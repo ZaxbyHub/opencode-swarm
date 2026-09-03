@@ -14,6 +14,7 @@ import {
 	transitionCoordinationState,
 } from '../../../src/db/coordination-store';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
+import { bunSpawn } from '../../../src/utils/bun-compat.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const dirs: string[] = [];
@@ -95,7 +96,7 @@ describe('pr-subscriptions SQLite authority', () => {
 			prUrl: 'https://github.com/o/r/pull/1',
 		});
 
-		const child = Bun.spawn(['bun', '-e', UPDATE_CHILD], {
+		const child = bunSpawn([process.execPath, '-e', UPDATE_CHILD], {
 			cwd: process.cwd(),
 			env: {
 				...process.env,
@@ -109,6 +110,7 @@ describe('pr-subscriptions SQLite authority', () => {
 			stdout: 'ignore',
 			stderr: 'ignore',
 			timeout: 60_000,
+			killProcessTree: true,
 		});
 		try {
 			await updateSnapshot(dir, created.correlationId, {
@@ -118,7 +120,7 @@ describe('pr-subscriptions SQLite authority', () => {
 			expect(await child.exited).toBe(0);
 		} finally {
 			try {
-				child.kill();
+				await child.killTree?.();
 			} catch {
 				// The child may already have exited.
 			}

@@ -26,6 +26,11 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
+
+const realSnapshotWriter = await import(
+	'../../../src/session/snapshot-writer.js'
+);
+
 // Static import (hoisted, resolves to the real module) so the mock below can
 // spread the real exports and only override the ones this suite cares about.
 // This keeps the mock resilient to the live import graph (close.ts pulls in
@@ -79,6 +84,7 @@ mock.module('../../../src/evidence/manager.js', () => ({
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
+	...realSnapshotWriter,
 	flushPendingSnapshot: mockFlushPendingSnapshot,
 }));
 

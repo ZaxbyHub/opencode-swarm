@@ -19,6 +19,7 @@ import {
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
+import { bunSpawn } from '../../../src/utils/bun-compat.js';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -63,13 +64,14 @@ function spawnChild(
 	};
 	// Array-form spawn, stdin ignored, spawn-level timeout, bounded output
 	// (Invariant 3).
-	const proc = Bun.spawn(['bun', '-e', CHILD_SCRIPT], {
+	const proc = bunSpawn([process.execPath, '-e', CHILD_SCRIPT], {
 		cwd: process.cwd(),
 		env,
 		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
 		timeout: CHILD_TIMEOUT_MS,
+		killProcessTree: true,
 	});
 	return proc;
 }
@@ -160,7 +162,7 @@ describe('pr-subscriptions multi-process serialization', () => {
 			} finally {
 				// Best-effort kill in finally (Invariant 3).
 				try {
-					child.kill();
+					await child.killTree?.();
 				} catch {
 					/* already exited */
 				}

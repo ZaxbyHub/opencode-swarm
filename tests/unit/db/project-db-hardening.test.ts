@@ -194,8 +194,8 @@ describe('failed-migration recovery', () => {
 			)
 			.all()
 			.map((r) => r.version);
-		expect(versions[versions.length - 1]).toBe(25);
-		expect(versions.length).toBe(25);
+		expect(versions[versions.length - 1]).toBe(26);
+		expect(versions.length).toBe(26);
 	});
 
 	test('marker-file fallback: a v14 failure with no migration_failures table writes the marker, and the marker is removed on success', () => {

@@ -127,6 +127,10 @@ export const MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024;
 const CHECKPOINT_SELECTION_RESERVE_BYTES = 64 * 1024;
 /** Hard validation bound for live (non-summary) records in a checkpoint. */
 export const MAX_CHECKPOINT_RECORDS = 2_048;
+/** Hard ceiling for SQLite delegation rows (live set plus retained terminals). */
+const MAX_COORDINATION_DELEGATION_ROWS = MAX_CHECKPOINT_RECORDS * 2;
+/** Retain a bounded terminal history for duplicate/replay diagnostics. */
+const MAX_COORDINATION_TERMINAL_ROWS = MAX_CHECKPOINT_RECORDS;
 /**
  * Closed-record summaries younger than this are never evicted to meet the
  * checkpoint byte budget — evicting them would let a replayed dispatch of a
@@ -1233,6 +1237,51 @@ function ensureDelegationCoordinationImported(
 		writeDelegationShadowProjection(directory, legacyRecords);
 	}
 	return 'ready';
+}
+
+/**
+ * Bound the SQLite delegation namespace before appending another row.  Unlike
+ * the legacy JSONL checkpoint, SQLite keeps one row per correlation forever;
+ * without a reaper, high-volume terminal delegations would eventually exhaust
+ * the paginated read ceiling.  Live rows are never removed.  The oldest
+ * terminal rows are hard-deleted once the bounded terminal history is full.
+ */
+function pruneCoordinationDelegationRows(directory: string): void {
+	const rows = listCoordinationStates(
+		directory,
+		DELEGATION_COORDINATION_NAMESPACE,
+		MAX_COORDINATION_STATE_LIST_ROWS,
+	);
+	const terminals = rows
+		.filter(
+			(row) =>
+				!isCheckpointLiveRecord(
+					JSON.parse(row.payload) as BackgroundDelegationRecord,
+				),
+		)
+		.sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+	const excessTerminals = Math.max(
+		0,
+		terminals.length - MAX_COORDINATION_TERMINAL_ROWS,
+	);
+	for (const row of terminals.slice(0, excessTerminals)) {
+		deleteCoordinationState(
+			directory,
+			DELEGATION_COORDINATION_NAMESPACE,
+			row.entityKey,
+			row.revision,
+		);
+	}
+	const remaining = listCoordinationStates(
+		directory,
+		DELEGATION_COORDINATION_NAMESPACE,
+		MAX_COORDINATION_STATE_LIST_ROWS,
+	);
+	if (remaining.length >= MAX_COORDINATION_DELEGATION_ROWS) {
+		throw new Error(
+			`delegation coordination state reached its ${MAX_COORDINATION_DELEGATION_ROWS}-row safety bound`,
+		);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -2698,6 +2747,16 @@ export function scanDelegationsForRecovery(
 				source: 'checkpoint+tail',
 			};
 		}
+		// A ready SQLite authority that cannot be read (including the bounded
+		// pagination ceiling) is uncertainty, not an invitation to fall back to a
+		// potentially stale/truncated legacy projection.  Recovery consumers use
+		// this result to fail closed before any destructive orphan cleanup.
+		return {
+			status: 'uncertain',
+			reason:
+				'background delegation coordination state is unreadable or over-bound',
+			source: 'unknown',
+		};
 	}
 	const load = loadFoldedState(directory, { strict: true });
 	if (load.status === 'uncertain') {
@@ -2741,6 +2800,7 @@ function appendRecord(
 		throw new Error('delegation coordination authority is uncertain');
 	}
 	if (importState === 'ready') {
+		pruneCoordinationDelegationRows(directory);
 		const current = getCoordinationState(
 			directory,
 			DELEGATION_COORDINATION_NAMESPACE,
@@ -3028,6 +3088,8 @@ export async function appendDelegationTransition(
 		status: BackgroundDelegationStatus;
 		result?: BackgroundDelegationResult;
 		completedAt?: number;
+		/** Test/recovery seam for replaying a persisted timestamp exactly. */
+		updatedAt?: number;
 		expectedCurrentStatuses?: readonly BackgroundDelegationStatus[];
 	},
 ): Promise<BackgroundDelegationRecord | null> {
@@ -3068,7 +3130,7 @@ export async function appendDelegationTransition(
 							? 2
 							: current.schemaVersion,
 					status: transition.status,
-					updatedAt: now,
+					updatedAt: transition.updatedAt ?? now,
 					...(transition.completedAt !== undefined
 						? { completedAt: transition.completedAt }
 						: transition.status === 'completed' || transition.status === 'error'
@@ -5391,6 +5453,11 @@ export function scanBackgroundCoderReservationsForAdmission(
 	if (importState === 'ready') {
 		const reservations = coordinationRowsToReservations(directory);
 		if (reservations !== null) return { status: 'ok', reservations };
+		return {
+			status: 'uncertain',
+			reason:
+				'background coder reservation coordination state is unreadable or over-bound',
+		};
 	}
 	return scanLegacyBackgroundCoderReservationsForAdmission(directory);
 }

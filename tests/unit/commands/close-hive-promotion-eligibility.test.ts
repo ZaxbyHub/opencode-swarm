@@ -11,6 +11,10 @@ import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 import { savePlan } from '../../../src/plan/manager';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
+const realSnapshotWriter = await import(
+	'../../../src/session/snapshot-writer.js'
+);
+
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
 	'../../../src/commands/close.js'
@@ -41,6 +45,7 @@ mock.module('../../../src/evidence/manager.js', () => ({
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
+	...realSnapshotWriter,
 	flushPendingSnapshot: mockFlushPendingSnapshot,
 }));
 

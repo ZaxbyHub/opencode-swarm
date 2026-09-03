@@ -18,6 +18,10 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 
+const realSnapshotWriter = await import(
+	'../../../src/session/snapshot-writer.js'
+);
+
 // ── Mock data ────────────────────────────────────────────────────────
 
 const MOCK_HANDOFF_DATA = {
@@ -58,6 +62,7 @@ mock.module('../../../src/services/handoff-service.js', () => ({
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
+	...realSnapshotWriter,
 	writeSnapshot: mockWriteSnapshot,
 	flushPendingSnapshot: mockFlushPendingSnapshot,
 }));

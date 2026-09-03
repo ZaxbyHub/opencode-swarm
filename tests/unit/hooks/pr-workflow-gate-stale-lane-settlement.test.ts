@@ -94,7 +94,7 @@ describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wed
 		// as open forever, so a lane whose backing process died without writing a
 		// terminal snapshot blocked abort AND completion with no tool-level exit.
 		await recordOpenLane('sess-a', 'intent-architecture', 'c1');
-		backdateLane('c1', STALE_AGE_MS);
+		await backdateLane('c1', STALE_AGE_MS);
 
 		const settlement = await settlePresumedStalePrWorkflowLanes(
 			directory,
@@ -120,7 +120,7 @@ describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wed
 			'intent-architecture',
 			'c-boundary-open',
 		);
-		backdateLane('c-boundary-open', DEFAULT_STALE_DELEGATION_TIMEOUT_MS);
+		await backdateLane('c-boundary-open', DEFAULT_STALE_DELEGATION_TIMEOUT_MS);
 
 		const settlement = await settlePresumedStalePrWorkflowLanes(
 			directory,
@@ -138,7 +138,10 @@ describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wed
 			'intent-architecture',
 			'c-boundary-stale',
 		);
-		backdateLane('c-boundary-stale', DEFAULT_STALE_DELEGATION_TIMEOUT_MS + 1);
+		await backdateLane(
+			'c-boundary-stale',
+			DEFAULT_STALE_DELEGATION_TIMEOUT_MS + 1,
+		);
 
 		const settlement = await settlePresumedStalePrWorkflowLanes(
 			directory,
@@ -166,7 +169,7 @@ describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wed
 
 	test('another session’s stale lane is never settled by this session', async () => {
 		await recordOpenLane('other-session', 'intent-architecture', 'c3');
-		backdateLane('c3', STALE_AGE_MS);
+		await backdateLane('c3', STALE_AGE_MS);
 
 		const settlement = await settlePresumedStalePrWorkflowLanes(
 			directory,
@@ -182,7 +185,7 @@ describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wed
 
 	test('settling durably transitions the record to `stale` and discloses to events.jsonl', async () => {
 		await recordOpenLane('sess-d', 'intent-architecture', 'c4');
-		backdateLane('c4', STALE_AGE_MS);
+		await backdateLane('c4', STALE_AGE_MS);
 
 		await settlePresumedStalePrWorkflowLanes(directory, 'sess-d');
 
@@ -218,9 +221,9 @@ describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wed
 		// `getSessionOps` to `() => null` — "the sweep runs" is true here by
 		// construction, not by accident.
 		await recordOpenLane('sess-retryable', 'intent-architecture', 'c-stale');
-		backdateLane('c-stale', STALE_AGE_MS);
+		await backdateLane('c-stale', STALE_AGE_MS);
 		await recordOpenLane('sess-retryable', 'risk-security', 'c-ingest-err');
-		backdateLane('c-ingest-err', STALE_AGE_MS, 'ingestion_error');
+		await backdateLane('c-ingest-err', STALE_AGE_MS, 'ingestion_error');
 
 		const settlement = await settlePresumedStalePrWorkflowLanes(
 			directory,
@@ -245,7 +248,7 @@ describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wed
 		// settlement; nothing previously exercised that branch. A directory at
 		// the events.jsonl path makes fsp.appendFile fail with EISDIR.
 		await recordOpenLane('sess-eisdir', 'intent-architecture', 'c-eisdir');
-		backdateLane('c-eisdir', STALE_AGE_MS);
+		await backdateLane('c-eisdir', STALE_AGE_MS);
 		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
 		await fs.rm(eventsPath, { recursive: true, force: true });
 		await fs.mkdir(eventsPath, { recursive: true });
@@ -269,7 +272,7 @@ describe('abortPrWorkflow — regression: abort must always be reachable when la
 		// hatch that exists to resolve the wedge, leaving no tool-level exit.
 		await activatePrWorkflow(directory, 'stale-abort', 'PR_REVIEW');
 		await recordOpenLane('stale-abort', 'intent-architecture', 'c5');
-		backdateLane('c5', STALE_AGE_MS);
+		await backdateLane('c5', STALE_AGE_MS);
 
 		const summary = await abortPrWorkflow(directory, 'stale-abort', {
 			kind: 'recovery',
@@ -298,7 +301,7 @@ describe('abortPrWorkflow — regression: abort must always be reachable when la
 	test('the abort audit event records the presumed-stale settlement', async () => {
 		await activatePrWorkflow(directory, 'stale-audit', 'PR_REVIEW');
 		await recordOpenLane('stale-audit', 'risk-security', 'c7');
-		backdateLane('c7', STALE_AGE_MS);
+		await backdateLane('c7', STALE_AGE_MS);
 
 		await abortPrWorkflow(directory, 'stale-audit', {
 			kind: 'recovery',
@@ -326,7 +329,7 @@ describe('abortPrWorkflow — regression: abort must always be reachable when la
 		);
 		await activatePrWorkflow(directory, 'stale-tool', 'PR_REVIEW');
 		await recordOpenLane('stale-tool', 'intent-architecture', 'c8');
-		backdateLane('c8', STALE_AGE_MS);
+		await backdateLane('c8', STALE_AGE_MS);
 
 		const parsed = JSON.parse(
 			await executeAbortPrWorkflow(
@@ -354,7 +357,7 @@ describe('completePrWorkflow — regression: stale lanes must not block completi
 			revision: 2,
 		});
 		await recordOpenLane('stale-complete', 'intent-architecture', 'c9');
-		backdateLane('c9', STALE_AGE_MS);
+		await backdateLane('c9', STALE_AGE_MS);
 
 		const error = await completePrWorkflow(
 			directory,
@@ -396,7 +399,7 @@ describe('completePrWorkflow — regression: stale lanes must not block completi
 			revision: 2,
 		});
 		await recordOpenLane('stale-complete-tool', 'intent-architecture', 'c11');
-		backdateLane('c11', STALE_AGE_MS);
+		await backdateLane('c11', STALE_AGE_MS);
 
 		const parsed = JSON.parse(
 			await executeCompletePrWorkflow(

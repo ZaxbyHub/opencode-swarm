@@ -107,7 +107,7 @@ describe('collect_lane_results surfaces the advisory (issue #2280 Part B)', () =
 				scope: null,
 			},
 		});
-		backdatePrWorkflowLane(directory, correlationId, ageMs);
+		await backdatePrWorkflowLane(directory, correlationId, ageMs);
 	}
 
 	test('a long-pending live critic lane gets an advisory and is left completely untouched', async () => {

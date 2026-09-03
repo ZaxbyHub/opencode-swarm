@@ -159,7 +159,9 @@ mock.module('../../../src/evidence/manager.js', () => ({
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
+	SNAPSHOT_PROJECTION_FILE: 'session/state.sqlite-projection.json',
 	flushPendingSnapshot: mockFlushPendingSnapshot,
+	writeSnapshotProjection: async () => {},
 	writeSnapshot: async () => {},
 }));
 

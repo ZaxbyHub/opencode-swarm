@@ -46,7 +46,7 @@ describe('project-db first-open contention', () => {
 					`while (!existsSync(${JSON.stringify(go)})) sleep(10);`,
 					`const db = getProjectDb(${JSON.stringify(tempDir)});`,
 					"const version = db.query('SELECT MAX(version) AS version FROM schema_migrations').get()?.version;",
-					'if (version !== 25) throw new Error(`unexpected version ${version}`);',
+					'if (version !== 26) throw new Error(`unexpected version ${version}`);',
 					`closeProjectDb(${JSON.stringify(tempDir)});`,
 				].join('\n'),
 			);

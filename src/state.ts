@@ -70,8 +70,8 @@ import {
 	claimSnapshotSessionOwnership,
 	clearSnapshotSessionOwnerships,
 	deleteSnapshotSessionRows,
-	isSnapshotSessionOwnedLocally,
 	isSnapshotSessionAuthoritativelyStale,
+	isSnapshotSessionOwnedLocally,
 	releaseSnapshotSessionOwnership,
 } from './session/snapshot-store.js';
 import { maybeSuggestWorktreeLink } from './session/worktree-link-suggestion.js';
@@ -1971,7 +1971,12 @@ export function sweepStaleSessions(
 			if (
 				directory &&
 				isSnapshotSessionOwnedLocally(id) &&
-				!isSnapshotSessionAuthoritativelyStale(directory, id, staleDurationMs, now)
+				!isSnapshotSessionAuthoritativelyStale(
+					directory,
+					id,
+					staleDurationMs,
+					now,
+				)
 			) {
 				continue;
 			}

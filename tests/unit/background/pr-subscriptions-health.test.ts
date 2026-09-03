@@ -24,6 +24,7 @@ import {
 	handlePrMonitorStatusCommand,
 	_internals as statusInternals,
 } from '../../../src/commands/pr-monitor-status';
+import { transitionCoordinationState } from '../../../src/db/coordination-store';
 import { _internals as telemetryInternals } from '../../../src/telemetry';
 import { sameProjectRoot } from '../../../src/utils/canonical-root';
 import { freezeClock } from '../../helpers/test-clock';
@@ -370,21 +371,21 @@ describe('pr-subscriptions health + recovery', () => {
 					'utf-8',
 				);
 				await updateSnapshot(dir, 'sess_1::o/r::1', { errorCount: 1 });
-				// Trigger a terminal compaction via seeded terminal pressure.
-				const cp: PrSubscriptionCheckpoint = JSON.parse(
-					fs.readFileSync(checkpointPath(dir), 'utf-8'),
-				);
+				// Trigger a terminal compaction via seeded terminal pressure in the
+				// authoritative SQLite namespace (the checkpoint is only a projection).
 				for (let i = 2; i <= 70; i++) {
 					const rec = record('sess_t', i, Date.now() - 1000);
 					rec.status = 'expired';
 					rec.isWatching = false;
-					cp.records[rec.correlationId] = rec;
+					transitionCoordinationState(dir, {
+						namespace: 'background.pr-subscription',
+						entityKey: rec.correlationId,
+						expectedRevision: null,
+						generation: 1,
+						status: rec.status,
+						payload: JSON.stringify(rec),
+					});
 				}
-				fs.writeFileSync(
-					checkpointPath(dir),
-					`${JSON.stringify(cp)}\n`,
-					'utf-8',
-				);
 				await unsubscribe(dir, 'sess_1::o/r::1');
 			} finally {
 				telemetryInternals.emit = savedEmit;

@@ -71,7 +71,7 @@ async function seedStaleLane(
 	correlationId: string,
 ): Promise<void> {
 	await recordOpenPrWorkflowLane(directory, sessionID, laneId, correlationId);
-	backdatePrWorkflowLane(directory, correlationId, STALE_LANE_AGE_MS);
+	await backdatePrWorkflowLane(directory, correlationId, STALE_LANE_AGE_MS);
 }
 
 describe('lane liveness probe — a live session contradicts staleness', () => {

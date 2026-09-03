@@ -532,7 +532,7 @@ function writeCoordinationProjection(
 	const checkpoint = prepared.checkpoint;
 	checkpoint.sequence = sequence;
 	checkpoint.updatedAt = Date.now();
-	writeCheckpointFile(directory, checkpoint);
+	_internals.writeCheckpointFile(directory, checkpoint);
 	fs.writeFileSync(
 		projectionMarkerPath(checkpointPath(directory)),
 		'',
@@ -584,7 +584,7 @@ function loadLegacyPrSubscriptionViewStrict(
 	}
 	const fold = foldLegacyRegion(legacy, 0, Number.MAX_SAFE_INTEGER);
 	if (fold.ioError || fold.aborted) {
-		throw new Error('legacy subscription source is unreadable');
+		throw new Error('PR subscription legacy migration read failed (I/O error)');
 	}
 	const view: Record<string, PrSubscriptionRecord> = {};
 	mergeFoldedRecords(view, fold.folded);
@@ -758,6 +758,29 @@ function ensurePrSubscriptionCoordinationImported(
 		// copied into SQLite. Let the read path overlay that tail instead of
 		// repairing/archiving the legacy projection here.
 		if (migrationPending) return false;
+		if (fileExistsStrict(storePath(directory))) {
+			let legacyStat: fs.Stats | null = null;
+			try {
+				legacyStat = _internals.statSync(storePath(directory));
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+					throw new Error(
+						`PR subscription legacy migration read failed (I/O error); refusing mutation: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+			}
+			if (
+				legacyStat &&
+				legacyStat.size >
+					PR_SUBSCRIPTION_LIMITS.migrationMaxBytesPerOperation &&
+				(checkpointRead.kind !== 'ok' ||
+					checkpointRead.value.migration === null)
+			) {
+				return false;
+			}
+		}
 		const legacyPath = storePath(directory);
 		const projectionNeedsRepair =
 			!fileExistsStrict(projectionMarkerPath(checkpointPath(directory))) ||
@@ -800,12 +823,53 @@ function ensurePrSubscriptionCoordinationImported(
 		return false;
 	}
 
+	// Preserve the bounded, resumable legacy migration path for large sources.
+	// Importing an 8+ MiB JSONL file directly into SQLite would make the first
+	// mutation unbounded and would discard the migration cursor that the v2
+	// checkpoint state machine uses to resume after a crash.
+	let legacyStat: fs.Stats | null = null;
+	try {
+		legacyStat = _internals.statSync(storePath(directory));
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+			throw new Error(
+				`PR subscription legacy migration read failed (I/O error); refusing mutation: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+	if (
+		legacyStat !== null &&
+		legacyStat.size > PR_SUBSCRIPTION_LIMITS.migrationMaxBytesPerOperation &&
+		(checkpointRead.kind !== 'ok' || checkpointRead.value.migration === null)
+	) {
+		return false;
+	}
 	const legacyView = loadLegacyPrSubscriptionViewStrict(directory);
 	const preparedImport = prepareCoordinationPersistence(
 		directory,
 		legacyView,
 		baseCheckpoint,
 	);
+	if (legacyStat) {
+		preparedImport.checkpoint.migration = {
+			scannedBytes: legacyStat.size,
+			sourceBytes: legacyStat.size,
+			sourceMtimeMs: legacyStat.mtimeMs,
+			corruptLines: preparedImport.checkpoint.maintenance.corruptLegacyRecords,
+			discardingOversizeLine: false,
+			baselineRecords: {},
+			baselineTerminalSummary: {
+				removed: 0,
+				expired: 0,
+				lastTerminalAt: null,
+			},
+			done: true,
+			archived: false,
+			startedAt: Date.now(),
+		};
+	}
 	assertCoordinationProjectionCapacity(
 		directory,
 		preparedImport.view,
@@ -840,7 +904,7 @@ function ensurePrSubscriptionCoordinationImported(
 	);
 	const importedView =
 		readCoordinationSubscriptions(directory) ?? preparedImport.view;
-	if (outcome === 'imported') {
+	if (outcome !== 'state_exists') {
 		for (const filePath of [
 			storePath(directory),
 			checkpointPath(directory),
@@ -849,12 +913,75 @@ function ensurePrSubscriptionCoordinationImported(
 		]) {
 			archiveShadowFileBestEffort(filePath);
 		}
+		// Keep the v2 migration/archive compatibility contract for older peers and
+		// recovery tooling while the SQLite rows become authoritative. The original
+		// source is retained as a second, verified copy so `maybeArchiveLegacy` can
+		// apply its size/mtime fencing and report a deferred archive on transient I/O.
+		const importedLegacy = importedShadowPath(storePath(directory));
+		if (legacyStat) {
+			if (
+				!fileExistsStrict(storePath(directory)) &&
+				fileExistsStrict(importedLegacy)
+			) {
+				fs.copyFileSync(importedLegacy, storePath(directory));
+			} else if (
+				fileExistsStrict(storePath(directory)) &&
+				!fileExistsStrict(importedLegacy)
+			) {
+				fs.copyFileSync(storePath(directory), importedLegacy);
+			}
+		}
 	}
 	writeCoordinationProjection(
 		directory,
 		importedView,
 		preparedImport.checkpoint,
 	);
+	if (outcome !== 'state_exists' && preparedImport.checkpoint.migration) {
+		// The compatibility projection may have refreshed the legacy shadow while
+		// it was being published. Re-fingerprint that verified copy before applying
+		// the archive fence; otherwise the intentional projection rewrite would look
+		// like an external concurrent mutation and defer archival forever.
+		if (fileExistsStrict(storePath(directory))) {
+			const projected = _internals.statSync(storePath(directory));
+			preparedImport.checkpoint.migration.sourceBytes = projected.size;
+			preparedImport.checkpoint.migration.scannedBytes = projected.size;
+			preparedImport.checkpoint.migration.sourceMtimeMs = projected.mtimeMs;
+		}
+		const archiveEvent = maybeArchiveLegacy(
+			directory,
+			preparedImport.checkpoint,
+		);
+		if (archiveEvent) {
+			preparedImport.checkpoint.sequence += 1;
+			preparedImport.checkpoint.updatedAt = Date.now();
+			_internals.writeCheckpointFile(directory, preparedImport.checkpoint);
+			flushAuditEvents(
+				directory,
+				[{ kind: 'migrate-complete' }, archiveEvent],
+				preparedImport.checkpoint.sequence,
+				preparedImport.checkpoint.maintenance,
+			);
+			emitHealthTelemetry(
+				directory,
+				'migrate-complete',
+				preparedImport.checkpoint,
+			);
+			emitHealthTelemetry(directory, 'archive', preparedImport.checkpoint);
+		} else {
+			flushAuditEvents(
+				directory,
+				[{ kind: 'migrate-complete' }],
+				preparedImport.checkpoint.sequence,
+				preparedImport.checkpoint.maintenance,
+			);
+			emitHealthTelemetry(
+				directory,
+				'migrate-complete',
+				preparedImport.checkpoint,
+			);
+		}
+	}
 	return true;
 }
 
@@ -875,7 +1002,20 @@ function persistCoordinationSubscriptions(
 	writeProjection = true,
 	events: AuditEvent[] = [],
 ): void {
+	const priorCheckpoint = readCheckpoint(directory);
+	const priorCompactions =
+		priorCheckpoint.kind === 'ok'
+			? priorCheckpoint.value.maintenance.compactions
+			: 0;
 	const prepared = prepareCoordinationPersistence(directory, view);
+	// Validate and publish the compatibility projection before mutating SQLite.
+	// A projection write can fail (capacity, permissions, injected I/O fault); in
+	// that case the authoritative transaction must not commit a state that the
+	// next reader cannot replay. SQLite remains the source of truth after this
+	// preflight, and a later read repairs a projection that is ahead of it.
+	if (writeProjection) {
+		writeCoordinationProjection(directory, prepared.view, prepared.checkpoint);
+	}
 	withCoordinationTransaction(directory, () => {
 		const current = new Map(
 			listCoordinationStates(
@@ -920,9 +1060,6 @@ function persistCoordinationSubscriptions(
 			}
 		}
 	});
-	if (writeProjection) {
-		writeCoordinationProjection(directory, prepared.view, prepared.checkpoint);
-	}
 	if (events.length === 0) return;
 	const checkpoint = readCheckpoint(directory);
 	if (checkpoint.kind !== 'ok') return;
@@ -930,7 +1067,7 @@ function persistCoordinationSubscriptions(
 	if (applyAuditCompaction(directory, auditCompaction) && auditCompaction) {
 		checkpoint.value.maintenance.droppedAuditTransitions +=
 			auditCompaction.dropped;
-		writeCheckpointFile(directory, checkpoint.value);
+		_internals.writeCheckpointFile(directory, checkpoint.value);
 	}
 	flushAuditEvents(
 		directory,
@@ -938,6 +1075,9 @@ function persistCoordinationSubscriptions(
 		checkpoint.value.sequence,
 		checkpoint.value.maintenance,
 	);
+	if (prepared.checkpoint.maintenance.compactions > priorCompactions) {
+		emitHealthTelemetry(directory, 'compact', prepared.checkpoint);
+	}
 }
 
 function foreignLegacySlotPath(directory: string): string {
@@ -2623,7 +2763,17 @@ function loadViewForWrite(directory: string): LoadedView {
 				break;
 			}
 
-			if (!fold.eof) {
+			// Large sources always consume at least two mutation turns, even when
+			// the first bounded read reaches EOF inside one oversized unterminated
+			// line.  Keeping the first generation explicitly pending preserves the
+			// crash-resumable migration contract and prevents a single mutation from
+			// doing an effectively unbounded legacy fold.
+			const deferLargeInitialGeneration =
+				!sameGeneration &&
+				legacySize > PR_SUBSCRIPTION_LIMITS.migrationMaxBytesPerOperation &&
+				foldedThisOperation >=
+					PR_SUBSCRIPTION_LIMITS.migrationMaxBytesPerOperation;
+			if (!fold.eof || deferLargeInitialGeneration) {
 				// Crash-resumable progress persist. Total per-op fold work is
 				// bounded by legacySourceMaxBytes (checked above).
 				const progress = cloneCheckpoint(checkpoint);

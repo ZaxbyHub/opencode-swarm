@@ -14,7 +14,9 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
+import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import { savePlan } from '../../../src/plan/manager.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
@@ -96,11 +98,9 @@ const mockExecuteWriteRetro = mock(async (_args: unknown, _directory: string) =>
 );
 
 const mockCurateAndStoreSwarm = mock(async () => {});
-
 const mockArchiveEvidence = mock(async () => {});
 
 const mockFlushPendingSnapshot = mock(async () => {});
-
 const mockCheckHivePromotions = mock(async () => ({
 	new_promotions: 0,
 	encounters_incremented: 0,
@@ -151,12 +151,12 @@ const mockEndAgentSession = mock((_sessionId: string) => {});
 let forceSkillReviewTimeout = false;
 let observedSkillReviewSignal: AbortSignal | undefined;
 let observedSkillReviewAborted = false;
-
 mock.module('../../../src/tools/write-retro.js', () => ({
 	executeWriteRetro: mockExecuteWriteRetro,
 }));
 
 mock.module('../../../src/hooks/knowledge-curator.js', () => ({
+	...actualKnowledgeCurator,
 	curateAndStoreSwarm: mockCurateAndStoreSwarm,
 }));
 
@@ -170,6 +170,7 @@ mock.module('../../../src/hooks/hive-promoter.js', () => ({
 	promoteFromSwarm: async () => '',
 }));
 mock.module('../../../src/evidence/manager.js', () => ({
+	...actualEvidenceManager,
 	archiveEvidence: mockArchiveEvidence,
 	// Pure, stateless type-guard — safe to keep real. Any code path
 	// transitively reached from close.ts's import graph that imports it

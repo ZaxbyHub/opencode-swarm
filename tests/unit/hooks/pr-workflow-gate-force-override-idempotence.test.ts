@@ -122,7 +122,7 @@ describe('the override finalization is a no-op over an already-terminal record',
 			'lane-alive',
 			'c-idem',
 		);
-		backdatePrWorkflowLane(directory, 'c-idem', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-idem', STALE_LANE_AGE_MS);
 		// Past the horizon and answering `busy` forever: the probe retains it, so the
 		// human-only force path is the only thing that can clear this gate.
 		gateInternals.getSessionOps = () => ({
@@ -139,7 +139,12 @@ describe('the override finalization is a no-op over an already-terminal record',
 		// only thing sparing it from a second write is the sweep's STATUS filter,
 		// never its age.
 		gateInternals.beforeAbortClear = async () => {
-			backdatePrWorkflowLane(directory, 'c-idem', STALE_LANE_AGE_MS, 'stale');
+			await backdatePrWorkflowLane(
+				directory,
+				'c-idem',
+				STALE_LANE_AGE_MS,
+				'stale',
+			);
 			ledgerLinesAtHandoff = await readLedgerLines();
 		};
 
@@ -210,8 +215,8 @@ describe('a lost CAS in a mixed batch retracts precisely, not vacuously', () => 
 			'lane-dead',
 			'c-mix-dead',
 		);
-		backdatePrWorkflowLane(directory, 'c-mix-alive', STALE_LANE_AGE_MS);
-		backdatePrWorkflowLane(directory, 'c-mix-dead', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-mix-alive', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-mix-dead', STALE_LANE_AGE_MS);
 		gateInternals.getSessionOps = () => ({
 			status: async () => ({
 				data: {

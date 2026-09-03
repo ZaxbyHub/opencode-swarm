@@ -1292,6 +1292,14 @@ export async function writeScopeBindingToDisk(
 		current.lifecycleState === binding.lifecycleState &&
 		JSON.stringify(current.files) === JSON.stringify(files)
 	) {
+		// Keep the compatibility shadow in sync even when the authoritative
+		// generation is already at this revision.  This matters when a legacy
+		// Windows identity (for example, an 8.3 `~1` path) was imported before
+		// the host could resolve its physical path and a later read recovered the
+		// canonical identity.  The SQLite row is already authoritative, but the
+		// durable shadow must be re-keyed as well so future legacy readers do not
+		// resurrect the stale identity.
+		writeScopeBindingShadow(directory, current);
 		return { ok: true, value: current };
 	}
 	const expectedRevision = current ? binding.revision - 1 : null;

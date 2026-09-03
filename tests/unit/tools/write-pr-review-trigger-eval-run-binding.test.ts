@@ -495,7 +495,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 		expect(after?.prReviewTriggerEvalPath).toBeUndefined();
 	});
 });
-
 function statMtimeMs(p: string): number {
 	return statSync(p).mtimeMs;
 }
