@@ -662,8 +662,6 @@ describe('v6.12 Task 4.4: Gate-Tracking ADVERSARIAL TESTS', () => {
 
 			await hook.messagesTransform({}, messages);
 
-			// No warning because task matches coder delegation
-			// (The [NEXT] deliberation preamble is inserted as a system message before the user message)
 			const userMsg1 = messages.messages.find(
 				(m: { info: { role: string } }) =>
 					m.info.role === 'user' && !isGuidanceCarrier(m),
@@ -732,8 +730,6 @@ describe('v6.12 Task 4.4: Gate-Tracking ADVERSARIAL TESTS', () => {
 
 			await hook.messagesTransform({}, messages);
 
-			// No DELEGATION VIOLATION warning (just clean coder delegation)
-			// (The [NEXT] deliberation preamble is inserted as a system message before the user message)
 			const userMsg3 = messages.messages.find(
 				(m: { info: { role: string } }) =>
 					m.info.role === 'user' && !isGuidanceCarrier(m),
