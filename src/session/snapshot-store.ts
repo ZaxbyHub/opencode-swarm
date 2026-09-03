@@ -27,6 +27,13 @@ const SNAPSHOT_NAMESPACES = [
 	DELEGATION_CHAIN_NAMESPACE,
 ] as const;
 
+/** Test-only seam for interleaving a foreign writer after the first snapshot read. */
+export const _snapshotStoreInternals: {
+	afterSnapshotMetaRead: () => void;
+} = {
+	afterSnapshotMetaRead: () => {},
+};
+
 interface SessionRowPayload {
 	session: SnapshotData['agentSessions'][string];
 }
@@ -141,63 +148,69 @@ export function importSnapshotRowsOnce(
 }
 
 export function readSnapshotRows(directory: string): SnapshotData | null {
-	const meta = listCoordinationStates(directory, META_NAMESPACE, 1)[0];
-	if (!meta) return null;
-	const parsedMeta = JSON.parse(meta.payload) as Pick<
-		SnapshotData,
-		'version' | 'writtenAt' | 'workflowSchema'
-	>;
-	if (
-		parsedMeta.version !== 1 &&
-		parsedMeta.version !== 2 &&
-		parsedMeta.version !== 3
-	) {
-		throw new Error('Unsupported SQLite snapshot version');
-	}
-	const snapshot: SnapshotData = {
-		version: parsedMeta.version,
-		writtenAt: parsedMeta.writtenAt,
-		...(parsedMeta.workflowSchema !== undefined && {
-			workflowSchema: parsedMeta.workflowSchema,
-		}),
-		toolAggregates: {},
-		activeAgent: {},
-		delegationChains: {},
-		agentSessions: {},
-	};
-	for (const row of listCoordinationStates(
-		directory,
-		TOOL_NAMESPACE,
-		MAX_COORDINATION_STATE_LIST_ROWS,
-	)) {
-		snapshot.toolAggregates[row.entityKey] = JSON.parse(row.payload);
-	}
-	for (const row of listCoordinationStates(
-		directory,
-		ACTIVE_AGENT_NAMESPACE,
-		MAX_COORDINATION_STATE_LIST_ROWS,
-	)) {
-		if (row.status === 'deleted') continue;
-		snapshot.activeAgent[row.entityKey] = JSON.parse(row.payload);
-	}
-	for (const row of listCoordinationStates(
-		directory,
-		DELEGATION_CHAIN_NAMESPACE,
-		MAX_COORDINATION_STATE_LIST_ROWS,
-	)) {
-		if (row.status === 'deleted') continue;
-		snapshot.delegationChains[row.entityKey] = JSON.parse(row.payload);
-	}
-	for (const row of listCoordinationStates(
-		directory,
-		SESSION_NAMESPACE,
-		MAX_COORDINATION_STATE_LIST_ROWS,
-	)) {
-		if (row.status === 'deleted') continue;
-		const payload = JSON.parse(row.payload) as SessionRowPayload;
-		snapshot.agentSessions[row.entityKey] = payload.session;
-	}
-	return snapshot;
+	if (!projectDbExists(directory)) return null;
+	// A logical snapshot spans five namespaces. Keep every SELECT in one SQLite
+	// snapshot so a concurrent writer cannot combine rows from different commits.
+	return withCoordinationTransaction(directory, () => {
+		const meta = listCoordinationStates(directory, META_NAMESPACE, 1)[0];
+		if (!meta) return null;
+		_snapshotStoreInternals.afterSnapshotMetaRead();
+		const parsedMeta = JSON.parse(meta.payload) as Pick<
+			SnapshotData,
+			'version' | 'writtenAt' | 'workflowSchema'
+		>;
+		if (
+			parsedMeta.version !== 1 &&
+			parsedMeta.version !== 2 &&
+			parsedMeta.version !== 3
+		) {
+			throw new Error('Unsupported SQLite snapshot version');
+		}
+		const snapshot: SnapshotData = {
+			version: parsedMeta.version,
+			writtenAt: parsedMeta.writtenAt,
+			...(parsedMeta.workflowSchema !== undefined && {
+				workflowSchema: parsedMeta.workflowSchema,
+			}),
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		};
+		for (const row of listCoordinationStates(
+			directory,
+			TOOL_NAMESPACE,
+			MAX_COORDINATION_STATE_LIST_ROWS,
+		)) {
+			snapshot.toolAggregates[row.entityKey] = JSON.parse(row.payload);
+		}
+		for (const row of listCoordinationStates(
+			directory,
+			ACTIVE_AGENT_NAMESPACE,
+			MAX_COORDINATION_STATE_LIST_ROWS,
+		)) {
+			if (row.status === 'deleted') continue;
+			snapshot.activeAgent[row.entityKey] = JSON.parse(row.payload);
+		}
+		for (const row of listCoordinationStates(
+			directory,
+			DELEGATION_CHAIN_NAMESPACE,
+			MAX_COORDINATION_STATE_LIST_ROWS,
+		)) {
+			if (row.status === 'deleted') continue;
+			snapshot.delegationChains[row.entityKey] = JSON.parse(row.payload);
+		}
+		for (const row of listCoordinationStates(
+			directory,
+			SESSION_NAMESPACE,
+			MAX_COORDINATION_STATE_LIST_ROWS,
+		)) {
+			if (row.status === 'deleted') continue;
+			const payload = JSON.parse(row.payload) as SessionRowPayload;
+			snapshot.agentSessions[row.entityKey] = payload.session;
+		}
+		return snapshot;
+	});
 }
 
 /** Remove the complete authoritative snapshot as one FULL transaction. */

@@ -221,10 +221,7 @@ export function deleteCoordinationState(
 	});
 }
 
-export function transitionCoordinationState(
-	directory: string,
-	input: CoordinationTransitionInput,
-): CoordinationTransitionResult {
+function validateTransitionInput(input: CoordinationTransitionInput): void {
 	boundedText(input.namespace, 'namespace', MAX_KEY_CHARS);
 	boundedText(input.entityKey, 'entityKey', MAX_KEY_CHARS);
 	boundedText(input.status, 'status', MAX_STATUS_CHARS);
@@ -247,96 +244,109 @@ export function transitionCoordinationState(
 			);
 		}
 	}
+}
 
-	return withCoordinationTransaction(directory, () => {
-		const db = getProjectDb(directory);
-		const current = readState(db, input.namespace, input.entityKey);
-		if (input.event) {
-			const duplicate = db
-				.query<
-					{
-						event_type: string;
-						generation: number;
-						payload: string;
-					},
-					[string, string]
-				>(
-					`SELECT event_type, generation, payload FROM coordination_event
+/**
+ * Apply one transition inside an already-owned coordination transaction.
+ *
+ * This is intentionally narrow: orchestration that must make several state
+ * transitions all-or-nothing uses it while holding `withCoordinationTransaction`.
+ * It must never become a general replacement for `transitionCoordinationState`,
+ * which owns the transaction for ordinary callers.
+ */
+export function transitionCoordinationStateWithinTransaction(
+	directory: string,
+	input: CoordinationTransitionInput,
+): CoordinationTransitionResult {
+	validateTransitionInput(input);
+	const db = getProjectDb(directory);
+	const current = readState(db, input.namespace, input.entityKey);
+	if (input.event) {
+		const duplicate = db
+			.query<
+				{
+					event_type: string;
+					generation: number;
+					payload: string;
+				},
+				[string, string]
+			>(
+				`SELECT event_type, generation, payload FROM coordination_event
 				 WHERE stream_id = ? AND idempotency_key = ?`,
-				)
-				.get(input.event.streamId, input.event.idempotencyKey);
-			if (duplicate) {
-				const exact =
-					duplicate.event_type === input.event.eventType &&
-					duplicate.generation === input.generation &&
-					duplicate.payload === input.event.payload;
-				return {
-					outcome: exact ? 'duplicate' : 'idempotency_conflict',
-					state: current,
-				};
-			}
+			)
+			.get(input.event.streamId, input.event.idempotencyKey);
+		if (duplicate) {
+			const exact =
+				duplicate.event_type === input.event.eventType &&
+				duplicate.generation === input.generation &&
+				duplicate.payload === input.event.payload;
+			return {
+				outcome: exact ? 'duplicate' : 'idempotency_conflict',
+				state: current,
+			};
 		}
-		if (current && input.generation < current.generation) {
-			return { outcome: 'stale_generation', state: current };
-		}
-		if (
-			(input.expectedRevision === null && current !== null) ||
-			(typeof input.expectedRevision === 'number' &&
-				current?.revision !== input.expectedRevision)
-		) {
-			return { outcome: 'revision_conflict', state: current };
-		}
+	}
+	if (current && input.generation < current.generation) {
+		return { outcome: 'stale_generation', state: current };
+	}
+	if (
+		(input.expectedRevision === null && current !== null) ||
+		(typeof input.expectedRevision === 'number' &&
+			current?.revision !== input.expectedRevision)
+	) {
+		return { outcome: 'revision_conflict', state: current };
+	}
 
-		const nextRevision = (current?.revision ?? 0) + 1;
-		const now = new Date().toISOString();
-		if (input.event) {
-			const currentStreamVersion =
-				db
-					.query<{ max: number | null }, [string]>(
-						'SELECT MAX(version) AS max FROM coordination_event WHERE stream_id = ?',
-					)
-					.get(input.event.streamId)?.max ?? 0;
-			if (
-				input.event.expectedStreamVersion !== undefined &&
-				input.event.expectedStreamVersion !== currentStreamVersion
-			) {
-				return { outcome: 'stream_version_conflict', state: current };
-			}
-			const nextVersion = currentStreamVersion + 1;
-			db.run(
-				`INSERT INTO coordination_event
+	const nextRevision = (current?.revision ?? 0) + 1;
+	const now = new Date().toISOString();
+	if (input.event) {
+		const currentStreamVersion =
+			db
+				.query<{ max: number | null }, [string]>(
+					'SELECT MAX(version) AS max FROM coordination_event WHERE stream_id = ?',
+				)
+				.get(input.event.streamId)?.max ?? 0;
+		if (
+			input.event.expectedStreamVersion !== undefined &&
+			input.event.expectedStreamVersion !== currentStreamVersion
+		) {
+			return { outcome: 'stream_version_conflict', state: current };
+		}
+		const nextVersion = currentStreamVersion + 1;
+		db.run(
+			`INSERT INTO coordination_event
 				 (stream_id, version, idempotency_key, event_type, generation, payload, created_at)
 				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				[
-					input.event.streamId,
-					nextVersion,
-					input.event.idempotencyKey,
-					input.event.eventType,
-					input.generation,
-					input.event.payload,
-					now,
-				],
+			[
+				input.event.streamId,
+				nextVersion,
+				input.event.idempotencyKey,
+				input.event.eventType,
+				input.generation,
+				input.event.payload,
+				now,
+			],
+		);
+		const streamFloor = nextVersion - _internals.maxEventsPerStream;
+		if (streamFloor > 0) {
+			db.run(
+				'DELETE FROM coordination_event WHERE stream_id = ? AND version <= ?',
+				[input.event.streamId, streamFloor],
 			);
-			const streamFloor = nextVersion - _internals.maxEventsPerStream;
-			if (streamFloor > 0) {
-				db.run(
-					'DELETE FROM coordination_event WHERE stream_id = ? AND version <= ?',
-					[input.event.streamId, streamFloor],
-				);
-			}
-			const total =
-				db
-					.query<{ count: number }, []>(
-						'SELECT COUNT(*) AS count FROM coordination_event',
-					)
-					.get()?.count ?? 0;
-			const overflow = total - _internals.maxTotalEvents;
-			if (overflow > 0) {
-				// This is deliberately a soft global target: every live stream keeps one
-				// waterline event so version and idempotency fences survive pruning.
-				// The authoritative state/domain reapers bound the number of live streams.
-				db.run(
-					`DELETE FROM coordination_event WHERE rowid IN (
+		}
+		const total =
+			db
+				.query<{ count: number }, []>(
+					'SELECT COUNT(*) AS count FROM coordination_event',
+				)
+				.get()?.count ?? 0;
+		const overflow = total - _internals.maxTotalEvents;
+		if (overflow > 0) {
+			// This is deliberately a soft global target: every live stream keeps one
+			// waterline event so version and idempotency fences survive pruning.
+			// The authoritative state/domain reapers bound the number of live streams.
+			db.run(
+				`DELETE FROM coordination_event WHERE rowid IN (
 						SELECT candidate.rowid FROM coordination_event AS candidate
 						WHERE candidate.version < (
 							SELECT MAX(head.version) FROM coordination_event AS head
@@ -344,33 +354,42 @@ export function transitionCoordinationState(
 						)
 						ORDER BY candidate.created_at, candidate.stream_id, candidate.version LIMIT ?
 					)`,
-					[overflow],
-				);
-			}
-			_internals.coordinationFaultInjector?.('after_event_before_state', db);
+				[overflow],
+			);
 		}
-		db.run(
-			`INSERT INTO coordination_state
+		_internals.coordinationFaultInjector?.('after_event_before_state', db);
+	}
+	db.run(
+		`INSERT INTO coordination_state
 			 (namespace, entity_key, revision, generation, status, payload, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(namespace, entity_key) DO UPDATE SET
 			 revision = excluded.revision, generation = excluded.generation,
 			 status = excluded.status, payload = excluded.payload, updated_at = excluded.updated_at`,
-			[
-				input.namespace,
-				input.entityKey,
-				nextRevision,
-				input.generation,
-				input.status,
-				input.payload,
-				now,
-			],
-		);
-		return {
-			outcome: 'applied',
-			state: readState(db, input.namespace, input.entityKey),
-		};
-	});
+		[
+			input.namespace,
+			input.entityKey,
+			nextRevision,
+			input.generation,
+			input.status,
+			input.payload,
+			now,
+		],
+	);
+	return {
+		outcome: 'applied',
+		state: readState(db, input.namespace, input.entityKey),
+	};
+}
+
+export function transitionCoordinationState(
+	directory: string,
+	input: CoordinationTransitionInput,
+): CoordinationTransitionResult {
+	validateTransitionInput(input);
+	return withCoordinationTransaction(directory, () =>
+		transitionCoordinationStateWithinTransaction(directory, input),
+	);
 }
 
 export interface CoordinationLeaseInput {

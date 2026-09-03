@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
+import { listCoordinationStates } from '../../../src/db/coordination-store.js';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	clearScopeBindings,
@@ -10,10 +11,12 @@ import {
 	registerScopeBinding,
 } from '../../../src/scope/scope-binding';
 import {
+	_scopePersistenceInternals,
 	claimScopeBindingForChildDurably,
 	persistAndRegisterScopeBinding,
 	readScopeBindingFromDisk,
 	replaceExistingScopeDeclaration,
+	writeScopeBindingToDisk,
 } from '../../../src/scope/scope-persistence';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -154,5 +157,83 @@ describe('scope admission rollback', () => {
 				requireDeclaration: true,
 			}),
 		).toBeNull();
+	});
+
+	test('F9: a failed multi-predecessor rollback leaves every durable predecessor unchanged', async () => {
+		// Previous rollback wrote restored predecessors one at a time, so a fault
+		// on the second write committed a partial replacement of durable authority.
+		const { directory, plan } = fixture();
+		const first = binding(directory, plan, 'architect-session', 'first');
+		const second = binding(directory, plan, 'architect-session', 'second');
+		expect(await writeScopeBindingToDisk(directory, first)).toMatchObject({
+			ok: true,
+		});
+		expect(await writeScopeBindingToDisk(directory, second)).toMatchObject({
+			ok: true,
+		});
+		const replacement = binding(directory, plan, 'architect-session', 'third');
+		const collision = binding(directory, plan, 'other-session', 'collision');
+		expect(
+			registerScopeBinding({
+				...collision,
+				generationId: replacement.generationId,
+			}),
+		).toMatchObject({ ok: true });
+		const originalTransition =
+			_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction;
+		let restoredPredecessors = 0;
+		// Only the second durable predecessor restore is faulted; all other
+		// transitions remain real. Non-rollback transition failures are covered by
+		// the existing scope durability suites.
+		_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction = (
+			transitionDirectory,
+			candidate,
+			expectedRevision,
+		) => {
+			if (
+				candidate.lifecycleState === 'live' &&
+				(candidate.bindingId === first.bindingId ||
+					candidate.bindingId === second.bindingId) &&
+				++restoredPredecessors === 2
+			) {
+				return {
+					ok: false,
+					code: 'SCOPE_BINDING_PERSISTENCE_FAILED',
+					message: 'injected second predecessor restore failure',
+				};
+			}
+			return originalTransition(
+				transitionDirectory,
+				candidate,
+				expectedRevision,
+			);
+		};
+		try {
+			expect(
+				await replaceExistingScopeDeclaration({
+					directory,
+					binding: replacement,
+					replaceExisting: true,
+				}),
+			).toMatchObject({
+				ok: false,
+				code: 'SCOPE_BINDING_PERSISTENCE_FAILED',
+			});
+			const rows = listCoordinationStates(directory, 'scope-binding', 10);
+			// The original replacement is already a committed durable operation when
+			// memory admission fails. A failed compensation must therefore leave that
+			// pre-rollback authority intact, rather than persist a half-revoked
+			// successor and a partially restored predecessor set.
+			expect(rows.map((row) => [row.entityKey, row.status]).sort()).toEqual(
+				[
+					[first.generationId, 'superseded'],
+					[second.generationId, 'superseded'],
+					[replacement.generationId, 'live'],
+				].sort(),
+			);
+		} finally {
+			_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction =
+				originalTransition;
+		}
 	});
 });

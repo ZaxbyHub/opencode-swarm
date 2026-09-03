@@ -7,7 +7,11 @@ import {
 	closeProjectDb,
 	getProjectDb,
 } from '../../../src/db/project-db.js';
-import { readSnapshotRows } from '../../../src/session/snapshot-store.js';
+import {
+	_snapshotStoreInternals,
+	readSnapshotRows,
+	writeSnapshotRows,
+} from '../../../src/session/snapshot-store.js';
 import { bunSpawn } from '../../../src/utils/bun-compat.js';
 import { withTimeout } from '../../../src/utils/timeout.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
@@ -33,6 +37,67 @@ afterEach(() => {
 });
 
 describe('SQLite session snapshot multiprocess coordination', () => {
+	test('F8: reads one committed snapshot while a foreign writer waits after meta', async () => {
+		// Before the transaction wrapper, a foreign commit between namespace scans
+		// could combine the old meta row with a newer tool row in one read result.
+		writeSnapshotRows(tempDir, {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: { tool: { count: 1 } },
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		});
+		const moduleUrl = pathToFileURL(
+			path.resolve(process.cwd(), 'src/session/snapshot-store.ts'),
+		).href;
+		const started = path.join(tempDir, 'foreign-writer-started');
+		const script = path.join(tempDir, 'foreign-writer.ts');
+		fs.writeFileSync(
+			script,
+			[
+				"import { writeFileSync } from 'node:fs';",
+				`import { writeSnapshotRows } from ${JSON.stringify(moduleUrl)};`,
+				`writeFileSync(${JSON.stringify(started)}, 'started');`,
+				`writeSnapshotRows(${JSON.stringify(tempDir)}, { version: 3, writtenAt: 2, toolAggregates: { tool: { count: 2 } }, activeAgent: {}, delegationChains: {}, agentSessions: {} } as never);`,
+			].join('\n'),
+		);
+		let child: ReturnType<typeof bunSpawn> | undefined;
+		const original = _snapshotStoreInternals.afterSnapshotMetaRead;
+		_snapshotStoreInternals.afterSnapshotMetaRead = () => {
+			child = bunSpawn([process.execPath, script], {
+				cwd: tempDir,
+				stdin: 'ignore',
+				stdout: 'ignore',
+				stderr: 'ignore',
+				timeout: 10_000,
+				killProcessTree: true,
+			});
+			waitForFile(started);
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+		};
+		try {
+			expect(readSnapshotRows(tempDir)).toMatchObject({
+				writtenAt: 1,
+				toolAggregates: { tool: { count: 1 } },
+			});
+			if (!child) throw new Error('foreign writer was not started');
+			expect(await child.exited).toBe(0);
+			_snapshotStoreInternals.afterSnapshotMetaRead = original;
+			expect(readSnapshotRows(tempDir)).toMatchObject({
+				writtenAt: 2,
+				toolAggregates: { tool: { count: 2 } },
+			});
+		} finally {
+			_snapshotStoreInternals.afterSnapshotMetaRead = original;
+			try {
+				child?.kill();
+			} catch {
+				/* already exited */
+			}
+		}
+	});
+
 	test('preserves independently keyed sessions written by two processes', async () => {
 		// Keep this regression focused on concurrent state writes; first-open
 		// migration contention has its own project-db test.

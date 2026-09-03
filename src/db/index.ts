@@ -23,6 +23,7 @@ export {
 	MAX_COORDINATION_STATE_LIST_ROWS,
 	releaseCoordinationLease,
 	transitionCoordinationState,
+	transitionCoordinationStateWithinTransaction,
 	withCoordinationTransaction,
 } from './coordination-store.js';
 export {

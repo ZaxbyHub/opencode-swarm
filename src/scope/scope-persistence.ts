@@ -60,6 +60,7 @@ import {
 	importCoordinationOnce,
 	listCoordinationStates,
 	transitionCoordinationState,
+	transitionCoordinationStateWithinTransaction,
 	withCoordinationTransaction,
 } from '../db';
 import { appendCoreEventSync } from '../events/core-events.js';
@@ -479,6 +480,65 @@ function transitionScopeBindingState(
 		.digest('hex');
 	try {
 		const result = transitionCoordinationState(directory, {
+			namespace: SCOPE_BINDING_COORDINATION_NAMESPACE,
+			entityKey: coordinationScopeEntityKey(binding),
+			expectedRevision,
+			generation: 1,
+			status: binding.lifecycleState,
+			payload,
+			event: {
+				streamId: `scope-binding:${binding.bindingId}`,
+				idempotencyKey,
+				eventType: binding.lifecycleState,
+				payload,
+			},
+		});
+		if (result.outcome !== 'applied' && result.outcome !== 'duplicate') {
+			return {
+				ok: false,
+				code:
+					result.outcome === 'revision_conflict' ||
+					result.outcome === 'stale_generation'
+						? 'SCOPE_BINDING_STALE'
+						: 'SCOPE_BINDING_PERSISTENCE_FAILED',
+				message: `Scope binding transition failed: ${result.outcome}.`,
+			};
+		}
+		const persisted =
+			result.state && parseCoordinationScopeBinding(directory, result.state);
+		return persisted
+			? { ok: true, value: persisted }
+			: persistenceFailure(
+					'Scope binding transition could not be re-read from coordination state.',
+				);
+	} catch (error) {
+		return persistenceFailure(
+			`Scope binding transition failed: ${
+				error instanceof Error ? error.message : 'unknown coordination error'
+			}`,
+		);
+	}
+}
+
+/**
+ * Scope replacement rollback owns one coordination transaction across the
+ * successor revocation and every predecessor restore. Re-entering the public
+ * transition helper would create nested SQLite transaction scopes that cannot
+ * make that whole compensation batch atomic.
+ */
+function transitionScopeBindingStateWithinTransaction(
+	directory: string,
+	binding: ScopeBinding,
+	expectedRevision: number | null,
+): ScopePersistenceResult {
+	const payload = scopeBindingShadowPayload(binding);
+	const idempotencyKey = createHash('sha256')
+		.update(
+			`${binding.bindingId}\0${binding.generationId}\0${binding.revision}\0${binding.lifecycleState}\0${payload}`,
+		)
+		.digest('hex');
+	try {
+		const result = transitionCoordinationStateWithinTransaction(directory, {
 			namespace: SCOPE_BINDING_COORDINATION_NAMESPACE,
 			entityKey: coordinationScopeEntityKey(binding),
 			expectedRevision,
@@ -1281,39 +1341,84 @@ export async function persistAndRegisterScopeBinding(
 	};
 }
 
-async function rollbackAdmissionFailure(
+function rollbackAdmissionFailure(
 	directory: string,
 	persisted: ScopeBinding,
 	predecessors: readonly { original: ScopeBinding; superseded: ScopeBinding }[],
 	admission: Extract<ScopeBindingAdmissionResult, { ok: false }>,
-): Promise<ScopePersistenceResult<never>> {
-	const revoked = await tombstoneScopeBinding(directory, persisted, 'revoked');
-	if (!revoked.ok) {
+): ScopePersistenceResult<never> {
+	const now = Date.now();
+	const revokedCandidate: ScopeBinding = {
+		...persisted,
+		revision: persisted.revision + 1,
+		lifecycleState: 'revoked',
+		updatedAt: now,
+		expiresAt: Math.min(persisted.expiresAt, now),
+	};
+	const restoredCandidates = predecessors.map(({ original, superseded }) => ({
+		...original,
+		revision: superseded.revision + 1,
+		lifecycleState: 'live' as const,
+		updatedAt: now,
+	}));
+	let failureMessage: string | null = null;
+	try {
+		withCoordinationTransaction(directory, () => {
+			const revoked =
+				_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
+					directory,
+					revokedCandidate,
+					persisted.revision,
+				);
+			if (!revoked.ok) {
+				failureMessage = revoked.message;
+				throw new Error('Scope rollback revocation transition failed.');
+			}
+			for (let index = 0; index < restoredCandidates.length; index += 1) {
+				const restored = restoredCandidates[index]!;
+				const superseded = predecessors[index]!.superseded;
+				const result =
+					_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
+						directory,
+						restored,
+						superseded.revision,
+					);
+				if (!result.ok) {
+					failureMessage = result.message;
+					throw new Error('Scope rollback predecessor restore failed.');
+				}
+			}
+		});
+	} catch (error) {
 		return persistenceFailure(
-			`Memory admission failed and durable rollback failed: ${revoked.message}`,
+			`Memory admission failed and durable rollback failed: ${
+				failureMessage ??
+				(error instanceof Error ? error.message : 'unknown coordination error')
+			}`,
 		);
 	}
-	for (const { original, superseded } of predecessors) {
-		const restored = await writeScopeBindingToDisk(directory, {
-			...original,
-			revision: superseded.revision + 1,
-			lifecycleState: 'live',
-			updatedAt: Date.now(),
-		});
-		if (!restored.ok) {
+	installScopeBindingTombstone(revokedCandidate);
+	writeScopeBindingShadow(directory, revokedCandidate);
+	const admitted: ScopeBinding[] = [];
+	for (const restored of restoredCandidates) {
+		writeScopeBindingShadow(directory, restored);
+		const memory = updateExactScopeBinding(restored);
+		const admissionResult = memory.ok ? memory : registerScopeBinding(restored);
+		if (!admissionResult.ok) {
+			for (const applied of admitted) {
+				installScopeBindingTombstone({
+					...applied,
+					revision: applied.revision + 1,
+					lifecycleState: 'revoked',
+					updatedAt: Date.now(),
+					expiresAt: Math.min(applied.expiresAt, Date.now()),
+				});
+			}
 			return persistenceFailure(
-				`Memory admission failed and predecessor restore failed: ${restored.message}`,
+				`Memory admission failed and predecessor re-admission failed: ${admissionResult.message}`,
 			);
 		}
-		const memory = updateExactScopeBinding(restored.value);
-		if (!memory.ok) {
-			const registered = registerScopeBinding(restored.value);
-			if (!registered.ok) {
-				return persistenceFailure(
-					`Memory admission failed and predecessor re-admission failed: ${registered.message}`,
-				);
-			}
-		}
+		admitted.push(restored);
 	}
 	return {
 		ok: false,
@@ -2461,6 +2566,9 @@ function atomicWriteSync(targetPath: string, content: string): void {
 }
 
 export const _scopePersistenceInternals = {
+	// Narrow DI seam for faulting one rollback transition in regression tests.
+	transitionScopeBindingState,
+	transitionScopeBindingStateWithinTransaction,
 	get liveBindingCapacity(): number {
 		return liveBindingCapacity;
 	},
