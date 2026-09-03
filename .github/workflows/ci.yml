@@ -47,8 +47,11 @@ jobs:
           #   "chore(main): release X.Y.Z"                                (squash)
           # This predicate is the single point of control for the whole
           # required-check set: when it says "release", every job skips its
-          # steps and reports success. It must therefore never match a
-          # non-release commit. The previous form grepped the FULL message (%B)
+          # steps and reports success. It must therefore never match a group
+          # whose HEAD is not a release merge. (A merge-queue group can batch
+          # other PRs behind the release PR; those ride along on the skip. That
+          # is pre-existing and independent of this predicate's form.)
+          # The previous form grepped the FULL message (%B)
           # for the unanchored token 'release-please--', so a PR whose
           # description merely mentioned that branch — or carried a body line
           # beginning "chore(main): release" — made a non-release merge group
