@@ -54,6 +54,9 @@ describe('authorize_pr_review_reentry tool (issue #2383)', () => {
 	});
 
 	test('rejects a valid-but-wrong abbreviated head SHA against the exact binding', async () => {
+		await activatePrWorkflow(directory, PR_ARTIFACT_SESSION_ID, 'PR_REVIEW', {
+			prHeadSha: PR_ARTIFACT_HEAD_SHA,
+		});
 		const raw = await executeAuthorizePrReviewReentry(
 			{ pr_head_sha: 'abcdef0', role: 'reviewer' },
 			directory,
@@ -61,7 +64,9 @@ describe('authorize_pr_review_reentry tool (issue #2383)', () => {
 		);
 		const result = JSON.parse(raw) as { success: boolean; message?: string };
 		expect(result.success).toBe(false);
-		expect(result.message).toContain('active PR_REVIEW workflow');
+		expect(result.message).toContain(
+			`active PR_REVIEW workflow bound to the declared head (active: ${PR_ARTIFACT_HEAD_SHA})`,
+		);
 	});
 
 	test('rejects a missing sessionID', async () => {
