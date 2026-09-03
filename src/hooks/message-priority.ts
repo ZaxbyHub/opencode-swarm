@@ -13,6 +13,8 @@
  * - DISPOSABLE (4): Duplicate reads, superseded writes, stale errors
  */
 
+import { isGuidanceCarrier } from './system-guidance-carrier.js';
+
 /**
  * Message priority tiers for context pruning decisions.
  * Lower values = higher priority (kept longer during pruning).
@@ -308,6 +310,13 @@ export function classifyMessage(
 
 	// 2. System messages - CRITICAL (never prune swarm state)
 	if (role === 'system') {
+		return MessagePriority.CRITICAL;
+	}
+
+	// 2b. Guidance carriers - CRITICAL (issue #2526: model-only guidance now
+	// rides user-role carriers; without this carve-out they would land at HIGH
+	// via the user branch and become prunable, which system entries never were)
+	if (role === 'user' && isGuidanceCarrier(message)) {
 		return MessagePriority.CRITICAL;
 	}
 

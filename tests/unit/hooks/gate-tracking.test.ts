@@ -20,6 +20,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import { isGuidanceCarrier } from '../../../src/hooks/system-guidance-carrier';
 import {
 	beginInvocation,
 	getActiveWindow,
@@ -661,10 +662,9 @@ describe('v6.12 Task 4.4: Gate-Tracking ADVERSARIAL TESTS', () => {
 
 			await hook.messagesTransform({}, messages);
 
-			// No warning because task matches coder delegation
-			// (The [NEXT] deliberation preamble is inserted as a system message before the user message)
 			const userMsg1 = messages.messages.find(
-				(m: { info: { role: string } }) => m.info.role === 'user',
+				(m: { info: { role: string } }) =>
+					m.info.role === 'user' && !isGuidanceCarrier(m),
 			);
 			expect(userMsg1?.parts[0].text).toBe(originalText);
 			expect(userMsg1?.parts[0].text).not.toContain('DELEGATION VIOLATION');
@@ -698,7 +698,8 @@ describe('v6.12 Task 4.4: Gate-Tracking ADVERSARIAL TESTS', () => {
 
 			// No warning
 			const userMsg2 = messages.messages.find(
-				(m: { info: { role: string } }) => m.info.role === 'user',
+				(m: { info: { role: string } }) =>
+					m.info.role === 'user' && !isGuidanceCarrier(m),
 			);
 			expect(userMsg2?.parts[0].text).toBe(originalText);
 			expect(userMsg2?.parts[0].text).not.toContain('DELEGATION VIOLATION');
@@ -729,10 +730,9 @@ describe('v6.12 Task 4.4: Gate-Tracking ADVERSARIAL TESTS', () => {
 
 			await hook.messagesTransform({}, messages);
 
-			// No DELEGATION VIOLATION warning (just clean coder delegation)
-			// (The [NEXT] deliberation preamble is inserted as a system message before the user message)
 			const userMsg3 = messages.messages.find(
-				(m: { info: { role: string } }) => m.info.role === 'user',
+				(m: { info: { role: string } }) =>
+					m.info.role === 'user' && !isGuidanceCarrier(m),
 			);
 			expect(userMsg3?.parts[0].text).not.toContain('DELEGATION VIOLATION');
 			expect(userMsg3?.parts[0].text).toBe(originalText);

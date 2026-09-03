@@ -9,7 +9,6 @@ import {
 	swarmState,
 } from '../../../src/state';
 import {
-	findSystemMessage,
 	findUserMessage,
 	getPrimaryText,
 	getSystemWarningText,
@@ -69,9 +68,8 @@ describe('QA skip hard-block enforcement', () => {
 		// Should NOT throw - call directly without expect().resolves
 		await hook.messagesTransform({}, messages);
 
-		// System message should contain [NEXT] guidance
-		const systemMsg = findSystemMessage(messages);
-		expect(systemMsg?.parts[0].text).toContain('[NEXT]');
+		// Issue #2526: the [NEXT] guidance rides a user-role guidance carrier
+		expect(getSystemWarningText(messages)).toContain('[NEXT]');
 
 		// Warning is now in a system message (model-only), not in user message text
 		const systemWarningText = getSystemWarningText(messages);

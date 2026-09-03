@@ -15,6 +15,7 @@ import { getAgentConfigs } from '../../../src/agents/index';
 import type { PluginConfig } from '../../../src/config';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import { isGuidanceCarrier } from '../../../src/hooks/system-guidance-carrier';
 import {
 	deserializeAgentSession,
 	TRANSIENT_SESSION_FIELDS,
@@ -57,11 +58,12 @@ function assistantMsg(sessionID: string, modelID: string, providerID?: string) {
 	};
 }
 
-// Advisories are QUEUED then injected into the message stream (a system message)
-// within the same transform call, so assert on the resulting system text.
+// Advisories are QUEUED then injected as a user-role guidance carrier within the
+// same transform call (issue #2526 — the host drops role:'system' entries), so
+// assert on the resulting carrier text.
 function systemText(messages: ReturnType<typeof assistantMsg>[]): string {
 	return messages
-		.filter((m) => m.info?.role === 'system')
+		.filter((m) => isGuidanceCarrier(m))
 		.flatMap((m) => m.parts)
 		.filter((p) => p.type === 'text')
 		.map((p) => (p as { text: string }).text)

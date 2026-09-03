@@ -3,6 +3,7 @@ import type { PluginConfig } from '../../../src/config';
 import { ORCHESTRATOR_NAME } from '../../../src/config/constants';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import { isGuidanceCarrier } from '../../../src/hooks/system-guidance-carrier';
 import {
 	ensureAgentSession,
 	resetSwarmState,
@@ -58,9 +59,7 @@ function makeMessages(
 	};
 }
 
-// ============================================
 // Task 2.1: Architect Self-Coding Detection
-// ============================================
 describe('architect self-coding detection (Task 2.1)', () => {
 	beforeEach(() => {
 		resetSwarmState();
@@ -266,9 +265,7 @@ describe('architect self-coding detection (Task 2.1)', () => {
 	});
 });
 
-// ============================================
 // Task 2.4: Batch Delegation Detection
-// ============================================
 describe('batch delegation detection (Task 2.4)', () => {
 	beforeEach(() => {
 		resetSwarmState();
@@ -426,9 +423,7 @@ describe('batch delegation detection (Task 2.4)', () => {
 	});
 });
 
-// ============================================
 // Task 2.5: Gate Failure Self-Fix Detection
-// ============================================
 describe('gate failure self-fix detection (Task 2.5)', () => {
 	beforeEach(() => {
 		resetSwarmState();
@@ -696,9 +691,7 @@ describe('gate failure self-fix detection (Task 2.5)', () => {
 	});
 });
 
-// ============================================
 // Task 2.7: Self-Coding Model-Only Guidance & Debug Leakage
-// ============================================
 describe('self-coding warnings model-only (Task 2.7)', () => {
 	beforeEach(() => {
 		resetSwarmState();
@@ -878,7 +871,7 @@ describe('self-coding warnings model-only (Task 2.7)', () => {
 		expect(userText).not.toContain('SELF-CODING DETECTED');
 	});
 
-	it('no system message -> warning still injected into created system message (model-only)', async () => {
+	it('no system message -> warning still injected into created guidance carrier (model-only)', async () => {
 		const config = makeGuardrailsConfig();
 		const hook = createGuardrailsHooks(config);
 
@@ -910,8 +903,10 @@ describe('self-coding warnings model-only (Task 2.7)', () => {
 
 		await hook.messagesTransform({}, messages as any);
 
-		// Verify a system message was created and warning injected there (model-only)
-		expect(messages.messages[0].info.role).toBe('system');
+		// Issue #2526: the warning rides a user-role guidance carrier, unshifted
+		// at the front — the original user message shifts to index 1
+		expect(messages.messages[0].info.role).toBe('user');
+		expect(isGuidanceCarrier(messages.messages[0])).toBe(true);
 		expect(messages.messages[0].parts[0].text).toContain(
 			'SELF-CODING DETECTED',
 		);
@@ -965,9 +960,7 @@ describe('self-coding warnings model-only (Task 2.7)', () => {
 	});
 });
 
-// ============================================
 // ADVERSARIAL TESTS: Task 2.7 Model-Only & Debug Leakage Gaps
-// ============================================
 describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	beforeEach(() => {
 		resetSwarmState();
@@ -1348,7 +1341,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	});
 
 	// GAP 9: System message at index > 0 - edge case from message consolidation
-	it('system message at index 1 (after user): warning still injected correctly', async () => {
+	it('system message at index 1 (after user): warning still injected via carrier', async () => {
 		const config = makeGuardrailsConfig();
 		const hook = createGuardrailsHooks(config);
 
@@ -1384,15 +1377,17 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 
 		await hook.messagesTransform({}, messages as any);
 
-		// The system message is at index 1 - code should still find it
-		// Check the system message at index 1
-		expect(messages.messages[1].parts[0].text).toContain(
+		// Issue #2526: the warning rides the guidance carrier, unshifted at the
+		// front; the pre-existing system entry must remain untouched
+		expect(isGuidanceCarrier(messages.messages[0])).toBe(true);
+		expect(messages.messages[0].parts[0].text).toContain(
 			'SELF-CODING DETECTED',
 		);
-		// User message should not have warning
-		expect(messages.messages[0].parts[0].text).not.toContain(
+		// Neither the user message nor the system entry carries the warning
+		expect(messages.messages[1].parts[0].text).not.toContain(
 			'SELF-CODING DETECTED',
 		);
+		expect(messages.messages[2].parts[0].text).toBe('System prompt.');
 	});
 
 	// GAP 10: Verify warning text doesn't contain raw internal data
@@ -1511,9 +1506,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	});
 });
 
-// ============================================
 // ADVERSARIAL TESTS: Attack Vectors
-// ============================================
 describe('ADVERSARIAL: attack vectors (Task 4.2)', () => {
 	beforeEach(() => {
 		resetSwarmState();
@@ -1795,9 +1788,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 	});
 });
 
-// ============================================
 // ADVERSARIAL TESTS: Boundary Cases
-// ============================================
 describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 	beforeEach(() => {
 		resetSwarmState();

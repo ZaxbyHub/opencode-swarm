@@ -8,6 +8,11 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
+	findGuidanceCarriers,
+	type GuidanceMessage,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
+import {
 	advanceTaskState,
 	ensureAgentSession,
 	resetSwarmState,
@@ -17,6 +22,16 @@ import {
 	makeMessages,
 	writeDisjointScopes,
 } from './_delegation-gate-helpers';
+
+/**
+ * Joined text of all guidance carriers' text parts (issue #2526: model-only
+ * guidance rides user-role carriers, not role:'system' entries).
+ */
+function carrierGuidanceText(messages: GuidanceMessage[]): string {
+	return findGuidanceCarriers(messages)
+		.map((m) => messageTextOf(m))
+		.join('\n');
+}
 
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -127,10 +142,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 
 		await hook.messagesTransform({}, messages);
 
-		const systemText = messages.messages
-			.filter((m) => m?.info?.role === 'system')
-			.map((m) => m.parts[0].text)
-			.join('\n');
+		const systemText = carrierGuidanceText(messages.messages);
 
 		expect(systemText).toContain('PARALLEL EXECUTION PROFILE');
 		expect(systemText).toContain('max_concurrent_tasks=4');
@@ -152,10 +164,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 
 		await hook.messagesTransform({}, messages);
 
-		const systemText = messages.messages
-			.filter((m) => m?.info?.role === 'system')
-			.map((m) => m.parts[0].text)
-			.join('\n');
+		const systemText = carrierGuidanceText(messages.messages);
 
 		expect(systemText).toContain('run gates sequentially');
 		expect(systemText).not.toContain('PARALLEL EXECUTION PROFILE');
@@ -181,10 +190,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 
 		await hook.messagesTransform({}, messages);
 
-		const systemText = messages.messages
-			.filter((m) => m?.info?.role === 'system')
-			.map((m) => m.parts[0].text)
-			.join('\n');
+		const systemText = carrierGuidanceText(messages.messages);
 
 		expect(systemText).toContain('dispatch up to 2');
 		expect(systemText).toContain('Eligible now: 1.3');
@@ -219,10 +225,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 
 		await hook.messagesTransform({}, messages);
 
-		const systemText = messages.messages
-			.filter((m) => m?.info?.role === 'system')
-			.map((m) => m.parts[0].text)
-			.join('\n');
+		const systemText = carrierGuidanceText(messages.messages);
 
 		expect(systemText).toContain('3 slot(s) occupied');
 		expect(systemText).toContain('dispatch up to 1');
@@ -253,10 +256,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 
 		await hook.messagesTransform({}, messages);
 
-		const systemText = messages.messages
-			.filter((m) => m?.info?.role === 'system')
-			.map((m) => m.parts[0].text)
-			.join('\n');
+		const systemText = carrierGuidanceText(messages.messages);
 
 		expect(systemText).toContain('1 slot(s) occupied');
 		expect(systemText).toContain('dispatch up to 1');
@@ -333,10 +333,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 
 		await hook.messagesTransform({}, messages);
 
-		const systemText = messages.messages
-			.filter((m) => m?.info?.role === 'system')
-			.map((m) => m.parts[0].text)
-			.join('\n');
+		const systemText = carrierGuidanceText(messages.messages);
 
 		expect(systemText).toContain('1 slot(s) occupied');
 		expect(systemText).toContain('dispatch up to 1');
@@ -412,10 +409,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 
 		await hook.messagesTransform({}, messages);
 
-		const systemText = messages.messages
-			.filter((m) => m?.info?.role === 'system')
-			.map((m) => m.parts[0].text)
-			.join('\n');
+		const systemText = carrierGuidanceText(messages.messages);
 
 		expect(systemText).toContain('Eligible now: 2.1');
 		expect(systemText).not.toContain('Eligible now: 2.2');
@@ -427,10 +421,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 
 		await hook.messagesTransform({}, messages);
 
-		const systemText = messages.messages
-			.filter((m) => m?.info?.role === 'system')
-			.map((m) => m.parts[0].text)
-			.join('\n');
+		const systemText = carrierGuidanceText(messages.messages);
 
 		expect(systemText).toContain('run gates sequentially');
 		expect(systemText).not.toContain('PARALLEL EXECUTION PROFILE');
@@ -444,10 +435,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 
 		await hook.messagesTransform({}, messages);
 
-		const systemText = messages.messages
-			.filter((m) => m?.info?.role === 'system')
-			.map((m) => m.parts[0].text)
-			.join('\n');
+		const systemText = carrierGuidanceText(messages.messages);
 
 		expect(systemText).toContain('run gates sequentially');
 		expect(systemText).not.toContain('PARALLEL EXECUTION PROFILE');
@@ -475,10 +463,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 
 		await hook.messagesTransform({}, messages);
 
-		const systemText = messages.messages
-			.filter((m) => m?.info?.role === 'system')
-			.map((m) => m.parts[0].text)
-			.join('\n');
+		const systemText = carrierGuidanceText(messages.messages);
 
 		expect(systemText).toContain('Lean Turbo is active');
 		expect(systemText).not.toContain('Eligible now:');

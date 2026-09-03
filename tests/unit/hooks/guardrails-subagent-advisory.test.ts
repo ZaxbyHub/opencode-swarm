@@ -4,6 +4,7 @@ import {
 	_internals,
 	createGuardrailsHooks,
 } from '../../../src/hooks/guardrails';
+import { isGuidanceCarrier } from '../../../src/hooks/system-guidance-carrier';
 import {
 	ensureAgentSession,
 	getActiveWindow,
@@ -293,9 +294,9 @@ describe('guardrails subagent advisory injection (messagesTransform)', () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Test 6: Subagent session with no system message → new system message created for injection
+	// Test 6: Subagent session with no system message → guidance carrier created for injection
 	// -------------------------------------------------------------------------
-	test('subagent with no system message → new system message created for injection', async () => {
+	test('subagent with no system message → guidance carrier created for injection', async () => {
 		const sessionId = 'session-no-system-msg';
 		const session = await setupSubagentSession(hooks, sessionId, 'coder');
 
@@ -314,9 +315,12 @@ describe('guardrails subagent advisory injection (messagesTransform)', () => {
 
 		await hooks.messagesTransform({}, output as any);
 
-		// A new system message should have been prepended
+		// Issue #2526: a USER-role guidance carrier (id 'swarm-guidance:guardrails')
+		// is prepended — the OpenCode host drops role:'system' entries from this
+		// transform surface, so model-only guidance must ride a user-role message.
 		expect(output.messages.length).toBe(2);
-		expect(output.messages[0].info.role).toBe('system');
+		expect(isGuidanceCarrier(output.messages[0])).toBe(true);
+		expect(output.messages[0].info.role).toBe('user');
 
 		const textPart = output.messages[0].parts[0] as {
 			type: string;
