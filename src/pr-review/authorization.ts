@@ -255,7 +255,7 @@ function pruneAuthorizations(
 			0,
 			Math.max(0, MAX_PERSISTED_AUTHORIZATIONS - live.length),
 		),
-	].sort(newest);
+	];
 }
 
 // proper-lockfile is a CommonJS module without published TypeScript types

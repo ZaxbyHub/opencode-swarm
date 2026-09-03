@@ -326,7 +326,7 @@ describe('PR workflow dispatch and receipt transport at the plugin host boundary
 				{
 					...current,
 					workflowInstanceId: 'replacement-workflow-instance',
-					updatedAt: new Date().toISOString(),
+					updatedAt: '2026-01-01T00:00:00.000Z',
 				},
 				{ replaceWorkflowInstanceId: current.workflowInstanceId },
 			);

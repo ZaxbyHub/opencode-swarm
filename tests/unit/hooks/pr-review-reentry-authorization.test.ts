@@ -244,8 +244,8 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 				now,
 			);
 			expect(kept.map((record) => record.authorizationId)).toEqual([
-				'used',
 				'live',
+				'used',
 			]);
 		});
 	});
@@ -276,9 +276,8 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 				now,
 			);
 			expect(kept).toHaveLength(32);
-			expect(kept.some((record) => record.authorizationId === 'live')).toBe(
-				true,
-			);
+			expect(kept[0]?.authorizationId).toBe('live');
+			expect(kept.filter((record) => record.consumedAt)).toHaveLength(31);
 		});
 	});
 
