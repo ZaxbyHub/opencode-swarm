@@ -105,17 +105,44 @@ export function createNodeDatabaseCtor(
 			return stmt;
 		}
 
+		/**
+		 * bun:sqlite's `run()` ALWAYS returns a `Changes` object — including the
+		 * no-bindings form (`node_modules/bun-types/sqlite.d.ts:186`). node:sqlite's
+		 * `exec()` returns void, so after executing the SQL the adapter rebuilds the
+		 * object from SQLite's connection-level counters via this probe, executed on
+		 * the SAME connection. Fixed SQL text → served from the instance statement
+		 * cache (prepared once per DB handle; each call is one cached `.get()`).
+		 * #2539: the memory-family ATTACH merge reads `.changes` off this return.
+		 */
+		private static readonly CHANGES_PROBE_SQL =
+			'SELECT changes() AS c, last_insert_rowid() AS r';
+
 		run(sql: string, ...rest: unknown[]): unknown {
 			// bun:sqlite `db.run(sql)` executes SQL with no bindings; `db.run(sql, [p…])`
 			// binds an array (callers always pass ONE array), and `db.run(sql, a, b)` binds
-			// spread args. Callers ignore the return value. The no-param path uses exec():
-			// both node:sqlite's exec() and bun:sqlite's run() execute ALL semicolon-
-			// separated statements, so the two drivers behave identically here. Every caller
-			// passes a single statement anyway (the memory provider pre-splits migrations
-			// via splitSql; project-db/global-db each pass a single-statement migration).
+			// spread args. The no-param path uses exec(): both node:sqlite's exec() and
+			// bun:sqlite's run() execute ALL semicolon-separated statements, so the two
+			// drivers behave identically here. Every caller passes a single statement
+			// anyway (the memory provider pre-splits migrations via splitSql;
+			// project-db/global-db each pass a single-statement migration).
 			if (rest.length === 0) {
 				this.raw.exec(sql);
-				return undefined;
+				// `.changes` matches bun for single-statement DML without triggers —
+				// the only form production code reads (both readers are
+				// single-statement: the memory-family ATTACH merge and the valid_from
+				// backfill; no trigger exists on their tables). Three
+				// intentionally-unpinned deltas remain (documented in
+				// src/db/driver-parity.ts): (a) multi-statement strings — bun SUMS
+				// `.changes` across statements while changes() reports the last one;
+				// (b) non-DML statements (SELECT/BEGIN/SAVEPOINT/DDL) — bun reports
+				// 0, changes() keeps the previous DML's count; (c) trigger-amplified
+				// DML — bun's run() INCLUDES trigger-fired rows while the SQL
+				// changes() this probe reads EXCLUDES them (live-probed both drivers:
+				// 1 direct + 1 trigger row → bun {changes: 2}, probe changes() = 1).
+				const row = this.statement(
+					NodeSqliteDatabase.CHANGES_PROBE_SQL,
+				).get() as { c: number | bigint; r: number | bigint } | undefined;
+				return { changes: Number(row?.c ?? 0), lastInsertRowid: row?.r ?? 0 };
 			}
 			const params =
 				rest.length === 1 && Array.isArray(rest[0])

@@ -22,7 +22,14 @@
  */
 
 import { createRequire } from 'node:module';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -96,6 +103,10 @@ async function main() {
 	const cfgHome = mkdtempSync(join(tmpdir(), 'repro1873-cfg-'));
 	process.env.HOME = cfgHome;
 	process.env.XDG_CONFIG_HOME = cfgHome;
+	// #2539: the memory-link cohort store resolves under the data dir
+	// (LOCALAPPDATA on win32 / XDG_DATA_HOME on linux) — redirect it too so the
+	// link/unlink scenario never touches real user directories.
+	process.env.XDG_DATA_HOME = cfgHome;
 	process.env.LOCALAPPDATA = cfgHome;
 	const projDir = mkdtempSync(join(tmpdir(), 'repro1873-proj-'));
 
@@ -352,6 +363,183 @@ async function main() {
 			`got ${remaining.map((r) => r.id).join(',')}`,
 		);
 		provider.close();
+		mod.clearPool();
+
+		// ── #2539: /swarm memory link → unlink → re-link through the REGISTERED
+		//    command path (executeSwarmCommand → COMMAND_REGISTRY) under the real
+		//    node:sqlite driver. Pre-fix, the first ATTACH merge crashed with
+		//    `Cannot read properties of undefined (reading 'changes')` because the
+		//    adapter's no-bindings run() returned undefined where bun:sqlite
+		//    returns a Changes object. ──
+		const memLinkDir = mkdtempSync(join(tmpdir(), 'repro1873-memlink-'));
+		try {
+			mkdirSync(join(memLinkDir, '.opencode'), { recursive: true });
+			writeFileSync(
+				join(memLinkDir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({
+					memory: { enabled: true, link: { enabled: true } },
+				}),
+				'utf-8',
+			);
+			const scope2539 = { type: 'workspace', workspaceId: 'repro-2539-ws' };
+			const runCmd = (tokens) =>
+				mod.executeSwarmCommand({
+					directory: memLinkDir,
+					tokens,
+					agents: {},
+					sessionID: 'repro-2539',
+				});
+
+			// Seed two records into the LOCAL store (pre-link).
+			const seed2539 = new mod.SQLiteMemoryProvider(memLinkDir);
+			await seed2539.initialize();
+			const recA2539 = makeRecord(mod, {
+				kind: 'project_fact',
+				scope: scope2539,
+				text: '2539 seed record A for link unlink relink',
+			});
+			const recB2539 = makeRecord(mod, {
+				kind: 'project_fact',
+				scope: scope2539,
+				text: '2539 seed record B for link unlink relink',
+			});
+			await seed2539.upsert(recA2539);
+			await seed2539.upsert(recB2539);
+			seed2539.close();
+			mod.clearPool();
+
+			const link1 = await runCmd(['memory', 'link', 'repro-2539-cohort']);
+			check(
+				'#2539 memory link via registered command path',
+				// Exact success prefix from handleMemoryLinkCommand (review tf-04):
+				// "Linked" alone would also match failure text that merely
+				// mentions the word.
+				link1.text.startsWith(
+					'🔗 Linked this worktree\'s memory to shared cohort store "repro-2539-cohort"',
+				) && !link1.text.includes('❌'),
+				link1.text.slice(0, 160),
+			);
+
+			// The cohort store must resolve under the ISOLATED cfg home — never
+			// the real user data dir. cfgHome only contains what this harness
+			// wrote, so the walk is tiny.
+			const cohortDbs = [];
+			(function walk2539(dir) {
+				for (const ent of readdirSync(dir, { withFileTypes: true })) {
+					const p = join(dir, ent.name);
+					if (ent.isDirectory()) walk2539(p);
+					else if (ent.name === 'memory.db' && p.includes('repro-2539-cohort')) {
+						cohortDbs.push(p);
+					}
+				}
+			})(cfgHome);
+			check(
+				'#2539 cohort store resolves under the isolated config home',
+				cohortDbs.length === 1,
+				`found: ${cohortDbs.join(', ')}`,
+			);
+
+			// Seed a third record AFTER link — the provider follows the link
+			// pointer, so it lands in the COHORT and the next merge has exactly
+			// one new row for the local store to absorb (non-zero .changes).
+			const cohortSeed = new mod.SQLiteMemoryProvider(memLinkDir);
+			await cohortSeed.initialize();
+			const recC2539 = makeRecord(mod, {
+				kind: 'project_fact',
+				scope: scope2539,
+				text: '2539 seed record C added while linked',
+			});
+			await cohortSeed.upsert(recC2539);
+			cohortSeed.close();
+			mod.clearPool();
+
+			// stageSqliteDb COPIES (never moves) the source DB, so the local
+			// memory.db must still exist here — proving the unlink destination is
+			// NON-EMPTY and the ATTACH-merge branch (the pre-fix crash path) is
+			// the one taken, not the empty-destination rename.
+			check(
+				'#2539 local memory.db survived link (unlink destination is non-empty)',
+				existsSync(join(memLinkDir, '.swarm', 'memory', 'memory.db')),
+				'local memory.db missing — scenario no longer exercises the ATTACH merge',
+			);
+
+			const unlink1 = await runCmd(['memory', 'unlink']);
+			check(
+				'#2539 memory unlink via registered command path (ATTACH merge, non-empty local destination)',
+				// Exact success prefix from handleMemoryUnlinkCommand (review tf-04).
+				unlink1.text.startsWith('🔓 Unlinked memory.') &&
+					!unlink1.text.includes('❌'),
+				unlink1.text.slice(0, 200),
+			);
+
+			// Re-link: unlink never deletes the cohort store, so this merge also
+			// takes the ATTACH branch with both sides non-empty.
+			const link2 = await runCmd(['memory', 'link', 'repro-2539-cohort']);
+			check(
+				'#2539 memory re-link via registered command path (populated cohort)',
+				link2.text.startsWith(
+					'🔗 Linked this worktree\'s memory to shared cohort store "repro-2539-cohort"',
+				) && !link2.text.includes('❌'),
+				link2.text.slice(0, 200),
+			);
+
+			const verify2539 = new mod.SQLiteMemoryProvider(memLinkDir);
+			await verify2539.initialize();
+			const listed2539 = await verify2539.list({ scopes: [scope2539] });
+			verify2539.close();
+			mod.clearPool();
+			const ids2539 = [recA2539.id, recB2539.id, recC2539.id];
+			check(
+				'#2539 all three records survive the link→unlink→re-link round trip',
+				listed2539.length === 3 &&
+					ids2539.every((id) => listed2539.some((r) => r.id === id)),
+				`got ${listed2539.length}: ${listed2539.map((r) => r.id).join(',')}`,
+			);
+
+			// Review tf-05/mt-02: exercise the EMPTY-LOCAL unlink (the rename
+			// branch) under the real node driver — the F-22 shape, which
+			// previously only ran under Bun. The rename branch never reads
+			// `.changes`, so this proves the registered command path also
+			// succeeds when the local destination has no memory.db at all.
+			rmSync(join(memLinkDir, '.swarm', 'memory', 'memory.db'), {
+				force: true,
+			});
+			for (const suffix of ['-wal', '-shm']) {
+				rmSync(join(memLinkDir, '.swarm', 'memory', `memory.db${suffix}`), {
+					force: true,
+				});
+			}
+			mod.clearPool();
+			check(
+				'#2539 empty-local precondition (local memory.db removed)',
+				!existsSync(join(memLinkDir, '.swarm', 'memory', 'memory.db')),
+				'local memory.db still present',
+			);
+			const unlink2 = await runCmd(['memory', 'unlink']);
+			check(
+				'#2539 empty-local unlink via registered command path (rename branch under node)',
+				unlink2.text.startsWith('🔓 Unlinked memory.') &&
+					!unlink2.text.includes('❌'),
+				unlink2.text.slice(0, 200),
+			);
+			const verifyEmpty2539 = new mod.SQLiteMemoryProvider(memLinkDir);
+			await verifyEmpty2539.initialize();
+			const listedEmpty2539 = await verifyEmpty2539.list({
+				scopes: [scope2539],
+			});
+			verifyEmpty2539.close();
+			mod.clearPool();
+			check(
+				'#2539 empty-local unlink restored all three records from the cohort',
+				listedEmpty2539.length === 3 &&
+					ids2539.every((id) =>
+						listedEmpty2539.some((r) => r.id === id),
+					),
+				`got ${listedEmpty2539.length}`,
+			);
+		} finally {
+			rmSync(memLinkDir, { recursive: true, force: true });
+		}
 	} catch (err) {
 		const msg = err && err.message ? err.message : String(err);
 		failures.push(`uncaught: ${msg}`);

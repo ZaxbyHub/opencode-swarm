@@ -100,6 +100,9 @@ const FORBIDDEN_PACKAGE_PREFIXES = [
 	'tests/smoke/',
 	'tests/security/',
 	'tests/adversarial/',
+	// #2539 review (mu-01): the repro-1873 Node harness bundle must never ship,
+	// even if a future edit adds it to package.json#files by mistake.
+	'dist-build-test/',
 ];
 
 function npmInvocation(args) {
