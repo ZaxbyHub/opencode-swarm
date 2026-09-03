@@ -451,9 +451,9 @@ describe('snapshot coordination post-resolution initialization', () => {
 		_snapshotCoordinationInternals.initialize = () => blocked;
 		const initialization = startSnapshotCoordinationInitialization(tempDir);
 
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		const guard = await beginSnapshotCoordinationReset(tempDir);
-		expect(Date.now() - startedAt).toBeLessThan(1_000);
+		expect(performance.now() - startedAt).toBeLessThan(1_000);
 		expect(guard.priorUnsettled).toBe(true);
 		expect(guard.closeError?.message).toMatch(/timed out/i);
 		await expect(ensureSnapshotCoordinationReady(tempDir)).rejects.toThrow(
