@@ -354,6 +354,41 @@ export function readSnapshotRows(directory: string): SnapshotData | null {
 	});
 }
 
+/**
+ * Confirm whether the authoritative durable row is genuinely stale before a
+ * local stale sweep is allowed to tombstone it.
+ *
+ * This re-reads SQLite rather than trusting the caller's in-memory copy so a
+ * peer process with a frozen snapshot cannot delete a still-fresh live row.
+ * Missing rows are treated as safe-to-evict: there is no durable authority left
+ * to protect.
+ */
+export function isSnapshotSessionAuthoritativelyStale(
+	directory: string,
+	sessionId: string,
+	staleDurationMs: number,
+	now = Date.now(),
+): boolean {
+	try {
+		if (!projectDbExists(directory) || !sessionId) return false;
+		const row = getCoordinationState(directory, SESSION_NAMESPACE, sessionId);
+		if (!row || row.status === 'deleted') return true;
+		const payload = parseRecordPayload(row.payload, 'agent-session') as
+			| SessionRowPayload
+			| { session?: { lastToolCallTime?: unknown } };
+		const lastToolCallTime = payload.session?.lastToolCallTime;
+		if (
+			typeof lastToolCallTime !== 'number' ||
+			!Number.isFinite(lastToolCallTime)
+		) {
+			return false;
+		}
+		return now - lastToolCallTime > staleDurationMs;
+	} catch {
+		return false;
+	}
+}
+
 /** Remove the complete authoritative snapshot as one FULL transaction. */
 export function clearSnapshotRows(directory: string): number {
 	if (!projectDbExists(directory)) return 0;

@@ -14,9 +14,11 @@ import {
 	startSnapshotCoordinationInitialization,
 } from '../../../src/session/snapshot-coordination-init.js';
 import {
+	claimSnapshotSessionOwnership,
 	clearSnapshotRows,
 	deleteSnapshotSessionRows,
 	importSnapshotRowsOnce,
+	isSnapshotSessionAuthoritativelyStale,
 	readSnapshotRows,
 	writeSnapshotRows,
 } from '../../../src/session/snapshot-store.js';
@@ -141,7 +143,12 @@ describe('snapshot coordination post-resolution initialization', () => {
 			toolAggregates: {},
 			activeAgent: { stale: 'coder' },
 			delegationChains: { stale: [] },
-			agentSessions: { stale: { agentName: 'coder' } as never },
+			agentSessions: {
+				stale: {
+					agentName: 'coder',
+					lastToolCallTime: 1,
+				} as never,
+			},
 		});
 
 		expect(sweepStaleSessions(10, 100, tempDir)).toEqual(['stale']);
@@ -149,6 +156,38 @@ describe('snapshot coordination post-resolution initialization', () => {
 		expect(readSnapshotRows(tempDir)!.activeAgent.stale).toBeUndefined();
 		expect(readSnapshotRows(tempDir)!.delegationChains.stale).toBeUndefined();
 		expect(readSnapshotRows(tempDir)!.agentSessions.stale).toBeUndefined();
+	});
+
+	test('stale-session eviction preserves a durably fresh session even if memory is stale', () => {
+		const sessionId = 'authoritative-fresh';
+		claimSnapshotSessionOwnership(sessionId, true);
+		const session = ensureAgentSession(sessionId, 'coder');
+		session.lastToolCallTime = 1;
+		writeSnapshotRows(tempDir, {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {
+				[sessionId]: {
+					agentName: 'coder',
+					lastToolCallTime: 1_995,
+					delegationActive: false,
+				} as never,
+			},
+		});
+
+		expect(
+			isSnapshotSessionAuthoritativelyStale(tempDir, sessionId, 10, 2_000),
+		).toBe(false);
+		expect(sweepStaleSessions(10, 2_000, tempDir)).toEqual([]);
+		expect(swarmState.agentSessions.has(sessionId)).toBe(true);
+		expect(readSnapshotRows(tempDir)!.agentSessions[sessionId]).toEqual({
+			agentName: 'coder',
+			lastToolCallTime: 1_995,
+			delegationActive: false,
+		});
 	});
 
 	test('fails closed on malformed durable snapshot payloads', () => {

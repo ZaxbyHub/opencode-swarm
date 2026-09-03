@@ -71,6 +71,7 @@ import {
 	clearSnapshotSessionOwnerships,
 	deleteSnapshotSessionRows,
 	isSnapshotSessionOwnedLocally,
+	isSnapshotSessionAuthoritativelyStale,
 	releaseSnapshotSessionOwnership,
 } from './session/snapshot-store.js';
 import { maybeSuggestWorktreeLink } from './session/worktree-link-suggestion.js';
@@ -1967,6 +1968,13 @@ export function sweepStaleSessions(
 	const staleIds: string[] = [];
 	for (const [id, session] of swarmState.agentSessions) {
 		if (now - session.lastToolCallTime > staleDurationMs) {
+			if (
+				directory &&
+				isSnapshotSessionOwnedLocally(id) &&
+				!isSnapshotSessionAuthoritativelyStale(directory, id, staleDurationMs, now)
+			) {
+				continue;
+			}
 			staleIds.push(id);
 		}
 	}
