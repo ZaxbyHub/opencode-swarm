@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.164.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.7...v7.164.8) (2026-09-03)
+
+
+### Bug Fixes
+
+* **db:** return a Changes-shaped object from the node adapter's no-bindings run() ([3a95533](https://github.com/ZaxbyHub/opencode-swarm/commit/3a95533dd4c2f1e07af5fd67bf0fd9c1d5017f96))
+
 ## [7.164.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.6...v7.164.7) (2026-09-03)
 
 
