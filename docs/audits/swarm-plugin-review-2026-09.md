@@ -10517,7 +10517,10 @@ posted with a rebase instruction. #2469 gained bullet A1-0a for the `RecordSchem
 dropped. #2526's Workstream H rationale was corrected — H2 is a destructive-safety defect, not a host-contract
 one — and #2527 now cross-references #2508's confirmation pattern. Two review comments contained statements that
 were false at the head they named (#2515's "read by nothing", #2517's "byte-identical"); corrections were posted
-beneath each. Still carrying a harmless stale "#2516 open" clause: #2525, #2531, #2532 and #2539. None of these
+beneath each. The four remaining stale "#2516 open" clauses (#2525, #2531, #2532, #2539) were then corrected against the
+current heads; that pass also found #2539's note had over-constrained the work at directory level — its three
+target files are in neither open PR — and #2525, #2529, #2533 and #2539 are now recorded as workable
+immediately. None of these
 fabricated paths appear in the report itself; they originated in the issue bodies.
 
 ## 9. Appendix: artifacts
