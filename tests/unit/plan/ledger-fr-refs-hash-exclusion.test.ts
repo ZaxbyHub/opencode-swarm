@@ -2,7 +2,7 @@
  * Tests for issue #1687 task 1.2: `fr_refs` (added to `TaskSchema` in task 1.1)
  * must survive ledger snapshot/replay via the existing generic full-plan-object
  * embed, WITHOUT any field-by-field wiring, and must be deliberately EXCLUDED
- * from `computePlanHash`, `computePlanStructureHash` (src/plan/ledger.ts), and
+ * from `computePlanLedgerHash`, `computePlanStructureHash` (src/plan/ledger.ts), and
  * `computePlanContentHash` (src/plan/manager.ts) so that `plan_hash_after`
  * (persisted on-disk and load-bearing for ledger replay/staleness detection)
  * stays byte-identical for every plan that predates `fr_refs`.
@@ -11,7 +11,7 @@
  * - A task's `fr_refs` survives a real snapshot-then-replay cycle
  *   (`takeSnapshotEvent` → on-disk ledger file → `replayFromLedger`), not
  *   merely a plan.json save/reload.
- * - `computePlanHash` / `computePlanStructureHash` are unaffected by a task's
+ * - `computePlanLedgerHash` / `computePlanStructureHash` are unaffected by a task's
  *   `fr_refs` content (hash identical whether `fr_refs` is unset, empty, or
  *   populated) — proving the exclusion is real, not merely documented.
  * - `computePlanContentHash` (src/plan/manager.ts) is likewise unaffected,
@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
-	computePlanHash,
+	computePlanLedgerHash,
 	computePlanStructureHash,
 	initLedger,
 	replayFromLedger,
@@ -152,7 +152,7 @@ describe('fr_refs survives ledger snapshot + replay (issue #1687 task 1.2)', () 
 		await initLedger(
 			dir,
 			derivePlanId(planWithFrRefs),
-			computePlanHash(planWithFrRefs),
+			computePlanLedgerHash(planWithFrRefs),
 			planWithFrRefs,
 		);
 
@@ -165,17 +165,17 @@ describe('fr_refs survives ledger snapshot + replay (issue #1687 task 1.2)', () 
 	});
 });
 
-describe('fr_refs is excluded from computePlanHash / computePlanStructureHash (ledger.ts)', () => {
-	test('computePlanHash is byte-identical regardless of fr_refs content', () => {
+describe('fr_refs is excluded from computePlanLedgerHash / computePlanStructureHash (ledger.ts)', () => {
+	test('computePlanLedgerHash is byte-identical regardless of fr_refs content', () => {
 		const basePlan = createTestPlan();
 		const withRefs = withFrRefsOnTaskOne(basePlan, ['FR-000', 'FR-001']);
 		const withDifferentRefs = withFrRefsOnTaskOne(basePlan, ['FR-999']);
 		const withEmptyRefs = withFrRefsOnTaskOne(basePlan, []);
 
-		const baseHash = computePlanHash(basePlan);
-		expect(computePlanHash(withRefs)).toBe(baseHash);
-		expect(computePlanHash(withDifferentRefs)).toBe(baseHash);
-		expect(computePlanHash(withEmptyRefs)).toBe(baseHash);
+		const baseHash = computePlanLedgerHash(basePlan);
+		expect(computePlanLedgerHash(withRefs)).toBe(baseHash);
+		expect(computePlanLedgerHash(withDifferentRefs)).toBe(baseHash);
+		expect(computePlanLedgerHash(withEmptyRefs)).toBe(baseHash);
 	});
 
 	test('computePlanStructureHash is byte-identical regardless of fr_refs content', () => {

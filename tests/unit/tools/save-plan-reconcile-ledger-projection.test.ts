@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { closeProjectDb } from '../../../src/db/project-db';
 import {
-	computePlanHash,
+	computePlanLedgerHash,
 	_internals as ledgerInternals,
 	readLedgerEvents,
 	replayFromLedger,
@@ -141,9 +141,9 @@ function seedSemanticUnknownEventLedger(
 	projectedPlan.phases[0].tasks[0].fr_refs = ['FR-2098'];
 	const initialPlan = makePlan('pending');
 	const planId = 'reconcile-swarm-Reconcile_Plan';
-	const initialHash = computePlanHash(initialPlan);
+	const initialHash = computePlanLedgerHash(initialPlan);
 	const inProgressPlan = makePlan('in_progress');
-	const inProgressHash = computePlanHash(inProgressPlan);
+	const inProgressHash = computePlanLedgerHash(inProgressPlan);
 	const unknownTailHash = 'SEMANTIC_UNKNOWN_TAIL_HASH';
 
 	fs.mkdirSync(join(dir, '.swarm'), { recursive: true });
@@ -311,14 +311,16 @@ describe('reconcile_ledger_projection', () => {
 		expect(recovery?.event_type).toBe('snapshot');
 		expect(recovery?.seq).toBe(4);
 		expect(recovery?.plan_hash_before).toBe('SEMANTIC_UNKNOWN_TAIL_HASH');
-		expect(recovery?.plan_hash_after).toBe(computePlanHash(projectedPlan));
+		expect(recovery?.plan_hash_after).toBe(
+			computePlanLedgerHash(projectedPlan),
+		);
 
 		const recoveredSnapshot = recovery?.payload as
 			| { plan?: Plan; payload_hash?: string }
 			| undefined;
 		expect(recoveredSnapshot?.plan).toEqual(projectedPlan);
 		expect(recoveredSnapshot?.payload_hash).toBe(
-			computePlanHash(projectedPlan),
+			computePlanLedgerHash(projectedPlan),
 		);
 		for (let index = 1; index < events.length; index++) {
 			expect(events[index].plan_hash_before).toBe(

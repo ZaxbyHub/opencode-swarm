@@ -20,7 +20,7 @@
  * - `identityDigest` — sha256 over the canonical identity object; this is
  *   the round-store scope/generation key and the evidence binding.
  *
- * `computePlanHash` (ledger integrity) and `computePlanStructureHash`
+ * `computePlanLedgerHash` (ledger integrity) and `computePlanStructureHash`
  * (plan-critic execution gate) are intentionally NOT reused or modified:
  * the first is status-sensitive by design, and the second still hashes
  * progress-like fields (`blocked_reason`, `current_phase`) while dropping

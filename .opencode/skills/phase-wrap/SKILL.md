@@ -9,6 +9,10 @@ description: >
 
 This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
+## Graph-first evidence contract
+
+Before final phase judgment, use `repo_map` `diff_context`, `impact_cone`, and `test_pack` to audit the changed surface and likely tests. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source, Git diff, and executable test evidence.
+
 ## ⛔ RETROSPECTIVE GATE
 
 **MANDATORY before calling phase_complete.** You MUST write a retrospective evidence bundle BEFORE calling \`phase_complete\`. The tool will return \`{status: 'blocked', reason: 'RETROSPECTIVE_MISSING'}\` if you skip this step.

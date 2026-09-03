@@ -6,7 +6,7 @@ import { canonicalMkdtemp } from '../../tests/helpers/tmpdir';
 import type { Plan } from '../config/plan-schema';
 import {
 	appendLedgerEvent,
-	computePlanHash,
+	computePlanLedgerHash,
 	initLedger,
 	ledgerExists,
 	readLedgerEvents,
@@ -139,7 +139,7 @@ describe('loadPlan ledger-aware hash comparison guard', () => {
 					),
 				})),
 			};
-			const postMutationHash = computePlanHash(postMutationPlan);
+			const postMutationHash = computePlanLedgerHash(postMutationPlan);
 
 			// Add a task_status_changed event to the ledger with correct planHashAfter
 			await appendLedgerEvent(
@@ -205,7 +205,7 @@ describe('loadPlan ledger-aware hash comparison guard', () => {
 					),
 				})),
 			};
-			const completedHash = computePlanHash(completedPlan);
+			const completedHash = computePlanLedgerHash(completedPlan);
 
 			await appendLedgerEvent(
 				testDir,
@@ -387,8 +387,8 @@ describe('loadPlan ledger-aware hash comparison guard', () => {
 			const plan1 = makeTestPlan();
 			const plan2 = makeTestPlan();
 
-			const hash1 = computePlanHash(plan1);
-			const hash2 = computePlanHash(plan2);
+			const hash1 = computePlanLedgerHash(plan1);
+			const hash2 = computePlanLedgerHash(plan2);
 
 			expect(hash1).toBe(hash2);
 		});
@@ -397,8 +397,8 @@ describe('loadPlan ledger-aware hash comparison guard', () => {
 			const plan1 = makeTestPlan({ title: 'Plan A' });
 			const plan2 = makeTestPlan({ title: 'Plan B' });
 
-			const hash1 = computePlanHash(plan1);
-			const hash2 = computePlanHash(plan2);
+			const hash1 = computePlanLedgerHash(plan1);
+			const hash2 = computePlanLedgerHash(plan2);
 
 			expect(hash1).not.toBe(hash2);
 		});
@@ -414,7 +414,7 @@ describe('loadPlan ledger-aware hash comparison guard', () => {
 
 			// Get the plan hash from plan.json
 			const planJson = readPlanJson(testDir)!;
-			const planHash = computePlanHash(planJson);
+			const planHash = computePlanLedgerHash(planJson);
 
 			// They should match because plan.json hasn't changed since initLedger read it
 			expect(planHash).toBe(ledgerHash);

@@ -20,6 +20,11 @@ import {
 import { captureWorkspaceSnapshot } from '../background/workspace-snapshot.js';
 import { getCurrentPhase, type Plan } from '../config/plan-schema.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import {
+	collectPlanTaskIdContextFromPhases,
+	toTaskIdPlanContextOptions,
+} from '../hooks/plan-task-id-context.js';
+import { resolveTaskId } from '../hooks/task-id-resolver.js';
 import { classifyTaskResult } from '../hooks/task-result-classifier.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { computePlanStructureHash } from '../plan/ledger.js';
@@ -197,15 +202,25 @@ function buildBinding(input: {
 	};
 }
 
-function extractPlanTaskId(args: Record<string, unknown>): string | null {
-	const raw = args.task_id ?? args.taskId;
-	if (typeof raw === 'string' && raw.trim().length > 0) {
-		return raw.trim().slice(0, 120);
+function extractPlanTaskId(
+	args: Record<string, unknown>,
+	plan: Plan,
+): string | null {
+	const context = collectPlanTaskIdContextFromPhases(plan.phases);
+	const result = resolveTaskId(args, {
+		policy: 'plan',
+		...toTaskIdPlanContextOptions(context),
+	});
+	if (result.status !== 'resolved') return null;
+	if (
+		context.status === 'over_limit' &&
+		!plan.phases.some((phase) =>
+			phase?.tasks?.some((task) => task?.id === result.taskId),
+		)
+	) {
+		return null;
 	}
-	const text = [args.prompt, args.description, args.task]
-		.filter((value): value is string => typeof value === 'string')
-		.join('\n');
-	return /(?:^|\n)\s*TASK:\s*(\d+\.\d+(?:\.\d+)*)\b/i.exec(text)?.[1] ?? null;
+	return result.taskId;
 }
 
 function storePath(directory: string): string {
@@ -633,7 +648,7 @@ export async function reserveApprovedPhaseParticipation(input: {
 		role: rawRole,
 		parentSessionId: input.parentSessionId,
 		callId: input.callId,
-		taskId: extractPlanTaskId(input.args),
+		taskId: extractPlanTaskId(input.args, plan),
 		policy: input.policy,
 		directory: input.directory,
 	});

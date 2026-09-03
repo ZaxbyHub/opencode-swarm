@@ -23,7 +23,7 @@ import type { Plan } from '../config/plan-schema';
 import * as ledger from './ledger';
 import {
 	appendLedgerEvent,
-	computePlanHash,
+	computePlanLedgerHash,
 	initLedger,
 	readLedgerEvents,
 	replayFromLedger,
@@ -236,7 +236,7 @@ describe('Fix 2: loadPlan() migration-aware ledger guard', () => {
 				},
 			],
 		});
-		const completedHash = computePlanHash(completedPlan);
+		const completedHash = computePlanLedgerHash(completedPlan);
 
 		// "test-swarm" + "-" + "Test Plan" → "test-swarm-Test_Plan"
 		const planId = 'test-swarm-Test_Plan';
@@ -654,7 +654,7 @@ describe('updateTaskStatus() heals same-identity ledger drift before applying up
 				},
 			],
 		});
-		const driftedHash = computePlanHash(driftedPlan);
+		const driftedHash = computePlanLedgerHash(driftedPlan);
 		const planId = 'test-swarm-Test_Plan';
 
 		// Append a ledger event with the correct planHashAfter so getLatestLedgerHash

@@ -3,7 +3,8 @@
 Tool registration is now driven by one file, `src/tools/manifest.ts`. Each tool
 has a single `TOOL_MANIFEST` entry with its `description`, default `agents`, and
 `handler`; `TOOL_NAMES`, `TOOL_NAME_SET`, `TOOL_DESCRIPTIONS`, `AGENT_TOOL_MAP`,
-and the plugin `tool: {}` object are all derived from it.
+and the plugin tool object (built by `buildPluginToolObject(...)` in
+`src/index.ts`) are all derived from it.
 
 **Why:** the previous four-site registration (`tool-names.ts`, the tools barrel,
 `constants.ts`, and the plugin wiring in `index.ts`) was the root cause of the

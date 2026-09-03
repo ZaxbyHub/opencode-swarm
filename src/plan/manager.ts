@@ -102,7 +102,7 @@ import {
 import {
 	appendLedgerEvent,
 	computeCurrentPlanHash,
-	computePlanHash,
+	computePlanLedgerHash,
 	getLatestLedgerSeq,
 	initLedger,
 	type LedgerEvent,
@@ -424,7 +424,7 @@ async function getLatestLedgerHash(directory: string): Promise<string> {
  * the flag never reached `update_task_status` / `phase_complete` in long-lived
  * hosts. This re-attaches it on every return for a persisted-stale workspace.
  *
- * Self-heal: before flagging, recompute `computePlanHash(plan)` vs the latest
+ * Self-heal: before flagging, recompute `computePlanLedgerHash(plan)` vs the latest
  * ledger hash. If they now MATCH the projection reconverged (e.g. an architect
  * `save_plan` rewrote plan.json + appended a ledger event) — clear the verdict
  * and return clean. This is the mechanism (together with `resetStartupLedgerCheck`
@@ -433,7 +433,7 @@ async function getLatestLedgerHash(directory: string): Promise<string> {
  *
  * Invariant 5: `_ledgerReplayStale` / `_ledgerReplayStaleReason` are RuntimePlan
  * overlays only. They are never written by `savePlan` (PlanSchema strips unknown
- * keys) and never hashed (`computePlanHash` uses an explicit allow-list), so the
+ * keys) and never hashed (`computePlanLedgerHash` uses an explicit allow-list), so the
  * mutation below cannot leak into durable plan.json or any hash.
  */
 async function surfaceLedgerStaleIfPersisted(
@@ -446,7 +446,7 @@ async function surfaceLedgerStaleIfPersisted(
 	}
 	// Cheap recheck only — never the expensive replay (that stays startup-gated).
 	try {
-		const planHash = computePlanHash(plan);
+		const planHash = computePlanLedgerHash(plan);
 		const ledgerHash = await getLatestLedgerHash(directory);
 		if (ledgerHash !== '' && planHash === ledgerHash) {
 			// Reconverged → the workspace recovered. Auto-clear and return clean.
@@ -504,7 +504,7 @@ async function parsePlanJsonCached(directory: string): Promise<Plan | null> {
  * Returns a short hash string for compact storage in plan.md.
  *
  * F-06: Hash function difference from ledger.ts:
- * - This function uses Bun.hash (compact) vs SHA-256 (ledger.ts::computePlanHash)
+ * - This function uses Bun.hash (compact) vs SHA-256 (ledger.ts::computePlanLedgerHash)
  * - Purpose: plan.md drift detection (short, readable) vs plan state integrity (cryptographic)
  * Both are intentional design choices for their respective use cases.
  */
@@ -699,7 +699,7 @@ export async function loadPlan(
 					// due to concurrent writes (save_plan + update_task_status). Only rebuild on
 					// first loadPlan() call per workspace per process lifetime.
 					if (await ledgerExists(directory)) {
-						const planHash = computePlanHash(validated);
+						const planHash = computePlanLedgerHash(validated);
 						const ledgerHash = await getLatestLedgerHash(directory);
 						const resolvedWorkspace = path.resolve(directory);
 						if (!startupLedgerCheckedWorkspaces.has(resolvedWorkspace)) {
@@ -818,7 +818,7 @@ export async function loadPlan(
 										// Mirrors the `_specStale` attach pattern above. These
 										// fields live on RuntimePlan (a TS overlay) and are never
 										// persisted (PlanSchema strips unknown keys) nor hashed
-										// (computePlanHash/computePlanContentHash use explicit
+										// (computePlanLedgerHash/computePlanContentHash use explicit
 										// field allow-lists).
 										{
 											const runtimeStale = validated as RuntimePlan;
@@ -1329,7 +1329,7 @@ export async function savePlan(
 	// plan_hash_after. initLedger reads from disk otherwise, but plan.json is
 	// only written later in this function — so without passing the hash here,
 	// the init event would capture the OLD plan's hash.
-	const planHashForInit = computePlanHash(validated);
+	const planHashForInit = computePlanLedgerHash(validated);
 	if (!(await ledgerExists(directory))) {
 		try {
 			options?.preCommitCheck?.();
@@ -1535,7 +1535,7 @@ export async function savePlan(
 				});
 			} else {
 				await takeSnapshotEvent(directory, validated, {
-					planHashAfter: computePlanHash(validated),
+					planHashAfter: computePlanLedgerHash(validated),
 					source: 'save_plan_stale_projection_reconcile',
 					expectedSeq: expected.expectedSeq,
 					expectedLedgerHash: expected.expectedLedgerHash,
@@ -1557,7 +1557,7 @@ export async function savePlan(
 	// Compute post-mutation hash from the fully-mutated validated plan
 	// This must happen BEFORE ledger events are appended so each event
 	// receives the correct planHashAfter (the hash after all mutations)
-	const hashAfter = computePlanHash(validated);
+	const hashAfter = computePlanLedgerHash(validated);
 
 	// Compute task changes by comparing old vs new plan
 	if (currentPlan) {
@@ -1734,12 +1734,12 @@ export async function savePlan(
 		: validated;
 	if (
 		replayedBeforeProjection &&
-		computePlanHash(replayedBeforeProjection) !==
-			computePlanHash(projectionCandidate)
+		computePlanLedgerHash(replayedBeforeProjection) !==
+			computePlanLedgerHash(projectionCandidate)
 	) {
 		options?.preCommitCheck?.();
 		await takeSnapshotEvent(directory, projectionCandidate, {
-			planHashAfter: computePlanHash(projectionCandidate),
+			planHashAfter: computePlanLedgerHash(projectionCandidate),
 			source: 'savePlan_structural_projection',
 		});
 	}
@@ -1773,7 +1773,7 @@ export async function savePlan(
 		latestSeq % SNAPSHOT_INTERVAL === 0
 	) {
 		await takeSnapshotWithRetry(directory, projectedPlan, {
-			planHashAfter: computePlanHash(projectedPlan),
+			planHashAfter: computePlanLedgerHash(projectedPlan),
 			source: 'savePlan_manager',
 		});
 	}
@@ -2042,7 +2042,7 @@ export async function rebuildPlan(
 	// because applyEventToPlan treats plan_rebuilt as an idempotent no-op.
 	try {
 		const planId = derivePlanId(targetPlan);
-		const planHashAfter = computePlanHash(targetPlan);
+		const planHashAfter = computePlanLedgerHash(targetPlan);
 		await appendLedgerEvent(
 			directory,
 			{
@@ -2101,7 +2101,7 @@ export async function closePlanTerminalState(
 
 	// Step 2: Compute hash from the validated plan — all subsequent ledger
 	// events carry this hash so that replay can verify state integrity.
-	const hashAfter = computePlanHash(validated);
+	const hashAfter = computePlanLedgerHash(validated);
 
 	// Step 3: Append terminal ledger events for each closed task.
 	for (const taskId of options.closedTaskIds) {

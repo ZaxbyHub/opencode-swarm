@@ -20,7 +20,7 @@ import { derivePlanId } from '../../../src/plan/utils';
 //
 // We mock the ledger module (spread real, override four functions) to force the
 // exact path: ledger present, hash mismatch, replay throws, no approved
-// snapshot. `computePlanHash` stays REAL so it produces a value that differs
+// snapshot. `computePlanLedgerHash` stays REAL so it produces a value that differs
 // from our sentinel ledger hash, guaranteeing the mismatch branch.
 // ---------------------------------------------------------------------------
 
@@ -88,7 +88,7 @@ describe('loadPlan — #1269 finding 2: _ledgerReplayStale on stale-return path'
 		// A ledger event whose plan_id matches the plan identity (so loadPlan takes
 		// the rebuild branch, not the migration/identity-mismatch branch) and whose
 		// plan_hash_after is a sentinel that will never equal the real
-		// computePlanHash(plan) → forces the hash-mismatch branch.
+		// computePlanLedgerHash(plan) → forces the hash-mismatch branch.
 		const fakeEvent = {
 			seq: 1,
 			plan_id: planId,
@@ -193,7 +193,7 @@ describe('loadPlan — #1269 finding 2: _ledgerReplayStale on stale-return path'
 	test('self-heal: once plan.json reconverges with the ledger, the next loadPlan CLEARS the flag', async () => {
 		// Proves the fix is "refuse until fixed, then auto-clear" — not a permanent
 		// stuck refusal. After detection, we make the ledger tail hash equal the real
-		// computePlanHash of the returned plan (simulating an architect save_plan /
+		// computePlanLedgerHash of the returned plan (simulating an architect save_plan /
 		// rebuild that reconverged plan.json with the ledger). The cheap self-heal
 		// recheck at the chokepoint must then drop the verdict.
 		const plan = createTestPlan({
@@ -238,14 +238,16 @@ describe('loadPlan — #1269 finding 2: _ledgerReplayStale on stale-return path'
 		expect(stale!._ledgerReplayStale).toBe(true);
 
 		// Invariant 5 evidence: the runtime-only flag does NOT affect the plan hash
-		// (computePlanHash uses an explicit field allow-list). Hash the SAME object
+		// (computePlanLedgerHash uses an explicit field allow-list). Hash the SAME object
 		// with the flag, then strip the runtime overlay and hash again — isolating
 		// the flag's (non-)effect, so this is safe to use as the reconverged tail.
-		const reconvergedHash = realLedger.computePlanHash(stale!);
+		const reconvergedHash = realLedger.computePlanLedgerHash(stale!);
 		const flaglessClone = { ...stale! } as RuntimePlan;
 		flaglessClone._ledgerReplayStale = undefined;
 		flaglessClone._ledgerReplayStaleReason = undefined;
-		expect(realLedger.computePlanHash(flaglessClone)).toBe(reconvergedHash);
+		expect(realLedger.computePlanLedgerHash(flaglessClone)).toBe(
+			reconvergedHash,
+		);
 
 		// Phase 2 — reconverge: ledger tail now matches the live plan.json hash.
 		ledgerTail = reconvergedHash;

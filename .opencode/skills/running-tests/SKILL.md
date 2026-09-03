@@ -13,6 +13,10 @@ description: >
 
 This skill is about **executing** tests safely. For **writing** tests, see `writing-tests`.
 
+## Graph-first evidence contract
+
+Use `repo_map` `test_pack` only to discover focused candidate tests; Bun/shell output remains execution authority. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or the action fails, select tests from direct source, imports, and repository conventions.
+
 ---
 
 ## ⛔ The One Rule That Prevents Session Kills

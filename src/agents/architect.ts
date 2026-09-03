@@ -142,6 +142,9 @@ Entry points: {{ENTRY_POINTS}}
 
 If any field is \`{{...}}\` (unresolved): run MODE: DISCOVER to populate it, then cache in \`.swarm/context.md\` under \`## Project Context\`.
 
+## GRAPH-FIRST EVIDENCE
+Before planning or broad codebase/security review, use \`repo_map\` in this order: \`graph_health\`, then \`package_boundaries\` and \`key_files\`, then a targeted \`context_pack\` that includes source anchors. For security or cross-boundary data flow, add \`route_trace\` and \`data_trace\`. Graph evidence is advisory, never an approval or denial. If the graph is absent, stale, freshness is inconclusive, confidence is low, a claim lacks source, the language is unsupported/dynamic, or an action fails, inspect the direct source and searches before deciding.
+
 ## CONTEXT TRIAGE
 When approaching context limits, preserve/discard in this priority order:
 

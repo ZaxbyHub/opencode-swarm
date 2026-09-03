@@ -53,8 +53,13 @@ import {
 	validateReceipt,
 } from './knowledge-receipt-validator.js';
 import type { PromotionEvidenceRecord } from './knowledge-types.js';
+import {
+	loadPlanTaskIdContext,
+	toTaskIdPlanContextOptions,
+} from './plan-task-id-context.js';
 import { appendPromotionEvidence } from './promotion-evidence-store.js';
 import { parseDelegationArgs } from './skill-propagation-gate.js';
+import { resolveTaskId, type TaskIdResolution } from './task-id-resolver.js';
 import { validateSwarmPath } from './utils.js';
 
 export interface DelegateAckInput {
@@ -73,9 +78,29 @@ function isTaskTool(tool: unknown): boolean {
 }
 
 /** Best-effort extraction of a task id from a delegation prompt envelope. */
-function extractTaskId(prompt: string): string | undefined {
-	const m = /\btask[_-]?id\s*[:=]\s*([A-Za-z0-9._-]{1,80})/i.exec(prompt);
-	return m ? m[1] : undefined;
+export function resolveDelegateAckTaskId(
+	args: Record<string, unknown>,
+	knownPlanTaskIds?: ReadonlySet<string>,
+	planContextOverLimit = false,
+): string | undefined {
+	const resolved = resolveDelegateAckTaskIdResult(
+		args,
+		knownPlanTaskIds,
+		planContextOverLimit,
+	);
+	return resolved.status === 'resolved' ? resolved.taskId : undefined;
+}
+
+function resolveDelegateAckTaskIdResult(
+	args: Record<string, unknown>,
+	knownPlanTaskIds?: ReadonlySet<string>,
+	planContextOverLimit = false,
+): TaskIdResolution {
+	return resolveTaskId(args, {
+		policy: 'attribution',
+		knownPlanTaskIds,
+		planContextOverLimit,
+	});
 }
 
 /**
@@ -472,6 +497,8 @@ export async function collectDelegateAcks(params: {
 	agent: string;
 	sessionId?: string;
 	taskId?: string;
+	/** A caller-owned resolution attempt; non-resolved states forbid reparsing. */
+	taskIdResolution?: TaskIdResolution;
 }): Promise<CollectDelegateAcksResult> {
 	const shown = parseDelegateDirectiveBlock(params.prompt);
 	if (shown.length === 0) {
@@ -499,6 +526,13 @@ export async function collectDelegateAcks(params: {
 	// receipt validator requires (trace-existence + cited-ID membership). Fall
 	// back to a fresh trace only for legacy prompts without the trace header.
 	const traceId = parseDelegateDirectiveTraceId(params.prompt) ?? undefined;
+	const taskId = params.taskIdResolution
+		? params.taskIdResolution.status === 'resolved'
+			? params.taskIdResolution.taskId
+			: undefined
+		: // Legacy explicit fallback for callers that do not provide
+			// taskIdResolution.
+			(params.taskId ?? resolveDelegateAckTaskId({ prompt: params.prompt }));
 	return reconcileShownDirectives({
 		directory: params.directory,
 		shown,
@@ -506,7 +540,7 @@ export async function collectDelegateAcks(params: {
 		transcript: params.transcript,
 		agent: params.agent,
 		sessionId,
-		taskId: params.taskId ?? extractTaskId(params.prompt),
+		taskId,
 	});
 }
 
@@ -629,11 +663,20 @@ export async function collectDelegateAcksAfter(
 	const sessionId =
 		typeof input.sessionID === 'string' ? input.sessionID : undefined;
 
+	const planTaskIdOptions = toTaskIdPlanContextOptions(
+		await loadPlanTaskIdContext(directory),
+	);
+	const taskIdResolution = resolveDelegateAckTaskIdResult(
+		argsRecord ?? { prompt },
+		planTaskIdOptions.knownPlanTaskIds,
+		planTaskIdOptions.planContextOverLimit,
+	);
 	await collectDelegateAcks({
 		directory,
 		prompt,
 		transcript,
 		agent,
 		sessionId,
+		taskIdResolution,
 	});
 }

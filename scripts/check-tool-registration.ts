@@ -4,8 +4,10 @@
  *
  * Belt-and-braces runtime check on top of the compile-time guarantees:
  *   - ToolMeta requires description + agents (a missing one is a TS error).
- *   - manifest.ts `satisfies Record<ToolName, () => ToolDefinition>` makes the
- *     handler set exhaustive vs the metadata keys (a missing handler is a TS error).
+ *   - manifest.ts registers handlers via `defineHandlers<T extends
+ *     Record<ToolName, () => ToolDefinition>>`; the generic constraint makes
+ *     the handler set exhaustive vs the metadata keys (a missing or stray
+ *     handler is a TS error).
  * This script verifies the runtime-derived sets (plugin tool object, TOOL_NAMES,
  * descriptions, AGENT_TOOL_MAP) stay coherent with the metadata, and exits
  * non-zero on any drift.
@@ -15,10 +17,16 @@
  * entry or declare a `@tool-opt-out` JSDoc tag. This catches the `knowledge_ack`
  * class — a fully built + tested tool that was never registered.
  *
+ * Issue #1643 added the barrel-export check (section 7): every TOOL_NAMES
+ * entry must resolve to a defined export of the src/tools/index.ts barrel.
+ * Checks 1–6 never imported the barrel, so a tool missing its barrel export
+ * (a surface still required by wiring/registration tests) passed this check.
+ *
  * Usage: bun run scripts/check-tool-registration.ts
  */
 
 import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AGENT_TOOL_MAP } from '../src/config/constants';
@@ -38,12 +46,41 @@ const REPO_ROOT = path.resolve(
 const TOOLS_DIR = path.join(REPO_ROOT, 'src', 'tools');
 
 /**
+ * Options for {@link collectToolRegistrationErrors}. The barrel record is
+ * injectable so the deliberately-missing-export regression test
+ * (tests/unit/scripts/check-tool-registration-barrel.test.ts, issue #1643)
+ * can exercise check 7 against a mutated copy of the real barrel without
+ * touching the working tree.
+ */
+export interface ToolRegistrationCheckOptions {
+	/** Stand-in for the src/tools/index.ts barrel namespace. */
+	barrel?: Record<string, unknown>;
+}
+
+/**
+ * Pure helper for check 7 (issue #1643): return every tool name that does not
+ * resolve to a DEFINED export of the barrel. A key that is absent OR whose
+ * value is `undefined` counts as missing (`export { x } from './x'` on a
+ * module whose `x` binding is undefined must not pass as an export).
+ */
+export function findMissingBarrelExports(
+	toolNames: readonly string[],
+	barrel: Record<string, unknown>,
+): string[] {
+	return toolNames.filter(
+		(name) => !(name in barrel) || barrel[name] === undefined,
+	);
+}
+
+/**
  * Pure collector for tool-registration coherence violations. Returns the list
  * of human-readable error strings (empty when coherent). Exported so the CI
  * drift checker (scripts/drift-check.ts, issue #1497) can reuse the exact same
  * logic without triggering the CLI's `process.exit`.
  */
-export function collectToolRegistrationErrors(): string[] {
+export function collectToolRegistrationErrors(
+	options: ToolRegistrationCheckOptions = {},
+): string[] {
 	const errors: string[] = [];
 
 	const metaKeys = Object.keys(TOOL_METADATA);
@@ -169,6 +206,30 @@ export function collectToolRegistrationErrors(): string[] {
 		errors.push(
 			`Tool "${name}" is built via createSwarmTool() in src/tools/${path.basename(relPath)} but has no TOOL_METADATA entry. ` +
 				`Register it in src/tools/tool-metadata.ts, delete it, or add a /** @tool-opt-out <reason> */ JSDoc tag above its export const definition.`,
+		);
+	}
+
+	// 7) Barrel-export check (issue #1643): every TOOL_NAMES entry must
+	//    resolve to a DEFINED export of the src/tools/index.ts barrel.
+	//    Checks 1–6 validate metadata ⇔ manifest ⇔ plugin object ⇔
+	//    TOOL_NAMES ⇔ AGENT_TOOL_MAP plus the reverse source→metadata scan,
+	//    but none of them import the barrel — a surface still required by
+	//    wiring/registration tests (tests/unit/tools/wiring-adversarial.test.ts,
+	//    tests/unit/tools/check-gate-status-export.test.ts, and
+	//    tests/integration/declare-scope-registration.test.ts). The barrel is
+	//    loaded synchronously via createRequire (works under Bun for this ESM
+	//    barrel) and is injectable for the regression test, which hands the
+	//    collector a copy of the real barrel with one export deleted.
+	const barrel: Record<string, unknown> =
+		options.barrel ??
+		(createRequire(import.meta.url)('../src/tools/index') as Record<
+			string,
+			unknown
+		>);
+	for (const name of findMissingBarrelExports(TOOL_NAMES, barrel)) {
+		errors.push(
+			`Tool "${name}" has no defined export in the src/tools/index.ts barrel. ` +
+				`Add \`export { ${name} } from './<module>'\` (issue #1643: the barrel is still a required surface for wiring and registration tests).`,
 		);
 	}
 
@@ -329,20 +390,33 @@ function* walkTsFiles(dir: string): Generator<string> {
 	}
 }
 
-function main(): void {
-	const errors = collectToolRegistrationErrors();
+/**
+ * CLI body: run all checks and report, returning the process exit code
+ * (0 = coherent, 1 = violations). Separated from {@link main} so the
+ * exit-code and success-message contract is testable without spawning a
+ * child process.
+ */
+export function runToolRegistrationCli(
+	options: ToolRegistrationCheckOptions = {},
+): number {
+	const errors = collectToolRegistrationErrors(options);
 	if (errors.length > 0) {
 		console.error('Tool registration check FAILED:\n');
 		for (const e of errors) console.error(`  - ${e}`);
 		console.error(
 			`\n${errors.length} violation(s). Every tool needs a TOOL_METADATA entry (src/tools/tool-metadata.ts) and a handler (src/tools/manifest.ts).`,
 		);
-		process.exit(1);
+		return 1;
 	}
 
 	console.log(
-		`Tool registration check passed: ${Object.keys(TOOL_METADATA).length} tools, coherent across metadata, handlers, the plugin object, TOOL_NAMES, and AGENT_TOOL_MAP.`,
+		`Tool registration check passed: ${Object.keys(TOOL_METADATA).length} tools, coherent across metadata, handlers, the plugin object, TOOL_NAMES, AGENT_TOOL_MAP, and the src/tools/index.ts barrel.`,
 	);
+	return 0;
+}
+
+function main(): void {
+	process.exit(runToolRegistrationCli());
 }
 
 if (import.meta.main) {

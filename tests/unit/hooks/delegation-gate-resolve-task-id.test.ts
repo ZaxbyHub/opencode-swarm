@@ -21,9 +21,14 @@ const {
 	resolveDelegatedPlanTaskId,
 	describeCoderScopeFailure,
 	resolveEvidenceTaskId,
+	extractPlanTaskId,
 } = delegationGateInternals;
 
 const PLAN_TASK_IDS = new Set(['1.1', '1.2', '2.1']);
+const PLAN_TASK_ID_CONTEXT = {
+	status: 'available' as const,
+	taskIds: PLAN_TASK_IDS,
+};
 
 describe('resolveDelegatedPlanTaskId — issue #1914 Defect 1', () => {
 	describe('explicit task_id field handling', () => {
@@ -87,16 +92,14 @@ describe('resolveDelegatedPlanTaskId — issue #1914 Defect 1', () => {
 			).toBe('1.1');
 		});
 
-		test('plan-task-shaped-but-unknown explicit task_id is returned (membership gate is downstream)', () => {
-			// The resolver does NOT validate plan membership for explicit plan-task-shaped
-			// values — prepareCoderScope's membership gate handles that. This preserves
-			// PR #961's "explicit id takes precedence" intent for plan-task-shaped values.
+		test('plan-task-shaped-but-unknown explicit task_id fails closed before prompt fallback', () => {
+			// Unknown strict explicit IDs now fail closed before prompt fallback.
 			expect(
 				resolveDelegatedPlanTaskId(
 					{ task_id: '9.9', prompt: 'TASK: 1.1 — other' },
 					PLAN_TASK_IDS,
 				),
-			).toBe('9.9');
+			).toBeNull();
 		});
 
 		test('explicit plan-task-shaped value > 20 chars falls through (length guard)', () => {
@@ -179,11 +182,28 @@ describe('resolveDelegatedPlanTaskId — issue #1914 Defect 1', () => {
 	});
 });
 
+describe('extractPlanTaskId — transcript-only attribution safety', () => {
+	test('accepts an explicit task-line id', () => {
+		expect(extractPlanTaskId('TASK: 2.1 implement the feature')).toBe('2.1');
+	});
+
+	test('does not treat dotted prose or versions as a task id', () => {
+		expect(extractPlanTaskId('release v1.2.3 notes')).toBeNull();
+		expect(extractPlanTaskId('TASK: release v1.2.3 notes')).toBeNull();
+	});
+
+	test('accepts task-list ids without scanning unrelated prose', () => {
+		expect(
+			extractPlanTaskId('Related release v1.2.3\n- [ ] 3.4: update the docs'),
+		).toBe('3.4');
+	});
+});
+
 describe('describeCoderScopeFailure — issue #1914 Defect 2', () => {
 	test('ambiguity in TASK: line lists candidates and known ids', () => {
 		const msg = describeCoderScopeFailure(
 			{ prompt: 'TASK: port from 1.1 to 2.1' },
-			PLAN_TASK_IDS,
+			PLAN_TASK_ID_CONTEXT,
 		);
 		expect(msg).toContain('multiple candidate task ids found in TASK: line');
 		expect(msg).toContain('1.1');
@@ -194,7 +214,7 @@ describe('describeCoderScopeFailure — issue #1914 Defect 2', () => {
 	test('ambiguity in prompt text (no TASK: line) lists candidates', () => {
 		const msg = describeCoderScopeFailure(
 			{ description: 'Fix 1.1 and also 2.1' },
-			PLAN_TASK_IDS,
+			PLAN_TASK_ID_CONTEXT,
 		);
 		expect(msg).toContain('multiple candidate task ids found in prompt text');
 		expect(msg).toContain('1.1');
@@ -204,7 +224,7 @@ describe('describeCoderScopeFailure — issue #1914 Defect 2', () => {
 	test('no signal reports explicit-field shape, TASK: line detection, and known ids', () => {
 		const msg = describeCoderScopeFailure(
 			{ prompt: 'Just do some work' },
-			PLAN_TASK_IDS,
+			PLAN_TASK_ID_CONTEXT,
 		);
 		expect(msg).toContain('no plan task id could be resolved');
 		expect(msg).toContain('Explicit task_id field: absent');
@@ -215,7 +235,7 @@ describe('describeCoderScopeFailure — issue #1914 Defect 2', () => {
 	test('non-plan-shaped explicit field is reported with shape and fall-through note', () => {
 		const msg = describeCoderScopeFailure(
 			{ task_id: 'ses_abc123', prompt: 'Do work' },
-			PLAN_TASK_IDS,
+			PLAN_TASK_ID_CONTEXT,
 		);
 		expect(msg).toContain('non-plan-shaped');
 		expect(msg).toContain('falling through to text extraction');
@@ -225,7 +245,7 @@ describe('describeCoderScopeFailure — issue #1914 Defect 2', () => {
 	test('TASK: line detected but no plan id present reports detection status', () => {
 		const msg = describeCoderScopeFailure(
 			{ prompt: 'TASK: 9.9 — unknown task' },
-			PLAN_TASK_IDS,
+			PLAN_TASK_ID_CONTEXT,
 		);
 		// 9.9 is not in PLAN_TASK_IDS so it's filtered out → no candidates →
 		// falls to the "no signal" branch, but TASK: line detection is still yes.
@@ -237,7 +257,7 @@ describe('describeCoderScopeFailure — issue #1914 Defect 2', () => {
 		const longValue = `ses_${'a'.repeat(60)}`;
 		const msg = describeCoderScopeFailure(
 			{ task_id: longValue, prompt: 'Do work' },
-			PLAN_TASK_IDS,
+			PLAN_TASK_ID_CONTEXT,
 		);
 		// .slice(0, 40) caps the rendered value.
 		expect(msg).toContain('ses_');
@@ -248,9 +268,27 @@ describe('describeCoderScopeFailure — issue #1914 Defect 2', () => {
 	test('empty known-plan-ids set renders (none)', () => {
 		const msg = describeCoderScopeFailure(
 			{ prompt: 'Do work' },
-			new Set<string>(),
+			{ status: 'available', taskIds: new Set<string>() },
 		);
 		expect(msg).toContain('Known plan task ids: (none)');
+	});
+
+	test('unknown strict explicit task_id reports fail-closed before prompt fallback', () => {
+		const msg = describeCoderScopeFailure(
+			{ task_id: '9.9', prompt: 'TASK: 1.1 — other' },
+			PLAN_TASK_ID_CONTEXT,
+		);
+		expect(msg).toContain('fails closed before prompt fallback');
+		expect(msg).toContain('9.9');
+	});
+
+	test('over-limit plan context reports bounded fail-closed diagnostic', () => {
+		const msg = describeCoderScopeFailure(
+			{ prompt: 'TASK: 1.1 — other' },
+			{ status: 'over_limit' },
+		);
+		expect(msg).toContain('shared bounded limit');
+		expect(msg).toContain('fails closed instead of guessing');
 	});
 });
 

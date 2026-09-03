@@ -1,5 +1,28 @@
 # Changelog
 
+## [7.164.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.3...v7.164.4) (2026-09-03)
+
+
+### Bug Fixes
+
+* **plan-critic:** one baseline hash definition ends spurious BASELINE DRIFT ([4c5efdc](https://github.com/ZaxbyHub/opencode-swarm/commit/4c5efdcd06bfddfac109c980cdcb9e0de1be3e6e))
+* **plan-critic:** one baseline hash definition ends spurious BASELINE DRIFT ([#2523](https://github.com/ZaxbyHub/opencode-swarm/issues/2523)) ([8aed01c](https://github.com/ZaxbyHub/opencode-swarm/commit/8aed01ca52ede37b64cf0699dcf4f9f91ccb480b))
+
+## [7.164.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.2...v7.164.3) (2026-09-02)
+
+
+### Bug Fixes
+
+* Rewrite AGENTS.md invariant 11 (tool registration) to match the compile-enforced manifest, close the barrel-export gap ([#1643](https://github.com/ZaxbyHub/opencode-swarm/issues/1643)) ([c02ef58](https://github.com/ZaxbyHub/opencode-swarm/commit/c02ef58e886f7c141d7c7cc503eb3ee9b9306f16))
+
+## [7.164.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.1...v7.164.2) (2026-09-02)
+
+
+### Bug Fixes
+
+* **task-id:** preserve explicit attribution without plan context ([81d2524](https://github.com/ZaxbyHub/opencode-swarm/commit/81d25243b801832446ba656f9cf35a4f4cb2c833))
+* **workflow:** wire graph-first task attribution ([d5faff0](https://github.com/ZaxbyHub/opencode-swarm/commit/d5faff0c864a1c504d1c75d9b37e211f7f623207))
+
 ## [7.164.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.0...v7.164.1) (2026-09-02)
 
 

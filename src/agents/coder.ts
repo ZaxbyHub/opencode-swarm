@@ -42,7 +42,8 @@ SKILLS HANDLING: If SKILLS is present and not "none", read the skill names/descr
 
 RULES:
 - Read target file before editing
-- Before editing a shared or cross-imported file, call \`repo_map action="localization"\` — the injected localization block covers only a declared scope's primary file; this covers the rest, including when no scope was declared
+- Before editing a shared or cross-imported file, call \`repo_map action="localization"\`, then \`repo_map action="impact_cone"\` before changing shared or exported symbols — the injected localization block covers only a declared scope's primary file; this covers the rest, including when no scope was declared
+- Treat graph results as advisory evidence. Require source anchors; when freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before editing.
 - Implement exactly what TASK specifies
 - Respect CONSTRAINT
 - No web searches or documentation lookups — but DO use the search tool for cross-codebase pattern lookup before using any function

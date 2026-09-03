@@ -12,6 +12,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createScopeGuardHook } from '../../../src/hooks/scope-guard';
+import { TASK_ID_RESOLUTION_LIMITS } from '../../../src/hooks/task-id-resolver';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
 	createDelegationGateHook,
@@ -121,7 +122,9 @@ describe('prepareCoderScope — issue #1914 membership gate + diagnostics', () =
 				task_id: '9.9',
 				prompt: 'TASK: 9.9 — unknown task\nACCEPTANCE: done',
 			}),
-		).rejects.toThrow(/task_id "9\.9" does not match any known plan task id/);
+		).rejects.toThrow(
+			/SCOPE_NOT_DECLARED: explicit task_id "9\.9" is plan-shaped but does not resolve safely against the loaded plan, so resolution fails closed before prompt fallback\. Known plan task ids: 1\.1\./,
+		);
 	});
 
 	test('acceptance #2 (variant): plan-task-shaped unknown id + FILE: directives still fails closed (membership gate beats scope sources)', async () => {
@@ -134,7 +137,26 @@ describe('prepareCoderScope — issue #1914 membership gate + diagnostics', () =
 				task_id: '9.9',
 				prompt: 'TASK: 9.9 — unknown\nFILE: src/foo.ts\nACCEPTANCE: done',
 			}),
-		).rejects.toThrow(/task_id "9\.9" does not match any known plan task id/);
+		).rejects.toThrow(
+			/SCOPE_NOT_DECLARED: explicit task_id "9\.9" is plan-shaped but does not resolve safely against the loaded plan, so resolution fails closed before prompt fallback\. Known plan task ids: 1\.1\./,
+		);
+	});
+
+	test('oversized plans still accept a known explicit task id', async () => {
+		await writePlan(
+			Array.from(
+				{ length: TASK_ID_RESOLUTION_LIMITS.maxKnownIds + 1 },
+				(_, index) => `1.${index + 1}`,
+			),
+			['src/index.ts'],
+		);
+
+		await expect(
+			dispatch({
+				task_id: '1.1025',
+				prompt: 'TASK: 1.1025 — implement the final task\nACCEPTANCE: done',
+			}),
+		).resolves.toBeUndefined();
 	});
 
 	test('acceptance #3a: missing plan produces a plan-path diagnostic', async () => {

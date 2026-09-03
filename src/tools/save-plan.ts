@@ -26,7 +26,7 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { writeCheckpoint } from '../plan/checkpoint';
 import {
 	appendLedgerEvent,
-	computePlanHash,
+	computePlanLedgerHash,
 	readLedgerEvents,
 	takeSnapshotWithRetry,
 } from '../plan/ledger';
@@ -1301,7 +1301,7 @@ export async function executeSavePlan(
 			// is appended once when the profile transitions to locked state.
 			if (resolvedProfile !== undefined && savedPlan) {
 				const planId = derivePlanId(plan);
-				const planHashAfter = computePlanHash(savedPlan);
+				const planHashAfter = computePlanLedgerHash(savedPlan);
 				const profileChanged =
 					JSON.stringify(resolvedProfile) !==
 					JSON.stringify(preservedExecutionProfile);

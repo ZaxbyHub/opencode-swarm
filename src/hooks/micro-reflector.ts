@@ -37,7 +37,12 @@ import {
 	validateActionability,
 	validateActionableFields,
 } from './knowledge-validator.js';
+import {
+	loadPlanTaskIdContext,
+	toTaskIdPlanContextOptions,
+} from './plan-task-id-context.js';
 import { parseDelegationArgs } from './skill-propagation-gate.js';
+import { resolveTaskId } from './task-id-resolver.js';
 import type { TrajectoryEntry } from './trajectory-logger.js';
 import { validateSwarmPath } from './utils.js';
 
@@ -543,9 +548,17 @@ export async function runMicroReflection(params: {
 }
 
 /** Best-effort task id from a delegation prompt envelope. */
-function extractTaskId(prompt: string): string | undefined {
-	const m = /\btask[_-]?id\s*[:=]\s*([A-Za-z0-9._-]{1,80})/i.exec(prompt);
-	return m ? m[1] : undefined;
+function extractTaskId(
+	args: Record<string, unknown>,
+	knownPlanTaskIds?: ReadonlySet<string>,
+	planContextOverLimit = false,
+): string | undefined {
+	const resolved = resolveTaskId(args, {
+		policy: 'attribution',
+		knownPlanTaskIds,
+		planContextOverLimit,
+	});
+	return resolved.status === 'resolved' ? resolved.taskId : undefined;
 }
 
 export interface MicroReflectorInput {
@@ -608,7 +621,14 @@ export async function microReflectorAfter(
 			: '';
 	const parsed = parseDelegationArgs(argsForParse);
 	const agent = parsed ? stripKnownSwarmPrefix(parsed.targetAgent) : 'unknown';
-	const taskId = extractTaskId(prompt);
+	const planTaskIdOptions = toTaskIdPlanContextOptions(
+		await loadPlanTaskIdContext(directory),
+	);
+	const taskId = extractTaskId(
+		argsRecord ?? { prompt },
+		planTaskIdOptions.knownPlanTaskIds,
+		planTaskIdOptions.planContextOverLimit,
+	);
 	const trajectory = taskId ? await readTaskTrajectory(directory, taskId) : [];
 	await runMicroReflection({
 		directory,

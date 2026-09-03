@@ -12,6 +12,10 @@ description: >
 
 Read-only deep audit of a specified codebase scope using parallel explorer waves, always 2 parallel reviewers, and sequential critic challenge. This mode does NOT mutate source code, does NOT delegate to coder, and does NOT call declare_scope.
 
+## Graph-first evidence contract
+
+Use `repo_map` `graph_health` and boundary discovery before a targeted source-bearing `context_pack`; existing `ask`, `key_files`, and `localization` remain discovery inputs. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before reporting a finding.
+
 ### MODE: DEEP_DIVE
 
 ## Step 0 — Parse Header

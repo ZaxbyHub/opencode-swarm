@@ -9,6 +9,10 @@ description: >
 
 This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
+## Graph-first evidence contract
+
+Before planning, call `repo_map` with `graph_health`, then `package_boundaries` and `key_files`, followed by a targeted source-bearing `context_pack`. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before committing the plan.
+
 ### MODE: PLAN
 
 PLANNING PROFILE (authoritative): obey the runtime-injected `[PLANNING PROFILE

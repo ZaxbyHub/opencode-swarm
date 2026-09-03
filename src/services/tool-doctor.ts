@@ -5,12 +5,13 @@
  *
  * As of #507, registration is DERIVED from the single registration-data source
  * (tool-metadata) and the handler set is compile-time-guaranteed to match it
- * (`manifest.ts satisfies Record<ToolName, () => ToolDefinition>`), so the set of
+ * (`manifest.ts` registers handlers via a `defineHandlers<T extends
+ * Record<ToolName, () => ToolDefinition>>` generic constraint), so the set of
  * registered tools is exactly TOOL_NAME_SET. This service therefore validates
  * against TOOL_NAME_SET (handler-free) rather than importing the handler-bearing
  * manifest — that keeps tool-doctor (and the `../services` barrel that re-exports
  * it) out of the tool-module import graph, avoiding init cycles (#507 CI finding).
- * The handler-level coherence is enforced by the compile-time `satisfies` plus the
+ * The handler-level coherence is enforced by that compile-time constraint plus the
  * standalone CI script `scripts/check-tool-registration.ts`.
  *
  * Also validates:

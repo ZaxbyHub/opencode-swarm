@@ -25,7 +25,7 @@ import { PlanSchema } from '../../../src/config/plan-schema';
 import { computeCouncilReviewIdentity } from '../../../src/council/council-review-identity';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
-import { computePlanHash } from '../../../src/plan/ledger';
+import { computePlanLedgerHash } from '../../../src/plan/ledger';
 import { derivePlanIdentityHash } from '../../../src/plan/utils';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
@@ -171,7 +171,7 @@ function writeFinalCouncilEvidence(options: {
 					plan_id: PLAN_ID,
 					...(options.omitPlanHash
 						? {}
-						: { plan_hash: options.planHash ?? computePlanHash(plan) }),
+						: { plan_hash: options.planHash ?? computePlanLedgerHash(plan) }),
 					...(options.omitPlanIdentityHash
 						? {}
 						: {
@@ -538,7 +538,7 @@ describe('final_council gate (Gate 6)', () => {
 							type: 'final-council',
 							timestamp: staleTimestamp,
 							plan_id: PLAN_ID,
-							plan_hash: computePlanHash(
+							plan_hash: computePlanLedgerHash(
 								PlanSchema.parse(
 									JSON.parse(
 										readFileSync(join(tempDir, '.swarm', 'plan.json'), 'utf-8'),
@@ -744,7 +744,7 @@ describe('final_council gate (Gate 6)', () => {
 							type: 'final-council',
 							// No `timestamp` field — triggers FINAL_COUNCIL_TIMESTAMP_REQUIRED
 							plan_id: PLAN_ID,
-							plan_hash: computePlanHash(plan),
+							plan_hash: computePlanLedgerHash(plan),
 							plan_identity_hash: derivePlanIdentityHash(plan),
 							verdict: 'approved',
 							summary: 'Evidence without timestamp',

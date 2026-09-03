@@ -142,6 +142,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'ast_grep',
 				'actionlint_scan',
 				'osv_scan',
+				'repo_map',
 				'knowledge_receipt',
 				'swarm_command',
 				'summarize_work',

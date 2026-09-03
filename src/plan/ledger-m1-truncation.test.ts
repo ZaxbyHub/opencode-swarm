@@ -139,7 +139,7 @@ describe('M1: loadPlan does not silently roll back plan.json on a truncated ledg
 			schema_version: '1.1.0',
 		};
 		// A durable post-poison event whose plan_hash_after is a sentinel that will
-		// never equal computePlanHash(plan.json), forcing the mismatch branch.
+		// never equal computePlanLedgerHash(plan.json), forcing the mismatch branch.
 		const toCompleted: LedgerEvent = {
 			seq: 4,
 			timestamp: '2026-01-01T00:00:03.000Z',
