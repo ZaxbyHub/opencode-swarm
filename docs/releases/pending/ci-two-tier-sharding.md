@@ -13,7 +13,7 @@ The CI pipeline (`ci.yml`) was restructured to reduce PR feedback time from ~40 
 ## Why
 
 1. **Cascading CI restarts:** When one PR merges, branch updates cascade to all open PRs, each restarting a 40+ min CI run. Enabling the merge queue (see below) stops the cascades entirely.
-2. **CI duration:** The critical path through quality → unit (3-OS matrix, 140+ sequential files) → integration → smoke was 40+ minutes. Sharding and the two-tier split bring PR feedback to ~12 minutes.
+2. **CI duration:** The critical path through quality → unit (3-OS matrix, 140+ sequential files) → integration → smoke was 40+ minutes. Sharding and the two-tier split bring PR feedback to ~12 minutes. (That unit-matrix serialisation of `integration` and `smoke` was later removed — see the merge-queue critical-path change, PR #2551.)
 
 ## Migration steps (admin required)
 

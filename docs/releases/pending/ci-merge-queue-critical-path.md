@@ -1,4 +1,4 @@
-### CI: integration and smoke no longer wait behind the unit matrix
+# CI: integration and smoke no longer wait behind the unit matrix
 
 In merge-group runs the `integration` and `smoke` jobs were sequenced after
 the 18-cell `unit` matrix even though they check out, install and run from
