@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
-	computePlanHash,
+	computePlanLedgerHash,
 	computePlanStructureHash,
 	initLedger,
 	takeSnapshotEvent,
@@ -79,7 +79,7 @@ describe('plan critic hash compatibility — regression: default-false field (cr
 		await initLedger(
 			dir,
 			derivePlanId(legacyPlan),
-			computePlanHash(legacyPlan),
+			computePlanLedgerHash(legacyPlan),
 			legacyPlan,
 		);
 		await takeSnapshotEvent(dir, legacyPlan, {

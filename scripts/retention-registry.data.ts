@@ -1536,12 +1536,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/plan/ledger.ts'],
 		writerCitations: [
-			'src/plan/ledger.ts:651 initLedger / :925 appendLedgerEvent — writeFileFsyncedThenRename (:352-365) under LEDGER_LOCK (:942)',
-			'src/plan/ledger.ts:1179 takeSnapshotEvent (every 50 events, manager.ts:1762); :1237 replaceTruncatedLedgerWithRecoveryRoot (corruption recovery ONLY, original archived :1282-1364)',
+			'src/plan/ledger.ts:675 initLedger / :949 appendLedgerEvent — writeFileFsyncedThenRename (:352-365) under LEDGER_LOCK (:966)',
+			'src/plan/ledger.ts:1206 takeSnapshotEvent (every 50 events, manager.ts:1762); :1268 replaceTruncatedLedgerWithRecoveryRoot (corruption recovery ONLY, original archived :1313-1395)',
 		],
 		readerCitations: [
-			'src/plan/ledger.ts:604 readLedgerEvents / :1725 readLedgerEventsWithIntegrity — FULL-FILE replay with torn-tail quarantine (:1818-1886), sync',
-			'src/plan/ledger.ts:562 getLatestLedgerSeq / :1928 loadLastApprovedPlan — full scans',
+			'src/plan/ledger.ts:628 readLedgerEvents / :1756 readLedgerEventsWithIntegrity — FULL-FILE replay with torn-tail quarantine (:1849-1917), sync',
+			'src/plan/ledger.ts:586 getLatestLedgerSeq / :1959 loadLastApprovedPlan — full scans',
 		],
 		schemaVersion: 'versioned plan events (docs/plan-durability.md)',
 		stateClass: 'authoritative',
@@ -1549,10 +1549,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'append-only by contract — NO cap, NO sampling, NO truncation (verified: only corruption-recovery replaces, archiving the original); archived identity-mismatch siblings swept to ≤5 (MAX_ARCHIVED_SIBLINGS manager.ts:1467)',
 			scope: 'global',
-			citation: 'docs/plan-durability.md; src/plan/ledger.ts:925,1237; src/plan/manager.ts:1467-1491',
+			citation: 'docs/plan-durability.md; src/plan/ledger.ts:949,1268; src/plan/manager.ts:1467-1491',
 		},
-		readBound: { pattern: 'full-file', bound: 'authoritative-lifecycle rationale: the ledger IS the plan authority (invariant 5); replay is the correctness path, close archives + removes terminal state', sync: true, citation: 'src/plan/ledger.ts:1725-1886; close.ts:1893-1910' },
-		lockModel: 'withEvidenceLock on the ledger path + optimistic CAS retry (appendLedgerEventWithRetry :1068-1109)',
+		readBound: { pattern: 'full-file', bound: 'authoritative-lifecycle rationale: the ledger IS the plan authority (invariant 5); replay is the correctness path, close archives + removes terminal state', sync: true, citation: 'src/plan/ledger.ts:1756-1917; close.ts:1893-1910' },
+		lockModel: 'withEvidenceLock on the ledger path + optimistic CAS retry (appendLedgerEventWithRetry :1092-1133)',
 		crashBehavior: 'fsync-then-rename append; torn tail quarantined to a side file, prefix-only projection refused (M1 fix)',
 		closePolicy: 'archived + terminal-state REMOVED unconditionally so a closed plan cannot resurrect (close.ts:1893-1910); ledger siblings removed (close.ts:1775-1795)',
 		closeArrayMembership: {

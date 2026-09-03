@@ -221,6 +221,17 @@ Every **50 ledger events** and on `phase_complete`, a `snapshot` event is append
 
 Snapshot events embed the full Plan payload and its `payload_hash`. During `loadPlan()`, `replayFromLedger()` scans for the latest snapshot event and uses it as the base state, then replays only events after that snapshot. This avoids replaying the entire ledger on every load.
 
+### Plan hash definitions — one baseline hash (issue #2523)
+
+Exactly two SHA-256 plan digests exist in `src/plan/ledger.ts`, with distinct roles and non-overlapping names:
+
+| Function | Status fields | Role |
+|----------|---------------|------|
+| `computePlanStructureHash` | **Excluded** | THE approval-baseline hash. A `source: 'critic_approved'` snapshot's `payload_hash` is always this hash (enforced at the `takeSnapshotEvent` write choke point), and `get_approved_plan` compares it against a fresh derivation to compute `drift_detected`. Task/phase status is excluded because the baseline detects *plan edits*, not execution progress — a status-only change must never report drift, and any structural change always must. |
+| `computePlanLedgerHash` | Included | The ledger hash-chain digest (`plan_hash_after`, plan-epoch identity, snapshot integrity, staleness detection). Pins the exact persisted state including execution progress; its byte output is persisted on-disk and must never change. Renamed from the old generic name in #2523; never use it for drift baselines. |
+
+Plan-identity hashing (`derivePlanIdentityHash`) is a third, unrelated axis (swarm/title identity, not content). `computeCurrentPlanHash` is a reader helper returning the LEDGER digest of the current on-disk `plan.json`.
+
 ## Snapshot Retry (FR-004)
 
 Snapshot writes (triggered every 50 ledger events and on `phase_complete`) use a bounded retry helper in both `save-plan.ts` and `manager.ts`:
@@ -389,7 +400,7 @@ once pre-check succeeds.
 
 ### Hash coverage — deliberately EXCLUDED
 
-Unlike `execution_profile` (which IS included in `computePlanHash`), `fr_refs` is **deliberately excluded** from `computePlanHash`, `computePlanStructureHash` (`src/plan/ledger.ts`), and `computePlanContentHash` (`src/plan/manager.ts`). All three hash functions build an explicit, named field list and do not reference `fr_refs`; each site carries a one-line code comment recording this exclusion so a future reader doesn't "fix" the omission. This means editing a task's `fr_refs` after critic approval does not change the plan's structural hash and does not re-trip `assertPlanCriticApprovedForExecution` — an intentional consequence of treating `fr_refs` as additive metadata, not structural plan content.
+Unlike `execution_profile` (which IS included in `computePlanLedgerHash`), `fr_refs` is **deliberately excluded** from `computePlanLedgerHash`, `computePlanStructureHash` (`src/plan/ledger.ts`), and `computePlanContentHash` (`src/plan/manager.ts`). All three hash functions build an explicit, named field list and do not reference `fr_refs`; each site carries a one-line code comment recording this exclusion so a future reader doesn't "fix" the omission. This means editing a task's `fr_refs` after critic approval does not change the plan's structural hash and does not re-trip `assertPlanCriticApprovedForExecution` — an intentional consequence of treating `fr_refs` as additive metadata, not structural plan content.
 
 ### Round-trip surfaces
 
@@ -399,7 +410,7 @@ Unlike `execution_profile` (which IS included in `computePlanHash`), `fr_refs` i
 | Ledger replay / snapshot embed | ✅ Rides the existing generic whole-`Plan`-object embed — no field-by-field wiring needed |
 | `checkpoint.ts` import/export | ✅ Passes through generically via `PlanSchema.parse` |
 | `get_approved_plan` tool | ✅ Passes through generically (`plan: unknown` payload) |
-| `computePlanHash` / `computePlanStructureHash` / `computePlanContentHash` | ❌ Deliberately excluded (see above) |
+| `computePlanLedgerHash` / `computePlanStructureHash` / `computePlanContentHash` | ❌ Deliberately excluded (see above) |
 | `migrateLegacyPlan` | Not applicable — legacy markdown plans predate this field |
 
 ## Scope Materialization at Worktree Paths (FR-102)

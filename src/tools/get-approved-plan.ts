@@ -24,7 +24,7 @@ import {
 } from '../db/qa-gate-profile.js';
 import {
 	type ApprovedSnapshotInfo,
-	computePlanHash,
+	computePlanStructureHash,
 	loadLastApprovedPlan,
 } from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
@@ -229,8 +229,12 @@ export async function executeGetApprovedPlan(
 		execution_profile: approved.plan.execution_profile ?? null,
 	};
 
-	// Step 6: Compare against current plan
-	const currentHash = computePlanHash(currentPlan);
+	// Step 6: Compare against current plan using the SAME hash definition the
+	// approval snapshot stored (issue #2523): `critic_approved` snapshots persist
+	// `computePlanStructureHash` (status-excluded), so the comparison must also
+	// be status-excluded. Task/phase status changes are execution progress, not
+	// plan edits, and must never report drift; any structural change must.
+	const currentHash = computePlanStructureHash(currentPlan);
 	const driftDetected = currentHash !== approved.payloadHash;
 
 	const currentPayload: CurrentPlanPayload = {

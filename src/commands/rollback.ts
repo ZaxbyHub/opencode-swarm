@@ -4,7 +4,11 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import { type Plan, PlanSchema } from '../config/plan-schema';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { validateSwarmPath } from '../hooks/utils';
-import { appendLedgerEvent, computePlanHash, initLedger } from '../plan/ledger';
+import {
+	appendLedgerEvent,
+	computePlanLedgerHash,
+	initLedger,
+} from '../plan/ledger';
 import { derivePlanId } from '../plan/utils.js';
 import { checkpoint as checkpointTool } from '../tools/checkpoint.js';
 import type { ToolResult } from '../tools/create-tool';
@@ -333,7 +337,7 @@ export async function handleRollbackCommand(
 				const plan = PlanSchema.parse(JSON.parse(planRaw) as Plan);
 				const planId = derivePlanId(plan);
 
-				const planHash = computePlanHash(plan);
+				const planHash = computePlanLedgerHash(plan);
 				await initLedger(directory, planId, planHash, plan);
 
 				await appendLedgerEvent(directory, {

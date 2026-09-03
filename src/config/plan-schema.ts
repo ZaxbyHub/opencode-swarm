@@ -84,7 +84,7 @@ export const TaskSchema = z.object({
 	// Spec FR-###/SC-### IDs this task maps to (issue #1687, FR-000/SC-000).
 	// Deliberately `.optional()` (NOT `.default([])`): must serialize to
 	// `undefined` (omitted by JSON.stringify) for tasks that don't set it, so
-	// computePlanHash/computePlanStructureHash/computePlanContentHash stay
+	// computePlanLedgerHash/computePlanStructureHash/computePlanContentHash stay
 	// byte-identical for every existing persisted plan predating this field.
 	fr_refs: z.array(z.string()).optional(),
 });
@@ -135,7 +135,7 @@ export type Plan = z.infer<typeof PlanSchema>;
  * `PlanSchema` (see this file ~line 95 — a plain `z.object`, no `.passthrough()`,
  * so Zod strips unknown keys), so `savePlan`'s `JSON.stringify(PlanSchema.parse(...))`
  * can never write these to .swarm/plan.json. It is also excluded from plan hashing:
- * both `computePlanHash` (src/plan/ledger.ts) and `computePlanContentHash`
+ * both `computePlanLedgerHash` (src/plan/ledger.ts) and `computePlanContentHash`
  * (src/plan/manager.ts) hash an explicit allow-list of fields, never the whole
  * object. Because of this, AGENTS.md invariant-5's "six places" (ledger replay,
  * projection, checkpoint import/export, get_approved_plan, tests, docs) do NOT

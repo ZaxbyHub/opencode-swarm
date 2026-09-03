@@ -109,7 +109,7 @@ describe('savePlan write-marker in_progress', () => {
 			ledgerExists: mock(async () => false),
 			initLedger: mock(async () => {}),
 			appendLedgerEvent: mock(async () => ({})),
-			computePlanHash: mock(() => 'hash'),
+			computePlanLedgerHash: mock(() => 'hash'),
 			computeCurrentPlanHash: mock(() => 'hash'),
 			readLedgerEvents: mock(async () => []),
 			getLatestLedgerSeq: mock(async () => 0),
@@ -162,7 +162,7 @@ describe('savePlan write-marker in_progress', () => {
 			ledgerExists: mock(async () => false),
 			initLedger: mock(async () => {}),
 			appendLedgerEvent: mock(async () => ({})),
-			computePlanHash: mock(() => 'hash'),
+			computePlanLedgerHash: mock(() => 'hash'),
 			computeCurrentPlanHash: mock(() => 'hash'),
 			readLedgerEvents: mock(async () => []),
 			getLatestLedgerSeq: mock(async () => 0),
@@ -224,7 +224,7 @@ describe('rebuildPlan write-marker in_progress', () => {
 		mock.module('../../../src/plan/ledger', () => ({
 			replayFromLedger: mock(async () => testPlan),
 			appendLedgerEvent: mock(async () => ({})),
-			computePlanHash: mock(() => 'hash'),
+			computePlanLedgerHash: mock(() => 'hash'),
 			takeSnapshotEvent: mock(async () => {}),
 		}));
 
@@ -263,7 +263,7 @@ describe('rebuildPlan write-marker in_progress', () => {
 
 		mock.module('../../../src/plan/ledger', () => ({
 			appendLedgerEvent: mock(async () => ({})),
-			computePlanHash: mock(() => 'hash'),
+			computePlanLedgerHash: mock(() => 'hash'),
 			takeSnapshotEvent: mock(async () => {}),
 		}));
 

@@ -23,7 +23,7 @@ import {
 	getOrCreateProfileForIdentity,
 } from '../../../src/db/qa-gate-profile';
 import {
-	computePlanHash,
+	computePlanStructureHash,
 	initLedger,
 	takeSnapshotEvent,
 } from '../../../src/plan/ledger';
@@ -151,7 +151,12 @@ describe('get_approved_plan tool', () => {
 		expect(result.approved_plan!.approval_metadata).toEqual(approvalMeta);
 		expect(result.approved_plan!.snapshot_seq).toBeGreaterThan(0);
 		expect(result.approved_plan!.snapshot_timestamp).toBeTruthy();
-		expect(result.approved_plan!.payload_hash).toBe(computePlanHash(plan));
+		// critic_approved snapshots persist the status-excluded structure hash
+		// as payload_hash (issue #2523), even without an explicit override —
+		// enforced by the takeSnapshotEvent write choke point.
+		expect(result.approved_plan!.payload_hash).toBe(
+			computePlanStructureHash(plan),
+		);
 		expect(result.approved_plan!.execution_profile).toEqual(
 			plan.execution_profile,
 		);

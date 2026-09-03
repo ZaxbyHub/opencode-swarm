@@ -27,7 +27,7 @@ import { join } from 'node:path';
 import type { Plan } from '../../src/config/plan-schema';
 import {
 	appendLedgerEvent,
-	computePlanHash,
+	computePlanLedgerHash,
 	initLedger,
 	takeSnapshotEvent,
 } from '../../src/plan/ledger';
@@ -102,7 +102,7 @@ describe('loadPlan: critic-approved snapshot recovery (Step 4b)', () => {
 			JSON.stringify(approvedPlan, null, 2),
 			'utf-8',
 		);
-		await initLedger(tempDir, planId, computePlanHash(approvedPlan));
+		await initLedger(tempDir, planId, computePlanLedgerHash(approvedPlan));
 
 		// 2. Persist a critic_approved snapshot. This is the state we expect
 		//    loadPlan to recover later.
@@ -175,7 +175,7 @@ describe('loadPlan: critic-approved snapshot recovery (Step 4b)', () => {
 			JSON.stringify(plan, null, 2),
 			'utf-8',
 		);
-		await initLedger(tempDir, planId, computePlanHash(plan));
+		await initLedger(tempDir, planId, computePlanLedgerHash(plan));
 
 		// Only a non-approved snapshot + plan_reset — no approved snapshot to
 		// recover from. This confirms Step 4b doesn't return a bogus value.
@@ -211,7 +211,7 @@ describe('loadPlan: critic-approved snapshot recovery (Step 4b)', () => {
 			JSON.stringify(ownPlan, null, 2),
 			'utf-8',
 		);
-		await initLedger(tempDir, ownPlanId, computePlanHash(ownPlan));
+		await initLedger(tempDir, ownPlanId, computePlanLedgerHash(ownPlan));
 
 		// Now inject a foreign critic_approved snapshot. takeSnapshotEvent
 		// derives plan_id from the plan payload, so this event's plan_id will
@@ -265,7 +265,7 @@ describe('loadPlan: critic-approved snapshot recovery (Step 4b)', () => {
 			JSON.stringify(approvedPlan, null, 2),
 			'utf-8',
 		);
-		await initLedger(tempDir, planId, computePlanHash(approvedPlan));
+		await initLedger(tempDir, planId, computePlanLedgerHash(approvedPlan));
 		await takeSnapshotEvent(tempDir, approvedPlan, {
 			source: 'critic_approved',
 			approvalMetadata: { phase: 1, verdict: 'APPROVED' },

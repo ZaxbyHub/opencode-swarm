@@ -43,10 +43,10 @@ planning system identified by a comprehensive planning-system audit.
 ### Documentation (F-06, F-11, F-12)
 
 - Added JSDoc to `computePlanContentHash` explaining the difference from
-  `computePlanHash` (Bun.hash vs SHA-256, plan.md drift vs plan state integrity)
+  `computePlanLedgerHash` (Bun.hash vs SHA-256, plan.md drift vs plan state integrity)
 - Added comment to `isPlanMdInSync` documenting the fuzzy substring fallback
   rationale and future cleanup intent
-- Added JSDoc to `computePlanHash` explaining the intentional exclusion of
+- Added JSDoc to `computePlanLedgerHash` explaining the intentional exclusion of
   `specMtime` and `specHash` fields
 
 ## Migration notes

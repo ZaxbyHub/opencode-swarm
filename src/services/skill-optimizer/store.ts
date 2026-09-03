@@ -456,7 +456,7 @@ export function replayCandidate(
  * Quarantine a corrupt ledger suffix. Writes the bad suffix to a unique side
  * file under `.swarm/evolution/skills/`. NEVER rewrites or truncates the
  * canonical `lifecycle.jsonl`. Mirrors `quarantineLedgerSuffix` in
- * `src/plan/ledger.ts:1188`.
+ * `src/plan/ledger.ts:1849`.
  */
 export function quarantineSuffix(
 	directory: string,

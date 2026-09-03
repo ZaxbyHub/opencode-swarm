@@ -5,7 +5,7 @@ import type { Plan } from '../../src/config/plan-schema';
 import {
 	appendLedgerEvent,
 	computeCurrentPlanHash,
-	computePlanHash,
+	computePlanLedgerHash,
 	getLatestLedgerSeq,
 	initLedger,
 	LEDGER_SCHEMA_VERSION,
@@ -35,7 +35,7 @@ describe('ledger', () => {
 		cleanupTestDir();
 	});
 
-	describe('computePlanHash', () => {
+	describe('computePlanLedgerHash', () => {
 		test('is deterministic - same plan produces same hash', () => {
 			const plan: Plan = {
 				schema_version: '1.0.0',
@@ -62,8 +62,8 @@ describe('ledger', () => {
 				],
 			};
 
-			const hash1 = computePlanHash(plan);
-			const hash2 = computePlanHash(plan);
+			const hash1 = computePlanLedgerHash(plan);
+			const hash2 = computePlanLedgerHash(plan);
 
 			expect(hash1).toBe(hash2);
 			expect(hash1).toHaveLength(64); // SHA-256 hex is 64 chars
@@ -89,8 +89,8 @@ describe('ledger', () => {
 				title: 'Different Plan',
 			};
 
-			const hash1 = computePlanHash(plan1);
-			const hash2 = computePlanHash(plan2);
+			const hash1 = computePlanLedgerHash(plan1);
+			const hash2 = computePlanLedgerHash(plan2);
 
 			expect(hash1).not.toBe(hash2);
 		});
@@ -896,7 +896,7 @@ describe('ledger', () => {
 			// Verify the payload structure
 			const payload = snapshotEvent.payload as unknown as SnapshotEventPayload;
 			expect(payload.plan).toEqual(initialPlan);
-			expect(payload.payload_hash).toBe(computePlanHash(initialPlan));
+			expect(payload.payload_hash).toBe(computePlanLedgerHash(initialPlan));
 
 			// Verify the event is in the ledger
 			const events = await readLedgerEvents(testDir);
@@ -1024,7 +1024,7 @@ describe('ledger', () => {
 			// to simulate the scenario where neither plan.json, snapshot event, nor
 			// embedded plan is available (pre-#444 legacy ledger format).
 			const ledgerPath = path.join(swarmDir, 'plan-ledger.jsonl');
-			const planHash = computePlanHash(plan);
+			const planHash = computePlanLedgerHash(plan);
 			const legacyEvent = {
 				seq: 1,
 				timestamp: new Date().toISOString(),
