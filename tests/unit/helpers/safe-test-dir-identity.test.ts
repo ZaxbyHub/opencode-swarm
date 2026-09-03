@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import { _internals, createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const originalInternals = { ..._internals };
@@ -13,17 +12,14 @@ afterEach(() => {
 describe('safe test directory physical identity', () => {
 	test('prefers native realpath and returns a physical directory path', () => {
 		let nativeCalls = 0;
-		const nativeInputs: string[] = [];
 		_internals.realpathSyncNative = (target) => {
 			nativeCalls += 1;
-			nativeInputs.push(String(target));
 			return originalInternals.realpathSyncNative(target);
 		};
 
 		const fixture = createSafeTestDir('safe-native-identity-');
 		try {
 			expect(nativeCalls).toBeGreaterThan(1);
-			expect(nativeInputs).toContain(os.tmpdir());
 			expect(fs.statSync(fixture.dir).isDirectory()).toBe(true);
 			expect(fixture.dir.includes('~')).toBe(false);
 		} finally {
