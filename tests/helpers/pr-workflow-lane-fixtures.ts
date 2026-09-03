@@ -58,10 +58,9 @@ export async function writeRawPrWorkflowGateState(
 /**
  * Record one open `swarm-pr-review:base` lane for `parentSessionId`.
  *
- * The delegation store derives `subagentSessionId` as `sub-<correlationId>`,
- * which is the key the liveness probe looks up in the host's session-status
- * map — hence {@link laneSubagentSessionId} rather than re-deriving it in
- * every suite.
+ * PR-review delegation records use the correlation id as the authenticated
+ * child session id. The liveness helper below remains a named fixture seam
+ * so callers use the same identity when building host-status maps.
  */
 export async function recordOpenPrWorkflowLane(
 	directory: string,
@@ -72,7 +71,7 @@ export async function recordOpenPrWorkflowLane(
 	await recordPendingDelegation(directory, {
 		correlationId,
 		jobId: null,
-		subagentSessionId: laneSubagentSessionId(correlationId),
+		subagentSessionId: correlationId,
 		parentSessionId,
 		callID: `call-${correlationId}`,
 		normalizedAgent: 'explorer',
@@ -95,7 +94,7 @@ export async function recordOpenPrWorkflowLane(
 
 /** The subagent session id {@link recordOpenPrWorkflowLane} assigns. */
 export function laneSubagentSessionId(correlationId: string): string {
-	return `sub-${correlationId}`;
+	return correlationId;
 }
 
 /**

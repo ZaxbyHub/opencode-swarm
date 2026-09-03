@@ -32,6 +32,7 @@ const { dir, cleanup } = createSafeTestDir('swarm-bg-xonce-');
 afterEach(cleanup);
 beforeEach(() => {
 	fs.rmSync(path.join(dir, '.swarm'), { recursive: true, force: true });
+	fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 });
 

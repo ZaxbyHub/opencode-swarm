@@ -16,34 +16,6 @@
 			"note": "Pre-existing debt, not approved drift: \"validateAndRecordAttestation\" exists in src/hooks/guardrails/file-authority.ts but not inside :136 (attestations.writerCitations[0])."
 		},
 		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "removeDelegationFallback",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"removeDelegationFallback\" exists in src/background/pending-delegations.ts but not inside :3933 (background-delegations-fallback.writerCitations[0])."
-		},
-		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "scanBackgroundCoderReservationsForAdmission",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"scanBackgroundCoderReservationsForAdmission\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:4107 (background-delegations-fallback.readerCitations[1])."
-		},
-		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "writeBackgroundCoderReservations",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeBackgroundCoderReservations\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:4163 (background-delegations-fallback.writerCitations[1])."
-		},
-		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "writeDelegationFallback",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeDelegationFallback\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:3882 (background-delegations-fallback.writerCitations[0])."
-		},
-		{
 			"rowId": "capsules",
 			"file": "src/context-map/capsule-persistence.ts",
 			"identifier": "loadCapsule",

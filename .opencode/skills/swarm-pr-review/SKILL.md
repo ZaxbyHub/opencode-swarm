@@ -70,7 +70,7 @@ This protocol runs on any agent harness. Before Phase 0, detect which profile
 this session is in by checking the actual tool list — never assume from the
 harness name, and never guess:
 
-- **Profile A — structured PR-workflow controller.** The swarm plugin's controller tools are available in this session: `dispatch_lanes_async`, `collect_lane_results`, `retrieve_lane_output`, `parse_lane_candidates`, `submit_pr_review_result`, `write_pr_review_artifact`, `write_pr_review_trigger_eval`, `complete_pr_workflow`. Typical host: OpenCode with the swarm plugin. The controller mechanically enforces this skill's accounting: it computes the
+- **Profile A — structured PR-workflow controller.** The swarm plugin's controller tools are available in this session: `dispatch_lanes_async`, `collect_lane_results`, `retrieve_lane_output`, `parse_lane_candidates`, `write_pr_review_artifact`, `write_pr_review_trigger_eval`, `complete_pr_workflow`. The child-bound `submit_pr_review_result` overlay is available only to dispatched base/micro lanes. Typical host: OpenCode with the swarm plugin. The controller mechanically enforces this skill's accounting: it computes the
   depth tier itself from the bound merge-base diff (never from caller
   claims), enforces the tier's lane floors and full dimension/family
   partitions for consolidated dispatch, and gates structured reviewer/critic
@@ -100,7 +100,7 @@ harness name, and never guess:
 
 | Harness (typical) | Profile | Lane dispatch | Ledger persistence | Completion gate |
 |---|---|---|---|---|
-| OpenCode + swarm plugin | A | `dispatch_lanes_async` / `collect_lane_results` | `submit_pr_review_result`, `write_pr_review_artifact`, `write_pr_review_trigger_eval` | `complete_pr_workflow` |
+| OpenCode + swarm plugin | A | `dispatch_lanes_async` / `collect_lane_results` | `write_pr_review_artifact`, `write_pr_review_trigger_eval` | `complete_pr_workflow` |
 | Claude Code | B | parallel `Agent`/`Task` subagents | ledger files in the session task workspace | Pre-Synthesis Gate checklist |
 | OpenAI Codex | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
 | ZCode | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
@@ -162,8 +162,8 @@ ordering, vocabulary, or schema.
 Controller order is exact: bind the immutable head/base range; dispatch,
 settle, and parse base lanes; evaluate every trigger row; dispatch micro lanes;
 settle and parse every matched micro family; persist the trigger evaluation;
-submit exactly one `submit_pr_review_result` receipt for each base/micro
-discovery lane and then stop; persist post-explorer findings; run reviewers;
+ensure each base/micro child lane submits exactly one child-bound structured
+receipt; persist post-explorer findings; run reviewers;
 run critics; then persist the final artifact and complete the workflow. Transcript
 `[CANDIDATE]` / `[CLEAN]` rows are deprecated legacy compatibility only for
 lanes whose snapped `pr_review_legacy_transcript_compatibility` contract
@@ -1978,9 +1978,10 @@ are:
    and a one-line `reason` describing the blocker. The tool clears the durable gate state
    and stops the auto-resume loop. It refuses only while PR workflow lanes are still LIVE (a recent `updatedAt`); collect those with `collect_lane_results` first.
    Lanes idle past the 30-minute staleness horizon settle as presumed-stale instead of blocking, disclosed as `presumed_stale_lanes` on the response and in `.swarm/events.jsonl`; a schema-invalid (but JSON-parseable) gate state no longer defeats abort either. See `references/lane-output-recoverability.md`.
-   It accepts both unbound and bound PR_REVIEW workflows so exhausted
-   post-bind discovery or validation cannot strand the gate. An audit event is
-   appended to `.swarm/events.jsonl`.
+   It accepts both unbound and bound PR_REVIEW workflows so an unrecoverable
+   bind/checkout blocker cannot strand the gate. Settled discovery or validation
+   lanes with incomplete coverage use the truthful N-of-6 settlement path instead
+   of aborting. An audit event is appended to `.swarm/events.jsonl`.
    When the tool reports `checkout_restore_required`, immediately call
    `prepare_pr_workflow_checkout` with `operation: "restore"`; do not leave the
    user detached from their original checkout with a hidden preserved stash.
@@ -2007,11 +2008,10 @@ or re-dispatching the disagreeing lane so its trigger_evaluation converges with
 the frozen ledger before re-binding.
 
 Abort is a recovery tool, not a coverage shortcut. Use it only when the
-bind/checkout path is genuinely unreachable or bounded structural recovery or
-retries are genuinely exhausted; never use it to skip a coverage obligation
-that is still recoverable, merely expensive, or inconvenient. When lanes have
-settled short of full coverage, the terminal N-of-6 settlement (issue #2383)
-is the truthful exit — not abort. For a publication-armed workflow whose exact
+bind/checkout path is genuinely unreachable; never use it to skip a coverage
+obligation that is still recoverable, merely expensive, or inconvenient. When
+lanes have settled short of full coverage, the terminal N-of-6 settlement (issue
+#2383) is the truthful exit — not abort. For a publication-armed workflow whose exact
 publication cannot proceed, `abort_pr_workflow` with `kind: "armed_recovery"`
 (plus the armed recovery identity fields from `pr_workflow_status`) is the
 audited escape: it settles lanes, invalidates the staged publication

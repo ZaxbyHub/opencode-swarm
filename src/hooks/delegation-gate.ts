@@ -140,6 +140,7 @@ import {
 } from './delegation-gate/worktree-isolation';
 import {
 	consumePrFeedbackScopeDeclaration,
+	readPrReviewReentryBindingContext,
 	resolvePrFeedbackScopeDeclaration,
 } from './pr-workflow-gate.js';
 export { resetStandardWorktreeIsolationState };
@@ -2795,6 +2796,7 @@ async function resolveEvidenceTaskId(
 	args: Record<string, unknown> | undefined,
 	session: AgentSessionState,
 	directory: string,
+	options: { allowSessionFallback?: boolean } = {},
 ): Promise<string | null> {
 	// Shared bounded resolution first; session fallback is allowed only when the
 	// resolver had no safe plan context and therefore made no authoritative
@@ -2843,6 +2845,7 @@ async function resolveEvidenceTaskId(
 	}
 
 	// Step 3: Session-state fallback
+	if (options.allowSessionFallback === false) return null;
 	return getEvidenceTaskId(session, directory);
 }
 
@@ -3097,6 +3100,7 @@ export function createDelegationGateHook(
 	interface StageBDispatchContext {
 		taskIds: Set<string>;
 		expectedVerdictKind: 'REVIEWED' | 'TESTED';
+		standalonePrReviewReentry?: boolean;
 	}
 	const stageBDispatchContextByCallID = new Map<
 		string,
@@ -3647,10 +3651,15 @@ export function createDelegationGateHook(
 			try {
 				const reviewSession = swarmState.agentSessions.get(input.sessionID);
 				if (reviewSession) {
+					const activePrReviewBinding = await readPrReviewReentryBindingContext(
+						directory,
+						input.sessionID,
+					);
 					const reviewTaskId = await resolveEvidenceTaskId(
 						args,
 						reviewSession,
 						directory,
+						activePrReviewBinding ? { allowSessionFallback: false } : undefined,
 					);
 					// Route against the exact reviewed task. The singular projection is
 					// compatibility-only and may point at a different concurrent task.
@@ -3805,11 +3814,24 @@ export function createDelegationGateHook(
 		}
 
 		if (TASK_GATE_AGENTS.has(targetAgent)) {
+			const isPrReviewReentryAgent =
+				targetAgent === 'reviewer' || targetAgent === 'test_engineer';
+			// startAgentSession registers disk rehydration asynchronously. Do not
+			// classify an authorized PR-review dispatch as plan-free while that
+			// durable state is still being applied; otherwise a persisted task can
+			// briefly bypass the explicit-task binding requirement.
+			if (isPrReviewReentryAgent && swarmState.pendingRehydrations.size > 0) {
+				await Promise.allSettled([...swarmState.pendingRehydrations]);
+			}
 			const stageBSession = ensureAgentSession(input.sessionID);
+			const activePrReviewBinding = isPrReviewReentryAgent
+				? await readPrReviewReentryBindingContext(directory, input.sessionID)
+				: null;
 			const resolvedTaskId = await resolveEvidenceTaskId(
 				args,
 				stageBSession,
 				directory,
+				activePrReviewBinding ? { allowSessionFallback: false } : undefined,
 			);
 			const candidateTaskIds = new Set<string>();
 			if (resolvedTaskId) candidateTaskIds.add(resolvedTaskId);
@@ -3839,6 +3861,48 @@ export function createDelegationGateHook(
 			const { getTaskWorkflowSnapshot, readTaskEvidence } = await import(
 				'../gate-evidence'
 			);
+			// A direct PR_REVIEW re-entry is allowed to omit task_id: the controller
+			// authorization is the task identity for that dispatch. Consume it here,
+			// at the same fail-closed delegation boundary as task-bearing re-entry,
+			// so two concurrent calls cannot both pass the earlier read-only admission
+			// check while leaving the one-use token available for a later call.
+			if (activePrReviewBinding && !resolvedTaskId && isPrReviewReentryAgent) {
+				if (stageBSession.taskWorkflowStates.size > 0 || dispatchPlan) {
+					throw new Error(
+						`TASK_WORKFLOW_TASK_ID_REQUIRED: cannot dispatch ${targetAgent} for PR-review re-entry without an explicit task_id or task identifier in the prompt while a plan or task workflow state exists. Bind the re-entry to the exact task before dispatching; refusing to guess from session or plan state protects parallel tasks from cross-attribution.`,
+					);
+				}
+				const { reserveActivePrReviewReentryAuthorization } = await import(
+					'./pr-workflow-gate.js'
+				);
+				const consumed = await reserveActivePrReviewReentryAuthorization(
+					directory,
+					input.sessionID,
+					{
+						role:
+							targetAgent === 'test_engineer' ? 'test_engineer' : 'reviewer',
+						callID: input.callID,
+					},
+				);
+				if (consumed) {
+					rememberStageBDispatchGenerations(input.callID, generations);
+					gateDispatchPrimaryTaskByCallID.set(input.callID, null);
+					stageBDispatchContextByCallID.set(input.callID, {
+						taskIds: new Set(generations.keys()),
+						expectedVerdictKind:
+							targetAgent === 'test_engineer' ? 'TESTED' : 'REVIEWED',
+						standalonePrReviewReentry: true,
+					});
+					return;
+				}
+				if (
+					await readPrReviewReentryBindingContext(directory, input.sessionID)
+				) {
+					throw new Error(
+						`TASK_WORKFLOW_STAGE_A_REQUIRED: cannot dispatch ${targetAgent} without a task workflow because its one-use PR-review re-entry authorization was already consumed or is unavailable. Issue a fresh authorization immediately before the direct Task dispatch.`,
+					);
+				}
+			}
 			for (const taskId of candidateTaskIds) {
 				const workflow = getTaskWorkflowSnapshot(
 					await readTaskEvidence(directory, taskId),
@@ -5177,7 +5241,10 @@ export function createDelegationGateHook(
 					// barrier) is replaced by the council verdict path (submit_council_verdicts).
 					// Stage B delegations may still occur as part of the 5-member council dispatch,
 					// but they do not advance state through the Stage B barrier.
-					if (!councilActive) {
+					const standalonePrReviewReentry =
+						stageBDispatchContextByCallID.get(input.callID)
+							?.standalonePrReviewReentry === true;
+					if (!councilActive && !standalonePrReviewReentry) {
 						const stageBParallelEnabled = true;
 
 						if (stageBParallelEnabled) {

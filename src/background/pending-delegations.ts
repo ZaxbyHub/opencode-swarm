@@ -65,6 +65,7 @@ import {
 	parsePrReviewCollectionReceiptShedMarker,
 } from './pr-review-collection-receipt.js';
 import {
+	decodePrReviewWorkflowBinding,
 	type PrReviewResultReceipt,
 	PrReviewResultReceiptSchema,
 } from './pr-review-contract.js';
@@ -234,7 +235,11 @@ export interface BackgroundDelegationRecord {
 	schemaVersion: 1 | 2 | 3 | 4;
 	/** Subagent session id from the dispatch envelope — the correlation key. */
 	correlationId: string;
-	/** Structured jobId from dispatch metadata when available, else null. */
+	/**
+	 * Structured jobId from dispatch metadata when available, else null. Async
+	 * PR-review base/micro lanes use a versioned workflow-instance binding here;
+	 * they have no host job id and older strict schemas already retain this field.
+	 */
 	jobId: string | null;
 	/** Subagent session id (== correlationId; kept explicit for clarity/forward-compat). */
 	subagentSessionId: string;
@@ -274,7 +279,10 @@ export interface BackgroundDelegationRecord {
 	workspace?: BackgroundWorkspaceSnapshot;
 	/** Immutable pre-coder provenance for doc-only gate classification. */
 	taskChangeContext?: BackgroundTaskChangeContext;
-	/** Exact-task workflow generation captured before a Stage B dispatch. */
+	/**
+	 * Exact-task workflow generation captured before Stage B, or the immutable
+	 * post-admission workflow revision for an async PR-review base/micro lane.
+	 */
 	workflowGeneration?: number;
 	/** Complete isolated-worktree recovery coordinates captured before handoff. */
 	worktree?: BackgroundWorktreeDescriptor;
@@ -941,7 +949,22 @@ const RecordSchema = z
 		result: ResultSchema.optional(),
 		completedAt: z.number().optional(),
 	})
-	.strict();
+	.strict()
+	.superRefine((value, context) => {
+		// PR-review child identity is the durable correlation key. Keep legacy
+		// non-review records readable, but never allow a review receipt to be
+		// associated with a different authenticated child session.
+		if (
+			value.mode?.startsWith('swarm-pr-review:') &&
+			value.correlationId !== value.subagentSessionId
+		) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				message:
+					'PR-review delegation identity requires correlationId to equal subagentSessionId',
+			});
+		}
+	});
 
 const FallbackArtifactSchema = z
 	.object({
@@ -2846,7 +2869,14 @@ export async function publishPrReviewResultReceipt(
 				const sameOwned =
 					owned.length === parsed.data.ownedWorkflowLanes.length &&
 					owned.every((lane) => parsed.data.ownedWorkflowLanes.includes(lane));
+				const dispatchWorkflowInstanceId = decodePrReviewWorkflowBinding(
+					current.jobId,
+				);
 				if (
+					!dispatchWorkflowInstanceId ||
+					current.workflowGeneration === undefined ||
+					dispatchWorkflowInstanceId !== parsed.data.workflowInstanceId ||
+					current.workflowGeneration !== parsed.data.workflowRevision ||
 					parsed.data.workflowInstanceId !== input.expectedWorkflowInstanceId ||
 					parsed.data.workflowRevision !== input.expectedWorkflowRevision ||
 					parsed.data.baseSha !== input.expectedBaseSha ||

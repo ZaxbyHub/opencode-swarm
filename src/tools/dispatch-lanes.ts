@@ -47,6 +47,7 @@ import {
 } from '../background/pr-review-collection-receipt.js';
 import {
 	buildPrReviewContractCard,
+	encodePrReviewWorkflowBinding,
 	PrReviewLaneResultEnvelopeSchema,
 	prReviewLegacyTranscriptCompatibilityEnabled,
 } from '../background/pr-review-contract.js';
@@ -1268,6 +1269,8 @@ export async function executeDispatchLanesAsync(
 	let verifiedPrHead: string | undefined;
 	let workflowRevisionDigest: string | undefined;
 	let verifiedReviewBaseSha: string | undefined;
+	let prReviewWorkflowInstanceId: string | undefined;
+	let prReviewWorkflowRevision: number | undefined;
 	// Reject a bare, colon-less PR workflow mode explicitly. Every downstream
 	// check keys on the colon-suffixed prefix, so `mode: "swarm-pr-review"` used
 	// to slip past the merge-base bind entirely and surface much later as
@@ -1426,6 +1429,11 @@ export async function executeDispatchLanesAsync(
 	const contractPromptLanes = (input: DispatchLaneSpec[]) =>
 		applyPrWorkflowPromptContract(input, {
 			mode: parsed.data.mode,
+			batchId:
+				parsed.data.mode === 'swarm-pr-review:base' ||
+				parsed.data.mode === 'swarm-pr-review:micro'
+					? batchId
+					: undefined,
 			prHeadSha: verifiedPrHead,
 			revisionDigest: workflowRevisionDigest,
 			scope: verifiedReviewBaseSha
@@ -1656,7 +1664,7 @@ export async function executeDispatchLanesAsync(
 							);
 						}
 					}
-					await enforcePrReviewBaseDimensions(
+					gateState = await enforcePrReviewBaseDimensions(
 						directory,
 						context.sessionID,
 						laneSpecs,
@@ -1674,6 +1682,8 @@ export async function executeDispatchLanesAsync(
 							prReviewResiliencePolicy: effectiveResilience,
 						},
 					);
+					prReviewWorkflowInstanceId = gateState.workflowInstanceId;
+					prReviewWorkflowRevision = gateState.revision;
 				} else if (parsed.data.mode === 'swarm-pr-review:micro') {
 					await assertPrReviewBaseCoverageSettled(directory, context.sessionID);
 					if (gateState.prHeadSha && gateState.prHeadSha !== headSha) {
@@ -1709,6 +1719,8 @@ export async function executeDispatchLanesAsync(
 						context.sessionID,
 						effectiveTriggerEvaluation,
 					);
+					prReviewWorkflowInstanceId = gateState.workflowInstanceId;
+					prReviewWorkflowRevision = gateState.revision;
 				} else if (
 					parsed.data.mode === 'swarm-pr-review:council' ||
 					parsed.data.mode === 'swarm-pr-review:reviewer' ||
@@ -1890,6 +1902,8 @@ export async function executeDispatchLanesAsync(
 						gitHead: verifiedPrHead,
 						dirtyHash: workflowRevisionDigest,
 						scope: canonicalWorkflowScope,
+						prReviewWorkflowInstanceId,
+						prReviewWorkflowRevision,
 					}),
 				),
 			),
@@ -2437,6 +2451,8 @@ async function launchAsyncLane(args: {
 	gitHead?: string;
 	dirtyHash?: string;
 	scope?: string;
+	prReviewWorkflowInstanceId?: string;
+	prReviewWorkflowRevision?: number;
 }): Promise<DispatchLaneResult> {
 	const validation = validateLaneAgent(args.lane.agent, args.context);
 	const role = validation.role;
@@ -2490,7 +2506,9 @@ async function launchAsyncLane(args: {
 			args.directory,
 			{
 				correlationId: sessionId,
-				jobId: null,
+				jobId: args.prReviewWorkflowInstanceId
+					? encodePrReviewWorkflowBinding(args.prReviewWorkflowInstanceId)
+					: null,
 				subagentSessionId: sessionId,
 				parentSessionId:
 					args.context.sessionID?.trim() ||
@@ -2514,6 +2532,9 @@ async function launchAsyncLane(args: {
 					prHeadSha: args.prHeadSha ?? null,
 					scope: args.scope ?? null,
 				},
+				...(args.prReviewWorkflowRevision !== undefined
+					? { workflowGeneration: args.prReviewWorkflowRevision }
+					: {}),
 				generation: create.generation,
 			},
 		);
@@ -5106,6 +5127,7 @@ function applyPrWorkflowPromptContract(
 	lanes: DispatchLaneSpec[],
 	options: {
 		mode?: string;
+		batchId?: string;
 		prHeadSha?: string;
 		revisionDigest?: string;
 		scope?: string;
@@ -5135,6 +5157,13 @@ function applyPrWorkflowPromptContract(
 		const revisionDigest = classifyControllerTokenField(
 			options.revisionDigest ?? '',
 		);
+		const batchId = classifyControllerTokenField(options.batchId ?? '');
+		const laneId = classifyControllerTokenField(lane.id);
+		const requiresSettlementProvenance =
+			options.batchId !== undefined &&
+			normalizedMode.ok &&
+			(normalizedMode.token === 'swarm-pr-review:base' ||
+				normalizedMode.token === 'swarm-pr-review:micro');
 		const declaredScope = canonicalizeControllerField(
 			options.scope ??
 				'the exact checked-out PR revision and repository-defined diff context',
@@ -5146,9 +5175,14 @@ function applyPrWorkflowPromptContract(
 			[]
 		).map((itemId) => classifyControllerTokenField(itemId));
 		const invalidAssignedId = assignedIdResults.find((result) => !result.ok);
-		if (!normalizedMode.ok || !prHeadSha.ok || !revisionDigest.ok) {
+		if (
+			!normalizedMode.ok ||
+			!prHeadSha.ok ||
+			!revisionDigest.ok ||
+			(requiresSettlementProvenance && (!batchId.ok || !laneId.ok))
+		) {
 			errors.push(
-				`Lane "${lane.id}" mandatory PR workflow contract requires non-empty single-token mode, pr_head_sha, and revision_digest values after controller sanitization`,
+				`Lane "${lane.id}" mandatory PR workflow contract requires non-empty single-token mode, pr_head_sha, revision_digest, and (for base/micro lanes) batch/lane provenance after controller sanitization`,
 			);
 			return lane;
 		}
@@ -5216,7 +5250,7 @@ function applyPrWorkflowPromptContract(
 		const structuredSubmissionParagraph =
 			normalizedMode.token === 'swarm-pr-review:base' ||
 			normalizedMode.token === 'swarm-pr-review:micro'
-				? '\nStructured settlement rule (issue #2384): call `submit_pr_review_result` exactly once with the canonical discovery result and then stop. Transcript machine rows are deprecated legacy compatibility only for lanes whose snapped contract explicitly enables them, and a present structured result never falls back because of extra prose, truncation, or transcript incompleteness.'
+				? `\nStructured settlement rule (issue #2384): call \`submit_pr_review_result\` exactly once with the canonical discovery result${batchId.ok && laneId.ok ? `, using batchId \`${batchId.token}\` and laneId \`${laneId.token}\`` : ''}, and then stop. The authenticated child delegation remains authoritative and resolves these identifiers when omitted. Transcript machine rows are deprecated legacy compatibility only for lanes whose snapped contract explicitly enables them, and a present structured result never falls back because of extra prose, truncation, or transcript incompleteness.`
 				: '';
 		// Pre-seeded statement of the read-only shell classifier's rules
 		// (#2276): the same enforcement already runs at tool time for BOTH the
@@ -5227,7 +5261,7 @@ function applyPrWorkflowPromptContract(
 
 [CONTROLLER-BOUND PR WORKFLOW CONTRACT]
 mode: ${normalizedMode.token}
-workflow_lane: ${workflowLane.ok ? workflowLane.token : '(none)'}${ownedLine}
+${batchId.ok ? `batch_id: ${batchId.token}\n` : ''}${laneId.ok ? `lane_id: ${laneId.token}\n` : ''}workflow_lane: ${workflowLane.ok ? workflowLane.token : '(none)'}${ownedLine}
 pr_head_sha: ${prHeadSha.token}
 revision_digest: ${revisionDigest.token}
 declared_scope: ${declaredScope}
@@ -5235,7 +5269,7 @@ caller_focus_non_authoritative: ${callerFocus || '(none)'}
 assigned_item_ids: ${assignedIds.length > 0 ? assignedIds.join(', ') : '(discovery lane)'}
 mandatory_lane_checklist: ${checklist}${budgetLine}
 
-This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
+This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. For base/micro settlement, submit the visible batch_id and lane_id values exactly as rendered above, or omit them and let the authenticated child delegation resolve them. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
 Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
 		const contractCard = normalizedMode.token.startsWith('swarm-pr-review:')

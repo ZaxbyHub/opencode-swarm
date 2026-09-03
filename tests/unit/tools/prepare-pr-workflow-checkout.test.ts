@@ -465,7 +465,7 @@ describe('prepare_pr_workflow_checkout', () => {
 		await recordPendingDelegation(directory, {
 			correlationId: 'checkout-lane',
 			jobId: null,
-			subagentSessionId: 'sub-1',
+			subagentSessionId: 'checkout-lane',
 			parentSessionId: SESSION_ID,
 			callID: 'call-1',
 			normalizedAgent: 'explorer',

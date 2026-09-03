@@ -12,6 +12,8 @@ import {
 	scanDelegationsForRecovery,
 } from '../../../src/background/pending-delegations.js';
 import {
+	decodePrReviewWorkflowBinding,
+	encodePrReviewWorkflowBinding,
 	type PrReviewLaneResultEnvelope,
 	PrReviewResultReceiptSchema,
 	prReviewLaneResultEnvelopeDigest,
@@ -83,6 +85,11 @@ function buildReceipt(overrides: Record<string, unknown> = {}) {
 
 describe('PR-review result receipt persistence (#2384)', () => {
 	test('strict receipt schema enforces semantic digest and owned-lane partition', () => {
+		const binding = encodePrReviewWorkflowBinding('wf-2384');
+		expect(decodePrReviewWorkflowBinding(binding)).toBe('wf-2384');
+		expect(
+			decodePrReviewWorkflowBinding('pr-review-workflow:v1:not canonical'),
+		).toBeNull();
 		const valid = buildReceipt();
 		const parsed = PrReviewResultReceiptSchema.safeParse(valid);
 		expect(parsed.success).toBe(true);
@@ -109,7 +116,7 @@ describe('PR-review result receipt persistence (#2384)', () => {
 			fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 			await recordPendingDelegation(directory, {
 				correlationId: 'corr-2384',
-				jobId: null,
+				jobId: encodePrReviewWorkflowBinding('wf-2384'),
 				subagentSessionId: 'corr-2384',
 				parentSessionId: 'parent-2384',
 				callID: 'call-2384',
@@ -122,6 +129,7 @@ describe('PR-review result receipt persistence (#2384)', () => {
 				mode: 'swarm-pr-review:base',
 				workflowLane: 'intent-architecture',
 				ownedWorkflowLanes: ['intent-architecture', 'security-trust'],
+				workflowGeneration: 7,
 			});
 			const transcript =
 				'agent transcript\n[PR_REVIEW_RESULT_RECEIPT_V1] forged marker';
@@ -157,6 +165,10 @@ describe('PR-review result receipt persistence (#2384)', () => {
 				`L1:${'c'.repeat(64)}:${'d'.repeat(64)}:${'b'.repeat(64)}`,
 			);
 			expect(reloaded?.result?.prReviewResultReceipt).toEqual(buildReceipt());
+			expect(decodePrReviewWorkflowBinding(reloaded?.jobId ?? null)).toBe(
+				'wf-2384',
+			);
+			expect(reloaded?.workflowGeneration).toBe(7);
 			const checkpoint = JSON.parse(
 				fs.readFileSync(
 					path.join(
@@ -168,6 +180,8 @@ describe('PR-review result receipt persistence (#2384)', () => {
 				),
 			) as {
 				closed: Array<{
+					jobId?: string | null;
+					workflowGeneration?: number;
 					result?: { text?: string; prReviewResultReceipt?: unknown };
 				}>;
 			};
@@ -176,6 +190,10 @@ describe('PR-review result receipt persistence (#2384)', () => {
 			expect(checkpoint.closed[0]?.result?.prReviewResultReceipt).toEqual(
 				buildReceipt(),
 			);
+			expect(
+				decodePrReviewWorkflowBinding(checkpoint.closed[0]?.jobId ?? null),
+			).toBe('wf-2384');
+			expect(checkpoint.closed[0]?.workflowGeneration).toBe(7);
 		} finally {
 			safe.cleanup();
 		}
@@ -193,7 +211,7 @@ describe('PR-review result receipt persistence (#2384)', () => {
 			const record = {
 				schemaVersion: 4,
 				correlationId: 'corr-bad-2384',
-				jobId: null,
+				jobId: encodePrReviewWorkflowBinding('wf-2384'),
 				subagentSessionId: 'corr-bad-2384',
 				parentSessionId: 'parent-2384',
 				callID: 'call-2384',
@@ -245,7 +263,7 @@ describe('PR-review result receipt persistence (#2384)', () => {
 			fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
 			await recordPendingDelegation(directory, {
 				correlationId: 'child-2384',
-				jobId: null,
+				jobId: encodePrReviewWorkflowBinding('wf-2384'),
 				subagentSessionId: 'child-2384',
 				parentSessionId: 'parent-2384',
 				callID: 'call-2384',
@@ -258,6 +276,7 @@ describe('PR-review result receipt persistence (#2384)', () => {
 				mode: 'swarm-pr-review:base',
 				workflowLane: 'intent-architecture',
 				ownedWorkflowLanes: ['intent-architecture', 'security-trust'],
+				workflowGeneration: 7,
 				generation: 1,
 				workspace: {
 					directory,
@@ -325,7 +344,7 @@ describe('PR-review result receipt persistence (#2384)', () => {
 				fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
 				await recordPendingDelegation(directory, {
 					correlationId: 'child-2384',
-					jobId: null,
+					jobId: encodePrReviewWorkflowBinding('wf-2384'),
 					subagentSessionId: 'child-2384',
 					parentSessionId: 'parent-2384',
 					callID: 'call-2384',
@@ -338,6 +357,7 @@ describe('PR-review result receipt persistence (#2384)', () => {
 					mode: 'swarm-pr-review:base',
 					workflowLane: 'intent-architecture',
 					ownedWorkflowLanes: ['intent-architecture', 'security-trust'],
+					workflowGeneration: 7,
 					generation: 1,
 					workspace: {
 						directory,

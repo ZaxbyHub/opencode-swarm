@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import type { ToolContext } from '@opencode-ai/plugin';
+import { recordPendingDelegation } from '../../../src/background/pending-delegations';
 import { activatePrWorkflow } from '../../../src/hooks/pr-workflow-gate';
 import type { ToolResult } from '../../../src/tools/create-tool';
 import {
@@ -302,6 +303,28 @@ describe('pr_workflow_status — session-pinned gate read', () => {
 		expect(JSON.stringify(parsed)).not.toContain(otherSession);
 		expect(gate.mode).toBeUndefined();
 		expect(gate.prHeadSha).toBeUndefined();
+	});
+
+	test('resolves a dispatched child to its parent workflow gate', async () => {
+		const parentSession = 'parent-session';
+		const childSession = 'child-session';
+		await activatePrWorkflow(tempDir, parentSession, 'PR_REVIEW', {
+			prHeadSha: HEAD_SHA,
+		});
+		await recordPendingDelegation(tempDir, {
+			correlationId: childSession,
+			jobId: null,
+			subagentSessionId: childSession,
+			parentSessionId: parentSession,
+			callID: 'dispatch-call',
+			normalizedAgent: 'explorer',
+			swarmPrefixedAgent: 'explorer',
+			planTaskId: null,
+			evidenceTaskId: null,
+		});
+		const parsed = await runTool(tempDir, childSession);
+		expect((parsed.gate as Record<string, unknown>).active).toBe(true);
+		expect((parsed.gate as Record<string, unknown>).mode).toBe('PR_REVIEW');
 	});
 
 	test('resolves the gate with the caller sessionID exactly once', async () => {

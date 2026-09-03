@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { storeLaneOutput } from '../../src/background/lane-output-store.js';
 import {
@@ -353,6 +353,25 @@ describe('PR workflow gate has authoritative real-host Task precedence', () => {
 	test('PR_FEEDBACK coder Tasks still reach acceptance and scope preflight', async () => {
 		await activatePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK');
 		await settleFeedbackVerification();
+		const planPath = path.join(directory, '.swarm', 'plan.json');
+		expect(existsSync(planPath)).toBeTrue();
+		const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+			phases: Array<{ tasks: Array<{ id: string }> }>;
+		};
+		const planTaskIds = plan.phases.flatMap((phase) =>
+			phase.tasks.map((task) => task.id),
+		);
+		expect(planTaskIds).toEqual(['1.1']);
+		expect(planTaskIds).not.toContain('9.9');
+		const prepared = JSON.parse(
+			String(
+				await plugin.tool.prepare_pr_feedback_scope.execute(
+					{ task_id: '9.9', files: ['src/index.ts'] },
+					{ directory, sessionID: SESSION_ID },
+				),
+			),
+		) as { success: boolean };
+		expect(prepared.success).toBeTrue();
 		const before = plugin.hooks['tool.execute.before'];
 
 		await expect(
@@ -361,7 +380,7 @@ describe('PR workflow gate has authoritative real-host Task precedence', () => {
 				{
 					args: {
 						subagent_type: 'coder',
-						task_id: '1.1',
+						task_id: '9.9',
 						prompt: 'Implement the approved fix.',
 					},
 				},
@@ -374,19 +393,32 @@ describe('PR workflow gate has authoritative real-host Task precedence', () => {
 				{
 					args: {
 						subagent_type: 'coder',
-						task_id: '1.1',
+						task_id: '9.9',
 						prompt:
 							'Implement the approved fix.\nACCEPTANCE: src/index.ts is updated and verified.',
 					},
 				},
 			),
 		).resolves.toBeUndefined();
-		expect(
-			getScopeBindingForParentDispatch({
-				parentSessionId: SESSION_ID,
-				dispatchCallId: 'coder-approved',
-			}),
-		).not.toBeNull();
+		const binding = getScopeBindingForParentDispatch({
+			parentSessionId: SESSION_ID,
+			dispatchCallId: 'coder-approved',
+		});
+		expect(binding).not.toBeNull();
+		expect(binding?.source).toBe('pr_feedback');
+		expect(binding?.planId).toBe(`pr-feedback:${SESSION_ID}`);
+		console.log(
+			`[ISSUE-2469-FEEDBACK-EVIDENCE] ${JSON.stringify({
+				runner_os: process.platform,
+				ci_commit: process.env.GITHUB_SHA ?? null,
+				plan_fixture_present: existsSync(planPath),
+				plan_task_ids: planTaskIds,
+				feedback_task_id: '9.9',
+				prepared_successfully: prepared.success,
+				binding_source: binding?.source ?? null,
+				binding_plan_id: binding?.planId ?? null,
+			})}`,
+		);
 	});
 
 	test('child sessions inherit the controller PR_REVIEW precedence', async () => {

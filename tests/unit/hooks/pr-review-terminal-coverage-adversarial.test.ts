@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -29,9 +30,9 @@ const originalResolveRevisionDigest =
 const originalResolveWorkingTreeClean = _test_exports.resolveIsWorkingTreeClean;
 const originalResolveWorkingTreeCleanAsync =
 	_test_exports.resolveIsWorkingTreeCleanAsync;
-
-beforeEach(() => {
+beforeEach(async () => {
 	directory = canonicalMkdtemp('pr-terminal-settlement-');
+	await fs.mkdir(path.join(directory, '.git'), { recursive: true });
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = () => PR_ARTIFACT_HEAD_SHA;
 	_test_exports.resolveCurrentGitHeadAsync = async () => PR_ARTIFACT_HEAD_SHA;

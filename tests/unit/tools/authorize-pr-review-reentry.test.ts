@@ -53,6 +53,22 @@ describe('authorize_pr_review_reentry tool (issue #2383)', () => {
 		expect(JSON.parse(raw).success).toBe(false);
 	});
 
+	test('rejects a valid-but-wrong abbreviated head SHA against the exact binding', async () => {
+		await activatePrWorkflow(directory, PR_ARTIFACT_SESSION_ID, 'PR_REVIEW', {
+			prHeadSha: PR_ARTIFACT_HEAD_SHA,
+		});
+		const raw = await executeAuthorizePrReviewReentry(
+			{ pr_head_sha: 'abcdef0', role: 'reviewer' },
+			directory,
+			{ sessionID: PR_ARTIFACT_SESSION_ID },
+		);
+		const result = JSON.parse(raw) as { success: boolean; message?: string };
+		expect(result.success).toBe(false);
+		expect(result.message).toContain(
+			`active PR_REVIEW workflow bound to the declared head (active: ${PR_ARTIFACT_HEAD_SHA})`,
+		);
+	});
+
 	test('rejects a missing sessionID', async () => {
 		const raw = await executeAuthorizePrReviewReentry(
 			{ pr_head_sha: PR_ARTIFACT_HEAD_SHA, role: 'reviewer' },
@@ -77,7 +93,9 @@ describe('authorize_pr_review_reentry tool (issue #2383)', () => {
 		expect(result.pr_head_sha).toBe(PR_ARTIFACT_HEAD_SHA);
 		expect(result.authorization_id).toBeTruthy();
 		expect(result.expires_at).toBeTruthy();
-		expect(result.instructions).toContain('subagent_type "reviewer"');
+		expect(result.instructions).toContain(
+			'direct subagent_type Task call with role "reviewer"',
+		);
 	});
 
 	test('fails when no active PR_REVIEW gate exists', async () => {

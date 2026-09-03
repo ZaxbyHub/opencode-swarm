@@ -15,7 +15,9 @@
  * seam-harness shape on purpose (each file keeps its own seams).
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdirSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { recordPendingDelegation } from '../../../src/background/pending-delegations.js';
 import { _test_exports as gateInternals } from '../../../src/hooks/pr-workflow-gate.js';
 import {
@@ -55,6 +57,7 @@ const originalDispatchSessionOps = _internals.getSessionOps;
 beforeEach(() => {
 	restoreClock = freezeClock();
 	directory = canonicalMkdtemp('pr-pending-liveness-collect-');
+	mkdirSync(path.join(directory, '.git'), { recursive: true });
 	gateInternals.resetTrackedStateCache();
 	gateInternals.pendingLaneLivenessThresholdMs = 60_000;
 });
@@ -85,7 +88,7 @@ describe('collect_lane_results surfaces the advisory (issue #2280 Part B)', () =
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: null,
-			subagentSessionId: `sub-${correlationId}`,
+			subagentSessionId: correlationId,
 			parentSessionId: 'collect-parent',
 			callID: `call-${correlationId}`,
 			normalizedAgent: 'critic',
@@ -109,8 +112,8 @@ describe('collect_lane_results surfaces the advisory (issue #2280 Part B)', () =
 
 	test('a long-pending live critic lane gets an advisory and is left completely untouched', async () => {
 		await recordCriticLane('c-critic-1', FIVE_MINUTES_MS);
-		installDispatchSession(['sub-c-critic-1']);
-		installGateStatus({ 'sub-c-critic-1': { type: 'busy' } });
+		installDispatchSession(['c-critic-1']);
+		installGateStatus({ 'c-critic-1': { type: 'busy' } });
 
 		const result = await executeCollectLaneResults(
 			{ batch_id: 'critic-batch', wait: false },
@@ -133,7 +136,7 @@ describe('collect_lane_results surfaces the advisory (issue #2280 Part B)', () =
 
 	test('a fresh pending critic lane produces no probe and no advisory field', async () => {
 		await recordCriticLane('c-fresh-1', 0);
-		installDispatchSession(['sub-c-fresh-1']);
+		installDispatchSession(['c-fresh-1']);
 		installGateStatus({});
 
 		const result = await executeCollectLaneResults(
@@ -153,8 +156,8 @@ describe('collect_lane_results surfaces the advisory (issue #2280 Part B)', () =
 		// durable record is still byte-identical pending, with no sweep, no
 		// cancel, and no message injected.
 		await recordCriticLane('c-stalled-1', FIVE_MINUTES_MS);
-		installDispatchSession(['sub-c-stalled-1']);
-		installGateStatus({ 'sub-c-stalled-1': { type: 'idle' } });
+		installDispatchSession(['c-stalled-1']);
+		installGateStatus({ 'c-stalled-1': { type: 'idle' } });
 
 		const result = await executeCollectLaneResults(
 			{ batch_id: 'critic-batch', wait: false },
@@ -180,7 +183,7 @@ describe('collect_lane_results surfaces the advisory (issue #2280 Part B)', () =
 		// collect call itself completes normally with the degraded advisory
 		// attached — the advisory can fail without failing its host.
 		await recordCriticLane('c-degraded-1', FIVE_MINUTES_MS);
-		installDispatchSession(['sub-c-degraded-1']);
+		installDispatchSession(['c-degraded-1']);
 		installGateStatus({}, new Error('session.status exploded'));
 
 		const result = await executeCollectLaneResults(
@@ -203,8 +206,8 @@ describe('collect_lane_results surfaces the advisory (issue #2280 Part B)', () =
 
 	test('a zero collection budget still answers, with the advisory degraded instead of probing (RP-001)', async () => {
 		await recordCriticLane('c-zbudget-1', FIVE_MINUTES_MS);
-		installDispatchSession(['sub-c-zbudget-1']);
-		installGateStatus({ 'sub-c-zbudget-1': { type: 'busy' } });
+		installDispatchSession(['c-zbudget-1']);
+		installGateStatus({ 'c-zbudget-1': { type: 'busy' } });
 
 		const result = await executeCollectLaneResults(
 			{ batch_id: 'critic-batch', wait: false, timeout_ms: 0 },
@@ -234,9 +237,9 @@ describe('collect_lane_results surfaces the advisory (issue #2280 Part B)', () =
 		await recordCriticLane('c-noclient-1', FIVE_MINUTES_MS);
 		// A session object with NO `messages` function at all.
 		_internals.getSessionOps = () => ({
-			status: async () => ({ data: { 'sub-c-noclient-1': { type: 'busy' } } }),
+			status: async () => ({ data: { 'c-noclient-1': { type: 'busy' } } }),
 		});
-		installGateStatus({ 'sub-c-noclient-1': { type: 'busy' } });
+		installGateStatus({ 'c-noclient-1': { type: 'busy' } });
 
 		const result = await executeCollectLaneResults(
 			{ batch_id: 'critic-batch', wait: true },

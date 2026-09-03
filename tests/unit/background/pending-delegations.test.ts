@@ -22,6 +22,7 @@ import { freezeClock } from '../../helpers/test-clock.js';
 function makeTempProject(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bg-'));
 	const real = fs.realpathSync(dir);
+	fs.mkdirSync(path.join(real, '.git'), { recursive: true });
 	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
 	return real;
 }
