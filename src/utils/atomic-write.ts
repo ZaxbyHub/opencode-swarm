@@ -146,7 +146,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/review-receipt.ts:674',
 			'src/hooks/review-receipt.ts:812',
 			'src/knowledge/identity.ts:209',
-			'src/evidence/phase-participation.ts:303 (pre-#2035)',
+			'src/evidence/phase-participation.ts (pre-#2035; migrated-to=src/evidence/phase-participation.ts:atomicWriteBytes)',
 			'src/turbo/lean/integration.ts:428',
 			'src/turbo/lean/reviewer.ts:403',
 			'src/plan/ledger.ts:746',
