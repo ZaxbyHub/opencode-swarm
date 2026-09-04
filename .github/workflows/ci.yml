@@ -153,7 +153,7 @@ jobs:
           # platform-path PRs to the ubuntu-only matrix). grep without -q
           # or -m reads its input to EOF before exiting, so git diff always
           # finishes writing normally and no SIGPIPE is possible.
-          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null | grep -E '^(src/worktree/|src/turbo/|src/sandbox/|src/plan/|src/parallel/|src/knowledge/|src/memory/|src/tools/|scripts/|\.github/workflows/)' >/dev/null; then
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null | grep -E '^(src/worktree/|src/turbo/|src/sandbox/|src/plan/|src/parallel/|src/knowledge/|src/memory/|src/tools/|scripts/|runners/|\.github/workflows/)' >/dev/null; then
             echo "touches-platform-paths=true" >> "$GITHUB_OUTPUT"
           else
             echo "touches-platform-paths=false" >> "$GITHUB_OUTPUT"

@@ -43,6 +43,11 @@ Non-goals carried forward from #1148:
   `src/hooks/guardrails/tool-before.ts`); OpenCode triggering plugin hooks
   around MCP tools does not make arbitrary MCP tool execution uniformly
   sandboxable. Any future MCP sandboxing needs its own design.
+- **Hash/signature verification of the shipped runner binary is a non-goal.**
+  Binary integrity rests on provenance (release workflow builds the runner
+  from the tagged source and packs it into the npm tarball in the same run)
+  plus the versioned probe handshake; a signing scheme would need its own
+  ADR.
 
 ## Re-evaluation triggers
 
