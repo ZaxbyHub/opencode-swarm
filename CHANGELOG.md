@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.164.13](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.12...v7.164.13) (2026-09-04)
+
+
+### Bug Fixes
+
+* **#2493:** correct CLI, command docs, install, and first-run activation ([859110b](https://github.com/ZaxbyHub/opencode-swarm/commit/859110bee43228f3eb23fd12c6dc436646bee611))
+* **cli,commands,status:** close swarm-pr-review + PR-comment findings on [#2493](https://github.com/ZaxbyHub/opencode-swarm/issues/2493) ([230fe35](https://github.com/ZaxbyHub/opencode-swarm/commit/230fe35cdd4e5d5051e4fd4c134b9810be1baf6e))
+* **repo-graph:** align temp writer citation ([0687738](https://github.com/ZaxbyHub/opencode-swarm/commit/068773899944c3973196f3e8381a14a76432358d))
+* **repo-graph:** harden warm indexed paths ([cd78a1d](https://github.com/ZaxbyHub/opencode-swarm/commit/cd78a1d35cbdffb405acccbe94cc0ca5ac8b581f))
+* **repo-graph:** harden warm indexed paths ([e86eb11](https://github.com/ZaxbyHub/opencode-swarm/commit/e86eb114287e6fb166646163a3964d7ade51d84d))
+
 ## [7.164.12](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.11...v7.164.12) (2026-09-04)
 
 
