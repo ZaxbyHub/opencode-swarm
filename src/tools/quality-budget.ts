@@ -109,6 +109,7 @@ export async function qualityBudget(
 				files_analyzed: [],
 				thresholds,
 				violations: [],
+				base_resolved: false,
 			},
 			violations: [],
 			summary: {
@@ -125,6 +126,7 @@ export async function qualityBudget(
 		changedFiles,
 		thresholds,
 		directory,
+		abortSignal,
 	);
 	abortSignal?.throwIfAborted();
 
@@ -156,6 +158,7 @@ export async function qualityBudget(
 				public_api_delta: metrics.public_api_delta,
 				duplication_ratio: metrics.duplication_ratio,
 				test_to_code_ratio: metrics.test_to_code_ratio,
+				base_resolved: metrics.base_resolved,
 			},
 			thresholds: {
 				max_complexity_delta: thresholds.max_complexity_delta,

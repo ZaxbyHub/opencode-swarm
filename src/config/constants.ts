@@ -301,6 +301,7 @@ export const TURBO_TOOL_NAMES = [
 	'lean_turbo_acquire_locks',
 	'lean_turbo_runner_status',
 	'lean_turbo_review',
+	'lean_turbo_critic',
 	'lean_turbo_run_phase',
 	'lean_turbo_status',
 ] as const satisfies readonly ToolName[];
