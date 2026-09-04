@@ -292,7 +292,7 @@ describe('observability-event-store', () => {
 		const db = getProjectDb(dir);
 		db.run(
 			'INSERT INTO observability_sink_health (id, accepted, quarantined, dropped, updated_at) VALUES (1, 10, 2, 1, ?)',
-			[new Date().toISOString()],
+			['2026-01-01T00:00:00.000Z'],
 		);
 		appendObservabilityEventDb(dir, sampleCanonical());
 		const health = readObservabilitySinkHealth(dir);
