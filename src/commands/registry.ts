@@ -267,7 +267,20 @@ export async function handleHelpCommand(ctx: CommandContext): Promise<string> {
 	const resolved = _internals.resolveCommand(tokens);
 
 	if (resolved) {
-		return _internals.buildDetailedHelp(resolved.key, resolved.entry);
+		const detailed = _internals.buildDetailedHelp(resolved.key, resolved.entry);
+		// #2493 review F-08: resolveCommand returns the DEREFERENCED canonical
+		// entry, so `/swarm help plan` printed the alias key as the title with
+		// the canonical command's description/details and no hint they differ.
+		// When the typed key is itself a pure alias, say so explicitly.
+		const originalEntry = COMMAND_REGISTRY[
+			resolved.key as keyof typeof COMMAND_REGISTRY
+		] as CommandEntry | undefined;
+		const aliasTarget = originalEntry?.handler
+			? undefined
+			: originalEntry?.aliasOf;
+		return aliasTarget
+			? `${detailed}\n\n> Note: \`/swarm ${resolved.key}\` is a deprecated alias for \`/swarm ${aliasTarget}\`.`
+			: detailed;
 	}
 
 	// Command not found - suggest similar commands
@@ -733,11 +746,12 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'agent',
 		toolNoArgs: true,
 	},
-	// Alias for the hyphenated form '/swarm doctor-tools'. Without it,
-	// resolveCommand(['doctor-tools']) returns null and the TUI shows
-	// "command not found". NOTE: aliasOf is warning text only — resolveCommand
-	// invokes this entry's OWN handler, so the handler must be set here (mirrors
-	// the 'config-doctor' alias above).
+	// Pure alias for the hyphenated form '/swarm doctor-tools' (canonical:
+	// 'doctor tools'). Without it, resolveCommand(['doctor-tools']) returns
+	// null and the TUI shows "command not found". #2493 converted this entry
+	// to aliasOf with NO handler — resolveRegistryEntry dereferences the alias
+	// chain to the canonical handler-bearing entry (mirrors the 'config-doctor'
+	// alias above).
 	'doctor-tools': {
 		description: 'Run tool registration coherence check',
 		category: 'diagnostics',
@@ -780,12 +794,13 @@ export const COMMAND_REGISTRY = {
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},
-	// Alias for TUI shortcut 'swarm-guardrail-explain' which extracts the
-	// subcommand as the single dash token 'guardrail-explain'. Without this alias
-	// resolveCommand(['guardrail-explain']) returns null and the TUI shows
-	// "command not found" (mirrors the 'config-doctor'/'doctor-tools' pattern).
-	// aliasOf is warning text only — resolveCommand invokes this entry's OWN
-	// handler, so the handler must be set here.
+	// Pure alias for TUI shortcut 'swarm-guardrail-explain' which extracts the
+	// subcommand as the single dash token 'guardrail-explain' (canonical:
+	// 'guardrail explain'). Without this alias resolveCommand
+	// (['guardrail-explain']) returns null and the TUI shows "command not
+	// found" (mirrors the 'config-doctor'/'doctor-tools' pattern). #2493
+	// converted this entry to aliasOf with NO handler — resolveRegistryEntry
+	// dereferences to the canonical handler-bearing entry.
 	'guardrail-explain': {
 		description:
 			'Dry-run: show what the guardrails would do to a command or write target (executes nothing)',
@@ -842,6 +857,8 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Show performance metrics [--cumulative] [--ci-gate] [--max-cost-usd <n>] [--gate-audit-run <id>]',
 		args: '--cumulative, --ci-gate, --max-cost-usd <n>, --gate-audit-run <id>',
+		details:
+			'Exit codes (#2493 review F-14): with --ci-gate, the process exits 0 only when every quality check passes and 1 on any failure, budget breach, or missing evidence — CI-safe by construction. Without --ci-gate the command is informational and always exits 0.',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},

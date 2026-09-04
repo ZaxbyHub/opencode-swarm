@@ -357,7 +357,15 @@ async function install(): Promise<number> {
 	}
 
 	// Add plugin to OpenCode config (note: 'plugin' not 'plugins')
-	if (!opencodeConfig.plugin) {
+	// #2493 review: a truthy-but-wrong-type `plugin` field (string, object)
+	// passed the falsy guard and crashed the `.filter()` below in strict
+	// mode. Treat any non-array as malformed and replace it, loudly.
+	if (!Array.isArray(opencodeConfig.plugin)) {
+		if (opencodeConfig.plugin) {
+			console.warn(
+				`⚠ opencode.json "plugin" field has an unexpected type (${typeof opencodeConfig.plugin}); replacing it with a plugin array.`,
+			);
+		}
 		opencodeConfig.plugin = [];
 	}
 
@@ -377,20 +385,35 @@ async function install(): Promise<number> {
 	// block already carries an EXPLICIT `disable` value (including `false`,
 	// i.e. the user re-enabled it), leave it untouched. Only set `disable:
 	// true` when the key is absent (fresh install) or the block is missing /
-	// malformed (null, false, string — replaced safely to avoid corruption).
-	if (!opencodeConfig.agent) {
+	// malformed (null, false, string, array — replaced safely to avoid
+	// corruption; #2493 review: arrays are typeof 'object', so they must be
+	// excluded explicitly or `agent.explore: ["a"]` spreads into
+	// `{0: 'a', disable: true}`).
+	const agentIsRecord =
+		typeof opencodeConfig.agent === 'object' &&
+		opencodeConfig.agent !== null &&
+		!Array.isArray(opencodeConfig.agent);
+	if (!agentIsRecord) {
+		if (opencodeConfig.agent) {
+			console.warn(
+				`⚠ opencode.json "agent" field has an unexpected type (${Array.isArray(opencodeConfig.agent) ? 'array' : typeof opencodeConfig.agent}); replacing it with agent overrides.`,
+			);
+		}
 		opencodeConfig.agent = {};
 	}
+	const agentRecord = opencodeConfig.agent as Record<string, unknown>;
 	for (const builtinAgent of ['explore', 'general'] as const) {
-		const existing = opencodeConfig.agent[builtinAgent];
+		const existing = agentRecord[builtinAgent];
 		const existingRecord =
-			typeof existing === 'object' && existing !== null
+			typeof existing === 'object' &&
+			existing !== null &&
+			!Array.isArray(existing)
 				? (existing as Record<string, unknown>)
 				: null;
 		if (existingRecord && existingRecord.disable !== undefined) {
 			continue;
 		}
-		opencodeConfig.agent[builtinAgent] = {
+		agentRecord[builtinAgent] = {
 			...(existingRecord ?? {}),
 			disable: true,
 		};
@@ -721,8 +744,20 @@ async function uninstall(): Promise<number> {
 			}
 		}
 
-		// If config has no plugin array or it's empty
-		if (!opencodeConfig.plugin || opencodeConfig.plugin.length === 0) {
+		// If config has no plugin array or it's empty. #2493 review: a
+		// truthy-but-wrong-type `plugin` field (string, object) crashed the
+		// `.filter()` below in strict mode — refuse instead of mutating a
+		// config we cannot interpret.
+		if (!Array.isArray(opencodeConfig.plugin)) {
+			if (opencodeConfig.plugin) {
+				console.warn(
+					'⚠ opencode.json "plugin" field has an unexpected type (expected array); refusing to modify it.',
+				);
+			}
+			console.log('⚠ opencode-swarm is not installed (no plugins configured).');
+			return 0;
+		}
+		if (opencodeConfig.plugin.length === 0) {
 			console.log('⚠ opencode-swarm is not installed (no plugins configured).');
 			return 0;
 		}
@@ -742,8 +777,13 @@ async function uninstall(): Promise<number> {
 		// Update config and save
 		opencodeConfig.plugin = filteredPlugins;
 
-		// Remove the disabled agent overrides
-		if (opencodeConfig.agent) {
+		// Remove the disabled agent overrides. Skip wrong-type agent blocks
+		// (same malformed-config policy as the plugin field above).
+		if (
+			typeof opencodeConfig.agent === 'object' &&
+			opencodeConfig.agent !== null &&
+			!Array.isArray(opencodeConfig.agent)
+		) {
 			delete opencodeConfig.agent.explore;
 			delete opencodeConfig.agent.general;
 
@@ -789,6 +829,31 @@ async function uninstall(): Promise<number> {
 				} else {
 					fs.rmSync(canonical, { recursive: true });
 					console.log(`✓ Removed custom prompts: ${canonical}`);
+					cleaned = true;
+				}
+			}
+
+			// #2493 review: remove the install-time config backup too. It is a
+			// byte copy of the user's opencode.json and may contain secrets
+			// (e.g. env blocks), so an uninstall that cleans the primary
+			// config must not leave an unmanaged copy behind.
+			const backupPath = path.join(
+				CONFIG_DIR,
+				'opencode.swarm-install-backup.json',
+			);
+			if (fs.existsSync(backupPath)) {
+				const canonical = safeRealpathSync(backupPath, backupPath);
+				if (
+					canonical === null ||
+					path.basename(canonical) !== 'opencode.swarm-install-backup.json' ||
+					path.basename(path.dirname(canonical)) !== path.basename(CONFIG_DIR)
+				) {
+					console.log(
+						`✗ Refused to remove install backup (failed safety check): ${canonical ?? backupPath}`,
+					);
+				} else {
+					fs.unlinkSync(canonical);
+					console.log(`✓ Removed install backup: ${canonical}`);
 					cleaned = true;
 				}
 			}

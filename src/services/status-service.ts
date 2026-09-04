@@ -80,6 +80,7 @@ export const _internals = {
 	getActiveFullAutoSessionID,
 	loadFullAutoRunState,
 	summarizeTelemetryCosts,
+	renderNoActivePlanStatusTail,
 };
 
 const MAX_TRACKED_TELEMETRY_COST_SUMMARIES = 32;
@@ -1494,6 +1495,98 @@ function renderBackgroundWorkLines(
 }
 
 /**
+ * No-active-plan status tail (#853 Layer C, #2493 W9b, #2034/#1659): spec
+ * drift, decision drift, and delegation-ledger health must COMPOSE — none of
+ * the three signals may suppress another. Extracted from
+ * handleStatusCommand so the composition is directly unit-testable
+ * (#2493 review: the old inline decision-drift early-return silently
+ * suppressed the ledger-health block when both signals coexisted).
+ */
+function renderNoActivePlanStatusTail(statusData: StatusData): string {
+	const decisionDriftLines = formatDecisionDriftLines(statusData.decisionDrift);
+	if (statusData.specStale) {
+		const reason =
+			statusData.specStaleReason ?? 'spec.md changed since plan saved';
+		const stored = statusData.specStaleStoredHash ?? 'unknown';
+		const current = statusData.specStaleCurrentHash ?? '(spec.md missing)';
+		return [
+			'No active swarm plan found.',
+			'',
+			`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
+			'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
+			...(decisionDriftLines ?? []),
+		].join('\n');
+	}
+	// #2034 / #1659: a delegation-ledger incident must stay visible even
+	// without an active plan — but only when there is something to say, so
+	// the clean-repo output stays byte-identical (pinned by existing tests).
+	const delegationHealth = statusData.delegationLedgerHealth;
+	if (
+		delegationHealth &&
+		(delegationHealth.checkpoint ||
+			delegationHealth.recovery ||
+			delegationHealth.lastUncertainty ||
+			delegationHealth.ledger.band !== 'ok' ||
+			delegationHealth.counts.activeOwners > 0 ||
+			delegationHealth.counts.pendingAdvisories > 0 ||
+			delegationHealth.counts.lateTerminals > 0 ||
+			delegationHealth.counts.orphanWorktreeOwners > 0)
+	) {
+		const lines = [
+			'No active swarm plan found.',
+			'',
+			'**Background Delegations**:',
+		];
+		lines.push(
+			`  - Ledger tail: ${formatLedgerBytes(delegationHealth.ledger.bytes)} / ${formatLedgerBytes(
+				delegationHealth.ledger.limitBytes,
+			)} recovery bound (${delegationHealth.ledger.pressurePct}% — ${delegationHealth.ledger.band})`,
+		);
+		if (delegationHealth.checkpoint) {
+			lines.push(
+				`  - Checkpoint #${delegationHealth.checkpoint.sequence} (${delegationHealth.checkpoint.liveRecords} live, ${delegationHealth.checkpoint.closedSummaries} archived)`,
+			);
+		}
+		if (delegationHealth.recovery) {
+			lines.push(
+				`  - Recovery: ${delegationHealth.recovery.source} (${delegationHealth.recovery.ok ? 'ok' : `FAILED: ${delegationHealth.recovery.reason ?? 'uncertain'}`})`,
+			);
+		}
+		const compactCounts = delegationHealth.counts;
+		if (
+			compactCounts.activeOwners > 0 ||
+			compactCounts.pendingAdvisories > 0 ||
+			compactCounts.lateTerminals > 0 ||
+			compactCounts.orphanWorktreeOwners > 0
+		) {
+			lines.push(
+				`  - Live set: ${compactCounts.activeOwners} active owners, ${compactCounts.pendingAdvisories} pending advisories, ${compactCounts.lateTerminals} late terminals, ${compactCounts.orphanWorktreeOwners} unsettled worktree owners`,
+			);
+		}
+		if (delegationHealth.lastUncertainty) {
+			lines.push(
+				`  - ⚠ Last uncertainty (${new Date(delegationHealth.lastUncertainty.at).toISOString()}): ${delegationHealth.lastUncertainty.reason}`,
+			);
+			if (delegationHealth.lastUncertainty.repairHint) {
+				lines.push(
+					`    repair: ${delegationHealth.lastUncertainty.repairHint}`,
+				);
+			}
+		}
+		// Decision drift composes with (never replaces) the ledger-health
+		// signal — same pattern as the specStale branch above.
+		lines.push(...(decisionDriftLines ?? []));
+		return lines.join('\n');
+	}
+	if (decisionDriftLines) {
+		return ['No active swarm plan found.', '', ...decisionDriftLines].join(
+			'\n',
+		);
+	}
+	return 'No active swarm plan found.';
+}
+
+/**
  * Handle status command - delegates to service and formats output.
  * Kept for backward compatibility - thin adapter.
  */
@@ -1523,86 +1616,7 @@ export async function handleStatusCommand(
 		// /swarm status never hides the staleness signal that gates writes.
 		// #2493 W9b: decision drift rides along (and renders standalone below)
 		// for the same reason.
-		const decisionDriftLines = formatDecisionDriftLines(
-			statusData.decisionDrift,
-		);
-		if (statusData.specStale) {
-			const reason =
-				statusData.specStaleReason ?? 'spec.md changed since plan saved';
-			const stored = statusData.specStaleStoredHash ?? 'unknown';
-			const current = statusData.specStaleCurrentHash ?? '(spec.md missing)';
-			return [
-				'No active swarm plan found.',
-				'',
-				`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
-				'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
-				...(decisionDriftLines ?? []),
-			].join('\n');
-		}
-		if (decisionDriftLines) {
-			return ['No active swarm plan found.', '', ...decisionDriftLines].join(
-				'\n',
-			);
-		}
-		// #2034 / #1659: a delegation-ledger incident must stay visible even
-		// without an active plan — but only when there is something to say, so
-		// the clean-repo output stays byte-identical (pinned by existing tests).
-		const delegationHealth = statusData.delegationLedgerHealth;
-		if (
-			delegationHealth &&
-			(delegationHealth.checkpoint ||
-				delegationHealth.recovery ||
-				delegationHealth.lastUncertainty ||
-				delegationHealth.ledger.band !== 'ok' ||
-				delegationHealth.counts.activeOwners > 0 ||
-				delegationHealth.counts.pendingAdvisories > 0 ||
-				delegationHealth.counts.lateTerminals > 0 ||
-				delegationHealth.counts.orphanWorktreeOwners > 0)
-		) {
-			const lines = [
-				'No active swarm plan found.',
-				'',
-				'**Background Delegations**:',
-			];
-			lines.push(
-				`  - Ledger tail: ${formatLedgerBytes(delegationHealth.ledger.bytes)} / ${formatLedgerBytes(
-					delegationHealth.ledger.limitBytes,
-				)} recovery bound (${delegationHealth.ledger.pressurePct}% — ${delegationHealth.ledger.band})`,
-			);
-			if (delegationHealth.checkpoint) {
-				lines.push(
-					`  - Checkpoint #${delegationHealth.checkpoint.sequence} (${delegationHealth.checkpoint.liveRecords} live, ${delegationHealth.checkpoint.closedSummaries} archived)`,
-				);
-			}
-			if (delegationHealth.recovery) {
-				lines.push(
-					`  - Recovery: ${delegationHealth.recovery.source} (${delegationHealth.recovery.ok ? 'ok' : `FAILED: ${delegationHealth.recovery.reason ?? 'uncertain'}`})`,
-				);
-			}
-			const compactCounts = delegationHealth.counts;
-			if (
-				compactCounts.activeOwners > 0 ||
-				compactCounts.pendingAdvisories > 0 ||
-				compactCounts.lateTerminals > 0 ||
-				compactCounts.orphanWorktreeOwners > 0
-			) {
-				lines.push(
-					`  - Live set: ${compactCounts.activeOwners} active owners, ${compactCounts.pendingAdvisories} pending advisories, ${compactCounts.lateTerminals} late terminals, ${compactCounts.orphanWorktreeOwners} unsettled worktree owners`,
-				);
-			}
-			if (delegationHealth.lastUncertainty) {
-				lines.push(
-					`  - ⚠ Last uncertainty (${new Date(delegationHealth.lastUncertainty.at).toISOString()}): ${delegationHealth.lastUncertainty.reason}`,
-				);
-				if (delegationHealth.lastUncertainty.repairHint) {
-					lines.push(
-						`    repair: ${delegationHealth.lastUncertainty.repairHint}`,
-					);
-				}
-			}
-			return lines.join('\n');
-		}
-		return 'No active swarm plan found.';
+		return _internals.renderNoActivePlanStatusTail(statusData);
 	}
 
 	return formatStatusMarkdown(statusData);

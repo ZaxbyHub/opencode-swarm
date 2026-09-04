@@ -93,9 +93,12 @@ describe('CLI/library parity (issue #2493, #1646 residual)', () => {
 			try {
 				const r = await runCLI(['run', 'benchmark', '--ci-gate'], cwd);
 				expect(r.exitCode).toBe(1);
-				expect(r.stdout + r.stderr).toContain('FAILED');
+				// #2493 review F-04: CommandFailure TEXT rides stdout (console.log
+				// in run()); only diagnostics ride stderr. Pin the exact stream.
+				expect(r.stdout).toContain('FAILED');
+				expect(r.stderr).not.toContain('FAILED');
 			} finally {
-				(await import('node:fs/promises')).rm(cwd, {
+				await (await import('node:fs/promises')).rm(cwd, {
 					recursive: true,
 					force: true,
 				});
@@ -107,7 +110,9 @@ describe('CLI/library parity (issue #2493, #1646 residual)', () => {
 			try {
 				const r = await runCLI(['run', 'qzxwv'], cwd);
 				expect(r.exitCode).toBe(1);
-				expect(r.stdout + r.stderr).not.toContain('Did you mean');
+				// #2493 review F-04: the not-found message is a stderr diagnostic.
+				expect(r.stderr).toContain('not found');
+				expect(r.stderr).not.toContain('Did you mean');
 			} finally {
 				await (await import('node:fs/promises')).rm(cwd, {
 					recursive: true,
@@ -121,7 +126,9 @@ describe('CLI/library parity (issue #2493, #1646 residual)', () => {
 			try {
 				const typo = await runCLI(['run', 'statu'], cwd);
 				expect(typo.exitCode).toBe(1);
-				expect(typo.stdout + typo.stderr).toContain('Did you mean');
+				// #2493 review F-04: suggestions and deprecation warnings are
+				// stderr-only diagnostics — assert the exact stream.
+				expect(typo.stderr).toContain('Did you mean');
 
 				const alias = await runCLI(['run', 'plan'], cwd);
 				expect(alias.stderr).toContain('deprecated');

@@ -78,7 +78,17 @@ export interface ContextDecision {
  */
 export function extractContextDecisions(content: string): ContextDecision[] {
 	const decisions: ContextDecision[] = [];
-	const lines = content.split('\n');
+	// #2493 review F-12: bound the whole-input split. Context files are
+	// human-authored plan markdown (writers bound them far below this); a
+	// larger input is treated as pathological and scanned as a capped prefix
+	// instead of ballooning into an unbounded line array. The regexes below
+	// are linear-time, so the scan itself was never ReDoS-susceptible.
+	const MAX_CONTENT_CHARS = 1_000_000;
+	const bounded =
+		content.length > MAX_CONTENT_CHARS
+			? content.slice(0, MAX_CONTENT_CHARS)
+			: content;
+	const lines = bounded.split('\n');
 	let inDecisionsSection = false;
 	let currentPhase: number | null = null;
 	let lineNumber = 0;

@@ -3,6 +3,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleBenchmarkCommand } from '../../../src/commands/benchmark';
+import { isCommandFailure } from '../../../src/commands/registry';
 import { saveEvidence } from '../../../src/evidence/manager';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { resultText } from '../../helpers/benchmark-result-text.js';
@@ -372,8 +373,9 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
+			// F-02: pin the string half of the CommandResult union (exit-0 path).
+			expect(isCommandFailure(result)).toBe(false);
 			expect(resultText(result)).toContain('✅ PASSED');
-			// All quality checks should pass
 			expect(resultText(result)).toContain('Complexity Delta: 3 <= 5 ✅');
 			expect(resultText(result)).toContain('Public API Delta: 5 <= 10 ✅');
 			expect(resultText(result)).toContain('Duplication Ratio: 2% <= 5% ✅');
@@ -499,7 +501,6 @@ describe('CI Gate Quality Checks', () => {
 				/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
 			);
 			expect(jsonMatch).not.toBeNull();
-			// Should not throw
 			expect(() => JSON.parse(jsonMatch![1])).not.toThrow();
 		});
 
@@ -535,7 +536,6 @@ describe('CI Gate Quality Checks', () => {
 			const parsed = JSON.parse(jsonMatch![1]);
 			// Should have 8 checks now (4 original + 4 quality)
 			expect(parsed.ci_gate.checks).toHaveLength(8);
-			// Verify all quality check names
 			const checkNames = parsed.ci_gate.checks.map(
 				(c: { name: string }) => c.name,
 			);

@@ -9,6 +9,7 @@ import {
 	saveLeanTurboRunState,
 } from '../turbo/lean/state';
 import * as logger from '../utils/logger';
+import { stripControlCharacters } from '../utils/sanitize-display.js';
 import { TURBO_BYPASS_DISCLOSURE } from './turbo-constants.js';
 
 /**
@@ -168,6 +169,27 @@ export async function handleTurboCommand(
 		return `Turbo Mode enabled (standard). ${TURBO_BYPASS_DISCLOSURE}`;
 	}
 
+	// --- turbo standard (no second arg): toggle standard ---
+	// #2493 review: the help text and JSDoc advertise `standard [on|off]`,
+	// and bare `lean` / bare `epic` both toggle — bare `standard` used to
+	// fall through to the unknown-argument rejection instead.
+	if (arg0 === 'standard' && arg1 === undefined) {
+		const isStandardActive =
+			session.turboMode === true && session.turboStrategy === 'standard';
+		if (isStandardActive) {
+			disableTurbo('/swarm turbo standard (toggle off)');
+			return 'Turbo Mode disabled';
+		}
+		if (isLeanActive) {
+			disableTurbo('/swarm turbo standard (switching from lean)');
+		}
+		session.turboMode = true;
+		session.turboStrategy = 'standard';
+		session.leanTurboActive = false;
+		session.leanTurboCurrentPhase = undefined;
+		return `Turbo Mode enabled (standard). ${TURBO_BYPASS_DISCLOSURE}`;
+	}
+
 	// --- turbo lean on ---
 	if (arg0 === 'lean' && arg1 === 'on') {
 		return enableLeanTurbo(session, directory, sessionID);
@@ -256,10 +278,10 @@ export async function handleTurboCommand(
 	// standard/epic) carried a bad second argument, that second token is the
 	// unknown one — printing args[0] would name a valid subcommand (#2493).
 	const MODE_SUBCOMMANDS = new Set(['lean', 'standard', 'epic']);
-	const attempted = (
+	const attempted = stripControlCharacters(
 		arg0 !== undefined && MODE_SUBCOMMANDS.has(arg0) && arg1 !== undefined
 			? arg1
-			: (arg0 ?? '')
+			: (arg0 ?? ''),
 	).slice(0, 100);
 	return (
 		`Unknown turbo argument "${attempted}". Turbo state is unchanged.\n` +

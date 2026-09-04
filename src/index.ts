@@ -3036,8 +3036,13 @@ async function initializeOpenCodeSwarm(
 						'Use /swarm show-plan to view or filter the current execution plan',
 				},
 				'swarm-plan': {
-					template: '/swarm plan $ARGUMENTS',
-					description: 'Deprecated alias for /swarm show-plan',
+					// #2493 review F-06: the palette previously typed the
+					// deprecated alias `/swarm plan`; point the template at the
+					// canonical command while keeping the shortcut key stable
+					// for existing muscle memory and parity snapshots.
+					template: '/swarm show-plan $ARGUMENTS',
+					description:
+						'Deprecated alias for /swarm show-plan (runs the canonical command)',
 				},
 				'swarm-agents': {
 					template: '/swarm agents',

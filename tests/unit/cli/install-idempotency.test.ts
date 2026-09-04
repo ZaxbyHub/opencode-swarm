@@ -168,4 +168,71 @@ describe('CLI install idempotency (issue #2493)', () => {
 		expect(parsed.plugin).toContain('opencode-swarm');
 		expect(await readFile(backupPath, 'utf-8')).toBe('{ this is not json');
 	});
+
+	// #2493 review F-01: arrays are typeof 'object', so an array-valued agent
+	// entry slipped past the record check and spread into `{0: 'a', ...}`.
+	test('array-valued agent entry is replaced, not record-corrupted', async () => {
+		const opencodeJsonPath = join(tempDir, 'opencode', 'opencode.json');
+		await writeFile(opencodeJsonPath, '{"agent":{"explore":["a","b"]}}');
+
+		const result = await runCLI(['install'], { XDG_CONFIG_HOME: tempDir });
+		expect(result.exitCode).toBe(0);
+
+		const parsed = JSON.parse(await readFile(opencodeJsonPath, 'utf-8'));
+		expect(parsed.agent.explore).toEqual({ disable: true });
+	});
+
+	// #2493 review (PR comment): a truthy-but-wrong-type agent BLOCK used to
+	// crash the installer in strict mode (property assignment on a primitive).
+	test('wrong-type agent block warns and is replaced', async () => {
+		const opencodeJsonPath = join(tempDir, 'opencode', 'opencode.json');
+		await writeFile(opencodeJsonPath, '{"agent":"legacy"}');
+
+		const result = await runCLI(['install'], { XDG_CONFIG_HOME: tempDir });
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toContain('unexpected type');
+
+		const parsed = JSON.parse(await readFile(opencodeJsonPath, 'utf-8'));
+		expect(parsed.agent.explore).toEqual({ disable: true });
+		expect(parsed.agent.general).toEqual({ disable: true });
+	});
+
+	// #2493 review (PR comment): a truthy-but-wrong-type plugin field used to
+	// crash the `.filter()` call in strict mode.
+	test('wrong-type plugin field warns and is replaced with a plugin array', async () => {
+		const opencodeJsonPath = join(tempDir, 'opencode', 'opencode.json');
+		await writeFile(opencodeJsonPath, '{"plugin":"opencode-swarm"}');
+
+		const result = await runCLI(['install'], { XDG_CONFIG_HOME: tempDir });
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toContain('unexpected type');
+
+		const parsed = JSON.parse(await readFile(opencodeJsonPath, 'utf-8'));
+		expect(Array.isArray(parsed.plugin)).toBe(true);
+		expect(parsed.plugin).toContain('opencode-swarm');
+	});
+
+	// #2493 review: `uninstall --clean` must remove the install backup — it is
+	// a byte copy of opencode.json and may hold user secrets.
+	test('uninstall --clean removes the install backup file', async () => {
+		const opencodeJsonPath = join(tempDir, 'opencode', 'opencode.json');
+		const backupPath = join(
+			tempDir,
+			'opencode',
+			'opencode.swarm-install-backup.json',
+		);
+		await writeFile(opencodeJsonPath, '{"plugin":["other-plugin"]}');
+		const installResult = await runCLI(['install'], {
+			XDG_CONFIG_HOME: tempDir,
+		});
+		expect(installResult.exitCode).toBe(0);
+		expect(existsSync(backupPath)).toBe(true);
+
+		const result = await runCLI(['uninstall', '--clean'], {
+			XDG_CONFIG_HOME: tempDir,
+		});
+		expect(result.exitCode).toBe(0);
+		expect(existsSync(backupPath)).toBe(false);
+		expect(result.stdout).toContain('Removed install backup');
+	});
 });

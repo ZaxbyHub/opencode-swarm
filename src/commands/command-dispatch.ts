@@ -3,6 +3,7 @@ import type { AutoReviewConfig, PluginConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
 import type { ReviewAgentModelRegistry } from '../review/runtime.js';
+import { stripControlCharacters } from '../utils/sanitize-display.js';
 import {
 	_internals,
 	COMMAND_REGISTRY,
@@ -81,11 +82,15 @@ export function formatCommandNotFound(tokens: string[]): string {
 	// Coerce: adversarial callers can pass non-string tokens (numbers, null,
 	// booleans) through argv-shaped inputs; everything downstream is string-typed.
 	const attemptedCommand = String(tokens[0]);
+	// Strip control characters (#2493 review F-11): the token is interpolated
+	// into a single-line chat/CLI message, and raw control bytes would corrupt
+	// terminal rendering.
+	const sanitized = stripControlCharacters(attemptedCommand);
 	const MAX_DISPLAY = 100;
 	const displayCommand =
-		attemptedCommand.length > MAX_DISPLAY
-			? `${attemptedCommand.slice(0, MAX_DISPLAY)}...`
-			: attemptedCommand;
+		sanitized.length > MAX_DISPLAY
+			? `${sanitized.slice(0, MAX_DISPLAY)}...`
+			: sanitized;
 	// Match against the bounded form so oversized inputs never reach the
 	// per-command levenshtein loop (findSimilarCommands' own 500-char guard
 	// fires only AFTER that O(N×Q) work).
