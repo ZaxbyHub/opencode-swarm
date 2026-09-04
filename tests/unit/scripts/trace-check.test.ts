@@ -238,6 +238,28 @@ describe('trace-check.sh identities, handshake, and early phases', () => {
 		expect(result.out).toContain('WARN');
 	}, 20_000);
 
+	test('phase 2 rejects an ALREADY_FIXED artifact with no ## Fixing Change heading', () => {
+		const worktree = repo();
+		const dir = trace(worktree);
+		writeState(worktree, dir, { classification: 'ALREADY_FIXED' });
+		const body =
+			'## Commands Tried\n```text\nrun\n```\n- Exit code: 1\n## Reproduction Verdict\nred\n';
+		fs.writeFileSync(path.join(dir, '02-reproduction.md'), body);
+		let result = run(worktree, ['phase', '2', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain('FAIL heading-Fixing Change');
+
+		// The identical artifact passes once the heading is present, so the
+		// failure above is the ALREADY_FIXED branch and not an unrelated rule.
+		fs.writeFileSync(
+			path.join(dir, '02-reproduction.md'),
+			`${body}## Fixing Change\nfixed upstream in abc1234\n`,
+		);
+		result = run(worktree, ['phase', '2', '--slug', 'issue-1']);
+		expect(result.code).toBe(0);
+		expect(result.out).toContain('OK heading-Fixing Change');
+	}, 20_000);
+
 	test('phase 0 freshness accepts only synced or a valid override, rejects behind/banana', () => {
 		const worktree = repo();
 		const dir = trace(worktree);

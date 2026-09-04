@@ -72,7 +72,7 @@ function reproduction(dir: string, rows: string) {
 function manifest(dir: string, paths = ['subject.txt']) {
 	fs.writeFileSync(
 		path.join(dir, 'repro/checkpoint.manifest'),
-		`# issue-tracer checkpoint manifest v1\n1\tCHECKPOINT\t${paths[0]}\t${'a'.repeat(40)}\t100644\tC1\tcmd\t-\t${'b'.repeat(40)}\t-\n`,
+		`# issue-tracer checkpoint manifest v1 rows=1\n1\tCHECKPOINT\t${paths[0]}\t${'a'.repeat(40)}\t100644\tC1\tcmd\t-\t${'b'.repeat(40)}\t-\n`,
 	);
 }
 function replaceTree(dir: string, tree: string) {
@@ -126,6 +126,18 @@ describe('trace-check.sh later phases', () => {
 		result = run(worktree, ['phase', '2.5', '--slug', 'issue-1']);
 		expect(result.out).toContain('FAIL base-log-C1');
 		fs.writeFileSync(path.join(dir, 'repro/C1.base.log'), 'fail\n');
+		// A manifest that EXISTS but carries a legacy header with no count is
+		// rejected too, not just a missing one: repro-check.sh refuses that
+		// header (it would otherwise be a one-line way to switch its row-count
+		// check off), so trace-check must not report the same file as OK.
+		fs.writeFileSync(
+			path.join(dir, 'repro/checkpoint.manifest'),
+			'# issue-tracer checkpoint manifest v1\n',
+		);
+		result = run(worktree, ['phase', '2.5', '--slug', 'issue-1']);
+		expect(result.out).toContain('FAIL checkpoint-manifest');
+		expect(result.out).not.toContain('OK checkpoint-manifest');
+
 		fs.rmSync(path.join(dir, 'repro/checkpoint.manifest'));
 		result = run(worktree, ['phase', '2.5', '--slug', 'issue-1']);
 		expect(result.out).toContain('FAIL checkpoint-manifest');

@@ -328,7 +328,12 @@ EOF
   checkpoint="$(grep '^checkpoint-tree-id: ' "$file" 2>/dev/null | head -n1 | sed 's/^checkpoint-tree-id: //')"
   is_hex "$checkpoint" && [ "$checkpoint" = "$(state_value checkpoint-tree-id)" ] && rule_ok red-checkpoint || rule_bad red-checkpoint "state binding missing or invalid"
   manifest_path="$trace/repro/checkpoint.manifest"
-  [ -f "$manifest_path" ] && grep -Fx '# issue-tracer checkpoint manifest v1' "$manifest_path" >/dev/null 2>&1 && rule_ok checkpoint-manifest || { rule_bad checkpoint-manifest "missing or invalid"; return; }
+  # Header shape only - repro-check.sh owns full validation (row count, seq
+  # run, field count). The `rows=<N>` suffix is required, matching the fact
+  # that repro-check refuses a header with no count; awk rather than a
+  # `head | grep -q` pipeline so no SIGPIPE can decide the verdict, and the
+  # END guard makes an empty manifest fail instead of vacuously passing.
+  [ -f "$manifest_path" ] && awk 'NR == 1 { if ($0 ~ /^# issue-tracer checkpoint manifest v1 rows=[0-9]+$/) exit 0; exit 1 } END { if (NR == 0) exit 1 }' "$manifest_path" && rule_ok checkpoint-manifest || { rule_bad checkpoint-manifest "missing or invalid"; return; }
   diff_path="$(git diff-tree -r --name-only "$(state_value phase0-tree-id)" "$checkpoint" 2>/dev/null || true)"
   while IFS= read -r check; do
     [ -z "$check" ] && continue

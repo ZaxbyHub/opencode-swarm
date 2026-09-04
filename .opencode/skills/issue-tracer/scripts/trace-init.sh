@@ -218,7 +218,11 @@ if { [ -e "$manifest_file" ] && [ ! -f "$manifest_file" ]; } || [ -L "$manifest_
   exit 2
 fi
 if [ ! -e "$manifest_file" ]; then
-  printf '%s\n' '# issue-tracer checkpoint manifest v1' > "$manifest_file"
+  # The header carries the expected data-row count, restamped by every
+  # `repro-check.sh checkpoint` append. Seeding it without `rows=0` would make
+  # repro-check refuse the manifest: a header with no count is rejected there so it
+  # cannot be used to disable the count check (see validate_manifest).
+  printf '%s\n' '# issue-tracer checkpoint manifest v1 rows=0' > "$manifest_file"
 fi
 
 echo "trace-init: created $trace_dir"

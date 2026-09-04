@@ -181,7 +181,7 @@ describe('trace-init.sh — issue-tracer trace directory setup (PR #1880 review)
 		expect(fs.existsSync(path.join(trace, 'repro'))).toBe(true);
 		expect(
 			fs.readFileSync(path.join(trace, 'repro/checkpoint.manifest'), 'utf-8'),
-		).toBe('# issue-tracer checkpoint manifest v1\n');
+		).toBe('# issue-tracer checkpoint manifest v1 rows=0\n');
 	});
 
 	test('is idempotent — a second run does not clobber an edited state.md', async () => {

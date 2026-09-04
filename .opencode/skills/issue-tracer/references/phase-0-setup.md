@@ -45,7 +45,7 @@ Risk triggers (any one escalates to at least M): auth/identity/sessions/permissi
 
 ## Ledger schema (`state.md`)
 
-Seeded by `trace-init.sh` and updated by the agent at every phase boundary; validated (never mutated) by `trace-check.sh`. Fourteen fixed `key: value` lines in this exact order, followed by a `## Gates` table:
+Seeded by `trace-init.sh` and updated by the agent at every phase boundary; validated (never mutated) by `trace-check.sh`. Thirteen fixed `key: value` lines in this exact order, followed by a `## Gates` table:
 
 ```
 # Trace State: <slug>

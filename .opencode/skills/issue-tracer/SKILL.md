@@ -27,7 +27,7 @@ This contract is MANDATORY and blocking in every implementation mode. Closure is
 5. **Class eradication.** Phase 4.2 characterizes the defect class, sweeps the codebase, dispositions every hit, and installs a demonstrated guardrail.
 6. **Acceptance criteria closed.** Every acceptance criterion is re-verified at closure with concrete evidence.
 7. **Evidence over assertion, SHA-bound.** Every "passed"/"verified" claim cites command and output; every review verdict records the exact commit SHA and tree-id it examined, and closure requires the final approval identity to equal what ships.
-8. **Anti-tampering.** Once the Phase 2.5 red checkpoint is frozen, the acceptance checks may not be weakened, skipped, or deleted; any legitimate change goes through the checkpoint manifest as a recorded amendment.
+8. **Anti-tampering.** Once the Phase 2.5 red checkpoint is frozen, weakening, skipping, or deleting an acceptance check is a contract violation; any legitimate change goes through the checkpoint manifest as an `AMEND` row with a closed reason. `repro-check.sh` enforces three properties only - it refuses to re-freeze an already-frozen path, and it rejects a manifest whose row count differs from the count recorded in its header or whose `seq` column is not contiguous - which close deletion, truncation, reordering, and silent re-freeze. They are within-file, shape-only checks: editing a blob id in place, or deleting the manifest and re-running the freeze, is NOT detected, because nothing yet binds the file to anything outside the agent-writable trace directory. The manifest is evidence a reviewer re-runs and reads, never a mechanism that prevents weakening.
 
 ## Gate Table
 

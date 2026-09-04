@@ -4,7 +4,7 @@ Use these templates to keep the investigation auditable and resumable. In compac
 
 ## `state.md`
 
-Seeded by `trace-init.sh`, updated by the agent at phase boundaries, validated (never mutated) by `trace-check.sh`. Fourteen fixed `key: value` lines in this exact order, then a `## Gates` table:
+Seeded by `trace-init.sh`, updated by the agent at phase boundaries, validated (never mutated) by `trace-check.sh`. Thirteen fixed `key: value` lines in this exact order, then a `## Gates` table:
 
 ```markdown
 # Trace State: <slug>
@@ -361,7 +361,7 @@ Written when CI rounds occur after publication: one entry per round with the fai
 
 ## `repro/` layout
 
-Lives inside the trace directory (git-excluded, never committed): `checkpoint.manifest` (append-only, header `# issue-tracer checkpoint manifest v1`) plus `<check-id>.base.log` and `<check-id>.head.log` per executable check, written by `repro-check.sh run`.
+Lives inside the trace directory (git-excluded, never committed): `checkpoint.manifest` (rows are appended, never edited - a frozen path is superseded only by a recorded `AMEND` row, and both the header's recorded row count and `seq` continuity are validated on every read and write; header `# issue-tracer checkpoint manifest v1 rows=<N>`, restamped with the row and seeded by `trace-init.sh` as `rows=0`, and see `references/acceptance-checks.md` for what that does and does not guarantee) plus `<check-id>.base.log` and `<check-id>.head.log` per executable check, written by `repro-check.sh run`.
 
 ## OBE subset
 

@@ -89,6 +89,102 @@ trace_for() {
 }
 manifest_for() { trace_for; printf '%s\n' "$trace_dir/repro/checkpoint.manifest"; }
 
+# Structural integrity of the checkpoint manifest, shared by `checkpoint` and
+# `verify-checkpoint` so both refuse the same mangled file. Three properties:
+# line 1 is the version header AND records the expected data-row count; every
+# later line carries exactly 10 TAB-separated fields; the seq column counts
+# 1..N with no gaps.
+#
+# The recorded count is what makes this total rather than a PREFIX invariant.
+# Seq contiguity alone is satisfied by any prefix of a valid file, so `head -3`
+# (or deleting just the last row) would still validate - silently dropping
+# those checks from the replay set AND un-freezing their paths, so a plain
+# `checkpoint` could then re-baseline a weakened check to green through the
+# very guard below. Comparing the header count against the rows actually
+# present closes the tail; seq closes the middle. Together they refuse deletion
+# anywhere, reordering, duplication, and field mangling.
+#
+# The legacy header with no `rows=` count (`... v1`) is REJECTED rather than
+# accepted for compatibility: accepting it would itself be a one-line bypass
+# (write the old header, then truncate freely). Nothing is lost by failing
+# closed - the manifest is an ephemeral, git-excluded, per-issue trace artifact
+# seeded fresh by trace-init.sh, so there is no installed base to migrate.
+#
+# This is tamper-EVIDENCE, not tamper-proofing: the trace directory is the
+# agent's own write surface, so a rewriter that renumbers every row AND
+# restamps the header count still gets through, and so does deleting the
+# manifest outright and re-running `checkpoint` (nothing binds the file's
+# existence or completeness to anything outside it). What it stops is a
+# partial write or a hand edit that leaves the file internally inconsistent.
+validate_manifest() {
+  local file="$1" problem counts
+  problem="$(awk -F '\t' '
+    NR == 1 {
+      if ($0 !~ /^# issue-tracer checkpoint manifest v1 rows=[0-9]+$/) { bad = "header"; exit }
+      declared = $0
+      sub(/^.*rows=/, "", declared)
+      declared = declared + 0
+      next
+    }
+    {
+      rows += 1
+      if (NF != 10) { bad = "fields " NR; exit }
+      if ($1 "" != rows "") { bad = "seq " NR; exit }
+      # A path is frozen by its first row; every later row for it must be a
+      # reasoned AMEND. do_checkpoint refuses a duplicate CHECKPOINT at write
+      # time, but do_verify is last-writer-wins per path, so without this a
+      # forged CHECKPOINT row appended by hand (plus a bumped header count)
+      # would silently re-baseline a frozen blob. Checking it here makes the
+      # rule hold in both commands.
+      if (seen[$3] && $2 != "AMEND") { bad = "supersede " NR; exit }
+      seen[$3] = 1
+    }
+    END {
+      if (bad != "") { print bad; exit }
+      if (NR == 0) { print "header"; exit }
+      if (declared != rows + 0) { print "count " declared " " rows + 0 }
+    }
+  ' "$file")"
+  case "$problem" in
+    '') return 0 ;;
+    'fields '*) echo "repro-check: checkpoint manifest line ${problem#fields } does not have 10 tab-separated fields" >&2 ;;
+    'seq '*) echo "repro-check: checkpoint manifest seq is not contiguous (row deleted or reordered) at line ${problem#seq }" >&2 ;;
+    'supersede '*) echo "repro-check: checkpoint manifest line ${problem#supersede } re-freezes an already-recorded path without an AMEND reason" >&2 ;;
+    'count '*)
+      counts="${problem#count }"
+      echo "repro-check: checkpoint manifest header records ${counts%% *} rows, found ${counts#* } (rows deleted or truncated)" >&2
+      ;;
+    *) echo "repro-check: invalid manifest header (want '# issue-tracer checkpoint manifest v1 rows=<N>' on line 1)" >&2 ;;
+  esac
+  exit 2
+}
+
+# True when field 3 (the path column) of any data row already names this path.
+# A recorded path is frozen: only a reasoned AMEND may supersede it.
+manifest_has_path() {
+  awk -F '\t' -v want="$2" 'NR > 1 && $3 == want { found = 1; exit } END { exit !found }' "$1"
+}
+
+# Append one data row and restamp the header's recorded count in a single
+# temp-file swap, so the manifest is never observable in a state where the
+# count and the rows disagree - a mid-loop `exit` (an invalid later path, an
+# already-frozen repeat) leaves a consistent file rather than bricking it.
+# Mirrors bound_log's `$log.truncate.tmp` pattern; refuse_nonregular_target
+# guards the temp name as well as the manifest, and `mv` renames over the
+# destination rather than writing through a symlink planted there.
+append_manifest_row() {
+  local file="$1" count="$2" row="$3" temp
+  temp="$file.append.tmp"
+  refuse_nonregular_target "$file"
+  refuse_nonregular_target "$temp"
+  {
+    printf '# issue-tracer checkpoint manifest v1 rows=%s\n' "$count"
+    awk 'NR > 1' "$file"
+    printf '%s\n' "$row"
+  } > "$temp"
+  mv "$temp" "$file"
+}
+
 # Refuse to redirect/append into a pre-existing path that is not a regular
 # file (a symlink, device, fifo, directory, ...). Must run immediately before
 # every `>`/`>>` into a leaf artifact path (base/head logs, checkpoint
@@ -240,7 +336,7 @@ do_run() {
 }
 
 do_checkpoint() {
-  local reason="-" check_id="" argv="" expect="" base="" path manifest seq kind mode blob
+  local reason="-" check_id="" argv="" expect="" base="" path manifest seq kind mode blob row
   trace_dir=""; slug=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -265,19 +361,34 @@ do_checkpoint() {
   mkdir -p "$(dirname "$manifest")"
   require_contained "$(dirname "$manifest")"
   refuse_nonregular_target "$manifest"
-  [ -f "$manifest" ] || printf '# issue-tracer checkpoint manifest v1\n' > "$manifest"
-  grep -Fx '# issue-tracer checkpoint manifest v1' "$manifest" >/dev/null 2>&1 || { echo "repro-check: invalid manifest header" >&2; exit 2; }
+  [ -f "$manifest" ] || printf '# issue-tracer checkpoint manifest v1 rows=0\n' > "$manifest"
+  # validate_manifest owns the header check: it is strictly stronger than the
+  # old `grep -Fx` (which matched the string on ANY line) and additionally
+  # proves the recorded count, the seq run, and the field count.
+  validate_manifest "$manifest"
   seq="$(awk 'END {print NR - 1}' "$manifest")"
   for path in "$@"; do
     is_inside_root "$path" || { echo "repro-check: checkpoint path must be repo-relative without ..: $path" >&2; exit 2; }
     has_bad_field "$path" && { echo "repro-check: checkpoint path cannot contain tabs or newlines" >&2; exit 2; }
     [ -f "$root/$path" ] || { echo "repro-check: checkpoint path must be a file: $path" >&2; exit 2; }
+    # Re-running the sanctioned `checkpoint` command on an already-frozen path
+    # would append a fresh CHECKPOINT row that last-writer-wins re-baselines a
+    # weakened check to green in do_verify. Refuse it: superseding a frozen
+    # blob requires an AMEND row that names a reason and stays in the file.
+    # The manifest is re-read per path, so a path frozen by an earlier
+    # iteration of this same invocation is already recorded and also refused.
+    if [ "$kind" = CHECKPOINT ] && manifest_has_path "$manifest" "$path"; then
+      echo "repro-check: $path is already frozen; supersede it with --reason CHECK_WRONG|FORMAT_ONLY|AC_CHANGED_BY_USER" >&2
+      exit 2
+    fi
     blob="$(git hash-object "$root/$path")"
     mode="$(git ls-files -s -- "$path" | awk 'NR==1 {print $1}')"
     [ -n "$mode" ] || { [ -x "$root/$path" ] && mode=100755 || mode=100644; }
     seq=$((seq + 1))
-    refuse_nonregular_target "$manifest"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$seq" "$kind" "$path" "$blob" "$mode" "$check_id" "$argv" "$expect" "$(git rev-parse "$base^{commit}")" "$reason" >> "$manifest"
+    # $seq is post-increment, so it is also the new total row count that the
+    # header must record. Row and header land together in one temp-file swap.
+    row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$seq" "$kind" "$path" "$blob" "$mode" "$check_id" "$argv" "$expect" "$(git rev-parse "$base^{commit}")" "$reason")"
+    append_manifest_row "$manifest" "$seq" "$row"
     echo "checkpoint: $kind $path"
   done
 }
@@ -288,7 +399,11 @@ do_verify() {
   while [ "$#" -gt 0 ]; do case "$1" in --slug) [ "$#" -ge 2 ] || usage; slug="$2"; shift 2;; --trace-dir) [ "$#" -ge 2 ] || usage; trace_dir="$2"; shift 2;; *) usage;; esac; done
   valid_slug "$slug" || { echo "repro-check: invalid slug" >&2; exit 2; }
   manifest="$(manifest_for)"
-  [ -f "$manifest" ] && grep -Fx '# issue-tracer checkpoint manifest v1' "$manifest" >/dev/null 2>&1 || { echo "repro-check: checkpoint manifest missing or invalid" >&2; exit 2; }
+  [ -f "$manifest" ] || { echo "repro-check: checkpoint manifest missing or invalid" >&2; exit 2; }
+  # Iterating only the surviving rows would silently drop a frozen check when a
+  # row is deleted OR the tail is truncated, so structure - header count, seq
+  # run, field count - is proven before any row is replayed.
+  validate_manifest "$manifest"
   while IFS=$'\t' read -r path old; do
     [ -f "$root/$path" ] || { echo "CHANGED $path $old MISSING"; changed=1; continue; }
     new="$(git hash-object "$root/$path")"
