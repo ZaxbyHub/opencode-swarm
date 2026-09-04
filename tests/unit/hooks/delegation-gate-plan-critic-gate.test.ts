@@ -48,7 +48,6 @@ function makePlan(overrides?: Partial<Plan>): Plan {
 		...overrides,
 	};
 }
-
 async function writePlan(dir: string, plan: Plan): Promise<void> {
 	await mkdir(join(dir, '.swarm'), { recursive: true });
 	writeFileSync(
@@ -57,7 +56,6 @@ async function writePlan(dir: string, plan: Plan): Promise<void> {
 	);
 	await initLedger(dir, derivePlanId(plan));
 }
-
 function coderDispatch(sessionID = 'session-plan-critic-gate') {
 	return {
 		input: {
