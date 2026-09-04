@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.164.11](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.10...v7.164.11) (2026-09-04)
+
+
+### Bug Fixes
+
+* **gates:** correct default execution-gate semantics and corrupt-evidence handling ([9a852f4](https://github.com/ZaxbyHub/opencode-swarm/commit/9a852f4e386b5a9695a495e8ec339ccc40d8846c))
+* **gates:** correct default execution-gate semantics and corrupt-evidence handling ([#2470](https://github.com/ZaxbyHub/opencode-swarm/issues/2470)) ([2894402](https://github.com/ZaxbyHub/opencode-swarm/commit/28944021848e80c1bd211fb88a35f58abc3b55ac))
+* **review:** close PR [#2557](https://github.com/ZaxbyHub/opencode-swarm/issues/2557) review findings and probe-validated pre-existing gaps ([d0cbfcd](https://github.com/ZaxbyHub/opencode-swarm/commit/d0cbfcd57c1024ea5f98f8964c61919fa8efd599))
+* **test:** use canonicalMkdtemp in new gate-audit availability test (FR-011) ([cb514de](https://github.com/ZaxbyHub/opencode-swarm/commit/cb514de1a3610b28813a7d22675c114370382677))
+
 ## [7.164.10](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.9...v7.164.10) (2026-09-03)
 
 
