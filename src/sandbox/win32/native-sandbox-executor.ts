@@ -14,6 +14,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { sanitizeDiagnosticText } from '../../scope/path-identity';
 import { criticalWarn } from '../../utils/logger';
 import type { SandboxExecutor } from '../executor';
 import { isValidEnvKey, SandboxError } from '../executor';
@@ -80,7 +81,7 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 		this._disabled = true;
 		this._disabledReason = reason;
 		criticalWarn(
-			`[sandbox] Sandbox disabled: ${reason}. Falling through to tool-layer enforcement. Run /swarm diagnose for details.`,
+			`[sandbox] Sandbox disabled: ${sanitizeDiagnosticText(reason, 200)}. Falling through to tool-layer enforcement. Run /swarm diagnose for details.`,
 		);
 	}
 
@@ -110,6 +111,24 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 		}
 
 		if (this._strength === 'strong') {
+			// Fail closed for cmd metacharacters (PR review PRR-003): the native
+			// path transports the command as a raw cmd /c string, so &, |, <,
+			// > or " in the command could split the wrapper line and execute a
+			// suffix OUTSIDE the runner's AppContainer/restricted-token while
+			// the audit records wrapped: true. Route metacharacter-bearing
+			// commands through the PowerShell wrapper, which transports the
+			// command as opaque Base64 — still fully wrapped (env-restricted),
+			// never unsandboxed. Simple single commands keep full strong
+			// confinement; carrying the command inside the policy JSON is the
+			// follow-up transport change that restores it for compounds.
+			if (/["&|<>]/.test(command)) {
+				return this._fallbackExecutor.wrapCommand(
+					command,
+					scopePaths,
+					tempDir,
+					envOverrides,
+				);
+			}
 			return this._wrapWithRunner(
 				command,
 				scopePaths,

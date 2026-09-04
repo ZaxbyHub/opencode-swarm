@@ -23,6 +23,7 @@ import { loadPlanJsonOnly } from '../plan/manager';
 import { SandboxCapabilityProbe } from '../sandbox/capability-probe.js';
 import { getExecutor } from '../sandbox/executor.js';
 import { getSandboxSkipSummary } from '../sandbox/skip-state.js';
+import { sanitizeDiagnosticText } from '../scope/path-identity';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { getAgentSession } from '../state.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
@@ -958,17 +959,14 @@ async function getSandboxStatus(sessionID?: string): Promise<HealthCheck> {
 		// Issue #2475: surface WHY the native runner is not in effect (probe
 		// error, e.g. binary missing/wrong-arch/protocol mismatch, or an
 		// explicit disable) so the diagnose line explains downgrades.
-		const executorExtras = executor as {
-			probeResult?: { error?: string } | null;
-			disabledReason?: string | null;
-		} | null;
+		// probeResult / disabledReason are optional members of the SandboxExecutor
+		// interface (src/sandbox/executor.ts); executors without a runner binary
+		// leave both undefined.
 		const downgradeReason =
-			executorExtras?.probeResult?.error ??
-			executorExtras?.disabledReason ??
-			null;
+			executor?.probeResult?.error ?? executor?.disabledReason ?? null;
 		const downgradeDetail =
 			downgradeReason !== null && downgradeReason !== undefined
-				? ` | downgrade reason: ${downgradeReason}`
+				? ` | downgrade reason: ${sanitizeDiagnosticText(downgradeReason, 200)}`
 				: '';
 
 		if (hasExecutor) {

@@ -168,6 +168,12 @@ function normalizeSandboxMechanism(mechanism: string): string {
  * consumes the envOverrides parameter. Only these are queried for declared
  * env hardening (#2236 F6b / #2259 / #2475). Host-equivalent executors
  * (#1875) own their environment themselves and must not be queried at all.
+ *
+ * This is an exact-match allowlist ON PURPOSE: a NEW plugin executor
+ * mechanism will silently lose all declared env hardening (the
+ * envOverrideBlock never reaches its child) unless it is registered here.
+ * Any executor that adds a new mechanism string MUST extend this function
+ * in the same change — pinned by tests/unit/hooks/guardrails-sandbox-env-wiring.test.ts.
  */
 function pluginOwnsExecutorEnv(mechanism: string): boolean {
 	if (mechanism.startsWith('native-runner/')) {

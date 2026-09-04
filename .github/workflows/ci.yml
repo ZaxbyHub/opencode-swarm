@@ -1119,11 +1119,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # npm pack of a local directory runs the prepare lifecycle ("bun run
-          # build") even under --ignore-scripts, and the pull_request leg has
-          # no bun installed. Strip prepare for this pack invocation only and
-          # restore the manifest unconditionally; the pack tests the files
-          # whitelist (binaries/ + dist layout), not the build itself.
+          # npm pack of a local directory runs the prepare lifecycle ("bun
+          # run build") even when the leg has no bun installed, so strip
+          # prepare for this pack invocation only and restore the manifest
+          # unconditionally; the pack tests the files whitelist (binaries/ +
+          # dist layout), not the build itself.
           REPO_ROOT="$PWD"
           cp package.json package.json.pack-backup
           restore_pkg() { mv "$REPO_ROOT/package.json.pack-backup" "$REPO_ROOT/package.json"; }

@@ -36,6 +36,13 @@ pub struct SandboxResult {
 ///      sandboxed PATH — stub dir first (network-egress kill), then parent
 ///      entries; TEMP/TMP always point at the policy temp root.
 ///
+/// Every key is normalized to UPPERCASE before it enters the map. Windows
+/// environment lookup is case-insensitive (`std::env::var("Path")` matches
+/// the `PATH` entry), but this HashMap is case-sensitive — without
+/// normalization an allowlist entry `Path` plus an unset `PATH` would leave
+/// the parent value live under its original case and the unset would
+/// silently no-op (PR review PRR-001/002).
+///
 /// `parent_lookup` is injectable so unit tests can drive the ordering without
 /// touching the process environment; production callers pass
 /// `|k| std::env::var(k).ok()`.
@@ -51,16 +58,16 @@ where
 
     for key in &policy.env_allowlist {
         if let Some(val) = parent_lookup(key) {
-            env.insert(key.clone(), val);
+            env.insert(key.to_uppercase(), val);
         }
     }
 
     for key in &policy.env_unsets {
-        env.remove(key);
+        env.remove(&key.to_uppercase());
     }
 
     for (key, val) in &policy.env_overrides {
-        env.insert(key.clone(), val.clone());
+        env.insert(key.to_uppercase(), val.clone());
     }
 
     let original_path = parent_lookup("PATH").unwrap_or_default();
@@ -152,6 +159,42 @@ mod tests {
         let policy = test_policy();
         let env = build_child_env(&policy, std::path::Path::new("C:\\stubs"), parent_env());
         assert_eq!(env.get("SYSTEMROOT").unwrap(), "C:\\Windows");
+    }
+
+    #[test]
+    fn mixed_case_unsets_remove_allowlisted_keys() {
+        // PR review PRR-001: Windows env lookup is case-insensitive, so an
+        // allowlist entry "Path" must be removable by an unset "PATH" (and
+        // vice versa). The map is case-sensitive; normalization makes the
+        // removal hit.
+        let mut policy = test_policy();
+        policy.env_allowlist = vec!["Path".to_string()];
+        policy.env_unsets = vec!["PATH".to_string()];
+        let env = build_child_env(&policy, std::path::Path::new("C:\\stubs"), parent_env());
+        assert!(
+            !env.contains_key("PATH") && !env.contains_key("Path"),
+            "case-variant unset must remove the allowlisted entry: {:?}",
+            env.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn case_variant_keys_collapse_to_one_entry() {
+        // PR review PRR-002: `Path` (allowlist) and `PATH` (override) are the
+        // same variable on Windows. The forced rewrite wins, and exactly one
+        // uppercase entry exists — never two case-variant copies.
+        let mut policy = test_policy();
+        policy.env_allowlist = vec!["Path".to_string()];
+        policy
+            .env_overrides
+            .insert("PATH".to_string(), "C:\\override".to_string());
+        let env = build_child_env(&policy, std::path::Path::new("C:\\stubs"), parent_env());
+        let path_entries = env
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case("path"))
+            .count();
+        assert_eq!(path_entries, 1, "case variants must collapse: {:?}", env);
+        assert!(env.contains_key("PATH"));
     }
 }
 

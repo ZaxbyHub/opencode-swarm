@@ -15,6 +15,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitizeDiagnosticText } from '../../scope/path-identity';
 import { criticalWarn } from '../../utils/logger';
 
 // Runtime-portable equivalent of __dirname: works from both the TypeScript source
@@ -296,7 +297,7 @@ export function probe(): RunnerProbeResult {
 				error: `runner protocol mismatch (got ${reportedProtocol ?? 'none'}, expected ${RUNNER_PROTOCOL_SCHEMA_VERSION})`,
 			};
 			criticalWarn(
-				`[sandbox] ${_cachedProbe.error} at ${binary} — stale or foreign runner binary refused; degrading to weak sandbox. Run /swarm diagnose for details.`,
+				`[sandbox] ${_cachedProbe.error} at ${path.basename(binary)} — stale or foreign runner binary refused; degrading to weak sandbox. Run /swarm diagnose for details.`,
 			);
 			return _cachedProbe;
 		}
@@ -323,7 +324,7 @@ export function probe(): RunnerProbeResult {
 			error: `probe threw: ${msg}`,
 		};
 		criticalWarn(
-			`[sandbox] swarm-sandbox-runner probe threw (${msg}) — degrading to weak sandbox. Run /swarm diagnose for details.`,
+			`[sandbox] swarm-sandbox-runner probe threw (${sanitizeDiagnosticText(msg, 200)}) — degrading to weak sandbox. Run /swarm diagnose for details.`,
 		);
 		return _cachedProbe;
 	}

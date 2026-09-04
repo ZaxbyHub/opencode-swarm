@@ -97,6 +97,25 @@ impl Policy {
                 "temp_root must not be empty".into(),
             ));
         }
+        // PR review PRR-002: an empty env key is meaningless (no environment
+        // variable has an empty name) and would silently become a no-op or a
+        // map entry under "" after uppercase normalization. Reject it here so
+        // the policy fails closed at parse time instead.
+        if self
+            .env_allowlist
+            .iter()
+            .chain(self.env_unsets.iter())
+            .any(|key| key.is_empty())
+        {
+            return Err(crate::error::RunnerError::PolicyParse(
+                "env_allowlist and env_unsets must not contain empty keys".into(),
+            ));
+        }
+        if self.env_overrides.keys().any(|key| key.is_empty()) {
+            return Err(crate::error::RunnerError::PolicyParse(
+                "env_overrides must not contain empty keys".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -192,5 +211,37 @@ mod tests {
         policy.validate().unwrap();
         let re: Policy = serde_json::from_str(&serde_json::to_string(&policy).unwrap()).unwrap();
         assert_eq!(re.env_unsets, policy.env_unsets);
+    }
+
+    #[test]
+    fn empty_env_keys_rejected() {
+        // PR review PRR-002: empty keys must fail closed at validate() time.
+        for (field, json) in [
+            (
+                "env_allowlist",
+                r#""env_allowlist": ["PATH", ""]"#,
+            ),
+            ("env_unsets", r#""env_unsets": [""]"#),
+            (
+                "env_overrides",
+                r#""env_overrides": {"": "value"}"#,
+            ),
+        ] {
+            let template = r#"{
+                "schema_version": 1,
+                "run_id": "test",
+                "workspace_roots": ["C:\\test"],
+                "writable_roots": ["C:\\test"],
+                "temp_root": "C:\\temp",
+                {field}
+            }"#;
+            let json = template.replace("{field}", json);
+            let policy: Policy = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{field}: unexpected parse error: {e}"));
+            assert!(
+                policy.validate().is_err(),
+                "{field}: empty key must be rejected"
+            );
+        }
     }
 }

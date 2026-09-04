@@ -113,6 +113,16 @@ export interface SandboxExecutor {
 	 * Returns a record of env vars to set/unset.
 	 */
 	getEnvOverrides(): Record<string, string | null>;
+
+	/**
+	 * Probe result for executors backed by a native runner binary (Windows).
+	 * Optional: executors without a runner binary leave it undefined and
+	 * /swarm diagnose omits the downgrade reason for them.
+	 */
+	readonly probeResult?: { error?: string } | null;
+
+	/** Reason recorded via disable(), if this executor was disabled. */
+	readonly disabledReason?: string | null;
 }
 
 export interface SandboxPolicyOptions {
