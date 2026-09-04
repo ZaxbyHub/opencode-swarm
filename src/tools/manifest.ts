@@ -80,6 +80,7 @@ import { knowledge_recall } from './knowledge-recall';
 import { knowledge_receipt } from './knowledge-receipt';
 import { knowledge_remove } from './knowledge-remove';
 import { lean_turbo_acquire_locks } from './lean-turbo-acquire-locks';
+import { lean_turbo_critic } from './lean-turbo-critic';
 import { lean_turbo_plan_lanes } from './lean-turbo-plan-lanes';
 import { lean_turbo_review } from './lean-turbo-review';
 import { lean_turbo_run_phase } from './lean-turbo-run-phase';
@@ -285,6 +286,7 @@ export const TOOL_MANIFEST = defineHandlers({
 		write_architecture_supervisor_evidence,
 	lean_turbo_plan_lanes: () => lean_turbo_plan_lanes,
 	lean_turbo_acquire_locks: () => lean_turbo_acquire_locks,
+	lean_turbo_critic: () => lean_turbo_critic,
 	lean_turbo_runner_status: () => lean_turbo_runner_status,
 	lean_turbo_review: () => lean_turbo_review,
 	lean_turbo_run_phase: () => lean_turbo_run_phase,

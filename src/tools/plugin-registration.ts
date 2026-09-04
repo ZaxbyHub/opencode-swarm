@@ -14,6 +14,7 @@ import type { PluginConfig } from '../config/index.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
 import type { ReviewAgentModelRegistry } from '../review/runtime.js';
+import { createLeanTurboCriticTool } from './lean-turbo-critic.js';
 import { createLeanTurboReviewTool } from './lean-turbo-review.js';
 import { createLeanTurboRunPhaseTool } from './lean-turbo-run-phase.js';
 import { TOOL_MANIFEST } from './manifest';
@@ -81,6 +82,12 @@ export function buildPluginToolObject(
 		getActiveAgentName,
 	);
 	tools.lean_turbo_review = createLeanTurboReviewTool(
+		reviewModelDispatcher,
+		reviewAgentNames,
+		reviewAgentModelRegistry,
+		getActiveAgentName,
+	);
+	tools.lean_turbo_critic = createLeanTurboCriticTool(
 		reviewModelDispatcher,
 		reviewAgentNames,
 		reviewAgentModelRegistry,
