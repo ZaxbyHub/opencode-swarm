@@ -38,10 +38,10 @@ export function seedInvariantGateDependencies(fixtureDir: string): void {
 				? fs.readFileSync(excludePath, 'utf8')
 				: '';
 			const entries = existing.split(/\r?\n/u);
-			if (!entries.includes('node_modules/')) {
+			if (!entries.includes('/node_modules')) {
 				const separator =
 					existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
-				fs.appendFileSync(excludePath, `${separator}node_modules/\n`, 'utf8');
+				fs.appendFileSync(excludePath, `${separator}/node_modules\n`, 'utf8');
 			}
 		}
 		fs.symlinkSync(repoNodeModules, fixtureNodeModules, 'junction');

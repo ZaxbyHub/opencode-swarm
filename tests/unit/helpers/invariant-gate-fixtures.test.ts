@@ -23,7 +23,7 @@ describe('seedInvariantGateDependencies', () => {
 		const excludeEntries = fs
 			.readFileSync(path.join(fixtureDir, '.git', 'info', 'exclude'), 'utf8')
 			.split(/\r?\n/u);
-		expect(excludeEntries).toContain('node_modules/');
+		expect(excludeEntries).toContain('/node_modules');
 		const ignoredDependency = await runGit(
 			['check-ignore', 'node_modules'],
 			fixtureDir,
