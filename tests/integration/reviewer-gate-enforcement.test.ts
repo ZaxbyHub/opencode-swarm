@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../src/config';
+import { closeAllProjectDbs } from '../../src/db/project-db.js';
 import { transitionTaskWorkflowEvidence } from '../../src/gate-evidence';
 import { createDelegationGateHook } from '../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../src/state';
@@ -49,6 +50,7 @@ describe('runtime reviewer gate', () => {
 
 	afterEach(() => {
 		resetSwarmState();
+		closeAllProjectDbs();
 		fs.rmSync(testDir, {
 			recursive: true,
 			force: true,

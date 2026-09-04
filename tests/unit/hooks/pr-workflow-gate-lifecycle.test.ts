@@ -3,6 +3,7 @@ import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -61,6 +62,7 @@ describe('pr-workflow-gate lifecycle', () => {
 				'PR_FEEDBACK',
 			);
 		} finally {
+			closeProjectDb(secondDir);
 			await fs.rm(secondDir, { recursive: true, force: true });
 		}
 	});

@@ -287,6 +287,44 @@ describe('run-coverage-gate.sh shard mode — issue #2341', () => {
 		);
 	});
 
+	test('each successful test must contribute a non-empty lcov artifact', () => {
+		const branchStart = coverageGateScript.indexOf(
+			'elif [ "$coverage_ready" -eq 1 ]; then',
+		);
+		const successBranch = coverageGateScript.slice(
+			branchStart,
+			coverageGateScript.indexOf('\n\tfi', branchStart),
+		);
+		expect(successBranch).toContain(
+			'::error file=${test_file}::No non-empty lcov.info produced for coverage test: ${test_file}',
+		);
+		expect(successBranch).toContain('failed=1');
+		expect(successBranch).not.toContain('::warning');
+	});
+
+	test('a missing lcov report retries before failing closed', () => {
+		expect(coverageGateScript).toContain('coverage_ready=0');
+		expect(coverageGateScript).toContain(
+			'produced no non-empty lcov.info, retrying',
+		);
+		expect(coverageGateScript).toContain(
+			'if [ "$exit_code" -eq 0 ] && [ "$coverage_ready" -eq 1 ]; then',
+		);
+		expect(coverageGateScript).toContain(
+			'if [ "$retry_num" -ge "$max_retries" ]; then',
+		);
+	});
+
+	test('successful coverage waits boundedly for Bun lcov flush', () => {
+		expect(coverageGateScript).toContain('--coverage-reporter=lcov');
+		expect(coverageGateScript).toContain('lcov_wait=0');
+		expect(coverageGateScript).toContain(
+			'while [ "$lcov_wait" -lt 20 ] && [ ! -s coverage/lcov.info ]',
+		);
+		expect(coverageGateScript).toContain('sleep 0.25');
+		expect(coverageGateScript).toContain('lcov_wait=$((lcov_wait + 1))');
+	});
+
 	test('shard mode skips threshold enforcement (aggregator owns the union)', () => {
 		expect(coverageGateScript).toContain(
 			'Shard ${shard_index}/${shard_count} local coverage',

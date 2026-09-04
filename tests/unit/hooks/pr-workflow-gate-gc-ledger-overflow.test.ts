@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import {
 	activatePrWorkflow,
 	declarePrFeedbackInventory,
@@ -8,10 +6,13 @@ import {
 	enforcePrReviewBaseDimensions,
 	_test_exports as gateInternals,
 	PR_REVIEW_BASE_DIMENSION_IDS,
-	prWorkflowSessionFileStem,
 	readPrWorkflowGateState,
 	recordPrReviewValidationBatch,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
 import {
 	establishReviewPrerequisites,
 	HEAD_SHA,
@@ -62,22 +63,20 @@ const ORPHAN_ITEM = 'FB-002';
 beforeEach(setupPrWorkflowGateFixtures);
 afterEach(teardownPrWorkflowGateFixtures);
 
-function gateStatePath(): string {
-	return path.join(
-		tempDir,
-		'.swarm',
-		'pr-workflow-gates',
-		`${prWorkflowSessionFileStem(SESSION_ID)}.json`,
-	);
-}
-
-/** Edit the persisted gate state in place and drop the in-memory cache. */
+/** Edit the authoritative gate state in place and drop the in-memory cache. */
 async function patchPersistedState(
 	mutate: (state: Record<string, unknown>) => void,
 ): Promise<void> {
-	const persisted = JSON.parse(await fs.readFile(gateStatePath(), 'utf-8'));
-	mutate(persisted);
-	await fs.writeFile(gateStatePath(), JSON.stringify(persisted), 'utf-8');
+	await withSessionStateMutation(tempDir, SESSION_ID, async () => {
+		const current = await readPrWorkflowGateState(tempDir, SESSION_ID);
+		if (!current) throw new Error('missing active workflow state');
+		const persisted = structuredClone(current) as unknown as Record<
+			string,
+			unknown
+		>;
+		mutate(persisted);
+		await writeStateWhileLocked(tempDir, persisted as never);
+	});
 	gateInternals.resetTrackedStateCache();
 }
 

@@ -14,6 +14,7 @@ import {
 	appendDelegationTransition,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -280,6 +281,7 @@ export async function createPublicationFixture(): Promise<PublicationFixture> {
 			// another suite in the same process.
 			Object.assign(_test_exports, seamSnapshot);
 			_test_exports.resetTrackedStateCache();
+			closeAllProjectDbs();
 			await fs.rm(directory, { recursive: true, force: true });
 		},
 	};

@@ -5,10 +5,9 @@ name: drift-check
 # logic lives in scripts/drift-check.ts, which imports the real modules and
 # compares runtime values (no fragile grep heuristics).
 #
-# Soft-warn by default: this workflow surfaces drift via GitHub annotations and a
-# sticky PR comment but does NOT block merges. Set the repository variable
-# DRIFT_CHECK_ENFORCE=1 (Settings > Secrets and variables > Actions > Variables)
-# to make drift a hard failure.
+# This workflow hard-fails blocking drift while still surfacing the full report
+# through GitHub annotations and a sticky PR comment. Notice-only dependency
+# freshness findings remain non-blocking.
 
 on:
   pull_request:
@@ -52,18 +51,17 @@ jobs:
       - name: Run drift check
         id: drift
         env:
-          DRIFT_CHECK_ENFORCE: ${{ vars.DRIFT_CHECK_ENFORCE }}
           # Issue #1899: opt CI into the dependency-freshness advisory (locked
           # @opencode-ai/* vs npm-latest). Fail-open `notice` only — never blocks
           # even under DRIFT_CHECK_ENFORCE. Left off locally so `bun run
           # drift:check` stays offline/deterministic.
           SWARM_DEP_FRESHNESS_CHECK: "1"
-        run: bun run scripts/drift-check.ts --report drift-report.md
+        run: bun run scripts/drift-check.ts --enforce --report drift-report.md
       - name: Post drift report comment
         # Only comment on pull requests, and even if the drift step failed under
         # enforce mode (so the report is always visible). continue-on-error so
-        # fork PRs (which lose pull-requests:write permission) do not cause
-        # the overall workflow to fail — consistent with soft-warn-by-default.
+        # fork PRs (which lose pull-requests:write permission) do not add a
+        # second failure after the authoritative drift step has reported.
         if: ${{ always() && github.event_name == 'pull_request' }}
         continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8

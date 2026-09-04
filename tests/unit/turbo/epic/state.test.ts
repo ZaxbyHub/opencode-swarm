@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../../src/db/project-db';
 import {
 	disableEpicMode,
 	emptyPersisted,
@@ -37,6 +38,7 @@ beforeEach(() => {
 afterEach(() => {
 	// Reset the fail-closed marker for this dir so each test starts clean.
 	repairStateUnreadable(dir);
+	closeAllProjectDbs();
 	try {
 		fs.rmSync(dir, { recursive: true, force: true });
 	} catch {
@@ -96,6 +98,20 @@ describe('epic state — enable / disable round-trip', () => {
 		if (!state) return;
 		expect(state.active).toBe(false);
 		expect(state.disabledAt).toBeDefined();
+	});
+
+	test('repeated authoritative reads do not archive unchanged projections', () => {
+		enableEpicMode(dir, 'stable-projection');
+		const swarmDir = path.join(dir, '.swarm');
+		const importedCount = () =>
+			fs
+				.readdirSync(swarmDir)
+				.filter((name) => name.startsWith('epic-state.json.imported')).length;
+		const before = importedCount();
+
+		expect(loadEpicSessionState(dir, 'stable-projection')?.active).toBe(true);
+		expect(loadEpicSessionState(dir, 'stable-projection')?.active).toBe(true);
+		expect(importedCount()).toBe(before);
 	});
 
 	test('multiple sessions persist independently in the same file', () => {
@@ -216,6 +232,27 @@ describe('epic state — reset + decision recording', () => {
 });
 
 describe('isEpicModeActiveForProject — project-scoped Epic check', () => {
+	test('fails closed when the project root cannot be opened as a directory', () => {
+		const fileRoot = path.join(dir, 'not-a-directory');
+		fs.writeFileSync(fileRoot, 'occupied');
+
+		expect(isEpicModeActiveForProject(fileRoot)).toBe(false);
+	});
+
+	test('fails closed when an existing project database cannot be opened', () => {
+		const swarmDir = path.join(dir, '.swarm');
+		fs.mkdirSync(swarmDir, { recursive: true });
+		fs.writeFileSync(path.join(swarmDir, 'swarm.db'), 'not a sqlite database');
+
+		expect(isEpicModeActiveForProject(dir)).toBe(false);
+	});
+
+	test('fails closed for traversal-style directory spellings', () => {
+		expect(
+			isEpicModeActiveForProject(path.join('..', '..', 'not-a-project')),
+		).toBe(false);
+	});
+
 	test('returns true when ANY session is active, regardless of which', () => {
 		// Architect's session enabled Epic; sub-agent sessions never toggle it.
 		// The project-scoped check must answer "is the project under Epic"

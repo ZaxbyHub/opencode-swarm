@@ -96,7 +96,11 @@ import {
 	formatBudgetWarning,
 	getDefaultConfig,
 } from '../../../src/services/context-budget-service';
-import { writeSnapshot } from '../../../src/session/snapshot-writer';
+import { ensureSnapshotCoordinationReady } from '../../../src/session/snapshot-coordination-init.ts';
+import {
+	SNAPSHOT_PROJECTION_FILE,
+	writeSnapshot,
+} from '../../../src/session/snapshot-writer.ts';
 import { swarmState } from '../../../src/state';
 import {
 	_internals as artifactCacheInternals,
@@ -222,12 +226,21 @@ describe('cached .swarm/ artifact writers invalidate the swarm-artifact-cache (#
 		await expectInvalidated(target);
 	});
 
-	test('writeSnapshot invalidates session/state.json after the atomic rename', async () => {
-		const target = await seedAndFreeze('session/state.json', 'OLD SNAPSHOT');
+	test('writeSnapshot invalidates session/state.sqlite-projection.json after the atomic rename', async () => {
+		const seed = JSON.stringify({
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		});
+		const target = await seedAndFreeze(SNAPSHOT_PROJECTION_FILE, seed);
+		await ensureSnapshotCoordinationReady(tmpDir);
 		await writeSnapshot(tmpDir, swarmState);
 		// Falsifiability: writeSnapshot swallows its own errors, so confirm it
 		// actually replaced the file before trusting the invalidation assertion.
-		expect(await fs.readFile(target, 'utf-8')).not.toBe('OLD SNAPSHOT');
+		expect(await fs.readFile(target, 'utf-8')).not.toBe(seed);
 		await expectInvalidated(target);
 	});
 

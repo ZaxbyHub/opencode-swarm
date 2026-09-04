@@ -17,10 +17,14 @@ import {
 	recordPendingDelegation,
 	scanDelegationsForRecovery,
 } from '../../../src/background/pending-delegations';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const { dir, cleanup } = createSafeTestDir('swarm-bg-conc-');
-afterEach(cleanup);
+afterEach(() => {
+	closeAllProjectDbs();
+	cleanup();
+});
 // Restore the production seam members (NOT replace the retry wrapper itself —
 // replacing it would bypass the very retry loop these tests exercise).
 const originalRenameOnce = _checkpointInternals.renameOnce;
@@ -130,11 +134,11 @@ describe('issue #2034 concurrency + Windows replace', () => {
 		}
 	});
 
-	it('suffix-preserving roll keeps raced appends (simulated via seam)', async () => {
+	it('out-of-band shadow appends during compaction do not bypass SQLite authority', async () => {
 		await recordPendingDelegation(dir, pendingInput('base-1'));
 		// Simulate a stale-lock interleave: while compaction runs, another
-		// writer appends after the cut was taken but before the roll — exactly
-		// the window the suffix-preserving re-stat covers.
+		// actor writes directly to the legacy shadow after the cut was taken.
+		// Under SQLite authority that out-of-band shadow write must be ignored.
 		const realRename = _checkpointInternals.renameWithRetry;
 		let injected = false;
 		_checkpointInternals.renameWithRetry = (from: string, to: string) => {
@@ -157,9 +161,14 @@ describe('issue #2034 concurrency + Windows replace', () => {
 		const scan = scanDelegationsForRecovery(dir);
 		expect(scan.status).toBe('ok');
 		if (scan.status === 'ok') {
-			expect(scan.owners.some((r) => r.correlationId === 'raced-1')).toBe(true);
 			expect(scan.owners.some((r) => r.correlationId === 'base-1')).toBe(true);
+			expect(scan.owners.some((r) => r.correlationId === 'raced-1')).toBe(
+				false,
+			);
 		}
+		expect(
+			readDelegations(dir).some((r) => r.correlationId === 'raced-1'),
+		).toBe(false);
 	});
 
 	it('mutation lock contention still lands writes (backoff/retry under load)', async () => {

@@ -15,6 +15,7 @@ import {
 	PR_ARTIFACT_REVISION_DIGEST,
 	PR_ARTIFACT_SESSION_ID,
 } from '../../helpers/pr-review-artifact-fixtures.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory = '';
@@ -55,7 +56,15 @@ async function bumpGeneration(): Promise<number> {
 		revision: number;
 	};
 	raw.revision += 1;
-	await fs.writeFile(statePath, JSON.stringify(raw), 'utf8');
+	const current = JSON.parse(await fs.readFile(statePath, 'utf8')) as {
+		sessionID: string;
+		mode: string;
+		[key: string]: unknown;
+	};
+	await writeAuthoritativePrWorkflowState(directory, {
+		...current,
+		revision: raw.revision,
+	});
 	_test_exports.resetTrackedStateCache();
 	return raw.revision;
 }

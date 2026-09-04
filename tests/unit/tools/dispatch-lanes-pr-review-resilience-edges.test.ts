@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import {
 	appendDelegationTransition,
 	findByBatchId,
@@ -17,6 +15,8 @@ import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
 
@@ -43,7 +43,6 @@ const originalResolveDiffStatsAsync =
 	gateInternals.resolvePrReviewDiffStatsAsync;
 const originalNowMs = gateInternals.nowMs;
 const FIXED_ISO_TIMESTAMP = '2026-01-01T00:00:00.000Z';
-
 function lane(id: string, workflowLane: string, ownedWorkflowLanes?: string[]) {
 	return {
 		id,
@@ -53,7 +52,6 @@ function lane(id: string, workflowLane: string, ownedWorkflowLanes?: string[]) {
 		...(ownedWorkflowLanes ? { owned_workflow_lanes: ownedWorkflowLanes } : {}),
 	};
 }
-
 function terminalErrorResult(errorText: string) {
 	const text = `[ERROR] ${errorText}`;
 	return {
@@ -64,7 +62,6 @@ function terminalErrorResult(errorText: string) {
 		digest: createHash('sha256').update(text).digest('hex'),
 	};
 }
-
 function terminalSuccessResult(text: string) {
 	return {
 		text,
@@ -73,7 +70,6 @@ function terminalSuccessResult(text: string) {
 		digest: createHash('sha256').update(text).digest('hex'),
 	};
 }
-
 beforeEach(async () => {
 	directory = canonicalMkdtemp('dispatch-pr-resilience-edges-');
 	await initializeGitRepository(directory);
@@ -126,7 +122,7 @@ afterEach(async () => {
 	gateInternals.resolvePrReviewDiffStats = originalResolveDiffStats;
 	gateInternals.resolvePrReviewDiffStatsAsync = originalResolveDiffStatsAsync;
 	gateInternals.nowMs = originalNowMs;
-	await fs.rm(directory, { recursive: true, force: true });
+	safeRmRecursive(directory);
 });
 
 describe('dispatch_lanes PR review resilience edges', () => {
@@ -216,16 +212,17 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			expectedCurrentStatuses: ['pending'],
 		});
 
-		const statePath = path.join(
+		const current = await readPrWorkflowGateState(
 			directory,
-			'.swarm',
-			gateInternals.workflowGateStateRelativePath('review-session-completed'),
+			'review-session-completed',
 		);
-		const persistedState = JSON.parse(
-			await fs.readFile(statePath, 'utf-8'),
-		) as {
-			prReviewBaseDispatches: Array<Record<string, unknown>>;
-			prReviewResilience: { attempts: Array<Record<string, unknown>> };
+		if (!current) throw new Error('missing active workflow state');
+		const persistedState = structuredClone(current) as typeof current;
+		persistedState.prReviewBaseDispatches ??= [];
+		persistedState.prReviewResilience ??= {
+			policy: { ...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG },
+			attempts: [],
+			status: 'healthy',
 		};
 		persistedState.prReviewBaseDispatches.push(
 			{
@@ -233,7 +230,7 @@ describe('dispatch_lanes PR review resilience edges', () => {
 				lanes: [
 					{
 						laneId: 'manual-canary-1',
-						workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1],
+						workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1]!,
 					},
 				],
 				validatedAt: FIXED_ISO_TIMESTAMP,
@@ -243,7 +240,7 @@ describe('dispatch_lanes PR review resilience edges', () => {
 				lanes: [
 					{
 						laneId: 'manual-fanout-1',
-						workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[2],
+						workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[2]!,
 					},
 				],
 				validatedAt: FIXED_ISO_TIMESTAMP,
@@ -254,17 +251,12 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			targetDimensions: [...PR_REVIEW_BASE_DIMENSION_IDS],
 			canaryBatchId: 'manual-batch-1',
 			canaryLaneId: 'manual-canary-1',
-			canaryWorkflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1],
+			canaryWorkflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1]!,
 			admittedAt: FIXED_ISO_TIMESTAMP,
 			fanoutBatchId: 'manual-fanout-1',
 		});
-		await fs.writeFile(
-			statePath,
-			JSON.stringify(persistedState, null, 2),
-			'utf-8',
-		);
+		await writeAuthoritativePrWorkflowState(directory, persistedState);
 		gateInternals.resetTrackedStateCache();
-
 		const thirdWave = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
@@ -282,7 +274,6 @@ describe('dispatch_lanes PR review resilience edges', () => {
 		expect(thirdWave.success).toBe(true);
 		expect(created).toBe(2);
 	});
-
 	test('keeps the first staged resilience policy snapshot even if config reloads to stricter values later', async () => {
 		let created = 0;
 		dispatchInternals.getSessionOps = () => ({
@@ -299,7 +290,6 @@ describe('dispatch_lanes PR review resilience edges', () => {
 					max_retry_attempts_after_initial: 2,
 				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
-
 		const firstWave = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
@@ -362,7 +352,6 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			circuitOpenDurationMs: 60_000,
 		});
 	});
-
 	test('fails closed before fanout child creation when the elapsed canary cannot be proven live via status', async () => {
 		for (const scenario of [
 			{
@@ -442,7 +431,6 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			gateInternals.nowMs = originalNowMs;
 		}
 	});
-
 	test('rejects skipped retry ordinals for staged canaries', async () => {
 		let created = 0;
 		dispatchInternals.getSessionOps = () => ({

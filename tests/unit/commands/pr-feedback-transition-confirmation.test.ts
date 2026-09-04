@@ -204,7 +204,7 @@ describe('PR feedback transition confirmation hardening (#2333)', () => {
 		);
 	});
 
-	test('exact retry recovers only when persisted review handoff provenance is intact', async () => {
+	test('exact retry recovers when authoritative review handoff provenance is intact even if the shadow projection is stale', async () => {
 		const handoffPath = await materializeTerminalReview();
 		const exactCommand = `/swarm pr-feedback ${PR_URL} continue from ${handoffPath}`;
 		await transitionPrReviewToFeedback(tempDir, SESSION_ID, {
@@ -234,15 +234,22 @@ describe('PR feedback transition confirmation hardening (#2333)', () => {
 		delete raw.prFeedbackReviewHandoff;
 		await fs.writeFile(statePath, JSON.stringify(raw, null, 2), 'utf8');
 
-		await expect(
-			transitionPrReviewToFeedback(tempDir, SESSION_ID, {
+		const retriedAgain = await transitionPrReviewToFeedback(
+			tempDir,
+			SESSION_ID,
+			{
 				runId: RUN_ID,
 				handoffPath,
 				prUrl: PR_URL,
 				exactCommand,
 				confirmedByUser: true,
-			}),
-		).rejects.toThrow(/handoff provenance|different handoff|already active/i);
+			},
+		);
+		expect(retriedAgain.mode).toBe('PR_FEEDBACK');
+		const repaired = await readPrWorkflowGateState(tempDir, SESSION_ID);
+		expect(repaired?.prFeedbackReviewHandoff?.path).toBe(
+			`pr-review/${RUN_ID}/feedback-handoff.json`,
+		);
 	});
 
 	test('external restart path also requires explicit command confirmation', async () => {

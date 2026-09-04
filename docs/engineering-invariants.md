@@ -854,6 +854,6 @@ Two failures motivated the automated check:
 
 ### Rules
 
-- It is **soft-warn by default**: GitHub annotations + a sticky PR comment, non-blocking. Set the repo variable `DRIFT_CHECK_ENFORCE=1` for hard-fail.
+- CI invokes drift-check with `--enforce`, so blocking findings fail the job; GitHub annotations and a sticky PR comment still publish the full report. Local `bun run drift:check` remains soft-warn unless invoked with `--enforce` (or `DRIFT_CHECK_ENFORCE=1`).
 - When you add a new skill that exists in **both** `.opencode/skills/` and `.claude/skills/`, classify it in `src/config/skill-mirrors.ts` (`identical` / `divergent` / `adapter` / `opencode-only`), or the check warns until you do.
 - Drift compute is sub-second, so CI caches only dependency install (the real cost), not per-file SHA-256 results.

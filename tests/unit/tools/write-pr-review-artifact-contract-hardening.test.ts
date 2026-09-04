@@ -15,6 +15,7 @@ import {
 	PR_ARTIFACT_REVISION_DIGEST,
 	PR_ARTIFACT_SESSION_ID,
 } from '../../helpers/pr-review-artifact-fixtures.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const HEAD_SHA = PR_ARTIFACT_HEAD_SHA;
@@ -65,7 +66,7 @@ afterEach(async () => {
 	_test_exports.resolveIsWorkingTreeCleanAsync =
 		originalResolveIsWorkingTreeCleanAsync;
 	artifactInternals.atomicWrite = originalAtomicWrite;
-	await fs.rm(directory, { recursive: true, force: true });
+	safeRmRecursive(directory);
 });
 
 describe('write_pr_review_artifact contract hardening (#2333)', () => {

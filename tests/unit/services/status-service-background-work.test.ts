@@ -12,9 +12,13 @@ import * as path from 'node:path';
 import {
 	BACKGROUND_CODER_RESERVATIONS_FILE,
 	BACKGROUND_DELEGATIONS_FILE,
+	type BackgroundTerminalResult,
+	buildBackgroundCompletionEventId,
+	claimTerminalResult,
 	recordPendingDelegation,
 	reserveBackgroundCoderSlot,
 } from '../../../src/background/pending-delegations';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import {
 	type BackgroundWorkStatus,
 	formatStatusMarkdown,
@@ -47,6 +51,25 @@ function baseStatus(over: Partial<StatusData> = {}): StatusData {
 	};
 }
 
+function rejectedTerminal(correlationId: string): BackgroundTerminalResult {
+	return {
+		eventId: buildBackgroundCompletionEventId({
+			correlationId,
+			jobId: null,
+			status: 'rejected',
+			resultDigest: `${correlationId}:rejected`,
+		}),
+		status: 'rejected',
+		recordedAt: 100,
+		result: {
+			chars: 8,
+			truncated: false,
+			digest: `${correlationId}:rejected`,
+			error: 'rejected',
+		},
+	};
+}
+
 describe('status background-work section (issue #2104)', () => {
 	let dir: string;
 
@@ -55,6 +78,7 @@ describe('status background-work section (issue #2104)', () => {
 	});
 
 	afterEach(() => {
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -106,6 +130,35 @@ describe('status background-work section (issue #2104)', () => {
 		expect(markdown).toContain('lease active until');
 		expect(markdown).toContain('Source: validated recovery');
 		expect(markdown).toContain('Maintenance:');
+	});
+
+	it('renders rejected background delegations in counts and markdown', async () => {
+		await recordPendingDelegation(dir, {
+			correlationId: 'ses_rejected',
+			jobId: null,
+			subagentSessionId: 'ses_rejected',
+			parentSessionId: 'parent_1',
+			callID: 'call_rejected',
+			normalizedAgent: 'reviewer',
+			swarmPrefixedAgent: 'reviewer',
+			planTaskId: null,
+			evidenceTaskId: null,
+		});
+		await claimTerminalResult(
+			dir,
+			'ses_rejected',
+			rejectedTerminal('ses_rejected'),
+		);
+
+		const status = await getStatusData(dir, {}, undefined, {
+			backgroundSubagents: true,
+		});
+		const work = status.backgroundWork as BackgroundWorkStatus;
+		expect(work.source).toBe('validated-recovery');
+		expect(work.counts.rejected).toBe(1);
+
+		const markdown = formatStatusMarkdown(status);
+		expect(markdown).toContain('1 rejected');
 	});
 
 	it('renders typed uncertainty and no counts when the ledger is corrupt', async () => {

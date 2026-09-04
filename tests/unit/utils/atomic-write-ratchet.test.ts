@@ -7,11 +7,99 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
+import * as ts from 'typescript';
 import {
 	matchTempGrammar,
 	SWARM_TEMP_GRAMMARS,
 	WRITER_CLASSIFICATION,
 } from '../../../src/utils/atomic-write';
+
+function symbolBody(absPath: string, symbol: string): string | null {
+	const source = readFileSync(absPath, 'utf-8');
+	const sourceFile = ts.createSourceFile(
+		absPath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	let body: string | null = null;
+	const visit = (node: ts.Node): void => {
+		if (
+			ts.isFunctionDeclaration(node) &&
+			node.name?.text === symbol &&
+			node.body
+		) {
+			body = node.body.getText(sourceFile);
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return body;
+}
+
+function citationError(producer: string, repoRoot: string): string | null {
+	const liveLine = /^(src\/[A-Za-z0-9/_.-]+):(\d+)$/.exec(producer);
+	if (liveLine) {
+		const abs = path.join(repoRoot, ...liveLine[1].split('/'));
+		if (!existsSync(abs)) return 'file missing';
+		const line = readFileSync(abs, 'utf-8').split(/\r?\n/)[
+			Number(liveLine[2]) - 1
+		];
+		if (line === undefined) return 'line missing';
+		return /\.tmp(?:[^A-Za-z0-9]|$)|\.(?:rebuild|close|migration)[.-]/.test(
+			line,
+		)
+			? null
+			: 'line has no temp construction';
+	}
+	const liveSymbol =
+		/^(src\/[A-Za-z0-9/_.-]+):([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(producer);
+	if (liveSymbol) {
+		const abs = path.join(repoRoot, ...liveSymbol[1].split('/'));
+		if (!existsSync(abs)) return 'file missing';
+		const body = symbolBody(abs, liveSymbol[2]);
+		if (!body) return 'symbol missing';
+		if (/\.tmp(?:[^A-Za-z0-9]|$)/.test(body)) return null;
+		if (/\bwriteAtomicSync\s*\(/.test(body)) {
+			const core = symbolBody(abs, 'writeAtomicSync');
+			return core && /\.tmp(?:[^A-Za-z0-9]|$)/.test(core)
+				? null
+				: 'canonical core has no temp construction';
+		}
+		return 'symbol has no temp construction';
+	}
+	const migrated =
+		/^(src\/[A-Za-z0-9/_.-]+) \(pre-#(\d+); (?:site=[A-Za-z0-9_.-]+; )?migrated-to=(src\/[A-Za-z0-9/_.-]+):([A-Za-z_$][A-Za-z0-9_$]*)\)$/.exec(
+			producer,
+		);
+	if (migrated) {
+		const oldAbs = path.join(repoRoot, ...migrated[1].split('/'));
+		const targetAbs = path.join(repoRoot, ...migrated[3].split('/'));
+		if (!existsSync(oldAbs) || !existsSync(targetAbs))
+			return 'migration file missing';
+		const body = symbolBody(targetAbs, migrated[4]);
+		if (!body) return 'migration symbol missing';
+		return /atomicWrite(?:SwarmFile|SwarmFileSync|FileAnyRoot)|\.tmp(?:[^A-Za-z0-9]|$)/.test(
+			body,
+		)
+			? null
+			: 'migration target has no canonical delegation or temp construction';
+	}
+	const legacy =
+		/^pre-7\.x writers \(pre-#2035; scanner=(src\/[A-Za-z0-9/_.-]+):([A-Za-z_$][A-Za-z0-9_$]*)\)$/.exec(
+			producer,
+		);
+	if (legacy) {
+		const abs = path.join(repoRoot, ...legacy[1].split('/'));
+		if (!existsSync(abs)) return 'legacy scanner file missing';
+		const body = symbolBody(abs, legacy[2]);
+		return body && /matchTempGrammar/.test(body)
+			? null
+			: 'legacy scanner does not apply registered grammars';
+	}
+	return 'unrecognized citation grammar';
+}
 
 describe('WRITER_CLASSIFICATION ratchet (no unregistered temp constructor)', () => {
 	test('every src file containing a .tmp./.tmp- construction is classified', () => {
@@ -78,33 +166,24 @@ describe('WRITER_CLASSIFICATION ratchet (no unregistered temp constructor)', () 
 		const stale: string[] = [];
 		for (const grammar of SWARM_TEMP_GRAMMARS) {
 			for (const producer of grammar.producers) {
-				const m = /^(src\/[A-Za-z0-9/_.-]+?)(?::(\d+))?( \(pre-#2035\))?$/.exec(
-					producer,
-				);
-				if (!m) continue; // descriptive citations (e.g. 'pre-7.x writers') have no path
-				const [, fileRel, lineNo, historical] = m;
-				const abs = path.join(repoRoot, ...fileRel.split('/'));
-				if (!existsSync(abs)) {
-					stale.push(`${grammar.id}: ${producer} — file missing`);
-					continue;
-				}
-				if (!lineNo) continue; // function-level citation (the canonical writer itself)
-				const line =
-					readFileSync(abs, 'utf-8').split(/\r?\n/)[Number(lineNo) - 1] ?? '';
-				// A live construction shows `.tmp` followed by a non-alnum
-				// terminator (dot/dash/quote/backtick/end) — pure `.tmp`-suffix
-				// templates end with a backtick. Or an explicit historical mark.
-				const ok =
-					/\.tmp(?:[^A-Za-z0-9]|$)/.test(line) ||
-					/\.(?:rebuild|close|migration)[.-]/.test(line) ||
-					Boolean(historical);
-				if (!ok)
-					stale.push(
-						`${grammar.id}: ${producer} — line has no temp construction`,
-					);
+				const error = citationError(producer, repoRoot);
+				if (error) stale.push(`${grammar.id}: ${producer} — ${error}`);
 			}
 		}
 		expect(stale).toEqual([]);
+	});
+
+	test('rejects all three historical and suffix bypass classes from issue #2391', () => {
+		const repoRoot = path.resolve(import.meta.dir, '../../..');
+		expect(
+			citationError('src/commands/handoff.ts:1 (pre-#2035)', repoRoot),
+		).toBe('unrecognized citation grammar');
+		expect(
+			citationError('src/utils/atomic-write.ts:missingSymbol', repoRoot),
+		).toBe('symbol missing');
+		expect(citationError('src/commands/handoff.ts:48 bogus', repoRoot)).toBe(
+			'unrecognized citation grammar',
+		);
 	});
 });
 

@@ -22,10 +22,10 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { resolveRepoRoot } from './check-invariants';
 
-const SCRIPT_PATH =
-	typeof process.argv[1] === 'string' ? path.resolve(process.argv[1]) : '';
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
 
 interface CheckResult {
 	messages: string[];

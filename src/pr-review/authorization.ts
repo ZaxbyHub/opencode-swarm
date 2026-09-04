@@ -19,20 +19,26 @@
  * orchestration gate back. The gate binds its
  * `readPrReviewReentryBindingContext` at module init.
  *
- * Persistence: `.swarm/pr-review/reentry-authorizations/<session-stem>.json`,
- * guarded by a `proper-lockfile` lock (the same dependency the candidate
- * sidecar store uses). Bounded: at most MAX_ACTIVE_AUTHORIZATIONS unconsumed
- * authorizations per session; expired/unconsumed records are pruned on write.
+ * Persistence: SQLite coordination state is authoritative; the legacy
+ * `.swarm/pr-review/reentry-authorizations/<session-stem>.json` path remains a
+ * post-commit shadow projection and one-time import source only.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 import { PrReviewRunIdSchema } from '../background/pr-review-contract.js';
+import {
+	getCoordinationState,
+	importCoordinationOnce,
+	transitionCoordinationState,
+} from '../db/coordination-store.js';
 import { validateSwarmPath } from '../hooks/utils.js';
-import { prWorkflowSessionFileStem } from './persistence.js';
+import {
+	prWorkflowSessionFileStem,
+	withSessionStateMutation,
+} from './persistence.js';
 
 export type PrReviewReentryRole = 'reviewer' | 'test_engineer';
 
@@ -41,6 +47,9 @@ const AUTHORIZATION_TTL_MS = 10 * 60 * 1000;
 const MAX_ACTIVE_AUTHORIZATIONS = 8;
 const MAX_PERSISTED_AUTHORIZATIONS = 32;
 const REENTRY_AUTHORIZATIONS_MAX_BYTES = 64 * 1024;
+const AUTHORIZATION_COORDINATION_PREFIX = 'pr-review.reentry-authorizations';
+const AUTHORIZATION_ENTITY_KEY = 'authorizations';
+const MAX_AUTHORIZATION_WRITE_ATTEMPTS = 5;
 
 export interface PrReviewReentryAuthorizationRecord {
 	schemaVersion: 1;
@@ -126,6 +135,12 @@ const AuthorizationFileSchema = z
 
 type AuthorizationFile = z.infer<typeof AuthorizationFileSchema>;
 
+interface AuthorizationStoreRow {
+	rowRevision: number;
+	rowGeneration: number;
+	store: AuthorizationFile;
+}
+
 function reentryAuthorizationFilePath(
 	directory: string,
 	sessionID: string,
@@ -136,6 +151,24 @@ function reentryAuthorizationFilePath(
 		`${prWorkflowSessionFileStem(sessionID)}.json`,
 	);
 	return validateSwarmPath(directory, relative);
+}
+
+function reentryAuthorizationImportedPath(
+	directory: string,
+	sessionID: string,
+): string {
+	return `${reentryAuthorizationFilePath(directory, sessionID)}.imported`;
+}
+
+function reentryAuthorizationProjectionMarkerPath(
+	directory: string,
+	sessionID: string,
+): string {
+	return `${reentryAuthorizationFilePath(directory, sessionID)}.sqlite-projection`;
+}
+
+function reentryAuthorizationCoordinationNamespace(sessionID: string): string {
+	return `${AUTHORIZATION_COORDINATION_PREFIX}:${prWorkflowSessionFileStem(sessionID)}`;
 }
 
 async function readAuthorizationFile(
@@ -164,6 +197,37 @@ async function readAuthorizationFile(
 		);
 	}
 	return parsed.data;
+}
+
+function parseAuthorizationPayload(
+	payload: string,
+	sessionID: string,
+): AuthorizationFile {
+	const decoded: unknown = JSON.parse(payload);
+	const parsed = AuthorizationFileSchema.safeParse(decoded);
+	if (!parsed.success || parsed.data.sessionId !== sessionID) {
+		throw new Error(
+			`reentry authorization store is invalid for session "${sessionID}"`,
+		);
+	}
+	return parsed.data;
+}
+
+function readAuthorizationsFromCoordination(
+	directory: string,
+	sessionID: string,
+): AuthorizationStoreRow | null {
+	const row = getCoordinationState(
+		directory,
+		reentryAuthorizationCoordinationNamespace(sessionID),
+		AUTHORIZATION_ENTITY_KEY,
+	);
+	if (!row) return null;
+	return {
+		rowRevision: row.revision,
+		rowGeneration: row.generation,
+		store: parseAuthorizationPayload(row.payload, sessionID),
+	};
 }
 
 /**
@@ -206,7 +270,7 @@ async function writeAuthorizationFile(
 	filePath: string,
 	file: AuthorizationFile,
 ): Promise<void> {
-	const serialized = `${JSON.stringify(file, null, 2)}\n`;
+	const serialized = serializeAuthorizationFile(file);
 	if (
 		Buffer.byteLength(serialized, 'utf8') > REENTRY_AUTHORIZATIONS_MAX_BYTES
 	) {
@@ -223,6 +287,192 @@ async function writeAuthorizationFile(
 	} finally {
 		await fsp.rm(tempPath, { force: true }).catch(() => undefined);
 	}
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+	try {
+		await fsp.stat(filePath);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+		throw error;
+	}
+}
+
+function serializeAuthorizationFile(file: AuthorizationFile): string {
+	return `${JSON.stringify(file, null, 2)}\n`;
+}
+
+async function readTextFileIfExists(filePath: string): Promise<string | null> {
+	try {
+		return await fsp.readFile(filePath, 'utf8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+}
+
+async function writeProjectionMarker(filePath: string): Promise<void> {
+	await fsp.mkdir(path.dirname(filePath), { recursive: true });
+	await fsp.writeFile(filePath, 'sqlite-projection\n', 'utf8');
+}
+
+async function collisionSafeImportedPath(filePath: string): Promise<string> {
+	const canonical = `${filePath}.imported`;
+	if (!(await fileExists(canonical))) return canonical;
+	for (let suffix = 1; suffix <= 10_000; suffix += 1) {
+		const candidate = `${canonical}.${suffix}`;
+		if (!(await fileExists(candidate))) return candidate;
+	}
+	throw new Error(
+		`No collision-safe archive path available for ${path.basename(filePath)}`,
+	);
+}
+
+async function archiveShadowSource(filePath: string): Promise<void> {
+	if (!(await fileExists(filePath))) return;
+	await renameWithRetryAsync(
+		filePath,
+		await collisionSafeImportedPath(filePath),
+	);
+}
+
+async function syncAuthorizationShadowProjection(
+	directory: string,
+	sessionID: string,
+	store: AuthorizationFile,
+	options: { archiveLegacy: boolean },
+): Promise<void> {
+	const filePath = reentryAuthorizationFilePath(directory, sessionID);
+	if (options.archiveLegacy && (await fileExists(filePath))) {
+		await archiveShadowSource(filePath);
+	}
+	await writeAuthorizationFile(filePath, store);
+	await writeProjectionMarker(
+		reentryAuthorizationProjectionMarkerPath(directory, sessionID),
+	);
+}
+
+async function repairImportedAuthorizationShadow(
+	directory: string,
+	sessionID: string,
+	store: AuthorizationFile,
+): Promise<void> {
+	const filePath = reentryAuthorizationFilePath(directory, sessionID);
+	const markerPath = reentryAuthorizationProjectionMarkerPath(
+		directory,
+		sessionID,
+	);
+	const live = await readTextFileIfExists(filePath);
+	if (live === null) {
+		await syncAuthorizationShadowProjection(directory, sessionID, store, {
+			archiveLegacy: false,
+		});
+		return;
+	}
+	const canonicalImportedExists = await fileExists(
+		reentryAuthorizationImportedPath(directory, sessionID),
+	);
+	const markerExists = await fileExists(markerPath);
+	const projected = serializeAuthorizationFile(store);
+	if (canonicalImportedExists && markerExists && live === projected) return;
+	if (canonicalImportedExists && live === projected) {
+		await writeProjectionMarker(markerPath);
+		return;
+	}
+	await syncAuthorizationShadowProjection(directory, sessionID, store, {
+		archiveLegacy: true,
+	});
+}
+
+async function readAuthorizationsAuthoritative(
+	directory: string,
+	sessionID: string,
+): Promise<AuthorizationStoreRow | null> {
+	const existing = readAuthorizationsFromCoordination(directory, sessionID);
+	if (existing) {
+		await repairImportedAuthorizationShadow(
+			directory,
+			sessionID,
+			existing.store,
+		);
+		return existing;
+	}
+	const filePath = reentryAuthorizationFilePath(directory, sessionID);
+	let raw: string;
+	try {
+		raw = await fsp.readFile(filePath, 'utf8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+	const legacy = await readAuthorizationFile(filePath);
+	if (!legacy) return null;
+	const outcome = importCoordinationOnce(
+		directory,
+		{
+			source: path.join(
+				'pr-review',
+				'reentry-authorizations',
+				`${prWorkflowSessionFileStem(sessionID)}.json`,
+			),
+			sourceDigest: createHash('sha256').update(raw).digest('hex'),
+			rowCount: legacy.authorizations.length,
+			emptyNamespace: reentryAuthorizationCoordinationNamespace(sessionID),
+		},
+		() => {
+			const result = transitionCoordinationState(directory, {
+				namespace: reentryAuthorizationCoordinationNamespace(sessionID),
+				entityKey: AUTHORIZATION_ENTITY_KEY,
+				expectedRevision: null,
+				generation: 1,
+				status: 'authorizations',
+				payload: JSON.stringify(legacy),
+			});
+			if (result.outcome !== 'applied') {
+				throw new Error(
+					`reentry authorization import failed: ${result.outcome}`,
+				);
+			}
+		},
+	);
+	const imported = readAuthorizationsFromCoordination(directory, sessionID);
+	if (imported && outcome === 'imported') {
+		await syncAuthorizationShadowProjection(
+			directory,
+			sessionID,
+			imported.store,
+			{ archiveLegacy: true },
+		);
+	}
+	return imported;
+}
+
+function persistAuthorizationsAuthoritative(
+	directory: string,
+	sessionID: string,
+	store: AuthorizationFile,
+	expectedRevision: number | null,
+	generation: number,
+): { outcome: 'applied' | 'revision_conflict' | 'stale_generation' } {
+	const result = transitionCoordinationState(directory, {
+		namespace: reentryAuthorizationCoordinationNamespace(sessionID),
+		entityKey: AUTHORIZATION_ENTITY_KEY,
+		expectedRevision,
+		generation,
+		status: 'authorizations',
+		payload: JSON.stringify(store),
+	});
+	if (
+		result.outcome !== 'applied' &&
+		result.outcome !== 'revision_conflict' &&
+		result.outcome !== 'stale_generation'
+	) {
+		throw new Error(
+			`reentry authorization persistence failed: ${result.outcome}`,
+		);
+	}
+	return { outcome: result.outcome };
 }
 
 /**
@@ -258,43 +508,6 @@ function pruneAuthorizations(
 	];
 }
 
-// proper-lockfile is a CommonJS module without published TypeScript types
-// (same treatment as candidate-sidecar-store.ts).
-interface LockfileModule {
-	lock(
-		path: string,
-		options: {
-			lockfilePath?: string;
-			retries?: { retries: number; minTimeout: number; maxTimeout: number };
-			stale?: number;
-			update?: number;
-			realpath?: boolean;
-		},
-	): Promise<() => Promise<unknown>>;
-}
-const lf = lockfile as unknown as LockfileModule;
-
-async function withAuthorizationLock<T>(
-	filePath: string,
-	write: () => Promise<T>,
-): Promise<T> {
-	// The store directory must exist before proper-lockfile creates the lock
-	// file inside it (the very first issuance otherwise hits ENOENT).
-	await fsp.mkdir(path.dirname(filePath), { recursive: true });
-	const release = await lf.lock(path.dirname(filePath), {
-		lockfilePath: `${filePath}.lock`,
-		retries: { retries: 8, minTimeout: 10, maxTimeout: 100 },
-		stale: 10_000,
-		update: 1_000,
-		realpath: false,
-	});
-	try {
-		return await write();
-	} finally {
-		await release().catch(() => undefined);
-	}
-}
-
 /**
  * Issue a one-use authorization for the CURRENT active PR_REVIEW workflow.
  * Fails when no active head-bound PR_REVIEW gate exists for the session, or
@@ -312,70 +525,94 @@ export async function issuePrReviewReentryAuthorization(
 			'BLOCKED: re-entry authorization requires an active sessionID',
 		);
 	}
-	const binding = await currentBinding(directory, trimmedSession);
-	if (!binding || binding.prHeadSha !== request.prHeadSha.toLowerCase()) {
-		throw new Error(
-			`BLOCKED: re-entry authorization requires an active PR_REVIEW workflow bound to the declared head (active: ${binding?.prHeadSha ?? '(none)'})`,
-		);
-	}
-	if (request.runId && binding.runId && request.runId !== binding.runId) {
-		throw new Error(
-			'BLOCKED: re-entry authorization run does not match the active PR-review run',
-		);
-	}
-	const filePath = reentryAuthorizationFilePath(directory, trimmedSession);
-	return withAuthorizationLock(filePath, async () => {
-		const existing = await readAuthorizationFile(filePath);
-		const nowMs = Date.now();
-		const now = new Date(nowMs).toISOString();
-		const records = pruneAuthorizations(existing?.authorizations ?? [], nowMs);
-		const active = records.filter(
-			(record) =>
-				!record.consumedAt &&
-				record.role === request.role &&
-				record.generation === binding.generation,
-		);
-		if (active.length > 0) {
+	return withSessionStateMutation(directory, trimmedSession, async () => {
+		const binding = await currentBinding(directory, trimmedSession);
+		if (!binding || binding.prHeadSha !== request.prHeadSha.toLowerCase()) {
 			throw new Error(
-				`BLOCKED: an unconsumed re-entry authorization for role "${request.role}" at generation ${binding.generation} already exists; use it (one immediate Task dispatch) before issuing another`,
+				`BLOCKED: re-entry authorization requires an active PR_REVIEW workflow bound to the declared head (active: ${binding?.prHeadSha ?? '(none)'})`,
 			);
 		}
-		if (
-			records.filter((record) => !record.consumedAt).length >=
-			MAX_ACTIVE_AUTHORIZATIONS
+		if (request.runId && binding.runId && request.runId !== binding.runId) {
+			throw new Error(
+				'BLOCKED: re-entry authorization run does not match the active PR-review run',
+			);
+		}
+		for (
+			let attempt = 0;
+			attempt < MAX_AUTHORIZATION_WRITE_ATTEMPTS;
+			attempt++
 		) {
-			throw new Error(
-				`BLOCKED: re-entry authorization store is at its bound of ${MAX_ACTIVE_AUTHORIZATIONS} active authorizations`,
+			const existing = await readAuthorizationsAuthoritative(
+				directory,
+				trimmedSession,
 			);
+			const nowMs = Date.now();
+			const now = new Date(nowMs).toISOString();
+			const records = pruneAuthorizations(
+				existing?.store.authorizations ?? [],
+				nowMs,
+			);
+			const active = records.filter(
+				(record) =>
+					!record.consumedAt &&
+					record.role === request.role &&
+					record.generation === binding.generation,
+			);
+			if (active.length > 0) {
+				throw new Error(
+					`BLOCKED: an unconsumed re-entry authorization for role "${request.role}" at generation ${binding.generation} already exists; use it (one immediate Task dispatch) before issuing another`,
+				);
+			}
+			if (
+				records.filter((record) => !record.consumedAt).length >=
+				MAX_ACTIVE_AUTHORIZATIONS
+			) {
+				throw new Error(
+					`BLOCKED: re-entry authorization store is at its bound of ${MAX_ACTIVE_AUTHORIZATIONS} active authorizations`,
+				);
+			}
+			const record: PrReviewReentryAuthorizationRecord = {
+				schemaVersion: 1,
+				authorizationId: randomUUID(),
+				sessionId: trimmedSession,
+				...(binding.workflowInstanceId
+					? { workflowInstanceId: binding.workflowInstanceId }
+					: {}),
+				...(binding.runId ? { runId: binding.runId } : {}),
+				prHeadSha: binding.prHeadSha,
+				revisionDigest: binding.revisionDigest,
+				role: request.role,
+				generation: binding.generation,
+				createdAt: now,
+				expiresAt: new Date(nowMs + AUTHORIZATION_TTL_MS).toISOString(),
+			};
+			const nextStore: AuthorizationFile = {
+				schemaVersion: 1,
+				sessionId: trimmedSession,
+				authorizations: [record, ...records].slice(
+					0,
+					MAX_PERSISTED_AUTHORIZATIONS,
+				),
+			};
+			const persisted = persistAuthorizationsAuthoritative(
+				directory,
+				trimmedSession,
+				nextStore,
+				existing?.rowRevision ?? null,
+				(existing?.rowGeneration ?? 0) + 1,
+			);
+			if (persisted.outcome !== 'applied') continue;
+			await syncAuthorizationShadowProjection(
+				directory,
+				trimmedSession,
+				nextStore,
+				{ archiveLegacy: false },
+			);
+			return record;
 		}
-		const record: PrReviewReentryAuthorizationRecord = {
-			schemaVersion: 1,
-			authorizationId: randomUUID(),
-			sessionId: trimmedSession,
-			...(binding.workflowInstanceId
-				? { workflowInstanceId: binding.workflowInstanceId }
-				: {}),
-			...(binding.runId ? { runId: binding.runId } : {}),
-			prHeadSha: binding.prHeadSha,
-			revisionDigest: binding.revisionDigest,
-			role: request.role,
-			generation: binding.generation,
-			createdAt: now,
-			expiresAt: new Date(nowMs + AUTHORIZATION_TTL_MS).toISOString(),
-		};
-		// The schema caps the persisted array at MAX_PERSISTED_AUTHORIZATIONS;
-		// prune may legitimately retain up to that many records, so the append
-		// must re-slice or a full store would write one record over the cap and
-		// become unreadable (parse fails before any prune can run again).
-		await writeAuthorizationFile(filePath, {
-			schemaVersion: 1,
-			sessionId: trimmedSession,
-			authorizations: [record, ...records].slice(
-				0,
-				MAX_PERSISTED_AUTHORIZATIONS,
-			),
-		});
-		return record;
+		throw new Error(
+			'BLOCKED: re-entry authorization store changed concurrently; reload the active session state before retrying',
+		);
 	});
 }
 
@@ -406,27 +643,23 @@ export async function hasPrReviewReentryAuthorizationAgainstBinding(
 ): Promise<boolean> {
 	const trimmedSession = sessionID.trim();
 	if (!trimmedSession) return false;
-	const filePath = reentryAuthorizationFilePath(directory, trimmedSession);
 	try {
-		return await withAuthorizationLock(filePath, async () => {
-			const existing = await readAuthorizationFile(filePath);
-			if (!existing) return false;
-			const nowMs = Date.now();
-			const records = pruneAuthorizations(existing.authorizations, nowMs);
-			if (records.length !== existing.authorizations.length) {
-				await writeAuthorizationFile(filePath, {
-					...existing,
-					authorizations: records,
-				});
-			}
-			return records.some(
-				(record) =>
-					!record.consumedAt &&
-					record.role === request.role &&
-					record.sessionId === trimmedSession &&
-					authorizationMatchesBinding(record, binding),
-			);
-		});
+		const existing = await readAuthorizationsAuthoritative(
+			directory,
+			trimmedSession,
+		);
+		if (!existing) return false;
+		const records = pruneAuthorizations(
+			existing.store.authorizations,
+			Date.now(),
+		);
+		return records.some(
+			(record) =>
+				!record.consumedAt &&
+				record.role === request.role &&
+				record.sessionId === trimmedSession &&
+				authorizationMatchesBinding(record, binding),
+		);
 	} catch {
 		return false;
 	}
@@ -446,13 +679,19 @@ export async function reservePrReviewReentryAuthorizationAgainstBinding(
 ): Promise<PrReviewReentryAuthorizationRecord | null> {
 	const trimmedSession = sessionID.trim();
 	if (!trimmedSession) return null;
-	const filePath = reentryAuthorizationFilePath(directory, trimmedSession);
 	try {
-		return await withAuthorizationLock(filePath, async () => {
-			const existing = await readAuthorizationFile(filePath);
+		for (
+			let attempt = 0;
+			attempt < MAX_AUTHORIZATION_WRITE_ATTEMPTS;
+			attempt++
+		) {
+			const existing = await readAuthorizationsAuthoritative(
+				directory,
+				trimmedSession,
+			);
 			if (!existing) return null;
 			const nowMs = Date.now();
-			const records = pruneAuthorizations(existing.authorizations, nowMs);
+			const records = pruneAuthorizations(existing.store.authorizations, nowMs);
 			const sameCallIndex = records.findIndex(
 				(record) =>
 					record.consumedCallId === request.callID &&
@@ -471,13 +710,25 @@ export async function reservePrReviewReentryAuthorizationAgainstBinding(
 								Date.parse(record.expiresAt) > nowMs,
 						);
 			if (index < 0) {
-				// Persist the prune even when nothing is consumable, so expired
-				// records do not accumulate.
-				if (records.length !== existing.authorizations.length) {
-					await writeAuthorizationFile(filePath, {
-						...existing,
+				if (records.length !== existing.store.authorizations.length) {
+					const prunedStore: AuthorizationFile = {
+						...existing.store,
 						authorizations: records,
-					});
+					};
+					const persisted = persistAuthorizationsAuthoritative(
+						directory,
+						trimmedSession,
+						prunedStore,
+						existing.rowRevision,
+						existing.rowGeneration + 1,
+					);
+					if (persisted.outcome !== 'applied') continue;
+					await syncAuthorizationShadowProjection(
+						directory,
+						trimmedSession,
+						prunedStore,
+						{ archiveLegacy: false },
+					);
 				}
 				return null;
 			}
@@ -492,12 +743,27 @@ export async function reservePrReviewReentryAuthorizationAgainstBinding(
 				consumedCallId: request.callID,
 			};
 			records[index] = consumed;
-			await writeAuthorizationFile(filePath, {
-				...existing,
+			const nextStore: AuthorizationFile = {
+				...existing.store,
 				authorizations: records,
-			});
+			};
+			const persisted = persistAuthorizationsAuthoritative(
+				directory,
+				trimmedSession,
+				nextStore,
+				existing.rowRevision,
+				existing.rowGeneration + 1,
+			);
+			if (persisted.outcome !== 'applied') continue;
+			await syncAuthorizationShadowProjection(
+				directory,
+				trimmedSession,
+				nextStore,
+				{ archiveLegacy: false },
+			);
 			return consumed;
-		});
+		}
+		return null;
 	} catch {
 		// Fail closed to the normal gating path on any store error: a broken
 		// authorization store must never weaken the Stage-A requirement by
@@ -510,6 +776,7 @@ export const _internals = {
 	AUTHORIZATION_TTL_MS,
 	MAX_ACTIVE_AUTHORIZATIONS,
 	reentryAuthorizationFilePath,
+	reentryAuthorizationCoordinationNamespace,
 	pruneAuthorizations,
 	authorizationMatchesBinding,
 	hasPrReviewReentryAuthorizationAgainstBinding,

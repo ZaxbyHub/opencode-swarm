@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -12,11 +13,19 @@ import {
 	_internals as reentryInternals,
 } from '../../../src/pr-review/authorization.js';
 import {
+	readPrWorkflowGateStateFromDisk,
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
+import {
 	PR_ARTIFACT_HEAD_SHA,
 	PR_ARTIFACT_REVISION_DIGEST,
 	PR_ARTIFACT_SESSION_ID,
 } from '../../helpers/pr-review-artifact-fixtures.js';
-import { withFrozenClock } from '../../helpers/test-clock.js';
+import {
+	withFrozenClock,
+	withFrozenClockAsync,
+} from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory = '';
@@ -24,9 +33,6 @@ const originalResolveCurrentGitHeadAsync =
 	_test_exports.resolveCurrentGitHeadAsync;
 const originalResolveRevisionDigest =
 	_test_exports.resolvePrWorkflowRevisionDigest;
-
-// Exercise the same lock-held production path used by the delegation gate;
-// the former direct-consume compatibility export was intentionally removed.
 const consumePrReviewReentryAuthorization =
 	reserveActivePrReviewReentryAuthorization;
 
@@ -42,6 +48,7 @@ afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
+	closeAllProjectDbs();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -53,14 +60,20 @@ async function establishActiveReview(): Promise<void> {
 
 /** Bump the gate state's revision on disk to simulate workflow progress. */
 async function bumpGeneration(): Promise<number> {
-	const statePath = `${directory}/.swarm/${_test_exports.workflowGateStateRelativePath(PR_ARTIFACT_SESSION_ID)}`;
-	const raw = JSON.parse(await fs.readFile(statePath, 'utf8')) as {
-		revision: number;
-	};
-	raw.revision += 1;
-	await fs.writeFile(statePath, JSON.stringify(raw), 'utf8');
-	_test_exports.resetTrackedStateCache();
-	return raw.revision;
+	return withSessionStateMutation(
+		directory,
+		PR_ARTIFACT_SESSION_ID,
+		async () => {
+			const current = await readPrWorkflowGateStateFromDisk(
+				directory,
+				PR_ARTIFACT_SESSION_ID,
+			);
+			if (!current) throw new Error('expected active workflow state');
+			const next = await writeStateWhileLocked(directory, current);
+			_test_exports.resetTrackedStateCache();
+			return next.revision;
+		},
+	);
 }
 
 describe('pr-review reentry authorization (issue #2383)', () => {
@@ -158,39 +171,31 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 
 	test('expired authorizations are pruned and not consumable', async () => {
 		await establishActiveReview();
-		const record = await issuePrReviewReentryAuthorization(
-			directory,
-			PR_ARTIFACT_SESSION_ID,
-			{ prHeadSha: PR_ARTIFACT_HEAD_SHA, role: 'reviewer' },
+		await withFrozenClockAsync(
+			async () => {
+				await issuePrReviewReentryAuthorization(
+					directory,
+					PR_ARTIFACT_SESSION_ID,
+					{ prHeadSha: PR_ARTIFACT_HEAD_SHA, role: 'reviewer' },
+				);
+			},
+			{ fixedNow: 0 },
 		);
-		// Rewrite the store with the record already expired.
-		const filePath = reentryInternals.reentryAuthorizationFilePath(
-			directory,
-			PR_ARTIFACT_SESSION_ID,
+		await withFrozenClockAsync(
+			async () => {
+				await expect(
+					reserveActivePrReviewReentryAuthorization(
+						directory,
+						PR_ARTIFACT_SESSION_ID,
+						{
+							role: 'reviewer',
+							callID: 'call-1',
+						},
+					),
+				).resolves.toBeNull();
+			},
+			{ fixedNow: reentryInternals.AUTHORIZATION_TTL_MS + 1 },
 		);
-		const expired = {
-			...record,
-			expiresAt: '2020-01-01T00:00:00.000Z',
-		};
-		await fs.writeFile(
-			filePath,
-			JSON.stringify(
-				{
-					schemaVersion: 1,
-					sessionId: record.sessionId,
-					authorizations: [expired],
-				},
-				null,
-				2,
-			) + '\n',
-			'utf8',
-		);
-		await expect(
-			consumePrReviewReentryAuthorization(directory, PR_ARTIFACT_SESSION_ID, {
-				role: 'reviewer',
-				callID: 'call-1',
-			}),
-		).resolves.toBeNull();
 	});
 
 	test('issue refuses stockpiling an unconsumed same-role+generation authorization', async () => {

@@ -45,6 +45,10 @@ import {
 } from '../memory/redaction';
 import { loadPlan } from '../plan/manager';
 import {
+	getSnapshotCoordinationStatus,
+	type SnapshotCoordinationStatus,
+} from '../session/snapshot-coordination-init.js';
+import {
 	getActiveFullAutoSessionID,
 	getDisplayBudget,
 	getDisplayFinalPromptPressure,
@@ -315,6 +319,8 @@ export interface StatusData {
 	 * stores surface as typed uncertainty, never partially-trusted counts.
 	 */
 	backgroundWork?: BackgroundWorkStatus;
+	/** Post-resolution SQLite import/readiness health (#2481). */
+	coordination?: SnapshotCoordinationStatus;
 	/** Issue #2043: compatibility total plus provenance completeness. */
 	costs?: {
 		totalCostUsd: number;
@@ -337,6 +343,7 @@ export interface BackgroundWorkStatus {
 		consumed: number;
 		stale: number;
 		cancelled: number;
+		rejected: number;
 		error: number;
 		ingestion_error: number;
 	};
@@ -392,6 +399,7 @@ async function collectBackgroundWorkStatus(
 		consumed: 0,
 		stale: 0,
 		cancelled: 0,
+		rejected: 0,
 		error: 0,
 		ingestion_error: 0,
 	};
@@ -940,7 +948,23 @@ export async function getStatusData(
 	} catch {
 		// Status remains fail-open when optional telemetry is unreadable.
 	}
+	const coordination = getSnapshotCoordinationStatus(directory);
+	if (coordination.state !== 'idle' && coordination.state !== 'succeeded') {
+		status.coordination = coordination;
+	}
+
 	return status;
+}
+
+function renderCoordinationStatus(
+	status: SnapshotCoordinationStatus,
+): string[] {
+	return [
+		'',
+		`**SQLite coordination**: ${status.state}${status.settled ? ' (settled)' : ' (unsettled)'}`,
+		...(status.error ? [`  - ${status.error}`] : []),
+		'  - Recovery: `/swarm recover --coordination` (an unsettled timed-out attempt must finish before retry)',
+	];
 }
 
 /**
@@ -1051,6 +1075,8 @@ export function formatStatusMarkdown(status: StatusData): string {
 		`**Tasks**: ${status.completedTasks}/${status.totalTasks} complete`,
 		`**Agents**: ${status.agentCount} registered`,
 	];
+	if (status.coordination)
+		lines.push(...renderCoordinationStatus(status.coordination));
 	if (status.costs && status.costs.delegations > 0) {
 		const evidence =
 			status.costs.evidenceStatus === 'complete'
@@ -1406,7 +1432,7 @@ function renderBackgroundWorkLines(
 	} else {
 		const counts = backgroundWork.counts;
 		lines.push(
-			`  - Delegations: ${counts.pending} pending, ${counts.running} running, ${counts.completed} completed (unconsumed), ${counts.consumed} consumed, ${counts.stale} stale, ${counts.cancelled} cancelled, ${counts.error} error, ${counts.ingestion_error} ingestion_error`,
+			`  - Delegations: ${counts.pending} pending, ${counts.running} running, ${counts.completed} completed (unconsumed), ${counts.consumed} consumed, ${counts.stale} stale, ${counts.cancelled} cancelled, ${counts.rejected} rejected, ${counts.error} error, ${counts.ingestion_error} ingestion_error`,
 		);
 		if (backgroundWork.reservations.length > 0) {
 			lines.push(
@@ -1480,6 +1506,12 @@ export async function handleStatusCommand(
 	const statusData = await getStatusData(directory, agents, sessionId, options);
 
 	if (!statusData.hasPlan) {
+		if (statusData.coordination) {
+			return [
+				'No active swarm plan found.',
+				...renderCoordinationStatus(statusData.coordination),
+			].join('\n');
+		}
 		// Issue #2104: the opt-in background-work section stays visible without
 		// a plan — an orphaned reservation is most interesting exactly then.
 		if (statusData.backgroundWork) {

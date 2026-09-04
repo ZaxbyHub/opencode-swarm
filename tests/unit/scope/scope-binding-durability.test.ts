@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	clearScopeBindings,
 	createClaimedScopeBinding,
@@ -84,6 +85,7 @@ function pending(directory: string, plan: Plan, call = 'task-call') {
 
 afterEach(() => {
 	clearScopeBindings();
+	closeAllProjectDbs();
 	for (const root of roots.splice(0))
 		fs.rmSync(root, { recursive: true, force: true });
 });
@@ -204,7 +206,7 @@ describe('generation-safe scope persistence', () => {
 		});
 	});
 
-	test('orphan winner receipt leaves pending authority fail-closed', async () => {
+	test('orphan winner receipt shadow does not override SQLite claim authority', async () => {
 		const { directory, plan } = fixture();
 		const predecessor = pending(directory, plan);
 		await persistAndRegisterScopeBinding(directory, predecessor);
@@ -232,10 +234,7 @@ describe('generation-safe scope persistence', () => {
 				childSessionId: 'coder-session',
 				dispatchCallId: 'task-call',
 			}),
-		).toMatchObject({
-			ok: false,
-			code: 'SCOPE_BINDING_PERSISTENCE_FAILED',
-		});
+		).toMatchObject({ ok: true });
 	});
 
 	test('lease refresh is exact-generation CAS and tombstone stays denied', async () => {
@@ -314,7 +313,7 @@ describe('generation-safe scope persistence', () => {
 		).toMatchObject({ generationId: second.generationId });
 	});
 
-	test('durable deletion cannot be bypassed by a live memory cache', async () => {
+	test('deleting a shadow projection does not revoke SQLite authority', async () => {
 		const { directory, plan } = fixture();
 		await persistAndRegisterScopeBinding(directory, pending(directory, plan));
 		const claimed = await claimScopeBindingForChildDurably({
@@ -338,7 +337,10 @@ describe('generation-safe scope persistence', () => {
 				taskId: active.taskId,
 				activeSessionId: active.ownerSessionId,
 			}),
-		).toEqual({ status: 'not_declared' });
+		).toMatchObject({
+			status: 'found',
+			binding: { generationId: active.generationId },
+		});
 	});
 
 	test('cleanup follows a refreshed revision and permanently defeats renewal', async () => {

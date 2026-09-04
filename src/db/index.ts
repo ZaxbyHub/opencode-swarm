@@ -13,6 +13,24 @@
  */
 
 export {
+	acquireCoordinationLease,
+	type CoordinationLease,
+	type CoordinationState,
+	countCoordinationStates,
+	deleteCoordinationImports,
+	deleteCoordinationState,
+	deleteCoordinationStateWithinTransaction,
+	getCoordinationLease,
+	getCoordinationState,
+	importCoordinationOnce,
+	listCoordinationStates,
+	MAX_COORDINATION_STATE_LIST_ROWS,
+	releaseCoordinationLease,
+	transitionCoordinationState,
+	transitionCoordinationStateWithinTransaction,
+	withCoordinationTransaction,
+} from './coordination-store.js';
+export {
 	closeGlobalDb,
 	getGlobalDb,
 	runGlobalMigrations,

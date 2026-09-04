@@ -12,10 +12,12 @@ import {
 	createPrWorkflowResponseGate,
 	_internals as responseGateInternals,
 } from '../../../src/hooks/pr-workflow-response-gate.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 
 let directory = '';
 const originalClaim = responseGateInternals.claimPrFeedbackMonitorEvents;
 const originalReadQueue = responseGateInternals.readPrFeedbackMonitorQueue;
+const originalReadGateState = responseGateInternals.readPrWorkflowGateState;
 
 beforeEach(() => {
 	directory = realpathSync(
@@ -30,6 +32,7 @@ afterEach(async () => {
 	autoWakeInternals.reset();
 	responseGateInternals.claimPrFeedbackMonitorEvents = originalClaim;
 	responseGateInternals.readPrFeedbackMonitorQueue = originalReadQueue;
+	responseGateInternals.readPrWorkflowGateState = originalReadGateState;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -38,26 +41,17 @@ async function writeState(
 	revision: number,
 	extra: Partial<PrWorkflowGateState>,
 ): Promise<void> {
-	const absolute = path.join(
-		directory,
-		'.swarm',
-		workflowInternals.workflowGateStateRelativePath(sessionID),
-	);
-	await fs.mkdir(path.dirname(absolute), { recursive: true });
-	await fs.writeFile(
-		absolute,
-		JSON.stringify({
-			schemaVersion: 1,
-			revision,
-			workflowInstanceId: 'test-instance',
-			sessionID,
-			mode: 'PR_FEEDBACK',
-			activatedAt: '2026-08-01T00:00:00.000Z',
-			updatedAt: '2026-08-01T00:00:00.000Z',
-			...extra,
-		}),
-		'utf8',
-	);
+	const state: PrWorkflowGateState = {
+		schemaVersion: 1,
+		revision,
+		workflowInstanceId: 'test-instance',
+		sessionID,
+		mode: 'PR_FEEDBACK',
+		activatedAt: '2026-08-01T00:00:00.000Z',
+		updatedAt: '2026-08-01T00:00:00.000Z',
+		...extra,
+	};
+	await writeAuthoritativePrWorkflowState(directory, state);
 }
 
 function queuedEvent() {
@@ -143,6 +137,18 @@ describe('PR workflow response gate monitor queue', () => {
 		const event = stubQueue(sessionID);
 		const claim = mock(async () => []);
 		responseGateInternals.claimPrFeedbackMonitorEvents = claim;
+		let inventoryLocked = false;
+		responseGateInternals.readPrWorkflowGateState = mock(
+			async (dir: string, sid: string) => {
+				const state = await originalReadGateState(dir, sid);
+				if (!inventoryLocked || sid !== sessionID || !state) return state;
+				return {
+					...state,
+					revision: state.revision + 1,
+					prFeedbackInventory: ['already-declared'],
+				};
+			},
+		) as typeof responseGateInternals.readPrWorkflowGateState;
 		await writeState(sessionID, 0, {
 			workflowInstanceId: 'feedback-race-instance',
 			prFeedbackTargetUrl: event.prUrl,
@@ -153,6 +159,7 @@ describe('PR workflow response gate monitor queue', () => {
 				prFeedbackTargetUrl: event.prUrl,
 				prFeedbackInventory: ['already-declared'],
 			});
+			inventoryLocked = true;
 			return {};
 		});
 		const gate = createPrWorkflowResponseGate({

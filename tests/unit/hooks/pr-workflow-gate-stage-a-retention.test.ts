@@ -17,6 +17,7 @@ import {
 	recordPrFeedbackGateBatch,
 	recordPrFeedbackStageA,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 
 /**
  * Issue #1968 P5a: re-recording Stage A used to wipe every already-proven
@@ -462,7 +463,15 @@ describe('PR_FEEDBACK Stage A gate-batch retention', () => {
 		const persisted = JSON.parse(await fs.readFile(statePath, 'utf-8'));
 		delete persisted.prFeedbackStageA.applicableCategories;
 		delete persisted.prFeedbackStageA.applicableObligations;
-		await fs.writeFile(statePath, JSON.stringify(persisted), 'utf-8');
+		await writeAuthoritativePrWorkflowState(
+			directory,
+			persisted as {
+				sessionID: string;
+				revision: number;
+				mode: string;
+				[key: string]: unknown;
+			},
+		);
 		gateInternals.resetTrackedStateCache();
 
 		// Same revision, and an attestation that is a superset of nothing — but the

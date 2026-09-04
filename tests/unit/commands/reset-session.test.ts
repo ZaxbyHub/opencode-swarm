@@ -1,32 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
 	handleResetSessionCommand,
 } from '../../../src/commands/reset-session';
+import { closeProjectDb } from '../../../src/db/project-db.js';
+import { ensureSnapshotCoordinationReady } from '../../../src/session/snapshot-coordination-init.js';
+import {
+	readSnapshotRows,
+	writeSnapshotRows,
+} from '../../../src/session/snapshot-store.js';
+import {
+	SNAPSHOT_PROJECTION_FILE,
+	writeSnapshotProjection,
+} from '../../../src/session/snapshot-writer.js';
 import {
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let testDir: string;
 
 beforeEach(() => {
 	resetSwarmState();
-	testDir = mkdtempSync(path.join(os.tmpdir(), 'reset-session-test-'));
+	testDir = canonicalMkdtemp('reset-session-test-');
 	mkdirSync(path.join(testDir, '.swarm', 'session'), { recursive: true });
 });
 
 afterEach(() => {
+	closeProjectDb(testDir);
 	try {
 		rmSync(testDir, { recursive: true, force: true });
 	} catch {
@@ -35,6 +41,143 @@ afterEach(() => {
 });
 
 describe('handleResetSessionCommand', () => {
+	it('#2481 clears the SQLite snapshot authority transactionally', async () => {
+		writeSnapshotRows(testDir, {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		});
+		expect(readSnapshotRows(testDir)).not.toBeNull();
+
+		const result = await handleResetSessionCommand(testDir, []);
+
+		expect(readSnapshotRows(testDir)).toBeNull();
+		expect(result).toContain('authoritative session snapshot row');
+	});
+
+	it('#2481 holds the snapshot reset guard until authority is cleared', async () => {
+		writeSnapshotRows(testDir, {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		});
+		let release!: () => void;
+		const barrier = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const original = _internals.beginSnapshotCoordinationReset;
+		_internals.beginSnapshotCoordinationReset = async () => {
+			await barrier;
+			return { release: () => undefined };
+		};
+		try {
+			const reset = handleResetSessionCommand(testDir, []);
+			await Promise.resolve();
+			expect(readSnapshotRows(testDir)).not.toBeNull();
+			release();
+			await reset;
+			expect(readSnapshotRows(testDir)).toBeNull();
+		} finally {
+			release();
+			_internals.beginSnapshotCoordinationReset = original;
+		}
+	});
+
+	it('removes the SQLite projection so reset cannot resurrect cleared state', async () => {
+		const snapshot = {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		};
+		writeSnapshotRows(testDir, snapshot);
+		await writeSnapshotProjection(testDir, snapshot);
+		const projectionPath = path.join(
+			testDir,
+			'.swarm',
+			SNAPSHOT_PROJECTION_FILE,
+		);
+		expect(existsSync(projectionPath)).toBe(true);
+
+		await handleResetSessionCommand(testDir, []);
+
+		expect(existsSync(projectionPath)).toBe(false);
+		expect(readSnapshotRows(testDir)).toBeNull();
+	});
+
+	it('keeps the coordination guard closed when authoritative deletion fails', async () => {
+		writeSnapshotRows(testDir, {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		});
+		const originalClear = _internals.clearSnapshotRows;
+		_internals.clearSnapshotRows = () => {
+			throw new Error('simulated SQLite failure');
+		};
+		try {
+			const result = await handleResetSessionCommand(testDir, []);
+			expect(result).toContain('Failed to clear SQLite session snapshot');
+			await expect(ensureSnapshotCoordinationReady(testDir)).rejects.toThrow(
+				/closing for reset-session/i,
+			);
+		} finally {
+			_internals.clearSnapshotRows = originalClear;
+			const retry = await handleResetSessionCommand(testDir, []);
+			expect(retry).toContain('authoritative session snapshot row');
+		}
+	});
+
+	it('regression: priorUnsettled close aborts before deleting authoritative or in-memory state (CP-001)', async () => {
+		const snapshot = {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		};
+		writeSnapshotRows(testDir, snapshot);
+		await writeSnapshotProjection(testDir, snapshot);
+		const projectionPath = path.join(
+			testDir,
+			'.swarm',
+			SNAPSHOT_PROJECTION_FILE,
+		);
+		startAgentSession('session-1', 'coder');
+		expect(readSnapshotRows(testDir)).not.toBeNull();
+		expect(existsSync(projectionPath)).toBe(true);
+		expect(swarmState.agentSessions.size).toBe(1);
+		const original = _internals.beginSnapshotCoordinationReset;
+		_internals.beginSnapshotCoordinationReset = async () => ({
+			release: () => undefined,
+			closeError: new Error('timed out'),
+			priorUnsettled: true,
+		});
+		try {
+			const result = await handleResetSessionCommand(testDir, []);
+			expect(result).toContain(
+				'Snapshot coordination close timed out; reset aborted to avoid racing an in-flight initializer',
+			);
+			expect(readSnapshotRows(testDir)).not.toBeNull();
+			expect(existsSync(projectionPath)).toBe(true);
+			expect(swarmState.agentSessions.size).toBe(1);
+		} finally {
+			_internals.beginSnapshotCoordinationReset = original;
+		}
+	});
+
 	it('deletes state.json when it exists', async () => {
 		const stateFile = path.join(testDir, '.swarm', 'session', 'state.json');
 		writeFileSync(stateFile, JSON.stringify({ test: 'data' }));

@@ -1,16 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { TASK_WORKFLOW_SCHEMA_MARKER } from '../../../src/gate-evidence';
 import { rehydrateState } from '../../../src/session/snapshot-reader';
 import type { SnapshotData } from '../../../src/session/snapshot-writer';
-import { writeSnapshot } from '../../../src/session/snapshot-writer';
+import {
+	SNAPSHOT_PROJECTION_FILE,
+	writeSnapshot,
+} from '../../../src/session/snapshot-writer';
 import {
 	ensureAgentSession,
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 const TEST_TIME = 1_700_000_000_000;
@@ -27,7 +31,7 @@ describe('snapshot workflow marker', () => {
 
 	afterEach(() => {
 		resetSwarmState();
-		rmSync(tempDir, { recursive: true, force: true });
+		safeRmRecursive(tempDir);
 	});
 
 	it('writes version 3 snapshots with the exact-task workflow marker', async () => {
@@ -38,7 +42,7 @@ describe('snapshot workflow marker', () => {
 
 		const written = JSON.parse(
 			readFileSync(
-				path.join(tempDir, '.swarm', 'session', 'state.json'),
+				path.join(tempDir, '.swarm', SNAPSHOT_PROJECTION_FILE),
 				'utf-8',
 			),
 		) as SnapshotData;

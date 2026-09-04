@@ -77,9 +77,9 @@ mock.module('../../../src/evidence/manager.js', () => ({
 	...actualEvidenceManager,
 	archiveEvidence: mockArchiveEvidence,
 }));
-
 mock.module('../../../src/session/snapshot-writer.js', () => ({
 	flushPendingSnapshot: mockFlushPendingSnapshot,
+	SNAPSHOT_PROJECTION_FILE: 'session/state.sqlite-projection.json',
 }));
 
 mock.module('../../../src/state.js', () => ({

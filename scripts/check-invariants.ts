@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as ts from 'typescript';
 import { fileURLToPath } from 'node:url';
 import { runGit as runGitBase } from './gate-utils';
 
@@ -220,36 +221,267 @@ export async function resolveBaseBranch(
 	return null;
 }
 
+const SUBPROCESS_CALLEES = new Set([
+	'spawn',
+	'spawnSync',
+	'execFile',
+	'execFileSync',
+	'exec',
+	'execSync',
+	'bunSpawn',
+	'runExternalTool',
+]);
+
+export interface SubprocessTimeoutViolation {
+	line: number;
+	callee: string;
+}
+
+function propertyNameText(name: ts.PropertyName | undefined): string | null {
+	return name && (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) ? name.text : null;
+}
+
+function unwrapExpression(expression: ts.Expression): ts.Expression {
+	while (
+		ts.isParenthesizedExpression(expression) ||
+		ts.isAsExpression(expression) ||
+		ts.isTypeAssertionExpression(expression) ||
+		ts.isSatisfiesExpression(expression) ||
+		ts.isAwaitExpression(expression)
+	) {
+		expression = expression.expression;
+	}
+	return expression;
+}
+
+function moduleNameFromLoader(expression: ts.Expression): string | null {
+	const loader = unwrapExpression(expression);
+	if (!ts.isCallExpression(loader)) {
+		return null;
+	}
+	const loaderName = ts.isIdentifier(loader.expression)
+		? loader.expression.text
+		: loader.expression.kind === ts.SyntaxKind.ImportKeyword
+			? 'import'
+			: null;
+	if (loaderName !== 'require' && loaderName !== 'import') {
+		return null;
+	}
+	const first = loader.arguments[0];
+	return first && ts.isStringLiteralLike(first) ? first.text.replace(/\.js$/, '') : null;
+}
+
+function moduleAllowsCallee(moduleName: string, callee: string): boolean {
+	const normalized = moduleName.replace(/^node:/, '');
+	if (normalized === 'child_process') return SUBPROCESS_CALLEES.has(callee);
+	if (normalized.endsWith('/bun-compat')) return callee === 'bunSpawn';
+	if (normalized.endsWith('/external-tool-runner')) return callee === 'runExternalTool';
+	return false;
+}
+
+function allowedCalleesForModule(moduleName: string): Set<string> {
+	const normalized = moduleName.replace(/^node:/, '');
+	if (normalized === 'child_process') return new Set(SUBPROCESS_CALLEES);
+	if (normalized.endsWith('/bun-compat')) return new Set(['bunSpawn']);
+	if (normalized.endsWith('/external-tool-runner')) return new Set(['runExternalTool']);
+	return new Set();
+}
+
+/** Pure, comment-aware call-site scan for the repository subprocess family. */
+export function scanSourceForSubprocessTimeouts(
+	file: string,
+	source: string,
+): SubprocessTimeoutViolation[] {
+	const sourceFile = ts.createSourceFile(
+		file,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const violations: SubprocessTimeoutViolation[] = [];
+	const namedBindings = new Map<string, string>();
+	const namespaceBindings = new Map<string, Set<string>>();
+	const objectBindings = new Map<string, ts.Expression>();
+	const registerModuleBinding = (
+		moduleName: string,
+		bindings: ts.NamedDeclaration['name'] | undefined,
+	): void => {
+		if (!bindings) return;
+		if (ts.isNamespaceImport(bindings)) {
+			namespaceBindings.set(bindings.name.text, allowedCalleesForModule(moduleName));
+			return;
+		}
+		if (!ts.isNamedImports(bindings)) return;
+		for (const element of bindings.elements) {
+			const imported = element.propertyName?.text ?? element.name.text;
+			if (moduleAllowsCallee(moduleName, imported)) {
+				namedBindings.set(element.name.text, imported);
+			}
+		}
+	};
+	const registerLoaderDeclaration = (name: ts.BindingName, loader: ts.Expression): void => {
+		const moduleName = moduleNameFromLoader(loader);
+		if (!moduleName) return;
+		if (ts.isIdentifier(name)) {
+			namespaceBindings.set(name.text, allowedCalleesForModule(moduleName));
+			return;
+		}
+		for (const element of name.elements) {
+			if (!ts.isBindingElement(element)) continue;
+			const imported = element.propertyName &&
+				(ts.isIdentifier(element.propertyName) || ts.isStringLiteralLike(element.propertyName))
+				? element.propertyName.text
+				: ts.isIdentifier(element.name)
+					? element.name.text
+					: null;
+			if (imported && ts.isIdentifier(element.name) && moduleAllowsCallee(moduleName, imported)) {
+				namedBindings.set(element.name.text, imported);
+			}
+		}
+	};
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
+			const moduleName = statement.moduleSpecifier.text.replace(/\.js$/, '');
+			if (statement.importClause) {
+				registerModuleBinding(moduleName, statement.importClause.namedBindings);
+			}
+		}
+	}
+	const collectDeclarations = (node: ts.Node): void => {
+		if (ts.isVariableDeclaration(node) && node.initializer) {
+			if (ts.isObjectLiteralExpression(unwrapExpression(node.initializer))) {
+				objectBindings.set(
+					node.name.getText(sourceFile),
+					unwrapExpression(node.initializer),
+				);
+			}
+			registerLoaderDeclaration(node.name, node.initializer);
+		}
+		ts.forEachChild(node, collectDeclarations);
+	};
+	collectDeclarations(sourceFile);
+	const resolveCallee = (expression: ts.LeftHandSideExpression): string | null => {
+		if (ts.isIdentifier(expression)) return namedBindings.get(expression.text) ?? null;
+		const propertyName = ts.isPropertyAccessExpression(expression)
+			? expression.name.text
+			: ts.isElementAccessExpression(expression) &&
+					expression.argumentExpression &&
+					ts.isStringLiteralLike(expression.argumentExpression)
+				? expression.argumentExpression.text
+				: null;
+		if (propertyName && SUBPROCESS_CALLEES.has(propertyName)) {
+			const receiver = unwrapExpression(expression.expression);
+			if (ts.isIdentifier(receiver)) {
+				if (
+					(receiver.text === 'Bun' &&
+						(propertyName === 'spawn' || propertyName === 'spawnSync')) ||
+					receiver.text === '_internals'
+				) {
+					return propertyName;
+				}
+				if (namespaceBindings.get(receiver.text)?.has(propertyName)) {
+					return propertyName;
+				}
+			}
+			if (ts.isPropertyAccessExpression(receiver) &&
+				ts.isIdentifier(receiver.expression) &&
+				receiver.expression.text === 'globalThis' &&
+				receiver.name.text === 'Bun' &&
+				(propertyName === 'spawn' || propertyName === 'spawnSync')) {
+				return propertyName;
+			}
+			const moduleName = moduleNameFromLoader(receiver);
+			if (moduleName && moduleAllowsCallee(moduleName, propertyName)) {
+				return propertyName;
+			}
+		}
+		return null;
+	};
+	const hasTimeoutExpression = (expression: ts.Expression, seen = new Set<string>()): boolean => {
+		expression = unwrapExpression(expression);
+		if (ts.isObjectLiteralExpression(expression)) {
+			return expression.properties.some((property) => {
+				if (ts.isSpreadAssignment(property)) {
+					const spread = unwrapExpression(property.expression);
+					if (ts.isIdentifier(spread) && !seen.has(spread.text)) {
+						const bound = objectBindings.get(spread.text);
+						if (bound) {
+							const nextSeen = new Set(seen);
+							nextSeen.add(spread.text);
+							return hasTimeoutExpression(bound, nextSeen);
+						}
+					}
+					return hasTimeoutExpression(spread, seen);
+				}
+				if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) {
+					return false;
+				}
+				return propertyNameText(property.name) === 'timeout' ||
+					propertyNameText(property.name) === 'timeoutMs';
+			});
+		}
+		if (ts.isIdentifier(expression) && !seen.has(expression.text)) {
+			const bound = objectBindings.get(expression.text);
+			if (bound) {
+				const nextSeen = new Set(seen);
+				nextSeen.add(expression.text);
+				return hasTimeoutExpression(bound, nextSeen);
+			}
+		}
+		return false;
+	};
+	const visit = (node: ts.Node): void => {
+		if (ts.isCallExpression(node)) {
+			const callee = resolveCallee(node.expression);
+			if (callee) {
+				const options = node.arguments.at(-1);
+				if (!options || !ts.isExpression(options) || !hasTimeoutExpression(options)) {
+					violations.push({
+						line: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
+							.line + 1,
+						callee,
+					});
+				}
+			}
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return violations;
+}
+
 export function checkSubprocessTimeout(repoRoot: string): CheckResult {
 	const messages = ['=== Check 1: Subprocess timeout required (advisory) ==='];
 	let timeoutWarnings = 0;
-	const files = listFiles(path.join(repoRoot, 'src'), {
-		extensions: ['.ts'],
-		excludeDirs: new Set(['node_modules', 'dist']),
-	});
+	const files = [
+		...listFiles(path.join(repoRoot, 'src'), {
+			extensions: ['.ts'],
+			excludeDirs: new Set(['node_modules', 'dist']),
+		}),
+		...listFiles(path.join(repoRoot, 'tests'), {
+			extensions: ['.ts'],
+			excludeDirs: new Set(['node_modules', 'dist']),
+		}),
+	].sort((a, b) => a.localeCompare(b));
 	for (const file of files) {
 		const rel = toPosixRelative(repoRoot, file);
 		if (
-			rel.endsWith('.test.ts') ||
 			rel.endsWith('.d.ts') ||
 			path.basename(file) === 'bun-compat.ts'
 		) {
 			continue;
 		}
-		const content = readText(file);
-		if (!/\bspawnSync\(|\bspawn\(/.test(content)) {
-			continue;
-		}
-		if (!/(timeout:|timeoutMs)/.test(content)) {
+		for (const violation of scanSourceForSubprocessTimeouts(rel, readText(file))) {
 			messages.push(
-				`WARNING: ${rel} uses spawn/spawnSync but has no timeout property in file`,
+				`WARNING: ${rel}:${violation.line} calls ${violation.callee} without a timeout/timeoutMs property in its options object`,
 			);
 			timeoutWarnings++;
 		}
 	}
 	if (timeoutWarnings > 0) {
 		messages.push(
-			`  (${timeoutWarnings} file(s) have spawn/spawnSync but no timeout — advisory, not blocking)`,
+			`  (${timeoutWarnings} subprocess call(s) have no call-local timeout — advisory, not blocking)`,
 		);
 	}
 	return { messages, violations: 0 };

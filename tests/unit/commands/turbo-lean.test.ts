@@ -14,6 +14,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { _internals, handleTurboCommand } from '../../../src/commands/turbo';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import {
 	resetSwarmState,
 	startAgentSession,
@@ -57,6 +58,7 @@ afterEach(() => {
 	}
 	mockLoadPluginConfigWithMeta.mockReset();
 	swarmState.agentSessions.delete(SESSION_ID);
+	closeAllProjectDbs();
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {

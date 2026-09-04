@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { transitionCoordinationState } from '../../../src/db/coordination-store';
 import { createScopeGuardHook } from '../../../src/hooks/scope-guard';
+import { tombstoneScopeBinding } from '../../../src/scope/scope-persistence';
 import {
 	ensureAgentSession,
 	recordSessionWorkspaceRoot,
@@ -66,17 +68,20 @@ describe('issue #2096 direct scope diagnostic advisories', () => {
 			.find((candidate) => path.basename(candidate).startsWith('binding-'));
 		if (!bindingPath) throw new Error('durable fixture missing');
 		const persisted = JSON.parse(fs.readFileSync(bindingPath, 'utf8'));
-		const expiredAt = persisted.declaredAt;
-		fs.writeFileSync(
-			bindingPath,
-			JSON.stringify({
-				...persisted,
-				revision: persisted.revision + 1,
-				lifecycleState: 'expired',
-				updatedAt: expiredAt,
-				expiresAt: expiredAt,
-			}),
+		transitionCoordinationState(directory, {
+			namespace: 'scope-binding',
+			entityKey: persisted.generationId,
+			expectedRevision: null,
+			generation: 1,
+			status: persisted.lifecycleState,
+			payload: JSON.stringify(persisted),
+		});
+		const expired = await tombstoneScopeBinding(
+			directory,
+			persisted,
+			'expired',
 		);
+		if (!expired.ok) throw new Error(expired.message);
 		const operation = hook().toolBefore(
 			{ tool: 'write', sessionID: 'coder-expired', callID: 'expired' },
 			{ args: { path: 'src/a.ts', content: 'x' } },

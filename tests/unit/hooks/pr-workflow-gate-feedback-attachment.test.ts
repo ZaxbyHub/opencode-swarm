@@ -12,7 +12,8 @@ import {
 } from '../../../src/hooks/pr-workflow-gate';
 
 let root = '';
-const originalBeforeAtomicRename = _test_exports.beforeAtomicRename;
+const originalBeforePrFeedbackTrackingPersist =
+	_test_exports.beforePrFeedbackTrackingPersist;
 const originalResolveCurrentGitHeadAsync =
 	_test_exports.resolveCurrentGitHeadAsync;
 const originalResolveCurrentUpstreamPushTargetAsync =
@@ -85,7 +86,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-	_test_exports.beforeAtomicRename = originalBeforeAtomicRename;
+	_test_exports.beforePrFeedbackTrackingPersist =
+		originalBeforePrFeedbackTrackingPersist;
 	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	_test_exports.resolveCurrentUpstreamPushTargetAsync =
 		originalResolveCurrentUpstreamPushTargetAsync;
@@ -295,7 +297,7 @@ describe('detached PR_FEEDBACK attachment', () => {
 		const denied = Object.assign(new Error('state write denied'), {
 			code: 'EACCES',
 		});
-		_test_exports.beforeAtomicRename = async () => {
+		_test_exports.beforePrFeedbackTrackingPersist = async () => {
 			throw denied;
 		};
 
@@ -309,7 +311,8 @@ describe('detached PR_FEEDBACK attachment', () => {
 			(await readPrWorkflowGateState(checkout, 'feedback-retry'))?.prHeadSha,
 		).toBeUndefined();
 
-		_test_exports.beforeAtomicRename = originalBeforeAtomicRename;
+		_test_exports.beforePrFeedbackTrackingPersist =
+			originalBeforePrFeedbackTrackingPersist;
 		await expect(
 			bindPrWorkflowHead(checkout, 'feedback-retry', head),
 		).resolves.toMatchObject({ prHeadSha: head });

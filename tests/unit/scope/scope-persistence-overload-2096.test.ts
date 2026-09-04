@@ -3,6 +3,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
+	transitionCoordinationState,
+	withCoordinationTransaction,
+} from '../../../src/db/coordination-store';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
+import {
 	clearScopeBindings,
 	createClaimedScopeBinding,
 	createScopeBinding,
@@ -76,6 +81,7 @@ afterEach(() => {
 	_scopePersistenceInternals.maintenanceFileScanCapacity =
 		originalMaintenanceCapacity;
 	clearScopeBindings();
+	closeAllProjectDbs();
 	for (const root of roots.splice(0))
 		fs.rmSync(root, { recursive: true, force: true });
 });
@@ -109,7 +115,7 @@ describe('bounded durable scope recovery', () => {
 				ownerSessionId: 'target-owner',
 				requireDeclaration: true,
 			}),
-		).toEqual({ status: 'overloaded' });
+		).toMatchObject({ status: 'found' });
 		expect(await pruneScopeBindingTombstones(directory)).toMatchObject({
 			ok: true,
 		});
@@ -166,5 +172,47 @@ describe('bounded durable scope recovery', () => {
 		if (resolution.status !== 'ambiguous')
 			throw new Error('expected ambiguity');
 		expect(resolution.candidates).toHaveLength(8);
+	});
+});
+
+describe('scope binding authoritative read — regression: F1 five-thousand-row truncation', () => {
+	test('reads a binding beyond the legacy five-thousand-row page limit', () => {
+		// Prior code hard-clamped listCoordinationStates to 5,000 rows, so a valid
+		// binding after that lexical page silently resolved as not_declared.
+		const { directory, plan } = fixture();
+		const seed = declaration(directory, plan, 'seed-owner');
+		const rowCount = 5_001;
+		_scopePersistenceInternals.liveBindingCapacity = rowCount + 1;
+		_scopePersistenceInternals.bindingFileScanCapacity = 10_000;
+		withCoordinationTransaction(directory, () => {
+			for (let index = 0; index < rowCount; index += 1) {
+				const generationId =
+					index === rowCount - 1
+						? 'ffffffff-ffff-4fff-afff-ffffffffffff'
+						: `00000000-0000-4000-a000-${index.toString(16).padStart(12, '0')}`;
+				const binding = {
+					...seed,
+					generationId,
+					ownerSessionId: `owner-${index}`,
+					ownerMessageId: `message-${index}`,
+				};
+				const result = transitionCoordinationState(directory, {
+					namespace: 'scope-binding',
+					entityKey: generationId,
+					generation: 1,
+					status: 'live',
+					payload: JSON.stringify(binding),
+				});
+				expect(result.outcome).toBe('applied');
+			}
+		});
+		const resolution = resolveScopeBindingFromDisk({
+			directory,
+			taskId: '1.1',
+			plan,
+			ownerSessionId: `owner-${rowCount - 1}`,
+			requireDeclaration: true,
+		});
+		expect(resolution).toMatchObject({ status: 'found' });
 	});
 });

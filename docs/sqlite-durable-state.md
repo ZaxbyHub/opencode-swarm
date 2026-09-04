@@ -1,6 +1,6 @@
 # `.swarm/swarm.db` — the SQLite durable-state foundation
 
-> Issue #2480 (Workstream D, PR 1 of 8). This document is the policy source for
+> Issues #2480–#2481 (Workstream D, PRs 1–2 of 8). This document is the policy source for
 > the durable-state substrate: connection identity, support floors, migrations,
 > durability classes, integrity/backup/checkpoint policy, the four table
 > patterns, the legacy-import contract, and the group-commit writer. Later
@@ -69,7 +69,8 @@ one `ctx.directory`, tests close via `closeProjectDb`/`closeAllProjectDbs`, and
 ## Versioned migrations + failed-migration recovery
 
 `schema_migrations` (`MAX(version)` + one transaction per migration) remains
-the versioning mechanism; v14–v17 added the foundation tables and every new
+the versioning mechanism; v14–v17 added the foundation tables, v18–v25 add the
+coordination event/state/lease/import tables and indexes, and every new
 migration is a SINGLE statement (a partial application can never hide inside a
 multi-statement string). On a migration failure:
 
@@ -108,6 +109,7 @@ Diagnose surfaces open failures (`/swarm diagnose` swarm.db check).
 |---|---|---|
 | `qa_gate_profile`, `qa_gate_profile_identity` | `full` | locked profiles are terminal state |
 | `task_checkpoint_receipt` | `full` | completion receipts are terminal state |
+| `coordination_event`, `coordination_event_fence`, `coordination_state`, `coordination_lease`, `coordination_import` | `full` | cross-process authorization, ownership, idempotency, and recovery state |
 | `insight_candidate` | `normal` | operational learning queue (FIFO + retention bounded) |
 | `phase_report` | `normal` | advisory per-phase reports |
 | `project_constraints`, `migration_failures`, `schema_migrations` | `normal` | operational/metadata |
@@ -194,12 +196,35 @@ registry (the next store call then gets a fresh writer); FOREIGN errors
 (e.g. a corrupt reopen) never evict. Pinned by sabotage-verified tests and
 by the real-node:sqlite leg of the merge-queue smoke repro.
 
+## Atomic coordination state (issue #2481)
+
+`src/db/coordination-store.ts` is the shared authority for cross-process state.
+An outer `BEGIN IMMEDIATE` transaction owns the connection's FULL durability;
+nested coordination calls use savepoints and cannot lower `synchronous` before
+the outer commit. Calls made inside an unknown transaction fail closed. State
+transitions support entity revision CAS, monotonic generation fences,
+idempotency-key collision detection, and optional append-stream version CAS.
+Event append and mutable-state projection commit together.
+
+Legacy files are imported only after plugin registration resolves. Import
+re-checks an empty namespace and records its digest in the same transaction;
+after commit the source is renamed to `.imported`. A crash before commit leaves
+no rows, while a crash after commit cannot duplicate them. Corrupt or ambiguous
+legacy authority blocks import. Compatibility files written after cutover are
+post-commit shadow projections and never authorize an operation.
+
+The readiness registry retains the underlying import promise even after its
+watchdog reports a timeout. Close waits for that promise, and recovery refuses
+to start a second attempt while it remains unsettled. `/swarm status` reports
+failed/timed-out readiness and `/swarm recover --coordination` performs the
+bounded explicit retry after settlement.
+
 ## Migration roadmap boundaries (what is NOT in D1)
 
 - Plan ledger (`.swarm/plan-ledger.jsonl`) → D5 (#2484).
 - Coordination state (session snapshots, pending delegations, pr-monitor,
   scope bindings, PR reentry authorizations, lane state, workflow
-  gates/circuits, background ownership) → D2 (#2481).
+  gates/circuits, background ownership) shipped in D2 (#2481).
 - Observability streams (`telemetry.jsonl`, `events.jsonl`,
   `context-telemetry.jsonl`, skill-usage) → D3 (#2482).
 - Residual streams (trajectories, knowledge family, run-memory, epic) →

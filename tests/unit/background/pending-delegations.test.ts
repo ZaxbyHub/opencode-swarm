@@ -17,6 +17,7 @@ import {
 	type SweepableDelegationStatus,
 	sweepStaleDelegations,
 } from '../../../src/background/pending-delegations';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { freezeClock } from '../../helpers/test-clock.js';
 
 function makeTempProject(): string {
@@ -76,6 +77,7 @@ describe('pending-delegations store', () => {
 	});
 	afterEach(() => {
 		restoreClock();
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 

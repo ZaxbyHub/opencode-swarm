@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { recordPendingDelegation } from '../../../src/background/pending-delegations.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	abortPrWorkflow,
 	activatePrWorkflow,
@@ -38,6 +39,7 @@ afterEach(async () => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = originalResolveCurrentGitHead;
 	gateInternals.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	closeAllProjectDbs();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

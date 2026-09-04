@@ -18,6 +18,7 @@ coverageDir = "./coverage"
 # 'git'/'gh' values so pre-existing tests don't need a per-file stub. See
 # the file for full rationale.
 preload = [
+	"./tests/preload/project-db-cleanup.ts",
 	"./tests/preload/prod-store-tripwire.ts",
 	"./tests/preload/executable-resolver-pin.ts",
 ]

@@ -14,6 +14,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	_test_exports as gateInternals,
 	settlePresumedStalePrWorkflowLanes,
@@ -62,6 +63,7 @@ afterEach(async () => {
 	// Restores getSessionOps and laneLivenessProbeTimeoutMs to their real
 	// bindings — never to a hand-rewritten literal.
 	gateInternals.resetTrackedStateCache();
+	closeProjectDb(directory);
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -71,7 +73,7 @@ async function seedStaleLane(
 	correlationId: string,
 ): Promise<void> {
 	await recordOpenPrWorkflowLane(directory, sessionID, laneId, correlationId);
-	backdatePrWorkflowLane(directory, correlationId, STALE_LANE_AGE_MS);
+	await backdatePrWorkflowLane(directory, correlationId, STALE_LANE_AGE_MS);
 }
 
 describe('lane liveness probe — a live session contradicts staleness', () => {

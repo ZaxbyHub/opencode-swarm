@@ -1,6 +1,7 @@
 /**
  * Session snapshot writer for OpenCode Swarm plugin.
- * Serializes swarmState to .swarm/session/state.json using atomic write (temp-file + rename).
+ * Persists swarmState as independently keyed SQLite coordination rows and a
+ * non-authoritative, versioned file projection.
  */
 
 import {
@@ -24,6 +25,13 @@ import { swarmState } from '../state';
 import { log } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
+import {
+	isSnapshotSessionOwnedLocally,
+	readSnapshotRows,
+	writeSnapshotRows,
+} from './snapshot-store.js';
+
+export const SNAPSHOT_PROJECTION_FILE = 'session/state.sqlite-projection.json';
 
 /**
  * v6.35.4: In-flight write guard.
@@ -372,76 +380,98 @@ export async function writeSnapshot(
 	state: typeof swarmState,
 ): Promise<void> {
 	try {
+		const { ensureSnapshotCoordinationReady } = await import(
+			'./snapshot-coordination-init.js'
+		);
+		await ensureSnapshotCoordinationReady(directory);
 		// Build SnapshotData object from state
 		const snapshot: SnapshotData = {
 			version: 3,
 			writtenAt: Date.now(),
 			workflowSchema: TASK_WORKFLOW_SCHEMA_MARKER,
 			toolAggregates: Object.fromEntries(state.toolAggregates),
-			activeAgent: Object.fromEntries(state.activeAgent),
-			delegationChains: Object.fromEntries(state.delegationChains),
+			activeAgent: Object.fromEntries(
+				[...state.activeAgent].filter(([sessionId]) =>
+					isSnapshotSessionOwnedLocally(sessionId),
+				),
+			),
+			delegationChains: Object.fromEntries(
+				[...state.delegationChains].filter(([sessionId]) =>
+					isSnapshotSessionOwnedLocally(sessionId),
+				),
+			),
 			agentSessions: {},
 		};
 
 		// Serialize each agent session
 		for (const [sessionId, sessionState] of state.agentSessions) {
+			if (!isSnapshotSessionOwnedLocally(sessionId)) continue;
 			snapshot.agentSessions[sessionId] = serializeAgentSession(sessionState);
 		}
 
-		// Serialize to JSON
-		const content = JSON.stringify(snapshot, null, 2);
-
-		// Get the resolved path for the state.json file
-		const resolvedPath = validateSwarmPath(directory, 'session/state.json');
-
-		// Ensure directory exists
-		const dir = path.dirname(resolvedPath);
-		mkdirSync(dir, { recursive: true });
-
-		// Atomic write: write to temp file then rename
-		const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-		await bunWrite(tempPath, content);
-		// FR-004: fsync the temp file so the rename below cannot leave us with
-		// an empty or partial canonical file on power-loss / kill -9.
-		try {
-			const fd = openSync(tempPath, 'r+');
-			try {
-				fsyncSync(fd);
-			} finally {
-				closeSync(fd);
-			}
-		} catch {
-			// fsync is best-effort; OSes / filesystems that don't support it
-			// (e.g. tmpfs, ramdisk) shouldn't block the main path.
-		}
-		try {
-			await renameWithTransientRetry(tempPath, resolvedPath);
-		} finally {
-			// No-op after a successful swap (the temp path no longer exists);
-			// drops the orphan when every retry failed, so a persistently locked
-			// target cannot litter .swarm/session with one .tmp file per
-			// tool.execute.after. Best-effort: an unlink blocked by something
-			// holding the fresh temp open can still leave the orphan behind.
-			// Mirrors src/evidence/task-file.ts:atomicWriteFile.
-			try {
-				unlinkSync(tempPath);
-			} catch {
-				/* already renamed or never created */
-			}
-		}
-		// Only after a SUCCESSFUL rename. `session/state.json` is read through the
-		// cached reader (`readSwarmFileAsync(directory, 'session/state.json')` at
-		// src/services/handoff-service.ts:376), and this writer runs on every
-		// tool.execute.after — a snapshot whose only delta is a counter or a
-		// timestamp field of identical width is the SAME SIZE as its predecessor,
-		// which the cache's stat stamp (mtime+ctime+size) cannot distinguish from
-		// "unchanged" inside one filesystem timestamp tick (issue #1729).
-		invalidateCachedArtifact(resolvedPath);
+		// SQLite is authoritative. Re-read after commit so the projection includes
+		// rows concurrently committed by another process.
+		writeSnapshotRows(directory, snapshot, { onlyLocallyOwnedSessions: true });
+		const canonicalSnapshot = readSnapshotRows(directory) ?? snapshot;
+		await writeSnapshotProjection(directory, canonicalSnapshot);
 	} catch (error) {
 		log('[snapshot-writer] write failed', {
 			error: error instanceof Error ? error.message : String(error),
 		});
 	}
+}
+
+export async function writeSnapshotProjection(
+	directory: string,
+	snapshot: SnapshotData,
+): Promise<void> {
+	const content = JSON.stringify(snapshot, null, 2);
+
+	// Get the resolved path for the state.json file
+	const resolvedPath = validateSwarmPath(directory, SNAPSHOT_PROJECTION_FILE);
+
+	// Ensure directory exists
+	const dir = path.dirname(resolvedPath);
+	mkdirSync(dir, { recursive: true });
+
+	// Atomic write: write to temp file then rename
+	const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+	await bunWrite(tempPath, content);
+	// FR-004: fsync the temp file so the rename below cannot leave us with
+	// an empty or partial canonical file on power-loss / kill -9.
+	try {
+		const fd = openSync(tempPath, 'r+');
+		try {
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		// fsync is best-effort; OSes / filesystems that don't support it
+		// (e.g. tmpfs, ramdisk) shouldn't block the main path.
+	}
+	try {
+		await renameWithTransientRetry(tempPath, resolvedPath);
+	} finally {
+		// No-op after a successful swap (the temp path no longer exists);
+		// drops the orphan when every retry failed, so a persistently locked
+		// target cannot litter .swarm/session with one .tmp file per
+		// tool.execute.after. Best-effort: an unlink blocked by something
+		// holding the fresh temp open can still leave the orphan behind.
+		// Mirrors src/evidence/task-file.ts:atomicWriteFile.
+		try {
+			unlinkSync(tempPath);
+		} catch {
+			/* already renamed or never created */
+		}
+	}
+	// Only after a SUCCESSFUL rename. The projection may be read through the
+	// cached artifact reader, and this writer runs on every
+	// tool.execute.after — a snapshot whose only delta is a counter or a
+	// timestamp field of identical width is the SAME SIZE as its predecessor,
+	// which the cache's stat stamp (mtime+ctime+size) cannot distinguish from
+	// "unchanged" inside one filesystem timestamp tick (issue #1729).
+	invalidateCachedArtifact(resolvedPath);
 }
 
 /**
