@@ -257,12 +257,7 @@ mod tests {
             .keys()
             .filter(|k| k.eq_ignore_ascii_case("path"))
             .count();
-        assert_eq!(
-            variants,
-            1,
-            "case variants must collapse to the managed entry: {:?}",
-            env
-        );
+        assert_eq!(variants, 1, "case variants must collapse: {:?}", env);
         let path = env.get("PATH").unwrap();
         assert!(
             path.starts_with("C:\\stubs;"),
