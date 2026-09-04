@@ -83,6 +83,42 @@ describe('subprocess timeout invariant — issue #1028/#2479', () => {
 		]);
 	});
 
+	test('covers Bun globals, DI seams, require, dynamic import, and spread-composed options', () => {
+		const source = [
+			"import { spawnSync } from 'node:child_process';",
+			'const shared = { timeout: 1 };',
+			"const cp = require('node:child_process');",
+			"const { execSync: requiredExecSync } = require('node:child_process');",
+			"const { spawn: dynamicSpawn } = await import('node:child_process');",
+			"Bun.spawn(['safe'], { ...shared });",
+			"_internals.spawnSync(['unsafe']);",
+			"cp.execFileSync('unsafe');",
+			"requiredExecSync('safe', { timeout: 1 });",
+			"dynamicSpawn('unsafe');",
+			"require('node:child_process').spawnSync('unsafe');",
+			"(await import('node:child_process')).execFile('unsafe');",
+		].join('\n');
+		expect(scanSourceForSubprocessTimeouts('extended.ts', source)).toEqual([
+			{ line: 7, callee: 'spawnSync' },
+			{ line: 8, callee: 'execFileSync' },
+			{ line: 10, callee: 'spawn' },
+			{ line: 11, callee: 'spawnSync' },
+			{ line: 12, callee: 'execFile' },
+		]);
+	});
+
+	test('resolves object options passed through a local identifier and nested spreads', () => {
+		const source = [
+			'const timeoutOptions = { timeoutMs: 1 };',
+			'const spawnOptions = { cwd: ".", ...timeoutOptions };',
+			"Bun.spawn(['safe'], spawnOptions);",
+			"Bun.spawn(['unsafe'], { ...{ cwd: '.' } });",
+		].join('\n');
+		expect(scanSourceForSubprocessTimeouts('options.ts', source)).toEqual([
+			{ line: 4, callee: 'spawn' },
+		]);
+	});
+
 	test('scans both production and test TypeScript while exempting bun-compat', () => {
 		const root = canonicalMkdtemp('subprocess-timeout-scope-');
 		roots.push(root);

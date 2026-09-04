@@ -201,8 +201,7 @@ function analyzeMockSyntax(content: string): {
 			ts.isPropertyAccessExpression(node.expression) &&
 			ts.isIdentifier(node.expression.expression) &&
 			node.expression.expression.text === 'mock' &&
-			(node.expression.name.text === 'restore' ||
-				node.expression.name.text === 'clearAllMocks')
+			node.expression.name.text === 'restore'
 		) {
 			hasCleanup = true;
 		}

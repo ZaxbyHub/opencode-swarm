@@ -45,4 +45,12 @@ describe('check-mock-cleanup comment awareness — issue #2267', () => {
 			delegationViolations: [],
 		});
 	});
+
+	test('does not treat clearAllMocks as module-mock restoration', () => {
+		const source = [
+			"mock.module('node:fs', () => ({}));",
+			'afterEach(() => mock.clearAllMocks());',
+		].join('\n');
+		expect(assessMockFile(source).missingCleanup).toBe(true);
+	});
 });
