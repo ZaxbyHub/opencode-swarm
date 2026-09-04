@@ -24,6 +24,7 @@ import * as fs from 'node:fs';
 
 const isWin = process.platform === 'win32';
 
+import { SandboxError } from '../../../src/sandbox/executor';
 import { NativeWindowsSandboxExecutor } from '../../../src/sandbox/win32/native-sandbox-executor';
 import {
 	_resetProbeCache,
@@ -213,15 +214,30 @@ describe('NativeWindowsSandboxExecutor — metacharacter fail-closed routing (PR
 				['redirect-in', 'sort < in.txt'],
 				['double-quote', 'echo "hello world"'],
 			] as const) {
-				const wrapped = executor.wrapCommand(cmd, ['C:\\ws']);
-				expect(
-					wrapped.includes('-EncodedCommand'),
-					`${label} must route to the PowerShell wrapper`,
-				).toBe(true);
-				expect(
-					wrapped.includes('swarm-sandbox-runner'),
-					`${label} must not reach the runner transport`,
-				).toBe(false);
+				// The security property is fail-closed: the command either wraps
+				// through the PowerShell wrapper (opaque Base64) or the fallback
+				// wrapper REFUSES it (SandboxError) — it must never reach the
+				// runner's raw cmd /c transport, where the metacharacter could
+				// split the wrapper line outside the sandbox boundary.
+				let outcome: 'wrapped' | 'refused';
+				let wrapped = '';
+				try {
+					wrapped = executor.wrapCommand(cmd, ['C:\\ws']);
+					outcome = 'wrapped';
+				} catch (err) {
+					expect(err).toBeInstanceOf(SandboxError);
+					outcome = 'refused';
+				}
+				if (outcome === 'wrapped') {
+					expect(
+						wrapped.includes('-EncodedCommand'),
+						`${label} must route to the PowerShell wrapper`,
+					).toBe(true);
+					expect(
+						wrapped.includes('swarm-sandbox-runner'),
+						`${label} must not reach the runner transport`,
+					).toBe(false);
+				}
 			}
 		},
 	);
