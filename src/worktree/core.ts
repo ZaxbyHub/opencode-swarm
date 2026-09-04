@@ -1136,6 +1136,23 @@ export async function removeWorktree(
 				projectRoot,
 			);
 			if (forced.exitCode === 0) {
+				if (fs.existsSync(worktreePath)) {
+					try {
+						fs.rmSync(worktreePath, { recursive: true, force: true });
+					} catch (error) {
+						return {
+							error: `git force-removed the worktree registration but residual directory cleanup failed: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						};
+					}
+					if (fs.existsSync(worktreePath)) {
+						return {
+							error:
+								'git force-removed the worktree registration but the residual directory still exists after cleanup',
+						};
+					}
+				}
 				return { success: true };
 			}
 			// Surface the force attempt's own failure, not the stale lastError.

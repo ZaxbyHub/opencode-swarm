@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BunCompatSubprocess } from '../../../src/utils/bun-compat';
@@ -106,6 +106,28 @@ describe('removeWorktree opt-in force fallback (#1708)', () => {
 			'--force',
 			worktreePath,
 		]);
+	});
+
+	test('force-success removes a residual trusted worktree directory', async () => {
+		const { base, worktreePath } = makeInRootFixture();
+		const calls = installSpawn({
+			nonForce: () =>
+				mockProc(
+					1,
+					'',
+					"fatal: '...' contains modified or untracked files, use --force to delete it",
+				),
+			force: () => mockProc(0),
+		});
+
+		const result = await removeWorktree(worktreePath, base, {
+			force: true,
+			worktreeDir: base,
+		});
+
+		expect(result).toEqual({ success: true });
+		expect(existsSync(worktreePath)).toBe(false);
+		expect(calls.some((call) => call.includes('--force'))).toBe(true);
 	});
 
 	test('EBUSY exhaustion (Windows) + force:true + in-root → escalates to --force after retries', async () => {

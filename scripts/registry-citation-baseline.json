@@ -16,55 +16,6 @@
 			"note": "Pre-existing debt, not approved drift: \"validateAndRecordAttestation\" exists in src/hooks/guardrails/file-authority.ts but not inside :136 (attestations.writerCitations[0])."
 		},
 		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "listDelegationFallbacks",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"listDelegationFallbacks\" exists in src/background/pending-delegations.ts but not inside :4780 (background-delegations-fallback.readerCitations[0])."
-		},
-		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "readDelegationFallback",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readDelegationFallback\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:4768 (background-delegations-fallback.readerCitations[0])."
-		},
-		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "removeDelegationFallback",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"removeDelegationFallback\" exists in src/background/pending-delegations.ts but not inside :4964 (background-delegations-fallback.writerCitations[0])."
-		},
-		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "scanBackgroundCoderReservationsForAdmission",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"scanBackgroundCoderReservationsForAdmission\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:5366 (background-delegations-fallback.readerCitations[1])."
-		},
-		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "scanDelegationFallbacksForRecovery",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"scanDelegationFallbacksForRecovery\" exists in src/background/pending-delegations.ts but not inside :4815 (background-delegations-fallback.readerCitations[0])."
-		},
-		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "writeBackgroundCoderReservations",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeBackgroundCoderReservations\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:5383 (background-delegations-fallback.writerCitations[1])."
-		},
-		{
-			"rowId": "background-delegations-fallback",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "writeDelegationFallback",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeDelegationFallback\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:4913 (background-delegations-fallback.writerCitations[0])."
-		},
-		{
 			"rowId": "capsules",
 			"file": "src/context-map/capsule-persistence.ts",
 			"identifier": "loadCapsule",
@@ -198,41 +149,6 @@
 			"note": "Pre-existing debt, not approved drift: \"persistReportJson\" exists in src/commands/coupling.ts but not inside src/commands/coupling.ts:153 (epic-turbo-state.writerCitations[4])."
 		},
 		{
-			"rowId": "epic-turbo-state",
-			"file": "src/turbo/epic/calibration.ts",
-			"identifier": "loadCalibrationState",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadCalibrationState\" exists in src/turbo/epic/calibration.ts but not inside src/turbo/epic/calibration.ts:138 (epic-turbo-state.readerCitations[1])."
-		},
-		{
-			"rowId": "epic-turbo-state",
-			"file": "src/turbo/epic/calibration.ts",
-			"identifier": "saveCalibrationState",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"saveCalibrationState\" exists in src/turbo/epic/calibration.ts but not inside src/turbo/epic/calibration.ts:182 (epic-turbo-state.writerCitations[1])."
-		},
-		{
-			"rowId": "epic-turbo-state",
-			"file": "src/turbo/epic/state.ts",
-			"identifier": "loadEpicSessionState",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadEpicSessionState\" exists in src/turbo/epic/state.ts but not inside src/turbo/epic/state.ts:513 (epic-turbo-state.readerCitations[0])."
-		},
-		{
-			"rowId": "epic-turbo-state",
-			"file": "src/turbo/epic/state.ts",
-			"identifier": "saveEpicSessionState",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"saveEpicSessionState\" exists in src/turbo/epic/state.ts but not inside src/turbo/epic/state.ts:524 (epic-turbo-state.writerCitations[0])."
-		},
-		{
-			"rowId": "epic-turbo-state",
-			"file": "src/turbo/lean/state.ts",
-			"identifier": "saveLeanTurboRunState",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"saveLeanTurboRunState\" exists in src/turbo/lean/state.ts but not inside src/turbo/lean/state.ts:596 (epic-turbo-state.writerCitations[3])."
-		},
-		{
 			"rowId": "evidence-bundles",
 			"file": "src/summaries/manager.ts",
 			"identifier": "storeSummary",
@@ -266,41 +182,6 @@
 			"identifier": "knowledgeApplicationTransformScan",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"knowledgeApplicationTransformScan\" exists in src/hooks/knowledge-application-gate.ts but not inside src/hooks/knowledge-application-gate.ts:418 (knowledge-application-legacy.writerCitations[1])."
-		},
-		{
-			"rowId": "knowledge-application-legacy",
-			"file": "src/hooks/knowledge-events.ts",
-			"identifier": "readLegacyApplicationRecords",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readLegacyApplicationRecords\" exists in src/hooks/knowledge-events.ts but not inside knowledge-events.ts:603 (knowledge-application-legacy.readerCitations[0])."
-		},
-		{
-			"rowId": "knowledge-events",
-			"file": "src/hooks/knowledge-events.ts",
-			"identifier": "appendHiveKnowledgeEvent",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendHiveKnowledgeEvent\" exists in src/hooks/knowledge-events.ts but not inside :488 (knowledge-events.writerCitations[0])."
-		},
-		{
-			"rowId": "knowledge-events",
-			"file": "src/hooks/knowledge-events.ts",
-			"identifier": "appendKnowledgeEvent",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendKnowledgeEvent\" exists in src/hooks/knowledge-events.ts but not inside src/hooks/knowledge-events.ts:375 (knowledge-events.writerCitations[0])."
-		},
-		{
-			"rowId": "knowledge-events",
-			"file": "src/hooks/knowledge-events.ts",
-			"identifier": "appendKnowledgeEventsBatch",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendKnowledgeEventsBatch\" exists in src/hooks/knowledge-events.ts but not inside :395 (knowledge-events.writerCitations[0])."
-		},
-		{
-			"rowId": "knowledge-events",
-			"file": "src/hooks/knowledge-events.ts",
-			"identifier": "readKnowledgeEvents",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readKnowledgeEvents\" exists in src/hooks/knowledge-events.ts but not inside src/hooks/knowledge-events.ts:561 (knowledge-events.readerCitations[0])."
 		},
 		{
 			"rowId": "knowledge-receipts-v2",
@@ -359,34 +240,6 @@
 			"note": "Pre-existing debt, not approved drift: \"validateAndCommitTerminalBatch\" exists in src/hooks/knowledge-receipt-ledger.ts but not inside :2098 (knowledge-receipts-v2.writerCitations[1])."
 		},
 		{
-			"rowId": "lane-delivery-cache",
-			"file": "src/background/lane-delivery-store.ts",
-			"identifier": "readFileSync",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readFileSync\" exists in src/background/lane-delivery-store.ts but not inside src/background/lane-delivery-store.ts:98 (lane-delivery-cache.readerCitations[0])."
-		},
-		{
-			"rowId": "link-pointers",
-			"file": "src/memory/memory-link.ts",
-			"identifier": "readMemoryLinkPointer",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readMemoryLinkPointer\" exists in src/memory/memory-link.ts but not inside memory-link.ts:93 (link-pointers.readerCitations[0])."
-		},
-		{
-			"rowId": "link-pointers",
-			"file": "src/memory/memory-link.ts",
-			"identifier": "removeMemoryLinkPointer",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"removeMemoryLinkPointer\" exists in src/memory/memory-link.ts but not inside :150 (link-pointers.writerCitations[0])."
-		},
-		{
-			"rowId": "link-pointers",
-			"file": "src/memory/memory-link.ts",
-			"identifier": "writeMemoryLinkPointer",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeMemoryLinkPointer\" exists in src/memory/memory-link.ts but not inside memory-link.ts:138 (link-pointers.writerCitations[0])."
-		},
-		{
 			"rowId": "memory-sqlite",
 			"file": "src/memory/sqlite-provider.ts",
 			"identifier": "appendOutcome",
@@ -408,20 +261,6 @@
 			"note": "Pre-existing debt, not approved drift: \"recordRecallUsage\" exists in src/memory/sqlite-provider.ts but not inside :1106 (memory-sqlite.writerCitations[0])."
 		},
 		{
-			"rowId": "phase-participation",
-			"file": "src/evidence/phase-participation.ts",
-			"identifier": "readPhaseParticipation",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readPhaseParticipation\" exists in src/evidence/phase-participation.ts but not inside src/evidence/phase-participation.ts:812 (phase-participation.readerCitations[0])."
-		},
-		{
-			"rowId": "phase-participation",
-			"file": "src/evidence/phase-participation.ts",
-			"identifier": "writeStore",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeStore\" exists in src/evidence/phase-participation.ts but not inside src/evidence/phase-participation.ts:481 (phase-participation.writerCitations[0])."
-		},
-		{
 			"rowId": "plan-checkpoints-exports",
 			"file": "src/tools/checkpoint.ts",
 			"identifier": "appendRetentionEvent",
@@ -441,55 +280,6 @@
 			"identifier": "writeCheckpointLog",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"writeCheckpointLog\" exists in src/tools/checkpoint.ts but not inside src/tools/checkpoint.ts:195 (plan-checkpoints-exports.writerCitations[1])."
-		},
-		{
-			"rowId": "plan-ledger",
-			"file": "src/plan/ledger.ts",
-			"identifier": "appendLedgerEvent",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendLedgerEvent\" exists in src/plan/ledger.ts but not inside :949 (plan-ledger.writerCitations[0])."
-		},
-		{
-			"rowId": "plan-ledger",
-			"file": "src/plan/ledger.ts",
-			"identifier": "getLatestLedgerSeq",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"getLatestLedgerSeq\" exists in src/plan/ledger.ts but not inside src/plan/ledger.ts:586 (plan-ledger.readerCitations[1])."
-		},
-		{
-			"rowId": "plan-ledger",
-			"file": "src/plan/ledger.ts",
-			"identifier": "initLedger",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"initLedger\" exists in src/plan/ledger.ts but not inside src/plan/ledger.ts:675 (plan-ledger.writerCitations[0])."
-		},
-		{
-			"rowId": "plan-ledger",
-			"file": "src/plan/ledger.ts",
-			"identifier": "loadLastApprovedPlan",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadLastApprovedPlan\" exists in src/plan/ledger.ts but not inside :1959 (plan-ledger.readerCitations[1])."
-		},
-		{
-			"rowId": "plan-ledger",
-			"file": "src/plan/ledger.ts",
-			"identifier": "readLedgerEvents",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readLedgerEvents\" exists in src/plan/ledger.ts but not inside src/plan/ledger.ts:628 (plan-ledger.readerCitations[0])."
-		},
-		{
-			"rowId": "plan-ledger",
-			"file": "src/plan/ledger.ts",
-			"identifier": "readLedgerEventsWithIntegrity",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readLedgerEventsWithIntegrity\" exists in src/plan/ledger.ts but not inside :1756 (plan-ledger.readerCitations[0])."
-		},
-		{
-			"rowId": "plan-ledger",
-			"file": "src/plan/ledger.ts",
-			"identifier": "takeSnapshotEvent",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"takeSnapshotEvent\" exists in src/plan/ledger.ts but not inside src/plan/ledger.ts:1206 (plan-ledger.writerCitations[1])."
 		},
 		{
 			"rowId": "plan-projections",
@@ -525,20 +315,6 @@
 			"identifier": "savePlan",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"savePlan\" exists in src/plan/manager.ts but not inside src/plan/manager.ts:1210 (plan-projections.writerCitations[0])."
-		},
-		{
-			"rowId": "pr-feedback-event-queues",
-			"file": "src/background/pr-feedback-event-queue.ts",
-			"identifier": "readPrFeedbackMonitorQueueFromDisk",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readPrFeedbackMonitorQueueFromDisk\" exists in src/background/pr-feedback-event-queue.ts but not inside src/background/pr-feedback-event-queue.ts:440 (pr-feedback-event-queues.readerCitations[0])."
-		},
-		{
-			"rowId": "pr-feedback-event-queues",
-			"file": "src/background/pr-feedback-event-queue.ts",
-			"identifier": "writeQueueRecord",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeQueueRecord\" exists in src/background/pr-feedback-event-queue.ts but not inside src/background/pr-feedback-event-queue.ts:241 (pr-feedback-event-queues.writerCitations[0])."
 		},
 		{
 			"rowId": "pr-review-run-artifacts",
@@ -590,116 +366,11 @@
 			"note": "Pre-existing debt, not approved drift: \"saveGraph\" exists in src/tools/repo-graph/storage.ts but not inside src/tools/repo-graph/storage.ts:339 (repo-graph.writerCitations[0])."
 		},
 		{
-			"rowId": "repo-graph-fingerprint",
-			"file": "src/tools/repo-graph/freshness.ts",
-			"identifier": "writeFingerprint",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeFingerprint\" exists in src/tools/repo-graph/freshness.ts but not inside src/tools/repo-graph/freshness.ts:518 (repo-graph-fingerprint.writerCitations[0])."
-		},
-		{
-			"rowId": "repo-memory-index",
-			"file": "src/tools/repo-graph/indexed-storage.ts",
-			"identifier": "loadSubgraphForFiles",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadSubgraphForFiles\" exists in src/tools/repo-graph/indexed-storage.ts but not inside src/tools/repo-graph/indexed-storage.ts:903 (repo-memory-index.readerCitations[1])."
-		},
-		{
-			"rowId": "repo-memory-index",
-			"file": "src/tools/repo-graph/indexed-storage.ts",
-			"identifier": "queryNodeByFile",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"queryNodeByFile\" exists in src/tools/repo-graph/indexed-storage.ts but not inside src/tools/repo-graph/indexed-storage.ts:855 (repo-memory-index.readerCitations[0])."
-		},
-		{
-			"rowId": "repo-memory-index",
-			"file": "src/tools/repo-graph/indexed-storage.ts",
-			"identifier": "syncIndexFromGraph",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"syncIndexFromGraph\" exists in src/tools/repo-graph/indexed-storage.ts but not inside src/tools/repo-graph/indexed-storage.ts:534 (repo-memory-index.writerCitations[0])."
-		},
-		{
-			"rowId": "repo-memory-index",
-			"file": "src/tools/repo-graph/storage.ts",
-			"identifier": "syncIndexFromGraph",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"syncIndexFromGraph\" exists in src/tools/repo-graph/storage.ts but not inside src/tools/repo-graph/storage.ts:659 (repo-memory-index.writerCitations[1])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "claimScopeBindingForChildDurably",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"claimScopeBindingForChildDurably\" exists in src/scope/scope-persistence.ts but not inside :1710 (scopes-family.writerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "importScopeBindingStateRows",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"importScopeBindingStateRows\" exists in src/scope/scope-persistence.ts but not inside :589 (scopes-family.writerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "readAllAuthoritativeScopeBindings",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readAllAuthoritativeScopeBindings\" exists in src/scope/scope-persistence.ts but not inside src/scope/scope-persistence.ts:820 (scopes-family.readerCitations[1])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "readScopeFromDisk",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readScopeFromDisk\" exists in src/scope/scope-persistence.ts but not inside src/scope/scope-persistence.ts:2591 (scopes-family.readerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "refreshScopeBindingLease",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"refreshScopeBindingLease\" exists in src/scope/scope-persistence.ts but not inside :1633 (scopes-family.writerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "replaceExistingScopeDeclaration",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"replaceExistingScopeDeclaration\" exists in src/scope/scope-persistence.ts but not inside :1939 (scopes-family.writerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "tombstoneScopeBinding",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"tombstoneScopeBinding\" exists in src/scope/scope-persistence.ts but not inside :1570 (scopes-family.writerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "transitionScopeBindingState",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"transitionScopeBindingState\" exists in src/scope/scope-persistence.ts but not inside :466 (scopes-family.writerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "writeScopeBindingToDisk",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeScopeBindingToDisk\" exists in src/scope/scope-persistence.ts but not inside :1236 (scopes-family.writerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "writeScopeToDisk",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeScopeToDisk\" exists in src/scope/scope-persistence.ts but not inside src/scope/scope-persistence.ts:1160 (scopes-family.writerCitations[0])."
-		},
-		{
 			"rowId": "session-state-snapshot",
 			"file": "src/services/context-budget-service.ts",
 			"identifier": "writeBudgetState",
 			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeBudgetState\" exists in src/services/context-budget-service.ts but not inside src/services/context-budget-service.ts:196 (session-state-snapshot.writerCitations[3])."
+			"note": "Pre-existing debt, not approved drift: \"writeBudgetState\" exists in src/services/context-budget-service.ts but not inside src/services/context-budget-service.ts:196 (session-state-snapshot.writerCitations[2])."
 		},
 		{
 			"rowId": "session-state-snapshot",

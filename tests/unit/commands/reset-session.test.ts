@@ -139,6 +139,45 @@ describe('handleResetSessionCommand', () => {
 		}
 	});
 
+	it('regression: priorUnsettled close aborts before deleting authoritative or in-memory state (CP-001)', async () => {
+		const snapshot = {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		};
+		writeSnapshotRows(testDir, snapshot);
+		await writeSnapshotProjection(testDir, snapshot);
+		const projectionPath = path.join(
+			testDir,
+			'.swarm',
+			SNAPSHOT_PROJECTION_FILE,
+		);
+		startAgentSession('session-1', 'coder');
+		expect(readSnapshotRows(testDir)).not.toBeNull();
+		expect(existsSync(projectionPath)).toBe(true);
+		expect(swarmState.agentSessions.size).toBe(1);
+		const original = _internals.beginSnapshotCoordinationReset;
+		_internals.beginSnapshotCoordinationReset = async () => ({
+			release: () => undefined,
+			closeError: new Error('timed out'),
+			priorUnsettled: true,
+		});
+		try {
+			const result = await handleResetSessionCommand(testDir, []);
+			expect(result).toContain(
+				'Snapshot coordination close timed out; reset aborted to avoid racing an in-flight initializer',
+			);
+			expect(readSnapshotRows(testDir)).not.toBeNull();
+			expect(existsSync(projectionPath)).toBe(true);
+			expect(swarmState.agentSessions.size).toBe(1);
+		} finally {
+			_internals.beginSnapshotCoordinationReset = original;
+		}
+	});
+
 	it('deletes state.json when it exists', async () => {
 		const stateFile = path.join(testDir, '.swarm', 'session', 'state.json');
 		writeFileSync(stateFile, JSON.stringify({ test: 'data' }));
