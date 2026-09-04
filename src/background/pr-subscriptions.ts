@@ -17,9 +17,9 @@
  *     migration source only. Migration folds it incrementally under bounded
  *     memory, persists a crash-resumable byte cursor, then renames the absorbed
  *     file to `subscriptions.legacy.jsonl` (deleted once older than
- *     `legacyArchiveTtlMs`). If the legacy file later changes (downgrade /
- *     external v1 writer), the tail is re-folded and absorbed — v1 append
- *     semantics keep working.
+ *     `legacyArchiveTtlMs`). Once SQLite authority is durably established, a
+ *     later legacy-file change is a non-authoritative shadow mutation: it is
+ *     archived or overwritten from SQLite, never re-imported.
  *
  * Merge semantics (last-write-wins, v1-compatible):
  *   - within the legacy log, the later line wins per `correlationId` (v1 fold);
@@ -51,6 +51,7 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import {
 	deleteCoordinationState,
+	getProjectDb,
 	importCoordinationOnce,
 	listCoordinationStates,
 	projectDbExists,
@@ -664,6 +665,7 @@ function prepareCoordinationPersistence(
 ): {
 	view: Record<string, PrSubscriptionRecord>;
 	checkpoint: PrSubscriptionCheckpoint;
+	compacted: boolean;
 } {
 	const preparedView = { ...view };
 	const checkpoint = buildCoordinationProjectionCheckpoint(
@@ -671,17 +673,13 @@ function prepareCoordinationPersistence(
 		preparedView,
 		baseCheckpoint,
 	);
-	compactTerminalRecords(preparedView, checkpoint);
+	const compacted = compactTerminalRecords(preparedView, checkpoint) !== null;
 	checkpoint.records = { ...preparedView };
-	return { view: preparedView, checkpoint };
+	return { view: preparedView, checkpoint, compacted };
 }
 
-function coordinationShadowDigest(
-	directory: string,
-	view: Record<string, PrSubscriptionRecord>,
-): string {
+function coordinationShadowDigest(directory: string): string {
 	const hash = createHash('sha256');
-	hash.update(JSON.stringify(view));
 	for (const filePath of [
 		storePath(directory),
 		checkpointPath(directory),
@@ -729,6 +727,25 @@ function coordinationProjectionMatches(
 		);
 	} catch {
 		return false;
+	}
+}
+
+function coordinationImportShadowState(
+	directory: string,
+): 'absent' | 'matches' | 'mismatch' {
+	if (!projectDbExists(directory)) return 'absent';
+	const statement = getProjectDb(directory).prepare<
+		{ source_digest: string },
+		[string]
+	>('SELECT source_digest FROM coordination_import WHERE source = ?');
+	try {
+		const row = statement.get(PR_SUBSCRIPTIONS_CHECKPOINT_FILE);
+		if (!row) return 'absent';
+		return row.source_digest === coordinationShadowDigest(directory)
+			? 'matches'
+			: 'mismatch';
+	} finally {
+		statement.finalize();
 	}
 }
 
@@ -794,7 +811,32 @@ function ensurePrSubscriptionCoordinationImported(
 			(fileExistsStrict(legacyPath) &&
 				!fileExistsStrict(projectionMarkerPath(legacyPath))) ||
 			!coordinationProjectionMatches(directory, coordinationView);
-		if (projectionNeedsRepair) return false;
+		if (projectionNeedsRepair) {
+			const checkpointProjectionPublished = fileExistsStrict(
+				projectionMarkerPath(checkpointPath(directory)),
+			);
+			const settledProjection =
+				checkpointProjectionPublished &&
+				checkpointRead.kind === 'ok' &&
+				(checkpointRead.value.migration === null ||
+					checkpointRead.value.migration.archived === true);
+			const importShadowState = coordinationImportShadowState(directory);
+			if (
+				(importShadowState === 'mismatch' && !settledProjection) ||
+				(!checkpointProjectionPublished && importShadowState !== 'matches') ||
+				hasLegacyReconciliationArtifacts(directory)
+			) {
+				return false;
+			}
+			for (const filePath of [
+				storePath(directory),
+				checkpointPath(directory),
+				auditPath(directory),
+			]) {
+				archiveShadowFileBestEffort(filePath);
+			}
+			writeCoordinationProjection(directory, coordinationView);
+		}
 		return true;
 	}
 
@@ -876,7 +918,7 @@ function ensurePrSubscriptionCoordinationImported(
 		directory,
 		{
 			source: PR_SUBSCRIPTIONS_CHECKPOINT_FILE,
-			sourceDigest: coordinationShadowDigest(directory, preparedImport.view),
+			sourceDigest: coordinationShadowDigest(directory),
 			rowCount: Object.keys(preparedImport.view).length,
 			emptyNamespace: PR_SUBSCRIPTION_COORDINATION_NAMESPACE,
 		},
@@ -996,14 +1038,6 @@ function ensurePrSubscriptionCoordinationImported(
 }
 
 function canUseCoordinationWritePath(directory: string): boolean {
-	const coordinationView = readCoordinationSubscriptions(directory);
-	if (
-		coordinationView !== null &&
-		Object.keys(coordinationView).length > 0 &&
-		fileExistsStrict(storePath(directory))
-	) {
-		return false;
-	}
 	if (hasLegacyReconciliationArtifacts(directory)) return false;
 	// Keep the v2 checkpoint migration state machine authoritative until it has
 	// consumed and archived its JSONL source. Importing its partial projection
@@ -1021,11 +1055,6 @@ function persistCoordinationSubscriptions(
 	writeProjection = true,
 	events: AuditEvent[] = [],
 ): void {
-	const priorCheckpoint = readCheckpoint(directory);
-	const priorCompactions =
-		priorCheckpoint.kind === 'ok'
-			? priorCheckpoint.value.maintenance.compactions
-			: 0;
 	const prepared = prepareCoordinationPersistence(directory, view);
 	// Validate and publish the compatibility projection before mutating SQLite.
 	// A projection write can fail (capacity, permissions, injected I/O fault); in
@@ -1100,7 +1129,7 @@ function persistCoordinationSubscriptions(
 		checkpoint.value.sequence,
 		checkpoint.value.maintenance,
 	);
-	if (prepared.checkpoint.maintenance.compactions > priorCompactions) {
+	if (prepared.compacted) {
 		emitHealthTelemetry(directory, 'compact', prepared.checkpoint);
 	}
 }

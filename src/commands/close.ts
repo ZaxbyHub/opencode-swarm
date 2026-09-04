@@ -80,6 +80,7 @@ import {
 import { telemetry as telemetryEmit } from '../telemetry';
 import { executeWriteRetro } from '../tools/write-retro';
 import { atomicWriteSwarmFile } from '../utils/atomic-write';
+import { collectGarbageBestEffort, sleep } from '../utils/bun-compat.js';
 import { log } from '../utils/logger';
 import {
 	type CloseTerminalResult,
@@ -1752,6 +1753,31 @@ export async function runArchiveEvidenceRetention(
  * artifacts. Resets context.md for the next session. All state mutations are
  * written back to ctx so the caller can build the close summary.
  */
+const ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS = [25, 50, 100, 200] as const;
+
+/**
+ * Delete one archived active-state artifact, tolerating the short-lived file
+ * locks Windows antivirus and SQLite sidecars can retain after handle close.
+ * Non-transient errors fail immediately; the retry budget is bounded to
+ * 375 ms so `/swarm close` remains responsive.
+ */
+async function unlinkActiveStateFileWithRetry(filePath: string): Promise<void> {
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			await _internals.unlink(filePath);
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException)?.code;
+			const delay = ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS[attempt];
+			if ((code !== 'EBUSY' && code !== 'EPERM') || delay === undefined) {
+				throw error;
+			}
+			if (attempt === 0) _internals.collectGarbageBestEffort();
+			await _internals.sleep(delay);
+		}
+	}
+}
+
 export async function runCleanStage(
 	ctx: CloseStageContext,
 ): Promise<CleanStageResult> {
@@ -1861,7 +1887,7 @@ export async function runCleanStage(
 				}
 			}
 			try {
-				await fs.unlink(filePath);
+				await _internals.unlinkActiveStateFileWithRetry(filePath);
 				cleanedFiles.push(artifact);
 			} catch (err) {
 				const errno = (err as NodeJS.ErrnoException)?.code;
@@ -2819,6 +2845,10 @@ function detectFullAuto(directory: string, sessionID: string): boolean {
 export const _internals = {
 	closeSnapshotCoordinationInitialization,
 	closeRepoMemory,
+	unlinkActiveStateFileWithRetry,
+	unlink: fs.unlink,
+	sleep,
+	collectGarbageBestEffort,
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	countSessionKnowledgeEntries,
 	CLOSE_SKILL_REVIEW_TIMEOUT_MS,

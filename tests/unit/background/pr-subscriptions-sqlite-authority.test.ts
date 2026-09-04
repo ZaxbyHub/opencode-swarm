@@ -44,13 +44,47 @@ function legacyRecord(sessionID: string, prNumber: number, updatedAt = 1) {
 }
 
 const UPDATE_CHILD = `
+const fs = await import("node:fs");
 const mod = await import(process.env.SWARM_PR_MODULE);
+const coordination = await import(process.env.SWARM_PR_COORDINATION_MODULE);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const deadline = Date.now() + Number(process.env.SWARM_PR_RENDEZVOUS_TIMEOUT_MS);
+const waitForMarker = async (markerPath) => {
+	while (!fs.existsSync(markerPath)) {
+		if (Date.now() >= deadline) throw new Error("rendezvous timeout");
+		await sleep(5);
+	}
+};
+fs.writeFileSync(process.env.SWARM_PR_READY, "ready");
+await waitForMarker(process.env.SWARM_PR_GO);
+coordination._internals.coordinationFaultInjector = (point) => {
+	if (point !== "before_begin") return;
+	fs.writeFileSync(process.env.SWARM_PR_ENTERED, "entered");
+	const waitDeadline = Date.now() + Number(process.env.SWARM_PR_RENDEZVOUS_TIMEOUT_MS);
+	while (!fs.existsSync(process.env.SWARM_PR_PARENT_GO)) {
+		if (Date.now() >= waitDeadline) throw new Error("overlap rendezvous timeout");
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+	}
+};
 await mod.updateSnapshot(process.env.SWARM_PR_DIR, process.env.SWARM_PR_CID, {
 	errorCount: 7,
 	lastCheckedAt: 200,
 });
+fs.writeFileSync(process.env.SWARM_PR_DONE, "done");
 console.log("done");
 `;
+
+const RENDEZVOUS_TIMEOUT_MS = 15_000;
+
+async function waitForMarker(markerPath: string): Promise<void> {
+	const deadline = Date.now() + RENDEZVOUS_TIMEOUT_MS;
+	while (!fs.existsSync(markerPath)) {
+		if (Date.now() >= deadline) {
+			throw new Error(`rendezvous timeout waiting for ${markerPath}`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+}
 
 afterEach(() => {
 	coordinationInternals.coordinationFaultInjector = undefined;
@@ -96,6 +130,12 @@ describe('pr-subscriptions SQLite authority', () => {
 			prUrl: 'https://github.com/o/r/pull/1',
 		});
 
+		const rendezvousDir = path.join(dir, '.swarm', 'pr-monitor');
+		const readyPath = path.join(rendezvousDir, 'child.ready');
+		const goPath = path.join(rendezvousDir, 'child.go');
+		const enteredPath = path.join(rendezvousDir, 'child.entered');
+		const parentInvokedPath = path.join(rendezvousDir, 'parent.invoked');
+		const donePath = path.join(rendezvousDir, 'child.done');
 		const child = bunSpawn([process.execPath, '-e', UPDATE_CHILD], {
 			cwd: process.cwd(),
 			env: {
@@ -103,8 +143,17 @@ describe('pr-subscriptions SQLite authority', () => {
 				SWARM_PR_MODULE: pathToFileURL(
 					path.resolve('src/background/pr-subscriptions.ts'),
 				).href,
+				SWARM_PR_COORDINATION_MODULE: pathToFileURL(
+					path.resolve('src/db/coordination-store.ts'),
+				).href,
 				SWARM_PR_DIR: dir,
 				SWARM_PR_CID: created.correlationId,
+				SWARM_PR_READY: readyPath,
+				SWARM_PR_GO: goPath,
+				SWARM_PR_ENTERED: enteredPath,
+				SWARM_PR_PARENT_GO: parentInvokedPath,
+				SWARM_PR_DONE: donePath,
+				SWARM_PR_RENDEZVOUS_TIMEOUT_MS: String(RENDEZVOUS_TIMEOUT_MS),
 			},
 			stdin: 'ignore',
 			stdout: 'ignore',
@@ -113,10 +162,30 @@ describe('pr-subscriptions SQLite authority', () => {
 			killProcessTree: true,
 		});
 		try {
-			await updateSnapshot(dir, created.correlationId, {
+			// The child must be fully initialized before it is released. Its
+			// coordination fault seam then pauses inside updateSnapshot's coordination
+			// transaction entry, so the parent invocation below is guaranteed to overlap
+			// an already-active child invocation rather than merely being scheduled
+			// near it.
+			await waitForMarker(readyPath);
+			fs.writeFileSync(goPath, 'go', 'utf8');
+			await waitForMarker(enteredPath);
+			// The child is still paused in the transaction hook; it cannot finish
+			// until the parent has invoked its own update below.
+			expect(fs.existsSync(donePath)).toBe(false);
+			const parentUpdate = updateSnapshot(dir, created.correlationId, {
 				mergeableState: 'clean',
 				lastCheckedAt: 100,
 			});
+			// Calling an async function executes synchronously through its first await.
+			// This marker is therefore published only after the parent invocation has
+			// entered withEvidenceLock and suspended on the lock held by the child.
+			fs.writeFileSync(parentInvokedPath, 'invoked', 'utf8');
+			expect(fs.existsSync(donePath)).toBe(false);
+			// The child observes parent.invoked before it can leave the transaction
+			// hook, making the overlap a protocol condition rather than a timer guess.
+			await parentUpdate;
+			await waitForMarker(donePath);
 			expect(await child.exited).toBe(0);
 		} finally {
 			try {

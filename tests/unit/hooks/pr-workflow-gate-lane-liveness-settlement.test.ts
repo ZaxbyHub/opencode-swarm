@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { handleAbortPrWorkflowCommand } from '../../../src/commands/abort-pr-workflow.js';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	abortPrWorkflow,
 	activatePrWorkflow,
@@ -65,6 +66,7 @@ afterEach(async () => {
 	gateInternals.resolveIsWorkingTreeClean = originals.resolveIsWorkingTreeClean;
 	gateInternals.resolveIsWorkingTreeCleanAsync =
 		originals.resolveIsWorkingTreeCleanAsync;
+	closeProjectDb(directory);
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

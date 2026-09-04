@@ -25,6 +25,7 @@ import {
 	_internals as statusInternals,
 } from '../../../src/commands/pr-monitor-status';
 import { transitionCoordinationState } from '../../../src/db/coordination-store';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { _internals as telemetryInternals } from '../../../src/telemetry';
 import { sameProjectRoot } from '../../../src/utils/canonical-root';
 import { freezeClock } from '../../helpers/test-clock';
@@ -92,6 +93,7 @@ describe('pr-subscriptions health + recovery', () => {
 		dir = makeTempProject();
 	});
 	afterEach(() => {
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 

@@ -368,6 +368,7 @@ function bindAlias(
 }
 
 function closeRecord(physicalKey: string, record: ProjectDbRecord): void {
+	_internals.checkpointWalBestEffort(record.db);
 	record.db.close();
 	_projectDbs.delete(physicalKey);
 	for (const alias of [...record.aliases]) unbindAlias(alias, physicalKey);
@@ -781,6 +782,7 @@ export function closeAllProjectDbs(): void {
 }
 
 export const _internals = {
+	checkpointWalBestEffort,
 	projectDbCount: () => _projectDbs.size,
 	projectDbAliasCount: () => _projectDbAliases.size,
 };

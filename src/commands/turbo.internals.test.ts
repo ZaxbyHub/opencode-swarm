@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeProjectDb } from '../db/project-db';
 import { getAgentSession, swarmState } from '../state';
 import { _internals, handleTurboCommand } from './turbo';
 
@@ -65,6 +66,7 @@ describe('turbo _internals DI seam', () => {
 
 		// Clean up temp directory
 		if (tmpDir) {
+			closeProjectDb(tmpDir);
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 		}
 	});

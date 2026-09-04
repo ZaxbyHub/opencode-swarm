@@ -16,11 +16,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	abortPrWorkflow,
 	activatePrWorkflow,
 	_test_exports as gateInternals,
+	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { writeStateWhileLocked } from '../../../src/pr-review/persistence.js';
 import { executePreparePrWorkflowCheckout } from '../../../src/tools/prepare-pr-workflow-checkout.js';
 import { bunSpawn } from '../../../src/utils/bun-compat.js';
 import {
@@ -113,6 +116,7 @@ afterEach(async () => {
 	// path, which the inline `beforeAbortClear = undefined` in the CAS test (kept
 	// because that test's retry depends on it mid-test) does not.
 	gateInternals.resetTrackedStateCache();
+	closeProjectDb(directory);
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -218,19 +222,11 @@ describe('the irreversible half is conditional on the reversible half (F1)', () 
 				data: { [laneSubagentSessionId('c-cas')]: { type: 'busy' } },
 			}),
 		});
-		const statePath = path.join(
-			directory,
-			'.swarm',
-			gateInternals.workflowGateStateRelativePath(SESSION_ID),
-		);
 		// The concurrent mutation between the durable audit append and the clear.
 		gateInternals.beforeAbortClear = async () => {
-			const current = JSON.parse(await fs.readFile(statePath, 'utf-8'));
-			await fs.writeFile(
-				statePath,
-				JSON.stringify({ ...current, revision: current.revision + 1 }),
-				'utf-8',
-			);
+			const current = await readPrWorkflowGateState(directory, SESSION_ID);
+			if (!current) throw new Error('expected active workflow state');
+			await writeStateWhileLocked(directory, current);
 		};
 
 		await expect(

@@ -34,12 +34,14 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { BACKGROUND_DELEGATIONS_FILE } from '../../../src/background/pending-delegations.js';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	abortPrWorkflow,
 	activatePrWorkflow,
 	_test_exports as gateInternals,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { writeStateWhileLocked } from '../../../src/pr-review/persistence.js';
 import {
 	backdatePrWorkflowLane,
 	laneStatusOnDisk,
@@ -110,6 +112,7 @@ afterEach(async () => {
 	gateInternals.resolveIsWorkingTreeClean = originals.resolveIsWorkingTreeClean;
 	gateInternals.resolveIsWorkingTreeCleanAsync =
 		originals.resolveIsWorkingTreeCleanAsync;
+	closeProjectDb(directory);
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -225,22 +228,14 @@ describe('a lost CAS in a mixed batch retracts precisely, not vacuously', () => 
 				},
 			}),
 		});
-		const statePath = path.join(
-			directory,
-			'.swarm',
-			gateInternals.workflowGateStateRelativePath(SESSION_ID),
-		);
 		// The seam runs AFTER settlement (which already swept `c-mix-dead` to
 		// `stale`) and immediately before the CAS-guarded clear — the same
 		// technique the restart suite's F1 test uses to force a lost
 		// compare-and-swap without touching production code.
 		gateInternals.beforeAbortClear = async () => {
-			const current = JSON.parse(await fs.readFile(statePath, 'utf-8'));
-			await fs.writeFile(
-				statePath,
-				JSON.stringify({ ...current, revision: current.revision + 1 }),
-				'utf-8',
-			);
+			const current = await readPrWorkflowGateState(directory, SESSION_ID);
+			if (!current) throw new Error('expected active workflow state');
+			await writeStateWhileLocked(directory, current);
 		};
 
 		await expect(
