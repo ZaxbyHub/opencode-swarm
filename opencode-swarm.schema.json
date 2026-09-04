@@ -87,9 +87,13 @@
     },
     "auto_select_architect": {
       "description": "Auto-select the swarm architect for new sessions instead of OpenCode built-ins. Omitted or false: manual selection (omitted behaves as false). true: enable auto-select and disable built-in build/plan agents. \"<architect_name>\" (e.g. \"mega_architect\"): enable targeting one architect in multi-swarm setups.",
-      "type": [
-        "boolean",
-        "string"
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        }
       ]
     },
     "swarms": {
@@ -759,7 +763,7 @@
         "effective_at": {
           "type": "string",
           "format": "date-time",
-          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
         },
         "billing_basis": {
           "type": "string",
@@ -3394,9 +3398,13 @@
         },
         "model": {
           "default": null,
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "fallback_models": {
@@ -3567,9 +3575,13 @@
         },
         "model": {
           "default": null,
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "fallback_models": {
