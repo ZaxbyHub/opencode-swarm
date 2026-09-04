@@ -41,6 +41,22 @@ function run(cwd: string, args: string[]) {
 		err: p.stderr.toString(),
 	};
 }
+function runWithEnv(cwd: string, args: string[], env: Record<string, string>) {
+	const p = Bun.spawnSync({
+		cmd: bashCommand(SCRIPT, ...args),
+		cwd,
+		env: { ...process.env, ...env },
+		stdin: 'ignore',
+		stdout: 'pipe',
+		stderr: 'pipe',
+		timeout: 30_000,
+	});
+	return {
+		code: p.exitCode,
+		out: p.stdout.toString(),
+		err: p.stderr.toString(),
+	};
+}
 function repo() {
 	const value = canonicalMkdtemp('repro-check-');
 	roots.push(value);
@@ -237,6 +253,25 @@ describe('repro-check.sh disposable checks', () => {
 			'-c',
 			'sleep 5',
 		]);
+		expect(result.code).toBe(6);
+	}, 20_000);
+
+	test('watchdog fallback (process-group kill) bounds a timed-out child when forced', () => {
+		const worktree = repo();
+		const base = git(worktree, 'rev-parse', 'HEAD');
+		const result = runWithEnv(
+			worktree,
+			[
+				...args(base, 'PRESERVING'),
+				'--timeout',
+				'2',
+				'--',
+				'bash',
+				'-c',
+				'sleep 5',
+			],
+			{ REPRO_CHECK_FORCE_FALLBACK: '1' },
+		);
 		expect(result.code).toBe(6);
 	}, 20_000);
 

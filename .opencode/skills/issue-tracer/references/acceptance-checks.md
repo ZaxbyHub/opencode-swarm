@@ -4,7 +4,7 @@ Use this reference for Phase 2.5 (freezing the checks) and Phase 4 (proving they
 
 ## The loop
 
-1. For every numbered acceptance criterion (`ACn`) in `01-issue-summary.md`, write exactly one row in the `## Acceptance checks` table appended to `02-reproduction.md` (see `references/evidence-artifacts.md` for the exact header and column set).
+1. For every numbered acceptance criterion (`ACn`) in `01-issue-summary.md`, write exactly one row in the `## Acceptance checks` table appended to `02-reproduction.md` (see `references/evidence-artifacts.md` for the exact header and column set). The `argv` cell must never contain a literal `|` - `trace-check.sh` splits each row on `|`, so a pipeline in `argv` corrupts the row; write the pipeline as a small script under `repro/` and put the script's invocation in `argv` instead.
 2. Run the executable classes against the pre-fix tree with `repro-check.sh run`. A DISCRIMINATING check that also passes on the buggy tree is vacuous and rejected - it carries no information about whether the bug is fixed (the bug-contrast replay rule below).
 3. Freeze the check set with `repro-check.sh checkpoint` before any production fix code exists. The checkpoint tree-id must differ from the Phase 0 tree-id only by paths listed in `repro/checkpoint.manifest` - this is validated mechanically at `trace-check.sh phase 2.5`.
 4. Phase 4 re-runs every check against the fixed tree; results are appended to the same table's `post-fix` column and echoed in `08-test-results.md`.

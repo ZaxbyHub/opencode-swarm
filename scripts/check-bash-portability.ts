@@ -39,13 +39,12 @@ function toPosixRelative(root: string, file: string): string {
 	return path.relative(root, file).replace(/\\/g, '/');
 }
 
-function listShellFiles(root: string): string[] {
-	const scriptsDir = path.join(root, 'scripts');
-	if (!fs.existsSync(scriptsDir)) {
+function walkShFiles(startDir: string): string[] {
+	if (!fs.existsSync(startDir)) {
 		return [];
 	}
 	const out: string[] = [];
-	const stack = [scriptsDir];
+	const stack = [startDir];
 	while (stack.length > 0) {
 		const current = stack.pop()!;
 		const entries = fs
@@ -62,6 +61,33 @@ function listShellFiles(root: string): string[] {
 				out.push(full);
 			}
 		}
+	}
+	return out;
+}
+
+function listSkillScriptsDirs(root: string): string[] {
+	const skillsRoot = path.join(root, '.opencode', 'skills');
+	if (!fs.existsSync(skillsRoot)) {
+		return [];
+	}
+	const out: string[] = [];
+	for (const entry of fs.readdirSync(skillsRoot, { withFileTypes: true })) {
+		if (!entry.isDirectory()) {
+			continue;
+		}
+		const scriptsDir = path.join(skillsRoot, entry.name, 'scripts');
+		if (fs.existsSync(scriptsDir)) {
+			out.push(scriptsDir);
+		}
+	}
+	return out;
+}
+
+function listShellFiles(root: string): string[] {
+	const out: string[] = [];
+	out.push(...walkShFiles(path.join(root, 'scripts')));
+	for (const skillScriptsDir of listSkillScriptsDirs(root)) {
+		out.push(...walkShFiles(skillScriptsDir));
 	}
 	return out.sort((a, b) => a.localeCompare(b));
 }

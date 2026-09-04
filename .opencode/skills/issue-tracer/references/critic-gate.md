@@ -37,8 +37,8 @@ Return exactly:
 ## Reviewed SHA / diff hash
 [reviewed-commit and tree-id you examined.]
 
-## Round N
-[This is round N of this critic loop; summarize what changed since the prior round, or "Round 1" if first.]
+## Round 1
+[The first round of this critic loop uses "## Round 1"; a second round appends "## Round 2", a third "## Round 3", and so on - one heading per round, never renumbered. `trace-check.sh` requires at least one heading matching `^## Round [0-9]+$`. Summarize what changed since the prior round, or state this is the first pass.]
 
 ## Verdict
 APPROVE / NEEDS_REVISION / BLOCKED

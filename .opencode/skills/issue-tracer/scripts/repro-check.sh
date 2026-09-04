@@ -38,30 +38,34 @@ bound_log() {
 
 run_one() {
   local cwd="$1" log="$2" seconds="$3"; shift 3
-  local status=0 pid started timed=0
+  local status=0 pid started timed=0 waited=0
   : > "$log"
-  if command -v timeout >/dev/null 2>&1; then
+  if [ "${REPRO_CHECK_FORCE_FALLBACK:-0}" != "1" ] && command -v timeout >/dev/null 2>&1; then
     ( cd "$cwd" && timeout --foreground -k 5 "${seconds}s" "$@" ) > "$log" 2>&1 || status=$?
   else
+    # POSIX watchdog fallback: run the child in its own process group so the
+    # whole group (not just the immediate child) can be killed on timeout.
     if command -v setsid >/dev/null 2>&1; then
       ( cd "$cwd" && exec setsid "$@" ) > "$log" 2>&1 &
     else
+      set -m
       ( cd "$cwd" && "$@" ) > "$log" 2>&1 &
+      set +m
     fi
     pid=$!
     started=$SECONDS
     while kill -0 "$pid" 2>/dev/null; do
       if [ "$((SECONDS - started))" -ge "$seconds" ]; then
         timed=1
-        case "$(uname -s 2>/dev/null || true)" in
-          MINGW* | MSYS* | CYGWIN*) taskkill //T //F //PID "$pid" >/dev/null 2>&1 || kill "$pid" >/dev/null 2>&1 || true ;;
-          *) kill -TERM -- "-$pid" >/dev/null 2>&1 || kill "$pid" >/dev/null 2>&1 || true ;;
-        esac
+        kill -TERM -- "-$pid" >/dev/null 2>&1 || kill -TERM "$pid" >/dev/null 2>&1 || true
+        waited=0
+        while [ "$waited" -lt 5 ] && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
+        kill -KILL -- "-$pid" >/dev/null 2>&1 || kill -KILL "$pid" >/dev/null 2>&1 || true
         break
       fi
       sleep 1
     done
-    wait "$pid" || status=$?
+    wait "$pid" 2>/dev/null || status=$?
     [ "$timed" -eq 0 ] || status=124
   fi
   bound_log "$log"
@@ -127,7 +131,7 @@ do_run() {
   cleanup() { git worktree remove --force "$worktree" >/dev/null 2>&1 || true; rm -rf "$worktree"; }
   trap cleanup EXIT HUP INT TERM
   git worktree add --detach "$worktree" "$base" >/dev/null 2>&1 || { echo "repro-check: could not create disposable worktree" >&2; exit 2; }
-  for arg in "${copies[@]}"; do copy_path "$arg"; done
+  for arg in ${copies[@]+"${copies[@]}"}; do copy_path "$arg"; done
   link_deps
   base_status="$(run_one "$worktree" "$trace_dir/repro/$check_id.base.log" "$timeout_seconds" "$@")"
   head_status="$(run_one "$root" "$trace_dir/repro/$check_id.head.log" "$timeout_seconds" "$@")"

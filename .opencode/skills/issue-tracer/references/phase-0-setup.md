@@ -14,6 +14,10 @@ Detached HEAD or fork-remote setups: record whatever ref is actually upstream (n
 
 If the worktree has unrelated user-owned uncommitted changes, never stash or touch them. Create a separate `git worktree` at the synced base and do all trace work there.
 
+## Slug derivation
+
+Derive `<issue-slug>` from the issue number/title before using it anywhere in this workflow: lowercase, kebab-case, `[a-z0-9-]` only (for example, issue #1849 "Real host injection" -> `1849-real-host-injection`). Never embed raw issue-title text (spaces, punctuation, shell metacharacters) into a slug - `trace-init.sh` enforces this same allowlist and exits non-zero on anything else, but every other `<issue-slug>` usage site in this workflow (state directory paths, the branch name, `trace-check.sh --slug`, `repro-check.sh --slug`) assumes an already-sanitized slug.
+
 ## Identities (both recorded at every gate)
 
 - `reviewed-commit` = `git rev-parse HEAD`. This is what review verdicts bind to, and it is only meaningful when the tree is clean - Phases 4.5 and 4.6 require `git status --porcelain` (trace dir excluded) to be empty before recording it.

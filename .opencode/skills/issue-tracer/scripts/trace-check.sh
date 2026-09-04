@@ -26,7 +26,7 @@ tree_id() {
   local index
   index="$(mktemp)"
   rm -f "$index"
-  if ! GIT_INDEX_FILE="$index" git read-tree HEAD || ! GIT_INDEX_FILE="$index" git add -A . || ! GIT_INDEX_FILE="$index" git write-tree; then
+  if ! GIT_INDEX_FILE="$index" git -C "$root" read-tree HEAD || ! GIT_INDEX_FILE="$index" git -C "$root" add -A . || ! GIT_INDEX_FILE="$index" git -C "$root" write-tree; then
     rm -f "$index"
     return 1
   fi
@@ -135,7 +135,7 @@ phase2() {
 }
 
 phase25() {
-  local file="$trace/02-reproduction.md" header ac row found class check pre notes reason checkpoint manifest_path diff_path
+  local file="$trace/02-reproduction.md" header ac row found class check pre notes reason checkpoint manifest_path diff_path cells ac_probe
   if is_already_fixed; then rule_ok obe-subset; return; fi
   header='| AC | class | check | argv | expect | pre-fix | post-fix | notes |'
   grep -Fx "$header" "$file" >/dev/null 2>&1 && rule_ok acceptance-table || { rule_bad acceptance-table "missing exact header"; return; }
@@ -146,6 +146,12 @@ phase25() {
   check="$(grep -E '^\|[[:space:]]*AC[0-9]+[[:space:]]*\|' "$file" 2>/dev/null | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4}' | sort | uniq -d | head -n1 || true)"
   [ -z "$check" ] && rule_ok acceptance-check-ids || rule_bad acceptance-check-ids "duplicate check id $check"
   while IFS= read -r row; do
+    cells="$(printf '%s' "$row" | awk -F'|' '{print NF}')"
+    if [ "${cells:-0}" -gt 10 ]; then
+      ac_probe="$(printf '%s' "$row" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}')"
+      rule_bad "acceptance-table-row-${ac_probe:-unknown}" "row for ${ac_probe:-unknown} has too many columns (literal | in argv?)"
+      continue
+    fi
     IFS='|' read -r _ ac class check argv expect pre post notes _ <<EOF
 $row
 EOF
@@ -174,7 +180,8 @@ EOF
 
 phase3() {
   check_headings "$trace/05-fix-plan.md" '## Selected Fix' '## Candidate Fixes' '## Impact Analysis' '## Anticipated Defect-Class Sweep (Phase 4.2)'
-  check_headings "$trace/06-critic-review.md" '## Reviewed SHA / diff hash' '## Verdict' '## Check replay' '## Round 1'
+  check_headings "$trace/06-critic-review.md" '## Reviewed SHA / diff hash' '## Verdict' '## Check replay'
+  grep -Eq '^## Round [0-9]+$' "$trace/06-critic-review.md" 2>/dev/null && rule_ok heading-round || rule_bad heading-round "missing ## Round N heading in $(basename "$trace/06-critic-review.md")"
   grep -A10 '^## Verdict$' "$trace/06-critic-review.md" 2>/dev/null | grep -q APPROVE && rule_ok critic-verdict || rule_bad critic-verdict "must approve"
   [ -f "$trace/07-approved-plan.md" ] && rule_ok approved-plan || rule_bad approved-plan "missing"
   state_gate plan-critic ""
@@ -243,8 +250,25 @@ done
 valid_slug "$slug" || { echo "trace-check: invalid slug" >&2; exit 2; }
 [ -n "$trace" ] || trace="$root/.agents/issue-traces/$slug"
 state="$trace/state.md"
-[ "$(state_value protocol)" = "3.0.0" ] || legacy=1
-[ "$legacy" -eq 0 ] || echo "WARN protocol: legacy trace (protocol missing or not 3.0.0), all failures downgraded to WARN"
+if [ ! -d "$trace" ] || [ ! -f "$state" ]; then
+  echo "FAIL state: missing $state"
+  exit 1
+fi
+protocol_line="$(grep -c '^protocol: ' "$state" 2>/dev/null || true)"
+protocol_value="$(state_value protocol)"
+if [ "${protocol_line:-0}" -eq 0 ]; then
+  # No protocol line at all: legacy v2 ledger unless a v3-only key is present,
+  # in which case this is a v3 ledger that had its protocol line stripped.
+  if grep -Eq '^(phase0-tree-id|checkpoint-tree-id|handshake): ' "$state" 2>/dev/null; then
+    echo "FAIL state-protocol: missing (v3 ledger without protocol line)"
+    exit 1
+  fi
+  legacy=1
+  echo "WARN protocol: legacy trace (protocol missing), all failures downgraded to WARN"
+elif [ "$protocol_value" != "3.0.0" ]; then
+  echo "FAIL state-protocol: unsupported $protocol_value"
+  exit 1
+fi
 
 if [ "$phase" = merge ]; then merge_check
 else
