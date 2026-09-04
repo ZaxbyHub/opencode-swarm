@@ -189,9 +189,7 @@ describe('ci.yml integration — coverage gate bounded retry (issue #1782 parity
 
 	test('coverage helper retries up to max_retries=2 (three attempts total)', () => {
 		expect(coverageGateScript).toContain('max_retries=2');
-		expect(coverageGateScript).toContain(
-			'while true; do',
-		);
+		expect(coverageGateScript).toContain('while true; do');
 		expect(coverageGateScript).toContain(
 			'if [ "$retry_num" -ge "$max_retries" ]; then',
 		);
@@ -212,9 +210,7 @@ describe('ci.yml integration — coverage gate bounded retry (issue #1782 parity
 	// slice, is what actually fails if the reset is relocated outside the loop
 	// (issue #1712 per-attempt isolation).
 	test('coverage helper resets the coverage dir INSIDE the retry loop, not just once per file', () => {
-		const whileStart = coverageGateScript.indexOf(
-			'while true; do',
-		);
+		const whileStart = coverageGateScript.indexOf('while true; do');
 		expect(whileStart).toBeGreaterThan(-1);
 		const doneIdx = coverageGateScript.indexOf('\n\tdone\n', whileStart);
 		expect(doneIdx).toBeGreaterThan(whileStart);
