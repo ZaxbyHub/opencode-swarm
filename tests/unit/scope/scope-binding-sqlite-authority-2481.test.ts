@@ -5,6 +5,10 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
+	_internals as coordinationInternals,
+	transitionCoordinationState,
+} from '../../../src/db/coordination-store.js';
+import {
 	closeAllProjectDbs,
 	getProjectDb,
 } from '../../../src/db/project-db.js';
@@ -55,12 +59,8 @@ function fixture(): { directory: string; plan: Plan } {
 }
 
 function exactPath(directory: string, binding: ScopeBinding): string {
-	return path.join(
-		directory,
-		'.swarm',
-		'scopes',
-		`binding-${binding.taskId}-${binding.bindingId}-${binding.generationId}.json`,
-	);
+	const name = `binding-${binding.taskId}-${binding.bindingId}-${binding.generationId}.json`;
+	return path.join(directory, '.swarm', 'scopes', name);
 }
 
 function legacyWrite(binding: ScopeBinding, directory: string): void {
@@ -120,11 +120,93 @@ function waitForFile(filePath: string, deadlineMs = 5_000): boolean {
 }
 
 afterEach(() => {
+	coordinationInternals.coordinationFaultInjector = undefined;
 	closeAllProjectDbs();
 	while (cleanups.length > 0) cleanups.pop()?.();
 });
 
 describe('scope binding SQLite authority cutover (#2481)', () => {
+	test('recovers archive work after an import commit crash', () => {
+		const { directory, plan } = fixture();
+		const binding = declarationBinding(directory, plan);
+		legacyWrite(binding, directory);
+		coordinationInternals.coordinationFaultInjector = (point) => {
+			if (point === 'after_commit_before_archive') {
+				throw new Error('scope archive crash');
+			}
+		};
+		expect(
+			readScopeBindingFromDisk({
+				directory,
+				taskId: '1.1',
+				plan,
+				ownerSessionId: binding.ownerSessionId,
+				requireDeclaration: true,
+			}),
+		).toBeNull();
+		coordinationInternals.coordinationFaultInjector = undefined;
+		expect(
+			readScopeBindingFromDisk({
+				directory,
+				taskId: '1.1',
+				plan,
+				ownerSessionId: binding.ownerSessionId,
+				requireDeclaration: true,
+			}),
+		).toMatchObject({ generationId: binding.generationId });
+		expect(fs.existsSync(`${exactPath(directory, binding)}.imported`)).toBe(
+			true,
+		);
+	});
+
+	test('a durable revocation overrides a stale same-process cache entry', async () => {
+		const { directory, plan } = fixture();
+		const binding = declarationBinding(directory, plan);
+		expect(
+			await persistAndRegisterScopeBinding(directory, binding),
+		).toMatchObject({ ok: true });
+		expect(
+			readScopeBindingFromDisk({
+				directory,
+				taskId: '1.1',
+				plan,
+				ownerSessionId: binding.ownerSessionId,
+				requireDeclaration: true,
+			}),
+		).not.toBeNull();
+		const row = getProjectDb(directory)
+			.query<{ revision: number }, [string, string]>(
+				'SELECT revision FROM coordination_state WHERE namespace = ? AND entity_key = ?',
+			)
+			.get('scope-binding', binding.generationId);
+		if (!row) throw new Error('scope authority row missing');
+		const revoked = {
+			...binding,
+			revision: binding.revision + 1,
+			lifecycleState: 'revoked' as const,
+			updatedAt: binding.updatedAt + 1,
+		};
+		expect(
+			transitionCoordinationState(directory, {
+				namespace: 'scope-binding',
+				entityKey: binding.generationId,
+				expectedRevision: row.revision,
+				generation: revoked.revision,
+				status: 'revoked',
+				payload: JSON.stringify(revoked),
+			}).outcome,
+		).toBe('applied');
+		expect(
+			readScopeBindingFromDisk({
+				directory,
+				taskId: '1.1',
+				plan,
+				ownerSessionId: binding.ownerSessionId,
+				requireDeclaration: true,
+			}),
+		).toBeNull();
+	});
+
 	test('valid legacy declaration imports once and archives the source after commit', () => {
 		const { directory, plan } = fixture();
 		const binding = declarationBinding(directory, plan);

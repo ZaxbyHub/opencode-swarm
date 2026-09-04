@@ -171,6 +171,26 @@ describe('pr-workflow gate SQLite authority (#2481)', () => {
 		);
 	});
 
+	test('a tampered compatibility shadow cannot inject fields into SQLite authority', async () => {
+		const directory = makeDir('pr-workflow-gate-sqlite-');
+		const sessionID = 'workflow-shadow-injection';
+		await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
+		const shadowPath = workflowGateStatePath(directory, sessionID);
+		const shadow = JSON.parse(await fsp.readFile(shadowPath, 'utf8')) as Record<
+			string,
+			unknown
+		>;
+		shadow.injectedByShadow = 'must-not-become-authority';
+		await fsp.writeFile(shadowPath, JSON.stringify(shadow), 'utf8');
+
+		const state = await readPrWorkflowGateStateFromDisk(directory, sessionID);
+		expect((state as Record<string, unknown>).injectedByShadow).toBeUndefined();
+		const repaired = JSON.parse(
+			await fsp.readFile(shadowPath, 'utf8'),
+		) as Record<string, unknown>;
+		expect(repaired.injectedByShadow).toBeUndefined();
+	});
+
 	test(
 		'real two-process workflow advancement races terminal clear and leaves one authoritative outcome',
 		{ timeout: 30_000 },

@@ -236,13 +236,6 @@ export function registerScopeBinding(
 			message: 'A newer revision of this generation is already admitted.',
 		};
 	}
-	if (!exact && pendingScopeBindings.size >= MAX_PENDING_SCOPE_BINDINGS) {
-		return {
-			ok: false,
-			code: 'SCOPE_BINDING_CAPACITY',
-			message: `Scope binding capacity ${MAX_PENDING_SCOPE_BINDINGS} is exhausted; complete or expire a live task before retrying.`,
-		};
-	}
 	if (
 		binding.activation === 'declaration' &&
 		binding.dispatchCallId === undefined
@@ -265,6 +258,13 @@ export function registerScopeBinding(
 				});
 			}
 		}
+	}
+	if (!exact && pendingScopeBindings.size >= MAX_PENDING_SCOPE_BINDINGS) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_CAPACITY',
+			message: `Scope binding capacity ${MAX_PENDING_SCOPE_BINDINGS} is exhausted; complete or expire a live task before retrying.`,
+		};
 	}
 	const key = bindingKey(binding);
 	pendingScopeBindings.delete(key);
@@ -331,7 +331,7 @@ export function getScopeBinding(input: {
 }
 
 /**
- * Resolve active child bindings that were minted in this process.  The
+ * Resolve active child bindings that were minted in this process. The
  * synchronous scope API is still used by a few host integrations that cannot
  * await the durable claim path; those bindings remain valid for the current
  * process while the SQLite authority is used on restart/cross-process reads.

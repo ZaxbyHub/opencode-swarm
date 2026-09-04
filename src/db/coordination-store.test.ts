@@ -21,6 +21,8 @@ afterEach(() => {
 	_internals.coordinationFaultInjector = undefined;
 	_internals.maxEventsPerStream = 2_048;
 	_internals.maxTotalEvents = 100_000;
+	_internals.maxEventFencesPerStream = 8_192;
+	_internals.maxTotalEventFences = 400_000;
 	closeAllProjectDbs();
 	fs.rmSync(tempDir, { recursive: true, force: true });
 });

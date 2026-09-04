@@ -13,7 +13,7 @@ import {
 	getCoordinationState,
 	transitionCoordinationState,
 } from '../../../src/db/coordination-store';
-import { closeAllProjectDbs } from '../../../src/db/project-db';
+import { closeAllProjectDbs, getProjectDb } from '../../../src/db/project-db';
 import { bunSpawn } from '../../../src/utils/bun-compat.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -44,13 +44,47 @@ function legacyRecord(sessionID: string, prNumber: number, updatedAt = 1) {
 }
 
 const UPDATE_CHILD = `
+const fs = await import("node:fs");
 const mod = await import(process.env.SWARM_PR_MODULE);
+const coordination = await import(process.env.SWARM_PR_COORDINATION_MODULE);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const deadline = performance.now() + Number(process.env.SWARM_PR_RENDEZVOUS_TIMEOUT_MS);
+const waitForMarker = async (markerPath) => {
+	while (!fs.existsSync(markerPath)) {
+		if (performance.now() >= deadline) throw new Error("rendezvous timeout");
+		await sleep(5);
+	}
+};
+fs.writeFileSync(process.env.SWARM_PR_READY, "ready");
+await waitForMarker(process.env.SWARM_PR_GO);
+coordination._internals.coordinationFaultInjector = (point) => {
+	if (point !== "before_begin") return;
+	fs.writeFileSync(process.env.SWARM_PR_ENTERED, "entered");
+	const waitDeadline = performance.now() + Number(process.env.SWARM_PR_RENDEZVOUS_TIMEOUT_MS);
+	while (!fs.existsSync(process.env.SWARM_PR_PARENT_GO)) {
+		if (performance.now() >= waitDeadline) throw new Error("overlap rendezvous timeout");
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+	}
+};
 await mod.updateSnapshot(process.env.SWARM_PR_DIR, process.env.SWARM_PR_CID, {
 	errorCount: 7,
 	lastCheckedAt: 200,
 });
+fs.writeFileSync(process.env.SWARM_PR_DONE, "done");
 console.log("done");
 `;
+
+const RENDEZVOUS_TIMEOUT_MS = 15_000;
+
+async function waitForMarker(markerPath: string): Promise<void> {
+	const deadline = performance.now() + RENDEZVOUS_TIMEOUT_MS;
+	while (!fs.existsSync(markerPath)) {
+		if (performance.now() >= deadline) {
+			throw new Error(`rendezvous timeout waiting for ${markerPath}`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+}
 
 afterEach(() => {
 	coordinationInternals.coordinationFaultInjector = undefined;
@@ -96,6 +130,12 @@ describe('pr-subscriptions SQLite authority', () => {
 			prUrl: 'https://github.com/o/r/pull/1',
 		});
 
+		const rendezvousDir = path.join(dir, '.swarm', 'pr-monitor');
+		const readyPath = path.join(rendezvousDir, 'child.ready');
+		const goPath = path.join(rendezvousDir, 'child.go');
+		const enteredPath = path.join(rendezvousDir, 'child.entered');
+		const parentInvokedPath = path.join(rendezvousDir, 'parent.invoked');
+		const donePath = path.join(rendezvousDir, 'child.done');
 		const child = bunSpawn([process.execPath, '-e', UPDATE_CHILD], {
 			cwd: process.cwd(),
 			env: {
@@ -103,8 +143,17 @@ describe('pr-subscriptions SQLite authority', () => {
 				SWARM_PR_MODULE: pathToFileURL(
 					path.resolve('src/background/pr-subscriptions.ts'),
 				).href,
+				SWARM_PR_COORDINATION_MODULE: pathToFileURL(
+					path.resolve('src/db/coordination-store.ts'),
+				).href,
 				SWARM_PR_DIR: dir,
 				SWARM_PR_CID: created.correlationId,
+				SWARM_PR_READY: readyPath,
+				SWARM_PR_GO: goPath,
+				SWARM_PR_ENTERED: enteredPath,
+				SWARM_PR_PARENT_GO: parentInvokedPath,
+				SWARM_PR_DONE: donePath,
+				SWARM_PR_RENDEZVOUS_TIMEOUT_MS: String(RENDEZVOUS_TIMEOUT_MS),
 			},
 			stdin: 'ignore',
 			stdout: 'ignore',
@@ -113,10 +162,32 @@ describe('pr-subscriptions SQLite authority', () => {
 			killProcessTree: true,
 		});
 		try {
-			await updateSnapshot(dir, created.correlationId, {
+			// The child must be fully initialized before it is released. Its
+			// coordination fault seam then pauses after updateSnapshot has acquired its
+			// cross-process evidence lock but before SQLite BEGIN. The parent invocation
+			// below must therefore contend on the same outer lock. This is an end-to-end
+			// serialization proof; direct SQLite transaction contention is covered by the
+			// coordination-store transaction tests.
+			await waitForMarker(readyPath);
+			fs.writeFileSync(goPath, 'go', 'utf8');
+			await waitForMarker(enteredPath);
+			// The child is still paused while owning the outer lock; it cannot finish
+			// until the parent has invoked its own update below.
+			expect(fs.existsSync(donePath)).toBe(false);
+			const parentUpdate = updateSnapshot(dir, created.correlationId, {
 				mergeableState: 'clean',
 				lastCheckedAt: 100,
 			});
+			// Calling an async function executes synchronously through its first await.
+			// This marker is therefore published only after the parent invocation has
+			// entered withEvidenceLock and initiated acquisition of the child-held lock.
+			fs.writeFileSync(parentInvokedPath, 'invoked', 'utf8');
+			expect(fs.existsSync(donePath)).toBe(false);
+			// The child observes parent.invoked before it can leave the transaction
+			// hook, making concurrent invocation a protocol condition rather than a
+			// timer guess.
+			await parentUpdate;
+			await waitForMarker(donePath);
 			expect(await child.exited).toBe(0);
 		} finally {
 			try {
@@ -202,6 +273,23 @@ describe('pr-subscriptions SQLite authority', () => {
 				payload: '{}',
 			}).outcome,
 		).toBe('applied');
+
+		await expect(listActive(dir)).rejects.toThrow(/authority is unreadable/i);
+	});
+
+	test('valid payload under the wrong SQLite entity key fails closed', async () => {
+		const dir = project();
+		const created = await subscribe(dir, {
+			sessionID: 'misbound',
+			prNumber: 51,
+			repoFullName: 'o/r',
+			prUrl: 'https://github.com/o/r/pull/51',
+		});
+		getProjectDb(dir).run(
+			`UPDATE coordination_state SET entity_key = ?
+			 WHERE namespace = ? AND entity_key = ?`,
+			['wrong-key', 'background.pr-subscription', created.correlationId],
+		);
 
 		await expect(listActive(dir)).rejects.toThrow(/authority is unreadable/i);
 	});

@@ -12,6 +12,7 @@ import {
 	subscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { closeProjectDb } from '../../../src/db/project-db';
 import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
@@ -78,6 +79,7 @@ describe('pr-subscriptions — I/O failure regressions (#2042)', () => {
 		_internals.legacyFstatSync = realLegacyFstatSync;
 		_internals.statSync = realStatSync;
 		_internals.renameWithRetry = realRenameWithRetry;
+		closeProjectDb(dir);
 		safeRmRecursive(dir);
 	});
 

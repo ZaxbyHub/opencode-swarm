@@ -140,6 +140,15 @@ export type ScopePersistenceResult<T = ScopeBinding> =
 	| { ok: true; value: T }
 	| { ok: false; code: ScopePersistenceCode; message: string };
 
+type ScopePersistenceFailure = Exclude<ScopePersistenceResult, { ok: true }>;
+
+class ScopeCoordinationAbort extends Error {
+	constructor(readonly failure: ScopePersistenceFailure) {
+		super(failure.message);
+		this.name = 'ScopeCoordinationAbort';
+	}
+}
+
 export type DurableScopeBindingResolution =
 	| { status: 'found'; binding: ScopeBinding }
 	| { status: 'expired'; candidates: ScopeBinding[]; totalCandidates: number }
@@ -648,6 +657,43 @@ function archiveImportedScopeAuthorityFiles(paths: readonly string[]): void {
 	}
 }
 
+function fingerprintCommittedScopeImportSource(
+	directory: string,
+): { authorityFiles: string[]; sourceDigest: string } | null {
+	const scopesDir = getScopesDir(directory);
+	try {
+		fs.lstatSync(scopesDir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+	if (!isScopesDirSafe(directory, scopesDir)) return null;
+	const names = fs.readdirSync(scopesDir).sort();
+	if (names.length > bindingFileScanCapacity) return null;
+	const authorityFiles: string[] = [];
+	for (const name of names) {
+		if (!name.startsWith('binding-') || !name.endsWith('.json')) continue;
+		const filePath = path.join(scopesDir, name);
+		authorityFiles.push(filePath);
+		const intentPath = getRetirementIntentPath(filePath);
+		if (fs.existsSync(intentPath)) authorityFiles.push(intentPath);
+	}
+	for (const name of names) {
+		if (/^claim-[a-f0-9]{40}\.json$/i.test(name)) {
+			authorityFiles.push(path.join(scopesDir, name));
+		}
+	}
+	if (authorityFiles.length === 0) return null;
+	const digest = createHash('sha256');
+	for (const filePath of authorityFiles) {
+		const raw = readBoundedFile(filePath);
+		if (raw === null) return null;
+		digest.update(path.basename(filePath));
+		digest.update(raw);
+	}
+	return { authorityFiles, sourceDigest: digest.digest('hex') };
+}
+
 function collectLegacyScopeBindingsForImport(directory: string): {
 	bindings: ScopeBinding[];
 	authorityFiles: string[];
@@ -783,17 +829,45 @@ function ensureScopeBindingAuthorityImported(
 	directory: string,
 ): ScopePersistenceResult<void> {
 	try {
-		if (
+		const authorityExists =
 			listCoordinationStates(directory, SCOPE_BINDING_COORDINATION_NAMESPACE, 1)
-				.length > 0
-		) {
-			return { ok: true, value: undefined };
+				.length > 0;
+		if (authorityExists) {
+			const importStatement = getProjectDb(directory).prepare(
+				'SELECT source_digest FROM coordination_import WHERE source = ?',
+			);
+			let importRow: { source_digest: string } | undefined;
+			try {
+				importRow = importStatement.get(
+					SCOPE_BINDING_COORDINATION_IMPORT_SOURCE,
+				) as { source_digest: string } | undefined;
+			} finally {
+				importStatement.finalize();
+			}
+			const committedSource = fingerprintCommittedScopeImportSource(directory);
+			// Once SQLite authority exists, arbitrary legacy/shadow artifacts cannot
+			// participate in authorization. The sole exception is recovery of the exact
+			// source generation committed by importCoordinationOnce before a crash.
+			if (
+				!importRow ||
+				!committedSource ||
+				importRow.source_digest !== committedSource.sourceDigest
+			) {
+				return { ok: true, value: undefined };
+			}
 		}
 		const legacy = collectLegacyScopeBindingsForImport(directory);
 		if (legacy.rowCount === 0 && legacy.authorityFiles.length === 0) {
 			return { ok: true, value: undefined };
 		}
 		const importedBindings = legacy.bindings.map((binding) => ({ ...binding }));
+		if (authorityExists) {
+			archiveImportedScopeAuthorityFiles(legacy.authorityFiles);
+			for (const binding of importedBindings) {
+				writeScopeBindingShadow(directory, binding);
+			}
+			return { ok: true, value: undefined };
+		}
 		const outcome = importCoordinationOnce(
 			directory,
 			{
@@ -806,7 +880,7 @@ function ensureScopeBindingAuthorityImported(
 				importScopeBindingStateRows(directory, importedBindings);
 			},
 		);
-		if (outcome === 'imported') {
+		if (outcome === 'imported' || outcome === 'already_imported') {
 			archiveImportedScopeAuthorityFiles(legacy.authorityFiles);
 			for (const binding of importedBindings) {
 				writeScopeBindingShadow(directory, binding);
@@ -1853,14 +1927,12 @@ export async function claimScopeBindingForChildDurably(input: {
 		let claimed: ScopeBinding | null = null;
 		let retired: ScopeBinding | null = null;
 		let alreadyClaimed: ScopeBinding | null = null;
-		let failure: Exclude<ScopePersistenceResult, { ok: true }> | null = null;
 		withCoordinationTransaction(input.directory, () => {
 			const currentSet = readAllAuthoritativeScopeBindings(input.directory, {
 				enforceLiveCapacity: false,
 			});
 			if (!currentSet.ok) {
-				failure = currentSet;
-				return;
+				throw new ScopeCoordinationAbort(currentSet);
 			}
 			const currentPredecessor = currentSet.value.find(
 				(binding) =>
@@ -1875,24 +1947,22 @@ export async function claimScopeBindingForChildDurably(input: {
 					binding.expiresAt > Date.now(),
 			);
 			if (liveSuccessors.length > 1) {
-				failure = {
+				throw new ScopeCoordinationAbort({
 					ok: false,
 					code: 'SCOPE_BINDING_AMBIGUOUS',
 					message:
 						'Incompatible successors exist for one predecessor generation.',
-				};
-				return;
+				});
 			}
 			const existing = liveSuccessors[0];
 			if (existing) {
 				if (existing.ownerSessionId !== input.childSessionId) {
-					failure = {
+					throw new ScopeCoordinationAbort({
 						ok: false,
 						code: 'SCOPE_BINDING_ALREADY_CLAIMED',
 						message:
 							'This pending generation has a winner in another child session.',
-					};
-					return;
+					});
 				}
 				alreadyClaimed = existing;
 				return;
@@ -1902,23 +1972,22 @@ export async function claimScopeBindingForChildDurably(input: {
 				currentPredecessor.lifecycleState !== 'live' ||
 				currentPredecessor.expiresAt <= Date.now()
 			) {
-				failure = {
+				throw new ScopeCoordinationAbort({
 					ok: false,
 					code: 'SCOPE_BINDING_EXPIRED',
 					message: 'The pending predecessor expired before claim.',
-				};
-				return;
+				});
 			}
 			predecessor = currentPredecessor;
 			const nextClaimed = createClaimedScopeBinding(predecessor, input);
-			const claimedWrite = transitionScopeBindingState(
-				input.directory,
-				nextClaimed,
-				null,
-			);
+			const claimedWrite =
+				_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
+					input.directory,
+					nextClaimed,
+					null,
+				);
 			if (!claimedWrite.ok) {
-				failure = claimedWrite;
-				return;
+				throw new ScopeCoordinationAbort(claimedWrite);
 			}
 			const superseded: ScopeBinding = {
 				...predecessor,
@@ -1930,19 +1999,18 @@ export async function claimScopeBindingForChildDurably(input: {
 					claimedWrite.value.updatedAt,
 				),
 			};
-			const retiredWrite = transitionScopeBindingState(
-				input.directory,
-				superseded,
-				predecessor.revision,
-			);
+			const retiredWrite =
+				_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
+					input.directory,
+					superseded,
+					predecessor.revision,
+				);
 			if (!retiredWrite.ok) {
-				failure = retiredWrite;
-				return;
+				throw new ScopeCoordinationAbort(retiredWrite);
 			}
 			claimed = claimedWrite.value;
 			retired = retiredWrite.value;
 		});
-		if (failure) return failure;
 		if (alreadyClaimed) {
 			const admission = registerScopeBinding(alreadyClaimed);
 			return admission.ok
@@ -1973,6 +2041,7 @@ export async function claimScopeBindingForChildDurably(input: {
 		installScopeBindingTombstone(retired);
 		return { ok: true, value: { previous: predecessor, claimed } };
 	} catch (error) {
+		if (error instanceof ScopeCoordinationAbort) return error.failure;
 		return persistenceFailure(
 			`Claim transaction failed: ${
 				error instanceof Error ? error.message : 'unknown coordination error'
@@ -2031,16 +2100,15 @@ export async function replaceExistingScopeDeclaration(input: {
 	try {
 		let persisted: ScopeBinding | null = null;
 		const retired: ScopeBinding[] = [];
-		let failure: Exclude<ScopePersistenceResult, { ok: true }> | null = null;
 		withCoordinationTransaction(input.directory, () => {
-			const create = transitionScopeBindingState(
-				input.directory,
-				binding,
-				null,
-			);
+			const create =
+				_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
+					input.directory,
+					binding,
+					null,
+				);
 			if (!create.ok) {
-				failure = create;
-				return;
+				throw new ScopeCoordinationAbort(create);
 			}
 			persisted = create.value;
 			for (const prior of owned) {
@@ -2051,19 +2119,18 @@ export async function replaceExistingScopeDeclaration(input: {
 					updatedAt: create.value.updatedAt,
 					expiresAt: Math.min(prior.expiresAt, create.value.updatedAt),
 				};
-				const result = transitionScopeBindingState(
-					input.directory,
-					superseded,
-					prior.revision,
-				);
+				const result =
+					_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
+						input.directory,
+						superseded,
+						prior.revision,
+					);
 				if (!result.ok) {
-					failure = result;
-					return;
+					throw new ScopeCoordinationAbort(result);
 				}
 				retired.push(result.value);
 			}
 		});
-		if (failure) return failure;
 		if (!persisted) {
 			return persistenceFailure(
 				'Declaration transaction did not persist a generation.',
@@ -2093,6 +2160,7 @@ export async function replaceExistingScopeDeclaration(input: {
 		}
 		return { ok: true, value: persisted };
 	} catch (error) {
+		if (error instanceof ScopeCoordinationAbort) return error.failure;
 		return persistenceFailure(
 			`Declaration transaction failed: ${
 				error instanceof Error ? error.message : 'unknown coordination error'

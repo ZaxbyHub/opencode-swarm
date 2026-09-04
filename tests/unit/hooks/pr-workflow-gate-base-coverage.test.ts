@@ -12,6 +12,7 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 import {
 	HEAD_SHA,
 	persistBatch,
@@ -451,18 +452,20 @@ describe('pr-workflow-gate base coverage', () => {
 		}
 	});
 
-	test('a gate state field this schema has never seen survives read and a subsequent read-modify-write round trip', async () => {
+	test('an authority field this schema has never seen survives a read-modify-write round trip', async () => {
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
 
 		// Simulate a newer version of this code having persisted a top-level
-		// field this schema has no knowledge of at all (not just a field that
-		// predates a default, but one .passthrough() has never declared).
+		// authoritative field this schema has no knowledge of at all.
 		const relativePath =
 			_test_exports.workflowGateStateRelativePath(SESSION_ID);
 		const statePath = path.join(tempDir, '.swarm', relativePath);
-		const onDisk = JSON.parse(await fs.readFile(statePath, 'utf-8'));
-		onDisk.futureFieldFromNewerVersion = 'opaque-value-from-the-future';
-		await fs.writeFile(statePath, JSON.stringify(onDisk), 'utf-8');
+		const authoritative = await readPrWorkflowGateState(tempDir, SESSION_ID);
+		if (!authoritative) throw new Error('missing authoritative workflow state');
+		await writeAuthoritativePrWorkflowState(tempDir, {
+			...authoritative,
+			futureFieldFromNewerVersion: 'opaque-value-from-the-future',
+		});
 
 		_test_exports.resetTrackedStateCache();
 		const recovered = await readPrWorkflowGateState(tempDir, SESSION_ID);

@@ -14,6 +14,7 @@ import {
 	unsubscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { closeProjectDb } from '../../../src/db/project-db';
 import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
@@ -81,6 +82,7 @@ describe('pr-subscriptions — adversarial persistence regressions (#2042)', () 
 		_internals.readSync = realReadSync;
 		_internals.renameWithRetry = realRenameWithRetry;
 		_internals.writeCheckpointFile = realWriteCheckpointFile;
+		closeProjectDb(dir);
 		safeRmRecursive(dir);
 	});
 

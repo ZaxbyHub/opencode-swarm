@@ -5,7 +5,7 @@
  */
 
 import { Database } from 'bun:sqlite';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import { ProjectDbError } from '../../../src/db/db-errors.js';
 import { getSwarmDbHealthSnapshot } from '../../../src/db/health.js';
 import {
+	_internals,
 	closeAllProjectDbs,
 	closeProjectDb,
 	getOpenProjectDbCount,
@@ -30,6 +31,7 @@ import {
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let dir: string;
+const realCheckpointWalBestEffort = _internals.checkpointWalBestEffort;
 
 beforeEach(() => {
 	dir = canonicalMkdtemp('projdb-hard-');
@@ -37,6 +39,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	_internals.checkpointWalBestEffort = realCheckpointWalBestEffort;
 	closeAllProjectDbs();
 	rmSync(dir, { recursive: true, force: true });
 });
@@ -194,8 +197,8 @@ describe('failed-migration recovery', () => {
 			)
 			.all()
 			.map((r) => r.version);
-		expect(versions[versions.length - 1]).toBe(26);
-		expect(versions.length).toBe(26);
+		expect(versions[versions.length - 1]).toBe(28);
+		expect(versions.length).toBe(28);
 	});
 
 	test('marker-file fallback: a v14 failure with no migration_failures table writes the marker, and the marker is removed on success', () => {
@@ -404,6 +407,17 @@ describe('#2480 review F-07: stale marker probe (canonical keyed)', () => {
 });
 
 describe('close-path WAL checkpoint', () => {
+	test('close invokes the best-effort checkpoint before closing the cached handle', () => {
+		const db = getProjectDb(dir);
+		const checkpoint = mock(() => {});
+		_internals.checkpointWalBestEffort = checkpoint;
+
+		closeProjectDb(dir);
+
+		expect(checkpoint).toHaveBeenCalledTimes(1);
+		expect(checkpoint).toHaveBeenCalledWith(db);
+	});
+
 	test('close checkpoints the WAL (TRUNCATE best-effort) and never throws', () => {
 		const db = getProjectDb(dir);
 		db.run(

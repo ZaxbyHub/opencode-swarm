@@ -230,7 +230,7 @@ export async function handleGateAuditCommand(
 		`- Missed: ${missed}`,
 		`- Unsupported/infrastructure: ${unavailable}`,
 		`- Cost: ${result.cost.source === 'unavailable' ? 'unavailable' : `$${result.cost.usd?.toFixed(4)}`}`,
-		'- quality_budget complexity_delta/public_api_delta: unavailable (#1655; excluded from promotion)',
+		'- quality_budget complexity_delta/public_api_delta: true base-vs-head deltas (#2470); not consumed by promotion regression math',
 	].join('\n');
 }
 

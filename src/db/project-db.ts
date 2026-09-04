@@ -323,6 +323,18 @@ const MIGRATIONS: Migration[] = [
 			PRIMARY KEY(stream_id, idempotency_key)
 		)`,
 	},
+	{
+		version: 27,
+		name: 'create_coordination_event_fence_stream_age_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_coordination_event_fence_stream_age
+			ON coordination_event_fence(stream_id, created_at)`,
+	},
+	{
+		version: 28,
+		name: 'create_coordination_event_fence_global_age_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_coordination_event_fence_global_age
+			ON coordination_event_fence(created_at, stream_id)`,
+	},
 ];
 
 interface ProjectDbRecord {
@@ -368,6 +380,7 @@ function bindAlias(
 }
 
 function closeRecord(physicalKey: string, record: ProjectDbRecord): void {
+	_internals.checkpointWalBestEffort(record.db);
 	record.db.close();
 	_projectDbs.delete(physicalKey);
 	for (const alias of [...record.aliases]) unbindAlias(alias, physicalKey);
@@ -794,6 +807,7 @@ export function closeAllProjectDbs(): void {
 }
 
 export const _internals = {
+	checkpointWalBestEffort,
 	projectDbCount: () => _projectDbs.size,
 	projectDbAliasCount: () => _projectDbAliases.size,
 };

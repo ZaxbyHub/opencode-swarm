@@ -14,10 +14,13 @@
 
 export {
 	acquireCoordinationLease,
+	type CoordinationLease,
 	type CoordinationState,
+	countCoordinationStates,
 	deleteCoordinationImports,
 	deleteCoordinationState,
 	deleteCoordinationStateWithinTransaction,
+	getCoordinationLease,
 	getCoordinationState,
 	importCoordinationOnce,
 	listCoordinationStates,

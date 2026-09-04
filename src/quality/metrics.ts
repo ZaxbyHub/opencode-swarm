@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { QualityBudgetConfig } from '../config/schema';
+import * as logger from '../utils/logger';
+import { readBaseFileContent, resolveQualityMergeBase } from './git-base';
 
 // ============ Types ============
 
@@ -12,6 +14,13 @@ export interface QualityMetrics {
 	files_analyzed: string[];
 	thresholds: QualityBudgetConfig;
 	violations: QualityViolation[];
+	/**
+	 * Whether a merge base resolved for this run. When false, the
+	 * complexity/public-API "deltas" collapsed to head-only absolute metrics
+	 * (the pre-#2470 semantics) and consumers should not treat them as true
+	 * base-vs-head deltas.
+	 */
+	base_resolved: boolean;
 }
 
 export interface QualityViolation {
@@ -25,6 +34,12 @@ export interface QualityViolation {
 
 const MAX_FILE_SIZE_BYTES = 256 * 1024; // 256KB per file
 const MIN_DUPLICATION_LINES = 10; // Minimum lines to flag as duplication
+/**
+ * Defensive cap on per-file `git show` base reads (issue #2470): bounds
+ * subprocess count for very large change sets; files beyond the cap count
+ * full head complexity toward the delta (conservative direction).
+ */
+const MAX_BASE_FILE_READS = 200;
 
 // ============ Complexity Calculation ============
 
@@ -104,32 +119,46 @@ function getComplexityForFile(filePath: string): number | null {
 }
 
 /**
- * Compute complexity delta for changed files
+ * Compute complexity delta for changed files.
+ *
+ * The delta is a true base-versus-head difference (issue #2470 / #1655): head
+ * complexity of each changed file minus its merge-base complexity. Files with
+ * no base version (new files, unavailable base) contribute their full head
+ * complexity; deleted files (head missing, base present) subtract their base
+ * complexity. When no merge base can be resolved the map is empty and every
+ * file is treated as new — preserving the historical head-only absolute value.
  */
 async function computeComplexityDelta(
 	files: string[],
 	workingDir: string,
+	baseContents: ReadonlyMap<string, string | null>,
 ): Promise<{ delta: number; analyzedFiles: string[] }> {
-	let totalComplexity = 0;
+	let delta = 0;
 	const analyzedFiles: string[] = [];
 
 	for (const file of files) {
 		const fullPath = path.isAbsolute(file) ? file : path.join(workingDir, file);
+		const baseContent = baseContents.get(file) ?? null;
 
 		// Check if file exists
 		if (!fs.existsSync(fullPath)) {
+			// Deleted file: the change removes its base complexity.
+			if (baseContent !== null) {
+				delta -= estimateCyclomaticComplexity(baseContent);
+			}
 			continue;
 		}
 
 		const complexity = getComplexityForFile(fullPath);
 		if (complexity !== null) {
-			totalComplexity += complexity;
+			delta +=
+				complexity -
+				(baseContent !== null ? estimateCyclomaticComplexity(baseContent) : 0);
 			analyzedFiles.push(file);
 		}
 	}
 
-	// Return complexity as delta (current complexity for changed files)
-	return { delta: totalComplexity, analyzedFiles };
+	return { delta, analyzedFiles };
 }
 
 // ============ Public API Delta Calculation ============
@@ -333,29 +362,40 @@ function getExportCountForFile(filePath: string): number {
 }
 
 /**
- * Compute public API delta for changed files
+ * Compute public API delta for changed files.
+ *
+ * True base-versus-head difference (issue #2470 / #1655), mirroring
+ * computeComplexityDelta: head export count minus merge-base export count per
+ * file; deleted files subtract their base exports.
  */
 async function computePublicApiDelta(
 	files: string[],
 	workingDir: string,
+	baseContents: ReadonlyMap<string, string | null>,
 ): Promise<{ delta: number; analyzedFiles: string[] }> {
-	let totalExports = 0;
+	let delta = 0;
 	const analyzedFiles: string[] = [];
 
 	for (const file of files) {
 		const fullPath = path.isAbsolute(file) ? file : path.join(workingDir, file);
+		const baseContent = baseContents.get(file) ?? null;
 
 		// Check if file exists
 		if (!fs.existsSync(fullPath)) {
+			// Deleted file: the change removes its base API surface.
+			if (baseContent !== null) {
+				delta -= countExportsInFile(baseContent);
+			}
 			continue;
 		}
 
 		const exports = getExportCountForFile(fullPath);
-		totalExports += exports;
+		delta +=
+			exports - (baseContent !== null ? countExportsInFile(baseContent) : 0);
 		analyzedFiles.push(file);
 	}
 
-	return { delta: totalExports, analyzedFiles };
+	return { delta, analyzedFiles };
 }
 
 // ============ Duplication Detection ============
@@ -1070,6 +1110,59 @@ function detectViolations(
 	return violations;
 }
 
+/**
+ * Load the merge-base content of every changed file once, shared by the
+ * complexity and public-API delta computations.
+ *
+ * Returns an empty map when no merge base resolves (not a git repo, no
+ * candidate branch) — callers then treat every file as having no base, which
+ * reproduces the historical head-only absolute metrics. Files beyond
+ * MAX_BASE_FILE_READS also fall back to no-base (conservative: their full
+ * head complexity counts toward the delta).
+ */
+async function loadBaseFileContents(
+	files: string[],
+	workingDir: string,
+	abortSignal?: AbortSignal,
+): Promise<{ contents: Map<string, string | null>; baseResolved: boolean }> {
+	const contents = new Map<string, string | null>();
+	if (files.length === 0) return { contents, baseResolved: false };
+
+	const baseRef = await resolveQualityMergeBase(workingDir, abortSignal);
+	if (!baseRef) {
+		// Degraded mode: with no merge base the "deltas" collapse to head-only
+		// absolute metrics. Never silent — gate-audit derives its
+		// qualityMetricAvailability from this same resolution state and the
+		// operator needs the signal at the point it happens.
+		logger.warn(
+			'[quality-metrics] No merge base resolved (not a git repo or no candidate branch); complexity/public-API deltas fall back to head-only absolute metrics.',
+		);
+		return { contents, baseResolved: false };
+	}
+
+	let read = 0;
+	let capped = false;
+	for (const file of files) {
+		abortSignal?.throwIfAborted();
+		if (read >= MAX_BASE_FILE_READS) {
+			capped = true;
+			break;
+		}
+		contents.set(
+			file,
+			await readBaseFileContent(workingDir, baseRef, file, abortSignal),
+		);
+		read++;
+	}
+	if (capped) {
+		logger.warn(
+			`[quality-metrics] More than ${MAX_BASE_FILE_READS} changed files — ` +
+				`base-version reads capped; remaining files count full head complexity toward the delta.`,
+		);
+	}
+	return { contents, baseResolved: true };
+}
+
 // ============ Main Function ============
 
 /**
@@ -1079,6 +1172,7 @@ export async function computeQualityMetrics(
 	changedFiles: string[],
 	thresholds: QualityBudgetConfig,
 	workingDir: string,
+	abortSignal?: AbortSignal,
 ): Promise<QualityMetrics> {
 	// Get defaults if not provided
 	const config: QualityBudgetConfig = {
@@ -1095,8 +1189,19 @@ export async function computeQualityMetrics(
 		],
 	};
 
+	// The primary production caller (pre_check_batch) passes ABSOLUTE paths
+	// (path.resolve(directory, file)) while the enforce globs are
+	// repo-relative; without relativization those inputs are silently dropped
+	// and the gate analyzes nothing. Absolute paths inside the working
+	// directory are relativized; anything else passes through unchanged.
+	const normalizedFiles = changedFiles.map((file) => {
+		if (!path.isAbsolute(file)) return file;
+		const rel = path.relative(workingDir, file).replace(/\\/g, '/');
+		return rel.length > 0 && !rel.startsWith('../') ? rel : file;
+	});
+
 	// Filter changed files to only include those matching enforce globs
-	const filteredFiles = changedFiles.filter((file) => {
+	const filteredFiles = normalizedFiles.filter((file) => {
 		const normalizedPath = file.replace(/\\/g, '/');
 		for (const glob of config.enforce_on_globs) {
 			if (globMatches(normalizedPath, glob)) {
@@ -1112,11 +1217,20 @@ export async function computeQualityMetrics(
 		return false;
 	});
 
+	// Load merge-base content once for both delta computations (issue #2470).
+	// Empty when no merge base resolves — files then keep head-only metrics
+	// and base_resolved=false discloses the degraded mode to consumers.
+	const { contents: baseContents, baseResolved } = await loadBaseFileContents(
+		filteredFiles,
+		workingDir,
+		abortSignal,
+	);
+
 	// Compute all metrics
 	const [complexityResult, apiResult, duplicationResult, testRatioResult] =
 		await Promise.all([
-			computeComplexityDelta(filteredFiles, workingDir),
-			computePublicApiDelta(filteredFiles, workingDir),
+			computeComplexityDelta(filteredFiles, workingDir, baseContents),
+			computePublicApiDelta(filteredFiles, workingDir, baseContents),
 			computeDuplicationRatio(filteredFiles, workingDir),
 			computeTestToCodeRatio(
 				workingDir,
@@ -1144,6 +1258,7 @@ export async function computeQualityMetrics(
 			files_analyzed: allAnalyzedFiles,
 			thresholds: config,
 			violations: [],
+			base_resolved: baseResolved,
 		},
 		config,
 	);
@@ -1156,5 +1271,6 @@ export async function computeQualityMetrics(
 		files_analyzed: allAnalyzedFiles,
 		thresholds: config,
 		violations,
+		base_resolved: baseResolved,
 	};
 }

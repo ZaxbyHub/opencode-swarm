@@ -43,8 +43,10 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
 	acquireCoordinationLease,
+	countCoordinationStates,
 	deleteCoordinationState,
 	deleteCoordinationStateWithinTransaction,
+	getCoordinationLease,
 	getCoordinationState,
 	getProjectDb,
 	importCoordinationOnce,
@@ -1049,6 +1051,34 @@ function coordinationReservationLeaseKey(
 	};
 }
 
+function releaseReservationLeaseIfPresent(
+	directory: string,
+	reservation: Pick<BackgroundCoderReservation, 'reservationId' | 'generation'>,
+): void {
+	const leaseKey = coordinationReservationLeaseKey(reservation);
+	const existing = getCoordinationLease(
+		directory,
+		leaseKey.namespace,
+		leaseKey.entityKey,
+	);
+	if (!existing) return;
+	if (
+		existing.generation !== leaseKey.generation ||
+		existing.ownerToken !== leaseKey.ownerToken ||
+		!releaseCoordinationLease(
+			directory,
+			leaseKey.namespace,
+			leaseKey.entityKey,
+			leaseKey.generation,
+			leaseKey.ownerToken,
+		)
+	) {
+		throw new Error(
+			`reservation lease authority mismatch for ${reservation.reservationId}`,
+		);
+	}
+}
+
 function coordinationRowsToDelegations(
 	directory: string,
 ): BackgroundDelegationRecord[] | null {
@@ -1069,9 +1099,14 @@ function coordinationRowsToDelegations(
 				const parsed = RecordSchema.safeParse(
 					JSON.parse(row.payload) as unknown,
 				);
-				if (!parsed.success) {
+				if (
+					!parsed.success ||
+					parsed.data.correlationId !== row.entityKey ||
+					Math.max(parsed.data.generation ?? 1, 1) !== row.generation ||
+					parsed.data.status !== row.status
+				) {
 					throw new Error(
-						`delegation coordination row failed schema validation for ${row.entityKey}`,
+						`delegation coordination row failed schema or authority binding validation for ${row.entityKey}`,
 					);
 				}
 				return parsed.data as BackgroundDelegationRecord;
@@ -4095,6 +4130,8 @@ export const _internals = {
 		legacyCoderSettlementReconcilers.clear();
 		legacyCoderSettlementReconcilerOrder.length = 0;
 	},
+	reservationCoordinationRowLimit: MAX_COORDINATION_STATE_LIST_ROWS,
+	writeBackgroundCoderReservations,
 };
 
 /** Record an exact legacy-WAL transfer that must be retried after contention. */
@@ -5375,9 +5412,14 @@ function coordinationRowsToReservations(
 				const parsed = BackgroundCoderReservationSchema.safeParse(
 					JSON.parse(row.payload) as unknown,
 				);
-				if (!parsed.success) {
+				if (
+					!parsed.success ||
+					parsed.data.reservationId !== row.entityKey ||
+					(parsed.data.generation ?? 1) !== row.generation ||
+					parsed.data.state !== row.status
+				) {
 					throw new Error(
-						`reservation coordination row failed schema validation for ${row.entityKey}`,
+						`reservation coordination row failed schema or authority binding validation for ${row.entityKey}`,
 					);
 				}
 				return parsed.data as BackgroundCoderReservation;
@@ -5607,14 +5649,24 @@ async function writeBackgroundCoderReservations(
 	if (importState === 'ready') {
 		try {
 			withCoordinationTransaction(directory, () => {
+				const safetyBound = _internals.reservationCoordinationRowLimit;
+				const authoritativeCount = countCoordinationStates(
+					directory,
+					RESERVATION_COORDINATION_NAMESPACE,
+				);
+				if (authoritativeCount > safetyBound) {
+					throw new Error(
+						`reservation coordination write exceeded its ${safetyBound}-row safety bound`,
+					);
+				}
 				const currentRows = listCoordinationStates(
 					directory,
 					RESERVATION_COORDINATION_NAMESPACE,
-					MAX_COORDINATION_STATE_LIST_ROWS,
+					safetyBound,
 				);
-				if (currentRows.length >= MAX_COORDINATION_STATE_LIST_ROWS) {
+				if (currentRows.length !== authoritativeCount) {
 					throw new Error(
-						`reservation coordination write reached its ${MAX_COORDINATION_STATE_LIST_ROWS}-row safety bound`,
+						'reservation coordination state changed during bounded reconciliation',
 					);
 				}
 				const current = new Map(currentRows.map((row) => [row.entityKey, row]));
@@ -5623,6 +5675,9 @@ async function writeBackgroundCoderReservations(
 				);
 				for (const [reservationId, row] of current) {
 					if (nextIds.has(reservationId)) continue;
+					const currentReservation = BackgroundCoderReservationSchema.parse(
+						JSON.parse(row.payload) as unknown,
+					);
 					const deleted = deleteCoordinationState(
 						directory,
 						RESERVATION_COORDINATION_NAMESPACE,
@@ -5632,6 +5687,7 @@ async function writeBackgroundCoderReservations(
 					if (!deleted) {
 						throw new Error(`reservation delete conflict for ${reservationId}`);
 					}
+					releaseReservationLeaseIfPresent(directory, currentReservation);
 				}
 				for (const reservation of parsed.data.reservations) {
 					const row = current.get(reservation.reservationId);
@@ -5677,13 +5733,7 @@ async function writeBackgroundCoderReservations(
 							);
 						}
 					} else {
-						releaseCoordinationLease(
-							directory,
-							leaseKey.namespace,
-							leaseKey.entityKey,
-							leaseKey.generation,
-							leaseKey.ownerToken,
-						);
+						releaseReservationLeaseIfPresent(directory, reservation);
 					}
 				}
 			});

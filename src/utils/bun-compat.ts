@@ -218,6 +218,24 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Force a full Bun garbage collection when available.
+ *
+ * Bun's SQLite query cache can leave evicted Statement wrappers alive after
+ * `Database.close(false)`. On Windows those wrappers retain the database file
+ * handle until GC, so immediate archive cleanup can fail with EBUSY. This is
+ * intentionally best-effort and only called after such an unlink failure;
+ * Node-hosted plugin contexts take the no-op path.
+ */
+export function collectGarbageBestEffort(): void {
+	const bun = getBun() as { gc?: (full?: boolean) => void } | undefined;
+	try {
+		bun?.gc?.(true);
+	} catch {
+		// GC assists recovery; the caller's bounded retry remains authoritative.
+	}
+}
+
+/**
  * Stable 32-bit hash. Bun's `Bun.hash` uses xxHash64 by default; on Node we
  * fall back to a 32-bit djb2 hash — identical hashes are NOT guaranteed
  * across runtimes, so callers should not rely on cross-runtime hash equality

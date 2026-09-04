@@ -19,6 +19,7 @@ import { mkdirSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { recordPendingDelegation } from '../../../src/background/pending-delegations.js';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import { _test_exports as gateInternals } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	_internals,
@@ -66,6 +67,7 @@ afterEach(async () => {
 	restoreClock();
 	gateInternals.resetTrackedStateCache();
 	_internals.getSessionOps = originalDispatchSessionOps;
+	closeProjectDb(directory);
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

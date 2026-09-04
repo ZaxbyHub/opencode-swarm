@@ -6,9 +6,12 @@ category: Fixed
 
 - Replaced last-writer-wins coordination files with FULL-durability SQLite transactions for session snapshots, background ownership and PR subscriptions, scope generations, PR-review authorization and workflow gates, and Lean/Epic lane state.
 - Added revision and generation fences, idempotent event application, process leases, strict one-time legacy imports, and post-commit compatibility projections.
-- Added a retained coordination idempotency fence so pruned event history cannot replay or double-apply an old key.
+- Added a bounded coordination idempotency fence so recently pruned event history cannot replay or double-apply an old key; the retained window is capped at 8,192 keys per stream and 400,000 keys globally.
+- Bound SQLite authority rows to their payload identity, generation, and status, and release coder-reservation leases atomically when their reservation is removed so stale leases cannot accumulate.
+- Kept bounded reservation reconciliation recoverable at the exact row limit while still failing closed when the authoritative namespace exceeds that limit.
+- Prevented compatibility shadows from feeding fields back into PR-review authority, kept Lean/Epic projection timestamps authority-derived, and made multi-row scope transitions roll back on any failed step.
 - Added `/swarm status` visibility for uncertain initialization and rejected background work, plus `/swarm recover --coordination` for an explicit safe retry.
 
 Migration is automatic on first use. Existing authority files are validated, imported exactly once, and renamed with an `.imported` suffix; generated projection files remain for one release. Corrupt or ambiguous legacy state fails closed and must be repaired before retrying recovery.
 
-No configuration changes or breaking API changes are required. A very large number of distinct event streams can temporarily keep the global event count above its soft 100,000-row target because the current waterline for every stream is retained for safe replay, and the retained idempotency fence can grow with the number of unique keys.
+No configuration changes or breaking API changes are required. A very large number of distinct event streams can temporarily keep the global event count above its soft 100,000-row target because the current waterline for every stream is retained for safe replay. Idempotency remains exact within the bounded fence window; callers must also use the required state-revision fence, which prevents an evicted old key from reapplying against newer state.

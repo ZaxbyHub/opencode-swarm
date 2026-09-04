@@ -38,6 +38,7 @@ import {
 	type BackgroundDelegationRecord,
 	readDelegations,
 } from '../../../src/background/pending-delegations.js';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	abortPrWorkflow,
 	activatePrWorkflow,
@@ -118,6 +119,7 @@ afterEach(async () => {
 	gateInternals.resolveIsWorkingTreeClean = originals.resolveIsWorkingTreeClean;
 	gateInternals.resolveIsWorkingTreeCleanAsync =
 		originals.resolveIsWorkingTreeCleanAsync;
+	closeProjectDb(directory);
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

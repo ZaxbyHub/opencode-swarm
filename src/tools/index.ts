@@ -201,6 +201,7 @@ export {
 	invalidate_pr_feedback_publication,
 } from './invalidate-pr-feedback-publication';
 export { lean_turbo_acquire_locks } from './lean-turbo-acquire-locks';
+export { lean_turbo_critic } from './lean-turbo-critic';
 export { lean_turbo_plan_lanes } from './lean-turbo-plan-lanes';
 export { lean_turbo_review } from './lean-turbo-review';
 export { lean_turbo_run_phase } from './lean-turbo-run-phase';
