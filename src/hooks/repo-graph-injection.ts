@@ -101,6 +101,8 @@ export const _internals = {
 	// Exposed so tests can pin the key's ino sensitivity (PRR-003): dropping
 	// it would let same-size/same-mtime rewrites reuse stale subgraphs.
 	subgraphCacheKey,
+	// Mutation pin for the full-graph LRU. A hit bypasses indexed freshness.
+	fullGraphCacheMatches,
 };
 
 function touchCache(key: string, value: CachedGraph): void {
@@ -121,6 +123,17 @@ function touchSubgraphCache(key: string, value: RepoGraph): void {
 		if (oldest === undefined) break;
 		subgraphCache.delete(oldest);
 	}
+}
+
+function fullGraphCacheMatches(
+	cached: Pick<CachedGraph, 'mtimeMs' | 'size' | 'ino'>,
+	stat: Pick<fs.Stats, 'mtimeMs' | 'size' | 'ino'>,
+): boolean {
+	return (
+		cached.mtimeMs === stat.mtimeMs &&
+		cached.size === stat.size &&
+		cached.ino === stat.ino
+	);
 }
 
 /**
@@ -211,12 +224,7 @@ async function evaluateGraphGates(
 	}
 
 	const cached = cache.get(key);
-	if (
-		cached &&
-		cached.mtimeMs === stat.mtimeMs &&
-		cached.size === stat.size &&
-		cached.ino === stat.ino
-	) {
+	if (cached && fullGraphCacheMatches(cached, stat)) {
 		touchCache(key, cached);
 		return { kind: 'hit', graph: cached.graph };
 	}

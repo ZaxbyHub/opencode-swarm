@@ -100,13 +100,6 @@
 			"note": "Pre-existing debt, not approved drift: \"writePhaseCouncilEvidence\" exists in src/tools/submit-phase-council-verdicts.ts but not inside src/tools/submit-phase-council-verdicts.ts:407 (council-evidence-files.writerCitations[0])."
 		},
 		{
-			"rowId": "council-evidence-files",
-			"file": "src/tools/write-final-council-evidence.ts",
-			"identifier": "writeFinalCouncilEvidence",
-			"kind": "absent-from-file",
-			"note": "Pre-existing debt, not approved drift: \"writeFinalCouncilEvidence\" does not occur anywhere in src/tools/write-final-council-evidence.ts (cited as src/tools/write-final-council-evidence.ts:292 in council-evidence-files.writerCitations[1])."
-		},
-		{
 			"rowId": "council-round-state-attempts",
 			"file": "src/council/council-round-state.ts",
 			"identifier": "loadState",
@@ -555,34 +548,6 @@
 			"note": "Pre-existing debt, not approved drift: \"AutomationStatusArtifact\" exists in src/background/status-artifact.ts but not inside src/background/status-artifact.ts:178 (status-artifacts.writerCitations[0])."
 		},
 		{
-			"rowId": "summaries",
-			"file": "src/summaries/manager.ts",
-			"identifier": "storeSummary",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"storeSummary\" exists in src/summaries/manager.ts but not inside src/summaries/manager.ts:132 (summaries.writerCitations[1])."
-		},
-		{
-			"rowId": "summaries",
-			"file": "src/summaries/store.ts",
-			"identifier": "listSummaries",
-			"kind": "absent-from-file",
-			"note": "Pre-existing debt, not approved drift: \"listSummaries\" does not occur anywhere in src/summaries/store.ts (cited as :186 in summaries.readerCitations[0])."
-		},
-		{
-			"rowId": "summaries",
-			"file": "src/summaries/store.ts",
-			"identifier": "loadFullOutput",
-			"kind": "absent-from-file",
-			"note": "Pre-existing debt, not approved drift: \"loadFullOutput\" does not occur anywhere in src/summaries/store.ts (cited as src/summaries/store.ts:148 in summaries.readerCitations[0])."
-		},
-		{
-			"rowId": "summaries",
-			"file": "src/summaries/store.ts",
-			"identifier": "storeSummary",
-			"kind": "absent-from-file",
-			"note": "Pre-existing debt, not approved drift: \"storeSummary\" does not occur anywhere in src/summaries/store.ts (cited as src/summaries/store.ts:70 in summaries.writerCitations[0])."
-		},
-		{
 			"rowId": "task-evidence-trajectory",
 			"file": "src/consensus/corpus.ts",
 			"identifier": "loadTaskTrajectories",
@@ -602,13 +567,6 @@
 			"identifier": "toolAfter",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"toolAfter\" exists in src/hooks/trajectory-logger.ts but not inside src/hooks/trajectory-logger.ts:469 (task-evidence-trajectory.writerCitations[0])."
-		},
-		{
-			"rowId": "task-gate-evidence",
-			"file": "src/evidence/task-gate-requirements.ts",
-			"identifier": "appendTaskGateRequirement",
-			"kind": "absent-from-file",
-			"note": "Pre-existing debt, not approved drift: \"appendTaskGateRequirement\" does not occur anywhere in src/evidence/task-gate-requirements.ts (cited as src/evidence/task-gate-requirements.ts:315 in task-gate-evidence.writerCitations[0])."
 		},
 		{
 			"rowId": "task-workflow-evidence",

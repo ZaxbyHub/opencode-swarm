@@ -30,6 +30,13 @@ import {
 	extractRustSymbols,
 	extractTSSymbols,
 } from '../symbols';
+import {
+	type FallbackScannerDependencies,
+	type FallbackScanOutcome,
+	type ImportBinding,
+	type ParsedImport,
+	runFallbackScan,
+} from './fallback-scanner';
 import { extractFileOntology, maskMultilineStringLiterals } from './ontology';
 import { safeRealpathSync } from './safe-realpath';
 import {
@@ -996,30 +1003,6 @@ function unresolvedRelativeImportsFor(
  * `as` alias or default import is used). Used to attribute call-site usage back
  * to the correct exported symbol.
  */
-interface ImportBinding {
-	imported: string;
-	local: string;
-}
-
-interface ParsedImport {
-	/** The module specifier (e.g., './foo', 'lodash') */
-	specifier: string;
-	/** The type of import */
-	importType:
-		| 'default'
-		| 'named'
-		| 'namespace'
-		| 'require'
-		| 'sideeffect'
-		| 'type';
-	/** Named imported symbols when statically detectable */
-	importedSymbols: string[];
-	/** Alias-aware imported→local bindings for usage attribution */
-	bindings: ImportBinding[];
-	/** True for `export { x } from '...'` re-exports (symbols are re-exposed). */
-	reExport: boolean;
-}
-
 /**
  * Parse imports from file content using the same rules as imports.ts.
  * Handles ES module imports and CommonJS require() statements.
@@ -2315,6 +2298,82 @@ function isBinaryContent(content: string): boolean {
 	return false;
 }
 
+function extractFallbackExports(
+	filePath: string,
+	absoluteRoot: string,
+): { exports: string[]; exportLines: Record<string, number> } {
+	const ext = path.extname(filePath).toLowerCase();
+	const relativePath = path.relative(absoluteRoot, filePath);
+	if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
+		return collectExports(
+			_internals.extractTSSymbols(relativePath, absoluteRoot),
+		);
+	}
+	if (ext === '.py' || ext === '.pyw') {
+		return collectExports(
+			_internals.extractPythonSymbols(relativePath, absoluteRoot),
+		);
+	}
+	if (ext === '.rs') {
+		return collectExports(
+			_internals.extractRustSymbols(relativePath, absoluteRoot),
+		);
+	}
+	if (ext === '.go') {
+		return collectExports(
+			_internals.extractGoSymbols(relativePath, absoluteRoot),
+		);
+	}
+	if (ext === '.dart') {
+		return collectExports(
+			_internals.extractDartSymbols(relativePath, absoluteRoot),
+		);
+	}
+	if (ext === '.rb' || ext === '.rake' || ext === '.gemspec') {
+		return collectExports(
+			_internals.extractRubySymbols(relativePath, absoluteRoot),
+		);
+	}
+	if (ext === '.php' || ext === '.phtml') {
+		return collectExports(
+			_internals.extractPhpSymbols(relativePath, absoluteRoot),
+		);
+	}
+	return { exports: [], exportLines: {} };
+}
+
+function fallbackScannerDependencies(): FallbackScannerDependencies {
+	return {
+		statFile: (filePath) => fsSync.statSync(filePath),
+		readFile: (filePath) => fsSync.readFileSync(filePath, 'utf-8'),
+		isBinaryContent,
+		extractExports: extractFallbackExports,
+		parseImports: (...args) => _internals.parseFileImports(...args),
+		stripComments: (content) => _internals.stripComments(content),
+		toModuleName,
+		getLanguage,
+		extractOntology: (input) => _internals.extractFileOntology(input),
+		resolveSpecifier: resolveModuleSpecifier,
+		usedSymbolsForImport,
+		isScannableSourcePath,
+	};
+}
+
+function scanFileWithFallback(
+	filePath: string,
+	absoluteRoot: string,
+	maxFileSize: number,
+	hasManifest?: (relDir: string) => boolean,
+): FallbackScanOutcome {
+	return runFallbackScan({
+		filePath,
+		absoluteRoot,
+		maxFileSize,
+		hasManifest,
+		dependencies: fallbackScannerDependencies(),
+	});
+}
+
 // ============ Single-File Scanner ============
 
 /**
@@ -2357,136 +2416,15 @@ export function scanFile(
 	maxFileSize: number,
 	hasManifest?: (relDir: string) => boolean,
 ): ScanResult {
-	let content: string;
-	let fileStats: fsSync.Stats;
-
-	try {
-		fileStats = fsSync.statSync(filePath);
-		if (fileStats.size > maxFileSize) {
-			return { node: null, edges: [] };
-		}
-		content = fsSync.readFileSync(filePath, 'utf-8');
-	} catch {
-		return { node: null, edges: [] };
-	}
-
-	// Skip binary files
-	if (isBinaryContent(content)) {
-		return { node: null, edges: [] };
-	}
-
-	// Extract symbol exports based on file extension
-	const ext = path.extname(filePath).toLowerCase();
-	let exports: string[] = [];
-	let exportLines: Record<string, number> = {};
-
-	try {
-		if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractTSSymbols(relativePath, absoluteRoot),
-			));
-		} else if (ext === '.py' || ext === '.pyw') {
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractPythonSymbols(relativePath, absoluteRoot),
-			));
-		} else if (ext === '.rs') {
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractRustSymbols(relativePath, absoluteRoot),
-			));
-		} else if (ext === '.go') {
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractGoSymbols(relativePath, absoluteRoot),
-			));
-		} else if (ext === '.dart') {
-			// Dynamic-language hardening (#1531): the AST fail-open path must
-			// not lose export metadata for the new languages (PR #2361 R9).
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractDartSymbols(relativePath, absoluteRoot),
-			));
-		} else if (ext === '.rb' || ext === '.rake' || ext === '.gemspec') {
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractRubySymbols(relativePath, absoluteRoot),
-			));
-		} else if (ext === '.php' || ext === '.phtml') {
-			const relativePath = path.relative(absoluteRoot, filePath);
-			({ exports, exportLines } = collectExports(
-				_internals.extractPhpSymbols(relativePath, absoluteRoot),
-			));
-		}
-
-		// Parse imports to get specifiers with types
-		const parsedImports = _internals.parseFileImports(
-			content,
-			filePath,
-			absoluteRoot,
-		);
-
-		// Comment-stripped content for conservative call-site usage detection.
-		// Computed once per file; only needed when there are imports to attribute.
-		const strippedForUsage =
-			parsedImports.length > 0 ? _internals.stripComments(content) : '';
-
-		const moduleName = toModuleName(filePath, absoluteRoot);
-		// Create the graph node
-		const node: GraphNode = {
-			filePath,
-			moduleName,
-			exports,
-			...(Object.keys(exportLines).length > 0 ? { exportLines } : {}),
-			imports: parsedImports.map((p) => p.specifier),
-			language: getLanguage(filePath),
-			mtime: fileStats.mtime.toISOString(),
-			sizeBytes: fileStats.size,
-			mtimeMs: fileStats.mtimeMs,
-			ontology: _internals.extractFileOntology({
-				moduleName,
-				filePath,
-				content,
-				language: getLanguage(filePath),
-				exports,
-				imports: parsedImports.map((p) => p.specifier),
-				hasManifest,
-			}),
-		};
-
-		// Process imports to create edges
-		const edges: GraphEdge[] = [];
-		const sortedImports = [...parsedImports].sort((a, b) =>
-			a.specifier.localeCompare(b.specifier),
-		);
-
-		for (const parsed of sortedImports) {
-			const resolvedTarget = resolveModuleSpecifier(
-				absoluteRoot,
-				filePath,
-				parsed.specifier,
-			);
-
-			if (resolvedTarget !== null) {
-				const usedSymbols = usedSymbolsForImport(parsed, strippedForUsage);
-				edges.push({
-					source: filePath,
-					target: resolvedTarget,
-					importSpecifier: parsed.specifier,
-					importType: parsed.importType,
-					importedSymbols: parsed.importedSymbols,
-					...(usedSymbols !== undefined ? { usedSymbols } : {}),
-					targetKind: isScannableSourcePath(resolvedTarget) ? 'node' : 'asset',
-				});
-			}
-		}
-
-		return { node, edges };
-	} catch {
-		// Skip malformed file without aborting incremental update
-		return { node: null, edges: [] };
-	}
+	const result = scanFileWithFallback(
+		filePath,
+		absoluteRoot,
+		maxFileSize,
+		hasManifest,
+	);
+	return result.status === 'scanned'
+		? { node: result.node, edges: result.edges }
+		: { node: null, edges: [] };
 }
 
 /**
@@ -3189,135 +3127,55 @@ export function buildWorkspaceGraph(
 		pushInputWitness(syncDiagnostics.extractorInputWitnesses, witness);
 	}
 	for (const filePath of sourceFiles) {
-		let content: string;
-		let fileStats: fsSync.Stats;
-
-		try {
-			fileStats = fsSync.statSync(filePath);
-			if (fileStats.size > maxFileSize) {
+		const result = scanFileWithFallback(
+			filePath,
+			absoluteRoot,
+			maxFileSize,
+			hasManifest,
+		);
+		if (result.status === 'skipped') {
+			if (result.reason === 'malformed') {
 				stats.skippedFiles++;
-				pushCapped(
-					syncDiagnostics.oversizedFiles,
-					toModuleName(filePath, absoluteRoot),
-				);
-				pushInputWitness(syncDiagnostics.extractorInputWitnesses, {
-					file: toModuleName(filePath, absoluteRoot),
-					kind: 'stable-skip',
-					sizeBytes: fileStats.size,
-					mtimeMs: fileStats.mtimeMs,
+				pushCapped(syncDiagnostics.extractionFailures, {
+					file: result.moduleName,
+					language: result.language ?? 'unknown',
+					reason: 'fallback_scan_failed',
 				});
+				if (result.sizeBytes !== undefined && result.mtimeMs !== undefined) {
+					pushInputWitness(syncDiagnostics.extractorInputWitnesses, {
+						file: result.moduleName,
+						kind: 'stable-skip',
+						sizeBytes: result.sizeBytes,
+						mtimeMs: result.mtimeMs,
+					});
+				}
 				continue;
 			}
-			content = fsSync.readFileSync(filePath, 'utf-8');
-		} catch {
 			stats.skippedFiles++;
-			pushCapped(
-				syncDiagnostics.unreadableFiles,
-				toModuleName(filePath, absoluteRoot),
-			);
-			continue;
-		}
-
-		// Skip binary files
-		if (isBinaryContent(content)) {
-			stats.skippedFiles++;
-			pushCapped(
-				syncDiagnostics.binaryFiles,
-				toModuleName(filePath, absoluteRoot),
-			);
-			pushInputWitness(syncDiagnostics.extractorInputWitnesses, {
-				file: toModuleName(filePath, absoluteRoot),
-				kind: 'stable-skip',
-				sizeBytes: fileStats.size,
-				mtimeMs: fileStats.mtimeMs,
-			});
+			const diagnosticTarget =
+				result.reason === 'oversized'
+					? syncDiagnostics.oversizedFiles
+					: result.reason === 'binary'
+						? syncDiagnostics.binaryFiles
+						: syncDiagnostics.unreadableFiles;
+			pushCapped(diagnosticTarget, result.moduleName);
+			if (
+				result.reason !== 'unreadable' &&
+				result.sizeBytes !== undefined &&
+				result.mtimeMs !== undefined
+			) {
+				pushInputWitness(syncDiagnostics.extractorInputWitnesses, {
+					file: result.moduleName,
+					kind: 'stable-skip',
+					sizeBytes: result.sizeBytes,
+					mtimeMs: result.mtimeMs,
+				});
+			}
 			continue;
 		}
 
 		stats.filesScanned++;
-
-		// Extract symbol exports based on file extension. Mirrors scanFile() so
-		// the sync and async builders stay byte-for-byte equivalent (issue #1144).
-		const ext = path.extname(filePath).toLowerCase();
-		let exports: string[] = [];
-		let exportLines: Record<string, number> = {};
-		let parsedImports: ParsedImport[] = [];
-
-		try {
-			if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractTSSymbols(relativePath, absoluteRoot),
-				));
-			} else if (ext === '.py' || ext === '.pyw') {
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractPythonSymbols(relativePath, absoluteRoot),
-				));
-			} else if (ext === '.rs') {
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractRustSymbols(relativePath, absoluteRoot),
-				));
-			} else if (ext === '.go') {
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractGoSymbols(relativePath, absoluteRoot),
-				));
-			} else if (ext === '.dart') {
-				// Dynamic-language hardening (#1531): the AST fail-open path must
-				// not lose export metadata for the new languages (PR #2361 R9).
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractDartSymbols(relativePath, absoluteRoot),
-				));
-			} else if (ext === '.rb' || ext === '.rake' || ext === '.gemspec') {
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractRubySymbols(relativePath, absoluteRoot),
-				));
-			} else if (ext === '.php' || ext === '.phtml') {
-				const relativePath = path.relative(absoluteRoot, filePath);
-				({ exports, exportLines } = collectExports(
-					_internals.extractPhpSymbols(relativePath, absoluteRoot),
-				));
-			}
-
-			parsedImports = _internals.parseFileImports(
-				content,
-				filePath,
-				absoluteRoot,
-			);
-		} catch {
-			// Skip malformed file without aborting entire graph build
-			continue;
-		}
-
-		const strippedForUsage =
-			parsedImports.length > 0 ? _internals.stripComments(content) : '';
-
-		const moduleName = toModuleName(filePath, absoluteRoot);
-		const language = getLanguage(filePath);
-		const node: GraphNode = {
-			filePath,
-			moduleName,
-			exports,
-			...(Object.keys(exportLines).length > 0 ? { exportLines } : {}),
-			imports: parsedImports.map((p) => p.specifier),
-			language,
-			mtime: fileStats.mtime.toISOString(),
-			sizeBytes: fileStats.size,
-			mtimeMs: fileStats.mtimeMs,
-			ontology: _internals.extractFileOntology({
-				moduleName,
-				filePath,
-				content,
-				language,
-				exports,
-				imports: parsedImports.map((p) => p.specifier),
-				hasManifest,
-			}),
-		};
+		const { node, edges } = result;
 
 		// A node that fails validation (e.g. control characters in ontology
 		// evidence extracted from a minified/generated file) must skip that one
@@ -3328,47 +3186,23 @@ export function buildWorkspaceGraph(
 		} catch {
 			stats.filesScanned--;
 			stats.skippedFiles++;
-			pushCapped(syncDiagnostics.validationSkippedFiles, moduleName);
+			pushCapped(syncDiagnostics.validationSkippedFiles, node.moduleName);
 			pushInputWitness(syncDiagnostics.extractorInputWitnesses, {
-				file: moduleName,
+				file: node.moduleName,
 				kind: 'stable-skip',
-				sizeBytes: fileStats.size,
-				mtimeMs: fileStats.mtimeMs,
+				sizeBytes: node.sizeBytes,
+				mtimeMs: node.mtimeMs ?? Date.parse(node.mtime),
 			});
 			continue;
 		}
 
-		// Sort imports deterministically by specifier for stable edge ordering
-		const sortedImports = [...parsedImports].sort((a, b) =>
-			a.specifier.localeCompare(b.specifier),
-		);
-
-		for (const parsed of sortedImports) {
-			const resolvedTarget = resolveModuleSpecifier(
-				absoluteRoot,
-				filePath,
-				parsed.specifier,
-			);
-
-			if (resolvedTarget !== null) {
-				const usedSymbols = usedSymbolsForImport(parsed, strippedForUsage);
-				const edge: GraphEdge = {
-					source: filePath,
-					target: resolvedTarget,
-					importSpecifier: parsed.specifier,
-					importType: parsed.importType,
-					importedSymbols: parsed.importedSymbols,
-					...(usedSymbols !== undefined ? { usedSymbols } : {}),
-					targetKind: isScannableSourcePath(resolvedTarget) ? 'node' : 'asset',
-				};
-				// The node is already valid; an individual invalid edge (e.g. a
-				// control character in an import specifier) drops just that edge
-				// rather than aborting the build (issue #1448).
-				try {
-					appendEdgeFast(graph, edge, seenEdges);
-				} catch {
-					/* skip malformed edge */
-				}
+		for (const edge of edges) {
+			// The node is already valid; an individual invalid edge drops just
+			// that edge rather than aborting the build (issue #1448).
+			try {
+				appendEdgeFast(graph, edge, seenEdges);
+			} catch {
+				/* skip malformed edge */
 			}
 		}
 	}

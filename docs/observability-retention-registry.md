@@ -331,7 +331,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `review-receipts` | .swarm/review-receipts/{YYYY-MM-DD}-{id}.json + index.json | governed-content | one small file per review receipt; NOT in close clean lists — accumulates (none) | indexed: manifest lookup + per-file reads | untouched — accumulates across reviews | **fix in #2309** — #2309 |
 
 
-### Category 5 — Plan durability, evidence bundles, council (12 rows)
+### Category 5 — Plan durability, evidence bundles, council (13 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -347,6 +347,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `spec-drift-artifacts` | .swarm/spec.md + .swarm/spec-staleness.json + .swarm/spec-snapshot.md… | authoritative | single-session drift state; spec-archive/ + spec.md + staleness + snapshot all in close c… (session-scoped) | full-file: bounded spec reads (effective-spec.ts:11-14) | archived+cleaned — unconditional removal so next sessi… | not a defect — this-gate |
 | `workflow-wal-dirs` | .swarm/coder-settlements/{taskId}.json + .swarm/task-repairs/{taskId}… | authoritative | per-task WAL files; all four dirs in ACTIVE_STATE_DIRS_TO_CLEAN (session-scoped) | indexed: single JSON per task | cleaned — all four dirs archived+cleaned | not a defect — this-gate |
 | `summaries` | .swarm/summaries/{S*}.json | governed-content | per-summary files; NO production retention — cleanupSummaries is unwired; summaries/ in n… (none) | indexed: per-file reads; directory listing unbounded | untouched — accumulates | **fix in #2309** — #2309 |
+| `architecture-summaries` | .swarm/evidence/{taskId}.json agent-summary notes + phase architecture/supervisor sidecars | governed-content | per-task/per-phase artifacts (session-scoped) | indexed: bounded evidence inventory or single-file reads | archived+cleaned with evidence/ | not a defect — #893 |
 
 ### Category 6 — Knowledge family (10 rows)
 

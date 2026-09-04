@@ -16,6 +16,8 @@ interface CacheEntry {
 	graph?: RepoGraph;
 	dirty: boolean;
 	mtime?: number;
+	ino?: string;
+	size?: number;
 }
 
 /** Oldest entry is first, newest entry is last. */
@@ -60,11 +62,15 @@ export function setCachedGraph(
 	workspace: string,
 	graph: RepoGraph,
 	mtime?: number,
+	ino?: number | string,
+	size?: number,
 ): void {
 	setEntry(workspace, {
 		graph,
 		dirty: false,
 		...(mtime === undefined ? {} : { mtime }),
+		...(ino === undefined ? {} : { ino: String(ino) }),
+		...(size === undefined ? {} : { size }),
 	});
 }
 
@@ -90,4 +96,14 @@ export function clearCache(workspace: string): void {
 /** Return the graph-file mtime captured with the cached graph, if present. */
 export function getCachedMtime(workspace: string): number | undefined {
 	return getEntry(workspace)?.mtime;
+}
+
+/** Return the graph-file inode/file-id captured with the cached graph. */
+export function getCachedIno(workspace: string): string | undefined {
+	return getEntry(workspace)?.ino;
+}
+
+/** Return the graph-file byte size captured with the cached graph. */
+export function getCachedSize(workspace: string): number | undefined {
+	return getEntry(workspace)?.size;
 }

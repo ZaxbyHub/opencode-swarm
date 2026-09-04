@@ -40,7 +40,11 @@ import { safeRealpathSync } from './safe-realpath';
 import { deriveRepoRootId } from './symbol-edge';
 import type { GraphEdge, GraphNode, RepoGraph } from './types';
 import { normalizeGraphPath, REPO_GRAPH_FILENAME } from './types';
-import { validateWorkspace } from './validation';
+import {
+	validateGraphEdge,
+	validateGraphNode,
+	validateWorkspace,
+} from './validation';
 
 // ============ Constants ============
 
@@ -138,6 +142,7 @@ const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
 
 /** Open handles keyed by resolved store path. */
 const _handles = new Map<string, Database>();
+const MAX_OPEN_HANDLES = 16;
 
 // ============ Small helpers ============
 
@@ -237,6 +242,24 @@ function closeHandleAt(storePath: string): void {
 	}
 }
 
+function getCachedHandle(storePath: string): Database | undefined {
+	const db = _handles.get(storePath);
+	if (!db) return undefined;
+	_handles.delete(storePath);
+	_handles.set(storePath, db);
+	return db;
+}
+
+function cacheHandle(storePath: string, db: Database): void {
+	closeHandleAt(storePath);
+	_handles.set(storePath, db);
+	while (_handles.size > MAX_OPEN_HANDLES) {
+		const oldest = _handles.keys().next().value as string | undefined;
+		if (oldest === undefined) break;
+		closeHandleAt(oldest);
+	}
+}
+
 /**
  * Close the cached connection for a workspace. Called by the `/swarm close`
  * clean stage before unlinking the store (Windows holds a WAL-mode file open,
@@ -278,6 +301,10 @@ export function closeAllRepoMemory(): void {
  * otherwise.
  */
 export function deleteRepoMemory(workspace: string): void {
+	removeRepoMemoryFiles(workspace);
+}
+
+function removeRepoMemoryFiles(workspace: string): boolean {
 	let storePath: string;
 	try {
 		storePath = getRepoMemoryPath(workspace);
@@ -285,20 +312,23 @@ export function deleteRepoMemory(workspace: string): void {
 		logger.log(
 			`[repo-graph] cannot resolve repo-memory path for delete: ${describeError(error)}`,
 		);
-		return;
+		return false;
 	}
 	closeHandleAt(storePath);
+	let removed = true;
 	for (const suffix of STORE_SUFFIXES) {
 		try {
-			unlinkSync(`${storePath}${suffix}`);
+			_internals.unlinkSync(`${storePath}${suffix}`);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+				removed = false;
 				logger.log(
 					`[repo-graph] failed to remove ${storePath}${suffix}: ${describeError(error)}`,
 				);
 			}
 		}
 	}
+	return removed;
 }
 
 /** Whether a SQLite driver is resolvable in this runtime. */
@@ -348,6 +378,18 @@ export function resolveGraphStorageMode(workspace: string): 'json' | 'indexed' {
  */
 export const _internals = {
 	isIndexedStorageAvailable,
+	removeRepoMemoryFiles,
+	unlinkSync,
+	cacheHandle,
+	maxOpenHandles: MAX_OPEN_HANDLES,
+	openHandleCount: () => _handles.size,
+	hasOpenHandle: (workspace: string) => {
+		try {
+			return _handles.has(getRepoMemoryPath(workspace));
+		} catch {
+			return false;
+		}
+	},
 };
 
 // ============ Connection management ============
@@ -417,7 +459,7 @@ function openForWrite(workspace: string): Database | null {
 		);
 		return null;
 	}
-	const cached = _handles.get(storePath);
+	const cached = getCachedHandle(storePath);
 	if (cached) return cached;
 
 	try {
@@ -436,7 +478,12 @@ function openForWrite(workspace: string): Database | null {
 					'[repo-graph] repo-memory index has a newer schema than this build; resetting',
 				);
 				db.close();
-				deleteRepoMemory(workspace);
+				if (!_internals.removeRepoMemoryFiles(workspace)) {
+					logger.log(
+						'[repo-graph] repo-memory future-schema reset aborted because deletion was incomplete',
+					);
+					return null;
+				}
 				db = new Db(storePath);
 				applyPragmas(db);
 			}
@@ -449,7 +496,7 @@ function openForWrite(workspace: string): Database | null {
 			}
 			throw error;
 		}
-		_handles.set(storePath, db);
+		cacheHandle(storePath, db);
 		return db;
 	} catch (error) {
 		logger.log(
@@ -476,7 +523,7 @@ function openForRead(workspace: string): Database | null {
 	} catch {
 		return null;
 	}
-	const cached = _handles.get(storePath);
+	const cached = getCachedHandle(storePath);
 	if (cached) return cached;
 	if (!existsSync(storePath)) return null;
 
@@ -509,7 +556,7 @@ function openForRead(workspace: string): Database | null {
 		deleteRepoMemory(workspace);
 		return null;
 	}
-	_handles.set(storePath, db);
+	cacheHandle(storePath, db);
 	return db;
 }
 
@@ -767,7 +814,44 @@ function openFreshIndex(workspace: string): IndexContext | null {
 
 interface FileRow {
 	path: string;
+	module_name: string;
 	node_json: string;
+}
+
+interface EdgeRow {
+	seq: number;
+	source: string;
+	target: string;
+	edge_json: string;
+}
+
+function parseNodeRow(row: FileRow): GraphNode {
+	const node = JSON.parse(row.node_json) as GraphNode;
+	validateGraphNode(node);
+	if (normalizeGraphPath(node.filePath) !== normalizeGraphPath(row.path)) {
+		throw new Error('repo-memory node row path does not match node_json');
+	}
+	if (
+		normalizeLookupPath(node.moduleName) !==
+		normalizeLookupPath(row.module_name)
+	) {
+		throw new Error(
+			'repo-memory node row module_name does not match node_json',
+		);
+	}
+	return node;
+}
+
+function parseEdgeRow(row: EdgeRow): GraphEdge {
+	const edge = JSON.parse(row.edge_json) as GraphEdge;
+	validateGraphEdge(edge);
+	if (
+		normalizeGraphPath(edge.source) !== normalizeGraphPath(row.source) ||
+		normalizeGraphPath(edge.target) !== normalizeGraphPath(row.target)
+	) {
+		throw new Error('repo-memory edge row endpoints do not match edge_json');
+	}
+	return edge;
 }
 
 /**
@@ -792,15 +876,15 @@ function resolveTargetRow(
 	const key = normalizeGraphPath(path.resolve(root, moduleName));
 	const direct = db
 		.query<FileRow, SQLQueryBindings[]>(
-			'SELECT path, node_json FROM files WHERE path = ?',
+			'SELECT path, module_name, node_json FROM files WHERE path = ?',
 		)
 		.get(...bind([key]));
 	if (direct) return direct;
 	const byModule = db
 		.query<FileRow, SQLQueryBindings[]>(
-			'SELECT path, node_json FROM files WHERE module_name = ? ORDER BY rowid DESC LIMIT 1',
+			'SELECT path, module_name, node_json FROM files WHERE module_name = ? ORDER BY rowid DESC LIMIT 1',
 		)
-		.get(...bind([moduleName]));
+		.get(...bind([normalizeLookupPath(moduleName)]));
 	return byModule ?? null;
 }
 
@@ -862,7 +946,7 @@ export function queryNodeByFile(
 	try {
 		const row = resolveTargetRow(ctx.db, ctx.root, file);
 		if (!row) return null;
-		return JSON.parse(row.node_json) as GraphNode;
+		return parseNodeRow(row);
 	} catch (error) {
 		logger.log(
 			`[repo-graph] repo-memory node lookup failed, discarding index: ${describeError(error)}`,
@@ -950,11 +1034,11 @@ export function loadSubgraphForFiles(
 		for (const row of chunkedQuery(memberKeys, (chunk) =>
 			db
 				.query<FileRow, SQLQueryBindings[]>(
-					`SELECT path, node_json FROM files WHERE path IN (${placeholders(chunk.length)})`,
+					`SELECT path, module_name, node_json FROM files WHERE path IN (${placeholders(chunk.length)})`,
 				)
 				.all(...bind(chunk)),
 		)) {
-			nodes[row.path] = JSON.parse(row.node_json) as GraphNode;
+			nodes[row.path] = parseNodeRow(row);
 		}
 
 		// Step 4. Fetched by `source` (idx_edges_source) and filtered on `target`
@@ -962,18 +1046,15 @@ export function loadSubgraphForFiles(
 		// chunk boundaries matches the original `graph.edges` order.
 		const edgeRows = chunkedQuery(memberKeys, (chunk) =>
 			db
-				.query<
-					{ seq: number; target: string; edge_json: string },
-					SQLQueryBindings[]
-				>(
-					`SELECT seq, target, edge_json FROM edges WHERE source IN (${placeholders(chunk.length)})`,
+				.query<EdgeRow, SQLQueryBindings[]>(
+					`SELECT seq, source, target, edge_json FROM edges WHERE source IN (${placeholders(chunk.length)})`,
 				)
 				.all(...bind(chunk)),
 		);
 		const edges: GraphEdge[] = edgeRows
 			.filter((row) => nodeKeys.has(row.target))
 			.sort((a, b) => a.seq - b.seq)
-			.map((row) => JSON.parse(row.edge_json) as GraphEdge);
+			.map(parseEdgeRow);
 
 		// Step 5 — the ACTIVE realpath-bound root, matching what every
 		// `loadGraph` consumer sees after `bindGraphToWorkspace` (storage.ts:124).

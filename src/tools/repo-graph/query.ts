@@ -51,6 +51,13 @@ interface QueryIndexes {
 	index: Map<string, FileReference[]>;
 	forwardIndex: Map<string, FileReference[]>;
 	moduleNameIndex: Map<string, GraphNode>;
+	edgesByTarget: Map<string, GraphEdge[]>;
+	symbolEdges?: SymbolEdgeIndexes;
+}
+
+interface SymbolEdgeIndexes {
+	forward: Map<string, SymbolEdge[]>;
+	reverse: Map<string, SymbolEdge[]>;
 }
 
 /**
@@ -122,6 +129,7 @@ function buildQueryIndexes(graph: RepoGraph): QueryIndexes {
 	const reverse = new Map<string, FileReference[]>();
 	const forward = new Map<string, FileReference[]>();
 	const moduleNameIndex = new Map<string, GraphNode>();
+	const edgesByTarget = new Map<string, GraphEdge[]>();
 	for (const node of Object.values(graph.nodes)) {
 		moduleNameIndex.set(normalizeLookupPath(node.moduleName), node);
 	}
@@ -132,6 +140,9 @@ function buildQueryIndexes(graph: RepoGraph): QueryIndexes {
 		if (isAssetEdge(edge)) continue;
 		const source = normalizeGraphPath(edge.source);
 		const target = normalizeGraphPath(edge.target);
+		const targetEdges = edgesByTarget.get(target);
+		if (targetEdges) targetEdges.push(edge);
+		else edgesByTarget.set(target, [edge]);
 		const sourceRef: FileReference = {
 			file: moduleNameForEdgePath(graph, edge.source),
 			importType: edge.importType,
@@ -157,6 +168,7 @@ function buildQueryIndexes(graph: RepoGraph): QueryIndexes {
 		index: reverse,
 		forwardIndex: forward,
 		moduleNameIndex,
+		edgesByTarget,
 	};
 }
 
@@ -174,6 +186,25 @@ function getReverseIndex(graph: RepoGraph): Map<string, FileReference[]> {
 
 function getForwardIndex(graph: RepoGraph): Map<string, FileReference[]> {
 	return getQueryIndexes(graph).forwardIndex;
+}
+
+function getSymbolEdgeIndexes(graph: RepoGraph): SymbolEdgeIndexes {
+	const indexes = getQueryIndexes(graph);
+	if (indexes.symbolEdges) return indexes.symbolEdges;
+	const forward = new Map<string, SymbolEdge[]>();
+	const reverse = new Map<string, SymbolEdge[]>();
+	for (const edge of graph.symbolEdges ?? []) {
+		const fromKey = `${normalizeGraphPath(edge.fromFile)}\0${edge.fromSymbol}`;
+		const toKey = `${normalizeGraphPath(edge.toFile)}\0${edge.toSymbol}`;
+		const fromEdges = forward.get(fromKey);
+		if (fromEdges) fromEdges.push(edge);
+		else forward.set(fromKey, [edge]);
+		const toEdges = reverse.get(toKey);
+		if (toEdges) toEdges.push(edge);
+		else reverse.set(toKey, [edge]);
+	}
+	indexes.symbolEdges = { forward, reverse };
+	return indexes.symbolEdges;
 }
 
 /**
@@ -522,9 +553,8 @@ export function getSymbolConsumers(
 	if (!node) return [];
 	const targetKey = normalizeGraphPath(node.filePath);
 	const refs: SymbolReference[] = [];
-	for (const edge of graph.edges) {
-		if (isAssetEdge(edge)) continue;
-		if (normalizeGraphPath(edge.target) !== targetKey) continue;
+	for (const edge of getQueryIndexes(graph).edgesByTarget.get(targetKey) ??
+		[]) {
 		const importedSymbols = edge.importedSymbols ?? [];
 		if (edge.importType === 'namespace') {
 			refs.push({
@@ -560,9 +590,8 @@ export function getCallers(
 	const targetKey = normalizeGraphPath(node.filePath);
 	const refs: CallerReference[] = [];
 	const seen = new Set<string>();
-	for (const edge of graph.edges) {
-		if (isAssetEdge(edge)) continue;
-		if (normalizeGraphPath(edge.target) !== targetKey) continue;
+	for (const edge of getQueryIndexes(graph).edgesByTarget.get(targetKey) ??
+		[]) {
 		const file = moduleNameForEdgePath(graph, edge.source);
 		if (seen.has(file)) continue;
 		if (edge.usedSymbols !== undefined) {
@@ -956,21 +985,9 @@ export function getContextPack(
 	}
 	const targetFile = normalizeGraphPath(targetNode.filePath);
 
-	// Build per-call symbol-edge indexes: forward (outgoing callees) and
-	// reverse (incoming callers), keyed by normalized file + symbol.
-	const forward = new Map<string, SymbolEdge[]>();
-	const reverse = new Map<string, SymbolEdge[]>();
-	const symbolEdges = graph.symbolEdges ?? [];
-	for (const edge of symbolEdges) {
-		const fromKey = `${normalizeGraphPath(edge.fromFile)}\0${edge.fromSymbol}`;
-		const toKey = `${normalizeGraphPath(edge.toFile)}\0${edge.toSymbol}`;
-		const fromEdges = forward.get(fromKey);
-		if (fromEdges) fromEdges.push(edge);
-		else forward.set(fromKey, [edge]);
-		const toEdges = reverse.get(toKey);
-		if (toEdges) toEdges.push(edge);
-		else reverse.set(toKey, [edge]);
-	}
+	// Lazily build symbol-edge indexes once per graph identity. The containing
+	// WeakMap is reset after every in-place incremental mutation.
+	const { forward, reverse } = getSymbolEdgeIndexes(graph);
 
 	// BFS both directions from the target symbol up to maxDepth inclusive.
 	const targetKey = `${targetFile}\0${symbol}`;
