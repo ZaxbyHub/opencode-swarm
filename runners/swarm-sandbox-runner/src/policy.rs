@@ -207,7 +207,10 @@ mod tests {
             "env_unsets": ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"]
         }"#;
         let policy: Policy = serde_json::from_str(json).unwrap();
-        assert_eq!(policy.env_unsets, vec!["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"]);
+        assert_eq!(
+            policy.env_unsets,
+            vec!["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"]
+        );
         policy.validate().unwrap();
         let re: Policy = serde_json::from_str(&serde_json::to_string(&policy).unwrap()).unwrap();
         assert_eq!(re.env_unsets, policy.env_unsets);
@@ -217,15 +220,9 @@ mod tests {
     fn empty_env_keys_rejected() {
         // PR review PRR-002: empty keys must fail closed at validate() time.
         for (field, json) in [
-            (
-                "env_allowlist",
-                r#""env_allowlist": ["PATH", ""]"#,
-            ),
+            ("env_allowlist", r#""env_allowlist": ["PATH", ""]"#),
             ("env_unsets", r#""env_unsets": [""]"#),
-            (
-                "env_overrides",
-                r#""env_overrides": {"": "value"}"#,
-            ),
+            ("env_overrides", r#""env_overrides": {"": "value"}"#),
         ] {
             let template = r#"{
                 "schema_version": 1,

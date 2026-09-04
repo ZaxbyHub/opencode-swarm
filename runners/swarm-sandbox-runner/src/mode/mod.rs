@@ -120,15 +120,24 @@ mod tests {
         policy.env_unsets = vec!["PATH".to_string()];
         let env = build_child_env(&policy, std::path::Path::new("C:\\stubs"), parent_env());
         let path = env.get("PATH").unwrap();
-        assert!(path.starts_with("C:\\stubs;"), "stub dir must shadow: {path}");
-        assert!(path.contains("C:\\Windows\\System32"), "parent entries retained: {path}");
+        assert!(
+            path.starts_with("C:\\stubs;"),
+            "stub dir must shadow: {path}"
+        );
+        assert!(
+            path.contains("C:\\Windows\\System32"),
+            "parent entries retained: {path}"
+        );
         assert_ne!(path, "C:\\Windows\\System32;C:\\tools");
     }
 
     #[test]
     fn env_unsets_genuinely_remove_non_managed_keys() {
         let mut policy = test_policy();
-        policy.env_unsets = vec!["LD_PRELOAD".to_string(), "DYLD_INSERT_LIBRARIES".to_string()];
+        policy.env_unsets = vec![
+            "LD_PRELOAD".to_string(),
+            "DYLD_INSERT_LIBRARIES".to_string(),
+        ];
         let env = build_child_env(&policy, std::path::Path::new("C:\\stubs"), parent_env());
         assert!(!env.contains_key("LD_PRELOAD"));
         assert!(!env.contains_key("DYLD_INSERT_LIBRARIES"));
