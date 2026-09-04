@@ -141,7 +141,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/evidence/manager.ts:456',
 			'src/tools/sast-baseline.ts:199',
 			'src/tools/repo-graph/storage.ts:524',
-			'src/memory/reflection-service.ts:547 (pre-#2035)',
+			'src/memory/reflection-service.ts (pre-#2035; migrated-to=src/memory/reflection-service.ts:atomicWrite)',
 			'src/hooks/review-receipt.ts:608',
 			'src/hooks/review-receipt.ts:674',
 			'src/hooks/review-receipt.ts:812',

@@ -20,6 +20,7 @@ import {
 	_internals,
 	getGraphPath,
 	loadGraph,
+	loadGraphSync,
 	loadOrCreateGraph,
 	saveGraph,
 } from './storage';
@@ -44,6 +45,23 @@ describe('full graph cache artifact identity', () => {
 		await loadOrCreateGraph(workspace);
 		const stats = statSync(getGraphPath(workspace));
 
+		expect(getCachedMtime(workspace)).toBe(stats.mtimeMs);
+		expect(getCachedSize(workspace)).toBe(stats.size);
+		expect(getCachedIno(workspace)).toBe(String(stats.ino));
+	});
+
+	test('loadGraphSync seeds the artifact witnesses after a cold cache load', async () => {
+		const workspace = canonicalMkdtemp('repo-graph-sync-cache-');
+		workspaces.push(workspace);
+		mkdirSync(path.join(workspace, '.opencode'), { recursive: true });
+
+		await saveGraph(workspace, createEmptyGraph(workspace));
+		clearCache(workspace);
+		const stats = statSync(getGraphPath(workspace));
+
+		const loaded = loadGraphSync(workspace);
+
+		expect(loaded?.metadata.generator).toBe('repo-graph');
 		expect(getCachedMtime(workspace)).toBe(stats.mtimeMs);
 		expect(getCachedSize(workspace)).toBe(stats.size);
 		expect(getCachedIno(workspace)).toBe(String(stats.ino));
