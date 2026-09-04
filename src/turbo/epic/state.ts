@@ -557,9 +557,17 @@ export function isEpicModeActiveForProject(directory: string): boolean {
 	if (directory.split(/[\\/]/).includes('..')) return false;
 	if (stateUnreadableMap.get(stateKey(directory))) return false;
 	const hasLegacyFile = fs.existsSync(stateFilePath(directory));
-	const hasCoordinationRows =
-		projectDbExists(directory) &&
-		listCoordinationStates(directory, COORDINATION_NAMESPACE, 1).length > 0;
+	let hasCoordinationRows = false;
+	try {
+		// Avoid opening or creating a database for a project that has never
+		// persisted coordination state, while still failing closed when an
+		// existing database is corrupt or inaccessible.
+		hasCoordinationRows =
+			projectDbExists(directory) &&
+			listCoordinationStates(directory, COORDINATION_NAMESPACE, 1).length > 0;
+	} catch {
+		return false;
+	}
 	if (!hasLegacyFile && !hasCoordinationRows) {
 		return false;
 	}

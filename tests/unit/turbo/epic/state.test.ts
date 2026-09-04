@@ -239,6 +239,14 @@ describe('isEpicModeActiveForProject — project-scoped Epic check', () => {
 		expect(isEpicModeActiveForProject(fileRoot)).toBe(false);
 	});
 
+	test('fails closed when an existing project database cannot be opened', () => {
+		const swarmDir = path.join(dir, '.swarm');
+		fs.mkdirSync(swarmDir, { recursive: true });
+		fs.writeFileSync(path.join(swarmDir, 'swarm.db'), 'not a sqlite database');
+
+		expect(isEpicModeActiveForProject(dir)).toBe(false);
+	});
+
 	test('fails closed for traversal-style directory spellings', () => {
 		expect(
 			isEpicModeActiveForProject(path.join('..', '..', 'not-a-project')),

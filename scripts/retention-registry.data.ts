@@ -467,23 +467,23 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1335,:1356,:1366)',
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1336,:1357,:1367)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'compaction high-water 1 MiB / low 256 KiB (:125-126); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:35); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:128,:132); TOMBSTONE_MIN_AGE 72 h (:143)',
+			bound: 'compaction high-water 1 MiB / low 256 KiB (:126-127); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:35); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:129,:133); TOMBSTONE_MIN_AGE 72 h (:144)',
 			scope: 'global',
-			citation: 'src/background/pending-delegations.ts:125-143; src/background/delegation-health.ts:35 (#2034)',
+			citation: 'src/background/pending-delegations.ts:126-144; src/background/delegation-health.ts:35 (#2034)',
 		},
 		readBound: {
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:111-116,1885',
+			citation: 'src/background/pending-delegations.ts:112-117,1886',
 		},
-		lockModel: 'withEvidenceLock agent=background on every mutation (:169-172); reads lock-free',
+		lockModel: 'withEvidenceLock agent=background on every mutation (:170-173); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1613-1625)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1614-1626)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:456-458); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:451-459 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
@@ -492,12 +492,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1885)',
+			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1886)',
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
 		disposition: {
 			kind: 'not-a-defect',
-			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:125-143; src/background/delegation-health.ts:35).',
+			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:126-144; src/background/delegation-health.ts:35).',
 		},
 	},
 	{
@@ -1126,14 +1126,14 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/commands/coupling.ts',
 		],
 		writerCitations: [
-			'src/turbo/epic/state.ts:529 saveEpicSessionState — per-session SQLite CAS with post-commit JSON projection',
+			'src/turbo/epic/state.ts:530 saveEpicSessionState — per-session SQLite CAS with post-commit JSON projection',
 			'src/turbo/epic/calibration.ts:187 saveCalibrationState — hotModuleAdditions grows monotonically',
 			'src/turbo/epic/divergence-recorder.ts:103 recordTaskDivergence — appendFileSync, no write cap (reader tail-bounded 16 MiB :162)',
 			'src/turbo/lean/state.ts:601 saveLeanTurboRunState — per-session SQLite CAS; src/turbo/lean/recovery.ts:163 writeRecoveryRecord (cleared on merge-back :214-227)',
 			'src/commands/coupling.ts:153 persistReportJson (--persist only, single rewritten file)',
 		],
 		readerCitations: [
-			'src/turbo/epic/state.ts:518 loadEpicSessionState — indexed SQLite state row',
+			'src/turbo/epic/state.ts:519 loadEpicSessionState — indexed SQLite state row',
 			'src/turbo/epic/calibration.ts:143 loadCalibrationState — FULL-FILE',
 			'src/turbo/epic/divergence-recorder.ts:187 readDivergenceHistory — TAIL-BOUNDED 16 MiB, sync',
 			'src/turbo/lean/recovery.ts:191 listRecoveryRecords — directory scan',
