@@ -300,7 +300,7 @@ describe('retention registry rows — coverage plumbing', () => {
 			/^\s*schemaVersion: 1;/,
 		);
 		expect(row.schemaVersion).toBe(
-			`RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:${checkpointVersion},:${manifestVersion},:${checkpointSchema})`,
+			`RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1336,:1357,:1367)`,
 		);
 
 		const lowWater = lineOf(
