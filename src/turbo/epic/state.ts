@@ -549,6 +549,11 @@ export function isEpicModeActive(
  * this module's defaults.
  */
 export function isEpicModeActiveForProject(directory: string): boolean {
+	// This read-only probe is also called by a few direct tool entry points that
+	// bypass `resolveWorkingDirectory`. Never follow raw traversal segments into
+	// an ancestor's `.swarm/` database; the caller will fail closed at its normal
+	// retrospective/project-root gate instead.
+	if (directory.split(/[\\/]/).includes('..')) return false;
 	if (stateUnreadableMap.get(stateKey(directory))) return false;
 	const hasLegacyFile = fs.existsSync(stateFilePath(directory));
 	let hasCoordinationRows = false;
