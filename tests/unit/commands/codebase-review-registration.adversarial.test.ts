@@ -24,7 +24,8 @@ describe('resolveCommand - codebase-review registration integrity', () => {
 
 		expect(result).not.toBeNull();
 		expect(result!.key).toBe('codebase review');
-		expect(result!.entry.aliasOf).toBe('codebase-review');
+		// #2493: dereferenced to the canonical entry.
+		expect(result!.entry).toBe(COMMAND_REGISTRY['codebase-review']);
 		expect(result!.remainingArgs).toEqual(args);
 	});
 
