@@ -8,7 +8,7 @@ Prefer, in this order: a graph query tool (query/path/explain) when a code graph
 
 ## Explorer contract
 
-When the candidate surface is broad or ambiguous, fan out to independent fresh-context explorer subagents with disjoint scopes: 1-2 for a trivial surface, 3-5 for a typical one, more only for genuinely multi-module scopes. Explorers return CANDIDATE locations only - file:line evidence and a short reason - never a verdict, a root-cause claim, or a fix suggestion. Their candidates enter the same ranking and bug-specific-explanation bar as candidates you found yourself; an explorer's confident tone is not evidence.
+When the candidate surface is broad or ambiguous, fan out to independent fresh-context explorer subagents with disjoint scopes: 1-2 for a trivial surface, 3-5 for a typical one, more only for genuinely multi-module scopes. Explorers return CANDIDATE locations only - file:line evidence and a short reason - never a verdict, a root-cause claim, or a fix suggestion. Their candidates enter the same ranking and bug-specific-explanation bar as candidates you found yourself; an explorer's confident tone is not evidence. This breadth work is mechanical, so route it to the runner's lowest-cost tier that can plausibly succeed, saving the strongest independent tier for the plan critic, implementation reviewer, and final critic.
 
 ## Blind second pass
 

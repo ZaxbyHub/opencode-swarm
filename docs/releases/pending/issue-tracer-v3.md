@@ -4,7 +4,7 @@ Issue-tracer v3 introduces a normative gate table, acceptance-check-driven valid
 
 ## Changes
 
-- **Gate table (Phase 0-5.1):** Normative table mapping each phase to required artifacts, validator command, and exit condition. Phase names standardized to 0, 1, 2, 2.5, 3, 4, 4.2, 4.5, 4.6, 5, 5.1. Replaces narrative descriptions with machine-checkable gates.
+- **Gate table (Phase 0-5.1):** Normative table mapping each phase to required artifacts, validator command, and exit condition. Phase names standardized to 0, 1, 2, 2.5, 3, 4, 4.2, 4.5, 4.6, 5, 5.1. Replaces narrative descriptions with validator-checked artifact gates.
 
 - **Issue validation (Phase 1):** Classification enum (VALID/AMBIGUOUS/ALREADY_FIXED/NOT_A_BUG/FEATURE) with explicit evidence requirements. Related-problems sweep to catch duplicates and subsumption. ALREADY_FIXED proof: GREEN on current main, RED at reported commit or merge-base.
 
@@ -12,9 +12,9 @@ Issue-tracer v3 introduces a normative gate table, acceptance-check-driven valid
 
 - **Red checkpoint manifest:** Append-only record of acceptance-check state at the phase boundary between Phase 2.5 (checks defined and validated RED) and Phase 4 (checks passing GREEN). Checkpoint includes blob hash, file mode, check id, argv, expect regex, and base SHA. Amendments recorded with reason (CHECK_WRONG/FORMAT_ONLY/AC_CHANGED_BY_USER) so drift is auditable.
 
-- **Scripts trace-check.sh and repro-check.sh:** trace-check.sh validates ledger state.md and artifact presence; repro-check.sh runs a check in isolation on a base commit and reviewed commit, captures logs with 2 MiB truncation, and prints a block for pasting into the trace. Both are model-agnostic and exit-code-clean for CI integration.
+- **Scripts trace-check.sh and repro-check.sh:** trace-check.sh validates ledger state.md and artifact presence; repro-check.sh runs the check against the pre-fix base in a disposable worktree and against the current working tree, captures logs with 2 MiB truncation, and prints a block for pasting into the trace. Both are model-agnostic and exit-code-clean for CI integration.
 
-- **Branch-freshness and clean-worktree rules (Phase 0):** fetch-failed::reason recorded with user-override quoting. Handshake detects adapter shim staleness (MATCH/SHIM/STALE/ABSENT). Trace rejected if worktree is dirty (excluding .agents/issue-traces/).
+- **Branch-freshness and worktree-cleanliness rules:** Phase 0 records the branch-freshness value (synced/behind/fetch-failed with an explicit user-override) and both identities; a dirty working tree at Phase 0 is expected to be moved to a separate worktree per protocol rather than blocked in place. Handshake detects adapter shim staleness (MATCH/SHIM/STALE/ABSENT). The validator itself enforces a clean tree (excluding .agents/issue-traces/) only at Phase 4.5 and Phase 4.6.
 
 - **Human-enforced merge gate (Phase 5.1):** PR is published but not merged until Phase 5.1 completes. 10b-merge-approval.md records user approval (verbatim), PR head SHA, and final critic reviewed-commit. merge state is AWAITING_USER_APPROVAL, APPROVED:<sha>, or MERGED. No autonomous push-to-merge.
 

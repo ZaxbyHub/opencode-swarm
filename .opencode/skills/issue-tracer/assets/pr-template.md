@@ -58,6 +58,8 @@ Any Full-Resolution Contract clause waived by the interactive user or a checked-
 
 Awaiting explicit user approval; not merged.
 
+PR head: [40-hex sha of the branch head this PR body describes]
+
 ## Issue Closure
 
 Closes #[issue-number]

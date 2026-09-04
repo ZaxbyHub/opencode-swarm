@@ -292,7 +292,10 @@ Use `references/critic-gate.md` (Plan Critic section). The artifact records both
 ```markdown
 # Recurrence Sweep and Guardrail
 
-(If the change corrects no incorrect behavior/data/docs - pure style/naming - record "no defect class" with a one-line justification and stop here.)
+(If the change corrects no incorrect behavior/data/docs - pure style/naming - record "no defect class" and stop here.)
+
+## Justification
+[One-line justification for why this change has no defect class.]
 
 ## Defect Class
 [One-sentence pattern statement: the shape of the mistake - API misused, guard omitted, contract assumed, encoding confused - not the site of it.]
@@ -325,7 +328,7 @@ Use `references/critic-gate.md` (Final Critic section). The artifact records bot
 
 ## `10-pr-body.md`
 
-Use `assets/pr-template.md`, including the `## Acceptance Criteria -> Evidence` map, the `## Merge status` line, and the `## Waivers (or none)` section.
+Use `assets/pr-template.md`, including the `## Acceptance Criteria -> Evidence` map, the `## Waivers (or none)` section, and the `## Merge status` section with its `PR head: <40-hex>` line. `trace-check.sh phase 5` requires all three exact headings/lines plus a `state.md` `merge:` value of `AWAITING_USER_APPROVAL`, `APPROVED:<sha>`, or `MERGED`.
 
 ## `10-ci-feedback.md`
 

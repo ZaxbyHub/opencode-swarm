@@ -259,6 +259,35 @@ describe('repro-check.sh disposable checks', () => {
 	test('watchdog fallback (process-group kill) bounds a timed-out child when forced', () => {
 		const worktree = repo();
 		const base = git(worktree, 'rev-parse', 'HEAD');
+
+		// Helper to count surviving sleep processes
+		function countSleepProcesses(): number {
+			if (process.platform === 'win32') {
+				const p = Bun.spawnSync({
+					cmd: ['tasklist', '/FI', 'IMAGENAME eq sleep.exe', '/FO', 'CSV'],
+					stdin: 'ignore',
+					stdout: 'pipe',
+					stderr: 'pipe',
+					timeout: 5_000,
+				});
+				const lines = p.stdout
+					.toString()
+					.split('\n')
+					.filter((l) => l.includes('sleep.exe'));
+				return lines.length;
+			} else {
+				const p = Bun.spawnSync({
+					cmd: ['pgrep', '-f', 'sleep 300'],
+					stdin: 'ignore',
+					stdout: 'pipe',
+					stderr: 'pipe',
+					timeout: 5_000,
+				});
+				return p.stdout.toString().trim().length > 0 ? 1 : 0;
+			}
+		}
+
+		const sleepBefore = countSleepProcesses();
 		const result = runWithEnv(
 			worktree,
 			[
@@ -273,6 +302,16 @@ describe('repro-check.sh disposable checks', () => {
 			{ REPRO_CHECK_FORCE_FALLBACK: '1' },
 		);
 		expect(result.code).toBe(6);
+
+		// Poll up to 3 times with 500ms sleeps to ensure process cleanup
+		let sleepAfter = countSleepProcesses();
+		for (let i = 0; i < 3 && sleepAfter > sleepBefore; i++) {
+			Bun.sleepSync(500);
+			sleepAfter = countSleepProcesses();
+		}
+
+		// Process-group kill terminates all children; single-pid kill would leave the sleep alive
+		expect(sleepAfter).toBeLessThanOrEqual(sleepBefore);
 	}, 20_000);
 
 	test('truncates oversized logs and tracks checkpoint amendments and changes', () => {
@@ -336,5 +375,48 @@ describe('repro-check.sh disposable checks', () => {
 				'utf8',
 			),
 		).toContain('\tAMEND\t');
+	});
+
+	test('rejects a --trace-dir outside .agents/issue-traces', () => {
+		const worktree = repo();
+		const base = git(worktree, 'rev-parse', 'HEAD');
+		const outside = canonicalMkdtemp('repro-check-outside-');
+		roots.push(outside);
+		const result = run(worktree, [
+			...args(base, 'PRESERVING'),
+			'--trace-dir',
+			outside,
+			'--',
+			'bash',
+			'check.sh',
+		]);
+		expect(result.code).toBe(2);
+		expect(result.err).toContain(
+			'--trace-dir must be inside .agents/issue-traces',
+		);
+	});
+
+	test('refuses to write through a symlinked repro/ directory and creates nothing outside the repo', () => {
+		const worktree = repo();
+		const base = git(worktree, 'rev-parse', 'HEAD');
+		const outside = canonicalMkdtemp('repro-check-escape-');
+		roots.push(outside);
+		fs.mkdirSync(path.join(worktree, '.agents/issue-traces/issue-1'), {
+			recursive: true,
+		});
+		fs.symlinkSync(
+			outside,
+			path.join(worktree, '.agents/issue-traces/issue-1/repro'),
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
+		const result = run(worktree, [
+			...args(base, 'PRESERVING'),
+			'--',
+			'bash',
+			'check.sh',
+		]);
+		expect(result.code).toBe(2);
+		expect(result.err).toContain('refusing');
+		expect(fs.readdirSync(outside)).toHaveLength(0);
 	});
 });

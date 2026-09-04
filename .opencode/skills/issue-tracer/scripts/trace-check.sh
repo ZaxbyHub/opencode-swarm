@@ -79,9 +79,45 @@ check_headings() {
 }
 
 state_gate() {
-  local gate="$1" commit="$2" row
-  row="$(awk -F '|' -v gate="$gate" -v commit="$commit" '$2 ~ "^[[:space:]]*" gate "[[:space:]]*$" && $3 ~ /APPROVE|RECORDED/ && (commit == "" || $4 ~ "^[[:space:]]*" commit "[[:space:]]*$") {print; exit}' "$state" 2>/dev/null || true)"
-  [ -n "$row" ] && rule_ok "gate-$gate" || rule_bad "gate-$gate" "missing approved bound row"
+  # Parse the `## Gates` table row-by-row (split on '|', trim each cell) and
+  # require the verdict cell to match $2 EXACTLY. An unanchored substring
+  # match here previously let a DISAPPROVED row satisfy an APPROVE gate,
+  # since "APPROVE|RECORDED" as a regex also matches "DISAPPROVED".
+  local gate="$1" verdict_want="$2" commit="$3" treeid="$4" line g v c t ok=0
+  while IFS= read -r line; do
+    case "$line" in '|'*) ;; *) continue;; esac
+    IFS='|' read -r _ g v c t _ <<EOF
+$line
+EOF
+    g="$(trim "$g")"; v="$(trim "$v")"; c="$(trim "$c")"; t="$(trim "$t")"
+    [ "$g" = "$gate" ] || continue
+    [ "$v" = "$verdict_want" ] || continue
+    [ -z "$commit" ] || [ "$c" = "$commit" ] || continue
+    [ -z "$treeid" ] || [ "$t" = "$treeid" ] || continue
+    ok=1
+    break
+  done < "$state"
+  [ "$ok" -eq 1 ] && rule_ok "gate-$gate" || rule_bad "gate-$gate" "missing approved bound row"
+}
+
+# Extract the section starting at a `## <heading>` line up to (but not
+# including) the next `## ` heading or EOF, then require it to contain a
+# line that is EXACTLY `APPROVE` or `Verdict: APPROVE`. Any other verdict
+# text (NEEDS_REVISION, BLOCKED, DISAPPROVED, ...) fails even if the literal
+# string "APPROVE" appears elsewhere in the artifact.
+artifact_verdict_approved() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  awk '
+    /^## Verdict$/ { infield = 1; next }
+    /^## / { infield = 0 }
+    infield {
+      line = $0
+      sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+      if (line == "APPROVE" || line == "Verdict: APPROVE") { found = 1 }
+    }
+    END { exit !found }
+  ' "$file" 2>/dev/null
 }
 
 clean_tree() {
@@ -91,7 +127,7 @@ clean_tree() {
 }
 
 phase0() {
-  local keys key expected actual previous=0 line
+  local keys key expected actual previous=0 line fresh
   keys='protocol phase tier classification base-ref base-sha freshness phase0-tree-id checkpoint-tree-id handshake tools merge next-action'
   for key in $keys; do
     line="$(grep -n "^$key: " "$state" 2>/dev/null | cut -d: -f1 | head -n1 || true)"
@@ -103,10 +139,33 @@ phase0() {
   [ "$(state_value protocol)" = "3.0.0" ] && rule_ok protocol || rule_bad protocol "expected 3.0.0"
   is_hex "$(state_value base-sha)" && rule_ok base-sha || rule_bad base-sha "must be 40 hex"
   is_hex "$(state_value phase0-tree-id)" && rule_ok phase0-tree-id || rule_bad phase0-tree-id "must be 40 hex"
-  case "$(state_value freshness)" in
+  # Accept only these exact forms:
+  #   synced                                            -> OK
+  #   behind:<n>                                        -> FAIL (must sync first)
+  #   fetch-failed:<reason> user-override:"<non-empty>"  -> OK (explicit override)
+  #   fetch-failed:<reason>                              -> FAIL (fail closed)
+  #   user-override:"<non-empty>"                        -> OK (standalone override)
+  #   anything else                                      -> FAIL (unknown value)
+  fresh="$(state_value freshness)"
+  case "$fresh" in
     unset|'') rule_bad freshness "must be recorded" ;;
-    fetch-failed:*) case "$(state_value freshness)" in *user-override:*) rule_ok freshness;; *) rule_bad freshness-fail-closed "fetch failure lacks user override";; esac ;;
-    *) rule_ok freshness ;;
+    synced) rule_ok freshness ;;
+    behind:*) rule_bad freshness "behind, sync before proceeding" ;;
+    fetch-failed:*)
+      if printf '%s' "$fresh" | grep -Eq 'user-override:"[^"]+"'; then
+        rule_ok freshness
+      else
+        rule_bad freshness-fail-closed "fetch failure lacks user override"
+      fi
+      ;;
+    user-override:*)
+      if printf '%s' "$fresh" | grep -Eq '^user-override:"[^"]+"$'; then
+        rule_ok freshness
+      else
+        rule_bad freshness "unknown value"
+      fi
+      ;;
+    *) rule_bad freshness "unknown value" ;;
   esac
   case "$(state_value tier)" in S|M|L) rule_ok tier;; *) rule_bad tier "must be S, M, or L";; esac
   [ "$(state_value handshake)" != "unset" ] && [ -n "$(state_value handshake)" ] && rule_ok handshake || rule_bad handshake "must be recorded"
@@ -181,9 +240,9 @@ phase3() {
   check_headings "$trace/05-fix-plan.md" '## Selected Fix' '## Candidate Fixes' '## Impact Analysis' '## Anticipated Defect-Class Sweep (Phase 4.2)'
   check_headings "$trace/06-critic-review.md" '## Reviewed SHA / diff hash' '## Verdict' '## Check replay'
   grep -Eq '^## Round [0-9]+$' "$trace/06-critic-review.md" 2>/dev/null && rule_ok heading-round || rule_bad heading-round "missing ## Round N heading in $(basename "$trace/06-critic-review.md")"
-  grep -A10 '^## Verdict$' "$trace/06-critic-review.md" 2>/dev/null | grep -q APPROVE && rule_ok critic-verdict || rule_bad critic-verdict "must approve"
+  artifact_verdict_approved "$trace/06-critic-review.md" && rule_ok critic-verdict || rule_bad critic-verdict "06-critic-review.md Verdict section must be exactly APPROVE"
   [ -f "$trace/07-approved-plan.md" ] && rule_ok approved-plan || rule_bad approved-plan "missing"
-  state_gate plan-critic ""
+  state_gate plan-critic APPROVE "" ""
 }
 
 executable_ids() { grep -E '^\|[[:space:]]*AC[0-9]+[[:space:]]*\|' "$trace/02-reproduction.md" 2>/dev/null | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $3); gsub(/^[ \t]+|[ \t]+$/, "", $4); if ($3 != "NON-EXECUTABLE") print $4}'; }
@@ -209,20 +268,30 @@ phase42() {
 
 phase45() {
   clean_tree
-  check_headings "$trace/08b-implementation-review.md" '## Reviewed SHA / diff hash' '## Verdict' '## Independently re-run' '## Check integrity' '## Deferred / Scoped-Out / Unwired'
-  state_gate implementation-review "$(git rev-parse HEAD)"
+  local file="$trace/08b-implementation-review.md"
+  check_headings "$file" '## Reviewed SHA / diff hash' '## Verdict' '## Independently re-run' '## Check integrity' '## Deferred / Scoped-Out / Unwired'
+  artifact_verdict_approved "$file" && rule_ok artifact-verdict-implementation-review || rule_bad artifact-verdict-implementation-review "must contain APPROVE under ## Verdict"
+  state_gate implementation-review APPROVE "$(git rev-parse HEAD)" "$(tree_id)"
 }
 phase46() {
-  local ac
+  local ac file="$trace/09-final-critic.md"
   clean_tree
-  check_headings "$trace/09-final-critic.md" '## Reviewed SHA / diff hash' '## Verdict' '## Review Freshness' '## Deferred / Scoped-Out / Unwired' '## Acceptance criteria evidence'
-  state_gate final-critic "$(git rev-parse HEAD)"
-  while IFS= read -r ac; do grep -A100 '^## Acceptance criteria evidence$' "$trace/09-final-critic.md" 2>/dev/null | grep -q "$ac" && rule_ok "final-$ac" || rule_bad "final-$ac" "missing evidence"; done < <(acceptance_ids)
+  check_headings "$file" '## Reviewed SHA / diff hash' '## Verdict' '## Review Freshness' '## Deferred / Scoped-Out / Unwired' '## Acceptance criteria evidence'
+  artifact_verdict_approved "$file" && rule_ok artifact-verdict-final-critic || rule_bad artifact-verdict-final-critic "must contain APPROVE under ## Verdict"
+  state_gate final-critic APPROVE "$(git rev-parse HEAD)" "$(tree_id)"
+  while IFS= read -r ac; do grep -A100 '^## Acceptance criteria evidence$' "$file" 2>/dev/null | grep -q "$ac" && rule_ok "final-$ac" || rule_bad "final-$ac" "missing evidence"; done < <(acceptance_ids)
 }
 phase5() {
   if is_already_fixed; then rule_ok obe-subset; return; fi
-  check_headings "$trace/10-pr-body.md" '## Acceptance Criteria' '## Waivers'
-  case "$(state_value merge)" in AWAITING_USER_APPROVAL|APPROVED:[0-9a-f]*|MERGED) rule_ok merge-state;; *) rule_bad merge-state "not ready";; esac
+  local file="$trace/10-pr-body.md" merge_value
+  check_headings "$file" '## Acceptance Criteria -> Evidence' '## Waivers (or none)'
+  grep -Eq '^PR head: [0-9a-f]{40}$' "$file" 2>/dev/null && rule_ok pr-head || rule_bad pr-head "missing PR head: <40-hex> line"
+  merge_value="$(state_value merge)"
+  case "$merge_value" in
+    AWAITING_USER_APPROVAL|MERGED) rule_ok merge-state ;;
+    APPROVED:*) is_hex "${merge_value#APPROVED:}" && rule_ok merge-state || rule_bad merge-state "APPROVED: must be followed by a 40-hex sha" ;;
+    *) rule_bad merge-state "not ready" ;;
+  esac
 }
 merge_check() {
   local file="$trace/10b-merge-approval.md" pr final
@@ -230,7 +299,7 @@ merge_check() {
   pr="$(grep -A3 '^## PR head SHA$' "$file" 2>/dev/null | grep -Eo '[0-9a-f]{40}' | head -n1 || true)"
   final="$(grep -A3 '^## Final critic reviewed-commit$' "$file" 2>/dev/null | grep -Eo '[0-9a-f]{40}' | head -n1 || true)"
   is_hex "$pr" && [ "$pr" = "$final" ] && rule_ok merge-sha-binding || rule_bad merge-sha-binding "PR and final critic SHA differ"
-  state_gate merge-approval ""
+  state_gate merge-approval RECORDED "" ""
   echo 'NOTE: human-enforced gate; this validator checks presence and binding only'
 }
 

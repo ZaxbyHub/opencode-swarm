@@ -96,7 +96,7 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 
 - Reproduce with the smallest faithful command; capture exact command, exit code, and output in `02-reproduction.md`.
 - Localize with reasoning-guided hierarchical search: graph/semantic search before exact search before reading; file to element to line/condition.
-- Fan out to disjoint-scope explorer subagents on ambiguous or broad surfaces; explorers return candidates with file:line evidence, never verdicts.
+- Fan out to disjoint-scope explorer subagents on ambiguous or broad surfaces; explorers return candidates with file:line evidence, never verdicts. Use the runner's lowest-cost tier that can plausibly succeed for this breadth work; reserve the strongest independent tier for the critic and reviewer roles.
 - Write a bug-specific causal explanation for each surviving candidate; run a second blind pass on high-risk or close-call faults.
 - Reference: `references/localization-playbook.md`.
 
@@ -105,7 +105,7 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 - Convert every numbered acceptance criterion into one typed, executable check (DISCRIMINATING, PRESERVING, NEW-SURFACE) or a justified NON-EXECUTABLE row.
 - Run `repro-check.sh run` against the pre-fix base for each executable check; reject vacuous checks that also pass on the buggy tree.
 - Freeze the checks with `repro-check.sh checkpoint` before any fix code exists; record the checkpoint tree-id.
-- Author checks at arm's length from the implementer when subagent dispatch is available (tiers M/L required, S optional); disclose the limitation otherwise.
+- Author checks at arm's length from the implementer when subagent dispatch is available (tiers M/L required, S optional); disclose the limitation otherwise. Check authoring is mechanical work: use the runner's lowest-cost tier that can plausibly succeed.
 - Reference: `references/acceptance-checks.md`.
 
 ### Phase 3: Fix Plan and Plan Critic

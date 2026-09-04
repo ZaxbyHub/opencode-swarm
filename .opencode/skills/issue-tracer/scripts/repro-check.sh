@@ -24,7 +24,69 @@ is_inside_root() {
   case "/$1/" in */../*|*/./*) return 1;; esac
   return 0
 }
-trace_for() { [ -n "$trace_dir" ] || trace_dir="$root/.agents/issue-traces/$slug"; }
+issue_traces_base="$root_real/.agents/issue-traces"
+
+# Path-only preflight: trace_dir (default or --trace-dir override) must be
+# textually rooted at <repo>/.agents/issue-traces/ before we touch the
+# filesystem. Runs before any mkdir/write, so a caller cannot point the
+# script at an arbitrary path via that flag.
+validate_trace_dir_prefix() {
+  case "$trace_dir/" in
+    "$root"/.agents/issue-traces/*) ;;
+    *)
+      echo "repro-check: --trace-dir must be inside .agents/issue-traces" >&2
+      exit 2
+      ;;
+  esac
+}
+
+# Symlink-escape guard: resolve the deepest EXISTING ancestor of trace_dir
+# (it may not exist yet) and require it to land inside the repo root. Must
+# run before any mkdir -p, since mkdir -p happily follows an existing
+# symlinked ancestor before any later check on the final path can catch it.
+refuse_ancestor_symlink_escape() {
+  local check="$trace_dir" resolved
+  while [ ! -e "$check" ]; do check="$(dirname "$check")"; done
+  if [ -L "$check" ]; then
+    echo "repro-check: --trace-dir must be inside .agents/issue-traces" >&2
+    exit 2
+  fi
+  resolved="$(cd "$check" && pwd -P)"
+  case "$resolved/" in
+    "$root_real"/*) ;;
+    *)
+      echo "repro-check: --trace-dir must be inside .agents/issue-traces" >&2
+      exit 2
+      ;;
+  esac
+}
+
+# Post-mkdir, strict resolution check: once a path under trace_dir exists,
+# its pwd -P form must land inside <repo-root>/.agents/issue-traces/. Also
+# refuses the path itself being a symlink (created between the ancestor
+# check above and this call).
+require_contained() {
+  local dir="$1" resolved
+  [ -e "$dir" ] || return 0
+  if [ -L "$dir" ]; then
+    echo "repro-check: refusing symlinked path: $dir" >&2
+    exit 2
+  fi
+  resolved="$(cd "$dir" && pwd -P)"
+  case "$resolved/" in
+    "$issue_traces_base"/*) ;;
+    *)
+      echo "repro-check: refusing path outside .agents/issue-traces: $dir" >&2
+      exit 2
+      ;;
+  esac
+}
+
+trace_for() {
+  [ -n "$trace_dir" ] || trace_dir="$root/.agents/issue-traces/$slug"
+  validate_trace_dir_prefix
+  refuse_ancestor_symlink_escape
+}
 manifest_for() { trace_for; printf '%s\n' "$trace_dir/repro/checkpoint.manifest"; }
 
 bound_log() {
@@ -126,7 +188,10 @@ do_run() {
   case "$class" in DISCRIMINATING|NEW-SURFACE) [ -n "$expect" ] || { echo "repro-check: --expect is required for $class" >&2; exit 2; };; esac
   has_bad_field "$expect" && { echo "repro-check: --expect cannot contain tabs or newlines" >&2; exit 2; }
   trace_for
+  require_contained "$trace_dir"
+  require_contained "$trace_dir/repro"
   mkdir -p "$trace_dir/repro"
+  require_contained "$trace_dir/repro"
   worktree="$(mktemp -d "${TMPDIR:-/tmp}/issue-tracer-repro.XXXXXX")"
   cleanup() { git worktree remove --force "$worktree" >/dev/null 2>&1 || true; rm -rf "$worktree"; }
   trap cleanup EXIT HUP INT TERM
@@ -178,7 +243,11 @@ do_checkpoint() {
     echo "repro-check: manifest fields cannot contain tabs or newlines" >&2
     exit 2
   fi
-  manifest="$(manifest_for)"; mkdir -p "$(dirname "$manifest")"
+  manifest="$(manifest_for)"
+  require_contained "$trace_dir"
+  require_contained "$(dirname "$manifest")"
+  mkdir -p "$(dirname "$manifest")"
+  require_contained "$(dirname "$manifest")"
   [ -f "$manifest" ] || printf '# issue-tracer checkpoint manifest v1\n' > "$manifest"
   grep -Fx '# issue-tracer checkpoint manifest v1' "$manifest" >/dev/null 2>&1 || { echo "repro-check: invalid manifest header" >&2; exit 2; }
   seq="$(awk 'END {print NR - 1}' "$manifest")"

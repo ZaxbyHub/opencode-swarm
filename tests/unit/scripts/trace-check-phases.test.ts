@@ -189,6 +189,71 @@ describe('trace-check.sh later phases', () => {
 		expect(result.code).toBe(1);
 		expect(result.out).toContain('FAIL merge-sha-binding');
 		expect(result.out).toContain('NOTE: human-enforced gate');
+	}, 20_000);
+
+	test('phase 5 requires the pr-template headings, a PR head line, and an anchored merge state', () => {
+		const worktree = repo();
+		const dir = setup(worktree);
+		const head = git(worktree, 'rev-parse', 'HEAD');
+		fs.writeFileSync(
+			path.join(dir, '10-pr-body.md'),
+			'## Acceptance Criteria\nx\n## Waivers\nnone\n',
+		);
+		let result = run(worktree, ['phase', '5', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain(
+			'FAIL heading-Acceptance Criteria -> Evidence',
+		);
+		expect(result.out).toContain('FAIL heading-Waivers (or none)');
+		expect(result.out).toContain('FAIL pr-head');
+
+		fs.writeFileSync(
+			path.join(dir, '10-pr-body.md'),
+			`## Acceptance Criteria -> Evidence\nx\n## Waivers (or none)\nnone\nPR head: ${head}\n`,
+		);
+		result = run(worktree, ['phase', '5', '--slug', 'issue-1']);
+		expect(result.out).toContain('OK pr-head');
+		expect(result.out).toContain('OK merge-state');
+
+		const state = path.join(dir, 'state.md');
+		fs.writeFileSync(
+			state,
+			fs
+				.readFileSync(state, 'utf8')
+				.replace('merge: AWAITING_USER_APPROVAL', 'merge: PENDING'),
+		);
+		result = run(worktree, ['phase', '5', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain('FAIL merge-state');
+
+		fs.writeFileSync(
+			state,
+			fs
+				.readFileSync(state, 'utf8')
+				.replace('merge: PENDING', `merge: APPROVED:${head}`),
+		);
+		result = run(worktree, ['phase', '5', '--slug', 'issue-1']);
+		expect(result.out).toContain('OK merge-state');
+	});
+
+	test('phase 4.2 fast path requires a ## Justification heading with content', () => {
+		const worktree = repo();
+		const dir = setup(worktree);
+		fs.writeFileSync(
+			path.join(dir, '08a-recurrence-sweep.md'),
+			'## Defect Class\nno defect class - pure rename\n',
+		);
+		let result = run(worktree, ['phase', '4.2', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).not.toContain('OK recurrence-sweep');
+
+		fs.writeFileSync(
+			path.join(dir, '08a-recurrence-sweep.md'),
+			'## Defect Class\nno defect class - pure rename\n## Justification\nRename only, no behavior change.\n',
+		);
+		result = run(worktree, ['phase', '4.2', '--slug', 'issue-1']);
+		expect(result.code).toBe(0);
+		expect(result.out).toContain('OK recurrence-sweep');
 	});
 
 	test('ALREADY_FIXED traces use the required subset after phase 2', () => {

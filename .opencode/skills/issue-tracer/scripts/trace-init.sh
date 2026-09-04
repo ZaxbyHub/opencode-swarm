@@ -183,7 +183,15 @@ fi
 
 repro_dir="$trace_dir/repro"
 manifest_file="$repro_dir/checkpoint.manifest"
+if [ -L "$repro_dir" ]; then
+  echo "trace-init: refusing to use 'repro/' - it is a symlink" >&2
+  exit 2
+fi
 mkdir -p "$repro_dir"
+if [ -L "$repro_dir" ]; then
+  echo "trace-init: refusing to use 'repro/' - it is a symlink" >&2
+  exit 2
+fi
 if [ ! -e "$manifest_file" ]; then
   printf '%s\n' '# issue-tracer checkpoint manifest v1' > "$manifest_file"
 fi

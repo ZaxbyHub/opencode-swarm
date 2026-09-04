@@ -115,7 +115,7 @@ Use a hypothesis-testing loop:
 3. Add or update tests:
    - Create a regression test that fails before the fix and passes after, reflecting the original issue scenario.
    - Prefer small, focused tests over broad integration tests when possible.
-   - If test additions are non-trivial (e.g., missing harness), document what should be added and why.
+   - Tests are added now, not documented as future work; a missing harness is built or worked around before publication, not deferred.
 4. Use `execute` to run:
    - The newly added/updated regression tests.
    - The relevant subset of the suite (e.g., package/module-level tests).
@@ -124,18 +124,18 @@ Use a hypothesis-testing loop:
    - Treat them as new signals, not noise.
    - Re-run a short localization loop for those failures before modifying code again.
 
-### 3.5 Adversarial Self-Review (before publishing)
+### 3.5 Independent Implementation Review, then Final Critic (before publishing)
 
-After the fix is implemented and the tests are green, do a single adversarial review pass on your own diff **before** opening the PR. This is a same-session self-review — it does not stop for human approval and costs no extra request. The goal is to catch overfitting and unwired fixes that "green tests" hide.
+After the fix is implemented and the tests are green, the diff goes through two separate adversarial passes on the **committed diff**, per the canonical issue-tracer skill (`.opencode/skills/issue-tracer/SKILL.md`) — not a single same-session self-review. The doer is not the grader.
 
-Review the actual `git diff` (open the changed files; do not trust your own summary) and try to **refute** the patch:
+1. **Independent implementation review** (fresh context, distinct from the implementer): review the actual `git diff` (open the changed files; do not trust the implementer's summary) and try to **refute** the patch:
+   - **Correctness vs root cause:** does the diff fix the documented root cause, or only the symptom/test? Could the patch be wrong while the new test still passes (overfitting)? Show why not.
+   - **Unwired / runtime-path gaps:** is every changed path wired into the real runtime path — entry points, exports, callers, config, routes, CLI/UI?
+   - **Contract & regression risk:** any regressed public API, backward-compat, persistence, concurrency, or security behavior?
+   - **Evidence integrity:** is every "passed"/"validated" claim backed by a captured command + output?
+2. **Final critic** (a second, separate fresh context from both the implementer and the implementation reviewer): re-reviews the same committed diff independently, confirming the reviewed commit matches the shipped HEAD and closing any gap the implementation review did not catch.
 
-- **Correctness vs root cause:** does the diff fix the documented root cause, or only the symptom/test? Could the patch be wrong while the new test still passes (overfitting)? Show why not.
-- **Unwired / runtime-path gaps:** is every changed path wired into the real runtime path — entry points, exports, callers, config, routes, CLI/UI?
-- **Contract & regression risk:** any regressed public API, backward-compat, persistence, concurrency, or security behavior?
-- **Evidence integrity:** is every "passed"/"validated" claim backed by a captured command + output?
-
-If you find a refuting case, return to localization or resolution and fix it, then re-review. Only proceed to publication when the review finds no unresolved refutation. GitHub coding agent sessions can spawn fresh-context subagents: when a reviewer agent is available, delegate this adversarial review to it by default — the doer is not the grader — and always for high-risk fixes (security, isolation, IPC, auth, payments, migrations, data integrity). Same-session self-review is the disclosed fallback for sessions that genuinely lack a delegation mechanism; it still stops for no human approval and costs no extra request.
+If either pass finds a refuting case, return to localization or resolution, fix it, and re-run both passes. Only proceed to publication when the final critic finds no unresolved refutation.
 
 ## Mandatory Publication Gate
 

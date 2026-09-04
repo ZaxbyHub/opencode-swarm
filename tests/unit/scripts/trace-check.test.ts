@@ -217,4 +217,40 @@ describe('trace-check.sh identities, handshake, and early phases', () => {
 		expect(result.code).toBe(0);
 		expect(result.out).toContain('WARN');
 	});
+
+	test('phase 0 freshness accepts only synced or a valid override, rejects behind/banana', () => {
+		const worktree = repo();
+		const dir = trace(worktree);
+		writeState(worktree, dir, { freshness: 'banana' });
+		let result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain('FAIL freshness: unknown value');
+
+		writeState(worktree, dir, { freshness: 'behind:3' });
+		result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain(
+			'FAIL freshness: behind, sync before proceeding',
+		);
+
+		writeState(worktree, dir, { freshness: 'synced' });
+		result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
+		expect(result.out).toContain('OK freshness');
+
+		writeState(worktree, dir, {
+			freshness: 'fetch-failed:offline user-override:"go ahead"',
+		});
+		result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
+		expect(result.out).toContain('OK freshness');
+
+		writeState(worktree, dir, { freshness: 'fetch-failed:offline' });
+		result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain('FAIL freshness-fail-closed');
+
+		writeState(worktree, dir, { freshness: 'user-override:""' });
+		result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain('FAIL freshness: unknown value');
+	}, 20_000);
 });
