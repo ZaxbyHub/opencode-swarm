@@ -73,10 +73,10 @@ function mockStrongRunner() {
 
 function readWrittenPolicy(wrapped: string): Record<string, unknown> {
 	// The wrapped command embeds the ABSOLUTE policy path ("type <path>").
-	// Extract it directly instead of re-joining a tmpdir prefix: os.tmpdir()
-	// 8.3 short names (RUNNER~1) and cross-platform realpath differences make
-	// a join from the test's canonical tmpdir miss the file the executor
-	// actually wrote (PR review PRR-013).
+	// Extract it directly instead of re-joining a temp-dir prefix: the OS
+	// temp root's 8.3 short names (RUNNER~1) and cross-platform realpath
+	// differences make a join from the test's canonical temp dir miss the
+	// file the executor actually wrote (PR review PRR-013).
 	const match =
 		/type ("?)([A-Za-z]:[^"|]*swarm-sandbox-policies[^"|]*\.json)\1/.exec(
 			wrapped,
