@@ -1430,7 +1430,13 @@ export async function getDiagnoseData(
 		// category) and the copy-pasteable /swarm guardrail reset command in
 		// guardrail-reset.ts's own syntax. Privacy-safe: digests are hashes;
 		// no failure display text, prompts, or arguments (#2103).
-		const circuitRows = circuits
+		// Bounded display must not hide the busiest circuits behind '+N more':
+		// sort by count desc (then digest for determinism), not insertion order.
+		const circuitRows = [...circuits]
+			.sort(
+				(a, b) =>
+					b.count - a.count || a.actionDigest.localeCompare(b.actionDigest),
+			)
 			.slice(0, 3)
 			.map(
 				(entry) =>

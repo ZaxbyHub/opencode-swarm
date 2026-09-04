@@ -564,9 +564,10 @@ export interface PRPollSnapshot {
  *
  * `comments[].id` from pr-view is the GraphQL node id, NOT the numeric
  * database id the REST endpoints return. The numeric id is recovered from the
- * comment permalink (`#issuecomment-<id>` suffix, verified against the REST
- * id on gh 2.92.0) so `lastCommentId` markers written by earlier versions
- * keep matching; the node id remains the defensive fallback.
+ * comment permalink (`#issuecomment-<id>` suffix, verified equal to the REST
+ * id on gh >= 2.92) so `lastCommentId` markers written by earlier versions
+ * keep matching; the node id remains the defensive fallback (a warn is
+ * logged if it ever fires — fallback ids change the marker space).
  */
 export async function getPRPollSnapshot(
 	prNumber: number,
@@ -583,6 +584,10 @@ export async function getPRPollSnapshot(
 				'--repo',
 				repoFullName,
 				'--json',
+				// `comments` returns the FULL conversation list in one payload
+				// (the old gh api calls returned 30/endpoint by REST default).
+				// Bounded above by ghExecAsync's MAX_OUTPUT_BYTES, and a
+				// strictly better event surface than the old first-30 window.
 				'number,state,mergeable,mergeStateStatus,headRefOid,statusCheckRollup,reviewDecision,reviewRequests,comments',
 			],
 			cwd,
@@ -609,7 +614,8 @@ export async function getPRPollSnapshot(
 			url?: string;
 		}>;
 	};
-	return {
+	const permalinkFallbacks: string[] = [];
+	const snapshot: PRPollSnapshot = {
 		status: {
 			number: parsed.number,
 			state: parsed.state as PRStatusResult['state'],
@@ -619,7 +625,7 @@ export async function getPRPollSnapshot(
 			statusCheckRollup: parsed.statusCheckRollup ?? [],
 		},
 		comments: (parsed.comments ?? []).map((c) => ({
-			id: numericIssueCommentId(c.url, c.id),
+			id: numericIssueCommentId(c.url, c.id, permalinkFallbacks),
 			author: String(c.author?.login ?? ''),
 			body: neutralizeUntrustedMarkdown(
 				String(c.body ?? ''),
@@ -638,14 +644,28 @@ export async function getPRPollSnapshot(
 			reviewRequestCount: parsed.reviewRequests?.length ?? 0,
 		},
 	};
+	if (permalinkFallbacks.length > 0) {
+		// Defensive path only: gh currently always emits comment permalinks.
+		// Fallback ids (GraphQL node ids) change the lastCommentId marker
+		// space, so surface it rather than silently re-baselining dedup.
+		warn(
+			`[PrMonitorWorker] ${permalinkFallbacks.length} comment(s) missing #issuecomment permalink; using node-id fallback for lastCommentId`,
+		);
+	}
+	return snapshot;
 }
 
 /** Recover the REST numeric comment id from a `#issuecomment-<id>` permalink. */
-function numericIssueCommentId(url: unknown, fallbackId: unknown): string {
+function numericIssueCommentId(
+	url: unknown,
+	fallbackId: unknown,
+	fallbacks: string[],
+): string {
 	if (typeof url === 'string') {
 		const match = url.match(/#issuecomment-(\d+)/);
 		if (match) return match[1];
 	}
+	fallbacks.push(String(fallbackId ?? ''));
 	return String(fallbackId ?? '');
 }
 

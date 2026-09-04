@@ -5,16 +5,19 @@
  * pre-consolidation three pr-view spawns and two gh api spawns.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import {
 	PrMonitorWorker,
 	_internals as workerInternals,
 } from '../../../src/background/pr-monitor-worker';
 import type { PrSubscriptionRecord } from '../../../src/background/pr-subscriptions';
 import type { PRPollSnapshot } from '../../../src/git/pr';
+import { canonicalTmpDir } from '../../helpers/tmpdir';
 
-const TEST_DIR = path.join(os.tmpdir(), 'pr-monitor-poll-consolidation-2471');
+const TEST_DIR = canonicalTmpDir();
+
+// Fixed fixture epochs (check:test-clock): never read the wall clock in
+// fixtures; these timestamps are only consumed as opaque ordering values.
+const FIXTURE_EPOCH = 1_700_000_000_000;
 
 function makeConfig(): Record<string, unknown> {
 	return {
@@ -42,12 +45,12 @@ function makeSubscription(
 		prNumber: 42,
 		repoFullName: 'owner/repo',
 		prUrl: 'https://github.com/owner/repo/pull/42',
-		lastCheckedAt: Date.now() - 60_000,
+		lastCheckedAt: FIXTURE_EPOCH,
 		isWatching: true,
 		hasUnaddressedEvents: false,
 		status: 'active',
-		createdAt: Date.now() - 120_000,
-		updatedAt: Date.now() - 60_000,
+		createdAt: FIXTURE_EPOCH - 120_000,
+		updatedAt: FIXTURE_EPOCH - 60_000,
 		errorCount: 0,
 		...overrides,
 	};
@@ -80,6 +83,18 @@ describe('#2471 poll consolidation spawn counts', () => {
 	let snapshotMock: ReturnType<typeof mock>;
 	let reviewCommentsMock: ReturnType<typeof mock>;
 	let mergeGroupRunMock: ReturnType<typeof mock>;
+	// Workers register themselves per directory; dispose each one so no
+	// registry entry outlives its test.
+	const createdWorkers: PrMonitorWorker[] = [];
+
+	function createWorker(): PrMonitorWorker {
+		const worker = new PrMonitorWorker({
+			directory: TEST_DIR,
+			config: makeConfig() as never,
+		});
+		createdWorkers.push(worker);
+		return worker;
+	}
 
 	beforeEach(() => {
 		savedInternals = { ...workerInternals };
@@ -105,6 +120,10 @@ describe('#2471 poll consolidation spawn counts', () => {
 	});
 
 	afterEach(() => {
+		for (const worker of createdWorkers) {
+			worker.dispose();
+		}
+		createdWorkers.length = 0;
 		workerInternals.getPRPollSnapshot = savedInternals.getPRPollSnapshot;
 		workerInternals.getPRReviewComments = savedInternals.getPRReviewComments;
 		workerInternals.getMergeGroupRun = savedInternals.getMergeGroupRun;
@@ -116,10 +135,7 @@ describe('#2471 poll consolidation spawn counts', () => {
 	});
 
 	test('one poll issues exactly one snapshot fetch and one review-comments fetch', async () => {
-		const worker = new PrMonitorWorker({
-			directory: TEST_DIR,
-			config: makeConfig() as never,
-		});
+		const worker = createWorker();
 		await worker.pollCycle();
 
 		expect(snapshotMock).toHaveBeenCalledTimes(1);
@@ -158,10 +174,7 @@ describe('#2471 poll consolidation spawn counts', () => {
 		workerInternals.getPRPollSnapshot =
 			queuedSnapshotMock as typeof workerInternals.getPRPollSnapshot;
 
-		const worker = new PrMonitorWorker({
-			directory: TEST_DIR,
-			config: makeConfig() as never,
-		});
+		const worker = createWorker();
 		await worker.pollCycle();
 
 		expect(queuedSnapshotMock).toHaveBeenCalledTimes(1);

@@ -6,8 +6,6 @@
  * per-PR breaker accounting.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import {
 	getPrMonitorWorkerHealth,
 	PrMonitorWorker,
@@ -19,9 +17,11 @@ import {
 	PrSubscriptionCapacityError,
 } from '../../../src/background/pr-subscriptions';
 import type { PRPollSnapshot } from '../../../src/git/pr';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { canonicalMkdtemp, canonicalTmpDir } from '../../helpers/tmpdir';
 
-const DIGEST = { note: 'fixtures' } as const;
+// Fixed fixture epochs (check:test-clock): never read the wall clock in
+// fixtures; these timestamps are only consumed as opaque ordering values.
+const FIXTURE_EPOCH = 1_700_000_000_000;
 
 function makeConfig(
 	overrides: Record<string, unknown> = {},
@@ -52,12 +52,12 @@ function makeSubscription(
 		prNumber: 42,
 		repoFullName: 'owner/repo',
 		prUrl: 'https://github.com/owner/repo/pull/42',
-		lastCheckedAt: Date.now() - 60_000,
+		lastCheckedAt: FIXTURE_EPOCH,
 		isWatching: true,
 		hasUnaddressedEvents: false,
 		status: 'active',
-		createdAt: Date.now() - 120_000,
-		updatedAt: Date.now() - 60_000,
+		createdAt: FIXTURE_EPOCH - 120_000,
+		updatedAt: FIXTURE_EPOCH - 60_000,
 		errorCount: 0,
 		...overrides,
 	};
@@ -93,6 +93,9 @@ describe('#2409/#2471 breaker independence and capacity skip', () => {
 	let updateSnapshotMock: ReturnType<typeof mock>;
 	let sweepStaleMock: ReturnType<typeof mock>;
 	let busPublishMock: ReturnType<typeof mock>;
+	// Every worker created by a test is disposed in afterEach so no live
+	// start() interval (or registry entry) leaks into another test file.
+	const createdWorkers: PrMonitorWorker[] = [];
 
 	beforeEach(() => {
 		directory = canonicalMkdtemp('pr-monitor-breaker-2471-');
@@ -124,6 +127,10 @@ describe('#2409/#2471 breaker independence and capacity skip', () => {
 	});
 
 	afterEach(() => {
+		for (const worker of createdWorkers) {
+			worker.dispose();
+		}
+		createdWorkers.length = 0;
 		workerInternals.listActive = savedInternals.listActive;
 		workerInternals.getPRPollSnapshot = savedInternals.getPRPollSnapshot;
 		workerInternals.getPRReviewComments = savedInternals.getPRReviewComments;
@@ -137,10 +144,12 @@ describe('#2409/#2471 breaker independence and capacity skip', () => {
 	function createWorker(
 		overrides: Record<string, unknown> = {},
 	): PrMonitorWorker {
-		return new PrMonitorWorker({
+		const worker = new PrMonitorWorker({
 			directory,
 			config: makeConfig(overrides) as never,
 		});
+		createdWorkers.push(worker);
+		return worker;
 	}
 
 	test('breaker trips and survives a deterministic snapshot-write failure at threshold', async () => {
@@ -158,17 +167,25 @@ describe('#2409/#2471 breaker independence and capacity skip', () => {
 		await worker.pollCycle();
 
 		const health = worker.getHealth();
-		// Four-part required assertion (#2471):
-		expect(health.suspendedPrCount).toBe(1); // breaker entry suspended
+		// Required #2471 assertions: (a) exactly one suspended breaker entry,
+		// (b) errorCount reached the threshold, (c) the entry carries a live
+		// suspendedUntil deadline (stamped from the worker's own clock, so
+		// anything past the 2023 fixture epoch proves a future deadline was
+		// written despite every snapshot write failing), (d) the refusal
+		// state stayed null (not a capacity failure), and (e) pr.error was
+		// emitted exactly once — at the threshold crossing only.
+		expect(health.suspendedPrCount).toBe(1);
 		const cb = (
 			worker as unknown as {
-				circuitBreakerMap: Map<string, { errorCount: number }>;
+				circuitBreakerMap: Map<
+					string,
+					{ errorCount: number; suspendedUntil: number }
+				>;
 			}
 		).circuitBreakerMap.get('sess1::owner/repo::42');
-		expect(cb?.errorCount).toBe(3); // errorCount reached threshold
-		expect(health.suspendedPrCount).toBeGreaterThan(0); // suspendedUntil in future
-		expect(health.storeWriteRefusal).toBeNull(); // NOT a capacity failure
-		// pr.error emitted exactly once at the threshold crossing.
+		expect(cb?.errorCount).toBe(3);
+		expect(cb?.suspendedUntil).toBeGreaterThan(FIXTURE_EPOCH);
+		expect(health.storeWriteRefusal).toBeNull();
 		const circuitEvents = busPublishMock.mock.calls.filter(
 			(args: unknown[]) => args[0] === 'pr.error',
 		);
@@ -176,7 +193,6 @@ describe('#2409/#2471 breaker independence and capacity skip', () => {
 		expect((circuitEvents[0]?.[1] as { reason: string }).reason).toBe(
 			'circuit_breaker',
 		);
-		void DIGEST;
 	});
 
 	test('capacity refusal skips breaker accounting and enters the skip state', async () => {
@@ -251,6 +267,50 @@ describe('#2409/#2471 breaker independence and capacity skip', () => {
 		expect(snapshotMock).toHaveBeenCalledTimes(3);
 	});
 
+	test('all subscriptions suspended: refused cycle fetches nothing and still advances counters', async () => {
+		const subs = [42, 43, 44].map((n) =>
+			makeSubscription({
+				correlationId: `sess1::owner/repo::${n}`,
+				prNumber: n,
+			}),
+		);
+		listActiveMock.mockImplementation(() => Promise.resolve(subs));
+		const capacity = new PrSubscriptionCapacityError(
+			'PR subscription store over checkpoint capacity: 600 records > 512.',
+		);
+		snapshotMock.mockImplementation(() => {
+			throw capacity;
+		});
+		updateSnapshotMock.mockImplementation(() => {
+			throw capacity;
+		});
+		const worker = createWorker();
+
+		// Discovery cycle: all three capacity-refuse; the breaker is untouched.
+		await worker.pollCycle();
+		expect(worker.getHealth().storeWriteRefusal?.consecutiveCycles).toBe(1);
+
+		// Suspend every subscription (deadline permanently in the future) so
+		// no probe candidate exists anywhere in the active set.
+		const cbMap = (
+			worker as unknown as {
+				circuitBreakerMap: Map<string, { suspendedUntil: number }>;
+			}
+		).circuitBreakerMap;
+		for (const sub of subs) {
+			cbMap.set(sub.correlationId, { suspendedUntil: Number.MAX_SAFE_INTEGER });
+		}
+
+		// Refused cycle with no probe: zero fetches, but the health counters
+		// advance exactly once (cycles +1, all 3 skipped PRs credited).
+		snapshotMock.mockClear();
+		await worker.pollCycle();
+		expect(snapshotMock).not.toHaveBeenCalled();
+		const refusal = worker.getHealth().storeWriteRefusal;
+		expect(refusal?.consecutiveCycles).toBe(2);
+		expect(refusal?.skippedPrCount).toBe(3);
+	});
+
 	test('stop/start keeps the refusal state so recovery still probes', async () => {
 		const capacity = new PrSubscriptionCapacityError(
 			'PR subscription store over checkpoint capacity: 1 bytes > 0.',
@@ -278,9 +338,7 @@ describe('#2409/#2471 breaker independence and capacity skip', () => {
 	test('registry exposes health per directory and null for unknown directories', () => {
 		const worker = createWorker();
 		expect(getPrMonitorWorkerHealth(directory)?.status).toBe('stopped');
-		expect(
-			getPrMonitorWorkerHealth(path.join(os.tmpdir(), 'never')),
-		).toBeNull();
+		expect(getPrMonitorWorkerHealth(canonicalTmpDir())).toBeNull();
 		worker.dispose();
 		expect(getPrMonitorWorkerHealth(directory)).toBeNull();
 	});

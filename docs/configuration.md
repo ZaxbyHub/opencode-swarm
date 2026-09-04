@@ -731,14 +731,9 @@ GitHub PR subscription and background polling infrastructure (FR-001). When enab
 }
 ```
 
-**GH CLI wrappers** (`src/git/pr.ts`): the PR monitor infrastructure uses five `gh`-based wrapper functions exported for use by the polling engine:
-- `getPRStatus(prNumber, repoFullName, cwd)` — fetches PR state, mergeability, and status check rollup via `gh pr view --json`
-- `getPRChecks(prNumber, repoFullName, cwd)` — fetches CI check results via `gh pr checks --json`
-- `getPRComments(prNumber, repoFullName, cwd, since?)` — fetches issue and review comments via `gh api` (merged, deduplicated)
-- `getMergeState(prNumber, repoFullName, cwd)` — fetches mergeable state and mergeStateStatus via `gh pr view --json`
-- `getPRReviewState(prNumber, repoFullName, cwd)` — fetches review decision and pending reviewer count via `gh pr view --json`; returns `ReviewStateResult` (`reviewDecision`, `reviewRequestCount`)
+**GH CLI wrappers** (`src/git/pr.ts`): since the #1660/#2471 poll consolidation, each per-PR poll issues exactly two `gh` spawns — one `gh pr view --json` snapshot (`getPRPollSnapshot`, returning status, merge state, review decision, and the full issue-comment list in a single payload) plus one `gh api repos/N/pulls/M/comments` call (`getPRReviewComments`) for inline review comments, which have no `gh pr view --json` equivalent. The five pre-consolidation wrappers (`getPRStatus`, `getPRChecks`, `getPRComments`, `getMergeState`, `getPRReviewState`) were removed; callers consume `PRPollSnapshot` instead.
 
-All five wrappers (`getPRStatus`, `getPRChecks`, `getPRComments`, `getMergeState`, `getPRReviewState`) use `_internals.ghExecAsync` — they share the same DI seam pattern (see `gitignore-warning.ts:_internals`). No synchronous `ghExec`-based wrappers are currently exposed for PR monitoring.
+Both remaining wrappers use `_internals.ghExecAsync` — they share the same DI seam pattern (see `gitignore-warning.ts:_internals`). No synchronous `ghExec`-based wrappers are currently exposed for PR monitoring.
 
 **Polling worker** (`src/background/pr-monitor-worker.ts`): `PrMonitorWorker` is a standalone background class with start/stop/dispose lifecycle. It implements **two-phase change detection**:
 1. `computeChanges()` — fetches current PR state (status, comments, merge, review) via async gh wrappers, then diffs against the last stored snapshot to produce a list of events and snapshot updates

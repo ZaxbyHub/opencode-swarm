@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+	handlePrMonitorStatusCommand,
+	_internals as statusInternals,
+} from '../../../src/commands/pr-monitor-status';
 import { handleResetSessionCommand } from '../../../src/commands/reset-session';
 import {
 	_test_exports as actionCircuitTestExports,
@@ -122,6 +126,72 @@ describe('#2471 recovery diagnostics surfaces', () => {
 			).toBe(true);
 			// The operator sees the release in the command output.
 			expect(result).toContain('guardrail circuit');
+		});
+	});
+
+	describe('/swarm pr status Monitor footer', () => {
+		let savedStatusInternals: typeof statusInternals;
+
+		beforeEach(() => {
+			savedStatusInternals = { ...statusInternals };
+		});
+
+		afterEach(() => {
+			statusInternals.listActive = savedStatusInternals.listActive;
+			statusInternals.getPrSubscriptionHealth =
+				savedStatusInternals.getPrSubscriptionHealth;
+			statusInternals.getPrMonitorWorkerHealth =
+				savedStatusInternals.getPrMonitorWorkerHealth;
+		});
+
+		function stubEmptySubscriptions(): void {
+			statusInternals.listActive =
+				(async () => []) as typeof statusInternals.listActive;
+			statusInternals.getPrSubscriptionHealth = (async () =>
+				null) as typeof statusInternals.getPrSubscriptionHealth;
+		}
+
+		test('renders the store-write refusal line with skip and cycle counts', async () => {
+			stubEmptySubscriptions();
+			statusInternals.getPrMonitorWorkerHealth = (() => ({
+				status: 'running',
+				suspendedPrCount: 0,
+				storeWriteRefusal: {
+					lastReason: 'over capacity',
+					consecutiveCycles: 2,
+					skippedPrCount: 7,
+				},
+			})) as typeof statusInternals.getPrMonitorWorkerHealth;
+
+			const output = await handlePrMonitorStatusCommand(directory, [], 'sess');
+
+			expect(output).toContain('Monitor: store writes refused (over capacity)');
+			expect(output).toContain('7 PR-skip(s) across 2 cycle(s)');
+			expect(output).toContain('remove it');
+		});
+
+		test('renders the circuit-suspension line when breakers are backoff-suspended', async () => {
+			stubEmptySubscriptions();
+			statusInternals.getPrMonitorWorkerHealth = (() => ({
+				status: 'running',
+				suspendedPrCount: 2,
+				storeWriteRefusal: null,
+			})) as typeof statusInternals.getPrMonitorWorkerHealth;
+
+			const output = await handlePrMonitorStatusCommand(directory, [], 'sess');
+
+			expect(output).toContain('2 PR(s) circuit-suspended (backing off)');
+			expect(output).not.toContain('store writes refused');
+		});
+
+		test('omits the Monitor line when no worker is registered', async () => {
+			stubEmptySubscriptions();
+			statusInternals.getPrMonitorWorkerHealth = (() =>
+				null) as typeof statusInternals.getPrMonitorWorkerHealth;
+
+			const output = await handlePrMonitorStatusCommand(directory, [], 'sess');
+
+			expect(output).not.toContain('Monitor:');
 		});
 	});
 });

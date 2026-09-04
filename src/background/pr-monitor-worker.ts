@@ -267,7 +267,9 @@ export class PrMonitorWorker {
 	/**
 	 * Stop the polling worker. Clears the interval timer but does not
 	 * interrupt an in-flight poll cycle — it will complete and the result
-	 * is discarded.
+	 * is discarded. Deliberately stays in the module health registry:
+	 * /swarm pr status must keep disclosing a stopped worker's refusal /
+	 * suspension state until dispose().
 	 */
 	stop(): void {
 		if (this.status === 'stopped' || this.status === 'stopping') {
@@ -368,41 +370,35 @@ export class PrMonitorWorker {
 
 			// Store-write refusal (#2409/#2471): while the store refuses
 			// writes, poll ONLY a one-PR recovery probe (the first
-			// non-suspended subscription). The probe rides the normal idle
-			// cadence, and shouldSkipIdlePoll's modulo scheduling (skipEvery
-			// <= 3) bounds the recovery delay to at most 3 cycles, so
-			// recovery cannot starve. A probe write success clears the
-			// refusal and full polling resumes next cycle without a worker
-			// restart; a continued refusal skips the rest with one
-			// cycle-level disclosure instead of per-PR per-interval errors.
+			// non-suspended subscription anywhere in the active set, with
+			// idle backoff bypassed so recovery cannot starve). A probe
+			// write success clears the refusal and full polling resumes next
+			// cycle without a worker restart; a continued refusal skips the
+			// rest with one cycle-level disclosure instead of per-PR
+			// per-interval errors. Every refused cycle advances both health
+			// counters exactly once (discovery cycle skips zero PRs — all of
+			// them were polled before the refusal surfaced).
 			if (this.storeWriteRefusal) {
-				const probe = capped.find(
+				const refusal = this.storeWriteRefusal;
+				const probe = activeSubs.find(
 					(sub) =>
 						(this.circuitBreakerMap.get(sub.correlationId)?.suspendedUntil ??
 							0) <= Date.now(),
 				);
 				const skipped = probe ? capped.length - 1 : capped.length;
-				if (this.storeWriteRefusal.consecutiveCycles > 0) {
-					// Probe already ran once and the refusal persisted.
-					this.storeWriteRefusal.skippedPrCount += skipped;
-					logError('[PrMonitorWorker] Store writes refused', {
-						correlationIdsSkipped: skipped,
-						consecutiveCycles: this.storeWriteRefusal.consecutiveCycles,
-						reason: this.storeWriteRefusal.lastReason,
-					});
-				}
+				refusal.consecutiveCycles++;
+				refusal.skippedPrCount += skipped;
+				logError('[PrMonitorWorker] Store writes refused', {
+					correlationIdsSkipped: skipped,
+					consecutiveCycles: refusal.consecutiveCycles,
+					reason: refusal.lastReason,
+				});
 				if (!probe) {
 					await this.runSweep();
 					return;
 				}
 				this.pollCycleCount++;
-				await this.pollWithTimeout(probe);
-				// A refused probe advances the cycle counter so the health
-				// surface reports the true refused-cycle count (a successful
-				// probe cleared the refusal inside pollSinglePr).
-				if (this.storeWriteRefusal) {
-					this.storeWriteRefusal.consecutiveCycles++;
-				}
+				await this.pollWithTimeout(probe, true);
 				await this.runSweep();
 				return;
 			}
@@ -413,7 +409,7 @@ export class PrMonitorWorker {
 
 			await this.processWithConcurrency(capped, concurrencyLimit);
 			await this.runSweep();
-			this.settleCycleRefusal(capped.length);
+			this.settleCycleRefusal();
 		} catch (err) {
 			log('[PrMonitorWorker] Poll cycle error', {
 				error: err instanceof Error ? err.message : String(err),
@@ -424,13 +420,14 @@ export class PrMonitorWorker {
 	/**
 	 * Advance the refusal cycle counter after a full poll cycle (#2409).
 	 * Called at cycle end so the FIRST refusal (discovered mid-cycle by
-	 * handlePollError) probes immediately on the next cycle, and only a
-	 * refused probe produces the cycle-level disclosure + skip counting.
+	 * handlePollError) probes immediately on the next cycle. This cycle
+	 * skipped nothing — every capped PR was already polled — so only the
+	 * cycle count advances here; skippedPrCount is credited per refused
+	 * cycle in the refusal branch above.
 	 */
-	private settleCycleRefusal(pollCount: number): void {
+	private settleCycleRefusal(): void {
 		if (!this.storeWriteRefusal) return;
 		this.storeWriteRefusal.consecutiveCycles++;
-		this.storeWriteRefusal.skippedPrCount += Math.max(0, pollCount - 1);
 	}
 
 	/**
@@ -469,7 +466,10 @@ export class PrMonitorWorker {
 	 * delegated to handlePollError (circuit-breaker accounting) and
 	 * the method resolves — it never rethrows.
 	 */
-	private async pollWithTimeout(sub: PrSubscriptionRecord): Promise<void> {
+	private async pollWithTimeout(
+		sub: PrSubscriptionRecord,
+		isProbe = false,
+	): Promise<void> {
 		const timeoutMs = this.config.poll_timeout_ms;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let timedOut = false;
@@ -487,7 +487,7 @@ export class PrMonitorWorker {
 
 		try {
 			await Promise.race([
-				this.pollSinglePr(sub, () => timedOut),
+				this.pollSinglePr(sub, () => timedOut, isProbe),
 				timeoutPromise,
 			]);
 		} catch (err) {
@@ -513,6 +513,7 @@ export class PrMonitorWorker {
 	private async pollSinglePr(
 		sub: PrSubscriptionRecord,
 		isTimedOut?: () => boolean,
+		isProbe = false,
 	): Promise<void> {
 		const correlationId = sub.correlationId;
 
@@ -540,7 +541,10 @@ export class PrMonitorWorker {
 		// gh subprocess volume (2×polls/cycle after the #2471
 		// consolidation) to near-zero for idle PRs.
 		const idleCount = this.idlePollCountMap.get(correlationId) ?? 0;
-		if (shouldSkipIdlePoll(idleCount, this.pollCycleCount)) {
+		// Recovery probes bypass idle backoff: they are the bounded recovery
+		// path (<=1 PR per cycle), and an idle probe PR would otherwise delay
+		// refusal recovery by up to skipEvery cycles.
+		if (!isProbe && shouldSkipIdlePoll(idleCount, this.pollCycleCount)) {
 			log('[PrMonitorWorker] Skipping idle PR poll (backoff)', {
 				correlationId,
 				idleCount,
@@ -1096,8 +1100,10 @@ export class PrMonitorWorker {
 		cb.errorCount++;
 
 		// In-memory breaker progression is committed BEFORE the durable write
-		// (#2409/#2471): a deterministic updateSnapshot failure must not be
-		// able to erase it. Persistence below is best-effort.
+		// (#2409/#2471). The try/catch below is the mechanism that actually
+		// guarantees that: without it a deterministic updateSnapshot throw
+		// would escape before the Map entry above survives to be read.
+		// Persistence is best-effort.
 		this.circuitBreakerMap.set(correlationId, cb);
 		try {
 			await _internals.updateSnapshot(this.directory, correlationId, {
@@ -1208,6 +1214,12 @@ export class PrMonitorWorker {
 					keysToPass,
 				);
 			} catch (err) {
+				// sweepStale persists compaction state, so a capacity refusal
+				// here is the same store-level policy failure as a poll-write
+				// refusal — feed the worker-level skip state (#2409/#2471).
+				if (err instanceof Error && isPrSubscriptionCapacityError(err)) {
+					this.noteStoreWriteRefusal(err);
+				}
 				log('[PrMonitorWorker] Sweep failed', {
 					error: err instanceof Error ? err.message : String(err),
 				});
