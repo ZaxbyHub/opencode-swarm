@@ -24,20 +24,20 @@ trim() { printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
 
 tree_id() {
   # Trace artifacts under .agents/issue-traces/ must never affect this
-  # identity. trace-init.sh writes that directory to info/exclude so a plain
-  # `git add -A .` leaves it untracked, but that exclude entry is an
-  # unenforced convention (the entry could be missing or removed). Pass an
-  # explicit exclude pathspec so the identity is robust even then.
+  # identity. trace-init.sh writes that directory to info/exclude, but that
+  # entry is an unenforced convention, so after staging the working tree
+  # (tracked + untracked-not-ignored, exactly like `git add -A .`) the trace
+  # directory is removed from the temporary index explicitly. Never use
+  # `add -f` here: it would stage gitignored content (node_modules, build
+  # output), making the identity machine-specific and writing ignored blobs
+  # into the real object store.
   local index
   index="$(mktemp)"
   rm -f "$index"
-  # -f is required here: when the trace directory is ALSO covered by
-  # info/exclude (the normal case), git add refuses with "paths are ignored
-  # by one of your .gitignore files" for the bare '.' pathspec even though
-  # the exclude magic below removes it from what actually gets staged. -f
-  # bypasses that refusal; it does not defeat the :(exclude) filter, so the
-  # trace directory is still never added.
-  if ! GIT_INDEX_FILE="$index" git -C "$root" read-tree HEAD || ! GIT_INDEX_FILE="$index" git -C "$root" add -A -f -- . ':(exclude).agents/issue-traces' || ! GIT_INDEX_FILE="$index" git -C "$root" write-tree; then
+  if ! GIT_INDEX_FILE="$index" git -C "$root" read-tree HEAD \
+    || ! GIT_INDEX_FILE="$index" git -C "$root" add -A -- . \
+    || ! GIT_INDEX_FILE="$index" git -C "$root" rm -r --cached --ignore-unmatch -q -- .agents/issue-traces \
+    || ! GIT_INDEX_FILE="$index" git -C "$root" write-tree; then
     rm -f "$index"
     return 1
   fi

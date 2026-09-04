@@ -99,6 +99,9 @@ function writeSummary(dir: string, classification = 'VALID') {
 }
 
 describe('trace-check.sh identities, handshake, and early phases', () => {
+	// Multi-spawn tests get a 20s budget because each spawn is a bash+git subprocess
+	// (~1-4s on Windows CI), not because any single assertion is slow.
+
 	test('tree-id matches HEAD tree when clean and includes untracked files', () => {
 		const worktree = repo();
 		expect(run(worktree, ['tree-id']).out.trim()).toBe(
@@ -269,5 +272,41 @@ describe('trace-check.sh identities, handshake, and early phases', () => {
 		result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
 		expect(result.code).toBe(1);
 		expect(result.out).toContain('FAIL freshness: unknown value');
+	}, 20_000);
+
+	test('tree-id ignores gitignored content', () => {
+		const worktree = repo();
+		// Record tree-id with clean working directory
+		const cleanId = run(worktree, ['tree-id']).out.trim();
+
+		// Create .gitignore and commit it
+		fs.writeFileSync(
+			path.join(worktree, '.gitignore'),
+			'node_modules/\ndist/\n',
+		);
+		git(worktree, 'add', '.gitignore');
+		git(worktree, 'commit', '-q', '-m', 'add .gitignore');
+
+		// Record tree-id after .gitignore commit
+		const withIgnoreId = run(worktree, ['tree-id']).out.trim();
+		expect(withIgnoreId).not.toBe(cleanId);
+
+		// Create gitignored files
+		fs.mkdirSync(path.join(worktree, 'node_modules/foo'), { recursive: true });
+		fs.writeFileSync(
+			path.join(worktree, 'node_modules/foo/big.js'),
+			'code here\n',
+		);
+		fs.mkdirSync(path.join(worktree, 'dist'));
+		fs.writeFileSync(path.join(worktree, 'dist/bundle.js'), 'bundle here\n');
+
+		// tree-id should not change because files are gitignored
+		expect(run(worktree, ['tree-id']).out.trim()).toBe(withIgnoreId);
+
+		// Create a non-ignored untracked file
+		fs.writeFileSync(path.join(worktree, 'src-new.txt'), 'new source\n');
+
+		// tree-id should change because this file is not gitignored
+		expect(run(worktree, ['tree-id']).out.trim()).not.toBe(withIgnoreId);
 	}, 20_000);
 });
