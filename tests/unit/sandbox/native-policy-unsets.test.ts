@@ -213,6 +213,8 @@ describe('NativeWindowsSandboxExecutor — metacharacter fail-closed routing (PR
 				['redirect-out', 'echo x > out.txt'],
 				['redirect-in', 'sort < in.txt'],
 				['double-quote', 'echo "hello world"'],
+				['caret-escape', 'echo ^&flag'],
+				['var-expansion', 'echo %PATH%'],
 			] as const) {
 				// The security property is fail-closed: the command either wraps
 				// through the PowerShell wrapper (opaque Base64) or the fallback

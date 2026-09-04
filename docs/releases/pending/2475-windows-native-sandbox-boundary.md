@@ -71,14 +71,15 @@ never receive" was literally true.
 
 ## Caveats
 
-- Compound or quoted Windows commands (`&`, `|`, `<`, `>`, `"` in the command
-  string) take the PowerShell wrapper path (still fully wrapped — env-restricted,
-  opaque Base64 transport) instead of the native runner's AppContainer /
-  restricted-token boundary. The runner's cmd-transport currently carries the
-  command as a raw `cmd /c` line without metacharacter escaping, so routing
-  such commands to the runner would let a suffix execute outside the sandbox;
-  carrying the command inside the policy JSON is the follow-up that restores
-  strong confinement for compound commands.
+- Compound or quoted Windows commands (`&`, `|`, `<`, `>`, `"`, `^`, `%` in
+  the command string) take the PowerShell wrapper path (still fully wrapped —
+  env-restricted, opaque Base64 transport) instead of the native runner's
+  AppContainer / restricted-token boundary. The runner's cmd-transport
+  currently carries the command as a raw `cmd /c` line without metacharacter
+  escaping, so routing such commands to the runner would let a suffix execute
+  outside the sandbox (`%VAR%` is expanded by cmd.exe even inside double
+  quotes); carrying the command inside the policy JSON is the follow-up that
+  restores strong confinement for compound commands.
 - arm64 coverage depends on GitHub `windows-11-arm` hosted runner capacity
   (GA for public repos); a failed arch build blocks the release rather than
   shipping x64-only.

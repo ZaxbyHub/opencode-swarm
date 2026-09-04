@@ -59,7 +59,7 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 			// without OPENCODE_SWARM_DEBUG (the executor is constructed once per
 			// session, so this emits at most once).
 			criticalWarn(
-				`[sandbox] native Windows sandbox runner unavailable (${this._probeResult.error ?? 'unknown'}); falling back to PowerShell environment restrictions (weak sandbox). Run /swarm diagnose for details.`,
+				`[sandbox] native Windows sandbox runner unavailable (${sanitizeDiagnosticText(this._probeResult.error ?? 'unknown', 200)}); falling back to PowerShell environment restrictions (weak sandbox). Run /swarm diagnose for details.`,
 			);
 		} else {
 			this._strength = 'none';
@@ -113,15 +113,17 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 		if (this._strength === 'strong') {
 			// Fail closed for cmd metacharacters (PR review PRR-003): the native
 			// path transports the command as a raw cmd /c string, so &, |, <,
-			// > or " in the command could split the wrapper line and execute a
-			// suffix OUTSIDE the runner's AppContainer/restricted-token while
-			// the audit records wrapped: true. Route metacharacter-bearing
-			// commands through the PowerShell wrapper, which transports the
-			// command as opaque Base64 — still fully wrapped (env-restricted),
-			// never unsandboxed. Simple single commands keep full strong
-			// confinement; carrying the command inside the policy JSON is the
-			// follow-up transport change that restores it for compounds.
-			if (/["&|<>]/.test(command)) {
+			// >, ", ^ or % in the command could split the wrapper line, unescape
+			// into an active character (^), or undergo %VAR% expansion (which
+			// cmd.exe performs even inside double quotes) — any of which can
+			// execute a suffix OUTSIDE the runner's AppContainer/restricted
+			// token while the audit records wrapped: true. Route such commands
+			// through the PowerShell wrapper, which transports the command as
+			// opaque Base64 — still fully wrapped (env-restricted), never
+			// unsandboxed. Simple single commands keep full strong confinement;
+			// carrying the command inside the policy JSON is the follow-up
+			// transport change that restores it for compounds.
+			if (/["&|<>^%]/.test(command)) {
 				return this._fallbackExecutor.wrapCommand(
 					command,
 					scopePaths,
