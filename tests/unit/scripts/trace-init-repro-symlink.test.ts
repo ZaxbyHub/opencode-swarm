@@ -117,3 +117,19 @@ describe('trace-init.sh refuses a pre-existing non-regular checkpoint.manifest',
 		},
 	);
 });
+
+describe('trace-init.sh refuses a pre-existing non-regular state.md', () => {
+	// Same `[ -L ] || ([ -e ] && [ ! -f ])` guard as the manifest write, applied
+	// to state.md. A directory placed at the state.md path is non-regular
+	// exactly like a symlink is, and creating one needs no special privilege
+	// on any platform (unlike a file symlink on Windows).
+	test('exits 2 when state.md is a directory instead of a regular file', () => {
+		const worktree = repo();
+		fs.mkdirSync(path.join(worktree, '.agents/issue-traces/issue-1/state.md'), {
+			recursive: true,
+		});
+		const result = run(worktree, ['issue-1']);
+		expect(result.code).toBe(2);
+		expect(result.err).toContain('refusing non-regular target');
+	});
+});

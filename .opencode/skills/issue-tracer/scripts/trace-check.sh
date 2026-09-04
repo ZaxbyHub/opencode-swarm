@@ -23,10 +23,21 @@ valid_slug() { case "$1" in ''|*[!a-z0-9-]*) return 1;; *) return 0;; esac; }
 trim() { printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
 
 tree_id() {
+  # Trace artifacts under .agents/issue-traces/ must never affect this
+  # identity. trace-init.sh writes that directory to info/exclude so a plain
+  # `git add -A .` leaves it untracked, but that exclude entry is an
+  # unenforced convention (the entry could be missing or removed). Pass an
+  # explicit exclude pathspec so the identity is robust even then.
   local index
   index="$(mktemp)"
   rm -f "$index"
-  if ! GIT_INDEX_FILE="$index" git -C "$root" read-tree HEAD || ! GIT_INDEX_FILE="$index" git -C "$root" add -A . || ! GIT_INDEX_FILE="$index" git -C "$root" write-tree; then
+  # -f is required here: when the trace directory is ALSO covered by
+  # info/exclude (the normal case), git add refuses with "paths are ignored
+  # by one of your .gitignore files" for the bare '.' pathspec even though
+  # the exclude magic below removes it from what actually gets staged. -f
+  # bypasses that refusal; it does not defeat the :(exclude) filter, so the
+  # trace directory is still never added.
+  if ! GIT_INDEX_FILE="$index" git -C "$root" read-tree HEAD || ! GIT_INDEX_FILE="$index" git -C "$root" add -A -f -- . ':(exclude).agents/issue-traces' || ! GIT_INDEX_FILE="$index" git -C "$root" write-tree; then
     rm -f "$index"
     return 1
   fi
@@ -78,12 +89,14 @@ check_headings() {
   while IFS= read -r heading; do rule_bad "duplicate-heading-${heading#\#\# }" "in $(basename "$file")"; done < <(grep '^## ' "$file" 2>/dev/null | sort | uniq -d)
 }
 
-state_gate() {
-  # Parse the `## Gates` table row-by-row (split on '|', trim each cell) and
-  # require the verdict cell to match $2 EXACTLY. An unanchored substring
-  # match here previously let a DISAPPROVED row satisfy an APPROVE gate,
-  # since "APPROVE|RECORDED" as a regex also matches "DISAPPROVED".
-  local gate="$1" verdict_want="$2" commit="$3" treeid="$4" line g v c t ok=0
+# Parse the `## Gates` table row-by-row (split on '|', trim each cell) and
+# return success (0) iff a row exists whose gate/verdict/commit/treeid all
+# match. An empty commit/treeid argument means "don't filter on that column".
+# An unanchored substring match here previously let a DISAPPROVED row satisfy
+# an APPROVE gate, since "APPROVE|RECORDED" as a regex also matches
+# "DISAPPROVED"; matching is done cell-by-cell after trimming instead.
+gate_row_exists() {
+  local gate="$1" verdict_want="$2" commit="$3" treeid="$4" line g v c t
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in '|'*) ;; *) continue;; esac
     IFS='|' read -r _ g v c t _ <<EOF
@@ -94,10 +107,14 @@ EOF
     [ "$v" = "$verdict_want" ] || continue
     [ -z "$commit" ] || [ "$c" = "$commit" ] || continue
     [ -z "$treeid" ] || [ "$t" = "$treeid" ] || continue
-    ok=1
-    break
+    return 0
   done < "$state"
-  [ "$ok" -eq 1 ] && rule_ok "gate-$gate" || rule_bad "gate-$gate" "missing approved bound row"
+  return 1
+}
+
+state_gate() {
+  local gate="$1" verdict_want="$2" commit="$3" treeid="$4"
+  gate_row_exists "$gate" "$verdict_want" "$commit" "$treeid" && rule_ok "gate-$gate" || rule_bad "gate-$gate" "missing approved bound row"
 }
 
 # Extract the section starting at a `## <heading>` line up to (but not
@@ -145,39 +162,23 @@ artifact_identity() {
   ARTIFACT_TREE="$(printf '%s\n' "$section" | grep -E '^tree-id: [0-9a-f]{40}$' | head -n1 | sed 's/^tree-id: //')"
 }
 
-# Look up the `## Gates` row for $1 with verdict APPROVE and echo its
-# reviewed-commit and tree-id cells, tab-separated. Fails if no such row.
-gate_row_identity() {
-  local gate="$1" line g v c t
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in '|'*) ;; *) continue;; esac
-    IFS='|' read -r _ g v c t _ <<EOF
-$line
-EOF
-    g="$(trim "$g")"; v="$(trim "$v")"
-    [ "$g" = "$gate" ] && [ "$v" = "APPROVE" ] || continue
-    printf '%s\t%s\n' "$(trim "$c")" "$(trim "$t")"
-    return 0
-  done < "$state"
-  return 1
-}
-
 # Require the artifact's own `## Reviewed SHA / diff hash` identity to equal
-# the identity recorded in the matching APPROVE gate row. This binds the
-# artifact prose to the ledger row instead of trusting either alone.
+# the expected commit/tree-id (the same values state_gate was called with for
+# this phase), AND require a `<gate> | APPROVE | <expected-commit> |
+# <expected-tree>` row to exist in the ledger. Checking only "the first
+# APPROVE row for this gate" here (regardless of which commit/tree it names)
+# previously let a STALE re-review row satisfy a CURRENT artifact and vice
+# versa, once the append-only re-review path produced two APPROVE rows for
+# the same gate.
 artifact_identity_matches_gate() {
-  local file="$1" gate="$2" row row_commit row_tree
-  if ! row="$(gate_row_identity "$gate")"; then
-    rule_bad "artifact-identity-$gate" "no matching APPROVE gate row for $gate"
-    return
-  fi
-  row_commit="$(printf '%s' "$row" | cut -f1)"
-  row_tree="$(printf '%s' "$row" | cut -f2)"
+  local file="$1" gate="$2" expected_commit="$3" expected_treeid="$4"
   artifact_identity "$file"
-  if [ -n "$ARTIFACT_COMMIT" ] && [ "$ARTIFACT_COMMIT" = "$row_commit" ] && [ -n "$ARTIFACT_TREE" ] && [ "$ARTIFACT_TREE" = "$row_tree" ]; then
+  if [ -n "$ARTIFACT_COMMIT" ] && [ "$ARTIFACT_COMMIT" = "$expected_commit" ] \
+    && [ -n "$ARTIFACT_TREE" ] && [ "$ARTIFACT_TREE" = "$expected_treeid" ] \
+    && gate_row_exists "$gate" APPROVE "$expected_commit" "$expected_treeid"; then
     rule_ok "artifact-identity-$gate"
   else
-    rule_bad "artifact-identity-$gate" "$(basename "$file") reviewed-commit/tree-id does not match the $gate gate row"
+    rule_bad "artifact-identity-$gate" "$(basename "$file") reviewed-commit/tree-id does not match the current $gate gate row"
   fi
 }
 
@@ -317,6 +318,7 @@ EOF
 }
 
 phase3() {
+  local head tid
   check_headings "$trace/05-fix-plan.md" '## Selected Fix' '## Candidate Fixes' '## Impact Analysis' '## Anticipated Defect-Class Sweep (Phase 4.2)'
   check_headings "$trace/06-critic-review.md" '## Reviewed SHA / diff hash' '## Verdict' '## Check replay'
   grep -Eq '^## Round [0-9]+$' "$trace/06-critic-review.md" 2>/dev/null && rule_ok heading-round || rule_bad heading-round "missing ## Round N heading in $(basename "$trace/06-critic-review.md")"
@@ -326,8 +328,9 @@ phase3() {
   # not implemented yet), so the plan-critic gate row is bound to the current
   # HEAD commit and the current working-tree identity (tree_id), not the
   # frozen checkpoint-tree-id.
-  state_gate plan-critic APPROVE "$(git rev-parse HEAD)" "$(tree_id)"
-  artifact_identity_matches_gate "$trace/06-critic-review.md" plan-critic
+  head="$(git rev-parse HEAD)"; tid="$(tree_id)"
+  state_gate plan-critic APPROVE "$head" "$tid"
+  artifact_identity_matches_gate "$trace/06-critic-review.md" plan-critic "$head" "$tid"
 }
 
 executable_ids() { grep -E '^\|[[:space:]]*AC[0-9]+[[:space:]]*\|' "$trace/02-reproduction.md" 2>/dev/null | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $3); gsub(/^[ \t]+|[ \t]+$/, "", $4); if ($3 != "NON-EXECUTABLE") print $4}'; }
@@ -356,19 +359,21 @@ phase42() {
 
 phase45() {
   clean_tree
-  local file="$trace/08b-implementation-review.md"
+  local file="$trace/08b-implementation-review.md" head tid
   check_headings "$file" '## Reviewed SHA / diff hash' '## Verdict' '## Independently re-run' '## Check integrity' '## Deferred / Scoped-Out / Unwired'
   artifact_verdict_approved "$file" && rule_ok artifact-verdict-implementation-review || rule_bad artifact-verdict-implementation-review "must contain APPROVE under ## Verdict"
-  state_gate implementation-review APPROVE "$(git rev-parse HEAD)" "$(tree_id)"
-  artifact_identity_matches_gate "$file" implementation-review
+  head="$(git rev-parse HEAD)"; tid="$(tree_id)"
+  state_gate implementation-review APPROVE "$head" "$tid"
+  artifact_identity_matches_gate "$file" implementation-review "$head" "$tid"
 }
 phase46() {
-  local ac file="$trace/09-final-critic.md"
+  local ac file="$trace/09-final-critic.md" head tid
   clean_tree
   check_headings "$file" '## Reviewed SHA / diff hash' '## Verdict' '## Review Freshness' '## Deferred / Scoped-Out / Unwired' '## Acceptance criteria evidence'
   artifact_verdict_approved "$file" && rule_ok artifact-verdict-final-critic || rule_bad artifact-verdict-final-critic "must contain APPROVE under ## Verdict"
-  state_gate final-critic APPROVE "$(git rev-parse HEAD)" "$(tree_id)"
-  artifact_identity_matches_gate "$file" final-critic
+  head="$(git rev-parse HEAD)"; tid="$(tree_id)"
+  state_gate final-critic APPROVE "$head" "$tid"
+  artifact_identity_matches_gate "$file" final-critic "$head" "$tid"
   while IFS= read -r ac; do grep -A100 '^## Acceptance criteria evidence$' "$file" 2>/dev/null | grep -q "$ac" && rule_ok "final-$ac" || rule_bad "final-$ac" "missing evidence"; done < <(acceptance_ids)
 }
 phase5() {

@@ -116,6 +116,14 @@ fi
 exclude_file="$git_dir/info/exclude"
 entry='.agents/issue-traces/'
 mkdir -p "$(dirname "$exclude_file")"
+# Refuse to redirect into a pre-existing non-regular exclude-file path (e.g. a
+# symlink). `[ ! -e ]` alone is not enough: a dangling symlink reports
+# non-existent (dereferenced) while a bare `>>` still follows the link and
+# writes through it to whatever it points at.
+if [ -L "$exclude_file" ] || { [ -e "$exclude_file" ] && [ ! -f "$exclude_file" ]; }; then
+  echo "trace-init: refusing non-regular target: $exclude_file" >&2
+  exit 2
+fi
 if [ ! -f "$exclude_file" ] || ! grep -qxF "$entry" "$exclude_file" 2>/dev/null; then
   printf '%s\n' "$entry" >> "$exclude_file"
 fi
@@ -158,6 +166,14 @@ rm -f "$tree_index"
 
 # Seed state.md so the trail has a resumable starting point.
 state_file="$trace_dir/state.md"
+# Refuse to redirect into a pre-existing non-regular state.md path (e.g. a
+# symlink). `[ ! -e ]` alone is not enough: a dangling symlink reports
+# non-existent (dereferenced) while a bare `>` still follows the link and
+# writes through it to whatever it points at.
+if [ -L "$state_file" ] || { [ -e "$state_file" ] && [ ! -f "$state_file" ]; }; then
+  echo "trace-init: refusing non-regular target: $state_file" >&2
+  exit 2
+fi
 if [ ! -e "$state_file" ]; then
   cat > "$state_file" <<EOF
 # Trace State: $slug

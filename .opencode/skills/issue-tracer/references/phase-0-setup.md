@@ -21,7 +21,7 @@ Derive `<issue-slug>` from the issue number/title before using it anywhere in th
 ## Identities (both recorded at every gate)
 
 - `reviewed-commit` = `git rev-parse HEAD`. This is what review verdicts bind to, and it is only meaningful when the tree is clean - Phases 4.5 and 4.6 require `git status --porcelain` (trace dir excluded) to be empty before recording it.
-- `tree-id` = the output of `trace-check.sh tree-id`, which builds a temporary index from `HEAD` plus `git add -A` (covering staged, unstaged, and untracked-not-ignored files) and writes a tree object from it, without touching the real index. This is the freshness identity that also works on a dirty tree (Phase 2.5's checkpoint, for example, is recorded before the tree is necessarily clean).
+- `tree-id` = the output of `trace-check.sh tree-id`, which builds a temporary index from `HEAD` plus `git add -A` (covering staged, unstaged, and untracked-not-ignored files) and writes a tree object from it, without touching the real index. This is the freshness identity that also works on a dirty tree (Phase 2.5's checkpoint, for example, is recorded before the tree is necessarily clean). `tree-id` always excludes `.agents/issue-traces/` by pathspec, so trace artifacts can never affect the identity even if the `info/exclude` entry is missing.
 
 Every gate-table row that records a verdict records both identities. No timestamps appear anywhere in the ledger - freshness is checked by comparing identities, never by recollection.
 

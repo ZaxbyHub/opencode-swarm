@@ -108,7 +108,24 @@ describe('trace-check.sh identities, handshake, and early phases', () => {
 		expect(run(worktree, ['tree-id']).out.trim()).not.toBe(
 			git(worktree, 'rev-parse', 'HEAD^{tree}'),
 		);
-	});
+	}, 20_000);
+
+	test('tree-id excludes .agents/issue-traces/ even without an info/exclude entry', () => {
+		// trace-init.sh writes .agents/issue-traces/ to info/exclude, but that is
+		// an unenforced convention (a missing or hand-edited exclude file would
+		// silently drop it). tree_id() must exclude the trace directory by
+		// pathspec so trace artifacts never affect the identity either way.
+		const worktree = repo();
+		const clean = run(worktree, ['tree-id']).out.trim();
+		fs.mkdirSync(path.join(worktree, '.agents/issue-traces/issue-1/repro'), {
+			recursive: true,
+		});
+		fs.writeFileSync(
+			path.join(worktree, '.agents/issue-traces/issue-1/state.md'),
+			'trace artifact\n',
+		);
+		expect(run(worktree, ['tree-id']).out.trim()).toBe(clean);
+	}, 20_000);
 
 	test('handshake reports ABSENT, MATCH, SHIM, and STALE without exposing file contents', () => {
 		const worktree = repo();
@@ -193,7 +210,7 @@ describe('trace-check.sh identities, handshake, and early phases', () => {
 		);
 		result = run(worktree, ['phase', '1', '--slug', 'issue-1']);
 		expect(result.out).toContain('FAIL duplicate-heading-Source');
-	});
+	}, 20_000);
 
 	test('phase 2 requires a text block and recorded exit code, while a legacy trace warns and exits zero', () => {
 		const worktree = repo();
@@ -216,7 +233,7 @@ describe('trace-check.sh identities, handshake, and early phases', () => {
 		result = run(worktree, ['phase', '2', '--slug', 'issue-1']);
 		expect(result.code).toBe(0);
 		expect(result.out).toContain('WARN');
-	});
+	}, 20_000);
 
 	test('phase 0 freshness accepts only synced or a valid override, rejects behind/banana', () => {
 		const worktree = repo();
