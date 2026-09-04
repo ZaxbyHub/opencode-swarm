@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
 	handleReportCommand,
@@ -16,12 +15,10 @@ import {
 	getProjectDb,
 } from '../../../src/db/project-db.js';
 import { createObservation } from '../../../src/observability/index.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function makeProject(): string {
-	const dir = join(
-		tmpdir(),
-		`swarm-report-${Math.random().toString(36).slice(2, 10)}`,
-	);
+	const dir = canonicalMkdtemp('swarm-report-');
 	mkdirSync(join(dir, '.swarm'), { recursive: true });
 	return dir;
 }

@@ -7,7 +7,6 @@ import {
 	statSync,
 	writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
 	_internals,
@@ -32,12 +31,10 @@ import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function makeProject(): string {
-	const dir = join(
-		tmpdir(),
-		`obs-store-${Math.random().toString(36).slice(2, 10)}`,
-	);
+	const dir = canonicalMkdtemp('obs-store-');
 	mkdirSync(join(dir, '.swarm'), { recursive: true });
 	return dir;
 }

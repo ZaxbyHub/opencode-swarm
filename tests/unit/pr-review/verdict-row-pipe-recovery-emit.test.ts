@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { indexVerdictRows } from '../../../src/pr-review/legacy-transcript-adapter.js';
 import {
@@ -9,6 +8,7 @@ import {
 	removeTelemetryListener,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
  * Issue #2482 / #2184: the verdict-row pipe tail-merge fidelity class
@@ -34,7 +34,7 @@ const LOSSY_ROW =
 	'[CRITIC] | C-lossy | UPHELD | HIGH | rationale with | a pipe | required change';
 
 function withTelemetry(fn: () => void): void {
-	const tmp = mkdtempSync(join(tmpdir(), 'verdict-emit-'));
+	const tmp = canonicalMkdtemp('verdict-emit-');
 	initTelemetry(tmp);
 	events.length = 0;
 	addTelemetryListener(listener);
