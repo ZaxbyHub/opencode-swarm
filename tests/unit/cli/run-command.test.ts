@@ -489,7 +489,7 @@ describe('run() - CLI entry point', () => {
 		const result = await run(['unknown-cmd']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: unknown-cmd'),
+			expect.stringContaining('Command `/swarm unknown-cmd` not found.'),
 		);
 	});
 
