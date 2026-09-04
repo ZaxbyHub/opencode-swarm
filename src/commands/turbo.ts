@@ -252,7 +252,15 @@ export async function handleTurboCommand(
 	// The legacy fall-through made typos indistinguishable from intentional
 	// toggles — `/swarm turbo fast` would flip turbo state with no signal
 	// that the argument was never understood. State is left untouched.
-	const attempted = (args[0] ?? '').slice(0, 100);
+	// Report the offending token: when a known mode subcommand (lean/
+	// standard/epic) carried a bad second argument, that second token is the
+	// unknown one — printing args[0] would name a valid subcommand (#2493).
+	const MODE_SUBCOMMANDS = new Set(['lean', 'standard', 'epic']);
+	const attempted = (
+		arg0 !== undefined && MODE_SUBCOMMANDS.has(arg0) && arg1 !== undefined
+			? arg1
+			: (arg0 ?? '')
+	).slice(0, 100);
 	return (
 		`Unknown turbo argument "${attempted}". Turbo state is unchanged.\n` +
 		'Valid arguments: (none) | on | off | status | lean [on|off] | standard [on|off] | epic [on|off].\n' +

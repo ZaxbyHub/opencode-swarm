@@ -185,4 +185,16 @@ describe('findSimilarCommands', () => {
 			expect(results[0]).toBe('status');
 		});
 	});
+
+	describe('relevance cutoff (#2493)', () => {
+		test('pure gibberish yields NO suggestions (not three confident guesses)', () => {
+			expect(_internals.findSimilarCommands('qzxwv')).toEqual([]);
+		});
+
+		test('plausible typos still pass the cutoff boundary', () => {
+			// 'agets' is 1 edit from 'agents' — inside max(2, ceil(5/3)) = 2.
+			const results = _internals.findSimilarCommands('agets');
+			expect(results).toContain('agents');
+		});
+	});
 });

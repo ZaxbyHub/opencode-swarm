@@ -1,3 +1,4 @@
+import { ALL_SUBAGENT_NAMES } from '../config/agent-names';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { ensureAgentSession, swarmState } from '../state';
 import { pushAdvisory } from '../utils/advisory-queue';
@@ -19,6 +20,12 @@ export const NON_ARCHITECT_ADVISORY_KEY = '[non-architect-advisory]';
 // not fire for internal housekeeping agents.
 const HOST_INTERNAL_AGENTS = new Set(['compaction', 'title', 'summary']);
 
+// Swarm subagent roles (coder/reviewer/critic/...) run in Task-spawned child
+// sessions where "switch to an architect" is inactionable and the gated
+// pipeline distinction is the orchestrator's business — the advisory targets
+// only user-facing sessions (host built-ins and custom user agents).
+const SWARM_SUBAGENT_ROLES = new Set<string>(ALL_SUBAGENT_NAMES);
+
 /**
  * Emit the one-time non-architect advisory for `sessionID` when `agentName`
  * identifies a user-facing, non-architect agent. Returns true when the
@@ -33,6 +40,7 @@ export function maybeEmitNonArchitectAdvisory(
 	const role = stripKnownSwarmPrefix(agentName);
 	if (role === 'architect') return false;
 	if (HOST_INTERNAL_AGENTS.has(role)) return false;
+	if (SWARM_SUBAGENT_ROLES.has(role)) return false;
 
 	const session =
 		swarmState.agentSessions.get(sessionID) ?? ensureAgentSession(sessionID);

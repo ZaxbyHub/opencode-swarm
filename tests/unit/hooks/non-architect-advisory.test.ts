@@ -66,4 +66,18 @@ describe('non-architect advisory (issue #2493)', () => {
 		expect(maybeEmitNonArchitectAdvisory('sess-f', '   ')).toBe(false);
 		expect(maybeEmitNonArchitectAdvisory('', 'general')).toBe(false);
 	});
+
+	test('swarm subagent roles (Task-spawned children) emit nothing', () => {
+		// Critic round: the chat.message hook also runs for child sessions with
+		// agent='coder' etc.; the advisory is inactionable there (#2493).
+		resetSwarmState();
+		expect(maybeEmitNonArchitectAdvisory('sess-sub-1', 'coder')).toBe(false);
+		expect(maybeEmitNonArchitectAdvisory('sess-sub-2', 'reviewer')).toBe(false);
+		expect(maybeEmitNonArchitectAdvisory('sess-sub-3', 'test_engineer')).toBe(
+			false,
+		);
+		expect(maybeEmitNonArchitectAdvisory('sess-sub-4', 'mega_critic')).toBe(
+			false,
+		);
+	});
 });

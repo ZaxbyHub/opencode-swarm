@@ -154,7 +154,7 @@ describe('backward compatibility — toggle and explicit on/off', () => {
 			['standard', 'bogus'],
 			SESSION_ID,
 		);
-		expect(out).toContain('Unknown turbo argument "standard"');
+		expect(out).toContain('Unknown turbo argument "bogus"');
 		expect(out).toContain('Turbo state is unchanged');
 		const session = swarmState.agentSessions.get(SESSION_ID)!;
 		expect(session.turboMode).toBe(true);
