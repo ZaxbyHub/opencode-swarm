@@ -289,7 +289,7 @@ describe('run-coverage-gate.sh shard mode — issue #2341', () => {
 
 	test('each successful test must contribute a non-empty lcov artifact', () => {
 		const branchStart = coverageGateScript.indexOf(
-			'elif [ -s coverage/lcov.info ]; then',
+			'elif [ "$coverage_ready" -eq 1 ]; then',
 		);
 		const successBranch = coverageGateScript.slice(
 			branchStart,
@@ -300,6 +300,19 @@ describe('run-coverage-gate.sh shard mode — issue #2341', () => {
 		);
 		expect(successBranch).toContain('failed=1');
 		expect(successBranch).not.toContain('::warning');
+	});
+
+	test('a missing lcov report retries before failing closed', () => {
+		expect(coverageGateScript).toContain('coverage_ready=0');
+		expect(coverageGateScript).toContain(
+			'produced no non-empty lcov.info, retrying',
+		);
+		expect(coverageGateScript).toContain(
+			'if [ "$exit_code" -eq 0 ] && [ "$coverage_ready" -eq 1 ]; then',
+		);
+		expect(coverageGateScript).toContain(
+			'if [ "$retry_num" -ge "$max_retries" ]; then',
+		);
 	});
 
 	test('shard mode skips threshold enforcement (aggregator owns the union)', () => {

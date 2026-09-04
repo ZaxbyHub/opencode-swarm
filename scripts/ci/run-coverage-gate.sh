@@ -146,19 +146,31 @@ while IFS= read -r test_file; do
 	# must hold across retries, not just across files.
 	max_retries=2
 	retry_num=0
-	rm -rf coverage
-	mkdir -p coverage
-	bun test --isolate --coverage --timeout 60000 "$test_file" > "$tmpout" 2>&1 || exit_code=$?
-	while [ "$exit_code" -ne 0 ] && [ "$retry_num" -lt "$max_retries" ]; do
-		retry_num=$((retry_num + 1))
-		echo "::warning file=${test_file}::Attempt ${retry_num} failed, retrying (${retry_num}/${max_retries}): ${test_file}"
-		exit_code=0
+	coverage_ready=0
+	while true; do
 		rm -rf coverage
 		mkdir -p coverage
+		exit_code=0
 		bun test --isolate --coverage --timeout 60000 "$test_file" > "$tmpout" 2>&1 || exit_code=$?
-		if [ "$exit_code" -eq 0 ]; then
-			echo "::notice file=${test_file}::Passed on retry ${retry_num} (flaky): ${test_file}"
-			echo "::notice file=${test_file}::Passed on retry ${retry_num} (flaky): ${test_file}" >> "$flake_ann"
+		coverage_ready=0
+		if [ "$exit_code" -eq 0 ] && [ -s coverage/lcov.info ]; then
+			coverage_ready=1
+		fi
+		if [ "$exit_code" -eq 0 ] && [ "$coverage_ready" -eq 1 ]; then
+			if [ "$retry_num" -gt 0 ]; then
+				echo "::notice file=${test_file}::Passed on retry ${retry_num} (flaky): ${test_file}"
+				echo "::notice file=${test_file}::Passed on retry ${retry_num} (flaky): ${test_file}" >> "$flake_ann"
+			fi
+			break
+		fi
+		if [ "$retry_num" -ge "$max_retries" ]; then
+			break
+		fi
+		retry_num=$((retry_num + 1))
+		if [ "$exit_code" -ne 0 ]; then
+			echo "::warning file=${test_file}::Attempt ${retry_num} failed, retrying (${retry_num}/${max_retries}): ${test_file}"
+		else
+			echo "::warning file=${test_file}::Attempt ${retry_num} produced no non-empty lcov.info, retrying (${retry_num}/${max_retries}): ${test_file}"
 		fi
 	done
 	{
@@ -173,7 +185,7 @@ while IFS= read -r test_file; do
 		echo "::error file=${test_file}::Coverage test failed: ${test_file}"
 		echo "::error file=${test_file}::FAILED: ${test_file}" >> "$flake_ann"
 		failed=1
-	elif [ -s coverage/lcov.info ]; then
+	elif [ "$coverage_ready" -eq 1 ]; then
 		cp coverage/lcov.info "$parts_dir/part-$index.info"
 	else
 		echo "::error file=${test_file}::No non-empty lcov.info produced for coverage test: ${test_file}"
