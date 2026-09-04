@@ -11,9 +11,7 @@ import {
 // ---------------------------------------------------------------------------
 
 function cmd(name: string): CommandEntry {
-	return COMMAND_REGISTRY[
-		name as keyof typeof COMMAND_REGISTRY
-	] as CommandEntry;
+	return COMMAND_REGISTRY[name as keyof typeof COMMAND_REGISTRY] as CommandEntry;
 }
 
 // ---------------------------------------------------------------------------
