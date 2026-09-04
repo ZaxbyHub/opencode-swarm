@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.165.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.13...v7.165.0) (2026-09-04)
+
+
+### Features
+
+* **issue-tracer:** v3 acceptance-check-driven protocol with validated gates ([1eaa37a](https://github.com/ZaxbyHub/opencode-swarm/commit/1eaa37a49646733e98e3a8d6e4420540ab19f1ff))
+
 ## [7.164.13](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.12...v7.164.13) (2026-09-04)
 
 
