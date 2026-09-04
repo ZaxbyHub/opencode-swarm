@@ -21,5 +21,5 @@ None. Run `bun run drift:check` as usual; the new checks are part of it. If a la
 ## Known caveats
 
 - The detector recognizes the specific phrasings currently in the tree ("dispatch cap of N lanes per batch", "accepts a maximum of N lanes per call", "accepts at most eight|N lanes per call", "batch at N lanes (`MAX_LANES`)", "needs more than N verification lanes", "scaled toward the N-lane dispatch limit", "up to the N-lane cap", plus generic `MAX_LANES=N`, "N lanes per call/batch", "N-lane cap/limit" in fragments). A future citation written in a novel phrasing is not detected until a regex is added — the pinned-entry "missing numeric claim" warning is the backstop for reworded pinned sentences.
-- Soft-warn by default, like the rest of drift-check: annotations only, unless the repo variable `DRIFT_CHECK_ENFORCE=1` is set.
+- CI runs drift-check with `--enforce`; local `bun run drift:check` remains soft-warn unless `--enforce` (or `DRIFT_CHECK_ENFORCE=1`) is set.
 - The 8-lane cap remains non-configurable by design (separate policy decision, per the issue).

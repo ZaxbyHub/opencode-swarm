@@ -14,7 +14,7 @@
         "proper-lockfile": "^4.1.2",
         "quick-lru": "^7.3.0",
         "web-tree-sitter": "^0.25.0",
-        "zod": "^4.1.8",
+        "zod": "4.3.6",
       },
       "devDependencies": {
         "@biomejs/biome": "2.3.14",

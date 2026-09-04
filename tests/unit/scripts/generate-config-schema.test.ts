@@ -14,6 +14,12 @@ import {
 import { PluginConfigSchema } from '../../../src/config/schema';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
+const PACKAGE_JSON_PATH = path.resolve(
+	import.meta.dir,
+	'../../../package.json',
+);
+const BUN_LOCK_PATH = path.resolve(import.meta.dir, '../../../bun.lock');
+
 /**
  * Issue #1663 — the generator is the single schema-walk behind both derived
  * artifacts. These tests pin its contract: deterministic serialization, full
@@ -79,6 +85,35 @@ describe('generate-config-schema — JSON Schema artifact', () => {
 		expect(pairItems?.items).toBe(false);
 		expect(pairItems?.minItems).toBe(2);
 		expect(pairItems?.maxItems).toBe(2);
+	});
+
+	test('pins effective_at to the Zod 4.3.6 optional-seconds datetime contract', () => {
+		const parsed = JSON.parse(serializeConfigSchema()) as {
+			properties: {
+				pricing?: {
+					properties?: { effective_at?: { format?: string; pattern?: string } };
+				};
+			};
+		};
+		const effectiveAt = parsed.properties.pricing?.properties?.effective_at;
+		expect(effectiveAt?.format).toBe('date-time');
+		expect(effectiveAt?.pattern).toContain('(?::[0-5]\\d(?:\\.\\d+)?)?');
+		const pattern = new RegExp(effectiveAt?.pattern ?? '(?!)');
+		expect(pattern.test('2026-09-03T12:34Z')).toBe(true);
+		expect(pattern.test('2026-09-03T12:34:56Z')).toBe(true);
+		expect(pattern.test('2026-09-03T12Z')).toBe(false);
+	});
+
+	test('exact-pins the root schema generator dependency in package and lock data', () => {
+		const packageJson = JSON.parse(
+			fs.readFileSync(PACKAGE_JSON_PATH, 'utf-8'),
+		) as {
+			dependencies?: Record<string, string>;
+		};
+		expect(packageJson.dependencies?.zod).toBe('4.3.6');
+		const lock = fs.readFileSync(BUN_LOCK_PATH, 'utf-8');
+		expect(lock).toContain('"zod": "4.3.6"');
+		expect(lock).toContain('"zod": ["zod@4.3.6"');
 	});
 
 	test('deterministic: two serializations are byte-identical', () => {

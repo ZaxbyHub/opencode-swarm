@@ -31,8 +31,8 @@ New `.github/workflows/drift-check.yml` runs `scripts/drift-check.ts` on every P
 and on `push: main`. The checker imports the real modules and compares runtime
 values (no fragile grep), covering skill mirrors, bundled-skill completeness,
 tool registration, commands, and agents. It emits GitHub annotations and a
-sticky PR comment, **soft-warn by default**; set the repo variable
-`DRIFT_CHECK_ENFORCE=1` for hard-fail. Skill mirror contracts are extracted to
+sticky PR comment. CI invokes drift-check with `--enforce`; local
+`bun run drift:check` remains soft-warn unless enforcement is requested. Skill mirror contracts are extracted to
 `src/config/skill-mirrors.ts`, shared with the existing mirror regression test so
 the two cannot diverge.
 

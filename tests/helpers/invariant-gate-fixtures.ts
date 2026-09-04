@@ -23,7 +23,33 @@ import { QUARANTINE_LIST_FILES } from '../../scripts/check-invariants';
 export const QUARANTINE_LIST_FILE_NAMES: readonly string[] =
 	QUARANTINE_LIST_FILES.map((rel) => rel.slice(rel.lastIndexOf('/') + 1));
 
+export function seedInvariantGateDependencies(fixtureDir: string): void {
+	const repoNodeModules = path.resolve(import.meta.dir, '../../node_modules');
+	const fixtureNodeModules = path.join(fixtureDir, 'node_modules');
+	if (fs.existsSync(repoNodeModules) && !fs.existsSync(fixtureNodeModules)) {
+		// These fixtures are often temporary Git repositories. On Windows, Git
+		// traverses directory junctions during `git add -A`, so keep the dependency
+		// junction out of the fixture index through its repository-local exclude.
+		// Non-Git fixtures do not need (and must not gain) Git metadata.
+		const gitInfoDir = path.join(fixtureDir, '.git', 'info');
+		if (fs.existsSync(gitInfoDir)) {
+			const excludePath = path.join(gitInfoDir, 'exclude');
+			const existing = fs.existsSync(excludePath)
+				? fs.readFileSync(excludePath, 'utf8')
+				: '';
+			const entries = existing.split(/\r?\n/u);
+			if (!entries.includes('/node_modules')) {
+				const separator =
+					existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
+				fs.appendFileSync(excludePath, `${separator}/node_modules\n`, 'utf8');
+			}
+		}
+		fs.symlinkSync(repoNodeModules, fixtureNodeModules, 'junction');
+	}
+}
+
 export function seedQuarantineListFiles(fixtureDir: string): void {
+	seedInvariantGateDependencies(fixtureDir);
 	fs.mkdirSync(path.join(fixtureDir, 'scripts', 'ci'), { recursive: true });
 	for (const listName of QUARANTINE_LIST_FILE_NAMES) {
 		fs.writeFileSync(

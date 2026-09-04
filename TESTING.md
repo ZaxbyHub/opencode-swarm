@@ -63,7 +63,12 @@ Run locally before pushing:
 ```bash
 bun run check:mock-cleanup
 bun run check:invariants
+bun run check:pre-push
 ```
+
+`check:pre-push` is the authoritative cross-platform aggregate for enforced
+repository drift and retention-registry citation validation. Unlike the plain
+`drift:check` report command, it exits nonzero for blocking drift.
 
 Intentionally skipped on Windows (async child process handles cause EBUSY):
 - `tests/unit/tools/pre-check-batch.test.ts`
