@@ -239,6 +239,12 @@ describe('isEpicModeActiveForProject — project-scoped Epic check', () => {
 		expect(isEpicModeActiveForProject(fileRoot)).toBe(false);
 	});
 
+	test('fails closed for traversal-style directory spellings', () => {
+		expect(isEpicModeActiveForProject(path.join('..', '..', 'not-a-project'))).toBe(
+			false,
+		);
+	});
+
 	test('returns true when ANY session is active, regardless of which', () => {
 		// Architect's session enabled Epic; sub-agent sessions never toggle it.
 		// The project-scoped check must answer "is the project under Epic"
