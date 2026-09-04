@@ -1875,7 +1875,7 @@
         },
         "auto_checkpoint_threshold": {
           "default": 3,
-          "description": "Maximum number of checkpoints to retain. Oldest checkpoints are evicted when this limit is exceeded.",
+          "description": "Number of completed tasks that trigger an automatic checkpoint. Retention of old checkpoints is controlled separately by max_retention.",
           "type": "integer",
           "minimum": 1,
           "maximum": 20

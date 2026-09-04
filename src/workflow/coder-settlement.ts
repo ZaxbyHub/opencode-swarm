@@ -933,7 +933,7 @@ export async function recoverCoderSettlement(
 					scopedObservedFiles(worktree.worktreePath, wal.context);
 				if (observed === null) {
 					throw new Error(
-						`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: isolated task ${taskId} changes could not be attributed safely`,
+						`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: transition ${wal.transitionId} for isolated task ${taskId} could not attribute worktree changes to the declared scope (${filePath}, state ${wal.state}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 					);
 				}
 				if (wal.mergeProvenance) {
@@ -964,7 +964,7 @@ export async function recoverCoderSettlement(
 					}
 					if (landed.error) {
 						throw new Error(
-							`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: ${landed.error}`,
+							`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: transition ${wal.transitionId} for task ${taskId} could not reconcile the landed merge (${filePath}, state ${wal.state}): ${landed.error}. Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 						);
 					}
 				}
@@ -1059,12 +1059,11 @@ export async function recoverCoderSettlement(
 					) {
 						return null;
 					}
-					// #2202: still bare — unlike the seven enriched state-conflict errors
-					// this one names neither the WAL path nor a recovery action. Reaching
-					// it needs a failed-worktree-merge fixture, so it is tracked rather
-					// than changed untested.
+					// #2202: enriched to match the seven #2195 state-conflict errors —
+					// task, transition, WAL path, state, merge outcome and the exact
+					// recovery command (never WAL deletion advice).
 					throw new Error(
-						`CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED: ${mergeResult.outcome === 'failed' ? mergeResult.message : mergeResult.outcome}`,
+						`CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED: transition ${wal.transitionId} for task ${taskId} worktree merge-back did not reach merged (${filePath}, state ${wal.state}, outcome ${mergeResult.outcome}${mergeResult.outcome === 'failed' && mergeResult.message ? `: ${mergeResult.message}` : ''}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 					);
 				}
 				await cleanupRecoveredWorktree(directory, descriptor);
@@ -1127,11 +1126,8 @@ export async function recoverCoderSettlement(
 				);
 			}
 			if (observed === null) {
-				// #2202: still bare — names the task but not the WAL path or a recovery
-				// action. Reaching it needs a baseline snapshot changedFilesSinceSnapshot
-				// cannot resolve, so it is tracked rather than changed untested.
 				throw new Error(
-					`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: task ${taskId} workspace changes could not be attributed safely`,
+					`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: transition ${wal.transitionId} for task ${taskId} workspace changes could not be attributed to the declared scope (${filePath}, state ${wal.state}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 				);
 			}
 			wal = {

@@ -10,6 +10,7 @@
  *   /swarm pr status                              → show session subscriptions
  */
 
+import { getPrMonitorWorkerHealth } from '../background/pr-monitor-worker.js';
 import {
 	getPrSubscriptionHealth,
 	listActive,
@@ -195,6 +196,7 @@ export const _internals = {
 	listMergeGroupRuns,
 	parseMergeGroupRuns,
 	getPrSubscriptionHealth,
+	getPrMonitorWorkerHealth,
 };
 
 /**
@@ -235,6 +237,32 @@ export async function handlePrMonitorStatusCommand(
 		if (health) storageFooter = _internals.formatStorageHealth(health);
 	} catch {
 		// Health is best-effort — omit the footer on failure.
+	}
+
+	// Worker-health footer (#2409/#2471): disclose the store-write refusal
+	// (over-capacity skip) state and breaker suspension count. Best-effort,
+	// same fail-open contract as the storage footer.
+	try {
+		const workerHealth = _internals.getPrMonitorWorkerHealth(directory);
+		if (workerHealth?.storeWriteRefusal) {
+			const refusal = workerHealth.storeWriteRefusal;
+			const monitorLine =
+				`Monitor: store writes refused (over capacity) — polling paused to a one-PR recovery probe` +
+				` (${refusal.skippedPrCount} PR-skip(s) across ${refusal.consecutiveCycles} cycle(s)).` +
+				' Archive or split .swarm/pr-monitor/subscriptions.jsonl (subscriptions can be re-created with /swarm pr subscribe), then remove it.';
+			storageFooter = storageFooter
+				? `${storageFooter}
+${monitorLine}`
+				: monitorLine;
+		} else if (workerHealth && workerHealth.suspendedPrCount > 0) {
+			const monitorLine = `Monitor: ${workerHealth.suspendedPrCount} PR(s) circuit-suspended (backing off)`;
+			storageFooter = storageFooter
+				? `${storageFooter}
+${monitorLine}`
+				: monitorLine;
+		}
+	} catch {
+		// Worker health is best-effort — omit the Monitor line on failure.
 	}
 
 	if (subs.length === 0) {

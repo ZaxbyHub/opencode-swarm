@@ -23,6 +23,7 @@ import type {
 	MergeStateResult,
 	PRCommentResult,
 	PRStatusResult,
+	ReviewStateResult,
 } from '../../../src/git/pr';
 
 // -- Test Fixtures --------------------------------------------------
@@ -115,14 +116,19 @@ function makeMergeState(
 }
 
 // -- Mock State ------------------------------------------------------
+/** Fetch-knob mock that accepts the real 3-arg fetch signature. */
+type FetchMock<T> = ReturnType<typeof mock> &
+	((prNumber: number, repoFullName: string, cwd: string) => Promise<T>);
 
 interface MockState {
 	listActive: ReturnType<typeof mock>;
-	getPRStatus: ReturnType<typeof mock>;
-	getPRComments: ReturnType<typeof mock>;
-	getMergeState: ReturnType<typeof mock>;
+	getPRStatus: FetchMock<PRStatusResult>;
+	getPRComments: FetchMock<PRCommentResult[]>;
+	getMergeState: FetchMock<MergeStateResult>;
 	getMergeGroupRun: ReturnType<typeof mock>;
-	getPRReviewState: ReturnType<typeof mock>;
+	getPRReviewState: FetchMock<ReviewStateResult>;
+	getPRPollSnapshot: ReturnType<typeof mock>;
+	getPRReviewComments: ReturnType<typeof mock>;
 	updateSnapshot: ReturnType<typeof mock>;
 	unsubscribe: ReturnType<typeof mock>;
 	sweepStale: ReturnType<typeof mock>;
@@ -148,6 +154,15 @@ function setupMocks(): void {
 		getPRReviewState: mock(() =>
 			Promise.resolve({ reviewDecision: '', reviewRequestCount: 0 }),
 		),
+		// #2471 consolidation: the composed seam mock; the four fetch mocks
+		// above remain the per-test fixture knobs.
+		getPRPollSnapshot: mock(async (pr: number, repo: string, cwd: string) => ({
+			status: await mockState.getPRStatus(pr, repo, cwd),
+			comments: await mockState.getPRComments(pr, repo, cwd),
+			merge: await mockState.getMergeState(pr, repo, cwd),
+			review: await mockState.getPRReviewState(pr, repo, cwd),
+		})),
+		getPRReviewComments: mock(() => Promise.resolve([])),
 		updateSnapshot: mock(() => Promise.resolve(null)),
 		unsubscribe: mock(() => Promise.resolve(null)),
 		sweepStale: mock(() => Promise.resolve(0)),
@@ -160,16 +175,12 @@ function setupMocks(): void {
 
 	workerInternals.listActive =
 		mockState.listActive as typeof workerInternals.listActive;
-	workerInternals.getPRStatus =
-		mockState.getPRStatus as typeof workerInternals.getPRStatus;
-	workerInternals.getPRComments =
-		mockState.getPRComments as typeof workerInternals.getPRComments;
-	workerInternals.getMergeState =
-		mockState.getMergeState as typeof workerInternals.getMergeState;
 	workerInternals.getMergeGroupRun =
 		mockState.getMergeGroupRun as typeof workerInternals.getMergeGroupRun;
-	workerInternals.getPRReviewState =
-		mockState.getPRReviewState as typeof workerInternals.getPRReviewState;
+	workerInternals.getPRPollSnapshot =
+		mockState.getPRPollSnapshot as typeof workerInternals.getPRPollSnapshot;
+	workerInternals.getPRReviewComments =
+		mockState.getPRReviewComments as typeof workerInternals.getPRReviewComments;
 	workerInternals.updateSnapshot =
 		mockState.updateSnapshot as typeof workerInternals.updateSnapshot;
 	workerInternals.unsubscribe =
@@ -183,11 +194,9 @@ function setupMocks(): void {
 function restoreInternals(): void {
 	if (savedInternals) {
 		workerInternals.listActive = savedInternals.listActive;
-		workerInternals.getPRStatus = savedInternals.getPRStatus;
-		workerInternals.getPRComments = savedInternals.getPRComments;
-		workerInternals.getMergeState = savedInternals.getMergeState;
 		workerInternals.getMergeGroupRun = savedInternals.getMergeGroupRun;
-		workerInternals.getPRReviewState = savedInternals.getPRReviewState;
+		workerInternals.getPRPollSnapshot = savedInternals.getPRPollSnapshot;
+		workerInternals.getPRReviewComments = savedInternals.getPRReviewComments;
 		workerInternals.updateSnapshot = savedInternals.updateSnapshot;
 		workerInternals.unsubscribe = savedInternals.unsubscribe;
 		workerInternals.sweepStale = savedInternals.sweepStale;
@@ -359,8 +368,6 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 
 		// Now: add a new passing check (ci/lint success) to the rollup.
 		// No new failures ? no pr.ci.failed event.
-		// allPassed=true, prevHadIssues=false ? no pr.ci.passed event.
-		// lastCheckRunSet changes but it is bookkeeping (excluded from meaningful whitelist).
 		mockState.listActive.mockResolvedValueOnce([sub]);
 		mockState.getPRStatus.mockResolvedValue(
 			makePRStatus({
@@ -376,7 +383,6 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 
 		await worker.pollCycle();
 
-		// Counter advances to 3 � lastCheckRunSet is bookkeeping, not meaningful
 		expect(getIdleCount(worker, CORRELATION_ID).get(CORRELATION_ID)).toBe(3);
 	});
 
@@ -386,39 +392,30 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 			lastCommentId: 'comment-1',
 		});
 
-		// First poll: no-change ? counter = 1
 		setupNoChangePoll(sub);
 		const worker = createWorker();
 		await worker.pollCycle();
 		expect(getIdleCount(worker, CORRELATION_ID).get(CORRELATION_ID)).toBe(1);
 
-		// Second poll: also no meaningful change. lastCheckedAt is
-		// always written in snapshotUpdates but excluded from MEANINGFUL fields.
 		setupNoChangePoll(sub);
 		mockState.updateSnapshot.mockResolvedValue(sub);
 
 		await worker.pollCycle();
 
-		// Counter advances to 2 (bookkeeping-only snapshot changes don't reset)
 		expect(getIdleCount(worker, CORRELATION_ID).get(CORRELATION_ID)).toBe(2);
 	});
 
 	test('mergeGroupRun absent-key cycle does NOT reset counter (Object.hasOwn guard)', async () => {
-		// When mergeGroupRunFetchSucceeded is false, snapshotUpdates does NOT
-		// include mergeGroupRun* keys. Object.hasOwn must not false-positive.
 		const sub = makeSubscription({
 			headRefOid: 'abc123',
 			lastCommentId: 'comment-1',
 		});
 
-		// First: idle count = 1
 		setupNoChangePoll(sub);
 		const worker = createWorker();
 		await worker.pollCycle();
 		expect(getIdleCount(worker, CORRELATION_ID).get(CORRELATION_ID)).toBe(1);
 
-		// Second: getMergeGroupRun throws ? mergeGroupRunFetchSucceeded = false
-		// ? snapshotUpdates lacks mergeGroupRun* keys
 		const stableSub = {
 			...sub,
 			headRefOid: 'abc123',
@@ -435,7 +432,6 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 
 		await worker.pollCycle();
 
-		// Counter advances to 2 � absent mergeGroupRun keys don't reset
 		expect(getIdleCount(worker, CORRELATION_ID).get(CORRELATION_ID)).toBe(2);
 	});
 
@@ -446,13 +442,11 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 			mergeableState: 'MERGEABLE',
 		});
 
-		// First: idle count = 1 (normal no-change cycle)
 		setupNoChangePoll(sub);
 		const worker = createWorker();
 		await worker.pollCycle();
 		expect(getIdleCount(worker, CORRELATION_ID).get(CORRELATION_ID)).toBe(1);
 
-		// Second: mergeableState flaps to UNKNOWN (excluded from meaningful)
 		const flappedSub = {
 			...sub,
 			headRefOid: 'abc123',
@@ -468,7 +462,6 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 
 		await worker.pollCycle();
 
-		// Counter advances to 2 � mergeableState is excluded
 		expect(getIdleCount(worker, CORRELATION_ID).get(CORRELATION_ID)).toBe(2);
 	});
 
@@ -481,11 +474,9 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 		const worker = createWorker();
 		worker.start();
 		await worker.pollCycle();
-		// State was populated by the poll cycle
 		expect(getIdleCount(worker, CORRELATION_ID).get(CORRELATION_ID)).toBe(1);
 		expect((worker as Record<string, unknown>)['pollCycleCount']).toBe(1);
 		worker.stop();
-		// stop() must clear idle-backoff state
 		expect(getIdleCount(worker, CORRELATION_ID).size).toBe(0);
 		expect((worker as Record<string, unknown>)['pollCycleCount']).toBe(0);
 	});
@@ -511,10 +502,6 @@ describe('PrMonitorWorker � idle backoff counter (FR-008)', () => {
 });
 
 describe('shouldSkipIdlePoll — module-level pure function', () => {
-	// Per General Council 3× cap: idleCount >= 6 uses skipEvery=3 uniformly.
-	// Pattern: cycle % 3 !== 0 → skip; cycle % 3 === 0 → poll.
-	// idleCount 0-2: never skip.
-	// idleCount 3-5: skipEvery=2.
 	const cases: Array<[number, number, boolean]> = [
 		[0, 1, false],
 		[3, 1, true],

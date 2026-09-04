@@ -111,14 +111,19 @@ function makeMergeState(
 }
 
 // ── Mock State ──────────────────────────────────────────────────────
+/** Fetch-knob mock that accepts the real 3-arg fetch signature. */
+type FetchMock<T> = ReturnType<typeof mock> &
+	((prNumber: number, repoFullName: string, cwd: string) => Promise<T>);
 
 interface MockState {
 	listActive: ReturnType<typeof mock>;
-	getPRStatus: ReturnType<typeof mock>;
-	getPRComments: ReturnType<typeof mock>;
-	getMergeState: ReturnType<typeof mock>;
+	getPRStatus: FetchMock<PRStatusResult>;
+	getPRComments: FetchMock<PRCommentResult[]>;
+	getMergeState: FetchMock<MergeStateResult>;
 	getMergeGroupRun: ReturnType<typeof mock>;
-	getPRReviewState: ReturnType<typeof mock>;
+	getPRReviewState: FetchMock<ReviewStateResult>;
+	getPRPollSnapshot: ReturnType<typeof mock>;
+	getPRReviewComments: ReturnType<typeof mock>;
 	updateSnapshot: ReturnType<typeof mock>;
 	unsubscribe: ReturnType<typeof mock>;
 	sweepStale: ReturnType<typeof mock>;
@@ -145,6 +150,16 @@ function setupMocks(): void {
 		getPRReviewState: mock(() =>
 			Promise.resolve({ reviewDecision: '', reviewRequestCount: 0 }),
 		),
+		// #2471 consolidation: the worker-facing seam now exposes the composed
+		// snapshot; the four fetch mocks above remain the per-test fixture knobs
+		// the snapshot composes, so existing overrides keep working unchanged.
+		getPRPollSnapshot: mock(async (pr: number, repo: string, cwd: string) => ({
+			status: await mockState.getPRStatus(pr, repo, cwd),
+			comments: await mockState.getPRComments(pr, repo, cwd),
+			merge: await mockState.getMergeState(pr, repo, cwd),
+			review: await mockState.getPRReviewState(pr, repo, cwd),
+		})),
+		getPRReviewComments: mock(() => Promise.resolve([])),
 		updateSnapshot: mock(() => Promise.resolve(null)),
 		unsubscribe: mock(() => Promise.resolve(null)),
 		sweepStale: mock(() => Promise.resolve(0)),
@@ -157,16 +172,12 @@ function setupMocks(): void {
 
 	workerInternals.listActive =
 		mockState.listActive as typeof workerInternals.listActive;
-	workerInternals.getPRStatus =
-		mockState.getPRStatus as typeof workerInternals.getPRStatus;
-	workerInternals.getPRComments =
-		mockState.getPRComments as typeof workerInternals.getPRComments;
-	workerInternals.getMergeState =
-		mockState.getMergeState as typeof workerInternals.getMergeState;
 	workerInternals.getMergeGroupRun =
 		mockState.getMergeGroupRun as typeof workerInternals.getMergeGroupRun;
-	workerInternals.getPRReviewState =
-		mockState.getPRReviewState as typeof workerInternals.getPRReviewState;
+	workerInternals.getPRPollSnapshot =
+		mockState.getPRPollSnapshot as typeof workerInternals.getPRPollSnapshot;
+	workerInternals.getPRReviewComments =
+		mockState.getPRReviewComments as typeof workerInternals.getPRReviewComments;
 	workerInternals.updateSnapshot =
 		mockState.updateSnapshot as typeof workerInternals.updateSnapshot;
 	workerInternals.unsubscribe =
@@ -180,11 +191,9 @@ function setupMocks(): void {
 function restoreInternals(): void {
 	if (savedInternals) {
 		workerInternals.listActive = savedInternals.listActive;
-		workerInternals.getPRStatus = savedInternals.getPRStatus;
-		workerInternals.getPRComments = savedInternals.getPRComments;
-		workerInternals.getMergeState = savedInternals.getMergeState;
 		workerInternals.getMergeGroupRun = savedInternals.getMergeGroupRun;
-		workerInternals.getPRReviewState = savedInternals.getPRReviewState;
+		workerInternals.getPRPollSnapshot = savedInternals.getPRPollSnapshot;
+		workerInternals.getPRReviewComments = savedInternals.getPRReviewComments;
 		workerInternals.updateSnapshot = savedInternals.updateSnapshot;
 		workerInternals.unsubscribe = savedInternals.unsubscribe;
 		workerInternals.sweepStale = savedInternals.sweepStale;
@@ -2073,7 +2082,6 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 
 	// ── Adversarial: PR with 0 failures (all pass) ──────────────────────
 	test('SC-015 adversarial: all checks still passing → no pr.ci.failed event', async () => {
-		// Prior: all passing; Current: all passing → no new failures
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([
 				{ n: 'ci/build', c: 'success' },
@@ -2104,7 +2112,6 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 	});
 
 	test('SC-015 adversarial: all checks still passing → no pr.ci.passed (already passing)', async () => {
-		// Prior: all passing; Current: all passing → no pr.ci.passed (no state transition)
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([{ n: 'ci/build', c: 'success' }]),
 		});
@@ -2130,9 +2137,7 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 		expect(ciPassedCalls).toHaveLength(0);
 	});
 
-	// ── Adversarial: PR with all checks already-failing (no new events) ─
 	test('SC-015 adversarial: all checks already failing → no pr.ci.failed event', async () => {
-		// Prior: all failing; Current: all failing → no new transition
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([
 				{ n: 'ci/build', c: 'failure' },
@@ -2162,10 +2167,7 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 		expect(ciFailedCalls).toHaveLength(0);
 	});
 
-	// ── Adversarial: PR with mixed pass/fail ────────────────────────────
 	test('SC-015 adversarial: one new failure among already-passing checks → one batched event with one entry', async () => {
-		// Prior: ci/build passing; Current: ci/build failure, ci/test still passing
-		// Only one new failure → batched event with single entry
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([
 				{ n: 'ci/build', c: 'success' },
@@ -2199,10 +2201,7 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 		expect(failedChecks[0].name).toBe('ci/build');
 	});
 
-	// ── Adversarial: PR with 1 new + 2 already-failing (suppressed) ────
 	test('SC-015 adversarial: one new failure + two already-failing → only the new one in batched event', async () => {
-		// Prior: ci/build=failure, ci/test=failure, ci/lint=success
-		// Current: ci/build=failure, ci/test=failure, ci/lint=failure (only lint is NEW)
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([
 				{ n: 'ci/build', c: 'failure' },
@@ -2234,16 +2233,12 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 		expect(ciFailedCalls).toHaveLength(1);
 		const failedChecks = (ciFailedCalls[0][1] as Record<string, unknown>)
 			.failedChecks as Array<{ name: string }>;
-		// Only ci/lint (the newly-failed check) should be in the batch
 		expect(failedChecks.map((c) => c.name).sort()).toEqual(['ci/lint']);
-		// ci/build and ci/test are already-failing and must NOT be re-reported
 		expect(failedChecks.map((c) => c.name)).not.toContain('ci/build');
 		expect(failedChecks.map((c) => c.name)).not.toContain('ci/test');
 	});
 
-	// ── Adversarial: PR transitions from all-failing to all-passing ────
 	test('SC-015 adversarial: all checks recover from failure → pr.ci.passed emitted', async () => {
-		// Prior: all failing; Current: all passing → pr.ci.passed
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([
 				{ n: 'ci/build', c: 'failure' },
@@ -2275,7 +2270,6 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 		expect(payload).toHaveProperty('checkCount', 2);
 	});
 
-	// ── Adversarial: FAILURE vs failure case-sensitivity ────────────────
 	test('SC-015 adversarial: conclusion is FAILURE (uppercase) still triggers batching', async () => {
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([
@@ -2312,9 +2306,7 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 		]);
 	});
 
-	// ── Adversarial: new check appearing in rollup that was not in prior set ─
 	test('SC-015 adversarial: new check not in prior set but now failing → emitted', async () => {
-		// ci/lint is brand new (not in prior set) and now failing
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([{ n: 'ci/build', c: 'success' }]),
 		});
@@ -2344,9 +2336,7 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 		expect(failedChecks.map((c) => c.name)).toEqual(['ci/lint']);
 	});
 
-	// ── Adversarial: check disappears from rollup (was in prior, gone now) ─
 	test('SC-015 adversarial: check missing from current rollup is not emitted as failure', async () => {
-		// ci/lint was in prior (success) but is gone from current rollup
 		const sub = makeSubscription({
 			lastCheckRunSet: JSON.stringify([
 				{ n: 'ci/build', c: 'success' },
@@ -2359,7 +2349,6 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 			makePRStatus({
 				statusCheckRollup: [
 					{ name: 'ci/build', status: 'completed', conclusion: 'success' },
-					// ci/lint is absent from current rollup
 				],
 			}),
 		);
@@ -2370,8 +2359,6 @@ describe('PrMonitorWorker — FR-005a CI failure batching adversarial (SC-015)',
 		const worker = createWorker();
 		await worker.pollCycle();
 
-		// No failure events should be emitted for the missing check
-		// (disappeared checks are a separate concern, not part of FR-005a batching)
 		const ciFailedCalls = mockState.busInstance.publish.mock.calls.filter(
 			(c: Array<unknown>) => c[0] === 'pr.ci.failed',
 		);

@@ -1424,7 +1424,7 @@ export const CheckpointConfigSchema = z.preprocess(
 				.max(20)
 				.default(3)
 				.describe(
-					'Maximum number of checkpoints to retain. Oldest checkpoints are evicted when this limit is exceeded.',
+					'Number of completed tasks that trigger an automatic checkpoint. Retention of old checkpoints is controlled separately by max_retention.',
 				),
 			// Maximum number of checkpoints to retain in the log. Older entries
 			// are evicted (FIFO) when this limit is exceeded. Distinct from

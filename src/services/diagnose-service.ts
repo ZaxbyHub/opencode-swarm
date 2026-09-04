@@ -1425,12 +1425,29 @@ export async function getDiagnoseData(
 			invocationID > 0
 				? listBlockingActionCircuitsForInvocation(sessionID, invocationID)
 				: [];
+		// #2471 (absorbing #1896 row 4): the check must be actionable, not just
+		// informative — each open circuit names its exact identity (digest +
+		// category) and the copy-pasteable /swarm guardrail reset command in
+		// guardrail-reset.ts's own syntax. Privacy-safe: digests are hashes;
+		// no failure display text, prompts, or arguments (#2103).
+		const circuitRows = circuits
+			.slice(0, 3)
+			.map(
+				(entry) =>
+					`${entry.circuitKind} digest ${entry.actionDigest} (count ${entry.count}) → /swarm guardrail reset ${entry.actionDigest} --invocation ${invocationID}`,
+			);
+		if (circuits.length > 3) {
+			circuitRows.push(`+ ${circuits.length - 3} more`);
+		}
+		circuitRows.push(
+			'fresh re-delegation or a full plugin restart also resets (circuits are in-memory, TTL 30m)',
+		);
 		checks.push({
 			name: 'Invocation circuits',
 			status: circuits.length > 0 ? '⚠️' : '✅',
 			detail:
 				circuits.length > 0
-					? `${circuits.length} exact-action circuit(s) open for invocation ${invocationID}: ${[...new Set(circuits.map((entry) => entry.circuitKind))].join(', ')}`
+					? `${circuits.length} exact-action circuit(s) open for invocation ${invocationID}: ${circuitRows.join(' | ')}`
 					: `No exact-action circuits open${invocationID > 0 ? ` for invocation ${invocationID}` : ''}`,
 		});
 		const routing = getTaskModelRoutingStateSnapshot();

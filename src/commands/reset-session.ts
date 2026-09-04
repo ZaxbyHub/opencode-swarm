@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
 import { appendCoreEventSync } from '../events/core-events';
+import { clearSessionActionCircuits } from '../failures/action-circuit.js';
 import {
 	commitGateReleaseBatch,
 	queryLiveMemberships,
@@ -350,6 +351,20 @@ export async function handleResetSessionCommand(
 	swarmState.agentSessions.clear();
 	clearSnapshotSessionOwnerships();
 	results.push(`✅ Cleared ${sessionCount} in-memory agent session(s)`);
+
+	// #2471 (absorbing #1896 row 4): release THIS session's guardrail action
+	// circuits with the state they key. The lifecycle handler clears these on
+	// session.deleted events this command never emits, so without this a
+	// "reset" session's blocking circuits linger until their 30-minute TTL.
+	// Scoped to the invoking session only — other sessions' circuits are not
+	// ours to clear (AGENTS invariant 8). The clear is audited internally as
+	// reason 'session'.
+	if (sessionID) {
+		clearSessionActionCircuits(sessionID);
+		results.push(
+			'✅ Released this session\u2019s guardrail circuit(s) (audited; re-delegate to re-arm)',
+		);
+	}
 
 	// Clear delegation chains to prevent stale coder_delegated detection
 	const chainCount = swarmState.delegationChains.size;

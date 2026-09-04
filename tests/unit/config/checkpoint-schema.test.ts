@@ -228,12 +228,19 @@ describe('CheckpointConfigSchema', () => {
 	});
 
 	describe('description (FR-006 SC-006)', () => {
-		it('auto_checkpoint_threshold description is set', () => {
+		it('auto_checkpoint_threshold describes the auto-save trigger, not retention (#2471)', () => {
 			expect(
 				CheckpointConfigSchema.out.shape.auto_checkpoint_threshold.description,
 			).toBe(
-				'Maximum number of checkpoints to retain. Oldest checkpoints are evicted when this limit is exceeded.',
+				'Number of completed tasks that trigger an automatic checkpoint. Retention of old checkpoints is controlled separately by max_retention.',
 			);
+		});
+
+		it('auto_checkpoint_threshold description does not claim retention semantics (#2471)', () => {
+			const description =
+				CheckpointConfigSchema.out.shape.auto_checkpoint_threshold.description;
+			expect(description).not.toContain('retain');
+			expect(description).not.toContain('evicted');
 		});
 	});
 
