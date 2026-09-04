@@ -240,9 +240,9 @@ describe('isEpicModeActiveForProject — project-scoped Epic check', () => {
 	});
 
 	test('fails closed for traversal-style directory spellings', () => {
-		expect(isEpicModeActiveForProject(path.join('..', '..', 'not-a-project'))).toBe(
-			false,
-		);
+		expect(
+			isEpicModeActiveForProject(path.join('..', '..', 'not-a-project')),
+		).toBe(false);
 	});
 
 	test('returns true when ANY session is active, regardless of which', () => {
