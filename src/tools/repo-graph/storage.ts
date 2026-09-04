@@ -22,7 +22,9 @@ import { assertProjectRoot } from '../../utils/project-boundary';
 import {
 	clearCache,
 	getCachedGraph,
+	getCachedIno,
 	getCachedMtime,
+	getCachedSize,
 	isDirty,
 	setCachedGraph,
 } from './cache';
@@ -86,12 +88,31 @@ export const _internals: {
 	fsRename: typeof fsPromises.rename;
 	retryDelayMs: number;
 	writeFingerprint: typeof writeFingerprint;
+	cacheArtifactMatches: typeof cacheArtifactMatches;
 } = {
 	safeRealpathSync,
 	fsRename: fsPromises.rename.bind(fsPromises),
 	retryDelayMs: WINDOWS_RENAME_RETRY_DELAY_MS,
 	writeFingerprint,
+	cacheArtifactMatches,
 };
+
+function cacheArtifactMatches(
+	cachedMtime: number | undefined,
+	cachedIno: string | undefined,
+	cachedSize: number | undefined,
+	stats: { mtimeMs: number; ino: number; size: number },
+): boolean {
+	if (cachedMtime !== undefined && stats.mtimeMs !== cachedMtime) return false;
+	if (cachedSize !== undefined && stats.size !== cachedSize) return false;
+	const liveIno = String(stats.ino ?? 0);
+	return (
+		cachedIno === undefined ||
+		cachedIno === '0' ||
+		liveIno === '0' ||
+		cachedIno === liveIno
+	);
+}
 
 function corruption(message: string, cause?: unknown): Error {
 	return Object.assign(new Error(message), { code: 'CORRUPTION', cause });
@@ -247,7 +268,16 @@ export async function loadGraph(workspace: string): Promise<RepoGraph | null> {
 			if (existsSync(graphPath)) {
 				const stats = await fsPromises.stat(graphPath);
 				const cachedMtime = getCachedMtime(normalized);
-				if (cachedMtime !== undefined && stats.mtimeMs !== cachedMtime) {
+				const cachedIno = getCachedIno(normalized);
+				const cachedSize = getCachedSize(normalized);
+				if (
+					!_internals.cacheArtifactMatches(
+						cachedMtime,
+						cachedIno,
+						cachedSize,
+						stats,
+					)
+				) {
 					// File was modified externally - invalidate cache
 					clearCache(normalized);
 				} else {
@@ -293,7 +323,7 @@ export async function loadGraph(workspace: string): Promise<RepoGraph | null> {
 		validateLoadedGraph(parsed, workspace);
 
 		// Update cache with current file mtime
-		setCachedGraph(normalized, parsed, stats.mtimeMs);
+		setCachedGraph(normalized, parsed, stats.mtimeMs, stats.ino, stats.size);
 
 		return parsed;
 	} catch (error: unknown) {
@@ -346,7 +376,7 @@ export function loadGraphSync(workspace: string): RepoGraph | null {
 			});
 		}
 		validateLoadedGraph(parsed, workspace);
-		setCachedGraph(normalized, parsed, stats.mtimeMs);
+		setCachedGraph(normalized, parsed, stats.mtimeMs, stats.ino, stats.size);
 		return parsed;
 	} catch (error: unknown) {
 		if (
@@ -685,7 +715,7 @@ export async function saveGraph(
 	// and size untouched). Do not "simplify" the two into one stat.
 	try {
 		const stats = await fsPromises.stat(graphPath);
-		setCachedGraph(normalized, graph, stats.mtimeMs);
+		setCachedGraph(normalized, graph, stats.mtimeMs, stats.ino, stats.size);
 	} catch (error) {
 		logger.log(
 			`[repo-graph] post-save cache refresh failed (document was written): ${
@@ -735,7 +765,6 @@ export async function loadOrCreateGraph(workspace: string): Promise<RepoGraph> {
 		}
 	}
 
-	setCachedGraph(workspace, newGraph);
 	return newGraph;
 }
 

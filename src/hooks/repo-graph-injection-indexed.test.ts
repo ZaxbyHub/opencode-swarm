@@ -425,4 +425,17 @@ describe('indexed branch — fail-open to the JSON path', () => {
 		expect(key(1)).toBe(key(1));
 		expect(key(1)).not.toBe(key(2));
 	});
+
+	test('full-graph cache comparator is inode-sensitive', () => {
+		const cached = { mtimeMs: 100, size: 10, ino: 7 };
+
+		expect(_internals.fullGraphCacheMatches(cached, cached)).toBe(true);
+		expect(
+			_internals.fullGraphCacheMatches(cached, {
+				mtimeMs: 100,
+				size: 10,
+				ino: 8,
+			}),
+		).toBe(false);
+	});
 });

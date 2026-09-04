@@ -12,8 +12,15 @@
 
 import { describe, expect, test } from 'bun:test';
 import * as path from 'node:path';
-import { getDependencies, getImporters, resetQueryCache } from './query';
-import type { GraphEdge, GraphNode, RepoGraph } from './types';
+import {
+	getCallers,
+	getContextPack,
+	getDependencies,
+	getImporters,
+	getSymbolConsumers,
+	resetQueryCache,
+} from './query';
+import type { GraphEdge, GraphNode, RepoGraph, SymbolEdge } from './types';
 import { normalizeGraphPath } from './types';
 
 const root = path.resolve('/repo');
@@ -87,6 +94,46 @@ function countingGraph(
 		metadata: metadata(moduleNames.length, edges.length),
 	};
 	return { graph, indexBuilds: () => reads };
+}
+
+function countingSymbolGraph(): {
+	graph: RepoGraph;
+	symbolIndexBuilds: () => number;
+	addSymbolEdge: (edge: SymbolEdge) => void;
+} {
+	let reads = 0;
+	const symbolEdges: SymbolEdge[] = [
+		{
+			fromFile: key('src/caller.ts'),
+			fromSymbol: 'call',
+			toFile: key('src/core/util.ts'),
+			toSymbol: 'run',
+		},
+	];
+	const nodes = makeNodes(['src/core/util.ts', 'src/caller.ts']);
+	nodes[key('src/core/util.ts')]!.exportRanges = {
+		run: { startLine: 1, endLine: 1 },
+	};
+	nodes[key('src/caller.ts')]!.exportRanges = {
+		call: { startLine: 1, endLine: 1 },
+		other: { startLine: 2, endLine: 2 },
+	};
+	const graph: RepoGraph = {
+		schema_version: '1.7.0',
+		workspaceRoot: root,
+		nodes,
+		edges: [],
+		get symbolEdges(): SymbolEdge[] {
+			reads++;
+			return symbolEdges;
+		},
+		metadata: metadata(2, 0),
+	};
+	return {
+		graph,
+		symbolIndexBuilds: () => reads,
+		addSymbolEdge: (edge) => symbolEdges.push(edge),
+	};
 }
 
 describe('query index cache — WeakMap keying (#1534)', () => {
@@ -211,5 +258,54 @@ describe('query index cache — WeakMap keying (#1534)', () => {
 		resetQueryCache();
 		expect(getDependencies(graphA, 'src/core/util.ts')).toHaveLength(1);
 		expect(getDependencies(graphB, 'src/core/util.ts')).toHaveLength(1);
+	});
+
+	test('callers and symbol consumers share one reverse-edge scan per graph identity', () => {
+		resetQueryCache();
+		const edges = [edge('src/caller.ts', 'src/core/util.ts')];
+		edges[0]!.usedSymbols = ['run'];
+		const counted = countingGraph(['src/core/util.ts', 'src/caller.ts'], edges);
+
+		expect(
+			getSymbolConsumers(counted.graph, 'src/core/util.ts', 'run'),
+		).toEqual([{ file: 'src/caller.ts', importedAs: 'run' }]);
+		expect(getCallers(counted.graph, 'src/core/util.ts', 'run')).toEqual([
+			{ file: 'src/caller.ts', resolution: 'used' },
+		]);
+		getSymbolConsumers(counted.graph, 'src/core/util.ts', 'run');
+		getCallers(counted.graph, 'src/core/util.ts', 'run');
+		expect(counted.indexBuilds()).toBe(1);
+
+		resetQueryCache();
+		getCallers(counted.graph, 'src/core/util.ts', 'run');
+		expect(counted.indexBuilds()).toBe(2);
+	});
+
+	test('context packs share one lazy symbol-edge index per graph identity', () => {
+		resetQueryCache();
+		const counted = countingSymbolGraph();
+
+		expect(
+			getContextPack(counted.graph, 'src/core/util.ts', 'run').spans,
+		).toHaveLength(2);
+		expect(
+			getContextPack(counted.graph, 'src/caller.ts', 'call').spans,
+		).toHaveLength(2);
+		expect(counted.symbolIndexBuilds()).toBe(1);
+		counted.addSymbolEdge({
+			fromFile: key('src/caller.ts'),
+			fromSymbol: 'other',
+			toFile: key('src/core/util.ts'),
+			toSymbol: 'run',
+		});
+		expect(
+			getContextPack(counted.graph, 'src/core/util.ts', 'run').spans,
+		).toHaveLength(2);
+
+		resetQueryCache();
+		expect(
+			getContextPack(counted.graph, 'src/core/util.ts', 'run').spans,
+		).toHaveLength(3);
+		expect(counted.symbolIndexBuilds()).toBe(2);
 	});
 });

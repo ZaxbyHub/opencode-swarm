@@ -112,6 +112,7 @@ const swarmDir = (): string => path.join(testDir, '.swarm');
 
 beforeEach(() => {
 	testDir = canonicalMkdtemp('close-repo-memory-cleanup-');
+	mkdirSync(path.join(testDir, '.opencode'), { recursive: true });
 	mkdirSync(swarmDir(), { recursive: true });
 });
 
