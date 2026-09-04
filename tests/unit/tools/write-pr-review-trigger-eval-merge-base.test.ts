@@ -206,7 +206,6 @@ async function establishBoundReviewGate(root: string): Promise<void> {
 		});
 	}
 }
-
 /** Strip the durably bound review base from authoritative gate state. */
 async function unbindReviewBase(root: string): Promise<void> {
 	await withSessionStateMutation(root, SESSION_ID, async () => {
@@ -220,7 +219,6 @@ async function unbindReviewBase(root: string): Promise<void> {
 	});
 	gateInternals.resetTrackedStateCache();
 }
-
 /**
  * Hand-written v2 receipt literal. Deliberately NOT produced by
  * `buildPrReviewTriggerReceiptV2`: pre-fix the builder cannot emit
@@ -251,7 +249,6 @@ function v2ReceiptFixture(extra: Record<string, unknown> = {}) {
 		...extra,
 	};
 }
-
 afterEach(() => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = originalResolveCurrentGitHead;
@@ -268,15 +265,10 @@ afterEach(() => {
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
-
 describe('write_pr_review_trigger_eval merge-base re-verification — regression: transient merge-base unavailability permanently wedged the PR_REVIEW workflow (WP-1 / RC-B)', () => {
 	test('(a) proceeds with base_verification bound_fallback when live re-derivation is unavailable but the received scope equals the bound scope', async () => {
 		// Previous code treated a `null` from `resolveExactMergeBase` — which
 		// collapses git timeout, spawn failure, unresolvable ref, and unsafe
-		// revision token into one bare `null` — as REFUTATION and hard-failed
-		// with "could not resolve the exact merge base". Every retry re-failed,
-		// so `prReviewTriggerEvalPath` was never set and the workflow could only
-		// be exited with abort_pr_workflow.
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
 		const asyncStub = mock(async () => null);
@@ -310,7 +302,6 @@ describe('write_pr_review_trigger_eval merge-base re-verification — regression
 			schema_version: 2,
 		});
 	});
-
 	test('(b) fails closed with enriched null-cause diagnostics when the received scope is not the bound one', async () => {
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
@@ -337,8 +328,6 @@ describe('write_pr_review_trigger_eval merge-base re-verification — regression
 		expect(response.message).toContain('unsafe revision token');
 		expect(response.message).toContain('abort_pr_workflow');
 		expect(existsSync(artifactPath(root, 'fallback-ref-mismatch'))).toBe(false);
-
-		// Same fail-closed branch when only the SHA half of the scope differs.
 		const shaMismatch = JSON.parse(
 			await executeWritePrReviewTriggerEval(
 				{
@@ -404,8 +393,6 @@ describe('write_pr_review_trigger_eval merge-base re-verification — regression
 		);
 		expect(mismatch.success).toBe(false);
 		expect(mismatch.message).toContain('merge-base mismatch');
-		// The overridden sync member wins AND actually ran; the async twin is never
-		// consulted, so the fallback branch cannot mask a real refutation.
 		expect(syncStub).toHaveBeenCalledTimes(1);
 		expect(asyncStub).not.toHaveBeenCalled();
 		expect(existsSync(artifactPath(mismatchRoot, 'merge-base-mismatch'))).toBe(

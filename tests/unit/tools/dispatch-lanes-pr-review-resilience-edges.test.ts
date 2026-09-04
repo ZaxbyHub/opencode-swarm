@@ -46,7 +46,6 @@ const originalResolveDiffStatsAsync =
 	gateInternals.resolvePrReviewDiffStatsAsync;
 const originalNowMs = gateInternals.nowMs;
 const FIXED_ISO_TIMESTAMP = '2026-01-01T00:00:00.000Z';
-
 function lane(id: string, workflowLane: string, ownedWorkflowLanes?: string[]) {
 	return {
 		id,
@@ -56,7 +55,6 @@ function lane(id: string, workflowLane: string, ownedWorkflowLanes?: string[]) {
 		...(ownedWorkflowLanes ? { owned_workflow_lanes: ownedWorkflowLanes } : {}),
 	};
 }
-
 function terminalErrorResult(errorText: string) {
 	const text = `[ERROR] ${errorText}`;
 	return {
@@ -67,7 +65,6 @@ function terminalErrorResult(errorText: string) {
 		digest: createHash('sha256').update(text).digest('hex'),
 	};
 }
-
 function terminalSuccessResult(text: string) {
 	return {
 		text,
@@ -76,7 +73,6 @@ function terminalSuccessResult(text: string) {
 		digest: createHash('sha256').update(text).digest('hex'),
 	};
 }
-
 beforeEach(async () => {
 	directory = canonicalMkdtemp('dispatch-pr-resilience-edges-');
 	await initializeGitRepository(directory);
@@ -218,7 +214,6 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			result: terminalSuccessResult('[RESULT] settled fanout'),
 			expectedCurrentStatuses: ['pending'],
 		});
-
 		await withSessionStateMutation(
 			directory,
 			'review-session-completed',
@@ -270,7 +265,6 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			},
 		);
 		gateInternals.resetTrackedStateCache();
-
 		const thirdWave = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
@@ -288,7 +282,6 @@ describe('dispatch_lanes PR review resilience edges', () => {
 		expect(thirdWave.success).toBe(true);
 		expect(created).toBe(2);
 	});
-
 	test('keeps the first staged resilience policy snapshot even if config reloads to stricter values later', async () => {
 		let created = 0;
 		dispatchInternals.getSessionOps = () => ({
@@ -305,7 +298,6 @@ describe('dispatch_lanes PR review resilience edges', () => {
 					max_retry_attempts_after_initial: 2,
 				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
-
 		const firstWave = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
@@ -368,7 +360,6 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			circuitOpenDurationMs: 60_000,
 		});
 	});
-
 	test('fails closed before fanout child creation when the elapsed canary cannot be proven live via status', async () => {
 		for (const scenario of [
 			{
@@ -448,7 +439,6 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			gateInternals.nowMs = originalNowMs;
 		}
 	});
-
 	test('rejects skipped retry ordinals for staged canaries', async () => {
 		let created = 0;
 		dispatchInternals.getSessionOps = () => ({
