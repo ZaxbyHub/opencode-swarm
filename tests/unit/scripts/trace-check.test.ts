@@ -300,8 +300,12 @@ describe('trace-check.sh identities, handshake, and early phases', () => {
 		fs.mkdirSync(path.join(worktree, 'dist'));
 		fs.writeFileSync(path.join(worktree, 'dist/bundle.js'), 'bundle here\n');
 
-		// tree-id should not change because files are gitignored
+		// tree-id should not change because files are gitignored, and computing
+		// it must not intern the ignored blobs into the real object store (a
+		// forced add would): the loose-object count stays identical.
+		const objectsBefore = git(worktree, 'count-objects');
 		expect(run(worktree, ['tree-id']).out.trim()).toBe(withIgnoreId);
+		expect(git(worktree, 'count-objects')).toBe(objectsBefore);
 
 		// Create a non-ignored untracked file
 		fs.writeFileSync(path.join(worktree, 'src-new.txt'), 'new source\n');

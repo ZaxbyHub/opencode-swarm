@@ -151,11 +151,12 @@ fi
 
 # Use a disposable index so the identity includes tracked and untracked source
 # changes without touching the caller's real index. The trace directory is
-# locally excluded before this point and therefore cannot affect the result.
+# removed from the disposable index explicitly (same recipe as trace-check.sh
+# tree-id), so it cannot affect the result even without the exclude entry.
 tree_index="$(mktemp)"
 rm -f "$tree_index"
 phase0_tree_id=""
-if phase0_tree_id="$(GIT_INDEX_FILE="$tree_index" git read-tree HEAD && GIT_INDEX_FILE="$tree_index" git add -A . && GIT_INDEX_FILE="$tree_index" git write-tree)"; then
+if phase0_tree_id="$(GIT_INDEX_FILE="$tree_index" git read-tree HEAD && GIT_INDEX_FILE="$tree_index" git add -A -- . && GIT_INDEX_FILE="$tree_index" git rm -r --cached --ignore-unmatch -q -- .agents/issue-traces && GIT_INDEX_FILE="$tree_index" git write-tree)"; then
   :
 else
   rm -f "$tree_index"
