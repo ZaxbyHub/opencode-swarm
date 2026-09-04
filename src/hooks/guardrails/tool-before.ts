@@ -163,6 +163,26 @@ function normalizeSandboxMechanism(mechanism: string): string {
 	return mechanism.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
+/**
+ * Mechanisms whose wrapCommand() is the plugin's own sandbox boundary and
+ * consumes the envOverrides parameter. Only these are queried for declared
+ * env hardening (#2236 F6b / #2259 / #2475). Host-equivalent executors
+ * (#1875) own their environment themselves and must not be queried at all.
+ */
+function pluginOwnsExecutorEnv(mechanism: string): boolean {
+	if (mechanism.startsWith('native-runner/')) {
+		return true;
+	}
+	switch (mechanism) {
+		case 'sandbox-exec':
+		case 'powershell-wrapper':
+		case 'Bubblewrap':
+			return true;
+		default:
+			return false;
+	}
+}
+
 /** @internal test seam */
 export function _resetSandboxUnavailableWarningState(): void {
 	hasWarnedSandboxUnavailable = false;
@@ -1395,10 +1415,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		];
 
 		try {
-			// Issues #2236 F6b / #2259 / #2475: bake every executor's declared
-			// env hardening into the wrapped command via wrapCommand's 4th
-			// parameter. Originally macOS-only by explicit deferral (F6c);
-			// Windows and Linux are now wired too:
+			// Issues #2236 F6b / #2259 / #2475: bake every PLUGIN-OWNED
+			// executor's declared env hardening into the wrapped command via
+			// wrapCommand's 4th parameter:
 			//   - macOS sandbox-exec emits SBPL (setenv)/(unsetenv).
 			//   - Windows native-runner policies carry strings in env_overrides
 			//     and nulls in env_unsets (removed from the allowlist); the
@@ -1408,7 +1427,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			//     own scoped TEMP/safe PATH assignments.
 			//   - Linux Bubblewrap declares {} (bwrap enforces via CLI flags),
 			//     so the pass-through is a no-op for it today.
-			const envOverrides = executor.getEnvOverrides();
+			// Host-equivalent executors (issue #1875) are deliberately NOT
+			// queried: when the host wrapper owns the environment, the plugin
+			// must not ask for env overrides at all — the throw-probe test in
+			// guardrails-sandbox-circuit.test.ts pins that contract.
+			const envOverrides = pluginOwnsExecutorEnv(executor.mechanism)
+				? executor.getEnvOverrides()
+				: undefined;
 			const wrappedCommand = executor.wrapCommand(
 				rawCommand,
 				writablePaths,

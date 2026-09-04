@@ -24,6 +24,10 @@ afterEach(() => {
 	_internals.findRunnerBinary = realFindRunnerBinary;
 });
 
+// findRunnerBinary maps process.arch to the package arch dir the same way;
+// mirror it so the fixtures resolve on arm64 CI runners too.
+const archDir = process.arch === 'x64' ? 'x64' : 'arm64';
+
 function writeFakeExe(root: string, ...segments: string[]): string {
 	const dir = path.join(root, ...segments);
 	fs.mkdirSync(dir, { recursive: true });
@@ -36,7 +40,7 @@ describe('findRunnerBinary — packaged (dist) layout discovery (#2475)', () => 
 	test('resolves the shipped exe one directory above the dist bundle (installed package)', () => {
 		const root = canonicalMkdtemp('runner-discovery-dist-');
 		try {
-			const exe = writeFakeExe(root, 'pkg', 'binaries', 'win32-x64');
+			const exe = writeFakeExe(root, 'pkg', 'binaries', `win32-${archDir}`);
 			fs.mkdirSync(path.join(root, 'pkg', 'dist'), { recursive: true });
 
 			_internals.runtimeDir = path.join(root, 'pkg', 'dist');
@@ -50,7 +54,7 @@ describe('findRunnerBinary — packaged (dist) layout discovery (#2475)', () => 
 	test('resolves the exe from the source-tree layout (src/sandbox/win32 -> repo root)', () => {
 		const root = canonicalMkdtemp('runner-discovery-src-');
 		try {
-			const exe = writeFakeExe(root, 'binaries', 'win32-x64');
+			const exe = writeFakeExe(root, 'binaries', `win32-${archDir}`);
 			fs.mkdirSync(path.join(root, 'src', 'sandbox', 'win32'), {
 				recursive: true,
 			});
@@ -69,8 +73,13 @@ describe('findRunnerBinary — packaged (dist) layout discovery (#2475)', () => 
 			// A layout where BOTH the 1-up and the 3-up candidates exist: the
 			// packaged (1-up) candidate must win — it is the layout the
 			// installed plugin actually uses.
-			const packagedExe = writeFakeExe(root, 'pkg', 'binaries', 'win32-x64');
-			writeFakeExe(root, 'pkg', 'x', 'y', 'binaries', 'win32-x64');
+			const packagedExe = writeFakeExe(
+				root,
+				'pkg',
+				'binaries',
+				`win32-${archDir}`,
+			);
+			writeFakeExe(root, 'pkg', 'x', 'y', 'binaries', `win32-${archDir}`);
 			fs.mkdirSync(path.join(root, 'pkg', 'dist'), { recursive: true });
 
 			_internals.runtimeDir = path.join(root, 'pkg', 'dist');
