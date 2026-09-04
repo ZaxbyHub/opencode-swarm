@@ -440,8 +440,11 @@ describe('issue #2098 coder settlement isolated-worktree recovery', () => {
 		fs.writeFileSync(walPath(fixture), `${JSON.stringify(wal, null, 2)}\n`);
 		_internals.liveDispatches.clear();
 
+		// #2202 enriched the message with transition/task/WAL-path/recovery
+		// command; pin the worktree-branch-specific attribution-uncertain text
+		// (the non-worktree doomed-abort never emits it).
 		await expect(recoverCoderSettlement(fixture.repo, TASK_ID)).rejects.toThrow(
-			'CODER_SETTLEMENT_RECOVERY_UNCERTAIN: isolated task',
+			'CODER_SETTLEMENT_RECOVERY_UNCERTAIN: transition coder:doomed-worktree for isolated task 1.1 could not attribute worktree changes to the declared scope',
 		);
 		// Fail-closed: the WAL was NOT aborted (no silent worktree abandonment)
 		// and the worktree is still there for manual reconciliation.
