@@ -551,8 +551,16 @@ export function isEpicModeActive(
 export function isEpicModeActiveForProject(directory: string): boolean {
 	if (stateUnreadableMap.get(stateKey(directory))) return false;
 	const hasLegacyFile = fs.existsSync(stateFilePath(directory));
-	const hasCoordinationRows =
-		listCoordinationStates(directory, COORDINATION_NAMESPACE, 1).length > 0;
+	let hasCoordinationRows = false;
+	try {
+		hasCoordinationRows =
+			listCoordinationStates(directory, COORDINATION_NAMESPACE, 1).length > 0;
+	} catch {
+		// This is a read-only applicability probe. Invalid, inaccessible, or
+		// otherwise unopenable project roots must fail closed without turning a
+		// phase preflight into an uncaught SQLite/filesystem exception.
+		return false;
+	}
 	if (!hasLegacyFile && !hasCoordinationRows) {
 		return false;
 	}

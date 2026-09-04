@@ -232,6 +232,13 @@ describe('epic state — reset + decision recording', () => {
 });
 
 describe('isEpicModeActiveForProject — project-scoped Epic check', () => {
+	test('fails closed when the project root cannot be opened as a directory', () => {
+		const fileRoot = path.join(dir, 'not-a-directory');
+		fs.writeFileSync(fileRoot, 'occupied');
+
+		expect(isEpicModeActiveForProject(fileRoot)).toBe(false);
+	});
+
 	test('returns true when ANY session is active, regardless of which', () => {
 		// Architect's session enabled Epic; sub-agent sessions never toggle it.
 		// The project-scoped check must answer "is the project under Epic"

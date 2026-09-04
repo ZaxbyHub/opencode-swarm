@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { _internals as delegationGateInternals } from '../../../src/hooks/delegation-gate';
 import {
 	computePlanStructureHash,
@@ -98,6 +99,7 @@ describe('delegation gate plan critic approval', () => {
 
 	afterEach(async () => {
 		resetSwarmState();
+		closeAllProjectDbs();
 		if (dir && existsSync(dir)) {
 			await rm(dir, { recursive: true, force: true });
 		}
