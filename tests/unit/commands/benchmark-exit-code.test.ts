@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, rmSync } from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
+import { join } from 'node:path';
 import { handleBenchmarkCommand } from '../../../src/commands/benchmark';
 import { isCommandFailure } from '../../../src/commands/registry';
 import { resetSwarmState } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
  * Issue #2493 (critic round): the structured CommandFailure half of the
@@ -17,11 +17,8 @@ let testDir: string;
 
 beforeEach(() => {
 	resetSwarmState();
-	testDir = path.join(
-		os.tmpdir(),
-		`benchmark-exit-code-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-	);
-	mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+	testDir = canonicalMkdtemp('benchmark-exit-code-');
+	mkdirSync(join(testDir, '.swarm'), { recursive: true });
 });
 
 afterEach(() => {
