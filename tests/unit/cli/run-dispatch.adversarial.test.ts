@@ -232,7 +232,6 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// @ts-expect-error - Testing with null (type violation)
 			const result = await run(null);
 
-			// Should treat null as falsy and return usage error
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
 				expect.stringContaining('Usage: bunx opencode-swarm run <command>'),
@@ -243,7 +242,6 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// @ts-expect-error - Testing with undefined (type violation)
 			const result = await run(undefined);
 
-			// Should treat undefined as falsy and return usage error
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
 				expect.stringContaining('Usage: bunx opencode-swarm run <command>'),
@@ -255,7 +253,6 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 		it('should handle empty string subcommand', async () => {
 			const result = await run(['']);
 
-			// Should treat empty string as unknown command
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
 				expect.stringContaining('not found.'),
@@ -265,7 +262,6 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 		it('should handle whitespace-only subcommand', async () => {
 			const result = await run(['   ']);
 
-			// Should treat whitespace as unknown command
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
 				expect.stringContaining('not found.'),
@@ -350,7 +346,6 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 		it('should handle config with no sub-subcommand (calls handleConfigCommand)', async () => {
 			const result = await run(['config']);
 
-			// Should call handleConfigCommand, not crash
 			expect(result).toBe(0);
 			expect(mockHandleConfigCommand).toHaveBeenCalledWith(cwd, []);
 			expect(mockHandleDoctorCommand).not.toHaveBeenCalled();
@@ -379,7 +374,6 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 		it('should handle evidence with no sub-subcommand (calls handleEvidenceCommand)', async () => {
 			const result = await run(['evidence']);
 
-			// Should call handleEvidenceCommand, not crash
 			expect(result).toBe(0);
 			expect(mockHandleEvidenceCommand).toHaveBeenCalledWith(cwd, []);
 			expect(mockHandleEvidenceSummaryCommand).not.toHaveBeenCalled();
