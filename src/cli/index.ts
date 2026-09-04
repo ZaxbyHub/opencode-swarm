@@ -343,6 +343,15 @@ async function install(): Promise<number> {
 			);
 			opencodeConfig = structuredClone(legacyConfig);
 		} else {
+			if (configExisted) {
+				// Unparseable opencode.json: start fresh rather than fail the
+				// install, but say so loudly — the byte-exact original is
+				// preserved in the backup written below (#2493 review).
+				console.warn(
+					'⚠ opencode.json exists but could not be parsed as JSON. ' +
+						'Starting from a fresh config; the original file is preserved in the backup written by this install.',
+				);
+			}
 			opencodeConfig = {};
 		}
 	}
@@ -936,9 +945,12 @@ export async function run(args: string[]): Promise<number> {
 	// genuinely need this path opt in with SWARM_ALLOW_HUMAN_ONLY_CLI=1.
 	let policy = (resolved.entry as { toolPolicy?: string }).toolPolicy;
 	if (!policy) {
-		// Aliases carry no toolPolicy of their own — resolve the canonical
-		// target's policy exactly as tool-policy.ts does (review finding: the
-		// dash form `run memory-import` bypassed the gate otherwise).
+		// resolveCommand dereferences pure (handler-less) aliases to their
+		// canonical entry, whose toolPolicy the direct read above already
+		// returns. This walk only matters for handler-BEARING aliases
+		// (validateAliases permits handler + aliasOf; resolveRegistryEntry
+		// does not dereference those) — it mirrors tool-policy.ts so the
+		// dash form `run memory-import` can never bypass the gate.
 		const aliasOf = (resolved.entry as { aliasOf?: string }).aliasOf;
 		if (aliasOf) {
 			const target = COMMAND_REGISTRY[

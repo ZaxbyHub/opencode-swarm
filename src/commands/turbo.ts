@@ -49,9 +49,10 @@ export async function handleTurboCommand(
 		return 'Error: No active session. Turbo Mode requires an active session to operate.';
 	}
 
-	// Parse arguments. Empty-string tokens (trailing-space invocations that
-	// arrive as ['']) are argument-less: only non-empty tokens steer dispatch.
-	const tokens = args.filter((a) => a !== undefined && a !== '');
+	// Parse arguments. Empty/whitespace-only tokens (trailing-space
+	// invocations arriving as ['']) are argument-less: only non-empty tokens
+	// steer dispatch.
+	const tokens = args.filter((a) => a !== undefined && a.trim() !== '');
 	const arg0 = tokens[0]?.toLowerCase();
 	const arg1 = tokens[1]?.toLowerCase();
 

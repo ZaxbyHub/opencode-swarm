@@ -53,6 +53,9 @@ export function normalizeSwarmCommandInput(
 }
 
 export function canonicalCommandKey(resolved: ResolvedSwarmCommand): string {
+	// Handler-BEARING aliases keep their aliasOf through resolveRegistryEntry
+	// (it only dereferences handler-less entries, and validateAliases permits
+	// handler + aliasOf), so their canonical key is the direct aliasOf read.
 	if (resolved.entry.aliasOf) {
 		return resolved.entry.aliasOf;
 	}
@@ -81,7 +84,10 @@ export function formatCommandNotFound(tokens: string[]): string {
 		attemptedCommand.length > MAX_DISPLAY
 			? `${attemptedCommand.slice(0, MAX_DISPLAY)}...`
 			: attemptedCommand;
-	const similar = _internals.findSimilarCommands(attemptedCommand);
+	// Match against the bounded form so oversized inputs never reach the
+	// per-command levenshtein loop (findSimilarCommands' own 500-char guard
+	// fires only AFTER that O(N×Q) work).
+	const similar = _internals.findSimilarCommands(displayCommand);
 	const header = `Command \`/swarm ${displayCommand}\` not found.`;
 	const suggestions =
 		similar.length > 0

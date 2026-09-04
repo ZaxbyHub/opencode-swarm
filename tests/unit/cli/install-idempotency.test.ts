@@ -133,4 +133,39 @@ describe('CLI install idempotency (issue #2493)', () => {
 			'{"agent":{"general":{"disable":true},"explore":{"disable":true}},"plugin":["opencode-swarm"]}',
 		);
 	});
+
+	// #2493 review: pin the documented safe-replacement behavior for a
+	// malformed (non-object) agent value — the string cannot carry a disable
+	// flag, so it is replaced with a well-formed record instead of throwing.
+	test('malformed non-object agent value is replaced with a well-formed record', async () => {
+		const opencodeJsonPath = join(tempDir, 'opencode', 'opencode.json');
+		await writeFile(opencodeJsonPath, '{"agent":{"explore":"legacy-string"}}');
+
+		const result = await runCLI(['install'], { XDG_CONFIG_HOME: tempDir });
+		expect(result.exitCode).toBe(0);
+
+		const parsed = JSON.parse(await readFile(opencodeJsonPath, 'utf-8'));
+		expect(parsed.agent.explore).toEqual({ disable: true });
+		expect(parsed.plugin).toContain('opencode-swarm');
+	});
+
+	// #2493 review: an unparseable opencode.json must not fail the install —
+	// it starts fresh, WARNS, and preserves the original bytes in the backup.
+	test('unparseable config warns, starts fresh, and preserves the original in the backup', async () => {
+		const opencodeJsonPath = join(tempDir, 'opencode', 'opencode.json');
+		const backupPath = join(
+			tempDir,
+			'opencode',
+			'opencode.swarm-install-backup.json',
+		);
+		await writeFile(opencodeJsonPath, '{ this is not json');
+
+		const result = await runCLI(['install'], { XDG_CONFIG_HOME: tempDir });
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toContain('could not be parsed');
+
+		const parsed = JSON.parse(await readFile(opencodeJsonPath, 'utf-8'));
+		expect(parsed.plugin).toContain('opencode-swarm');
+		expect(await readFile(backupPath, 'utf-8')).toBe('{ this is not json');
+	});
 });
