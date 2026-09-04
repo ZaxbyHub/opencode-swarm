@@ -13,7 +13,6 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 const isWin = process.platform === 'win32';
@@ -23,6 +22,7 @@ import {
 	_resetProbeCache,
 	_internals as runnerInternals,
 } from '../../../src/sandbox/win32/runner-client';
+import { canonicalTmpDir } from '../../helpers/tmpdir';
 
 const realFindRunnerBinary = runnerInternals.findRunnerBinary;
 const realSpawnRunner = runnerInternals.spawnRunner;
@@ -70,7 +70,7 @@ function readWrittenPolicy(wrapped: string): Record<string, unknown> {
 		wrapped,
 	)?.[0];
 	expect(rel).toBeDefined();
-	const policyPath = path.join(os.tmpdir(), rel as string);
+	const policyPath = path.join(canonicalTmpDir(), rel as string);
 	expect(fs.existsSync(policyPath)).toBe(true);
 	const policy = JSON.parse(fs.readFileSync(policyPath, 'utf8')) as Record<
 		string,
