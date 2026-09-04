@@ -215,7 +215,7 @@ export function evaluateBashPortability(
 			messages.push(`  - ${file}`);
 		}
 	} else {
-		messages.push('No bash4+-only constructs found in scripts/.');
+		messages.push('No bash4+-only constructs found in scripts/ or .opencode/skills/*/scripts/.');
 	}
 
 	return {

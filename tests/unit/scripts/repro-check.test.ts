@@ -268,7 +268,7 @@ describe('repro-check.sh disposable checks', () => {
 				'--',
 				'bash',
 				'-c',
-				'sleep 5',
+				'sleep 300 & wait',
 			],
 			{ REPRO_CHECK_FORCE_FALLBACK: '1' },
 		);

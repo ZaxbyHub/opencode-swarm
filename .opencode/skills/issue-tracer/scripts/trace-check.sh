@@ -93,7 +93,6 @@ clean_tree() {
 phase0() {
   local keys key expected actual previous=0 line
   keys='protocol phase tier classification base-ref base-sha freshness phase0-tree-id checkpoint-tree-id handshake tools merge next-action'
-  if [ ! -f "$state" ]; then rule_bad state "missing"; return; fi
   for key in $keys; do
     line="$(grep -n "^$key: " "$state" 2>/dev/null | cut -d: -f1 | head -n1 || true)"
     if [ -z "$line" ]; then rule_bad "state-$key" "missing"; continue; fi

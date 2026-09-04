@@ -105,7 +105,7 @@ Gate rows (`plan-critic`, `implementation-review`, `final-critic`, `merge-approv
 |---|---|---|---|---|---|---|---|
 | AC1 | DISCRIMINATING / PRESERVING / NEW-SURFACE / NON-EXECUTABLE | C1 or DOCS_ONLY/HOST_ONLY/PRODUCT_DECISION/EXTERNAL_SERVICE_UNAVAILABLE | `<command>` or `-` | `<regex>` or `-` | RED / GREEN / ERROR / `-` | GREEN or `pending` | [substitute evidence path or free text] |
 
-The table splits each row on `|`, so the `argv` cell must never contain a literal `|` (for example a shell pipeline). If a check needs a pipeline, write it as a small script under `repro/` and put the script's path/invocation in `argv` instead of the raw pipeline. `trace-check.sh` rejects any row with more than 8 cells with `acceptance-table: row for ACn has too many columns (literal | in argv?)`.
+The table splits each row on `|`, so the `argv` cell must never contain a literal `|` (for example a shell pipeline). If a check needs a pipeline, write it as a small script under `repro/` and put the script's path/invocation in `argv` instead of the raw pipeline. `trace-check.sh` rejects any row with more than 8 cells with `FAIL acceptance-table-row-ACn: row for ACn has too many columns (literal | in argv?)`.
 
 ## Red checkpoint
 manifest: repro/checkpoint.manifest
