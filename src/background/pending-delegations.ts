@@ -43,6 +43,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
 	acquireCoordinationLease,
+	countCoordinationStates,
 	deleteCoordinationState,
 	deleteCoordinationStateWithinTransaction,
 	getCoordinationLease,
@@ -4129,6 +4130,8 @@ export const _internals = {
 		legacyCoderSettlementReconcilers.clear();
 		legacyCoderSettlementReconcilerOrder.length = 0;
 	},
+	reservationCoordinationRowLimit: MAX_COORDINATION_STATE_LIST_ROWS,
+	writeBackgroundCoderReservations,
 };
 
 /** Record an exact legacy-WAL transfer that must be retried after contention. */
@@ -5646,14 +5649,24 @@ async function writeBackgroundCoderReservations(
 	if (importState === 'ready') {
 		try {
 			withCoordinationTransaction(directory, () => {
+				const safetyBound = _internals.reservationCoordinationRowLimit;
+				const authoritativeCount = countCoordinationStates(
+					directory,
+					RESERVATION_COORDINATION_NAMESPACE,
+				);
+				if (authoritativeCount > safetyBound) {
+					throw new Error(
+						`reservation coordination write exceeded its ${safetyBound}-row safety bound`,
+					);
+				}
 				const currentRows = listCoordinationStates(
 					directory,
 					RESERVATION_COORDINATION_NAMESPACE,
-					MAX_COORDINATION_STATE_LIST_ROWS,
+					safetyBound,
 				);
-				if (currentRows.length >= MAX_COORDINATION_STATE_LIST_ROWS) {
+				if (currentRows.length !== authoritativeCount) {
 					throw new Error(
-						`reservation coordination write reached its ${MAX_COORDINATION_STATE_LIST_ROWS}-row safety bound`,
+						'reservation coordination state changed during bounded reconciliation',
 					);
 				}
 				const current = new Map(currentRows.map((row) => [row.entityKey, row]));

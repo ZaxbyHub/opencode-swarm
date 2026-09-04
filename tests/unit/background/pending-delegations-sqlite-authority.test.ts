@@ -12,6 +12,7 @@ import {
 	claimCoderSettlement,
 	claimTerminalResult,
 	findByCorrelationId,
+	_internals as pendingInternals,
 	type RecordPendingInput,
 	readDelegations,
 	recordPendingDelegationDetailed,
@@ -102,6 +103,7 @@ console.log(JSON.stringify(result));
 
 afterEach(() => {
 	coordinationInternals.coordinationFaultInjector = undefined;
+	pendingInternals.reservationCoordinationRowLimit = 25_000;
 	closeAllProjectDbs();
 	for (const dir of dirs.splice(0)) {
 		fs.rmSync(dir, { recursive: true, force: true });
@@ -324,6 +326,31 @@ describe('pending delegations SQLite authority', () => {
 			)
 			.get(reserved.reservation.reservationId);
 		expect(lease?.owner_token).toBe('foreign-owner');
+	});
+
+	test('an exactly-full bounded reservation view can reconcile downward', async () => {
+		const dir = project();
+		for (const planTaskId of ['full-1', 'full-2']) {
+			const reserved = await reserveBackgroundCoderSlot(dir, {
+				parentSessionId: 'parent',
+				planTaskId,
+				callID: `call-${planTaskId}`,
+				maxConcurrent: 2,
+				generation: 1,
+			});
+			expect(reserved.ok).toBe(true);
+		}
+		pendingInternals.reservationCoordinationRowLimit = 2;
+
+		expect(
+			await pendingInternals.writeBackgroundCoderReservations(dir, []),
+		).toBe(true);
+		const remaining = getProjectDb(dir)
+			.query<{ count: number }, []>(
+				"SELECT COUNT(*) AS count FROM coordination_state WHERE namespace = 'background.coder-reservation'",
+			)
+			.get();
+		expect(remaining?.count).toBe(0);
 	});
 
 	test('rejected terminal state is durably visible to readers and recovery scans', async () => {

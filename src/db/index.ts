@@ -16,6 +16,7 @@ export {
 	acquireCoordinationLease,
 	type CoordinationLease,
 	type CoordinationState,
+	countCoordinationStates,
 	deleteCoordinationImports,
 	deleteCoordinationState,
 	deleteCoordinationStateWithinTransaction,

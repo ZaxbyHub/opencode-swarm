@@ -215,6 +215,20 @@ export function listCoordinationStates(
 	return states;
 }
 
+/** Return the exact number of authoritative rows in one coordination namespace. */
+export function countCoordinationStates(
+	directory: string,
+	namespace: string,
+): number {
+	if (!projectDbExists(directory)) return 0;
+	const row = getProjectDb(directory)
+		.query<{ count: number }, [string]>(
+			'SELECT COUNT(*) AS count FROM coordination_state WHERE namespace = ?',
+		)
+		.get(namespace);
+	return row?.count ?? 0;
+}
+
 export function deleteCoordinationState(
 	directory: string,
 	namespace: string,
