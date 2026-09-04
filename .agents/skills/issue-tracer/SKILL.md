@@ -4,42 +4,28 @@ audience: swarm-plugin
 description: >
   Use when asked to trace, investigate, root-cause, reproduce, plan, fix,
   resolve, close, or prepare a PR for an issue, bug report, defect, regression,
-  failing test, or confusing runtime behavior. This Codex adapter's canonical
-  protocol lives in .opencode and owns the Full-Resolution Contract,
-  reproduction, reasoning-guided localization, no-gap fix planning, recurrence-
-  class eradication, independent critic and implementation review, and PR-ready
-  closure.
+  failing test, or confusing runtime behavior. This Codex adapter delegates to
+  the canonical protocol at .opencode, which owns the Full-Resolution Contract,
+  reproduction, reasoning-guided localization, no-gap fix planning,
+  recurrence-class eradication, independent critic and implementation review,
+  and PR-ready closure.
 metadata:
-  version: 2.1.0
+  version: 3.0.0
 ---
 
 # Issue Tracer
 
-Read and follow `../../../.opencode/skills/issue-tracer/SKILL.md` as the canonical workflow.
+Follow the canonical workflow at `../../../.opencode/skills/issue-tracer/SKILL.md`.
 
-## Codex Execution Notes
+## Codex Tools
 
-- File-edit tool: `apply_patch`. Plan/tasklist tool: `update_plan` for
-  substantial work. Web tool: `web` (current external framework/API behavior,
-  advisories, release notes — cite URLs). Use the shell execution tool for
-  `rg`, `git`, `gh`, tests, builds, and local validation, in parallel where the
-  files are independent.
-- The independent critic (Phase 3), implementation review (Phase 4.5), and
-  final critic (Phase 4.6) run only when a separate subagent/delegation
-  mechanism is available and authorized. When none is available, record the
-  unavailability and run the labeled fallback pass from
-  `.opencode/skills/issue-tracer/references/critic-gate.md` ("Fallback
-  self-critic/self-review/final-critic: independent … unavailable"),
-  disclosed in the artifact and final response.
-- For `opencode-swarm` specifically, read `AGENTS.md` and
-  `docs/engineering-invariants.md` for touched invariants, use repo shell
-  commands (not broad OpenCode `test_runner` scopes) for validation, and load
-  `writing-tests` before changing tests.
-- Trace directory and its VCS exclusion are created by the canonical
-  `.opencode/skills/issue-tracer/scripts/trace-init.sh <issue-slug>` (run from
-  the repo root); the deferred-work gate is
-  `.opencode/skills/issue-tracer/scripts/scan-deferred.sh`.
-- Publication (commit/push/PR) is governed by the repo's canonical publish
-  protocol via the `commit-pr` skill (`.agents/skills/commit-pr/SKILL.md`,
-  which routes to `.claude/skills/commit-pr/SKILL.md`). Switch to it only when
-  the user asks to commit, push, or open/update a PR.
+- File-edit: `apply_patch`. Tasklist: `update_plan`. Web: `web` (cite URLs).
+- Shell: `rg`, `git`, `gh`, tests, builds. Subagent dispatch: per your runner config.
+
+## Gates and Delegation
+
+Plan critic (Phase 3), implementation review (Phase 4.5), and final critic (Phase 4.6) require subagent delegation when available. Receive only diff and artifacts from the canonical protocol's `.opencode/skills/issue-tracer/references/critic-gate.md`. When unavailable, record the failure, run the labeled fallback, and disclose it.
+
+## Scripts and Publication
+
+Trace directory created by `.opencode/skills/issue-tracer/scripts/trace-init.sh <issue-slug>` (from repo root). Deferred-work gate: `.opencode/skills/issue-tracer/scripts/scan-deferred.sh`. Publication via `.agents/skills/commit-pr/SKILL.md` only when user asks to commit/push/open PR.

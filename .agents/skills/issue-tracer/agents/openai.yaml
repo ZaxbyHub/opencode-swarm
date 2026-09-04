@@ -1,4 +1,4 @@
 interface:
   display_name: "Issue Tracer"
-  short_description: "Evidence-first bug tracing and full resolution"
-  default_prompt: "Use $issue-tracer to investigate this issue, find the root cause, and drive it to a fully verified fix."
+  short_description: "Evidence-first issue validation, acceptance-check-driven fix, reviewed and unmerged PR"
+  default_prompt: "Use $issue-tracer to validate the issue, drive acceptance-check-based reproduction and fix, get independent review approval, and produce an unmerged PR ready for user approval."

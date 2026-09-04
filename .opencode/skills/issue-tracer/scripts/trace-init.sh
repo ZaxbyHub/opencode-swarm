@@ -116,23 +116,113 @@ fi
 exclude_file="$git_dir/info/exclude"
 entry='.agents/issue-traces/'
 mkdir -p "$(dirname "$exclude_file")"
+# Refuse to redirect into a pre-existing non-regular exclude-file path (e.g. a
+# symlink). `[ ! -e ]` alone is not enough: a dangling symlink reports
+# non-existent (dereferenced) while a bare `>>` still follows the link and
+# writes through it to whatever it points at.
+if [ -L "$exclude_file" ] || { [ -e "$exclude_file" ] && [ ! -f "$exclude_file" ]; }; then
+  echo "trace-init: refusing non-regular target: $exclude_file" >&2
+  exit 2
+fi
 if [ ! -f "$exclude_file" ] || ! grep -qxF "$entry" "$exclude_file" 2>/dev/null; then
   printf '%s\n' "$entry" >> "$exclude_file"
 fi
 
+# Resolve the base identity before seeding state. Prefer the remote's declared
+# default branch, then use the same conservative fallbacks as scan-deferred.
+base_ref=""
+if symbolic_ref="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null)"; then
+  base_ref="origin/${symbolic_ref#refs/remotes/origin/}"
+fi
+if [ -z "$base_ref" ]; then
+  for candidate in origin/main origin/master main master; do
+    if git rev-parse --verify --quiet "$candidate^{commit}" >/dev/null 2>&1; then
+      base_ref="$candidate"
+      break
+    fi
+  done
+fi
+base_sha="unset"
+if [ -n "$base_ref" ]; then
+  base_sha="$(git rev-parse "$base_ref^{commit}")"
+else
+  base_ref="unset"
+fi
+
+# Use a disposable index so the identity includes tracked and untracked source
+# changes without touching the caller's real index. The trace directory is
+# removed from the disposable index explicitly (same recipe as trace-check.sh
+# tree-id), so it cannot affect the result even without the exclude entry.
+tree_index="$(mktemp "${TMPDIR:-/tmp}/issue-tracer-index.XXXXXX")"
+rm -f "$tree_index"
+phase0_tree_id=""
+if phase0_tree_id="$(GIT_INDEX_FILE="$tree_index" git -C "$root" read-tree HEAD && GIT_INDEX_FILE="$tree_index" git -C "$root" add -A -- . && GIT_INDEX_FILE="$tree_index" git -C "$root" rm -r --cached --ignore-unmatch -q -- .agents/issue-traces && GIT_INDEX_FILE="$tree_index" git -C "$root" write-tree)"; then
+  :
+else
+  rm -f "$tree_index"
+  echo "trace-init: could not calculate phase-0 tree identity" >&2
+  exit 2
+fi
+rm -f "$tree_index"
+
 # Seed state.md so the trail has a resumable starting point.
 state_file="$trace_dir/state.md"
+# Refuse to redirect into a pre-existing non-regular state.md path (e.g. a
+# symlink). `[ ! -e ]` alone is not enough: a dangling symlink reports
+# non-existent (dereferenced) while a bare `>` still follows the link and
+# writes through it to whatever it points at.
+if [ -L "$state_file" ] || { [ -e "$state_file" ] && [ ! -f "$state_file" ]; }; then
+  echo "trace-init: refusing non-regular target: $state_file" >&2
+  exit 2
+fi
 if [ ! -e "$state_file" ]; then
   cat > "$state_file" <<EOF
 # Trace State: $slug
+protocol: 3.0.0
+phase: 0
+tier: unset
+classification: unset
+base-ref: $base_ref
+base-sha: $base_sha
+freshness: unset
+phase0-tree-id: $phase0_tree_id
+checkpoint-tree-id: unset
+handshake: unset
+tools: none
+merge: not-applicable
+next-action: unset
 
-- Phase: 0 (setup)
-- Completed gates:
-- Active hypothesis:
-- Selected fix candidate:
-- Unresolved risks:
-- Next action:
+## Gates
+| gate | verdict | reviewed-commit | tree-id | artifact |
+|---|---|---|---|---|
 EOF
+fi
+
+repro_dir="$trace_dir/repro"
+manifest_file="$repro_dir/checkpoint.manifest"
+if [ -L "$repro_dir" ]; then
+  echo "trace-init: refusing to use 'repro/' - it is a symlink" >&2
+  exit 2
+fi
+mkdir -p "$repro_dir"
+if [ -L "$repro_dir" ]; then
+  echo "trace-init: refusing to use 'repro/' - it is a symlink" >&2
+  exit 2
+fi
+# Refuse to redirect into a pre-existing non-regular manifest path (e.g. a
+# symlink). `[ ! -e ]` alone is not enough: a broken symlink reports
+# non-existent (dereferenced) while a bare `>` still follows the link and
+# writes through it to whatever it points at.
+if { [ -e "$manifest_file" ] && [ ! -f "$manifest_file" ]; } || [ -L "$manifest_file" ]; then
+  echo "trace-init: refusing non-regular target: $manifest_file" >&2
+  exit 2
+fi
+if [ ! -e "$manifest_file" ]; then
+  # The header carries the expected data-row count, restamped by every
+  # `repro-check.sh checkpoint` append. Seeding it without `rows=0` would make
+  # repro-check refuse the manifest: a header with no count is rejected there so it
+  # cannot be used to disable the count check (see validate_manifest).
+  printf '%s\n' '# issue-tracer checkpoint manifest v1 rows=0' > "$manifest_file"
 fi
 
 echo "trace-init: created $trace_dir"

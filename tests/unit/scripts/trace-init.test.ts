@@ -13,6 +13,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { bashCommand } from '../../helpers/bash';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const SCRIPT = path.resolve(
 	process.cwd(),
@@ -85,9 +86,7 @@ function track(dir: string): string {
 }
 
 function makeRepo(prefix: string): string {
-	const repoDir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), prefix)),
-	);
+	const repoDir = canonicalMkdtemp(prefix);
 	git(repoDir, 'init', '-q', '-b', 'main');
 	git(repoDir, 'config', 'user.email', 'test@example.com');
 	git(repoDir, 'config', 'user.name', 'Test');
@@ -146,6 +145,43 @@ describe('trace-init.sh — issue-tracer trace directory setup (PR #1880 review)
 		expect(fs.readFileSync(stateFile, 'utf-8')).toContain(
 			'Trace State: issue-1849',
 		);
+	});
+
+	test('seeds the v3 ledger identities, repro directory, and manifest header', async () => {
+		const repo = track(makeRepo('trace-init-v3-seed-'));
+		git(repo, 'branch', 'origin/main');
+		const result = await runScript(repo, ['v3-seed']);
+		expect(result.exitCode).toBe(0);
+
+		const trace = path.join(repo, '.agents/issue-traces/v3-seed');
+		const state = fs
+			.readFileSync(path.join(trace, 'state.md'), 'utf-8')
+			.split(/\r?\n/);
+		expect(state.slice(1, 14).map((line) => line.split(': ')[0])).toEqual([
+			'protocol',
+			'phase',
+			'tier',
+			'classification',
+			'base-ref',
+			'base-sha',
+			'freshness',
+			'phase0-tree-id',
+			'checkpoint-tree-id',
+			'handshake',
+			'tools',
+			'merge',
+			'next-action',
+		]);
+		expect(state).toContain(
+			`base-sha: ${git(repo, 'rev-parse', 'origin/main').trim()}`,
+		);
+		expect(state).toContain(
+			`phase0-tree-id: ${git(repo, 'rev-parse', 'HEAD^{tree}').trim()}`,
+		);
+		expect(fs.existsSync(path.join(trace, 'repro'))).toBe(true);
+		expect(
+			fs.readFileSync(path.join(trace, 'repro/checkpoint.manifest'), 'utf-8'),
+		).toBe('# issue-tracer checkpoint manifest v1 rows=0\n');
 	});
 
 	test('is idempotent — a second run does not clobber an edited state.md', async () => {
@@ -386,6 +422,45 @@ describe('trace-init.sh — issue-tracer trace directory setup (PR #1880 review)
 			).toBe(false);
 		},
 	);
+
+	test('phase-0 identity is scoped to the repo root even when invoked from a subdirectory', async () => {
+		const repo = track(makeRepo('trace-init-subdir-identity-'));
+		fs.mkdirSync(path.join(repo, 'nested', 'deeper'), { recursive: true });
+		// An untracked file at the repo ROOT (not under the invocation cwd).
+		// Before the fix, the phase-0 identity pipeline's `git add -A -- .`
+		// and `git rm -r --cached -- .agents/issue-traces` ran without
+		// `-C "$root"`, so `.` resolved against the nested cwd and this
+		// root-level untracked file was silently excluded from the tree.
+		fs.writeFileSync(path.join(repo, 'untracked-at-root.txt'), 'x\n');
+
+		const nested = path.join(repo, 'nested', 'deeper');
+		const result = await runScript(nested, ['subdir-slug']);
+		expect(result.exitCode).toBe(0);
+
+		const state = fs.readFileSync(
+			path.join(repo, '.agents/issue-traces/subdir-slug/state.md'),
+			'utf-8',
+		);
+		const match = state.match(/^phase0-tree-id: ([0-9a-f]{40})$/m);
+		expect(match).not.toBeNull();
+		const phase0TreeId = match?.[1];
+
+		const CHECK_SCRIPT = path.resolve(
+			process.cwd(),
+			'.opencode/skills/issue-tracer/scripts/trace-check.sh',
+		);
+		const checkResult = Bun.spawnSync({
+			cmd: bashCommand(CHECK_SCRIPT, 'tree-id'),
+			cwd: repo,
+			env: process.env,
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: 10_000,
+		});
+		expect(checkResult.exitCode).toBe(0);
+		expect(checkResult.stdout.toString().trim()).toBe(phase0TreeId);
+	});
 
 	test('residual (non-blocking, PR #1880 review): .agents already existing as a plain regular file fails safe — non-zero exit, no trace dir created — even though the diagnostic is a raw shell error rather than a clean trace-init message', async () => {
 		// Known limitation: the containment check's ancestor-walk `cd`s into

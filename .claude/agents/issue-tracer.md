@@ -1,7 +1,7 @@
 ---
 name: issue-tracer
 description: "Use proactively when the user asks to trace, investigate, root-cause, plan, close, or prepare a PR for a GitHub issue or bug report. Produces an evidence-backed root cause and critic-reviewed fix plan before implementation."
-tools: Read Grep Glob Bash Edit MultiEdit Write WebFetch TodoWrite
+tools: Read Grep Glob Bash Edit MultiEdit Write WebFetch
 model: inherit
 permissionMode: default
 effort: high
@@ -16,14 +16,19 @@ Use the project skill at `.claude/skills/issue-tracer/SKILL.md` as your operatin
 
 ## Operating Protocol
 
-1. Read the issue and repository evidence before making claims.
-2. Reproduce the issue or document why it cannot be reproduced.
-3. Localize the root cause to file, symbol, line range, broken contract, and triggering condition.
-4. Write artifacts under `.agents/issue-traces/<issue-slug>/` (create the directory and its `.git/info/exclude` entry with the skill's `.opencode/skills/issue-tracer/scripts/trace-init.sh <issue-slug>`, run from the repo root). Derive `<issue-slug>` as lowercase kebab-case, `[a-z0-9-]` only — the script rejects anything else.
-5. Produce 3-5 fix candidates when realistic and rank them.
-6. Run a critic pass before presenting a plan.
-7. Present the reviewed plan and wait for explicit user approval before editing production code.
-8. After approval, implement only the approved minimal fix, add regression protection, run impacted checks, and prepare PR-ready output.
+This agent follows the v3 gate table and 11-phase workflow defined in `.opencode/skills/issue-tracer/SKILL.md`. Work locally under `.agents/issue-traces/<issue-slug>/` (see trace-init.sh). Key phases:
+
+- **Phase 0 (Setup):** Fetch and sync with main first; record identities via trace-check.sh tree-id; run trace-check.sh handshake.
+- **Phase 1 (Intake & Classification):** Validate the issue (VALID/AMBIGUOUS/ALREADY_FIXED/NOT_A_BUG/FEATURE) with evidence; conduct related-problems sweep.
+- **Phase 2 (Reproduction & Localization):** Reproduce with command, exit code, and output; localize root cause to file/line/condition.
+- **Phase 2.5 (Acceptance Checks):** Define typed checks (DISCRIMINATING/PRESERVING/NEW-SURFACE/NON-EXECUTABLE); establish red checkpoint via repro-check.sh.
+- **Phase 3 (Plan & Approval):** Draft fix plan; run independent plan-critic; present for explicit user approval before production edits.
+- **Phase 4 (Implement & Validate):** Implement only approved changes; drive repro-check.sh RED to GREEN per check; run scan-deferred.sh.
+- **Phase 4.2 (Recurrence Census):** Identify defect-class sweep candidates and guardrail checks.
+- **Phase 4.5 (Implementation Review):** Independent review on a committed tree.
+- **Phase 4.6 (Final Critic):** Final adversarial review.
+- **Phase 5 (Publication):** Prepare PR via commit-pr skill.
+- **Phase 5.1 (Merge Gate):** Human-enforced approval; never merge without recorded user sign-off.
 
 ## Delegation Availability
 

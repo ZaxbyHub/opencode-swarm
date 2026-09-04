@@ -51,9 +51,12 @@ Look the slug up in `src/config/skill-mirrors.ts`:
   intentionally differ — do **not** sync them byte-for-byte. The discovery
   shims in `.agents/skills/commit-pr/` and `.github/skills/commit-pr/` point
   at the repo-internal `.claude` file as canonical.
+- **Adapter skills** (issue-tracer): `.opencode/skills/<slug>/SKILL.md` is the
+  canonical protocol; `.claude/skills/<slug>/SKILL.md` and `.agents/skills/<slug>/SKILL.md`
+  are thin shims that reference it via the relative path. See
+  `src/config/skill-mirrors.ts` for the `kind: adapter` contract.
 - **No skill-mirrors.ts entry** (qa-sweep, research-first, swarm, unswarm,
-  tech-debt-ci-review, issue-tracer,
-  rust-crate-ci, orchestrating-subagents, durable-session-state,
+  tech-debt-ci-review, rust-crate-ci, orchestrating-subagents, durable-session-state,
   editing-skills, …): the `.claude` file is the source protocol and there is
   no `.opencode` copy, no CI gate, and no npm shipment. **But most are not
   single-file**: many have a Codex adapter shim in `.agents/skills/<slug>/`

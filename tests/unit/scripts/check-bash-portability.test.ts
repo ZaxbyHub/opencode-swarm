@@ -58,7 +58,7 @@ describe('check-bash-portability', () => {
 		});
 		expect(result.status, result.stdout + result.stderr).toBe(0);
 		expect(result.stdout).toContain(
-			'No bash4+-only constructs found in scripts/.',
+			'No bash4+-only constructs found in scripts/ or .opencode/skills/*/scripts/.',
 		);
 	});
 

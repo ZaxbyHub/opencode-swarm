@@ -67,6 +67,13 @@ const expectedProjectSkillFiles = [
 	'.opencode/skills/codebase-review-swarm/references/review-protocol-v8.2.md',
 ];
 
+const issueTracerScripts = [
+	'trace-init.sh',
+	'scan-deferred.sh',
+	'trace-check.sh',
+	'repro-check.sh',
+].map((name) => `.opencode/skills/issue-tracer/scripts/${name}`);
+
 const baseFiles = [
 	'dist/index.js',
 	'dist/index.d.ts',
@@ -102,6 +109,13 @@ describe('package-smoke skill-list sync', () => {
 		expect([...requiredProjectSkillSlugs].sort()).toEqual(
 			[...REQUIRED_PROJECT_SKILL_SLUGS].sort(),
 		);
+	});
+
+	test('includes the issue-tracer runtime scripts in the packed skill tree', async () => {
+		const packed = await import('../../../scripts/package-smoke.mjs').then(
+			(module) => module.listExpectedProjectSkillFiles(),
+		);
+		for (const script of issueTracerScripts) expect(packed).toContain(script);
 	});
 });
 

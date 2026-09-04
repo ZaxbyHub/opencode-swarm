@@ -21,7 +21,7 @@ files as you go; treat the conversation as cache, not storage.
 ## Where artifacts live
 
 - Generic swarm tasks: `.claude/session/tasks/<task-slug>/` in the project.
-- Issue-tracer work: `.claude/issue-traces/<issue>/` (that skill's own schema
+- Issue-tracer work: `.agents/issue-traces/<issue-slug>/` (that skill's own schema
   — `08b-implementation-review.md`, `09-final-critic.md` — wins for its work).
 - Never write task artifacts to the repo root, and never under `.swarm/` —
   that directory is the OpenCode plugin's runtime state, not Claude Code's.
