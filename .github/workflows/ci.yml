@@ -1119,11 +1119,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # npm pack of a local directory runs the prepare lifecycle ("bun run
+          # build") even under --ignore-scripts, and the pull_request leg has
+          # no bun installed. Strip prepare for this pack invocation only and
+          # restore the manifest unconditionally; the pack tests the files
+          # whitelist (binaries/ + dist layout), not the build itself.
+          REPO_ROOT="$PWD"
+          cp package.json package.json.pack-backup
+          restore_pkg() { mv "$REPO_ROOT/package.json.pack-backup" "$REPO_ROOT/package.json"; }
+          trap restore_pkg EXIT
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            if (pkg.scripts) delete pkg.scripts.prepare;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
           mkdir -p packed-probe && cd packed-probe
-          # --ignore-scripts skips the prepare lifecycle ("bun run build"), so
-          # this step needs no bun install and no bundle build: it packs the
-          # tree as staged (binaries/ + the dist layout marker above).
-          npm pack .. --json --ignore-scripts > pack.json
+          npm pack .. --json > pack.json
           # npm pack --json output can carry non-JSON noise around the payload;
           # isolate the single JSON array exactly like parsePackOutput in
           # scripts/package-smoke.mjs does (slice first '[' to last ']').
@@ -1165,4 +1177,4 @@ jobs:
             if (probe.arch !== "x86_64") throw new Error("packed runner arch mismatch: " + probe.arch);
             console.log("packed runner probe ok");
           '
-          cd .. && rm -rf packed-probe
+          cd "$REPO_ROOT" && rm -rf packed-probe
