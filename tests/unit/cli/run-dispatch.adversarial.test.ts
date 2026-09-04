@@ -279,8 +279,13 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 
 			// Should handle null byte gracefully, not crash
 			expect(result).toBe(1);
+			// #2493 review F-11: formatCommandNotFound strips control characters
+			// before interpolating the token, so the echoed name has no NUL byte.
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Command `/swarm \x00` not found.'),
+				expect.stringContaining('Command `/swarm ` not found.'),
+			);
+			expect(mockConsoleError).toHaveBeenCalledWith(
+				expect.not.stringContaining('\x00'),
 			);
 		});
 
