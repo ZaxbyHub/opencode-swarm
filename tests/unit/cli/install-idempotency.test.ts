@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const CLI_PATH = join(import.meta.dir, '../../../src/cli/index.ts');
 
@@ -30,7 +30,7 @@ describe('CLI install idempotency (issue #2493)', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = await mkdtemp(join(tmpdir(), 'opencode-swarm-idem-'));
+		tempDir = canonicalMkdtemp('opencode-swarm-idem-');
 		await mkdir(join(tempDir, 'opencode'), { recursive: true });
 	});
 
@@ -100,7 +100,7 @@ describe('CLI install idempotency (issue #2493)', () => {
 	});
 
 	test('OPENCODE_CONFIG_DIR is honored (alternate config dir)', async () => {
-		const altDir = await mkdtemp(join(tmpdir(), 'opencode-swarm-alt-'));
+		const altDir = canonicalMkdtemp('opencode-swarm-alt-');
 		try {
 			const result = await runCLI(['install'], {
 				OPENCODE_CONFIG_DIR: altDir,
