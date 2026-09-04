@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import { createWriteStream } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { ObservabilityEvent } from './observability/envelope.js';
 import {
 	createObservation,
 	toLegacyTelemetryLine,
@@ -162,7 +163,13 @@ export type TelemetryEvent =
 	// authoritative gate store.
 	| 'council_attempt'
 	| 'council_round_transition'
-	| 'council_attempt_unscoped';
+	| 'council_attempt_unscoped'
+	// #2482 (D3): context-source savings attribution (#1990 honesty rule —
+	// emitted ONLY when cited-file token sizes are known; unknown measurements
+	// are omitted entirely, never recorded as zeros) and the #2184
+	// verdict-row pipe-recovery fidelity class (identifiers/enums only).
+	| 'context_source_attribution'
+	| 'verdict_row_pipe_recovery';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -195,6 +202,13 @@ export type ReviewerGateReasonCode =
 export type TelemetryListener = (
 	event: TelemetryEvent,
 	data: Record<string, unknown>,
+	/**
+	 * The canonical observability envelope built by this emit (issue #2482).
+	 * Always passed positionally by `emit()`; optional so every existing
+	 * two-argument listener stays assignable. The SQLite observability sink
+	 * (`src/db/observability-event-store.ts`) is the canonical consumer.
+	 */
+	canonical?: ObservabilityEvent,
 ) => void;
 
 // ============================================================================
@@ -385,7 +399,7 @@ export function emit(
 
 		for (const listener of _listeners) {
 			try {
-				listener(event, data);
+				listener(event, data, canonical);
 			} catch {
 				// Listener errors must NOT propagate
 			}

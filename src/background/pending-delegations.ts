@@ -4853,6 +4853,27 @@ export function isTerminalDelegationStatus(
  * the status and age filters still apply on top of either, which is the point —
  * an included record that has since gone `completed` is still spared.
  */
+/**
+ * #2482: stale-sweep terminal observer. Registered by delegation-lifecycle
+ * (which imports this store) so the sweep's recovered `delegation_end`
+ * emission lives beside its pairing `delegation_begin` — while keeping the
+ * import graph acyclic (this store must not import delegation-lifecycle
+ * back; the cycle left DEFAULT_STALE_DELEGATION_TIMEOUT_MS in its TDZ for
+ * transitively-importing modules). Unregistered = no observation.
+ */
+let _staleSweepObserver:
+	| ((record: BackgroundDelegationRecord, status: 'stale') => void)
+	| null = null;
+
+/** #2482: register the stale-sweep terminal observer. */
+export function registerStaleSweepObserver(
+	observer:
+		| ((record: BackgroundDelegationRecord, status: 'stale') => void)
+		| null,
+): void {
+	_staleSweepObserver = observer;
+}
+
 function sweepStaleLocked(
 	directory: string,
 	timeoutMs: number,
@@ -4884,6 +4905,17 @@ function sweepStaleLocked(
 			status: 'stale',
 			updatedAt: now,
 		});
+		// #2482 / #2244: the sweep just moved an open record to a durable
+		// terminal status WITHOUT the claim path emitting the terminal event
+		// — by definition its `delegation_begin` is unpaired. Emit the
+		// exactly-once recovered end (record-attributed identity via the
+		// shared leaf builder; the store lock is already held, mirroring the
+		// council-observability precedent). Fail-open by design.
+		try {
+			_staleSweepObserver?.(record, 'stale');
+		} catch {
+			// Observation only — the sweep result must not change.
+		}
 		swept += 1;
 	}
 	if (swept > 0) maybeCompactDelegationsLocked(directory);

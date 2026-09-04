@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 59-entry event catalog,
+`src/observability/`: the canonical event envelope, the 61-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all eighteen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 59 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 61 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -197,10 +197,10 @@ those inputs before this change.
 
 ---
 
-## 5. The 59-entry catalog
+## 5. The 61-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 59 entries = the 38 pre-existing members of
-`TelemetryEvent` (`src/telemetry.ts:15-165`) plus `agent_conflict_detected`
+Source: `src/observability/catalog.ts`. Exactly 61 entries = the 38 pre-existing members of
+`TelemetryEvent` (`src/telemetry.ts:16-172`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
 result event) plus `knowledge_receipt_transition` (issue #2031, the bounded
@@ -240,46 +240,46 @@ for a currently-unread kind). `ISSUE_LIFECYCLE_RETENTION = #2045`.
 
 #### session_started
 Category `lifecycle`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:550`. Consumers: none — owner **#2047**. Retention: **#2045**.
+`src/telemetry.ts:564`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`. OTel mapping: `openinference`.
 
 #### session_ended
 Category `lifecycle`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:554`. Consumers: none — owner **#2047**. Retention: **#2045**.
+`src/telemetry.ts:568`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`. OTel mapping: `openinference`.
 
 #### agent_activated
 Category `lifecycle`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:558`. Consumers: none — owner **#2047**. Retention: **#2045**.
+`src/telemetry.ts:572`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`. OTel mapping: `openinference`.
 
 #### task_state_changed
 Category `lifecycle`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:596`. Consumers: none — owner **#2047**. Retention: **#2045**.
+`src/telemetry.ts:610`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`, `taskId`. OTel mapping: `openinference`.
 
 #### phase_changed
 Category `lifecycle`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:644`. Consumers: none — owner **#2047**. Retention: **#2045**.
+`src/telemetry.ts:658`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId` (the producer emits `oldPhase`/`newPhase`,
 not `phase`, so no `phaseId` is extractable — requiring one would violate on
 every event). OTel mapping: `openinference`.
 
 #### heartbeat
 Category `lifecycle`, severity `debug`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:826`. Consumer: `src/telemetry.ts:232` (in-process
+`src/telemetry.ts:840`. Consumer: `src/telemetry.ts:246` (in-process
 `addTelemetryListener` heartbeat feeding `/swarm status`). Retention: **#2045**.
 Required workflow IDs: `hostSessionId`. `allowsLinks: false` — a point-in-time
 liveness ping has no work to link to.
 
 #### turbo_mode_changed
 Category `lifecycle`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:834`. Consumers: none — owner **#2047**. Retention: **#2045**.
+`src/telemetry.ts:848`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`.
 
 #### environment_detected
 Category `lifecycle`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:859`. Consumers: none — owner **#2047**. Retention: **#2045**.
+`src/telemetry.ts:873`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`. `allowsLinks: false` — a host-environment
 fact, not a unit of work.
 
@@ -287,7 +287,7 @@ fact, not a unit of work.
 
 #### delegation_begin
 Category `delegation`, severity `info`, privacy `pseudonymous`. Producers
-`src/telemetry.ts:562` and `src/background/delegation-lifecycle.ts`
+`src/telemetry.ts:576` and `src/background/delegation-lifecycle.ts`
 (`emitDelegationBegin`, lane dispatch — issue #2045). Consumers: none — owner
 **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`, `taskId`. OTel mapping: `genai`.
@@ -305,7 +305,7 @@ cost rollups are unaffected (they key on `delegation_end.record_id`).
 
 #### delegation_end
 Category `delegation`, severity `info`, privacy `pseudonymous`. Producers
-`src/telemetry.ts:572` and `src/background/delegation-lifecycle.ts`
+`src/telemetry.ts:586` and `src/background/delegation-lifecycle.ts`
 (`emitDelegationCostObservation`, claimed lane terminals — issue #2045).
 Consumer: `src/services/cost-accounting.ts:127`
 (`readTelemetryEvents` → `summarizeTelemetryCosts` → `/swarm costs`). Retention:
@@ -342,12 +342,12 @@ inconclusive instead of guessing. Retention: **#2043**. Required workflow IDs:
 
 #### model_fallback
 Category `delegation`, severity `notice`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:677`. Consumers: none — owner **#2047**. Retention: **#2045**.
+`src/telemetry.ts:691`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`. OTel mapping: `genai`.
 
 #### model_unresolved
 Category `delegation`, severity `warning`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:691` (issue #2271 bug 4: preflight confirmed a configured
+`src/telemetry.ts:705` (issue #2271 bug 4: preflight confirmed a configured
 agent model id does not resolve against the provider catalog — fires before
 any dispatch attempt, unlike a runtime `model_fallback`). Consumers: none —
 owner **#2047**. Retention: **#2045**. Required workflow IDs: `hostSessionId`.
@@ -360,29 +360,29 @@ phantom-conversation artifact, not a real session.
 
 #### gate_passed
 Category `gate`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:605`. Consumers: none — owner **#2047** (verified:
+`src/telemetry.ts:619`. Consumers: none — owner **#2047** (verified:
 `src/evaluation/gate-stats.ts:99` filters for `reviewer_gate_decision` only;
 nothing reads `gate_passed`). Retention: **#2045**. Required workflow IDs:
 `hostSessionId`, `taskId`.
 
 #### gate_failed
 Category `gate`, severity `warning`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:622`. Consumers: none — owner **#2047** (same verification as
+`src/telemetry.ts:636`. Consumers: none — owner **#2047** (same verification as
 `gate_passed`). Retention: **#2045**. Required workflow IDs: `hostSessionId`,
 `taskId`.
 
 #### gate_parse_error
 Category `gate`, severity `warning`, privacy **`sensitive`** (carries a
 free-text error message that can embed a path). Producer
-`src/telemetry.ts:609`. Consumers: none — owner **#2047**. Retention: **#2045**.
-Required workflow IDs: `taskId` only — verified at `src/telemetry.ts:609-615`:
+`src/telemetry.ts:623`. Consumers: none — owner **#2047**. Retention: **#2045**.
+Required workflow IDs: `taskId` only — verified at `src/telemetry.ts:623-629`:
 the producer takes only `(taskId, error)` and has **no** `sessionId`, unlike
 every sibling helper. Forbidden workflow IDs: `hostSessionId` (a session id on
 this kind would mean one was manufactured).
 
 #### reviewer_gate_decision
 Category `gate`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:632`. Consumer: `src/evaluation/gate-stats.ts:99`. Retention:
+`src/telemetry.ts:646`. Consumer: `src/evaluation/gate-stats.ts:99`. Retention:
 **#2045**. Required workflow IDs: `hostSessionId`, `taskId`.
 
 #### council_attempt
@@ -441,16 +441,29 @@ state-corrupt submission (cf. `gate_parse_error`).
 
 ### Cost category
 
+
+#### context_source_attribution
+
+Category `cost`, severity `info`, privacy `operational` — producer `src/services/context-attribution.ts:124` (issue #2482, absorbing #1990)
+
+Recorded once per measured context-source injection. Payload: `sessionId`, optional `taskId`, `source` (`context_pack` | `lane-orientation` | `reflection` | `ask`), `tokensReturned`, `tokensSavedEstimate` (floored at 0), and `estimate: true`. HONESTY RULE: the event is emitted ONLY when the cited-file token total was actually measured; when file sizes are unknown the call records NOTHING — never a zero and never a guess. Aggregated by `/swarm report`.
+
+#### verdict_row_pipe_recovery
+
+Category `gate`, severity `info`, privacy `pseudonymous` — producer `src/pr-review/legacy-transcript-adapter.ts:691` (issue #2482, absorbing #2184)
+
+Emitted when the verdict-row parser recovers a legacy row with unescaped pipe overflow, carrying the fidelity class into the event lifecycle: `marker`, `itemId`, `recovery` (`legacy-fidelity-safe` | `legacy-lossy`), `fieldCount`. Identifiers and enums only — the 120-character row preview from the debug warning is deliberately NOT included. Mid-row pipes remain accepted per the repository owner's relaxation directive (#2181/#2182); this event makes the safe-vs-lossy distinction observable without debug logging.
+
 #### budget_updated
 Category `cost`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:648`. Consumers: none — owner **#2047**. Retention: **#2043**.
+`src/telemetry.ts:662`. Consumers: none — owner **#2047**. Retention: **#2043**.
 Required workflow IDs: `hostSessionId`.
 
 ### Guardrail category
 
 #### context_pruned
 Category `guardrail`, severity `notice`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:667`. Consumers: none — owner **#2047**. Retention: **#2047**.
+`src/telemetry.ts:681`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
 
 Bounded aggregate emitted once per enforcement pass when transcript mutation
@@ -463,7 +476,7 @@ content, tool output, path, or fabricated session identifier is written.
 #### retrieval_routed
 
 Category `guardrail`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:1216`. Consumers: none — owner **#2047**. Retention:
+`src/telemetry.ts:1230`. Consumers: none — owner **#2047**. Retention:
 **#2047**. Required workflow IDs: `hostSessionId`.
 
 Emitted once after a retrieval request is routed successfully. Its payload is
@@ -474,17 +487,17 @@ content.
 
 #### hard_limit_hit
 Category `guardrail`, severity `error`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:705`. Consumers: none — owner **#2047**. Retention: **#2047**.
+`src/telemetry.ts:719`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
 
 #### revision_limit_hit
 Category `guardrail`, severity `warning`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:714`. Consumers: none — owner **#2047**. Retention: **#2047**.
+`src/telemetry.ts:728`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
 
 #### loop_detected
 Category `guardrail`, severity `warning`, privacy **`sensitive`**. Producer
-`src/telemetry.ts:718`. Consumers: none — owner **#2047**. Retention: **#2047**.
+`src/telemetry.ts:732`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
 
 `sensitive`, not `pseudonymous`, because the `loopType` argument carries
@@ -499,74 +512,74 @@ take the worst case across producers; one clean producer cannot downgrade it.
 
 #### scope_violation
 Category `guardrail`, severity `error`, privacy **`sensitive`** (carries `file`,
-a repository-relative or absolute path). Producer `src/telemetry.ts:814`.
+a repository-relative or absolute path). Producer `src/telemetry.ts:828`.
 Consumers: none — owner **#2047**. Retention: **#2047**. Required workflow IDs:
 `hostSessionId`.
 
 #### qa_skip_violation
 Category `guardrail`, severity `warning`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:822`. Consumers: none — owner **#2047**. Retention: **#2047**.
+`src/telemetry.ts:836`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
 
 #### auto_oversight_escalation
 Category `guardrail`, severity `warning`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:844`. Consumers: none — owner **#2047**. Retention: **#2047**.
+`src/telemetry.ts:858`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId` (`phase` is an *optional* parameter here,
-`src/telemetry.ts:844`, so `phaseId` is deliberately not required).
+`src/telemetry.ts:858`, so `phaseId` is deliberately not required).
 
 ### PRM category
 
 #### no_op_strong_warning
 Category `guardrail`, severity `warning`, privacy `pseudonymous`. Repeated no-op agent turns crossed the strong-warning threshold.
-Producer `src/telemetry.ts:732`. Consumers: none — owner **#2047**. Retention: **#2047**.
+Producer `src/telemetry.ts:746`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`. Added to main by #2063 while this PR was open.
 
 #### gate_denial_loop
 Category `guardrail`, severity `warning`, privacy `pseudonymous`. The same (session, tool, denial-code) streak reached the hard rung (#2063 B1).
-Producer `src/telemetry.ts:753`. Consumers: none — owner **#2047**. Retention: **#2047**.
+Producer `src/telemetry.ts:767`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`. Added to main by #2063 while this PR was open.
 
 #### execution_stall_warning
 Category `guardrail`, severity `warning`, privacy `pseudonymous`. An ARMED execution episode reached the advisory rung (#2063 B5).
-Producer `src/telemetry.ts:767`. Consumers: none — owner **#2047**. Retention: **#2047**.
+Producer `src/telemetry.ts:781`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`. Added to main by #2063 while this PR was open.
 
 #### execution_stall_denied
 Category `guardrail`, severity `error`, privacy `pseudonymous`. A non-productive tool was hard-denied at the stop rung (#2063 B5).
-Producer `src/telemetry.ts:784`. Consumers: none — owner **#2047**. Retention: **#2047**.
+Producer `src/telemetry.ts:798`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`. Added to main by #2063 while this PR was open.
 
 #### swarm_internals_read_denied
 Category `guardrail`, severity `error`, privacy `sensitive`. A read resolved inside the installed opencode-swarm package and was denied (#2063 B4).
-Producer `src/telemetry.ts:801`. Consumers: none — owner **#2047**. Retention: **#2047**.
+Producer `src/telemetry.ts:815`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`. Added to main by #2063 while this PR was open.
 
 #### prm_hard_stop_delivered
 Category `prm`, severity `error`, privacy `pseudonymous`. DELIVERY of a PRM hard stop, distinct from the `prm_hard_stop` TRIGGER (#2063 C2).
-Producer `src/telemetry.ts:1197`. Consumers: none — owner **#2047**. Retention: **#2047**.
+Producer `src/telemetry.ts:1211`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`. Added to main by #2063 while this PR was open.
 
 #### prm_pattern_detected
 Category `prm`, severity `notice`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:874`. Consumers: none — owner **#2047**. Retention: **#2047**.
+`src/telemetry.ts:888`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
 
 #### prm_course_correction_injected
 Category `prm`, severity `notice`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:888`. Consumers: none — owner **#2047**. Retention: **#2047**.
+`src/telemetry.ts:902`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
 
 #### prm_escalation_triggered
 Category `prm`, severity `warning`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:901`. Consumers: none — owner **#2047**. Retention: **#2047**.
+`src/telemetry.ts:915`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
 
 #### prm_hard_stop
 Category `prm`, severity `critical`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:915`. Consumers: none — owner **#2047**. Retention: **#2047**.
+`src/telemetry.ts:929`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
 
-### Evidence category (dark — "emitted but no live parallel paths", `src/telemetry.ts:39`)
+### Evidence category (dark — "emitted but no live parallel paths", `src/telemetry.ts:40`)
 
 #### evidence_lock_acquired
 Category `evidence`, severity `info`, privacy **`sensitive`** (carries
@@ -676,7 +689,7 @@ the operator flow ran and why it aborted, if it did.
 
 #### residue_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:974` (`residueHealth`, called by
+`src/telemetry.ts:988` (`residueHealth`, called by
 `quarantineSwarmResidue` in `src/services/swarm-residue.ts` after a
 residue quarantine run — the close clean stage or `/swarm config doctor
 --quarantine-residue`; issue #2035). Consumers: none — owner **#2047**.
@@ -693,7 +706,7 @@ pressure without leaking workspace layout.
 
 #### context_telemetry_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:998` (`contextTelemetryHealth`, called by the bounded
+`src/telemetry.ts:1012` (`contextTelemetryHealth`, called by the bounded
 `.swarm/context-telemetry.jsonl` store in `src/context-map/telemetry.ts` after a
 compaction or close cut; issue #2037). Consumers: none — owner **#2047**.
 Retention: **#2047**. No workflow ID is required: context-map telemetry is
@@ -710,7 +723,7 @@ contents or workspace layout.
 
 #### skill_usage_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1035` (`skillUsageHealth`, called for the `.swarm/skill-usage.jsonl`
+`src/telemetry.ts:1049` (`skillUsageHealth`, called for the `.swarm/skill-usage.jsonl`
 store during compaction, migration, consumption, and pressure events; issue
 #2038). Consumers: none — owner **#2047**. Retention: **#2047**. No workflow
 ID is required: skill-usage tracking is aggregate-only and not correlated to a
@@ -731,7 +744,7 @@ health aggregate so later reporting (PR 16/19) can surface skill-usage
 pressure without leaking per-skill identifiers.
 #### core_events_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1061` (`coreEventsHealth`, called by the bounded
+`src/telemetry.ts:1075` (`coreEventsHealth`, called by the bounded
 `.swarm/events.jsonl` store in `src/events/core-events.ts` after a compaction
 or close cut; issue #2039). Consumers: none — owner **#2047**. Retention:
 **#2047**. No workflow ID is required: the aggregate is store-level and
@@ -761,7 +774,7 @@ for longer than the cache-refresh window.
 
 #### shell_audit_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1085` (`shellAuditHealth`, called by the bounded
+`src/telemetry.ts:1099` (`shellAuditHealth`, called by the bounded
 `.swarm/session/shell-audit.jsonl` security-audit store in
 `src/hooks/guardrails/shell-audit-store.ts` after a compaction or close cut;
 issue #2040). Consumers: none — owner **#2047**. Retention: **#2047**. No
@@ -781,7 +794,7 @@ per-type folded counts disclose.
 
 #### trajectory_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1108` (`trajectoryHealth`, called by the bounded
+`src/telemetry.ts:1122` (`trajectoryHealth`, called by the bounded
 `.swarm/trajectories/` PRM session-trajectory store in
 `src/prm/trajectory-store.ts` after a compaction pass or cleanup sweep, and —
 cooldown-bounded to one event per minute — when an append is skipped because
@@ -801,7 +814,7 @@ corruption in this store).
 
 #### pr_subscription_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1137` (`prSubscriptionHealth`, called by the bounded
+`src/telemetry.ts:1151` (`prSubscriptionHealth`, called by the bounded
 `.swarm/pr-monitor/` PR-monitor subscription checkpoint store in
 `src/background/pr-subscriptions.ts` after a terminal-record compaction, a
 legacy-JSONL migration completion (including the one-time read-bootstrap), a
@@ -822,7 +835,7 @@ the same figures synchronously.
 
 #### learning_health_alarm
 Category `lifecycle`, severity `warning`, privacy `operational`. Producer
-`src/telemetry.ts:1181` (`learningHealthAlarm`, called by the learning-health
+`src/telemetry.ts:1195` (`learningHealthAlarm`, called by the learning-health
 registry in `src/health/learning-health.ts` when one of the eight issue-#2044
 alarm families — `headroom_dead_streak`, `model_limit_fallback`,
 `retrieval_outcome_liveness`, `role_participation`, `promoted_fixture_share`,
@@ -897,7 +910,7 @@ row 17 records the authoritative knowledge-receipt partition added by #2031.
 
 | # | Store | Writer (file:line) | Reader(s) (file:line) | Discriminator | Clock | Schema ver. | Correlation carried | Correlation MISSING | Close/archive | State class | Owner |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | `.swarm/telemetry.jsonl` (+`.1`) | `src/telemetry.ts:378` (the `stream.write(line, …)` call) | `src/services/cost-accounting.ts:133` (`readTelemetryEvents`) → `summarizeTelemetryCosts:124` → `/swarm costs`; `src/evaluation/gate-stats.ts:99`; in-process `addTelemetryListener` heartbeat (`src/telemetry.ts:231-240`) → `/swarm status` | `event` | ISO string | none | `sessionId`, `taskId`, `agentName`, `gate` | no trace/span id, no delegation id linking begin↔end; `gate_parse_error` has no `sessionId` (`gateParseError` emit payload, `src/telemetry.ts:609-613`) | yes — `close.ts:270-297` | operational | #2045 (lifecycle/terminals), #2043 (cost provenance) |
+| 1 | `.swarm/telemetry.jsonl` (+`.1`) | `src/telemetry.ts:392` (the `stream.write(line, …)` call) | `src/services/cost-accounting.ts:133` (`readTelemetryEvents`) → `summarizeTelemetryCosts:124` → `/swarm costs`; `src/evaluation/gate-stats.ts:99`; in-process `addTelemetryListener` heartbeat (`src/telemetry.ts:245-254`) → `/swarm status` | `event` | ISO string | none | `sessionId`, `taskId`, `agentName`, `gate` | no trace/span id, no delegation id linking begin↔end; `gate_parse_error` has no `sessionId` (`gateParseError` emit payload, `src/telemetry.ts:623-627`) | yes — `close.ts:270-297` | operational | #2045 (lifecycle/terminals), #2043 (cost provenance) |
 | 2 | `.swarm/context-telemetry.jsonl` | `src/context-map/telemetry.ts:704` `recordTelemetry` (writes the store under the exclusive lock; compaction/atomic-rewrite at `compactStore:918` / `atomicReplace:492`) | `src/context-map/telemetry.ts:793` `getTelemetrySummary` → `src/commands/context-map-stats.ts:16` (sole non-test consumer, verified) | none (uniform shape) | ISO string | **2** (manifest header, issue #2037) | `task_id` only | `session_id`, agent identity beyond a free-text `agent_role` | **no** | operational | **#2037** |
 | 3 | `.swarm/skill-usage.jsonl` (+ `.swarm/skill-usage-pending.json`) | `src/hooks/skill-usage-log.ts:535` | `readSkillUsageEntries:770`, `readSkillUsageEntriesTail:808`, `applySkillUsageFeedback:2080` → `bumpKnowledgeConfidenceBatchResult` | `type` (legacy marker variant only; acks now live in the sidecar) | ISO string | `version` on the sidecar document (`skillVersion` versions the *skill*, not the record) | `sessionID`, `agentName`, `taskID`, `skillPath` | no trace/span | `skill_usage_health` (counts-only) | derived (stream) / authoritative (sidecar) | **#2038 — closed** |
 | 4 | `.swarm/events.jsonl` | ~30 call sites | `src/services/context-budget-service.ts:195` (line-count proxy for turn count — does NOT parse JSON); `src/hooks/curator.ts:1524` | **`event` OR `type`** (split across writers: `src/context/role-filter.ts:147`/`src/tools/phase-complete.ts:1571` use `event:`; `src/hooks/curator.ts:1759`/`src/hooks/full-auto-intercept.ts:269` use `type:`) | ISO string | none | inconsistent per writer | `sessionID` absent on `phase_complete`, `auto_oversight`, `context_filtered` | yes — `close.ts:275` | operational | **#2039** |

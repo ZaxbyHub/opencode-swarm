@@ -568,12 +568,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:5158 writeDelegationFallback / :5209 removeDelegationFallback',
-			'src/background/pending-delegations.ts:5638 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:5190 writeDelegationFallback / :5241 removeDelegationFallback',
+			'src/background/pending-delegations.ts:5670 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:5013 readDelegationFallback / :5025 listDelegationFallbacks / :5059 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:5616 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:5045 readDelegationFallback / :5057 listDelegationFallbacks / :5091 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:5648 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:971)',
 		stateClass: 'authoritative',
@@ -1032,6 +1032,43 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'not-a-defect',
 			proof: 'Verified global 500-entry FIFO enforced on pending rows inside the append transaction plus 7-day consumed-row DELETE retention (src/db/insight-candidate-store.ts) — carried over from the legacy store and re-verified for the swarm.db migration (issue #2480).',
+		},
+	},
+	{
+		id: 'observability-events-sqlite',
+		category: 3,
+		pathGrammar:
+			'swarm.db tables observability_event / observability_sink_health / observability_import (issue #2482; the bounded .swarm/telemetry.jsonl(.1) stream stays the operational legacy record, imported incrementally — never renamed)',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/db/observability-event-store.ts'],
+		writerCitations: [
+			'src/db/observability-event-store.ts appendObservabilityEventDb — telemetry-listener sink; group-commit writer (one BEGIN IMMEDIATE txn per flush, durability class normal); INSERT OR IGNORE by event_id; throttled DELETE retention (MAX_OBSERVABILITY_EVENT_ROWS 50000) and health upsert ride the same batch',
+			'src/db/observability-event-store.ts syncObservabilityImport — report-path-only incremental legacy import (fingerprint markers in observability_import, content-derived synthetic ids, INSERT OR IGNORE; one BEGIN IMMEDIATE per changed file)',
+		],
+		readerCitations: [
+			'src/db/observability-event-store.ts queryObservabilityEvents — bounded deterministic SELECT (filters task/session/trace/batch/since; ORDER BY occurred_at,rowid; LIMIT MAX_REPORT_ROWS 5000)',
+			'src/db/observability-event-store.ts readObservabilityCoverage / readObservabilitySinkHealth — coverage + health counters for /swarm report',
+			'src/commands/report.ts handleReportCommand — the /swarm report consumer',
+		],
+		schemaVersion: 'envelope rows (eventId/kind/workflow ids/payload JSON; imported rows use sha256(obs-import-v1 + line) synthetic ids)',
+		stateClass: 'operational',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'MAX_OBSERVABILITY_EVENT_ROWS 50000 GLOBAL DELETE-oldest (rowid ASC) inside the append batch every RETENTION_CHECK_INTERVAL 512 accepted events; per-payload cap MAX_EVENT_PAYLOAD_BYTES 16384 (oversize → quarantined truncated stub)',
+			scope: 'global',
+			citation: 'src/db/observability-event-store.ts',
+		},
+		readBound: { pattern: 'indexed', bound: 'idx_obs_event_* indexes; report queries LIMIT 5000 rows, quarantined rows excluded from timelines', sync: true, citation: 'src/db/observability-event-store.ts queryObservabilityEvents' },
+		lockModel: 'SQLite WAL + busy_timeout 5000 + group-commit BEGIN IMMEDIATE batches (shared writer with the other swarm.db stores); legacy import runs its own BEGIN IMMEDIATE',
+		crashBehavior: 'WAL auto-recovery; unflushed queue ops lost by design (fail-open observability — the telemetry.jsonl legacy line and the JSONL file remain the operational record); malformed events quarantined in-table with a reason, never dropped',
+		closePolicy: 'untouched (bounded tables inside swarm.db; swarm.db itself is archived+cleaned by the project-db row)',
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'telemetry.jsonl(.1) NEVER renamed (it stays the live sink); syncObservabilityImport re-imports deterministically from per-file fingerprint markers — rotation/shrink triggers a content-deduped full rescan',
+		healthSignal: 'observability_sink_health counters (accepted/quarantined/dropped/last_error)',
+		owner: 'this-gate',
+		disposition: {
+			kind: 'not-a-defect',
+			proof: 'Global 50000-row DELETE-based retention + 16 KiB per-payload cap enforced inside the append batch (src/db/observability-event-store.ts runRetentionIfOverCap/buildLiveRow); rebuildable by construction — imported rows are content-derived and re-sync reproduces them (test-proven).',
 		},
 	},
 	{
@@ -3632,6 +3669,10 @@ export const PROJECT_SWARM_ROWS_WITH_INDIRECT_ROOT: readonly string[] =
 		// owned and lifecycle-declared by the project-db row; these rows own the
 		// logical tables and the cold-archived legacy files inside them.
 		'insight-candidates',
+		// issue #2482: same indirection — observability tables inside swarm.db;
+		// the legacy telemetry.jsonl stays live (owned by telemetry-jsonl) and
+		// is imported incrementally, never renamed.
+		'observability-events-sqlite',
 		'drift-reports',
 		'doc-drift-signals',
 	]);

@@ -347,6 +347,14 @@ Show per-agent and per-task token/cost telemetry [--json]
 
 **Args:** `--json`
 
+### `/swarm report`
+
+Report swarm observability events from the SQLite query authority [--task <id>] [--session <id>] [--trace <id>] [--run <batchId>] [--since <ISO-8601>] [--json]
+
+**Args:** `--task <id>, --session <id>, --trace <id>, --run <batchId>, --since <ISO-8601>, --json`
+
+Read-only, bounded, deterministic report over the observability events store in .swarm/swarm.db. --run filters the lane/dispatch batch axis (workflow.batchId). Unmatched delegation begins are disclosed, never fabricated into ends. --json emits a schemaVersion-tagged block.
+
 ### `/swarm learning`
 
 Show learning metrics and violation trends
