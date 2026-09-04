@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
@@ -99,7 +99,7 @@ describe('delegation gate plan critic approval', () => {
 		resetSwarmState();
 		closeAllProjectDbs();
 		if (dir && existsSync(dir)) {
-			await rm(dir, { recursive: true, force: true });
+			(await import('../../helpers/safe-test-dir.js')).safeRmRecursive(dir);
 		}
 	});
 
