@@ -782,6 +782,28 @@ function archiveShadowFileBestEffort(filePath: string): void {
 	}
 }
 
+function retireAuthoritativeLegacyShadow(directory: string): boolean {
+	const legacyPath = storePath(directory);
+	if (!fileExistsStrict(legacyPath)) return true;
+	if (fileExistsStrict(projectionMarkerPath(legacyPath))) return true;
+	const importedPath = importedShadowPath(legacyPath);
+	try {
+		if (!fileExistsStrict(importedPath)) {
+			_internals.renameWithRetry(legacyPath, importedPath);
+		} else {
+			fs.unlinkSync(legacyPath);
+		}
+		return !fileExistsStrict(legacyPath);
+	} catch (error) {
+		log(
+			`[pr-monitor] authoritative legacy shadow retirement failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+		return false;
+	}
+}
+
 function ensurePrSubscriptionCoordinationImported(
 	directory: string,
 	createIfNeeded: boolean,
@@ -800,10 +822,18 @@ function ensurePrSubscriptionCoordinationImported(
 		// copied into SQLite. Let the read path overlay that tail instead of
 		// repairing/archiving the legacy projection here.
 		if (migrationPending) return false;
-		if (fileExistsStrict(storePath(directory))) {
+		const legacyPath = storePath(directory);
+		if (
+			fileExistsStrict(legacyPath) &&
+			!fileExistsStrict(projectionMarkerPath(legacyPath)) &&
+			!retireAuthoritativeLegacyShadow(directory)
+		) {
+			return false;
+		}
+		if (fileExistsStrict(legacyPath)) {
 			let legacyStat: fs.Stats | null = null;
 			try {
-				legacyStat = _internals.statSync(storePath(directory));
+				legacyStat = _internals.statSync(legacyPath);
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
 					throw new Error(
@@ -823,7 +853,6 @@ function ensurePrSubscriptionCoordinationImported(
 				return false;
 			}
 		}
-		const legacyPath = storePath(directory);
 		const projectionNeedsRepair =
 			!fileExistsStrict(projectionMarkerPath(checkpointPath(directory))) ||
 			(fileExistsStrict(legacyPath) &&
@@ -1054,7 +1083,7 @@ function canUseCoordinationWritePath(directory: string): boolean {
 		fileExistsStrict(legacyPath) &&
 		!fileExistsStrict(projectionMarkerPath(legacyPath))
 	) {
-		return false;
+		if (!retireAuthoritativeLegacyShadow(directory)) return false;
 	}
 	if (hasLegacyReconciliationArtifacts(directory)) return false;
 	// Keep the v2 checkpoint migration state machine authoritative until it has
@@ -2449,18 +2478,7 @@ async function loadViewForRead(directory: string): Promise<{
 		}
 		if (read.value.migration?.done === true) {
 			if (!legacyProjectionFingerprintMatches(directory, read.value)) {
-				const pendingCheckpoint = cloneCheckpoint(read.value);
-				pendingCheckpoint.records = {
-					...pendingCheckpoint.records,
-					...(pendingCoordination ?? {}),
-				};
-				const overlaid = overlayLegacy(directory, pendingCheckpoint);
-				return {
-					view: overlaid.view,
-					recoverySource: overlaid.usedLegacy
-						? 'checkpoint+legacy'
-						: 'checkpoint',
-				};
+				retireAuthoritativeLegacyShadow(directory);
 			}
 			return {
 				view: { ...read.value.records },
@@ -2930,26 +2948,10 @@ function loadViewForWrite(directory: string): LoadedView {
 		return { checkpoint, view, audit, dirty };
 	}
 
-	const overlaid = overlayLegacy(directory, checkpoint);
-	view = overlaid.view;
-	if (overlaid.usedLegacy && !overlaid.aborted) {
-		// A changed source was folded completely. Settle the size+mtime
-		// fingerprint even when no record won the merge — otherwise a source
-		// of losing/older records (or pure garbage) would be re-folded on
-		// EVERY read forever. Re-enter the archive path so the now-stable
-		// source gets archived. An ABORTED fold never settles: the unchanged
-		// fingerprint forces a full retry on the next op and keeps the
-		// archive blocked.
-		if (migration.done !== true) {
-			migration.sourceBytes = legacySize;
-			migration.sourceMtimeMs = legacyMtime;
-			migration.scannedBytes = legacySize;
-			if (!migration.archived) migration.archived = false;
-		}
-		checkpoint.maintenance.corruptLegacyRecords += overlaid.corruptLines;
-		dirty = true;
+	if (!legacyProjectionFingerprintMatches(directory, checkpoint)) {
+		retireAuthoritativeLegacyShadow(directory);
 	}
-	return { checkpoint, view, audit, dirty };
+	return { checkpoint, view: { ...checkpoint.records }, audit, dirty };
 }
 
 // ---------------------------------------------------------------------------

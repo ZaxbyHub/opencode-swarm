@@ -72,6 +72,14 @@ describe('delegation gate doc-only durable evidence', () => {
 
 	beforeEach(() => {
 		resetSwarmState();
+		try {
+			const swarmWorktreesInTemp = path.join(os.tmpdir(), '.swarm-worktrees');
+			if (fs.existsSync(swarmWorktreesInTemp)) {
+				fs.rmSync(swarmWorktreesInTemp, { recursive: true, force: true });
+			}
+		} catch {
+			/* best-effort */
+		}
 		directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foreground-doc-gate-'));
 		git(directory, ['init']);
 		git(directory, ['config', 'user.email', 'tests@example.com']);
@@ -93,6 +101,14 @@ describe('delegation gate doc-only durable evidence', () => {
 		swarmState.opencodeClient = undefined;
 		resetSwarmState();
 		fs.rmSync(directory, { recursive: true, force: true });
+		try {
+			const swarmWorktreesInTemp = path.join(os.tmpdir(), '.swarm-worktrees');
+			if (fs.existsSync(swarmWorktreesInTemp)) {
+				fs.rmSync(swarmWorktreesInTemp, { recursive: true, force: true });
+			}
+		} catch {
+			/* best-effort */
+		}
 	});
 
 	async function runCoder(filesTouched: string[], actualFiles: string[]) {

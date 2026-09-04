@@ -246,7 +246,6 @@ describe('retention registry rows — coverage plumbing', () => {
 		const health = sourceLines('src/background/delegation-health.ts');
 		const close = sourceLines('src/commands/close.ts');
 		const appendRecord = lineOf(pending, /^function appendRecord\(/);
-		const appendFile = lineOf(pending, /^\s*fs\.appendFileSync\(/);
 		const firstMutation = lineOf(
 			pending,
 			/^export async function recordPendingDelegationDetailed\(/,
@@ -261,16 +260,11 @@ describe('retention registry rows — coverage plumbing', () => {
 				/^export async function (?!read|list|scan|find)/.test(line),
 			).length;
 		const durableWriter = lineOf(pending, /^function writeDurableFileSync\(/);
-		const checkpointWrite = lineOf(
-			pending,
-			/^\s*writeDurableFileSync\(checkpointPath/,
-		);
-		const tailWrite = lineOf(pending, /^\s*writeDurableFileSync\(storePath/);
 
 		expect(mutationCount).toBe(20);
 		expect(row.writerCitations).toEqual([
-			`src/background/pending-delegations.ts:${appendRecord} appendRecord — appendFileSync :${appendFile} (20 mutation entry points :${firstMutation}-${lastMutation})`,
-			`src/background/pending-delegations.ts:${durableWriter} writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:${checkpointWrite}-${tailWrite})`,
+			`src/background/pending-delegations.ts:${appendRecord} appendRecord — SQLite coordination event+state transaction with post-commit JSON projection`,
+			`src/background/pending-delegations.ts:${durableWriter} writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility`,
 		]);
 
 		const readDelegations = lineOf(
@@ -282,7 +276,7 @@ describe('retention registry rows — coverage plumbing', () => {
 			/^export function scanDelegationsForRecovery\(/,
 		);
 		expect(row.readerCitations.slice(0, 2)).toEqual([
-			`src/background/pending-delegations.ts:${readDelegations} readDelegations — checkpoint+tail fold (lenient), sync`,
+			`src/background/pending-delegations.ts:${readDelegations} readDelegations — SQLite authority with bounded legacy compatibility, sync`,
 			`src/background/pending-delegations.ts:${recoveryScan} scanDelegationsForRecovery — strict, fails closed`,
 		]);
 

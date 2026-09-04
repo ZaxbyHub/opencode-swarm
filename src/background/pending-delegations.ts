@@ -2458,21 +2458,44 @@ function compactDelegationsLocked(
 	directory: string,
 	options: { force?: boolean },
 ): CompactBackgroundDelegationsResult {
-	const authoritative = projectDbExists(directory)
+	const hasAuthority = projectDbExists(directory);
+	const authoritative = hasAuthority
 		? coordinationRowsToDelegations(directory)
 		: null;
-	const load: LedgerLoad =
-		authoritative && authoritative.length > 0
-			? {
-					status: 'ok',
-					mode: 'legacy',
-					records: new Map(
-						authoritative.map((record) => [record.correlationId, record]),
-					),
-					manifest: null,
-					checkpoint: null,
-				}
-			: loadFoldedState(directory, { strict: false });
+	const manifestRead = hasAuthority ? readDelegationManifest(directory) : null;
+	const checkpointRead = hasAuthority
+		? readDelegationCheckpoint(directory)
+		: null;
+	const manifest =
+		manifestRead?.kind === 'ok' &&
+		sameProjectRoot(manifestRead.manifest.rootPath, directory)
+			? manifestRead.manifest
+			: null;
+	const existingCheckpoint =
+		checkpointRead?.kind === 'ok' &&
+		sameProjectRoot(checkpointRead.checkpoint.rootPath, directory)
+			? checkpointRead.checkpoint
+			: null;
+	if (hasAuthority && authoritative === null) {
+		// A present SQLite database whose rows cannot be read is an unknown
+		// authority state.  Falling back to the legacy ledger here could compact
+		// stale data and overwrite a newer transaction, so fail closed.
+		const reason =
+			'SQLite delegation coordination authority is unreadable; refusing legacy compaction fallback';
+		recordLedgerUncertainty(directory, reason, 'compaction');
+		return { status: 'uncertain', reason };
+	}
+	const load: LedgerLoad = hasAuthority
+		? {
+				status: 'ok',
+				mode: 'legacy',
+				records: new Map(
+					(authoritative ?? []).map((record) => [record.correlationId, record]),
+				),
+				manifest,
+				checkpoint: existingCheckpoint,
+			}
+		: loadFoldedState(directory, { strict: false });
 	if (load.status === 'uncertain') {
 		recordLedgerUncertainty(
 			directory,
