@@ -266,4 +266,3 @@ mod tests {
         assert!(env.contains_key("PATH"));
     }
 }
-
