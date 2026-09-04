@@ -164,19 +164,20 @@ artifact_identity() {
     infield { print }
   ' "$file" 2>/dev/null || true)"
   local commit_matches tree_matches
-  commit_matches="$(printf '%s\n' "$section" | grep -E '^reviewed-commit: [0-9a-f]{40}$' || true)"
-  tree_matches="$(printf '%s\n' "$section" | grep -E '^tree-id: [0-9a-f]{40}$' || true)"
+  # Count every prefixed line (well-formed or not) so a malformed duplicate
+  # such as "reviewed-commit: stale" cannot hide behind one valid line; the
+  # sole surviving line must then be well-formed to yield a value.
+  commit_matches="$(printf '%s\n' "$section" | grep -E '^reviewed-commit:' || true)"
+  tree_matches="$(printf '%s\n' "$section" | grep -E '^tree-id:' || true)"
   ARTIFACT_COMMIT_COUNT="$(printf '%s\n' "$commit_matches" | grep -c . || true)"
   ARTIFACT_TREE_COUNT="$(printf '%s\n' "$tree_matches" | grep -c . || true)"
-  if [ "$ARTIFACT_COMMIT_COUNT" -eq 1 ]; then
+  ARTIFACT_COMMIT=""
+  ARTIFACT_TREE=""
+  if [ "$ARTIFACT_COMMIT_COUNT" -eq 1 ] && printf '%s\n' "$commit_matches" | grep -Eq '^reviewed-commit: [0-9a-f]{40}$'; then
     ARTIFACT_COMMIT="$(printf '%s\n' "$commit_matches" | sed 's/^reviewed-commit: //')"
-  else
-    ARTIFACT_COMMIT=""
   fi
-  if [ "$ARTIFACT_TREE_COUNT" -eq 1 ]; then
+  if [ "$ARTIFACT_TREE_COUNT" -eq 1 ] && printf '%s\n' "$tree_matches" | grep -Eq '^tree-id: [0-9a-f]{40}$'; then
     ARTIFACT_TREE="$(printf '%s\n' "$tree_matches" | sed 's/^tree-id: //')"
-  else
-    ARTIFACT_TREE=""
   fi
 }
 

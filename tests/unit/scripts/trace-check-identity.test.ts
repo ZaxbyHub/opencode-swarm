@@ -331,6 +331,25 @@ describe('trace-check.sh artifact_identity requires exactly one reviewed-commit 
 			'FAIL artifact-identity-plan-critic: expected exactly one reviewed-commit and one tree-id line',
 		);
 	});
+
+	test('artifact identity fails when a valid line is followed by a MALFORMED duplicate', () => {
+		const worktree = repo();
+		const head = git(worktree, 'rev-parse', 'HEAD');
+		const tree = git(worktree, 'rev-parse', 'HEAD^{tree}');
+		const { dir } = setup(
+			worktree,
+			`| plan-critic | APPROVE | ${head} | ${tree} | 06-critic-review |\n`,
+		);
+		criticReview(
+			dir,
+			`reviewed-commit: ${head}\ntree-id: ${tree}\nreviewed-commit: stale`,
+		);
+		const result = run(worktree, ['phase', '3', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain(
+			'FAIL artifact-identity-plan-critic: expected exactly one reviewed-commit and one tree-id line',
+		);
+	});
 });
 
 describe('trace-check.sh phase 0 freshness grammar is fully anchored', () => {
