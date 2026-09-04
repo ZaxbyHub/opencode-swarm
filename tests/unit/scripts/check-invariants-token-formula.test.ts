@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { findInlineTokenFormulaViolations } from '../../../scripts/check-token-formula';
+import { estimateTokens } from '../../../src/hooks/utils';
 
 /**
  * #2107 §1 / #1616: the inline char/token formula detector must (a) catch a
@@ -8,6 +9,10 @@ import { findInlineTokenFormulaViolations } from '../../../scripts/check-token-f
  */
 
 describe('findInlineTokenFormulaViolations (drift guard, #2107 §1)', () => {
+	test('canonical estimator remains executable', () => {
+		expect(estimateTokens('1234')).toBe(2);
+	});
+
 	test('flags an inline ×0.33 estimation', () => {
 		const hits = findInlineTokenFormulaViolations('src/services/example.ts', [
 			'const tokens = Math.ceil(text.length * 0.33);',
