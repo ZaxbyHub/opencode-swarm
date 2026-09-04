@@ -25,10 +25,10 @@ function committedDoc(): string {
 	return readFileSync(DOC_PATH, 'utf-8').replace(/\r\n/g, '\n');
 }
 
-/** All `### /swarm <key>` command headings in the document. */
+/** All ``### /swarm <key>`` command headings in the document. */
 function topLevelCommandHeadings(doc: string): Set<string> {
 	const headings = new Set<string>();
-	for (const match of doc.matchAll(/^### \/swarm (.+)$/gm)) {
+	for (const match of doc.matchAll(/^### `\/swarm (.+)`$/gm)) {
 		headings.add(match[1]);
 	}
 	return headings;
@@ -36,7 +36,7 @@ function topLevelCommandHeadings(doc: string): Set<string> {
 
 /** The body of one command entry: from its `###` heading to the next heading. */
 function entrySection(doc: string, key: string): string {
-	const heading = `### /swarm ${key}\n`;
+	const heading = `### \`/swarm ${key}\`\n`;
 	const start = doc.indexOf(heading);
 	if (start === -1) {
 		throw new Error(`expected heading "${heading.trim()}" in generated doc`);
@@ -80,8 +80,8 @@ describe('generate-commands-docs — escape hatches (#2493 obligation 4)', () =>
 			sectionStart,
 			sectionEnd === -1 ? undefined : sectionEnd,
 		);
-		expect(section).toContain('### /swarm abort-pr-workflow');
-		expect(section).toContain('### /swarm approve-plan-critic');
+		expect(section).toContain('### `/swarm abort-pr-workflow`');
+		expect(section).toContain('### `/swarm approve-plan-critic`');
 	});
 
 	test('escape hatch entries state they are human-only restricted commands', () => {
@@ -101,7 +101,7 @@ describe('generate-commands-docs — escape hatches (#2493 obligation 4)', () =>
 });
 
 describe('generate-commands-docs — hidden compatibility aliases', () => {
-	test('no hidden alias appears as a "### /swarm <key>" heading', () => {
+	test('no hidden alias appears as a "### `/swarm <key>`" heading', () => {
 		const headings = topLevelCommandHeadings(buildCommandsDoc());
 		const leaked = HIDDEN_COMMAND_KEYS.filter((key) => headings.has(key));
 		expect(leaked, 'hidden keys that leaked into headings').toEqual([]);
@@ -127,12 +127,14 @@ describe('generate-commands-docs — registry coverage', () => {
 			if (cmd.subcommandOf) continue;
 			if (!headings.has(key)) missing.push(key);
 		}
-		expect(missing, 'registry keys missing a "### /swarm" heading').toEqual([]);
+		expect(missing, 'registry keys missing a "### `/swarm`" heading').toEqual(
+			[],
+		);
 	});
 
 	test('no command heading is rendered twice', () => {
 		const matches = [
-			...buildCommandsDoc().matchAll(/^### \/swarm (.+)$/gm),
+			...buildCommandsDoc().matchAll(/^### `\/swarm (.+)`$/gm),
 		].map((m) => m[1]);
 		expect(new Set(matches).size).toBe(matches.length);
 	});

@@ -171,7 +171,7 @@ function pushEntry(
 	options: { headingLevel: 3 | 4; escapeHatch?: boolean } = { headingLevel: 3 },
 ): void {
 	const heading = options.headingLevel === 3 ? '###' : '####';
-	lines.push(`${heading} /swarm ${key}`, '');
+	lines.push(`${heading} \`/swarm ${key}\``, '');
 	lines.push(cmd.description, '');
 	if (cmd.args && cmd.args.trim() !== '') {
 		lines.push(`**Args:** \`${cmd.args}\``, '');
