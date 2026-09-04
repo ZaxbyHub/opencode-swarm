@@ -153,7 +153,7 @@ fi
 # changes without touching the caller's real index. The trace directory is
 # removed from the disposable index explicitly (same recipe as trace-check.sh
 # tree-id), so it cannot affect the result even without the exclude entry.
-tree_index="$(mktemp)"
+tree_index="$(mktemp "${TMPDIR:-/tmp}/issue-tracer-index.XXXXXX")"
 rm -f "$tree_index"
 phase0_tree_id=""
 if phase0_tree_id="$(GIT_INDEX_FILE="$tree_index" git -C "$root" read-tree HEAD && GIT_INDEX_FILE="$tree_index" git -C "$root" add -A -- . && GIT_INDEX_FILE="$tree_index" git -C "$root" rm -r --cached --ignore-unmatch -q -- .agents/issue-traces && GIT_INDEX_FILE="$tree_index" git -C "$root" write-tree)"; then

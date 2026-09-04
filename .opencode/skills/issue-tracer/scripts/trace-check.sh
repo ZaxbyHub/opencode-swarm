@@ -32,7 +32,7 @@ tree_id() {
   # output), making the identity machine-specific and writing ignored blobs
   # into the real object store.
   local index
-  index="$(mktemp)"
+  index="$(mktemp "${TMPDIR:-/tmp}/issue-tracer-index.XXXXXX")"
   rm -f "$index"
   if ! GIT_INDEX_FILE="$index" git -C "$root" read-tree HEAD \
     || ! GIT_INDEX_FILE="$index" git -C "$root" add -A -- . \

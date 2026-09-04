@@ -57,12 +57,12 @@ describe('issue-tracer v3 adapters', () => {
 			const content = readFileSync(skillPath, 'utf-8');
 
 			// Extract body (after frontmatter)
-			const parts = content.split(/^---$/m);
+			const parts = content.split(/^---\r?$/m);
 			const body = parts.length >= 3 ? parts[2] : content;
 
 			// Check for vendor/model names
 			const vendorPattern =
-				/\b(Opus|Sonnet|Haiku|GPT|gpt-|Kimi|MiniMax|GLM|Gemini)\b/;
+				/\b(Opus|Sonnet|Haiku|GPT|gpt-|Kimi|MiniMax|GLM|Gemini)\b/i;
 			expect(body.match(vendorPattern)).toBeNull();
 		});
 
@@ -74,7 +74,7 @@ describe('issue-tracer v3 adapters', () => {
 			const content = readFileSync(skillPath, 'utf-8');
 
 			// Extract body
-			const parts = content.split(/^---$/m);
+			const parts = content.split(/^---\r?$/m);
 			const body = parts.length >= 3 ? parts[2] : content;
 
 			// Claude is not allowed in body (even in tool-binding context, adapters handle that)
@@ -105,7 +105,7 @@ describe('issue-tracer v3 adapters', () => {
 				const filePath = join(refDir, file);
 				const content = readFileSync(filePath, 'utf-8');
 				const vendorPattern =
-					/\b(Opus|Sonnet|Haiku|GPT|gpt-|Kimi|MiniMax|GLM|Gemini)\b/;
+					/\b(Opus|Sonnet|Haiku|GPT|gpt-|Kimi|MiniMax|GLM|Gemini)\b/i;
 
 				const matches = content.match(vendorPattern);
 				expect(matches).toBeNull(
