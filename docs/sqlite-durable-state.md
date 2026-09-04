@@ -109,7 +109,7 @@ Diagnose surfaces open failures (`/swarm diagnose` swarm.db check).
 |---|---|---|
 | `qa_gate_profile`, `qa_gate_profile_identity` | `full` | locked profiles are terminal state |
 | `task_checkpoint_receipt` | `full` | completion receipts are terminal state |
-| `coordination_event`, `coordination_state`, `coordination_lease`, `coordination_import` | `full` | cross-process authorization, ownership, and recovery state |
+| `coordination_event`, `coordination_event_fence`, `coordination_state`, `coordination_lease`, `coordination_import` | `full` | cross-process authorization, ownership, idempotency, and recovery state |
 | `insight_candidate` | `normal` | operational learning queue (FIFO + retention bounded) |
 | `phase_report` | `normal` | advisory per-phase reports |
 | `project_constraints`, `migration_failures`, `schema_migrations` | `normal` | operational/metadata |

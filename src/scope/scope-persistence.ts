@@ -81,6 +81,7 @@ import {
 	clearSweepTombstoneForRevival,
 	createClaimedScopeBinding,
 	DEFAULT_SCOPE_BINDING_TTL_MS,
+	getActiveScopeBindingsForSession,
 	hasDeliberateScopeBindingDenyOverlay,
 	hasScopeBindingDenyOverlay,
 	installFailedRevocationOverlay,
@@ -1564,13 +1565,47 @@ export function resolveScopeBindingFromDisk(input: {
 		(candidate) =>
 			candidate.lifecycleState !== 'live' || candidate.expiresAt <= Date.now(),
 	);
+	if (candidates.length > 0 && !input.includeExpired) {
+		return { status: 'not_declared' };
+	}
 	return input.includeExpired && expired.length > 0
 		? {
 				status: 'expired',
 				candidates: expired.slice(0, 8),
 				totalCandidates: expired.length,
 			}
-		: { status: 'not_declared' };
+		: (() => {
+				// Preserve the synchronous same-process claim path only when the
+				// authoritative set contains no matching generation at all. A foreign
+				// durable revoke/supersede must outrank stale in-memory admission.
+				const inMemory =
+					input.requireDeclaration === true
+						? []
+						: getActiveScopeBindingsForSession({
+								directory: input.directory,
+								activeSessionId: input.ownerSessionId,
+							}).filter(
+								(binding) =>
+									binding.taskId === input.taskId &&
+									binding.planId === derivePlanId(input.plan) &&
+									binding.planStructureHash ===
+										computePlanStructureHash(input.plan) &&
+									(input.requireDispatchCorrelation !== true ||
+										isDispatchCorrelated(binding)) &&
+									(input.parentCallId === undefined ||
+										binding.parentCallId === input.parentCallId),
+							);
+				if (inMemory.length > 1) {
+					return {
+						status: 'ambiguous' as const,
+						candidates: inMemory.slice(0, 8),
+						totalCandidates: inMemory.length,
+					};
+				}
+				return inMemory.length === 1
+					? ({ status: 'found', binding: inMemory[0] } as const)
+					: ({ status: 'not_declared' } as const);
+			})();
 }
 
 function isDispatchCorrelated(binding: ScopeBinding): boolean {
