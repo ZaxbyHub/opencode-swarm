@@ -1126,14 +1126,14 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/commands/coupling.ts',
 		],
 		writerCitations: [
-			'src/turbo/epic/state.ts:530 saveEpicSessionState — per-session SQLite CAS with post-commit JSON projection',
+			'src/turbo/epic/state.ts:519 saveEpicSessionState — per-session SQLite CAS with post-commit JSON projection',
 			'src/turbo/epic/calibration.ts:187 saveCalibrationState — hotModuleAdditions grows monotonically',
 			'src/turbo/epic/divergence-recorder.ts:103 recordTaskDivergence — appendFileSync, no write cap (reader tail-bounded 16 MiB :162)',
 			'src/turbo/lean/state.ts:601 saveLeanTurboRunState — per-session SQLite CAS; src/turbo/lean/recovery.ts:163 writeRecoveryRecord (cleared on merge-back :214-227)',
 			'src/commands/coupling.ts:153 persistReportJson (--persist only, single rewritten file)',
 		],
 		readerCitations: [
-			'src/turbo/epic/state.ts:519 loadEpicSessionState — indexed SQLite state row',
+			'src/turbo/epic/state.ts:508 loadEpicSessionState — indexed SQLite state row',
 			'src/turbo/epic/calibration.ts:143 loadCalibrationState — FULL-FILE',
 			'src/turbo/epic/divergence-recorder.ts:187 readDivergenceHistory — TAIL-BOUNDED 16 MiB, sync',
 			'src/turbo/lean/recovery.ts:191 listRecoveryRecords — directory scan',

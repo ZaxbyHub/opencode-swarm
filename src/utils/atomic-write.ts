@@ -153,7 +153,6 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/services/synonym-map.ts:389',
 			'src/services/skill-optimizer/store.ts:340',
 			'src/services/skill-optimizer/store.ts:503',
-			'src/turbo/epic/state.ts:93',
 			'src/turbo/epic/calibration.ts:202',
 			'src/commands/archive-sqlite.ts:318',
 			'src/memory/jsonl-migration.ts:161',

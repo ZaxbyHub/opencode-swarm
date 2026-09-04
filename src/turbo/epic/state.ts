@@ -17,6 +17,7 @@ import {
 	transitionCoordinationState,
 } from '../../db/coordination-store.js';
 import { projectDbExists } from '../../db/project-db.js';
+import { atomicWriteSwarmFileSync } from '../../utils/atomic-write.js';
 import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import * as logger from '../../utils/logger.js';
 
@@ -88,10 +89,6 @@ function archiveStateFileWithoutOverwrite(directory: string): void {
 		return;
 	}
 	throw new Error('Epic state legacy archive collision limit exceeded');
-}
-
-function projectionTmpPath(filePath: string): string {
-	return `${filePath}.tmp.${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -172,19 +169,11 @@ function writeProjection(
 	if (fs.existsSync(filePath) && fs.lstatSync(filePath).isDirectory()) {
 		throw new Error(`${STATE_FILE} is a directory`);
 	}
-	const tmpPath = projectionTmpPath(filePath);
 	const payload = `${JSON.stringify(persisted, null, 2)}\n`;
-	try {
-		fs.writeFileSync(tmpPath, payload, 'utf-8');
-		fs.renameSync(tmpPath, filePath);
-	} catch (error) {
-		try {
-			if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-		} catch {
-			// best-effort cleanup
-		}
-		throw error;
-	}
+	// The SQLite row is authoritative; this compatibility projection still needs
+	// the canonical bounded, fsynced, same-directory writer so readers never see
+	// a torn JSON file and residue scanners see one stable temp grammar.
+	atomicWriteSwarmFileSync(filePath, payload);
 }
 
 function seedProjectionBestEffort(
