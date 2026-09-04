@@ -38,6 +38,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'benchmark',
 		'gate-audit',
 		'gate-stats',
+		'report',
 		'costs',
 		'knowledge',
 		'memory',

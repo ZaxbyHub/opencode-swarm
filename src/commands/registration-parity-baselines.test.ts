@@ -118,6 +118,8 @@ describe('Command registration parity — classification baselines', () => {
 			'gate-audit',
 			'gate-stats',
 			'context-map stats',
+			// #2482: read-only observability report over swarm.db
+			'report',
 		];
 		const EXPECTED_ADDITIONS = {
 			allowlist: new Set([
