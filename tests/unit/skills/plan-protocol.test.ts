@@ -1,5 +1,5 @@
 /**
- * Verification tests for .opencode/skills/plan/SKILL.md protocol content.
+ * Verification tests for .opencode/skills/swarm-plan/SKILL.md protocol content.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -7,9 +7,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildQaGateSelectionDialogue } from '../../../src/agents/architect';
 
-const SKILL_PATH = join(process.cwd(), '.opencode/skills/plan/SKILL.md');
+const SKILL_PATH = join(process.cwd(), '.opencode/skills/swarm-plan/SKILL.md');
 const skillContent = readFileSync(SKILL_PATH, 'utf-8');
-const CLAUDE_SKILL_PATH = join(process.cwd(), '.claude/skills/plan/SKILL.md');
+const CLAUDE_SKILL_PATH = join(
+	process.cwd(),
+	'.claude/skills/swarm-plan/SKILL.md',
+);
 const claudeSkillContent = readFileSync(CLAUDE_SKILL_PATH, 'utf-8');
 
 const earlyModeSkills = {
@@ -19,10 +22,10 @@ const earlyModeSkills = {
 	'brainstorm (.claude)': '.claude/skills/brainstorm/SKILL.md',
 } as const;
 
-describe('.opencode/skills/plan/SKILL.md protocol content', () => {
+describe('.opencode/skills/swarm-plan/SKILL.md protocol content', () => {
 	describe('frontmatter', () => {
 		it('declares the plan skill', () => {
-			expect(skillContent).toContain('name: plan');
+			expect(skillContent).toContain('name: swarm-plan');
 			expect(skillContent).toContain('description:');
 		});
 	});

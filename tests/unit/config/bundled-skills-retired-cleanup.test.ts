@@ -36,6 +36,7 @@ import { createSafeTestDir } from '../../helpers/safe-test-dir';
 // re-enters itself forever (PR #2387 review finding F-002). The repo
 // precedent is tests/helpers/prod-store-tripwire.ts.
 const realRm = realFsPromises.rm.bind(realFsPromises);
+const realRename = realFsPromises.rename.bind(realFsPromises);
 
 function writePackageSkill(
 	packageRoot: string,
@@ -203,17 +204,29 @@ describe('retired bundled-skill cleanup (issue #2379: resume → swarm-resume)',
 	test('fails open when removal of a retired directory errors', async () => {
 		fs.mkdirSync(retiredDir(), { recursive: true });
 		// Portable stand-in for Windows EPERM/EACCES on a locked directory:
-		// fsp.rm({force:true}) does not swallow permission errors, so the
-		// cleanup must catch them itself and leave the sync green. Tier-2
-		// mock per the writing-tests skill: spread the real module, override
-		// only `rm`, reject only for the retired path, delegate everything
+		// neither fsp.rename (the #2493-review backup rename) nor
+		// fsp.rm({force:true}) swallows permission errors, so the cleanup
+		// must catch them itself and leave the sync green. Tier-2 mock per
+		// the writing-tests skill: spread the real module, override `rename`
+		// and `rm`, reject only for the retired path, delegate everything
 		// else to the real implementation (captured at module scope — see the
 		// realRm note above). Restored in afterEach via mock.restore().
+		// Snapshot the retired path VALUE: the mock below outlives this test
+		// (mock.restore does not undo mock.module), and calling retiredDir()
+		// inside the closure would read the MUTABLE projectDir and silently
+		// reject paths of every later test's fixture.
+		const retiredPath = path.resolve(retiredDir());
+		const isRetiredPath = (target: unknown): boolean =>
+			typeof target === 'string' &&
+			path.resolve(target).startsWith(retiredPath);
 		mock.module('node:fs/promises', () => ({
 			...realFsPromises,
+			rename: (from: string, to: string) =>
+				isRetiredPath(from)
+					? Promise.reject(new Error('EPERM: locked'))
+					: realRename(from, to),
 			rm: (target: string, options?: never) =>
-				typeof target === 'string' &&
-				path.resolve(target) === path.resolve(retiredDir())
+				isRetiredPath(target)
 					? Promise.reject(new Error('EPERM: locked'))
 					: realRm(target, options),
 		}));
@@ -221,13 +234,35 @@ describe('retired bundled-skill cleanup (issue #2379: resume → swarm-resume)',
 		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
 		// PR #2387 review finding F-008: prove the test discriminates — the
-		// rejected rm must have left the retired directory in place, and the
-		// failure must stay debug-gated (no user-facing warning surfaces).
+		// rejected rename+rm must have left the retired directory in place,
+		// and the failure must stay debug-gated (no user-facing warning
+		// surfaces).
 		expect(fs.existsSync(retiredDir())).toBe(true);
 		expect(warnOutput).toEqual([]);
 		expect(getDeferredWarnings()).toEqual([]);
 		expect(fs.readFileSync(activeSkillPath(), 'utf-8')).toBe(
 			'canonical skill\n',
 		);
+	});
+
+	test('preserves a user-customized retired directory as .retired-backup (#2493 review F-03)', async () => {
+		fs.mkdirSync(retiredDir(), { recursive: true });
+		fs.writeFileSync(
+			path.join(retiredDir(), 'SKILL.md'),
+			'user customized\n',
+			'utf-8',
+		);
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+
+		// The customized copy is renamed aside (first-preserved copy wins),
+		// never silently destroyed.
+		const backupDir = `${retiredDir()}.retired-backup`;
+		expect(fs.existsSync(retiredDir())).toBe(false);
+		expect(fs.readFileSync(path.join(backupDir, 'SKILL.md'), 'utf-8')).toBe(
+			'user customized\n',
+		);
+		// The failure stays debug-gated — no user-facing warning surfaces.
+		expect(warnOutput).toEqual([]);
 	});
 });

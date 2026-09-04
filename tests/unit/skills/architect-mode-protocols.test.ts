@@ -37,7 +37,7 @@ const MODE_SKILLS = [
 	['ISSUE_INGEST', 'issue-ingest', ['Phase 1: INTAKE', 'Phase 4: TRANSITION']],
 	[
 		'PLAN',
-		'plan',
+		'swarm-plan',
 		[
 			'SPEC POLICY',
 			'GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)',
@@ -160,7 +160,7 @@ describe('architect MODE protocol skills', () => {
 		for (const slug of [
 			'brainstorm',
 			'pre-phase-briefing',
-			'plan',
+			'swarm-plan',
 			'critic-gate',
 			'execute',
 			'phase-wrap',

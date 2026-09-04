@@ -61,7 +61,9 @@ describe('resolveCommand — deep dive alias passes remaining args', () => {
 		const result = resolveCommand(['deep', 'dive', 'auth']);
 		expect(result).not.toBeNull();
 		expect(result!.key).toBe('deep dive');
-		expect(result!.entry.aliasOf).toBe('deep-dive');
+		// #2493: resolveCommand dereferences the pure alias; the
+		// returned entry IS the canonical deep-dive entry.
+		expect(result!.entry).toBe(COMMAND_REGISTRY['deep-dive']);
 		expect(result!.remainingArgs).toEqual(['auth']);
 	});
 
@@ -250,11 +252,14 @@ describe('COMMAND_REGISTRY["deep dive"] — alias structure invariants', () => {
 		expect(entry.aliasOf).toBe('deep-dive');
 	});
 
-	test('deep dive has handler function (own handler, not inherited)', () => {
+	test('deep dive is a pure alias dereferenced to the canonical handler', () => {
 		const entry = COMMAND_REGISTRY[
 			'deep dive' as RegisteredCommand
 		] as CommandEntry;
-		expect(typeof entry.handler).toBe('function');
+		// #2493: pure alias — no handler of its own.
+		expect(entry.handler).toBeUndefined();
+		const resolved = resolveCommand(['deep', 'dive']);
+		expect(resolved?.entry.handler).toBe(COMMAND_REGISTRY['deep-dive'].handler);
 	});
 
 	test('deep dive has non-empty description', () => {

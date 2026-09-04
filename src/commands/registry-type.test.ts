@@ -171,9 +171,10 @@ describe('CommandEntry type', () => {
 			for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 				expect(entry, `Command "${name}" should have a handler`).toBeDefined();
 				expect(
-					typeof entry.handler,
-					`Command "${name}" handler should be a function`,
-				).toBe('function');
+					typeof entry.handler === 'function' ||
+						typeof entry.aliasOf === 'string',
+					`Command "${name}" should have a handler or an aliasOf target (#2493)`,
+				).toBe(true);
 				expect(
 					typeof entry.description,
 					`Command "${name}" should have a description string`,

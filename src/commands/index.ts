@@ -393,6 +393,11 @@ async function buildSwarmCommandPrompt(args: {
 			command: canonicalKey,
 			args: resolved.remainingArgs,
 			original: `/swarm ${tokens.join(' ')}`.trim(),
+			// #2493 review: alias deprecation warnings must survive the
+			// tool-routed path too (the direct-execute path already prepends
+			// resolved.warning — mirror it here so `/swarm plan` via chat is
+			// not silently rewritten to the canonical command with no signal).
+			warning: typedResolved.warning,
 		});
 	}
 
@@ -525,9 +530,11 @@ function routeToSwarmCommandTool(args: {
 	command: string;
 	args: string[];
 	original: string;
+	warning?: string;
 }): string {
 	return [
 		`The user typed \`${args.original}\`.`,
+		...(args.warning ? [args.warning] : []),
 		'Call the `swarm_command` tool exactly once with:',
 		JSON.stringify({ command: args.command, args: args.args }, null, 2),
 		'After the tool returns, show the tool output verbatim and add no extra swarm state.',

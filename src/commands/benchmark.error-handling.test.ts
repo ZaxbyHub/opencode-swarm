@@ -19,6 +19,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { EvidenceBundle } from '../config/evidence-schema';
 import { handleBenchmarkCommand } from './benchmark';
+import { isCommandFailure } from './registry';
+
+const text = (r: Awaited<ReturnType<typeof handleBenchmarkCommand>>): string =>
+	isCommandFailure(r) ? r.text : r;
 
 let tempDir: string;
 
@@ -70,15 +74,15 @@ describe('handleBenchmarkCommand corrupt evidence handling', () => {
 		// Should complete without throwing in cumulative mode
 		const result = await handleBenchmarkCommand(tempDir, ['--ci-gate']);
 
-		expect(result).toBeDefined();
-		expect(typeof result).toBe('string');
+		expect(text(result)).toBeDefined();
+		expect(typeof text(result)).toBe('string');
 
 		// Should contain benchmark output markers
-		expect(result).toContain('## Swarm Benchmark');
-		expect(result).toContain('[BENCHMARK_JSON]');
+		expect(text(result)).toContain('## Swarm Benchmark');
+		expect(text(result)).toContain('[BENCHMARK_JSON]');
 
 		// corrupt-task should NOT appear in the output (skipped)
-		expect(result).not.toContain('corrupt-task');
+		expect(text(result)).not.toContain('corrupt-task');
 	});
 
 	it('should handle multiple corrupt files mixed with valid files', async () => {
@@ -106,13 +110,13 @@ describe('handleBenchmarkCommand corrupt evidence handling', () => {
 		// Should complete successfully in cumulative mode
 		const result = await handleBenchmarkCommand(tempDir, ['--ci-gate']);
 
-		expect(result).toBeDefined();
-		expect(typeof result).toBe('string');
-		expect(result).toContain('## Swarm Benchmark');
+		expect(text(result)).toBeDefined();
+		expect(typeof text(result)).toBe('string');
+		expect(text(result)).toContain('## Swarm Benchmark');
 
 		// Corrupt files should not appear
-		expect(result).not.toContain('bad-file-1');
-		expect(result).not.toContain('bad-file-2');
+		expect(text(result)).not.toContain('bad-file-1');
+		expect(text(result)).not.toContain('bad-file-2');
 	});
 
 	it('should handle all files being corrupt gracefully', async () => {
@@ -131,10 +135,10 @@ describe('handleBenchmarkCommand corrupt evidence handling', () => {
 		// Should complete without throwing even with all corrupt files
 		const result = await handleBenchmarkCommand(tempDir, ['--ci-gate']);
 
-		expect(result).toBeDefined();
-		expect(typeof result).toBe('string');
-		expect(result).toContain('## Swarm Benchmark');
-		expect(result).toContain('[BENCHMARK_JSON]');
+		expect(text(result)).toBeDefined();
+		expect(typeof text(result)).toBe('string');
+		expect(text(result)).toContain('## Swarm Benchmark');
+		expect(text(result)).toContain('[BENCHMARK_JSON]');
 	});
 
 	it('should handle directory with missing evidence.json file', async () => {
@@ -153,8 +157,8 @@ describe('handleBenchmarkCommand corrupt evidence handling', () => {
 
 		const result = await handleBenchmarkCommand(tempDir, ['--ci-gate']);
 
-		expect(result).toBeDefined();
-		expect(result).toContain('## Swarm Benchmark');
+		expect(text(result)).toBeDefined();
+		expect(text(result)).toContain('## Swarm Benchmark');
 	});
 
 	it('should handle directory with empty evidence.json file', async () => {
@@ -174,9 +178,9 @@ describe('handleBenchmarkCommand corrupt evidence handling', () => {
 		const result = await handleBenchmarkCommand(tempDir, ['--ci-gate']);
 
 		// Should complete without throwing and skip empty file
-		expect(result).toBeDefined();
-		expect(result).toContain('## Swarm Benchmark');
-		expect(result).toContain('[BENCHMARK_JSON]');
+		expect(text(result)).toBeDefined();
+		expect(text(result)).toContain('## Swarm Benchmark');
+		expect(text(result)).toContain('[BENCHMARK_JSON]');
 	});
 
 	it('should handle deeply nested corrupt data that parses but fails schema', async () => {
@@ -199,9 +203,9 @@ describe('handleBenchmarkCommand corrupt evidence handling', () => {
 		const result = await handleBenchmarkCommand(tempDir, ['--ci-gate']);
 
 		// Should complete without throwing
-		expect(result).toBeDefined();
-		expect(result).toContain('## Swarm Benchmark');
-		expect(result).toContain('[BENCHMARK_JSON]');
+		expect(text(result)).toBeDefined();
+		expect(text(result)).toContain('## Swarm Benchmark');
+		expect(text(result)).toContain('[BENCHMARK_JSON]');
 	});
 
 	it('should handle --cumulative flag with corrupt evidence', async () => {
@@ -216,11 +220,11 @@ describe('handleBenchmarkCommand corrupt evidence handling', () => {
 		// Should complete without throwing using --cumulative flag
 		const result = await handleBenchmarkCommand(tempDir, ['--cumulative']);
 
-		expect(result).toBeDefined();
-		expect(typeof result).toBe('string');
-		expect(result).toContain('## Swarm Benchmark');
-		expect(result).toContain('mode: cumulative');
-		expect(result).toContain('[BENCHMARK_JSON]');
+		expect(text(result)).toBeDefined();
+		expect(typeof text(result)).toBe('string');
+		expect(text(result)).toContain('## Swarm Benchmark');
+		expect(text(result)).toContain('mode: cumulative');
+		expect(text(result)).toContain('[BENCHMARK_JSON]');
 	});
 
 	it('should handle empty evidence directory', async () => {
@@ -228,13 +232,13 @@ describe('handleBenchmarkCommand corrupt evidence handling', () => {
 
 		const result = await handleBenchmarkCommand(tempDir, ['--ci-gate']);
 
-		expect(result).toBeDefined();
-		expect(typeof result).toBe('string');
-		expect(result).toContain('## Swarm Benchmark');
-		expect(result).toContain('[BENCHMARK_JSON]');
+		expect(text(result)).toBeDefined();
+		expect(typeof text(result)).toBe('string');
+		expect(text(result)).toContain('## Swarm Benchmark');
+		expect(text(result)).toContain('[BENCHMARK_JSON]');
 
 		// Should show no evidence data
-		expect(result).toContain('No evidence data found');
+		expect(text(result)).toContain('No evidence data found');
 	});
 
 	it('should handle non-cumulative mode without crashing on corrupt files', async () => {
@@ -247,11 +251,11 @@ describe('handleBenchmarkCommand corrupt evidence handling', () => {
 		// so corrupt files should not affect the output
 		const result = await handleBenchmarkCommand(tempDir, []);
 
-		expect(result).toBeDefined();
-		expect(typeof result).toBe('string');
-		expect(result).toContain('## Swarm Benchmark');
-		expect(result).toContain('mode: in-memory');
-		expect(result).toContain('[BENCHMARK_JSON]');
+		expect(text(result)).toBeDefined();
+		expect(typeof text(result)).toBe('string');
+		expect(text(result)).toContain('## Swarm Benchmark');
+		expect(text(result)).toContain('mode: in-memory');
+		expect(text(result)).toContain('[BENCHMARK_JSON]');
 	});
 });
 

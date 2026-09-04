@@ -232,7 +232,6 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// @ts-expect-error - Testing with null (type violation)
 			const result = await run(null);
 
-			// Should treat null as falsy and return usage error
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
 				expect.stringContaining('Usage: bunx opencode-swarm run <command>'),
@@ -243,7 +242,6 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// @ts-expect-error - Testing with undefined (type violation)
 			const result = await run(undefined);
 
-			// Should treat undefined as falsy and return usage error
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
 				expect.stringContaining('Usage: bunx opencode-swarm run <command>'),
@@ -255,20 +253,18 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 		it('should handle empty string subcommand', async () => {
 			const result = await run(['']);
 
-			// Should treat empty string as unknown command
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command: '),
+				expect.stringContaining('not found.'),
 			);
 		});
 
 		it('should handle whitespace-only subcommand', async () => {
 			const result = await run(['   ']);
 
-			// Should treat whitespace as unknown command
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command:    '),
+				expect.stringContaining('not found.'),
 			);
 		});
 	});
@@ -279,8 +275,13 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 
 			// Should handle null byte gracefully, not crash
 			expect(result).toBe(1);
+			// #2493 review F-11: formatCommandNotFound strips control characters
+			// before interpolating the token, so the echoed name has no NUL byte.
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command: \x00'),
+				expect.stringContaining('Command `/swarm ` not found.'),
+			);
+			expect(mockConsoleError).toHaveBeenCalledWith(
+				expect.not.stringContaining('\x00'),
 			);
 		});
 
@@ -290,7 +291,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should handle embedded null bytes gracefully
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command:'),
+				expect.stringContaining('not found.'),
 			);
 		});
 	});
@@ -345,7 +346,6 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 		it('should handle config with no sub-subcommand (calls handleConfigCommand)', async () => {
 			const result = await run(['config']);
 
-			// Should call handleConfigCommand, not crash
 			expect(result).toBe(0);
 			expect(mockHandleConfigCommand).toHaveBeenCalledWith(cwd, []);
 			expect(mockHandleDoctorCommand).not.toHaveBeenCalled();
@@ -374,7 +374,6 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 		it('should handle evidence with no sub-subcommand (calls handleEvidenceCommand)', async () => {
 			const result = await run(['evidence']);
 
-			// Should call handleEvidenceCommand, not crash
 			expect(result).toBe(0);
 			expect(mockHandleEvidenceCommand).toHaveBeenCalledWith(cwd, []);
 			expect(mockHandleEvidenceSummaryCommand).not.toHaveBeenCalled();
@@ -407,7 +406,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should handle long command name gracefully, not crash
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command:'),
+				expect.stringContaining('not found.'),
 			);
 		});
 
@@ -418,7 +417,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should handle extremely long command name gracefully, not crash
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command:'),
+				expect.stringContaining('not found.'),
 			);
 		});
 
@@ -429,7 +428,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should handle long args array gracefully, not crash
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command:'),
+				expect.stringContaining('not found.'),
 			);
 		});
 	});
@@ -441,7 +440,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should handle control characters gracefully
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command:'),
+				expect.stringContaining('not found.'),
 			);
 		});
 
@@ -451,7 +450,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should handle unicode gracefully (may or may not be valid command)
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command:'),
+				expect.stringContaining('not found.'),
 			);
 		});
 
@@ -461,7 +460,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should treat as unknown command, not execute path traversal
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command: ../../etc/passwd'),
+				expect.stringContaining('Command `/swarm ../../etc/passwd` not found.'),
 			);
 		});
 
@@ -471,7 +470,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should treat as unknown command, not execute shell injection
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command: status; rm -rf /'),
+				expect.stringContaining('Command `/swarm status; rm -rf /` not found.'),
 			);
 		});
 
@@ -481,7 +480,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should treat as unknown command, not execute command substitution
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command: $(whoami)'),
+				expect.stringContaining('Command `/swarm $(whoami)` not found.'),
 			);
 		});
 	});
@@ -494,7 +493,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should handle numeric command (coerced to string)
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command: 123'),
+				expect.stringContaining('Command `/swarm 123` not found.'),
 			);
 		});
 
@@ -505,7 +504,7 @@ describe('run() dispatch function - ADVERSARIAL SECURITY & BOUNDARY TESTS', () =
 			// Should handle boolean command (coerced to string)
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command: true'),
+				expect.stringContaining('Command `/swarm true` not found.'),
 			);
 		});
 	});

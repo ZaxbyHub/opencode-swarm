@@ -6,7 +6,7 @@ import { createArchitectAgent } from '../../../src/agents/architect';
 describe('architect-prompt-template: task 11.1 verification tests', () => {
 	let prompt: string;
 	const planSkill = readFileSync(
-		join(process.cwd(), '.opencode/skills/plan/SKILL.md'),
+		join(process.cwd(), '.opencode/skills/swarm-plan/SKILL.md'),
 		'utf-8',
 	);
 

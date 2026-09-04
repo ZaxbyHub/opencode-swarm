@@ -9,6 +9,7 @@ import {
 	saveLeanTurboRunState,
 } from '../turbo/lean/state';
 import * as logger from '../utils/logger';
+import { stripControlCharacters } from '../utils/sanitize-display.js';
 import { TURBO_BYPASS_DISCLOSURE } from './turbo-constants.js';
 
 /**
@@ -29,7 +30,7 @@ export const _internals: {
  * Supports standard turbo toggle, lean turbo mode, and status reporting.
  *
  * @param directory - Project directory (used to persist Lean Turbo run state)
- * @param args - Optional arguments: "lean" | "standard" | "on" | "off" | "status" | undefined
+ * @param args - Arguments: (none) | "on" | "off" | "status" | "lean" ["on"|"off"] | "standard" ["on"|"off"] | "epic" ["on"|"off"]. Unknown arguments are rejected without changing state.
  * @param sessionID - Session ID for accessing active session state
  * @returns Feedback message about Turbo Mode state
  */
@@ -49,9 +50,12 @@ export async function handleTurboCommand(
 		return 'Error: No active session. Turbo Mode requires an active session to operate.';
 	}
 
-	// Parse arguments
-	const arg0 = args[0]?.toLowerCase();
-	const arg1 = args[1]?.toLowerCase();
+	// Parse arguments. Empty/whitespace-only tokens (trailing-space
+	// invocations arriving as ['']) are argument-less: only non-empty tokens
+	// steer dispatch.
+	const tokens = args.filter((a) => a !== undefined && a.trim() !== '');
+	const arg0 = tokens[0]?.toLowerCase();
+	const arg1 = tokens[1]?.toLowerCase();
 
 	// Handle status command
 	if (arg0 === 'status') {
@@ -165,6 +169,27 @@ export async function handleTurboCommand(
 		return `Turbo Mode enabled (standard). ${TURBO_BYPASS_DISCLOSURE}`;
 	}
 
+	// --- turbo standard (no second arg): toggle standard ---
+	// #2493 review: the help text and JSDoc advertise `standard [on|off]`,
+	// and bare `lean` / bare `epic` both toggle — bare `standard` used to
+	// fall through to the unknown-argument rejection instead.
+	if (arg0 === 'standard' && arg1 === undefined) {
+		const isStandardActive =
+			session.turboMode === true && session.turboStrategy === 'standard';
+		if (isStandardActive) {
+			disableTurbo('/swarm turbo standard (toggle off)');
+			return 'Turbo Mode disabled';
+		}
+		if (isLeanActive) {
+			disableTurbo('/swarm turbo standard (switching from lean)');
+		}
+		session.turboMode = true;
+		session.turboStrategy = 'standard';
+		session.leanTurboActive = false;
+		session.leanTurboCurrentPhase = undefined;
+		return `Turbo Mode enabled (standard). ${TURBO_BYPASS_DISCLOSURE}`;
+	}
+
 	// --- turbo lean on ---
 	if (arg0 === 'lean' && arg1 === 'on') {
 		return enableLeanTurbo(session, directory, sessionID);
@@ -245,17 +270,24 @@ export async function handleTurboCommand(
 		return `${leanMsg}\nEpic Mode enabled — the architect will use the transparent decide-then-dispatch wave flow: declare_scope (per pending task) → epic_decide_phase → epic_plan_waves → Task (per task in current wave, all in one message) → epic_record_divergence.`;
 	}
 
-	// Default fallback: unrecognized argument → toggle (restores legacy behavior)
-	if (isTurboOn) {
-		disableTurbo('/swarm turbo (toggle off via unknown arg)');
-		return 'Turbo Mode disabled';
-	} else {
-		session.turboMode = true;
-		session.turboStrategy = 'standard';
-		session.leanTurboActive = false;
-		session.leanTurboCurrentPhase = undefined;
-		return `Turbo Mode enabled. ${TURBO_BYPASS_DISCLOSURE}`;
-	}
+	// Unknown argument (issue #2493): reject instead of silently toggling.
+	// The legacy fall-through made typos indistinguishable from intentional
+	// toggles — `/swarm turbo fast` would flip turbo state with no signal
+	// that the argument was never understood. State is left untouched.
+	// Report the offending token: when a known mode subcommand (lean/
+	// standard/epic) carried a bad second argument, that second token is the
+	// unknown one — printing args[0] would name a valid subcommand (#2493).
+	const MODE_SUBCOMMANDS = new Set(['lean', 'standard', 'epic']);
+	const attempted = stripControlCharacters(
+		arg0 !== undefined && MODE_SUBCOMMANDS.has(arg0) && arg1 !== undefined
+			? arg1
+			: (arg0 ?? ''),
+	).slice(0, 100);
+	return (
+		`Unknown turbo argument "${attempted}". Turbo state is unchanged.\n` +
+		'Valid arguments: (none) | on | off | status | lean [on|off] | standard [on|off] | epic [on|off].\n' +
+		'Run `/swarm help` for details.'
+	);
 }
 
 /**

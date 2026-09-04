@@ -18,6 +18,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleBenchmarkCommand } from '../../../src/commands/benchmark.js';
 import { saveEvidence } from '../../../src/evidence/manager.js';
+import { resultText } from '../../helpers/benchmark-result-text.js';
 
 let testDir: string;
 
@@ -58,8 +59,8 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('Quality Signals');
-			expect(result).toContain('Review pass rate: 100%');
+			expect(resultText(result)).toContain('Quality Signals');
+			expect(resultText(result)).toContain('Review pass rate: 100%');
 		});
 
 		it('should aggregate test evidence when loadEvidence returns status: "found"', async () => {
@@ -77,8 +78,8 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('Quality Signals');
-			expect(result).toContain('Test pass rate: 80%');
+			expect(resultText(result)).toContain('Quality Signals');
+			expect(resultText(result)).toContain('Test pass rate: 80%');
 		});
 
 		it('should aggregate quality_budget evidence when loadEvidence returns status: "found"', async () => {
@@ -107,11 +108,11 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('Quality Metrics');
-			expect(result).toContain('Complexity Delta: 3');
-			expect(result).toContain('Public API Delta: 5');
-			expect(result).toContain('Duplication Ratio: 2%');
-			expect(result).toContain('Test-to-Code Ratio: 40%');
+			expect(resultText(result)).toContain('Quality Metrics');
+			expect(resultText(result)).toContain('Complexity Delta: 3');
+			expect(resultText(result)).toContain('Public API Delta: 5');
+			expect(resultText(result)).toContain('Duplication Ratio: 2%');
+			expect(resultText(result)).toContain('Test-to-Code Ratio: 40%');
 		});
 
 		it('should aggregate diff evidence when loadEvidence returns status: "found"', async () => {
@@ -128,8 +129,8 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('Quality Signals');
-			expect(result).toContain('Code churn: +100 / -50 lines');
+			expect(resultText(result)).toContain('Quality Signals');
+			expect(resultText(result)).toContain('Code churn: +100 / -50 lines');
 		});
 	});
 
@@ -141,7 +142,7 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('No evidence data found');
+			expect(resultText(result)).toContain('No evidence data found');
 		});
 
 		it('should aggregate only found evidence when some tasks return not_found', async () => {
@@ -162,8 +163,8 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
 			// Only task 1.1's evidence should be counted
-			expect(result).toContain('Review pass rate: 100%');
-			expect(result).toContain('(1)');
+			expect(resultText(result)).toContain('Review pass rate: 100%');
+			expect(resultText(result)).toContain('(1)');
 		});
 
 		it('should show "No evidence data found" when all tasks return not_found', async () => {
@@ -173,7 +174,7 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('No evidence data found');
+			expect(resultText(result)).toContain('No evidence data found');
 		});
 	});
 
@@ -188,7 +189,7 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('No evidence data found');
+			expect(resultText(result)).toContain('No evidence data found');
 		});
 
 		it('should aggregate only found evidence when some tasks return invalid_schema', async () => {
@@ -209,8 +210,8 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('Review pass rate: 100%');
-			expect(result).toContain('(1)');
+			expect(resultText(result)).toContain('Review pass rate: 100%');
+			expect(resultText(result)).toContain('(1)');
 		});
 	});
 
@@ -247,8 +248,8 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
 			// Only tasks 1.1 and 1.4 should be counted
-			expect(result).toContain('Review pass rate: 100%');
-			expect(result).toContain('(2)');
+			expect(resultText(result)).toContain('Review pass rate: 100%');
+			expect(resultText(result)).toContain('(2)');
 		});
 
 		it('should aggregate quality metrics from multiple found tasks', async () => {
@@ -300,10 +301,10 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
 			// averages: (2+6)/2=4, (4+8)/2=6, (0.01+0.03)*100/2=2%, (0.3+0.5)*100/2=40%
-			expect(result).toContain('Complexity Delta: 4');
-			expect(result).toContain('Public API Delta: 6');
-			expect(result).toContain('Duplication Ratio: 2%');
-			expect(result).toContain('Test-to-Code Ratio: 40%');
+			expect(resultText(result)).toContain('Complexity Delta: 4');
+			expect(resultText(result)).toContain('Public API Delta: 6');
+			expect(resultText(result)).toContain('Duplication Ratio: 2%');
+			expect(resultText(result)).toContain('Test-to-Code Ratio: 40%');
 		});
 	});
 
@@ -358,9 +359,9 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
 
-			expect(result).toContain('CI Gate');
-			expect(result).toContain('✅ PASSED');
-			expect(result).toContain('Complexity Delta: 3 <= 5 ✅');
+			expect(resultText(result)).toContain('CI Gate');
+			expect(resultText(result)).toContain('✅ PASSED');
+			expect(resultText(result)).toContain('Complexity Delta: 3 <= 5 ✅');
 		});
 
 		it('should skip invalid evidence when checking CI gate (quality checks pass, review/test fail)', async () => {
@@ -370,16 +371,16 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
 
-			expect(result).toContain('CI Gate');
-			expect(result).toContain('❌ FAILED');
+			expect(resultText(result)).toContain('CI Gate');
+			expect(resultText(result)).toContain('❌ FAILED');
 			// Review and test checks fail with 0%
-			expect(result).toContain('Review pass rate: 0% >= 70% ❌');
-			expect(result).toContain('Test pass rate: 0% >= 80% ❌');
+			expect(resultText(result)).toContain('Review pass rate: 0% >= 70% ❌');
+			expect(resultText(result)).toContain('Test pass rate: 0% >= 80% ❌');
 			// Quality checks pass by default when no evidence
-			expect(result).toContain('Complexity Delta: 0 <= 5 ✅');
-			expect(result).toContain('Public API Delta: 0 <= 10 ✅');
-			expect(result).toContain('Duplication Ratio: 0% <= 5% ✅');
-			expect(result).toContain('Test-to-Code Ratio: 0% >= 30% ✅');
+			expect(resultText(result)).toContain('Complexity Delta: 0 <= 5 ✅');
+			expect(resultText(result)).toContain('Public API Delta: 0 <= 10 ✅');
+			expect(resultText(result)).toContain('Duplication Ratio: 0% <= 5% ✅');
+			expect(resultText(result)).toContain('Test-to-Code Ratio: 0% >= 30% ✅');
 		});
 	});
 
@@ -399,10 +400,10 @@ describe('handleBenchmarkCommand loadEvidence discriminated union', () => {
 
 			const result = await handleBenchmarkCommand(testDir, []);
 
-			expect(result).toContain('mode: in-memory');
+			expect(resultText(result)).toContain('mode: in-memory');
 			// In-memory mode does NOT include Quality Signals section
-			expect(result).not.toContain('Quality Signals');
-			expect(result).not.toContain('No evidence data found');
+			expect(resultText(result)).not.toContain('Quality Signals');
+			expect(resultText(result)).not.toContain('No evidence data found');
 		});
 	});
 });

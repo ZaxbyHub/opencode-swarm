@@ -19,7 +19,7 @@ The funnel includes 13 always-surface categories (scope, data loss, security, co
 - `.opencode/skills/specify/SKILL.md` + `.claude` mirror: Inline funnel reference
 - `.opencode/skills/brainstorm/SKILL.md` + `.claude` mirror: Inline funnel reference
 - `.opencode/skills/issue-ingest/SKILL.md` + `.claude` mirror: Inline funnel reference
-- `.opencode/skills/plan/SKILL.md` + `.claude` mirror: 86-line CLARIFICATION FUNNEL section
+- `.opencode/skills/swarm-plan/SKILL.md` + `.claude` mirror: 86-line CLARIFICATION FUNNEL section
 
 ## Risk Mitigation
 - **Overconfidence guard**: self_resolved classification requires evidence directly from user request, spec, or recorded context — unsupported defaults must be classified as user_decision

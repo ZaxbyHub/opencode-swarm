@@ -244,7 +244,7 @@ describe('run() dispatch function', () => {
 
 			expect(result).toBe(1);
 			expect(mockConsoleError).toHaveBeenCalledWith(
-				expect.stringContaining('Unknown command: unknown-xyz'),
+				expect.stringContaining('Command `/swarm unknown-xyz` not found.'),
 			);
 		});
 	});

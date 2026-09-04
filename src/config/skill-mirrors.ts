@@ -106,9 +106,14 @@ export const MIRRORED_ARCHITECT_MODE_SKILLS: Array<{
 		canonical: '.opencode',
 	},
 	{
-		slug: 'plan',
-		opencodePath: '.opencode/skills/plan/SKILL.md',
-		claudePath: '.claude/skills/plan/SKILL.md',
+		// Slug renamed from `plan` (issue #2388, delivered via #2493): both
+		// hosts expose native skill directories as `/<slug>` slash commands,
+		// so the bare slug shadowed the hosts' built-in `/plan` plan mode.
+		// The internal MODE label stays `PLAN`; only the user-facing slug
+		// moved.
+		slug: 'swarm-plan',
+		opencodePath: '.opencode/skills/swarm-plan/SKILL.md',
+		claudePath: '.claude/skills/swarm-plan/SKILL.md',
 		canonical: '.opencode',
 	},
 	{

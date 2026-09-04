@@ -25,7 +25,7 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'swarm-pr-subscribe',
 	'swarm-ci-monitor',
 	'issue-ingest',
-	'plan',
+	'swarm-plan',
 	'critic-gate',
 	'execute',
 	'phase-wrap',
@@ -53,11 +53,19 @@ export type BundledProjectSkill = (typeof BUNDLED_PROJECT_SKILLS)[number];
  * Bundled skill slugs that were retired (renamed away) in shipped releases.
  * The sync removes their materialized directories from
  * `.swarm/bundled-skills/` in existing user projects so a rename never leaves
- * a stale protocol copy behind (issue #2379: `resume` → `swarm-resume`).
+ * a stale protocol copy behind (issue #2379: `resume` → `swarm-resume`;
+ * issue #2388 via #2493: `plan` → `swarm-plan`).
  * A slug must never appear both here and in BUNDLED_PROJECT_SKILLS (asserted
  * by tests/unit/skills/claude-slug-collision-guard.test.ts).
  */
-export const RETIRED_BUNDLED_PROJECT_SKILLS = ['resume'] as const;
+export const RETIRED_BUNDLED_PROJECT_SKILLS = [
+	// `resume` → `swarm-resume` (issue #2379): the bare slug shadowed Claude
+	// Code's built-in /resume conversation-resume command.
+	'resume',
+	// `plan` → `swarm-plan` (issue #2388, delivered via #2493): the bare slug
+	// shadowed both hosts' built-in /plan plan-mode command.
+	'plan',
+] as const;
 /**
  * Project-private runtime location for plugin-owned skills. Repository-native
  * skill roots (`.opencode/skills`, `.claude/skills`, and `.agents/skills`) are
@@ -308,6 +316,14 @@ async function copyBundledDirectoryBoundedAsync(
  * `skillsDir` before any delete), symlink-refusing, and fail-open per slug:
  * a removal failure (including Windows EPERM/EACCES, which `force: true`
  * does not swallow) logs and continues without failing the surrounding sync.
+ *
+ * #2493 review: a retired directory may hold user edits made to the bundled
+ * copy before the slug was retired, so each target is first RENAMED aside to
+ * `<slug>.retired-backup` (same-directory rename — cheap, bounded, atomic on
+ * every supported platform) rather than deleted outright. Only when a backup
+ * from a prior retirement already exists (or the rename fails) does the
+ * recursive removal proceed — the first-preserved copy wins, and the
+ * retirement still completes.
  */
 async function removeRetiredBundledSkillDirsAsync(
 	skillsDir: string,
@@ -323,13 +339,41 @@ async function removeRetiredBundledSkillDirsAsync(
 			}
 			try {
 				const stat = await fsp.lstat(target);
-				// Skip symlinks (never delete through a link) and non-directories.
+				// Skip symlinks (never delete or rename through a link) and
+				// non-directories.
 				if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
 			} catch (err) {
 				// ENOENT: nothing to clean up — the expected state for projects
 				// that never materialized this slug.
 				if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
 				throw err;
+			}
+			const backupTarget = `${target}.retired-backup`;
+			let backupExists = true;
+			try {
+				await fsp.lstat(backupTarget);
+			} catch {
+				backupExists = false;
+			}
+			if (!backupExists) {
+				try {
+					await fsp.rename(target, backupTarget);
+					log('preserved retired bundled skill as .retired-backup', {
+						slug,
+					});
+					continue;
+				} catch (renameErr) {
+					log(
+						'could not preserve retired bundled skill (continuing to removal)',
+						{
+							slug,
+							message:
+								renameErr instanceof Error
+									? renameErr.message
+									: String(renameErr),
+						},
+					);
+				}
 			}
 			await fsp.rm(target, { recursive: true, force: true });
 			log('removed retired bundled skill', { slug });

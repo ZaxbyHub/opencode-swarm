@@ -12,6 +12,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleBenchmarkCommand } from '../../../src/commands/benchmark.js';
 import { saveEvidence } from '../../../src/evidence/manager.js';
+import { resultText } from '../../helpers/benchmark-result-text.js';
 
 let testDir: string;
 
@@ -45,7 +46,7 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('No evidence data found');
+			expect(resultText(result)).toContain('No evidence data found');
 		});
 
 		it('should skip multiple tasks with invalid evidence', async () => {
@@ -56,7 +57,7 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('No evidence data found');
+			expect(resultText(result)).toContain('No evidence data found');
 		});
 
 		it('should handle mix of valid and invalid evidence files', async () => {
@@ -78,8 +79,8 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
 			// Only the valid evidence should be aggregated
-			expect(result).toContain('Review pass rate: 100%');
-			expect(result).toContain('(1)');
+			expect(resultText(result)).toContain('Review pass rate: 100%');
+			expect(resultText(result)).toContain('(1)');
 		});
 
 		it('should handle partially valid JSON that fails schema validation', async () => {
@@ -99,7 +100,7 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
 			// Invalid schema bundle is skipped
-			expect(result).toContain('No evidence data found');
+			expect(resultText(result)).toContain('No evidence data found');
 		});
 	});
 
@@ -119,8 +120,8 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 
 			// No quality data → no Quality Signals section OR "No evidence data found"
 			// The note type doesn't contribute to review/test quality metrics
-			expect(result).not.toContain('Review pass rate');
-			expect(result).not.toContain('Test pass rate');
+			expect(resultText(result)).not.toContain('Review pass rate');
+			expect(resultText(result)).not.toContain('Test pass rate');
 		});
 	});
 
@@ -129,7 +130,7 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 			// Empty string → listEvidenceTaskIds returns [] (no .swarm dir)
 			const result = await handleBenchmarkCommand('', ['--cumulative']);
 
-			expect(result).toContain('No evidence data found');
+			expect(resultText(result)).toContain('No evidence data found');
 		});
 
 		it('should handle non-existent directory gracefully', async () => {
@@ -142,7 +143,7 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 				'--cumulative',
 			]);
 
-			expect(result).toContain('No evidence data found');
+			expect(resultText(result)).toContain('No evidence data found');
 		});
 
 		it('should handle directory with no .swarm subdirectory', async () => {
@@ -154,7 +155,7 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 			);
 			try {
 				const result = await handleBenchmarkCommand(emptyDir, ['--cumulative']);
-				expect(result).toContain('No evidence data found');
+				expect(resultText(result)).toContain('No evidence data found');
 			} finally {
 				rmSync(emptyDir, { recursive: true, force: true });
 			}
@@ -187,7 +188,7 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
-			expect(result).toContain('No evidence data found');
+			expect(resultText(result)).toContain('No evidence data found');
 		});
 
 		it('should handle mixed valid/invalid evidence at scale', async () => {
@@ -213,8 +214,8 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 			const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
 
 			// Only the 5 valid reviews should be counted
-			expect(result).toContain('Review pass rate: 100%');
-			expect(result).toContain('(5)');
+			expect(resultText(result)).toContain('Review pass rate: 100%');
+			expect(resultText(result)).toContain('(5)');
 		});
 	});
 
@@ -229,17 +230,17 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
 
 			// CI gate should run even with invalid evidence
-			expect(result).toContain('CI Gate');
+			expect(resultText(result)).toContain('CI Gate');
 			// With no valid evidence, review and test pass rates are 0%
-			expect(result).toContain('❌ FAILED');
+			expect(resultText(result)).toContain('❌ FAILED');
 		});
 
 		it('should handle CI gate with no evidence at all', async () => {
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
 
-			expect(result).toContain('CI Gate');
+			expect(resultText(result)).toContain('CI Gate');
 			// No evidence means review/test rates are 0%, but quality metrics pass by default
-			expect(result).toContain('Complexity Delta: 0 <= 5 ✅');
+			expect(resultText(result)).toContain('Complexity Delta: 0 <= 5 ✅');
 		});
 
 		it('should handle CI gate with a mix of valid passing evidence and invalid files', async () => {
@@ -271,10 +272,10 @@ describe('handleBenchmarkCommand - Adversarial Security Tests', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
 
-			expect(result).toContain('CI Gate');
+			expect(resultText(result)).toContain('CI Gate');
 			// Review and test from valid task should count
-			expect(result).toContain('Review pass rate: 100%');
-			expect(result).toContain('Test pass rate: 100%');
+			expect(resultText(result)).toContain('Review pass rate: 100%');
+			expect(resultText(result)).toContain('Test pass rate: 100%');
 		});
 	});
 });

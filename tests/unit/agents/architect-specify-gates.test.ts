@@ -17,7 +17,7 @@ describe('architect prompt - MODE: SPECIFY step 5b QA gate selection', () => {
 		'utf-8',
 	);
 	const planSkill = readFileSync(
-		join(process.cwd(), '.opencode/skills/plan/SKILL.md'),
+		join(process.cwd(), '.opencode/skills/swarm-plan/SKILL.md'),
 		'utf-8',
 	);
 
@@ -57,7 +57,7 @@ describe('architect prompt - MODE: SPECIFY step 5b QA gate selection', () => {
 	});
 
 	test('MODE: PLAN owns pre-save gate persistence', () => {
-		expect(prompt).toContain('file:.swarm/bundled-skills/plan/SKILL.md');
+		expect(prompt).toContain('file:.swarm/bundled-skills/swarm-plan/SKILL.md');
 		expect(planSkill).toContain('before first `save_plan`');
 		const bootstrap = planSkill.slice(
 			planSkill.indexOf('QA AND EXECUTION PROFILE BOOTSTRAP'),

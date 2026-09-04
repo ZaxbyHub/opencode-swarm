@@ -11,7 +11,7 @@ worktrees, and its dispatch rules actively forbade sending more than one coder.
 This change makes parallel execution + worktree isolation first-class:
 
 - **Architect proactively recommends parallelism** (`src/agents/architect.ts`,
-  `.claude/skills/plan/SKILL.md`, `.opencode/skills/plan/SKILL.md`): the
+  `.claude/skills/swarm-plan/SKILL.md`, `.opencode/skills/swarm-plan/SKILL.md`): the
   parallel-coders question now explains that parallel coders each run in an
   isolated git worktree (separate working dir + branch, auto-merged back) and
   instructs the architect to inspect the plan, group dependency-ready tasks with

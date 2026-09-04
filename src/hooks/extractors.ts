@@ -1,4 +1,5 @@
 import type { Plan } from '../config/plan-schema';
+import { extractContextDecisions } from '../utils/context-decisions';
 import { estimateCharsForTokens } from './utils';
 
 /**
@@ -79,6 +80,15 @@ export function extractCurrentTask(planContent: string): string | null {
 
 /**
  * Extracts decisions section from context content.
+ *
+ * #2493 W9a: derives from the shared section extractor
+ * (`src/utils/context-decisions.ts`) instead of a private line-scan.
+ * Mapping preserves this consumer's historical output exactly:
+ * - Only NON-indented `- ` lines are kept (the old scan matched raw
+ *   `line.startsWith('- ')`; the shared extractor is indent-tolerant, so
+ *   indented sub-bullets are filtered out here).
+ * - Lines are reproduced verbatim from `raw` — bullet prefix, markers
+ *   (✅ / [timestamps]) and all — then joined, trimmed and truncated.
  */
 export function extractDecisions(
 	contextContent: string,
@@ -88,26 +98,10 @@ export function extractDecisions(
 		return null;
 	}
 
-	const lines = contextContent.split('\n');
-	let decisionsText = '';
-	let inDecisionsSection = false;
-
-	for (const line of lines) {
-		if (line.trim() === '## Decisions') {
-			inDecisionsSection = true;
-			continue;
-		}
-
-		if (inDecisionsSection) {
-			if (line.startsWith('## ')) {
-				// Reached next section
-				break;
-			}
-			if (line.startsWith('- ')) {
-				decisionsText += `${line}\n`;
-			}
-		}
-	}
+	const decisionLines = extractContextDecisions(contextContent)
+		.filter((decision) => decision.raw.startsWith('- '))
+		.map((decision) => decision.raw);
+	const decisionsText = decisionLines.map((line) => `${line}\n`).join('');
 
 	if (!decisionsText.trim()) {
 		return null;

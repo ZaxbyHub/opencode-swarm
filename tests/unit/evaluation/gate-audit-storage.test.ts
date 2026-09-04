@@ -3,6 +3,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleBenchmarkCommand } from '../../../src/commands/benchmark.js';
+import { isCommandFailure } from '../../../src/commands/registry.js';
+
+const text = (r: Awaited<ReturnType<typeof handleBenchmarkCommand>>): string =>
+	isCommandFailure(r) ? r.text : r;
+
 import { createGateAuditManifest } from '../../../src/evaluation/gate-audit.js';
 import { saveGateGroundTruth } from '../../../src/evaluation/gate-ground-truth.js';
 import { computeGateStatistics } from '../../../src/evaluation/gate-stats.js';
@@ -148,10 +153,10 @@ describe('gate-audit storage and reporting', () => {
 				'--gate-audit-run',
 				'audit-ci',
 			]);
-			expect(output).toContain('Gate audit complete');
-			expect(output).toContain('Gate audit catch rate');
-			expect(output).toContain('"ground_truth_available": true');
-			expect(output).toContain('"gate_audit"');
+			expect(text(output)).toContain('Gate audit complete');
+			expect(text(output)).toContain('Gate audit catch rate');
+			expect(text(output)).toContain('"ground_truth_available": true');
+			expect(text(output)).toContain('"gate_audit"');
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -170,9 +175,9 @@ describe('gate-audit storage and reporting', () => {
 				'--gate-audit-run',
 				'audit-clean-reject',
 			]);
-			expect(output).toContain('Gate audit catch rate: 100%');
-			expect(output).toContain('Clean-control rejections: 6/6');
-			expect(output).toContain('❌ FAILED');
+			expect(text(output)).toContain('Gate audit catch rate: 100%');
+			expect(text(output)).toContain('Clean-control rejections: 6/6');
+			expect(text(output)).toContain('❌ FAILED');
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

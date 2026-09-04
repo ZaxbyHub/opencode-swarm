@@ -270,9 +270,10 @@ describe('CLI install command', () => {
 		expect(updated.agent.coder.model).toBe('my-coder');
 	});
 
-	test('Install overwrites disable:false to disable:true for standard config', async () => {
-		// Regression: if user has disable:false explicitly set, ensure
-		// install() overwrites it to disable:true (enforce the required flag).
+	test('Install preserves a user-set disable:false (never fight the user)', async () => {
+		// Issue #2493: a re-enabled agent must stay re-enabled. The old
+		// contract (overwriting disable:false back to true) silently fought
+		// the user's configuration on every re-install.
 		const opencodeDir = join(tempDir, 'opencode');
 		const opencodeJsonPath = join(opencodeDir, 'opencode.json');
 
@@ -294,11 +295,11 @@ describe('CLI install command', () => {
 
 		const updated = JSON.parse(await readFile(opencodeJsonPath, 'utf-8'));
 
-		// disable should be overwritten to true, custom model preserved
-		expect(updated.agent.explore.disable).toBe(true);
+		// disable stays false (explicit user decision), custom model preserved
+		expect(updated.agent.explore.disable).toBe(false);
 		expect(updated.agent.explore.model).toBe('custom-explore');
 
-		expect(updated.agent.general.disable).toBe(true);
+		expect(updated.agent.general.disable).toBe(false);
 		expect(updated.agent.general.model).toBe('custom-general');
 	});
 });

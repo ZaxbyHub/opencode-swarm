@@ -334,9 +334,10 @@ describe('Swarm subcommand registration', () => {
 			{ template: string; description: string }
 		>;
 
-		// Test a few specific templates
+		// Test a few specific templates (#2493 review F-06: the swarm-plan
+		// palette shortcut templates the CANONICAL command, not the alias).
 		expect(commands['swarm-status'].template).toBe('/swarm status');
-		expect(commands['swarm-plan'].template).toBe('/swarm plan $ARGUMENTS');
+		expect(commands['swarm-plan'].template).toBe('/swarm show-plan $ARGUMENTS');
 		expect(commands['swarm-agents'].template).toBe('/swarm agents');
 		expect(commands['swarm-reset'].template).toBe('/swarm reset --confirm');
 		expect(commands['swark-knowledge']).toBeUndefined(); // Typos should not exist
@@ -357,7 +358,7 @@ describe('Swarm subcommand registration', () => {
 			'Use /swarm status to show current swarm status and active phase',
 		);
 		expect(commands['swarm-plan'].description).toBe(
-			'Deprecated alias for /swarm show-plan',
+			'Deprecated alias for /swarm show-plan (runs the canonical command)',
 		);
 		expect(commands['swarm-agents'].description).toBe(
 			'Use /swarm agents to list registered swarm agents',

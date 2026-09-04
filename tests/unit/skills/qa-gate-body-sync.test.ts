@@ -4,8 +4,11 @@ import { existsSync, readFileSync } from 'node:fs';
 
 const SKILL_PAIRS = [
 	{
-		name: 'plan',
-		paths: ['.claude/skills/plan/SKILL.md', '.opencode/skills/plan/SKILL.md'],
+		name: 'swarm-plan',
+		paths: [
+			'.claude/skills/swarm-plan/SKILL.md',
+			'.opencode/skills/swarm-plan/SKILL.md',
+		],
 	},
 ];
 

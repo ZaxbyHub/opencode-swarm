@@ -60,13 +60,13 @@ plumbing:
 - Keep the user in control: surface a *recommendation*, not an auto-decision.
 - Respect engineering invariants (AGENTS.md): prompts are large strings; edits
   are additive and must not break presence-assertion tests; keep architect.ts
-  and `.claude/skills/plan/SKILL.md` dialogue copies in lockstep.
+  and `.claude/skills/swarm-plan/SKILL.md` dialogue copies in lockstep.
 
 ## Changes
 
 ### C1 — Architect: proactive parallelization recommendation + worktree concept (keystone)
 Files: `src/agents/architect.ts` (`buildQaGateSelectionDialogue`),
-`.claude/skills/plan/SKILL.md` (lockstep copy), and the corresponding
+`.claude/skills/swarm-plan/SKILL.md` (lockstep copy), and the corresponding
 `.opencode/skills/.../plan` copy if present.
 - Add a concise concept block: parallel coders each run in an **isolated git
   worktree** (own working dir + branch); completed work is auto-merged back.
@@ -172,7 +172,7 @@ File: `docs/releases/pending/` per repo convention (front-matter `type`/`issue`)
   `buildQaGateSelectionDialogue('SPECIFY'|'BRAINSTORM'|'PLAN')` contains
   `how many coders should run in parallel` and the new worktree concept phrase.
 - **T2 — lockstep sync.** A test asserting the architect dialogue and
-  `.claude/skills/plan/SKILL.md` (and `.opencode/skills/plan/SKILL.md`) share the
+  `.claude/skills/swarm-plan/SKILL.md` (and `.opencode/skills/swarm-plan/SKILL.md`) share the
   key parallel/worktree substrings, so the copies cannot silently drift.
 - **T3 — reviewer-gate parallel exemption (C4).** RED-before/GREEN-after:
   second different-task coder allowed under parallel mode; same-task re-delegation
@@ -180,7 +180,7 @@ File: `docs/releases/pending/` per repo convention (front-matter `type`/`issue`)
 
 ## Lockstep copies that MUST change together (critic axis 4)
 - `src/agents/architect.ts` `buildQaGateSelectionDialogue`
-- `.claude/skills/plan/SKILL.md` AND `.opencode/skills/plan/SKILL.md` (byte-identical;
+- `.claude/skills/swarm-plan/SKILL.md` AND `.opencode/skills/swarm-plan/SKILL.md` (byte-identical;
   both carry the dialogue ~L202+). The `specify` and `brainstorm` skills also embed
   the parallel-coders line — update them only if their copy diverges from the new text.
 

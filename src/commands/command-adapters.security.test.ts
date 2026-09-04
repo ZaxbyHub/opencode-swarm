@@ -23,13 +23,12 @@ import { handleArchiveCommand } from './archive';
 import { handleBenchmarkCommand } from './benchmark';
 import { handleDoctorCommand } from './doctor';
 import { handleEvidenceCommand } from './evidence';
+import { isCommandFailure } from './registry';
 import { handleResetCommand } from './reset';
 import { handleRetrieveCommand } from './retrieve';
 import { handleSyncPlanCommand } from './sync-plan';
 
-// ============================================================================
 // TEST UTILITIES
-// ============================================================================
 
 function createTempDir(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'security-test-'));
@@ -54,10 +53,6 @@ function createTestConfig(dir: string, config: object): void {
 	const configPath = path.join(configDir, 'opencode-swarm.json');
 	fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
-
-// ============================================================================
-// ATTACK VECTOR PAYLOADS
-// ============================================================================
 
 // Path traversal payloads with literal ".." that MUST be blocked
 // Note: Only .. followed by / or \ is dangerous; ..; is just a literal filename
@@ -165,9 +160,7 @@ const UNICODE_PAYLOADS = [
 	'👨‍👩‍👧‍👦', // Family emoji (ZWJ sequence)
 ];
 
-// ============================================================================
 // SECURITY TESTS
-// ============================================================================
 
 describe('Command Adapters - Adversarial Security Tests', () => {
 	let tempDir: string;
@@ -274,7 +267,9 @@ describe('Command Adapters - Adversarial Security Tests', () => {
 					const result = await handleRetrieveCommand(tempDir, [payload]);
 					// Should reject with error message, not leak files
 					expect(result).toContain('Invalid summary ID');
-					expect(result).not.toContain('root:'); // No leaked /etc/passwd content
+					expect(isCommandFailure(result) ? result.text : result).not.toContain(
+						'root:',
+					); // No leaked /etc/passwd content
 				}
 			});
 
@@ -613,7 +608,9 @@ describe('Command Adapters - Adversarial Security Tests', () => {
 
 			it('should handle --ci-gate flag', async () => {
 				const result = await handleBenchmarkCommand(tempDir, ['--ci-gate']);
-				expect(result).toContain('CI Gate');
+				expect(isCommandFailure(result) ? result.text : result).toContain(
+					'CI Gate',
+				);
 			});
 
 			it('should handle flag injection attempts', async () => {
@@ -621,7 +618,9 @@ describe('Command Adapters - Adversarial Security Tests', () => {
 					'--ci-gate',
 					'--unknown=../../../etc/passwd',
 				]);
-				expect(result).not.toContain('root:');
+				expect(isCommandFailure(result) ? result.text : result).not.toContain(
+					'root:',
+				);
 			});
 		});
 

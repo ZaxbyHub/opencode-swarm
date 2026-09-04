@@ -214,7 +214,15 @@ function findSimilarCommands(query: string): string[] {
 	});
 
 	scored.sort((a, b) => a.score - b.score);
-	return scored.slice(0, 3).map((s) => s.cmd);
+	// Relevance cutoff (#1646 item 4 via #2493): without it, ANY query — pure
+	// gibberish included — yields three confident "Did you mean" suggestions
+	// that can steer agents toward unintended commands. Commands farther than
+	// max(2, ceil(queryLength/3)) edits away are not plausible typos.
+	const cutoff = Math.max(2, Math.ceil(q.length / 3));
+	return scored
+		.filter((s) => s.score <= cutoff)
+		.slice(0, 3)
+		.map((s) => s.cmd);
 }
 
 function emitValidationWarnings(
@@ -259,7 +267,20 @@ export async function handleHelpCommand(ctx: CommandContext): Promise<string> {
 	const resolved = _internals.resolveCommand(tokens);
 
 	if (resolved) {
-		return _internals.buildDetailedHelp(resolved.key, resolved.entry);
+		const detailed = _internals.buildDetailedHelp(resolved.key, resolved.entry);
+		// #2493 review F-08: resolveCommand returns the DEREFERENCED canonical
+		// entry, so `/swarm help plan` printed the alias key as the title with
+		// the canonical command's description/details and no hint they differ.
+		// When the typed key is itself a pure alias, say so explicitly.
+		const originalEntry = COMMAND_REGISTRY[
+			resolved.key as keyof typeof COMMAND_REGISTRY
+		] as CommandEntry | undefined;
+		const aliasTarget = originalEntry?.handler
+			? undefined
+			: originalEntry?.aliasOf;
+		return aliasTarget
+			? `${detailed}\n\n> Note: \`/swarm ${resolved.key}\` is a deprecated alias for \`/swarm ${aliasTarget}\`.`
+			: detailed;
 	}
 
 	// Command not found - suggest similar commands
@@ -310,7 +331,32 @@ export type CommandContext = {
 	reviewAgentModelRegistry?: ReviewAgentModelRegistry;
 };
 
-export type CommandResult = Promise<string>;
+/**
+ * Issue #2493 (#1646 item 3): opt-in structured failure channel. A handler
+ * may return a plain string (ok — CLI exits 0, chat prints it verbatim) or
+ * this shape to signal failure; the CLI maps `ok: false` to `exitCode ?? 1`
+ * while the chat path displays `text` unchanged (chat has no exit codes).
+ */
+export type CommandFailure = {
+	/** User-facing failure text (also what the chat path displays). */
+	text: string;
+	ok: false;
+	/** CLI exit code; defaults to 1 when omitted. */
+	exitCode?: number;
+};
+
+export type CommandResult = Promise<string | CommandFailure>;
+
+/** Type guard for the CommandFailure half of the CommandResult union. */
+export function isCommandFailure(
+	value: string | CommandFailure,
+): value is CommandFailure {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		(value as CommandFailure).ok === false
+	);
+}
 
 async function handleModeCommandWithBundledSkills(
 	ctx: CommandContext,
@@ -337,7 +383,11 @@ async function handleModeCommandWithBundledSkills(
 		);
 	}
 	const result = await Promise.resolve(handler(ctx.directory, ctx.args));
-	if (/^\s*\[MODE:\s*[A-Z][A-Z0-9_-]*\b/.test(result)) {
+	// MODE banners only exist on the string half of the CommandResult union.
+	if (
+		typeof result === 'string' &&
+		/^\s*\[MODE:\s*[A-Z][A-Z0-9_-]*\b/.test(result)
+	) {
 		if (mechanicalMode) {
 			await activatePrWorkflow(ctx.directory, ctx.sessionID, mechanicalMode, {
 				requireCheckoutPreflight: true,
@@ -389,7 +439,13 @@ export type CommandCategory =
 	| 'utility';
 
 export type CommandEntry = {
-	handler: (ctx: CommandContext) => CommandResult;
+	/**
+	 * Command handler. OPTIONAL on pure alias entries (#1646 via #2493): an
+	 * entry without a handler MUST carry a valid `aliasOf` (enforced by
+	 * validateAliases) and `resolveCommand` dereferences to the canonical
+	 * entry — new aliases never redeclare the canonical handler.
+	 */
+	handler?: (ctx: CommandContext) => CommandResult;
 	/** Human-readable description shown in /swarm help and CLI --help */
 	description: string;
 	/** If true, this command is only accessible as a sub-key of a parent command */
@@ -518,80 +574,48 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'none',
 	},
 	'blueprint-validate': {
-		handler: (ctx) =>
-			handleBlueprintValidateCommand(ctx.directory, ctx.args, {
-				config: ctx.config,
-			}),
 		description: 'TUI shortcut alias for blueprint validate',
 		category: 'utility',
 		aliasOf: 'blueprint validate',
 		deprecated: true,
 	},
 	'blueprint-current': {
-		handler: (ctx) =>
-			handleBlueprintCurrentCommand(ctx.directory, ctx.agents, {
-				config: ctx.config,
-			}),
 		description: 'TUI shortcut alias for blueprint current',
 		category: 'utility',
 		aliasOf: 'blueprint current',
 		deprecated: true,
 	},
 	'blueprint-history': {
-		handler: (ctx) =>
-			handleBlueprintHistoryCommand(ctx.directory, ctx.args, {
-				config: ctx.config,
-			}),
 		description: 'TUI shortcut alias for blueprint history',
 		category: 'utility',
 		aliasOf: 'blueprint history',
 		deprecated: true,
 	},
 	'blueprint-diff': {
-		handler: (ctx) =>
-			handleBlueprintDiffCommand(ctx.directory, ctx.args, {
-				config: ctx.config,
-			}),
 		description: 'TUI shortcut alias for blueprint diff',
 		category: 'utility',
 		aliasOf: 'blueprint diff',
 		deprecated: true,
 	},
 	'blueprint-export': {
-		handler: (ctx) =>
-			handleBlueprintExportCommand(ctx.directory, ctx.args, {
-				config: ctx.config,
-			}),
 		description: 'TUI shortcut alias for blueprint export',
 		category: 'utility',
 		aliasOf: 'blueprint export',
 		deprecated: true,
 	},
 	'harness-candidate-validate': {
-		handler: (ctx) =>
-			handleHarnessCandidateValidateCommand(ctx.directory, ctx.args, {
-				config: ctx.config,
-			}),
 		description: 'TUI shortcut alias for harness candidate validate',
 		category: 'utility',
 		aliasOf: 'harness candidate validate',
 		deprecated: true,
 	},
 	'harness-candidate-show': {
-		handler: (ctx) =>
-			handleHarnessCandidateShowCommand(ctx.directory, ctx.args, {
-				config: ctx.config,
-			}),
 		description: 'TUI shortcut alias for harness candidate show',
 		category: 'utility',
 		aliasOf: 'harness candidate show',
 		deprecated: true,
 	},
 	'harness-candidate-diff': {
-		handler: (ctx) =>
-			handleHarnessCandidateDiffCommand(ctx.directory, ctx.args, {
-				config: ctx.config,
-			}),
 		description: 'TUI shortcut alias for harness candidate diff',
 		category: 'utility',
 		aliasOf: 'harness candidate diff',
@@ -644,7 +668,6 @@ export const COMMAND_REGISTRY = {
 	// resolveCommand(['context-map-stats']) returns null and the TUI shows
 	// "command not found". Mirrors the 'doctor-tools' alias above.
 	'context-map-stats': {
-		handler: async (ctx) => handleContextMapStatsCommand(ctx.directory),
 		description: 'Show aggregated context-capsule telemetry stats',
 		category: 'diagnostics',
 		aliasOf: 'context-map stats',
@@ -658,7 +681,6 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'agent',
 	},
 	plan: {
-		handler: (ctx) => handlePlanCommand(ctx.directory, ctx.args),
 		description: 'Show current plan (deprecated alias for /swarm show-plan)',
 		category: 'core',
 		clashesWithNativeCcCommand: '/plan',
@@ -711,7 +733,6 @@ export const COMMAND_REGISTRY = {
 	// Alias for TUI shortcut 'swarm-config-doctor' which extracts subcommand as 'config-doctor' (dash).
 	// Without this alias the shortcut resolves to null and shows help text instead of running the command.
 	'config-doctor': {
-		handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args),
 		description: 'Run config doctor checks',
 		subcommandOf: 'config',
 		category: 'diagnostics',
@@ -725,13 +746,13 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'agent',
 		toolNoArgs: true,
 	},
-	// Alias for the hyphenated form '/swarm doctor-tools'. Without it,
-	// resolveCommand(['doctor-tools']) returns null and the TUI shows
-	// "command not found". NOTE: aliasOf is warning text only — resolveCommand
-	// invokes this entry's OWN handler, so the handler must be set here (mirrors
-	// the 'config-doctor' alias above).
+	// Pure alias for the hyphenated form '/swarm doctor-tools' (canonical:
+	// 'doctor tools'). Without it, resolveCommand(['doctor-tools']) returns
+	// null and the TUI shows "command not found". #2493 converted this entry
+	// to aliasOf with NO handler — resolveRegistryEntry dereferences the alias
+	// chain to the canonical handler-bearing entry (mirrors the 'config-doctor'
+	// alias above).
 	'doctor-tools': {
-		handler: (ctx) => handleDoctorToolsCommand(ctx.directory, ctx.args),
 		description: 'Run tool registration coherence check',
 		category: 'diagnostics',
 		aliasOf: 'doctor tools',
@@ -747,8 +768,6 @@ export const COMMAND_REGISTRY = {
 	},
 	// Alias: users commonly type 'diagnosis' — route to the same handler as 'diagnose'.
 	diagnosis: {
-		handler: (ctx) =>
-			handleDiagnoseCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description: 'Run health check on swarm state',
 		category: 'diagnostics',
 		aliasOf: 'diagnose',
@@ -775,17 +794,14 @@ export const COMMAND_REGISTRY = {
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},
-	// Alias for TUI shortcut 'swarm-guardrail-explain' which extracts the
-	// subcommand as the single dash token 'guardrail-explain'. Without this alias
-	// resolveCommand(['guardrail-explain']) returns null and the TUI shows
-	// "command not found" (mirrors the 'config-doctor'/'doctor-tools' pattern).
-	// aliasOf is warning text only — resolveCommand invokes this entry's OWN
-	// handler, so the handler must be set here.
+	// Pure alias for TUI shortcut 'swarm-guardrail-explain' which extracts the
+	// subcommand as the single dash token 'guardrail-explain' (canonical:
+	// 'guardrail explain'). Without this alias resolveCommand
+	// (['guardrail-explain']) returns null and the TUI shows "command not
+	// found" (mirrors the 'config-doctor'/'doctor-tools' pattern). #2493
+	// converted this entry to aliasOf with NO handler — resolveRegistryEntry
+	// dereferences to the canonical handler-bearing entry.
 	'guardrail-explain': {
-		handler: async (ctx) => {
-			const { handleGuardrailExplain } = await import('./guardrail-explain.js');
-			return handleGuardrailExplain(ctx.directory, ctx.args);
-		},
 		description:
 			'Dry-run: show what the guardrails would do to a command or write target (executes nothing)',
 		category: 'diagnostics',
@@ -796,10 +812,6 @@ export const COMMAND_REGISTRY = {
 	// shortcut resolves to this one-token form, while the canonical command is
 	// the two-token 'guardrail reset' entry above.
 	'guardrail-reset': {
-		handler: async (ctx) => {
-			const { handleGuardrailReset } = await import('./guardrail-reset.js');
-			return handleGuardrailReset(ctx.args, ctx.sessionID);
-		},
 		description:
 			'Reset one exact active invocation/action circuit after repair',
 		category: 'diagnostics',
@@ -845,6 +857,8 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Show performance metrics [--cumulative] [--ci-gate] [--max-cost-usd <n>] [--gate-audit-run <id>]',
 		args: '--cumulative, --ci-gate, --max-cost-usd <n>, --gate-audit-run <id>',
+		details:
+			'Exit codes (#2493 review F-14): with --ci-gate, the process exits 0 only when every quality check passes and 1 on any failure, budget breach, or missing evidence — CI-safe by construction. Without --ci-gate the command is informational and always exits 0.',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},
@@ -1021,7 +1035,6 @@ export const COMMAND_REGISTRY = {
 	// Alias for TUI shortcut 'swarm-evidence-summary' which extracts subcommand as 'evidence-summary' (dash).
 	// Without this alias the shortcut resolves to null and shows help text instead of running the command.
 	'evidence-summary': {
-		handler: (ctx) => handleEvidenceSummaryCommand(ctx.directory),
 		description: 'Generate evidence summary with completion ratio and blockers',
 		subcommandOf: 'evidence',
 		args: '',
@@ -1033,7 +1046,6 @@ export const COMMAND_REGISTRY = {
 	},
 	// Deprecation aliases for confusing command names
 	doctor: {
-		handler: (ctx) => handleDoctorCommand(ctx.directory, ctx.args),
 		description: 'Run config doctor checks',
 		category: 'diagnostics',
 		aliasOf: 'config doctor',
@@ -1041,8 +1053,6 @@ export const COMMAND_REGISTRY = {
 		clashesWithNativeCcCommand: '/doctor',
 	},
 	info: {
-		handler: async (ctx) =>
-			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
 		description:
 			'Show current swarm state (plus background-work health when hooks.background_subagents is enabled)',
 		category: 'core',
@@ -1050,31 +1060,24 @@ export const COMMAND_REGISTRY = {
 		deprecated: true,
 	},
 	'list-agents': {
-		handler: (ctx) =>
-			Promise.resolve(handleAgentsCommand(ctx.agents, undefined)),
 		description: 'List registered agents',
 		category: 'core',
 		aliasOf: 'agents',
 		deprecated: true,
 	},
 	health: {
-		handler: (ctx) =>
-			handleDiagnoseCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description: 'Run health check on swarm state',
 		category: 'diagnostics',
 		aliasOf: 'diagnose',
 		deprecated: true,
 	},
 	check: {
-		handler: (ctx) => handlePreflightCommand(ctx.directory, ctx.args),
 		description: 'Run preflight automation checks',
 		category: 'diagnostics',
 		aliasOf: 'preflight',
 		deprecated: true,
 	},
 	clear: {
-		handler: (ctx) =>
-			handleResetSessionCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description:
 			'Clear session state while preserving plan, evidence, and knowledge',
 		category: 'utility',
@@ -1148,16 +1151,12 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Use /swarm finalize to finalize the swarm project and archive evidence',
 		details:
-			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs aggressive git reset --hard to the default remote branch, discarding uncommitted changes and gitignored build artifacts (user-created untracked files are preserved); falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed. WARNING: alignment discards local changes and gitignored files. Resets agent sessions, delegation chains, and active-agent mappings. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Use --skill-review to run the quota-bounded skill_improver in proposal mode. Use --dry-run to preview what finalize would archive, clean, and align without taking the lock or changing anything.',
+			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs aggressive git reset --hard to the default remote branch, discarding uncommitted changes and gitignored build artifacts (user-created untracked files are preserved); falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed. WARNING: alignment discards local changes and gitignored files. Resets agent sessions, delegation chains, and active-agent mappings. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Cleanup: knowledge.jsonl is preserved; plan.json, plan.md, events.jsonl, handoff.*, run-memory.jsonl, and summaries/ are removed. Use --skill-review to run the quota-bounded skill_improver in proposal mode. Use --dry-run to preview what finalize would archive, clean, and align without taking the lock or changing anything.',
 		args: '--prune-branches, --skill-review, --dry-run',
 		category: 'core',
 		toolPolicy: 'none',
 	},
 	close: {
-		handler: (ctx) =>
-			handleCloseCommand(ctx.directory, ctx.args, {
-				sessionID: ctx.sessionID,
-			}),
 		description:
 			'Use /swarm close (deprecated alias) to finalize and archive swarm state',
 		details:
@@ -1253,21 +1252,18 @@ export const COMMAND_REGISTRY = {
 	// .swarm/spec.md requires --overwrite — consent is obtained by the SKILL
 	// layer, not the command) via canonicalCommandKey (aliasOf).
 	'sdd-status': {
-		handler: (ctx) => handleSddStatusCommand(ctx.directory, ctx.args),
 		description:
 			'Show OpenSpec-compatible SDD status and effective spec source',
 		aliasOf: 'sdd status',
 		deprecated: true,
 	},
 	'sdd-validate': {
-		handler: (ctx) => handleSddValidateCommand(ctx.directory, ctx.args),
 		description:
 			'Validate OpenSpec-compatible artifacts and effective spec projection',
 		aliasOf: 'sdd validate',
 		deprecated: true,
 	},
 	'sdd-project': {
-		handler: (ctx) => handleSddProjectCommand(ctx.directory, ctx.args),
 		description:
 			'Materialize the OpenSpec-compatible effective spec into .swarm/spec.md',
 		aliasOf: 'sdd project',
@@ -1412,8 +1408,6 @@ export const COMMAND_REGISTRY = {
 	// 'config-doctor'/'doctor-tools' alias pattern. The alias inherits the
 	// canonical agent tool policy via canonicalCommandKey (aliasOf).
 	'pr-subscribe': {
-		handler: (ctx) =>
-			handlePrSubscribeCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description:
 			'Subscribe the current session to PR state-change notifications',
 		aliasOf: 'pr subscribe',
@@ -1433,8 +1427,6 @@ export const COMMAND_REGISTRY = {
 	// Alias for the TUI shortcut 'swarm-pr-unsubscribe' (normalizes to
 	// 'pr-unsubscribe'). See the 'pr-subscribe' alias note above.
 	'pr-unsubscribe': {
-		handler: (ctx) =>
-			handlePrUnsubscribeCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description:
 			'Unsubscribe the current session from PR state-change notifications',
 		aliasOf: 'pr unsubscribe',
@@ -1459,13 +1451,6 @@ export const COMMAND_REGISTRY = {
 	// Alias for the TUI shortcut 'swarm-pr-status' (normalizes to 'pr-status').
 	// See the 'pr-subscribe' alias note above.
 	'pr-status': {
-		handler: (ctx) =>
-			handlePrMonitorStatusCommand(
-				ctx.directory,
-				ctx.args,
-				ctx.sessionID,
-				ctx.source,
-			),
 		description: 'Show PR monitor subscription status for the current session',
 		aliasOf: 'pr status',
 		deprecated: true,
@@ -1492,8 +1477,6 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'none',
 	},
 	'deep dive': {
-		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(ctx, handleDeepDiveCommand),
 		description: 'Alias for /swarm deep-dive — launch deep codebase audit',
 		args: '<scope> [--profile standard|security|ux|architecture|full] [--max-explorers 1..8] [--json] [--skip-update] [--allow-dirty]',
 		category: 'agent',
@@ -1511,8 +1494,6 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'none',
 	},
 	'deep research': {
-		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(ctx, handleDeepResearchCommand),
 		description:
 			'Alias for /swarm deep-research — launch a cited deep research pass',
 		args: '<question> [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
@@ -1531,8 +1512,6 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'none',
 	},
 	'codebase review': {
-		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(ctx, handleCodebaseReviewCommand),
 		description:
 			'Alias for /swarm codebase-review - launch codebase-review-swarm',
 		args: '[scope] [--mode phase0|complete|defect|security|correctness|testing|ui|performance|ai-slop|enhancements|custom] [--tracks <list>] [--continue <run-id>] [--json] [--skip-update] [--allow-dirty]',
@@ -1551,8 +1530,6 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'none',
 	},
 	'design docs': {
-		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(ctx, handleDesignDocsCommand),
 		description: 'Alias for /swarm design-docs — generate or sync design docs',
 		args: '<description> [--out <dir>] [--lang <name>] [--update]',
 		category: 'agent',
@@ -1619,7 +1596,7 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleResetCommand(ctx.directory, ctx.args),
 		description: 'Clear swarm state files [--confirm]',
 		details:
-			'DELETES plan.md, context.md, and summaries/ directory from .swarm/. Stops background automation and clears in-memory queues. SAFETY: requires --confirm flag — without it, displays a warning and tips to export first. Before deleting, auto-backs up the state it removes to .swarm/reset-backups/<timestamp>/ (newest 5 kept) so it can be restored by copying the files back.',
+			'DELETES plan.md, plan.json, context.md, events.jsonl, run-memory.jsonl, and summaries/ from .swarm/. Stops background automation and clears in-memory queues. SAFETY: requires --confirm flag — without it, displays a warning and tips to export first. Before deleting, auto-backs up the state it removes to .swarm/reset-backups/<timestamp>/ (newest 5 kept) so it can be restored by copying the files back.',
 		args: '--confirm (required)',
 		category: 'utility',
 		clashesWithNativeCcCommand: '/reset',
@@ -1949,25 +1926,21 @@ export const COMMAND_REGISTRY = {
 	// canonical tool policy (import/migrate are human-only) via
 	// canonicalCommandKey (aliasOf).
 	'memory-status': {
-		handler: (ctx) => handleMemoryStatusCommand(ctx.directory, ctx.args),
 		description: 'Show Swarm memory provider, JSONL, and migration status',
 		aliasOf: 'memory status',
 		deprecated: true,
 	},
 	'memory-export': {
-		handler: (ctx) => handleMemoryExportCommand(ctx.directory, ctx.args),
 		description: 'Export current Swarm memory to JSONL files',
 		aliasOf: 'memory export',
 		deprecated: true,
 	},
 	'memory-import': {
-		handler: (ctx) => handleMemoryImportCommand(ctx.directory, ctx.args),
 		description: 'Import legacy JSONL memory into SQLite',
 		aliasOf: 'memory import',
 		deprecated: true,
 	},
 	'memory-migrate': {
-		handler: (ctx) => handleMemoryMigrateCommand(ctx.directory, ctx.args),
 		description: 'Run the one-time legacy JSONL to SQLite migration',
 		aliasOf: 'memory migrate',
 		deprecated: true,
@@ -2011,6 +1984,14 @@ export function validateAliases(): {
 
 	for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 		const cmdEntry = entry as CommandEntry;
+		// #1646 via #2493: a handler-less entry is a pure alias and MUST
+		// redirect through aliasOf to a handler-bearing target.
+		if (!cmdEntry.handler && !cmdEntry.aliasOf) {
+			errors.push(
+				`Command '${name}' has no handler and no aliasOf — pure aliases must dereference to a canonical entry`,
+			);
+			continue;
+		}
 		if (cmdEntry.aliasOf) {
 			const target = cmdEntry.aliasOf;
 
@@ -2138,7 +2119,7 @@ try {
  * Returns a warning if the resolved command is a deprecated alias.
  */
 export function resolveCommand(tokens: string[]): {
-	entry: CommandEntry;
+	entry: CommandEntry & { handler: (ctx: CommandContext) => CommandResult };
 	remainingArgs: string[];
 	key: string;
 	warning?: string;
@@ -2152,9 +2133,8 @@ export function resolveCommand(tokens: string[]): {
 			`${tokens[0]} ${tokens[1]} ${tokens[2]}` as RegisteredCommand;
 		if (Object.hasOwn(COMMAND_REGISTRY, compound)) {
 			return {
-				entry: COMMAND_REGISTRY[compound] as CommandEntry,
+				...resolveRegistryEntry(compound),
 				remainingArgs: tokens.slice(3),
-				key: compound,
 			};
 		}
 	}
@@ -2162,15 +2142,9 @@ export function resolveCommand(tokens: string[]): {
 	if (tokens.length >= 2) {
 		const compound = `${tokens[0]} ${tokens[1]}` as RegisteredCommand;
 		if (Object.hasOwn(COMMAND_REGISTRY, compound)) {
-			const entry = COMMAND_REGISTRY[compound] as CommandEntry;
-			const warning = entry.deprecated
-				? `⚠️ "/swarm ${compound}" is deprecated. Use "/swarm ${entry.aliasOf}" instead.`
-				: undefined;
 			return {
-				entry,
+				...resolveRegistryEntry(compound),
 				remainingArgs: tokens.slice(2),
-				key: compound,
-				warning,
 			};
 		}
 	}
@@ -2178,17 +2152,55 @@ export function resolveCommand(tokens: string[]): {
 	// Fall back to single-token key
 	const key = tokens[0] as RegisteredCommand;
 	if (Object.hasOwn(COMMAND_REGISTRY, key)) {
-		const entry = COMMAND_REGISTRY[key] as CommandEntry;
-		const warning = entry.deprecated
-			? `⚠️ "/swarm ${key}" is deprecated. Use "/swarm ${entry.aliasOf}" instead.`
-			: undefined;
 		return {
-			entry,
+			...resolveRegistryEntry(key),
 			remainingArgs: tokens.slice(1),
-			key,
-			warning,
 		};
 	}
 
 	return null;
+}
+
+/**
+ * Resolve a registry key to its executable entry (#1646 via #2493): pure
+ * aliases (entries without their own handler) dereference through `aliasOf`
+ * — validateAliases guarantees the chain is acyclic and lands on a
+ * handler-bearing canonical entry — so the canonical handler runs with the
+ * ALIAS deprecation warning. The returned entry type carries a guaranteed
+ * handler so callers never re-implement alias dereferencing (the old CLI
+ * tool-policy fallback was exactly such a re-implementation).
+ */
+function resolveRegistryEntry(key: RegisteredCommand): {
+	entry: CommandEntry & { handler: (ctx: CommandContext) => CommandResult };
+	key: string;
+	warning?: string;
+} {
+	let entry = COMMAND_REGISTRY[key] as CommandEntry;
+	const warning = entry.deprecated
+		? `⚠️ "/swarm ${key}" is deprecated. Use "/swarm ${entry.aliasOf}" instead.`
+		: undefined;
+
+	while (!entry.handler && entry.aliasOf) {
+		const target = COMMAND_REGISTRY[
+			entry.aliasOf as RegisteredCommand
+		] as CommandEntry;
+		if (!target) break;
+		entry = target;
+	}
+
+	const handler = entry.handler;
+	if (!handler) {
+		// Unreachable post-validateAliases (module-load validation fails the
+		// build first); kept as a typed, explicit failure for safety.
+		throw new Error(`Command '${key}' resolves to no handler`);
+	}
+	// Return the registry's own entry object (not a copy) so identity-based
+	// round-trip checks against COMMAND_REGISTRY values keep holding.
+	return {
+		entry: entry as CommandEntry & {
+			handler: (ctx: CommandContext) => CommandResult;
+		},
+		key,
+		warning,
+	};
 }

@@ -15,7 +15,7 @@ import { join } from 'node:path';
 // Skills with FULL clarification funnel (all 5 categories, all protections required)
 const FULL_FUNNEL_SKILLS = [
 	'clarify',
-	'plan',
+	'swarm-plan',
 	'specify',
 	'brainstorm',
 	'issue-ingest',
@@ -154,7 +154,10 @@ describe('Cross-skill funnel parity verification', () => {
 		});
 
 		it('plan skill contains always-surface section', () => {
-			const skillPath = join(process.cwd(), '.opencode/skills/plan/SKILL.md');
+			const skillPath = join(
+				process.cwd(),
+				'.opencode/skills/swarm-plan/SKILL.md',
+			);
 			const content = readFileSync(skillPath, 'utf-8');
 			expect(content).toContain('Always-Surface Categories');
 		});
@@ -176,7 +179,10 @@ describe('Cross-skill funnel parity verification', () => {
 					process.cwd(),
 					'.opencode/skills/clarify/SKILL.md',
 				);
-				const planPath = join(process.cwd(), '.opencode/skills/plan/SKILL.md');
+				const planPath = join(
+					process.cwd(),
+					'.opencode/skills/swarm-plan/SKILL.md',
+				);
 				const clarifyContent = readFileSync(clarifyPath, 'utf-8');
 				const planContent = readFileSync(planPath, 'utf-8');
 

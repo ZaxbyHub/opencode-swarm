@@ -72,6 +72,7 @@ import {
 } from '../services/skill-reviser.js';
 import { swarmState } from '../state.js';
 import { bunWrite } from '../utils/bun-compat';
+import { extractContextDecisions } from '../utils/context-decisions';
 import * as logger from '../utils/logger';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import type {
@@ -1732,22 +1733,24 @@ export async function runCuratorPhase(
 			: 0;
 		const tasksTotal = phaseData ? phaseData.tasks.length : 0;
 
-		// Extract key decisions from context.md (lines starting with '- ')
-		const keyDecisions: string[] = [];
-		if (contextMd) {
-			const decisionSection = contextMd.match(
-				/## Decisions\r?\n([\s\S]*?)(?:\r?\n##|$)/,
-			);
-			if (decisionSection) {
-				const lines = decisionSection[1].split('\n');
-				for (const line of lines) {
-					const trimmed = line.trim();
-					if (trimmed.startsWith('- ')) {
-						keyDecisions.push(trimmed.slice(2));
-					}
-				}
-			}
-		}
+		// Extract key decisions from context.md (lines starting with '- ').
+		//
+		// #2493 W9a: derives from the shared section extractor
+		// (`src/utils/context-decisions.ts`) instead of an inline regex.
+		// Behavior change (intentional, boundary alignment): the old regex
+		// matched `## Decisions` ANYWHERE in a line — so a prose mention or
+		// `### Decisions` started a bogus section — and ended the section at
+		// any `\n##`, so a `###` subheading inside the section truncated the
+		// decision list. The shared extractor uses the strict boundary every
+		// other consumer already used: the header line must be exactly
+		// `## Decisions` (trimmed), and the section ends at the next `## `
+		// header. Item text still keeps markers (✅ / [timestamps]) and the
+		// first-5 cap below is unchanged.
+		const keyDecisions: string[] = contextMd
+			? extractContextDecisions(contextMd).map((decision) =>
+					decision.raw.trim().slice(2),
+				)
+			: [];
 
 		const phaseDigest: PhaseDigestEntry = {
 			phase,

@@ -229,7 +229,16 @@ describe('run() function - Adversarial Tests', () => {
 		const mockError = new Error('Handler error');
 		mockHandleStatusCommand.mockRejectedValueOnce(mockError);
 
-		await expect(run(['status'])).rejects.toThrow('Handler error');
+		// #2493: run() contains handler errors (bounded error path) instead
+		// of propagating the throw out of the CLI entry.
+		const result = await run(['status']);
+		expect(result).toBe(1);
+
+		// #2493 review F-05: the bounded path must still SURFACE the handler's
+		// error message on stderr, not just flip the exit code.
+		expect(mockConsoleError).toHaveBeenCalledWith(
+			expect.stringContaining('Handler error'),
+		);
 
 		// Verify console.log was not called for the result
 		expect(mockConsoleLog).not.toHaveBeenCalled();
@@ -272,7 +281,7 @@ describe('run() function - Adversarial Tests', () => {
 
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command:  '),
+			expect.stringContaining('not found.'),
 		);
 	});
 
@@ -320,7 +329,7 @@ describe('run() function - Adversarial Tests', () => {
 
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: null'),
+			expect.stringContaining('Command `/swarm null` not found.'),
 		);
 	});
 
@@ -419,7 +428,7 @@ describe('run() function - Adversarial Tests', () => {
 
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: unknown'),
+			expect.stringContaining('Command `/swarm unknown` not found.'),
 		);
 	});
 });

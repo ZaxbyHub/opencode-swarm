@@ -503,7 +503,7 @@ describe('A3: Traceability check in MODE: PLAN', () => {
 	const agent = createArchitectAgent('test-model');
 	const prompt = agent.config.prompt!;
 	const planSkill = readFileSync(
-		join(process.cwd(), '.opencode/skills/plan/SKILL.md'),
+		join(process.cwd(), '.opencode/skills/swarm-plan/SKILL.md'),
 		'utf-8',
 	);
 

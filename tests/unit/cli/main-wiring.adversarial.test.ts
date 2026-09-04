@@ -168,7 +168,8 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['--help']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: --help'),
+			// #2493: run() now emits formatCommandNotFound output.
+			expect.stringContaining('Command `/swarm --help` not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -177,7 +178,7 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command:'),
+			expect.stringContaining('not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -186,7 +187,7 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['../../etc/passwd']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: ../../etc/passwd'),
+			expect.stringContaining('Command `/swarm ../../etc/passwd` not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -195,7 +196,9 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['<script>alert(1)</script>']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: <script>alert(1)</script>'),
+			expect.stringContaining(
+				'Command `/swarm <script>alert(1)</script>` not found.',
+			),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -205,7 +208,7 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run([longCmd]);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command:'),
+			expect.stringContaining('not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -214,7 +217,7 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['null']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: null'),
+			expect.stringContaining('Command `/swarm null` not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -223,7 +226,7 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['undefined']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: undefined'),
+			expect.stringContaining('Command `/swarm undefined` not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -232,7 +235,7 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['__proto__']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: __proto__'),
+			expect.stringContaining('Command `/swarm __proto__` not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -282,7 +285,7 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['status; rm -rf /']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: status; rm -rf /'),
+			expect.stringContaining('Command `/swarm status; rm -rf /` not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -291,7 +294,7 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['status|cat']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command: status|cat'),
+			expect.stringContaining('Command `/swarm status|cat` not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -300,7 +303,7 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['status\nrm -rf /']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command:'),
+			expect.stringContaining('not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});
@@ -309,7 +312,7 @@ describe('main() run dispatch wiring — adversarial tests', () => {
 		const result = await run(['status\tcat']);
 		expect(result).toBe(1);
 		expect(mockConsoleError).toHaveBeenCalledWith(
-			expect.stringContaining('Unknown command:'),
+			expect.stringContaining('not found.'),
 		);
 		expect(mockExit).not.toHaveBeenCalled();
 	});

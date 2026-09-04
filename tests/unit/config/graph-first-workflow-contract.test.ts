@@ -120,7 +120,7 @@ describe('graph-first workflow contracts', () => {
 	test('canonical skill files keep graph-first contract sections with exact actions and fallback language', () => {
 		const sectionSurfaces = [
 			{
-				path: '.opencode/skills/plan/SKILL.md',
+				path: '.opencode/skills/swarm-plan/SKILL.md',
 				actions: [
 					'graph_health',
 					'package_boundaries',
@@ -170,7 +170,7 @@ describe('graph-first workflow contracts', () => {
 				actions: ['diff_context', 'impact_cone'],
 			},
 			{
-				path: '.claude/skills/plan/SKILL.md',
+				path: '.claude/skills/swarm-plan/SKILL.md',
 				actions: [
 					'graph_health',
 					'package_boundaries',

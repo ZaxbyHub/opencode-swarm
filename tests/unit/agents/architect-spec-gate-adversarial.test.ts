@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 describe('profile-aware SPEC POLICY — adversarial (standalone)', () => {
 	const prompt = readFileSync(
-		join(process.cwd(), '.opencode/skills/plan/SKILL.md'),
+		join(process.cwd(), '.opencode/skills/swarm-plan/SKILL.md'),
 		'utf-8',
 	);
 	const balancedStart = prompt.indexOf(

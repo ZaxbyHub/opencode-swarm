@@ -44,13 +44,16 @@ export const OPENCODE_NATIVE_AGENTS = new Set([
  * src/commands/conflict-registry.ts and update CLAUDE_CODE_CONFLICTS if the
  * command also matches a swarm subcommand.
  */
-function freezeSet<T>(items: readonly T[]): ReadonlySet<T> {
+function freezeSet<T>(
+	items: readonly T[],
+	name = 'CLAUDE_CODE_NATIVE_COMMANDS',
+): ReadonlySet<T> {
 	const set = new Set(items);
 	const proxy = new Proxy(set, {
 		get(target, prop) {
 			if (prop === 'add' || prop === 'delete' || prop === 'clear') {
 				return () => {
-					throw new TypeError('CLAUDE_CODE_NATIVE_COMMANDS is readonly');
+					throw new TypeError(`${name} is readonly`);
 				};
 			}
 			// Wrap forEach to prevent exposing the raw Set as callback's 3rd arg
@@ -68,16 +71,16 @@ function freezeSet<T>(items: readonly T[]): ReadonlySet<T> {
 			return typeof value === 'function' ? value.bind(target) : value;
 		},
 		set() {
-			throw new TypeError('CLAUDE_CODE_NATIVE_COMMANDS is readonly');
+			throw new TypeError(`${name} is readonly`);
 		},
 		deleteProperty() {
-			throw new TypeError('CLAUDE_CODE_NATIVE_COMMANDS is readonly');
+			throw new TypeError(`${name} is readonly`);
 		},
 		defineProperty() {
-			throw new TypeError('CLAUDE_CODE_NATIVE_COMMANDS is readonly');
+			throw new TypeError(`${name} is readonly`);
 		},
 		setPrototypeOf() {
-			throw new TypeError('CLAUDE_CODE_NATIVE_COMMANDS is readonly');
+			throw new TypeError(`${name} is readonly`);
 		},
 	});
 	return proxy;
@@ -198,6 +201,44 @@ export const CLAUDE_CODE_NATIVE_COMMANDS: ReadonlySet<string> = freezeSet([
 	'team-onboarding',
 	'bashes', // alias for /tasks
 ]);
+
+/**
+ * OpenCode built-in slash commands (without leading slash). Used by
+ * tests/unit/skills/claude-slug-collision-guard.test.ts to assert that no
+ * repo-shipped native skill slug in `.opencode/skills/` or `.claude/skills/`
+ * shadows one of OpenCode's own `/<slug>` commands (the host exposes every
+ * native skill directory as a slash command, so e.g. a `plan` skill dir would
+ * shadow OpenCode's built-in `/plan` plan mode — issue #2388/#2493).
+ *
+ * Hand-curated mirror of OpenCode's built-in slash commands — must be
+ * reviewed when bumping @opencode-ai/* dependencies (no programmatic oracle
+ * exists; issue #2493).
+ */
+export const OPENCODE_NATIVE_COMMANDS: ReadonlySet<string> = freezeSet(
+	[
+		'plan',
+		'new',
+		'share',
+		'clear',
+		'undo',
+		'redo',
+		'compact',
+		'export',
+		'help',
+		'exit',
+		'models',
+		'themes',
+		'edit',
+		'resume',
+		'copy',
+		'log',
+		'messages',
+		'summary',
+		'tree',
+		'session',
+	],
+	'OPENCODE_NATIVE_COMMANDS',
+);
 
 export const MEMORY_TOOL_NAMES = [
 	'swarm_memory_recall',

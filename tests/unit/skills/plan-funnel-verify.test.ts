@@ -2,8 +2,11 @@ import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const SKILL_OPENCODE = join(process.cwd(), '.opencode/skills/plan/SKILL.md');
-const SKILL_CLAUDE = join(process.cwd(), '.claude/skills/plan/SKILL.md');
+const SKILL_OPENCODE = join(
+	process.cwd(),
+	'.opencode/skills/swarm-plan/SKILL.md',
+);
+const SKILL_CLAUDE = join(process.cwd(), '.claude/skills/swarm-plan/SKILL.md');
 
 describe('plan SKILL.md Clarification Funnel verification', () => {
 	let opencodeContent: string;

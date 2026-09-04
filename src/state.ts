@@ -799,6 +799,14 @@ export interface AgentSessionState {
 	resumeModelAdvisoryDone?: boolean;
 	/** One-shot guard: the config-vs-UI model advisory has fired for this session (#1896). */
 	configModelAdvisoryDone?: boolean;
+	/**
+	 * One-shot guard: the first-run non-architect advisory has fired for this
+	 * session (#2493 K3 UX-3). Keyed by sessionID only — "session starts on a
+	 * non-architect agent" is operationalized as the first user message
+	 * arriving on a non-architect agent (the OpenCode plugin v1 shape has no
+	 * session-start hook).
+	 */
+	nonArchitectAdvisoryDone?: boolean;
 }
 
 export type NonTransientErrorCategory =

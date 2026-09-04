@@ -125,23 +125,41 @@ describe('backward compatibility — toggle and explicit on/off', () => {
 		expect(session.turboMode).toBe(false);
 	});
 
-	test('unknown arg with turbo off: toggles on (backward compat)', async () => {
+	test('unknown arg with turbo off: rejected, state unchanged (issue #2493)', async () => {
 		const out = await handleTurboCommand(tmpDir, ['bogus'], SESSION_ID);
-		expect(out).toContain('Turbo Mode enabled');
+		expect(out).toContain('Unknown turbo argument "bogus"');
+		expect(out).toContain('Turbo state is unchanged');
 		const session = swarmState.agentSessions.get(SESSION_ID)!;
-		expect(session.turboMode).toBe(true);
-		expect(session.turboStrategy).toBe('standard');
+		expect(session.turboMode).toBe(false);
 	});
 
-	test('unknown arg with turbo on: toggles off (backward compat)', async () => {
+	test('unknown arg with turbo on: rejected, state unchanged (issue #2493)', async () => {
 		const session0 = swarmState.agentSessions.get(SESSION_ID)!;
 		session0.turboMode = true;
 		session0.turboStrategy = 'standard';
 
 		const out = await handleTurboCommand(tmpDir, ['bogus'], SESSION_ID);
-		expect(out).toContain('Turbo Mode disabled');
+		expect(out).toContain('Unknown turbo argument "bogus"');
+		expect(out).toContain('Turbo state is unchanged');
 		const session = swarmState.agentSessions.get(SESSION_ID)!;
-		expect(session.turboMode).toBe(false);
+		expect(session.turboMode).toBe(true);
+		expect(session.turboStrategy).toBe('standard');
+	});
+
+	test('unknown second arg after known strategy: rejected, state unchanged (issue #2493)', async () => {
+		const session0 = swarmState.agentSessions.get(SESSION_ID)!;
+		session0.turboMode = true;
+		session0.turboStrategy = 'standard';
+
+		const out = await handleTurboCommand(
+			tmpDir,
+			['standard', 'bogus'],
+			SESSION_ID,
+		);
+		expect(out).toContain('Unknown turbo argument "bogus"');
+		expect(out).toContain('Turbo state is unchanged');
+		const session = swarmState.agentSessions.get(SESSION_ID)!;
+		expect(session.turboMode).toBe(true);
 	});
 
 	test('turbo lean (no sub-arg) with lean inactive: enables lean', async () => {

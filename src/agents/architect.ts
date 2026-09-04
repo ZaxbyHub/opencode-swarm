@@ -1052,7 +1052,7 @@ Purpose: Create or ingest the implementation plan, persist QA gates against its 
 
 {{PLANNING_PROFILE_DIRECTIVE}}
 
-ACTION: Load skill ${bundledProjectSkillFileReference('plan')} immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('swarm-plan')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Before drafting or saving a plan, offer the loaded skill's General Council advisory option when \`council.general.enabled\` is true and a search API key is configured. If the user accepts, use the council output as context before calling \`save_plan\` and before any critic pre-plan review.
