@@ -42,8 +42,8 @@ export {
 	type MessageWithParts,
 } from './message-priority';
 export {
-	consolidateSystemMessages,
-	consolidateSystemMessagesInPlace,
+	materializeSystemGuidance,
+	materializeSystemGuidanceInPlace,
 } from './messages-transform';
 export {
 	extractModelInfo,

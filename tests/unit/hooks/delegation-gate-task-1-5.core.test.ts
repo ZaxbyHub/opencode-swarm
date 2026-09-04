@@ -2,7 +2,8 @@
  * Core [NEXT] guidance injection + task completion gate tests (delegation-gate-task-1-5.test.ts — Part 1 of 3)
  *
  * Covers:
- * - [NEXT] guidance injection as model-only system message
+ * - [NEXT] guidance injection as model-only guidance carrier (issue #2526:
+ *   user-role carrier, since the host drops role:'system' entries)
  * - Last-gate context handling (broken context, null values)
  * - Task completion gate blocking behavior before next work
  * - Regression: original user message preservation
@@ -13,14 +14,25 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import {
+	findGuidanceCarriers,
+	isGuidanceCarrier,
+} from '../../../src/hooks/system-guidance-carrier';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
-	findSystemMessage,
-	findUserMessage,
 	makeConfig,
 	makeMessages,
 	seedAuthoritativeTaskWorkflow,
 } from './_delegation-gate-helpers';
+
+/** The real user message — role 'user' but NOT a guidance carrier. */
+function findRealUserMessage(messages: { messages: unknown[] }) {
+	return messages.messages.find(
+		(m) =>
+			(m as { info?: { role?: string } })?.info?.role === 'user' &&
+			!isGuidanceCarrier(m),
+	);
+}
 
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -94,7 +106,7 @@ describe('Task 1.5: [NEXT] Guidance — Core', () => {
 	});
 
 	describe('[NEXT] guidance injection', () => {
-		it('should inject [NEXT] guidance as system message (not visible in user message)', async () => {
+		it('should inject [NEXT] guidance as a guidance carrier (not visible in user message)', async () => {
 			const config = makeConfig();
 			const hook = createDelegationGateHook(config, tempDir);
 
@@ -106,17 +118,24 @@ describe('Task 1.5: [NEXT] Guidance — Core', () => {
 
 			await hook.messagesTransform({}, messages);
 
-			// Find the system message that was inserted
-			const systemMessages = messages.messages.filter(
-				(m) => m?.info?.role === 'system',
-			);
+			// Find the guidance carriers that were inserted (issue #2526:
+			// model-only guidance rides a user-role carrier, never role:'system')
+			const carriers = findGuidanceCarriers(messages.messages);
 
-			// Should have exactly one system message with [NEXT] guidance
-			expect(systemMessages.length).toBe(1);
-			expect(systemMessages[0].parts[0].text).toContain('[NEXT]');
+			// Should have exactly one guidance carrier with [NEXT] guidance
+			expect(carriers.length).toBe(1);
+			expect(carriers[0].info?.role).toBe('user');
+			expect(carriers[0].info?.id).toBe('swarm-guidance:delegation');
+			expect(carriers[0].parts[0]?.text).toContain('[NEXT]');
 
-			// The user message should still contain original text
-			const userMessage = findUserMessage(messages);
+			// No role:'system' entries may survive on this surface
+			expect(
+				messages.messages.filter((m) => m?.info?.role === 'system').length,
+			).toBe(0);
+
+			// The user message should still contain original text (carrier is
+			// a separate entry — the real user message is untouched)
+			const userMessage = findRealUserMessage(messages);
 			expect(userMessage?.parts[0].text).toContain('TASK: Implement feature X');
 		});
 
@@ -140,15 +159,14 @@ describe('Task 1.5: [NEXT] Guidance — Core', () => {
 
 			await hook.messagesTransform({}, messages);
 
-			// Find the system message
-			const systemMessages = messages.messages.filter(
-				(m) => m?.info?.role === 'system',
-			);
+			// Find the guidance carrier
+			const carriers = findGuidanceCarriers(messages.messages);
 
 			// Should contain last gate info
-			expect(systemMessages[0].parts[0].text).toContain('lint');
-			expect(systemMessages[0].parts[0].text).toContain('PASSED');
-			expect(systemMessages[0].parts[0].text).toContain('1.1');
+			expect(carriers.length).toBeGreaterThan(0);
+			expect(carriers[0].parts[0]?.text).toContain('lint');
+			expect(carriers[0].parts[0]?.text).toContain('PASSED');
+			expect(carriers[0].parts[0]?.text).toContain('1.1');
 		});
 
 		it('should show FAILED when last gate failed', async () => {
@@ -170,11 +188,10 @@ describe('Task 1.5: [NEXT] Guidance — Core', () => {
 
 			await hook.messagesTransform({}, messages);
 
-			const systemMessages = messages.messages.filter(
-				(m) => m?.info?.role === 'system',
-			);
+			const carriers = findGuidanceCarriers(messages.messages);
 
-			expect(systemMessages[0].parts[0].text).toContain('FAILED');
+			expect(carriers.length).toBeGreaterThan(0);
+			expect(carriers[0].parts[0]?.text).toContain('FAILED');
 		});
 
 		it('directs task completion status update before next work when QA gates finished', async () => {
@@ -207,9 +224,8 @@ describe('Task 1.5: [NEXT] Guidance — Core', () => {
 
 				await hook.messagesTransform({}, messages);
 
-				const systemText = messages.messages
-					.filter((m) => m?.info?.role === 'system')
-					.map((m) => m.parts[0].text)
+				const systemText = findGuidanceCarriers(messages.messages)
+					.map((m) => m.parts.map((p) => p.text ?? '').join('\n'))
 					.join('\n');
 
 				expect(systemText).toContain('TASK COMPLETION REQUIRED');

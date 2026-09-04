@@ -14,8 +14,20 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import {
+	findGuidanceCarriers,
+	type GuidanceMessage,
+	isGuidanceCarrier,
+} from '../../../src/hooks/system-guidance-carrier';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { makeConfig, makeMessages } from './_delegation-gate-helpers';
+
+/** The real user message — role 'user' but NOT a guidance carrier. */
+function findRealUserMessage(messages: { messages: GuidanceMessage[] }) {
+	return messages.messages.find(
+		(m) => m.info?.role === 'user' && !isGuidanceCarrier(m),
+	);
+}
 
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -122,11 +134,12 @@ describe('delegation-gate task 1.5: sessionID validation (security)', () => {
 			// Should not throw - should skip guidance injection
 			await hook.messagesTransform({}, messages);
 
-			// No system message should be inserted for invalid sessionID
-			const systemMessages = messages.messages.filter(
-				(m) => m?.info?.role === 'system',
-			);
-			expect(systemMessages.length).toBe(0);
+			// No guidance carrier should be inserted for invalid sessionID, and
+			// no role:'system' entry may appear on this surface (issue #2526)
+			expect(findGuidanceCarriers(messages.messages).length).toBe(0);
+			expect(
+				messages.messages.filter((m) => m?.info?.role === 'system').length,
+			).toBe(0);
 		}
 	});
 
@@ -157,11 +170,11 @@ describe('delegation-gate task 1.5: sessionID validation (security)', () => {
 
 			await hook.messagesTransform({}, messages);
 
-			// System message should be inserted for valid sessionID
-			const systemMessages = messages.messages.filter(
-				(m) => m?.info?.role === 'system',
-			);
-			expect(systemMessages.length).toBe(1);
+			// Exactly one guidance carrier should be inserted for valid sessionID
+			const carriers = findGuidanceCarriers(messages.messages);
+			expect(carriers.length).toBe(1);
+			expect(carriers[0].info?.role).toBe('user');
+			expect(carriers[0].info?.id).toBe('swarm-guidance:delegation');
 		}
 	});
 });
@@ -190,12 +203,10 @@ describe('delegation-gate task 1.5: null/undefined lastGateOutcome handling', ()
 		// Should not throw
 		await hook.messagesTransform({}, messages);
 
-		// Should still inject [NEXT] guidance
-		const systemMessages = messages.messages.filter(
-			(m) => m?.info?.role === 'system',
-		);
-		expect(systemMessages.length).toBe(1);
-		expect(systemMessages[0].parts[0].text).toContain('[NEXT]');
+		// Should still inject [NEXT] guidance as a carrier
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBe(1);
+		expect(carriers[0].parts[0]?.text).toContain('[NEXT]');
 	});
 
 	it('should handle undefined lastGateOutcome', async () => {
@@ -212,10 +223,8 @@ describe('delegation-gate task 1.5: null/undefined lastGateOutcome handling', ()
 
 		await hook.messagesTransform({}, messages);
 
-		const systemMessages = messages.messages.filter(
-			(m) => m?.info?.role === 'system',
-		);
-		expect(systemMessages.length).toBe(1);
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBe(1);
 	});
 
 	it('should handle malformed lastGateOutcome (missing fields)', async () => {
@@ -235,10 +244,8 @@ describe('delegation-gate task 1.5: null/undefined lastGateOutcome handling', ()
 		await hook.messagesTransform({}, messages);
 
 		// Should still inject guidance
-		const systemMessages = messages.messages.filter(
-			(m) => m?.info?.role === 'system',
-		);
-		expect(systemMessages.length).toBe(1);
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBe(1);
 	});
 
 	it('should sanitize gate name with special characters', async () => {
@@ -257,12 +264,10 @@ describe('delegation-gate task 1.5: null/undefined lastGateOutcome handling', ()
 
 		await hook.messagesTransform({}, messages);
 
-		const systemMessages = messages.messages.filter(
-			(m) => m?.info?.role === 'system',
-		);
+		const carriers = findGuidanceCarriers(messages.messages);
 
 		// Should NOT contain raw [ ] or <script>
-		const guidanceText = systemMessages[0].parts[0].text;
+		const guidanceText = carriers[0]?.parts[0]?.text ?? '';
 		expect(guidanceText).not.toContain('<script>');
 		// The [] should be replaced with ()
 		expect(guidanceText).toContain('test()gate');
@@ -293,15 +298,15 @@ describe('delegation-gate task 1.5: duplicate guidance insertion (violation + de
 
 		await hook.messagesTransform({}, messages);
 
-		// Should have TWO system messages: violation warning + [NEXT] guidance
-		const systemMessages = messages.messages.filter(
-			(m) => m?.info?.role === 'system',
-		);
+		// Should have TWO guidance carriers: violation warning + [NEXT] guidance
+		const carriers = findGuidanceCarriers(messages.messages);
 
-		expect(systemMessages.length).toBe(2);
+		expect(carriers.length).toBe(2);
 
 		// Check for violation warning
-		const allGuidance = systemMessages.map((m) => m.parts[0].text).join(' ');
+		const allGuidance = carriers
+			.map((m) => m.parts.map((p) => p.text ?? '').join(' '))
+			.join(' ');
 		expect(allGuidance).toContain('DELEGATION VIOLATION');
 		expect(allGuidance).toContain('[NEXT]');
 	});
@@ -319,10 +324,10 @@ describe('delegation-gate task 1.5: duplicate guidance insertion (violation + de
 
 		await hook.messagesTransform({}, messages);
 
-		// Find user message - should be preserved
-		const userMessage = messages.messages.find((m) => m?.info?.role === 'user');
+		// Find the real user message (carriers are separate entries) — preserved
+		const userMessage = findRealUserMessage(messages);
 
-		expect(userMessage?.parts[0].text).toContain(originalText);
+		expect(userMessage?.parts[0]?.text).toContain(originalText);
 	});
 });
 
@@ -345,10 +350,11 @@ describe('delegation-gate task 1.5: empty agent handling (regression from Task 1
 		await hook.messagesTransform({}, messages);
 
 		// No system message should be inserted
-		const systemMessages = messages.messages.filter(
-			(m) => m?.info?.role === 'system',
-		);
-		expect(systemMessages.length).toBe(0);
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBe(0);
+		expect(
+			messages.messages.filter((m) => m?.info?.role === 'system').length,
+		).toBe(0);
 	});
 
 	it('should skip guidance injection for non-architect agent', async () => {
@@ -360,10 +366,11 @@ describe('delegation-gate task 1.5: empty agent handling (regression from Task 1
 
 		await hook.messagesTransform({}, messages);
 
-		const systemMessages = messages.messages.filter(
-			(m) => m?.info?.role === 'system',
-		);
-		expect(systemMessages.length).toBe(0);
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBe(0);
+		expect(
+			messages.messages.filter((m) => m?.info?.role === 'system').length,
+		).toBe(0);
 	});
 
 	it('should inject guidance for undefined agent (main session = architect)', async () => {
@@ -383,10 +390,8 @@ describe('delegation-gate task 1.5: empty agent handling (regression from Task 1
 		await hook.messagesTransform({}, messages);
 
 		// Should inject guidance
-		const systemMessages = messages.messages.filter(
-			(m) => m?.info?.role === 'system',
-		);
-		expect(systemMessages.length).toBe(1);
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBe(1);
 	});
 });
 
@@ -411,12 +416,9 @@ describe('delegation-gate task 1.5: batch detection regression', () => {
 
 		await hook.messagesTransform({}, messages2);
 
-		// Batch warning is injected as a system message (not prepended to user message text)
-		const systemMessages = messages2.messages.filter(
-			(m) => m?.info?.role === 'system',
-		);
-		const systemText = systemMessages
-			.map((m) => m.parts?.[0]?.text ?? '')
+		// Batch warning is injected as model-only guidance (not prepended to user message text)
+		const systemText = findGuidanceCarriers(messages2.messages)
+			.map((m) => m.parts.map((p) => p.text ?? '').join('\n'))
 			.join('\n');
 		expect(systemText).toContain('BATCH DETECTED');
 		expect(systemText).toContain('and also');
@@ -446,12 +448,9 @@ describe('delegation-gate task 1.5: batch detection regression', () => {
 
 		await hook.messagesTransform({}, messages);
 
-		// Batch warning is injected as a system message (not into user message text)
-		const systemMessages = messages.messages.filter(
-			(m) => m?.info?.role === 'system',
-		);
-		const systemText = systemMessages
-			.map((m) => m.parts?.[0]?.text ?? '')
+		// Batch warning is injected as model-only guidance (not into user message text)
+		const systemText = findGuidanceCarriers(messages.messages)
+			.map((m) => m.parts.map((p) => p.text ?? '').join('\n'))
 			.join('\n');
 		expect(systemText).toContain('Multiple FILE: directives');
 	});

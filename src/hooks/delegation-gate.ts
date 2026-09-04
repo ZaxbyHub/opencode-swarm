@@ -153,6 +153,10 @@ import {
 } from './delegation-gate/worktree-merge-status';
 import { deleteStoredInputArgs, getStoredInputArgs } from './guardrails';
 import { normalizeToolName } from './normalize-tool-name';
+import {
+	insertGuidanceCarrier,
+	isGuidanceCarrier,
+} from './system-guidance-carrier';
 import { validateSwarmPath } from './utils';
 
 const EvidenceTaskIdPlanSchema = z
@@ -6035,18 +6039,15 @@ export function createDelegationGateHook(
 					// Inject warning as model-only system guidance (not visible to user)
 					const warningText = `[DELEGATION VIOLATION] Code modifications detected for task ${currentTaskId} with zero coder delegations. Rule 1: DELEGATE all coding to coder. You do NOT write code.`;
 
-					// Add as a system message for model-only guidance
-					const systemMsgIdx = messages.findIndex(
-						(m: MessageWithParts) => m && m.info?.role === 'system',
+					// Add as model-only guidance. Issue #2526: the host's converter
+					// drops role:'system' entries on the messages transform surface,
+					// so guidance rides a user-role carrier instead.
+					const carrierIdx = messages.findIndex(
+						(m: MessageWithParts) => m && isGuidanceCarrier(m),
 					);
-					const insertIdx = systemMsgIdx >= 0 ? systemMsgIdx + 1 : 0;
+					const insertIdx = carrierIdx >= 0 ? carrierIdx + 1 : 0;
 
-					const guidanceMessage: MessageWithParts = {
-						info: { role: 'system' },
-						parts: [{ type: 'text', text: warningText }],
-					};
-
-					messages.splice(insertIdx, 0, guidanceMessage);
+					insertGuidanceCarrier(messages, 'delegation', warningText, insertIdx);
 				}
 			}
 
@@ -6106,18 +6107,15 @@ export function createDelegationGateHook(
 								'[NEXT] Begin the first plan task and run gates sequentially.';
 						}
 
-						// Inject as model-only system guidance (not visible in message output)
-						const systemMsgIdx = messages.findIndex(
-							(m: MessageWithParts) => m && m.info?.role === 'system',
+						// Inject as model-only guidance (not visible in message
+						// output). Issue #2526: user-role carrier — the host drops
+						// role:'system' entries on this surface.
+						const carrierIdx = messages.findIndex(
+							(m: MessageWithParts) => m && isGuidanceCarrier(m),
 						);
-						const insertIdx = systemMsgIdx >= 0 ? systemMsgIdx + 1 : 0;
+						const insertIdx = carrierIdx >= 0 ? carrierIdx + 1 : 0;
 
-						const guidanceMessage: MessageWithParts = {
-							info: { role: 'system' },
-							parts: [{ type: 'text', text: guidance }],
-						};
-
-						messages.splice(insertIdx, 0, guidanceMessage);
+						insertGuidanceCarrier(messages, 'delegation', guidance, insertIdx);
 					}
 				}
 			}
@@ -6252,17 +6250,20 @@ export function createDelegationGateHook(
 Rule 3: ONE task per coder call. Split this into separate delegations.
 ${warningLines.join('\n')}`;
 
-			// Inject warning as model-only system guidance (not visible to user)
-			const batchWarnSystemIdx = messages.findIndex(
-				(m: MessageWithParts) => m && m.info?.role === 'system',
+			// Inject warning as model-only guidance (not visible to user).
+			// Issue #2526: user-role carrier — the host drops role:'system'
+			// entries on this surface.
+			const batchWarnCarrierIdx = messages.findIndex(
+				(m: MessageWithParts) => m && isGuidanceCarrier(m),
 			);
 			const batchWarnInsertIdx =
-				batchWarnSystemIdx >= 0 ? batchWarnSystemIdx + 1 : 0;
-			const batchWarnMessage: MessageWithParts = {
-				info: { role: 'system' },
-				parts: [{ type: 'text', text: warningText }],
-			};
-			messages.splice(batchWarnInsertIdx, 0, batchWarnMessage);
+				batchWarnCarrierIdx >= 0 ? batchWarnCarrierIdx + 1 : 0;
+			insertGuidanceCarrier(
+				messages,
+				'delegation',
+				warningText,
+				batchWarnInsertIdx,
+			);
 		},
 		toolAfter,
 		taskMetadata,

@@ -4,23 +4,35 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
+	findGuidanceCarriers,
+	type GuidanceMessage,
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
+import {
 	ensureAgentSession,
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
-import {
-	findSystemMessage,
-	findUserMessage,
-	getPrimaryText,
-	makeConfig,
-	makeMessages,
-} from './_delegation-gate-helpers';
+import { makeConfig, makeMessages } from './_delegation-gate-helpers';
 
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	const real = fs.realpathSync(dir);
 	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
 	return real;
+}
+
+/**
+ * Text of the REAL user message — role 'user' but NOT a guidance carrier
+ * (issue #2526: model-only guidance rides user-role carriers inserted at the
+ * head of the array, so a naive role filter would return carrier text).
+ */
+function getRealUserText(messages: { messages: GuidanceMessage[] }): string {
+	const userMsg = messages.messages.find(
+		(m) => m.info?.role === 'user' && !isGuidanceCarrier(m),
+	);
+	return userMsg?.parts?.[0]?.text ?? '';
 }
 
 // ============================================
@@ -66,14 +78,14 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 		setCurrentTaskId(sessionID, '1.3');
 		const messages = makeMessages(taskList, undefined, null);
-		const originalText = getPrimaryText(messages);
+		const originalText = getRealUserText(messages);
 
 		await hook.messagesTransform({}, messages);
 
 		// Text should NOT be modified
-		expect(getPrimaryText(messages)).toBe(originalText);
-		expect(getPrimaryText(messages)).not.toContain('[Task window:');
-		expect(getPrimaryText(messages)).not.toContain('tasks hidden');
+		expect(getRealUserText(messages)).toBe(originalText);
+		expect(getRealUserText(messages)).not.toContain('[Task window:');
+		expect(getRealUserText(messages)).not.toContain('tasks hidden');
 	});
 
 	it('trims task list when more than 5 tasks and current task in middle', async () => {
@@ -102,13 +114,15 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 		await hook.messagesTransform({}, messages);
 
-		// System message should contain [NEXT] guidance
-		const systemMsg = findSystemMessage(messages);
-		expect(systemMsg?.parts[0].text).toContain('[NEXT]');
+		// The guidance carrier should contain [NEXT] guidance (issue #2526:
+		// model-only guidance rides a user-role carrier)
+		const carrier = findGuidanceCarriers(messages.messages).find((m) =>
+			messageTextOf(m).includes('[NEXT]'),
+		);
+		expect(carrier?.parts[0]?.text).toContain('[NEXT]');
 
-		// User message should contain trimmed task list
-		const userMsg = findUserMessage(messages);
-		const resultText = userMsg?.parts[0].text ?? '';
+		// Real user message should contain trimmed task list
+		const resultText = getRealUserText(messages);
 
 		// Should contain hidden marker before
 		expect(resultText).toContain('[...2 tasks hidden...]');
@@ -153,7 +167,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 		// With null sessionID, messages[0] is still the user message
 		// Text should NOT be modified when currentTaskId is null
-		expect(getPrimaryText(messages)).not.toContain('[Task window:');
+		expect(getRealUserText(messages)).not.toContain('[Task window:');
 	});
 
 	it('trims correctly when current task is near the start', async () => {
@@ -182,7 +196,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 		await hook.messagesTransform({}, messages);
 
-		const resultText = getPrimaryText(messages);
+		const resultText = getRealUserText(messages);
 
 		// Should NOT have hidden marker before (window clamped at start)
 		expect(resultText).not.toMatch(
@@ -232,12 +246,14 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 		await hook.messagesTransform({}, messages);
 
-		// System message should contain [NEXT] guidance
-		const systemMsg = findSystemMessage(messages);
-		expect(systemMsg?.parts[0].text).toContain('[NEXT]');
+		// The guidance carrier should contain [NEXT] guidance
+		const carrier = findGuidanceCarriers(messages.messages).find((m) =>
+			messageTextOf(m).includes('[NEXT]'),
+		);
+		expect(carrier?.parts[0]?.text).toContain('[NEXT]');
 
-		// User message should contain trimmed task list
-		const resultText = getPrimaryText(messages);
+		// Real user message should contain trimmed task list
+		const resultText = getRealUserText(messages);
 
 		// Should have hidden marker before
 		expect(resultText).toContain('[...6 tasks hidden...]');
@@ -284,7 +300,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 		// Should not throw
 		await hook.messagesTransform({}, messages);
 
-		const resultText = getPrimaryText(messages);
+		const resultText = getRealUserText(messages);
 
 		// When current task not found, currentIdx = -1
 		// windowStart = Math.max(0, -1 - 2) = Math.max(0, -3) = 0
@@ -327,11 +343,11 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 		await hook.messagesTransform({}, messages);
 
-		// Find the user message (visible message)
-		const userMessage = messages.messages.find((m) => m.info.role === 'user');
-		const userText = userMessage?.parts[0]?.text ?? '';
+		// Find the REAL user message (carriers are separate role:'user' entries)
+		const userText = getRealUserText(messages);
 
-		// [NEXT] guidance should be model-only (in system message), NOT visible in user message
+		// [NEXT] guidance should be model-only (in a guidance carrier), NOT
+		// visible in the user message
 		expect(userText).not.toContain('[DELIBERATE:');
 		// After [NEXT] guidance, the prefix should appear
 		expect(userText).toContain(prefixText);
@@ -341,12 +357,10 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 		expect(userText).toContain('[Task window: showing 6 of 7 tasks]');
 		expect(userText).toContain('[...1 tasks hidden...]');
 
-		// Verify [NEXT] guidance is in a system message (model-only)
-		const systemMessages = messages.messages.filter(
-			(m) => m.info.role === 'system',
-		);
-		expect(systemMessages.length).toBeGreaterThan(0);
-		const hasNextGuidance = systemMessages.some((m) =>
+		// Verify [NEXT] guidance is in a guidance carrier (model-only)
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBeGreaterThan(0);
+		const hasNextGuidance = carriers.some((m) =>
 			m.parts.some((p) => p.text?.includes('[NEXT]')),
 		);
 		expect(hasNextGuidance).toBe(true);
@@ -373,7 +387,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 		await hook.messagesTransform({}, messages);
 
-		const resultText = getPrimaryText(messages);
+		const resultText = getRealUserText(messages);
 		expect(resultText).toContain('[Task window: showing 6 of 7 tasks]');
 	});
 
@@ -394,13 +408,13 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 		setCurrentTaskId(sessionID, '1.4');
 		const messages = makeMessages(taskList, 'coder', sessionID); // Non-architect agent
-		const originalText = getPrimaryText(messages);
+		const originalText = getRealUserText(messages);
 
 		await hook.messagesTransform({}, messages);
 
 		// Text should NOT be modified for non-architect
-		expect(getPrimaryText(messages)).toBe(originalText);
-		expect(getPrimaryText(messages)).not.toContain('[Task window:');
+		expect(getRealUserText(messages)).toBe(originalText);
+		expect(getRealUserText(messages)).not.toContain('[Task window:');
 	});
 
 	it('handles different task list formats (checked, unchecked, plain)', async () => {
@@ -426,7 +440,7 @@ describe('Task 4.1 — progressive task disclosure (task window trimming)', () =
 
 		await hook.messagesTransform({}, messages);
 
-		const resultText = getPrimaryText(messages);
+		const resultText = getRealUserText(messages);
 
 		// Should detect and trim all formats
 		expect(resultText).toContain('[Task window: showing 6 of 7 tasks]');

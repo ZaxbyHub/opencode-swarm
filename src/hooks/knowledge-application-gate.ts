@@ -70,6 +70,7 @@ import type {
 	MessageWithParts,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
+import { isGuidanceCarrier } from './system-guidance-carrier.js';
 
 /**
  * Fallback set used only when `config.high_risk_tools` is absent. The parsed
@@ -545,9 +546,12 @@ export async function knowledgeApplicationTransformScan(
 	if (!output?.messages) return;
 	if (!sessionID) return;
 	// Find the latest message authored by an architect-prefixed agent.
+	// Issue #2526: skip guidance carriers — injected directives (which can
+	// quote ack-marker text) must never be parsed as architect acknowledgements.
 	let target: MessageWithParts | undefined;
 	for (let i = output.messages.length - 1; i >= 0; i--) {
 		const m = output.messages[i];
+		if (isGuidanceCarrier(m)) continue;
 		const agent = m.info?.agent;
 		if (
 			typeof agent === 'string' &&

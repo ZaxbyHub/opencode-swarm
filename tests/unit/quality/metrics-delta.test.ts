@@ -212,7 +212,7 @@ describe('quality metrics true base-vs-head deltas (issue #2470/#1655)', () => {
 		const dir = canonicalMkdtemp('metrics-delta-cap-');
 		try {
 			fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
-			git(dir, 'init', '-q');
+			git(dir, 'init', '-q', '-b', 'main');
 			git(dir, 'config', 'user.email', 't@t.test');
 			git(dir, 'config', 'user.name', 'Test');
 			fs.writeFileSync(path.join(dir, 'src', 'big.ts'), ifs(2));
@@ -224,7 +224,6 @@ describe('quality metrics true base-vs-head deltas (issue #2470/#1655)', () => {
 			}
 			git(dir, 'add', '-A');
 			git(dir, 'commit', '-qm', 'base-all');
-			git(dir, 'checkout', '-qb', 'main');
 			git(dir, 'checkout', '-qb', 'work');
 			for (const rel of files) {
 				fs.writeFileSync(path.join(dir, rel), ifs(8));

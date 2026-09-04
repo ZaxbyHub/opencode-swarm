@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { _test_exports as kiExports } from '../../../src/hooks/knowledge-injector';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
+import { isGuidanceCarrier } from '../../../src/hooks/system-guidance-carrier';
 import {
 	advanceTurnGeneration,
 	beginTurnLedger,
@@ -40,9 +41,12 @@ describe('safe idempotency (#2107 §7)', () => {
 		const output = { messages };
 		kiExports.injectKnowledgeMessage(output, 'lesson A');
 		kiExports.injectKnowledgeMessage(output, 'lesson A again');
+		// #2526: the injected block rides a user-role guidance carrier; the
+		// sentinel text lives INSIDE the fenced carrier body (text-based
+		// idempotency scans are unchanged).
 		const injected = messages.filter(
 			(m) =>
-				m.info?.role === 'system' &&
+				isGuidanceCarrier(m) &&
 				m.parts?.some((p) => p.text?.includes(kiExports.INJECTION_SENTINEL)),
 		);
 		expect(injected).toHaveLength(1);
@@ -59,7 +63,14 @@ describe('safe idempotency (#2107 §7)', () => {
 		const second = { messages: freshSurface() };
 		kiExports.injectKnowledgeMessage(second, 'lesson A');
 		expect(second.messages).toHaveLength(2);
-		const injected = second.messages.find((m) => m.info?.role === 'system');
+		// #2526: the re-injected block is a knowledge guidance carrier (user
+		// role + carrier id prefix), with the lesson in its fenced text body.
+		const injected = second.messages.find((m) => isGuidanceCarrier(m));
+		expect(injected).toBeDefined();
+		expect(injected?.info).toMatchObject({
+			id: 'swarm-guidance:knowledge',
+			role: 'user',
+		});
 		expect(injected?.parts?.[0]).toMatchObject({
 			type: 'text',
 		});
@@ -76,7 +87,7 @@ describe('safe idempotency (#2107 §7)', () => {
 		// surface carries the changed content.
 		const next = { messages: freshSurface() };
 		kiExports.injectKnowledgeMessage(next, 'lesson B');
-		const text = next.messages.find((m) => m.info?.role === 'system')
+		const text = next.messages.find((m) => isGuidanceCarrier(m))
 			?.parts?.[0] as { text?: string };
 		expect(text?.text).toContain('lesson B');
 	});

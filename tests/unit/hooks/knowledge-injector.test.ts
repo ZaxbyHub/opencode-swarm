@@ -1,20 +1,9 @@
 /**
  * Verification tests for src/hooks/knowledge-injector.ts
  *
- * Tests cover:
- * - First-call init (no injection)
- * - Second-call fetch and injection
- * - Cache re-inject (third call)
- * - Phase change invalidates cache
- * - Non-orchestrator agents skipped
- * - Context budget exhaustion
- * - Empty knowledge handling
- * - Tier labels ([HIVE] vs [SWARM])
- * - Star ratings
- * - Rejected pattern warnings
- * - Idempotency
- * - No plan handling
- * - Unknown agent handling
+ * Tests cover init/fetch/cache-re-inject, phase-change invalidation,
+ * orchestrator gating, budget exhaustion, empty knowledge, tier labels,
+ * star ratings, rejected-pattern warnings, idempotency, plan/agent edges.
  * file-scoped mock.module fixtures are reset through their control mocks.
  */
 
@@ -1408,8 +1397,10 @@ describe('Run memory wiring', () => {
 		expect(text).toContain('Always validate inputs');
 		// Should NOT contain run memory section
 		expect(text).not.toContain('## RUN MEMORY');
-		// The knowledge section should start with the 📚 emoji
-		expect(text).toMatch(/^.*📚 Lessons:/);
+		// #2526: the block rides a guidance carrier — body (after the fence
+		// line) starts with the 📚 Lessons header; no run-memory preamble.
+		expect(text.startsWith('<swarm_system_directive')).toBe(true);
+		expect(text.slice(text.indexOf('\n') + 1)).toMatch(/^.*📚 Lessons:/);
 	});
 
 	it('[FOR: architect, coder] tag present in output when run memory is available', async () => {

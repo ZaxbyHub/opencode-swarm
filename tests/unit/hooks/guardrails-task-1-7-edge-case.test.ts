@@ -3,6 +3,10 @@ import { ORCHESTRATOR_NAME } from '../../../src/config/constants';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
+	findGuidanceCarriers,
+	isGuidanceCarrier,
+} from '../../../src/hooks/system-guidance-carrier';
+import {
 	ensureAgentSession,
 	resetSwarmState,
 	startAgentSession,
@@ -30,8 +34,8 @@ describe('ADVERSARIAL: Task 1.7 edge-case fix verification - missing system mess
 		resetSwarmState();
 	});
 
-	describe('Attack Vector 1: No system message exists - edge case fix creates one', () => {
-		it('self-coding warning: creates system message when none exists', async () => {
+	describe('Attack Vector 1: No system message exists - edge case fix creates a guidance carrier', () => {
+		it('self-coding warning: creates guidance carrier when none exists', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 
@@ -54,9 +58,12 @@ describe('ADVERSARIAL: Task 1.7 edge-case fix verification - missing system mess
 
 			await hooks.messagesTransform({}, messages as any);
 
-			// Verify system message was created and prepended
+			// Issue #2526: a USER-role guidance carrier (id 'swarm-guidance:guardrails')
+			// is created and prepended — the OpenCode host drops role:'system'
+			// entries from this transform surface.
 			expect(messages.messages.length).toBe(2);
-			expect(messages.messages[0].info.role).toBe('system');
+			expect(isGuidanceCarrier(messages.messages[0])).toBe(true);
+			expect(messages.messages[0].info.role).toBe('user');
 			expect(messages.messages[0].parts[0].text).toContain(
 				'SELF-CODING DETECTED',
 			);
@@ -64,7 +71,7 @@ describe('ADVERSARIAL: Task 1.7 edge-case fix verification - missing system mess
 			expect(messages.messages[1].info.role).toBe('user');
 		});
 
-		it('self-fix warning: creates system message when none exists', async () => {
+		it('self-fix warning: creates guidance carrier when none exists', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 
@@ -92,9 +99,10 @@ describe('ADVERSARIAL: Task 1.7 edge-case fix verification - missing system mess
 
 			await hooks.messagesTransform({}, messages as any);
 
-			// Verify system message was created and prepended
+			// Issue #2526: a USER-role guidance carrier is created and prepended.
 			expect(messages.messages.length).toBe(2);
-			expect(messages.messages[0].info.role).toBe('system');
+			expect(isGuidanceCarrier(messages.messages[0])).toBe(true);
+			expect(messages.messages[0].info.role).toBe('user');
 			expect(messages.messages[0].parts[0].text).toContain('SELF-FIX DETECTED');
 		});
 	});
@@ -196,7 +204,7 @@ describe('ADVERSARIAL: Task 1.7 edge-case fix verification - missing system mess
 	});
 
 	describe('Attack Vector 4: Both self-coding and self-fix trigger in same call', () => {
-		it('should NOT create duplicate system messages', async () => {
+		it('should NOT create duplicate guidance carriers', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 
@@ -224,14 +232,17 @@ describe('ADVERSARIAL: Task 1.7 edge-case fix verification - missing system mess
 
 			await hooks.messagesTransform({}, messages as any);
 
-			// Should have exactly 2 messages: 1 system (created) + 1 original user
+			// Should have exactly 2 messages: 1 carrier (created) + 1 original user.
+			// Issue #2526: both warnings share ONE user-role guidance carrier —
+			// ensureGuidanceCarrier's find-first semantics cannot produce a second.
 			expect(messages.messages.length).toBe(2);
-			expect(messages.messages[0].info.role).toBe('system');
+			expect(isGuidanceCarrier(messages.messages[0])).toBe(true);
+			expect(findGuidanceCarriers(messages.messages as any)).toHaveLength(1);
 
-			// System message should contain BOTH warnings
-			const systemText = messages.messages[0].parts[0].text;
-			expect(systemText).toContain('SELF-CODING DETECTED');
-			expect(systemText).toContain('SELF-FIX DETECTED');
+			// Carrier should contain BOTH warnings
+			const carrierText = messages.messages[0].parts[0].text;
+			expect(carrierText).toContain('SELF-CODING DETECTED');
+			expect(carrierText).toContain('SELF-FIX DETECTED');
 		});
 	});
 
@@ -265,9 +276,11 @@ describe('ADVERSARIAL: Task 1.7 edge-case fix verification - missing system mess
 			expect(userMessageText).not.toContain('MODEL_ONLY_GUIDANCE');
 			expect(userMessageText).not.toContain('SELF-CODING DETECTED');
 
-			// System message SHOULD contain MODEL_ONLY_GUIDANCE
-			const systemMessageText = messages.messages[0].parts[0].text;
-			expect(systemMessageText).toContain('MODEL_ONLY_GUIDANCE');
+			// Issue #2526: the guidance carrier (user-role, index 0) SHOULD contain
+			// MODEL_ONLY_GUIDANCE — it is the model-only channel; the real user
+			// message must stay untouched.
+			const carrierText = messages.messages[0].parts[0].text;
+			expect(carrierText).toContain('MODEL_ONLY_GUIDANCE');
 		});
 	});
 
