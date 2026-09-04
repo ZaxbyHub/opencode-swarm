@@ -32,6 +32,7 @@ import {
 	importCoordinationOnce,
 	transitionCoordinationState,
 } from '../db/coordination-store.js';
+import type { PrWorkflowGateState } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 
@@ -516,7 +517,11 @@ export async function writePrWorkflowAtomicJson(
 
 export async function readPrWorkflowGateStateFromDisk<
 	S extends PrWorkflowPersistedStateBase,
->(directory: string, sessionID: string): Promise<S | null> {
+>(
+	directory: string,
+	sessionID: string,
+	options: { allowSalvagedImport?: boolean } = {},
+): Promise<S | null> {
 	const authoritative = await readPrWorkflowGateStateFromCoordination<S>(
 		directory,
 		sessionID,
@@ -530,10 +535,14 @@ export async function readPrWorkflowGateStateFromDisk<
 		await repairImportedWorkflowGateShadow(directory, sessionID, merged);
 		return merged;
 	}
-	return importLegacyPrWorkflowGateStateIfNeeded<S>(directory, sessionID);
+	return importLegacyPrWorkflowGateStateIfNeeded<S>(
+		directory,
+		sessionID,
+		options.allowSalvagedImport === true,
+	);
 }
 
-export async function readPrWorkflowGateStateFileFromDisk<
+export async function readPrWorkflowGateStateFileRawFromDisk<
 	S extends PrWorkflowPersistedStateBase,
 >(filePath: string, stateLabel: string): Promise<S | null> {
 	let raw: string;
@@ -561,7 +570,13 @@ export async function readPrWorkflowGateStateFileFromDisk<
 	return parsed.data;
 }
 
-async function readPrWorkflowGateStateFromCoordination<
+export async function readPrWorkflowGateStateFileFromDisk<
+	S extends PrWorkflowPersistedStateBase,
+>(filePath: string, stateLabel: string): Promise<S | null> {
+	return readPrWorkflowGateStateFileRawFromDisk<S>(filePath, stateLabel);
+}
+
+export async function readPrWorkflowGateStateFromCoordination<
 	S extends PrWorkflowPersistedStateBase,
 >(directory: string, sessionID: string): Promise<S | null> {
 	const decoded = readPrWorkflowGateStateCoordinationRow<S>(
@@ -752,7 +767,11 @@ async function mergeWorkflowGateShadowExtras<
 
 async function importLegacyPrWorkflowGateStateIfNeeded<
 	S extends PrWorkflowPersistedStateBase,
->(directory: string, sessionID: string): Promise<S | null> {
+>(
+	directory: string,
+	sessionID: string,
+	allowSalvagedImport = false,
+): Promise<S | null> {
 	const filePath = workflowGateStatePath(directory, sessionID);
 	let raw: string;
 	try {
@@ -761,10 +780,13 @@ async function importLegacyPrWorkflowGateStateIfNeeded<
 		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
 		throw error;
 	}
-	const legacy = await readPrWorkflowGateStateFileFromDisk<S>(
-		filePath,
-		sessionID,
-	);
+	const legacy = allowSalvagedImport
+		? ((
+				await (
+					await import('../hooks/pr-workflow-gate.js')
+				).readPrWorkflowGateStateForRecovery(directory, sessionID)
+			)?.state ?? null)
+		: await readPrWorkflowGateStateFileFromDisk<S>(filePath, sessionID);
 	if (!legacy) return null;
 	const namespace = workflowGateStateCoordinationNamespace(sessionID);
 	const outcome = importCoordinationOnce(
@@ -884,23 +906,45 @@ export async function writeStateWhileLocked<
 export async function deleteStateWhileLocked(
 	directory: string,
 	sessionID: string,
-	options: { expectedStateRevision?: number } = {},
+	options: {
+		expectedStateRevision?: number;
+		allowSalvagedRead?: boolean;
+	} = {},
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	let currentAuthoritative = readPrWorkflowGateStateCoordinationRow(
 		directory,
 		normalizedSessionID,
 	);
+	let recoveryState: PrWorkflowGateState | null = null;
 	if (!currentAuthoritative) {
-		await readPrWorkflowGateStateFromDisk(directory, normalizedSessionID);
-		currentAuthoritative = readPrWorkflowGateStateCoordinationRow(
-			directory,
-			normalizedSessionID,
-		);
+		if (options.allowSalvagedRead) {
+			const { readPrWorkflowGateStateForRecovery } = await import(
+				'../hooks/pr-workflow-gate.js'
+			);
+			recoveryState =
+				(
+					await readPrWorkflowGateStateForRecovery(
+						directory,
+						normalizedSessionID,
+					)
+				)?.state ?? null;
+		}
+		if (!recoveryState) {
+			await readPrWorkflowGateStateFromDisk(directory, normalizedSessionID, {
+				allowSalvagedImport: options.allowSalvagedRead === true,
+			});
+			currentAuthoritative = readPrWorkflowGateStateCoordinationRow(
+				directory,
+				normalizedSessionID,
+			);
+		}
 	}
+	const currentRevision =
+		currentAuthoritative?.state.revision ?? recoveryState?.revision;
 	if (
 		options.expectedStateRevision !== undefined &&
-		currentAuthoritative?.state.revision !== options.expectedStateRevision
+		currentRevision !== options.expectedStateRevision
 	) {
 		throw new Error(
 			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',

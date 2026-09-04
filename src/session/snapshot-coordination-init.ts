@@ -131,10 +131,15 @@ async function initializeSnapshotCoordination(
 			directory,
 			SNAPSHOT_PROJECTION_FILE,
 		);
-		const source = existsSync(legacyPath)
-			? 'session/state.json'
-			: existsSync(projectionPath)
-				? SNAPSHOT_PROJECTION_FILE
+		// Keep bootstrap source selection aligned with readSnapshot(): the
+		// SQLite-backed projection is the newest compatibility shadow and must
+		// win whenever both candidates exist.  Choosing legacy first here would
+		// let the early reader and the post-resolution importer hydrate different
+		// snapshots during a mixed-version restart.
+		const source = existsSync(projectionPath)
+			? SNAPSHOT_PROJECTION_FILE
+			: existsSync(legacyPath)
+				? 'session/state.json'
 				: null;
 		if (source) {
 			// Unlike the compatibility reader, import never treats corruption or an
@@ -167,7 +172,18 @@ async function initializeSnapshotCoordination(
 	await rehydrateState(snapshot, directory);
 	for (const session of swarmState.agentSessions.values())
 		applyRehydrationCache(session);
-	await writeSnapshotProjection(directory, snapshot);
+	try {
+		await _snapshotCoordinationInternals.writeProjection(directory, snapshot);
+	} catch (error) {
+		// The projection is a derived compatibility shadow.  SQLite is already
+		// authoritative and rehydrated above, so a shadow write failure must not
+		// make readiness fail or strand the live in-memory state.
+		advisoryWarn(
+			`[opencode-swarm] SQLite snapshot is ready, but its compatibility projection could not be written: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
 }
 
 export function startSnapshotCoordinationInitialization(
@@ -365,10 +381,12 @@ export const _snapshotCoordinationInternals: {
 	entries: Map<string, ReadinessEntry>;
 	initialize: (directory: string) => Promise<void>;
 	renameLegacySnapshot: (from: string, to: string) => void;
+	writeProjection: (directory: string, snapshot: SnapshotData) => Promise<void>;
 	timeoutMs: number;
 } = {
 	entries,
 	initialize: initializeSnapshotCoordination,
 	renameLegacySnapshot: renameSync,
+	writeProjection: writeSnapshotProjection,
 	timeoutMs: READY_TIMEOUT_MS,
 };

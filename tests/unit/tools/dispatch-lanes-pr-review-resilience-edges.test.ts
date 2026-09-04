@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import {
 	appendDelegationTransition,
 	findByBatchId,
@@ -14,9 +12,14 @@ import {
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
+import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
 
@@ -126,7 +129,7 @@ afterEach(async () => {
 	gateInternals.resolvePrReviewDiffStats = originalResolveDiffStats;
 	gateInternals.resolvePrReviewDiffStatsAsync = originalResolveDiffStatsAsync;
 	gateInternals.nowMs = originalNowMs;
-	await fs.rm(directory, { recursive: true, force: true });
+	safeRmRecursive(directory);
 });
 
 describe('dispatch_lanes PR review resilience edges', () => {
@@ -216,52 +219,55 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			expectedCurrentStatuses: ['pending'],
 		});
 
-		const statePath = path.join(
+		await withSessionStateMutation(
 			directory,
-			'.swarm',
-			gateInternals.workflowGateStateRelativePath('review-session-completed'),
-		);
-		const persistedState = JSON.parse(
-			await fs.readFile(statePath, 'utf-8'),
-		) as {
-			prReviewBaseDispatches: Array<Record<string, unknown>>;
-			prReviewResilience: { attempts: Array<Record<string, unknown>> };
-		};
-		persistedState.prReviewBaseDispatches.push(
-			{
-				batchId: 'manual-batch-1',
-				lanes: [
+			'review-session-completed',
+			async () => {
+				const current = await readPrWorkflowGateState(
+					directory,
+					'review-session-completed',
+				);
+				if (!current) throw new Error('missing active workflow state');
+				const persistedState = structuredClone(current) as typeof current;
+				persistedState.prReviewBaseDispatches ??= [];
+				persistedState.prReviewResilience ??= {
+					policy: { ...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG },
+					attempts: [],
+					status: 'healthy',
+				};
+				persistedState.prReviewBaseDispatches.push(
 					{
-						laneId: 'manual-canary-1',
-						workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1],
+						batchId: 'manual-batch-1',
+						lanes: [
+							{
+								laneId: 'manual-canary-1',
+								workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1]!,
+							},
+						],
+						validatedAt: FIXED_ISO_TIMESTAMP,
 					},
-				],
-				validatedAt: FIXED_ISO_TIMESTAMP,
-			},
-			{
-				batchId: 'manual-fanout-1',
-				lanes: [
 					{
-						laneId: 'manual-fanout-1',
-						workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[2],
+						batchId: 'manual-fanout-1',
+						lanes: [
+							{
+								laneId: 'manual-fanout-1',
+								workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[2]!,
+							},
+						],
+						validatedAt: FIXED_ISO_TIMESTAMP,
 					},
-				],
-				validatedAt: FIXED_ISO_TIMESTAMP,
+				);
+				persistedState.prReviewResilience.attempts.push({
+					attempt: 1,
+					targetDimensions: [...PR_REVIEW_BASE_DIMENSION_IDS],
+					canaryBatchId: 'manual-batch-1',
+					canaryLaneId: 'manual-canary-1',
+					canaryWorkflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1]!,
+					admittedAt: FIXED_ISO_TIMESTAMP,
+					fanoutBatchId: 'manual-fanout-1',
+				});
+				await writeStateWhileLocked(directory, persistedState);
 			},
-		);
-		persistedState.prReviewResilience.attempts.push({
-			attempt: 1,
-			targetDimensions: [...PR_REVIEW_BASE_DIMENSION_IDS],
-			canaryBatchId: 'manual-batch-1',
-			canaryLaneId: 'manual-canary-1',
-			canaryWorkflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1],
-			admittedAt: FIXED_ISO_TIMESTAMP,
-			fanoutBatchId: 'manual-fanout-1',
-		});
-		await fs.writeFile(
-			statePath,
-			JSON.stringify(persistedState, null, 2),
-			'utf-8',
 		);
 		gateInternals.resetTrackedStateCache();
 

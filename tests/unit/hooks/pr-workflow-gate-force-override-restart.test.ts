@@ -23,7 +23,6 @@ import {
 	_test_exports as gateInternals,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
-import { writeStateWhileLocked } from '../../../src/pr-review/persistence.js';
 import { executePreparePrWorkflowCheckout } from '../../../src/tools/prepare-pr-workflow-checkout.js';
 import { bunSpawn } from '../../../src/utils/bun-compat.js';
 import {
@@ -33,6 +32,7 @@ import {
 	recordOpenPrWorkflowLane,
 	STALE_LANE_AGE_MS,
 } from '../../helpers/pr-workflow-lane-fixtures.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -226,7 +226,10 @@ describe('the irreversible half is conditional on the reversible half (F1)', () 
 		gateInternals.beforeAbortClear = async () => {
 			const current = await readPrWorkflowGateState(directory, SESSION_ID);
 			if (!current) throw new Error('expected active workflow state');
-			await writeStateWhileLocked(directory, current);
+			await writeAuthoritativePrWorkflowState(directory, {
+				...current,
+				revision: current.revision + 1,
+			});
 		};
 
 		await expect(

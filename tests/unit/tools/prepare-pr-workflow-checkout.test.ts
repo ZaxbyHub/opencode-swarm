@@ -160,7 +160,10 @@ describe('prepare_pr_workflow_checkout', () => {
 			success: true,
 			paths: ['.opencode/opencode-swarm.json'],
 		});
-		expect(renameAttempts).toBe(3);
+		// The injected rename fails twice, then succeeds on the third attempt;
+		// SQLite-authority bootstrap and the checkout receipt each add one
+		// successful durable projection rename to the shared persistence seam.
+		expect(renameAttempts).toBe(5);
 		expect(result.stash_oid).toMatch(/^[0-9a-f]{40,64}$/i);
 		expect(result.recovery).toContain('operation=restore');
 		expect(result.recovery).toContain(`stash_oid=${result.stash_oid}`);

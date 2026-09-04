@@ -1074,6 +1074,34 @@ export async function removeWorktree(
 		);
 
 		if (result.exitCode === 0) {
+			if (fs.existsSync(worktreePath)) {
+				const trusted = isPathUnderSwarmWorktreeBase(
+					worktreePath,
+					projectRoot,
+					options?.worktreeDir ? [options.worktreeDir] : [],
+				);
+				if (!trusted) {
+					return {
+						error:
+							'git removed the worktree registration but the residual directory is outside the trusted swarm worktree base',
+					};
+				}
+				try {
+					fs.rmSync(worktreePath, { recursive: true, force: true });
+				} catch (error) {
+					return {
+						error: `git removed the worktree registration but residual directory cleanup failed: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					};
+				}
+				if (fs.existsSync(worktreePath)) {
+					return {
+						error:
+							'git removed the worktree registration but the residual directory still exists after cleanup',
+					};
+				}
+			}
 			return { success: true };
 		}
 

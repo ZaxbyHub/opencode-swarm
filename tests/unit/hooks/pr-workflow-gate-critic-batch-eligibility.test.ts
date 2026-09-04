@@ -1,15 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import {
 	assertPrReviewValidationSettled,
 	enforcePrReviewBaseDimensions,
 	_test_exports as gateInternals,
 	PR_REVIEW_BASE_DIMENSION_IDS,
-	prWorkflowSessionFileStem,
 	readPrWorkflowGateState,
 	recordPrReviewValidationBatch,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
 import {
 	establishReviewPrerequisites,
 	HEAD_SHA,
@@ -108,13 +109,17 @@ async function settleSixThenCritic(): Promise<void> {
 	).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 }
 
-function gateStatePath(): string {
-	return path.join(
-		tempDir,
-		'.swarm',
-		'pr-workflow-gates',
-		`${prWorkflowSessionFileStem(SESSION_ID)}.json`,
-	);
+async function mutateAuthoritativeState(
+	mutate: (state: Record<string, unknown>) => void,
+): Promise<void> {
+	await withSessionStateMutation(tempDir, SESSION_ID, async () => {
+		const current = await readPrWorkflowGateState(tempDir, SESSION_ID);
+		if (!current) throw new Error('missing active workflow state');
+		const next = structuredClone(current) as unknown as Record<string, unknown>;
+		mutate(next);
+		await writeStateWhileLocked(tempDir, next as never);
+	});
+	gateInternals.resetTrackedStateCache();
 }
 
 /**
@@ -124,10 +129,11 @@ function gateStatePath(): string {
  * critic claims went stale.
  */
 async function makeBatchLegacy(batchId: string): Promise<void> {
-	const persisted = JSON.parse(await fs.readFile(gateStatePath(), 'utf-8'));
-	delete (persisted.prReviewBatchCoherence as Record<string, unknown>)[batchId];
-	await fs.writeFile(gateStatePath(), JSON.stringify(persisted), 'utf-8');
-	gateInternals.resetTrackedStateCache();
+	await mutateAuthoritativeState((persisted) => {
+		delete (persisted.prReviewBatchCoherence as Record<string, unknown>)[
+			batchId
+		];
+	});
 }
 
 /** Declare a single-lane critic batch owning every item and land its rows. */
@@ -280,17 +286,20 @@ describe('pr-workflow-gate critic batch eligibility', () => {
 
 	test('released raw-key critic bindings remain readable', async () => {
 		await settleSixThenCritic();
-		const persisted = JSON.parse(await fs.readFile(gateStatePath(), 'utf-8'));
-		const coherence = persisted.prReviewBatchCoherence['critic-all'];
-		coherence.reviewerItemBindings = Object.fromEntries(
-			Object.entries(coherence.reviewerItemBindings).map(([key, digest]) => [
-				key.replace(/^item:/, ''),
-				digest,
-			]),
-		);
-		delete coherence.reviewerItemBindingKeyEncoding;
-		await fs.writeFile(gateStatePath(), JSON.stringify(persisted), 'utf-8');
-		gateInternals.resetTrackedStateCache();
+		await mutateAuthoritativeState((persisted) => {
+			const coherence = (
+				persisted.prReviewBatchCoherence as Record<
+					string,
+					Record<string, unknown>
+				>
+			)['critic-all'];
+			coherence.reviewerItemBindings = Object.fromEntries(
+				Object.entries(
+					coherence.reviewerItemBindings as Record<string, string>,
+				).map(([key, digest]) => [key.replace(/^item:/, ''), digest]),
+			);
+			delete coherence.reviewerItemBindingKeyEncoding;
+		});
 
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'critic'),

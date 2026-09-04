@@ -44,7 +44,9 @@ import { z } from 'zod';
 import {
 	acquireCoordinationLease,
 	deleteCoordinationState,
+	deleteCoordinationStateWithinTransaction,
 	getCoordinationState,
+	getProjectDb,
 	importCoordinationOnce,
 	listCoordinationStates,
 	MAX_COORDINATION_STATE_LIST_ROWS,
@@ -1177,10 +1179,17 @@ function ensureDelegationCoordinationImported(
 	const existing = dbExists ? coordinationRowsToDelegations(directory) : null;
 	if (dbExists && existing === null) return 'uncertain';
 	if (existing && existing.length > 0) {
-		if (
-			!fs.existsSync(projectionMarkerPath(storePath(directory))) ||
-			!delegationShadowMatches(directory, existing)
-		) {
+		// Mutation callers already hold the store lock and rewrite the compatibility
+		// projection after a successful transition when it is absent. Avoid folding
+		// the entire ledger on every append; ordinary readers retain the full shadow
+		// reconciliation check below.
+		if (createIfNeeded) return 'ready';
+		const markerPresent = fs.existsSync(
+			projectionMarkerPath(storePath(directory)),
+		);
+		const shadowMatches =
+			markerPresent && delegationShadowMatches(directory, existing);
+		if (!shadowMatches) {
 			for (const filePath of [
 				storePath(directory),
 				checkpointPath(directory),
@@ -1188,8 +1197,8 @@ function ensureDelegationCoordinationImported(
 			]) {
 				archiveShadowFileBestEffort(filePath);
 			}
+			writeDelegationShadowProjection(directory, existing);
 		}
-		writeDelegationShadowProjection(directory, existing);
 		return 'ready';
 	}
 	const legacyRecords = loadLegacyDelegationsStrict(directory);
@@ -2341,6 +2350,80 @@ export interface CompactBackgroundDelegationsResult {
 }
 
 /**
+ * Keep the SQLite authority aligned with the bounded checkpoint projection.
+ * Compaction is a state replacement, so leaving full transcript rows behind
+ * would make every subsequent read resurrect the data the checkpoint shed.
+ * The row replacement/deletion is one coordination transaction and is
+ * compare-and-swap guarded against a concurrent append.
+ */
+function synchronizeCoordinationAfterCompaction(
+	directory: string,
+	retained: readonly BackgroundDelegationRecord[],
+): void {
+	if (!projectDbExists(directory)) return;
+	const retainedById = new Map(
+		retained.map((record) => [record.correlationId, record]),
+	);
+	withCoordinationTransaction(directory, () => {
+		const rows = listCoordinationStates(
+			directory,
+			DELEGATION_COORDINATION_NAMESPACE,
+			MAX_COORDINATION_STATE_LIST_ROWS,
+		);
+		if (rows.length >= MAX_COORDINATION_STATE_LIST_ROWS) {
+			throw new Error(
+				`delegation coordination read reached its ${MAX_COORDINATION_STATE_LIST_ROWS}-row safety bound`,
+			);
+		}
+		for (const row of rows) {
+			const record = retainedById.get(row.entityKey);
+			if (!record) {
+				if (
+					!deleteCoordinationStateWithinTransaction(
+						directory,
+						DELEGATION_COORDINATION_NAMESPACE,
+						row.entityKey,
+						row.revision,
+					)
+				) {
+					throw new Error(
+						`coordination compaction delete lost a concurrent update for ${row.entityKey}`,
+					);
+				}
+				continue;
+			}
+			const current = RecordSchema.safeParse(JSON.parse(row.payload));
+			if (!current.success) {
+				throw new Error(
+					`delegation coordination row failed schema validation for ${row.entityKey}`,
+				);
+			}
+			if (isDeepStrictEqual(current.data, record)) continue;
+			const result = getProjectDb(directory).run(
+				`UPDATE coordination_state
+				 SET revision = ?, generation = ?, status = ?, payload = ?, updated_at = ?
+				 WHERE namespace = ? AND entity_key = ? AND revision = ?`,
+				[
+					row.revision + 1,
+					Math.max(record.generation ?? 1, 1),
+					record.status,
+					JSON.stringify(record),
+					new Date().toISOString(),
+					DELEGATION_COORDINATION_NAMESPACE,
+					row.entityKey,
+					row.revision,
+				],
+			);
+			if (result.changes !== 1) {
+				throw new Error(
+					`coordination compaction update lost a concurrent update for ${row.entityKey}`,
+				);
+			}
+		}
+	});
+}
+
+/**
  * Compact the delegation ledger: checkpoint the folded authoritative state,
  * publish it via the manifest, and roll the ledger to the post-cut tail.
  * Runs under the store lock (issue #2034 requirement 1).
@@ -2375,7 +2458,44 @@ function compactDelegationsLocked(
 	directory: string,
 	options: { force?: boolean },
 ): CompactBackgroundDelegationsResult {
-	const load = loadFoldedState(directory, { strict: false });
+	const hasAuthority = projectDbExists(directory);
+	const authoritative = hasAuthority
+		? coordinationRowsToDelegations(directory)
+		: null;
+	const manifestRead = hasAuthority ? readDelegationManifest(directory) : null;
+	const checkpointRead = hasAuthority
+		? readDelegationCheckpoint(directory)
+		: null;
+	const manifest =
+		manifestRead?.kind === 'ok' &&
+		sameProjectRoot(manifestRead.manifest.rootPath, directory)
+			? manifestRead.manifest
+			: null;
+	const existingCheckpoint =
+		checkpointRead?.kind === 'ok' &&
+		sameProjectRoot(checkpointRead.checkpoint.rootPath, directory)
+			? checkpointRead.checkpoint
+			: null;
+	if (hasAuthority && authoritative === null) {
+		// A present SQLite database whose rows cannot be read is an unknown
+		// authority state.  Falling back to the legacy ledger here could compact
+		// stale data and overwrite a newer transaction, so fail closed.
+		const reason =
+			'SQLite delegation coordination authority is unreadable; refusing legacy compaction fallback';
+		recordLedgerUncertainty(directory, reason, 'compaction');
+		return { status: 'uncertain', reason };
+	}
+	const load: LedgerLoad = hasAuthority
+		? {
+				status: 'ok',
+				mode: 'legacy',
+				records: new Map(
+					(authoritative ?? []).map((record) => [record.correlationId, record]),
+				),
+				manifest,
+				checkpoint: existingCheckpoint,
+			}
+		: loadFoldedState(directory, { strict: false });
 	if (load.status === 'uncertain') {
 		recordLedgerUncertainty(
 			directory,
@@ -2603,6 +2723,15 @@ function compactDelegationsLocked(
 				)
 			: Buffer.alloc(0);
 	writeDurableFileSync(storePath(directory), tailContent);
+	try {
+		synchronizeCoordinationAfterCompaction(directory, [...live, ...keptClosed]);
+	} catch (error) {
+		const reason = `coordination authority could not be synchronized after compaction: ${
+			error instanceof Error ? error.message : String(error)
+		}`;
+		recordLedgerUncertainty(directory, reason, 'compaction');
+		return { status: 'uncertain', reason };
+	}
 
 	try {
 		const pressurePct = Math.min(
@@ -2827,8 +2956,10 @@ function appendRecord(
 				`coordination append rejected for ${record.correlationId}: ${result.outcome}`,
 			);
 		}
-		const records = coordinationRowsToDelegations(directory);
-		if (records) writeDelegationShadowProjection(directory, records);
+		if (!fs.existsSync(projectionMarkerPath(storePath(directory)))) {
+			const records = coordinationRowsToDelegations(directory);
+			if (records) writeDelegationShadowProjection(directory, records);
+		}
 		return;
 	}
 	ensureSwarmDir(directory);

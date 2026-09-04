@@ -550,6 +550,20 @@ function writeCoordinationProjection(
 				.join('\n') + (Object.keys(checkpoint.records).length > 0 ? '\n' : '');
 		writeLegacyStoreFile(legacyPath, legacyPayload);
 		fs.writeFileSync(projectionMarkerPath(legacyPath), '', 'utf-8');
+		// Keep the migration fingerprint paired with the compatibility projection.
+		// Readers use this pair to distinguish an internally refreshed shadow from
+		// a same-size external rewrite that must remain visible until reconciled.
+		if (checkpoint.migration?.done === true) {
+			try {
+				const legacyStat = fs.statSync(legacyPath);
+				checkpoint.migration.sourceBytes = legacyStat.size;
+				checkpoint.migration.scannedBytes = legacyStat.size;
+				checkpoint.migration.sourceMtimeMs = legacyStat.mtimeMs;
+				_internals.writeCheckpointFile(directory, checkpoint);
+			} catch {
+				/* A later read will repair the fingerprint or fail closed. */
+			}
+		}
 	}
 }
 
@@ -749,6 +763,27 @@ function coordinationImportShadowState(
 	}
 }
 
+function legacyProjectionFingerprintMatches(
+	directory: string,
+	checkpoint: PrSubscriptionCheckpoint,
+): boolean {
+	const migration = checkpoint.migration;
+	const legacyPath = storePath(directory);
+	if (!fileExistsStrict(legacyPath)) return true;
+	if (!fileExistsStrict(projectionMarkerPath(legacyPath)) || !migration?.done) {
+		return false;
+	}
+	try {
+		const stat = fs.statSync(legacyPath);
+		return (
+			stat.size === migration.sourceBytes &&
+			stat.mtimeMs === migration.sourceMtimeMs
+		);
+	} catch {
+		return false;
+	}
+}
+
 function archiveShadowFileBestEffort(filePath: string): void {
 	if (!fileExistsStrict(filePath)) return;
 	const importedPath = importedShadowPath(filePath);
@@ -761,6 +796,28 @@ function archiveShadowFileBestEffort(filePath: string): void {
 				error instanceof Error ? error.message : String(error)
 			}`,
 		);
+	}
+}
+
+function retireAuthoritativeLegacyShadow(directory: string): boolean {
+	const legacyPath = storePath(directory);
+	if (!fileExistsStrict(legacyPath)) return true;
+	if (fileExistsStrict(projectionMarkerPath(legacyPath))) return true;
+	const importedPath = importedShadowPath(legacyPath);
+	try {
+		if (!fileExistsStrict(importedPath)) {
+			_internals.renameWithRetry(legacyPath, importedPath);
+		} else {
+			fs.unlinkSync(legacyPath);
+		}
+		return !fileExistsStrict(legacyPath);
+	} catch (error) {
+		log(
+			`[pr-monitor] authoritative legacy shadow retirement failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+		return false;
 	}
 }
 
@@ -782,10 +839,11 @@ function ensurePrSubscriptionCoordinationImported(
 		// copied into SQLite. Let the read path overlay that tail instead of
 		// repairing/archiving the legacy projection here.
 		if (migrationPending) return false;
-		if (fileExistsStrict(storePath(directory))) {
+		const legacyPath = storePath(directory);
+		if (fileExistsStrict(legacyPath)) {
 			let legacyStat: fs.Stats | null = null;
 			try {
-				legacyStat = _internals.statSync(storePath(directory));
+				legacyStat = _internals.statSync(legacyPath);
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
 					throw new Error(
@@ -805,7 +863,6 @@ function ensurePrSubscriptionCoordinationImported(
 				return false;
 			}
 		}
-		const legacyPath = storePath(directory);
 		const projectionNeedsRepair =
 			!fileExistsStrict(projectionMarkerPath(checkpointPath(directory))) ||
 			(fileExistsStrict(legacyPath) &&
@@ -2425,6 +2482,19 @@ async function loadViewForRead(directory: string): Promise<{
 			return { view: {}, recoverySource: 'foreign' };
 		}
 		if (read.value.migration?.done === true) {
+			if (!legacyProjectionFingerprintMatches(directory, read.value)) {
+				const legacyPath = storePath(directory);
+				if (fileExistsStrict(projectionMarkerPath(legacyPath))) {
+					const overlaid = overlayLegacy(directory, read.value);
+					return {
+						view: overlaid.view,
+						recoverySource: overlaid.usedLegacy
+							? 'checkpoint+legacy'
+							: 'checkpoint',
+					};
+				}
+				retireAuthoritativeLegacyShadow(directory);
+			}
 			return {
 				view: { ...read.value.records },
 				recoverySource: 'checkpoint',
@@ -2893,26 +2963,15 @@ function loadViewForWrite(directory: string): LoadedView {
 		return { checkpoint, view, audit, dirty };
 	}
 
-	const overlaid = overlayLegacy(directory, checkpoint);
-	view = overlaid.view;
-	if (overlaid.usedLegacy && !overlaid.aborted) {
-		// A changed source was folded completely. Settle the size+mtime
-		// fingerprint even when no record won the merge — otherwise a source
-		// of losing/older records (or pure garbage) would be re-folded on
-		// EVERY read forever. Re-enter the archive path so the now-stable
-		// source gets archived. An ABORTED fold never settles: the unchanged
-		// fingerprint forces a full retry on the next op and keeps the
-		// archive blocked.
-		if (migration.done !== true) {
-			migration.sourceBytes = legacySize;
-			migration.sourceMtimeMs = legacyMtime;
-			migration.scannedBytes = legacySize;
-			if (!migration.archived) migration.archived = false;
+	if (!legacyProjectionFingerprintMatches(directory, checkpoint)) {
+		const legacyPath = storePath(directory);
+		if (fileExistsStrict(projectionMarkerPath(legacyPath))) {
+			const overlaid = overlayLegacy(directory, checkpoint);
+			return { checkpoint, view: overlaid.view, audit, dirty };
 		}
-		checkpoint.maintenance.corruptLegacyRecords += overlaid.corruptLines;
-		dirty = true;
+		retireAuthoritativeLegacyShadow(directory);
 	}
-	return { checkpoint, view, audit, dirty };
+	return { checkpoint, view: { ...checkpoint.records }, audit, dirty };
 }
 
 // ---------------------------------------------------------------------------
@@ -2961,26 +3020,6 @@ function finalizeWrite(
 	// atomic rewrite; a failed rewrite must not publish a false loss counter.
 	const auditCompaction = prepareAuditCompaction(directory);
 	persistCheckpointWithAuditCompaction(directory, checkpoint, auditCompaction);
-	if (checkpoint.migration?.done === true) {
-		const legacyPath = storePath(directory);
-		try {
-			const legacyStat = fs.statSync(legacyPath);
-			if (
-				legacyStat.size !== checkpoint.migration.sourceBytes ||
-				legacyStat.mtimeMs !== checkpoint.migration.sourceMtimeMs
-			) {
-				const legacyPayload =
-					Object.values(checkpoint.records)
-						.map((entry) => JSON.stringify(entry))
-						.join('\n') +
-					(Object.keys(checkpoint.records).length > 0 ? '\n' : '');
-				writeLegacyStoreFile(legacyPath, legacyPayload);
-				fs.writeFileSync(projectionMarkerPath(legacyPath), '', 'utf-8');
-			}
-		} catch {
-			/* absent or unreadable legacy shadow — archive handling continues */
-		}
-	}
 	flushAuditEvents(
 		directory,
 		events,

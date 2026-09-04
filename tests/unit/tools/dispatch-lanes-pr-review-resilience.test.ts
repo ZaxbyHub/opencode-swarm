@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
 	appendDelegationTransition,
@@ -16,6 +15,7 @@ import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
 
@@ -130,7 +130,7 @@ afterEach(async () => {
 	gateInternals.resolvePrReviewDiffStats = originalResolveDiffStats;
 	gateInternals.resolvePrReviewDiffStatsAsync = originalResolveDiffStatsAsync;
 	gateInternals.nowMs = originalNowMs;
-	await fs.rm(directory, { recursive: true, force: true });
+	safeRmRecursive(directory);
 });
 
 describe('dispatch_lanes PR review resilience', () => {

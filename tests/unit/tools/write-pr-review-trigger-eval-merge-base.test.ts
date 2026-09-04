@@ -3,11 +3,9 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
-	readdirSync,
 	readFileSync,
 	realpathSync,
 	rmSync,
-	writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,7 +26,12 @@ import {
 	_test_exports as gateInternals,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
+	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate';
+import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence';
 import {
 	executeWritePrReviewTriggerEval,
 	PR_REVIEW_TRIGGER_DEFINITIONS,
@@ -204,14 +207,17 @@ async function establishBoundReviewGate(root: string): Promise<void> {
 	}
 }
 
-/** Strip the durably bound review base from gate state (unbound-gate fixture). */
-function unbindReviewBase(root: string): void {
-	const gateDir = join(root, '.swarm', 'pr-workflow-gates');
-	const gatePath = join(gateDir, readdirSync(gateDir)[0]);
-	const rawState = JSON.parse(readFileSync(gatePath, 'utf8'));
-	delete rawState.prReviewBaseRef;
-	delete rawState.prReviewBaseSha;
-	writeFileSync(gatePath, `${JSON.stringify(rawState)}\n`, 'utf8');
+/** Strip the durably bound review base from authoritative gate state. */
+async function unbindReviewBase(root: string): Promise<void> {
+	await withSessionStateMutation(root, SESSION_ID, async () => {
+		const current = await readPrWorkflowGateState(root, SESSION_ID);
+		if (!current) throw new Error('missing active review gate');
+		await writeStateWhileLocked(root, {
+			...current,
+			prReviewBaseRef: undefined,
+			prReviewBaseSha: undefined,
+		});
+	});
 	gateInternals.resetTrackedStateCache();
 }
 
@@ -356,7 +362,7 @@ describe('write_pr_review_trigger_eval merge-base re-verification — regression
 	test('(c) fails closed through the explicit unbound guard when gate state has no bound base_ref/base_sha', async () => {
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
-		unbindReviewBase(root);
+		await unbindReviewBase(root);
 		writerInternals.resolveMergeBaseAsync = mock(async () => null);
 		const response = JSON.parse(
 			await executeWritePrReviewTriggerEval(

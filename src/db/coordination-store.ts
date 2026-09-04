@@ -238,6 +238,28 @@ export function deleteCoordinationState(
 	});
 }
 
+/** Delete one coordination row inside a caller-owned transaction. */
+export function deleteCoordinationStateWithinTransaction(
+	directory: string,
+	namespace: string,
+	entityKey: string,
+	expectedRevision?: number,
+): boolean {
+	const db = getProjectDb(directory);
+	const result =
+		expectedRevision === undefined
+			? db.run(
+					'DELETE FROM coordination_state WHERE namespace = ? AND entity_key = ?',
+					[namespace, entityKey],
+				)
+			: db.run(
+					`DELETE FROM coordination_state
+					 WHERE namespace = ? AND entity_key = ? AND revision = ?`,
+					[namespace, entityKey, expectedRevision],
+				);
+	return result.changes === 1;
+}
+
 function validateTransitionInput(input: CoordinationTransitionInput): void {
 	boundedText(input.namespace, 'namespace', MAX_KEY_CHARS);
 	boundedText(input.entityKey, 'entityKey', MAX_KEY_CHARS);
@@ -506,8 +528,7 @@ export function acquireCoordinationLease(
 		if (
 			row &&
 			row.lease_expires_at > new Date().toISOString() &&
-			(row.owner_token !== input.ownerToken ||
-				row.generation !== input.generation)
+			row.owner_token !== input.ownerToken
 		) {
 			return { outcome: 'held' };
 		}
