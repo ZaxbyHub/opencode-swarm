@@ -14,6 +14,7 @@ import {
 	batchDurabilityClass,
 	DURABILITY_CLASSES,
 	withDurabilityClass,
+	withImmediateTransaction,
 } from '../../../src/db/durability.js';
 import { closeProjectDb, getProjectDb } from '../../../src/db/project-db.js';
 import {
@@ -97,6 +98,31 @@ describe('withDurabilityClass', () => {
 		expect(
 			db.query<{ synchronous: number }, []>('PRAGMA synchronous').get()
 				?.synchronous,
+		).toBe(1);
+		db.close();
+	});
+});
+
+describe('withImmediateTransaction post-commit behavior', () => {
+	test('does not attempt rollback when a post-commit observer throws', () => {
+		const db = new Database(':memory:');
+		db.run('CREATE TABLE probe (value TEXT NOT NULL)');
+		expect(() =>
+			withImmediateTransaction(
+				db,
+				'full',
+				() => db.run("INSERT INTO probe (value) VALUES ('committed')"),
+				{
+					afterOuterCommit: () => {
+						throw new Error('observer failed');
+					},
+				},
+			),
+		).toThrow('observer failed');
+		expect(
+			db
+				.query<{ count: number }, []>('SELECT COUNT(*) AS count FROM probe')
+				.get()?.count,
 		).toBe(1);
 		db.close();
 	});

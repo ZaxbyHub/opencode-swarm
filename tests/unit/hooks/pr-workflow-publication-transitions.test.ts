@@ -112,8 +112,8 @@ describe('state × operation matrix (every nonterminal state is safe)', () => {
 	});
 });
 
-describe('corrupt publication state stays non-publishable (fail closed)', () => {
-	test('a truncated publication record blocks the push and reports an actionable diagnostic', async () => {
+describe('shadow-projection corruption does not weaken publication authority', () => {
+	test('a truncated publication shadow record does not bypass the authoritative armed generation', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
 		const absolute = fixture.fixtureStatePath(SESSION_ID);
 		const raw = JSON.parse(await fs.readFile(absolute, 'utf-8')) as Record<
@@ -124,20 +124,9 @@ describe('corrupt publication state stays non-publishable (fail closed)', () => 
 		raw.prFeedbackPublication = { schemaVersion: 1, active: null };
 		await fs.writeFile(absolute, JSON.stringify(raw, null, 2), 'utf-8');
 		_test_exports.resetTrackedStateCache();
-		await expect(pushCommand()).rejects.toThrow(/is invalid|armed/i);
-		// A plain abort cannot clear the corrupt armed window either — but the
-		// salvage reader treats the present-but-unreadable publication record
-		// as ARMED (fail-closed), and the cancel arm remains the audited exit.
-		await expect(
-			abortPrWorkflow(fixture.directory, SESSION_ID, {
-				kind: 'cancel-publication',
-				reason: 'corrupt publication record',
-				cancelPublication: true,
-			}),
-		).resolves.toBeTruthy();
-		await expect(
-			readPrWorkflowGateState(fixture.directory, SESSION_ID),
-		).resolves.toBeNull();
+		await expect(pushCommand()).resolves.toBeUndefined();
+		const { active } = await readActive();
+		expect(active?.state).toBe('armed');
 	});
 
 	test('publicationShapeUnreadable salvage treats a malformed record as armed', async () => {
@@ -211,18 +200,19 @@ describe('audit trail', () => {
 	});
 });
 
-describe('deleted gate state cannot clear the authorization requirement (issue #2108 safety boundary)', () => {
-	test('a hand-deleted gate file leaves publication commands blocked via the events trail', async () => {
+describe('deleted gate shadow cannot clear the authorization requirement (issue #2108 safety boundary)', () => {
+	test('a hand-deleted gate shadow file leaves publication commands governed by the authoritative armed state', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
-		// Delete the gate state by hand (the exact manual state-file edit the
-		// issue forbids as an authorization-clearing path).
+		// Delete the shadow file by hand. SQLite remains authoritative, so this
+		// must not clear the publication guard.
 		await fs.rm(fixture.fixtureStatePath(SESSION_ID), { force: true });
 		_test_exports.resetTrackedStateCache();
-		// Publication-capable commands fail closed: the audit trail still
-		// shows a LIVE armed generation for this session.
-		await expect(pushCommand()).rejects.toThrow(
-			'live in the audit trail but its gate state is missing',
-		);
+		await expect(pushCommand()).resolves.toBeUndefined();
+		await expect(
+			enforcePrWorkflowToolBefore(fixture.directory, SESSION_ID, 'shell', {
+				command: 'git push --force origin x:y',
+			}),
+		).rejects.toThrow(/only the exact approved push is allowed/);
 		// Non-publication commands are NOT blocked (the guard never bricks
 		// the session on absent evidence).
 		await expect(
@@ -233,15 +223,13 @@ describe('deleted gate state cannot clear the authorization requirement (issue #
 				command: 'git status',
 			}),
 		).resolves.toBeUndefined();
-		// The audited cancel remains reachable WITHOUT gate state and records
-		// the terminal no-publish event.
+		// The audited cancel remains reachable and records the terminal no-publish event.
 		const summary = await abortPrWorkflow(fixture.directory, SESSION_ID, {
 			kind: 'cancel-publication',
-			reason: 'state file was deleted by hand',
+			reason: 'shadow file was deleted by hand',
 			cancelPublication: true,
 		});
 		expect(summary.mode).toBe('PR_FEEDBACK');
-		expect(summary.stateSalvageDisclosure).toContain('event-only terminal');
 		// After the terminal lands, publication commands are no longer held.
 		await expect(pushCommand()).resolves.toBeUndefined();
 	});
@@ -271,8 +259,8 @@ describe('deleted gate state cannot clear the authorization requirement (issue #
 	});
 });
 
-describe('dangling guard scope (re-review findings)', () => {
-	test('flag-prefixed and env-prefixed push forms are held after gate deletion', async () => {
+describe('armed guard scope (re-review findings)', () => {
+	test('flag-prefixed and env-prefixed push forms are still held after shadow deletion', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
 		await fs.rm(fixture.fixtureStatePath(SESSION_ID), { force: true });
 		_test_exports.resetTrackedStateCache();
@@ -294,7 +282,7 @@ describe('dangling guard scope (re-review findings)', () => {
 					command,
 				}),
 			).rejects.toThrow(
-				'live in the audit trail but its gate state is missing',
+				/only the exact approved push is allowed|must be standalone shell commands/,
 			);
 		}
 		// Non-push git commands still pass; and per the documented
@@ -321,7 +309,9 @@ describe('dangling guard scope (re-review findings)', () => {
 			enforcePrWorkflowToolBefore(fixture.directory, SESSION_ID, 'shell', {
 				command: 'git commit -m "push the button"',
 			}),
-		).rejects.toThrow('live in the audit trail but its gate state is missing');
+		).rejects.toThrow(
+			/only the exact approved push is allowed|must be standalone shell commands|approved commit is immutable/,
+		);
 	});
 
 	test('a successful legacy migration (migrated outcome=armed) also dangles after deletion', async () => {

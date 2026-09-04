@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { seedQuarantineListFiles } from '../../helpers/invariant-gate-fixtures.js';
+import {
+	seedInvariantGateDependencies,
+	seedQuarantineListFiles,
+} from '../../helpers/invariant-gate-fixtures.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
@@ -254,6 +257,7 @@ describe('check-invariants.sh', () => {
 				GATE_UTILS_PATH,
 				path.join(fixtureDir, 'scripts', 'gate-utils.ts'),
 			);
+			seedInvariantGateDependencies(fixtureDir);
 			// Deliberately do NOT copy the allowlist
 
 			const result = runCheckInvariants(fixtureDir, true);

@@ -9,6 +9,7 @@ import {
 	recordPendingDelegation,
 	recordPendingDelegationDetailed,
 } from '../../../src/background/pending-delegations';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const directories: string[] = [];
@@ -38,6 +39,7 @@ function pending(generation?: number): RecordPendingInput {
 }
 
 afterEach(() => {
+	closeAllProjectDbs();
 	for (const directory of directories.splice(0)) {
 		fs.rmSync(directory, { recursive: true, force: true });
 	}

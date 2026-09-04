@@ -120,8 +120,8 @@ and do not expect them to auto-trigger.
 1. If the edit changed content wording (not just whitespace/formatting), read
    `file:.swarm/bundled-skills/skill-edit-validation/SKILL.md` and run its
    content-assertion sweep to catch stale test assertions before proceeding.
-2. `bun run drift:check` — must not introduce new warnings (soft-warn in CI,
-   but treat a new warning as a failure).
+2. `bun run drift:check --enforce` — CI runs the same enforcement mode; blocking
+   drift findings fail the job, while the full report is posted as a PR comment.
 3. If you touched a byte-identical pair, `diff` the two files to prove
    identity.
 4. Skill-only diffs (no `src/`, `scripts/`, or test changes) count as

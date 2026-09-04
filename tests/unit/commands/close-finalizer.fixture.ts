@@ -15,6 +15,10 @@ import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
+const realSnapshotWriter = await import(
+	'../../../src/session/snapshot-writer.js'
+);
+
 type MockSwarmState = {
 	activeToolCalls: Map<string, unknown>;
 	toolAggregates: Map<string, unknown>;
@@ -132,6 +136,7 @@ export async function createCloseFinalizerHarness() {
 		isValidEvidenceType,
 	}));
 	mock.module('../../../src/session/snapshot-writer.js', () => ({
+		...realSnapshotWriter,
 		flushPendingSnapshot: mockFlushPendingSnapshot,
 		writeSnapshot: async () => {},
 	}));

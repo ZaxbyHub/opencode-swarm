@@ -81,6 +81,19 @@ describe('project-db', () => {
 		expect(tables).toContain('qa_gate_profile');
 		expect(tables).toContain('qa_gate_profile_identity');
 		expect(tables).toContain('task_checkpoint_receipt');
+		expect(tables).toContain('coordination_event');
+		expect(tables).toContain('coordination_state');
+		expect(tables).toContain('coordination_lease');
+		expect(tables).toContain('coordination_import');
+		expect(tables).toContain('coordination_event_fence');
+		const indexes = db
+			.query<{ name: string }, []>(
+				"SELECT name FROM sqlite_master WHERE type='index' ORDER BY name",
+			)
+			.all()
+			.map((r) => r.name);
+		expect(indexes).toContain('idx_coordination_event_fence_stream_age');
+		expect(indexes).toContain('idx_coordination_event_fence_global_age');
 		db.close();
 	});
 
@@ -95,7 +108,8 @@ describe('project-db', () => {
 			.all()
 			.map((r) => r.version);
 		expect(versions).toEqual([
-			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+			22, 23, 24, 25, 26, 27, 28,
 		]);
 		db.close();
 	});
@@ -269,7 +283,8 @@ describe('project-db', () => {
 			.all()
 			.map((row) => row.version);
 		expect(versions).toEqual([
-			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+			22, 23, 24, 25, 26, 27, 28,
 		]);
 		const rows = db
 			.query<

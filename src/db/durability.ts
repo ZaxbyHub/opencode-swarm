@@ -24,6 +24,10 @@ export const DURABILITY_CLASSES: Readonly<Record<string, 'full' | 'normal'>> = {
 	qa_gate_profile: 'full',
 	qa_gate_profile_identity: 'full',
 	task_checkpoint_receipt: 'full',
+	coordination_event: 'full',
+	coordination_state: 'full',
+	coordination_lease: 'full',
+	coordination_import: 'full',
 	// Operational / diagnostic — NORMAL.
 	insight_candidate: 'normal',
 	phase_report: 'normal',
@@ -63,11 +67,10 @@ export function applySynchronousForClass(
  * "the previous value" — is the correct post-condition: nothing outside the
  * foundation ever sets a different value on this connection.
  *
- * NESTING CAVEAT (final-critic note): nesting a normal-class helper inside an
- * open full-class transaction would restore NORMAL before the OUTER commit.
- * No production path nests these helpers today (group-commit ops never call
- * the qa-gate/receipt writers); if nesting is ever introduced, restore the
- * pre-call value instead.
+ * This low-level pragma helper does not own a transaction and therefore must
+ * not be nested. Transactional callers use `withImmediateTransaction`, whose
+ * owner tracking prevents a nested helper from lowering the outer commit's
+ * durability.
  */
 export function withDurabilityClass<T>(
 	db: Database,
@@ -82,3 +85,79 @@ export function withDurabilityClass<T>(
 		applySynchronousForClass(db, 'normal');
 	}
 }
+
+type TransactionOwner = {
+	readonly durability: 'full' | 'normal';
+	depth: number;
+};
+
+const transactionOwners = new WeakMap<Database, TransactionOwner>();
+
+export interface ImmediateTransactionHooks {
+	beforeBegin?: (db: Database) => void;
+	beforeOuterCommit?: (db: Database) => void;
+	afterOuterCommit?: (db: Database) => void;
+}
+
+/**
+ * Run a synchronous immediate transaction without allowing a nested call to
+ * lower the connection durability before the real outer commit (#2481).
+ */
+export function withImmediateTransaction<T>(
+	db: Database,
+	cls: 'full' | 'normal',
+	fn: () => T,
+	hooks: ImmediateTransactionHooks = {},
+): T {
+	const owner = transactionOwners.get(db);
+	if (owner) {
+		if (cls === 'full' && owner.durability !== 'full') {
+			throw new Error(
+				'Cannot nest a FULL coordination transaction inside a NORMAL owner',
+			);
+		}
+		owner.depth += 1;
+		try {
+			return db.transaction(fn)();
+		} finally {
+			owner.depth -= 1;
+		}
+	}
+	if (db.inTransaction) {
+		throw new Error(
+			'Refusing to nest inside an unknown non-coordination-owned transaction',
+		);
+	}
+
+	hooks.beforeBegin?.(db);
+	applySynchronousForClass(db, cls);
+	transactionOwners.set(db, { durability: cls, depth: 1 });
+	db.run('BEGIN IMMEDIATE');
+	let committed = false;
+	try {
+		const result = fn();
+		hooks.beforeOuterCommit?.(db);
+		db.run('COMMIT');
+		committed = true;
+		// Post-commit observers cannot make the durable operation un-happen. Let
+		// their error propagate, but never misreport the commit as rolled back.
+		hooks.afterOuterCommit?.(db);
+		return result;
+	} catch (err) {
+		if (!committed) {
+			try {
+				db.run('ROLLBACK');
+			} catch {
+				// Preserve the original transaction failure.
+			}
+		}
+		throw err;
+	} finally {
+		transactionOwners.delete(db);
+		applySynchronousForClass(db, 'normal');
+	}
+}
+
+export const _transactionInternals = {
+	transactionOwners,
+};

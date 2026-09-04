@@ -1,5 +1,25 @@
 # Changelog
 
+## [7.164.12](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.11...v7.164.12) (2026-09-04)
+
+
+### Bug Fixes
+
+* **coordination:** avoid opening sqlite for missing epic db ([8a849fb](https://github.com/ZaxbyHub/opencode-swarm/commit/8a849fb4bdc35785424dba99a83a980d05f8a535))
+* **coordination:** harden epic probe and authority fixtures ([f48b581](https://github.com/ZaxbyHub/opencode-swarm/commit/f48b581a9097e5178c8b3d24f1f73c1113af3eb6))
+* **coordination:** make cross-process state atomic ([d158a34](https://github.com/ZaxbyHub/opencode-swarm/commit/d158a3480970ace4fe98104487ddbd5b1ce12669))
+* **coordination:** route epic projection through atomic writer ([b50b715](https://github.com/ZaxbyHub/opencode-swarm/commit/b50b715c3c38ea9037d876af873de6d37ece685c))
+
+## [7.164.11](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.10...v7.164.11) (2026-09-04)
+
+
+### Bug Fixes
+
+* **gates:** correct default execution-gate semantics and corrupt-evidence handling ([9a852f4](https://github.com/ZaxbyHub/opencode-swarm/commit/9a852f4e386b5a9695a495e8ec339ccc40d8846c))
+* **gates:** correct default execution-gate semantics and corrupt-evidence handling ([#2470](https://github.com/ZaxbyHub/opencode-swarm/issues/2470)) ([2894402](https://github.com/ZaxbyHub/opencode-swarm/commit/28944021848e80c1bd211fb88a35f58abc3b55ac))
+* **review:** close PR [#2557](https://github.com/ZaxbyHub/opencode-swarm/issues/2557) review findings and probe-validated pre-existing gaps ([d0cbfcd](https://github.com/ZaxbyHub/opencode-swarm/commit/d0cbfcd57c1024ea5f98f8964c61919fa8efd599))
+* **test:** use canonicalMkdtemp in new gate-audit availability test (FR-011) ([cb514de](https://github.com/ZaxbyHub/opencode-swarm/commit/cb514de1a3610b28813a7d22675c114370382677))
+
 ## [7.164.10](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.9...v7.164.10) (2026-09-03)
 
 

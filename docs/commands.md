@@ -910,11 +910,17 @@ DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWA
 
 ### `/swarm reset-session`
 
-Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project. Also recovers stale coder settlements (issue #2268): a `DISPATCHED` settlement WAL left behind by a dispatch whose completion never arrived is settled here, so future coder dispatches cannot stay wedged with `CODER_DISPATCH_IN_PROGRESS`. Before deleting, the session state is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept). Since #2398 the reset is also a real escape from the `knowledge_application` enforce gate: the invoking session's pending architect-directive obligations are durably released in the receipt ledger (audited as `application_gate_session_reset_release`), and the gate's in-memory denial state is cleared process-wide (like the command's other in-memory clears) — other sessions' ledger obligations and the knowledge store itself are preserved.
+Clear only session state (the session namespaces in `.swarm/swarm.db` plus
+`.swarm/session/` compatibility projections). Preserves plan, evidence, and
+knowledge. Use when starting a new model/session but continuing the same project. Also recovers stale coder settlements (issue #2268): a `DISPATCHED` settlement WAL left behind by a dispatch whose completion never arrived is settled here, so future coder dispatches cannot stay wedged with `CODER_DISPATCH_IN_PROGRESS`. Before deleting, the session projection is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept), so it can be imported again if recovery is needed. Since #2398 the reset is also a real escape from the `knowledge_application` enforce gate: the invoking session's pending architect-directive obligations are durably released in the receipt ledger (audited as `application_gate_session_reset_release`), and the gate's in-memory denial state is cleared process-wide (like the command's other in-memory clears) — other sessions' ledger obligations and the knowledge store itself are preserved.
 
-### `/swarm recover [task_id] [--force]`
+### `/swarm recover [task_id] [--force]` or `/swarm recover --coordination`
 
 Settle stale coder-settlement WALs in `.swarm/coder-settlements/` — the `CODER_DISPATCH_IN_PROGRESS` / `CODER_SETTLEMENT_IN_PROGRESS` wedge class where a dispatch completed but its settlement never fired (host killed mid-dispatch, cancelled Task, gate denial; issue #2268). Safe mode recovers settlements whose owning process is gone. `--force` additionally releases ownership keys still held by this process — only use it when no coder dispatch is genuinely still running; a still-running dispatch's late completion will then report `CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT` (safe to ignore, the settlement is already durably recovered). Never interrupts a dispatch owned by another live OpenCode process. Human-only: agents self-heal dead-owner settlements via `update_task_status`. `/swarm diagnose` reports non-terminal settlements with the exact remediation.
+
+`--coordination` retries the post-resolution SQLite legacy import/readiness
+attempt. It refuses to overlap an earlier attempt that timed out but has not
+settled; `/swarm status` reports that state and its bounded diagnostic.
 
 ### `/swarm checkpoint <save|restore|delete|list> <label>`
 

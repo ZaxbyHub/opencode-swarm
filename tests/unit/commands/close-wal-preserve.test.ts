@@ -22,6 +22,10 @@ import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import * as actualState from '../../../src/state.js';
 
+const realSnapshotWriter = await import(
+	'../../../src/session/snapshot-writer.js'
+);
+
 mock.module('../../../src/tools/write-retro.js', () => ({
 	executeWriteRetro: mock(async () =>
 		JSON.stringify({ success: true, phase: 1, task_id: 'r', message: 'ok' }),
@@ -36,6 +40,7 @@ mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mock(async () => {}),
 }));
 mock.module('../../../src/session/snapshot-writer.js', () => ({
+	...realSnapshotWriter,
 	flushPendingSnapshot: mock(async () => {}),
 }));
 mock.module('../../../src/state.js', () => ({

@@ -29,6 +29,7 @@ import {
 	swarmState,
 } from '../../../src/state.js';
 
+const projectionFile = 'session/state.sqlite-projection.json';
 describe('Session Snapshot Integration - Adversarial Tests', () => {
 	let tempDir: string;
 
@@ -47,7 +48,6 @@ describe('Session Snapshot Integration - Adversarial Tests', () => {
 		}
 		resetSwarmState();
 	});
-
 	describe('Prototype Pollution Attacks', () => {
 		it('should block __proto__ pollution in state.json', async () => {
 			// Verify Object.prototype doesn't have an 'admin' property initially
@@ -129,7 +129,7 @@ describe('Session Snapshot Integration - Adversarial Tests', () => {
 
 			// Verify file was written to the parent .swarm directory
 			// This is expected - the directory argument is used as the base
-			const writtenPath = join(maliciousDir, '.swarm', 'session', 'state.json');
+			const writtenPath = join(maliciousDir, '.swarm', projectionFile);
 			const fileExists = existsSync(writtenPath);
 			expect(fileExists).toBe(true);
 
@@ -489,7 +489,7 @@ describe('Session Snapshot Integration - Adversarial Tests', () => {
 			await Promise.all(promises);
 
 			// Verify the file exists and contains valid JSON
-			const statePath = join(tempDir, '.swarm', 'session', 'state.json');
+			const statePath = join(tempDir, '.swarm', projectionFile);
 			const fileExists = existsSync(statePath);
 			expect(fileExists).toBe(true);
 

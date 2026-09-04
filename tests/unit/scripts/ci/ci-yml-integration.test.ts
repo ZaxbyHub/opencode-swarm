@@ -163,7 +163,7 @@ describe('ci.yml integration — merge-queue coverage isolation', () => {
 	test('coverage helper runs each file with Bun isolation', () => {
 		expect(coverageGateScript).toContain('set -euo pipefail');
 		expect(coverageGateScript).toContain(
-			'bun test --isolate --coverage --timeout 60000 "$test_file"',
+			'bun test --isolate --coverage --coverage-reporter=lcov --timeout 60000 "$test_file"',
 		);
 		expect(coverageGateScript).toContain(
 			"{ grep -vE '^\\s*#|^\\s*$' scripts/ci/quarantined-tests.txt || true; } | sort > quarantined.txt",
@@ -189,8 +189,12 @@ describe('ci.yml integration — coverage gate bounded retry (issue #1782 parity
 
 	test('coverage helper retries up to max_retries=2 (three attempts total)', () => {
 		expect(coverageGateScript).toContain('max_retries=2');
+		expect(coverageGateScript).toContain('while true; do');
 		expect(coverageGateScript).toContain(
-			'while [ "$exit_code" -ne 0 ] && [ "$retry_num" -lt "$max_retries" ]; do',
+			'if [ "$retry_num" -ge "$max_retries" ]; then',
+		);
+		expect(coverageGateScript).toContain(
+			'if [ "$exit_code" -eq 0 ] && [ "$coverage_ready" -eq 1 ]; then',
 		);
 	});
 
@@ -201,15 +205,12 @@ describe('ci.yml integration — coverage gate bounded retry (issue #1782 parity
 
 	// Anchored ordering assertion (writing-tests skill "Anchored Content
 	// Assertions"): a bare `toContain('rm -rf coverage')` would still pass if
-	// someone moved the reset back outside the retry loop, because the
-	// pre-loop reset (once per file, before the first attempt) also contains
-	// that literal. Slicing to the retry-loop body specifically, and then
-	// checking index order INSIDE that slice, is what actually fails if the
-	// reset is relocated outside the loop (issue #1712 per-attempt isolation).
+	// someone moved the reset outside the attempt loop. Slicing to the
+	// `while true` body specifically, and then checking index order INSIDE that
+	// slice, is what actually fails if the reset is relocated outside the loop
+	// (issue #1712 per-attempt isolation).
 	test('coverage helper resets the coverage dir INSIDE the retry loop, not just once per file', () => {
-		const whileStart = coverageGateScript.indexOf(
-			'while [ "$exit_code" -ne 0 ] && [ "$retry_num" -lt "$max_retries" ]; do',
-		);
+		const whileStart = coverageGateScript.indexOf('while true; do');
 		expect(whileStart).toBeGreaterThan(-1);
 		const doneIdx = coverageGateScript.indexOf('\n\tdone\n', whileStart);
 		expect(doneIdx).toBeGreaterThan(whileStart);
@@ -219,7 +220,7 @@ describe('ci.yml integration — coverage gate bounded retry (issue #1782 parity
 		const rmIdx = loopBody.indexOf('rm -rf coverage');
 		const mkdirIdx = loopBody.indexOf('mkdir -p coverage');
 		const bunTestIdx = loopBody.indexOf(
-			'bun test --isolate --coverage --timeout 60000 "$test_file"',
+			'bun test --isolate --coverage --coverage-reporter=lcov --timeout 60000 "$test_file"',
 		);
 
 		// All four markers must be present inside the loop body itself.
@@ -228,14 +229,13 @@ describe('ci.yml integration — coverage gate bounded retry (issue #1782 parity
 		expect(mkdirIdx).toBeGreaterThan(-1);
 		expect(bunTestIdx).toBeGreaterThan(-1);
 
-		// And in this order: increment retry counter -> reset coverage dir ->
-		// recreate coverage dir -> re-run bun test. If the reset were moved
-		// outside the loop, rmIdx/mkdirIdx would be -1 inside this slice and
-		// the assertions above would already fail; this also guards against a
-		// reset that's present but reordered after the retried bun test run.
-		expect(rmIdx).toBeGreaterThan(retryIncrementIdx);
+		// Every attempt resets the coverage dir before invoking Bun. If the reset
+		// were moved outside the loop, rmIdx/mkdirIdx would be -1 inside this
+		// slice and the assertions above would already fail; this also guards
+		// against a reset that happens after the retried test run.
 		expect(mkdirIdx).toBeGreaterThan(rmIdx);
 		expect(bunTestIdx).toBeGreaterThan(mkdirIdx);
+		expect(retryIncrementIdx).toBeGreaterThan(bunTestIdx);
 	});
 
 	test('coverage helper appends the "passed on retry" notice to the flake-annotation file', () => {

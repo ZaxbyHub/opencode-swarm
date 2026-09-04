@@ -21,10 +21,14 @@ import {
 	recordPendingDelegation,
 	scanDelegationsForRecovery,
 } from '../../../src/background/pending-delegations';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const { dir, cleanup } = createSafeTestDir('swarm-bg-ckptcrash-');
-afterEach(cleanup);
+afterEach(() => {
+	closeAllProjectDbs();
+	cleanup();
+});
 // Restore the PRODUCTION seam members (never replace the retry wrapper — the
 // module-level seam object is shared across every test file in this bun
 // process, and a clobbered wrapper silently bypasses renameOnce injections in
@@ -94,7 +98,7 @@ function minimal(correlationId: string): BackgroundDelegationRecord {
 }
 
 describe('issue #2034 crash matrix', () => {
-	it('payload checksum mismatch on a schema-valid checkpoint → uncertain', async () => {
+	it('post-import checkpoint payload corruption is ignored in favor of SQLite authority', async () => {
 		await recordPendingDelegation(dir, pendingInput('live-1'));
 		await compactBackgroundDelegations(dir, { force: true });
 		// Bit-flip a schema-valid field: createdAt changes but the embedded
@@ -106,13 +110,15 @@ describe('issue #2034 crash matrix', () => {
 		fs.writeFileSync(checkpointPath(), JSON.stringify(checkpoint));
 
 		const scan = scanDelegationsForRecovery(dir);
-		expect(scan.status).toBe('uncertain');
-		if (scan.status === 'uncertain') {
-			expect(scan.reason).toContain('payload checksum mismatch');
+		expect(scan.status).toBe('ok');
+		if (scan.status === 'ok') {
+			expect(scan.source).toBe('checkpoint+tail');
+			expect(scan.owners).toHaveLength(1);
+			expect(scan.owners[0]!.correlationId).toBe('live-1');
 		}
 	});
 
-	it('manifest checksum pointing at a different checkpoint → uncertain', async () => {
+	it('post-import manifest checksum corruption is ignored in favor of SQLite authority', async () => {
 		await recordPendingDelegation(dir, pendingInput('live-1'));
 		await compactBackgroundDelegations(dir, { force: true });
 		const checkpoint = JSON.parse(
@@ -130,34 +136,34 @@ describe('issue #2034 crash matrix', () => {
 		});
 
 		const scan = scanDelegationsForRecovery(dir);
-		expect(scan.status).toBe('uncertain');
-		if (scan.status === 'uncertain') {
-			expect(scan.reason).toContain(
-				'manifest checksum does not match its checkpoint',
-			);
+		expect(scan.status).toBe('ok');
+		if (scan.status === 'ok') {
+			expect(scan.source).toBe('checkpoint+tail');
+			expect(scan.owners).toHaveLength(1);
+			expect(scan.owners[0]!.correlationId).toBe('live-1');
 		}
 	});
 
-	it('uncertain scan reports an honest source: unknown for manifest-present stores', async () => {
+	it('post-import shadow corruption never displaces SQLite authority', async () => {
 		await recordPendingDelegation(dir, pendingInput('live-1'));
 		await compactBackgroundDelegations(dir, { force: true });
 		fs.writeFileSync(checkpointPath(), '{"schemaVersion":1,"corrupt":true}');
 		const scan = scanDelegationsForRecovery(dir);
-		expect(scan.status).toBe('uncertain');
-		if (scan.status === 'uncertain') {
-			expect(scan.source).toBe('unknown');
-			// The repair hint rides along so durable observations stay actionable.
-			expect(scan.repairHint).toBeTruthy();
+		expect(scan.status).toBe('ok');
+		if (scan.status === 'ok') {
+			expect(scan.source).toBe('checkpoint+tail');
+			expect(scan.owners).toHaveLength(1);
+			expect(scan.owners[0]!.correlationId).toBe('live-1');
 		}
 
-		// Manifest-less failure keeps the legacy label (and no repair hint:
-		// a legacy ledger needs no checkpoint repair).
 		fs.rmSync(manifestPath(), { force: true });
 		fs.appendFileSync(ledgerPath(), '{"torn json');
-		const legacy = scanDelegationsForRecovery(dir);
-		expect(legacy.status).toBe('uncertain');
-		if (legacy.status === 'uncertain') {
-			expect(legacy.source).toBe('legacy-ledger');
+		const rescan = scanDelegationsForRecovery(dir);
+		expect(rescan.status).toBe('ok');
+		if (rescan.status === 'ok') {
+			expect(rescan.source).toBe('checkpoint+tail');
+			expect(rescan.owners).toHaveLength(1);
+			expect(rescan.owners[0]!.correlationId).toBe('live-1');
 		}
 	});
 
@@ -191,7 +197,7 @@ describe('issue #2034 crash matrix', () => {
 		}
 	});
 
-	it('crash before manifest publication: orphan checkpoint ignored, legacy fold correct', async () => {
+	it('crash before manifest publication leaves SQLite authority intact', async () => {
 		await recordPendingDelegation(dir, pendingInput('live-1'));
 		await compactBackgroundDelegations(dir, { force: true });
 		// Simulate the pre-manifest crash: remove the manifest and restore the
@@ -205,7 +211,7 @@ describe('issue #2034 crash matrix', () => {
 		const scan = scanDelegationsForRecovery(dir);
 		expect(scan.status).toBe('ok');
 		if (scan.status === 'ok') {
-			expect(scan.source).toBe('legacy-ledger');
+			expect(scan.source).toBe('checkpoint+tail');
 			expect(scan.owners).toHaveLength(1);
 			expect(scan.owners[0]!.correlationId).toBe('live-1');
 		}
@@ -303,58 +309,50 @@ describe('issue #2034 crash matrix', () => {
 		}
 	});
 
-	it('malformed tail line → strict recovery fails closed', async () => {
+	it('post-import malformed shadow tail is ignored in favor of SQLite authority', async () => {
 		await recordPendingDelegation(dir, pendingInput('live-1'));
 		await compactBackgroundDelegations(dir, { force: true });
 		fs.appendFileSync(ledgerPath(), '{"corrupt json without close');
 		const scan = scanDelegationsForRecovery(dir);
-		expect(scan.status).toBe('uncertain');
-		if (scan.status === 'uncertain') {
-			expect(scan.reason).toContain('malformed JSON');
+		expect(scan.status).toBe('ok');
+		if (scan.status === 'ok') {
+			expect(scan.source).toBe('checkpoint+tail');
+			expect(scan.owners).toHaveLength(1);
+			expect(scan.owners[0]!.correlationId).toBe('live-1');
 		}
-		// The lenient reader still skips the torn line (pinned behavior).
 		expect(readDelegations(dir).length).toBe(1);
 	});
 
-	it('truncated manifest → uncertain (no legacy fallback)', async () => {
+	it('post-import truncated manifest is ignored in favor of SQLite authority', async () => {
 		await recordPendingDelegation(dir, pendingInput('live-1'));
 		await compactBackgroundDelegations(dir, { force: true });
 		fs.writeFileSync(manifestPath(), '{"schemaVersion":1,"sequ');
 		const scan = scanDelegationsForRecovery(dir);
-		expect(scan.status).toBe('uncertain');
-		if (scan.status === 'uncertain') {
-			expect(scan.reason).toContain('manifest is invalid');
+		expect(scan.status).toBe('ok');
+		if (scan.status === 'ok') {
+			expect(scan.source).toBe('checkpoint+tail');
+			expect(scan.owners).toHaveLength(1);
+			expect(scan.owners[0]!.correlationId).toBe('live-1');
 		}
 	});
 
-	it('corrupt checkpoint with a published manifest fails closed and refuses mutations', async () => {
+	it('post-import corrupt checkpoint with a published manifest does not block SQLite-backed mutations', async () => {
 		await recordPendingDelegation(dir, pendingInput('live-1'));
 		await compactBackgroundDelegations(dir, { force: true });
 		fs.writeFileSync(checkpointPath(), '{"schemaVersion":1,"corrupt":true}');
 
 		const scan = scanDelegationsForRecovery(dir);
-		expect(scan.status).toBe('uncertain');
-		if (scan.status === 'uncertain') {
-			expect(scan.reason).toContain('checkpoint is invalid');
+		expect(scan.status).toBe('ok');
+		if (scan.status === 'ok') {
+			expect(scan.source).toBe('checkpoint+tail');
+			expect(scan.owners).toHaveLength(1);
+			expect(scan.owners[0]!.correlationId).toBe('live-1');
 		}
 
-		// Mutations refuse rather than appending state derived from partial truth.
-		const before = fs.readFileSync(ledgerPath());
-		await recordPendingDelegation(dir, pendingInput('must-not-record'));
-		expect(fs.readFileSync(ledgerPath()).equals(before)).toBe(true);
+		await recordPendingDelegation(dir, pendingInput('must-record'));
 		expect(
-			readDelegations(dir).some((r) => r.correlationId === 'must-not-record'),
-		).toBe(false);
-
-		// The durable health artifact carries the uncertainty + repair hint.
-		const health = JSON.parse(
-			fs.readFileSync(
-				path.join(dir, '.swarm', 'background-delegations-health.json'),
-				'utf-8',
-			),
-		) as { lastUncertainty?: { reason: string; repairHint?: string } };
-		expect(health.lastUncertainty?.reason).toContain('checkpoint is invalid');
-		expect(health.lastUncertainty?.repairHint).toBeTruthy();
+			readDelegations(dir).some((r) => r.correlationId === 'must-record'),
+		).toBe(true);
 	});
 
 	it('orphan checkpoint without a manifest never blocks the store', async () => {
@@ -378,27 +376,31 @@ describe('issue #2034 crash matrix', () => {
 		}
 	});
 
-	it('sequence regression (mixed files) → uncertain', async () => {
+	it('post-import shadow sequence regression is ignored in favor of SQLite authority', async () => {
 		await recordPendingDelegation(dir, pendingInput('live-1'));
 		await compactBackgroundDelegations(dir, { force: true });
 		const manifest = readManifest();
 		writeManifest({ ...manifest, sequence: 99 });
 		const scan = scanDelegationsForRecovery(dir);
-		expect(scan.status).toBe('uncertain');
-		if (scan.status === 'uncertain') {
-			expect(scan.reason).toContain('sequence mismatch');
+		expect(scan.status).toBe('ok');
+		if (scan.status === 'ok') {
+			expect(scan.source).toBe('checkpoint+tail');
+			expect(scan.owners).toHaveLength(1);
+			expect(scan.owners[0]!.correlationId).toBe('live-1');
 		}
 	});
 
-	it('copied trio bound to a different project root → uncertain with rebind hint', async () => {
+	it('post-import foreign shadow trio is ignored in favor of SQLite authority', async () => {
 		await recordPendingDelegation(dir, pendingInput('live-1'));
 		await compactBackgroundDelegations(dir, { force: true });
 		const manifest = readManifest();
 		writeManifest({ ...manifest, rootPath: 'E:\\definitely\\another\\root' });
 		const scan = scanDelegationsForRecovery(dir);
-		expect(scan.status).toBe('uncertain');
-		if (scan.status === 'uncertain') {
-			expect(scan.reason).toContain('different project root');
+		expect(scan.status).toBe('ok');
+		if (scan.status === 'ok') {
+			expect(scan.source).toBe('checkpoint+tail');
+			expect(scan.owners).toHaveLength(1);
+			expect(scan.owners[0]!.correlationId).toBe('live-1');
 		}
 	});
 

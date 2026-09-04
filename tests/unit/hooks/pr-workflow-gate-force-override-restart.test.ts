@@ -16,10 +16,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	abortPrWorkflow,
 	activatePrWorkflow,
 	_test_exports as gateInternals,
+	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import { executePreparePrWorkflowCheckout } from '../../../src/tools/prepare-pr-workflow-checkout.js';
 import { bunSpawn } from '../../../src/utils/bun-compat.js';
@@ -30,6 +32,7 @@ import {
 	recordOpenPrWorkflowLane,
 	STALE_LANE_AGE_MS,
 } from '../../helpers/pr-workflow-lane-fixtures.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -113,6 +116,7 @@ afterEach(async () => {
 	// path, which the inline `beforeAbortClear = undefined` in the CAS test (kept
 	// because that test's retry depends on it mid-test) does not.
 	gateInternals.resetTrackedStateCache();
+	closeProjectDb(directory);
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -125,7 +129,7 @@ describe('force override restores a restartable session', () => {
 			'lane-alive',
 			'c-restart',
 		);
-		backdatePrWorkflowLane(directory, 'c-restart', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-restart', STALE_LANE_AGE_MS);
 		// The lane is past the horizon AND its session answers `busy` forever: the
 		// probe retains it, so nothing settles it and no age ever will.
 		gateInternals.getSessionOps = () => ({
@@ -179,8 +183,8 @@ describe('force override restores a restartable session', () => {
 		);
 		// Backdated only after BOTH records exist, so no ordering assumption about
 		// the lazy maintenance sweep inside `recordPendingDelegation` is baked in.
-		backdatePrWorkflowLane(directory, 'c-mine', STALE_LANE_AGE_MS);
-		backdatePrWorkflowLane(directory, 'c-theirs', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-mine', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-theirs', STALE_LANE_AGE_MS);
 		gateInternals.getSessionOps = () => ({
 			status: async () => ({
 				data: { [laneSubagentSessionId('c-mine')]: { type: 'busy' } },
@@ -212,25 +216,20 @@ describe('the irreversible half is conditional on the reversible half (F1)', () 
 			'lane-alive',
 			'c-cas',
 		);
-		backdatePrWorkflowLane(directory, 'c-cas', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-cas', STALE_LANE_AGE_MS);
 		gateInternals.getSessionOps = () => ({
 			status: async () => ({
 				data: { [laneSubagentSessionId('c-cas')]: { type: 'busy' } },
 			}),
 		});
-		const statePath = path.join(
-			directory,
-			'.swarm',
-			gateInternals.workflowGateStateRelativePath(SESSION_ID),
-		);
 		// The concurrent mutation between the durable audit append and the clear.
 		gateInternals.beforeAbortClear = async () => {
-			const current = JSON.parse(await fs.readFile(statePath, 'utf-8'));
-			await fs.writeFile(
-				statePath,
-				JSON.stringify({ ...current, revision: current.revision + 1 }),
-				'utf-8',
-			);
+			const current = await readPrWorkflowGateState(directory, SESSION_ID);
+			if (!current) throw new Error('expected active workflow state');
+			await writeAuthoritativePrWorkflowState(directory, {
+				...current,
+				revision: current.revision + 1,
+			});
 		};
 
 		await expect(
@@ -305,8 +304,8 @@ describe('the override discloses restartability it can actually verify (F2)', ()
 			'lane-dead',
 			'c-dead',
 		);
-		backdatePrWorkflowLane(directory, 'c-alive', STALE_LANE_AGE_MS);
-		backdatePrWorkflowLane(directory, 'c-dead', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-alive', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-dead', STALE_LANE_AGE_MS);
 		gateInternals.getSessionOps = () => ({
 			status: async () => ({
 				data: {
@@ -385,8 +384,8 @@ describe('the abandonment clause states what it observed, not what is absent (N1
 			'lane-race',
 			'c-race',
 		);
-		backdatePrWorkflowLane(directory, 'c-kept', STALE_LANE_AGE_MS);
-		backdatePrWorkflowLane(directory, 'c-race', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-kept', STALE_LANE_AGE_MS);
+		await backdatePrWorkflowLane(directory, 'c-race', STALE_LANE_AGE_MS);
 		// BOTH lanes must be probe-retained. If only one were, the other would
 		// settle through the ordinary sweep and never enter the override's targeted
 		// set, and the race would be asserted against a lane nothing overrode.
@@ -403,7 +402,7 @@ describe('the abandonment clause states what it observed, not what is absent (N1
 		// the only thing sparing it is the sweep's STATUS filter, not its age, so a
 		// regression cannot pass by accidentally sparing it for the wrong reason.
 		gateInternals.beforeAbortClear = async () => {
-			backdatePrWorkflowLane(
+			await backdatePrWorkflowLane(
 				directory,
 				'c-race',
 				STALE_LANE_AGE_MS,

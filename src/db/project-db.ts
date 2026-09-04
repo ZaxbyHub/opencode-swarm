@@ -13,7 +13,7 @@
 
 import type { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write.js';
 import {
 	canonicalRootKeyFresh,
@@ -45,6 +45,10 @@ const MIGRATION_FAILURE_ERROR_MAX_CHARS = 500;
  * successful migration run.
  */
 const MIGRATION_FAILURE_MARKER = 'db-migration-failure.json';
+
+/** Bounded retries for cross-process first-open migration contention. */
+const MIGRATION_BUSY_RETRIES = 2;
+const OPEN_CONTENTION_RETRIES = 4;
 
 const MIGRATIONS: Migration[] = [
 	{
@@ -226,6 +230,111 @@ const MIGRATIONS: Migration[] = [
 			PRIMARY KEY(kind, phase)
 		)`,
 	},
+	// Issue #2481 (Workstream D2): transactional coordination authority.
+	{
+		version: 18,
+		name: 'create_coordination_event',
+		sql: `CREATE TABLE IF NOT EXISTS coordination_event (
+			stream_id TEXT NOT NULL,
+			version INTEGER NOT NULL CHECK(version >= 1),
+			idempotency_key TEXT NOT NULL,
+			event_type TEXT NOT NULL,
+			generation INTEGER NOT NULL CHECK(generation >= 0),
+			payload TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(stream_id, version),
+			UNIQUE(stream_id, idempotency_key)
+		)`,
+	},
+	{
+		version: 19,
+		name: 'create_coordination_event_type_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_coordination_event_type
+			ON coordination_event(event_type, created_at)`,
+	},
+	{
+		version: 20,
+		name: 'create_coordination_state',
+		sql: `CREATE TABLE IF NOT EXISTS coordination_state (
+			namespace TEXT NOT NULL,
+			entity_key TEXT NOT NULL,
+			revision INTEGER NOT NULL CHECK(revision >= 1),
+			generation INTEGER NOT NULL CHECK(generation >= 0),
+			status TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(namespace, entity_key)
+		)`,
+	},
+	{
+		version: 21,
+		name: 'create_coordination_state_status_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_coordination_state_status
+			ON coordination_state(namespace, status, updated_at)`,
+	},
+	{
+		version: 22,
+		name: 'create_coordination_lease',
+		sql: `CREATE TABLE IF NOT EXISTS coordination_lease (
+			namespace TEXT NOT NULL,
+			entity_key TEXT NOT NULL,
+			generation INTEGER NOT NULL CHECK(generation >= 0),
+			owner_token TEXT NOT NULL,
+			lease_expires_at TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(namespace, entity_key)
+		)`,
+	},
+	{
+		version: 23,
+		name: 'create_coordination_lease_expiry_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_coordination_lease_expiry
+			ON coordination_lease(namespace, lease_expires_at)`,
+	},
+	{
+		version: 24,
+		name: 'create_coordination_import',
+		sql: `CREATE TABLE IF NOT EXISTS coordination_import (
+			source TEXT PRIMARY KEY,
+			imported_at TEXT NOT NULL,
+			source_digest TEXT NOT NULL,
+			row_count INTEGER NOT NULL CHECK(row_count >= 0)
+		)`,
+	},
+	{
+		version: 25,
+		name: 'create_coordination_event_created_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_coordination_event_created
+			ON coordination_event(created_at, stream_id, version)`,
+	},
+	// Durable idempotency fence (issue #2481): retain the key fingerprint even
+	// when the append-only event history prunes old rows.
+	{
+		version: 26,
+		name: 'create_coordination_event_idempotency_fence',
+		sql: `CREATE TABLE IF NOT EXISTS coordination_event_fence (
+			stream_id TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			event_type TEXT NOT NULL,
+			generation INTEGER NOT NULL CHECK(generation >= 0),
+			payload_digest TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(stream_id, idempotency_key)
+		)`,
+	},
+	{
+		version: 27,
+		name: 'create_coordination_event_fence_stream_age_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_coordination_event_fence_stream_age
+			ON coordination_event_fence(stream_id, created_at)`,
+	},
+	{
+		version: 28,
+		name: 'create_coordination_event_fence_global_age_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_coordination_event_fence_global_age
+			ON coordination_event_fence(created_at, stream_id)`,
+	},
 ];
 
 interface ProjectDbRecord {
@@ -271,6 +380,7 @@ function bindAlias(
 }
 
 function closeRecord(physicalKey: string, record: ProjectDbRecord): void {
+	_internals.checkpointWalBestEffort(record.db);
 	record.db.close();
 	_projectDbs.delete(physicalKey);
 	for (const alias of [...record.aliases]) unbindAlias(alias, physicalKey);
@@ -354,6 +464,35 @@ export function isConcurrentMigrationApply(err: unknown): boolean {
 	);
 }
 
+function isSqliteBusy(err: unknown): boolean {
+	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+	return (
+		msg.includes('sqlite_busy') ||
+		msg.includes('database is locked') ||
+		msg.includes('database is busy')
+	);
+}
+
+function isConcurrentOpenContention(err: unknown, dbPath: string): boolean {
+	if (isSqliteBusy(err)) return true;
+	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+	// Bun/Windows can surface the first WAL-header race as SQLITE_IOERR rather
+	// than SQLITE_BUSY. Only retry this broad category when another process has
+	// already materialized the exact DB path, and retain the hard attempt cap.
+	return msg.includes('disk i/o error') && existsSync(dbPath);
+}
+
+function sleepSync(ms: number): void {
+	try {
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+	} catch {
+		const startedAt = Date.now();
+		while (Date.now() - startedAt < ms) {
+			// Bounded portability fallback for runtimes that forbid Atomics.wait.
+		}
+	}
+}
+
 /** True when the recorded schema version has reached `version`. */
 function currentVersionNowCovers(db: Database, version: number): boolean {
 	const row = db
@@ -362,6 +501,15 @@ function currentVersionNowCovers(db: Database, version: number): boolean {
 		)
 		.get();
 	return (row?.version ?? 0) >= version;
+}
+
+/** Best-effort variant for contention/error paths where the probe can itself be busy. */
+function currentVersionNowCoversSafely(db: Database, version: number): boolean {
+	try {
+		return currentVersionNowCovers(db, version);
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -394,9 +542,24 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
 				migration.name,
 			]);
 		});
-		try {
-			apply();
-		} catch (err) {
+		let lastError: unknown;
+		for (let attempt = 0; attempt <= MIGRATION_BUSY_RETRIES; attempt += 1) {
+			try {
+				apply();
+				lastError = undefined;
+				break;
+			} catch (err) {
+				lastError = err;
+				if (currentVersionNowCoversSafely(db, migration.version)) {
+					lastError = undefined;
+					break;
+				}
+				if (!isSqliteBusy(err) || attempt === MIGRATION_BUSY_RETRIES) break;
+				sleepSync(10 * (attempt + 1));
+			}
+		}
+		if (lastError !== undefined) {
+			const err = lastError;
 			// #2480 review F-03: another process may have applied this same
 			// migration concurrently (both read the same MAX(version); the
 			// loser hits the schema_migrations PK or an "already exists" on
@@ -405,7 +568,7 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
 			// spurious failure (which previously also skipped marker cleanup).
 			if (
 				isConcurrentMigrationApply(err) &&
-				currentVersionNowCovers(db, migration.version)
+				currentVersionNowCoversSafely(db, migration.version)
 			) {
 				continue;
 			}
@@ -479,8 +642,21 @@ export function getProjectDb(directory: string): Database {
 	// root before choosing its resource identity. A missing child beneath a
 	// symlink/junction parent otherwise changes from a lexical key to a physical
 	// key after `.swarm/` creation and can strand a duplicate connection.
-	mkdirSync(directory, { recursive: true });
-	const key = canonicalRootKeyFresh(directory);
+	// Normalize first: on Windows, recursive mkdir of a relative path containing
+	// `..` can throw EEXIST even when the resolved directory already exists.
+	// Keep this failure typed so callers never see a raw filesystem exception.
+	const materializedDirectory = resolve(directory);
+	try {
+		mkdirSync(materializedDirectory, { recursive: true });
+	} catch (err) {
+		throw new ProjectDbError(
+			'mkdir_failed',
+			`Failed to create project root ${materializedDirectory}: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+	const key = canonicalRootKeyFresh(materializedDirectory);
 	const alias = lexicalAliasKey(directory);
 	const existing = _projectDbs.get(key);
 	if (existing) {
@@ -513,12 +689,35 @@ export function getProjectDb(directory: string): Database {
 				}`,
 			);
 		}
-		db = new Db(join(swarmDir, 'swarm.db'));
-		db.run('PRAGMA journal_mode = WAL;');
-		db.run('PRAGMA synchronous = NORMAL;');
-		db.run('PRAGMA busy_timeout = 5000;');
-		db.run('PRAGMA foreign_keys = ON;');
-		runProjectMigrations(db, swarmDir);
+		const dbFile = join(swarmDir, 'swarm.db');
+		for (let attempt = 0; attempt <= OPEN_CONTENTION_RETRIES; attempt += 1) {
+			db = new Db(dbFile);
+			try {
+				// Install the busy handler before journal-mode negotiation: two fresh
+				// processes can otherwise race on the first WAL pragma (#2481).
+				db.run('PRAGMA busy_timeout = 5000;');
+				db.run('PRAGMA journal_mode = WAL;');
+				db.run('PRAGMA synchronous = NORMAL;');
+				db.run('PRAGMA foreign_keys = ON;');
+				runProjectMigrations(db, swarmDir);
+				break;
+			} catch (err) {
+				try {
+					db.close();
+				} catch {
+					// Best-effort between bounded attempts.
+				}
+				db = undefined;
+				if (
+					!isConcurrentOpenContention(err, dbFile) ||
+					attempt === OPEN_CONTENTION_RETRIES
+				)
+					throw err;
+				sleepSync(25 * (attempt + 1));
+			}
+		}
+		if (!db)
+			throw new Error('SQLite initialization exhausted its busy retry budget');
 	} catch (err) {
 		// Close the half-opened handle so a failed open never leaks a WAL
 		// lock (the sqlite-provider open-failure precedent).
@@ -608,6 +807,7 @@ export function closeAllProjectDbs(): void {
 }
 
 export const _internals = {
+	checkpointWalBestEffort,
 	projectDbCount: () => _projectDbs.size,
 	projectDbAliasCount: () => _projectDbAliases.size,
 };

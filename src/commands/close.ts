@@ -29,6 +29,7 @@ import {
 	reconcilePhaseClose,
 	recordPhaseCloseIntent,
 } from '../hooks/knowledge-receipt-ledger.js';
+import { closeSnapshotCoordinationInitialization } from '../session/snapshot-coordination-init.js';
 import {
 	closeRepoMemory,
 	REPO_MEMORY_FILENAME,
@@ -79,6 +80,7 @@ import {
 import { telemetry as telemetryEmit } from '../telemetry';
 import { executeWriteRetro } from '../tools/write-retro';
 import { atomicWriteSwarmFile } from '../utils/atomic-write';
+import { collectGarbageBestEffort, sleep } from '../utils/bun-compat.js';
 import { log } from '../utils/logger';
 import {
 	type CloseTerminalResult,
@@ -1751,6 +1753,31 @@ export async function runArchiveEvidenceRetention(
  * artifacts. Resets context.md for the next session. All state mutations are
  * written back to ctx so the caller can build the close summary.
  */
+const ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS = [25, 50, 100, 200] as const;
+
+/**
+ * Delete one archived active-state artifact, tolerating the short-lived file
+ * locks Windows antivirus and SQLite sidecars can retain after handle close.
+ * Non-transient errors fail immediately; the retry budget is bounded to
+ * 375 ms so `/swarm close` remains responsive.
+ */
+async function unlinkActiveStateFileWithRetry(filePath: string): Promise<void> {
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			await _internals.unlink(filePath);
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException)?.code;
+			const delay = ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS[attempt];
+			if ((code !== 'EBUSY' && code !== 'EPERM') || delay === undefined) {
+				throw error;
+			}
+			if (attempt === 0) _internals.collectGarbageBestEffort();
+			await _internals.sleep(delay);
+		}
+	}
+}
+
 export async function runCleanStage(
 	ctx: CloseStageContext,
 ): Promise<CleanStageResult> {
@@ -1820,6 +1847,18 @@ export async function runCleanStage(
 			// here is redundant for the archive. The close is best-effort and
 			// never throws into the clean stage.
 			if (artifact === 'swarm.db') {
+				try {
+					await _internals.closeSnapshotCoordinationInitialization(
+						ctx.directory,
+					);
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					ctx.warnings.push(
+						`Preserved swarm.db because snapshot coordination did not settle: ${reason}.`,
+					);
+					// Never unlink a database while an initializer may still be using it.
+					continue;
+				}
 				// #2480: flush+close the group-commit writer FIRST (mirrors the
 				// dispose/exit paths), then the DB handle. Closing only the
 				// handle would leave the cached writer bound to a dead handle —
@@ -1848,7 +1887,7 @@ export async function runCleanStage(
 				}
 			}
 			try {
-				await fs.unlink(filePath);
+				await _internals.unlinkActiveStateFileWithRetry(filePath);
 				cleanedFiles.push(artifact);
 			} catch (err) {
 				const errno = (err as NodeJS.ErrnoException)?.code;
@@ -2382,7 +2421,13 @@ export async function handleCloseCommand(
 	}
 
 	try {
-		// Idempotency check — first thing inside try/finally so finalizeLock is released on all paths.
+		// #2481: settle the retained post-resolution import before VACUUM INTO or
+		// cleanup can observe/close swarm.db. If the bounded close wait expires,
+		// the coordination guard stays installed until the underlying attempt
+		// settles and this command aborts without racing the transaction.
+		await closeSnapshotCoordinationInitialization(directory);
+
+		// Idempotency check — after readiness settlement and inside try/finally so finalizeLock is released on all paths.
 		// If plan.json is gone and an archive bundle exists AND no active state files remain,
 		// this project was already finalized in a prior run. Return a clean no-op so a second
 		// /swarm finalize invocation does not produce a degraded "Plan not found" run.
@@ -2656,7 +2701,7 @@ export async function handleCloseCommand(
 		try {
 			const sessionIdsToEnd = [...swarmState.agentSessions.keys()];
 			for (const sessionId of sessionIdsToEnd) {
-				_internals.endAgentSession(sessionId);
+				_internals.endAgentSession(sessionId, directory);
 			}
 
 			// Preserve plugin-init singletons through state reset
@@ -2798,7 +2843,12 @@ function detectFullAuto(directory: string, sessionID: string): boolean {
 }
 
 export const _internals = {
+	closeSnapshotCoordinationInitialization,
 	closeRepoMemory,
+	unlinkActiveStateFileWithRetry,
+	unlink: fs.unlink,
+	sleep,
+	collectGarbageBestEffort,
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	countSessionKnowledgeEntries,
 	CLOSE_SKILL_REVIEW_TIMEOUT_MS,

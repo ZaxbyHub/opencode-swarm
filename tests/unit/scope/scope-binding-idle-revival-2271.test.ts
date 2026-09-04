@@ -22,6 +22,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
+	closeAllProjectDbs,
+	getProjectDb,
+} from '../../../src/db/project-db.js';
+import {
 	clearScopeBindings,
 	createScopeBinding,
 	installScopeBindingTombstone,
@@ -126,16 +130,50 @@ function patchDurable(
 	patch: Partial<ScopeBinding>,
 ): void {
 	const filePath = durableFilePath(directory, binding);
-	const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<
-		string,
-		unknown
-	>;
-	fs.writeFileSync(filePath, JSON.stringify({ ...parsed, ...patch }, null, 2));
+	const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as ScopeBinding;
+	const next = { ...parsed, ...patch } as ScopeBinding;
+	getProjectDb(directory).run(
+		`UPDATE coordination_state
+		 SET revision = ?, status = ?, payload = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE namespace = ? AND entity_key = ?`,
+		[
+			next.revision,
+			next.lifecycleState,
+			JSON.stringify(next),
+			'scope-binding',
+			binding.generationId,
+		],
+	);
+	fs.writeFileSync(filePath, JSON.stringify(next, null, 2));
+}
+
+function insertDurable(directory: string, binding: ScopeBinding): void {
+	getProjectDb(directory).run(
+		`INSERT INTO coordination_state
+		 (namespace, entity_key, revision, generation, status, payload, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		[
+			'scope-binding',
+			binding.generationId,
+			binding.revision,
+			1,
+			binding.lifecycleState,
+			JSON.stringify(binding),
+		],
+	);
+	const filePath = path.join(
+		directory,
+		'.swarm',
+		'scopes',
+		`binding-${binding.taskId}-${binding.bindingId}-${binding.generationId}.json`,
+	);
+	fs.writeFileSync(filePath, JSON.stringify(binding, null, 2));
 }
 
 afterEach(() => {
 	clearScopeBindings();
 	restoreClock();
+	closeAllProjectDbs();
 	for (const root of roots.splice(0))
 		fs.rmSync(root, { recursive: true, force: true });
 });
@@ -288,25 +326,14 @@ describe('issue #2271 bug 5 — idle scope-binding auto-revival', () => {
 		// ignores it.
 		const siblingId = randomUUID();
 		const siblingGeneration = randomUUID();
-		const siblingPath = path.join(
-			path.dirname(durableFilePath(directory, claimed)),
-			`binding-1.1-${siblingId}-${siblingGeneration}.json`,
-		);
 		const raw = JSON.parse(
 			fs.readFileSync(durableFilePath(directory, claimed), 'utf-8'),
-		) as Record<string, unknown>;
-		fs.writeFileSync(
-			siblingPath,
-			JSON.stringify(
-				{
-					...raw,
-					bindingId: siblingId,
-					generationId: siblingGeneration,
-				},
-				null,
-				2,
-			),
-		);
+		) as ScopeBinding;
+		insertDurable(directory, {
+			...raw,
+			bindingId: siblingId,
+			generationId: siblingGeneration,
+		});
 		clearScopeBindings();
 
 		const resolution = resolveAuthorizedScopeBindingDetailed({

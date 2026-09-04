@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+	closeAllProjectDbs,
+	projectDbExists,
+} from '../../src/db/project-db.js';
 import OpenCodeSwarm, { overrideIndexInternalsForTest } from '../../src/index';
+import { _snapshotCoordinationInternals } from '../../src/session/snapshot-coordination-init.js';
 import { resetSwarmState } from '../../src/state';
 import { createIsolatedTestEnv } from '../helpers/isolated-test-env';
 import { canonicalMkdtemp } from '../helpers/tmpdir';
@@ -127,9 +132,43 @@ describe('issue #2104 background maintenance init wiring', () => {
 
 	afterEach(() => {
 		resetSwarmState();
+		_snapshotCoordinationInternals.entries.clear();
+		closeAllProjectDbs();
 		fs.rmSync(directory, { recursive: true, force: true });
 		cleanupIsolatedEnv();
 		cleanupIsolatedEnv = () => {};
+	});
+
+	test('#2481 defers SQLite first-open and legacy import until after server resolution', async () => {
+		writeProjectConfig(directory, {});
+		const sessionDir = path.join(directory, '.swarm', 'session');
+		fs.mkdirSync(sessionDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(sessionDir, 'state.json'),
+			JSON.stringify({
+				version: 3,
+				writtenAt: 1,
+				toolAggregates: {},
+				activeAgent: {},
+				delegationChains: {},
+				agentSessions: {},
+			}),
+		);
+
+		const { scheduledTasks } = await bootWithCapturedTasks(directory);
+		expect(projectDbExists(directory)).toBe(false);
+
+		const coordinationTask = scheduledTasks.find(
+			(task) => task.name === 'snapshotCoordinationPostResolutionTask',
+		);
+		expect(coordinationTask).toBeDefined();
+		await coordinationTask!.run();
+
+		expect(projectDbExists(directory)).toBe(true);
+		expect(fs.existsSync(path.join(sessionDir, 'state.json'))).toBe(false);
+		expect(fs.existsSync(path.join(sessionDir, 'state.json.imported'))).toBe(
+			true,
+		);
 	});
 
 	test('P5 is deferred, opt-in, and fails open on a corrupt reservation store', async () => {

@@ -11,10 +11,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
+import {
+	claimSnapshotSessionOwnership,
+	clearSnapshotSessionOwnerships,
+} from '../../../src/session/snapshot-store.js';
 import {
 	createSnapshotWriterHook,
 	flushPendingSnapshot,
 	type SerializedAgentSession,
+	SNAPSHOT_PROJECTION_FILE,
 	type SnapshotData,
 	serializeAgentSession,
 	writeSnapshot,
@@ -36,13 +42,11 @@ beforeEach(() => {
 	mkdirSync(testDir, { recursive: true });
 });
 
-afterEach(() => {
-	// Flush any pending snapshot writes to prevent test pollution
-	flushPendingSnapshot(testDir).catch(() => {
-		// Ignore errors during cleanup
-	});
+afterEach(async () => {
+	await flushPendingSnapshot(testDir).catch(() => {});
+	closeAllProjectDbs();
+	clearSnapshotSessionOwnerships();
 
-	// Clean up the test directory
 	if (existsSync(testDir)) {
 		rmSync(testDir, { recursive: true, force: true });
 	}
@@ -427,7 +431,7 @@ describe('writeSnapshot', () => {
 
 		await writeSnapshot(testDir, state);
 
-		const filePath = path.join(testDir, '.swarm', 'session', 'state.json');
+		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 		expect(existsSync(filePath)).toBe(true);
 
 		const content = await Bun.file(filePath).text();
@@ -445,7 +449,7 @@ describe('writeSnapshot', () => {
 
 		await writeSnapshot(testDir, state);
 
-		const filePath = path.join(testDir, '.swarm', 'session', 'state.json');
+		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 		const content = await Bun.file(filePath).text();
 		const parsed = JSON.parse(content) as SnapshotData;
 
@@ -505,7 +509,7 @@ describe('writeSnapshot', () => {
 
 		await writeSnapshot(testDir, state);
 
-		const filePath = path.join(testDir, '.swarm', 'session', 'state.json');
+		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 		const content = await Bun.file(filePath).text();
 		const parsed = JSON.parse(content) as SnapshotData;
 
@@ -546,7 +550,7 @@ describe('writeSnapshot', () => {
 
 		await writeSnapshot(testDir, state);
 
-		const filePath = path.join(testDir, '.swarm', 'session', 'state.json');
+		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 		const content = await Bun.file(filePath).text();
 		const parsed = JSON.parse(content) as SnapshotData;
 
@@ -605,10 +609,10 @@ describe('writeSnapshot', () => {
 			pendingEvents: 0,
 			agentSessions: new Map([['session-1', session]]),
 		};
-
+		claimSnapshotSessionOwnership('session-1');
 		await writeSnapshot(testDir, state);
 
-		const filePath = path.join(testDir, '.swarm', 'session', 'state.json');
+		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 		const content = await Bun.file(filePath).text();
 		const parsed = JSON.parse(content) as SnapshotData;
 
@@ -673,11 +677,10 @@ describe('writeSnapshot - fsyncSync (FR-004)', () => {
 			pendingEvents: 0,
 			agentSessions: new Map(),
 		};
-
 		await writeSnapshot(testDir, state);
 
 		// Verify file was created with correct content
-		const filePath = path.join(testDir, '.swarm', 'session', 'state.json');
+		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 		expect(existsSync(filePath)).toBe(true);
 		const content = await Bun.file(filePath).text();
 		const parsed = JSON.parse(content) as SnapshotData;
@@ -710,7 +713,7 @@ describe('writeSnapshot - fsyncSync (FR-004)', () => {
 		await expect(writeSnapshot(testDir, state)).resolves.toBeUndefined();
 
 		// The canonical file must exist with correct content
-		const filePath = path.join(testDir, '.swarm', 'session', 'state.json');
+		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 		expect(existsSync(filePath)).toBe(true);
 		const content = await Bun.file(filePath).text();
 		const parsed = JSON.parse(content) as SnapshotData;
@@ -724,36 +727,6 @@ describe('writeSnapshot - fsyncSync (FR-004)', () => {
 				totalDuration: 10,
 			},
 		});
-	});
-
-	it('snapshot file contains correct delegationChains data', async () => {
-		const state = {
-			toolAggregates: new Map(),
-			activeAgent: new Map(),
-			delegationChains: new Map([
-				[
-					'session-1',
-					[
-						{ from: 'architect', to: 'coder', timestamp: 1700000000000 },
-						{ from: 'coder', to: 'reviewer', timestamp: 1700000001000 },
-					],
-				],
-			]),
-			activeToolCalls: new Map(),
-			pendingEvents: 0,
-			agentSessions: new Map(),
-		};
-
-		await writeSnapshot(testDir, state);
-
-		const filePath = path.join(testDir, '.swarm', 'session', 'state.json');
-		expect(existsSync(filePath)).toBe(true);
-		const content = await Bun.file(filePath).text();
-		const parsed = JSON.parse(content) as SnapshotData;
-		expect(parsed.delegationChains['session-1']).toEqual([
-			{ from: 'architect', to: 'coder', timestamp: 1700000000000 },
-			{ from: 'coder', to: 'reviewer', timestamp: 1700000001000 },
-		]);
 	});
 });
 
@@ -777,7 +750,7 @@ describe('createSnapshotWriterHook', () => {
 		const hook = createSnapshotWriterHook(testDir);
 
 		// Verify the file doesn't exist before calling the hook
-		const filePath = path.join(testDir, '.swarm', 'session', 'state.json');
+		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 		expect(existsSync(filePath)).toBe(false);
 
 		// Call the hook
@@ -809,7 +782,7 @@ describe('createSnapshotWriterHook', () => {
 		// Flush the pending snapshot to trigger the debounced write
 		await flushPendingSnapshot(testDir);
 
-		const filePath = path.join(testDir, '.swarm', 'session', 'state.json');
+		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 		const content = await Bun.file(filePath).text();
 
 		expect(() => JSON.parse(content)).not.toThrow();

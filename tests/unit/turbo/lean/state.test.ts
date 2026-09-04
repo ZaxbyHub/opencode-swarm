@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../../src/db/project-db';
 import {
 	ensureAgentSession,
 	getAgentSession,
@@ -248,6 +249,7 @@ describe('Lean Turbo Durable State', () => {
 
 	afterEach(() => {
 		resetSwarmState();
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -271,6 +273,27 @@ describe('Lean Turbo Durable State', () => {
 			expect(loaded).toBeDefined();
 			expect(loaded!.status).toBe('running');
 			expect(loaded!.sessionID).toBe('roundtrip-session');
+		});
+
+		it('repeated authoritative reads do not archive unchanged projections', () => {
+			const state = emptyRunState('stable-projection', 4);
+			state.status = 'running';
+			saveLeanTurboRunState(dir, state);
+			const swarmDir = path.join(dir, '.swarm');
+			const importedCount = () =>
+				fs
+					.readdirSync(swarmDir)
+					.filter((name) => name.startsWith('turbo-state.json.imported'))
+					.length;
+			const before = importedCount();
+
+			expect(loadLeanTurboRunState(dir, state.sessionID)?.status).toBe(
+				'running',
+			);
+			expect(loadLeanTurboRunState(dir, state.sessionID)?.status).toBe(
+				'running',
+			);
+			expect(importedCount()).toBe(before);
 		});
 	});
 

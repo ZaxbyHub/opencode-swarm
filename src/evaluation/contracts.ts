@@ -472,8 +472,10 @@ export const GateAuditResultV1Schema = z
 		cost: CostRecordSchema,
 		qualityMetricAvailability: z
 			.object({
-				complexity_delta: z.literal('unavailable'),
-				public_api_delta: z.literal('unavailable'),
+				// 'unavailable' is retained for results persisted before #2470
+				// made quality_budget deltas true base-vs-head measurements.
+				complexity_delta: z.enum(['unavailable', 'available']),
+				public_api_delta: z.enum(['unavailable', 'available']),
 			})
 			.strict(),
 	})

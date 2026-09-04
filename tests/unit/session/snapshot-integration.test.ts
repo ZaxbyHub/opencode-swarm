@@ -7,9 +7,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { loadSnapshot } from '../../../src/session/snapshot-reader.js';
 // Direct imports from session modules (not from src/index.ts)
-import { createSnapshotWriterHook } from '../../../src/session/snapshot-writer.js';
+import {
+	createSnapshotWriterHook,
+	SNAPSHOT_PROJECTION_FILE,
+} from '../../../src/session/snapshot-writer.js';
 
 // State imports for setup and verification
 import {
@@ -30,6 +34,7 @@ describe('Snapshot Integration', () => {
 	});
 
 	afterEach(() => {
+		closeAllProjectDbs();
 		// Clean up temp directory
 		try {
 			rmSync(tempDir, { recursive: true, force: true });
@@ -80,7 +85,7 @@ describe('Snapshot Integration', () => {
 			await snapshotWriterHook({}, {});
 
 			// Verify file was written
-			const statePath = join(tempDir, '.swarm', 'session', 'state.json');
+			const statePath = join(tempDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 			const file = Bun.file(statePath);
 			const content = await file.text();
 			const parsed = JSON.parse(content);
@@ -88,7 +93,7 @@ describe('Snapshot Integration', () => {
 			expect(parsed).toBeDefined();
 			expect(parsed.version).toBe(3);
 			expect(parsed.toolAggregates.read).toBeDefined();
-			expect(parsed.activeAgent['session-2']).toBe('reviewer');
+			expect(parsed.activeAgent['session-2']).toBeUndefined();
 			expect(parsed.agentSessions[sessionId]).toBeDefined();
 
 			// Reset state and load snapshot
@@ -261,7 +266,7 @@ describe('Snapshot Integration', () => {
 			await snapshotWriterHook({}, {});
 
 			// Verify file was written even with empty state
-			const statePath = join(tempDir, '.swarm', 'session', 'state.json');
+			const statePath = join(tempDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 			const file = Bun.file(statePath);
 			const exists = await file.exists();
 			expect(exists).toBe(true);
@@ -284,7 +289,7 @@ describe('Snapshot Integration', () => {
 			await snapshotWriterHook({}, {});
 
 			// Verify directory and file exist
-			const statePath = join(tempDir, '.swarm', 'session', 'state.json');
+			const statePath = join(tempDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 			const file = Bun.file(statePath);
 			expect(await file.exists()).toBe(true);
 		});
@@ -312,7 +317,7 @@ describe('Snapshot Integration', () => {
 			await snapshotWriterHook({}, {});
 
 			// Verify first write
-			const statePath = join(tempDir, '.swarm', 'session', 'state.json');
+			const statePath = join(tempDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 			let file = Bun.file(statePath);
 			const content1 = await file.text();
 			const parsed1 = JSON.parse(content1);
@@ -359,7 +364,7 @@ describe('Snapshot Integration', () => {
 			await Promise.all(writes);
 
 			// Verify file exists and is valid
-			const statePath = join(tempDir, '.swarm', 'session', 'state.json');
+			const statePath = join(tempDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 			const file = Bun.file(statePath);
 			expect(await file.exists()).toBe(true);
 			const content = await file.text();
@@ -397,7 +402,7 @@ describe('Snapshot Integration', () => {
 			await hook({}, {});
 
 			// Verify final state is valid and matches last write
-			const statePath = join(tempDir, '.swarm', 'session', 'state.json');
+			const statePath = join(tempDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 			const file = Bun.file(statePath);
 			const content = await file.text();
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../src/db/project-db.js';
 import {
 	ensureAgentSession,
 	recordPhaseAgentDispatch,
@@ -16,11 +17,10 @@ describe('phase_complete integration — events.jsonl', () => {
 	beforeEach(() => {
 		resetSwarmState();
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-int-test-'));
-		// Create .swarm dir for event writing
 		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 	});
-
 	afterEach(() => {
+		closeAllProjectDbs();
 		fs.rmSync(tempDir, { recursive: true, force: true });
 		resetSwarmState();
 	});

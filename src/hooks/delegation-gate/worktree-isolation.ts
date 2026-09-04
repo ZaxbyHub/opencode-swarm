@@ -34,6 +34,7 @@ import {
 	attemptMergeBackFromDirty,
 	cleanupOrphanedBranches,
 	getMergeStrategy,
+	isPathUnderSwarmWorktreeBase,
 	makeWorktreeBranchName,
 	mergeInternals,
 	postMergeCleanup,
@@ -869,6 +870,15 @@ async function runRecoveryGit(
 		} catch {
 			// best-effort
 		}
+	}
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+	try {
+		await fs.stat(targetPath);
+		return true;
+	} catch {
+		return false;
 	}
 }
 
@@ -2647,7 +2657,26 @@ export async function cleanupStandardWorktreeForCallId(
 			force: true,
 			worktreeDir: worktree_dir,
 		});
-		removedWorktree = !('error' in result);
+		if (!('error' in result)) {
+			removedWorktree = true;
+		} else if (
+			result.error.includes('is not a working tree') &&
+			(await pathExists(worktreePath)) &&
+			isPathUnderSwarmWorktreeBase(
+				worktreePath,
+				directory,
+				worktree_dir ? [worktree_dir] : [],
+			)
+		) {
+			try {
+				await fs.rm(worktreePath, { recursive: true, force: true });
+				removedWorktree = !(await pathExists(worktreePath));
+			} catch (err) {
+				logger.log(
+					`[swarm] cleanupStandardWorktreeForCallId: residual directory cleanup failed for ${callID}: ${err}`,
+				);
+			}
+		}
 	} catch (err) {
 		logger.log(
 			`[swarm] cleanupStandardWorktreeForCallId: removeWorktree failed for ${callID}: ${err}`,

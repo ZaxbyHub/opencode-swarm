@@ -318,6 +318,12 @@ export const QualityBudgetEvidenceSchema = BaseEvidenceSchema.extend({
 		public_api_delta: z.number(),
 		duplication_ratio: z.number(),
 		test_to_code_ratio: z.number(),
+		/**
+		 * Whether a merge base resolved; false = head-only absolute fallback.
+		 * Defaults to false so pre-#2470 evidence (which predates the field,
+		 * and was indeed not base-resolved) keeps parsing.
+		 */
+		base_resolved: z.boolean().default(false),
 	}),
 	thresholds: z.object({
 		max_complexity_delta: z.number(),

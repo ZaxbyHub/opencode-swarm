@@ -36,10 +36,10 @@
  *   - GitHub Actions annotations (`::warning file=...::message`) on stdout.
  *   - A structured markdown report (default written to drift-report.md, override
  *     with --report <path>; suppress with --no-report).
- *   - Exit code: 0 by default (soft-warn). When DRIFT_CHECK_ENFORCE is truthy
- *     ("1"/"true"/"yes"), exits 1 if any error/warning finding exists.
+ *   - Exit code: 0 by default (soft-warn). With `--enforce` or a truthy
+ *     DRIFT_CHECK_ENFORCE value, blocking findings exit 1.
  *
- * Usage: bun run scripts/drift-check.ts [--report <path>] [--no-report] [--json]
+ * Usage: bun run scripts/drift-check.ts [--enforce] [--report <path>] [--no-report] [--json]
  */
 
 import * as fs from 'node:fs';
@@ -1595,21 +1595,24 @@ export function buildReport(findings: DriftFinding[]): string {
 	return lines.join('\n');
 }
 
-function isEnforce(): boolean {
+export function isEnforce(explicit = false): boolean {
+	if (explicit) return true;
 	const v = (process.env.DRIFT_CHECK_ENFORCE ?? '').trim().toLowerCase();
 	return v === '1' || v === 'true' || v === 'yes' || v === 'on';
 }
 
-function parseArgs(argv: string[]): {
+export function parseArgs(argv: string[]): {
 	reportPath: string | null;
 	json: boolean;
 	fix: boolean;
 	confirm: boolean;
+	enforce: boolean;
 } {
 	let reportPath: string | null = 'drift-report.md';
 	let json = false;
 	let fix = false;
 	let confirm = false;
+	let enforce = false;
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === '--no-report') reportPath = null;
@@ -1617,21 +1620,24 @@ function parseArgs(argv: string[]): {
 		else if (arg === '--json') json = true;
 		else if (arg === '--fix') fix = true;
 		else if (arg === '--confirm') confirm = true;
+		else if (arg === '--enforce') enforce = true;
 	}
-	return { reportPath, json, fix, confirm };
+	return { reportPath, json, fix, confirm, enforce };
 }
 
 async function main(): Promise<void> {
-	const { reportPath, json, fix, confirm } = parseArgs(process.argv.slice(2));
+	const { reportPath, json, fix, confirm, enforce } = parseArgs(
+		process.argv.slice(2),
+	);
 
 	// Issue #1781 E3: `drift:fix` reconciles mirrored skill pairs before
 	// detection. It is a developer convenience (env-guarded or --confirm,
 	// never a CI mutation). Refuse to run under DRIFT_CHECK_ENFORCE so a CI
 	// accident can never mutate native skill roots (AGENTS.md invariant 4).
 	if (fix) {
-		if (isEnforce()) {
+		if (isEnforce(enforce)) {
 			console.error(
-				'drift-check: --fix is a developer tool and must not run under DRIFT_CHECK_ENFORCE (would mutate native skill roots in CI).',
+				'drift-check: --fix is a developer tool and must not run while enforcement is enabled (would mutate native skill roots in CI).',
 			);
 			process.exit(1);
 		}
@@ -1665,10 +1671,10 @@ async function main(): Promise<void> {
 	}
 
 	const blocking = findings.filter((f) => f.severity !== 'notice');
-	const enforce = isEnforce();
-	if (blocking.length > 0 && enforce) {
+	const enforceFindings = isEnforce(enforce);
+	if (blocking.length > 0 && enforceFindings) {
 		console.error(
-			`\ndrift-check: ${blocking.length} blocking finding(s) and DRIFT_CHECK_ENFORCE is set — failing.`,
+			`\ndrift-check: ${blocking.length} blocking finding(s) with enforcement enabled — failing.`,
 		);
 		process.exit(1);
 	}

@@ -331,21 +331,9 @@ describe('detectProjectLanguages adversarial', () => {
 		}
 		const { symlink } = await import('node:fs/promises');
 		const linkPath = join(tempDir, 'self-link');
-		try {
-			await symlink(linkPath, linkPath);
-		} catch {
-			// Some platforms may refuse self-referential symlinks; still verify no throw.
-		}
-		// Verify symlink exists (or at least we tried to create it)
-		const { stat, lstat } = await import('node:fs/promises');
-		let symlinkExists = false;
-		try {
-			await lstat(linkPath);
-			symlinkExists = true;
-		} catch {
-			// Symlink creation failed on this platform; that's okay
-		}
-		expect([true, false]).toContain(symlinkExists); // Either exists or doesn't; main invariant is no throw
+		await symlink(linkPath, linkPath);
+		const { lstat } = await import('node:fs/promises');
+		expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
 		await writeFile(
 			join(tempDir, 'package.json'),
 			JSON.stringify({ name: 'test' }),

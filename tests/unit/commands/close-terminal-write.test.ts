@@ -20,6 +20,10 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 
+const realSnapshotWriter = await import(
+	'../../../src/session/snapshot-writer.js'
+);
+
 // Track raw fs.writeFile calls to plan.json as a side-effect sensor
 const rawWriteCalls: string[] = [];
 const originalWriteFile = await import('node:fs/promises').then(
@@ -31,8 +35,6 @@ const mockClosePlanTerminalState = mock(async () => {});
 await import('../../../src/tools/write-retro.js');
 await import('../../../src/hooks/knowledge-curator.js');
 await import('../../../src/evidence/manager.js');
-await import('../../../src/session/snapshot-writer.js');
-
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
 const mockExecuteWriteRetro = mock(async () =>
@@ -55,6 +57,7 @@ mock.module('../../../src/evidence/manager.js', () => ({
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
+	...realSnapshotWriter,
 	flushPendingSnapshot: mockFlushPendingSnapshot,
 }));
 

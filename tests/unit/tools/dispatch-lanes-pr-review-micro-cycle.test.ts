@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { CANDIDATE_HEADERS } from '../../../src/background/candidate-contract.js';
 import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
 import {
@@ -8,6 +6,10 @@ import {
 	findByBatchId,
 } from '../../../src/background/pending-delegations.js';
 import type { PrReviewInlineTriggerRow } from '../../../src/background/pr-review-trigger-contract.js';
+import {
+	getCoordinationState,
+	transitionCoordinationState,
+} from '../../../src/db/coordination-store.js';
 import {
 	activatePrWorkflow,
 	bindPrReviewBase,
@@ -17,6 +19,7 @@ import {
 	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { prWorkflowSessionFileStem } from '../../../src/pr-review/persistence.js';
 import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
@@ -364,11 +367,25 @@ describe('PR-review trigger-evaluation and micro-dispatch cycle', () => {
 		);
 		expect(otherSession.success).toBe(false);
 
-		const gateDir = join(tempDir, '.swarm', 'pr-workflow-gates');
-		const gatePath = join(gateDir, readdirSync(gateDir)[0]);
-		const rawState = JSON.parse(readFileSync(gatePath, 'utf8'));
-		rawState.prReviewTriggerLedger = rawState.prReviewTriggerLedger.slice(1);
-		writeFileSync(gatePath, `${JSON.stringify(rawState)}\n`, 'utf8');
+		const current = await readPrWorkflowGateState(tempDir, SESSION_ID);
+		if (!current) throw new Error('missing active workflow state');
+		const namespace = `pr-workflow.state:${prWorkflowSessionFileStem(SESSION_ID)}`;
+		const row = getCoordinationState(tempDir, namespace, 'state');
+		if (!row) throw new Error('missing workflow coordination row');
+		const corruptRevision = current.revision + 1;
+		const result = transitionCoordinationState(tempDir, {
+			namespace,
+			entityKey: 'state',
+			expectedRevision: row.revision,
+			generation: corruptRevision,
+			status: current.mode,
+			payload: JSON.stringify({
+				...current,
+				revision: corruptRevision,
+				prReviewTriggerLedger: current.prReviewTriggerLedger.slice(1),
+			}),
+		});
+		expect(result.outcome).toBe('applied');
 		gateInternals.resetTrackedStateCache();
 		const corrupt = await dispatchMicro(
 			'micro-corrupt-frozen',

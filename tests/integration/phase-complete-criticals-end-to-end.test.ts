@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../src/db/project-db.js';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import {
 	commitDisplayedMembership,
@@ -72,6 +73,7 @@ describe('phase_complete critical-directive gate (e2e)', () => {
 	});
 
 	afterEach(() => {
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 

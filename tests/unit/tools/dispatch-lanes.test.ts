@@ -604,14 +604,11 @@ describe('executeDispatchLanes', () => {
 			directory,
 		);
 
-		const result = await Promise.race([
-			execution,
-			new Promise<'blocked'>((resolve) =>
-				setTimeout(() => resolve('blocked'), 200),
-			),
-		]);
+		// Await the production cleanup bound directly. If teardown ever awaits the
+		// deliberately hung delete call, the test's own timeout fails deterministically;
+		// a short wall-clock race is flaky on loaded Windows runners.
+		const result = await execution;
 
-		expect(result).not.toBe('blocked');
 		expect(result).toEqual(
 			expect.objectContaining({
 				success: true,

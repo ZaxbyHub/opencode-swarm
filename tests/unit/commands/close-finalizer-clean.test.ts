@@ -7,6 +7,7 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import { initializeCloseFinalizerHarness } from './close-finalizer.shared.ts';
 
@@ -119,6 +120,29 @@ describe('handleCloseCommand — clean stage', () => {
 			false,
 		);
 		expect(existsSync(h.swarmDir(testDir))).toBe(true);
+	});
+
+	it('preserves swarm.db when coordination close fails during cleanup', async () => {
+		await h.writePlan(testDir);
+		const dbPath = path.join(h.swarmDir(testDir), 'swarm.db');
+		const Db = loadDatabaseCtor();
+		const db = new Db(dbPath);
+		db.run('CREATE TABLE marker (value TEXT NOT NULL);');
+		db.close();
+		const originalClose =
+			h.closeInternals.closeSnapshotCoordinationInitialization;
+		h.closeInternals.closeSnapshotCoordinationInitialization = async () => {
+			throw new Error('coordination still running');
+		};
+		try {
+			const result = await h.handleCloseCommand(testDir, []);
+			expect(existsSync(dbPath)).toBe(true);
+			expect(result).toContain(
+				'Preserved swarm.db because snapshot coordination did not settle',
+			);
+		} finally {
+			h.closeInternals.closeSnapshotCoordinationInitialization = originalClose;
+		}
 	});
 });
 

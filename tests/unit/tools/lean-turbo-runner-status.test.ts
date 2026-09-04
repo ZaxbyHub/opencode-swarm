@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import {
 	executeLeanTurboRunnerStatus,
 	type LeanTurboRunnerStatusArgs,
@@ -23,9 +24,7 @@ import {
 	saveLeanTurboRunState,
 } from '../../../src/turbo/lean/state';
 
-// ---------------------------------------------------------------------------
 // Temp directory setup
-// ---------------------------------------------------------------------------
 
 let tmpDir: string;
 let originalCwd: string;
@@ -49,6 +48,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	closeAllProjectDbs();
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {

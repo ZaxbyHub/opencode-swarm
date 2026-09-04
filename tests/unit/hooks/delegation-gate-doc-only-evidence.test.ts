@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { _internals as workspaceSnapshotInternals } from '../../../src/background/workspace-snapshot';
 import type { Plan } from '../../../src/config/plan-schema';
@@ -22,6 +21,7 @@ import {
 	checkReviewerGate,
 	executeUpdateTaskStatus,
 } from '../../../src/tools/update-task-status';
+import { canonicalMkdtemp, canonicalTmpDir } from '../../helpers/tmpdir';
 import {
 	makeConfig,
 	recordPlanCriticApproval,
@@ -72,7 +72,18 @@ describe('delegation gate doc-only durable evidence', () => {
 
 	beforeEach(() => {
 		resetSwarmState();
-		directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foreground-doc-gate-'));
+		try {
+			const swarmWorktreesInTemp = path.join(
+				canonicalTmpDir(),
+				'.swarm-worktrees',
+			);
+			if (fs.existsSync(swarmWorktreesInTemp)) {
+				fs.rmSync(swarmWorktreesInTemp, { recursive: true, force: true });
+			}
+		} catch {
+			/* best-effort */
+		}
+		directory = canonicalMkdtemp('foreground-doc-gate-');
 		git(directory, ['init']);
 		git(directory, ['config', 'user.email', 'tests@example.com']);
 		git(directory, ['config', 'user.name', 'Tests']);
@@ -93,6 +104,17 @@ describe('delegation gate doc-only durable evidence', () => {
 		swarmState.opencodeClient = undefined;
 		resetSwarmState();
 		fs.rmSync(directory, { recursive: true, force: true });
+		try {
+			const swarmWorktreesInTemp = path.join(
+				canonicalTmpDir(),
+				'.swarm-worktrees',
+			);
+			if (fs.existsSync(swarmWorktreesInTemp)) {
+				fs.rmSync(swarmWorktreesInTemp, { recursive: true, force: true });
+			}
+		} catch {
+			/* best-effort */
+		}
 	});
 
 	async function runCoder(filesTouched: string[], actualFiles: string[]) {

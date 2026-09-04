@@ -11,6 +11,7 @@ import {
 	writeScopeBindingToDisk,
 } from '../../../src/scope/scope-persistence.js';
 import { _internals as filesystemIdentityInternals } from '../../../src/utils/filesystem-identity.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp, canonicalTmpDir } from '../../helpers/tmpdir';
 
 const cleanup: string[] = [];
@@ -23,7 +24,7 @@ afterEach(() => {
 		originalFilesystemIdentityInternals,
 	);
 	for (const target of cleanup.splice(0).reverse()) {
-		fs.rmSync(target, { recursive: true, force: true });
+		safeRmRecursive(target);
 	}
 });
 

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -50,14 +51,13 @@ afterEach(async () => {
 	_test_exports.resolveIsWorkingTreeClean = originalResolveWorkingTreeClean;
 	_test_exports.resolveIsWorkingTreeCleanAsync =
 		originalResolveWorkingTreeCleanAsync;
+	closeAllProjectDbs();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
 type Dimension = (typeof PR_REVIEW_BASE_DIMENSION_IDS)[number];
-
 /**
- * Build a run with `successfulCount` covered dimensions and the remainder
- * terminally failed with a typed contract failure (issue #2383 N-of-6 shape).
+ * Build a run with covered and terminally failed dimensions (issue #2383).
  */
 async function establishNOfSix(successfulCount: number): Promise<{
 	unresolved: Dimension[];

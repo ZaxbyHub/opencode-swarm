@@ -19,6 +19,10 @@ import {
 	recordPrFeedbackGateBatch,
 	recordPrFeedbackStageA,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 
 // Split from pr-workflow-gate-completion.test.ts (FR-006): publication-arm
@@ -420,19 +424,15 @@ describe('PR workflow terminal completion - publication and terminal clear', () 
 		_test_exports.resolveRemoteRefsContainingHead = () => [
 			'refs/remotes/origin/pr-head',
 		];
-		const statePath = path.join(
-			directory,
-			'.swarm',
-			_test_exports.workflowGateStateRelativePath(SESSION_ID),
-		);
 		_test_exports.beforeTerminalClear = async () => {
-			const raw = JSON.parse(await fs.readFile(statePath, 'utf-8')) as {
-				revision: number;
-				updatedAt: string;
-			};
-			raw.revision += 1;
-			raw.updatedAt = withFrozenClock(() => new Date().toISOString());
-			await fs.writeFile(statePath, JSON.stringify(raw), 'utf-8');
+			await withSessionStateMutation(directory, SESSION_ID, async () => {
+				const current = await readPrWorkflowGateState(directory, SESSION_ID);
+				if (!current) throw new Error('missing active workflow state');
+				await writeStateWhileLocked(directory, {
+					...current,
+					updatedAt: withFrozenClock(() => new Date().toISOString()),
+				});
+			});
 			_test_exports.resetTrackedStateCache();
 		};
 		await expect(
