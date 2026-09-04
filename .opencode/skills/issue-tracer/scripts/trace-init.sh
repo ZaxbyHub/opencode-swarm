@@ -192,6 +192,14 @@ if [ -L "$repro_dir" ]; then
   echo "trace-init: refusing to use 'repro/' - it is a symlink" >&2
   exit 2
 fi
+# Refuse to redirect into a pre-existing non-regular manifest path (e.g. a
+# symlink). `[ ! -e ]` alone is not enough: a broken symlink reports
+# non-existent (dereferenced) while a bare `>` still follows the link and
+# writes through it to whatever it points at.
+if { [ -e "$manifest_file" ] && [ ! -f "$manifest_file" ]; } || [ -L "$manifest_file" ]; then
+  echo "trace-init: refusing non-regular target: $manifest_file" >&2
+  exit 2
+fi
 if [ ! -e "$manifest_file" ]; then
   printf '%s\n' '# issue-tracer checkpoint manifest v1' > "$manifest_file"
 fi

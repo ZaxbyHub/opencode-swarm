@@ -89,6 +89,20 @@ trace_for() {
 }
 manifest_for() { trace_for; printf '%s\n' "$trace_dir/repro/checkpoint.manifest"; }
 
+# Refuse to redirect/append into a pre-existing path that is not a regular
+# file (a symlink, device, fifo, directory, ...). Must run immediately before
+# every `>`/`>>` into a leaf artifact path (base/head logs, checkpoint
+# manifest), since a pre-existing symlink there would otherwise be silently
+# followed by the shell redirection, writing through it to an arbitrary
+# target.
+refuse_nonregular_target() {
+  local path="$1"
+  if { [ -e "$path" ] && [ ! -f "$path" ]; } || [ -L "$path" ]; then
+    echo "repro-check: refusing non-regular target: $path" >&2
+    exit 2
+  fi
+}
+
 bound_log() {
   local log="$1" total kept=1048576 omitted temp
   total="$(wc -c < "$log" | tr -d ' ')"
@@ -101,6 +115,7 @@ bound_log() {
 run_one() {
   local cwd="$1" log="$2" seconds="$3"; shift 3
   local status=0 pid started timed=0 waited=0
+  refuse_nonregular_target "$log"
   : > "$log"
   if [ "${REPRO_CHECK_FORCE_FALLBACK:-0}" != "1" ] && command -v timeout >/dev/null 2>&1; then
     ( cd "$cwd" && timeout --foreground -k 5 "${seconds}s" "$@" ) > "$log" 2>&1 || status=$?
@@ -248,6 +263,7 @@ do_checkpoint() {
   require_contained "$(dirname "$manifest")"
   mkdir -p "$(dirname "$manifest")"
   require_contained "$(dirname "$manifest")"
+  refuse_nonregular_target "$manifest"
   [ -f "$manifest" ] || printf '# issue-tracer checkpoint manifest v1\n' > "$manifest"
   grep -Fx '# issue-tracer checkpoint manifest v1' "$manifest" >/dev/null 2>&1 || { echo "repro-check: invalid manifest header" >&2; exit 2; }
   seq="$(awk 'END {print NR - 1}' "$manifest")"
@@ -259,6 +275,7 @@ do_checkpoint() {
     mode="$(git ls-files -s -- "$path" | awk 'NR==1 {print $1}')"
     [ -n "$mode" ] || { [ -x "$root/$path" ] && mode=100755 || mode=100644; }
     seq=$((seq + 1))
+    refuse_nonregular_target "$manifest"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$seq" "$kind" "$path" "$blob" "$mode" "$check_id" "$argv" "$expect" "$(git rev-parse "$base^{commit}")" "$reason" >> "$manifest"
     echo "checkpoint: $kind $path"
   done

@@ -231,7 +231,7 @@ checkpoint-tree-id: <40-hex>
 
 ## `06-critic-review.md`
 
-Use `references/critic-gate.md` (Plan Critic section). The artifact records both identities and a verdict, plus `## Round N` per revision cycle and `## Check replay`. Optional `06b-critic-recheck.md` records a later recheck round in the same shape when the plan changes after initial approval.
+Use `references/critic-gate.md` (Plan Critic section). The `## Reviewed SHA / diff hash` section records exactly two lines - `reviewed-commit: <40-hex>` and `tree-id: <40-hex>` - and `trace-check.sh` requires both to equal the `plan-critic` row's `reviewed-commit`/`tree-id` cells in `## Gates`. The artifact also records a verdict, `## Round N` per revision cycle, and `## Check replay`. Optional `06b-critic-recheck.md` records a later recheck round in the same shape when the plan changes after initial approval.
 
 ## `07-approved-plan.md`
 
@@ -328,11 +328,11 @@ no-defect-class: true
 
 ## `08b-implementation-review.md`
 
-Use `references/critic-gate.md` (Implementation Review section). The artifact records both identities, a verdict, `## Independently re-run`, `## Check integrity`, and the `## Deferred / Scoped-Out / Unwired` finding.
+Use `references/critic-gate.md` (Implementation Review section). The `## Reviewed SHA / diff hash` section records exactly two lines - `reviewed-commit: <40-hex>` and `tree-id: <40-hex>` - and `trace-check.sh` requires both to equal the `implementation-review` row's `reviewed-commit`/`tree-id` cells in `## Gates`. The artifact also records a verdict, `## Independently re-run`, `## Check integrity`, and the `## Deferred / Scoped-Out / Unwired` finding.
 
 ## `09-final-critic.md`
 
-Use `references/critic-gate.md` (Final Critic section). The artifact records both identities (confirmed equal to shipped HEAD), a verdict, `## Acceptance criteria evidence`, and the `## Deferred / Scoped-Out / Unwired` finding. Optional `09b-final-critic-delta.md` records a later delta review in the same shape after a post-approval edit.
+Use `references/critic-gate.md` (Final Critic section). The `## Reviewed SHA / diff hash` section records exactly two lines - `reviewed-commit: <40-hex>` and `tree-id: <40-hex>` - confirmed equal to shipped HEAD, and `trace-check.sh` requires both to equal the `final-critic` row's `reviewed-commit`/`tree-id` cells in `## Gates`. The artifact also records a verdict, `## Acceptance criteria evidence`, and the `## Deferred / Scoped-Out / Unwired` finding. Optional `09b-final-critic-delta.md` records a later delta review in the same shape after a post-approval edit.
 
 ## `10-pr-body.md`
 

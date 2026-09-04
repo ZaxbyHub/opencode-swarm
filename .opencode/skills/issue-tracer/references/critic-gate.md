@@ -2,7 +2,7 @@
 
 This reference drives three independent gates: the Phase 3 plan critic, the Phase 4.5 implementation review, and the Phase 4.6 final critic. Each is adversarial and independent - it does not improve wording; it tries to prove the work is not done. None of them writes production code.
 
-Every verdict artifact records both `reviewed-commit` (`git rev-parse HEAD`) and `tree-id` (the output of `trace-check.sh tree-id`) under the `## Reviewed SHA / diff hash` heading. Closure requires the final-approval identities to equal the shipped HEAD; a later edit invalidates the approval and re-runs the affected gate. Freshness is checked by comparing identities, never by recollection.
+Every verdict artifact records both `reviewed-commit` (`git rev-parse HEAD`) and `tree-id` (the output of `trace-check.sh tree-id`) under the `## Reviewed SHA / diff hash` heading, as exactly two lines: `reviewed-commit: <40-hex sha>` and `tree-id: <40-hex tree-id>`. `trace-check.sh` requires these two lines and requires their values to equal the corresponding `## Gates` row's `reviewed-commit`/`tree-id` cells for that gate (plan-critic for `06-critic-review.md`, implementation-review for `08b-implementation-review.md`, final-critic for `09-final-critic.md`). Closure requires the final-approval identities to equal the shipped HEAD; a later edit invalidates the approval and re-runs the affected gate. Freshness is checked by comparing identities, never by recollection.
 
 Before any fallback pass: attempt the delegation mechanism and record the verbatim tool-call error, or quote the user/session text forbidding subagents. If authorization is merely unclear and the session is interactive, ask the user. Non-interactive sessions may fall back only with the recorded failure output, stated in the artifact.
 
@@ -35,7 +35,8 @@ Return exactly:
 # Critic Review
 
 ## Reviewed SHA / diff hash
-[reviewed-commit and tree-id you examined.]
+reviewed-commit: <40-hex sha you examined>
+tree-id: <40-hex tree-id from `trace-check.sh tree-id`>
 
 ## Round 1
 [The first round of this critic loop uses "## Round 1"; a second round appends "## Round 2", a third "## Round 3", and so on - one heading per round, never renumbered. `trace-check.sh` requires at least one heading matching `^## Round [0-9]+$`. Summarize what changed since the prior round, or state this is the first pass.]
@@ -163,7 +164,8 @@ Return exactly:
 # Implementation Review
 
 ## Reviewed SHA / diff hash
-[The commit SHA or diff hash you examined.]
+reviewed-commit: <40-hex sha you examined>
+tree-id: <40-hex tree-id from `trace-check.sh tree-id`>
 
 ## Verdict
 APPROVE / NEEDS_REVISION / BLOCKED
@@ -244,7 +246,8 @@ Return exactly:
 # Final Critic
 
 ## Reviewed SHA / diff hash
-[The commit SHA or diff hash you examined; confirm it equals the shipped HEAD.]
+reviewed-commit: <40-hex sha you examined; confirm it equals the shipped HEAD>
+tree-id: <40-hex tree-id from `trace-check.sh tree-id`>
 
 ## Verdict
 APPROVE / NEEDS_REVISION / BLOCKED

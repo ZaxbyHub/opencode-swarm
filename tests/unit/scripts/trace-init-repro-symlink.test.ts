@@ -68,3 +68,52 @@ describe('trace-init.sh refuses a pre-existing symlinked repro/ directory', () =
 		expect(fs.readdirSync(outside)).toHaveLength(0);
 	});
 });
+
+describe('trace-init.sh refuses a pre-existing non-regular checkpoint.manifest', () => {
+	// A file symlink (not a directory junction) requires elevated privilege to
+	// create on Windows and fails with EPERM in this sandbox, so this exercises
+	// the same `[ -e ] && [ ! -f ]` guard branch with a directory placed at the
+	// manifest path - a directory is non-regular exactly like a symlink is, and
+	// creating one needs no special privilege on any platform.
+	test('exits 2 when checkpoint.manifest is a directory instead of a regular file', () => {
+		const worktree = repo();
+		fs.mkdirSync(
+			path.join(
+				worktree,
+				'.agents/issue-traces/issue-1/repro/checkpoint.manifest',
+			),
+			{ recursive: true },
+		);
+		const result = run(worktree, ['issue-1']);
+		expect(result.code).toBe(2);
+		expect(result.err).toContain('refusing non-regular target');
+	});
+
+	// True symlink-following case: only runs where unprivileged symlink
+	// creation is available (non-Windows).
+	test.skipIf(process.platform === 'win32')(
+		'exits 2 and leaves the symlink target untouched when checkpoint.manifest is a symlink',
+		() => {
+			const worktree = repo();
+			const outsideFile = canonicalMkdtemp('trace-init-manifest-outside-');
+			roots.push(outsideFile);
+			const target = path.join(outsideFile, 'victim.txt');
+			fs.writeFileSync(target, 'untouched\n');
+			fs.mkdirSync(path.join(worktree, '.agents/issue-traces/issue-1/repro'), {
+				recursive: true,
+			});
+			fs.symlinkSync(
+				target,
+				path.join(
+					worktree,
+					'.agents/issue-traces/issue-1/repro/checkpoint.manifest',
+				),
+				'file',
+			);
+			const result = run(worktree, ['issue-1']);
+			expect(result.code).toBe(2);
+			expect(result.err).toContain('refusing non-regular target');
+			expect(fs.readFileSync(target, 'utf8')).toBe('untouched\n');
+		},
+	);
+});
