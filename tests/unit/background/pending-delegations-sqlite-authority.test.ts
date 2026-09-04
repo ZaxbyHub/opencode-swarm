@@ -20,7 +20,7 @@ import {
 	scanDelegationsForRecovery,
 } from '../../../src/background/pending-delegations';
 import { _internals as coordinationInternals } from '../../../src/db/coordination-store';
-import { closeAllProjectDbs } from '../../../src/db/project-db';
+import { closeAllProjectDbs, getProjectDb } from '../../../src/db/project-db';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const dirs: string[] = [];
@@ -240,6 +240,42 @@ describe('pending delegations SQLite authority', () => {
 				generation: 2,
 			}),
 		).not.toBeNull();
+	});
+
+	test('successful reservation release removes its durable lease', async () => {
+		const dir = project();
+		const reservationId = buildBackgroundCoderReservationId({
+			parentSessionId: 'parent',
+			planTaskId: '1.2',
+			callID: 'call-release',
+		});
+		const reserved = await reserveBackgroundCoderSlot(dir, {
+			parentSessionId: 'parent',
+			planTaskId: '1.2',
+			callID: 'call-release',
+			maxConcurrent: 2,
+			generation: 3,
+		});
+		expect(reserved.ok).toBe(true);
+		if (!reserved.ok) throw new Error(reserved.detail);
+		expect(reserved.reservation.reservationId).toBe(reservationId);
+		expect(
+			await releaseBackgroundCoderReservation(dir, {
+				reservationId,
+				parentSessionId: 'parent',
+				planTaskId: '1.2',
+				callID: 'call-release',
+				correlationId: null,
+				generation: 3,
+				reason: 'dispatch_failed',
+			}),
+		).toBe(true);
+		const remaining = getProjectDb(dir)
+			.query<{ count: number }, []>(
+				"SELECT COUNT(*) AS count FROM coordination_lease WHERE namespace = 'background.coder-reservation'",
+			)
+			.get();
+		expect(remaining?.count).toBe(0);
 	});
 
 	test('rejected terminal state is durably visible to readers and recovery scans', async () => {

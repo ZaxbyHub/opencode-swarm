@@ -29,14 +29,11 @@ import {
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate';
 import {
-	withSessionStateMutation,
-	writeStateWhileLocked,
-} from '../../../src/pr-review/persistence';
-import {
 	executeWritePrReviewTriggerEval,
 	PR_REVIEW_TRIGGER_DEFINITIONS,
 	_internals as writerInternals,
 } from '../../../src/tools/write-pr-review-trigger-eval';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority';
 import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 
 const tempDirs: string[] = [];
@@ -209,18 +206,13 @@ async function establishBoundReviewGate(root: string): Promise<void> {
 
 /** Strip the durably bound review base from authoritative gate state. */
 async function unbindReviewBase(root: string): Promise<void> {
-	await withSessionStateMutation(root, SESSION_ID, async () => {
-		const current = await readPrWorkflowGateState(root, SESSION_ID);
-		if (!current) throw new Error('missing active review gate');
-		await writeStateWhileLocked(root, {
-			...current,
-			prReviewBaseRef: undefined,
-			prReviewBaseSha: undefined,
-		});
-	});
+	const current = await readPrWorkflowGateState(root, SESSION_ID);
+	if (!current) throw new Error('missing active review gate');
+	current.prReviewBaseRef = undefined;
+	current.prReviewBaseSha = undefined;
+	await writeAuthoritativePrWorkflowState(root, current);
 	gateInternals.resetTrackedStateCache();
 }
-
 /**
  * Hand-written v2 receipt literal. Deliberately NOT produced by
  * `buildPrReviewTriggerReceiptV2`: pre-fix the builder cannot emit

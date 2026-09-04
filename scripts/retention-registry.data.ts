@@ -458,16 +458,16 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2923 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
-			'src/background/pending-delegations.ts:1407 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
+			'src/background/pending-delegations.ts:2928 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
+			'src/background/pending-delegations.ts:1412 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:2831 readDelegations — SQLite authority with bounded legacy compatibility, sync',
-			'src/background/pending-delegations.ts:2859 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:2836 readDelegations — SQLite authority with bounded legacy compatibility, sync',
+			'src/background/pending-delegations.ts:2864 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1301,:1322,:1332)',
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1306,:1327,:1337)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
@@ -479,12 +479,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:110-115,1851',
+			citation: 'src/background/pending-delegations.ts:110-115,1856',
 		},
 		lockModel: 'withEvidenceLock agent=background on every mutation (:168-171); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1579-1591)',
-		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:455-457); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:450-458 docblock)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1584-1596)',
+		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:456-458); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:451-459 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
 			'background-delegations.checkpoint.json': 'archive-only',
@@ -492,7 +492,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1851)',
+			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1856)',
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
 		disposition: {

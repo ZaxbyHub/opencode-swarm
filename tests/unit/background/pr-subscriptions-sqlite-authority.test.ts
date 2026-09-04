@@ -13,7 +13,7 @@ import {
 	getCoordinationState,
 	transitionCoordinationState,
 } from '../../../src/db/coordination-store';
-import { closeAllProjectDbs } from '../../../src/db/project-db';
+import { closeAllProjectDbs, getProjectDb } from '../../../src/db/project-db';
 import { bunSpawn } from '../../../src/utils/bun-compat.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -48,10 +48,10 @@ const fs = await import("node:fs");
 const mod = await import(process.env.SWARM_PR_MODULE);
 const coordination = await import(process.env.SWARM_PR_COORDINATION_MODULE);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const deadline = Date.now() + Number(process.env.SWARM_PR_RENDEZVOUS_TIMEOUT_MS);
+const deadline = performance.now() + Number(process.env.SWARM_PR_RENDEZVOUS_TIMEOUT_MS);
 const waitForMarker = async (markerPath) => {
 	while (!fs.existsSync(markerPath)) {
-		if (Date.now() >= deadline) throw new Error("rendezvous timeout");
+		if (performance.now() >= deadline) throw new Error("rendezvous timeout");
 		await sleep(5);
 	}
 };
@@ -60,9 +60,9 @@ await waitForMarker(process.env.SWARM_PR_GO);
 coordination._internals.coordinationFaultInjector = (point) => {
 	if (point !== "before_begin") return;
 	fs.writeFileSync(process.env.SWARM_PR_ENTERED, "entered");
-	const waitDeadline = Date.now() + Number(process.env.SWARM_PR_RENDEZVOUS_TIMEOUT_MS);
+	const waitDeadline = performance.now() + Number(process.env.SWARM_PR_RENDEZVOUS_TIMEOUT_MS);
 	while (!fs.existsSync(process.env.SWARM_PR_PARENT_GO)) {
-		if (Date.now() >= waitDeadline) throw new Error("overlap rendezvous timeout");
+		if (performance.now() >= waitDeadline) throw new Error("overlap rendezvous timeout");
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
 	}
 };
@@ -77,9 +77,9 @@ console.log("done");
 const RENDEZVOUS_TIMEOUT_MS = 15_000;
 
 async function waitForMarker(markerPath: string): Promise<void> {
-	const deadline = Date.now() + RENDEZVOUS_TIMEOUT_MS;
+	const deadline = performance.now() + RENDEZVOUS_TIMEOUT_MS;
 	while (!fs.existsSync(markerPath)) {
-		if (Date.now() >= deadline) {
+		if (performance.now() >= deadline) {
 			throw new Error(`rendezvous timeout waiting for ${markerPath}`);
 		}
 		await new Promise((resolve) => setTimeout(resolve, 10));
@@ -273,6 +273,23 @@ describe('pr-subscriptions SQLite authority', () => {
 				payload: '{}',
 			}).outcome,
 		).toBe('applied');
+
+		await expect(listActive(dir)).rejects.toThrow(/authority is unreadable/i);
+	});
+
+	test('valid payload under the wrong SQLite entity key fails closed', async () => {
+		const dir = project();
+		const created = await subscribe(dir, {
+			sessionID: 'misbound',
+			prNumber: 51,
+			repoFullName: 'o/r',
+			prUrl: 'https://github.com/o/r/pull/51',
+		});
+		getProjectDb(dir).run(
+			`UPDATE coordination_state SET entity_key = ?
+			 WHERE namespace = ? AND entity_key = ?`,
+			['wrong-key', 'background.pr-subscription', created.correlationId],
+		);
 
 		await expect(listActive(dir)).rejects.toThrow(/authority is unreadable/i);
 	});

@@ -491,9 +491,14 @@ function readCoordinationSubscriptions(
 				const parsed = RecordSchema.safeParse(
 					JSON.parse(row.payload) as unknown,
 				);
-				if (!parsed.success) {
+				if (
+					!parsed.success ||
+					parsed.data.correlationId !== row.entityKey ||
+					row.generation !== 1 ||
+					parsed.data.status !== row.status
+				) {
 					throw new Error(
-						`PR subscription coordination row failed schema validation for ${row.entityKey}`,
+						`PR subscription coordination row failed schema or authority binding validation for ${row.entityKey}`,
 					);
 				}
 				return [row.entityKey, parsed.data as PrSubscriptionRecord];

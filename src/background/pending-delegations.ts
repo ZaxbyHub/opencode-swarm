@@ -1069,9 +1069,14 @@ function coordinationRowsToDelegations(
 				const parsed = RecordSchema.safeParse(
 					JSON.parse(row.payload) as unknown,
 				);
-				if (!parsed.success) {
+				if (
+					!parsed.success ||
+					parsed.data.correlationId !== row.entityKey ||
+					Math.max(parsed.data.generation ?? 1, 1) !== row.generation ||
+					parsed.data.status !== row.status
+				) {
 					throw new Error(
-						`delegation coordination row failed schema validation for ${row.entityKey}`,
+						`delegation coordination row failed schema or authority binding validation for ${row.entityKey}`,
 					);
 				}
 				return parsed.data as BackgroundDelegationRecord;
@@ -5375,9 +5380,14 @@ function coordinationRowsToReservations(
 				const parsed = BackgroundCoderReservationSchema.safeParse(
 					JSON.parse(row.payload) as unknown,
 				);
-				if (!parsed.success) {
+				if (
+					!parsed.success ||
+					parsed.data.reservationId !== row.entityKey ||
+					(parsed.data.generation ?? 1) !== row.generation ||
+					parsed.data.state !== row.status
+				) {
 					throw new Error(
-						`reservation coordination row failed schema validation for ${row.entityKey}`,
+						`reservation coordination row failed schema or authority binding validation for ${row.entityKey}`,
 					);
 				}
 				return parsed.data as BackgroundCoderReservation;
@@ -5623,6 +5633,9 @@ async function writeBackgroundCoderReservations(
 				);
 				for (const [reservationId, row] of current) {
 					if (nextIds.has(reservationId)) continue;
+					const currentReservation = BackgroundCoderReservationSchema.parse(
+						JSON.parse(row.payload) as unknown,
+					);
 					const deleted = deleteCoordinationState(
 						directory,
 						RESERVATION_COORDINATION_NAMESPACE,
@@ -5632,6 +5645,14 @@ async function writeBackgroundCoderReservations(
 					if (!deleted) {
 						throw new Error(`reservation delete conflict for ${reservationId}`);
 					}
+					const leaseKey = coordinationReservationLeaseKey(currentReservation);
+					releaseCoordinationLease(
+						directory,
+						leaseKey.namespace,
+						leaseKey.entityKey,
+						leaseKey.generation,
+						leaseKey.ownerToken,
+					);
 				}
 				for (const reservation of parsed.data.reservations) {
 					const row = current.get(reservation.reservationId);

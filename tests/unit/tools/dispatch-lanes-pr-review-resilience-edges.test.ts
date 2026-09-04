@@ -12,13 +12,10 @@ import {
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
-	withSessionStateMutation,
-	writeStateWhileLocked,
-} from '../../../src/pr-review/persistence.js';
-import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
@@ -219,56 +216,50 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			expectedCurrentStatuses: ['pending'],
 		});
 
-		await withSessionStateMutation(
+		const current = await readPrWorkflowGateState(
 			directory,
 			'review-session-completed',
-			async () => {
-				const current = await readPrWorkflowGateState(
-					directory,
-					'review-session-completed',
-				);
-				if (!current) throw new Error('missing active workflow state');
-				const persistedState = structuredClone(current) as typeof current;
-				persistedState.prReviewBaseDispatches ??= [];
-				persistedState.prReviewResilience ??= {
-					policy: { ...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG },
-					attempts: [],
-					status: 'healthy',
-				};
-				persistedState.prReviewBaseDispatches.push(
+		);
+		if (!current) throw new Error('missing active workflow state');
+		const persistedState = structuredClone(current) as typeof current;
+		persistedState.prReviewBaseDispatches ??= [];
+		persistedState.prReviewResilience ??= {
+			policy: { ...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG },
+			attempts: [],
+			status: 'healthy',
+		};
+		persistedState.prReviewBaseDispatches.push(
+			{
+				batchId: 'manual-batch-1',
+				lanes: [
 					{
-						batchId: 'manual-batch-1',
-						lanes: [
-							{
-								laneId: 'manual-canary-1',
-								workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1]!,
-							},
-						],
-						validatedAt: FIXED_ISO_TIMESTAMP,
+						laneId: 'manual-canary-1',
+						workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1]!,
 					},
+				],
+				validatedAt: FIXED_ISO_TIMESTAMP,
+			},
+			{
+				batchId: 'manual-fanout-1',
+				lanes: [
 					{
-						batchId: 'manual-fanout-1',
-						lanes: [
-							{
-								laneId: 'manual-fanout-1',
-								workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[2]!,
-							},
-						],
-						validatedAt: FIXED_ISO_TIMESTAMP,
+						laneId: 'manual-fanout-1',
+						workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[2]!,
 					},
-				);
-				persistedState.prReviewResilience.attempts.push({
-					attempt: 1,
-					targetDimensions: [...PR_REVIEW_BASE_DIMENSION_IDS],
-					canaryBatchId: 'manual-batch-1',
-					canaryLaneId: 'manual-canary-1',
-					canaryWorkflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1]!,
-					admittedAt: FIXED_ISO_TIMESTAMP,
-					fanoutBatchId: 'manual-fanout-1',
-				});
-				await writeStateWhileLocked(directory, persistedState);
+				],
+				validatedAt: FIXED_ISO_TIMESTAMP,
 			},
 		);
+		persistedState.prReviewResilience.attempts.push({
+			attempt: 1,
+			targetDimensions: [...PR_REVIEW_BASE_DIMENSION_IDS],
+			canaryBatchId: 'manual-batch-1',
+			canaryLaneId: 'manual-canary-1',
+			canaryWorkflowLane: PR_REVIEW_BASE_DIMENSION_IDS[1]!,
+			admittedAt: FIXED_ISO_TIMESTAMP,
+			fanoutBatchId: 'manual-fanout-1',
+		});
+		await writeAuthoritativePrWorkflowState(directory, persistedState);
 		gateInternals.resetTrackedStateCache();
 
 		const thirdWave = await executeDispatchLanesAsync(
