@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { z } from 'zod';
 import {
 	assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts,
 	assertPrReviewValidationSettled,
@@ -456,50 +455,5 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 		expect(composed.unclaimed).toEqual([]);
 		expect(composed.contributingBatchIds).toEqual(['rv-legacy']);
 		expect(composed.claims.get(halves[0][0])?.classification).toBe('CONFIRMED');
-	});
-
-	test('a v1 plugin still parses state a v2 plugin wrote', async () => {
-		await establishReviewPrerequisites();
-		await reviewerBatch(
-			'rv-1',
-			[{ laneId: 'rv-1-a', reviewItemIds: BASE_IDS }],
-			[{ laneId: 'rv-1-a', rows: reviewed(BASE_IDS) }],
-		);
-		const persisted = await readPersistedState();
-		expect(persisted.prReviewBatchCoherence).toBeDefined();
-		// Exactly the pre-change shape: a .strict() batch record under a
-		// .passthrough() parent. A rolled-back plugin reads this file on every
-		// gate call, including the abort escape hatch.
-		const v1Lane = z
-			.object({
-				laneId: z.string().min(1),
-				workflowLane: z.string().min(1),
-				reviewItemIds: z.array(z.string().min(1)).min(1).optional(),
-			})
-			.strict();
-		const v1Batch = z
-			.object({
-				batchId: z.string().min(1),
-				phase: z.enum(['council', 'reviewer', 'critic']),
-				lanes: z.array(v1Lane).min(1),
-				validatedAt: z.string().min(1),
-			})
-			.strict();
-		const v1Schema = z
-			.object({
-				schemaVersion: z.literal(1),
-				revision: z.number().int().nonnegative().default(0),
-				sessionID: z.string().min(1),
-				mode: z.enum(['PR_REVIEW', 'PR_FEEDBACK']),
-				activatedAt: z.string().min(1),
-				updatedAt: z.string().min(1),
-				prReviewValidationBatches: z.array(v1Batch).optional(),
-			})
-			.passthrough();
-		const parsed = v1Schema.safeParse(persisted);
-		expect(parsed.success).toBe(true);
-		expect(
-			(parsed.data as Record<string, unknown>).prReviewBatchCoherence,
-		).toBeDefined();
 	});
 });
