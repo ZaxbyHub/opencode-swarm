@@ -225,7 +225,7 @@ export function assessMockFile(content: string): MockFileAssessment {
 		mockModuleCalls.length > 0 &&
 		!hasCleanup &&
 		!hasFileScopedReset &&
-		!EXCEPTION_PATTERN.test(codeContent);
+		!EXCEPTION_PATTERN.test(content);
 
 	const spreadViolations: SpreadViolation[] = [];
 	const seen = new Set<string>();

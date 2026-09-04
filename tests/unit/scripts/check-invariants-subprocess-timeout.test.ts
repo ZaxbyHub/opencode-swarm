@@ -97,6 +97,8 @@ describe('subprocess timeout invariant — issue #1028/#2479', () => {
 			"dynamicSpawn('unsafe');",
 			"require('node:child_process').spawnSync('unsafe');",
 			"(await import('node:child_process')).execFile('unsafe');",
+			"cp['spawn']('unsafe');",
+			"Bun['spawnSync'](['unsafe']);",
 		].join('\n');
 		expect(scanSourceForSubprocessTimeouts('extended.ts', source)).toEqual([
 			{ line: 7, callee: 'spawnSync' },
@@ -104,6 +106,8 @@ describe('subprocess timeout invariant — issue #1028/#2479', () => {
 			{ line: 10, callee: 'spawn' },
 			{ line: 11, callee: 'spawnSync' },
 			{ line: 12, callee: 'execFile' },
+			{ line: 13, callee: 'spawn' },
+			{ line: 14, callee: 'spawnSync' },
 		]);
 	});
 

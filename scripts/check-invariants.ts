@@ -363,33 +363,37 @@ export function scanSourceForSubprocessTimeouts(
 	collectDeclarations(sourceFile);
 	const resolveCallee = (expression: ts.LeftHandSideExpression): string | null => {
 		if (ts.isIdentifier(expression)) return namedBindings.get(expression.text) ?? null;
-		if (
-			ts.isPropertyAccessExpression(expression) &&
-			SUBPROCESS_CALLEES.has(expression.name.text)
-		) {
+		const propertyName = ts.isPropertyAccessExpression(expression)
+			? expression.name.text
+			: ts.isElementAccessExpression(expression) &&
+					expression.argumentExpression &&
+					ts.isStringLiteralLike(expression.argumentExpression)
+				? expression.argumentExpression.text
+				: null;
+		if (propertyName && SUBPROCESS_CALLEES.has(propertyName)) {
 			const receiver = unwrapExpression(expression.expression);
 			if (ts.isIdentifier(receiver)) {
 				if (
 					(receiver.text === 'Bun' &&
-						(expression.name.text === 'spawn' || expression.name.text === 'spawnSync')) ||
+						(propertyName === 'spawn' || propertyName === 'spawnSync')) ||
 					receiver.text === '_internals'
 				) {
-					return expression.name.text;
+					return propertyName;
 				}
-				if (namespaceBindings.get(receiver.text)?.has(expression.name.text)) {
-					return expression.name.text;
+				if (namespaceBindings.get(receiver.text)?.has(propertyName)) {
+					return propertyName;
 				}
 			}
 			if (ts.isPropertyAccessExpression(receiver) &&
 				ts.isIdentifier(receiver.expression) &&
 				receiver.expression.text === 'globalThis' &&
 				receiver.name.text === 'Bun' &&
-				(expression.name.text === 'spawn' || expression.name.text === 'spawnSync')) {
-				return expression.name.text;
+				(propertyName === 'spawn' || propertyName === 'spawnSync')) {
+				return propertyName;
 			}
 			const moduleName = moduleNameFromLoader(receiver);
-			if (moduleName && moduleAllowsCallee(moduleName, expression.name.text)) {
-				return expression.name.text;
+			if (moduleName && moduleAllowsCallee(moduleName, propertyName)) {
+				return propertyName;
 			}
 		}
 		return null;

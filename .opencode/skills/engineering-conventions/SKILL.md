@@ -195,7 +195,7 @@ The cross-tree skill mirror contract is the authoritative registry at `src/confi
 - **`opencode-only`:** `.opencode` exists; no `.claude` mirror expected. Examples: `loop` (would shadow Claude Code's built-in `/loop`), `running-tests` (OpenCode-runtime guidance).
 - **Adapter shim pattern:** for architect MODE skills like `swarm-pr-review` and `swarm-pr-feedback`, the `.claude` and `.agents` files are thin adapter shims that delegate to the canonical `.opencode` file via `expectedCanonicalRef`. When updating these, the canonical content goes in `.opencode`; the adapter shim typically needs no change unless the cross-tree delegation interface changes.
 
-**If your PR modifies a `.opencode/skills/<X>/SKILL.md` file:** check `src/config/skill-mirrors.ts` for the contract, then run `bun run drift:check` locally before pushing. Mirror drift is currently a soft-warn (`DRIFT_CHECK_ENFORCE=1` would make it hard-fail). The drift-check CI job surfaces drift as an issue comment, not a blocking check — but a drift between canonical and mirror means Claude Code agents reading the mirror get stale instructions.
+**If your PR modifies a `.opencode/skills/<X>/SKILL.md` file:** check `src/config/skill-mirrors.ts` for the contract, then run `bun run drift:check --enforce` locally before pushing. CI invokes drift-check with `--enforce`, so blocking mirror drift fails the job while the report is also surfaced as an issue comment; a drift between canonical and mirror means Claude Code agents reading the mirror get stale instructions.
 
 ## Sandbox env overrides (subprocess-safety deep-dive)
 

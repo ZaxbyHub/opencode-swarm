@@ -37,17 +37,25 @@ interface BoundedStreamReadHandle {
 }
 
 function decodeCompleteUtf8Prefix(bytes: Uint8Array): string {
-	const decoded = new TextDecoder().decode(bytes);
-	const encoder = new TextEncoder();
-	let byteLength = 0;
-	let result = '';
-	for (const character of decoded) {
-		const encodedLength = encoder.encode(character).byteLength;
-		if (byteLength + encodedLength > bytes.byteLength) break;
-		result += character;
-		byteLength += encodedLength;
+	const fatalDecoder = new TextDecoder('utf-8', { fatal: true });
+	try {
+		return fatalDecoder.decode(bytes);
+	} catch {
+		// A bounded read can end in the middle of a UTF-8 sequence. UTF-8
+		// code points are at most four bytes, so trim only the incomplete
+		// suffix until the remaining prefix decodes without replacement.
+		for (let trim = 1; trim <= 3 && trim <= bytes.byteLength; trim += 1) {
+			try {
+				return fatalDecoder.decode(bytes.subarray(0, bytes.byteLength - trim));
+			} catch {
+				// Continue trimming the incomplete suffix.
+			}
+		}
+		// Preserve the historical best-effort behavior for malformed bytes in
+		// the middle of a stream, but never expose a decoder replacement that
+		// represents the truncated tail itself.
+		return new TextDecoder().decode(bytes).replace(/\uFFFD+$/u, '');
 	}
-	return result;
 }
 
 const DEFAULT_WINDOWS_EXTENSIONS = ['.exe', '.cmd', '.bat'];

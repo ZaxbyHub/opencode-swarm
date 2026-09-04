@@ -53,4 +53,12 @@ describe('check-mock-cleanup comment awareness — issue #2267', () => {
 		].join('\n');
 		expect(assessMockFile(source).missingCleanup).toBe(true);
 	});
+
+	test('honors documented comment escape hatches after stripping code comments', () => {
+		const source = [
+			"mock.module('node:fs', () => ({}));",
+			'// file-scoped and deliberately has no mock.restore',
+		].join('\n');
+		expect(assessMockFile(source).missingCleanup).toBe(false);
+	});
 });

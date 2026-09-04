@@ -51,6 +51,27 @@ describe('external-tool-runner authority ratchets — issue #1248/#2479', () => 
 		expect(result.stdout).toBe('éééé');
 	});
 
+	test('drops an incomplete four-byte UTF-8 suffix without leaking U+FFFD', async () => {
+		_internals.bunSpawn = (() => ({
+			stdout: stream('😀'),
+			stderr: stream(''),
+			exited: Promise.resolve(0),
+			exitCode: 0,
+			kill: () => undefined,
+		})) as typeof originalBunSpawn;
+		const result = await runExternalTool({
+			executable: 'fake-tool',
+			args: [],
+			cwd: canonicalTmpDir(),
+			timeoutMs: 1_000,
+			maxStdoutBytes: 3,
+			maxStderrBytes: 10,
+		});
+		expect(result.stdoutTruncated).toBe(true);
+		expect(result.stdout).toBe('');
+		expect(result.stdout).not.toContain('\uFFFD');
+	});
+
 	test('logs non-ESRCH kill failures but keeps already-gone processes quiet', async () => {
 		for (const [code, expectedWarnings] of [
 			['EPERM', 3],
