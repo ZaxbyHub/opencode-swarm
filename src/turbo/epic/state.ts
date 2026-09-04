@@ -16,6 +16,7 @@ import {
 	listCoordinationStates,
 	transitionCoordinationState,
 } from '../../db/coordination-store.js';
+import { projectDbExists } from '../../db/project-db.js';
 import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import * as logger from '../../utils/logger.js';
 
@@ -556,16 +557,9 @@ export function isEpicModeActiveForProject(directory: string): boolean {
 	if (directory.split(/[\\/]/).includes('..')) return false;
 	if (stateUnreadableMap.get(stateKey(directory))) return false;
 	const hasLegacyFile = fs.existsSync(stateFilePath(directory));
-	let hasCoordinationRows = false;
-	try {
-		hasCoordinationRows =
-			listCoordinationStates(directory, COORDINATION_NAMESPACE, 1).length > 0;
-	} catch {
-		// This is a read-only applicability probe. Invalid, inaccessible, or
-		// otherwise unopenable project roots must fail closed without turning a
-		// phase preflight into an uncaught SQLite/filesystem exception.
-		return false;
-	}
+	const hasCoordinationRows =
+		projectDbExists(directory) &&
+		listCoordinationStates(directory, COORDINATION_NAMESPACE, 1).length > 0;
 	if (!hasLegacyFile && !hasCoordinationRows) {
 		return false;
 	}
