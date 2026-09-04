@@ -13,6 +13,7 @@ import { executeAbortPrWorkflow } from '../../../src/tools/abort-pr-workflow.js'
 import { abort_pr_workflow } from '../../../src/tools/index.js';
 import { TOOL_MANIFEST } from '../../../src/tools/manifest.js';
 import { TOOL_NAMES } from '../../../src/tools/tool-names.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 
 let directory = '';
 const originalResolveCurrentGitHead = gateInternals.resolveCurrentGitHead;
@@ -191,11 +192,10 @@ describe('abort_pr_workflow tool', () => {
 		// the clear: bump the on-disk revision so the clear's CAS read mismatches.
 		gateInternals.beforeAbortClear = async () => {
 			const current = JSON.parse(await fs.readFile(statePath, 'utf-8'));
-			await fs.writeFile(
-				statePath,
-				JSON.stringify({ ...current, revision: current.revision + 1 }),
-				'utf-8',
-			);
+			await writeAuthoritativePrWorkflowState(directory, {
+				...current,
+				revision: current.revision + 1,
+			});
 		};
 
 		await expect(

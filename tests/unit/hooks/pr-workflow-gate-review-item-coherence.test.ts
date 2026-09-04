@@ -12,6 +12,7 @@ import {
 	prWorkflowSessionFileStem,
 	recordPrReviewValidationBatch,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 import {
 	establishReviewPrerequisites,
 	HEAD_SHA,
@@ -67,7 +68,15 @@ async function makeBatchesLegacy(...batchIds: string[]): Promise<void> {
 	const state = await readPersistedState();
 	const entries = state.prReviewBatchCoherence as Record<string, unknown>;
 	for (const batchId of batchIds) delete entries[batchId];
-	await fs.writeFile(gateStatePath(), JSON.stringify(state), 'utf-8');
+	await writeAuthoritativePrWorkflowState(
+		tempDir,
+		state as {
+			sessionID: string;
+			revision: number;
+			mode: string;
+			[key: string]: unknown;
+		},
+	);
 	gateInternals.resetTrackedStateCache();
 }
 

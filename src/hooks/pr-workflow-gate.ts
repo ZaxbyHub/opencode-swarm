@@ -93,6 +93,7 @@ import {
 	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
 } from '../config/schema.js';
+import { closeAllProjectDbs } from '../db/project-db.js';
 import { appendCoreEventSync, readCoreEvents } from '../events/core-events.js';
 import {
 	classifyPrWorkflowGitState,
@@ -2142,6 +2143,7 @@ export async function clearPrWorkflowGateState(
 		}
 		await deleteStateWhileLocked(directory, normalizedSessionID, {
 			expectedStateRevision: expectedRevision,
+			allowSalvagedRead: options.allowSalvagedRead,
 		});
 	});
 }
@@ -3794,7 +3796,33 @@ async function bindPrWorkflowHeadWhileLocked(
 		updatedAt: isoNow(),
 	};
 	await _test_exports.beforePrFeedbackTrackingPersist?.();
-	return writeStateWhileLocked(directory, nextState);
+	try {
+		return await writeStateWhileLocked(directory, nextState);
+	} catch (error) {
+		if (!state.prHeadSha) {
+			try {
+				const candidates = await resolvePrFeedbackTrackingCandidatesAsync(
+					directory,
+					normalizedHead,
+				);
+				if (candidates?.local.length === 1) {
+					await switchPrFeedbackTrackingCandidateAsync(
+						directory,
+						candidates.local[0]!,
+					);
+				} else if (candidates?.remote.length === 1) {
+					await switchPrFeedbackTrackingCandidateAsync(
+						directory,
+						candidates.remote[0]!,
+					);
+				}
+				await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
+			} catch {
+				// Best-effort recovery only; preserve the original persistence error.
+			}
+		}
+		throw error;
+	}
 }
 
 /**
@@ -11640,6 +11668,7 @@ export const _test_exports = {
 			PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS;
 		_test_exports.pendingLaneLivenessThresholdMs =
 			PR_WORKFLOW_PENDING_LIVENESS_THRESHOLD_MS;
+		closeAllProjectDbs();
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
 	/**

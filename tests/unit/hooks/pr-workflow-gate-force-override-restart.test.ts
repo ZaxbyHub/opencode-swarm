@@ -30,6 +30,7 @@ import {
 	recordOpenPrWorkflowLane,
 	STALE_LANE_AGE_MS,
 } from '../../helpers/pr-workflow-lane-fixtures.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -226,11 +227,10 @@ describe('the irreversible half is conditional on the reversible half (F1)', () 
 		// The concurrent mutation between the durable audit append and the clear.
 		gateInternals.beforeAbortClear = async () => {
 			const current = JSON.parse(await fs.readFile(statePath, 'utf-8'));
-			await fs.writeFile(
-				statePath,
-				JSON.stringify({ ...current, revision: current.revision + 1 }),
-				'utf-8',
-			);
+			await writeAuthoritativePrWorkflowState(directory, {
+				...current,
+				revision: current.revision + 1,
+			});
 		};
 
 		await expect(

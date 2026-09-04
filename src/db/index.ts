@@ -17,6 +17,7 @@ export {
 	type CoordinationState,
 	deleteCoordinationImports,
 	deleteCoordinationState,
+	deleteCoordinationStateWithinTransaction,
 	getCoordinationState,
 	importCoordinationOnce,
 	listCoordinationStates,

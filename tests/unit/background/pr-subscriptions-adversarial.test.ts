@@ -14,9 +14,9 @@ import {
 	unsubscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
-import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 
 const FROZEN_NOW = 1_780_000_000_000;
 

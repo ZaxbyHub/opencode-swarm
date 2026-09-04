@@ -549,6 +549,20 @@ function writeCoordinationProjection(
 				.join('\n') + (Object.keys(checkpoint.records).length > 0 ? '\n' : '');
 		writeLegacyStoreFile(legacyPath, legacyPayload);
 		fs.writeFileSync(projectionMarkerPath(legacyPath), '', 'utf-8');
+		// Keep the migration fingerprint paired with the compatibility projection.
+		// Readers use this pair to distinguish an internally refreshed shadow from
+		// a same-size external rewrite that must remain visible until reconciled.
+		if (checkpoint.migration?.done === true) {
+			try {
+				const legacyStat = fs.statSync(legacyPath);
+				checkpoint.migration.sourceBytes = legacyStat.size;
+				checkpoint.migration.scannedBytes = legacyStat.size;
+				checkpoint.migration.sourceMtimeMs = legacyStat.mtimeMs;
+				_internals.writeCheckpointFile(directory, checkpoint);
+			} catch {
+				/* A later read will repair the fingerprint or fail closed. */
+			}
+		}
 	}
 }
 
@@ -732,6 +746,27 @@ function coordinationProjectionMatches(
 	}
 }
 
+function legacyProjectionFingerprintMatches(
+	directory: string,
+	checkpoint: PrSubscriptionCheckpoint,
+): boolean {
+	const migration = checkpoint.migration;
+	const legacyPath = storePath(directory);
+	if (!fileExistsStrict(legacyPath)) return true;
+	if (!fileExistsStrict(projectionMarkerPath(legacyPath)) || !migration?.done) {
+		return false;
+	}
+	try {
+		const stat = fs.statSync(legacyPath);
+		return (
+			stat.size === migration.sourceBytes &&
+			stat.mtimeMs === migration.sourceMtimeMs
+		);
+	} catch {
+		return false;
+	}
+}
+
 function archiveShadowFileBestEffort(filePath: string): void {
 	if (!fileExistsStrict(filePath)) return;
 	const importedPath = importedShadowPath(filePath);
@@ -794,7 +829,22 @@ function ensurePrSubscriptionCoordinationImported(
 			(fileExistsStrict(legacyPath) &&
 				!fileExistsStrict(projectionMarkerPath(legacyPath))) ||
 			!coordinationProjectionMatches(directory, coordinationView);
-		if (projectionNeedsRepair) return false;
+		if (projectionNeedsRepair) {
+			// Once the legacy source is absent (or explicitly marked as a
+			// compatibility projection), SQLite is authoritative. Repair stale
+			// checkpoint/shadow projections from the durable rows before allowing a
+			// write; never fall back to a stale JSON shadow in that state.
+			const legacyProjectionIsSafe =
+				!fileExistsStrict(legacyPath) ||
+				(fileExistsStrict(projectionMarkerPath(legacyPath)) &&
+					checkpointRead.kind === 'ok' &&
+					legacyProjectionFingerprintMatches(directory, checkpointRead.value));
+			if (legacyProjectionIsSafe) {
+				writeCoordinationProjection(directory, coordinationView);
+				return true;
+			}
+			return false;
+		}
 		return true;
 	}
 
@@ -997,10 +1047,12 @@ function ensurePrSubscriptionCoordinationImported(
 
 function canUseCoordinationWritePath(directory: string): boolean {
 	const coordinationView = readCoordinationSubscriptions(directory);
+	const legacyPath = storePath(directory);
 	if (
 		coordinationView !== null &&
 		Object.keys(coordinationView).length > 0 &&
-		fileExistsStrict(storePath(directory))
+		fileExistsStrict(legacyPath) &&
+		!fileExistsStrict(projectionMarkerPath(legacyPath))
 	) {
 		return false;
 	}
@@ -2396,6 +2448,20 @@ async function loadViewForRead(directory: string): Promise<{
 			return { view: {}, recoverySource: 'foreign' };
 		}
 		if (read.value.migration?.done === true) {
+			if (!legacyProjectionFingerprintMatches(directory, read.value)) {
+				const pendingCheckpoint = cloneCheckpoint(read.value);
+				pendingCheckpoint.records = {
+					...pendingCheckpoint.records,
+					...(pendingCoordination ?? {}),
+				};
+				const overlaid = overlayLegacy(directory, pendingCheckpoint);
+				return {
+					view: overlaid.view,
+					recoverySource: overlaid.usedLegacy
+						? 'checkpoint+legacy'
+						: 'checkpoint',
+				};
+			}
 			return {
 				view: { ...read.value.records },
 				recoverySource: 'checkpoint',
