@@ -490,6 +490,45 @@ export interface CoordinationLeaseInput {
 	payload: string;
 }
 
+export interface CoordinationLease extends CoordinationLeaseInput {
+	updatedAt: string;
+}
+
+export function getCoordinationLease(
+	directory: string,
+	namespace: string,
+	entityKey: string,
+): CoordinationLease | null {
+	boundedText(namespace, 'namespace', MAX_KEY_CHARS);
+	boundedText(entityKey, 'entityKey', MAX_KEY_CHARS);
+	const row = getProjectDb(directory)
+		.query<
+			{
+				generation: number;
+				owner_token: string;
+				lease_expires_at: string;
+				payload: string;
+				updated_at: string;
+			},
+			[string, string]
+		>(
+			`SELECT generation, owner_token, lease_expires_at, payload, updated_at
+			 FROM coordination_lease WHERE namespace = ? AND entity_key = ?`,
+		)
+		.get(namespace, entityKey);
+	return row
+		? {
+				namespace,
+				entityKey,
+				generation: row.generation,
+				ownerToken: row.owner_token,
+				leaseExpiresAt: row.lease_expires_at,
+				payload: row.payload,
+				updatedAt: row.updated_at,
+			}
+		: null;
+}
+
 export function acquireCoordinationLease(
 	directory: string,
 	input: CoordinationLeaseInput,

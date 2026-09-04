@@ -159,6 +159,88 @@ describe('scope admission rollback', () => {
 		).toBeNull();
 	});
 
+	test('full capacity still admits an atomic replacement after retiring its predecessor', async () => {
+		const { directory, plan } = fixture();
+		const predecessor = binding(directory, plan, 'architect-session', 'first');
+		expect(
+			await persistAndRegisterScopeBinding(directory, predecessor),
+		).toMatchObject({ ok: true });
+		fillMemory(directory, plan, MAX_PENDING_SCOPE_BINDINGS - 1);
+
+		const replacement = binding(directory, plan, 'architect-session', 'second');
+		expect(
+			await replaceExistingScopeDeclaration({
+				directory,
+				binding: replacement,
+				replaceExisting: true,
+			}),
+		).toMatchObject({
+			ok: true,
+			value: { generationId: replacement.generationId },
+		});
+	});
+
+	for (const scenario of ['child claim', 'declaration replacement'] as const) {
+		test(`a failed second ${scenario} transition rolls back the first write`, async () => {
+			const { directory, plan } = fixture();
+			const predecessor = binding(
+				directory,
+				plan,
+				'architect-session',
+				'task-call',
+				scenario === 'child claim' ? 'pending_child' : 'declaration',
+			);
+			expect(
+				await persistAndRegisterScopeBinding(directory, predecessor),
+			).toMatchObject({ ok: true });
+			const original =
+				_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction;
+			let calls = 0;
+			_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction =
+				(transitionDirectory, candidate, expectedRevision) =>
+					++calls === 2
+						? {
+								ok: false,
+								code: 'SCOPE_BINDING_PERSISTENCE_FAILED',
+								message: 'injected second transition failure',
+							}
+						: original(transitionDirectory, candidate, expectedRevision);
+			try {
+				const result =
+					scenario === 'child claim'
+						? await claimScopeBindingForChildDurably({
+								directory,
+								parentSessionId: 'architect-session',
+								childSessionId: 'coder-session',
+								dispatchCallId: 'task-call',
+							})
+						: await replaceExistingScopeDeclaration({
+								directory,
+								binding: binding(
+									directory,
+									plan,
+									'architect-session',
+									'replacement',
+								),
+								replaceExisting: true,
+							});
+				expect(result).toMatchObject({
+					ok: false,
+					code: 'SCOPE_BINDING_PERSISTENCE_FAILED',
+				});
+				expect(
+					listCoordinationStates(directory, 'scope-binding', 10).map((row) => [
+						row.entityKey,
+						row.status,
+					]),
+				).toEqual([[predecessor.generationId, 'live']]);
+			} finally {
+				_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction =
+					original;
+			}
+		});
+	}
+
 	test('F9: a failed multi-predecessor rollback leaves every durable predecessor unchanged', async () => {
 		// Previous rollback wrote restored predecessors one at a time, so a fault
 		// on the second write committed a partial replacement of durable authority.

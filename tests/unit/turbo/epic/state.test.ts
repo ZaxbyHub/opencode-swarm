@@ -100,6 +100,20 @@ describe('epic state — enable / disable round-trip', () => {
 		expect(state.disabledAt).toBeDefined();
 	});
 
+	test('repeated authoritative reads do not archive unchanged projections', () => {
+		enableEpicMode(dir, 'stable-projection');
+		const swarmDir = path.join(dir, '.swarm');
+		const importedCount = () =>
+			fs
+				.readdirSync(swarmDir)
+				.filter((name) => name.startsWith('epic-state.json.imported')).length;
+		const before = importedCount();
+
+		expect(loadEpicSessionState(dir, 'stable-projection')?.active).toBe(true);
+		expect(loadEpicSessionState(dir, 'stable-projection')?.active).toBe(true);
+		expect(importedCount()).toBe(before);
+	});
+
 	test('multiple sessions persist independently in the same file', () => {
 		enableEpicMode(dir, 'sess-A');
 		enableEpicMode(dir, 'sess-B');

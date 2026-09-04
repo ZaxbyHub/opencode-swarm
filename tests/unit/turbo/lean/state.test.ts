@@ -274,6 +274,27 @@ describe('Lean Turbo Durable State', () => {
 			expect(loaded!.status).toBe('running');
 			expect(loaded!.sessionID).toBe('roundtrip-session');
 		});
+
+		it('repeated authoritative reads do not archive unchanged projections', () => {
+			const state = emptyRunState('stable-projection', 4);
+			state.status = 'running';
+			saveLeanTurboRunState(dir, state);
+			const swarmDir = path.join(dir, '.swarm');
+			const importedCount = () =>
+				fs
+					.readdirSync(swarmDir)
+					.filter((name) => name.startsWith('turbo-state.json.imported'))
+					.length;
+			const before = importedCount();
+
+			expect(loadLeanTurboRunState(dir, state.sessionID)?.status).toBe(
+				'running',
+			);
+			expect(loadLeanTurboRunState(dir, state.sessionID)?.status).toBe(
+				'running',
+			);
+			expect(importedCount()).toBe(before);
+		});
 	});
 
 	describe('isLeanTurboRunActive', () => {

@@ -458,32 +458,32 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2928 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
-			'src/background/pending-delegations.ts:1412 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
+			'src/background/pending-delegations.ts:2957 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
+			'src/background/pending-delegations.ts:1441 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:2836 readDelegations — SQLite authority with bounded legacy compatibility, sync',
-			'src/background/pending-delegations.ts:2864 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:2865 readDelegations — SQLite authority with bounded legacy compatibility, sync',
+			'src/background/pending-delegations.ts:2893 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1306,:1327,:1337)',
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1335,:1356,:1366)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'compaction high-water 1 MiB / low 256 KiB (:124-125); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:35); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:127,:131); TOMBSTONE_MIN_AGE 72 h (:142)',
+			bound: 'compaction high-water 1 MiB / low 256 KiB (:125-126); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:35); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:128,:132); TOMBSTONE_MIN_AGE 72 h (:143)',
 			scope: 'global',
-			citation: 'src/background/pending-delegations.ts:124-142; src/background/delegation-health.ts:35 (#2034)',
+			citation: 'src/background/pending-delegations.ts:125-143; src/background/delegation-health.ts:35 (#2034)',
 		},
 		readBound: {
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:110-115,1856',
+			citation: 'src/background/pending-delegations.ts:111-116,1885',
 		},
-		lockModel: 'withEvidenceLock agent=background on every mutation (:168-171); reads lock-free',
+		lockModel: 'withEvidenceLock agent=background on every mutation (:169-172); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1584-1596)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1613-1625)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:456-458); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:451-459 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
@@ -492,12 +492,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1856)',
+			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1885)',
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
 		disposition: {
 			kind: 'not-a-defect',
-			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:124-142; src/background/delegation-health.ts:35).',
+			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:125-143; src/background/delegation-health.ts:35).',
 		},
 	},
 	{
@@ -568,12 +568,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:5121 writeDelegationFallback / :5172 removeDelegationFallback',
-			'src/background/pending-delegations.ts:5596 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:5155 writeDelegationFallback / :5206 removeDelegationFallback',
+			'src/background/pending-delegations.ts:5635 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:4976 readDelegationFallback / :4988 listDelegationFallbacks / :5022 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:5574 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:5010 readDelegationFallback / :5022 listDelegationFallbacks / :5056 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:5613 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:971)',
 		stateClass: 'authoritative',
@@ -1126,14 +1126,14 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/commands/coupling.ts',
 		],
 		writerCitations: [
-			'src/turbo/epic/state.ts:530 saveEpicSessionState — per-session SQLite CAS with post-commit JSON projection',
+			'src/turbo/epic/state.ts:529 saveEpicSessionState — per-session SQLite CAS with post-commit JSON projection',
 			'src/turbo/epic/calibration.ts:187 saveCalibrationState — hotModuleAdditions grows monotonically',
 			'src/turbo/epic/divergence-recorder.ts:103 recordTaskDivergence — appendFileSync, no write cap (reader tail-bounded 16 MiB :162)',
-			'src/turbo/lean/state.ts:602 saveLeanTurboRunState — per-session SQLite CAS; src/turbo/lean/recovery.ts:163 writeRecoveryRecord (cleared on merge-back :214-227)',
+			'src/turbo/lean/state.ts:601 saveLeanTurboRunState — per-session SQLite CAS; src/turbo/lean/recovery.ts:163 writeRecoveryRecord (cleared on merge-back :214-227)',
 			'src/commands/coupling.ts:153 persistReportJson (--persist only, single rewritten file)',
 		],
 		readerCitations: [
-			'src/turbo/epic/state.ts:519 loadEpicSessionState — indexed SQLite state row',
+			'src/turbo/epic/state.ts:518 loadEpicSessionState — indexed SQLite state row',
 			'src/turbo/epic/calibration.ts:143 loadCalibrationState — FULL-FILE',
 			'src/turbo/epic/divergence-recorder.ts:187 readDivergenceHistory — TAIL-BOUNDED 16 MiB, sync',
 			'src/turbo/lean/recovery.ts:191 listRecoveryRecords — directory scan',
@@ -1302,11 +1302,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/scope/scope-persistence.ts'],
 		writerCitations: [
-			'src/scope/scope-persistence.ts:1167 writeScopeToDisk (v1 projection) / :1243 writeScopeBindingToDisk (v2) / :1759 claimScopeBindingForChildDurably / :1988 replaceExistingScopeDeclaration / :1619 tombstoneScopeBinding / :1682 refreshScopeBindingLease / :471 transitionScopeBindingState / :594 importScopeBindingStateRows',
+			'src/scope/scope-persistence.ts:1241 writeScopeToDisk (v1 projection) / :1317 writeScopeBindingToDisk (v2) / :1833 claimScopeBindingForChildDurably / :2057 replaceExistingScopeDeclaration / :1693 tombstoneScopeBinding / :1756 refreshScopeBindingLease / :480 transitionScopeBindingState / :603 importScopeBindingStateRows',
 		],
 		readerCitations: [
-			'src/scope/scope-persistence.ts:2644 readScopeFromDisk — bounded 2 MiB O_NOFOLLOW v1 compatibility, sync',
-			'src/scope/scope-persistence.ts:825 readAllAuthoritativeScopeBindings — bounded indexed SQLite scan, sync',
+			'src/scope/scope-persistence.ts:2712 readScopeFromDisk — bounded 2 MiB O_NOFOLLOW v1 compatibility, sync',
+			'src/scope/scope-persistence.ts:899 readAllAuthoritativeScopeBindings — bounded indexed SQLite scan, sync',
 		],
 		schemaVersion: 'v1 projection + v2 exact-generation bindings (v1 never authorizes: :916)',
 		stateClass: 'authoritative',

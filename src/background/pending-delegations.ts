@@ -45,6 +45,7 @@ import {
 	acquireCoordinationLease,
 	deleteCoordinationState,
 	deleteCoordinationStateWithinTransaction,
+	getCoordinationLease,
 	getCoordinationState,
 	getProjectDb,
 	importCoordinationOnce,
@@ -1047,6 +1048,34 @@ function coordinationReservationLeaseKey(
 		generation: reservation.generation ?? 1,
 		ownerToken: reservation.reservationId,
 	};
+}
+
+function releaseReservationLeaseIfPresent(
+	directory: string,
+	reservation: Pick<BackgroundCoderReservation, 'reservationId' | 'generation'>,
+): void {
+	const leaseKey = coordinationReservationLeaseKey(reservation);
+	const existing = getCoordinationLease(
+		directory,
+		leaseKey.namespace,
+		leaseKey.entityKey,
+	);
+	if (!existing) return;
+	if (
+		existing.generation !== leaseKey.generation ||
+		existing.ownerToken !== leaseKey.ownerToken ||
+		!releaseCoordinationLease(
+			directory,
+			leaseKey.namespace,
+			leaseKey.entityKey,
+			leaseKey.generation,
+			leaseKey.ownerToken,
+		)
+	) {
+		throw new Error(
+			`reservation lease authority mismatch for ${reservation.reservationId}`,
+		);
+	}
 }
 
 function coordinationRowsToDelegations(
@@ -5645,14 +5674,7 @@ async function writeBackgroundCoderReservations(
 					if (!deleted) {
 						throw new Error(`reservation delete conflict for ${reservationId}`);
 					}
-					const leaseKey = coordinationReservationLeaseKey(currentReservation);
-					releaseCoordinationLease(
-						directory,
-						leaseKey.namespace,
-						leaseKey.entityKey,
-						leaseKey.generation,
-						leaseKey.ownerToken,
-					);
+					releaseReservationLeaseIfPresent(directory, currentReservation);
 				}
 				for (const reservation of parsed.data.reservations) {
 					const row = current.get(reservation.reservationId);
@@ -5698,13 +5720,7 @@ async function writeBackgroundCoderReservations(
 							);
 						}
 					} else {
-						releaseCoordinationLease(
-							directory,
-							leaseKey.namespace,
-							leaseKey.entityKey,
-							leaseKey.generation,
-							leaseKey.ownerToken,
-						);
+						releaseReservationLeaseIfPresent(directory, reservation);
 					}
 				}
 			});

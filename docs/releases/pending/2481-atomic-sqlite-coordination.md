@@ -8,6 +8,7 @@ category: Fixed
 - Added revision and generation fences, idempotent event application, process leases, strict one-time legacy imports, and post-commit compatibility projections.
 - Added a bounded coordination idempotency fence so recently pruned event history cannot replay or double-apply an old key; the retained window is capped at 8,192 keys per stream and 400,000 keys globally.
 - Bound SQLite authority rows to their payload identity, generation, and status, and release coder-reservation leases atomically when their reservation is removed so stale leases cannot accumulate.
+- Prevented compatibility shadows from feeding fields back into PR-review authority, kept Lean/Epic projection timestamps authority-derived, and made multi-row scope transitions roll back on any failed step.
 - Added `/swarm status` visibility for uncertain initialization and rejected background work, plus `/swarm recover --coordination` for an explicit safe retry.
 
 Migration is automatic on first use. Existing authority files are validated, imported exactly once, and renamed with an `.imported` suffix; generated projection files remain for one release. Corrupt or ambiguous legacy state fails closed and must be repaired before retrying recovery.

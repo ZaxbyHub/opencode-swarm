@@ -278,6 +278,54 @@ describe('pending delegations SQLite authority', () => {
 		expect(remaining?.count).toBe(0);
 	});
 
+	test('mismatched reservation lease aborts cleanup without deleting authority', async () => {
+		const dir = project();
+		const reserved = await reserveBackgroundCoderSlot(dir, {
+			parentSessionId: 'parent',
+			planTaskId: '1.3',
+			callID: 'call-mismatched-lease',
+			maxConcurrent: 2,
+			generation: 4,
+		});
+		expect(reserved.ok).toBe(true);
+		if (!reserved.ok) throw new Error(reserved.detail);
+		getProjectDb(dir).run(
+			`UPDATE coordination_lease SET owner_token = ?
+			 WHERE namespace = ? AND entity_key = ?`,
+			[
+				'foreign-owner',
+				'background.coder-reservation.lease',
+				reserved.reservation.reservationId,
+			],
+		);
+
+		expect(
+			await releaseBackgroundCoderReservation(dir, {
+				reservationId: reserved.reservation.reservationId,
+				parentSessionId: 'parent',
+				planTaskId: '1.3',
+				callID: 'call-mismatched-lease',
+				correlationId: null,
+				generation: 4,
+				reason: 'dispatch_failed',
+			}),
+		).toBe(false);
+		const state = getProjectDb(dir)
+			.query<{ count: number }, [string]>(
+				`SELECT COUNT(*) AS count FROM coordination_state
+				 WHERE namespace = 'background.coder-reservation' AND entity_key = ?`,
+			)
+			.get(reserved.reservation.reservationId);
+		expect(state?.count).toBe(1);
+		const lease = getProjectDb(dir)
+			.query<{ owner_token: string }, [string]>(
+				`SELECT owner_token FROM coordination_lease
+				 WHERE namespace = 'background.coder-reservation.lease' AND entity_key = ?`,
+			)
+			.get(reserved.reservation.reservationId);
+		expect(lease?.owner_token).toBe('foreign-owner');
+	});
+
 	test('rejected terminal state is durably visible to readers and recovery scans', async () => {
 		const dir = project();
 		expect(

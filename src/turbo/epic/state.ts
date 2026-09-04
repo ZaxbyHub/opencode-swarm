@@ -262,7 +262,6 @@ function ensureReadableState(directory: string): void {
 function refreshProjectionFromCoordination(directory: string): void {
 	const persisted =
 		buildPersistedFromCoordination(directory) ?? emptyPersisted();
-	persisted.updatedAt = nowISO();
 	writeProjection(directory, persisted);
 }
 
