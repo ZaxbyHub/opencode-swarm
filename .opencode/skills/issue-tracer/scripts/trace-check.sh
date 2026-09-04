@@ -84,7 +84,7 @@ state_gate() {
   # match here previously let a DISAPPROVED row satisfy an APPROVE gate,
   # since "APPROVE|RECORDED" as a regex also matches "DISAPPROVED".
   local gate="$1" verdict_want="$2" commit="$3" treeid="$4" line g v c t ok=0
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in '|'*) ;; *) continue;; esac
     IFS='|' read -r _ g v c t _ <<EOF
 $line
@@ -115,6 +115,22 @@ artifact_verdict_approved() {
       line = $0
       sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
       if (line == "APPROVE" || line == "Verdict: APPROVE") { found = 1 }
+    }
+    END { exit !found }
+  ' "$file" 2>/dev/null
+}
+
+recurrence_justification_ok() {
+  local file="$1"
+  awk '
+    /^## Justification$/ { infield = 1; next }
+    /^## / { infield = 0 }
+    infield {
+      line = $0
+      sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+      if (line == "") next
+      if (line ~ /^\[.*\]$/) next
+      found = 1
     }
     END { exit !found }
   ' "$file" 2>/dev/null
@@ -257,7 +273,10 @@ phase4() {
 phase42() {
   local file="$trace/08a-recurrence-sweep.md" hits rows
   [ -f "$file" ] || { rule_bad recurrence-sweep "missing"; return; }
-  if grep -qi 'no defect class' "$file" && grep -A100 '^## Justification$' "$file" 2>/dev/null | grep -q '[^[:space:]]'; then rule_ok recurrence-sweep; return; fi
+  if grep -Eq '^no-defect-class: true$' "$file" 2>/dev/null; then
+    if recurrence_justification_ok "$file"; then rule_ok recurrence-sweep; else rule_bad recurrence-sweep "fast-path Justification must have non-placeholder text"; fi
+    return
+  fi
   check_headings "$file" '## Defect Class' '## Predicates and Results' '## Dispositions' '## Guardrail'
   hits="$(grep -E '^- Predicate.*hits: [0-9]+' "$file" 2>/dev/null | sed -E 's/.*hits: ([0-9]+).*/\1/' | awk '{s += $1} END {print s + 0}')"
   grep -Eq '^- Predicate.*hits: [0-9]+' "$file" 2>/dev/null && rule_ok recurrence-predicates || rule_bad recurrence-predicates "missing hit counts"

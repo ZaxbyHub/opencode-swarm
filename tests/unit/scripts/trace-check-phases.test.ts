@@ -236,24 +236,82 @@ describe('trace-check.sh later phases', () => {
 		expect(result.out).toContain('OK merge-state');
 	});
 
-	test('phase 4.2 fast path requires a ## Justification heading with content', () => {
+	test('phase 4.2 fast path requires the no-defect-class marker line plus a non-placeholder Justification', () => {
 		const worktree = repo();
 		const dir = setup(worktree);
+
+		// (ii) filled fast-path artifact: marker present, real justification -> OK
 		fs.writeFileSync(
 			path.join(dir, '08a-recurrence-sweep.md'),
-			'## Defect Class\nno defect class - pure rename\n',
+			'# Recurrence Sweep and Guardrail\n\nno-defect-class: true\n\n## Justification\nRename only, no behavior change.\n',
 		);
 		let result = run(worktree, ['phase', '4.2', '--slug', 'issue-1']);
-		expect(result.code).toBe(1);
-		expect(result.out).not.toContain('OK recurrence-sweep');
+		expect(result.code).toBe(0);
+		expect(result.out).toContain('OK recurrence-sweep');
 
+		// (iii) marker present, only a bracketed placeholder under Justification -> FAIL
 		fs.writeFileSync(
 			path.join(dir, '08a-recurrence-sweep.md'),
-			'## Defect Class\nno defect class - pure rename\n## Justification\nRename only, no behavior change.\n',
+			'# Recurrence Sweep and Guardrail\n\nno-defect-class: true\n\n## Justification\n[Reason this change has zero behavioral surface - one line.]\n',
+		);
+		result = run(worktree, ['phase', '4.2', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).not.toContain('OK recurrence-sweep');
+		expect(result.out).toContain('FAIL recurrence-sweep');
+
+		// (iv) the phrase "no defect class" appears in prose but the marker line is
+		// absent: full-sweep rules must apply, not the fast path. Make it a valid
+		// full sweep so it passes, proving the phrase no longer short-circuits.
+		fs.writeFileSync(
+			path.join(dir, '08a-recurrence-sweep.md'),
+			'# Recurrence Sweep and Guardrail\n\nNote: this is not a "no defect class" style change.\n\n## Defect Class\nGuard omitted before write.\n\n## Predicates and Results\n- Predicate alpha hits: 1\n\n## Dispositions\n| Hit (file:line) | Disposition | Justification |\n|---|---|---|\n| a:1 | FIX | fixed |\n\n## Guardrail\n### Check C1 RED then GREEN\n',
 		);
 		result = run(worktree, ['phase', '4.2', '--slug', 'issue-1']);
 		expect(result.code).toBe(0);
-		expect(result.out).toContain('OK recurrence-sweep');
+		expect(result.out).not.toContain('FAIL');
+		expect(result.out).not.toContain('no-defect-class');
+	});
+
+	test('phase 4.2: the verbatim 08a template full-sweep variant fails until filled in', () => {
+		const worktree = repo();
+		const dir = setup(worktree);
+		const templatePath = path.resolve(
+			process.cwd(),
+			'.opencode/skills/issue-tracer/references/evidence-artifacts.md',
+		);
+		const template = fs.readFileSync(templatePath, 'utf8');
+		const lines = template.split('\n');
+		const headingIdx = lines.findIndex(
+			(l) => l.trim() === '## `08a-recurrence-sweep.md`',
+		);
+		expect(headingIdx).toBeGreaterThan(-1);
+		let depth = 0;
+		let collecting = false;
+		const collected: string[] = [];
+		for (let i = headingIdx + 1; i < lines.length; i++) {
+			const line = lines[i];
+			const isFence = /^```/.test(line.trim());
+			if (isFence) {
+				if (!collecting) {
+					collecting = true;
+					depth = 1;
+					continue;
+				}
+				depth += line.trim() === '```' ? -1 : 1;
+				if (depth === 0) break;
+				collected.push(line);
+				continue;
+			}
+			if (collecting) collected.push(line);
+		}
+		const extracted = collected.join('\n');
+		expect(extracted).toContain('# Recurrence Sweep and Guardrail');
+		expect(extracted).not.toContain('no-defect-class: true');
+
+		fs.writeFileSync(path.join(dir, '08a-recurrence-sweep.md'), extracted);
+		const result = run(worktree, ['phase', '4.2', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toMatch(/FAIL recurrence-/);
 	});
 
 	test('ALREADY_FIXED traces use the required subset after phase 2', () => {

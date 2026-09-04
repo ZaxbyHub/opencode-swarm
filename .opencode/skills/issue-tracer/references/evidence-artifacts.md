@@ -289,13 +289,10 @@ Use `references/critic-gate.md` (Plan Critic section). The artifact records both
 
 ## `08a-recurrence-sweep.md`
 
+Full-sweep variant (default; required whenever the change corrects any incorrect behavior, data, or docs):
+
 ```markdown
 # Recurrence Sweep and Guardrail
-
-(If the change corrects no incorrect behavior/data/docs - pure style/naming - record "no defect class" and stop here.)
-
-## Justification
-[One-line justification for why this change has no defect class.]
 
 ## Defect Class
 [One-sentence pattern statement: the shape of the mistake - API misused, guard omitted, contract assumed, encoding confused - not the site of it.]
@@ -316,6 +313,17 @@ Use `references/critic-gate.md` (Plan Critic section). The artifact records both
 - Rung chosen: [lint/static rule > type constraint > runtime/trust-boundary assertion > CI check > documented invariant + regression family]
 - Infeasibility reasons (required if landing on either of the two weakest rungs): [why each stronger rung is infeasible for this class - "faster" is not a reason]
 - Demonstration: [revert-check / mutation / synthetic instance] - captured output showing it FAILS on the original defect and PASSES on the fixed code.
+```
+
+Fast path (only when the change corrects zero incorrect behavior/data/docs - pure style/naming): mark the artifact with the exact line `no-defect-class: true` and fill in `## Justification`. `trace-check.sh phase 4.2` looks for that marker line anywhere in the file; when present it requires `## Justification` to hold real (non-bracketed) text and skips the full-sweep headings entirely.
+
+```markdown
+# Recurrence Sweep and Guardrail
+
+no-defect-class: true
+
+## Justification
+[Reason this change has zero behavioral surface - one line.]
 ```
 
 ## `08b-implementation-review.md`

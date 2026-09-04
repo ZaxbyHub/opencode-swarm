@@ -126,7 +126,7 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 
 - Characterize the defect class as a one-sentence pattern; derive and run concrete search predicates repo-wide.
 - Disposition every hit; install a guardrail at the strongest feasible rung; demonstrate it failing on the original defect and passing on the fix.
-- Fast path: pure style/naming changes record "no defect class" with a one-line justification.
+- Fast path: pure style/naming changes mark `no-defect-class: true` with a one-line `## Justification`.
 - Reference: `references/full-resolution-contract.md`.
 
 ### Phase 4.5: Independent Implementation Review

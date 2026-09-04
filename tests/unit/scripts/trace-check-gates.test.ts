@@ -242,4 +242,26 @@ describe('trace-check.sh gate table parsing (state_gate)', () => {
 		const result = run(worktree, ['phase', '3', '--slug', 'issue-1']);
 		expect(result.out).toContain('OK critic-verdict');
 	});
+
+	test('state_gate still matches the APPROVE row when state.md has no trailing newline', () => {
+		const worktree = repo();
+		const head = git(worktree, 'rev-parse', 'HEAD');
+		const tree = git(worktree, 'rev-parse', 'HEAD^{tree}');
+		const { dir } = setup(worktree);
+		implementationReview(dir, 'APPROVE');
+		const statePath = path.join(dir, 'state.md');
+		const withNewline = fs.readFileSync(statePath, 'utf8');
+		// Build the content the same way the fixture does, then strip the
+		// final newline so the last physical line (the gate row) has no
+		// trailing "\n" -- mirrors `printf '%s'` writing an unterminated file.
+		const gateRow = `| implementation-review | APPROVE | ${head} | ${tree} | 08b |`;
+		const noTrailingNewline = `${withNewline.trimEnd()}\n${gateRow}`.replace(
+			/\n$/,
+			'',
+		);
+		fs.writeFileSync(statePath, noTrailingNewline);
+		expect(noTrailingNewline.endsWith('\n')).toBe(false);
+		const result = run(worktree, ['phase', '4.5', '--slug', 'issue-1']);
+		expect(result.out).toContain('OK gate-implementation-review');
+	});
 });
