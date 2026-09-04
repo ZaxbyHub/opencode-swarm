@@ -234,16 +234,39 @@ mod tests {
     fn mixed_case_unsets_remove_allowlisted_keys() {
         // PR review PRR-001: Windows env lookup is case-insensitive, so an
         // allowlist entry "Path" must be removable by an unset "PATH" (and
-        // vice versa). The map is case-sensitive; normalization makes the
-        // removal hit.
+        // vice versa). The map is case-sensitive; without normalization the
+        // case-variant allowlisted copy would survive the unset alongside the
+        // forced PATH rewrite (two entries for one variable). The forced
+        // rewrite itself always runs last (issue #2259 contract), so the
+        // correct postcondition is exactly ONE uppercase PATH entry whose
+        // value is the managed stub-prefixed rewrite.
         let mut policy = test_policy();
         policy.env_allowlist = vec!["Path".to_string()];
         policy.env_unsets = vec!["PATH".to_string()];
-        let env = build_child_env(&policy, std::path::Path::new("C:\\stubs"), parent_env());
+        // Simulate the Windows case-insensitive parent lookup: "Path" must
+        // resolve to the same value as "PATH", or the fixture cannot
+        // distinguish normalized from un-normalized behavior.
+        let lookup = |key: &str| parent_env()(key).or_else(|| parent_env()(&key.to_uppercase()));
+        let env = build_child_env(&policy, std::path::Path::new("C:\\stubs"), lookup);
         assert!(
-            !env.contains_key("PATH") && !env.contains_key("Path"),
-            "case-variant unset must remove the allowlisted entry: {:?}",
+            !env.contains_key("Path"),
+            "case-variant entry must be gone: {:?}",
             env.keys().collect::<Vec<_>>()
+        );
+        let variants = env
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case("path"))
+            .count();
+        assert_eq!(
+            variants,
+            1,
+            "case variants must collapse to the managed entry: {:?}",
+            env
+        );
+        let path = env.get("PATH").unwrap();
+        assert!(
+            path.starts_with("C:\\stubs;"),
+            "remaining PATH must be the managed rewrite, not the parent value: {path}"
         );
     }
 
