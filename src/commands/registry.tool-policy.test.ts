@@ -11,12 +11,12 @@ import {
 // ---------------------------------------------------------------------------
 
 function cmd(name: string): CommandEntry {
-	return COMMAND_REGISTRY[name as keyof typeof COMMAND_REGISTRY] as CommandEntry;
+	return COMMAND_REGISTRY[
+		name as keyof typeof COMMAND_REGISTRY
+	] as CommandEntry;
 }
 
-// ---------------------------------------------------------------------------
-// 1. CLASSIFICATION SNAPSHOT
-// ---------------------------------------------------------------------------
+// --- 1. CLASSIFICATION SNAPSHOT ---
 
 describe('toolPolicy classification snapshot — no regression', () => {
 	const EXPECTED_AGENT = new Set<string>([
