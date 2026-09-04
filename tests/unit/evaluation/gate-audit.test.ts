@@ -75,9 +75,7 @@ describe('Tier-1 gate audit', () => {
 	}, 120_000);
 
 	test('qualityMetricAvailability reports unavailable when no merge base resolves', async () => {
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'gate-audit-nobase-')),
-		);
+		const root = canonicalMkdtemp('gate-audit-nobase-');
 		try {
 			_gateAuditInternals.captureWorkingTreeFingerprint = async () => ({
 				head: 'a'.repeat(40),
