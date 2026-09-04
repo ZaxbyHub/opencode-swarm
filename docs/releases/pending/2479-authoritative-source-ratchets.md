@@ -3,6 +3,6 @@
 ## Fixed
 
 - Pin Zod exactly and snapshot the generated schema's datetime and tuple semantics, preventing dependency drift from silently changing the committed schema.
-- Make CI drift enforcement unconditional, add a cross-platform pre-push aggregate, and retry coverage shards when a passing test transiently produces no LCOV artifact before failing closed.
+- Make CI drift enforcement unconditional, add a cross-platform pre-push aggregate, and retry coverage shards when a passing test transiently produces no LCOV artifact before failing closed. Coverage shards also wait a bounded five seconds for Bun's post-test LCOV flush, preventing a passing test from being misclassified when the report write lands just after process exit.
 - Replace comment- and file-level heuristics with lexical/AST checks for mock cleanup and subprocess timeouts, and close fabricated historical-citation bypasses in the atomic-write registry.
 - Finish the still-live #1248 regressions for UTF-8 byte caps, process-kill diagnostics, symlink fixtures, and deep syntax verdicts.

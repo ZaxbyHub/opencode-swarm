@@ -315,6 +315,15 @@ describe('run-coverage-gate.sh shard mode — issue #2341', () => {
 		);
 	});
 
+	test('successful coverage waits boundedly for Bun lcov flush', () => {
+		expect(coverageGateScript).toContain('lcov_wait=0');
+		expect(coverageGateScript).toContain(
+			'while [ "$lcov_wait" -lt 20 ] && [ ! -s coverage/lcov.info ]',
+		);
+		expect(coverageGateScript).toContain('sleep 0.25');
+		expect(coverageGateScript).toContain('lcov_wait=$((lcov_wait + 1))');
+	});
+
 	test('shard mode skips threshold enforcement (aggregator owns the union)', () => {
 		expect(coverageGateScript).toContain(
 			'Shard ${shard_index}/${shard_count} local coverage',

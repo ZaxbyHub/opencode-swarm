@@ -153,8 +153,18 @@ while IFS= read -r test_file; do
 		exit_code=0
 		bun test --isolate --coverage --timeout 60000 "$test_file" > "$tmpout" 2>&1 || exit_code=$?
 		coverage_ready=0
-		if [ "$exit_code" -eq 0 ] && [ -s coverage/lcov.info ]; then
-			coverage_ready=1
+		if [ "$exit_code" -eq 0 ]; then
+			# Bun can flush lcov.info just after the test process exits. Wait a
+			# bounded 5 seconds for that asynchronous write before treating a
+			# passing test as a missing-coverage failure (CI coverage race).
+			lcov_wait=0
+			while [ "$lcov_wait" -lt 20 ] && [ ! -s coverage/lcov.info ]; do
+				sleep 0.25
+				lcov_wait=$((lcov_wait + 1))
+			done
+			if [ -s coverage/lcov.info ]; then
+				coverage_ready=1
+			fi
 		fi
 		if [ "$exit_code" -eq 0 ] && [ "$coverage_ready" -eq 1 ]; then
 			if [ "$retry_num" -gt 0 ]; then
