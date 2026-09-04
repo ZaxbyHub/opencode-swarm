@@ -142,12 +142,10 @@ describe('rehydratePrSubscriptions', () => {
 	});
 
 	test('uses mergeableState as lastKnownStatus when present', async () => {
-		// Pre-seed the legacy v1 log so subscribe() migrates it into the
-		// #2042 bounded checkpoint; then append an externally-updated copy of
-		// the record with UNCHANGED updatedAt and verify the appended (later
-		// positioned) line still wins — v1 positional last-line-wins semantics
-		// preserved by the checkpoint overlay merge. Frozen clock keeps the
-		// tie (seeded updatedAt === store-written updatedAt) deterministic.
+		// Pre-seed the legacy v1 log with mergeableState so subscribe() migrates
+		// it into the SQLite-backed coordination store and the rehydration path
+		// carries that optional field into lastKnownStatus. Frozen clock keeps
+		// the migration timestamps deterministic.
 		const restore = freezeClock();
 		try {
 			const filePath = path.join(dir, '.swarm', PR_SUBSCRIPTIONS_FILE);
@@ -165,6 +163,7 @@ describe('rehydratePrSubscriptions', () => {
 				createdAt: seededAt,
 				updatedAt: seededAt,
 				errorCount: 0,
+				mergeableState: 'CONFLICTING',
 			};
 			fs.writeFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
 
@@ -174,10 +173,6 @@ describe('rehydratePrSubscriptions', () => {
 				repoFullName: 'o/r',
 				prUrl: 'https://github.com/o/r/pull/1',
 			});
-
-			// External v1 writer appends a modified copy with the same updatedAt.
-			record.mergeableState = 'CONFLICTING';
-			fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
 
 			const map = await rehydratePrSubscriptions('sess_1', dir);
 			const state = map.get('o/r::1');
