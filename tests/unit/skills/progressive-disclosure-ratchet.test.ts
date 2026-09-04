@@ -25,6 +25,7 @@ const ENTRY_SKILL_BASELINES: Record<string, number> = {
 	'.opencode/skills/swarm-pr-review/SKILL.md': 2024,
 	'.opencode/skills/swarm-pr-feedback/SKILL.md': 949,
 	'.opencode/skills/writing-tests/SKILL.md': 847,
+	'.opencode/skills/issue-tracer/SKILL.md': 196,
 };
 
 describe('progressive-disclosure ratchet (issue #2131 G)', () => {

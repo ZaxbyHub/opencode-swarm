@@ -249,9 +249,9 @@ export const OPENCODE_ONLY_ARCHITECT_MODE_SKILLS: Array<{
  *  - `divergent`: both must exist; content intentionally differs per runtime.
  *  - `opencode-only`: `.opencode` exists; no `.claude` mirror expected.
  *  - `adapter`: a non-architect-MODE skill whose `.opencode` copy is
- *    canonical and has no `.claude` copy at all, but does have one or more
- *    thin adapter shims (e.g. `.agents/skills/<slug>/`) that reference the
- *    canonical file by a fixed substring (`expectedCanonicalRef`). Mirrors
+ *    canonical and may have one or more thin adapter shims under
+ *    `.claude/skills/<slug>/` and/or `.agents/skills/<slug>/` that reference
+ *    the canonical file by a fixed substring (`expectedCanonicalRef`). Mirrors
  *    the `ADAPTER_ARCHITECT_MODE_SKILLS` check, generalized to skills that
  *    are not architect MODE skills (so `identical`/`divergent`, which both
  *    require a `.claude` copy to exist, do not fit).
@@ -360,7 +360,7 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 		],
 		expectedCanonicalRef: '../../../.opencode/skills/issue-tracer/SKILL.md',
 		reason:
-			'Canonicalized (issue-tracer v2, issue-tracer-skill-update): .opencode/skills/issue-tracer/SKILL.md is the single agent-neutral protocol (Full-Resolution Contract, Phase 4.2 recurrence sweep, gate-integrity edits); .claude and .agents are thin adapter shims that reference it via the ../../../ relative path (modeled on the swarm-pr-review adapter shape). Bundled to npm consumers via BUNDLED_PROJECT_SKILLS + package.json#files.',
+			'Canonicalized (issue-tracer v3, gate table and issue validation): .opencode/skills/issue-tracer/SKILL.md is the single agent-neutral protocol (gate table, issue validation, typed acceptance checks with red checkpoint, trace-check.sh and repro-check.sh scripts, model-agnostic adapters, human-enforced merge gate); .claude and .agents are thin adapter shims that reference it via the ../../../ relative path (modeled on the swarm-pr-review adapter shape). Bundled to npm consumers via BUNDLED_PROJECT_SKILLS + package.json#files.',
 	},
 	// ---------------------------------------------------------------------------
 	// .agents-only skills — no .opencode counterpart; live in .claude and/or

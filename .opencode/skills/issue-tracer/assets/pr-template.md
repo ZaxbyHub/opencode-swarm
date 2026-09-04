@@ -21,10 +21,10 @@ This is a drafting aid. The published PR body must satisfy the repository's own 
 
 ## Tests
 
-- Regression test: `[command]` → PASS
-- Impacted suite: `[command]` → PASS
-- Lint/type/build/security checks: `[commands]` → PASS
-- Deferred-work scan: `.opencode/skills/issue-tracer/scripts/scan-deferred.sh` → clean
+- Regression test: `[command]` -> PASS
+- Impacted suite: `[command]` -> PASS
+- Lint/type/build/security checks: `[commands]` -> PASS
+- Deferred-work scan: `.opencode/skills/issue-tracer/scripts/scan-deferred.sh` -> clean
 
 ## Regression Protection
 
@@ -32,7 +32,7 @@ This is a drafting aid. The published PR body must satisfy the repository's own 
 - [Negative/boundary/adversarial case if relevant]
 - [Test drift review result]
 
-## Acceptance Criteria → Evidence
+## Acceptance Criteria -> Evidence
 
 | Acceptance criterion (from intake) | Evidence (command + output, or test name) |
 |---|---|
@@ -40,9 +40,9 @@ This is a drafting aid. The published PR body must satisfy the repository's own 
 
 ## Invariant Audit
 
-List the invariants from the repository's invariant/architecture-contract doc and mark each touched / not touched with concrete evidence (command, test output, source inspection, or grep result). If the repository has no invariant doc, state "none documented" — never fabricate an audit.
+List the invariants from the repository's invariant/architecture-contract doc and mark each touched / not touched with concrete evidence (command, test output, source inspection, or grep result). If the repository has no invariant doc, state "none documented" - never fabricate an audit.
 
-- [invariant]: touched / not touched — [evidence]
+- [invariant]: touched / not touched - [evidence]
 
 ## Risk and Rollback
 
@@ -53,6 +53,10 @@ List the invariants from the repository's invariant/architecture-contract doc an
 ## Waivers (or none)
 
 Any Full-Resolution Contract clause waived by the interactive user or a checked-in owner contract, quoted verbatim with its source. If none, write "none".
+
+## Merge status
+
+Awaiting explicit user approval; not merged.
 
 ## Issue Closure
 

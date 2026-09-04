@@ -120,19 +120,72 @@ if [ ! -f "$exclude_file" ] || ! grep -qxF "$entry" "$exclude_file" 2>/dev/null;
   printf '%s\n' "$entry" >> "$exclude_file"
 fi
 
+# Resolve the base identity before seeding state. Prefer the remote's declared
+# default branch, then use the same conservative fallbacks as scan-deferred.
+base_ref=""
+if symbolic_ref="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null)"; then
+  base_ref="origin/${symbolic_ref#refs/remotes/origin/}"
+fi
+if [ -z "$base_ref" ]; then
+  for candidate in origin/main origin/master main master; do
+    if git rev-parse --verify --quiet "$candidate^{commit}" >/dev/null 2>&1; then
+      base_ref="$candidate"
+      break
+    fi
+  done
+fi
+base_sha="unset"
+if [ -n "$base_ref" ]; then
+  base_sha="$(git rev-parse "$base_ref^{commit}")"
+else
+  base_ref="unset"
+fi
+
+# Use a disposable index so the identity includes tracked and untracked source
+# changes without touching the caller's real index. The trace directory is
+# locally excluded before this point and therefore cannot affect the result.
+tree_index="$(mktemp)"
+rm -f "$tree_index"
+phase0_tree_id=""
+if phase0_tree_id="$(GIT_INDEX_FILE="$tree_index" git read-tree HEAD && GIT_INDEX_FILE="$tree_index" git add -A . && GIT_INDEX_FILE="$tree_index" git write-tree)"; then
+  :
+else
+  rm -f "$tree_index"
+  echo "trace-init: could not calculate phase-0 tree identity" >&2
+  exit 2
+fi
+rm -f "$tree_index"
+
 # Seed state.md so the trail has a resumable starting point.
 state_file="$trace_dir/state.md"
 if [ ! -e "$state_file" ]; then
   cat > "$state_file" <<EOF
 # Trace State: $slug
+protocol: 3.0.0
+phase: 0
+tier: unset
+classification: unset
+base-ref: $base_ref
+base-sha: $base_sha
+freshness: unset
+phase0-tree-id: $phase0_tree_id
+checkpoint-tree-id: unset
+handshake: unset
+tools: none
+merge: not-applicable
+next-action: unset
 
-- Phase: 0 (setup)
-- Completed gates:
-- Active hypothesis:
-- Selected fix candidate:
-- Unresolved risks:
-- Next action:
+## Gates
+| gate | verdict | reviewed-commit | tree-id | artifact |
+|---|---|---|---|---|
 EOF
+fi
+
+repro_dir="$trace_dir/repro"
+manifest_file="$repro_dir/checkpoint.manifest"
+mkdir -p "$repro_dir"
+if [ ! -e "$manifest_file" ]; then
+  printf '%s\n' '# issue-tracer checkpoint manifest v1' > "$manifest_file"
 fi
 
 echo "trace-init: created $trace_dir"

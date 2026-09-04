@@ -9,16 +9,30 @@ The canonical version is the `metadata.version` field in the canonical `SKILL.md
 | Agent | Loads (project-level) | Resolves to |
 |---|---|---|
 | OpenCode | `.opencode/skills/issue-tracer/SKILL.md` | canonical |
-| Claude Code | `.claude/skills/issue-tracer/SKILL.md` | adapter shim → canonical |
-| OpenAI Codex | `.agents/skills/issue-tracer/SKILL.md` | adapter shim → canonical |
-| ZCode | `.agents/skills/issue-tracer/SKILL.md` | adapter shim → canonical |
+| Claude Code | `.claude/skills/issue-tracer/SKILL.md` | adapter shim -> canonical |
+| OpenAI Codex | `.agents/skills/issue-tracer/SKILL.md` | adapter shim -> canonical |
+| ZCode | `.agents/skills/issue-tracer/SKILL.md` | adapter shim -> canonical |
 | GitHub coding agent | repo-root `AGENTS.md` pointer | canonical |
 
 The adapter shims point to `../../../.opencode/skills/issue-tracer/SKILL.md` as the canonical workflow and add only short per-agent execution notes (tool bindings, fallback labels, publish routing); the protocol itself lives in the single canonical body, so a project checkout always executes one protocol.
 
-### Agent Adapter table — how each row was filled
+### Agent Adapter table - capability-first
 
-The canonical SKILL.md's Agent Adapter table maps each capability to a concrete tool per agent. Those rows were filled from each agent's current tool surface: OpenCode (`edit`/`write`, `todowrite`, `webfetch`, `task`), Claude Code (`Edit`/`Write`/`MultiEdit`, `TodoWrite`, `WebFetch`/`WebSearch`, `Agent`/`Task`), OpenAI Codex (`apply_patch`, `update_plan`, `web`, plus native fresh-context subagent dispatch), and the GitHub coding agent (`edit`, built-in task list, `web`, plus native fresh-context subagent dispatch). **ZCode** is mapped to the Codex-native tool surface (`apply_patch`/`update_plan`/`web`, plus native fresh-context subagent dispatch) because it is a Codex-family CLI that shares the project-level `.agents/skills/` discovery tree with Codex; if your ZCode build exposes different tool names, treat the table as capability-first and substitute your build's names.
+The canonical SKILL.md's Agent Adapter table maps each role (file-edit tool, plan/tasklist tool, web tool, subagent/delegation) to your runner's own current tool surface - detect it from the session's actual tool list, never from the runner's name. Do not hardcode a fixed tool-name table here: tool surfaces change across runner versions, and a stale hardcoded mapping is worse than an explicit "verify against your own tool docs" instruction. Use each runner's own current documentation to fill the cells at session start.
+
+### Delegating-shim pattern
+
+Each per-agent adapter (`.claude/skills/issue-tracer/SKILL.md`, `.agents/skills/issue-tracer/SKILL.md`) is a thin shim, not a copy of the protocol: it names the canonical file with the exact relative reference `../../../.opencode/skills/issue-tracer/SKILL.md` and the phrase "canonical workflow", adds only short per-runner execution notes (tool bindings, fallback labels, publish routing), and stays under 60 lines with no `## Phase ` heading of its own. A user-level shim intended to delegate rather than fork should declare `shim: true` and a `version:` matching the canonical `metadata.version` in its own frontmatter - that pair is exactly what the handshake in `references/phase-0-setup.md` checks for, and it is what turns a user-level copy from a shadowing risk into a safe, self-updating pointer.
+
+## Per-runner discovery precedence (as observed, not guaranteed)
+
+Precedence between a project-level skill copy and a user-level (home-directory) copy of the same slug varies by runner and runner version, and the safe assumption is "verify, don't guess":
+
+- **ZCode**: user-level wins over project-level for ZCode skills (evidenced: a user-level `issue-tracer` fork was observed running instead of this repo's canonical, across many trace directories, on a real host).
+- **Claude Code**: personal (user-level) skills are documented to take precedence over project-level skills of the same name.
+- **Codex**: project-level skills are documented as resolved first in current secondary sources; treat this as unverified against Codex's own primary docs until checked against your installed version.
+
+Do not assume "project wins" as a universal default - verify with the version-stamp comparison below for whichever runner you are actually using.
 
 ## User-level installs can SHADOW the project copy
 
@@ -45,21 +59,29 @@ Then, for each CLI you use, compare the user-level copy's stamp to the project c
 # Claude Code
 diff <(grep 'version:' ~/.claude/skills/issue-tracer/SKILL.md 2>/dev/null || echo 'version: none') \
      <(grep 'version:' .opencode/skills/issue-tracer/SKILL.md) \
-  && echo 'in sync' || echo 'STALE user-level copy — remove ~/.claude/skills/issue-tracer or re-sync it'
+  && echo 'in sync' || echo 'STALE user-level copy - remove ~/.claude/skills/issue-tracer or re-sync it'
 
 # ZCode
 diff <(grep 'version:' ~/.zcode/skills/issue-tracer/SKILL.md 2>/dev/null || echo 'version: none') \
      <(grep 'version:' .opencode/skills/issue-tracer/SKILL.md) \
-  && echo 'in sync' || echo 'STALE user-level copy — remove ~/.zcode/skills/issue-tracer or re-sync it'
+  && echo 'in sync' || echo 'STALE user-level copy - remove ~/.zcode/skills/issue-tracer or re-sync it'
 
 # Codex
 diff <(grep 'version:' ~/.codex/skills/issue-tracer/SKILL.md 2>/dev/null || echo 'version: none') \
      <(grep 'version:' .opencode/skills/issue-tracer/SKILL.md) \
-  && echo 'in sync' || echo 'STALE user-level copy — remove ~/.codex/skills/issue-tracer or re-sync it'
+  && echo 'in sync' || echo 'STALE user-level copy - remove ~/.codex/skills/issue-tracer or re-sync it'
 ```
 
 The safest default is to keep no user-level `issue-tracer` copy at all and let each project ship its own canonical, so version drift cannot occur. If you do keep a user-level copy, reconcile it whenever the project canonical's `metadata.version` changes.
 
-Maintainer rule: bump `metadata.version` (canonical SKILL.md plus both adapter shims, in lockstep) in the same changeset as any canonical content edit — the stamp is the only reconciliation signal user-level copies have, and an unbumped edit silently defeats it.
+Maintainer rule: bump `metadata.version` (canonical SKILL.md plus both adapter shims, in lockstep) in the same changeset as any canonical content edit - the stamp is the only reconciliation signal user-level copies have, and an unbumped edit silently defeats it.
 
 GitHub coding agents load the repository's checked-in `AGENTS.md` and `.opencode/skills/issue-tracer/SKILL.md` directly, with no user-level home directory, so shadowing does not apply to that surface; their sessions can spawn fresh-context subagents, so the independent critic/review gates run as the preferred path there too.
+
+## Handshake semantics (automated, advisory)
+
+`trace-check.sh handshake` automates the reconciliation above for the four user-level roots it can see (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills`, `~/.zcode/skills`), reading only the `version:`/`shim:` lines - never full content, never a directory listing. It reports `MATCH`/`SHIM`/`STALE`/`ABSENT` per root and always exits 0, because it can never detect the dangerous case (a copy that shadows the canonical before this skill is even loaded). Treat a `STALE` result as a signal to run the manual reconcile commands above for that specific root, and treat `ABSENT` as informational, not an error.
+
+## Capability-first, not vendor-first
+
+This skill is model-agnostic. Wherever a role is needed (independent critic, implementation reviewer, final critic, cross-CLI invocation), use your runner's own equivalents at the strongest tier your session allows - never a hardcoded vendor or model name. If your runner's own instructions (a user-level AGENTS.md, an agent-definition file) already mandate a specific external critic or model, follow those instructions; this skill does not override them, and it does not invent a mandate of its own.
