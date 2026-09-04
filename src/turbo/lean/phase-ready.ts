@@ -629,11 +629,16 @@ export function verifyLeanTurboPhaseReady(
 
 	// ── 7. Integrated diff evidence (when required) ──────────────────────────
 	if (mergedConfig.integrated_diff_required) {
+		// Must match the writer: phaseEvidencePath (src/turbo/lean/evidence.ts)
+		// writes the aggregated phase evidence under the lean-turbo/ subdir.
+		// The flat path read here previously made this gate unsatisfiable in
+		// production — the writer's file could never be seen (PR feedback).
 		const evidencePath = path.join(
 			directory,
 			'.swarm',
 			'evidence',
 			String(phase),
+			'lean-turbo',
 			'lean-turbo-phase.json',
 		);
 		let hasDiff = false;

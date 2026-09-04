@@ -16,7 +16,7 @@ Promotion uses deterministic paired bootstrap intervals (10,000 resamples, 95% c
 
 Package consumers use the versioned callable `evaluationV1` function namespace. Its `evaluateCandidate` boundary admits and freezes the task set, runs the immutable baseline/candidate pairs, evaluates the promotion policy, and persists the resulting decision before returning; calling `evaluationV1(options)` is equivalent. `runEvaluation` and `decidePromotion` remain attached for consumers that need the lower-level phases. `hashTaskInput` and `hashCandidateInput` are asynchronous so bounded package hashing yields while reading task trees. The package default export remains the OpenCode v1 plugin object.
 
-`complexity_delta` and `public_api_delta` remain explicitly unavailable until the separate quality-metric work in #1655 exists. They are excluded from promotion rather than fabricated.
+`complexity_delta` and `public_api_delta` are now produced by `quality_budget` as true base-vs-head deltas (#1655 / #2470): a git merge base is resolved and each changed file's base content is read via bounded `git show`, so a complexity-reducing refactor no longer false-fails the gate. `gate-audit` derives its `qualityMetricAvailability` flag from whether a merge base actually resolves for the audited project — a degraded no-base run reports `unavailable` and warns rather than asserting availability. The promotion decision artifact still records both metrics under its `unavailableQualityMetrics` field: they remain excluded from promotion regression math, and renaming that field's values would change promotion `decisionId` hashes, so the hardcode is deliberate backward-compat debt.
 
 ## Tier-1 production gate audit
 

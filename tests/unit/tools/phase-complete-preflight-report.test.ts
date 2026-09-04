@@ -146,6 +146,46 @@ describe('phase_complete structured preflight report', () => {
 		]);
 	});
 
+	test('lean_turbo_readiness recovery names the critic only when the block is critic-specific', async () => {
+		const blockedReadiness = (message: string) =>
+			check('lean_turbo_readiness', async () => ({
+				blocked: true,
+				reason: 'LEAN_TURBO_PHASE_NOT_READY',
+				message,
+				agentsDispatched: [],
+				agentsMissing: [],
+				warnings: [],
+			}));
+
+		const criticReport = await collectPhaseGateReport({
+			phase: 6,
+			checks: [
+				blockedReadiness(
+					'Phase 6 cannot be completed: Integrated critic approval missing or rejected',
+				),
+			],
+		});
+		expect(criticReport.entries[0].recovery?.action).toBe('lean_turbo_review');
+		expect(criticReport.entries[0].recovery?.args).toEqual({
+			follow_up_tool: 'lean_turbo_critic',
+		});
+
+		const reviewerReport = await collectPhaseGateReport({
+			phase: 6,
+			checks: [
+				blockedReadiness(
+					'Phase 6 cannot be completed: Integrated reviewer approval missing or rejected',
+				),
+			],
+		});
+		expect(reviewerReport.entries[0].recovery?.action).toBe(
+			'lean_turbo_review',
+		);
+		// No critic hint when only reviewer evidence is missing — pointing the
+		// architect at lean_turbo_critic there would misdirect the repair.
+		expect(reviewerReport.entries[0].recovery?.args).toBeUndefined();
+	});
+
 	test('every advertised recovery resolves to a registered tool or host Task action', async () => {
 		const gateIds = [
 			'critical_directives',
