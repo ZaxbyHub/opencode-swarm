@@ -533,7 +533,7 @@ export async function handleBenchmarkCommand(
 			`- Ground truth: ${gateAuditSummary.truthAvailable ? 'available' : 'unavailable'} (parsed ${gateAuditStatistics.groundTruth.parsed}; malformed ${gateAuditStatistics.groundTruth.malformed}; ambiguous ${gateAuditStatistics.groundTruth.ambiguous}; unjoined ${gateAuditStatistics.groundTruth.unjoined}; insufficient ${gateAuditSummary.insufficientData})`,
 			`- Regression catches: ${gateAuditSummary.caught}/${gateAuditSummary.regressions}`,
 			`- Clean-control rejections: ${gateAuditSummary.falseRejections}/${gateAuditSummary.negativeControls}`,
-			'- complexity_delta/public_api_delta: unavailable (#1655; excluded)',
+			'- complexity_delta/public_api_delta: true base-vs-head deltas (#2470); not consumed by promotion regression math',
 			'',
 		);
 	}
