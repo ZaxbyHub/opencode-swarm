@@ -163,7 +163,7 @@ describe('ci.yml integration — merge-queue coverage isolation', () => {
 	test('coverage helper runs each file with Bun isolation', () => {
 		expect(coverageGateScript).toContain('set -euo pipefail');
 		expect(coverageGateScript).toContain(
-			'bun test --isolate --coverage --timeout 60000 "$test_file"',
+			'bun test --isolate --coverage --coverage-reporter=lcov --timeout 60000 "$test_file"',
 		);
 		expect(coverageGateScript).toContain(
 			"{ grep -vE '^\\s*#|^\\s*$' scripts/ci/quarantined-tests.txt || true; } | sort > quarantined.txt",
@@ -220,7 +220,7 @@ describe('ci.yml integration — coverage gate bounded retry (issue #1782 parity
 		const rmIdx = loopBody.indexOf('rm -rf coverage');
 		const mkdirIdx = loopBody.indexOf('mkdir -p coverage');
 		const bunTestIdx = loopBody.indexOf(
-			'bun test --isolate --coverage --timeout 60000 "$test_file"',
+			'bun test --isolate --coverage --coverage-reporter=lcov --timeout 60000 "$test_file"',
 		);
 
 		// All four markers must be present inside the loop body itself.

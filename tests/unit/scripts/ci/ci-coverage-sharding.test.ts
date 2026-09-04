@@ -316,6 +316,7 @@ describe('run-coverage-gate.sh shard mode — issue #2341', () => {
 	});
 
 	test('successful coverage waits boundedly for Bun lcov flush', () => {
+		expect(coverageGateScript).toContain('--coverage-reporter=lcov');
 		expect(coverageGateScript).toContain('lcov_wait=0');
 		expect(coverageGateScript).toContain(
 			'while [ "$lcov_wait" -lt 20 ] && [ ! -s coverage/lcov.info ]',

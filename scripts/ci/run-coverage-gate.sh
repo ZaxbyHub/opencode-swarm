@@ -151,7 +151,7 @@ while IFS= read -r test_file; do
 		rm -rf coverage
 		mkdir -p coverage
 		exit_code=0
-		bun test --isolate --coverage --timeout 60000 "$test_file" > "$tmpout" 2>&1 || exit_code=$?
+		bun test --isolate --coverage --coverage-reporter=lcov --timeout 60000 "$test_file" > "$tmpout" 2>&1 || exit_code=$?
 		coverage_ready=0
 		if [ "$exit_code" -eq 0 ]; then
 			# Bun can flush lcov.info just after the test process exits. Wait a
