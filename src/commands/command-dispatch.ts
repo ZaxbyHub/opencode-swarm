@@ -80,7 +80,7 @@ export function canonicalCommandKey(resolved: ResolvedSwarmCommand): string {
 export function formatCommandNotFound(tokens: string[]): string {
 	// Coerce: adversarial callers can pass non-string tokens (numbers, null,
 	// booleans) through argv-shaped inputs; everything downstream is string-typed.
-	const attemptedCommand = String(tokens[0] ?? '');
+	const attemptedCommand = String(tokens[0]);
 	const MAX_DISPLAY = 100;
 	const displayCommand =
 		attemptedCommand.length > MAX_DISPLAY
