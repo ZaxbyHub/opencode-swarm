@@ -23,6 +23,7 @@ import {
 	reserveBackgroundCoderSlot,
 	scanBackgroundCoderReservationsForAdmission,
 } from '../../../src/background/pending-delegations';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -71,6 +72,7 @@ describe('coder reservation leases (issue #2104)', () => {
 
 	afterEach(() => {
 		restoreClock();
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 

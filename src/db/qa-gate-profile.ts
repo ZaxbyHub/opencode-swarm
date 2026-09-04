@@ -11,7 +11,10 @@ import { createHash } from 'node:crypto';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import { warn } from '../utils/logger.js';
-import { applySynchronousForClass, DURABILITY_CLASSES } from './durability.js';
+import {
+	DURABILITY_CLASSES,
+	withImmediateTransaction as withSharedImmediateTransaction,
+} from './durability.js';
 import { getProjectDb, projectDbExists } from './project-db.js';
 
 /**
@@ -191,41 +194,19 @@ function withImmediateTransaction<T>(
 	db: ReturnType<typeof getProjectDb>,
 	fn: () => T,
 ): T {
-	// #2480 obligation 4: qa_gate_profile is a terminal-state table (locked
-	// profiles are immutable) — every write transaction through this shared
-	// path runs at synchronous=FULL and restores the NORMAL default after.
-	applySynchronousForClass(db, DURABILITY_CLASSES.qa_gate_profile);
-	// Test-only observability: the synchronous level observed DURING the most
-	// recent transaction through this helper, so tests can pin the escalation
-	// on the public write paths (implementation-review finding).
-	_internals.lastTxnSynchronous =
-		db.query<{ synchronous: number }, []>('PRAGMA synchronous').get()
-			?.synchronous ?? -1;
-	const restoreSynchronous = (): void => {
-		applySynchronousForClass(db, 'normal');
-	};
-	if (db.inTransaction) {
-		try {
-			return db.transaction(fn)();
-		} finally {
-			restoreSynchronous();
-		}
-	}
-	db.run('BEGIN IMMEDIATE');
-	try {
-		const result = fn();
-		db.run('COMMIT');
-		return result;
-	} catch (err) {
-		try {
-			db.run('ROLLBACK');
-		} catch {
-			// Ignore rollback failures; surface the original error below.
-		}
-		throw err;
-	} finally {
-		restoreSynchronous();
-	}
+	return withSharedImmediateTransaction(
+		db,
+		DURABILITY_CLASSES.qa_gate_profile,
+		fn,
+		{
+			beforeOuterCommit: (connection) => {
+				_internals.lastTxnSynchronous =
+					connection
+						.query<{ synchronous: number }, []>('PRAGMA synchronous')
+						.get()?.synchronous ?? -1;
+			},
+		},
+	);
 }
 
 function rowToProfile(row: QaGateProfileRow): QaGateProfile {

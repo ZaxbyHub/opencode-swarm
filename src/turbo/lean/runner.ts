@@ -799,7 +799,10 @@ export class LeanTurboRunner {
 									// thrown-exception cleanup in `_doDispatch` so a lane
 									// timeout does not leave those behind alongside the orphan
 									// remote session deleted above.
-									endAgentSession(result.sessionId);
+									endAgentSession(
+										result.sessionId,
+										worktreeDirectory ?? this._directory,
+									);
 								} else {
 									// Timeout hadn't fired yet, clear the pending marker
 									this._timedOutLanes.delete(lane.laneId);
@@ -836,9 +839,9 @@ export class LeanTurboRunner {
 		plan?: Plan,
 	): Promise<LaneDispatchResult> {
 		let sessionId: string | undefined;
+		const effectiveDirectory = worktreeDirectory ?? this._directory;
 		try {
-			// Use worktree directory when provided, otherwise use primary directory
-			const effectiveDirectory = worktreeDirectory ?? this._directory;
+			// Use worktree directory when provided, otherwise use primary directory.
 			// Create ephemeral session
 			const createResult = await session.create({
 				...(this._sessionID
@@ -932,7 +935,7 @@ export class LeanTurboRunner {
 				// no authorizable scope) those clears simply match zero bindings and a
 				// missing map key, so it is safe — but not a no-op in general — to
 				// call unconditionally here.
-				endAgentSession(sessionId);
+				endAgentSession(sessionId, effectiveDirectory);
 				return {
 					ok: false,
 					error: `session.prompt failed: ${typeof promptResult.error === 'string' ? promptResult.error : JSON.stringify(promptResult.error)}`,
@@ -947,7 +950,7 @@ export class LeanTurboRunner {
 				// Same rationale as the session.prompt failure branch above: clear
 				// any lane scope binding + AgentSessionState published for this
 				// session before the exception aborted dispatch.
-				endAgentSession(sessionId);
+				endAgentSession(sessionId, effectiveDirectory);
 			}
 			const msg = err instanceof Error ? err.message : String(err);
 			return { ok: false, error: msg };
@@ -1011,7 +1014,7 @@ export class LeanTurboRunner {
 			// publish attempt is being treated as failed. `endAgentSession` clears
 			// both for this child session id and is a safe no-op if neither was
 			// actually created yet.
-			endAgentSession(childSessionId);
+			endAgentSession(childSessionId, effectiveDirectory);
 			log(
 				`[lean-turbo] lane ${lane.laneId} write authority could not be published: ${reason}`,
 			);

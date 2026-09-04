@@ -20,6 +20,7 @@ import type {
 	SerializedInvocationWindow,
 	SnapshotData,
 } from './snapshot-writer';
+import { SNAPSHOT_PROJECTION_FILE } from './snapshot-writer';
 
 /**
  * Transient session fields that must be reset on rehydration.
@@ -314,43 +315,75 @@ export function deserializeAgentSession(
 export async function readSnapshot(
 	directory: string,
 ): Promise<SnapshotData | null> {
-	try {
-		const resolvedPath = validateSwarmPath(directory, 'session/state.json');
-		const file = bunFile(resolvedPath);
-		const content = await file.text();
+	for (const relativePath of [SNAPSHOT_PROJECTION_FILE, 'session/state.json']) {
+		try {
+			const resolvedPath = validateSwarmPath(directory, relativePath);
+			const file = bunFile(resolvedPath);
+			const content = await file.text();
 
-		// Check if file is empty or just whitespace
-		if (!content.trim()) {
-			return null;
-		}
-
-		const parsed = JSON.parse(content, (key, value) => {
-			if (key === '__proto__' || key === 'constructor') return undefined;
-			return value;
-		}) as SnapshotData;
-
-		// Validate version — quarantine incompatible snapshots so they are not
-		// re-read on every subsequent restart.
-		if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) {
-			try {
-				const quarantinePath = validateSwarmPath(
-					directory,
-					'session/state.json.quarantine',
-				);
-				// Rename the stale file.  Errors are swallowed — the important
-				// thing is that we return null so the caller starts fresh.
-				renameSync(resolvedPath, quarantinePath);
-			} catch {
-				// Quarantine rename failed — not fatal, still return null below.
+			// Check if file is empty or just whitespace
+			if (!content.trim()) {
+				continue;
 			}
-			return null;
-		}
 
-		return parsed;
-	} catch {
-		// File doesn't exist, parse fails, or any other error - return null
-		return null;
+			const parsed = JSON.parse(content, (key, value) => {
+				if (key === '__proto__' || key === 'constructor') return undefined;
+				return value;
+			}) as SnapshotData;
+
+			// Validate version — quarantine incompatible snapshots so they are not
+			// re-read on every subsequent restart.
+			if (
+				parsed.version !== 1 &&
+				parsed.version !== 2 &&
+				parsed.version !== 3
+			) {
+				try {
+					const quarantinePath = validateSwarmPath(
+						directory,
+						`${relativePath}.quarantine`,
+					);
+					// Rename the stale file. Errors are swallowed; the next candidate
+					// remains eligible as the compatibility fallback.
+					renameSync(resolvedPath, quarantinePath);
+				} catch {
+					// Quarantine rename failed — not fatal; still try the next candidate.
+				}
+				continue;
+			}
+
+			return parsed;
+		} catch {
+			// Try the legacy authority file after a missing/corrupt projection.
+		}
 	}
+	return null;
+}
+
+/** Strict single-candidate reader used by the SQLite import boundary. */
+export async function readSnapshotFileStrict(
+	directory: string,
+	relativePath: string,
+): Promise<SnapshotData> {
+	const resolvedPath = validateSwarmPath(directory, relativePath);
+	const content = await bunFile(resolvedPath).text();
+	if (!content.trim()) throw new Error(`snapshot ${relativePath} is empty`);
+	const parsed = JSON.parse(content, (key, value) => {
+		if (key === '__proto__' || key === 'constructor') return undefined;
+		return value;
+	}) as SnapshotData;
+	if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) {
+		throw new Error(`snapshot ${relativePath} has an unsupported version`);
+	}
+	if (
+		!parsed.toolAggregates ||
+		!parsed.activeAgent ||
+		!parsed.delegationChains ||
+		!parsed.agentSessions
+	) {
+		throw new Error(`snapshot ${relativePath} has an invalid shape`);
+	}
+	return parsed;
 }
 
 /**

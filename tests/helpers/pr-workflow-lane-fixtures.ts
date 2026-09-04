@@ -13,33 +13,25 @@
  * scan; the obligation to freeze belongs to the suites that call in.)
  */
 
-import { appendFileSync } from 'node:fs';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import {
-	BACKGROUND_DELEGATIONS_FILE,
+	appendDelegationTransition,
 	type BackgroundDelegationRecord,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	readDelegations,
 	recordPendingDelegation,
 } from '../../src/background/pending-delegations.js';
-import {
-	_test_exports as gateInternals,
-	type PrWorkflowGateState,
-} from '../../src/hooks/pr-workflow-gate.js';
+import type { PrWorkflowGateState } from '../../src/hooks/pr-workflow-gate.js';
+import { writeAuthoritativePrWorkflowState } from './pr-workflow-state-authority.js';
 
 /** A lane age comfortably past the settlement horizon. */
 export const STALE_LANE_AGE_MS = DEFAULT_STALE_DELEGATION_TIMEOUT_MS + 60_000;
 
-/** Write a raw gate-state record straight to disk (mirrors the abort suite). */
+/** Write a gate-state record through SQLite authority and its compatibility projection. */
 export async function writeRawPrWorkflowGateState(
 	directory: string,
 	sessionID: string,
 	partial: Partial<PrWorkflowGateState>,
 ): Promise<void> {
-	const relative = gateInternals.workflowGateStateRelativePath(sessionID);
-	const absolute = path.join(directory, '.swarm', relative);
-	await fs.mkdir(path.dirname(absolute), { recursive: true });
 	const base: PrWorkflowGateState = {
 		schemaVersion: 1,
 		revision: 0,
@@ -48,11 +40,7 @@ export async function writeRawPrWorkflowGateState(
 		activatedAt: '2026-07-19T00:00:00.000Z',
 		updatedAt: '2026-07-19T00:00:00.000Z',
 	};
-	await fs.writeFile(
-		absolute,
-		JSON.stringify({ ...base, ...partial }, null, 2),
-		'utf-8',
-	);
+	await writeAuthoritativePrWorkflowState(directory, { ...base, ...partial });
 }
 
 /**
@@ -102,25 +90,19 @@ export function laneSubagentSessionId(correlationId: string): string {
  * replacement snapshot — the store folds last-write-wins per correlationId, so
  * this is the same shape a real record takes when its process stops updating.
  */
-export function backdatePrWorkflowLane(
+export async function backdatePrWorkflowLane(
 	directory: string,
 	correlationId: string,
 	ageMs: number,
 	status?: BackgroundDelegationRecord['status'],
-): void {
+): Promise<void> {
 	const record = readDelegations(directory).find(
 		(candidate) => candidate.correlationId === correlationId,
 	) as BackgroundDelegationRecord;
-	const storePath = path.join(directory, '.swarm', BACKGROUND_DELEGATIONS_FILE);
-	appendFileSync(
-		storePath,
-		`${JSON.stringify({
-			...record,
-			status: status ?? record.status,
-			updatedAt: Date.now() - ageMs,
-		})}\n`,
-		'utf-8',
-	);
+	await appendDelegationTransition(directory, correlationId, {
+		status: status ?? record.status,
+		updatedAt: Date.now() - ageMs,
+	});
 }
 
 /** The durable status of one lane record, or `undefined` if absent. */

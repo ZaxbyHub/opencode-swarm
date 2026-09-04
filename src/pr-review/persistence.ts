@@ -26,6 +26,13 @@ import type { BigIntStats } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { ZodError } from 'zod';
+import {
+	deleteCoordinationState,
+	getCoordinationState,
+	importCoordinationOnce,
+	transitionCoordinationState,
+} from '../db/coordination-store.js';
+import type { PrWorkflowGateState } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 
@@ -53,6 +60,8 @@ export function prWorkflowSessionFileStem(sessionID: string): string {
 }
 
 export const WORKFLOW_GATE_DIR = 'pr-workflow-gates';
+const WORKFLOW_STATE_COORDINATION_PREFIX = 'pr-workflow.state';
+const WORKFLOW_STATE_ENTITY_KEY = 'state';
 
 export function workflowGateStateRelativePath(sessionID: string): string {
 	return path.join(
@@ -77,6 +86,24 @@ export function workflowGateStatePath(
 	sessionID: string,
 ): string {
 	return validateSwarmPath(directory, workflowGateStateRelativePath(sessionID));
+}
+
+function workflowGateStateImportedPath(
+	directory: string,
+	sessionID: string,
+): string {
+	return `${workflowGateStatePath(directory, sessionID)}.imported`;
+}
+
+function workflowGateStateProjectionMarkerPath(
+	directory: string,
+	sessionID: string,
+): string {
+	return `${workflowGateStatePath(directory, sessionID)}.sqlite-projection`;
+}
+
+function workflowGateStateCoordinationNamespace(sessionID: string): string {
+	return `${WORKFLOW_STATE_COORDINATION_PREFIX}:${prWorkflowSessionFileStem(sessionID)}`;
 }
 
 function workflowGateStateLockPath(
@@ -490,12 +517,27 @@ export async function writePrWorkflowAtomicJson(
 
 export async function readPrWorkflowGateStateFromDisk<
 	S extends PrWorkflowPersistedStateBase,
->(directory: string, sessionID: string): Promise<S | null> {
-	const filePath = workflowGateStatePath(directory, sessionID);
-	return readPrWorkflowGateStateFileFromDisk<S>(filePath, sessionID);
+>(
+	directory: string,
+	sessionID: string,
+	options: { allowSalvagedImport?: boolean } = {},
+): Promise<S | null> {
+	const authoritative = await readPrWorkflowGateStateFromCoordination<S>(
+		directory,
+		sessionID,
+	);
+	if (authoritative) {
+		await repairImportedWorkflowGateShadow(directory, sessionID, authoritative);
+		return authoritative;
+	}
+	return importLegacyPrWorkflowGateStateIfNeeded<S>(
+		directory,
+		sessionID,
+		options.allowSalvagedImport === true,
+	);
 }
 
-export async function readPrWorkflowGateStateFileFromDisk<
+export async function readPrWorkflowGateStateFileRawFromDisk<
 	S extends PrWorkflowPersistedStateBase,
 >(filePath: string, stateLabel: string): Promise<S | null> {
 	let raw: string;
@@ -523,6 +565,241 @@ export async function readPrWorkflowGateStateFileFromDisk<
 	return parsed.data;
 }
 
+export async function readPrWorkflowGateStateFileFromDisk<
+	S extends PrWorkflowPersistedStateBase,
+>(filePath: string, stateLabel: string): Promise<S | null> {
+	return readPrWorkflowGateStateFileRawFromDisk<S>(filePath, stateLabel);
+}
+
+export async function readPrWorkflowGateStateFromCoordination<
+	S extends PrWorkflowPersistedStateBase,
+>(directory: string, sessionID: string): Promise<S | null> {
+	const decoded = readPrWorkflowGateStateCoordinationRow<S>(
+		directory,
+		sessionID,
+	);
+	return decoded?.state ?? null;
+}
+
+function readPrWorkflowGateStateCoordinationRow<
+	S extends PrWorkflowPersistedStateBase,
+>(
+	directory: string,
+	sessionID: string,
+): { rowRevision: number; state: S } | null {
+	const row = getCoordinationState(
+		directory,
+		workflowGateStateCoordinationNamespace(sessionID),
+		WORKFLOW_STATE_ENTITY_KEY,
+	);
+	if (!row) return null;
+	let parsedJson: unknown;
+	try {
+		parsedJson = JSON.parse(row.payload);
+	} catch {
+		throw new Error(
+			`BLOCKED: PR workflow gate state for session "${sessionID}" is not valid JSON`,
+		);
+	}
+	const bound = requireCodec() as PrReviewStateCodec<S>;
+	const parsed = bound.safeParse(parsedJson);
+	if (!parsed.success || parsed.data.revision !== row.generation) {
+		throw new Error(
+			`BLOCKED: PR workflow gate state for session "${sessionID}" is invalid`,
+		);
+	}
+	return { rowRevision: row.revision, state: parsed.data };
+}
+
+function workflowStateStatus(state: PrWorkflowPersistedStateBase): string {
+	const mode = (state as { mode?: unknown }).mode;
+	return typeof mode === 'string' && mode.trim().length > 0 ? mode : 'active';
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+	try {
+		await fsp.stat(filePath);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+		throw error;
+	}
+}
+
+function serializeWorkflowGateState(
+	state: PrWorkflowPersistedStateBase,
+): string {
+	return JSON.stringify(state, null, 2);
+}
+
+async function readTextFileIfExists(filePath: string): Promise<string | null> {
+	try {
+		return await fsp.readFile(filePath, 'utf8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+}
+
+async function writeProjectionMarker(
+	directory: string,
+	filePath: string,
+): Promise<void> {
+	await ensurePrWorkflowSafeParentDirectory(directory, filePath);
+	await fsp.writeFile(filePath, 'sqlite-projection\n', 'utf8');
+}
+
+async function renameWithRetry(from: string, to: string): Promise<void> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
+		try {
+			await hooks.rename(from, to);
+			return;
+		} catch (error) {
+			lastError = error;
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EBUSY') {
+				throw error;
+			}
+			if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
+				await delay(RENAME_RETRY_DELAY_MS);
+			}
+		}
+	}
+	throw lastError;
+}
+
+async function collisionSafeImportedPath(filePath: string): Promise<string> {
+	const canonical = `${filePath}.imported`;
+	if (!(await fileExists(canonical))) return canonical;
+	for (let suffix = 1; suffix <= 10_000; suffix += 1) {
+		const candidate = `${canonical}.${suffix}`;
+		if (!(await fileExists(candidate))) return candidate;
+	}
+	throw new Error(
+		`No collision-safe archive path available for ${path.basename(filePath)}`,
+	);
+}
+
+async function archiveShadowSource(filePath: string): Promise<void> {
+	if (!(await fileExists(filePath))) return;
+	await renameWithRetry(filePath, await collisionSafeImportedPath(filePath));
+}
+
+async function syncWorkflowGateShadowProjection(
+	directory: string,
+	sessionID: string,
+	state: PrWorkflowPersistedStateBase,
+	options: { archiveLegacy: boolean },
+): Promise<void> {
+	const filePath = workflowGateStatePath(directory, sessionID);
+	if (options.archiveLegacy && (await fileExists(filePath))) {
+		await archiveShadowSource(filePath);
+	}
+	await writeAtomicJson(directory, filePath, state);
+	await writeProjectionMarker(
+		directory,
+		workflowGateStateProjectionMarkerPath(directory, sessionID),
+	);
+}
+
+async function repairImportedWorkflowGateShadow(
+	directory: string,
+	sessionID: string,
+	state: PrWorkflowPersistedStateBase,
+): Promise<void> {
+	const filePath = workflowGateStatePath(directory, sessionID);
+	const markerPath = workflowGateStateProjectionMarkerPath(
+		directory,
+		sessionID,
+	);
+	const live = await readTextFileIfExists(filePath);
+	if (live === null) {
+		await syncWorkflowGateShadowProjection(directory, sessionID, state, {
+			archiveLegacy: false,
+		});
+		return;
+	}
+	const canonicalImportedExists = await fileExists(
+		workflowGateStateImportedPath(directory, sessionID),
+	);
+	const markerExists = await fileExists(markerPath);
+	const projected = serializeWorkflowGateState(state);
+	if (canonicalImportedExists && markerExists && live === projected) return;
+	if (canonicalImportedExists && live === projected) {
+		await writeProjectionMarker(directory, markerPath);
+		return;
+	}
+	await syncWorkflowGateShadowProjection(directory, sessionID, state, {
+		archiveLegacy: true,
+	});
+}
+
+async function importLegacyPrWorkflowGateStateIfNeeded<
+	S extends PrWorkflowPersistedStateBase,
+>(
+	directory: string,
+	sessionID: string,
+	allowSalvagedImport = false,
+): Promise<S | null> {
+	const filePath = workflowGateStatePath(directory, sessionID);
+	let raw: string;
+	try {
+		raw = await fsp.readFile(filePath, 'utf-8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+	const legacy = allowSalvagedImport
+		? ((
+				await (
+					await import('../hooks/pr-workflow-gate.js')
+				).readPrWorkflowGateStateForRecovery(directory, sessionID)
+			)?.state ?? null)
+		: await readPrWorkflowGateStateFileFromDisk<S>(filePath, sessionID);
+	if (!legacy) return null;
+	const namespace = workflowGateStateCoordinationNamespace(sessionID);
+	const outcome = importCoordinationOnce(
+		directory,
+		{
+			source: workflowGateStateRelativePath(sessionID),
+			sourceDigest: createHash('sha256').update(raw).digest('hex'),
+			rowCount: 1,
+			emptyNamespace: namespace,
+		},
+		() => {
+			const result = transitionCoordinationState(directory, {
+				namespace,
+				entityKey: WORKFLOW_STATE_ENTITY_KEY,
+				expectedRevision: null,
+				generation: legacy.revision,
+				status: workflowStateStatus(legacy),
+				payload: JSON.stringify(legacy),
+			});
+			if (result.outcome !== 'applied') {
+				throw new Error(
+					`PR workflow gate state import failed: ${result.outcome}`,
+				);
+			}
+		},
+	);
+	const authoritative = await readPrWorkflowGateStateFromCoordination<S>(
+		directory,
+		sessionID,
+	);
+	if (authoritative && outcome === 'imported') {
+		await syncWorkflowGateShadowProjection(
+			directory,
+			sessionID,
+			authoritative,
+			{
+				archiveLegacy: true,
+			},
+		);
+	}
+	return authoritative;
+}
+
 // ---------------------------------------------------------------------------
 // CAS write
 // ---------------------------------------------------------------------------
@@ -537,10 +814,21 @@ export async function writeStateWhileLocked<
 ): Promise<S> {
 	const bound = requireCodec() as PrReviewStateCodec<S>;
 	const validated = bound.parse(state);
-	const current = await readPrWorkflowGateStateFromDisk<S>(
+	let currentAuthoritative = readPrWorkflowGateStateCoordinationRow<S>(
 		directory,
 		validated.sessionID,
 	);
+	let current = currentAuthoritative?.state ?? null;
+	if (!current) {
+		current = await readPrWorkflowGateStateFromDisk<S>(
+			directory,
+			validated.sessionID,
+		);
+		currentAuthoritative = readPrWorkflowGateStateCoordinationRow<S>(
+			directory,
+			validated.sessionID,
+		);
+	}
 	if (
 		current ? current.revision !== validated.revision : validated.revision !== 0
 	) {
@@ -561,10 +849,100 @@ export async function writeStateWhileLocked<
 		...validated,
 		revision: validated.revision + 1,
 	});
-	const filePath = workflowGateStatePath(directory, validated.sessionID);
-	await writeAtomicJson(directory, filePath, nextState);
+	const result = transitionCoordinationState(directory, {
+		namespace: workflowGateStateCoordinationNamespace(validated.sessionID),
+		entityKey: WORKFLOW_STATE_ENTITY_KEY,
+		expectedRevision: currentAuthoritative?.rowRevision ?? null,
+		generation: nextState.revision,
+		status: workflowStateStatus(nextState),
+		payload: JSON.stringify(nextState),
+	});
+	if (result.outcome !== 'applied') {
+		throw new Error(
+			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
+		);
+	}
+	await syncWorkflowGateShadowProjection(
+		directory,
+		validated.sessionID,
+		nextState,
+		{ archiveLegacy: false },
+	);
 	rememberState(directory, nextState);
 	return nextState;
+}
+
+/** Remove authoritative PR workflow state while the session mutation lock is held. */
+export async function deleteStateWhileLocked(
+	directory: string,
+	sessionID: string,
+	options: {
+		expectedStateRevision?: number;
+		allowSalvagedRead?: boolean;
+	} = {},
+): Promise<void> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	let currentAuthoritative = readPrWorkflowGateStateCoordinationRow(
+		directory,
+		normalizedSessionID,
+	);
+	let recoveryState: PrWorkflowGateState | null = null;
+	if (!currentAuthoritative) {
+		if (options.allowSalvagedRead) {
+			const { readPrWorkflowGateStateForRecovery } = await import(
+				'../hooks/pr-workflow-gate.js'
+			);
+			recoveryState =
+				(
+					await readPrWorkflowGateStateForRecovery(
+						directory,
+						normalizedSessionID,
+					)
+				)?.state ?? null;
+		}
+		if (!recoveryState) {
+			await readPrWorkflowGateStateFromDisk(directory, normalizedSessionID, {
+				allowSalvagedImport: options.allowSalvagedRead === true,
+			});
+			currentAuthoritative = readPrWorkflowGateStateCoordinationRow(
+				directory,
+				normalizedSessionID,
+			);
+		}
+	}
+	const currentRevision =
+		currentAuthoritative?.state.revision ?? recoveryState?.revision;
+	if (
+		options.expectedStateRevision !== undefined &&
+		currentRevision !== options.expectedStateRevision
+	) {
+		throw new Error(
+			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
+		);
+	}
+	if (currentAuthoritative) {
+		const deleted = deleteCoordinationState(
+			directory,
+			workflowGateStateCoordinationNamespace(normalizedSessionID),
+			WORKFLOW_STATE_ENTITY_KEY,
+			currentAuthoritative.rowRevision,
+		);
+		if (!deleted) {
+			throw new Error(
+				'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
+			);
+		}
+	}
+	try {
+		await fsp.rm(workflowGateStatePath(directory, normalizedSessionID), {
+			force: true,
+		});
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+			throw error;
+		}
+	}
+	forgetTrackedPrWorkflowState(directory, normalizedSessionID);
 }
 
 // ---------------------------------------------------------------------------

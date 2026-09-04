@@ -29,6 +29,10 @@ import { derivePlanId } from '../../../src/plan/utils.js';
 import * as actualState from '../../../src/state.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
+const realSnapshotWriter = await import(
+	'../../../src/session/snapshot-writer.js'
+);
+
 // ── Mocks (must precede the dynamic import) ──────────────────────────
 
 const mockExecuteWriteRetro = mock(async (_args: unknown, _directory: string) =>
@@ -59,6 +63,7 @@ mock.module('../../../src/evidence/manager.js', () => ({
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
+	...realSnapshotWriter,
 	flushPendingSnapshot: mockFlushPendingSnapshot,
 }));
 

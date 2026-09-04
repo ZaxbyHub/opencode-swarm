@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	clearScopeBindings,
 	createClaimedScopeBinding,
@@ -73,6 +74,7 @@ function declaration(
 
 afterEach(() => {
 	clearScopeBindings();
+	closeAllProjectDbs();
 	for (const root of roots.splice(0))
 		fs.rmSync(root, { recursive: true, force: true });
 });
@@ -128,7 +130,9 @@ describe('scope binding migration and declaration replacement', () => {
 			false,
 		);
 		expect(
-			names.filter((name) => name.startsWith('binding-1.1-')),
+			names.filter(
+				(name) => name.startsWith('binding-1.1-') && name.endsWith('.json'),
+			),
 		).toHaveLength(1);
 		expect(
 			fs

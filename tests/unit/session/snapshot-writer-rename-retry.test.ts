@@ -20,13 +20,14 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
-	rmSync,
 	writeFileSync,
 } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { ensureSnapshotCoordinationReady } from '../../../src/session/snapshot-coordination-init';
 import {
 	_internals,
+	SNAPSHOT_PROJECTION_FILE,
 	SNAPSHOT_RENAME_MAX_ATTEMPTS,
 	type SnapshotData,
 	writeSnapshot,
@@ -36,6 +37,7 @@ import {
 	readCachedTextFile,
 	resetSwarmArtifactCache,
 } from '../../../src/utils/swarm-artifact-cache';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let testDir: string;
@@ -71,13 +73,14 @@ afterEach(() => {
 	artifactCacheInternals.stat = originalCacheStat;
 	resetSwarmArtifactCache();
 	if (existsSync(testDir)) {
-		rmSync(testDir, { recursive: true, force: true });
+		safeRmRecursive(testDir);
 	}
 });
 
 describe('writeSnapshot — regression: transient rename failure must not drop the snapshot (bun-compat parity)', () => {
 	const sessionDir = () => path.join(testDir, '.swarm', 'session');
-	const statePath = () => path.join(sessionDir(), 'state.json');
+	const statePath = () =>
+		path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 
 	it.each([
 		'EEXIST',
@@ -142,11 +145,24 @@ describe('writeSnapshot — regression: transient rename failure must not drop t
 		// under a frozen stamp the cache can only miss if the entry was
 		// dropped, so a directRead the file never contains proves invalidation.
 		mkdirSync(sessionDir(), { recursive: true });
-		writeFileSync(statePath(), 'OLD SNAPSHOT', 'utf-8');
+		// Warm the per-directory coordination entry before intercepting the
+		// projection rename; initialization has its own projection write and is
+		// outside this retry unit's call-count contract.
+		await ensureSnapshotCoordinationReady(testDir);
+		const oldSnapshot: SnapshotData = {
+			version: 3,
+			writtenAt: 1_700_000_000_000,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		};
+		const oldSnapshotText = JSON.stringify(oldSnapshot);
+		writeFileSync(statePath(), oldSnapshotText, 'utf-8');
 		const primed = await readCachedTextFile(statePath(), async () =>
 			readFileSync(statePath(), 'utf-8'),
 		);
-		expect(primed).toBe('OLD SNAPSHOT');
+		expect(primed).toBe(oldSnapshotText);
 		const frozenStat = await fsp.stat(statePath());
 		artifactCacheInternals.stat = (async () =>
 			frozenStat) as typeof artifactCacheInternals.stat;

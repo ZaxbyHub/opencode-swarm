@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createSwarmCommandHandler } from '../../../src/commands/index.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	readPrWorkflowGateState,
@@ -70,6 +71,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
+	closeAllProjectDbs();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

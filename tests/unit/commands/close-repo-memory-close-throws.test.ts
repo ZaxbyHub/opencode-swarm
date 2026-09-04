@@ -27,6 +27,10 @@ import * as actualIndexedStorage from '../../../src/tools/repo-graph/indexed-sto
 import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
+const realSnapshotWriter = await import(
+	'../../../src/session/snapshot-writer.js'
+);
+
 // Deterministic fixture instant (explicit-arg Date constructor, not a raw
 // clock read — see docs/testing/test-stability.md, issue #1782).
 const FIXED_NOW_ISO = new Date('2026-01-01T00:00:00.000Z').toISOString();
@@ -45,6 +49,7 @@ mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mock(async () => {}),
 }));
 mock.module('../../../src/session/snapshot-writer.js', () => ({
+	...realSnapshotWriter,
 	flushPendingSnapshot: mock(async () => {}),
 }));
 mock.module('../../../src/state.js', () => ({

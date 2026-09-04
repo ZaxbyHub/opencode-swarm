@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
+import { closeAllProjectDbs } from '../../src/db/project-db.js';
 import {
 	ensureAgentSession,
 	recordPhaseAgentDispatch,
@@ -12,8 +12,6 @@ import {
 import { executePhaseComplete } from '../../src/tools/phase-complete';
 
 /**
- * E2E phase completion validation test.
- *
  * Tests the v6.36 architecture change where:
  * 1. architect delegates to critic_drift_verifier BEFORE calling phase_complete
  * 2. critic_drift_verifier writes .swarm/evidence/{phase}/drift-verifier.json with verdict='approved'
@@ -77,6 +75,7 @@ describe('phase_complete E2E — drift evidence → phase_complete reads it and 
 		try {
 			return await fn(dir);
 		} finally {
+			closeAllProjectDbs();
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	}

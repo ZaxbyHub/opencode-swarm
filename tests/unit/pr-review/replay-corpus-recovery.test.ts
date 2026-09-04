@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -11,6 +10,7 @@ import {
 	PR_ARTIFACT_HEAD_SHA,
 	PR_ARTIFACT_SESSION_ID,
 } from '../../helpers/pr-review-artifact-fixtures.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
@@ -71,13 +71,7 @@ async function armWorkflow(): Promise<{ generation: number; id: string }> {
 			validatedAt: '2026-01-01T00:00:00.000Z',
 		},
 	};
-	const statePath = path.join(
-		directory,
-		'.swarm',
-		_test_exports.workflowGateStateRelativePath(PR_ARTIFACT_SESSION_ID),
-	);
-	await fs.mkdir(path.dirname(statePath), { recursive: true });
-	await fs.writeFile(statePath, JSON.stringify(armed), 'utf8');
+	await writeAuthoritativePrWorkflowState(directory, armed);
 	_test_exports.resetTrackedStateCache();
 	return { generation: armed.revision, id: armed.workflowInstanceId ?? '' };
 }

@@ -22,6 +22,10 @@ import { savePlan } from '../../../src/plan/manager.js';
 import * as actualState from '../../../src/state.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
+const realSnapshotWriter = await import(
+	'../../../src/session/snapshot-writer.js'
+);
+
 // Mirror the mock.module setup used by close-cleanup.test.ts so
 // handleCloseCommand runs without LLM/git side effects.
 mock.module('../../../src/tools/write-retro.js', () => ({
@@ -38,6 +42,7 @@ mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mock(async () => {}),
 }));
 mock.module('../../../src/session/snapshot-writer.js', () => ({
+	...realSnapshotWriter,
 	flushPendingSnapshot: mock(async () => {}),
 }));
 mock.module('../../../src/state.js', () => ({

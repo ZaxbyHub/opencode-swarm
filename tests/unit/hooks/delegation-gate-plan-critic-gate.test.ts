@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { _internals as delegationGateInternals } from '../../../src/hooks/delegation-gate';
 import {
 	computePlanStructureHash,
@@ -47,7 +48,6 @@ function makePlan(overrides?: Partial<Plan>): Plan {
 		...overrides,
 	};
 }
-
 async function writePlan(dir: string, plan: Plan): Promise<void> {
 	await mkdir(join(dir, '.swarm'), { recursive: true });
 	writeFileSync(
@@ -56,7 +56,6 @@ async function writePlan(dir: string, plan: Plan): Promise<void> {
 	);
 	await initLedger(dir, derivePlanId(plan));
 }
-
 function coderDispatch(sessionID = 'session-plan-critic-gate') {
 	return {
 		input: {
@@ -98,8 +97,9 @@ describe('delegation gate plan critic approval', () => {
 
 	afterEach(async () => {
 		resetSwarmState();
+		closeAllProjectDbs();
 		if (dir && existsSync(dir)) {
-			await rm(dir, { recursive: true, force: true });
+			(await import('../../helpers/safe-test-dir.js')).safeRmRecursive(dir);
 		}
 	});
 

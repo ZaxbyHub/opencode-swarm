@@ -2,14 +2,10 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readFileSync,
-	realpathSync,
-	rmSync,
 	statSync,
 	writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { storeLaneOutput } from '../../../src/background/lane-output-store';
 import {
@@ -29,14 +25,16 @@ import {
 	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate';
+import { writeStateWhileLocked } from '../../../src/pr-review/persistence';
 import {
 	executeWritePrReviewTriggerEval,
 	PR_REVIEW_TRIGGER_DEFINITIONS,
 	_internals as writerInternals,
 } from '../../../src/tools/write-pr-review-trigger-eval';
+import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 
-const tempDirs: string[] = [];
+const tempDirs: Array<() => void> = [];
 const SESSION_ID = 'trigger-eval-run-binding';
 const HEAD_SHA = 'abc123';
 const REVISION_DIGEST = 'review-revision';
@@ -57,10 +55,10 @@ const originalMarkTriggerEvaluationComplete =
 	writerInternals.markPrReviewTriggerEvaluationComplete;
 
 function tempRoot(): string {
-	const root = realpathSync(mkdtempSync(join(tmpdir(), 'trigger-eval-bind-')));
-	mkdirSync(join(root, '.git'), { recursive: true });
-	tempDirs.push(root);
-	return root;
+	const { dir, cleanup } = createSafeTestDir('trigger-eval-bind-');
+	mkdirSync(join(dir, '.git'), { recursive: true });
+	tempDirs.push(cleanup);
+	return dir;
 }
 
 function artifactPath(root: string, runId: string): string {
@@ -231,10 +229,21 @@ afterEach(() => {
 	writerInternals.resolveMergeBase = originalResolveMergeBase;
 	writerInternals.markPrReviewTriggerEvaluationComplete =
 		originalMarkTriggerEvaluationComplete;
-	for (const dir of tempDirs.splice(0)) {
-		rmSync(dir, { recursive: true, force: true });
+	for (const cleanup of tempDirs.splice(0)) {
+		cleanup();
 	}
 });
+
+async function bindFindingsRun(root: string, runId: string): Promise<void> {
+	const state = await readPrWorkflowGateState(root, SESSION_ID);
+	if (!state) {
+		throw new Error('expected bound PR_REVIEW state');
+	}
+	await writeStateWhileLocked(root, {
+		...state,
+		prReviewArtifactRunId: runId,
+	});
+}
 
 async function writeTriggerEval(
 	root: string,
@@ -368,11 +377,7 @@ describe('write_pr_review_trigger_eval — run_id binding + fail-closed receipt 
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
 
-		const stateRel = gateInternals.workflowGateStateRelativePath(SESSION_ID);
-		const stateAbs = join(root, '.swarm', stateRel);
-		const state = JSON.parse(readFileSync(stateAbs, 'utf-8'));
-		state.prReviewArtifactRunId = 'findings-run';
-		writeFileSync(stateAbs, JSON.stringify(state));
+		await bindFindingsRun(root, 'findings-run');
 		gateInternals.resetTrackedStateCache();
 
 		const result = await writeTriggerEval(root, 'trigger-run');
@@ -473,11 +478,7 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
 
-		const stateRel = gateInternals.workflowGateStateRelativePath(SESSION_ID);
-		const stateAbs = join(root, '.swarm', stateRel);
-		const state = JSON.parse(readFileSync(stateAbs, 'utf-8'));
-		state.prReviewArtifactRunId = 'findings-bound-run';
-		writeFileSync(stateAbs, JSON.stringify(state));
+		await bindFindingsRun(root, 'findings-bound-run');
 		gateInternals.resetTrackedStateCache();
 
 		await expect(
@@ -494,7 +495,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 		expect(after?.prReviewTriggerEvalPath).toBeUndefined();
 	});
 });
-
 function statMtimeMs(p: string): number {
 	return statSync(p).mtimeMs;
 }

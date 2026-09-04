@@ -7,7 +7,6 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -19,6 +18,8 @@ import {
 	subscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
+import { bunSpawn } from '../../../src/utils/bun-compat.js';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -63,13 +64,14 @@ function spawnChild(
 	};
 	// Array-form spawn, stdin ignored, spawn-level timeout, bounded output
 	// (Invariant 3).
-	const proc = Bun.spawn(['bun', '-e', CHILD_SCRIPT], {
+	const proc = bunSpawn([process.execPath, '-e', CHILD_SCRIPT], {
 		cwd: process.cwd(),
 		env,
 		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
 		timeout: CHILD_TIMEOUT_MS,
+		killProcessTree: true,
 	});
 	return proc;
 }
@@ -102,6 +104,7 @@ describe('pr-subscriptions multi-process serialization', () => {
 		dir = makeTempProject();
 	});
 	afterEach(() => {
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -159,7 +162,7 @@ describe('pr-subscriptions multi-process serialization', () => {
 			} finally {
 				// Best-effort kill in finally (Invariant 3).
 				try {
-					child.kill();
+					await child.killTree?.();
 				} catch {
 					/* already exited */
 				}
@@ -185,7 +188,7 @@ describe('pr-subscriptions multi-process serialization', () => {
 		CHILD_TIMEOUT_MS + 30_000,
 	);
 
-	test('an external unlocked writer appending to a checkpointed store is folded on read', async () => {
+	test('an external unlocked writer appending to a checkpointed shadow is ignored and rewritten from SQLite', async () => {
 		await subscribe(dir, {
 			sessionID: 'sess_1',
 			prNumber: 1,
@@ -220,8 +223,10 @@ describe('pr-subscriptions multi-process serialization', () => {
 			fs.appendFileSync(legacy, `${JSON.stringify(external)}\n`, 'utf-8');
 
 			const active = await listActive(dir);
-			expect(active).toHaveLength(2);
-			expect(active.some((r) => r.sessionID === 'sess_ext')).toBe(true);
+			expect(active).toHaveLength(1);
+			expect(active.some((r) => r.sessionID === 'sess_ext')).toBe(false);
+			expect(fs.existsSync(legacy)).toBe(false);
+			expect(fs.existsSync(`${legacy}.imported`)).toBe(true);
 		} finally {
 			restore();
 		}

@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { mkdtempSync, realpathSync } from 'node:fs';
-import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -14,6 +13,7 @@ import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
 import {
 	installLegacyPrReviewPolicy,
@@ -103,7 +103,7 @@ afterEach(async () => {
 	dispatchInternals.resolveExactMergeBaseAsync = originalResolveMergeBaseAsync;
 	restorePrReviewPolicy();
 	dispatchInternals.getSessionOps = originalGetSessionOps;
-	await fs.rm(directory, { recursive: true, force: true });
+	safeRmRecursive(directory);
 });
 
 describe('dispatch_lanes PR workflow enforcement', () => {

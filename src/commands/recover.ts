@@ -1,4 +1,5 @@
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
+import { retrySnapshotCoordinationInitialization } from '../session/snapshot-coordination-init.js';
 import {
 	listCoderSettlementWalStates,
 	recoverStaleCoderSettlements,
@@ -88,6 +89,23 @@ export async function handleRecoverCommand(
 	args: string[],
 ): Promise<string> {
 	const force = args.includes('--force');
+	if (args.includes('--coordination')) {
+		try {
+			await retrySnapshotCoordinationInitialization(directory);
+			return [
+				'## SQLite Coordination Recovery',
+				'',
+				'✅ Coordination initialization/import completed successfully.',
+			].join('\n');
+		} catch (err) {
+			return [
+				'## SQLite Coordination Recovery',
+				'',
+				`❌ Recovery refused or failed: ${sanitizeDiagnosticText(err instanceof Error ? err.message : String(err), 512)}`,
+				'If an earlier attempt timed out, wait for that underlying attempt to settle before retrying; it is never abandoned or run concurrently.',
+			].join('\n');
+		}
+	}
 	const positional = args.filter((arg) => !arg.startsWith('--'));
 	const taskId = positional[0];
 	if (positional.length > 1) {

@@ -18,6 +18,10 @@ import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
+const realSnapshotWriter = await import(
+	'../../../src/session/snapshot-writer.js'
+);
+
 type CloseModule = typeof import('../../../src/commands/close.js');
 
 type MockSwarmState = {
@@ -245,6 +249,7 @@ export async function initializeCloseFinalizerHarness(): Promise<{
 	}));
 
 	mock.module('../../../src/session/snapshot-writer.js', () => ({
+		...realSnapshotWriter,
 		flushPendingSnapshot: mockFlushPendingSnapshot,
 		writeSnapshot: async () => {},
 	}));

@@ -39,9 +39,9 @@ const mockRunSkillImprover = mock(async () => ({
 mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mockArchiveEvidence,
 }));
-
 mock.module('../../../src/session/snapshot-writer.js', () => ({
 	flushPendingSnapshot: mockFlushPendingSnapshot,
+	SNAPSHOT_PROJECTION_FILE: 'session/state.sqlite-projection.json',
 }));
 
 mock.module('../../../src/plan/checkpoint.js', () => ({

@@ -406,5 +406,7 @@ describe('PR-review collection receipt footer', () => {
 			}
 			expect(reloadedShedMarkerCount).toBe(shedMarkerCount);
 		});
-	}, 15_000);
+		// This intentionally large receipt corpus performs hundreds of SQLite-backed
+		// transitions; allow slower Windows/macOS runners while keeping the test bounded.
+	}, 30_000);
 });

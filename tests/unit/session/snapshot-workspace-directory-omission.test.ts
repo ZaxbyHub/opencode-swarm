@@ -28,6 +28,7 @@ import {
 	TRANSIENT_SESSION_FIELDS,
 } from '../../../src/session/snapshot-reader.js';
 import {
+	SNAPSHOT_PROJECTION_FILE,
 	serializeAgentSession,
 	writeSnapshot,
 } from '../../../src/session/snapshot-writer.js';
@@ -97,7 +98,7 @@ describe('workspaceDirectory is deliberately not persisted (issue #2002)', () =>
 		// — not just that the typed field is absent from the writer's return
 		// value, but that nothing downstream (e.g. a stray string field) leaked
 		// it into the actual bytes written to .swarm/.
-		const statePath = join(tempDir, '.swarm', 'session', 'state.json');
+		const statePath = join(tempDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 		const raw = readFileSync(statePath, 'utf8');
 		expect(raw).not.toContain('lane-root-marker');
 

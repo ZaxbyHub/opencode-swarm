@@ -7,6 +7,7 @@ import {
 	appendDelegationTransition,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -119,6 +120,7 @@ export async function teardownPrWorkflowGateFixtures(): Promise<void> {
 		originalResolveRemoteRefsContainingHeadAsync;
 	_test_exports.resolvePrReviewDiffStatsAsync =
 		originalResolvePrReviewDiffStatsAsync;
+	closeAllProjectDbs();
 	await fs.rm(tempDir, { recursive: true, force: true });
 }
 

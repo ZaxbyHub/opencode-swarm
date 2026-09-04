@@ -15,6 +15,7 @@ import {
 	subscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 
 function makeTempProject(): string {
 	const dir = canonicalMkdtemp('swarm-pr-sub-rcv-');
@@ -95,6 +96,7 @@ describe('pr-subscriptions recovery slots', () => {
 		currentDir = dirPath;
 	});
 	afterEach(() => {
+		closeAllProjectDbs();
 		fs.rmSync(dirPath, { recursive: true, force: true });
 	});
 

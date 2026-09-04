@@ -15,9 +15,14 @@ import {
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
+import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
 
@@ -81,14 +86,15 @@ async function removeDelegationStore(root: string) {
 
 async function writeWorkflowGateState(
 	sessionID: string,
-	state: Record<string, unknown>,
+	transform: (
+		current: NonNullable<Awaited<ReturnType<typeof readPrWorkflowGateState>>>,
+	) => NonNullable<Awaited<ReturnType<typeof readPrWorkflowGateState>>>,
 ) {
-	const statePath = path.join(
-		directory,
-		'.swarm',
-		gateInternals.workflowGateStateRelativePath(sessionID),
-	);
-	await fs.writeFile(statePath, JSON.stringify(state, null, 2), 'utf-8');
+	await withSessionStateMutation(directory, sessionID, async () => {
+		const current = await readPrWorkflowGateState(directory, sessionID);
+		if (!current) throw new Error('missing active workflow state');
+		await writeStateWhileLocked(directory, transform(current));
+	});
 	gateInternals.resetTrackedStateCache();
 }
 
@@ -152,7 +158,7 @@ afterEach(async () => {
 	gateInternals.resolvePrReviewDiffStats = originalResolveDiffStats;
 	gateInternals.resolvePrReviewDiffStatsAsync = originalResolveDiffStatsAsync;
 	gateInternals.nowMs = originalNowMs;
-	await fs.rm(directory, { recursive: true, force: true });
+	safeRmRecursive(directory);
 });
 
 describe('dispatch_lanes PR review resilience circuit bounds', () => {
@@ -231,8 +237,8 @@ describe('dispatch_lanes PR review resilience circuit bounds', () => {
 		);
 		expect(seededRecords).toHaveLength(132);
 
-		await writeWorkflowGateState(sessionID, {
-			...seedState,
+		await writeWorkflowGateState(sessionID, (current) => ({
+			...current,
 			updatedAt: '2026-08-23T01:00:00.000Z',
 			prReviewBaseDispatches: seededBatches,
 			prReviewBaseDispatch: seededBatches.at(-1),
@@ -260,7 +266,7 @@ describe('dispatch_lanes PR review resilience circuit bounds', () => {
 					openedAt: '2026-08-23T00:30:00.000Z',
 				},
 			},
-		});
+		}));
 		await clearDelegationCheckpointArtifacts(directory);
 		await fs.writeFile(
 			path.join(directory, '.swarm', BACKGROUND_DELEGATIONS_FILE),
@@ -346,42 +352,35 @@ describe('dispatch_lanes PR review resilience circuit bounds', () => {
 			gateInternals.MAX_WORKFLOW_BATCHES * PR_REVIEW_BASE_DIMENSION_IDS.length,
 		);
 
-		const statePath = path.join(
-			directory,
-			'.swarm',
-			gateInternals.workflowGateStateRelativePath(sessionID),
-		);
-		const persisted = JSON.parse(
-			await fs.readFile(statePath, 'utf-8'),
-		) as Record<string, unknown>;
-		persisted.prReviewResilience = {
-			policy: {
-				enabled: true,
-				canaryProbeMs: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.canary_probe_ms,
-				statusProbeTimeoutMs:
-					DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.status_probe_timeout_ms,
-				correlatedFailureThreshold:
-					DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.correlated_failure_threshold,
-				maxRetryAttemptsAfterInitial:
-					DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.max_retry_attempts_after_initial,
+		await writeWorkflowGateState(sessionID, (current) => ({
+			...current,
+			prReviewResilience: {
+				policy: {
+					enabled: true,
+					canaryProbeMs: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.canary_probe_ms,
+					statusProbeTimeoutMs:
+						DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.status_probe_timeout_ms,
+					correlatedFailureThreshold:
+						DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.correlated_failure_threshold,
+					maxRetryAttemptsAfterInitial:
+						DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.max_retry_attempts_after_initial,
+				},
+				attempts: [],
+				circuit: {
+					version: 2,
+					state: 'OPEN',
+					generation: 1,
+					providerClass: 'provider.rate_limit',
+					contributors: Array.from({ length: maxContributors }, (_, index) => ({
+						batchId: `batch-${Math.floor(index / PR_REVIEW_BASE_DIMENSION_IDS.length)}`,
+						laneId: `lane-${index}`,
+						terminalAt: '2026-08-23T00:00:00.000Z',
+					})),
+					openedAt: '2026-08-23T00:00:00.000Z',
+					openUntil: '2026-08-23T00:01:00.000Z',
+				},
 			},
-			attempts: [],
-			circuit: {
-				version: 2,
-				state: 'OPEN',
-				generation: 1,
-				providerClass: 'provider.rate_limit',
-				contributors: Array.from({ length: maxContributors }, (_, index) => ({
-					batchId: `batch-${Math.floor(index / PR_REVIEW_BASE_DIMENSION_IDS.length)}`,
-					laneId: `lane-${index}`,
-					terminalAt: '2026-08-23T00:00:00.000Z',
-				})),
-				openedAt: '2026-08-23T00:00:00.000Z',
-				openUntil: '2026-08-23T00:01:00.000Z',
-			},
-		};
-		await fs.writeFile(statePath, JSON.stringify(persisted, null, 2), 'utf-8');
-		gateInternals.resetTrackedStateCache();
+		}));
 
 		const reloaded = await readPrWorkflowGateState(directory, sessionID);
 		const circuit = reloaded?.prReviewResilience?.circuit;

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import type { PluginConfig } from '../../../src/config';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
@@ -48,6 +49,7 @@ afterEach(async () => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	gateInternals.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
+	closeAllProjectDbs();
 	await fs.rm(tmpDir, { recursive: true, force: true });
 });
 

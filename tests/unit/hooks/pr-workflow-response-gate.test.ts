@@ -14,6 +14,7 @@ import {
 	_test_exports as workflowInternals,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import { createPrWorkflowResponseGate } from '../../../src/hooks/pr-workflow-response-gate.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 
 let directory = '';
 
@@ -37,9 +38,6 @@ async function writeStateWithRevision(
 	sessionID: string,
 	revision: number,
 ): Promise<void> {
-	const relative = workflowInternals.workflowGateStateRelativePath(sessionID);
-	const absolute = path.join(directory, '.swarm', relative);
-	await fs.mkdir(path.dirname(absolute), { recursive: true });
 	const state: PrWorkflowGateState = {
 		schemaVersion: 1,
 		revision,
@@ -48,7 +46,7 @@ async function writeStateWithRevision(
 		activatedAt: '2026-07-19T00:00:00.000Z',
 		updatedAt: '2026-07-19T00:00:00.000Z',
 	};
-	await fs.writeFile(absolute, JSON.stringify(state, null, 2), 'utf-8');
+	await writeAuthoritativePrWorkflowState(directory, state);
 }
 
 describe('PR workflow response-level gate', () => {

@@ -968,7 +968,9 @@ export function feedbackArtifactCoversItems(
 	const record = findByBatchId(directory, batchId, {
 		parentSessionId: state.sessionID,
 	}).find((candidate) => candidate.laneId === laneId);
-	const ref = record?.result?.outputRef?.trim();
+	const ref =
+		record?.result?.outputRef?.trim() ??
+		record?.terminalResult?.result.outputRef?.trim();
 	const loaded = ref ? readLaneOutput(directory, ref) : null;
 	if (!loaded) return false;
 	const rows = loaded.artifact.text
@@ -1022,7 +1024,9 @@ export function readSettledFeedbackClassifications(
 			const delegation = findByBatchId(directory, record.batchId, {
 				parentSessionId: state.sessionID,
 			}).find((candidate) => candidate.laneId === ownership.laneId);
-			const ref = delegation?.result?.outputRef?.trim();
+			const ref =
+				delegation?.result?.outputRef?.trim() ??
+				delegation?.terminalResult?.result.outputRef?.trim();
 			const loaded = ref ? readLaneOutput(directory, ref) : null;
 			if (!loaded) continue;
 			for (const line of loaded.artifact.text.split(/\r?\n/)) {

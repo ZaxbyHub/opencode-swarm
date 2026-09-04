@@ -11,6 +11,7 @@ import {
 	subscribe,
 	unsubscribe,
 } from '../../../src/background/pr-subscriptions';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function makeTempProject(): string {
@@ -44,6 +45,7 @@ describe('pr-subscriptions post-review hardening', () => {
 	afterEach(() => {
 		_internals.auditCompactionWrite = realAuditCompactionWrite;
 		_internals.statSync = realStatSync;
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -91,12 +93,25 @@ describe('pr-subscriptions post-review hardening', () => {
 	});
 
 	test('filesystem failures expose only a stable error code to callers', async () => {
-		const record = await subscribe(dir, input('session-1', 1));
-		const checkpoint = JSON.parse(
-			fs.readFileSync(checkpointPath(dir), 'utf-8'),
-		) as { rootPath: string };
-		checkpoint.rootPath = path.join(dir, 'foreign-root');
-		fs.writeFileSync(checkpointPath(dir), `${JSON.stringify(checkpoint)}\n`);
+		fs.writeFileSync(
+			checkpointPath(dir),
+			`${JSON.stringify({
+				schemaVersion: 1,
+				sequence: 1,
+				rootPath: path.join(dir, 'foreign-root'),
+				updatedAt: 1,
+				records: {},
+				terminalSummary: { removed: 0, expired: 0, lastTerminalAt: null },
+				migration: null,
+				maintenance: {
+					compactions: 0,
+					droppedAuditTransitions: 0,
+					corruptLegacyRecords: 0,
+					lastCompactedAt: null,
+					resets: 0,
+				},
+			})}\n`,
+		);
 		_internals.statSync = () => {
 			throw Object.assign(new Error(`secret absolute path ${dir}`), {
 				code: 'EIO',
@@ -110,6 +125,5 @@ describe('pr-subscriptions post-review hardening', () => {
 		);
 		expect(result).toContain('EIO');
 		expect(result).not.toContain(dir);
-		expect(record.correlationId).toContain('session-1');
 	});
 });

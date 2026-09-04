@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { scanDelegationsForRecovery } from '../background/pending-delegations.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { classifyPrWorkflowGitState } from '../git/pr-workflow-state.js';
 import {
@@ -624,58 +625,13 @@ async function countOpenPrWorkflowLanes(
 	directory: string,
 	sessionID: string,
 ): Promise<number> {
-	const filePath = validateSwarmPath(directory, 'background-delegations.jsonl');
-	let raw: string;
-	try {
-		raw = await fsp.readFile(filePath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+	const scan = scanDelegationsForRecovery(directory);
+	if (scan.status === 'uncertain') {
 		throw new Error(
-			'BLOCKED: unable to inspect PR workflow lanes; cannot safely prepare checkout',
+			`BLOCKED: unable to inspect PR workflow lanes; cannot safely prepare checkout (${scan.reason})`,
 		);
 	}
-	const latestByCorrelationID = new Map<
-		string,
-		{ parentSessionId: string; mode?: unknown; status: string }
-	>();
-	for (const rawLine of raw.split('\n')) {
-		const line = rawLine.trim();
-		if (!line) continue;
-		let record: unknown;
-		try {
-			record = JSON.parse(line);
-		} catch {
-			throw new Error(
-				'BLOCKED: PR workflow lane registry is malformed; cannot safely prepare checkout',
-			);
-		}
-		if (
-			typeof record !== 'object' ||
-			record === null ||
-			typeof (record as { correlationId?: unknown }).correlationId !==
-				'string' ||
-			typeof (record as { parentSessionId?: unknown }).parentSessionId !==
-				'string' ||
-			typeof (record as { status?: unknown }).status !== 'string'
-		) {
-			throw new Error(
-				'BLOCKED: PR workflow lane registry is invalid; cannot safely prepare checkout',
-			);
-		}
-		const typed = record as {
-			correlationId: string;
-			parentSessionId: string;
-			mode?: unknown;
-			status: string;
-		};
-		if (typed.parentSessionId === sessionID && typeof typed.mode !== 'string') {
-			throw new Error(
-				'BLOCKED: active-session lane metadata is invalid; cannot safely prepare checkout',
-			);
-		}
-		latestByCorrelationID.set(typed.correlationId, typed);
-	}
-	return [...latestByCorrelationID.values()].filter(
+	return scan.owners.filter(
 		(record) =>
 			record.parentSessionId === sessionID &&
 			typeof record.mode === 'string' &&

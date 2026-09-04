@@ -232,7 +232,14 @@ import {
 } from './services/injection-budget';
 import { runModelPreflight } from './services/model-preflight';
 import { scheduleVersionCheck } from './services/version-check.js';
+import {
+	closeSnapshotCoordinationInitialization,
+	getSnapshotCoordinationStatus,
+	markSnapshotCoordinationClosing,
+	startSnapshotCoordinationInitialization,
+} from './session/snapshot-coordination-init.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
+import { deleteSnapshotSessionRows } from './session/snapshot-store.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
 import {
 	ensureAgentSession,
@@ -1145,6 +1152,14 @@ async function initializeOpenCodeSwarm(
 				.finally(() => clearTimeout(watchdog));
 		});
 	}
+
+	// Issue #2481: SQLite first-open, legacy snapshot import, and canonical
+	// rehydration are intentionally post-resolution. The readiness registry in
+	// snapshot-coordination-init retains the underlying promise; this detached
+	// scheduler is only the trigger and is never treated as the owner.
+	postResolutionTasks.push(function snapshotCoordinationPostResolutionTask() {
+		return startSnapshotCoordinationInitialization(ctx.directory);
+	});
 
 	// Issue #2271 bug 4: model-resolution preflight runs OFF the resolution
 	// path (it makes an HTTP call to the host's provider catalog — exactly the
@@ -2439,12 +2454,18 @@ async function initializeOpenCodeSwarm(
 		planSyncWorker?.stop();
 		prEventCleanup?.();
 		prEventDelivery?.unregisterPrEventDelivery();
+		markSnapshotCoordinationClosing(ctx.directory);
 		// #2480: durable-state close: flush queued group-commit writes, then
 		// closeProjectDb (its own best-effort TRUNCATE→PASSIVE checkpoint is
 		// contention-reporting and stays fast, so it is safe on the exit path).
 		try {
 			closeGroupCommitWriter(ctx.directory);
-			closeProjectDb(ctx.directory);
+			// Exit handlers cannot await the retained initialization promise. If it
+			// is still running, leave the handle to OS process teardown rather than
+			// closing it underneath the import transaction.
+			if (getSnapshotCoordinationStatus(ctx.directory).settled) {
+				closeProjectDb(ctx.directory);
+			}
 		} catch {
 			// best-effort by contract
 		}
@@ -2574,6 +2595,7 @@ async function initializeOpenCodeSwarm(
 		// writes, TRUNCATE→PASSIVE checkpoint, close the canonical handle.
 		dispose: async (): Promise<void> => {
 			try {
+				await closeSnapshotCoordinationInitialization(ctx.directory);
 				closeGroupCommitWriter(ctx.directory);
 				closeProjectDb(ctx.directory);
 			} catch (err) {
@@ -2766,6 +2788,7 @@ async function initializeOpenCodeSwarm(
 							lifecycleEvent.type === 'session.deleted' ||
 							lifecycleEvent.type === 'session.removed'
 						) {
+							deleteSnapshotSessionRows(ctx.directory, sessionID);
 							clearPendingTaskModelRoutesForSession(sessionID);
 							clearSessionActionCircuits(sessionID);
 							clearFullAutoSevereSession(sessionID);

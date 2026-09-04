@@ -18,6 +18,7 @@ import {
 	unsubscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -100,6 +101,7 @@ describe('pr-subscriptions checkpoint store', () => {
 		dir = makeTempProject();
 	});
 	afterEach(() => {
+		closeProjectDb(dir);
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -132,6 +134,8 @@ describe('pr-subscriptions checkpoint store', () => {
 			await subscribePr(dir, 1);
 			const before = fs.statSync(checkpointPath(dir)).mtimeMs;
 			await updateSnapshot(dir, 'nonexistent::o/r::9', { errorCount: 1 });
+			expect(fs.statSync(checkpointPath(dir)).mtimeMs).toBe(before);
+			await updateSnapshot(dir, 'sess_1::o/r::1', { errorCount: 0 });
 			expect(fs.statSync(checkpointPath(dir)).mtimeMs).toBe(before);
 		});
 

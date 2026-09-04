@@ -3,6 +3,7 @@ import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -12,6 +13,11 @@ import {
 	clearPrWorkflowGateState,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	readPrWorkflowGateStateFromDisk,
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const HEAD_SHA = 'abcdef1234567890';
@@ -50,6 +56,7 @@ afterEach(async () => {
 		originalResolveIsWorkingTreeCleanAsync;
 	_test_exports.isProcessAlive = originalIsProcessAlive;
 	_test_exports.nowMs = originalNowMs;
+	closeAllProjectDbs();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -152,27 +159,30 @@ describe('PR workflow exact checkout head', () => {
 		expect(current?.revision).toBe(completionSnapshot!.revision + 1);
 	});
 
-	test('refreshes cached state after an external writer updates then clears the durable file', async () => {
+	test('refreshes cached state after an external writer updates then clears the authoritative state', async () => {
 		const sessionID = 'external-state-refresh';
 		await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
 		const cached = await readPrWorkflowGateState(directory, sessionID);
 		expect(cached).not.toBeNull();
-		const statePath = path.join(
+		const external = await withSessionStateMutation(
 			directory,
-			'.swarm',
-			_test_exports.workflowGateStateRelativePath(sessionID),
+			sessionID,
+			async () => {
+				const current = await readPrWorkflowGateStateFromDisk(
+					directory,
+					sessionID,
+				);
+				return writeStateWhileLocked(directory, {
+					...current!,
+					updatedAt: withFrozenClock(() => new Date().toISOString()),
+				});
+			},
 		);
-		const external = {
-			...cached!,
-			revision: cached!.revision + 1,
-			updatedAt: withFrozenClock(() => new Date().toISOString()),
-		};
-		await fs.writeFile(statePath, JSON.stringify(external), 'utf-8');
 
 		const refreshed = await readPrWorkflowGateState(directory, sessionID);
 		expect(refreshed?.revision).toBe(external.revision);
 
-		await fs.rm(statePath);
+		await clearPrWorkflowGateState(directory, sessionID, external.revision);
 		await expect(
 			readPrWorkflowGateState(directory, sessionID),
 		).resolves.toBeNull();
@@ -182,15 +192,12 @@ describe('PR workflow exact checkout head', () => {
 		const sessionID = 'clear-checkout-recovery';
 		_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 		await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
-		const statePath = path.join(
-			directory,
-			'.swarm',
-			_test_exports.workflowGateStateRelativePath(sessionID),
-		);
-		const existing = await readPrWorkflowGateState(directory, sessionID);
-		await fs.writeFile(
-			statePath,
-			JSON.stringify({
+		await withSessionStateMutation(directory, sessionID, async () => {
+			const existing = await readPrWorkflowGateStateFromDisk(
+				directory,
+				sessionID,
+			);
+			await writeStateWhileLocked(directory, {
 				...existing!,
 				checkoutRecovery: {
 					code: 'GIT_STATE_INDETERMINATE',
@@ -208,9 +215,8 @@ describe('PR workflow exact checkout head', () => {
 					},
 					detectedAt: '2026-01-01T00:00:00Z',
 				},
-			}),
-			'utf-8',
-		);
+			});
+		});
 		_test_exports.resetTrackedStateCache();
 
 		// Precondition: checkoutRecovery must be present before bind to prove clearing.

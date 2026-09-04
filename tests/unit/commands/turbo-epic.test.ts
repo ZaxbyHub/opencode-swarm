@@ -27,6 +27,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleTurboCommand } from '../../../src/commands/turbo';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import {
 	resetSwarmState,
 	startAgentSession,
@@ -60,6 +61,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	resetSwarmState();
+	closeAllProjectDbs();
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {
