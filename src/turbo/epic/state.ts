@@ -550,10 +550,22 @@ export function isEpicModeActive(
  * this module's defaults.
  */
 export function isEpicModeActiveForProject(directory: string): boolean {
+	// This read-only probe is also called by a few direct tool entry points that
+	// bypass `resolveWorkingDirectory`. Never follow raw traversal segments into
+	// an ancestor's `.swarm/` database; the caller will fail closed at its normal
+	// retrospective/project-root gate instead.
+	if (directory.split(/[\\/]/).includes('..')) return false;
 	if (stateUnreadableMap.get(stateKey(directory))) return false;
 	const hasLegacyFile = fs.existsSync(stateFilePath(directory));
-	const hasCoordinationRows =
-		listCoordinationStates(directory, COORDINATION_NAMESPACE, 1).length > 0;
+	let hasCoordinationRows = false;
+	try {
+		hasCoordinationRows =
+			listCoordinationStates(directory, COORDINATION_NAMESPACE, 1).length > 0;
+	} catch {
+		// A missing/inaccessible or corrupt coordination DB must not turn this
+		// advisory read into a tool crash. The state is unreadable, so fail closed.
+		return false;
+	}
 	if (!hasLegacyFile && !hasCoordinationRows) {
 		return false;
 	}

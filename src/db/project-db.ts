@@ -13,7 +13,7 @@
 
 import type { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write.js';
 import {
 	canonicalRootKeyFresh,
@@ -629,8 +629,21 @@ export function getProjectDb(directory: string): Database {
 	// root before choosing its resource identity. A missing child beneath a
 	// symlink/junction parent otherwise changes from a lexical key to a physical
 	// key after `.swarm/` creation and can strand a duplicate connection.
-	mkdirSync(directory, { recursive: true });
-	const key = canonicalRootKeyFresh(directory);
+	// Normalize first: on Windows, recursive mkdir of a relative path containing
+	// `..` can throw EEXIST even when the resolved directory already exists.
+	// Keep this failure typed so callers never see a raw filesystem exception.
+	const materializedDirectory = resolve(directory);
+	try {
+		mkdirSync(materializedDirectory, { recursive: true });
+	} catch (err) {
+		throw new ProjectDbError(
+			'mkdir_failed',
+			`Failed to create project root ${materializedDirectory}: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+	const key = canonicalRootKeyFresh(materializedDirectory);
 	const alias = lexicalAliasKey(directory);
 	const existing = _projectDbs.get(key);
 	if (existing) {
