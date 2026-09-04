@@ -1022,7 +1022,7 @@ jobs:
   # adding a job-level if. Do NOT add `if: always()` here — a skipped prerequisite must
   # still skip smoke, which is the required-check eviction class PR #2313 hit.
   smoke:
-    needs: [detect-release, package-check, php-validation, rust-sandbox-runner]
+    needs: [detect-release, detect-paths, package-check, php-validation, rust-sandbox-runner]
     strategy:
       fail-fast: false
       matrix:
@@ -1075,3 +1075,78 @@ jobs:
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
         shell: bash
         run: bun run repro:1873
+
+      # Issue #2475: probe the PACKED artifact, not only target/release. Builds
+      # the native sandbox runner, stages it into binaries/win32-x64/ exactly as
+      # the release pipeline does, npm-packs the tree, extracts the tarball, and
+      # executes the shipped binary's --probe from the packed layout — validating
+      # package.json#files inclusion, the discovery path contract (1-up from the
+      # dist bundle), and the probe protocol handshake end-to-end. Runs on the
+      # windows-latest leg for merge groups AND for PRs that touch
+      # platform-sensitive paths (src/sandbox/**, runners/**, workflows), so the
+      # packaging path is exercised before a release ever cuts binaries.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        if: matrix.os == 'windows-latest' && (github.event_name == 'merge_group' || needs.detect-paths.outputs.touches-platform-paths == 'true') && needs.detect-release.outputs.is-release != 'true'
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: matrix.os == 'windows-latest' && (github.event_name == 'merge_group' || needs.detect-paths.outputs.touches-platform-paths == 'true') && needs.detect-release.outputs.is-release != 'true'
+      - name: Cache cargo for packed-artifact probe
+        if: matrix.os == 'windows-latest' && (github.event_name == 'merge_group' || needs.detect-paths.outputs.touches-platform-paths == 'true') && needs.detect-release.outputs.is-release != 'true'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            runners/swarm-sandbox-runner/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('runners/swarm-sandbox-runner/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Build sandbox runner and stage into package path
+        if: matrix.os == 'windows-latest' && (github.event_name == 'merge_group' || needs.detect-paths.outputs.touches-platform-paths == 'true') && needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --manifest-path runners/swarm-sandbox-runner/Cargo.toml
+          mkdir -p dist
+          cp runners/swarm-sandbox-runner/target/release/swarm-sandbox-runner.exe binaries/win32-x64/swarm-sandbox-runner.exe
+          ls -l binaries/win32-x64
+      - name: Pack, extract, and probe the packed artifact
+        if: matrix.os == 'windows-latest' && (github.event_name == 'merge_group' || needs.detect-paths.outputs.touches-platform-paths == 'true') && needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p packed-probe && cd packed-probe
+          npm pack .. --json > pack.json
+          node -e '
+            const fs = require("fs");
+            const pack = JSON.parse(fs.readFileSync("pack.json", "utf8"));
+            const entry = pack[0];
+            console.log("tarball:", entry.filename, entry.size, "bytes");
+            const hasExe = entry.files.some((f) => f.path && f.path.includes("binaries/win32-x64/swarm-sandbox-runner.exe"));
+            if (!hasExe) throw new Error("packed tarball is missing binaries/win32-x64/swarm-sandbox-runner.exe");
+            const distEntry = entry.files.find((f) => f.path === "dist/index.js");
+            if (!distEntry) throw new Error("packed tarball is missing dist/index.js (build first)");
+          '
+          tar -xzf opencode-swarm-*.tgz
+          test -f package/binaries/win32-x64/swarm-sandbox-runner.exe
+          # Discovery-layout contract: findRunnerBinary resolves the exe ONE
+          # directory above the dist bundle (package root).
+          test -f package/dist/index.js
+          node -e '
+            const path = require("path");
+            const fs = require("fs");
+            const runtimeDir = path.join(process.cwd(), "package", "dist");
+            const candidate = path.resolve(runtimeDir, "..", "binaries", "win32-x64", "swarm-sandbox-runner.exe");
+            if (!fs.existsSync(candidate)) throw new Error("1-up discovery candidate missing: " + candidate);
+            console.log("discovery candidate ok:", candidate);
+          '
+          # Protocol + capability probe of the SHIPPED artifact.
+          package/binaries/win32-x64/swarm-sandbox-runner.exe --probe > probe.json
+          cat probe.json
+          node -e '
+            const fs = require("fs");
+            const probe = JSON.parse(fs.readFileSync("probe.json", "utf8"));
+            if (probe.protocol_schema_version !== 1) throw new Error("packed runner protocol_schema_version != 1");
+            if (typeof probe.runner_version !== "string" || probe.runner_version.length === 0) throw new Error("packed runner missing runner_version");
+            if (probe.arch !== "x86_64") throw new Error("packed runner arch mismatch: " + probe.arch);
+            console.log("packed runner probe ok");
+          '
+          cd .. && rm -rf packed-probe

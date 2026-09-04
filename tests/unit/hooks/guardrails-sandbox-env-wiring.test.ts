@@ -1,14 +1,17 @@
 /**
- * Tests for the F6b macOS-only env override wiring at applySandboxExecution
+ * Tests for the F6b macOS env override wiring at applySandboxExecution
  * (issue #2236) and the F6a item 3 config gate (guardrails.sandbox_macos_enabled)
  * that reaches src/sandbox/executor.ts's _createMacOSExecutor().
  *
  * F6b: getEnvOverrides() was declared on every SandboxExecutor implementation
  * but had ZERO production callers. applySandboxExecution
  * (src/hooks/guardrails/tool-before.ts) now calls executor.getEnvOverrides()
- * and passes it through wrapCommand's 4th parameter, but ONLY when
- * executor.mechanism === 'sandbox-exec' — Windows and Linux stay unwired in
- * this PR by explicit user decision (F6c).
+ * and passes it through wrapCommand's 4th parameter for EVERY mechanism.
+ *
+ * Issue #2475 closed the F6c deferral: Windows strong mode (native-runner/*),
+ * the PowerShell weak wrapper, and Linux Bubblewrap now receive their declared
+ * env overrides too. The tests below pin each mechanism against regression
+ * back to the old mechanism === 'sandbox-exec' gate.
  *
  * F6a item 3: the resolved GuardrailsConfig's sandbox_macos_enabled flag
  * must reach setMacOSSandboxPolicy() before the first getSandboxExecutor()
@@ -129,57 +132,96 @@ describe('applySandboxExecution — F6b macOS-only env override wiring (#2236)',
 		expect(capturedEnvOverrides).toEqual(envOverrides);
 	});
 
-	it('does NOT call getEnvOverrides() for a non-sandbox-exec mechanism (Bubblewrap) — F6c: Linux/Windows stay unwired', async () => {
-		let getEnvOverridesCalled = false;
-		let capturedEnvOverrides: unknown = 'not-set';
-		guardrailsInternals.getSandboxExecutor = async () => ({
-			isAvailable: () => true,
+	// Issue #2475 (#2259): every previously-deferred mechanism must now receive
+	// its declared getEnvOverrides(). Each case mirrors the macOS anchor test
+	// above with the mechanism and platform swapped.
+	const nonMacMechanisms = [
+		{
+			mechanism: 'powershell-wrapper',
+			platform: 'win32',
+			identity:
+				'win32:powershell-wrapper:enabled:advisory:fs=partial:net=partial:proc=none',
+			envOverrides: {
+				PATH: 'C:\\Windows\\System32;C:\\Windows',
+				TEMP: null,
+				TMP: null,
+			},
+		},
+		{
+			mechanism: 'native-runner/app-container',
+			platform: 'win32',
+			identity:
+				'win32:native-runner/app-container:enabled:strong:fs=enforced:net=enforced:proc=enforced',
+			envOverrides: {
+				PATH: null,
+				TEMP: null,
+				TMP: null,
+				LD_PRELOAD: null,
+				DYLD_INSERT_LIBRARIES: null,
+			},
+		},
+		{
 			mechanism: 'Bubblewrap',
-			wrapCommand: (
-				_cmd: string,
-				_paths: string[],
-				_tempDir: string | undefined,
-				env: unknown,
-			) => {
-				capturedEnvOverrides = env;
-				return 'wrapped-command';
-			},
-			getEnvOverrides: () => {
-				getEnvOverridesCalled = true;
-				return {};
-			},
-		});
-		guardrailsInternals.assessSandboxEnforcement = async () => ({
-			allowed: true,
-			capability: {
-				platform: 'linux',
-				mechanism: 'Bubblewrap',
-				status: 'enabled',
-				strength: 'strong',
-				identity:
-					'linux:bubblewrap:enabled:strong:fs=enforced:net=enforced:proc=enforced',
-				dimensions: {
-					filesystem: 'enforced',
-					network: 'enforced',
-					process: 'enforced',
+			platform: 'linux',
+			identity:
+				'linux:bubblewrap:enabled:strong:fs=enforced:net=enforced:proc=enforced',
+			envOverrides: {}, // bwrap hardens via CLI flags, not env
+		},
+	] as const;
+
+	for (const spec of nonMacMechanisms) {
+		it(`passes getEnvOverrides() through to wrapCommand for mechanism "${spec.mechanism}" (#2475 unwired-mechanism wiring)`, async () => {
+			let capturedEnvOverrides: unknown = 'not-set';
+			guardrailsInternals.getSandboxExecutor = async () => ({
+				isAvailable: () => true,
+				mechanism: spec.mechanism,
+				wrapCommand: (
+					_cmd: string,
+					_paths: string[],
+					_tempDir: string | undefined,
+					env: unknown,
+				) => {
+					capturedEnvOverrides = env;
+					return 'wrapped-command';
 				},
-			},
-			reasons: [],
-			cacheKey: 'linux:bubblewrap:test',
+				getEnvOverrides: () => spec.envOverrides,
+			});
+			guardrailsInternals.assessSandboxEnforcement = async () => ({
+				allowed: true,
+				capability: {
+					platform: spec.platform,
+					mechanism: spec.mechanism,
+					status: 'enabled',
+					strength: 'strong',
+					identity: spec.identity,
+					dimensions: {
+						filesystem: 'enforced',
+						network: 'enforced',
+						process: 'enforced',
+					},
+				},
+				reasons: [],
+				cacheKey: `${spec.platform}:${spec.mechanism}:test`,
+			});
+
+			const hooks = createGuardrailsHooks(directory, {
+				...baseGuardrailsConfig,
+			});
+			const args = { command: 'echo hi' };
+
+			await hooks.toolBefore(
+				{
+					tool: 'bash',
+					sessionID: 'sandbox-env-session',
+					callID: 'env-wrap-1',
+				},
+				{ args },
+			);
+
+			expect(args.command).toBe('wrapped-command');
+			expect(capturedEnvOverrides).toEqual(spec.envOverrides);
 		});
-
-		const hooks = createGuardrailsHooks(directory, { ...baseGuardrailsConfig });
-		const args = { command: 'echo hi' };
-
-		await hooks.toolBefore(
-			{ tool: 'bash', sessionID: 'sandbox-env-session', callID: 'env-wrap-1' },
-			{ args },
-		);
-
-		expect(args.command).toBe('wrapped-command');
-		expect(getEnvOverridesCalled).toBe(false);
-		expect(capturedEnvOverrides).toBeUndefined();
-	});
+	}
 });
 
 describe('F6a item 3 — sandbox_macos_enabled config gate reaches setMacOSSandboxPolicy (#2236)', () => {

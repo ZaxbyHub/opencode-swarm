@@ -19,8 +19,84 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  publish-npm:
+  # Issue #2475: build the native Windows sandbox runner for BOTH architectures
+  # and hand the executables to publish-npm, which drops them into the
+  # binaries/win32-<arch>/ package paths that runner-client.ts discovers. Until
+  # this job existed, binaries/ shipped only .gitkeep placeholders and users
+  # never received the advertised sandbox. Native builds on matching hosts (no
+  # cross-compilation); both arches must succeed for a release to proceed —
+  # fail-fast is disabled only so both legs report diagnostics.
+  build-sandbox-runner:
     needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            runners/swarm-sandbox-runner/target
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('runners/swarm-sandbox-runner/Cargo.lock', 'runners/swarm-sandbox-runner/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.arch }}-cargo-
+
+      - name: Build swarm-sandbox-runner (release)
+        working-directory: runners/swarm-sandbox-runner
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Probe built binary (capability + protocol contract)
+        shell: bash
+        working-directory: runners/swarm-sandbox-runner
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/swarm-sandbox-runner.exe"
+          echo "--probe output:"
+          "$bin" --probe > probe.json
+          cat probe.json
+          node -e '
+            const fs = require("fs");
+            const probe = JSON.parse(fs.readFileSync("probe.json", "utf8"));
+            if (probe.protocol_schema_version !== 1) {
+              throw new Error("probe missing protocol_schema_version=1: " + JSON.stringify(probe));
+            }
+            if (typeof probe.runner_version !== "string" || probe.runner_version.length === 0) {
+              throw new Error("probe missing runner_version");
+            }
+            console.log("probe ok: runner_version=" + probe.runner_version + " protocol=1 arch=" + probe.arch);
+          '
+
+      - name: Upload runner artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sandbox-runner-win32-${{ matrix.arch }}
+          path: runners/swarm-sandbox-runner/target/${{ matrix.target }}/release/swarm-sandbox-runner.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-npm:
+    needs: [release-please, build-sandbox-runner]
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -32,6 +108,21 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
+
+      # Issue #2475: place the release-built runner executables into the
+      # package paths runner-client.ts discovers BEFORE packing/publishing.
+      # The .gitkeep placeholders are replaced by the real binaries.
+      - name: Download sandbox runner binaries
+        uses: actions/download-artifact@634f93cb2916103fd4b5809875f6a8c49b3abd5e # v5.0.0
+        with:
+          path: sandbox-runner-artifacts
+
+      - name: Stage sandbox runner binaries into package paths
+        run: |
+          set -euo pipefail
+          install -m 644 sandbox-runner-artifacts/sandbox-runner-win32-x64/swarm-sandbox-runner.exe binaries/win32-x64/swarm-sandbox-runner.exe
+          install -m 644 sandbox-runner-artifacts/sandbox-runner-win32-arm64/swarm-sandbox-runner.exe binaries/win32-arm64/swarm-sandbox-runner.exe
+          ls -l binaries/win32-x64/ binaries/win32-arm64/
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -58,8 +149,12 @@ jobs:
       - name: Build
         run: bun run build
 
+      # SWARM_PACKAGE_SMOKE_REQUIRE_BINARIES=1 makes package-smoke fail the
+      # release if either win32 arch binary is missing or implausibly small.
       - name: Validate packed npm artifact
         run: bun run package:smoke
+        env:
+          SWARM_PACKAGE_SMOKE_REQUIRE_BINARIES: "1"
 
       - name: Publish to npm
         run: |

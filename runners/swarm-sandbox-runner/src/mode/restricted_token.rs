@@ -102,24 +102,9 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
     let stub_dir = path_stubs::create_stub_dir(&policy.temp_root, &policy.run_id)?;
     path_stubs::create_stubs(&stub_dir, &policy.path_stubs)?;
 
-    // 6. Build environment
-    let mut env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for key in &policy.env_allowlist {
-        if let Ok(val) = std::env::var(key) {
-            env.insert(key.clone(), val);
-        }
-    }
-    for (key, val) in &policy.env_overrides {
-        env.insert(key.clone(), val.clone());
-    }
-
-    let original_path = env.get("PATH").cloned().unwrap_or_default();
-    env.insert(
-        "PATH".to_string(),
-        path_stubs::build_sandboxed_path(&stub_dir, &original_path),
-    );
-    env.insert("TEMP".to_string(), policy.temp_root.clone());
-    env.insert("TMP".to_string(), policy.temp_root.clone());
+    // 6. Build environment (shared ordering: allowlist -> unsets -> overrides
+    //    -> forced runner-managed PATH/TEMP/TMP rewrites; see mode::build_child_env)
+    let env = crate::mode::build_child_env(policy, &stub_dir, |k| std::env::var(k).ok());
 
     // 7. Build command line
     let cmd_line = build_command_line(command);

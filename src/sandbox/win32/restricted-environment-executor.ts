@@ -501,12 +501,20 @@ export class WindowsSandboxExecutor implements SandboxExecutor {
 
 		// The intact script is encoded as UTF-16LE for Windows PowerShell's
 		// -EncodedCommand contract. No line or quote normalization is performed.
+		// Per-call env overrides run FIRST (issue #2475/#2259): a null override
+		// means "strip the parent's verbatim value", and the executor's own
+		// scoped TEMP/TMP and safe PATH assignments below then take precedence —
+		// matching the documented contract on getEnvOverrides() ("TEMP/TMP are
+		// set to null (will be set to scoped temp at runtime via wrapCommand)").
+		// Applying them AFTER would remove the scoped TEMP entirely and break
+		// Join-Path $env:TEMP for multiline commands.
 		const envOverrideBlock =
-			envOverrideLines.length > 0 ? `\n  ${envOverrideLines.join('\n  ')}` : '';
+			envOverrideLines.length > 0 ? `${envOverrideLines.join('\n  ')}\n` : '';
 		const psScript = `
 $ErrorActionPreference = 'Stop';
 $ProgressPreference = 'SilentlyContinue';
 try {
+  ${envOverrideBlock}
   $env:TEMP = '${escapedTemp}';
   $env:TMP = '${escapedTemp}';
 
@@ -525,7 +533,6 @@ try {
       Remove-Item Env:$v -Force -ErrorAction SilentlyContinue;
     }
   }
-  ${envOverrideBlock}
 
   # Execute the command — PS-native cmdlets via Invoke-Expression, others via the standard command interpreter
   $commandBytes = [Convert]::FromBase64String('${commandBase64}');

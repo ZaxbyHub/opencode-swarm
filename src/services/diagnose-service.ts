@@ -955,6 +955,21 @@ async function getSandboxStatus(sessionID?: string): Promise<HealthCheck> {
 
 		const executor = await _internals.getSandboxExecutor();
 		const hasExecutor = executor !== null;
+		// Issue #2475: surface WHY the native runner is not in effect (probe
+		// error, e.g. binary missing/wrong-arch/protocol mismatch, or an
+		// explicit disable) so the diagnose line explains downgrades.
+		const executorExtras = executor as {
+			probeResult?: { error?: string } | null;
+			disabledReason?: string | null;
+		} | null;
+		const downgradeReason =
+			executorExtras?.probeResult?.error ??
+			executorExtras?.disabledReason ??
+			null;
+		const downgradeDetail =
+			downgradeReason !== null && downgradeReason !== undefined
+				? ` | downgrade reason: ${downgradeReason}`
+				: '';
 
 		if (hasExecutor) {
 			// An available executor is NOT automatically strong. The Windows
@@ -974,7 +989,7 @@ async function getSandboxStatus(sessionID?: string): Promise<HealthCheck> {
 				return {
 					name: 'Sandbox',
 					status: '⚠️',
-					detail: `Mechanism: ${mechanism.toLowerCase()} | ${dimensions} | Partial boundary: ${reasons}${skipDetail}`,
+					detail: `Mechanism: ${mechanism.toLowerCase()} | ${dimensions} | Partial boundary: ${reasons}${downgradeDetail}${skipDetail}`,
 				};
 			}
 

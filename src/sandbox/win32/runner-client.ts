@@ -15,12 +15,15 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { warn } from '../../utils/logger';
+import { criticalWarn } from '../../utils/logger';
 
 // Runtime-portable equivalent of __dirname: works from both the TypeScript source
 // tree and the compiled ESM bundle in dist/, where Bun hardcodes the build-machine
 // __dirname as a string literal (making it wrong on any other machine).
 const _runtimeDir = fileURLToPath(new URL('.', import.meta.url));
+
+/** Policy/probe protocol version this client speaks. */
+export const RUNNER_PROTOCOL_SCHEMA_VERSION = 1;
 
 /** Result of probing the runner binary for capabilities. */
 export interface RunnerProbeResult {
@@ -35,6 +38,8 @@ export interface RunnerProbeResult {
 		is_admin: boolean;
 		os_version: string;
 		arch: string;
+		runner_version?: string;
+		protocol_schema_version?: number;
 	} | null;
 	error?: string;
 }
@@ -93,6 +98,8 @@ export interface SandboxPolicy {
 	network_mode: 'off' | 'on';
 	env_allowlist: string[];
 	env_overrides: Record<string, string>;
+	/** Keys the runner must remove from the child environment (null overrides). */
+	env_unsets: string[];
 	path_stubs: string[];
 	private_desktop: boolean;
 	deny_alternate_data_streams: boolean;
@@ -112,31 +119,45 @@ export const _internals: {
 	findRunnerBinary: () => string | null;
 	spawnRunner: typeof spawnSync;
 	spawnAsync: typeof spawn;
+	runtimeDir: string | null;
 } = {
 	findRunnerBinary,
 	spawnRunner: spawnSync,
 	spawnAsync: spawn,
+	runtimeDir: null,
 };
 
 /**
  * Locate the swarm-sandbox-runner binary.
  *
  * Search order:
- * 1. binaries/<platform>-<arch>/ in the package
- * 2. PATH
+ * 1. binaries/win32-<arch>/ next to the compiled dist bundle (published layout)
+ * 2. binaries/win32-<arch>/ relative to the source tree (dev/test layout)
+ * 3. PATH
+ *
+ * Issue #2475: the published plugin is a flat dist/index.js, so the package
+ * root — and the binaries shipped inside it — is exactly ONE directory above
+ * the runtime dir. The historical 3-up/4-up candidates only resolved from the
+ * TypeScript source tree (src/sandbox/win32/ -> repo root); from dist they
+ * pointed above the installed package and could never find the shipped exe.
+ * (dist/cli consumers would need a 2-up candidate; nothing imports this module
+ * from the CLI bundle today.)
  */
 function findRunnerBinary(): string | null {
 	const arch = process.arch === 'x64' ? 'x64' : 'arm64';
 	const platform = 'win32';
+	const runtimeDir = _internals.runtimeDir ?? _runtimeDir;
 
-	// Check package-local binaries.
-	// _runtimeDir is resolved at runtime from import.meta.url so it is correct
-	// whether the code runs from src/ or the compiled dist/ bundle (where Bun
-	// would hardcode __dirname as a build-machine path, which is wrong on any
-	// consumer machine).
 	const packagePaths = [
 		path.resolve(
-			_runtimeDir,
+			runtimeDir,
+			'..',
+			'binaries',
+			`${platform}-${arch}`,
+			'swarm-sandbox-runner.exe',
+		),
+		path.resolve(
+			runtimeDir,
 			'..',
 			'..',
 			'..',
@@ -145,7 +166,7 @@ function findRunnerBinary(): string | null {
 			'swarm-sandbox-runner.exe',
 		),
 		path.resolve(
-			_runtimeDir,
+			runtimeDir,
 			'..',
 			'..',
 			'..',
@@ -213,7 +234,12 @@ export function probe(): RunnerProbeResult {
 			capabilities: null,
 			error: 'runner binary not found',
 		};
-		warn('Sandbox runner binary not found — degrading to weak sandbox');
+		// Issue #2475: a security-relevant isolation downgrade must be visible
+		// without OPENCODE_SWARM_DEBUG. Emitted at most once per process because
+		// the failed probe result is cached.
+		criticalWarn(
+			'[sandbox] swarm-sandbox-runner binary not found — native Windows sandbox unavailable; commands fall back to the weak PowerShell wrapper (or run unsandboxed in advisory mode). Run /swarm diagnose for details.',
+		);
 		return _cachedProbe;
 	}
 
@@ -233,7 +259,9 @@ export function probe(): RunnerProbeResult {
 				capabilities: null,
 				error: `probe spawn error: ${(result.error as NodeJS.ErrnoException).code ?? result.error.message}`,
 			};
-			warn(`Sandbox runner probe failed: ${_cachedProbe.error}`);
+			criticalWarn(
+				`[sandbox] swarm-sandbox-runner probe failed (${_cachedProbe.error}) — degrading to weak sandbox. This covers wrong-arch and corrupt binaries; run /swarm diagnose for details.`,
+			);
 			return _cachedProbe;
 		}
 
@@ -244,11 +272,34 @@ export function probe(): RunnerProbeResult {
 				capabilities: null,
 				error: `probe exited with code ${result.status}`,
 			};
-			warn(`Sandbox runner probe failed: ${_cachedProbe.error}`);
+			criticalWarn(
+				`[sandbox] swarm-sandbox-runner probe failed (${_cachedProbe.error}) — degrading to weak sandbox. Run /swarm diagnose for details.`,
+			);
 			return _cachedProbe;
 		}
 
 		const capabilities = JSON.parse(result.stdout?.trim() ?? '{}');
+
+		// Protocol handshake (issue #2475): refuse binaries that do not report
+		// the protocol version this client speaks. The runner ships in lockstep
+		// with the plugin inside the same npm package, so a missing/mismatched
+		// version means a stale or PATH-shadowed foreign binary. Fail closed.
+		const reportedProtocol =
+			typeof capabilities.protocol_schema_version === 'number'
+				? capabilities.protocol_schema_version
+				: null;
+		if (reportedProtocol !== RUNNER_PROTOCOL_SCHEMA_VERSION) {
+			_cachedProbe = {
+				available: false,
+				mode: 'none',
+				capabilities,
+				error: `runner protocol mismatch (got ${reportedProtocol ?? 'none'}, expected ${RUNNER_PROTOCOL_SCHEMA_VERSION})`,
+			};
+			criticalWarn(
+				`[sandbox] ${_cachedProbe.error} at ${binary} — stale or foreign runner binary refused; degrading to weak sandbox. Run /swarm diagnose for details.`,
+			);
+			return _cachedProbe;
+		}
 
 		let mode: 'app-container' | 'restricted-token' | 'none' = 'none';
 		if (capabilities.app_container_available) {
@@ -271,7 +322,9 @@ export function probe(): RunnerProbeResult {
 			capabilities: null,
 			error: `probe threw: ${msg}`,
 		};
-		warn(`Sandbox runner probe threw: ${msg}`);
+		criticalWarn(
+			`[sandbox] swarm-sandbox-runner probe threw (${msg}) — degrading to weak sandbox. Run /swarm diagnose for details.`,
+		);
 		return _cachedProbe;
 	}
 }
@@ -412,6 +465,7 @@ export function buildDefaultPolicy(
 			HTTP_PROXY: 'http://127.0.0.1:1',
 			HTTPS_PROXY: 'http://127.0.0.1:1',
 		},
+		env_unsets: [],
 		path_stubs: ['ssh.exe', 'curl.exe', 'wget.exe', 'scp.exe', 'sftp.exe'],
 		private_desktop: true,
 		deny_alternate_data_streams: true,

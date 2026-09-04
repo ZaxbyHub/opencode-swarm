@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Policy schema version this runner speaks. The TypeScript client refuses
+/// binaries whose probe reports a different value (stale or foreign binary).
+pub const PROTOCOL_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
     pub schema_version: u32,
@@ -24,6 +28,12 @@ pub struct Policy {
     pub env_allowlist: Vec<String>,
     #[serde(default)]
     pub env_overrides: HashMap<String, String>,
+    /// Keys removed from the child environment. Applied after the allowlist
+    /// copy and before the forced PATH/TEMP/TMP rewrites, so a nulled
+    /// runner-managed key means "never inherited verbatim" (the managed
+    /// sandboxed value stands) while every other key is genuinely absent.
+    #[serde(default)]
+    pub env_unsets: Vec<String>,
     #[serde(default)]
     pub path_stubs: Vec<String>,
     #[serde(default)]
@@ -163,5 +173,24 @@ mod tests {
         assert_eq!(policy.wall_clock_timeout_ms, 600_000);
         assert_eq!(policy.network_mode, NetworkMode::Off);
         assert!(policy.deny_unc_paths);
+        assert!(policy.env_unsets.is_empty());
+    }
+
+    #[test]
+    fn env_unsets_round_trip() {
+        let json = r#"{
+            "schema_version": 1,
+            "run_id": "test",
+            "workspace_roots": ["C:\\test"],
+            "writable_roots": ["C:\\test"],
+            "temp_root": "C:\\temp",
+            "env_allowlist": ["PATH", "TEMP"],
+            "env_unsets": ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"]
+        }"#;
+        let policy: Policy = serde_json::from_str(json).unwrap();
+        assert_eq!(policy.env_unsets, vec!["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"]);
+        policy.validate().unwrap();
+        let re: Policy = serde_json::from_str(&serde_json::to_string(&policy).unwrap()).unwrap();
+        assert_eq!(re.env_unsets, policy.env_unsets);
     }
 }

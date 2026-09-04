@@ -10,6 +10,13 @@ pub struct ProbeResult {
     pub is_admin: bool,
     pub os_version: String,
     pub arch: String,
+    /// Crate version of this runner binary. Informational: the TypeScript
+    /// client surfaces it in diagnostics but compatibility is decided by
+    /// `protocol_schema_version`.
+    pub runner_version: String,
+    /// Policy/probe protocol version this binary speaks. The TypeScript
+    /// client refuses binaries that report a different (or missing) value.
+    pub protocol_schema_version: u32,
 }
 
 #[cfg(windows)]
@@ -33,6 +40,8 @@ pub fn run_probe() -> ProbeResult {
         is_admin,
         os_version: os_ver,
         arch,
+        runner_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_schema_version: crate::policy::PROTOCOL_SCHEMA_VERSION,
     }
 }
 
@@ -47,6 +56,8 @@ pub fn run_probe() -> ProbeResult {
         is_admin: false,
         os_version: "non-windows".to_string(),
         arch: std::env::consts::ARCH.to_string(),
+        runner_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_schema_version: crate::policy::PROTOCOL_SCHEMA_VERSION,
     }
 }
 

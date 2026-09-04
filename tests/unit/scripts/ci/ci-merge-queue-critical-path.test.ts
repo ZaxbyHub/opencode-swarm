@@ -50,8 +50,11 @@ describe('ci.yml merge-group critical path — CI-004 for integration and smoke'
 
 	test('smoke does not wait for unit or integration', () => {
 		const smoke = extractJob(yml, 'smoke');
+		// detect-paths (issue #2475) feeds the windows packed-artifact probe's
+		// pull_request activation; it is a fast ubuntu job that always runs, so
+		// it adds no serialisation behind the slower package-check leg.
 		expect(extractNeedsLine(smoke)).toBe(
-			'needs: [detect-release, package-check, php-validation, rust-sandbox-runner]',
+			'needs: [detect-release, detect-paths, package-check, php-validation, rust-sandbox-runner]',
 		);
 		expect(smoke).not.toMatch(/needs: \[[^\]]*\b(unit|integration)\b/);
 	});

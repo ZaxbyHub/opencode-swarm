@@ -105,6 +105,22 @@ const FORBIDDEN_PACKAGE_PREFIXES = [
 	'dist-build-test/',
 ];
 
+// Issue #2475: the native Windows sandbox runner ships in the npm tarball at
+// binaries/win32-<arch>/swarm-sandbox-runner.exe — exactly the layout
+// findRunnerBinary() in src/sandbox/win32/runner-client.ts discovers. The
+// .gitkeep placeholders keep the directories present in dev checkouts; the
+// release pipeline replaces them with the compiled binaries.
+const SANDBOX_RUNNER_ARCHES = ['x64', 'arm64'];
+const MIN_RUNNER_BINARY_BYTES = 500_000;
+
+function sandboxBinaryPath(arch) {
+	return `binaries/win32-${arch}/swarm-sandbox-runner.exe`;
+}
+
+function sandboxPlaceholderPath(arch) {
+	return `binaries/win32-${arch}/.gitkeep`;
+}
+
 function npmInvocation(args) {
 	if (process.platform !== 'win32') {
 		return { command: 'npm', args };
@@ -223,14 +239,51 @@ export function validatePackageFiles(
 	files,
 	expectedGrammarFiles,
 	expectedProjectSkillFiles,
+	options = {},
 ) {
 	const paths = new Set(files.map((file) => normalizePackagePath(file.path ?? file)));
+	const sizes = new Map(
+		files.map((file) => [
+			normalizePackagePath(file.path ?? file),
+			typeof file === 'string' ? 0 : (file.size ?? 0),
+		]),
+	);
 	const expectedSkillPaths = new Set(expectedProjectSkillFiles);
 	const errors = [];
+	const requireSandboxBinaries =
+		options.requireSandboxBinaries ??
+		process.env.SWARM_PACKAGE_SMOKE_REQUIRE_BINARIES === '1';
 
 	for (const required of REQUIRED_PACKAGE_FILES) {
 		if (!paths.has(required)) {
 			errors.push(`missing required package file: ${required}`);
+		}
+	}
+
+	// Sandbox runner binaries (issue #2475): the tarball must always carry the
+	// binaries/win32-<arch>/ directories, and in the release path
+	// (SWARM_PACKAGE_SMOKE_REQUIRE_BINARIES=1, set by release-and-publish.yml)
+	// the compiled runner executables themselves must be present and
+	// plausibly sized — a release without them silently drops the native
+	// sandbox for every Windows user.
+	for (const arch of SANDBOX_RUNNER_ARCHES) {
+		const exe = sandboxBinaryPath(arch);
+		const placeholder = sandboxPlaceholderPath(arch);
+		const hasExe = paths.has(exe);
+		if (requireSandboxBinaries) {
+			if (!hasExe) {
+				errors.push(
+					`missing sandbox runner binary: ${exe} (required for release packages — the native Windows sandbox must ship)`,
+				);
+			} else if ((sizes.get(exe) ?? 0) < MIN_RUNNER_BINARY_BYTES) {
+				errors.push(
+					`sandbox runner binary is implausibly small (<${MIN_RUNNER_BINARY_BYTES} bytes): ${exe}`,
+				);
+			}
+		} else if (!hasExe && !paths.has(placeholder)) {
+			errors.push(
+				`missing binaries/win32-${arch}/ package directory (expected swarm-sandbox-runner.exe or the .gitkeep placeholder)`,
+			);
 		}
 	}
 

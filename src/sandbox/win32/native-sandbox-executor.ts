@@ -14,7 +14,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { warn } from '../../utils/logger';
+import { criticalWarn } from '../../utils/logger';
 import type { SandboxExecutor } from '../executor';
 import { isValidEnvKey, SandboxError } from '../executor';
 import { WindowsSandboxExecutor as EnvironmentExecutor } from './restricted-environment-executor';
@@ -54,9 +54,11 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 		} else if (this._fallbackExecutor.isAvailable()) {
 			this._strength = 'weak';
 			this.mechanism = 'powershell-wrapper';
-			warn(
-				`Native sandbox runner unavailable (${this._probeResult.error ?? 'unknown'}); ` +
-					'falling back to PowerShell environment restrictions (weak sandbox)',
+			// Issue #2475: a strong -> weak isolation downgrade must be visible
+			// without OPENCODE_SWARM_DEBUG (the executor is constructed once per
+			// session, so this emits at most once).
+			criticalWarn(
+				`[sandbox] native Windows sandbox runner unavailable (${this._probeResult.error ?? 'unknown'}); falling back to PowerShell environment restrictions (weak sandbox). Run /swarm diagnose for details.`,
 			);
 		} else {
 			this._strength = 'none';
@@ -77,8 +79,8 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 	disable(reason: string): void {
 		this._disabled = true;
 		this._disabledReason = reason;
-		warn(
-			`Sandbox disabled: ${reason}. Falling through to tool-layer enforcement.`,
+		criticalWarn(
+			`[sandbox] Sandbox disabled: ${reason}. Falling through to tool-layer enforcement. Run /swarm diagnose for details.`,
 		);
 	}
 
@@ -158,15 +160,23 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 		policy.network_mode = policyOverride?.network_mode ?? policy.network_mode;
 
 		// Apply per-call env overrides to the runner policy.
-		// String values are set via env_overrides; null values are skipped since
-		// the native runner does not support unsetting env vars via the policy.
+		// String values are set via env_overrides; null values go to env_unsets
+		// and are removed from the allowlist (issue #2475/#2259) — the runner
+		// applies unsets after the allowlist copy and before its forced
+		// PATH/TEMP/TMP rewrites, so a nulled runner-managed key means "never
+		// inherited verbatim" (the managed sandboxed value stands) while every
+		// other key is genuinely absent from the child environment.
 		if (_envOverrides) {
 			for (const [key, value] of Object.entries(_envOverrides)) {
 				if (!isValidEnvKey(key)) continue;
 				if (typeof value === 'string') {
 					policy.env_overrides[key] = value;
+				} else {
+					policy.env_unsets.push(key);
+					policy.env_allowlist = policy.env_allowlist.filter(
+						(allowed) => allowed.toUpperCase() !== key.toUpperCase(),
+					);
 				}
-				// null values: runner policy has no unset mechanism — skip
 			}
 		}
 
