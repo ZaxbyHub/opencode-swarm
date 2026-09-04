@@ -139,6 +139,31 @@ describe('repro-check.sh refuses a non-regular checkpoint.manifest', () => {
 	});
 });
 
+describe('repro-check.sh refuses a non-regular bound_log truncate temp path', () => {
+	test('run exits 2 when a directory occupies the deterministic truncate.tmp path and leaves the original log untouched', () => {
+		const worktree = repo();
+		const base = git(worktree, 'rev-parse', 'HEAD');
+		const dir = path.join(worktree, '.agents/issue-traces/issue-1/repro');
+		fs.mkdirSync(dir, { recursive: true });
+		const logPath = path.join(dir, 'C1.base.log');
+		fs.writeFileSync(logPath, 'placeholder\n');
+		// bound_log() now uses a deterministic "<log>.truncate.tmp" name
+		// (not "<log>.truncate.$$"), so a directory pre-placed at that exact
+		// path is reachable from outside the script and must be refused.
+		fs.mkdirSync(`${logPath}.truncate.tmp`, { recursive: true });
+		const result = run(worktree, [
+			...args(base, 'PRESERVING'),
+			'--',
+			'bash',
+			'-c',
+			'head -c 3145728 /dev/zero; exit 1',
+		]);
+		expect(result.code).toBe(2);
+		expect(result.err).toContain('refusing non-regular target');
+		expect(fs.statSync(`${logPath}.truncate.tmp`).isDirectory()).toBe(true);
+	});
+});
+
 describe('repro-check.sh refuses a real pre-existing symlink at a leaf artifact path', () => {
 	test.skipIf(process.platform === 'win32')(
 		'run exits 2 and leaves the symlinked base log target untouched',

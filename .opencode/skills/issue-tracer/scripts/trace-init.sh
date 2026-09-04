@@ -156,7 +156,7 @@ fi
 tree_index="$(mktemp)"
 rm -f "$tree_index"
 phase0_tree_id=""
-if phase0_tree_id="$(GIT_INDEX_FILE="$tree_index" git read-tree HEAD && GIT_INDEX_FILE="$tree_index" git add -A -- . && GIT_INDEX_FILE="$tree_index" git rm -r --cached --ignore-unmatch -q -- .agents/issue-traces && GIT_INDEX_FILE="$tree_index" git write-tree)"; then
+if phase0_tree_id="$(GIT_INDEX_FILE="$tree_index" git -C "$root" read-tree HEAD && GIT_INDEX_FILE="$tree_index" git -C "$root" add -A -- . && GIT_INDEX_FILE="$tree_index" git -C "$root" rm -r --cached --ignore-unmatch -q -- .agents/issue-traces && GIT_INDEX_FILE="$tree_index" git -C "$root" write-tree)"; then
   :
 else
   rm -f "$tree_index"

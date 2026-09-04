@@ -135,22 +135,27 @@ artifact_verdict_approved() {
       line = $0
       sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
       if (line == "") next
-      if (line ~ /^\[/) next
+      if (line ~ /^\[.*\]$/) next
       verdict = line
-      sub(/^Verdict: /, "", verdict)
+      if (line ~ /^Verdict: /) { sub(/^Verdict: /, "", verdict) }
+      else if (line !~ /^[A-Z_-]+$/) { next }
       if (verdict == "APPROVE" || verdict == "NEEDS_REVISION" || verdict == "BLOCKED" || verdict == "DISAPPROVED" || verdict == "REJECTED") {
         count++
         if (verdict == "APPROVE") { approve_count++ } else { other_count++ }
+      } else {
+        unknown_count++
       }
     }
-    END { exit !(count == 1 && approve_count == 1 && other_count == 0) }
+    END { exit !(count == 1 && approve_count == 1 && other_count == 0 && unknown_count == 0) }
   ' "$file" 2>/dev/null
 }
 
 # Extract the `## Reviewed SHA / diff hash` section from an artifact and
-# require exactly the two identity lines `reviewed-commit: <40hex>` and
-# `tree-id: <40hex>`. Sets ARTIFACT_COMMIT / ARTIFACT_TREE (empty when the
-# corresponding line is absent or malformed).
+# require exactly one line matching `reviewed-commit: <40hex>` and exactly
+# one matching `tree-id: <40hex>`. Sets ARTIFACT_COMMIT / ARTIFACT_TREE
+# (empty unless exactly one matching line was found) and
+# ARTIFACT_COMMIT_COUNT / ARTIFACT_TREE_COUNT (the actual match counts, so
+# callers can distinguish "0 matches" from "duplicate matches").
 artifact_identity() {
   local file="$1" section
   section="$(awk '
@@ -158,8 +163,21 @@ artifact_identity() {
     /^## / { infield = 0 }
     infield { print }
   ' "$file" 2>/dev/null || true)"
-  ARTIFACT_COMMIT="$(printf '%s\n' "$section" | grep -E '^reviewed-commit: [0-9a-f]{40}$' | head -n1 | sed 's/^reviewed-commit: //')"
-  ARTIFACT_TREE="$(printf '%s\n' "$section" | grep -E '^tree-id: [0-9a-f]{40}$' | head -n1 | sed 's/^tree-id: //')"
+  local commit_matches tree_matches
+  commit_matches="$(printf '%s\n' "$section" | grep -E '^reviewed-commit: [0-9a-f]{40}$' || true)"
+  tree_matches="$(printf '%s\n' "$section" | grep -E '^tree-id: [0-9a-f]{40}$' || true)"
+  ARTIFACT_COMMIT_COUNT="$(printf '%s\n' "$commit_matches" | grep -c . || true)"
+  ARTIFACT_TREE_COUNT="$(printf '%s\n' "$tree_matches" | grep -c . || true)"
+  if [ "$ARTIFACT_COMMIT_COUNT" -eq 1 ]; then
+    ARTIFACT_COMMIT="$(printf '%s\n' "$commit_matches" | sed 's/^reviewed-commit: //')"
+  else
+    ARTIFACT_COMMIT=""
+  fi
+  if [ "$ARTIFACT_TREE_COUNT" -eq 1 ]; then
+    ARTIFACT_TREE="$(printf '%s\n' "$tree_matches" | sed 's/^tree-id: //')"
+  else
+    ARTIFACT_TREE=""
+  fi
 }
 
 # Require the artifact's own `## Reviewed SHA / diff hash` identity to equal
@@ -173,7 +191,9 @@ artifact_identity() {
 artifact_identity_matches_gate() {
   local file="$1" gate="$2" expected_commit="$3" expected_treeid="$4"
   artifact_identity "$file"
-  if [ -n "$ARTIFACT_COMMIT" ] && [ "$ARTIFACT_COMMIT" = "$expected_commit" ] \
+  if [ "$ARTIFACT_COMMIT_COUNT" -ne 1 ] || [ "$ARTIFACT_TREE_COUNT" -ne 1 ]; then
+    rule_bad "artifact-identity-$gate" "expected exactly one reviewed-commit and one tree-id line"
+  elif [ -n "$ARTIFACT_COMMIT" ] && [ "$ARTIFACT_COMMIT" = "$expected_commit" ] \
     && [ -n "$ARTIFACT_TREE" ] && [ "$ARTIFACT_TREE" = "$expected_treeid" ] \
     && gate_row_exists "$gate" APPROVE "$expected_commit" "$expected_treeid"; then
     rule_ok "artifact-identity-$gate"
@@ -200,7 +220,7 @@ recurrence_justification_ok() {
 
 clean_tree() {
   local dirty
-  dirty="$(git status --porcelain | awk '$0 !~ /^.. \.agents\/issue-traces\//')"
+  dirty="$(git -C "$root" status --porcelain | awk '$0 !~ /^.. \.agents\/issue-traces\//')"
   [ -z "$dirty" ] && rule_ok clean-tree || rule_bad clean-tree "working tree has non-trace changes"
 }
 

@@ -254,6 +254,83 @@ describe('trace-check.sh artifact_verdict_approved requires exactly one APPROVE 
 		expect(result.code).toBe(1);
 		expect(result.out).toContain('FAIL artifact-verdict-implementation-review');
 	});
+
+	test('a Verdict section with APPROVE plus an unknown verdict-shaped line (Verdict: BANANA) FAILS', () => {
+		const worktree = repoV();
+		const dir = setupV(worktree);
+		fs.writeFileSync(
+			path.join(dir, '08b-implementation-review.md'),
+			'## Reviewed SHA / diff hash\nx\n## Verdict\nAPPROVE\nVerdict: BANANA\n## Independently re-run\nx\n## Check integrity\nx\n## Deferred / Scoped-Out / Unwired\nx\n',
+		);
+		const result = run(worktree, ['phase', '4.5', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain('FAIL artifact-verdict-implementation-review');
+	});
+
+	test('a Verdict section with APPROVE plus an unknown bare uppercase token (BANANA) FAILS', () => {
+		const worktree = repoV();
+		const dir = setupV(worktree);
+		fs.writeFileSync(
+			path.join(dir, '08b-implementation-review.md'),
+			'## Reviewed SHA / diff hash\nx\n## Verdict\nAPPROVE\nBANANA\n## Independently re-run\nx\n## Check integrity\nx\n## Deferred / Scoped-Out / Unwired\nx\n',
+		);
+		const result = run(worktree, ['phase', '4.5', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain('FAIL artifact-verdict-implementation-review');
+	});
+
+	test('a Verdict section with APPROVE plus a bracketed guidance line is OK', () => {
+		const worktree = repoV();
+		const dir = setupV(worktree);
+		fs.writeFileSync(
+			path.join(dir, '08b-implementation-review.md'),
+			'## Reviewed SHA / diff hash\nx\n## Verdict\nAPPROVE\n[optional note: no additional context]\n## Independently re-run\nx\n## Check integrity\nx\n## Deferred / Scoped-Out / Unwired\nx\n',
+		);
+		const result = run(worktree, ['phase', '4.5', '--slug', 'issue-1']);
+		expect(result.out).toContain('OK artifact-verdict-implementation-review');
+	});
+});
+
+describe('trace-check.sh artifact_identity requires exactly one reviewed-commit and one tree-id line', () => {
+	test('a duplicate stale reviewed-commit/tree-id line alongside the current identity FAILS', () => {
+		const worktree = repo();
+		const head = git(worktree, 'rev-parse', 'HEAD');
+		const tree = git(worktree, 'rev-parse', 'HEAD^{tree}');
+		const { dir } = setup(
+			worktree,
+			`| plan-critic | APPROVE | ${head} | ${tree} | 06-critic-review |\n`,
+		);
+		const stale = 'd'.repeat(40);
+		criticReview(
+			dir,
+			`reviewed-commit: ${head}\nreviewed-commit: ${stale}\ntree-id: ${tree}`,
+		);
+		const result = run(worktree, ['phase', '3', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain(
+			'FAIL artifact-identity-plan-critic: expected exactly one reviewed-commit and one tree-id line',
+		);
+	});
+
+	test('a duplicate tree-id line alongside the current identity FAILS', () => {
+		const worktree = repo();
+		const head = git(worktree, 'rev-parse', 'HEAD');
+		const tree = git(worktree, 'rev-parse', 'HEAD^{tree}');
+		const { dir } = setup(
+			worktree,
+			`| plan-critic | APPROVE | ${head} | ${tree} | 06-critic-review |\n`,
+		);
+		const stale = 'e'.repeat(40);
+		criticReview(
+			dir,
+			`reviewed-commit: ${head}\ntree-id: ${tree}\ntree-id: ${stale}`,
+		);
+		const result = run(worktree, ['phase', '3', '--slug', 'issue-1']);
+		expect(result.code).toBe(1);
+		expect(result.out).toContain(
+			'FAIL artifact-identity-plan-critic: expected exactly one reviewed-commit and one tree-id line',
+		);
+	});
 });
 
 describe('trace-check.sh phase 0 freshness grammar is fully anchored', () => {

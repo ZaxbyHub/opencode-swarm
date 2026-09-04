@@ -1,6 +1,6 @@
 # Issue-tracer 3.0.0 (gate-driven workflow)
 
-Issue-tracer v3 introduces a normative gate table, acceptance-check-driven validation, a red checkpoint manifest, and a human-enforced merge gate. These changes make issue-trace artifacts durable and validator-checked at each phase boundary, with independent review recorded per gate.
+Issue-tracer v3 introduces a normative gate table, acceptance-check-driven validation, a red checkpoint manifest, and a human-enforced merge gate. These changes make issue-trace artifacts durable and validator-checked at each phase boundary against the current commit and tree identity, with independent review recorded per gate.
 
 ## Changes
 

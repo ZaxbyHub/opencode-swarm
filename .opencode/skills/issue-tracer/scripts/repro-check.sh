@@ -107,7 +107,8 @@ bound_log() {
   local log="$1" total kept=1048576 omitted temp
   total="$(wc -c < "$log" | tr -d ' ')"
   [ "$total" -le 2097152 ] && return
-  temp="$log.truncate.$$"
+  temp="$log.truncate.tmp"
+  refuse_nonregular_target "$temp"
   { head -c "$kept" "$log"; printf '\n[... truncated %s bytes ...]\n' "$((total - (kept * 2)))"; tail -c "$kept" "$log"; } > "$temp"
   mv "$temp" "$log"
 }
