@@ -81,7 +81,6 @@ import {
 	clearSweepTombstoneForRevival,
 	createClaimedScopeBinding,
 	DEFAULT_SCOPE_BINDING_TTL_MS,
-	getActiveScopeBindingsForSession,
 	hasDeliberateScopeBindingDenyOverlay,
 	hasScopeBindingDenyOverlay,
 	installFailedRevocationOverlay,
@@ -648,6 +647,43 @@ function archiveImportedScopeAuthorityFiles(paths: readonly string[]): void {
 	}
 }
 
+function fingerprintCommittedScopeImportSource(
+	directory: string,
+): { authorityFiles: string[]; sourceDigest: string } | null {
+	const scopesDir = getScopesDir(directory);
+	try {
+		fs.lstatSync(scopesDir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+	if (!isScopesDirSafe(directory, scopesDir)) return null;
+	const names = fs.readdirSync(scopesDir).sort();
+	if (names.length > bindingFileScanCapacity) return null;
+	const authorityFiles: string[] = [];
+	for (const name of names) {
+		if (!name.startsWith('binding-') || !name.endsWith('.json')) continue;
+		const filePath = path.join(scopesDir, name);
+		authorityFiles.push(filePath);
+		const intentPath = getRetirementIntentPath(filePath);
+		if (fs.existsSync(intentPath)) authorityFiles.push(intentPath);
+	}
+	for (const name of names) {
+		if (/^claim-[a-f0-9]{40}\.json$/i.test(name)) {
+			authorityFiles.push(path.join(scopesDir, name));
+		}
+	}
+	if (authorityFiles.length === 0) return null;
+	const digest = createHash('sha256');
+	for (const filePath of authorityFiles) {
+		const raw = readBoundedFile(filePath);
+		if (raw === null) return null;
+		digest.update(path.basename(filePath));
+		digest.update(raw);
+	}
+	return { authorityFiles, sourceDigest: digest.digest('hex') };
+}
+
 function collectLegacyScopeBindingsForImport(directory: string): {
 	bindings: ScopeBinding[];
 	authorityFiles: string[];
@@ -783,17 +819,45 @@ function ensureScopeBindingAuthorityImported(
 	directory: string,
 ): ScopePersistenceResult<void> {
 	try {
-		if (
+		const authorityExists =
 			listCoordinationStates(directory, SCOPE_BINDING_COORDINATION_NAMESPACE, 1)
-				.length > 0
-		) {
-			return { ok: true, value: undefined };
+				.length > 0;
+		if (authorityExists) {
+			const importStatement = getProjectDb(directory).prepare(
+				'SELECT source_digest FROM coordination_import WHERE source = ?',
+			);
+			let importRow: { source_digest: string } | undefined;
+			try {
+				importRow = importStatement.get(
+					SCOPE_BINDING_COORDINATION_IMPORT_SOURCE,
+				) as { source_digest: string } | undefined;
+			} finally {
+				importStatement.finalize();
+			}
+			const committedSource = fingerprintCommittedScopeImportSource(directory);
+			// Once SQLite authority exists, arbitrary legacy/shadow artifacts cannot
+			// participate in authorization. The sole exception is recovery of the exact
+			// source generation committed by importCoordinationOnce before a crash.
+			if (
+				!importRow ||
+				!committedSource ||
+				importRow.source_digest !== committedSource.sourceDigest
+			) {
+				return { ok: true, value: undefined };
+			}
 		}
 		const legacy = collectLegacyScopeBindingsForImport(directory);
 		if (legacy.rowCount === 0 && legacy.authorityFiles.length === 0) {
 			return { ok: true, value: undefined };
 		}
 		const importedBindings = legacy.bindings.map((binding) => ({ ...binding }));
+		if (authorityExists) {
+			archiveImportedScopeAuthorityFiles(legacy.authorityFiles);
+			for (const binding of importedBindings) {
+				writeScopeBindingShadow(directory, binding);
+			}
+			return { ok: true, value: undefined };
+		}
 		const outcome = importCoordinationOnce(
 			directory,
 			{
@@ -806,7 +870,7 @@ function ensureScopeBindingAuthorityImported(
 				importScopeBindingStateRows(directory, importedBindings);
 			},
 		);
-		if (outcome === 'imported') {
+		if (outcome === 'imported' || outcome === 'already_imported') {
 			archiveImportedScopeAuthorityFiles(legacy.authorityFiles);
 			for (const binding of importedBindings) {
 				writeScopeBindingShadow(directory, binding);
@@ -1464,35 +1528,6 @@ export function resolveScopeBindingFromDisk(input: {
 	includeExpired?: boolean;
 }): DurableScopeBindingResolution {
 	if (!isSafeTaskId(input.taskId)) return { status: 'not_declared' };
-	// Preserve the synchronous same-process claim path.  Once a SQLite
-	// authority exists, legacy files are projections and cannot be used to
-	// discover a newly claimed binding; the in-memory v2 record is nevertheless
-	// an exact, live authorization for this process.
-	const inMemory =
-		input.requireDeclaration === true
-			? []
-			: getActiveScopeBindingsForSession({
-					directory: input.directory,
-					activeSessionId: input.ownerSessionId,
-				}).filter(
-					(binding) =>
-						binding.taskId === input.taskId &&
-						binding.planId === derivePlanId(input.plan) &&
-						binding.planStructureHash ===
-							computePlanStructureHash(input.plan) &&
-						(input.requireDispatchCorrelation !== true ||
-							isDispatchCorrelated(binding)) &&
-						(input.parentCallId === undefined ||
-							binding.parentCallId === input.parentCallId),
-				);
-	if (inMemory.length > 1) {
-		return {
-			status: 'ambiguous',
-			candidates: inMemory.slice(0, 8),
-			totalCandidates: inMemory.length,
-		};
-	}
-	if (inMemory.length === 1) return { status: 'found', binding: inMemory[0] };
 	const completeSet = readAllAuthoritativeScopeBindings(input.directory);
 	if (!completeSet.ok) {
 		if (completeSet.code === 'SCOPE_BINDING_STORE_OVERLOADED') {
@@ -2513,34 +2548,6 @@ export function resolveAuthorizedScopeBindingForSessionDetailed(input: {
 }): DurableScopeBindingResolution {
 	const plan = readCurrentPlan(input.directory);
 	if (!plan) return { status: 'not_declared' };
-	// A same-process synchronous claim is already an exact v2 authorization even
-	// when a SQLite authority was created by an earlier test/process.  Legacy
-	// files remain projections once SQLite exists, so do not discard this live
-	// in-memory binding while waiting for a durable writer that the synchronous
-	// host API cannot await.  Cross-process/restart resolution still uses the
-	// authoritative rows below.
-	const inMemory = getActiveScopeBindingsForSession({
-		directory: input.directory,
-		activeSessionId: input.activeSessionId,
-	}).filter((binding) =>
-		plan.phases.some((phase) =>
-			phase.tasks.some(
-				(task) =>
-					task.id === binding.taskId &&
-					binding.planId === derivePlanId(plan) &&
-					binding.planStructureHash === computePlanStructureHash(plan) &&
-					!hasScopeBindingDenyOverlay(binding),
-			),
-		),
-	);
-	if (inMemory.length > 1) {
-		return {
-			status: 'ambiguous',
-			candidates: inMemory.slice(0, 8),
-			totalCandidates: inMemory.length,
-		};
-	}
-	if (inMemory.length === 1) return { status: 'found', binding: inMemory[0] };
 	const matches: ScopeBinding[] = [];
 	const expired: ScopeBinding[] = [];
 	let expiredTotal = 0;

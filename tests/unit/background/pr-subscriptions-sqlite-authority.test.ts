@@ -163,14 +163,15 @@ describe('pr-subscriptions SQLite authority', () => {
 		});
 		try {
 			// The child must be fully initialized before it is released. Its
-			// coordination fault seam then pauses inside updateSnapshot's coordination
-			// transaction entry, so the parent invocation below is guaranteed to overlap
-			// an already-active child invocation rather than merely being scheduled
-			// near it.
+			// coordination fault seam then pauses after updateSnapshot has acquired its
+			// cross-process evidence lock but before SQLite BEGIN. The parent invocation
+			// below must therefore contend on the same outer lock. This is an end-to-end
+			// serialization proof; direct SQLite transaction contention is covered by the
+			// coordination-store transaction tests.
 			await waitForMarker(readyPath);
 			fs.writeFileSync(goPath, 'go', 'utf8');
 			await waitForMarker(enteredPath);
-			// The child is still paused in the transaction hook; it cannot finish
+			// The child is still paused while owning the outer lock; it cannot finish
 			// until the parent has invoked its own update below.
 			expect(fs.existsSync(donePath)).toBe(false);
 			const parentUpdate = updateSnapshot(dir, created.correlationId, {
@@ -179,11 +180,12 @@ describe('pr-subscriptions SQLite authority', () => {
 			});
 			// Calling an async function executes synchronously through its first await.
 			// This marker is therefore published only after the parent invocation has
-			// entered withEvidenceLock and suspended on the lock held by the child.
+			// entered withEvidenceLock and initiated acquisition of the child-held lock.
 			fs.writeFileSync(parentInvokedPath, 'invoked', 'utf8');
 			expect(fs.existsSync(donePath)).toBe(false);
 			// The child observes parent.invoked before it can leave the transaction
-			// hook, making the overlap a protocol condition rather than a timer guess.
+			// hook, making concurrent invocation a protocol condition rather than a
+			// timer guess.
 			await parentUpdate;
 			await waitForMarker(donePath);
 			expect(await child.exited).toBe(0);

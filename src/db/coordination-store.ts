@@ -10,6 +10,8 @@ const MAX_STATUS_CHARS = 128;
 const MAX_PAYLOAD_CHARS = 1_048_576;
 const MAX_EVENTS_PER_STREAM = 2_048;
 const MAX_TOTAL_EVENTS = 100_000;
+const MAX_EVENT_FENCES_PER_STREAM = 8_192;
+const MAX_TOTAL_EVENT_FENCES = 400_000;
 export const MAX_COORDINATION_STATE_LIST_ROWS = 25_000;
 const COORDINATION_STATE_PAGE_SIZE = 5_000;
 
@@ -26,9 +28,13 @@ export const _internals: {
 	) => void;
 	maxEventsPerStream: number;
 	maxTotalEvents: number;
+	maxEventFencesPerStream: number;
+	maxTotalEventFences: number;
 } = {
 	maxEventsPerStream: MAX_EVENTS_PER_STREAM,
 	maxTotalEvents: MAX_TOTAL_EVENTS,
+	maxEventFencesPerStream: MAX_EVENT_FENCES_PER_STREAM,
+	maxTotalEventFences: MAX_TOTAL_EVENT_FENCES,
 };
 
 export interface CoordinationState {
@@ -353,6 +359,38 @@ export function transitionCoordinationStateWithinTransaction(
 				now,
 			],
 		);
+		const streamFenceOverflow =
+			(db
+				.query<{ count: number }, [string]>(
+					'SELECT COUNT(*) AS count FROM coordination_event_fence WHERE stream_id = ?',
+				)
+				.get(input.event.streamId)?.count ?? 0) -
+			_internals.maxEventFencesPerStream;
+		if (streamFenceOverflow > 0) {
+			db.run(
+				`DELETE FROM coordination_event_fence WHERE rowid IN (
+					SELECT rowid FROM coordination_event_fence
+					WHERE stream_id = ? ORDER BY created_at, rowid LIMIT ?
+				)`,
+				[input.event.streamId, streamFenceOverflow],
+			);
+		}
+		const totalFenceCount =
+			db
+				.query<{ count: number }, []>(
+					'SELECT COUNT(*) AS count FROM coordination_event_fence',
+				)
+				.get()?.count ?? 0;
+		const totalFenceOverflow = totalFenceCount - _internals.maxTotalEventFences;
+		if (totalFenceOverflow > 0) {
+			db.run(
+				`DELETE FROM coordination_event_fence WHERE rowid IN (
+					SELECT rowid FROM coordination_event_fence
+					ORDER BY created_at, stream_id, rowid LIMIT ?
+				)`,
+				[totalFenceOverflow],
+			);
+		}
 		const streamFloor = nextVersion - _internals.maxEventsPerStream;
 		if (streamFloor > 0) {
 			db.run(
