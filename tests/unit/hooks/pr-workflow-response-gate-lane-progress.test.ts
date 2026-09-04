@@ -17,6 +17,10 @@ import {
 	createPrWorkflowResponseGate,
 	_internals as responseInternals,
 } from '../../../src/hooks/pr-workflow-response-gate.js';
+import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
 import { executeSubmitPrReviewResult } from '../../../src/tools/submit-pr-review-result.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -37,21 +41,24 @@ describe('PR workflow response-gate lane progress token (#2469)', () => {
 		batchId: string,
 		laneIds: readonly string[],
 	): Promise<void> {
-		const statePath = path.join(
-			directory,
-			'.swarm',
-			workflowInternals.workflowGateStateRelativePath(sessionID),
-		);
-		const state = JSON.parse(await fs.readFile(statePath, 'utf8'));
-		state.prReviewValidationBatches = [
-			{
-				batchId,
-				phase: 'council',
-				lanes: laneIds.map((laneId) => ({ laneId, workflowLane: laneId })),
-				validatedAt: '2026-01-01T00:00:00.000Z',
-			},
-		];
-		await fs.writeFile(statePath, JSON.stringify(state), 'utf8');
+		await withSessionStateMutation(directory, sessionID, async () => {
+			const current = await readPrWorkflowGateState(directory, sessionID);
+			if (!current) throw new Error('missing active workflow state');
+			await writeStateWhileLocked(directory, {
+				...current,
+				prReviewValidationBatches: [
+					{
+						batchId,
+						phase: 'council',
+						lanes: laneIds.map((laneId) => ({
+							laneId,
+							workflowLane: laneId,
+						})),
+						validatedAt: '2026-01-01T00:00:00.000Z',
+					},
+				],
+			});
+		});
 		workflowInternals.resetTrackedStateCache();
 	}
 
@@ -228,14 +235,14 @@ describe('PR workflow response-gate lane progress token (#2469)', () => {
 			mode: 'swarm-pr-review:base',
 			workflowLane: 'stale-lane',
 		});
-		const statePath = path.join(
-			directory,
-			'.swarm',
-			workflowInternals.workflowGateStateRelativePath(sessionID),
-		);
-		const state = JSON.parse(await fs.readFile(statePath, 'utf8'));
-		state.activatedAt = '2100-01-01T00:00:00.000Z';
-		await fs.writeFile(statePath, JSON.stringify(state), 'utf8');
+		await withSessionStateMutation(directory, sessionID, async () => {
+			const current = await readPrWorkflowGateState(directory, sessionID);
+			if (!current) throw new Error('missing active workflow state');
+			await writeStateWhileLocked(directory, {
+				...current,
+				activatedAt: '2100-01-01T00:00:00.000Z',
+			});
+		});
 		workflowInternals.resetTrackedStateCache();
 		const promptAsync = mock(async () => ({}));
 		const gate = createPrWorkflowResponseGate({

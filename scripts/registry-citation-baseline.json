@@ -65,34 +65,6 @@
 			"note": "Pre-existing debt, not approved drift: \"writeDelegationFallback\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:4913 (background-delegations-fallback.writerCitations[0])."
 		},
 		{
-			"rowId": "background-delegations-ledger",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "appendRecord",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendRecord\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:2732 (background-delegations-ledger.writerCitations[0])."
-		},
-		{
-			"rowId": "background-delegations-ledger",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "readDelegations",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readDelegations\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:2650 (background-delegations-ledger.readerCitations[0])."
-		},
-		{
-			"rowId": "background-delegations-ledger",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "scanDelegationsForRecovery",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"scanDelegationsForRecovery\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:2678 (background-delegations-ledger.readerCitations[1])."
-		},
-		{
-			"rowId": "background-delegations-ledger",
-			"file": "src/background/pending-delegations.ts",
-			"identifier": "writeDurableFileSync",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeDurableFileSync\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:1346 (background-delegations-ledger.writerCitations[1])."
-		},
-		{
 			"rowId": "capsules",
 			"file": "src/context-map/capsule-persistence.ts",
 			"identifier": "loadCapsule",

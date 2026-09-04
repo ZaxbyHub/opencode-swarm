@@ -490,8 +490,7 @@ export function acquireCoordinationLease(
 		if (
 			row &&
 			row.lease_expires_at > new Date().toISOString() &&
-			(row.owner_token !== input.ownerToken ||
-				row.generation !== input.generation)
+			row.owner_token !== input.ownerToken
 		) {
 			return { outcome: 'held' };
 		}

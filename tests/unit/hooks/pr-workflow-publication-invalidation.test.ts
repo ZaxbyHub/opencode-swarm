@@ -10,6 +10,10 @@ import {
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
+import {
 	createPublicationFixture,
 	HEAD_SHA,
 	POST_COMMIT_SHA,
@@ -257,15 +261,25 @@ describe('cross-workspace binding (copied .swarm cannot authorize)', () => {
 		// copying the state into another repository).
 		const stateBefore = await readActive();
 		expect(stateBefore.active?.workspaceIdentity).toBeTruthy();
-		const fs = await import('node:fs/promises');
-		const path = await import('node:path');
-		const relative = _test_exports.workflowGateStateRelativePath(SESSION_ID);
-		const absolute = path.join(fixture.directory, '.swarm', relative);
-		const raw = JSON.parse(await fs.readFile(absolute, 'utf-8')) as {
-			prFeedbackPublication: { active: { workspaceIdentity: string } };
-		};
-		raw.prFeedbackPublication.active.workspaceIdentity = 'Z:/other/workspace';
-		await fs.writeFile(absolute, JSON.stringify(raw, null, 2), 'utf-8');
+		await withSessionStateMutation(fixture.directory, SESSION_ID, async () => {
+			const current = await readPrWorkflowGateState(
+				fixture.directory,
+				SESSION_ID,
+			);
+			if (!current?.prFeedbackPublication?.active) {
+				throw new Error('missing active publication generation');
+			}
+			await writeStateWhileLocked(fixture.directory, {
+				...current,
+				prFeedbackPublication: {
+					...current.prFeedbackPublication,
+					active: {
+						...current.prFeedbackPublication.active,
+						workspaceIdentity: 'Z:/other/workspace',
+					},
+				},
+			});
+		});
 		_test_exports.resetTrackedStateCache();
 		await expect(attemptExactPush()).rejects.toThrow('INVALIDATED');
 		const { active } = await readActive();
@@ -279,15 +293,22 @@ describe('evidence-join integrity (defense-in-depth, PR #2422 review PRR-009)', 
 		// Keep every identity component (digest/head/worktree/upstream/remote-
 		// url/workspace) intact; forge ONLY the receipt set the generation's
 		// join pinned — Stage A validatedAt from a different arming.
-		const fs = await import('node:fs/promises');
-		const path = await import('node:path');
-		const relative = _test_exports.workflowGateStateRelativePath(SESSION_ID);
-		const absolute = path.join(fixture.directory, '.swarm', relative);
-		const raw = JSON.parse(await fs.readFile(absolute, 'utf-8')) as {
-			prFeedbackStageA: { validatedAt: string };
-		};
-		raw.prFeedbackStageA.validatedAt = '2000-01-01T00:00:00.000Z';
-		await fs.writeFile(absolute, JSON.stringify(raw, null, 2), 'utf-8');
+		await withSessionStateMutation(fixture.directory, SESSION_ID, async () => {
+			const current = await readPrWorkflowGateState(
+				fixture.directory,
+				SESSION_ID,
+			);
+			if (!current?.prFeedbackStageA) {
+				throw new Error('missing stage A state');
+			}
+			await writeStateWhileLocked(fixture.directory, {
+				...current,
+				prFeedbackStageA: {
+					...current.prFeedbackStageA,
+					validatedAt: '2000-01-01T00:00:00.000Z',
+				},
+			});
+		});
 		_test_exports.resetTrackedStateCache();
 		await expect(attemptExactPush()).rejects.toThrow('INVALIDATED');
 		const { active } = await readActive();

@@ -12,12 +12,17 @@ import {
 	activatePrWorkflow,
 	clearPrWorkflowGateState,
 	type PrWorkflowGateState,
+	readPrWorkflowGateState,
 	_test_exports as workflowInternals,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	createPrWorkflowResponseGate,
 	DEFAULT_TOTAL_WAKE_CEILINGS,
 } from '../../../src/hooks/pr-workflow-response-gate.js';
+import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
 
 let directory = '';
 
@@ -41,19 +46,20 @@ async function writeStateWithRevision(
 	revision: number,
 	tier?: PrReviewDepthTier,
 ): Promise<void> {
-	const relative = workflowInternals.workflowGateStateRelativePath(sessionID);
-	const absolute = path.join(directory, '.swarm', relative);
-	await fs.mkdir(path.dirname(absolute), { recursive: true });
-	const state: PrWorkflowGateState = {
-		schemaVersion: 1,
-		revision,
-		sessionID,
-		mode: 'PR_REVIEW',
-		activatedAt: '2026-07-19T00:00:00.000Z',
-		updatedAt: '2026-07-19T00:00:00.000Z',
-		...(tier !== undefined && { prReviewDepthTier: tier }),
-	};
-	await fs.writeFile(absolute, JSON.stringify(state, null, 2), 'utf-8');
+	const existing =
+		(await readPrWorkflowGateState(directory, sessionID)) ??
+		(await activatePrWorkflow(directory, sessionID, 'PR_REVIEW'));
+	await withSessionStateMutation(directory, sessionID, async () => {
+		const current = await readPrWorkflowGateState(directory, sessionID);
+		if (!current) throw new Error('missing active workflow state');
+		await writeStateWhileLocked(directory, {
+			...current,
+			updatedAt: new Date(
+				Date.parse(existing.activatedAt) + Math.max(revision, 0),
+			).toISOString(),
+			...(tier !== undefined ? { prReviewDepthTier: tier } : {}),
+		} satisfies PrWorkflowGateState);
+	});
 }
 
 /**

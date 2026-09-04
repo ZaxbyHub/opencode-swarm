@@ -33,13 +33,21 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { BACKGROUND_DELEGATIONS_FILE } from '../../../src/background/pending-delegations.js';
+import {
+	BACKGROUND_DELEGATIONS_FILE,
+	type BackgroundDelegationRecord,
+	readDelegations,
+} from '../../../src/background/pending-delegations.js';
 import {
 	abortPrWorkflow,
 	activatePrWorkflow,
 	_test_exports as gateInternals,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
 import {
 	backdatePrWorkflowLane,
 	laneStatusOnDisk,
@@ -131,7 +139,7 @@ describe('the override finalization is a no-op over an already-terminal record',
 			}),
 		});
 
-		let ledgerLinesAtHandoff: string[] = [];
+		let recordAtHandoff: BackgroundDelegationRecord | undefined;
 		// The interleaving. `beforeAbortClear` is the last seam before the
 		// CAS-guarded clear, and the finalization runs strictly after that clear —
 		// so a record driven terminal here is already `stale` by the time the
@@ -145,7 +153,9 @@ describe('the override finalization is a no-op over an already-terminal record',
 				STALE_LANE_AGE_MS,
 				'stale',
 			);
-			ledgerLinesAtHandoff = await readLedgerLines();
+			recordAtHandoff = readDelegations(directory).find(
+				(candidate) => candidate.correlationId === 'c-idem',
+			);
 		};
 
 		const summary = await abortPrWorkflow(directory, SESSION_ID, {
@@ -153,15 +163,22 @@ describe('the override finalization is a no-op over an already-terminal record',
 			reason: 'lane wedged busy forever',
 		});
 
-		// The seam ran, so the comparison below is against a real snapshot rather
-		// than an empty array that would make `toEqual` vacuous.
-		expect(ledgerLinesAtHandoff.length).toBeGreaterThan(0);
-		// THE assertion: the finalize sweep appended nothing. `sweepStaleLocked`
-		// filters on `pending`/`running` here, so an already-`stale` record is
-		// skipped entirely — no transition line, and no compaction either (that runs
-		// only when at least one record was swept). Byte-for-byte, not just a count,
-		// so a rewrite that happened to preserve the line count still fails.
-		expect(await readLedgerLines()).toEqual(ledgerLinesAtHandoff);
+		// The seam ran, so the comparison below is against a real authoritative
+		// record rather than an absent placeholder.
+		expect(recordAtHandoff).toBeDefined();
+		const finalRecords = readDelegations(directory).filter(
+			(candidate) => candidate.correlationId === 'c-idem',
+		);
+		// THE assertion: the finalize sweep rewrote nothing. Under SQLite
+		// authority the compatibility projection is a row replacement mirror, so
+		// byte-for-byte shadow equality is not the invariant; the authoritative
+		// row's identity and timestamp are.
+		expect(finalRecords).toHaveLength(1);
+		expect(finalRecords[0]).toMatchObject({
+			correlationId: 'c-idem',
+			status: 'stale',
+			updatedAt: recordAtHandoff?.updatedAt,
+		});
 		// The folded read stays coherent: one record, one terminal status.
 		expect(laneStatusOnDisk(directory, 'c-idem')).toBe('stale');
 		// The disclosure states what the read-back OBSERVED, not what this abort
@@ -225,22 +242,16 @@ describe('a lost CAS in a mixed batch retracts precisely, not vacuously', () => 
 				},
 			}),
 		});
-		const statePath = path.join(
-			directory,
-			'.swarm',
-			gateInternals.workflowGateStateRelativePath(SESSION_ID),
-		);
 		// The seam runs AFTER settlement (which already swept `c-mix-dead` to
 		// `stale`) and immediately before the CAS-guarded clear — the same
 		// technique the restart suite's F1 test uses to force a lost
 		// compare-and-swap without touching production code.
 		gateInternals.beforeAbortClear = async () => {
-			const current = JSON.parse(await fs.readFile(statePath, 'utf-8'));
-			await fs.writeFile(
-				statePath,
-				JSON.stringify({ ...current, revision: current.revision + 1 }),
-				'utf-8',
-			);
+			await withSessionStateMutation(directory, SESSION_ID, async () => {
+				const current = await readPrWorkflowGateState(directory, SESSION_ID);
+				if (!current) throw new Error('missing active workflow state');
+				await writeStateWhileLocked(directory, { ...current });
+			});
 		};
 
 		await expect(
