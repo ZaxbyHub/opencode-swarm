@@ -44,7 +44,7 @@ describe('architect PLAN→CRITIC-GATE→EXECUTE pipeline', () => {
 describe('PLAN→CRITIC-GATE transition in plan skill', () => {
 	it('plan skill contains Transition to CRITIC-GATE section', () => {
 		const planSkill = readFileSync(
-			join(CWD, '.opencode/skills/plan/SKILL.md'),
+			join(CWD, '.opencode/skills/swarm-plan/SKILL.md'),
 			'utf-8',
 		);
 
@@ -56,7 +56,7 @@ describe('PLAN→CRITIC-GATE transition in plan skill', () => {
 
 	it('plan skill references critic review workflow', () => {
 		const planSkill = readFileSync(
-			join(CWD, '.opencode/skills/plan/SKILL.md'),
+			join(CWD, '.opencode/skills/swarm-plan/SKILL.md'),
 			'utf-8',
 		);
 

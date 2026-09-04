@@ -25,7 +25,7 @@ critic proceed to substantive evaluation (feasibility, risk, scope, etc.).
 
 ### Files changed
 
-- `.opencode/skills/plan/SKILL.md` and `.claude/skills/plan/SKILL.md`:
+- `.opencode/skills/swarm-plan/SKILL.md` and `.claude/skills/swarm-plan/SKILL.md`:
   TRACEABILITY CHECK extended to cover MUST/SHALL SC-### obligations
 - `.opencode/skills/critic-gate/SKILL.md` and `.claude/skills/critic-gate/SKILL.md`:
   New obligation traceability enforcement section

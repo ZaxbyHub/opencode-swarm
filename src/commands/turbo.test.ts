@@ -194,7 +194,7 @@ describe('handleTurboCommand', () => {
 			expect(getSession().turboMode).toBe(true);
 		});
 
-		it('treats unknown arguments as toggle', async () => {
+		it('rejects unknown arguments without changing state (#2493)', async () => {
 			getSession().turboMode = false;
 
 			const result = await handleTurboCommand(
@@ -203,8 +203,9 @@ describe('handleTurboCommand', () => {
 				testSessionId,
 			);
 
-			expect(result).toBe('Turbo Mode enabled. ' + TURBO_BYPASS_DISCLOSURE);
-			expect(getSession().turboMode).toBe(true);
+			expect(result).toContain('Unknown turbo argument "invalid"');
+			expect(result).toContain('Turbo state is unchanged');
+			expect(getSession().turboMode).toBe(false);
 		});
 
 		it('does not modify other session properties', async () => {

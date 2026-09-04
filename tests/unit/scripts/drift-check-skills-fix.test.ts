@@ -88,11 +88,13 @@ describe('drift:fix skill-mirror — MIRRORED pairs (canonical .opencode)', () =
 		process.env.SWARM_SKILL_SYNC_CONFIRM = '1';
 		const root = makeTempRoot();
 		const same = 'IDENTICAL CONTENT\n';
-		writeFile(root, '.opencode/skills/plan/SKILL.md', same);
-		writeFile(root, '.claude/skills/plan/SKILL.md', same);
+		writeFile(root, '.opencode/skills/swarm-plan/SKILL.md', same);
+		writeFile(root, '.claude/skills/swarm-plan/SKILL.md', same);
 
 		const synced = fixSkillMirrorDrift(root);
-		expect(synced.find((f) => f.message.includes('"plan"'))).toBeUndefined();
+		expect(
+			synced.find((f) => f.message.includes('"swarm-plan"')),
+		).toBeUndefined();
 	});
 
 	test('detectSkillMirrorDrift returns zero findings after fix', () => {

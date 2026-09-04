@@ -9,7 +9,7 @@ const read = (path: string): string =>
 const mirroredSkills = [
 	'brainstorm',
 	'specify',
-	'plan',
+	'swarm-plan',
 	'issue-ingest',
 ] as const;
 
@@ -98,7 +98,7 @@ describe('QA gate pre-plan bootstrap protocol (#2145)', () => {
 	});
 
 	test('PLAN freezes identity and persists gates before the first save', () => {
-		const content = read('.opencode/skills/plan/SKILL.md');
+		const content = read('.opencode/skills/swarm-plan/SKILL.md');
 		const bootstrap = content.slice(
 			content.indexOf('QA AND EXECUTION PROFILE BOOTSTRAP'),
 			content.indexOf('TRACEABILITY CHECK'),
@@ -118,8 +118,8 @@ describe('QA gate pre-plan bootstrap protocol (#2145)', () => {
 
 	test('authoritative PLAN surfaces forbid direct context and derived-plan writes', () => {
 		const surfaces = [
-			read('.opencode/skills/plan/SKILL.md'),
-			read('.claude/skills/plan/SKILL.md'),
+			read('.opencode/skills/swarm-plan/SKILL.md'),
+			read('.claude/skills/swarm-plan/SKILL.md'),
 			createArchitectAgent('test-model').config.prompt!,
 			read('references/qa-gate-gates-body.md'),
 			read('scripts/sync-qa-gate-skills.ts'),
@@ -130,13 +130,13 @@ describe('QA gate pre-plan bootstrap protocol (#2145)', () => {
 			'TASK: Write the implementation plan to .swarm/plan.md',
 		);
 		expect(surfaces).not.toContain('Also create .swarm/context.md with:');
-		expect(read('.opencode/skills/plan/SKILL.md')).toMatch(
+		expect(read('.opencode/skills/swarm-plan/SKILL.md')).toMatch(
 			/save_plan[^]*unavailable[^]*STOP[^]*Never ask a coder to hand-write/i,
 		);
 	});
 
 	test('LOOP auto mode persists explicit balanced defaults without pausing', () => {
-		const content = read('.opencode/skills/plan/SKILL.md');
+		const content = read('.opencode/skills/swarm-plan/SKILL.md');
 		expect(content).toMatch(
 			/MODE: LOOP[\s\S]*autonomy=auto[\s\S]*balanced-speed defaults[\s\S]*set_qa_gates/i,
 		);

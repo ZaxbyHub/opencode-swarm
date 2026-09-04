@@ -160,6 +160,7 @@ import {
 } from './hooks/knowledge-injector.js';
 import { materializeSystemGuidanceInPlace } from './hooks/messages-transform.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
+import { maybeEmitNonArchitectAdvisory } from './hooks/non-architect-advisory.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import {
 	loadPlanTaskIdContext,
@@ -4795,6 +4796,24 @@ async function initializeOpenCodeSwarm(
 						console.error(
 							`[DIAG] chat.message agent=${input.agent ?? 'none'} session=${input.sessionID}`,
 						);
+					// Issue #2493 (K3 UX-3): one-time first-run advisory when a
+					// session runs on a non-architect agent (see
+					// src/hooks/non-architect-advisory.ts). Fail-open: never
+					// blocks message processing.
+					try {
+						if (
+							input?.sessionID &&
+							typeof input?.agent === 'string' &&
+							input.agent.trim() !== ''
+						) {
+							maybeEmitNonArchitectAdvisory(
+								String(input.sessionID),
+								String(input.agent),
+							);
+						}
+					} catch {
+						// Advisory-only; never block chat processing.
+					}
 					if (
 						input?.sessionID &&
 						typeof input?.agent === 'string' &&

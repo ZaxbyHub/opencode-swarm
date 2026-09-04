@@ -17,7 +17,10 @@ describe('DROP Protection Mechanical Enforcement Documentation', () => {
 			process.cwd(),
 			'.opencode/skills/clarify/SKILL.md',
 		);
-		const planPath = join(process.cwd(), '.opencode/skills/plan/SKILL.md');
+		const planPath = join(
+			process.cwd(),
+			'.opencode/skills/swarm-plan/SKILL.md',
+		);
 		const clarifyContent = readFileSync(clarifyPath, 'utf-8');
 		const planContent = readFileSync(planPath, 'utf-8');
 
@@ -55,7 +58,7 @@ describe('DROP Protection Mechanical Enforcement Documentation', () => {
 	});
 
 	describe('Implementation guidance in documentation', () => {
-		for (const slug of ['clarify', 'plan']) {
+		for (const slug of ['clarify', 'swarm-plan']) {
 			const skillPath = join(
 				process.cwd(),
 				'.opencode/skills',
@@ -85,7 +88,7 @@ describe('DROP Protection Mechanical Enforcement Documentation', () => {
 	describe('Always-surface categories protection across all skills', () => {
 		const skillSlugs = [
 			'clarify',
-			'plan',
+			'swarm-plan',
 			'specify',
 			'brainstorm',
 			'issue-ingest',
@@ -126,7 +129,10 @@ describe('DROP Protection Mechanical Enforcement Documentation', () => {
 		});
 
 		it('plan skill specifies override target: APPROVED/ASK_USER', () => {
-			const planPath = join(process.cwd(), '.opencode/skills/plan/SKILL.md');
+			const planPath = join(
+				process.cwd(),
+				'.opencode/skills/swarm-plan/SKILL.md',
+			);
 			const content = readFileSync(planPath, 'utf-8');
 			const stage3Start = content.indexOf(
 				'#### Stage 3: Consult Critic Sounding Board',

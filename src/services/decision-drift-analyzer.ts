@@ -13,6 +13,7 @@ import * as path from 'node:path';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlan } from '../plan/manager';
 import { log } from '../utils';
+import { extractContextDecisions } from '../utils/context-decisions';
 
 /**
  * Drift signal severity levels
@@ -95,61 +96,18 @@ export const DEFAULT_DRIFT_CONFIG: DriftAnalyzerConfig = {
 
 /**
  * Extract decisions from context.md content
+ *
+ * #2493 W9a: the section scan itself now lives in the shared extractor
+ * (`src/utils/context-decisions.ts`) so all four historical consumers of
+ * the `## Decisions` section agree on boundaries. This delegate preserves
+ * this module's public shape exactly — `ContextDecision` is a structural
+ * superset of `Decision` (it additionally carries the raw source line), so
+ * the mapping is the identity.
  */
 export function extractDecisionsFromContext(
 	contextContent: string,
 ): Decision[] {
-	const decisions: Decision[] = [];
-	const lines = contextContent.split('\n');
-	let inDecisionsSection = false;
-	let currentPhase: number | null = null;
-	let lineNumber = 0;
-
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
-		lineNumber = i + 1;
-
-		// Track current phase
-		const phaseMatch = line.match(/^## Phase (\d+)/);
-		if (phaseMatch) {
-			currentPhase = parseInt(phaseMatch[1], 10);
-		}
-
-		// Start of decisions section
-		if (line.trim() === '## Decisions') {
-			inDecisionsSection = true;
-			continue;
-		}
-
-		// End of decisions section
-		if (inDecisionsSection && line.startsWith('## ')) {
-			break;
-		}
-
-		// Extract decision items
-		if (inDecisionsSection && line.trim().startsWith('- ')) {
-			const text = line.trim().substring(2); // Remove "- "
-			const confirmed = text.includes('✅') || text.includes('[confirmed]');
-			const timestampMatch = text.match(/\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/);
-			const timestamp = timestampMatch ? timestampMatch[1] : null;
-
-			// Extract phase from decision if present
-			const decisionPhaseMatch = text.match(/Phase (\d+)/);
-			const decisionPhase = decisionPhaseMatch
-				? parseInt(decisionPhaseMatch[1], 10)
-				: currentPhase;
-
-			decisions.push({
-				text: text.replace(/\s*\[.*?\]\s*/g, '').trim(), // Remove timestamp/confirm markers
-				phase: decisionPhase,
-				confirmed,
-				timestamp,
-				line: lineNumber,
-			});
-		}
-	}
-
-	return decisions;
+	return extractContextDecisions(contextContent);
 }
 
 /**

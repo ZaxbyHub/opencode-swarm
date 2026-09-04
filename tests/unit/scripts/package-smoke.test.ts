@@ -35,7 +35,7 @@ const requiredProjectSkillSlugs = [
 	'swarm-pr-subscribe',
 	'swarm-ci-monitor',
 	'issue-ingest',
-	'plan',
+	'swarm-plan',
 	'critic-gate',
 	'execute',
 	'phase-wrap',

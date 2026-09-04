@@ -8,7 +8,7 @@ function readSkill(slug: string): string {
 	);
 }
 
-export const PLAN_PROTOCOL = readSkill('plan');
+export const PLAN_PROTOCOL = readSkill('swarm-plan');
 export const EXECUTE_PROTOCOL = readSkill('execute');
 export const PHASE_WRAP_PROTOCOL = readSkill('phase-wrap');
 

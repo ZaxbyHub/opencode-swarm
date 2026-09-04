@@ -155,7 +155,7 @@ describe('brainstorm skill', () => {
 
 		writeFile(
 			repo,
-			'.opencode/skills/plan/SKILL.md',
+			'.opencode/skills/swarm-plan/SKILL.md',
 			'# PLAN\n\nMODE: PLAN\ndoes NOT delegate to coder.\n',
 		);
 		runGit(['add', '.'], repo);
@@ -171,7 +171,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Variable assigned from a path expression containing the slug
-const SKILL_PATH = join(process.cwd(), '.opencode/skills/plan/SKILL.md');
+const SKILL_PATH = join(process.cwd(), '.opencode/skills/swarm-plan/SKILL.md');
 const skillContent = readFileSync(SKILL_PATH, 'utf-8');
 
 describe('plan skill', () => {
@@ -185,7 +185,7 @@ describe('plan skill', () => {
 		// Remove the phrase
 		writeFile(
 			repo,
-			'.opencode/skills/plan/SKILL.md',
+			'.opencode/skills/swarm-plan/SKILL.md',
 			'# PLAN\n\nMODE: PLAN\nfreely delegates to coder.\n',
 		);
 

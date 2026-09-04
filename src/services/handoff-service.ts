@@ -9,6 +9,7 @@ import type { ExecutionProfile } from '../config/plan-schema';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { log } from '../utils';
+import { extractContextDecisions } from '../utils/context-decisions';
 
 /**
  * RTL override character pattern for sanitization
@@ -282,45 +283,29 @@ function parseSessionState(content: string | null): {
 
 /**
  * Extract decisions from context.md content
+ *
+ * #2493 W9a: derives from the shared section extractor
+ * (`src/utils/context-decisions.ts`) instead of a private line-scan.
+ * Mapping preserves this consumer's historical output exactly:
+ * - cleaned text: bracket groups (timestamps, [confirmed]) and the ✅
+ *   marker removed (the shared `text` already strips bracket groups, so
+ *   only ✅ removal remains here);
+ * - empty results dropped;
+ * - RTL-sanitized and truncated to MAX_DECISION_LENGTH;
+ * - LAST 5 decisions kept.
  */
 function extractDecisions(content: string | null): string[] {
 	if (!content) return [];
 
 	const decisions: string[] = [];
-	const lines = content.split('\n');
-	let inDecisionsSection = false;
-
-	for (const line of lines) {
-		// Start of decisions section
-		if (line.trim() === '## Decisions') {
-			inDecisionsSection = true;
-			continue;
-		}
-
-		// End of decisions section
-		if (
-			inDecisionsSection &&
-			line.startsWith('## ') &&
-			line.trim() !== '## Decisions'
-		) {
-			break;
-		}
-
-		// Extract decision items
-		if (inDecisionsSection && line.trim().startsWith('- ')) {
-			const text = line.trim().substring(2);
-			// Clean up the decision text
-			const cleaned = text
-				.replace(/\s*\[.*?\]\s*/g, '')
-				.replace(/✅/g, '')
-				.replace(/\[confirmed\]/g, '')
-				.trim();
-			if (cleaned) {
-				// Apply RTL sanitization and length limit
-				const sanitized = sanitizeString(cleaned, MAX_DECISION_LENGTH);
-				if (sanitized) {
-					decisions.push(sanitized);
-				}
+	for (const decision of extractContextDecisions(content)) {
+		// Clean up the decision text
+		const cleaned = decision.text.replace(/✅/g, '').trim();
+		if (cleaned) {
+			// Apply RTL sanitization and length limit
+			const sanitized = sanitizeString(cleaned, MAX_DECISION_LENGTH);
+			if (sanitized) {
+				decisions.push(sanitized);
 			}
 		}
 	}

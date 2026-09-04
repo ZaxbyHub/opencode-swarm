@@ -198,11 +198,11 @@ describe('deriveShippedSkillNames', () => {
 			files: [
 				'dist',
 				'.opencode/skills/brainstorm',
-				'.opencode/skills/plan',
+				'.opencode/skills/swarm-plan',
 				'README.md',
 			],
 		});
-		expect(names).toEqual(['brainstorm', 'plan']);
+		expect(names).toEqual(['brainstorm', 'swarm-plan']);
 	});
 
 	test('ignores non-.opencode/skills entries and a missing files field', () => {

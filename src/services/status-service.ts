@@ -57,11 +57,13 @@ import { getLastHeartbeat } from '../telemetry';
 import { listRecoveryRecords } from '../turbo/lean/recovery';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
 import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
+import { extractContextDecisions } from '../utils/context-decisions';
 import { getCompactionMetrics } from './compaction-service';
 import {
 	type CostSummary,
 	summarizeTelemetryCosts,
 } from './cost-accounting.js';
+import { analyzeDecisionDrift } from './decision-drift-analyzer';
 
 /**
  * Dependency-injection seam for status-service.
@@ -203,6 +205,22 @@ export interface StatusData {
 	specStaleStoredHash?: string;
 	/** Current spec.md hash on disk (null when spec.md is missing) */
 	specStaleCurrentHash?: string | null;
+	/**
+	 * #2493 W9b: decision-drift visibility. Counts derived from running the
+	 * same analyzer the architect context injection uses
+	 * (`analyzeDecisionDrift`) over `.swarm/context.md`. `undefined` when
+	 * detection is disabled (`automation.capabilities.decision_drift_detection:
+	 * false`), when there is no drift, or when the analysis fails (fail-open —
+	 * a status command must never fail because an optional signal hiccupped).
+	 */
+	decisionDrift?: {
+		/** Number of stale-decision signals */
+		staleCount: number;
+		/** Number of contradictory-decision signals */
+		contradictionCount: number;
+		/** Timestamp of the most recent timestamped decision, when any exist */
+		lastDecisionAt?: string;
+	};
 	/** Directives auto-escalated in the last 7 days (Change 3). */
 	recentEscalations?: RecentEscalation[];
 	/** #1234 Part 3: pending skill/motif proposals in .swarm/skills/proposals/ */
@@ -499,6 +517,87 @@ function formatAgo(ms: number): string {
 }
 
 /**
+ * #2493 W9b: decision-drift snapshot for /swarm status.
+ *
+ * Runs the same analyzer the architect context injection uses
+ * (`analyzeDecisionDrift`, src/services/decision-drift-analyzer.ts) and
+ * reduces it to bounded counts. Gated on the same
+ * `automation.capabilities.decision_drift_detection` flag the
+ * system-enhancer hook reads — the schema default is true, so this is
+ * opt-OUT: only an explicit `false` disables the status read (an absent
+ * `automation` block leaves it on).
+ *
+ * Returns undefined when detection is disabled, no drift exists, or
+ * anything fails — fail-open, like every other optional status signal.
+ */
+async function collectDecisionDriftSnapshot(
+	directory: string,
+): Promise<StatusData['decisionDrift']> {
+	try {
+		const config = loadPluginConfig(directory);
+		if (config.automation?.capabilities?.decision_drift_detection === false) {
+			return undefined;
+		}
+		const result = await analyzeDecisionDrift(directory);
+		const staleCount = result.signals.filter((s) => s.type === 'stale').length;
+		const contradictionCount = result.signals.filter(
+			(s) => s.type === 'contradiction',
+		).length;
+		if (staleCount === 0 && contradictionCount === 0) {
+			return undefined;
+		}
+		const contextContent = await readSwarmFileAsync(directory, 'context.md');
+		const lastDecisionAt = latestDecisionTimestamp(contextContent);
+		return lastDecisionAt
+			? { staleCount, contradictionCount, lastDecisionAt }
+			: { staleCount, contradictionCount };
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Latest `[timestamp]` marker across the decisions in context.md content,
+ * or null when none carry a timestamp. Lexicographic max is safe for the
+ * ISO-8601 shape the extractor captures (`YYYY-MM-DDTHH:MM:SS[.mmm]Z`).
+ */
+function latestDecisionTimestamp(contextContent: string | null): string | null {
+	if (!contextContent) return null;
+	let latest: string | null = null;
+	for (const decision of extractContextDecisions(contextContent)) {
+		if (decision.timestamp && (!latest || decision.timestamp > latest)) {
+			latest = decision.timestamp;
+		}
+	}
+	return latest;
+}
+
+/**
+ * #2493 W9b: render the decision-drift summary line. Shared by both render
+ * sites (formatStatusMarkdown and handleStatusCommand's no-plan branch) so
+ * the plan-present and no-plan outputs cannot drift apart. Returns null
+ * when there is nothing to render (absent or zero counts).
+ */
+function formatDecisionDriftLines(
+	drift: StatusData['decisionDrift'],
+): string[] | null {
+	if (!drift) return null;
+	if (drift.staleCount <= 0 && drift.contradictionCount <= 0) return null;
+	const parts: string[] = [];
+	if (drift.staleCount > 0) parts.push(`${drift.staleCount} stale`);
+	if (drift.contradictionCount > 0) {
+		parts.push(`${drift.contradictionCount} contradictory`);
+	}
+	const lastSuffix = drift.lastDecisionAt
+		? ` (last decision ${drift.lastDecisionAt})`
+		: '';
+	const total = drift.staleCount + drift.contradictionCount;
+	return [
+		`**Decision drift detected**: ${parts.join(', ')} decision${total > 1 ? 's' : ''}${lastSuffix}. See .swarm/context.md.`,
+	];
+}
+
+/**
  * Get status data from the swarm directory.
  * Returns structured data that can be used by GUI, background flows, or commands.
  */
@@ -604,6 +703,11 @@ export async function getStatusData(
 			plan as { _specStaleReason?: string }
 		)._specStaleReason;
 	}
+
+	// #2493 W9b: surface decision drift in /swarm status. Best-effort and
+	// fail-open like every other optional signal — a status command must
+	// never fail because drift analysis hiccupped.
+	status.decisionDrift = await collectDecisionDriftSnapshot(directory);
 
 	// Surface recently-escalated directives (Change 3).
 	status.recentEscalations = await readRecentEscalations(directory);
@@ -982,6 +1086,12 @@ export function formatStatusMarkdown(status: StatusData): string {
 			`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
 			'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
 		);
+	}
+
+	// #2493 W9b: decision-drift surfacing in /swarm status output.
+	const decisionDriftLines = formatDecisionDriftLines(status.decisionDrift);
+	if (decisionDriftLines) {
+		lines.push('', ...decisionDriftLines);
 	}
 
 	// Turbo status display - strategy-specific
@@ -1379,6 +1489,11 @@ export async function handleStatusCommand(
 		}
 		// Issue #853 Layer C: surface spec drift even with no active plan, so
 		// /swarm status never hides the staleness signal that gates writes.
+		// #2493 W9b: decision drift rides along (and renders standalone below)
+		// for the same reason.
+		const decisionDriftLines = formatDecisionDriftLines(
+			statusData.decisionDrift,
+		);
 		if (statusData.specStale) {
 			const reason =
 				statusData.specStaleReason ?? 'spec.md changed since plan saved';
@@ -1389,7 +1504,13 @@ export async function handleStatusCommand(
 				'',
 				`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
 				'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
+				...(decisionDriftLines ?? []),
 			].join('\n');
+		}
+		if (decisionDriftLines) {
+			return ['No active swarm plan found.', '', ...decisionDriftLines].join(
+				'\n',
+			);
 		}
 		// #2034 / #1659: a delegation-ledger incident must stay visible even
 		// without an active plan — but only when there is something to say, so

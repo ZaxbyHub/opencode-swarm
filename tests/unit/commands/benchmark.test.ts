@@ -9,6 +9,7 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { resultText } from '../../helpers/benchmark-result-text.js';
 
 let testDir: string;
 
@@ -28,14 +29,14 @@ afterEach(() => {
 describe('handleBenchmarkCommand', () => {
 	it('default mode with empty state', async () => {
 		const result = await handleBenchmarkCommand(testDir, []);
-		expect(result).toContain('mode: in-memory');
-		expect(result).toContain('No agent sessions recorded');
-		expect(result).toContain('No tool data recorded');
-		expect(result).toContain('No delegations recorded');
-		expect(result).toContain('[BENCHMARK_JSON]');
+		expect(resultText(result)).toContain('mode: in-memory');
+		expect(resultText(result)).toContain('No agent sessions recorded');
+		expect(resultText(result)).toContain('No tool data recorded');
+		expect(resultText(result)).toContain('No delegations recorded');
+		expect(resultText(result)).toContain('[BENCHMARK_JSON]');
 		// Should NOT have Quality Signals or CI Gate sections
-		expect(result).not.toContain('Quality Signals');
-		expect(result).not.toContain('CI Gate');
+		expect(resultText(result)).not.toContain('Quality Signals');
+		expect(resultText(result)).not.toContain('CI Gate');
 	});
 
 	it('default mode with populated state', async () => {
@@ -87,14 +88,14 @@ describe('handleBenchmarkCommand', () => {
 		});
 
 		const result = await handleBenchmarkCommand(testDir, []);
-		expect(result).toContain('**coder**');
-		expect(result).toContain('25 tool calls');
-		expect(result).toContain('1 warning');
-		expect(result).toContain('**reviewer**');
-		expect(result).toContain('10 tool calls');
+		expect(resultText(result)).toContain('**coder**');
+		expect(resultText(result)).toContain('25 tool calls');
+		expect(resultText(result)).toContain('1 warning');
+		expect(resultText(result)).toContain('**reviewer**');
+		expect(resultText(result)).toContain('10 tool calls');
 		// Tool performance table
-		expect(result).toContain('| read |');
-		expect(result).toContain('| edit |');
+		expect(resultText(result)).toContain('| read |');
+		expect(resultText(result)).toContain('| edit |');
 	});
 
 	it('cumulative mode reads evidence', async () => {
@@ -133,10 +134,10 @@ describe('handleBenchmarkCommand', () => {
 		});
 
 		const result = await handleBenchmarkCommand(testDir, ['--cumulative']);
-		expect(result).toContain('mode: cumulative');
-		expect(result).toContain('Quality Signals');
-		expect(result).toContain('Review pass rate: 50%');
-		expect(result).toContain('Test pass rate: 100%');
+		expect(resultText(result)).toContain('mode: cumulative');
+		expect(resultText(result)).toContain('Quality Signals');
+		expect(resultText(result)).toContain('Review pass rate: 50%');
+		expect(resultText(result)).toContain('Test pass rate: 100%');
 	});
 
 	it('ci-gate passes when thresholds met', async () => {
@@ -188,8 +189,8 @@ describe('handleBenchmarkCommand', () => {
 		});
 
 		const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-		expect(result).toContain('CI Gate');
-		expect(result).toContain('✅ PASSED');
+		expect(resultText(result)).toContain('CI Gate');
+		expect(resultText(result)).toContain('✅ PASSED');
 	});
 
 	it('ci-gate fails when review pass rate below threshold', async () => {
@@ -230,8 +231,8 @@ describe('handleBenchmarkCommand', () => {
 		});
 
 		const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-		expect(result).toContain('❌ FAILED');
-		expect(result).toContain('Review pass rate');
+		expect(resultText(result)).toContain('❌ FAILED');
+		expect(resultText(result)).toContain('Review pass rate');
 	});
 
 	it('ci-gate fails when agent error rate above threshold', async () => {
@@ -269,8 +270,8 @@ describe('handleBenchmarkCommand', () => {
 		});
 
 		const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-		expect(result).toContain('❌ FAILED');
-		expect(result).toContain('Agent error rate');
+		expect(resultText(result)).toContain('❌ FAILED');
+		expect(resultText(result)).toContain('Agent error rate');
 	});
 
 	it('JSON block is parseable', async () => {
@@ -283,7 +284,7 @@ describe('handleBenchmarkCommand', () => {
 		});
 
 		const result = await handleBenchmarkCommand(testDir, []);
-		const jsonMatch = result.match(
+		const jsonMatch = resultText(result).match(
 			/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
 		);
 		expect(jsonMatch).not.toBeNull();
@@ -305,6 +306,6 @@ describe('handleBenchmarkCommand', () => {
 		]);
 
 		const result = await handleBenchmarkCommand(testDir, []);
-		expect(result).toContain('Total: 3 delegations');
+		expect(resultText(result)).toContain('Total: 3 delegations');
 	});
 });

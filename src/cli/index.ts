@@ -4,15 +4,17 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import packageJson from '../../package.json' with { type: 'json' };
+import { formatCommandNotFound } from '../commands/command-dispatch.js';
 import {
 	COMMAND_REGISTRY,
+	isCommandFailure,
 	resolveCommand,
 	VALID_COMMANDS,
 } from '../commands/registry.js';
 import {
 	discoverVersionPinnedCachePaths,
+	getHostConfigDir,
 	getPluginCachePaths,
-	getPluginConfigDir,
 	getPluginLockFilePaths,
 	readCachePackageVersion,
 	VERSION_PINNED_LEAF,
@@ -40,7 +42,9 @@ const PACKAGE_ROOT = path.resolve(
 	'..',
 );
 
-const CONFIG_DIR = getPluginConfigDir();
+// Issue #2493: getHostConfigDir honors OPENCODE_CONFIG_DIR so the installer
+// writes to the directory the host actually reads, not just the XDG default.
+const CONFIG_DIR = getHostConfigDir();
 
 const OPENCODE_CONFIG_PATH = path.join(CONFIG_DIR, 'opencode.json');
 const PLUGIN_CONFIG_PATH = path.join(CONFIG_DIR, 'opencode-swarm.json');
@@ -286,6 +290,30 @@ function saveJson(filepath: string, data: unknown): void {
 	fs.writeFileSync(filepath, `${JSON.stringify(data, null, 2)}\n`, 'utf-8');
 }
 
+/**
+ * Order-insensitive JSON serialization for semantic config comparison
+ * (issue #2493): two configs that differ only in key ORDER are semantically
+ * identical, so a re-install must not rewrite them.
+ */
+function stableJsonStringify(value: unknown): string {
+	return JSON.stringify(sortKeysDeep(value));
+}
+
+function sortKeysDeep(value: unknown): unknown {
+	if (Array.isArray(value)) {
+		return value.map(sortKeysDeep);
+	}
+	if (value && typeof value === 'object') {
+		const record = value as Record<string, unknown>;
+		const sorted: Record<string, unknown> = {};
+		for (const key of Object.keys(record).sort()) {
+			sorted[key] = sortKeysDeep(record[key]);
+		}
+		return sorted;
+	}
+	return value;
+}
+
 async function install(): Promise<number> {
 	console.log('🐝 Installing OpenCode Swarm...\n');
 
@@ -296,14 +324,24 @@ async function install(): Promise<number> {
 	// Load or create OpenCode config
 	// Migration: if opencode.json doesn't exist but config.json does (old installer bug), use config.json as starting state
 	const LEGACY_CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
-	let opencodeConfig = loadJson<OpenCodeConfig>(OPENCODE_CONFIG_PATH);
-	if (!opencodeConfig) {
+	const configExisted = fs.existsSync(OPENCODE_CONFIG_PATH);
+	const originalConfigRaw = configExisted
+		? fs.readFileSync(OPENCODE_CONFIG_PATH, 'utf-8')
+		: null;
+	// Keep the pre-install parsed state so we can detect "no semantic change"
+	// and skip the rewrite entirely (issue #2493: second install must be a
+	// byte-for-byte no-op that preserves user formatting and comments).
+	const originalConfig = loadJson<OpenCodeConfig>(OPENCODE_CONFIG_PATH);
+	let opencodeConfig: OpenCodeConfig;
+	if (originalConfig) {
+		opencodeConfig = structuredClone(originalConfig);
+	} else {
 		const legacyConfig = loadJson<OpenCodeConfig>(LEGACY_CONFIG_PATH);
 		if (legacyConfig) {
 			console.log(
 				'⚠ Migrating existing config from config.json to opencode.json...',
 			);
-			opencodeConfig = legacyConfig;
+			opencodeConfig = structuredClone(legacyConfig);
 		} else {
 			opencodeConfig = {};
 		}
@@ -326,30 +364,52 @@ async function install(): Promise<number> {
 
 	// Disable OpenCode's default agents to avoid conflicts.
 	// Use merge semantics to preserve any custom settings (e.g. model) the user
-	// may have configured — only enforce disable:true, don't wipe other keys.
-	// Safely handle edge cases where agent.explore/general might be non-objects
-	// (null, false, string, etc.) to avoid data corruption from spread operator.
+	// may have configured. Issue #2493: never fight the user — if the agent
+	// block already carries an EXPLICIT `disable` value (including `false`,
+	// i.e. the user re-enabled it), leave it untouched. Only set `disable:
+	// true` when the key is absent (fresh install) or the block is missing /
+	// malformed (null, false, string — replaced safely to avoid corruption).
 	if (!opencodeConfig.agent) {
 		opencodeConfig.agent = {};
 	}
-	opencodeConfig.agent.explore = {
-		...(typeof opencodeConfig.agent.explore === 'object' &&
-		opencodeConfig.agent.explore !== null
-			? (opencodeConfig.agent.explore as Record<string, unknown>)
-			: {}),
-		disable: true,
-	};
-	opencodeConfig.agent.general = {
-		...(typeof opencodeConfig.agent.general === 'object' &&
-		opencodeConfig.agent.general !== null
-			? (opencodeConfig.agent.general as Record<string, unknown>)
-			: {}),
-		disable: true,
-	};
+	for (const builtinAgent of ['explore', 'general'] as const) {
+		const existing = opencodeConfig.agent[builtinAgent];
+		const existingRecord =
+			typeof existing === 'object' && existing !== null
+				? (existing as Record<string, unknown>)
+				: null;
+		if (existingRecord && existingRecord.disable !== undefined) {
+			continue;
+		}
+		opencodeConfig.agent[builtinAgent] = {
+			...(existingRecord ?? {}),
+			disable: true,
+		};
+	}
 
-	saveJson(OPENCODE_CONFIG_PATH, opencodeConfig);
-	console.log('✓ Added opencode-swarm to OpenCode plugins');
-	console.log('✓ Disabled default OpenCode agents (explore, general)');
+	// Issue #2493: write only on semantic change. Comparing key-sorted JSON
+	// makes the check order-insensitive; an unchanged config is never
+	// rewritten, so user formatting/comments survive every re-install.
+	const semanticallyChanged =
+		!originalConfig ||
+		stableJsonStringify(opencodeConfig) !== stableJsonStringify(originalConfig);
+	if (semanticallyChanged) {
+		if (configExisted && originalConfigRaw !== null) {
+			const backupPath = path.join(
+				CONFIG_DIR,
+				'opencode.swarm-install-backup.json',
+			);
+			fs.writeFileSync(backupPath, originalConfigRaw, 'utf-8');
+			console.log(
+				`✓ Backed up existing config to ${path.basename(backupPath)}`,
+			);
+		}
+		saveJson(OPENCODE_CONFIG_PATH, opencodeConfig);
+		console.log('✓ Added opencode-swarm to OpenCode plugins');
+		console.log('✓ Disabled default OpenCode agents (explore, general)');
+	} else {
+		console.log('✓ OpenCode config already up to date (no rewrite)');
+	}
 
 	// Evict the opencode plugin cache so the next startup pulls the latest version
 	// from npm. opencode's Npm.add() is cache-first with no staleness check — once
@@ -392,6 +452,14 @@ async function install(): Promise<number> {
 			// temperature/variant on council_generalist / council_skeptic / council_domain_expert.
 			agents: { ...DEFAULT_AGENT_CONFIGS },
 			max_iterations: 5,
+			// Issue #2493 (K3 UX-3): first-run activation. Fresh installs
+			// opt into architect auto-selection so the gated pipeline is live
+			// out of the box (the plugin's config hook disables the host's
+			// build/plan built-ins when this is truthy). Existing config files
+			// are never touched — users opt out by setting false or removing
+			// the key. This default lives at the INSTALL layer, not the zod
+			// schema, so it never changes behavior for existing installs.
+			auto_select_architect: true,
 		};
 		saveJson(PLUGIN_CONFIG_PATH, defaultConfig);
 		console.log('✓ Created default plugin config at:', PLUGIN_CONFIG_PATH);
@@ -848,10 +916,16 @@ export async function run(args: string[]): Promise<number> {
 	const resolved = resolveCommand(args);
 
 	if (!resolved) {
-		console.error(
-			`Unknown command: ${args[0]}\nValid commands: ${VALID_COMMANDS.join(', ')}`,
-		);
+		// Parity with the chat path (#1646 item 2 via #2493): top-3
+		// did-you-mean suggestions instead of the full command dump.
+		console.error(formatCommandNotFound(args));
 		return 1;
+	}
+
+	// Deprecation warnings must reach CLI users too (#1646): stderr, before
+	// the handler output, exactly the audience a sunset campaign needs.
+	if (resolved.warning) {
+		console.error(resolved.warning);
 	}
 
 	// Human-only / restricted commands are operator actions. The CLI is the
@@ -885,15 +959,31 @@ export async function run(args: string[]): Promise<number> {
 		return 1;
 	}
 
-	const result = await resolved.entry.handler({
-		directory: cwd,
-		args: resolved.remainingArgs,
-		sessionID: '',
-		agents: {},
-		source: 'cli',
-		packageRoot: PACKAGE_ROOT,
-	});
+	let result: string | { text: string; ok: false; exitCode?: number };
+	try {
+		result = await resolved.entry.handler({
+			directory: cwd,
+			args: resolved.remainingArgs,
+			sessionID: '',
+			agents: {},
+			source: 'cli',
+			packageRoot: PACKAGE_ROOT,
+		});
+	} catch (error) {
+		// Handler exceptions previously escaped run() entirely as unhandled
+		// rejections; map them to a normal CLI failure (#1646 via #2493).
+		console.error(
+			`Error executing command '${resolved.key}': ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+		return 1;
+	}
 
+	if (isCommandFailure(result)) {
+		console.log(result.text);
+		return result.exitCode ?? 1;
+	}
 	console.log(result);
 	return 0;
 }

@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleBenchmarkCommand } from '../../../src/commands/benchmark';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import { resultText } from '../../helpers/benchmark-result-text.js';
 
 let testDir: string;
 
@@ -76,7 +77,7 @@ describe('benchmark cost threshold', () => {
 			'--max-cost-usd',
 			'0',
 		]);
-		const jsonMatch = result.match(
+		const jsonMatch = resultText(result).match(
 			/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
 		);
 		const parsed = JSON.parse(jsonMatch![1]);
@@ -84,7 +85,7 @@ describe('benchmark cost threshold', () => {
 			(check: { name: string }) => check.name === 'Total cost',
 		);
 
-		expect(result).toContain('Total cost: inconclusive');
+		expect(resultText(result)).toContain('Total cost: inconclusive');
 		expect(costGate.passed).toBe(false);
 		expect(costGate.evidence_status).toBe('inconclusive');
 		expect(costGate.reason).toBe('budgetInconclusive');
@@ -101,7 +102,7 @@ describe('benchmark cost threshold', () => {
 			'--max-cost-usd',
 			'1',
 		]);
-		expect(result).toContain('Total cost: inconclusive');
+		expect(resultText(result)).toContain('Total cost: inconclusive');
 	});
 
 	it('uses authoritative modern evidence instead of a contradictory scalar', async () => {
@@ -123,7 +124,7 @@ describe('benchmark cost threshold', () => {
 			'--max-cost-usd',
 			'1',
 		]);
-		const jsonMatch = result.match(
+		const jsonMatch = resultText(result).match(
 			/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
 		);
 		const parsed = JSON.parse(jsonMatch![1]);
@@ -131,7 +132,7 @@ describe('benchmark cost threshold', () => {
 		expect(parsed.costs.total_input_tokens).toBe(1_000_000);
 		expect(parsed.costs.total_reasoning_tokens).toBe(4);
 		expect(parsed.costs.total_cache_tokens).toBe(5);
-		expect(result).toContain('Total cost: $5.000000 <= $1.000000');
+		expect(resultText(result)).toContain('Total cost: $5.000000 <= $1.000000');
 	});
 
 	it('passes when cumulative delegation cost is at or below threshold', async () => {
@@ -143,8 +144,8 @@ describe('benchmark cost threshold', () => {
 			'0.30',
 		]);
 
-		expect(result).toContain('Total cost: $0.250000 <= $0.300000');
-		const jsonMatch = result.match(
+		expect(resultText(result)).toContain('Total cost: $0.250000 <= $0.300000');
+		const jsonMatch = resultText(result).match(
 			/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
 		);
 		const parsed = JSON.parse(jsonMatch![1]);
@@ -163,15 +164,15 @@ describe('benchmark cost threshold', () => {
 			'0.30',
 		]);
 
-		expect(result).toContain('Total cost: $0.350000 <= $0.300000');
-		expect(result).toContain('FAILED');
+		expect(resultText(result)).toContain('Total cost: $0.350000 <= $0.300000');
+		expect(resultText(result)).toContain('FAILED');
 	});
 
 	it('does not add a cost gate unless a threshold is provided', async () => {
 		writeCostTelemetry(0.35);
 
 		const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-		const jsonMatch = result.match(
+		const jsonMatch = resultText(result).match(
 			/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
 		);
 		const parsed = JSON.parse(jsonMatch![1]);

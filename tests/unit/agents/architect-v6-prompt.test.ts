@@ -10,7 +10,7 @@ import { createArchitectAgent } from '../../../src/agents/architect';
 import { createCriticAgent } from '../../../src/agents/critic';
 
 const PLAN_SKILL = readFileSync(
-	join(process.cwd(), '.opencode/skills/plan/SKILL.md'),
+	join(process.cwd(), '.opencode/skills/swarm-plan/SKILL.md'),
 	'utf-8',
 );
 const EXECUTE_SKILL = readFileSync(
@@ -395,7 +395,7 @@ describe('Architect Agent - STALE SPEC DETECTION', () => {
 	const p = createArchitectAgent('test-model').config.prompt!;
 
 	it('has STALE SPEC DETECTION with 3 numbered options', () => {
-		expect(p).toContain('file:.swarm/bundled-skills/plan/SKILL.md');
+		expect(p).toContain('file:.swarm/bundled-skills/swarm-plan/SKILL.md');
 		const idx = PLAN_SKILL.indexOf('STALE SPEC DETECTION');
 		const proceedIdx = PLAN_SKILL.indexOf('proceed with spec:', idx);
 		const section = PLAN_SKILL.slice(

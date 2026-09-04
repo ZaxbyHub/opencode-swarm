@@ -17,7 +17,7 @@ describe('findSimilarCommands', () => {
 
 		test('"agets" returns "agents" in top 3 results', () => {
 			const results = _internals.findSimilarCommands('agets');
-			expect(results.length).toBe(3);
+			expect(results.length).toBeGreaterThan(0);
 			expect(results).toContain('agents');
 		});
 	});
@@ -31,13 +31,13 @@ describe('findSimilarCommands', () => {
 
 		test('"evidnece summary" returns "evidence summary" in top 3', () => {
 			const results = _internals.findSimilarCommands('evidnece summary');
-			expect(results.length).toBe(3);
+			expect(results.length).toBeGreaterThan(0);
 			expect(results).toContain('evidence summary');
 		});
 
 		test('"knwledge list" returns "knowledge migrate" or "knowledge restore" (compound match)', () => {
 			const results = _internals.findSimilarCommands('knwledge list');
-			expect(results.length).toBe(3);
+			expect(results.length).toBeGreaterThan(0);
 			// Token scoring should match compound commands with similar tokens
 			const hasKnowledge = results.some((r) => r.includes('knowledge'));
 			expect(hasKnowledge).toBe(true);
@@ -47,7 +47,7 @@ describe('findSimilarCommands', () => {
 	describe('dash-stripped comparison for dashed commands', () => {
 		test('"fullauto" returns "full-auto" in top 3 results', () => {
 			const results = _internals.findSimilarCommands('fullauto');
-			expect(results.length).toBe(3);
+			expect(results.length).toBeGreaterThan(0);
 			expect(results).toContain('full-auto');
 		});
 
@@ -65,7 +65,7 @@ describe('findSimilarCommands', () => {
 
 		test('"resetession" returns "reset-session" in top 3 results', () => {
 			const results = _internals.findSimilarCommands('resetession');
-			expect(results.length).toBe(3);
+			expect(results.length).toBeGreaterThan(0);
 			expect(results).toContain('reset-session');
 		});
 	});
@@ -93,20 +93,20 @@ describe('findSimilarCommands', () => {
 	});
 
 	describe('gibberish input does not crash', () => {
-		test('"xyzzy" returns 3 commands without crashing', () => {
+		test('"xyzzy" returns no confident suggestions without crashing (#2493 cutoff)', () => {
 			const results = _internals.findSimilarCommands('xyzzy');
-			expect(results.length).toBe(3);
 			expect(Array.isArray(results)).toBe(true);
+			expect(results.length).toBeLessThanOrEqual(3);
 		});
 
-		test('"asdfqwer" returns 3 commands without crashing', () => {
+		test('"asdfqwer" returns no confident suggestions without crashing (#2493 cutoff)', () => {
 			const results = _internals.findSimilarCommands('asdfqwer');
-			expect(results.length).toBe(3);
+			expect(results.length).toBeLessThanOrEqual(3);
 		});
 
-		test('"!!!@@@" returns 3 commands without crashing', () => {
+		test('"!!!@@@" returns no confident suggestions without crashing (#2493 cutoff)', () => {
 			const results = _internals.findSimilarCommands('!!!@@@');
-			expect(results.length).toBe(3);
+			expect(results.length).toBeLessThanOrEqual(3);
 		});
 	});
 
@@ -154,8 +154,8 @@ describe('findSimilarCommands', () => {
 		});
 	});
 
-	describe('returns exactly 3 results', () => {
-		test('all queries return exactly 3 results', () => {
+	describe('result count is capped at 3 (#2493)', () => {
+		test('all queries return at most 3 results', () => {
 			const queries = [
 				'status',
 				'confg',
@@ -167,7 +167,7 @@ describe('findSimilarCommands', () => {
 			];
 			for (const q of queries) {
 				const results = _internals.findSimilarCommands(q);
-				expect(results.length).toBe(3);
+				expect(results.length).toBeLessThanOrEqual(3);
 			}
 		});
 	});

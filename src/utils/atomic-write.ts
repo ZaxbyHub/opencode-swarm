@@ -95,7 +95,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/commands/handoff.ts:48 (pre-#2035)',
 			'src/commands/handoff.ts:79 (pre-#2035)',
 			'src/memory/local-jsonl-provider.ts:1288',
-			'src/config/bundled-skills.ts:251',
+			'src/config/bundled-skills.ts:259',
 		],
 	},
 	{

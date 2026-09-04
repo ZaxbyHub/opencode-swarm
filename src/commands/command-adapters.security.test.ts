@@ -21,6 +21,11 @@ import { validateSwarmPath } from '../hooks/utils';
 import { sanitizeSummaryId } from '../summaries/manager';
 import { handleArchiveCommand } from './archive';
 import { handleBenchmarkCommand } from './benchmark';
+import { isCommandFailure } from './registry';
+
+const text = (r: Awaited<ReturnType<typeof handleBenchmarkCommand>>): string =>
+	isCommandFailure(r) ? r.text : r;
+
 import { handleDoctorCommand } from './doctor';
 import { handleEvidenceCommand } from './evidence';
 import { handleResetCommand } from './reset';
@@ -274,7 +279,7 @@ describe('Command Adapters - Adversarial Security Tests', () => {
 					const result = await handleRetrieveCommand(tempDir, [payload]);
 					// Should reject with error message, not leak files
 					expect(result).toContain('Invalid summary ID');
-					expect(result).not.toContain('root:'); // No leaked /etc/passwd content
+					expect(text(result)).not.toContain('root:'); // No leaked /etc/passwd content
 				}
 			});
 
@@ -613,7 +618,7 @@ describe('Command Adapters - Adversarial Security Tests', () => {
 
 			it('should handle --ci-gate flag', async () => {
 				const result = await handleBenchmarkCommand(tempDir, ['--ci-gate']);
-				expect(result).toContain('CI Gate');
+				expect(text(result)).toContain('CI Gate');
 			});
 
 			it('should handle flag injection attempts', async () => {
@@ -621,7 +626,7 @@ describe('Command Adapters - Adversarial Security Tests', () => {
 					'--ci-gate',
 					'--unknown=../../../etc/passwd',
 				]);
-				expect(result).not.toContain('root:');
+				expect(text(result)).not.toContain('root:');
 			});
 		});
 

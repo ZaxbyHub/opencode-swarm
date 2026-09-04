@@ -3,7 +3,13 @@ import type { AutoReviewConfig, PluginConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
 import type { ReviewAgentModelRegistry } from '../review/runtime.js';
-import { _internals, type CommandEntry, resolveCommand } from './registry.js';
+import {
+	_internals,
+	COMMAND_REGISTRY,
+	type CommandEntry,
+	isCommandFailure,
+	resolveCommand,
+} from './registry.js';
 
 export type ResolvedSwarmCommand = NonNullable<
 	ReturnType<typeof resolveCommand>
@@ -47,7 +53,25 @@ export function normalizeSwarmCommandInput(
 }
 
 export function canonicalCommandKey(resolved: ResolvedSwarmCommand): string {
-	return resolved.entry.aliasOf ?? resolved.key;
+	if (resolved.entry.aliasOf) {
+		return resolved.entry.aliasOf;
+	}
+	// #2493 pure aliases: resolveCommand returns the dereferenced canonical
+	// entry (which carries no aliasOf), so recover the canonical key by
+	// walking the ORIGINAL key's alias chain — the same walk
+	// resolveRegistryEntry performs to find the handler-bearing entry.
+	let entry = COMMAND_REGISTRY[resolved.key as keyof typeof COMMAND_REGISTRY] as
+		| CommandEntry
+		| undefined;
+	while (entry && !entry.handler && entry.aliasOf) {
+		const target = COMMAND_REGISTRY[
+			entry.aliasOf as keyof typeof COMMAND_REGISTRY
+		] as CommandEntry | undefined;
+		if (!target) break;
+		if (target.handler) return entry.aliasOf;
+		entry = target;
+	}
+	return resolved.key;
 }
 
 export function formatCommandNotFound(tokens: string[]): string {
@@ -112,7 +136,7 @@ export async function executeSwarmCommand(args: {
 			text = policyResult.message;
 		} else {
 			try {
-				text = await resolved.entry.handler({
+				const raw = await resolved.entry.handler({
 					directory,
 					args: resolved.remainingArgs,
 					sessionID,
@@ -126,6 +150,9 @@ export async function executeSwarmCommand(args: {
 					activeAgentName,
 					reviewAgentModelRegistry,
 				});
+				// Structured failures unwrap to their text on the chat path
+				// (chat has no exit codes; the CLI is the exit-code consumer).
+				text = isCommandFailure(raw) ? raw.text : raw;
 			} catch (_err) {
 				const cmdName = tokens[0] || 'unknown';
 				const errMsg = _err instanceof Error ? _err.message : String(_err);

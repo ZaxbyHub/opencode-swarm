@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { handleBenchmarkCommand } from '../../../src/commands/benchmark';
 import { saveEvidence } from '../../../src/evidence/manager';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import { resultText } from '../../helpers/benchmark-result-text.js';
 
 let testDir: string;
 
@@ -22,7 +23,6 @@ afterEach(() => {
 });
 
 describe('CI Gate Quality Checks', () => {
-	// Setup helper to create passing evidence
 	async function createPassingEvidence() {
 		// Create passing review evidence: 8 approved, 2 rejected = 80% >= 70%
 		for (let i = 0; i < 8; i++) {
@@ -99,7 +99,7 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).toContain('Complexity Delta: 3 <= 5 ✅');
+			expect(resultText(result)).toContain('Complexity Delta: 3 <= 5 ✅');
 		});
 
 		it('fails when complexity delta exceeds threshold', async () => {
@@ -136,8 +136,8 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).toContain('Complexity Delta: 8 <= 5 ❌');
-			expect(result).toContain('❌ FAILED');
+			expect(resultText(result)).toContain('Complexity Delta: 8 <= 5 ❌');
+			expect(resultText(result)).toContain('❌ FAILED');
 		});
 	});
 
@@ -168,7 +168,7 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).toContain('Public API Delta: 5 <= 10 ✅');
+			expect(resultText(result)).toContain('Public API Delta: 5 <= 10 ✅');
 		});
 
 		it('fails when public API delta exceeds threshold', async () => {
@@ -204,8 +204,8 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).toContain('Public API Delta: 15 <= 10 ❌');
-			expect(result).toContain('❌ FAILED');
+			expect(resultText(result)).toContain('Public API Delta: 15 <= 10 ❌');
+			expect(resultText(result)).toContain('❌ FAILED');
 		});
 	});
 
@@ -236,7 +236,7 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).toContain('Duplication Ratio: 3% <= 5% ✅');
+			expect(resultText(result)).toContain('Duplication Ratio: 3% <= 5% ✅');
 		});
 
 		it('fails when duplication ratio exceeds threshold', async () => {
@@ -272,8 +272,8 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).toContain('Duplication Ratio: 8% <= 5% ❌');
-			expect(result).toContain('❌ FAILED');
+			expect(resultText(result)).toContain('Duplication Ratio: 8% <= 5% ❌');
+			expect(resultText(result)).toContain('❌ FAILED');
 		});
 	});
 
@@ -304,7 +304,7 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).toContain('Test-to-Code Ratio: 50% >= 30% ✅');
+			expect(resultText(result)).toContain('Test-to-Code Ratio: 50% >= 30% ✅');
 		});
 
 		it('fails when test-to-code ratio below threshold', async () => {
@@ -340,8 +340,8 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).toContain('Test-to-Code Ratio: 10% >= 30% ❌');
-			expect(result).toContain('❌ FAILED');
+			expect(resultText(result)).toContain('Test-to-Code Ratio: 10% >= 30% ❌');
+			expect(resultText(result)).toContain('❌ FAILED');
 		});
 	});
 
@@ -372,12 +372,12 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).toContain('✅ PASSED');
+			expect(resultText(result)).toContain('✅ PASSED');
 			// All quality checks should pass
-			expect(result).toContain('Complexity Delta: 3 <= 5 ✅');
-			expect(result).toContain('Public API Delta: 5 <= 10 ✅');
-			expect(result).toContain('Duplication Ratio: 2% <= 5% ✅');
-			expect(result).toContain('Test-to-Code Ratio: 50% >= 30% ✅');
+			expect(resultText(result)).toContain('Complexity Delta: 3 <= 5 ✅');
+			expect(resultText(result)).toContain('Public API Delta: 5 <= 10 ✅');
+			expect(resultText(result)).toContain('Duplication Ratio: 2% <= 5% ✅');
+			expect(resultText(result)).toContain('Test-to-Code Ratio: 50% >= 30% ✅');
 		});
 	});
 
@@ -408,18 +408,18 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).toContain('### Quality Metrics');
-			expect(result).toContain('Complexity Delta: 3');
-			expect(result).toContain('Public API Delta: 5');
-			expect(result).toContain('Duplication Ratio: 2%');
-			expect(result).toContain('Test-to-Code Ratio: 40%');
+			expect(resultText(result)).toContain('### Quality Metrics');
+			expect(resultText(result)).toContain('Complexity Delta: 3');
+			expect(resultText(result)).toContain('Public API Delta: 5');
+			expect(resultText(result)).toContain('Duplication Ratio: 2%');
+			expect(resultText(result)).toContain('Test-to-Code Ratio: 40%');
 		});
 
 		it('does not display Quality Metrics section when no evidence', async () => {
 			await createPassingEvidence();
 			// No quality_budget evidence
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			expect(result).not.toContain('### Quality Metrics');
+			expect(resultText(result)).not.toContain('### Quality Metrics');
 		});
 	});
 
@@ -450,7 +450,7 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			const jsonMatch = result.match(
+			const jsonMatch = resultText(result).match(
 				/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
 			);
 			expect(jsonMatch).not.toBeNull();
@@ -495,7 +495,7 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			const jsonMatch = result.match(
+			const jsonMatch = resultText(result).match(
 				/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
 			);
 			expect(jsonMatch).not.toBeNull();
@@ -529,7 +529,7 @@ describe('CI Gate Quality Checks', () => {
 			});
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
-			const jsonMatch = result.match(
+			const jsonMatch = resultText(result).match(
 				/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
 			);
 			const parsed = JSON.parse(jsonMatch![1]);
@@ -598,13 +598,13 @@ describe('CI Gate Quality Checks', () => {
 
 			const result = await handleBenchmarkCommand(testDir, ['--ci-gate']);
 			// Average: (2+6)/2 = 4
-			expect(result).toContain('Complexity Delta: 4 <= 5 ✅');
+			expect(resultText(result)).toContain('Complexity Delta: 4 <= 5 ✅');
 			// Average: (4+8)/2 = 6
-			expect(result).toContain('Public API Delta: 6 <= 10 ✅');
+			expect(resultText(result)).toContain('Public API Delta: 6 <= 10 ✅');
 			// Average: (0.01+0.03)*100/2 = 2%
-			expect(result).toContain('Duplication Ratio: 2% <= 5% ✅');
+			expect(resultText(result)).toContain('Duplication Ratio: 2% <= 5% ✅');
 			// Average: (0.3+0.5)*100/2 = 40%
-			expect(result).toContain('Test-to-Code Ratio: 40% >= 30% ✅');
+			expect(resultText(result)).toContain('Test-to-Code Ratio: 40% >= 30% ✅');
 		});
 	});
 });

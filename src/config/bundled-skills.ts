@@ -25,7 +25,7 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'swarm-pr-subscribe',
 	'swarm-ci-monitor',
 	'issue-ingest',
-	'plan',
+	'swarm-plan',
 	'critic-gate',
 	'execute',
 	'phase-wrap',
@@ -53,11 +53,19 @@ export type BundledProjectSkill = (typeof BUNDLED_PROJECT_SKILLS)[number];
  * Bundled skill slugs that were retired (renamed away) in shipped releases.
  * The sync removes their materialized directories from
  * `.swarm/bundled-skills/` in existing user projects so a rename never leaves
- * a stale protocol copy behind (issue #2379: `resume` → `swarm-resume`).
+ * a stale protocol copy behind (issue #2379: `resume` → `swarm-resume`;
+ * issue #2388 via #2493: `plan` → `swarm-plan`).
  * A slug must never appear both here and in BUNDLED_PROJECT_SKILLS (asserted
  * by tests/unit/skills/claude-slug-collision-guard.test.ts).
  */
-export const RETIRED_BUNDLED_PROJECT_SKILLS = ['resume'] as const;
+export const RETIRED_BUNDLED_PROJECT_SKILLS = [
+	// `resume` → `swarm-resume` (issue #2379): the bare slug shadowed Claude
+	// Code's built-in /resume conversation-resume command.
+	'resume',
+	// `plan` → `swarm-plan` (issue #2388, delivered via #2493): the bare slug
+	// shadowed both hosts' built-in /plan plan-mode command.
+	'plan',
+] as const;
 /**
  * Project-private runtime location for plugin-owned skills. Repository-native
  * skill roots (`.opencode/skills`, `.claude/skills`, and `.agents/skills`) are

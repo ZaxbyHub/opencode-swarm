@@ -1454,7 +1454,9 @@ export const save_plan: ToolDefinition = createSwarmTool({
 								size: z
 									.enum(['small', 'medium', 'large'])
 									.optional()
-									.describe('Task size estimate (default: small)'),
+									.describe(
+										'Task size estimate. When omitted on a revision, the existing task keeps its size; new tasks default to small.',
+									),
 								depends: z
 									.array(z.string())
 									.optional()

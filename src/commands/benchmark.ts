@@ -75,7 +75,7 @@ function summarizeGateAuditStatistics(report: GateStatisticsReport) {
 export async function handleBenchmarkCommand(
 	directory: string,
 	args: string[],
-): Promise<string> {
+): Promise<string | { text: string; ok: false; exitCode: number }> {
 	let cumulative = args.includes('--cumulative');
 	if (args.includes('--ci-gate')) cumulative = true;
 	const maxCostUsd = parseMaxCostUsd(args);
@@ -654,7 +654,16 @@ export async function handleBenchmarkCommand(
 		JSON.stringify(json, null, 2),
 		'[/BENCHMARK_JSON]',
 	);
-	return lines.join('\n');
+	const output = lines.join('\n');
+	// #1646 item 3 via #2493: --ci-gate now actually gates. The command's
+	// description promises CI gating, but the old Promise<string> return made
+	// a nonzero exit structurally impossible. On a failed gate, return the
+	// structured failure so the CLI exits 1 (chat still prints the full
+	// report text unchanged).
+	if (ciGate && !ciGate.passed) {
+		return { text: output, ok: false as const, exitCode: 1 };
+	}
+	return output;
 }
 
 function parseMaxCostUsd(args: string[]): number | null {

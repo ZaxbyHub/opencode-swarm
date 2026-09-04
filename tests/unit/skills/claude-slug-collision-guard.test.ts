@@ -5,10 +5,12 @@
  * Both hosts expose every `<native-root>/skills/<slug>/` directory as the
  * slash command `/<slug>`, with no notion of "internal-only protocol skill".
  * The `resume` architect-MODE protocol shadowed Claude Code's built-in
- * `/resume` (conversation resume) until it was renamed to `swarm-resume`.
- * `CLAUDE_CODE_NATIVE_COMMANDS` (src/config/constants.ts) is the repo's own
- * oracle for host built-in names, so this test reuses it instead of a second
- * hand-maintained list.
+ * `/resume` (conversation resume) until it was renamed to `swarm-resume`;
+ * `plan` shadowed both hosts' built-in `/plan` until it was renamed to
+ * `swarm-plan` (issue #2388, shipped via #2493). `CLAUDE_CODE_NATIVE_COMMANDS`
+ * and `OPENCODE_NATIVE_COMMANDS` (src/config/constants.ts) are the repo's own
+ * oracles for host built-in names, so this test reuses them instead of a
+ * second hand-maintained list.
  */
 
 import { describe, expect, test } from 'bun:test';
@@ -18,7 +20,10 @@ import {
 	BUNDLED_PROJECT_SKILLS,
 	RETIRED_BUNDLED_PROJECT_SKILLS,
 } from '../../../src/config/bundled-skills';
-import { CLAUDE_CODE_NATIVE_COMMANDS } from '../../../src/config/constants';
+import {
+	CLAUDE_CODE_NATIVE_COMMANDS,
+	OPENCODE_NATIVE_COMMANDS,
+} from '../../../src/config/constants';
 import { OPENCODE_ONLY_ARCHITECT_MODE_SKILLS } from '../../../src/config/skill-mirrors';
 
 const ROOT = process.cwd();
@@ -68,11 +73,9 @@ function allFilesBelow(directory: string): string[] {
  * Acknowledged, deliberately-kept collisions. Every entry needs a reason and
  * an exit path; this list must shrink, never grow:
  *
- * - `plan` (both trees): pre-existing same-class collision (shadows Claude
- *   Code plan mode). It gets the same dedicated reviewed rename PR treatment
- *   as `resume` in #2379 — the issue explicitly prescribes one rename PR per
- *   slug — and is tracked as follow-up issue #2388. Remove this entry when
- *   that rename lands.
+ * - `plan` (both trees) previously shadowed Claude Code's plan mode and
+ *   OpenCode's built-in `/plan`. The rename to `swarm-plan` shipped with
+ *   #2493 (issue #2388), so the entry was removed — keep it out.
  * - OPENCODE_ONLY_ARCHITECT_MODE_SKILLS (.opencode tree, derived — not
  *   duplicated): those slugs are intentionally not mirrored to `.claude`
  *   precisely because a mirror would shadow a Claude Code built-in (e.g.
@@ -81,9 +84,8 @@ function allFilesBelow(directory: string): string[] {
  *   opencode-only slug cannot shadow anything in the Claude Code host.
  */
 const ACKNOWLEDGED_CLAUDE_COMMAND_COLLISIONS: Record<string, string[]> = {
-	'.claude/skills': ['plan'],
+	'.claude/skills': [],
 	'.opencode/skills': [
-		'plan',
 		...OPENCODE_ONLY_ARCHITECT_MODE_SKILLS.map(({ slug }) => slug),
 	],
 };
@@ -112,6 +114,33 @@ describe('native skill slugs must not shadow host built-in commands (#2379)', ()
 	test("issue #2379: 'resume' no longer ships as a native skill slug in either tree", () => {
 		expect(nativeSkillSlugs('.claude/skills')).not.toContain('resume');
 		expect(nativeSkillSlugs('.opencode/skills')).not.toContain('resume');
+	});
+
+	test("issue #2388 (#2493): 'swarm-plan' does not collide with Claude Code built-in commands", () => {
+		expect(CLAUDE_CODE_NATIVE_COMMANDS.has('swarm-plan')).toBe(false);
+		expect(nativeSkillSlugs('.claude/skills')).toContain('swarm-plan');
+		expect(nativeSkillSlugs('.opencode/skills')).toContain('swarm-plan');
+	});
+});
+
+describe('native skill slugs must not shadow OpenCode built-in commands (#2493)', () => {
+	// Zero acknowledged exceptions: after the `plan` → `swarm-plan` rename
+	// (#2388, shipped via #2493) every tracked native skill slug in both trees
+	// is clear of OPENCODE_NATIVE_COMMANDS. Do not add an allowlist here —
+	// rename the colliding skill instead (same one-rename-PR-per-slug policy
+	// as #2379/#2388).
+	for (const tree of NATIVE_SKILL_TREES) {
+		test(`${tree}: no slug is an OpenCode built-in slash command`, () => {
+			const collisions = nativeSkillSlugs(tree).filter((slug) =>
+				OPENCODE_NATIVE_COMMANDS.has(slug),
+			);
+			expect(collisions).toEqual([]);
+		});
+	}
+
+	test("issue #2388 (#2493): 'swarm-plan' does not collide with OpenCode built-in commands", () => {
+		expect(OPENCODE_NATIVE_COMMANDS.has('swarm-plan')).toBe(false);
+		expect(OPENCODE_NATIVE_COMMANDS.has('plan')).toBe(true);
 	});
 });
 

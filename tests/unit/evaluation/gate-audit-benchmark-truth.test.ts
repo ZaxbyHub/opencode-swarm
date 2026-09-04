@@ -8,6 +8,7 @@ import {
 	saveGateGroundTruth,
 } from '../../../src/evaluation/gate-ground-truth.js';
 import { saveGateAuditResult } from '../../../src/evaluation/store.js';
+import { resultText } from '../../helpers/benchmark-result-text.js';
 
 function project(): string {
 	return fs.realpathSync(
@@ -90,7 +91,13 @@ function truth(runId: string, repetitions = 6): GateGroundTruthV1[] {
 }
 
 async function benchmark(root: string, runId: string): Promise<string> {
-	return handleBenchmarkCommand(root, ['--ci-gate', '--gate-audit-run', runId]);
+	return resultText(
+		await handleBenchmarkCommand(root, [
+			'--ci-gate',
+			'--gate-audit-run',
+			runId,
+		]),
+	);
 }
 
 function groundTruthCheck(output: string): { passed: boolean; value: number } {

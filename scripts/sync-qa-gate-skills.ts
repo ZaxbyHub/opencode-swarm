@@ -18,7 +18,7 @@ const BEGIN_MARKER = "<!-- BEGIN QA_GATE_BODY -->";
 const END_MARKER = "<!-- END QA_GATE_BODY -->";
 
 const SKILL_PAIRS = [
-	{ name: "plan", paths: [".claude/skills/plan/SKILL.md", ".opencode/skills/plan/SKILL.md"] },
+	{ name: "swarm-plan", paths: [".claude/skills/swarm-plan/SKILL.md", ".opencode/skills/swarm-plan/SKILL.md"] },
 ] as const;
 
 async function readBody(repoRoot: string): Promise<string> {

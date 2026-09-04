@@ -9,7 +9,7 @@ describe('Profile-aware spec policy — integration', () => {
 	const agent = createArchitectAgent('test-model');
 	const prompt = agent.config.prompt!;
 	const planSection = readFileSync(
-		join(process.cwd(), '.opencode/skills/plan/SKILL.md'),
+		join(process.cwd(), '.opencode/skills/swarm-plan/SKILL.md'),
 		'utf-8',
 	);
 

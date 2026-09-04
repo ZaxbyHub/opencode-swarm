@@ -134,7 +134,7 @@ directly (skip full discovery dialogue) — the objective is already framed.
   1. Load `file:.swarm/bundled-skills/pre-phase-briefing/SKILL.md` (required before
      planning, especially on cycle 2+: it reads the prior retrospective and
      verifies codebase reality so the new plan reflects what actually changed).
-  2. Load `file:.swarm/bundled-skills/plan/SKILL.md` to decompose the work into
+  2. Load `file:.swarm/bundled-skills/swarm-plan/SKILL.md` to decompose the work into
      tasks and call `save_plan`. With `depth=exhaustive`, prefer finer task
      granularity and deeper localization.
   3. Load `file:.swarm/bundled-skills/critic-gate/SKILL.md` to put the plan through

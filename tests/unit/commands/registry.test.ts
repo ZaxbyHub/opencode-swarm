@@ -34,11 +34,15 @@ describe('CommandRegistry types and structure', () => {
 		}
 	});
 
-	test('every COMMAND_REGISTRY entry has a handler function', () => {
+	test('every COMMAND_REGISTRY entry has a handler or a valid pure-alias aliasOf', () => {
+		// #1646 via #2493: pure aliases carry NO handler — resolveCommand
+		// dereferences them to the canonical entry.
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
-			expect(typeof entry.handler, `Command '${name}' missing handler`).toBe(
-				'function',
-			);
+			expect(
+				typeof entry.handler === 'function' ||
+					typeof entry.aliasOf === 'string',
+				`Command '${name}' has neither handler nor aliasOf`,
+			).toBe(true);
 		}
 	});
 
@@ -334,9 +338,13 @@ describe('resolveCommand()', () => {
 			// So "plan xyz" tries "plan xyz" (fails) then "plan" (succeeds).
 			const result = resolveCommand(['plan', 'xyz']);
 			expect(result).not.toBeNull();
+			// Dereferenced to the canonical show-plan entry (#2493); the matched
+			// key stays the alias key the user typed.
+			expect(result!.key).toBe('plan');
 			expect(result!.entry.description).toBe(
-				'Show current plan (deprecated alias for /swarm show-plan)',
+				'Show current plan (optionally filter by phase number)',
 			);
+			expect(result!.warning).toContain('deprecated');
 			expect(result!.remainingArgs).toEqual(['xyz']);
 		});
 	});
@@ -481,11 +489,9 @@ describe('Task 3.1 — New alias entries (doctor, info, list-agents, health, che
 			'clear',
 		];
 		for (const alias of newAliases) {
-			const entry = COMMAND_REGISTRY[alias as RegisteredCommand];
-			expect(
-				typeof entry.handler,
-				`Alias '${alias}' should have a handler function`,
-			).toBe('function');
+			// Pure aliases dereference to canonical entries (#2493) — no
+			// handler of their own; instead they redirect via aliasOf.
+			expect(COMMAND_REGISTRY[alias as RegisteredCommand].aliasOf).toBeTruthy();
 		}
 	});
 
@@ -585,43 +591,55 @@ describe('Task 3.1 — New alias entries (doctor, info, list-agents, health, che
 		const doctorResult = resolveCommand(['doctor']);
 		expect(doctorResult).not.toBeNull();
 		expect(doctorResult!.key).toBe('doctor');
-		expect(doctorResult!.entry.aliasOf).toBe('config doctor');
+		expect(doctorResult!.entry.description).toBe('Run config doctor checks');
 
 		// info → status
 		const infoResult = resolveCommand(['info']);
 		expect(infoResult).not.toBeNull();
 		expect(infoResult!.key).toBe('info');
-		expect(infoResult!.entry.aliasOf).toBe('status');
+		expect(infoResult!.entry.description).toBe(
+			'Show current swarm state (plus background-work health when hooks.background_subagents is enabled)',
+		);
 
 		// list-agents → agents
 		const listAgentsResult = resolveCommand(['list-agents']);
 		expect(listAgentsResult).not.toBeNull();
 		expect(listAgentsResult!.key).toBe('list-agents');
-		expect(listAgentsResult!.entry.aliasOf).toBe('agents');
+		expect(listAgentsResult!.entry.description).toBe('List registered agents');
 
 		// health → diagnose
 		const healthResult = resolveCommand(['health']);
 		expect(healthResult).not.toBeNull();
 		expect(healthResult!.key).toBe('health');
-		expect(healthResult!.entry.aliasOf).toBe('diagnose');
+		expect(healthResult!.entry.description).toBe(
+			'Run health check on swarm state',
+		);
 
 		// check → preflight
 		const checkResult = resolveCommand(['check']);
 		expect(checkResult).not.toBeNull();
 		expect(checkResult!.key).toBe('check');
-		expect(checkResult!.entry.aliasOf).toBe('preflight');
+		expect(checkResult!.entry.description).toBe(
+			COMMAND_REGISTRY.preflight.description,
+		);
+		expect(typeof checkResult!.entry.handler).toBe('function');
 
 		// clear → reset-session
 		const clearResult = resolveCommand(['clear']);
 		expect(clearResult).not.toBeNull();
 		expect(clearResult!.key).toBe('clear');
-		expect(clearResult!.entry.aliasOf).toBe('reset-session');
+		expect(clearResult!.entry.description).toBe(
+			COMMAND_REGISTRY['reset-session'].description,
+		);
+		expect(typeof clearResult!.entry.handler).toBe('function');
 
 		// context-map-stats → context-map stats (FR-013 testability, FR-014 documented invocation)
 		const cmsResult = resolveCommand(['context-map-stats']);
 		expect(cmsResult).not.toBeNull();
 		expect(cmsResult!.key).toBe('context-map-stats');
-		expect(cmsResult!.entry.aliasOf).toBe('context-map stats');
+		expect(cmsResult!.entry.description).toBe(
+			COMMAND_REGISTRY['context-map stats'].description,
+		);
 
 		// Documented invocation form: /swarm context-map stats — should resolve
 		const cmsCanonicalResult = resolveCommand(['context-map', 'stats']);
@@ -854,6 +872,10 @@ describe('deep-dive command registration (FR-025 through FR-028)', () => {
 		const result = resolveCommand(['deep', 'dive']);
 		expect(result).not.toBeNull();
 		expect(result!.key).toBe('deep dive');
-		expect(result!.entry.aliasOf).toBe('deep-dive');
+		// Dereferenced to the canonical deep-dive entry (#2493 pure alias).
+		expect(result!.entry.description).toBe(
+			'Launch deep codebase audit with parallel explorer waves, dual reviewers, and critic challenge [scope]',
+		);
+		expect(typeof result!.entry.handler).toBe('function');
 	});
 });

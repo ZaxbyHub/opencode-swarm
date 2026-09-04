@@ -16,7 +16,7 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const PLAN_PATH = join(process.cwd(), '.opencode/skills/plan/SKILL.md');
+const PLAN_PATH = join(process.cwd(), '.opencode/skills/swarm-plan/SKILL.md');
 const planContent = readFileSync(PLAN_PATH, 'utf-8');
 
 const FEEDBACK_PATH = join(
@@ -25,7 +25,7 @@ const FEEDBACK_PATH = join(
 );
 const feedbackContent = readFileSync(FEEDBACK_PATH, 'utf-8');
 
-describe('.opencode/skills/plan/SKILL.md ledger-only plan writes', () => {
+describe('.opencode/skills/swarm-plan/SKILL.md ledger-only plan writes', () => {
 	it('save_plan unavailability fails closed without a coder fallback', () => {
 		expect(planContent).toContain(
 			'If the authoritative ledger-backed `save_plan` tool is unavailable, STOP',

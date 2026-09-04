@@ -2794,7 +2794,9 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			),
 		timeout_ms: z
 			.number()
-			.optional()
+			.int()
+			.min(1)
+			.default(DEFAULT_TIMEOUT_MS)
 			.describe('Timeout in milliseconds (default 60000, max 300000)'),
 		working_directory: z
 			.string()
