@@ -16,6 +16,7 @@ import {
 import * as toolIndex from '../../../src/tools/index';
 import { lean_turbo_critic } from '../../../src/tools/lean-turbo-critic';
 import { TOOL_MANIFEST } from '../../../src/tools/manifest';
+import { buildPluginToolObject } from '../../../src/tools/plugin-registration';
 import { TOOL_METADATA, TOOL_NAME_SET } from '../../../src/tools/tool-metadata';
 
 describe('lean_turbo_critic registration (issue #2470/#2007 reachability guard)', () => {
@@ -51,5 +52,15 @@ describe('lean_turbo_critic registration (issue #2470/#2007 reachability guard)'
 
 	test('the standalone tool object is executable (plugin-registration wiring model)', () => {
 		expect(typeof lean_turbo_critic.execute).toBe('function');
+	});
+
+	test('buildPluginToolObject exposes an executable lean_turbo_critic', () => {
+		// Exercises the REAL plugin-registration assembly: deleting the
+		// tools.lean_turbo_critic line in plugin-registration.ts fails this
+		// test, unlike a check against the standalone export.
+		const tools = buildPluginToolObject({});
+		const wired = (tools as Record<string, unknown>).lean_turbo_critic;
+		expect(wired).toBeDefined();
+		expect(typeof (wired as { execute?: unknown }).execute).toBe('function');
 	});
 });

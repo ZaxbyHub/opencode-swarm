@@ -33,13 +33,15 @@ describe('quality_budget tool verdicts with true base-vs-head deltas (#2470/#165
 		const dir = canonicalMkdtemp('qb-delta-reduce-');
 		try {
 			fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
-			git(dir, 'init', '-q');
+			// -b main: create-or-fail on the canonical branch name. A bare
+			// `git init` + `checkout -qb main` fails (exit 128) on any machine
+			// with init.defaultBranch=main.
+			git(dir, 'init', '-q', '-b', 'main');
 			git(dir, 'config', 'user.email', 't@t.test');
 			git(dir, 'config', 'user.name', 'Test');
 			fs.writeFileSync(path.join(dir, 'src', 'big.ts'), ifs(20));
 			git(dir, 'add', '-A');
 			git(dir, 'commit', '-qm', 'base');
-			git(dir, 'checkout', '-qb', 'main');
 			git(dir, 'checkout', '-qb', 'work');
 
 			// Halve complexity: 21 → 9. Absolute total (9) still exceeds the
@@ -74,13 +76,15 @@ describe('quality_budget tool verdicts with true base-vs-head deltas (#2470/#165
 		const dir = canonicalMkdtemp('qb-delta-increase-');
 		try {
 			fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
-			git(dir, 'init', '-q');
+			// -b main: create-or-fail on the canonical branch name. A bare
+			// `git init` + `checkout -qb main` fails (exit 128) on any machine
+			// with init.defaultBranch=main.
+			git(dir, 'init', '-q', '-b', 'main');
 			git(dir, 'config', 'user.email', 't@t.test');
 			git(dir, 'config', 'user.name', 'Test');
 			fs.writeFileSync(path.join(dir, 'src', 'big.ts'), ifs(2));
 			git(dir, 'add', '-A');
 			git(dir, 'commit', '-qm', 'base');
-			git(dir, 'checkout', '-qb', 'main');
 			git(dir, 'checkout', '-qb', 'work');
 
 			// True delta 18 > 5 (and > 1.5×5) → error → verdict fail.

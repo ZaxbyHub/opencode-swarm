@@ -14,6 +14,13 @@ export interface QualityMetrics {
 	files_analyzed: string[];
 	thresholds: QualityBudgetConfig;
 	violations: QualityViolation[];
+	/**
+	 * Whether a merge base resolved for this run. When false, the
+	 * complexity/public-API "deltas" collapsed to head-only absolute metrics
+	 * (the pre-#2470 semantics) and consumers should not treat them as true
+	 * base-vs-head deltas.
+	 */
+	base_resolved: boolean;
 }
 
 export interface QualityViolation {
@@ -1116,23 +1123,34 @@ function detectViolations(
 async function loadBaseFileContents(
 	files: string[],
 	workingDir: string,
-): Promise<Map<string, string | null>> {
-	const baseContents = new Map<string, string | null>();
-	if (files.length === 0) return baseContents;
+	abortSignal?: AbortSignal,
+): Promise<{ contents: Map<string, string | null>; baseResolved: boolean }> {
+	const contents = new Map<string, string | null>();
+	if (files.length === 0) return { contents, baseResolved: false };
 
-	const baseRef = await resolveQualityMergeBase(workingDir);
-	if (!baseRef) return baseContents;
+	const baseRef = await resolveQualityMergeBase(workingDir, abortSignal);
+	if (!baseRef) {
+		// Degraded mode: with no merge base the "deltas" collapse to head-only
+		// absolute metrics. Never silent — gate-audit derives its
+		// qualityMetricAvailability from this same resolution state and the
+		// operator needs the signal at the point it happens.
+		logger.warn(
+			'[quality-metrics] No merge base resolved (not a git repo or no candidate branch); complexity/public-API deltas fall back to head-only absolute metrics.',
+		);
+		return { contents, baseResolved: false };
+	}
 
 	let read = 0;
 	let capped = false;
 	for (const file of files) {
+		abortSignal?.throwIfAborted();
 		if (read >= MAX_BASE_FILE_READS) {
 			capped = true;
 			break;
 		}
-		baseContents.set(
+		contents.set(
 			file,
-			await readBaseFileContent(workingDir, baseRef, file),
+			await readBaseFileContent(workingDir, baseRef, file, abortSignal),
 		);
 		read++;
 	}
@@ -1142,7 +1160,7 @@ async function loadBaseFileContents(
 				`base-version reads capped; remaining files count full head complexity toward the delta.`,
 		);
 	}
-	return baseContents;
+	return { contents, baseResolved: true };
 }
 
 // ============ Main Function ============
@@ -1154,6 +1172,7 @@ export async function computeQualityMetrics(
 	changedFiles: string[],
 	thresholds: QualityBudgetConfig,
 	workingDir: string,
+	abortSignal?: AbortSignal,
 ): Promise<QualityMetrics> {
 	// Get defaults if not provided
 	const config: QualityBudgetConfig = {
@@ -1170,8 +1189,19 @@ export async function computeQualityMetrics(
 		],
 	};
 
+	// The primary production caller (pre_check_batch) passes ABSOLUTE paths
+	// (path.resolve(directory, file)) while the enforce globs are
+	// repo-relative; without relativization those inputs are silently dropped
+	// and the gate analyzes nothing. Absolute paths inside the working
+	// directory are relativized; anything else passes through unchanged.
+	const normalizedFiles = changedFiles.map((file) => {
+		if (!path.isAbsolute(file)) return file;
+		const rel = path.relative(workingDir, file).replace(/\\/g, '/');
+		return rel.length > 0 && !rel.startsWith('../') ? rel : file;
+	});
+
 	// Filter changed files to only include those matching enforce globs
-	const filteredFiles = changedFiles.filter((file) => {
+	const filteredFiles = normalizedFiles.filter((file) => {
 		const normalizedPath = file.replace(/\\/g, '/');
 		for (const glob of config.enforce_on_globs) {
 			if (globMatches(normalizedPath, glob)) {
@@ -1188,8 +1218,13 @@ export async function computeQualityMetrics(
 	});
 
 	// Load merge-base content once for both delta computations (issue #2470).
-	// Empty when no merge base resolves — files then keep head-only metrics.
-	const baseContents = await loadBaseFileContents(filteredFiles, workingDir);
+	// Empty when no merge base resolves — files then keep head-only metrics
+	// and base_resolved=false discloses the degraded mode to consumers.
+	const { contents: baseContents, baseResolved } = await loadBaseFileContents(
+		filteredFiles,
+		workingDir,
+		abortSignal,
+	);
 
 	// Compute all metrics
 	const [complexityResult, apiResult, duplicationResult, testRatioResult] =
@@ -1223,6 +1258,7 @@ export async function computeQualityMetrics(
 			files_analyzed: allAnalyzedFiles,
 			thresholds: config,
 			violations: [],
+			base_resolved: baseResolved,
 		},
 		config,
 	);
@@ -1235,5 +1271,6 @@ export async function computeQualityMetrics(
 		files_analyzed: allAnalyzedFiles,
 		thresholds: config,
 		violations,
+		base_resolved: baseResolved,
 	};
 }

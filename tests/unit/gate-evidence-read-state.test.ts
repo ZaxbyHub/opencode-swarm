@@ -3,8 +3,11 @@
  *
  * readTaskEvidenceState must distinguish:
  *  - ok:          valid evidence parses and is returned
- *  - missing:     ENOENT (and ENAMETOOLONG-class "file cannot exist")
- *  - unparseable: malformed JSON, version-skew workflow.state, invalid taskId
+ *  - missing:     ENOENT, ENAMETOOLONG-class "file cannot exist", and
+ *                 grammar-invalid taskIds (no valid filename can exist, so
+ *                 pointing at repair_gate_evidence would misdirect)
+ *  - unparseable: malformed JSON, version-skew workflow.state, permission
+ *                 errors — a real file exists but cannot be used
  *
  * readTaskEvidence must keep its historical fail-open contract: null for BOTH
  * missing and unparseable.
@@ -119,11 +122,14 @@ describe('readTaskEvidenceState (issue #2470 tri-state reader)', () => {
 		}
 	});
 
-	test('unparseable: invalid taskId fails closed rather than reading a file', async () => {
+	test('missing: grammar-invalid taskId cannot produce an evidence filename', async () => {
 		const dir = canonicalMkdtemp('read-state-badid-');
 		try {
 			const state = await readTaskEvidenceState(dir, '../escape');
-			expect(state.kind).toBe('unparseable');
+			// "missing", not "unparseable": no file can exist for an invalid
+			// taskId, and a corrupt-evidence diagnostic would send operators
+			// to repair_gate_evidence, which cannot fix a format problem.
+			expect(state.kind).toBe('missing');
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

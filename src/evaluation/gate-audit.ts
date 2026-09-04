@@ -8,6 +8,7 @@ import {
 	executeMutationSuite,
 	runMutationCommand,
 } from '../mutation/engine.js';
+import { resolveQualityMergeBase } from '../quality/git-base.js';
 import { classifyFailure } from '../test-impact/failure-classifier.js';
 import type { TestRunRecord } from '../test-impact/history-store.js';
 import { qualityBudget } from '../tools/quality-budget.js';
@@ -773,6 +774,16 @@ export async function runGateAudit(
 				};
 			}),
 		);
+		// quality_budget produces true base-vs-head deltas only while a merge
+		// base resolves for the audited project; without one the metrics
+		// collapse to head-only absolute values — exactly the historical
+		// "unavailable" semantics. Derived from actual resolution state
+		// rather than asserted (PR feedback on #2470).
+		const qualityBaseResolved =
+			(await _gateAuditInternals.resolveQualityMergeBase(
+				options.projectRoot,
+				options.abortSignal,
+			)) !== null;
 		const result = GateAuditResultV1Schema.parse({
 			v: 1,
 			runId: manifest.id,
@@ -787,10 +798,8 @@ export async function runGateAudit(
 			cells,
 			cost,
 			qualityMetricAvailability: {
-				// #2470: quality_budget now produces true base-vs-head deltas;
-				// they remain excluded from the promotion regression-catch math.
-				complexity_delta: 'available',
-				public_api_delta: 'available',
+				complexity_delta: qualityBaseResolved ? 'available' : 'unavailable',
+				public_api_delta: qualityBaseResolved ? 'available' : 'unavailable',
 			},
 		});
 		await saveGateAuditResult(options.projectRoot, result);
@@ -827,4 +836,5 @@ export function defaultGateAuditId(seed: string): string {
 
 export const _gateAuditInternals = {
 	captureWorkingTreeFingerprint,
+	resolveQualityMergeBase,
 };

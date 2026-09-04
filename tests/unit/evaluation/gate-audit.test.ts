@@ -7,10 +7,12 @@ import { _gateAuditInternals } from '../../../src/evaluation/gate-audit.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const originalFingerprint = _gateAuditInternals.captureWorkingTreeFingerprint;
+const originalResolveBase = _gateAuditInternals.resolveQualityMergeBase;
 const packageRoot = path.resolve(import.meta.dir, '../../..');
 
 afterEach(() => {
 	_gateAuditInternals.captureWorkingTreeFingerprint = originalFingerprint;
+	_gateAuditInternals.resolveQualityMergeBase = originalResolveBase;
 });
 
 describe('Tier-1 gate audit', () => {
@@ -23,6 +25,9 @@ describe('Tier-1 gate audit', () => {
 				head: 'a'.repeat(40),
 				porcelainHash: 'b'.repeat(64),
 			});
+			// Availability is derived from merge-base resolution state; the
+			// temp root is not a repo, so pin the resolved branch explicitly.
+			_gateAuditInternals.resolveQualityMergeBase = async () => 'c'.repeat(40);
 			const raw = await handleGateAuditCommand(
 				root,
 				[
@@ -63,6 +68,49 @@ describe('Tier-1 gate audit', () => {
 			expect(result.qualityMetricAvailability).toEqual({
 				complexity_delta: 'available',
 				public_api_delta: 'available',
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	}, 120_000);
+
+	test('qualityMetricAvailability reports unavailable when no merge base resolves', async () => {
+		const root = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'gate-audit-nobase-')),
+		);
+		try {
+			_gateAuditInternals.captureWorkingTreeFingerprint = async () => ({
+				head: 'a'.repeat(40),
+				porcelainHash: 'b'.repeat(64),
+			});
+			// Degraded mode: no merge base resolves in the audited project, so
+			// quality metrics collapse to head-only absolute values — the
+			// availability flag must disclose that instead of asserting
+			// 'available'.
+			_gateAuditInternals.resolveQualityMergeBase = async () => null;
+			const raw = await handleGateAuditCommand(
+				root,
+				[
+					'--run-id',
+					'audit-quality-unavailable',
+					'--gates',
+					'quality',
+					'--runs',
+					'1',
+					'--max-concurrency',
+					'1',
+					'--max-retries',
+					'0',
+					'--max-time-ms',
+					'60000',
+					'--json',
+				],
+				{ packageRoot },
+			);
+			const result = JSON.parse(raw);
+			expect(result.qualityMetricAvailability).toEqual({
+				complexity_delta: 'unavailable',
+				public_api_delta: 'unavailable',
 			});
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });

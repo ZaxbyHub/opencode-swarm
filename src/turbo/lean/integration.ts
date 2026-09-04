@@ -422,8 +422,10 @@ async function writeCriticEvidence(
 		2,
 	);
 
-	// Atomic write: temp file in same directory, then rename
-	const tempPath = `${evidencePath}.tmp.${process.pid}.${Date.now()}`;
+	// Atomic write: temp file in same directory, then rename. The random
+	// suffix (mirroring evidence.ts atomicWriteJson) prevents same-ms
+	// collisions now that lean_turbo_critic is a real production caller.
+	const tempPath = `${evidencePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
 	try {
 		await fs.writeFile(tempPath, content, 'utf-8');
 		await fs.rename(tempPath, evidencePath);

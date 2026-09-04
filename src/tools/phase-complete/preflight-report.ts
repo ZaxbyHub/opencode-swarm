@@ -136,14 +136,20 @@ function defaultBlockedRecovery(
 	const action = toolByGate[check.id];
 	if (action) {
 		if (check.id === 'lean_turbo_readiness') {
+			// Readiness can block on reviewer OR critic evidence (both default
+			// true for config-driven lean projects). The advertised action
+			// stays lean_turbo_review (a registered tool); the follow_up_tool
+			// hint names the critic only when the blocked reason is critic-
+			// specific, so the model is not pointed at the wrong producer.
+			const blockedOnCritic = /critic/i.test(
+				`${result.message ?? ''} ${result.reason ?? ''}`,
+			);
 			return {
 				kind: 'tool' as const,
 				action,
-				// Readiness can also block on critic evidence
-				// (turbo.lean.phase_critic default true); the critic
-				// follow-up rides in args (issue #2470), matching the
-				// follow_up_tool convention below.
-				args: { follow_up_tool: 'lean_turbo_critic' },
+				...(blockedOnCritic
+					? { args: { follow_up_tool: 'lean_turbo_critic' } }
+					: {}),
 			};
 		}
 		return { kind: 'tool', action };

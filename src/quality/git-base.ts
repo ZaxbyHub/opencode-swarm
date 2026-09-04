@@ -16,6 +16,7 @@
 import * as path from 'node:path';
 import { runExternalTool } from '../utils/external-tool-runner';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
+import * as logger from '../utils/logger';
 
 /** Same candidate order as getChangedLineRanges (src/tools/pre-check-batch.ts). */
 const BASE_BRANCH_CANDIDATES = [
@@ -36,6 +37,7 @@ const SHA_PATTERN = /^[0-9a-f]{40,64}$/i;
 async function runBaseQuery(
 	args: string[],
 	workingDir: string,
+	abortSignal?: AbortSignal,
 ): Promise<string | null> {
 	let gitExecutable: string;
 	try {
@@ -50,12 +52,21 @@ async function runBaseQuery(
 		timeoutMs: GIT_TIMEOUT_MS,
 		maxStdoutBytes: GIT_MAX_OUTPUT_BYTES,
 		maxStderrBytes: GIT_MAX_STDERR_BYTES,
+		abortSignal,
 	});
 	if (
 		result.status !== 'completed' ||
 		result.exitCode !== 0 ||
 		result.stdoutTruncated
 	) {
+		// A truncated read (e.g. a >2MB base blob) must not silently pass as
+		// "no base content" — that direction inflates the delta with no
+		// diagnostic (PR feedback on #2470).
+		if (result.status === 'completed' && result.stdoutTruncated) {
+			logger.warn(
+				`[quality-metrics] git ${args[0]} output exceeded the ${GIT_MAX_OUTPUT_BYTES}-byte cap and was truncated; the affected file counts as having no base content.`,
+			);
+		}
 		return null;
 	}
 	return result.stdout;
@@ -70,11 +81,13 @@ async function runBaseQuery(
  */
 export async function resolveQualityMergeBase(
 	workingDir: string,
+	abortSignal?: AbortSignal,
 ): Promise<string | null> {
 	for (const baseBranch of BASE_BRANCH_CANDIDATES) {
 		const output = await _internals.runBaseQuery(
 			['merge-base', baseBranch, 'HEAD'],
 			workingDir,
+			abortSignal,
 		);
 		const candidate = output?.trim();
 		if (candidate && SHA_PATTERN.test(candidate)) {
@@ -96,6 +109,7 @@ export async function readBaseFileContent(
 	workingDir: string,
 	baseRef: string,
 	file: string,
+	abortSignal?: AbortSignal,
 ): Promise<string | null> {
 	const normalized = file.replace(/\\/g, '/');
 	if (normalized.startsWith('../') || path.isAbsolute(normalized)) {
@@ -104,8 +118,12 @@ export async function readBaseFileContent(
 		return null;
 	}
 	const output = await _internals.runBaseQuery(
+		// NOTE: the rev:path form (`sha:./file`) is the ONLY way to read blob
+		// content; `git show <sha> -- <path>` would print the commit PATCH
+		// instead (review-feedback PRR-M2 rejected on that semantic ground).
 		['show', `${baseRef}:./${normalized}`],
 		workingDir,
+		abortSignal,
 	);
 	return output === null ? null : output;
 }

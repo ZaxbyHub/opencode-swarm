@@ -51,17 +51,23 @@ function git(dir: string, ...args: string[]): void {
 /** Create a git repo whose 'main' branch holds baseFileContent at src/big.ts. */
 function makeRepo(baseContent: string): string {
 	const dir = canonicalMkdtemp('metrics-delta-');
-	fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
-	git(dir, 'init', '-q');
-	git(dir, 'config', 'user.email', 't@t.test');
-	git(dir, 'config', 'user.name', 'Test');
-	fs.writeFileSync(path.join(dir, 'src', 'big.ts'), baseContent);
-	git(dir, 'add', '-A');
-	git(dir, 'commit', '-qm', 'base');
-	// Normalize the base branch name to 'main' regardless of init default.
-	git(dir, 'checkout', '-qb', 'main');
-	git(dir, 'checkout', '-qb', 'work');
-	return dir;
+	try {
+		fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+		// -b main: create-or-fail on the canonical branch name (a bare
+		// `git init` + `checkout -qb main` exits 128 when init.defaultBranch
+		// is already main) and keeps the temp dir from leaking on failure.
+		git(dir, 'init', '-q', '-b', 'main');
+		git(dir, 'config', 'user.email', 't@t.test');
+		git(dir, 'config', 'user.name', 'Test');
+		fs.writeFileSync(path.join(dir, 'src', 'big.ts'), baseContent);
+		git(dir, 'add', '-A');
+		git(dir, 'commit', '-qm', 'base');
+		git(dir, 'checkout', '-qb', 'work');
+		return dir;
+	} catch (error) {
+		fs.rmSync(dir, { recursive: true, force: true });
+		throw error;
+	}
 }
 
 function metrics(
@@ -94,6 +100,26 @@ describe('quality metrics true base-vs-head deltas (issue #2470/#1655)', () => {
 			// head complexity (9) − base complexity (21) = −12
 			expect(m.complexity_delta).toBe(-12);
 			expect(complexityViolations(m)).toEqual([]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('absolute changed-file paths (pre_check_batch convention) are analyzed like relative ones', async () => {
+		const dir = makeRepo(ifs(20));
+		try {
+			fs.writeFileSync(path.join(dir, 'src', 'big.ts'), ifs(8));
+			// pre_check_batch passes path.resolve(directory, file) — absolute
+			// paths. The enforce globs are repo-relative, so the absolute form
+			// must be relativized or the gate silently analyzes nothing.
+			const m = await computeQualityMetrics(
+				[path.join(dir, 'src', 'big.ts')],
+				{ ...THRESHOLDS },
+				dir,
+			);
+			expect(m.files_analyzed).toContain('src/big.ts');
+			expect(m.complexity_delta).toBe(-12);
+			expect(m.base_resolved).toBe(true);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

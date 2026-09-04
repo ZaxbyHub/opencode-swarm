@@ -1139,9 +1139,12 @@ export async function readTaskEvidence(
  * Classification mirrors readTaskEvidenceRaw: ENOENT and ENAMETOOLONG are
  * "no file can exist" → missing (no telemetry — like readTaskEvidenceRaw,
  * ENAMETOOLONG is intentionally silent on the gateParseError channel);
+ * a taskId that fails the grammar also classifies as missing (it cannot
+ * produce a valid evidence filename, so no file can exist — repair_gate_evidence
+ * could never fix a format problem, so "corrupt" would misdirect operators);
  * everything else — malformed
  * JSON, Zod rejection of a newer `workflow.state` (version skew), permission
- * errors, invalid taskId — is `unparseable` and emits telemetry.gateParseError
+ * errors — is `unparseable` and emits telemetry.gateParseError
  * exactly once before being returned (not thrown).
  */
 export type TaskEvidenceReadState =
@@ -1155,6 +1158,13 @@ export async function readTaskEvidenceState(
 ): Promise<TaskEvidenceReadState> {
 	try {
 		assertValidTaskId(taskId);
+	} catch {
+		// No valid filename can exist for a grammar-invalid taskId (see the
+		// #1729 "file cannot exist" rationale), so this is missing, not
+		// corrupt evidence.
+		return { kind: 'missing' };
+	}
+	try {
 		const evidencePath = getEvidencePath(directory, taskId);
 		const raw = readFileSync(evidencePath, 'utf-8');
 		const evidence = parseTaskEvidence(raw, taskId);
