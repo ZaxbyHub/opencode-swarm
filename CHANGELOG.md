@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.166.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.0...v7.166.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **security:** close PR-review findings on trust-boundary hardening ([a187bb6](https://github.com/ZaxbyHub/opencode-swarm/commit/a187bb68707b70445afe2b85d05557545206623f))
+* **security:** harden executable, git-ref, and config trust boundaries ([#2476](https://github.com/ZaxbyHub/opencode-swarm/issues/2476)) ([ae65531](https://github.com/ZaxbyHub/opencode-swarm/commit/ae655310b4af7edbfdb709c0bff46996a042e71a))
+* **security:** harden executable, git-ref, and config trust boundaries ([#2476](https://github.com/ZaxbyHub/opencode-swarm/issues/2476)) ([5bb691b](https://github.com/ZaxbyHub/opencode-swarm/commit/5bb691b7c08a6fd7a965335fee4735bf923c5124))
+
 ## [7.166.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.165.0...v7.166.0) (2026-09-05)
 
 
