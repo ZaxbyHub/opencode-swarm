@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.166.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.165.0...v7.166.0) (2026-09-05)
+
+
+### Features
+
+* **observability:** sqlite-native event sink and /swarm report ([#2482](https://github.com/ZaxbyHub/opencode-swarm/issues/2482)) ([06b1cfe](https://github.com/ZaxbyHub/opencode-swarm/commit/06b1cfe7d9cfd952af3b98b8508687619d4761e7))
+
+
+### Bug Fixes
+
+* **observability:** address PR [#2571](https://github.com/ZaxbyHub/opencode-swarm/issues/2571) review findings (2571-r1) ([cee95e8](https://github.com/ZaxbyHub/opencode-swarm/commit/cee95e8a48efd7fe64ea48708c6277a512b78214))
+* **pr-monitor:** close review findings on refusal accounting, recovery tests, and diagnostics ([6d48eb4](https://github.com/ZaxbyHub/opencode-swarm/commit/6d48eb48cb84e4cca5c842a1764836587239a6f7))
+* **recovery:** make recovery state actionable and circuit-safe ([#2471](https://github.com/ZaxbyHub/opencode-swarm/issues/2471)) ([9a8df72](https://github.com/ZaxbyHub/opencode-swarm/commit/9a8df726f5207f3a7fdd0622835580e33d238471))
+* **sandbox:** ship and verify the Windows native sandbox boundary ([#2475](https://github.com/ZaxbyHub/opencode-swarm/issues/2475)) ([7c67070](https://github.com/ZaxbyHub/opencode-swarm/commit/7c670705b48def24d37e59a25e53d4ee20a7539c))
+* **test:** biome-canonical formatting in tool-policy cap reclaim (505 lines) ([927cedf](https://github.com/ZaxbyHub/opencode-swarm/commit/927cedf9b825829f3855f7a7e9df945f43fc7c7d))
+
 ## [7.165.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.13...v7.165.0) (2026-09-04)
 
 

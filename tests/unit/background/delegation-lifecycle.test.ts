@@ -226,7 +226,16 @@ describe('delegation-lifecycle', () => {
 		expect(readDelegationHealthArtifact(dir)?.counts.lateTerminals ?? 0).toBe(
 			0,
 		);
-		expect(ends).toHaveLength(0);
+		// Issue #2482: the eventless terminal now closes its lifecycle pair with
+		// a reconstructed end (attributed to the record, marked recovered) —
+		// previously this path emitted nothing, leaving an unpairable begin.
+		expect(ends).toHaveLength(1);
+		expect(ends[0]).toEqual({
+			sessionId: 'parent-1',
+			agent: 'mega_sme',
+			result: 'stale',
+		});
+		expect(costFields[0]?.recovered).toBe(true);
 	});
 
 	it('classifies not_open when the claim is refused and the record is still open', async () => {
@@ -309,14 +318,19 @@ describe('delegation-lifecycle', () => {
 		expect(entry.elapsed_ms).toBe(5_000);
 	});
 
-	it('cost identity material requires a laneId and joins by record fields', () => {
-		const material = delegationCostRecordMaterial(
+	it('cost identity material joins by record fields for lane and Task shapes', () => {
+		const laneMaterial = delegationCostRecordMaterial(
 			makeRecord({ laneId: 'lane-x' }),
 		);
-		expect(material).toBe('parent-1\0batch-1\0lane:lane-x');
-		expect(() =>
-			delegationCostRecordMaterial(makeRecord({ laneId: undefined })),
-		).toThrow(/laneId/);
+		expect(laneMaterial).toBe('parent-1\0batch-1\0lane:lane-x');
+		// Issue #2482: Task-tool delegations carry no laneId; their material is
+		// the Task shape (${parentSessionId}\0${callID}) instead of a throw, so
+		// background Task terminals can still emit cost observations. The two
+		// shapes hash-disjointly (pinned in delegation-terminal-pairing.test.ts).
+		const taskMaterial = delegationCostRecordMaterial(
+			makeRecord({ laneId: undefined, callID: 'call-7' }),
+		);
+		expect(taskMaterial).toBe('parent-1\0call-7');
 	});
 
 	it('emitted cost identity fields are deterministic and join by canonical record fields', async () => {

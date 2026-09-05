@@ -365,7 +365,9 @@ describe('swarm-subcommand-parity', () => {
 		// 105 → 106: /swarm approve-write added for exact human one-shot authority (#1824).
 		// 106 → 114: declarative harness blueprint and candidate commands added
 		// for issue #1825, documented in .claude/skills/swarm/SKILL.md.
-		expect(expectedCommands.size).toBe(114);
+		// 114 → 115: /swarm report added (#2482), documented in
+		// .claude/skills/swarm/SKILL.md.
+		expect(expectedCommands.size).toBe(115);
 
 		console.info(
 			`[swarm-subcommand-parity] skill documented commands (raw): ${skillRawCommands.length}`,

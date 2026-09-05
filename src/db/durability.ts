@@ -34,6 +34,11 @@ export const DURABILITY_CLASSES: Readonly<Record<string, 'full' | 'normal'>> = {
 	project_constraints: 'normal',
 	migration_failures: 'normal',
 	schema_migrations: 'normal',
+	// D3 observability sink (#2482) — rebuildable query authority; the
+	// bounded `.swarm/telemetry.jsonl` stream remains the operational record.
+	observability_event: 'normal',
+	observability_sink_health: 'normal',
+	observability_import: 'normal',
 };
 
 /** Escalation rule: any full-class op makes the whole batch full-class. */

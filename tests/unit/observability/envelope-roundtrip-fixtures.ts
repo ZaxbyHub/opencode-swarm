@@ -449,4 +449,18 @@ export const FIXTURES: Record<string, Record<string, unknown>> = {
 			'9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0',
 		attemptId: '1e2d3c4b-5a69-4877-9665-443322110ff0',
 	},
+	context_source_attribution: {
+		sessionId: 'sess-fix-2482-attrib',
+		taskId: 'task-fix-2482',
+		source: 'context_pack',
+		tokensReturned: 420,
+		tokensSavedEstimate: 1580,
+		estimate: true,
+	},
+	verdict_row_pipe_recovery: {
+		marker: '[REVIEWED]',
+		itemId: 'item-fix-2482',
+		recovery: 'legacy-fidelity-safe',
+		fieldCount: 6,
+	},
 };

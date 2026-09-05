@@ -111,6 +111,7 @@ import { handlePreflightCommand } from './preflight.js';
 import { handlePromoteCommand } from './promote.js';
 import { handleQaGatesCommand } from './qa-gates.js';
 import { handleRecoverCommand } from './recover.js';
+import { handleReportCommand } from './report.js';
 import { handleResetCommand } from './reset.js';
 import { handleResetSessionCommand } from './reset-session.js';
 import { handleRetrieveCommand } from './retrieve.js';
@@ -989,6 +990,16 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleCostsCommand(ctx.directory, ctx.args),
 		description: 'Show per-agent and per-task token/cost telemetry [--json]',
 		args: '--json',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
+	report: {
+		handler: (ctx) => handleReportCommand(ctx.directory, ctx.args),
+		description:
+			'Report swarm observability events from the SQLite query authority [--task <id>] [--session <id>] [--trace <id>] [--run <batchId>] [--since <ISO-8601>] [--json]',
+		args: '--task <id>, --session <id>, --trace <id>, --run <batchId>, --since <ISO-8601>, --json',
+		details:
+			'Bounded, deterministic query over the observability events store in .swarm/swarm.db (the first run performs a bounded, idempotent legacy-import into the local sink). --run filters the lane/dispatch batch axis (workflow.batchId). Unmatched delegation begins are disclosed, never fabricated into ends. --json emits a schemaVersion-tagged block.',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},
