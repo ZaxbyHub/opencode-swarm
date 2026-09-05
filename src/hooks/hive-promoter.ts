@@ -24,10 +24,13 @@
 
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import { KnowledgeConfigSchema } from '../config/schema.js';
+import type { CohortIdentity } from '../knowledge/cohort-identity.js';
 import { resolveCohortId } from '../knowledge/cohort-identity.js';
 import { authorizeCuration } from '../knowledge/curation-policy.js';
 import { resolveHiveDataDir } from '../knowledge/hive-paths.js';
+import { ensureCohortIdCached } from './cohort-cache.js';
 import { appendCuratorRecommendation, readCuratorSummary } from './curator.js';
 import {
 	describeEligibilityRoute,
@@ -252,7 +255,9 @@ function lessonRevision(lesson: string): string {
  * new canonical-cohort confirmations. Returns a summary for curator state.
  *
  * `directory` is required (#1847) to resolve the canonical cohort identity
- * (#1846) for cross-project distinctness.
+ * (#1846) for cross-project distinctness. `sessionID` (#2472 W2) is optional:
+ * when present, cohort resolution reuses the session's cached cohort id (see
+ * the `_internals.resolveCohortId` default).
  *
  * @note The 'hive-fast-track' tag is privileged — it bypasses the 3-phase
  *   confirmation requirement inside the eligibility_route gate. It should only
@@ -262,6 +267,7 @@ export async function checkHivePromotions(
 	swarmEntries: SwarmKnowledgeEntry[],
 	config: KnowledgeConfig,
 	directory: string,
+	sessionID?: string,
 ): Promise<HivePromotionSummary> {
 	const empty: HivePromotionSummary = {
 		timestamp: new Date().toISOString(),
@@ -275,11 +281,25 @@ export async function checkHivePromotions(
 		return empty;
 	}
 
-	// Resolve the source cohort ONCE, OUTSIDE the transaction. resolveCohortId
-	// may issue up to 2 sequential git subprocess calls (~3s worst case); doing
-	// this under the directory lock would risk exceeding the 5s stale window.
-	// It never throws (path fallback always succeeds).
-	const sourceCohort = await _internals.resolveCohortId(directory);
+	// #2472 W2: zero ACTIVE swarm entries ⇒ this pass is provably a no-op —
+	// every eligibility route includes the active-status gate, cross-cohort
+	// confirmations only pair against ACTIVE entries, and staged rejects
+	// require an eligible candidate first. Return BEFORE cohort resolution,
+	// evidence loading, and the hive transaction so an empty store costs one
+	// swarm-store read instead of a git spawn + lock acquire.
+	const activeSwarm = swarmEntries.filter((e) => isActiveStatus(e.status));
+	if (activeSwarm.length === 0) {
+		return empty;
+	}
+
+	// Resolve the source cohort ONCE, OUTSIDE the transaction. The default
+	// resolver routes through the shared cohort cache (#2472 W2 — see
+	// `_internals.resolveCohortId`), so a cached session id costs no git
+	// subprocesses; a cold resolve may issue up to 2 sequential git calls
+	// (~3s worst case) and doing that under the directory lock would risk
+	// exceeding the 5s stale window. It never throws (path fallback always
+	// succeeds).
+	const sourceCohort = await _internals.resolveCohortId(directory, sessionID);
 
 	// Authoritative terminal-application evidence comes from receipt-ledger
 	// history. The bounded promotion-evidence JSONL remains a rebuildable
@@ -300,7 +320,8 @@ export async function checkHivePromotions(
 	// filtered), plus append/confirm/cap/persist. This keeps the closure well
 	// under the 5s stale window for default caps (100/200); admin-raised caps
 	// remain bounded by the candidate count, not the raw swarm×hive product.
-	const activeSwarm = swarmEntries.filter((e) => isActiveStatus(e.status));
+	// (`activeSwarm` was hoisted above the cohort/evidence work for the #2472
+	// W2 empty-candidates early return.)
 	const activeSwarmBigrams = activeSwarm.map((e) =>
 		typeof e.lesson === 'string' ? wordBigrams(e.lesson) : new Set<string>(),
 	);
@@ -786,6 +807,59 @@ async function authorizeAndRecordHiveMerge(args: {
 	});
 }
 
+/**
+ * #2472 W2 gate 1 — write-class tool names that may trigger promotion.
+ *
+ * Source of truth: `WRITE_TOOL_NAMES` in `src/config/constants.ts` — the same
+ * canonical write-tool set used by scope-guard, guardrails, and the repo-graph
+ * builder. Copied into a Set for O(1) membership on the tool.execute.after hot
+ * path. Do NOT add names here — extend `WRITE_TOOL_NAMES` there.
+ */
+const PROMOTER_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(
+	WRITE_TOOL_NAMES,
+);
+
+/**
+ * #2472 W2 gate 3 — minimum wall-clock spacing (ms) between promotion bodies
+ * per directory. A second qualifying write-tool invocation inside this window
+ * returns before the promotion body, so a multi-file edit burst runs the body
+ * at most once per window (frozen check C3 Phase B pins transactHiveStore ≤ 1).
+ */
+const PROMOTION_CADENCE_FLOOR_MS = 60_000;
+
+/**
+ * #2472 W2 — bound for `lastPromotionRunAt` (AGENTS.md invariant 8: module
+ * state must be keyed and explicitly bounded). 64 distinct project directories
+ * is far beyond any real process's working set.
+ */
+const MAX_PROMOTER_TRACKED_DIRECTORIES = 64;
+
+/** Last time the promotion body ran, per directory (insertion-ordered; the
+ *  oldest key is evicted past the cap). */
+const lastPromotionRunAt = new Map<string, number>();
+
+/**
+ * #2472 W2 (critic Round 2 item 1) — directories whose one-time legacy
+ * curator-summary migration check has already run in this process. Keeps the
+ * `readCuratorSummary` migration reachable on an empty store while bounding it
+ * to at most once per directory per process. Bounded by the set of distinct
+ * directories seen (add-only).
+ */
+const curatorMigrationCheckedDirectories = new Set<string>();
+
+/** Record a promotion-body run for `directory`, refreshing recency and evicting
+ *  the oldest key past the cap (invariant 8). */
+function markPromotionRunAt(directory: string, now: number): void {
+	lastPromotionRunAt.delete(directory);
+	lastPromotionRunAt.set(directory, now);
+	if (lastPromotionRunAt.size > MAX_PROMOTER_TRACKED_DIRECTORIES) {
+		const oldest = lastPromotionRunAt.keys().next().value;
+		if (oldest !== undefined && oldest !== directory) {
+			lastPromotionRunAt.delete(oldest);
+		}
+	}
+}
+
 export const _internals = {
 	readSwarmEntries: (directory: string) =>
 		readKnowledge<SwarmKnowledgeEntry>(resolveSwarmKnowledgePath(directory)),
@@ -793,7 +867,27 @@ export const _internals = {
 	readCuratorSummary,
 	appendCuratorRecommendation,
 	// #1847 DI seams (invariant 7) — tests inject these rather than mock.module.
-	resolveCohortId,
+	//
+	// #2472 W2: the DEFAULT cohort resolver routes through the shared cohort
+	// cache (`ensureCohortIdCached`, ./cohort-cache.ts) instead of the raw
+	// per-call git spawn — a qualifying promoter run reuses the cohort id
+	// cached at `chat.message` turn 1, and `ensureCohortIdCached` resolves once
+	// and caches on a miss, so at most one resolution happens per session
+	// either way. Falls back to the raw resolver when there is no sessionID
+	// (manual `/swarm promote` paths) or the cached resolve failed. The
+	// promoter consumes only `.cohortId`; on a cache hit the identity's
+	// provenance fields are inert placeholders — the cached id was already
+	// canonicalized by `resolveCohortId` before it was cached.
+	resolveCohortId: async (
+		directory: string,
+		sessionID?: string,
+	): Promise<CohortIdentity> => {
+		const cached = await ensureCohortIdCached(directory, sessionID);
+		if (cached) {
+			return { cohortId: cached, source: 'path', degraded: true };
+		}
+		return resolveCohortId(directory);
+	},
 	transactHiveStore,
 	validateLesson,
 	// PRR-007: the shared curation policy the dedup-merge routes through (as an
@@ -809,27 +903,84 @@ export const _internals = {
 	/** Loads the default KnowledgeConfig (schema defaults) for manual promotion
 	 *  paths when the command did not load one. */
 	loadDefaultKnowledgeConfig: () => KnowledgeConfigSchema.parse({}),
+	/** Test-only: clears the #2472 W2 hook-gating state (per-directory cadence
+	 *  map + curator-migration guard). Production code never calls this; it
+	 *  exists so test files sharing one Bun process start from a clean slate. */
+	resetPromoterGatingState: () => {
+		lastPromotionRunAt.clear();
+		curatorMigrationCheckedDirectories.clear();
+	},
 };
 
 /**
  * Create a hook that promotes swarm entries to the hive.
- * The hook fires unconditionally - the caller decides when to invoke it.
+ *
+ * #2472 W2 gating — the hook self-gates instead of running unconditionally:
+ *  1. Write-class tools only (`PROMOTER_WRITE_TOOL_NAMES`): a read-only tool
+ *     call returns before even the swarm-store read.
+ *  2. Empty-candidates gate: when no swarm entry has ACTIVE status the hook
+ *     returns BEFORE cohort resolution, evidence loading, the hive
+ *     transaction, and the curator-summary read. The one-time legacy
+ *     curator-summary migration read stays reachable — at most once per
+ *     directory per process (critic Round 2 item 1).
+ *  3. Cadence floor: a second qualifying invocation inside
+ *     `PROMOTION_CADENCE_FLOOR_MS` returns before the promotion body.
  */
 export function createHivePromoterHook(
 	directory: string,
 	config: KnowledgeConfig,
 ): (input: unknown, output: unknown) => Promise<void> {
-	const hook = async (_input: unknown, _output: unknown): Promise<void> => {
+	const hook = async (input: unknown, _output: unknown): Promise<void> => {
+		// Gate 1 — tool class. `tool.execute.after` fires for EVERY tool; only
+		// workspace-modifying tools can move promotion state.
+		const tool = (input as { tool?: unknown } | null | undefined)?.tool;
+		if (typeof tool !== 'string' || !PROMOTER_WRITE_TOOL_NAMES.has(tool)) {
+			return;
+		}
+		const sessionID = (input as { sessionID?: unknown } | null | undefined)
+			?.sessionID;
+
+		// Gate 2 — promotion candidates. Read the swarm store first; with no
+		// ACTIVE entry there is nothing to promote or confirm.
 		const swarmEntries = await _internals.readSwarmEntries(directory);
+		const hasActiveCandidates = swarmEntries.some((e) =>
+			isActiveStatus(e.status),
+		);
+		if (!hasActiveCandidates) {
+			// Critic requirement: preserve the one-time legacy curator-summary
+			// migration (the pre-W2 code read the summary "first even on a
+			// no-op"). On an empty store the migration check runs at most once
+			// per directory per process; subsequent empty-store calls return
+			// without reading it.
+			if (!curatorMigrationCheckedDirectories.has(directory)) {
+				curatorMigrationCheckedDirectories.add(directory);
+				await _internals.readCuratorSummary(directory);
+			}
+			return;
+		}
+
+		// Gate 3 — cadence floor (see PROMOTION_CADENCE_FLOOR_MS).
+		const now = Date.now();
+		const lastRunAt = lastPromotionRunAt.get(directory);
+		if (
+			lastRunAt !== undefined &&
+			now - lastRunAt < PROMOTION_CADENCE_FLOOR_MS
+		) {
+			return;
+		}
+		markPromotionRunAt(directory, now);
 
 		const promotionSummary = await _internals.checkHivePromotions(
 			swarmEntries,
 			config,
 			directory,
+			typeof sessionID === 'string' ? sessionID : undefined,
 		);
 
 		// Read first even on a no-op: this is the one-time migration path for
-		// legacy bloated curator summaries when a project is reopened.
+		// legacy bloated curator summaries when a project is reopened. On a
+		// non-empty store today's ordering is kept — this read runs on every
+		// qualifying promotion body.
 		const curatorSummary = await _internals.readCuratorSummary(directory);
 		if (!curatorSummary) return;
 

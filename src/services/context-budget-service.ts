@@ -14,21 +14,30 @@ import {
 	readSwarmFileAsync,
 	validateSwarmPath,
 } from '../hooks/utils';
+import {
+	RECENT_WRITE_WINDOW_MS,
+	wasRecentlyWrittenByThisProcess,
+} from '../utils/atomic-write';
 import { bunFile, bunWrite } from '../utils/bun-compat';
 import * as logger from '../utils/logger.js';
 import { validateProjectDirectory } from '../utils/path-security';
 import {
 	invalidateCachedArtifact,
 	readCachedTextFile,
+	wasObservedToExist,
 } from '../utils/swarm-artifact-cache';
 
 /**
  * Read a knowledge file's text by absolute (link-aware) path, returning '' on
  * any error. Mirrors `readSwarmFileAsync`'s resilience so routing through the
  * shared link store does not silently drop it:
- * - ENOENT retry (5×10ms) for the macOS/APFS rename-visibility race that can
- *   make a read immediately after an atomic write transiently see ENOENT —
- *   without it, a budget report can undercount knowledge tokens to zero.
+ * - ENOENT retry (5×10ms) ONLY when the miss is EVIDENCED (this process
+ *   recently wrote the file, or a prior read observed it to exist) — the
+ *   macOS/APFS rename-visibility race that can make a read immediately after
+ *   an atomic write transiently see ENOENT. Without it, a budget report can
+ *   undercount knowledge tokens to zero. A first ENOENT on a file with no
+ *   evidence it ever existed returns '' immediately with ZERO sleeps (issue
+ *   #2472 W3 / PERF-1 — same three-way policy as `readSwarmFileAsync`).
  * - stamp-cached reads so a large shared knowledge store is not re-read from
  *   disk on every (frequent) budget report.
  *
@@ -49,6 +58,16 @@ async function readFileOrEmpty(filePath: string): Promise<string> {
 			// Only retry on ENOENT (rename-visibility race); other errors fail to ''.
 			const isNotFound = (err as NodeJS.ErrnoException)?.code === 'ENOENT';
 			if (!isNotFound || attempt === maxAttempts - 1) return '';
+			// Never-existed fast path (issue #2472 W3): retry only when the
+			// miss is evidenced — a recent write by this process (rename race)
+			// or a prior observation of existence. Otherwise retrying cannot
+			// succeed; return '' immediately with zero sleeps.
+			if (
+				!wasRecentlyWrittenByThisProcess(filePath, RECENT_WRITE_WINDOW_MS) &&
+				!wasObservedToExist(filePath)
+			) {
+				return '';
+			}
 			await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
 		}
 	}

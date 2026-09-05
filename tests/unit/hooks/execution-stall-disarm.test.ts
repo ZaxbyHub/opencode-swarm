@@ -20,6 +20,10 @@
  * These tests drive the REAL `.swarm/plan.json` reader against real fixture
  * files; the DI seam is used only where a test needs to prove the seam itself is
  * consulted.
+ *
+ * Issue #2472 W7: `recordExecutionStallToolAfter` is async (its workspace
+ * captures route through the async snapshot twin), so the cycle helpers here
+ * await it.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
@@ -41,8 +45,8 @@ import { resetSwarmState, swarmState } from '../../../src/state';
 const PROBE_EVERY = _test_exports.WORKSPACE_PROBE_EVERY_CALLS;
 
 const realNow = _internals.now;
-const realCapture = _internals.captureWorkspaceSnapshot;
-const realChanged = _internals.changedFilesSinceSnapshot;
+const realCapture = _internals.captureWorkspaceSnapshotAsync;
+const realChanged = _internals.changedFilesSinceSnapshotAsync;
 const realReadPlan = _internals.readPlanOpenTaskState;
 
 let clock = 1_700_000_000_000;
@@ -73,10 +77,10 @@ beforeEach(() => {
 	clock = 1_700_000_000_000;
 	_internals.now = () => clock;
 	// Fake, always-clean workspace so no test in this file spawns git.
-	_internals.captureWorkspaceSnapshot = mock(
+	_internals.captureWorkspaceSnapshotAsync = mock(
 		() => ({ gitHead: 'HEAD0', changedFiles: [] }) as never,
 	) as never;
-	_internals.changedFilesSinceSnapshot = mock(() => []) as never;
+	_internals.changedFilesSinceSnapshotAsync = mock(async () => []) as never;
 	_internals.readPlanOpenTaskState = realReadPlan;
 	tempDir = fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), 'stall-disarm-')),
@@ -85,8 +89,8 @@ beforeEach(() => {
 
 afterEach(() => {
 	_internals.now = realNow;
-	_internals.captureWorkspaceSnapshot = realCapture;
-	_internals.changedFilesSinceSnapshot = realChanged;
+	_internals.captureWorkspaceSnapshotAsync = realCapture;
+	_internals.changedFilesSinceSnapshotAsync = realChanged;
 	_internals.readPlanOpenTaskState = realReadPlan;
 	_test_exports.reset();
 	resetSwarmState();
@@ -111,13 +115,13 @@ function armViaDispatch(sessionID: string): void {
 }
 
 /** A successful `update_task_status` toolAfter. */
-function statusUpdate(
+async function statusUpdate(
 	sessionID: string,
 	taskId: string,
 	status: string,
 	callID: string,
-): void {
-	recordExecutionStallToolAfter({
+): Promise<void> {
+	await recordExecutionStallToolAfter({
 		sessionID,
 		tool: 'update_task_status',
 		callID,
@@ -132,7 +136,11 @@ function statusUpdate(
 }
 
 /** One full non-progress cycle (before + after), as the real host does. */
-function nonProgressCycle(sessionID: string, n: number, tool = 'bash'): void {
+async function nonProgressCycle(
+	sessionID: string,
+	n: number,
+	tool = 'bash',
+): Promise<void> {
 	clock += 1_000;
 	observeExecutionStallToolCall({
 		sessionID,
@@ -140,7 +148,7 @@ function nonProgressCycle(sessionID: string, n: number, tool = 'bash'): void {
 		args: tool === 'bash' ? { command: `echo ${n}` } : { filePath: `/p/${n}` },
 		callID: `np-${n}`,
 	});
-	recordExecutionStallToolAfter({
+	await recordExecutionStallToolAfter({
 		sessionID,
 		tool,
 		callID: `np-${n}`,
@@ -173,7 +181,7 @@ describe('#2063 B5 — readPlanOpenTaskState (the real reader)', () => {
 });
 
 describe('#2063 B5 — disarm when the plan has no in_progress task', () => {
-	test('REGRESSION (reviewer r4): the final update_task_status disarms, so 60+ later calls are NOT denied', () => {
+	test('REGRESSION (reviewer r4): the final update_task_status disarms, so 60+ later calls are NOT denied', async () => {
 		// The exact reported shape: architect closes out its last task, then runs
 		// commit + CI + reporting work. None of that is a "progress event" for
 		// this lever, and the session never goes idle, so before this fix the
@@ -183,12 +191,12 @@ describe('#2063 B5 — disarm when the plan has no in_progress task', () => {
 		writePlan(['in_progress']);
 
 		armViaDispatch(sessionID);
-		for (let i = 0; i < 5; i++) nonProgressCycle(sessionID, i);
+		for (let i = 0; i < 5; i++) await nonProgressCycle(sessionID, i);
 		expect(_test_exports.peekState(sessionID)?.armed).toBe(true);
 
 		// The final status update settles the last open task.
 		writePlan(['completed']);
-		statusUpdate(sessionID, '1.1', 'completed', 'uts-final');
+		await statusUpdate(sessionID, '1.1', 'completed', 'uts-final');
 
 		const state = _test_exports.peekState(sessionID);
 		expect(state?.armed).toBe(false);
@@ -197,7 +205,7 @@ describe('#2063 B5 — disarm when the plan has no in_progress task', () => {
 
 		// The commit / CI tail: well past the hard rung, never denied.
 		for (let i = 0; i < DEFAULT_EXECUTION_STALL_STOP_CALLS + 5; i++) {
-			nonProgressCycle(sessionID, 100 + i, i % 2 === 0 ? 'bash' : 'read');
+			await nonProgressCycle(sessionID, 100 + i, i % 2 === 0 ? 'bash' : 'read');
 		}
 
 		expect(_test_exports.peekState(sessionID)?.armed).toBe(false);
@@ -210,7 +218,7 @@ describe('#2063 B5 — disarm when the plan has no in_progress task', () => {
 		).not.toThrow();
 	});
 
-	test('two in_progress tasks, one completed → the episode STAYS armed', () => {
+	test('two in_progress tasks, one completed → the episode STAYS armed', async () => {
 		// The narrowing that keeps the lever alive mid-phase: settling one task
 		// while another is still open is not the end of the execution episode.
 		const sessionID = 'one-of-two-completed';
@@ -218,42 +226,42 @@ describe('#2063 B5 — disarm when the plan has no in_progress task', () => {
 		writePlan(['in_progress', 'in_progress']);
 
 		armViaDispatch(sessionID);
-		for (let i = 0; i < 5; i++) nonProgressCycle(sessionID, i);
+		for (let i = 0; i < 5; i++) await nonProgressCycle(sessionID, i);
 
 		writePlan(['completed', 'in_progress']);
-		statusUpdate(sessionID, '1.1', 'completed', 'uts-partial');
+		await statusUpdate(sessionID, '1.1', 'completed', 'uts-partial');
 
 		expect(_test_exports.peekState(sessionID)?.armed).toBe(true);
 		expect(isExecutionEpisodeArmed(sessionID)).toBe(true);
 
 		// And the lever still reaches the hard rung from here.
 		for (let i = 0; i < DEFAULT_EXECUTION_STALL_STOP_CALLS; i++) {
-			nonProgressCycle(sessionID, 200 + i);
+			await nonProgressCycle(sessionID, 200 + i);
 		}
 		expect(() =>
 			enforceExecutionStallDenial({ sessionID, tool: 'bash' }),
 		).toThrow(/^EXECUTION_STALL:/);
 	});
 
-	test('a settling status update does NOT disarm while the plan is unreadable', () => {
+	test('a settling status update does NOT disarm while the plan is unreadable', async () => {
 		// `'unknown' !== 'none'`: a plan-less architect loop keeps the lever.
 		const sessionID = 'unknown-keeps-armed';
 		setupArchitect(sessionID);
 		// No plan.json written at all.
 
 		armViaDispatch(sessionID);
-		statusUpdate(sessionID, '1.1', 'completed', 'uts-no-plan');
+		await statusUpdate(sessionID, '1.1', 'completed', 'uts-no-plan');
 
 		expect(_test_exports.peekState(sessionID)?.armed).toBe(true);
 		for (let i = 0; i < DEFAULT_EXECUTION_STALL_STOP_CALLS; i++) {
-			nonProgressCycle(sessionID, i);
+			await nonProgressCycle(sessionID, i);
 		}
 		expect(() =>
 			enforceExecutionStallDenial({ sessionID, tool: 'read' }),
 		).toThrow(/^EXECUTION_STALL:/);
 	});
 
-	test('update_task_status(in_progress) never consults the plan — it ARMS', () => {
+	test('update_task_status(in_progress) never consults the plan — it ARMS', async () => {
 		// Arming path (b) must not be short-circuited by a plan that has not yet
 		// been re-read; the check is scoped to SETTLING updates only.
 		const sessionID = 'in-progress-still-arms';
@@ -262,20 +270,20 @@ describe('#2063 B5 — disarm when the plan has no in_progress task', () => {
 		const spy = mock(() => 'none' as const);
 		_internals.readPlanOpenTaskState = spy as never;
 
-		statusUpdate(sessionID, '1.1', 'in_progress', 'uts-arm');
+		await statusUpdate(sessionID, '1.1', 'in_progress', 'uts-arm');
 
 		expect(_test_exports.peekState(sessionID)?.armed).toBe(true);
 		expect(isExecutionEpisodeArmed(sessionID)).toBe(true);
 		expect(spy.mock.calls.length).toBe(0);
 	});
 
-	test('a FAILED status update does not disarm', () => {
+	test('a FAILED status update does not disarm', async () => {
 		const sessionID = 'failed-status-no-disarm';
 		setupArchitect(sessionID);
 		writePlan(['completed']);
 
 		armViaDispatch(sessionID);
-		recordExecutionStallToolAfter({
+		await recordExecutionStallToolAfter({
 			sessionID,
 			tool: 'update_task_status',
 			callID: 'uts-fail',
@@ -293,7 +301,7 @@ describe('#2063 B5 — disarm when the plan has no in_progress task', () => {
 });
 
 describe('#2063 B5 — the periodic probe catches an OUT-OF-BAND plan change', () => {
-	test('a plan edited outside update_task_status disarms at the next probe', () => {
+	test('a plan edited outside update_task_status disarms at the next probe', async () => {
 		const sessionID = 'out-of-band-disarm';
 		setupArchitect(sessionID);
 		writePlan(['in_progress']);
@@ -301,13 +309,13 @@ describe('#2063 B5 — the periodic probe catches an OUT-OF-BAND plan change', (
 		armViaDispatch(sessionID);
 		// One cycle captures the workspace baseline; the probe runs
 		// PROBE_EVERY cycles later.
-		nonProgressCycle(sessionID, 0);
-		for (let i = 1; i < PROBE_EVERY; i++) nonProgressCycle(sessionID, i);
+		await nonProgressCycle(sessionID, 0);
+		for (let i = 1; i < PROBE_EVERY; i++) await nonProgressCycle(sessionID, i);
 		expect(_test_exports.peekState(sessionID)?.armed).toBe(true);
 
 		// Somebody settles the plan without going through the tool.
 		writePlan(['completed']);
-		nonProgressCycle(sessionID, PROBE_EVERY);
+		await nonProgressCycle(sessionID, PROBE_EVERY);
 
 		const state = _test_exports.peekState(sessionID);
 		expect(state?.armed).toBe(false);
@@ -318,13 +326,14 @@ describe('#2063 B5 — the periodic probe catches an OUT-OF-BAND plan change', (
 		).not.toThrow();
 	});
 
-	test('the probe leaves the episode armed while a task is still open', () => {
+	test('the probe leaves the episode armed while a task is still open', async () => {
 		const sessionID = 'probe-open-task';
 		setupArchitect(sessionID);
 		writePlan(['in_progress']);
 
 		armViaDispatch(sessionID);
-		for (let i = 0; i <= PROBE_EVERY * 2; i++) nonProgressCycle(sessionID, i);
+		for (let i = 0; i <= PROBE_EVERY * 2; i++)
+			await nonProgressCycle(sessionID, i);
 
 		expect(_test_exports.peekState(sessionID)?.armed).toBe(true);
 		expect(
@@ -332,14 +341,14 @@ describe('#2063 B5 — the periodic probe catches an OUT-OF-BAND plan change', (
 		).toBeGreaterThan(PROBE_EVERY);
 	});
 
-	test('the probe does not disarm on an unreadable plan', () => {
+	test('the probe does not disarm on an unreadable plan', async () => {
 		const sessionID = 'probe-unknown-plan';
 		setupArchitect(sessionID);
 		// No plan.json.
 
 		armViaDispatch(sessionID);
 		for (let i = 0; i < DEFAULT_EXECUTION_STALL_STOP_CALLS; i++) {
-			nonProgressCycle(sessionID, i);
+			await nonProgressCycle(sessionID, i);
 		}
 
 		expect(_test_exports.peekState(sessionID)?.armed).toBe(true);

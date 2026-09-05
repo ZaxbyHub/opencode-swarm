@@ -15,6 +15,7 @@
  * assembly paths are exercised: Path A (scoring off) and Path B (scoring on).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
@@ -132,6 +133,22 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 		return output.system;
 	}
 
+	/**
+	 * #2472 W4: the system-enhancer transform defers the doc-index directory
+	 * walk and the dark-matter git spawn to a background macrotask AFTER the
+	 * transform returns. On Windows those hold directory handles (git -C
+	 * chdir + readdir) that make rm() fail with EBUSY when teardown races
+	 * them, so drain the deferred scan (it always writes dark-matter.md,
+	 * even on empty results — #1021) before removing the temp dir.
+	 */
+	async function drainDeferredMaintenanceScan(): Promise<void> {
+		const marker = join(tempDir, '.swarm', 'dark-matter.md');
+		const deadline = Date.now() + 5000;
+		while (!existsSync(marker) && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+	}
+
 	const budgetBlockOf = (system: string[]) =>
 		system.find((s) => s.includes('[SWARM INJECTION FOOTPRINT:'));
 
@@ -147,6 +164,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 
 	afterEach(async () => {
 		resetSwarmState();
+		await drainDeferredMaintenanceScan();
 		await rm(tempDir, { recursive: true, force: true });
 	});
 

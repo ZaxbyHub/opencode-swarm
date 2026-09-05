@@ -672,6 +672,243 @@ function buildLanguageTestConstraints(
 }
 
 /**
+ * #2472 W4 (AC-5): project roots with a deferred maintenance scan (doc-index
+ * directory walk + dark-matter git spawn + `.swarm` writes) scheduled but not
+ * yet completed. The guard is module-level by design: the scans are
+ * per-project-root, not per-session, and must deduplicate across every
+ * session sharing this process. Bounded by construction (invariant 8): every
+ * scheduled task removes its key in `finally`, so the set holds only
+ * in-flight scans — there is no unbounded growth and no cross-session data.
+ */
+const pendingDeferredScanDirs = new Set<string>();
+
+/**
+ * Schedule `fn` as a MACROTASK (unref'd `setTimeout(…, 0)`), mirroring the
+ * post-resolution task-queue pattern in `src/index.ts`.
+ *
+ * Deliberately NOT `queueMicrotask`: a microtask queued inside the awaited
+ * `experimental.chat.system.transform` body can run before the caller
+ * resumes, which would put the maintenance scans right back on the prompt
+ * path. Repo precedent (PR #1920) pins macrotask scheduling for deferred
+ * hot-path work, and the frozen acceptance check for this issue
+ * (repro/check-c5.ts) asserts the immediately-post-await state. The timer is
+ * unref'd so a pending scan can never keep the OpenCode host process alive.
+ *
+ * A bare `setTimeout(…, 0)` is NOT sufficient on its own: the transform body
+ * itself awaits file I/O and retry sleeps, so a timer registered early in
+ * the body fires during those internal yields — still INSIDE the awaited
+ * call. That is why the registration point is the handler's tail (see
+ * `scheduleDeferredMaintenanceScans` and its call site in the handler's
+ * `finally`): from there only microtasks separate the registration from the
+ * caller's resumption, so the macrotask provably cannot run before the
+ * prompt-construction call has returned.
+ */
+function scheduleDeferredMacrotask(fn: () => void): void {
+	const timer = setTimeout(fn, 0);
+	if (typeof (timer as { unref?: () => void }).unref === 'function') {
+		(timer as { unref: () => void }).unref();
+	}
+}
+
+/**
+ * The maintenance scans: doc-manifest build/refresh plus dark-matter
+ * detection and all of its `.swarm` writes. Both artifacts feed LATER turns
+ * only — the doc manifest is consumed by the architect through the
+ * doc_scan/doc_extract tools, and dark-matter.md / its knowledge entries by
+ * later injections — which is what makes the whole computation
+ * deferral-safe (#2472 W4, frozen contract C5). The transform reads whatever
+ * a PREVIOUS deferred scan materialized; nothing in this function's result
+ * is needed by the turn that scheduled it.
+ *
+ * Body moved verbatim from the transform's synchronous scan block. Failures
+ * are caught and logged non-fatally (debug-gated logger) because they can no
+ * longer surface through the transform's own try/catch — an unhandled
+ * rejection in a background task would be a host-process defect.
+ */
+async function runDeferredMaintenanceScans(directory: string): Promise<void> {
+	// v6.39: Auto-trigger doc_scan to build/refresh doc manifest
+	// Non-blocking — failure does not prevent plan processing
+	try {
+		const { scanDocIndex } = await import('../tools/doc-scan.js');
+		const { manifest, cached } = await scanDocIndex(directory);
+		if (!cached) {
+			warn(
+				`[system-enhancer] Doc manifest generated: ${manifest.files.length} files indexed`,
+			);
+		}
+	} catch (error) {
+		log(
+			`[system-enhancer] Deferred doc-index scan failed (non-fatal): ${error}`,
+		);
+	}
+
+	// Dark matter scan: detect co-change patterns in git history
+	// Non-blocking — skip silently on repos without git history, shallow clones, or errors
+	// Cached: skip if dark-matter.md already exists (matches doc_scan caching pattern)
+	try {
+		const darkMatterPath = validateSwarmPath(directory, 'dark-matter.md');
+		if (!fs.existsSync(darkMatterPath)) {
+			// Read from `_internals` so the `_internals` DI seam can be
+			// mocked in tests (writing-tests skill Invariant 7). The
+			// named exports of co-change-analyzer.ts are bound at import
+			// time, so mutating `_internals.detectDarkMatter` would not
+			// affect them. Reading `_internals.foo` at call time picks
+			// up the latest seam value, which is what the dark-matter-
+			// wiring test relies on.
+			const darkMatter = await coChangeInternals.detectDarkMatter(directory, {
+				minCommits: 20,
+				minCoChanges: 3,
+			});
+			// Always write cache — even on empty results — to prevent
+			// repeated O(n²) recomputation on every chat turn (#1021).
+			// Ensure .swarm/ directory exists before writing (may not exist
+			// on first run in a fresh repo before plugin init creates it).
+			await fs.promises.mkdir(path.dirname(darkMatterPath), {
+				recursive: true,
+			});
+			const darkMatterReport =
+				coChangeInternals.formatDarkMatterOutput(darkMatter);
+			await fs.promises.writeFile(darkMatterPath, darkMatterReport, 'utf-8');
+			warn(
+				`[system-enhancer] Dark matter scan complete: ${darkMatter.length} co-change patterns found`,
+			);
+			if (darkMatter.length > 0) {
+				// Generate knowledge entries from dark matter results
+				try {
+					const projectName = path.basename(path.resolve(directory));
+					const knowledgeEntries =
+						coChangeInternals.darkMatterToKnowledgeEntries(
+							darkMatter,
+							projectName,
+						);
+					const knowledgePath =
+						knowledgeStoreInternals.resolveSwarmKnowledgePath(directory);
+					// Deduplicate: skip entries already in knowledge
+					const existingEntries =
+						await knowledgeStoreInternals.readKnowledge<SwarmKnowledgeEntry>(
+							knowledgePath,
+						);
+					const existingLessons = new Set(existingEntries.map((e) => e.lesson));
+					// Layer-5 actionability gate (Change 4): dark-matter entries are
+					// generated actionable at the source, but the gate contract is
+					// structural — enforce it here so a future change to the
+					// generator cannot silently bypass it.
+					//
+					// M10 content-safety gate: the dark-matter writer is the one
+					// ingestion path that never ran through validateLesson — its
+					// lesson text is derived from git-tracked file paths, which are
+					// attacker-influenceable (a maliciously named path could embed
+					// `system:` / `<script>` / control-char payloads that would then
+					// be injected verbatim into the architect's system prompt). Run
+					// every generated entry through the same Layer-2 content-safety
+					// scan every other ingestion path uses, and drop any that fail.
+					const newEntries = knowledgeEntries.filter(
+						(e) =>
+							!existingLessons.has(e.lesson) &&
+							validateActionability(e).actionable &&
+							validateLesson(e.lesson, [], {
+								category: e.category,
+								scope: e.scope,
+								confidence: e.confidence,
+							}).valid,
+					);
+					if (newEntries.length === 0) {
+						warn(`[system-enhancer] No new knowledge entries (all duplicates)`);
+					} else {
+						for (const entry of newEntries) {
+							await knowledgeStoreInternals.appendKnowledge(
+								knowledgePath,
+								entry,
+							);
+						}
+						warn(
+							`[system-enhancer] Created ${newEntries.length} new knowledge entries (${knowledgeEntries.length - newEntries.length} duplicates skipped)`,
+						);
+					}
+				} catch (e) {
+					// Non-blocking: knowledge is supplementary
+					warn(`[system-enhancer] Failed to create knowledge entries: ${e}`);
+				}
+			}
+		} // end if (!fs.existsSync(darkMatterPath))
+
+		// Retroactive repair: v6.41.0 regression (b324ce1) wrote dark matter entries
+		// with scope: 'project', which is filtered out by the default scope_filter ['global'].
+		// Re-scope any such entries to 'global' so they can reach the architect.
+		try {
+			const knowledgePath =
+				knowledgeStoreInternals.resolveSwarmKnowledgePath(directory);
+			const allEntries =
+				await knowledgeStoreInternals.readKnowledge<SwarmKnowledgeEntry>(
+					knowledgePath,
+				);
+			const stale = allEntries.filter(
+				(e) =>
+					e.scope === 'project' &&
+					e.auto_generated === true &&
+					Array.isArray(e.tags) &&
+					e.tags.includes('dark-matter'),
+			);
+			if (stale.length > 0) {
+				for (const e of stale) {
+					e.scope = 'global';
+					e.updated_at = new Date().toISOString();
+				}
+				await knowledgeStoreInternals.rewriteKnowledge(
+					knowledgePath,
+					allEntries,
+				);
+				warn(
+					`[system-enhancer] Repaired ${stale.length} dark matter knowledge entries (scope: 'project' → 'global')`,
+				);
+			}
+		} catch {
+			// Non-blocking
+		}
+	} catch (error) {
+		log(
+			`[system-enhancer] Deferred dark-matter scan failed (non-fatal): ${error}`,
+		);
+	}
+}
+
+/**
+ * Schedule the maintenance scans for `directory` off the prompt-construction
+ * path (#2472 W4 / AC-5 / frozen check C5). Per-directory in-flight guard: a
+ * second call while a scan for the same project root is still pending is a
+ * no-op — the pending task performs the same cache checks and will observe
+ * any state this call would have.
+ *
+ * Must be called from the transform handler's TAIL (the `finally`), after
+ * the handler's last `await`: registering the unref'd macrotask there leaves
+ * only microtasks between registration and the caller's resumption, so the
+ * scan provably starts only after the awaited prompt-construction call has
+ * returned.
+ */
+function scheduleDeferredMaintenanceScans(directory: string): void {
+	const key = path.resolve(directory);
+	if (pendingDeferredScanDirs.has(key)) {
+		return;
+	}
+	pendingDeferredScanDirs.add(key);
+	scheduleDeferredMacrotask(() => {
+		void (async () => {
+			try {
+				await runDeferredMaintenanceScans(directory);
+			} catch (error) {
+				// Absolute backstop: a failure here must never surface as an
+				// unhandled rejection in the host process.
+				warn(
+					`[system-enhancer] Deferred maintenance scans failed (non-fatal): ${error}`,
+				);
+			} finally {
+				pendingDeferredScanDirs.delete(key);
+			}
+		})();
+	});
+}
+
+/**
  * Creates the experimental.chat.system.transform hook for system enhancement.
  */
 export function createSystemEnhancerHook(
@@ -745,6 +982,12 @@ export function createSystemEnhancerHook(
 					modelID: liveModelID,
 					providerID: liveProviderID,
 				});
+				// #2472 W4: armed when the transform body passes the (former)
+				// maintenance-scan block, consumed by the `finally` below to
+				// register the deferred scans as this handler's final
+				// synchronous act. Hoisted here (FR-004 pattern) so EVERY exit
+				// path — early return or exception — can read it.
+				let deferMaintenanceScans = false;
 				try {
 					// Skip swarm context injection for native opencode agents (build,
 					// plan, general, explore, compaction, title, summary). These agents
@@ -899,164 +1142,23 @@ export function createSystemEnhancerHook(
 						planReadCache,
 					);
 
-					// v6.39: Auto-trigger doc_scan to build/refresh doc manifest
-					// Non-blocking — failure does not prevent plan processing
-					try {
-						const { scanDocIndex } = await import('../tools/doc-scan.js');
-						const { manifest, cached } = await scanDocIndex(directory);
-						if (!cached) {
-							warn(
-								`[system-enhancer] Doc manifest generated: ${manifest.files.length} files indexed`,
-							);
-						}
-					} catch {
-						// Non-blocking — doc scan failure should not prevent plan processing
-					}
-
-					// Dark matter scan: detect co-change patterns in git history
-					// Non-blocking — skip silently on repos without git history, shallow clones, or errors
-					// Cached: skip if dark-matter.md already exists (matches doc_scan caching pattern)
-					try {
-						const darkMatterPath = validateSwarmPath(
-							directory,
-							'dark-matter.md',
-						);
-						if (!fs.existsSync(darkMatterPath)) {
-							// Read from `_internals` so the `_internals` DI seam can be
-							// mocked in tests (writing-tests skill Invariant 7). The
-							// named exports of co-change-analyzer.ts are bound at import
-							// time, so mutating `_internals.detectDarkMatter` would not
-							// affect them. Reading `_internals.foo` at call time picks
-							// up the latest seam value, which is what the dark-matter-
-							// wiring test relies on.
-							const darkMatter = await coChangeInternals.detectDarkMatter(
-								directory,
-								{
-									minCommits: 20,
-									minCoChanges: 3,
-								},
-							);
-							// Always write cache — even on empty results — to prevent
-							// repeated O(n²) recomputation on every chat turn (#1021).
-							// Ensure .swarm/ directory exists before writing (may not exist
-							// on first run in a fresh repo before plugin init creates it).
-							await fs.promises.mkdir(path.dirname(darkMatterPath), {
-								recursive: true,
-							});
-							const darkMatterReport =
-								coChangeInternals.formatDarkMatterOutput(darkMatter);
-							await fs.promises.writeFile(
-								darkMatterPath,
-								darkMatterReport,
-								'utf-8',
-							);
-							warn(
-								`[system-enhancer] Dark matter scan complete: ${darkMatter.length} co-change patterns found`,
-							);
-							if (darkMatter.length > 0) {
-								// Generate knowledge entries from dark matter results
-								try {
-									const projectName = path.basename(path.resolve(directory));
-									const knowledgeEntries =
-										coChangeInternals.darkMatterToKnowledgeEntries(
-											darkMatter,
-											projectName,
-										);
-									const knowledgePath =
-										knowledgeStoreInternals.resolveSwarmKnowledgePath(
-											directory,
-										);
-									// Deduplicate: skip entries already in knowledge
-									const existingEntries =
-										await knowledgeStoreInternals.readKnowledge<SwarmKnowledgeEntry>(
-											knowledgePath,
-										);
-									const existingLessons = new Set(
-										existingEntries.map((e) => e.lesson),
-									);
-									// Layer-5 actionability gate (Change 4): dark-matter entries are
-									// generated actionable at the source, but the gate contract is
-									// structural — enforce it here so a future change to the
-									// generator cannot silently bypass it.
-									//
-									// M10 content-safety gate: the dark-matter writer is the one
-									// ingestion path that never ran through validateLesson — its
-									// lesson text is derived from git-tracked file paths, which are
-									// attacker-influenceable (a maliciously named path could embed
-									// `system:` / `<script>` / control-char payloads that would then
-									// be injected verbatim into the architect's system prompt). Run
-									// every generated entry through the same Layer-2 content-safety
-									// scan every other ingestion path uses, and drop any that fail.
-									const newEntries = knowledgeEntries.filter(
-										(e) =>
-											!existingLessons.has(e.lesson) &&
-											validateActionability(e).actionable &&
-											validateLesson(e.lesson, [], {
-												category: e.category,
-												scope: e.scope,
-												confidence: e.confidence,
-											}).valid,
-									);
-									if (newEntries.length === 0) {
-										warn(
-											`[system-enhancer] No new knowledge entries (all duplicates)`,
-										);
-									} else {
-										for (const entry of newEntries) {
-											await knowledgeStoreInternals.appendKnowledge(
-												knowledgePath,
-												entry,
-											);
-										}
-										warn(
-											`[system-enhancer] Created ${newEntries.length} new knowledge entries (${knowledgeEntries.length - newEntries.length} duplicates skipped)`,
-										);
-									}
-								} catch (e) {
-									// Non-blocking: knowledge is supplementary
-									warn(
-										`[system-enhancer] Failed to create knowledge entries: ${e}`,
-									);
-								}
-							}
-						} // end if (!fs.existsSync(darkMatterPath))
-
-						// Retroactive repair: v6.41.0 regression (b324ce1) wrote dark matter entries
-						// with scope: 'project', which is filtered out by the default scope_filter ['global'].
-						// Re-scope any such entries to 'global' so they can reach the architect.
-						try {
-							const knowledgePath =
-								knowledgeStoreInternals.resolveSwarmKnowledgePath(directory);
-							const allEntries =
-								await knowledgeStoreInternals.readKnowledge<SwarmKnowledgeEntry>(
-									knowledgePath,
-								);
-							const stale = allEntries.filter(
-								(e) =>
-									e.scope === 'project' &&
-									e.auto_generated === true &&
-									Array.isArray(e.tags) &&
-									e.tags.includes('dark-matter'),
-							);
-							if (stale.length > 0) {
-								for (const e of stale) {
-									e.scope = 'global';
-									e.updated_at = new Date().toISOString();
-								}
-								await knowledgeStoreInternals.rewriteKnowledge(
-									knowledgePath,
-									allEntries,
-								);
-								warn(
-									`[system-enhancer] Repaired ${stale.length} dark matter knowledge entries (scope: 'project' → 'global')`,
-								);
-							}
-						} catch {
-							// Non-blocking
-						}
-					} catch {
-						// Non-blocking — skip silently on repos without git history, shallow clones, or errors
-					}
+					// #2472 W4 (AC-5, frozen check C5): the maintenance scans —
+					// the doc-index directory walk and the dark-matter git
+					// spawn + all of its `.swarm` writes — must NOT run inside
+					// the awaited prompt-construction body. Both artifacts feed
+					// LATER turns only (doc manifest via the doc_scan/doc_extract
+					// tools; dark-matter.md and its knowledge entries via later
+					// injections), so the whole computation is deferred to an
+					// unref'd-macrotask background task with a per-directory
+					// in-flight guard. This turn — and every later turn — still
+					// reads whatever a PREVIOUS deferred scan materialized; only
+					// the scan/compute/write is off the prompt path.
+					//
+					// Reaching this point ARMS the deferral; the actual macrotask
+					// is registered as the handler's final synchronous act (end of
+					// the `finally` below) so it cannot fire during one of this
+					// body's own internal awaits.
+					deferMaintenanceScans = true;
 
 					// Check if scoring is enabled
 					const scoringEnabled =
@@ -2840,6 +2942,17 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 							Math.max(0, actualDemand - injectedTokens),
 							'system',
 						);
+					}
+
+					// #2472 W4 (AC-5, frozen check C5): register the deferred
+					// maintenance scans as this handler's FINAL synchronous act.
+					// Only microtasks separate this registration from the
+					// caller's resumption, so the unref'd macrotask provably
+					// cannot fire inside the awaited prompt-construction call —
+					// a timer registered anywhere earlier in the body would
+					// fire during one of the body's own internal awaits.
+					if (deferMaintenanceScans) {
+						scheduleDeferredMaintenanceScans(directory);
 					}
 				}
 			},

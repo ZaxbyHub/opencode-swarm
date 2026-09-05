@@ -14,6 +14,14 @@
  * the async builder, yields to the event loop before doing any work, and
  * exposes the init promise so `toolAfter` can serialize incremental
  * updates after the initial scan completes.
+ *
+ * Issue #2472 (REPOGRAPH-1): `toolAfter` runs its entire cheap synchronous
+ * filter chain (enabled flag, write-tool membership, path extraction and
+ * validation, exclude-dir scoping) BEFORE awaiting the init promise, so a
+ * non-write tool call settles immediately even while the startup scan is
+ * pending — only write tools that will actually mutate the graph wait for
+ * the scan. The startup scan itself is bounded by an overall wall-clock
+ * budget (STARTUP_SCAN_BUDGET_MS) that resolves fail-open on timeout.
  */
 
 import * as path from 'node:path';
@@ -36,7 +44,7 @@ import {
 } from '../tools/repo-graph/freshness';
 import { safeRealpathSync } from '../tools/repo-graph/safe-realpath';
 import * as logger from '../utils/logger';
-import { yieldToEventLoop } from '../utils/timeout';
+import { withTimeout, yieldToEventLoop } from '../utils/timeout';
 
 export interface RepoGraphBuilderHook {
 	init(): Promise<void>;
@@ -45,6 +53,19 @@ export interface RepoGraphBuilderHook {
 		output: { output?: unknown; args?: unknown },
 	): Promise<void>;
 }
+
+/**
+ * Overall wall-clock budget for the startup repo-graph scan (issue #2472
+ * REPOGRAPH-1 / AC-2). The walker's own per-walk budget (`walkBudgetMs` /
+ * DEFAULT_WALK_BUDGET_MS in `src/tools/repo-graph/builder.ts`) bounds a single
+ * directory walk, but the full startup scan (load → freshness probe → rebuild
+ * or incremental refresh) previously had no overall ceiling: a slow or wedged
+ * workspace could leave `initPromise` pending forever. Racing the whole scan
+ * against this budget keeps init settlement bounded; on timeout the hook logs
+ * a warning and resolves fail-open (no graph saved; incremental write updates
+ * proceed; the next session retries the scan).
+ */
+const STARTUP_SCAN_BUDGET_MS = 30_000;
 
 export interface RepoGraphDeps {
 	buildWorkspaceGraph: (
@@ -85,6 +106,12 @@ export interface RepoGraphBuilderOptions {
 	maxFiles?: number;
 	walkBudgetMs?: number;
 	excludeDirs?: readonly string[];
+	/**
+	 * Overall wall-clock budget (ms) for the startup scan (issue #2472).
+	 * Defaults to STARTUP_SCAN_BUDGET_MS. Additive DI/test knob so the
+	 * fail-open timeout path can be exercised without waiting 30 s.
+	 */
+	scanBudgetMs?: number;
 }
 
 function extractFilePath(args: unknown): string | null {
@@ -196,6 +223,7 @@ export function createRepoGraphBuilderHook(
 	const _refreshCap = options?.refreshCap ?? 50;
 	const _maxFiles = options?.maxFiles ?? 10_000;
 	const _walkBudgetMs = options?.walkBudgetMs ?? 5_000;
+	const _scanBudgetMs = options?.scanBudgetMs ?? STARTUP_SCAN_BUDGET_MS;
 
 	// User-configured directory excludes (issue #1448). Empty entries are
 	// dropped; the Set is used both to scope the initial scan and to keep
@@ -278,6 +306,9 @@ export function createRepoGraphBuilderHook(
 	}
 
 	async function rebuildGraph(reason: string): Promise<void> {
+		// Announce the scan when it STARTS (issue #2472 / AC-2), not only at
+		// completion, so a slow or wedged scan is visible from its beginning.
+		logger.log(`[repo-graph] Scan start: building workspace graph (${reason})`);
 		const graph = await _buildWorkspaceGraph(workspaceRoot, _buildOptions);
 		await _saveGraph(workspaceRoot, graph);
 		const fingerprintWritten = await _writeFingerprint(
@@ -396,12 +427,40 @@ export function createRepoGraphBuilderHook(
 		}
 	}
 
+	/**
+	 * Run the startup scan under the overall wall-clock budget
+	 * (STARTUP_SCAN_BUDGET_MS, overridable via `options.scanBudgetMs`).
+	 *
+	 * On timeout — or, defensively, any unexpected `doInit` rejection — log a
+	 * warning and RESOLVE fail-open: `initPromise` must always settle safely
+	 * and never reject (callers await it from `toolAfter` and the detached
+	 * post-resolution task queue). A timed-out scan saves no graph; incremental
+	 * write updates proceed as usual, and the next session retries the scan.
+	 */
+	async function runBoundedInit(): Promise<void> {
+		try {
+			await withTimeout(
+				doInit(),
+				_scanBudgetMs,
+				new Error(
+					`Startup repo-graph scan exceeded the ${_scanBudgetMs}ms wall-clock budget`,
+				),
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			logger.warn(
+				`[repo-graph] ${message}; giving up fail-open (no graph saved). ` +
+					'Incremental write updates continue; the next session retries the scan.',
+			);
+		}
+	}
+
 	return {
 		init(): Promise<void> {
 			if (!_enabled) return Promise.resolve();
 			if (!initStarted) {
 				initStarted = true;
-				initPromise = doInit();
+				initPromise = runBoundedInit();
 			}
 			return initPromise;
 		},
@@ -410,15 +469,14 @@ export function createRepoGraphBuilderHook(
 			input: { tool: string; sessionID: string; args?: unknown },
 			_output: { output?: unknown; args?: unknown },
 		): Promise<void> {
+			// Cheap synchronous filters FIRST, before any repo-graph init await
+			// (issue #2472 REPOGRAPH-1 / AC-1). The overwhelming majority of
+			// toolAfter invocations are read/non-write calls (or writes to
+			// non-source / excluded files) that will never touch the graph;
+			// each must settle immediately even while the startup scan is
+			// still pending. Awaiting initPromise before these filters
+			// withheld every read call on a slow or wedged initial scan.
 			if (!_enabled) return;
-			// Wait for the initial scan before applying incremental updates.
-			// Without this gate, an early write tool could race the initial
-			// scan and stomp the saved graph with a partial update. The
-			// `.catch(()=>{})` swallows any init error so a failed initial
-			// scan does not poison every subsequent tool call.
-			await initPromise.catch(() => {
-				/* init failure is already logged */
-			});
 
 			if (!(WRITE_TOOL_NAMES as readonly string[]).includes(input.tool)) {
 				return;
@@ -439,6 +497,18 @@ export function createRepoGraphBuilderHook(
 			) {
 				return;
 			}
+
+			// Init gate — reached only by write tools that survived the cheap
+			// filters and will actually mutate the graph. Wait for the initial
+			// scan before applying incremental updates: without this gate, an
+			// early write tool could race the initial scan and stomp the saved
+			// graph with a partial update. The `.catch(()=>{})` swallows any
+			// init error so a failed initial scan does not poison every
+			// subsequent tool call, and initPromise itself is budget-bounded
+			// (runBoundedInit above), so this await can never hang forever.
+			await initPromise.catch(() => {
+				/* init failure is already logged */
+			});
 
 			const absoluteFilePath = path.isAbsolute(filePath)
 				? filePath

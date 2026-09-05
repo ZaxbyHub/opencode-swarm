@@ -15,6 +15,10 @@
  * returns `null` whenever the baseline was DIRTY, which is the common case for a
  * real stalled session. The fallback below is what keeps the rung alive there,
  * and the dirty-baseline case is the one this file exercises first.
+ *
+ * Issue #2472 W7: `recordExecutionStallToolAfter` is async (its workspace
+ * captures route through the async snapshot twin), so every helper here awaits
+ * it — the probe's counter resets happen after those awaits.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
@@ -35,8 +39,8 @@ const TEST_DIR = path.join(os.tmpdir(), 'stall-progress-fixture');
 const PROBE_EVERY = _test_exports.WORKSPACE_PROBE_EVERY_CALLS;
 
 const realNow = _internals.now;
-const realCapture = _internals.captureWorkspaceSnapshot;
-const realChanged = _internals.changedFilesSinceSnapshot;
+const realCapture = _internals.captureWorkspaceSnapshotAsync;
+const realChanged = _internals.changedFilesSinceSnapshotAsync;
 
 let clock = 1_700_000_000_000;
 let snapshots: Array<{ gitHead: string | null; changedFiles: string[] }> = [];
@@ -53,18 +57,20 @@ beforeEach(() => {
 	_internals.now = () => clock;
 	// Deterministic, git-free snapshot sequence: each capture consumes the next
 	// scripted snapshot and then sticks on the last one.
-	_internals.captureWorkspaceSnapshot = mock(() => {
+	_internals.captureWorkspaceSnapshotAsync = mock(() => {
 		const snap = snapshots[Math.min(snapshotIndex, snapshots.length - 1)];
 		snapshotIndex++;
 		return snap as never;
 	}) as never;
-	_internals.changedFilesSinceSnapshot = mock(() => changedResult) as never;
+	_internals.changedFilesSinceSnapshotAsync = mock(
+		async () => changedResult,
+	) as never;
 });
 
 afterEach(() => {
 	_internals.now = realNow;
-	_internals.captureWorkspaceSnapshot = realCapture;
-	_internals.changedFilesSinceSnapshot = realChanged;
+	_internals.captureWorkspaceSnapshotAsync = realCapture;
+	_internals.changedFilesSinceSnapshotAsync = realChanged;
 	_test_exports.reset();
 	resetSwarmState();
 });
@@ -89,8 +95,8 @@ function beforeRead(sessionID: string, n: number): void {
 	});
 }
 
-function afterRead(sessionID: string, n: number): void {
-	recordExecutionStallToolAfter({
+async function afterRead(sessionID: string, n: number): Promise<void> {
+	await recordExecutionStallToolAfter({
 		sessionID,
 		tool: 'read',
 		callID: `r-${n}`,
@@ -100,21 +106,21 @@ function afterRead(sessionID: string, n: number): void {
 }
 
 /** One full non-progress tool-call cycle (before + after). */
-function readCycle(sessionID: string, n: number): void {
+async function readCycle(sessionID: string, n: number): Promise<void> {
 	beforeRead(sessionID, n);
-	afterRead(sessionID, n);
+	await afterRead(sessionID, n);
 }
 
 function counter(sessionID: string): number {
 	return _test_exports.peekState(sessionID)?.nonProgressCalls ?? -1;
 }
 
-function dispatchCycle(
+async function dispatchCycle(
 	sessionID: string,
 	role: string,
 	n: number,
 	output: unknown,
-): void {
+): Promise<void> {
 	clock += 1_000;
 	observeExecutionStallToolCall({
 		sessionID,
@@ -122,7 +128,7 @@ function dispatchCycle(
 		args: { subagent_type: role },
 		callID: `t-${n}`,
 	});
-	recordExecutionStallToolAfter({
+	await recordExecutionStallToolAfter({
 		sessionID,
 		tool: 'Task',
 		callID: `t-${n}`,
@@ -135,7 +141,7 @@ const TASK_OK = { title: 'Task', output: 'summary', metadata: {} };
 const TASK_ERR = { title: 'Task', output: '', metadata: {}, error: 'boom' };
 
 describe('#2063 B5 — delegation-completion progress', () => {
-	test('a coder completion resets the counter and clears an active hard rung', () => {
+	test('a coder completion resets the counter and clears an active hard rung', async () => {
 		const sessionID = 'coder-resets';
 		arm(sessionID);
 		for (let i = 0; i < DEFAULT_EXECUTION_STALL_STOP_CALLS; i++) {
@@ -145,7 +151,7 @@ describe('#2063 B5 — delegation-completion progress', () => {
 			enforceExecutionStallDenial({ sessionID, tool: 'read' }),
 		).toThrow(/^EXECUTION_STALL:/);
 
-		dispatchCycle(sessionID, 'coder', 1, TASK_OK);
+		await dispatchCycle(sessionID, 'coder', 1, TASK_OK);
 
 		expect(counter(sessionID)).toBe(0);
 		expect(() =>
@@ -156,7 +162,7 @@ describe('#2063 B5 — delegation-completion progress', () => {
 		expect(isExecutionEpisodeArmed(sessionID)).toBe(true);
 	});
 
-	test('an EXPLORER completion does NOT reset the counter', () => {
+	test('an EXPLORER completion does NOT reset the counter', async () => {
 		// Closes the "delegate the spelunking" escape: an architect that farms
 		// read-only work out to explorers is still not making progress.
 		const sessionID = 'explorer-no-reset';
@@ -164,49 +170,49 @@ describe('#2063 B5 — delegation-completion progress', () => {
 		for (let i = 0; i < 10; i++) beforeRead(sessionID, i);
 		const before = counter(sessionID);
 
-		dispatchCycle(sessionID, 'explorer', 1, TASK_OK);
+		await dispatchCycle(sessionID, 'explorer', 1, TASK_OK);
 
 		// +1 for the dispatch call itself, and no reset.
 		expect(counter(sessionID)).toBe(before + 1);
 	});
 
-	test('an sme completion does NOT reset the counter', () => {
+	test('an sme completion does NOT reset the counter', async () => {
 		const sessionID = 'sme-no-reset';
 		arm(sessionID);
 		for (let i = 0; i < 10; i++) beforeRead(sessionID, i);
 		const before = counter(sessionID);
 
-		dispatchCycle(sessionID, 'sme', 1, TASK_OK);
+		await dispatchCycle(sessionID, 'sme', 1, TASK_OK);
 
 		expect(counter(sessionID)).toBe(before + 1);
 	});
 
-	test('a FAILED coder completion does NOT reset the counter', () => {
+	test('a FAILED coder completion does NOT reset the counter', async () => {
 		const sessionID = 'coder-fail-no-reset';
 		arm(sessionID);
 		for (let i = 0; i < 10; i++) beforeRead(sessionID, i);
 		const before = counter(sessionID);
 
-		dispatchCycle(sessionID, 'coder', 1, TASK_ERR);
+		await dispatchCycle(sessionID, 'coder', 1, TASK_ERR);
 
 		expect(counter(sessionID)).toBe(before + 1);
 	});
 
-	test('reviewer and test_engineer completions reset the counter', () => {
+	test('reviewer and test_engineer completions reset the counter', async () => {
 		for (const role of ['reviewer', 'test_engineer', 'mega_coder']) {
 			resetSwarmState();
 			_test_exports.reset();
 			const sessionID = `reset-${role}`;
 			arm(sessionID);
 			for (let i = 0; i < 10; i++) beforeRead(sessionID, i);
-			dispatchCycle(sessionID, role, 1, TASK_OK);
+			await dispatchCycle(sessionID, role, 1, TASK_OK);
 			expect(counter(sessionID)).toBe(0);
 		}
 	});
 });
 
 describe('#2063 B5 — write and status progress', () => {
-	test('a successful file write resets the counter', () => {
+	test('a successful file write resets the counter', async () => {
 		const sessionID = 'write-resets';
 		arm(sessionID);
 		for (let i = 0; i < 12; i++) beforeRead(sessionID, i);
@@ -218,7 +224,7 @@ describe('#2063 B5 — write and status progress', () => {
 			args: { filePath: '/p/out.ts', content: 'x' },
 			callID: 'w-1',
 		});
-		recordExecutionStallToolAfter({
+		await recordExecutionStallToolAfter({
 			sessionID,
 			tool: 'write',
 			callID: 'w-1',
@@ -229,7 +235,7 @@ describe('#2063 B5 — write and status progress', () => {
 		expect(counter(sessionID)).toBe(0);
 	});
 
-	test('a FAILED write does not reset the counter', () => {
+	test('a FAILED write does not reset the counter', async () => {
 		const sessionID = 'write-fail';
 		arm(sessionID);
 		for (let i = 0; i < 12; i++) beforeRead(sessionID, i);
@@ -242,7 +248,7 @@ describe('#2063 B5 — write and status progress', () => {
 			args: { filePath: '/p/out.ts' },
 			callID: 'w-2',
 		});
-		recordExecutionStallToolAfter({
+		await recordExecutionStallToolAfter({
 			sessionID,
 			tool: 'edit',
 			callID: 'w-2',
@@ -258,7 +264,7 @@ describe('#2063 B5 — write and status progress', () => {
 		expect(counter(sessionID)).toBe(before + 1);
 	});
 
-	test('update_task_status success resets the counter for ANY status', () => {
+	test('update_task_status success resets the counter for ANY status', async () => {
 		for (const status of ['in_progress', 'completed', 'blocked', 'pending']) {
 			resetSwarmState();
 			_test_exports.reset();
@@ -266,7 +272,7 @@ describe('#2063 B5 — write and status progress', () => {
 			arm(sessionID);
 			for (let i = 0; i < 12; i++) beforeRead(sessionID, i);
 
-			recordExecutionStallToolAfter({
+			await recordExecutionStallToolAfter({
 				sessionID,
 				tool: 'update_task_status',
 				callID: 'uts',
@@ -286,15 +292,15 @@ describe('#2063 B5 — write and status progress', () => {
 
 describe('#2063 B5 — periodic workspace probe', () => {
 	/** Arm, then capture the baseline via one non-progress cycle. */
-	function armWithBaseline(sessionID: string): void {
+	async function armWithBaseline(sessionID: string): Promise<void> {
 		arm(sessionID);
-		readCycle(sessionID, 0);
+		await readCycle(sessionID, 0);
 		expect(_test_exports.peekState(sessionID)?.needsWorkspaceBaseline).toBe(
 			false,
 		);
 	}
 
-	test('a DIRTY baseline still detects new changes (changedFilesSinceSnapshot returns null there)', () => {
+	test('a DIRTY baseline still detects new changes (changedFilesSinceSnapshot returns null there)', async () => {
 		// This is the production-shaped case: a stalled architect's workspace is
 		// almost always already dirty, and `changedFilesSinceSnapshot` fails
 		// closed to `null` for a dirty baseline (workspace-snapshot.ts:1259). If
@@ -307,13 +313,13 @@ describe('#2063 B5 — periodic workspace probe', () => {
 		];
 		changedResult = null;
 
-		armWithBaseline(sessionID);
-		for (let i = 1; i <= PROBE_EVERY; i++) readCycle(sessionID, i);
+		await armWithBaseline(sessionID);
+		for (let i = 1; i <= PROBE_EVERY; i++) await readCycle(sessionID, i);
 
 		expect(counter(sessionID)).toBe(0);
 	});
 
-	test('a DIRTY baseline with no new paths is NOT progress', () => {
+	test('a DIRTY baseline with no new paths is NOT progress', async () => {
 		const sessionID = 'dirty-no-change';
 		snapshots = [
 			{ gitHead: 'H0', changedFiles: ['pre-existing.ts'] },
@@ -321,14 +327,14 @@ describe('#2063 B5 — periodic workspace probe', () => {
 		];
 		changedResult = null;
 
-		armWithBaseline(sessionID);
-		for (let i = 1; i <= PROBE_EVERY; i++) readCycle(sessionID, i);
+		await armWithBaseline(sessionID);
+		for (let i = 1; i <= PROBE_EVERY; i++) await readCycle(sessionID, i);
 
 		// arming dispatch (1) + the baseline-capture read (1) + PROBE_EVERY reads.
 		expect(counter(sessionID)).toBe(PROBE_EVERY + 2);
 	});
 
-	test('a moved HEAD counts as progress even with a dirty baseline', () => {
+	test('a moved HEAD counts as progress even with a dirty baseline', async () => {
 		const sessionID = 'head-moved';
 		snapshots = [
 			{ gitHead: 'H0', changedFiles: ['pre-existing.ts'] },
@@ -336,52 +342,52 @@ describe('#2063 B5 — periodic workspace probe', () => {
 		];
 		changedResult = null;
 
-		armWithBaseline(sessionID);
-		for (let i = 1; i <= PROBE_EVERY; i++) readCycle(sessionID, i);
+		await armWithBaseline(sessionID);
+		for (let i = 1; i <= PROBE_EVERY; i++) await readCycle(sessionID, i);
 
 		expect(counter(sessionID)).toBe(0);
 	});
 
-	test('a CLEAN baseline uses changedFilesSinceSnapshot as the authoritative signal', () => {
+	test('a CLEAN baseline uses changedFilesSinceSnapshot as the authoritative signal', async () => {
 		const sessionID = 'clean-baseline';
 		changedResult = ['src/new.ts'];
 
-		armWithBaseline(sessionID);
-		for (let i = 1; i <= PROBE_EVERY; i++) readCycle(sessionID, i);
+		await armWithBaseline(sessionID);
+		for (let i = 1; i <= PROBE_EVERY; i++) await readCycle(sessionID, i);
 
 		expect(counter(sessionID)).toBe(0);
 	});
 
-	test('the probe runs at most once per WORKSPACE_PROBE_EVERY_CALLS calls', () => {
+	test('the probe runs at most once per WORKSPACE_PROBE_EVERY_CALLS calls', async () => {
 		const sessionID = 'probe-frequency';
-		armWithBaseline(sessionID);
+		await armWithBaseline(sessionID);
 		const capturesAfterBaseline = (
-			_internals.captureWorkspaceSnapshot as unknown as {
+			_internals.captureWorkspaceSnapshotAsync as unknown as {
 				mock: { calls: unknown[] };
 			}
 		).mock.calls.length;
 
 		changedResult = [];
-		for (let i = 1; i <= PROBE_EVERY - 1; i++) readCycle(sessionID, i);
+		for (let i = 1; i <= PROBE_EVERY - 1; i++) await readCycle(sessionID, i);
 		expect(
 			(
-				_internals.captureWorkspaceSnapshot as unknown as {
+				_internals.captureWorkspaceSnapshotAsync as unknown as {
 					mock: { calls: unknown[] };
 				}
 			).mock.calls.length,
 		).toBe(capturesAfterBaseline);
 
-		readCycle(sessionID, PROBE_EVERY);
+		await readCycle(sessionID, PROBE_EVERY);
 		expect(
 			(
-				_internals.captureWorkspaceSnapshot as unknown as {
+				_internals.captureWorkspaceSnapshotAsync as unknown as {
 					mock: { calls: unknown[] };
 				}
 			).mock.calls.length,
 		).toBeGreaterThan(capturesAfterBaseline);
 	});
 
-	test('the probe RE-BASELINES, so one old change cannot suppress the rung forever', () => {
+	test('the probe RE-BASELINES, so one old change cannot suppress the rung forever', async () => {
 		// Without re-baselining, a workspace that changed once at minute 1 would
 		// read as "progress" at every later probe and the hard rung would be
 		// unreachable in any dirty repository.
@@ -394,26 +400,26 @@ describe('#2063 B5 — periodic workspace probe', () => {
 		];
 		changedResult = null;
 
-		armWithBaseline(sessionID);
+		await armWithBaseline(sessionID);
 		// First probe sees the new file → progress → counter 0.
-		for (let i = 1; i <= PROBE_EVERY; i++) readCycle(sessionID, i);
+		for (let i = 1; i <= PROBE_EVERY; i++) await readCycle(sessionID, i);
 		expect(counter(sessionID)).toBe(0);
 
 		// The next window sees the SAME file, now part of the baseline → no
 		// progress, so the counter keeps climbing.
 		for (let i = 0; i < PROBE_EVERY + 1; i++) {
-			readCycle(sessionID, 100 + i);
+			await readCycle(sessionID, 100 + i);
 		}
 		expect(counter(sessionID)).toBeGreaterThan(PROBE_EVERY);
 	});
 
-	test('no probe runs while the episode is unarmed', () => {
+	test('no probe runs while the episode is unarmed', async () => {
 		const sessionID = 'unarmed-no-probe';
 		swarmState.activeAgent.set(sessionID, 'architect');
-		for (let i = 0; i < PROBE_EVERY * 3; i++) readCycle(sessionID, i);
+		for (let i = 0; i < PROBE_EVERY * 3; i++) await readCycle(sessionID, i);
 		expect(
 			(
-				_internals.captureWorkspaceSnapshot as unknown as {
+				_internals.captureWorkspaceSnapshotAsync as unknown as {
 					mock: { calls: unknown[] };
 				}
 			).mock.calls.length,

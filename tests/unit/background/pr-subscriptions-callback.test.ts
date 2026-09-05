@@ -146,6 +146,53 @@ describe('pr-subscriptions — onSubscriptionCreated callback', () => {
 	});
 });
 
+describe('pr-subscriptions — setOnSubscriptionCreated return-previous contract (#2472 W9)', () => {
+	afterEach(() => {
+		setOnSubscriptionCreated(
+			null as unknown as (
+				directory: string,
+				record: PrSubscriptionRecord,
+			) => void,
+		);
+	});
+
+	test('first registration returns null (no prior callback was registered)', () => {
+		// The first call's return value is not pinned by the frozen C10(ii)
+		// contract; here it must be null so a first-time caller can detect
+		// "nothing to retain".
+		const prev = setOnSubscriptionCreated((_directory, _record) => {});
+		expect(prev).toBeNull();
+	});
+
+	test('re-registration returns the prior callback identity (retain-and-invoke)', () => {
+		const cb1 = (_directory: string, _record: PrSubscriptionRecord): void => {};
+		const cb2 = (_directory: string, _record: PrSubscriptionRecord): void => {};
+
+		setOnSubscriptionCreated(cb1);
+		// Re-registration must return the PRIOR callback so the re-registering
+		// instance can retain and invoke its cleanup instead of orphaning it
+		// (previously returned void — the orphaning defect).
+		const prev = setOnSubscriptionCreated(cb2);
+		expect(prev).toBe(cb1);
+	});
+
+	test('returned previous callback is invoked, not just retained (caller-side contract)', () => {
+		// Production wiring (src/index.ts) invokes the previous instance's
+		// prEventCleanup before re-registering. This pins the module-side half:
+		// the returned callback is the exact function the previous registrant
+		// installed, so identity-based cleanup is possible.
+		let previousInvoked = false;
+		const cb1 = (_directory: string, _record: PrSubscriptionRecord): void => {
+			previousInvoked = true;
+		};
+		setOnSubscriptionCreated(cb1);
+		const prev = setOnSubscriptionCreated(() => {});
+		expect(prev).toBe(cb1);
+		prev?.('unused-directory', {} as PrSubscriptionRecord);
+		expect(previousInvoked).toBe(true);
+	});
+});
+
 describe('pr-subscriptions — subscribe() input validation', () => {
 	let dir: string;
 

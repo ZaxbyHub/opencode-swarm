@@ -151,7 +151,7 @@ describe('background completion observer docs participation', () => {
 		expect(findByCorrelationId(directory, 'docs-child')?.status).toBe(
 			'consumed',
 		);
-		expect(readPhaseParticipation(directory, plan, 1, 'docs')).toEqual({
+		expect(await readPhaseParticipation(directory, plan, 1, 'docs')).toEqual({
 			status: 'valid',
 			found: true,
 		});
@@ -199,7 +199,7 @@ describe('background completion observer docs participation', () => {
 		expect(findByCorrelationId(directory, 'docs-child')?.status).toBe(
 			'cancelled',
 		);
-		expect(readPhaseParticipation(directory, plan, 1, 'docs')).toEqual({
+		expect(await readPhaseParticipation(directory, plan, 1, 'docs')).toEqual({
 			status: 'valid',
 			found: false,
 		});

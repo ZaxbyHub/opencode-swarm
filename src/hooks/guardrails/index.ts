@@ -1287,7 +1287,10 @@ export function createGuardrailsHooks(
 			// carries no args for the architect, which is exactly why the module
 			// remembers the dispatched role at toolBefore time instead of relying
 			// on it — see `pendingDispatchRoles` there.
-			recordExecutionStallToolAfter({
+			// Issue #2472 W7: awaited because the recorder's workspace captures
+			// route through the bounded async snapshot twin — an un-awaited call
+			// would let the no-op detector below read pre-probe counters.
+			await recordExecutionStallToolAfter({
 				sessionID: input.sessionID,
 				tool: input.tool,
 				callID: input.callID,

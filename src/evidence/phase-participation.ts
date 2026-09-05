@@ -17,7 +17,7 @@ import {
 	parseTaskEnvelope,
 	type TaskEnvelope,
 } from '../background/task-envelope.js';
-import { captureWorkspaceSnapshot } from '../background/workspace-snapshot.js';
+import { captureWorkspaceSnapshotAsync } from '../background/workspace-snapshot.js';
 import { getCurrentPhase, type Plan } from '../config/plan-schema.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
@@ -123,10 +123,18 @@ function policyDigest(policy: unknown): string {
 	return sha256(stableCanonicalStringify(policy ?? {}));
 }
 
-function captureParticipationWorkspace(
+/**
+ * Async (issue #2472 W11/R-2): this helper was the last sync capture twin call
+ * reachable from the per-tool-call hook chains (the toolBefore docs-Task
+ * reserve via `buildBinding`, and the toolAfter completing-docs-Task observe).
+ * It routes through `captureWorkspaceSnapshotAsync` so no hook path in this
+ * module sync-spawns git. Non-hook callers (background observer, the
+ * phase-complete tool read) await the same helper.
+ */
+async function captureParticipationWorkspace(
 	directory: string,
-): ParticipationWorkspace {
-	const workspace = captureWorkspaceSnapshot(directory, {
+): Promise<ParticipationWorkspace> {
+	const workspace = await captureWorkspaceSnapshotAsync(directory, {
 		resolveCurrentPrHeadSha: true,
 	});
 	return {
@@ -177,7 +185,7 @@ async function persistWithBindingRecovery(
 	}
 }
 
-function buildBinding(input: {
+async function buildBinding(input: {
 	plan: Plan;
 	phase: number;
 	role: string;
@@ -186,7 +194,7 @@ function buildBinding(input: {
 	taskId: string | null;
 	policy: unknown;
 	directory: string;
-}): Binding {
+}): Promise<Binding> {
 	return {
 		role: stripKnownSwarmPrefix(input.role),
 		prefixedRole: input.role,
@@ -198,7 +206,7 @@ function buildBinding(input: {
 		parentSessionId: input.parentSessionId,
 		callId: input.callId,
 		policyDigest: policyDigest(input.policy),
-		workspace: captureParticipationWorkspace(input.directory),
+		workspace: await captureParticipationWorkspace(input.directory),
 		capturedAt: Date.now(),
 	};
 }
@@ -643,7 +651,7 @@ export async function reserveApprovedPhaseParticipation(input: {
 	}
 	const plan = await loadPlan(input.directory);
 	if (!plan) return;
-	const binding = buildBinding({
+	const binding = await buildBinding({
 		plan,
 		phase: getCurrentPhase(plan),
 		role: rawRole,
@@ -719,7 +727,7 @@ export async function observePhaseParticipationToolResult(input: {
 	if (
 		!workspaceIdentityIsFresh(
 			binding.workspace,
-			captureParticipationWorkspace(input.directory),
+			await captureParticipationWorkspace(input.directory),
 		)
 	) {
 		return;
@@ -789,7 +797,7 @@ export async function completeBackgroundPhaseParticipation(input: {
 			if (
 				!workspaceIdentityIsFresh(
 					pending.workspace,
-					captureParticipationWorkspace(input.directory),
+					await captureParticipationWorkspace(input.directory),
 				)
 			) {
 				return false;
@@ -810,18 +818,18 @@ export async function completeBackgroundPhaseParticipation(input: {
 	);
 }
 
-export function readPhaseParticipation(
+export async function readPhaseParticipation(
 	directory: string,
 	plan: Plan,
 	phase: number,
 	role: string,
-): ParticipationReadResult {
+): Promise<ParticipationReadResult> {
 	const read = readRawStore(directory);
 	if (read.status !== 'valid') {
 		return { status: read.status, found: false };
 	}
 	const canonicalRole = stripKnownSwarmPrefix(role);
-	const currentWorkspace = captureParticipationWorkspace(directory);
+	const currentWorkspace = await captureParticipationWorkspace(directory);
 	return {
 		status: 'valid',
 		found: read.store.receipts.some(

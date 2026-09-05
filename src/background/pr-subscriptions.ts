@@ -163,14 +163,27 @@ let onSubscriptionCreated:
 	| ((directory: string, record: PrSubscriptionRecord) => void)
 	| null = null;
 
+/** The lazy-start callback type (see `onSubscriptionCreated`). */
+export type PrSubscriptionCreatedCallback = (
+	directory: string,
+	record: PrSubscriptionRecord,
+) => void;
+
 /**
  * Register the lazy-start callback invoked after a successful subscription.
  * Called once during plugin init to wire the PR monitor worker lifecycle.
+ *
+ * Retain-and-invoke contract (issue #2472 W9): returns the PREVIOUSLY
+ * registered callback (null when none), so a plugin re-init that
+ * re-registers can retain and invoke the prior callback's cleanup instead of
+ * silently orphaning it. Overwriting semantics are otherwise unchanged.
  */
 export function setOnSubscriptionCreated(
-	callback: (directory: string, record: PrSubscriptionRecord) => void,
-): void {
+	callback: PrSubscriptionCreatedCallback,
+): PrSubscriptionCreatedCallback | null {
+	const previous = onSubscriptionCreated;
 	onSubscriptionCreated = callback;
+	return previous;
 }
 
 export type PrSubscriptionStatus = 'active' | 'removed' | 'expired';

@@ -626,6 +626,62 @@ export const MAX_ATOMIC_WRITE_BYTES = 256 * 1024 * 1024;
 const RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'EEXIST']);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Recent-write intent tracking (issue #2472 W3 / PERF-1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Bound on distinct tracked target paths (invariant 8: bounded + FIFO). */
+const MAX_RECENT_WRITE_TRACKED_PATHS = 256;
+
+/**
+ * Default window within which an ENOENT read of a target this process wrote
+ * (or is writing) is treated as plausibly mid-rename rather than never-existed
+ * — see `wasRecentlyWrittenByThisProcess` and the three-way ENOENT policy in
+ * `readSwarmFileAsync` (src/hooks/utils.ts).
+ */
+export const RECENT_WRITE_WINDOW_MS = 500;
+
+/**
+ * Resolved target path → most recent write-intent OR write-completion stamp.
+ * The latest stamp governs: a completed write refreshes the intent stamp so
+ * read-your-own-write stays inside the window even on slow filesystems.
+ */
+const recentWriteActivity = new Map<string, number>();
+
+function noteRecentWriteActivity(resolvedTarget: string): void {
+	// delete-before-set refreshes insertion order, so FIFO eviction below
+	// always drops the least-RECENTLY-written path, not the first-ever one.
+	recentWriteActivity.delete(resolvedTarget);
+	recentWriteActivity.set(resolvedTarget, Date.now());
+	while (recentWriteActivity.size > MAX_RECENT_WRITE_TRACKED_PATHS) {
+		const oldest = recentWriteActivity.keys().next().value;
+		if (oldest === undefined) break;
+		recentWriteActivity.delete(oldest);
+	}
+}
+
+/**
+ * Whether this process recorded a write INTENT or write COMPLETION for
+ * `targetPath` within the last `withinMs` milliseconds (default
+ * {@link RECENT_WRITE_WINDOW_MS}).
+ *
+ * Consumers: the ENOENT retry ladders (`readSwarmFileAsync`,
+ * `readFileOrEmpty` in src/services/context-budget-service.ts) use this as
+ * the "evidenced rename-race" arm — an ENOENT on a file THIS process just
+ * wrote (or is mid-write on: intent is recorded before the temp file write
+ * begins) retries, while an ENOENT with no evidence the file ever existed
+ * returns immediately (issue #2472 PERF-1: 4×10ms of sleeps per missing-file
+ * read, ~1.9s/turn on plan-less projects).
+ */
+export function wasRecentlyWrittenByThisProcess(
+	targetPath: string,
+	withinMs: number = RECENT_WRITE_WINDOW_MS,
+): boolean {
+	const last = recentWriteActivity.get(path.resolve(targetPath));
+	if (last === undefined) return false;
+	return Date.now() - last <= withinMs;
+}
+
 export interface AtomicWriteOptions {
 	/** Skip the pre-rename fsync (tests / truly ephemeral data). */
 	readonly skipFsync?: boolean;
@@ -716,6 +772,12 @@ function writeAtomicSync(
 		assertWellFormedTargetPath(targetPath);
 	}
 	const resolvedTarget = path.resolve(targetPath);
+	// WRITE INTENT (issue #2472 W3): recorded before ANY filesystem work so a
+	// reader that hits ENOENT while this write is in flight (temp write, fsync,
+	// rename) knows the file is being produced and retries instead of taking
+	// the never-existed fast path. Covers both the sync and async exported
+	// writers — they share this core.
+	noteRecentWriteActivity(resolvedTarget);
 	const buffer = toBuffer(content);
 	const maxBytes = options?.maxBytes ?? MAX_ATOMIC_WRITE_BYTES;
 	if (buffer.byteLength > maxBytes) {
@@ -778,6 +840,10 @@ function writeAtomicSync(
 		// directory fsync unsupported — best-effort
 	}
 	invalidateCachedArtifact(resolvedTarget);
+	// WRITE COMPLETION (issue #2472 W3): refresh the stamp so a read racing the
+	// post-rename directory-entry visibility window stays retry-worthy for the
+	// full RECENT_WRITE_WINDOW_MS after the write finished.
+	noteRecentWriteActivity(resolvedTarget);
 }
 
 /**

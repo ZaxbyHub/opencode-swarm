@@ -101,9 +101,9 @@ describe('phase participation storage adversaries', () => {
 	test('fails closed and preserves an oversized projection byte-for-byte', async () => {
 		const bytes = Buffer.alloc(MAX_PHASE_PARTICIPATION_BYTES + 1, 0x78);
 		fs.writeFileSync(evidencePath, bytes);
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').status).toBe(
-			'oversized',
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).status,
+		).toBe('oversized');
 
 		await expect(
 			reserveApprovedPhaseParticipation({
@@ -120,9 +120,9 @@ describe('phase participation storage adversaries', () => {
 
 	test('reports an unreadable projection and does not replace it', async () => {
 		fs.mkdirSync(evidencePath);
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').status).toBe(
-			'unreadable',
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).status,
+		).toBe('unreadable');
 		await expect(
 			reserveApprovedPhaseParticipation({
 				directory,
@@ -326,14 +326,14 @@ describe('phase participation storage adversaries', () => {
 			callId: 'call',
 			output: { output: 'Documentation updated.' },
 		});
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			true,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(true);
 
 		commitWorkspace(directory, 'head-b');
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			false,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(false);
 	});
 
 	test('does not mint foreground proof after the Git HEAD changes', async () => {
@@ -356,9 +356,9 @@ describe('phase participation storage adversaries', () => {
 			output: { output: 'Documentation updated.' },
 		});
 
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			false,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(false);
 	});
 
 	test('rejects a receipt after upstream advances while local HEAD stays fixed', async () => {
@@ -381,9 +381,9 @@ describe('phase participation storage adversaries', () => {
 			callId: 'call',
 			output: { output: 'Documentation updated.' },
 		});
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			true,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(true);
 
 		git(directory, [
 			'-c',
@@ -398,8 +398,8 @@ describe('phase participation storage adversaries', () => {
 		git(directory, ['update-ref', 'refs/heads/upstream-main', 'HEAD']);
 		git(directory, ['reset', '--hard', 'HEAD^']);
 
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			false,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(false);
 	});
 });

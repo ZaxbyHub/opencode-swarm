@@ -86,21 +86,32 @@ describe('system-enhancer — budget-check throw no longer drops downstream inje
 		},
 	} as unknown as PluginConfig;
 
-	// The hook's dark-matter block (system-enhancer.ts:849-882) UNCONDITIONALLY
+	// The hook's dark-matter block (system-enhancer.ts) UNCONDITIONALLY
 	// mkdir+writeFile `.swarm/dark-matter.md` under `directory` via the root-blind
 	// `validateSwarmPath`. For a REJECTED_DIR that resolves as a RELATIVE path on
 	// POSIX (`C:\Windows\...` is one backslash-delimited filename there), that
 	// mkdir would SUCCEED under the cwd and leave a stray directory in the repo
 	// tree (AGENTS.md invariant 4 spirit). Neutralize it through the call-time
-	// `_internals` DI seam (system-enhancer.ts:855-861 reads
+	// `_internals` DI seam (system-enhancer.ts reads
 	// `coChangeInternals.detectDarkMatter` at call time so tests can mock it,
 	// writing-tests Invariant 7): a thrown detectDarkMatter is swallowed by the
-	// dark-matter try/catch, so no mkdir/write happens regardless of host.
+	// deferred dark-matter try/catch, so no mkdir/write happens regardless of
+	// host.
+	//
+	// #2472 W4: the scans now run in a deferred background macrotask AFTER the
+	// transform returns, so the throwing stub must stay in place until that
+	// task has actually consumed it — otherwise the task would run the REAL
+	// detectDarkMatter against REJECTED_DIR after the afterEach restore and
+	// attempt the very stray mkdir this fixture exists to prevent. The stub
+	// counts its calls so the test can await exactly that.
 	let originalDetectDarkMatter: typeof coChangeInternals.detectDarkMatter;
+	let throwingDetectCalls = 0;
 	beforeEach(() => {
 		resetSwarmState();
+		throwingDetectCalls = 0;
 		originalDetectDarkMatter = coChangeInternals.detectDarkMatter;
 		coChangeInternals.detectDarkMatter = async () => {
+			throwingDetectCalls++;
 			throw new Error(
 				'dark-matter write neutralized for throw-containment test',
 			);
@@ -152,5 +163,16 @@ describe('system-enhancer — budget-check throw no longer drops downstream inje
 		expect(
 			output.system.some((s) => s.includes('[SWARM INJECTION FOOTPRINT:')),
 		).toBe(false);
+
+		// #2472 W4: drain the deferred maintenance scan WITHIN this test's
+		// seam window so the (throwing) stub — not the real detectDarkMatter —
+		// handles it. Without this, the background task would run after the
+		// afterEach seam restore and attempt a stray mkdir under the repo tree
+		// on POSIX hosts (see the fixture comment above).
+		const drainDeadline = Date.now() + 5000;
+		while (throwingDetectCalls === 0 && Date.now() < drainDeadline) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		expect(throwingDetectCalls).toBe(1);
 	});
 });

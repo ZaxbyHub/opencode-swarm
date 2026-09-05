@@ -17,8 +17,8 @@ import type {
 } from '../background/pending-delegations.js';
 import { buildBackgroundCoderReservationId } from '../background/pending-delegations.js';
 import {
-	captureWorkspaceSnapshot,
-	changedFilesSinceSnapshot,
+	captureWorkspaceSnapshotAsync,
+	changedFilesSinceSnapshotAsync,
 } from '../background/workspace-snapshot.js';
 import type { PluginConfig } from '../config';
 import {
@@ -3300,12 +3300,16 @@ export function createDelegationGateHook(
 		}
 		coderObservedFilesByCallID.set(callID, observedFiles);
 	};
-	const rememberCoderTaskChangeContext = (
+	// Async (issue #2472 W7): the baseline capture uses the bounded async
+	// snapshot twin so the dispatch path never blocks the host event loop on a
+	// sync git spawn. Every caller awaits it, preserving the
+	// capture-before-settlement ordering below.
+	const rememberCoderTaskChangeContext = async (
 		callID: string,
 		declaredFiles: string[] | null,
 		observationDirectory = directory,
 		workflowGeneration?: number,
-	): void => {
+	): Promise<void> => {
 		if (
 			!coderTaskChangeContextByCallID.has(callID) &&
 			coderTaskChangeContextByCallID.size >= MAX_PENDING_CODER_CHANGE_CONTEXTS
@@ -3316,7 +3320,7 @@ export function createDelegationGateHook(
 		}
 		coderTaskChangeContextByCallID.set(callID, {
 			declaredFiles,
-			baseline: captureWorkspaceSnapshot(observationDirectory),
+			baseline: await captureWorkspaceSnapshotAsync(observationDirectory),
 			workflowGeneration,
 		});
 	};
@@ -3334,7 +3338,7 @@ export function createDelegationGateHook(
 			);
 		}
 		// Issue #2214: a dirty launch baseline can never support mutation
-		// attribution — changedFilesSinceSnapshot fails closed for any
+		// attribution — changedFilesSinceSnapshotAsync fails closed for any
 		// pre-existing uncommitted/untracked path. Enforce the clean-baseline
 		// contract at dispatch time, BEFORE the coder runs and before the
 		// settlement WAL is written, so the dispatch fails fast with an
@@ -4206,7 +4210,7 @@ export function createDelegationGateHook(
 						args.background,
 					)
 				) {
-					rememberCoderTaskChangeContext(
+					await rememberCoderTaskChangeContext(
 						input.callID,
 						preparedScope.declaredFiles,
 						directory,
@@ -4410,7 +4414,7 @@ export function createDelegationGateHook(
 						args.background,
 					)
 				) {
-					rememberCoderTaskChangeContext(
+					await rememberCoderTaskChangeContext(
 						input.callID,
 						incomingCoderDeclaredFiles,
 						directory,
@@ -4428,7 +4432,7 @@ export function createDelegationGateHook(
 						args.background,
 					)
 				) {
-					rememberCoderTaskChangeContext(
+					await rememberCoderTaskChangeContext(
 						input.callID,
 						incomingCoderDeclaredFiles,
 						directory,
@@ -4524,7 +4528,7 @@ export function createDelegationGateHook(
 						args.background,
 					)
 				) {
-					rememberCoderTaskChangeContext(
+					await rememberCoderTaskChangeContext(
 						input.callID,
 						incomingCoderDeclaredFiles,
 						standardDispatch.handle.worktreePath,
@@ -4540,7 +4544,7 @@ export function createDelegationGateHook(
 						args.background,
 					)
 				) {
-					rememberCoderTaskChangeContext(
+					await rememberCoderTaskChangeContext(
 						input.callID,
 						incomingCoderDeclaredFiles,
 						directory,
@@ -4831,7 +4835,9 @@ export function createDelegationGateHook(
 						const { buildPromptSnapshot, findByCorrelationId } = await import(
 							'../background/pending-delegations.js'
 						);
-						const { captureWorkspaceSnapshot } = await import(
+						// Issue #2472 W7: the ASYNC twin — binding the sync capture here
+						// would put a sync git spawn back on the hot toolAfter path.
+						const { captureWorkspaceSnapshotAsync } = await import(
 							'../background/workspace-snapshot.js'
 						);
 						const { subagentSessionId, jobId } = extractDispatchIds(_output);
@@ -4862,6 +4868,15 @@ export function createDelegationGateHook(
 								stripKnownSwarmPrefix(subagentType) === 'coder'
 									? coderTaskChangeContextByCallID.get(input.callID)
 									: undefined;
+							// Hoisted out of the object literal: the fallback capture is
+							// async (issue #2472 W7) and must resolve before the record
+							// is built.
+							const fallbackWorkspace = taskChangeContext
+								? { ...taskChangeContext.baseline, prHeadSha, scope }
+								: await captureWorkspaceSnapshotAsync(directory, {
+										prHeadSha,
+										scope,
+									});
 							const pendingInputDraft: RecordPendingInput = {
 								correlationId: subagentSessionId,
 								jobId,
@@ -4872,12 +4887,7 @@ export function createDelegationGateHook(
 								swarmPrefixedAgent: subagentType,
 								planTaskId: evidenceTaskId,
 								evidenceTaskId,
-								workspace: taskChangeContext
-									? { ...taskChangeContext.baseline, prHeadSha, scope }
-									: captureWorkspaceSnapshot(directory, {
-											prHeadSha,
-											scope,
-										}),
+								workspace: fallbackWorkspace,
 								taskChangeContext,
 								workflowGeneration: TASK_GATE_AGENTS.has(
 									stripKnownSwarmPrefix(subagentType),
@@ -5136,9 +5146,12 @@ export function createDelegationGateHook(
 						input.callID,
 					);
 					if (taskChangeContext) {
+						// Async (issue #2472 W11/R-1): the changed-files derivation
+						// sync-spawned transitively through its internal capture/diff;
+						// hook paths use the async twin.
 						rememberCoderObservedFiles(
 							input.callID,
-							changedFilesSinceSnapshot(
+							await changedFilesSinceSnapshotAsync(
 								taskChangeContext.baseline.directory,
 								taskChangeContext.baseline,
 							),
@@ -5610,10 +5623,10 @@ export function createDelegationGateHook(
 										: undefined;
 								const rawObservedFiles = taskChangeContext
 									? (coderObservedFilesByCallID.get(input.callID) ??
-										changedFilesSinceSnapshot(
+										(await changedFilesSinceSnapshotAsync(
 											taskChangeContext.baseline.directory,
 											taskChangeContext.baseline,
-										))
+										)))
 									: null;
 								if (
 									targetAgentForEvidence === 'coder' &&

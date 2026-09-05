@@ -39,8 +39,8 @@ import {
 const TEST_DIR = path.join(os.tmpdir(), 'stall-episode-fixture');
 
 const realNow = _internals.now;
-const realCapture = _internals.captureWorkspaceSnapshot;
-const realChanged = _internals.changedFilesSinceSnapshot;
+const realCapture = _internals.captureWorkspaceSnapshotAsync;
+const realChanged = _internals.changedFilesSinceSnapshotAsync;
 
 let clock = 1_700_000_000_000;
 
@@ -55,14 +55,14 @@ beforeEach(() => {
 	_test_exports.reset();
 	clock = 1_700_000_000_000;
 	_internals.now = () => clock;
-	_internals.captureWorkspaceSnapshot = mock(cleanSnapshot) as never;
-	_internals.changedFilesSinceSnapshot = mock(() => []) as never;
+	_internals.captureWorkspaceSnapshotAsync = mock(cleanSnapshot) as never;
+	_internals.changedFilesSinceSnapshotAsync = mock(async () => []) as never;
 });
 
 afterEach(() => {
 	_internals.now = realNow;
-	_internals.captureWorkspaceSnapshot = realCapture;
-	_internals.changedFilesSinceSnapshot = realChanged;
+	_internals.captureWorkspaceSnapshotAsync = realCapture;
+	_internals.changedFilesSinceSnapshotAsync = realChanged;
 	_test_exports.reset();
 	resetSwarmState();
 });
@@ -226,11 +226,11 @@ describe('#2063 B5 — episode arming', () => {
 		}
 	});
 
-	test('arms on a successful update_task_status(in_progress)', () => {
+	test('arms on a successful update_task_status(in_progress)', async () => {
 		const sessionID = 'arm-on-status';
 		setupArchitect(sessionID);
 
-		recordExecutionStallToolAfter({
+		await recordExecutionStallToolAfter({
 			sessionID,
 			tool: 'update_task_status',
 			callID: 'uts-1',
@@ -247,11 +247,11 @@ describe('#2063 B5 — episode arming', () => {
 		expect(isExecutionEpisodeArmed(sessionID)).toBe(true);
 	});
 
-	test('does NOT arm when update_task_status(in_progress) FAILED', () => {
+	test('does NOT arm when update_task_status(in_progress) FAILED', async () => {
 		const sessionID = 'noarm-failed-status';
 		setupArchitect(sessionID);
 
-		recordExecutionStallToolAfter({
+		await recordExecutionStallToolAfter({
 			sessionID,
 			tool: 'update_task_status',
 			callID: 'uts-fail',
@@ -422,13 +422,13 @@ describe('#2063 B5 — bounded session state (invariant 8)', () => {
 		expect(_test_exports.peekState(active)?.armed).toBe(true);
 	});
 
-	test('the callID→role note is released even for a non-architect toolAfter', () => {
+	test('the callID→role note is released even for a non-architect toolAfter', async () => {
 		const sessionID = 'role-note-release';
 		setupArchitect(sessionID);
 		dispatch(sessionID, 'coder', 7);
 		expect(_test_exports.pendingDispatchRoleCount()).toBe(1);
 
-		recordExecutionStallToolAfter({
+		await recordExecutionStallToolAfter({
 			sessionID,
 			tool: 'Task',
 			callID: 'task-7',

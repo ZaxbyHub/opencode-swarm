@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
 	PR_REVIEW_RISK_IMPACTS,
 	PR_REVIEW_RISK_TAGS,
@@ -786,6 +787,91 @@ export function normalizeCandidateArtifact(
 		].join('\n'),
 		synthesizedHeader: true,
 		repairKinds,
+	};
+}
+
+/**
+ * Bounded memoization of `normalizeCandidateArtifact` (issue #2472 W8 / AC-9;
+ * frozen check C9).
+ *
+ * Why: the three production boundaries (candidate-parser's parseAndPersist and
+ * the two pr-workflow-gate sites) re-normalize the SAME lane artifact text on
+ * every re-inspection — a multi-pass PR-review gate can visit one artifact
+ * several times per tool call, and the repair pipeline above (fence recovery,
+ * pipe tail-merges, header resynchronization, per-line field analysis) is
+ * pure-but-expensive string work. The function is total and deterministic in
+ * `(rawText, fallbackFamily)`, so a digest-keyed memo is semantically
+ * transparent.
+ *
+ * Key: sha256(rawText + '\0' + fallbackFamily) — the NUL separator keeps a
+ * text that literally ends with a family name from colliding with another
+ * text/family pair. Capacity 512 entries with FIFO eviction (Map insertion
+ * order; hits do NOT reorder — this is FIFO, not LRU). 512 stays well under
+ * the pinned ceiling of 2000 (frozen check C9) while covering the working set
+ * of a single PR-review run's artifacts, and per invariant 8 the cache is
+ * bounded and never grows without eviction. Hits return the SAME result
+ * object the first call returned; all current consumers treat the result as
+ * read-only (they read `.text` / `.repairKinds`).
+ */
+const CANDIDATE_ARTIFACT_CACHE_CAPACITY = 512;
+
+const candidateArtifactCache = new Map<string, NormalizedCandidateArtifact>();
+let candidateArtifactCacheHits = 0;
+let candidateArtifactCacheMisses = 0;
+
+function candidateArtifactCacheKey(
+	rawText: string,
+	fallbackFamily: RowFormatFamily,
+): string {
+	return createHash('sha256')
+		.update(`${rawText}\0${fallbackFamily}`)
+		.digest('hex');
+}
+
+/**
+ * Memoizing twin of `normalizeCandidateArtifact` — identical signature and
+ * semantics; see the cache docblock above. This is the variant production
+ * call sites must use.
+ */
+export function normalizeCandidateArtifactCached(
+	rawText: string,
+	fallbackFamily: RowFormatFamily,
+): NormalizedCandidateArtifact {
+	const key = candidateArtifactCacheKey(rawText, fallbackFamily);
+	const hit = candidateArtifactCache.get(key);
+	if (hit !== undefined) {
+		candidateArtifactCacheHits++;
+		return hit;
+	}
+	candidateArtifactCacheMisses++;
+	const result = normalizeCandidateArtifact(rawText, fallbackFamily);
+	if (candidateArtifactCache.size >= CANDIDATE_ARTIFACT_CACHE_CAPACITY) {
+		// FIFO: evict the oldest INSERTED entry. Map iteration order is
+		// insertion order and hits never re-insert, so this stays FIFO.
+		const oldest = candidateArtifactCache.keys().next().value;
+		if (oldest !== undefined) {
+			candidateArtifactCache.delete(oldest);
+		}
+	}
+	candidateArtifactCache.set(key, result);
+	return result;
+}
+
+/** Empties the memo cache. Hit/miss counters are monotonic and NOT reset. */
+export function invalidateCandidateArtifactCache(): void {
+	candidateArtifactCache.clear();
+}
+
+/** Observability for the memoization contract (frozen check C9). */
+export function candidateArtifactCacheStats(): {
+	size: number;
+	hits: number;
+	misses: number;
+} {
+	return {
+		size: candidateArtifactCache.size,
+		hits: candidateArtifactCacheHits,
+		misses: candidateArtifactCacheMisses,
 	};
 }
 

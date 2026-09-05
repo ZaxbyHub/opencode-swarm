@@ -8,6 +8,10 @@ import {
 	toLegacyTelemetryLine,
 } from './observability/index.js';
 import type { DelegationCostFields } from './services/cost-accounting.js';
+// Non-fatal best-effort logging for the re-home close path (issue #2472 W9).
+// Cycle-safe: src/utils' barrel (errors/logger/merge/regex) never imports
+// telemetry.
+import { log } from './utils';
 
 // ============================================================================
 // Types
@@ -316,12 +320,43 @@ export function resetTelemetryForTesting(): void {
 /**
  * Initialize telemetry with the project directory.
  * Creates `.swarm/` if it doesn't exist and opens `telemetry.jsonl` for appending.
- * Idempotent — calling multiple times has no effect after the first successful call.
+ * Idempotent — calling multiple times with the SAME directory has no effect
+ * after the first successful call.
+ *
+ * Re-home (issue #2472 W9): when called with a projectDirectory DIFFERENT
+ * from the latched `_projectDirectory` while a stream exists (a second
+ * server() instance initializing in this process for another project root),
+ * the old stream is flushed/closed best-effort and telemetry re-initializes
+ * for the new directory exactly as a fresh init does — the previous behavior
+ * latched the first directory forever, so the second project's
+ * `.swarm/telemetry.jsonl` was never created. A disabled telemetry state
+ * stays disabled.
  * @param projectDirectory - Absolute path to the project root
  */
 export function initTelemetry(projectDirectory: string): void {
-	if (_writeStream !== null || _disabled) {
+	if (_disabled) {
 		return;
+	}
+	if (_writeStream !== null && _projectDirectory === projectDirectory) {
+		return;
+	}
+	if (_writeStream !== null && _projectDirectory !== projectDirectory) {
+		// Directory change: drain the old stream's buffer to the OS and close
+		// it. Best-effort — a close failure is logged non-fatally and the
+		// re-init below proceeds. The old stream's late 'error' events cannot
+		// disable the new stream: the per-stream identity guard installed at
+		// creation only acts when `_writeStream === stream` still holds.
+		const oldStream = _writeStream;
+		_writeStream = null;
+		try {
+			oldStream.end();
+		} catch (error) {
+			log(
+				`[telemetry] failed to close the previous project's stream during re-home (non-fatal): ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
 	}
 
 	try {

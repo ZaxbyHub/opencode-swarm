@@ -7,7 +7,7 @@ import type {
 	BackgroundWorktreeDescriptor,
 } from '../background/pending-delegations.js';
 import {
-	captureWorkspaceSnapshot,
+	captureWorkspaceSnapshotAsync,
 	changedFilesSinceSnapshot,
 } from '../background/workspace-snapshot.js';
 import { appendCoreEventSync } from '../events/core-events.js';
@@ -322,7 +322,10 @@ export async function beginCoderSettlement(options: {
 	// is present) is deliberately NOT blocked here — issue #2214 keeps that
 	// class retryable at settle time.
 	if (options.context.baseline.gitHead === null) {
-		const rootBaseline = captureWorkspaceSnapshot(options.directory);
+		// Async (issue #2472 W11/R-3): this dispatch-approval-path probe used the
+		// sync capture twin; it now routes through the bounded async twin so the
+		// delegation gate's dispatch approval never blocks the host event loop.
+		const rootBaseline = await captureWorkspaceSnapshotAsync(options.directory);
 		if (rootBaseline.gitHead !== null) {
 			throw new Error(
 				`CODER_SETTLEMENT_BASELINE_UNAVAILABLE: the launch baseline for task ${options.taskId} has no git HEAD — the observation directory (${options.context.baseline.directory}) is not a git repository or git is unavailable there. ` +
