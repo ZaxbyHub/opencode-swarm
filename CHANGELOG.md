@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.166.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.3...v7.166.4) (2026-09-05)
+
+
+### Bug Fixes
+
+* **skills:** close PR-review findings on host-executability guardrails ([2f4175e](https://github.com/ZaxbyHub/opencode-swarm/commit/2f4175eed616a26d27649dca6fdc99146fbf6bd3))
+* **skills:** make first-class skills executable across supported hosts ([c262842](https://github.com/ZaxbyHub/opencode-swarm/commit/c262842c88b5c24867545d603bfa72c6ed25ac5b))
+
 ## [7.166.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.2...v7.166.3) (2026-09-05)
 
 
