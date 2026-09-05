@@ -97,6 +97,8 @@ export type DelegationCostFields = TokenUsage & {
 	model?: string;
 	gate?: string;
 	retry_index?: number;
+	/** #2482: marks a recovered eventless-terminal end (stale sweep / terminal-without-event). */
+	recovered?: boolean;
 };
 
 export type DelegationCostInput = {

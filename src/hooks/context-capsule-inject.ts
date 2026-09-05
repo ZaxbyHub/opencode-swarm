@@ -30,6 +30,10 @@ import type { TelemetryEntry } from '../context-map/telemetry.js';
 import { recordTelemetry } from '../context-map/telemetry.js';
 import { estimateTokens } from '../hooks/utils.js';
 import {
+	measureCitedFileTokens,
+	recordContextSourceAttribution,
+} from '../services/context-attribution.js';
+import {
 	claimTurnBudget,
 	recordProducerEmission,
 } from '../services/injection-budget.js';
@@ -127,6 +131,8 @@ export const _internals = {
 	buildCapsule,
 	recordTelemetry,
 	saveCapsule,
+	measureCitedFileTokens,
+	recordContextSourceAttribution,
 	getActiveAgent: (sessionID: string): string | undefined =>
 		swarmState.activeAgent.get(sessionID),
 	getSession: (sessionID: string): AgentSessionState | undefined =>
@@ -338,6 +344,27 @@ async function injectCapsule(
 		Math.max(0, grantedCapsuleTokens - estimateTokens(capsule.content)),
 		'system',
 	);
+
+	// #2482 / #1990: context-source savings attribution. The cited-file token
+	// total is MEASURED (bounded stat loop over the capsule's in-scope files);
+	// when no size is measurable the attribution module records nothing —
+	// unknown measurements are omitted, never fabricated as zeros. Fail-open.
+	try {
+		const cited = _internals.measureCitedFileTokens(files, (p) =>
+			fs.statSync(path.join(directory, p)),
+		);
+		if (cited.total > 0) {
+			_internals.recordContextSourceAttribution({
+				sessionId: sessionID,
+				taskId: effectiveTaskId,
+				source: 'context_pack',
+				tokensReturned: metadata.token_estimate,
+				citedFileTokensTotal: cited.total,
+			});
+		}
+	} catch {
+		// Attribution is observability only — never breaks the hook.
+	}
 
 	// Persist capsule for debugging/inspection
 	try {

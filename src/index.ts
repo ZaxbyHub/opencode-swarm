@@ -69,6 +69,7 @@ import {
 import { createRoleFilterSystemHook } from './context/role-filter.js';
 import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
 import { closeGroupCommitWriter } from './db/group-commit-writer.js';
+import { registerObservabilityEventSink } from './db/observability-event-store.js';
 import { closeProjectDb } from './db/project-db.js';
 import { createEvaluationModelDispatcher } from './evaluation/model-dispatcher.js';
 import {
@@ -290,10 +291,18 @@ const MAX_TRACKED_HEARTBEAT_SESSIONS = 500;
  * unit testing of the cap invariant; used by the heartbeat throttle and
  * delegation-telemetry pairing paths below.
  */
-export function capSessionMap<K, V>(map: Map<K, V>, max: number): void {
+export function capSessionMap<K, V>(
+	map: Map<K, V>,
+	max: number,
+	/** #2482 / #2244: the just-inserted key must never evict itself (a re-set
+	 * entry keeps its ORIGINAL insertion position, so without this guard the
+	 * fresh entry can be the oldest and evict itself at the cap — mirroring
+	 * the stored-input-args guard). */
+	justInserted?: K,
+): void {
 	while (map.size > max) {
 		const oldest = map.keys().next().value;
-		if (oldest === undefined) break;
+		if (oldest === undefined || oldest === justInserted) break;
 		map.delete(oldest);
 	}
 }
@@ -1119,6 +1128,10 @@ async function initializeOpenCodeSwarm(
 	// unref'd timer only after `initializeOpenCodeSwarm` resolves, with a 30s
 	// watchdog around the detached scan.
 	// Ensure .swarm/ exists before repo graph init tries to save the first graph.
+	// #2482: register the SQLite observability sink FIRST so the very first
+	// emitted event is captured. Registration is O(1) (one listener push),
+	// never opens the DB, and never throws — safe on the init path.
+	registerObservabilityEventSink(ctx.directory);
 	initTelemetry(ctx.directory);
 	startHeartbeatTracking();
 
@@ -3113,6 +3126,11 @@ async function initializeOpenCodeSwarm(
 					description:
 						'Use /swarm costs to show per-agent, task, gate, and retry token/cost totals',
 				},
+				'swarm-report': {
+					template: '/swarm report $ARGUMENTS',
+					description:
+						'Use /swarm report to query swarm observability events (--task/--session/--trace/--run/--since/--json)',
+				},
 				'swarm-export': {
 					template: '/swarm export',
 					description: 'Use /swarm export to export plan and context as JSON',
@@ -3624,7 +3642,11 @@ async function initializeOpenCodeSwarm(
 							// FIFO-cap the KEY count to bound memory (mirrors
 							// latestAssistantUsageBySession). Values are timestamps, so no
 							// clearInterval/clearTimeout is needed on eviction.
-							capSessionMap(_heartbeatTimers, MAX_TRACKED_HEARTBEAT_SESSIONS);
+							capSessionMap(
+								_heartbeatTimers,
+								MAX_TRACKED_HEARTBEAT_SESSIONS,
+								sessionID,
+							);
 							telemetry.heartbeat(sessionID);
 						}
 					} catch {
@@ -4063,6 +4085,7 @@ async function initializeOpenCodeSwarm(
 						capSessionMap(
 							_delegationTelemetryByCallID,
 							MAX_TRACKED_DELEGATION_TELEMETRY,
+							input.callID,
 						);
 						telemetry.delegationBegin(
 							input.sessionID,

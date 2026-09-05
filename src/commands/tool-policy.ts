@@ -10,6 +10,7 @@ import {
 	type CommandEntry,
 	VALID_COMMANDS,
 } from './registry.js';
+import { parseReportArgs } from './report.js';
 
 /**
  * Creates a lazily-initialized Set that computes its contents on first access.
@@ -331,6 +332,17 @@ export function classifySwarmCommandToolUse(
 			message:
 				'Usage through swarm_command: `/swarm costs` or `/swarm costs --json`.',
 		};
+	}
+
+	if (canonicalKey === 'report') {
+		const parsed = parseReportArgs(args);
+		if (parsed.error !== undefined || parsed.parsed === undefined) {
+			return {
+				allowed: false,
+				message: `Usage through swarm_command: ${parsed.error ?? 'invalid arguments'}`,
+			};
+		}
+		return { allowed: true };
 	}
 
 	if (canonicalKey === 'review') {

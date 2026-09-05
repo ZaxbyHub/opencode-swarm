@@ -80,6 +80,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm simulate` — dry-run hidden coupling analysis with configurable thresholds
 - `/swarm ci-simulate` — create a temporary merge-result worktree and run CI pre-merge
 - `/swarm qa-gates` — view or modify QA gate profile for the current plan
+- `/swarm report` — query the SQLite observability sink (filters: --task/--session/--trace/--run/--since, --json)
 - `/swarm acknowledge-spec-drift` — acknowledge spec drift and suppress further warnings
 
 **Knowledge / memory / curation**

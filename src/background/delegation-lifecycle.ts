@@ -20,7 +20,6 @@
  * while DIAGNOSTIC observations run only on `claimed` (exactly-once-at-emit).
  */
 
-import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { collectLaneDelegateAcks } from '../hooks/delegate-ack-collector.js';
@@ -41,6 +40,7 @@ import {
 } from '../services/cost-accounting.js';
 import { telemetry } from '../telemetry.js';
 import * as logger from '../utils/logger.js';
+import { buildDelegationTerminalIdentityFields } from './delegation-cost-identity.js';
 import {
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
@@ -50,6 +50,7 @@ import {
 	findByCorrelationId,
 	isTerminalDelegationStatus,
 	readDelegations,
+	registerStaleSweepObserver,
 } from './pending-delegations.js';
 
 /** Terminal statuses a shared settle may establish (mirrors Task semantics). */
@@ -212,6 +213,12 @@ export async function settleDelegationTerminal(
 	if (!reread) return { kind: 'missing' };
 	if (isTerminalDelegationStatus(reread.status)) {
 		if (reread.terminalResult) return { kind: 'conflict', record: reread };
+		// #2482 / #2244: the record reached a terminal status WITHOUT the
+		// claim path ever emitting the terminal event — by definition no
+		// `delegation_end` exists for its begin. Emit the exactly-once
+		// recovered end so the delegation pair completes. (A `conflict` above
+		// has a terminalResult — the original claimer's emission stands.)
+		emitDelegationEventlessTerminalEnd(reread, reread.status);
 		return { kind: 'already_terminal_without_event', record: reread };
 	}
 	return { kind: 'not_open', record: reread };
@@ -239,57 +246,55 @@ export function emitDelegationBegin(
 }
 
 /**
- * Canonical cost-record identity material for a lane/delegation terminal.
- * Joining back to the delegation record uses exactly these record fields —
- * never agent-name matching. The `lane:` discriminator keeps lane identities
- * disjoint from Task-tool records, whose material is `${sessionId}\0${callID}`.
+ * Canonical cost-record identity material for a lane/delegation terminal —
+ * re-exported from the leaf module `delegation-cost-identity.ts` (issue
+ * #2482) so `pending-delegations.ts` (imported by this module) can construct
+ * the exact same identity for its stale-sweep terminal emissions without an
+ * import cycle. Records WITH a `laneId` (lane records) use the `lane:`
+ * discriminator; records WITHOUT one (Task-tool delegations) use the
+ * pre-documented Task shape `${sessionId}\0${callID}` (the same material the
+ * foreground Task handoff hashes). Hash inputs stay distinct, so lane and
+ * Task ids can never collide even for a shared (sessionId, callID) pair.
  */
-export function delegationCostRecordMaterial(
-	record: Pick<
-		BackgroundDelegationRecord,
-		'parentSessionId' | 'callID' | 'laneId'
-	>,
-): string {
-	if (!record.laneId) {
-		throw new Error(
-			'delegation cost identity requires a laneId (all lane records set one)',
-		);
-	}
-	return `${record.parentSessionId}\0${record.callID}\0lane:${record.laneId}`;
-}
+export { delegationCostRecordMaterial } from './delegation-cost-identity.js';
 
-/** Emit the `delegation_end` cost observation for a claimed lane terminal. */
+/** Durable record fields the terminal emitters need (record-attributed). */
+type TerminalEmitRecord = Pick<
+	BackgroundDelegationRecord,
+	| 'parentSessionId'
+	| 'swarmPrefixedAgent'
+	| 'planTaskId'
+	| 'callID'
+	| 'laneId'
+	| 'subagentSessionId'
+>;
+
+/**
+ * Emit the `delegation_end` cost observation for a claimed lane terminal.
+ * `terminalStatus` is the durable record's terminal status string (may be a
+ * sweep status like `stale`, which the narrow `DelegationTerminalStatus` input
+ * union does not name).
+ */
 function emitDelegationCostObservation(
-	record: BackgroundDelegationRecord,
+	record: TerminalEmitRecord,
 	observations: DelegationObservationInput,
-	terminalStatus: DelegationTerminalStatus,
+	terminalStatus: string,
+	recovered = false,
 ): void {
 	try {
-		const material = delegationCostRecordMaterial(record);
 		const costFields = buildDelegationCostFields({
 			raw: observations.costRaw,
 			model: observations.model,
 			pricing: observations.pricing,
 		});
-		costFields.record_id = createHash('sha256')
-			.update(`delegation-cost-id-v1\0${material}`)
-			.digest('hex')
-			.slice(0, 32);
-		costFields.identity_fingerprint = createHash('sha256')
-			.update(
-				`delegation-cost-identity-v1\0${material}\0${record.swarmPrefixedAgent}\0${observations.model ?? ''}`,
-			)
-			.digest('hex')
-			.slice(0, 32);
-		costFields.version = 1;
-		costFields.parent_session_digest = createHash('sha256')
-			.update(`delegation-cost-parent-v1\0${record.parentSessionId}`)
-			.digest('hex')
-			.slice(0, 32);
-		costFields.child_session_digest = createHash('sha256')
-			.update(`delegation-cost-child-v1\0${record.subagentSessionId}`)
-			.digest('hex')
-			.slice(0, 32);
+		Object.assign(
+			costFields,
+			buildDelegationTerminalIdentityFields({
+				record,
+				model: observations.model,
+				recovered,
+			}),
+		);
 		_internals.telemetry.delegationEnd(
 			record.parentSessionId,
 			record.swarmPrefixedAgent,
@@ -305,6 +310,33 @@ function emitDelegationCostObservation(
 		);
 	}
 }
+
+/**
+ * Emit the exactly-once `delegation_end` pairing observation for an
+ * EVENTLESS terminal (issue #2482 / #2244): a durable record that reached a
+ * terminal status without the claim path ever emitting the terminal event —
+ * the `already_terminal_without_event` settle outcome and the stale sweep.
+ * Attribution and pairing identity come from the durable record (correct
+ * across restarts; never the in-memory parent-session map), and the
+ * deterministic `record_id` keeps cost rollups deduped. `recovered: true`
+ * marks these ends in the payload. `duplicate`/`conflict` outcomes must NOT
+ * call this — the original claimer's emission stands (exactly-once-at-emit).
+ */
+export function emitDelegationEventlessTerminalEnd(
+	record: TerminalEmitRecord,
+	terminalStatus: string,
+): void {
+	emitDelegationCostObservation(record, {}, terminalStatus, true);
+}
+
+// #2482: wire the stale sweep's recovered-end emission through this module so
+// both halves of the delegation pair live beside each other (the sweep runs
+// under the pending-delegations store lock and calls this observer
+// fail-open). Registration is a single assignment — no I/O; production always
+// loads this module (dispatch lanes, completion observer, plugin init).
+registerStaleSweepObserver((record) => {
+	emitDelegationEventlessTerminalEnd(record, 'stale');
+});
 
 /** Append the trajectory observation for a claimed lane terminal. */
 async function appendDelegationTrajectoryObservation(

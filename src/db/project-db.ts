@@ -335,6 +335,81 @@ const MIGRATIONS: Migration[] = [
 		sql: `CREATE INDEX IF NOT EXISTS idx_coordination_event_fence_global_age
 			ON coordination_event_fence(created_at, stream_id)`,
 	},
+	// D3 observability sink (issue #2482): the canonical event envelope's
+	// durable local query authority. Telemetry-pattern table — durability
+	// class `normal`, DELETE-based retention, rebuildable from the bounded
+	// `.swarm/telemetry.jsonl` legacy stream (see observability-event-store).
+	{
+		version: 29,
+		name: 'create_observability_event',
+		sql: `CREATE TABLE IF NOT EXISTS observability_event (
+			event_id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			category TEXT,
+			severity TEXT,
+			occurred_at TEXT NOT NULL,
+			writer_sequence INTEGER,
+			trace_id TEXT,
+			span_id TEXT,
+			host_session_id TEXT,
+			task_id TEXT,
+			lane_id TEXT,
+			batch_id TEXT,
+			phase_id TEXT,
+			council_round_id TEXT,
+			project_ref TEXT,
+			outcome_status TEXT,
+			retry_index INTEGER,
+			privacy_class TEXT,
+			sampled INTEGER,
+			payload_json TEXT NOT NULL,
+			relationship_violations TEXT,
+			quarantined INTEGER NOT NULL DEFAULT 0,
+			quarantine_reason TEXT,
+			ingested_via TEXT NOT NULL
+		)`,
+	},
+	{
+		version: 30,
+		name: 'create_observability_event_indexes',
+		sql: `CREATE INDEX IF NOT EXISTS idx_obs_event_occurred
+			ON observability_event(occurred_at);
+			CREATE INDEX IF NOT EXISTS idx_obs_event_kind
+			ON observability_event(kind, occurred_at);
+			CREATE INDEX IF NOT EXISTS idx_obs_event_session
+			ON observability_event(host_session_id, occurred_at);
+			CREATE INDEX IF NOT EXISTS idx_obs_event_task
+			ON observability_event(task_id, occurred_at);
+			CREATE INDEX IF NOT EXISTS idx_obs_event_trace
+			ON observability_event(trace_id);
+			CREATE INDEX IF NOT EXISTS idx_obs_event_batch
+			ON observability_event(batch_id)`,
+	},
+	{
+		version: 31,
+		name: 'create_observability_sink_health',
+		sql: `CREATE TABLE IF NOT EXISTS observability_sink_health (
+			id INTEGER PRIMARY KEY CHECK(id = 1),
+			accepted INTEGER NOT NULL DEFAULT 0,
+			quarantined INTEGER NOT NULL DEFAULT 0,
+			dropped INTEGER NOT NULL DEFAULT 0,
+			last_error_category TEXT,
+			last_error_at TEXT,
+			last_flush_at TEXT,
+			updated_at TEXT NOT NULL
+		)`,
+	},
+	{
+		version: 32,
+		name: 'create_observability_import',
+		sql: `CREATE TABLE IF NOT EXISTS observability_import (
+			source TEXT PRIMARY KEY,
+			fingerprint_size INTEGER NOT NULL,
+			fingerprint_mtime_ms INTEGER NOT NULL,
+			lines_seen INTEGER NOT NULL CHECK(lines_seen >= 0),
+			imported_at TEXT NOT NULL
+		)`,
+	},
 ];
 
 interface ProjectDbRecord {

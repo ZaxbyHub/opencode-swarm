@@ -435,6 +435,9 @@ describe('the real repository is coherent', () => {
 			// issue #2480: swarm.db table rows — the physical artifact is owned
 			// by the project-db row; these own the logical tables + legacy files.
 			'insight-candidates',
+			// issue #2482: swarm.db observability_event tables — physical
+			// artifact owned by the project-db row.
+			'observability-events-sqlite',
 			'drift-reports',
 			'doc-drift-signals',
 		]);

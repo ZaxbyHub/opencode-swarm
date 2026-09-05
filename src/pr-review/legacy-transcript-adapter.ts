@@ -50,6 +50,7 @@ import {
 	parsePrReviewRiskTagsField,
 	parsePrReviewVerdictRow,
 } from '../background/pr-review-contract.js';
+import { emit } from '../telemetry.js';
 import { warn } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -683,6 +684,16 @@ export function indexVerdictRows(
 					recovery,
 				},
 			);
+			// #2482 / #2184: absorb the fidelity class into the event
+			// lifecycle so the fidelity-safe vs lossy distinction is observable
+			// without debug logging. Identifiers/enums only — no row prose.
+			// Fail-open (the try/catch in emit covers sink failures too).
+			emit('verdict_row_pipe_recovery', {
+				marker,
+				itemId,
+				recovery,
+				fieldCount: fields.length,
+			});
 		}
 		markerRows.push(fields);
 		const itemId = fields[1] ?? '';
