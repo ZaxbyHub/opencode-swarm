@@ -174,7 +174,7 @@ const FORBID_COUNCIL_ROUND: readonly WorkflowIdKey[] = Object.freeze([
 
 /** Live reader of `delegation_end` cost fields. */
 const CONSUMER_COST_ACCOUNTING = Object.freeze([
-	'src/services/cost-accounting.ts:427',
+	'src/services/cost-accounting.ts:431',
 ]);
 const CONSUMER_COST_CORRECTION = Object.freeze([
 	'src/services/cost-accounting.ts:428',
@@ -565,7 +565,9 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 		{
 			category: 'cost',
 			severity: 'info',
-			privacyClass: 'operational',
+			// PRR-005: payload carries sessionId/taskId identifiers —
+			// 'operational' (no identifiers) would be self-contradictory.
+			privacyClass: 'pseudonymous',
 			producer: 'src/services/context-attribution.ts:124',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,

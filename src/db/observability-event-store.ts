@@ -66,6 +66,14 @@ const LEGACY_STREAM_FILES = ['telemetry.jsonl.1', 'telemetry.jsonl'] as const;
 /** Import id namespace — synthetic event ids are content-derived and stable. */
 const IMPORT_ID_NAMESPACE = 'obs-import-v1';
 
+/**
+ * Parse gate for legacy import lines (PRR-002): JSON.parse cost scales with
+ * line length; rotation bounds the file at ~10 MiB, but a single pathological
+ * line is still a self-inflicted heap spike. Lines longer than this are
+ * quarantined WITHOUT parsing.
+ */
+const MAX_IMPORT_LINE_BYTES = 1024 * 1024;
+
 export type IngestedVia = 'live' | 'import';
 
 export interface ObservabilityEventRow {
@@ -77,6 +85,7 @@ export interface ObservabilityEventRow {
 	occurred_at: string;
 	writer_sequence: number | null;
 	trace_id: string | null;
+	span_id: string | null;
 	host_session_id: string | null;
 	task_id: string | null;
 	lane_id: string | null;
@@ -89,6 +98,7 @@ export interface ObservabilityEventRow {
 	privacy_class: string | null;
 	sampled: number | null;
 	payload_json: string;
+	relationship_violations: string | null;
 	quarantined: number;
 	quarantine_reason: string | null;
 	ingested_via: string;
@@ -119,6 +129,13 @@ export interface ObservabilityEventFilter {
  * every accepted event (the queue batches writes; queries are the natural
  * flush point for a query authority). Never throws — a failed flush simply
  * means the query sees the last committed batch.
+ */
+/**
+ * Flush the SHARED per-root group-commit writer before a read. This commits
+ * pending writes of EVERY durability class queued on that writer, not just
+ * observability rows — conservative and correct (a flush never harms), at
+ * the cost of performing other classes' writes on our read path (documented
+ * trade-off, PRR-017).
  */
 function flushPendingWrites(directory: string): void {
 	try {
@@ -172,6 +189,18 @@ export function registerObservabilityEventSink(directory: string): void {
 		const key = canonicalProjectKey(directory);
 		if (_sinkListener !== null) {
 			if (_sinkDirectory === key) return;
+			const previous = _sinkDirectory;
+			if (previous !== null) {
+				// Best-effort flush of the previous root's pending counters,
+				// then forget them: the per-root maps would otherwise grow
+				// without bound across rebinds (PRR-012). Only flush when the
+				// root already has a DB — getGroupCommitWriter would
+				// otherwise materialize one for a root with nothing pending.
+				if (projectDbExists(previous)) flushPendingWrites(previous);
+				_healthDeltas.delete(previous);
+				_eventsSinceRetentionCheck.delete(previous);
+				_eventsSinceHealthUpsert.delete(previous);
+			}
 			try {
 				removeTelemetryListener(_sinkListener);
 			} catch {
@@ -249,6 +278,38 @@ interface BuiltRow {
 	};
 }
 
+/** True when the payload marks this delegation_end as a recovered end. */
+function isRecoveredDelegationEnd(canonical: ObservabilityEvent): boolean {
+	if (canonical.kind !== 'delegation_end') return false;
+	const raw = canonical.legacy?.raw as
+		| { recovered?: unknown; record_id?: unknown; result?: unknown }
+		| undefined;
+	return (
+		raw?.recovered === true &&
+		typeof raw.record_id === 'string' &&
+		raw.record_id.length > 0 &&
+		typeof raw.result === 'string'
+	);
+}
+
+/**
+ * PRR-001: recovered delegation ends get a DETERMINISTIC row id derived from
+ * the record identity + terminal status, not the random envelope id. The same
+ * eventless terminal can be detected twice (the stale-sweep observer and a
+ * later settle's already_terminal_without_event branch both emit); random
+ * per-emission ids defeated the sink's event_id dedup, storing two rows for
+ * one delegation. With this key, duplicate emissions collapse via INSERT OR
+ * IGNORE regardless of which call site (or process) emitted them.
+ */
+function recoveredEndEventId(canonical: ObservabilityEvent): string {
+	if (!isRecoveredDelegationEnd(canonical)) return canonical.eventId;
+	const raw = canonical.legacy?.raw as { record_id: string; result: string };
+	return createHash('sha256')
+		.update(`obs-recovered-end-v1\0${raw.record_id}\0${raw.result}`)
+		.digest('hex')
+		.slice(0, 32);
+}
+
 function buildLiveRow(canonical: ObservabilityEvent): BuiltRow {
 	const violations = canonical.relationshipViolations ?? [];
 	const fallbackBuild = violations.includes('observation_build_failed');
@@ -278,7 +339,7 @@ function buildLiveRow(canonical: ObservabilityEvent): BuiltRow {
 	const policy = canonical.policy ?? {};
 	return {
 		columns: {
-			event_id: canonical.eventId,
+			event_id: recoveredEndEventId(canonical),
 			kind: canonical.kind,
 			category: canonical.category ?? null,
 			severity: canonical.severity ?? null,
@@ -457,46 +518,58 @@ function syntheticImportEventId(line: string): string {
 		.digest('hex');
 }
 
+/** Stub row for a line that cannot (or should not) be parsed. */
+function unparseableImportRow(
+	line: string,
+	reason: 'import_unparseable_line' | 'import_oversize_line',
+): { columns: BuiltRow['columns']; quarantined: boolean } {
+	return {
+		columns: {
+			event_id: syntheticImportEventId(line),
+			kind: 'unknown',
+			category: null,
+			severity: null,
+			occurred_at: new Date().toISOString(),
+			writer_sequence: null,
+			trace_id: null,
+			span_id: null,
+			host_session_id: null,
+			task_id: null,
+			lane_id: null,
+			batch_id: null,
+			phase_id: null,
+			council_round_id: null,
+			project_ref: null,
+			outcome_status: null,
+			retry_index: null,
+			privacy_class: null,
+			sampled: null,
+			payload_json:
+				line.length > MAX_EVENT_PAYLOAD_BYTES
+					? '{"truncated":true}'
+					: JSON.stringify({ raw_line: line }),
+			relationship_violations: null,
+			quarantined: 1,
+			quarantine_reason: reason,
+		},
+		quarantined: true,
+	};
+}
+
 /** Build an import row from one legacy JSONL line; null → skip (blank). */
 function buildImportRow(
 	line: string,
 ): { columns: BuiltRow['columns']; quarantined: boolean } | null {
 	if (line.trim().length === 0) return null;
+	// PRR-002: quarantine pathological lines WITHOUT parsing them.
+	if (line.length > MAX_IMPORT_LINE_BYTES) {
+		return unparseableImportRow(line, 'import_oversize_line');
+	}
 	let parsed: Record<string, unknown>;
 	try {
 		parsed = JSON.parse(line) as Record<string, unknown>;
 	} catch {
-		return {
-			columns: {
-				event_id: syntheticImportEventId(line),
-				kind: 'unknown',
-				category: null,
-				severity: null,
-				occurred_at: new Date().toISOString(),
-				writer_sequence: null,
-				trace_id: null,
-				span_id: null,
-				host_session_id: null,
-				task_id: null,
-				lane_id: null,
-				batch_id: null,
-				phase_id: null,
-				council_round_id: null,
-				project_ref: null,
-				outcome_status: null,
-				retry_index: null,
-				privacy_class: null,
-				sampled: null,
-				payload_json:
-					line.length > MAX_EVENT_PAYLOAD_BYTES
-						? '{"truncated":true}'
-						: JSON.stringify({ raw_line: line }),
-				relationship_violations: null,
-				quarantined: 1,
-				quarantine_reason: 'import_unparseable_line',
-			},
-			quarantined: true,
-		};
+		return unparseableImportRow(line, 'import_unparseable_line');
 	}
 	const workflow = _internals.extractWorkflowIds(parsed);
 	const timestamp =
@@ -701,10 +774,12 @@ export function queryObservabilityEvents(
 	const rows = db
 		.query<ObservabilityEventRow, string[]>(
 			`SELECT rowid, event_id, kind, category, severity, occurred_at,
-				writer_sequence, trace_id, host_session_id, task_id, lane_id,
+				writer_sequence, trace_id, span_id, host_session_id, task_id,
+				lane_id,
 				batch_id, phase_id, council_round_id, project_ref, outcome_status,
-				retry_index, privacy_class, sampled, payload_json, quarantined,
-				quarantine_reason, ingested_via
+				retry_index, privacy_class, sampled, payload_json,
+				relationship_violations, quarantined, quarantine_reason,
+				ingested_via
 			FROM observability_event WHERE ${whereSql}
 			ORDER BY occurred_at ASC, rowid ASC LIMIT ?`,
 		)

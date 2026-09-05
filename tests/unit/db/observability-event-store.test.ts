@@ -8,6 +8,7 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { emitDelegationEventlessTerminalEnd } from '../../../src/background/delegation-lifecycle.js';
 import {
 	_internals,
 	appendObservabilityEventDb,
@@ -27,8 +28,10 @@ import {
 } from '../../../src/db/project-db.js';
 import { createObservation } from '../../../src/observability/index.js';
 import {
+	addTelemetryListener,
 	emit,
 	initTelemetry,
+	removeTelemetryListener,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
@@ -60,6 +63,7 @@ describe('observability-event-store', () => {
 	});
 	afterEach(() => {
 		resetObservabilityEventSinkForTesting();
+		resetTelemetryForTesting();
 		cleanup(dir);
 	});
 
@@ -285,15 +289,98 @@ describe('observability-event-store', () => {
 		}
 	});
 
-	test('health counters persist through the throttled upsert path', () => {
+	test('health counters persist through the throttled upsert path (PRR-006)', () => {
 		const db = getProjectDb(dir);
 		db.run(
 			'INSERT INTO observability_sink_health (id, accepted, quarantined, dropped, updated_at) VALUES (1, 10, 2, 1, ?)',
 			['2026-01-01T00:00:00.000Z'],
 		);
-		appendObservabilityEventDb(dir, sampleCanonical());
+		// Drive past HEALTH_UPSERT_INTERVAL (256) so the throttled upsert
+		// actually fires inside the append batch, then assert the SEEDED
+		// counters MOVED by the appended delta — a not.toBeNull() assertion
+		// passed even when the upsert was a no-op.
+		for (let i = 0; i < 256; i++) {
+			appendObservabilityEventDb(dir, sampleCanonical());
+		}
 		const health = readObservabilitySinkHealth(dir);
 		expect(health).not.toBeNull();
+		expect(health?.accepted).toBe(10 + 256);
+		expect(health?.quarantined).toBe(2);
+		expect(health?.updated_at).not.toBeNull();
+	});
+
+	test('unserializable legacy payload is quarantined with a reason (PRR-007)', () => {
+		const canonical = sampleCanonical() as ReturnType<typeof createObservation>;
+		const circular: Record<string, unknown> = {};
+		circular.self = circular;
+		(canonical as { legacy?: { raw?: unknown } }).legacy = { raw: circular };
+		appendObservabilityEventDb(dir, canonical);
+		// Public read path flushes the group-commit batch before the query.
+		queryObservabilityEvents(dir, {});
+		const db = getProjectDb(dir);
+		const row = db
+			.query<{ quarantined: number; quarantine_reason: string | null }, []>(
+				'SELECT quarantined, quarantine_reason FROM observability_event',
+			)
+			.get();
+		expect(row?.quarantined).toBe(1);
+		expect(row?.quarantine_reason).toBe('payload_unserializable');
+	});
+
+	test('duplicate recovered delegation_end emissions collapse to one sink row (PRR-001)', () => {
+		registerObservabilityEventSink(dir);
+		initTelemetry(dir);
+		let delegationEndEmits = 0;
+		const capture = (): void => {
+			/* counted via telemetry listener below */
+		};
+		void capture;
+		const listener = (
+			event: string,
+			_data: Record<string, unknown>,
+			_canonical?: unknown,
+		): void => {
+			if (event === 'delegation_end') delegationEndEmits += 1;
+		};
+		addTelemetryListener(listener as never);
+		try {
+			const record = {
+				schemaVersion: 2,
+				correlationId: 'sess-recovered',
+				jobId: null,
+				subagentSessionId: 'sess-recovered',
+				parentSessionId: 'parent-1',
+				callID: 'batch-9',
+				normalizedAgent: 'sme',
+				swarmPrefixedAgent: 'mega_sme',
+				planTaskId: null,
+				evidenceTaskId: null,
+				status: 'stale',
+				createdAt: 1,
+				updatedAt: 2,
+				batchId: 'b1',
+				laneId: 'lane-a',
+				mode: 'advisory',
+			} as never;
+			// The stale-sweep observer emits emission #1; a later settle's
+			// already_terminal_without_event branch emits #2 for the SAME
+			// durable record. Both must land on ONE sink row.
+			emitDelegationEventlessTerminalEnd(record, 'stale');
+			emitDelegationEventlessTerminalEnd(record, 'stale');
+			const rows = queryObservabilityEvents(dir, {}).rows.filter(
+				(r) => r.kind === 'delegation_end',
+			);
+			expect(delegationEndEmits).toBe(2);
+			expect(rows).toHaveLength(1);
+			const payload = JSON.parse(rows[0]!.payload_json) as {
+				recovered?: boolean;
+				record_id?: string;
+			};
+			expect(payload.recovered).toBe(true);
+			expect(typeof payload.record_id).toBe('string');
+		} finally {
+			removeTelemetryListener(listener as never);
+		}
 	});
 
 	test('report queries are bounded and deterministic (occurred_at, rowid ordering)', () => {

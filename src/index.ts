@@ -3642,7 +3642,11 @@ async function initializeOpenCodeSwarm(
 							// FIFO-cap the KEY count to bound memory (mirrors
 							// latestAssistantUsageBySession). Values are timestamps, so no
 							// clearInterval/clearTimeout is needed on eviction.
-							capSessionMap(_heartbeatTimers, MAX_TRACKED_HEARTBEAT_SESSIONS);
+							capSessionMap(
+								_heartbeatTimers,
+								MAX_TRACKED_HEARTBEAT_SESSIONS,
+								sessionID,
+							);
 							telemetry.heartbeat(sessionID);
 						}
 					} catch {

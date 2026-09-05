@@ -999,7 +999,7 @@ export const COMMAND_REGISTRY = {
 			'Report swarm observability events from the SQLite query authority [--task <id>] [--session <id>] [--trace <id>] [--run <batchId>] [--since <ISO-8601>] [--json]',
 		args: '--task <id>, --session <id>, --trace <id>, --run <batchId>, --since <ISO-8601>, --json',
 		details:
-			'Read-only, bounded, deterministic report over the observability events store in .swarm/swarm.db. --run filters the lane/dispatch batch axis (workflow.batchId). Unmatched delegation begins are disclosed, never fabricated into ends. --json emits a schemaVersion-tagged block.',
+			'Bounded, deterministic query over the observability events store in .swarm/swarm.db (the first run performs a bounded, idempotent legacy-import into the local sink). --run filters the lane/dispatch batch axis (workflow.batchId). Unmatched delegation begins are disclosed, never fabricated into ends. --json emits a schemaVersion-tagged block.',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},

@@ -226,6 +226,12 @@ learning-health registry in `src/health/learning-health.ts`) plus
 attempt / accepted-transition observations joined to the lifecycle
 correlation system via the server-derived `councilRoundId`).
 
+plus seven further post-#2029 additions that §5 catalogs in place (deliberately
+not re-enumerated here) plus the two issue-#2482 kinds —
+`context_source_attribution` (absorbing #1990) and
+`verdict_row_pipe_recovery` (absorbing #2184) — for the honest
+38 + 14 + 7 + 2 = 61 total.
+
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
 hard failure), otherwise the live reader file:line. **Retention** is
@@ -444,13 +450,13 @@ state-corrupt submission (cf. `gate_parse_error`).
 
 #### context_source_attribution
 
-Category `cost`, severity `info`, privacy `operational` — producer `src/services/context-attribution.ts:124` (issue #2482, absorbing #1990)
+Category `cost`, severity `info`, privacy `pseudonymous` — producer `src/services/context-attribution.ts:124` (issue #2482, absorbing #1990). Consumers: none — owner #2047. Retention: #2045.
 
 Recorded once per measured context-source injection. Payload: `sessionId`, optional `taskId`, `source` (`context_pack` | `lane-orientation` | `reflection` | `ask`), `tokensReturned`, `tokensSavedEstimate` (floored at 0), and `estimate: true`. HONESTY RULE: the event is emitted ONLY when the cited-file token total was actually measured; when file sizes are unknown the call records NOTHING — never a zero and never a guess. Aggregated by `/swarm report`.
 
 #### verdict_row_pipe_recovery
 
-Category `gate`, severity `info`, privacy `pseudonymous` — producer `src/pr-review/legacy-transcript-adapter.ts:691` (issue #2482, absorbing #2184)
+Category `gate`, severity `info`, privacy `pseudonymous` — producer `src/pr-review/legacy-transcript-adapter.ts:691` (issue #2482, absorbing #2184). Consumers: none — owner #2047. Retention: #2045.
 
 Emitted when the verdict-row parser recovers a legacy row with unescaped pipe overflow, carrying the fidelity class into the event lifecycle: `marker`, `itemId`, `recovery` (`legacy-fidelity-safe` | `legacy-lossy`), `fieldCount`. Identifiers and enums only — the 120-character row preview from the debug warning is deliberately NOT included. Mid-row pipes remain accepted per the repository owner's relaxation directive (#2181/#2182); this event makes the safe-vs-lossy distinction observable without debug logging.
 

@@ -1052,7 +1052,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		],
 		schemaVersion: 'envelope rows (eventId/kind/workflow ids/payload JSON; imported rows use sha256(obs-import-v1 + line) synthetic ids)',
 		stateClass: 'operational',
-		privacyClass: 'metadata',
+		// ZB-review: the table persists raw payloads verbatim (incl. kinds the
+		// event catalog labels 'sensitive'), so the honest class is 'content'.
+		privacyClass: 'content',
 		writeLimits: {
 			bound: 'MAX_OBSERVABILITY_EVENT_ROWS 50000 GLOBAL DELETE-oldest (rowid ASC) inside the append batch every RETENTION_CHECK_INTERVAL 512 accepted events; per-payload cap MAX_EVENT_PAYLOAD_BYTES 16384 (oversize → quarantined truncated stub)',
 			scope: 'global',

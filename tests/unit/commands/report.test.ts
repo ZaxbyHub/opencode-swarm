@@ -131,6 +131,42 @@ describe('handleReportCommand', () => {
 		expect(md).toContain('1 begins / 0 ends; 1 unmatched begin(s)');
 	});
 
+	test('--run filters the batch axis end-to-end (PRR-008)', async () => {
+		const dir = makeProject();
+		dirs.push(dir);
+		const f = join(dir, '.swarm', 'telemetry.jsonl');
+		writeFileSync(
+			f,
+			`${JSON.stringify({
+				timestamp: '2026-01-01T00:00:00.000Z',
+				event: 'phase_changed',
+				sessionId: 's1',
+				batchId: 'b1',
+			})}
+${JSON.stringify({
+	timestamp: '2026-01-02T00:00:00.000Z',
+	event: 'phase_changed',
+	sessionId: 's1',
+	batchId: 'b2',
+})}
+`,
+		);
+		const out = await handleReportCommand(dir, ['--run', 'b1', '--json']);
+		const parsed = JSON.parse(
+			out.slice('[REPORT_JSON]'.length, out.lastIndexOf('[/REPORT_JSON]')),
+		) as {
+			timeline: Array<{ kind: string }>;
+			filters: Record<string, unknown>;
+		};
+		expect(parsed.filters).toMatchObject({ batchId: 'b1' });
+		expect(parsed.timeline).toHaveLength(1);
+		const all = await handleReportCommand(dir, ['--json']);
+		const allParsed = JSON.parse(
+			all.slice('[REPORT_JSON]'.length, all.lastIndexOf('[/REPORT_JSON]')),
+		) as { timeline: unknown[] };
+		expect(allParsed.timeline).toHaveLength(2);
+	});
+
 	test('--json emits a versioned schema block with coverage+pairing+savings', async () => {
 		const dir = makeProject();
 		dirs.push(dir);

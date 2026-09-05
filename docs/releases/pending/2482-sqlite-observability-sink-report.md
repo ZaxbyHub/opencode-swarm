@@ -13,7 +13,7 @@ Adds the canonical event envelope's durable local query authority in `.swarm/swa
   `telemetry.jsonl` path. The bounded `telemetry.jsonl(.1)` stream stays the operational
   record and is imported incrementally and deterministically by `/swarm report` (never
   renamed; content-derived synthetic ids make full rebuilds byte-identical).
-- **`/swarm report`** (also `/swarm report --json`): read-only, bounded, deterministic report
+- **`/swarm report`** (also `/swarm report --json`): bounded, deterministic query (first run performs an idempotent legacy-import into the local sink)
   with `--task` / `--session` / `--trace` / `--run` (the lane/dispatch batch axis) /
   `--since` filters, coverage disclosure (live vs imported vs quarantined rows), delegation
   begin/end pairing counts (unmatched begins disclosed, never fabricated), context-source

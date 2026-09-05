@@ -56,6 +56,14 @@ describe('verdict_row_pipe_recovery emission (issue #2184 residual)', () => {
 		expect(events.length).toBe(2);
 		const kinds = events.map((e) => e.recovery).sort();
 		expect(kinds).toEqual(['legacy-fidelity-safe', 'legacy-lossy']);
+		// PRR-014: pin the fixture-derived values, not just their types —
+		// a payload of arbitrary well-typed values must NOT satisfy this.
+		expect(events[0]?.marker).toBe('[REVIEWED]');
+		expect(events[0]?.itemId).toBe('C-safe');
+		expect(events[0]?.recovery).toBe('legacy-fidelity-safe');
+		expect(events[1]?.marker).toBe('[CRITIC]');
+		expect(events[1]?.itemId).toBe('C-lossy');
+		expect(events[1]?.recovery).toBe('legacy-lossy');
 		for (const e of events) {
 			// Identifiers/enums only — no row prose leaks into the event.
 			expect(typeof e.marker).toBe('string');

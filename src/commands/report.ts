@@ -116,12 +116,14 @@ export function parseReportArgs(args: string[]): {
 interface PairingStats {
 	begins: number;
 	ends: number;
+	recoveredEnds: number;
 	unmatchedBegins: number;
 }
 
 function computePairing(rows: ObservabilityEventRow[]): PairingStats {
 	let begins = 0;
 	let ends = 0;
+	let recoveredEnds = 0;
 	// Pair by (sessionId, agentName, taskId) triple in the filtered window —
 	// honest COUNTS with a disclosed delta; per-call joins are not fabricated
 	// (the Task transport emits no shared callID on both halves).
@@ -139,7 +141,11 @@ function computePairing(rows: ObservabilityEventRow[]): PairingStats {
 				sessionId?: string;
 				agentName?: string;
 				taskId?: string;
+				recovered?: boolean;
 			};
+			// PRR-009: surface recovered ends instead of silently folding
+			// them into the raw end count.
+			if (payload.recovered === true) recoveredEnds += 1;
 			const key = `${payload.sessionId ?? ''}\0${payload.agentName ?? ''}\0${
 				payload.taskId ?? ''
 			}`;
@@ -151,7 +157,7 @@ function computePairing(rows: ObservabilityEventRow[]): PairingStats {
 	}
 	let unmatched = 0;
 	for (const count of openBegins.values()) unmatched += count;
-	return { begins, ends, unmatchedBegins: unmatched };
+	return { begins, ends, recoveredEnds, unmatchedBegins: unmatched };
 }
 
 interface SavingsRow {
@@ -283,7 +289,9 @@ export async function handleReportCommand(
 	}
 	lines.push('');
 	lines.push(
-		`**Delegation pairing** — ${pairing.begins} begins / ${pairing.ends} ends; ${pairing.unmatchedBegins} unmatched begin(s) disclosed`,
+		`**Delegation pairing** — ${pairing.begins} begins / ${pairing.ends} ends${
+			pairing.recoveredEnds > 0 ? ` (${pairing.recoveredEnds} recovered)` : ''
+		}; ${pairing.unmatchedBegins} unmatched begin(s) disclosed`,
 	);
 	lines.push('');
 	if (savings.length > 0) {
@@ -292,8 +300,11 @@ export async function handleReportCommand(
 		lines.push('| Source | Calls | Tokens returned | Est. saved |');
 		lines.push('| --- | --- | --- | --- |');
 		for (const s of savings) {
+			// PRR-011: source arrives from event payloads — escape markdown
+			// structure characters so a crafted value cannot break the table.
+			const safeSource = s.source.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 			lines.push(
-				`| ${s.source} | ${s.calls} | ${s.tokensReturned} | ${s.tokensSavedEstimate} |`,
+				`| ${safeSource} | ${s.calls} | ${s.tokensReturned} | ${s.tokensSavedEstimate} |`,
 			);
 		}
 		lines.push('');
