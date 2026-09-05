@@ -114,10 +114,6 @@ import {
 	outputLooksLikeBackgroundRunning,
 	safeHook,
 } from './hooks';
-// Direct (non-barrel) import: the hooks barrel intentionally re-exports only
-// the hook factories; the dispose-fence helper is a lifecycle utility used
-// solely by this file's dispose block (PR #2588 bot finding 7).
-import { cancelDeferredMaintenanceScans } from './hooks/system-enhancer';
 import {
 	detectAdversarialPatterns,
 	detectDebuggingSpiral,
@@ -196,6 +192,10 @@ import {
 } from './hooks/skill-propagation-gate.js';
 import { createSlopDetectorHook } from './hooks/slop-detector';
 import { createSteeringConsumedHook } from './hooks/steering-consumed.js';
+// Direct (non-barrel) import: the hooks barrel intentionally re-exports only
+// the hook factories; the dispose-fence helper is a lifecycle utility used
+// solely by this file's dispose block (PR #2588 bot finding 7).
+import { cancelDeferredMaintenanceScans } from './hooks/system-enhancer';
 import {
 	createTrajectoryLoggerHook,
 	recordDeniedToolCall,

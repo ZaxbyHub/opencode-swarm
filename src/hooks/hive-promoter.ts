@@ -29,8 +29,8 @@ import { KnowledgeConfigSchema } from '../config/schema.js';
 import type { CohortIdentity } from '../knowledge/cohort-identity.js';
 import { resolveCohortId } from '../knowledge/cohort-identity.js';
 import { authorizeCuration } from '../knowledge/curation-policy.js';
-import { canonicalRootKey } from '../utils/canonical-root.js';
 import { resolveHiveDataDir } from '../knowledge/hive-paths.js';
+import { canonicalRootKey } from '../utils/canonical-root.js';
 import { ensureCohortIdCached } from './cohort-cache.js';
 import { appendCuratorRecommendation, readCuratorSummary } from './curator.js';
 import {

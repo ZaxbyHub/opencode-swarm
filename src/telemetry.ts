@@ -8,15 +8,15 @@ import {
 	toLegacyTelemetryLine,
 } from './observability/index.js';
 import type { DelegationCostFields } from './services/cost-accounting.js';
+// Non-fatal best-effort logging for the re-home close path (issue #2472 W9).
+// Cycle-safe: src/utils' barrel (errors/logger/merge/regex) never imports
+// telemetry.
+import { log } from './utils';
 // Canonical project-root identity for the re-home same-directory check
 // (issue #2472 / PR #2588 PRR-019): raw string === mis-fires on Windows case
 // differences and symlink/junction spellings of the SAME root, churning the
 // stream. canonical-root.ts imports only node:* builtins — cycle-safe here.
 import { sameProjectRoot } from './utils/canonical-root.js';
-// Non-fatal best-effort logging for the re-home close path (issue #2472 W9).
-// Cycle-safe: src/utils' barrel (errors/logger/merge/regex) never imports
-// telemetry.
-import { log } from './utils';
 
 // ============================================================================
 // Types
