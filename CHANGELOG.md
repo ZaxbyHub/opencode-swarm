@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.166.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.2...v7.166.3) (2026-09-05)
+
+
+### Bug Fixes
+
+* **retention:** bound every residual durable stream ([#2483](https://github.com/ZaxbyHub/opencode-swarm/issues/2483)) ([0b83962](https://github.com/ZaxbyHub/opencode-swarm/commit/0b8396245b98d3e835c8d8888f92d899d35f2cde))
+
 ## [7.166.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.1...v7.166.2) (2026-09-05)
 
 
