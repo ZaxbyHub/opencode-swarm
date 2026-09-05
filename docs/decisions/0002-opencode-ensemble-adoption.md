@@ -106,8 +106,10 @@ review:
 
 The mechanical contract is symmetric: while no port exists, no file under `src/` may carry the
 `ported-from: opencode-ensemble` marker and `THIRD_PARTY_NOTICES.md` is intentionally absent;
-once a marker exists, the notice file must exist and carry the copyright line, or the checklist
-test fails.
+once a marker exists, the notice file must exist and carry the copyright line, every marker line
+must carry the full header format above, or the checklist test fails. The checklist test's
+mechanical scan covers `.ts` files under `src/` only; a port touching non-TS files, strings, or
+UI assets is not covered by that scan and is enforced at review time under this section.
 
 ## Re-evaluation triggers
 
@@ -126,8 +128,9 @@ Revisit this decision (new ADR required) when any of the following holds:
   defaults credited in their issues and release fragments.
 - No `THIRD_PARTY_NOTICES.md` ships with this change (nothing is ported); the file becomes
   mandatory the moment the first port lands.
-- Future ports are mechanically discoverable via the `ported-from: opencode-ensemble` marker,
-  and the ADR checklist test keeps this record's license, provenance, decisions, and gate
-  sections pinned and current.
+- Future TypeScript ports are mechanically discoverable via the `ported-from: opencode-ensemble`
+  marker scan (`.ts` files under `src/`, full header format enforced); ports in other file types
+  rely on review-time enforcement of the Port obligation, and the ADR checklist test keeps this
+  record's license, provenance, decisions, and gate sections pinned and current.
 - The MIT verification removes license risk for any such future port; the remaining risk is
   engineering fit, which each porting PR must argue on its own merits.

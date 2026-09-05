@@ -18,11 +18,19 @@ function read(relativePath: string): string {
 		.replace(/\r\n/g, '\n');
 }
 
+/** True when `index` sits outside any fenced code block (even number of ``` before it). */
+function outsideFences(markdown: string, index: number): boolean {
+	return (markdown.slice(0, index).match(/```/g)?.length ?? 0) % 2 === 0;
+}
+
 /** Slice a `## <name>` section out of a markdown document (to the next `## ` heading or EOF). */
 function section(markdown: string, heading: string): string {
 	const start = markdown.indexOf(`## ${heading}`);
-	if (start < 0) return '';
-	const next = markdown.indexOf('\n## ', start + 1);
+	if (start < 0 || !outsideFences(markdown, start)) return '';
+	let next = markdown.indexOf('\n## ', start + 1);
+	while (next >= 0 && !outsideFences(markdown, next)) {
+		next = markdown.indexOf('\n## ', next + 1);
+	}
 	return next < 0 ? markdown.slice(start) : markdown.slice(start, next);
 }
 
@@ -66,8 +74,6 @@ describe('ensemble adoption ADR (issue #2505) — review checklist', () => {
 		expect(license).toContain(PINNED_UPSTREAM_COMMIT);
 		expect(license).toContain('@opencode-ai/plugin');
 		expect(license).toContain('@opencode-ai/sdk');
-		// The pinned commit must be cited as a full 40-hex SHA, not truncated.
-		expect(license).toMatch(/[0-9a-f]{40}/);
 	});
 
 	test('decision section records reimplementation-first with adopted ideas credited', () => {
@@ -135,7 +141,7 @@ describe('ensemble adoption ADR (issue #2505) — review checklist', () => {
 					continue;
 				}
 				if (!entry.name.endsWith('.ts')) continue;
-				const content = fs.readFileSync(full, 'utf8');
+				const content = fs.readFileSync(full, 'utf8').replace(/\r\n/g, '\n');
 				if (content.includes(PORT_MARKER)) markerFiles.push(full);
 			}
 		};
@@ -145,6 +151,22 @@ describe('ensemble adoption ADR (issue #2505) — review checklist', () => {
 		if (markerFiles.length === 0) {
 			expect(fs.existsSync(noticesPath)).toBe(false);
 		} else {
+			// Every marker line must carry the full provenance header the ADR
+			// mandates: ported-from: opencode-ensemble <commit-sha> <path>.
+			// A leading comment prefix (//, #, *) is allowed — the header is a
+			// comment line in the ported file.
+			for (const file of markerFiles) {
+				const lines = fs
+					.readFileSync(file, 'utf8')
+					.replace(/\r\n/g, '\n')
+					.split('\n');
+				for (const line of lines) {
+					if (!line.includes(PORT_MARKER)) continue;
+					expect(line).toMatch(
+						/^\s*(?:[/#*]+)\s*ported-from: opencode-ensemble [0-9a-f]{40} \S+/,
+					);
+				}
+			}
 			expect(fs.existsSync(noticesPath)).toBe(true);
 			expect(fs.readFileSync(noticesPath, 'utf8')).toContain(
 				UPSTREAM_COPYRIGHT,
