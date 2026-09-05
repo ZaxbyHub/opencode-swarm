@@ -20,6 +20,7 @@ import {
 } from '../../../src/state';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { canonicalRootKey } from '../../../src/utils/canonical-root';
 import { writeDisjointScopes } from './_delegation-gate-helpers';
 
 function git(directory: string, args: string[]): void {
@@ -198,7 +199,10 @@ describe('background coder Stage A provenance', () => {
 			'src/feature.ts',
 		]);
 		expect(record?.taskChangeContext?.baseline.changedFiles).toEqual([]);
-		expect(record?.taskChangeContext?.baseline.directory).toBe(directory);
+		// Snapshot directory identity is the canonical root key (win32 case-folded).
+		expect(record?.taskChangeContext?.baseline.directory).toBe(
+			canonicalRootKey(directory),
+		);
 	});
 
 	test('a running background coder durably blocks a duplicate task launch', async () => {
