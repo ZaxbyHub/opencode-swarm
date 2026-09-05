@@ -13,7 +13,8 @@ Workstream B, PR 3 of 3 — closes the remaining trust-boundary gaps from the
   `gh_evidence`, `pr.ts` (`ghExec`/`ghExecAsync`), and
   `pr-monitor-status` now spawn a resolved absolute `gh` instead of a bare
   name. Windows candidate ordering changed from "bare `gh` first" to
-  "platform absolutes first, bare name last" — the runtime-friction fix the
+  "platform absolutes first, probed PATH candidates next, bare-name
+  terminal fallback last" — the runtime-friction fix the
   #2236 sweep predicted for stale-PATH plugin processes.
 - **deepMerge prototype-pollution refusal (AC2):** `deepMerge` now performs a
   full recursive override scan and throws a typed `DangerousMergeKeyError`
@@ -44,8 +45,10 @@ Workstream B, PR 3 of 3 — closes the remaining trust-boundary gaps from the
   `C:\Program Files\nodejs\npm.cmd`. `.exe` hits spawn directly; POSIX and
   resolution-failure paths keep the historical bare-name behavior.
 - **Bounded council fetches (AC6):** Tavily and Brave provider searches in
-  `src/council/web-search-provider.ts` pass `AbortSignal.timeout(6_000)` so a
-  never-responding provider can no longer hang a council web search.
+  `src/council/web-search-provider.ts` race every fetch against a 6-second
+  deadline (`withTimeoutSignal`), so a never-responding provider can no longer
+  hang a council web search; a deadline miss is surfaced as its own timeout
+  error rather than a generic network failure.
 
 ## Migration
 

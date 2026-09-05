@@ -9,7 +9,9 @@ import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import { createSwarmTool } from './create-tool.js';
 
-/** Lazy-bind so mock.module can intercept at call time (#330). */
+/** Lazy-bind so mock.module can intercept at call time (#330); all internal
+ * calls route through _internals.getExecFileAsync so tests can replace the
+ * seam directly (PRR-020). */
 function getExecFileAsync() {
 	return promisify(child_process.execFile);
 }
@@ -49,7 +51,7 @@ export async function parseGitLog(
 	try {
 		// #2476 AC4: the aliased-callee form hid this bare 'git' literal from the
 		// bare-spawn ratchet; route through the shared resolver.
-		const { stdout } = await getExecFileAsync()(
+		const { stdout } = await _internals.getExecFileAsync()(
 			resolveGitExecutable(),
 			[
 				'log',
@@ -383,7 +385,7 @@ export async function detectDarkMatter(
 	try {
 		// #2476 AC4: the aliased-callee form hid this bare 'git' literal from the
 		// bare-spawn ratchet; route through the shared resolver.
-		const { stdout } = await getExecFileAsync()(
+		const { stdout } = await _internals.getExecFileAsync()(
 			resolveGitExecutable(),
 			['rev-list', '--count', 'HEAD'],
 			{
@@ -609,6 +611,7 @@ export const _internals: {
 	detectDarkMatter: typeof detectDarkMatter;
 	darkMatterToKnowledgeEntries: typeof darkMatterToKnowledgeEntries;
 	formatDarkMatterOutput: typeof formatDarkMatterOutput;
+	getExecFileAsync: typeof getExecFileAsync;
 } = {
 	parseGitLog,
 	buildCoChangeMatrix,
@@ -616,4 +619,5 @@ export const _internals: {
 	detectDarkMatter,
 	darkMatterToKnowledgeEntries,
 	formatDarkMatterOutput,
+	getExecFileAsync,
 } as const;

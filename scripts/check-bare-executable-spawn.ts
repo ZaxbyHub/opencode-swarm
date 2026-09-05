@@ -511,7 +511,7 @@ export function collectBareSpawnErrors(root: string = REPO_ROOT): CollectResult 
 	let skippedAllowlisted = 0;
 
 	for (const file of walkTsFiles(srcDir)) {
-		if (file.endsWith('.test.ts')) continue;
+		if (file.endsWith('.test.ts') || file.endsWith('.spec.ts')) continue;
 		const rel = path.relative(root, file).replace(/\\/g, '/');
 		if (RESOLVER_ALLOWLIST.includes(rel)) {
 			skippedAllowlisted++;

@@ -38,8 +38,10 @@ describe('web-search provider fetch timeout (#2476 AC6)', () => {
 	test('TavilyProvider rejects with WebSearchError within 8s', async () => {
 		const provider = new TavilyProvider('test-key');
 		const startedAt = performance.now();
-		await expect(provider.search('query', 1)).rejects.toBeInstanceOf(
-			WebSearchError,
+		// PRR-008: the deadline miss itself is surfaced (message says "timed
+		// out"), not wrapped as a generic "network error".
+		await expect(provider.search('query', 1)).rejects.toThrow(
+			/Tavily search timed out after 6000ms/,
 		);
 		expect(performance.now() - startedAt).toBeLessThan(8_000);
 	}, 9_000);
@@ -47,8 +49,8 @@ describe('web-search provider fetch timeout (#2476 AC6)', () => {
 	test('BraveProvider rejects with WebSearchError within 8s', async () => {
 		const provider = new BraveProvider('test-key');
 		const startedAt = performance.now();
-		await expect(provider.search('query', 1)).rejects.toBeInstanceOf(
-			WebSearchError,
+		await expect(provider.search('query', 1)).rejects.toThrow(
+			/Brave search timed out after 6000ms/,
 		);
 		expect(performance.now() - startedAt).toBeLessThan(8_000);
 	}, 9_000);

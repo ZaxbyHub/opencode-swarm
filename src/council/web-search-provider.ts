@@ -94,10 +94,13 @@ export class TavilyProvider implements WebSearchProvider {
 		}
 
 		let response: Response;
+		// #2476 AC6: bounded abortable fetch. withTimeoutSignal (the
+		// repo-sanctioned native-timeout replacement, #1964/#2103) trips a
+		// manual AbortController at the deadline and races the operation.
+		const timeoutError = new WebSearchError(
+			`Tavily search timed out after ${SEARCH_TIMEOUT_MS}ms`,
+		);
 		try {
-			// #2476 AC6: bounded abortable fetch. withTimeoutSignal (the
-			// repo-sanctioned native-timeout replacement, #1964/#2103) trips a
-			// manual AbortController at the deadline and races the operation.
 			response = await withTimeoutSignal(
 				(signal) =>
 					fetch('https://api.tavily.com/search', {
@@ -107,11 +110,12 @@ export class TavilyProvider implements WebSearchProvider {
 						signal,
 					}),
 				SEARCH_TIMEOUT_MS,
-				new WebSearchError(
-					`Tavily search timed out after ${SEARCH_TIMEOUT_MS}ms`,
-				),
+				timeoutError,
 			);
 		} catch (err) {
+			// PRR-008: surface the deadline miss itself, not a "network error"
+			// wrapper that mislabels it for consumers printing err.message.
+			if (err === timeoutError) throw err;
 			throw new WebSearchError(
 				`Tavily network error for query "${query}"`,
 				err,
@@ -170,8 +174,11 @@ export class BraveProvider implements WebSearchProvider {
 		}
 
 		let response: Response;
+		// #2476 AC6 — same sanctioned timeout wrapper as Tavily above.
+		const braveTimeoutError = new WebSearchError(
+			`Brave search timed out after ${SEARCH_TIMEOUT_MS}ms`,
+		);
 		try {
-			// #2476 AC6 — same sanctioned timeout wrapper as Tavily above.
 			response = await withTimeoutSignal(
 				(signal) =>
 					fetch(url.toString(), {
@@ -183,11 +190,10 @@ export class BraveProvider implements WebSearchProvider {
 						signal,
 					}),
 				SEARCH_TIMEOUT_MS,
-				new WebSearchError(
-					`Brave search timed out after ${SEARCH_TIMEOUT_MS}ms`,
-				),
+				braveTimeoutError,
 			);
 		} catch (err) {
+			if (err === braveTimeoutError) throw err;
 			throw new WebSearchError(`Brave network error for query "${query}"`, err);
 		}
 

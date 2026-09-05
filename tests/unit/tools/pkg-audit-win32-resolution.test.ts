@@ -18,7 +18,7 @@
 import { describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { _internals } from '../../../src/tools/pkg-audit';
+import { _internals, pkg_audit } from '../../../src/tools/pkg-audit';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const IS_WIN = process.platform === 'win32';
@@ -188,5 +188,92 @@ describe('pkg-audit resolveAuditCommand — #2476 AC5 win32 routing', () => {
 			}
 		},
 		15_000,
+	);
+
+	it.skipIf(!IS_WIN)(
+		'routes a cargo .cmd hit through the same cmd.exe form (PRR-013)',
+		() => {
+			const tmp = canonicalMkdtemp('pkg-audit-cargo-');
+			try {
+				const cargoDir = path.join(tmp, 'cargo dir');
+				fs.mkdirSync(cargoDir);
+				fs.writeFileSync(
+					path.join(cargoDir, 'cargo.cmd'),
+					'@echo off\r\necho probe-cargo-ok\r\n',
+				);
+				let command: string[] = [];
+				withPathReplacement(cargoDir, () => {
+					command = _internals.resolveAuditCommand('cargo');
+				});
+				expect(command).toEqual([
+					'cmd.exe',
+					'/d',
+					'/s',
+					'/c',
+					'call "' + path.join(cargoDir, 'cargo.cmd') + '"',
+				]);
+			} finally {
+				fs.rmSync(tmp, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.skipIf(!IS_WIN)(
+		'pkg_audit.execute passes verbatim args and killProcessTree for the cmd.exe-routed spawn (PRR-001)',
+		async () => {
+			const tmp = canonicalMkdtemp('pkg-audit-tree-');
+			const previousPath = process.env.PATH;
+			const originalBunSpawn = _internals.bunSpawn;
+			const recorded: Array<{
+				command: string[];
+				options: Record<string, unknown>;
+			}> = [];
+			try {
+				const spacedDir = path.join(tmp, 'space dir');
+				fs.mkdirSync(spacedDir);
+				fs.writeFileSync(
+					path.join(spacedDir, 'npm.cmd'),
+					'@echo off\r\necho probe-npm-ok\r\n',
+				);
+
+				_internals.bunSpawn = ((command: string[], options: unknown) => {
+					recorded.push({
+						command: [...command],
+						options: { ...(options as Record<string, unknown>) },
+					});
+					// Exit 0 short-circuits runNpmAudit before JSON parsing, so the
+					// fake proc only needs the stdout/stderr/exited surface.
+					return {
+						stdout: { text: async () => '' },
+						stderr: { text: async () => '' },
+						exited: Promise.resolve(0),
+						kill: () => {},
+					} as unknown as ReturnType<typeof originalBunSpawn>;
+				}) as typeof originalBunSpawn;
+
+				// PATH must stay replaced across the await: resolveAuditCommand
+				// reads process.env.PATH inside execute's async body.
+				process.env.PATH = spacedDir;
+				try {
+					await pkg_audit.execute({ ecosystem: 'npm' }, tmp);
+				} finally {
+					process.env.PATH = previousPath;
+				}
+			} finally {
+				_internals.bunSpawn = originalBunSpawn;
+				fs.rmSync(tmp, { recursive: true, force: true });
+			}
+
+			expect(recorded).toHaveLength(1);
+			const { command, options } = recorded[0];
+			expect(command[0]).toBe('cmd.exe');
+			expect(command[4]).toBe(
+				'call "' + path.join(tmp, 'space dir', 'npm.cmd') + '"',
+			);
+			expect(options.windowsVerbatimArguments).toBe(true);
+			// PRR-001: the timeout kill must reach the .cmd's node grandchild,
+			// not just the cmd.exe direct child.
+			expect(options.killProcessTree).toBe(true);
+		},
 	);
 });

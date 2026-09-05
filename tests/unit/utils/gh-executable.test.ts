@@ -3,6 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
+import {
 	__seedGhExecutableForTests,
 	_internals,
 	describeGhResolution,
@@ -144,6 +148,63 @@ describe('gh resolver parity (#2476 AC1)', () => {
 			}) as unknown as NodeJS.ProcessEnv;
 		expect(resolveGhExecutable()).toBe(override);
 		expect(probes[0]?.cmd).toBe(override);
+	});
+
+	test('a rejected override emits the parity advisory (PRR-006)', () => {
+		const override = writeCandidate('plain/gh.exe');
+		_internals.platform = () => 'win32';
+		_internals.env = () =>
+			({
+				[GH_BINARY_ENV_VAR]: override,
+			}) as unknown as NodeJS.ProcessEnv;
+		// Exit 0 but prints non-gh output — the override is unusable.
+		_internals.spawnSync = ((cmd: string) => {
+			probes.push({ cmd, args: [] });
+			return {
+				status: 0,
+				stdout: Buffer.from('not really gh'),
+				stderr: Buffer.from(''),
+				pid: 1,
+				output: [],
+				error: undefined,
+			} as ReturnType<typeof _internals.spawnSync>;
+		}) as typeof _internals.spawnSync;
+		clearDeferredWarnings();
+		expect(resolveGhExecutable()).toBe('gh');
+		const warnings = getDeferredWarnings().join('\n');
+		expect(warnings).toContain('OPENCODE_SWARM_GH_BINARY override');
+		expect(warnings).toContain(override);
+		clearDeferredWarnings();
+	});
+
+	test('a PATH candidate that passes the version gate is accepted (PRR-012)', () => {
+		// The resolver builds PATH candidates with the PLATFORM separator
+		// (joinDirAndName gives '<dir>\<name>' under the win32 stub) no matter
+		// which host runs the test. Plant the file at EXACTLY that joined
+		// string: on Windows this is the ordinary path; on POSIX it is a
+		// filename containing a literal backslash, which stat() resolves the
+		// same way. Host-native path.join here would desynchronize the planted
+		// file from the probed candidate on ubuntu/macOS (this file runs on all
+		// three CI OSes via the detect-paths matrix).
+		_internals.platform = () => 'win32';
+		const toolsDir = path.join(scratch, 'tools');
+		fs.mkdirSync(toolsDir, { recursive: true });
+		const pathHit = `${toolsDir}\\gh.exe`;
+		fs.writeFileSync(pathHit, '#!/bin/sh\nexit 0\n');
+		const absentDir = path.join(scratch, 'no-platform-ghere');
+		fs.mkdirSync(absentDir, { recursive: true });
+		// Platform absolutes resolve under absent dirs (stat-rejected, no
+		// probe) and gh.exe is the first WINDOWS_PATH_EXTENSIONS name, so the
+		// first spawn probe must be the PATH candidate.
+		_internals.env = () =>
+			({
+				PATH: toolsDir,
+				ProgramFiles: absentDir,
+				'ProgramFiles(x86)': absentDir,
+				LOCALAPPDATA: absentDir,
+			}) as unknown as NodeJS.ProcessEnv;
+		expect(resolveGhExecutable()).toBe(pathHit);
+		expect(probes[0]?.cmd).toBe(pathHit);
 	});
 
 	test('budget exhaustion returns the bare fallback without probing everything', () => {

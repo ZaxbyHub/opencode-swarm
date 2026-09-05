@@ -50,6 +50,7 @@ import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { advisoryWarn } from '../services/warning-buffer.js';
 
 /** Env var escape hatch — a blocked user can set this without editing files. */
 export const GH_BINARY_ENV_VAR = 'OPENCODE_SWARM_GH_BINARY';
@@ -104,7 +105,10 @@ interface CacheFallback {
 }
 type CacheEntry = CacheSuccess | CacheFallback;
 
-/** Module state — lazy, memoized on first call (AGENTS.md invariant 1). */
+/** Module state — lazy, memoized on first call (AGENTS.md invariant 1).
+ * Bounded: success cache holds ONE entry per process; the fallback cache
+ * expires after NEGATIVE_CACHE_TTL_MS; lastAttempts is replaced wholesale
+ * each probe cycle and bounded by the candidate-list length. */
 let cache: CacheEntry | null = null;
 let lastAttempts: GhResolutionAttempt[] = [];
 let cacheGeneration = 0;
@@ -312,6 +316,13 @@ function probeCycle(
 			accepted: result.accepted,
 			reason: result.accepted ? undefined : result.reason,
 		});
+		if (candidate.source === 'override' && !result.accepted) {
+			// Parity with git-executable.ts (PRR-006): a rejected operator
+			// override must not fall through silently.
+			advisoryWarn(
+				`[opencode-swarm] ${GH_BINARY_ENV_VAR} override "${candidate.path}" is unusable (${result.reason}); falling back to automatic gh resolution.`,
+			);
+		}
 		if (result.accepted) {
 			return { outcome: 'accepted', path: candidate.path };
 		}

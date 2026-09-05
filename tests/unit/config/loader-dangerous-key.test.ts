@@ -9,7 +9,10 @@ import {
 } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { loadPluginConfigWithMeta } from '../../../src/config/loader';
+import {
+	loadPluginConfigWithMeta,
+	loadPluginConfigWithMetaAsync,
+} from '../../../src/config/loader';
 import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
@@ -98,5 +101,23 @@ describe('loader: dangerous-key project config (#2476 AC2)', () => {
 		expect(getDeferredWarnings().join('\n')).not.toContain(
 			'prototype-pollution',
 		);
+	});
+
+	// PRR-011: the ASYNC leg is the one plugin init actually calls
+	// (src/index.ts, issue #704). It shares buildConfigWithMeta with the sync
+	// path, but the hostile-config behavior must be pinned on this leg too.
+	test('async loader (init path): hostile __proto__ config is dropped with the security advisory', async () => {
+		const dir = writeProjectConfig(
+			'{"git":{"__proto__":{"binary":"/evil/shim"}},"max_iterations":9}',
+		);
+		const meta = await loadPluginConfigWithMetaAsync(dir);
+		const warnings = getDeferredWarnings().join('\n');
+		expect(warnings).toContain('SECURITY');
+		expect(warnings).toContain('__proto__');
+		expect(
+			meta.config.git?.binary ??
+				(meta.config as Record<string, unknown>)?.git?.binary,
+		).toBeUndefined();
+		expect(meta.config.max_iterations).not.toBe(9);
 	});
 });

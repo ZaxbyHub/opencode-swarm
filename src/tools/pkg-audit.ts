@@ -326,7 +326,11 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 			cwd: directory,
 			// #2476 AC5: the cmd.exe-routed form carries a pre-quoted verbatim
 			// tail; keep Node from re-quoting it into a broken command line.
-			...(command[0] === 'cmd.exe' ? { windowsVerbatimArguments: true } : {}),
+			// killProcessTree (PRR-001): the timeout kill must reach the .cmd's
+			// node grandchild, not just the cmd.exe direct child.
+			...(command[0] === 'cmd.exe'
+				? { windowsVerbatimArguments: true, killProcessTree: true }
+				: {}),
 		});
 
 		const timeoutPromise = new Promise<'timeout'>((resolve) =>
@@ -688,7 +692,11 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 			cwd: directory,
 			// #2476 AC5: the cmd.exe-routed form carries a pre-quoted verbatim
 			// tail; keep Node from re-quoting it into a broken command line.
-			...(command[0] === 'cmd.exe' ? { windowsVerbatimArguments: true } : {}),
+			// killProcessTree (PRR-001): the timeout kill must reach the .cmd's
+			// node grandchild, not just the cmd.exe direct child.
+			...(command[0] === 'cmd.exe'
+				? { windowsVerbatimArguments: true, killProcessTree: true }
+				: {}),
 		});
 
 		const timeoutPromise = new Promise<'timeout'>((resolve) =>
