@@ -103,6 +103,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `repo_graph` | object | {} | Repository dependency-graph settings (builder excludes, incremental refresh). Nested defaults materialize when the whole section is omitted. |
 | `evidence` | object | — | Evidence retention and storage settings. |
 | `summaries` | object | — | Summary generation settings. |
+| `retention` | object | {} | Retention sweep settings (issue #2483). |
 | `review_passes` | object | — | Dual-pass security review settings. |
 | `adversarial_detection` | object | — | Same-model adversarial checker detection settings. |
 | `adversarial_testing` | object | { … } | Cross-model adversarial testing settings. |

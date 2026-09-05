@@ -12,7 +12,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
-	deleteCapsule,
 	listCapsules,
 	loadCapsule,
 	saveCapsule,
@@ -301,66 +300,6 @@ describe('loadCapsule', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. deleteCapsule tests
-// ---------------------------------------------------------------------------
-
-describe('deleteCapsule', () => {
-	let mocks: ReturnType<typeof createFreshMocks>;
-
-	beforeEach(() => {
-		mocks = createFreshMocks();
-		_internals.writeFileSync = mocks.writeFileSync;
-		_internals.readFileSync = mocks.readFileSync;
-		_internals.existsSync = mocks.existsSync;
-		_internals.mkdirSync = mocks.mkdirSync;
-		_internals.readdirSync = mocks.readdirSync;
-		_internals.unlinkSync = mocks.unlinkSync;
-		_internals.renameSync = mocks.renameSync;
-	});
-
-	afterEach(() => {
-		_internals.writeFileSync = realFs.writeFileSync;
-		_internals.readFileSync = realFs.readFileSync;
-		_internals.existsSync = realFs.existsSync;
-		_internals.mkdirSync = realFs.mkdirSync;
-		_internals.readdirSync = realFs.readdirSync;
-		_internals.unlinkSync = realFs.unlinkSync;
-		_internals.renameSync = realFs.renameSync;
-	});
-
-	test('returns true when file exists and is deleted', () => {
-		mocks.existsSync = mock(() => true);
-		_internals.existsSync = mocks.existsSync;
-
-		const result = deleteCapsule('8.1', '/fake');
-
-		expect(result).toBe(true);
-		expect(mocks.unlinkSync).toHaveBeenCalledTimes(1);
-		const [deletedPath] = mocks.unlinkSync.mock.calls[0]!;
-		expect(deletedPath).toBe(
-			path.join('/fake', '.swarm', 'capsules', '8.1.json'),
-		);
-	});
-
-	test('returns false when file does not exist', () => {
-		mocks.existsSync = mock(() => false);
-		_internals.existsSync = mocks.existsSync;
-
-		const result = deleteCapsule('9.1', '/fake');
-
-		expect(result).toBe(false);
-		expect(mocks.unlinkSync).not.toHaveBeenCalled();
-	});
-
-	test('returns false for invalid taskId', () => {
-		const result = deleteCapsule('../../etc/passwd', '/fake');
-
-		expect(result).toBe(false);
-		expect(mocks.unlinkSync).not.toHaveBeenCalled();
-	});
-});
-
-// ---------------------------------------------------------------------------
 // 4. listCapsules tests
 // ---------------------------------------------------------------------------
 
@@ -491,10 +430,6 @@ describe('path traversal security', () => {
 		expect(loadCapsule('../../etc/passwd', '/fake')).toBeNull();
 	});
 
-	test('deleteCapsule("../../etc/passwd") → false', () => {
-		expect(deleteCapsule('../../etc/passwd', '/fake')).toBe(false);
-	});
-
 	test('saveCapsule("1") → success=false (single number, no dot)', () => {
 		const capsule = makeCapsule({ task_id: '1' });
 		expect(saveCapsule(capsule, '/fake').success).toBe(false);
@@ -511,14 +446,6 @@ describe('path traversal security', () => {
 
 	test('loadCapsule("a.b") → null', () => {
 		expect(loadCapsule('a.b', '/fake')).toBeNull();
-	});
-
-	test('deleteCapsule("1") → false', () => {
-		expect(deleteCapsule('1', '/fake')).toBe(false);
-	});
-
-	test('deleteCapsule("a.b") → false', () => {
-		expect(deleteCapsule('a.b', '/fake')).toBe(false);
 	});
 });
 
@@ -572,17 +499,6 @@ describe('integration — real filesystem', () => {
 		expect(loaded).not.toBeNull();
 		expect(loaded!.task_id).toBe('99.1');
 		expect(loaded!.content).toBe(capsule.content);
-	});
-
-	test('deleteCapsule removes file', () => {
-		const capsule = makeCapsule({ task_id: '99.2' });
-		saveCapsule(capsule, tmpDir);
-
-		const deleted = deleteCapsule('99.2', tmpDir);
-		expect(deleted).toBe(true);
-
-		const loaded = loadCapsule('99.2', tmpDir);
-		expect(loaded).toBeNull();
 	});
 
 	test('listCapsules returns saved task IDs', () => {

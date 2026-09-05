@@ -566,6 +566,18 @@ export const SummaryConfigSchema = z.object({
 
 export type SummaryConfig = z.infer<typeof SummaryConfigSchema>;
 
+// Retention sweep configuration (issue #2483 §4)
+export const RetentionConfigSchema = z
+	.object({
+		/** When false, the retention sweep is a no-op that reports `{ disabled: true }`. Default: true. */
+		enabled: z.boolean().default(true),
+		/** Compute and log would-prune counts without deleting anything. Default: false. */
+		dry_run: z.boolean().default(false),
+	})
+	.prefault({});
+
+export type RetentionConfig = z.infer<typeof RetentionConfigSchema>;
+
 // Review passes configuration (dual-pass security review)
 export const ReviewPassesConfigSchema = z.object({
 	always_security_review: z.boolean().default(false),
@@ -3612,6 +3624,14 @@ export const PluginConfigSchema = z.object({
 	// Summary configuration
 	summaries: SummaryConfigSchema.optional().describe(
 		'Summary generation settings.',
+	),
+
+	// Retention sweep configuration (issue #2483 §4). Nested defaults
+	// materialize when the whole section is omitted (prefault, mirroring
+	// repo_graph) so every consumer observes `enabled: true, dry_run: false`
+	// by default.
+	retention: RetentionConfigSchema.describe(
+		'Retention sweep settings (issue #2483).',
 	),
 
 	// Review passes configuration (dual-pass security review)

@@ -16,20 +16,6 @@
 			"note": "Pre-existing debt, not approved drift: \"validateAndRecordAttestation\" exists in src/hooks/guardrails/file-authority.ts but not inside :136 (attestations.writerCitations[0])."
 		},
 		{
-			"rowId": "capsules",
-			"file": "src/context-map/capsule-persistence.ts",
-			"identifier": "loadCapsule",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadCapsule\" exists in src/context-map/capsule-persistence.ts but not inside src/context-map/capsule-persistence.ts:165 (capsules.readerCitations[0])."
-		},
-		{
-			"rowId": "capsules",
-			"file": "src/context-map/capsule-persistence.ts",
-			"identifier": "saveCapsule",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"saveCapsule\" exists in src/context-map/capsule-persistence.ts but not inside src/context-map/capsule-persistence.ts:114 (capsules.writerCitations[0])."
-		},
-		{
 			"rowId": "close-archive-bundles",
 			"file": "src/commands/close.ts",
 			"identifier": "runArchiveStage",
@@ -84,13 +70,6 @@
 			"identifier": "saveContextMap",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"saveContextMap\" exists in src/context-map/persistence.ts but not inside src/context-map/persistence.ts:132 (context-map.writerCitations[0])."
-		},
-		{
-			"rowId": "context-snapshot",
-			"file": "src/services/compaction-service.ts",
-			"identifier": "appendSnapshot",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendSnapshot\" exists in src/services/compaction-service.ts but not inside src/services/compaction-service.ts:86 (context-snapshot.writerCitations[0])."
 		},
 		{
 			"rowId": "council-evidence-files",
@@ -363,7 +342,7 @@
 			"file": "src/services/context-budget-service.ts",
 			"identifier": "writeBudgetState",
 			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeBudgetState\" exists in src/services/context-budget-service.ts but not inside src/services/context-budget-service.ts:196 (session-state-snapshot.writerCitations[2])."
+			"note": "Pre-existing debt, not approved drift: \"writeBudgetState\" exists in src/services/context-budget-service.ts but not inside src/services/context-budget-service.ts:196 (session-state-snapshot.writerCitations[3])."
 		},
 		{
 			"rowId": "session-state-snapshot",
@@ -371,20 +350,6 @@
 			"identifier": "readSnapshot",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"readSnapshot\" exists in src/session/snapshot-reader.ts but not inside src/session/snapshot-reader.ts:320 (session-state-snapshot.readerCitations[0])."
-		},
-		{
-			"rowId": "skill-changelogs",
-			"file": "src/services/skill-changelog.ts",
-			"identifier": "appendSkillChangelog",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendSkillChangelog\" exists in src/services/skill-changelog.ts but not inside src/services/skill-changelog.ts:36 (skill-changelogs.writerCitations[0])."
-		},
-		{
-			"rowId": "skill-changelogs",
-			"file": "src/services/skill-changelog.ts",
-			"identifier": "readSkillChangelog",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readSkillChangelog\" exists in src/services/skill-changelog.ts but not inside src/services/skill-changelog.ts:63 (skill-changelogs.readerCitations[0])."
 		},
 		{
 			"rowId": "skill-improver-proposals",

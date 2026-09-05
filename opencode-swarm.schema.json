@@ -1524,6 +1524,21 @@
         }
       }
     },
+    "retention": {
+      "description": "Retention sweep settings (issue #2483).",
+      "default": {},
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
     "review_passes": {
       "description": "Dual-pass security review settings.",
       "type": "object",

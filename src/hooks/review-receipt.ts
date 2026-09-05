@@ -36,6 +36,7 @@ import type {
 	FindingValidation,
 	ReviewFinding,
 } from '../agents/agent-output-schema.js';
+import { resolveRetentionCap } from '../retention/caps.js';
 
 // ============================================================================
 // Types
@@ -758,6 +759,87 @@ export async function removeReviewReceipt(
 	});
 }
 
+export interface PruneDanglingReceiptIndexEntriesOptions {
+	/** Count dangling entries without rewriting the index (sweep dry-run). */
+	dryRun?: boolean;
+}
+
+/**
+ * Lenient index read for the maintenance prune: unlike {@link readReceiptIndex}
+ * (which fails closed to an empty manifest for the read path), a manifest
+ * whose `entries` is an array still participates even when `schema_version`
+ * is absent or foreign — the rewrite then emits the canonical form. Returns
+ * `null` when the file is missing or has no usable entries array.
+ */
+async function readIndexForPrune(
+	context: ReceiptPersistenceContext,
+): Promise<ReceiptIndex | null> {
+	const indexPath = path.join(context.receipts.path, 'index.json');
+	try {
+		const parsed = JSON.parse(
+			await fs.promises.readFile(indexPath, 'utf-8'),
+		) as Partial<ReceiptIndex>;
+		if (!Array.isArray(parsed.entries)) return null;
+		return { schema_version: 1, entries: parsed.entries };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Drop index entries whose receipt file no longer exists (issue #2483).
+ *
+ * The retention sweep prunes receipt FILES by age/count; without this pass
+ * the manifest keeps naming pruned evidence forever. Entries whose
+ * `filename` is not a bare basename (the poisoned-entry class the read path
+ * already refuses) count as dangling and are dropped with the rest.
+ *
+ * The rewrite is atomic (temp+rename via {@link writeReceiptIndex}) under
+ * the same `_indexLockChain` as appends, so an interleaved append is never
+ * lost. Returns the number of entries dropped (or, with `dryRun`, the
+ * number that WOULD be dropped). A missing/unparseable index, or a receipts
+ * directory that does not exist, is a 0 — this helper never creates state.
+ */
+export async function pruneDanglingReceiptIndexEntries(
+	directory: string,
+	options: PruneDanglingReceiptIndexEntriesOptions = {},
+): Promise<number> {
+	const indexPath = resolveReceiptIndexPath(directory);
+	if (!fs.existsSync(indexPath)) return 0;
+	const context = captureExistingReceiptContext(directory);
+	const isDangling = (entry: ReceiptIndexEntry): boolean => {
+		const name = String(entry?.filename ?? '');
+		const bare =
+			name !== '' &&
+			path.basename(name) === name &&
+			!name.includes('/') &&
+			!name.includes('\\');
+		if (!bare) return true; // poisoned/foreign filename: dangling
+		return !fs.existsSync(path.join(context.receipts.path, name));
+	};
+
+	const snapshot = await readIndexForPrune(context);
+	if (!snapshot) return 0;
+	const dangling = snapshot.entries.filter(isDangling).length;
+	if (dangling === 0 || options.dryRun === true) return dangling;
+
+	return withIndexLock(async () => {
+		// Re-read under the lock so a concurrent append between the snapshot
+		// and the rewrite is preserved.
+		const current = await readIndexForPrune(context);
+		if (!current) return 0;
+		const survivors = current.entries.filter((entry) => !isDangling(entry));
+		if (survivors.length === current.entries.length) return 0;
+		await writeReceiptIndex(
+			directory,
+			{ schema_version: 1, entries: survivors },
+			undefined,
+			context,
+		);
+		return current.entries.length - survivors.length;
+	});
+}
+
 /**
  * Atomically attach independent finding-validation results to an existing
  * receipt. The receipt identity and index entry remain unchanged.
@@ -894,14 +976,26 @@ export async function readReceiptsByScopeHash(
 }
 
 /**
+ * Read cap for the receipts index reader (issue #2483 §2, R12): the index is
+ * append-ordered (newest last), so bounding the read to the LAST
+ * {@link MAX_RECEIPTS_READ} entries keeps every read O(cap) while still
+ * returning the newest receipts. The effective value resolves through
+ * `resolveRetentionCap` so the #2483 acceptance checks can shrink it.
+ */
+export const MAX_RECEIPTS_READ = 1000;
+
+/**
  * Read all receipts from the index (all verdicts, latest first).
- * Useful for drift verification context.
+ * Useful for drift verification context. Bounded to the newest
+ * {@link MAX_RECEIPTS_READ} index entries (see the constant's docblock).
  */
 export async function readAllReceipts(
 	directory: string,
 ): Promise<ReviewReceipt[]> {
 	const index = await readReceiptIndex(directory);
-	const sorted = [...index.entries].sort((a, b) =>
+	const cap = resolveRetentionCap('MAX_RECEIPTS_READ', MAX_RECEIPTS_READ);
+	const bounded = index.entries.slice(-cap);
+	const sorted = [...bounded].sort((a, b) =>
 		b.reviewed_at.localeCompare(a.reviewed_at),
 	);
 

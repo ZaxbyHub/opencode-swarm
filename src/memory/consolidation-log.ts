@@ -1,6 +1,7 @@
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
+import { resolveRetentionCap } from '../retention/caps';
+import { appendCappedJsonl, readTailJsonl } from '../retention/jsonl-cap';
 import type { VettedMemoryRoot } from './storage-root';
 
 /**
@@ -39,6 +40,16 @@ export interface ConsolidationLogRecord {
 const LOG_RELATIVE_PATH = path.join('memory', 'consolidation-log.jsonl');
 const LOG_BASENAME = 'consolidation-log.jsonl';
 
+/**
+ * Global FIFO cap on the consolidation log (issue #2483 §2). Enforcement and
+ * the bounded read both resolve the effective value through
+ * `resolveRetentionCap` so the #2483 acceptance checks can shrink the cap
+ * below this default and prove the writer clamps. The cap keeps last-N
+ * semantics: records are returned oldest-to-newest, so callers that
+ * `slice(-limit)` for the CLI's last-N view keep working.
+ */
+export const MAX_CONSOLIDATION_LOG_ENTRIES = 500;
+
 /** #1850: resolve the log path under either a local directory or a vetted root. */
 function resolveLogPath(target: string | VettedMemoryRoot): string {
 	if (typeof target === 'string') {
@@ -53,31 +64,22 @@ function resolveLogPath(target: string | VettedMemoryRoot): string {
 export async function readConsolidationLog(
 	target: string | VettedMemoryRoot,
 ): Promise<ConsolidationLogRecord[]> {
-	const filePath = resolveLogPath(target);
-	let raw: string;
-	try {
-		raw = await readFile(filePath, 'utf-8');
-	} catch {
-		return [];
-	}
-	const records: ConsolidationLogRecord[] = [];
-	for (const line of raw.split('\n')) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		try {
-			records.push(JSON.parse(trimmed) as ConsolidationLogRecord);
-		} catch {
-			// Skip corrupt lines rather than failing the whole read.
-		}
-	}
-	return records;
+	return readTailJsonl<ConsolidationLogRecord>(resolveLogPath(target), {
+		maxEntries: resolveRetentionCap(
+			'MAX_CONSOLIDATION_LOG_ENTRIES',
+			MAX_CONSOLIDATION_LOG_ENTRIES,
+		),
+	});
 }
 
 export async function appendConsolidationLog(
 	target: string | VettedMemoryRoot,
 	record: ConsolidationLogRecord,
 ): Promise<void> {
-	const filePath = resolveLogPath(target);
-	await mkdir(path.dirname(filePath), { recursive: true });
-	await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+	await appendCappedJsonl(resolveLogPath(target), JSON.stringify(record), {
+		maxEntries: resolveRetentionCap(
+			'MAX_CONSOLIDATION_LOG_ENTRIES',
+			MAX_CONSOLIDATION_LOG_ENTRIES,
+		),
+	});
 }

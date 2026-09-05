@@ -53,6 +53,7 @@ import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types';
 import { validateSwarmPath } from '../hooks/utils';
 import { runFinalizeRewardSweep } from '../memory/finalize-reward-sweep';
 import { tryAcquireLock } from '../parallel/file-locks.js';
+import { runRetentionSweep } from '../retention/sweep';
 import { clearAllScopes } from '../scope/scope-persistence';
 import {
 	buildActionMenu,
@@ -400,7 +401,7 @@ async function copyDirRecursive(src: string, dest: string): Promise<number> {
  * task state transitions and snapshot events that plan.json/plan.md don't
  * preserve.
  */
-const ARCHIVE_ARTIFACTS = [
+export const ARCHIVE_ARTIFACTS = [
 	'plan.json',
 	'plan.md',
 	'plan-ledger.jsonl',
@@ -424,6 +425,9 @@ const ARCHIVE_ARTIFACTS = [
 	// carrying it into the next plan would label an unrelated task 1.1 as failed.
 	'run-memory.jsonl',
 	'repo-graph.json',
+	// #2483: the repo-graph fingerprint sidecar rides with its sibling
+	// repo-graph.json (archive + clean) so close can no longer orphan it.
+	'repo-graph.fingerprint.json',
 	'doc-manifest.json',
 	'dark-matter.md',
 	// telemetry.jsonl (active) AND telemetry.jsonl.1 (rotated) are archived as a
@@ -434,10 +438,13 @@ const ARCHIVE_ARTIFACTS = [
 	'telemetry.jsonl',
 	'telemetry.jsonl.1',
 	'swarm.db',
-	// swarm.db-shm / swarm.db-wal are intentionally NOT listed: they are
-	// transient SQLite sidecars recreated on next open. They are never archived
-	// and never cleaned (preserved on disk). See the ACTIVE_STATE_TO_CLEAN
-	// docblock below.
+	'epic-state.json',
+	'turbo-state.json',
+	// swarm.db-shm / swarm.db-wal are intentionally NOT listed: the VACUUM INTO
+	// snapshot needs no sidecar content. They are never archived, but since
+	// #2483 they ARE removed right after the swarm.db unlink by
+	// removeSqliteSidecarsAfterClose (reversing #1692 — see the
+	// ACTIVE_STATE_TO_CLEAN docblock below).
 	// repo-memory.sqlite (issue #1534): the derived index maintained when
 	// repo_graph.storage === 'indexed'. Mirrors swarm.db exactly — snapshotted
 	// via archiveSqliteSnapshot (VACUUM INTO), and its -shm/-wal sidecars are
@@ -491,10 +498,13 @@ const ARCHIVE_ARTIFACTS = [
  * interference.
  *
  * The SQLite WAL sidecars swarm.db-shm and swarm.db-wal are deliberately NOT in
- * either list: they are transient internals that SQLite recreates on next open,
- * so they are neither archived nor cleaned — they are left in place. (An earlier
- * revision listed them here as "must be removed"; that was never true — the
- * archive stage skipped them, so the clean stage never reached them.)
+ * either list (the archive-first guard would preserve them anyway): since #2483
+ * they are removed immediately AFTER the swarm.db unlink by
+ * removeSqliteSidecarsAfterClose, deliberately reversing #1692. Post-unlink the
+ * sidecar paths are meaningless for future opens (no new opener can attach),
+ * live processes keep their already-open fds so deleting the PATH cannot
+ * corrupt them, and a Windows open-handle collision yields EBUSY which the
+ * helper skips fail-open.
  *
  * Note: knowledge.jsonl is intentionally NOT cleaned because it contains cumulative
  * project knowledge (lessons learned) that should persist across sessions and finalize
@@ -518,7 +528,7 @@ const ARCHIVE_ARTIFACTS = [
  * the SPEC_DRIFT_BLOCK message. Both are archived first (archive-first guard),
  * then cleaned so the next session starts drift-free.
  */
-const ACTIVE_STATE_TO_CLEAN = [
+export const ACTIVE_STATE_TO_CLEAN = [
 	'plan.json',
 	'plan.md',
 	'plan-ledger.jsonl',
@@ -533,6 +543,8 @@ const ACTIVE_STATE_TO_CLEAN = [
 	// Archived first, then cleaned so the next plan starts with no run memory.
 	'run-memory.jsonl',
 	'repo-graph.json',
+	// #2483: archived + cleaned with its sibling repo-graph.json (above).
+	'repo-graph.fingerprint.json',
 	'doc-manifest.json',
 	'dark-matter.md',
 	'telemetry.jsonl',
@@ -546,11 +558,17 @@ const ACTIVE_STATE_TO_CLEAN = [
 	'spec-staleness.json',
 	'spec-snapshot.md',
 	'swarm.db',
-	// swarm.db-shm / swarm.db-wal intentionally omitted — preserved on disk
-	// (transient SQLite sidecars, recreated on next open). See docblock above.
+	// swarm.db-shm / swarm.db-wal intentionally omitted from this list — the
+	// archive-first guard never admits them, so they are removed separately
+	// right after the swarm.db unlink by removeSqliteSidecarsAfterClose
+	// (#2483, reversing #1692). See docblock above.
 	// repo-memory.sqlite (issue #1534): same treatment as swarm.db — its
 	// -shm/-wal sidecars are intentionally omitted for the same reason.
 	REPO_MEMORY_FILENAME,
+	// #2483 (R5): close ends epic-mode runtime state — the epic lane and turbo
+	// bookkeeping must not leak into the next session.
+	'epic-state.json',
+	'turbo-state.json',
 ];
 
 /**
@@ -613,7 +631,7 @@ const REQUIRED_ARTIFACTS = new Set(['plan.json', 'plan-ledger.jsonl']);
  * These contain session-generated data that must be removed so future
  * swarms start clean. Each entry is a relative path under .swarm/.
  */
-const ACTIVE_STATE_DIRS_TO_CLEAN = [
+export const ACTIVE_STATE_DIRS_TO_CLEAN = [
 	'coder-settlements',
 	'council',
 	'evidence',
@@ -622,6 +640,13 @@ const ACTIVE_STATE_DIRS_TO_CLEAN = [
 	'spec-archive',
 	'task-repairs',
 	'task-terminals',
+	// #2483 (R5): close ends epic-mode runtime state — per-run memory logs and
+	// the rebuildable epic diagnostics (calibration/divergence) are archived
+	// into the session bundle, then the live copies are reset. Between closes
+	// the writer caps and the retention sweep bound them. recovery/ stays out
+	// (the sweep owns it).
+	'runs',
+	'epic',
 ];
 
 /**
@@ -1427,10 +1452,12 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 		//
 		// WAL sidecar files (swarm.db-shm/-wal) are transient SQLite internals
 		// that SQLite recreates on next open; they are deliberately absent from
-		// ARCHIVE_ARTIFACTS/ACTIVE_STATE_TO_CLEAN, so they are neither archived
-		// nor cleaned (left in place). swarm.db itself is snapshotted via the
-		// in-process VACUUM INTO engine (archiveSqliteSnapshot), which produces
-		// a single self-contained, transactionally-consistent file.
+		// ARCHIVE_ARTIFACTS/ACTIVE_STATE_TO_CLEAN, so they are never archived —
+		// the clean stage removes them right after the swarm.db unlink via
+		// removeSqliteSidecarsAfterClose (#2483, reversing #1692). swarm.db
+		// itself is snapshotted via the in-process VACUUM INTO engine
+		// (archiveSqliteSnapshot), which produces a single self-contained,
+		// transactionally-consistent file.
 
 		// When linked, the knowledge family lives in the shared link store, which
 		// is cohort-owned. Do not archive or clean it from a single worktree's
@@ -1459,11 +1486,12 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 				// loader (src/db/sqlite-loader.ts). Produces a single self-contained
 				// file (journal_mode=delete, no WAL sidecars) containing ALL committed
 				// rows and EXCLUDING uncommitted writers (spike-proven under Bun + Node).
-				// Sidecar files (-shm/-wal) are transient and intentionally neither
-				// archived nor cleaned — left in place, no warning. repo-memory.sqlite
-				// (issue #1534) is a WAL-mode DB exactly like swarm.db, so a raw copy
-				// would not be a consistent snapshot; it is routed through the same
-				// archiveSqliteSnapshot path.
+				// Sidecar files (-shm/-wal) are transient and intentionally never
+				// archived; swarm.db's sidecars are removed after its unlink by
+				// removeSqliteSidecarsAfterClose (#2483), with no warning.
+				// repo-memory.sqlite (issue #1534) is a WAL-mode DB exactly like
+				// swarm.db, so a raw copy would not be a consistent snapshot; it is
+				// routed through the same archiveSqliteSnapshot path.
 				const r = await archiveSqliteSnapshot({
 					sourcePath: srcPath,
 					destDir: ctx.archiveDir,
@@ -1778,6 +1806,28 @@ async function unlinkActiveStateFileWithRetry(filePath: string): Promise<void> {
 	}
 }
 
+/**
+ * Remove the SQLite WAL sidecars (swarm.db-wal / swarm.db-shm) immediately
+ * after the clean stage unlinks swarm.db (#2483, deliberately reversing the
+ * #1692 preserve decision): once the main db is unlinked the sidecar paths
+ * are meaningless for future opens — no new opener can attach — and live
+ * processes keep their already-open fds, so deleting the PATH cannot corrupt
+ * them. Best-effort and per-file fail-open: ENOENT (already gone) and EBUSY
+ * (Windows open-handle collision) are skipped silently.
+ */
+export function removeSqliteSidecarsAfterClose(swarmDir: string): void {
+	for (const sidecar of ['swarm.db-wal', 'swarm.db-shm']) {
+		try {
+			fsSync.unlinkSync(path.join(swarmDir, sidecar));
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException)?.code;
+			if (code !== 'ENOENT' && code !== 'EBUSY') {
+				log('[close-command] failed to remove sqlite sidecar:', error);
+			}
+		}
+	}
+}
+
 export async function runCleanStage(
 	ctx: CloseStageContext,
 ): Promise<CleanStageResult> {
@@ -1899,6 +1949,11 @@ export async function runCleanStage(
 						`Failed to clean active-state file ${artifact} [${errno ?? 'unknown'}]: ${reason}`,
 					);
 				}
+			}
+			// #2483: immediately after the swarm.db unlink, drop its -wal/-shm
+			// sidecar paths (reversing #1692 — see removeSqliteSidecarsAfterClose).
+			if (artifact === 'swarm.db') {
+				removeSqliteSidecarsAfterClose(ctx.swarmDir);
 			}
 		}
 	} else {
@@ -2334,7 +2389,7 @@ export async function runFinalizeDryRun(
 		'### Git',
 		`- ${gitNote}`,
 		'',
-		'_Note: swarm.db-shm / swarm.db-wal are transient SQLite sidecars — they are never archived or cleaned. The clean list is an approximation of the archive-first guard._',
+		'_Note: swarm.db-shm / swarm.db-wal are transient SQLite sidecars — never archived; a real close removes them right after the swarm.db unlink (#2483, reversing #1692). The clean list is an approximation of the archive-first guard._',
 		'',
 		'Run `/swarm finalize` (without `--dry-run`) to apply.',
 	];
@@ -2561,6 +2616,28 @@ export async function handleCloseCommand(
 		});
 
 		await runArchiveStage(ctx);
+		// #2483: one bounded retention sweep between the archive and clean
+		// stages prunes the residual keyspace families close does not own.
+		// Fail-open — a sweep failure never blocks the clean stage.
+		try {
+			const retentionCfg = (
+				loadedConfig as { retention?: { enabled?: boolean; dry_run?: boolean } }
+			).retention;
+			const summariesRetentionDays = (
+				loadedConfig as { summaries?: { retention_days?: number } } | undefined
+			)?.summaries?.retention_days;
+			await runRetentionSweep(directory, {
+				enabled: retentionCfg?.enabled !== false,
+				dryRun: retentionCfg?.dry_run === true,
+				summariesRetentionDays:
+					typeof summariesRetentionDays === 'number' &&
+					summariesRetentionDays >= 1
+						? summariesRetentionDays
+						: undefined,
+			});
+		} catch (sweepError) {
+			log('[close-command] retention sweep failed (non-fatal):', sweepError);
+		}
 		const cleanResult = await runCleanStage(ctx);
 		// Emit the structured archive event AFTER clean so source_disposition
 		// can be finalized truthfully ('removed' for cleaned artifacts).

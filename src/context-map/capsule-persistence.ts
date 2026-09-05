@@ -19,6 +19,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { estimateTokens } from '../hooks/utils';
+import { resolveRetentionCap } from '../retention/caps';
 import type { CapsuleMetadata, ContextCapsule } from '../types/context-capsule';
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,7 @@ export const _internals = {
 	existsSync: fs.existsSync,
 	mkdirSync: fs.mkdirSync,
 	readdirSync: fs.readdirSync,
+	statSync: fs.statSync,
 	unlinkSync: fs.unlinkSync,
 	renameSync: fs.renameSync,
 } as const;
@@ -184,35 +186,23 @@ export function loadCapsule(
 }
 
 /**
- * Delete a capsule from `.swarm/capsules/{task_id}.json`.
- *
- * Returns `true` if the file was deleted, `false` if it didn't exist.
- * Never throws.
+ * Listing cap for `.swarm/capsules/` enumeration (issue #2483 §2, R12): the
+ * list returns NEWEST-first (mtime descending, code-unit filename
+ * tie-break — never localeCompare) and is capped, so every listing read is
+ * O(cap), not O(unbounded capsule history). The effective value resolves
+ * through `resolveRetentionCap` so the #2483 acceptance checks can shrink it.
  */
-export function deleteCapsule(taskId: string, directory: string): boolean {
-	if (!isValidTaskId(taskId)) {
-		return false;
-	}
-
-	const filePath = capsulePath(taskId, directory);
-
-	try {
-		if (!_internals.existsSync(filePath)) {
-			return false;
-		}
-		_internals.unlinkSync(filePath);
-		return true;
-	} catch {
-		return false;
-	}
-}
+export const MAX_CAPSULES_LISTED = 500;
 
 /**
- * List all saved capsule task IDs in `.swarm/capsules/`.
+ * List saved capsule task IDs in `.swarm/capsules/`, newest-first.
  *
  * Returns an array of task IDs derived from filenames (stripping the
- * `.json` extension). Returns an empty array if the directory doesn't
- * exist. Never throws.
+ * `.json` extension), ordered by capsule file mtime descending (code-unit
+ * filename tie-break) and capped at {@link MAX_CAPSULES_LISTED} entries.
+ * A capsule whose file cannot be `stat`-ed sorts oldest (fail-open per
+ * entry). Returns an empty array if the directory doesn't exist. Never
+ * throws.
  */
 export function listCapsules(directory: string): string[] {
 	const capsulesDir = path.join(directory, '.swarm', 'capsules');
@@ -222,9 +212,29 @@ export function listCapsules(directory: string): string[] {
 			return [];
 		}
 		const entries = _internals.readdirSync(capsulesDir);
-		return entries
+		const ids = entries
 			.filter((entry) => entry.endsWith('.json'))
 			.map((entry) => entry.slice(0, -5));
+		const mtimeById = new Map<string, number>();
+		for (const id of ids) {
+			try {
+				mtimeById.set(
+					id,
+					_internals.statSync(path.join(capsulesDir, `${id}.json`)).mtimeMs,
+				);
+			} catch {
+				mtimeById.set(id, 0); // unreadable mtime sorts oldest, never throws
+			}
+		}
+		const cap = resolveRetentionCap('MAX_CAPSULES_LISTED', MAX_CAPSULES_LISTED);
+		return ids
+			.sort((a, b) => {
+				const mtimeDelta = (mtimeById.get(b) ?? 0) - (mtimeById.get(a) ?? 0);
+				if (mtimeDelta !== 0) return mtimeDelta;
+				// Code-unit tie-break (never localeCompare).
+				return a < b ? -1 : a > b ? 1 : 0;
+			})
+			.slice(0, cap);
 	} catch {
 		return [];
 	}
