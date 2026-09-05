@@ -1,6 +1,7 @@
-import { appendFile, mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
+import { resolveRetentionCap } from '../retention/caps';
+import { appendCappedJsonl } from '../retention/jsonl-cap';
 
 export type MemoryRunLogEventName =
 	| 'recall_requested'
@@ -40,6 +41,15 @@ export interface MemoryRunLogEvent {
 	metadata?: Record<string, unknown>;
 }
 
+/**
+ * Global FIFO cap on each run's `memory.jsonl` run log (issue #2483 §2).
+ * Enforcement resolves the effective value through `resolveRetentionCap` so
+ * the #2483 acceptance checks can shrink the cap below this default and
+ * prove the writer clamps. Keyspace (run directories) is handled by the
+ * retention sweep and close lifecycle.
+ */
+export const MAX_RUN_LOG_ENTRIES = 2000;
+
 export async function appendMemoryRunLog(
 	directory: string,
 	runId: string | undefined,
@@ -48,15 +58,19 @@ export async function appendMemoryRunLog(
 	const safeRunId = sanitizeRunId(runId);
 	const relativePath = path.join('runs', safeRunId, 'memory.jsonl');
 	const filePath = validateSwarmPath(directory, relativePath);
-	await mkdir(path.dirname(filePath), { recursive: true });
-	await appendFile(
+	await appendCappedJsonl(
 		filePath,
-		`${JSON.stringify({
+		JSON.stringify({
 			...event,
 			runId: safeRunId,
 			timestamp: event.timestamp ?? new Date().toISOString(),
-		})}\n`,
-		'utf-8',
+		}),
+		{
+			maxEntries: resolveRetentionCap(
+				'MAX_RUN_LOG_ENTRIES',
+				MAX_RUN_LOG_ENTRIES,
+			),
+		},
 	);
 }
 

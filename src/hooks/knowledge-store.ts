@@ -13,6 +13,8 @@ import {
 	resolveHiveKnowledgePath as resolveHiveKnowledgePathImpl,
 	resolveHiveRejectedPath as resolveHiveRejectedPathImpl,
 } from '../knowledge/hive-paths.js';
+import { resolveRetentionCap } from '../retention/caps.js';
+import { appendCappedJsonl, readTailJsonl } from '../retention/jsonl-cap.js';
 import * as logger from '../utils/logger.js';
 import { readCachedParsedFile } from '../utils/swarm-artifact-cache.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
@@ -301,11 +303,25 @@ export interface KnowledgeRetractionRecord {
 	matched_hive_ids: string[];
 }
 
+/**
+ * Global FIFO cap on the retraction audit stream (issue #2483 §2). Enforcement
+ * resolves the effective value through {@link resolveRetentionCap} so the
+ * #2483 acceptance checks can shrink the cap below this default and prove the
+ * writer clamps.
+ */
+export const MAX_RETRACTION_RECORDS = 500;
+
 export async function readRetractionRecords(
 	directory: string,
 ): Promise<KnowledgeRetractionRecord[]> {
-	return readKnowledge<KnowledgeRetractionRecord>(
+	return readTailJsonl<KnowledgeRetractionRecord>(
 		resolveSwarmRetractionsPath(directory),
+		{
+			maxEntries: resolveRetentionCap(
+				'MAX_RETRACTION_RECORDS',
+				MAX_RETRACTION_RECORDS,
+			),
+		},
 	);
 }
 
@@ -313,7 +329,35 @@ export async function appendRetractionRecord(
 	directory: string,
 	record: KnowledgeRetractionRecord,
 ): Promise<void> {
-	await appendKnowledge(resolveSwarmRetractionsPath(directory), record);
+	const filePath = resolveSwarmRetractionsPath(directory);
+	const dir = path.dirname(filePath);
+	await mkdir(dir, { recursive: true });
+
+	// Same directory-level proper-lockfile discipline as appendKnowledge: a
+	// concurrent cap enforcement must not interleave with this append, and
+	// vice versa. The cap itself is enforced inside the lock via
+	// appendCappedJsonl (append + crash-atomic FIFO compaction, issue #2483).
+	let release: (() => Promise<void>) | null = null;
+	try {
+		release = await lockfile.lock(dir, {
+			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
+			stale: 5000,
+		});
+		await appendCappedJsonl(filePath, JSON.stringify(record), {
+			maxEntries: resolveRetentionCap(
+				'MAX_RETRACTION_RECORDS',
+				MAX_RETRACTION_RECORDS,
+			),
+		});
+	} finally {
+		if (release) {
+			try {
+				await release();
+			} catch {
+				/* lock release failed — non-blocking */
+			}
+		}
+	}
 }
 
 /**

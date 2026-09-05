@@ -1,6 +1,7 @@
 import { mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { resolveRetentionCap } from '../retention/caps';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
@@ -179,11 +180,23 @@ export async function loadFullOutput(
 }
 
 /**
- * List all summary IDs that have summary entries.
- * Returns sorted array of valid summary IDs.
- * Returns empty array if summaries directory doesn't exist.
+ * Listing cap for `.swarm/summaries/` enumeration (issue #2483 §2, R12): the
+ * public list returns NEWEST-first (mtime descending, code-unit filename
+ * tie-break — never localeCompare) and is capped, so every listing read is
+ * O(cap), not O(unbounded summary history). The effective value resolves
+ * through `resolveRetentionCap` so the #2483 acceptance checks can shrink it.
+ * Retention cleanup does NOT go through this capped view — it enumerates the
+ * directory directly so stale files beyond the newest N are still pruned.
  */
-export async function listSummaries(directory: string): Promise<string[]> {
+export const MAX_SUMMARIES_LISTED = 500;
+
+/**
+ * Enumerate every valid summary ID in the summaries directory (UNCAPPED).
+ * Shared by the capped public listing and by retention cleanup, which must
+ * see every entry file regardless of the listing cap. Returns an empty array
+ * if the summaries directory doesn't exist.
+ */
+function enumerateSummaryIds(directory: string): string[] {
 	// Validate summaries base directory path
 	const summariesBasePath = validateSwarmPath(directory, 'summaries');
 
@@ -228,26 +241,86 @@ export async function listSummaries(directory: string): Promise<string[]> {
 		}
 	}
 
-	// Return sorted
-	return summaryIds.sort();
+	return summaryIds;
 }
 
 /**
- * Delete summaries older than retentionDays.
- * Returns array of deleted summary IDs.
+ * List summary IDs that have summary entries, newest-first (mtime
+ * descending, code-unit filename tie-break), capped at
+ * {@link MAX_SUMMARIES_LISTED} entries. Returns an empty array if the
+ * summaries directory doesn't exist.
  */
-export async function cleanupSummaries(
+export async function listSummaries(directory: string): Promise<string[]> {
+	const summaryIds = enumerateSummaryIds(directory);
+	if (summaryIds.length === 0) return [];
+
+	const summariesBasePath = validateSwarmPath(directory, 'summaries');
+	const mtimeById = new Map<string, number>();
+	for (const id of summaryIds) {
+		try {
+			mtimeById.set(
+				id,
+				statSync(path.join(summariesBasePath, `${id}.json`)).mtimeMs,
+			);
+		} catch {
+			mtimeById.set(id, 0); // unreadable mtime sorts oldest, never throws
+		}
+	}
+	const cap = resolveRetentionCap('MAX_SUMMARIES_LISTED', MAX_SUMMARIES_LISTED);
+	return summaryIds
+		.sort((a, b) => {
+			const mtimeDelta = (mtimeById.get(b) ?? 0) - (mtimeById.get(a) ?? 0);
+			if (mtimeDelta !== 0) return mtimeDelta;
+			// Code-unit tie-break (never localeCompare).
+			return a < b ? -1 : a > b ? 1 : 0;
+		})
+		.slice(0, cap);
+}
+
+/**
+ * List summary IDs past the retention horizon WITHOUT deleting them (review
+ * FB-9: the single detection predicate shared by `cleanupSummaries` and the
+ * sweep's dry-run counter, so rehearsal and deletion can never diverge).
+ *
+ * Retention cleanup enumerates the directory DIRECTLY (uncapped): the
+ * public listSummaries is capped to the newest MAX_SUMMARIES_LISTED, and
+ * routing cleanup through it would skip stale files beyond that window
+ * (issue #2483).
+ *
+ * Retention also enumerates LENIENTLY: `enumerateSummaryIds` applies the
+ * strict write-side `^S\d+$` id grammar, but retention's job is to bound
+ * the keyspace — ANY `S*.json` occupant past the horizon is stale
+ * regardless of whether its id would pass write validation (legacy or
+ * foreign producers included).
+ *
+ * Detection is content-timestamp-first: a numeric `timestamp` older than the
+ * cutoff marks the entry stale; a missing/unparsable timestamp falls back to
+ * the file mtime (issue #2483); unreadable content or a parse failure is
+ * never stale (a `warn` is emitted for the latter, as deletion does).
+ */
+export async function listStaleSummaryIds(
 	directory: string,
 	retentionDays: number,
+	options?: { now?: number },
 ): Promise<string[]> {
-	const summaryIds = await listSummaries(directory);
-	const cutoffTime = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+	const summariesBasePath = validateSwarmPath(directory, 'summaries');
+	let retentionFiles: string[] = [];
+	try {
+		retentionFiles = readdirSync(summariesBasePath).filter(
+			(name) => name.endsWith('.json') && /^S.+$/.test(name.slice(0, -5)),
+		);
+	} catch {
+		retentionFiles = [];
+	}
+	const now = options?.now ?? Date.now();
+	const cutoffTime = now - retentionDays * 24 * 60 * 60 * 1000;
 
-	const deleted: string[] = [];
+	const stale: string[] = [];
 
-	for (const id of summaryIds) {
+	for (const filename of retentionFiles) {
+		const id = filename.slice(0, -5);
 		// Construct and validate path
-		const relativePath = path.join('summaries', `${id}.json`);
+		const relativePath = path.join('summaries', filename);
 		const summaryPath = validateSwarmPath(directory, relativePath);
 
 		// Read the summary to check timestamp
@@ -260,17 +333,56 @@ export async function cleanupSummaries(
 			const parsed = JSON.parse(content);
 			const timestamp = parsed.timestamp as number;
 
-			// Delete if older than cutoff
-			if (timestamp < cutoffTime) {
-				rmSync(summaryPath);
-				deleted.push(id);
+			// Stale if older than cutoff. A missing/unparsable timestamp
+			// falls back to the file mtime (issue #2483: the retention sweep
+			// prunes summaries whose content carries no timestamp field).
+			if (
+				(typeof timestamp === 'number' &&
+					Number.isFinite(timestamp) &&
+					timestamp < cutoffTime) ||
+				(typeof timestamp !== 'number' &&
+					(() => {
+						try {
+							return statSync(summaryPath).mtimeMs < cutoffTime;
+						} catch {
+							return false;
+						}
+					})())
+			) {
+				stale.push(id);
 			}
+		} catch (error) {
+			warn(
+				`Failed to inspect summary ${id} for retention: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	return stale;
+}
+
+/**
+ * Delete summaries older than retentionDays.
+ * Returns array of deleted summary IDs.
+ */
+export async function cleanupSummaries(
+	directory: string,
+	retentionDays: number,
+	options?: { now?: number },
+): Promise<string[]> {
+	const staleIds = await listStaleSummaryIds(directory, retentionDays, options);
+	const deleted: string[] = [];
+	for (const id of staleIds) {
+		try {
+			rmSync(
+				validateSwarmPath(directory, path.join('summaries', `${id}.json`)),
+			);
+			deleted.push(id);
 		} catch (error) {
 			warn(
 				`Failed to cleanup summary ${id}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 	}
-
 	return deleted;
 }

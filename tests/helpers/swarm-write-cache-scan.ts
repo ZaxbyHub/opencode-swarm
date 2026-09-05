@@ -2604,6 +2604,22 @@ export const UNRESOLVED_READER_REGISTRY: readonly UnresolvedReaderRegistration[]
 		// readPriorDriftReports now reads the swarm.db phase_report table (no
 		// filesystem reader, no cached artifact, no #1729 stale-read hazard).
 		{
+			file: 'src/summaries/manager.ts',
+			callee: 'readSwarmFileAsync',
+			arg: 'relativePath',
+			category: 'declared-patterns',
+			patterns: ['summaries/*.json'],
+			reason:
+				'`relativePath` is path.join("summaries", filename) over an UNCAPPED ' +
+				'readdir listing (issue #2483 lenient retention enumeration — any ' +
+				'S*.json occupant is a candidate), so the argument folds to no ' +
+				'literal. The reader`s real blast radius is exactly summaries/*.json: ' +
+				'listStaleSummaryIds reads candidate summaries content-timestamp-first ' +
+				'purely to decide staleness before rmSync. A stale cached read can ' +
+				'only postpone one entry`s deletion to the next sweep (fail-open, ' +
+				'bounded by the retention horizon), never resurrect deleted content.',
+		},
+		{
 			file: 'src/hooks/knowledge-curator.ts',
 			callee: 'readSwarmFileAsync',
 			arg: 'relativeEvidencePath',

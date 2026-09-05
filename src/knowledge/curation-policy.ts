@@ -26,7 +26,7 @@
  * the destructive callers (Layer 4 routing).
  */
 
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
 	isLinked,
@@ -40,6 +40,8 @@ import type {
 	CurationProposal,
 	KnowledgeConfig,
 } from '../hooks/knowledge-types.js';
+import { resolveRetentionCap } from '../retention/caps.js';
+import { appendCappedJsonl } from '../retention/jsonl-cap.js';
 import {
 	type CohortConfigFingerprintInput,
 	cohortConfigFingerprint,
@@ -110,6 +112,14 @@ export interface CohortQuorumConfig {
 const DEFAULT_QUORUM: CohortQuorumConfig = { minCohortEvidence: 3 };
 
 /**
+ * Global FIFO cap on the curation-proposals audit stream (issue #2483 §2).
+ * Enforcement resolves the effective value through `resolveRetentionCap` so
+ * the #2483 acceptance checks can shrink the cap below this default and prove
+ * the writer clamps.
+ */
+export const MAX_CURATION_PROPOSALS = 200;
+
+/**
  * Authorize a destructive curation action against a single entry.
  *
  * The caller MUST pre-fetch the entry (so ownership is decided against the
@@ -133,15 +143,21 @@ export async function authorizeCuration(
 	// N1 fix (criterion #11): persist unauthorized proposals to a cohort-scoped
 	// proposals file so other cohort members may later confirm them, and so
 	// operators can see blocked destructive intent. Best-effort (fail-open).
+	// The append is capped FIFO via appendCappedJsonl (issue #2483): the
+	// proposals audit stream is globally bounded.
 	const persistProposal = (p: CurationProposal) => {
 		queueMicrotask(async () => {
 			try {
 				const storeDir = _internals.resolveKnowledgeStoreDir(directory);
-				await mkdir(storeDir, { recursive: true });
-				await appendFile(
+				await appendCappedJsonl(
 					path.join(storeDir, 'curation-proposals.jsonl'),
-					`${JSON.stringify(p)}\n`,
-					'utf-8',
+					JSON.stringify(p),
+					{
+						maxEntries: resolveRetentionCap(
+							'MAX_CURATION_PROPOSALS',
+							MAX_CURATION_PROPOSALS,
+						),
+					},
 				);
 			} catch {
 				/* best-effort: proposal persistence must not block curation */

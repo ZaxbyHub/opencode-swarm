@@ -201,10 +201,10 @@ describe('config/loader', () => {
 			}
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		});
-
 		it('returns defaults when no config files exist', () => {
 			const result = loadPluginConfig(tempDir);
-			const { repo_graph: _repoGraph, ...legacyDefaults } = result;
+			// repo_graph and retention prefault nested defaults (#2483 §4, repo_graph precedent).
+			const { repo_graph: _rg, retention: _rt, ...legacyDefaults } = result;
 			expect(legacyDefaults).toEqual({
 				config_format_version: 1,
 				max_iterations: 5,

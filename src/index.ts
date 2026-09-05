@@ -222,6 +222,7 @@ import { initObservability } from './observability/index.js';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
 import { cleanupOldTrajectoryFiles } from './prm/trajectory-store';
+import { runRetentionSweep } from './retention/sweep';
 import { createReviewModelDispatcher } from './review/contracts.js';
 import { createFindingValidationScheduler } from './review/finding-validator.js';
 import { captureReviewAgentModelRegistry } from './review/runtime.js';
@@ -462,6 +463,15 @@ const BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS = 10_000;
  * server()-resolution path (Invariant 1).
  */
 const TRAJECTORY_CLEANUP_INIT_TIMEOUT_MS = 10_000;
+
+/**
+ * Issue #2483 — hard budget for the one post-init retention sweep pass over
+ * the residual keyspace families under `.swarm/`. Rides the same
+ * wrapper-owned post-resolution queue as the trajectory cleanup above
+ * (Invariant 1); like that pass, withTimeout bounds only how long the
+ * scheduler waits — the sweep itself is bounded by its per-family caps.
+ */
+const RETENTION_SWEEP_INIT_TIMEOUT_MS = 5_000;
 
 // Per Invariant 1 / Issue #704 / repro-704 T1 Windows failures: the plugin
 // init path used to await `loadPluginConfigWithMetaAsync` UNBOUNDED — the only
@@ -1359,6 +1369,48 @@ async function initializeOpenCodeSwarm(
 			.catch((err: unknown) => {
 				const msg = err instanceof Error ? err.message : String(err);
 				log('post-init trajectory cleanup timed out or failed (non-fatal)', {
+					error: msg,
+				});
+			})
+			.then(() => undefined);
+	});
+
+	// Issue #2483 — one bounded, fail-open retention sweep pass over the
+	// residual keyspace families under `.swarm/`. `/swarm close` sweeps at
+	// close time, but a project that never closes would otherwise keep every
+	// residual family forever, so plugin load schedules exactly one pass. It
+	// rides the wrapper-owned post-resolution queue (never the
+	// server()-resolution path — Invariant 1) and fails open; the timeout
+	// bounds the scheduler's wait, not the sweep's per-family deletion caps.
+	postResolutionTasks.push(function retentionSweepPostInitTask() {
+		const retentionConfig = (config as Record<string, unknown> | undefined)
+			?.retention as { enabled?: unknown; dry_run?: unknown } | undefined;
+		const retentionSummaries = (config as Record<string, unknown> | undefined)
+			?.summaries as { retention_days?: unknown } | undefined;
+		const retentionDaysValue = retentionSummaries?.retention_days;
+		// Review FB-10: when the outer budget expires, flip the sweep's
+		// cooperative stop token so the in-flight pass abandons the remaining
+		// families instead of finishing them after the awaiter moved on.
+		let sweepCancelled = false;
+		return withTimeout(
+			runRetentionSweep(ctx.directory, {
+				enabled: retentionConfig?.enabled !== false,
+				dryRun: retentionConfig?.dry_run === true,
+				summariesRetentionDays:
+					typeof retentionDaysValue === 'number' && retentionDaysValue >= 1
+						? retentionDaysValue
+						: undefined,
+				shouldContinue: () => !sweepCancelled,
+			}),
+			RETENTION_SWEEP_INIT_TIMEOUT_MS,
+			new Error(
+				`retention sweep exceeded ${RETENTION_SWEEP_INIT_TIMEOUT_MS}ms post-init budget; continuing without it (close-time sweeps remain a backstop)`,
+			),
+		)
+			.catch((err: unknown) => {
+				sweepCancelled = true;
+				const msg = err instanceof Error ? err.message : String(err);
+				log('post-init retention sweep timed out or failed (non-fatal)', {
 					error: msg,
 				});
 			})

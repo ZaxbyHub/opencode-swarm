@@ -78,13 +78,49 @@ describe('handleCloseCommand --dry-run', () => {
 		const out = await handleCloseCommand(testDir, ['--dry-run']);
 
 		// The would-archive / would-clean lists must not include the sidecars
-		// (they are never archived or cleaned). They may only appear in the
-		// explanatory footnote.
+		// (they are never archived, and their removal rides the swarm.db unlink
+		// via removeSqliteSidecarsAfterClose, not these arrays — #2483). They
+		// may only appear in the explanatory footnote.
 		const beforeFootnote = out.split('_Note:')[0];
 		expect(beforeFootnote).not.toContain('swarm.db-shm');
 		expect(beforeFootnote).not.toContain('swarm.db-wal');
-		// Sidecars remain on disk.
+		// The footnote states the post-unlink removal (#2483, reversing #1692).
+		expect(out).toContain('_Note:');
+		expect(out).toContain('swarm.db-shm');
+		// Dry-run is read-only: sidecars remain on disk.
 		expect(existsSync(path.join(swarmDir(), 'swarm.db-shm'))).toBe(true);
+	});
+
+	it('reports repo-graph.fingerprint.json under would-archive AND would-clean, and runs/ + epic/ as clean dirs (#2483)', async () => {
+		writePlan();
+		writeFileSync(path.join(swarmDir(), 'repo-graph.json'), '{}');
+		writeFileSync(path.join(swarmDir(), 'repo-graph.fingerprint.json'), '{}');
+		mkdirSync(path.join(swarmDir(), 'runs', 'R1'), { recursive: true });
+		mkdirSync(path.join(swarmDir(), 'epic'), { recursive: true });
+
+		const out = await handleCloseCommand(testDir, ['--dry-run']);
+
+		const wouldArchive = out
+			.split('### Would archive')[1]
+			.split('### Would clean')[0];
+		const wouldClean = out
+			.split('### Would clean')[1]
+			.split('### Would remove unconditionally')[0];
+		// The fingerprint sidecar rides with its sibling repo-graph.json.
+		expect(wouldArchive).toContain('repo-graph.json');
+		expect(wouldArchive).toContain('repo-graph.fingerprint.json');
+		expect(wouldClean).toContain('repo-graph.fingerprint.json');
+		// Epic-mode runtime dirs are archived and cleaned at close (R5).
+		expect(wouldArchive).toContain('runs/');
+		expect(wouldArchive).toContain('epic/');
+		expect(wouldClean).toContain('runs/');
+		expect(wouldClean).toContain('epic/');
+		// Dry-run is read-only: everything staged still exists.
+		expect(
+			existsSync(path.join(swarmDir(), 'repo-graph.fingerprint.json')),
+		).toBe(true);
+		expect(existsSync(path.join(swarmDir(), 'runs', 'R1'))).toBe(true);
+		expect(existsSync(path.join(swarmDir(), 'epic'))).toBe(true);
 	});
 
 	it('lists a terminal file only under "Would remove unconditionally", not also under "Would clean"', async () => {

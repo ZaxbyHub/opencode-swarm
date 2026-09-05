@@ -103,6 +103,17 @@ const WRITER_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
+ * DELETER BLINDNESS (issue #2483, accepted and recorded here): WRITER_PATTERNS
+ * contains no unlink/rm/rename-reaper patterns, so pure deletion paths (the
+ * retention sweep, close clean lists, residue scanner) are invisible to the
+ * coverage ratchet. Extending the pattern set would flag every existing
+ * cleanup path with no registry row to own it — reapers are not durable
+ * writers. The two-rung disposition rules below (RESOLVED_SCOPE_ISSUES and
+ * the authoritative direct-file exemption) bound the streams themselves
+ * instead of trying to enumerate deleters.
+ */
+
+/**
  * Raw SQLite-handle confinement (issue #2480). Patterns that indicate a
  * module holds or types a raw `Database` handle (as opposed to going through
  * an enumerated store-op or open seam). Outside `src/db/**`, only
@@ -204,6 +215,20 @@ function dispositionIssueIsValid(issue: number): boolean {
 	);
 }
 
+/**
+ * Issue #2483 ratchet rung 2 — FROZEN recurrence-hatch set. Issues whose
+ * scope #2483 closed (the residual-durable-streams umbrella #2309 and #2483
+ * itself) or that were closed as superseded (#2045/#2046 closure comments
+ * flag the still-open accumulation gaps; #2047/#2048 were superseded by the
+ * merged #2482 SQLite observability sink/index). A `fix-in-issue`
+ * disposition naming one of these is rejected: pointing at a resolved
+ * umbrella no longer passes — a new unbounded stream must carry a real bound
+ * (cap/sweep/close) or a reviewed exemption under an OPEN owning issue.
+ */
+export const RESOLVED_SCOPE_ISSUES: ReadonlySet<number> = new Set<number>([
+	2045, 2046, 2047, 2048, 2309, 2483,
+]);
+
 const VALID_STATE_CLASSES = new Set([
 	'authoritative',
 	'operational',
@@ -252,6 +277,22 @@ export function collectRowShapeErrors(row: RetentionRow): string[] {
 			`${label}: privacyClass "${row.privacyClass}" is not one of metadata | content | mixed.`,
 		);
 	}
+	// Issue #2483 ratchet rung 1 (frozen check C2/C6): an AUTHORITATIVE stream
+	// on a direct-file store — a pathGrammar that does not route through
+	// swarm.db — must carry a reviewed directFileExemption.reason restating
+	// the row's own durability justification. New authoritative stores belong
+	// in swarm.db unless a reviewed reason exempts them; a silent new
+	// authoritative direct file is the #2483 defect class.
+	if (
+		row.stateClass === 'authoritative' &&
+		!row.pathGrammar.includes('swarm.db') &&
+		(typeof row.directFileExemption?.reason !== 'string' ||
+			!row.directFileExemption.reason.trim())
+	) {
+		errors.push(
+			`${label}: stateClass "authoritative" on a direct-file store (pathGrammar does not route through swarm.db) with no reviewed directFileExemption.reason — an authoritative direct-file exemption must restate the durability requirement that rules out the swarm.db surface (issue #2483 ratchet rung 1).`,
+		);
+	}
 	if (!VALID_LIMIT_SCOPES.has(row.writeLimits.scope)) {
 		errors.push(
 			`${label}: writeLimits.scope "${row.writeLimits.scope}" is not one of global | per-trigger | per-key | session-scoped | none.`,
@@ -297,6 +338,19 @@ export function collectRowShapeErrors(row: RetentionRow): string[] {
 		errors.push(`${label}: readBound.pattern is required.`);
 	}
 	errors.push(...collectDispositionErrors(row));
+	// Issue #2483 ratchet rung 2 (the recurrence hatch): a fix-in-issue
+	// disposition may not name an issue in the frozen RESOLVED_SCOPE_ISSUES
+	// set. #2309 is how every unbounded residual stream entered the registry
+	// and persisted; closing that hatch means a resolved umbrella can never
+	// again absorb a new unbounded stream.
+	if (
+		row.disposition.kind === 'fix-in-issue' &&
+		RESOLVED_SCOPE_ISSUES.has(row.disposition.issue)
+	) {
+		errors.push(
+			`${label} (disposition): fix-in-issue names #${row.disposition.issue}, a resolved scope issue (RESOLVED_SCOPE_ISSUES, issue #2483) — its scope was closed or superseded by #2483/#2482. A new unbounded stream must carry a real bound (writer cap, sweep family, or close lifecycle) with a not-a-defect/retain-by-design proof, or point at an OPEN owning issue.`,
+		);
+	}
 	// Verified-unbounded streams (scope "none") may never be whitewashed as
 	// bounded-by-design — the issue's no-owner-waiver rule. (Also pinned in
 	// tests/unit/scripts/retention-registry-rows.test.ts.)

@@ -15,6 +15,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { resolveRetentionCap } from '../../retention/caps.js';
 import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import * as logger from '../../utils/logger.js';
 
@@ -33,7 +34,11 @@ export interface CalibrationState {
 	 * Modules promoted to the hot-module list by observed divergence.
 	 * Monotonically grows — never auto-shrinks (loosening the hot-module
 	 * list requires manual intervention; the calibration loop only adds).
-	 * Sorted lexicographically for stable diffs.
+	 * Sorted lexicographically for stable diffs. Bounded at
+	 * {@link MAX_CALIBRATION_MODULES} on every save and load (issue #2483):
+	 * once the cap binds, late-alphabet module paths are PERMANENTLY
+	 * excluded from the list and — because additions are monotonic — can
+	 * never re-enter (critic N5).
 	 */
 	hotModuleAdditions: string[];
 	/**
@@ -51,6 +56,28 @@ export interface CalibrationState {
 
 const STATE_FILE = 'calibration.json';
 const STATE_REL_DIR = path.join('.swarm', 'epic');
+
+/**
+ * Global cap on the persisted `hotModuleAdditions` list (issue #2483 §2).
+ * Enforcement (save AND load) keeps the lexicographically SMALLEST prefix of
+ * the sorted list — deterministic and order-respecting, with no invented
+ * score. N5 bias, stated plainly: once the cap binds, late-alphabet module
+ * paths are permanently excluded from the list and — because additions are
+ * monotonic — can never re-enter. The effective value resolves through
+ * `resolveRetentionCap` so the #2483 acceptance checks can shrink the cap
+ * below this default and prove the truncation clamps.
+ */
+export const MAX_CALIBRATION_MODULES = 500;
+
+/** Truncate to the lexicographically smallest prefix of the effective cap. */
+function truncateHotModules(modules: string[]): string[] {
+	const cap = resolveRetentionCap(
+		'MAX_CALIBRATION_MODULES',
+		MAX_CALIBRATION_MODULES,
+	);
+	if (modules.length <= cap) return modules;
+	return [...modules].sort().slice(0, cap);
+}
 
 function nowISO(): string {
 	return new Date().toISOString();
@@ -172,7 +199,12 @@ export function loadCalibrationState(
 			);
 			return null;
 		}
-		return parsed;
+		// #2483: enforce the module cap on load too — a hand-edited or
+		// pre-cap state file must never reintroduce an unbounded list.
+		return {
+			...parsed,
+			hotModuleAdditions: truncateHotModules(parsed.hotModuleAdditions),
+		};
 	} catch (err) {
 		markUnreadable(directory, err instanceof Error ? err.message : String(err));
 		return null;
@@ -201,6 +233,9 @@ export function saveCalibrationState(
 		filePath = path.join(directory, STATE_REL_DIR, STATE_FILE);
 		tmpPath = `${filePath}.tmp.${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		state.updatedAt = nowISO();
+		// #2483: enforce the module cap on save — the persisted list is the
+		// lexicographically smallest prefix of the effective cap.
+		state.hotModuleAdditions = truncateHotModules(state.hotModuleAdditions);
 		payload = `${JSON.stringify(state, null, 2)}\n`;
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);

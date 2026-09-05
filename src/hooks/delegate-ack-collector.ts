@@ -28,8 +28,9 @@
  * implementation — not a second lifecycle copy.
  */
 
-import { appendFile, mkdir } from 'node:fs/promises';
-import * as path from 'node:path';
+import { resolveRetentionCap } from '../retention/caps.js';
+import { appendCappedJsonl } from '../retention/jsonl-cap.js';
+import { warn } from '../utils/logger.js';
 import { ensureCohortIdCached } from './cohort-cache.js';
 import { parseAcknowledgments } from './knowledge-application.js';
 import { escalateViolatedEntries } from './knowledge-escalator.js';
@@ -104,8 +105,18 @@ function resolveDelegateAckTaskIdResult(
 }
 
 /**
+ * Global FIFO cap on the unacknowledged-criticals audit stream (issue #2483
+ * §2). Enforcement resolves the effective value through `resolveRetentionCap`
+ * so the #2483 acceptance checks can shrink the cap below this default and
+ * prove the writer clamps.
+ */
+export const MAX_UNACKNOWLEDGED_CRITICALS = 500;
+
+/**
  * Append an unacknowledged-critical audit line. Path is validated to stay inside
- * `.swarm/`. Best-effort: errors are swallowed by the caller.
+ * `.swarm/`. Best-effort: errors are swallowed by the caller. The append is
+ * capped FIFO via `appendCappedJsonl` (append + crash-atomic compaction), so
+ * the audit stream is globally bounded (issue #2483).
  */
 async function appendUnacknowledgedCritical(
 	directory: string,
@@ -115,8 +126,20 @@ async function appendUnacknowledgedCritical(
 		directory,
 		'unacknowledged-criticals.jsonl',
 	);
-	await mkdir(path.dirname(filePath), { recursive: true });
-	await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+	await appendCappedJsonl(filePath, JSON.stringify(record), {
+		maxEntries: resolveRetentionCap(
+			'MAX_UNACKNOWLEDGED_CRITICALS',
+			MAX_UNACKNOWLEDGED_CRITICALS,
+		),
+		// Review FB-5: FIFO compaction dropping CRITICAL audit records is an
+		// operational warning, not quiet churn — surface how many oldest
+		// entries were discarded so the loss is observable.
+		onPrune: (dropped) => {
+			warn(
+				`unacknowledged-criticals audit at cap: dropped ${dropped} oldest ${dropped === 1 ? 'entry' : 'entries'} (FIFO bound MAX_UNACKNOWLEDGED_CRITICALS)`,
+			);
+		},
+	});
 }
 
 export interface CollectDelegateAcksResult {

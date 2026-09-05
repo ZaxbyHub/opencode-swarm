@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { validateProjectRoot } from '../evidence/manager.js';
+import { resolveRetentionCap } from '../retention/caps.js';
 
 export type TestRunResult = 'pass' | 'fail' | 'skip';
 
@@ -23,6 +24,73 @@ const MAX_CHANGED_FILES = 50;
 const HISTORY_WRITE_LOCK_TIMEOUT_MS = 5_000;
 const HISTORY_WRITE_LOCK_STALE_MS = 60_000;
 const HISTORY_WRITE_LOCK_BACKOFF_MS = 10;
+
+/**
+ * Global cap on TOTAL entries in `.swarm/cache/test-history.jsonl` (issue
+ * #2483 §2). Enforced inside the existing read-prune-write pass on EVERY
+ * append — deliberately no amortized cadence (critic N3): a cadence like
+ * every-512-appends would never fire inside a shrunken test override width
+ * and silently fail the #2483 acceptance check. The effective value resolves
+ * through `resolveRetentionCap`.
+ */
+export const MAX_TEST_HISTORY_ENTRIES = 5000;
+
+/**
+ * Global cap on DISTINCT (testFile, testName) keys in the history file
+ * (issue #2483 §2): when distinct keys exceed the cap, the oldest-key records
+ * are dropped entirely (keyspace prune). Enforced on every append alongside
+ * {@link MAX_TEST_HISTORY_ENTRIES}.
+ */
+export const MAX_TEST_HISTORY_KEYS = 1000;
+
+/** Normalized per-test history key (mirrors the per-key prune grouping). */
+function normalizedTestKey(rec: TestRunRecord): string {
+	return `${rec.testFile.toLowerCase()}|${rec.testName.toLowerCase()}`;
+}
+
+/**
+ * Enforce the two global caps (#2483) on an oldest-first record array:
+ *  - entries: drop the OLDEST entries globally (earliest in file order — the
+ *    file is append-ordered and rewritten timestamp-ascending, so file order
+ *    is age order);
+ *  - keys: when distinct keys exceed the key cap, drop the records of the
+ *    least-recently-active keys entirely (a key's recency is the file index
+ *    of its newest record).
+ * Returns a new array; never empties a non-empty input as a side effect of
+ * the entry cap alone (each surviving record keeps its key intact).
+ */
+function enforceGlobalHistoryCaps(records: TestRunRecord[]): TestRunRecord[] {
+	const entryCap = resolveRetentionCap(
+		'MAX_TEST_HISTORY_ENTRIES',
+		MAX_TEST_HISTORY_ENTRIES,
+	);
+	const keyCap = resolveRetentionCap(
+		'MAX_TEST_HISTORY_KEYS',
+		MAX_TEST_HISTORY_KEYS,
+	);
+	let out = records;
+	if (out.length > entryCap) {
+		out = out.slice(out.length - entryCap);
+	}
+	if (out.length === 0) return out;
+	const lastSeenIndex = new Map<string, number>();
+	for (let i = 0; i < out.length; i++) {
+		lastSeenIndex.set(normalizedTestKey(out[i]), i);
+	}
+	if (lastSeenIndex.size <= keyCap) return out;
+	// Least-recently-active keys first (smallest newest-record index).
+	const keysByRecency = [...lastSeenIndex.entries()]
+		.sort((a, b) => a[1] - b[1])
+		.map(([key]) => key);
+	const dropKeys = new Set(keysByRecency.slice(0, lastSeenIndex.size - keyCap));
+	out = out.filter((rec) => !dropKeys.has(normalizedTestKey(rec)));
+	// Key eviction can only shrink the array, but re-clamp defensively so the
+	// returned file never exceeds the entry cap.
+	if (out.length > entryCap) {
+		out = out.slice(out.length - entryCap);
+	}
+	return out;
+}
 
 function getHistoryPath(workingDir?: string): string {
 	if (!workingDir) {
@@ -218,9 +286,13 @@ export function batchAppendTestRuns(
 				new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
 		);
 
+		// Enforce the global entry + key caps on every append (#2483, critic
+		// N3 — no cadence) after the per-test prune and final age sort.
+		const cappedRecords = enforceGlobalHistoryCaps(prunedRecords);
+
 		// Write atomically ONCE
 		try {
-			const lines = prunedRecords.map((rec) => JSON.stringify(rec));
+			const lines = cappedRecords.map((rec) => JSON.stringify(rec));
 			const content = `${lines.join('\n')}\n`;
 			const tempPath = `${historyPath}.tmp`;
 			fs.writeFileSync(tempPath, content, 'utf-8');
@@ -346,9 +418,13 @@ export function appendTestRun(
 				new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
 		);
 
+		// Enforce the global entry + key caps on every append (#2483, critic
+		// N3 — no cadence) after the per-test prune and final age sort.
+		const cappedRecords = enforceGlobalHistoryCaps(prunedRecords);
+
 		// Write atomically: temp file + rename to prevent corruption on crash
 		try {
-			const lines = prunedRecords.map((rec) => JSON.stringify(rec));
+			const lines = cappedRecords.map((rec) => JSON.stringify(rec));
 			const content = `${lines.join('\n')}\n`;
 			const tempPath = `${historyPath}.tmp`;
 			fs.writeFileSync(tempPath, content, 'utf-8');

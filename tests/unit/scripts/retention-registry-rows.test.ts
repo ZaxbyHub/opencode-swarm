@@ -220,17 +220,31 @@ describe('retention registry rows — disposition rules (issue #2036)', () => {
 		expect(violations).toEqual([]);
 	});
 
-	test('the per-key rows the guardrail reclassified are owned by an issue', () => {
+	test('the per-key rows the guardrail reclassified carry a compliant keyspace bound', () => {
 		// Both were `not-a-defect` proved only by a per-key cap; the #2038 rule
-		// found them. If either is ever restored to a non-fix disposition, it must
-		// come with a keyspaceBound that survives the gate.
+		// reclassified them to fix-in-issue under #2309; #2483 then installed the
+		// real bounds (global caps for test-history, the retention sweep for
+		// pr-feedback-event-queues) and restored `not-a-defect`. The #2038
+		// evidence lives on in the keyspaceBound prose, and the gate-level rule
+		// (see check-retention-registry.test.ts "per-key keyspace declaration")
+		// plus RESOLVED_SCOPE_ISSUES keep the hatch closed. If either is ever
+		// re-dispositioned again, the keyspaceBound must still survive the gate.
 		for (const id of ['test-history', 'pr-feedback-event-queues']) {
 			const row = rows().find((candidate) => candidate.id === id);
 			if (!row) throw new Error(`missing ${id} row`);
 			expect(row.writeLimits.scope).toBe('per-key');
-			expect(row.disposition.kind).toBe('fix-in-issue');
-			// The evidence must survive the reclassification, not be replaced by it.
-			expect(row.writeLimits.keyspaceBound ?? '').toContain('#2038');
+			expect(row.disposition.kind).toBe('not-a-defect');
+			const declared = (row.writeLimits.keyspaceBound ?? '').trim();
+			// The bound must name its enforcing source and must not declare the
+			// keyspace non-finite (the #2038 admission).
+			expect(/src\/[A-Za-z0-9._/-]+\.ts/.test(declared)).toBe(true);
+			expect(declared).toContain('#2038');
+			for (const pattern of [
+				/\bunbounded\b/i,
+				/\bno (?:hard |aggregate )?(?:global )?ceiling\b/i,
+			]) {
+				expect(pattern.test(declared)).toBe(false);
+			}
 		}
 	});
 });

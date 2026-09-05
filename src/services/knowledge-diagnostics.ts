@@ -36,12 +36,15 @@ import type {
 } from '../hooks/knowledge-types.js';
 import { resolveUnactionablePath } from '../hooks/knowledge-validator.js';
 import { resolveInsightCandidatesPath } from '../hooks/micro-reflector.js';
+import { MAX_CURATION_PROPOSALS } from '../knowledge/curation-policy.js';
 import { readMemoryLinkPointer } from '../memory/memory-link.js';
 import {
 	buildMemoryCohortFingerprintInput,
 	classifyStoredFingerprintAlgorithmVersion,
 	computeMemoryCohortFingerprint,
 } from '../memory/redaction.js';
+import { resolveRetentionCap } from '../retention/caps.js';
+import { readTailJsonl } from '../retention/jsonl-cap.js';
 import { readSynonymMap } from './synonym-map.js';
 import { compareVersions, readVersionCache } from './version-check.js';
 
@@ -676,7 +679,10 @@ async function computeCurationDiagnostics(
  * Count pending proposals in the store-scoped `curation-proposals.jsonl`
  * (PRR-008). Best-effort: returns 0 on any error, missing file, or unresolvable
  * store dir. Counts records whose `status` is `pending` (the only status
- * authorizeCuration writes); non-JSON lines are ignored defensively.
+ * authorizeCuration writes); non-JSON lines are ignored defensively. The read
+ * is tail-bounded to the writer's cap (issue #2483: the writer enforces
+ * `MAX_CURATION_PROPOSALS` FIFO, so the pending count is O(cap), never
+ * O(unbounded history)).
  */
 async function countPendingProposals(directory: string): Promise<number> {
 	let proposalsPath: string;
@@ -690,17 +696,15 @@ async function countPendingProposals(directory: string): Promise<number> {
 	}
 	if (!existsSync(proposalsPath)) return 0;
 	try {
-		const content = await readFile(proposalsPath, 'utf-8');
+		const records = await readTailJsonl<{ status?: unknown }>(proposalsPath, {
+			maxEntries: resolveRetentionCap(
+				'MAX_CURATION_PROPOSALS',
+				MAX_CURATION_PROPOSALS,
+			),
+		});
 		let n = 0;
-		for (const line of content.split('\n')) {
-			const trimmed = line.trim();
-			if (!trimmed) continue;
-			try {
-				const parsed = JSON.parse(trimmed) as { status?: unknown };
-				if (parsed.status === 'pending') n++;
-			} catch {
-				/* ignore corrupt line */
-			}
+		for (const parsed of records) {
+			if (parsed.status === 'pending') n++;
 		}
 		return n;
 	} catch {

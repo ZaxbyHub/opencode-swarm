@@ -22,6 +22,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { resolveRetentionCap } from '../../retention/caps.js';
 import * as logger from '../../utils/logger.js';
 import { normalizePath } from '../lean/conflicts.js';
 
@@ -49,6 +50,78 @@ export interface DivergenceRecord {
 
 const EVIDENCE_REL_DIR = path.join('.swarm', 'epic');
 const EVIDENCE_FILE = 'divergence.jsonl';
+
+/**
+ * Global byte cap on `.swarm/epic/divergence.jsonl` (issue #2483 §2).
+ * Byte-cap contract (critic N2): compaction retains the newest WHOLE records
+ * that fit within the effective cap, with a floor of at least one record — a
+ * non-empty stream is never emptied by compaction (one record ≈ 320 B; under
+ * any smaller effective cap the file keeps the newest single record). The
+ * effective value resolves through `resolveRetentionCap` so the #2483
+ * acceptance checks can shrink the cap below this default and prove the
+ * writer clamps.
+ */
+export const MAX_DIVERGENCE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Write-side compaction enforcing {@link MAX_DIVERGENCE_BYTES}. Applies the
+ * same rule as `appendCappedJsonl`'s compaction (src/retention/jsonl-cap.ts)
+ * but synchronously: `recordTaskDivergence` is a synchronous best-effort
+ * audit writer on the task-completion path and cannot await the async
+ * helper. Crash-atomic rewrite (temp + rename); on failure the file stays
+ * transiently over cap by at most one record and the next append retries.
+ */
+function compactToByteCap(filePath: string): void {
+	const maxBytes = resolveRetentionCap(
+		'MAX_DIVERGENCE_BYTES',
+		MAX_DIVERGENCE_BYTES,
+	);
+	let size: number;
+	try {
+		size = fs.statSync(filePath).size;
+	} catch {
+		return;
+	}
+	if (size <= maxBytes) return;
+	let content: string;
+	try {
+		content = fs.readFileSync(filePath, 'utf-8');
+	} catch {
+		return; // next append retries compaction
+	}
+	const lines = content
+		.split('\n')
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0);
+	const kept: string[] = [];
+	let keptBytes = 0;
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i] as string;
+		const lineBytes = Buffer.byteLength(`${line}\n`, 'utf-8');
+		// Whole-record floor: the newest record is always kept, even when a
+		// single record alone exceeds the effective cap.
+		if (kept.length > 0 && keptBytes + lineBytes > maxBytes) break;
+		kept.unshift(line);
+		keptBytes += lineBytes;
+	}
+	if (kept.length === 0) return;
+	const tmpPath = `${filePath}.tmp-${process.pid}-${Math.random()
+		.toString(36)
+		.slice(2, 8)}`;
+	try {
+		fs.writeFileSync(tmpPath, `${kept.join('\n')}\n`, 'utf-8');
+		fs.renameSync(tmpPath, filePath);
+	} catch (err) {
+		try {
+			fs.unlinkSync(tmpPath);
+		} catch {
+			/* best-effort residue cleanup */
+		}
+		logger.warn(
+			`[epic/divergence] byte-cap compaction failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+}
 
 /**
  * Compute the divergence between a declared scope and the files actually
@@ -142,6 +215,10 @@ export function recordTaskDivergence(
 	const filePath = path.join(evidenceDir, EVIDENCE_FILE);
 	try {
 		fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+		// #2483: write-side byte cap — compact immediately after the append so
+		// the file exceeds MAX_DIVERGENCE_BYTES only transiently (by at most
+		// one record) and is never emptied by compaction.
+		compactToByteCap(filePath);
 	} catch (err) {
 		logger.warn(
 			`[epic/divergence] append failed: ${err instanceof Error ? err.message : String(err)}`,

@@ -18,9 +18,10 @@
  * src/hooks/context-budget.ts actually removes content).
  */
 
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CompactionConfig } from '../config/schema';
+import { resolveRetentionCap } from '../retention/caps';
+import { appendCappedJsonl } from '../retention/jsonl-cap';
 import { getFinalPromptPressure, getSessionBudgetPct } from '../state';
 export type { CompactionConfig };
 
@@ -79,17 +80,45 @@ function getSessionState(sessionId: string): CompactionState {
 
 // ── Snapshot writer ────────────────────────────────────────────────────────────
 
-function appendSnapshot(
+/**
+ * Global byte cap on `.swarm/context-snapshot.md` (issue #2483 §2). Enforced
+ * via `appendCappedJsonl` with a high entry count so only the byte budget
+ * binds; compaction keeps the newest whole records that fit and never empties
+ * a non-empty snapshot (whole-record floor ≥ 1 entry).
+ */
+export const MAX_CONTEXT_SNAPSHOT_BYTES = 65536;
+
+/**
+ * Whole-record ceiling for the snapshot file (review FB-8). Only the byte
+ * budget binds in practice; this entry cap is a pure defense-in-depth bound
+ * and resolves through the seam like every other #2483 cap so tests can
+ * shrink it.
+ */
+export const MAX_CONTEXT_SNAPSHOT_ENTRIES = 100000;
+
+async function appendSnapshot(
 	directory: string,
 	tier: 'observation' | 'reflection' | 'emergency',
 	budgetPct: number,
 	message: string,
-): void {
+): Promise<void> {
 	try {
 		const snapshotPath = path.join(directory, '.swarm', 'context-snapshot.md');
 		const timestamp = new Date().toISOString();
 		const entry = `\n## [${tier.toUpperCase()}] ${timestamp} — ${budgetPct.toFixed(1)}% used\n${message}\n`;
-		fs.appendFileSync(snapshotPath, entry, 'utf-8');
+		// N4 (issue #2483): the entry header/message length (~472 B/entry) is
+		// load-bearing for the frozen C3 check's 512-byte override — do not
+		// reword the tier messages without re-verifying that probe width.
+		await appendCappedJsonl(snapshotPath, entry, {
+			maxEntries: resolveRetentionCap(
+				'MAX_CONTEXT_SNAPSHOT_ENTRIES',
+				MAX_CONTEXT_SNAPSHOT_ENTRIES,
+			),
+			maxBytes: resolveRetentionCap(
+				'MAX_CONTEXT_SNAPSHOT_BYTES',
+				MAX_CONTEXT_SNAPSHOT_BYTES,
+			),
+		});
 	} catch {
 		// snapshot write failure is non-fatal
 	}
@@ -176,7 +205,7 @@ export function createCompactionService(
 						budgetPct,
 						config.preserveLastNTurns,
 					);
-					appendSnapshot(directory, 'emergency', budgetPct, msg);
+					await appendSnapshot(directory, 'emergency', budgetPct, msg);
 					state.lastSnapshotAt = new Date().toISOString();
 					injectMessage(sessionId, msg);
 					return;
@@ -190,7 +219,7 @@ export function createCompactionService(
 					state.lastReflectionAt = budgetPct;
 					state.reflectionCount++;
 					const msg = buildReflectionMessage(budgetPct);
-					appendSnapshot(directory, 'reflection', budgetPct, msg);
+					await appendSnapshot(directory, 'reflection', budgetPct, msg);
 					state.lastSnapshotAt = new Date().toISOString();
 					injectMessage(sessionId, msg);
 					return;
@@ -204,7 +233,7 @@ export function createCompactionService(
 					state.lastObservationAt = budgetPct;
 					state.observationCount++;
 					const msg = buildObservationMessage(budgetPct);
-					appendSnapshot(directory, 'observation', budgetPct, msg);
+					await appendSnapshot(directory, 'observation', budgetPct, msg);
 					state.lastSnapshotAt = new Date().toISOString();
 					injectMessage(sessionId, msg);
 				}

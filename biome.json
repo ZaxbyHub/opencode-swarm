@@ -3,6 +3,7 @@
 	"files": {
 		"includes": [
 			"src/**",
+			"!src/graphify-out/**",
 			"tests/**",
 			"test/**",
 			"biome.json",

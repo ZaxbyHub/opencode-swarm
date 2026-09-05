@@ -1,4 +1,3 @@
-import { appendFile, mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
 	extractCuratorMemoryDecisionsFromAgentOutput,
@@ -12,6 +11,8 @@ import {
 	insertGuidanceCarrier,
 } from '../hooks/system-guidance-carrier';
 import { validateSwarmPath } from '../hooks/utils';
+import { resolveRetentionCap } from '../retention/caps';
+import { appendCappedJsonl } from '../retention/jsonl-cap';
 import {
 	claimTurnBudget,
 	recordProducerEmission,
@@ -507,6 +508,14 @@ async function logInjectionSkipped(
  */
 const UNITID_PROBE_TASK_ID_PATTERN = /\bTASK:\s*(\d+(?:\.\d+)+)\b/;
 
+/**
+ * Global FIFO cap on the (env-gated) unitid-probe audit stream (issue #2483
+ * §2). Enforcement resolves the effective value through
+ * `resolveRetentionCap` so the #2483 acceptance checks can shrink the cap
+ * below this default and prove the writer clamps.
+ */
+export const MAX_UNITID_PROBE_ENTRIES = 2000;
+
 async function maybeWriteUnitIdProbe(input: {
 	directory: string;
 	sessionID: string | undefined;
@@ -531,8 +540,12 @@ async function maybeWriteUnitIdProbe(input: {
 			input.directory,
 			path.join('memory', 'unitid-probe.jsonl'),
 		);
-		await mkdir(path.dirname(filePath), { recursive: true });
-		await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+		await appendCappedJsonl(filePath, JSON.stringify(record), {
+			maxEntries: resolveRetentionCap(
+				'MAX_UNITID_PROBE_ENTRIES',
+				MAX_UNITID_PROBE_ENTRIES,
+			),
+		});
 	} catch {
 		// Probe I/O must never affect real injection behavior.
 	}
