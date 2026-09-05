@@ -52,7 +52,8 @@ const CONDITIONING_PHRASES = [
 ] as const;
 
 const SWARM_PR_REVIEW = '.opencode/skills/swarm-pr-review/SKILL.md';
-const MAPPING_CONNECTOR = '[\\s|`]*(?:→|->|=>|maps?\\s+to|mapped\\s+to|:)[\\s|`]*';
+const MAPPING_CONNECTOR =
+	'[\\s|`]*(?:→|->|=>|maps?\\s+to|mapped\\s+to|:)[\\s|`]*';
 
 function readRepoFile(path: string): string {
 	return readFileSync(join(process.cwd(), path), 'utf-8');
@@ -75,7 +76,9 @@ describe('skill/host executable-contract guardrail (issue #2494)', () => {
 			'INCOMPLETE',
 		]);
 		expect(allowedPrReviewReportVerdicts('PARTIAL')).not.toContain('APPROVE');
-		expect(allowedPrReviewReportVerdicts('NO_COVERAGE')).toEqual(['INCOMPLETE']);
+		expect(allowedPrReviewReportVerdicts('NO_COVERAGE')).toEqual([
+			'INCOMPLETE',
+		]);
 	});
 
 	test('every skill naming a controller tool carries availability conditioning', () => {
@@ -122,15 +125,22 @@ describe('skill/host executable-contract guardrail (issue #2494)', () => {
 
 		for (const display of advertised) {
 			const re = new RegExp(
-				'`?' + display + '`?' + MAPPING_CONNECTOR + '(APPROVE|REQUEST_CHANGES|INCOMPLETE)(?!_WITH_NOTES)',
+				'`?' +
+					display +
+					'`?' +
+					MAPPING_CONNECTOR +
+					'(APPROVE|REQUEST_CHANGES|INCOMPLETE)(?!_WITH_NOTES)',
 			);
-			expect(lines.some((l) => re.test(l)))
-				.toBeTrue(`no published mapping line for display verdict ${display}`);
+			expect(lines.some((l) => re.test(l))).toBeTrue(
+				`no published mapping line for display verdict ${display}`,
+			);
 		}
 
 		// Honesty guard: a BLOCK-condition review can never approve.
 		const blockMapsToApprove = lines.some((l) =>
-			new RegExp('`?BLOCK`?' + MAPPING_CONNECTOR + 'APPROVE(?!_WITH_NOTES)').test(l),
+			new RegExp(
+				'`?BLOCK`?' + MAPPING_CONNECTOR + 'APPROVE(?!_WITH_NOTES)',
+			).test(l),
 		);
 		expect(blockMapsToApprove).toBe(false);
 	});
@@ -138,17 +148,14 @@ describe('skill/host executable-contract guardrail (issue #2494)', () => {
 	test('blanket no-partial clauses are scoped to the N-of-6 terminal settlement', () => {
 		const lines = readRepoFile(SWARM_PR_REVIEW).split(/\r?\n/);
 		const settlementToken = /N-of-6|settle|settlement|#2383|unsettled/i;
-		const anchors = [
-			/^14\.\s/,
-			/^15\.\s/,
-			/COVERAGE GATE CONDITION/,
-		];
+		const anchors = [/^14\.\s/, /^15\.\s/, /COVERAGE GATE CONDITION/];
 		for (const anchor of anchors) {
 			const idx = lines.findIndex((l) => anchor.test(l));
 			expect(idx).toBeGreaterThanOrEqual(0);
 			const window = lines.slice(idx, idx + 4).join('\n');
-			expect(settlementToken.test(window))
-				.toBeTrue(`clause at line ${idx + 1} lacks N-of-6 settlement scoping`);
+			expect(settlementToken.test(window)).toBeTrue(
+				`clause at line ${idx + 1} lacks N-of-6 settlement scoping`,
+			);
 		}
 	});
 });
