@@ -70,8 +70,10 @@ describe('System Enhancer real-time learning nudge', () => {
 	async function drainDeferredMaintenanceScan(): Promise<void> {
 		if (!invokedTransform) return;
 		const marker = join(tempDir, '.swarm', 'dark-matter.md');
-		const deadline = Date.now() + 5000;
-		while (!existsSync(marker) && Date.now() < deadline) {
+		// performance.now polling deadline — the sanctioned test-clock pattern
+		// for polling waits (not clock-dependent logic).
+		const deadline = performance.now() + 5000;
+		while (!existsSync(marker) && performance.now() < deadline) {
 			await new Promise((resolve) => setTimeout(resolve, 20));
 		}
 	}

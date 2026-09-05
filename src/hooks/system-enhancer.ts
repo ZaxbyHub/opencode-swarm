@@ -683,6 +683,30 @@ function buildLanguageTestConstraints(
 const pendingDeferredScanDirs = new Set<string>();
 
 /**
+ * #2472 W4 (PR #2588 bot finding 7): project roots whose deferred
+ * maintenance scans have been CANCELLED — populated by
+ * {@link cancelDeferredMaintenanceScans} (plugin dispose) and cleared when
+ * a NEW system-enhancer instance is created for the same project root
+ * (dispose → re-init is the restart-safe lifecycle). Module-level for the
+ * same reason as `pendingDeferredScanDirs`: the scans are per-project-root,
+ * not per-session. Bounded by construction (invariant 8): at most one live
+ * entry per distinct project root, and creating a new instance for a root
+ * removes that root's entry.
+ */
+const cancelledDeferredScanDirs = new Set<string>();
+
+/**
+ * #2472 W4 (PR #2588 bot finding 7): per-directory generation of the
+ * deferred-scan task. Each scheduled task captures the current value and
+ * re-checks it before its first statement and before every major scan
+ * step; `cancelDeferredMaintenanceScans` bumps the value, so any pending
+ * or in-flight task for that directory observes the mismatch and aborts
+ * before doing further scan work. Bounded by construction: one number per
+ * distinct project root, replaced (not accumulated) on each cancel.
+ */
+const deferredScanGenerations = new Map<string, number>();
+
+/**
  * Schedule `fn` as a MACROTASK (unref'd `setTimeout(…, 0)`), mirroring the
  * post-resolution task-queue pattern in `src/index.ts`.
  *
@@ -724,8 +748,22 @@ function scheduleDeferredMacrotask(fn: () => void): void {
  * are caught and logged non-fatally (debug-gated logger) because they can no
  * longer surface through the transform's own try/catch — an unhandled
  * rejection in a background task would be a host-process defect.
+ *
+ * `isCancelled` is the disposal fence (PR #2588 bot finding 7): it is
+ * checked before the first statement and before each major step (the doc
+ * scan and the dark-matter scan, including between the long-running git
+ * spawn and its `.swarm` writes), so a scan cancelled mid-flight aborts
+ * promptly instead of materializing artifacts for a torn-down project.
  */
-async function runDeferredMaintenanceScans(directory: string): Promise<void> {
+async function runDeferredMaintenanceScans(
+	directory: string,
+	isCancelled: () => boolean,
+): Promise<void> {
+	// Checkpoint — before the doc-index scan (the first major step).
+	if (isCancelled()) {
+		log('[system-enhancer] Deferred maintenance scans cancelled; skipping');
+		return;
+	}
 	// v6.39: Auto-trigger doc_scan to build/refresh doc manifest
 	// Non-blocking — failure does not prevent plan processing
 	try {
@@ -745,6 +783,13 @@ async function runDeferredMaintenanceScans(directory: string): Promise<void> {
 	// Dark matter scan: detect co-change patterns in git history
 	// Non-blocking — skip silently on repos without git history, shallow clones, or errors
 	// Cached: skip if dark-matter.md already exists (matches doc_scan caching pattern)
+	// Checkpoint — before the dark-matter scan (the second major step).
+	if (isCancelled()) {
+		log(
+			'[system-enhancer] Deferred maintenance scans cancelled before dark-matter scan; skipping',
+		);
+		return;
+	}
 	try {
 		const darkMatterPath = validateSwarmPath(directory, 'dark-matter.md');
 		if (!fs.existsSync(darkMatterPath)) {
@@ -759,6 +804,16 @@ async function runDeferredMaintenanceScans(directory: string): Promise<void> {
 				minCommits: 20,
 				minCoChanges: 3,
 			});
+			// Checkpoint — detectDarkMatter (the git spawn) is the
+			// long-running part; re-check BEFORE any `.swarm` write so a
+			// scan cancelled mid-detect aborts promptly instead of
+			// materializing artifacts for a torn-down project.
+			if (isCancelled()) {
+				log(
+					'[system-enhancer] Deferred dark-matter scan cancelled before writing artifacts; skipping',
+				);
+				return;
+			}
 			// Always write cache — even on empty results — to prevent
 			// repeated O(n²) recomputation on every chat turn (#1021).
 			// Ensure .swarm/ directory exists before writing (may not exist
@@ -879,6 +934,10 @@ async function runDeferredMaintenanceScans(directory: string): Promise<void> {
  * no-op — the pending task performs the same cache checks and will observe
  * any state this call would have.
  *
+ * A CANCELLED directory (see {@link cancelDeferredMaintenanceScans}) never
+ * schedules: the call is a no-op until a new hook instance for the same
+ * project root removes the cancellation marker (PR #2588 bot finding 7).
+ *
  * Must be called from the transform handler's TAIL (the `finally`), after
  * the handler's last `await`: registering the unref'd macrotask there leaves
  * only microtasks between registration and the caller's resumption, so the
@@ -890,11 +949,30 @@ function scheduleDeferredMaintenanceScans(directory: string): void {
 	if (pendingDeferredScanDirs.has(key)) {
 		return;
 	}
+	if (cancelledDeferredScanDirs.has(key)) {
+		return;
+	}
 	pendingDeferredScanDirs.add(key);
+	// Capture the current deferred-scan generation: cancel bumps it, which
+	// every checkpoint below observes (bot finding 7). Both the capture and
+	// the re-check coalesce an absent entry to 0 so a directory that was
+	// never cancelled does not read `undefined !== 0` as cancelled.
+	const generation = deferredScanGenerations.get(key) ?? 0;
+	const isCancelled = () =>
+		(deferredScanGenerations.get(key) ?? 0) !== generation;
 	scheduleDeferredMacrotask(() => {
 		void (async () => {
 			try {
-				await runDeferredMaintenanceScans(directory);
+				// First statement inside the deferred task (bot finding 7):
+				// a task whose directory was cancelled after this scheduling
+				// must exit BEFORE doing any scan work.
+				if (isCancelled()) {
+					log(
+						`[system-enhancer] Deferred maintenance scans for ${key} cancelled; skipping`,
+					);
+					return;
+				}
+				await runDeferredMaintenanceScans(directory, isCancelled);
 			} catch (error) {
 				// Absolute backstop: a failure here must never surface as an
 				// unhandled rejection in the host process.
@@ -909,12 +987,44 @@ function scheduleDeferredMaintenanceScans(directory: string): void {
 }
 
 /**
+ * #2472 W4 (PR #2588 bot finding 7): dispose fence for a project root's
+ * deferred maintenance scans. Called best-effort from the plugin's
+ * `dispose` so a scheduled-but-not-yet-fired (or in-flight) doc-index /
+ * dark-matter background task cannot fire into — or keep writing `.swarm`
+ * artifacts for — a project whose plugin instance is being torn down.
+ *
+ *  (i)  Future scheduling for `directory` is suppressed: the resolved root
+ *       is added to `cancelledDeferredScanDirs`, and
+ *       `scheduleDeferredMaintenanceScans` is a no-op for cancelled roots.
+ *  (ii) Any already-scheduled or in-flight task for `directory` aborts:
+ *       the root's deferred-scan generation is bumped, and every task
+ *       captured the pre-bump value and re-checks it before its first
+ *       statement and before each major scan step, so even a long-running
+ *       dark-matter git scan stops before its next write.
+ *
+ * A NEW system-enhancer instance created for the same directory (plugin
+ * re-init — the restart-safe lifecycle of issue #2472) removes the
+ * cancellation marker, so fresh instances schedule scans normally again.
+ */
+export function cancelDeferredMaintenanceScans(directory: string): void {
+	const key = path.resolve(directory);
+	cancelledDeferredScanDirs.add(key);
+	deferredScanGenerations.set(key, (deferredScanGenerations.get(key) ?? 0) + 1);
+}
+
+/**
  * Creates the experimental.chat.system.transform hook for system enhancement.
  */
 export function createSystemEnhancerHook(
 	config: PluginConfig,
 	directory: string,
 ): Record<string, unknown> {
+	// PR #2588 bot finding 7: creating a NEW instance for this project root
+	// un-serves any earlier cancellation (dispose → re-init is the
+	// restart-safe lifecycle): fresh instances schedule deferred maintenance
+	// scans normally again.
+	cancelledDeferredScanDirs.delete(path.resolve(directory));
+
 	const enabled = config.hooks?.system_enhancer !== false;
 
 	if (!enabled) {
@@ -982,11 +1092,18 @@ export function createSystemEnhancerHook(
 					modelID: liveModelID,
 					providerID: liveProviderID,
 				});
-				// #2472 W4: armed when the transform body passes the (former)
-				// maintenance-scan block, consumed by the `finally` below to
-				// register the deferred scans as this handler's final
-				// synchronous act. Hoisted here (FR-004 pattern) so EVERY exit
-				// path — early return or exception — can read it.
+				// #2472 W4: armed once the transform body has passed the
+				// intentional native-agent skip guard (see the arm site
+				// directly below the guard), consumed by the `finally`
+				// below to register the deferred scans as this handler's
+				// final synchronous act. Hoisted here (FR-004 pattern) so
+				// EVERY exit path — early return or exception — can read
+				// it. PRR-010 (PR #2588): the arm used to sit deep inside
+				// the try body next to the former synchronous scan block,
+				// so a throw at an awaited point before it (e.g. the
+				// context.md read) silently skipped the finally-run
+				// schedule; arming immediately after the skip guard makes
+				// the schedule unconditional on every later exit path.
 				let deferMaintenanceScans = false;
 				try {
 					// Skip swarm context injection for native opencode agents (build,
@@ -1083,6 +1200,22 @@ export function createSystemEnhancerHook(
 						}
 					}
 
+					// #2472 W4 (AC-5, frozen check C5) / PRR-010 (PR #2588): arm
+					// the deferred maintenance scans HERE — directly after the
+					// intentional native-agent skip guard above — so every
+					// later exit path (a throw at any awaited point, e.g. the
+					// context.md read below; Path A's early return; or normal
+					// completion) still schedules the deferred scan from the
+					// `finally` exactly once per invocation. Arming deeper in
+					// the body (next to the former synchronous scan block) let
+					// a throw before the arm silently skip the schedule. The
+					// native-agent early return above is the ONE intentional
+					// non-arming exit: those agents must not trigger
+					// scanDocIndex or the dark-matter scan (see the guard's
+					// comment). Arming is a boolean assignment only — no scan
+					// work runs here (check-c5 contract).
+					deferMaintenanceScans = true;
+
 					// Per-invocation closure cache: all plan-file reads within this
 					// single transform call share one Map so the filesystem is hit at
 					// most once per file per turn.
@@ -1154,11 +1287,11 @@ export function createSystemEnhancerHook(
 					// reads whatever a PREVIOUS deferred scan materialized; only
 					// the scan/compute/write is off the prompt path.
 					//
-					// Reaching this point ARMS the deferral; the actual macrotask
-					// is registered as the handler's final synchronous act (end of
-					// the `finally` below) so it cannot fire during one of this
-					// body's own internal awaits.
-					deferMaintenanceScans = true;
+					// The deferral was ARMED above (directly after the
+					// native-agent skip guard — PRR-010); the actual macrotask
+					// is registered as the handler's final synchronous act (end
+					// of the `finally` below) so it cannot fire during one of
+					// this body's own internal awaits.
 
 					// Check if scoring is enabled
 					const scoringEnabled =

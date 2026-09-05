@@ -661,6 +661,20 @@ function noteRecentWriteActivity(resolvedTarget: string): void {
 }
 
 /**
+ * Remove the recent-write marker for `targetPath` (PRR-008). Called from the
+ * canonical writer's failure path: a write that throws before its rename
+ * completes must not leave a stale INTENT stamp behind, or a subsequent ENOENT
+ * read of the target would be misclassified as a rename race and retried
+ * against a file this process is no longer producing. Successful writes are
+ * unaffected — they reach the WRITE COMPLETION refresh, which re-stamps the
+ * marker for the post-rename visibility window. Returns true when a stamp was
+ * present and removed.
+ */
+export function clearRecentWriteActivity(targetPath: string): boolean {
+	return recentWriteActivity.delete(path.resolve(targetPath));
+}
+
+/**
  * Whether this process recorded a write INTENT or write COMPLETION for
  * `targetPath` within the last `withinMs` milliseconds (default
  * {@link RECENT_WRITE_WINDOW_MS}).
@@ -797,36 +811,46 @@ function writeAtomicSync(
 	// acceptance: "failed writes clean only their own temp and preserve the
 	// previous target").
 	try {
-		const fd = fs.openSync(tempPath, 'wx', options?.mode);
 		try {
-			let written = 0;
-			while (written < buffer.byteLength) {
-				written += _internals.writeSync(
-					fd,
-					buffer,
-					written,
-					buffer.byteLength - written,
-				);
-			}
-			if (options?.skipFsync !== true) {
-				try {
-					_internals.fsyncSync(fd);
-				} catch {
-					// fsync unsupported on this FS — durability is best-effort
+			const fd = fs.openSync(tempPath, 'wx', options?.mode);
+			try {
+				let written = 0;
+				while (written < buffer.byteLength) {
+					written += _internals.writeSync(
+						fd,
+						buffer,
+						written,
+						buffer.byteLength - written,
+					);
 				}
+				if (options?.skipFsync !== true) {
+					try {
+						_internals.fsyncSync(fd);
+					} catch {
+						// fsync unsupported on this FS — durability is best-effort
+					}
+				}
+			} finally {
+				fs.closeSync(fd);
 			}
+			renameWithRetry(tempPath, resolvedTarget);
 		} finally {
-			fs.closeSync(fd);
+			// Exact finally cleanup of THIS invocation's temp only (no-op after a
+			// successful rename — ENOENT is swallowed).
+			try {
+				_internals.unlinkSync(tempPath);
+			} catch {
+				/* renamed away or never created */
+			}
 		}
-		renameWithRetry(tempPath, resolvedTarget);
-	} finally {
-		// Exact finally cleanup of THIS invocation's temp only (no-op after a
-		// successful rename — ENOENT is swallowed).
-		try {
-			_internals.unlinkSync(tempPath);
-		} catch {
-			/* renamed away or never created */
-		}
+	} catch (error) {
+		// PRR-008: the write failed before the rename completed. The pre-write
+		// INTENT stamp above must not linger for RECENT_WRITE_WINDOW_MS — an
+		// ENOENT read of this target would then be misclassified as a rename
+		// race and retried against a file this invocation will never produce.
+		// Clear it; the previous target (if any) stays preserved on disk.
+		clearRecentWriteActivity(resolvedTarget);
+		throw error;
 	}
 	// Best-effort parent-dir fsync so the rename itself is durable (macOS/APFS).
 	try {

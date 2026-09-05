@@ -269,6 +269,19 @@ export function createRepoGraphBuilderHook(
 	}
 	const failuresBySession = new Map<string, FailureState>();
 
+	// PRR-003 / PR #2588 bot finding 4 — stale-overwrite guard: monotonic
+	// generation of graph saves for THIS workspace. A full scan captures the
+	// current value before its (possibly long) build starts and re-checks it
+	// immediately before the persist call; if any newer save landed in
+	// between — a successful incremental write update, or the fail-open
+	// settle of a timed-out startup scan — the scan's result is stale and its
+	// save is skipped (debug-gated log) instead of overwriting the newer
+	// on-disk state. Deliberately instance-scoped (not module-level): saves
+	// are per-workspace, and a process-wide counter would let one
+	// workspace's saves spuriously suppress another workspace's pending
+	// full scan.
+	let graphSaveGeneration = 0;
+
 	function recordSuccess(sessionID: string): void {
 		failuresBySession.delete(sessionID);
 	}
@@ -309,7 +322,24 @@ export function createRepoGraphBuilderHook(
 		// Announce the scan when it STARTS (issue #2472 / AC-2), not only at
 		// completion, so a slow or wedged scan is visible from its beginning.
 		logger.log(`[repo-graph] Scan start: building workspace graph (${reason})`);
+		// Capture the save generation BEFORE the build: the build can
+		// outlive the startup budget (a zombie scan whose doInit promise is
+		// still running after runBoundedInit settled fail-open), and any
+		// save that lands while it runs makes this scan's result stale.
+		const generationAtScanStart = graphSaveGeneration;
 		const graph = await _buildWorkspaceGraph(workspaceRoot, _buildOptions);
+		// Stale-overwrite guard (PRR-003 / bot finding 4): re-check
+		// immediately before the persist call. A zombie scan that completes
+		// after a newer incremental save (or after its own budget's fail-open
+		// settle) must NOT overwrite the newer graph — skip both the save
+		// and its freshness fingerprint, which certifies the graph that IS
+		// on disk.
+		if (graphSaveGeneration !== generationAtScanStart) {
+			logger.log(
+				`[repo-graph] Skipping graph save (${reason}): a newer graph save superseded this scan`,
+			);
+			return;
+		}
 		await _saveGraph(workspaceRoot, graph);
 		const fingerprintWritten = await _writeFingerprint(
 			workspaceRoot,
@@ -434,8 +464,14 @@ export function createRepoGraphBuilderHook(
 	 * On timeout — or, defensively, any unexpected `doInit` rejection — log a
 	 * warning and RESOLVE fail-open: `initPromise` must always settle safely
 	 * and never reject (callers await it from `toolAfter` and the detached
-	 * post-resolution task queue). A timed-out scan saves no graph; incremental
-	 * write updates proceed as usual, and the next session retries the scan.
+	 * post-resolution task queue). A timed-out scan's underlying `doInit`
+	 * promise keeps running in the background (JS promises cannot be
+	 * cancelled), but the fail-open settle bumps the save generation, so the
+	 * zombie scan's eventual completion can never write a graph: its late
+	 * `_saveGraph` is skipped, and a graph saved by any newer incremental
+	 * write update (each of which also bumps the generation) is never
+	 * overwritten by the stale scan result. Incremental write updates proceed
+	 * as usual, and the next session retries the scan.
 	 */
 	async function runBoundedInit(): Promise<void> {
 		try {
@@ -447,6 +483,10 @@ export function createRepoGraphBuilderHook(
 				),
 			);
 		} catch (error) {
+			// Invalidate any still-running zombie scan for this workspace:
+			// its late save must not overwrite state saved after this
+			// fail-open settle (PRR-003 / bot finding 4).
+			graphSaveGeneration++;
 			const message = error instanceof Error ? error.message : String(error);
 			logger.warn(
 				`[repo-graph] ${message}; giving up fail-open (no graph saved). ` +
@@ -557,6 +597,11 @@ export function createRepoGraphBuilderHook(
 					workspaceRoot,
 				);
 				await updateFiles([pathForUpdate]);
+				// The incremental update just persisted a NEWER graph than any
+				// full scan that started earlier — bump the save generation so
+				// a still-running zombie scan's late save cannot overwrite it
+				// (PRR-003 / bot finding 4).
+				graphSaveGeneration++;
 				recordSuccess(input.sessionID);
 				logger.log(
 					`[repo-graph] Incremental update for ${path.basename(filePath)}`,

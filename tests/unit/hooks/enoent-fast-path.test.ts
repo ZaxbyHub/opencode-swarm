@@ -103,9 +103,11 @@ describe('first-miss ENOENT fast path (issue #2472 W3 / PERF-1)', () => {
 		const dir = canonicalMkdtemp('enoent-fast-never-');
 		installSleepCounter();
 		try {
-			const start = Date.now();
+			// performance.now elapsed measurement — the sanctioned test-clock
+			// pattern for timing bounds (not clock-dependent logic).
+			const start = performance.now();
 			const result = await readSwarmFileAsync(dir, 'plan.md');
-			const elapsed = Date.now() - start;
+			const elapsed = performance.now() - start;
 			expect(result).toBeNull();
 			expect(shortSleepCount).toBe(0);
 			// Zero sleeps ⇒ only the call itself; bound is generous CI headroom.

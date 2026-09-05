@@ -169,8 +169,10 @@ describe('system-enhancer — budget-check throw no longer drops downstream inje
 		// handles it. Without this, the background task would run after the
 		// afterEach seam restore and attempt a stray mkdir under the repo tree
 		// on POSIX hosts (see the fixture comment above).
-		const drainDeadline = Date.now() + 5000;
-		while (throwingDetectCalls === 0 && Date.now() < drainDeadline) {
+		// performance.now polling deadline — the sanctioned test-clock pattern
+		// for polling waits (not clock-dependent logic).
+		const drainDeadline = performance.now() + 5000;
+		while (throwingDetectCalls === 0 && performance.now() < drainDeadline) {
 			await new Promise((resolve) => setTimeout(resolve, 20));
 		}
 		expect(throwingDetectCalls).toBe(1);

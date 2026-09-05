@@ -9,7 +9,7 @@ import {
 	type BunCompatSubprocess,
 	bunSpawn,
 } from '../utils/bun-compat.js';
-import { sameProjectRoot } from '../utils/canonical-root.js';
+import { canonicalRootKey, sameProjectRoot } from '../utils/canonical-root.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import type { BackgroundWorkspaceSnapshot } from './pending-delegations.js';
 
@@ -1878,7 +1878,12 @@ export function captureWorkspaceSnapshot(
 			: null
 		: configuredPrHeadSha;
 	return {
-		directory: path.resolve(directory),
+		// Project-root identity (issue #2474): the snapshot's directory field is
+		// compared and persisted as a root identity (workspaceSnapshotMatches),
+		// so it is derived through the canonical-root helper — realpath-collapsed
+		// and case-folded on win32 — rather than a raw lexical path.resolve. Both
+		// twins must construct it identically or twin-parity tests diverge.
+		directory: canonicalRootKey(directory),
 		gitHead: snapshot?.gitHead ?? null,
 		dirtyHash: porcelain === null ? null : digest(porcelain),
 		changedFiles: snapshot
@@ -1943,7 +1948,9 @@ export async function captureWorkspaceSnapshotAsync(
 			: null
 		: configuredPrHeadSha;
 	const captured: BackgroundWorkspaceSnapshot = {
-		directory: path.resolve(directory),
+		// Same canonical identity as the sync twin (see the comment there) — the
+		// async baseline is compared against sync-captured currents.
+		directory: canonicalRootKey(directory),
 		gitHead: snapshot?.gitHead ?? null,
 		dirtyHash: porcelain === null ? null : digest(porcelain),
 		changedFiles: snapshot

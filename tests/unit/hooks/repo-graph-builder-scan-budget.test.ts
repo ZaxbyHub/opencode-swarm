@@ -14,6 +14,10 @@
  *    options knob) that resolves fail-open, and a full rebuild announces its
  *    start via logger.log.
  *
+ *  - PRR-003 / PR #2588 bot finding 4 — a timed-out (zombie) scan that
+ *    completes in the background cannot overwrite a newer incremental save
+ *    that landed after the budget fired (stale-overwrite generation guard).
+ *
  * Uses the DI deps parameter (not mock.module) per the repo testing standard,
  * and canonicalMkdtemp for symlink-safe temp workspaces (issue #1737 / FR-011).
  */
@@ -68,7 +72,7 @@ function fakeGraph(nodeCount = 3, edgeCount = 1): RepoGraph {
 		nodes: {},
 		edges: [],
 		metadata: {
-			generatedAt: new Date().toISOString(),
+			generatedAt: '2026-01-15T00:00:00.000Z',
 			generator: 'test',
 			nodeCount,
 			edgeCount,
@@ -144,7 +148,9 @@ describe('repo-graph-builder filter-first toolAfter (check-c1 mirror)', () => {
 		let initSettledAt = 0;
 		let updateCalledAt = 0;
 		const updateGraphForFiles = mock(() => {
-			updateCalledAt = Date.now();
+			// performance.now ordering stamps — the sanctioned test-clock pattern
+			// (monotonic, so the >= ordering assertion is strictly sound).
+			updateCalledAt = performance.now();
 			return Promise.resolve(fakeGraph());
 		});
 
@@ -161,7 +167,7 @@ describe('repo-graph-builder filter-first toolAfter (check-c1 mirror)', () => {
 		);
 
 		const initDone = hook.init().then(() => {
-			initSettledAt = Date.now();
+			initSettledAt = performance.now();
 		});
 		await sleep(30); // inside the pending scan
 		expect(initSettledAt).toBe(0);
@@ -191,6 +197,80 @@ describe('repo-graph-builder filter-first toolAfter (check-c1 mirror)', () => {
 		await writeP;
 		expect(updateGraphForFiles).toHaveBeenCalledTimes(1);
 		expect(updateCalledAt).toBeGreaterThanOrEqual(initSettledAt);
+	});
+});
+
+describe('repo-graph-builder zombie-scan stale-overwrite guard (PRR-003 / bot finding 4)', () => {
+	test('late full-scan save is skipped when a newer incremental save landed after the budget fired', async () => {
+		// Prior buggy behavior: runBoundedInit raced doInit() via withTimeout;
+		// on timeout initPromise settled fail-open but the background build
+		// kept running, and its eventual _saveGraph unconditionally overwrote
+		// whatever newer incremental save a write tool had persisted in the
+		// meantime. The generation guard must skip the zombie save.
+		const fullScanGraph = fakeGraph(11, 7);
+		const incrementalGraph = fakeGraph(12, 8);
+		const saveCalls: RepoGraph[] = [];
+		const saveGraph = mock(
+			async (_workspace: string, graph: RepoGraph): Promise<void> => {
+				saveCalls.push(graph);
+			},
+		);
+		// The incremental-update dep routes its persist through the SAME
+		// saveGraph dep (mirroring the real updateGraphForFiles, which saves
+		// its result) so the save ORDER is observable at one seam: the
+		// incremental save lands first, and the zombie full-scan save must
+		// never follow it.
+		const updateGraphForFiles = mock(async () => {
+			await saveGraph(tempWorkspace, incrementalGraph);
+			return incrementalGraph;
+		});
+		// The full scan resolves only when released — well after the budget
+		// fires — so doInit's rebuild is genuinely a zombie scan.
+		let releaseBuild: (graph: RepoGraph) => void = () => {};
+		const buildGate = new Promise<RepoGraph>((resolve) => {
+			releaseBuild = resolve;
+		});
+
+		const hook = createRepoGraphBuilderHook(
+			tempWorkspace,
+			{
+				loadGraph: async () => null, // forces the full-rebuild path
+				buildWorkspaceGraph: () => buildGate,
+				saveGraph,
+				updateGraphForFiles,
+				writeFingerprint: async () => true,
+			},
+			{ enabled: true, initRefresh: true, scanBudgetMs: 80 },
+		);
+
+		// 1. The startup scan starts and blows the budget -> init settles
+		//    fail-open deterministically (init resolves exactly when the
+		//    budget fires; buildGate is still pending).
+		await hook.init();
+
+		// 2. A write tool lands an incremental save while the zombie scan is
+		//    still building. Only the incremental save has persisted so far.
+		const srcFile = writeFixture(path.join('src', 'zombie-guard.ts'));
+		await hook.toolAfter(
+			{
+				tool: 'edit',
+				sessionID: 'zombie-guard',
+				args: { file_path: srcFile },
+			},
+			{ output: '' },
+		);
+		expect(updateGraphForFiles).toHaveBeenCalledTimes(1);
+		expect(saveCalls).toEqual([incrementalGraph]);
+
+		// 3. The zombie full scan completes LATE. Its save must be SKIPPED —
+		//    saveGraph stays at exactly one call carrying the incremental
+		//    result, never a second call overwriting it with the stale
+		//    full-scan graph.
+		releaseBuild(fullScanGraph);
+		await sleep(50); // let the zombie continuation run its guard
+		expect(saveGraph).toHaveBeenCalledTimes(1);
+		expect(saveCalls[0]).toBe(incrementalGraph);
+		expect(saveCalls).not.toContain(fullScanGraph);
 	});
 });
 

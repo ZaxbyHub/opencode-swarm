@@ -29,6 +29,7 @@ import { KnowledgeConfigSchema } from '../config/schema.js';
 import type { CohortIdentity } from '../knowledge/cohort-identity.js';
 import { resolveCohortId } from '../knowledge/cohort-identity.js';
 import { authorizeCuration } from '../knowledge/curation-policy.js';
+import { canonicalRootKey } from '../utils/canonical-root.js';
 import { resolveHiveDataDir } from '../knowledge/hive-paths.js';
 import { ensureCohortIdCached } from './cohort-cache.js';
 import { appendCuratorRecommendation, readCuratorSummary } from './curator.js';
@@ -847,14 +848,28 @@ const lastPromotionRunAt = new Map<string, number>();
  */
 const curatorMigrationCheckedDirectories = new Set<string>();
 
+/**
+ * PRR-023 — one canonical gating key per directory. `path.resolve` collapses
+ * alternate spellings of the same directory (trailing separators, `.`/`..`
+ * segments, forward/back-slash mixes on Windows), so the cadence floor and the
+ * curator-migration once-guard are shared across every hook closure spelling
+ * of one project: a differently-spelled invocation can neither bypass the
+ * cadence floor nor re-trigger the one-time migration.
+ */
+function promoterGatingKey(directory: string): string {
+	return canonicalRootKey(directory);
+}
+
 /** Record a promotion-body run for `directory`, refreshing recency and evicting
- *  the oldest key past the cap (invariant 8). */
+ *  the oldest key past the cap (invariant 8). Keyed on the resolved spelling
+ *  (PRR-023). */
 function markPromotionRunAt(directory: string, now: number): void {
-	lastPromotionRunAt.delete(directory);
-	lastPromotionRunAt.set(directory, now);
+	const key = promoterGatingKey(directory);
+	lastPromotionRunAt.delete(key);
+	lastPromotionRunAt.set(key, now);
 	if (lastPromotionRunAt.size > MAX_PROMOTER_TRACKED_DIRECTORIES) {
 		const oldest = lastPromotionRunAt.keys().next().value;
-		if (oldest !== undefined && oldest !== directory) {
+		if (oldest !== undefined && oldest !== key) {
 			lastPromotionRunAt.delete(oldest);
 		}
 	}
@@ -903,6 +918,13 @@ export const _internals = {
 	/** Loads the default KnowledgeConfig (schema defaults) for manual promotion
 	 *  paths when the command did not load one. */
 	loadDefaultKnowledgeConfig: () => KnowledgeConfigSchema.parse({}),
+	/** #2472 W2 cadence clock (PRR-021 DI seam, invariant 7): the promotion
+	 *  cadence floor reads time through this seam so tests can advance the
+	 *  60s floor deterministically without real sleeping or raw wall-clock
+	 *  polling. Everything else (entry timestamps, audit timestamps) stays on
+	 *  `new Date().toISOString()` — only the cadence decision is time-driven
+	 *  control flow. */
+	now: (): number => Date.now(),
 	/** Test-only: clears the #2472 W2 hook-gating state (per-directory cadence
 	 *  map + curator-migration guard). Production code never calls this; it
 	 *  exists so test files sharing one Bun process start from a clean slate. */
@@ -951,17 +973,23 @@ export function createHivePromoterHook(
 			// migration (the pre-W2 code read the summary "first even on a
 			// no-op"). On an empty store the migration check runs at most once
 			// per directory per process; subsequent empty-store calls return
-			// without reading it.
-			if (!curatorMigrationCheckedDirectories.has(directory)) {
-				curatorMigrationCheckedDirectories.add(directory);
+			// without reading it. Keyed on the resolved spelling (PRR-023) so
+			// alternate spellings of one directory share the guard.
+			if (
+				!curatorMigrationCheckedDirectories.has(promoterGatingKey(directory))
+			) {
+				curatorMigrationCheckedDirectories.add(promoterGatingKey(directory));
 				await _internals.readCuratorSummary(directory);
 			}
 			return;
 		}
 
-		// Gate 3 — cadence floor (see PROMOTION_CADENCE_FLOOR_MS).
-		const now = Date.now();
-		const lastRunAt = lastPromotionRunAt.get(directory);
+		// Gate 3 — cadence floor (see PROMOTION_CADENCE_FLOOR_MS). The clock is
+		// the `_internals.now` seam (PRR-021) and the map key is the resolved
+		// spelling (PRR-023), so the floor is deterministic in tests and shared
+		// across directory spellings.
+		const now = _internals.now();
+		const lastRunAt = lastPromotionRunAt.get(promoterGatingKey(directory));
 		if (
 			lastRunAt !== undefined &&
 			now - lastRunAt < PROMOTION_CADENCE_FLOOR_MS

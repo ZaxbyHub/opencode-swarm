@@ -105,8 +105,10 @@ const { detectArchitectMode, createSystemEnhancerHook } = await import(
  * asserting it synchronously inside the awaited call.
  */
 async function waitFor(predicate: () => boolean, what: string): Promise<void> {
-	const deadline = Date.now() + 5000;
-	while (Date.now() < deadline) {
+	// performance.now polling deadline — the sanctioned test-clock pattern for
+	// polling waits (not clock-dependent logic); see tests/unit/index.test.ts.
+	const deadline = performance.now() + 5000;
+	while (performance.now() < deadline) {
 		if (predicate()) return;
 		await new Promise((resolve) => setTimeout(resolve, 20));
 	}

@@ -22,8 +22,10 @@ import {
 } from './background';
 import { createBackgroundCompletionObserver } from './background/completion-observer.js';
 import {
+	ensurePrSubscriptionDispatcherInstalled,
 	listActive as listActiveSubscriptions,
-	setOnSubscriptionCreated,
+	registerPrMonitorWorkerHandler,
+	removePrMonitorWorkerHandler,
 } from './background/pr-subscriptions';
 import {
 	agentHasSwarmCommandTool,
@@ -112,6 +114,10 @@ import {
 	outputLooksLikeBackgroundRunning,
 	safeHook,
 } from './hooks';
+// Direct (non-barrel) import: the hooks barrel intentionally re-exports only
+// the hook factories; the dispose-fence helper is a lifecycle utility used
+// solely by this file's dispose block (PR #2588 bot finding 7).
+import { cancelDeferredMaintenanceScans } from './hooks/system-enhancer';
 import {
 	detectAdversarialPatterns,
 	detectDebuggingSpiral,
@@ -392,18 +398,6 @@ function registerProcessExitCleanupDispatcher(): void {
 		process.on(signal, handler);
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Retain-and-invoke slot for PR event subscribers (issue #2472 W9)
-// ---------------------------------------------------------------------------
-//
-// setOnSubscriptionCreated overwrites a single module-level callback. When a
-// second server() instance initializes in this process (plugin restart), the
-// overwrite silently orphaned the previous instance's PR event subscribers —
-// both instances' subscribers stayed live and double-delivered. Each instance
-// publishes its own prEventCleanup here after registering subscribers; the
-// NEXT instance invokes (and clears) it before re-registering.
-let retainedPrEventCleanup: (() => void) | null = null;
 
 /**
  * Delegation-telemetry pairing state: callID → identity recorded when
@@ -2485,40 +2479,19 @@ async function initializeOpenCodeSwarm(
 
 	// Wire the lazy-start callback into the subscription store so the
 	// worker starts automatically when a new PR is subscribed.
-	// Retain-and-invoke (issue #2472 W9): when a second server() instance
-	// initializes in this process, the previous instance's PR event
-	// subscribers must be torn down BEFORE this instance re-registers —
-	// otherwise both instances' subscribers stay live and double-deliver.
-	// The module-level slot holds the most recent instance's cleanup; this
-	// instance publishes its own below, right after registering subscribers.
-	if (retainedPrEventCleanup !== null) {
-		try {
-			retainedPrEventCleanup();
-		} catch (err) {
-			log(
-				'[pr-monitor] previous instance subscriber cleanup failed (non-fatal)',
-				{
-					error: err instanceof Error ? err.message : String(err),
-				},
-			);
-		}
-		retainedPrEventCleanup = null;
-	}
-	const previousOnSubscriptionCreated = setOnSubscriptionCreated(
-		(directory: string, _record) => {
-			ensurePrMonitorWorkerRunning(directory);
-		},
-	);
-	if (previousOnSubscriptionCreated !== null) {
-		// Observability only. The superseded callback is intentionally NOT
-		// invoked: starting the previous instance's worker is that instance's
-		// behavior; the subscriber teardown above is the cleanup half of the
-		// retain-and-invoke contract (setOnSubscriptionCreated now returns the
-		// prior callback so re-registration cannot orphan it silently).
-		log(
-			'[pr-monitor] superseded a previous on-subscription-created callback (plugin re-init)',
-		);
-	}
+	// Multi-project ownership (PR #2588, review finding 5 / PRR-011): a single
+	// process-wide DISPATCHER is installed once per process
+	// (ensurePrSubscriptionDispatcherInstalled — identity-guarded), routing
+	// each subscription event to the live server() instance that owns the
+	// event's project root via the registry in pr-subscriptions.ts. The old
+	// wiring tore down the previous instance's PR event subscribers at init
+	// and re-registered a callback closing over THIS instance's worker
+	// starter, so initializing project B killed project A's subscribers and
+	// stole A's subscription events. Ownership is now per-instance: B's init
+	// leaves A's registry entry untouched; each instance's cleanupAutomation
+	// removes only its own entry.
+	ensurePrSubscriptionDispatcherInstalled();
+	registerPrMonitorWorkerHandler(ctx.directory, ensurePrMonitorWorkerRunning);
 
 	// Register PR event subscribers for event delivery to active sessions
 	let prEventCleanup: (() => void) | null = null;
@@ -2539,10 +2512,6 @@ async function initializeOpenCodeSwarm(
 				directory: ctx.directory,
 				config: prMonitorConfig,
 			});
-			// Publish this instance's cleanup to the retain-and-invoke slot so
-			// the NEXT server() instance in this process tears these subscribers
-			// down before registering its own (issue #2472 W9).
-			retainedPrEventCleanup = prEventCleanup;
 		} catch (err) {
 			log('[pr-monitor] Failed to register PR event subscribers (non-fatal)', {
 				error: err instanceof Error ? err.message : String(err),
@@ -2605,6 +2574,11 @@ async function initializeOpenCodeSwarm(
 		automationManager?.stop();
 		prMonitorWorker?.stop();
 		planSyncWorker?.stop();
+		// Remove THIS instance's per-project worker-handler registry entry
+		// (PR #2588, review finding 5): the dispatcher routes subscription
+		// events per canonical root, so only this project's entry may go —
+		// other live projects' entries must survive this instance's teardown.
+		removePrMonitorWorkerHandler(ctx.directory);
 		prEventCleanup?.();
 		prEventDelivery?.unregisterPrEventDelivery();
 		markSnapshotCoordinationClosing(ctx.directory);
@@ -2923,6 +2897,22 @@ async function initializeOpenCodeSwarm(
 		// the registry empties), and evict this project's scoped pooled
 		// provider handles.
 		dispose: async (): Promise<void> => {
+			// PR #2588 bot finding 7 (#2472 W4): fence this project's deferred
+			// maintenance scans (doc-index directory walk / dark-matter git
+			// scan + `.swarm` writes, scheduled by the system-enhancer
+			// transform that was created for ctx.directory). A pending or
+			// in-flight background task must not fire into — or keep writing
+			// artifacts for — a directory whose plugin instance is being torn
+			// down. Best-effort and fail-open: cancellation is bookkeeping
+			// only and must never block teardown; a future re-init for the
+			// same directory (new system-enhancer instance) un-serves it.
+			try {
+				cancelDeferredMaintenanceScans(ctx.directory);
+			} catch (err) {
+				log('dispose deferred-scan cancellation failed (non-fatal)', {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
 			// Stop automation manager / pr monitor / plan sync workers, PR event
 			// subscribers + delivery, and the durable snapshot/db state.
 			// Idempotent: safe even if the 'exit' dispatcher already ran it.

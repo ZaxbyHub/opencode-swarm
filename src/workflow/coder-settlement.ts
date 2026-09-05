@@ -8,7 +8,7 @@ import type {
 } from '../background/pending-delegations.js';
 import {
 	captureWorkspaceSnapshotAsync,
-	changedFilesSinceSnapshot,
+	changedFilesSinceSnapshotAsync,
 } from '../background/workspace-snapshot.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import {
@@ -184,12 +184,17 @@ function isProcessAlive(processId: number): boolean {
 	}
 }
 
-function scopedObservedFiles(
+// Async (PRR-004 / #2472): recoverCoderSettlement is awaited from the
+// delegation gate's hook-reachable recovery path (delegation-gate.ts), so its
+// mutation-attribution helper must route through the bounded async twin — the
+// sync twin internally spawnSynces a workspace capture/diff and would block
+// the host event loop.
+async function scopedObservedFiles(
 	directory: string,
 	context: BackgroundTaskChangeContext,
-): string[] | null {
+): Promise<string[] | null> {
 	const baseline = { ...context.baseline, directory };
-	const observed = changedFilesSinceSnapshot(directory, baseline);
+	const observed = await changedFilesSinceSnapshotAsync(directory, baseline);
 	if (!observed || !context.declaredFiles) return null;
 	return observed.filter((filePath) =>
 		isPathWithinDeclaredScope(filePath, context.declaredFiles ?? [], directory),
@@ -933,7 +938,7 @@ export async function recoverCoderSettlement(
 				const worktree = wal.worktree;
 				const observed =
 					wal.observedFiles ??
-					scopedObservedFiles(worktree.worktreePath, wal.context);
+					(await scopedObservedFiles(worktree.worktreePath, wal.context));
 				if (observed === null) {
 					throw new Error(
 						`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: transition ${wal.transitionId} for isolated task ${taskId} could not attribute worktree changes to the declared scope (${filePath}, state ${wal.state}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
@@ -1087,8 +1092,9 @@ export async function recoverCoderSettlement(
 			// doomed baseline (non-git or dirty at dispatch — the pre-#2214-fix
 			// wedge class) can never be attributed: abort so the task becomes
 			// repairable instead of throwing RECOVERY_UNCERTAIN forever. A clean
-			// baseline whose current capture fails stays retryable.
-			const rawObserved = changedFilesSinceSnapshot(
+			// baseline whose current capture fails stays retryable. Async twin per
+			// PRR-004 (same rationale as scopedObservedFiles above).
+			const rawObserved = await changedFilesSinceSnapshotAsync(
 				directory,
 				wal.context.baseline,
 			);

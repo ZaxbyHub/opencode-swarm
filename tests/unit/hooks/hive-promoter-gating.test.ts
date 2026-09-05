@@ -17,16 +17,24 @@
  *  3. Cadence floor — two back-to-back qualifying invocations run the
  *     promotion body at most once (`transactHiveStore` ≤ 1); a non-empty store
  *     keeps today's curator-summary ordering (the read still runs after the
- *     promotion body).
+ *     promotion body). PRR-021: the floor's expiry is ALSO pinned — after the
+ *     60s floor elapses (advanced via the `_internals.now` seam, no real
+ *     sleeping) a further qualifying invocation runs the body again. PRR-023:
+ *     the cadence map and the migration guard are keyed on the RESOLVED
+ *     directory, so alternate spellings of one directory share both guards.
  *
  * Instrumentation mirrors the frozen check
  * (.agents/issue-traces/2472-hot-path-stalls-restart-safe/repro/check-c3.ts):
  * the `_internals` seam is swapped in place and restored in `finally`
- * (AGENTS.md invariant 7 — no `mock.module`).
+ * (AGENTS.md invariant 7 — no `mock.module`). The cadence clock is driven
+ * through the same seam (`_internals.now`) with a deterministic controllable
+ * value — no raw wall-clock reads (scripts/check-test-clock.ts) and no
+ * sleeping.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { rmSync } from 'node:fs';
+import path from 'node:path';
 import {
 	_internals,
 	createHivePromoterHook,
@@ -40,6 +48,7 @@ const real = {
 	transactHiveStore: _internals.transactHiveStore,
 	readSwarmEntries: _internals.readSwarmEntries,
 	readCuratorSummary: _internals.readCuratorSummary,
+	now: _internals.now,
 };
 
 const counts = {
@@ -54,6 +63,16 @@ function resetCounts(): void {
 	for (const key of Object.keys(counts) as (keyof typeof counts)[]) {
 		counts[key] = 0;
 	}
+}
+
+/** Deterministic cadence clock (PRR-021): installSeam wires `_internals.now`
+ *  to this value; tests advance it explicitly instead of sleeping or reading
+ *  the wall clock. Arbitrary fixed base — the promoter only ever compares
+ *  deltas against the 60s floor. */
+let clockNow = 1_000_000;
+
+function advanceClock(ms: number): void {
+	clockNow += ms;
 }
 
 function installSeam(entriesProvider: () => unknown[]): void {
@@ -93,6 +112,7 @@ function installSeam(entriesProvider: () => unknown[]): void {
 			counts.readCuratorSummary++;
 			return null;
 		};
+	_internals.now = () => clockNow;
 }
 
 function restoreSeam(): void {
@@ -101,9 +121,12 @@ function restoreSeam(): void {
 	_internals.transactHiveStore = real.transactHiveStore;
 	_internals.readSwarmEntries = real.readSwarmEntries;
 	_internals.readCuratorSummary = real.readCuratorSummary;
+	_internals.now = real.now;
 }
 
-/** A minimal ACTIVE swarm entry (mirrors the frozen check's fixture shape). */
+/** A minimal ACTIVE swarm entry (mirrors the frozen check's fixture shape).
+ *  Timestamps are fixed literals — nothing in the gating paths is wall-clock
+ *  sensitive, and fixed values keep this file clean under check-test-clock. */
 function makeActiveEntry(id: string): SwarmKnowledgeEntry {
 	return {
 		id,
@@ -121,8 +144,8 @@ function makeActiveEntry(id: string): SwarmKnowledgeEntry {
 			failed_after_count: 0,
 		},
 		schema_version: 3,
-		created_at: new Date().toISOString(),
-		updated_at: new Date().toISOString(),
+		created_at: '2026-01-01T00:00:00.000Z',
+		updated_at: '2026-01-01T00:00:00.000Z',
 		project_name: 'hive-gating',
 	};
 }
@@ -133,6 +156,7 @@ describe('hive promoter hook gating (#2472 W2 / C3)', () => {
 
 	beforeEach(() => {
 		dir = canonicalMkdtemp('hive-gating-');
+		clockNow = 1_000_000;
 		// Module-level gating state (cadence map + migration guard) survives
 		// across test files in Bun's shared runner — start each test clean.
 		_internals.resetPromoterGatingState();
@@ -175,10 +199,35 @@ describe('hive promoter hook gating (#2472 W2 / C3)', () => {
 			installSeam(() => [makeActiveEntry('entry-1')]);
 			resetCounts();
 			await hook({ tool: 'write', sessionID: 'gating-cadence' }, {});
+			// Deterministic (PRR-021): advance the seam clock to a point strictly
+			// inside the 60s floor — the second invocation MUST be floored, not
+			// merely observed to be (wall-clock luck under a real clock).
+			advanceClock(1_000);
 			await hook({ tool: 'write', sessionID: 'gating-cadence' }, {});
 			// Exactly 1: the first qualifying invocation MUST run the body, the
 			// second MUST be floored (≤ 1 is the frozen C3 Phase B contract).
 			expect(counts.transactHiveStore).toBe(1);
+		} finally {
+			restoreSeam();
+		}
+	});
+
+	it('cadence floor expiry: a qualifying invocation AFTER the 60s floor runs the body again (PRR-021)', async () => {
+		try {
+			installSeam(() => [makeActiveEntry('entry-1')]);
+			resetCounts();
+			await hook({ tool: 'write', sessionID: 'gating-expiry' }, {});
+			expect(counts.transactHiveStore).toBe(1);
+			// Inside the floor — still suppressed.
+			advanceClock(59_000);
+			await hook({ tool: 'write', sessionID: 'gating-expiry' }, {});
+			expect(counts.transactHiveStore).toBe(1);
+			// Past the floor (PROMOTION_CADENCE_FLOOR_MS = 60_000): the body runs
+			// again. No real sleeping — the elapse is simulated through the
+			// `_internals.now` seam, so the expiry property is deterministic.
+			advanceClock(61_000);
+			await hook({ tool: 'write', sessionID: 'gating-expiry' }, {});
+			expect(counts.transactHiveStore).toBe(2);
 		} finally {
 			restoreSeam();
 		}
@@ -192,6 +241,28 @@ describe('hive promoter hook gating (#2472 W2 / C3)', () => {
 			expect(counts.readCuratorSummary).toBe(1);
 			await hook({ tool: 'write', sessionID: 'gating-migration' }, {});
 			await hook({ tool: 'write', sessionID: 'gating-migration' }, {});
+			expect(counts.readCuratorSummary).toBe(1);
+		} finally {
+			restoreSeam();
+		}
+	});
+
+	it('curator migration runs once per RESOLVED directory — alternate spellings share the guard (PRR-023)', async () => {
+		try {
+			installSeam(() => []);
+			resetCounts();
+			await hook({ tool: 'write', sessionID: 'gating-resolved' }, {});
+			expect(counts.readCuratorSummary).toBe(1);
+			// A different SPELLING of the same directory (trailing separator).
+			// Pre-PRR-023 the migration guard was raw-keyed, so this spelling
+			// re-triggered the one-time read; the resolved key shares the guard.
+			const alternateSpelling = `${dir}${path.sep}`;
+			const alternateHook = createHivePromoterHook(
+				alternateSpelling,
+				_internals.loadDefaultKnowledgeConfig(),
+			);
+			await alternateHook({ tool: 'write', sessionID: 'gating-resolved' }, {});
+			await hook({ tool: 'write', sessionID: 'gating-resolved' }, {});
 			expect(counts.readCuratorSummary).toBe(1);
 		} finally {
 			restoreSeam();

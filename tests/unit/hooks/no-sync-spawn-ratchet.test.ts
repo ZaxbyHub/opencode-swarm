@@ -25,12 +25,12 @@
  *     `probeBranchExists`, classified OUT_OF_CLASS by the recurrence sweep
  *     (lock-held recovery path, not per-tool-call) — its body is stripped by
  *     name so every OTHER sync spawn in that file still bites.
- *  2. `src/hooks/delegation-gate.ts` and
- *     `src/hooks/guardrails/execution-stall.ts` additionally contain no
+ *  2. `src/hooks/delegation-gate.ts`,
+ *     `src/hooks/guardrails/execution-stall.ts`, and — PRR-004 —
+ *     `src/workflow/coder-settlement.ts` (recoverCoderSettlement is awaited
+ *     from the delegation gate's hook-reachable recovery path) contain no
  *     binding/call of the sync `changedFilesSinceSnapshot` (word-bounded: the
- *     `changedFilesSinceSnapshotAsync` twin must not trip it). The other
- *     scanned files keep the sync twin as their sanctioned settlement/
- *     recovery interface, so the rule is scoped to these two.
+ *     `changedFilesSinceSnapshotAsync` twin must not trip it).
  *  3. `src/background/workspace-snapshot.ts` exports
  *     `captureWorkspaceSnapshotAsync` and `changedFilesSinceSnapshotAsync`
  *     whose body slices (export line to the next line-start `export`) are
@@ -47,7 +47,8 @@ const ROOT = join(import.meta.dir, '..', '..', '..');
 
 interface ScannedFile {
 	path: string;
-	/** Scan for sync `changedFilesSinceSnapshot` residue (R-1 hook sites only). */
+	/** Scan for sync `changedFilesSinceSnapshot` residue (R-1 hook sites + the
+	 *  hook-reachable settlement recovery path per PRR-004). */
 	changedFilesScan: boolean;
 	/** Strip the classified OUT_OF_CLASS recovery probe before the spawn scan. */
 	stripRecoveryProbe: boolean;
@@ -73,7 +74,9 @@ const SCANNED_FILES: readonly ScannedFile[] = [
 	},
 	{
 		path: 'src/workflow/coder-settlement.ts',
-		changedFilesScan: false,
+		// PRR-004: recoverCoderSettlement is awaited from delegation-gate.ts's
+		// hook-reachable recovery path, so its sync-twin usage is in class.
+		changedFilesScan: true,
 		stripRecoveryProbe: true,
 	},
 ] as const;
@@ -215,7 +218,7 @@ describe('no-sync-spawn static ratchet (issue #2472 W10 / AC-11, W11 R-1..R-3)',
 		).toBe(0);
 	});
 
-	test('delegation-gate and execution-stall do not bind or call the sync changedFilesSinceSnapshot (word-bounded; Async twin must not trip)', () => {
+	test('delegation-gate, execution-stall, and coder-settlement do not bind or call the sync changedFilesSinceSnapshot (word-bounded; Async twin must not trip)', () => {
 		const violations: Violation[] = [];
 		for (const file of SCANNED_FILES) {
 			if (!file.changedFilesScan) continue;
@@ -229,7 +232,7 @@ describe('no-sync-spawn static ratchet (issue #2472 W10 / AC-11, W11 R-1..R-3)',
 		}
 		expect(
 			violations.length,
-			`sync changedFilesSinceSnapshot still reachable from R-1 hook files (transitively sync-spawns through its internal capture/diff): ${describeViolations(violations)}`,
+			`sync changedFilesSinceSnapshot still reachable from R-1 hook files or the hook-reachable coder-settlement recovery path (transitively sync-spawns through its internal capture/diff): ${describeViolations(violations)}`,
 		).toBe(0);
 	});
 

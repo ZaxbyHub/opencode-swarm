@@ -17,6 +17,16 @@
  *  (c) in-flight guard: a second transform call while the first deferred
  *      scan is pending does not schedule a second one.
  *
+ * Plus the PR #2588 feedback-round contracts:
+ *  (d) dispose fence (bot finding 7): cancelDeferredMaintenanceScans called
+ *      between scheduling and the macrotask firing (the dispose race —
+ *      deterministic because the timer cannot fire while the cancelling
+ *      code runs synchronously on the post-await continuation) suppresses
+ *      the pending task entirely: no detect call, no artifacts;
+ *  (e) re-arm: a NEW hook instance for the same directory un-serves the
+ *      cancellation (dispose → re-init restart-safe lifecycle), so its
+ *      normal schedule path materializes artifacts again.
+ *
  * Instrumentation follows the writing-tests skill: the co-change-analyzer
  * `_internals` DI seam (which system-enhancer reads at call time) is
  * replaced with a counting stub and restored in `finally` — no mock.module.
@@ -28,7 +38,10 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
-import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
+import {
+	cancelDeferredMaintenanceScans,
+	createSystemEnhancerHook,
+} from '../../../src/hooks/system-enhancer';
 import { _internals as coChangeInternals } from '../../../src/tools/co-change-analyzer';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -45,8 +58,10 @@ async function pollUntil(
 	deadlineMs = POLL_DEADLINE_MS,
 	intervalMs = POLL_INTERVAL_MS,
 ): Promise<boolean> {
-	const start = Date.now();
-	while (Date.now() - start < deadlineMs) {
+	// performance.now polling deadline — the sanctioned test-clock pattern for
+	// polling waits (not clock-dependent logic).
+	const start = performance.now();
+	while (performance.now() - start < deadlineMs) {
 		if (predicate()) return true;
 		await sleep(intervalMs);
 	}
@@ -167,6 +182,73 @@ describe('system-enhancer deferred maintenance scans (#2472 W4 / AC-5)', () => {
 			expect(detectCalls).toBe(1);
 		} finally {
 			releaseDetect?.();
+			coChangeInternals.detectDarkMatter = realDetectDarkMatter;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('(d) dispose fence: cancelled directory runs no deferred scan work (bot finding 7)', async () => {
+		const dir = canonicalMkdtemp('se-deferred-scan-cancel-');
+		const realDetectDarkMatter = coChangeInternals.detectDarkMatter;
+		let detectCalls = 0;
+		coChangeInternals.detectDarkMatter = (async () => {
+			detectCalls++;
+			return [];
+		}) as typeof realDetectDarkMatter;
+		try {
+			const transform = makeTransform(dir);
+			await transform({ sessionID: 'se-deferred-cancel' }, { system: [] });
+
+			// The macrotask is scheduled but has NOT fired yet: registration is
+			// the handler's final synchronous act and only microtasks precede
+			// the caller's resumption, so this synchronous cancel always lands
+			// first — exactly the dispose race the fence exists for.
+			cancelDeferredMaintenanceScans(dir);
+
+			// Wait well past the 0ms macrotask: the cancelled task must exit
+			// at its first statement, before ANY scan work.
+			await sleep(200);
+			expect(detectCalls).toBe(0);
+			expect(existsSync(join(dir, '.swarm', 'dark-matter.md'))).toBe(false);
+			expect(existsSync(join(dir, '.swarm', 'doc-manifest.json'))).toBe(false);
+		} finally {
+			coChangeInternals.detectDarkMatter = realDetectDarkMatter;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('(e) re-arm: a new instance for the same directory un-serves the cancellation', async () => {
+		const dir = canonicalMkdtemp('se-deferred-scan-rearm-');
+		const realDetectDarkMatter = coChangeInternals.detectDarkMatter;
+		let detectCalls = 0;
+		coChangeInternals.detectDarkMatter = (async () => {
+			detectCalls++;
+			return [];
+		}) as typeof realDetectDarkMatter;
+		try {
+			// schedule (instance 1)…
+			const transform1 = makeTransform(dir);
+			await transform1({ sessionID: 'se-deferred-rearm-1' }, { system: [] });
+			// …cancel (same-tick guarantee as test (d))…
+			cancelDeferredMaintenanceScans(dir);
+			// …let the cancelled task fire and exit (clears the single-flight
+			// key) before scheduling again.
+			await sleep(100);
+			expect(detectCalls).toBe(0); // sanity: the cancellation held
+
+			// …schedule again via a NEW instance (makeTransform constructs a
+			// fresh hook, which un-serves the cancelled marker): its normal
+			// schedule path must materialize both artifacts.
+			const transform2 = makeTransform(dir);
+			await transform2({ sessionID: 'se-deferred-rearm-2' }, { system: [] });
+			const materialized = await pollUntil(
+				() =>
+					existsSync(join(dir, '.swarm', 'dark-matter.md')) &&
+					existsSync(join(dir, '.swarm', 'doc-manifest.json')),
+			);
+			expect(materialized).toBe(true);
+			expect(detectCalls).toBeGreaterThanOrEqual(1);
+		} finally {
 			coChangeInternals.detectDarkMatter = realDetectDarkMatter;
 			rmSync(dir, { recursive: true, force: true });
 		}

@@ -763,6 +763,43 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: { kind: 'not-a-defect', proof: 'Fixed two-field shape rewritten per recovery pass (src/background/delegation-lifecycle.ts readRecoveryCursor/writeRecoveryCursor); loss is fail-open to idempotent rework, bounded by MAX_TERMINAL_LANE_RECEIPT_RECOVERY + admission deadline.' },
 	},
 	{
+		id: 'workspace-snapshot-digest',
+		category: 2,
+		pathGrammar: '.swarm/workspace-snapshot.digest',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/background/workspace-snapshot.ts'],
+		writerCitations: [
+			'src/background/workspace-snapshot.ts:1918 captureWorkspaceSnapshotAsync — async twin persist path: after a successful capture the content digest is written to the .swarm-contained marker (:1967-1978)',
+			'src/background/workspace-snapshot.ts:1970 atomicWriteSwarmFile — validateSwarmPath(SNAPSHOT_DIGEST_MARKER_FILENAME)-contained atomic temp+rename; advisory by contract, a containment rejection or write failure never fails the capture (:1974-1977)',
+		],
+		readerCitations: [
+			'src/background/workspace-snapshot.ts:1992 shouldSkipSnapshot — single readFileSync of the marker, trim + exact compare; missing/malformed marker or candidate digest fails open to false (a skip can never suppress a capture)',
+		],
+		schemaVersion: 'none — single sha256 hex line (64 lowercase hex chars + trailing newline)',
+		stateClass: 'derived-rebuildable',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'ONE fixed-shape advisory marker per project root — 65 bytes (64-char sha256 hex + newline), atomically overwritten per capture; the write is skipped entirely whenever the digest is unchanged, so footprint is constant regardless of capture frequency',
+			scope: 'global',
+			citation: 'src/background/workspace-snapshot.ts:1967-1978',
+		},
+		readBound: { pattern: 'line-bounded', bound: 'single 65-byte marker read once per capture', sync: true, citation: 'src/background/workspace-snapshot.ts:1992-2005' },
+		lockModel: 'none — advisory marker; atomic temp+rename makes concurrent captures last-writer-wins and a raced stale value costs one redundant capture at worst',
+		crashBehavior: 'atomic temp+rename; a torn or lost marker fails open (shouldSkipSnapshot false) and the next capture rewrites it — the marker is advisory, never authoritative state',
+		closePolicy: 'archived then cleaned by /swarm close — the marker is a member of both ARCHIVE_ARTIFACTS and ACTIVE_STATE_TO_CLEAN (close.ts), so close preserves a copy in the archive and removes the live file',
+		closeArrayMembership: {
+			'workspace-snapshot.digest': 'archive+clean',
+		},
+		resetPolicy: 'not reset — a stale marker after any reset merely fails open to a full capture',
+		legacyCompatibility: 'pre-marker installs simply capture and write on first use; a malformed marker reads as a mismatch (skip=false)',
+		healthSignal: 'n/a (advisory skip marker; effectiveness is observable only as avoided writes)',
+		owner: '#2472',
+		disposition: {
+			kind: 'not-a-defect',
+			proof: 'Single fixed-shape 65-byte advisory marker, atomically overwritten per capture and skipped entirely when the content digest is unchanged; a missing, torn, or stale marker costs exactly one redundant capture because shouldSkipSnapshot fails open — constant footprint, no accumulation vector (src/background/workspace-snapshot.ts:1967-1978,1992-2005).',
+		},
+	},
+	{
 		id: 'pr-review-reentry-authorizations',
 		category: 2,
 		pathGrammar: '.swarm/pr-review/reentry-authorizations/{session-stem}.json (+ .lock)',
