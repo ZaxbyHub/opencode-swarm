@@ -99,7 +99,10 @@ RESEARCH CONTEXT — <subtopic>
 ## Step 4 — Parallel Synthesis Workers
 
 Dispatch up to `max_researchers` `the active swarm's sme agent` calls with
-`dispatch_lanes_async` when available — one per subtopic. Record the returned
+`dispatch_lanes_async` when available — one per subtopic. Before the first
+dispatch, verify from the session's actual tool list whether the controller's
+lane tools are present; when they are absent, use the native parallel subagent
+path from the start rather than discovering the gap on first failure. Record the returned
 `batch_id`, then continue architect-owned retrieval quality work that does not
 depend on worker output: tighten the evidence ledger, check source authority,
 prepare reviewer shard structure, and identify unresolved gaps. Do not write final

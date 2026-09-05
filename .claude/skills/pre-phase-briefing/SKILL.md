@@ -55,6 +55,14 @@ List every referenced item — file, module, function, API, config surface, and 
 
 Do not fix the lane count in advance and do not over-spawn: extra lanes on a small surface waste tokens without improving coverage, while too few on a large surface leave gaps. Split by codebase area by default; when the surface is a single dense area, split by check-type instead — one lane for *existence & current state*, one for *assumption correctness & prior-work*.
 
+**Capability gate (before the first dispatch).** Check the session's actual tool
+list: if `dispatch_lanes_async`/`collect_lane_results` are not present
+(non-controller hosts — Claude Code, Codex, ZCode), run the same lanes as native
+parallel subagents, or as strictly sequential passes when no subagent mechanism
+exists. The disjoint reference partition, the hard settlement gate, and per-lane
+provenance are unchanged on every path; record that dispatch was procedural, and
+never fabricate `batch_id` or lane receipts.
+
 **3. Dispatch asynchronously, then keep working.**
 Dispatch the lanes with `dispatch_lanes_async`, record the returned `batch_id`, and continue **non-dependent** Architect work while they run — digest the retrospective and `user_directives`, review the spec/plan text for internal consistency, check governance/QA-gate config and the obligation ledger, and prepare the plan skeleton / task decomposition. This is dispatch-and-keep-busy, not fire-and-forget. Poll with `collect_lane_results` (wait omitted or false) to process settled lanes incrementally, or join with `wait: true` once independent work is exhausted.
 

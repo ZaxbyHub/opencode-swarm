@@ -35,6 +35,9 @@ rule.
    - lanes: one lane per task, each with a single taskId
    - max_concurrent: up to 3
    ```
+   This protocol applies only in sessions whose actual tool list includes the
+   swarm controller's dispatch tools; on hosts without the controller it is not
+   applicable — do not fabricate set-dispatch rows.
 4. **Collect + attribute:** Single-task lanes auto-attribute to their taskId; set-dispatch rows auto-attribute per parsed row.
 5. **Do NOT rely on prose summaries:** A batched dispatch without parseable rows is ambiguous and does not count per-task.
 
