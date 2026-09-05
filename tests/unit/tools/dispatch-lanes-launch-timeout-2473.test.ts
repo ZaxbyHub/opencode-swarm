@@ -5,9 +5,11 @@
  * commit (08be83096) and stay green after the fix:
  *
  *  - An acceptance TIMEOUT at the prompt/promptAsync launch is never retried
- *    and never re-dispatched — even when a fallback model is configured. The
- *    withTimeout rejection message is pre-classified 'permanent' (/timed
- *    out/i) at BOTH launch sites, because a timed-out acceptance cannot prove
+ *    and never re-dispatched — even when a fallback model is configured. A
+ *    withTimeout rejection is a plain Error, so the issue-#2473 launch
+ *    classify gate (instanceof LanePromptLaunchRejectionError) falls through
+ *    to its 'permanent' default — the pre-fix `/timed out/i` special case is
+ *    subsumed by that default, because a timed-out acceptance cannot prove
  *    the host never accepted the prompt.
  *  - The session.create retry cap is enforced: an always-transient create
  *    stops after exactly 2 generations (the frozen

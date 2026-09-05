@@ -225,7 +225,7 @@ export const LAUNCH_SCENARIO_BUDGETS: readonly ScenarioBudgetRow[] = [
 	scenarioRow({
 		scenario: 'timeout-no-retry',
 		retry_owner:
-			'none — an acceptance timeout is pre-classified permanent (/timed out/i) at both launch sites',
+			'none — an acceptance timeout is a plain Error that falls through the issue-2473 instanceof gate to permanent (pre-fix /timed out/i clause subsumed)',
 		effective_configuration: {
 			entry: 'executeDispatchLanesAsync',
 			create_generations: CONTRACT_MAX_SESSION_CREATE_GENERATIONS,
