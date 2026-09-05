@@ -18,9 +18,9 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { canonicalRootKey } from '../../../src/utils/canonical-root';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
-import { canonicalRootKey } from '../../../src/utils/canonical-root';
 import { writeDisjointScopes } from './_delegation-gate-helpers';
 
 function git(directory: string, args: string[]): void {
