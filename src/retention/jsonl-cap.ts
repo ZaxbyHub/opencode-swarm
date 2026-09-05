@@ -1,16 +1,27 @@
 /**
  * Capped JSONL append + bounded tail read (issue #2483 §1).
  *
- * `appendCappedJsonl` appends one JSONL line and, when the durable file
- * exceeds its entry/byte cap, rewrites it crash-atomically (temp file +
- * rename with a Windows transient-error retry) keeping the NEWEST whole
- * records that fit. Compaction has a whole-record floor: a non-empty stream
- * is never emptied by compaction — at least the newest single record always
- * survives, whatever the effective cap (the #2483 acceptance contract).
+ * `appendCappedJsonl` enforces the entry/byte caps on EVERY completed state:
+ * when an append would push the file past its caps, the compacted prefix
+ * (newest whole records that fit, minus the incoming record) is first
+ * swapped in crash-atomically (temp file + rename with a Windows
+ * transient-error retry), then the new record is appended — so an
+ * interleaved reader never observes more than the caps. Compaction has a
+ * whole-record floor: a non-empty stream is never emptied by compaction —
+ * at least the newest single record always survives, whatever the effective
+ * cap (the #2483 acceptance contract).
+ *
+ * Concurrency: all calls for the same `filePath` serialize through a
+ * per-file async mutex, so in-process concurrent appenders can never lose a
+ * line to the compaction rename (review finding FB-4). Cross-process
+ * writers remain best-effort by the documented fail-open contract (audit
+ * streams; the one lockfile-guarded writer predates this module).
  *
  * `readTailJsonl` reads only the last `maxBytes` bytes (newline-aligned) and
  * parses at most `maxEntries` records from the end, so every reader that
- * routes through it is O(cap), not O(history).
+ * routes through it is O(cap), not O(history). `readTailJsonlDetailed`
+ * additionally reports whether a torn trailing line was skipped, for
+ * callers whose conservative decisions depend on tail completeness.
  *
  * Plumbing module: callers own their streams (retention-registry exemption;
  * callers' rows carry the citations).
@@ -26,13 +37,53 @@ export interface CappedJsonlOptions {
 	maxEntries: number;
 	/** Optional byte cap for the compacted file. */
 	maxBytes?: number;
+	/**
+	 * Invoked when compaction drops `droppedCount` oldest records to enforce
+	 * the caps. Lets stream owners surface truncation (review finding FB-5)
+	 * instead of failing silently; failures thrown here are swallowed.
+	 */
+	onPrune?: (droppedCount: number) => void;
+}
+
+/**
+ * Per-file async mutex: chains every append/compaction for one file so
+ * in-process concurrent writers serialize instead of racing the
+ * read-modify-rename compaction window. Entries are pruned when the chain
+ * tail settles and no waiter remains (bounded growth, session-state
+ * invariant 8).
+ */
+const appendChains = new Map<string, Promise<void>>();
+
+function withFileLock<T>(filePath: string, task: () => Promise<T>): Promise<T> {
+	const key = path.resolve(filePath);
+	const tail = appendChains.get(key) ?? Promise.resolve();
+	const run = tail.then(task, task);
+	const settled = run.then(
+		() => {
+			if ((appendChains.get(key) ?? settled) === settled) {
+				appendChains.delete(key);
+			}
+		},
+		() => {
+			if ((appendChains.get(key) ?? settled) === settled) {
+				appendChains.delete(key);
+			}
+		},
+	);
+	appendChains.set(key, settled);
+	return run;
 }
 
 function sleepSync(ms: number): void {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function renameWithRetry(from: string, to: string): void {
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Synchronous retry: reserved for sync-only writers (divergence-recorder). */
+function renameWithRetrySync(from: string, to: string): void {
 	let lastError: unknown;
 	for (let attempt = 1; attempt <= RENAME_MAX_ATTEMPTS; attempt++) {
 		try {
@@ -54,6 +105,35 @@ function renameWithRetry(from: string, to: string): void {
 			}
 			if (attempt < RENAME_MAX_ATTEMPTS) {
 				sleepSync(RENAME_RETRY_DELAY_MS);
+			}
+		}
+	}
+	throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+/** Async retry: does not block the plugin-host event loop (review FB-13). */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+	let lastError: unknown;
+	for (let attempt = 1; attempt <= RENAME_MAX_ATTEMPTS; attempt++) {
+		try {
+			await fs.promises.rename(from, to);
+			return;
+		} catch (error) {
+			lastError = error;
+			const code =
+				typeof error === 'object' && error !== null && 'code' in error
+					? String((error as { code?: unknown }).code)
+					: '';
+			if (
+				code !== 'EBUSY' &&
+				code !== 'EPERM' &&
+				code !== 'EEXIST' &&
+				code !== 'ENOTEMPTY'
+			) {
+				throw error;
+			}
+			if (attempt < RENAME_MAX_ATTEMPTS) {
+				await sleep(RENAME_RETRY_DELAY_MS);
 			}
 		}
 	}
@@ -96,15 +176,7 @@ function selectCompactionSurvivors(
 	return kept;
 }
 
-/**
- * Append `line` (a bare JSON record without the trailing newline) to
- * `filePath`, enforcing the caps with a crash-atomic compaction when
- * exceeded. The append itself is a single `appendFile`; the compaction
- * rewrite is temp+rename, so a crash mid-compaction leaves either the old
- * complete file or the new complete file — never a torn one (a stale `.tmp`
- * residue, if any, is never read by any consumer).
- */
-export async function appendCappedJsonl(
+async function appendAndCap(
 	filePath: string,
 	line: string,
 	opts: CappedJsonlOptions,
@@ -112,42 +184,70 @@ export async function appendCappedJsonl(
 	const directory = path.dirname(filePath);
 	fs.mkdirSync(directory, { recursive: true });
 	const record = `${line.trim()}\n`;
-	await fs.promises.appendFile(filePath, record, 'utf-8');
-
-	let existing: string;
+	// Compact BEFORE appending: survivors are computed for the file AS IF the
+	// new record were already present, the compacted prefix (everything kept
+	// except the new record) is swapped in via tmp+rename, and only then is
+	// the new record appended. An interleaved reader therefore never observes
+	// more than the caps — the append-first ordering used previously left a
+	// cap+1 window between the append and the compaction rename landing
+	// (flush-boundary flakes in the #2483 width tests).
+	let existing = '';
 	try {
 		existing = await fs.promises.readFile(filePath, 'utf-8');
 	} catch {
-		// The append succeeded but the read raced a concurrent prune; the next
-		// append re-checks the caps.
-		return;
+		/* new file: nothing to compact */
 	}
 	const lines = wholeLines(existing);
-	const overEntries = lines.length > opts.maxEntries;
-	const overBytes =
-		opts.maxBytes !== undefined &&
-		Buffer.byteLength(existing, 'utf-8') > opts.maxBytes;
-	if (!overEntries && !overBytes) {
-		return;
-	}
-
-	const survivors = selectCompactionSurvivors(lines, opts);
-	const compacted = `${survivors.join('\n')}\n`;
-	const tmp = path.join(
-		directory,
-		`.${path.basename(filePath)}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`,
-	);
-	fs.writeFileSync(tmp, compacted, 'utf-8');
-	try {
-		renameWithRetry(tmp, filePath);
-	} catch (error) {
+	const combined = [...lines, line.trim()];
+	// selectCompactionSurvivors always returns a contiguous suffix of its
+	// input (it walks newest→oldest and only ever stops early), so the kept
+	// prefix excluding the new record is `combined.slice(k, len-1)`.
+	const survivors = selectCompactionSurvivors(combined, opts);
+	const dropped = combined.length - survivors.length;
+	if (dropped > 0) {
+		const compactedLines = combined.slice(dropped, combined.length - 1);
+		const compacted =
+			compactedLines.length > 0 ? `${compactedLines.join('\n')}\n` : '';
+		const tmp = path.join(
+			directory,
+			`.${path.basename(filePath)}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`,
+		);
+		fs.writeFileSync(tmp, compacted, 'utf-8');
 		try {
-			fs.unlinkSync(tmp);
-		} catch {
-			/* best-effort residue cleanup */
+			await renameWithRetry(tmp, filePath);
+		} catch (error) {
+			try {
+				fs.unlinkSync(tmp);
+			} catch {
+				/* best-effort residue cleanup */
+			}
+			throw error instanceof Error ? error : new Error(String(error));
 		}
-		throw error instanceof Error ? error : new Error(String(error));
+		if (opts.onPrune) {
+			try {
+				opts.onPrune(dropped);
+			} catch {
+				/* surfacing must never break the append */
+			}
+		}
 	}
+	await fs.promises.appendFile(filePath, record, 'utf-8');
+}
+
+/**
+ * Append `line` (a bare JSON record without the trailing newline) to
+ * `filePath`, enforcing the caps with a crash-atomic compaction when
+ * exceeded. Calls for the same file serialize through a per-file async
+ * mutex (in-process writers never lose lines to the compaction rename);
+ * the compaction rewrite is temp+rename, so a crash mid-compaction leaves
+ * either the old complete file or the new complete file — never a torn one.
+ */
+export async function appendCappedJsonl(
+	filePath: string,
+	line: string,
+	opts: CappedJsonlOptions,
+): Promise<void> {
+	return withFileLock(filePath, () => appendAndCap(filePath, line, opts));
 }
 
 export interface TailJsonlOptions {
@@ -155,16 +255,22 @@ export interface TailJsonlOptions {
 	maxBytes?: number;
 }
 
-/**
- * Bounded tail read: returns at most `maxEntries` records parsed from the
- * end of the file, reading no more than `maxBytes` bytes. Malformed lines
- * are skipped (they can be a torn final write); a missing file is `[]`.
- */
-export async function readTailJsonl<T>(
+export interface TailJsonlResult<T> {
+	records: T[];
+	/**
+	 * True when a torn (unterminated) trailing line was skipped by the
+	 * newline-alignment or whole-line filter. Conservative callers (e.g.
+	 * evolution terminal detection) treat this as "state uncertain".
+	 */
+	tailTruncated: boolean;
+}
+
+async function readTailInternal<T>(
 	filePath: string,
 	opts: TailJsonlOptions,
-): Promise<T[]> {
+): Promise<TailJsonlResult<T>> {
 	let content: string;
+	let tailTruncated = false;
 	try {
 		if (opts.maxBytes !== undefined) {
 			const stat = await fs.promises.stat(filePath);
@@ -188,7 +294,10 @@ export async function readTailJsonl<T>(
 			content = await fs.promises.readFile(filePath, 'utf-8');
 		}
 	} catch {
-		return [];
+		return { records: [], tailTruncated: false };
+	}
+	if (content.length > 0 && !content.endsWith('\n')) {
+		tailTruncated = true;
 	}
 	const lines = wholeLines(content);
 	const take =
@@ -201,5 +310,30 @@ export async function readTailJsonl<T>(
 			/* skip malformed line */
 		}
 	}
+	return { records, tailTruncated };
+}
+
+/**
+ * Bounded tail read: returns at most `maxEntries` records parsed from the
+ * end of the file, reading no more than `maxBytes` bytes. Malformed lines
+ * are skipped (they can be a torn final write); a missing file is `[]`.
+ */
+export async function readTailJsonl<T>(
+	filePath: string,
+	opts: TailJsonlOptions,
+): Promise<T[]> {
+	const { records } = await readTailInternal<T>(filePath, opts);
 	return records;
+}
+
+/**
+ * Bounded tail read that also reports whether a torn trailing line was
+ * skipped, so conservative callers can distinguish "no record" from
+ * "state uncertain" (review FB-11).
+ */
+export async function readTailJsonlDetailed<T>(
+	filePath: string,
+	opts: TailJsonlOptions,
+): Promise<TailJsonlResult<T>> {
+	return readTailInternal<T>(filePath, opts);
 }

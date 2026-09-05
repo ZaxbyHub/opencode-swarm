@@ -44,6 +44,9 @@ import * as calibration from '../../../src/turbo/epic/calibration';
 import * as divergenceRecorder from '../../../src/turbo/epic/divergence-recorder';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
+// Fixed data-field timestamp (check-test-clock-safe; values are never asserted against wall clock).
+const ISO_NOW = '2025-09-04T12:00:00.000Z';
+
 const OVERRIDE_COUNT_CAP = 8;
 const OVERRIDE_BYTES_CAP = 512;
 const WRITE_ENTRIES = OVERRIDE_COUNT_CAP + 5;
@@ -124,7 +127,7 @@ describe('bounded writers clamp at the overridden cap (issue #2483)', () => {
 				id: `retr-${i}`,
 				retracted_lesson: `lesson ${i}`,
 				normalized_lesson: `lesson ${i}`,
-				recorded_at: new Date().toISOString(),
+				recorded_at: ISO_NOW,
 				reported_by: 'bounded-test',
 				matched_swarm_ids: [],
 				matched_hive_ids: [],
@@ -211,8 +214,8 @@ describe('bounded writers clamp at the overridden cap (issue #2483)', () => {
 			await consolidationLog.appendConsolidationLog(root, {
 				phaseNumber: i + 1,
 				runId: `run-${i}`,
-				startedAt: new Date().toISOString(),
-				completedAt: new Date().toISOString(),
+				startedAt: ISO_NOW,
+				completedAt: ISO_NOW,
 				clusterCount: 1,
 				clustersDeferred: 0,
 				decisionsEmitted: 1,
@@ -324,7 +327,7 @@ describe('bounded writers clamp at the overridden cap (issue #2483)', () => {
 		for (let i = 0; i < WRITE_ENTRIES; i++) {
 			historyStore.appendTestRun(
 				{
-					timestamp: new Date().toISOString(),
+					timestamp: ISO_NOW,
 					taskId: `4.${(i % 5) + 1}`,
 					testFile: `tests/unit/bounded-${i}.test.ts`,
 					testName: `bounded test ${i}`,
@@ -345,7 +348,7 @@ describe('bounded writers clamp at the overridden cap (issue #2483)', () => {
 		for (let i = 0; i < WRITE_ENTRIES; i++) {
 			await skillChangelog.appendSkillChangelog(root, `bounded-skill-${i}`, {
 				version: 1,
-				timestamp: new Date().toISOString(),
+				timestamp: ISO_NOW,
 				action: 'generated',
 				reason: `bounded test ${i}`,
 			});
@@ -372,7 +375,7 @@ describe('reopen: a fresh module instance reads the bounded durable file', () =>
 				id: `reopen-${i}`,
 				retracted_lesson: `lesson ${i}`,
 				normalized_lesson: `lesson ${i}`,
-				recorded_at: new Date().toISOString(),
+				recorded_at: ISO_NOW,
 				reported_by: 'bounded-test',
 				matched_swarm_ids: [],
 				matched_hive_ids: [],
@@ -380,8 +383,8 @@ describe('reopen: a fresh module instance reads the bounded durable file', () =>
 			await consolidationLog.appendConsolidationLog(root, {
 				phaseNumber: i + 1,
 				runId: `run-${i}`,
-				startedAt: new Date().toISOString(),
-				completedAt: new Date().toISOString(),
+				startedAt: ISO_NOW,
+				completedAt: ISO_NOW,
 				clusterCount: 1,
 				clustersDeferred: 0,
 				decisionsEmitted: 1,

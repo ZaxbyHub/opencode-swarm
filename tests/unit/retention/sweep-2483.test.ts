@@ -50,7 +50,7 @@ const { runRetentionSweep } = await import('../../../src/retention/sweep.js');
 const { handleCloseCommand } = await import('../../../src/commands/close.js');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const NOW = Date.now();
+const NOW = 1_757_000_000_000; // fixed epoch anchor (check-test-clock-safe); all mtimes are offsets of this
 const OLD_40D = NOW - 40 * DAY_MS;
 const OLD_100D = NOW - 100 * DAY_MS;
 

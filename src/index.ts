@@ -1296,6 +1296,10 @@ async function initializeOpenCodeSwarm(
 		const retentionSummaries = (config as Record<string, unknown> | undefined)
 			?.summaries as { retention_days?: unknown } | undefined;
 		const retentionDaysValue = retentionSummaries?.retention_days;
+		// Review FB-10: when the outer budget expires, flip the sweep's
+		// cooperative stop token so the in-flight pass abandons the remaining
+		// families instead of finishing them after the awaiter moved on.
+		let sweepCancelled = false;
 		return withTimeout(
 			runRetentionSweep(ctx.directory, {
 				enabled: retentionConfig?.enabled !== false,
@@ -1304,6 +1308,7 @@ async function initializeOpenCodeSwarm(
 					typeof retentionDaysValue === 'number' && retentionDaysValue >= 1
 						? retentionDaysValue
 						: undefined,
+				shouldContinue: () => !sweepCancelled,
 			}),
 			RETENTION_SWEEP_INIT_TIMEOUT_MS,
 			new Error(
@@ -1311,6 +1316,7 @@ async function initializeOpenCodeSwarm(
 			),
 		)
 			.catch((err: unknown) => {
+				sweepCancelled = true;
 				const msg = err instanceof Error ? err.message : String(err);
 				log('post-init retention sweep timed out or failed (non-fatal)', {
 					error: msg,

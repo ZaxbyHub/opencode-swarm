@@ -294,7 +294,7 @@ per row.
 | `skill-usage` | .swarm/skill-usage.jsonl | derived-rebuildable | HARD GLOBAL: SKILL_USAGE_LIMITS maxEntries=5,000/maxBytes=1.5MiB/maxAgeMs=90d, floorPerSkill=20 (global) | mixed full-file + tail: full readers bounded at readMaxBytes=1,677,722 B (truncatedRead reported); tail 64 KiB | untouched — persists across sessions | retain by design — #2038 (implemented) |
 | `skill-usage-pending` | .swarm/skill-usage-pending.json | authoritative | queueMaxRecords=5,000/queueMaxBytes=512KiB/maxAgeMs=90d/maxAttempts=5 (global) | indexed: single JSON doc bounded at readMaxBytes=1,677,722 B; oversized reads quarantined | untouched — persists across sessions | retain by design — #2038 (implemented); direct-file exemption (#2038) |
 
-### Category 2 — Background delegation, PR monitor/feedback, lane sidecars (11 rows)
+### Category 2 — Background delegation, PR monitor/feedback, lane sidecars (13 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -397,7 +397,7 @@ per row.
 | `test-history` | .swarm/cache/test-history.jsonl | operational | MAX_HISTORY_PER_TEST 20 FIFO per key PLUS GLOBAL MAX_TEST_HISTORY_ENTRIES 5000 + MAX_TEST_HISTORY_KEYS 1000 on every append (per-key; keyspace finite by the global key cap) | full-file: bounded transitively by the global 5000-entry cap | untouched (cache/) | not a defect — #2483 |
 | `impact-map` | .swarm/cache/impact-map.json | derived-rebuildable | rebuildable via buildImpactMap (:449-455); size bounded by repository file population (session-scoped) | full-file: rebuildable cache; stale entries rejected by mtime che… | untouched (cache/) | not a defect — this-gate |
 
-### Category 8 — Close/reset, worktree, doctor, session, warnings/automation, skills (25 rows)
+### Category 8 — Close/reset, worktree, doctor, session, warnings/automation, skills (26 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -465,6 +465,10 @@ rg -n "CREATE TABLE" src --type ts -g '!**/__tests__/**' -g '!*.test.ts'
 bun run scripts/check-retention-registry.ts
 # Result: "Retention registry check passed: 99 rows … every enumerated writer
 # module is registered or exempt."
+# (Enumeration-time count. The registry has since grown — issue #2309/#2483
+# ratification rows among them; the live row count is what the gate reports
+# today, 109 as of the #2483 close — and Appendix A is retained verbatim as
+# the committed evidence of the ORIGINAL enumeration only.)
 ```
 
 The enumerator's pattern set (write APIs + atomic-write helper calls + SQLite

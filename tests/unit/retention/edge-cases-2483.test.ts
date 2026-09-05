@@ -32,7 +32,7 @@ import { runRetentionSweep } from '../../../src/retention/sweep';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const NOW = Date.now();
+const NOW = 1_757_000_000_000; // fixed epoch anchor (check-test-clock-safe); all mtimes are offsets of this
 const OLD = NOW - 40 * DAY_MS;
 
 const tempRoots: string[] = [];
@@ -133,9 +133,35 @@ describe('containment and clock-skew guards', () => {
 		const familyDir = path.join(root, '.swarm', 'capsules');
 		mkdirSync(familyDir, { recursive: true });
 		let linked = false;
+		let junctionTarget: string | null = null;
 		try {
-			symlinkSync(targetOutside, path.join(familyDir, 'pointing-out.json'));
-			linked = true;
+			// On Windows a DIRECTORY junction needs no privilege, but a file
+			// junction does not exist — junctions are directory-only. So on
+			// win32 we stage a JUNCTION to an outside DIRECTORY (review FB-17:
+			// the fixture must actually materialize on Windows CI instead of
+			// silently skipping); elsewhere a plain file symlink. Both are
+			// lstat-visible links the sweep must refuse.
+			if (process.platform === 'win32') {
+				const outsideDir = path.join(
+					makeRoot('symlink-outside-dir'),
+					'precious',
+				);
+				mkdirSync(outsideDir, { recursive: true });
+				writeFileSync(
+					path.join(outsideDir, 'precious.json'),
+					'{"precious":true}',
+				);
+				symlinkSync(
+					outsideDir,
+					path.join(familyDir, 'pointing-out.link'),
+					'junction',
+				);
+				junctionTarget = outsideDir;
+				linked = true;
+			} else {
+				symlinkSync(targetOutside, path.join(familyDir, 'pointing-out.json'));
+				linked = true;
+			}
 		} catch {
 			// Platforms without symlink privilege (Windows without Developer
 			// Mode) cannot stage the fixture; the refusal guard is untestable
@@ -143,14 +169,26 @@ describe('containment and clock-skew guards', () => {
 		}
 		seed(root, path.join('capsules', 'plain-stale.json'), OLD);
 		const result = await runRetentionSweep(root, { now: NOW });
-		expect(existsSync(targetOutside)).toBe(true);
 		expect(result.errors).toEqual({});
 		if (linked) {
-			// The symlink entry itself is refused (lstat): not deleted, never
+			// The link entry itself is refused (lstat): not deleted, never
 			// followed — the sweep cannot reach through it.
 			const names = readdirSync(familyDir);
-			expect(names).toContain('pointing-out.json');
-			expect(readFileSync(targetOutside, 'utf-8')).toBe('{"precious":true}');
+			expect(names).toContain(
+				process.platform === 'win32'
+					? 'pointing-out.link'
+					: 'pointing-out.json',
+			);
+			if (process.platform === 'win32') {
+				// The junction target's content survived untouched.
+				expect(
+					readFileSync(path.join(junctionTarget!, 'precious.json'), 'utf-8'),
+				).toBe('{"precious":true}');
+				expect(existsSync(junctionTarget!)).toBe(true);
+			} else {
+				expect(existsSync(targetOutside)).toBe(true);
+				expect(readFileSync(targetOutside, 'utf-8')).toBe('{"precious":true}');
+			}
 		}
 	});
 

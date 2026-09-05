@@ -34,7 +34,12 @@ export interface PruneDirectoryOptions {
 	maxAgeMs?: number;
 	/** Clock injection point for tests/checks. */
 	now?: number;
-	/** Enumeration bound (default 20000). */
+	/**
+	 * Enumeration bound (default 100000 — review FB-12: 20000 stat ops could
+	 * exhaust before a legitimately large keyspace finished enumerating,
+	 * silently skipping stale tail entries; the budget is stats, not
+	 * deletions, so the higher ceiling stays bounded).
+	 */
 	maxScan?: number;
 	/** Count victims without deleting (blast-radius rehearsal / dry_run). */
 	dryRun?: boolean;
@@ -157,7 +162,7 @@ export async function pruneDirectory(
 	opts: PruneDirectoryOptions,
 ): Promise<number> {
 	const now = opts.now ?? Date.now();
-	const maxScan = opts.maxScan ?? 20_000;
+	const maxScan = opts.maxScan ?? 100_000;
 	const { candidates } = listPruneCandidates(dir, maxScan);
 	if (candidates.length === 0) return 0;
 

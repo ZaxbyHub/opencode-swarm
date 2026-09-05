@@ -278,25 +278,31 @@ export async function listSummaries(directory: string): Promise<string[]> {
 }
 
 /**
- * Delete summaries older than retentionDays.
- * Returns array of deleted summary IDs.
+ * List summary IDs past the retention horizon WITHOUT deleting them (review
+ * FB-9: the single detection predicate shared by `cleanupSummaries` and the
+ * sweep's dry-run counter, so rehearsal and deletion can never diverge).
+ *
+ * Retention cleanup enumerates the directory DIRECTLY (uncapped): the
+ * public listSummaries is capped to the newest MAX_SUMMARIES_LISTED, and
+ * routing cleanup through it would skip stale files beyond that window
+ * (issue #2483).
+ *
+ * Retention also enumerates LENIENTLY: `enumerateSummaryIds` applies the
+ * strict write-side `^S\d+$` id grammar, but retention's job is to bound
+ * the keyspace — ANY `S*.json` occupant past the horizon is stale
+ * regardless of whether its id would pass write validation (legacy or
+ * foreign producers included).
+ *
+ * Detection is content-timestamp-first: a numeric `timestamp` older than the
+ * cutoff marks the entry stale; a missing/unparsable timestamp falls back to
+ * the file mtime (issue #2483); unreadable content or a parse failure is
+ * never stale (a `warn` is emitted for the latter, as deletion does).
  */
-export async function cleanupSummaries(
+export async function listStaleSummaryIds(
 	directory: string,
 	retentionDays: number,
 	options?: { now?: number },
 ): Promise<string[]> {
-	// Retention cleanup enumerates the directory DIRECTLY (uncapped): the
-	// public listSummaries is capped to the newest MAX_SUMMARIES_LISTED, and
-	// routing cleanup through it would skip stale files beyond that window
-	// (issue #2483).
-	//
-	// Retention also enumerates LENIENTLY: `enumerateSummaryIds` applies the
-	// strict write-side `^S\d+$` id grammar, but retention's job is to bound
-	// the keyspace — ANY `S*.json` occupant past the horizon is stale
-	// regardless of whether its id would pass write validation (legacy or
-	// foreign producers included). This matches the sweep's own dry-run
-	// counter (`countStaleSummaries`), so rehearsal and deletion agree.
 	const summariesBasePath = validateSwarmPath(directory, 'summaries');
 	let retentionFiles: string[] = [];
 	try {
@@ -309,7 +315,7 @@ export async function cleanupSummaries(
 	const now = options?.now ?? Date.now();
 	const cutoffTime = now - retentionDays * 24 * 60 * 60 * 1000;
 
-	const deleted: string[] = [];
+	const stale: string[] = [];
 
 	for (const filename of retentionFiles) {
 		const id = filename.slice(0, -5);
@@ -327,7 +333,7 @@ export async function cleanupSummaries(
 			const parsed = JSON.parse(content);
 			const timestamp = parsed.timestamp as number;
 
-			// Delete if older than cutoff. A missing/unparsable timestamp
+			// Stale if older than cutoff. A missing/unparsable timestamp
 			// falls back to the file mtime (issue #2483: the retention sweep
 			// prunes summaries whose content carries no timestamp field).
 			if (
@@ -343,15 +349,40 @@ export async function cleanupSummaries(
 						}
 					})())
 			) {
-				rmSync(summaryPath);
-				deleted.push(id);
+				stale.push(id);
 			}
+		} catch (error) {
+			warn(
+				`Failed to inspect summary ${id} for retention: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	return stale;
+}
+
+/**
+ * Delete summaries older than retentionDays.
+ * Returns array of deleted summary IDs.
+ */
+export async function cleanupSummaries(
+	directory: string,
+	retentionDays: number,
+	options?: { now?: number },
+): Promise<string[]> {
+	const staleIds = await listStaleSummaryIds(directory, retentionDays, options);
+	const deleted: string[] = [];
+	for (const id of staleIds) {
+		try {
+			rmSync(
+				validateSwarmPath(directory, path.join('summaries', `${id}.json`)),
+			);
+			deleted.push(id);
 		} catch (error) {
 			warn(
 				`Failed to cleanup summary ${id}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 	}
-
 	return deleted;
 }

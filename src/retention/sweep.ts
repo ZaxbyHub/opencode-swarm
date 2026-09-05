@@ -30,7 +30,7 @@ import * as path from 'node:path';
 import { pruneDanglingReceiptIndexEntries } from '../hooks/review-receipt';
 import { isTerminal } from '../services/skill-optimizer/lifecycle';
 import type { SkillOptState } from '../services/skill-optimizer/store';
-import { cleanupSummaries } from '../summaries/manager';
+import { cleanupSummaries, listStaleSummaryIds } from '../summaries/manager';
 import { log } from '../utils/logger';
 import {
 	pruneDirectory,
@@ -61,6 +61,13 @@ export interface RetentionSweepOptions {
 	enabled?: boolean;
 	/** Honored from `summaries.retention_days`. */
 	summariesRetentionDays?: number;
+	/**
+	 * Cooperative stop token, polled between families/passes (review FB-10).
+	 * The post-init scheduler flips it when the outer `withTimeout` budget
+	 * expires so an in-flight sweep abandons the remaining families instead
+	 * of finishing its full pass after the awaiter already moved on.
+	 */
+	shouldContinue?: () => boolean;
 }
 
 export interface RetentionSweepResult {
@@ -172,8 +179,15 @@ export async function runRetentionSweep(
 	// their CONTENT (newest file mtime in the subtree — see dir-prune), so a
 	// run/batch/candidate directory whose files are all past the horizon is
 	// pruned even when the directory node's own mtime was refreshed by
-	// unrelated metadata churn.
+	// unrelated metadata churn. The optional `shouldContinue` token (review
+	// FB-10) is polled before each family so an externally-cancelled sweep
+	// stops promptly instead of finishing its remaining pass.
 	for (const family of familiesFor(swarmRoot, now)) {
+		if (options.shouldContinue && !options.shouldContinue()) {
+			result.errors.sweep_cancelled =
+				'sweep cancelled by shouldContinue token before family ' + family.label;
+			return result;
+		}
 		try {
 			const pruned = await pruneDirectory(family.dir, {
 				maxAgeMs: family.maxAgeMs,
@@ -298,7 +312,7 @@ export async function runRetentionSweep(
 		const retentionDays =
 			options.summariesRetentionDays ?? DEFAULT_SUMMARIES_RETENTION_DAYS;
 		const before = dryRun
-			? await countStaleSummaries(swarmRoot, retentionDays, now)
+			? await countStaleSummaries(projectRoot, retentionDays, now)
 			: 0;
 		if (dryRun) {
 			if (before > 0) result.pruned['summaries-retention'] = before;
@@ -391,8 +405,12 @@ async function walkEvolution(
 	const entries = await fs.promises.readdir(root).catch(() => [] as string[]);
 	for (const name of entries) {
 		const entryPath = path.join(root, name);
-		const stat = await fs.promises.stat(entryPath).catch(() => null);
-		if (!stat) continue;
+		// lstat, not stat (review FB-14): a symlinked entry inside evolution/
+		// is neither traversed nor visited — the same refusal policy
+		// pruneDirectory applies, so the sweep can never age-delete through a
+		// link pointing outside `.swarm/`.
+		const stat = await fs.promises.lstat(entryPath).catch(() => null);
+		if (!stat || stat.isSymbolicLink()) continue;
 		if (stat.isDirectory()) {
 			await walkEvolution(entryPath, visit);
 		}
@@ -409,25 +427,20 @@ async function isRealDirectory(dir: string): Promise<boolean> {
 	}
 }
 
-/** Dry-run helper: count summaries past the horizon without deleting. */
+/**
+ * Dry-run helper: count summaries past the horizon without deleting.
+ * Delegates to the manager's shared `listStaleSummaryIds` predicate (review
+ * FB-9) so the rehearsal counter and `cleanupSummaries` can never diverge —
+ * the previous mtime-only duplicate here mispredicted staleness for any
+ * summary whose content carries a numeric timestamp (content wins there).
+ */
 async function countStaleSummaries(
-	swarmRoot: string,
+	projectRoot: string,
 	retentionDays: number,
 	now: number,
 ): Promise<number> {
-	const summariesDir = path.join(swarmRoot, 'summaries');
-	const names = await fs.promises
-		.readdir(summariesDir)
-		.catch(() => [] as string[]);
-	const cutoff = now - retentionDays * DAY_MS;
-	let stale = 0;
-	for (const name of names) {
-		if (!/^S.+$/.test(name.replace(/\.json$/, '')) || !name.endsWith('.json'))
-			continue;
-		const stat = await fs.promises
-			.stat(path.join(summariesDir, name))
-			.catch(() => null);
-		if (stat && stat.mtimeMs <= now && stat.mtimeMs < cutoff) stale += 1;
-	}
-	return stale;
+	const staleIds = await listStaleSummaryIds(projectRoot, retentionDays, {
+		now,
+	});
+	return staleIds.length;
 }

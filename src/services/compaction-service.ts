@@ -88,6 +88,14 @@ function getSessionState(sessionId: string): CompactionState {
  */
 export const MAX_CONTEXT_SNAPSHOT_BYTES = 65536;
 
+/**
+ * Whole-record ceiling for the snapshot file (review FB-8). Only the byte
+ * budget binds in practice; this entry cap is a pure defense-in-depth bound
+ * and resolves through the seam like every other #2483 cap so tests can
+ * shrink it.
+ */
+export const MAX_CONTEXT_SNAPSHOT_ENTRIES = 100000;
+
 async function appendSnapshot(
 	directory: string,
 	tier: 'observation' | 'reflection' | 'emergency',
@@ -102,7 +110,10 @@ async function appendSnapshot(
 		// load-bearing for the frozen C3 check's 512-byte override — do not
 		// reword the tier messages without re-verifying that probe width.
 		await appendCappedJsonl(snapshotPath, entry, {
-			maxEntries: 100000,
+			maxEntries: resolveRetentionCap(
+				'MAX_CONTEXT_SNAPSHOT_ENTRIES',
+				MAX_CONTEXT_SNAPSHOT_ENTRIES,
+			),
 			maxBytes: resolveRetentionCap(
 				'MAX_CONTEXT_SNAPSHOT_BYTES',
 				MAX_CONTEXT_SNAPSHOT_BYTES,

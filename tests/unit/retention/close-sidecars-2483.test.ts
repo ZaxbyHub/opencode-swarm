@@ -11,6 +11,7 @@ import {
 	chmodSync,
 	existsSync,
 	mkdirSync,
+	type PathLike,
 	readdirSync,
 	rmSync,
 	writeFileSync,
@@ -29,6 +30,7 @@ const {
 	ARCHIVE_ARTIFACTS,
 	ACTIVE_STATE_TO_CLEAN,
 	ACTIVE_STATE_DIRS_TO_CLEAN,
+	_internals,
 } = await import('../../../src/commands/close.js');
 
 let testDir: string;
@@ -89,6 +91,34 @@ describe('removeSqliteSidecarsAfterClose', () => {
 	it('does not throw when the directory is missing (per-file ENOENT fail-open)', () => {
 		const missing = path.join(testDir, 'absent-swarm');
 		expect(() => removeSqliteSidecarsAfterClose(missing)).not.toThrow();
+	});
+
+	it('EBUSY on one sidecar is skipped silently and the sibling is still removed (_internals seam, review FB-7)', () => {
+		const walPath = path.join(swarmDir(), 'swarm.db-wal');
+		const shmPath = path.join(swarmDir(), 'swarm.db-shm');
+		writeFileSync(walPath, 'busy-wal');
+		writeFileSync(shmPath, 'plain-shm');
+		const realUnlinkSidecarSync = _internals.unlinkSidecarSync;
+		const attempted: string[] = [];
+		_internals.unlinkSidecarSync = (p: PathLike) => {
+			attempted.push(String(p));
+			if (String(p).endsWith('swarm.db-wal')) {
+				const err = new Error('file in use') as NodeJS.ErrnoException & Error;
+				err.code = 'EBUSY';
+				throw err;
+			}
+			return realUnlinkSidecarSync(p);
+		};
+		try {
+			expect(() => removeSqliteSidecarsAfterClose(swarmDir())).not.toThrow();
+			// The EBUSY sidecar survives (fail-open skip); the loop still
+			// reaches the sibling and removes it.
+			expect(existsSync(walPath)).toBe(true);
+			expect(existsSync(shmPath)).toBe(false);
+			expect(attempted).toEqual([walPath, shmPath]);
+		} finally {
+			_internals.unlinkSidecarSync = realUnlinkSidecarSync;
+		}
 	});
 
 	it('read-only sidecar never aborts the helper: no throw, the writable sibling is still removed (per-file fail-open)', () => {

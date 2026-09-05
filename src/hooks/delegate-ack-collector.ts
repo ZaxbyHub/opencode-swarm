@@ -30,6 +30,7 @@
 
 import { resolveRetentionCap } from '../retention/caps.js';
 import { appendCappedJsonl } from '../retention/jsonl-cap.js';
+import { warn } from '../utils/logger.js';
 import { ensureCohortIdCached } from './cohort-cache.js';
 import { parseAcknowledgments } from './knowledge-application.js';
 import { escalateViolatedEntries } from './knowledge-escalator.js';
@@ -130,6 +131,14 @@ async function appendUnacknowledgedCritical(
 			'MAX_UNACKNOWLEDGED_CRITICALS',
 			MAX_UNACKNOWLEDGED_CRITICALS,
 		),
+		// Review FB-5: FIFO compaction dropping CRITICAL audit records is an
+		// operational warning, not quiet churn — surface how many oldest
+		// entries were discarded so the loss is observable.
+		onPrune: (dropped) => {
+			warn(
+				`unacknowledged-criticals audit at cap: dropped ${dropped} oldest ${dropped === 1 ? 'entry' : 'entries'} (FIFO bound MAX_UNACKNOWLEDGED_CRITICALS)`,
+			);
+		},
 	});
 }
 

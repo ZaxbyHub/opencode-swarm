@@ -1818,7 +1818,10 @@ async function unlinkActiveStateFileWithRetry(filePath: string): Promise<void> {
 export function removeSqliteSidecarsAfterClose(swarmDir: string): void {
 	for (const sidecar of ['swarm.db-wal', 'swarm.db-shm']) {
 		try {
-			fsSync.unlinkSync(path.join(swarmDir, sidecar));
+			// _internals seam (review FB-7): the EBUSY skip branch is part of the
+			// Windows contract and is exercised by injecting a throwing unlink
+			// rather than relying on platform-specific open-handle races.
+			_internals.unlinkSidecarSync(path.join(swarmDir, sidecar));
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException)?.code;
 			if (code !== 'ENOENT' && code !== 'EBUSY') {
@@ -2924,6 +2927,9 @@ export const _internals = {
 	closeRepoMemory,
 	unlinkActiveStateFileWithRetry,
 	unlink: fs.unlink,
+	// Review FB-7: sync unlink seam for removeSqliteSidecarsAfterClose's
+	// EBUSY/ENOENT fail-open branches.
+	unlinkSidecarSync: fsSync.unlinkSync,
 	sleep,
 	collectGarbageBestEffort,
 	ACTIVE_STATE_DIRS_TO_CLEAN,

@@ -34,7 +34,10 @@ machinery. This change installs bounds at three layers:
   age-only backstop for unreadable ones). Summaries cleanup now honors
   `summaries.retention_days` (default 7 days) — the previously dead setting
   is live. The sweep only ever touches paths under `.swarm/`, never follows
-  symlinks, never prunes future-dated entries, and never touches the
+  symlinks, never prunes future-dated entries, only ever unlinks whole
+  entries matching a family grammar (never partial/`.tmp` names — a
+  cloud-sync-style partial artifact is outside every family), and never
+  touches the
   authoritative streams (plan ledger, knowledge store, council, evidence,
   scopes, `swarm.db`, telemetry).
 
