@@ -11,7 +11,7 @@ import {
 	candidateHeaderFamily,
 	type FindingsSeverity,
 	isCandidateSeverity,
-	normalizeCandidateArtifact,
+	normalizeCandidateArtifactCached,
 	type RowFormatFamily,
 	selectCandidateHeader,
 	splitPipeFields,
@@ -13721,7 +13721,10 @@ function parseCanonicalCandidateRows(
 	const rows: CanonicalCandidateArtifactRow[] = [];
 	const issues: string[] = [];
 	let headerFamily: RowFormatFamily | null = null;
-	for (const [index, line] of normalizeCandidateArtifact(text, fallbackFamily)
+	for (const [index, line] of normalizeCandidateArtifactCached(
+		text,
+		fallbackFamily,
+	)
 		.text.split(/\r?\n/)
 		.entries()) {
 		const fields = splitPipeFields(line).map((field) => field.trim());
@@ -15203,7 +15206,7 @@ function analyzePrReviewDiscoveryArtifact(
 	// covered while contributing nothing to the inventory.
 	const fallbackFamily = resolvePrReviewRowFamily(expectedWorkflowLane, mode);
 	const issues: string[] = [];
-	const normalized = normalizeCandidateArtifact(text, fallbackFamily);
+	const normalized = normalizeCandidateArtifactCached(text, fallbackFamily);
 	const canonicalText = normalized.text;
 	const repairKinds = normalized.repairKinds;
 	let salvaged = repairKinds.length > 0;

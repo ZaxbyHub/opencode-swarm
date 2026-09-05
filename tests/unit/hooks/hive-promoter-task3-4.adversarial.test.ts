@@ -48,11 +48,44 @@ import {
 	_internals,
 	createHivePromoterHook,
 } from '../../../src/hooks/hive-promoter.js';
-import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
+import type {
+	KnowledgeConfig,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types.js';
+
+/**
+ * #2472 W2: the promoter hook gates on tool class and on ACTIVE swarm
+ * candidates. These tests exercise the curator-summary feedback path that runs
+ * AFTER the promotion body, so the default swarm read returns one ACTIVE entry
+ * and every hook invocation passes a write-class tool input.
+ */
+function makeActiveSwarmEntry(): SwarmKnowledgeEntry {
+	return {
+		id: 'task-3-4-active',
+		tier: 'swarm',
+		lesson: 'Adversarial fixture lesson for the curator feedback path',
+		category: 'process',
+		tags: ['hive-fast-track'],
+		scope: 'global',
+		confidence: 0.9,
+		status: 'promoted',
+		confirmed_by: [],
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: 3,
+		created_at: '2026-01-01T00:00:00Z',
+		updated_at: '2026-01-01T00:00:00Z',
+		project_name: 'task-3-4',
+	};
+}
 
 describe('Task 3.4: curator-summary feedback integration adversarial tests', () => {
 	let mockConfig: KnowledgeConfig;
 	const realCheckHivePromotions = _internals.checkHivePromotions;
+	const realReadSwarmEntries = _internals.readSwarmEntries;
 	const realReadCuratorSummary = _internals.readCuratorSummary;
 	const realAppendCuratorRecommendation =
 		_internals.appendCuratorRecommendation;
@@ -84,6 +117,12 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			encounter_increment: 0.1,
 			max_encounter_score: 5.0,
 		};
+		// #2472 W2: ACTIVE swarm candidates + cleared per-directory gating state
+		// (cadence floor + migration guard are module-level and these tests use
+		// the FIXED directory '/test-project', so without the reset every test
+		// after the first would be skipped by the cadence floor).
+		_internals.readSwarmEntries = mock(async () => [makeActiveSwarmEntry()]);
+		_internals.resetPromoterGatingState();
 		_internals.checkHivePromotions = mock(async () => ({
 			timestamp: new Date().toISOString(),
 			new_promotions: 1,
@@ -99,6 +138,7 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 
 	afterEach(() => {
 		_internals.checkHivePromotions = realCheckHivePromotions;
+		_internals.readSwarmEntries = realReadSwarmEntries;
 		_internals.readCuratorSummary = realReadCuratorSummary;
 		_internals.appendCuratorRecommendation = realAppendCuratorRecommendation;
 	});
@@ -119,7 +159,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			const hook = createHivePromoterHook('/test-project', mockConfig);
 
 			// This might not crash but could cause issues downstream
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			// The hook uses safeHook which suppresses errors, so let's check write wasn't called with bad data
 			// Note: This test documents the vulnerability
@@ -138,7 +180,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			});
 
 			const hook = createHivePromoterHook('/test-project', mockConfig);
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 			// Hook runs without crash due to safeHook, but data is corrupted
 		});
 	});
@@ -159,7 +203,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			const hook = createHivePromoterHook('/test-project', mockConfig);
 
 			// Should not crash
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			// Should have written summary with new last_updated
 			expect(mockWriteCuratorSummary).toHaveBeenCalled();
@@ -176,7 +222,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			const hook = createHivePromoterHook('/test-project', mockConfig);
 
 			// Should NOT crash - hook just won't update curator summary
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			// Should NOT attempt to write curator summary
 			expect(mockWriteCuratorSummary).not.toHaveBeenCalled();
@@ -197,7 +245,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			});
 
 			const hook = createHivePromoterHook('/test-project', mockConfig);
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			expect(mockWriteCuratorSummary).toHaveBeenCalled();
 			const writtenSummary = mockWriteCuratorSummary.mock.calls[0][1];
@@ -225,7 +275,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			// Test with a suspicious path that might leak
 			const suspiciousPath = '/Users/user/.ssh/id_rsa';
 			const hook = createHivePromoterHook(suspiciousPath, mockConfig);
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			expect(mockWriteCuratorSummary).toHaveBeenCalled();
 			const writtenSummary = mockWriteCuratorSummary.mock.calls[0][1];
@@ -249,7 +301,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			});
 
 			const hook = createHivePromoterHook('/test-project', mockConfig);
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			expect(mockWriteCuratorSummary).toHaveBeenCalled();
 			const writtenSummary = mockWriteCuratorSummary.mock.calls[0][1];
@@ -285,7 +339,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			// Mock huge promotion counts via the internal function
 			// We can't directly control this, but we verify the format handles it
 			const hook = createHivePromoterHook('/test-project', mockConfig);
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			expect(mockWriteCuratorSummary).toHaveBeenCalled();
 			const writtenSummary = mockWriteCuratorSummary.mock.calls[0][1];
@@ -315,7 +371,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			});
 
 			const hook = createHivePromoterHook('/test-project', mockConfig);
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			expect(mockWriteCuratorSummary).toHaveBeenCalled();
 			const writtenSummary = mockWriteCuratorSummary.mock.calls[0][1];
@@ -349,7 +407,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			});
 
 			const hook = createHivePromoterHook('/test-project', mockConfig);
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			expect(mockWriteCuratorSummary).toHaveBeenCalled();
 			const writtenSummary = mockWriteCuratorSummary.mock.calls[0][1];
@@ -379,7 +439,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 			const hook = createHivePromoterHook('/test-project', mockConfig);
 
 			// Should not crash
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			expect(mockWriteCuratorSummary).toHaveBeenCalled();
 		});
@@ -398,7 +460,9 @@ describe('Task 3.4: curator-summary feedback integration adversarial tests', () 
 
 			const hook = createHivePromoterHook('/test-project', mockConfig);
 
-			await hook({}, {});
+			// #2472 W2: write-class tool input so the gated hook reaches the
+			// promotion + curator-feedback path under test.
+			await hook({ tool: 'write' }, {});
 
 			expect(mockWriteCuratorSummary).toHaveBeenCalled();
 		});

@@ -38,6 +38,40 @@ export interface SwarmArtifactCacheStats {
 const textCache = new Map<string, TextCacheEntry>();
 const parsedCache = new Map<string, ParsedCacheEntry<unknown>>();
 
+/**
+ * Paths a successful stat/read in this process has observed to exist (issue
+ * #2472 W3 / PERF-1). Bounded FIFO Set — invariant 8 (session/global state
+ * must be keyed and bounded with explicit eviction).
+ *
+ * NOT the text/parsed caches: those are stamp-keyed and FIFO-evicted at 128,
+ * so key presence there is not a reliable existence signal. This set is the
+ * "previously observed" arm of the ENOENT retry-worthiness policy: an ENOENT
+ * on a path recorded here is plausibly mid-rename (the file existed moments
+ * ago), while an ENOENT on an unrecorded path never-existed and returns
+ * immediately. Deliberately NOT cleared by `invalidateCachedArtifact` (a
+ * write implies existence) — only capacity eviction removes entries.
+ */
+const MAX_KNOWN_TO_EXIST_PATHS = 512;
+const knownToExist = new Set<string>();
+
+function noteKnownToExist(resolvedPath: string): void {
+	if (knownToExist.has(resolvedPath)) return; // keep the hit path cheap
+	knownToExist.add(resolvedPath);
+	if (knownToExist.size > MAX_KNOWN_TO_EXIST_PATHS) {
+		const oldest = knownToExist.values().next().value;
+		if (oldest !== undefined) knownToExist.delete(oldest);
+	}
+}
+
+/**
+ * Whether a previous successful stat/read inside this module observed
+ * `filePath` to exist (resolved the same way the cache keys are). Cheap Set
+ * lookup — safe on hot paths.
+ */
+export function wasObservedToExist(filePath: string): boolean {
+	return knownToExist.has(path.resolve(filePath));
+}
+
 const stats: SwarmArtifactCacheStats = {
 	textReadCount: 0,
 	textCacheHitCount: 0,
@@ -150,6 +184,9 @@ export function readCachedTextFileSync(
 		stats.textReadCount++;
 		return directRead();
 	}
+	// Successful stat: the file exists right now — record it for the ENOENT
+	// retry-worthiness arm (issue #2472 W3).
+	noteKnownToExist(cacheKey);
 
 	const cached = textCache.get(cacheKey);
 	if (cached && sameStamp(cached, stamp)) {
@@ -177,6 +214,9 @@ export async function readCachedTextFile(
 		stats.textReadCount++;
 		return directRead();
 	}
+	// Successful stat: the file exists right now — record it for the ENOENT
+	// retry-worthiness arm (issue #2472 W3).
+	noteKnownToExist(cacheKey);
 
 	const cached = textCache.get(cacheKey);
 	if (cached && sameStamp(cached, stamp)) {

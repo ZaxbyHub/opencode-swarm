@@ -971,7 +971,7 @@ export async function executePhaseComplete(
 			if (required.includes('docs')) {
 				crossSessionResult.agents.delete('docs');
 				if (participationPlan) {
-					const receipt = readPhaseParticipation(
+					const receipt = await readPhaseParticipation(
 						dir,
 						participationPlan,
 						phase,

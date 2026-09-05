@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +19,7 @@ describe('System Enhancer real-time learning nudge', () => {
 
 	beforeEach(async () => {
 		tempDir = await mkdtemp(join(tmpdir(), 'swarm-learning-nudge-test-'));
+		invokedTransform = false;
 		resetSwarmState();
 		resetRealtimeLearningNudgeState();
 		const swarmDir = join(tempDir, '.swarm');
@@ -53,8 +55,32 @@ describe('System Enhancer real-time learning nudge', () => {
 		await writeFile(join(swarmDir, 'context.md'), '# Context\n');
 	});
 
+	/**
+	 * #2472 W4: the system-enhancer transform defers the doc-index directory
+	 * walk and the dark-matter git spawn to a background macrotask AFTER the
+	 * transform returns. On Windows those hold directory handles (git -C
+	 * chdir + readdir) that make rm() fail with EBUSY when teardown races
+	 * them, so drain the deferred scan (it always writes dark-matter.md,
+	 * even on empty results — #1021) before removing the temp dir. Only
+	 * tests that actually invoke the transform schedule a scan, so the drain
+	 * is gated on that — otherwise teardown would always burn the deadline.
+	 */
+	let invokedTransform = false;
+
+	async function drainDeferredMaintenanceScan(): Promise<void> {
+		if (!invokedTransform) return;
+		const marker = join(tempDir, '.swarm', 'dark-matter.md');
+		// performance.now polling deadline — the sanctioned test-clock pattern
+		// for polling waits (not clock-dependent logic).
+		const deadline = performance.now() + 5000;
+		while (!existsSync(marker) && performance.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+	}
+
 	afterEach(async () => {
 		resetRealtimeLearningNudgeState();
+		await drainDeferredMaintenanceScan();
 		await rm(tempDir, { recursive: true, force: true });
 	});
 
@@ -62,6 +88,7 @@ describe('System Enhancer real-time learning nudge', () => {
 		config: PluginConfig,
 		sessionID = 'learning-session',
 	): Promise<string[]> {
+		invokedTransform = true;
 		const hooks = createSystemEnhancerHook(config, tempDir);
 		const transform = hooks['experimental.chat.system.transform'] as (
 			input: { sessionID?: string },

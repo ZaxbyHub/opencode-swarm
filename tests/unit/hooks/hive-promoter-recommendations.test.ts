@@ -11,7 +11,10 @@ import {
 	createHivePromoterHook,
 	type HivePromotionSummary,
 } from '../../../src/hooks/hive-promoter.js';
-import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
+import type {
+	KnowledgeConfig,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
 const config = {
@@ -47,6 +50,36 @@ function promotion(
 	};
 }
 
+/**
+ * #2472 W2: the promoter hook gates on tool class and on ACTIVE swarm
+ * candidates. An ACTIVE entry (plus the `{ tool: 'write' }` hook input used
+ * below) lets each test reach the promotion body; tests that keep the empty
+ * default exercise the empty-store early-return path (which still performs the
+ * one-time curator-summary migration).
+ */
+function makeActiveSwarmEntry(): SwarmKnowledgeEntry {
+	return {
+		id: 'hive-recs-active',
+		tier: 'swarm',
+		lesson: 'Keep promoter recommendations deduplicated by semantic action',
+		category: 'process',
+		tags: ['hive-fast-track'],
+		scope: 'global',
+		confidence: 0.9,
+		status: 'promoted',
+		confirmed_by: [],
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: 3,
+		created_at: '2026-07-01T00:00:00.000Z',
+		updated_at: '2026-07-01T00:00:00.000Z',
+		project_name: 'hive-recs',
+	};
+}
+
 describe('hive promoter recommendations — regression: issue #1769', () => {
 	let directory: string;
 	let cleanup: () => void;
@@ -57,6 +90,8 @@ describe('hive promoter recommendations — regression: issue #1769', () => {
 
 	beforeEach(() => {
 		({ dir: directory, cleanup } = createSafeTestDir('hive-recs-'));
+		// Default: EMPTY swarm store (the empty-candidates path). Tests that
+		// need the promotion body override this with [makeActiveSwarmEntry()].
 		_internals.readSwarmEntries = mock(async () => []);
 		_internals.readCuratorSummary = readCuratorSummary;
 		_internals.appendCuratorRecommendation = realAppend;
@@ -85,9 +120,11 @@ describe('hive promoter recommendations — regression: issue #1769', () => {
 				summary(Array.from({ length: 500 }, () => ({ ...duplicate }))),
 			),
 		);
-		_internals.checkHivePromotions = mock(async () => promotion());
 
-		await createHivePromoterHook(directory, config)({}, {});
+		// Empty store: the hook performs only the one-time migration read
+		// (#2472 W2 critic requirement) — no promotion runs, but the bloated
+		// legacy summary is still cleaned up on reopen.
+		await createHivePromoterHook(directory, config)({ tool: 'write' }, {});
 
 		const loaded = await readCuratorSummary(directory);
 		expect(loaded?.knowledge_recommendations).toHaveLength(1);
@@ -95,11 +132,12 @@ describe('hive promoter recommendations — regression: issue #1769', () => {
 
 	test('total hive entries alone is ambient state, not recommendation activity', async () => {
 		await writeCuratorSummary(directory, summary());
+		_internals.readSwarmEntries = mock(async () => [makeActiveSwarmEntry()]);
 		_internals.checkHivePromotions = mock(async () =>
 			promotion({ total_hive_entries: 999 }),
 		);
 
-		await createHivePromoterHook(directory, config)({}, {});
+		await createHivePromoterHook(directory, config)({ tool: 'write' }, {});
 
 		expect(
 			(await readCuratorSummary(directory))?.knowledge_recommendations,
@@ -108,6 +146,7 @@ describe('hive promoter recommendations — regression: issue #1769', () => {
 
 	test('repeated semantic activity keeps one newest recommendation', async () => {
 		await writeCuratorSummary(directory, summary());
+		_internals.readSwarmEntries = mock(async () => [makeActiveSwarmEntry()]);
 		let invocation = 0;
 		_internals.checkHivePromotions = mock(async () =>
 			promotion({
@@ -118,8 +157,12 @@ describe('hive promoter recommendations — regression: issue #1769', () => {
 		);
 		const hook = createHivePromoterHook(directory, config);
 
-		await hook({}, {});
-		await hook({}, {});
+		await hook({ tool: 'write' }, {});
+		// #2472 W2: reset the per-directory cadence floor between calls — this
+		// test targets recommendation dedup, not the cadence gate (pinned
+		// separately in hive-promoter-gating.test.ts).
+		_internals.resetPromoterGatingState();
+		await hook({ tool: 'write' }, {});
 
 		const recommendations = (await readCuratorSummary(directory))
 			?.knowledge_recommendations;
@@ -130,11 +173,12 @@ describe('hive promoter recommendations — regression: issue #1769', () => {
 	});
 
 	test('active promotion does not create a curator summary when none exists', async () => {
+		_internals.readSwarmEntries = mock(async () => [makeActiveSwarmEntry()]);
 		_internals.checkHivePromotions = mock(async () =>
 			promotion({ new_promotions: 1 }),
 		);
 
-		await createHivePromoterHook(directory, config)({}, {});
+		await createHivePromoterHook(directory, config)({ tool: 'write' }, {});
 
 		expect(
 			fs.existsSync(path.join(directory, '.swarm', 'curator-summary.json')),

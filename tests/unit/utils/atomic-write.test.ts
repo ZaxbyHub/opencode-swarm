@@ -32,6 +32,7 @@ import {
 	parseTargetBasename,
 	SWARM_TEMP_GRAMMARS,
 	WRITER_CLASSIFICATION,
+	wasRecentlyWrittenByThisProcess,
 } from '../../../src/utils/atomic-write';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -371,6 +372,42 @@ describe('atomicWriteSwarmFile', () => {
 			atomicWriteSwarmFile(target, 'x'.repeat(16), { maxBytes: 8 }),
 		).rejects.toThrow(/byte bound/);
 		expect(readdirSync(swarmDir)).toEqual([]);
+	});
+
+	test('failed write clears the recent-write intent marker (PRR-008); success keeps it', async () => {
+		// Regression (PR #2588 review PRR-008): the writer records write INTENT
+		// before any filesystem work, but a write that throws before the rename
+		// completed used to leave that marker behind — an ENOENT read of the
+		// target within RECENT_WRITE_WINDOW_MS was then misclassified as a
+		// rename race and retried against a file this invocation never produced.
+		// The failure path must clear the marker; a SUCCESSFUL write must still
+		// keep it (that is the rename-race read-your-own-write protection).
+		const target = path.join(swarmDir, 'intent.json');
+		await atomicWriteSwarmFile(target, 'previous');
+		expect(wasRecentlyWrittenByThisProcess(target)).toBe(true);
+		const realRename = _internals.renameSync;
+		_internals.renameSync = (() => {
+			// ENOENT is not in RETRYABLE_RENAME_CODES → immediate propagation,
+			// no retry sleeps.
+			throw Object.assign(new Error('ENOENT: temp vanished'), {
+				code: 'ENOENT',
+			});
+		}) as typeof _internals.renameSync;
+		try {
+			await expect(atomicWriteSwarmFile(target, 'doomed')).rejects.toThrow(
+				'ENOENT',
+			);
+		} finally {
+			_internals.renameSync = realRename;
+		}
+		// Intent marker cleared by the failure path…
+		expect(wasRecentlyWrittenByThisProcess(target)).toBe(false);
+		// …while the prior target and the rename-race protection on a
+		// successful write are both preserved.
+		expect(readFileSync(target, 'utf-8')).toBe('previous');
+		const other = path.join(swarmDir, 'intent-ok.json');
+		await atomicWriteSwarmFile(other, 'fresh');
+		expect(wasRecentlyWrittenByThisProcess(other)).toBe(true);
 	});
 
 	test('N concurrent writers to the same target leave zero residue and a complete file', async () => {

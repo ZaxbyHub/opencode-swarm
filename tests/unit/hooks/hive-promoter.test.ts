@@ -162,8 +162,7 @@ describe('hive-promoter (transactional, #1847)', () => {
 	let realHome: string | undefined;
 
 	beforeEach(() => {
-		// Isolate the hive store by redirecting HOME to a per-test temp dir.
-		// The hive path resolver reads process.env.HOME live each call.
+		// Isolate the hive store via per-test HOME (resolver reads it live).
 		tempHome = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'hive-test-')));
 		realHome = process.env.HOME;
 		process.env.HOME = tempHome;
@@ -828,7 +827,8 @@ describe('hive-promoter (transactional, #1847)', () => {
 			const entry = makeSwarmEntry();
 			await writeSwarmEntries(swarmDir, [entry]);
 			const hook = createHivePromoterHook(swarmDir, makeConfig());
-			await hook({}, {});
+			// #2472 W2: pass a write-class tool so the promotion body runs.
+			await hook({ tool: 'write' }, {});
 			expect(await readRawHive()).toHaveLength(1);
 		});
 	});

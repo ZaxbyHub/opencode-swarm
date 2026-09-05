@@ -2,12 +2,14 @@ import * as child_process from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { validateSwarmPath } from '../hooks/utils.js';
+import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
 import {
 	type BunCompatSpawnOptions,
 	type BunCompatSubprocess,
 	bunSpawn,
 } from '../utils/bun-compat.js';
-import { sameProjectRoot } from '../utils/canonical-root.js';
+import { canonicalRootKey, sameProjectRoot } from '../utils/canonical-root.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import type { BackgroundWorkspaceSnapshot } from './pending-delegations.js';
 
@@ -1793,11 +1795,26 @@ function porcelainV2PathAfterFields(
 	return pathValue || null;
 }
 
-export function captureWorkspaceSnapshot(
-	directory: string,
-	optionsOrScope: string | null | CaptureWorkspaceSnapshotOptions = null,
-	prHeadShaArg: string | null = null,
-): BackgroundWorkspaceSnapshot {
+/**
+ * Digest marker (`.swarm`-contained) recording the content digest of the last
+ * snapshot persisted by {@link captureWorkspaceSnapshotAsync}. Issue #2472 W7:
+ * comparing a candidate digest against this marker lets hot hook paths skip
+ * rewriting a byte-identical snapshot.
+ */
+const SNAPSHOT_DIGEST_MARKER_FILENAME = 'workspace-snapshot.digest';
+
+/**
+ * Resolve the two overloads of {@link captureWorkspaceSnapshot} and its async
+ * twin into one normalized option set (shared so the twins cannot drift).
+ */
+function parseCaptureOptions(
+	optionsOrScope: string | null | CaptureWorkspaceSnapshotOptions,
+	prHeadShaArg: string | null,
+): {
+	scope: string | null;
+	configuredPrHeadSha: string | null;
+	resolveCurrentPrHeadSha: boolean;
+} {
 	const scope =
 		typeof optionsOrScope === 'object' && optionsOrScope !== null
 			? (optionsOrScope.scope ?? null)
@@ -1812,6 +1829,29 @@ export function captureWorkspaceSnapshot(
 		typeof optionsOrScope === 'object' &&
 		optionsOrScope !== null &&
 		optionsOrScope.resolveCurrentPrHeadSha === true;
+	return { scope, configuredPrHeadSha, resolveCurrentPrHeadSha };
+}
+
+/**
+ * Content identity of a captured snapshot: the pair (gitHead, dirtyHash) is
+ * exactly what `workspaceSnapshotMatches` compares, so an identical pair means
+ * an indistinguishable snapshot for every consumer in this module. `null` when
+ * Git could not resolve the state (no identity to persist or compare).
+ */
+function snapshotContentDigest(
+	snapshot: BackgroundWorkspaceSnapshot,
+): string | null {
+	if (snapshot.gitHead === null || snapshot.dirtyHash === null) return null;
+	return digest(`${snapshot.gitHead}\n${snapshot.dirtyHash}`);
+}
+
+export function captureWorkspaceSnapshot(
+	directory: string,
+	optionsOrScope: string | null | CaptureWorkspaceSnapshotOptions = null,
+	prHeadShaArg: string | null = null,
+): BackgroundWorkspaceSnapshot {
+	const { scope, configuredPrHeadSha, resolveCurrentPrHeadSha } =
+		parseCaptureOptions(optionsOrScope, prHeadShaArg);
 	const upstreamBefore = resolveCurrentPrHeadSha
 		? runGit(directory, ['rev-parse', '@{upstream}'])
 		: null;
@@ -1838,7 +1878,12 @@ export function captureWorkspaceSnapshot(
 			: null
 		: configuredPrHeadSha;
 	return {
-		directory: path.resolve(directory),
+		// Project-root identity (issue #2474): the snapshot's directory field is
+		// compared and persisted as a root identity (workspaceSnapshotMatches),
+		// so it is derived through the canonical-root helper — realpath-collapsed
+		// and case-folded on win32 — rather than a raw lexical path.resolve. Both
+		// twins must construct it identically or twin-parity tests diverge.
+		directory: canonicalRootKey(directory),
 		gitHead: snapshot?.gitHead ?? null,
 		dirtyHash: porcelain === null ? null : digest(porcelain),
 		changedFiles: snapshot
@@ -1852,6 +1897,112 @@ export function captureWorkspaceSnapshot(
 		prHeadSha,
 		scope,
 	};
+}
+
+/**
+ * Async twin of {@link captureWorkspaceSnapshot} (issue #2472 W7 / AC-8).
+ *
+ * Identical output contract, but every Git call routes through the bounded
+ * async runner ({@link runGitAsync}) so the delegation gate and the
+ * execution-stall guardrail — the hottest per-tool-call hook paths — never
+ * block the host event loop on a synchronous `spawnSync`. Failure semantics
+ * mirror the sync twin: a failed Git call degrades that field to `null`
+ * instead of throwing.
+ *
+ * After a successful capture the snapshot's content digest is persisted to the
+ * `.swarm`-contained digest marker unless {@link shouldSkipSnapshot} reports
+ * it unchanged — the persist-side digest skip (computing the candidate digest
+ * BEFORE capture would require running the same `git status` first, so the
+ * skip is applied where it is free: when rewriting the marker).
+ */
+export async function captureWorkspaceSnapshotAsync(
+	directory: string,
+	optionsOrScope: string | null | CaptureWorkspaceSnapshotOptions = null,
+	prHeadShaArg: string | null = null,
+): Promise<BackgroundWorkspaceSnapshot> {
+	const { scope, configuredPrHeadSha, resolveCurrentPrHeadSha } =
+		parseCaptureOptions(optionsOrScope, prHeadShaArg);
+	const upstreamBefore = resolveCurrentPrHeadSha
+		? await runGitAsync(directory, ['rev-parse', '@{upstream}'])
+		: null;
+	const porcelainRaw = await runGitAsync(directory, [
+		'status',
+		'--porcelain=v2',
+		'--branch',
+		'-z',
+		'--untracked-files=all',
+	]);
+	// Issue #2271 bug 2 (same rationale as the sync twin): hash and parse the
+	// same .swarm-filtered payload so dirtyHash comparisons and changedFiles
+	// derivation stay consistent across both twins.
+	const porcelain =
+		porcelainRaw === null ? null : filterSwarmRuntimePorcelain(porcelainRaw);
+	const snapshot =
+		porcelain === null ? null : parsePorcelainV2Snapshot(porcelain);
+	const upstreamAfter = resolveCurrentPrHeadSha
+		? await runGitAsync(directory, ['rev-parse', '@{upstream}'])
+		: null;
+	const prHeadSha = resolveCurrentPrHeadSha
+		? upstreamBefore && upstreamBefore === upstreamAfter
+			? upstreamBefore
+			: null
+		: configuredPrHeadSha;
+	const captured: BackgroundWorkspaceSnapshot = {
+		// Same canonical identity as the sync twin (see the comment there) — the
+		// async baseline is compared against sync-captured currents.
+		directory: canonicalRootKey(directory),
+		gitHead: snapshot?.gitHead ?? null,
+		dirtyHash: porcelain === null ? null : digest(porcelain),
+		changedFiles: snapshot
+			? [
+					...new Set([
+						...snapshot.dirtyTrackedPaths,
+						...snapshot.untrackedPaths,
+					]),
+				]
+			: null,
+		prHeadSha,
+		scope,
+	};
+	const contentDigest = snapshotContentDigest(captured);
+	if (contentDigest !== null && !shouldSkipSnapshot(directory, contentDigest)) {
+		try {
+			await atomicWriteSwarmFile(
+				validateSwarmPath(directory, SNAPSHOT_DIGEST_MARKER_FILENAME),
+				`${contentDigest}\n`,
+			);
+		} catch {
+			// Marker persistence is advisory: a containment rejection or write
+			// failure must never turn a successful capture into a hook failure.
+		}
+	}
+	return captured;
+}
+
+/**
+ * Unchanged-content/digest skip for workspace snapshots (issue #2472 W7).
+ *
+ * True when `digest` matches the content digest of the last snapshot persisted
+ * by {@link captureWorkspaceSnapshotAsync} for this directory — the caller may
+ * skip re-persisting (or, when it can compute the candidate digest cheaply,
+ * re-capturing) an identical snapshot. Fails open to `false`: a missing,
+ * unreadable, or malformed marker, or a malformed candidate digest, must never
+ * suppress a capture.
+ */
+export function shouldSkipSnapshot(
+	directory: string,
+	digestText: string,
+): boolean {
+	if (!/^[0-9a-f]{64}$/.test(digestText)) return false;
+	try {
+		const stored = fs.readFileSync(
+			validateSwarmPath(directory, SNAPSHOT_DIGEST_MARKER_FILENAME),
+			'utf-8',
+		);
+		return stored.trim() === digestText;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -1879,6 +2030,51 @@ export function changedFilesSinceSnapshot(
 	const changed = new Set(current.changedFiles);
 	if (baseline.gitHead !== current.gitHead) {
 		const committed = runGit(directory, [
+			'diff',
+			'--name-only',
+			'-z',
+			baseline.gitHead,
+			current.gitHead,
+		]);
+		if (committed === null) return null;
+		for (const changedPath of parseNulPaths(committed)) {
+			if (!isSwarmRuntimePath(changedPath)) changed.add(changedPath);
+		}
+	}
+
+	return [...changed];
+}
+
+/**
+ * Async twin of {@link changedFilesSinceSnapshot} (issue #2472 W11 / R-1).
+ *
+ * Identical output contract — conservative final-path derivation, `null` when
+ * attribution cannot be proven so gate classification fails closed — but the
+ * current-state capture and the cross-HEAD diff route through
+ * {@link captureWorkspaceSnapshotAsync} and the bounded async git runner, so
+ * hook-reachable callers (the execution-stall probe, delegation-gate
+ * Task-completion coder attribution) never block the host event loop on a
+ * synchronous spawn. Settlement/recovery and background-observer callers that
+ * are not on per-tool-call hook paths may keep the sync twin.
+ */
+export async function changedFilesSinceSnapshotAsync(
+	directory: string,
+	baseline: BackgroundWorkspaceSnapshot | undefined,
+): Promise<string[] | null> {
+	if (!baseline?.gitHead || baseline.changedFiles == null) return null;
+	// Same issue #2271 bug 2 rationale as the sync twin: strip plugin-owned
+	// .swarm runtime paths from persisted baselines before the dirty check.
+	const baselineDirt = baseline.changedFiles.filter(
+		(p) => !isSwarmRuntimePath(p),
+	);
+	// Same fail-closed rule: a dirty baseline cannot prove task ownership.
+	if (baselineDirt.length > 0) return null;
+	const current = await captureWorkspaceSnapshotAsync(directory);
+	if (!current.gitHead || current.changedFiles == null) return null;
+
+	const changed = new Set(current.changedFiles);
+	if (baseline.gitHead !== current.gitHead) {
+		const committed = await runGitAsync(directory, [
 			'diff',
 			'--name-only',
 			'-z',

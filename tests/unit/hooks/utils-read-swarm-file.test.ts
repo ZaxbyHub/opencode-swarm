@@ -1,5 +1,6 @@
 /**
- * Retry-behavior tests for `readSwarmFileAsync` (issue #1782).
+ * Retry-behavior tests for `readSwarmFileAsync` (issue #1782, amended by
+ * issue #2472 W3 / PERF-1).
  *
  * The function historically retried only ENOENT (5 × 10ms). On Windows CI,
  * AV/indexing of a freshly-written `.swarm/plan.json` can raise EBUSY/EPERM/
@@ -8,13 +9,17 @@
  * the stale session fallback (the delegation-gate-resolve-task-id.test.ts
  * merge-group flake in run 29854486821).
  *
- * The fix extends the retry set to include EBUSY/EPERM/EACCES and switches
- * the AV-class branch to exponential backoff (10/20/40/80/160ms across 6
- * attempts). The ENOENT branch keeps the cheap pre-#1782 budget (5 × 10ms)
- * to avoid a hot-path latency regression on missing-file reads
- * (`system-enhancer.ts` reads `context.md`/`plan.md` per message transform).
+ * The #1782 fix extended the retry set to include EBUSY/EPERM/EACCES with
+ * exponential backoff (10/20/40/80/160ms across 6 attempts). Issue #2472 W3
+ * then split ENOENT by EVIDENCE (three-way policy): an ENOENT retries the
+ * cheap 5 × 10ms budget ONLY when this process recently wrote the file
+ * (`wasRecentlyWrittenByThisProcess` — the transient-ENOENT fixture below
+ * writes through the canonical atomic writer to record that intent) or the
+ * artifact cache previously observed it to exist; an ENOENT on a file that
+ * plausibly never existed returns null on the FIRST attempt with zero sleeps
+ * (plan-less projects were paying 4 × 10ms per missing-file read, ~1.9s/turn).
  *
- * Uses the existing `_internals` seam (src/hooks/utils.ts:23-35) per AGENTS.md
+ * Uses the existing `_internals` seam (src/hooks/utils.ts) per AGENTS.md
  * invariant 7 (DI over `mock.module`).
  */
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -24,6 +29,7 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { _internals, readSwarmFileAsync } from '../../../src/hooks/utils';
 import { resetSwarmState } from '../../../src/state';
+import { atomicWriteSwarmFileSync } from '../../../src/utils/atomic-write';
 
 const realReadCachedTextFile = _internals.readCachedTextFile;
 
@@ -150,11 +156,19 @@ describe('readSwarmFileAsync retry behavior (issue #1782)', () => {
 		}
 	});
 
-	test('still retries ENOENT (macOS/APFS rename-visibility race)', async () => {
+	test('still retries evidenced ENOENT (macOS/APFS rename-visibility race)', async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'readswarm-enoent-'));
 		try {
 			fs.mkdirSync(path.join(tmp, '.swarm'), { recursive: true });
-			fs.writeFileSync(path.join(tmp, '.swarm', 'plan.json'), '{"ok":true}');
+			// Retry precondition (issue #2472 W3): the ENOENT ladder only
+			// retries a file this process recently wrote (or previously
+			// observed). Create the fixture through the canonical atomic writer
+			// so the write-intent marker is recorded exactly as production
+			// would record it — no test-only seam needed.
+			atomicWriteSwarmFileSync(
+				path.join(tmp, '.swarm', 'plan.json'),
+				'{"ok":true}',
+			);
 
 			let calls = 0;
 			_internals.readCachedTextFile = ((
@@ -174,12 +188,16 @@ describe('readSwarmFileAsync retry behavior (issue #1782)', () => {
 		}
 	});
 
-	test('persistent-ENOENT stays cheap (hot-path regression guard, issue #1782 final-critic)', async () => {
-		// The split retry policy MUST keep ENOENT on the pre-#1782 cheap budget
-		// (5 attempts × 10ms = ~40ms). The per-message system-enhancer path
-		// reads context.md and plan.md via readSwarmFileAsync; a 310ms budget
-		// on missing files would be an unacceptable per-message regression on
-		// projects without those files.
+	test('never-existing ENOENT returns null on the first attempt with zero sleeps (issue #2472 PERF-1)', async () => {
+		// The three-way policy (issue #2472 W3) replaces the old "always retry
+		// ENOENT 5 × 10ms" behavior: an ENOENT with no recent write by this
+		// process and no prior observation of existence is a file that plausibly
+		// NEVER existed — retrying cannot succeed. The per-message
+		// system-enhancer path reads context.md and plan.md via
+		// readSwarmFileAsync; on plan-less projects the old ladder cost 4 × 10ms
+		// per read (~1.9s/turn). The pre-#2472 version of this test pinned the
+		// removed behavior (5 attempts / 4 sleeps) and was re-pinned to the new
+		// contract.
 		const tmp = fs.mkdtempSync(
 			path.join(os.tmpdir(), 'readswarm-persistent-enoent-'),
 		);
@@ -195,14 +213,13 @@ describe('readSwarmFileAsync retry behavior (issue #1782)', () => {
 			const elapsed = performance.now() - start;
 
 			expect(result).toBeNull();
-			// 5 attempts (ENOENT_MAX_ATTEMPTS), 4 inter-attempt sleeps of 10ms.
-			expect(calls).toBe(5);
-			// Cheap budget: 4 × 10ms = 40ms plus small overhead. The upper
-			// bound (< 80) allows ~2x slack on the 40ms baseline while still
-			// catching a regression that routes ENOENT through the AV-class
-			// 310ms path (which would blow past 80ms). (PRR-009: was < 150,
-			// too loose — allowed ~3.75x regression.)
-			expect(elapsed).toBeLessThan(80);
+			// 1 attempt — the never-existed fast path returns before any sleep.
+			expect(calls).toBe(1);
+			// Zero inter-attempt sleeps: the only elapsed time is the call
+			// itself. The bound (< 40) is half of even ONE old retry sleep
+			// budget (4 × 10ms), catching a regression back to any retrying
+			// ladder while tolerating timer/scheduling overhead.
+			expect(elapsed).toBeLessThan(40);
 		} finally {
 			rmSyncHardened(tmp);
 		}

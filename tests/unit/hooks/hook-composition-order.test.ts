@@ -55,6 +55,26 @@ const systemChain = between(
 	"'experimental.session.compacting'",
 );
 
+/**
+ * W5 re-anchoring (issue #2472): the system-entry materializer's body moved
+ * out of the chain array into a named const — the frozen check-c6 contract
+ * forbids anonymous inline handlers in the composeHandlers chains, and the
+ * inline body WAS the anonymous handler. The ordering pins below target the
+ * named reference inside the chain; the binding check here still ties that
+ * name to the real materializer implementation, so the pin keeps its
+ * original strength.
+ */
+const MATERIALIZER_STEP = 'messagesTransformSystemGuidanceMaterializeStep';
+const materializerDeclaration = between(
+	`const ${MATERIALIZER_STEP}`,
+	'const systemTransformStartDiagnostic',
+);
+if (!materializerDeclaration.includes('materializeSystemGuidanceInPlace(')) {
+	throw new Error(
+		`${MATERIALIZER_STEP} no longer wraps materializeSystemGuidanceInPlace — re-point the ordering pins in this test`,
+	);
+}
+
 function orderOf(chain: string, symbol: string): number {
 	const idx = chain.indexOf(symbol);
 	if (idx < 0) {
@@ -80,27 +100,18 @@ describe('messages.transform composition order (#2107 §2)', () => {
 
 	test('knowledge injector runs before the system-entry materializer', () => {
 		expect(orderOf(messagesChain, 'knowledgeInjectorHook')).toBeLessThan(
-			orderOf(
-				messagesChain,
-				'materializeSystemGuidanceInPlace(output.messages)',
-			),
+			orderOf(messagesChain, MATERIALIZER_STEP),
 		);
 	});
 
 	test('materializer runs before final context accounting', () => {
-		expect(
-			orderOf(
-				messagesChain,
-				'materializeSystemGuidanceInPlace(output.messages)',
-			),
-		).toBeLessThan(orderOf(messagesChain, 'finalContextAccountingStep'));
+		expect(orderOf(messagesChain, MATERIALIZER_STEP)).toBeLessThan(
+			orderOf(messagesChain, 'finalContextAccountingStep'),
+		);
 	});
 
 	test('the materializer is the last STRUCTURE-mutating handler (accounting is read-mostly)', () => {
-		const materializer = orderOf(
-			messagesChain,
-			'materializeSystemGuidanceInPlace(output.messages)',
-		);
+		const materializer = orderOf(messagesChain, MATERIALIZER_STEP);
 		const after = messagesChain
 			.slice(materializer + 1)
 			.slice(

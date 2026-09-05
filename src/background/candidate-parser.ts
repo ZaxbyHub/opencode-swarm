@@ -12,7 +12,7 @@ import {
 	type CandidateSeverity,
 	candidateDiagnosticPreview,
 	isCandidateLookingShortRow,
-	normalizeCandidateArtifact,
+	normalizeCandidateArtifactCached,
 	type PrReviewRiskImpact,
 	type PrReviewRiskTag,
 	parsePrReviewRiskTagsField,
@@ -1132,7 +1132,7 @@ export function parseAndPersist(
 	// question and DID change for every consumer: a defective [CLEAN] no longer
 	// discards independently validated candidate rows (see acceptedCandidates).
 	const normalized = flags.expected_family
-		? normalizeCandidateArtifact(input.text, flags.expected_family)
+		? normalizeCandidateArtifactCached(input.text, flags.expected_family)
 		: undefined;
 	const normalizedInput = normalized
 		? { ...input, text: normalized.text }

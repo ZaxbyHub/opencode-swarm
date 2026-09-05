@@ -105,9 +105,9 @@ describe('phase participation persistence retries', () => {
 			output,
 		});
 
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			true,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(true);
 	});
 
 	test('replays the same running result after a transient store failure', async () => {

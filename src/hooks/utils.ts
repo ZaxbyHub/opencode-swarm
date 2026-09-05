@@ -9,8 +9,15 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SwarmError, warn } from '../utils';
+import {
+	RECENT_WRITE_WINDOW_MS,
+	wasRecentlyWrittenByThisProcess,
+} from '../utils/atomic-write';
 import { bunFile } from '../utils/bun-compat';
-import { readCachedTextFile } from '../utils/swarm-artifact-cache';
+import {
+	readCachedTextFile,
+	wasObservedToExist,
+} from '../utils/swarm-artifact-cache';
 
 /**
  * Test-only dependency-injection seam. Production code calls
@@ -279,17 +286,16 @@ export async function readSwarmFileAsync(
 		cache.set(key, promise);
 		return promise;
 	}
-	// SPLIT retry budget constants — see comment below for rationale.
-	// ENOENT (macOS/APFS rename race): cheap, short window. Preserves the
-	// pre-#1782 hot-path latency for missing files (system-enhancer reads
-	// context.md/plan.md per message; loadPlanJsonOnly reads plan.json per
-	// evidence attribution).
+	// SPLIT retry budget constants — see the three-way policy below.
+	// Evidenced ENOENT (macOS/APFS rename race): cheap, short window — and ONLY
+	// when the miss is evidenced (see the policy block). Never-existing files
+	// return null immediately with zero sleeps.
 	const ENOENT_MAX_ATTEMPTS = 5;
 	const ENOENT_RETRY_DELAY_MS = 10;
 	// EBUSY/EPERM/EACCES (Windows AV scan): longer window. Sized for real
 	// Windows Defender scan windows (commonly 100–500ms).
 	const maxAttempts = 6;
-	// Retry loop to handle macOS/APFS rename-visibility race AND transient
+	// Retry loop to handle macOS/APFS rename-visibility races AND transient
 	// Windows FS errors from AV/indexing of a freshly-written file.
 	//
 	// After an atomic rename, the filesystem can take a few ms to update the
@@ -301,30 +307,40 @@ export async function readSwarmFileAsync(
 	// class was previously hardened at a higher layer in `getEvidenceTaskId`
 	// (src/hooks/delegation-gate.ts:1742-1747, v6.33.7) by swallowing the
 	// error and returning null; this is the source-level retry that prevents
-	// the swallow from being reached. Retry-set precedent: `RENAME_RETRY_CODES`
+	// the swallow from being reached. Retry-set precedent: `RETRYABLE_RENAME_CODES`
 	// at src/evidence/documents-retention.ts:67-70 (deliberately omits
 	// `ENOTEMPTY`, which is a rename-specific code not applicable to reads).
 	//
-	// SPLIT POLICY (issue #1782 final-critic finding): the two error classes
-	// have fundamentally different latency budgets.
+	// THREE-WAY POLICY (issue #1782 split policy, amended by issue #2472 W3 /
+	// PERF-1): the error classes have fundamentally different latency budgets,
+	// and ENOENT itself is now split by EVIDENCE.
 	//
-	//   - ENOENT (macOS/APFS rename race): short window — the prior flat
-	//     10ms × 4 sleeps = 40ms budget was sized for this. PRESERVED to avoid
-	//     a hot-path regression: `system-enhancer.ts` reads `context.md` and
-	//     `plan.md` per message transform, and `loadPlanJsonOnly` reads
-	//     `plan.json` per evidence attribution. On projects without those
-	//     files, `bunFile(...).text()` throws ENOENT — a 310ms miss path
-	//     would be unacceptable on the per-message path.
-	//   - EBUSY/EPERM/EACCES (Windows AV scan): commonly 100–500ms. Use
-	//     exponential backoff 10/20/40/80/160ms across 6 attempts (310ms total
-	//     worst-case) — sized for real Defender scan windows. The prior flat
-	//     10ms × 4 = 40ms budget was observed insufficient when both
-	//     unit-test-level retries of
-	//     `tests/unit/hooks/delegation-gate-resolve-task-id.test.ts` failed in
-	//     merge-group run 29854486821 (2026-07-21).
+	//   1. AV window — EBUSY/EPERM/EACCES (Windows AV scan): commonly
+	//      100–500ms. Exponential backoff 10/20/40/80/160ms across 6 attempts
+	//      (310ms total worst-case), sized for real Defender scan windows
+	//      (#1782; the prior flat 10ms × 4 = 40ms budget was observed
+	//      insufficient when both unit-test-level retries of
+	//      tests/unit/hooks/delegation-gate-resolve-task-id.test.ts failed in
+	//      merge-group run 29854486821, 2026-07-21). UNCHANGED by #2472.
+	//   2. Evidenced rename-race — ENOENT on a file this process recently
+	//      wrote (`wasRecentlyWrittenByThisProcess`, write INTENT recorded
+	//      before the temp write begins so a first write racing its readers
+	//      still retries; window RECENT_WRITE_WINDOW_MS) OR previously
+	//      observed to exist (`wasObservedToExist`, recorded on every
+	//      successful stat in the artifact cache — covers the re-read case
+	//      across the intent window): flat 5 × 10ms, the pre-#1782 budget.
+	//   3. Never-existed fast path — ENOENT with NO evidence the file ever
+	//      existed: return null immediately, ZERO sleeps. `system-enhancer.ts`
+	//      reads `context.md`/`plan.md` per message transform and
+	//      `loadPlanJsonOnly` reads `plan.json` per evidence attribution; on
+	//      projects without those files every read paid 4 × 10ms of retry
+	//      sleeps for a file that never existed (~1.9s/turn, PERF-1).
 	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		// Hoisted so the ENOENT policy below can identify WHICH file missed
+		// ('' only if validateSwarmPath itself threw before resolution).
+		let resolvedPath = '';
 		try {
-			const resolvedPath = _internals.validateSwarmPath(directory, filename);
+			resolvedPath = _internals.validateSwarmPath(directory, filename);
 			return await _internals.readCachedTextFile(resolvedPath, async () => {
 				const file = bunFile(resolvedPath);
 				return await file.text();
@@ -332,8 +348,21 @@ export async function readSwarmFileAsync(
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException)?.code;
 			if (code === 'ENOENT') {
-				// Short-window rename-visibility race. Cheap flat backoff.
-				// Preserves the pre-#1782 hot-path latency for missing files.
+				// Retry-worthy = evidenced rename-race: this process wrote the
+				// file recently (intent OR completion recorded), or a previous
+				// read observed it to exist. Otherwise the file plausibly NEVER
+				// existed — retrying cannot succeed, so return null with ZERO
+				// sleeps (issue #2472 PERF-1 fast path).
+				const retryWorthy =
+					resolvedPath !== '' &&
+					(wasRecentlyWrittenByThisProcess(
+						resolvedPath,
+						RECENT_WRITE_WINDOW_MS,
+					) ||
+						wasObservedToExist(resolvedPath));
+				if (!retryWorthy) return null;
+				// Evidenced (plausibly mid-rename): short-window cheap flat
+				// backoff, preserving the pre-#1782 latency budget.
 				if (attempt >= ENOENT_MAX_ATTEMPTS - 1) return null;
 				await new Promise((resolve) =>
 					setTimeout(resolve, ENOENT_RETRY_DELAY_MS),

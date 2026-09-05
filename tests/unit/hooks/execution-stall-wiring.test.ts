@@ -50,8 +50,8 @@ let installRoot: string;
 let hooks: ReturnType<typeof createGuardrailsHooks>;
 
 const realNow = stallInternals.now;
-const realCapture = stallInternals.captureWorkspaceSnapshot;
-const realChanged = stallInternals.changedFilesSinceSnapshot;
+const realCapture = stallInternals.captureWorkspaceSnapshotAsync;
+const realChanged = stallInternals.changedFilesSinceSnapshotAsync;
 const realModuleUrl = guardInternals.moduleUrl;
 
 let clock = 1_700_000_000_000;
@@ -61,10 +61,10 @@ beforeEach(() => {
 	stallTestExports.reset();
 	clock = 1_700_000_000_000;
 	stallInternals.now = () => clock;
-	stallInternals.captureWorkspaceSnapshot = mock(
+	stallInternals.captureWorkspaceSnapshotAsync = mock(
 		() => ({ gitHead: 'H0', changedFiles: [] }) as never,
 	) as never;
-	stallInternals.changedFilesSinceSnapshot = mock(() => []) as never;
+	stallInternals.changedFilesSinceSnapshotAsync = mock(async () => []) as never;
 
 	root = fs.mkdtempSync(path.join(os.tmpdir(), 'stall-wiring-'));
 	workspace = path.join(root, 'user-project');
@@ -89,8 +89,8 @@ beforeEach(() => {
 
 afterEach(() => {
 	stallInternals.now = realNow;
-	stallInternals.captureWorkspaceSnapshot = realCapture;
-	stallInternals.changedFilesSinceSnapshot = realChanged;
+	stallInternals.captureWorkspaceSnapshotAsync = realCapture;
+	stallInternals.changedFilesSinceSnapshotAsync = realChanged;
 	guardInternals.moduleUrl = realModuleUrl;
 	guardInternals.resetCaches();
 	stallTestExports.reset();

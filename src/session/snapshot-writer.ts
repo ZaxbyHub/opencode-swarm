@@ -192,6 +192,133 @@ export interface SerializedAgentSession {
 }
 
 /**
+ * Compile-time snapshot-field parity map (issue #2472 W6 / AC-7; frozen check C7).
+ *
+ * WHY THIS MAP EXISTS — the serializer reads FROM `AgentSessionState` and
+ * writes TO `SerializedAgentSession`, so the drift-prone direction is a field
+ * that exists on the live state but silently never reaches the snapshot:
+ * nothing fails, the field is just lost on every restart. The
+ * `Record<Exclude<keyof AgentSessionState, keyof SerializedAgentSession>, string>`
+ * key type makes that direction exhaustive at compile time — EVERY state field
+ * that is not a serialized field MUST appear here with a one-line rationale,
+ * and a key that is NOT such a field is an excess-property type error. Adding
+ * a field to either interface without reconciling this map fails
+ * `bun run typecheck` (CI gate).
+ *
+ * The serialized-only direction (a `SerializedAgentSession` field with no
+ * `AgentSessionState` counterpart) is guarded separately by the
+ * `_serializedFieldsExistOnState` assertion below. The asymmetry is
+ * deliberate: the serializer can only *drop* state fields, while the reader
+ * could otherwise *invent* fields the live state does not have.
+ *
+ * This is NOT the same list as `TRANSIENT_SESSION_FIELDS` in
+ * `src/session/snapshot-reader.ts` (fields RESET on rehydration — a subset of
+ * the *serialized* fields). This map lists fields that are NEVER serialized.
+ * Most are genuinely process-local; `workspaceDirectory` is deliberately
+ * unserializable for trust reasons (see its TRUST BOUNDARY comment in
+ * `src/state.ts`), which is exactly why it must carry an entry here rather
+ * than fall out of the type silently.
+ *
+ * The runtime mirror of this guard lives at
+ * `tests/unit/session/snapshot-field-parity-guard.test.ts` (what frozen
+ * check C7 runs).
+ */
+export const SESSION_TRANSIENT_FIELDS: Readonly<
+	Record<Exclude<keyof AgentSessionState, keyof SerializedAgentSession>, string>
+> = {
+	lastDelegationReason:
+		'Per-turn delegation telemetry; rebuilt by the next delegation event and meaningless after a restart.',
+	nonTransientCircuit:
+		'In-memory-only circuit by design (see state.ts): a restarted host must never inherit a stale stop.',
+	pendingToolExecutions:
+		'Bounded in-memory correlation for wrapper-replaced commands; the pending execution dies with the process.',
+	taskWorkflowCache:
+		'Durable evidence stays authoritative; the exact-task cache is rebuilt from plan+evidence on rehydrate.',
+	taskCouncilApproved:
+		'Council verdicts live in durable evidence; rehydrate recomputes from evidence instead of trusting a snapshot.',
+	taskCouncilWorkflowGeneration:
+		'Generation token guarding in-flight council dispatches; a stale generation must not survive a restart.',
+	pendingCouncilRequirements:
+		'Per-(task,round) member requirements for the NEXT submission attempt; no submission is pending across a restart.',
+	lastGateOutcome:
+		'Only used to inject a deliberation preamble for the immediately following turn; no such turn exists after restart.',
+	declaredCoderScope:
+		'Scope declarations are validated per Task call against a live v2 binding; a restored array would be an unverified grant.',
+	workspaceDirectory:
+		'Trust boundary (issue #2002): never serialized — a snapshot-restored root is untrusted (see state.ts field comment).',
+	lastScopeViolation:
+		'One-shot diagnostic for the current turn; a fresh process has observed no violations.',
+	modifiedFilesThisCoderTask:
+		'Compatibility projection synced from currentTaskId + modifiedFilesByTask; the reader re-derives it from the durable map.',
+	reviewerScopeGenerations:
+		'Bounded in-memory coder generations awaiting reviewer claims; in-flight claims cannot cross a process boundary.',
+	reviewerScopeGenerationCounter:
+		'Monotonic per-process source for scope generations; call identity stays authoritative and re-seeds per process.',
+	reviewerScopeIncarnation:
+		'Identity of this in-memory parent-session incarnation; a new process is a new incarnation by definition.',
+	reviewerScopeLatestGenerationByTask:
+		'Generation tokens retained only through async validation in flight; nothing is in flight across a restart.',
+	reviewerScopeOwnershipHistory:
+		'Bounded recent background-ownership tombstones for in-process reviewer consumption only.',
+	qaGateSessionOverrides:
+		'Ratchet-tighter session overrides ride the live session; cleared on session reset and never persisted.',
+	loopDetectionWindow:
+		'Sliding window of recent delegation hashes; loop detection restarts empty in a fresh process.',
+	loopWarningPending:
+		'Pending chat injection consumed by the next messagesTransform; no transform is pending after a restart.',
+	contextPressureWarningSent:
+		'One-shot per-session warning flag; recomputed against the live context window.',
+	lastProviderRecoveryFingerprint:
+		'Dedupe fingerprint for the most recent provider-failure transcript; the transcript does not survive a restart.',
+	prmPatternCounts:
+		'PRM state is per-process; a rehydrated session re-detects patterns from zero (reader resets deliberately).',
+	prmEscalationLevel:
+		'PRM escalation must not carry across restarts; the reader resets it to 0.',
+	prmLastPatternDetected:
+		'Last live detector match; no detector has run in a fresh process.',
+	prmTrajectoryStep:
+		'Trajectory steps restart at 0; carrying the cursor would mis-key the episode ledger.',
+	prmHardStopPending:
+		'DENY token consumed by toolBefore; a resumed run must re-detect the pattern before re-arming.',
+	prmHardStopInjectPending:
+		'INJECT token paired with the DENY token (issue #2063 C2); transient like every PRM field.',
+	prmStruckEpisodes:
+		'Episode ledger keyed by trajectory step numbers that restart at 0 (issue #2134); stale keys would blind PRM.',
+	prmLadderCounts:
+		'Ladder counts pair with the episode ledger; a resumed run re-earns its strikes (issue #2134).',
+	prmDelegationCallId:
+		'Dispatch identity of the reset that already ran; Task callIDs do not survive a restart.',
+	prmEscalationTracker:
+		'Class instance owned by the PRM hook; not serializable and re-created lazily per process.',
+	prmInjectedAdvisoryKeys:
+		'Cross-turn advisory dedupe; reset on rehydrate so patterns are re-evaluated fresh (issue #1976 B1).',
+	executionEpisodeArmed:
+		'Arming requires an in-session execution attempt; a stale in_progress task must not arm a fresh session.',
+	prSubscriptions:
+		'The background poller re-registers from its own durable authority; the in-memory Map is not snapshot data.',
+	resumeModelAdvisoryDone:
+		'One-shot advisory guard scoped to THIS rehydration; a future rehydration must fire its own.',
+	configModelAdvisoryDone:
+		'One-shot advisory guard for this live session; nothing to resume.',
+	nonArchitectAdvisoryDone:
+		'One-shot UX advisory guard (issue #2493 K3); fires per live session.',
+};
+
+/**
+ * Reverse-direction parity guard: every `SerializedAgentSession` field must
+ * exist on `AgentSessionState`. The const assignment is what makes tsc
+ * actually enforce the conditional type — when a serialized field has no
+ * state counterpart, the type degrades to the error tuple below and assigning
+ * `true` fails `bun run typecheck` with that message.
+ */
+export type SerializedFieldsAllExistOnState =
+	Exclude<keyof SerializedAgentSession, keyof AgentSessionState> extends never
+		? true
+		: ['SerializedAgentSession field missing from AgentSessionState'];
+
+export const _serializedFieldsExistOnState: SerializedFieldsAllExistOnState = true;
+
+/**
  * Minimal interface for serialized InvocationWindow
  */
 export interface SerializedInvocationWindow {
