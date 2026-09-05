@@ -163,14 +163,131 @@ let onSubscriptionCreated:
 	| ((directory: string, record: PrSubscriptionRecord) => void)
 	| null = null;
 
+/** The lazy-start callback type (see `onSubscriptionCreated`). */
+export type PrSubscriptionCreatedCallback = (
+	directory: string,
+	record: PrSubscriptionRecord,
+) => void;
+
 /**
  * Register the lazy-start callback invoked after a successful subscription.
  * Called once during plugin init to wire the PR monitor worker lifecycle.
+ *
+ * Retain-and-invoke contract (issue #2472 W9): returns the PREVIOUSLY
+ * registered callback (null when none), so a plugin re-init that
+ * re-registers can retain and invoke the prior callback's cleanup instead of
+ * silently orphaning it. Overwriting semantics are otherwise unchanged.
  */
 export function setOnSubscriptionCreated(
-	callback: (directory: string, record: PrSubscriptionRecord) => void,
-): void {
+	callback: PrSubscriptionCreatedCallback,
+): PrSubscriptionCreatedCallback | null {
+	const previous = onSubscriptionCreated;
 	onSubscriptionCreated = callback;
+	return previous;
+}
+
+// ---------------------------------------------------------------------------
+// Per-project worker-handler registry + process dispatcher (PR #2588, review
+// finding 5 / PRR-011 — multi-project subscriber/worker ownership)
+// ---------------------------------------------------------------------------
+
+/**
+ * Live per-project lazy-start handlers, keyed by canonical project root
+ * (`canonicalRootKey` — realpath-resolved + Windows case-folded; the same
+ * identity `src/background/workspace-snapshot.ts` derives). Each server()
+ * instance registers ITS `ensurePrMonitorWorkerRunning` under its resolved
+ * directory; the process-wide dispatcher routes each subscription event to
+ * the handler that owns the event's project root. Ownership is per-instance:
+ * initializing project B never touches project A's entry — only the owning
+ * instance's cleanup (dispose / process exit) removes it.
+ */
+const prMonitorWorkerHandlers = new Map<
+	string,
+	PrSubscriptionCreatedCallback
+>();
+
+/** Bound on the per-project handler registry (Invariant 8 — FIFO eviction). */
+const MAX_PR_MONITOR_WORKER_HANDLERS = 64;
+
+/**
+ * Register (or replace) a directory's lazy PR-monitor worker-start handler.
+ * Keyed by canonical project root, so a re-init for the SAME root replaces
+ * that root's entry (plugin restart) while an instance for a DIFFERENT root
+ * coexists with the existing entries.
+ */
+export function registerPrMonitorWorkerHandler(
+	directory: string,
+	handler: PrSubscriptionCreatedCallback,
+): void {
+	const key = canonicalRootKey(directory);
+	while (
+		prMonitorWorkerHandlers.size >= MAX_PR_MONITOR_WORKER_HANDLERS &&
+		!prMonitorWorkerHandlers.has(key)
+	) {
+		const oldest = prMonitorWorkerHandlers.keys().next().value;
+		if (oldest === undefined) break;
+		prMonitorWorkerHandlers.delete(oldest);
+	}
+	prMonitorWorkerHandlers.set(key, handler);
+}
+
+/**
+ * Remove a directory's lazy-start handler — the owning instance's cleanup
+ * path (dispose or process-exit). When `expectedHandler` is provided, the
+ * entry is deleted only if it is still that instance's handler: a stale
+ * dispose arriving after a newer same-root instance re-registered must not
+ * strip the newer instance's registration. Removing a root that was never
+ * registered is a no-op.
+ */
+export function removePrMonitorWorkerHandler(
+	directory: string,
+	expectedHandler?: PrSubscriptionCreatedCallback,
+): void {
+	const key = canonicalRootKey(directory);
+	if (
+		expectedHandler !== undefined &&
+		prMonitorWorkerHandlers.get(key) !== expectedHandler
+	) {
+		return;
+	}
+	prMonitorWorkerHandlers.delete(key);
+}
+
+/**
+ * The process-wide subscription-created dispatcher: routes each event to the
+ * live handler that owns the event's project root. Deliberately stateless
+ * apart from the registry lookup, so it never re-binds routing to one
+ * instance's closures (the review-finding-5 defect: each init used to
+ * overwrite the single module callback with a closure over the NEWEST
+ * instance's worker starter, stealing every earlier project's events). A
+ * directory with no registered handler is a documented silent no-op — e.g. a
+ * subscription created by a direct-CLI/test caller while no server()
+ * instance owns that root.
+ */
+function dispatchPrMonitorWorkerHandler(
+	directory: string,
+	record: PrSubscriptionRecord,
+): void {
+	const handler = prMonitorWorkerHandlers.get(canonicalRootKey(directory));
+	if (handler) handler(directory, record);
+}
+
+/**
+ * Install the per-project dispatcher as the module's single
+ * subscription-created callback — once per process (identity guard; a later
+ * init call is a no-op while the dispatcher is still installed). The
+ * dispatcher stays installed for the process lifetime; each server()
+ * instance owns only its registry entry. If an embedder or test replaced the
+ * module callback, the next init re-installs the dispatcher.
+ */
+export function ensurePrSubscriptionDispatcherInstalled(): void {
+	if (onSubscriptionCreated === dispatchPrMonitorWorkerHandler) return;
+	const previous = setOnSubscriptionCreated(dispatchPrMonitorWorkerHandler);
+	if (previous !== null) {
+		log(
+			'[pr-monitor] superseded a previous on-subscription-created callback (installing the per-project dispatcher)',
+		);
+	}
 }
 
 export type PrSubscriptionStatus = 'active' | 'removed' | 'expired';

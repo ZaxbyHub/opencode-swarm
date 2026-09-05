@@ -139,7 +139,10 @@ export const RESOLVER_ALLOWLIST: readonly string[] = [
 export type ViolationForm =
 	| 'first-arg'
 	| 'array-first-element'
-	| 'executable-property';
+	| 'executable-property'
+	| 'aliased-callee'
+	| 'wrapper-callee'
+	| 'seed-helper-call';
 
 export interface BareSpawnViolation {
 	file: string;
@@ -148,6 +151,17 @@ export interface BareSpawnViolation {
 	executable: string;
 	snippet: string;
 }
+
+/**
+ * Issue #2476 AC4 / #2266 — `__seed*ForTests` helpers pin their resolver to
+ * ANY path with ZERO probes, bypassing candidate ordering, the absoluteness
+ * check, and the version probe in one call. Safe today only by convention
+ * (no src/ caller exists); this predicate makes that convention mechanical:
+ * any CALL of a `__seed*ForTests` symbol under non-test `src/` is a
+ * violation (the definitions themselves are function declarations, never
+ * calls, and doc comments are not AST — both stay naturally exempt).
+ */
+export const SEED_HELPER_CALLEE_PATTERN = /^__seed[A-Za-z0-9]*ForTests$/;
 
 function calleeName(expr: ts.LeftHandSideExpression): string | undefined {
 	if (ts.isIdentifier(expr)) return expr.text;
@@ -188,6 +202,21 @@ export function scanSourceForBareSpawn(
 		return (sourceLines[lineOf(pos) - 1] ?? '').trim();
 	}
 
+	/**
+	 * Issue #2476 AC4 pass 2 (source issue #2266 review): three blind spots
+	 * this visitor closes on top of forms 1/2/3 —
+	 *
+	 *   4. ALIASED CALLEE — `getExecFileAsync()('git', ...)`. The callee is
+	 *      itself a CallExpression, so `calleeName()` returns undefined and
+	 *      form 1 never fires. Detected here by shape: callee is a call AND
+	 *      the first argument is a flagged executable literal.
+	 *   5. SEED-HELPER CALL — any call whose callee identifier matches
+	 *      SEED_HELPER_CALLEE_PATTERN (see that constant).
+	 *
+	 * Form 6 (WRAPPER CALLEE) needs file-level context (the set of local
+	 * wrapper function names) and is handled in a second pass inside
+	 * `scanSourceForBareSpawn`, not here.
+	 */
 	function visit(node: ts.Node): void {
 		if (ts.isCallExpression(node)) {
 			const name = calleeName(node.expression);
@@ -244,6 +273,35 @@ export function scanSourceForBareSpawn(
 				}
 			}
 
+			// Form 4: aliased callee — callee is itself a call
+			// (`getExecFileAsync()('git', ...)`); `calleeName()` cannot see it.
+			if (
+				name === undefined &&
+				ts.isCallExpression(node.expression) &&
+				args.length > 0 &&
+				ts.isStringLiteralLike(args[0]) &&
+				FLAGGED_EXECUTABLES.has(args[0].text)
+			) {
+				violations.push({
+					file: relPath,
+					line: lineOf(args[0].getStart(sf)),
+					form: 'aliased-callee',
+					executable: args[0].text,
+					snippet: snippetAt(args[0].getStart(sf)),
+				});
+			}
+
+			// Form 5: seed-helper call (any callee matching the pattern).
+			if (name !== undefined && SEED_HELPER_CALLEE_PATTERN.test(name)) {
+				violations.push({
+					file: relPath,
+					line: lineOf(node.expression.getStart(sf)),
+					form: 'seed-helper-call',
+					executable: name,
+					snippet: snippetAt(node.expression.getStart(sf)),
+				});
+			}
+
 			// Form 3: callee-independent — see the DEVIATION note atop this file.
 			for (const arg of args) {
 				if (!ts.isObjectLiteralExpression(arg)) continue;
@@ -266,7 +324,113 @@ export function scanSourceForBareSpawn(
 	}
 
 	visit(sf);
+
+	// Form 6 (second pass — needs the file's local declarations): a WRAPPER is
+	// a file-local `function` declaration or `const <name> = <arrow/function
+	// expression>` whose body contains a SPAWN_FAMILY call whose FIRST
+	// ARGUMENT is exactly the wrapper's first parameter identifier. Calls to
+	// such a wrapper name with a flagged executable string literal as the
+	// first argument are violations (`spawnSyncWithTransientRetry('git', ...)`
+	// — the src/git/pr.ts #2261 blind spot). ONE HOP, same file only: no
+	// transitive wrapper chains and no cross-file resolution — a rung-1
+	// ratchet limitation documented here deliberately. The param-position
+	// rule keeps availability probes (inner spawn of an unrelated literal,
+	// e.g. `spawnSync('where', ...)`) out of the wrapper set.
+	const wrappers = new Set<string>();
+	for (const stmt of sf.statements) {
+		let name: string | undefined;
+		let body: ts.Node | undefined;
+		let firstParam: ts.Identifier | undefined;
+		if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
+			name = stmt.name.text;
+			body = stmt.body;
+			firstParam = stmt.parameters[0]?.name as ts.Identifier | undefined;
+		} else if (
+			ts.isVariableStatement(stmt) &&
+			stmt.declarationList.declarations.length === 1
+		) {
+			const decl = stmt.declarationList.declarations[0];
+			const init = decl.initializer;
+			if (
+				decl.name &&
+				ts.isIdentifier(decl.name) &&
+				init &&
+				(ts.isArrowFunction(init) || ts.isFunctionExpression(init)) &&
+				init.body
+			) {
+				name = decl.name.text;
+				body = init.body;
+				firstParam = init.parameters[0]?.name as ts.Identifier | undefined;
+			}
+		}
+		if (
+			name &&
+			body &&
+			firstParam &&
+			ts.isIdentifier(firstParam) &&
+			containsSpawnForwardingFirstParam(body, firstParam.text)
+		) {
+			wrappers.add(name);
+		}
+	}
+	if (wrappers.size > 0) {
+		const visitWrappers = (node: ts.Node): void => {
+			if (ts.isCallExpression(node)) {
+				const name = calleeName(node.expression);
+				const first = node.arguments[0];
+				if (
+					name !== undefined &&
+					wrappers.has(name) &&
+					first &&
+					ts.isStringLiteralLike(first) &&
+					FLAGGED_EXECUTABLES.has(first.text)
+				) {
+					violations.push({
+						file: relPath,
+						line: lineOf(first.getStart(sf)),
+						form: 'wrapper-callee',
+						executable: first.text,
+						snippet: snippetAt(first.getStart(sf)),
+					});
+				}
+			}
+			ts.forEachChild(node, visitWrappers);
+		};
+		visitWrappers(sf);
+	}
 	return violations;
+}
+
+/**
+ * True when `body` contains a SPAWN_FAMILY call whose first argument is the
+ * identifier `firstParamName` — the forwarding shape that makes the outer
+ * function a spawn wrapper.
+ */
+function containsSpawnForwardingFirstParam(
+	body: ts.Node,
+	firstParamName: string,
+): boolean {
+	let found = false;
+	const walk = (node: ts.Node): void => {
+		if (found) return;
+		if (ts.isCallExpression(node)) {
+			const name = calleeName(node.expression);
+			const first = node.arguments[0];
+			if (
+				name !== undefined &&
+				SPAWN_FAMILY.has(name) &&
+				first &&
+				ts.isIdentifier(first) &&
+				first.text === firstParamName
+			) {
+				found = true;
+				return;
+			}
+		}
+		ts.forEachChild(node, walk);
+	};
+	walk(body);
+	return found;
 }
 
 /**
@@ -313,7 +477,21 @@ function formatViolation(v: BareSpawnViolation): string {
 			? 'first positional argument'
 			: v.form === 'array-first-element'
 				? 'first element of the first-argument array literal'
-				: '"executable:" property of an options object literal';
+				: v.form === 'aliased-callee'
+					? 'first argument of an aliased-callee spawn (callee itself a call)'
+					: v.form === 'wrapper-callee'
+						? 'first argument of a call to a file-local spawn wrapper'
+						: v.form === 'seed-helper-call'
+							? `call to the TEST-ONLY seed helper '${v.executable}'`
+							: '"executable:" property of an options object literal';
+	if (v.form === 'seed-helper-call') {
+		return (
+			`${v.file}:${v.line}: ${formLabel}. ` +
+			'`__seed*ForTests` bypasses resolver ordering, absoluteness, and probing; ' +
+			'it must never be called from src/ production code (issue #2266/#2476). ' +
+			`Line: ${v.snippet}`
+		);
+	}
 	return (
 		`${v.file}:${v.line}: bare-name spawn of '${v.executable}' as the ${formLabel}. ` +
 		`Route through ${RESOLVER_ALLOWLIST[0]}'s resolver instead of spawning a bare name. ` +
@@ -333,7 +511,7 @@ export function collectBareSpawnErrors(root: string = REPO_ROOT): CollectResult 
 	let skippedAllowlisted = 0;
 
 	for (const file of walkTsFiles(srcDir)) {
-		if (file.endsWith('.test.ts')) continue;
+		if (file.endsWith('.test.ts') || file.endsWith('.spec.ts')) continue;
 		const rel = path.relative(root, file).replace(/\\/g, '/');
 		if (RESOLVER_ALLOWLIST.includes(rel)) {
 			skippedAllowlisted++;

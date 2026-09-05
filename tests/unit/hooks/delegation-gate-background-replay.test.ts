@@ -12,6 +12,7 @@ import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { resetStandardWorktreeIsolationState } from '../../../src/hooks/delegation-gate/worktree-isolation';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { canonicalRootKey } from '../../../src/utils/canonical-root';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
@@ -102,7 +103,8 @@ describe('background coder toolAfter replay ownership', () => {
 		);
 		await hook.toolAfter(input, output);
 		const first = findByCorrelationId(directory, 'coder-session');
-		expect(first?.workspace?.directory).toBe(directory);
+		// Snapshot directory identity is the canonical root key (win32 case-folded).
+		expect(first?.workspace?.directory).toBe(canonicalRootKey(directory));
 		expect(first?.taskChangeContext?.declaredFiles).toEqual(['src/example.ts']);
 		expect(first?.coderReservationId).toBeTruthy();
 		expect(ledgerLineCount(directory)).toBe(1);

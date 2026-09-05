@@ -22,8 +22,10 @@ import {
 } from './background';
 import { createBackgroundCompletionObserver } from './background/completion-observer.js';
 import {
+	ensurePrSubscriptionDispatcherInstalled,
 	listActive as listActiveSubscriptions,
-	setOnSubscriptionCreated,
+	registerPrMonitorWorkerHandler,
+	removePrMonitorWorkerHandler,
 } from './background/pr-subscriptions';
 import {
 	agentHasSwarmCommandTool,
@@ -190,6 +192,10 @@ import {
 } from './hooks/skill-propagation-gate.js';
 import { createSlopDetectorHook } from './hooks/slop-detector';
 import { createSteeringConsumedHook } from './hooks/steering-consumed.js';
+// Direct (non-barrel) import: the hooks barrel intentionally re-exports only
+// the hook factories; the dispose-fence helper is a lifecycle utility used
+// solely by this file's dispose block (PR #2588 bot finding 7).
+import { cancelDeferredMaintenanceScans } from './hooks/system-enhancer';
 import {
 	createTrajectoryLoggerHook,
 	recordDeniedToolCall,
@@ -203,6 +209,7 @@ import {
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
 import type { MemoryConfig as RuntimeMemoryConfig } from './memory/config.js';
+import { evictAndClose } from './memory/provider-pool.js';
 import {
 	advancePendingTaskModelRoute,
 	bindPendingTaskModelRouteChild,
@@ -305,6 +312,91 @@ export function capSessionMap<K, V>(
 		const oldest = map.keys().next().value;
 		if (oldest === undefined || oldest === justInserted) break;
 		map.delete(oldest);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Process-exit cleanup registry (issue #2472 W9 — lifecycle ownership)
+// ---------------------------------------------------------------------------
+//
+// Defect class being closed: every server() instance registered its own
+// 'exit' listener directly (process.on with the 'exit' event). Plugin re-init
+// in one process accumulated one 'exit' listener per init (never removed),
+// dispose left stale listeners registered against torn-down closures, and
+// nothing covered SIGINT/SIGTERM. The registry below gives each instance its
+// own token-keyed slot; the process-level dispatcher is registered exactly
+// once per process and iterates the registry. A disposing instance removes
+// itself, and the last one out removes the shared process listeners.
+
+/** Per-instance exit cleanup, keyed by an instance token (directory + counter). */
+type InstanceExitCleanup = () => void;
+const instanceExitCleanups = new Map<string, InstanceExitCleanup>();
+/** Disambiguates tokens when two instances share one project directory. */
+let instanceExitCleanupCounter = 0;
+/** Once-guard: the process-level 'exit' + signal registration runs at most once. */
+let processExitCleanupRegistered = false;
+/** Signal-handler pairs registered by the once-guard, for later removal. */
+let processSignalCleanupHandlers: Array<{
+	signal: NodeJS.Signals;
+	handler: () => void;
+}> = [];
+/** Re-entrancy guard: a signal storm must not loop the cleanup path. */
+let signalExitCleanupInFlight = false;
+
+/** 'exit' dispatcher: run every registered per-instance cleanup, best-effort. */
+function runInstanceExitCleanups(): void {
+	for (const cleanup of instanceExitCleanups.values()) {
+		try {
+			cleanup();
+		} catch {
+			// best-effort by contract: one failing cleanup must not block the rest
+		}
+	}
+}
+
+/**
+ * Best-effort SIGINT/SIGTERM coverage (issue #2472 W9): run the registered
+ * cleanups synchronously, then restore default behavior by removing this
+ * handler and re-raising the signal so the process terminates exactly as it
+ * would have without the plugin. Deliberately minimal and re-entrancy-guarded
+ * — a plugin must not trap the host process.
+ */
+function makeSignalExitCleanupHandler(signal: NodeJS.Signals): () => void {
+	const handler = (): void => {
+		if (signalExitCleanupInFlight) return; // re-entrancy guard
+		signalExitCleanupInFlight = true;
+		try {
+			runInstanceExitCleanups();
+		} catch {
+			// best-effort: cleanup must never block the default disposition
+		} finally {
+			// Restore default behavior: remove ourselves, then re-raise.
+			process.off(signal, handler);
+			process.kill(process.pid, signal);
+		}
+	};
+	return handler;
+}
+
+/**
+ * Register the shared process-exit dispatcher and best-effort SIGINT/SIGTERM
+ * handlers exactly once per process (the once-guard below). server() instances
+ * never touch process listeners directly — they add per-instance cleanups to
+ * the registry, and only the last disposing instance removes these shared
+ * listeners (see the dispose hook).
+ */
+function registerProcessExitCleanupDispatcher(): void {
+	if (processExitCleanupRegistered) {
+		return;
+	}
+	processExitCleanupRegistered = true;
+	process.on('exit', runInstanceExitCleanups);
+	processSignalCleanupHandlers = [
+		{ signal: 'SIGINT', handler: makeSignalExitCleanupHandler('SIGINT') },
+		{ signal: 'SIGTERM', handler: makeSignalExitCleanupHandler('SIGTERM') },
+	];
+	for (const { signal, handler } of processSignalCleanupHandlers) {
+		process.on(signal, handler);
 	}
 }
 
@@ -2439,9 +2531,19 @@ async function initializeOpenCodeSwarm(
 
 	// Wire the lazy-start callback into the subscription store so the
 	// worker starts automatically when a new PR is subscribed.
-	setOnSubscriptionCreated((directory: string, _record) => {
-		ensurePrMonitorWorkerRunning(directory);
-	});
+	// Multi-project ownership (PR #2588, review finding 5 / PRR-011): a single
+	// process-wide DISPATCHER is installed once per process
+	// (ensurePrSubscriptionDispatcherInstalled — identity-guarded), routing
+	// each subscription event to the live server() instance that owns the
+	// event's project root via the registry in pr-subscriptions.ts. The old
+	// wiring tore down the previous instance's PR event subscribers at init
+	// and re-registered a callback closing over THIS instance's worker
+	// starter, so initializing project B killed project A's subscribers and
+	// stole A's subscription events. Ownership is now per-instance: B's init
+	// leaves A's registry entry untouched; each instance's cleanupAutomation
+	// removes only its own entry.
+	ensurePrSubscriptionDispatcherInstalled();
+	registerPrMonitorWorkerHandler(ctx.directory, ensurePrMonitorWorkerRunning);
 
 	// Register PR event subscribers for event delivery to active sessions
 	let prEventCleanup: (() => void) | null = null;
@@ -2513,11 +2615,25 @@ async function initializeOpenCodeSwarm(
 		});
 	}
 
-	// Cleanup: stop automation manager and workers on process exit
+	// Cleanup: stop automation manager and workers on process exit.
+	// Idempotent (issue #2472 W9): the per-instance `cleaned` flag is set
+	// BEFORE any teardown step, so a dispose/'exit' interleaving can never
+	// double-stop workers or double-run the durable-state closes.
+	let automationCleaned = false;
 	const cleanupAutomation = () => {
+		if (automationCleaned) return;
+		automationCleaned = true;
 		automationManager?.stop();
 		prMonitorWorker?.stop();
 		planSyncWorker?.stop();
+		// Remove THIS instance's per-project worker-handler registry entry
+		// (PR #2588, review finding 5): the dispatcher routes subscription
+		// events per canonical root, so only this project's entry may go —
+		// other live projects' entries must survive this instance's teardown.
+		// The expected-handler guard makes a stale dispose arriving after a
+		// same-root re-init a no-op instead of stripping the newer
+		// instance's registration (final-critic follow-up, this round).
+		removePrMonitorWorkerHandler(ctx.directory, ensurePrMonitorWorkerRunning);
 		prEventCleanup?.();
 		prEventDelivery?.unregisterPrEventDelivery();
 		markSnapshotCoordinationClosing(ctx.directory);
@@ -2536,7 +2652,12 @@ async function initializeOpenCodeSwarm(
 			// best-effort by contract
 		}
 	};
-	process.on('exit', cleanupAutomation);
+	// Register THIS instance's cleanup in the shared once-guarded process
+	// dispatcher's registry (issue #2472 W9) — never process.on directly, which
+	// accumulated one 'exit' listener per init and never removed any.
+	const instanceExitCleanupToken = `${ctx.directory}#${++instanceExitCleanupCounter}`;
+	registerProcessExitCleanupDispatcher();
+	instanceExitCleanups.set(instanceExitCleanupToken, cleanupAutomation);
 
 	// v6.7 Task 5.7: Config Doctor - run on startup if automation flags permit
 	// Runs in background-safe way (non-blocking, no errors propagate)
@@ -2650,6 +2771,172 @@ async function initializeOpenCodeSwarm(
 		},
 	});
 
+	// Named transform handlers (issue #2472 W5): every element passed into the
+	// two composeHandlers chains below is a NAMED handler (identifier reference
+	// or named function expression). Anonymous inline arrows made safeHook's
+	// failure log print "unknown" (`fn.name || 'unknown'`), so a failing stage
+	// could not be attributed. Bodies are byte-identical to the previous inline
+	// arrows — same order, same capture, same behavior; only the binding moved.
+
+	/**
+	 * messages.transform stage: delegation-ledger resume + [DIAG] start marker.
+	 * Injects the delegation summary when an architect session resumes.
+	 */
+	const messagesTransformDelegationLedgerStep = (
+		_input: unknown,
+		output: unknown,
+	): Promise<void> => {
+		if (process.env.DEBUG_SWARM)
+			// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
+			console.error(`[DIAG] messagesTransform START`);
+		// (#1849) The SDK messages.transform input is `{}` — sessionID is
+		// NOT on input. Recover it from output.messages[].info.sessionID.
+		const mctx = resolveMessageTransformContext(output as MessageArrayLike);
+		if (mctx.sessionID) {
+			const archAgent = swarmState.activeAgent.get(mctx.sessionID);
+			const archSession = swarmState.agentSessions.get(mctx.sessionID);
+			const agentName = archAgent ?? archSession?.agentName ?? '';
+			if (stripKnownSwarmPrefix(agentName) === ORCHESTRATOR_NAME) {
+				try {
+					delegationLedgerHook.onArchitectResume(mctx.sessionID);
+				} catch {
+					/* non-blocking */
+				}
+			}
+		}
+		return Promise.resolve();
+	};
+
+	/**
+	 * messages.transform stage: scan latest architect-authored message for
+	 * KNOWLEDGE_APPLIED / KNOWLEDGE_IGNORED / KNOWLEDGE_CONTRADICTED /
+	 * KNOWLEDGE_VIOLATED markers and record each via the dedup-aware path.
+	 * Best-effort; never throws.
+	 */
+	const messagesTransformKnowledgeApplicationScanStep = (
+		_input: unknown,
+		output: unknown,
+	): Promise<void> => {
+		try {
+			// (#1849) sessionID from output.messages[].info, not input.
+			const mctx = resolveMessageTransformContext(output as MessageArrayLike);
+			return knowledgeApplicationTransformScan(
+				ctx.directory,
+				output as {
+					messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
+				},
+				mctx.sessionID,
+			);
+		} catch {
+			return Promise.resolve();
+		}
+	};
+
+	/**
+	 * messages.transform stage: scan for skill propagation warnings and
+	 * compliance tracking.
+	 */
+	const messagesTransformSkillPropagationScanStep = (
+		_input: unknown,
+		output: unknown,
+	): Promise<void> => {
+		try {
+			if (!skillPropagationConfig.enabled) {
+				return Promise.resolve();
+			}
+			// (#1849) sessionID from output.messages[].info, not input.
+			const mctx = resolveMessageTransformContext(output as MessageArrayLike);
+			return skillPropagationTransformScan(
+				ctx.directory,
+				output as {
+					messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
+				},
+				mctx.sessionID,
+				skillPropagationConfig,
+			);
+		} catch {
+			return Promise.resolve();
+		}
+	};
+
+	/**
+	 * messages.transform final structure-mutating stage: materialize any
+	 * remaining role:'system' entries into user-role guidance carriers (issue
+	 * #2526). The pinned host's converter drops role:'system' entries on this
+	 * surface and throws on flat entries without `parts`, so every plugin
+	 * producer now splices carriers directly and this boundary converts — or
+	 * drops — anything that still arrives as a system entry from an
+	 * un-migrated or third-party injector. Handles both the production
+	 * `{info,parts}` shape and the flat `{role,content}` shape (issue #1778
+	 * H1). MUST mutate `output.messages` IN PLACE (issue #1619): the host
+	 * discards this hook's return value and afterwards reads its own local
+	 * message array — a rebind never reaches the model. See
+	 * `materializeSystemGuidanceInPlace`.
+	 */
+	const messagesTransformSystemGuidanceMaterializeStep = (
+		_input: unknown,
+		output: {
+			messages?: import('./hooks/messages-transform.js').Message[];
+		},
+	): Promise<void> => {
+		if (Array.isArray(output.messages)) {
+			materializeSystemGuidanceInPlace(output.messages);
+		}
+		if (process.env.DEBUG_SWARM)
+			// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
+			console.error(`[DIAG] messagesTransform DONE`);
+		return Promise.resolve();
+	};
+
+	/** system.transform stage: [DIAG] start marker. */
+	const systemTransformStartDiagnostic = async (
+		_input: unknown,
+		_output: unknown,
+	): Promise<void> => {
+		if (process.env.DEBUG_SWARM)
+			// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
+			console.error(`[DIAG] systemTransform START`);
+	};
+
+	/** system.transform stage: [DIAG] marker after the system enhancer. */
+	const systemTransformEnhancerDoneDiagnostic = async (
+		_input: unknown,
+		_output: unknown,
+	): Promise<void> => {
+		if (process.env.DEBUG_SWARM)
+			// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
+			console.error(`[DIAG] systemTransform enhancer DONE`);
+	};
+
+	/** system.transform stage: heartbeat, throttled to 30s per session. */
+	const systemTransformHeartbeatStep = (
+		input: unknown,
+		_output: unknown,
+	): Promise<void> => {
+		try {
+			const { sessionID } = input as { sessionID?: string };
+			if (!sessionID) return Promise.resolve();
+			const lastTime = _heartbeatTimers.get(sessionID);
+			if (Date.now() - (lastTime ?? 0) > 30_000) {
+				_heartbeatTimers.set(sessionID, Date.now());
+				// FIFO-cap the KEY count to bound memory (mirrors
+				// latestAssistantUsageBySession). Values are timestamps, so no
+				// clearInterval/clearTimeout is needed on eviction. The
+				// just-inserted key guard (#2482 / #2244) keeps the fresh
+				// entry from evicting itself at the cap.
+				capSessionMap(
+					_heartbeatTimers,
+					MAX_TRACKED_HEARTBEAT_SESSIONS,
+					sessionID,
+				);
+				telemetry.heartbeat(sessionID);
+			}
+		} catch {
+			// never throws
+		}
+		return Promise.resolve();
+	};
+
 	return {
 		name: 'opencode-swarm',
 
@@ -2659,7 +2946,50 @@ async function initializeOpenCodeSwarm(
 		// with the process-exit close in `cleanupAutomation` as the backstop.
 		// Inert if never called, correct if called: flush queued group-commit
 		// writes, TRUNCATE→PASSIVE checkpoint, close the canonical handle.
+		// Issue #2472 W9 extended it to full lifecycle ownership: stop the
+		// workers via the shared idempotent cleanup, remove this instance from
+		// the exit-cleanup registry (removing the shared process listeners when
+		// the registry empties), and evict this project's scoped pooled
+		// provider handles.
 		dispose: async (): Promise<void> => {
+			// PR #2588 bot finding 7 (#2472 W4): fence this project's deferred
+			// maintenance scans (doc-index directory walk / dark-matter git
+			// scan + `.swarm` writes, scheduled by the system-enhancer
+			// transform that was created for ctx.directory). A pending or
+			// in-flight background task must not fire into — or keep writing
+			// artifacts for — a directory whose plugin instance is being torn
+			// down. Best-effort and fail-open: cancellation is bookkeeping
+			// only and must never block teardown; a future re-init for the
+			// same directory (new system-enhancer instance) un-serves it.
+			try {
+				cancelDeferredMaintenanceScans(ctx.directory);
+			} catch (err) {
+				log('dispose deferred-scan cancellation failed (non-fatal)', {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+			// Stop automation manager / pr monitor / plan sync workers, PR event
+			// subscribers + delivery, and the durable snapshot/db state.
+			// Idempotent: safe even if the 'exit' dispatcher already ran it.
+			cleanupAutomation();
+			// Remove THIS instance's registration; when the registry empties,
+			// remove the shared process listeners so repeated init/dispose
+			// cycles cannot accumulate them.
+			instanceExitCleanups.delete(instanceExitCleanupToken);
+			if (instanceExitCleanups.size === 0 && processExitCleanupRegistered) {
+				process.off('exit', runInstanceExitCleanups);
+				for (const { signal, handler } of processSignalCleanupHandlers) {
+					process.off(signal, handler);
+				}
+				processSignalCleanupHandlers = [];
+				processExitCleanupRegistered = false;
+			}
+			// Scoped provider eviction (issue #2472 W9): force-close only THIS
+			// project's pooled memory provider handles via evictAndClose. Never
+			// the global pool-clearing variant — the module-level pool is shared
+			// process-wide and other projects' handles must survive this
+			// instance's teardown.
+			evictAndClose(ctx.directory);
 			try {
 				await closeSnapshotCoordinationInitialization(ctx.directory);
 				closeGroupCommitWriter(ctx.directory);
@@ -3544,29 +3874,7 @@ async function initializeOpenCodeSwarm(
 		'experimental.chat.messages.transform': composeHandlers(
 			...[
 				// Delegation ledger: inject summary when architect session resumes
-				(_input: unknown, output: unknown): Promise<void> => {
-					if (process.env.DEBUG_SWARM)
-						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
-						console.error(`[DIAG] messagesTransform START`);
-					// (#1849) The SDK messages.transform input is `{}` — sessionID is
-					// NOT on input. Recover it from output.messages[].info.sessionID.
-					const mctx = resolveMessageTransformContext(
-						output as MessageArrayLike,
-					);
-					if (mctx.sessionID) {
-						const archAgent = swarmState.activeAgent.get(mctx.sessionID);
-						const archSession = swarmState.agentSessions.get(mctx.sessionID);
-						const agentName = archAgent ?? archSession?.agentName ?? '';
-						if (stripKnownSwarmPrefix(agentName) === ORCHESTRATOR_NAME) {
-							try {
-								delegationLedgerHook.onArchitectResume(mctx.sessionID);
-							} catch {
-								/* non-blocking */
-							}
-						}
-					}
-					return Promise.resolve();
-				},
+				messagesTransformDelegationLedgerStep,
 				pipelineHook['experimental.chat.messages.transform'],
 				contextBudgetHandler,
 				initOrphanRecoveryAdvisoryHook.messagesTransform,
@@ -3582,45 +3890,9 @@ async function initializeOpenCodeSwarm(
 				// / KNOWLEDGE_IGNORED / KNOWLEDGE_CONTRADICTED /
 				// KNOWLEDGE_VIOLATED markers and record
 				// each via the dedup-aware path. Best-effort; never throws.
-				(_input: unknown, output: unknown): Promise<void> => {
-					try {
-						// (#1849) sessionID from output.messages[].info, not input.
-						const mctx = resolveMessageTransformContext(
-							output as MessageArrayLike,
-						);
-						return knowledgeApplicationTransformScan(
-							ctx.directory,
-							output as {
-								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
-							},
-							mctx.sessionID,
-						);
-					} catch {
-						return Promise.resolve();
-					}
-				},
+				messagesTransformKnowledgeApplicationScanStep,
 				// v2: scan for skill propagation warnings and compliance tracking
-				(_input: unknown, output: unknown): Promise<void> => {
-					try {
-						if (!skillPropagationConfig.enabled) {
-							return Promise.resolve();
-						}
-						// (#1849) sessionID from output.messages[].info, not input.
-						const mctx = resolveMessageTransformContext(
-							output as MessageArrayLike,
-						);
-						return skillPropagationTransformScan(
-							ctx.directory,
-							output as {
-								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
-							},
-							mctx.sessionID,
-							skillPropagationConfig,
-						);
-					} catch {
-						return Promise.resolve();
-					}
-				},
+				messagesTransformSkillPropagationScanStep,
 				// Final structure-mutating handler: materialize any remaining
 				// role:'system' entries into user-role guidance carriers (issue
 				// #2526). The pinned host's converter drops role:'system' entries
@@ -3635,20 +3907,7 @@ async function initializeOpenCodeSwarm(
 				// discards this hook's return value and afterwards reads its own
 				// local message array — a rebind never reaches the model. See
 				// `materializeSystemGuidanceInPlace`.
-				(
-					_input: unknown,
-					output: {
-						messages?: import('./hooks/messages-transform.js').Message[];
-					},
-				): Promise<void> => {
-					if (Array.isArray(output.messages)) {
-						materializeSystemGuidanceInPlace(output.messages);
-					}
-					if (process.env.DEBUG_SWARM)
-						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
-						console.error(`[DIAG] messagesTransform DONE`);
-					return Promise.resolve();
-				},
+				messagesTransformSystemGuidanceMaterializeStep,
 				// #2107 §3: final context accounting. Runs AFTER consolidation
 				// (which remains the last STRUCTURE-mutating handler). Read-mostly:
 				// measures the final model-visible surface once, resolves the real
@@ -3671,41 +3930,12 @@ async function initializeOpenCodeSwarm(
 		// Inject system prompt enhancements + phase monitor (when phase_preflight or knowledge enabled)
 		'experimental.chat.system.transform': composeHandlers(
 			...([
-				async (_input: unknown, _output: unknown): Promise<void> => {
-					if (process.env.DEBUG_SWARM)
-						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
-						console.error(`[DIAG] systemTransform START`);
-				},
+				systemTransformStartDiagnostic,
 				systemEnhancerHook['experimental.chat.system.transform'],
-				async (_input: unknown, _output: unknown): Promise<void> => {
-					if (process.env.DEBUG_SWARM)
-						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
-						console.error(`[DIAG] systemTransform enhancer DONE`);
-				},
+				systemTransformEnhancerDoneDiagnostic,
 				contextCapsuleInjectHook['experimental.chat.system.transform'],
 				// Heartbeat: throttled to 30s per session
-				(input: unknown, _output: unknown): Promise<void> => {
-					try {
-						const { sessionID } = input as { sessionID?: string };
-						if (!sessionID) return Promise.resolve();
-						const lastTime = _heartbeatTimers.get(sessionID);
-						if (Date.now() - (lastTime ?? 0) > 30_000) {
-							_heartbeatTimers.set(sessionID, Date.now());
-							// FIFO-cap the KEY count to bound memory (mirrors
-							// latestAssistantUsageBySession). Values are timestamps, so no
-							// clearInterval/clearTimeout is needed on eviction.
-							capSessionMap(
-								_heartbeatTimers,
-								MAX_TRACKED_HEARTBEAT_SESSIONS,
-								sessionID,
-							);
-							telemetry.heartbeat(sessionID);
-						}
-					} catch {
-						// never throws
-					}
-					return Promise.resolve();
-				},
+				systemTransformHeartbeatStep,
 				automationConfig.capabilities?.phase_preflight === true &&
 				preflightTriggerManager
 					? createPhaseMonitorHook(

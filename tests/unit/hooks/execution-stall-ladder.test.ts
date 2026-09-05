@@ -34,8 +34,8 @@ import {
 const TEST_DIR = path.join(os.tmpdir(), 'stall-ladder-fixture');
 
 const realNow = _internals.now;
-const realCapture = _internals.captureWorkspaceSnapshot;
-const realChanged = _internals.changedFilesSinceSnapshot;
+const realCapture = _internals.captureWorkspaceSnapshotAsync;
+const realChanged = _internals.changedFilesSinceSnapshotAsync;
 const realEmit = telemetryInternals.emit;
 
 let clock = 1_700_000_000_000;
@@ -48,10 +48,10 @@ beforeEach(() => {
 	clock = 1_700_000_000_000;
 	events = [];
 	_internals.now = () => clock;
-	_internals.captureWorkspaceSnapshot = mock(
+	_internals.captureWorkspaceSnapshotAsync = mock(
 		() => ({ gitHead: 'HEAD0', changedFiles: [] }) as never,
 	) as never;
-	_internals.changedFilesSinceSnapshot = mock(() => []) as never;
+	_internals.changedFilesSinceSnapshotAsync = mock(async () => []) as never;
 	telemetryInternals.emit = ((
 		event: TelemetryEvent,
 		data: Record<string, unknown>,
@@ -62,8 +62,8 @@ beforeEach(() => {
 
 afterEach(() => {
 	_internals.now = realNow;
-	_internals.captureWorkspaceSnapshot = realCapture;
-	_internals.changedFilesSinceSnapshot = realChanged;
+	_internals.captureWorkspaceSnapshotAsync = realCapture;
+	_internals.changedFilesSinceSnapshotAsync = realChanged;
 	telemetryInternals.emit = realEmit;
 	_test_exports.reset();
 	resetSwarmState();
@@ -307,7 +307,7 @@ describe('#2063 B5 — hard rung', () => {
 });
 
 describe('#2063 B5 — composite lock (round-2 rev6)', () => {
-	test('with the hard rung active AND another gate denying Task, update_task_status and advisory surfacing still pass', () => {
+	test('with the hard rung active AND another gate denying Task, update_task_status and advisory surfacing still pass', async () => {
 		const sessionID = 'composite';
 		driveTo(sessionID, DEFAULT_EXECUTION_STALL_STOP_CALLS);
 
@@ -331,7 +331,7 @@ describe('#2063 B5 — composite lock (round-2 rev6)', () => {
 		).not.toThrow();
 		// … and it is a progress event, which clears the hard rung so the session
 		// is not deadlocked between two gates.
-		recordExecutionStallToolAfter({
+		await recordExecutionStallToolAfter({
 			sessionID,
 			tool: 'update_task_status',
 			callID: 'uts-1',

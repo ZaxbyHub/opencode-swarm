@@ -173,7 +173,19 @@ describe('git.binary provenance — project config is untrusted', () => {
 		const config = loadPluginConfig(projectDir);
 
 		expect(config.git?.binary).toBeUndefined();
-		expect(refusalWarnings().length).toBe(1);
+		// #2476 AC2: deepMerge itself now refuses the payload, so the ENTIRE
+		// project config is dropped (strictly stronger than the old
+		// provenance neutralization of the merged prototype). The refusal is
+		// surfaced as the SECURITY advisory naming the dangerous key.
+		const warnings = getDeferredWarnings();
+		expect(
+			warnings.some(
+				(w) =>
+					w.includes('SECURITY') &&
+					w.includes('Ignoring the entire project config') &&
+					w.includes('__proto__'),
+			),
+		).toBe(true);
 	});
 
 	it('refuses a git.binary reachable only through the git object own prototype', () => {

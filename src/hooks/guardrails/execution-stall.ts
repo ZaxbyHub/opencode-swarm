@@ -96,8 +96,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { BackgroundWorkspaceSnapshot } from '../../background/pending-delegations.js';
 import {
-	captureWorkspaceSnapshot,
-	changedFilesSinceSnapshot,
+	captureWorkspaceSnapshotAsync,
+	changedFilesSinceSnapshotAsync,
 } from '../../background/workspace-snapshot.js';
 import { ORCHESTRATOR_NAME, WRITE_TOOL_NAMES } from '../../config/constants';
 import {
@@ -594,22 +594,27 @@ export function enforceExecutionStallDenial(params: {
  * probe and the hard rung could never be reached in a workspace that is dirty
  * at all.
  *
- * `changedFilesSinceSnapshot` is the authoritative signal when it can answer,
- * but it returns `null` whenever the baseline was DIRTY
+ * `changedFilesSinceSnapshotAsync` is the authoritative signal when it can
+ * answer, but it returns `null` whenever the baseline was DIRTY
  * (`workspace-snapshot.ts:1259`) — which is the common case for a real stalled
  * session. It returns that `null` WITHOUT spawning git, so the fallback below
  * costs exactly one `git status` on the common path and two only when the
  * baseline was clean.
+ *
+ * Async (issue #2472 W7): the capture uses the bounded async snapshot twin so
+ * the probe never blocks the host event loop on a sync git spawn. W11/R-1
+ * extended that to the changed-files helper itself, which used to sync-spawn
+ * transitively through its internal capture/diff.
  */
-function probeWorkspaceProgress(
+async function probeWorkspaceProgress(
 	directory: string,
 	baseline: BackgroundWorkspaceSnapshot | null,
-): { progress: boolean; next: BackgroundWorkspaceSnapshot | null } {
+): Promise<{ progress: boolean; next: BackgroundWorkspaceSnapshot | null }> {
 	try {
 		const authoritative = baseline
-			? _internals.changedFilesSinceSnapshot(directory, baseline)
+			? await _internals.changedFilesSinceSnapshotAsync(directory, baseline)
 			: null;
-		const current = _internals.captureWorkspaceSnapshot(directory);
+		const current = await _internals.captureWorkspaceSnapshotAsync(directory);
 		if (!baseline) return { progress: false, next: current };
 		if (authoritative !== null) {
 			return { progress: authoritative.length > 0, next: current };
@@ -638,8 +643,11 @@ function probeWorkspaceProgress(
  * `tool.execute.after`. Records progress events, arms on a successful
  * `update_task_status(in_progress)`, and runs the periodic workspace probe.
  * NEVER throws.
+ *
+ * Async (issue #2472 W7): the workspace captures route through the async
+ * snapshot twin, so callers (guardrails' `toolAfter`) must await it.
  */
-export function recordExecutionStallToolAfter(params: {
+export async function recordExecutionStallToolAfter(params: {
 	sessionID: string;
 	tool: string;
 	callID: string;
@@ -647,7 +655,7 @@ export function recordExecutionStallToolAfter(params: {
 	output: unknown;
 	directory: string;
 	options?: ExecutionStallOptions;
-}): void {
+}): Promise<void> {
 	const { sessionID, tool, callID, args, output, directory, options } = params;
 	try {
 		// The dispatch-role note is keyed by callID and must be released even
@@ -711,8 +719,11 @@ export function recordExecutionStallToolAfter(params: {
 			state.needsWorkspaceBaseline = false;
 			state.callsSinceWorkspaceProbe = 0;
 			try {
+				// Probe-vs-re-baseline ordering: the baseline is fully assigned
+				// only after the awaited capture resolves, so a later probe can
+				// never observe a half-written baseline.
 				state.workspaceBaseline =
-					_internals.captureWorkspaceSnapshot(directory);
+					await _internals.captureWorkspaceSnapshotAsync(directory);
 			} catch {
 				state.workspaceBaseline = null;
 			}
@@ -730,7 +741,12 @@ export function recordExecutionStallToolAfter(params: {
 			disarmEpisode(sessionID, state);
 			return;
 		}
-		const probe = probeWorkspaceProgress(directory, state.workspaceBaseline);
+		// Await the probe BEFORE re-baselining so the next baseline reflects the
+		// fully-resolved snapshot (issue #2472 W7 probe-vs-re-baseline ordering).
+		const probe = await probeWorkspaceProgress(
+			directory,
+			state.workspaceBaseline,
+		);
 		state.workspaceBaseline = probe.next;
 		if (probe.progress) clearStreak(state);
 	} catch {
@@ -783,12 +799,14 @@ function readUpdateTaskStatusOutcome(
  * idleness-lapse tests drive; the two workspace functions are indirected so a
  * test never spawns git, and `readPlanOpenTaskState` so a test can drive the
  * disarm edge without a plan fixture (the disarm tests exercise the REAL reader
- * against a real `.swarm/plan.json` as well).
+ * against a real `.swarm/plan.json` as well). The capture seam carries the
+ * ASYNC twin (issue #2472 W7) — hook paths must never reach the sync
+ * spawn-based capture.
  */
 export const _internals = {
 	now: (): number => Date.now(),
-	captureWorkspaceSnapshot,
-	changedFilesSinceSnapshot,
+	captureWorkspaceSnapshotAsync,
+	changedFilesSinceSnapshotAsync,
 	ensureArchitectSession,
 	readPlanOpenTaskState,
 };

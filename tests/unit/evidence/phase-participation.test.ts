@@ -129,7 +129,7 @@ describe('durable phase participation', () => {
 			output: foregroundOutput(),
 		});
 
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs')).toEqual({
+		expect(await readPhaseParticipation(directory, plan(), 1, 'docs')).toEqual({
 			status: 'valid',
 			found: true,
 		});
@@ -159,9 +159,9 @@ describe('durable phase participation', () => {
 			output: foregroundOutput(),
 		});
 
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			false,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(false);
 	});
 
 	test('fails closed for empty, failed, cancelled, and uncorrelated running results', async () => {
@@ -192,9 +192,9 @@ describe('durable phase participation', () => {
 				output,
 			});
 		}
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			false,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(false);
 		const store = JSON.parse(
 			fs.readFileSync(
 				path.join(directory, '.swarm', ...PHASE_PARTICIPATION_FILE.split('/')),
@@ -222,9 +222,9 @@ describe('durable phase participation', () => {
 				'<task id="child-running" state="running"><summary>running</summary></task>',
 		});
 
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			false,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(false);
 		const store = JSON.parse(
 			fs.readFileSync(
 				path.join(directory, '.swarm', ...PHASE_PARTICIPATION_FILE.split('/')),
@@ -263,9 +263,9 @@ describe('durable phase participation', () => {
 			output: foregroundOutput(),
 		});
 
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			false,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(false);
 	});
 
 	test('normalizes a prefixed docs role without weakening the exact binding', async () => {
@@ -284,9 +284,9 @@ describe('durable phase participation', () => {
 			callId: 'prefixed',
 			output: foregroundOutput(),
 		});
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			true,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(true);
 	});
 
 	test('keeps identical call IDs isolated by parent session', async () => {
@@ -307,9 +307,9 @@ describe('durable phase participation', () => {
 			callId: 'shared-call',
 			output: foregroundOutput('parent-a', 'child-a'),
 		});
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			true,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(true);
 		await observePhaseParticipationToolResult({
 			directory,
 			tool: 'Task',
@@ -343,14 +343,15 @@ describe('durable phase participation', () => {
 			output: foregroundOutput(),
 		});
 		expect(
-			readPhaseParticipation(directory, plan('completed'), 1, 'docs').found,
+			(await readPhaseParticipation(directory, plan('completed'), 1, 'docs'))
+				.found,
 		).toBe(true);
 
 		const changed = plan('completed');
 		changed.phases[0]!.tasks[0]!.description = 'Different obligation';
-		expect(readPhaseParticipation(directory, changed, 1, 'docs').found).toBe(
-			false,
-		);
+		expect(
+			(await readPhaseParticipation(directory, changed, 1, 'docs')).found,
+		).toBe(false);
 	});
 
 	test('quarantines exact corrupt bytes only on a genuine redispatch', async () => {
@@ -362,9 +363,9 @@ describe('durable phase participation', () => {
 		fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
 		const corrupt = Buffer.from('{not-json}\u0000', 'utf8');
 		fs.writeFileSync(evidencePath, corrupt);
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').status).toBe(
-			'corrupt',
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).status,
+		).toBe('corrupt');
 
 		await reserveApprovedPhaseParticipation({
 			directory,
@@ -382,9 +383,9 @@ describe('durable phase participation', () => {
 		const files = fs.readdirSync(quarantine);
 		expect(files).toHaveLength(1);
 		expect(fs.readFileSync(path.join(quarantine, files[0]!))).toEqual(corrupt);
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').status).toBe(
-			'valid',
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).status,
+		).toBe('valid');
 	});
 
 	test('fails closed without destroying corrupt evidence when quarantine is full', async () => {
@@ -453,9 +454,9 @@ describe('durable phase participation', () => {
 				}),
 			).toBe(true);
 		}
-		expect(readPhaseParticipation(directory, plan(), 1, 'docs').found).toBe(
-			true,
-		);
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(true);
 	});
 
 	test('requires consumed Stage-B ingestion for task-bound background docs', async () => {

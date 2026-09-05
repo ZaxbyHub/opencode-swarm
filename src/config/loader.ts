@@ -151,7 +151,10 @@ function loadRawConfigFromPath(configPath: string): {
 	}
 }
 
-import { deepMerge as deepMergeFn } from '../utils/merge';
+import {
+	DangerousMergeKeyError,
+	deepMerge as deepMergeFn,
+} from '../utils/merge';
 
 // Re-export deepMerge and MAX_MERGE_DEPTH from src/utils/merge for backward compatibility.
 // Tests and src/config/constants.ts import these from loader.ts directly.
@@ -520,6 +523,9 @@ function exposedGitBinary(raw: Record<string, unknown> | null): unknown {
 /**
  * `git.binary` is an ADMINISTRATIVE, USER-LEVEL-ONLY key — a project config
  * may never supply it.
+ * Since the #2476 dangerous-key wrap refuses `__proto__` payloads before
+ * the merge, this gate's remaining job is value-source discrimination (and
+ * defense-in-depth for pre-fix payload shapes).
  *
  * SECURITY (CWE-427/CWE-77, arbitrary code execution). `git.binary` names the
  * executable this plugin spawns for every host-side git call (commit, push,
@@ -633,10 +639,29 @@ function buildConfigWithMeta(
 	//    override explicit user values.
 	let mergedRaw: Record<string, unknown> = rawUserConfig ?? {};
 	if (rawProjectConfig) {
-		mergedRaw = deepMergeFn(mergedRaw, rawProjectConfig) as Record<
-			string,
-			unknown
-		>;
+		// Issue #2476 AC2 (source issue #2264): a repo-supplied project config
+		// carrying __proto__/constructor/prototype at any depth is a hostile
+		// prototype-pollution payload, not a config — the typed merge refusal
+		// is fail-closed on the attack. The CATCH keeps plugin load fail-open
+		// for every benign config: we drop the project overlay entirely and
+		// continue with user-level config only (the `enforceGitBinaryProvenance`
+		// gate below stays as defense-in-depth for the pre-fix payload class).
+		try {
+			mergedRaw = deepMergeFn(mergedRaw, rawProjectConfig) as Record<
+				string,
+				unknown
+			>;
+		} catch (err) {
+			if (err instanceof DangerousMergeKeyError) {
+				advisoryWarn(
+					`[opencode-swarm] ⚠️ SECURITY: Ignoring the entire project config (.opencode/${CONFIG_FILENAME}): ` +
+						`it carries the dangerous key "${err.key}" at "${err.path}", a prototype-pollution payload. ` +
+						'Continuing with user-level configuration only.',
+				);
+			} else {
+				throw err;
+			}
+		}
 	}
 
 	// 1b. `git.binary` is an administrative, user-level-only key: a project

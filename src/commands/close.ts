@@ -472,6 +472,14 @@ export const ARCHIVE_ARTIFACTS = [
 	// its bounded-retention mechanism is compaction (not close), so active state
 	// stays usable after close.
 	'context-telemetry.jsonl',
+	// workspace-snapshot.digest (issue #2472 W7 / PR #2588 PRR-015): the
+	// content-digest skip marker written by captureWorkspaceSnapshotAsync
+	// (SNAPSHOT_DIGEST_MARKER_FILENAME, src/background/workspace-snapshot.ts —
+	// bare name here because the constant is module-private). Archived then
+	// cleaned with the other session-generated markers so a stale digest from
+	// the closed session can never influence the next session's
+	// shouldSkipSnapshot decision.
+	'workspace-snapshot.digest',
 ];
 
 /**
@@ -569,6 +577,10 @@ export const ACTIVE_STATE_TO_CLEAN = [
 	// bookkeeping must not leak into the next session.
 	'epic-state.json',
 	'turbo-state.json',
+	// workspace-snapshot.digest (PRR-015): paired with its ARCHIVE_ARTIFACTS
+	// entry above so the archive-first guard can remove it — a stale skip
+	// marker must not survive into the next session.
+	'workspace-snapshot.digest',
 ];
 
 /**

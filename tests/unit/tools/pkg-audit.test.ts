@@ -65,6 +65,11 @@ function getMockContext(): ToolContext {
 	};
 }
 
+// #2476 AC5: on win32 npm/cargo may resolve to a cmd.exe-routed or absolute command; stubs match the resolved tool.
+function isAuditTool(cmd: string[], tool: string): boolean {
+	return cmd[0] === tool || cmd.join(' ').toLowerCase().includes(`${tool}.`);
+}
+
 describe('pkg-audit tool', () => {
 	beforeEach(() => {
 		originalSpawn = Bun.spawn;
@@ -614,14 +619,13 @@ describe('pkg-audit tool', () => {
 				'[package]\nname = "test"',
 			);
 
-			// First call is npm (exit 0), second is cargo (exit 0)
 			let callCount = 0;
 			const originalMockSpawn = Bun.spawn;
 			Bun.spawn = (cmd, opts) => {
 				callCount++;
-				if (cmd[0] === 'npm') {
+				if (isAuditTool(cmd, 'npm')) {
 					mockStdout = '{"vulnerabilities": {}}';
-				} else if (cmd[0] === 'cargo') {
+				} else if (isAuditTool(cmd, 'cargo')) {
 					mockStdout = '{"vulnerabilities": null}';
 				}
 				return mockSpawn(cmd, opts);
@@ -649,18 +653,15 @@ describe('pkg-audit tool', () => {
 				'[package]\nname = "test"',
 			);
 
-			// npm completes clean; cargo-audit is "not installed" (spawn throws
-			// with a command-not-found message) → runCargoAudit returns
-			// incomplete:true.
+			// npm completes clean; cargo spawn throws "not installed".
 			const originalMockSpawn = Bun.spawn;
 			Bun.spawn = (cmd, opts) => {
-				if (cmd[0] === 'npm') {
+				if (isAuditTool(cmd, 'npm')) {
 					mockSpawnError = null;
 					mockExitCode = 0;
 					mockStdout = '{"vulnerabilities": {}}';
 					return mockSpawn(cmd, opts);
 				}
-				// cargo path: simulate the tool being absent.
 				throw new Error('cargo-audit: command not found');
 			};
 
@@ -671,14 +672,11 @@ describe('pkg-audit tool', () => {
 			const parsed = JSON.parse(result);
 			Bun.spawn = originalMockSpawn;
 
-			// The core MH1 assertion: absence of findings is unproven because a
-			// sub-scan did not complete, so clean must NOT be an unqualified true.
+			// MH1: a sub-scan did not complete, so clean must NOT be true.
 			expect(parsed.clean).toBe(false);
-			// The incomplete ecosystem is surfaced explicitly.
 			expect(parsed.ecosystemsIncomplete).toContain('cargo');
 			// npm actually completed and must not be flagged incomplete.
 			expect(parsed.ecosystemsIncomplete).not.toContain('npm');
-			// The per-ecosystem note is surfaced (not silently dropped).
 			expect(Array.isArray(parsed.notes)).toBe(true);
 			expect(
 				parsed.notes.some((n: string) => n.includes('not installed')),

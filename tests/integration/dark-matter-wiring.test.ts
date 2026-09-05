@@ -97,6 +97,24 @@ const { detectArchitectMode, createSystemEnhancerHook } = await import(
 	'../../src/hooks/system-enhancer'
 );
 
+/**
+ * #2472 W4 (AC-5): the doc-index scan and the dark-matter scan now run in a
+ * deferred macrotask background task AFTER the transform call returns (off
+ * the prompt-construction path — frozen contract repro/check-c5.ts), so
+ * these wiring tests poll with real timers for the deferred work instead of
+ * asserting it synchronously inside the awaited call.
+ */
+async function waitFor(predicate: () => boolean, what: string): Promise<void> {
+	// performance.now polling deadline — the sanctioned test-clock pattern for
+	// polling waits (not clock-dependent logic); see tests/unit/index.test.ts.
+	const deadline = performance.now() + 5000;
+	while (performance.now() < deadline) {
+		if (predicate()) return;
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+	expect(predicate(), `timed out waiting for ${what}`).toBe(true);
+}
+
 // Restore original functions at file exit (Bun runs afterAll at process
 // teardown). This prevents the mocks from leaking into OTHER test files
 // that share the same module cache.
@@ -201,8 +219,14 @@ describe('system-enhancer dark matter trigger', () => {
 			output: { system: string[] },
 		) => Promise<void>;
 
-		// Invoke the hook which triggers dark matter scan
+		// Invoke the hook which schedules the deferred dark matter scan
 		await transform({ sessionID: 'test-session' }, { system: [] });
+
+		// #2472 W4: the scan runs in a deferred background task — wait for it.
+		await waitFor(
+			() => mockDetectDarkMatter.mock.calls.length > 0,
+			'deferred detectDarkMatter',
+		);
 
 		// Verify detectDarkMatter was called through the hook
 		expect(mockDetectDarkMatter).toHaveBeenCalled();
@@ -238,16 +262,21 @@ describe('system-enhancer dark matter trigger', () => {
 			input: { sessionID?: string; model?: unknown },
 			output: { system: string[] },
 		) => Promise<void>;
+		const darkMatterPath = path.join(tempDir, '.swarm', 'dark-matter.md');
 
 		await transform({ sessionID: 'test-session' }, { system: [] });
+
+		// #2472 W4: dark-matter.md materializes in the deferred background task
+		await waitFor(
+			() => fs.existsSync(darkMatterPath),
+			'deferred dark-matter.md write',
+		);
 
 		// Verify formatDarkMatterOutput was called
 		expect(mockFormatDarkMatterOutput).toHaveBeenCalled();
 		expect(formatDarkMatterOutputCalls.length).toBeGreaterThan(0);
 
 		// Verify dark-matter.md was written
-		const darkMatterPath = path.join(tempDir, '.swarm', 'dark-matter.md');
-		expect(fs.existsSync(darkMatterPath)).toBe(true);
 		const content = fs.readFileSync(darkMatterPath, 'utf-8');
 		expect(content).toContain('src/a.ts');
 		expect(content).toContain('src/b.ts');
@@ -282,6 +311,12 @@ describe('system-enhancer dark matter trigger', () => {
 		) => Promise<void>;
 
 		await transform({ sessionID: 'test-session' }, { system: [] });
+
+		// #2472 W4: knowledge-entry generation happens in the deferred task
+		await waitFor(
+			() => darkMatterToKnowledgeEntriesCalls.length > 0,
+			'deferred dark-matter knowledge-entry generation',
+		);
 
 		// Verify darkMatterToKnowledgeEntries was called
 		expect(mockDarkMatterToKnowledgeEntries).toHaveBeenCalled();
@@ -323,8 +358,13 @@ describe('repos without git skip silently', () => {
 
 		await transform({ sessionID: 'test-session' }, { system: [] });
 
+		// #2472 W4: the cache file materializes in the deferred background task
+		await waitFor(
+			() => fs.existsSync(darkMatterPath),
+			'deferred dark-matter.md write (empty results)',
+		);
+
 		// dark-matter.md MUST exist even on empty results to prevent recomputation
-		expect(fs.existsSync(darkMatterPath)).toBe(true);
 		const content = fs.readFileSync(darkMatterPath, 'utf-8');
 		expect(content).toContain('No hidden couplings detected');
 	});
@@ -350,6 +390,16 @@ describe('repos without git skip silently', () => {
 		await transform({ sessionID: 'test-session' }, { system: [] });
 		await transform({ sessionID: 'test-session' }, { system: [] });
 
+		// #2472 W4: wait until the deferred scan has run PAST the dark-matter
+		// cache check — its trailing retroactive-repair block reads knowledge
+		// through the (mocked) seam even when the cache short-circuits the
+		// detect call, so a read here proves the deferred task reached (and
+		// took) the cached path.
+		await waitFor(
+			() => mockReadKnowledge.mock.calls.length > 0,
+			'deferred scan past the dark-matter cache check',
+		);
+
 		// detectDarkMatter should NOT have been called — cache was present
 		expect(mockDetectDarkMatter).not.toHaveBeenCalled();
 	});
@@ -372,8 +422,13 @@ describe('repos without git skip silently', () => {
 
 		await transform({ sessionID: 'test-session' }, { system: [] });
 
+		// #2472 W4: the deferred task mkdir's .swarm/ and writes the cache
+		await waitFor(
+			() => fs.existsSync(darkMatterPath),
+			'deferred dark-matter.md write (.swarm/ not pre-created)',
+		);
+
 		// dark-matter.md must exist even though .swarm/ was not pre-created
-		expect(fs.existsSync(darkMatterPath)).toBe(true);
 		const content = fs.readFileSync(darkMatterPath, 'utf-8');
 		expect(content).toContain('No hidden couplings detected');
 	});
@@ -401,6 +456,15 @@ describe('repos without git skip silently', () => {
 
 		// Should not throw despite mock throwing
 		await transform({ sessionID: 'test-session' }, { system: [] });
+
+		// #2472 W4: the throw now happens inside the deferred background task;
+		// wait for the task to actually run the (throwing) detect so the final
+		// assertion below proves the error was contained there — no file write,
+		// no unhandled rejection.
+		await waitFor(
+			() => mockDetectDarkMatter.mock.calls.length > 0,
+			'deferred (throwing) detectDarkMatter',
+		);
 
 		// dark-matter.md should not exist because the error was caught
 		expect(fs.existsSync(darkMatterPath)).toBe(false);

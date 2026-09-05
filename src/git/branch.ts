@@ -21,6 +21,7 @@ import {
 	MAX_TRANSIENT_RETRIES,
 	transientBackoff,
 } from '../utils/transient-retry.js';
+import { assertSafeGitRefArg } from './safe-ref';
 
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
@@ -393,6 +394,11 @@ export function createBranch(
 	laneEnv?: Record<string, string>,
 	laneIndex?: number,
 ): void {
+	// Issue #2476 AC3: branchName/remote are caller-derived and land in
+	// git argv ref positions; a dash-leading value would be parsed by git as
+	// an option (source issue #2265). Fail closed before any git call.
+	assertSafeGitRefArg(remote, 'createBranch remote');
+	assertSafeGitRefArg(branchName, 'createBranch branchName');
 	// Check if branch already exists
 	try {
 		gitExec(
@@ -429,6 +435,9 @@ export function createBranch(
  */
 export function getChangedFiles(cwd: string, branch?: string): string[] {
 	const baseBranch = branch || _internals.getDefaultBaseBranch(cwd);
+	// Issue #2476 AC3: baseBranch is auto-detected from repository-derived git
+	// output — validate before the diff argv position.
+	assertSafeGitRefArg(baseBranch, 'getChangedFiles baseBranch');
 
 	try {
 		const output = gitExec(['diff', '--name-only', baseBranch, 'HEAD'], cwd);
@@ -622,6 +631,14 @@ export async function resetToRemoteBranch(
 			};
 		}
 
+		// Issue #2476 AC3: currentBranch/defaultRemoteBranch are
+		// repository-derived (getCurrentBranch / git config output); a hostile
+		// repo can make either dash-leading (source issue #2265).
+		assertSafeGitRefArg(currentBranch, 'resetToRemoteBranch currentBranch');
+		assertSafeGitRefArg(
+			defaultRemoteBranch,
+			'resetToRemoteBranch defaultRemoteBranch',
+		);
 		const targetBranch = `origin/${defaultRemoteBranch}`;
 
 		// Safety check: Detached HEAD
@@ -759,7 +776,18 @@ export async function resetToRemoteBranch(
 						continue;
 					}
 					try {
-						gitExec(['branch', '-d', trimmedLine], cwd);
+						gitExec(
+							[
+								'branch',
+								'-d',
+								'--',
+								assertSafeGitRefArg(
+									trimmedLine,
+									'resetToRemoteBranch prune merged branch',
+								),
+							],
+							cwd,
+						);
 						prunedBranches.push(trimmedLine);
 					} catch {
 						warnings.push(`Could not safely delete branch: ${trimmedLine}`);
@@ -785,7 +813,18 @@ export async function resetToRemoteBranch(
 						const parts = trimmedLine.split(/\s+/);
 						const branchName = parts[0];
 						try {
-							gitExec(['branch', '-d', branchName], cwd);
+							gitExec(
+								[
+									'branch',
+									'-d',
+									'--',
+									assertSafeGitRefArg(
+										branchName,
+										'resetToRemoteBranch prune gone branch',
+									),
+								],
+								cwd,
+							);
 							prunedBranches.push(branchName);
 						} catch {
 							warnings.push(`Could not delete gone branch: ${branchName}`);
@@ -876,6 +915,11 @@ export async function resetToMainAfterMerge(
 		}
 
 		const currentBranch = getCurrentBranch(cwd);
+		// Issue #2476 AC3: defaultBranch/currentBranch are repository-derived
+		// (detectDefaultRemoteBranch / getCurrentBranch git output); validate
+		// before they reach checkout / log-range / reset argv positions.
+		assertSafeGitRefArg(currentBranch, 'resetToMainAfterMerge currentBranch');
+		assertSafeGitRefArg(defaultBranch, 'resetToMainAfterMerge defaultBranch');
 		const targetBranch = `origin/${defaultBranch}`;
 
 		// Step 2: Safety guard — detached HEAD
@@ -1076,7 +1120,18 @@ export async function resetToMainAfterMerge(
 							line.trim() === `* ${previousBranch}`,
 					);
 				if (isMerged) {
-					_internals.gitExec(['branch', '-d', previousBranch], cwd);
+					_internals.gitExec(
+						[
+							'branch',
+							'-d',
+							'--',
+							assertSafeGitRefArg(
+								previousBranch,
+								'resetToMainAfterMerge previousBranch',
+							),
+						],
+						cwd,
+					);
 					branchDeleted = true;
 				} else {
 					warnings.push(
@@ -1106,7 +1161,18 @@ export async function resetToMainAfterMerge(
 						continue;
 					}
 					try {
-						_internals.gitExec(['branch', '-d', trimmedLine], cwd);
+						_internals.gitExec(
+							[
+								'branch',
+								'-d',
+								'--',
+								assertSafeGitRefArg(
+									trimmedLine,
+									'resetToMainAfterMerge prune branch',
+								),
+							],
+							cwd,
+						);
 					} catch {
 						warnings.push(`Could not prune branch: ${trimmedLine}`);
 					}
