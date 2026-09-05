@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.166.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.1...v7.166.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **runtime:** remove hot-path stalls and make the plugin lifecycle restart-safe ([c0ac0df](https://github.com/ZaxbyHub/opencode-swarm/commit/c0ac0df278c46eed6774d58b78ea9a4a6d4cb0c7))
+
 ## [7.166.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.0...v7.166.1) (2026-09-05)
 
 
