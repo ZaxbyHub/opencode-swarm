@@ -176,7 +176,15 @@ const PR_REVIEW_VERDICT_RESPONSE_PER_ITEM_CHARS = 1_500;
 // swarm-pr-feedback modes, which #2276 leaves on the pre-existing flat cap).
 const PR_WORKFLOW_PROTOCOL_OUTPUT_MAX_CHARS = 12_000;
 const MAX_ZOD_ISSUES_LISTED = 20;
-const MAX_SESSION_CREATE_GENERATIONS = 2;
+/**
+ * Configured session.create retry cap (issue #1615 / #2473): the 1-based
+ * `generation` on a lane result and its delegation record counts create
+ * attempts. Exported because the frozen per-scenario launch budget manifest
+ * (tests/unit/tools/dispatch-lanes-launch-budget-manifest.ts, issue #2473)
+ * derives its integer create-attempt bound from this contract constant
+ * instead of re-hardcoding the value.
+ */
+export const MAX_SESSION_CREATE_GENERATIONS = 2;
 const MAX_CREATE_FAILURE_WALK_NODES = 64;
 const MAX_CREATE_FAILURE_WALK_DEPTH = 6;
 const MAX_CREATE_FAILURE_SIGNAL_CHARS = 8_192;
@@ -3389,6 +3397,23 @@ function consumePrReviewReceiptAppendFailureLog(
 	return true;
 }
 
+/**
+ * Issue #2473: thrown ONLY when the host returned a definitive rejection
+ * envelope (`result.error`) for a prompt/promptAsync LAUNCH call — the server
+ * responded, so the prompt was provably never accepted. Transport-level
+ * throws (ECONNRESET/ETIMEDOUT/broken pipe — no server response) and
+ * withTimeout deadlines stay plain Errors: acceptance is unknowable there, so
+ * the launch classify callbacks must treat them as permanent (single-shot)
+ * instead of failover-eligible. Extends Error with the byte-identical message
+ * (#2349): the distinction rides on the class, never on the message text.
+ */
+class LanePromptLaunchRejectionError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'LanePromptLaunchRejectionError';
+	}
+}
+
 function scheduleAsyncLanePrompt(args: {
 	session: SessionOps;
 	directory: string;
@@ -3477,16 +3502,26 @@ async function startAsyncLanePrompt(args: {
 					promptController,
 				);
 				if (result.error) {
-					throw new Error(
+					throw new LanePromptLaunchRejectionError(
 						`session.promptAsync launch failed: ${formatError(result.error)}`,
 					);
 				}
 				return result;
 			},
 			classify: (error) => {
-				const message = error instanceof Error ? error.message : String(error);
-				if (/timed out/i.test(message)) return 'permanent';
-				return isTransientProviderError(message) ? 'transient' : 'permanent';
+				// Issue #2473: only a definitive server rejection (the host
+				// returned `result.error`) proves the launch was never accepted.
+				// Transport throws (ECONNRESET/ETIMEDOUT/broken pipe) and
+				// withTimeout deadlines leave acceptance unknowable, so they
+				// classify permanent — re-dispatching them would duplicate an
+				// uncertain execution. The pre-fix `/timed out/i` special case
+				// is subsumed by this default.
+				if (!(error instanceof LanePromptLaunchRejectionError)) {
+					return 'permanent';
+				}
+				return isTransientProviderError(error.message)
+					? 'transient'
+					: 'permanent';
 			},
 			maxTransientRetriesPerModel: 0,
 			deadlineAtMs: _internals.now() + args.timeoutMs,
@@ -4101,16 +4136,26 @@ async function runLane(
 					syncClassifiedReason = `session.prompt failed: ${laneTerminalErrorReason(
 						classifyLaneTerminalError(result.error),
 					)}`;
-					throw new Error(
+					throw new LanePromptLaunchRejectionError(
 						`session.prompt failed: ${formatError(result.error)}`,
 					);
 				}
 				return result;
 			},
 			classify: (error) => {
-				const message = error instanceof Error ? error.message : String(error);
-				if (/timed out/i.test(message)) return 'permanent';
-				return isTransientProviderError(message) ? 'transient' : 'permanent';
+				// Issue #2473: only a definitive server rejection (the host
+				// returned `result.error`) proves the launch was never accepted.
+				// Transport throws (ECONNRESET/ETIMEDOUT/broken pipe) and
+				// withTimeout deadlines leave acceptance unknowable, so they
+				// classify permanent — re-dispatching them would duplicate an
+				// uncertain execution. The pre-fix `/timed out/i` special case
+				// is subsumed by this default.
+				if (!(error instanceof LanePromptLaunchRejectionError)) {
+					return 'permanent';
+				}
+				return isTransientProviderError(error.message)
+					? 'transient'
+					: 'permanent';
 			},
 			maxTransientRetriesPerModel: 0,
 			deadlineAtMs: _internals.now() + timeoutMs,
