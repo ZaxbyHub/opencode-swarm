@@ -524,14 +524,6 @@ export interface PRStatusResult {
 	}>;
 }
 
-export interface PRCheckResult {
-	name: string;
-	bucket: string;
-	state: string;
-	startedAt: string | null;
-	completedAt: string | null;
-}
-
 export interface PRCommentResult {
 	id: string;
 	author: string;
@@ -555,14 +547,33 @@ export interface ReviewStateResult {
 
 // ── gh CLI PR status wrapper functions ──────────────────────────────
 
+// ── consolidated per-PR poll fetch (issues #1660/#2471) ──────────────
+
+/** All per-PR data one poll cycle needs, in two gh spawns. */
+export interface PRPollSnapshot {
+	status: PRStatusResult;
+	comments: PRCommentResult[];
+	merge: MergeStateResult;
+	review: ReviewStateResult;
+}
+
 /**
- * Fetch PR status via gh pr view --json
+ * Fetch status, merge state, review state and conversation (issue) comments
+ * with ONE `gh pr view --json` call. Previously this was three near-duplicate
+ * pr-view spawns (status/merge/review) plus two gh api spawns per PR per poll.
+ *
+ * `comments[].id` from pr-view is the GraphQL node id, NOT the numeric
+ * database id the REST endpoints return. The numeric id is recovered from the
+ * comment permalink (`#issuecomment-<id>` suffix, verified equal to the REST
+ * id on gh >= 2.92) so `lastCommentId` markers written by earlier versions
+ * keep matching; the node id remains the defensive fallback (a warn is
+ * logged if it ever fires — fallback ids change the marker space).
  */
-export async function getPRStatus(
+export async function getPRPollSnapshot(
 	prNumber: number,
 	repoFullName: string,
 	cwd: string,
-): Promise<PRStatusResult> {
+): Promise<PRPollSnapshot> {
 	let stdout: string;
 	try {
 		stdout = await _internals.ghExecAsync(
@@ -573,101 +584,115 @@ export async function getPRStatus(
 				'--repo',
 				repoFullName,
 				'--json',
-				'number,state,mergeable,mergeStateStatus,headRefOid,statusCheckRollup',
+				// `comments` returns the FULL conversation list in one payload
+				// (the old gh api calls returned 30/endpoint by REST default).
+				// Bounded above by ghExecAsync's MAX_OUTPUT_BYTES, and a
+				// strictly better event surface than the old first-30 window.
+				'number,state,mergeable,mergeStateStatus,headRefOid,statusCheckRollup,reviewDecision,reviewRequests,comments',
 			],
 			cwd,
 		);
 	} catch (err) {
 		throw new Error(
-			`Failed to fetch PR status for ${repoFullName}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`,
+			`Failed to fetch PR poll snapshot for ${repoFullName}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
-	return JSON.parse(stdout) as PRStatusResult;
+	const parsed = JSON.parse(stdout) as {
+		number: number;
+		state: string;
+		mergeable: string;
+		mergeStateStatus: string;
+		headRefOid: string;
+		statusCheckRollup?: PRStatusResult['statusCheckRollup'];
+		reviewDecision?: string;
+		reviewRequests?: Array<{ login: string }>;
+		comments?: Array<{
+			id?: string;
+			author?: { login?: string } | null;
+			body?: string | null;
+			createdAt?: string;
+			url?: string;
+		}>;
+	};
+	const permalinkFallbacks: string[] = [];
+	const snapshot: PRPollSnapshot = {
+		status: {
+			number: parsed.number,
+			state: parsed.state as PRStatusResult['state'],
+			mergeable: parsed.mergeable as PRStatusResult['mergeable'],
+			mergeStateStatus: parsed.mergeStateStatus,
+			headRefOid: parsed.headRefOid,
+			statusCheckRollup: parsed.statusCheckRollup ?? [],
+		},
+		comments: (parsed.comments ?? []).map((c) => ({
+			id: numericIssueCommentId(c.url, c.id, permalinkFallbacks),
+			author: String(c.author?.login ?? ''),
+			body: neutralizeUntrustedMarkdown(
+				String(c.body ?? ''),
+				'GitHub issue comment',
+			),
+			createdAt: String(c.createdAt ?? ''),
+			isReviewComment: false,
+		})),
+		merge: {
+			mergeable: parsed.mergeable as MergeStateResult['mergeable'],
+			mergeStateStatus: parsed.mergeStateStatus,
+			headRefOid: parsed.headRefOid,
+		},
+		review: {
+			reviewDecision: parsed.reviewDecision ?? '',
+			reviewRequestCount: parsed.reviewRequests?.length ?? 0,
+		},
+	};
+	if (permalinkFallbacks.length > 0) {
+		// Defensive path only: gh currently always emits comment permalinks.
+		// Fallback ids (GraphQL node ids) change the lastCommentId marker
+		// space, so surface it rather than silently re-baselining dedup.
+		warn(
+			`[PrMonitorWorker] ${permalinkFallbacks.length} comment(s) missing #issuecomment permalink; using node-id fallback for lastCommentId`,
+		);
+	}
+	return snapshot;
+}
+
+/** Recover the REST numeric comment id from a `#issuecomment-<id>` permalink. */
+function numericIssueCommentId(
+	url: unknown,
+	fallbackId: unknown,
+	fallbacks: string[],
+): string {
+	if (typeof url === 'string') {
+		const match = url.match(/#issuecomment-(\d+)/);
+		if (match) return match[1];
+	}
+	fallbacks.push(String(fallbackId ?? ''));
+	return String(fallbackId ?? '');
 }
 
 /**
- * Fetch CI check results via gh pr checks --json
+ * Fetch inline pull-request review comments via gh api — the review half of
+ * the old two-endpoint getPRComments (the issue-comment half now rides the
+ * pr-view snapshot). Inline review comments have no `gh pr view --json`
+ * equivalent, so this stays the second spawn of the poll cycle.
  */
-export async function getPRChecks(
+export async function getPRReviewComments(
 	prNumber: number,
 	repoFullName: string,
 	cwd: string,
-): Promise<PRCheckResult[]> {
+): Promise<PRCommentResult[]> {
 	let stdout: string;
 	try {
 		stdout = await _internals.ghExecAsync(
-			[
-				'pr',
-				'checks',
-				String(prNumber),
-				'--repo',
-				repoFullName,
-				'--json',
-				'name,bucket,state,startedAt,completedAt',
-			],
+			['api', `repos/${repoFullName}/pulls/${prNumber}/comments`],
 			cwd,
 		);
-	} catch (err) {
-		throw new Error(
-			`Failed to fetch PR checks for ${repoFullName}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`,
-		);
-	}
-	return JSON.parse(stdout) as PRCheckResult[];
-}
-
-/**
- * Fetch PR comments since a given timestamp via gh api
- * Returns both issue comments and pull request review comments, merged together
- */
-export async function getPRComments(
-	prNumber: number,
-	repoFullName: string,
-	cwd: string,
-	since?: string,
-): Promise<PRCommentResult[]> {
-	const query = since ? `?since=${since}` : '';
-	const issueCommentsPath = `repos/${repoFullName}/issues/${prNumber}/comments${query}`;
-	const reviewCommentsPath = `repos/${repoFullName}/pulls/${prNumber}/comments${query}`;
-
-	let issueComments: Array<Record<string, unknown>>;
-	let reviewComments: Array<Record<string, unknown>>;
-
-	try {
-		const issueRaw = await _internals.ghExecAsync(
-			['api', issueCommentsPath],
-			cwd,
-		);
-		issueComments = JSON.parse(issueRaw) as Array<Record<string, unknown>>;
-	} catch (err) {
-		throw new Error(
-			`Failed to fetch issue comments for ${repoFullName}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`,
-		);
-	}
-
-	try {
-		const reviewRaw = await _internals.ghExecAsync(
-			['api', reviewCommentsPath],
-			cwd,
-		);
-		reviewComments = JSON.parse(reviewRaw) as Array<Record<string, unknown>>;
 	} catch (err) {
 		throw new Error(
 			`Failed to fetch review comments for ${repoFullName}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
-
-	const mapIssueComment = (c: Record<string, unknown>): PRCommentResult => ({
-		id: String(c.id ?? ''),
-		author: String((c.user as Record<string, unknown>)?.login ?? ''),
-		body: neutralizeUntrustedMarkdown(
-			String(c.body ?? ''),
-			'GitHub issue comment',
-		),
-		createdAt: String(c.created_at ?? ''),
-		isReviewComment: false,
-	});
-
-	const mapReviewComment = (c: Record<string, unknown>): PRCommentResult => ({
+	const reviewComments = JSON.parse(stdout) as Array<Record<string, unknown>>;
+	return reviewComments.map((c) => ({
 		id: String(c.id ?? ''),
 		author: String((c.user as Record<string, unknown>)?.login ?? ''),
 		body: neutralizeUntrustedMarkdown(
@@ -676,89 +701,7 @@ export async function getPRComments(
 		),
 		createdAt: String(c.created_at ?? ''),
 		isReviewComment: true,
-	});
-
-	return [
-		...issueComments.map(mapIssueComment),
-		...reviewComments.map(mapReviewComment),
-	];
-}
-
-/**
- * Fetch merge state (mergeable + mergeStateStatus) via gh pr view --json
- */
-export async function getMergeState(
-	prNumber: number,
-	repoFullName: string,
-	cwd: string,
-): Promise<MergeStateResult> {
-	let stdout: string;
-	try {
-		stdout = await _internals.ghExecAsync(
-			[
-				'pr',
-				'view',
-				String(prNumber),
-				'--repo',
-				repoFullName,
-				'--json',
-				'mergeable,mergeStateStatus,headRefOid',
-			],
-			cwd,
-		);
-	} catch (err) {
-		throw new Error(
-			`Failed to fetch merge state for ${repoFullName}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`,
-		);
-	}
-	const parsed = JSON.parse(stdout) as {
-		mergeable: string;
-		mergeStateStatus: string;
-		headRefOid: string;
-	};
-	return {
-		mergeable: parsed.mergeable as MergeStateResult['mergeable'],
-		mergeStateStatus: parsed.mergeStateStatus,
-		headRefOid: parsed.headRefOid,
-	};
-}
-
-/**
- * Fetch the current review state for a PR using `gh pr view --json reviewDecision,reviewRequests`.
- * Uses async ghExecAsync to avoid blocking the event loop.
- */
-export async function getPRReviewState(
-	prNumber: number,
-	repoFullName: string,
-	cwd: string,
-): Promise<ReviewStateResult> {
-	let stdout: string;
-	try {
-		stdout = await _internals.ghExecAsync(
-			[
-				'pr',
-				'view',
-				String(prNumber),
-				'--repo',
-				repoFullName,
-				'--json',
-				'reviewDecision,reviewRequests',
-			],
-			cwd,
-		);
-	} catch (err) {
-		throw new Error(
-			`Failed to fetch review state for ${repoFullName}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`,
-		);
-	}
-	const parsed = JSON.parse(stdout) as {
-		reviewDecision: string;
-		reviewRequests: Array<{ login: string }>;
-	};
-	return {
-		reviewDecision: parsed.reviewDecision ?? '',
-		reviewRequestCount: parsed.reviewRequests?.length ?? 0,
-	};
+	}));
 }
 
 /**

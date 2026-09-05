@@ -650,6 +650,26 @@ function buildCoordinationProjectionCheckpoint(
 	return checkpoint;
 }
 
+/**
+ * Deterministic store-capacity policy failure (issue #2409/#2471): the folded
+ * live set exceeds the bounded checkpoint and every store write is refused
+ * until the operator archives/splits the store. Structured as a distinct
+ * error class so consumers (the PR-monitor worker) can classify it without
+ * string matching — capacity refusals short-circuit to the skip state, not
+ * transient retry or per-PR breaker accounting (AGENTS invariant 9).
+ */
+export class PrSubscriptionCapacityError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'PrSubscriptionCapacityError';
+	}
+}
+
+/** True when the error is the store's bounded-capacity refusal. */
+export function isPrSubscriptionCapacityError(err: unknown): boolean {
+	return err instanceof PrSubscriptionCapacityError;
+}
+
 function assertCoordinationProjectionCapacity(
 	directory: string,
 	view: Record<string, PrSubscriptionRecord>,
@@ -662,7 +682,7 @@ function assertCoordinationProjectionCapacity(
 	);
 	const recordCount = Object.keys(checkpoint.records).length;
 	if (recordCount > PR_SUBSCRIPTION_LIMITS.maxCheckpointRecords) {
-		throw new Error(
+		throw new PrSubscriptionCapacityError(
 			`PR subscription store over checkpoint capacity: ${recordCount} records > ${PR_SUBSCRIPTION_LIMITS.maxCheckpointRecords}. The folded state exceeds the bounded checkpoint — archive or split .swarm/pr-monitor/subscriptions.jsonl (subscriptions can be re-created with /swarm pr subscribe), then remove it.`,
 		);
 	}
@@ -671,7 +691,7 @@ function assertCoordinationProjectionCapacity(
 		'utf-8',
 	);
 	if (contentBytes > PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes) {
-		throw new Error(
+		throw new PrSubscriptionCapacityError(
 			`PR subscription store over checkpoint capacity: ${contentBytes} bytes > ${PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes}. The folded state exceeds the bounded checkpoint — archive or split .swarm/pr-monitor/subscriptions.jsonl (subscriptions can be re-created with /swarm pr subscribe), then remove it.`,
 		);
 	}
@@ -1753,7 +1773,7 @@ function writeCheckpointFile(
 		// refuse the write instead. With terminal compaction applied first,
 		// only a pathological active-set (config caps actives at 100) hits
 		// this — loudly, with the operator remedy.
-		throw new Error(
+		throw new PrSubscriptionCapacityError(
 			`PR subscription store over checkpoint capacity: ${recordCount} records > ${PR_SUBSCRIPTION_LIMITS.maxCheckpointRecords}. The folded state exceeds the bounded checkpoint — archive or split .swarm/pr-monitor/subscriptions.jsonl (subscriptions can be re-created with /swarm pr subscribe), then remove it.`,
 		);
 	}
@@ -1762,7 +1782,7 @@ function writeCheckpointFile(
 	// .length counts UTF-16 code units and under-reports multibyte content.
 	const contentBytes = Buffer.byteLength(content, 'utf-8');
 	if (contentBytes > PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes) {
-		throw new Error(
+		throw new PrSubscriptionCapacityError(
 			`PR subscription store over checkpoint capacity: ${contentBytes} bytes > ${PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes}. The folded state exceeds the bounded checkpoint — archive or split .swarm/pr-monitor/subscriptions.jsonl (subscriptions can be re-created with /swarm pr subscribe), then remove it.`,
 		);
 	}
