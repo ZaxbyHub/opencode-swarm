@@ -7,7 +7,6 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	ensurePrSubscriptionDispatcherInstalled,
@@ -16,10 +15,10 @@ import {
 	setOnSubscriptionCreated,
 	subscribe,
 } from '../../../src/background/pr-subscriptions';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function makeTempProject(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-pr-sub-cb-'));
-	const real = fs.realpathSync(dir);
+	const real = canonicalMkdtemp('swarm-pr-sub-cb-');
 	fs.mkdirSync(path.join(real, '.swarm', 'pr-monitor'), { recursive: true });
 	return real;
 }
