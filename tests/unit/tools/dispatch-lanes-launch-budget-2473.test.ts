@@ -81,15 +81,15 @@ async function awaitSignal(
 async function waitFor(
 	predicate: () => boolean,
 	what: string,
-	budgetMs = 5_000,
+	maxAttempts = 500,
 ): Promise<void> {
-	const deadline = Date.now() + budgetMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) {
-			throw new Error(`condition not observed within ${budgetMs}ms: ${what}`);
-		}
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		if (predicate()) return;
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
+	throw new Error(
+		`condition not observed within ${maxAttempts} attempts: ${what}`,
+	);
 }
 
 function hostLaunchCount(ops: SessionOps): number {
@@ -190,7 +190,7 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 		};
 		_internals.getSessionOps = () => ops;
 
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		const result = await executeDispatchLanes(
 			{ lanes: [{ id: 'budget-create-lane', agent: 'explorer', prompt: 'x' }] },
 			directory,
@@ -204,7 +204,7 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 		assertWithinBudget(getScenarioBudget('create-transient-retry'), {
 			host_launches: hostLaunches,
 			attempts: hostLaunches + OBSERVED_SAME_MODEL_RETRIES_AT_LAUNCH,
-			wall_clock_ms: Date.now() - startedAt,
+			wall_clock_ms: performance.now() - startedAt,
 		});
 		expect(hostLaunches).toBe(3);
 	});

@@ -45,20 +45,23 @@ function tempProject(): string {
 	return directory;
 }
 
-/** Bounded real-timer poll — fails loudly instead of hanging on a missed condition. */
+/** Bounded attempt-counted poll — fails loudly instead of hanging on a missed condition. */
 async function waitFor(
 	predicate: () => boolean,
 	what: string,
-	budgetMs = 5_000,
+	maxAttempts = 500,
 ): Promise<void> {
-	const deadline = Date.now() + budgetMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) {
-			throw new Error(`condition not observed within ${budgetMs}ms: ${what}`);
-		}
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		if (predicate()) return;
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
+	throw new Error(
+		`condition not observed within ${maxAttempts} attempts: ${what}`,
+	);
 }
+
+// Fixed-epoch timestamp (deterministic; satisfies check:test-clock without a clock read).
+const FIXED_EPOCH_MS = 1_750_000_000_000;
 
 function digest(text: string): string {
 	return createHash('sha256').update(text).digest('hex');
@@ -197,7 +200,7 @@ describe('late stale generation artifacts stay fenced (issue 2473 AC3)', () => {
 				},
 			},
 			{},
-			Date.now(),
+			FIXED_EPOCH_MS,
 		);
 		expect(outcome.kind).not.toBe('claimed');
 
