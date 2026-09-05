@@ -1532,6 +1532,13 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		// issue #2483: retention { enabled, dry_run } — object-structural
+		// validation only; Zod owns the leaf types (RetentionConfigSchema).
+		case 'retention': {
+			emitObjectTypeMismatch('retention', value, findings);
+			break;
+		}
+
 		case 'review_passes': {
 			emitObjectTypeMismatch('review_passes', value, findings);
 			break;
