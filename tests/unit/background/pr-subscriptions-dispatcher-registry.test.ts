@@ -220,4 +220,33 @@ describe('pr-subscriptions — per-project worker-handler registry + dispatcher 
 		expect(spy).toHaveLength(1); // replaced callback never fires again
 		expect(calls).toHaveLength(2); // dispatcher routing resumed
 	});
+
+	test('stale dispose after a same-root re-init does not strip the newer handler (identity guard)', async () => {
+		const dir = makeTempProject();
+		let routedBy = '';
+		const handlerA = () => {
+			routedBy = 'A';
+		};
+		const handlerB = () => {
+			routedBy = 'B';
+		};
+
+		registerPrMonitorWorkerHandler(dir, handlerA);
+		// Instance B re-initializes the same root before A's late dispose.
+		registerPrMonitorWorkerHandler(dir, handlerB);
+
+		// A's stale dispose passes ITS handler identity: the entry (now B's)
+		// must survive. Mutation probe: an unconditional delete here fails
+		// the routing expectation below.
+		removePrMonitorWorkerHandler(dir, handlerA);
+
+		ensurePrSubscriptionDispatcherInstalled();
+		await subscribeInto(dir, 801);
+		expect(routedBy).toBe('B'); // B's handler still registered and routed
+
+		// B's own dispose (matching identity) removes the entry.
+		removePrMonitorWorkerHandler(dir, handlerB);
+		await subscribeInto(dir, 802);
+		expect(routedBy).toBe('B'); // unchanged: silent no-op after owner left
+	});
 });

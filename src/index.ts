@@ -2578,7 +2578,10 @@ async function initializeOpenCodeSwarm(
 		// (PR #2588, review finding 5): the dispatcher routes subscription
 		// events per canonical root, so only this project's entry may go —
 		// other live projects' entries must survive this instance's teardown.
-		removePrMonitorWorkerHandler(ctx.directory);
+		// The expected-handler guard makes a stale dispose arriving after a
+		// same-root re-init a no-op instead of stripping the newer
+		// instance's registration (final-critic follow-up, this round).
+		removePrMonitorWorkerHandler(ctx.directory, ensurePrMonitorWorkerRunning);
 		prEventCleanup?.();
 		prEventDelivery?.unregisterPrEventDelivery();
 		markSnapshotCoordinationClosing(ctx.directory);

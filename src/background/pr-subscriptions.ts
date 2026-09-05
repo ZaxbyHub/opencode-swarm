@@ -233,11 +233,24 @@ export function registerPrMonitorWorkerHandler(
 
 /**
  * Remove a directory's lazy-start handler — the owning instance's cleanup
- * path (dispose or process-exit). Removing a root that was never registered
- * (or whose entry a newer same-root instance already replaced) is a no-op.
+ * path (dispose or process-exit). When `expectedHandler` is provided, the
+ * entry is deleted only if it is still that instance's handler: a stale
+ * dispose arriving after a newer same-root instance re-registered must not
+ * strip the newer instance's registration. Removing a root that was never
+ * registered is a no-op.
  */
-export function removePrMonitorWorkerHandler(directory: string): void {
-	prMonitorWorkerHandlers.delete(canonicalRootKey(directory));
+export function removePrMonitorWorkerHandler(
+	directory: string,
+	expectedHandler?: PrSubscriptionCreatedCallback,
+): void {
+	const key = canonicalRootKey(directory);
+	if (
+		expectedHandler !== undefined &&
+		prMonitorWorkerHandlers.get(key) !== expectedHandler
+	) {
+		return;
+	}
+	prMonitorWorkerHandlers.delete(key);
 }
 
 /**
