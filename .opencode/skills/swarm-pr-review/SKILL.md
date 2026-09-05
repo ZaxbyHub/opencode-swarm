@@ -1725,7 +1725,7 @@ Council findings are supplementary, not authoritative overrides. Do not adopt co
 | `APPROVE_WITH_NOTES` | zero unresolved CRITICAL findings, HIGH findings are downgraded/advisory only, obligations MET or explicitly non-blocking | `APPROVE_WITH_NOTES` -> APPROVE |
 | `REQUEST_CHANGES` | any unresolved HIGH finding, any NOT_MET blocking obligation, multiple MEDIUM findings with the same root cause, or validation/probe evidence indicates user-impacting risk | `REQUEST_CHANGES` -> REQUEST_CHANGES |
 | `BLOCK` | any unresolved CRITICAL finding, unsafe write/git/security issue, evidence integrity break, role/tool permission bypass, or config ratchet violation that can disable required protections | `BLOCK` -> REQUEST_CHANGES |
-| `INCOMPLETE` | machine-only terminal - terminal coverage is PARTIAL or NO_COVERAGE (issue #2383) | `INCOMPLETE` -> INCOMPLETE |
+| `INCOMPLETE` | machine-only terminal - forced under NO_COVERAGE, permitted under PARTIAL or COMPLETE (issue #2383) | `INCOMPLETE` -> INCOMPLETE |
 
 ---
 

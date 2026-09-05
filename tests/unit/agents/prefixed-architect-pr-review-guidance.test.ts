@@ -11,9 +11,12 @@
  * tests or #2529's task/Task normalization.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { getAgentConfigs } from '../../../src/agents';
 import type { PluginConfig } from '../../../src/config';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const minimalConfig = (partial: Partial<PluginConfig> = {}): PluginConfig =>
 	partial as PluginConfig;
@@ -60,14 +63,38 @@ function renderArchitect(
 }
 
 describe('prefixed architect PR_REVIEW guidance (issue #2494 AC6)', () => {
+	let prevXdg: string | undefined;
+	let cfgDir: string;
+
+	beforeEach(() => {
+		// Isolate XDG_CONFIG_HOME (architect-prompt-budget idiom): loadAgentPrompt
+		// reads $XDG_CONFIG_HOME/opencode/opencode-swarm/architect.md and a
+		// developer replacement prompt wholesale-replaces ARCHITECT_PROMPT, which
+		// would make these content assertions fail on that machine while CI stays
+		// green. canonicalMkdtemp is FR-011-compliant (realpath'd temp root).
+		prevXdg = process.env.XDG_CONFIG_HOME;
+		cfgDir = canonicalMkdtemp('swarm-prefixed-architect-');
+		mkdirSync(join(cfgDir, 'opencode', 'opencode-swarm'), { recursive: true });
+		process.env.XDG_CONFIG_HOME = cfgDir;
+	});
+
+	afterEach(() => {
+		if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = prevXdg;
+		rmSync(cfgDir, { recursive: true, force: true });
+	});
+
 	test('local_architect renders MODE: PR_REVIEW guidance with controller tools', () => {
 		const configs = getAgentConfigs(multiSwarmConfig());
 		const local = renderArchitect(configs, 'local_architect');
 
 		expect(local.mode).toBe('primary');
 
-		// PR_REVIEW mode guidance is present in the rendered prompt.
-		expect(local.prompt).toContain('MODE: PR_REVIEW');
+		// PR_REVIEW mode guidance is present in the rendered prompt. The '###'
+		// section-header form is pinned specifically: a bare 'MODE: PR_REVIEW'
+		// substring also occurs in the PR_FEEDBACK cross-reference, so the plain
+		// toContain survives removal of the entire guidance section.
+		expect(local.prompt).toContain('### MODE: PR_REVIEW');
 		// The bundled swarm-pr-review skill load instruction is present.
 		expect(local.prompt).toContain('swarm-pr-review/SKILL.md');
 		// The PR_REVIEW guidance carries the terminal machine verdict surface

@@ -97,44 +97,75 @@ describe('skill/host executable-contract guardrail (issue #2494)', () => {
 		expect(offenders).toEqual([]);
 	});
 
-	test('swarm-pr-review publishes a display->machine mapping for every advertised verdict', () => {
+	test('swarm-pr-review publishes the exact display->machine mapping in BOTH surfaces', () => {
 		const lines = readRepoFile(SWARM_PR_REVIEW).split(/\r?\n/);
 
-		// Advertised display verdicts = first table column of the Merge
-		// Recommendation Table (backticked), plus `INCOMPLETE` as the
-		// machine-only terminal row.
-		const advertised = new Set<string>();
-		let inTable = false;
-		for (const line of lines) {
-			if (/^#\s+Merge Recommendation Table\s*$/.test(line.trim())) {
-				inTable = true;
-				continue;
-			}
-			if (inTable && /^#{1,3}\s/.test(line.trim())) break;
-			if (!inTable) continue;
-			const m = line.match(/^\|\s*`([A-Z_]+)`\s*\|/);
-			if (m) advertised.add(m[1]);
-		}
-		expect([...advertised].sort()).toEqual([
-			'APPROVE',
-			'APPROVE_WITH_NOTES',
-			'BLOCK',
-			'INCOMPLETE',
-			'REQUEST_CHANGES',
-		]);
+		// The pinned #2494 contract: each advertised display verdict maps to
+		// exactly this machine target, in EACH publication surface (the Merge
+		// Recommendation Table AND the Final Output ## Verdict bullets — the
+		// bullet list is the emission instruction a model follows at report
+		// time, so per-surface agreement is asserted, not whole-file presence).
+		const expectedTargets: Record<string, string> = {
+			APPROVE: 'APPROVE',
+			APPROVE_WITH_NOTES: 'APPROVE',
+			REQUEST_CHANGES: 'REQUEST_CHANGES',
+			BLOCK: 'REQUEST_CHANGES',
+			INCOMPLETE: 'INCOMPLETE',
+		};
+		const machineGroup = '(APPROVE|REQUEST_CHANGES|INCOMPLETE)(?!_WITH_NOTES)';
 
-		for (const display of advertised) {
-			const re = new RegExp(
-				'`?' +
-					display +
-					'`?' +
-					MAPPING_CONNECTOR +
-					'(APPROVE|REQUEST_CHANGES|INCOMPLETE)(?!_WITH_NOTES)',
+		const collectMappings = (
+			startRe: RegExp,
+			rowRe: RegExp,
+			into: Map<string, string>,
+		): void => {
+			let inside = false;
+			for (const line of lines) {
+				if (startRe.test(line.trim())) {
+					inside = true;
+					continue;
+				}
+				if (inside && /^#{1,3}\s/.test(line.trim())) break;
+				if (!inside) continue;
+				const col = line.match(rowRe);
+				if (!col) continue;
+				const m = line.match(
+					new RegExp('`?' + col[1] + '`?' + MAPPING_CONNECTOR + machineGroup),
+				);
+				// machineGroup is capture group 1 (the connector group is
+				// non-capturing).
+				if (m) into.set(col[1], m[1]);
+			}
+		};
+
+		const tableMappings = new Map<string, string>();
+		collectMappings(
+			/^#\s+Merge Recommendation Table\s*$/,
+			/^\|\s*`([A-Z_]+)`\s*\|/,
+			tableMappings,
+		);
+		const bulletMappings = new Map<string, string>();
+		collectMappings(/^##\s+Verdict\s*$/, /^-\s*`([A-Z_]+)`/, bulletMappings);
+
+		for (const [display, target] of Object.entries(expectedTargets)) {
+			expect(tableMappings.get(display)).toBe(
+				target,
+				`Merge Recommendation Table must map ${display} -> ${target}`,
 			);
-			expect(lines.some((l) => re.test(l))).toBeTrue(
-				`no published mapping line for display verdict ${display}`,
-			);
+			if (display !== 'INCOMPLETE') {
+				// INCOMPLETE is machine-only by design: table row only, no bullet.
+				expect(bulletMappings.get(display)).toBe(
+					target,
+					`## Verdict bullets must map ${display} -> ${target}`,
+				);
+			}
 		}
+		// No un-pinned display verdict may appear in either surface.
+		const pinned = Object.keys(expectedTargets).sort();
+		expect([...tableMappings.keys()].sort()).toEqual(pinned);
+		expect([...bulletMappings.keys()].sort()).toEqual(
+			pinned.filter((k) => k !== 'INCOMPLETE'),
+		);
 
 		// Honesty guard: a BLOCK-condition review can never approve.
 		const blockMapsToApprove = lines.some((l) =>
@@ -147,13 +178,17 @@ describe('skill/host executable-contract guardrail (issue #2494)', () => {
 
 	test('blanket no-partial clauses are scoped to the N-of-6 terminal settlement', () => {
 		const lines = readRepoFile(SWARM_PR_REVIEW).split(/\r?\n/);
-		const settlementToken = /N-of-6|settle|settlement|#2383|unsettled/i;
+		// Specific tokens only (N-of-6 / issue #2383): a generic "settle" match
+		// would also pass a negated rewrite like "settlement is never allowed".
+		const settlementToken = /N-of-6|#2383/i;
 		const anchors = [/^14\.\s/, /^15\.\s/, /COVERAGE GATE CONDITION/];
 		for (const anchor of anchors) {
 			const idx = lines.findIndex((l) => anchor.test(l));
 			expect(idx).toBeGreaterThanOrEqual(0);
-			const window = lines.slice(idx, idx + 4).join('\n');
-			expect(settlementToken.test(window)).toBeTrue(
+			// Each anchor is a single-line clause; scoping the anchor's own line
+			// (not a multi-line window) prevents a sibling rule's settlement
+			// token from masking this clause losing its scoping.
+			expect(settlementToken.test(lines[idx])).toBeTrue(
 				`clause at line ${idx + 1} lacks N-of-6 settlement scoping`,
 			);
 		}
