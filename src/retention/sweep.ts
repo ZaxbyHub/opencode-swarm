@@ -37,7 +37,7 @@ import {
 	SUBTREE_SCAN_CAP,
 	subtreeNewestFileMtime,
 } from './dir-prune';
-import { readTailJsonl } from './jsonl-cap';
+import { readTailJsonlDetailed } from './jsonl-cap';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -345,16 +345,27 @@ export async function runRetentionSweep(
 	return result;
 }
 
-/** Terminal-state detection from lifecycle.jsonl tail (toState) or state.json. */
+/**
+ * Terminal-state detection from lifecycle.jsonl tail (toState) or state.json.
+ * Reads the tail through the DETAILED reader (review FB-11): a torn
+ * (unterminated) trailing line makes the ledger tail state UNCERTAIN, so the
+ * candidate is not declared terminal from it — the state.json fallback (and
+ * ultimately the 90d age-only backstop) owns that decision instead.
+ */
 async function candidateIsTerminal(candidateDir: string): Promise<boolean> {
-	const fromLedger = await readTailJsonl<{ toState?: string; type?: string }>(
-		path.join(candidateDir, 'lifecycle.jsonl'),
-		{ maxEntries: 1, maxBytes: 64 * 1024 },
-	);
-	const last = fromLedger[fromLedger.length - 1];
-	if (last) {
-		const state = (last.toState ?? last.type ?? '') as SkillOptState;
-		if (isTerminal(state)) return true;
+	const ledger = await readTailJsonlDetailed<{
+		toState?: string;
+		type?: string;
+	}>(path.join(candidateDir, 'lifecycle.jsonl'), {
+		maxEntries: 1,
+		maxBytes: 64 * 1024,
+	});
+	if (!ledger.tailTruncated) {
+		const last = ledger.records[ledger.records.length - 1];
+		if (last) {
+			const state = (last.toState ?? last.type ?? '') as SkillOptState;
+			if (isTerminal(state)) return true;
+		}
 	}
 	try {
 		const stateJson = JSON.parse(

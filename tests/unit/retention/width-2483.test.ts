@@ -130,3 +130,53 @@ describe('capsule listing cap width (review FB-18)', () => {
 		expect(existsSync(path.join(capsulesDir, 'task-0000.json'))).toBe(true);
 	});
 });
+
+describe('sweep cancellation token (review FB-10 round-2 regression)', () => {
+	it('records sweep_cancelled and prunes nothing when the token is already expired', async () => {
+		const root = makeRoot('cancel-immediate');
+		const staleRun = path.join(root, '.swarm', 'runs', 'stale.json');
+		mkdirSync(path.dirname(staleRun), { recursive: true });
+		writeFileSync(staleRun, '{}');
+		utimesSync(
+			staleRun,
+			new Date(NOW - 40 * 24 * 60 * 60 * 1000),
+			new Date(NOW - 40 * 24 * 60 * 60 * 1000),
+		);
+
+		const result = await runRetentionSweep(root, {
+			now: NOW,
+			shouldContinue: () => false,
+		});
+
+		expect(Object.keys(result.pruned)).toEqual([]);
+		expect(result.errors.sweep_cancelled).toBeDefined();
+		expect(existsSync(staleRun)).toBe(true);
+	});
+
+	it('stops before the FIRST post-family pass when the token expires after the directory families', async () => {
+		const root = makeRoot('cancel-post-family');
+		// familiesFor() currently yields 10 directory families, so polls
+		// 1..10 are the family-loop polls; poll 11 is the first post-family
+		// pass (review-receipts index). The token allows exactly the family
+		// polls and expires there — pinning the round-2 six-pass coverage.
+		const staleSummary = path.join(root, '.swarm', 'summaries', 'S1.json');
+		mkdirSync(path.dirname(staleSummary), { recursive: true });
+		writeFileSync(staleSummary, '{}');
+		utimesSync(
+			staleSummary,
+			new Date(NOW - 40 * 24 * 60 * 60 * 1000),
+			new Date(NOW - 40 * 24 * 60 * 60 * 1000),
+		);
+
+		let polls = 0;
+		const result = await runRetentionSweep(root, {
+			now: NOW,
+			shouldContinue: () => ++polls <= 10,
+		});
+
+		expect(result.errors.sweep_cancelled).toContain('review-receipts-index');
+		// The summaries pass was never reached.
+		expect(existsSync(staleSummary)).toBe(true);
+		expect(result.pruned['summaries-retention']).toBeUndefined();
+	});
+});
