@@ -204,7 +204,7 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 		assertWithinBudget(getScenarioBudget('create-transient-retry'), {
 			host_launches: hostLaunches,
 			attempts: hostLaunches + OBSERVED_SAME_MODEL_RETRIES_AT_LAUNCH,
-			wall_clock_ms: performance.now() - startedAt,
+			wall_clock_ms: Math.round(performance.now() - startedAt),
 		});
 		expect(hostLaunches).toBe(3);
 	});
