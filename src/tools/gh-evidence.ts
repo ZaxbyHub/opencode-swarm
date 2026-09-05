@@ -1,10 +1,13 @@
-import path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import {
 	resolveExecutableFromPath,
 	runExternalTool,
 } from '../utils/external-tool-runner';
+import {
+	resolveGhExecutable,
+	windowsGhAbsoluteCandidates,
+} from '../utils/gh-executable';
 import { containsControlChars } from '../utils/path-security';
 import { neutralizeUntrustedMarkdown } from '../utils/untrusted-markdown';
 import { createSwarmTool } from './create-tool';
@@ -128,10 +131,7 @@ interface GhEvidenceError {
 }
 
 interface GhBinaryCandidateOptions {
-	env?: Pick<
-		NodeJS.ProcessEnv,
-		'ProgramFiles' | 'ProgramFiles(x86)' | 'LOCALAPPDATA'
-	>;
+	env?: NodeJS.ProcessEnv;
 	platform?: NodeJS.Platform;
 }
 
@@ -142,38 +142,32 @@ export function resolveGhBinaryCandidates(
 	if (platform !== 'win32') return ['gh'];
 
 	const env = options.env ?? process.env;
-	const candidates = ['gh'];
-	const pushCandidate = (...parts: string[]): void => {
-		const candidate = path.join(...parts);
-		if (!candidates.includes(candidate)) candidates.push(candidate);
-	};
-
-	if (env.ProgramFiles) {
-		pushCandidate(env.ProgramFiles, 'GitHub CLI', 'gh.exe');
-	}
-	if (env['ProgramFiles(x86)']) {
-		pushCandidate(env['ProgramFiles(x86)'], 'GitHub CLI', 'gh.exe');
-	}
-	if (env.LOCALAPPDATA) {
-		pushCandidate(env.LOCALAPPDATA, 'GitHub CLI', 'gh.exe');
-		pushCandidate(env.LOCALAPPDATA, 'Programs', 'GitHub CLI', 'gh.exe');
-	}
-
-	return candidates;
+	// Issue #2476 AC1 / source #2262: ABSOLUTE candidates come first; the
+	// bare name is no longer a candidate at all — `resolveGhExecutable()`
+	// owns the full ordering contract (override → platform absolutes → PATH
+	// matches → bare fallback LAST) and this list now only feeds the legacy
+	// absolute-candidates surface.
+	return windowsGhAbsoluteCandidates(env);
 }
 
 /**
- * Resolve the `gh` binary to invoke. Exported (issue #2236 hardening, lane
- * C1b) so other call sites that need a `gh` executable — e.g. `src/git/pr.ts`,
- * `src/commands/pr-monitor-status.ts` — reuse this resolver instead of
- * spawning a bare `'gh'` literal or inventing a second gh resolver. Returns
- * `null` when no candidate is found; callers should fall back to the bare
- * `'gh'` literal (mirrors `resolveGitExecutable()`'s "never regress a working
- * host" fallback in `src/utils/git-executable.ts`).
+ * Resolve the `gh` binary for the gh_evidence tool. Exported (issue #2236
+ * hardening, lane C1b) so other call sites that need a `gh` executable — e.g.
+ * `src/git/pr.ts`, `src/commands/pr-monitor-status.ts` — reuse this resolver
+ * instead of spawning a bare `'gh'` literal or inventing a second gh resolver.
+ *
+ * Issue #2476 AC1: delegates to the hardened twin of the git resolver
+ * (`src/utils/gh-executable.ts`) — absolute-candidate-first ordering,
+ * absoluteness requirement, `gh --version` probe, bounded budget, caching.
+ * Returns `null` when nothing validated (the resolver's bare-`'gh'` terminal
+ * fallback maps here to null so the tool renders its gh-not-found guidance
+ * exactly as a scan-miss did before); callers that spawn directly should use
+ * `resolveGhExecutable()` instead, which never returns null.
  */
 export function resolveGhBinary(): string | null {
 	if (ghBinaryTestPin !== undefined) return ghBinaryTestPin;
-	return _internals.resolveExecutableFromPath(resolveGhBinaryCandidates());
+	const resolved = _internals.resolveGhExecutable();
+	return resolved === 'gh' ? null : resolved;
 }
 
 /**
@@ -564,11 +558,13 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 export const _internals: {
 	resolveGhBinaryCandidates: typeof resolveGhBinaryCandidates;
 	resolveExecutableFromPath: typeof resolveExecutableFromPath;
+	resolveGhExecutable: typeof resolveGhExecutable;
 	resolveGhBinary: typeof resolveGhBinary;
 	runExternalTool: typeof runExternalTool;
 } = {
 	resolveGhBinaryCandidates,
 	resolveExecutableFromPath,
+	resolveGhExecutable,
 	resolveGhBinary,
 	runExternalTool,
 };

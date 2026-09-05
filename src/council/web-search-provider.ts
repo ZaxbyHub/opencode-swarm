@@ -12,6 +12,7 @@
  * Malformed but successful responses produce an empty result array, never throw.
  */
 
+import { withTimeoutSignal } from '../utils/timeout.js';
 import type {
 	GeneralCouncilConfig,
 	WebSearchResult,
@@ -65,6 +66,15 @@ interface BraveResponse {
 	};
 }
 
+/**
+ * Bounded, abortable deadline for every provider fetch (issue #2476 AC6).
+ * A provider that accepts the connection but never responds must turn into a
+ * typed `WebSearchError` here, not an indefinitely pending council pass.
+ * AbortSignal.timeout is available on every supported runtime (Bun >= 1.3,
+ * Node >= 17.3; this repo pins Node >= 22.13).
+ */
+const SEARCH_TIMEOUT_MS = 6_000;
+
 export class TavilyProvider implements WebSearchProvider {
 	constructor(private readonly apiKey: string) {}
 
@@ -84,13 +94,28 @@ export class TavilyProvider implements WebSearchProvider {
 		}
 
 		let response: Response;
+		// #2476 AC6: bounded abortable fetch. withTimeoutSignal (the
+		// repo-sanctioned native-timeout replacement, #1964/#2103) trips a
+		// manual AbortController at the deadline and races the operation.
+		const timeoutError = new WebSearchError(
+			`Tavily search timed out after ${SEARCH_TIMEOUT_MS}ms`,
+		);
 		try {
-			response = await fetch('https://api.tavily.com/search', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(requestBody),
-			});
+			response = await withTimeoutSignal(
+				(signal) =>
+					fetch('https://api.tavily.com/search', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify(requestBody),
+						signal,
+					}),
+				SEARCH_TIMEOUT_MS,
+				timeoutError,
+			);
 		} catch (err) {
+			// PRR-008: surface the deadline miss itself, not a "network error"
+			// wrapper that mislabels it for consumers printing err.message.
+			if (err === timeoutError) throw err;
 			throw new WebSearchError(
 				`Tavily network error for query "${query}"`,
 				err,
@@ -149,15 +174,26 @@ export class BraveProvider implements WebSearchProvider {
 		}
 
 		let response: Response;
+		// #2476 AC6 — same sanctioned timeout wrapper as Tavily above.
+		const braveTimeoutError = new WebSearchError(
+			`Brave search timed out after ${SEARCH_TIMEOUT_MS}ms`,
+		);
 		try {
-			response = await fetch(url.toString(), {
-				method: 'GET',
-				headers: {
-					'X-Subscription-Token': this.apiKey,
-					Accept: 'application/json',
-				},
-			});
+			response = await withTimeoutSignal(
+				(signal) =>
+					fetch(url.toString(), {
+						method: 'GET',
+						headers: {
+							'X-Subscription-Token': this.apiKey,
+							Accept: 'application/json',
+						},
+						signal,
+					}),
+				SEARCH_TIMEOUT_MS,
+				braveTimeoutError,
+			);
 		} catch (err) {
+			if (err === braveTimeoutError) throw err;
 			throw new WebSearchError(`Brave network error for query "${query}"`, err);
 		}
 

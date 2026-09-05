@@ -633,6 +633,27 @@ printing anything else is rejected, so an arbitrary executable cannot be
 mistaken for git — this applies to the environment variable and every
 automatically discovered candidate too, not just the config value.
 
+### GitHub CLI (`gh`)
+
+Related hardening (issue #2476): the gh executable the plugin invokes for
+`gh`-backed features (`pr.ts`, `gh_evidence`, pr-monitor status) is resolved
+by `src/utils/gh-executable.ts` with the same candidate discipline as git:
+platform absolute locations first, then every `gh` match on `PATH` (accepted
+only if `<candidate> --version` exits 0 and prints gh's own
+`gh version <major>.<minor>…` line), then the bare `gh` name as a terminal
+fallback.
+
+There is deliberately **no `gh.binary` config key** — the only override is the
+environment variable:
+
+| Env var | Description |
+|---------|-------------|
+| `OPENCODE_SWARM_GH_BINARY` | Absolute path to the gh executable to try first. An unusable value (relative, missing, or failing the version probe) is skipped with a warning and the resolver falls through its built-in candidate list — it never breaks gh availability. |
+
+Like `OPENCODE_SWARM_GIT_BINARY`, this is a user/machine-level escape hatch; no
+repository-supplied value can ever name a gh candidate. See
+`describeGhResolution()` for a diagnostic of the most recent probe cycle.
+
 ### Memory
 
 Optional scoped memory substrate for recall and proposal-only memory writes.

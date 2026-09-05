@@ -16,8 +16,8 @@ import {
 	listActive,
 	type PrSubscriptionHealth,
 } from '../background/pr-subscriptions.js';
-import { resolveGhBinary } from '../tools/gh-evidence.js';
 import { runExternalTool } from '../utils/external-tool-runner.js';
+import { resolveGhExecutable } from '../utils/gh-executable.js';
 
 const GH_RUN_LIST_TIMEOUT_MS = 10_000;
 const GH_RUN_LIST_MAX_BYTES = 20_000;
@@ -107,7 +107,7 @@ async function listMergeGroupRuns(
 	prNumber: number,
 ): Promise<{ runs: MergeGroupRun[]; error?: string }> {
 	const result = await runExternalTool({
-		executable: resolveGhBinary() ?? 'gh',
+		executable: resolveGhExecutable(),
 		args: [
 			'run',
 			'list',

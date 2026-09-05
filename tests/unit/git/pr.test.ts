@@ -9,24 +9,21 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as branch from '../../../src/git/branch';
+import * as pr from '../../../src/git/pr';
 
-// Mock spawnSync using spyOn - we'll spy on the module's spawnSync function
 let mockSpawnSync: ReturnType<typeof spyOn>;
-// Store original branch._internals.spawnSync for restoration
 let originalBranchSpawnSync: typeof branch._internals.spawnSync;
+let originalPrResolveGh: typeof pr._internals.resolveGhExecutable;
+let originalPrResolveGit: typeof pr._internals.resolveGitExecutable;
 
 describe('PR Creation - Comprehensive Tests', () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
-		// Create a temporary directory for each test
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-test-'));
 
-		// Setup .swarm directory for plan.json
 		fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 
-		// Mock spawnSync using bun:test spyOn for pr.ts functions (isGhAvailable, isAuthenticated, etc.)
-		// Note: This intercepts pr.ts's __spawnSyncSeam calls (via spawnSyncWithTransientRetry)
 		mockSpawnSync = spyOn(child_process, 'spawnSync').mockImplementation(
 			() => ({
 				status: 0,
@@ -36,28 +33,31 @@ describe('PR Creation - Comprehensive Tests', () => {
 		);
 
 		// Also mock branch._internals.spawnSync to intercept gitExec calls from branch.ts
-		// This is needed because commitAndPush calls gitExec (from branch.ts)
-		// The mock uses a function that delegates to the spy, respecting mockReturnValueOnce
 		originalBranchSpawnSync = branch._internals.spawnSync;
 		branch._internals.spawnSync = ((cmd, args, options) => {
-			// Call through the spy to respect mockReturnValueOnce chain
-			// The spy is set up via spyOn and mockReturnValueOnce in tests
 			return mockSpawnSync(
 				cmd,
 				args,
 				options as Parameters<typeof child_process.spawnSync>[2],
 			);
 		}) as typeof branch._internals.spawnSync;
+
+		// #2476: pin resolver seams to bare names for exact argv assertions.
+		originalPrResolveGh = pr._internals.resolveGhExecutable;
+		originalPrResolveGit = pr._internals.resolveGitExecutable;
+		pr._internals.resolveGhExecutable = () => 'gh';
+		pr._internals.resolveGitExecutable = () => 'git';
 	});
 
 	afterEach(async () => {
-		// Restore the mocks
 		if (mockSpawnSync) {
 			mockSpawnSync.mockRestore();
 		}
 		if (originalBranchSpawnSync) {
 			branch._internals.spawnSync = originalBranchSpawnSync;
 		}
+		pr._internals.resolveGhExecutable = originalPrResolveGh;
+		pr._internals.resolveGitExecutable = originalPrResolveGit;
 		try {
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 		} catch {

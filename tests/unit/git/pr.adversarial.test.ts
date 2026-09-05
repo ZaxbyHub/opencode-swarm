@@ -23,7 +23,7 @@
  * 3. Control characters are removed
  */
 
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as realFs from 'node:fs';
 import * as realPath from 'node:path';
 
@@ -66,7 +66,6 @@ const mockSpawnSync = mock(
 	},
 );
 
-// Mock fs and path modules properly
 const mockFs: Record<string, unknown> = {};
 const mockFsModule = {
 	...realFs,
@@ -81,7 +80,6 @@ const mockPathModule = {
 	join: (...parts: string[]) => parts.join('/'),
 };
 
-// Mock the node:child_process module BEFORE importing pr
 import * as realChildProcess from 'node:child_process';
 
 mock.module('node:child_process', () => ({
@@ -92,7 +90,6 @@ mock.module('node:child_process', () => ({
 mock.module('node:fs', () => mockFsModule);
 mock.module('node:path', () => mockPathModule);
 
-// Import AFTER mock setup - need to import branch first to get its functions
 const branch = await import('../../../src/git/branch');
 const {
 	sanitizeInput,
@@ -100,7 +97,12 @@ const {
 	generateEvidenceMd,
 	isGhAvailable,
 	isAuthenticated,
+	_internals: prInternals,
 } = await import('../../../src/git/pr');
+
+// #2476: pin the resolver seams to bare names so spawn argv assertions stay exact.
+const originalGhResolver = prInternals.resolveGhExecutable;
+const originalGitResolver = prInternals.resolveGitExecutable;
 
 function setupMock(
 	...values: Array<{ status: number; stdout: string; stderr: string }>
@@ -127,13 +129,19 @@ describe('Git PR Module - Adversarial Security Tests', () => {
 		spawnCalls = [];
 		returnValues = [];
 		mockSpawnSync.mockClear();
+		// #2476: bare-name resolvers keep argv assertions exact.
+		prInternals.resolveGhExecutable = () => 'gh';
+		prInternals.resolveGitExecutable = () => 'git';
 		// Reset mock fs
 		Object.keys(mockFs).forEach((key) => delete mockFs[key]);
 	});
 
-	// ========================================================================
+	afterEach(() => {
+		prInternals.resolveGhExecutable = originalGhResolver;
+		prInternals.resolveGitExecutable = originalGitResolver;
+	});
+
 	// CRITICAL: Verify spawnSync uses array arguments (not shell string)
-	// ========================================================================
 
 	describe('CRITICAL: spawnSync uses array arguments (not shell string)', () => {
 		test('createPullRequest passes arguments as array, not shell command', async () => {
@@ -182,9 +190,7 @@ describe('Git PR Module - Adversarial Security Tests', () => {
 		});
 	});
 
-	// ========================================================================
 	// SECTION 1: Command Substitution Prevention (the critical security feature)
-	// ========================================================================
 
 	describe('Attack Vector 1: Command injection - verify sanitizeInput neutralizes', () => {
 		test('sanitizeInput escapes backticks to prevent command substitution', () => {
@@ -255,9 +261,7 @@ describe('Git PR Module - Adversarial Security Tests', () => {
 		});
 	});
 
-	// ========================================================================
 	// SECTION 2: Control Character Removal
-	// ========================================================================
 
 	describe('Attack Vector 2: Control character removal', () => {
 		test('sanitizeInput removes all C0 control characters (0x00-0x1F)', () => {
@@ -338,9 +342,7 @@ describe('Git PR Module - Adversarial Security Tests', () => {
 		});
 	});
 
-	// ========================================================================
 	// SECTION 3: Unicode Handling (these chars are NOT in control char range)
-	// ========================================================================
 
 	describe('Attack Vector 3: Unicode normalization attacks', () => {
 		test('sanitizeInput preserves RTL override characters (not control chars)', () => {
@@ -385,9 +387,7 @@ describe('Git PR Module - Adversarial Security Tests', () => {
 		});
 	});
 
-	// ========================================================================
 	// SECTION 4: Path Traversal (cwd parameter - passed through to gh CLI)
-	// ========================================================================
 
 	describe('Attack Vector 4: Path traversal in cwd parameter', () => {
 		test('cwd is passed through to gh CLI (path validation at OS level)', async () => {
@@ -441,9 +441,7 @@ describe('Git PR Module - Adversarial Security Tests', () => {
 		});
 	});
 
-	// ========================================================================
 	// SECTION 5: Malformed plan.json Handling
-	// ========================================================================
 
 	describe('Attack Vector 5: Malformed plan.json payloads', () => {
 		test('handles invalid JSON gracefully', () => {
@@ -507,9 +505,7 @@ describe('Git PR Module - Adversarial Security Tests', () => {
 		});
 	});
 
-	// ========================================================================
 	// SECTION 6: Regex Denial of Service Prevention
-	// ========================================================================
 
 	describe('Attack Vector 6: Regex denial of service', () => {
 		// Note: These tests verify URL parsing handles various inputs
@@ -537,9 +533,7 @@ describe('Git PR Module - Adversarial Security Tests', () => {
 		});
 	});
 
-	// ========================================================================
 	// SECTION 7: Oversized Input Handling
-	// ========================================================================
 
 	describe('Attack Vector 7: Oversized inputs', () => {
 		test('sanitizeInput handles 10MB title efficiently', () => {
@@ -570,9 +564,7 @@ describe('Git PR Module - Adversarial Security Tests', () => {
 		});
 	});
 
-	// ========================================================================
 	// SECTION 8: Integration - Full Attack Scenario
-	// ========================================================================
 
 	describe('Integration: Full attack scenarios', () => {
 		test('sanitizeInput handles complex multi-attack input', () => {
