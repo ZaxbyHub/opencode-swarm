@@ -84,6 +84,11 @@ const baseFiles = [
 	'package.json',
 	'opencode-swarm.schema.json',
 	...expectedGrammars,
+	// The dev-tree tarball ships the .gitkeep placeholders for the sandbox
+	// runner binary directories (the release pipeline replaces them with the
+	// compiled executables — issue #2475).
+	'binaries/win32-x64/.gitkeep',
+	'binaries/win32-arm64/.gitkeep',
 	...REQUIRED_EVALUATION_FIXTURE_IDS.flatMap((id: string) => [
 		`evaluation-fixtures/tier1/${id}/manifest.json`,
 		`evaluation-fixtures/tier1/${id}/instruction.md`,
@@ -281,5 +286,92 @@ describe('package-smoke validatePackageFiles', () => {
 		expect(result.errors).toContain(
 			'unexpected bundled skill package file: .opencode/skills/design-docs/generated/debug.json',
 		);
+	});
+});
+
+describe('package-smoke sandbox runner binary contract (#2475)', () => {
+	const filesWithoutBinaries = baseFiles.filter(
+		(f) => !f.path.startsWith('binaries/'),
+	);
+
+	const withBinaries = [
+		...filesWithoutBinaries,
+		{ path: 'binaries/win32-x64/swarm-sandbox-runner.exe', size: 1_200_000 },
+		{ path: 'binaries/win32-arm64/swarm-sandbox-runner.exe', size: 1_100_000 },
+	];
+
+	test('default (PR) mode: .gitkeep placeholders satisfy the directory contract', () => {
+		const result = validatePackageFiles(
+			baseFiles,
+			expectedGrammars,
+			expectedProjectSkillFiles,
+		);
+
+		expect(result.ok).toBe(true);
+	});
+
+	test('default (PR) mode: missing binaries directory for either arch fails', () => {
+		const result = validatePackageFiles(
+			filesWithoutBinaries,
+			expectedGrammars,
+			expectedProjectSkillFiles,
+		);
+
+		expect(result.ok).toBe(false);
+		expect(result.errors).toContain(
+			'missing binaries/win32-x64/ package directory (expected swarm-sandbox-runner.exe or the .gitkeep placeholder)',
+		);
+		expect(result.errors).toContain(
+			'missing binaries/win32-arm64/ package directory (expected swarm-sandbox-runner.exe or the .gitkeep placeholder)',
+		);
+	});
+
+	test('require mode: real binaries pass', () => {
+		const result = validatePackageFiles(
+			withBinaries,
+			expectedGrammars,
+			expectedProjectSkillFiles,
+			{ requireSandboxBinaries: true },
+		);
+
+		expect(result.ok).toBe(true);
+	});
+
+	test('require mode (release path): placeholders alone fail — a release must ship the runners', () => {
+		const result = validatePackageFiles(
+			baseFiles,
+			expectedGrammars,
+			expectedProjectSkillFiles,
+			{ requireSandboxBinaries: true },
+		);
+
+		expect(result.ok).toBe(false);
+		expect(result.errors).toContain(
+			'missing sandbox runner binary: binaries/win32-x64/swarm-sandbox-runner.exe (required for release packages — the native Windows sandbox must ship)',
+		);
+		expect(result.errors).toContain(
+			'missing sandbox runner binary: binaries/win32-arm64/swarm-sandbox-runner.exe (required for release packages — the native Windows sandbox must ship)',
+		);
+	});
+
+	test('require mode: an implausibly small runner exe fails', () => {
+		const result = validatePackageFiles(
+			[
+				...filesWithoutBinaries,
+				{ path: 'binaries/win32-x64/swarm-sandbox-runner.exe', size: 42 },
+				{
+					path: 'binaries/win32-arm64/swarm-sandbox-runner.exe',
+					size: 1_100_000,
+				},
+			],
+			expectedGrammars,
+			expectedProjectSkillFiles,
+			{ requireSandboxBinaries: true },
+		);
+
+		expect(result.ok).toBe(false);
+		expect(
+			result.errors.some((e: string) => e.includes('implausibly small')),
+		).toBe(true);
 	});
 });

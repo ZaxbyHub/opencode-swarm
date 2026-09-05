@@ -16,6 +16,20 @@ fn probe_returns_valid_json() {
 }
 
 #[test]
+fn probe_reports_protocol_contract_fields() {
+    // Issue #2475: the TypeScript client refuses binaries whose probe lacks
+    // protocol_schema_version == 1 or a non-empty runner_version. If these
+    // assertions fail, every shipped plugin would refuse the runner.
+    let result = run_probe();
+    assert_eq!(
+        result.protocol_schema_version,
+        swarm_sandbox_runner::policy::PROTOCOL_SCHEMA_VERSION
+    );
+    assert_eq!(result.protocol_schema_version, 1);
+    assert!(!result.runner_version.is_empty());
+}
+
+#[test]
 fn probe_arch_is_known() {
     let result = run_probe();
     assert!(

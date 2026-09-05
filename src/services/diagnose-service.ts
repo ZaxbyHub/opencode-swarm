@@ -23,6 +23,7 @@ import { loadPlanJsonOnly } from '../plan/manager';
 import { SandboxCapabilityProbe } from '../sandbox/capability-probe.js';
 import { getExecutor } from '../sandbox/executor.js';
 import { getSandboxSkipSummary } from '../sandbox/skip-state.js';
+import { sanitizeDiagnosticText } from '../scope/path-identity';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { getAgentSession } from '../state.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
@@ -955,6 +956,18 @@ async function getSandboxStatus(sessionID?: string): Promise<HealthCheck> {
 
 		const executor = await _internals.getSandboxExecutor();
 		const hasExecutor = executor !== null;
+		// Issue #2475: surface WHY the native runner is not in effect (probe
+		// error, e.g. binary missing/wrong-arch/protocol mismatch, or an
+		// explicit disable) so the diagnose line explains downgrades.
+		// probeResult / disabledReason are optional members of the SandboxExecutor
+		// interface (src/sandbox/executor.ts); executors without a runner binary
+		// leave both undefined.
+		const downgradeReason =
+			executor?.probeResult?.error ?? executor?.disabledReason ?? null;
+		const downgradeDetail =
+			downgradeReason !== null && downgradeReason !== undefined
+				? ` | downgrade reason: ${sanitizeDiagnosticText(downgradeReason, 200)}`
+				: '';
 
 		if (hasExecutor) {
 			// An available executor is NOT automatically strong. The Windows
@@ -974,7 +987,7 @@ async function getSandboxStatus(sessionID?: string): Promise<HealthCheck> {
 				return {
 					name: 'Sandbox',
 					status: '⚠️',
-					detail: `Mechanism: ${mechanism.toLowerCase()} | ${dimensions} | Partial boundary: ${reasons}${skipDetail}`,
+					detail: `Mechanism: ${mechanism.toLowerCase()} | ${dimensions} | Partial boundary: ${reasons}${downgradeDetail}${skipDetail}`,
 				};
 			}
 

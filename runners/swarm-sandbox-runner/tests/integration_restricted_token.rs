@@ -23,6 +23,7 @@ fn test_policy(workspace: &str, temp: &str) -> Policy {
             "SYSTEMROOT".to_string(),
         ],
         env_overrides: HashMap::new(),
+        env_unsets: Vec::new(),
         path_stubs: vec!["ssh.exe".to_string(), "curl.exe".to_string()],
         private_desktop: false,
         deny_alternate_data_streams: true,

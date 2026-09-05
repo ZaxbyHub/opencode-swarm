@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Policy schema version this runner speaks. The TypeScript client refuses
+/// binaries whose probe reports a different value (stale or foreign binary).
+pub const PROTOCOL_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
     pub schema_version: u32,
@@ -24,6 +28,12 @@ pub struct Policy {
     pub env_allowlist: Vec<String>,
     #[serde(default)]
     pub env_overrides: HashMap<String, String>,
+    /// Keys removed from the child environment. Applied after the allowlist
+    /// copy and before the forced PATH/TEMP/TMP rewrites, so a nulled
+    /// runner-managed key means "never inherited verbatim" (the managed
+    /// sandboxed value stands) while every other key is genuinely absent.
+    #[serde(default)]
+    pub env_unsets: Vec<String>,
     #[serde(default)]
     pub path_stubs: Vec<String>,
     #[serde(default)]
@@ -85,6 +95,25 @@ impl Policy {
         if self.temp_root.is_empty() {
             return Err(crate::error::RunnerError::PolicyParse(
                 "temp_root must not be empty".into(),
+            ));
+        }
+        // PR review PRR-002: an empty env key is meaningless (no environment
+        // variable has an empty name) and would silently become a no-op or a
+        // map entry under "" after uppercase normalization. Reject it here so
+        // the policy fails closed at parse time instead.
+        if self
+            .env_allowlist
+            .iter()
+            .chain(self.env_unsets.iter())
+            .any(|key| key.is_empty())
+        {
+            return Err(crate::error::RunnerError::PolicyParse(
+                "env_allowlist and env_unsets must not contain empty keys".into(),
+            ));
+        }
+        if self.env_overrides.keys().any(|key| key.is_empty()) {
+            return Err(crate::error::RunnerError::PolicyParse(
+                "env_overrides must not contain empty keys".into(),
             ));
         }
         Ok(())
@@ -163,5 +192,53 @@ mod tests {
         assert_eq!(policy.wall_clock_timeout_ms, 600_000);
         assert_eq!(policy.network_mode, NetworkMode::Off);
         assert!(policy.deny_unc_paths);
+        assert!(policy.env_unsets.is_empty());
+    }
+
+    #[test]
+    fn env_unsets_round_trip() {
+        let json = r#"{
+            "schema_version": 1,
+            "run_id": "test",
+            "workspace_roots": ["C:\\test"],
+            "writable_roots": ["C:\\test"],
+            "temp_root": "C:\\temp",
+            "env_allowlist": ["PATH", "TEMP"],
+            "env_unsets": ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"]
+        }"#;
+        let policy: Policy = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            policy.env_unsets,
+            vec!["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"]
+        );
+        policy.validate().unwrap();
+        let re: Policy = serde_json::from_str(&serde_json::to_string(&policy).unwrap()).unwrap();
+        assert_eq!(re.env_unsets, policy.env_unsets);
+    }
+
+    #[test]
+    fn empty_env_keys_rejected() {
+        // PR review PRR-002: empty keys must fail closed at validate() time.
+        for (field, json) in [
+            ("env_allowlist", r#""env_allowlist": ["PATH", ""]"#),
+            ("env_unsets", r#""env_unsets": [""]"#),
+            ("env_overrides", r#""env_overrides": {"": "value"}"#),
+        ] {
+            let template = r#"{
+                "schema_version": 1,
+                "run_id": "test",
+                "workspace_roots": ["C:\\test"],
+                "writable_roots": ["C:\\test"],
+                "temp_root": "C:\\temp",
+                {field}
+            }"#;
+            let json = template.replace("{field}", json);
+            let policy: Policy = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{field}: unexpected parse error: {e}"));
+            assert!(
+                policy.validate().is_err(),
+                "{field}: empty key must be rejected"
+            );
+        }
     }
 }

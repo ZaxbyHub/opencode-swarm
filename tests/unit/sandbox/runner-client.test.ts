@@ -102,6 +102,8 @@ describe('runner-client probe()', () => {
 			is_admin: false,
 			os_version: '10.0.22631',
 			arch: 'x86_64',
+			runner_version: '0.1.0',
+			protocol_schema_version: 1,
 		};
 
 		_internals.findRunnerBinary = () => 'C:\\fake\\runner.exe';
@@ -133,6 +135,8 @@ describe('runner-client probe()', () => {
 			is_admin: false,
 			os_version: '10.0.22631',
 			arch: 'x86_64',
+			runner_version: '0.1.0',
+			protocol_schema_version: 1,
 		};
 
 		_internals.findRunnerBinary = () => 'C:\\fake\\runner.exe';
