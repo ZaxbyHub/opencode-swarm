@@ -106,12 +106,11 @@ harness name, and never guess:
 | ZCode | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
 
 Host-native JSON-schema transport is optional and currently unregistered on the
-tested OpenCode, Claude Code, Codex, and ZCode host matrix. Profile A therefore
-uses the child-bound `submit_pr_review_result` tool as its supported baseline.
-Any future native integration must implement the fixed internal
-`promptJsonSchema({ sessionId, agent, schema, parts })` seam and pass the
-adapter-present, unsupported-before-execution, provider-failure, timeout, and
-per-session capability tests before registration.
+tested host matrix, so Profile A uses the child-bound `submit_pr_review_result`
+tool as its supported baseline. Any future native integration must implement
+the fixed internal `promptJsonSchema({ sessionId, agent, schema, parts })` seam
+and pass adapter-present, unsupported-before-execution, provider-failure,
+timeout, and per-session capability tests before registration.
 
 **Completion-gate assurance is NOT equivalent across profiles.** Only Profile A
 enforces completion MECHANICALLY: the controller's `complete_pr_workflow` receipt
@@ -125,12 +124,12 @@ repository unless a controller-equivalent receipt gate is added for those profil
 Verify each row against your own current tool list before relying on it; a
 harness may gain or lose capabilities between versions. OpenCode, Claude Code,
 Codex, and ZCode can all spawn fresh-context subagents in current versions —
-run Profile B wherever the session actually exposes that capability, and
-reserve Profile C for sessions that genuinely lack a subagent mechanism; never
-assign a harness to Profile C by name alone. The absence of the controller is
-NOT a BLOCKED condition — Profiles B and C are legitimate execution paths whose
-completion gate is PROCEDURAL (see the completion-gate assurance note above), not
-the mechanically enforced receipt gate Profile A provides.
+run Profile B wherever the session actually exposes that capability; reserve
+Profile C for sessions that genuinely lack a subagent mechanism, never assigning
+a harness to Profile C by name alone. The absence of the controller is NOT a
+BLOCKED condition — Profiles B and C are legitimate execution paths whose
+completion gate is PROCEDURAL (see the note above), not the mechanically
+enforced receipt gate Profile A provides.
 BLOCKED is reserved for bypassing an active controller and for coverage gaps
 that remain unclosable after bounded retries on any profile.
 
@@ -1544,7 +1543,7 @@ BLOCKED. Terminal critic rows are cross-field checked: `DISPROVED` requires
 `NONE`, `UPHELD` requires CRITICAL/HIGH/MEDIUM, and `DOWNGRADED` cannot remain
 CRITICAL.
 
-**COVERAGE GATE alignment:** Critic lane failures apply the COVERAGE GATE (Phase 3) — under Profile A via `dispatch_lanes_async` with `mode: "swarm-pr-review:critic"` and the same exact `pr_head_sha`; under Profiles B/C via a fresh critic subagent or pass. Do NOT mark findings UNVERIFIED or continue past the gap. The orchestrator NEVER fabricates a critic verdict by parsing prose, by tolerating a planning preamble, by presenting partial findings, or by silently accepting reduced coverage.
+**COVERAGE GATE alignment:** Critic lane failures apply the COVERAGE GATE (Phase 3) — under Profile A via `dispatch_lanes_async` with `mode: "swarm-pr-review:critic"` and the same exact `pr_head_sha`; under Profiles B/C via a fresh critic subagent or pass. Do NOT mark findings UNVERIFIED or continue past the gap. The orchestrator NEVER fabricates a critic verdict by parsing prose, by tolerating a planning preamble, by presenting partial findings as complete beyond the truthful N-of-6 settlement, or by silently accepting reduced coverage.
 
 Refuted findings become `DISPROVED` or `ADVISORY`, depending on critic rationale. Downgrades must be listed in the final validation provenance.
 
@@ -1720,12 +1719,13 @@ Council findings are supplementary, not authoritative overrides. Do not adopt co
 
 # Merge Recommendation Table
 
-| Verdict | Condition |
-|---|---|
-| `APPROVE` | zero unresolved CRITICAL findings, zero unresolved HIGH findings, all blocking obligations MET, no required validation phase failed |
-| `APPROVE_WITH_NOTES` | zero unresolved CRITICAL findings, HIGH findings are downgraded/advisory only, obligations MET or explicitly non-blocking |
-| `REQUEST_CHANGES` | any unresolved HIGH finding, any NOT_MET blocking obligation, multiple MEDIUM findings with the same root cause, or validation/probe evidence indicates user-impacting risk |
-| `BLOCK` | any unresolved CRITICAL finding, unsafe write/git/security issue, evidence integrity break, role/tool permission bypass, or config ratchet violation that can disable required protections |
+| Verdict | Condition | `report_verdict` |
+|---|---|---|
+| `APPROVE` | zero unresolved CRITICAL findings, zero unresolved HIGH findings, all blocking obligations MET, no required validation phase failed | `APPROVE` -> APPROVE |
+| `APPROVE_WITH_NOTES` | zero unresolved CRITICAL findings, HIGH findings are downgraded/advisory only, obligations MET or explicitly non-blocking | `APPROVE_WITH_NOTES` -> APPROVE |
+| `REQUEST_CHANGES` | any unresolved HIGH finding, any NOT_MET blocking obligation, multiple MEDIUM findings with the same root cause, or validation/probe evidence indicates user-impacting risk | `REQUEST_CHANGES` -> REQUEST_CHANGES |
+| `BLOCK` | any unresolved CRITICAL finding, unsafe write/git/security issue, evidence integrity break, role/tool permission bypass, or config ratchet violation that can disable required protections | `BLOCK` -> REQUEST_CHANGES |
+| `INCOMPLETE` | machine-only terminal - forced under NO_COVERAGE, permitted under PARTIAL or COMPLETE (issue #2383) | `INCOMPLETE` -> INCOMPLETE |
 
 ---
 
@@ -1746,9 +1746,9 @@ Council findings are supplementary, not authoritative overrides. Do not adopt co
 11. Obligation precedence is deterministic. Do not skip higher-precedence sources to fill gaps with LLM synthesis.
 12. Do not leak secrets from logs, evidence bundles, config files, URLs, or scanner output.
 13. Do not recommend destructive git or filesystem actions as fixes unless they are clearly scoped, safe, and necessary.
-14. If subagents fail, timeout, or return malformed output, retry with corrected parameters (max 2 attempts) through the dispatch mechanism of the active profile — Profile A: the same structured `dispatch_lanes_async` workflow mode and exact `pr_head_sha`, where blocking or direct-Task dispatch cannot preserve the durable provenance contract and is not an equivalent fallback; Profiles B/C: a fresh subagent or pass bound to the same exact `pr_head_sha`. If retries fail, the affected coverage dimension is BLOCKED and must be surfaced to the user before synthesis. Do not fabricate validation results, do not present partial findings, and do not silently mark candidates UNVERIFIED to proceed past the gap.
+14. If subagents fail, timeout, or return malformed output, retry with corrected parameters (max 2 attempts) through the dispatch mechanism of the active profile — Profile A: the same structured `dispatch_lanes_async` workflow mode and exact `pr_head_sha`, where blocking or direct-Task dispatch cannot preserve the durable provenance contract and is not an equivalent fallback; Profiles B/C: a fresh subagent or pass bound to the same exact `pr_head_sha`. If retries fail, the affected coverage dimension is BLOCKED and must be surfaced to the user before synthesis. Do not fabricate validation results, do not present partial findings as complete or beyond the truthful N-of-6 settlement (issue #2383), and do not silently mark candidates UNVERIFIED to proceed past the gap.
 
-15. If context pack, repo graph, deterministic signals, or Swarm artifacts are unavailable, retry with alternative access paths. If a source that should exist on the active profile is still unavailable after retry, the affected coverage dimension is BLOCKED and must be surfaced to the user. A source that cannot exist on the active profile (for example `.swarm/` artifacts outside Profile A) is marked N/A in the validation provenance instead — N/A is disclosure, never a waiver of the dimensions and families that must still be covered. Do not proceed to synthesis with unclosed coverage gaps under a "best available evidence" rationale — the architect is not authorized to produce a degraded review.
+15. If context pack, repo graph, deterministic signals, or Swarm artifacts are unavailable, retry with alternative access paths. If a source that should exist on the active profile is still unavailable after retry, the affected coverage dimension is BLOCKED and must be surfaced to the user. A source that cannot exist on the active profile (for example `.swarm/` artifacts outside Profile A) is marked N/A in the validation provenance instead — N/A is disclosure, never a waiver of the dimensions and families that must still be covered. Do not proceed to synthesis with unclosed coverage gaps under a "best available evidence" rationale — the architect is not authorized to produce a degraded review that hides a coverage gap; the disclosed N-of-6 PARTIAL/NO_COVERAGE settlement (issue #2383) is the only sanctioned partial exit.
 
 ---
 
@@ -1794,7 +1794,7 @@ If any reviewer lane lacks a parseable `[REVIEWED]` row after bounded
 re-dispatch, the reviewer dimension is BLOCKED. Do not infer or silently
 downgrade a verdict.
 
-**COVERAGE GATE CONDITION:** If ANY validation dimension shows incomplete coverage (lanes that failed and were not closed by retry or verified equivalent alternative, CI that did not run, tools that were unavailable after retry), the Pre-Synthesis Gate FAILS — apply the COVERAGE GATE (Phase 3). Do not proceed to final output. Surface unclosed gaps with exact failing dimensions and retry/equivalence evidence.
+**COVERAGE GATE CONDITION:** If ANY validation dimension shows incomplete coverage that was not settled through the truthful N-of-6 terminal settlement (issue #2383) — lanes that failed and were not closed by retry or verified equivalent alternative, CI that did not run, tools that were unavailable after retry — the Pre-Synthesis Gate FAILS — apply the COVERAGE GATE (Phase 3). Do not proceed to final output. Surface unclosed gaps with exact failing dimensions and retry/equivalence evidence.
 
 ---
 
@@ -1872,12 +1872,13 @@ List concise reasons for notable false positives from explorers, tools, council 
 
 ## Verdict
 
-Use one of:
+Use one display verdict; the value after `->` is its exact `complete_pr_workflow`
+`report_verdict` (#2494 vocabulary bridge; severity/action policy owned by #2491):
 
-- `APPROVE`
-- `APPROVE_WITH_NOTES`
-- `REQUEST_CHANGES`
-- `BLOCK`
+- `APPROVE` -> APPROVE
+- `APPROVE_WITH_NOTES` -> APPROVE (notes stay in the report body)
+- `REQUEST_CHANGES` -> REQUEST_CHANGES
+- `BLOCK` -> REQUEST_CHANGES
 
 ## Merge recommendation
 
@@ -1941,9 +1942,8 @@ Legacy receipts derive the exact original commit from the stash and restore a
 uniquely matching local branch when one exists (otherwise detached).
 
 Under Profiles B/C, no mechanical response gate exists: the Pre-Synthesis Gate
-checklist is the completion gate. Emit the final report only after every
-checklist line is filled, every dimension and family is attested, and every
-BLOCKED item is surfaced.
+checklist is the completion gate. Emit the final report only after every line
+is filled, every dimension and family attested, and every BLOCKED item surfaced.
 
 ## Aborting an unrecoverable review (Profile A)
 
