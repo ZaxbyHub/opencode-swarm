@@ -180,14 +180,19 @@ export async function runRetentionSweep(
 	// run/batch/candidate directory whose files are all past the horizon is
 	// pruned even when the directory node's own mtime was refreshed by
 	// unrelated metadata churn. The optional `shouldContinue` token (review
-	// FB-10) is polled before each family so an externally-cancelled sweep
-	// stops promptly instead of finishing its remaining pass.
-	for (const family of familiesFor(swarmRoot, now)) {
+	// FB-10) is polled before every family AND before every later pass so an
+	// externally-cancelled sweep stops promptly instead of finishing its
+	// remaining work.
+	const cancelled = (label: string): boolean => {
 		if (options.shouldContinue && !options.shouldContinue()) {
 			result.errors.sweep_cancelled =
-				'sweep cancelled by shouldContinue token before family ' + family.label;
-			return result;
+				'sweep cancelled by shouldContinue token before ' + label;
+			return true;
 		}
+		return false;
+	};
+	for (const family of familiesFor(swarmRoot, now)) {
+		if (cancelled(family.label)) return result;
 		try {
 			const pruned = await pruneDirectory(family.dir, {
 				maxAgeMs: family.maxAgeMs,
@@ -205,6 +210,7 @@ export async function runRetentionSweep(
 	// 1b. Review-receipts index coherence: receipt files pruned above (or by
 	// any other actor) must not leave dangling index entries — the manifest
 	// is rewritten atomically (temp+rename, same as the append side).
+	if (cancelled('review-receipts-index')) return result;
 	try {
 		const dropped = await pruneDanglingReceiptIndexEntries(projectRoot, {
 			dryRun,
@@ -218,6 +224,7 @@ export async function runRetentionSweep(
 	// 2. Whole-file age deletion for the rebuildable epic diagnostics
 	// (divergence re-accumulates on new observations; calibration re-learns;
 	// writer-side caps bound them between sweeps).
+	if (cancelled('epic-diagnostics')) return result;
 	for (const [label, rel] of [
 		['epic-divergence', path.join('epic', 'divergence.jsonl')],
 		['epic-calibration', path.join('epic', 'calibration.json')],
@@ -242,6 +249,7 @@ export async function runRetentionSweep(
 	}
 
 	// 3. Legacy `.imported` doc-drift cold archives (post-SQLite-migration).
+	if (cancelled('doc-drift-imported')) return result;
 	try {
 		const legacy = await fs.promises
 			.readdir(swarmRoot)
@@ -271,6 +279,7 @@ export async function runRetentionSweep(
 	// 4. Evolution candidates: prune a candidate directory when its lifecycle
 	// is terminal AND it is older than the family horizon; an age-only
 	// backstop (90d) keeps the keyspace finite when state is unreadable.
+	if (cancelled('evolution-terminal-candidates')) return result;
 	try {
 		const evolutionRoot = path.join(swarmRoot, 'evolution', 'skills');
 		const pruned = await pruneEvolutionCandidates(evolutionRoot, now, dryRun);
@@ -282,6 +291,7 @@ export async function runRetentionSweep(
 
 	// 5. `_eval-input` scratch (7d) and quarantine sidecars (30d) under
 	// evolution/skills/**.
+	if (cancelled('evolution-scratch')) return result;
 	try {
 		let evalPruned = 0;
 		await walkEvolution(
@@ -308,6 +318,7 @@ export async function runRetentionSweep(
 
 	// 6. Summaries retention (the previously-dead `summaries.retention_days`
 	// becomes live through this production call site).
+	if (cancelled('summaries-retention')) return result;
 	try {
 		const retentionDays =
 			options.summariesRetentionDays ?? DEFAULT_SUMMARIES_RETENTION_DAYS;

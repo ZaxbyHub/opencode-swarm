@@ -27,7 +27,9 @@ machinery. This change installs bounds at three layers:
   pr-feedback events, PR-review reentry-authorization shadows and run
   artifacts, review receipts, lane results, capsules, run logs, skill and
   skill-improver proposals (14-day pending-review expiry), and recovery
-  files at 30 days; the rebuildable `epic/divergence.jsonl` and
+  files at 30 days (each family pass carries a bounded stat-scan budget of
+  100,000 — stats, not deletions — so legitimately large keyspaces finish
+  enumerating); the rebuildable `epic/divergence.jsonl` and
   `epic/calibration.json` diagnostics and legacy `doc-drift-phase-*.json.imported`
   archives are deleted whole at 30 days; terminal skill-evolution candidates
   are pruned 30 days after reaching a terminal state (with a 90-day

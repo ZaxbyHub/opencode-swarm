@@ -235,6 +235,16 @@ async function appendAndCap(
 }
 
 /**
+ * Test/inspection seam (review round 2): exposes the mutex so the
+ * concurrent-append test can assert the chain fully drains instead of
+ * reasoning about the self-deletion logic.
+ */
+export const _internals = {
+	appendChains,
+	withFileLock,
+};
+
+/**
  * Append `line` (a bare JSON record without the trailing newline) to
  * `filePath`, enforcing the caps with a crash-atomic compaction when
  * exceeded. Calls for the same file serialize through a per-file async
