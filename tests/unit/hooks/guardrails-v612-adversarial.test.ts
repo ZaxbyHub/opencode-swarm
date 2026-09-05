@@ -29,6 +29,7 @@ import {
 	_internals,
 	createGuardrailsHooks,
 } from '../../../src/hooks/guardrails';
+import { getDeferredWarnings } from '../../../src/services/warning-buffer';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -61,9 +62,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		_internals.allowUncorrelatedGateReceipts = false;
 	});
 
-	// ============================================================
 	// ATTACK VECTOR 1: Architect exemption bypass via activeAgent poisoning
-	// ============================================================
 	describe('Attack Vector 1 — activeAgent poisoning', () => {
 		it('activeAgent set to architect DOES exempt session (expected behavior per v6.1.2 design)', async () => {
 			// Use an unknown agent name so the base config is used (no built-in profile override)
@@ -144,9 +143,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		});
 	});
 
-	// ============================================================
 	// ATTACK VECTOR 2: ORCHESTRATOR_NAME injection via config
-	// ============================================================
 	describe('Attack Vector 2 — Config injection attempts', () => {
 		it('malicious config with enabled:false survives validation failure on OTHER field', () => {
 			const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proj-'));
@@ -233,9 +230,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		});
 	});
 
-	// ============================================================
 	// ATTACK VECTOR 3: Race condition — activeAgent cleared between checks
-	// ============================================================
 	describe('Attack Vector 3 — Race condition: activeAgent cleared mid-check', () => {
 		it('guardrails fallback uses ORCHESTRATOR_NAME when activeAgent deleted before ensureAgentSession', async () => {
 			const guardrailsConfig = GuardrailsConfigSchema.parse({
@@ -290,9 +285,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		});
 	});
 
-	// ============================================================
 	// ATTACK VECTOR 4: startAgentSession with ORCHESTRATOR_NAME
-	// ============================================================
 	describe('Attack Vector 4 — startAgentSession with ORCHESTRATOR_NAME', () => {
 		it('startAgentSession("architect") sets activeAgent to "architect"', () => {
 			startAgentSession('architect-session', ORCHESTRATOR_NAME);
@@ -338,9 +331,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		});
 	});
 
-	// ============================================================
 	// ATTACK VECTOR 5: startAgentSession with prefixed architect name
-	// ============================================================
 	describe('Attack Vector 5 — startAgentSession with prefixed architect name', () => {
 		it('startAgentSession("mega_architect") sets activeAgent to "mega_architect"', () => {
 			startAgentSession('prefixed-session', 'mega_architect');
@@ -403,9 +394,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		});
 	});
 
-	// ============================================================
 	// ATTACK VECTOR 6: Boundary — empty string agentName
-	// ============================================================
 	describe('Attack Vector 6 — Boundary: empty string agentName', () => {
 		it('startAgentSession with empty string does not crash', () => {
 			expect(() => {
@@ -457,9 +446,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		});
 	});
 
-	// ============================================================
 	// ATTACK VECTOR 7: Boundary — null/undefined guardrails in fallback
-	// ============================================================
 	describe('Attack Vector 7 — Boundary: null/undefined guardrails in fallback', () => {
 		it('config.guardrails?.enabled === false returns false when guardrails is null', () => {
 			const config = { guardrails: null };
@@ -529,9 +516,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		});
 	});
 
-	// ============================================================
 	// ATTACK VECTOR 8: Double-disable — validation failure AND explicit disable
-	// ============================================================
 	describe('Attack Vector 8 — Double-disable: validation failure + explicit disable', () => {
 		it('guardrails remains enabled when BOTH validation fails AND enabled:false is set', () => {
 			const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proj-'));
@@ -650,9 +635,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		});
 	});
 
-	// ============================================================
 	// ADDITIONAL ADVERSARIAL: Edge cases and boundary violations
-	// ============================================================
 	describe('Additional adversarial edge cases', () => {
 		it('attempt to set negative max_tool_calls is rejected by Zod', () => {
 			expect(() => {
@@ -696,8 +679,20 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 			try {
 				const config = loadPluginConfig(projectDir);
 
-				// Config should be valid
-				expect(config.guardrails?.enabled).toBe(true);
+				// #2476 AC2: deepMerge now refuses the payload outright — the
+				// ENTIRE project config is dropped (stronger than the old
+				// merge-then-sanitize), so its guardrails block never lands
+				// and the SECURITY advisory names the dangerous key.
+				expect(config.guardrails?.enabled).toBeUndefined();
+				const warnings = getDeferredWarnings();
+				expect(
+					warnings.some(
+						(w: string) =>
+							w.includes('SECURITY') &&
+							w.includes('Ignoring the entire project config') &&
+							w.includes('constructor'),
+					),
+				).toBe(true);
 
 				// Prototype pollution should not affect plain objects
 				// eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -721,9 +716,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		});
 	});
 
-	// ============================================================
 	// ATTACK VECTOR 9: Gate Tracking Manipulation (v6.12)
-	// ============================================================
 	describe('Attack Vector 9 — Gate tracking manipulation', () => {
 		it('ATTACK: tool name with namespace prefix (opencode:lint) IS recognized as gate', async () => {
 			const guardrailsConfig = GuardrailsConfigSchema.parse({

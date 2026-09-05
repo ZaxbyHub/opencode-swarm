@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { isCommandAvailable } from '../build/discovery';
 import { warn } from '../utils';
 import { bunSpawn, classifySpawnFailure } from '../utils/bun-compat';
+import { resolveExecutableFromPath } from '../utils/external-tool-runner';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -20,7 +21,42 @@ const AUDIT_TIMEOUT_MS = 120_000; // 120 seconds
  * functions gate strictly on a non-zero exit and were dispositioned
  * SAFE-EXIT-CHECK by that sweep.
  */
-export const _internals: { bunSpawn: typeof bunSpawn } = { bunSpawn };
+/**
+ * Resolve the spawn command prefix for a package-audit binary (issue #2476
+ * AC5). On POSIX (or when resolution fails) the bare name is returned -- the
+ * historical behavior, which works there. On win32 the absolute candidate is
+ * resolved via resolveExecutableFromPath (.exe/.cmd/.bat variants); a
+ * `.cmd`/`.bat` hit cannot be spawned directly by Node (EINVAL since the
+ * CVE-2024-27980 hardening), so it is routed through cmd.exe as
+ * `/d /s /c call "<resolved>"` -- everything after `/c` is cmd's own command
+ * line, the repo-documented windowsVerbatimArguments pattern. Empirically
+ * verified on Windows (node & Bun): a bare quoted tail `"<path>"` is mangled
+ * by cmd's /s quote-stripping (the last quote in the line is removed), while
+ * the `call` prefix keeps the quoted path intact for paths containing spaces
+ * such as C:\Program Files. Callers append their fixed literal arguments
+ * (`audit --json`) as separate argv elements; verbatim joining keeps them
+ * outside the quoted path. The only interpolated value is the resolved
+ * ABSOLUTE path, rejected when it contains any cmd metacharacter
+ * (`" & | < > ^ ! %`) so the verbatim command line degrades to the bare-name
+ * fallback rather than through any cmd re-interpretation; the remaining
+ * tokens are fixed literals.
+ */
+function resolveAuditCommandDefault(name: 'npm' | 'cargo'): string[] {
+	if (process.platform !== 'win32') return [name];
+	const resolved = resolveExecutableFromPath([name]);
+	if (!resolved) return [name];
+	const lowered = resolved.toLowerCase();
+	if (lowered.endsWith('.cmd') || lowered.endsWith('.bat')) {
+		if (/["&|<>^!%]/.test(resolved)) return [name];
+		return ['cmd.exe', '/d', '/s', '/c', 'call "' + resolved + '"'];
+	}
+	return [resolved];
+}
+
+export const _internals: {
+	bunSpawn: typeof bunSpawn;
+	resolveAuditCommand: typeof resolveAuditCommandDefault;
+} = { bunSpawn, resolveAuditCommand: resolveAuditCommandDefault };
 
 // ============ Types ============
 type Severity = 'critical' | 'high' | 'moderate' | 'low' | 'info';
@@ -281,13 +317,16 @@ function cargoAuditFailure(command: string[], error: unknown): AuditResult {
 }
 
 async function runNpmAudit(directory: string): Promise<AuditResult> {
-	const command = ['npm', 'audit', '--json'];
+	const command = [..._internals.resolveAuditCommand('npm'), 'audit', '--json'];
 
 	try {
 		const proc = _internals.bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
+			// #2476 AC5: the cmd.exe-routed form carries a pre-quoted verbatim
+			// tail; keep Node from re-quoting it into a broken command line.
+			...(command[0] === 'cmd.exe' ? { windowsVerbatimArguments: true } : {}),
 		});
 
 		const timeoutPromise = new Promise<'timeout'>((resolve) =>
@@ -636,13 +675,20 @@ interface CargoAuditResponse {
 }
 
 async function runCargoAudit(directory: string): Promise<AuditResult> {
-	const command = ['cargo', 'audit', '--json'];
+	const command = [
+		..._internals.resolveAuditCommand('cargo'),
+		'audit',
+		'--json',
+	];
 
 	try {
 		const proc = _internals.bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
+			// #2476 AC5: the cmd.exe-routed form carries a pre-quoted verbatim
+			// tail; keep Node from re-quoting it into a broken command line.
+			...(command[0] === 'cmd.exe' ? { windowsVerbatimArguments: true } : {}),
 		});
 
 		const timeoutPromise = new Promise<'timeout'>((resolve) =>

@@ -2,8 +2,9 @@ import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
-import { resolveGhBinary } from '../tools/gh-evidence.js';
 import { mergeEnvForChild } from '../utils/bun-compat';
+import { resolveGhExecutable } from '../utils/gh-executable.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import { warn } from '../utils/logger.js';
 import {
 	isTransientSpawnError,
@@ -19,6 +20,7 @@ import {
 	readLaneEnvFileFromDiskSync,
 	stageAll,
 } from './branch.js';
+import { assertSafeGitRefArg } from './safe-ref';
 
 export const GIT_TIMEOUT_MS = 30_000;
 const EvidencePlanSchema = z
@@ -73,12 +75,16 @@ export function sanitizeInput(input: string): string {
 export function ghExec(args: string[], cwd: string): string {
 	// Issue #2236 hardening (lane C1b): resolve the `gh` binary ONCE per call
 	// via the shared resolver in `src/tools/gh-evidence.ts` (do not invent a
-	// second one). `resolveGhBinary()` returns `null` when no candidate is
-	// found; fall back to the bare `'gh'` literal so a host that resolves
-	// `gh` via plain PATH lookup at spawn time never regresses (same
+	// second one). Since #2476 AC1 the hardened resolver
+	// (`src/utils/gh-executable.ts`) returns the bare `'gh'` literal itself
+	// when nothing validates, so a host that resolves `gh` via plain PATH
+	// lookup at spawn time never regresses (same
 	// "never regress a working host" philosophy as
 	// `resolveGitExecutable()`'s bare-`'git'` last-resort fallback).
-	const ghBinary = _internals.resolveGhBinary() ?? 'gh';
+	// #2476 AC1: the hardened gh resolver never returns null — the bare
+	// 'gh' fallback is its own terminal outcome (probe/caching live in
+	// src/utils/gh-executable.ts).
+	const ghBinary = _internals.resolveGhExecutable();
 	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
 		const result = child_process.spawnSync(ghBinary, args, {
 			cwd,
@@ -225,7 +231,7 @@ export async function ghExecAsync(
 	return new Promise<string>((resolve, reject) => {
 		// See ghExec() above for the resolver rationale (issue #2236 hardening,
 		// lane C1b) — same shared resolver, same bare-`'gh'` fallback.
-		const ghBinary = _internals.resolveGhBinary() ?? 'gh';
+		const ghBinary = _internals.resolveGhExecutable();
 		const proc = child_process.spawn(ghBinary, args, {
 			cwd,
 			// stdin must be 'ignore' to prevent pipe blocking on Windows (AGENTS.md v7.3.3)
@@ -322,7 +328,8 @@ export const _internals: {
 	spawnSync: typeof __spawnSyncSeam.spawnSync;
 	readLaneEnvFileFromDiskSync: typeof readLaneEnvFileFromDiskSync;
 	getMergeGroupRun: typeof getMergeGroupRun;
-	resolveGhBinary: typeof resolveGhBinary;
+	resolveGhExecutable: typeof resolveGhExecutable;
+	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
 	ghExec,
 	ghExecAsync,
@@ -330,7 +337,8 @@ export const _internals: {
 	spawnSync: __spawnSyncSeam.spawnSync,
 	readLaneEnvFileFromDiskSync,
 	getMergeGroupRun,
-	resolveGhBinary,
+	resolveGhExecutable,
+	resolveGitExecutable,
 };
 
 /**
@@ -468,8 +476,10 @@ export async function commitAndPush(
 	stageAll(cwd, laneEnv, laneIndex);
 
 	// Check if there are changes to commit
+	// #2476 AC4: wrapper-hidden bare 'git' literals must route through the
+	// shared resolver like every other spawn site.
 	const statusResult = spawnSyncWithTransientRetry(
-		'git',
+		_internals.resolveGitExecutable(),
 		['status', '--porcelain'],
 		{
 			cwd,
@@ -492,9 +502,15 @@ export async function commitAndPush(
 
 	// Push
 	const branch = await getCurrentBranch(cwd, laneEnv, laneIndex);
+	// Issue #2476 AC3: branch is repository-derived (getCurrentBranch git
+	// output); a hostile repo can advertise a dash-leading branch name, which
+	// git would parse as an option in the refspec position (source #2265).
+	// `push <remote> -- <refspec>` is semantics-preserving for benign names
+	// and fail-closed for hostile ones (R3 probe), plus the validation guard.
+	assertSafeGitRefArg(branch, 'commitAndPush push refspec');
 	const _pushResult = spawnSyncWithTransientRetry(
-		'git',
-		['push', '-u', 'origin', branch],
+		_internals.resolveGitExecutable(),
+		['push', '-u', 'origin', '--', branch],
 		{
 			cwd,
 			encoding: 'utf-8',

@@ -115,7 +115,7 @@ describe('resetToMainAfterMerge', () => {
 				(c) => c.args[0] === 'branch' && c.args[1] === '-d',
 			);
 			expect(deleteCall).toBeDefined();
-			expect(deleteCall!.args[2]).toBe('feat/x');
+			expect(deleteCall!.args.slice(2)).toEqual(['--', 'feat/x']);
 		});
 	});
 
@@ -594,9 +594,9 @@ describe('resetToMainAfterMerge', () => {
 				(c) => c.args[0] === 'branch' && c.args[1] === '-d',
 			);
 			expect(pruneCalls.length).toBe(3); // feat/x + 2 merged branches
-			expect(pruneCalls[0].args[2]).toBe('feat/x');
-			expect(pruneCalls[1].args[2]).toBe('merged-branch-1');
-			expect(pruneCalls[2].args[2]).toBe('merged-branch-2');
+			expect(pruneCalls[0].args.slice(2)).toEqual(['--', 'feat/x']);
+			expect(pruneCalls[1].args.slice(2)).toEqual(['--', 'merged-branch-1']);
+			expect(pruneCalls[2].args.slice(2)).toEqual(['--', 'merged-branch-2']);
 		});
 
 		test('pruneBranches=false (default), no pruning happens', async () => {

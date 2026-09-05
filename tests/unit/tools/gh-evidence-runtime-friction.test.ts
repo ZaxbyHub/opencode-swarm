@@ -74,7 +74,14 @@ describe('gh_evidence runtime friction regressions', () => {
 				LOCALAPPDATA: process.env.LOCALAPPDATA,
 			},
 		});
-		expect(candidates[0]).toBe('gh');
+		// #2476 AC1: the absolute ProgramFiles candidate is now FIRST and the
+		// bare 'gh' name is no longer a candidate at all (the hardened
+		// resolver in src/utils/gh-executable.ts owns the bare-name terminal
+		// fallback, probed LAST).
+		expect(candidates[0]).toBe(
+			path.join('C:\\Program Files', 'GitHub CLI', 'gh.exe'),
+		);
+		expect(candidates).not.toContain('gh');
 		expect(candidates).toContain(
 			path.join('C:\\Program Files', 'GitHub CLI', 'gh.exe'),
 		);

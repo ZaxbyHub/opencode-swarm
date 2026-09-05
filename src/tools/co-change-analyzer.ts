@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import { createSwarmTool } from './create-tool.js';
 
 /** Lazy-bind so mock.module can intercept at call time (#330). */
@@ -46,8 +47,10 @@ export async function parseGitLog(
 	const commitMap = new Map<string, Set<string>>();
 
 	try {
+		// #2476 AC4: the aliased-callee form hid this bare 'git' literal from the
+		// bare-spawn ratchet; route through the shared resolver.
 		const { stdout } = await getExecFileAsync()(
-			'git',
+			resolveGitExecutable(),
 			[
 				'log',
 				'--name-only',
@@ -378,8 +381,10 @@ export async function detectDarkMatter(
 
 	// Check total commits
 	try {
+		// #2476 AC4: the aliased-callee form hid this bare 'git' literal from the
+		// bare-spawn ratchet; route through the shared resolver.
 		const { stdout } = await getExecFileAsync()(
-			'git',
+			resolveGitExecutable(),
 			['rev-list', '--count', 'HEAD'],
 			{
 				cwd: directory,
