@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.139.5",
+  "tagCommit": "aea6e30da4d83f566f03063e29861c80617d9dfc",
+  "targetCommitish": "aea6e30da4d83f566f03063e29861c80617d9dfc",
+  "releaseBodySha256": "4ff9797156a617f73cfb15df612f004a2792d352f485241bbdd84242bab154cc",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/fr-2069-skill-assertion-remediation.md",
+      "sha256": "a79c07ef3addfff9c70fba29315396ca669ff829c2fa2531284fcc73d1d7a403"
+    }
+  ]
+}

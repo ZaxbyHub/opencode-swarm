@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.114.1",
+  "tagCommit": "cd4f1167637fa41a9a06854013fba283b2f7d7e1",
+  "targetCommitish": "cd4f1167637fa41a9a06854013fba283b2f7d7e1",
+  "releaseBodySha256": "8ff69f80b4c13fa79dcf21eca7f0a386b11e0b08fd620465162ba6afd1733653",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/skills-audit-truth-sweep.md",
+      "sha256": "3dd4b5d6375f2507dc64327a0162b694e1a5be64aa52c6cfe21a1b850961ecad"
+    }
+  ]
+}

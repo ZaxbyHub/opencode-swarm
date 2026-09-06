@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.143.6",
+  "tagCommit": "34a6832c68a8faf55ccfff226095a6750bcbf600",
+  "targetCommitish": "34a6832c68a8faf55ccfff226095a6750bcbf600",
+  "releaseBodySha256": "ab5e6378832a55ae35c8ef3029449720c3ea0d1cf38efa5cacf3648d25e683c5",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2242-pipeline-resilience.md",
+      "sha256": "41aff6e5870f2d4e74d2ec6dbf876da481fa571b8aedb7ac8ca658310e747649"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2242-req-coverage-gate-hardening.md",
+      "sha256": "c47e5acaf12ffdfe6731763733ad3534da69f6847928a7cc0f1bbeeb3b2a1387"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/2242-trigger-eval-merge-base-fallback.md",
+      "sha256": "eaa93ed8df22d4bb8dd62706ca93a1b18d05bf44abb9477942eba0f6f9aeaa8a"
+    }
+  ]
+}

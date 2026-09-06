@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.26.2",
+  "tagCommit": "709b99d59e8472d516521a42730fb40a08145575",
+  "targetCommitish": "709b99d59e8472d516521a42730fb40a08145575",
+  "releaseBodySha256": "01d97dad7168d1ce04e3687238cb56c77b4300f8275ff914e7ade325687876e8",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/swarm-plan-legacy-root-cleanup.md",
+      "sha256": "beb3fe354ee5d1ffe9fc74a2cfdfd03aaecfcec347ee6f8ef8c7c7707ffd342b"
+    }
+  ]
+}

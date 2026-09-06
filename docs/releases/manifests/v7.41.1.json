@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.41.1",
+  "tagCommit": "1508f4f5288cb577dd2f1c42d3c9e0f0be0db0fd",
+  "targetCommitish": "1508f4f5288cb577dd2f1c42d3c9e0f0be0db0fd",
+  "releaseBodySha256": "11868365feed68cd6d36dccc5c653721669b84378fcc157bcae0c2660496eb5e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/extract-plan-execute-skills.md",
+      "sha256": "3569d041bb2f8e21ab4131c4c75076d6b63a48a2b93861750803cc7736e497b9"
+    }
+  ]
+}

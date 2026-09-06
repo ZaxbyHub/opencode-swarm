@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.28.3",
+  "tagCommit": "2736f91dd2bdc80d27c06f5fd106b63f30f39980",
+  "targetCommitish": "2736f91dd2bdc80d27c06f5fd106b63f30f39980",
+  "releaseBodySha256": "c7767a0c1542f00539ce73ec0b5e40f16806a2982732266a44befafb3a31c465",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/test-runner-smol-env-gate-process-kill.md",
+      "sha256": "e87f177e40b8874e1e3b775ab8231aa60b2b49b5d02018febfbeed1363a83b93"
+    }
+  ]
+}

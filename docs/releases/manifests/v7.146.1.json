@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.146.1",
+  "tagCommit": "5669fa7991d0f5be26d01f7c57aeb3d6a8de132f",
+  "targetCommitish": "5669fa7991d0f5be26d01f7c57aeb3d6a8de132f",
+  "releaseBodySha256": "79f4d2a2e50fb7725f21a245966048cdde0b34abe3ebad8ca53ada2854435237",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2285-2298-pr-review-resilience.md",
+      "sha256": "5d3681777627cd6f8586a5106aded6f3e9154c39236e2681254fb9f59ea5a7cf"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/fix-stage-a-attribution-wedge.md",
+      "sha256": "118f4fae149dde4a7629835275060cfefe1d0fe0dca2528df193011a684ddf03"
+    }
+  ]
+}

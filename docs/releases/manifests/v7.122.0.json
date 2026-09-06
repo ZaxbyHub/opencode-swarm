@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.122.0",
+  "tagCommit": "b873d706677dd579b92ffebeab2954461e5f16e0",
+  "targetCommitish": "b873d706677dd579b92ffebeab2954461e5f16e0",
+  "releaseBodySha256": "bbe471e1ae9aa246249f2559f63a0fa058f70949b832341bd69132f734059872",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1849-real-host-injection-and-trustworthy-receipts.md",
+      "sha256": "27213c3b712df75b28617b851f696448678115cd8a92a4c627aaed2bfb8b85b6"
+    }
+  ]
+}

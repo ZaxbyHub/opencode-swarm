@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.148.5",
+  "tagCommit": "46053f08babe0bd850008467ce4a5110fe06219d",
+  "targetCommitish": "46053f08babe0bd850008467ce4a5110fe06219d",
+  "releaseBodySha256": "b5556e10e25c61ab8dc72eebdee1ff0bd2db2c27652bc98948dd97da89782623",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/sast-javascript-callee-bindings.md",
+      "sha256": "dd180fc77c28bf6306d59848043be6c4360dde5feb078df004631d4384ac3f70"
+    }
+  ]
+}

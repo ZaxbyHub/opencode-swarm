@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.119.0",
+  "tagCommit": "5c10cd7bdebfeced2eb0f42c97db9657a45a9f82",
+  "targetCommitish": "5c10cd7bdebfeced2eb0f42c97db9657a45a9f82",
+  "releaseBodySha256": "ef69b6c0b3a231b2069a351ad1031c7116bf8d7281c0debf681654f02648dfdd",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1857-swarm-model-cli.md",
+      "sha256": "9a95a0581e0217c37c55c45ef097748e65c31adb83a5b517e86a518c6e9ff8eb"
+    }
+  ]
+}

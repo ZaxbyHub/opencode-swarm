@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.162.1",
+  "tagCommit": "65be86379af9f033fa5354bd5c8a932630f32946",
+  "targetCommitish": "65be86379af9f033fa5354bd5c8a932630f32946",
+  "releaseBodySha256": "b9691ff22c97d7bcf743eb4a980d599060cb7a113012793a398d360c9f6fa7ae",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2385-pr-review-reducer-decomposition.md",
+      "sha256": "e24832c91142dc19eb8a0196bd9496463c4aa84c31567300526eae87708bd159"
+    }
+  ]
+}

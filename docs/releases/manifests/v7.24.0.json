@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.24.0",
+  "tagCommit": "9600d4c65e67980ab2e253b0eb28f9354f4598f2",
+  "targetCommitish": "9600d4c65e67980ab2e253b0eb28f9354f4598f2",
+  "releaseBodySha256": "e8f3fee60515a52b038358896f27520af009e3be37ae754fb1f4ae554128487e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/task-completion-commit-frequency.md",
+      "sha256": "e24b67a17cb5b45b4d3e5cfb022f1bd52dfa2b7a2e5ccc88f783667c4bf2a22e"
+    }
+  ]
+}

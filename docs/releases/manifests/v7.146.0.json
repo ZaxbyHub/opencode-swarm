@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.146.0",
+  "tagCommit": "038fb11f122c83477db063c4e01817e626019ea8",
+  "targetCommitish": "038fb11f122c83477db063c4e01817e626019ea8",
+  "releaseBodySha256": "e2f45f459c015a78275b52ce1f0bab95130ef4219ff234e5cb5f0542fe219694",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1466-phase6-memory-privacy-observability.md",
+      "sha256": "b64fe1a263609e7ece51cc4fe30b455cab38f135ddf63d7c98b21c38965eb014"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2036-retention-read-amplification-registry.md",
+      "sha256": "c96e9be94d0200de10761c21b0e72e62fd28d1cf6e5db321f9382a765a8857d8"
+    }
+  ]
+}

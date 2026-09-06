@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.125.2",
+  "tagCommit": "dbe24a53657fa3546069f9e6a102a137c5e02aa6",
+  "targetCommitish": "dbe24a53657fa3546069f9e6a102a137c5e02aa6",
+  "releaseBodySha256": "12429f4690e9157e50a0a8a282f17e6654d01c5e54faec5409d37065af866163",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/knowledge-gate-deadlock-escape-hatch.md",
+      "sha256": "4dfcd8d09f0706221cef2f93b864f4d135175fdc90c2df9cb57e187d4c0e63ae"
+    }
+  ]
+}

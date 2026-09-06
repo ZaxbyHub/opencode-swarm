@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.145.1",
+  "tagCommit": "737c3ba6bfeff22c73aac7cafc4a461e58deb21d",
+  "targetCommitish": "737c3ba6bfeff22c73aac7cafc4a461e58deb21d",
+  "releaseBodySha256": "4a2a52edaca265aeca26706cc4b0f7407138fa48649326205b0bed7ae5691b0e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2301-placeholder-scan-guard-clause-fp.md",
+      "sha256": "6ae473c4ca1a9997018c2188476ca7931648296c2cd7094322ecf35190808202"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/fix-orchestration-failures-2271.md",
+      "sha256": "df450017197f7436ecf019d4de90e8e99d2b64c69d2a3d7f30e6185f56676614"
+    }
+  ]
+}

@@ -15,11 +15,7 @@ import {
 	_internals,
 	external_skill_promote,
 } from '../../../src/tools/external-skill-promote.js';
-import { seedCandidate } from './_external-skill-promote-fixtures.js';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 /**
  * Call the tool's execute function with a directory context.
@@ -81,6 +77,60 @@ async function writeTestConfig(
 		JSON.stringify(defaultConfig, null, 2),
 		'utf-8',
 	);
+}
+
+/** Seed the store with a candidate and return the created record. */
+async function seedCandidate(
+	directory: string,
+	overrides: {
+		evaluation_verdict?: string;
+		evaluation_history?: Array<{
+			verdict: string;
+			timestamp: string;
+			actor: string;
+			reason?: string;
+			gate_results?: Array<{ gate: string; verdict: string }>;
+			risk_assessment?: {
+				total_flags: number;
+				findings: Array<{ severity: string; category: string }>;
+			};
+		}>;
+		skill_body?: string;
+		sha256?: string;
+		fetched_at?: string;
+	},
+): Promise<ExternalSkillCandidate> {
+	const store = createExternalSkillStore(directory, { max_candidates: 500 });
+	const skillBody =
+		overrides.skill_body ??
+		'This is a safe skill body with no dangerous patterns.';
+
+	// Compute correct SHA-256 if not overridden, so provenance_integrity gate passes
+	let sha256 = overrides.sha256;
+	if (sha256 === undefined) {
+		const { createHash } = await import('node:crypto');
+		sha256 = createHash('sha256').update(skillBody).digest('hex');
+	}
+
+	const fetchedAt =
+		overrides.fetched_at ??
+		withFrozenClock(() => new Date(Date.now() - 60_000).toISOString(), {
+			fixedNow: Date.parse('2026-09-06T12:00:00.000Z'),
+		});
+
+	return store.add({
+		source_url: 'https://example.com/skill.md',
+		source_type: 'github',
+		publisher: 'test-publisher',
+		sha256,
+		fetched_at: fetchedAt,
+		skill_name: 'test-skill',
+		skill_body: skillBody,
+		risk_flags: [],
+		evaluation_verdict: (overrides.evaluation_verdict ??
+			'passed') as ExternalSkillCandidate['evaluation_verdict'],
+		evaluation_history: overrides.evaluation_history ?? [],
+	});
 }
 
 // ---------------------------------------------------------------------------

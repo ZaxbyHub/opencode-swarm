@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.124.0",
+  "tagCommit": "85290ffb62ab9f04e94c0f2807df5117aafcb62a",
+  "targetCommitish": "85290ffb62ab9f04e94c0f2807df5117aafcb62a",
+  "releaseBodySha256": "8b53cb2d17d1a4e02e234a2510b1b1a5a30685c0d6e2465479f5254dbc9f65c3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1850-cohort-memory-sharing.md",
+      "sha256": "01a5099af310bc621b62b0f27368ca19f04d8214429b4870c08ef2ba8585de47"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.146.3",
+  "tagCommit": "ffc364773dc759ee7cb0b0f47d6a7825fe5594eb",
+  "targetCommitish": "ffc364773dc759ee7cb0b0f47d6a7825fe5594eb",
+  "releaseBodySha256": "e916ecd9c65ea20fb85b2f030ca51988b7defb6e6194c07ca2b1a5c6e6fbb0a2",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2037-bound-context-map-telemetry.md",
+      "sha256": "a386b63373f2d81a7406cfec8c24845971999f332866a6e286babc92da7b8e45"
+    }
+  ]
+}

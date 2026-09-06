@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.145.2",
+  "tagCommit": "81729eb1f27d8c79d559706700776624300fa096",
+  "targetCommitish": "81729eb1f27d8c79d559706700776624300fa096",
+  "releaseBodySha256": "388cea92d55bd57917ce3c018ff1e00d18603087d48615dafa16b6d0fdc58379",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2101-phase-final-review-evidence-repair.md",
+      "sha256": "f433705d66100cbc8fe8c71269c1a14f1051968357bcc7dcd1ff82295c170d25"
+    }
+  ]
+}

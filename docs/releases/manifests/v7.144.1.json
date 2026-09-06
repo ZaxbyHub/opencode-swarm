@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.144.1",
+  "tagCommit": "6d8b17d399df70c71d8c961a021064ed4b3a1e43",
+  "targetCommitish": "6d8b17d399df70c71d8c961a021064ed4b3a1e43",
+  "releaseBodySha256": "b0c3694d1c363829607b1569a31d4440984fbdbb32164398b4e6869b7b867962",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1649-architect-prompt-budget-ceiling.md",
+      "sha256": "aa98cdf4af7cdc4e165a05bfe915b663471a4a80cc2be12577a624431e42aa17"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2196-rust-sandbox-runner-clippy-needless-late-init.md",
+      "sha256": "dc222169152eb67597dc475675238321b008df7014622729484bd215cf04f43f"
+    }
+  ]
+}

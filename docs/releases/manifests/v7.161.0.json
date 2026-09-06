@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.161.0",
+  "tagCommit": "5654c1acb696c0b283d3586ceced228e93016724",
+  "targetCommitish": "5654c1acb696c0b283d3586ceced228e93016724",
+  "releaseBodySha256": "77b86f8699bfa20ebe481cf5a5dc07f3a9d11a0412b9174fafa31874403e6eec",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/1537-hybrid-retrieval-router.md",
+      "sha256": "f4b862125b869b720a489c6fb2d4734f2afbc2931c9b89bfaead78570a039fd7"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1964-abort-timeout-guardrail-hardening.md",
+      "sha256": "da8a5e4866a05247ebca9e7e0017312df4dbde98bbe48f937832d95ea8ab9e47"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/issue-2045-task-lane-lifecycle-parity.md",
+      "sha256": "507f550fac7e4489dac09c4996c72e10543333601c94a990d15d104657d3b26d"
+    }
+  ]
+}

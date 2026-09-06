@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.10",
+  "tagCommit": "678aa8130fd84f6e55eec0191c46c06ddf5a2421",
+  "targetCommitish": "678aa8130fd84f6e55eec0191c46c06ddf5a2421",
+  "releaseBodySha256": "6874221eb9bb7c1bb8ef5f4b7a06026278e5b971d2d50e04893db110ff9ca5c9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2526-system-guidance-carrier.md",
+      "sha256": "d7045508ea79fc47829e5440abf35c0ab3ff3e3f96e4a8657802869f986f00f5"
+    }
+  ]
+}

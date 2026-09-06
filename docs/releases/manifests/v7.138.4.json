@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.138.4",
+  "tagCommit": "72aeb8e8e69ffd4e7696b44a7e4b1f871540def7",
+  "targetCommitish": "72aeb8e8e69ffd4e7696b44a7e4b1f871540def7",
+  "releaseBodySha256": "83fa73848a6c36a7dce248fec005550ee593691ccb0cf3fc90e47bce990e7194",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-2096-scope-authority-binding-durability.md",
+      "sha256": "36f36ee066e8455ba1e53447fb8b6335f45be7491a7cf2afe973b14d8797feb9"
+    }
+  ]
+}

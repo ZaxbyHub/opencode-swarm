@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.161.1",
+  "tagCommit": "58e1850ae96e210d8b0de356d3de1dc46b6887f5",
+  "targetCommitish": "58e1850ae96e210d8b0de356d3de1dc46b6887f5",
+  "releaseBodySha256": "76789b32337d60b4cd77df35ea551ca5f62ee77b73373d6ba78717082b3f5571",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/1994-post-mortem-corrections.md",
+      "sha256": "b2991028e643b9bd53ec09c3232af609f24384e35eac99ea8a9733421f60f12e"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2445-plan-critic-model-inheritance.md",
+      "sha256": "7cf17b7754d188c1ccddc4cf5ccc44299755d5dfb310cb9609db904a6b9ff2af"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/2457-review-followups.md",
+      "sha256": "94f652912757635983dd6aa5dd52807362fe66e748f1a0b056bbb2c767ef5b70"
+    }
+  ]
+}

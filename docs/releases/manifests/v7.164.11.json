@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.11",
+  "tagCommit": "ed6437ca787de7c6dc8c4fe17df54fd2ddea6717",
+  "targetCommitish": "ed6437ca787de7c6dc8c4fe17df54fd2ddea6717",
+  "releaseBodySha256": "5f890982c2ba89498a1cc6b6d33cee7808c67c1834f114e906a045c3b79ba440",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2470-gate-semantics-corrupt-evidence.md",
+      "sha256": "c12178ce71d310886eb5987588d2698c8be212de34432949b1649a2a99a82fa1"
+    }
+  ]
+}

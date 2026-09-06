@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.129.3",
+  "tagCommit": "c770a720574c714e1f25b747f0c16914eed519f8",
+  "targetCommitish": "c770a720574c714e1f25b747f0c16914eed519f8",
+  "releaseBodySha256": "c43a956ea5cfcab6a66bfe78012d7465a7fc6213dd42c2cc233c7c5624c91518",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-review-dispatch-async-git-bind.md",
+      "sha256": "0f2be1a694b25dc17ec28cf50f3be0fefd3dcee931b442412178f875f5cc4959"
+    }
+  ]
+}

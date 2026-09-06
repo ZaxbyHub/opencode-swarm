@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.137.2",
+  "tagCommit": "ba88fc6cc74ec12267eaa13910b3e90db6a03f46",
+  "targetCommitish": "ba88fc6cc74ec12267eaa13910b3e90db6a03f46",
+  "releaseBodySha256": "a798d47212bd12fa69be916ea69fbee3c226c77f794f0cfaa9d2737e771f705a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2022-authoritative-council-round-state.md",
+      "sha256": "d684d932118b81beff927d5c97a08e2d03fc375185646f22bca11fafc4f0d832"
+    }
+  ]
+}

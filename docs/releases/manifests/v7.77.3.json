@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.77.3",
+  "tagCommit": "5be13ade65b9c00f0a423b9d4c8b10448e4fa11b",
+  "targetCommitish": "5be13ade65b9c00f0a423b9d4c8b10448e4fa11b",
+  "releaseBodySha256": "81b318154c62007dc52d159359df68a93854169380ad4044fc411d5f221c0aa7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1307-knowledge-transaction-closeout.md",
+      "sha256": "8683db4a469a056d7a3a85b3cfe567c03af1c98a6b8eb18f24c4f6d85f010a93"
+    }
+  ]
+}

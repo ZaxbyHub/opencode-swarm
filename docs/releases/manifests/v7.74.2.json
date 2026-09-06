@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.74.2",
+  "tagCommit": "4d0f7551803ee3af61f78393134493af57713910",
+  "targetCommitish": "4d0f7551803ee3af61f78393134493af57713910",
+  "releaseBodySha256": "b2e06ca2453231cdedf6f6ecc8d3bbbca81aa1d93bf8d39e72d482e901bc42ae",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/external-content-scanning-1278.md",
+      "sha256": "45707b20638f900c16904b3002a38ef6a7ce1c0e0f327bbf53a9add01c983c2c"
+    }
+  ]
+}

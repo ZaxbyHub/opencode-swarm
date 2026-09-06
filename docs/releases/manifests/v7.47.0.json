@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.47.0",
+  "tagCommit": "73fd9e7357d58e6f32541c153d72d839da1bace3",
+  "targetCommitish": "73fd9e7357d58e6f32541c153d72d839da1bace3",
+  "releaseBodySha256": "2a2830a816e4672e6fae0569346fdf6bfac1af33fffa289bc47d43d15f92d146",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1080-design-docs-generation-and-drift-sync.md",
+      "sha256": "c92ebb206a439efd77b95601d920e53b732205d93c8a710852834239775b9329"
+    }
+  ]
+}

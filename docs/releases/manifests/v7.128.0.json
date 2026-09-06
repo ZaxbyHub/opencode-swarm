@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.128.0",
+  "tagCommit": "d99b8ed351cbb61a2fd8e18e47cb9406f26d1394",
+  "targetCommitish": "d99b8ed351cbb61a2fd8e18e47cb9406f26d1394",
+  "releaseBodySha256": "ad86fd9df88de1eb50edbbf7860252535a50798f18463f80752d0f4bb1f2f126",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1905-model-failover-remaining-dispatch-sites.md",
+      "sha256": "1b06ab9f70ab78bec67ca1c118b239121891bc9e8d4df9cc2502129967dcce14"
+    }
+  ]
+}

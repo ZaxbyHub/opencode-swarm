@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.134.2",
+  "tagCommit": "b006717d727689354d3743985a0a5a8323fe5015",
+  "targetCommitish": "b006717d727689354d3743985a0a5a8323fe5015",
+  "releaseBodySha256": "17bf331d39d171be13407f53ccc83308cbeb865016971f3ccb0c966461ab6c6e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1928-shell-write-tee-glued-eval-gaps.md",
+      "sha256": "67bb7716ed77d1ba4c6251bef4805c317449e7cb53bc0a8fef7dc8e8f7b6e7c2"
+    }
+  ]
+}

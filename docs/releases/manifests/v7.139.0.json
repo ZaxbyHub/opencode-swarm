@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.139.0",
+  "tagCommit": "e9c1c65f11135bfb4dc4d948e28cf7dfff81e881",
+  "targetCommitish": "e9c1c65f11135bfb4dc4d948e28cf7dfff81e881",
+  "releaseBodySha256": "45c5dcb8b9d2f7475cb6e944e84fcdb2f97fb4fb9baecc57eba72deeb6f59718",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/run-memory-producer-wiring.md",
+      "sha256": "9ac10fc176ab901f82ab05dda580ad89a73cfc9478fc894a667b36579c9df1e4"
+    }
+  ]
+}

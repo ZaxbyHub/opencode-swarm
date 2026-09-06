@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.78.4",
+  "tagCommit": "e1fa2fb662f2cbd13280516ec09cfe2d8ed19409",
+  "targetCommitish": "e1fa2fb662f2cbd13280516ec09cfe2d8ed19409",
+  "releaseBodySha256": "fd71e645e38d9af19e58a5326d160b31782eacd065c916e38acfb4f4ccabf1c3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1276-swarm-artifact-cache.md",
+      "sha256": "797f580e7b89fe546692a1eff5f9992483d9643029511e822e668e0533607242"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.23.0",
+  "tagCommit": "3c5817b6ccfc8b51b70b38aeae92ffa5b436f767",
+  "targetCommitish": "3c5817b6ccfc8b51b70b38aeae92ffa5b436f767",
+  "releaseBodySha256": "96c4b458c872d122c8c1e518177095d9cb4ae5378b99b9f3ac6a33dfa908aa1d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/skill-context-enrichment.md",
+      "sha256": "6bdb21dcb651ec3fde82676622ab9bfca091dc67d8e7019475f486c57cf1b029"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.166.3",
+  "tagCommit": "08be83096bdadcb295847ed53d13b56be462e7dd",
+  "targetCommitish": "08be83096bdadcb295847ed53d13b56be462e7dd",
+  "releaseBodySha256": "36cf7cfb17547c49bcd83e048c9a864f4fb5a4c0b976033c736b05d6dde418db",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2483-bound-residual-durable-streams.md",
+      "sha256": "d674985bcad0f15b70b7af97283065089771a2aadecb58e5e2335b252030e4df"
+    }
+  ]
+}

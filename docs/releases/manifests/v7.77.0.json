@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.77.0",
+  "tagCommit": "e9a118f41b1ab321581cc8586fa951bb449424a6",
+  "targetCommitish": "e9a118f41b1ab321581cc8586fa951bb449424a6",
+  "releaseBodySha256": "f358ff9b3f3dcc6876146a1680970c36c6bf093dc7a7b6e126247037791eb91c",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1302-wave2-skill-validation-consolidation.md",
+      "sha256": "8d4110bf533ed4710c94b1a2bcdddc24c472c7efc3ed3871670d07b29093cb3d"
+    }
+  ]
+}

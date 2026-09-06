@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.137.0",
+  "tagCommit": "a60f6af97770e22f9aef0963ee7c529c3b29005e",
+  "targetCommitish": "a60f6af97770e22f9aef0963ee7c529c3b29005e",
+  "releaseBodySha256": "e06671ffb24951c82ca7881082d464d3497a085c95140513e0d9ed66b12b6892",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2029-observability-event-contract.md",
+      "sha256": "cf78d2586d71fc55ac482b3d32d51b1de0ecb91bf05d4aaf8a497209a1a8efa8"
+    }
+  ]
+}

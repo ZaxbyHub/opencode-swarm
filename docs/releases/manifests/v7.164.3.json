@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.3",
+  "tagCommit": "f3b6a0890399e9f1520b3bcac6fc5480ae3ae897",
+  "targetCommitish": "f3b6a0890399e9f1520b3bcac6fc5480ae3ae897",
+  "releaseBodySha256": "4c2bdeec14d2abcae31a6e35c1d12c10b3fcaed2338b84272c3d4dd3ef63a47e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1643-tool-registration-invariant-rewrite.md",
+      "sha256": "30acc61c40461d9aeac07884a7b6407d2bae4b81a73b5f9103b5dd719ff20503"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/507-tool-manifest.md",
+      "sha256": "9380facf56e71af2b6c3cc2cae9e811a7825f9b2fc2f57fd25e20aa0a804bf55"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/epic-mode-activation.md",
+      "sha256": "640cef26bcdc38d1876fd63becfdc9a51a22fd7509c8d8067cd434002729044c"
+    }
+  ]
+}

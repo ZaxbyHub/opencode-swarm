@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.29.2",
+  "tagCommit": "29fd8ddf66bf62c0a274586a4f349a7f67cd1761",
+  "targetCommitish": "29fd8ddf66bf62c0a274586a4f349a7f67cd1761",
+  "releaseBodySha256": "b089333cbd9ba24f6cb30024f3fb69d3294068b12bce2cbe3cf223193e528cae",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-985-delegation-continuation.md",
+      "sha256": "ce39e5d70ab8b5d2cc15875ec843e9f446c613c4e730c3eee22c541adb12c81d"
+    }
+  ]
+}

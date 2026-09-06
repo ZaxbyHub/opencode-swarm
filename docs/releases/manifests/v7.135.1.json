@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.135.1",
+  "tagCommit": "1e41c71489922d5d1f1f7888ab84bf481f64cc15",
+  "targetCommitish": "1e41c71489922d5d1f1f7888ab84bf481f64cc15",
+  "releaseBodySha256": "0dfbab3a540192b2af3c1beff483523fbf0e2b9700da9192a38dc710681bd5eb",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2002-worktree-coder-write-scope.md",
+      "sha256": "54d89f38ccd88f65ff0237da0ffee38128bafef00b614d5ece51347b558b0af1"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.118.0",
+  "tagCommit": "e9ec8ce321a427fef4d725d328b50edfde2873c7",
+  "targetCommitish": "e9ec8ce321a427fef4d725d328b50edfde2873c7",
+  "releaseBodySha256": "e6ea31786030c880f427b6ec8b2a8e71c209e2139761f5f8389d96162fa713c4",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1847-transactional-hive-promotion.md",
+      "sha256": "8f11afd033bc0e1c757d9844476db6215f4174adda22aee96a1235b7446c1bc6"
+    }
+  ]
+}

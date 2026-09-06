@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.156.0",
+  "tagCommit": "16c52a69dcb5afa24648829bf445fb30ca5709c8",
+  "targetCommitish": "16c52a69dcb5afa24648829bf445fb30ca5709c8",
+  "releaseBodySha256": "22bef1c8f20b17e4eaa8ff917a620badfdaffb72a7bc4f08800bbceb32c942f7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1825-declarative-harness-evolution.md",
+      "sha256": "6b4c8170f0b38b8cb6d4d85bd8862a63266441ba93bede49dcabbe50c0d249c9"
+    }
+  ]
+}

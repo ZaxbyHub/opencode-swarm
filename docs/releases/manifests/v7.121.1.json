@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.121.1",
+  "tagCommit": "7e1ca67779a31ca66c90ddf19f5afe4d9757b40b",
+  "targetCommitish": "7e1ca67779a31ca66c90ddf19f5afe4d9757b40b",
+  "releaseBodySha256": "110aa76a92d01807674454cfb91e84f31617d703ee8cd1c0df67ec7cc9bb9b7c",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-1688-durable-persistence.md",
+      "sha256": "8c18628e5eba855b3471c25d408ec521f99dacd8df7acdebc94ac63339ce27e9"
+    }
+  ]
+}

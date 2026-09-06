@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.153.1",
+  "tagCommit": "97cd617eaab72258f570862c04887e0d0dc8c47a",
+  "targetCommitish": "97cd617eaab72258f570862c04887e0d0dc8c47a",
+  "releaseBodySha256": "b98a7899ac46619c29c8e3219654e063b0556f113388dab34d8a378b2c888ed0",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2041-prm-trajectory-bounded-store.md",
+      "sha256": "e49cfd0ce276449f8387f72ac9ce7f22a2a14055c8f35ade98467aa4f2c1bdc8"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2105-worktree-redispatch-recovery-status.md",
+      "sha256": "ef3dd4cc8d67f06528fedca87e4b34396ddcc592b13fbc2e20bfd80f5bf7d708"
+    }
+  ]
+}

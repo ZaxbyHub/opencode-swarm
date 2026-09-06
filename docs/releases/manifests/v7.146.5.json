@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.146.5",
+  "tagCommit": "677a673b4010e2e05fa0c115af287b85d71a2664",
+  "targetCommitish": "677a673b4010e2e05fa0c115af287b85d71a2664",
+  "releaseBodySha256": "e897943bec9ecd90a53254eb232fe32dc3da376c3a4a3bebee3eb6b39e46b6d9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1982-quarantine-pr-monitor-status.md",
+      "sha256": "a2cb02eedf7efb3e8b69adfa452ff200af6304000f4a214a16d34126465f27dd"
+    }
+  ]
+}
