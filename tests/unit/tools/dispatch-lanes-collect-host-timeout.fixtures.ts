@@ -33,6 +33,16 @@ export function createCollectLaneTimeoutFixture(
 	// re-appliable because restoreInternals() (afterEach) puts the real clock
 	// back — the owning test file re-pins in beforeEach so every test starts
 	// deterministic while the process is left clean after the final restore.
+	//
+	// FUTURE AUTHORS: if you add a `wait: true` scenario that relies on the
+	// deadline advancing, either override `_internals.now` yourself (see the
+	// 8-lane budget test) or build this fixture with
+	// `{ deterministicClock: false }`. Under the pinned default the deadline
+	// NEVER advances, so such a scenario would poll forever instead of
+	// degrading on the real clock. Current silent inheritors of the pin:
+	// collect-transport-recovery, collect-wait-budget,
+	// transport-validator-timeout, collect-nondestructive-observer,
+	// collect-pending-identities.
 	const pinCollectionClock = () => {
 		_internals.now = () => DETERMINISTIC_COLLECTION_EPOCH;
 	};

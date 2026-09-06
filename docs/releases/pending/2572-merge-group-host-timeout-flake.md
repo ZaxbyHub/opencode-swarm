@@ -14,6 +14,11 @@
   The three sibling suites whose `wait: true` scenarios genuinely need real deadline progression
   (collect-revision-snapshot, collect-diagnostic-lifecycle, pr-review/replay-corpus-observer) opt out
   via `{ deterministicClock: false }` and are unchanged.
+  Five further suites (collect-transport-recovery, collect-wait-budget,
+  transport-validator-timeout, collect-nondestructive-observer,
+  collect-pending-identities) silently inherit the pinned default; their current scenarios settle
+  or self-override independently of the clock, and the fixture doc comment now warns future
+  authors.
 - New regression test: the salvage scenario stays complete when a true 120 ms event-loop stall
   (`Atomics.wait`, no raw clock usage) lands in the exact root-cause window; reverting the fixture's
   clock install turns it red.
