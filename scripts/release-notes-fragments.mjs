@@ -423,6 +423,7 @@ export const MAX_PENDING_FRAGMENT_SCAN = 5_000;
 export const MAX_PENDING_FRAGMENT_RETENTION = 750;
 export const MAX_RELEASE_MANIFEST_SCAN = 1_000;
 const MAX_RELEASE_MANIFEST_BYTES = 1024 * 1024;
+export const MAX_RELEASE_HISTORY_BYTES = 1024 * 1024;
 export const MAX_RELEASE_CANDIDATES = 1_000;
 export const MAX_FRAGMENT_ENTRIES = 5_000;
 export const MAX_FRAGMENT_BYTES = 256 * 1024;
@@ -504,7 +505,14 @@ function safeRepositoryFilePath(repoRoot, relativePath) {
 function defaultReconciliationIo(repoRoot) {
 	return {
 		async readText(relativePath) {
-			return readFileSync(safeRepositoryFilePath(repoRoot, relativePath), 'utf8');
+			const absolute = safeRepositoryFilePath(repoRoot, relativePath);
+			const cap = relativePath.startsWith('docs/releases/manifests/')
+				? MAX_RELEASE_MANIFEST_BYTES
+				: MAX_RELEASE_HISTORY_BYTES;
+			if (lstatSync(absolute).size > cap) {
+				throw new Error('release artifact size cap exceeded: ' + relativePath);
+			}
+			return readFileSync(absolute, 'utf8');
 		},
 		async readBytes(relativePath) {
 			return readBoundedFragmentBytes(repoRoot, relativePath);
@@ -555,27 +563,57 @@ function listPendingFragmentState(repoRoot) {
 	const pendingRoot = path.resolve(repoRoot, FRAGMENT_DIR);
 	if (!existsSync(pendingRoot)) return [];
 	assertSafeDirectoryChain(repoRoot, FRAGMENT_DIR);
-	const names = readDirectoryNamesBounded(
-		pendingRoot,
-		MAX_PENDING_FRAGMENT_SCAN,
-		'pending fragment',
-	);
-	return names
-		.filter((name) => name.toLowerCase().endsWith('.md'))
-		.sort()
-		.map((name) => {
-			const relativePath = FRAGMENT_DIR + '/' + name;
-			const { absolute } = containedPendingPath(repoRoot, relativePath);
-			const stat = lstatSync(absolute);
-			if (stat.isFile() && !stat.isSymbolicLink() && stat.size > MAX_FRAGMENT_BYTES) {
-				throw new Error('release fragment size cap exceeded: ' + relativePath);
+	const pending = [];
+	const directories = [{ absolute: pendingRoot, relativePath: FRAGMENT_DIR }];
+	let scannedEntries = 0;
+	while (directories.length > 0) {
+		const directory = directories.pop();
+		const handle = opendirSync(directory.absolute);
+		try {
+			for (;;) {
+				const entry = handle.readSync();
+				if (entry === null) break;
+				scannedEntries += 1;
+				if (scannedEntries > MAX_PENDING_FRAGMENT_SCAN) {
+					throw new Error(
+						'pending fragment hard scan cap exceeded: more than ' +
+							MAX_PENDING_FRAGMENT_SCAN,
+					);
+				}
+				const relativePath = directory.relativePath + '/' + entry.name;
+				const absolute = path.join(directory.absolute, entry.name);
+				const stat = lstatSync(absolute);
+				if (stat.isDirectory() && !stat.isSymbolicLink()) {
+					directories.push({ absolute, relativePath });
+					continue;
+				}
+				if (!relativePath.toLowerCase().endsWith('.md')) {
+					if (stat.isSymbolicLink()) {
+						throw new Error('unsafe pending fragment directory: ' + relativePath);
+					}
+					continue;
+				}
+				const contained = containedPendingPath(repoRoot, relativePath);
+				if (
+					stat.isFile() &&
+					!stat.isSymbolicLink() &&
+					stat.size > MAX_FRAGMENT_BYTES
+				) {
+					throw new Error('release fragment size cap exceeded: ' + relativePath);
+				}
+				pending.push({
+					relativePath,
+					absolute: contained.absolute,
+					regular: stat.isFile() && !stat.isSymbolicLink(),
+				});
 			}
-			return {
-				relativePath,
-				absolute,
-				regular: stat.isFile() && !stat.isSymbolicLink(),
-			};
-		});
+		} finally {
+			handle.closeSync();
+		}
+	}
+	return pending.sort((left, right) =>
+		left.relativePath.localeCompare(right.relativePath),
+	);
 }
 
 export function auditFragmentRetention(
@@ -660,7 +698,9 @@ export function auditFragmentRetention(
 		if (!Number.isFinite(expiresAt)) {
 			throw new Error('historical replay state expiry is malformed');
 		}
-		if (expiresAt <= nowMs) staleHistoricalReplay = true;
+		if (expiresAt <= nowMs || expiresAt > nowMs + HISTORICAL_REPLAY_TTL_MS) {
+			staleHistoricalReplay = true;
+		}
 		else activeHistoricalReplay = true;
 	}
 	const countViolation =
@@ -872,6 +912,12 @@ export async function reconcileTaggedRelease(options) {
 			})),
 	};
 	const manifestText = JSON.stringify(manifest, null, 2) + '\n';
+	if (Buffer.byteLength(release.body, 'utf8') > MAX_RELEASE_HISTORY_BYTES) {
+		throw new Error('release history size cap exceeded: ' + historyPath);
+	}
+	if (Buffer.byteLength(manifestText, 'utf8') > MAX_RELEASE_MANIFEST_BYTES) {
+		throw new Error('release manifest size cap exceeded: ' + manifestPath);
+	}
 	for (const [relativePath, expected] of [
 		[historyPath, release.body],
 		[manifestPath, manifestText],

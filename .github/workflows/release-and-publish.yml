@@ -299,16 +299,24 @@ jobs:
 
           ## Invariant audit
 
-          - 1-2: not touched — release documentation only
-          - 3: touched — bounded release-note subprocess path
-          - 4-11: not touched — release documentation only
-          - 12: touched — exact-tag release history and cleanup
+          - 1 (plugin init): not touched — cleanup commit changes only docs/releases
+          - 2 (runtime portability): not touched — cleanup commit changes only docs/releases
+          - 3 (subprocesses): not touched — cleanup commit changes only docs/releases
+          - 4 (.swarm containment): not touched — cleanup commit changes only docs/releases
+          - 5 (plan durability): not touched — cleanup commit changes only docs/releases
+          - 6 (test_runner safety): not touched — cleanup commit changes only docs/releases
+          - 7 (test writing): not touched — cleanup commit changes only docs/releases
+          - 8 (session state): not touched — cleanup commit changes only docs/releases
+          - 9 (guardrails/retry): not touched — cleanup commit changes only docs/releases
+          - 10 (chat/system msg): not touched — cleanup commit changes only docs/releases
+          - 11 (tool registration): not touched — cleanup commit changes only docs/releases
+          - 12 (release/cache): touched — exact-tag history/manifest and byte-identical deletion plan completed
 
           ## Test plan
 
           - cleanup plan dry-run succeeded
           - cleanup plan apply succeeded
-          - CI and PR Standards are explicitly dispatched at $head_sha"
+          - CI, PR Standards, and drift/retention are explicitly dispatched at $head_sha"
 
           case "$title" in
             chore\(release\):\ materialize\ *\ fragment\ history) ;;
@@ -352,6 +360,7 @@ jobs:
           dispatch_after="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           gh workflow run ci.yml --ref "$branch"
           gh workflow run pr-standards.yml --ref "$branch" -f pr_number="$pr_number"
+          gh workflow run drift-check.yml --ref "$branch"
 
           wait_for_dispatched_run() {
             workflow="$1"
@@ -375,9 +384,11 @@ jobs:
 
           ci_record="$(wait_for_dispatched_run ci.yml)"
           standards_record="$(wait_for_dispatched_run pr-standards.yml)"
+          drift_record="$(wait_for_dispatched_run drift-check.yml)"
           IFS=$'\t' read -r ci_run_id ci_run_url ci_run_sha <<< "$ci_record"
           IFS=$'\t' read -r standards_run_id standards_run_url standards_run_sha <<< "$standards_record"
-          if [ "$ci_run_sha" != "$head_sha" ] || [ "$standards_run_sha" != "$head_sha" ]; then
+          IFS=$'\t' read -r drift_run_id drift_run_url drift_run_sha <<< "$drift_record"
+          if [ "$ci_run_sha" != "$head_sha" ] || [ "$standards_run_sha" != "$head_sha" ] || [ "$drift_run_sha" != "$head_sha" ]; then
             echo "::error::Dispatched workflow evidence does not match cleanup head $head_sha"
             exit 1
           fi
@@ -386,6 +397,7 @@ jobs:
             echo "Cleanup head: $head_sha"
             echo "CI run $ci_run_id: $ci_run_url ($ci_run_sha)"
             echo "PR Standards run $standards_run_id: $standards_run_url ($standards_run_sha)"
+            echo "Drift/retention run $drift_run_id: $drift_run_url ($drift_run_sha)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   update-pr-notes:

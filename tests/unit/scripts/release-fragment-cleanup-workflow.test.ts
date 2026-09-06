@@ -75,6 +75,9 @@ describe('release fragment cleanup workflow', () => {
 		expect(releaseWorkflow).toContain(
 			'gh workflow run pr-standards.yml --ref "$branch" -f pr_number="$pr_number"',
 		);
+		expect(releaseWorkflow).toContain(
+			'gh workflow run drift-check.yml --ref "$branch"',
+		);
 		expect(releaseWorkflow).toContain('--base main');
 		expect(releaseWorkflow).toContain('baseRefName,headRefOid');
 		expect(releaseWorkflow).toContain('wait_for_dispatched_run()');
@@ -85,8 +88,12 @@ describe('release fragment cleanup workflow', () => {
 		expect(releaseWorkflow).toContain(
 			'PR Standards run $standards_run_id: $standards_run_url',
 		);
+		expect(releaseWorkflow).toContain(
+			'Drift/retention run $drift_run_id: $drift_run_url',
+		);
 		expect(ciWorkflow).toMatch(/on:\s*\n\s+workflow_dispatch:/);
 		expect(standardsWorkflow).toMatch(/on:\s*\n\s+workflow_dispatch:/);
+		expect(driftWorkflow).toMatch(/on:\s*\n\s+workflow_dispatch:/);
 		expect(standardsWorkflow).toContain('pr_number:');
 		expect(standardsWorkflow).toContain('Validate dispatched PR title');
 		expect(standardsWorkflow).toContain('Validate dispatched PR contract');
@@ -106,6 +113,11 @@ describe('release fragment cleanup workflow', () => {
 		expect(standardsWorkflow).toContain(
 			'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"',
 		);
+		for (let invariant = 1; invariant <= 12; invariant += 1) {
+			expect(releaseWorkflow).toContain(`- ${invariant} (`);
+		}
+		expect(releaseWorkflow).not.toContain('- 1-2:');
+		expect(releaseWorkflow).not.toContain('- 4-11:');
 	});
 
 	test('enforces the bounded retention audit in drift CI', () => {

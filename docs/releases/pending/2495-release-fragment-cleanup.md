@@ -9,6 +9,9 @@
   fragments that were accidentally left behind.
 - Historical reconstruction uses capped tag batches with snapshot-bound resume
   cursors, so partial backfills cannot silently truncate or lose their place.
+- Retention recursively covers accepted nested fragment paths, replay
+  authorization cannot extend beyond seven days, and automated cleanup PRs
+  explicitly dispatch the drift/retention workflow alongside required checks.
 - The initial exact-tag backfill materializes 226 release bodies/manifests and
   removes 252 byte-identical consumed fragments; 383 changed, ambiguous, or
   genuinely unconsumed fragments remain visible instead of being guessed away.

@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 // @ts-expect-error JavaScript CLI module intentionally has no declaration file.
 import {
@@ -8,6 +14,7 @@ import {
 	HISTORICAL_REPLAY_STATE,
 	HISTORICAL_REPLAY_TTL_MS,
 	MAX_FRAGMENT_BYTES,
+	MAX_RELEASE_HISTORY_BYTES,
 	readDirectoryNamesBounded,
 	readFragmentFromWorkspace,
 	reconcileTaggedRelease,
@@ -90,6 +97,19 @@ describe('release note input bounds', () => {
 		).rejects.toThrow(/release fragment size cap exceeded/i);
 	});
 
+	test('counts nested pending fragments accepted by the aggregation path', () => {
+		const root = fixtureRoot();
+		const nested = path.join(root, 'docs/releases/pending/nested');
+		mkdirSync(nested);
+		writeFileSync(path.join(nested, 'a.md'), 'a');
+		writeFileSync(path.join(nested, 'b.md'), 'b');
+
+		expect(auditFragmentRetention(root, 1)).toMatchObject({
+			pending: 2,
+			violation: true,
+		});
+	});
+
 	test('rejects oversized artifact content at the reconciliation boundary', async () => {
 		const root = fixtureRoot();
 		await expect(
@@ -107,6 +127,24 @@ describe('release note input bounds', () => {
 				],
 			}),
 		).rejects.toThrow(/consumed fragment content size cap exceeded/i);
+	});
+
+	test('rejects oversized existing history before reading it', async () => {
+		const root = fixtureRoot();
+		writeFileSync(
+			path.join(root, 'docs/releases/v1.2.3.md'),
+			Buffer.alloc(MAX_RELEASE_HISTORY_BYTES + 1),
+		);
+
+		await expect(
+			reconcileTaggedRelease({
+				repoRoot: root,
+				tagName: 'v1.2.3',
+				tagCommit: '0123456789abcdef0123456789abcdef01234567',
+				release: { tagName: 'v1.2.3', body: '' },
+				entries: [],
+			}),
+		).rejects.toThrow(/release artifact size cap exceeded/i);
 	});
 
 	test('authorizes CI retention only while a validated replay has work remaining', async () => {
@@ -173,5 +211,35 @@ describe('release note input bounds', () => {
 		);
 		expect(expired.violation).toBe(true);
 		expect(expired.diagnostics.join('\n')).toMatch(/authorization expired/i);
+	});
+
+	test('rejects a replay expiry beyond the fixed authorization window', async () => {
+		const root = fixtureRoot();
+		writeFileSync(path.join(root, 'docs/releases/pending/a.md'), 'a');
+		writeFileSync(path.join(root, 'docs/releases/pending/b.md'), 'b');
+		const nowMs = Date.parse('2026-09-06T00:00:00.000Z');
+		await reconcileTaggedRelease({
+			repoRoot: root,
+			tagName: 'v1.2.3',
+			tagCommit: '0123456789abcdef0123456789abcdef01234567',
+			release: { tagName: 'v1.2.3', body: '' },
+			entries: [],
+			dryRun: false,
+			maxPendingFragments: 1,
+			nowMs,
+			historicalReplay: createHistoricalReplayBatch(
+				['v1.2.3', 'v1.2.4'],
+				'0',
+				2,
+			),
+		});
+		const statePath = path.join(root, HISTORICAL_REPLAY_STATE);
+		const state = JSON.parse(readFileSync(statePath, 'utf8'));
+		state.expiresAt = '2099-01-01T00:00:00.000Z';
+		writeFileSync(statePath, JSON.stringify(state));
+
+		const result = auditFragmentRetention(root, 1, nowMs);
+		expect(result.violation).toBe(true);
+		expect(result.diagnostics.join('\n')).toMatch(/authorization expired/i);
 	});
 });
