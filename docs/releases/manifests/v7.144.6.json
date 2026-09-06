@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.144.6",
+  "tagCommit": "eae4ed49235e7c2e06695413ed2db54bbcf2620e",
+  "targetCommitish": "eae4ed49235e7c2e06695413ed2db54bbcf2620e",
+  "releaseBodySha256": "2d55d4c82cad61c192d30358c4ffe408e39586fdae7f70de6638a002c2964021",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2283-knowledge-query-category-flake.md",
+      "sha256": "d14743c9633ff8859d4ed7c3e509f07f03aa5f264b2ca7ffb92d2b75c8ef3223"
+    }
+  ]
+}

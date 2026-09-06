@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.157.1",
+  "tagCommit": "f3a604912186dd829c9cea2df0cada9b689d6691",
+  "targetCommitish": "f3a604912186dd829c9cea2df0cada9b689d6691",
+  "releaseBodySha256": "592b4f1272238bc188873253303e1866e408e08485acb8d43c3e8f0fff666493",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/repo-graph-query-source-read-cap.md",
+      "sha256": "57185de436244c24cc626834c58a90e95578fe84e7e4076c4a55c93bae7f2a73"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.138.1",
+  "tagCommit": "d46f9637d30221add2dd5c1150cfede15257204b",
+  "targetCommitish": "d46f9637d30221add2dd5c1150cfede15257204b",
+  "releaseBodySha256": "c83d393b91e3ad2be1a3a3020a5597f6aa8c85c81b08c4cf9f6dcbd7ade4f6e5",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1652-secretscan-hard-gate-completion.md",
+      "sha256": "ffebdadc9abb2e51005ba0fc605c1769d76bc8bb47da453898485b0c815de587"
+    }
+  ]
+}

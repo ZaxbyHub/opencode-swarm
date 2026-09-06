@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.2",
+  "tagCommit": "01bb966f738f3eb28ea1ccb1e3319902ff8fb483",
+  "targetCommitish": "01bb966f738f3eb28ea1ccb1e3319902ff8fb483",
+  "releaseBodySha256": "77fe04a17b10f7eb6225ed60239dd35f87b958ee4d7b7e725a4ed55874c63c02",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2488-graph-first-workflow-wiring.md",
+      "sha256": "5166a3b291408750434a0540e1d29150252729af37c066b9a9e2e410f728dcee"
+    }
+  ]
+}

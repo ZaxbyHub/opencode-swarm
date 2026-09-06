@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 export interface SpawnResult {
@@ -149,30 +148,4 @@ export async function resolveRepoRoot(startDir: string): Promise<string> {
 	}
 	const trimmed = result.stdout.trim();
 	return trimmed.length > 0 ? path.resolve(trimmed) : path.resolve(startDir);
-}
-
-export function walkFiles(
-	root: string,
-	visit: (absPath: string, relPath: string) => void,
-	options?: { maxDepth?: number; filePredicate?: (entry: fs.Dirent) => boolean },
-): void {
-	const maxDepth = options?.maxDepth ?? Number.POSITIVE_INFINITY;
-	const filePredicate = options?.filePredicate;
-	const visitDir = (dir: string, relDir: string, depth: number): void => {
-		if (depth > maxDepth) {
-			return;
-		}
-		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-			const abs = path.join(dir, entry.name);
-			const rel = relDir ? path.join(relDir, entry.name) : entry.name;
-			if (entry.isDirectory()) {
-				visitDir(abs, rel, depth + 1);
-				continue;
-			}
-			if (entry.isFile() && (!filePredicate || filePredicate(entry))) {
-				visit(abs, rel);
-			}
-		}
-	};
-	visitDir(root, '', 0);
 }

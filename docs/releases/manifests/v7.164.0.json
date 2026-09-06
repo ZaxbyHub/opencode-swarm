@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.0",
+  "tagCommit": "789096cdb3dcf7196c74c75a095da44c577af70c",
+  "targetCommitish": "789096cdb3dcf7196c74c75a095da44c577af70c",
+  "releaseBodySha256": "9bad42a923e9006a8e4c45897f0f9c72a066aa5890d4fc2c06b96d2337504a72",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2480-sqlite-durable-state-foundation.md",
+      "sha256": "e44d8fefbd05a233ae473fc8e8d6b14c5e0a74224cd4dfd3f2c48b31563e59bc"
+    }
+  ]
+}

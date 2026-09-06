@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.114.7",
+  "tagCommit": "cb1bd77b69b9a54dd097f2abc0ef54d2a346d34d",
+  "targetCommitish": "cb1bd77b69b9a54dd097f2abc0ef54d2a346d34d",
+  "releaseBodySha256": "b8f9701f06f4826a5a9273777f66819621ed5f2d6a22dd2dbc443f6d380566ad",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1755-tui-pollution-pr4-tool-path.md",
+      "sha256": "79f0fa9cf138c557493469efe5d5b56d6ac1e65a34419e2e5f8de68a6b438586"
+    }
+  ]
+}

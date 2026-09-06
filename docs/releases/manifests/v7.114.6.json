@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.114.6",
+  "tagCommit": "6d367a9f20131facd8a9bbd87b733b4c143c2bf4",
+  "targetCommitish": "6d367a9f20131facd8a9bbd87b733b4c143c2bf4",
+  "releaseBodySha256": "31c7d355a56df2514908ddd4cb06744984fce22553c3bfb7388b11da165460a2",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1754-tui-pollution-pr3-hook-path.md",
+      "sha256": "ad4efbb0012a321378ef0f41c429a3109ffb7cb599ab8fa6f0d36b84f6a95179"
+    }
+  ]
+}

@@ -5,6 +5,12 @@ name: PR Standards
 # sync with that skill — it wins on any conflict.
 
 on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to validate
+        required: true
+        type: string
   pull_request:
     types: [opened, edited, synchronize, reopened, ready_for_review]
   # Emit these required checks for merge-queue groups too, so the queue can merge
@@ -40,6 +46,26 @@ jobs:
             ci
             build
           requireScope: false
+
+      - name: Validate dispatched PR title
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          title="$(jq -r '.title' <<< "$pr_json")"
+          head_sha="$(jq -r '.head.sha' <<< "$pr_json")"
+          if [ "$head_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::Dispatched PR head $head_sha does not match workflow ref $GITHUB_SHA."
+            exit 1
+          fi
+          if ! grep -Eq '^(feat|fix|perf|revert|docs|chore|refactor|test|ci|build)(\([^)]+\))?!?: .+' <<< "$title"; then
+            echo "::error::PR title does not satisfy the conventional-title contract."
+            exit 1
+          fi
+          echo "Dispatched PR title contract satisfied for #$PR_NUMBER."
 
   pr-standards:
     runs-on: ubuntu-latest
@@ -151,3 +177,51 @@ jobs:
 
           echo "::error::Missing docs/releases/pending/<unique-slug>.md release fragment (see .claude/skills/commit-pr/SKILL.md Step 2)."
           exit 1
+
+      - name: Validate dispatched PR contract
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+
+          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          state="$(jq -r '.state' <<< "$pr_json")"
+          title="$(jq -r '.title' <<< "$pr_json")"
+          body="$(jq -r '.body // ""' <<< "$pr_json")"
+          base_ref="$(jq -r '.base.ref' <<< "$pr_json")"
+          head_sha="$(jq -r '.head.sha' <<< "$pr_json")"
+          if [ "$state" != "open" ] || [ "$base_ref" != "main" ]; then
+            echo "::error::Dispatched PR must be open and target main."
+            exit 1
+          fi
+          if [ "$head_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::Dispatched PR head $head_sha does not match workflow ref $GITHUB_SHA."
+            exit 1
+          fi
+          if ! grep -Eq '^(feat|fix|perf|revert|docs|chore|refactor|test|ci|build)(\([^)]+\))?!?: .+' <<< "$title"; then
+            echo "::error::PR title does not satisfy the conventional-title contract."
+            exit 1
+          fi
+
+          summary_ln="$(grep -n -m1 '^## Summary[[:space:]]*$' <<< "$body" | cut -d: -f1 || true)"
+          audit_ln="$(grep -n -m1 '^## Invariant audit[[:space:]]*$' <<< "$body" | cut -d: -f1 || true)"
+          test_ln="$(grep -n -m1 '^## Test plan[[:space:]]*$' <<< "$body" | cut -d: -f1 || true)"
+          if [ -z "$summary_ln" ] || [ -z "$audit_ln" ] || [ -z "$test_ln" ] || \
+             [ "$summary_ln" -ge "$audit_ln" ] || [ "$audit_ln" -ge "$test_ln" ]; then
+            echo "::error::PR body must contain Summary, Invariant audit, and Test plan in order."
+            exit 1
+          fi
+
+          changed="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename')"
+          if [ -z "$changed" ]; then
+            echo "::error::Dispatched PR has no changed files."
+            exit 1
+          fi
+          if grep -Eq '^(src/|bin/|scripts/|tests/|test/|runners/|examples/|binaries/|package\.json|bun\.lock|bunfig\.toml)' <<< "$changed" && \
+             ! grep -Eq '^docs/releases/pending/.+\.md$' <<< "$changed"; then
+            echo "::error::Dispatched PR is missing a pending release fragment."
+            exit 1
+          fi
+          echo "Dispatched PR contract satisfied for #$PR_NUMBER."

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.155.0",
+  "tagCommit": "d63b2278fa7970b908c1f7914c0e0e697289ac02",
+  "targetCommitish": "d63b2278fa7970b908c1f7914c0e0e697289ac02",
+  "releaseBodySha256": "613ea079e5eb6d3eb327137bfeeb5e75ed7f33b7614c4c8057d984a4ce8d7e7d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1534-indexed-repo-memory-storage.md",
+      "sha256": "12d275e084965df497a18ca09b46e22b4e64474ec940bf100a3b3ef781925cc0"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/1534-registry-citation-drift-gate.md",
+      "sha256": "2cc981f36e7e7f12580d643eef87b1ed489e7f2430b2fc352db2a6dff3169eee"
+    }
+  ]
+}

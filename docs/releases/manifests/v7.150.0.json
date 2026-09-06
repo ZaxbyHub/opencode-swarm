@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.150.0",
+  "tagCommit": "46dd9ced946414ac7b9ee84e7ca911b395f47c23",
+  "targetCommitish": "46dd9ced946414ac7b9ee84e7ca911b395f47c23",
+  "releaseBodySha256": "f0e6ee14ad8b49b82dbbaf82e870d4a8e7533479eca50fdaac2c254c97390695",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1531-dart-ruby-php-symbol-graph.md",
+      "sha256": "8b76d203f73d588dadebd3743794acf1a9b4a316e89f6e5663535fb73f79a3ac"
+    }
+  ]
+}

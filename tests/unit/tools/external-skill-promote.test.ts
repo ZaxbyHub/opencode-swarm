@@ -16,10 +16,6 @@ import {
 	external_skill_promote,
 } from '../../../src/tools/external-skill-promote.js';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /**
  * Call the tool's execute function with a directory context.
  */

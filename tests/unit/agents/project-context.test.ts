@@ -8,6 +8,8 @@ import {
 	_internals as projectContextInternals,
 } from '../../../src/agents/project-context';
 import { UNRESOLVED } from '../../../src/agents/template';
+import { LANGUAGE_BACKEND_REGISTRY } from '../../../src/lang/registry-backend';
+import { withTimeoutSignal } from '../../../src/utils/timeout';
 
 /**
  * Phase 4b tests for the project-context resolver.
@@ -147,6 +149,37 @@ describe('buildProjectContext', () => {
 		expect(ctx!.PROJECT_CONTEXT_SECONDARY_LANGUAGES).toContain('python');
 		expect(ctx!.PROJECT_CONTEXT_SECONDARY_LANGUAGES).toContain('rust');
 	});
+
+	test('captures profiles before selector awaits (correctness-state-C001)', async () => {
+		const realBackend = LANGUAGE_BACKEND_REGISTRY.getOrDefault('typescript');
+		expect(realBackend).toBeDefined();
+		let selectorsStarted = false;
+		let profilesReadBeforeSelectors = false;
+		const backend = {
+			...realBackend!,
+			selectFramework: async () => {
+				selectorsStarted = true;
+				await Promise.resolve();
+				return null;
+			},
+			selectEntryPoints: async () => [],
+		};
+		const realPickBackend = projectContextInternals.pickBackend;
+		const realPickedProfiles = projectContextInternals.pickedProfiles;
+		try {
+			projectContextInternals.pickBackend = async () => backend;
+			projectContextInternals.pickedProfiles = () => {
+				profilesReadBeforeSelectors = !selectorsStarted;
+				return [{ id: 'typescript' }, { id: 'javascript' }];
+			};
+			const ctx = await buildProjectContext(tempDir);
+			expect(profilesReadBeforeSelectors).toBe(true);
+			expect(ctx?.PROJECT_CONTEXT_SECONDARY_LANGUAGES).toBe('javascript');
+		} finally {
+			projectContextInternals.pickBackend = realPickBackend;
+			projectContextInternals.pickedProfiles = realPickedProfiles;
+		}
+	});
 });
 
 describe('init fail-open behavior', () => {
@@ -155,33 +188,32 @@ describe('init fail-open behavior', () => {
 		// Set to 300ms (Phase 4b post-Windows-smoke fix) to keep total
 		// server() time under the 400ms Issue #704 / repro-704.mjs T1
 		// deadline. Changing it requires updating the surrounding
-		// `withTimeout` wrap and repro-704.mjs.
+		// `withTimeoutSignal` wrap and repro-704.mjs.
 		expect(LANG_BACKEND_DETECTION_TIMEOUT_MS).toBe(300);
 	});
 
-	test('a hung pickBackend resolves the caller as a timeout', async () => {
-		// Replace pickBackend with one that never resolves. The caller's
-		// withTimeout(2000ms) wrapper would normally race this; here we
-		// directly verify the seam allows substitution. Restore in finally.
+	test('a slow pickBackend receives and obeys the caller abort signal', async () => {
+		// Exercise the same withTimeoutSignal boundary as initializeOpenCodeSwarm,
+		// rather than a local Promise.race that cannot prove cancellation wiring.
 		const realPickBackend = projectContextInternals.pickBackend;
 		try {
-			projectContextInternals.pickBackend = () =>
-				new Promise(() => {
-					/* never resolves */
+			let observedSignal: AbortSignal | undefined;
+			projectContextInternals.pickBackend = async (_directory, signal) =>
+				new Promise((_, reject) => {
+					observedSignal = signal;
+					signal?.addEventListener('abort', () => reject(signal.reason), {
+						once: true,
+					});
 				});
-
-			// We cannot await the hung promise itself in a test. Instead we
-			// verify the seam shape: the caller's `withTimeout` wrapper would
-			// receive a never-resolving promise here.
-			const promise = buildProjectContext(tempDir);
-			// Race against a tiny timeout to confirm the inner promise hangs.
-			const result = await Promise.race([
-				promise,
-				new Promise<'timeout'>((resolve) =>
-					setTimeout(() => resolve('timeout'), 50),
+			const timeoutError = new Error('project context timed out');
+			await expect(
+				withTimeoutSignal(
+					(signal) => buildProjectContext(tempDir, signal),
+					30,
+					timeoutError,
 				),
-			]);
-			expect(result).toBe('timeout');
+			).rejects.toBe(timeoutError);
+			expect(observedSignal?.aborted).toBe(true);
 		} finally {
 			projectContextInternals.pickBackend = realPickBackend;
 		}

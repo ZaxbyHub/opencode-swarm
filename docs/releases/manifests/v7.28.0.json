@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.28.0",
+  "tagCommit": "a1637ef6d9b1e4dc32c03ad12d6e06fb3ecf465f",
+  "targetCommitish": "a1637ef6d9b1e4dc32c03ad12d6e06fb3ecf465f",
+  "releaseBodySha256": "cadcc90f334b9f0db95d7d371f0670c6dace1b6542845a4d3405256b51b3113b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/parallel-work-check-skill.md",
+      "sha256": "2e35cf772812b71a0c79763b94f16a29c307e9d6ce66af858f9f632a584a746b"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.32.1",
+  "tagCommit": "4a7a06c6128e01320017c6393bf6bff41b21332c",
+  "targetCommitish": "4a7a06c6128e01320017c6393bf6bff41b21332c",
+  "releaseBodySha256": "158a5e71b4daebb380e0cfa3f911f782302bf3d3cf083c1a99e57c6212af2af3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/978-council-evidence-lock.md",
+      "sha256": "2f9b37aa4ccbcce928906b21664b37250fcb4f8eca9f15a7f5cba0586cc27ca4"
+    }
+  ]
+}

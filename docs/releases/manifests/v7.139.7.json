@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.139.7",
+  "tagCommit": "8410ab97df776c48201c025c78472dc04a33a87f",
+  "targetCommitish": "8410ab97df776c48201c025c78472dc04a33a87f",
+  "releaseBodySha256": "e9f3c71a2035ad31e451ef36fd14f036ac94f5e3964ccdc4706fa4f1aa498d4a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/swarm-pr-review-micro-retry-recovery.md",
+      "sha256": "afc875142e00973c6464800b4c69365ea368d2ed58a856600d137dc2ef286535"
+    }
+  ]
+}

@@ -171,6 +171,7 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: read
@@ -185,6 +186,228 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
         run: node scripts/release-notes-fragments.mjs update-release
+
+      - name: Prepare exact-tag fragment cleanup plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          node scripts/release-notes-fragments.mjs prepare-cleanup \
+            --tag "$TAG_NAME" \
+            --out .release-fragment-cleanup/plan.json \
+            --apply
+
+      - name: Upload exact-tag fragment cleanup plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-fragment-cleanup-plan
+          path: .release-fragment-cleanup/plan.json
+          if-no-files-found: error
+          retention-days: 1
+
+  cleanup-release-fragments:
+    needs: [release-please, update-release-notes]
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: cleanup-release-fragments
+      cancel-in-progress: false
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download exact-run cleanup plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-fragment-cleanup-plan
+          path: .release-fragment-cleanup
+
+      - name: Validate and apply fragment cleanup
+        env:
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          node scripts/release-notes-fragments.mjs apply-cleanup \
+            --plan .release-fragment-cleanup/plan.json
+          node scripts/release-notes-fragments.mjs apply-cleanup \
+            --plan .release-fragment-cleanup/plan.json \
+            --apply
+
+      - name: Open cleanup PR and dispatch required checks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          release_changes="$(git status --porcelain -- docs/releases)"
+          if [ -z "$release_changes" ]; then
+            echo "Release fragment cleanup is already materialized."
+            exit 0
+          fi
+          workspace_changes="$(git status --porcelain)"
+          changed_paths="$(printf '%s\n' "$workspace_changes" | cut -c4-)"
+
+          branch="chore/release-fragments-${TAG_NAME#v}"
+          remote_sha=""
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch --no-tags origin "refs/heads/$branch"
+            remote_sha="$(git rev-parse FETCH_HEAD)"
+            expected_subject="chore(release): materialize $TAG_NAME fragment history"
+            actual_subject="$(git show -s --format=%s "$remote_sha")"
+            if [ "$actual_subject" != "$expected_subject" ]; then
+              echo "::error::Refusing to replace an unrelated cleanup branch: $branch"
+              exit 1
+            fi
+            parent_sha="$(git rev-parse "$remote_sha^")"
+            if ! git merge-base --is-ancestor "$parent_sha" HEAD; then
+              echo "::error::Cleanup branch parent is not in current main history: $branch"
+              exit 1
+            fi
+            branch_changed_paths="$(git diff --name-only "$parent_sha" "$remote_sha")"
+            unexpected_paths="$(printf '%s\n' "$branch_changed_paths" | awk '$0 !~ /^docs\/releases\//')"
+            if [ -n "$unexpected_paths" ]; then
+              echo "::error::Cleanup branch contains non-release paths: $branch"
+              exit 1
+            fi
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+          git checkout -b "$branch"
+          git add -- docs/releases
+          git commit -m "chore(release): materialize $TAG_NAME fragment history"
+          head_sha="$(git rev-parse HEAD)"
+          if [ -n "$remote_sha" ]; then
+            git push --force-with-lease="refs/heads/$branch:$remote_sha" origin "HEAD:refs/heads/$branch"
+          else
+            git push origin "HEAD:refs/heads/$branch"
+          fi
+
+          title="chore(release): materialize $TAG_NAME fragment history"
+          body="## Summary
+
+          Materialize the exact GitHub Release body and fragment provenance for $TAG_NAME, then remove only byte-identical consumed pending fragments.
+
+          ## Invariant audit
+
+          - 1 (plugin init): not touched — cleanup commit changes only docs/releases
+          - 2 (runtime portability): not touched — cleanup commit changes only docs/releases
+          - 3 (subprocesses): not touched — cleanup commit changes only docs/releases
+          - 4 (.swarm containment): not touched — cleanup commit changes only docs/releases
+          - 5 (plan durability): not touched — cleanup commit changes only docs/releases
+          - 6 (test_runner safety): not touched — cleanup commit changes only docs/releases
+          - 7 (test writing): not touched — cleanup commit changes only docs/releases
+          - 8 (session state): not touched — cleanup commit changes only docs/releases
+          - 9 (guardrails/retry): not touched — cleanup commit changes only docs/releases
+          - 10 (chat/system msg): not touched — cleanup commit changes only docs/releases
+          - 11 (tool registration): not touched — cleanup commit changes only docs/releases
+          - 12 (release/cache): touched — exact-tag history/manifest and byte-identical deletion plan completed
+
+          ## Test plan
+
+          - cleanup plan dry-run succeeded
+          - cleanup plan apply succeeded
+          - CI, PR Standards, and drift/retention are explicitly dispatched at $head_sha"
+
+          case "$title" in
+            chore\(release\):\ materialize\ *\ fragment\ history) ;;
+            *) echo "::error::Cleanup PR title violates the PR contract."; exit 1 ;;
+          esac
+          summary_ln="$(grep -n -m1 '^## Summary[[:space:]]*$' <<< "$body" | cut -d: -f1 || true)"
+          audit_ln="$(grep -n -m1 '^## Invariant audit[[:space:]]*$' <<< "$body" | cut -d: -f1 || true)"
+          test_ln="$(grep -n -m1 '^## Test plan[[:space:]]*$' <<< "$body" | cut -d: -f1 || true)"
+          if [ -z "$summary_ln" ] || [ -z "$audit_ln" ] || [ -z "$test_ln" ] || \
+             [ "$summary_ln" -ge "$audit_ln" ] || [ "$audit_ln" -ge "$test_ln" ]; then
+            echo "::error::Cleanup PR body violates the PR contract."
+            exit 1
+          fi
+          if grep -Eq '^(src/|bin/|scripts/|tests/|test/|runners/|examples/|binaries/|package\.json|bun\.lock|bunfig\.toml)' <<< "$changed_paths"; then
+            echo "::error::Cleanup PR unexpectedly requires a pending release fragment."
+            exit 1
+          fi
+
+          existing_pr="$(gh pr list --state open --head "$branch" --json url --jq '.[0].url // empty')"
+          if [ -n "$existing_pr" ]; then
+            gh pr edit "$existing_pr" \
+              --base main \
+              --title "$title" \
+              --body "$body"
+            pr_url="$existing_pr"
+          else
+            pr_url="$(gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "$title" \
+              --body "$body")"
+          fi
+
+          pr_record="$(gh pr view "$pr_url" --json number,url,baseRefName,headRefOid --jq '[.number, .url, .baseRefName, .headRefOid] | @tsv')"
+          IFS=$'\t' read -r pr_number pr_url pr_base pr_head_sha <<< "$pr_record"
+          if [ "$pr_base" != "main" ] || [ "$pr_head_sha" != "$head_sha" ]; then
+            echo "::error::Cleanup PR does not bind main to the pushed cleanup head."
+            exit 1
+          fi
+
+          dispatch_after="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run ci.yml --ref "$branch"
+          gh workflow run pr-standards.yml --ref "$branch" -f pr_number="$pr_number"
+          gh workflow run drift-check.yml --ref "$branch"
+
+          wait_for_dispatched_run() {
+            workflow="$1"
+            for _attempt in $(seq 1 120); do
+              record="$(gh run list \
+                --workflow "$workflow" \
+                --branch "$branch" \
+                --event workflow_dispatch \
+                --limit 20 \
+                --json databaseId,url,headSha,createdAt,status,conclusion \
+                --jq ".[] | select(.headSha == \"$head_sha\" and .createdAt >= \"$dispatch_after\") | [.databaseId, .url, .headSha, .status, .conclusion] | @tsv")"
+              if [ -n "$record" ]; then
+                IFS=$'\t' read -r run_id run_url run_sha run_status run_conclusion <<< "$record"
+                if [ "$run_status" = "completed" ]; then
+                  if [ "$run_conclusion" != "success" ]; then
+                    echo "::error::$workflow run $run_id completed with conclusion $run_conclusion" >&2
+                    return 1
+                  fi
+                  printf '%s\n' "$record"
+                  return 0
+                fi
+              fi
+              sleep 5
+            done
+            echo "::error::Timed out finding $workflow run for cleanup head $head_sha" >&2
+            return 1
+          }
+
+          ci_record="$(wait_for_dispatched_run ci.yml)"
+          standards_record="$(wait_for_dispatched_run pr-standards.yml)"
+          drift_record="$(wait_for_dispatched_run drift-check.yml)"
+          IFS=$'\t' read -r ci_run_id ci_run_url ci_run_sha ci_run_status ci_run_conclusion <<< "$ci_record"
+          IFS=$'\t' read -r standards_run_id standards_run_url standards_run_sha standards_run_status standards_run_conclusion <<< "$standards_record"
+          IFS=$'\t' read -r drift_run_id drift_run_url drift_run_sha drift_run_status drift_run_conclusion <<< "$drift_record"
+          if [ "$ci_run_sha" != "$head_sha" ] || [ "$standards_run_sha" != "$head_sha" ] || [ "$drift_run_sha" != "$head_sha" ]; then
+            echo "::error::Dispatched workflow evidence does not match cleanup head $head_sha"
+            exit 1
+          fi
+          {
+            echo "Cleanup PR: $pr_url"
+            echo "Cleanup head: $head_sha"
+            echo "CI run $ci_run_id: $ci_run_url ($ci_run_sha, $ci_run_conclusion)"
+            echo "PR Standards run $standards_run_id: $standards_run_url ($standards_run_sha, $standards_run_conclusion)"
+            echo "Drift/retention run $drift_run_id: $drift_run_url ($drift_run_sha, $drift_run_conclusion)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   update-pr-notes:
     needs: release-please

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.103.0",
+  "tagCommit": "fa5a2eb63ce947e69bf6e6db0f34d06ac048c751",
+  "targetCommitish": "fa5a2eb63ce947e69bf6e6db0f34d06ac048c751",
+  "releaseBodySha256": "cadb5743fbbe5b02370bbc71bfa1d5f8cad7d3e8b4f4a2a48908b8f3ab01c070",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1145-hardening-gaps-semgrep-stderr-detector.md",
+      "sha256": "757b8e496c284fe01683b5840ef849149a79029e7478f78750a6961d9e1ee952"
+    }
+  ]
+}

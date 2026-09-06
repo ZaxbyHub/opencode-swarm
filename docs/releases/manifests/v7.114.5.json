@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.114.5",
+  "tagCommit": "6fb84d13dc0be0123775d8db19f23324b365f0a8",
+  "targetCommitish": "6fb84d13dc0be0123775d8db19f23324b365f0a8",
+  "releaseBodySha256": "200433c5f12a7b0b65219a69a9ab265ac2290391e56a0d0a78538cf6d218d78d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-review-phase4-repair.md",
+      "sha256": "0dbe2fd3e85bd16a387ceeef18b2b43e44f4c81cbd7efa74264d4df919552533"
+    }
+  ]
+}

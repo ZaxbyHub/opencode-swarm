@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.44.0",
+  "tagCommit": "be7be0ba784b81dd5da125016a0865cad0817e8c",
+  "targetCommitish": "be7be0ba784b81dd5da125016a0865cad0817e8c",
+  "releaseBodySha256": "e2a8864d752ab2cd661c6e6fe72f2870805673d06e17c78502dc44bba281d281",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/event-sourced-knowledge-lifecycle.md",
+      "sha256": "98d09190b2d2b3d9468150f153bbfc5c505992b3f377e5a317c1946f76b57c77"
+    }
+  ]
+}

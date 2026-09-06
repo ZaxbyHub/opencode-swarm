@@ -1,6 +1,8 @@
 import { z } from 'zod';
+import { loadPluginConfig } from '../config/loader.js';
 import {
 	abortPrWorkflow,
+	type PrWorkflowLaneLivenessOptions,
 	type PrWorkflowMode,
 	recoverArmedPrWorkflow,
 } from '../hooks/pr-workflow-gate.js';
@@ -78,6 +80,26 @@ export async function executeAbortPrWorkflow(
 			message: 'PR workflow abort requires an active sessionID',
 		});
 	}
+	// Issue #2506: resolve the lane-liveness watchdog policy from the
+	// directory-scoped plugin config (dispatch-lanes `loadPluginConfig`
+	// precedent) and thread it into both abort arms.
+	let laneLiveness: PrWorkflowLaneLivenessOptions | undefined;
+	try {
+		const config = loadPluginConfig(directory);
+		const hooks = (
+			config as { hooks?: { background_pending_timeout_minutes?: number } }
+		).hooks;
+		laneLiveness = {
+			laneLivenessWatchdog: config.lane_liveness_watchdog,
+			backgroundPendingTimeoutMs:
+				hooks?.background_pending_timeout_minutes !== undefined
+					? hooks.background_pending_timeout_minutes * 60_000
+					: undefined,
+		};
+	} catch {
+		// Config read failure must not block the abort escape hatch; the
+		// disabled default is always safe.
+	}
 	if (parsed.data.kind === 'armed_recovery') {
 		try {
 			const summary = await recoverArmedPrWorkflow(
@@ -100,6 +122,7 @@ export async function executeAbortPrWorkflow(
 							}
 						: {}),
 					reason: parsed.data.reason,
+					...(laneLiveness ? { laneLiveness } : {}),
 				},
 			);
 			return JSON.stringify({
@@ -140,6 +163,7 @@ export async function executeAbortPrWorkflow(
 			...(parsed.data.mode
 				? { expectedMode: parsed.data.mode as PrWorkflowMode }
 				: {}),
+			...(laneLiveness ? { laneLiveness } : {}),
 		});
 		let checkoutRestoreRequired = true;
 		let checkoutRestoreReceipts: Awaited<

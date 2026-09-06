@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.6",
+  "tagCommit": "eb2c001013a343bb72d24260f39c6754637dd0e8",
+  "targetCommitish": "eb2c001013a343bb72d24260f39c6754637dd0e8",
+  "releaseBodySha256": "496ddb839a52a8907c3cd267749f8229d67a014de076dba95d8649993830b1a5",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2469-pr-review-workflow-hardening.md",
+      "sha256": "4dfb05a529f0f05da4d9aacef8847e42f38a9301f7faa8b9ed37b44c888e53e4"
+    }
+  ]
+}

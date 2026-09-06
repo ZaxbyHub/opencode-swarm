@@ -3,9 +3,9 @@
  *
  * Called from `src/index.ts:initializeOpenCodeSwarm` immediately before
  * `getAgentConfigs(...)` (Phase 4b of the language-agnostic plugin work).
- * Wrapped in `withTimeout(2000ms)` by the caller; on timeout or any
- * failure, the caller falls open to `emptyProjectContext()` per
- * Invariant 1 (plugin init bounded + fail-open).
+ * Wrapped in `withTimeoutSignal(300ms)` by the caller. The manifest-dispatch
+ * portion cooperates with that deadline; on timeout or failure, the caller
+ * falls open to `emptyProjectContext()`.
  *
  * Imported lazily by the caller via `await import('./agents/project-context')`
  * to keep the dispatch import graph off the synchronous init prelude.
@@ -15,10 +15,13 @@
  * path. The full `LanguageBackend.selectTestFramework` /
  * `selectBuildCommand` hooks call `isCommandAvailable` (which spawns
  * `where`/`which` and can take 200–500ms per call on Windows). Even with
- * the 2000ms `withTimeout` wrapper, multiple sequential spawns
+ * the 300ms `withTimeoutSignal` wrapper, multiple sequential spawns
  * (typically 3–5 per buildProjectContext call) easily push `server()`
  * past the 400ms Invariant 1 deadline asserted by
  * `scripts/repro-704.mjs:TIMING_DEADLINE_MS`.
+ * Existing framework and prompt-hint inference below also performs bounded
+ * synchronous file probes. The timeout is therefore a cooperative dispatch
+ * boundary, not a claim that every operation in this function is preemptible.
  *
  * The architect prompt's `TEST_CMD` / `BUILD_CMD` / `LINT_CMD` values are
  * HINTS for the LLM. If the user doesn't have the named binary installed,
@@ -42,9 +45,10 @@ import {
 /**
  * Wall-clock budget for the session-init language-backend resolution step.
  * Caller (`src/index.ts:initializeOpenCodeSwarm`) wraps `buildProjectContext`
- * in `withTimeout(LANG_BACKEND_DETECTION_TIMEOUT_MS)`. Exceeding the budget
- * fails open with `null` so the manifest still returns to the OpenCode
- * plugin host (Invariant 1).
+ * in `withTimeoutSignal(LANG_BACKEND_DETECTION_TIMEOUT_MS)`. Dispatch observes
+ * the signal and avoids publishing late cache state. Synchronous hint inference
+ * later in this function remains bounded by operation count but is not
+ * preemptible by the signal.
  */
 export const LANG_BACKEND_DETECTION_TIMEOUT_MS = 300;
 
@@ -202,9 +206,15 @@ function selectLintCommand(
  */
 export async function buildProjectContext(
 	directory: string,
+	signal?: AbortSignal,
 ): Promise<ProjectContext | null> {
-	const backend = await _internals.pickBackend(directory);
+	const backend = await _internals.pickBackend(directory, signal);
 	if (!backend) return null;
+	// Capture the ranked profiles before any await after pickBackend. The
+	// dispatch profile-key side table is bounded and process-global, so another
+	// concurrent lookup could otherwise evict or retarget this directory's entry
+	// while framework/entry-point selectors are pending.
+	const profiles = _internals.pickedProfiles(directory);
 
 	const ctx: ProjectContext = emptyProjectContext();
 	ctx.PROJECT_LANGUAGE = backend.displayName;
@@ -265,7 +275,6 @@ export async function buildProjectContext(
 	// Secondary languages: reuse the ranked list pickBackend already cached
 	// (B1 fix from PR #825 adversarial review — avoids a second
 	// detectProjectLanguages call on the 300ms critical path).
-	const profiles = _internals.pickedProfiles(directory);
 	if (profiles.length > 1) {
 		ctx.PROJECT_CONTEXT_SECONDARY_LANGUAGES = profiles
 			.slice(1)

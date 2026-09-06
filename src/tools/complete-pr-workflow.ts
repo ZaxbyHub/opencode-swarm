@@ -1,7 +1,9 @@
 import { z } from 'zod';
+import { loadPluginConfig } from '../config/loader.js';
 import {
 	completePrWorkflow,
 	type PrFeedbackInventoryAmendmentRecord,
+	type PrWorkflowLaneLivenessOptions,
 	type PrWorkflowMode,
 	readPrReviewTerminalCoverageForReport,
 	readPrWorkflowGateState,
@@ -66,14 +68,39 @@ export async function executeCompletePrWorkflow(
 	// sweep is idempotent, so calling it here costs nothing on the second pass.
 	let staleDisclosure: {
 		presumed_stale_lanes?: string[];
-		presumed_stale_disclosure?: string;
+		presumed_stale_disclosure?: string | undefined;
 		probe_retained_lanes?: string[];
 		probe_status?: string;
+		horizon_conflict?: string;
 	} = {};
+	// Issue #2506: resolve the lane-liveness watchdog policy from the same
+	// directory-scoped plugin config the resilience policy uses
+	// (`loadPluginConfig`, the dispatch-lanes precedent) and thread it plus
+	// the background pending timeout so the settlement applies ONE
+	// effective horizon with conflict disclosure. Declared outside the
+	// observation try so the gate call below threads the SAME policy.
+	let laneLiveness: PrWorkflowLaneLivenessOptions | undefined;
+	try {
+		const config = loadPluginConfig(directory);
+		const hooks = (
+			config as { hooks?: { background_pending_timeout_minutes?: number } }
+		).hooks;
+		laneLiveness = {
+			laneLivenessWatchdog: config.lane_liveness_watchdog,
+			backgroundPendingTimeoutMs:
+				hooks?.background_pending_timeout_minutes !== undefined
+					? hooks.background_pending_timeout_minutes * 60_000
+					: undefined,
+		};
+	} catch {
+		// Config read failure must not block completion; the disabled
+		// default is always safe.
+	}
 	try {
 		const settlement = await _internals.settlePresumedStalePrWorkflowLanes(
 			directory,
 			context.sessionID,
+			laneLiveness,
 		);
 		if (settlement.presumedStaleLaneIds.length > 0) {
 			staleDisclosure = {
@@ -91,6 +118,13 @@ export async function executeCompletePrWorkflow(
 		}
 		if (settlement.probeDegradedReason) {
 			staleDisclosure.probe_status = settlement.probeDegradedReason;
+		}
+		// Issue #2506 review round 2: surface the horizon disagreement (AC2
+		// conflictDisclosed) on the response whenever it exists — not gated on
+		// anything having settled, because a silently absorbed config conflict
+		// is exactly what the operator needs to see even on success paths.
+		if (settlement.horizonConflictNote) {
+			staleDisclosure.horizon_conflict = settlement.horizonConflictNote;
 		}
 	} catch {
 		// Observation only. A settlement-read failure must never convert a
@@ -145,9 +179,17 @@ export async function executeCompletePrWorkflow(
 			context.sessionID,
 			parsed.data.mode as PrWorkflowMode,
 			parsed.data.pr_head_sha,
+			// Issue #2506: thread the resolved watchdog policy into the gate's
+			// internal settlement too — the observation settlement above and
+			// the gate re-validation must run the SAME effective horizon.
 			parsed.data.mode === 'PR_REVIEW'
-				? { reportVerdict: parsed.data.report_verdict }
-				: undefined,
+				? {
+						reportVerdict: parsed.data.report_verdict,
+						...(laneLiveness ? { laneLiveness } : {}),
+					}
+				: laneLiveness
+					? { laneLiveness }
+					: undefined,
 		);
 		let checkoutRestoreRequired = false;
 		let checkoutRestoreReceipts: Awaited<

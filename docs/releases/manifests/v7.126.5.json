@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.126.5",
+  "tagCommit": "f2c832f9066a74ebd93acf171487060fe6e1cfcb",
+  "targetCommitish": "f2c832f9066a74ebd93acf171487060fe6e1cfcb",
+  "releaseBodySha256": "d4f0f69beac128b23269350a94cf2dbb789eb64595aa8aebfe3bb8e9c13e998a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1900-loader-sync-async-parity-locked-or-gates-metadata.md",
+      "sha256": "0fe4f85c45c57ce903f269e8695ad3064eb86a307fa57b7784ddd1f3d0cda7f9"
+    }
+  ]
+}

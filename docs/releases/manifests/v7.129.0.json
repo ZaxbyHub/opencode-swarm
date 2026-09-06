@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.129.0",
+  "tagCommit": "07bef196dab2fd72da38335d47400965e2a743ce",
+  "targetCommitish": "07bef196dab2fd72da38335d47400965e2a743ce",
+  "releaseBodySha256": "e79663e581704acbe652ed6d5a9ab926763d61fd56b1c7151acad3c016649834",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1690-recursive-value-recovery.md",
+      "sha256": "b3806dcdf6fc764731b64ae3dd2aaa3811be683203a14363e79bf441d209b183"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/checkpoint-auto-threshold-description.md",
+      "sha256": "ebbf3f27d9b30c1a09a38fa4a1052a556ed177d55ac0f11aebb9c4879b5b7734"
+    }
+  ]
+}

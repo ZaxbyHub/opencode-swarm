@@ -304,13 +304,13 @@ describe('runFinalizeRewardSweep — control paths', () => {
 	});
 });
 
-describe('close.ts insertion point (persistence ordering)', () => {
+describe('close finalize orchestration insertion point (persistence ordering)', () => {
 	test('the sweep is invoked AFTER runFinalizeStage and BEFORE runAlignStage', async () => {
-		const closePath = path.resolve(
+		const orchestratorPath = path.resolve(
 			import.meta.dir,
-			'../../../src/commands/close.ts',
+			'../../../src/commands/close/orchestrator.ts',
 		);
-		const source = await fs.readFile(closePath, 'utf-8');
+		const source = await fs.readFile(orchestratorPath, 'utf-8');
 		const finalizeIdx = source.indexOf('await runFinalizeStage(ctx)');
 		const sweepIdx = source.indexOf('_internals.runFinalizeRewardSweep({');
 		const alignIdx = source.indexOf('await runAlignStage(ctx)');

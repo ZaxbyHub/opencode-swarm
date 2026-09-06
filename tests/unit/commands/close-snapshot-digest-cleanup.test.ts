@@ -9,20 +9,30 @@
  * src/commands/close.ts, so this pins the wiring as a source-contract guard
  * (same pattern as close-delegation-archive.test.ts): dropping either entry,
  * or removing only one half of the archive+clean pair (which the archive-first
- * guard would silently never delete), fails this test.
+ * guard would silently never delete), fails this test. The lists now live in
+ * the extracted close constants module.
  */
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const closeSource = readFileSync(
-	join(import.meta.dir, '..', '..', '..', 'src', 'commands', 'close.ts'),
+	join(
+		import.meta.dir,
+		'..',
+		'..',
+		'..',
+		'src',
+		'commands',
+		'close',
+		'constants.ts',
+	),
 	'utf-8',
 );
 
 function arrayRegion(name: string): string {
 	const start = closeSource.indexOf(`const ${name} = [`);
-	if (start === -1) throw new Error(`${name} not found in close.ts`);
+	if (start === -1) throw new Error(`${name} not found in close/constants.ts`);
 	const end = closeSource.indexOf('];', start);
 	return closeSource.slice(start, end);
 }

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.114.3",
+  "tagCommit": "10a98ae39b39b54a733d966dbba123b5dcaad409",
+  "targetCommitish": "10a98ae39b39b54a733d966dbba123b5dcaad409",
+  "releaseBodySha256": "b3c69faf7af22bd8263a8e88283d7a203b898466e43fe8d99a8e2ac8771e24a4",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/close-reset-stale-spec-drift-state.md",
+      "sha256": "9fb0b161f3cb3558a180e3ae8c657819b46491cb3bfbc9be6989248e0e06da56"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.140.1",
+  "tagCommit": "5e86e8e21cf9f9017925ba9c74d975b4f37275ef",
+  "targetCommitish": "5e86e8e21cf9f9017925ba9c74d975b4f37275ef",
+  "releaseBodySha256": "e9c072b47f55ec27ef2d112e1619d72e3fada40369d20d30826e9321286a1474",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2131-skill-integrity-abort-and-issue-trace.md",
+      "sha256": "cfeb4a906e7be2cb9563adc7d51eb6457d7ef2a21711f2c60ac8060e62b174b8"
+    }
+  ]
+}

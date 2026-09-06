@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.25.0",
+  "tagCommit": "9cdd3d9b1cabf908b455087868e5bb7309b58f5a",
+  "targetCommitish": "9cdd3d9b1cabf908b455087868e5bb7309b58f5a",
+  "releaseBodySha256": "fdc046df686f55a3795167775b2fdef7971e811f93c1ad91a8a48c58d587670b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/test-runner-per-test-history.md",
+      "sha256": "11d949798e4720b777dffcf33a971b9358cc2ec533f8b20ab09528b483a33e55"
+    }
+  ]
+}

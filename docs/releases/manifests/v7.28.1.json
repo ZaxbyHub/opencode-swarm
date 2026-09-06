@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.28.1",
+  "tagCommit": "2a8a21eec8931103f07418c9c095dafc534f6eec",
+  "targetCommitish": "2a8a21eec8931103f07418c9c095dafc534f6eec",
+  "releaseBodySha256": "66217c4f7fd699e98454e17f31aace756fb433de4694faed3b4aa24eed24f6cc",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/skill-description-aware-propagation-957.md",
+      "sha256": "7f23a138f3ce09deeb244b6b1c3e0b8278471a598847b162dcbe71152f87f6a4"
+    }
+  ]
+}

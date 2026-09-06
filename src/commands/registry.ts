@@ -3,10 +3,12 @@ import {
 	BUNDLED_PROJECT_SKILL_ROOT,
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
+import { loadPluginConfig } from '../config/loader.js';
 import type { AutoReviewConfig, PluginConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import {
 	activatePrWorkflow,
+	type PrWorkflowLaneLivenessOptions,
 	type PrWorkflowMode,
 	transitionPrReviewToFeedback,
 } from '../hooks/pr-workflow-gate.js';
@@ -416,12 +418,34 @@ async function handlePrFeedbackCommandWithTransition(
 		const exactCommand = parsed.prUrl
 			? `/swarm pr-feedback ${parsed.prUrl} continue from ${parsed.continuation.handoffPath}`
 			: `/swarm pr-feedback continue from ${parsed.continuation.handoffPath}`;
+		// Issue #2506 review round 2: the PR_REVIEW→PR_FEEDBACK continuation is
+		// a third settlement entry point, so it resolves the watchdog policy
+		// exactly like the abort/complete tools (fail-open to disabled) and
+		// threads it through — the ONE effective horizon covers this path too.
+		let laneLiveness: PrWorkflowLaneLivenessOptions | undefined;
+		try {
+			const config = loadPluginConfig(ctx.directory);
+			const hooks = (
+				config as { hooks?: { background_pending_timeout_minutes?: number } }
+			).hooks;
+			laneLiveness = {
+				laneLivenessWatchdog: config.lane_liveness_watchdog,
+				backgroundPendingTimeoutMs:
+					hooks?.background_pending_timeout_minutes !== undefined
+						? hooks.background_pending_timeout_minutes * 60_000
+						: undefined,
+			};
+		} catch {
+			// Config read failure must not block the continuation; the disabled
+			// default is always safe.
+		}
 		await transitionPrReviewToFeedback(ctx.directory, ctx.sessionID, {
 			runId: parsed.continuation.runId,
 			handoffPath: parsed.continuation.handoffPath,
 			prUrl: parsed.prUrl,
 			exactCommand,
 			confirmedByUser: true,
+			...(laneLiveness ? { laneLiveness } : {}),
 		});
 	} else {
 		await activatePrWorkflow(ctx.directory, ctx.sessionID, 'PR_FEEDBACK', {

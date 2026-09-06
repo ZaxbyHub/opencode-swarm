@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.126.1",
+  "tagCommit": "ef6205ecc6b08913bef2e628d50d7e9433b52186",
+  "targetCommitish": "ef6205ecc6b08913bef2e628d50d7e9433b52186",
+  "releaseBodySha256": "690dbd62a9824b7a03b2992b1fc4d0e00201cc07830a59c8c0c076caaafa9b56",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1900-loader-sync-async-parity-locked-or-gates-metadata.md",
+      "sha256": "9f3d3e95940c193bd1575de0b992aaee2a128e9238ef9e93862ad7cb00802f49"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/pr-workflow-gate-capability-contract.md",
+      "sha256": "c68b03211839b4f1d43d12bcfc3f0285ac6aba2b68fc9c40bab85f5c7cb98e96"
+    }
+  ]
+}

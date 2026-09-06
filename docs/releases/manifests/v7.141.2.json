@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.141.2",
+  "tagCommit": "19a257e99c810142359203395acdecc1ddde12f1",
+  "targetCommitish": "19a257e99c810142359203395acdecc1ddde12f1",
+  "releaseBodySha256": "1a3fa962c8604bfc6e3fc8aa6c7c7aca1e85e15c8677f3f7336b9c4279038a72",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2010-server-boot-test-isolation.md",
+      "sha256": "166c94ed6e653fc2be33744e5cd9837bc8d27c761e074ada7ecb099b69b10b30"
+    }
+  ]
+}

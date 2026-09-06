@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.160.0",
+  "tagCommit": "b958c02e8d09775aea93ae0adbf09f1718404381",
+  "targetCommitish": "b958c02e8d09775aea93ae0adbf09f1718404381",
+  "releaseBodySha256": "8987a3bf1d1e5680ff7e641518fe967c911606817b0bc7cff21abf81031cad5b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1536-kg15-route-data-security-test-packs.md",
+      "sha256": "a0c04c19bf39e24cf6c43c6776461d10c54b05264b06d1048587848fe399efde"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2044-model-limit-provenance-learning-health-alarms.md",
+      "sha256": "76c147572d2db51827fcdb9cfe9845afd14487fe081fa0a64b9b156a663cf460"
+    }
+  ]
+}

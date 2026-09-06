@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.138.3",
+  "tagCommit": "d06fb42d122521b4b6ee21ddd14fa30a2f223979",
+  "targetCommitish": "d06fb42d122521b4b6ee21ddd14fa30a2f223979",
+  "releaseBodySha256": "30e98832aac3d25adac898eb36cecc6fd6b3186c224f4ddd5ff05e383926bd15",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/minimax-native-context-limits.md",
+      "sha256": "762bbd35188cb1fcb9f19869a20001c3a9d88b007bf761a76d47e5d3e1b34e95"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/pr-review-frozen-trigger-evidence.md",
+      "sha256": "2f2c3bbaa9109968708a0e9f8f22f9643fe52a1b9f72b5c0a7f988ab64e5557d"
+    }
+  ]
+}

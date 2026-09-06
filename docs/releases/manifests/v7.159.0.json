@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.159.0",
+  "tagCommit": "a82d0cb3ac115f630f25b132f8907fdc34f772fc",
+  "targetCommitish": "a82d0cb3ac115f630f25b132f8907fdc34f772fc",
+  "releaseBodySha256": "86c4d2a181bea97f685648f56dd2fd77e87c585647f01fd121ffb652fff8d507",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 5,
+      "path": "docs/releases/pending/1535-kg14-expanded-graph-query-actions.md",
+      "sha256": "f5968e164892919739f507407e0a778c65d8c59587135f4708e9d054c09376e3"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/1663-config-json-schema-and-config-docs.md",
+      "sha256": "d7a6ef552581ba979ca070f36f010c420b458133d492e09be949fbb320147ff8"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1753-tui-pollution-pr2-init-path.md",
+      "sha256": "de8022bcea3420f839de2a8938abcd044fca4f6172ec6e34b35f9dec3a327f8a"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2420-project-config-installer-no-empty-override.md",
+      "sha256": "b03758a5764e3e94d157f2ebac4e582a80f748211c14103cef536abba5f052e5"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/928-config-validation-failures.md",
+      "sha256": "de747417e3cb6fb89fdd374f05d750d5e82426642cd27c02af2dde98187390a7"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/issue-2366-curation-finalize-audit.md",
+      "sha256": "3e177ce6e2df3a6a7b10963ca668e6a252a1261c9a17fd4301f8cbb16a391944"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.50.1",
+  "tagCommit": "d529b0379f051dcdef909f54bc188c7e9c711967",
+  "targetCommitish": "d529b0379f051dcdef909f54bc188c7e9c711967",
+  "releaseBodySha256": "59a16d5d081fb4da62fbe1da792d313dad3d999c1bc0c5be680946b3b79b14ab",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-495-flaky-score-variance.md",
+      "sha256": "f6e595eb86fed595c204bd5fbdc8fec57a679e036b30a459c726236fee41e665"
+    }
+  ]
+}

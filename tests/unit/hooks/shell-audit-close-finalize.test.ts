@@ -163,10 +163,19 @@ describe('finalizeShellAuditForClose — the archived cut', () => {
 	});
 });
 
-describe('close.ts ordering source-contract (issue #2040)', () => {
+describe('close archive-stage ordering source-contract (issue #2040)', () => {
 	test('the shell-audit finalize runs BEFORE both archive loops (validated cut before copy)', () => {
 		const closeSource = readFileSync(
-			join(import.meta.dir, '..', '..', '..', 'src', 'commands', 'close.ts'),
+			join(
+				import.meta.dir,
+				'..',
+				'..',
+				'..',
+				'src',
+				'commands',
+				'close',
+				'archive-stage.ts',
+			),
 			'utf-8',
 		);
 		// The finalize-before-archive wiring must EXIST and be ORDERED ahead of

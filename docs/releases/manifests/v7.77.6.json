@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.77.6",
+  "tagCommit": "9151e5ce6addebd294d866e95042920b254f9616",
+  "targetCommitish": "9151e5ce6addebd294d866e95042920b254f9616",
+  "releaseBodySha256": "8e62a3bba13f3827ac8261df47d5688896986675201ae63a1c77b030996d6919",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/repo-graph-eperm-rename-retry.md",
+      "sha256": "81c102c546ad62033f586334b92342f8db63579c1696d6e0bc5c967ab937ddb2"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.63.0",
+  "tagCommit": "4f5556b7bf435b1f6d61f6ee78326b524c362087",
+  "targetCommitish": "4f5556b7bf435b1f6d61f6ee78326b524c362087",
+  "releaseBodySha256": "8eb0a3cbead60d8057576e8bbb3ef6518879db73bd8a567899dd3fdd3583660e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/swarm-learning-system-changes-1-6.md",
+      "sha256": "de0180eab011ae014b04dd757ac1a6cd1b74217229799842c780d14c1bf25809"
+    }
+  ]
+}

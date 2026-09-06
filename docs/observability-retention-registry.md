@@ -200,7 +200,7 @@ whose `/swarm close` *lifecycle* is not. Issue #1534 added `repo-memory.sqlite`
 
 Before this rule the registry already forced every durable writer to have a
 row, and each row declared a prose `closePolicy` — but nothing verified that a
-row claiming "archived"/"cleaned" actually appeared in close.ts's arrays.
+row claiming "archived"/"cleaned" actually appeared in the close-stage arrays.
 
 **The rule.** Every `project-swarm` row whose `pathGrammar` names a literal flat
 `.swarm/<file>` MUST declare `closeArrayMembership` for that file, one of
@@ -208,21 +208,21 @@ row claiming "archived"/"cleaned" actually appeared in close.ts's arrays.
 **array membership only** — deliberately, because that is what is mechanically
 checkable; the prose `closePolicy` remains the place for narrative such as
 "context.md is archived and separately rewritten to a stub". Conversely, every
-artifact close.ts wires into either array must be declared by **exactly one**
+artifact the close stages wire into either array must be declared by **exactly one**
 row, or appear in the frozen `CLOSE_ARTIFACTS_WITHOUT_REGISTRY_ROW` allowlist
 (which may only shrink).
 
 **The gate**, `collectCloseLifecycleCoherenceErrors`
 (`scripts/check-retention-registry.ts`), parses the real arrays and dispatch
-sites out of `src/commands/close.ts` via `scripts/close-lifecycle-facts.ts` and
+sites out of `src/commands/close/{constants,archive-stage,clean-stage}.ts` via `scripts/close-lifecycle-facts.ts` and
 rejects:
 
-- a declaration that disagrees with close.ts (sub-defect **a**);
+- a declaration that disagrees with the close stages (sub-defect **a**);
 - an archived `.db`/`.sqlite`/`.sqlite3` artifact outside the
   `archiveSqliteSnapshot` dispatch condition (sub-defect **b**);
 - a cleaned SQLite artifact with no `closeXxx(...)` handle-close guard before
   the unlink in `runCleanStage` (sub-defect **c**);
-- a close.ts artifact no row declares, or that two rows declare;
+- a close-stage artifact no row declares, or that two rows declare;
 - a `project-swarm` row whose `pathGrammar` does not start with `.swarm/`
   (which would silently exempt it), unless listed in
   `PROJECT_SWARM_ROWS_WITH_INDIRECT_ROOT`;
@@ -231,7 +231,7 @@ rejects:
   `SQLITE_ARTIFACTS_EXEMPT_FROM_ARCHIVE_CLEAN` map with a reason. Without this
   last rule an author could reintroduce sub-defect **(a)** verbatim by
   declaring a new `.swarm/*.sqlite` as `neither`: the declaration would match
-  close.ts, and the VACUUM-INTO and handle-close rules would never fire because
+  the close stages, and the VACUUM-INTO and handle-close rules would never fire because
   they key on real array membership. A WAL-mode database orphaned across
   `/swarm close` must be an explicit, reviewed exception — never a quiet
   `neither`.
@@ -242,13 +242,13 @@ unresolvable identifiers become errors rather than dropped artifacts, and the
 gate additionally requires both arrays to be non-empty and `swarm.db` to appear
 in *both* SQLite sets — facts true independently of any artifact a given change
 adds. `tests/unit/scripts/check-retention-close-lifecycle.test.ts` drives the
-collectors with synthetic close.ts source for each sub-defect.
+collectors with synthetic close-stage source for each sub-defect.
 
 **Why the CI-check rung.** `tsconfig.json` is a single config with
 `include: ["src/**/*"]` and no CI step runs `tsc` over `scripts/`, so a required
 field on `RetentionRow` would be enforced by zero gates. Even with a `scripts/`
 tsconfig a type could require the field's *presence* but never that its value
-*matches* close.ts, which is the whole invariant — the type rung is a
+*matches* the close stages, which is the whole invariant — the type rung is a
 complement, not a substitute. Biome's configured scope is `src/**` and
 `tests/**`, and the property is cross-artifact semantics keyed on data values
 rather than code shape. And the registry is build-time
@@ -260,13 +260,13 @@ documentation-as-data under `scripts/`, deliberately never loaded by the plugin
 ## Close/reset/archive reconciliation (acceptance criterion)
 
 `/swarm close` (finalize) semantics are recorded per row. The reconciled sets
-(read from `src/commands/close.ts` on the gate tree): `ARCHIVE_ARTIFACTS`
-(:404-475 — including `repo-graph.fingerprint.json` :430 and
+(read from `src/commands/close/constants.ts` on the gate tree): `ARCHIVE_ARTIFACTS`
+(:16-95 — including `repo-graph.fingerprint.json` :42 and
 `epic-state.json`/`turbo-state.json` :441-442, #2483 additions),
-`ACTIVE_STATE_TO_CLEAN` (:531-572 — fingerprint :547, epic-state/turbo-state
-:570-571), `ACTIVE_STATE_DIRS_TO_CLEAN` (:634-650 — coder-settlements,
+`ACTIVE_STATE_TO_CLEAN` (:150-195 — fingerprint :166, epic-state/turbo-state
+:189-190), `ACTIVE_STATE_DIRS_TO_CLEAN` (:253-269 — coder-settlements,
 council, evidence, session, scopes, spec-archive, task-repairs, task-terminals,
-plus the #2483 additions `runs`/`epic` :648-649), dynamic artifacts
+plus the #2483 additions `runs`/`epic` :267-268), dynamic artifacts
 (post-mortem-*.md; drift-report-phase-*.json; config-backup-*; plan-ledger
 siblings; SWARM_PLAN checkpoints), deliberate exclusions (locks/;
 knowledge.jsonl archived-not-cleaned; swarm.db -wal/-shm removed post-unlink by
@@ -287,10 +287,10 @@ per row.
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
-| `telemetry-jsonl` | .swarm/telemetry.jsonl (+ single rotated .1) | operational | ROTATION_CHECK_INTERVAL=50 emits; rotate at 10 MiB (rotateTelemetryIfNeeded maxBytes, src… (global) | full-file: ≤ 2×10 MiB — both readers full-read but the rotation i… | archived+cleaned — flush (close.ts:1274), ARCHIVE_ARTI… | retain by design — #2051 (legacy-path retirement/migration owner); this gate (ratification) |
+| `telemetry-jsonl` | .swarm/telemetry.jsonl (+ single rotated .1) | operational | ROTATION_CHECK_INTERVAL=50 emits; rotate at 10 MiB (rotateTelemetryIfNeeded maxBytes, src… (global) | full-file: ≤ 2×10 MiB — both readers full-read but the rotation i… | archived+cleaned — flush (`src/commands/close/archive-stage.ts:155-166`), ARCHIVE_ARTI… | retain by design — #2051 (legacy-path retirement/migration owner); this gate (ratification) |
 | `events-jsonl` | .swarm/events.jsonl | operational | CORE_EVENT_LIMITS: ACTIVE_MAX_BYTES=2 MiB / ACTIVE_MAX_ENTRIES=20k / AGE_MAX_MS=7d on the retained window (authority set exempt — indexed); compact pass 512 KiB; checkInterval 25 (global) | manifest+retained-window (tail-bounded): READ_MAX_BYTES=3 MiB, manifest-stripped, coverage disclosed; lifetime counts from the manifest header | finalized validated cut (finalizeCoreEventsForClose) then archived+cleaned together with events-authority-index.json | retain by design — #2039 (shipped PR) |
 | `events-authority-index` | .swarm/events-authority-index.json | authoritative | AUTHORITY_INDEX_MAX_ENTRIES=20k FIFO (~2 MiB worst case); eviction counted + disclosed via core_events_health (global) | indexed: whole-file JSON read of the capped index; misses fall back to the bounded retained-window scan | archived+cleaned together with events.jsonl (same boundary as the WAL dirs it dedupes for) | retain by design — #2039 (shipped PR); direct-file exemption (#2039) |
-| `context-telemetry` | .swarm/context-telemetry.jsonl | operational | ACTIVE_MAX_BYTES=256KiB / ACTIVE_MAX_ENTRIES=10k / AGE_MAX_MS=30d on the retained raw window; lifetime folded aggregate in the manifest header (global) | manifest+retained-window: bounded — READ_MAX_BYTES=280KiB, independent of total history | archived as a validated cut — finalizeContextTelemetry before copy, ARCHIVE_ARTIFACTS (close.ts); NOT cleaned (persists; compaction is retention) | retain by design — #2037 (shipped PR) |
+| `context-telemetry` | .swarm/context-telemetry.jsonl | operational | ACTIVE_MAX_BYTES=256KiB / ACTIVE_MAX_ENTRIES=10k / AGE_MAX_MS=30d on the retained raw window; lifetime folded aggregate in the manifest header (global) | manifest+retained-window: bounded — READ_MAX_BYTES=280KiB, independent of total history | archived as a validated cut — finalizeContextTelemetry before copy, ARCHIVE_ARTIFACTS (`src/commands/close/archive-stage.ts:155-184`); NOT cleaned (persists; compaction is retention) | retain by design — #2037 (shipped PR) |
 | `skill-usage` | .swarm/skill-usage.jsonl | derived-rebuildable | HARD GLOBAL: SKILL_USAGE_LIMITS maxEntries=5,000/maxBytes=1.5MiB/maxAgeMs=90d, floorPerSkill=20 (global) | mixed full-file + tail: full readers bounded at readMaxBytes=1,677,722 B (truncatedRead reported); tail 64 KiB | untouched — persists across sessions | retain by design — #2038 (implemented) |
 | `skill-usage-pending` | .swarm/skill-usage-pending.json | authoritative | queueMaxRecords=5,000/queueMaxBytes=512KiB/maxAgeMs=90d/maxAttempts=5 (global) | indexed: single JSON doc bounded at readMaxBytes=1,677,722 B; oversized reads quarantined | untouched — persists across sessions | retain by design — #2038 (implemented); direct-file exemption (#2038) |
 
@@ -298,8 +298,8 @@ per row.
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
-| `background-delegations-ledger` | .swarm/background-delegations.jsonl (+ .checkpoint.json + .manifest.j… | authoritative | compaction high-water 1 MiB / low 256 KiB (:82-83); MAX_RECOVERY_LEDGER_BYTES 4 MiB; MAX_… (global) | indexed (checkpoint+tail) with full-fold fallback: legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_… | archived-only — ARCHIVE_ARTIFACTS (close.ts:463-465); … | not a defect — #2034 (merged); direct-file exemption (#2034) |
-| `background-delegations-health` | .swarm/background-delegations-health.json | derived-rebuildable | bounded by described data (checkpoint/ledger bounds above) (global) | indexed: single small JSON artifact | archived-only — ARCHIVE_ARTIFACTS (close.ts:420), not … | not a defect — #2034 (merged) |
+| `background-delegations-ledger` | .swarm/background-delegations.jsonl (+ .checkpoint.json + .manifest.j… | authoritative | compaction high-water 1 MiB / low 256 KiB (:82-83); MAX_RECOVERY_LEDGER_BYTES 4 MiB; MAX_… (global) | indexed (checkpoint+tail) with full-fold fallback: legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_… | archived-only — ARCHIVE_ARTIFACTS (`src/commands/close/constants.ts:70-78`); … | not a defect — #2034 (merged); direct-file exemption (#2034) |
+| `background-delegations-health` | .swarm/background-delegations-health.json | derived-rebuildable | bounded by described data (checkpoint/ledger bounds above) (global) | indexed: single small JSON artifact | archived-only — ARCHIVE_ARTIFACTS (`src/commands/close/constants.ts:75-78`), not … | not a defect — #2034 (merged) |
 | `learning-health-artifact` | .swarm/learning-health.json | derived-rebuildable | ≤64 scopes/alarm × 8 alarms compact counters + ≤100-transition ring; no fact lists persisted (global) | indexed: single small JSON artifact (async) | not archived or cleaned — operational health artifact; deletion loses visibility only | not a defect — #2044 |
 | `background-delegations-fallback` | .swarm/background-delegation-fallback/*.json + .swarm/background-code… | authoritative | MAX_LIVE_BACKGROUND_FALLBACKS 256 (:64); per-file 1 MiB (:75); reservations ≤256 entries … (global) | directory-scan: ≤256 files × 1 MiB | untouched (cross-session recovery state) | not a defect — #2034 (merged); direct-file exemption (#2034) |
 | `pr-monitor-subscriptions` | .swarm/pr-monitor/subscriptions.checkpoint.json (+ bounded subscriptions.audit.jsonl; legacy subscriptions.jsonl absorbed→archived→TTL-deleted) | operational | live cap: explicit maxSubscriptions (config default 20/max 100) + store net 20 (PR_SUBSCRIPTION_LIMITS); terminals 60→30 + 30 d age; audit 500/128 KiB→250/64 KiB with ≤128 KiB tail reads; checkpoint pressure-guard 256 KiB + HARD read guards (512-record / 1 MiB ceiling → quarantine+recovery); legacy source ≤64 MiB, migration ≤8 MiB/mutation (over-limit refused before mutation + reported) (per-project-store) | indexed: bounded checkpoint read (live-set sized); legacy tail fold only while pending/changed | untouched (compaction + archive TTL own reaping) | retain by design — #2042 (bounded checkpoint store shipped) |
@@ -312,7 +312,7 @@ per row.
 | `pr-review-reentry-authorizations` | .swarm/pr-review/reentry-authorizations/{session-stem}.json (+ .lock) | operational | ≤8 unconsumed / ≤32 persisted per session, pruned on write; 10-min TTL; file ≤64 KiB; 30 d sweep on the shadow files (per-key; keyspace finite by the 30 d reaper, authority stays in swarm.db) | indexed: single session file, 64 KiB hard read bound | untouched by close — the 30 d sweep owns the shadow-file reap | not a defect — #2483 |
 | `pr-review-run-artifacts` | .swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, tri… | governed-content | per-run: findings ≤1000 records/call + 10 MiB read guard; run dirs 30 d sweep (per-key; keyspace finite by the 30 d reaper) | line-bounded: 10 MiB read guard | untouched by close — the 30 d sweep owns the run-dir reap | not a defect — #2483 |
 | `status-artifacts` | .swarm/automation-status.json + .swarm/evidence-summary.json | operational | single rewritten snapshot (filename ≤255 chars :66) (global) | indexed: single small JSON | untouched | not a defect — this-gate |
-| `locks-dir` | .swarm/locks/{sha256|.base64}.lock + .meta sidecars | operational | LOCK_TIMEOUT_MS 5 min stale expiry; cleanupExpiredLocks sweep (:250-297) (global) | directory-scan: live locks only (expired filtered) | untouched — deliberately excluded from close (close.ts… | not a defect — #2035 (merged) |
+| `locks-dir` | .swarm/locks/{sha256|.base64}.lock + .meta sidecars | operational | LOCK_TIMEOUT_MS 5 min stale expiry; cleanupExpiredLocks sweep (:250-297) (global) | directory-scan: live locks only (expired filtered) | untouched — deliberately excluded from close (`src/commands/close/constants.ts:253-268` omits `locks`) | not a defect — #2035 (merged) |
 
 ### Category 3 — Evidence trajectories, PRM, insight, observability sink, postmortems, consensus, epic/turbo (13 rows)
 
@@ -323,10 +323,10 @@ per row.
 | `prm-replays` | .swarm/replays/{sessionId}-{timestamp}.jsonl | operational | per-artifact 1 MiB byte cap at write (REPLAY_LIMITS; skip + one-time warn at cap); shared age 7 d + count 200/dir sweep (per-key) | write-only: n/a | untouched (age/count sweep only) | retain by design — #2041 (shipped PR) |
 | `insight-candidates` | swarm.db table insight_candidate (#2480; legacy .swarm/insight-candidates.jsonl cold-archived .jsonl.imported) | operational | INSIGHT_PENDING_CAP 500 GLOBAL FIFO on pending rows + 7-day consumed-row DELETE retention (insight-candidate-store.ts) (global) | indexed: pending partial index, batch ≤20/trigger | untouched (bounded queue inside swarm.db; DB itself archived+cleaned by `project-db`) | not a defect — this-gate |
 | `observability-events-sqlite` | swarm.db tables observability_event/sink_health/import (#2482): canonical-envelope query authority — listener sink via group-commit writer, 50k DELETE retention, deterministic legacy import (telemetry.jsonl never renamed), /swarm report reader | operational | MAX_OBSERVABILITY_EVENT_ROWS 50000 GLOBAL DELETE-oldest inside the append batch + 16 KiB per-payload cap (observability-event-store.ts) (global) | indexed: idx_obs_event_* filters; report queries LIMIT 5000, quarantined excluded | untouched (bounded tables inside swarm.db; DB itself archived+cleaned by `project-db`) | not a defect — this-gate |
-| `postmortems` | .swarm/post-mortem-{planId}.md | governed-content | one bounded-input report per plan (inputs capped :38-43); idempotent dedup (per-key) | full-file: single report per plan | archived+cleaned — dynamic artifacts (close.ts:1418-14… | not a defect — this-gate |
-| `epic-promotions-evidence` | .swarm/evidence/epic-promotions.jsonl | operational | no per-file cap; bounded by session — evidence/ dir archived+cleaned at close (close.ts:5… (session-scoped) | full-file: session-scoped file (close-cleaned) | cleaned — evidence/ dir lifecycle | not a defect — this-gate |
+| `postmortems` | .swarm/post-mortem-{planId}.md | governed-content | one bounded-input report per plan (inputs capped :38-43); idempotent dedup (per-key) | full-file: single report per plan | archived+cleaned — dynamic artifacts (`src/commands/close/archive-stage.ts:360-450`, `src/commands/close/clean-stage.ts:155-174`) | not a defect — this-gate |
+| `epic-promotions-evidence` | .swarm/evidence/epic-promotions.jsonl | operational | no per-file cap; bounded by session — evidence/ dir archived+cleaned at close (`src/commands/close/constants.ts:253-268`) (session-scoped) | full-file: session-scoped file (close-cleaned) | cleaned — evidence/ dir lifecycle | not a defect — this-gate |
 | `knowledge-promotion-evidence` | .swarm/knowledge-promotion-evidence.jsonl | derived-rebuildable | MAX_PROMOTION_EVIDENCE_ENTRIES 2000 GLOBAL FIFO (:41,92-105) (global) | indexed: authoritative reader queries the receipt ledger (bound… | untouched (derived, bounded) | not a defect — this-gate |
-| `epic-turbo-state` | .swarm/epic-state.json + .swarm/epic/{calibration.json,divergence.jso… | operational | MAX_CALIBRATION_MODULES 500 (save+load truncation) + MAX_DIVERGENCE_BYTES 8 MiB write-side compaction + 30 d sweep + close wiring (global) | mixed full-file + tail: divergence reader tail-bounded 16 MiB; calibration cap-truncated on load | archived+cleaned — epic-state.json + turbo-state.json in both arrays (close.ts:441-442,570-571); runs/ + epic/ dirs cleaned (:648-649); recovery/ owned by the 30 d sweep | not a defect — #2483 |
+| `epic-turbo-state` | .swarm/epic-state.json + .swarm/epic/{calibration.json,divergence.jso… | operational | MAX_CALIBRATION_MODULES 500 (save+load truncation) + MAX_DIVERGENCE_BYTES 8 MiB write-side compaction + 30 d sweep + close wiring (global) | mixed full-file + tail: divergence reader tail-bounded 16 MiB; calibration cap-truncated on load | archived+cleaned — epic-state.json + turbo-state.json in both arrays (`src/commands/close/constants.ts:50-54,187-190`); runs/ + epic/ dirs cleaned (`src/commands/close/constants.ts:253-268`); recovery/ owned by the 30 d sweep | not a defect — #2483 |
 | `lean-turbo-evidence` | .swarm/evidence/{phase}/lean-turbo/{laneId}.json + lean-turbo-phase.j… | governed-content | per-phase/per-lane artifacts; evidence/ dir archived+cleaned at close (session-scoped) | indexed: session-scoped evidence dir | cleaned — evidence/ dir lifecycle | not a defect — this-gate |
 | `evidence-gate-artifacts` | .swarm/evidence/{phase}/{drift-verifier,hallucination-guard,mutation-… | governed-content | per-phase overwrite or bounded per-run artifacts; whole tree archived+cleaned at close (session-scoped) | indexed: single small JSON per gate | cleaned — evidence/ dir lifecycle | not a defect — this-gate |
 | `drift-reports` | swarm.db table phase_report kind=curator_drift (#2480; legacy .swarm/drift-report-phase-{N}.json cold-archived .json.imported) | governed-content | one row per phase, PK(kind,phase) last-write-wins (session-scoped) | indexed: ordered per-phase rows via PK | rows archived+cleaned with swarm.db (`project-db` row); legacy files still archived+cleaned by the close dynamic regex | not a defect — this-gate |
@@ -353,7 +353,7 @@ per row.
 |---|---|---|---|---|---|---|
 | `plan-ledger` | .swarm/plan-ledger.jsonl (+ archived-*.jsonl siblings, reconcile-arch… | authoritative | append-only by contract — NO cap, NO sampling, NO truncation (verified: only corruption-r… (global) | full-file: authoritative-lifecycle rationale: the ledger IS the p… | archived + terminal-state REMOVED unconditionally so a… | retain by design — this-gate; direct-file exemption (#2484 — SQLite migration owned by #2484) |
 | `plan-projections` | .swarm/plan.json + .swarm/plan.md | derived-rebuildable | single rewritten files derived from the ledger (rebuildable by replay) (global) | full-file: single plan document | archived+cleaned (plan.json/plan.md in both close list… | not a defect — this-gate |
-| `plan-checkpoints-exports` | .swarm/plan-export/SWARM_PLAN.{json,md} (+ legacy .swarm/SWARM_PLAN.*… | governed-content | bounded export set; checkpoints.json FIFO 20 default (checkpoint.max_retention) (global) | full-file: single checkpoint document / ≤20-entry log | archived + removed from all three locations (close.ts:… | not a defect — this-gate |
+| `plan-checkpoints-exports` | .swarm/plan-export/SWARM_PLAN.{json,md} (+ legacy .swarm/SWARM_PLAN.*… | governed-content | bounded export set; checkpoints.json FIFO 20 default (checkpoint.max_retention) (global) | full-file: single checkpoint document / ≤20-entry log | archived + removed from all three locations (`src/commands/close/clean-stage.ts:254-279`) | not a defect — this-gate |
 | `evidence-bundles` | .swarm/evidence/{taskId}/evidence.json | governed-content | ≤100 entries + ≤500 KiB per bundle; retention 30 d / 10 bundles; evidence/ close-scoped (per-key) | full-file: ≤500 KiB per bundle by write-side enforcement | cleaned — evidence/ dir lifecycle (after retention arc… | not a defect — this-gate |
 | `phase-participation` | .swarm/evidence/phase-participation.json (+ phase-participation-quara… | authoritative | MAX_PHASE_PARTICIPATION_BYTES 256 KiB (:36); PENDING ≤128; RECEIPTS ≤128 (:37-38); quaran… (global) | full-file: ≤256 KiB by write-side trim | cleaned — evidence/ dir lifecycle | not a defect — this-gate; direct-file exemption (#2036) |
 | `council-round-state-attempts` | .swarm/council/round-state/{token}.json + .swarm/council/attempts/{to… | authoritative | MAX_ROUND 10 (:18); audit-tail read ≤256 KiB; council/ dir archived+cleaned at close (per-key; keyspace finite by close + finite token domain) | line-bounded: ≤256 KiB audit tail | cleaned — council/ dir lifecycle | retain by design — #2046/#2483; direct-file exemption (#2046) |
@@ -369,7 +369,7 @@ per row.
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
-| `knowledge-store` | .swarm/knowledge.jsonl (+ linked/hive store roots via link.json) | governed-content | caller-configured maxEntries (swarm_max_entries default 100) enforced by enforceKnowledge… (global) | full-file: bounded transitively by the configured entry cap | archived-only — ARCHIVE_ARTIFACTS (close.ts:381,452-45… | not a defect — this-gate |
+| `knowledge-store` | .swarm/knowledge.jsonl (+ linked/hive store roots via link.json) | governed-content | caller-configured maxEntries (swarm_max_entries default 100) enforced by enforceKnowledge… (global) | full-file: bounded transitively by the configured entry cap | archived-only — ARCHIVE_ARTIFACTS (`src/commands/close/constants.ts:16-95`, directory handling `src/commands/close/archive-stage.ts:421-451`) | not a defect — this-gate |
 | `knowledge-events` | .swarm/knowledge-events.jsonl + .swarm/knowledge-counter-baseline.jso… | operational | MAX_EVENT_LOG_ENTRIES 5000 GLOBAL FIFO; evicted rows folded into knowledge-counter-baseli… (global) | full-file: ≤5000 lines by FIFO + baseline folding | untouched (bounded diagnostic stream) | not a defect — this-gate |
 | `knowledge-application-legacy` | .swarm/knowledge-application.jsonl + .swarm/.knowledge-shown.json | derived-rebuildable | MAX_LEGACY_APPLICATION_LOG_ENTRIES 5000 FIFO (:40,143-145) (global) | full-file: ≤5000 lines by FIFO | untouched (bounded compatibility stream) | not a defect — #2051 (retirement owner) |
 | `knowledge-receipts-v2` | .swarm/knowledge-receipts-v2.jsonl (+ .snapshot.json + -archive.jsonl… | authoritative | MAX_JOURNAL_RECORDS 2000 / 32 MiB; MAX_ARCHIVE_RECORDS 10000 / 16 MiB; grace DEFAULT_RECE… (global) | indexed: journal ≤2000 records; archive ≤10000 — both hard-capp… | close may copy for forensics but NEVER deletes live or… | not a defect — #2031 (merged); direct-file exemption (#2031) |
@@ -395,7 +395,7 @@ per row.
 | `run-memory` | .swarm/run-memory.jsonl | operational | no per-file cap; bounded by session — archived+cleaned at close (ACTIVE_STATE_TO_CLEAN cl… (session-scoped) | full-file: session-scoped (close-cleaned) | archived+cleaned | not a defect — this-gate |
 | `documents-cache` | .swarm/evidence-cache/documents.jsonl | derived-rebuildable | config cache_max_bytes (512 B–50 MiB) / cache_max_records (10–100k); no-op when unset (do… (per-trigger) | line-bounded: streamed ≤100 MiB read cap | pruned via close retention forwarding | not a defect — this-gate |
 | `repo-graph` | .swarm/repo-graph.json | derived-rebuildable | rebuildable from source (buildImpactMap/graph builder); archived+cleaned at close (ACTIVE… (session-scoped) | full-file: cached + validated; reflection reader hard-bounded 16 … | archived+cleaned | retain by design — this-gate |
-| `repo-graph-fingerprint` | .swarm/repo-graph.fingerprint.json | derived-rebuildable | bounded read (24 MiB); archived+cleaned at close with its sibling repo-graph.json (#2483) (session-scoped) | indexed: ≤24 MiB / ≤100,256 entries | archived+cleaned with repo-graph.json (close.ts:430,547) | not a defect — #2483 |
+| `repo-graph-fingerprint` | .swarm/repo-graph.fingerprint.json | derived-rebuildable | bounded read (24 MiB); archived+cleaned at close with its sibling repo-graph.json (#2483) (session-scoped) | indexed: ≤24 MiB / ≤100,256 entries | archived+cleaned with repo-graph.json (`src/commands/close/constants.ts:40-42,164-166`) | not a defect — #2483 |
 | `test-history` | .swarm/cache/test-history.jsonl | operational | MAX_HISTORY_PER_TEST 20 FIFO per key PLUS GLOBAL MAX_TEST_HISTORY_ENTRIES 5000 + MAX_TEST_HISTORY_KEYS 1000 on every append (per-key; keyspace finite by the global key cap) | full-file: bounded transitively by the global 5000-entry cap | untouched (cache/) | not a defect — #2483 |
 | `impact-map` | .swarm/cache/impact-map.json | derived-rebuildable | rebuildable via buildImpactMap (:449-455); size bounded by repository file population (session-scoped) | full-file: rebuildable cache; stale entries rejected by mtime che… | untouched (cache/) | not a defect — this-gate |
 
@@ -407,7 +407,7 @@ per row.
 | `reset-backups` | .swarm/reset-backups/{kind}-{timestamp}/ | governed-content | RESET_BACKUP_RETENTION 5 GLOBAL (:20, prune :125) (global) | write-only: n/a | untouched | not a defect — this-gate |
 | `worktree-status-owners` | Bounded merge-status, provisioning-owner/lifecycle, and recovery-authority/journal/credential stores under `.swarm/` | authoritative | hard global byte, entry, and file-count caps declared in the owning modules | directory-scan/indexed: bounded strict recovery scans | untouched (cross-session recovery state) | not a defect — this-gate; direct-file exemption (#2036) |
 | `worktree-lane-profiles` | <worktree>/.swarm/lanes/{laneIndex}.env | operational | one bounded env file per lane per worktree; removed at lane teardown (:219) (per-key) | write-only: n/a | worktree-scoped — removed with the worktree | not a defect — this-gate |
-| `config-doctor-artifacts` | .swarm/config-doctor.json + .swarm/config-backup-{timestamp}.json | operational | single rewritten artifact + timestamped backups deleted by close (close.ts:1754-1762) (global) | indexed: single JSON | doctor artifact untouched; config backups cleaned at c… | not a defect — this-gate |
+| `config-doctor-artifacts` | .swarm/config-doctor.json + .swarm/config-backup-{timestamp}.json | operational | single rewritten artifact + timestamped backups deleted by close (`src/commands/close/clean-stage.ts:192-220`) (global) | indexed: single JSON | doctor artifact untouched; config backups cleaned at c… | not a defect — this-gate |
 | `session-state-snapshot` | .swarm/session/{state.json, budget-state.json, session-start.jsonl, s… | authoritative | single snapshot per session; session/ dir archived+cleaned at close; session-start.jsonl … (session-scoped) | full-file: session-scoped files | cleaned — session/ dir lifecycle | not a defect — this-gate; direct-file exemption (#2036) |
 | `full-auto-state` | .swarm/full-auto-state.json (+ .bak) | authoritative | single rewritten state; denialHistory capped 100; bounded by run lifecycle (global) | indexed: single JSON | untouched (cross-session automation state) | not a defect — this-gate; direct-file exemption (#2036) |
 | `write-approval-ledger` | .swarm/authority/write-approvals.jsonl | authoritative | single atomically rewritten ledger capped at 512 issued/consumed entries (global) | full-file: at most the write-side 512-entry cap | untouched; expiry, one-shot consumption, and tail compaction bound retained authority | not a defect — #1824; direct-file exemption (#1824) |

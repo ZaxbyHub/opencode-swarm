@@ -3,24 +3,46 @@
  * The single-file store (`context-telemetry.jsonl`) must be ARCHIVED as a
  * defined, validated cut (finalizeContextTelemetry folds the tail before
  * archiving) and deliberately NOT cleaned (cross-session state; compaction is
- * the retention mechanism). Both lists are module-private in
- * src/commands/close.ts, so this pins them as a source-contract guard: moving
+ * the retention mechanism). Both lists live in the close constants module,
+ * so this pins them as a source-contract guard: moving
  * the entry to the cleanup list would violate the issue-#2037 close contract.
  */
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const closeSource = readFileSync(
-	join(import.meta.dir, '..', '..', '..', 'src', 'commands', 'close.ts'),
+const constantsSource = readFileSync(
+	join(
+		import.meta.dir,
+		'..',
+		'..',
+		'..',
+		'src',
+		'commands',
+		'close',
+		'constants.ts',
+	),
+	'utf-8',
+);
+const archiveStageSource = readFileSync(
+	join(
+		import.meta.dir,
+		'..',
+		'..',
+		'..',
+		'src',
+		'commands',
+		'close',
+		'archive-stage.ts',
+	),
 	'utf-8',
 );
 
 function arrayRegion(name: string): string {
-	const start = closeSource.indexOf(`const ${name} = [`);
-	if (start === -1) throw new Error(`${name} not found in close.ts`);
-	const end = closeSource.indexOf('];', start);
-	return closeSource.slice(start, end);
+	const start = constantsSource.indexOf(`const ${name} = [`);
+	if (start === -1) throw new Error(`${name} not found in close/constants.ts`);
+	const end = constantsSource.indexOf('];', start);
+	return constantsSource.slice(start, end);
 }
 
 const CONTEXT_TELEMETRY_ARTIFACTS = ['context-telemetry.jsonl'];
@@ -34,8 +56,10 @@ describe('/swarm close × context-map telemetry store (#2037)', () => {
 		// The finalize-before-archive wiring must EXIST and be ORDERED ahead of
 		// the archive loop (fold tail => atomic cut). A refactor that moves the
 		// call after the copy, or into a dead branch, must fail here.
-		const finalizeIndex = closeSource.indexOf('finalizeContextTelemetry(');
-		const archiveLoopIndex = closeSource.indexOf(
+		const finalizeIndex = archiveStageSource.indexOf(
+			'finalizeContextTelemetry(',
+		);
+		const archiveLoopIndex = archiveStageSource.indexOf(
 			'for (const artifact of ARCHIVE_ARTIFACTS)',
 		);
 		expect(finalizeIndex).toBeGreaterThan(-1);

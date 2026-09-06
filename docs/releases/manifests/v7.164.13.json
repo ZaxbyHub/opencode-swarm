@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.13",
+  "tagCommit": "aa8b1de4433e0aa05144773aa2d8b63064d98470",
+  "targetCommitish": "aa8b1de4433e0aa05144773aa2d8b63064d98470",
+  "releaseBodySha256": "1cec1ec338f5738e18219ae837da6732826dd2a571ce9917d927c9e3e691d533",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2489-repo-graph-warm-indexed-hardening.md",
+      "sha256": "001e158da7be0ad6fc1f1ed2a5013a2a04bf3f347a14c2d835adafb4cc8a53ef"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2493-cli-install-first-run.md",
+      "sha256": "3991ff554d9a99245c42d9b2741ac11c69754dc019c53081bcf4fe72961d1408"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/2493-commands-docs-gate.md",
+      "sha256": "8c0b13c32cdb9557fa0c9c825d59d5332451bb8772834e57478c628677fb2400"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/architect-acceptance-criteria.md",
+      "sha256": "aab12dd585989b08e01208ed948a519fedc1f303709e585e6eca72ad3df3636b"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/clarification-funnel.md",
+      "sha256": "e0e90ffe520408ac0649fdd196d0c30e0b8f844c9eb25a92ba5a7fe311cfc441"
+    },
+    {
+      "prNumber": null,
+      "order": 5,
+      "path": "docs/releases/pending/critic-funnel-fixes.md",
+      "sha256": "216a8cb350b3c0ee0bdf60802b0bdcbcad651a57867fe3f208270d551bb783fa"
+    },
+    {
+      "prNumber": null,
+      "order": 6,
+      "path": "docs/releases/pending/critic-gate-must-shall-obligation-traceability.md",
+      "sha256": "c71f580dad21684fa6b93417784f6e72696b2874cd0cc82ea002c8405b06160f"
+    },
+    {
+      "prNumber": null,
+      "order": 7,
+      "path": "docs/releases/pending/worktree-parallelization-first-class.md",
+      "sha256": "28a27c454bc497245f74db6e6d9e2b3dbbba715533be1e1aedf06ff84d0ce2ac"
+    }
+  ]
+}

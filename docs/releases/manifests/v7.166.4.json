@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.166.4",
+  "tagCommit": "e58e383d50e3d9d350a6b983269a962ed09b622e",
+  "targetCommitish": "e58e383d50e3d9d350a6b983269a962ed09b622e",
+  "releaseBodySha256": "14c866cbb3bb623be95b1bdbd04203fa399dab9f3b10742886a1eadfe6368def",
+  "fragments": [
+    {
+      "prNumber": 2593,
+      "path": "docs/releases/pending/2494-skill-host-executability.md",
+      "sha256": "814e98ad1968c2d13f50cbe874bb493c435db6c5280789fded227298c71a7133"
+    }
+  ]
+}

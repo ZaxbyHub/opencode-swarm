@@ -258,7 +258,7 @@ describe('retention registry rows — coverage plumbing', () => {
 
 		const pending = sourceLines('src/background/pending-delegations.ts');
 		const health = sourceLines('src/background/delegation-health.ts');
-		const close = sourceLines('src/commands/close.ts');
+		const closeConstants = sourceLines('src/commands/close/constants.ts');
 		const appendRecord = lineOf(pending, /^function appendRecord\(/);
 		const firstMutation = lineOf(
 			pending,
@@ -374,15 +374,24 @@ describe('retention registry rows — coverage plumbing', () => {
 		);
 		expect(row.legacyCompatibility).toContain(`(:${legacyLoader})`);
 
-		const closeStart = lineOf(close, /Background-delegation durable store/);
-		const archiveStart = lineOf(close, /'background-delegations\.jsonl'/);
+		const closeStart = lineOf(
+			closeConstants,
+			/Background-delegation durable store/,
+		);
+		const archiveStart = lineOf(
+			closeConstants,
+			/'background-delegations\.jsonl'/,
+		);
 		const archiveEnd = lineOf(
-			close,
+			closeConstants,
 			/'background-delegations\.manifest\.json'/,
 		);
-		const closeEnd = lineOf(close, /'background-delegations-health\.json'/);
+		const closeEnd = lineOf(
+			closeConstants,
+			/'background-delegations-health\.json'/,
+		);
 		expect(row.closePolicy).toBe(
-			`archived-only — ARCHIVE_ARTIFACTS (close.ts:${archiveStart}-${archiveEnd}); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:${closeStart}-${closeEnd} docblock)`,
+			`archived-only — ARCHIVE_ARTIFACTS (src/commands/close/constants.ts:${archiveStart}-${archiveEnd}); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, src/commands/close/constants.ts:${closeStart}-${closeEnd} docblock)`,
 		);
 		expect(row.disposition.kind).toBe('not-a-defect');
 		if (row.disposition.kind === 'not-a-defect') {

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.77.4",
+  "tagCommit": "c80fd658c24082633a5a71f82bbcfc25faf4d0d4",
+  "targetCommitish": "c80fd658c24082633a5a71f82bbcfc25faf4d0d4",
+  "releaseBodySha256": "500053290384ff22ec49e4e73fb80205f04b6583bc34fc7772d688249c248b6a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/final-council-gate-hardening-port.md",
+      "sha256": "e3b12077ee94f4d4d15858e787feee8f5a5033495d9aeee03b83069b4fcfd9dc"
+    }
+  ]
+}

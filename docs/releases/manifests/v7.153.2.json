@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.153.2",
+  "tagCommit": "d31d032bde7e472c2fe200b6765612ac10ed027f",
+  "targetCommitish": "d31d032bde7e472c2fe200b6765612ac10ed027f",
+  "releaseBodySha256": "7e62dcca40b8c832e2887dc6fdb9f2e6efd3a3eb6025afe3ddc8fd3dd7938647",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2094-cross-platform-ci-gates.md",
+      "sha256": "a9834266d7abfd35a3eb308de96b212f3bac19300751763a7e42fde73d115fd4"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2398-knowledge-gate-rolling-obligation.md",
+      "sha256": "f333f591251fe524c2bda956c6a4456c663194f2b6918c94e6584b6d83c40be1"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/knowledge-gate-deadlock-escape-hatch.md",
+      "sha256": "7a60165a7bcbdfc31ac02b8c2fe5a2341e70328edb6fa4cebc2314833ce29ca7"
+    }
+  ]
+}
