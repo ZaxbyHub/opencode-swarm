@@ -126,8 +126,8 @@ const PENDING_RELEASE_FRAGMENT_SUFFIX = '.md';
 
 /**
  * Prose shapes that hand-copy the dispatch lane batch cap in release-note
- * fragments. Fragments are transient (deleted when release-please consumes
- * them), so they are scanned as a directory instead of pinned by path.
+ * fragments. Fragments are retained until exact-tag cleanup safely consumes
+ * them, so they are scanned as a directory instead of pinned by path.
  */
 const LANE_CAP_FRAGMENT_REGEXES: readonly RegExp[] = [
 	/MAX_LANES\s*=\s*(\d+)/,

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.165.0",
+  "tagCommit": "e3aa5c75f9a023cff8c765c636c63f24dbd67df7",
+  "targetCommitish": "e3aa5c75f9a023cff8c765c636c63f24dbd67df7",
+  "releaseBodySha256": "d3fcd251b9fd938fca9fd81391cd16fbdfba5f71616f53e0af2800bd4633a03b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-tracer-v3.md",
+      "sha256": "f04e54ed985494ad0126e502df1e813cb362b897f6fac5b8dd18959aa8e214d0"
+    }
+  ]
+}

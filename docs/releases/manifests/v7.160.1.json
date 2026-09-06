@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.160.1",
+  "tagCommit": "fea72a77a13262836c97e21d83c04a3a7bab09a1",
+  "targetCommitish": "fea72a77a13262836c97e21d83c04a3a7bab09a1",
+  "releaseBodySha256": "fb20a10301f06c733bf61cfb4989d4d94769265aa4cf975420a048476ebe64ac",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/2302-sast-baseline-reflow-triage.md",
+      "sha256": "c2b5f3e06eaf0c6a27be23173093f85a6e22532cff4998e5b2faf99fd27314d8"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2384-pr-review-legacy-transcript-compatibility.md",
+      "sha256": "871dd0611a9040d33464e3332f898f9539c9f18bdf5cc01c640746cc622bb9d8"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/2443-review-sast-baseline-hardening.md",
+      "sha256": "1fbf438732cf7ca2f0e9a2dc73e2c1c4b9f1bda73574992ad861a0ea541539b3"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/issue-2384-trigger-eval-temp-root-boundary-fix.md",
+      "sha256": "fa54dbede3b3cace1557d3d89f581a205a66ccd36118765fe3c58b448d54f91f"
+    }
+  ]
+}

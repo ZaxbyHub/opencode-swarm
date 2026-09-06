@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.27.0",
+  "tagCommit": "11ea7179b9b6178acee9741bee9db9c53bdf4eb7",
+  "targetCommitish": "11ea7179b9b6178acee9741bee9db9c53bdf4eb7",
+  "releaseBodySha256": "b6331a3bc042b7c54a3afd54abec669dfd84f7609ed52276857ff6ea009cbbba",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/failure-classifier-infrastructure-failure.md",
+      "sha256": "8a5eab6da350c1c107a7c055a0c87d36b66386d986304705e37fe98d5c7c3eeb"
+    }
+  ]
+}

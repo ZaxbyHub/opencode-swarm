@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.32.0",
+  "tagCommit": "2553c2908a4d0a45bf8f4e52fe931a0fa0ad1e80",
+  "targetCommitish": "2553c2908a4d0a45bf8f4e52fe931a0fa0ad1e80",
+  "releaseBodySha256": "d7ea5704295b043536c708c2b7ec42a773d088ab7bb5c8ef7a1f6eb48efaa269",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/swarm-memory-recall-injection.md",
+      "sha256": "bcd5cfd88d5576013d701a3c9e599de9c140bc116567401cea4a84a8fffd369c"
+    }
+  ]
+}

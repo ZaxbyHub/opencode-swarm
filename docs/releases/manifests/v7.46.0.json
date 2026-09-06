@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.46.0",
+  "tagCommit": "77e8ad953c3e53303c864b88b3deab65ecb920ed",
+  "targetCommitish": "77e8ad953c3e53303c864b88b3deab65ecb920ed",
+  "releaseBodySha256": "fbe8054d90f29aecc776d4c580be0c7a22054d6edc85465f1f6c2412b30e930c",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1003-windows-native-sandbox-runner.md",
+      "sha256": "cfa5812eeaece38987fd67d912c617c86991d71108572a087e83926b3fe094f3"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/clarification-funnel.md",
+      "sha256": "4cb87fb7ecfeaf85fbdf5cc818e0834ebbe818e91fd0b368dc05b34328b174c5"
+    }
+  ]
+}

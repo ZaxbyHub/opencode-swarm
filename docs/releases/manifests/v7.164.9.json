@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.9",
+  "tagCommit": "6824f6ef200492d7a493f3e891d56c6b01b01062",
+  "targetCommitish": "6824f6ef200492d7a493f3e891d56c6b01b01062",
+  "releaseBodySha256": "57b4047bf4d4998e57030db17ec7bd930a3e13d88150779b45344b47ac12c420",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2528-per-agent-permission-blocks.md",
+      "sha256": "e3708f77caf3da94e471c7d071e75c8c4a4fc7a54895eabcff79cadc1d66c14e"
+    }
+  ]
+}

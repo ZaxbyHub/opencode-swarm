@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.125.6",
+  "tagCommit": "70952f1c53f8f94e3be3030c70e63d90237b8782",
+  "targetCommitish": "70952f1c53f8f94e3be3030c70e63d90237b8782",
+  "releaseBodySha256": "4f8bafda70eb8d591d08728a263cb9946fdb06fdefff5fc78b70b99488731b81",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/architect-acceptance-criteria.md",
+      "sha256": "894154934443b67d84ca9f8f96eff10d8aa5f5f5f6500db3a437e59b746535e6"
+    }
+  ]
+}

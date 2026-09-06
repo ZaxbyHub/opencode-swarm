@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.122.1",
+  "tagCommit": "6abbea0837f225caf046ac9abc337877b52f09d1",
+  "targetCommitish": "6abbea0837f225caf046ac9abc337877b52f09d1",
+  "releaseBodySha256": "921f166c9bf1e0b2fcc0977351716b6c9f1d319f1d2c8411dbf04eb425cd9eba",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1875-nontransient-error-loop.md",
+      "sha256": "88c54c27080d021ff9119a8c500d4af11067b4b34640071907ff81ac836cb104"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/extract-remaining-architect-mode-skills.md",
+      "sha256": "425c94ae17b481da708de6ddbd91a755073a6554b16a35c4959c4c00ff69fcab"
+    }
+  ]
+}

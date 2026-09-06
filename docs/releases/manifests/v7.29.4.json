@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.29.4",
+  "tagCommit": "214f1bfa48b23e691f0f9f00b324cdc5a2c770e6",
+  "targetCommitish": "214f1bfa48b23e691f0f9f00b324cdc5a2c770e6",
+  "releaseBodySha256": "1a03498f8d43dc2b9c3fc44667f3213c0782ce726622acc60b3b46835165747c",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/swarm-directory-containment-922.md",
+      "sha256": "4bcfae03976b73e3b47bf0f794eed1daea4c526ef2772ecb66cd3f13577249a7"
+    }
+  ]
+}

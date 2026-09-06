@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.64.0",
+  "tagCommit": "8ac343cc33c061ed4ffda386c7dd382eda013c08",
+  "targetCommitish": "8ac343cc33c061ed4ffda386c7dd382eda013c08",
+  "releaseBodySha256": "534373787c113f75f3328e87c712f2c66766306158d9ad4dda52c390fac1b33e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/external-skill-curation-pipeline.md",
+      "sha256": "1fcb9731a5d1bc0878775f28c0bd5530a8e898636593eb12cb146a814a0d3621"
+    }
+  ]
+}

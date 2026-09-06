@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.163.1",
+  "tagCommit": "cfe7a5add24b19fe0cd01cb95d5baf721d7fa5be",
+  "targetCommitish": "cfe7a5add24b19fe0cd01cb95d5baf721d7fa5be",
+  "releaseBodySha256": "deee4b0220b202a7c502993e5304d1c91f92f908346e4418ecaf7b8d04527de4",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2477-root-fix-fs-process-test-isolation-flakes.md",
+      "sha256": "86b762cf952ca9958b2c9de284797ac3aeb1616ae85c467e448455fb3a69c62f"
+    }
+  ]
+}

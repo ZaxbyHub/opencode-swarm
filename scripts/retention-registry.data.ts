@@ -2698,7 +2698,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'document record schema',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'content',
-		writeLimits: { bound: 'config cache_max_bytes (512 B–50 MiB) / cache_max_records (10–100k); no-op when unset (documented contract)', scope: 'per-trigger', citation: 'src/evidence/documents-retention.ts:66,95-103; docs/releases/pending/evidence-cache-retention.md' },
+		writeLimits: { bound: 'config cache_max_bytes (512 B–50 MiB) / cache_max_records (10–100k); no-op when unset (documented contract)', scope: 'per-trigger', citation: 'src/evidence/documents-retention.ts:66,95-103; docs/evidence-and-telemetry.md:68-80' },
 		readBound: { pattern: 'line-bounded', bound: 'streamed ≤100 MiB read cap', sync: false, citation: 'src/evidence/documents-retention.ts:66,203-257' },
 		lockModel: 'none during prune (append-vs-rewrite race accepted + documented :24-32)',
 		crashBehavior: 'atomic rewrite with temp cleanup',

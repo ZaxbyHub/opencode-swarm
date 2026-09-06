@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.65.0",
+  "tagCommit": "0ece9e01a3dd9d7f8714e62ccb2daa6fc85d18b6",
+  "targetCommitish": "0ece9e01a3dd9d7f8714e62ccb2daa6fc85d18b6",
+  "releaseBodySha256": "36f1388ebf320d274e82e8a8bfad7511ba3627352a472d142af8233aeba7fb6e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/provenance-verification.md",
+      "sha256": "bca5dc3bf12c684f09746259448ed8def68eef421c43e7d1ed81d1915c4e0507"
+    }
+  ]
+}

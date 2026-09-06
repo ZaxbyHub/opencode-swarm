@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.52.3",
+  "tagCommit": "1a996e54fc876ee5fbbdc6ce62bdfd23357d2dfd",
+  "targetCommitish": "1a996e54fc876ee5fbbdc6ce62bdfd23357d2dfd",
+  "releaseBodySha256": "2fc92921cc96091467f3a03ea57d486a169f6026e86aef6c91959a621cac0b7b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/council-mode-followup-pr728-review-items.md",
+      "sha256": "562b989a9b320970a0ae1c71fcf932d1148c8db36a524f2453bf96c92d93e510"
+    }
+  ]
+}

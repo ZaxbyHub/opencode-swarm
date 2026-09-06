@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.149.1",
+  "tagCommit": "fc7c8358bcb27089b00d77948d01becdad845c17",
+  "targetCommitish": "fc7c8358bcb27089b00d77948d01becdad845c17",
+  "releaseBodySha256": "54b390d6d0fb70f34274dceb3a8f05ad381400cc73e84803495581cd4055c36d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2280-base-only-checkpoint-and-liveness-advisory.md",
+      "sha256": "2c06f8e5304e738c610175074cef4ce7ab42be4ea99b99f79365b35f7b86d093"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2349-async-lane-terminal-provider-errors.md",
+      "sha256": "a97fcea6144429f8cd8ae0d66b1fecf701550757a203f607c8c3b3d076dc325c"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/2350-discovery-wave-recovery.md",
+      "sha256": "5d12ea644396fcc47153bca516740adc33c5ad963be630602f89af461d2e97f7"
+    }
+  ]
+}

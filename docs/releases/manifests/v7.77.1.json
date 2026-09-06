@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.77.1",
+  "tagCommit": "c15a8d314e76f184576cf83b88ba0d380acae724",
+  "targetCommitish": "c15a8d314e76f184576cf83b88ba0d380acae724",
+  "releaseBodySha256": "438ee5fb784dde52048fa60c909ce4417969d12b1a1f55385967852244d11bd0",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/test-impact-infrastructure-failure.md",
+      "sha256": "731a04840171331e2f3bf52cd9a5b1a720b8d69f3009e5f28bc3e9ccf36d5153"
+    }
+  ]
+}

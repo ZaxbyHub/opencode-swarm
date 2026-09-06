@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.68.0",
+  "tagCommit": "8052c5639839914cfced2769f4bec2b40d2065f1",
+  "targetCommitish": "8052c5639839914cfced2769f4bec2b40d2065f1",
+  "releaseBodySha256": "fc057d223d6148dd155f8921ea3676468deb7791801c7729f2c52c246f32b386",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1234-learning-observability-skill-revision.md",
+      "sha256": "735c20a0cfad649b63c51f70901fe0629872c52ec44fa11a2e78eca9701d165a"
+    }
+  ]
+}

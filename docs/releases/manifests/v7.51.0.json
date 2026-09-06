@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.51.0",
+  "tagCommit": "e2159d02d298efb835a20b1709898cd973c1766a",
+  "targetCommitish": "e2159d02d298efb835a20b1709898cd973c1766a",
+  "releaseBodySha256": "7231845def46946eee921b320fac7d55dca7d2f06750e0553e967c1bc83e395b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/tool-improvements-batch.md",
+      "sha256": "9f21707162a23a81ea82e0fe11d95a48136cf6b6c5536b84d85287897819c2df"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.50.4",
+  "tagCommit": "51dc82166784096d52ba21f3728594512db0665d",
+  "targetCommitish": "51dc82166784096d52ba21f3728594512db0665d",
+  "releaseBodySha256": "4382dd9400c6ba98582c4919c44304cc9b101fc0380db198bfa730ebb5e1068a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-1111-zod-validation-json-readers.md",
+      "sha256": "b9892960dd92c3db5e9064198155f85aace51bc3d9d944497b7b83a0db5fd3d8"
+    }
+  ]
+}

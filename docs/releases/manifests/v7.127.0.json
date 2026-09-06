@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.127.0",
+  "tagCommit": "bcff2be020e47dcb2e6f87ea2e00a70f63b0d66a",
+  "targetCommitish": "bcff2be020e47dcb2e6f87ea2e00a70f63b0d66a",
+  "releaseBodySha256": "984006037f655a983a02ff1593d20a27499ecdee9b565f5f792cd6e9a6ebabcf",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-skills-harness-portability.md",
+      "sha256": "3e8d12753bbf6bd0673df27954ab13073815f4aec4a8b98705e4f7542306653b"
+    }
+  ]
+}

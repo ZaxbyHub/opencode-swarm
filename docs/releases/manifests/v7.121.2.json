@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.121.2",
+  "tagCommit": "618fd2093ae7e3aa8ee7ab825fd5a3bb2df40515",
+  "targetCommitish": "618fd2093ae7e3aa8ee7ab825fd5a3bb2df40515",
+  "releaseBodySha256": "606b3ba0381328f7b064eb9d7b247a761045655f2e37644959e38122e5fe9550",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1687-delegation-spec-fr-acceptance.md",
+      "sha256": "72e0304c1218d2efa921d33902d77efa713790ae6d9442a369008893e48c9926"
+    }
+  ]
+}

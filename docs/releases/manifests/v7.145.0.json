@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.145.0",
+  "tagCommit": "cae705bf80db83e723d7cec5905b14e941988f1b",
+  "targetCommitish": "cae705bf80db83e723d7cec5905b14e941988f1b",
+  "releaseBodySha256": "2817d97911a80ef0eeb3fa363d2aae7903e881a6e7bd289ab22f5c23d8103618",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2035-unified-atomic-writes-residue-quarantine.md",
+      "sha256": "8d1006a5ed2da98ac05c39a46f2a9890d137094461f8910eba4ca41577a495c3"
+    }
+  ]
+}

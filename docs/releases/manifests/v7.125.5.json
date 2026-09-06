@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.125.5",
+  "tagCommit": "4509f6d97f716100a09c61cef1fb1d364d23d096",
+  "targetCommitish": "4509f6d97f716100a09c61cef1fb1d364d23d096",
+  "releaseBodySha256": "529a2849871637adc275b33d2795e738ad26416bb52c291aa0db792bd0b12bec",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-review-gate-deadlock-abort.md",
+      "sha256": "727f60c7d87e733878897e49ce65ee77e2cbfa10773435e4a51e3ca50314ae13"
+    }
+  ]
+}

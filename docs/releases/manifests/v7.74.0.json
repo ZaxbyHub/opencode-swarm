@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.74.0",
+  "tagCommit": "057d2e23469ee39b2c8723058ecc0f215935382f",
+  "targetCommitish": "057d2e23469ee39b2c8723058ecc0f215935382f",
+  "releaseBodySha256": "b390a43fffe69647a30486397aab653fc7edbfd6ab88e563e07f7e6dcd39c95a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/concurrent-task-enhancement.md",
+      "sha256": "bea37f39a397bc4367cd988092623c275f1d7d38a81057c8b7a4b6a4cc582262"
+    }
+  ]
+}

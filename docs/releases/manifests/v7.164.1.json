@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.1",
+  "tagCommit": "bda0c6dbc0f17998192a7fcdff6aa27dd55b40be",
+  "targetCommitish": "bda0c6dbc0f17998192a7fcdff6aa27dd55b40be",
+  "releaseBodySha256": "37d8015f2ef915e0b213a1bb1b89419093dc8b1c94c1931539a9fda3f6b68534",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2469-restore-pr-review-pr-feedback.md",
+      "sha256": "d42d1ef99f92dd1b2847f064c7dbb405dfe498d4cb9a0241fa88b9b354cfe2c3"
+    }
+  ]
+}

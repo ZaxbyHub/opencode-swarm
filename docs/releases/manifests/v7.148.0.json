@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.148.0",
+  "tagCommit": "5f5cc105c0ceaee43d8ff53cea5e265817c59013",
+  "targetCommitish": "5f5cc105c0ceaee43d8ff53cea5e265817c59013",
+  "releaseBodySha256": "70d38879290f977712be25a610b9ec438da75b6172e94f016c96d9280f758f33",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1530-cpp-swift-symbol-graph.md",
+      "sha256": "d069fe5178298c80fc0f093e70be6a22664ce4a1d135fd0235a24b68dec2c0c4"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2280-base-only-checkpoint-and-liveness-advisory.md",
+      "sha256": "e70efd9712dd3dbdb157db0e691ab5b9d509c762446b84f11054bbe4fdb9c250"
+    }
+  ]
+}

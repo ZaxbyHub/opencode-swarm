@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.78.7",
+  "tagCommit": "e0f448e4054adb0aeb5bd50e7e46c3f232b3f548",
+  "targetCommitish": "e0f448e4054adb0aeb5bd50e7e46c3f232b3f548",
+  "releaseBodySha256": "46e47723747be914b3c6fa5fd8908cc94ec2dc11e6afc63b0e564a80158e388d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-1245-followup-clear-alias-and-internals-seam.md",
+      "sha256": "5753e1b58f02617669188bcff0f96ba2f86996dc69146a1863b616082c752d1a"
+    }
+  ]
+}

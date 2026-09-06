@@ -15,10 +15,7 @@ import {
 	_internals,
 	external_skill_promote,
 } from '../../../src/tools/external-skill-promote.js';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 /**
  * Call the tool's execute function with a directory context.
@@ -115,8 +112,11 @@ async function seedCandidate(
 		sha256 = createHash('sha256').update(skillBody).digest('hex');
 	}
 
-	// Use a recent fetched_at so TTL gate passes
-	const fetchedAt = overrides.fetched_at ?? '2026-06-08T12:00:00.000Z';
+	const fetchedAt =
+		overrides.fetched_at ??
+		withFrozenClock(() => new Date(Date.now() - 60_000).toISOString(), {
+			fixedNow: Date.parse('2026-09-06T12:00:00.000Z'),
+		});
 
 	return store.add({
 		source_url: 'https://example.com/skill.md',
