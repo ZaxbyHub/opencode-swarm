@@ -10,7 +10,7 @@ import {
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { loadDatabaseCtor } from '../db/sqlite-loader.js';
-import { validateSwarmPath } from '../hooks/utils';
+import { estimateTokens, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import { stableCanonicalStringify } from '../utils/stable-stringify';
 import {
@@ -31,6 +31,7 @@ import { type FusionWeights, fuseRankings } from './embeddings/fusion';
 import { LocalEmbeddingProvider } from './embeddings/local-provider';
 import {
 	CrossEncoderReranker,
+	type MemoryReranker,
 	type RerankCandidate,
 	shouldRerank,
 } from './embeddings/reranker';
@@ -290,6 +291,41 @@ interface Migration {
 const RECALL_CANDIDATE_LIMIT = 1000;
 const FTS_SCHEMA_MIGRATION_VERSION = 3;
 const FTS_SCHEMA_MIGRATION_NAME = 'create_memory_fts5_shadow_index';
+
+function recallCandidateLimit(request: RecallRequest): number {
+	const requested = request.quality?.candidateCap;
+	if (typeof requested !== 'number' || !Number.isFinite(requested))
+		return RECALL_CANDIDATE_LIMIT;
+	return Math.min(RECALL_CANDIDATE_LIMIT, Math.max(1, Math.trunc(requested)));
+}
+
+function estimateReturnedTokens(items: readonly RecallResultItem[]): number {
+	// Recall itself does not build a prompt, so token consumption is unmeasured.
+	// Report a deterministic text-only estimate over what actually returned.
+	return items.reduce(
+		(total, item) => total + estimateTokens(item.record.text),
+		0,
+	);
+}
+
+function capQualityRecallItemsByTokenBudget(
+	items: readonly RecallResultItem[],
+	tokenBudget: number,
+): RecallResultItem[] {
+	const boundedTokenBudget = Number.isFinite(tokenBudget)
+		? Math.max(0, Math.trunc(tokenBudget))
+		: 0;
+	const selected: RecallResultItem[] = [];
+	let tokenEstimate = 0;
+	for (const item of items) {
+		const itemTokens = estimateTokens(item.record.text);
+		if (tokenEstimate + itemTokens > boundedTokenBudget) continue;
+		selected.push(item);
+		tokenEstimate += itemTokens;
+	}
+	return selected;
+}
+
 const FTS_TABLE_NAME = 'memory_items_fts';
 const FTS_INDEX_COLUMNS = [
 	{
@@ -674,6 +710,39 @@ export interface SQLiteJsonlImportResult {
 	totalRows: number;
 }
 
+export interface SQLiteRetrievalDependencies {
+	/** Optional deterministic override used by quality evaluation and focused tests. */
+	embeddingProvider?: EmbeddingProvider;
+	/** Selects dense candidates without claiming sqlite-vec availability. */
+	denseSelector?: (
+		request: RecallRequest,
+		queryEmbedding: Float32Array,
+		records: readonly MemoryRecord[],
+	) => Promise<MemoryRecord[]>;
+	reranker?: MemoryReranker;
+	/** Monotonic clock seam; default is Date.now. */
+	now?: () => number;
+}
+
+export interface MemoryRecallQualityTrace {
+	profile: 'lexical' | 'hybrid' | 'hybrid+rerank';
+	status: 'complete' | 'degraded' | 'skipped';
+	degradationReason?: string;
+	provenance: 'lexical' | 'sqlite-vec' | 'injected-dense';
+	usedEmbedding: boolean;
+	usedReranker: boolean;
+	latencyMs: number;
+	resourceUsage: {
+		lexical_candidate_count: number;
+		dense_candidate_count: number;
+		rerank_candidate_count: number;
+		returned_count: number;
+		query_embedding_invocation_count: number;
+		/** Deterministic estimate over the text actually returned, not a budget echo. */
+		returned_token_estimate: number;
+	};
+}
+
 export class SQLiteMemoryProvider
 	implements MemoryProvider, MemoryProposalStore
 {
@@ -695,7 +764,8 @@ export class SQLiteMemoryProvider
 	private vecAvailable = false;
 	private embeddingProvider: EmbeddingProvider | null = null;
 	private embeddingCache: EmbeddingCache | null = null;
-	private reranker: CrossEncoderReranker | null = null;
+	private reranker: MemoryReranker | null = null;
+	private readonly retrievalDependencies: SQLiteRetrievalDependencies;
 	private memories = new Map<string, MemoryRecord>();
 	private proposals = new Map<string, MemoryProposal>();
 	private lastAutomaticJsonlMigration: SQLiteJsonlImportResult | null = null;
@@ -714,9 +784,13 @@ export class SQLiteMemoryProvider
 		 * behavior).
 		 */
 		vettedCohortRoot?: string | null,
+		retrievalDependencies: SQLiteRetrievalDependencies = {},
 	) {
 		this.rootDirectory = rootDirectory;
 		this.cohortRoot = vettedCohortRoot ?? null;
+		this.retrievalDependencies = retrievalDependencies;
+		this.embeddingProvider = retrievalDependencies.embeddingProvider ?? null;
+		this.reranker = retrievalDependencies.reranker ?? null;
 		this.config = {
 			...DEFAULT_MEMORY_CONFIG,
 			...config,
@@ -1155,22 +1229,27 @@ export class SQLiteMemoryProvider
 	async recallWithDiagnostics(request: RecallRequest): Promise<{
 		items: RecallResultItem[];
 		diagnostics: RecallScoringDiagnostics;
+		qualityTrace?: MemoryRecallQualityTrace;
 	}> {
 		await this.initialize();
+		const qualityProfile = request.quality?.profile;
+		const candidateLimit = recallCandidateLimit(request);
+		const recallElapsedStart = this.now();
 
 		// ── Disabled-path guard: byte-identical to the legacy lexical-only flow ──
 		// When embeddings are off (config flag, vec extension, or provider missing),
 		// execute the existing path verbatim so golden fixtures pass unchanged.
 		if (
+			qualityProfile === 'lexical' ||
 			!this.config.embeddings.enabled ||
-			!this.vecAvailable ||
+			(!this.vecAvailable && !this.retrievalDependencies.embeddingProvider) ||
 			!this.embeddingProvider
 		) {
 			const scopedRecords = await this.list({
 				scopes: request.scopes,
 				kinds: request.kinds,
 				includeExpired: request.includeExpired,
-				limit: RECALL_CANDIDATE_LIMIT,
+				limit: candidateLimit,
 			});
 			const candidates = this.selectRecallCandidates(request, scopedRecords);
 			const result = scoreMemoryRecordsWithDiagnostics(
@@ -1189,28 +1268,58 @@ export class SQLiteMemoryProvider
 				request.maxItems,
 			);
 			const expanded = this.expandRelated(disabledPathSliced, request);
+			const returned = qualityProfile
+				? capQualityRecallItemsByTokenBudget(expanded, request.tokenBudget)
+				: expanded;
 			return {
-				items: expanded,
+				items: returned,
 				diagnostics: {
 					...result.diagnostics,
 					// Fix 3: derive exploredCount from what actually survived
 					// slicing so the count always matches an item present in the
 					// returned bundle.
-					exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
-					returnedCount: expanded.length,
+					exploredCount: returned.some((item) => item.explored) ? 1 : 0,
+					returnedCount: returned.length,
 				},
+				...(qualityProfile
+					? {
+							qualityTrace: {
+								profile: qualityProfile,
+								status:
+									qualityProfile === 'lexical'
+										? ('complete' as const)
+										: ('degraded' as const),
+								...(qualityProfile === 'lexical'
+									? {}
+									: { degradationReason: 'dense retrieval is unavailable' }),
+								provenance: 'lexical' as const,
+								usedEmbedding: false,
+								usedReranker: false,
+								latencyMs: Math.max(0, this.now() - recallElapsedStart),
+								resourceUsage: {
+									lexical_candidate_count: candidates.records.length,
+									dense_candidate_count: 0,
+									rerank_candidate_count: 0,
+									returned_count: returned.length,
+									query_embedding_invocation_count: 0,
+									returned_token_estimate: estimateReturnedTokens(returned),
+								},
+							},
+						}
+					: {}),
 			};
 		}
 
 		// ── Enabled path: lexical + dense RRF fusion ──
-		const recallElapsedStart = Date.now();
+		const wantsQualityTrace = Boolean(qualityProfile);
+		const resolvedQualityProfile = qualityProfile ?? 'hybrid';
 
 		// Stage 1 – lexical (FTS5-ranked candidates, unchanged from legacy path).
 		const scopedRecords = await this.list({
 			scopes: request.scopes,
 			kinds: request.kinds,
 			includeExpired: request.includeExpired,
-			limit: RECALL_CANDIDATE_LIMIT,
+			limit: candidateLimit,
 		});
 		const lexicalCandidates = this.selectRecallCandidates(
 			request,
@@ -1226,6 +1335,7 @@ export class SQLiteMemoryProvider
 			: lexicalResult.items;
 		// best-first id list for fusion (already sorted by score desc)
 		const lexicalIds = lexicalReranked.map((item) => item.record.id);
+		let queryEmbeddingInvocationCount = 0;
 
 		// Stage 2 – dense (sqlite-vec kNN). Non-fatal fallback to lexical-only on
 		// EmbeddingVersionMismatchError or any provider failure.
@@ -1236,6 +1346,7 @@ export class SQLiteMemoryProvider
 			let queryEmbedding =
 				this.embeddingCache?.get(modelVersion, normalizedQuery)?.vector ?? null;
 			if (queryEmbedding === null) {
+				queryEmbeddingInvocationCount++;
 				queryEmbedding = await this.embeddingProvider.embed(normalizedQuery);
 				this.embeddingCache?.set(modelVersion, normalizedQuery, {
 					vector: queryEmbedding,
@@ -1268,15 +1379,42 @@ export class SQLiteMemoryProvider
 				request.maxItems,
 			);
 			const expanded = this.expandRelated(denseFailedSliced, request);
+			const returned = wantsQualityTrace
+				? capQualityRecallItemsByTokenBudget(expanded, request.tokenBudget)
+				: expanded;
 			return {
-				items: expanded,
+				items: returned,
 				diagnostics: {
 					...lexicalResult.diagnostics,
 					// Fix 3: derive exploredCount from what actually survived
 					// slicing.
-					exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
-					returnedCount: expanded.length,
+					exploredCount: returned.some((item) => item.explored) ? 1 : 0,
+					returnedCount: returned.length,
 				},
+				...(wantsQualityTrace
+					? {
+							qualityTrace: {
+								profile: resolvedQualityProfile,
+								status: 'degraded' as const,
+								degradationReason: 'dense retrieval failed',
+								provenance: this.retrievalDependencies.embeddingProvider
+									? ('injected-dense' as const)
+									: ('sqlite-vec' as const),
+								usedEmbedding: true,
+								usedReranker: false,
+								latencyMs: Math.max(0, this.now() - recallElapsedStart),
+								resourceUsage: {
+									lexical_candidate_count: lexicalCandidates.records.length,
+									dense_candidate_count: 0,
+									rerank_candidate_count: 0,
+									returned_count: returned.length,
+									query_embedding_invocation_count:
+										queryEmbeddingInvocationCount,
+									returned_token_estimate: estimateReturnedTokens(returned),
+								},
+							},
+						}
+					: {}),
 			};
 		}
 
@@ -1345,10 +1483,17 @@ export class SQLiteMemoryProvider
 		}
 
 		// ── Stage 6 – cross-encoder rerank (enabled path only, latency-gated) ──
-		const previousRecallElapsedMs = Date.now() - recallElapsedStart;
+		const previousRecallElapsedMs = this.now() - recallElapsedStart;
 		let rerankedItems = fusedItems;
-		if (
+		let usedReranker = false;
+		let rerankDegradationReason: string | undefined;
+		let rerankCandidateCount = 0;
+		const rerankRequested = resolvedQualityProfile === 'hybrid+rerank';
+		const rerankEnabledForRequest =
 			this.config.retrieval.rerank.enabled &&
+			(!qualityProfile || qualityProfile === 'hybrid+rerank');
+		if (
+			rerankEnabledForRequest &&
 			shouldRerank(
 				previousRecallElapsedMs,
 				this.config.retrieval.latencyBudgetMs,
@@ -1361,6 +1506,7 @@ export class SQLiteMemoryProvider
 					});
 				}
 				const topN = Math.min(20, fusedItems.length);
+				rerankCandidateCount = topN;
 				const rerankCandidates: RerankCandidate[] = fusedItems
 					.slice(0, topN)
 					.map((item) => ({
@@ -1373,6 +1519,13 @@ export class SQLiteMemoryProvider
 					request.query,
 					topN,
 				);
+				// Invocation succeeded. `available` diagnoses a no-model fallback
+				// separately, so fake rerankers and unchanged rankings are not
+				// mistaken for an uncalled component.
+				usedReranker = true;
+				if (!this.reranker.available && rerankRequested) {
+					rerankDegradationReason = 'reranker unavailable';
+				}
 				// Reorder ONLY the top-N prefix by the reranker's returned order.
 				// The untouched tail (candidates beyond topN) is appended after the
 				// reranked prefix in their original fused order, so unreranked
@@ -1391,7 +1544,12 @@ export class SQLiteMemoryProvider
 					reason: err instanceof Error ? err.message : String(err),
 				});
 				rerankedItems = fusedItems;
+				if (rerankRequested) rerankDegradationReason = 'reranker failed';
 			}
+		} else if (rerankRequested) {
+			rerankDegradationReason = rerankEnabledForRequest
+				? 'reranking skipped by latency budget'
+				: 'reranking disabled';
 		}
 
 		// Fix 1 (C.1 reviewer fix): cap normal hits at maxItems, then append the
@@ -1402,8 +1560,11 @@ export class SQLiteMemoryProvider
 			request.maxItems,
 		);
 		const expanded = this.expandRelated(fusionSliced, request);
+		const returned = wantsQualityTrace
+			? capQualityRecallItemsByTokenBudget(expanded, request.tokenBudget)
+			: expanded;
 		return {
-			items: expanded,
+			items: returned,
 			diagnostics: {
 				...lexicalResult.diagnostics,
 				// Fix 3: derive exploredCount from what actually survived fusion
@@ -1412,10 +1573,37 @@ export class SQLiteMemoryProvider
 				// explored item on its own normalised-score scale, so
 				// `lexicalResult.diagnostics.exploredCount` alone is not a
 				// reliable signal of what is actually present here.
-				exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
-				returnedCount: expanded.length,
+				exploredCount: returned.some((item) => item.explored) ? 1 : 0,
+				returnedCount: returned.length,
 				fusionActive: true,
 			},
+			...(wantsQualityTrace
+				? {
+						qualityTrace: {
+							profile: resolvedQualityProfile,
+							status: rerankDegradationReason
+								? ('degraded' as const)
+								: ('complete' as const),
+							...(rerankDegradationReason
+								? { degradationReason: rerankDegradationReason }
+								: {}),
+							provenance: this.retrievalDependencies.embeddingProvider
+								? ('injected-dense' as const)
+								: ('sqlite-vec' as const),
+							usedEmbedding: true,
+							usedReranker,
+							latencyMs: Math.max(0, this.now() - recallElapsedStart),
+							resourceUsage: {
+								lexical_candidate_count: lexicalCandidates.records.length,
+								dense_candidate_count: denseIds.length,
+								rerank_candidate_count: rerankCandidateCount,
+								returned_count: returned.length,
+								query_embedding_invocation_count: queryEmbeddingInvocationCount,
+								returned_token_estimate: estimateReturnedTokens(returned),
+							},
+						},
+					}
+				: {}),
 		};
 	}
 
@@ -2134,6 +2322,59 @@ export class SQLiteMemoryProvider
 		request: RecallRequest,
 		queryEmbedding: Float32Array,
 	): Promise<MemoryRecord[]> {
+		const candidateLimit = recallCandidateLimit(request);
+		if (this.retrievalDependencies.denseSelector) {
+			// Injected selectors are evaluation/test seams, not a bypass around the
+			// production retrieval boundary. Keep their candidate set identical to
+			// the scoped/kind/expiry-filtered list used by the other dense paths.
+			const eligible = await this.list({
+				scopes: request.scopes,
+				kinds: request.kinds,
+				includeExpired: request.includeExpired,
+				limit: candidateLimit,
+			});
+			const eligibleById = new Map(
+				eligible.map((record) => [record.id, record]),
+			);
+			const selected = await this.retrievalDependencies.denseSelector(
+				request,
+				queryEmbedding,
+				eligible,
+			);
+			const seen = new Set<string>();
+			const bounded: MemoryRecord[] = [];
+			for (const candidate of selected) {
+				const eligibleRecord = eligibleById.get(candidate.id);
+				if (!eligibleRecord || seen.has(candidate.id)) continue;
+				seen.add(candidate.id);
+				bounded.push(eligibleRecord);
+				if (bounded.length >= candidateLimit) break;
+			}
+			return bounded;
+		}
+		if (this.retrievalDependencies.embeddingProvider && !this.vecAvailable) {
+			// The evaluator intentionally uses an injected, deterministic dense
+			// selector. This is not sqlite-vec and must remain explicitly labelled
+			// as injected-dense in its quality trace.
+			const candidates = await this.list({
+				scopes: request.scopes,
+				kinds: request.kinds,
+				includeExpired: request.includeExpired,
+				limit: candidateLimit,
+			});
+			const vectors = await this.embeddingProvider?.embedBatch(
+				candidates.map((record) => record.text),
+			);
+			return candidates
+				.map((record, index) => ({
+					record,
+					score: cosineSimilarity(queryEmbedding, vectors?.[index]),
+				}))
+				.sort(
+					(a, b) => b.score - a.score || a.record.id.localeCompare(b.record.id),
+				)
+				.map(({ record }) => record);
+		}
 		if (
 			!this.config.embeddings.enabled ||
 			!this.vecAvailable ||
@@ -2153,7 +2394,11 @@ export class SQLiteMemoryProvider
 		// scope/kind/superseded/deleted/expired (mirroring lexical scoping).
 		// For tight scope filters this oversampling reduces (but may not
 		// eliminate) recall loss; pre-filtering via vec0 WHERE is a future improvement.
-		const k = Math.max(100, request.maxItems * 20);
+		const requestedQualityCap = request.quality?.candidateCap;
+		const k =
+			typeof requestedQualityCap === 'number'
+				? candidateLimit
+				: Math.max(100, request.maxItems * 20);
 		const rows = this.requireDb()
 			.query<{ id: string; distance: number }, SQLQueryBindings[]>(
 				`SELECT id, distance FROM memory_items_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?`,
@@ -2188,7 +2433,13 @@ export class SQLiteMemoryProvider
 			const record = this.memories.get(row.id);
 			if (record) results.push(record);
 		}
-		return results;
+		return typeof requestedQualityCap === 'number'
+			? results.slice(0, candidateLimit)
+			: results;
+	}
+
+	private now(): number {
+		return this.retrievalDependencies.now?.() ?? Date.now();
 	}
 
 	private runMigrations(): void {
@@ -3809,6 +4060,25 @@ const FTS_STOP_WORDS = new Set([
 	'when',
 	'with',
 ]);
+
+/** Small dependency-free cosine helper used only by the explicit injected-dense
+ * evaluation fallback. sqlite-vec remains the production default. */
+function cosineSimilarity(
+	a: Float32Array,
+	b: Float32Array | undefined,
+): number {
+	if (!b || a.length !== b.length || a.length === 0) return 0;
+	let dot = 0;
+	let aNorm = 0;
+	let bNorm = 0;
+	for (let index = 0; index < a.length; index++) {
+		dot += a[index] * b[index];
+		aNorm += a[index] * a[index];
+		bNorm += b[index] * b[index];
+	}
+	if (aNorm === 0 || bNorm === 0) return 0;
+	return dot / Math.sqrt(aNorm * bNorm);
+}
 
 function buildFtsQuery(request: RecallRequest): string | null {
 	const text =

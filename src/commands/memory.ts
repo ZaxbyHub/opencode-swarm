@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPluginConfig } from '../config/loader';
@@ -520,6 +520,15 @@ export async function handleMemoryEvaluateCommand(
 	if ('error' in parsed) return parsed.error;
 	const report = await evaluateMemoryRecallFixtures({
 		fixtureDirectory: parsed.fixtureDirectory,
+		...(parsed.profiles ? { profiles: parsed.profiles } : {}),
+		...(parsed.heldoutCorpusDirectory
+			? {
+					heldoutCorpusDirectory: parsed.heldoutCorpusDirectory,
+					providers: ['sqlite'],
+					modes: ['manual'],
+					resourceCaps: { candidate_count: 20, token_budget: 256 },
+				}
+			: {}),
 	});
 	if (parsed.json) return `${JSON.stringify(report, null, 2)}\n`;
 	return [
@@ -535,6 +544,10 @@ export async function handleMemoryEvaluateCommand(
 		`- Same-scope noise: \`${report.summary.same_scope_noise_count}\``,
 		`- Cross-scope leaks: \`${report.summary.cross_scope_leak_count}\``,
 		`- Stale memories: \`${report.summary.stale_memory_count}\``,
+		...(parsed.manifestPath ? [`- Manifest: \`${parsed.manifestPath}\``] : []),
+		...(parsed.profiles
+			? [`- Profiles: \`${parsed.profiles.join(', ')}\``]
+			: []),
 		'',
 		'Use `/swarm memory evaluate --json` for the full report.',
 	].join('\n');
@@ -622,7 +635,15 @@ function isPathWithinAnyOf(target: string, roots: string[]): boolean {
 function parseEvaluateArgs(
 	directory: string,
 	args: string[],
-): { json: boolean; fixtureDirectory: string } | { error: string } {
+):
+	| {
+			json: boolean;
+			fixtureDirectory: string;
+			profiles?: Array<'lexical' | 'hybrid' | 'hybrid+rerank'>;
+			manifestPath?: string;
+			heldoutCorpusDirectory?: string;
+	  }
+	| { error: string } {
 	let json = false;
 	let fixtureDirectory = path.join(
 		PACKAGE_ROOT,
@@ -630,6 +651,11 @@ function parseEvaluateArgs(
 		'fixtures',
 		'memory-recall',
 	);
+	let profiles: Array<'lexical' | 'hybrid' | 'hybrid+rerank'> | undefined;
+	let manifestPath: string | undefined;
+	let heldoutCorpusDirectory: string | undefined;
+	const legacyUsage =
+		'Usage: /swarm memory evaluate [--json] [--fixtures <directory>]';
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
 		if (arg === '--json') {
@@ -697,11 +723,107 @@ function parseEvaluateArgs(
 			i++;
 			continue;
 		}
+		if (arg === '--profiles') {
+			const next = args[i + 1];
+			if (!next) {
+				return { error: legacyUsage };
+			}
+			const allowed = new Set(['lexical', 'hybrid', 'hybrid+rerank']);
+			const requested = next
+				.split(',')
+				.map((profile) => profile.trim())
+				.filter(Boolean);
+			if (
+				requested.length === 0 ||
+				requested.some((profile) => !allowed.has(profile))
+			) {
+				return {
+					error:
+						'Usage: /swarm memory evaluate [--json] [--fixtures <directory>] [--profiles <lexical,hybrid,hybrid+rerank>] [--manifest <file>]',
+				};
+			}
+			profiles = requested as typeof profiles;
+			i++;
+			continue;
+		}
+		if (arg === '--manifest') {
+			const next = args[i + 1];
+			if (!next) {
+				return {
+					error:
+						'Usage: /swarm memory evaluate [--json] [--fixtures <directory>] [--profiles <lexical,hybrid,hybrid+rerank>] [--manifest <file>]',
+				};
+			}
+			const resolvedManifest = path.resolve(directory, next);
+			if (path.basename(resolvedManifest) !== 'manifest.json') {
+				return {
+					error:
+						'--manifest <file> must be named manifest.json; the held-out loader resolves the selected corpus directory manifest by that exact filename',
+				};
+			}
+			const projectRoot = path.resolve(directory);
+			const bundledRoot = path.join(
+				PACKAGE_ROOT,
+				'tests',
+				'fixtures',
+				'memory-recall-heldout',
+			);
+			if (!isPathWithinAnyOf(resolvedManifest, [projectRoot, bundledRoot])) {
+				return {
+					error:
+						'--manifest <file> must resolve under the project directory or the bundled tests/fixtures/memory-recall-heldout directory',
+				};
+			}
+			try {
+				manifestPath = realpathSync(resolvedManifest);
+				const realRoots = [projectRoot, bundledRoot]
+					.map((root) => {
+						try {
+							return realpathSync(root);
+						} catch {
+							return null;
+						}
+					})
+					.filter((root): root is string => root !== null);
+				if (!isPathWithinAnyOf(manifestPath, realRoots)) {
+					return {
+						error:
+							'--manifest <file> escaped the allowed roots via a symlink or non-canonical path; it must stay under the project directory or the bundled tests/fixtures/memory-recall-heldout directory',
+					};
+				}
+				const manifest = JSON.parse(
+					readFileSync(manifestPath, 'utf8'),
+				) as Record<string, unknown>;
+				const isHeldoutManifest =
+					manifest.split === 'heldout' &&
+					typeof manifest.corpus_id === 'string';
+				if (!isHeldoutManifest) {
+					return {
+						error:
+							'--manifest <file> must be a held-out corpus manifest with split=heldout',
+					};
+				}
+				heldoutCorpusDirectory = path.dirname(manifestPath);
+			} catch {
+				return {
+					error:
+						'--manifest <file> must be an existing JSON manifest inside an allowed root',
+				};
+			}
+			i++;
+			continue;
+		}
 		return {
-			error: 'Usage: /swarm memory evaluate [--json] [--fixtures <directory>]',
+			error: legacyUsage,
 		};
 	}
-	return { json, fixtureDirectory };
+	return {
+		json,
+		fixtureDirectory,
+		profiles,
+		manifestPath,
+		heldoutCorpusDirectory,
+	};
 }
 
 function parseMaintenanceArgs(

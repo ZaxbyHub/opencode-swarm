@@ -71,6 +71,32 @@ export const REQUIRED_EVALUATION_FIXTURE_IDS = [
 	'boundary-error',
 ];
 
+export const REQUIRED_HELDOUT_RETRIEVAL_FILES = [
+	'tests/fixtures/memory-recall-heldout/manifest.json',
+	...[
+		'bash.sh',
+		'c.c',
+		'cpp.cpp',
+		'csharp.cs',
+		'css.css',
+		'dart.dart',
+		'go.go',
+		'ini.ini',
+		'java.java',
+		'javascript.js',
+		'kotlin.kt',
+		'php.php',
+		'powershell.ps1',
+		'python.py',
+		'regex.regex',
+		'ruby.rb',
+		'rust.rs',
+		'swift.swift',
+		'tsx.tsx',
+		'typescript.ts',
+	].map((name) => `tests/fixtures/memory-recall-heldout/sources/${name}`),
+];
+
 const REQUIRED_PACKAGE_FILES = [
 	'dist/index.js',
 	'dist/index.d.ts',
@@ -85,6 +111,7 @@ const REQUIRED_PACKAGE_FILES = [
 		`evaluation-fixtures/tier1/${id}/environment/defect.ts`,
 		`evaluation-fixtures/tier1/${id}/environment/defect.test.ts`,
 	]),
+	...REQUIRED_HELDOUT_RETRIEVAL_FILES,
 	'README.md',
 	'LICENSE',
 	'package.json',
@@ -407,8 +434,11 @@ async function main() {
 				"const privateCiFix = path.join(projectDir, '.swarm', 'bundled-skills', 'ci-fix-monitor', 'SKILL.md');",
 				"const packageRoot = path.join(process.cwd(), 'node_modules', 'opencode-swarm');",
 				"const packagedPlan = path.join(packageRoot, '.opencode', 'skills', 'swarm-plan', 'SKILL.md');",
+				"const heldoutManifest = path.join(packageRoot, 'tests', 'fixtures', 'memory-recall-heldout', 'manifest.json');",
 				"const evaluationTasks = await loadTier1EvaluationTasks(packageRoot);",
 				"if (evaluationTasks.length !== 12) throw new Error('packed Tier-1 evaluation fixtures did not resolve');",
+				"const heldout = JSON.parse(readFileSync(heldoutManifest, 'utf8'));",
+				"if (heldout.split !== 'heldout' || heldout.cases?.length !== 20) throw new Error('packed held-out retrieval corpus did not resolve');",
 				"const sentinel = '---\\nname: swarm-plan\\naudience: ragappv3\\ndescription: repository-owned sentinel\\n---\\n';",
 				"mkdirSync(path.dirname(nativePlan), { recursive: true });",
 				"writeFileSync(nativePlan, sentinel);",

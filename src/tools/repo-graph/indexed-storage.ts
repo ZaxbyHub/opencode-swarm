@@ -39,7 +39,11 @@ import { validateSymlinkBoundary } from '../../utils/path-security';
 import { safeRealpathSync } from './safe-realpath';
 import { deriveRepoRootId } from './symbol-edge';
 import type { GraphEdge, GraphNode, RepoGraph } from './types';
-import { normalizeGraphPath, REPO_GRAPH_FILENAME } from './types';
+import {
+	isGraphSchemaVersionCompatible,
+	normalizeGraphPath,
+	REPO_GRAPH_FILENAME,
+} from './types';
 import {
 	validateGraphEdge,
 	validateGraphNode,
@@ -721,6 +725,14 @@ function openFreshIndex(workspace: string): IndexContext | null {
 	const persistedMtime = meta.get('source_mtime_ms');
 	const schemaVersion = meta.get('graph_schema_version');
 	if (!persistedRoot || !persistedSize || !persistedMtime || !schemaVersion) {
+		closeRepoMemory(workspace);
+		return null;
+	}
+	if (!isGraphSchemaVersionCompatible(schemaVersion)) {
+		closeRepoMemory(workspace);
+		logger.log(
+			`[repo-graph] repo-memory graph schema ${schemaVersion} is unsupported; falling back to JSON`,
+		);
 		return null;
 	}
 

@@ -85,6 +85,7 @@
 		".opencode/skills/orchestrating-subagents",
 		".opencode/skills/durable-session-state",
 		"tests/fixtures/memory-recall",
+		"tests/fixtures/memory-recall-heldout",
 		"opencode-swarm.schema.json",
 		"README.md",
 		"LICENSE"
@@ -131,7 +132,8 @@
 		"check:error-channel-discard": "bun run scripts/check-error-channel-discard.ts",
 		"check:path-identity": "bun run scripts/check-path-identity.ts",
 		"check:registry-citations": "bun run scripts/check-registry-citations.ts",
-		"check:memory-recall": "bun run scripts/memory-recall-regression.ts"
+		"check:memory-recall": "bun run scripts/memory-recall-regression.ts",
+		"check:retrieval-quality": "bun run scripts/retrieval-quality-regression.ts"
 	},
 	"dependencies": {
 		"@opencode-ai/plugin": "^1.18.3",

@@ -1,5 +1,6 @@
 export type { MemoryConfig } from './config';
 export { DEFAULT_MEMORY_CONFIG, resolveMemoryConfig } from './config';
+export type { MemoryReranker, RerankCandidate } from './embeddings/reranker';
 export {
 	MemoryDisabledError,
 	MemoryPiiDetectorError,
@@ -8,12 +9,20 @@ export {
 export {
 	evaluateMemoryRecallFixtures,
 	loadRecallEvaluationFixtures,
+	type RecallEvaluationComparison,
+	type RecallEvaluationIdentity,
+	type RecallEvaluationManifest,
 	type RecallEvaluationMetrics,
 	type RecallEvaluationMode,
 	type RecallEvaluationOptions,
+	type RecallEvaluationProfile,
 	type RecallEvaluationProviderName,
 	type RecallEvaluationReport,
+	type RecallEvaluationResourceCaps,
+	type RecallEvaluationResourceUsage,
 	type RecallEvaluationRun,
+	type RecallEvaluationScenario,
+	validateRecallEvaluationManifest,
 } from './evaluation';
 export type {
 	MemoryGatewayOptions,
@@ -27,6 +36,14 @@ export {
 	createMemoryGateway,
 	MemoryGateway,
 } from './gateway';
+export {
+	type HeldoutRecallCorpusCase,
+	type HeldoutRecallCorpusManifest,
+	type LoadedHeldoutRecallScenario,
+	loadHeldoutRecallEvaluationCorpus,
+	loadHeldoutRecallEvaluationScenarios,
+	validateHeldoutRecallCorpusManifest,
+} from './heldout-evaluation-corpus';
 export {
 	createMemoryLifecycleHooks,
 	type MemoryLifecycleHookOptions,
@@ -129,6 +146,10 @@ export {
 	validateMemoryProposal,
 	validateMemoryRecordRules,
 } from './schema';
+export type {
+	MemoryRecallQualityTrace,
+	SQLiteRetrievalDependencies,
+} from './sqlite-provider';
 export {
 	EVENT_CHAIN_GENESIS,
 	MEMORY_EVENTS_CHAIN_HEAD_KEY,
@@ -164,6 +185,7 @@ export type {
 	RecallBundle,
 	RecallInjectionSkipReason,
 	RecallMode,
+	RecallQualityProfile,
 	RecallRequest,
 	RecallResultItem,
 	ResolvedCuratorMemoryDecision,

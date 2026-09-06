@@ -258,6 +258,9 @@ export type RecallInjectionSkipReason =
 	| 'below_threshold'
 	| 'no_results';
 
+/** Explicit, evaluator-only opt-in. Normal agent recall never requests it. */
+export type RecallQualityProfile = 'lexical' | 'hybrid' | 'hybrid+rerank';
+
 export interface RecallRequest {
 	query: string;
 	task?: string;
@@ -277,6 +280,18 @@ export interface RecallRequest {
 	 * suppression never deletes or tombstones the underlying record.
 	 */
 	includeLowQ?: boolean;
+	/**
+	 * Produces bounded retrieval-quality telemetry on `recallWithDiagnostics`.
+	 * This is intentionally opt-in so agent-facing recall output stays unchanged.
+	 */
+	quality?: {
+		profile: RecallQualityProfile;
+		/**
+		 * Bounded evaluator-only retrieval work cap. Omitted for normal agent
+		 * recall, which preserves the established provider candidate behavior.
+		 */
+		candidateCap?: number;
+	};
 }
 
 export interface RecallResultItem {

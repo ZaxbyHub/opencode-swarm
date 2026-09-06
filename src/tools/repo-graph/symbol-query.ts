@@ -25,6 +25,7 @@ import {
 	getDependencies,
 	getGraphNode,
 	getImporters,
+	getSymbolEdgeIndexes,
 } from './query';
 import {
 	createStableSymbolId,
@@ -136,29 +137,6 @@ function visibilityOf(node: GraphNode, symbol: string): GraphSymbolVisibility {
 	return node.exports.includes(symbol) ? 'exported' : 'module-local';
 }
 
-/**
- * Forward/reverse symbol-edge maps keyed `normalizedAbsoluteFile\0symbol` —
- * the same keying as `getContextPack`, so traversal semantics stay identical.
- */
-function symbolEdgeMaps(graph: RepoGraph): {
-	forward: Map<string, SymbolEdge[]>;
-	reverse: Map<string, SymbolEdge[]>;
-} {
-	const forward = new Map<string, SymbolEdge[]>();
-	const reverse = new Map<string, SymbolEdge[]>();
-	for (const edge of graph.symbolEdges ?? []) {
-		const fromKey = `${normalizeGraphPath(edge.fromFile)}\0${edge.fromSymbol}`;
-		const toKey = `${normalizeGraphPath(edge.toFile)}\0${edge.toSymbol}`;
-		const fromEdges = forward.get(fromKey);
-		if (fromEdges) fromEdges.push(edge);
-		else forward.set(fromKey, [edge]);
-		const toEdges = reverse.get(toKey);
-		if (toEdges) toEdges.push(edge);
-		else reverse.set(toKey, [edge]);
-	}
-	return { forward, reverse };
-}
-
 function symbolKey(node: GraphNode, symbol: string): string {
 	return `${normalizeGraphPath(node.filePath)}\0${symbol}`;
 }
@@ -203,7 +181,7 @@ function directNeighbors(
 	topN: number,
 	warnings: string[],
 ): { callers: ConeEntry[]; callees: ConeEntry[]; dropped: number } {
-	const { forward, reverse } = symbolEdgeMaps(graph);
+	const { forward, reverse } = getSymbolEdgeIndexes(graph);
 	const key = symbolKey(node, symbol);
 	const byFileSymbol = (a: ConeEntry, b: ConeEntry) =>
 		a.file.localeCompare(b.file) || a.symbol.localeCompare(b.symbol);
@@ -642,7 +620,7 @@ export function getImpactCone(
 		// callee side forward edges only. An undirected BFS would bounce back
 		// along the discovering edge and re-emit the target's own edge from the
 		// neighbor's perspective, double-counting every relationship.
-		const { forward, reverse } = symbolEdgeMaps(graph);
+		const { forward, reverse } = getSymbolEdgeIndexes(graph);
 		const emitted = new Set<string>();
 		const startKey = symbolKey(node, options.symbol);
 		const runBfs = (direction: 'caller' | 'callee'): void => {
@@ -1217,7 +1195,7 @@ export function explainGraphEntry(
 				kind: symbolKindOf(node, effectiveSymbol),
 			});
 		}
-		const { forward, reverse } = symbolEdgeMaps(graph);
+		const { forward, reverse } = getSymbolEdgeIndexes(graph);
 		const key = symbolKey(node, effectiveSymbol);
 		let legacyEdges = 0;
 		const isLegacy = (edge: SymbolEdge): boolean =>

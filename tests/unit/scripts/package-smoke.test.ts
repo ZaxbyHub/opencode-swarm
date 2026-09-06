@@ -4,6 +4,7 @@ import * as path from 'node:path';
 // @ts-expect-error - .mjs script exports runtime helpers without declarations.
 import {
 	REQUIRED_EVALUATION_FIXTURE_IDS,
+	REQUIRED_HELDOUT_RETRIEVAL_FILES,
 	REQUIRED_PROJECT_SKILL_SLUGS,
 	validatePackageFiles,
 } from '../../../scripts/package-smoke.mjs';
@@ -96,6 +97,7 @@ const baseFiles = [
 		`evaluation-fixtures/tier1/${id}/environment/defect.ts`,
 		`evaluation-fixtures/tier1/${id}/environment/defect.test.ts`,
 	]),
+	...REQUIRED_HELDOUT_RETRIEVAL_FILES,
 ].map((path) => ({ path }));
 
 describe('package-smoke skill-list sync', () => {

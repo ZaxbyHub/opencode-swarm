@@ -190,6 +190,10 @@ Memory commands:
 
 `/swarm memory evaluate --json` runs the golden recall fixtures under `tests/fixtures/memory-recall` against both `local-jsonl` and `sqlite`, across manual, injection, and curator recall modes. Pass `--fixtures <directory>` to evaluate a different fixture directory from an interactive CLI run. The JSON report includes `precision@k`, `recall@k`, `injection_count`, `noisy_injection_count`, `same_scope_noise_count`, `cross_scope_leak_count`, and `stale_memory_count`.
 
+For retrieval-quality comparisons, pass `--profiles lexical,hybrid,hybrid+rerank`. These profiles use the production lexical → dense → RRF → rerank path with identical candidate and token resource caps. The offline held-out gate uses a 20-record candidate cap over the shared 20-case corpus; `returned_token_estimate` is an honest text-only measurement, not an assertion that prompt tokens were consumed. `lexical` is always available; `hybrid` and `hybrid+rerank` report `degraded` or `skipped` with an explicit reason when optional dependencies are unavailable. Reports record provenance, latency, caps, and unavailable-cost provenance rather than inventing model measurements. Omit `--profiles` to preserve the legacy schema-v1 provider-by-mode report.
+
+`--manifest <file>` is an additive, containment-checked option for a held-out corpus named `manifest.json` (including the packaged `tests/fixtures/memory-recall-heldout/manifest.json` or an equivalent corpus under the project root). Other filenames are rejected because the loader resolves the selected corpus directory's `manifest.json`. It loads and evaluates that corpus; report manifests are not accepted as inert display inputs. The held-out corpus is content-addressed and records exact symbols, edges, known misses, spurious edges, paraphrases, analyzer identities, profile thresholds, and Linux/macOS/Windows gate IDs. Known limitations are bounded offline evaluation, deterministic injected dense adapters in the regression gate, and no model downloads or network access; missing optional components degrade honestly to lexical retrieval.
+
 Rollback to JSONL provider:
 
 1. Stop using memory tools for the project.
@@ -568,6 +572,15 @@ greater than the baseline tolerance (0.05). CI runs it as the
 `memory-recall-regression` job. Regenerate the baseline with
 `bun run scripts/memory-recall-regression.ts --update` when an intentional
 metric change lands, and justify it in the PR.
+
+`bun run check:retrieval-quality` validates the versioned held-out contract and
+runs two complete production evaluator passes. It compares canonical ranked
+IDs, metrics, statuses, caps, provenance, identities, degradation reasons, and
+thresholds while excluding only timestamps, measured latency, temporary paths,
+and other measurement-only fields. It reports and gates the graph direct-source
+positive-hit count separately from route completion (the current corpus requires
+14 positive paraphrase hits out of 20). Its bounded JSON output is suitable for
+issue #2503 trend aggregation.
 
 ## Inspecting Or Resetting Local Memory
 

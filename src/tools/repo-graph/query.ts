@@ -55,7 +55,7 @@ interface QueryIndexes {
 	symbolEdges?: SymbolEdgeIndexes;
 }
 
-interface SymbolEdgeIndexes {
+export interface SymbolEdgeIndexes {
 	forward: Map<string, SymbolEdge[]>;
 	reverse: Map<string, SymbolEdge[]>;
 }
@@ -188,7 +188,7 @@ function getForwardIndex(graph: RepoGraph): Map<string, FileReference[]> {
 	return getQueryIndexes(graph).forwardIndex;
 }
 
-function getSymbolEdgeIndexes(graph: RepoGraph): SymbolEdgeIndexes {
+export function getSymbolEdgeIndexes(graph: RepoGraph): SymbolEdgeIndexes {
 	const indexes = getQueryIndexes(graph);
 	if (indexes.symbolEdges) return indexes.symbolEdges;
 	const forward = new Map<string, SymbolEdge[]>();

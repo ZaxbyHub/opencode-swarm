@@ -2508,12 +2508,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/tools/repo-graph/indexed-storage.ts'],
 		writerCitations: [
-			'src/tools/repo-graph/indexed-storage.ts:582 syncIndexFromGraph — full-replace transaction: DELETE FROM edges/files/graph_meta then re-INSERT every node/edge',
-			'src/tools/repo-graph/storage.ts:690 syncIndexFromGraph — invoked from saveGraph only when the indexed-mode save lock was acquired, inside the lock span',
+			'src/tools/repo-graph/indexed-storage.ts:586 syncIndexFromGraph — full-replace transaction: DELETE FROM edges/files/graph_meta then re-INSERT every node/edge',
+			'src/tools/repo-graph/storage.ts:709 syncIndexFromGraph — invoked from saveGraph only when the indexed-mode save lock was acquired, inside the lock span',
 		],
 		readerCitations: [
-			'src/tools/repo-graph/indexed-storage.ts:940 queryNodeByFile — indexed single-row SELECT by path/module_name (resolveTargetRow), sync',
-			'src/tools/repo-graph/indexed-storage.ts:988 loadSubgraphForFiles — bounded-neighbourhood closure via idx_edges_source/idx_edges_target, sync',
+			'src/tools/repo-graph/indexed-storage.ts:952 queryNodeByFile — indexed single-row SELECT by path/module_name (resolveTargetRow), sync',
+			'src/tools/repo-graph/indexed-storage.ts:1000 loadSubgraphForFiles — bounded-neighbourhood closure via idx_edges_source/idx_edges_target, sync',
 		],
 		schemaVersion: 'schema_migrations versioned (6, indexed-storage.ts:91-136)',
 		stateClass: 'derived-rebuildable',
@@ -2768,10 +2768,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/tools/repo-graph/storage.ts'],
 		writerCitations: [
-			'src/tools/repo-graph/storage.ts:339 saveGraph — atomic temp+rename with 5×100 ms Windows retry; :506 loadOrCreateGraph (COPYFILE_EXCL)',
+			'src/tools/repo-graph/storage.ts:480 saveGraph — atomic temp+rename with 5×100 ms Windows retry; :755 loadOrCreateGraph (COPYFILE_EXCL)',
 		],
 		readerCitations: [
-			'src/tools/repo-graph/storage.ts:204 loadGraph / :293 loadGraphSync — FULL-FILE with validation behind a 16-workspace mtime-invalidated cache (cache.ts:13)',
+			'src/tools/repo-graph/storage.ts:277 loadGraph / :375 loadGraphSync — FULL-FILE with validation behind a 16-workspace mtime-invalidated cache (cache.ts:13)',
 			'src/memory/reflection-service.ts:386 loadBoundedGraph — ≤16 MiB',
 		],
 		schemaVersion: 'graph schema with workspaceRoot identity validation (:360-386)',
@@ -4020,6 +4020,7 @@ export const EXEMPT_WRITER_MODULES: Readonly<Record<string, string>> = Object.fr
 	'src/db/sqlite-loader.ts': 'bun:sqlite/node:sqlite loader (issue #1873) — DB rows own the streams',
 	'src/memory/jsonl-migration.ts': 'legacy JSONL→SQLite migration executor — memory-sqlite row owns the destination',
 	'src/retention/jsonl-cap.ts': 'shared retention plumbing (appendCappedJsonl/readTailJsonl, issue #2483 §1) — callers own the streams; their rows carry the cap citations',
+	'src/evaluation/retrieval-quality.ts': 'temporary bounded evaluation artifacts under os.tmpdir — always removed in finally and never durable project state',
 });
 
 /** Sequence window for fix-in-issue dispositions (issue #2036 amendment clause). */
