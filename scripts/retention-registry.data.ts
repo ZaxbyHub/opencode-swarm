@@ -1667,13 +1667,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/plan/ledger.ts', 'src/plan/ledger-sqlite.ts'],
 		writerCitations: [
-			'src/plan/ledger.ts:994 initLedger / :1293 appendLedgerEvent — authority-mode coordinator under LEDGER_LOCK; SQLite event+state uses FULL transactions and JSONL is the exact portable stream',
-			'src/plan/ledger.ts:1602 takeSnapshotEvent; :1664 replaceTruncatedLedgerWithRecoveryRoot (corruption recovery ONLY, original content-addressed before replacement)',
+			'src/plan/ledger.ts:1015 initLedger / :1314 appendLedgerEvent — authority-mode coordinator under LEDGER_LOCK; SQLite event+state uses FULL transactions and JSONL is the exact portable stream',
+			'src/plan/ledger.ts:1626 takeSnapshotEvent; :1688 replaceTruncatedLedgerWithRecoveryRoot (corruption recovery ONLY, original content-addressed before replacement)',
 			'src/plan/ledger-sqlite.ts — registry-backed SQLite event/state/import mutations; every transaction uses synchronous=FULL through the project DB durability policy',
 		],
 		readerCitations: [
-			'src/plan/ledger.ts:980 readLedgerEvents / :2311 readLedgerEventsWithIntegrity — authority-mode coordinator; JSONL full-file replay in file-shadow mode, ordered SQLite rows after cutover',
-			'src/plan/ledger.ts:966 getLatestLedgerSeq / loadLastApprovedPlan — coordinated authority reads',
+			'src/plan/ledger.ts:998 readLedgerEvents / :2335 readLedgerEventsWithIntegrity — authority-mode coordinator; JSONL full-file replay in file-shadow mode, ordered SQLite rows after cutover',
+			'src/plan/ledger.ts:984 getLatestLedgerSeq / loadLastApprovedPlan — coordinated authority reads',
 		],
 		schemaVersion: 'versioned plan events (docs/plan-durability.md)',
 		stateClass: 'authoritative',

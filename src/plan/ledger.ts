@@ -439,10 +439,13 @@ function findRawMalformedSuffix(content: Buffer): Buffer {
 }
 
 interface FileLedgerRead {
+	/** Events in the verified prefix only; integrity readers must never see the bad suffix. */
 	events: LedgerEvent[];
 	lines: Uint8Array[];
 	truncated: boolean;
 	badSuffix: string | null;
+	/** Best-effort parse of every structurally valid line, including post-poison tail events. */
+	lenientEvents?: LedgerEvent[];
 }
 
 function isStructurallyValidLedgerEvent(value: unknown): value is LedgerEvent {
@@ -470,7 +473,10 @@ function readFileLedgerExact(directory: string): FileLedgerRead {
 	const bytes = fs.readFileSync(ledgerPath);
 	const decoder = new TextDecoder('utf-8', { fatal: true });
 	const events: LedgerEvent[] = [];
+	const lenientEvents: LedgerEvent[] = [];
 	const lines: Uint8Array[] = [];
+	let truncated = false;
+	let badSuffix: string | null = null;
 	let start = 0;
 	for (let index = 0; index <= bytes.length; index++) {
 		if (index < bytes.length && bytes[index] !== 0x0a) continue;
@@ -483,20 +489,21 @@ function readFileLedgerExact(directory: string): FileLedgerRead {
 				if (!isStructurallyValidLedgerEvent(parsed)) {
 					throw new Error('invalid ledger event shape');
 				}
-				events.push(parsed);
-				lines.push(new Uint8Array(line));
+				lenientEvents.push(parsed);
+				if (!truncated) events.push(parsed);
+				// Preserve only the exact prefix for SQLite parity checks, while
+				// retaining later parseable events for lenient legacy readers.
+				if (!truncated) lines.push(new Uint8Array(line));
 			} catch {
-				return {
-					events,
-					lines,
-					truncated: true,
-					badSuffix: bytes.subarray(start).toString('utf8'),
-				};
+				if (!truncated) {
+					truncated = true;
+					badSuffix = bytes.subarray(start).toString('utf8');
+				}
 			}
 		}
 		start = index + 1;
 	}
-	return { events, lines, truncated: false, badSuffix: null };
+	return { events, lines, truncated, badSuffix, lenientEvents };
 }
 
 function sqliteEventsAsLedger(directory: string): {
@@ -651,7 +658,18 @@ function coordinateLedger(directory: string): FileLedgerRead {
 	const file = readFileLedgerExact(directory);
 	if (!hasSqliteLedger(directory)) {
 		if (file.events.length > 0 && !file.truncated) {
-			importCanonicalIntoSqlite(directory, file, true);
+			try {
+				importCanonicalIntoSqlite(directory, file, true);
+			} catch (error) {
+				// The portable stream is still authoritative during the carrying
+				// release. A syntactically valid but semantically newer event may be
+				// unreadable by this plugin version; keep the exact file visible so a
+				// stale-projection recovery can replace it with a verified snapshot,
+				// rather than failing the read while importing the optional shadow.
+				log(
+					`[ledger] SQLite shadow import deferred after file read: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		}
 		return file;
 	}
@@ -981,7 +999,10 @@ export async function readLedgerEvents(
 	directory: string,
 ): Promise<LedgerEvent[]> {
 	const result = coordinateLedger(directory);
-	return [...result.events].sort((a, b) => a.seq - b.seq);
+	const events = result.truncated
+		? (result.lenientEvents ?? result.events)
+		: result.events;
+	return [...events].sort((a, b) => a.seq - b.seq);
 }
 
 /**
@@ -1381,11 +1402,14 @@ export async function appendLedgerEvent(
 				serializeLedgerEvent(event),
 			);
 			const state = getPlanLedgerState(directory);
-			if (!state) {
-				throw new Error('Ledger not initialized. Call initLedger() first.');
-			}
+			// A legacy file-authoritative ledger may contain a syntactically valid
+			// event from a newer reader that cannot be replayed by this version. In
+			// that case the optional SQLite shadow deliberately remains absent until
+			// a recovery snapshot establishes a replayable root; the canonical JSONL
+			// stream must still be appendable for that recovery to complete.
+			const authorityMode = state?.authorityMode ?? 'file_shadow';
 
-			if (state.authorityMode === 'sqlite') {
+			if (authorityMode === 'sqlite') {
 				try {
 					const existing = sqliteEventsAsLedger(directory);
 					appendSqliteLedger(directory, {
