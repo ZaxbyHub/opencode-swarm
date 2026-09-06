@@ -32,6 +32,7 @@ import {
 	readObservabilitySinkHealth,
 	syncObservabilityImport,
 } from '../db/observability-event-store.js';
+import { readOtlpExporterHealth } from '../observability/otlp-exporter.js';
 
 export const REPORT_JSON_SCHEMA_VERSION = 1;
 
@@ -244,6 +245,9 @@ export async function handleReportCommand(
 		outcome: row.outcome_status,
 	}));
 	const health = readObservabilitySinkHealth(directory);
+	// #2485: OTLP export health (null when the exporter never ran here — the
+	// default-off population sees no section).
+	const otlpHealth = readOtlpExporterHealth(directory);
 	const postImportCoverage: typeof coverage =
 		readObservabilityCoverage(directory) ?? coverage;
 	const report = {
@@ -266,6 +270,7 @@ export async function handleReportCommand(
 		},
 		savings: savings.map((s) => ({ ...s, estimate: true })),
 		health,
+		otlpExport: otlpHealth,
 		timeline,
 	};
 	if (parsed.json) {
@@ -312,6 +317,15 @@ export async function handleReportCommand(
 	lines.push(
 		`**Sink health** — accepted ${health?.accepted ?? 0}, quarantined ${health?.quarantined ?? 0}, dropped ${health?.dropped ?? 0}`,
 	);
+	if (otlpHealth !== null) {
+		const drops = Object.entries(otlpHealth.dropped)
+			.map(([reason, count]) => `${count} ${reason}`)
+			.join(', ');
+		lines.push('');
+		lines.push(
+			`**OTLP export** — ${otlpHealth.state}${otlpHealth.circuitOpen ? ' (circuit open, cooldown)' : ''}; ${otlpHealth.convention} mapping ${otlpHealth.mappingVersion}; spooled ${otlpHealth.spoolRecords} record(s) / ${otlpHealth.spoolBytes} B; accepted ${otlpHealth.accepted}, exported ${otlpHealth.exported}, retried ${otlpHealth.retried}, dropped ${drops.length > 0 ? drops : '0'}`,
+		);
+	}
 	lines.push('');
 	lines.push(`**Timeline** — ${timeline.length} event(s)`);
 	for (const entry of timeline.slice(0, 50)) {

@@ -105,13 +105,21 @@ describe('tool failure classification', () => {
 	// dispatch-lanes.ts) without further escaping. An unstripped ESC/C0
 	// sequence in provider-controlled text could spoof terminal output or
 	// consume a caller's length budget before the meaningful text.
-	it('strips C0 control characters and ESC/ANSI sequences', () => {
+	// #2485/#2369 Gap 2: the assertion was tightened to require the SGR
+	// PARAMETER TEXT (`[31m`/`[0m`) to be gone too — the pre-#2485 test only
+	// asserted the ESC byte was absent, which overclaimed: the surviving
+	// `[31m` prefix was itself the mechanism that let a credential keyword
+	// hide behind the SGR final byte `m` and defeat redaction.
+	it('strips C0 control characters and removes ESC/ANSI SGR sequences including their parameter text', () => {
 		const display = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
 			'\x1b[31mFAKE ERROR\x1b[0m real message\x00\x07',
 		);
 
 		expect(display).not.toMatch(/[\x00-\x1f\x7f]/);
 		expect(display).toContain('real message');
+		expect(display).not.toContain('[31m');
+		expect(display).not.toContain('[0m');
+		expect(display).toContain('FAKE ERROR');
 	});
 
 	it('redacts a secret even when a control byte is embedded inside the keyword or the value', () => {
@@ -212,6 +220,14 @@ describe('tool failure classification', () => {
 			{ make: (s: string) => `password=${s}`, screaming: false },
 			{ make: (s: string) => `api_key=${s}`, screaming: false },
 			{ make: (s: string) => `api-key=${s}`, screaming: false },
+			// #2485 / #2369 Gap 1: glued and suffixed key shapes. The key match
+			// is identifier-shaped (prefix + fill-tolerant morpheme +
+			// fill-tolerant suffix), so insertions anywhere in the key region —
+			// including between morpheme and suffix — must not reopen a leak.
+			{ make: (s: string) => `access_token=${s}`, screaming: false },
+			{ make: (s: string) => `private_key=${s}`, screaming: false },
+			{ make: (s: string) => `tokenX=${s}`, screaming: false },
+			{ make: (s: string) => `my_secret=${s}`, screaming: false },
 			{ make: (s: string) => `API_KEY=${s}`, screaming: true },
 			{ make: (s: string) => `MY_AUTH=${s}`, screaming: true },
 			{ make: (s: string) => `X_TOKEN=${s}`, screaming: true },
@@ -281,5 +297,93 @@ describe('tool failure classification', () => {
 		// The unrelated preceding line survives un-redacted and un-merged.
 		expect(display).toContain('AUTH FAILED');
 		expect(display).not.toContain('AUTHFAILED');
+	});
+
+	// #2485 hardening of the two #2369 gaps. These are regression pins for
+	// the glued-key family (Gap 1) and the ANSI-SGR-adjacent bypass (Gap 2);
+	// both were verified leaking on the pre-#2485 tree (issue trace
+	// 02-reproduction.md). Over-redaction of benign identifiers containing a
+	// morpheme is the accepted trade — the assertions below pin the SAFE
+	// direction only (no secret survives), plus the prose shapes that must
+	// stay legible.
+	it('redacts glued and suffixed credential key names (#2369 Gap 1)', () => {
+		const display = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			[
+				'access_token=hunter2one',
+				'refresh_token=hunter2two',
+				'client_secret=hunter2three',
+				'private_key=hunter2four',
+				'session_key=hunter2five',
+				'my_secret=hunter2six',
+				'tokenX=hunter2seven',
+			].join(' '),
+		);
+		expect(display).not.toContain('hunter2one');
+		expect(display).not.toContain('hunter2two');
+		expect(display).not.toContain('hunter2three');
+		expect(display).not.toContain('hunter2four');
+		expect(display).not.toContain('hunter2five');
+		expect(display).not.toContain('hunter2six');
+		expect(display).not.toContain('hunter2seven');
+		expect(display).toContain('access_token=<redacted>');
+		expect(display).toContain('private_key=<redacted>');
+		expect(display).toContain('tokenX=<redacted>');
+	});
+
+	it('redacts the credential after every auth scheme word, not just Bearer (#2369 Gap 1)', () => {
+		const basic =
+			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+				'Authorization: Basic dXNlcjpwYXNzd29yZA==',
+			);
+		expect(basic).not.toContain('dXNlcjpwYXNzd29yZA');
+		expect(basic).toContain('Authorization=<redacted>');
+
+		const digest =
+			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+				'authorization: Digest deadbeefcafef00d',
+			);
+		expect(digest).not.toContain('deadbeefcafef00d');
+
+		const plain = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			'token=abc',
+		);
+		expect(plain).toBe('token=<redacted>');
+	});
+
+	it('redacts ANSI-SGR-adjacent credentials and removes the SGR parameter text (#2369 Gap 2)', () => {
+		const display = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			'pre \x1b[31mtoken=ghp_realsecret123\x1b[0m post',
+		);
+		expect(display).not.toContain('ghp_realsecret123');
+		expect(display).not.toContain('[31m');
+		expect(display).not.toContain('[0m');
+		expect(display).toContain('token=<redacted>');
+	});
+
+	it('redacts a credential hidden behind an over-long SGR parameter run and a combined ANSI+Basic shape', () => {
+		// >32-char parameter run: beyond CSI_SEQUENCE's bound, so the bare-SGR
+		// fallback sweep must remove the parameter body before it can shield
+		// the keyword.
+		const longRun =
+			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+				'x \x1b[123456789012345678901234567890123m token=leakme9z y',
+			);
+		expect(longRun).not.toContain('leakme9z');
+		expect(longRun).not.toContain('123456789012345678901234567890123');
+
+		// Combined shape: both gaps in one payload.
+		const combined =
+			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+				'Authorization: Basic \x1b[31mdXNlcjpwYXNzd29yZA==\x1b[0m',
+			);
+		expect(combined).not.toContain('dXNlcjpwYXNzd29yZA');
+		expect(combined).toContain('Authorization=<redacted>');
+	});
+
+	it('keeps prose legible: keywords without separators and author fields are not mangled', () => {
+		const prose = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			'the token count was fine and the author was Jane',
+		);
+		expect(prose).toBe('the token count was fine and the author was Jane');
 	});
 });

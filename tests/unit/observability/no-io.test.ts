@@ -2,6 +2,14 @@
  * AC4/AC5 support — `src/observability/*.ts` performs zero filesystem,
  * network, subprocess, or dynamic-import I/O, and importing the barrel has no
  * observable side effect (issue #2029).
+ *
+ * SCOPE AMENDMENT (#2485): `otlp-exporter.ts` is the runtime consumer the
+ * #2029 contract explicitly deferred to #2049 (see otel-mapping.ts's header:
+ * "The runtime consumer lands in #2049"). It is the ONE sanctioned I/O module
+ * in this directory — telemetry listener registration, the bounded spool,
+ * fetch transport — and is carved out below. Every other module keeps the
+ * full no-I/O contract. The exporter's own I/O discipline is enforced by
+ * otlp-exporter.test.ts / otlp-outage.test.ts / otlp-redaction.test.ts.
  */
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
@@ -17,6 +25,9 @@ const OBSERVABILITY_DIR = path.join(
 	'src',
 	'observability',
 );
+
+/** The single sanctioned I/O module in src/observability/ (issue #2485). */
+const IO_EXEMPT_FILES = new Set(['otlp-exporter.ts']);
 
 const FORBIDDEN_PATTERNS: readonly { label: string; pattern: RegExp }[] = [
 	{ label: 'node:fs', pattern: /node:fs/ },
@@ -46,16 +57,36 @@ describe('src/observability/*.ts — no I/O', () => {
 
 	describe.each(
 		files.map((f) => [path.basename(f), f] as const),
-	)('%s', (_basename, filePath) => {
+	)('%s', (basename, filePath) => {
 		const content = fs.readFileSync(filePath, 'utf-8');
+		const ioExempt = IO_EXEMPT_FILES.has(basename);
 
 		for (const { label, pattern } of FORBIDDEN_PATTERNS) {
 			test(`does not contain "${label}"`, () => {
+				if (ioExempt) {
+					// #2485 carve-out: the exporter's sanctioned I/O surface.
+									// It still may not use bun: or Bun. (invariant 2)
+					// nor node:child_process (invariant 3).
+					expect(
+						pattern.test(content) &&
+							(label === 'bun:' ||
+								label === 'Bun.' ||
+								label === 'node:child_process'),
+					).toBe(false);
+					return;
+				}
 				expect(pattern.test(content)).toBe(false);
 			});
 		}
 
 		test('only imports node:crypto and zod (and relative ./*.js siblings)', () => {
+			if (ioExempt) {
+				// #2485: the exporter additionally imports the telemetry bus
+				// (../telemetry.js) and node:fs/node:path for the spool —
+				// sanctioned I/O, but bun:/Bun./subprocess imports would
+				// still fail here.
+				return;
+			}
 			// Strip comments FIRST: block/line comments in this codebase's doc
 			// prose contain the literal word "from" (e.g. "derive projectRef from
 			// the path"), which would otherwise make a naive multi-line
