@@ -737,9 +737,6 @@ describe('Adversarial: Concurrent temp file collision', () => {
 
 		// Initialize ledger first
 		const { initLedger } = await import('../../../src/plan/ledger');
-		// The ledger root must use the same derived identity as savePlan; a
-		// synthetic id would make every concurrent append fail closed before CAS
-		// retry is exercised.
 		await initLedger(tempDir, 'test-swarm-Test_Plan', '', testPlan);
 
 		// Now try concurrent updates
