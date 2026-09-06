@@ -76,7 +76,7 @@ import {
 import { appendCoreEventSync } from '../events/core-events.js';
 import { isGitRepo } from '../git/branch';
 import { getWorktreeMergeFailure } from '../hooks/delegation-gate/worktree-merge-status';
-import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { readSwarmFileAsync } from '../hooks/utils';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { recordTaskAttempt } from '../services/run-memory.js';
 import { emit } from '../telemetry.js';
@@ -502,7 +502,16 @@ async function readPlanJsonUtf8(directory: string): Promise<string | null> {
 	// Route projection reads through the shared retry-aware reader so transient
 	// Windows AV/indexer locks and macOS rename visibility races are handled
 	// consistently with the other `.swarm/` file consumers.
-	return readSwarmFileAsync(directory, 'plan.json');
+	return readSwarmFileAsync(
+		directory,
+		'plan.json',
+		undefined,
+		async (filePath) =>
+			new TextDecoder('utf-8', { fatal: true }).decode(
+				await fsPromises.readFile(filePath),
+			),
+		false,
+	);
 }
 
 /**
