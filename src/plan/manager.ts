@@ -172,6 +172,7 @@ export const _internals: {
 	loadPlan: typeof loadPlan;
 	loadPlanJsonOnly: typeof loadPlanJsonOnly;
 	readPlanJsonUtf8: typeof readPlanJsonUtf8;
+	readPlanFileUtf8: typeof readPlanFileUtf8;
 	regeneratePlanMarkdown: typeof regeneratePlanMarkdown;
 	isGitRepo: typeof isGitRepo;
 	isEpicModeActiveForProject: typeof isEpicModeActiveForProject;
@@ -183,6 +184,7 @@ export const _internals: {
 	loadPlan,
 	loadPlanJsonOnly,
 	readPlanJsonUtf8,
+	readPlanFileUtf8,
 	regeneratePlanMarkdown,
 	isGitRepo,
 	isEpicModeActiveForProject,
@@ -506,11 +508,14 @@ async function readPlanJsonUtf8(directory: string): Promise<string | null> {
 		directory,
 		'plan.json',
 		undefined,
-		async (filePath) =>
-			new TextDecoder('utf-8', { fatal: true }).decode(
-				await fsPromises.readFile(filePath),
-			),
+		(filePath) => _internals.readPlanFileUtf8(filePath),
 		false,
+	);
+}
+
+async function readPlanFileUtf8(filePath: string): Promise<string> {
+	return new TextDecoder('utf-8', { fatal: true }).decode(
+		await fsPromises.readFile(filePath),
 	);
 }
 

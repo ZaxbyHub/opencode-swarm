@@ -5,6 +5,7 @@ import { KnowledgeConfigSchema } from '../../config/schema';
 import { isFullAutoRunActive } from '../../full-auto/state.js';
 import { validateSwarmPath } from '../../hooks/utils';
 import { tryAcquireLock } from '../../parallel/file-locks.js';
+import { peekPlanFromLedger } from '../../plan/ledger.js';
 import { runRetentionSweep } from '../../retention/sweep';
 import { buildActionMenu } from '../../services/session-reflection';
 import { closeSnapshotCoordinationInitialization } from '../../session/snapshot-coordination-init.js';
@@ -92,15 +93,30 @@ export async function handleCloseCommand(
 		if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
 			return `❌ Failed to read plan.json: ${error instanceof Error ? error.message : String(error)}`;
 		}
-		// ENOENT — check whether .swarm/ itself exists to distinguish plan-free from wrong directory
-		const swarmDirExists = await fs
-			.access(swarmDir)
-			.then(() => true)
-			.catch(() => false);
-		if (!swarmDirExists) {
-			return `❌ No .swarm/ directory found in ${directory}. Run /swarm close from the project root, or run /swarm plan first.`;
+		// A missing projection is not proof that the session is plan-free. The
+		// ledger is authoritative, and this read-only recovery must not repair
+		// either the projection or the SQLite/file-shadow state.
+		try {
+			const recovered = (await peekPlanFromLedger(directory)).plan;
+			if (recovered) {
+				planData = recovered;
+				planExists = true;
+			}
+		} catch (recoveryError) {
+			return `❌ Failed to recover plan from the authoritative ledger: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`;
 		}
-		// .swarm/ exists but plan.json is absent — valid plan-free session, continue with cleanup
+		if (!planExists) {
+			// ENOENT — check whether .swarm/ itself exists to distinguish plan-free from wrong directory
+			const swarmDirExists = await fs
+				.access(swarmDir)
+				.then(() => true)
+				.catch(() => false);
+			if (!swarmDirExists) {
+				return `❌ No .swarm/ directory found in ${directory}. Run /swarm close from the project root, or run /swarm plan first.`;
+			}
+			// .swarm/ exists but no authoritative plan was recoverable — valid
+			// plan-free session, continue with cleanup.
+		}
 	}
 
 	// --dry-run: describe what finalize WOULD do and return WITHOUT taking the

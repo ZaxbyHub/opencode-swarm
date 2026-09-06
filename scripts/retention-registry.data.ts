@@ -1715,7 +1715,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/commands/reset.ts',
 		],
 		writerCitations: [
-			'src/plan/manager.ts:1210 savePlan — plan.json temp+rename (:1779-1788), plan.md (:1817-1824); :1931 rebuildPlan; :2074 closePlanTerminalState',
+			'src/plan/manager.ts:1715 savePlan — plan.json temp+rename; :1761 plan.md; :1901 rebuildPlan; :2090 closePlanTerminalState',
 			'src/commands/rollback.ts — lifecycle-locked checkpoint projection publication with prior-byte compensation after authoritative re-root',
 			'src/commands/reset.ts — lifecycle-locked critical projection deletion with prior-byte compensation when authority cleanup aborts',
 		],

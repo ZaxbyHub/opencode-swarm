@@ -13,7 +13,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { _internals as delegationGateInternals } from '../../../src/hooks/delegation-gate';
-import { _internals as hooksUtilsInternals } from '../../../src/hooks/utils';
+import { _internals as planManagerInternals } from '../../../src/plan/manager';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
@@ -386,20 +386,17 @@ describe('resolveEvidenceTaskId — issue #1914 plan-critic item 3 (transitive b
 		// With the fix (EBUSY added to the retry set + exponential backoff),
 		// the first EBUSY is retried, the second attempt succeeds, and the
 		// resolver correctly extracts '2.1' from the TASK: line.
-		const realReadCachedTextFile = hooksUtilsInternals.readCachedTextFile;
+		const realReadPlanFileUtf8 = planManagerInternals.readPlanFileUtf8;
 		let calls = 0;
-		hooksUtilsInternals.readCachedTextFile = ((
-			resolvedPath: string,
-			reader: () => Promise<string>,
-		) => {
+		planManagerInternals.readPlanFileUtf8 = async (resolvedPath: string) => {
 			calls++;
 			if (calls < 2) {
 				const err = new Error('resource busy') as NodeJS.ErrnoException;
 				err.code = 'EBUSY';
 				throw err;
 			}
-			return reader();
-		}) as typeof realReadCachedTextFile;
+			return realReadPlanFileUtf8(resolvedPath);
+		};
 		try {
 			const session = ensureAgentSession(
 				'rev-session-ebusy',
@@ -419,7 +416,7 @@ describe('resolveEvidenceTaskId — issue #1914 plan-critic item 3 (transitive b
 			expect(resolved).toBe('2.1');
 			expect(calls).toBeGreaterThanOrEqual(2);
 		} finally {
-			hooksUtilsInternals.readCachedTextFile = realReadCachedTextFile;
+			planManagerInternals.readPlanFileUtf8 = realReadPlanFileUtf8;
 		}
 	});
 });
