@@ -622,7 +622,7 @@ Category `plan`, severity `warning`, privacy **`sensitive`** (carries
 
 #### snapshot_failed
 Category `plan`, severity `error`, privacy `sensitive` (free-text filesystem
-error message). Producer `src/plan/ledger.ts:1558`. Consumers: none — owner
+error message). Producer `src/plan/ledger.ts:1566`. Consumers: none — owner
 **#2047**. Retention: **#2036**. Forbidden workflow IDs: `hostSessionId`.
 
 ### Conflict category
