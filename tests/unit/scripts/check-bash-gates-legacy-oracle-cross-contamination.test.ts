@@ -38,11 +38,11 @@ function legacyExpected(actualPasses: number): string {
 	return `${legacyKnownIssueWarning(actualPasses)}\nKnown pre-existing cross-contamination present (non-blocking).\nExpected passes when fixed: update known_expected in this script.`;
 }
 
-function readKnownPairPassCount(output: string): number {
+function readKnownPairPassCount(output: string): number | undefined {
 	const match = output.match(
 		/knowledge-reader\.test\.ts \+ tests\/unit\/services\/skill-generator\.test\.ts: (?:expected 99 pass, got )?(\d+) pass/,
 	);
-	return match ? Number(match[1]) : 0;
+	return match ? Number(match[1]) : undefined;
 }
 
 function normalizeOutput(text: string): string {
@@ -101,6 +101,24 @@ describe('cross-contamination legacy-oracle compatibility', () => {
 		expect(normalizeOutput(captured.stdout)).toBe(tsExpected(71));
 	});
 
+	test('reports a clean outcome when both pairs pass', async () => {
+		const captured = await captureLogLines((log) =>
+			runCrossContamination(REPO_ROOT, {
+				runPair: (_repoRoot, pair): PairRunResult => ({
+					exitCode: 0,
+					stdout: `${pair.fileA.includes('knowledge-reader') ? 98 : 57} pass\n`,
+					stderr: '',
+				}),
+				log,
+			}),
+		);
+
+		expect(captured.exitCode).toBe(0);
+		expect(normalizeOutput(captured.stdout)).toBe(
+			'No cross-contamination detected: all test pairs pass when co-run.',
+		);
+	});
+
 	test('preserves the archived Bash owner golden separately when Bash is available', async () => {
 		if (!hasBash) return;
 		const isolatedEnv = createIsolatedTestEnv();
@@ -120,34 +138,54 @@ describe('cross-contamination legacy-oracle compatibility', () => {
 			const tsPasses = readKnownPairPassCount(
 				`${tsResult.stdout}\n${tsResult.stderr}`,
 			);
-			expect(tsPasses).toBeGreaterThanOrEqual(71);
-			expect(tsPasses).toBeLessThanOrEqual(98);
-			expect(normalizeOutput(tsResult.stdout), tsResult.stderr).toBe(
-				tsExpected(tsPasses),
-			);
+			if (tsPasses === undefined) {
+				expect(normalizeOutput(tsResult.stdout), tsResult.stderr).toBe(
+					'No cross-contamination detected: all test pairs pass when co-run.',
+				);
+			} else {
+				expect(tsPasses).toBeGreaterThanOrEqual(71);
+				expect(tsPasses).toBeLessThanOrEqual(98);
+				expect(normalizeOutput(tsResult.stdout), tsResult.stderr).toBe(
+					tsExpected(tsPasses),
+				);
+			}
 			expect(normalizeOutput(tsResult.stderr)).toBe('');
 			expect(legacyResult.exitCode, legacyResult.stderr).toBe(0);
 			const normalizedLegacy = normalizeOutput(legacyResult.stdout);
 			const legacyPasses = readKnownPairPassCount(
 				`${legacyResult.stdout}\n${legacyResult.stderr}`,
 			);
-			expect(legacyPasses).toBeGreaterThanOrEqual(71);
-			expect(legacyPasses).toBeLessThan(99);
-			expect(normalizedLegacy).toStartWith(
-				legacyKnownIssueWarning(legacyPasses),
-			);
+			if (legacyPasses === undefined) {
+				expect(normalizedLegacy).not.toContain(
+					'::warning title=Cross-contamination known issue::',
+				);
+				expect(normalizedLegacy).toContain(
+					'No cross-contamination detected: all test pairs pass when co-run.',
+				);
+				expect(normalizedLegacy).toEndWith(
+					'No cross-contamination detected: all test pairs pass when co-run.',
+				);
+			} else {
+				expect(legacyPasses).toBeGreaterThanOrEqual(71);
+				expect(legacyPasses).toBeLessThan(99);
+				expect(normalizedLegacy).toStartWith(
+					legacyKnownIssueWarning(legacyPasses),
+				);
+			}
 			expect(normalizedLegacy).toContain(
 				'::warning title=Mock module not in isolation list::',
 			);
 			expect(normalizedLegacy).toContain(
 				'::notice title=Hook test file not in CI coverage::',
 			);
-			expect(normalizedLegacy).toEndWith(
-				legacyExpected(legacyPasses).slice(
-					legacyKnownIssueWarning(legacyPasses).length + 1,
-				),
-			);
-			expect(normalizedLegacy).not.toBe(tsExpected(tsPasses));
+			if (legacyPasses !== undefined) {
+				expect(normalizedLegacy).toEndWith(
+					legacyExpected(legacyPasses).slice(
+						legacyKnownIssueWarning(legacyPasses).length + 1,
+					),
+				);
+			}
+			expect(normalizedLegacy).not.toBe(normalizeOutput(tsResult.stdout));
 			expect(normalizeOutput(legacyResult.stderr)).toBe('');
 		} finally {
 			isolatedEnv.cleanup();
