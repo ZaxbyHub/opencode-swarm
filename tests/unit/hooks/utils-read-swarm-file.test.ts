@@ -30,6 +30,7 @@ import { performance } from 'node:perf_hooks';
 import { _internals, readSwarmFileAsync } from '../../../src/hooks/utils';
 import { resetSwarmState } from '../../../src/state';
 import { atomicWriteSwarmFileSync } from '../../../src/utils/atomic-write';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const realReadCachedTextFile = _internals.readCachedTextFile;
 
@@ -226,7 +227,7 @@ describe('readSwarmFileAsync retry behavior (issue #1782)', () => {
 	});
 
 	test('custom readers can bypass the replacement-decoding artifact cache', async () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'readswarm-reader-'));
+		const tmp = canonicalMkdtemp('readswarm-reader-');
 		try {
 			fs.mkdirSync(path.join(tmp, '.swarm'), { recursive: true });
 			const planPath = path.join(tmp, '.swarm', 'plan.json');
