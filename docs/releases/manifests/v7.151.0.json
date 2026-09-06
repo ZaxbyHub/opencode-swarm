@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.151.0",
+  "tagCommit": "f795a533df116f0d68e74e59348423186a3f7814",
+  "targetCommitish": "f795a533df116f0d68e74e59348423186a3f7814",
+  "releaseBodySha256": "015d492a6916a5d75ed1bbceca522324b2bea62bcb0d9739c70992d90ad0fdff",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2040-shell-audit-bounded-store.md",
+      "sha256": "50c307115e164a698eac820b36fb03a10f57362b228392b6a30915dcc1898eca"
+    }
+  ]
+}

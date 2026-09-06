@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.146.2",
+  "tagCommit": "9e73881a4c684e161947ac24ba0dd479889833d0",
+  "targetCommitish": "9e73881a4c684e161947ac24ba0dd479889833d0",
+  "releaseBodySha256": "16290a4048bea383b0c1b81093e0c8c3015e66ebea26f8187378cb8cfeabe95e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2299-gate-denial-ack-discoverability.md",
+      "sha256": "8affaafa3471a5244ab9c2fae874e68ac8d5e7a422690711aa632c66fe7a01ea"
+    }
+  ]
+}

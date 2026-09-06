@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.166.1",
+  "tagCommit": "6ae7e69f6af5627cb8785718aa02140483a836bf",
+  "targetCommitish": "6ae7e69f6af5627cb8785718aa02140483a836bf",
+  "releaseBodySha256": "cbec086a7fdd3ad5d1b88f7dec405acd26e091e27baaa3fd18989f2ba0c596cc",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2476-harden-trust-boundaries.md",
+      "sha256": "f68cde7806e031e6b2a05dcbe324b89492e792567799cda006b9603d22cf5a99"
+    }
+  ]
+}

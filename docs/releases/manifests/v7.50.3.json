@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.50.3",
+  "tagCommit": "54bf6a1383068a7a213444537f301d06863ed0ce",
+  "targetCommitish": "54bf6a1383068a7a213444537f301d06863ed0ce",
+  "releaseBodySha256": "86ceccbcdd1ba8165765f8da08d6f21ed289cba876a37ed7e626b7b32fc12bd6",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-1110-symlink-evidence-escape.md",
+      "sha256": "eecfa85c4b9f4d42e46367f50887c4f42bf0dfeec3affc8203bbb9c356bc11c3"
+    }
+  ]
+}

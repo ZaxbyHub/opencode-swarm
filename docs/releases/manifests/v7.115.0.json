@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.115.0",
+  "tagCommit": "3b45a4a3a240bd25ccf92050e1e29e1b776c6dba",
+  "targetCommitish": "3b45a4a3a240bd25ccf92050e1e29e1b776c6dba",
+  "releaseBodySha256": "abb878647ce0166a77bb313282cdc3f497cc461af935bbf6172541b24060738a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1718-apply-patch-fuzzy-match.md",
+      "sha256": "b475e914ecf723fa27d68931a24e6ad4b01a78164b04b02581a38a459325e181"
+    }
+  ]
+}

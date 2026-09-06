@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.32.3",
+  "tagCommit": "b462ca8e5370da49a3d66c82fad5117381f5f090",
+  "targetCommitish": "b462ca8e5370da49a3d66c82fad5117381f5f090",
+  "releaseBodySha256": "70ffda8ab5467190408778ba2567b35d5b961fad5025c11262450cc4de0568b4",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/recall-injection-precision.md",
+      "sha256": "70ac64a1d060be2264ea019282b496215075b16fdc88109a388da94b914ee3e7"
+    }
+  ]
+}

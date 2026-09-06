@@ -285,7 +285,7 @@ import {
 	ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
 	ensureSwarmGitExcluded,
 } from './utils/gitignore-warning';
-import { withTimeout } from './utils/timeout';
+import { withTimeout, withTimeoutSignal } from './utils/timeout';
 import { truncateToolOutput } from './utils/tool-output';
 
 /**
@@ -1088,23 +1088,26 @@ async function initializeOpenCodeSwarm(
 	// source-only workspace has no possible backend context, so skip the heavy
 	// language-backend graph entirely after the cheap bounded ancestor preflight.
 	const projectContextP = hasManifestAncestor(ctx.directory)
-		? withTimeout(
-				(async () => {
-					const mod = await import('./agents/project-context');
-					return mod.buildProjectContext(ctx.directory);
-				})(),
-				300, // LANG_BACKEND_DETECTION_TIMEOUT_MS — see project-context.ts
-				new Error(
+		? (() => {
+				const timeoutError = new Error(
 					'language-backend detection exceeded 300ms; ' +
 						'continuing with unresolved sentinels',
-				),
-			).catch((err: unknown) => {
-				const msg = err instanceof Error ? err.message : String(err);
-				log('language-backend detection timed out or failed (non-fatal)', {
-					error: msg,
+				);
+				return withTimeoutSignal(
+					async (signal) => {
+						const mod = await import('./agents/project-context');
+						return mod.buildProjectContext(ctx.directory, signal);
+					},
+					300, // LANG_BACKEND_DETECTION_TIMEOUT_MS — see project-context.ts
+					timeoutError,
+				).catch((err: unknown) => {
+					const msg = err instanceof Error ? err.message : String(err);
+					log('language-backend detection timed out or failed (non-fatal)', {
+						error: msg,
+					});
+					return null;
 				});
-				return null;
-			})
+			})()
 		: Promise.resolve(null);
 	await Promise.all([configLoadP, snapshotP, gitExcludeP, projectContextP]);
 	const { config, loadedFromFile } = await configLoadP;

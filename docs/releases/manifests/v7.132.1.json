@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.132.1",
+  "tagCommit": "710b60546866cb186e997dc964a17de3157c6a0e",
+  "targetCommitish": "710b60546866cb186e997dc964a17de3157c6a0e",
+  "releaseBodySha256": "16966ed9f5acbd6e4c3ecb2e976f1274a02fcda4fe2d69a7945204a880e3ddb3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-workflow-lane-output-context.md",
+      "sha256": "15b145656c81fbe2fd7c562341d1443eacef2ba55e72ec387c9277c8e3c427a2"
+    }
+  ]
+}

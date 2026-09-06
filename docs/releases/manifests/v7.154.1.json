@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.154.1",
+  "tagCommit": "3507f44ff07f9d1614b81c03f4f30261db8f30e4",
+  "targetCommitish": "3507f44ff07f9d1614b81c03f4f30261db8f30e4",
+  "releaseBodySha256": "fd59fcc53950615cba100041c39933a6b576269c00fee15d7bf46925c2911cda",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-monitor-recovery-hardening-2408-followup.md",
+      "sha256": "a8bc549954ad6d948b8fd92eaf0a9e2edb89a1df2f2aab7ec8284811948858f9"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/pr-subscriptions-checkpoint-compaction-2042.md",
+      "sha256": "40ba844d19ce0aa4cf125115d8415f04382e3a89543b04b96140c422bbef504a"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.166.0",
+  "tagCommit": "19eeab82efd61ccc151f9b02c505e8ab4684d0ae",
+  "targetCommitish": "19eeab82efd61ccc151f9b02c505e8ab4684d0ae",
+  "releaseBodySha256": "5ef7ad51d0df6371feab9f54ffd274a75ff336d3971423a690efd742eea400f7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2471-recovery-state-actionable-circuit-safe.md",
+      "sha256": "af552eb1eecf4a117e397c7755f64921fe721fb82f854ac4a8717e315e6b0179"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2475-windows-native-sandbox-boundary.md",
+      "sha256": "2790f61e808f916bd8f720efe7153308d4909405a004d02899c07a7645f2094c"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/2482-sqlite-observability-sink-report.md",
+      "sha256": "3b89afff09764925e839e61f1616f452e150ddffc673e46693a7e73aad2a8de2"
+    }
+  ]
+}

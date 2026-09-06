@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.136.3",
+  "tagCommit": "5e0eb675c25e0b16626fedf76046cc5b59fbbb88",
+  "targetCommitish": "5e0eb675c25e0b16626fedf76046cc5b59fbbb88",
+  "releaseBodySha256": "90e34da4fdcdb901026836ffbdd39f6ea714d42ea733dde92e31d9c2844a8656",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2063-endless-self-loop-containment.md",
+      "sha256": "f5595b388409d9ad00af962d1491d6dd1abfef5eb565ef8bcd344a03bee13863"
+    }
+  ]
+}

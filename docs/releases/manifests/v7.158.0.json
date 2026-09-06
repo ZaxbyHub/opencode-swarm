@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.158.0",
+  "tagCommit": "cc8618d3fd25bba915d9697b67a0873ebc61acf7",
+  "targetCommitish": "cc8618d3fd25bba915d9697b67a0873ebc61acf7",
+  "releaseBodySha256": "d1d1de313b221fcb08e8ad641ea4f6bc22b9788e14f8a5eb181e9583842a07b7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2383-pr-review-terminal-settlement-typed-routing.md",
+      "sha256": "f32f7c594252ab63e3cc06bb09628ce48f949ef84b0ead53d7e67331ddf60f3c"
+    }
+  ]
+}

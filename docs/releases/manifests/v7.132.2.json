@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.132.2",
+  "tagCommit": "e13dfc6b2dec19fa1203117274afbf2a5c2420fa",
+  "targetCommitish": "e13dfc6b2dec19fa1203117274afbf2a5c2420fa",
+  "releaseBodySha256": "ad37ab06817368fc9d1b903055699e69fdfc4b113e191d10a80df33772aed417",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/advisory-injection-gates.md",
+      "sha256": "289ac0100d1c45c8e282a506301100599b5dce39440d3c5f1792b12cc70de0b3"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/pr-review-banner-flood-and-dispatch-diagnostics.md",
+      "sha256": "c1316b060e2b6db64222494c2c0c7040d3d73b263d8d80145f2534cdff81c13a"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/syntax-check-vacuous-pass.md",
+      "sha256": "3c911c5a11331d54da5495dc47b019d713c1ceed63babfe9b5e0e7f29d1d19a1"
+    }
+  ]
+}

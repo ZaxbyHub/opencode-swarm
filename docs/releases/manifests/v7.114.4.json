@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.114.4",
+  "tagCommit": "6243c7ad69d04ab70bfd206d7a729f2debbfceb6",
+  "targetCommitish": "6243c7ad69d04ab70bfd206d7a729f2debbfceb6",
+  "releaseBodySha256": "5eb9a3aac4e1eb98c2bc88d70644c71df4b8e4b49cc8299fe7301b3111b10492",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1770-skill-usage-recording-attribution-fix.md",
+      "sha256": "3bbd80310fe2e3734412594b5abba9c33fcf85b9f533a2cfa9a316f7607c4d92"
+    }
+  ]
+}

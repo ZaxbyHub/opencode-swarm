@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.158.1",
+  "tagCommit": "d61042c6940d3aee87470854124c3c8fdd199093",
+  "targetCommitish": "d61042c6940d3aee87470854124c3c8fdd199093",
+  "releaseBodySha256": "f3bafec4e09c010617801710f5e2177333d9326461647c5301aeeb4bdcd5e44e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2042-pr-monitor-bounded-checkpoint-audit.md",
+      "sha256": "2b733d6e7d91dd729fb05d1f567dfe8916dfac9ec78dbfda359d75d8d63aba9a"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/pr-subscriptions-checkpoint-compaction-2042.md",
+      "sha256": "cc17510be395bf245370c106773bc9b6e7572bb77fee8a36bf063675b0554c14"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/pr-subscriptions-post-review-hardening.md",
+      "sha256": "28df20cd82912f544b18d238e9d080f88d6e45fbfea154516cec658d671b9ee5"
+    }
+  ]
+}

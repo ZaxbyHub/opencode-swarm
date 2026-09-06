@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.125.1",
+  "tagCommit": "73df6591e5497e3ea073b87cd80886617bae4418",
+  "targetCommitish": "73df6591e5497e3ea073b87cd80886617bae4418",
+  "releaseBodySha256": "4512444c5e3885800bd9d919f78e98a446d9b0bb03db36de935fe1ec62a23009",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/evidence-cache-retention.md",
+      "sha256": "448426db642f141f294c66ca8b52b7cea8f217800c8f8bac2412407214498a52"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.121.4",
+  "tagCommit": "1326eba972dad5b86a0d8fff5ba264bd703c5d7e",
+  "targetCommitish": "1326eba972dad5b86a0d8fff5ba264bd703c5d7e",
+  "releaseBodySha256": "dee3f474676dcae93559a1385eb7614ef5afcb538d3f93c7409232bb6934e9a6",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1873-node-sqlite-fallback.md",
+      "sha256": "017039bc7b53d126a1f06eb55b6c97cb01f6ff1e93ca0e3b841a315065129ff8"
+    }
+  ]
+}

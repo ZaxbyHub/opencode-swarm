@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.62.1",
+  "tagCommit": "4ca6992fd5d1bed95fc1710a81b764c0e116c070",
+  "targetCommitish": "4ca6992fd5d1bed95fc1710a81b764c0e116c070",
+  "releaseBodySha256": "7306a152c90eae82c04bbfa61f49778c7ee060e90f3928f0d887a81a579d4ec7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-1167-advisory-findings.md",
+      "sha256": "40e6cc900293606aa154a6857d8d4cde9a65ceddfa57c142f4c1a59c749b061c"
+    }
+  ]
+}

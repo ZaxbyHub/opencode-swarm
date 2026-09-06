@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.27.4",
+  "tagCommit": "82edad3bb74854bdb466506cf85eb7574de15efe",
+  "targetCommitish": "82edad3bb74854bdb466506cf85eb7574de15efe",
+  "releaseBodySha256": "fd0a542bc227394813b845e8aa3c52e21180aecf436cbed6af8b729d1d00e6e4",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-956-plan-completion-gate.md",
+      "sha256": "00e088a6490c1918c25dff5c99404f3c476cec0ab9e8fdb96fc57eb7fc407c8d"
+    }
+  ]
+}

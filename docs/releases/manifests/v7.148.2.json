@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.148.2",
+  "tagCommit": "1f7dddce33e8a9d76d5eb6d5d1cd852800dc4876",
+  "targetCommitish": "1f7dddce33e8a9d76d5eb6d5d1cd852800dc4876",
+  "releaseBodySha256": "a6b6238c12a3902ffb879b555bad1ec61ca88e0208b9f2861ab1fbf0d92a8d8e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2333-verdict-row-contract-hardening.md",
+      "sha256": "5742374a3f0f67f53df006467739fcc0b5f359f518e7320e4735c55b737d96f5"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/pr-review-trigger-eval-run-binding.md",
+      "sha256": "a918bb1383abec916eea55ef5a39ddab7da55c630cd45e28c0c62f3270bff8b5"
+    }
+  ]
+}

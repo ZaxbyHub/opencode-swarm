@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.153.0",
+  "tagCommit": "83abcda2bb44fd53a60edea716c9b8bccea069ce",
+  "targetCommitish": "83abcda2bb44fd53a60edea716c9b8bccea069ce",
+  "releaseBodySha256": "209f8bc65b2dc4171ecd5beb5e0afeca3fa616849499f0eb3e68e12d06d346f8",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 5,
+      "path": "docs/releases/pending/1533-kg12-source-bearing-context-pack.md",
+      "sha256": "86d9b44bdb2442c2dd4a51e1ebecd1e310f2ec29eebc6b49480af29b3b7b6c2c"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1824-integrity-sandbox-boundary.md",
+      "sha256": "65836f642fcd700773d49cca798b8b8be4ab02721adc2b1e7efe8f7072cfa7cd"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/2285-2298-pr-review-resilience.md",
+      "sha256": "bdfa84708ddb73d3381fe5e600e001c383347c395ea45decc6b9a4a6cc11623e"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/2381-nondestructive-collection-and-revision-snapshots.md",
+      "sha256": "0d7f665aa6d0445d8df851310c67b06223a07926f4da66529ccea80d189f92db"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/ci-bundle-size-cap-8mib.md",
+      "sha256": "45b3f5d60fceac9ce0218a1f4c33486b40b0b2fd70910b7fb7f150c5a52116b3"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/skill-improver-phase4-bundle-safety-mock-coverage.md",
+      "sha256": "402b9087c22f62dcaf64d9a5702b33ff31f20fcdd4513560977ae45ffc7761e2"
+    }
+  ]
+}

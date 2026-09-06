@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.154.3",
+  "tagCommit": "853d6615c86cf7cde24ee72292d228b55351568d",
+  "targetCommitish": "853d6615c86cf7cde24ee72292d228b55351568d",
+  "releaseBodySha256": "791908df30104d24356c766bb9a9915a561d0177f6e971fe9c5577ee12a38b92",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2107-unify-context-pressure-budgets.md",
+      "sha256": "3601583f4e38401c4f6bb2e1ebf3b3274b10ecac49e14395039b1743d91da1eb"
+    }
+  ]
+}

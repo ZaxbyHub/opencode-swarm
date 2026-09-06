@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.113.1",
+  "tagCommit": "bc75d5137b24f84c16c51d9b66e2dbf08654bb45",
+  "targetCommitish": "bc75d5137b24f84c16c51d9b66e2dbf08654bb45",
+  "releaseBodySha256": "45b0fa77f177360b3e0588b70c0cb2d655914e5923fcc5d0dfe83d4b50cfdc4b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1753-tui-pollution-pr2-init-path.md",
+      "sha256": "c17160541b728f550256387e43257bef72d3f33adad15e0d4686a29c90768b67"
+    }
+  ]
+}

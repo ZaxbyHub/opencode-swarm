@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.147.0",
+  "tagCommit": "f0aa7d26f3cd7564ff4261f491369795e046c090",
+  "targetCommitish": "f0aa7d26f3cd7564ff4261f491369795e046c090",
+  "releaseBodySha256": "f435ac1f19254d58c9f7778cb479c49f8b3ef8dc2b01b28bbd805501cc2c7c84",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1529-jvm-dotnet-symbol-graph.md",
+      "sha256": "3a77f21491a725d87285b8e56deffc5bc29aa13bca3a6171c2aa0293c765c6c6"
+    }
+  ]
+}

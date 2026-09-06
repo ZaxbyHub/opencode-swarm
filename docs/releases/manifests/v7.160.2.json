@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.160.2",
+  "tagCommit": "cbcce9d53068fe40399ee5eecc94a9e2a66f2360",
+  "targetCommitish": "cbcce9d53068fe40399ee5eecc94a9e2a66f2360",
+  "releaseBodySha256": "2b78cd6afd3e35e9009958bd5dc0eede4c1de3e48d54e1eb2f4e4cd07debebdf",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2303-build-discovery-runtime-safety.md",
+      "sha256": "9337e7b6faea37282522c890991f38d56b87ec681b5586adf800cbddf02391e8"
+    }
+  ]
+}

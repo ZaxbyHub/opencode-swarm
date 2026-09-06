@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.130.2",
+  "tagCommit": "42b42b881a47f7732beaa4208e083d8240045f8c",
+  "targetCommitish": "42b42b881a47f7732beaa4208e083d8240045f8c",
+  "releaseBodySha256": "ca616dc7790067946d886a170182becb20c62a56b4c25566b7eebdee7833d9f9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-workflow-revision-token-validation.md",
+      "sha256": "c46618032c2dc6e07023d42cfaf99ae20f62b01f120610163a07ace3e6d73e6c"
+    }
+  ]
+}

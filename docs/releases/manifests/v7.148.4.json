@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.148.4",
+  "tagCommit": "6a3151e7fde839d4e4d466f327a5b8da3a96e75e",
+  "targetCommitish": "6a3151e7fde839d4e4d466f327a5b8da3a96e75e",
+  "releaseBodySha256": "d5f8068d6e716c2630b99c0acf553f6c909685050ac429b01a1065b72ecb9fc2",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2104-background-reclaimable-retryable-visible.md",
+      "sha256": "8426848071d7e7a92f1b16c6b8c10eb8bfe603259952ba53bdd65b52c3149ef4"
+    }
+  ]
+}

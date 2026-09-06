@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.5",
+  "tagCommit": "6c32527e9316563af201646d2f063d653bf2fd82",
+  "targetCommitish": "6c32527e9316563af201646d2f063d653bf2fd82",
+  "releaseBodySha256": "5ba456f109db976819ddf11876f6b80fb54514ad24db0ba2de011a2b22ac1432",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2524-wire-gates-config.md",
+      "sha256": "c7768db5aa03f6a8449eeaa4ea2c4ced21e4b8471e38d0c2fbcb95c5018563e0"
+    }
+  ]
+}

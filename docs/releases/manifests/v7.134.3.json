@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.134.3",
+  "tagCommit": "03a8b08dc4c7e52f018defa30f363a94dfe3b6ed",
+  "targetCommitish": "03a8b08dc4c7e52f018defa30f363a94dfe3b6ed",
+  "releaseBodySha256": "56a738050393bfc3207509269918c9a73f2223b27a4e6bee750951309423cefe",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-workflow-startup-and-feedback-transition.md",
+      "sha256": "2e18cce29cf4e4f83f94383d755199660dc19ab8016d5692196683c9f7ea6ed6"
+    }
+  ]
+}

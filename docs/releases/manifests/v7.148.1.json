@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.148.1",
+  "tagCommit": "5ef1054330f3fb3c1cc63f0afff33baf41d9887f",
+  "targetCommitish": "5ef1054330f3fb3c1cc63f0afff33baf41d9887f",
+  "releaseBodySha256": "852df0dd2c7a9e6bd4754bf69094e74614b451d1f0c9db82be056b4ee9d8a8a6",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2038-hard-global-skill-usage-bound.md",
+      "sha256": "ba562c5def04351ae874a627a03ec068b0cde5ed9675d6292095c5fca5f909c9"
+    }
+  ]
+}

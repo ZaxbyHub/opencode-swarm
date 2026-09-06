@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.126.0",
+  "tagCommit": "c0c52b76b083e24c92c6cba7bf4244fe7a1cc839",
+  "targetCommitish": "c0c52b76b083e24c92c6cba7bf4244fe7a1cc839",
+  "releaseBodySha256": "5b7246c60029965f324204089a6522dc74bafeadc68a964bcfb1c138a11f689d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/loader-recovery-metadata-and-turbo-disclosure-fr-001-002-003-004.md",
+      "sha256": "dfdd3a59291a988d68a9740acb880339b3fdc0c9b339d11dfad7ac36bfc2e001"
+    }
+  ]
+}

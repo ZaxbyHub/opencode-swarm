@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.77.5",
+  "tagCommit": "f4809b1170fa34de3dc00efe0678e8e5e4269bf4",
+  "targetCommitish": "f4809b1170fa34de3dc00efe0678e8e5e4269bf4",
+  "releaseBodySha256": "d646f73792c6240683abf0200b394b11ca2f4e99bcd403217356f3a940a3be34",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/command-registry-ssot-tool-policy-1369.md",
+      "sha256": "d97ea9b01ce752c2e36a1180d7a2dc21b604f4fb0555f11b1a4254629ab1b521"
+    }
+  ]
+}

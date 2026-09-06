@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.7",
+  "tagCommit": "cf8eb68554630d4a488f9b104a6da70ef250319d",
+  "targetCommitish": "cf8eb68554630d4a488f9b104a6da70ef250319d",
+  "releaseBodySha256": "4529ff1a14cf7cf95aa2d725377b280615a5930baac754cac8a420d54a36716b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2474-canonical-path-identity.md",
+      "sha256": "fdc645e42e3e5964d4cfcecfcbe851b749ddb6bb95bc7c92c44e5517789c8d5a"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2525-receiptless-gate-repair-wedge.md",
+      "sha256": "9a327fe0ac869893cdce3785e025b5a9424a80501c56eb19d1bf50135d3edd3d"
+    }
+  ]
+}

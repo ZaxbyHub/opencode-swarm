@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.152.1",
+  "tagCommit": "8be4fa56d4035a19f7fb4cdd620d4425912398d3",
+  "targetCommitish": "8be4fa56d4035a19f7fb4cdd620d4425912398d3",
+  "releaseBodySha256": "72bd527834bda9934f4b7365426d03288bde2b666549add08b05a2c23bd57269",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2379-resume-skill-slug-rename.md",
+      "sha256": "f47adb0bd41745aebe51cda2ca9d823e0faaa9971479e2a377b4c3992a5d9735"
+    }
+  ]
+}

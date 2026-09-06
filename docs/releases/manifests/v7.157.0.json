@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.157.0",
+  "tagCommit": "a06cf9d7411cbe49e452ef5fb86a2efbb2aa638c",
+  "targetCommitish": "a06cf9d7411cbe49e452ef5fb86a2efbb2aa638c",
+  "releaseBodySha256": "605aeb6fd85b04c2d18c8ac203adf8847251c3f65da89c805b8472fe3d595b3b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2108-pr-feedback-publication-invalidation-reapproval.md",
+      "sha256": "3199041105231b79d694e1c50479ace3aa2881e6b42e5f71915960869504f945"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.126.4",
+  "tagCommit": "938912e6754d52e17098cb456958ded7d511ea59",
+  "targetCommitish": "938912e6754d52e17098cb456958ded7d511ea59",
+  "releaseBodySha256": "1f01e7aaee882f9f8e652001a87abc374605bf9031a794a09eba39b429a111cb",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1908-test-stability-pass.md",
+      "sha256": "44f52b30dca0f6b0a8b9834ac0060641f46854318d51fe6a3ead6b7e57dcf3ce"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.8",
+  "tagCommit": "cf426931cc6fc26b67cd76468dd34d5905106f5f",
+  "targetCommitish": "cf426931cc6fc26b67cd76468dd34d5905106f5f",
+  "releaseBodySha256": "ae2b18648d7d1c637db3517c64dcea95d3161a683e50f0e44d5b7ce7a12a7592",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2539-node-sqlite-run-changes-return.md",
+      "sha256": "bdae90ba288b56cff94fc09860b9f4445ee5ba00aa95f5a69ec71ea3a7038311"
+    }
+  ]
+}

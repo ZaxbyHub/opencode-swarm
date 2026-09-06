@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.154.0",
+  "tagCommit": "87e9d6da23211537721abc0ea44f11c5253571ec",
+  "targetCommitish": "87e9d6da23211537721abc0ea44f11c5253571ec",
+  "releaseBodySha256": "1ea26d500f2e53aa15f170fd522c13bb8e6bdabd7d3872513e352bf0707fb35a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2382-typed-recoverable-resilience-circuit.md",
+      "sha256": "f4cccdfd8ef0575ba0a2ed80ea8296e0e3858abd13bb47be1313defd2619e13f"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/pr-subscriptions-checkpoint-compaction-2042.md",
+      "sha256": "532b5a6b952774eaca1195ade242284b2dfd080115262289ae94d552e99f9c04"
+    }
+  ]
+}
