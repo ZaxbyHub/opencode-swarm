@@ -224,4 +224,37 @@ describe('readSwarmFileAsync retry behavior (issue #1782)', () => {
 			rmSyncHardened(tmp);
 		}
 	});
+
+	test('custom readers can bypass the replacement-decoding artifact cache', async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'readswarm-reader-'));
+		try {
+			fs.mkdirSync(path.join(tmp, '.swarm'), { recursive: true });
+			const planPath = path.join(tmp, '.swarm', 'plan.json');
+			fs.writeFileSync(planPath, '{"strict":true}');
+
+			let cacheCalls = 0;
+			_internals.readCachedTextFile = (() => {
+				cacheCalls++;
+				return Promise.resolve('{"lossy":true}');
+			}) as typeof _internals.readCachedTextFile;
+
+			let readerCalls = 0;
+			const result = await readSwarmFileAsync(
+				tmp,
+				'plan.json',
+				undefined,
+				async (resolvedPath) => {
+					readerCalls++;
+					return fs.promises.readFile(resolvedPath, 'utf8');
+				},
+				false,
+			);
+
+			expect(result).toBe('{"strict":true}');
+			expect(readerCalls).toBe(1);
+			expect(cacheCalls).toBe(0);
+		} finally {
+			rmSyncHardened(tmp);
+		}
+	});
 });
