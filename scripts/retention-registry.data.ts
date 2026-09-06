@@ -509,7 +509,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'withEvidenceLock agent=background on every mutation (:170-173); reads lock-free',
 		crashBehavior:
 			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1614-1626)',
-		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:463-465); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:458-466 docblock)',
+		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:465-467); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:460-468 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
 			'background-delegations.checkpoint.json': 'archive-only',

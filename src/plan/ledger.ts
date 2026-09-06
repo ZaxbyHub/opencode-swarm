@@ -680,13 +680,10 @@ function coordinateLedger(directory: string): FileLedgerRead {
 					'PLAN_LEDGER_DIVERGED: malformed file prefix differs from SQLite authority',
 				);
 			}
-			writePortableLedger(directory, sqlite.lines);
-			return {
-				events: sqlite.events,
-				lines: sqlite.lines,
-				truncated: false,
-				badSuffix: null,
-			};
+			// In file-shadow mode the JSONL stream remains authoritative. Preserve
+			// the malformed suffix so integrity readers can fail closed; silently
+			// replacing it from SQLite would hide corruption and defeat quarantine.
+			return file;
 		}
 		if (
 			file.events[0]?.seq === 1 &&
