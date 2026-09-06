@@ -56,4 +56,33 @@ describe('plan-ledger archive staging cleanup (#2484)', () => {
 		expect(tempPath).toMatch(/\.tmp\.[0-9a-f]{32}$/);
 		expect(fs.existsSync(tempPath)).toBe(false);
 	});
+
+	test('portable SQLite export uses a random suffix and cleans up on failure', () => {
+		const root = makeRoot('portable-export');
+		const writes: string[] = [];
+		_internals.writeFileFsyncedThenRename = (tempPath, targetPath, data) => {
+			writes.push(tempPath);
+			originalInternals.writeFileFsyncedThenRename(tempPath, targetPath, data);
+		};
+
+		_internals.writePortableLedger(root, [
+			new Uint8Array(Buffer.from('{"seq":1}')),
+		]);
+		expect(writes[0]).toMatch(/\.sqlite-export\.[0-9a-f]{32}\.tmp$/);
+		expect(fs.existsSync(writes[0]!)).toBe(false);
+
+		let failedTempPath = '';
+		_internals.writeFileFsyncedThenRename = (tempPath) => {
+			failedTempPath = tempPath;
+			fs.writeFileSync(tempPath, 'partial');
+			throw new Error('injected portable export failure');
+		};
+		expect(() =>
+			_internals.writePortableLedger(root, [
+				new Uint8Array(Buffer.from('{"seq":2}')),
+			]),
+		).toThrow('injected portable export failure');
+		expect(failedTempPath).toMatch(/\.sqlite-export\.[0-9a-f]{32}\.tmp$/);
+		expect(fs.existsSync(failedTempPath)).toBe(false);
+	});
 });

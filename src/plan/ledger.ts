@@ -568,8 +568,16 @@ function writePortableLedger(directory: string, lines: Uint8Array[]): void {
 	const content = Buffer.concat(
 		lines.flatMap((line) => [Buffer.from(line), Buffer.from('\n')]),
 	);
-	const tempPath = `${ledgerPath}.sqlite-export.${Date.now()}.${Math.floor(Math.random() * 1e9)}.tmp`;
-	_internals.writeFileFsyncedThenRename(tempPath, ledgerPath, content);
+	const tempPath = `${ledgerPath}.sqlite-export.${crypto.randomBytes(16).toString('hex')}.tmp`;
+	try {
+		_internals.writeFileFsyncedThenRename(tempPath, ledgerPath, content);
+	} finally {
+		try {
+			fs.unlinkSync(tempPath);
+		} catch {
+			/* renamed or never created */
+		}
+	}
 }
 
 function archiveLegacyLedger(
@@ -2631,6 +2639,7 @@ export const _internals = {
 	getLedgerPath,
 	getPlanJsonPath,
 	archiveLegacyLedger,
+	writePortableLedger,
 	writeFileFsyncedThenRename,
 	fsyncRecoveryDirectory,
 	readLedgerDirectory,
