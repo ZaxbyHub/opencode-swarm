@@ -156,7 +156,7 @@ describe('init fail-open behavior', () => {
 		// Set to 300ms (Phase 4b post-Windows-smoke fix) to keep total
 		// server() time under the 400ms Issue #704 / repro-704.mjs T1
 		// deadline. Changing it requires updating the surrounding
-		// `withTimeout` wrap and repro-704.mjs.
+		// `withTimeoutSignal` wrap and repro-704.mjs.
 		expect(LANG_BACKEND_DETECTION_TIMEOUT_MS).toBe(300);
 	});
 

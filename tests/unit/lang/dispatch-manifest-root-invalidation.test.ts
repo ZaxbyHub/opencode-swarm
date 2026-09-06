@@ -12,9 +12,9 @@ import {
 import { MANIFEST_FILES } from '../../../src/lang/manifest-files';
 
 // Keep this acceptance ceiling aligned with findManifestRoot's documented
-// maximum upward search. The test counts every sync and async filesystem API
-// the implementation uses so this preserving acceptance check remains valid
-// on both the historical base and the current async dispatch implementation.
+// maximum upward search. This discriminating check counts every sync and async
+// filesystem API used by dispatch: the historical base fails its zero-sync
+// assertion, while the current async implementation stays within the ceiling.
 const MAX_MANIFEST_SEARCH_DEPTH = 32;
 // Beyond the bounded trace validation, a warm lookup performs at most two
 // async realpath operations, one root directory listing, and one async stat
