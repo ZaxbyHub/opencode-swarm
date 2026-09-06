@@ -72,29 +72,30 @@ export async function executeCompletePrWorkflow(
 		probe_retained_lanes?: string[];
 		probe_status?: string;
 	} = {};
+	// Issue #2506: resolve the lane-liveness watchdog policy from the same
+	// directory-scoped plugin config the resilience policy uses
+	// (`loadPluginConfig`, the dispatch-lanes precedent) and thread it plus
+	// the background pending timeout so the settlement applies ONE
+	// effective horizon with conflict disclosure. Declared outside the
+	// observation try so the gate call below threads the SAME policy.
+	let laneLiveness: PrWorkflowLaneLivenessOptions | undefined;
 	try {
-		// Issue #2506: resolve the lane-liveness watchdog policy from the same
-		// directory-scoped plugin config the resilience policy uses
-		// (`loadPluginConfig`, the dispatch-lanes precedent) and thread it plus
-		// the background pending timeout so the settlement applies ONE
-		// effective horizon with conflict disclosure.
-		let laneLiveness: PrWorkflowLaneLivenessOptions | undefined;
-		try {
-			const config = loadPluginConfig(directory);
-			const hooks = (
-				config as { hooks?: { background_pending_timeout_minutes?: number } }
-			).hooks;
-			laneLiveness = {
-				laneLivenessWatchdog: config.lane_liveness_watchdog,
-				backgroundPendingTimeoutMs:
-					hooks?.background_pending_timeout_minutes !== undefined
-						? hooks.background_pending_timeout_minutes * 60_000
-						: undefined,
-			};
-		} catch {
-			// Config read failure must not block completion; the disabled
-			// default is always safe.
-		}
+		const config = loadPluginConfig(directory);
+		const hooks = (
+			config as { hooks?: { background_pending_timeout_minutes?: number } }
+		).hooks;
+		laneLiveness = {
+			laneLivenessWatchdog: config.lane_liveness_watchdog,
+			backgroundPendingTimeoutMs:
+				hooks?.background_pending_timeout_minutes !== undefined
+					? hooks.background_pending_timeout_minutes * 60_000
+					: undefined,
+		};
+	} catch {
+		// Config read failure must not block completion; the disabled
+		// default is always safe.
+	}
+	try {
 		const settlement = await _internals.settlePresumedStalePrWorkflowLanes(
 			directory,
 			context.sessionID,
@@ -170,9 +171,17 @@ export async function executeCompletePrWorkflow(
 			context.sessionID,
 			parsed.data.mode as PrWorkflowMode,
 			parsed.data.pr_head_sha,
+			// Issue #2506: thread the resolved watchdog policy into the gate's
+			// internal settlement too — the observation settlement above and
+			// the gate re-validation must run the SAME effective horizon.
 			parsed.data.mode === 'PR_REVIEW'
-				? { reportVerdict: parsed.data.report_verdict }
-				: undefined,
+				? {
+						reportVerdict: parsed.data.report_verdict,
+						...(laneLiveness ? { laneLiveness } : {}),
+					}
+				: laneLiveness
+					? { laneLiveness }
+					: undefined,
 		);
 		let checkoutRestoreRequired = false;
 		let checkoutRestoreReceipts: Awaited<
