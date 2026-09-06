@@ -120,4 +120,78 @@ describe('handleResetSessionCommand — worktree lane reclamation (#2527)', () =
 		expect(second).toContain('Removed 1 confirmed worktree lane(s)');
 		expect(existsSync(dirtyLane)).toBe(false);
 	}, 120_000);
+
+	it('foreign .git-bearing lane survives even a VALID confirm token', async () => {
+		// Review finding (external HIGH follow-up): the token branch must be
+		// scoped to the `own` partition — a healthy foreign lane is never
+		// purgeable regardless of the operator's confirmation.
+		const repoB = path.join(root, 'repoB-token');
+		initRepo(repoB);
+		const foreignLane = path.join(
+			repoA,
+			'.swarm-worktrees',
+			'ses-ft',
+			'laneFT',
+		);
+		addWorktree(repoB, 'rs-foreign-token', foreignLane);
+		const foreignWork = path.join(foreignLane, 'sibling.txt');
+		writeFileSync(foreignWork, 'sibling work\n');
+		const dirtyLane = path.join(repoA, '.swarm-worktrees', 'ses-dt', 'laneDT');
+		addWorktree(repoA, 'rs-dirty-token', dirtyLane);
+		writeFileSync(path.join(dirtyLane, 'mine.txt'), 'mine\n');
+
+		const first = await handleResetSessionCommand(repoA, [], 'ses_op04');
+		const token = /--confirm=([0-9a-f]{24})/.exec(first)?.[1];
+		expect(token).toBeDefined();
+
+		const second = await handleResetSessionCommand(
+			repoA,
+			[`--confirm=${token}`],
+			'ses_op04',
+		);
+		expect(second).toContain('owned by a different repository');
+		expect(second).toContain('Removed 1 confirmed worktree lane(s)');
+		// The foreign lane AND its uncommitted work survive the confirmed purge.
+		expect(existsSync(foreignLane)).toBe(true);
+		expect(existsSync(foreignWork)).toBe(true);
+		expect(existsSync(dirtyLane)).toBe(false);
+	}, 120_000);
+
+	it('git-less directory under a configured worktree_dir override survives a VALID confirm token', async () => {
+		// Reproduction of the external-review HIGH: a `.git`-less remnant under
+		// an override base that points OUTSIDE the project is ownership-
+		// unprovable — it must be reported and preserved on both the no-token
+		// and the confirm-token path, never purged.
+		const sharedBase = path.join(root, 'shared-worktrees');
+		const foreignGitless = path.join(sharedBase, 'ses-x', 'laneX');
+		mkdirSync(foreignGitless, { recursive: true });
+		const foreignFile = path.join(foreignGitless, 'precious.txt');
+		writeFileSync(foreignFile, 'not ours\n');
+		mkdirSync(path.join(repoA, '.opencode'), { recursive: true });
+		writeFileSync(
+			path.join(repoA, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ worktree: { worktree_dir: sharedBase } }),
+		);
+		const dirtyLane = path.join(repoA, '.swarm-worktrees', 'ses-ov', 'laneOV');
+		addWorktree(repoA, 'rs-override-dirty', dirtyLane);
+		writeFileSync(path.join(dirtyLane, 'mine.txt'), 'mine\n');
+
+		const first = await handleResetSessionCommand(repoA, [], 'ses_op05');
+		expect(first).toContain('ownership unprovable');
+		expect(first).toMatch(/--confirm=[0-9a-f]{24}/);
+		const token = /--confirm=([0-9a-f]{24})/.exec(first)?.[1];
+		expect(token).toBeDefined();
+
+		const second = await handleResetSessionCommand(
+			repoA,
+			[`--confirm=${token}`],
+			'ses_op05',
+		);
+		expect(second).toContain('ownership unprovable');
+		expect(second).toContain('Removed 1 confirmed worktree lane(s)');
+		// The foreign git-less directory and its content survive.
+		expect(existsSync(foreignGitless)).toBe(true);
+		expect(existsSync(foreignFile)).toBe(true);
+		expect(existsSync(dirtyLane)).toBe(false);
+	}, 120_000);
 });

@@ -117,8 +117,14 @@ function readPending(directory: string): PendingPurgeRecord | null {
 		) {
 			return null;
 		}
-		// TTL expiry is silent: an expired record reads as absent.
-		if (_internals.now() - parsed.createdAt > PENDING_PURGE_TTL_MS) return null;
+		// TTL expiry is silent: an expired record reads as absent. A
+		// future-dated createdAt (beyond a 1-minute clock-skew allowance)
+		// is corrupt/hostile and also reads as absent.
+		if (!Number.isFinite(parsed.createdAt)) return null;
+		if (parsed.createdAt > _internals.now() + 60_000) return null;
+		if (_internals.now() - parsed.createdAt > PENDING_PURGE_TTL_MS) {
+			return null;
+		}
 		return {
 			schemaVersion: 1,
 			scopeDigest: parsed.scopeDigest,
@@ -149,7 +155,6 @@ export function previewDestructivePurge(
 	extra?: { kind?: string; candidates?: PurgeCandidate[] },
 ): PurgePlan {
 	const scope = resolveCandidates(scopeTarget, extra);
-	const digest = scopeDigest(scope.kind, scope.candidates);
 	const previewLines = [
 		`Destructive purge preview (${scope.candidates.length} candidate(s)) for ${projectRoot}:`,
 		...scope.candidates.map((c) => `  - ${c.path} (${c.reason})`),
@@ -201,7 +206,11 @@ export function executeDestructivePurge(
 ): PurgeExecution {
 	const pending = readPending(projectRoot);
 	if (!pending) {
-		return { ok: false, reason: 'no pending purge for this scope (expired, overwritten, or already executed)' };
+		return {
+			ok: false,
+			reason:
+				'no pending purge for this scope (expired, overwritten, or already executed)',
+		};
 	}
 	const scope = resolveCandidates(scopeTarget, extra);
 	const digest = scopeDigest(scope.kind, scope.candidates);
@@ -211,7 +220,8 @@ export function executeDestructivePurge(
 	if (pending.scopeDigest !== digest) {
 		return {
 			ok: false,
-			reason: 'purge scope changed since the token was issued — re-run the preview and confirm the new token',
+			reason:
+				'purge scope changed since the token was issued — re-run the preview and confirm the new token',
 		};
 	}
 	const purged: string[] = [];

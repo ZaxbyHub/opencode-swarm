@@ -94,7 +94,8 @@ function isLiveLaneOwnerEntry(value: unknown): value is LiveLaneOwnerEntry {
 		typeof c.sessionId === 'string' &&
 		typeof c.taskId === 'string' &&
 		typeof c.ownerPid === 'number' &&
-		Number.isFinite(c.ownerPid) &&
+		Number.isInteger(c.ownerPid) &&
+		c.ownerPid > 0 &&
 		typeof c.startedAt === 'number' &&
 		Number.isFinite(c.startedAt)
 	);

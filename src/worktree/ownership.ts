@@ -18,9 +18,13 @@
  *     refusing to destroy uncommitted work. Both must preserve the
  *     candidate.
  *  3. A `.git`-less directory is deletable ONLY when it sits inside this
- *     project's own worktree base (ours by construction, per F1). On the
- *     legacy parent-level shared base a `.git`-less directory is
- *     ownership-unprovable and is skipped and reported.
+ *     project's own default worktree base (ours by construction, per F1).
+ *     Anywhere else — the legacy parent-level shared base, or a configured
+ *     `worktree_dir` override that may point anywhere — the ownership of a
+ *     bare directory cannot be proven and it is skipped and reported.
+ *     Review-round hardening: the marker probe is errno-discriminating —
+ *     an unreadable-but-present `.git` classifies as `uncertain`, never as
+ *     "gitless".
  *
  * The entry files (`src/hooks/init-orphan-recovery.ts`,
  * `src/commands/reset-session.ts`) must not call `rmSync` on base-derived
@@ -36,19 +40,33 @@ export type OwnedRemovalOutcome =
 	| { status: 'skipped'; reason: string }
 	| { status: 'refused'; reason: string };
 
-export interface RemoveOwnedWorktreeDirOptions {
-	/** Trust extra `worktree_dir` override bases for the `.git`-less rule. */
-	worktreeDirOverrides?: string[];
-	/** Internal seam override (tests); defaults to the production helper. */
-}
+export type GitMarkerProbe = 'gitless' | 'present' | 'uncertain';
 
 export const _internals = {
 	resolveWorktreeRepoOwnership,
 	isPathUnderSwarmWorktreeBase,
 	removeWorktree,
 	rmSync: fs.rmSync.bind(fs),
-	existsSync: fs.existsSync.bind(fs),
+	statSync: fs.statSync.bind(fs),
 };
+
+/**
+ * Errno-discriminating `.git` marker probe. A bare `existsSync` collapses
+ * every I/O error (EPERM/EBUSY/EMFILE on a transiently-unreadable marker)
+ * into "gitless", which would route an ownership-unprovable path into
+ * removal. Only a proven-absent marker is "gitless"; any other error is
+ * "uncertain" and the caller must retain the candidate.
+ */
+export function probeGitMarker(dotGitPath: string): GitMarkerProbe {
+	try {
+		_internals.statSync(dotGitPath);
+		return 'present';
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === 'ENOENT' || code === 'ENOTDIR') return 'gitless';
+		return 'uncertain';
+	}
+}
 
 /**
  * Attempt to reclaim one worktree-base directory, gated by repo ownership.
@@ -58,22 +76,29 @@ export const _internals = {
 export async function removeOwnedWorktreeDir(
 	worktreePath: string,
 	projectRoot: string,
-	options: RemoveOwnedWorktreeDirOptions = {},
 ): Promise<OwnedRemovalOutcome> {
-	const dotGit = path.join(worktreePath, '.git');
-	if (!_internals.existsSync(dotGit)) {
-		// `.git`-less remnant: deletable only inside this project's own base
-		// (ours by construction). On the legacy parent-level shared base the
-		// ownership of a bare directory cannot be proven — skip, never delete.
+	const marker = probeGitMarker(path.join(worktreePath, '.git'));
+	if (marker === 'uncertain') {
+		return {
+			status: 'skipped',
+			reason: 'ownership uncertain (unreadable .git marker)',
+		};
+	}
+	if (marker === 'gitless') {
+		// `.git`-less remnant: deletable only inside this project's own
+		// default base (ours by construction). Anywhere else — the legacy
+		// parent-level shared base, or a configured `worktree_dir` override
+		// that may point anywhere — the ownership of a bare directory cannot
+		// be proven: skip, never delete.
 		const internal = _internals.isPathUnderSwarmWorktreeBase(
 			worktreePath,
 			projectRoot,
-			options.worktreeDirOverrides,
 		);
 		if (!internal) {
 			return {
 				status: 'skipped',
-				reason: 'gitless directory outside the project worktree base (ownership unprovable)',
+				reason:
+					'gitless directory outside the project worktree base (ownership unprovable)',
 			};
 		}
 		try {

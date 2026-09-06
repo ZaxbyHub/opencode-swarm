@@ -121,8 +121,24 @@ export function resolveWorktreeRepoOwnership(
 		process.platform === 'win32'
 			? (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 			: (a: string, b: string) => a === b;
+	// Canonicalize both sides through realpathSync (matching the sibling
+	// containment primitive's 8.3/junction discipline) so a symlinked
+	// project-root spelling cannot diverge from the git-recorded pointer
+	// path. Unresolvable paths (deleted/racing) fall back to lexical
+	// resolution — the comparison then fails toward owned:false (retain),
+	// which is the safe direction.
+	const canonical = (p: string): string => {
+		try {
+			return fs.realpathSync(p);
+		} catch {
+			return p;
+		}
+	};
 	return {
-		owned: cmp(path.resolve(mainWorktree), path.resolve(expectedProjectRoot)),
+		owned: cmp(
+			path.resolve(canonical(mainWorktree)),
+			path.resolve(canonical(expectedProjectRoot)),
+		),
 		mainWorktree,
 		uncertain: false,
 	};

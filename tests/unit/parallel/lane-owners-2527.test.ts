@@ -11,7 +11,14 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import {
 	_internals,
@@ -166,6 +173,43 @@ describe('live lane owner store (issue #2527)', () => {
 		const view = listLiveLaneOwners(dir);
 
 		expect(view.live).toHaveLength(1);
+		expect(view.reaped).toHaveLength(0);
+	});
+
+	test('corrupt record with ownerPid 0 is rejected at parse (never "live")', () => {
+		// Review finding: process.kill(0, 0) probes the process GROUP and
+		// succeeds, so an ownerPid of 0 must never validate as a live record.
+		const lane = path.join(dir, 'lane-badpid');
+		mkdirSync(lane, { recursive: true });
+		record(lane);
+		const storeFile = path.join(dir, '.swarm', 'live-lane-owners.json');
+		const raw = JSON.parse(readFileSync(storeFile, 'utf-8')) as {
+			entries: Array<{ ownerPid: number }>;
+		};
+		raw.entries[0].ownerPid = 0;
+		writeFileSync(storeFile, JSON.stringify(raw));
+
+		const view = listLiveLaneOwners(dir);
+
+		expect(view.live).toHaveLength(0);
+	});
+
+	test('unknown future schemaVersion reads as the empty store', () => {
+		// Final-critic B14-i pin: a store written by a FUTURE version is
+		// rejected wholesale (fail-open to the unprotected pre-#2527 state).
+		const lane = path.join(dir, 'lane-future');
+		mkdirSync(lane, { recursive: true });
+		record(lane);
+		const storeFile = path.join(dir, '.swarm', 'live-lane-owners.json');
+		const raw = JSON.parse(readFileSync(storeFile, 'utf-8')) as {
+			schemaVersion: number;
+		};
+		raw.schemaVersion = 2;
+		writeFileSync(storeFile, JSON.stringify(raw));
+
+		const view = listLiveLaneOwners(dir);
+
+		expect(view.live).toHaveLength(0);
 		expect(view.reaped).toHaveLength(0);
 	});
 

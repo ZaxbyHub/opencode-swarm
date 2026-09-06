@@ -754,6 +754,13 @@ export async function runInitOrphanRecovery(
 			recoveryReplayWarnings.push(
 				`Migrated ${migration.moved.length} worktree(s) from the legacy shared base into the project base (issue #2527).`,
 			);
+			// Review-round hardening: a just-moved lane is protected for THIS
+			// pass at its NEW path, so the enumeration below can never see it
+			// as an unprotected orphan before its durable owner record is
+			// (re-)established.
+			for (const movedPath of migration.moved) {
+				protectedWorktreePaths.add(worktreePathKey(movedPath, directory));
+			}
 		}
 		if (migration.retained.length > 0) {
 			recoveryReplayWarnings.push(

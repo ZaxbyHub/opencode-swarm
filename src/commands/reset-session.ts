@@ -24,15 +24,17 @@ import {
 import { SNAPSHOT_PROJECTION_FILE } from '../session/snapshot-writer.js';
 import { swarmState } from '../state';
 import { recoverStaleCoderSettlements } from '../workflow/coder-settlement.js';
+import { isPathUnderSwarmWorktreeBase } from '../worktree/core';
 import {
 	cleanupOrphanedBranches,
 	type OrphanCleanupResult,
 } from '../worktree/merge';
-import { removeOwnedWorktreeDir } from '../worktree/ownership';
+import { probeGitMarker, removeOwnedWorktreeDir } from '../worktree/ownership';
 import {
 	executeDestructivePurge,
 	issueConfirmToken,
 	type PurgeCandidate,
+	previewDestructivePurge,
 } from './destructive-purge';
 import {
 	backupSwarmStateBeforeReset,
@@ -581,12 +583,31 @@ export async function handleResetSessionCommand(
 						.listLiveLaneOwners(directory)
 						.live.map((owner) => owner.lanePath),
 				);
-				// Foreign lanes are NEVER deletable — with or without a token.
+				// Foreign and ownership-unprovable lanes are NEVER deletable —
+				// with or without a token. A `.git`-less remnant is ours only
+				// INSIDE the default project worktree base (ours by
+				// construction); under a configured `worktree_dir` override —
+				// which may point anywhere — ownership of a bare directory
+				// cannot be proven, so it is preserved and reported.
 				const own: string[] = [];
 				const foreign: string[] = [];
+				const unprovable: string[] = [];
 				for (const candidate of candidates) {
+					const marker = probeGitMarker(path.join(candidate, '.git'));
+					if (marker === 'uncertain') {
+						unprovable.push(candidate);
+						continue;
+					}
+					if (marker === 'gitless') {
+						if (isPathUnderSwarmWorktreeBase(candidate, directory)) {
+							own.push(candidate);
+						} else {
+							unprovable.push(candidate);
+						}
+						continue;
+					}
 					const ownership = resolveWorktreeRepoOwnership(candidate, directory);
-					if (!fs.existsSync(path.join(candidate, '.git')) || ownership.owned) {
+					if (ownership.owned) {
 						own.push(candidate);
 					} else {
 						foreign.push(candidate);
@@ -597,12 +618,26 @@ export async function handleResetSessionCommand(
 						`ℹ️ Preserved "${lane}" — owned by a different repository; never deleted by this project.`,
 					);
 				}
+				for (const lane of unprovable) {
+					results.push(
+						`ℹ️ Preserved "${lane}" — ownership unprovable (git-less outside the project worktree base, or unreadable metadata); never deleted by this project.`,
+					);
+				}
 
 				if (confirmToken) {
 					// Operator echoed the exact confirmation: purge the full
 					// own scope through the shared primitive (single-use token,
-					// set-digest bound).
-					const scope: PurgeCandidate[] = own.map((lane) => ({
+					// set-digest bound). Belt-and-suspenders: every scope
+					// member must be a proven-owned `.git`-bearing lane or a
+					// git-less remnant inside the project base — the classifier
+					// above already guarantees this, so a violation is a bug
+					// and the candidate is dropped rather than purged.
+					const purgeScope = own.filter(
+						(lane) =>
+							probeGitMarker(path.join(lane, '.git')) === 'present' ||
+							isPathUnderSwarmWorktreeBase(lane, directory),
+					);
+					const scope: PurgeCandidate[] = purgeScope.map((lane) => ({
 						path: lane,
 						reason: 'confirmed reset-session purge',
 					}));
@@ -649,6 +684,17 @@ export async function handleResetSessionCommand(
 							path: lane,
 							reason: 'uncommitted or live-owned work',
 						}));
+						// Disclosure: show the operator exactly what a confirmed
+						// purge would destroy (dirty vs live is indistinguishable
+						// from a bare count) before arming the token.
+						const preview = previewDestructivePurge(
+							preservedOwn[0],
+							directory,
+							{ candidates: scope },
+						);
+						for (const line of preview.previewLines) {
+							results.push(`   ${line}`);
+						}
 						const token = issueConfirmToken(preservedOwn[0], directory, {
 							candidates: scope,
 						});
