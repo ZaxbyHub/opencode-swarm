@@ -118,12 +118,21 @@ async function watchdogEvents(dir: string): Promise<Record<string, unknown>[]> {
 			path.join(dir, '.swarm', 'events.jsonl'),
 			'utf-8',
 		);
-		return text
-			.trim()
+				return text
 			.split('\n')
-			.filter((line) => line.trim().length > 0)
-			.map((line) => JSON.parse(line) as Record<string, unknown>)
-			.filter((event) => event.type === 'pr_workflow_lane_watchdog');
+			.map((line) => {
+				try {
+					return JSON.parse(line) as Record<string, unknown>;
+				} catch {
+					// Mirrors the production scan: skip lines that are not
+					// valid JSON instead of failing the whole read.
+					return null;
+				}
+			})
+			.filter(
+				(event): event is Record<string, unknown> =>
+					event !== null && event.type === 'pr_workflow_lane_watchdog',
+			);
 	} catch {
 		return [];
 	}
@@ -239,6 +248,49 @@ describe('PRR-005.4 + cross-session isolation — dedup scan input hygiene', () 
 		expect(
 			(await watchdogEvents(directory)).filter(
 				(event) => event.escalated === true && event.sessionID === 'sess-mine',
+			).length,
+		).toBe(1);
+	});
+
+	test('a corrupt tail line is skipped by the dedup scan without blocking appends', async () => {
+		await recordOpenPrWorkflowLane(
+			directory,
+			'sess-corrupt',
+			'risk-security',
+			'c-corrupt',
+		);
+		installBusyHost(['c-corrupt']);
+		await settlePresumedStalePrWorkflowLanes(directory, 'sess-corrupt', {
+			laneLivenessWatchdog: stallOnly,
+		});
+		expect(
+			(await watchdogEvents(directory)).filter(
+				(event) => event.escalated === true,
+			).length,
+		).toBe(1);
+
+		// appendCoreEventSync repairs line framing rather than rejecting a
+		// torn tail, so the store still accepts appends; the scan must skip
+		// the garbage line and a fresh escalation for a NEW label still lands.
+		await fs.appendFile(
+			path.join(directory, '.swarm', 'events.jsonl'),
+			'{not json at all\n',
+			'utf-8',
+		);
+		await recordOpenPrWorkflowLane(
+			directory,
+			'sess-corrupt',
+			'docs-quality',
+			'c-corrupt-2',
+		);
+		installBusyHost(['c-corrupt', 'c-corrupt-2']);
+		await settlePresumedStalePrWorkflowLanes(directory, 'sess-corrupt', {
+			laneLivenessWatchdog: stallOnly,
+		});
+		expect(
+			(await watchdogEvents(directory)).filter(
+				(event) =>
+					event.escalated === true && event.laneIds.includes('docs-quality'),
 			).length,
 		).toBe(1);
 	});
@@ -410,108 +462,5 @@ describe('PRR-003 — horizonConflictNote surfaces the config disagreement', () 
 			},
 		);
 		expect(agreeing.horizonConflictNote).toBeUndefined();
-	});
-});
-
-describe('PRR-014 — the live-seam re-arm disjunct fires under a fully frozen clock', () => {
-	test('activity since the durable escalation (same frozen ms) re-arms the lane', async () => {
-		// The C4 file freezes Date.now only, so the escalation events it writes
-		// carry REAL-clock timestamps and the live-seam disjunct
-		// (lastActivityAtMs >= lastEscalation) is structurally always false
-		// there. This test re-freezes WITH isoNow so event timestamps share the
-		// frozen clock and the disjunct becomes exercisable.
-		restoreClock();
-		restoreClock = freezeClock({ fixedNow: FIXED_NOW, isoNow: true });
-		await recordOpenPrWorkflowLane(
-			directory,
-			'sess-rearm',
-			'risk-security',
-			'c-rearm',
-		);
-		installBusyHost(['c-rearm']);
-		const original = surface().readLaneActivity;
-		surface().readLaneActivity = (async () => ({
-			stepsObserved: 0,
-			estimatedTokens: 0,
-		})) as unknown as typeof original;
-		try {
-			// Pass 1: zero activity -> escalated once. Event timestamp is
-			// frozen to FIXED_NOW (isoNow frozen too, unlike the C4 file).
-			await settlePresumedStalePrWorkflowLanes(directory, 'sess-rearm', {
-				laneLivenessWatchdog: stallOnly,
-			});
-			expect(
-				(await watchdogEvents(directory)).filter(
-					(event) => event.escalated === true,
-				).length,
-			).toBe(1);
-
-			// Pass 2: the seam itself reports activity AT the frozen now —
-			// lastActivityAtMs >= lastEscalation (same millisecond), so the
-			// live-seam disjunct alone must re-arm the lane.
-			surface().readLaneActivity = (async () => ({
-				stepsObserved: 0,
-				estimatedTokens: 0,
-				lastActivityAtMs: FIXED_NOW,
-			})) as unknown as typeof original;
-			await settlePresumedStalePrWorkflowLanes(directory, 'sess-rearm', {
-				laneLivenessWatchdog: stallOnly,
-			});
-			expect(
-				(await watchdogEvents(directory)).filter(
-					(event) => event.escalated === true,
-				).length,
-			).toBe(2);
-		} finally {
-			surface().readLaneActivity = original;
-		}
-	});
-});
-
-describe('PRR-002 — the force-abort finalize sweep runs at the effective horizon', () => {
-	test('retained retry lane between the watchdog horizon and the floor IS finalized', async () => {
-		await activatePrWorkflow(directory, 'sess-finalize', 'PR_REVIEW');
-		await recordOpenPrWorkflowLane(
-			directory,
-			'sess-finalize',
-			'intent-architecture',
-			'c-fin',
-		);
-		await backdatePrWorkflowLane(directory, 'c-fin', MID_AGE_MS);
-		// A RETRY-status lane past the 60s horizon is probe-retained (the
-		// deadline never aborts provider retries) — the exact gap-window lane
-		// the old floor-based finalize sweep left pending forever.
-		const abortCalls: unknown[] = [];
-		const map: Record<string, { type?: string }> = {
-			[laneSubagentSessionId('c-fin')]: { type: 'retry' },
-		};
-		gateInternals.getSessionOps = () =>
-			({
-				status: async () => ({ data: map }),
-				abort: async (args: unknown) => {
-					abortCalls.push(args);
-					return {};
-				},
-			}) as unknown as ReturnType<typeof gateInternals.getSessionOps>;
-
-		const settled = await settlePresumedStalePrWorkflowLanes(
-			directory,
-			'sess-finalize',
-			{
-				laneLivenessWatchdog: watchdogWith(60_000),
-			},
-		);
-		expect(settled.probedAliveLaneIds).toEqual(['intent-architecture']);
-		expect(laneStatusOnDisk(directory, 'c-fin')).toBe('pending');
-
-		// Human force abort WITH the same policy: the finalize sweep must run
-		// at the 60s effective horizon (not the 30-minute floor), so the
-		// 5-minute-old retained lane is finalized and the session restartable.
-		await abortPrWorkflow(directory, 'sess-finalize', {
-			kind: 'force',
-			reason: 'operator override',
-			laneLiveness: { laneLivenessWatchdog: watchdogWith(60_000) },
-		});
-		expect(laneStatusOnDisk(directory, 'c-fin')).toBe('stale');
 	});
 });

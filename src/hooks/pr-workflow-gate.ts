@@ -3281,7 +3281,7 @@ export async function settlePresumedStalePrWorkflowLanes(
 						`${deadlineLanes.length} lane(s) exceeded the ${horizon.horizonMs}ms execution ` +
 						`deadline (${horizon.source}); ` +
 						(abortAttempted
-							? 'sessions aborted best-effort and settled through '
+							? 'sessions aborted best-effort and '
 							: 'no session abort was attempted (the liveness probe could not confirm these sessions were running); lanes settled ') +
 						`through the shared path with the real outcome: no output observed (no ` +
 						`transcript activity recorded for these lanes)`,
