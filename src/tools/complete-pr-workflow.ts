@@ -1,7 +1,9 @@
 import { z } from 'zod';
+import { loadPluginConfig } from '../config/loader.js';
 import {
 	completePrWorkflow,
 	type PrFeedbackInventoryAmendmentRecord,
+	type PrWorkflowLaneLivenessOptions,
 	type PrWorkflowMode,
 	readPrReviewTerminalCoverageForReport,
 	readPrWorkflowGateState,
@@ -66,14 +68,37 @@ export async function executeCompletePrWorkflow(
 	// sweep is idempotent, so calling it here costs nothing on the second pass.
 	let staleDisclosure: {
 		presumed_stale_lanes?: string[];
-		presumed_stale_disclosure?: string;
+		presumed_stale_disclosure?: string | undefined;
 		probe_retained_lanes?: string[];
 		probe_status?: string;
 	} = {};
 	try {
+		// Issue #2506: resolve the lane-liveness watchdog policy from the same
+		// directory-scoped plugin config the resilience policy uses
+		// (`loadPluginConfig`, the dispatch-lanes precedent) and thread it plus
+		// the background pending timeout so the settlement applies ONE
+		// effective horizon with conflict disclosure.
+		let laneLiveness: PrWorkflowLaneLivenessOptions | undefined;
+		try {
+			const config = loadPluginConfig(directory);
+			const hooks = (
+				config as { hooks?: { background_pending_timeout_minutes?: number } }
+			).hooks;
+			laneLiveness = {
+				laneLivenessWatchdog: config.lane_liveness_watchdog,
+				backgroundPendingTimeoutMs:
+					hooks?.background_pending_timeout_minutes !== undefined
+						? hooks.background_pending_timeout_minutes * 60_000
+						: undefined,
+			};
+		} catch {
+			// Config read failure must not block completion; the disabled
+			// default is always safe.
+		}
 		const settlement = await _internals.settlePresumedStalePrWorkflowLanes(
 			directory,
 			context.sessionID,
+			laneLiveness,
 		);
 		if (settlement.presumedStaleLaneIds.length > 0) {
 			staleDisclosure = {

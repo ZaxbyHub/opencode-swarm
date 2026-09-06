@@ -88,6 +88,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `inject_phase_reminders` | boolean | true | Inject phase reminder directives during execution. |
 | `hooks` | object | — | Hook subsystem toggles and settings. |
 | `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. |
+| `lane_liveness_watchdog` | object (strict) | — | Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes. |
 | `pr_review_legacy_transcript_compatibility` | boolean | — | Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes. |
 | `gates` | object | — | Quality gate configuration (v6.9 anti-slop features). |
 | `context_budget` | object | — | Context budget thresholds. |
@@ -827,6 +828,90 @@ clean reset.
 ```json
 {
   "pr_review_resilience": {
+    "enabled": false
+  }
+}
+```
+
+### lane_liveness_watchdog
+
+Controls the lane-liveness watchdog for PR workflow lanes (issue #2506): a
+typed execution deadline and an advisory stall escalation. **Disabled by
+default.** An omitted section, or `enabled: false`, is a full no-op — PR-lane
+settlement stays byte-identical to the pre-#2506 substrate (age-only
+settlement, the fail-open liveness probe, probe retention, and the
+human-only force abort). Each numeric field disables its own feature at `0`
+while leaving the others armed.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Arm the watchdog. `false` (or omitted) runs no probes, writes no watchdog events, and never changes the settlement horizon. |
+| `timeout_ms` | number | `1800000` | When enabled and non-zero, the single effective PR-lane settlement horizon in milliseconds (0–86400000). `0` disables the execution deadline and restores the reachability-floor fallback. |
+| `stall_threshold_ms` | number | `300000` | Activity window for stall detection in milliseconds (0–86400000). Stall escalation is active only when this and both thresholds below are non-zero. |
+| `stall_min_steps` | number | `5` | Observable transcript steps within the window that count as progress (0–10000). |
+| `stall_token_threshold` | number | `200` | Estimated tokens within the window that count as progress (0–1000000). |
+
+**The single effective horizon.** An enabled watchdog with `timeout_ms > 0`
+owns the PR-lane settlement horizon. Everything else — no config,
+`enabled: false`, or `timeout_ms: 0` — falls back to the 30-minute
+reachability floor (`DEFAULT_STALE_DELEGATION_TIMEOUT_MS`), which must never
+disappear: it is the guarantee that abort and completion cannot be
+permanently blocked by a lane whose backing process died. A disagreement
+with `hooks.background_pending_timeout_minutes` is disclosed
+(`conflictDisclosed` on the gate's horizon resolution) but never resolved
+into a second horizon; the effective horizon remains the one settlement
+authority.
+
+**Typed liveness conditions.** The watchdog keeps five conditions
+distinguishable, with the frozen precedence `completed_failure` >
+`observer_deadline` > `provider_retry_in_flight` > `execution_deadline` >
+`idle_failed_child`:
+
+- `observer_deadline` — the caller's collection wait budget expired while the session is live or unknown; observer noise, never child failure, never a terminal transition.
+- `provider_retry_in_flight` — the host reports the session in `retry`: provider latency with its own bounded retry owner; retained even past the horizon.
+- `completed_failure` — the ledger already holds a terminal error: the lane completed with a real (failed) outcome, not a liveness signal.
+- `idle_failed_child` — an open record whose session is idle or absent below the horizon: the child failed without a terminal write.
+- `execution_deadline` — the lane exceeded the effective execution horizon: aborted best-effort and settled with its real outcome. With the deadline active this overrides probe retention for `busy` lanes (a `retry` lane stays retained — provider latency owns its retry).
+
+**Stall escalation and the `pr_workflow_lane_watchdog` event.** When stall
+escalation is armed, the gate evaluates the lanes a settlement still
+considers open — one shared status query, the same directory-wide probe the
+settlement path uses, with no per-lane fan-out. Each `busy`/`retry` lane
+whose observed activity in the last `stall_threshold_ms` missed BOTH the
+step and the estimated-token thresholds is escalated; escalation is advisory
+only (an escalated lane is never settled or aborted by it — the operator
+inspects the transcript or uses the human-only force abort). Every
+escalation and progression observation is disclosed as a
+`pr_workflow_lane_watchdog` event in `.swarm/events.jsonl`, carrying the
+typed condition, the effective horizon and its source, the escalated lane
+ids (bounded to 10), and the stall thresholds. Re-escalation is durably
+deduped: a lane is not escalated again until activity is observed since its
+last escalation, proven from the durable event log itself (an
+`escalated: false` + `activityObserved: true` observation record), so the
+dedup survives state resets without forking a second durable state file.
+
+**Token counts are estimates.** The host API exposes no provider-true
+per-session token counts; `estimatedTokens` is derived from transcript text
+length, and every surface that reports it (including the stall disclosure)
+labels it an estimate. A lane whose transcript cannot be read reads as zero
+activity — the conservative direction for stall escalation (escalate, then
+let the operator inspect).
+
+**Example** — opt in with the frozen defaults (30-minute horizon, 5-minute stall window, 5 steps / ~200 estimated tokens):
+
+```json
+{
+  "lane_liveness_watchdog": {
+    "enabled": true
+  }
+}
+```
+
+**Example** — the default: watchdog off, settlement unchanged:
+
+```json
+{
+  "lane_liveness_watchdog": {
     "enabled": false
   }
 }

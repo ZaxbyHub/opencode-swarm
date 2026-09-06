@@ -88,6 +88,7 @@ import {
 	switchPrFeedbackTrackingCandidateAsync,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
+import type { LaneLivenessWatchdogConfig } from '../config/schema.js';
 import {
 	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
 	type PrReviewResilienceConfig,
@@ -201,6 +202,14 @@ import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
 import { sameProjectRoot } from '../utils/canonical-root.js';
 import { log, warn } from '../utils/logger.js';
 import { withTimeout } from '../utils/timeout.js';
+import {
+	classifyLaneLivenessCondition,
+	defaultReadLaneActivity,
+	type EffectivePrLaneHorizon,
+	laneLivenessWatchdogFeatures,
+	MAX_LANE_LIVENESS_DISCLOSED_IDS,
+	resolveEffectivePrLaneHorizonMs,
+} from './lane-liveness-watchdog.js';
 import { normalizeToolName } from './normalize-tool-name.js';
 import { validateSwarmPath } from './utils.js';
 
@@ -2290,6 +2299,12 @@ interface PrWorkflowLaneLivenessSessionOps {
 		data?: Record<string, { type?: string }> | null;
 		error?: unknown;
 	}>;
+	/**
+	 * Issue #2506: the watchdog's best-effort, one-attempt lane abort. The
+	 * host session object exposes it; the seam type keeps it optional so the
+	 * probe-only hosts of the #2251 era remain valid.
+	 */
+	abort?: (args: unknown) => Promise<unknown>;
 }
 
 const defaultGetSessionOps = (): PrWorkflowLaneLivenessSessionOps | null =>
@@ -2676,22 +2691,329 @@ function isOpenPrWorkflowLane(
  * {@link probePrWorkflowLaneSessionStatusTypes} — so an unavailable, erroring
  * or empty probe leaves the age-only behaviour exactly as it was.
  */
+/**
+ * Issue #2506 (G2): optional lane-liveness watchdog options for the on-demand
+ * settlement entry points. The two-argument call shape every existing caller
+ * uses means "watchdog disabled" (the default-off config contract).
+ */
+export interface PrWorkflowLaneLivenessOptions {
+	laneLivenessWatchdog?: LaneLivenessWatchdogConfig;
+	backgroundPendingTimeoutMs?: number;
+}
+
+/**
+ * The #2506 watchdog budget counters (issue AC7). Mutated in place so the
+ * `_test_exports.laneLivenessWatchdog` surface reads live values; zeroed by
+ * `resetTrackedStateCache()`.
+ */
+const laneLivenessWatchdogCounters = {
+	hostStatusCalls: 0,
+	hostAbortCalls: 0,
+	evaluations: 0,
+};
+
+/** The #2506 watchdog seam surface exposed through `_test_exports`. */
+const laneLivenessWatchdogSurface = {
+	resolveEffectivePrLaneHorizonMs,
+	classifyLaneLivenessCondition,
+	evaluateLaneLivenessWatchdog: evaluateLaneLivenessWatchdogEscalation,
+	readLaneActivity: defaultReadLaneActivity,
+	...laneLivenessWatchdogCounters,
+};
+
+/**
+ * Best-effort, bounded, ONE-attempt abort of a lane's subagent session
+ * (#2506 execution_deadline). Never retried: the settlement below proceeds
+ * with the real outcome regardless of whether the abort was delivered.
+ */
+async function abortLaneSessionForWatchdog(
+	record: BackgroundDelegationRecord,
+): Promise<boolean> {
+	const session = _test_exports.getSessionOps();
+	const abortOp = session?.abort;
+	if (!session || typeof abortOp !== 'function' || !record.subagentSessionId) {
+		return false;
+	}
+	try {
+		await withTimeout(
+			(abortOp as NonNullable<PrWorkflowLaneLivenessSessionOps['abort']>).call(
+				session,
+				{ path: { id: record.subagentSessionId } },
+			),
+			_test_exports.laneLivenessProbeTimeoutMs,
+			new Error('lane-liveness watchdog abort exceeded its deadline'),
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Last escalation timestamp (epoch ms) per lane label, derived from the
+ * durable event log — the registered, bounded, already-disclosed channel
+ * (`.swarm/events.jsonl`). Disk-derived on purpose: the dedup must survive
+ * `resetTrackedStateCache()` (frozen C4 contract) and must not fork a second
+ * durable state file. Reading is a single bounded scan; events older than
+ * the 7-day retention window fold into the manifest header, after which a
+ * stale escalation no longer suppresses a fresh one — the correct behavior.
+ *
+ * The same scan also indexes the ACTIVITY OBSERVATION events
+ * (`escalated: false` + `activityObserved: true`) written by
+ * `appendWatchdogActivityObservation`: the durable proof that a lane
+ * progressed since the last escalation, which is what re-arms a suppressed
+ * lane for its next stall. The `execution_deadline` disclosure event is also
+ * `escalated: false` but is NOT an activity observation (no activity was
+ * observed — the opposite), so the marker field, not the absence of
+ * `escalated`, decides membership.
+ */
+function lastWatchdogEscalationsByLaneLabel(directory: string): {
+	escalations: Map<string, number>;
+	activityObservations: Map<string, number>;
+} {
+	const escalations = new Map<string, number>();
+	const activityObservations = new Map<string, number>();
+	let text = '';
+	try {
+		text = readCoreEvents(directory).text;
+	} catch {
+		return { escalations, activityObservations };
+	}
+	for (const line of text.split('\n')) {
+		const trimmed = line.trim();
+		if (!trimmed || !trimmed.includes('pr_workflow_lane_watchdog')) continue;
+		let event: Record<string, unknown>;
+		try {
+			event = JSON.parse(trimmed) as Record<string, unknown>;
+		} catch {
+			continue;
+		}
+		if (event.type !== 'pr_workflow_lane_watchdog') continue;
+		const isEscalation = event.escalated === true;
+		const isActivityObservation =
+			!isEscalation && event.activityObserved === true;
+		if (!isEscalation && !isActivityObservation) continue;
+		const timestamp = Date.parse(`${event.timestamp}`);
+		if (!Number.isFinite(timestamp)) continue;
+		const laneIds = event.laneIds;
+		if (!Array.isArray(laneIds)) continue;
+		const target = isEscalation ? escalations : activityObservations;
+		for (const label of laneIds) {
+			if (typeof label !== 'string') continue;
+			const prior = target.get(label);
+			if (prior === undefined || timestamp > prior)
+				target.set(label, timestamp);
+		}
+	}
+	return { escalations, activityObservations };
+}
+
+/**
+ * Record a progressing (non-stalled) observation durably as a
+ * `pr_workflow_lane_watchdog` event with `escalated: false`. This is what
+ * makes the re-escalation rule falsifiable from disk alone: after real
+ * activity, the next stall is a NEW stall. Re-nudge-suppression idea adopted
+ * from opencode-ensemble with credit (ADR 0002); reimplemented here.
+ */
+function appendWatchdogActivityObservation(
+	directory: string,
+	sessionID: string,
+	labels: string[],
+	horizon: EffectivePrLaneHorizon,
+): void {
+	try {
+		appendCoreEventSync(directory, {
+			type: 'pr_workflow_lane_watchdog',
+			timestamp: isoNow(),
+			sessionID,
+			condition: 'provider_retry_in_flight',
+			laneIds: labels.slice(0, MAX_LANE_LIVENESS_DISCLOSED_IDS),
+			effectiveHorizonMs: horizon.horizonMs,
+			horizonSource: horizon.source,
+			escalated: false,
+			// The durable activity marker: `lastWatchdogEscalationsByLaneLabel`
+			// indexes events by this field to re-arm a suppressed lane. Without
+			// it, only the in-memory seam's `lastActivityAtMs` could prove
+			// progression, and a stall evaluation whose seam reports no
+			// timestamp would dedupe forever on the first escalation.
+			activityObserved: true,
+			disclosure: `${labels.length} lane(s) progressed (activity observed since the last escalation); stall escalation baseline reset`,
+		});
+	} catch {
+		// Best-effort: a failed observation record must never block settlement.
+	}
+}
+
+/**
+ * The #2506 stall-escalation evaluation for the lanes a settlement still
+ * considers open or probe-retained: escalate each lane whose session is
+ * busy/retry and whose observed activity in the last `stall_threshold_ms`
+ * missed BOTH the step and the estimated-token thresholds, deduped per lane
+ * against the last escalation event unless activity was observed since.
+ * Advisory by design: an escalated lane is never settled or aborted here —
+ * the operator response (inspect, or the human-only force abort) owns that.
+ */
+async function evaluateLaneLivenessWatchdogEscalation(args: {
+	directory: string;
+	sessionID: string;
+	lanes: BackgroundDelegationRecord[];
+	sessionTypes: Map<string, string>;
+	watchdog: LaneLivenessWatchdogConfig;
+	horizon: EffectivePrLaneHorizon;
+}): Promise<void> {
+	const { directory, sessionID, lanes, sessionTypes, watchdog, horizon } = args;
+	const candidates = lanes.filter((record) => {
+		if (!record.subagentSessionId) return false;
+		const type = sessionTypes.get(record.subagentSessionId);
+		return type === 'busy' || type === 'retry';
+	});
+	if (candidates.length === 0) return;
+	const lastEscalations = lastWatchdogEscalationsByLaneLabel(directory);
+	const escalated: BackgroundDelegationRecord[] = [];
+	const progressed: BackgroundDelegationRecord[] = [];
+	for (const record of candidates) {
+		const activity = await laneLivenessWatchdogSurface.readLaneActivity(
+			directory,
+			record.subagentSessionId as string,
+		);
+		const steps = activity?.stepsObserved ?? 0;
+		const tokens = activity?.estimatedTokens ?? 0;
+		const progressing =
+			steps >= watchdog.stall_min_steps ||
+			tokens >= watchdog.stall_token_threshold;
+		if (progressing) {
+			progressed.push(record);
+			continue;
+		}
+		const label = prWorkflowLaneLabel(record);
+		const lastEscalation = lastEscalations.escalations.get(label);
+		if (lastEscalation !== undefined) {
+			// "Activity since the last escalation" is provable from either of
+			// two independent sources: the live seam's `lastActivityAtMs`, or
+			// the durable activity-observation event the progression path
+			// wrote. The durable event matters because a stalled re-evaluation
+			// legitimately reports NO `lastActivityAtMs` (nothing is happening
+			// now) — the observation is the surviving record that activity DID
+			// happen in between. The comparison is `>=` so a same-timestamp
+			// observation counts as "since" (frozen-clock tests, or activity
+			// within the same millisecond).
+			const lastActivity = activity?.lastActivityAtMs;
+			const activitySince =
+				(lastActivity !== undefined && lastActivity >= lastEscalation) ||
+				(lastEscalations.activityObservations.get(label) ?? -Infinity) >=
+					lastEscalation;
+			if (!activitySince) continue;
+		}
+		escalated.push(record);
+	}
+	if (progressed.length > 0) {
+		appendWatchdogActivityObservation(
+			directory,
+			sessionID,
+			progressed.map(prWorkflowLaneLabel),
+			horizon,
+		);
+	}
+	if (escalated.length === 0) return;
+	const first = escalated[0];
+	const condition = classifyLaneLivenessCondition({
+		sessionStatusType: first.subagentSessionId
+			? sessionTypes.get(first.subagentSessionId)
+			: undefined,
+		recordStatus: first.status,
+		waitBudgetExpired: false,
+		exceededEffectiveHorizon: Date.now() - first.updatedAt > horizon.horizonMs,
+	});
+	const laneLabels = escalated.map(prWorkflowLaneLabel);
+	const disclosure =
+		`${laneLabels.length} lane(s) stalled (fewer than ${watchdog.stall_min_steps} steps ` +
+		`and fewer than ~${watchdog.stall_token_threshold} estimated tokens in the last ` +
+		`${watchdog.stall_threshold_ms}ms): inspect the lane transcript or abort via ` +
+		`/swarm abort-pr-workflow (force): ${laneLabels
+			.slice(0, MAX_LANE_LIVENESS_DISCLOSED_IDS)
+			.join(', ')}`;
+	try {
+		appendCoreEventSync(directory, {
+			type: 'pr_workflow_lane_watchdog',
+			timestamp: isoNow(),
+			sessionID,
+			condition,
+			laneIds: laneLabels.slice(0, MAX_LANE_LIVENESS_DISCLOSED_IDS),
+			effectiveHorizonMs: horizon.horizonMs,
+			horizonSource: horizon.source,
+			escalated: true,
+			stall: {
+				stepsObserved: 0,
+				estimatedTokens: 0,
+				stallThresholdMs: watchdog.stall_threshold_ms,
+				stallMinSteps: watchdog.stall_min_steps,
+				stallTokenThreshold: watchdog.stall_token_threshold,
+			},
+			disclosure,
+		});
+	} catch {
+		// The escalation is advisory; settlement must not depend on the audit.
+	}
+}
+
 export async function settlePresumedStalePrWorkflowLanes(
 	directory: string,
 	sessionID: string,
+	options?: PrWorkflowLaneLivenessOptions,
 ): Promise<PrWorkflowStaleLaneSettlement> {
+	// Issue #2506 (G2): resolve the ONE effective horizon up front. With the
+	// watchdog disabled (the default, and the shape of every pre-#2506
+	// two-argument call) this is exactly `PR_WORKFLOW_STALE_LANE_TIMEOUT_MS`
+	// and every behavior below is byte-identical to the substrate's.
+	const watchdog = options?.laneLivenessWatchdog;
+	const { deadlineActive, stallActive } =
+		laneLivenessWatchdogFeatures(watchdog);
+	const watchdogWork = deadlineActive || stallActive;
+	const horizon = resolveEffectivePrLaneHorizonMs(
+		watchdog,
+		options?.backgroundPendingTimeoutMs,
+	);
 	const now = Date.now();
 	const open: BackgroundDelegationRecord[] = [];
 	const presumedStale: BackgroundDelegationRecord[] = [];
 	for (const record of readDelegations(directory)) {
 		if (!isOpenPrWorkflowLane(record, sessionID)) continue;
-		if (now - record.updatedAt > PR_WORKFLOW_STALE_LANE_TIMEOUT_MS) {
+		if (now - record.updatedAt > horizon.horizonMs) {
 			presumedStale.push(record);
 		} else {
 			open.push(record);
 		}
 	}
+	if (watchdogWork && (open.length > 0 || presumedStale.length > 0)) {
+		laneLivenessWatchdogSurface.evaluations += 1;
+	}
 	if (presumedStale.length === 0) {
+		// Stall-only watchdog pass: one shared status call over the open lanes
+		// (the same directory-wide query the probe uses — no per-lane fan-out).
+		if (watchdogWork && stallActive && open.length > 0) {
+			let statuses = new Map<string, string>();
+			try {
+				const probe = await _test_exports.probeLaneSessionStatusTypesAsync(
+					directory,
+					open,
+				);
+				statuses = probe.statuses;
+				if (!probe.degradedReason)
+					laneLivenessWatchdogSurface.hostStatusCalls += 1;
+			} catch {
+				// Fail-open: an unprobeable host must not wedge the advisory path.
+			}
+			if (statuses.size > 0) {
+				await evaluateLaneLivenessWatchdogEscalation({
+					directory,
+					sessionID,
+					lanes: open,
+					sessionTypes: statuses,
+					watchdog: watchdog as LaneLivenessWatchdogConfig,
+					horizon,
+				});
+			}
+		}
 		// Nothing is below the horizon to re-verify, so the probe is not consulted
 		// at all: no host round-trip on the overwhelmingly common path.
 		const freshOnlyLaneIds = open.map(prWorkflowLaneLabel);
@@ -2705,23 +3027,76 @@ export async function settlePresumedStalePrWorkflowLanes(
 	// R5: the seam is mutable and this function has call sites with no try/catch
 	// of their own, so a throwing probe must degrade here rather than convert a
 	// settleable workflow into an unhandled rejection.
+	//
+	// Issue #2506: when the watchdog is active, ONE types-carrying probe serves
+	// both the substrate's alive/retention decision and the watchdog's typed
+	// conditions (`retry` = provider latency; `busy` past the effective horizon
+	// = execution deadline). When inactive, the substrate's alive-set probe is
+	// used unchanged.
 	let probe: {
 		alive: Set<string>;
 		degradedReason?: PrWorkflowLaneProbeDegradedReason;
 	};
-	try {
-		probe = await _test_exports.probeLaneLivenessAsync(
-			directory,
-			presumedStale,
-		);
-	} catch {
-		probe = { alive: new Set<string>(), degradedReason: 'probe-error' };
+	let sessionTypes = new Map<string, string>();
+	if (watchdogWork) {
+		try {
+			const typesProbe = await _test_exports.probeLaneSessionStatusTypesAsync(
+				directory,
+				stallActive ? [...presumedStale, ...open] : presumedStale,
+			);
+			sessionTypes = typesProbe.statuses;
+			if (!typesProbe.degradedReason) {
+				laneLivenessWatchdogSurface.hostStatusCalls += 1;
+			}
+			const alive = new Set<string>();
+			for (const [sessionId, type] of typesProbe.statuses) {
+				if (isLiveSessionStatusType(type)) alive.add(sessionId);
+			}
+			probe = typesProbe.degradedReason
+				? {
+						alive: new Set<string>(),
+						degradedReason: typesProbe.degradedReason,
+					}
+				: { alive };
+		} catch {
+			probe = { alive: new Set<string>(), degradedReason: 'probe-error' };
+		}
+	} else {
+		try {
+			probe = await _test_exports.probeLaneLivenessAsync(
+				directory,
+				presumedStale,
+			);
+		} catch {
+			probe = { alive: new Set<string>(), degradedReason: 'probe-error' };
+		}
 	}
 	const probeRetained: BackgroundDelegationRecord[] = [];
 	const settled: BackgroundDelegationRecord[] = [];
+	// Issue #2506: with the execution deadline active, a `busy` lane past the
+	// EFFECTIVE horizon is an execution_deadline — the watchdog overrides
+	// probe retention for it (that retention is exactly what kept a
+	// genuinely-over-deadline lane alive forever). `retry` stays retained:
+	// provider latency owns its own bounded retry, and a deadline must not
+	// invent child failure for it. With the deadline inactive, retention is
+	// the substrate's: every live (busy/retry) lane is spared.
+	const deadlineLanes: BackgroundDelegationRecord[] = [];
 	for (const record of presumedStale) {
-		if (record.subagentSessionId && probe.alive.has(record.subagentSessionId)) {
+		const type = record.subagentSessionId
+			? sessionTypes.get(record.subagentSessionId)
+			: undefined;
+		if (deadlineActive && type !== 'retry') {
+			deadlineLanes.push(record);
+			settled.push(record);
+		} else if (
+			record.subagentSessionId &&
+			probe.alive.has(record.subagentSessionId)
+		) {
 			probeRetained.push(record);
+		} else if (deadlineActive) {
+			// Probe degraded (or no session id): the deadline governs.
+			deadlineLanes.push(record);
+			settled.push(record);
 		} else {
 			settled.push(record);
 		}
@@ -2755,6 +3130,19 @@ export async function settlePresumedStalePrWorkflowLanes(
 		// Nothing was settled, so nothing may be swept and no
 		// `pr_workflow_lanes_presumed_stale` record may be written — an audit trail
 		// asserting a settlement that did not happen is worse than none.
+		//
+		// Issue #2506: retention is not a dead end — stall escalation still
+		// surfaces the low-output lane for operator action.
+		if (watchdogWork && stallActive && probeRetained.length > 0) {
+			await evaluateLaneLivenessWatchdogEscalation({
+				directory,
+				sessionID,
+				lanes: probeRetained,
+				sessionTypes,
+				watchdog: watchdog as LaneLivenessWatchdogConfig,
+				horizon,
+			});
+		}
 		return {
 			openLaneIds,
 			openLanes: openLaneIds.length,
@@ -2764,6 +3152,42 @@ export async function settlePresumedStalePrWorkflowLanes(
 			disclosure: retentionDisclosure,
 		};
 	}
+	// Issue #2506: abort each deadline lane's session ONCE, best-effort, and
+	// only while it is actually running (busy). A lane the probe could not see
+	// has nothing left to abort; its settlement keeps the real outcome.
+	if (deadlineActive) {
+		for (const record of deadlineLanes) {
+			const type = record.subagentSessionId
+				? sessionTypes.get(record.subagentSessionId)
+				: undefined;
+			if (type !== 'busy' || !record.subagentSessionId) continue;
+			const aborted = await abortLaneSessionForWatchdog(record);
+			if (aborted) laneLivenessWatchdogSurface.hostAbortCalls += 1;
+		}
+		if (deadlineLanes.length > 0) {
+			try {
+				appendCoreEventSync(directory, {
+					type: 'pr_workflow_lane_watchdog',
+					timestamp: isoNow(),
+					sessionID,
+					condition: 'execution_deadline',
+					laneIds: deadlineLanes
+						.map(prWorkflowLaneLabel)
+						.slice(0, MAX_LANE_LIVENESS_DISCLOSED_IDS),
+					effectiveHorizonMs: horizon.horizonMs,
+					horizonSource: horizon.source,
+					escalated: false,
+					disclosure:
+						`${deadlineLanes.length} lane(s) exceeded the ${horizon.horizonMs}ms execution ` +
+						`deadline (${horizon.source}); sessions aborted best-effort and settled through ` +
+						`the shared path with the real outcome: no output observed (no transcript ` +
+						`activity recorded for these lanes)`,
+				});
+			} catch {
+				// Best-effort audit; the settlement below is the durable fact.
+			}
+		}
+	}
 	const presumedStaleLaneIds = settled.map(prWorkflowLaneLabel);
 	// The leading clause is a STABLE PREFIX: existing operator tooling and tests
 	// pin `N lane(s) stale >30min` / `treated as settled: …`. The probe verdict is
@@ -2771,7 +3195,7 @@ export async function settlePresumedStalePrWorkflowLanes(
 	// not run / some lanes retained) are distinguishable without breaking it.
 	const disclosure =
 		`${presumedStaleLaneIds.length} lane(s) stale >` +
-		`${Math.round(PR_WORKFLOW_STALE_LANE_TIMEOUT_MS / 60_000)}min, ` +
+		`${Math.round(horizon.horizonMs / 60_000)}min, ` +
 		`treated as settled: ${presumedStaleLaneIds
 			.slice(0, MAX_DISCLOSED_LANE_IDS)
 			.join(', ')}` +
@@ -2797,10 +3221,14 @@ export async function settlePresumedStalePrWorkflowLanes(
 	// `isOpenPrWorkflowLane` counted as open" restriction to "cannot exceed what
 	// this settlement DECIDED". The seam + try/catch keep a sweep failure from
 	// affecting the decision already made above.
+	//
+	// Issue #2506: the sweep runs at the EFFECTIVE horizon (identical to the
+	// constant whenever the watchdog is off), and a watchdog deadline lane is
+	// deliberately NOT excluded — its settlement IS the decision.
 	try {
 		await _test_exports.sweepStaleDelegationsAsync(
 			directory,
-			PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+			horizon.horizonMs,
 			{
 				statuses: PR_WORKFLOW_SWEEPABLE_LANE_STATUSES,
 				excludeCorrelationIds: new Set(
@@ -2817,13 +3245,36 @@ export async function settlePresumedStalePrWorkflowLanes(
 			timestamp: isoNow(),
 			sessionID,
 			presumedStaleLanes: presumedStaleLaneIds.slice(0, MAX_DISCLOSED_LANE_IDS),
-			staleTimeoutMs: PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+			staleTimeoutMs: horizon.horizonMs,
 			probeStatus: probe.degradedReason ?? 'ok',
 			probedAliveLanes: probedAliveLaneIds.slice(0, MAX_DISCLOSED_LANE_IDS),
 			disclosure,
 		});
 	} catch {
 		// The audit trail is best-effort; settlement must not depend on it.
+	}
+	// Issue #2506: stall escalation runs after a settlement with no deadline
+	// event this evaluation — a deadline settlement already carries the
+	// operator's attention, and the still-open/retained lanes get theirs here.
+	if (
+		watchdogWork &&
+		stallActive &&
+		!(deadlineActive && deadlineLanes.length > 0)
+	) {
+		const stallCandidates = [...open, ...probeRetained];
+		if (stallCandidates.length > 0 && sessionTypes.size > 0) {
+			await evaluateLaneLivenessWatchdogEscalation({
+				directory,
+				sessionID,
+				lanes: stallCandidates,
+				sessionTypes,
+				watchdog: watchdog as LaneLivenessWatchdogConfig,
+				horizon,
+			});
+		} else if (stallCandidates.length > 0) {
+			// Probe degraded: one shared retry is not in the budget; treat unknown
+			// sessions as unescalatable (fail-open to silence, never to noise).
+		}
 	}
 	return {
 		openLaneIds,
@@ -3052,6 +3503,8 @@ export async function abortPrWorkflow(
 		 * `recovery`/`force` aborts remain refused while armed.
 		 */
 		cancelPublication?: boolean;
+		/** Issue #2506: lane-liveness watchdog config for this settlement. */
+		laneLiveness?: PrWorkflowLaneLivenessOptions;
 	} = { kind: 'recovery', reason: '' },
 ): Promise<{
 	mode: PrWorkflowMode;
@@ -3177,6 +3630,7 @@ export async function abortPrWorkflow(
 	const laneSettlement = await settlePresumedStalePrWorkflowLanes(
 		directory,
 		state.sessionID,
+		options.laneLiveness,
 	);
 	// S3 (issue #2251 R2): the liveness probe can now retain a lane past the age
 	// horizon indefinitely, so age alone no longer guarantees an eventual exit. A
@@ -3543,6 +3997,8 @@ export async function recoverArmedPrWorkflow(
 		generation: number;
 		workflowInstanceId?: string;
 		reason: string;
+		/** Issue #2506: lane-liveness watchdog config for this settlement. */
+		laneLiveness?: PrWorkflowLaneLivenessOptions;
 	},
 ): Promise<{
 	mode: PrWorkflowMode;
@@ -3647,6 +4103,7 @@ export async function recoverArmedPrWorkflow(
 			const laneSettlement = await settlePresumedStalePrWorkflowLanes(
 				directory,
 				state.sessionID,
+				request.laneLiveness,
 			);
 			if (laneSettlement.openLanes > 0) {
 				const laneIds = laneSettlement.openLaneIds
@@ -10095,6 +10552,7 @@ function assertSamePrFeedbackHandoff(
 async function assertPrReviewTerminalReady(
 	directory: string,
 	sessionID: string,
+	laneLiveness?: PrWorkflowLaneLivenessOptions,
 ): Promise<{
 	state: PrWorkflowGateState;
 	settlement: PrReviewTerminalCoverageSettlement & {
@@ -10107,6 +10565,7 @@ async function assertPrReviewTerminalReady(
 	const laneSettlement = await settlePresumedStalePrWorkflowLanes(
 		directory,
 		state.sessionID,
+		laneLiveness,
 	);
 	if (laneSettlement.openLanes > 0) {
 		throw new Error(
@@ -11146,7 +11605,11 @@ export async function completePrWorkflow(
 	sessionID: string,
 	expectedMode: PrWorkflowMode,
 	prHeadSha: string,
-	options?: { reportVerdict?: PrReviewReportVerdict },
+	options?: {
+		reportVerdict?: PrReviewReportVerdict;
+		/** Issue #2506: lane-liveness watchdog config for this settlement. */
+		laneLiveness?: PrWorkflowLaneLivenessOptions;
+	},
 ): Promise<PrWorkflowCompletionStatus> {
 	const state = await requireBoundState(directory, sessionID, expectedMode);
 	const normalizedHead = normalizePrHeadSha(prHeadSha);
@@ -11159,6 +11622,7 @@ export async function completePrWorkflow(
 	const laneSettlement = await settlePresumedStalePrWorkflowLanes(
 		directory,
 		state.sessionID,
+		options?.laneLiveness,
 	);
 	if (laneSettlement.openLanes > 0) {
 		throw new Error(
@@ -11255,7 +11719,11 @@ export async function completePrWorkflow(
 					`BLOCKED: PR_REVIEW ${settlement.kind} completion allows report_verdict ${preAllowed.join(' | ')}; got "${verdict}". Partial coverage never approves and never claims a full review.`,
 				);
 			}
-			const ready = await assertPrReviewTerminalReady(directory, sessionID);
+			const ready = await assertPrReviewTerminalReady(
+				directory,
+				sessionID,
+				options?.laneLiveness,
+			);
 			const readyState = ready.state;
 			if (
 				workflowIdentity(readyState) !== workflowIdentity(state) ||
@@ -11663,6 +12131,15 @@ export const _test_exports = {
 		// bun's shared test process, not a restore.
 		_test_exports.sweepStaleDelegationsAsync = sweepStaleDelegations;
 		_test_exports.probeLaneLivenessAsync = probeAlivePrWorkflowLaneSessions;
+		_test_exports.probeLaneSessionStatusTypesAsync =
+			probePrWorkflowLaneSessionStatusTypes;
+		// Issue #2506: the watchdog counters zero and the activity seam
+		// restores to its default, so suite ordering cannot leak budget
+		// accounting or transcript fixtures between test files.
+		laneLivenessWatchdogSurface.hostStatusCalls = 0;
+		laneLivenessWatchdogSurface.hostAbortCalls = 0;
+		laneLivenessWatchdogSurface.evaluations = 0;
+		laneLivenessWatchdogSurface.readLaneActivity = defaultReadLaneActivity;
 		_test_exports.getSessionOps = defaultGetSessionOps;
 		_test_exports.laneLivenessProbeTimeoutMs =
 			PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS;
@@ -11713,6 +12190,20 @@ export const _test_exports = {
 	sweepStaleDelegationsAsync: sweepStaleDelegations,
 	/** The fail-open liveness probe (issue #2251). */
 	probeLaneLivenessAsync: probeAlivePrWorkflowLaneSessions,
+	/**
+	 * The types-carrying variant of the liveness probe (issue #2506): one
+	 * shared status call returning per-session status TYPES, so the watchdog
+	 * can distinguish `retry` (provider latency) from `busy` (past-deadline
+	 * execution) without a second host round-trip. Seam for the same
+	 * order-independence reason as `probeLaneLivenessAsync`.
+	 */
+	probeLaneSessionStatusTypesAsync: probePrWorkflowLaneSessionStatusTypes,
+	/**
+	 * The #2506 lane-liveness watchdog surface: the pure policy functions,
+	 * the overridable transcript-activity reader, and the live budget
+	 * counters (zeroed by `resetTrackedStateCache`).
+	 */
+	laneLivenessWatchdog: laneLivenessWatchdogSurface,
 	/**
 	 * Session handle for the liveness probe.
 	 *
