@@ -3,7 +3,7 @@
  *
  * Called from `src/index.ts:initializeOpenCodeSwarm` immediately before
  * `getAgentConfigs(...)` (Phase 4b of the language-agnostic plugin work).
- * Wrapped in `withTimeout(2000ms)` by the caller; on timeout or any
+ * Wrapped in `withTimeoutSignal(300ms)` by the caller; on timeout or any
  * failure, the caller falls open to `emptyProjectContext()` per
  * Invariant 1 (plugin init bounded + fail-open).
  *
@@ -15,7 +15,7 @@
  * path. The full `LanguageBackend.selectTestFramework` /
  * `selectBuildCommand` hooks call `isCommandAvailable` (which spawns
  * `where`/`which` and can take 200–500ms per call on Windows). Even with
- * the 2000ms `withTimeout` wrapper, multiple sequential spawns
+ * the 300ms `withTimeoutSignal` wrapper, multiple sequential spawns
  * (typically 3–5 per buildProjectContext call) easily push `server()`
  * past the 400ms Invariant 1 deadline asserted by
  * `scripts/repro-704.mjs:TIMING_DEADLINE_MS`.
@@ -42,7 +42,7 @@ import {
 /**
  * Wall-clock budget for the session-init language-backend resolution step.
  * Caller (`src/index.ts:initializeOpenCodeSwarm`) wraps `buildProjectContext`
- * in `withTimeout(LANG_BACKEND_DETECTION_TIMEOUT_MS)`. Exceeding the budget
+ * in `withTimeoutSignal(LANG_BACKEND_DETECTION_TIMEOUT_MS)`. Exceeding the budget
  * fails open with `null` so the manifest still returns to the OpenCode
  * plugin host (Invariant 1).
  */
@@ -202,8 +202,9 @@ function selectLintCommand(
  */
 export async function buildProjectContext(
 	directory: string,
+	signal?: AbortSignal,
 ): Promise<ProjectContext | null> {
-	const backend = await _internals.pickBackend(directory);
+	const backend = await _internals.pickBackend(directory, signal);
 	if (!backend) return null;
 
 	const ctx: ProjectContext = emptyProjectContext();

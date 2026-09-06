@@ -8,7 +8,7 @@
  * during a session do not re-walk the filesystem.
  *
  * Per the language-agnostic plan, hot-path callers (hooks, tools) wrap
- * this in `withTimeout(200ms)` and fail open on the cache miss; session-
+ * this in `withTimeout(300ms)` and fail open on the cache miss; session-
  * start callers use `withTimeout(2000ms)`. Both budgets are caller-set —
  * the dispatch function itself does not impose timeouts.
  *
@@ -33,9 +33,13 @@ import { LANGUAGE_BACKEND_REGISTRY } from './registry-backend';
 const _internals: {
 	detectProjectLanguages: typeof detectProjectLanguages;
 	cacheCapacity: number;
+	readonly manifestRootCacheSize: number;
 } = {
 	detectProjectLanguages,
 	cacheCapacity: 64,
+	get manifestRootCacheSize() {
+		return manifestRootCache.size;
+	},
 };
 export { _internals };
 
@@ -75,50 +79,216 @@ let insertCounter = 0;
  * stable per-handle within a process — sufficient for cache invalidation.
  */
 /**
- * List a directory's entries safely, returning an empty Set on error
- * (permission denied, ENOENT, etc.). Wrapped to avoid the cost of throw-
- * and-catch when the caller iterates many directories.
+ * List a directory's entries, preserving failure separately from an empty
+ * directory so manifest-root walks never cache unverifiable topology.
  */
-function safeReaddirSet(dir: string): Set<string> {
+async function tryReadDirectoryAsync(dir: string): Promise<Set<string> | null> {
 	try {
-		return new Set(fs.readdirSync(dir));
+		return new Set(await fs.promises.readdir(dir));
 	} catch {
-		return new Set();
+		return null;
 	}
 }
 
-function manifestHash(dir: string): string {
-	// One readdir call + Set intersection beats 20 sequential fs.statSync
-	// calls. On Windows under corporate antivirus each individual stat can
-	// take 5-20ms; the previous all-stats loop was the dominant Windows
-	// cost on repro-704 T1.
-	const entries = safeReaddirSet(dir);
-	if (entries.size === 0) return '';
-	const parts: string[] = [];
-	for (const name of MANIFEST_FILES) {
-		if (!entries.has(name)) continue;
-		try {
-			const stat = fs.statSync(path.join(dir, name));
-			parts.push(`${name}:${stat.size}:${stat.mtimeMs}:${stat.ino}`);
-		} catch {
-			// race with concurrent delete — skip
-		}
+async function manifestHash(
+	dir: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	// Retain one synchronous root identity probe for the warm-path contract. All
+	// directory enumeration and manifest metadata reads below are asynchronous so
+	// an outer timeout can yield while a slow filesystem operation is pending.
+	try {
+		if (!fs.statSync(dir).isDirectory()) return '';
+	} catch {
+		return '';
 	}
-	return parts.join('|');
+	const entries = await tryReadDirectoryAsync(dir);
+	throwIfAborted(signal);
+	if (entries === null || entries.size === 0) return '';
+	const names = MANIFEST_FILES.filter((name) => entries.has(name));
+	const parts = await Promise.all(
+		names.map(async (name) => {
+			try {
+				const stat = await fs.promises.stat(path.join(dir, name));
+				return `${name}:${stat.size}:${stat.mtimeMs}:${stat.ino}`;
+			} catch {
+				// Race with concurrent delete — omit this manifest. The following
+				// call re-observes the current directory topology.
+				return null;
+			}
+		}),
+	);
+	throwIfAborted(signal);
+	return parts.filter((part): part is string => part !== null).join('|');
 }
 
 /**
- * Cache of input-dir → resolved-manifest-root. Skips the upward walk on
- * repeated `pickBackend(dir)` calls with the same dir, which the
- * adversarial review flagged as wasted work — the entry cache hash check
- * doesn't help if findManifestRoot itself takes N readdir calls.
+ * Cache of input-dir → resolved-manifest-root plus a bounded directory
+ * metadata trace. The trace proves the topology observed during the upward
+ * walk is unchanged without re-enumerating directories on warm lookups.
  *
  * Cleared by `clearDispatchCache` along with the main cache.
  */
-const manifestRootCache: Map<string, string> = new Map();
+const MAX_MANIFEST_SEARCH_DEPTH = 32;
+
+type DirectoryFingerprint = {
+	directory: string;
+	dev: number;
+	ino: number;
+	size: number;
+	mtimeMs: number;
+	ctimeMs: number;
+};
+
+type ManifestRootCacheValue = {
+	root: string;
+	trace: ReadonlyArray<DirectoryFingerprint>;
+	insertOrder: number;
+};
+
+type ManifestRootResolution = {
+	root: string;
+	key: string;
+	trace: ReadonlyArray<DirectoryFingerprint>;
+	cacheable: boolean;
+};
+
+type DirectoryWalkSnapshot =
+	| {
+			entries: Set<string>;
+			fingerprint: DirectoryFingerprint;
+			complete: true;
+	  }
+	| {
+			entries: Set<string> | null;
+			complete: false;
+	  };
+
+const manifestRootCache: Map<string, ManifestRootCacheValue> = new Map();
+let manifestRootInsertCounter = 0;
+
+// `pickedProfiles` runs immediately after `pickBackend` in project-context
+// construction. Keep its lookup synchronous and filesystem-free by recording
+// the caller's lexical spelling only after dispatch populated the main cache.
+const profileCacheKeyByInput = new Map<string, string>();
+
+function cacheProfileKey(input: string, cacheKey: string): void {
+	const key = path.resolve(input);
+	profileCacheKeyByInput.delete(key);
+	profileCacheKeyByInput.set(key, cacheKey);
+	while (profileCacheKeyByInput.size > _internals.cacheCapacity) {
+		const oldest = profileCacheKeyByInput.keys().next().value;
+		if (oldest === undefined) break;
+		profileCacheKeyByInput.delete(oldest);
+	}
+}
+
+async function directoryFingerprint(
+	dir: string,
+): Promise<DirectoryFingerprint | null> {
+	try {
+		const stat = await fs.promises.stat(dir);
+		if (!stat.isDirectory()) return null;
+		return {
+			directory: dir,
+			dev: stat.dev,
+			ino: stat.ino,
+			size: stat.size,
+			mtimeMs: stat.mtimeMs,
+			ctimeMs: stat.ctimeMs,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function fingerprintsMatch(
+	expected: DirectoryFingerprint,
+	actual: DirectoryFingerprint,
+): boolean {
+	return (
+		expected.dev === actual.dev &&
+		expected.ino === actual.ino &&
+		expected.size === actual.size &&
+		expected.mtimeMs === actual.mtimeMs &&
+		expected.ctimeMs === actual.ctimeMs
+	);
+}
 
 /**
- * Walk up from `start` until a directory containing any of MANIFEST_FILES
+ * Capture a directory listing and stable metadata proof for a root-cache walk.
+ * A matching pair of listings brackets the single metadata read: an entry added
+ * or removed while enumerating leaves the walk non-cacheable, while the saved
+ * fingerprint invalidates a later cache hit after either snapshot completes.
+ *
+ * Keep this to one statSync per directory. Cold callers can cross thirty or
+ * more directories, where three metadata reads per level can exceed the
+ * caller's production startup budget on an antivirus-intercepted filesystem.
+ */
+async function readDirectoryForManifestWalk(
+	dir: string,
+): Promise<DirectoryWalkSnapshot> {
+	const entries = await tryReadDirectoryAsync(dir);
+	const fingerprint = await directoryFingerprint(dir);
+	const after = await tryReadDirectoryAsync(dir);
+	if (
+		entries === null ||
+		fingerprint === null ||
+		after === null ||
+		entries.size !== after.size ||
+		[...entries].some((entry) => !after.has(entry))
+	) {
+		// Never select from the first listing after validation fails: it can
+		// name a manifest deleted before the second listing. Continue the
+		// bounded ancestor walk from a fresh-safe empty result instead.
+		return { entries: null, complete: false };
+	}
+	return { entries, fingerprint, complete: true };
+}
+
+async function isManifestRootCacheEntryValid(
+	entry: ManifestRootCacheValue,
+): Promise<boolean> {
+	for (const fingerprint of entry.trace) {
+		const current = await directoryFingerprint(fingerprint.directory);
+		if (current === null || !fingerprintsMatch(fingerprint, current)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function evictManifestRootCacheIfNeeded(): void {
+	if (manifestRootCache.size <= _internals.cacheCapacity) return;
+	let oldestKey: string | undefined;
+	let oldestOrder = Infinity;
+	for (const [key, value] of manifestRootCache) {
+		if (value.insertOrder < oldestOrder) {
+			oldestKey = key;
+			oldestOrder = value.insertOrder;
+		}
+	}
+	if (oldestKey !== undefined) manifestRootCache.delete(oldestKey);
+}
+
+function cacheManifestRoot(
+	key: string,
+	root: string,
+	trace: ReadonlyArray<DirectoryFingerprint>,
+	cacheable: boolean,
+	signal?: AbortSignal,
+): void {
+	if (!cacheable || signal?.aborted) return;
+	manifestRootCache.set(key, {
+		root,
+		trace,
+		insertOrder: manifestRootInsertCounter++,
+	});
+	evictManifestRootCacheIfNeeded();
+}
+
+/**
+ * Asynchronously walk up from `start` until a directory containing any of MANIFEST_FILES
  * is found, or we reach the filesystem root. Returns the manifest-bearing
  * directory, or `start` itself if none found.
  *
@@ -134,35 +304,64 @@ const manifestRootCache: Map<string, string> = new Map();
  * MANIFEST_FILES (e.g. a monorepo parent's package.json shadowing a
  * sub-project's go.mod). Matches the convention git itself uses for
  * `git rev-parse --show-toplevel`.
+ *
+ * Linearization: each result reflects the manifest topology observed by its
+ * validated listings and fingerprint. A mutation after that observation can
+ * only be seen by the next call; filesystem APIs cannot make that later race
+ * part of the already-completed lookup.
  */
-function findManifestRoot(start: string): string {
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) {
+		throw signal.reason ?? new Error('manifest-root lookup aborted');
+	}
+}
+
+async function findManifestRoot(
+	start: string,
+	signal?: AbortSignal,
+): Promise<ManifestRootResolution> {
+	throwIfAborted(signal);
 	const resolved = path.resolve(start);
 	const key = canonicalRootKeyFresh(resolved);
 	const cached = manifestRootCache.get(key);
-	if (cached !== undefined) return cached;
+	if (cached !== undefined) {
+		if (await isManifestRootCacheEntryValid(cached)) {
+			throwIfAborted(signal);
+			return { root: cached.root, key, trace: [], cacheable: false };
+		}
+		manifestRootCache.delete(key);
+	}
 	let cur = resolved;
-	for (let i = 0; i < 32; i++) {
-		const entries = safeReaddirSet(cur);
-		if (entries.size > 0) {
-			for (const name of MANIFEST_FILES) {
-				if (entries.has(name)) {
-					manifestRootCache.set(key, cur);
-					return cur;
+	const trace: DirectoryFingerprint[] = [];
+	let cacheable = true;
+	for (let i = 0; i < MAX_MANIFEST_SEARCH_DEPTH; i++) {
+		const snapshot = await readDirectoryForManifestWalk(cur);
+		throwIfAborted(signal);
+		if (!snapshot.complete) {
+			cacheable = false;
+		} else {
+			trace.push(snapshot.fingerprint);
+		}
+		const { entries } = snapshot;
+		if (entries !== null) {
+			if (entries.size > 0) {
+				for (const name of MANIFEST_FILES) {
+					if (entries.has(name)) {
+						return { root: cur, key, trace, cacheable };
+					}
 				}
-			}
-			// .git boundary: stop the walk at the enclosing git root so we
-			// don't leak into ancestor projects.
-			if (entries.has('.git')) {
-				manifestRootCache.set(key, cur);
-				return cur;
+				// .git boundary: stop the walk at the enclosing git root so we
+				// don't leak into ancestor projects.
+				if (entries.has('.git')) {
+					return { root: cur, key, trace, cacheable };
+				}
 			}
 		}
 		const parent = path.dirname(cur);
 		if (parent === cur) break; // reached filesystem root
 		cur = parent;
 	}
-	manifestRootCache.set(key, start);
-	return start;
+	return { root: start, key, trace, cacheable };
 }
 
 /**
@@ -194,12 +393,24 @@ function evictIfNeeded(): void {
  */
 export async function pickBackend(
 	dir: string,
+	signal?: AbortSignal,
 ): Promise<LanguageBackend | null> {
-	const root = findManifestRoot(dir);
-	const hash = manifestHash(root);
+	const resolution = await findManifestRoot(dir, signal);
+	const { root } = resolution;
+	throwIfAborted(signal);
+	const hash = await manifestHash(root, signal);
+	throwIfAborted(signal);
+	cacheManifestRoot(
+		resolution.key,
+		root,
+		resolution.trace,
+		resolution.cacheable,
+		signal,
+	);
 	const cacheKey = canonicalRootKeyFresh(root);
 	const cached = cache.get(cacheKey);
 	if (cached && cached.hash === hash) {
+		cacheProfileKey(dir, cacheKey);
 		return cached.backend;
 	}
 
@@ -217,10 +428,12 @@ export async function pickBackend(
 			insertOrder: insertCounter++,
 		});
 		evictIfNeeded();
+		cacheProfileKey(dir, cacheKey);
 		return null;
 	}
 
 	const profiles = await _internals.detectProjectLanguages(root);
+	throwIfAborted(signal);
 	if (profiles.length === 0) {
 		cache.set(cacheKey, {
 			hash,
@@ -229,6 +442,7 @@ export async function pickBackend(
 			insertOrder: insertCounter++,
 		});
 		evictIfNeeded();
+		cacheProfileKey(dir, cacheKey);
 		return null;
 	}
 	// detectProjectLanguages returns profiles tier-sorted (lowest tier first).
@@ -243,6 +457,7 @@ export async function pickBackend(
 		insertOrder: insertCounter++,
 	});
 	evictIfNeeded();
+	cacheProfileKey(dir, cacheKey);
 	return backend;
 }
 
@@ -255,8 +470,9 @@ export async function pickBackend(
  * cache).
  */
 export function pickedProfiles(dir: string): ReadonlyArray<{ id: string }> {
-	const root = findManifestRoot(dir);
-	const cached = cache.get(canonicalRootKeyFresh(root));
+	const cacheKey = profileCacheKeyByInput.get(path.resolve(dir));
+	if (cacheKey === undefined) return [];
+	const cached = cache.get(cacheKey);
 	return cached?.profiles ?? [];
 }
 
@@ -267,5 +483,7 @@ export function pickedProfiles(dir: string): ReadonlyArray<{ id: string }> {
 export function clearDispatchCache(): void {
 	cache.clear();
 	manifestRootCache.clear();
+	profileCacheKeyByInput.clear();
 	insertCounter = 0;
+	manifestRootInsertCounter = 0;
 }
