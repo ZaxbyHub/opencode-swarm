@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
@@ -9,6 +8,7 @@ import {
 	pickBackend,
 } from '../../../src/lang/dispatch';
 import { withTimeoutSignal } from '../../../src/utils/timeout';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('language dispatch manifest-root cache capacity (#2489)', () => {
 	afterEach(() => {
@@ -16,9 +16,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 	});
 
 	test('bounds manifest-root entries by the shared dispatch cache capacity', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-manifest-root-lru-')),
-		);
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-lru-');
 		const originalCapacity = dispatchInternals.cacheCapacity;
 		dispatchInternals.cacheCapacity = 2;
 		try {
@@ -37,9 +35,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 	});
 
 	test('clearDispatchCache empties manifest-root entries', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-manifest-root-clear-')),
-		);
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-clear-');
 		try {
 			fs.writeFileSync(path.join(tempDir, 'package.json'), '{}');
 			await pickBackend(tempDir);
@@ -53,9 +49,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 	});
 
 	test('does not cache a walk whose directory changes during enumeration', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-manifest-root-race-')),
-		);
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-race-');
 		const packageRoot = path.join(tempDir, 'package-root');
 		const closerRoot = path.join(packageRoot, 'packages', 'worker');
 		const sourceDir = path.join(closerRoot, 'src');
@@ -91,9 +85,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 	});
 
 	test('does not select a closer manifest deleted during enumeration', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-manifest-root-delete-')),
-		);
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-delete-');
 		const packageRoot = path.join(tempDir, 'package-root');
 		const closerRoot = path.join(packageRoot, 'packages', 'worker');
 		const sourceDir = path.join(closerRoot, 'src');
@@ -131,11 +123,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 	});
 
 	test('re-walks after a warm root loses its manifest before hashing', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(
-				path.join(os.tmpdir(), 'dispatch-manifest-root-warm-delete-'),
-			),
-		);
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-warm-delete-');
 		const packageRoot = path.join(tempDir, 'package-root');
 		const closerRoot = path.join(packageRoot, 'packages', 'worker');
 		const sourceDir = path.join(closerRoot, 'src');
@@ -177,11 +165,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 	});
 
 	test('re-walks when the detector loses a changed warm manifest', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(
-				path.join(os.tmpdir(), 'dispatch-manifest-root-detect-delete-'),
-			),
-		);
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-detect-delete-');
 		const packageRoot = path.join(tempDir, 'package-root');
 		const closerRoot = path.join(packageRoot, 'packages', 'worker');
 		const sourceDir = path.join(closerRoot, 'src');
@@ -223,9 +207,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 	});
 
 	test('bounds async stat fanout for a 30-directory cold walk', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-manifest-root-budget-')),
-		);
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-budget-');
 		const directoryVisits = 30;
 		const sourceDir = path.join(
 			tempDir,
@@ -253,9 +235,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 	});
 
 	test('returns at the real 300ms timeout and does not cache a late aborted walk', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-manifest-root-timeout-')),
-		);
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-timeout-');
 		const sourceDir = path.join(
 			tempDir,
 			...Array.from({ length: 8 }, (_, index) => `d${index.toString(36)}`),
@@ -316,11 +296,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 	});
 
 	test('linearizes a warm hit before a manifest created after its directory check', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(
-				path.join(os.tmpdir(), 'dispatch-manifest-root-linearize-'),
-			),
-		);
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-linearize-');
 		const packageRoot = path.join(tempDir, 'package-root');
 		const closerRoot = path.join(packageRoot, 'packages', 'worker');
 		const sourceDir = path.join(closerRoot, 'src');

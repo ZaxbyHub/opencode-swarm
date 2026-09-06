@@ -66,6 +66,17 @@ export function lexicalRootAliasKey(directory: string): string {
 	return normalizeIdentityPath(path.resolve(directory));
 }
 
+/**
+ * Return a bounded, filesystem-free key for a caller's lexical root spelling.
+ *
+ * This is intentionally separate from `canonicalRootKeyFresh*`: dispatch uses
+ * it for a synchronous input-alias table immediately after an async lookup has
+ * populated the real cache. It is not a physical project-root identity.
+ */
+export function canonicalRootKeyLexical(directory: string): string {
+	return lexicalRootAliasKey(directory);
+}
+
 function resolveCanonicalRootKey(directory: string): string {
 	let resolved = path.resolve(directory);
 	try {

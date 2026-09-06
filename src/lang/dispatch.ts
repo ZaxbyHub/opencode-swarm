@@ -24,7 +24,10 @@ import type { LanguageBackend } from './backend';
 // `pickBackend` would get only the default backend even for languages with
 // concrete overrides like typescript. The barrel is idempotent.
 import './backends';
-import { canonicalRootKeyFreshAsync } from '../utils/canonical-root.js';
+import {
+	canonicalRootKeyFreshAsync,
+	canonicalRootKeyLexical,
+} from '../utils/canonical-root.js';
 import { detectProjectLanguages } from './detector';
 import { MANIFEST_FILES } from './manifest-files';
 import { LANGUAGE_BACKEND_REGISTRY } from './registry-backend';
@@ -169,7 +172,7 @@ let manifestRootInsertCounter = 0;
 const profileCacheKeyByInput = new Map<string, string>();
 
 function cacheProfileKey(input: string, cacheKey: string): void {
-	const key = path.resolve(input);
+	const key = canonicalRootKeyLexical(input);
 	profileCacheKeyByInput.delete(key);
 	profileCacheKeyByInput.set(key, cacheKey);
 	while (profileCacheKeyByInput.size > _internals.cacheCapacity) {
@@ -455,7 +458,7 @@ export async function pickBackend(
 			// and re-walk once to select the nearest ancestor visible at that point.
 			manifestRootCache.delete(resolution.key);
 			if (attempt === 0) continue;
-			profileCacheKeyByInput.delete(path.resolve(dir));
+			profileCacheKeyByInput.delete(canonicalRootKeyLexical(dir));
 			return null;
 		}
 
@@ -508,7 +511,7 @@ export async function pickBackend(
 		) {
 			manifestRootCache.delete(resolution.key);
 			if (attempt === 0) continue;
-			profileCacheKeyByInput.delete(path.resolve(dir));
+			profileCacheKeyByInput.delete(canonicalRootKeyLexical(dir));
 			return null;
 		}
 
@@ -559,7 +562,7 @@ export async function pickBackend(
  * cache).
  */
 export function pickedProfiles(dir: string): ReadonlyArray<{ id: string }> {
-	const cacheKey = profileCacheKeyByInput.get(path.resolve(dir));
+	const cacheKey = profileCacheKeyByInput.get(canonicalRootKeyLexical(dir));
 	if (cacheKey === undefined) return [];
 	const cached = cache.get(cacheKey);
 	return cached?.profiles ?? [];

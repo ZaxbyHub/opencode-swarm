@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 import '../../../src/lang/backends';
@@ -10,6 +9,7 @@ import {
 	pickBackend,
 } from '../../../src/lang/dispatch';
 import { MANIFEST_FILES } from '../../../src/lang/manifest-files';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // Keep this acceptance ceiling aligned with findManifestRoot's documented
 // maximum upward search. This discriminating check counts every sync and async
@@ -27,11 +27,7 @@ describe('language dispatch manifest-root cache invalidation (#2489)', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(
-				path.join(os.tmpdir(), 'dispatch-manifest-root-invalidation-'),
-			),
-		);
+		tempDir = canonicalMkdtemp('dispatch-manifest-root-invalidation-');
 		clearDispatchCache();
 	});
 
