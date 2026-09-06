@@ -11,8 +11,9 @@ import {
 } from '../../../src/lang/dispatch';
 
 // Keep this acceptance ceiling aligned with findManifestRoot's documented
-// maximum upward search. One extra directory read hashes the selected root and
-// one metadata read fingerprints this fixture's sole manifest.
+// maximum upward search. The warm validation has one asynchronous stat per
+// visited directory, then manifestHash performs one synchronous root stat, one
+// asynchronous directory read, and one asynchronous manifest stat.
 const MAX_MANIFEST_SEARCH_DEPTH = 32;
 const MAX_WARM_LOOKUP_FS_OPS = MAX_MANIFEST_SEARCH_DEPTH + 2;
 
@@ -137,29 +138,43 @@ describe('language dispatch manifest-root cache invalidation (#2489)', () => {
 			'{"name":"unchanged-bound"}',
 		);
 
-		const readdirSpy = spyOn(fs, 'readdirSync');
-		const statSpy = spyOn(fs, 'statSync');
+		const syncReaddirSpy = spyOn(fs, 'readdirSync');
+		const syncStatSpy = spyOn(fs, 'statSync');
+		const asyncReaddirSpy = spyOn(fs.promises, 'readdir');
+		const asyncStatSpy = spyOn(fs.promises, 'stat');
 		try {
 			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
 
-			readdirSpy.mockClear();
-			statSpy.mockClear();
+			syncReaddirSpy.mockClear();
+			syncStatSpy.mockClear();
+			asyncReaddirSpy.mockClear();
+			asyncStatSpy.mockClear();
 			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
 			const secondLookupOps =
-				readdirSpy.mock.calls.length + statSpy.mock.calls.length;
+				syncReaddirSpy.mock.calls.length +
+				syncStatSpy.mock.calls.length +
+				asyncReaddirSpy.mock.calls.length +
+				asyncStatSpy.mock.calls.length;
 
-			readdirSpy.mockClear();
-			statSpy.mockClear();
+			syncReaddirSpy.mockClear();
+			syncStatSpy.mockClear();
+			asyncReaddirSpy.mockClear();
+			asyncStatSpy.mockClear();
 			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
 			const thirdLookupOps =
-				readdirSpy.mock.calls.length + statSpy.mock.calls.length;
+				syncReaddirSpy.mock.calls.length +
+				syncStatSpy.mock.calls.length +
+				asyncReaddirSpy.mock.calls.length +
+				asyncStatSpy.mock.calls.length;
 
 			expect(secondLookupOps).toBeGreaterThan(0);
 			expect(secondLookupOps).toBeLessThanOrEqual(MAX_WARM_LOOKUP_FS_OPS);
 			expect(thirdLookupOps).toBe(secondLookupOps);
 		} finally {
-			readdirSpy.mockRestore();
-			statSpy.mockRestore();
+			syncReaddirSpy.mockRestore();
+			syncStatSpy.mockRestore();
+			asyncReaddirSpy.mockRestore();
+			asyncStatSpy.mockRestore();
 		}
 	});
 });

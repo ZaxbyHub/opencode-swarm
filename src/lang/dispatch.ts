@@ -7,10 +7,9 @@
  * results in a bounded LRU keyed by (dir, manifest-hash) so repeated calls
  * during a session do not re-walk the filesystem.
  *
- * Per the language-agnostic plan, hot-path callers (hooks, tools) wrap
- * this in `withTimeout(300ms)` and fail open on the cache miss; session-
- * start callers use `withTimeout(2000ms)`. Both budgets are caller-set —
- * the dispatch function itself does not impose timeouts.
+ * Callers supply any timeout policy. Plugin initialization wraps this in
+ * `withTimeoutSignal(300ms)` and fails open on timeout; the dispatch function
+ * itself does not impose a separate deadline.
  *
  * Invariant 4: this module never writes to `.swarm/`. All caching is
  * in-process. `dir` is treated as caller-supplied and not validated as a
@@ -142,12 +141,14 @@ type DirectoryFingerprint = {
 
 type ManifestRootCacheValue = {
 	root: string;
+	rootHadManifest: boolean;
 	trace: ReadonlyArray<DirectoryFingerprint>;
 	insertOrder: number;
 };
 
 type ManifestRootResolution = {
 	root: string;
+	rootHadManifest: boolean;
 	key: string;
 	trace: ReadonlyArray<DirectoryFingerprint>;
 	cacheable: boolean;
@@ -221,9 +222,10 @@ function fingerprintsMatch(
  * or removed while enumerating leaves the walk non-cacheable, while the saved
  * fingerprint invalidates a later cache hit after either snapshot completes.
  *
- * Keep this to one statSync per directory. Cold callers can cross thirty or
- * more directories, where three metadata reads per level can exceed the
- * caller's production startup budget on an antivirus-intercepted filesystem.
+ * Keep this to one asynchronous stat per directory. Cold callers can cross
+ * thirty or more directories, where three metadata reads per level can exceed
+ * the caller's production startup budget on an antivirus-intercepted
+ * filesystem.
  */
 async function readDirectoryForManifestWalk(
 	dir: string,
@@ -274,6 +276,7 @@ function evictManifestRootCacheIfNeeded(): void {
 function cacheManifestRoot(
 	key: string,
 	root: string,
+	rootHadManifest: boolean,
 	trace: ReadonlyArray<DirectoryFingerprint>,
 	cacheable: boolean,
 	signal?: AbortSignal,
@@ -281,6 +284,7 @@ function cacheManifestRoot(
 	if (!cacheable || signal?.aborted) return;
 	manifestRootCache.set(key, {
 		root,
+		rootHadManifest,
 		trace,
 		insertOrder: manifestRootInsertCounter++,
 	});
@@ -327,7 +331,13 @@ async function findManifestRoot(
 	if (cached !== undefined) {
 		if (await isManifestRootCacheEntryValid(cached)) {
 			throwIfAborted(signal);
-			return { root: cached.root, key, trace: [], cacheable: false };
+			return {
+				root: cached.root,
+				rootHadManifest: cached.rootHadManifest,
+				key,
+				trace: [],
+				cacheable: false,
+			};
 		}
 		manifestRootCache.delete(key);
 	}
@@ -347,13 +357,25 @@ async function findManifestRoot(
 			if (entries.size > 0) {
 				for (const name of MANIFEST_FILES) {
 					if (entries.has(name)) {
-						return { root: cur, key, trace, cacheable };
+						return {
+							root: cur,
+							rootHadManifest: true,
+							key,
+							trace,
+							cacheable,
+						};
 					}
 				}
 				// .git boundary: stop the walk at the enclosing git root so we
 				// don't leak into ancestor projects.
 				if (entries.has('.git')) {
-					return { root: cur, key, trace, cacheable };
+					return {
+						root: cur,
+						rootHadManifest: false,
+						key,
+						trace,
+						cacheable,
+					};
 				}
 			}
 		}
@@ -361,7 +383,7 @@ async function findManifestRoot(
 		if (parent === cur) break; // reached filesystem root
 		cur = parent;
 	}
-	return { root: start, key, trace, cacheable };
+	return { root: start, rootHadManifest: false, key, trace, cacheable };
 }
 
 /**
@@ -395,14 +417,26 @@ export async function pickBackend(
 	dir: string,
 	signal?: AbortSignal,
 ): Promise<LanguageBackend | null> {
-	const resolution = await findManifestRoot(dir, signal);
-	const { root } = resolution;
+	let resolution = await findManifestRoot(dir, signal);
+	let { root } = resolution;
 	throwIfAborted(signal);
-	const hash = await manifestHash(root, signal);
+	let hash = await manifestHash(root, signal);
 	throwIfAborted(signal);
+	if (resolution.rootHadManifest && hash === '') {
+		// A warm trace can validate immediately before its selected manifest is
+		// deleted. Hashing then observes that deletion, so discard the stale root
+		// and re-walk once to select the nearest ancestor visible at that point.
+		manifestRootCache.delete(resolution.key);
+		resolution = await findManifestRoot(dir, signal);
+		root = resolution.root;
+		throwIfAborted(signal);
+		hash = await manifestHash(root, signal);
+		throwIfAborted(signal);
+	}
 	cacheManifestRoot(
 		resolution.key,
 		root,
+		resolution.rootHadManifest,
 		resolution.trace,
 		resolution.cacheable,
 		signal,

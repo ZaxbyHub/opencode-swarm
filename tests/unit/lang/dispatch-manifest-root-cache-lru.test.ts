@@ -130,6 +130,52 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 		}
 	});
 
+	test('re-walks after a warm root loses its manifest before hashing', async () => {
+		const tempDir = fs.realpathSync(
+			fs.mkdtempSync(
+				path.join(os.tmpdir(), 'dispatch-manifest-root-warm-delete-'),
+			),
+		);
+		const packageRoot = path.join(tempDir, 'package-root');
+		const closerRoot = path.join(packageRoot, 'packages', 'worker');
+		const sourceDir = path.join(closerRoot, 'src');
+		const cargoManifest = path.join(closerRoot, 'Cargo.toml');
+		fs.mkdirSync(sourceDir, { recursive: true });
+		fs.writeFileSync(path.join(packageRoot, 'package.json'), '{}');
+		fs.writeFileSync(cargoManifest, '[package]\nname = "worker"\n');
+
+		const realReaddir = fs.promises.readdir;
+		let deleteBeforeWarmHash = false;
+		let deletedCloserManifest = false;
+		const readdirSpy = spyOn(fs.promises, 'readdir').mockImplementation((async (
+			directory: fs.PathLike,
+			options?: Parameters<typeof fs.promises.readdir>[1],
+		) => {
+			if (
+				deleteBeforeWarmHash &&
+				!deletedCloserManifest &&
+				path.resolve(String(directory)) === closerRoot
+			) {
+				deletedCloserManifest = true;
+				fs.unlinkSync(cargoManifest);
+			}
+			return realReaddir(directory, options);
+		}) as typeof fs.promises.readdir);
+		try {
+			expect((await pickBackend(sourceDir))?.id).toBe('rust');
+			deleteBeforeWarmHash = true;
+
+			// Root validation completed before this deletion; manifestHash sees the
+			// missing Cargo.toml and must trigger a fresh ancestor walk instead of
+			// caching a null backend for the stale closer root.
+			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
+			expect(deletedCloserManifest).toBe(true);
+		} finally {
+			readdirSpy.mockRestore();
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	test('bounds async stat fanout for a 30-directory cold walk', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-manifest-root-budget-')),
@@ -149,7 +195,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 		try {
 			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
 
-			// The old pre-stat + readdir + post-stat proof cost two stats per
+			// The old pre-stat + readdir + post-stat proof cost two async stats per
 			// directory. Keep the new traversal to one async stat per directory;
 			// the following timeout test covers latency across every async FS op.
 			const statCalls = statSpy.mock.calls.length;
