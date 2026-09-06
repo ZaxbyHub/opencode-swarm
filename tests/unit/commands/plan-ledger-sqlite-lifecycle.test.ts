@@ -11,7 +11,10 @@ import {
 	_internals as rollbackInternals,
 } from '../../../src/commands/rollback';
 import type { Plan } from '../../../src/config/plan-schema';
+import { withFrozenClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
+const nowIso = (): string => withFrozenClock(() => new Date().toISOString());
 
 function makePlan(): Plan {
 	return {
@@ -134,9 +137,7 @@ describe('plan-ledger lifecycle transitions (#2531)', () => {
 		await writeFile(
 			join(directory, '.swarm', 'checkpoints', 'manifest.json'),
 			JSON.stringify({
-				checkpoints: [
-					{ phase: 1, label: 'root', timestamp: new Date().toISOString() },
-				],
+				checkpoints: [{ phase: 1, label: 'root', timestamp: nowIso() }],
 			}),
 		);
 		await writeFile(join(checkpointDir, 'plan.json'), JSON.stringify(plan));
@@ -176,9 +177,7 @@ describe('plan-ledger lifecycle transitions (#2531)', () => {
 		await writeFile(
 			join(directory, '.swarm', 'checkpoints', 'manifest.json'),
 			JSON.stringify({
-				checkpoints: [
-					{ phase: 1, label: 'root', timestamp: new Date().toISOString() },
-				],
+				checkpoints: [{ phase: 1, label: 'root', timestamp: nowIso() }],
 			}),
 		);
 		await writeFile(join(checkpointDir, 'plan.json'), JSON.stringify(plan));

@@ -14,7 +14,10 @@ import type { Plan } from '../../../src/config/plan-schema';
 import * as realHookUtils from '../../../src/hooks/utils.js';
 import { peekPlanFromLedger } from '../../../src/plan/ledger';
 import { savePlan } from '../../../src/plan/manager';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+
+const nowIso = (): string => withFrozenClock(() => new Date().toISOString());
 
 // Mock validateSwarmPath before importing rollback.ts (it binds at module load)
 mock.module('../../../src/hooks/utils.js', () => ({
@@ -81,7 +84,7 @@ function createRollbackCheckpoint(plan: Plan = createValidPlan()) {
 		{
 			phase: 1,
 			label: 'Phase 1 complete',
-			timestamp: new Date().toISOString(),
+			timestamp: nowIso(),
 		},
 	]);
 	const checkpointDir = getCheckpointDir(1);

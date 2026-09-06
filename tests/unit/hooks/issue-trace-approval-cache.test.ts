@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { _internals, resetApprovalCache } from '../../../src/hooks/issue-trace';
 import type { PlanLedgerState } from '../../../src/plan/ledger-sqlite';
+import { withFrozenClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const originals = { ..._internals };
@@ -102,7 +103,7 @@ describe('issue-trace approval cache', () => {
 		expect(await _internals.boundedApprovalCheck(directory, 100)).toBe(false);
 		expect(approvalCalls).toBe(1);
 
-		const nextMtime = new Date(Date.now() + 2_000);
+		const nextMtime = withFrozenClock(() => new Date(Date.now() + 2_000));
 		fs.utimesSync(ledgerPath, nextMtime, nextMtime);
 		expect(await _internals.boundedApprovalCheck(directory, 100)).toBe(true);
 		expect(approvalCalls).toBe(2);

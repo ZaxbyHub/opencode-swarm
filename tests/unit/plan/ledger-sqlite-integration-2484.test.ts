@@ -24,6 +24,7 @@ import {
 } from '../../../src/plan/ledger-sqlite';
 import { derivePlanId } from '../../../src/plan/utils';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 const fixtures: Array<ReturnType<typeof createSafeTestDir>> = [];
 
@@ -139,7 +140,7 @@ describe('plan ledger SQLite migration and authority — issue #2484 regressions
 		const root = JSON.parse(original.trimEnd()) as Record<string, unknown>;
 		const forgedExtension = {
 			seq: 2,
-			timestamp: new Date().toISOString(),
+			timestamp: withFrozenClock(() => new Date().toISOString()),
 			plan_id: root.plan_id,
 			event_type: 'plan_exported',
 			source: 'forged-portable-extension',
@@ -255,7 +256,7 @@ describe('plan ledger SQLite migration and authority — issue #2484 regressions
 		const first = readSqliteLedgerEvents(directory).events[0]!.event;
 		const second = JSON.stringify({
 			seq: 2,
-			timestamp: new Date().toISOString(),
+			timestamp: withFrozenClock(() => new Date().toISOString()),
 			plan_id: first.plan_id,
 			event_type: 'plan_exported',
 			source: 'transaction-fault',
