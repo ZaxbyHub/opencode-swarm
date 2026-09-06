@@ -30,6 +30,7 @@
  * before the flush lands and re-introduce the race.
  */
 import { log } from './logger.js';
+import { withTimeout } from './timeout.js';
 
 /** Minimum lifecycle surface for tearing an ephemeral session down. */
 export interface EphemeralSessionLifecycle {
@@ -37,6 +38,12 @@ export interface EphemeralSessionLifecycle {
 	abort?: (args: { path: { id: string } }) => Promise<unknown>;
 	/** Hard delete the session and cascade its rows. */
 	delete: (args: { path: { id: string } }) => Promise<unknown>;
+	/**
+	 * Read the session back (issue #2599). Used by `teardownEphemeralSessionVerified`
+	 * as the bounded existence check; optional because some shims lack it —
+	 * absence degrades verification to a typed unverified result.
+	 */
+	get?: (args: { path: { id: string } }) => Promise<unknown>;
 }
 
 export const DEFAULT_EPHEMERAL_ABORT_TIMEOUT_MS = 5_000;
@@ -135,8 +142,13 @@ export async function boundedDeleteEphemeralSession(
  * Callers that need cleanup guaranteed before they return should `await` this.
  * Fire-and-forget callers may `void` it — the abort→delete ordering still holds
  * inside the unit, so the FK race is closed regardless; only the caller's own
- * completion timing is detached (process exit before completion leaks a
- * session, same as the prior fire-and-forget delete, and is harmless).
+ * completion timing is detached. A caller that exits before completion leaks
+ * the session. For a lane-directory child session that leak is NOT harmless:
+ * the leaked session's plugin activity keeps the lane's `swarm.db` WAL handle
+ * open, which locks the lane directory against deletion on Windows (issue
+ * #2599) — those callers must use `teardownEphemeralSessionVerified`, which
+ * confirms the session actually died and returns a typed failure when it
+ * survives.
  */
 export async function teardownEphemeralSession(
 	session: EphemeralSessionLifecycle,
@@ -155,14 +167,127 @@ export async function teardownEphemeralSession(
 	await _internals.boundedDelete(session, sessionId, deleteTimeoutMs);
 }
 
+export const DEFAULT_EPHEMERAL_VERIFY_TIMEOUT_MS = 2_000;
+export const DEFAULT_EPHEMERAL_MAX_DELETE_ATTEMPTS = 3;
+
+export interface TeardownEphemeralSessionVerifiedOptions
+	extends TeardownEphemeralSessionOptions {
+	/** Bounded timeout for the post-delete existence check (`session.get`). */
+	verifyTimeoutMs?: number;
+	/**
+	 * Total bounded delete attempts (initial + retries) when the session
+	 * survives the first delete. Bounded to [2, 6].
+	 */
+	maxDeleteAttempts?: number;
+}
+
+export type EphemeralTeardownVerification =
+	| { ok: true; sessionId: string; attempts: number }
+	| {
+			ok: false;
+			sessionId: string;
+			attempts: number;
+			/** Stable marker for telemetry/routing; see issue #2599 AC3. */
+			kind: 'ephemeral-session-teardown-unverified';
+			reason: string;
+	  };
+
+/**
+ * Bounded existence check via `session.get`. `get` throwing (session-gone
+ * errors surface as rejections on the SDK surface) or returning an empty body
+ * both mean the session is gone (mirrors the reason-forwarding resolver
+ * precedent in `src/hooks/pr-workflow-session-resolver.ts`).
+ */
+async function sessionExists(
+	session: EphemeralSessionLifecycle,
+	sessionId: string,
+	verifyTimeoutMs: number,
+): Promise<boolean> {
+	if (typeof session.get !== 'function') return true; // cannot disprove → treat as alive
+	try {
+		const result = await withTimeout(
+			session.get({ path: { id: sessionId } }),
+			verifyTimeoutMs,
+			new Error(
+				`ephemeral session verify timed out after ${verifyTimeoutMs}ms`,
+			),
+		);
+		const body = (result as { data?: unknown } | undefined)?.data;
+		if (body === undefined || body === null) return false;
+		return true;
+	} catch {
+		// A rejected get is how the host reports "no such session".
+		return false;
+	}
+}
+
+/**
+ * Verified teardown (issue #2599): bounded abort → bounded delete → bounded
+ * existence check, retrying the delete a bounded number of times when the
+ * session survives, and returning a typed `ephemeral-session-teardown-unverified`
+ * failure when it still does. Never throws; the caller decides how to escalate.
+ */
+export async function teardownEphemeralSessionVerified(
+	session: EphemeralSessionLifecycle,
+	sessionId: string,
+	options: TeardownEphemeralSessionVerifiedOptions = {},
+): Promise<EphemeralTeardownVerification> {
+	const verifyTimeoutMs =
+		options.verifyTimeoutMs ?? DEFAULT_EPHEMERAL_VERIFY_TIMEOUT_MS;
+	const attempts = Math.min(
+		6,
+		Math.max(
+			2,
+			options.maxDeleteAttempts ?? DEFAULT_EPHEMERAL_MAX_DELETE_ATTEMPTS,
+		),
+	);
+	if (typeof session.get !== 'function') {
+		// Best-effort pass (identical to teardownEphemeralSession), then report
+		// that verification was impossible — never claim an unproven death.
+		await teardownEphemeralSession(session, sessionId, options);
+		return {
+			ok: false,
+			sessionId,
+			attempts: 1,
+			kind: 'ephemeral-session-teardown-unverified',
+			reason: 'get-unavailable',
+		};
+	}
+	let deleteAttempts = 0;
+	for (;;) {
+		await teardownEphemeralSession(session, sessionId, {
+			...options,
+			skipAbort: deleteAttempts > 0 ? true : options.skipAbort,
+		});
+		deleteAttempts += 1;
+		const alive = await _internals.sessionExists(
+			session,
+			sessionId,
+			verifyTimeoutMs,
+		);
+		if (!alive) return { ok: true, sessionId, attempts: deleteAttempts };
+		if (deleteAttempts >= attempts) {
+			return {
+				ok: false,
+				sessionId,
+				attempts: deleteAttempts,
+				kind: 'ephemeral-session-teardown-unverified',
+				reason: 'session-survived-bounded-retries',
+			};
+		}
+	}
+}
+
 export const _internals: {
 	boundedSessionCall: typeof boundedSessionCall;
 	boundedAbort: typeof boundedAbortEphemeralSession;
 	boundedDelete: typeof boundedDeleteEphemeralSession;
+	sessionExists: typeof sessionExists;
 	log: typeof log;
 } = {
 	boundedSessionCall,
 	boundedAbort: boundedAbortEphemeralSession,
 	boundedDelete: boundedDeleteEphemeralSession,
+	sessionExists,
 	log,
 };

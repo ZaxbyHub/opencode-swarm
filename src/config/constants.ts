@@ -805,6 +805,10 @@ export const DEFAULT_WORKTREE_ISOLATION_CONFIG: WorktreeIsolationConfig = {
 	lane_permissions: 'scoped_allow',
 	serialization_release_after_dispatches: 5,
 	serialization_release_after_ms: 60_000,
+	// Issue #2599: mirrors WorktreeIsolationConfigSchema's
+	// session_create_timeout_ms default (alignment pinned by
+	// tests/unit/config/worktree-session-create-timeout.test.ts).
+	session_create_timeout_ms: 30_000,
 	runtime_isolation: {
 		enabled: false,
 		port_stride: 1,

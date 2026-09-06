@@ -24,6 +24,8 @@ export function resolveWorktreeIsolationConfig(
 			merge_strategy: lean.merge_strategy ?? 'merge',
 			worktree_dir: lean.worktree_dir,
 			deps_strategy: lean.deps_strategy ?? 'skip',
+			session_create_timeout_ms:
+				DEFAULT_WORKTREE_ISOLATION_CONFIG.session_create_timeout_ms,
 			runtime_isolation:
 				lean.runtime_isolation ??
 				DEFAULT_WORKTREE_ISOLATION_CONFIG.runtime_isolation,
