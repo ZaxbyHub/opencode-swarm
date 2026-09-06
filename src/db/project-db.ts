@@ -779,11 +779,23 @@ export function withProjectDbReadOnly<T>(
 	const dbFile = projectDbPath(directory);
 	if (!existsSync(dbFile)) return null;
 	const Db = loadDatabaseCtor();
-	const immutableUrl = pathToFileURL(dbFile);
-	immutableUrl.searchParams.set('immutable', '1');
-	// SQLITE_OPEN_READONLY | SQLITE_OPEN_URI. The immutable URI prevents both
-	// supported drivers from materializing WAL/SHM sidecars during observation.
-	const db = new Db(immutableUrl.href, 0x01 | 0x40);
+	const walPresent = existsSync(`${dbFile}-wal`);
+	// An immutable connection is safe for a self-contained main database, but it
+	// deliberately ignores a surviving WAL. A crashed writer can leave the
+	// authoritative plan only in that WAL, so use the driver's read-only mode
+	// whenever a sidecar exists; otherwise a fresh process would observe stale
+	// state during a lifecycle preview. The read-only option forbids SQL writes
+	// while still allowing SQLite to replay the existing WAL.
+	const db = walPresent
+		? new Db(dbFile, { readonly: true })
+		: (() => {
+				const immutableUrl = pathToFileURL(dbFile);
+				immutableUrl.searchParams.set('immutable', '1');
+				// SQLITE_OPEN_READONLY | SQLITE_OPEN_URI. The immutable URI prevents
+				// both supported drivers from materializing WAL/SHM sidecars when no
+				// WAL needs to be observed.
+				return new Db(immutableUrl.href, 0x01 | 0x40);
+			})();
 	try {
 		return read(db);
 	} finally {

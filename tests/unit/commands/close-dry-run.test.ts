@@ -17,7 +17,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { _internals, handleCloseCommand } from '../../../src/commands/close';
 import type { Plan } from '../../../src/config/plan-schema';
-import { closeProjectDb, getProjectDb } from '../../../src/db/project-db';
+import {
+	closeAllProjectDbs,
+	closeProjectDb,
+	getProjectDb,
+} from '../../../src/db/project-db';
+import { loadDatabaseCtor } from '../../../src/db/sqlite-loader';
 import { initLedger } from '../../../src/plan/ledger';
 import {
 	cutoverSqliteLedger,
@@ -312,5 +317,46 @@ describe('handleCloseCommand --dry-run', () => {
 		expect(out).toContain('DRY RUN');
 		expect(out).toContain('#1 Hot WAL phase');
 		expect(out).not.toContain('plan-free session');
+	});
+
+	it('regression: sees SQLite authority left in a WAL after a fresh-process restart', async () => {
+		const plan: Plan = {
+			schema_version: '1.0.0',
+			title: 'Cold WAL dry run',
+			swarm: 'close-dry-run',
+			current_phase: 1,
+			phases: [
+				{ id: 1, name: 'Cold WAL phase', status: 'in_progress', tasks: [] },
+			],
+		};
+		await initLedger(testDir, 'close-dry-run-cold-wal', undefined, plan);
+		const state = getPlanLedgerState(testDir);
+		expect(state?.parityStatus).toBe('clean');
+		cutoverSqliteLedger(testDir, {
+			expectedShadowStartedVersion: state?.shadowStartedVersion ?? undefined,
+			version: '999.0.0',
+		});
+		rmSync(path.join(swarmDir(), 'plan-ledger.jsonl'));
+
+		// Drop the process-local cache, then leave a committed change in the WAL
+		// through an independent writer. The dry-run must read that WAL without
+		// reopening the project database as a mutating cached handle.
+		closeAllProjectDbs();
+		const Db = loadDatabaseCtor();
+		const writer = new Db(path.join(swarmDir(), 'swarm.db'));
+		writer.run('PRAGMA journal_mode = WAL;');
+		writer.run(
+			"UPDATE plan_ledger_state SET updated_at = '2030-01-01T00:00:00.000Z' WHERE id = 1",
+		);
+		expect(existsSync(path.join(swarmDir(), 'swarm.db-wal'))).toBe(true);
+
+		try {
+			const out = await handleCloseCommand(testDir, ['--dry-run']);
+			expect(out).toContain('DRY RUN');
+			expect(out).toContain('#1 Cold WAL phase');
+			expect(out).not.toContain('plan-free session');
+		} finally {
+			writer.close();
+		}
 	});
 });
