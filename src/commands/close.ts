@@ -53,6 +53,8 @@ import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types';
 import { validateSwarmPath } from '../hooks/utils';
 import { runFinalizeRewardSweep } from '../memory/finalize-reward-sweep';
 import { tryAcquireLock } from '../parallel/file-locks.js';
+import { peekPlanFromLedger } from '../plan/ledger.js';
+import { loadPlan } from '../plan/manager.js';
 import { runRetentionSweep } from '../retention/sweep';
 import { clearAllScopes } from '../scope/scope-persistence';
 import {
@@ -2414,6 +2416,10 @@ export async function runFinalizeDryRun(
 
 /**
  * Handles /swarm close command - performs full terminal session finalization:
+ * The plan ledger is authoritative: when plan.json is absent, recover the
+ * structured plan through the manager before treating the session as plan-free.
+ * plan.json and plan.md are projections and must not outrank a recoverable
+ * ledger root during lifecycle teardown.
  * 0. Guarantee: mark all incomplete phases/tasks as closed
  * 1. Finalize: write retrospectives, produce terminal summary
  * 2. Archive: create timestamped bundle of swarm artifacts
@@ -2444,6 +2450,7 @@ export async function handleCloseCommand(
 	}
 
 	const planPath = validateSwarmPath(directory, 'plan.json');
+	const dryRun = args.includes('--dry-run');
 
 	let planExists = false;
 	let planData: PlanData = {
@@ -2458,21 +2465,39 @@ export async function handleCloseCommand(
 		if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
 			return `❌ Failed to read plan.json: ${error instanceof Error ? error.message : String(error)}`;
 		}
-		// ENOENT — check whether .swarm/ itself exists to distinguish plan-free from wrong directory
-		const swarmDirExists = await fs
-			.access(swarmDir)
-			.then(() => true)
-			.catch(() => false);
-		if (!swarmDirExists) {
-			return `❌ No .swarm/ directory found in ${directory}. Run /swarm close from the project root, or run /swarm plan first.`;
+		// A missing projection is not proof that the session is plan-free. The
+		// manager recovers from the authoritative ledger before falling back to
+		// legacy Markdown. This keeps close terminalization attached to the real
+		// plan and prevents a surviving ledger from being ignored during cleanup.
+		try {
+			const recovered = dryRun
+				? (await peekPlanFromLedger(directory)).plan
+				: await loadPlan(directory);
+			if (recovered) {
+				planData = recovered;
+				planExists = true;
+			}
+		} catch (recoveryError) {
+			return `❌ Failed to recover plan from the authoritative ledger: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`;
 		}
-		// .swarm/ exists but plan.json is absent — valid plan-free session, continue with cleanup
+		if (!planExists) {
+			// ENOENT — check whether .swarm/ itself exists to distinguish plan-free from wrong directory
+			const swarmDirExists = await fs
+				.access(swarmDir)
+				.then(() => true)
+				.catch(() => false);
+			if (!swarmDirExists) {
+				return `❌ No .swarm/ directory found in ${directory}. Run /swarm close from the project root, or run /swarm plan first.`;
+			}
+			// .swarm/ exists but no authoritative plan was recoverable — valid
+			// plan-free session, continue with cleanup.
+		}
 	}
 
 	// --dry-run: describe what finalize WOULD do and return WITHOUT taking the
 	// finalize lock or mutating anything. Kept before lock acquisition so a
 	// dry-run is fully read-only and can never contend with a real run. (#1692)
-	if (args.includes('--dry-run')) {
+	if (dryRun) {
 		return _internals.runFinalizeDryRun(
 			directory,
 			swarmDir,

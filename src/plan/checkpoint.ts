@@ -55,7 +55,7 @@ export async function writeCheckpoint(directory: string): Promise<void> {
 		const header = `<!--
 AUTO-GENERATED EXPORT/CHECKPOINT SNAPSHOT — DO NOT EDIT
 This file is NOT the live plan. It is a derived export artifact.
-- .swarm/plan-ledger.jsonl is the authoritative source of plan state.
+- The plan ledger is authoritative: SQLite after cutover, JSONL during file-shadow mode.
 - .swarm/plan.json and .swarm/plan.md are derived projections.
 Regenerated on: save_plan and phase_complete.
 -->

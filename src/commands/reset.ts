@@ -2,6 +2,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resetAutomationManager } from '../background/manager';
 import { validateSwarmPath } from '../hooks/utils';
+import { clearPlanLedgerForReset } from '../plan/ledger.js';
+import { withPlanLifecycleLock } from '../plan/manager.js';
 import {
 	backupSwarmStateBeforeReset,
 	type ResetBackupResult,
@@ -18,8 +20,22 @@ export const _internals: {
 		kind: 'reset' | 'reset-session',
 		relEntries: string[],
 	) => ResetBackupResult;
+	clearPlanLedgerForReset: typeof clearPlanLedgerForReset;
+	withPlanLifecycleLock: typeof withPlanLifecycleLock;
+	existsSync: typeof fs.existsSync;
+	readFileSync: typeof fs.readFileSync;
+	unlinkSync: typeof fs.unlinkSync;
+	writeFileSync: typeof fs.writeFileSync;
+	rmSync: typeof fs.rmSync;
 } = {
 	backupSwarmStateBeforeReset,
+	clearPlanLedgerForReset,
+	withPlanLifecycleLock,
+	existsSync: fs.existsSync,
+	readFileSync: fs.readFileSync,
+	unlinkSync: fs.unlinkSync,
+	writeFileSync: fs.writeFileSync,
+	rmSync: fs.rmSync,
 };
 
 /**
@@ -54,9 +70,6 @@ export async function handleResetCommand(
 	const filesToReset = [
 		'plan.md',
 		'plan.json',
-		// Plan backing-state: a surviving ledger gets replayed by replayFromLedger()
-		// on the next loadPlan(), resurrecting the wiped plan back into plan.json.
-		'plan-ledger.jsonl',
 		'context.md',
 		// Single-session spec-drift state. spec-staleness.json is an existence-only
 		// gate (enforceSpecDriftGate) that hard-blocks the core write tools
@@ -92,6 +105,9 @@ export async function handleResetCommand(
 	// #1692
 	try {
 		const backup = _internals.backupSwarmStateBeforeReset(directory, 'reset', [
+			// The managed clear removes this portable ledger while holding the
+			// plan-ledger lock; include it in the archive without deleting it again.
+			'plan-ledger.jsonl',
 			...filesToReset,
 			'summaries',
 		]);
@@ -110,30 +126,89 @@ export async function handleResetCommand(
 		);
 	}
 
-	for (const filename of filesToReset) {
-		try {
-			const resolvedPath = validateSwarmPath(directory, filename);
-			if (fs.existsSync(resolvedPath)) {
-				fs.unlinkSync(resolvedPath);
-				results.push(`- ✅ Deleted ${filename}`);
-			} else {
-				results.push(`- ⏭️ ${filename} not found (skipped)`);
-			}
-		} catch {
-			// Justification: best-effort cleanup — deletion may fail for reasons
-			// other than absence (permissions, concurrent lock, etc.). The file
-			// was already skipped if it didn't exist; this catch records a
-			// generic failure so the reset report reflects the partial result.
-			results.push(`- ❌ Failed to delete ${filename}`);
-		}
+	// The ledger is authoritative. Hold the same plan lock used by savePlan while
+	// clearing authority and deleting every derived projection. The lifecycle
+	// helper establishes the repository-wide order: plan.json lock, then ledger
+	// lock inside clearPlanLedgerForReset. A concurrent save therefore cannot
+	// publish a fresh projection between those two destructive steps.
+	try {
+		await _internals.withPlanLifecycleLock(
+			directory,
+			'reset-plan-lifecycle',
+			async () => {
+				const criticalProjectionNames = new Set(['plan.md', 'plan.json']);
+				const criticalProjectionBytes = new Map<string, Buffer>();
+				for (const filename of criticalProjectionNames) {
+					const resolvedPath = validateSwarmPath(directory, filename);
+					if (_internals.existsSync(resolvedPath)) {
+						criticalProjectionBytes.set(
+							filename,
+							_internals.readFileSync(resolvedPath),
+						);
+					}
+				}
+				try {
+					for (const filename of criticalProjectionNames) {
+						const resolvedPath = validateSwarmPath(directory, filename);
+						if (_internals.existsSync(resolvedPath))
+							_internals.unlinkSync(resolvedPath);
+					}
+					await _internals.clearPlanLedgerForReset(directory);
+				} catch (error) {
+					for (const [filename, bytes] of criticalProjectionBytes) {
+						try {
+							_internals.writeFileSync(
+								validateSwarmPath(directory, filename),
+								bytes,
+							);
+						} catch {}
+					}
+					throw error;
+				}
+				results.push('- ✅ Cleared authoritative plan ledger');
+				for (const filename of criticalProjectionNames) {
+					results.push(
+						criticalProjectionBytes.has(filename)
+							? `- ✅ Deleted ${filename}`
+							: `- ⏭️ ${filename} not found (skipped)`,
+					);
+				}
+
+				for (const filename of filesToReset) {
+					if (criticalProjectionNames.has(filename)) continue;
+					try {
+						const resolvedPath = validateSwarmPath(directory, filename);
+						if (_internals.existsSync(resolvedPath)) {
+							_internals.unlinkSync(resolvedPath);
+							results.push(`- ✅ Deleted ${filename}`);
+						} else {
+							results.push(`- ⏭️ ${filename} not found (skipped)`);
+						}
+					} catch {
+						results.push(`- ❌ Failed to delete ${filename}`);
+					}
+				}
+			},
+		);
+	} catch (err) {
+		results.push(
+			`- ❌ Failed to clear authoritative plan ledger: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return [
+			'## Swarm Reset Aborted',
+			'',
+			...results,
+			'',
+			'The reset could not complete safely. Any deleted critical projections were restored best-effort and the authoritative ledger was preserved whenever projection cleanup failed. Resolve the reported filesystem or ledger error and retry /swarm reset --confirm.',
+		].join('\n');
 	}
 
 	// Also clean up legacy root-level SWARM_PLAN artifacts (pre-v7.x sessions)
 	for (const filename of ['SWARM_PLAN.md', 'SWARM_PLAN.json']) {
 		try {
 			const rootPath = path.join(directory, filename);
-			if (fs.existsSync(rootPath)) {
-				fs.unlinkSync(rootPath);
+			if (_internals.existsSync(rootPath)) {
+				_internals.unlinkSync(rootPath);
 				results.push(`- ✅ Deleted ${filename} (root)`);
 			}
 		} catch (err) {
@@ -159,8 +234,8 @@ export async function handleResetCommand(
 	// Clean up summaries directory
 	try {
 		const summariesPath = validateSwarmPath(directory, 'summaries');
-		if (fs.existsSync(summariesPath)) {
-			fs.rmSync(summariesPath, { recursive: true, force: true });
+		if (_internals.existsSync(summariesPath)) {
+			_internals.rmSync(summariesPath, { recursive: true, force: true });
 			results.push('- ✅ Deleted summaries/ directory');
 		} else {
 			results.push('- ⏭️ summaries/ not found (skipped)');

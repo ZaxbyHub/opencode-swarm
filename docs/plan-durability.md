@@ -4,11 +4,84 @@
 
 **v6.42.0** introduced a durable plan durability model that provides crash recovery, audit logging, and corruption isolation for the swarm planning system. The core principle: the ledger is authoritative; projections are derived and can be rebuilt at any time.
 
+## SQLite plan-ledger migration (issue #2484 / D5)
+
+The plan ledger migration is additive to `.swarm/swarm.db`. It does not replace
+or reinterpret the existing durable-state tables. The D5 schema adds three
+tables: `plan_ledger_event` for the append-only event stream,
+`plan_ledger_state` for the authority mode, parity record, and terminal
+projection metadata, and `plan_ledger_import` for content-addressed legacy
+import records. SQLite transactions commit the event and authoritative state
+update together, so a visible tail always has a complete event prefix and its
+matching replay result.
+
+### Canonical bytes and text decoding
+
+The event BLOB is not a database driver's JSON value and is not regenerated
+from typed columns. It preserves the exact UTF-8 bytes emitted by the existing
+ledger serializer (`JSON.stringify(event)`, without the JSONL newline). Hashes
+and parity checks use those stored bytes rather than re-serializing the parsed
+object. Reads use fatal UTF-8 decoding, so malformed byte sequences fail
+closed. A valid UTF-8 encoding of the JavaScript replacement character U+FFFD
+remains valid plan data and is not confused with byte-decoding damage.
+
+### Legacy import, shadow release, and cutover
+
+Migration is deliberately staged. During the first release carrying D5, the
+existing `.swarm/plan-ledger.jsonl` remains the authority and SQLite is a
+`file_shadow`: eligible writes are compared against the additive SQLite copy,
+but a shadow failure does not make a plan write appear committed. Existing
+JSONL projects are not cut over merely because the plugin was updated.
+
+Import is idempotent and only runs when the target plan-ledger namespace is
+empty. The importer validates every JSONL record strictly, writes and fsyncs a
+content-addressed byte-for-byte archive before the database transaction, then
+commits the complete verified history in one transaction. The active JSONL is
+retained because it remains authoritative throughout the shadow release. A
+crash before commit imports nothing; a crash after commit cannot duplicate
+rows, and the legacy source is never deleted.
+
+After one full release of shadow operation and successful structured parity,
+a version gate may enable SQLite authority for a project. That gate is checked
+per project/plan and is not an immediate migration of every legacy project;
+legacy projects stay on the file authority until their import, parity, and
+cutover prerequisites are satisfied. Once SQLite authority is enabled,
+JSONL is a portable, human-inspectable **derived export**, regenerated from
+the committed SQLite prefix in canonical sequence order. It is not an
+independent write authority and must never be read back over a newer SQLite
+tail.
+
+### Independent parity and crash reconciliation
+
+Parity is structured and independent: it compares plan identity, sequence,
+event type, exact event bytes, previous/resulting plan hashes, and independently
+replayed terminal projections. It does not compare two projections
+produced by the same parser/serializer and therefore cannot make a shared bug
+look like agreement. The six surfaces are the replayed Plan, `plan.json`,
+`plan.md`, `SWARM_PLAN.json`, `SWARM_PLAN.md`, and `get_approved_plan` output.
+All are projections of the same authoritative event stream and remain
+rebuildable.
+
+Recovery after a crash or rollback is prefix-only. Reconciliation first finds
+the last mutually verified `(plan identity, sequence, digest, bytes)` prefix;
+it may remove or replay only an uncommitted suffix after that prefix. It must
+never rewrite a divergent committed prefix, choose a winner by timestamp, or
+merge two different plans. A divergence at or before the verified prefix
+fails closed, preserves both artifacts for diagnosis, and requires an
+explicit repair/import decision. Rollback applies the same rule to the
+restored checkpoint: restore the checkpoint-derived prefix, reconcile the
+SQLite tail transactionally, then rebuild projections; reset archives/removes
+the old plan namespace and starts a fresh plan epoch only after both
+authorities are settled. Close archives the durable database/export before
+cleanup, and a failed archive or reconciliation leaves recovery inputs in
+place for retry.
+
 ## File Roles
 
 | File | Purpose | Authority |
 |------|---------|-----------|
-| `.swarm/plan-ledger.jsonl` | Durable runtime record of all plan events | **Authoritative** — append-only, never delete |
+| `.swarm/swarm.db` (`plan_ledger_*`) | Exact event bytes plus transactional replay/tail state | **Authoritative after cutover**; verified shadow during the carrying release |
+| `.swarm/plan-ledger.jsonl` | Portable exact event stream | **Authoritative in `file_shadow`**, derived export after SQLite cutover |
 | `.swarm/plan.json` | Machine-readable projection of current plan state | Derived — can be rebuilt from ledger |
 | `.swarm/plan.md` | Human-readable plan view | Derived — generated from plan.json |
 | `.swarm/plan-export/SWARM_PLAN.md` | Operator checkpoint artifact | Export-only — not live source of truth |
@@ -36,13 +109,14 @@ At coder dispatch, scope-source precedence is active `declare_scope` binding, th
 
 ### Ledger append concurrency
 
-`appendLedgerEvent()` serializes its read -> validate -> rewrite sequence under
-a project-scoped lock keyed to `.swarm/plan-ledger.jsonl`. The lock is acquired
-before reading the latest ledger sequence and released only after the canonical
-ledger file has been replaced. This preserves monotonic sequence assignment and
-keeps `expectedSeq` / `expectedHash` stale-writer checks tied to the latest
-committed ledger state even when two OpenCode processes or background workers
-try to append at the same time.
+`appendLedgerEvent()` serializes its read -> validate -> commit sequence under a
+project-scoped lock keyed to `.swarm/plan-ledger.jsonl`. In `file_shadow`, the
+file commit happens first and the exact suffix is mirrored transactionally; a
+failed mirror remains repairable on the next read. After cutover, the SQLite
+event and terminal replay state commit together before the JSONL export is
+refreshed. This preserves monotonic sequence assignment and keeps
+`expectedSeq` / `expectedHash` stale-writer checks tied to the current authority
+even when two processes or background workers try to append at the same time.
 
 ### Ledger Event Types
 

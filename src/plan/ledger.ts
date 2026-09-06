@@ -8,6 +8,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import packageJson from '../../package.json' with { type: 'json' };
 import {
 	ExecutionProfileSchema,
 	type Plan,
@@ -18,6 +19,19 @@ import { withEvidenceLock } from '../evidence/lock.js';
 import { emit } from '../telemetry.js';
 import { criticalWarn, log } from '../utils/logger';
 import { assertProjectRoot } from '../utils/project-boundary';
+import {
+	appendSqliteLedger,
+	clearSqliteLedger,
+	cutoverSqliteLedger,
+	getPlanLedgerState,
+	hasSqliteLedger,
+	importSqliteLedger,
+	readSqliteLedgerEvents,
+	readSqliteLedgerEventsReadOnly,
+	recordSqliteLedgerParity,
+	replaceSqliteLedger,
+	SqliteLedgerStaleWriterError,
+} from './ledger-sqlite';
 import { normalizeExecutionProfileForHash } from './planning-profile';
 import { derivePlanId, derivePlanIdentityHash } from './utils';
 
@@ -424,6 +438,344 @@ function findRawMalformedSuffix(content: Buffer): Buffer {
 	return Buffer.alloc(0);
 }
 
+interface FileLedgerRead {
+	events: LedgerEvent[];
+	lines: Uint8Array[];
+	truncated: boolean;
+	badSuffix: string | null;
+}
+
+function isStructurallyValidLedgerEvent(value: unknown): value is LedgerEvent {
+	const event = asRecord(value);
+	return (
+		event !== null &&
+		Number.isSafeInteger(event.seq) &&
+		(event.seq as number) > 0 &&
+		typeof event.timestamp === 'string' &&
+		typeof event.plan_id === 'string' &&
+		typeof event.event_type === 'string' &&
+		typeof event.source === 'string' &&
+		typeof event.plan_hash_before === 'string' &&
+		typeof event.plan_hash_after === 'string' &&
+		typeof event.schema_version === 'string'
+	);
+}
+
+/** Read JSONL without replacement decoding and retain each exact event cell. */
+function readFileLedgerExact(directory: string): FileLedgerRead {
+	const ledgerPath = getLedgerPath(directory);
+	if (!fs.existsSync(ledgerPath)) {
+		return { events: [], lines: [], truncated: false, badSuffix: null };
+	}
+	const bytes = fs.readFileSync(ledgerPath);
+	const decoder = new TextDecoder('utf-8', { fatal: true });
+	const events: LedgerEvent[] = [];
+	const lines: Uint8Array[] = [];
+	let start = 0;
+	for (let index = 0; index <= bytes.length; index++) {
+		if (index < bytes.length && bytes[index] !== 0x0a) continue;
+		let end = index;
+		if (end > start && bytes[end - 1] === 0x0d) end--;
+		const line = bytes.subarray(start, end);
+		if (line.length > 0) {
+			try {
+				const parsed: unknown = JSON.parse(decoder.decode(line));
+				if (!isStructurallyValidLedgerEvent(parsed)) {
+					throw new Error('invalid ledger event shape');
+				}
+				events.push(parsed);
+				lines.push(new Uint8Array(line));
+			} catch {
+				return {
+					events,
+					lines,
+					truncated: true,
+					badSuffix: bytes.subarray(start).toString('utf8'),
+				};
+			}
+		}
+		start = index + 1;
+	}
+	return { events, lines, truncated: false, badSuffix: null };
+}
+
+function sqliteEventsAsLedger(directory: string): {
+	events: LedgerEvent[];
+	lines: Uint8Array[];
+} {
+	const rows = readSqliteLedgerEvents(directory).events;
+	return {
+		events: rows.map((row) => row.event as LedgerEvent),
+		lines: rows.map((row) => row.canonicalEvent),
+	};
+}
+
+function exactPrefix(prefix: Uint8Array[], complete: Uint8Array[]): boolean {
+	return (
+		prefix.length <= complete.length &&
+		prefix.every((line, index) =>
+			Buffer.from(line).equals(Buffer.from(complete[index]!)),
+		)
+	);
+}
+
+function eventsProjection(
+	directory: string,
+	events: LedgerEvent[],
+): {
+	replayHash: string;
+	projectionHash: string;
+	projection: Uint8Array;
+} {
+	const plan = reconstructPlanFromEvents(directory, structuredClone(events));
+	const projection = new TextEncoder().encode(JSON.stringify(plan));
+	return {
+		replayHash: plan
+			? computePlanLedgerHash(plan)
+			: crypto.createHash('sha256').update(projection).digest('hex'),
+		projectionHash: crypto
+			.createHash('sha256')
+			.update(projection)
+			.digest('hex'),
+		projection,
+	};
+}
+
+function stateForEvents(
+	directory: string,
+	events: LedgerEvent[],
+	authorityMode: 'file_shadow' | 'sqlite',
+) {
+	const terminal = eventsProjection(directory, events);
+	const last = events.at(-1);
+	return {
+		authorityMode,
+		shadowStartedVersion:
+			getPlanLedgerState(directory)?.shadowStartedVersion ??
+			packageJson.version,
+		parityStatus: 'pending' as const,
+		terminalProjectionHash: terminal.projectionHash,
+		terminalProjection: terminal.projection,
+		lastSeq: last?.seq ?? 0,
+		planId: last?.plan_id ?? null,
+		terminalPlanHash: last?.plan_hash_after ?? null,
+	};
+}
+
+function writePortableLedger(directory: string, lines: Uint8Array[]): void {
+	const ledgerPath = getLedgerPath(directory);
+	fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
+	const content = Buffer.concat(
+		lines.flatMap((line) => [Buffer.from(line), Buffer.from('\n')]),
+	);
+	const tempPath = `${ledgerPath}.sqlite-export.${Date.now()}.${Math.floor(Math.random() * 1e9)}.tmp`;
+	_internals.writeFileFsyncedThenRename(tempPath, ledgerPath, content);
+}
+
+function archiveLegacyLedger(
+	directory: string,
+	bytes: Buffer,
+): {
+	path: string;
+	hash: string;
+} {
+	const hash = crypto.createHash('sha256').update(bytes).digest('hex');
+	const archivePath = path.join(
+		directory,
+		'.swarm',
+		`plan-ledger.legacy-archive.${hash}.jsonl`,
+	);
+	if (!fs.existsSync(archivePath)) {
+		const tempPath = `${archivePath}.tmp.${Date.now()}`;
+		writeFileFsyncedThenRename(tempPath, archivePath, bytes);
+		fsyncRecoveryDirectory(path.dirname(archivePath));
+	}
+	return { path: archivePath, hash };
+}
+
+function importCanonicalIntoSqlite(
+	directory: string,
+	file: FileLedgerRead,
+	legacy: boolean,
+): void {
+	if (file.truncated) return;
+	const ledgerBytes = fs.readFileSync(getLedgerPath(directory));
+	const archive = legacy ? archiveLegacyLedger(directory, ledgerBytes) : null;
+	const terminal = eventsProjection(directory, file.events);
+	importSqliteLedger(directory, {
+		canonicalEvents: file.lines,
+		state: {
+			...stateForEvents(directory, file.events, 'file_shadow'),
+			fileReplayHash: terminal.replayHash,
+			sqliteReplayHash: terminal.replayHash,
+			parityStatus: 'clean',
+		},
+		source: 'plan-ledger.jsonl',
+		sourceHash: crypto.createHash('sha256').update(ledgerBytes).digest('hex'),
+		archivePath: archive?.path ?? null,
+		archiveHash: archive?.hash ?? null,
+		archiveSize: archive ? ledgerBytes.length : null,
+		archiveCreatedAt: archive ? new Date().toISOString() : null,
+		mode: 'file_shadow',
+		version: packageJson.version,
+	});
+}
+
+/**
+ * Reconcile the portable JSONL and SQLite streams only across exact byte
+ * prefixes. Divergent committed prefixes are never merged or timestamp-picked.
+ */
+function coordinateLedger(directory: string): FileLedgerRead {
+	const file = readFileLedgerExact(directory);
+	if (!hasSqliteLedger(directory)) {
+		if (file.events.length > 0 && !file.truncated) {
+			importCanonicalIntoSqlite(directory, file, true);
+		}
+		return file;
+	}
+
+	let sqlite = sqliteEventsAsLedger(directory);
+	const state = getPlanLedgerState(directory);
+	if (!state)
+		throw new Error('SQLite plan ledger has events but no authority state');
+
+	if (state.authorityMode === 'file_shadow') {
+		if (!fs.existsSync(getLedgerPath(directory))) {
+			// The shadow contains a previously verified complete history. Recreate a
+			// missing portable authority file rather than treating absence as an empty
+			// plan or allowing plan.md to win.
+			writePortableLedger(directory, sqlite.lines);
+			return {
+				events: sqlite.events,
+				lines: sqlite.lines,
+				truncated: false,
+				badSuffix: null,
+			};
+		}
+		if (file.truncated) {
+			if (!exactPrefix(file.lines, sqlite.lines)) {
+				throw new Error(
+					'PLAN_LEDGER_DIVERGED: malformed file prefix differs from SQLite authority',
+				);
+			}
+			writePortableLedger(directory, sqlite.lines);
+			return {
+				events: sqlite.events,
+				lines: sqlite.lines,
+				truncated: false,
+				badSuffix: null,
+			};
+		}
+		if (
+			file.events[0]?.seq === 1 &&
+			file.events[0]?.event_type === 'plan_created' &&
+			sqlite.events[0]?.plan_id !== file.events[0]?.plan_id
+		) {
+			try {
+				replaceSqliteLedger(directory, {
+					canonicalEvents: file.lines,
+					state: stateForEvents(directory, file.events, 'file_shadow'),
+					source: 'plan_identity_reinitialized',
+					mode: 'file_shadow',
+					version: packageJson.version,
+				});
+				sqlite = sqliteEventsAsLedger(directory);
+			} catch (error) {
+				log(
+					`[ledger] SQLite shadow re-root reconciliation deferred: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return file;
+			}
+		}
+		if (!exactPrefix(sqlite.lines, file.lines)) {
+			throw new Error(
+				'PLAN_LEDGER_DIVERGED: JSONL and SQLite committed prefixes differ',
+			);
+		}
+		try {
+			for (
+				let index = sqlite.lines.length;
+				index < file.lines.length;
+				index++
+			) {
+				appendSqliteLedger(directory, {
+					canonicalEvent: file.lines[index]!,
+					expectedSeq: index,
+					state: stateForEvents(
+						directory,
+						file.events.slice(0, index + 1),
+						'file_shadow',
+					),
+				});
+			}
+		} catch (error) {
+			// JSONL is still authoritative in shadow mode. The SQLite transaction
+			// rolled back event+state together, so leave the exact file suffix for a
+			// later read to retry rather than failing a committed plan save.
+			log(
+				`[ledger] SQLite shadow suffix repair deferred: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return file;
+		}
+		sqlite = sqliteEventsAsLedger(directory);
+		const fileProjection = eventsProjection(directory, file.events);
+		// SQLite parity is intentionally derived from its independently validated
+		// typed rows and committed state, not by feeding both stores through the
+		// same replay function. rowEvent() first proves every typed column matches
+		// the canonical BLOB; the terminal typed plan hash can then be compared with
+		// the file replay's reconstructed-plan hash.
+		const current = getPlanLedgerState(directory)!;
+		const sqliteReplayHash = sqlite.events.at(-1)?.plan_hash_after ?? '';
+		const sqliteProjectionHash = current.terminalProjectionHash;
+		const parityStatus =
+			fileProjection.replayHash === sqliteReplayHash &&
+			fileProjection.projectionHash === sqliteProjectionHash
+				? 'clean'
+				: 'diverged';
+		if (
+			current.parityStatus !== parityStatus ||
+			current.fileReplayHash !== fileProjection.replayHash ||
+			current.sqliteReplayHash !== sqliteReplayHash
+		) {
+			recordSqliteLedgerParity(directory, {
+				fileReplayHash: fileProjection.replayHash,
+				sqliteReplayHash,
+				terminalProjectionHash: sqliteProjectionHash,
+				parityStatus,
+			});
+		}
+		const refreshed = getPlanLedgerState(directory)!;
+		if (
+			refreshed.parityStatus === 'clean' &&
+			refreshed.shadowStartedVersion !== null &&
+			refreshed.shadowStartedVersion !== packageJson.version
+		) {
+			cutoverSqliteLedger(directory, {
+				expectedShadowStartedVersion: refreshed.shadowStartedVersion,
+			});
+		}
+		return file;
+	}
+
+	// SQLite commits before publishing its optional JSONL export. Consequently,
+	// no portable extension is trustworthy after cutover, even when it is a
+	// syntactically valid exact prefix extension. SQLite is the only authority
+	// here; any stale, truncated, divergent, or extended export is repaired below.
+	if (
+		file.truncated ||
+		file.lines.length !== sqlite.lines.length ||
+		!exactPrefix(file.lines, sqlite.lines)
+	) {
+		writePortableLedger(directory, sqlite.lines);
+	}
+	return {
+		events: sqlite.events,
+		lines: sqlite.lines,
+		truncated: false,
+		badSuffix: null,
+	};
+}
+
 /**
  * Compute a SHA-256 digest of the FULL plan state for the ledger hash chain.
  * Uses deterministic JSON serialization for consistent hashing.
@@ -583,7 +935,7 @@ export function computeCurrentPlanHash(directory: string): string {
  */
 export async function ledgerExists(directory: string): Promise<boolean> {
 	const ledgerPath = getLedgerPath(directory);
-	return fs.existsSync(ledgerPath);
+	return fs.existsSync(ledgerPath) || hasSqliteLedger(directory);
 }
 
 /**
@@ -593,39 +945,11 @@ export async function ledgerExists(directory: string): Promise<boolean> {
  * @returns Highest seq value, or 0 if ledger is empty/doesn't exist
  */
 export async function getLatestLedgerSeq(directory: string): Promise<number> {
-	const ledgerPath = getLedgerPath(directory);
-
-	if (!fs.existsSync(ledgerPath)) {
-		return 0;
-	}
-
-	try {
-		const content = fs.readFileSync(ledgerPath, 'utf8');
-		const lines = content
-			.trim()
-			.split('\n')
-			.filter((line) => line.trim() !== '');
-
-		if (lines.length === 0) {
-			return 0;
-		}
-
-		let maxSeq = 0;
-		for (const line of lines) {
-			try {
-				const event = JSON.parse(line) as { seq: number };
-				if (event.seq > maxSeq) {
-					maxSeq = event.seq;
-				}
-			} catch {
-				// Skip malformed lines
-			}
-		}
-
-		return maxSeq;
-	} catch {
-		return 0;
-	}
+	const coordinated = coordinateLedger(directory);
+	return coordinated.events.reduce(
+		(maximum, event) => Math.max(maximum, event.seq),
+		0,
+	);
 }
 
 /**
@@ -637,41 +961,8 @@ export async function getLatestLedgerSeq(directory: string): Promise<number> {
 export async function readLedgerEvents(
 	directory: string,
 ): Promise<LedgerEvent[]> {
-	const ledgerPath = getLedgerPath(directory);
-
-	if (!fs.existsSync(ledgerPath)) {
-		return [];
-	}
-
-	try {
-		const content = fs.readFileSync(ledgerPath, 'utf8');
-		const lines = content
-			.trim()
-			.split('\n')
-			.filter((line) => line.trim() !== '');
-
-		const events: LedgerEvent[] = [];
-		let skippedCount = 0;
-		for (const line of lines) {
-			try {
-				const event = JSON.parse(line) as LedgerEvent;
-				events.push(event);
-			} catch {
-				skippedCount++;
-			}
-		}
-		if (skippedCount > 0) {
-			log(
-				`[ledger] Skipped ${skippedCount} malformed line(s) in plan-ledger.jsonl`,
-			);
-		}
-
-		// Sort by seq ascending
-		events.sort((a, b) => a.seq - b.seq);
-		return events;
-	} catch {
-		return [];
-	}
+	const result = coordinateLedger(directory);
+	return [...result.events].sort((a, b) => a.seq - b.seq);
 }
 
 /**
@@ -747,6 +1038,31 @@ export async function initLedger(
 	const line = `${JSON.stringify(event)}\n`;
 
 	writeFileFsyncedThenRename(tempPath, ledgerPath, line);
+
+	// New projects also spend the carrying release in file-shadow mode. Keeping
+	// initialization on the same staged path as legacy projects exercises parity
+	// before a later plugin version is allowed to cut over.
+	const initialized = readFileLedgerExact(directory);
+	if (hasSqliteLedger(directory)) {
+		const priorMode =
+			getPlanLedgerState(directory)?.authorityMode ?? 'file_shadow';
+		try {
+			replaceSqliteLedger(directory, {
+				canonicalEvents: initialized.lines,
+				state: stateForEvents(directory, initialized.events, priorMode),
+				source: 'plan_identity_reinitialized',
+				mode: priorMode,
+				version: packageJson.version,
+			});
+		} catch (error) {
+			if (priorMode !== 'file_shadow') throw error;
+			log(
+				`[ledger] SQLite shadow re-root deferred after file commit: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	} else {
+		importCanonicalIntoSqlite(directory, initialized, false);
+	}
 }
 
 /**
@@ -1042,24 +1358,65 @@ export async function appendLedgerEvent(
 
 			// Ensure .swarm/ directory exists
 			fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
-
-			// Write to temp file then rename for atomicity.
-			// Random suffix prevents concurrent writers across processes from clobbering
-			// each other's temp file (each process writes its own uniquely-named temp).
-			const tempPath = `${ledgerPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
-			const line = `${JSON.stringify(event)}\n`;
-
-			// If ledger exists, append to it via temp file
-			if (!fs.existsSync(ledgerPath)) {
-				// Ledger not initialized - cannot append without plan_created event
+			const canonicalEvent = new TextEncoder().encode(
+				serializeLedgerEvent(event),
+			);
+			const state = getPlanLedgerState(directory);
+			if (!state) {
 				throw new Error('Ledger not initialized. Call initLedger() first.');
 			}
-			const existingContent = fs.readFileSync(ledgerPath, 'utf8');
 
-			// fsync the fully-rewritten temp file before renaming it over the
-			// canonical ledger so a crash mid-write cannot publish a truncated or
-			// partially-flushed ledger (see writeFileFsyncedThenRename).
-			writeFileFsyncedThenRename(tempPath, ledgerPath, existingContent + line);
+			if (state.authorityMode === 'sqlite') {
+				try {
+					const existing = sqliteEventsAsLedger(directory);
+					appendSqliteLedger(directory, {
+						canonicalEvent,
+						expectedSeq: latestSeq,
+						state: stateForEvents(
+							directory,
+							[...existing.events, event],
+							'sqlite',
+						),
+					});
+				} catch (error) {
+					if (error instanceof SqliteLedgerStaleWriterError) {
+						throw new LedgerStaleWriterError(error.message);
+					}
+					throw error;
+				}
+				try {
+					writePortableLedger(directory, sqliteEventsAsLedger(directory).lines);
+				} catch (error) {
+					criticalWarn(
+						`[ledger] SQLite committed event ${event.seq}, but refreshing the portable plan-ledger.jsonl export failed: ${error instanceof Error ? error.message : String(error)}. SQLite remains authoritative; a later read will retry the export.`,
+					);
+				}
+			} else {
+				// During the carrying release JSONL commits first. A shadow-store fault is
+				// observable but cannot make a file-authoritative save look uncommitted;
+				// the next read repairs the exact missing suffix transactionally.
+				const tempPath = `${ledgerPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
+				if (!fs.existsSync(ledgerPath)) {
+					throw new Error('Ledger not initialized. Call initLedger() first.');
+				}
+				const existingContent = fs.readFileSync(ledgerPath);
+				writeFileFsyncedThenRename(
+					tempPath,
+					ledgerPath,
+					Buffer.concat([
+						existingContent,
+						Buffer.from(canonicalEvent),
+						Buffer.from('\n'),
+					]),
+				);
+				try {
+					coordinateLedger(directory);
+				} catch (error) {
+					log(
+						`[ledger] SQLite shadow update deferred after file commit: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
 
 			return event;
 		},
@@ -1409,6 +1766,109 @@ export async function replaceTruncatedLedgerWithRecoveryRoot(
 	);
 }
 
+/** Clear authoritative plan-ledger rows after the reset command has archived them. */
+export async function clearPlanLedgerForReset(
+	directory: string,
+): Promise<void> {
+	assertProjectRoot(directory);
+	// The reset command has completed its archive first. Serialize the database
+	// clear and portable-export removal with readers/writers so an old JSONL file
+	// cannot be re-imported between those two destructive steps.
+	await withEvidenceLock(
+		directory,
+		LEDGER_LOCK_PATH,
+		'plan-ledger',
+		'reset-plan-ledger',
+		async () => {
+			clearSqliteLedger(directory);
+			try {
+				fs.unlinkSync(getLedgerPath(directory));
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+			}
+		},
+	);
+}
+
+/**
+ * Re-root the authoritative history for an explicit checkpoint rollback.
+ * Existing JSONL bytes are content-addressed before the SQLite transaction;
+ * the portable export is published only after the new SQLite root commits.
+ */
+export async function replacePlanLedgerWithRoot(
+	directory: string,
+	plan: Plan,
+	source: string,
+): Promise<void> {
+	assertProjectRoot(directory);
+	const validated = PlanSchema.parse(plan);
+	await withEvidenceLock(
+		directory,
+		LEDGER_LOCK_PATH,
+		'plan-ledger',
+		'replace-plan-ledger-root',
+		async () => {
+			const ledgerPath = getLedgerPath(directory);
+			if (fs.existsSync(ledgerPath)) {
+				archiveLegacyLedger(directory, fs.readFileSync(ledgerPath));
+			}
+			const planHash = computePlanLedgerHash(validated);
+			const root: LedgerEvent = {
+				seq: 1,
+				timestamp: new Date().toISOString(),
+				plan_id: derivePlanId(validated),
+				event_type: 'plan_created',
+				source,
+				plan_hash_before: '',
+				plan_hash_after: planHash,
+				schema_version: LEDGER_SCHEMA_VERSION,
+				payload: {
+					plan: validated,
+					payload_hash: planHash,
+					plan_epoch: crypto.randomUUID(),
+				},
+			};
+			const line = new TextEncoder().encode(serializeLedgerEvent(root));
+			const priorMode =
+				getPlanLedgerState(directory)?.authorityMode ?? 'file_shadow';
+			if (priorMode === 'file_shadow') {
+				writePortableLedger(directory, [line]);
+				try {
+					replaceSqliteLedger(directory, {
+						canonicalEvents: [line],
+						state: stateForEvents(directory, [root], priorMode),
+						source:
+							source === 'savePlan_identity_migration'
+								? 'plan_identity_reinitialized'
+								: 'checkpoint_rollback',
+						mode: priorMode,
+						version: packageJson.version,
+					});
+				} catch (error) {
+					log(
+						`[ledger] SQLite shadow re-root deferred after authoritative file commit: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				return;
+			}
+			replaceSqliteLedger(directory, {
+				canonicalEvents: [line],
+				state: stateForEvents(directory, [root], priorMode),
+				source: 'checkpoint_rollback',
+				mode: priorMode,
+				version: packageJson.version,
+			});
+			try {
+				writePortableLedger(directory, [line]);
+			} catch (error) {
+				criticalWarn(
+					`[ledger] SQLite committed rollback root, but refreshing the portable plan-ledger.jsonl export failed: ${error instanceof Error ? error.message : String(error)}. SQLite remains authoritative; a later read will retry the export.`,
+				);
+			}
+		},
+	);
+}
+
 /**
  * Options for replayFromLedger
  */
@@ -1458,6 +1918,48 @@ export async function replayFromLedger(
 ): Promise<Plan | null> {
 	const { plan } = await replayFromLedgerWithStatus(directory, options);
 	return plan;
+}
+
+/**
+ * Reconstruct a plan without repairing either ledger authority or its
+ * projections. This is deliberately separate from `replayFromLedgerWithStatus`:
+ * ordinary replay coordinates the file/SQLite shadows and quarantines corrupted
+ * suffixes, both of which are writes. Lifecycle previews need a strictly
+ * observational view even when plan.json is missing.
+ */
+export async function peekPlanFromLedger(
+	directory: string,
+	_options?: ReplayOptions,
+): Promise<ReplayStatusResult> {
+	const file = readFileLedgerExact(directory);
+	let events = file.events;
+	let truncated = file.truncated;
+	let badSuffix = file.badSuffix;
+	const sqliteReadOnly = readSqliteLedgerEventsReadOnly(directory);
+	if (sqliteReadOnly.events.length > 0) {
+		const sqlite = {
+			events: sqliteReadOnly.events.map((row) => row.event as LedgerEvent),
+		};
+		const authority = sqliteReadOnly.state;
+		// In SQLite mode the database is authoritative. In file-shadow mode the
+		// portable JSONL remains canonical unless it is absent; the latter is the
+		// ordinary post-crash case that normal replay would repair by exporting the
+		// SQLite shadow, which a dry-run must not do.
+		if (authority?.authorityMode === 'sqlite' || events.length === 0) {
+			events = sqlite.events;
+			truncated = false;
+			badSuffix = null;
+		}
+	}
+
+	if (events.length === 0) {
+		return { plan: null, truncated, badSuffix };
+	}
+	return {
+		plan: reconstructPlanFromEvents(directory, events),
+		truncated,
+		badSuffix,
+	};
 }
 
 /**
@@ -1770,42 +2272,17 @@ export async function readLedgerEventsWithIntegrity(
 ): Promise<LedgerIntegrityResult> {
 	const ledgerPath = getLedgerPath(directory);
 
-	if (!fs.existsSync(ledgerPath)) {
+	if (!fs.existsSync(ledgerPath) && !hasSqliteLedger(directory)) {
 		return { events: [], truncated: false, badSuffix: null };
 	}
 
 	try {
-		const content = fs.readFileSync(ledgerPath, 'utf8');
-		const lines = content.split('\n');
-
-		const events: LedgerEvent[] = [];
-		let truncated = false;
-		let badSuffix: string | null = null;
-
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-
-			// Skip empty lines
-			if (line.trim() === '') {
-				continue;
-			}
-
-			try {
-				const event = JSON.parse(line) as LedgerEvent;
-				events.push(event);
-			} catch {
-				// First malformed line found — stop here
-				truncated = true;
-				// Collect remaining content from this line to end of file
-				badSuffix = lines.slice(i).join('\n');
-				break;
-			}
-		}
-
-		// Sort by seq ascending
-		events.sort((a, b) => a.seq - b.seq);
-
-		return { events, truncated, badSuffix };
+		const result = coordinateLedger(directory);
+		return {
+			events: [...result.events].sort((a, b) => a.seq - b.seq),
+			truncated: result.truncated,
+			badSuffix: result.badSuffix,
+		};
 	} catch (error) {
 		// The ledger EXISTS but could not be read (EACCES, EIO, EISDIR, …).
 		// Returning the absent-ledger shape here is indistinguishable from ENOENT,
@@ -1816,7 +2293,14 @@ export async function readLedgerEventsWithIntegrity(
 				`PLAN_LEDGER_UNREADABLE: ${ledgerPath} exists but could not be read (${error instanceof Error ? error.message : String(error)}); plan state cannot be resolved. This is NOT an absent ledger — preserve the file and check permissions/filesystem health before retrying.`,
 			);
 		}
-		return { events: [], truncated: false, badSuffix: null };
+		// Preserve historical best-effort semantics only for filesystem read errors.
+		// SQLite transaction/parity/cutover failures are durability failures and
+		// must remain visible to the caller.
+		const code = (error as NodeJS.ErrnoException)?.code;
+		if (code && ['EACCES', 'EIO', 'EISDIR', 'EPERM'].includes(code)) {
+			return { events: [], truncated: false, badSuffix: null };
+		}
+		throw error;
 	}
 }
 
@@ -2101,6 +2585,7 @@ export const _internals = {
 	takeSnapshotEvent,
 	replayFromLedger,
 	replayFromLedgerWithStatus,
+	peekPlanFromLedger,
 	applyEventToPlan,
 	readLedgerEventsWithIntegrity,
 	quarantineLedgerSuffix,

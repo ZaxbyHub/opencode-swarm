@@ -379,7 +379,8 @@ Swarm creates a `.swarm/` directory in your project:
 
 ```
 .swarm/
-├── plan-ledger.jsonl  # Authoritative append-only plan history
+├── swarm.db           # SQLite plan history (shadow, then authority after cutover)
+├── plan-ledger.jsonl  # Portable event stream; authority during file-shadow rollout
 ├── plan.json          # Derived structured plan projection
 ├── plan.md            # Derived human-readable plan projection
 ├── context.md         # Project context and selected workflow notes

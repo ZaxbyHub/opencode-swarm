@@ -133,6 +133,8 @@ const RAW_DB_HANDLE_MODULES: Readonly<Record<string, string>> = {
 		'VACUUM INTO snapshot/verify connections — owned by the swarm.db / repo-memory registry rows',
 	'src/memory/sqlite-provider.ts':
 		'memory.db provider (own DB file) — owned by the memory-sqlite registry row',
+	'src/plan/ledger-sqlite.ts':
+		'plan-ledger event/state/import store — owned by the plan-ledger registry row (#2484)',
 	'src/tools/repo-graph/indexed-storage.ts':
 		'repo-memory.sqlite store — owned by the repo-memory-index registry row',
 };
