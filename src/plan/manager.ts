@@ -499,14 +499,10 @@ async function parsePlanJsonCached(directory: string): Promise<Plan | null> {
  * rejected by the decoder. ENOENT is the normal projection-missing signal.
  */
 async function readPlanJsonUtf8(directory: string): Promise<string | null> {
-	const planPath = validateSwarmPath(directory, 'plan.json');
-	try {
-		const bytes = await fsPromises.readFile(planPath);
-		return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
-		throw error;
-	}
+	// Route projection reads through the shared retry-aware reader so transient
+	// Windows AV/indexer locks and macOS rename visibility races are handled
+	// consistently with the other `.swarm/` file consumers.
+	return readSwarmFileAsync(directory, 'plan.json');
 }
 
 /**
