@@ -18,6 +18,7 @@ import {
 describe('issue #2105 worktree isolation recovery routing lifecycle', () => {
 	const harness = setupRecoveryIsolationHarness();
 	const originalTimeoutMs = _internals.worktreeSessionCreateTimeoutMs;
+	const originalSettleGraceMs = _internals.worktreeSessionCreateSettleGraceMs;
 	const originals = {
 		tryAcquireWorktreeLifecycleLock: _internals.tryAcquireWorktreeLifecycleLock,
 		preProvisionCollisionCheck: _internals.preProvisionCollisionCheck,
@@ -36,6 +37,7 @@ describe('issue #2105 worktree isolation recovery routing lifecycle', () => {
 	afterEach(() => {
 		Object.assign(_internals, originals);
 		_internals.worktreeSessionCreateTimeoutMs = originalTimeoutMs;
+		_internals.worktreeSessionCreateSettleGraceMs = originalSettleGraceMs;
 	});
 
 	test('precreate re-dispatch claims a preserved authority and reuses the preserved lane', async () => {
@@ -184,7 +186,9 @@ describe('issue #2105 worktree isolation recovery routing lifecycle', () => {
 		swarmState.opencodeClient = {
 			session: { create: createSession },
 		} as never;
-		_internals.worktreeSessionCreateTimeoutMs = 1;
+		// Issue #2599: deadline via the config knob; settle grace shrunk so
+		// the never-settling create gives up quickly.
+		_internals.worktreeSessionCreateSettleGraceMs = 10;
 		const replay = mock(() => [
 			{ authorityDigest: 'digest-timeout', outcome: 'noop' as const },
 		]);
@@ -240,7 +244,9 @@ describe('issue #2105 worktree isolation recovery routing lifecycle', () => {
 
 		await expect(
 			precreateStandardWorktreeSession({
-				config: { worktree: { policy: 'auto' } } as never,
+				config: {
+					worktree: { policy: 'auto', session_create_timeout_ms: 1 },
+				} as never,
 				directory: harness.directory,
 				parentSessionID: 'parent-1',
 				callID: 'call-1',

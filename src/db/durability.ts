@@ -28,6 +28,11 @@ export const DURABILITY_CLASSES: Readonly<Record<string, 'full' | 'normal'>> = {
 	coordination_state: 'full',
 	coordination_lease: 'full',
 	coordination_import: 'full',
+	// Plan-ledger event bytes, terminal projection state, and import markers are
+	// authoritative and must commit together at synchronous=FULL (#2484).
+	plan_ledger_event: 'full',
+	plan_ledger_state: 'full',
+	plan_ledger_import: 'full',
 	// Operational / diagnostic — NORMAL.
 	insight_candidate: 'normal',
 	phase_report: 'normal',

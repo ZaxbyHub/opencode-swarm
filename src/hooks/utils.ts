@@ -271,8 +271,10 @@ export async function readSwarmFileAsync(
 	directory: string,
 	filename: string,
 	cache?: Map<string, Promise<string | null>>,
+	reader?: (resolvedPath: string) => Promise<string | null>,
+	useArtifactCache = true,
 ): Promise<string | null> {
-	if (cache !== undefined) {
+	if (cache !== undefined && useArtifactCache) {
 		const key = `${directory}::${filename}`;
 		const cached = cache.get(key);
 		if (cached !== undefined) {
@@ -282,7 +284,13 @@ export async function readSwarmFileAsync(
 		}
 		// Store the promise BEFORE awaiting so any concurrent call for the same
 		// key picks up the in-flight promise instead of starting a second read.
-		const promise = readSwarmFileAsync(directory, filename);
+		const promise = readSwarmFileAsync(
+			directory,
+			filename,
+			undefined,
+			reader,
+			useArtifactCache,
+		);
 		cache.set(key, promise);
 		return promise;
 	}
@@ -341,12 +349,24 @@ export async function readSwarmFileAsync(
 		let resolvedPath = '';
 		try {
 			resolvedPath = _internals.validateSwarmPath(directory, filename);
-			return await _internals.readCachedTextFile(resolvedPath, async () => {
+			const read = async (): Promise<string | null> => {
+				if (reader !== undefined) return reader(resolvedPath);
 				const file = bunFile(resolvedPath);
 				return await file.text();
-			});
+			};
+			return useArtifactCache
+				? await _internals.readCachedTextFile(resolvedPath, read)
+				: await read();
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException)?.code;
+			// A caller-supplied decoder may reject malformed content with an
+			// error that has no filesystem errno. Preserve that signal instead
+			// of treating it like an unreadable optional artifact.
+			if (
+				reader !== undefined &&
+				(code === undefined || code === 'ERR_ENCODING_INVALID_ENCODED_DATA')
+			)
+				throw err;
 			if (code === 'ENOENT') {
 				// Retry-worthy = evidenced rename-race: this process wrote the
 				// file recently (intent OR completion recorded), or a previous

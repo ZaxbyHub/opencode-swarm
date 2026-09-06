@@ -112,6 +112,7 @@ import {
 
 export { resolveDelegatedPlanTaskId } from './task-id-resolver.js';
 
+import { closeProjectDb } from '../db/project-db';
 import {
 	abortCoderSettlement,
 	abortCoderSettlementIfDoomed,
@@ -124,6 +125,7 @@ import {
 } from '../workflow/coder-settlement.js';
 import { recoverPreparedTaskRepair } from '../workflow/task-repair.js';
 import { recoverPreparedTaskTerminal } from '../workflow/task-terminal.js';
+import { recordDeadLaneReclaim } from './delegation-gate/dead-lane-reclaim';
 import {
 	awaitingMergeByCallID,
 	checkStandardWorktreeSerializationRelease,
@@ -5257,10 +5259,40 @@ export function createDelegationGateHook(
 						reason,
 						directory,
 					);
-					await _wtiInternals.removeWorktree(
-						standardDispatch.handle.worktreePath,
-						directory,
-					);
+					// Issue #2599 AC5: release the lane DB handle before removal.
+					closeProjectDb(standardDispatch.handle.worktreePath);
+					const removal = await _wtiInternals
+						.removeWorktree(standardDispatch.handle.worktreePath, directory)
+						.catch((cleanupError: unknown) => ({
+							error:
+								cleanupError instanceof Error
+									? cleanupError.message
+									: String(cleanupError),
+						}));
+					const removalError =
+						typeof removal === 'object' &&
+						removal !== null &&
+						'error' in removal &&
+						typeof removal.error === 'string'
+							? removal.error
+							: undefined;
+					if (removalError) {
+						// Issue #2599 AC6: typed strand record + diagnostic instead of
+						// a silently wedged lane.
+						recordDeadLaneReclaim(directory, {
+							lanePath: standardDispatch.handle.worktreePath,
+							branchName: standardDispatch.handle.branchName,
+							parentSessionId: standardDispatch.parentSessionID,
+							taskId: standardDispatch.taskId,
+							reason: removalError,
+						});
+						pushAdvisory(
+							ensureAgentSession(standardDispatch.parentSessionID),
+							`WORKTREE_LANE_STRANDED: lane ${standardDispatch.handle.worktreePath} could not be removed (${removalError}). ` +
+								'A child session or system process may hold .swarm/swarm.db (WAL); its DB handle was released via closeProjectDb before this attempt. ' +
+								'reclaim scheduled at next start.',
+						);
+					}
 					await _wtiInternals.postMergeCleanup(
 						directory,
 						standardDispatch.handle.branchName,

@@ -9,12 +9,25 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { _internals, handleCloseCommand } from '../../../src/commands/close';
+import type { Plan } from '../../../src/config/plan-schema';
+import {
+	closeAllProjectDbs,
+	closeProjectDb,
+	getProjectDb,
+} from '../../../src/db/project-db';
+import { loadDatabaseCtor } from '../../../src/db/sqlite-loader';
+import { initLedger } from '../../../src/plan/ledger';
+import {
+	cutoverSqliteLedger,
+	getPlanLedgerState,
+} from '../../../src/plan/ledger-sqlite';
 
 let testDir: string;
 const swarmDir = (): string => path.join(testDir, '.swarm');
@@ -217,5 +230,133 @@ describe('handleCloseCommand --dry-run', () => {
 		expect(out).toContain('DRY RUN');
 		expect(out).toContain('plan-free session');
 		expect(existsSync(path.join(swarmDir(), 'events.jsonl'))).toBe(true);
+	});
+
+	it('regression: recovers a ledger-only plan without writing during dry-run', async () => {
+		const plan: Plan = {
+			schema_version: '1.0.0',
+			title: 'Ledger-only dry run',
+			swarm: 'close-dry-run',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Ledger phase',
+					status: 'in_progress',
+					tasks: [],
+				},
+			],
+		};
+		await initLedger(testDir, 'close-dry-run-plan', undefined, plan);
+		const ledgerPath = path.join(swarmDir(), 'plan-ledger.jsonl');
+		const beforeLedger = readFileSync(ledgerPath, 'utf8');
+		const beforeEntries = readdirSync(swarmDir()).sort();
+
+		const out = await handleCloseCommand(testDir, ['--dry-run']);
+
+		expect(out).toContain('DRY RUN');
+		expect(out).toContain('#1 Ledger phase');
+		// Previous code called loadPlan(), which rebuilt plan.json (and could repair
+		// the ledger) before checking --dry-run. A preview is now observational.
+		expect(existsSync(path.join(swarmDir(), 'plan.json'))).toBe(false);
+		expect(existsSync(path.join(swarmDir(), 'plan.md'))).toBe(false);
+		expect(readFileSync(ledgerPath, 'utf8')).toBe(beforeLedger);
+		expect(readdirSync(swarmDir()).sort()).toEqual(beforeEntries);
+	});
+
+	it('regression: does not migrate or journal a cold pre-ledger database during dry-run', async () => {
+		const plan: Plan = {
+			schema_version: '1.0.0',
+			title: 'Cold legacy DB dry run',
+			swarm: 'close-dry-run',
+			current_phase: 1,
+			phases: [
+				{ id: 1, name: 'Legacy phase', status: 'in_progress', tasks: [] },
+			],
+		};
+		await initLedger(testDir, 'close-dry-run-legacy-db', undefined, plan);
+		const db = getProjectDb(testDir);
+		db.run('DROP TABLE plan_ledger_event');
+		db.run('DROP TABLE plan_ledger_state');
+		db.run('DROP TABLE plan_ledger_import');
+		db.run('DELETE FROM schema_migrations WHERE version >= 33');
+		closeProjectDb(testDir);
+
+		const dbPath = path.join(swarmDir(), 'swarm.db');
+		const beforeDb = readFileSync(dbPath);
+		const beforeEntries = readdirSync(swarmDir()).sort();
+		const out = await handleCloseCommand(testDir, ['--dry-run']);
+
+		expect(out).toContain('DRY RUN');
+		expect(out).toContain('#1 Legacy phase');
+		expect(readFileSync(dbPath)).toEqual(beforeDb);
+		expect(readdirSync(swarmDir()).sort()).toEqual(beforeEntries);
+	});
+
+	it('regression: sees SQLite authority committed in a live WAL during dry-run', async () => {
+		const plan: Plan = {
+			schema_version: '1.0.0',
+			title: 'Hot WAL dry run',
+			swarm: 'close-dry-run',
+			current_phase: 1,
+			phases: [
+				{ id: 1, name: 'Hot WAL phase', status: 'in_progress', tasks: [] },
+			],
+		};
+		await initLedger(testDir, 'close-dry-run-hot-wal', undefined, plan);
+		const state = getPlanLedgerState(testDir);
+		expect(state?.parityStatus).toBe('clean');
+		cutoverSqliteLedger(testDir, {
+			expectedShadowStartedVersion: state?.shadowStartedVersion ?? undefined,
+			version: '999.0.0',
+		});
+		rmSync(path.join(swarmDir(), 'plan-ledger.jsonl'));
+
+		const out = await handleCloseCommand(testDir, ['--dry-run']);
+
+		expect(out).toContain('DRY RUN');
+		expect(out).toContain('#1 Hot WAL phase');
+		expect(out).not.toContain('plan-free session');
+	});
+
+	it('regression: sees SQLite authority left in a WAL after a fresh-process restart', async () => {
+		const plan: Plan = {
+			schema_version: '1.0.0',
+			title: 'Cold WAL dry run',
+			swarm: 'close-dry-run',
+			current_phase: 1,
+			phases: [
+				{ id: 1, name: 'Cold WAL phase', status: 'in_progress', tasks: [] },
+			],
+		};
+		await initLedger(testDir, 'close-dry-run-cold-wal', undefined, plan);
+		const state = getPlanLedgerState(testDir);
+		expect(state?.parityStatus).toBe('clean');
+		cutoverSqliteLedger(testDir, {
+			expectedShadowStartedVersion: state?.shadowStartedVersion ?? undefined,
+			version: '999.0.0',
+		});
+		rmSync(path.join(swarmDir(), 'plan-ledger.jsonl'));
+
+		// Drop the process-local cache, then leave a committed change in the WAL
+		// through an independent writer. The dry-run must read that WAL without
+		// reopening the project database as a mutating cached handle.
+		closeAllProjectDbs();
+		const Db = loadDatabaseCtor();
+		const writer = new Db(path.join(swarmDir(), 'swarm.db'));
+		writer.run('PRAGMA journal_mode = WAL;');
+		writer.run(
+			"UPDATE plan_ledger_state SET updated_at = '2030-01-01T00:00:00.000Z' WHERE id = 1",
+		);
+		expect(existsSync(path.join(swarmDir(), 'swarm.db-wal'))).toBe(true);
+
+		try {
+			const out = await handleCloseCommand(testDir, ['--dry-run']);
+			expect(out).toContain('DRY RUN');
+			expect(out).toContain('#1 Cold WAL phase');
+			expect(out).not.toContain('plan-free session');
+		} finally {
+			writer.close();
+		}
 	});
 });

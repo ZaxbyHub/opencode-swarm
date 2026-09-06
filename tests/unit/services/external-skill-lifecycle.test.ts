@@ -125,7 +125,7 @@ async function seedCandidate(
 	const store = createExternalSkillStore(directory, { max_candidates: 500 });
 	const skillBody = overrides.skill_body ?? 'Safe skill body content.';
 	const sha256 = overrides.sha256 ?? computeHash(skillBody);
-	const fetchedAt = overrides.fetched_at ?? '2026-06-09T12:00:00.000Z';
+	const fetchedAt = overrides.fetched_at ?? FIXED_TIMESTAMP;
 	return store.add({
 		source_url: 'https://example.com/skill.md',
 		source_type: 'github',

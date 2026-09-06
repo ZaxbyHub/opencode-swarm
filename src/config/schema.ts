@@ -2898,6 +2898,23 @@ export const WorktreeIsolationConfigSchema = z.object({
 	 */
 	serialization_release_after_ms: z.number().int().positive().default(60_000),
 	/**
+	 * Issue #2599: client-side budget for the lane child `session.create` call
+	 * in worktree-isolated dispatches (and the recovery-lane equivalent), in
+	 * milliseconds. On hosts where the child session's plugin init in a fresh
+	 * worktree copy legitimately exceeds the old hardcoded 5 s (bundled-skill
+	 * sync + repo-graph fingerprint + SQLite open on a cold FS), every
+	 * dispatch failed at the deadline and — worse — leaked the late-accepted
+	 * child session, which held the lane's `swarm.db` WAL lock. Default raised
+	 * 5 000 → 30 000: bounded and honest while covering cold-host child init.
+	 * Deadline failures name this knob in their diagnostic.
+	 */
+	session_create_timeout_ms: z
+		.number()
+		.int()
+		.min(1000)
+		.max(120000)
+		.default(30_000),
+	/**
 	 * FR-201 SC-124: Per-lane runtime profile injection (env vars, port allocation).
 	 * When enabled, each lane gets deterministic PORT = base + laneIndex * stride,
 	 * plus any custom env_overrides and cache_redirects merged in.
@@ -3402,6 +3419,32 @@ export type LaneLivenessWatchdogConfig = z.infer<
 >;
 
 /**
+ * Issue #2507 dispatch protection: an action-local spawn-protection circuit
+ * plus a token-bucket dispatch rate limit for native task delegations.
+ *
+ * Default-ON follows the guardrails family (`guardrails.enabled` defaults
+ * true): the numbers are deliberately conservative (10 dispatches per second
+ * with a burst of 10 never waits in normal use), and every knob is
+ * user-overridable — set `enabled: false` to opt out entirely, or
+ * `rate_per_second: 0` to disable only the limiter. Parameter surface
+ * adopted with credit from opencode-ensemble (reimplemented per ADR 0002 —
+ * no upstream code is ported).
+ */
+export const DispatchProtectionConfigSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		spawn_failure_threshold: z.number().int().min(1).max(50).default(3),
+		half_open_after_ms: z.number().int().min(1).max(3_600_000).default(30_000),
+		rate_per_second: z.number().min(0).max(10_000).default(10),
+		burst_capacity: z.number().int().min(1).max(10_000).default(10),
+	})
+	.strict();
+
+export type DispatchProtectionConfig = z.infer<
+	typeof DispatchProtectionConfigSchema
+>;
+
+/**
  * Issue #2384: deprecated transcript-row settlement for Profile A PR-review
  * base/micro discovery lanes is an explicit compatibility opt-in. Omitted
  * config resolves false in consumers; legacy transcript parsing remains a
@@ -3574,6 +3617,13 @@ export const PluginConfigSchema = z.object({
 	// feature; timeout_ms is the single effective PR-lane horizon when on).
 	lane_liveness_watchdog: LaneLivenessWatchdogConfigSchema.optional().describe(
 		'Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes.',
+	),
+
+	// Issue #2507 (G3): dispatch protection for native task delegations —
+	// action-local spawn circuit + token-bucket rate limit (rate 0 disables the
+	// limiter; enabled false disables the whole section).
+	dispatch_protection: DispatchProtectionConfigSchema.optional().describe(
+		'Dispatch protection: action-local spawn-failure circuit breaker and token-bucket rate limiting for native task delegations.',
 	),
 
 	// Deprecated transcript-row settlement compatibility for Profile A

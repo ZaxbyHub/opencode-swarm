@@ -737,7 +737,7 @@ describe('Adversarial: Concurrent temp file collision', () => {
 
 		// Initialize ledger first
 		const { initLedger } = await import('../../../src/plan/ledger');
-		await initLedger(tempDir, 'test-plan-id', '', testPlan);
+		await initLedger(tempDir, 'test-swarm-Test_Plan', '', testPlan);
 
 		// Now try concurrent updates
 		const results = await Promise.allSettled([

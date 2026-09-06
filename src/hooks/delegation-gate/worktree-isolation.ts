@@ -14,6 +14,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { PluginConfig, WorktreeIsolationConfig } from '../../config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
+import { closeProjectDb } from '../../db/project-db';
 import { tryAcquireLock } from '../../parallel/file-locks';
 import { recordLiveLaneOwner } from '../../parallel/lane-owners';
 import { isUntrustedEnvKey, isValidEnvKey } from '../../sandbox/executor';
@@ -26,7 +27,7 @@ import {
 import { pushAdvisory } from '../../utils/advisory-queue';
 import { bunSpawn } from '../../utils/bun-compat';
 import { sameProjectRoot } from '../../utils/canonical-root.js';
-import { teardownEphemeralSession } from '../../utils/ephemeral-session-teardown.js';
+import { teardownEphemeralSessionVerified } from '../../utils/ephemeral-session-teardown.js';
 import { resolveGitExecutable } from '../../utils/git-executable.js';
 import * as logger from '../../utils/logger.js';
 import { withTimeout } from '../../utils/timeout.js';
@@ -55,6 +56,7 @@ import {
 	SOURCE_WORKTREE_UNCERTAIN_STAGE,
 } from '../../worktree/merge';
 import { verifyReviewerScopeGenerationMergeBack } from '../reviewer-scope-mergeback';
+import { recordDeadLaneReclaim } from './dead-lane-reclaim';
 import {
 	clearWorktreeMergeStatus,
 	recordWorktreeMergeFailure,
@@ -319,37 +321,144 @@ const serializationStateBySessionID = new Map<
 >();
 
 const WORKTREE_RECOVERY_CLAIM_LEASE_MS = 5 * 60_000;
-const WORKTREE_SESSION_CREATE_TIMEOUT_MS = 5_000;
+/**
+ * Issue #2599: default for `worktree.session_create_timeout_ms` (mirrored in
+ * WorktreeIsolationConfigSchema + DEFAULT_WORKTREE_ISOLATION_CONFIG). The old
+ * hardcoded 5 s budget failed every dispatch on hosts whose fresh-worktree
+ * child init legitimately exceeds it (cold-FS plugin init) AND leaked the
+ * late-accepted child session, locking the lane DB.
+ */
+const WORKTREE_SESSION_CREATE_TIMEOUT_MS = 30_000;
+const WORKTREE_SESSION_CREATE_SETTLE_GRACE_MS = 5_000;
 
+type CreateSettleState<T> =
+	| { status: 'fulfilled'; result: T }
+	| { status: 'rejected' };
+
+/**
+ * Issue #2599: bounded lane session.create with deterministic late-settle
+ * handling. The create promise's outcome is captured exactly once into a
+ * derived settle-state promise — never a mutable flag read across async
+ * continuations — so a create that settles after the deadline reaches
+ * `onLateResolve` (verified teardown of the late child) under EVERY
+ * microtask interleaving, and only after the settle (or this grace bound)
+ * does the caller's lane cleanup begin.
+ */
 async function createSessionWithinBudget<T>(
 	promise: Promise<T>,
 	label: string,
 	onLateResolve?: (result: T) => Promise<void> | void,
+	timeoutMs: number = _internals.worktreeSessionCreateTimeoutMs,
 ): Promise<T> {
-	let timedOut = false;
-	void promise.then(
-		(result) => {
-			if (timedOut) {
-				void onLateResolve?.(result);
-			}
-		},
-		() => {
-			// If the create promise rejects after the timeout fires, the caller's
-			// failure path has already been entered. No extra cleanup is needed.
-		},
-	);
+	const settled = new Promise<CreateSettleState<T>>((resolveState) => {
+		void promise.then(
+			(result) => resolveState({ status: 'fulfilled', result }),
+			() => resolveState({ status: 'rejected' }),
+		);
+	});
 	try {
 		return await withTimeout(
 			promise,
-			_internals.worktreeSessionCreateTimeoutMs,
+			timeoutMs,
 			new Error(
-				`${label} deadline expired after ${_internals.worktreeSessionCreateTimeoutMs}ms`,
+				`${label} deadline expired after ${timeoutMs}ms (worktree.session_create_timeout_ms)`,
 			),
 		);
 	} catch (error) {
-		timedOut = true;
+		// Deadline fired. Attach exactly ONE settle-continuation that runs
+		// verified teardown if the create FULFILLS — whenever that happens,
+		// even after the settle grace below expires (the create may settle
+		// long after the deadline error reached the caller; `settled`
+		// resolves exactly once, so teardown fires at most once). A late
+		// REJECTION needs no cleanup (the caller's failure path is already
+		// entered — the pre-#2599 contract, preserved).
+		//
+		// The continuation gets its own TERMINAL catch. Under the current
+		// race-based withTimeout the grace await's Promise.race already
+		// attaches a handler that would absorb a late rejection, but that is
+		// an implementation detail of src/utils/timeout.ts, not a contract:
+		// this terminal catch makes the continuation's error handling
+		// self-contained (and logged) no matter how withTimeout evolves
+		// (#2599 review round 1).
+		const teardown = settled
+			.then(
+				async (state) => {
+					if (state.status === 'fulfilled') {
+						await onLateResolve?.(state.result);
+					}
+				},
+				() => {
+					// `settled` never rejects by construction; defensive only.
+				},
+			)
+			.catch((teardownError: unknown) => {
+				logger.log(
+					`[worktree-isolation] ${label} late-settle teardown failed: ${
+						teardownError instanceof Error
+							? teardownError.message
+							: String(teardownError)
+					}`,
+				);
+			});
+		// AC4: give the create a bounded chance to settle BEFORE the caller's
+		// lane cleanup starts, so deletion never races a booting child; a
+		// create that never settles gives up at the grace bound.
+		await withTimeout(
+			teardown,
+			_internals.worktreeSessionCreateSettleGraceMs,
+			new Error(`${label} settle grace expired`),
+		).catch(() => {});
 		throw error;
 	}
+}
+
+/**
+ * Issue #2599: effective lane session-create deadline. The user's explicit
+ * `worktree.session_create_timeout_ms` wins when set. NOTE: `args.config` is
+ * the POST-zod-parse config (loader safeParse), so the schema's
+ * `.default(30_000)` already supplies 30_000 for an unset knob in production —
+ * the `_internals.worktreeSessionCreateTimeoutMs` fallback is reachable only
+ * in tests (and from raw, unparseable config objects), where it preserves the
+ * seam's pre-#2599 role as the test override for the dispatch paths.
+ */
+function resolveSessionCreateTimeoutMs(
+	args: Parameters<typeof precreateStandardWorktreeSession>[0],
+): number {
+	const raw = (
+		args.config as
+			| { worktree?: { session_create_timeout_ms?: number } }
+			| undefined
+	)?.worktree?.session_create_timeout_ms;
+	return raw ?? _internals.worktreeSessionCreateTimeoutMs;
+}
+
+/**
+ * Issue #2599 AC6: a lane whose removal failed on a held handle (EBUSY) is
+ * recorded for next-start reclaim and surfaced as a typed, actionable
+ * diagnostic instead of being silently wedged until host restart.
+ */
+async function handleStrandedLane(lane: {
+	directory: string;
+	parentSessionID: string;
+	lanePath: string;
+	branchName: string;
+	taskId: string;
+	reason: string;
+}): Promise<void> {
+	recordDeadLaneReclaim(lane.directory, {
+		lanePath: lane.lanePath,
+		branchName: lane.branchName,
+		parentSessionId: lane.parentSessionID,
+		taskId: lane.taskId,
+		reason: lane.reason,
+	});
+	const session = ensureAgentSession(lane.parentSessionID);
+	pushAdvisory(
+		session,
+		`WORKTREE_LANE_STRANDED: lane ${lane.lanePath} could not be removed (${lane.reason}). ` +
+			'A child session or system process may hold .swarm/swarm.db (WAL); its DB handle was released via closeProjectDb before this attempt. ' +
+			'reclaim scheduled at next start.',
+	);
 }
 
 interface RecoverySessionLaunch {
@@ -1207,12 +1316,26 @@ export async function precreateStandardWorktreeSession(args: {
 									async (result) => {
 										const lateChildSessionId = result.data?.id;
 										if (lateChildSessionId) {
-											await teardownEphemeralSession(
-												client.session,
-												lateChildSessionId,
-											);
+											// Issue #2599: verified teardown. A surviving
+											// late-accepted recovery child would re-lock the
+											// preserved lane's swarm.db. The lane itself is
+											// owned by recovery records (never reclaimed
+											// here) — surface the leak, don't schedule
+											// reclaim for a protected lane.
+											const verification =
+												await teardownEphemeralSessionVerified(
+													client.session,
+													lateChildSessionId,
+												);
+											if (!verification.ok) {
+												pushAdvisory(
+													ensureAgentSession(args.parentSessionID),
+													`WORKTREE_RECOVERY_CHILD_SESSION_LEAKED: recovery child session ${lateChildSessionId} survived verified teardown (${verification.reason}); it holds the lane swarm.db at ${collision.worktreePath}. Retry the dispatch or restart the host to release it.`,
+												);
+											}
 										}
 									},
+									resolveSessionCreateTimeoutMs(args),
 								);
 								recoveredChildSessionId = createResult.data?.id ?? '';
 								if (!recoveredChildSessionId) {
@@ -1276,10 +1399,19 @@ export async function precreateStandardWorktreeSession(args: {
 					// prompt, so abort-then-delete is safe and bounded.
 					_internals.replayWorktreeRecoveryClaimJournal(args.directory);
 					if (recoveredChildSessionId) {
-						await teardownEphemeralSession(
+						// Issue #2599: verified teardown of the orphaned recovery
+						// child; a survivor surfaces a typed advisory (the preserved
+						// lane is recovery-protected — never scheduled for reclaim).
+						const verification = await teardownEphemeralSessionVerified(
 							client.session,
 							recoveredChildSessionId,
 						);
+						if (!verification.ok) {
+							pushAdvisory(
+								ensureAgentSession(args.parentSessionID),
+								`WORKTREE_RECOVERY_CHILD_SESSION_LEAKED: recovery child session ${recoveredChildSessionId} survived verified teardown (${verification.reason}); it holds the lane swarm.db at ${collision.worktreePath}. Retry the dispatch or restart the host to release it.`,
+							);
+						}
 					}
 					hardStopStandardWorktreeLifecycle(
 						args.parentSessionID,
@@ -1381,6 +1513,8 @@ export async function precreateStandardWorktreeSession(args: {
 						);
 					}
 
+					// Issue #2599 AC5: release the lane DB handle before deletion.
+					closeProjectDb(collision.worktreePath);
 					const removeResult = await _internals.removeWorktree(
 						collision.worktreePath,
 						args.directory,
@@ -1617,25 +1751,63 @@ export async function precreateStandardWorktreeSession(args: {
 				async (result) => {
 					const lateChildSessionId = result.data?.id;
 					if (lateChildSessionId) {
-						await teardownEphemeralSession(client.session, lateChildSessionId);
+						// Issue #2599: the create settled after the deadline —
+						// verified teardown of the late child, and a typed strand
+						// record when it survives (its plugin activity holds the
+						// lane's swarm.db WAL lock).
+						const verification = await teardownEphemeralSessionVerified(
+							client.session,
+							lateChildSessionId,
+						);
+						if (!verification.ok) {
+							await handleStrandedLane({
+								directory: args.directory,
+								parentSessionID: args.parentSessionID,
+								lanePath: handle.worktreePath,
+								branchName: handle.branchName,
+								taskId: args.taskId,
+								reason: `late child session ${lateChildSessionId} survived verified teardown (${verification.reason})`,
+							});
+						}
 					}
 				},
+				resolveSessionCreateTimeoutMs(args),
 			);
 		} catch (error) {
-			await _internals
+			// Issue #2599 AC5: release this process's handle on the lane DB
+			// BEFORE any deletion attempt (Windows WAL lock ⇒ EBUSY).
+			closeProjectDb(handle.worktreePath);
+			const removal = await _internals
 				.removeWorktree(handle.worktreePath, args.directory, {
 					force: true,
 					worktreeDir: worktreeConfig.worktree_dir,
 				})
-				.catch((cleanupError: unknown) => {
-					logger.log(
-						`[worktree-isolation] session-create failure cleanup could not remove lane ${handle.worktreePath}: ${
-							cleanupError instanceof Error
-								? cleanupError.message
-								: String(cleanupError)
-						}`,
-					);
+				.catch((cleanupError: unknown) => ({
+					error:
+						cleanupError instanceof Error
+							? cleanupError.message
+							: String(cleanupError),
+				}));
+			const removalError =
+				typeof removal === 'object' &&
+				removal !== null &&
+				'error' in removal &&
+				typeof removal.error === 'string'
+					? removal.error
+					: undefined;
+			if (removalError) {
+				logger.log(
+					`[worktree-isolation] session-create failure cleanup could not remove lane ${handle.worktreePath}: ${removalError}`,
+				);
+				await handleStrandedLane({
+					directory: args.directory,
+					parentSessionID: args.parentSessionID,
+					lanePath: handle.worktreePath,
+					branchName: handle.branchName,
+					taskId: args.taskId,
+					reason: removalError,
 				});
+			}
 			_internals.removeWorktreeProvisioningOwner(
 				args.directory,
 				args.callID,
@@ -1653,20 +1825,39 @@ export async function precreateStandardWorktreeSession(args: {
 		if (!createResult?.data?.id) {
 			// Issue #2271 bug 1: an abandoned lane here feeds future collision
 			// churn — surface the failed cleanup instead of swallowing it silently.
-			await _internals
+			// Issue #2599 AC5: close the lane DB handle before deletion.
+			closeProjectDb(handle.worktreePath);
+			const removal = await _internals
 				.removeWorktree(handle.worktreePath, args.directory, {
 					force: true,
 					worktreeDir: worktreeConfig.worktree_dir,
 				})
-				.catch((cleanupError: unknown) => {
-					logger.log(
-						`[worktree-isolation] session-create failure cleanup could not remove lane ${handle.worktreePath}: ${
-							cleanupError instanceof Error
-								? cleanupError.message
-								: String(cleanupError)
-						}`,
-					);
+				.catch((cleanupError: unknown) => ({
+					error:
+						cleanupError instanceof Error
+							? cleanupError.message
+							: String(cleanupError),
+				}));
+			const removalError =
+				typeof removal === 'object' &&
+				removal !== null &&
+				'error' in removal &&
+				typeof removal.error === 'string'
+					? removal.error
+					: undefined;
+			if (removalError) {
+				logger.log(
+					`[worktree-isolation] session-create failure cleanup could not remove lane ${handle.worktreePath}: ${removalError}`,
+				);
+				await handleStrandedLane({
+					directory: args.directory,
+					parentSessionID: args.parentSessionID,
+					lanePath: handle.worktreePath,
+					branchName: handle.branchName,
+					taskId: args.taskId,
+					reason: removalError,
 				});
+			}
 			_internals.removeWorktreeProvisioningOwner(
 				args.directory,
 				args.callID,
@@ -2664,6 +2855,10 @@ export async function cleanupStandardWorktreeForCallId(
 	// Remove the worktree directory.
 	let removedWorktree = false;
 	try {
+		// Issue #2599 AC5: release this process's handle on the lane DB
+		// before deletion (Windows WAL lock ⇒ EBUSY), covering the residual
+		// fs.rm fallback below as well.
+		closeProjectDb(worktreePath);
 		const result = await _internals.removeWorktree(worktreePath, directory, {
 			force: true,
 			worktreeDir: worktree_dir,
@@ -3377,6 +3572,18 @@ export const _internals = {
 	preserveDirtyWorktreeAtPath,
 	/** Bounded lane session.create timeout (tests may override). */
 	worktreeSessionCreateTimeoutMs: WORKTREE_SESSION_CREATE_TIMEOUT_MS,
+	/**
+	 * Issue #2599 AC4: bound on how long the deadline path waits for the
+	 * create promise to settle before proceeding to lane cleanup. Tests
+	 * override this to keep never-settling-create cases fast.
+	 */
+	worktreeSessionCreateSettleGraceMs: WORKTREE_SESSION_CREATE_SETTLE_GRACE_MS,
+	/**
+	 * Issue #2599: the settle-state-machine budget wrapper, exposed so tests
+	 * can drive both late-settle interleavings directly with controlled
+	 * promises (no racy shared flag is involved).
+	 */
+	createSessionWithinBudget,
 	/** FR-001a: abort entry point for in-flight dispatches. */
 	abortStandardWorktreeDispatch,
 	standardWorktreeByCallID,

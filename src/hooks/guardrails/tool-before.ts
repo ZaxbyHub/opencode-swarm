@@ -56,7 +56,10 @@ import { criticalWarn, warn } from '../../utils';
 import { normalizePatchIndentation } from '../../utils/patch-dedent';
 import { isPathUnderSwarmWorktreeBase } from '../../worktree/core.js';
 import { detectLoop } from '../loop-detector';
-import { normalizeToolName } from '../normalize-tool-name';
+import {
+	normalizeToolName,
+	normalizeToolNameLowerCase,
+} from '../normalize-tool-name';
 import {
 	detectInteractiveSession,
 	detectPosixWrites,
@@ -1755,14 +1758,17 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	}
 
 	/**
-	 * Detects and breaks delegation loops for Task tool calls.
+	 * Detects and breaks delegation loops for native task tool calls.
+	 * The host's tool id is lowercase `task` (issue #2507 / HOOKS-2); the
+	 * shared normalizer also strips namespace prefixes, so the legacy
+	 * capitalised spelling keeps working.
 	 */
 	function handleLoopDetection(
 		sessionID: string,
 		tool: string,
 		args: unknown,
 	): void {
-		if (tool !== 'Task') return;
+		if (normalizeToolNameLowerCase(tool) !== 'task') return;
 
 		const loopArgs = args as Record<string, unknown> | undefined;
 		const loopResult = detectLoop(sessionID, tool, loopArgs);

@@ -50,6 +50,7 @@ mock.module('../../../src/plan/manager.js', () => ({
 	migrateLegacyPlan: mock(),
 	regeneratePlanMarkdown: mock(),
 	closePlanTerminalState: async () => {},
+	withPlanLifecycleLock: async <T>(_: string, fn: () => Promise<T>) => fn(),
 	_snapshot_test_exports: {},
 }));
 

@@ -1,14 +1,15 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as realFs from 'node:fs';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// The only cross-module mock in this file is the scoped node:fs error simulation.
-// The reset command does not import state; this suite verifies the real singleton
-// remains intact without a process-global state mock.
-import { handleResetCommand } from '../../../src/commands/reset';
+import {
+	handleResetCommand,
+	_internals as resetInternals,
+} from '../../../src/commands/reset';
+import type { Plan } from '../../../src/config/plan-schema';
+import { savePlan } from '../../../src/plan/manager';
 import {
 	getSessionBudgetPct,
 	setSessionBudget,
@@ -24,8 +25,6 @@ describe('handleResetCommand', () => {
 	});
 
 	afterEach(async () => {
-		// Restore the node:fs mock used by the EBUSY/EACCES cases below.
-		mock.restore();
 		if (existsSync(tempDir)) {
 			await rm(tempDir, { recursive: true, force: true });
 		}
@@ -293,7 +292,7 @@ describe('handleResetCommand', () => {
 		const result = await handleResetCommand(tempDir, ['--confirm']);
 
 		expect(result).toContain('## Swarm Reset Complete');
-		expect(result).toContain('✅ Deleted plan-ledger.jsonl');
+		expect(result).toContain('✅ Cleared authoritative plan ledger');
 		expect(result).toContain('✅ Deleted plan.json');
 
 		// Resurrection guard: both plan.json and plan-ledger.jsonl must be absent
@@ -302,6 +301,68 @@ describe('handleResetCommand', () => {
 		expect(existsSync(join(tempDir, '.swarm', 'plan-ledger.jsonl'))).toBe(
 			false,
 		);
+	});
+
+	test('regression: a concurrent save cannot resurrect plan.json after reset clears authority', async () => {
+		const plan: Plan = {
+			schema_version: '1.0.0',
+			title: 'Reset race',
+			swarm: 'reset-race',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'pending',
+					tasks: [
+						{
+							id: '1.1',
+							phase: 1,
+							status: 'pending',
+							size: 'small',
+							description: 'Race writer',
+							depends: [],
+							files_touched: [],
+						},
+					],
+				},
+			],
+		};
+		await savePlan(tempDir, plan);
+
+		const originalClear = resetInternals.clearPlanLedgerForReset;
+		let enteredClear!: () => void;
+		const clearEntered = new Promise<void>((resolve) => {
+			enteredClear = resolve;
+		});
+		let releaseClear!: () => void;
+		const releaseGate = new Promise<void>((resolve) => {
+			releaseClear = resolve;
+		});
+		resetInternals.clearPlanLedgerForReset = async (directory) => {
+			enteredClear();
+			await releaseGate;
+			await originalClear(directory);
+		};
+
+		try {
+			const reset = handleResetCommand(tempDir, ['--confirm']);
+			await clearEntered;
+			// Before the fix reset dropped the ledger lock before projection cleanup,
+			// letting this real save publish a new plan.json from stale in-memory state.
+			await expect(savePlan(tempDir, plan)).rejects.toThrow(
+				/Plan write blocked/,
+			);
+			releaseClear();
+			await reset;
+
+			expect(existsSync(join(tempDir, '.swarm', 'plan.json'))).toBe(false);
+			expect(existsSync(join(tempDir, '.swarm', 'plan-ledger.jsonl'))).toBe(
+				false,
+			);
+		} finally {
+			resetInternals.clearPlanLedgerForReset = originalClear;
+		}
 	});
 
 	// ── SINGLETON PRESERVATION (FR-001d) ─────────────────────────────────
@@ -364,118 +425,5 @@ describe('handleResetCommand', () => {
 			Object.assign(swarmState, original);
 			swarmState.activeToolCalls.delete('reset-test-call');
 		}
-	});
-
-	// ── EBUSY / LOCKED FILE ERROR HANDLING (FR-007) ──────────────────────────────
-	// Simulates EBUSY during unlinkSync (used by reset for .swarm/ files and root
-	// legacy artifacts). Verifies catch path produces '❌ Failed to delete ...'
-	// friendly message (instead of crash) and that processing continues for
-	// remaining files/artifacts. Uses mock.module('node:fs') + spread real exports
-	// + afterEach(mock.restore()) per writing-tests skill. Dynamic re-import after
-	// mock ensures SUT binds the mocked fs (matches handoff.error-handling.test.ts
-	// and close-plan-terminal-state.test.ts patterns). existsSync mocked to true
-	// so delete paths are exercised; unlink throws on first call, succeeds on
-	// retry/subsequent to prove continuation.
-	describe('EBUSY simulation for locked files during reset (FR-007)', () => {
-		test('reports friendly error for EBUSY on unlinkSync but continues processing other files', async () => {
-			let unlinkCallCount = 0;
-			const ebusiError = Object.assign(
-				new Error('EBUSY: resource busy or locked'),
-				{
-					code: 'EBUSY',
-				},
-			);
-
-			await mock.module('node:fs', () => ({
-				...realFs,
-				existsSync: mock((_p: string) => true),
-				unlinkSync: mock((_p: string) => {
-					unlinkCallCount++;
-					if (unlinkCallCount === 1) {
-						throw ebusiError;
-					}
-					// succeed on subsequent calls (simulates "retry" and continuation to next files)
-				}),
-			}));
-
-			// Re-import to get fresh module with mock applied (top-level import captured real fs)
-			const { handleResetCommand: handleResetWithMock } = await import(
-				'../../../src/commands/reset'
-			);
-
-			const result = await handleResetWithMock(tempDir, ['--confirm']);
-
-			// Friendly error message for the file whose unlink threw (first call)
-			expect(result).toContain('## Swarm Reset Complete');
-			expect(result).toContain('❌ Failed to delete plan.md');
-
-			// Processing continued (subsequent unlinks succeeded per mock counter)
-			expect(result).toContain('✅ Deleted plan.json');
-			expect(result).toContain('✅ Deleted context.md');
-
-			// No crash; command produced full output with footer
-			expect(result).toContain(
-				'Swarm state has been cleared. Start fresh with a new plan.',
-			);
-		});
-	});
-
-	// ── EACCES / PERMISSION DENIED + rmSync FAILURE PATH (FR-014) ─────────────────────
-	// Simulates EACCES (permission denied) during unlinkSync on the FIRST call but
-	// succeeding on retry (per task spec). Also overrides rmSync to exercise the
-	// summaries/ catch path. Verifies friendly '❌ Failed to delete ...' messages
-	// (contains "Failed to delete") and that command continues processing other
-	// files without crashing. Uses the exact mock.module('node:fs') + ...fsSync spread
-	// + existsSync always-true + dynamic re-import + afterEach(mock.restore()) pattern
-	// already established in this file (and state mock at top for reference).
-	describe('EACCES simulation for permission-denied files during reset (FR-014)', () => {
-		test('reports friendly error for EACCES on unlinkSync but continues processing other files (and exercises rmSync failure)', async () => {
-			let unlinkCallCount = 0;
-			const eaccesError = Object.assign(
-				new Error('EACCES: permission denied'),
-				{
-					code: 'EACCES',
-				},
-			);
-
-			await mock.module('node:fs', () => ({
-				...realFs,
-				existsSync: mock((_p: string) => true),
-				unlinkSync: mock((_p: string) => {
-					unlinkCallCount++;
-					if (unlinkCallCount === 1) {
-						throw eaccesError;
-					}
-					// succeed on subsequent calls (simulates "retry" and continuation to next files)
-				}),
-				rmSync: mock((_p: string, _opts?: unknown) => {
-					// throw to exercise the summaries/ directory failure path in reset
-					throw eaccesError;
-				}),
-			}));
-
-			// Re-import to get fresh module with mock applied (top-level import captured real fs)
-			const { handleResetCommand: handleResetWithMock } = await import(
-				'../../../src/commands/reset'
-			);
-
-			const resetResult = await handleResetWithMock(tempDir, ['--confirm']);
-
-			// Friendly error message for the file whose unlink threw (first call)
-			expect(resetResult).toContain('## Swarm Reset Complete');
-			expect(resetResult).toContain('❌ Failed to delete plan.md');
-
-			// Processing continued (subsequent unlinks succeeded per mock counter)
-			expect(resetResult).toContain('✅ Deleted plan.json');
-			expect(resetResult).toContain('✅ Deleted context.md');
-
-			// rmSync failure path also exercised
-			expect(resetResult).toContain('❌ Failed to delete summaries/');
-
-			// No crash; command produced full output with footer
-			expect(resetResult).toContain(
-				'Swarm state has been cleared. Start fresh with a new plan.',
-			);
-		});
 	});
 });

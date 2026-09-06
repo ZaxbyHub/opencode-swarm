@@ -14,6 +14,7 @@
 import type { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write.js';
 import {
 	canonicalRootKeyFresh,
@@ -410,6 +411,86 @@ const MIGRATIONS: Migration[] = [
 			imported_at TEXT NOT NULL
 		)`,
 	},
+	// Issue #2484 (Workstream D5): exact-byte plan-ledger authority. Keep the
+	// canonical event bytes in a BLOB and duplicate the stable LedgerEvent
+	// metadata into typed columns so the store can validate/replay without
+	// importing the file-ledger module (which would create a dependency cycle).
+	{
+		version: 33,
+		name: 'create_plan_ledger_event',
+		sql: `CREATE TABLE IF NOT EXISTS plan_ledger_event (
+			seq INTEGER PRIMARY KEY CHECK(seq >= 1),
+			canonical_event BLOB NOT NULL CHECK(length(canonical_event) > 0),
+			event_hash TEXT NOT NULL UNIQUE,
+			root_event_hash TEXT,
+			plan_epoch TEXT,
+			timestamp TEXT NOT NULL,
+			plan_id TEXT NOT NULL,
+			event_type TEXT NOT NULL,
+			task_id TEXT,
+			phase_id INTEGER,
+			from_status TEXT,
+			to_status TEXT,
+			source TEXT NOT NULL,
+			plan_hash_before TEXT NOT NULL,
+			plan_hash_after TEXT NOT NULL,
+			schema_version TEXT NOT NULL,
+			payload_hash TEXT,
+			payload_json TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+	},
+	{
+		version: 34,
+		name: 'create_plan_ledger_state',
+		sql: `CREATE TABLE IF NOT EXISTS plan_ledger_state (
+			id INTEGER PRIMARY KEY CHECK(id = 1),
+			authority_mode TEXT NOT NULL CHECK(authority_mode IN ('file_shadow', 'sqlite')),
+			shadow_started_version TEXT,
+			parity_status TEXT NOT NULL CHECK(parity_status IN ('pending', 'clean', 'diverged', 'failed')),
+			file_replay_hash TEXT,
+			sqlite_replay_hash TEXT,
+			terminal_projection_hash TEXT NOT NULL DEFAULT '',
+			last_seq INTEGER NOT NULL DEFAULT 0 CHECK(last_seq >= 0),
+			last_event_hash TEXT,
+			root_event_hash TEXT,
+			plan_id TEXT,
+			plan_epoch TEXT,
+			terminal_plan_hash TEXT,
+			terminal_projection BLOB,
+			terminal_projection_json TEXT,
+			terminal_metadata TEXT,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+	},
+	{
+		version: 35,
+		name: 'create_plan_ledger_import',
+		sql: `CREATE TABLE IF NOT EXISTS plan_ledger_import (
+			source TEXT PRIMARY KEY,
+			source_hash TEXT NOT NULL,
+			archive_path TEXT,
+			archive_hash TEXT,
+			archive_size INTEGER,
+			archive_created_at TEXT,
+			mode TEXT NOT NULL,
+			version TEXT,
+			row_count INTEGER NOT NULL DEFAULT 0 CHECK(row_count >= 0),
+			imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+	},
+	{
+		version: 36,
+		name: 'create_plan_ledger_event_indexes',
+		sql: `CREATE INDEX IF NOT EXISTS idx_plan_ledger_event_plan
+			ON plan_ledger_event(plan_id, seq)`,
+	},
+	{
+		version: 37,
+		name: 'create_plan_ledger_import_hash_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_plan_ledger_import_hash
+			ON plan_ledger_import(source_hash)`,
+	},
 ];
 
 interface ProjectDbRecord {
@@ -676,6 +757,50 @@ export function projectDbPath(directory: string): string {
  */
 export function projectDbExists(directory: string): boolean {
 	return existsSync(projectDbPath(directory));
+}
+
+/**
+ * Open the existing project database for one observational callback.
+ *
+ * Unlike `getProjectDb`, this never creates directories, negotiates WAL, runs
+ * migrations, or enters the shared connection cache. It is the only suitable
+ * path for lifecycle previews such as `/swarm close --dry-run`.
+ */
+export function withProjectDbReadOnly<T>(
+	directory: string,
+	read: (db: Database) => T,
+): T | null {
+	// A cached writer may have authoritative commits that exist only in its live
+	// WAL. An immutable second connection deliberately ignores that WAL, so read
+	// through the already-open handle when one exists. This is observational: no
+	// migrations, PRAGMAs, cache mutations, or new handles are introduced here.
+	const cached = _projectDbs.get(canonicalRootKeyFresh(directory));
+	if (cached) return read(cached.db);
+	const dbFile = projectDbPath(directory);
+	if (!existsSync(dbFile)) return null;
+	const Db = loadDatabaseCtor();
+	const walPresent = existsSync(`${dbFile}-wal`);
+	// An immutable connection is safe for a self-contained main database, but it
+	// deliberately ignores a surviving WAL. A crashed writer can leave the
+	// authoritative plan only in that WAL, so use the driver's read-only mode
+	// whenever a sidecar exists; otherwise a fresh process would observe stale
+	// state during a lifecycle preview. The read-only option forbids SQL writes
+	// while still allowing SQLite to replay the existing WAL.
+	const db = walPresent
+		? new Db(dbFile, { readonly: true })
+		: (() => {
+				const immutableUrl = pathToFileURL(dbFile);
+				immutableUrl.searchParams.set('immutable', '1');
+				// SQLITE_OPEN_READONLY | SQLITE_OPEN_URI. The immutable URI prevents
+				// both supported drivers from materializing WAL/SHM sidecars when no
+				// WAL needs to be observed.
+				return new Db(immutableUrl.href, 0x01 | 0x40);
+			})();
+	try {
+		return read(db);
+	} finally {
+		db.close();
+	}
 }
 
 /**

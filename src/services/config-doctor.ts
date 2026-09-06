@@ -1844,6 +1844,11 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'dispatch_protection': {
+			emitObjectTypeMismatch('dispatch_protection', value, findings);
+			break;
+		}
+
 		case 'pr_review_legacy_transcript_compatibility': {
 			if (value !== undefined && typeof value !== 'boolean') {
 				findings.push({

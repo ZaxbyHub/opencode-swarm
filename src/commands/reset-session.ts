@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveWorktreeRepoOwnership } from '../config/lane-context';
+import { closeProjectDb } from '../db/project-db';
 import { appendCoreEventSync } from '../events/core-events';
 import { clearSessionActionCircuits } from '../failures/action-circuit.js';
 import { resolveWorktreeEnumerationBases } from '../hooks/init-orphan-recovery';
@@ -196,6 +197,22 @@ async function releaseKnowledgeGateObligations(
 		/* best-effort audit — the durable ledger release above is the authority */
 	}
 	return results;
+}
+
+/**
+ * Issue #2599: child-directory names of a lane base (`<session>/<lane>`),
+ * directories only; unreadable/absent ⇒ empty (the caller treats removal as
+ * best-effort anyway).
+ */
+function listChildDirs(dir: string): string[] {
+	try {
+		return fs
+			.readdirSync(dir, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name);
+	} catch {
+		return [];
+	}
 }
 
 /**
@@ -578,6 +595,12 @@ export async function handleResetSessionCommand(
 			if (candidates.length === 0) {
 				results.push('⏭️ No worktree lanes to reclaim');
 			} else {
+				// Issue #2599 AC5 (integrated): release each lane's swarm.db
+				// handle BEFORE any removal (Windows WAL lock would EBUSY the
+				// rm). Closing a handle this process never opened is a no-op.
+				for (const lane of candidates) {
+					closeProjectDb(lane);
+				}
 				const livePaths = new Set(
 					_internals
 						.listLiveLaneOwners(directory)
@@ -708,8 +731,7 @@ export async function handleResetSessionCommand(
 			}
 		}
 	} catch (err) {
-		results.push(`⚠️ Failed to reclaim worktree lanes: ${errorMessage(err)}`);
-	}
+		results.push(`⚠️ Failed to reclaim worktree lanes: ${errorMessage(err)}`);	}
 
 	try {
 		const branchResult = await _internals.cleanupOrphanedBranches(

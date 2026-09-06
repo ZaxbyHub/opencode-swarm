@@ -18,7 +18,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
+import { getPlanLedgerStateReadOnly } from '../plan/ledger-sqlite';
 import { error as _logErrorImpl } from '../utils/logger.js';
 import { isPlanCriticApproved } from './delegation-gate';
 import { computeNextMode } from './issue-trace-reducer';
@@ -51,15 +51,20 @@ export const _internals = {
 	recurrenceSweepReceiptExists,
 	implementationReviewReceiptExists,
 	isPlanCriticApproved,
+	getPlanLedgerState: getPlanLedgerStateReadOnly,
 	logError: _logErrorImpl,
+	// Exposed through the DI seam so the cache fingerprint can be tested
+	// without driving the full issue-trace state machine.
+	boundedApprovalCheck: (directory: string, timeoutMs: number) =>
+		boundedApprovalCheck(directory, timeoutMs),
 };
 
 // ── Session-level caches ──────────────────────────────────────────
-// Invalidated when the underlying file size changes. Both caches are
+// Invalidated when the underlying authority revision changes. Both caches are
 // per-directory and reset between tests via resetApprovalCache() /
 // resetPhaseStatusCache().
 
-let cachedApproval: { dir: string; size: number; result: boolean } | null =
+let cachedApproval: { dir: string; revision: string; result: boolean } | null =
 	null;
 
 let cachedPhaseStatus: {
@@ -73,36 +78,48 @@ let cachedPhaseStatus: {
 
 /**
  * Calls isPlanCriticApproved with a configurable timeout.
- * Uses a size-based cache to avoid re-reading the entire ledger
- * on every message transform. Fail-closed to false on timeout or error.
+ * Uses the SQLite ledger revision when SQLite is authoritative, otherwise
+ * the portable ledger's size+mtime, to avoid re-reading the entire ledger on
+ * every message transform. Fail-closed to false on timeout or error.
  */
 async function boundedApprovalCheck(
 	directory: string,
 	timeoutMs: number,
 ): Promise<boolean> {
 	try {
-		// Check if ledger file exists and its size for cache invalidation
+		// The SQLite state probe is read-only: getPlanLedgerState first checks for
+		// an existing project DB, so an approval check never creates swarm.db.
 		const ledgerPath = path.join(directory, '.swarm', 'plan-ledger.jsonl');
 		let currentSize = -1;
+		let currentMtime = -1;
 		try {
 			const stat = fs.statSync(ledgerPath);
 			currentSize = stat.size;
+			currentMtime = stat.mtimeMs;
 		} catch {
-			// Ledger doesn't exist — skip cache, check directly
-			const timeout = new Promise<boolean>((resolve) => {
-				setTimeout(() => resolve(false), timeoutMs);
-			});
-			return await Promise.race([
-				_internals.isPlanCriticApproved(directory),
-				timeout,
-			]);
+			// A SQLite-authoritative project may legitimately have no portable
+			// export after a failed publication, so keep the -1 file fingerprint.
 		}
 
-		// Return cached result if same directory and ledger hasn't changed
+		let state: ReturnType<typeof getPlanLedgerStateReadOnly> = null;
+		let authorityReadFailed = false;
+		try {
+			state = _internals.getPlanLedgerState(directory);
+		} catch {
+			// A broken DB must not make the hook throw. Do not cache the result
+			// against a file fingerprint when authority cannot be read.
+			authorityReadFailed = true;
+		}
+		const revision = authorityReadFailed
+			? null
+			: state?.authorityMode === 'sqlite'
+				? `sqlite:${state.lastSeq}:${state.lastEventHash ?? ''}:${state.updatedAt}`
+				: `file:${currentSize}:${currentMtime}`;
+
 		if (
 			cachedApproval &&
 			cachedApproval.dir === directory &&
-			cachedApproval.size === currentSize
+			cachedApproval.revision === revision
 		) {
 			return cachedApproval.result;
 		}
@@ -117,7 +134,9 @@ async function boundedApprovalCheck(
 				_internals.isPlanCriticApproved(directory),
 				timeout,
 			]);
-			cachedApproval = { dir: directory, size: currentSize, result };
+			if (revision !== null) {
+				cachedApproval = { dir: directory, revision, result };
+			}
 			return result;
 		} finally {
 			if (timer !== undefined) clearTimeout(timer);

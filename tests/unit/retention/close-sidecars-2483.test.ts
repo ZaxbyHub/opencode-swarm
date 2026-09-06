@@ -17,6 +17,7 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 import { savePlan } from '../../../src/plan/manager.js';
 import { installCloseCommandMocks } from '../../helpers/close-command-mocks';
@@ -42,6 +43,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	closeProjectDb(testDir);
 	if (existsSync(testDir)) rmSync(testDir, { recursive: true, force: true });
 	mock.restore();
 });
@@ -157,21 +159,23 @@ describe('VACUUM INTO archive still produced for a real swarm.db', () => {
 			phases: [{ id: 1, name: 'P1', status: 'complete', tasks: [] }],
 		});
 		const Db = loadDatabaseCtor();
+		closeProjectDb(testDir);
 		const db = new Db(path.join(swarmDir(), 'swarm.db'));
 		db.run('PRAGMA journal_mode = WAL;');
 		db.run(
-			'CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);',
+			'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);',
 		);
 		db.run(
-			'CREATE TABLE project_constraints (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL);',
+			'CREATE TABLE IF NOT EXISTS project_constraints (id INTEGER PRIMARY KEY AUTOINCREMENT, constraint_type TEXT NOT NULL, content TEXT NOT NULL);',
 		);
-		db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
-			1,
-			'init',
-		]);
-		db.run('INSERT INTO project_constraints (content) VALUES (?)', [
-			'committed-row',
-		]);
+		db.run(
+			'INSERT OR IGNORE INTO schema_migrations (version, name) VALUES (?, ?)',
+			[1, 'init'],
+		);
+		db.run(
+			'INSERT INTO project_constraints (constraint_type, content) VALUES (?, ?)',
+			['regression', 'committed-row'],
+		);
 		db.close();
 		writeFileSync(path.join(swarmDir(), 'swarm.db-shm'), Buffer.from('shm'));
 		writeFileSync(path.join(swarmDir(), 'swarm.db-wal'), Buffer.from('wal'));

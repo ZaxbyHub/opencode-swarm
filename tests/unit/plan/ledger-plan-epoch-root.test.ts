@@ -257,12 +257,15 @@ describe('readPlanEpochIdentity fails closed on an unreadable ledger', () => {
 		expect(message).not.toContain('Plan ledger is empty');
 	});
 
-	test('an absent ledger still resolves to null rather than throwing', async () => {
+	test('a missing portable ledger is restored from the verified SQLite shadow', async () => {
 		const plan = makePlan();
 		const directory = await createPopulatedLedger(plan);
 		const ledgerPath = resolve(join(directory, '.swarm', 'plan-ledger.jsonl'));
 		fs.rmSync(ledgerPath, { force: true });
 
-		await expect(readPlanEpochIdentity(directory, plan)).resolves.toBeNull();
+		const identity = await readPlanEpochIdentity(directory, plan);
+		expect(identity).not.toBeNull();
+		expect(identity?.planId).toBe(derivePlanId(plan));
+		expect(fs.existsSync(ledgerPath)).toBe(true);
 	});
 });

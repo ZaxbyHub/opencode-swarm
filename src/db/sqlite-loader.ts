@@ -65,8 +65,8 @@ interface NodeDatabaseSync {
 }
 
 type NodeDatabaseSyncCtor = new (
-	filename: string,
-	options?: { allowExtension?: boolean },
+	filename: string | URL,
+	options?: { allowExtension?: boolean; readOnly?: boolean },
 ) => NodeDatabaseSync;
 
 /**
@@ -88,12 +88,34 @@ export function createNodeDatabaseCtor(
 		private readonly stmts = new Map<string, NodeStatementSync>();
 		private savepointCounter = 0;
 
-		constructor(filename: string) {
+		constructor(
+			filename: string,
+			options?:
+				| number
+				| {
+						readonly?: boolean;
+						readwrite?: boolean;
+						create?: boolean;
+				  },
+		) {
 			// `allowExtension: true` is REQUIRED for `loadExtension` (sqlite-vec): probe
 			// shows `enableLoadExtension(true)` throws ERR_INVALID_STATE without it. SQL
 			// reaching these DBs is internal/trusted, so the widened `load_extension()`
 			// surface is not reachable by untrusted input.
-			this.raw = new DatabaseSyncCtor(filename, { allowExtension: true });
+			const immutableReadOnly =
+				typeof options === 'number' &&
+				(options & 0x01) !== 0 &&
+				(options & 0x40) !== 0 &&
+				filename.startsWith('file:');
+			const readOnly =
+				immutableReadOnly ||
+				(typeof options === 'object' && options?.readonly === true);
+			this.raw = new DatabaseSyncCtor(
+				immutableReadOnly ? new URL(filename) : filename,
+				readOnly
+					? { allowExtension: false, readOnly: true }
+					: { allowExtension: true },
+			);
 		}
 
 		private statement(sql: string): NodeStatementSync {

@@ -26,6 +26,7 @@ import {
 } from '../background/pending-delegations.js';
 import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
 import { loadPluginConfig } from '../config/loader';
+import { closeProjectDb } from '../db/project-db';
 import {
 	isLocked,
 	listActiveLocks,
@@ -46,6 +47,7 @@ import {
 	cleanupOrphanedBranches,
 	scanRegisteredWorktreeLiveness,
 } from '../worktree/merge';
+import { reclaimDeadLanes } from './delegation-gate/dead-lane-reclaim';
 import { removeOwnedWorktreeDir } from '../worktree/ownership';
 import { scanWorktreeMergeFailuresForRecovery } from './delegation-gate/worktree-merge-status';
 import { scanBackgroundWorktreeOwnershipTagsForRecovery } from './delegation-gate/worktree-ownership-tag';
@@ -816,6 +818,9 @@ export async function runInitOrphanRecovery(
 				// reported, git refusals are a stop (never an rmSync
 				// escalation), and .git-less remnants are only removable
 				// inside this project's own base.
+				// Issue #2599 AC5 (integrated): release the lane's swarm.db
+				// handle BEFORE deletion (Windows WAL lock would EBUSY the rm).
+				closeProjectDb(worktreePath);
 				const outcome = await removeOwnedWorktreeDir(worktreePath, directory);
 				if (outcome.status === 'removed') {
 					removedWorktrees.push(worktreePath);
@@ -845,6 +850,33 @@ export async function runInitOrphanRecovery(
 		const branchWarnings = cleanupResult.errors.map(
 			(e) => `Could not delete orphaned branch "${e.branch}": ${e.error}`,
 		);
+
+		// Step 3 (issue #2599): reclaim lanes whose removal previously failed
+		// on a held handle (EBUSY). Bounded and fail-open like every other
+		// step: per-lane failures retain their reclaim record for the next
+		// start instead of blocking init.
+		const reclaimResult = await withTimeout(
+			reclaimDeadLanes(directory, {
+				activeSessionIds,
+				protectedWorktreePaths,
+			}),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during dead-lane reclaim; continuing without reclaim`,
+			),
+		).catch((error: unknown) => ({
+			reclaimed: [] as string[],
+			retained: [] as Array<{ lanePath: string; reason: string }>,
+			error: error instanceof Error ? error.message : String(error),
+		}));
+		if (reclaimResult.reclaimed.length > 0) {
+			removedWorktrees.push(...reclaimResult.reclaimed);
+		}
+		for (const retained of reclaimResult.retained) {
+			worktreeWarnings.push(
+				`Preserved dead lane "${retained.lanePath}" (${retained.reason}); reclaim scheduled at next start.`,
+			);
+		}
 
 		const allWarnings = [...worktreeWarnings, ...branchWarnings];
 		const mergedWarnings = [...recoveryReplayWarnings, ...allWarnings];

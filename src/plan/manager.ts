@@ -1,11 +1,8 @@
 import {
 	closeSync,
-	copyFileSync,
-	existsSync,
 	fsyncSync,
 	mkdirSync,
 	openSync,
-	readdirSync,
 	renameSync,
 	unlinkSync,
 	writeFileSync,
@@ -113,6 +110,7 @@ import {
 	loadLastApprovedPlan,
 	readLedgerEvents,
 	readLedgerEventsWithIntegrity,
+	replacePlanLedgerWithRoot,
 	replaceTruncatedLedgerWithRecoveryRoot,
 	replayFromLedger,
 	replayFromLedgerWithStatus,
@@ -173,6 +171,8 @@ export function resetStartupLedgerCheck(): void {
 export const _internals: {
 	loadPlan: typeof loadPlan;
 	loadPlanJsonOnly: typeof loadPlanJsonOnly;
+	readPlanJsonUtf8: typeof readPlanJsonUtf8;
+	readPlanFileUtf8: typeof readPlanFileUtf8;
 	regeneratePlanMarkdown: typeof regeneratePlanMarkdown;
 	isGitRepo: typeof isGitRepo;
 	isEpicModeActiveForProject: typeof isEpicModeActiveForProject;
@@ -183,6 +183,8 @@ export const _internals: {
 } = {
 	loadPlan,
 	loadPlanJsonOnly,
+	readPlanJsonUtf8,
+	readPlanFileUtf8,
 	regeneratePlanMarkdown,
 	isGitRepo,
 	isEpicModeActiveForProject,
@@ -482,19 +484,38 @@ async function parsePlanJsonCached(directory: string): Promise<Plan | null> {
 		// inside readCachedParsedFile's factory, which already memoizes parsed
 		// results process-wide (PLAN_JSON_CACHE_NAMESPACE), so re-reading here is
 		// only the first-invocation cost.
-		() => readSwarmFileAsync(directory, 'plan.json'),
+		() => _internals.readPlanJsonUtf8(directory),
 		(planJsonContent) => {
-			if (
-				planJsonContent.includes('\0') ||
-				planJsonContent.includes('\uFFFD')
-			) {
-				throw new Error(
-					'Plan rejected: .swarm/plan.json contains null bytes or invalid encoding',
-				);
+			if (planJsonContent.includes('\0')) {
+				throw new Error('Plan rejected: .swarm/plan.json contains null bytes');
 			}
 			const parsed = JSON.parse(planJsonContent);
 			return PlanSchema.parse(parsed);
 		},
+	);
+}
+
+/**
+ * Read the canonical plan projection with fatal UTF-8 decoding. A literal U+FFFD
+ * in valid UTF-8 is data and must survive; only malformed byte sequences are
+ * rejected by the decoder. ENOENT is the normal projection-missing signal.
+ */
+async function readPlanJsonUtf8(directory: string): Promise<string | null> {
+	// Route projection reads through the shared retry-aware reader so transient
+	// Windows AV/indexer locks and macOS rename visibility races are handled
+	// consistently with the other `.swarm/` file consumers.
+	return readSwarmFileAsync(
+		directory,
+		'plan.json',
+		undefined,
+		(filePath) => _internals.readPlanFileUtf8(filePath),
+		false,
+	);
+}
+
+async function readPlanFileUtf8(filePath: string): Promise<string> {
+	return new TextDecoder('utf-8', { fatal: true }).decode(
+		await fsPromises.readFile(filePath),
 	);
 }
 
@@ -659,19 +680,20 @@ export async function loadPlan(
 	directory: string,
 	cache?: Map<string, Promise<string | null>>,
 ): Promise<RuntimePlan | null> {
-	// Step 1: Try to load and validate plan.json
-	const planJsonContent = await readSwarmFileAsync(
-		directory,
-		'plan.json',
-		cache,
-	);
+	// Step 1: Try to load and validate plan.json. Decode bytes strictly so a
+	// malformed UTF-8 sequence cannot be silently converted to U+FFFD. A literal
+	// U+FFFD encoded in valid UTF-8 remains ordinary plan data.
+	let planJsonContent: string | null = null;
+	try {
+		planJsonContent = await _internals.readPlanJsonUtf8(directory);
+	} catch (error) {
+		warn(
+			`Plan rejected: .swarm/plan.json could not be decoded as valid UTF-8: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 	if (planJsonContent !== null) {
-		// SECURITY: Reject content with null bytes or invalid UTF-8
-		if (planJsonContent.includes('\0') || planJsonContent.includes('\uFFFD')) {
-			warn(
-				'Plan rejected: .swarm/plan.json contains null bytes or invalid encoding',
-			);
-			// Skip to plan.md migration path - don't parse tainted content
+		if (planJsonContent.includes('\0')) {
+			warn('Plan rejected: .swarm/plan.json contains null bytes');
 		} else {
 			try {
 				const validated = await parsePlanJsonCached(directory);
@@ -1025,16 +1047,8 @@ export async function loadPlan(
 		}
 	}
 
-	// Step 3: Try to migrate from legacy plan.md (no plan.json exists)
-	const planMdContent = await readSwarmFileAsync(directory, 'plan.md', cache);
-	if (planMdContent !== null) {
-		const migrated = migrateLegacyPlan(planMdContent);
-		// Save the migrated plan (writes both files)
-		await savePlan(directory, migrated);
-		return migrated;
-	}
-
-	// Step 4: Neither exists — try to rebuild from ledger.
+	// Step 3: Neither projection exists — recover from the authoritative ledger
+	// before consulting lossy legacy Markdown.
 	// Guarded by an in-process mutex to prevent concurrent loadPlan calls from
 	// racing through recovery and both calling savePlan (#444 item 6).
 	if (await ledgerExists(directory)) {
@@ -1149,6 +1163,17 @@ export async function loadPlan(
 			recoveryMutexes.delete(resolvedDir);
 		}
 	}
+	// Step 4: Ledger recovery was unavailable. Try to migrate from legacy plan.md
+	// as a final compatibility fallback (no ledger means there is no authority to
+	// prefer over this lossy projection).
+	const planMdContent = await readSwarmFileAsync(directory, 'plan.md', cache);
+	if (planMdContent !== null) {
+		const migrated = migrateLegacyPlan(planMdContent);
+		// Save the migrated plan (writes both files)
+		await savePlan(directory, migrated);
+		return migrated;
+	}
+
 	return null;
 }
 
@@ -1194,6 +1219,40 @@ export async function savePlanWithAutoAcknowledgedRemovals(
 		acknowledged_removals: { ids: removedIds, reason, source },
 	});
 	return { removedCount: removedIds.length };
+}
+
+/**
+ * Serialize a lifecycle transition with all regular plan writers.
+ *
+ * Lock ordering is intentionally `plan.json` then `plan-ledger`: `savePlan`
+ * already acquires the plan lock before it reaches any ledger operation. Reset
+ * and rollback must use the same order or a writer can resurrect a projection
+ * after authority has changed (or deadlock by taking the locks in reverse).
+ */
+export async function withPlanLifecycleLock<T>(
+	directory: string,
+	taskId: string,
+	fn: () => Promise<T>,
+): Promise<T> {
+	assertProjectRoot(directory);
+	const lockResult = await tryAcquireLock(
+		directory,
+		'plan.json',
+		'plan-lifecycle',
+		taskId,
+	);
+	if (!lockResult.acquired) {
+		throw new PlanConcurrentModificationError(
+			`Plan lifecycle blocked: plan.json is locked by ${lockResult.existing?.agent ?? 'another agent'} (task: ${lockResult.existing?.taskId ?? 'unknown'})`,
+		);
+	}
+	try {
+		return await fn();
+	} finally {
+		if (lockResult.lock._release) {
+			await lockResult.lock._release().catch(() => {});
+		}
+	}
 }
 
 /**
@@ -1354,145 +1413,15 @@ export async function savePlan(
 	} else {
 		const existingEvents = await readLedgerEvents(directory);
 		if (existingEvents.length > 0 && existingEvents[0].plan_id !== planId) {
-			// The ledger was created for a different plan identity.
-			// Reinitialize so events and hashes are keyed to the new plan identity.
-			//
-			// Recovery-safe ordering (Issue 392):
-			// 1. Move the old ledger file aside (rename to backup) BEFORE calling initLedger.
-			//    This allows the real initLedger to create a fresh ledger (it refuses to run
-			//    if the ledger file already exists at the path).
-			// 2. Attempt initLedger — if it fails with "already initialized" (concurrent),
-			//    discard the backup since the new ledger is already in place.
-			// 3. If it fails with any OTHER error, restore the original ledger from backup.
-			// 4. Only archive the backup AFTER initLedger succeeds.
-			const swarmDir = path.resolve(directory, '.swarm');
-			const oldLedgerPath = path.join(swarmDir, 'plan-ledger.jsonl');
-			const oldLedgerBackupPath = path.join(
-				swarmDir,
-				`plan-ledger.backup-${Date.now()}-${Math.floor(Math.random() * 1e9)}.jsonl`,
+			options?.preCommitCheck?.();
+			await replacePlanLedgerWithRoot(
+				directory,
+				validated,
+				'savePlan_identity_migration',
 			);
-			let backupExists = false;
-
-			// Move the old ledger file aside BEFORE initLedger runs.
-			// This ensures initLedger sees no existing ledger and can create a fresh one.
-			if (existsSync(oldLedgerPath)) {
-				try {
-					options?.preCommitCheck?.();
-					renameSync(oldLedgerPath, oldLedgerBackupPath);
-					backupExists = true;
-				} catch (renameErr) {
-					// Cross-platform rename failure (e.g., file locked on Windows).
-					// If we can't move the file aside, we cannot safely reinitialize,
-					// and continuing would append mixed-identity events into the mismatched ledger.
-					throw new Error(
-						`[savePlan] Cannot reinitialize ledger: could not move old ledger aside (rename failed: ${renameErr instanceof Error ? renameErr.message : String(renameErr)}). The existing ledger has plan_id="${existingEvents[0].plan_id}" which does not match the current plan="${planId}". To proceed, close any programs that may have the ledger file open, or run /swarm reset-session to clear the ledger.`,
-					);
-				}
-			}
-
-			let initSucceeded = false;
-
-			if (backupExists) {
-				try {
-					options?.preCommitCheck?.();
-					await initLedger(directory, planId, planHashForInit, validated);
-					initSucceeded = true;
-				} catch (initErr) {
-					// Another concurrent savePlan already initialized the new ledger — that is fine.
-					// Any OTHER error: restore the original ledger and do NOT archive.
-					// Use String() to handle non-Error throws (strings, objects with no .message).
-					const errorMessage = String(initErr);
-					if (errorMessage.includes('already initialized')) {
-						// Concurrent initialization — new ledger is already in place.
-						// Discard the backup since we don't need it (new ledger is already there).
-						try {
-							if (existsSync(oldLedgerBackupPath))
-								unlinkSync(oldLedgerBackupPath);
-						} catch {
-							/* best effort */
-						}
-					} else {
-						// Unexpected error — restore the original ledger so workspace stays usable
-						if (existsSync(oldLedgerBackupPath)) {
-							try {
-								renameSync(oldLedgerBackupPath, oldLedgerPath);
-							} catch {
-								// Restore failed — try copy as fallback
-								copyFileSync(oldLedgerBackupPath, oldLedgerPath);
-								try {
-									unlinkSync(oldLedgerBackupPath);
-								} catch {
-									/* best effort */
-								}
-							}
-						}
-						throw initErr;
-					}
-				}
-			}
-
-			// Archive the backup only after initLedger succeeded.
-			if (initSucceeded && backupExists) {
-				const archivePath = path.join(
-					swarmDir,
-					`plan-ledger.archived-${Date.now()}-${Math.floor(Math.random() * 1e9)}.jsonl`,
-				);
-				try {
-					renameSync(oldLedgerBackupPath, archivePath);
-					warn(
-						`[savePlan] Ledger identity mismatch (was "${existingEvents[0].plan_id}", now "${planId}") — archived old ledger to ${archivePath} and reinitializing.`,
-					);
-				} catch (renameErr) {
-					// Cross-platform rename failure (e.g., file locked on Windows).
-					// The new ledger is already initialized and usable — warn but don't throw.
-					warn(
-						`[savePlan] Could not archive old ledger (rename failed: ${renameErr instanceof Error ? renameErr.message : String(renameErr)}). Old ledger may still exist at ${oldLedgerBackupPath}.`,
-					);
-					// Clean up backup since archive failed
-					try {
-						if (existsSync(oldLedgerBackupPath))
-							unlinkSync(oldLedgerBackupPath);
-					} catch {
-						/* best effort */
-					}
-				}
-			} else if (!initSucceeded && backupExists) {
-				// init didn't succeed and we have a backup — clean it up
-				// (error case already handled above: restored or discarded)
-				try {
-					if (existsSync(oldLedgerBackupPath)) unlinkSync(oldLedgerBackupPath);
-				} catch {
-					/* best effort */
-				}
-			}
-
-			// Sweep stale archived ledger siblings to prevent accumulation (#444 item 5).
-			// Only runs after identity-mismatch archival (not on every savePlan call).
-			const MAX_ARCHIVED_SIBLINGS = 5;
-			try {
-				const allFiles = readdirSync(swarmDir);
-				const archivedSiblings = allFiles
-					.filter(
-						(f) =>
-							f.startsWith('plan-ledger.archived-') && f.endsWith('.jsonl'),
-					)
-					.sort(); // Lexicographic sort — older timestamps come first
-				if (archivedSiblings.length > MAX_ARCHIVED_SIBLINGS) {
-					const toRemove = archivedSiblings.slice(
-						0,
-						archivedSiblings.length - MAX_ARCHIVED_SIBLINGS,
-					);
-					for (const file of toRemove) {
-						try {
-							unlinkSync(path.join(swarmDir, file));
-						} catch {
-							/* best effort */
-						}
-					}
-				}
-			} catch {
-				/* readdir failure is non-blocking */
-			}
+			warn(
+				`[savePlan] Ledger identity mismatch (was "${existingEvents[0].plan_id}", now "${planId}") — archived the prior exact history and committed a new root.`,
+			);
 		}
 	}
 

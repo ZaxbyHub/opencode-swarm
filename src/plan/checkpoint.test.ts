@@ -128,7 +128,7 @@ describe('writeCheckpoint', () => {
 
 				expect(content).toContain('AUTO-GENERATED');
 				expect(content).toContain('NOT the live plan');
-				expect(content).toContain('.swarm/plan-ledger.jsonl');
+				expect(content).toContain('JSONL during file-shadow mode');
 				expect(content).toContain('.swarm/plan.json');
 				expect(content).toContain('.swarm/plan.md');
 			} finally {
