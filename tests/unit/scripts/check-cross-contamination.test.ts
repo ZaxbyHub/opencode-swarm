@@ -1,20 +1,15 @@
 import { describe, expect, test } from 'bun:test';
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
 	auditCrossContamination,
 	buildPairCommand,
-	collectHookWarnings,
 	evaluatePairResult,
-	HOOK_ISOLATION_BASENAMES,
 	lastLines,
-	matchesHookStepGlob,
 	PAIRS,
 	readPassCount,
-	toRepoRelativePath,
+	runPair,
 } from '../../../scripts/check-cross-contamination';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -45,19 +40,33 @@ describe('check-cross-contamination — parsing helpers', () => {
 			'4321',
 		]);
 	});
-
-	test('toRepoRelativePath normalizes separators to forward slashes', () => {
-		const rel = toRepoRelativePath(
-			'C:\\repo',
-			'C:\\repo\\tests\\unit\\hooks\\x.test.ts',
-		);
-		expect(rel).toBe('tests/unit/hooks/x.test.ts');
-	});
 });
 
 describe('check-cross-contamination — pair result classification', () => {
 	const cleanPair = PAIRS[0];
 	const knownPair = PAIRS[1];
+
+	test('keeps the pair order and records explicit floors/outcomes', () => {
+		expect(PAIRS.map(({ fileA, fileB }) => [fileA, fileB])).toEqual([
+			[
+				'tests/unit/diff/ast-diff.test.ts',
+				'src/hooks/__tests__/semantic-diff-injection.test.ts',
+			],
+			[
+				'tests/unit/hooks/knowledge-reader.test.ts',
+				'tests/unit/services/skill-generator.test.ts',
+			],
+		]);
+		expect(cleanPair).toMatchObject({
+			minimumPasses: 57,
+			allowedOutcome: 'clean',
+		});
+		expect(knownPair).toMatchObject({
+			minimumPasses: 71,
+			maximumKnownPasses: 98,
+			allowedOutcome: 'known_shared_process',
+		});
+	});
 
 	test('classifies an exit-0 co-run as clean', () => {
 		const result = evaluatePairResult(cleanPair, {
@@ -67,34 +76,11 @@ describe('check-cross-contamination — pair result classification', () => {
 		});
 		expect(result.kind).toBe('clean');
 		expect(result.messages).toEqual([]);
-		expect(result.expectedPasses).toBe(57);
+		expect(result.actualPasses).toBe(57);
+		expect(result.minimumPasses).toBe(57);
 	});
 
-	test('classifies a pre-existing shortfall as known_issue', () => {
-		const result = evaluatePairResult(knownPair, {
-			exitCode: 1,
-			stdout: ' 71 pass\n',
-			stderr: '',
-		});
-		expect(result.kind).toBe('known_issue');
-		expect(result.actualPasses).toBe(71);
-		expect(result.messages.join('\n')).toContain('known baseline: 71');
-	});
-
-	test('classifies a pass-count drop below the baseline as regression_pass_drop', () => {
-		const result = evaluatePairResult(cleanPair, {
-			exitCode: 1,
-			stdout: '56 pass\nline 1\nline 2\n',
-			stderr: '',
-		});
-		expect(result.kind).toBe('regression_pass_drop');
-		expect(result.actualPasses).toBe(56);
-		expect(result.messages.join('\n')).toContain(
-			'Previously known baseline was 57',
-		);
-	});
-
-	test('classifies a non-zero exit with enough passes as regression_unexpected_failure', () => {
+	test('treats a non-zero clean-pair exit at the floor as unexpected', () => {
 		const result = evaluatePairResult(cleanPair, {
 			exitCode: 1,
 			stdout: '57 pass\n',
@@ -106,6 +92,63 @@ describe('check-cross-contamination — pair result classification', () => {
 		);
 	});
 
+	test('classifies a knowledge-pair floor result as an allowed known issue', () => {
+		const result = evaluatePairResult(knownPair, {
+			exitCode: 1,
+			stdout: ' 71 pass\n',
+			stderr: "ENOENT: no such file or directory, lstat '/tmp/.swarm'\n",
+		});
+		expect(result.kind).toBe('known_issue');
+		expect(result.actualPasses).toBe(71);
+		expect(result.messages.join('\n')).toContain('per-file CI isolation');
+		expect(result.messages.join('\n')).toContain(
+			'CI runs each discovered unit file in its own process',
+		);
+	});
+
+	test('requires the known shared-process failure signature', () => {
+		const result = evaluatePairResult(knownPair, {
+			exitCode: 1,
+			stdout: '80 pass\n',
+			stderr: 'AssertionError: unrelated failure\n',
+		});
+		expect(result.kind).toBe('regression_unexpected_failure');
+		expect(result.messages.join('\n')).toContain(
+			'did not match the known shared-process failure signature',
+		);
+	});
+
+	test('permits the known knowledge-pair outcome at its explicit ceiling', () => {
+		const result = evaluatePairResult(knownPair, {
+			exitCode: 1,
+			stdout: '98 pass\n',
+			stderr: "ENOENT: no such file or directory, lstat '/tmp/.swarm'\n",
+		});
+		expect(result.kind).toBe('known_issue');
+	});
+
+	test('fails a known knowledge-pair result above its ceiling with output evidence', () => {
+		const result = evaluatePairResult(knownPair, {
+			exitCode: 1,
+			stdout: '99 pass\nstdout evidence\n',
+			stderr: 'stderr evidence\n',
+		});
+		expect(result.kind).toBe('regression_unexpected_failure');
+		expect(result.messages.join('\n')).toContain('98-pass ceiling');
+		expect(result.messages.join('\n')).toContain('stdout evidence');
+		expect(result.messages.join('\n')).toContain('stderr evidence');
+	});
+
+	test('fails a knowledge-pair result below the floor', () => {
+		const result = evaluatePairResult(knownPair, {
+			exitCode: 1,
+			stdout: '70 pass\n',
+			stderr: '',
+		});
+		expect(result.kind).toBe('regression_pass_drop');
+		expect(result.actualPasses).toBe(70);
+	});
+
 	test('treats malformed combined output as a regression with zero passes', () => {
 		const result = evaluatePairResult(knownPair, {
 			exitCode: 1,
@@ -115,47 +158,15 @@ describe('check-cross-contamination — pair result classification', () => {
 		expect(result.kind).toBe('regression_pass_drop');
 		expect(result.actualPasses).toBe(0);
 	});
-});
 
-describe('check-cross-contamination — hook audit warnings', () => {
-	test('warns for recursive mock.module files outside the isolation list and notices uncovered top-level files', () => {
-		const tmpDir = canonicalMkdtemp('cross-contamination-hooks-');
-		const mockModuleToken = 'mock.' + 'module';
-		try {
-			const hooksRoot = path.join(tmpDir, 'tests', 'unit', 'hooks');
-			fs.mkdirSync(path.join(hooksRoot, 'nested'), { recursive: true });
-
-			fs.writeFileSync(
-				path.join(hooksRoot, 'nested', 'leaky-new.test.ts'),
-				`${mockModuleToken}('../../../src/x.js', () => ({}));\n`,
-			);
-			fs.writeFileSync(
-				path.join(hooksRoot, 'new-uncovered.test.ts'),
-				'test("placeholder", () => {});\n',
-			);
-			fs.writeFileSync(
-				path.join(hooksRoot, HOOK_ISOLATION_BASENAMES[0]),
-				`${mockModuleToken}('../../../src/y.js', () => ({}));\n`,
-			);
-
-			const warnings = collectHookWarnings(tmpDir);
-			expect(warnings).toHaveLength(2);
-			expect(warnings.join('\n')).toContain(
-				`tests/unit/hooks/nested/leaky-new.test.ts uses ${mockModuleToken}() but is not in the CI isolation step file list`,
-			);
-			expect(warnings.join('\n')).toContain(
-				'tests/unit/hooks/new-uncovered.test.ts is not covered by any named CI step glob or the isolation list',
-			);
-		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
-		}
-	});
-
-	test('matches the checked-in hook step glob policy', () => {
-		expect(
-			matchesHookStepGlob('knowledge-reader-key-normalization.test.ts'),
-		).toBe(true);
-		expect(matchesHookStepGlob('totally-new-hook.test.ts')).toBe(false);
+	test('rejects a missing pair member before spawning the co-run', async () => {
+		const result = await runPair(REPO_ROOT, {
+			...cleanPair,
+			fileA: 'tests/unit/scripts/does-not-exist.test.ts',
+		});
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain('Cross-contamination pair file missing');
+		expect(result.stderr).toContain('does-not-exist.test.ts');
 	});
 });
 
@@ -168,29 +179,26 @@ describe('check-cross-contamination — main audit wiring', () => {
 				seenRoots.push(repoRoot);
 				return { exitCode: 0, stdout: '', stderr: '' };
 			},
-			collectWarnings: () => [],
 		});
 
 		expect(summary.exitCode).toBe(0);
 		expect(seenRoots).toEqual([REPO_ROOT, REPO_ROOT]);
 		expect(summary.repoRoot).toBe(REPO_ROOT);
-		expect(summary.messages.at(-1)).toBe(
+		expect(summary.messages).toEqual([
 			'No cross-contamination detected: all test pairs pass when co-run.',
-		);
+		]);
 	});
 
-	test('keeps coverage warnings non-blocking when no regression is present', async () => {
+	test('does not emit hook coverage warnings in the default audit output', async () => {
 		const summary = await auditCrossContamination(REPO_ROOT, {
 			runPair: () => ({ exitCode: 0, stdout: '', stderr: '' }),
-			collectWarnings: () => [
-				'::notice title=Hook test file not in CI coverage::example',
-			],
 		});
 
 		expect(summary.exitCode).toBe(0);
-		expect(summary.coverageWarning).toBe(true);
-		expect(summary.messages.join('\n')).toContain(
-			'Audit checks completed with warnings (non-blocking).',
-		);
+		expect(summary.messages).toEqual([
+			'No cross-contamination detected: all test pairs pass when co-run.',
+		]);
+		expect(summary.messages.join('\n')).not.toContain('Hook test file');
+		expect(summary.messages.join('\n')).not.toContain('Mock module not');
 	});
 });
