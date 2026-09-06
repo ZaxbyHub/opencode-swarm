@@ -385,7 +385,8 @@ directly under `.release-fragment-cleanup/`. Existing matching history is
 preserved; any conflict fails closed. Commit each bounded batch as a cleanup
 PR. Each non-final tag writes a version-controlled replay-state artifact so
 required retention CI can verify that bounded work remains. That authorization
-expires after seven days and an expiry beyond that fixed window is rejected, so
+expires after seven days, reruns preserve its original deadline, and an expiry
+beyond that fixed window is rejected, so
 an abandoned/interrupted replay fails retention CI instead of suppressing the
 limit indefinitely. The last tag of the final batch
 removes that state and fails closed before mutation unless its projected pending

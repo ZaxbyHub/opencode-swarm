@@ -13,6 +13,7 @@ import {
 	createHistoricalReplayBatch,
 	HISTORICAL_REPLAY_STATE,
 	HISTORICAL_REPLAY_TTL_MS,
+	MARKER_START,
 	MAX_FRAGMENT_BYTES,
 	MAX_RELEASE_HISTORY_BYTES,
 	readDirectoryNamesBounded,
@@ -198,9 +199,9 @@ describe('release note input bounds', () => {
 			maxPendingFragments: 1,
 			nowMs,
 			historicalReplay: createHistoricalReplayBatch(
-				['v1.2.3', 'v1.2.4'],
+				['v1.2.3', 'v1.2.4', 'v1.2.5'],
 				'0',
-				2,
+				3,
 			),
 		});
 
@@ -241,5 +242,184 @@ describe('release note input bounds', () => {
 		const result = auditFragmentRetention(root, 1, nowMs);
 		expect(result.violation).toBe(true);
 		expect(result.diagnostics.join('\n')).toMatch(/authorization expired/i);
+	});
+
+	test('does not renew the replay deadline on an idempotent rerun', async () => {
+		const root = fixtureRoot();
+		for (const name of ['a.md', 'b.md']) {
+			writeFileSync(path.join(root, 'docs/releases/pending', name), name);
+		}
+		const startMs = Date.parse('2026-09-01T00:00:00.000Z');
+		const tags = ['v1.2.3', 'v1.2.4', 'v1.2.5'];
+		const firstBatch = createHistoricalReplayBatch(tags, '0', 1);
+		const input = {
+			repoRoot: root,
+			tagName: 'v1.2.3',
+			tagCommit: '0123456789abcdef0123456789abcdef01234567',
+			release: { tagName: 'v1.2.3', body: '' },
+			entries: [],
+			dryRun: false,
+			maxPendingFragments: 1,
+			historicalReplay: firstBatch,
+		};
+		await reconcileTaggedRelease({ ...input, nowMs: startMs });
+		const statePath = path.join(root, HISTORICAL_REPLAY_STATE);
+		const original = JSON.parse(readFileSync(statePath, 'utf8'));
+		await reconcileTaggedRelease({
+			...input,
+			nowMs: startMs + 6 * 24 * 60 * 60 * 1_000,
+		});
+		const rerun = JSON.parse(readFileSync(statePath, 'utf8'));
+		await reconcileTaggedRelease({
+			...input,
+			tagName: 'v1.2.4',
+			release: { tagName: 'v1.2.4', body: '' },
+			historicalReplay: createHistoricalReplayBatch(
+				tags,
+				firstBatch.nextCursor,
+				1,
+			),
+			nowMs: startMs + 6 * 24 * 60 * 60 * 1_000,
+		});
+		const progressed = JSON.parse(readFileSync(statePath, 'utf8'));
+
+		expect(rerun.expiresAt).toBe(original.expiresAt);
+		expect(progressed.expiresAt).toBe(original.expiresAt);
+		expect(
+			auditFragmentRetention(root, 1, startMs + HISTORICAL_REPLAY_TTL_MS + 1)
+				.violation,
+		).toBe(true);
+	});
+
+	test('rejects historical replay that does not start at tag zero', async () => {
+		const root = fixtureRoot();
+		const tags = ['v1.2.3', 'v1.2.4'];
+		const first = createHistoricalReplayBatch(tags, '0', 1);
+		await expect(
+			reconcileTaggedRelease({
+				repoRoot: root,
+				tagName: 'v1.2.4',
+				tagCommit: '0123456789abcdef0123456789abcdef01234567',
+				release: { tagName: 'v1.2.4', body: '' },
+				entries: [],
+				dryRun: false,
+				historicalReplay: createHistoricalReplayBatch(
+					tags,
+					first.nextCursor,
+					1,
+				),
+			}),
+		).rejects.toThrow(/must begin with the first ordered tag/i);
+		expect(existsSync(path.join(root, 'docs/releases/v1.2.4.md'))).toBe(false);
+	});
+
+	test('rejects overlapping batches and skipped replay tags before mutation', async () => {
+		const root = fixtureRoot();
+		const tags = ['v1.2.3', 'v1.2.4', 'v1.2.5'];
+		const first = createHistoricalReplayBatch(tags, '0', 1);
+		const common = {
+			repoRoot: root,
+			tagCommit: '0123456789abcdef0123456789abcdef01234567',
+			entries: [],
+			dryRun: false,
+		};
+		await reconcileTaggedRelease({
+			...common,
+			tagName: 'v1.2.3',
+			release: { tagName: 'v1.2.3', body: '' },
+			historicalReplay: first,
+		});
+		await expect(
+			reconcileTaggedRelease({
+				...common,
+				tagName: 'v1.2.4',
+				release: { tagName: 'v1.2.4', body: '' },
+				historicalReplay: createHistoricalReplayBatch(tags, '0', 2),
+			}),
+		).rejects.toThrow(/cannot renew or replace/i);
+		expect(existsSync(path.join(root, 'docs/releases/v1.2.4.md'))).toBe(false);
+		await expect(
+			reconcileTaggedRelease({
+				...common,
+				tagName: 'v1.2.5',
+				release: { tagName: 'v1.2.5', body: '' },
+				historicalReplay: createHistoricalReplayBatch(
+					tags,
+					first.tagListDigest + ':2',
+					1,
+				),
+			}),
+		).rejects.toThrow(/cannot renew or replace/i);
+		expect(existsSync(path.join(root, 'docs/releases/v1.2.5.md'))).toBe(false);
+	});
+
+	test('rejects an expired final replay tag before mutation', async () => {
+		const root = fixtureRoot();
+		const startMs = Date.parse('2026-09-01T00:00:00.000Z');
+		const replay = createHistoricalReplayBatch(['v1.2.3', 'v1.2.4'], '0', 2);
+		const common = {
+			repoRoot: root,
+			tagCommit: '0123456789abcdef0123456789abcdef01234567',
+			entries: [],
+			dryRun: false,
+			historicalReplay: replay,
+		};
+		await reconcileTaggedRelease({
+			...common,
+			tagName: 'v1.2.3',
+			release: { tagName: 'v1.2.3', body: '' },
+			nowMs: startMs,
+		});
+		await expect(
+			reconcileTaggedRelease({
+				...common,
+				tagName: 'v1.2.4',
+				release: { tagName: 'v1.2.4', body: '' },
+				nowMs: startMs + HISTORICAL_REPLAY_TTL_MS + 1,
+			}),
+		).rejects.toThrow(/cannot renew or replace/i);
+		expect(existsSync(path.join(root, 'docs/releases/v1.2.4.md'))).toBe(false);
+		expect(existsSync(path.join(root, HISTORICAL_REPLAY_STATE))).toBe(true);
+	});
+
+	test('validates malformed release bodies before apply-mode overflow returns', async () => {
+		const root = fixtureRoot();
+		for (const name of ['a.md', 'b.md']) {
+			writeFileSync(path.join(root, 'docs/releases/pending', name), name);
+		}
+		await expect(
+			reconcileTaggedRelease({
+				repoRoot: root,
+				tagName: 'v1.2.3',
+				tagCommit: '0123456789abcdef0123456789abcdef01234567',
+				release: { tagName: 'v1.2.3', body: MARKER_START },
+				entries: [],
+				dryRun: false,
+				maxPendingFragments: 1,
+			}),
+		).rejects.toThrow(/invalid custom release-notes block/i);
+		expect(existsSync(path.join(root, 'docs/releases/v1.2.3.md'))).toBe(false);
+	});
+
+	test('validates history conflicts before apply-mode overflow returns', async () => {
+		const root = fixtureRoot();
+		for (const name of ['a.md', 'b.md']) {
+			writeFileSync(path.join(root, 'docs/releases/pending', name), name);
+		}
+		writeFileSync(path.join(root, 'docs/releases/v1.2.3.md'), 'conflict');
+		await expect(
+			reconcileTaggedRelease({
+				repoRoot: root,
+				tagName: 'v1.2.3',
+				tagCommit: '0123456789abcdef0123456789abcdef01234567',
+				release: { tagName: 'v1.2.3', body: '' },
+				entries: [],
+				dryRun: false,
+				maxPendingFragments: 1,
+			}),
+		).rejects.toThrow(/refusing to overwrite conflicting release history/i);
+		expect(
+			readFileSync(path.join(root, 'docs/releases/v1.2.3.md'), 'utf8'),
+		).toBe('conflict');
 	});
 });

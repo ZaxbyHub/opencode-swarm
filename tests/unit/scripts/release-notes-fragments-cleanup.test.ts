@@ -347,6 +347,7 @@ describe('reconcileTaggedRelease', () => {
 
 		const result = await reconcileTaggedRelease({
 			...options(root),
+			release: { tagName: 'v1.2.3', body: '' },
 			entries: [],
 			maxPendingFragments: 1,
 			dryRun: false,
@@ -484,17 +485,14 @@ describe('resolveCleanupPlanPath', () => {
 		expect(
 			resolveCleanupPlanPath(root, '.release-fragment-cleanup/plan.json'),
 		).toBe(path.join(root, '.release-fragment-cleanup', 'plan.json'));
-		expect(() => resolveCleanupPlanPath(root, '../outside.json')).toThrow(
-			/must be a JSON file/i,
-		);
-		expect(() =>
-			resolveCleanupPlanPath(
-				root,
-				'.release-fragment-cleanup/nested/plan.json',
-			),
-		).toThrow(/must be a JSON file/i);
-		expect(() =>
-			resolveCleanupPlanPath(root, path.join(root, 'absolute.json')),
-		).toThrow(/must be a JSON file/i);
+		for (const candidate of [
+			'../outside.json',
+			'.release-fragment-cleanup/nested/plan.json',
+			path.join(root, 'absolute.json'),
+		]) {
+			expect(() => resolveCleanupPlanPath(root, candidate)).toThrow(
+				/must be a JSON file/i,
+			);
+		}
 	});
 });

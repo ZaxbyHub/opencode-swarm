@@ -686,6 +686,7 @@ export function auditFragmentRetention(
 		if (
 			state?.schemaVersion !== 1 ||
 			typeof state.tagName !== 'string' ||
+			typeof state.startedAt !== 'string' ||
 			typeof state.expiresAt !== 'string'
 		) {
 			throw new Error('historical replay state is malformed');
@@ -694,11 +695,17 @@ export function auditFragmentRetention(
 		if (!authorization?.hasMoreWork) {
 			throw new Error('historical replay state does not authorize more work');
 		}
+		const startedAt = Date.parse(state.startedAt);
 		const expiresAt = Date.parse(state.expiresAt);
-		if (!Number.isFinite(expiresAt)) {
+		if (!Number.isFinite(startedAt) || !Number.isFinite(expiresAt)) {
 			throw new Error('historical replay state expiry is malformed');
 		}
-		if (expiresAt <= nowMs || expiresAt > nowMs + HISTORICAL_REPLAY_TTL_MS) {
+		if (
+			startedAt > nowMs ||
+			expiresAt !== startedAt + HISTORICAL_REPLAY_TTL_MS ||
+			expiresAt <= nowMs ||
+			expiresAt > nowMs + HISTORICAL_REPLAY_TTL_MS
+		) {
 			staleHistoricalReplay = true;
 		}
 		else activeHistoricalReplay = true;
@@ -859,7 +866,7 @@ export async function reconcileTaggedRelease(options) {
 			' pending fragment(s), limit ' +
 			maxPendingFragments,
 	];
-	if (retention.violation && !retention.authorizedIntermediate) {
+	const retentionFailureResult = () => {
 		diagnostics.push(
 			'retention policy violation: a non-final historical replay batch is required',
 		);
@@ -873,6 +880,9 @@ export async function reconcileTaggedRelease(options) {
 			diagnostics,
 			retention,
 		};
+	};
+	if (retention.violation && !retention.authorizedIntermediate && dryRun) {
+		return retentionFailureResult();
 	}
 
 	const markerStarts = countLiteral(release.body, MARKER_START);
@@ -927,6 +937,75 @@ export async function reconcileTaggedRelease(options) {
 			throw new Error('refusing to overwrite conflicting release history: ' + relativePath);
 		}
 	}
+	let replayStateText = null;
+	if (historicalReplay !== null) {
+		let startedAt = new Date(nowMs).toISOString();
+		let expiresAt = new Date(nowMs + HISTORICAL_REPLAY_TTL_MS).toISOString();
+		const existingStateText = await readOptional(io, HISTORICAL_REPLAY_STATE);
+		const currentIndex = historicalReplay.orderedTags.indexOf(tagName);
+		if (existingStateText !== null) {
+			const existingState = JSON.parse(existingStateText);
+			const existingStart = Date.parse(existingState?.startedAt ?? '');
+			const existingExpiry = Date.parse(existingState?.expiresAt ?? '');
+			const existingReplay = validateHistoricalReplayProof(
+				existingState?.replay,
+				existingState?.tagName,
+			);
+			const previousIndex = historicalReplay.orderedTags.indexOf(
+				existingState?.tagName,
+			);
+			const sameTag = currentIndex === previousIndex;
+			const exactSuccessor = currentIndex === previousIndex + 1;
+			const previousBatchIndex = existingState?.replay?.tags?.indexOf(
+				existingState?.tagName,
+			);
+			const proofProgresses = sameTag
+				? JSON.stringify(existingState?.replay) ===
+					JSON.stringify(historicalReplay)
+				: exactSuccessor &&
+					(previousBatchIndex < existingState?.replay?.tags?.length - 1
+						? JSON.stringify(existingState?.replay) ===
+							JSON.stringify(historicalReplay)
+						: historicalReplay.cursor === existingState?.replay?.nextCursor);
+			if (
+				existingState?.schemaVersion !== 1 ||
+				!existingReplay?.hasMoreWork ||
+				existingState?.replay?.tagListDigest !== historicalReplay.tagListDigest ||
+				previousIndex < 0 ||
+				!proofProgresses ||
+				!Number.isFinite(existingStart) ||
+				!Number.isFinite(existingExpiry) ||
+				existingExpiry !== existingStart + HISTORICAL_REPLAY_TTL_MS ||
+				existingExpiry <= nowMs ||
+				existingExpiry > nowMs + HISTORICAL_REPLAY_TTL_MS
+			) {
+				throw new Error(
+					'historical replay state cannot renew or replace its authorization window',
+				);
+			}
+			expiresAt = existingState.expiresAt;
+			startedAt = existingState.startedAt;
+		} else if (currentIndex !== 0) {
+			throw new Error('historical replay must begin with the first ordered tag');
+		}
+		if (replayAuthorization?.hasMoreWork) {
+			replayStateText =
+				JSON.stringify(
+					{
+						schemaVersion: 1,
+						tagName,
+						startedAt,
+						expiresAt,
+						replay: historicalReplay,
+					},
+					null,
+					2,
+				) + '\n';
+		}
+	}
+	if (retention.violation && !retention.authorizedIntermediate) {
+		return retentionFailureResult();
+	}
 
 	const deleted = [];
 	if (!dryRun) {
@@ -963,20 +1042,7 @@ export async function reconcileTaggedRelease(options) {
 			log('deleted consumed fragment ' + relativePath);
 		}
 		if (replayAuthorization?.hasMoreWork) {
-			const expiresAt = new Date(nowMs + HISTORICAL_REPLAY_TTL_MS).toISOString();
-			await io.writeText(
-				HISTORICAL_REPLAY_STATE,
-				JSON.stringify(
-					{
-						schemaVersion: 1,
-						tagName,
-						expiresAt,
-						replay: historicalReplay,
-					},
-					null,
-					2,
-				) + '\n',
-			);
+			await io.writeText(HISTORICAL_REPLAY_STATE, replayStateText);
 		} else if (historicalReplay !== null) {
 			await io.removePath(HISTORICAL_REPLAY_STATE);
 		}
