@@ -37,7 +37,7 @@ function arrayEntries(source: string, constName: string): string[] {
 }
 
 describe('/swarm close handles run-memory.jsonl', () => {
-	const closeSource = readFileSync(join(SRC, 'close.ts'), 'utf-8');
+	const closeSource = readFileSync(join(SRC, 'close', 'constants.ts'), 'utf-8');
 
 	it('archives it, so the forensic bundle keeps the outcome trail', () => {
 		expect(arrayEntries(closeSource, 'ARCHIVE_ARTIFACTS')).toContain(

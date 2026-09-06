@@ -50,7 +50,7 @@ export const CORE_EVENTS_MENTION_ALLOWLIST: Readonly<
 		reason: 'the bounded core event store and append seam itself (issue #2039)',
 		cls: 'seam',
 	},
-	'src/commands/close.ts': {
+	'src/commands/close/constants.ts': {
 		reason: 'archive/clean lifecycle ownership of events.jsonl and events-authority-index.json',
 		cls: 'lifecycle',
 	},

@@ -16,13 +16,6 @@
 			"note": "Pre-existing debt, not approved drift: \"validateAndRecordAttestation\" exists in src/hooks/guardrails/file-authority.ts but not inside :136 (attestations.writerCitations[0])."
 		},
 		{
-			"rowId": "close-archive-bundles",
-			"file": "src/commands/close.ts",
-			"identifier": "runArchiveStage",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"runArchiveStage\" exists in src/commands/close.ts but not inside src/commands/close.ts:1256 (close-archive-bundles.writerCitations[0])."
-		},
-		{
 			"rowId": "close-session-outputs",
 			"file": "src/hooks/agent-activity.ts",
 			"identifier": "doFlush",
@@ -532,13 +525,6 @@
 			"identifier": "toolAfter",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"toolAfter\" exists in src/hooks/trajectory-logger.ts but not inside src/hooks/trajectory-logger.ts:469 (task-evidence-trajectory.writerCitations[0])."
-		},
-		{
-			"rowId": "task-workflow-evidence",
-			"file": "src/commands/close.ts",
-			"identifier": "ACTIVE_STATE_DIRS_TO_CLEAN",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"ACTIVE_STATE_DIRS_TO_CLEAN\" exists in src/commands/close.ts but not inside src/commands/close.ts:574 (task-workflow-evidence.writeLimits.citation)."
 		},
 		{
 			"rowId": "task-workflow-evidence",

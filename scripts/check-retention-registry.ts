@@ -601,6 +601,11 @@ export function collectCoverageRatchetErrors(
 }
 
 const CLOSE_MODULE_REL = 'src/commands/close.ts';
+const CLOSE_LIFECYCLE_MODULE_RELS = [
+	'src/commands/close/constants.ts',
+	'src/commands/close/archive-stage.ts',
+	'src/commands/close/clean-stage.ts',
+] as const;
 
 /**
  * Issue #2480: raw-handle confinement. Every non-test module under `src/`
@@ -682,6 +687,7 @@ export function collectDbFoundationStalenessErrors(
 export function makeCloseIdentifierResolver(
 	root: string,
 	closeSource: string,
+	moduleRel: string = CLOSE_MODULE_REL,
 ): IdentifierResolver {
 	const importRe = /import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*'([^']+)'/g;
 	const specsByName = new Map<string, string>();
@@ -695,7 +701,7 @@ export function makeCloseIdentifierResolver(
 		const spec = specsByName.get(name);
 		if (!spec || !spec.startsWith('.')) return undefined;
 		const base = path.resolve(
-			path.dirname(path.join(root, CLOSE_MODULE_REL)),
+			path.dirname(path.join(root, moduleRel)),
 			spec.replace(/\.js$/, ''),
 		);
 		for (const candidate of [`${base}.ts`, path.join(base, 'index.ts')]) {
@@ -714,11 +720,13 @@ export function makeCloseIdentifierResolver(
 	};
 }
 
-/** Load close.ts and extract its close-lifecycle facts for the real repo. */
+/** Load the split close-stage owners and extract lifecycle facts for the real repo. */
 export function loadCloseLifecycleFacts(root: string): CloseLifecycleFacts {
-	let source: string;
+	const sources = new Map<string, string>();
 	try {
-		source = fs.readFileSync(path.join(root, CLOSE_MODULE_REL), 'utf-8');
+		for (const rel of CLOSE_LIFECYCLE_MODULE_RELS) {
+			sources.set(rel, fs.readFileSync(path.join(root, rel), 'utf-8'));
+		}
 	} catch (err) {
 		const reason = err instanceof Error ? err.message : String(err);
 		return {
@@ -727,13 +735,21 @@ export function loadCloseLifecycleFacts(root: string): CloseLifecycleFacts {
 			sqliteArchiveDispatch: [],
 			sqliteCleanHandleClose: [],
 			parseErrors: [
-				`${CLOSE_MODULE_REL} could not be read (${reason}) — the issue #1534 close-lifecycle gate fails closed rather than passing vacuously.`,
+				`split close lifecycle sources could not be read (${reason}) — the issue #1534 close-lifecycle gate fails closed rather than passing vacuously.`,
 			],
 		};
 	}
+	const constantsSource = sources.get(CLOSE_LIFECYCLE_MODULE_RELS[0]) ?? '';
+	const combinedSource = CLOSE_LIFECYCLE_MODULE_RELS.map(
+		(rel) => sources.get(rel) ?? '',
+	).join('\n');
 	return parseCloseLifecycleFacts(
-		source,
-		makeCloseIdentifierResolver(root, source),
+		combinedSource,
+		makeCloseIdentifierResolver(
+			root,
+			constantsSource,
+			CLOSE_LIFECYCLE_MODULE_RELS[0],
+		),
 	);
 }
 
