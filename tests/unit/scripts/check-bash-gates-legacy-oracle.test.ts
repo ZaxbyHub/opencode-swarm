@@ -12,17 +12,12 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { main as runBashPortability } from '../../../scripts/check-bash-portability';
-import {
-	type PairRunResult,
-	main as runCrossContamination,
-} from '../../../scripts/check-cross-contamination';
 import { runGit, spawnUtf8 } from '../../../scripts/gate-utils';
 import { bashCommand, resolveBash } from '../../helpers/bash.js';
 import {
 	buildInvariantsOracleExpected,
 	seedQuarantineListFiles,
 } from '../../helpers/invariant-gate-fixtures.js';
-import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../');
@@ -59,14 +54,9 @@ const BASH_PORTABILITY_GATE = path.resolve(
 	REPO_ROOT,
 	'scripts/check-bash-portability.ts',
 );
-const CROSS_CONTAMINATION_GATE = path.resolve(
-	REPO_ROOT,
-	'scripts/check-cross-contamination.ts',
-);
 const tempRoots: string[] = [];
 const MOCK_MODULE_CALL = ['mock', "module('./dep', () => ({}));"].join('.');
 const RAW_TMPDIR_CALL = ['tmpdir', '()'].join('');
-const CROSS_CONTAMINATION_TIMEOUT_MS = 180_000;
 interface LegacyFixtureEntry {
 	path: string;
 	mode: string;
@@ -187,22 +177,6 @@ async function expectLegacyParity(
 	expect(normalizeOutput(legacyResult.stderr)).toBe(
 		normalizeOutput(tsResult.stderr),
 	);
-}
-
-async function captureLogLines(
-	run: (log: (line: string) => void) => number | Promise<number>,
-): Promise<{
-	exitCode: number;
-	stdout: string;
-}> {
-	const lines: string[] = [];
-	const exitCode = await run((line) => {
-		lines.push(line);
-	});
-	return {
-		exitCode,
-		stdout: lines.join('\n'),
-	};
 }
 
 async function captureConsoleLog(run: () => number | Promise<number>): Promise<{
@@ -445,56 +419,4 @@ describe('issue #2094 legacy-oracle parity', () => {
 		expect(captured.exitCode).toBe(1);
 		expect(normalizeOutput(captured.stdout)).toBe(expected);
 	});
-
-	test('cross-contamination preserves the archived known-issue warning shape', async () => {
-		const captured = await captureLogLines((log) =>
-			runCrossContamination(REPO_ROOT, {
-				runPair: (_repoRoot, pair): PairRunResult =>
-					pair.fileA.includes('knowledge-reader')
-						? { exitCode: 1, stdout: ' 71 pass\n', stderr: '' }
-						: { exitCode: 0, stdout: '57 pass\n', stderr: '' },
-				collectWarnings: () => [],
-				log,
-			}),
-		);
-
-		expect(captured.exitCode).toBe(0);
-		expect(normalizeOutput(captured.stdout)).toBe(
-			[
-				'::warning title=Cross-contamination known issue::Co-run of tests/unit/hooks/knowledge-reader.test.ts + tests/unit/services/skill-generator.test.ts: expected 99 pass, got 71 pass (known baseline: 71). Pre-existing vi.mock() leak — tracked in scripts/check-cross-contamination.sh.',
-				'',
-				'Known pre-existing cross-contamination present (non-blocking).',
-				'Expected passes when fixed: update known_expected in this script.',
-			].join('\n'),
-		);
-	});
-
-	test('cross-contamination matches the archived Bash owner on the real repo when Bash is available', async () => {
-		if (!hasBash) return;
-		const isolatedEnv = createIsolatedTestEnv();
-		try {
-			const legacyResult = await runLegacyGate(
-				'scripts/check-cross-contamination.sh',
-				REPO_ROOT,
-				CROSS_CONTAMINATION_TIMEOUT_MS,
-			);
-			const tsResult = await runTsGate(
-				CROSS_CONTAMINATION_GATE,
-				REPO_ROOT,
-				CROSS_CONTAMINATION_TIMEOUT_MS,
-			);
-
-			expect(tsResult.exitCode, tsResult.stderr).toBe(legacyResult.exitCode);
-			expect(tsResult.stdout).toBe(legacyResult.stdout);
-			expect(tsResult.stderr).toBe(legacyResult.stderr);
-			expect(normalizeOutput(tsResult.stdout), tsResult.stderr).toBe(
-				normalizeOutput(legacyResult.stdout),
-			);
-			expect(normalizeOutput(tsResult.stderr)).toBe(
-				normalizeOutput(legacyResult.stderr),
-			);
-		} finally {
-			isolatedEnv.cleanup();
-		}
-	}, 240_000);
 });

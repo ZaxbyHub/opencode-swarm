@@ -817,7 +817,7 @@ jobs:
           failed=0
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
           trap 'rm -f "$tmpdir"/bun-out-int-* "$tmpdir"/int-*.txt' EXIT
-          find tests/integration test -maxdepth 1 -name '*.test.ts' -type f | sort > "$tmpdir/int-all-tests.txt"
+          find tests/integration test -name '*.test.ts' -type f | sort > "$tmpdir/int-all-tests.txt"
           # Drop known-red pre-existing failures (issue #1705) — same rationale
           # as the unit/coverage jobs' quarantine lists. See
           # scripts/ci/quarantined-integration-tests.txt for the tracked list.
