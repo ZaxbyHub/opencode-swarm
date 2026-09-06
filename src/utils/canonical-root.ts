@@ -66,6 +66,17 @@ export function lexicalRootAliasKey(directory: string): string {
 	return normalizeIdentityPath(path.resolve(directory));
 }
 
+/**
+ * Return a bounded, filesystem-free key for a caller's lexical root spelling.
+ *
+ * This is intentionally separate from `canonicalRootKeyFresh*`: dispatch uses
+ * it for a synchronous input-alias table immediately after an async lookup has
+ * populated the real cache. It is not a physical project-root identity.
+ */
+export function canonicalRootKeyLexical(directory: string): string {
+	return lexicalRootAliasKey(directory);
+}
+
 function resolveCanonicalRootKey(directory: string): string {
 	let resolved = path.resolve(directory);
 	try {
@@ -76,6 +87,29 @@ function resolveCanonicalRootKey(directory: string): string {
 		} catch {
 			/* root missing / inaccessible — resolve() is the best identity we have */
 		}
+	}
+	return normalizeIdentityPath(resolved);
+}
+
+/**
+ * Resolve a physical root identity without blocking the event loop.
+ *
+ * Init-path callers must use this form when their work is governed by an
+ * AbortSignal deadline. `fs.promises.realpath` lets the timeout race settle
+ * while slow network filesystems, antivirus hooks, or junction resolution are
+ * still pending; a later caller-side abort check prevents the late result from
+ * publishing cache state. The synchronous helpers above remain necessary for
+ * existing synchronous authority and persistence call sites.
+ */
+export async function canonicalRootKeyFreshAsync(
+	directory: string,
+): Promise<string> {
+	let resolved = path.resolve(directory);
+	try {
+		resolved = await fsSync.promises.realpath(resolved);
+	} catch {
+		// A missing or inaccessible path has no physical identity available.
+		// Preserve the same lexical fallback as canonicalRootKeyFresh.
 	}
 	return normalizeIdentityPath(resolved);
 }

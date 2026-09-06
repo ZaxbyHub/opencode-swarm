@@ -4,6 +4,7 @@ import {
 	_internals as projectContextInternals,
 } from '../../../src/agents/project-context';
 import { emptyProjectContext } from '../../../src/agents/template';
+import { withTimeoutSignal } from '../../../src/utils/timeout';
 
 /**
  * Regression guard for Invariant 1 (plugin init bounded + fail-open).
@@ -11,7 +12,7 @@ import { emptyProjectContext } from '../../../src/agents/template';
  * Phase 4b adds `buildProjectContext(directory)` to the init path, called
  * from `src/index.ts:initializeOpenCodeSwarm` immediately before
  * `getAgentConfigs(...)`. The caller wraps the call in
- * `withTimeout(LANG_BACKEND_DETECTION_TIMEOUT_MS = 300)` and falls open to
+ * `withTimeoutSignal(LANG_BACKEND_DETECTION_TIMEOUT_MS = 300)` and falls open to
  * `null` (which `getAgentConfigs` then treats as `emptyProjectContext`).
  *
  * Without that wrap + fail-open, a hang in `pickBackend` (e.g. a slow
@@ -35,24 +36,33 @@ describe('init fail-open: buildProjectContext under simulated hang', () => {
 		projectContextInternals.pickBackend = realPickBackend;
 	});
 
-	test('caller-side withTimeout(300) bounds a hung pickBackend', async () => {
-		// Simulate a hang: pickBackend never resolves.
-		projectContextInternals.pickBackend = () => new Promise(() => {});
+	test('caller-side withTimeoutSignal aborts and bounds a slow pickBackend', async () => {
+		let observedSignal: AbortSignal | undefined;
+		projectContextInternals.pickBackend = async (_directory, signal) =>
+			new Promise((_, reject) => {
+				observedSignal = signal;
+				signal?.addEventListener('abort', () => reject(signal.reason), {
+					once: true,
+				});
+			});
 
-		// Mirror the caller's wrap shape from src/index.ts. The caller does
-		// `withTimeout(buildProjectContext(...), 300, error).catch(() => null)`.
-		// We verify that race resolves within 300ms rather than hanging
-		// forever. The 600ms upper bound here is the Issue #704 contract —
-		// `server()` must not block past the architect's first-await deadline.
+		// Mirror the production boundary in src/index.ts. Cooperative cancellation
+		// proves late dispatch work cannot continue to publish cache state after
+		// init has failed open.
 		const start = Date.now();
-		const result = await Promise.race([
-			buildProjectContext('/tmp'),
-			new Promise<null>((resolve) => setTimeout(() => resolve(null), 600)),
-		]);
+		const timeoutError = new Error('simulated init timeout');
+		await expect(
+			withTimeoutSignal(
+				(signal) => buildProjectContext('/tmp', signal),
+				30,
+				timeoutError,
+			),
+		).rejects.toBe(timeoutError);
 		const elapsed = Date.now() - start;
-		expect(elapsed).toBeLessThan(800);
-		// Caller treats null as fail-open → emptyProjectContext.
-		const ctx = result ?? emptyProjectContext();
+		expect(elapsed).toBeLessThan(150);
+		expect(observedSignal?.aborted).toBe(true);
+		// The caller treats timeout failure as null → emptyProjectContext.
+		const ctx = emptyProjectContext();
 		expect(ctx.PROJECT_LANGUAGE).toBeDefined();
 	});
 

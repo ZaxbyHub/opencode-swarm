@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.90.1",
+  "tagCommit": "a47a33d3bcf956d2615dbfa59a9f4502a140f6c0",
+  "targetCommitish": "a47a33d3bcf956d2615dbfa59a9f4502a140f6c0",
+  "releaseBodySha256": "af0134249413b638b132477390d4b0fb90d49f38e6a0bd89c76526ff04a8f33f",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1273-telemetry-rotation-wiring.md",
+      "sha256": "37a48cca3c0a3c03194c09cab8735cd58d8a6bb55fcf8791a888860769ed0e7f"
+    }
+  ]
+}

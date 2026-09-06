@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.103.3",
+  "tagCommit": "1a1abb4a3e203cf8f887d7c84046ac152d1096e0",
+  "targetCommitish": "1a1abb4a3e203cf8f887d7c84046ac152d1096e0",
+  "releaseBodySha256": "5a46afdbabf0aa6056c036f8e17e30012c1fdc177663218a7f55f8f715d9ed08",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/knowledge-system-feedback-loop-fixes.md",
+      "sha256": "b4ad8da51228feb715aa4bce99b33df0cd7791c22a993b3e9fd7556130ab64ab"
+    }
+  ]
+}

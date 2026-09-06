@@ -3,7 +3,7 @@
  * The delegation ledger, checkpoint, manifest, and health artifact must be
  * ARCHIVED as a set (forensic completeness) and deliberately NOT cleaned
  * (cross-session state; compaction is the retention mechanism). Both lists
- * are module-private in src/commands/close.ts, so this pins them as a
+ * live in the close constants module, so this pins them as a
  * source-contract guard (same pattern as the swarm-write-cache scan guards):
  * removing the entries or moving them to the cleanup list fails this test.
  */
@@ -11,16 +11,25 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const closeSource = readFileSync(
-	join(import.meta.dir, '..', '..', '..', 'src', 'commands', 'close.ts'),
+const constantsSource = readFileSync(
+	join(
+		import.meta.dir,
+		'..',
+		'..',
+		'..',
+		'src',
+		'commands',
+		'close',
+		'constants.ts',
+	),
 	'utf-8',
 );
 
 function arrayRegion(name: string): string {
-	const start = closeSource.indexOf(`const ${name} = [`);
-	if (start === -1) throw new Error(`${name} not found in close.ts`);
-	const end = closeSource.indexOf('];', start);
-	return closeSource.slice(start, end);
+	const start = constantsSource.indexOf(`const ${name} = [`);
+	if (start === -1) throw new Error(`${name} not found in close/constants.ts`);
+	const end = constantsSource.indexOf('];', start);
+	return constantsSource.slice(start, end);
 }
 
 const DELEGATION_ARTIFACTS = [

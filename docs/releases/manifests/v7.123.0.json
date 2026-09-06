@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.123.0",
+  "tagCommit": "cb8efe9abf20de8c40f4778171be31f6b6c261b6",
+  "targetCommitish": "cb8efe9abf20de8c40f4778171be31f6b6c261b6",
+  "releaseBodySha256": "106c8002757e80fefa400bedd8a319d185c35f5fe707a7ae39f089be0bb7c5e5",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-tracer-canonicalization.md",
+      "sha256": "ec954552cf947ed33873310de9ecc95d0bdec15feb3ba248b2c162ff63ab6cde"
+    }
+  ]
+}

@@ -14,6 +14,11 @@ const FLAKE_DETECTION_YML_PATH = join(
 	import.meta.dir,
 	'../../../../.github/workflows/flake-detection.yml',
 );
+const REPO_ROOT = join(import.meta.dir, '../../../..');
+const REQUIRED_RECURSIVE_INTEGRATION_TESTS = [
+	'tests/integration/lang/prompt-injection.test.ts',
+	'tests/integration/lang/tool-profiles.test.ts',
+] as const;
 
 /*
  * Every extractor below ends its lazy match on the same four-alternative
@@ -64,6 +69,11 @@ function extractIntegrationTestsStep(yml: string): string {
 		/- name: Integration tests[\s\S]*?(?=\n {6}- name:|\n {6}# ---|\n {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
 	);
 	return match ? match[0] : '';
+}
+
+function extractIntegrationFindCommand(step: string): string {
+	const match = step.match(/^\s*find tests\/integration test[^\n]*$/m);
+	return match ? match[0].trim() : '';
 }
 
 function extractUnitFlakeAnnotationsUploadStep(yml: string): string {
@@ -141,6 +151,34 @@ describe('ci.yml integration — integration quarantine extraction', () => {
 		expect(step).toMatch(
 			/if \[ \$exit_code -eq 0 \]; then\s+# Match the unit wrapper's[\s\S]*?grep -E "\^\\\[ISSUE-\[0-9\]\+\(-\[A-Z0-9-\]\+\)\?-EVIDENCE\\\]" "\$tmp" \|\| true\s+fi/,
 		);
+	});
+});
+
+describe('ci.yml integration — recursive corpus discovery (issue #2552)', () => {
+	const yml = readFileSync(CI_YML_PATH, 'utf8');
+	const step = extractIntegrationTestsStep(yml);
+	const findCommand = extractIntegrationFindCommand(step);
+
+	test('the real integration step discovers both nested security-sensitive fixtures', () => {
+		// These exact basenames live below tests/integration/lang/. Pinning their
+		// paths against the actual find command catches a regression where a
+		// shallow discovery change silently leaves both files out of merge-queue CI.
+		expect(findCommand).toBe(
+			`find tests/integration test -name '*.test.ts' -type f | sort > "$tmpdir/int-all-tests.txt"`,
+		);
+		for (const relativePath of REQUIRED_RECURSIVE_INTEGRATION_TESTS) {
+			expect(existsSync(join(REPO_ROOT, relativePath))).toBe(true);
+			expect(relativePath.startsWith('tests/integration/')).toBe(true);
+			expect(relativePath.endsWith('.test.ts')).toBe(true);
+		}
+	});
+
+	test('integration discovery has no depth cap of any kind', () => {
+		// Do not weaken this to a literal `-maxdepth 1` check: any numeric
+		// max-depth still drops a nested integration test, including the two
+		// files pinned above. The exact command assertion also preserves the
+		// existing sort and per-file input contract.
+		expect(findCommand).not.toMatch(/\s-(?:maxdepth|mindepth)(?:\s|$)/);
 	});
 });
 

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.166.2",
+  "tagCommit": "82495de7faa4f075174be9d7abbc4d002cbd57b1",
+  "targetCommitish": "82495de7faa4f075174be9d7abbc4d002cbd57b1",
+  "releaseBodySha256": "2b1b48d5271772af77cb06a2bc33d8d46de4ba8f187a69c784dab2ee929b85ed",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2472-hot-path-stalls-restart-safe.md",
+      "sha256": "a0561e8044f8ca0146cc6f175bd5069415af5f5e1559aafbab0ac7937112ad01"
+    }
+  ]
+}

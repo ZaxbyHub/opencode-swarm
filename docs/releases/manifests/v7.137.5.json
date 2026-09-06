@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.137.5",
+  "tagCommit": "ba7e7e316e4e6ae6f6dc0f6efbbf47beed42b273",
+  "targetCommitish": "ba7e7e316e4e6ae6f6dc0f6efbbf47beed42b273",
+  "releaseBodySha256": "7e4f9c476c3a483875628213b7e0bf8e02c9f1aab82ff743c1e763ded2b6cd71",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1615-bounded-launch-retry.md",
+      "sha256": "f53e286db332dd6783b8e42d726a3854ffad9775e9ee984e3c3235d65a0974d6"
+    }
+  ]
+}

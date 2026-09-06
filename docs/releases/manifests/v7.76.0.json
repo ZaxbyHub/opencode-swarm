@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.76.0",
+  "tagCommit": "6e831e09320b516112667dea3878b342c617b68a",
+  "targetCommitish": "6e831e09320b516112667dea3878b342c617b68a",
+  "releaseBodySha256": "6d5d7366b157a8fce3b5002ea3bb9ed97399b4ed8d2afa257111f362a1d38233",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-1337-repo-ontology-package-boundaries.md",
+      "sha256": "df016a9045f90077694ad6c31c046bd133f02813bf6b3db756e132a491490d50"
+    }
+  ]
+}

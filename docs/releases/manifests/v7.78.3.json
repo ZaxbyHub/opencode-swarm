@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.78.3",
+  "tagCommit": "6e9ec2e794e15b434ef12d9c6ff1183c8cea9db6",
+  "targetCommitish": "6e9ec2e794e15b434ef12d9c6ff1183c8cea9db6",
+  "releaseBodySha256": "b077cad049da0c982e3bd7b2b1ae8bd604fdfdf7e3e1c0ffa90c910de9e763c7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1335-knowledge-counter-baseline-feedback.md",
+      "sha256": "dd58a93d3883428caab5039b123e30681e991ec3963328ae92be639e70095b8e"
+    }
+  ]
+}

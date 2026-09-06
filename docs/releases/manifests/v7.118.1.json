@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.118.1",
+  "tagCommit": "30e77bfa50c2c9a4c43cb5308640ed57cb755254",
+  "targetCommitish": "30e77bfa50c2c9a4c43cb5308640ed57cb755254",
+  "releaseBodySha256": "2096e27235d0ef9985c4d8a3e3900da80390bc18cf2d8cf58bb8267a27a919bf",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/tui-pollution-pr5-consoles.md",
+      "sha256": "8f166abbdbbb74b4b210d797eec327f634fdae8cc35ff5d57c341f97fda30962"
+    }
+  ]
+}

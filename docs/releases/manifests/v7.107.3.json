@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.107.3",
+  "tagCommit": "bb49092e770b508865a8be43f5795353db4a5220",
+  "targetCommitish": "bb49092e770b508865a8be43f5795353db4a5220",
+  "releaseBodySha256": "5f1401ab3ce89dec681c8f3c264c07718e796762975fc9b83b0017231fd61b8f",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1705-1712-test-debt-and-coverage-isolation.md",
+      "sha256": "6586943b1df1cb907e5b45dbedda117162bb742fa6d902e2f799771cddce689f"
+    }
+  ]
+}

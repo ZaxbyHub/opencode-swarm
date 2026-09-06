@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.49.0",
+  "tagCommit": "a31175cf7994179296e368523dcad3a14e73803b",
+  "targetCommitish": "a31175cf7994179296e368523dcad3a14e73803b",
+  "releaseBodySha256": "27538ddde7b29353e35167e91e2565560b1338321f709d37a0f2873f8fe699b7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/507-tool-manifest.md",
+      "sha256": "38a7e719f9f08c3b2dd544217e8376f2cb4fb794f78ff248df92f6f195e69293"
+    }
+  ]
+}

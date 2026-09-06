@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.147.1",
+  "tagCommit": "18bce4e18368543d5c80ddb1e26f9287c1c37e93",
+  "targetCommitish": "18bce4e18368543d5c80ddb1e26f9287c1c37e93",
+  "releaseBodySha256": "b91e90984c9f86ac52f14f40026dccc31f2d8bd64adb8fa37125da18be635f98",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/1737-quarantine-debt-and-ci-portability-lints.md",
+      "sha256": "336afb18b90839deb9b421295ba35e4973653d785ee30944dd490203b6fee0e4"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2103-invocation-failure-recovery.md",
+      "sha256": "e08791c47e13b9a2c72ba963051a444f301756d13b86e08b9791c9cad4ab8a71"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/2341-shard-coverage-gate.md",
+      "sha256": "bf54cfad81889c2202ff73bfefed6e6a8f1fb652dc72e25f3a4b23ef60958bb2"
+    }
+  ]
+}

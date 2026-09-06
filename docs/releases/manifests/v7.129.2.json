@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.129.2",
+  "tagCommit": "9b67d48fc25963be184239629ff28a88c872e05d",
+  "targetCommitish": "9b67d48fc25963be184239629ff28a88c872e05d",
+  "releaseBodySha256": "ed3b41884c34988ccc019ebcbb8d4faade90c10a2527bd607d1b47561e6f9aad",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1936-pr-review-micro-lane-floor.md",
+      "sha256": "136127d806616c4f8c3bf41d60182eec3fba2ed6242f960cf117e7f637b72f91"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/pr-skills-harness-portability.md",
+      "sha256": "a8c689c0d11fa9be77380d100bf0cec1f89777e11e098205a43112bfc4b076b3"
+    }
+  ]
+}

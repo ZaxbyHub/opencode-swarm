@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.121.3",
+  "tagCommit": "8e980c219a2c6d344441a7ba778b0a73bcf6014c",
+  "targetCommitish": "8e980c219a2c6d344441a7ba778b0a73bcf6014c",
+  "releaseBodySha256": "0458d9048b7a6e7ad06704c67150318e41ac5f1d7efa7e1ade4640896a0454fa",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-1756-tui-safety-closeout.md",
+      "sha256": "2d6c7284c88c336c64f1ed7da68104cae913053fdcb04f1f3c8657318e4ecbbf"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/tui-pollution-pr5-consoles.md",
+      "sha256": "d428cb009e5c938526196c749bdbf6379c3b77ec3f958e4cffa438809c5deef5"
+    }
+  ]
+}

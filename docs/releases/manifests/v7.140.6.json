@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.140.6",
+  "tagCommit": "34876f6181351bee2211455a9abb7072dfb67053",
+  "targetCommitish": "34876f6181351bee2211455a9abb7072dfb67053",
+  "releaseBodySha256": "560d637efa3af05892a14c3811dec25170240b6644a8929d86ce705888595953",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-review-lane-contract-recoverability.md",
+      "sha256": "9b0a80bb11192c3933c9656f44fde8eb983ee97b1843f5f493f1d249b5ed044f"
+    }
+  ]
+}

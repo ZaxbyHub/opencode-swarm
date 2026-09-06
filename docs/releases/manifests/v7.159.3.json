@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.159.3",
+  "tagCommit": "15d33664c7defae33061c1efa9c8f0c28198e763",
+  "targetCommitish": "15d33664c7defae33061c1efa9c8f0c28198e763",
+  "releaseBodySha256": "0de53e8c26329ba5237ae4ccdc337b5283d2a20fd8361a0d8fe8036b66f4a2b9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2038-skill-usage-retention-clock-skew.md",
+      "sha256": "8deaa873752dce2286c9f8800913ee73e05b44fdeb20c5f7051d5453df31621b"
+    }
+  ]
+}

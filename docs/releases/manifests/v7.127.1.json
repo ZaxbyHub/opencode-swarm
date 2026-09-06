@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.127.1",
+  "tagCommit": "0a884e9813923bd38c5496f2057f7f2a2b09de58",
+  "targetCommitish": "0a884e9813923bd38c5496f2057f7f2a2b09de58",
+  "releaseBodySha256": "032f607b6b79e0a870ba326cd7684c071a756c70b2f7a40eb1e963d9451aec88",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-review-gate-banner-prefix.md",
+      "sha256": "da636a25dca3bafbe2315a9107261ee50c800855eeca15e09779f2c0def218de"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/pr-review-gate-deadlock-abort.md",
+      "sha256": "536e17293c122c9ab47ca5fca1f8e2575ff84774f001f3afcd10cc5ebea52bf1"
+    }
+  ]
+}

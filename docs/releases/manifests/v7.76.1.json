@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.76.1",
+  "tagCommit": "3cf40d3d29f16c4a9566b064992cfeca51fc81eb",
+  "targetCommitish": "3cf40d3d29f16c4a9566b064992cfeca51fc81eb",
+  "releaseBodySha256": "7b494e1efd4c41492ac03d757e97320afaf23300d15215bfd5fbd7f37f5b9fe9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1346-background-session-tui-flooding.md",
+      "sha256": "131fd38ef02c31b602c8632509a7e0dc7086cc7d6015dc87145de1e03a27050c"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.144.7",
+  "tagCommit": "38952a1a86886d8b93bacbff8ea065b5859ed9f2",
+  "targetCommitish": "38952a1a86886d8b93bacbff8ea065b5859ed9f2",
+  "releaseBodySha256": "68d5e67264c2ae8e1240a744482f9e5085a1258becfe7281f9224d428f5f52a0",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2277-persistence-validator-errors.md",
+      "sha256": "65115347524eb157518603aa56eb99ccdaf8031eb431b2e44b9c4ce4637c5b09"
+    }
+  ]
+}

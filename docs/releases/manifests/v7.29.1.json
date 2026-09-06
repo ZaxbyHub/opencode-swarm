@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.29.1",
+  "tagCommit": "eedb8e9e042fdfe7edfe2aca8fd27987fc2581c3",
+  "targetCommitish": "eedb8e9e042fdfe7edfe2aca8fd27987fc2581c3",
+  "releaseBodySha256": "944088f087722bd0e5168c26e72fc7e954b7f5bbcb9ec3d7150e5b99561976d9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/prefixed-spec-writer-routing.md",
+      "sha256": "0f1cb720837afcf8419949493605db92ac5dfc5cf9fe85f60268ac02186c74fc"
+    }
+  ]
+}

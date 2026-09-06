@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.138.0",
+  "tagCommit": "704f4a5ba6e84c5180854342a97d992d73f615bc",
+  "targetCommitish": "704f4a5ba6e84c5180854342a97d992d73f615bc",
+  "releaseBodySha256": "f1c608dbbe7f19239e6066b015404d35de5bab7902218261902422201c29e2c4",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2077-session-reflection-signals.md",
+      "sha256": "bf8d24f319c48dbdebfc5c31dcb05afe644af5c80f29bfa5e1d8c5af90398f5e"
+    }
+  ]
+}

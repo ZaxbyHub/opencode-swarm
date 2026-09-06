@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.125.0",
+  "tagCommit": "f89e45323e107ac99c849ada7a66ea611881b4ef",
+  "targetCommitish": "f89e45323e107ac99c849ada7a66ea611881b4ef",
+  "releaseBodySha256": "4f34733547321c805bb5552bc0427202c7e4c9a33d9b998663c0f893d46c0f5b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-workflow-mechanical-gates.md",
+      "sha256": "f3bb020481854083259e6e17b3a616d04a6eae297de9dd06dc33e4d6ea0b6835"
+    }
+  ]
+}

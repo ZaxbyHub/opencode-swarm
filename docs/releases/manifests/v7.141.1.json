@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.141.1",
+  "tagCommit": "957417d202bb044df22124aabca4d2b05de374b0",
+  "targetCommitish": "957417d202bb044df22124aabca4d2b05de374b0",
+  "releaseBodySha256": "93c7ecaedda3ad8f16eb455c0c8cce84a85ed4cfa448e7a6f7f5bb1399912b0e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/test-runner-targets-support.md",
+      "sha256": "41f739f0cd9a5e0d3fcc6060fc4bd00d60085d55a8a4647a415daa4df69dc563"
+    }
+  ]
+}

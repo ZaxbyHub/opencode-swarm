@@ -371,6 +371,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	Record<string, 'migrated' | 'registered-bespoke' | 'external' | 'reader-only'>
 > = Object.freeze({
 	'src/commands/close.ts': 'migrated',
+	// These stage modules mention the registered .tmp grammar only in comments;
+	// they do not construct temporary paths or perform atomic writes.
+	'src/commands/close/context.ts': 'reader-only',
+	'src/commands/close/clean-stage.ts': 'reader-only',
 	'src/commands/handoff.ts': 'migrated',
 	'src/commands/simulate.ts': 'migrated',
 	'src/commands/coupling.ts': 'migrated',

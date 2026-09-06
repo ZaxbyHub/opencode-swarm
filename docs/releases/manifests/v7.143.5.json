@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.143.5",
+  "tagCommit": "0c76f73253424be32fbb1817018171da98165261",
+  "targetCommitish": "0c76f73253424be32fbb1817018171da98165261",
+  "releaseBodySha256": "157e98d9729ea4885055c3c6ff71b5602a6862e5c543d4f6855c0e1ee764c0db",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-2185-quarantine-win32-wrapper-runtime.md",
+      "sha256": "85392f6ce8b811b41e43db37540bfee916dea6985213a5402fc035ca92d76be5"
+    }
+  ]
+}

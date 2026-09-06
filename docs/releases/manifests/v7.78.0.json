@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.78.0",
+  "tagCommit": "529bdfa2a56b220da0337d8ebd4f6e14e6463b7c",
+  "targetCommitish": "529bdfa2a56b220da0337d8ebd4f6e14e6463b7c",
+  "releaseBodySha256": "d229b47d3e4f7044c8d82fe6ac2b41657557f3127818c6d7193b18375fb5f065",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-1296-hive-knowledge-archive-support.md",
+      "sha256": "a0787b5920fcec008ecaee737cbbf1a125cb0058ebc73d7a2f3aa18b224f185a"
+    }
+  ]
+}

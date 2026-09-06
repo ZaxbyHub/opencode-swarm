@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.135.5",
+  "tagCommit": "a54ef2cb6706bb3146b876b552c9830f6891d09a",
+  "targetCommitish": "a54ef2cb6706bb3146b876b552c9830f6891d09a",
+  "releaseBodySha256": "2a937d8b8e49df5b91f44b0d49a9cf1fa5b7cee53541dc3bf7cd565eee12fad1",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-workflow-total-wake-budget-and-tier-widening.md",
+      "sha256": "25e87a6bc68d997c6374aa834aff54f8d920b037afe7813ec574c43a545d1149"
+    }
+  ]
+}

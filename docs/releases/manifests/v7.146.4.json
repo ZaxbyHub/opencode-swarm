@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.146.4",
+  "tagCommit": "4b750bed5a7e4ae944c3c21127dccddad4079d46",
+  "targetCommitish": "4b750bed5a7e4ae944c3c21127dccddad4079d46",
+  "releaseBodySha256": "491237735331a9c5c6440144aea7ae80011883eaa9e7dbdbaf9cb35fbd2a3b60",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1611-knowledge-schema-docs-drift.md",
+      "sha256": "4ed8da85f88092500b80bcc2a3034622cbeac8053862c3034ba4d358a2105047"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/2277-persistence-validator-errors.md",
+      "sha256": "fd5862d91742ca0948c6a2a7129ed0a4c7d211507244ae4dd3d7266c2c67fe80"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/2279-severity-dialects.md",
+      "sha256": "2babd052ec226d15d95a6f3e8f5561d0b0fb8c81e177a70bd695bb6b5b5ab0e7"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/pr-review-shed-marker-size-cap.md",
+      "sha256": "96d63b3cd27316956afbfab63bcc3fd9328f189ffc2039bf735ffee5fec92ad0"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/pr-review-verdict-collection-and-partial-batches.md",
+      "sha256": "c4340931858da53a26e55239739b4e221bc41ffc9407ec8564a16055d219dc46"
+    },
+    {
+      "prNumber": null,
+      "order": 5,
+      "path": "docs/releases/pending/release-notes-pipeline-hardening.md",
+      "sha256": "2d688856be7799bfa0471471e7123967f3831da224dd981b9d7dcb5a92aca8d4"
+    }
+  ]
+}

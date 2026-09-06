@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.117.0",
+  "tagCommit": "6cb0d4ff01e1f18ad44d4d64c22fdfb46d4cb774",
+  "targetCommitish": "6cb0d4ff01e1f18ad44d4d64c22fdfb46d4cb774",
+  "releaseBodySha256": "1d8da754859d9a63682f1d430e6e1220a91917a284470952d15c8c7f182166c3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1846-linked-cohort-identity.md",
+      "sha256": "1b296430f97165f78f3470845174078c4efb99bd1c098d1751301b16ed4daacd"
+    }
+  ]
+}

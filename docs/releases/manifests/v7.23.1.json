@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.23.1",
+  "tagCommit": "2e84dcfe9ded936823d914b6515e16fd3901e6e6",
+  "targetCommitish": "2e84dcfe9ded936823d914b6515e16fd3901e6e6",
+  "releaseBodySha256": "28544bde5f57fa2b499d032fc55b6c6a7c0412134433b8145549d54411255ac2",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/delegation-chain-persistence-gate-recovery.md",
+      "sha256": "a075c6d2b1ffcd804e9866412e73073b55dfcc6132d68b57c0e553fc0d793a18"
+    }
+  ]
+}

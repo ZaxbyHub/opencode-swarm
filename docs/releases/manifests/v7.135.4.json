@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.135.4",
+  "tagCommit": "b99126a1f7500a944cffd7051f595511f9860f6e",
+  "targetCommitish": "b99126a1f7500a944cffd7051f595511f9860f6e",
+  "releaseBodySha256": "6b3f5d1739e469e26112aa90e7aef0d1ca9643acb3a0dc9bf9b838f12b4ee410",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2020-council-stale-verdict-deadlock.md",
+      "sha256": "d27c0d2befacbda692e303584ca3aaeb7f7b2a0b5a5921eabfbb2ca33ad8d495"
+    }
+  ]
+}

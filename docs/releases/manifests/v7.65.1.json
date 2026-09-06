@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.65.1",
+  "tagCommit": "c212ce17332b1b360ec209477e7b371811f9b102",
+  "targetCommitish": "c212ce17332b1b360ec209477e7b371811f9b102",
+  "releaseBodySha256": "890695eb5625ddff55c0cd9d85bb95cf5b9289711267de6ddbe6fd570294f8ad",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/agent-model-config-merging.md",
+      "sha256": "636955b18556126bb400b79bce7db8b5c256d01a395cae58deba52b37873d641"
+    }
+  ]
+}
