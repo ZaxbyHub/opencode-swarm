@@ -3,9 +3,9 @@
  *
  * Called from `src/index.ts:initializeOpenCodeSwarm` immediately before
  * `getAgentConfigs(...)` (Phase 4b of the language-agnostic plugin work).
- * Wrapped in `withTimeoutSignal(300ms)` by the caller; on timeout or any
- * failure, the caller falls open to `emptyProjectContext()` per
- * Invariant 1 (plugin init bounded + fail-open).
+ * Wrapped in `withTimeoutSignal(300ms)` by the caller. The manifest-dispatch
+ * portion cooperates with that deadline; on timeout or failure, the caller
+ * falls open to `emptyProjectContext()`.
  *
  * Imported lazily by the caller via `await import('./agents/project-context')`
  * to keep the dispatch import graph off the synchronous init prelude.
@@ -19,6 +19,9 @@
  * (typically 3–5 per buildProjectContext call) easily push `server()`
  * past the 400ms Invariant 1 deadline asserted by
  * `scripts/repro-704.mjs:TIMING_DEADLINE_MS`.
+ * Existing framework and prompt-hint inference below also performs bounded
+ * synchronous file probes. The timeout is therefore a cooperative dispatch
+ * boundary, not a claim that every operation in this function is preemptible.
  *
  * The architect prompt's `TEST_CMD` / `BUILD_CMD` / `LINT_CMD` values are
  * HINTS for the LLM. If the user doesn't have the named binary installed,
@@ -42,9 +45,10 @@ import {
 /**
  * Wall-clock budget for the session-init language-backend resolution step.
  * Caller (`src/index.ts:initializeOpenCodeSwarm`) wraps `buildProjectContext`
- * in `withTimeoutSignal(LANG_BACKEND_DETECTION_TIMEOUT_MS)`. Exceeding the budget
- * fails open with `null` so the manifest still returns to the OpenCode
- * plugin host (Invariant 1).
+ * in `withTimeoutSignal(LANG_BACKEND_DETECTION_TIMEOUT_MS)`. Dispatch observes
+ * the signal and avoids publishing late cache state. Synchronous hint inference
+ * later in this function remains bounded by operation count but is not
+ * preemptible by the signal.
  */
 export const LANG_BACKEND_DETECTION_TIMEOUT_MS = 300;
 
