@@ -239,9 +239,19 @@ describe('background dispatch double-store recovery', () => {
 			resetSwarmState();
 			const recovery = await runInitOrphanRecovery(project);
 
+			// Issue #2527: the legacy parent-level lane is MIGRATED into the
+			// project-internal base (git worktree move — nothing is deleted),
+			// and the ownership tag keeps the migrated lane protected there.
+			const migratedPath = path.join(
+				project,
+				'.swarm-worktrees',
+				'child',
+				'lane-1',
+			);
 			expect(recovery.removedWorktrees).not.toContain(worktreePath);
+			expect(recovery.removedWorktrees).not.toContain(migratedPath);
 			expect(
-				fs.readFileSync(path.join(worktreePath, 'valuable.txt'), 'utf8'),
+				fs.readFileSync(path.join(migratedPath, 'valuable.txt'), 'utf8'),
 			).toBe('keep\n');
 		} finally {
 			cleanup();

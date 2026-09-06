@@ -99,7 +99,7 @@ describe('ensureSwarmGitExcluded — bounded execution', () => {
 		}
 	});
 
-	test('reaches every spawn site (4 git calls) when the happy path runs', async () => {
+	test('reaches every spawn site (5 git calls) when the happy path runs', async () => {
 		const cmds: string[][] = [];
 		const killCalls = { count: 0 };
 		let callIndex = 0;
@@ -114,7 +114,10 @@ describe('ensureSwarmGitExcluded — bounded execution', () => {
 			{ exitCode: 0, stdout: `${fakeGitRoot}/.git/info/exclude\n` },
 			// 3. check-ignore -q .swarm/.gitkeep — non-zero means NOT ignored
 			{ exitCode: 1, stdout: '' },
-			// 4. ls-files -- .swarm — empty stdout means no tracked files
+			// 4. check-ignore -q .swarm-worktrees/.gitkeep — independent probe
+			//    (final-critic F2, #2527)
+			{ exitCode: 1, stdout: '' },
+			// 5. ls-files -- .swarm — empty stdout means no tracked files
 			{ exitCode: 0, stdout: '' },
 		];
 
@@ -139,7 +142,7 @@ describe('ensureSwarmGitExcluded — bounded execution', () => {
 				recursive: true,
 			});
 			await ensureSwarmGitExcluded(tmpDir, { quiet: true });
-			expect(cmds.length).toBe(4);
+			expect(cmds.length).toBe(5);
 			expect(cmds[0]).toEqual([
 				'git',
 				'-C',
@@ -167,12 +170,20 @@ describe('ensureSwarmGitExcluded — bounded execution', () => {
 				'git',
 				'-C',
 				tmpDir,
+				'check-ignore',
+				'-q',
+				'.swarm-worktrees/.gitkeep',
+			]);
+			expect(cmds[4]).toEqual([
+				'git',
+				'-C',
+				tmpDir,
 				'ls-files',
 				'--',
 				'.swarm',
 			]);
 			// Every spawn site invokes kill() in its finally.
-			expect(killCalls.count).toBe(4);
+			expect(killCalls.count).toBe(5);
 		} finally {
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 			fs.rmSync(fakeGitRoot, { recursive: true, force: true });

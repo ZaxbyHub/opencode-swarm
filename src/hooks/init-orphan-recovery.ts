@@ -25,11 +25,13 @@ import {
 	scanDelegationsForRecovery,
 } from '../background/pending-delegations.js';
 import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
+import { loadPluginConfig } from '../config/loader';
 import {
 	isLocked,
 	listActiveLocks,
 	tryAcquireLock,
 } from '../parallel/file-locks';
+import { listLiveLaneOwners } from '../parallel/lane-owners';
 import { swarmState } from '../state';
 import {
 	listRecoveryRecords,
@@ -38,11 +40,13 @@ import {
 import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { log } from '../utils/index.js';
 import { withTimeout } from '../utils/timeout.js';
-import { removeWorktree } from '../worktree/core';
+import { migrateLegacyWorktreeBase } from '../worktree/base-migration';
+import { removeWorktree, resolveWorktreeBaseDir } from '../worktree/core';
 import {
 	cleanupOrphanedBranches,
 	scanRegisteredWorktreeLiveness,
 } from '../worktree/merge';
+import { removeOwnedWorktreeDir } from '../worktree/ownership';
 import { scanWorktreeMergeFailuresForRecovery } from './delegation-gate/worktree-merge-status';
 import { scanBackgroundWorktreeOwnershipTagsForRecovery } from './delegation-gate/worktree-ownership-tag';
 import {
@@ -200,10 +204,39 @@ async function writeAdvisoryFile(
 }
 
 /**
- * Enumerates orphaned worktree directories under the worktree root.
- *
- * The worktree root follows the convention from `provisionWorktree` in `core.ts`:
- * `<path.dirname(directory)>/.swarm-worktrees/<sessionId>/<laneId>`
+ * Issue #2527: resolves the worktree bases this project enumerates for
+ * reclamation — the project-internal default base plus every configured
+ * `worktree_dir` override. The LEGACY parent-level shared base is never
+ * enumerated for deletion (it is only read by the migration pass).
+ */
+export function resolveWorktreeEnumerationBases(directory: string): string[] {
+	const bases = [resolveWorktreeBaseDir(directory)];
+	try {
+		// Bounded, fail-open: a single cached config read; no config or an
+		// unreadable one degrades to the default base only.
+		const config = loadPluginConfig(directory) as {
+			worktree?: { worktree_dir?: string };
+			turbo?: { lean?: { worktree_dir?: string } };
+		};
+		const overrides = [
+			config?.worktree?.worktree_dir,
+			config?.turbo?.lean?.worktree_dir,
+		].filter((value): value is string => typeof value === 'string');
+		for (const override of overrides) {
+			const base = resolveWorktreeBaseDir(directory, override);
+			if (!bases.some((existing) => existing === base)) bases.push(base);
+		}
+	} catch {
+		// Fail-open: default base only.
+	}
+	return bases;
+}
+
+/**
+ * Enumerates orphaned worktree directories under this project's worktree
+ * bases (default project-internal base + `worktree_dir` overrides —
+ * `resolveWorktreeEnumerationBases`), laid out `<base>/<sessionId>/<laneId>`
+ * per `provisionWorktree` in `core.ts`.
  *
  * @param directory - Project root directory
  * @param activeSessionIds - Session IDs that are still active (not orphans)
@@ -215,42 +248,40 @@ async function enumerateOrphanedWorktreeDirs(
 	protectedWorktreePaths: ReadonlySet<string> = new Set(),
 ): Promise<string[]> {
 	const orphanedDirs: string[] = [];
-	const worktreeRoot = path.resolve(
-		path.dirname(directory),
-		SWARM_WORKTREE_DIR_NAME,
-	);
 
-	let entries: fs.Dirent[];
-	try {
-		entries = await fsPromises.readdir(worktreeRoot, { withFileTypes: true });
-	} catch {
-		// Worktree root doesn't exist — nothing to reclaim
-		return [];
-	}
-
-	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
-		const sessionId = entry.name;
-		// Skip active sessions
-		if (activeSessionIds.includes(sessionId)) continue;
-
-		// Check for lane subdirectories under this session
-		let sessionEntries: fs.Dirent[];
+	for (const worktreeRoot of resolveWorktreeEnumerationBases(directory)) {
+		let entries: fs.Dirent[];
 		try {
-			sessionEntries = await fsPromises.readdir(
-				path.join(worktreeRoot, sessionId),
-				{ withFileTypes: true },
-			);
+			entries = await fsPromises.readdir(worktreeRoot, { withFileTypes: true });
 		} catch {
+			// This base doesn't exist — nothing to reclaim from it
 			continue;
 		}
 
-		for (const laneEntry of sessionEntries) {
-			if (!laneEntry.isDirectory()) continue;
-			const worktreePath = path.join(worktreeRoot, sessionId, laneEntry.name);
-			if (protectedWorktreePaths.has(canonicalRootKeyFresh(worktreePath)))
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			const sessionId = entry.name;
+			// Skip active sessions
+			if (activeSessionIds.includes(sessionId)) continue;
+
+			// Check for lane subdirectories under this session
+			let sessionEntries: fs.Dirent[];
+			try {
+				sessionEntries = await fsPromises.readdir(
+					path.join(worktreeRoot, sessionId),
+					{ withFileTypes: true },
+				);
+			} catch {
 				continue;
-			orphanedDirs.push(worktreePath);
+			}
+
+			for (const laneEntry of sessionEntries) {
+				if (!laneEntry.isDirectory()) continue;
+				const worktreePath = path.join(worktreeRoot, sessionId, laneEntry.name);
+				if (protectedWorktreePaths.has(canonicalRootKeyFresh(worktreePath)))
+					continue;
+				orphanedDirs.push(worktreePath);
+			}
 		}
 	}
 
@@ -289,53 +320,6 @@ async function isCrossProcessLockHeld(directory: string): Promise<boolean> {
 	}
 
 	return false;
-}
-
-/**
- * Removes an orphaned worktree directory, trying git worktree remove first,
- * then falling back to filesystem deletion on best-effort basis.
- *
- * @param worktreePath - Absolute path to the worktree directory
- * @param projectRoot - Absolute path to the project root
- * @returns Error message if removal failed, undefined on success
- */
-async function removeOrphanedWorktreeDir(
-	worktreePath: string,
-	projectRoot: string,
-): Promise<string | undefined> {
-	// A registered linked worktree always carries a `.git` pointer. Directories
-	// without one are stale filesystem remnants, so remove them directly instead
-	// of spawning one failing `git worktree remove` process per directory. This
-	// keeps recovery bounded when a crash leaves many partial lane directories.
-	if (!fs.existsSync(path.join(worktreePath, '.git'))) {
-		try {
-			_internals.rmSync(worktreePath, { recursive: true, force: true });
-			return undefined;
-		} catch (error) {
-			return error instanceof Error ? error.message : String(error);
-		}
-	}
-
-	// Try git worktree remove first
-	const removeResult = await _internals.removeWorktree(
-		worktreePath,
-		projectRoot,
-	);
-
-	// Check if this is a successful result: 'error' NOT in result means it's RemoveSuccess
-	// (RemoveSuccess has { success: true }, RemoveFailure has { error: string })
-	// Note: we check 'error' first to avoid TypeScript narrowing { success: false, error: '...' }
-	// to RemoveSuccess when the mock returns that shape
-	if (!('error' in removeResult)) return undefined;
-
-	// removeWorktree failed — try filesystem fallback
-	try {
-		_internals.rmSync(worktreePath, { recursive: true, force: true });
-		return undefined; // Success after filesystem fallback
-	} catch {
-		// Return the error from removeWorktree
-		return removeResult.error;
-	}
 }
 
 async function crossProcessAdvisoryResult(
@@ -729,6 +713,54 @@ export async function runInitOrphanRecovery(
 			}
 		}
 
+		// Issue #2527 step A (after every fail-closed uncertainty guard, before
+		// migration and enumeration): durable live-lane owners. Liveness here
+		// is the lane's own (PID alive within the 24h claim window), not the
+		// five-minute lock TTL — a long-running lane must never look orphaned
+		// to a second process. The read GCs records whose lane path is gone.
+		const liveLaneOwners = listLiveLaneOwners(directory);
+		for (const owner of liveLaneOwners.live) {
+			protectedWorktreePaths.add(worktreePathKey(owner.lanePath, directory));
+			if (!activeSessionIds.includes(owner.sessionId)) {
+				activeSessionIds.push(owner.sessionId);
+			}
+		}
+
+		// Issue #2527 step B: migrate the legacy parent-level shared base into
+		// the project-internal base. Runs only now — after the uncertainty
+		// guards (mutation under uncertain state is unacceptable) and with the
+		// liveness answer in hand. Fail-open and non-throwing; NEVER deletes
+		// anything (foreign/live/gitless legacy entries are left for their
+		// owners; the legacy base itself is rmdir'd only when empty).
+		const migration = await withTimeout(
+			migrateLegacyWorktreeBase(directory, liveLaneOwners.live),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				'legacy worktree-base migration exceeded its bounded budget; retried next start',
+			),
+		).catch((error: unknown) => ({
+			attempted: true,
+			legacyBaseExists: true,
+			moved: [] as string[],
+			retained: [
+				{
+					lanePath: '<pass>',
+					reason: `migration pass exceeded its budget: ${error instanceof Error ? error.message : String(error)}`,
+				},
+			],
+			legacyBaseRemoved: false,
+		}));
+		if (migration.moved.length > 0) {
+			recoveryReplayWarnings.push(
+				`Migrated ${migration.moved.length} worktree(s) from the legacy shared base into the project base (issue #2527).`,
+			);
+		}
+		if (migration.retained.length > 0) {
+			recoveryReplayWarnings.push(
+				`${migration.retained.length} legacy-base worktree entr${migration.retained.length === 1 ? 'y remains' : 'ies remain'} left for their owning checkouts (never deleted by this project).`,
+			);
+		}
+
 		// Step 1: Enumerate and remove orphaned worktree directories
 		const orphanedWorktreeDirs = await withTimeout(
 			enumerateOrphanedWorktreeDirs(
@@ -772,13 +804,22 @@ export async function runInitOrphanRecovery(
 					continue;
 				}
 
-				const error = await removeOrphanedWorktreeDir(worktreePath, directory);
-				if (error) {
+				// Issue #2527: every deletion goes through the ownership-gated
+				// helper — foreign/uncertain candidates are skipped and
+				// reported, git refusals are a stop (never an rmSync
+				// escalation), and .git-less remnants are only removable
+				// inside this project's own base.
+				const outcome = await removeOwnedWorktreeDir(worktreePath, directory);
+				if (outcome.status === 'removed') {
+					removedWorktrees.push(worktreePath);
+				} else if (outcome.status === 'skipped') {
 					worktreeWarnings.push(
-						`Could not reclaim orphaned worktree "${worktreePath}": ${error}`,
+						`Preserved worktree candidate "${worktreePath}": ${outcome.reason}.`,
 					);
 				} else {
-					removedWorktrees.push(worktreePath);
+					worktreeWarnings.push(
+						`Could not reclaim orphaned worktree "${worktreePath}" (git refused; left in place): ${outcome.reason}`,
+					);
 				}
 			}
 		}

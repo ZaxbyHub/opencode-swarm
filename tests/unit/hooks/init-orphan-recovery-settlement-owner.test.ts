@@ -30,8 +30,10 @@ describe('init orphan recovery settlement ownership', () => {
 		);
 		roots.push(root);
 		const directory = path.join(root, 'project');
+		// Issue #2527: lanes enumerated for reclamation live under the
+		// project-INTERNAL base (<project>/.swarm-worktrees).
 		const worktreePath = path.join(
-			root,
+			directory,
 			'.swarm-worktrees',
 			'child-session',
 			'1.1',

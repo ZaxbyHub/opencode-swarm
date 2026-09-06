@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import type { PluginConfig, WorktreeIsolationConfig } from '../../config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
 import { tryAcquireLock } from '../../parallel/file-locks';
+import { recordLiveLaneOwner } from '../../parallel/lane-owners';
 import { isUntrustedEnvKey, isValidEnvKey } from '../../sandbox/executor';
 import {
 	ensureAgentSession,
@@ -1525,6 +1526,16 @@ export async function precreateStandardWorktreeSession(args: {
 		}
 		handle = provisionResult;
 		mergeStrategy = worktreeConfig.merge_strategy;
+		// Issue #2527 F3: durable live-lane-owner record (lifetime = the
+		// lane's; cleared by removeWorktree on both success returns and GC'd
+		// on read). Only recorded AFTER a successful provision, mirroring the
+		// provisioning-owner constraint.
+		recordLiveLaneOwner(args.directory, {
+			lanePath: handle.worktreePath,
+			branchName: handle.branchName,
+			sessionId: args.parentSessionID,
+			taskId: args.taskId,
+		});
 	}
 
 	const originalPrompt =

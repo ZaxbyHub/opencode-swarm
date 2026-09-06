@@ -83,16 +83,42 @@ function findGitRoot(startDir: string): string | null {
 }
 
 /**
+ * Return true if any line in the file content exactly matches one of the
+ * given ignore patterns (ignoring leading/trailing whitespace and comment
+ * lines).
+ */
+function fileCoversIgnorePatterns(
+	content: string,
+	patterns: string[],
+): boolean {
+	for (const rawLine of content.split('\n')) {
+		const line = rawLine.trim();
+		if (line.startsWith('#') || line.length === 0) continue;
+		if (patterns.includes(line)) return true;
+	}
+	return false;
+}
+
+/**
  * Return true if any line in the file content is `.swarm` or `.swarm/`
  * (exact match, ignoring leading/trailing whitespace, ignoring comment lines).
  */
 function fileCoversSwarm(content: string): boolean {
-	for (const rawLine of content.split('\n')) {
-		const line = rawLine.trim();
-		if (line.startsWith('#') || line.length === 0) continue;
-		if (line === '.swarm' || line === '.swarm/') return true;
-	}
-	return false;
+	return fileCoversIgnorePatterns(content, ['.swarm', '.swarm/']);
+}
+
+/**
+ * Same as {@link fileCoversSwarm} for the `.swarm-worktrees/` lane base
+ * (issue #2527). Distinct from `.swarm/`: the gitignore pattern `.swarm/`
+ * matches only a directory named exactly `.swarm`, so every existing
+ * installation that already excludes `.swarm/` still needs the separate
+ * `.swarm-worktrees/` pattern appended (final-critic F2).
+ */
+function fileCoversSwarmWorktrees(content: string): boolean {
+	return fileCoversIgnorePatterns(content, [
+		'.swarm-worktrees',
+		'.swarm-worktrees/',
+	]);
 }
 
 /**
@@ -212,8 +238,11 @@ const GIT_SPAWN_OPTIONS = {
  * Steps:
  * 1. Resolve git root via `git rev-parse --show-toplevel`
  * 2. Resolve local exclude path via `git rev-parse --git-path info/exclude`
- * 3. Check if `.swarm/` is already ignored via `git check-ignore -q`
- * 4. If not ignored: append `.swarm/` to the local exclude file (idempotent)
+ * 3. Check if `.swarm/` AND `.swarm-worktrees/` are already ignored via two
+ *    independent `git check-ignore -q` probes (they are distinct patterns —
+ *    `.swarm/` does not cover `.swarm-worktrees/`, #2527)
+ * 4. For whichever pattern is not ignored: append it to the local exclude
+ *    file (idempotent, per-pattern)
  * 5. Detect tracked `.swarm/` files via `git ls-files -- .swarm`
  * 6. If tracked: emit an unsuppressed remediation warning
  *
@@ -243,11 +272,16 @@ export async function ensureSwarmGitExcluded(
 
 		// Steps 1, 2, and 3 are independent — run them in parallel to reduce
 		// startup latency. Each adds ~10-50 ms; parallelizing saves up to 100 ms
-		// on cold cache.
+		// on cold cache. The two check-ignore probes are separate (final-critic
+		// F2, issue #2527): `.swarm/` and `.swarm-worktrees/` are distinct
+		// patterns, and gating the worktrees probe on the `.swarm/` result
+		// would silently skip every existing installation that already
+		// excludes `.swarm/`.
 		const [
 			[gitRootExitCode, gitRootOutput],
 			[excludePathExitCode, excludePathRaw],
 			checkIgnoreExitCode,
+			checkIgnoreWorktreesExitCode,
 		] = await Promise.all([
 			// Step 1: Get git root using CLI (handles worktrees/submodules)
 			(async (): Promise<[number, string]> => {
@@ -318,6 +352,29 @@ export async function ensureSwarmGitExcluded(
 					}
 				}
 			})(),
+			// Step 3b: Same probe for the .swarm-worktrees/ lane base (#2527).
+			(async (): Promise<number> => {
+				const proc = _internals.bunSpawn(
+					[
+						gitExecutable,
+						'-C',
+						directory,
+						'check-ignore',
+						'-q',
+						'.swarm-worktrees/.gitkeep',
+					],
+					GIT_SPAWN_OPTIONS,
+				);
+				try {
+					return await proc.exited;
+				} finally {
+					try {
+						proc.kill();
+					} catch {
+						// Already exited — kill is a no-op.
+					}
+				}
+			})(),
 		]);
 
 		if (gitRootExitCode !== 0) return; // Not a git repo
@@ -338,8 +395,16 @@ export async function ensureSwarmGitExcluded(
 			? excludeRelPath
 			: path.join(directory, excludeRelPath);
 
-		if (checkIgnoreExitCode !== 0) {
-			// .swarm/ is NOT ignored — write to local exclude file
+		// Per-pattern exclusion (final-critic F2, #2527): append whichever of
+		// `.swarm/` / `.swarm-worktrees/` is missing. Gating the whole append
+		// on the `.swarm/` probe alone would silently skip every existing
+		// installation that already excludes `.swarm/` but predates the
+		// project-internal `.swarm-worktrees/` base.
+		const swarmIgnored = checkIgnoreExitCode === 0;
+		const worktreesIgnored = checkIgnoreWorktreesExitCode === 0;
+		if (!swarmIgnored || !worktreesIgnored) {
+			// At least one pattern is not ignored by any source — write to
+			// the local exclude file
 			try {
 				fs.mkdirSync(path.dirname(excludePath), { recursive: true });
 
@@ -350,16 +415,23 @@ export async function ensureSwarmGitExcluded(
 					// File doesn't exist yet — fine
 				}
 
-				// Only append if not already covered (handles concurrent-start duplicates
-				// being harmless — git treats duplicate patterns identically)
-				if (!fileCoversSwarm(existing)) {
+				// Only append patterns not already covered (handles
+				// concurrent-start duplicates being harmless — git treats
+				// duplicate patterns identically)
+				const needSwarm = !swarmIgnored && !fileCoversSwarm(existing);
+				const needWorktrees =
+					!worktreesIgnored && !fileCoversSwarmWorktrees(existing);
+				const added: string[] = [];
+				if (needSwarm) added.push('.swarm/');
+				if (needWorktrees) added.push('.swarm-worktrees/');
+				if (added.length > 0) {
 					fs.appendFileSync(
 						excludePath,
-						'\n# opencode-swarm local runtime state\n.swarm/\n',
+						`\n# opencode-swarm local runtime state (incl. worktree lanes, #2527)\n${added.join('\n')}\n`,
 						'utf8',
 					);
 					advisoryWarn(
-						'[opencode-swarm] Added .swarm/ to .git/info/exclude to prevent runtime state from appearing in git status.',
+						`[opencode-swarm] Added ${added.join(' + ')} to .git/info/exclude to prevent runtime state from appearing in git status.`,
 					);
 				}
 			} catch {

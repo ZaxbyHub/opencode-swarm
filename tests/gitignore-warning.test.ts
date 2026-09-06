@@ -329,14 +329,14 @@ describe('ensureSwarmGitExcluded', () => {
 		expect(exclude).toContain('.swarm/');
 	});
 
-	// 2. .swarm/ already in .gitignore — no exclude write
-	it('does not write to exclude when .swarm/ is already in .gitignore', async () => {
+	// 2. .swarm/ in .gitignore — no bare .swarm/ added (worktrees upgrade: sibling -2527 file)
+	it('adds no bare .swarm/ line to exclude when .gitignore already covers it', async () => {
 		makeRealGitRepo(tmpDir);
 		writeGitignore(tmpDir, '.swarm/\n');
 
 		await ensureSwarmGitExcluded(tmpDir);
 
-		// Should not have appended to exclude (already ignored via .gitignore)
+		// .swarm/ remains covered by .gitignore
 		const exclude = readExclude(tmpDir);
 		expect(exclude).not.toContain('.swarm/');
 	});

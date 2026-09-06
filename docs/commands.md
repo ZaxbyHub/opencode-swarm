@@ -637,6 +637,8 @@ Clear session state while preserving plan, evidence, and knowledge
 
 Deletes only .swarm/session/state.json and other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge. Also releases this session's pending knowledge-gate obligations (#2398) and recovers stale coder settlements so dispatches cannot wedge on CODER_DISPATCH_IN_PROGRESS (#2268). Auto-backs up removed files to .swarm/reset-backups/ (newest 5 kept).
 
+Worktree reclamation is ownership-scoped and confirmed (#2527): lanes owned by a DIFFERENT repository are never deleted; clean lanes owned by this repository are reclaimed without extra flags; lanes with uncommitted or live work are preserved and require re-running with `--confirm=<token>` (printed by the first invocation, valid 15 minutes, single-use).
+
 ### `/swarm recover`
 
 Recover wedged coder settlements [task_id] [--force]

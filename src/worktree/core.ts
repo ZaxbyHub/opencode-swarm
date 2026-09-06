@@ -14,6 +14,7 @@ import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
+import { clearLiveLaneOwner } from '../parallel/lane-owners';
 import {
 	buildSwarmBranchName,
 	matchSwarmLaneBranch,
@@ -46,6 +47,11 @@ import type {
  */
 export const _internals: {
 	bunSpawn: typeof bunSpawn;
+	/**
+	 * Issue #2527 F3: clear the durable live-lane-owner record when this
+	 * module removes a worktree (seam so tests can observe the clear).
+	 */
+	clearLiveLaneOwner: typeof clearLiveLaneOwner;
 	/** Test seam for process.platform — allows non-Windows CIs to exercise Windows paths. */
 	platform: string;
 	/** Test seam for sleep — allows tests to skip real delays. */
@@ -101,6 +107,7 @@ export const _internals: {
 	 */
 	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
+	clearLiveLaneOwner,
 	bunSpawn,
 	resolveGitExecutable,
 	platform: process.platform,
@@ -563,15 +570,18 @@ export function makeWorktreeBranchName(
 
 /**
  * Resolves the swarm-managed worktree base directory: `directory/worktreeDir`
- * when an override is configured, otherwise the DD-6 default
- * `<project-parent>/.swarm-worktrees`. Shared by `provisionWorktree` (path
- * construction) and the destructive-command guard / removeWorktree force
- * fallback (containment checks) so both sides agree on what counts as
- * "swarm-managed".
+ * when an override is configured, otherwise the project-INTERNAL default
+ * `<project>/.swarm-worktrees` (issue #2527 root fix — the pre-#2527 default
+ * was the project's PARENT, so every sibling checkout shared one base and
+ * reclamation in one project could destroy another project's lanes).
+ * Shared by `provisionWorktree` (path construction) and the
+ * destructive-command guard / removeWorktree force fallback (containment
+ * checks) so both sides agree on what counts as "swarm-managed". The legacy
+ * parent-level base is migrated by `base-migration.ts`, never deleted.
  *
  * @param directory   - Project root (an absolute path to the git working tree).
  * @param worktreeDir - Optional worktree-dir override (relative to `directory`
- *                      or absolute). When absent, the DD-6 default base is used.
+ *                      or absolute). When absent, the default base is used.
  * @returns The absolute worktree base directory.
  */
 export function resolveWorktreeBaseDir(
@@ -580,7 +590,7 @@ export function resolveWorktreeBaseDir(
 ): string {
 	return worktreeDir
 		? path.resolve(directory, worktreeDir)
-		: path.resolve(path.dirname(directory), SWARM_WORKTREE_DIR_NAME);
+		: path.resolve(directory, SWARM_WORKTREE_DIR_NAME);
 }
 
 /**
@@ -1074,6 +1084,9 @@ export async function removeWorktree(
 		);
 
 		if (result.exitCode === 0) {
+			// Issue #2527 F3: the worktree is gone (or going) — its durable
+			// live-owner record dies with it, at BOTH success returns.
+			_internals.clearLiveLaneOwner(projectRoot, worktreePath);
 			if (fs.existsSync(worktreePath)) {
 				const trusted = isPathUnderSwarmWorktreeBase(
 					worktreePath,
@@ -1136,6 +1149,8 @@ export async function removeWorktree(
 				projectRoot,
 			);
 			if (forced.exitCode === 0) {
+				// Issue #2527 F3 (force-fallback success return).
+				_internals.clearLiveLaneOwner(projectRoot, worktreePath);
 				if (fs.existsSync(worktreePath)) {
 					try {
 						fs.rmSync(worktreePath, { recursive: true, force: true });

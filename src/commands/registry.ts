@@ -1644,7 +1644,7 @@ export const COMMAND_REGISTRY = {
 			'Clear session state while preserving plan, evidence, and knowledge',
 		details:
 			"Deletes only .swarm/session/state.json and other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge. Also releases this session's pending knowledge-gate obligations (#2398) and recovers stale coder settlements so dispatches cannot wedge on CODER_DISPATCH_IN_PROGRESS (#2268). Auto-backs up removed files to .swarm/reset-backups/ (newest 5 kept).",
-		args: '',
+		args: '[--confirm=<token>] (required only to purge lanes with uncommitted/live work)',
 		category: 'utility',
 		toolPolicy: 'restricted',
 	},
