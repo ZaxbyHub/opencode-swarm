@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.167.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.167.1...v7.167.2) (2026-09-06)
+
+
+### Bug Fixes
+
+* **dispatch:** invalidate stale manifest-root cache ([dda1b88](https://github.com/ZaxbyHub/opencode-swarm/commit/dda1b882678653f32f2de6a56917b9375dbd9321))
+
 ## [7.167.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.167.0...v7.167.1) (2026-09-06)
 
 
