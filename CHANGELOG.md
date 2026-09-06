@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.167.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.167.0...v7.167.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **release:** automate safe release-fragment cleanup ([1da9b2f](https://github.com/ZaxbyHub/opencode-swarm/commit/1da9b2f710d598fc64bd509265957d7f34545497))
+* **release:** harden cleanup provenance and CI gates ([0a7eb40](https://github.com/ZaxbyHub/opencode-swarm/commit/0a7eb40010e7fa7388c97b7637d1d21fbd858cf6))
+
 ## [7.167.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.4...v7.167.0) (2026-09-06)
 
 
