@@ -288,6 +288,12 @@ export interface BunCompatSpawnOptions {
 	stdout?: 'inherit' | 'ignore' | 'pipe';
 	stderr?: 'inherit' | 'ignore' | 'pipe';
 	timeout?: number;
+	/**
+	 * Maximum bytes retained for each buffered stdout/stderr stream. Invalid
+	 * values fall back to `DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES` so `bunSpawn`
+	 * keeps its no-throw compatibility contract.
+	 */
+	maxBuffer?: number;
 	/** Preserve the caller's exact Windows argv quoting (required for cmd.exe /c). */
 	windowsVerbatimArguments?: boolean;
 	/**
@@ -300,6 +306,29 @@ export interface BunCompatSpawnOptions {
 	 * short-lived `bunSpawn` callers (git, lint, version checks).
 	 */
 	killProcessTree?: boolean;
+}
+
+/**
+ * Default bounded capture for unclaimed subprocess pipes. Five MiB matches
+ * the established Git subprocess limit while remaining finite by default.
+ */
+export const DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
+
+/** Raised when either buffered pipe exceeds its configured output limit. */
+export class BunCompatOutputLimitError extends Error {
+	readonly limit: number;
+	readonly captured: number;
+	readonly total: number;
+
+	constructor(limit: number, captured: number, total: number) {
+		super(
+			`Subprocess output exceeded the ${limit}-byte buffer limit after capturing ${captured} bytes (${total} bytes observed)`,
+		);
+		this.name = 'BunCompatOutputLimitError';
+		this.limit = limit;
+		this.captured = captured;
+		this.total = total;
+	}
 }
 
 export interface BunCompatStream {
@@ -617,32 +646,113 @@ function wrapSpawnFailure(
 	return describeSpawnCwdFailure(cwd, executable, err) ?? err;
 }
 
+function normalizedMaxBuffer(value: unknown): number {
+	return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+		? value
+		: DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES;
+}
+
+interface OutputOverflowController {
+	readonly error: BunCompatOutputLimitError | undefined;
+	readonly completed: Promise<void>;
+	overflow(captured: number, total: number): void;
+	complete(): void;
+}
+
+/**
+ * stdout and stderr are one subprocess outcome: once either exceeds its
+ * limit, both buffered views must report the same error after terminal events
+ * drain. The auto-drain callers deliberately swallow their own rejection so a
+ * pipe configured but never read cannot create an unhandled rejection.
+ */
+function createOutputOverflowController(
+	limit: number,
+	requestKill: () => void,
+): OutputOverflowController {
+	let error: BunCompatOutputLimitError | undefined;
+	let killRequested = false;
+	let resolveCompleted!: () => void;
+	const completed = new Promise<void>((resolve) => {
+		resolveCompleted = resolve;
+	});
+	return {
+		get error() {
+			return error;
+		},
+		completed,
+		overflow(captured, total) {
+			if (error) return;
+			error = new BunCompatOutputLimitError(limit, captured, total);
+			if (killRequested) return;
+			killRequested = true;
+			try {
+				requestKill();
+			} catch {
+				// The process may already have exited naturally.
+			}
+		},
+		complete() {
+			resolveCompleted();
+		},
+	};
+}
+
 function streamFromNode(
 	pipe: NodeJS.ReadableStream | null | undefined,
+	limit?: number,
+	controller?: OutputOverflowController,
 ): BunCompatStream {
-	// Expose either full buffered output (`text()`/`bytes()`) or a Web reader for
-	// incremental bounded consumption. Claim exactly one mode lazily: Node
-	// streams start paused, so a bounded reader must not run beside an eager,
-	// unbounded chunk collector.
+	if (!pipe) return staticStream('');
+	// A same-stack reader has exclusive ownership. A deferred auto-claim then
+	// drains every still-unclaimed pipe before an exit-first consumer can block
+	// a child on OS pipe backpressure.
+	let mode: 'buffered' | 'reader' | undefined;
 	let collected: Promise<Buffer> | undefined;
-	let readerClaimed = false;
 	const collect = (): Promise<Buffer> => {
-		if (readerClaimed) {
+		if (mode === 'reader') {
 			return Promise.reject(
 				new TypeError('Subprocess output is already consumed by a reader'),
 			);
 		}
-		collected ??= new Promise((resolve) => {
+		mode = 'buffered';
+		if (collected) return collected;
+		collected = new Promise<Buffer>((resolve) => {
 			if (!pipe) {
 				resolve(Buffer.alloc(0));
 				return;
 			}
 			const chunks: Buffer[] = [];
+			let captured = 0;
+			let total = 0;
+			let finished = false;
+			const finish = () => {
+				if (finished) return;
+				finished = true;
+				resolve(Buffer.concat(chunks));
+			};
 			pipe.on('data', (chunk: Buffer | string) => {
-				chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+				const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+				total += bytes.byteLength;
+				if (controller?.error || limit === undefined) return;
+				const remaining = limit - captured;
+				if (remaining > 0) {
+					// Copy the retained prefix: a subarray would keep an oversized
+					// source chunk's whole backing buffer alive past the limit.
+					const retained = Buffer.from(bytes.subarray(0, remaining));
+					chunks.push(retained);
+					captured += retained.byteLength;
+				}
+				if (bytes.byteLength > remaining) {
+					controller?.overflow(captured, total);
+				}
 			});
-			pipe.on('end', () => resolve(Buffer.concat(chunks)));
-			pipe.on('error', () => resolve(Buffer.concat(chunks)));
+			pipe.on('end', finish);
+			pipe.on('close', finish);
+			pipe.on('error', finish);
+		}).then(async (bytes): Promise<Buffer> => {
+			await controller?.completed;
+			if (controller?.error) throw controller.error;
+			return bytes;
 		});
 		return collected;
 	};
@@ -692,7 +802,7 @@ function streamFromNode(
 		});
 	};
 
-	return {
+	const result: BunCompatStream = {
 		async text(): Promise<string> {
 			return (await collect()).toString('utf-8');
 		},
@@ -701,13 +811,19 @@ function streamFromNode(
 			return new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
 		},
 		getReader(): ReadableStreamDefaultReader<Uint8Array> {
-			if (readerClaimed || collected) {
+			if (mode !== undefined) {
 				throw new TypeError('Subprocess output is already consumed');
 			}
-			readerClaimed = true;
+			mode = 'reader';
 			return toWebReadable().getReader();
 		},
 	};
+	if (pipe && controller && limit !== undefined) {
+		queueMicrotask(() => {
+			if (mode === undefined) void collect().catch(() => undefined);
+		});
+	}
+	return result;
 }
 
 function mapStdio(
@@ -716,12 +832,13 @@ function mapStdio(
 	return v ?? 'pipe';
 }
 
-function streamFromBun(stream: unknown): BunCompatStream {
-	// Bun's subprocess `stdout`/`stderr` is a `ReadableStream` (Web Streams).
-	// Wrap it to expose the `text()`/`bytes()`/`getReader()` shape the rest
-	// of the codebase expects from the shim. We tee the stream when both
-	// shapes are needed in the same call site, but in practice each caller
-	// uses only one path.
+function streamFromBun(
+	stream: unknown,
+	limit?: number,
+	controller?: OutputOverflowController,
+): BunCompatStream {
+	// Bun's subprocess stdout/stderr are Web Streams. Give them the same
+	// ownership, deferred-drain, and finite-buffer contract as Node streams.
 	if (!stream || typeof stream !== 'object') {
 		const empty: BunCompatStream = {
 			async text() {
@@ -741,51 +858,84 @@ function streamFromBun(stream: unknown): BunCompatStream {
 		return empty;
 	}
 	const candidate = stream as {
-		text?: () => Promise<string>;
-		bytes?: () => Promise<Uint8Array>;
 		getReader?: () => ReadableStreamDefaultReader<Uint8Array>;
 	};
-	const collect = async (): Promise<Uint8Array> => {
-		if (typeof candidate.getReader !== 'function') {
-			return new Uint8Array(0);
+	let mode: 'buffered' | 'reader' | undefined;
+	let collected: Promise<Uint8Array> | undefined;
+	const collect = (): Promise<Uint8Array> => {
+		if (mode === 'reader') {
+			return Promise.reject(
+				new TypeError('Subprocess output is already consumed by a reader'),
+			);
 		}
-		const reader = candidate.getReader();
-		const chunks: Uint8Array[] = [];
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (value) chunks.push(value);
-		}
-		const total = chunks.reduce((acc, c) => acc + c.byteLength, 0);
-		const out = new Uint8Array(total);
-		let off = 0;
-		for (const c of chunks) {
-			out.set(c, off);
-			off += c.byteLength;
-		}
-		return out;
+		mode = 'buffered';
+		collected ??= (async () => {
+			if (typeof candidate.getReader !== 'function') return new Uint8Array(0);
+			const reader = candidate.getReader();
+			const chunks: Uint8Array[] = [];
+			let captured = 0;
+			let total = 0;
+			try {
+				for (;;) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					if (!value) continue;
+					total += value.byteLength;
+					if (controller?.error || limit === undefined) continue;
+					const remaining = limit - captured;
+					if (remaining > 0) {
+						const retained = value.slice(0, remaining);
+						chunks.push(retained);
+						captured += retained.byteLength;
+					}
+					if (value.byteLength > remaining) {
+						controller?.overflow(captured, total);
+					}
+				}
+			} finally {
+				reader.releaseLock();
+			}
+			await controller?.completed;
+			if (controller?.error) throw controller.error;
+			const out = new Uint8Array(captured);
+			let offset = 0;
+			for (const chunk of chunks) {
+				out.set(chunk, offset);
+				offset += chunk.byteLength;
+			}
+			return out;
+		})();
+		return collected;
 	};
-	const text =
-		typeof candidate.text === 'function'
-			? () => (candidate.text as () => Promise<string>)()
-			: async () => new TextDecoder().decode(await collect());
-	const bytes =
-		typeof candidate.bytes === 'function'
-			? () => (candidate.bytes as () => Promise<Uint8Array>)()
-			: collect;
-	const getReader =
-		typeof candidate.getReader === 'function'
-			? () =>
-					(
-						candidate.getReader as () => ReadableStreamDefaultReader<Uint8Array>
-					)()
-			: () =>
-					new ReadableStream<Uint8Array>({
-						start(controller) {
-							controller.close();
+	const result: BunCompatStream = {
+		async text() {
+			return new TextDecoder().decode(await collect());
+		},
+		bytes: collect,
+		getReader() {
+			if (mode !== undefined) {
+				throw new TypeError('Subprocess output is already consumed');
+			}
+			mode = 'reader';
+			return typeof candidate.getReader === 'function'
+				? candidate.getReader()
+				: new ReadableStream<Uint8Array>({
+						start(streamController) {
+							streamController.close();
 						},
 					}).getReader();
-	return { text, bytes, getReader };
+		},
+	};
+	if (
+		typeof candidate.getReader === 'function' &&
+		controller &&
+		limit !== undefined
+	) {
+		queueMicrotask(() => {
+			if (mode === undefined) void collect().catch(() => undefined);
+		});
+	}
+	return result;
 }
 
 /**
@@ -907,6 +1057,7 @@ export function bunSpawn(
 	cmd: string[],
 	options?: BunCompatSpawnOptions,
 ): BunCompatSubprocess {
+	const maxBuffer = normalizedMaxBuffer(options?.maxBuffer);
 	// #2236 chokepoint: a `cwd` taken from durable or reconstructed state can
 	// point at a directory that has since been torn down. The spawn is still
 	// attempted; every failure path below runs the caught error through
@@ -923,6 +1074,7 @@ export function bunSpawn(
 		// Always build a fresh options object so we never mutate the caller's.
 		const spawnOpts: Record<string, unknown> = { ...options };
 		delete spawnOpts.killProcessTree;
+		delete spawnOpts.maxBuffer;
 		if (mergedEnv !== undefined) spawnOpts.env = mergedEnv;
 		// Security (SC-003.4): a child that traps SIGTERM must still be killed
 		// when the timeout fires. Bun's default kill signal on timeout is
@@ -975,6 +1127,9 @@ export function bunSpawn(
 			options?.killProcessTree
 				? killBunTree(sig)
 				: Promise.resolve(proc.kill(sig));
+		const outputController = createOutputOverflowController(maxBuffer, () => {
+			void killBunProcess('SIGKILL').catch(() => undefined);
+		});
 		let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 		if (
 			options?.killProcessTree === true &&
@@ -992,10 +1147,11 @@ export function bunSpawn(
 		}
 		const exited = proc.exited.finally(() => {
 			if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+			outputController.complete();
 		});
 		return {
-			stdout: streamFromBun(proc.stdout),
-			stderr: streamFromBun(proc.stderr),
+			stdout: streamFromBun(proc.stdout, maxBuffer, outputController),
+			stderr: streamFromBun(proc.stderr, maxBuffer, outputController),
 			exited,
 			get exitCode() {
 				return proc.exitCode;
@@ -1044,6 +1200,9 @@ export function bunSpawn(
 		proc.kill(signal as NodeJS.Signals);
 		return Promise.resolve();
 	};
+	const outputController = createOutputOverflowController(maxBuffer, () => {
+		void killChild('SIGKILL').catch(() => undefined);
+	});
 
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 	let observedSignal: NodeJS.Signals | null = null;
@@ -1076,11 +1235,12 @@ export function bunSpawn(
 		}
 	}).finally(() => {
 		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+		outputController.complete();
 	});
 
 	return {
-		stdout: streamFromNode(proc.stdout),
-		stderr: streamFromNode(proc.stderr),
+		stdout: streamFromNode(proc.stdout, maxBuffer, outputController),
+		stderr: streamFromNode(proc.stderr, maxBuffer, outputController),
 		exited,
 		get exitCode(): number | null {
 			// Windows may expose the libuv spawn error (for example -4058 for
@@ -1159,8 +1319,10 @@ export function bunSpawnSync(
 		| undefined;
 	if (bun?.spawnSync) {
 		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
-		const spawnOpts =
-			mergedEnv !== undefined ? { ...options, env: mergedEnv } : options;
+		const spawnOpts: Record<string, unknown> = { ...options };
+		// `maxBuffer` is an async compatibility-layer option, not a Bun API.
+		delete spawnOpts.maxBuffer;
+		if (mergedEnv !== undefined) spawnOpts.env = mergedEnv;
 		try {
 			return bun.spawnSync(cmd, spawnOpts);
 		} catch (error) {
