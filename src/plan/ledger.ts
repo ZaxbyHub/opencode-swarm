@@ -586,8 +586,18 @@ function archiveLegacyLedger(
 		`plan-ledger.legacy-archive.${hash}.jsonl`,
 	);
 	if (!fs.existsSync(archivePath)) {
-		const tempPath = `${archivePath}.tmp.${Date.now()}`;
-		writeFileFsyncedThenRename(tempPath, archivePath, bytes);
+		// The archive is content-addressed, but its staging file must still be
+		// unique: concurrent first writers must never share a fixed `.tmp` path.
+		const tempPath = `${archivePath}.tmp.${crypto.randomBytes(16).toString('hex')}`;
+		try {
+			_internals.writeFileFsyncedThenRename(tempPath, archivePath, bytes);
+		} finally {
+			try {
+				fs.unlinkSync(tempPath);
+			} catch {
+				/* renamed or never created */
+			}
+		}
 		fsyncRecoveryDirectory(path.dirname(archivePath));
 	}
 	return { path: archivePath, hash };
@@ -626,6 +636,10 @@ function importCanonicalIntoSqlite(
  * prefixes. Divergent committed prefixes are never merged or timestamp-picked.
  */
 function coordinateLedger(directory: string): FileLedgerRead {
+	// Reset publishes this marker before clearing SQLite. Readers that do not
+	// share the lifecycle lock must not resurrect the old JSONL authority.
+	if (fs.existsSync(path.join(directory, '.swarm', 'plan-ledger.resetting')))
+		return { events: [], lines: [], truncated: false, badSuffix: null };
 	const file = readFileLedgerExact(directory);
 	if (!hasSqliteLedger(directory)) {
 		if (file.events.length > 0 && !file.truncated) {
@@ -1410,10 +1424,21 @@ export async function appendLedgerEvent(
 					]),
 				);
 				try {
-					coordinateLedger(directory);
+					// The file is authoritative during the soak release. Mirror only the
+					// newly committed canonical event into SQLite here; the next coordinated
+					// read performs the full parity projection. This keeps append cost
+					// constant instead of replaying the entire ledger for every event.
+					appendSqliteLedger(directory, {
+						canonicalEvent,
+						expectedSeq: latestSeq,
+						state: {
+							authorityMode: 'file_shadow',
+							parityStatus: 'pending',
+						},
+					});
 				} catch (error) {
 					log(
-						`[ledger] SQLite shadow update deferred after file commit: ${error instanceof Error ? error.message : String(error)}`,
+						`[ledger] SQLite shadow append deferred after file commit: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
 			}
@@ -1698,8 +1723,8 @@ export async function replaceTruncatedLedgerWithRecoveryRoot(
 					break;
 				}
 			}
-			const archiveTempPath = `${archivePath}.tmp`;
-			const canonicalTempPath = `${ledgerPath}.reconcile.${Date.now()}.${Math.floor(Math.random() * 1e9)}.tmp`;
+			const archiveTempPath = `${archivePath}.tmp.${crypto.randomBytes(16).toString('hex')}`;
+			const canonicalTempPath = `${ledgerPath}.reconcile.${crypto.randomBytes(16).toString('hex')}.tmp`;
 
 			const planHash = computePlanLedgerHash(validated);
 			const rawBadSuffix = findRawMalformedSuffix(originalBytes);
@@ -1780,11 +1805,19 @@ export async function clearPlanLedgerForReset(
 		'plan-ledger',
 		'reset-plan-ledger',
 		async () => {
-			clearSqliteLedger(directory);
+			const marker = path.join(directory, '.swarm', 'plan-ledger.resetting');
+			fs.writeFileSync(marker, 'resetting\n', 'utf8');
 			try {
-				fs.unlinkSync(getLedgerPath(directory));
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+				clearSqliteLedger(directory);
+				try {
+					fs.unlinkSync(getLedgerPath(directory));
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+				}
+			} finally {
+				try {
+					fs.unlinkSync(marker);
+				} catch {}
 			}
 		},
 	);
@@ -1931,11 +1964,15 @@ export async function peekPlanFromLedger(
 	directory: string,
 	_options?: ReplayOptions,
 ): Promise<ReplayStatusResult> {
+	if (fs.existsSync(path.join(directory, '.swarm', 'plan-ledger.resetting')))
+		return { plan: null, truncated: false, badSuffix: null };
 	const file = readFileLedgerExact(directory);
 	let events = file.events;
 	let truncated = file.truncated;
 	let badSuffix = file.badSuffix;
 	const sqliteReadOnly = readSqliteLedgerEventsReadOnly(directory);
+	if (fs.existsSync(path.join(directory, '.swarm', 'plan-ledger.resetting')))
+		return { plan: null, truncated: false, badSuffix: null };
 	if (sqliteReadOnly.events.length > 0) {
 		const sqlite = {
 			events: sqliteReadOnly.events.map((row) => row.event as LedgerEvent),
@@ -2593,6 +2630,7 @@ export const _internals = {
 	loadLastPlanCriticApprovedSnapshot,
 	getLedgerPath,
 	getPlanJsonPath,
+	archiveLegacyLedger,
 	writeFileFsyncedThenRename,
 	fsyncRecoveryDirectory,
 	readLedgerDirectory,

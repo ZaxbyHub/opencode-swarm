@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { projectDbPath } from '../../../src/db/project-db';
 import { _internals, resetApprovalCache } from '../../../src/hooks/issue-trace';
 import type { PlanLedgerState } from '../../../src/plan/ledger-sqlite';
 import { withFrozenClock } from '../../helpers/test-clock';
@@ -107,5 +108,11 @@ describe('issue-trace approval cache', () => {
 		fs.utimesSync(ledgerPath, nextMtime, nextMtime);
 		expect(await _internals.boundedApprovalCheck(directory, 100)).toBe(true);
 		expect(approvalCalls).toBe(2);
+	});
+
+	test('approval fingerprint does not create a project database', () => {
+		const directory = makeTempDir();
+		expect(_internals.getPlanLedgerState(directory)).toBeNull();
+		expect(fs.existsSync(projectDbPath(directory))).toBe(false);
 	});
 });

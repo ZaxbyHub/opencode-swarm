@@ -18,7 +18,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { getPlanLedgerState } from '../plan/ledger-sqlite';
+import { getPlanLedgerStateReadOnly } from '../plan/ledger-sqlite';
 import { error as _logErrorImpl } from '../utils/logger.js';
 import { isPlanCriticApproved } from './delegation-gate';
 import { computeNextMode } from './issue-trace-reducer';
@@ -51,7 +51,7 @@ export const _internals = {
 	recurrenceSweepReceiptExists,
 	implementationReviewReceiptExists,
 	isPlanCriticApproved,
-	getPlanLedgerState,
+	getPlanLedgerState: getPlanLedgerStateReadOnly,
 	logError: _logErrorImpl,
 	// Exposed through the DI seam so the cache fingerprint can be tested
 	// without driving the full issue-trace state machine.
@@ -101,7 +101,7 @@ async function boundedApprovalCheck(
 			// export after a failed publication, so keep the -1 file fingerprint.
 		}
 
-		let state: ReturnType<typeof getPlanLedgerState> = null;
+		let state: ReturnType<typeof getPlanLedgerStateReadOnly> = null;
 		let authorityReadFailed = false;
 		try {
 			state = _internals.getPlanLedgerState(directory);

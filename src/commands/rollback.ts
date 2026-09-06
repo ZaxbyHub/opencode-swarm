@@ -380,27 +380,42 @@ export async function handleRollbackCommand(
 						// The root is already durable. Restore both projections and the
 						// prior root before surfacing the error, so a failed publish cannot
 						// leave the workspace pointing at two different plans.
+						const compensationFailures: string[] = [];
 						for (const [file, previous] of previousProjection) {
 							const destination = path.join(swarmDir, file);
 							if (previous === null) {
 								try {
 									fs.unlinkSync(destination);
-								} catch {}
+								} catch (error) {
+									compensationFailures.push(
+										`${file}: ${error instanceof Error ? error.message : String(error)}`,
+									);
+								}
 							} else {
-								fs.writeFileSync(destination, previous);
+								try {
+									fs.writeFileSync(destination, previous);
+								} catch (error) {
+									compensationFailures.push(
+										`${file}: ${error instanceof Error ? error.message : String(error)}`,
+									);
+								}
 							}
 						}
-						if (prior.plan) {
-							await _internals.replacePlanLedgerWithRoot(
-								directory,
-								prior.plan,
-								'rollback_projection_compensation',
+						try {
+							if (prior.plan)
+								await _internals.replacePlanLedgerWithRoot(
+									directory,
+									prior.plan,
+									'rollback_projection_compensation',
+								);
+							else await _internals.clearPlanLedgerForReset(directory);
+						} catch (error) {
+							compensationFailures.push(
+								`authoritative state: ${error instanceof Error ? error.message : String(error)}`,
 							);
-						} else {
-							await _internals.clearPlanLedgerForReset(directory);
 						}
 						throw new Error(
-							`checkpoint projection publish failed (${publishError instanceof Error ? publishError.message : String(publishError)}); restored the prior authoritative state`,
+							`checkpoint projection publish failed (${publishError instanceof Error ? publishError.message : String(publishError)}); compensation ${compensationFailures.length ? `failed: ${compensationFailures.join('; ')}` : 'completed'}`,
 						);
 					}
 				},

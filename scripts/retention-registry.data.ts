@@ -1667,13 +1667,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/plan/ledger.ts', 'src/plan/ledger-sqlite.ts'],
 		writerCitations: [
-			'src/plan/ledger.ts:975 initLedger / :1274 appendLedgerEvent — authority-mode coordinator under LEDGER_LOCK; SQLite event+state uses FULL transactions and JSONL is the exact portable stream',
-			'src/plan/ledger.ts:1572 takeSnapshotEvent; :1634 replaceTruncatedLedgerWithRecoveryRoot (corruption recovery ONLY, original content-addressed before replacement)',
+			'src/plan/ledger.ts:989 initLedger / :1288 appendLedgerEvent — authority-mode coordinator under LEDGER_LOCK; SQLite event+state uses FULL transactions and JSONL is the exact portable stream',
+			'src/plan/ledger.ts:1597 takeSnapshotEvent; :1659 replaceTruncatedLedgerWithRecoveryRoot (corruption recovery ONLY, original content-addressed before replacement)',
 			'src/plan/ledger-sqlite.ts — registry-backed SQLite event/state/import mutations; every transaction uses synchronous=FULL through the project DB durability policy',
 		],
 		readerCitations: [
-			'src/plan/ledger.ts:961 readLedgerEvents / :2269 readLedgerEventsWithIntegrity — authority-mode coordinator; JSONL full-file replay in file-shadow mode, ordered SQLite rows after cutover',
-			'src/plan/ledger.ts:947 getLatestLedgerSeq / loadLastApprovedPlan — coordinated authority reads',
+			'src/plan/ledger.ts:975 readLedgerEvents / :2306 readLedgerEventsWithIntegrity — authority-mode coordinator; JSONL full-file replay in file-shadow mode, ordered SQLite rows after cutover',
+			'src/plan/ledger.ts:961 getLatestLedgerSeq / loadLastApprovedPlan — coordinated authority reads',
 		],
 		schemaVersion: 'versioned plan events (docs/plan-durability.md)',
 		stateClass: 'authoritative',
@@ -1690,12 +1690,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		readBound: { pattern: 'full-file', bound: 'JSONL is read fully only while it is the file-shadow authority; after cutover, ordered SQLite rows are authoritative and JSONL is repaired as a portable export', sync: true, citation: 'src/plan/ledger.ts:629-780,2269-2308' },
 		lockModel: 'withEvidenceLock on the ledger path + optimistic CAS retry (appendLedgerEventWithRetry :1463); SQLite mutations also use BEGIN IMMEDIATE FULL transactions',
 		crashBehavior: 'file-shadow writes use fsync-then-rename and repair SQLite by exact prefix; SQLite-authority writes commit event+state atomically and repair export failures on a later read',
-		closePolicy: 'archived + terminal-state REMOVED unconditionally so a closed plan cannot resurrect (close.ts:1893-1910); ledger siblings removed (close.ts:1775-1795)',
+		closePolicy: 'archived + terminal-state REMOVED unconditionally so a closed plan cannot resurrect (close.ts:1893-1910); transient ledger siblings removed, but content-addressed legacy archives remain for retention (close.ts:1775-1798)',
 		closeArrayMembership: {
 			'plan-ledger.jsonl': 'archive+clean',
 		},
 		resetPolicy: 'close/finalize is the lifecycle boundary',
-		legacyCompatibility: 'checkpoints read 3 legacy locations with deprecation warnings (plan/checkpoint.ts:95-119)',
+		legacyCompatibility: 'checkpoints read 3 legacy locations with deprecation warnings (plan/checkpoint.ts:95-119); plan-ledger legacy archives are content-addressed and retention-bounded to newest 16 after a 30 d horizon (src/retention/sweep.ts)',
 		healthSignal: 'authority_mode + parity_status/replay hashes in plan_ledger_state; truncated flag + quarantine file presence during file-shadow recovery',
 		owner: 'this-gate',
 		disposition: {

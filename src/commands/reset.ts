@@ -155,13 +155,23 @@ export async function handleResetCommand(
 					}
 					await _internals.clearPlanLedgerForReset(directory);
 				} catch (error) {
+					const compensationFailures: string[] = [];
 					for (const [filename, bytes] of criticalProjectionBytes) {
 						try {
 							_internals.writeFileSync(
 								validateSwarmPath(directory, filename),
 								bytes,
 							);
-						} catch {}
+						} catch (restoreError) {
+							compensationFailures.push(
+								`${filename}: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+							);
+						}
+					}
+					if (compensationFailures.length > 0) {
+						results.push(
+							`- ❌ Compensation failed: ${compensationFailures.join('; ')}`,
+						);
 					}
 					throw error;
 				}

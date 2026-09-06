@@ -191,7 +191,7 @@ describe('handleRollbackCommand — ledger replacement failure (issue #2484)', (
 		const result = await handleRollbackCommand(testDir, ['1']);
 
 		expect(result).toContain('failed to replace the authoritative ledger');
-		expect(result).toContain('restored the prior authoritative state');
+		expect(result).toContain('compensation completed');
 		expect(
 			JSON.parse(
 				realFs.readFileSync(path.join(getSwarmDir(), 'plan.json'), 'utf-8'),
@@ -219,8 +219,18 @@ describe('handleRollbackCommand — ledger replacement failure (issue #2484)', (
 
 		const result = await handleRollbackCommand(testDir, ['1']);
 
-		expect(result).toContain('restored the prior authoritative state');
+		expect(result).toContain('compensation failed');
 		expect(existsSync(path.join(getSwarmDir(), 'plan.json'))).toBe(false);
+		expect((await peekPlanFromLedger(testDir)).plan).toBeNull();
+	});
+
+	it('read-only previews hide ledger state while reset is in progress', async () => {
+		await savePlan(testDir, createValidPlan());
+		writeFileSync(
+			path.join(getSwarmDir(), 'plan-ledger.resetting'),
+			'resetting\n',
+		);
+
 		expect((await peekPlanFromLedger(testDir)).plan).toBeNull();
 	});
 });

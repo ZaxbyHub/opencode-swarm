@@ -2049,7 +2049,10 @@ export async function runCleanStage(
 			(f) =>
 				(f.startsWith('plan-ledger.archived-') ||
 					f.startsWith('plan-ledger.backup-')) &&
-				f.endsWith('.jsonl'),
+				f.endsWith('.jsonl') &&
+				// Content-addressed legacy archives are recovery inputs owned by
+				// retention; never remove them during close.
+				!/^plan-ledger\.legacy-archive\.[0-9a-f]{64}\.jsonl$/.test(f),
 		);
 		for (const sibling of ledgerSiblings) {
 			try {

@@ -30,15 +30,9 @@ afterEach(async () => {
 });
 
 // ── EBUSY / LOCKED FILE ERROR HANDLING (FR-007) ──────────────────────────────
-// Simulates EBUSY during unlinkSync (used by reset for .swarm/ files and root
-// legacy artifacts). Verifies catch path produces '❌ Failed to delete ...'
-// friendly message (instead of crash) and that processing continues for
-// remaining files/artifacts. Uses mock.module('node:fs') + spread real exports
-// + afterEach(mock.restore()) per writing-tests skill. Dynamic re-import after
-// mock ensures SUT binds the mocked fs (matches handoff.error-handling.test.ts
-// and close-plan-terminal-state.test.ts patterns). existsSync mocked to true
-// so delete paths are exercised; unlink targets plan.md explicitly because
-// reset clears SQLite before projection cleanup and may unlink other paths first.
+// Simulates EBUSY through the reset command's _internals dependency-injection
+// seam. The seam keeps this test isolated without Bun's process-wide
+// mock.module leakage and verifies that non-critical cleanup remains fail-open.
 describe('EBUSY simulation for locked files during reset (FR-007)', () => {
 	test('reports friendly error for EBUSY on a noncritical file and continues processing', async () => {
 		const contextPath = join(tempDir, '.swarm', 'context.md');
@@ -65,13 +59,9 @@ describe('EBUSY simulation for locked files during reset (FR-007)', () => {
 });
 
 // ── EACCES / PERMISSION DENIED + rmSync FAILURE PATH (FR-014) ─────────────────────
-// Simulates EACCES (permission denied) during unlinkSync on the FIRST call but
-// succeeding on retry (per task spec). Also overrides rmSync to exercise the
-// summaries/ catch path. Verifies friendly '❌ Failed to delete ...' messages
-// (contains "Failed to delete") and that command continues processing other
-// files without crashing. Uses the exact mock.module('node:fs') + ...fsSync spread
-// + existsSync always-true + dynamic re-import + afterEach(mock.restore()) pattern
-// already established in this file (and state mock at top for reference).
+// Exercises the authoritative projection deletion failure through the same
+// _internals seam. The test asserts fail-closed reset behavior and preserves
+// the prior ledger/projection bytes for retry.
 describe('EACCES simulation for permission-denied files during reset (FR-014)', () => {
 	test('aborts and preserves authority when plan.json cannot be deleted', async () => {
 		const planPath = join(tempDir, '.swarm', 'plan.json');
@@ -111,5 +101,48 @@ describe('EACCES simulation for permission-denied files during reset (FR-014)', 
 		expect(await readFile(markdownPath)).toEqual(markdownBefore);
 		expect(await readFile(ledgerPath)).toEqual(ledgerBefore);
 		expect(getPlanLedgerState(tempDir)).toEqual(stateBefore);
+	});
+
+	test('reports compensation failures when restoring a deleted critical projection fails', async () => {
+		const planPath = join(tempDir, '.swarm', 'plan.json');
+		const markdownPath = join(tempDir, '.swarm', 'plan.md');
+		const plan: Plan = {
+			schema_version: '1.0.0',
+			title: 'Restore-failure plan',
+			swarm: 'reset-test',
+			current_phase: 1,
+			phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+		};
+		await savePlan(tempDir, plan);
+		const originalClearPlanLedgerForReset =
+			resetInternals.clearPlanLedgerForReset;
+		const originalWriteFileSync = resetInternals.writeFileSync;
+		resetInternals.clearPlanLedgerForReset = async () => {
+			throw new Error('ledger cleanup failed');
+		};
+		const restoreError = Object.assign(new Error('EACCES: restore failed'), {
+			code: 'EACCES',
+		});
+
+		resetInternals.writeFileSync = ((
+			filePath: Parameters<typeof resetInternals.writeFileSync>[0],
+			data: Parameters<typeof resetInternals.writeFileSync>[1],
+		) => {
+			if (filePath === planPath) throw restoreError;
+			return originalWriteFileSync(filePath, data);
+		}) as typeof resetInternals.writeFileSync;
+
+		try {
+			const resetResult = await handleResetCommand(tempDir, ['--confirm']);
+
+			expect(resetResult).toContain('## Swarm Reset Aborted');
+			expect(resetResult).toContain('Compensation failed');
+			expect(resetResult).toContain('plan.json: EACCES: restore failed');
+			expect(existsSync(planPath)).toBe(false);
+			expect(existsSync(markdownPath)).toBe(true);
+		} finally {
+			resetInternals.clearPlanLedgerForReset = originalClearPlanLedgerForReset;
+			resetInternals.writeFileSync = originalWriteFileSync;
+		}
 	});
 });

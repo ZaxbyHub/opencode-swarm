@@ -1,14 +1,18 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db';
+import { loadDatabaseCtor } from '../../../src/db/sqlite-loader';
 import {
 	appendSqliteLedger,
 	clearSqliteLedger,
 	cutoverSqliteLedger,
 	getPlanLedgerState,
+	getPlanLedgerStateReadOnly,
 	hasSqliteLedger,
 	importSqliteLedger,
 	readSqliteLedgerEvents,
+	readSqliteLedgerEventsReadOnly,
 	recordSqliteLedgerParity,
 	replaceSqliteLedger,
 	SqliteLedgerImportError,
@@ -165,5 +169,36 @@ describe('SQLite plan-ledger store', () => {
 		clearSqliteLedger(directory);
 		expect(hasSqliteLedger(directory)).toBe(false);
 		expect(getPlanLedgerState(directory)).toBeNull();
+	});
+
+	test('read-only state probe fails safe on a half-migrated database', () => {
+		const directory = canonicalMkdtemp('ledger-sqlite-half-migrated-');
+		roots.push(directory);
+		const swarmDir = path.join(directory, '.swarm');
+		mkdirSync(swarmDir, { recursive: true });
+		const Db = loadDatabaseCtor();
+		const db = new Db(path.join(swarmDir, 'swarm.db'));
+		db.run(
+			'CREATE TABLE plan_ledger_event (seq INTEGER PRIMARY KEY, canonical_event BLOB NOT NULL);',
+		);
+		db.close();
+
+		expect(getPlanLedgerStateReadOnly(directory)).toBeNull();
+	});
+
+	test('read-only state probe hides SQLite authority while reset marker exists', () => {
+		const directory = canonicalMkdtemp('ledger-sqlite-reset-marker-');
+		roots.push(directory);
+		importSqliteLedger(directory, {
+			canonicalEvents: [event(1)],
+			state: { authorityMode: 'sqlite' },
+		});
+		writeFileSync(
+			path.join(directory, '.swarm', 'plan-ledger.resetting'),
+			'resetting\n',
+		);
+
+		expect(getPlanLedgerStateReadOnly(directory)).toBeNull();
+		expect(readSqliteLedgerEventsReadOnly(directory).events).toHaveLength(0);
 	});
 });

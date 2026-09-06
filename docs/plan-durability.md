@@ -90,6 +90,21 @@ place for retry.
 
 > **Migration note:** As of v7.x, SWARM_PLAN files live inside `.swarm/plan-export/` instead of the project root. The `/swarm close` and `/swarm reset --confirm` commands clean up all three locations (`.swarm/plan-export/`, flat `.swarm/`, and project root) during the transition window.
 
+### SQLite cutover soak and legacy archives
+
+SQLite cutover is a soak transition, not an immediate replacement: while the
+ledger state is `file_shadow`, every read verifies the portable JSONL prefix,
+mirrors its suffix into SQLite, and records clean replay/projection parity.
+Only a later read with clean parity and a changed `shadow_started_version` may
+promote SQLite to authority; a stale expected version or divergent parity fails
+closed. The portable JSONL remains a repairable export after promotion.
+
+Legacy imports preserve the original JSONL in a content-addressed
+`plan-ledger.legacy-archive.<sha256>.jsonl` file. These recovery inputs are
+immutable and bounded by retention (the newest 16 are retained; older entries
+are removed only after the normal 30-day horizon). Reconciliation and archive
+staging use collision-safe temporary names and remove leftovers on failure.
+
 ## Durable task write scope (`files_touched`)
 
 Architects author a coding task's exact project-relative write scope with the optional `files_touched` array on `save_plan`. Non-empty arrays are canonicalized with the same path normalizer used by `declare_scope` (separator normalization, dot-segment collapse, deduplication, and stable sorting). Absolute paths, traversal components, empty entries, control characters, entries over 4,096 UTF-8 bytes, and aggregate scope text over 1 MiB fail before any plan write. On revision, omission preserves that task's existing scope; an explicit `[]` clears it.

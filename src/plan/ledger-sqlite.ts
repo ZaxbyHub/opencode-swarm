@@ -9,6 +9,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { withImmediateTransaction } from '../db/durability.js';
 import {
 	getProjectDb,
@@ -908,6 +910,13 @@ export function getPlanLedgerState(directory: string): PlanLedgerState | null {
 	return readState(getProjectDb(directory));
 }
 
+/** Read authority metadata without opening the writable project DB. */
+export function getPlanLedgerStateReadOnly(
+	directory: string,
+): PlanLedgerState | null {
+	return readSqliteLedgerEventsReadOnly(directory).state;
+}
+
 function validateStateAgainstRows(
 	state: PlanLedgerState | null,
 	rows: SqliteLedgerEventRow[],
@@ -996,8 +1005,10 @@ export function readSqliteLedgerEvents(
 export function readSqliteLedgerEventsReadOnly(
 	directory: string,
 ): SqliteLedgerReadResult {
-	return (
-		withProjectDbReadOnly(directory, (db) => {
+	const resetMarker = path.join(directory, '.swarm', 'plan-ledger.resetting');
+	if (existsSync(resetMarker)) return { events: [], state: null, import: null };
+	try {
+		const result = withProjectDbReadOnly(directory, (db) => {
 			const table = db
 				.query<{ present: number }, []>(
 					"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'plan_ledger_event'",
@@ -1013,8 +1024,23 @@ export function readSqliteLedgerEventsReadOnly(
 			const state = readState(db);
 			validateStateAgainstRows(state, rows);
 			return { events: rows, state, import: null };
-		}) ?? { events: [], state: null, import: null }
-	);
+		}) ?? { events: [], state: null, import: null };
+		// A reset can publish the marker while the read-only connection is open.
+		// Recheck before publishing the observation so stale authority is not
+		// returned after the reset window has begun.
+		return existsSync(resetMarker)
+			? { events: [], state: null, import: null }
+			: result;
+	} catch (error) {
+		// Observational callers may encounter a database opened between migration
+		// steps. Treat missing plan-ledger tables/columns as an absent SQLite
+		// ledger; never run migrations from a read-only path just to repair it.
+		const message = error instanceof Error ? error.message : String(error);
+		if (/no such table|no such column/i.test(message)) {
+			return { events: [], state: null, import: null };
+		}
+		throw error;
+	}
 }
 
 export function appendSqliteLedger(
