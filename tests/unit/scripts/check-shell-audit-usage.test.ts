@@ -145,7 +145,7 @@ describe('allowlist hygiene', () => {
 	test('the import allowlist covers exactly the seam and its three approved callers', () => {
 		expect(Object.keys(SHELL_AUDIT_IMPORT_ALLOWLIST).sort()).toEqual(
 			[
-				'src/commands/close.ts',
+				'src/commands/close/internals.ts',
 				'src/hooks/guardrails/audit-log.ts',
 				'src/hooks/guardrails/shell-audit-store.ts',
 				'src/services/guardrail-log-service.ts',

@@ -3248,22 +3248,7 @@ export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 	},
 	// --- Round 7: surfaced by the COPY class in WRITE_HEADS -------------------
 	{
-		file: 'src/commands/close.ts',
-		rule: 'C',
-		target: 'destEntry',
-		status: 'not-an-evidence-artifact',
-		reason:
-			'copyDirRecursiveWithFailures(src, dest) copies each entry to ' +
-			'path.join(dest, entry); `dest` is a PARAMETER so the target folds to ' +
-			'null. Its only caller (runArchiveStage) passes ' +
-			'path.join(ctx.archiveDir, dirName), and ctx.archiveDir is ' +
-			'.swarm/archive/swarm-<timestamp>-<suffix>. The destination is therefore ' +
-			'always under .swarm/archive/, never .swarm/evidence/ — evidence/ is one ' +
-			'of the SOURCE directories it archives, which is why the file is a ' +
-			'candidate at all.',
-	},
-	{
-		file: 'src/commands/close.ts',
+		file: 'src/commands/close/archive-stage.ts',
 		rule: 'C',
 		target: 'destPath',
 		status: 'not-an-evidence-artifact',

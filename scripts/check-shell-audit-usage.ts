@@ -77,7 +77,7 @@ export const SHELL_AUDIT_IMPORT_ALLOWLIST: Readonly<
 		reason: 'the bounded diagnostic reader — routes reads through readShellAuditTail / getShellAuditFoldedSummary (issue #2040)',
 		cls: 'seam-caller',
 	},
-	'src/commands/close.ts': {
+	'src/commands/close/internals.ts': {
 		reason: 'close lifecycle ownership — finalizes the store before the session/ archive copy via finalizeShellAuditForClose (issue #2040)',
 		cls: 'lifecycle',
 	},

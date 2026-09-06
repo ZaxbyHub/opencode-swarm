@@ -1,5 +1,5 @@
 /**
- * Fact extraction from `src/commands/close.ts` for the issue #1534 recurrence
+ * Fact extraction from the `src/commands/close/` stage modules for the issue #1534 recurrence
  * guardrail (consumed by `scripts/check-retention-registry.ts`).
  *
  * DEFECT CLASS (issue #1534): a durable `.swarm/` artifact whose CREATION is
@@ -14,13 +14,13 @@
  *   (c) the cached DB handle is not closed before `fs.unlink`, which fails with
  *       EBUSY on Windows only — invisible on a Linux CI host.
  *
- * This module answers, mechanically, "what does close.ts ACTUALLY do?" so the
+ * This module answers, mechanically, "what does /swarm close ACTUALLY do?" so the
  * retention registry's per-artifact declarations can be checked against it.
  * It is deliberately a SOURCE parser rather than an import of close.ts:
- * importing that module would execute the whole command/plugin graph inside a
- * build-time gate, and hoisting the arrays into a leaf module would renumber
- * the `close.ts:NNN` line citations that ~40 registry rows carry in their
- * `closePolicy` prose (a real correctness cost for marginal robustness gain).
+ * importing those modules would execute the whole command/plugin graph inside a
+ * build-time gate. The checker concatenates the constants, archive-stage, and
+ * clean-stage sources so each lifecycle fact remains mechanically visible after
+ * issue #2496 split the former close.ts monolith.
  *
  * Every extraction FAILS CLOSED: an array line the parser does not recognise,
  * an identifier it cannot resolve, or a dispatch site it cannot find becomes a
