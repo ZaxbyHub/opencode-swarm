@@ -24,7 +24,11 @@ const {
 	makeTempDir,
 	recordPending,
 	restoreInternals,
-} = createCollectLaneTimeoutFixture();
+	// Real clock deliberately (see the wait:true scenarios below): these tests
+	// exercise multi-poll deadline progression against the record's real
+	// updatedAt, so the fixture's deterministic collection clock (issue #2572)
+	// must stay off here.
+} = createCollectLaneTimeoutFixture({ deterministicClock: false });
 
 afterEach(async () => {
 	restoreInternals();
