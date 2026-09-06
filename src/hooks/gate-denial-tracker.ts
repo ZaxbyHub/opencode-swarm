@@ -45,6 +45,7 @@
  */
 
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { SPAWN_CIRCUIT_DENIAL_CODE } from '../dispatch/spawn-circuit';
 import {
 	_test_exports as actionCircuitTestExports,
 	armActionCircuitAttempt,
@@ -272,7 +273,19 @@ export function noteGateDenial(
 			return NOT_COUNTED;
 		}
 
+		// Issue #2507: spawn-protection denials own their own escalation
+		// ladder (threshold -> OPEN -> single half-open probe -> reopen).
+		// Counting them here as a second policy.gate_denial streak would put
+		// two accounting owners on one failure category (AGENTS.md invariant
+		// 9); every retry of an open action is already denied before any
+		// host launch, so containment does not depend on a second STOP rung.
 		const errorObject = err as { message: string };
+		if (
+			deriveGateDenialCode(errorObject.message) === SPAWN_CIRCUIT_DENIAL_CODE
+		) {
+			return NOT_COUNTED;
+		}
+
 		const originalMessage = errorObject.message;
 		const code = deriveGateDenialCode(originalMessage);
 		const normalizedTool = normalizeToolNameLowerCase(tool ?? '');
