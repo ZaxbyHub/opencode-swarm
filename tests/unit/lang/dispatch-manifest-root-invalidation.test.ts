@@ -60,6 +60,27 @@ describe('language dispatch manifest-root cache invalidation (#2489)', () => {
 		expect((await pickBackend(sourceDir))?.id).toBe('rust');
 	});
 
+	test('a manifest created beyond the first two trace entries invalidates the warm root', async () => {
+		const packageRoot = path.join(tempDir, 'deep-package-root');
+		const closerRoot = path.join(packageRoot, 'a', 'b');
+		const sourceDir = path.join(closerRoot, 'c', 'd', 'e', 'f');
+		fs.mkdirSync(sourceDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(packageRoot, 'package.json'),
+			'{"name":"deep-workspace"}',
+		);
+
+		expect((await pickBackend(sourceDir))?.id).toBe('typescript');
+
+		// Every recorded directory matters: checking only the first few entries
+		// would miss this manifest four levels above the caller.
+		fs.writeFileSync(
+			path.join(closerRoot, 'Cargo.toml'),
+			'[package]\nname = "deep-worker"\n',
+		);
+		expect((await pickBackend(sourceDir))?.id).toBe('rust');
+	});
+
 	test('deleting the cached closer Cargo.toml falls back to ancestor package.json', async () => {
 		const packageRoot = path.join(tempDir, 'package-root');
 		const closerRoot = path.join(packageRoot, 'packages', 'worker');
