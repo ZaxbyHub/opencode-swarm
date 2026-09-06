@@ -57,6 +57,8 @@ jobs:
           # drift:check` stays offline/deterministic.
           SWARM_DEP_FRESHNESS_CHECK: "1"
         run: bun run scripts/drift-check.ts --enforce --report drift-report.md
+      - name: Enforce release-fragment retention
+        run: node scripts/release-notes-fragments.mjs verify-retention
       - name: Post drift report comment
         # Only comment on pull requests, and even if the drift step failed under
         # enforce mode (so the report is always visible). continue-on-error so

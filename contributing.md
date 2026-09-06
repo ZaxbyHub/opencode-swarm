@@ -339,7 +339,52 @@ Do not prefix the heading with a version (`# v7.21.4`) — release-please owns t
 
 ### What still happens automatically
 
-After your PR merges, release-please opens or updates its release PR. CI runs `scripts/release-notes-fragments.mjs update-pr` to aggregate every pending fragment referenced by that release PR and inject it inside the `<!-- custom-release-notes:start --> … <!-- custom-release-notes:end -->` marker block (preserving release-please's own body markers). When the release PR merges and a tag is cut, `update-release` mirrors the same aggregation into the GitHub Release body. **Pending fragments are not deleted automatically.** They stay in `docs/releases/pending/` until a maintainer prunes them post-release.
+After your PR merges, release-please opens or updates its release PR. CI runs `scripts/release-notes-fragments.mjs update-pr` to aggregate every pending fragment referenced by that release PR and inject it inside the `<!-- custom-release-notes:start --> … <!-- custom-release-notes:end -->` marker block (preserving release-please's own body markers). When the release PR merges and a tag is cut, `update-release` mirrors the same aggregation into the GitHub Release body.
+
+The tag job then prepares an exact-tag cleanup plan. It proves the remote
+peeled tag, local peeled tag, and checkout HEAD are the same commit, binds the
+full GitHub Release body and each consumed fragment's SHA-256, and passes that
+plan to a fresh `main` checkout. The apply step is dry-run first and writes
+`docs/releases/v<version>.md` plus
+`docs/releases/manifests/v<version>.json`; it deletes only a current pending
+file whose raw bytes still equal the tagged bytes. Changed, renamed, missing,
+ambiguous, unsafe, and unconsumed files are retained and reported. Repository
+changes are proposed on a deterministic cleanup PR—never pushed to `main`.
+Re-running the same tag is a no-op. Safety limits cap one fragment at 256 KiB,
+one release at 1,000 candidate PRs and 5,000 fragment entries, and directory
+enumeration at 5,000 pending entries or 1,000 manifests; excess input fails
+closed before unbounded reads or collection.
+
+For historical reconstruction, first write an immutable oldest-to-newest tag
+list as `{ "schemaVersion": 1, "tags": ["v1.0.0", "v1.1.0"] }` in
+`.release-fragment-cleanup/tags.json`. Run `prepare-historical-batch
+--tags-file .release-fragment-cleanup/tags.json >
+.release-fragment-cleanup/batch.json`; stdout is the reusable JSON batch while
+diagnostics go to stderr. Process only the returned tags, and resume with its
+non-null `nextCursor`. The cursor includes a SHA-256
+binding to the complete ordered tag list, so deletion, insertion, or reordering
+between batches fails closed instead of skipping work. Each batch is capped at 25
+tags, the input is hard-capped at 1,000 tags, and invalid or oversized input
+fails visibly rather than truncating. For each returned tag, check out that
+exact tag oldest-to-newest and run
+`prepare-cleanup --tag <tag> --out .release-fragment-cleanup/plan.json
+--apply`. When the batch has a non-null `nextCursor`, also pass
+`--historical-batch .release-fragment-cleanup/batch.json` for every tag,
+including tags in the final batch. The immutable plan
+records the digest-bound ordered tag snapshot, exact slice, and continuation.
+Then run
+`apply-cleanup --plan
+.release-fragment-cleanup/plan.json` followed by the explicit `--apply` form
+from a current main checkout. Cleanup-plan paths are restricted to one JSON file
+directly under `.release-fragment-cleanup/`. Existing matching history is
+preserved; any conflict fails closed. Commit each bounded batch as a cleanup
+PR. Each non-final tag writes a version-controlled replay-state artifact so
+required retention CI can verify that bounded work remains. The last tag of the
+final batch removes that state and fails closed before mutation unless its
+projected pending count satisfies the limit. The final batch has
+`nextCursor: null`, and its last tag must satisfy `verify-retention`.
+The drift workflow runs `verify-retention` to reject byte-identical consumed
+fragments and to enforce the pending-fragment count limit.
 
 ---
 

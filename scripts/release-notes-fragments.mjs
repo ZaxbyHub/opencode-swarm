@@ -19,13 +19,28 @@
  * Modes:
  *   node scripts/release-notes-fragments.mjs update-pr
  *   node scripts/release-notes-fragments.mjs update-release
+ *   node scripts/release-notes-fragments.mjs prepare-cleanup --tag <tag> --out .release-fragment-cleanup/plan.json --apply
+ *   node scripts/release-notes-fragments.mjs prepare-historical-batch --tags-file .release-fragment-cleanup/tags.json [--cursor <cursor>] [--batch-size <count>]
+ *   node scripts/release-notes-fragments.mjs apply-cleanup --plan .release-fragment-cleanup/plan.json [--apply]
+ *   node scripts/release-notes-fragments.mjs verify-retention
  *
  * Dependencies: Node built-ins + the `gh` CLI already present on
  * GitHub-hosted runners. No npm dependencies.
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	opendirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -36,6 +51,8 @@ import { fileURLToPath } from 'node:url';
 export const MARKER_START = '<!-- custom-release-notes:start -->';
 export const MARKER_END = '<!-- custom-release-notes:end -->';
 export const FRAGMENT_DIR = 'docs/releases/pending';
+export const HISTORICAL_REPLAY_STATE =
+	'docs/releases/manifests/historical-replay-state.json';
 
 // -----------------------------------------------------------------------------
 // Pure helpers — exported for unit tests. No I/O, no gh CLI.
@@ -278,6 +295,510 @@ export function upsertReleaseNotesBlock(body, combined) {
 	return `${block}\n\n${original}`;
 }
 
+const RELEASE_TAG_RE = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
+export const MAX_PENDING_FRAGMENT_SCAN = 5_000;
+export const MAX_PENDING_FRAGMENT_RETENTION = 750;
+export const MAX_RELEASE_MANIFEST_SCAN = 1_000;
+const MAX_RELEASE_MANIFEST_BYTES = 1024 * 1024;
+export const MAX_RELEASE_CANDIDATES = 1_000;
+export const MAX_FRAGMENT_ENTRIES = 5_000;
+export const MAX_FRAGMENT_BYTES = 256 * 1024;
+
+function sha256(value) {
+	const hash = createHash('sha256');
+	if (typeof value === 'string') hash.update(value, 'utf8');
+	else hash.update(value);
+	return hash.digest('hex');
+}
+
+export function decodeFragmentBytes(bytes, filePath = 'fragment') {
+	try {
+		return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+	} catch {
+		throw new Error('release fragment is not valid UTF-8: ' + filePath);
+	}
+}
+
+function countLiteral(text, literal) {
+	let count = 0;
+	let offset = 0;
+	while ((offset = text.indexOf(literal, offset)) !== -1) {
+		count += 1;
+		offset += literal.length;
+	}
+	return count;
+}
+
+function containedPendingPath(repoRoot, relativePath) {
+	const normalized = relativePath.replace(/\\/g, '/');
+	if (!filterPendingFragmentPaths([{ path: normalized }]).includes(normalized)) {
+		throw new Error('unsafe pending fragment path: ' + relativePath);
+	}
+	const pendingRoot = path.resolve(repoRoot, FRAGMENT_DIR);
+	const absolute = path.resolve(repoRoot, normalized);
+	if (!absolute.startsWith(pendingRoot + path.sep)) {
+		throw new Error('pending fragment escaped repository containment: ' + relativePath);
+	}
+	return { normalized, absolute };
+}
+
+function assertSafeDirectoryChain(repoRoot, relativeDirectory) {
+	const normalized = relativeDirectory.replace(/\\/g, '/');
+	if (
+		path.isAbsolute(relativeDirectory) ||
+		normalized.split('/').some((segment) => segment === '..')
+	) {
+		throw new Error('unsafe release directory: ' + relativeDirectory);
+	}
+	let current = path.resolve(repoRoot);
+	for (const segment of normalized.split('/').filter(Boolean)) {
+		current = path.join(current, segment);
+		if (!existsSync(current)) break;
+		const stat = lstatSync(current);
+		if (!stat.isDirectory() || stat.isSymbolicLink()) {
+			throw new Error('unsafe release directory: ' + relativeDirectory);
+		}
+	}
+}
+
+function safeRepositoryFilePath(repoRoot, relativePath) {
+	const absolute = path.resolve(repoRoot, relativePath);
+	const root = path.resolve(repoRoot);
+	if (!absolute.startsWith(root + path.sep)) {
+		throw new Error('release artifact escaped repository containment: ' + relativePath);
+	}
+	assertSafeDirectoryChain(repoRoot, path.dirname(relativePath));
+	if (existsSync(absolute)) {
+		const stat = lstatSync(absolute);
+		if (!stat.isFile() || stat.isSymbolicLink()) {
+			throw new Error('unsafe release artifact: ' + relativePath);
+		}
+	}
+	return absolute;
+}
+
+function defaultReconciliationIo(repoRoot) {
+	return {
+		async readText(relativePath) {
+			return readFileSync(safeRepositoryFilePath(repoRoot, relativePath), 'utf8');
+		},
+		async readBytes(relativePath) {
+			return readBoundedFragmentBytes(repoRoot, relativePath);
+		},
+		async writeText(relativePath, content) {
+			const absolute = safeRepositoryFilePath(repoRoot, relativePath);
+			mkdirSync(path.dirname(absolute), { recursive: true });
+			const temporary = absolute + '.tmp-' + process.pid;
+			writeFileSync(temporary, content, 'utf8');
+			renameSync(temporary, absolute);
+		},
+		async removePath(relativePath) {
+			rmSync(safeRepositoryFilePath(repoRoot, relativePath), { force: true });
+		},
+	};
+}
+
+function readBoundedFragmentBytes(repoRoot, relativePath) {
+	const absolute = safeRepositoryFilePath(repoRoot, relativePath);
+	const stat = lstatSync(absolute);
+	if (stat.size > MAX_FRAGMENT_BYTES) {
+		throw new Error('release fragment size cap exceeded: ' + relativePath);
+	}
+	return readFileSync(absolute);
+}
+
+export function readDirectoryNamesBounded(directory, limit, label) {
+	const names = [];
+	const handle = opendirSync(directory);
+	try {
+		for (;;) {
+			const entry = handle.readSync();
+			if (entry === null) break;
+			names.push(entry.name);
+			if (names.length > limit) {
+				throw new Error(
+					label + ' hard scan cap exceeded: more than ' + limit,
+				);
+			}
+		}
+	} finally {
+		handle.closeSync();
+	}
+	return names;
+}
+
+function listPendingFragmentState(repoRoot) {
+	const pendingRoot = path.resolve(repoRoot, FRAGMENT_DIR);
+	if (!existsSync(pendingRoot)) return [];
+	assertSafeDirectoryChain(repoRoot, FRAGMENT_DIR);
+	const names = readDirectoryNamesBounded(
+		pendingRoot,
+		MAX_PENDING_FRAGMENT_SCAN,
+		'pending fragment',
+	);
+	return names
+		.filter((name) => name.toLowerCase().endsWith('.md'))
+		.sort()
+		.map((name) => {
+			const relativePath = FRAGMENT_DIR + '/' + name;
+			const { absolute } = containedPendingPath(repoRoot, relativePath);
+			const stat = lstatSync(absolute);
+			if (stat.isFile() && !stat.isSymbolicLink() && stat.size > MAX_FRAGMENT_BYTES) {
+				throw new Error('release fragment size cap exceeded: ' + relativePath);
+			}
+			return {
+				relativePath,
+				absolute,
+				regular: stat.isFile() && !stat.isSymbolicLink(),
+			};
+		});
+}
+
+export function auditFragmentRetention(
+	repoRoot,
+	maxPendingFragments = MAX_PENDING_FRAGMENT_RETENTION,
+) {
+	const pending = listPendingFragmentState(repoRoot);
+	const manifestsRoot = path.resolve(repoRoot, 'docs/releases/manifests');
+	const consumedHashesByPath = new Map();
+	if (existsSync(manifestsRoot)) {
+		assertSafeDirectoryChain(repoRoot, 'docs/releases/manifests');
+		const names = readDirectoryNamesBounded(
+			manifestsRoot,
+			MAX_RELEASE_MANIFEST_SCAN,
+			'release manifest',
+		)
+			.filter(
+				(name) =>
+					name !== path.basename(HISTORICAL_REPLAY_STATE) &&
+					name.toLowerCase().endsWith('.json'),
+			)
+			.sort();
+		for (const name of names) {
+			const absolute = path.resolve(manifestsRoot, name);
+			const stat = lstatSync(absolute);
+			if (
+				!stat.isFile() ||
+				stat.isSymbolicLink() ||
+				stat.size > MAX_RELEASE_MANIFEST_BYTES
+			) {
+				throw new Error('unsafe or oversized release manifest: ' + name);
+			}
+			const manifest = JSON.parse(readFileSync(absolute, 'utf8'));
+			if (manifest?.schemaVersion !== 1 || !Array.isArray(manifest.fragments)) {
+				throw new Error('malformed release manifest: ' + name);
+			}
+			if (manifest.fragments.length > MAX_FRAGMENT_ENTRIES) {
+				throw new Error('release manifest fragment entry cap exceeded: ' + name);
+			}
+			for (const fragment of manifest.fragments) {
+				const { normalized } = containedPendingPath(repoRoot, fragment?.path ?? '');
+				if (!/^[0-9a-f]{64}$/.test(fragment?.sha256 ?? '')) {
+					throw new Error('malformed fragment hash in release manifest: ' + name);
+				}
+				const hashes = consumedHashesByPath.get(normalized) ?? new Set();
+				hashes.add(fragment.sha256);
+				consumedHashesByPath.set(normalized, hashes);
+			}
+		}
+	}
+	const consumedPending = [];
+	for (const item of pending) {
+		if (!item.regular) continue;
+		const hashes = consumedHashesByPath.get(item.relativePath);
+		if (hashes && hashes.has(sha256(readBoundedFragmentBytes(repoRoot, item.relativePath)))) {
+			consumedPending.push(item.relativePath);
+		}
+	}
+	let activeHistoricalReplay = false;
+	const replayStatePath = safeRepositoryFilePath(repoRoot, HISTORICAL_REPLAY_STATE);
+	if (existsSync(replayStatePath)) {
+		const stateStat = lstatSync(replayStatePath);
+		if (stateStat.size > MAX_CLEANUP_PLAN_BYTES) {
+			throw new Error('historical replay state size cap exceeded');
+		}
+		const state = JSON.parse(readFileSync(replayStatePath, 'utf8'));
+		if (state?.schemaVersion !== 1 || typeof state.tagName !== 'string') {
+			throw new Error('historical replay state is malformed');
+		}
+		const authorization = validateHistoricalReplayProof(state.replay, state.tagName);
+		if (!authorization?.hasMoreWork) {
+			throw new Error('historical replay state does not authorize more work');
+		}
+		activeHistoricalReplay = true;
+	}
+	const countViolation =
+		pending.length > maxPendingFragments && !activeHistoricalReplay;
+	return {
+		pending: pending.length,
+		limit: maxPendingFragments,
+		consumedPending,
+		violation: countViolation || consumedPending.length > 0,
+		diagnostics: [
+			'retention: ' +
+				pending.length +
+				' pending fragment(s), limit ' +
+				maxPendingFragments,
+			...(consumedPending.length > 0
+				? [
+						'retention: ' +
+							consumedPending.length +
+							' byte-identical consumed fragment(s) remain pending',
+					]
+				: []),
+			...(activeHistoricalReplay
+				? ['retention: authorized historical replay remains in progress']
+				: []),
+		],
+	};
+}
+
+async function readOptional(io, relativePath) {
+	try {
+		return await io.readText(relativePath);
+	} catch (error) {
+		if (error?.code === 'ENOENT') return null;
+		throw error;
+	}
+}
+
+/**
+ * Reconcile exact tagged-release provenance with a current repository checkout.
+ * The caller proves remote/local/HEAD tag equality and passes the canonical
+ * commit value. This boundary is dry-run unless dryRun is explicitly false.
+ */
+export async function reconcileTaggedRelease(options) {
+	const {
+		repoRoot,
+		tagName,
+		release,
+		tagCommit,
+		entries = [],
+		dryRun = true,
+		historicalReplay = null,
+		maxPendingFragments = MAX_PENDING_FRAGMENT_RETENTION,
+		log = () => {},
+	} = options ?? {};
+	if (typeof repoRoot !== 'string' || repoRoot.length === 0) {
+		throw new Error('repoRoot is required');
+	}
+	const match = RELEASE_TAG_RE.exec(tagName ?? '');
+	if (!match) throw new Error('invalid release tag: ' + (tagName ?? ''));
+	if (!release || release.tagName !== tagName) {
+		throw new Error(
+			'release tag mismatch: requested ' +
+				tagName +
+				', received ' +
+				(release?.tagName ?? 'missing'),
+		);
+	}
+	if (typeof tagCommit !== 'string' || tagCommit.length === 0) {
+		throw new Error('canonical tag commit is required');
+	}
+	if (typeof release.body !== 'string') throw new Error('release body is required');
+	if (!Array.isArray(entries)) throw new Error('entries must be an array');
+	if (entries.length > MAX_FRAGMENT_ENTRIES) {
+		throw new Error('consumed fragment entry cap exceeded');
+	}
+	if (!Number.isInteger(maxPendingFragments) || maxPendingFragments < 0) {
+		throw new Error('maxPendingFragments must be a non-negative integer');
+	}
+	const replayAuthorization = validateHistoricalReplayProof(
+		historicalReplay,
+		tagName,
+	);
+
+	const io = { ...defaultReconciliationIo(repoRoot), ...(options.io ?? {}) };
+	const pending = listPendingFragmentState(repoRoot);
+	const entryByPath = new Map();
+	for (const entry of entries) {
+		if (
+			!entry ||
+			!Number.isInteger(entry.prNumber) ||
+			typeof entry.filePath !== 'string' ||
+			typeof entry.content !== 'string'
+		) {
+			throw new Error('malformed consumed fragment entry');
+		}
+		if (Buffer.byteLength(entry.content, 'utf8') > MAX_FRAGMENT_BYTES) {
+			throw new Error('consumed fragment content size cap exceeded: ' + entry.filePath);
+		}
+		const { normalized } = containedPendingPath(repoRoot, entry.filePath);
+		const contentSha256 = entry.contentSha256 ?? sha256(entry.content);
+		if (!/^[0-9a-f]{64}$/.test(contentSha256)) {
+			throw new Error('malformed consumed fragment hash: ' + normalized);
+		}
+		if (contentSha256 !== sha256(entry.content)) {
+			throw new Error(
+				'consumed fragment hash does not match UTF-8 content: ' + normalized,
+			);
+		}
+		const previous = entryByPath.get(normalized);
+		if (
+			previous &&
+			(previous.content !== entry.content ||
+				previous.contentSha256 !== contentSha256)
+		) {
+			throw new Error('ambiguous consumed fragment content: ' + normalized);
+		}
+		if (!previous) {
+			entryByPath.set(normalized, {
+				...entry,
+				filePath: normalized,
+				contentSha256,
+			});
+		}
+	}
+
+	const eligible = new Set();
+	const retained = [];
+	for (const item of pending) {
+		const consumed = entryByPath.get(item.relativePath);
+		if (!consumed || !item.regular) {
+			retained.push(item.relativePath);
+			continue;
+		}
+		const current = await io.readBytes(item.relativePath);
+		if (sha256(current) === consumed.contentSha256) eligible.add(item.relativePath);
+		else retained.push(item.relativePath);
+	}
+	const projectedPending = pending.length - eligible.size;
+	const retention = {
+		limit: maxPendingFragments,
+		current: pending.length,
+		projected: projectedPending,
+		violation: projectedPending > maxPendingFragments,
+		authorizedIntermediate:
+			projectedPending > maxPendingFragments &&
+			replayAuthorization?.hasMoreWork === true,
+	};
+	const diagnostics = [
+		'retention: projected ' +
+			projectedPending +
+			' pending fragment(s), limit ' +
+			maxPendingFragments,
+	];
+	if (retention.violation && !retention.authorizedIntermediate) {
+		diagnostics.push(
+			'retention policy violation: a non-final historical replay batch is required',
+		);
+		for (const message of diagnostics) log(message);
+		return {
+			tagName,
+			version: match[1],
+			consumedFragments: [...entryByPath.keys()],
+			deleted: [],
+			retained,
+			diagnostics,
+			retention,
+		};
+	}
+
+	const markerStarts = countLiteral(release.body, MARKER_START);
+	const markerEnds = countLiteral(release.body, MARKER_END);
+	const markerShapeValid =
+		entryByPath.size === 0
+			? markerStarts === markerEnds && markerStarts <= 1
+			: markerStarts === 1 && markerEnds === 1;
+	if (!markerShapeValid) {
+		throw new Error('release body has an invalid custom release-notes block');
+	}
+	if (
+		entryByPath.size > 0 &&
+		upsertReleaseNotesBlock(release.body, combineFragments(entries)) !== release.body
+	) {
+		throw new Error('published custom release-notes block does not match consumed fragments');
+	}
+
+	const version = match[1];
+	const historyPath = 'docs/releases/v' + version + '.md';
+	const manifestPath = 'docs/releases/manifests/v' + version + '.json';
+	const manifest = {
+		schemaVersion: 1,
+		tag: tagName,
+		tagCommit,
+		targetCommitish: release.targetCommitish ?? null,
+		releaseBodySha256: sha256(release.body),
+		fragments: [...entryByPath.values()]
+			.sort((a, b) => a.filePath.localeCompare(b.filePath))
+			.map((entry) => ({
+				prNumber: entry.prNumber,
+				path: entry.filePath,
+				sha256: entry.contentSha256,
+			})),
+	};
+	const manifestText = JSON.stringify(manifest, null, 2) + '\n';
+	for (const [relativePath, expected] of [
+		[historyPath, release.body],
+		[manifestPath, manifestText],
+	]) {
+		const current = await readOptional(io, relativePath);
+		if (current !== null && current !== expected) {
+			throw new Error('refusing to overwrite conflicting release history: ' + relativePath);
+		}
+	}
+
+	const deleted = [];
+	if (!dryRun) {
+		if ((await readOptional(io, historyPath)) === null) {
+			await io.writeText(historyPath, release.body);
+		}
+		if ((await readOptional(io, manifestPath)) === null) {
+			await io.writeText(manifestPath, manifestText);
+		}
+		for (const relativePath of [...eligible].sort()) {
+			const { absolute } = containedPendingPath(repoRoot, relativePath);
+			let stat;
+			try {
+				stat = lstatSync(absolute);
+			} catch (error) {
+				if (error?.code === 'ENOENT') continue;
+				throw error;
+			}
+			const consumed = entryByPath.get(relativePath);
+			if (
+				!stat.isFile() ||
+				stat.isSymbolicLink() ||
+				sha256(await io.readBytes(relativePath)) !== consumed.contentSha256
+			) {
+				retained.push(relativePath);
+				diagnostics.push(
+					'retention: fragment changed during apply and was retained: ' +
+						relativePath,
+				);
+				continue;
+			}
+			await io.removePath(relativePath);
+			deleted.push(relativePath);
+			log('deleted consumed fragment ' + relativePath);
+		}
+		if (replayAuthorization?.hasMoreWork) {
+			await io.writeText(
+				HISTORICAL_REPLAY_STATE,
+				JSON.stringify(
+					{ schemaVersion: 1, tagName, replay: historicalReplay },
+					null,
+					2,
+				) + '\n',
+			);
+		} else if (historicalReplay !== null) {
+			await io.removePath(HISTORICAL_REPLAY_STATE);
+		}
+	}
+	for (const message of diagnostics) log(message);
+	return {
+		tagName,
+		version,
+		historyPath,
+		manifestPath,
+		consumedFragments: [...entryByPath.keys()],
+		deleted,
+		retained,
+		diagnostics,
+		retention,
+	};
+}
+
 /**
  * Merge two arrays of PR candidate numbers into a single deduplicated array,
  * preserving first-seen order across both sources.
@@ -314,24 +835,49 @@ export function mergeCandidateLists(direct, shaResolved) {
 // the 30-second cap is generous but prevents an indefinite hang from
 // stalling the workflow run.
 const GH_TIMEOUT_MS = 30_000;
+const GIT_TIMEOUT_MS = 15_000;
+const SUBPROCESS_MAX_BUFFER = 16 * 1024 * 1024;
 
-function ghJson(args) {
+function ghJson(args, cwd = resolveRepoRoot()) {
 	const raw = execFileSync('gh', args, {
+		cwd,
 		encoding: 'utf8',
-		maxBuffer: 16 * 1024 * 1024,
+		maxBuffer: SUBPROCESS_MAX_BUFFER,
 		timeout: GH_TIMEOUT_MS,
-		stdin: 'ignore',
+		stdio: ['ignore', 'pipe', 'pipe'],
 	});
 	return JSON.parse(raw);
 }
 
-function ghText(args) {
+function ghText(args, cwd = resolveRepoRoot()) {
 	return execFileSync('gh', args, {
+		cwd,
 		encoding: 'utf8',
-		maxBuffer: 16 * 1024 * 1024,
+		maxBuffer: SUBPROCESS_MAX_BUFFER,
 		timeout: GH_TIMEOUT_MS,
-		stdin: 'ignore',
+		stdio: ['ignore', 'pipe', 'pipe'],
 	});
+}
+
+function ghInput(args, input, cwd = resolveRepoRoot()) {
+	return execFileSync('gh', args, {
+		cwd,
+		input,
+		encoding: 'utf8',
+		maxBuffer: SUBPROCESS_MAX_BUFFER,
+		timeout: GH_TIMEOUT_MS,
+		stdio: ['pipe', 'pipe', 'pipe'],
+	});
+}
+
+function gitText(args, cwd = resolveRepoRoot()) {
+	return execFileSync('git', args, {
+		cwd,
+		encoding: 'utf8',
+		maxBuffer: SUBPROCESS_MAX_BUFFER,
+		timeout: GIT_TIMEOUT_MS,
+		stdio: ['ignore', 'pipe', 'pipe'],
+	}).trim();
 }
 
 function tryGhJson(args) {
@@ -474,9 +1020,15 @@ const MAX_FALLBACK_CANDIDATES = 50;
 
 export function resolveAllCandidates(strippedBody, log) {
 	const directCandidates = extractCandidatePrNumbers(strippedBody);
+	if (directCandidates.length > MAX_RELEASE_CANDIDATES) {
+		throw new Error('release candidate PR cap exceeded');
+	}
 	log(`found ${directCandidates.length} direct PR ref(s) in body`);
 
 	const commitShas = extractCommitShasFromBody(strippedBody);
+	if (commitShas.length > MAX_RELEASE_CANDIDATES) {
+		throw new Error('release commit SHA candidate cap exceeded');
+	}
 	log(`found ${commitShas.length} commit SHA(s) in body`);
 	let shaResolved = [];
 	if (commitShas.length > 0) {
@@ -498,10 +1050,22 @@ export function resolveAllCandidates(strippedBody, log) {
  * the repo root in CI; we resolve relative to the repo root computed from
  * this script's own location for local invocations.
  */
-function readFragmentFromWorkspace(repoRoot, filePath) {
-	const abs = path.resolve(repoRoot, filePath);
+export function readFragmentFromWorkspace(repoRoot, filePath) {
+	assertSafeDirectoryChain(repoRoot, FRAGMENT_DIR);
+	const { absolute: abs } = containedPendingPath(repoRoot, filePath);
 	if (!existsSync(abs)) return null;
-	return readFileSync(abs, 'utf8');
+	const stat = lstatSync(abs);
+	if (!stat.isFile() || stat.isSymbolicLink()) {
+		throw new Error('unsafe release fragment: ' + filePath);
+	}
+	if (stat.size > MAX_FRAGMENT_BYTES) {
+		throw new Error('release fragment size cap exceeded: ' + filePath);
+	}
+	const bytes = readBoundedFragmentBytes(repoRoot, filePath);
+	return {
+		content: decodeFragmentBytes(bytes, filePath),
+		contentSha256: sha256(bytes),
+	};
 }
 
 /**
@@ -612,6 +1176,9 @@ export async function verifyBlockSurvived(opts) {
  * `combineFragments`.
  */
 function collectFragmentsForPrs(candidates, repoRoot, log) {
+	if (!Array.isArray(candidates) || candidates.length > MAX_RELEASE_CANDIDATES) {
+		throw new Error('release candidate PR cap exceeded');
+	}
 	const entries = [];
 	const seenPaths = new Set();
 	for (const num of candidates) {
@@ -621,16 +1188,22 @@ function collectFragmentsForPrs(candidates, repoRoot, log) {
 			continue;
 		}
 		const fragPaths = filterPendingFragmentPaths(pr.files);
+		if (fragPaths.length > MAX_FRAGMENT_ENTRIES) {
+			throw new Error('release fragment entry cap exceeded for #' + num);
+		}
 		if (fragPaths.length === 0) continue;
 		for (const fp of fragPaths) {
 			if (seenPaths.has(fp)) continue;
 			seenPaths.add(fp);
-			const content = readFragmentFromWorkspace(repoRoot, fp);
-			if (content === null) {
+			const fragment = readFragmentFromWorkspace(repoRoot, fp);
+			if (fragment === null) {
 				log(`fragment ${fp} referenced by #${num} not found in workspace`);
 				continue;
 			}
-			entries.push({ prNumber: num, filePath: fp, content });
+			entries.push({ prNumber: num, filePath: fp, ...fragment });
+			if (entries.length > MAX_FRAGMENT_ENTRIES) {
+				throw new Error('release fragment entry cap exceeded');
+			}
 		}
 	}
 	return entries;
@@ -755,11 +1328,7 @@ async function modeUpdatePr(log) {
 		return res.ok ? (res.value?.body ?? '') : '';
 	};
 	const applyEdit = async (newBody) => {
-		execFileSync(
-			'gh',
-			['pr', 'edit', String(releasePr.number), '--body-file', '-'],
-			{ input: newBody, encoding: 'utf8', timeout: GH_TIMEOUT_MS },
-		);
+		ghInput(['pr', 'edit', String(releasePr.number), '--body-file', '-'], newBody);
 	};
 
 	await verifyBlockSurvived({
@@ -832,13 +1401,429 @@ async function modeUpdateRelease(log) {
 		log(`Release ${tagName} body already up to date — exiting 0`);
 		return 0;
 	}
-	execFileSync('gh', ['release', 'edit', tagName, '--notes-file', '-'], {
-		input: newBody,
-		encoding: 'utf8',
-		timeout: GH_TIMEOUT_MS,
-	});
+	ghInput(['release', 'edit', tagName, '--notes-file', '-'], newBody);
 	log(`Updated release ${tagName} with ${entries.length} fragment(s)`);
 	return 0;
+}
+
+const MAX_TAG_PEEL_DEPTH = 5;
+const MAX_CLEANUP_PLAN_BYTES = 16 * 1024 * 1024;
+export const MAX_HISTORICAL_TAGS = 1_000;
+export const MAX_HISTORICAL_BATCH_SIZE = 25;
+
+function parseModeFlags(args) {
+	const flags = {
+		apply: false,
+		tag: null,
+		out: null,
+		plan: null,
+		tagsFile: null,
+		cursor: null,
+		batchSize: null,
+	};
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === '--apply') {
+			flags.apply = true;
+			continue;
+		}
+		if (
+			arg === '--tag' ||
+			arg === '--out' ||
+			arg === '--plan' ||
+			arg === '--tags-file' ||
+			arg === '--cursor' ||
+			arg === '--historical-batch' ||
+			arg === '--batch-size'
+		) {
+			const value = args[index + 1];
+			if (!value || value.startsWith('--')) {
+				throw new Error(arg + ' requires a value');
+			}
+			const key = arg
+				.slice(2)
+				.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+			flags[key] = value;
+			index += 1;
+			continue;
+		}
+		throw new Error('unknown option: ' + arg);
+	}
+	return flags;
+}
+
+/**
+ * Select one bounded, resumable historical replay batch. The caller owns the
+ * oldest-to-newest tag ordering; cursors bind an offset to that list's digest.
+ * A non-null nextCursor is the explicit signal that retention may remain above
+ * policy until another batch is processed.
+ */
+export function createHistoricalReplayBatch(
+	tags,
+	cursor = '0',
+	batchSize = MAX_HISTORICAL_BATCH_SIZE,
+) {
+	if (!Array.isArray(tags) || tags.length === 0) {
+		throw new Error('historical tags must be a non-empty array');
+	}
+	if (tags.length > MAX_HISTORICAL_TAGS) {
+		throw new Error(
+			'historical tag hard cap exceeded: ' +
+				tags.length +
+				' > ' +
+				MAX_HISTORICAL_TAGS,
+		);
+	}
+	if (
+		!Number.isInteger(batchSize) ||
+		batchSize < 1 ||
+		batchSize > MAX_HISTORICAL_BATCH_SIZE
+	) {
+		throw new Error(
+			'historical batch size must be between 1 and ' +
+				MAX_HISTORICAL_BATCH_SIZE,
+		);
+	}
+	const seen = new Set();
+	for (const tag of tags) {
+		if (typeof tag !== 'string' || !RELEASE_TAG_RE.test(tag)) {
+			throw new Error('invalid historical release tag: ' + String(tag));
+		}
+		if (seen.has(tag)) throw new Error('duplicate historical release tag: ' + tag);
+		seen.add(tag);
+	}
+	const tagListDigest = sha256(JSON.stringify(tags));
+	let start = 0;
+	if (cursor !== '0') {
+		const match = /^([0-9a-f]{64}):(0|[1-9]\d*)$/.exec(cursor ?? '');
+		if (!match) {
+			throw new Error('historical cursor is malformed');
+		}
+		if (match[1] !== tagListDigest) {
+			throw new Error('historical cursor does not match the ordered tag list');
+		}
+		start = Number(match[2]);
+	}
+	if (!Number.isSafeInteger(start) || start > tags.length) {
+		throw new Error('historical cursor is outside the tag list');
+	}
+	const end = Math.min(start + batchSize, tags.length);
+	const boundCursor = tagListDigest + ':' + start;
+	return {
+		schemaVersion: 1,
+		cursor: boundCursor,
+		tagListDigest,
+		orderedTags: [...tags],
+		tags: tags.slice(start, end),
+		nextCursor: end < tags.length ? tagListDigest + ':' + end : null,
+		complete: end === tags.length,
+	};
+}
+
+/**
+ * Validate that retention authorization is a coherent batch emitted by
+ * createHistoricalReplayBatch, not a standalone cursor-shaped string.
+ */
+export function validateHistoricalReplayProof(replay, tagName) {
+	if (replay === null || replay === undefined) return null;
+	if (
+		replay.schemaVersion !== 1 ||
+		!Array.isArray(replay.tags) ||
+		replay.tags.length === 0 ||
+		replay.tags.length > MAX_HISTORICAL_BATCH_SIZE ||
+		!replay.tags.includes(tagName) ||
+		!Array.isArray(replay.orderedTags) ||
+		replay.orderedTags.length === 0 ||
+		replay.orderedTags.length > MAX_HISTORICAL_TAGS ||
+		new Set(replay.orderedTags).size !== replay.orderedTags.length ||
+		replay.orderedTags.some(
+			(tag) => typeof tag !== 'string' || !RELEASE_TAG_RE.test(tag),
+		) ||
+		typeof replay.complete !== 'boolean' ||
+		!/^[0-9a-f]{64}$/.test(replay.tagListDigest ?? '')
+	) {
+		throw new Error('historical replay proof is malformed');
+	}
+	const cursorMatch = /^([0-9a-f]{64}):(0|[1-9]\d*)$/.exec(
+		replay.cursor ?? '',
+	);
+	const nextMatch =
+		replay.nextCursor === null
+			? null
+			: /^([0-9a-f]{64}):(0|[1-9]\d*)$/.exec(replay.nextCursor ?? '');
+	const start = Number(cursorMatch?.[2]);
+	const end = start + replay.tags.length;
+	if (
+		!cursorMatch ||
+		cursorMatch[1] !== replay.tagListDigest ||
+		sha256(JSON.stringify(replay.orderedTags)) !== replay.tagListDigest ||
+		(replay.complete
+			? replay.nextCursor !== null || end !== replay.orderedTags.length
+			: !nextMatch ||
+				nextMatch[1] !== replay.tagListDigest ||
+				Number(nextMatch[2]) !== end ||
+				end >= replay.orderedTags.length) ||
+		JSON.stringify(replay.tags) !==
+			JSON.stringify(replay.orderedTags.slice(start, end))
+	) {
+		throw new Error('historical replay proof is not a contiguous batch');
+	}
+	const tagIndex = replay.tags.indexOf(tagName);
+	return {
+		nextCursor: replay.nextCursor,
+		hasMoreWork: tagIndex < replay.tags.length - 1 || replay.nextCursor !== null,
+	};
+}
+
+function requireRepoSlug() {
+	const repoSlug = process.env.GITHUB_REPOSITORY;
+	if (!repoSlug || !/^[^/\s]+\/[^/\s]+$/.test(repoSlug)) {
+		throw new Error('GITHUB_REPOSITORY must be set to owner/repository');
+	}
+	return repoSlug;
+}
+
+export function peelRemoteTagObject(repoSlug, tagName, getJson = ghJson) {
+	let object = getJson([
+		'api',
+		'repos/' + repoSlug + '/git/ref/tags/' + encodeURIComponent(tagName),
+	]).object;
+	for (let depth = 0; depth <= MAX_TAG_PEEL_DEPTH; depth += 1) {
+		if (!object || typeof object.sha !== 'string') {
+			throw new Error('remote tag object is malformed');
+		}
+		if (object.type === 'commit') return object.sha;
+		if (object.type !== 'tag' || depth === MAX_TAG_PEEL_DEPTH) {
+			throw new Error('remote tag did not peel to a commit within the depth cap');
+		}
+		object = getJson(['api', 'repos/' + repoSlug + '/git/tags/' + object.sha]).object;
+	}
+	throw new Error('remote tag peel failed');
+}
+
+export function validateExactTagProof(remoteCommit, localCommit, headCommit) {
+	if (
+		typeof remoteCommit !== 'string' ||
+		remoteCommit.length === 0 ||
+		remoteCommit !== localCommit ||
+		localCommit !== headCommit
+	) {
+		throw new Error(
+			'exact tag proof failed: remote=' +
+				(remoteCommit ?? 'missing') +
+				' local=' +
+				(localCommit ?? 'missing') +
+				' HEAD=' +
+				(headCommit ?? 'missing'),
+		);
+	}
+	return remoteCommit;
+}
+
+async function resolveReleaseEntries(tagName, releaseBody, repoRoot, log) {
+	const strippedBody = stripCustomReleaseNotesBlock(releaseBody);
+	let candidates = resolveAllCandidates(strippedBody, log);
+	if (candidates.length === 0) {
+		const decision = await decideChangelogFallback({
+			tagName,
+			repoRoot,
+			readChangelog: (filePath) => readFileSync(filePath, 'utf8'),
+			statChangelog: (filePath) => statSync(filePath),
+			resolveCandidates: (section, nestedLog) =>
+				resolveAllCandidates(section, nestedLog),
+			log,
+		});
+		if (decision.exitCode !== 0) {
+			throw new Error('release candidate fallback failed for ' + tagName);
+		}
+		candidates = decision.candidates;
+	}
+	return collectFragmentsForPrs(candidates, repoRoot, log);
+}
+
+function writeAtomicJson(filePath, value) {
+	const absolute = path.resolve(filePath);
+	mkdirSync(path.dirname(absolute), { recursive: true });
+	const temporary = absolute + '.tmp-' + process.pid;
+	const content = JSON.stringify(value, null, 2) + '\n';
+	if (Buffer.byteLength(content, 'utf8') > MAX_CLEANUP_PLAN_BYTES) {
+		throw new Error('cleanup plan exceeds byte cap');
+	}
+	writeFileSync(temporary, content, 'utf8');
+	renameSync(temporary, absolute);
+}
+
+export function resolveCleanupPlanPath(repoRoot, candidate) {
+	if (typeof candidate !== 'string' || candidate.length === 0) {
+		throw new Error('cleanup plan path is required');
+	}
+	const normalized = candidate.replace(/\\/g, '/');
+	if (
+		path.isAbsolute(candidate) ||
+		normalized.split('/').some((segment) => segment === '..') ||
+		!normalized.startsWith('.release-fragment-cleanup/') ||
+		normalized.slice('.release-fragment-cleanup/'.length).includes('/') ||
+		!normalized.toLowerCase().endsWith('.json')
+	) {
+		throw new Error(
+			'cleanup plan path must be a JSON file under .release-fragment-cleanup/',
+		);
+	}
+	const plansRoot = path.resolve(repoRoot, '.release-fragment-cleanup');
+	if (existsSync(plansRoot) && lstatSync(plansRoot).isSymbolicLink()) {
+		throw new Error('cleanup plan directory must not be a symlink');
+	}
+	const absolute = path.resolve(repoRoot, normalized);
+	if (!absolute.startsWith(plansRoot + path.sep)) {
+		throw new Error('cleanup plan path escaped repository containment');
+	}
+	if (existsSync(absolute)) {
+		const stat = lstatSync(absolute);
+		if (!stat.isFile() || stat.isSymbolicLink()) {
+			throw new Error('cleanup plan path must be a regular non-symlink file');
+		}
+	}
+	return absolute;
+}
+
+async function modePrepareCleanup(log, args) {
+	const flags = parseModeFlags(args);
+	const tagName = flags.tag ?? process.env.TAG_NAME;
+	if (!tagName) throw new Error('prepare-cleanup requires --tag or TAG_NAME');
+	const repoRoot = resolveRepoRoot();
+	const repoSlug = requireRepoSlug();
+	const release = ghJson([
+		'release',
+		'view',
+		tagName,
+		'--json',
+		'body,tagName,targetCommitish',
+	]);
+	if (release.tagName !== tagName) {
+		throw new Error('release tag mismatch for ' + tagName);
+	}
+	const remoteCommit = peelRemoteTagObject(repoSlug, tagName);
+	const localCommit = gitText(['rev-parse', tagName + '^{commit}'], repoRoot);
+	const headCommit = gitText(['rev-parse', 'HEAD'], repoRoot);
+	validateExactTagProof(remoteCommit, localCommit, headCommit);
+	const entries = await resolveReleaseEntries(
+		tagName,
+		release.body ?? '',
+		repoRoot,
+		log,
+	);
+	let historicalReplay = null;
+	if (flags.historicalBatch) {
+		const batchPath = resolveCleanupPlanPath(repoRoot, flags.historicalBatch);
+		const stat = statSync(batchPath);
+		if (!stat.isFile() || stat.size > MAX_CLEANUP_PLAN_BYTES) {
+			throw new Error('historical batch proof is not a bounded regular file');
+		}
+		historicalReplay = JSON.parse(readFileSync(batchPath, 'utf8'));
+		validateHistoricalReplayProof(historicalReplay, tagName);
+	}
+	const plan = {
+		schemaVersion: 1,
+		tagName,
+		tagCommit: remoteCommit,
+		release: {
+			tagName: release.tagName,
+			targetCommitish: release.targetCommitish ?? null,
+			body: release.body ?? '',
+		},
+		entries,
+		historicalReplay,
+	};
+	log(
+		'prepared cleanup plan for ' +
+			tagName +
+			' with ' +
+			entries.length +
+			' fragment(s)' +
+			(flags.apply ? '' : ' (dry run)'),
+	);
+	if (flags.apply) {
+		if (!flags.out) throw new Error('--apply requires --out for prepare-cleanup');
+		writeAtomicJson(resolveCleanupPlanPath(repoRoot, flags.out), plan);
+		log('wrote cleanup plan to ' + flags.out);
+	}
+	return 0;
+}
+
+function modePrepareHistoricalBatch(log, args) {
+	const flags = parseModeFlags(args);
+	if (!flags.tagsFile) {
+		throw new Error('prepare-historical-batch requires --tags-file');
+	}
+	const repoRoot = resolveRepoRoot();
+	const tagsPath = resolveCleanupPlanPath(repoRoot, flags.tagsFile);
+	const stat = statSync(tagsPath);
+	if (!stat.isFile() || stat.size > MAX_CLEANUP_PLAN_BYTES) {
+		throw new Error('historical tags file is not a bounded regular file');
+	}
+	const input = JSON.parse(readFileSync(tagsPath, 'utf8'));
+	if (input?.schemaVersion !== 1 || !Array.isArray(input.tags)) {
+		throw new Error('historical tags file must use schemaVersion 1 with tags');
+	}
+	const rawBatchSize = flags.batchSize ?? String(MAX_HISTORICAL_BATCH_SIZE);
+	if (!/^[1-9]\d*$/.test(rawBatchSize)) {
+		throw new Error('historical batch size must be a positive integer');
+	}
+	const result = createHistoricalReplayBatch(
+		input.tags,
+		flags.cursor ?? '0',
+		Number(rawBatchSize),
+	);
+	process.stderr.write(
+		'prepared historical batch at cursor ' +
+			result.cursor +
+			(result.nextCursor === null
+				? ' (final batch)'
+				: '; resume with --cursor ' + result.nextCursor) +
+			'\n',
+	);
+	process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+	return 0;
+}
+
+function readCleanupPlan(repoRoot, planPath) {
+	const absolute = resolveCleanupPlanPath(repoRoot, planPath);
+	const stat = statSync(absolute);
+	if (!stat.isFile() || stat.size > MAX_CLEANUP_PLAN_BYTES) {
+		throw new Error('cleanup plan is not a bounded regular file');
+	}
+	const plan = JSON.parse(readFileSync(absolute, 'utf8'));
+	if (plan?.schemaVersion !== 1) throw new Error('unsupported cleanup plan schema');
+	return plan;
+}
+
+async function modeApplyCleanup(log, args) {
+	const flags = parseModeFlags(args);
+	if (!flags.plan) throw new Error('apply-cleanup requires --plan');
+	const repoRoot = resolveRepoRoot();
+	const plan = readCleanupPlan(repoRoot, flags.plan);
+	const result = await reconcileTaggedRelease({
+		repoRoot,
+		tagName: plan.tagName,
+		release: plan.release,
+		tagCommit: plan.tagCommit,
+		entries: plan.entries,
+		historicalReplay: plan.historicalReplay ?? null,
+		dryRun: !flags.apply,
+		log,
+	});
+	process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+	return result.retention.violation && !result.retention.authorizedIntermediate
+		? 1
+		: 0;
+}
+
+function modeVerifyRetention(log, args) {
+	if (args.length > 0) throw new Error('verify-retention does not accept options');
+	const result = auditFragmentRetention(resolveRepoRoot());
+	for (const message of result.diagnostics) log(message);
+	process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+	return result.violation ? 1 : 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -855,9 +1840,17 @@ async function main() {
 			return modeUpdatePr(log);
 		case 'update-release':
 			return modeUpdateRelease(log);
+		case 'prepare-cleanup':
+			return modePrepareCleanup(log, process.argv.slice(3));
+		case 'prepare-historical-batch':
+			return modePrepareHistoricalBatch(log, process.argv.slice(3));
+		case 'apply-cleanup':
+			return modeApplyCleanup(log, process.argv.slice(3));
+		case 'verify-retention':
+			return modeVerifyRetention(log, process.argv.slice(3));
 		default:
 			process.stderr.write(
-				'Usage: release-notes-fragments.mjs <update-pr|update-release>\n',
+				'Usage: release-notes-fragments.mjs <update-pr|update-release|prepare-cleanup|prepare-historical-batch|apply-cleanup|verify-retention>\n',
 			);
 			return 2;
 	}
