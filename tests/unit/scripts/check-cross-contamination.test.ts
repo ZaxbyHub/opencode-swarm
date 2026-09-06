@@ -8,6 +8,7 @@ import {
 	lastLines,
 	PAIRS,
 	readPassCount,
+	runPair,
 } from '../../../scripts/check-cross-contamination';
 
 const REPO_ROOT = path.resolve(
@@ -62,6 +63,7 @@ describe('check-cross-contamination — pair result classification', () => {
 		});
 		expect(knownPair).toMatchObject({
 			minimumPasses: 71,
+			maximumKnownPasses: 98,
 			allowedOutcome: 'known_shared_process',
 		});
 	});
@@ -94,7 +96,7 @@ describe('check-cross-contamination — pair result classification', () => {
 		const result = evaluatePairResult(knownPair, {
 			exitCode: 1,
 			stdout: ' 71 pass\n',
-			stderr: '',
+			stderr: "ENOENT: no such file or directory, lstat '/tmp/.swarm'\n",
 		});
 		expect(result.kind).toBe('known_issue');
 		expect(result.actualPasses).toBe(71);
@@ -104,13 +106,37 @@ describe('check-cross-contamination — pair result classification', () => {
 		);
 	});
 
-	test('permits the known knowledge-pair outcome above the floor', () => {
+	test('requires the known shared-process failure signature', () => {
 		const result = evaluatePairResult(knownPair, {
 			exitCode: 1,
-			stdout: '99 pass\n',
-			stderr: '',
+			stdout: '80 pass\n',
+			stderr: 'AssertionError: unrelated failure\n',
+		});
+		expect(result.kind).toBe('regression_unexpected_failure');
+		expect(result.messages.join('\n')).toContain(
+			'did not match the known shared-process failure signature',
+		);
+	});
+
+	test('permits the known knowledge-pair outcome at its explicit ceiling', () => {
+		const result = evaluatePairResult(knownPair, {
+			exitCode: 1,
+			stdout: '98 pass\n',
+			stderr: "ENOENT: no such file or directory, lstat '/tmp/.swarm'\n",
 		});
 		expect(result.kind).toBe('known_issue');
+	});
+
+	test('fails a known knowledge-pair result above its ceiling with output evidence', () => {
+		const result = evaluatePairResult(knownPair, {
+			exitCode: 1,
+			stdout: '99 pass\nstdout evidence\n',
+			stderr: 'stderr evidence\n',
+		});
+		expect(result.kind).toBe('regression_unexpected_failure');
+		expect(result.messages.join('\n')).toContain('98-pass ceiling');
+		expect(result.messages.join('\n')).toContain('stdout evidence');
+		expect(result.messages.join('\n')).toContain('stderr evidence');
 	});
 
 	test('fails a knowledge-pair result below the floor', () => {
@@ -131,6 +157,16 @@ describe('check-cross-contamination — pair result classification', () => {
 		});
 		expect(result.kind).toBe('regression_pass_drop');
 		expect(result.actualPasses).toBe(0);
+	});
+
+	test('rejects a missing pair member before spawning the co-run', async () => {
+		const result = await runPair(REPO_ROOT, {
+			...cleanPair,
+			fileA: 'tests/unit/scripts/does-not-exist.test.ts',
+		});
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain('Cross-contamination pair file missing');
+		expect(result.stderr).toContain('does-not-exist.test.ts');
 	});
 });
 

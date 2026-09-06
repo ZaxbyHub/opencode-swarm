@@ -8,6 +8,17 @@
 - Cleaned up the cross-contamination warning language so a known baseline
   warning remains diagnostic while a newly introduced regression remains
   blocking; the policy decision is recorded alongside that distinction.
+- Removed obsolete hook-audit notices and bounded the known shared-process
+  allowance with an explicit pass-count ceiling.
+- Removed the obsolete hook-audit subsystem in full: `collectHookWarnings`,
+  `walkHookTestFiles`, `matchesHookStepGlob`, `isHookIsolationBasename`,
+  `stripGlobSuffix`, `toRepoRelativePath`, `HOOKS_ROOT_REL`,
+  `HOOK_ISOLATION_BASENAMES`, `HOOK_STEP_GLOBS`, and the
+  `coverageWarning`/`collectWarnings` injection surface. The unused shared
+  `gate-utils.walkFiles` export was removed with it. Functional coverage now
+  comes from recursive integration discovery, the existing per-file unit
+  isolation, and pair-specific `minimumPasses`/`maximumKnownPasses` semantics;
+  the archived Bash fixture remains a separate compatibility oracle.
 - Documented the C9 post-land receipt schema and the requirement for three
   receipts per stage before closure.
 

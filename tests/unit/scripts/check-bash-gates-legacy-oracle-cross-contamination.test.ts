@@ -22,12 +22,28 @@ const hasBash = (() => {
 		return false;
 	}
 })();
-const tsKnownSharedProcessWarning =
-	'::warning title=Cross-contamination known issue::Co-run of tests/unit/hooks/knowledge-reader.test.ts + tests/unit/services/skill-generator.test.ts: 71 pass meets the minimum 71-pass floor but exits non-zero. Allowed known shared-process outcome: CI runs each discovered unit file in its own process (per-file CI isolation), so this pre-existing mock leak is non-blocking.';
-const legacyKnownIssueWarning =
-	'::warning title=Cross-contamination known issue::Co-run of tests/unit/hooks/knowledge-reader.test.ts + tests/unit/services/skill-generator.test.ts: expected 99 pass, got 71 pass (known baseline: 71). Pre-existing vi.mock() leak — tracked in scripts/check-cross-contamination.sh.';
-const tsExpected = `${tsKnownSharedProcessWarning}\n\nKnown pre-existing cross-contamination present (non-blocking).\nThis shared-process-only outcome remains guarded by the minimumPasses floor in this script.`;
-const legacyExpected = `${legacyKnownIssueWarning}\nKnown pre-existing cross-contamination present (non-blocking).\nExpected passes when fixed: update known_expected in this script.`;
+function tsKnownSharedProcessWarning(actualPasses: number): string {
+	return `::warning title=Cross-contamination known issue::Co-run of tests/unit/hooks/knowledge-reader.test.ts + tests/unit/services/skill-generator.test.ts: ${actualPasses} pass meets the minimum 71-pass floor but exits non-zero. Allowed known shared-process outcome: CI runs each discovered unit file in its own process (per-file CI isolation), so this pre-existing mock leak is non-blocking.`;
+}
+
+function legacyKnownIssueWarning(actualPasses: number): string {
+	return `::warning title=Cross-contamination known issue::Co-run of tests/unit/hooks/knowledge-reader.test.ts + tests/unit/services/skill-generator.test.ts: expected 99 pass, got ${actualPasses} pass (known baseline: 71). Pre-existing vi.mock() leak — tracked in scripts/check-cross-contamination.sh.`;
+}
+
+function tsExpected(actualPasses: number): string {
+	return `${tsKnownSharedProcessWarning(actualPasses)}\n\nKnown pre-existing cross-contamination present (non-blocking).\nThis shared-process-only outcome remains guarded by its configured pass floor and ceiling in this script.`;
+}
+
+function legacyExpected(actualPasses: number): string {
+	return `${legacyKnownIssueWarning(actualPasses)}\nKnown pre-existing cross-contamination present (non-blocking).\nExpected passes when fixed: update known_expected in this script.`;
+}
+
+function readKnownPairPassCount(output: string): number {
+	const match = output.match(
+		/knowledge-reader\.test\.ts \+ tests\/unit\/services\/skill-generator\.test\.ts: (?:expected 99 pass, got )?(\d+) pass/,
+	);
+	return match ? Number(match[1]) : 0;
+}
 
 function normalizeOutput(text: string): string {
 	return text.replace(/\r\n/g, '\n').trimEnd();
@@ -70,14 +86,19 @@ describe('cross-contamination legacy-oracle compatibility', () => {
 			runCrossContamination(REPO_ROOT, {
 				runPair: (_repoRoot, pair): PairRunResult =>
 					pair.fileA.includes('knowledge-reader')
-						? { exitCode: 1, stdout: ' 71 pass\n', stderr: '' }
+						? {
+								exitCode: 1,
+								stdout: ' 71 pass\n',
+								stderr:
+									"ENOENT: no such file or directory, lstat '/tmp/.swarm'\n",
+							}
 						: { exitCode: 0, stdout: '57 pass\n', stderr: '' },
 				log,
 			}),
 		);
 
 		expect(captured.exitCode).toBe(0);
-		expect(normalizeOutput(captured.stdout)).toBe(tsExpected);
+		expect(normalizeOutput(captured.stdout)).toBe(tsExpected(71));
 	});
 
 	test('preserves the archived Bash owner golden separately when Bash is available', async () => {
@@ -96,13 +117,25 @@ describe('cross-contamination legacy-oracle compatibility', () => {
 			);
 
 			expect(tsResult.exitCode, tsResult.stderr).toBe(0);
+			const tsPasses = readKnownPairPassCount(
+				`${tsResult.stdout}\n${tsResult.stderr}`,
+			);
+			expect(tsPasses).toBeGreaterThanOrEqual(71);
+			expect(tsPasses).toBeLessThanOrEqual(98);
 			expect(normalizeOutput(tsResult.stdout), tsResult.stderr).toBe(
-				tsExpected,
+				tsExpected(tsPasses),
 			);
 			expect(normalizeOutput(tsResult.stderr)).toBe('');
 			expect(legacyResult.exitCode, legacyResult.stderr).toBe(0);
 			const normalizedLegacy = normalizeOutput(legacyResult.stdout);
-			expect(normalizedLegacy).toStartWith(legacyKnownIssueWarning);
+			const legacyPasses = readKnownPairPassCount(
+				`${legacyResult.stdout}\n${legacyResult.stderr}`,
+			);
+			expect(legacyPasses).toBeGreaterThanOrEqual(71);
+			expect(legacyPasses).toBeLessThan(99);
+			expect(normalizedLegacy).toStartWith(
+				legacyKnownIssueWarning(legacyPasses),
+			);
 			expect(normalizedLegacy).toContain(
 				'::warning title=Mock module not in isolation list::',
 			);
@@ -110,9 +143,11 @@ describe('cross-contamination legacy-oracle compatibility', () => {
 				'::notice title=Hook test file not in CI coverage::',
 			);
 			expect(normalizedLegacy).toEndWith(
-				legacyExpected.slice(legacyKnownIssueWarning.length + 1),
+				legacyExpected(legacyPasses).slice(
+					legacyKnownIssueWarning(legacyPasses).length + 1,
+				),
 			);
-			expect(normalizedLegacy).not.toBe(tsExpected);
+			expect(normalizedLegacy).not.toBe(tsExpected(tsPasses));
 			expect(normalizeOutput(legacyResult.stderr)).toBe('');
 		} finally {
 			isolatedEnv.cleanup();
