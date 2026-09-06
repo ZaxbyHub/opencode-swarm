@@ -423,6 +423,8 @@ export const MAX_PENDING_FRAGMENT_SCAN = 5_000;
 export const MAX_PENDING_FRAGMENT_RETENTION = 750;
 export const MAX_RELEASE_MANIFEST_SCAN = 1_000;
 const MAX_RELEASE_MANIFEST_BYTES = 1024 * 1024;
+export const MAX_RELEASE_MANIFEST_AUDIT_BYTES = 8 * 1024 * 1024;
+export const MAX_RELEASE_MANIFEST_AUDIT_ENTRIES = 1_000_000;
 export const MAX_RELEASE_HISTORY_BYTES = 1024 * 1024;
 export const MAX_RELEASE_CANDIDATES = 1_000;
 export const MAX_FRAGMENT_ENTRIES = 5_000;
@@ -625,6 +627,8 @@ export function auditFragmentRetention(
 	const pending = listPendingFragmentState(repoRoot);
 	const manifestsRoot = path.resolve(repoRoot, 'docs/releases/manifests');
 	const consumedHashesByPath = new Map();
+	let scannedManifestBytes = 0;
+	let scannedManifestEntries = 0;
 	if (existsSync(manifestsRoot)) {
 		assertSafeDirectoryChain(repoRoot, 'docs/releases/manifests');
 		const names = readDirectoryNamesBounded(
@@ -648,12 +652,20 @@ export function auditFragmentRetention(
 			) {
 				throw new Error('unsafe or oversized release manifest: ' + name);
 			}
+			scannedManifestBytes += stat.size;
+			if (scannedManifestBytes > MAX_RELEASE_MANIFEST_AUDIT_BYTES) {
+				throw new Error('release manifest audit byte cap exceeded');
+			}
 			const manifest = JSON.parse(readFileSync(absolute, 'utf8'));
 			if (manifest?.schemaVersion !== 1 || !Array.isArray(manifest.fragments)) {
 				throw new Error('malformed release manifest: ' + name);
 			}
 			if (manifest.fragments.length > MAX_FRAGMENT_ENTRIES) {
 				throw new Error('release manifest fragment entry cap exceeded: ' + name);
+			}
+			scannedManifestEntries += manifest.fragments.length;
+			if (scannedManifestEntries > MAX_RELEASE_MANIFEST_AUDIT_ENTRIES) {
+				throw new Error('release manifest audit entry cap exceeded');
 			}
 			for (const fragment of manifest.fragments) {
 				const { normalized } = containedPendingPath(repoRoot, fragment?.path ?? '');
@@ -1680,7 +1692,9 @@ async function modeUpdateRelease(log) {
 	const strippedBody = stripCustomReleaseNotesBlock(releaseBody);
 
 	// Extract direct PR refs and resolve commit-SHA links, then merge.
-	let allCandidates = resolveAllCandidates(strippedBody, log);
+	let allCandidates = resolveAllCandidates(strippedBody, log, {
+		requireComplete: true,
+	});
 
 	// Fallback: release-please has been observed to create releases with an
 	// EMPTY body (e.g. v7.146.1, v7.145.1). The tag workspace's CHANGELOG.md
@@ -1694,7 +1708,8 @@ async function modeUpdateRelease(log) {
 			repoRoot,
 			readChangelog: (p) => readFileSync(p, 'utf8'),
 			statChangelog: (p) => statSync(p),
-			resolveCandidates: (section, log2) => resolveAllCandidates(section, log2),
+			resolveCandidates: (section, log2) =>
+				resolveAllCandidates(section, log2, { requireComplete: true }),
 			log,
 		});
 		if (decision.exitCode !== 0) {
@@ -1706,7 +1721,10 @@ async function modeUpdateRelease(log) {
 		}
 	}
 	log(`collecting fragments for ${allCandidates.length} candidate PR(s): ${allCandidates.map((n) => `#${n}`).join(', ')}`);
-	const entries = collectFragmentsForPrs(allCandidates, repoRoot, log);
+	const entries = collectFragmentsForPrs(allCandidates, repoRoot, log, {
+		requireComplete: true,
+		verifyCandidate: verifyProvenanceCandidate,
+	});
 	if (entries.length === 0) {
 		log('No pending fragments found across referenced PRs — exiting 0');
 		return 0;
@@ -1822,6 +1840,9 @@ export function createHistoricalReplayBatch(
 	}
 	if (!Number.isSafeInteger(start) || start > tags.length) {
 		throw new Error('historical cursor is outside the tag list');
+	}
+	if (cursor !== '0' && start === tags.length) {
+		throw new Error('historical cursor points past the final batch');
 	}
 	const end = Math.min(start + batchSize, tags.length);
 	const boundCursor = tagListDigest + ':' + start;
@@ -2171,16 +2192,49 @@ function readCleanupPlan(repoRoot, planPath) {
 	return plan;
 }
 
+function refreshCleanupPlanProvenance(repoRoot, plan) {
+	const repoSlug = requireRepoSlug();
+	const remoteCommit = peelRemoteTagObject(repoSlug, plan.tagName);
+	const localCommit = gitText(['rev-parse', plan.tagName + '^{commit}'], repoRoot);
+	const headCommit = gitText(['rev-parse', 'HEAD'], repoRoot);
+	validateExactTagProof(remoteCommit, localCommit, headCommit);
+	if (remoteCommit !== plan.tagCommit) {
+		throw new Error('cleanup plan tag commit is stale: ' + plan.tagName);
+	}
+	const release = ghJson([
+		'release',
+		'view',
+		plan.tagName,
+		'--json',
+		'body,tagName,targetCommitish',
+	]);
+	if (
+		release.tagName !== plan.release.tagName ||
+		sha256(release.body ?? '') !== sha256(plan.release.body ?? '')
+	) {
+		throw new Error('cleanup plan release body is stale: ' + plan.tagName);
+	}
+	return {
+		tagCommit: remoteCommit,
+		release: {
+			tagName: release.tagName,
+			targetCommitish: release.targetCommitish ?? null,
+			body: release.body ?? '',
+		},
+	};
+}
+
 async function modeApplyCleanup(log, args) {
 	const flags = parseModeFlags(args);
 	if (!flags.plan) throw new Error('apply-cleanup requires --plan');
 	const repoRoot = resolveRepoRoot();
 	const plan = readCleanupPlan(repoRoot, flags.plan);
+	const fresh = refreshCleanupPlanProvenance(repoRoot, plan);
 	const result = await reconcileTaggedRelease({
 		repoRoot,
 		tagName: plan.tagName,
-		release: plan.release,
-		tagCommit: plan.tagCommit,
+		release: fresh.release,
+		tagCommit: fresh.tagCommit,
 		entries: plan.entries,
 		historicalReplay: plan.historicalReplay ?? null,
 		dryRun: !flags.apply,

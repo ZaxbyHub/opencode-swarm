@@ -15,5 +15,5 @@
   alongside required checks.
 - The complete exact-tag migration materializes 226 release bodies/manifests
   and removes 253 byte-identical consumed paths (one in the initial exact-tag
-  proof plus 252 in the historical backfill); 383 changed, ambiguous, or
+  proof plus 252 in the historical backfill); 384 changed, ambiguous, or
   genuinely unconsumed fragments remain visible instead of being guessed away.

@@ -115,8 +115,10 @@ async function seedCandidate(
 		sha256 = createHash('sha256').update(skillBody).digest('hex');
 	}
 
-	// Use a recent fetched_at so TTL gate passes
-	const fetchedAt = overrides.fetched_at ?? '2026-06-08T12:00:00.000Z';
+	// Keep the default fixture fresh relative to the validator's clock so the
+	// test remains valid after the repository's current date moves past 90 days.
+	const fetchedAt =
+		overrides.fetched_at ?? new Date(Date.now() - 60_000).toISOString();
 
 	return store.add({
 		source_url: 'https://example.com/skill.md',

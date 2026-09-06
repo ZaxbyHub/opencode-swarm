@@ -254,6 +254,8 @@ jobs:
             echo "Release fragment cleanup is already materialized."
             exit 0
           fi
+          workspace_changes="$(git status --porcelain)"
+          changed_paths="$(printf '%s\n' "$workspace_changes" | cut -c4-)"
 
           branch="chore/release-fragments-${TAG_NAME#v}"
           remote_sha=""
@@ -271,8 +273,8 @@ jobs:
               echo "::error::Cleanup branch parent is not in current main history: $branch"
               exit 1
             fi
-            changed_paths="$(git diff-tree --no-commit-id --name-only -r "$remote_sha")"
-            unexpected_paths="$(printf '%s\n' "$changed_paths" | awk '$0 !~ /^docs\/releases\//')"
+            branch_changed_paths="$(git diff --name-only "$parent_sha" "$remote_sha")"
+            unexpected_paths="$(printf '%s\n' "$branch_changed_paths" | awk '$0 !~ /^docs\/releases\//')"
             if [ -n "$unexpected_paths" ]; then
               echo "::error::Cleanup branch contains non-release paths: $branch"
               exit 1
@@ -330,7 +332,7 @@ jobs:
             echo "::error::Cleanup PR body violates the PR contract."
             exit 1
           fi
-          if grep -Eq '^(src/|bin/|scripts/|tests/|test/|runners/|examples/|binaries/|package\.json|bun\.lock|bunfig\.toml)' <<< "$release_changes"; then
+          if grep -Eq '^(src/|bin/|scripts/|tests/|test/|runners/|examples/|binaries/|package\.json|bun\.lock|bunfig\.toml)' <<< "$changed_paths"; then
             echo "::error::Cleanup PR unexpectedly requires a pending release fragment."
             exit 1
           fi
@@ -364,17 +366,24 @@ jobs:
 
           wait_for_dispatched_run() {
             workflow="$1"
-            for _attempt in $(seq 1 12); do
+            for _attempt in $(seq 1 120); do
               record="$(gh run list \
                 --workflow "$workflow" \
                 --branch "$branch" \
                 --event workflow_dispatch \
                 --limit 20 \
-                --json databaseId,url,headSha,createdAt \
-                --jq ".[] | select(.headSha == \"$head_sha\" and .createdAt >= \"$dispatch_after\") | [.databaseId, .url, .headSha] | @tsv")"
+                --json databaseId,url,headSha,createdAt,status,conclusion \
+                --jq ".[] | select(.headSha == \"$head_sha\" and .createdAt >= \"$dispatch_after\") | [.databaseId, .url, .headSha, .status, .conclusion] | @tsv")"
               if [ -n "$record" ]; then
-                printf '%s\n' "$record"
-                return 0
+                IFS=$'\t' read -r run_id run_url run_sha run_status run_conclusion <<< "$record"
+                if [ "$run_status" = "completed" ]; then
+                  if [ "$run_conclusion" != "success" ]; then
+                    echo "::error::$workflow run $run_id completed with conclusion $run_conclusion" >&2
+                    return 1
+                  fi
+                  printf '%s\n' "$record"
+                  return 0
+                fi
               fi
               sleep 5
             done
@@ -385,9 +394,9 @@ jobs:
           ci_record="$(wait_for_dispatched_run ci.yml)"
           standards_record="$(wait_for_dispatched_run pr-standards.yml)"
           drift_record="$(wait_for_dispatched_run drift-check.yml)"
-          IFS=$'\t' read -r ci_run_id ci_run_url ci_run_sha <<< "$ci_record"
-          IFS=$'\t' read -r standards_run_id standards_run_url standards_run_sha <<< "$standards_record"
-          IFS=$'\t' read -r drift_run_id drift_run_url drift_run_sha <<< "$drift_record"
+          IFS=$'\t' read -r ci_run_id ci_run_url ci_run_sha ci_run_status ci_run_conclusion <<< "$ci_record"
+          IFS=$'\t' read -r standards_run_id standards_run_url standards_run_sha standards_run_status standards_run_conclusion <<< "$standards_record"
+          IFS=$'\t' read -r drift_run_id drift_run_url drift_run_sha drift_run_status drift_run_conclusion <<< "$drift_record"
           if [ "$ci_run_sha" != "$head_sha" ] || [ "$standards_run_sha" != "$head_sha" ] || [ "$drift_run_sha" != "$head_sha" ]; then
             echo "::error::Dispatched workflow evidence does not match cleanup head $head_sha"
             exit 1
@@ -395,9 +404,9 @@ jobs:
           {
             echo "Cleanup PR: $pr_url"
             echo "Cleanup head: $head_sha"
-            echo "CI run $ci_run_id: $ci_run_url ($ci_run_sha)"
-            echo "PR Standards run $standards_run_id: $standards_run_url ($standards_run_sha)"
-            echo "Drift/retention run $drift_run_id: $drift_run_url ($drift_run_sha)"
+            echo "CI run $ci_run_id: $ci_run_url ($ci_run_sha, $ci_run_conclusion)"
+            echo "PR Standards run $standards_run_id: $standards_run_url ($standards_run_sha, $standards_run_conclusion)"
+            echo "Drift/retention run $drift_run_id: $drift_run_url ($drift_run_sha, $drift_run_conclusion)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   update-pr-notes:

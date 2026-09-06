@@ -16,6 +16,7 @@ import {
 	MARKER_START,
 	MAX_FRAGMENT_BYTES,
 	MAX_RELEASE_HISTORY_BYTES,
+	MAX_RELEASE_MANIFEST_AUDIT_BYTES,
 	readDirectoryNamesBounded,
 	readFragmentFromWorkspace,
 	reconcileTaggedRelease,
@@ -96,6 +97,37 @@ describe('release note input bounds', () => {
 				entries: [],
 			}),
 		).rejects.toThrow(/release fragment size cap exceeded/i);
+	});
+
+	test('caps cumulative manifest bytes during retention auditing (PB-002)', () => {
+		// Before PB-002, each manifest was individually capped but the audit could
+		// parse an unbounded aggregate of otherwise-valid manifest files.
+		const root = fixtureRoot();
+		const manifests = path.join(root, 'docs/releases/manifests');
+		mkdirSync(manifests, { recursive: true });
+		const base = JSON.stringify({ schemaVersion: 1, fragments: [] });
+		const fileBytes = 900 * 1024;
+		const padded = base + ' '.repeat(fileBytes - Buffer.byteLength(base));
+		const count = Math.floor(MAX_RELEASE_MANIFEST_AUDIT_BYTES / fileBytes) + 1;
+		for (let index = 0; index < count; index += 1) {
+			writeFileSync(path.join(manifests, `v1.0.${index}.json`), padded);
+		}
+
+		expect(() => auditFragmentRetention(root)).toThrow(
+			/release manifest audit byte cap exceeded/i,
+		);
+	});
+
+	test('rejects a cursor that points past the final historical batch (FB-005)', () => {
+		// Before FB-005, a hand-crafted end cursor returned an empty final batch;
+		// reject it before any caller can mistake it for valid replay progress.
+		const tags = ['v1.0.0', 'v1.0.1'];
+		const first = createHistoricalReplayBatch(tags, '0', 2);
+		const digest = first.tagListDigest;
+
+		expect(() => createHistoricalReplayBatch(tags, `${digest}:2`, 2)).toThrow(
+			/historical cursor points past the final batch/i,
+		);
 	});
 
 	test('counts nested pending fragments accepted by the aggregation path', () => {
