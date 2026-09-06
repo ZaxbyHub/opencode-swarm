@@ -89,6 +89,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `hooks` | object | — | Hook subsystem toggles and settings. |
 | `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. |
 | `lane_liveness_watchdog` | object (strict) | — | Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes. |
+| `dispatch_protection` | object (strict) | — | Dispatch protection: action-local spawn-failure circuit breaker and token-bucket rate limiting for native task delegations. |
 | `pr_review_legacy_transcript_compatibility` | boolean | — | Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes. |
 | `gates` | object | — | Quality gate configuration (v6.9 anti-slop features). |
 | `context_budget` | object | — | Context budget thresholds. |
@@ -829,6 +830,61 @@ clean reset.
 {
   "pr_review_resilience": {
     "enabled": false
+  }
+}
+```
+
+### dispatch_protection
+
+Dispatch protection for native `task` delegations (issue #2507): an
+action-local spawn-failure circuit breaker plus a token-bucket dispatch rate
+limit. **Enabled by default** (matching the guardrails family —
+`guardrails.enabled` also defaults to true); the defaults are conservative and
+never wait in normal use. Set `enabled: false` to opt out of both mechanisms,
+or `rate_per_second: 0` to disable only the limiter.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | Master switch. `false` disables the spawn circuit and the rate limiter entirely. |
+| `spawn_failure_threshold` | integer | `3` | Repeated actual dispatch failures of the SAME semantic action (1–50) that open that action's circuit. |
+| `half_open_after_ms` | integer | `30000` | How long an open circuit stays open (1–3,600,000 ms) before exactly one recovery probe is admitted. An OPEN episode always denies at least once before any probe. |
+| `rate_per_second` | number | `10` | Token-bucket refill rate per second (0–10,000). `0` disables rate limiting. Fractional rates (e.g. `0.2`) are accepted. |
+| `burst_capacity` | integer | `10` | Tokens available immediately before pacing begins (1–10,000). Dispatches beyond the burst are PACED (awaited), never denied. |
+
+Behavior notes:
+
+- The circuit is keyed by session + invocation + semantic action digest
+  (`createActionIdentity`), denies only the matching action, and a corrected
+  success clears only that action. Read, diagnose, repair, rescope, abort and
+  handoff controls remain reachable while a circuit is open; there is no
+  global breaker.
+- Rate limiting applies only to the native `task` tool; read/diagnose/repair
+  controls never wait.
+- Per-project bucket state persists in the existing coordination store
+  (namespace `dispatch.token-bucket`); a fresh process rehydrates from that
+  row, so an exhausted bucket does not grant a fresh burst after a restart.
+  Persistence is debounced to PACED acquires (those that had to wait): a
+  burst fully consumed without ever pacing writes no row, so a restart in
+  that window grants one fresh burst. If persistence writes fail, the
+  in-memory bucket keeps pacing the live process (fail-open) and a restart
+  likewise grants one fresh burst.
+
+**Example** — opt out entirely:
+
+```json
+{
+  "dispatch_protection": {
+    "enabled": false
+  }
+}
+```
+
+**Example** — keep the breaker, disable only the rate limiter:
+
+```json
+{
+  "dispatch_protection": {
+    "rate_per_second": 0
   }
 }
 ```

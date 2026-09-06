@@ -53,6 +53,7 @@ import {
 	AuthorityConfigSchema,
 	AutomationConfigSchema,
 	type AutoReviewConfig,
+	DispatchProtectionConfigSchema,
 	GuardrailsConfigSchema,
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
@@ -73,6 +74,17 @@ import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
 import { closeGroupCommitWriter } from './db/group-commit-writer.js';
 import { registerObservabilityEventSink } from './db/observability-event-store.js';
 import { closeProjectDb } from './db/project-db.js';
+import {
+	armDispatchIdentity,
+	assertDispatchSpawnCircuitAdmits,
+	dispatchIdentityFor,
+	invocationIdForSession,
+	noteDispatchSpawnFailure,
+	noteDispatchSpawnSuccess,
+	spawnCircuitIsTaskTool,
+	takeArmedDispatchIdentity,
+} from './dispatch/spawn-circuit.js';
+import { acquireDispatchToken } from './dispatch/token-bucket.js';
 import { createEvaluationModelDispatcher } from './evaluation/model-dispatcher.js';
 import {
 	observePhaseParticipationToolResult,
@@ -2007,6 +2019,14 @@ async function initializeOpenCodeSwarm(
 			? { ...config.guardrails, enabled: false }
 			: (config.guardrails ?? {});
 	const guardrailsConfig = GuardrailsConfigSchema.parse(guardrailsFallback);
+
+	// Issue #2507 (G3): dispatch protection for native task delegations.
+	// Zod defaults fill enabled/threshold/half-open/rate/burst when the
+	// section is absent; explicit enabled === false disables both the
+	// spawn circuit and the rate limiter.
+	const dispatchProtectionConfig = DispatchProtectionConfigSchema.parse(
+		config.dispatch_protection ?? {},
+	);
 
 	// SECURITY AUDIT: Emit explicit warning when guardrails are disabled via user config
 	// This is a security-relevant action that requires explicit acknowledgment
@@ -4071,6 +4091,37 @@ async function initializeOpenCodeSwarm(
 			// object it caught. The intentional chain order is documented below.
 			let failClosedRegionCompleted = false;
 			try {
+				// 0. Dispatch protection (issue #2507, G3) — native task route
+				//    only. Order is deliberate: the spawn-circuit assert runs
+				//    FIRST so a denied dispatch never consumes a rate token,
+				//    then the token bucket PACES (awaits, never denies).
+				//    The armed identity is computed from PRE-mutation args so
+				//    the toolAfter recorder consumes the same digest even
+				//    when later steps mutate output.args.
+				if (
+					dispatchProtectionConfig.enabled &&
+					spawnCircuitIsTaskTool(input.tool)
+				) {
+					const armed = armDispatchIdentity(
+						input.callID,
+						input.tool,
+						output.args,
+					);
+					const invocationID = invocationIdForSession(input.sessionID);
+					assertDispatchSpawnCircuitAdmits({
+						sessionID: input.sessionID,
+						invocationID,
+						actionDigest: armed.digest,
+						threshold: dispatchProtectionConfig.spawn_failure_threshold,
+						halfOpenAfterMs: dispatchProtectionConfig.half_open_after_ms,
+					});
+					await acquireDispatchToken({
+						directory: ctx.directory,
+						ratePerSecond: dispatchProtectionConfig.rate_per_second,
+						burstCapacity: dispatchProtectionConfig.burst_capacity,
+					});
+				}
+
 				// 1. Guardrails authority enforcement (FAIL-CLOSED).
 				//    Throws must propagate to block tools.
 				await guardrailsHooks.toolBefore(input, output);
@@ -4502,6 +4553,55 @@ async function initializeOpenCodeSwarm(
 			const afterCtx = resolveToolAfterContext(
 				input as { tool: string; sessionID: string; callID: string },
 			);
+			// Issue #2507 (G3): spawn-protection outcome recorder — native
+			// task route only, fail-open (observational, never alters the
+			// after-hook). Consumes the digest ARMED at toolBefore step 0
+			// (pre-mutation args) so a corrected success clears exactly the
+			// circuit the before-hook keyed; falls back to recomputing from
+			// the stored args snapshot when no armed digest exists (pure
+			// compute — never re-inserts into the bounded armed map). The
+			// recorder gate uses the same shared normalizer as the before
+			// gate so a prefixed spelling cannot arm without recording.
+			// Denials never fire toolAfter (#2214), so policy denials cannot
+			// count as spawn failures.
+			if (
+				dispatchProtectionConfig.enabled &&
+				spawnCircuitIsTaskTool(input.tool)
+			) {
+				try {
+					const armed = takeArmedDispatchIdentity(input.callID);
+					const identity =
+						armed ?? dispatchIdentityFor(input.tool, afterCtx.args);
+					const invocationID = invocationIdForSession(input.sessionID);
+					if (output?.state === 'error') {
+						const { opened } = noteDispatchSpawnFailure({
+							sessionID: input.sessionID,
+							invocationID,
+							actionDigest: identity.digest,
+							threshold: dispatchProtectionConfig.spawn_failure_threshold,
+							halfOpenAfterMs: dispatchProtectionConfig.half_open_after_ms,
+						});
+						if (opened) {
+							// One bounded structured event on the
+							// false-to-true transition (invariant 9); no raw
+							// prompt, secret, URL, command, or output text.
+							telemetry.loopDetected(
+								input.sessionID,
+								swarmState.activeAgent.get(input.sessionID) ?? 'agent',
+								`dispatch.spawn:${identity.pattern}`,
+							);
+						}
+					} else if (output?.state === 'completed') {
+						noteDispatchSpawnSuccess({
+							sessionID: input.sessionID,
+							invocationID,
+							actionDigest: identity.digest,
+						});
+					}
+				} catch {
+					/* observational only; never alters the after-hook */
+				}
+			}
 			// Issue #2108: record the durable result of an admitted exact-bound
 			// push (`PR_FEEDBACK` publication attempts). Fail-open — a missed
 			// observation is recovered by the gate's reaper as `uncertain`, and

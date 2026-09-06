@@ -386,6 +386,41 @@
       },
       "additionalProperties": false
     },
+    "dispatch_protection": {
+      "description": "Dispatch protection: action-local spawn-failure circuit breaker and token-bucket rate limiting for native task delegations.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "spawn_failure_threshold": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "half_open_after_ms": {
+          "default": 30000,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "rate_per_second": {
+          "default": 10,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "burst_capacity": {
+          "default": 10,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      },
+      "additionalProperties": false
+    },
     "pr_review_legacy_transcript_compatibility": {
       "description": "Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes.",
       "type": "boolean"
