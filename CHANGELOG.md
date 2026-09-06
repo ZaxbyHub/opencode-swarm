@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.168.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.167.2...v7.168.0) (2026-09-06)
+
+
+### Features
+
+* **plan:** migrate plan ledger to sqlite ([3b62d23](https://github.com/ZaxbyHub/opencode-swarm/commit/3b62d231a5f9c175dc593bd6745dd5e8663c9964))
+
+
+### Bug Fixes
+
+* **dispatch:** route loop guards through shared normalizer, add action-local spawn circuit and token-bucket rate limit (issue [#2507](https://github.com/ZaxbyHub/opencode-swarm/issues/2507)) ([0a75664](https://github.com/ZaxbyHub/opencode-swarm/commit/0a75664035adc1807f0e1a512eb2f71179f8b59e))
+* **worktree:** verify late-settle lane session teardown and reclaim stranded lanes ([#2599](https://github.com/ZaxbyHub/opencode-swarm/issues/2599)) ([a4abcad](https://github.com/ZaxbyHub/opencode-swarm/commit/a4abcadaaf2c8bd1a09b7b486f1d6ad93f46bcb2))
+
 ## [7.167.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.167.1...v7.167.2) (2026-09-06)
 
 
