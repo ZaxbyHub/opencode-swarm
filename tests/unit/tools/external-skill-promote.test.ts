@@ -17,12 +17,6 @@ import {
 } from '../../../src/tools/external-skill-promote.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 
-const FIXED_NOW_MS = Date.parse('2026-09-06T12:00:00.000Z');
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /**
  * Call the tool's execute function with a directory context.
  */
@@ -37,10 +31,9 @@ async function callTool(args: unknown, directory: string): Promise<string> {
 /** Create a temp directory for test store state. */
 async function createTempDir(): Promise<string> {
 	const tmpBase = os.tmpdir();
-	const now = withFrozenClock(() => Date.now(), { fixedNow: FIXED_NOW_MS });
 	const tmpDir = path.join(
 		tmpBase,
-		`ext-skill-promote-test-${now}-${Math.random().toString(36).slice(2, 8)}`,
+		`ext-skill-promote-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 	);
 	await fs.mkdir(tmpDir, { recursive: true });
 	return tmpDir;
@@ -119,12 +112,10 @@ async function seedCandidate(
 		sha256 = createHash('sha256').update(skillBody).digest('hex');
 	}
 
-	// Keep the default fixture fresh relative to the validator's clock so the
-	// test remains valid after the repository's current date moves past 90 days.
 	const fetchedAt =
 		overrides.fetched_at ??
 		withFrozenClock(() => new Date(Date.now() - 60_000).toISOString(), {
-			fixedNow: FIXED_NOW_MS,
+			fixedNow: Date.parse('2026-09-06T12:00:00.000Z'),
 		});
 
 	return store.add({
