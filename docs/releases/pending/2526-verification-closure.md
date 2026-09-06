@@ -36,8 +36,9 @@ with durable pinned tests, so the delivery contract cannot silently regress:
   normalized to placeholders on both sides; everything else compares
   byte-for-byte.
 
-Carrier-construction census — all 18 producer sites are disposed as migrated
-to user-role guidance carriers: guardrails ×10
+Carrier-construction census (authoring-time grep fact, re-verified by direct read at
+this head — not asserted by the tests above) — all 18 producer sites are disposed as
+migrated to user-role guidance carriers: guardrails ×10
 (`src/hooks/guardrails/messages-transform.ts:524,586,605,702,752,772,805,867,906,944`),
 delegation ×3 (`src/hooks/delegation-gate.ts:6063,6131,6274`), issue-trace ×2
 (`src/hooks/issue-trace.ts:273,280`), knowledge ×2

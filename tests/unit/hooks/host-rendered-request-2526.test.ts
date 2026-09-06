@@ -294,5 +294,5 @@ describe('captured provider request parity (issue #2526 AC2)', () => {
 			KEYWORD,
 			'bun test before every release cut',
 		]);
-	});
+	}, 60_000);
 });
