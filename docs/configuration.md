@@ -2023,6 +2023,7 @@ Extended worktree isolation configuration. These settings apply to all worktree 
 | `lane_permissions` | `"scoped_allow" \| "deny" \| "off"` | `"scoped_allow"` | Permission policy for OpenCode instances running **inside** a worktree lane. See below. Has no effect outside a lane — ordinary sessions are never modified by this setting. |
 | `serialization_release_after_dispatches` | number | `5` | Release a serialized session after this many successful dispatches have completed and merged back from that session. Only applies when serialization mode is active. |
 | `serialization_release_after_ms` | number | `60000` | Release a serialized session after this many milliseconds have elapsed since the session was first serialized (even if zero dispatches have succeeded). Acts as a TTL ceiling on serialized sessions. |
+| `session_create_timeout_ms` | number | `30000` | Client-side budget (ms) for the lane child `session.create` call in worktree-isolated dispatches (and the recovery-lane equivalent). Integer, 1000–120,000. Raised from the old hardcoded 5000 default: on hosts where a fresh lane’s child-session init legitimately exceeds 5 s, every dispatch used to fail at the deadline and leak the late-accepted child session, which locked the lane’s `swarm.db` (issue #2599). Deadline errors name this knob. |
 
 **`deps_strategy` behavior:**
 

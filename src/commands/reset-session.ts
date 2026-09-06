@@ -1,8 +1,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
+import { closeProjectDb } from '../db/project-db';
 import { appendCoreEventSync } from '../events/core-events';
 import { clearSessionActionCircuits } from '../failures/action-circuit.js';
+import { recordDeadLaneReclaim } from '../hooks/delegation-gate/dead-lane-reclaim';
 import {
 	commitGateReleaseBatch,
 	queryLiveMemberships,
@@ -182,6 +184,22 @@ async function releaseKnowledgeGateObligations(
 		/* best-effort audit — the durable ledger release above is the authority */
 	}
 	return results;
+}
+
+/**
+ * Issue #2599: child-directory names of a lane base (`<session>/<lane>`),
+ * directories only; unreadable/absent ⇒ empty (the caller treats removal as
+ * best-effort anyway).
+ */
+function listChildDirs(dir: string): string[] {
+	try {
+		return fs
+			.readdirSync(dir, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name);
+	} catch {
+		return [];
+	}
 }
 
 /**
@@ -536,12 +554,53 @@ export async function handleResetSessionCommand(
 			if (preserveWorktrees) {
 				results.push('⏭️ Skipped .swarm-worktrees/ removal (see above)');
 			} else {
+				// Issue #2599 AC5: release in-process handles on every lane's
+				// swarm.db BEFORE the bulk removal (Windows WAL lock ⇒ EBUSY).
+				// Enumerates the default <session>/<lane> layout only — lanes
+				// provisioned under a `worktree_dir` override live elsewhere and
+				// are documented as a known limitation (see the release note);
+				// handle-release for them is deferred to #2527's shared surface.
+				const sessionDirs = fs
+					.readdirSync(worktreesDir, { withFileTypes: true })
+					.filter((entry) => entry.isDirectory())
+					.map((entry) => path.join(worktreesDir, entry.name));
+				for (const sessionDir of sessionDirs) {
+					for (const laneEntry of fs.readdirSync(sessionDir, {
+						withFileTypes: true,
+					})) {
+						if (laneEntry.isDirectory()) {
+							closeProjectDb(path.join(sessionDir, laneEntry.name));
+						}
+					}
+				}
 				fs.rmSync(worktreesDir, { recursive: true, force: true });
 				results.push('✅ Removed .swarm-worktrees/ directory');
 			}
 		}
 	} catch (err) {
-		results.push(`⚠️ Failed to remove .swarm-worktrees/: ${errorMessage(err)}`);
+		// Issue #2599 AC6: a locked lane is recorded for next-start reclaim
+		// and reported with a typed, actionable diagnostic instead of a bare
+		// warning that leaves the task wedged until host restart.
+		const stranded = listChildDirs(worktreesDir)
+			.map((sessionId) => path.join(worktreesDir, sessionId))
+			.flatMap((sessionDir) =>
+				listChildDirs(sessionDir).map((laneId) =>
+					path.join(sessionDir, laneId),
+				),
+			);
+		for (const lanePath of stranded) {
+			recordDeadLaneReclaim(directory, {
+				lanePath,
+				branchName: '',
+				parentSessionId: path.basename(path.dirname(lanePath)),
+				taskId: path.basename(lanePath),
+				reason: errorMessage(err),
+			});
+		}
+		results.push(
+			`⚠️ WORKTREE_LANE_STRANDED: Failed to remove .swarm-worktrees/: ${errorMessage(err)}. ` +
+				`${stranded.length} lane(s) recorded. A child session or system process may hold .swarm/swarm.db (WAL). reclaim scheduled at next start.`,
+		);
 	}
 
 	try {

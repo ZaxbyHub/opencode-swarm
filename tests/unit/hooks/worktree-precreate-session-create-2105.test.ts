@@ -24,6 +24,8 @@ const originals = {
 		_internals.lookupWorktreeRecoveryAuthoritiesByTask,
 	claimWorktreeRecoveryAuthority: _internals.claimWorktreeRecoveryAuthority,
 	worktreeSessionCreateTimeoutMs: _internals.worktreeSessionCreateTimeoutMs,
+	worktreeSessionCreateSettleGraceMs:
+		_internals.worktreeSessionCreateSettleGraceMs,
 };
 
 describe('issue #2105 bounded lane session creation', () => {
@@ -51,9 +53,20 @@ describe('issue #2105 bounded lane session creation', () => {
 		cleanup();
 	});
 
-	function args(options?: { generation?: number }) {
+	function args(options?: {
+		generation?: number;
+		/** Issue #2599: the authoritative deadline knob in production config. */
+		sessionCreateTimeoutMs?: number;
+	}) {
 		return {
-			config: { worktree: { policy: 'auto' } } as never,
+			config: {
+				worktree: {
+					policy: 'auto',
+					...(options?.sessionCreateTimeoutMs !== undefined
+						? { session_create_timeout_ms: options.sessionCreateTimeoutMs }
+						: {}),
+				},
+			} as never,
 			directory,
 			parentSessionID,
 			callID: 'call-1',
@@ -96,14 +109,19 @@ describe('issue #2105 bounded lane session creation', () => {
 			id: taskId,
 			sessionId: parentSessionID,
 		}));
-		_internals.worktreeSessionCreateTimeoutMs = 1;
+		// Issue #2599: the deadline now flows through the
+		// worktree.session_create_timeout_ms config knob; the settle grace is
+		// shrunk so the never-settling create gives up quickly.
+		_internals.worktreeSessionCreateSettleGraceMs = 10;
 		swarmState.opencodeClient = {
 			session: {
 				create: createSession,
 			},
 		} as never;
 
-		await precreateStandardWorktreeSession(args({ generation: 0 }));
+		await precreateStandardWorktreeSession(
+			args({ generation: 0, sessionCreateTimeoutMs: 1 }),
+		);
 
 		expect(remove).toHaveBeenCalledTimes(1);
 		expect(ownerCleanup).toHaveBeenCalledTimes(1);

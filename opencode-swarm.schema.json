@@ -4197,6 +4197,12 @@
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991
         },
+        "session_create_timeout_ms": {
+          "default": 30000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 120000
+        },
         "runtime_isolation": {
           "type": "object",
           "properties": {

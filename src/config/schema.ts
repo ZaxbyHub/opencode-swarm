@@ -2898,6 +2898,23 @@ export const WorktreeIsolationConfigSchema = z.object({
 	 */
 	serialization_release_after_ms: z.number().int().positive().default(60_000),
 	/**
+	 * Issue #2599: client-side budget for the lane child `session.create` call
+	 * in worktree-isolated dispatches (and the recovery-lane equivalent), in
+	 * milliseconds. On hosts where the child session's plugin init in a fresh
+	 * worktree copy legitimately exceeds the old hardcoded 5 s (bundled-skill
+	 * sync + repo-graph fingerprint + SQLite open on a cold FS), every
+	 * dispatch failed at the deadline and — worse — leaked the late-accepted
+	 * child session, which held the lane's `swarm.db` WAL lock. Default raised
+	 * 5 000 → 30 000: bounded and honest while covering cold-host child init.
+	 * Deadline failures name this knob in their diagnostic.
+	 */
+	session_create_timeout_ms: z
+		.number()
+		.int()
+		.min(1000)
+		.max(120000)
+		.default(30_000),
+	/**
 	 * FR-201 SC-124: Per-lane runtime profile injection (env vars, port allocation).
 	 * When enabled, each lane gets deterministic PORT = base + laneIndex * stride,
 	 * plus any custom env_overrides and cache_redirects merged in.
