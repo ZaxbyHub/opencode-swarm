@@ -3,9 +3,10 @@
  * unavailable, 429 + Retry-After, circuit open/cooldown/probe, restart
  * replay from the persistent spool, and spool byte-cap drop-oldest.
  */
+
+import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, test } from 'bun:test';
 import {
 	flushOtlpExporterForTesting,
 	OTLP_EXPORT_SPOOL_DIR,
@@ -17,6 +18,7 @@ import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import {
 	deadEndpointUrl,
 	freshProjectDir,
@@ -24,7 +26,6 @@ import {
 	startStubCollector,
 	testExportConfig,
 } from './otlp-fixtures.js';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const PAYLOAD = {
 	tokens_input: 42,
@@ -111,14 +112,20 @@ describe('restart replay', () => {
 			testExportConfig(dead, { maxRetries: 0, backoffBaseMs: 5 }),
 		);
 		const { emit } = await import('../../../src/telemetry.js');
-		emit('delegation_begin' as never, {
-			...PAYLOAD,
-			sessionId: 'replay-alpha-4d2f',
-		} as never);
-		emit('delegation_begin' as never, {
-			...PAYLOAD,
-			sessionId: 'replay-beta-8c71',
-		} as never);
+		emit(
+			'delegation_begin' as never,
+			{
+				...PAYLOAD,
+				sessionId: 'replay-alpha-4d2f',
+			} as never,
+		);
+		emit(
+			'delegation_begin' as never,
+			{
+				...PAYLOAD,
+				sessionId: 'replay-beta-8c71',
+			} as never,
+		);
 		await flushOtlpExporterForTesting(dir);
 		expect(readOtlpExporterHealth(dir)?.spoolRecords).toBe(2);
 
@@ -157,15 +164,18 @@ describe('spool byte cap', () => {
 		);
 		const { emit } = await import('../../../src/telemetry.js');
 		for (let i = 0; i < 40; i++) {
-			emit('delegation_begin' as never, {
-				...PAYLOAD,
-				sessionId: `cap-${i}`,
-			} as never);
+			emit(
+				'delegation_begin' as never,
+				{
+					...PAYLOAD,
+					sessionId: `cap-${i}`,
+				} as never,
+			);
 		}
 		// Drop-oldest happens at append time; budget + slack asserted.
 		expect(spoolSize(dir)).toBeLessThanOrEqual(5 * 1024);
 		const health = readOtlpExporterHealth(dir);
-		expect((health?.dropped['spool_cap'] ?? 0)).toBeGreaterThanOrEqual(1);
+		expect(health?.dropped['spool_cap'] ?? 0).toBeGreaterThanOrEqual(1);
 	}, 20_000);
 });
 
@@ -240,7 +250,9 @@ describe('TLS/auth failure classification (secret-safe diagnostics)', () => {
 		await flushOtlpExporterForTesting(dir);
 
 		const health = readOtlpExporterHealth(dir);
-		expect((health?.dropped['rejected_permanent'] ?? 0)).toBeGreaterThanOrEqual(1);
+		expect(health?.dropped['rejected_permanent'] ?? 0).toBeGreaterThanOrEqual(
+			1,
+		);
 		expect(health?.spoolRecords).toBe(0);
 		// Diagnostics stay secret-safe: category only, never header values or
 		// endpoint strings. The whole persisted state is checked.

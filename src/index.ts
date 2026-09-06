@@ -75,11 +75,6 @@ import { closeGroupCommitWriter } from './db/group-commit-writer.js';
 import { registerObservabilityEventSink } from './db/observability-event-store.js';
 import { closeProjectDb } from './db/project-db.js';
 import {
-	flushOtlpExporterForTesting,
-	isOtlpExporterActive,
-	registerOtlpExporter,
-} from './observability/otlp-exporter.js';
-import {
 	armDispatchIdentity,
 	assertDispatchSpawnCircuitAdmits,
 	dispatchIdentityFor,
@@ -236,6 +231,11 @@ import {
 	resolveTaskChatModelOverride,
 } from './models/task-model-routing.js';
 import { initObservability } from './observability/index.js';
+import {
+	flushOtlpExporterForTesting,
+	isOtlpExporterActive,
+	registerOtlpExporter,
+} from './observability/otlp-exporter.js';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
 import { cleanupOldTrajectoryFiles } from './prm/trajectory-store';

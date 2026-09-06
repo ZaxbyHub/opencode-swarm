@@ -4,12 +4,12 @@
  * events never export; Unicode/control-sequence payloads cannot smuggle
  * text through the export path.
  */
+
+import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, test } from 'bun:test';
-import {
-	type ObservabilityEvent,
-} from '../../../src/observability/envelope.js';
+import type { ObservabilityEvent } from '../../../src/observability/envelope.js';
+import { createObservation } from '../../../src/observability/observe.js';
 import {
 	flushOtlpExporterForTesting,
 	OTLP_EXPORT_SPOOL_DIR,
@@ -18,18 +18,17 @@ import {
 	registerOtlpExporter,
 	resetOtlpExporterForTesting,
 } from '../../../src/observability/otlp-exporter.js';
-import { createObservation } from '../../../src/observability/observe.js';
 import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import {
 	freshProjectDir,
 	spansOf,
 	startStubCollector,
 	testExportConfig,
 } from './otlp-fixtures.js';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const SECRET = 'ghp_LEAKCHECK0001';
 
@@ -45,13 +44,16 @@ describe('secret patterns never reach spool, wire, or diagnostics', () => {
 		initTelemetry(dir);
 		registerOtlpExporter(dir, testExportConfig(stub.url, { batchSize: 8 }));
 		const { emit } = await import('../../../src/telemetry.js');
-		emit('delegation_begin' as never, {
-			tokens_input: 5,
-			model: 'redact-model',
-			authorization: `Bearer ${SECRET}`,
-			api_key: SECRET,
-			prompt: `user said ${SECRET} in plaintext`,
-		} as never);
+		emit(
+			'delegation_begin' as never,
+			{
+				tokens_input: 5,
+				model: 'redact-model',
+				authorization: `Bearer ${SECRET}`,
+				api_key: SECRET,
+				prompt: `user said ${SECRET} in plaintext`,
+			} as never,
+		);
 		// Endpoint unavailable first so the record sits in the spool: assert
 		// the SPOOL is clean, then flush to assert the WIRE is clean.
 		await flushOtlpExporterForTesting(dir);
@@ -66,9 +68,7 @@ describe('secret patterns never reach spool, wire, or diagnostics', () => {
 				return '';
 			}
 		})();
-		const wireText = stub.requests
-			.map((r) => JSON.stringify(r.body))
-			.join(' ');
+		const wireText = stub.requests.map((r) => JSON.stringify(r.body)).join(' ');
 		// Whether the record is still spooled or already shipped, the secret
 		// must be in NEITHER place (it never enters any attribute).
 		expect(spoolText.includes(SECRET)).toBe(false);
@@ -89,10 +89,13 @@ describe('secret patterns never reach spool, wire, or diagnostics', () => {
 			}),
 		);
 		const { emit } = await import('../../../src/telemetry.js');
-		emit('delegation_begin' as never, {
-			tokens_input: 1,
-			model: 'm',
-		} as never);
+		emit(
+			'delegation_begin' as never,
+			{
+				tokens_input: 1,
+				model: 'm',
+			} as never,
+		);
 		await flushOtlpExporterForTesting(dir);
 
 		const health = readOtlpExporterHealth(dir);

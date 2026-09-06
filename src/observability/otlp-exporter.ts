@@ -46,7 +46,6 @@
  * subprocesses, no Bun.* globals (AGENTS.md invariants 2 and 3).
  */
 import {
-	appendFileSync,
 	existsSync,
 	mkdirSync,
 	readFileSync,
@@ -55,16 +54,16 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import type { ObservabilityEvent } from './envelope.js';
+import type { TelemetryListener } from '../telemetry.js';
+import { addTelemetryListener, removeTelemetryListener } from '../telemetry.js';
 import { getCatalogEntry } from './catalog.js';
+import type { ObservabilityEvent } from './envelope.js';
 import {
 	OPENINFERENCE_ATTRIBUTES,
 	OPENINFERENCE_MAPPING_VERSION,
 	OTEL_GENAI_ATTRIBUTES,
 	OTEL_GENAI_MAPPING_VERSION,
 } from './otel-mapping.js';
-import type { TelemetryListener } from '../telemetry.js';
-import { addTelemetryListener, removeTelemetryListener } from '../telemetry.js';
 
 /** Spool home, relative to the project root (retention-registry row `otlp-export-spool`). */
 export const OTLP_EXPORT_SPOOL_DIR = '.swarm/otlp-export';
@@ -209,8 +208,10 @@ export function projectOtlpAttributes(
 	}
 	// Closed swarm.* extension set — the only non-mapped attributes allowed.
 	attributes['swarm.event.kind'] = event.kind;
-	if (event.category !== undefined) attributes['swarm.event.category'] = event.category;
-	if (event.severity !== undefined) attributes['swarm.event.severity'] = event.severity;
+	if (event.category !== undefined)
+		attributes['swarm.event.category'] = event.category;
+	if (event.severity !== undefined)
+		attributes['swarm.event.severity'] = event.severity;
 	if (event.outcome?.status !== undefined) {
 		attributes['swarm.outcome.status'] = event.outcome.status;
 	}
@@ -332,7 +333,10 @@ function readSpoolLines(directory: string): string[] {
 
 function writeSpoolLines(directory: string, lines: string[]): void {
 	mkdirSync(join(directory, OTLP_EXPORT_SPOOL_DIR), { recursive: true });
-	atomicWrite(spoolPath(directory), lines.length === 0 ? '' : `${lines.join('\n')}\n`);
+	atomicWrite(
+		spoolPath(directory),
+		lines.length === 0 ? '' : `${lines.join('\n')}\n`,
+	);
 }
 
 function spoolByteSize(lines: string[]): number {
@@ -365,10 +369,7 @@ function appendSpoolRecord(record: SpoolRecord): void {
 		return true;
 	});
 	fresh.push(line);
-	while (
-		fresh.length > 1 &&
-		spoolByteSize(fresh) > cfg.spoolMaxBytes
-	) {
+	while (fresh.length > 1 && spoolByteSize(fresh) > cfg.spoolMaxBytes) {
 		const dropped = fresh.shift();
 		if (dropped !== undefined) noteDrop('spool_cap');
 	}
@@ -426,7 +427,11 @@ async function postBatch(
 	cfg: OtlpExportConfig,
 	url: string,
 	batch: Array<Record<string, unknown>>,
-): Promise<{ ok: boolean; category: string | null; retryAfterMs: number | null }> {
+): Promise<{
+	ok: boolean;
+	category: string | null;
+	retryAfterMs: number | null;
+}> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), cfg.requestTimeoutMs);
 	try {
@@ -501,7 +506,11 @@ async function postBatch(
 				retryAfterMs = Math.min(seconds * 1000, cfg.backoffMaxMs);
 			}
 		}
-		return { ok: false, category: classifyStatus(response.status), retryAfterMs };
+		return {
+			ok: false,
+			category: classifyStatus(response.status),
+			retryAfterMs,
+		};
 	} catch {
 		// Network/DNS/timeout — transient. Category only; never the message.
 		return { ok: false, category: 'unavailable', retryAfterMs: null };
@@ -558,7 +567,8 @@ async function runFlushCycle(): Promise<void> {
 				break;
 			}
 			if (result.category === 'rejected_permanent') {
-				for (let d = 0; d < batchLines.length; d++) noteDrop('rejected_permanent');
+				for (let d = 0; d < batchLines.length; d++)
+					noteDrop('rejected_permanent');
 				shipped = true; // terminally dropped, not re-sent
 				break;
 			}
@@ -605,7 +615,9 @@ function flushSingleFlight(): Promise<void> {
 }
 
 /** Drain ALL pending batches now (bounded by MAX_FLUSH_ITERATIONS). */
-export async function flushOtlpExporterForTesting(directory: string): Promise<void> {
+export async function flushOtlpExporterForTesting(
+	directory: string,
+): Promise<void> {
 	if (directory !== _directory) return;
 	await flushSingleFlight();
 }

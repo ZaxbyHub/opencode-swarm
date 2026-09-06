@@ -3,13 +3,15 @@
  * Outage/adversarial behavior lives in otlp-outage.test.ts; privacy in
  * otlp-redaction.test.ts; attribute-set closure in otlp-cardinality.test.ts.
  */
+
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import {
 	OBSERVABILITY_SCHEMA_VERSION,
 	type ObservabilityEvent,
 } from '../../../src/observability/envelope.js';
+import { createObservation } from '../../../src/observability/observe.js';
 import {
 	OPENINFERENCE_ATTRIBUTES,
 	OPENINFERENCE_MAPPING_VERSION,
@@ -26,11 +28,11 @@ import {
 	registerOtlpExporter,
 	resetOtlpExporterForTesting,
 } from '../../../src/observability/otlp-exporter.js';
-import { createObservation } from '../../../src/observability/observe.js';
 import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import {
 	attributeKeysOf,
 	freshProjectDir,
@@ -38,7 +40,6 @@ import {
 	startStubCollector,
 	testExportConfig,
 } from './otlp-fixtures.js';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 
 afterEach(() => {
 	resetOtlpExporterForTesting();
@@ -100,9 +101,7 @@ describe('projectOtlpAttributes (pure adapter)', () => {
 			provenance: { ...sampleEvent().provenance, model: 'prov-model' },
 		};
 		expect(
-			projectOtlpAttributes(withProvenance, 'openinference')[
-				'llm.model_name'
-			],
+			projectOtlpAttributes(withProvenance, 'openinference')['llm.model_name'],
 		).toBe('prov-model');
 	});
 
@@ -129,15 +128,16 @@ describe('projectOtlpAttributes (pure adapter)', () => {
 			sampleEvent('conflict_detected'),
 			'genai',
 		);
-		expect(Object.keys(attrs).every((k) => k.startsWith('swarm.'))).toBe(
-			true,
-		);
+		expect(Object.keys(attrs).every((k) => k.startsWith('swarm.'))).toBe(true);
 		expect(attrs['swarm.event.kind']).toBe('conflict_detected');
 	});
 
 	test('content privacy class produces no span at all', () => {
 		const event = sampleEvent();
-		const content = { ...event, policy: { ...event.policy, privacyClass: 'content' as const } };
+		const content = {
+			...event,
+			policy: { ...event.policy, privacyClass: 'content' as const },
+		};
 		expect(buildOtlpSpan(content, 'genai')).toBeNull();
 	});
 
@@ -181,7 +181,10 @@ describe('opt-in isolation', () => {
 
 	test('non-https non-loopback endpoint fails closed to disabled', () => {
 		const dir = freshProjectDir();
-		registerOtlpExporter(dir, testExportConfig('http://collector.example.com:4318'));
+		registerOtlpExporter(
+			dir,
+			testExportConfig('http://collector.example.com:4318'),
+		);
 		expect(isOtlpExporterActive()).toBe(false);
 		expect(existsSync(join(dir, OTLP_EXPORT_SPOOL_DIR))).toBe(false);
 	});

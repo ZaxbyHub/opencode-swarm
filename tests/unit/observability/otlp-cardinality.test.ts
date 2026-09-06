@@ -5,14 +5,12 @@
  * the mapped correlation fields.
  */
 import { describe, expect, test } from 'bun:test';
+import { createObservation } from '../../../src/observability/observe.js';
 import {
 	OPENINFERENCE_ATTRIBUTES,
 	OTEL_GENAI_ATTRIBUTES,
 } from '../../../src/observability/otel-mapping.js';
-import {
-	projectOtlpAttributes,
-} from '../../../src/observability/otlp-exporter.js';
-import { createObservation } from '../../../src/observability/observe.js';
+import { projectOtlpAttributes } from '../../../src/observability/otlp-exporter.js';
 
 const SWARM_EXTENSION_KEYS = new Set([
 	'swarm.event.kind',
@@ -25,9 +23,7 @@ const SWARM_EXTENSION_KEYS = new Set([
 function closedKeySet(convention: 'genai' | 'openinference'): Set<string> {
 	return new Set([
 		...Object.values(
-			convention === 'genai'
-				? OTEL_GENAI_ATTRIBUTES
-				: OPENINFERENCE_ATTRIBUTES,
+			convention === 'genai' ? OTEL_GENAI_ATTRIBUTES : OPENINFERENCE_ATTRIBUTES,
 		),
 		...SWARM_EXTENSION_KEYS,
 	]);
@@ -100,10 +96,7 @@ describe('cardinality attack: producer payloads cannot widen the export', () => 
 
 	test('per-emit key-count is stable across wildly different payloads (bounded set)', () => {
 		const lean = Object.keys(
-			projectOtlpAttributes(
-				createObservation('delegation_begin', {}),
-				'genai',
-			),
+			projectOtlpAttributes(createObservation('delegation_begin', {}), 'genai'),
 		).length;
 		const rich = Object.keys(
 			projectOtlpAttributes(

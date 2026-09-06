@@ -242,6 +242,7 @@ const CREDENTIAL_KV_PATTERN = new RegExp(
  * stay closed. Parameter runs are bounded (≤32); the
  * {@link BARE_SGR_PARAMETER_RUN} sweep below catches the over-long tail.
  */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: the ESC byte IS the match target - a CSI sequence is defined by it (#2485 Gap 2)
 const CSI_SEQUENCE = /\x1b\[[0-9;:;<=>?]{0,32}[ !-/]{0,4}[@-~]/gu;
 /**
  * Fallback for CSI parameter runs longer than {@link CSI_SEQUENCE}'s bound:
