@@ -80,6 +80,29 @@ function resolveCanonicalRootKey(directory: string): string {
 	return normalizeIdentityPath(resolved);
 }
 
+/**
+ * Resolve a physical root identity without blocking the event loop.
+ *
+ * Init-path callers must use this form when their work is governed by an
+ * AbortSignal deadline. `fs.promises.realpath` lets the timeout race settle
+ * while slow network filesystems, antivirus hooks, or junction resolution are
+ * still pending; a later caller-side abort check prevents the late result from
+ * publishing cache state. The synchronous helpers above remain necessary for
+ * existing synchronous authority and persistence call sites.
+ */
+export async function canonicalRootKeyFreshAsync(
+	directory: string,
+): Promise<string> {
+	let resolved = path.resolve(directory);
+	try {
+		resolved = await fsSync.promises.realpath(resolved);
+	} catch {
+		// A missing or inaccessible path has no physical identity available.
+		// Preserve the same lexical fallback as canonicalRootKeyFresh.
+	}
+	return normalizeIdentityPath(resolved);
+}
+
 export function canonicalRootKey(directory: string): string {
 	const memoized = canonicalRootMemo.get(directory);
 	if (memoized !== undefined) {

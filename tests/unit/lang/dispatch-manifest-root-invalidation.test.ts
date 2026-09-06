@@ -9,13 +9,19 @@ import {
 	_internals as dispatchInternals,
 	pickBackend,
 } from '../../../src/lang/dispatch';
+import { MANIFEST_FILES } from '../../../src/lang/manifest-files';
 
 // Keep this acceptance ceiling aligned with findManifestRoot's documented
-// maximum upward search. The warm validation has one asynchronous stat per
-// visited directory, then manifestHash performs one synchronous root stat, one
-// asynchronous directory read, and one asynchronous manifest stat.
+// maximum upward search. The test counts every sync and async filesystem API
+// the implementation uses so this preserving acceptance check remains valid
+// on both the historical base and the current async dispatch implementation.
 const MAX_MANIFEST_SEARCH_DEPTH = 32;
-const MAX_WARM_LOOKUP_FS_OPS = MAX_MANIFEST_SEARCH_DEPTH + 2;
+// Beyond the bounded trace validation, a warm lookup performs at most two
+// async realpath operations, one root directory listing, and one async stat
+// for each known manifest. The ceiling intentionally counts every filesystem
+// API used by the implementation, not just the operations this fixture needs.
+const MAX_WARM_LOOKUP_FS_OPS =
+	MAX_MANIFEST_SEARCH_DEPTH + MANIFEST_FILES.length + 3;
 
 describe('language dispatch manifest-root cache invalidation (#2489)', () => {
 	let tempDir: string;
@@ -142,6 +148,7 @@ describe('language dispatch manifest-root cache invalidation (#2489)', () => {
 		const syncStatSpy = spyOn(fs, 'statSync');
 		const asyncReaddirSpy = spyOn(fs.promises, 'readdir');
 		const asyncStatSpy = spyOn(fs.promises, 'stat');
+		const asyncRealpathSpy = spyOn(fs.promises, 'realpath');
 		try {
 			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
 
@@ -149,23 +156,27 @@ describe('language dispatch manifest-root cache invalidation (#2489)', () => {
 			syncStatSpy.mockClear();
 			asyncReaddirSpy.mockClear();
 			asyncStatSpy.mockClear();
+			asyncRealpathSpy.mockClear();
 			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
 			const secondLookupOps =
 				syncReaddirSpy.mock.calls.length +
 				syncStatSpy.mock.calls.length +
 				asyncReaddirSpy.mock.calls.length +
-				asyncStatSpy.mock.calls.length;
+				asyncStatSpy.mock.calls.length +
+				asyncRealpathSpy.mock.calls.length;
 
 			syncReaddirSpy.mockClear();
 			syncStatSpy.mockClear();
 			asyncReaddirSpy.mockClear();
 			asyncStatSpy.mockClear();
+			asyncRealpathSpy.mockClear();
 			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
 			const thirdLookupOps =
 				syncReaddirSpy.mock.calls.length +
 				syncStatSpy.mock.calls.length +
 				asyncReaddirSpy.mock.calls.length +
-				asyncStatSpy.mock.calls.length;
+				asyncStatSpy.mock.calls.length +
+				asyncRealpathSpy.mock.calls.length;
 
 			expect(secondLookupOps).toBeGreaterThan(0);
 			expect(secondLookupOps).toBeLessThanOrEqual(MAX_WARM_LOOKUP_FS_OPS);
@@ -175,6 +186,7 @@ describe('language dispatch manifest-root cache invalidation (#2489)', () => {
 			syncStatSpy.mockRestore();
 			asyncReaddirSpy.mockRestore();
 			asyncStatSpy.mockRestore();
+			asyncRealpathSpy.mockRestore();
 		}
 	});
 });

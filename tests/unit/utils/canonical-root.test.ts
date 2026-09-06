@@ -5,6 +5,7 @@ import {
 	_internals,
 	canonicalRootKey,
 	canonicalRootKeyFresh,
+	canonicalRootKeyFreshAsync,
 	lexicalRootAliasKey,
 	sameProjectRoot,
 } from '../../../src/utils/canonical-root';
@@ -56,6 +57,27 @@ describe('canonical project-root identity', () => {
 		};
 
 		expect(canonicalRootKeyFresh(input)).toBe(
+			path.posix.normalize(path.resolve(input)),
+		);
+	});
+
+	test('async fresh key resolves a physical root and normalizes for Windows', async () => {
+		const root = canonicalMkdtemp('canonical-root-async-');
+		try {
+			_internals.platform = () => 'win32';
+			const physical = await fs.promises.realpath(root);
+			expect(await canonicalRootKeyFreshAsync(root)).toBe(
+				path.win32.normalize(physical).toLowerCase(),
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('async fresh key falls back to a normalized lexical path', async () => {
+		const input = path.join(canonicalTmpDir(), 'missing-root-async-2489');
+		_internals.platform = () => 'posix';
+		expect(await canonicalRootKeyFreshAsync(input)).toBe(
 			path.posix.normalize(path.resolve(input)),
 		);
 	});

@@ -206,7 +206,7 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 		}
 	});
 
-	test('yields at the real 300ms timeout and does not cache an aborted walk', async () => {
+	test('returns at the real 300ms timeout and does not cache a late aborted walk', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-manifest-root-timeout-')),
 		);
@@ -217,9 +217,10 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 		fs.mkdirSync(sourceDir, { recursive: true });
 		fs.writeFileSync(path.join(tempDir, 'package.json'), '{}');
 
-		const delay = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
+		const delay = () => new Promise<void>((resolve) => setTimeout(resolve, 75));
 		const realReaddir = fs.promises.readdir;
 		const realStat = fs.promises.stat;
+		const realRealpath = fs.promises.realpath;
 		const readdirSpy = spyOn(fs.promises, 'readdir').mockImplementation((async (
 			directory: fs.PathLike,
 			options?: Parameters<typeof fs.promises.readdir>[1],
@@ -234,8 +235,18 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 			await delay();
 			return realStat(file, options);
 		}) as typeof fs.promises.stat);
+		const realpathSpy = spyOn(fs.promises, 'realpath').mockImplementation(
+			(async (
+				file: fs.PathLike,
+				options?: Parameters<typeof fs.promises.realpath>[1],
+			) => {
+				await delay();
+				return realRealpath(file, options);
+			}) as typeof fs.promises.realpath,
+		);
 		let walk: Promise<unknown> | undefined;
 		try {
+			const started = performance.now();
 			await expect(
 				withTimeoutSignal(
 					(signal) => {
@@ -246,12 +257,14 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 					new Error('language dispatch exceeded 300ms'),
 				),
 			).rejects.toThrow('language dispatch exceeded 300ms');
+			expect(performance.now() - started).toBeLessThan(450);
 			expect(dispatchInternals.manifestRootCacheSize).toBe(0);
 			await expect(walk).rejects.toThrow('language dispatch exceeded 300ms');
 			expect(dispatchInternals.manifestRootCacheSize).toBe(0);
 		} finally {
 			readdirSpy.mockRestore();
 			statSpy.mockRestore();
+			realpathSpy.mockRestore();
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

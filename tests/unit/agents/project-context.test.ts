@@ -8,6 +8,7 @@ import {
 	_internals as projectContextInternals,
 } from '../../../src/agents/project-context';
 import { UNRESOLVED } from '../../../src/agents/template';
+import { withTimeoutSignal } from '../../../src/utils/timeout';
 
 /**
  * Phase 4b tests for the project-context resolver.
@@ -159,29 +160,28 @@ describe('init fail-open behavior', () => {
 		expect(LANG_BACKEND_DETECTION_TIMEOUT_MS).toBe(300);
 	});
 
-	test('a hung pickBackend resolves the caller as a timeout', async () => {
-		// Replace pickBackend with one that never resolves. The caller's
-		// withTimeout(2000ms) wrapper would normally race this; here we
-		// directly verify the seam allows substitution. Restore in finally.
+	test('a slow pickBackend receives and obeys the caller abort signal', async () => {
+		// Exercise the same withTimeoutSignal boundary as initializeOpenCodeSwarm,
+		// rather than a local Promise.race that cannot prove cancellation wiring.
 		const realPickBackend = projectContextInternals.pickBackend;
 		try {
-			projectContextInternals.pickBackend = () =>
-				new Promise(() => {
-					/* never resolves */
+			let observedSignal: AbortSignal | undefined;
+			projectContextInternals.pickBackend = async (_directory, signal) =>
+				new Promise((_, reject) => {
+					observedSignal = signal;
+					signal?.addEventListener('abort', () => reject(signal.reason), {
+						once: true,
+					});
 				});
-
-			// We cannot await the hung promise itself in a test. Instead we
-			// verify the seam shape: the caller's `withTimeout` wrapper would
-			// receive a never-resolving promise here.
-			const promise = buildProjectContext(tempDir);
-			// Race against a tiny timeout to confirm the inner promise hangs.
-			const result = await Promise.race([
-				promise,
-				new Promise<'timeout'>((resolve) =>
-					setTimeout(() => resolve('timeout'), 50),
+			const timeoutError = new Error('project context timed out');
+			await expect(
+				withTimeoutSignal(
+					(signal) => buildProjectContext(tempDir, signal),
+					30,
+					timeoutError,
 				),
-			]);
-			expect(result).toBe('timeout');
+			).rejects.toBe(timeoutError);
+			expect(observedSignal?.aborted).toBe(true);
 		} finally {
 			projectContextInternals.pickBackend = realPickBackend;
 		}

@@ -24,7 +24,7 @@ import type { LanguageBackend } from './backend';
 // `pickBackend` would get only the default backend even for languages with
 // concrete overrides like typescript. The barrel is idempotent.
 import './backends';
-import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
+import { canonicalRootKeyFreshAsync } from '../utils/canonical-root.js';
 import { detectProjectLanguages } from './detector';
 import { MANIFEST_FILES } from './manifest-files';
 import { LANGUAGE_BACKEND_REGISTRY } from './registry-backend';
@@ -74,8 +74,8 @@ let insertCounter = 0;
  * Combines size + mtimeMs + inode. inode catches atomic-replace edits
  * (same size, same mtime granularity) which size+mtime alone misses on
  * filesystems with second-level mtime rounding (HFS+, some Docker overlay
- * layouts). On Windows, fs.statSync returns a synthesized ino that is
- * stable per-handle within a process — sufficient for cache invalidation.
+ * layouts). On Windows, async stat returns a synthesized ino that is stable
+ * per-handle within a process — sufficient for cache invalidation.
  */
 /**
  * List a directory's entries, preserving failure separately from an empty
@@ -93,14 +93,9 @@ async function manifestHash(
 	dir: string,
 	signal?: AbortSignal,
 ): Promise<string> {
-	// Retain one synchronous root identity probe for the warm-path contract. All
-	// directory enumeration and manifest metadata reads below are asynchronous so
-	// an outer timeout can yield while a slow filesystem operation is pending.
-	try {
-		if (!fs.statSync(dir).isDirectory()) return '';
-	} catch {
-		return '';
-	}
+	// Every probe here is asynchronous: this function runs under the plugin
+	// initialization withTimeoutSignal boundary, so a slow filesystem must never
+	// block the event loop before that boundary can reject and abort the walk.
 	const entries = await tryReadDirectoryAsync(dir);
 	throwIfAborted(signal);
 	if (entries === null || entries.size === 0) return '';
@@ -326,7 +321,8 @@ async function findManifestRoot(
 ): Promise<ManifestRootResolution> {
 	throwIfAborted(signal);
 	const resolved = path.resolve(start);
-	const key = canonicalRootKeyFresh(resolved);
+	const key = await canonicalRootKeyFreshAsync(resolved);
+	throwIfAborted(signal);
 	const cached = manifestRootCache.get(key);
 	if (cached !== undefined) {
 		if (await isManifestRootCacheEntryValid(cached)) {
@@ -441,7 +437,8 @@ export async function pickBackend(
 		resolution.cacheable,
 		signal,
 	);
-	const cacheKey = canonicalRootKeyFresh(root);
+	const cacheKey = await canonicalRootKeyFreshAsync(root);
+	throwIfAborted(signal);
 	const cached = cache.get(cacheKey);
 	if (cached && cached.hash === hash) {
 		cacheProfileKey(dir, cacheKey);
