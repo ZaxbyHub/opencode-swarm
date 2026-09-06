@@ -181,6 +181,8 @@ describe('language dispatch manifest-root cache invalidation (#2489)', () => {
 			expect(secondLookupOps).toBeGreaterThan(0);
 			expect(secondLookupOps).toBeLessThanOrEqual(MAX_WARM_LOOKUP_FS_OPS);
 			expect(thirdLookupOps).toBe(secondLookupOps);
+			expect(syncReaddirSpy).not.toHaveBeenCalled();
+			expect(syncStatSpy).not.toHaveBeenCalled();
 		} finally {
 			syncReaddirSpy.mockRestore();
 			syncStatSpy.mockRestore();
