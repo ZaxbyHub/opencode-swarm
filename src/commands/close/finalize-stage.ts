@@ -37,6 +37,23 @@ import type {
 } from './context.js';
 import { _internals, closeReceiptLifecycleInternals } from './internals.js';
 
+async function resolveCuratorLLMDelegate(
+	directory: string,
+	mode: 'phase' | 'postmortem',
+	sessionId?: string,
+): Promise<
+	ReturnType<
+		typeof import('../../hooks/curator-llm-factory.js').createCuratorLLMDelegate
+	>
+> {
+	const seam = _internals.createCuratorLLMDelegate;
+	if (seam) return seam(directory, mode, sessionId);
+	const { createCuratorLLMDelegate } = await import(
+		'../../hooks/curator-llm-factory.js'
+	);
+	return createCuratorLLMDelegate(directory, mode, sessionId);
+}
+
 /**
  * Close-command wrapper around the exact-task terminal reconciliation service.
  *
@@ -387,7 +404,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 			ctx.directory,
 			ctx.config,
 			{
-				llmDelegate: _internals.createCuratorLLMDelegate(
+				llmDelegate: await resolveCuratorLLMDelegate(
 					ctx.directory,
 					'phase',
 					ctx.options.sessionID,
@@ -692,7 +709,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 		const curatorCfg = CCS.parse(pmLoadedConfig.curator ?? {});
 		if (curatorCfg.enabled && curatorCfg.postmortem_enabled) {
 			const pmResult = await _internals.runCuratorPostMortem(ctx.directory, {
-				llmDelegate: _internals.createCuratorLLMDelegate(
+				llmDelegate: await resolveCuratorLLMDelegate(
 					ctx.directory,
 					'postmortem',
 					ctx.options.sessionID,

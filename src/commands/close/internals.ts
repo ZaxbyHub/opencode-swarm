@@ -1,60 +1,42 @@
 import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
-import { loadPluginConfigWithMeta } from '../../config';
-import { finalizeContextTelemetry as finalizeContextTelemetryImpl } from '../../context-map/telemetry.js';
-import { finalizeCoreEventsForClose as finalizeCoreEventsForCloseImpl } from '../../events/core-events.js';
-import { archiveEvidence } from '../../evidence/manager';
-import {
-	getGitRepositoryStatus,
-	resetToMainAfterMerge,
-	resetToRemoteBranch,
-} from '../../git/branch';
-import { createCuratorLLMDelegate } from '../../hooks/curator-llm-factory';
-import { runCuratorPostMortem } from '../../hooks/curator-postmortem';
 import { redactDecisionLineForArchive } from '../../hooks/guardrails/audit-log.js';
-import { finalizeShellAuditForClose as finalizeShellAuditForCloseImpl } from '../../hooks/guardrails/shell-audit-store.js';
-import { checkHivePromotions } from '../../hooks/hive-promoter';
-import { curateAndStoreSwarm } from '../../hooks/knowledge-curator';
-import {
-	reconcilePhaseClose,
-	recordPhaseCloseIntent,
-} from '../../hooks/knowledge-receipt-ledger.js';
-import { runFinalizeRewardSweep } from '../../memory/finalize-reward-sweep';
-import { closeSnapshotCoordinationInitialization } from '../../session/snapshot-coordination-init.js';
-import {
-	endAgentSession,
-	resetSwarmStatePreservingSingletons,
-} from '../../state';
-import { closeRepoMemory } from '../../tools/repo-graph/indexed-storage';
-import { collectGarbageBestEffort, sleep } from '../../utils/bun-compat.js';
+import { finalizeShellAuditForClose } from '../../hooks/guardrails/shell-audit-store.js';
 import {
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	CLOSE_REFLECTION_TIMEOUT_MS,
 	CLOSE_SKILL_REVIEW_TIMEOUT_MS,
 } from './constants.js';
 
-/** Narrow seam for receipt/plan ordering tests. */
+/** Narrow seam for receipt/plan ordering tests. Wired by the close facade. */
 export const closeReceiptLifecycleInternals = {
-	recordPhaseCloseIntent,
-	reconcilePhaseClose,
+	recordPhaseCloseIntent:
+		undefined as unknown as typeof import('../../hooks/knowledge-receipt-ledger.js').recordPhaseCloseIntent,
+	reconcilePhaseClose:
+		undefined as unknown as typeof import('../../hooks/knowledge-receipt-ledger.js').reconcilePhaseClose,
 };
 
 /**
  * Canonical mutable close-command dependency seam.
  *
- * Stage modules read this object at call sites. The facade fills the local
- * function references synchronously after module initialization, preserving
- * the historical object identity without introducing a stage-to-facade cycle.
+ * This module intentionally has no imports from the command, agent, state, or
+ * hook graphs. The facade wires concrete implementations after all stage
+ * modules have initialized, so a direct stage import cannot re-enter close.ts
+ * through the command registry (FB-005/FB-006).
  */
 export const _internals = {
-	closeSnapshotCoordinationInitialization,
-	closeRepoMemory,
+	closeSnapshotCoordinationInitialization:
+		undefined as unknown as typeof import('../../session/snapshot-coordination-init.js').closeSnapshotCoordinationInitialization,
+	closeRepoMemory:
+		undefined as unknown as typeof import('../../tools/repo-graph/indexed-storage.js').closeRepoMemory,
 	unlinkActiveStateFileWithRetry:
 		undefined as unknown as typeof import('./fs-helpers.js').unlinkActiveStateFileWithRetry,
 	unlink: fs.unlink,
 	unlinkSidecarSync: fsSync.unlinkSync,
-	sleep,
-	collectGarbageBestEffort,
+	sleep:
+		undefined as unknown as typeof import('../../utils/bun-compat.js').sleep,
+	collectGarbageBestEffort:
+		undefined as unknown as typeof import('../../utils/bun-compat.js').collectGarbageBestEffort,
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	countSessionKnowledgeEntries:
 		undefined as unknown as typeof import('./finalize-stage.js').countSessionKnowledgeEntries,
@@ -64,20 +46,30 @@ export const _internals = {
 		undefined as unknown as typeof import('./orchestrator.js').detectFullAuto,
 	guaranteeAllPlansComplete:
 		undefined as unknown as typeof import('./finalize-stage.js').guaranteeAllPlansComplete,
-	getGitRepositoryStatus,
-	resetToMainAfterMerge,
-	resetToRemoteBranch,
+	getGitRepositoryStatus:
+		undefined as unknown as typeof import('../../git/branch.js').getGitRepositoryStatus,
+	resetToMainAfterMerge:
+		undefined as unknown as typeof import('../../git/branch.js').resetToMainAfterMerge,
+	resetToRemoteBranch:
+		undefined as unknown as typeof import('../../git/branch.js').resetToRemoteBranch,
 	copyDirRecursive:
 		undefined as unknown as typeof import('./fs-helpers.js').copyDirRecursive,
-	loadPluginConfigWithMeta,
-	curateAndStoreSwarm,
-	checkHivePromotions,
-	runCuratorPostMortem,
-	createCuratorLLMDelegate,
-	resetSwarmStatePreservingSingletons,
+	loadPluginConfigWithMeta:
+		undefined as unknown as typeof import('../../config/index.js').loadPluginConfigWithMeta,
+	curateAndStoreSwarm:
+		undefined as unknown as typeof import('../../hooks/knowledge-curator.js').curateAndStoreSwarm,
+	checkHivePromotions:
+		undefined as unknown as typeof import('../../hooks/hive-promoter.js').checkHivePromotions,
+	runCuratorPostMortem:
+		undefined as unknown as typeof import('../../hooks/curator-postmortem.js').runCuratorPostMortem,
+	createCuratorLLMDelegate:
+		undefined as unknown as typeof import('../../hooks/curator-llm-factory.js').createCuratorLLMDelegate,
+	resetSwarmStatePreservingSingletons:
+		undefined as unknown as typeof import('../../state.js').resetSwarmStatePreservingSingletons,
 	runFinalizeStage:
 		undefined as unknown as typeof import('./finalize-stage.js').runFinalizeStage,
-	runFinalizeRewardSweep,
+	runFinalizeRewardSweep:
+		undefined as unknown as typeof import('../../memory/finalize-reward-sweep.js').runFinalizeRewardSweep,
 	acquireFinalizeLock:
 		undefined as unknown as typeof import('./orchestrator.js').acquireFinalizeLock,
 	runArchiveStage:
@@ -92,22 +84,19 @@ export const _internals = {
 		undefined as unknown as typeof import('./align-stage.js').runAlignStage,
 	runFinalizeDryRun:
 		undefined as unknown as typeof import('./dry-run.js').runFinalizeDryRun,
-	archiveEvidence,
+	archiveEvidence:
+		undefined as unknown as typeof import('../../evidence/manager.js').archiveEvidence,
 	closePlanTerminalState:
 		undefined as unknown as typeof import('./finalize-stage.js').reconcileCloseTerminalStateForPlan,
-	endAgentSession,
-	flushAndDrainTelemetry: async (): Promise<void> => {
-		const { flushAndDrainTelemetry } = await import('../../telemetry.js');
-		return flushAndDrainTelemetry();
-	},
-	finalizeContextTelemetry: (directory: string): void => {
-		finalizeContextTelemetryImpl(directory);
-	},
-	finalizeCoreEvents: (directory: string): void => {
-		finalizeCoreEventsForCloseImpl(directory);
-	},
+	endAgentSession:
+		undefined as unknown as typeof import('../../state.js').endAgentSession,
+	flushAndDrainTelemetry: undefined as unknown as () => Promise<void>,
+	finalizeContextTelemetry:
+		undefined as unknown as typeof import('../../context-map/telemetry.js').finalizeContextTelemetry,
+	finalizeCoreEvents:
+		undefined as unknown as typeof import('../../events/core-events.js').finalizeCoreEventsForClose,
 	finalizeShellAudit: (directory: string): void => {
-		finalizeShellAuditForCloseImpl(directory, {
+		finalizeShellAuditForClose(directory, {
 			lineTransform: redactDecisionLineForArchive,
 		});
 	},

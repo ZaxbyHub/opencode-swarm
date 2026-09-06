@@ -21,6 +21,7 @@ import {
 	archiveCloseSummary,
 	detectFullAuto,
 } from './close/orchestrator.js';
+import { wireCloseInternals } from './close/wiring.js';
 
 Object.assign(_internals, {
 	unlinkActiveStateFileWithRetry,
@@ -38,6 +39,7 @@ Object.assign(_internals, {
 	runFinalizeDryRun,
 	closePlanTerminalState: reconcileCloseTerminalStateForPlan,
 });
+wireCloseInternals();
 
 export { runAlignStage } from './close/align-stage.js';
 export {
@@ -65,7 +67,6 @@ export type {
 export { removeSqliteSidecarsAfterClose } from './close/db-helpers.js';
 export { runFinalizeDryRun } from './close/dry-run.js';
 export { runFinalizeStage } from './close/finalize-stage.js';
-export { copyDirRecursive } from './close/fs-helpers.js';
 export {
 	_internals,
 	closeReceiptLifecycleInternals,

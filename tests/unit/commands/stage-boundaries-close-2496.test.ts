@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -112,5 +113,21 @@ describe('close stage module boundaries — issue #2496', () => {
 		const canonical = await import('../../../src/commands/close/internals.js');
 
 		expect(facade._internals).toBe(canonical._internals);
+	});
+
+	it('FB-005/FB-006: each stage can be imported directly before the facade', () => {
+		const script =
+			"import('./src/commands/close/clean-stage.ts').then(() => console.log('stage-import-ok'))";
+		const result = spawnSync(process.execPath, ['-e', script], {
+			cwd: repoRoot,
+			encoding: 'utf8',
+			stdio: ['ignore', 'pipe', 'pipe'],
+			timeout: 30_000,
+		});
+		expect(
+			result.status,
+			`direct clean-stage import failed: ${result.stderr || result.error?.message || ''}`,
+		).toBe(0);
+		expect(result.stdout).toContain('stage-import-ok');
 	});
 });

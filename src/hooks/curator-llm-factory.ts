@@ -1,4 +1,3 @@
-import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { swarmState } from '../state.js';
 import { telemetry } from '../telemetry.js';
@@ -14,10 +13,19 @@ function resolveConfiguredFallbackModels(
 		string,
 		{ model?: string; fallback_models?: string[]; disabled?: boolean }
 	>,
+	resolveFallbackModel?: (
+		agentBaseName: string,
+		fallbackIndex: number,
+		swarmAgents?: Record<
+			string,
+			{ model?: string; fallback_models?: string[]; disabled?: boolean }
+		>,
+	) => string | null,
 ): string[] {
 	const configured = swarmAgents?.[agentBaseName]?.fallback_models;
 	if (configured) return configured;
 
+	if (!resolveFallbackModel) return [];
 	const inherited: string[] = [];
 	for (let fallbackIndex = 1; ; fallbackIndex += 1) {
 		const model = resolveFallbackModel(
@@ -186,6 +194,12 @@ export function createCuratorLLMDelegate(
 		const sdkOpts = signal ? { signal } : {};
 
 		try {
+			// The agents index imports the command registry, which imports the close
+			// facade. Defer that dependency until an actual delegate invocation so
+			// direct imports of close stage modules remain cycle-free.
+			const { getSwarmAgents, resolveFallbackModel } = await import(
+				'../agents/index.js'
+			);
 			// 1. Create ephemeral session scoped to project directory.
 			// Bind to the calling session as parent so OpenCode treats this as
 			// a child session and does not persist it as a new root in the TUI.
@@ -231,6 +245,7 @@ export function createCuratorLLMDelegate(
 			const fallbackModels = resolveConfiguredFallbackModels(
 				baseRole,
 				swarmAgents,
+				resolveFallbackModel,
 			);
 
 			// Capture the session id as a const so the type narrows to `string`
