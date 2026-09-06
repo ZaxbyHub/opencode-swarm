@@ -43,7 +43,7 @@
  *   exactly one recovery probe.
  *
  * Import rules: node:fs/node:path/telemetry bus only. No OTel SDK, no
- * subprocesses, no Bun.* globals (AGENTS.md invariants 2 and 3).
+ * subprocesses, no Bun-global references (AGENTS.md invariants 2 and 3).
  */
 import {
 	existsSync,
