@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.70.0",
+  "tagCommit": "c0fb190314fb8ecb78d7144bf048197b7ab8443c",
+  "targetCommitish": "c0fb190314fb8ecb78d7144bf048197b7ab8443c",
+  "releaseBodySha256": "c71cf4ea63097477e6f1b4d7be1b4b3603159b50b7abe93e4db01f54eb92b939",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1220-reasoning-thinking-agent-override.md",
+      "sha256": "14f22ac6b67b6eb1a218ff0b696eee569af06ee735cf03ffa231b7642059c0d3"
+    }
+  ]
+}

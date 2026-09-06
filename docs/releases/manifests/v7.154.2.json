@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.154.2",
+  "tagCommit": "6b39022340186f848eb56c0beec025a335f78904",
+  "targetCommitish": "6b39022340186f848eb56c0beec025a335f78904",
+  "releaseBodySha256": "dea3bd16ba1c946fab1acdf12a02dde148bf72c5c12c67de0aa8b0fd5f2ebc81",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2402-background-coder-settlement-transfer.md",
+      "sha256": "274f05eb953d62cd1247c2554b1926484956b73de0fc026c252507b68f3412ec"
+    }
+  ]
+}

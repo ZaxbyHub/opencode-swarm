@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.79.1",
+  "tagCommit": "ef723464efdc4fe71517988fd7cba3e6ba4ce11f",
+  "targetCommitish": "ef723464efdc4fe71517988fd7cba3e6ba4ce11f",
+  "releaseBodySha256": "21384dc317d39c8183f4ad5b009967bdde18f462864d81fdfc328edba93268e7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/ci-two-tier-sharding.md",
+      "sha256": "ceb8eabd96e5beba20aaa44457b3698ba7d1cd3b521d60733040bdf0b3eb528c"
+    }
+  ]
+}

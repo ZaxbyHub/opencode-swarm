@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.76.2",
+  "tagCommit": "aceee3e04343e9af620decf31cf1c6820bee716f",
+  "targetCommitish": "aceee3e04343e9af620decf31cf1c6820bee716f",
+  "releaseBodySha256": "b587dddc58c32dbe8e3eb2cf5e0f6e6af46d19429d737138fbb8861d833f09d7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/onboarding-bundled-skills-init-sync.md",
+      "sha256": "782680d87c94a9aaa5dffc18bf15efbf6d32659b138c8f166b67551043488f40"
+    }
+  ]
+}

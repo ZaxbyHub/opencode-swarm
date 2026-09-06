@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.163.0",
+  "tagCommit": "3bbad17106330383c26862c546b2a072b0540ba8",
+  "targetCommitish": "3bbad17106330383c26862c546b2a072b0540ba8",
+  "releaseBodySha256": "48b694fc03289ffa3159c6a3dc0b38da3a64993d0978ae3147fc9b5c9dbb8e91",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2046-council-attempt-observability.md",
+      "sha256": "2828ec4fc842df3bc1048e302f370ad7d708bef6fd0baa714994e56b13eeae60"
+    }
+  ]
+}

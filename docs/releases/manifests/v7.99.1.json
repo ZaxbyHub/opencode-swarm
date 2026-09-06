@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.99.1",
+  "tagCommit": "ffc779a16321de616e36e92206aca86a5ab42fac",
+  "targetCommitish": "ffc779a16321de616e36e92206aca86a5ab42fac",
+  "releaseBodySha256": "bd4f566b5480b19cd2627e7cb5b04af4d15525e265601dea6fb68eb3885b1db8",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1231-testing-infrastructure-audit.md",
+      "sha256": "4c07e296f4afc79a27f0e383fa7970a5626db1d155a70874de70d78402614126"
+    }
+  ]
+}

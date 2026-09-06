@@ -99,7 +99,10 @@ The synthesized answer's `sources` array should reference URLs and tool outputs 
 3. Dispatch `the active swarm's council_generalist agent`,
    `the active swarm's council_skeptic agent`, and
    `the active swarm's council_domain_expert agent` with `dispatch_lanes_async`
-   when available -- one lane per agent. Record the returned `batch_id`, then
+   when available -- one lane per agent. Before the first dispatch, verify from
+   the session's actual tool list whether the controller's lane tools are
+   present; when they are absent, use the native parallel subagent path from
+   the start rather than discovering the gap on first failure. Record the returned `batch_id`, then
    continue only non-dependent architect work: prepare the synthesis outline,
    normalize the RESEARCH CONTEXT citations, and draft disagreement categories.
    Do not call `convene_general_council` or present conclusions from running

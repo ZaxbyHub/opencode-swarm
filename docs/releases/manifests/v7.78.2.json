@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.78.2",
+  "tagCommit": "dca4e4099ca54e4e7487897459b2798fad3aca6b",
+  "targetCommitish": "dca4e4099ca54e4e7487897459b2798fad3aca6b",
+  "releaseBodySha256": "f2a686f78b08134e86e8b99e91b1f299a4612489802e454ec2deb643dbe8020f",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1381-pr-monitor-worker-never-starts.md",
+      "sha256": "94c420373bcff31cccb75178c01870ae5a46302b1e82b399dbeb33606647c6b8"
+    }
+  ]
+}

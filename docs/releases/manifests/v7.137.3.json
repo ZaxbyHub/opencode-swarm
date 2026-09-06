@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.137.3",
+  "tagCommit": "61eaadc7fb489720faca27e1a77c9124841097bf",
+  "targetCommitish": "61eaadc7fb489720faca27e1a77c9124841097bf",
+  "releaseBodySha256": "3a251c5ff23c5cb48e4ad7f432f2e072a5bea3d402eebb9195cf8b692bdb1ccb",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2030-wal-consistent-close-archive.md",
+      "sha256": "75f3b7491081265593552f4c4212e0b6115662702c9a145a693cc2c07c205d75"
+    }
+  ]
+}

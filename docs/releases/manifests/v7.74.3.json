@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.74.3",
+  "tagCommit": "1102746cf67cf21a521b27127ca6fbd3e4c02bf8",
+  "targetCommitish": "1102746cf67cf21a521b27127ca6fbd3e4c02bf8",
+  "releaseBodySha256": "f72c7eedd49de93aae6be08171c00834a7da127b561f0483c7489faee6a51f0f",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1263-config-doctor-coverage-closure.md",
+      "sha256": "fbb8a5315aad308f2dc7329be2fcad8ac96729601d382eff2644dc2c86aa9f5c"
+    }
+  ]
+}

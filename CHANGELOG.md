@@ -1,5 +1,29 @@
 # Changelog
 
+## [7.167.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.4...v7.167.0) (2026-09-06)
+
+
+### Features
+
+* **pr-workflow:** add lane-liveness timeout watchdog and stall detection ([4dedf45](https://github.com/ZaxbyHub/opencode-swarm/commit/4dedf4568b9b2faa60fa6df764bbdf1f9cc17053))
+* **pr-workflow:** add lane-liveness watchdog with unified horizon (issue [#2506](https://github.com/ZaxbyHub/opencode-swarm/issues/2506)) ([004531d](https://github.com/ZaxbyHub/opencode-swarm/commit/004531d3f233bd4c549161f0fd16a362a84273e6))
+
+
+### Bug Fixes
+
+* **dispatch:** require provable non-acceptance for lane-launch failover (issue [#2473](https://github.com/ZaxbyHub/opencode-swarm/issues/2473)) ([4c91715](https://github.com/ZaxbyHub/opencode-swarm/commit/4c91715a43384be20aabd9b7ba273febe3fc1383))
+* **pr-workflow:** close lane-liveness review findings (round 2) ([5161910](https://github.com/ZaxbyHub/opencode-swarm/commit/5161910f6cda90fe36813ab85333a529fa1726c8))
+* **pr-workflow:** restore 'settled' verb in deadline disclosure arm ([c4d5b05](https://github.com/ZaxbyHub/opencode-swarm/commit/c4d5b05fdae642819f7b36ea1bf94bbe35730725))
+* **pr-workflow:** thread resolved lane-liveness policy into gate completion call ([57bd689](https://github.com/ZaxbyHub/opencode-swarm/commit/57bd689729b53c74b2171a11c81b456aabd82a29))
+
+## [7.166.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.3...v7.166.4) (2026-09-05)
+
+
+### Bug Fixes
+
+* **skills:** close PR-review findings on host-executability guardrails ([2f4175e](https://github.com/ZaxbyHub/opencode-swarm/commit/2f4175eed616a26d27649dca6fdc99146fbf6bd3))
+* **skills:** make first-class skills executable across supported hosts ([c262842](https://github.com/ZaxbyHub/opencode-swarm/commit/c262842c88b5c24867545d603bfa72c6ed25ac5b))
+
 ## [7.166.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.166.2...v7.166.3) (2026-09-05)
 
 

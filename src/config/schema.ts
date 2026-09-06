@@ -3374,6 +3374,34 @@ export const PrReviewResilienceConfigSchema = z
 	.strict();
 
 /**
+ * Issue #2506 (G2): the lane-liveness watchdog. Default OFF; each numeric knob
+ * disables its own feature at 0. When enabled, `timeout_ms` becomes the ONE
+ * effective PR-lane settlement horizon (the 30-minute reachability floor
+ * remains the fallback when the watchdog is off or `timeout_ms` is 0), and
+ * stall detection escalates low-output lanes BEFORE that horizon. Parameter
+ * surface adopted with credit from opencode-ensemble (reimplemented per ADR
+ * 0002 — no upstream code is ported).
+ */
+export const LaneLivenessWatchdogConfigSchema = z
+	.object({
+		enabled: z.boolean().default(false),
+		timeout_ms: z.number().int().min(0).max(86_400_000).default(1_800_000),
+		stall_threshold_ms: z
+			.number()
+			.int()
+			.min(0)
+			.max(86_400_000)
+			.default(300_000),
+		stall_min_steps: z.number().int().min(0).max(10_000).default(5),
+		stall_token_threshold: z.number().int().min(0).max(1_000_000).default(200),
+	})
+	.strict();
+
+export type LaneLivenessWatchdogConfig = z.infer<
+	typeof LaneLivenessWatchdogConfigSchema
+>;
+
+/**
  * Issue #2384: deprecated transcript-row settlement for Profile A PR-review
  * base/micro discovery lanes is an explicit compatibility opt-in. Omitted
  * config resolves false in consumers; legacy transcript parsing remains a
@@ -3540,6 +3568,12 @@ export const PluginConfigSchema = z.object({
 	// PR_REVIEW base-wave staged canary/fanout resilience.
 	pr_review_resilience: PrReviewResilienceConfigSchema.optional().describe(
 		'PR review base-wave staged canary/fanout resilience settings.',
+	),
+
+	// Issue #2506 (G2): lane-liveness watchdog (default-off; 0 disables each
+	// feature; timeout_ms is the single effective PR-lane horizon when on).
+	lane_liveness_watchdog: LaneLivenessWatchdogConfigSchema.optional().describe(
+		'Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes.',
 	),
 
 	// Deprecated transcript-row settlement compatibility for Profile A

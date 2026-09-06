@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.78.8",
+  "tagCommit": "d7e258bc34097814431e8453f34355ae154b536e",
+  "targetCommitish": "d7e258bc34097814431e8453f34355ae154b536e",
+  "releaseBodySha256": "6498ac87d12688bea7c282d023b748d38aee044983a87d473267643ab5929059",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/finalize-git-detection-subprocess-safety.md",
+      "sha256": "d03df8bfaa9d32e51dd7bf2e5dad919e2b742d7a3399a33be425a8e6be78e2c4"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.136.1",
+  "tagCommit": "56a8547628743b90b1cd049f29d1403be6eea05f",
+  "targetCommitish": "56a8547628743b90b1cd049f29d1403be6eea05f",
+  "releaseBodySha256": "6c78ab68fb70bc395bf25e88f8ee7fac0081d67329f2ce0fd91db3c66a42e74d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-review-candidate-transcript-framing.md",
+      "sha256": "5942324c1f277ce0a1b9a9699833660fd7f64278d7fb27d5b26bfe163ba0fc3d"
+    }
+  ]
+}

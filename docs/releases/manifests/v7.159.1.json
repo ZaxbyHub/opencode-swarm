@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.159.1",
+  "tagCommit": "1f7b420ab68ce8b4c5b7d96220f09bad99c9e34b",
+  "targetCommitish": "1f7b420ab68ce8b4c5b7d96220f09bad99c9e34b",
+  "releaseBodySha256": "4280ba7daba6a59e1704a14ed78c239920a43daf97b4b037a8732e524bf4411f",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2043-cost-correction-recovery-and-status-cache.md",
+      "sha256": "3d72b471b96672a5833099851bf0bad4d2330f1d37f79dfd82e7a6aff482ba53"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2043-provider-cost-provenance.md",
+      "sha256": "93aa1bb1ef680f24657ec454b84e982f7a11db4fe82119ead7de6b3e1658b71c"
+    }
+  ]
+}

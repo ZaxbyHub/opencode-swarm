@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.164.12",
+  "tagCommit": "5c1417d23e5957937a9cf61c4ae6a4c8844e3b09",
+  "targetCommitish": "5c1417d23e5957937a9cf61c4ae6a4c8844e3b09",
+  "releaseBodySha256": "ec91d744f8eca5bb7db1687944618e0c4204346aeed65cae681dd73eb027d9cf",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2481-atomic-sqlite-coordination.md",
+      "sha256": "9dbb5e11c9e130664246173b51eaf4a51872b14b40dce7baa3b0b70baf579447"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2481-pr-subscriptions-shadow-reconciliation.md",
+      "sha256": "bec1a6f5e3a76a0bfe4e182c10e72e838bc70cb40012fb4e4fcb697d7901a7f6"
+    }
+  ]
+}

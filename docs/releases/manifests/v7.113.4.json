@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.113.4",
+  "tagCommit": "1001e1b6464b4401c843343c1c1479984d66a132",
+  "targetCommitish": "1001e1b6464b4401c843343c1c1479984d66a132",
+  "releaseBodySha256": "d6b90f89d998ca7f38a861cb6eff495bf12ca1dca96c4c950aa5e319bfcc5f0c",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/hive-promoter-curator-flooding.md",
+      "sha256": "98ee5b364e7a763bb0ddfb935bb4ff0ca44357574ca89add147416634720e8aa"
+    }
+  ]
+}

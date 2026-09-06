@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.162.0",
+  "tagCommit": "049a3d76e3f11a40f83e0b04657269c61d4716d6",
+  "targetCommitish": "049a3d76e3f11a40f83e0b04657269c61d4716d6",
+  "releaseBodySha256": "3906a36a96335f99254c01d8307fffa3b83d11c86001185c9f94ec11b9a698ec",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1603-related-memory-links.md",
+      "sha256": "72237df976b7f3a3e4883237d1fd56cb57d17144321cdf936f32291b257c7979"
+    }
+  ]
+}

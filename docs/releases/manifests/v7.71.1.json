@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.71.1",
+  "tagCommit": "d8fa71621314c8817048935297e0740ca3273f83",
+  "targetCommitish": "d8fa71621314c8817048935297e0740ca3273f83",
+  "releaseBodySha256": "cb6cb747e913c78ad3971019b2b7937bbddcba13959f28c2473395f45a6d2b66",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1235-deep-dive-maintainability.md",
+      "sha256": "f5d9ecb21151e39126cb13ff80e83b8f4db794f82c40a2db1694557b5ee5cbaf"
+    }
+  ]
+}

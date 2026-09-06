@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.22.1",
+  "tagCommit": "ced1edbc0e7b527a8e9648a11b28fe079dd54fc5",
+  "targetCommitish": "ced1edbc0e7b527a8e9648a11b28fe079dd54fc5",
+  "releaseBodySha256": "ce56511f462cf8f2a87482db9447e1996036074e375ccaeb7c96f67ab8027b60",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/parallel-execution-profile-guidance.md",
+      "sha256": "79a6a91db5a8163341acb694446e553c14118c898b2d31513d97458f414ec61a"
+    }
+  ]
+}

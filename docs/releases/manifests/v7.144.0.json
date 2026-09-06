@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.144.0",
+  "tagCommit": "08c744d685ed01ba300f97244419aa71d008f2e0",
+  "targetCommitish": "08c744d685ed01ba300f97244419aa71d008f2e0",
+  "releaseBodySha256": "0a94776076cff9a79a5c1e374fa38225cbed707d8b2ef127de077fcaa802923f",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2034-background-delegation-checkpoint-compaction-status-health.md",
+      "sha256": "265051140120f6e90019464cf88720f37a965d3e519f77b0cb3d4f3b859be156"
+    }
+  ]
+}

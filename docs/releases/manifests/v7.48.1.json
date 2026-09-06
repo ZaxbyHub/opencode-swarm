@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.48.1",
+  "tagCommit": "246237ec1d435607b0ba6649c430f1d613a2d808",
+  "targetCommitish": "246237ec1d435607b0ba6649c430f1d613a2d808",
+  "releaseBodySha256": "b529714ee82f22c6d882ea48c736f8db39ac61348ca57afca9b81f2efeb29a9c",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/653-architect-designer-stripping-gaps-and-warn.md",
+      "sha256": "787a0f340de6580970033cc969e1b48eca1b7a77af2fc30c23f3b1589131c384"
+    }
+  ]
+}

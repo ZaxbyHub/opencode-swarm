@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.129.4",
+  "tagCommit": "1be3a8429191252d900e430fe843be6e602f765f",
+  "targetCommitish": "1be3a8429191252d900e430fe843be6e602f765f",
+  "releaseBodySha256": "8126759e36eea4b8674f866a0f6e91f24ceb1f4a2b3ea7ab8250cb0f7c2bbc57",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1691-windows-toolchain-resolution.md",
+      "sha256": "5ac5fe58cf5f1b6f7b2cf3abe5ab1268ff03257774bc956ec248638b9ecd623f"
+    }
+  ]
+}

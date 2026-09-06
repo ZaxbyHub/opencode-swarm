@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.132.0",
+  "tagCommit": "fd9b02d4d18d18b3346ca76dd343b788f462a0cb",
+  "targetCommitish": "fd9b02d4d18d18b3346ca76dd343b788f462a0cb",
+  "releaseBodySha256": "57d98c5a0bc0af89e121a415c5557aa6f750afee1237cb7e91a5aa0f1ec6713b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/v8-parallel-first-execution.md",
+      "sha256": "38fb9ed02b3779f1bf985058b754b8e9795bdd78c916f332d08848af6ef26299"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.79.0",
+  "tagCommit": "761bc4a6f9bfdaee70c92d5ef1cb10743c107e42",
+  "targetCommitish": "761bc4a6f9bfdaee70c92d5ef1cb10743c107e42",
+  "releaseBodySha256": "3f9bfee00cfca14aeb2c5f15bc8ee75e5c596bae98a4321d079eb337070c7411",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/summarizer-threshold-and-pre-check-batch-docs.md",
+      "sha256": "c60c36537dce7c4cbc184db483c7390579d2358022fdbfc4cb23df9b8f7ac674"
+    }
+  ]
+}

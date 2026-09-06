@@ -351,6 +351,41 @@
       },
       "additionalProperties": false
     },
+    "lane_liveness_watchdog": {
+      "description": "Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "timeout_ms": {
+          "default": 1800000,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "stall_threshold_ms": {
+          "default": 300000,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "stall_min_steps": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "stall_token_threshold": {
+          "default": 200,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        }
+      },
+      "additionalProperties": false
+    },
     "pr_review_legacy_transcript_compatibility": {
       "description": "Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes.",
       "type": "boolean"

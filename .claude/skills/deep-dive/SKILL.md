@@ -51,7 +51,7 @@ Produce a SCOPE MAP: list of files, modules, and interfaces within the audit bou
 
 ## Step 3 — Explorer Missions (Parallel Waves)
 
-Dispatch explorer waves with `dispatch_lanes_async` when available. Each wave contains up to `max_explorers` missions.
+Dispatch explorer waves with `dispatch_lanes_async` when available. Each wave contains up to `max_explorers` missions. Before the first dispatch, verify from the session's actual tool list whether the controller's lane tools are present; when they are absent, use the native parallel subagent path from the start rather than discovering the gap on first failure.
 
 **File caps per mission:**
 - 8 files maximum per mission
