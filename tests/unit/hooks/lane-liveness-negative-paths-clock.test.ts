@@ -10,9 +10,9 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
-	_test_exports as gateInternals,
-	activatePrWorkflow,
 	abortPrWorkflow,
+	activatePrWorkflow,
+	_test_exports as gateInternals,
 	settlePresumedStalePrWorkflowLanes,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
