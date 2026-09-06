@@ -194,4 +194,68 @@ describe('dead-lane-reclaim (#2599)', () => {
 		expect(fs.existsSync(lanePath)).toBe(true);
 		expect(listDeadLaneReclaims(directory)).toHaveLength(1);
 	});
+
+	test('corrupt store reads as empty: reclaim no-ops, nothing deleted (PRR-106)', async () => {
+		fs.writeFileSync(
+			path.join(directory, '.swarm', 'dead-lane-reclaims.json'),
+			'{not valid json',
+			'utf-8',
+		);
+		const result = await reclaimDeadLanes(directory);
+		expect(result.reclaimed).toEqual([]);
+		expect(result.retained).toEqual([]);
+		expect(closedPaths).toEqual([]);
+		// The lane directory itself is untouched — fail-safe direction.
+		expect(fs.existsSync(lanePath)).toBe(true);
+	});
+
+	test('real ownership gate: pairing-preserving semantics (PRR-108)', () => {
+		const realIsOwned = originals.isLaneOwnedByActiveSession;
+		const lane = path.join(directory, '.swarm-worktrees', 'ses-1', 'task-1');
+		// Active parent session → owned, path irrelevant.
+		expect(realIsOwned(lane, new Set(['ses-1']), 'ses-1')).toBe(true);
+		// Inactive parent, path embeds the session segment → not owned
+		// (deletion may proceed through the dirty/protected gates).
+		expect(realIsOwned(lane, new Set(['ses-2']), 'ses-1')).toBe(false);
+		// Windows separators normalize: still pairing-consistent.
+		expect(
+			realIsOwned(lane.replace(/\//g, '\\'), new Set(['ses-2']), 'ses-1'),
+		).toBe(false);
+		// Inactive parent AND path does not embed the recorded session id →
+		// self-inconsistent record → preserved (never trusted for deletion).
+		const otherLane = path.join(
+			directory,
+			'.swarm-worktrees',
+			'ses-9',
+			'task-1',
+		);
+		expect(realIsOwned(otherLane, new Set(['ses-2']), 'ses-1')).toBe(true);
+	});
+
+	test('byte cap binds before entry cap; newest entries kept (PRR-104)', async () => {
+		const bigReason = 'x'.repeat(1000);
+		for (let i = 0; i < 300; i += 1) {
+			recordDeadLaneReclaim(directory, {
+				lanePath: `${lanePath}-${i}`,
+				branchName: 'b',
+				parentSessionId: 'ses-1',
+				taskId: `task-${i}`,
+				reason: bigReason,
+			});
+		}
+		const entries = listDeadLaneReclaims(directory);
+		// ~1 KB/entry ⇒ the 256 KiB byte cap binds around ~200 entries, well
+		// below the 512-entry cap — the byte-axis drop loop is exercised.
+		expect(entries.length).toBeGreaterThan(0);
+		// Survival bound that ONLY the byte-axis drop-oldest loop satisfies:
+		// ~201 entries fit under 256 KiB at ~1.3 KB/entry with the loop, but
+		// a regression that neuters the loop lets the file cross the byte cap
+		// and readStore's oversize guard resets accumulation (~90 survivors).
+		expect(entries.length).toBeGreaterThan(150);
+		expect(entries.length).toBeLessThan(300);
+		// Newest kept: the last-written task survives; the first is dropped.
+		const ids = new Set(entries.map((entry) => entry.taskId));
+		expect(ids.has('task-299')).toBe(true);
+		expect(ids.has('task-0')).toBe(false);
+	}, 60_000);
 });

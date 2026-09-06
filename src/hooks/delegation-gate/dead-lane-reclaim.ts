@@ -1,5 +1,4 @@
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { closeProjectDb } from '../../db/project-db';
 import { atomicWriteSwarmFileSync } from '../../utils/atomic-write';
 import {
@@ -120,6 +119,15 @@ function writeStore(directory: string, store: DeadLaneReclaimStore): void {
 			serialized.length <= MAX_DEAD_LANE_RECLAIM_BYTES ||
 			entries.length === 0
 		) {
+			// PRR-104: bound-dropping is logged (debug-gated via logger.log —
+			// set OPENCODE_SWARM_DEBUG=1 to audit a missing strand record).
+			if (entries.length < store.entries.length) {
+				logger.log(
+					`[dead-lane-reclaim] store bound dropped ${
+						store.entries.length - entries.length
+					} oldest entries (caps: ${MAX_DEAD_LANE_RECLAIMS} entries / ${MAX_DEAD_LANE_RECLAIM_BYTES} bytes)`,
+				);
+			}
 			_internals.atomicWriteSwarmFileSync(storePath(directory), serialized);
 			return;
 		}
@@ -160,8 +168,28 @@ function isLaneOwnedByActiveSession(
 	activeSessionIds: Set<string>,
 	parentSessionId?: string,
 ): boolean {
-	void lanePath;
-	return activeSessionIds.has(parentSessionId ?? '');
+	if (activeSessionIds.has(parentSessionId ?? '')) {
+		return true;
+	}
+	// PRR-108 hardening: the strand record pairs lanePath with its parent
+	// session id at write time (the lane path embeds the session segment).
+	// A record whose path does NOT embed its own session id is
+	// self-inconsistent (tampered/malformed store) — never trust it for
+	// deletion; preserve so the mismatch surfaces on every start.
+	if (
+		parentSessionId &&
+		!lanePathIncludesSessionSegment(lanePath, parentSessionId)
+	) {
+		return true;
+	}
+	return false;
+}
+
+function lanePathIncludesSessionSegment(
+	lanePath: string,
+	sessionId: string,
+): boolean {
+	return lanePath.replace(/\\/g, '/').split('/').includes(sessionId);
 }
 
 /**
@@ -320,10 +348,6 @@ async function pathExists(target: string): Promise<boolean> {
 		return false;
 	}
 }
-
-type RemoveWorktreeResult =
-	| { success: true }
-	| { success: false; error: string };
 
 export const _internals: {
 	removeWorktree: typeof removeWorktree;

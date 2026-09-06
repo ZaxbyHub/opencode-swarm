@@ -413,9 +413,11 @@ async function createSessionWithinBudget<T>(
 
 /**
  * Issue #2599: effective lane session-create deadline. The user's explicit
- * `worktree.session_create_timeout_ms` (read from the RAW config so an unset
- * knob stays distinguishable from a set one) wins; otherwise the
- * `_internals.worktreeSessionCreateTimeoutMs` seam applies — preserving the
+ * `worktree.session_create_timeout_ms` wins when set. NOTE: `args.config` is
+ * the POST-zod-parse config (loader safeParse), so the schema's
+ * `.default(30_000)` already supplies 30_000 for an unset knob in production —
+ * the `_internals.worktreeSessionCreateTimeoutMs` fallback is reachable only
+ * in tests (and from raw, unparseable config objects), where it preserves the
  * seam's pre-#2599 role as the test override for the dispatch paths.
  */
 function resolveSessionCreateTimeoutMs(

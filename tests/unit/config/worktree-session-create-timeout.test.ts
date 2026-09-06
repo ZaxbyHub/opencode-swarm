@@ -48,4 +48,15 @@ describe('worktree.session_create_timeout_ms (issue #2599)', () => {
 		} as Parameters<typeof resolveWorktreeIsolationConfig>[0]);
 		expect(resolved.session_create_timeout_ms).toBe(30_000);
 	});
+
+	test('lean-turbo synthesis resolves to the default (worktree_isolation is a boolean flag, not a knob surface — BOT-2 refuted)', () => {
+		const resolved = resolveWorktreeIsolationConfig({
+			worktree: undefined,
+			turbo: {
+				strategy: 'lean',
+				lean: { merge_strategy: 'merge', worktree_isolation: true },
+			},
+		} as unknown as Parameters<typeof resolveWorktreeIsolationConfig>[0]);
+		expect(resolved.session_create_timeout_ms).toBe(30_000);
+	});
 });

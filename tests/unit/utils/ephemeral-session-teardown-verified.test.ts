@@ -55,6 +55,21 @@ describe('teardownEphemeralSessionVerified (#2599)', () => {
 		expect(result.ok).toBe(true);
 	});
 
+	test('a non-empty body object (even empty data) means alive — pinned semantics', async () => {
+		// BOT-3: get returning { data: {} } yields a defined, non-null body,
+		// which sessionExists treats as PRESENT. This pins that boundary:
+		// only undefined/null bodies (or get-throw) mean gone.
+		const lifecycle = fakeLifecycle({
+			deleteImpl: async () => {},
+			getImpl: async () => ({ data: {} }),
+		});
+		const result = await teardownEphemeralSessionVerified(lifecycle, 'ses-1');
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.kind).toBe('ephemeral-session-teardown-unverified');
+		}
+	});
+
 	test('surviving session: bounded retries then typed unverified failure', async () => {
 		let deleteCalls = 0;
 		const lifecycle = fakeLifecycle({
