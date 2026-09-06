@@ -176,6 +176,52 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 		}
 	});
 
+	test('re-walks when the detector loses a changed warm manifest', async () => {
+		const tempDir = fs.realpathSync(
+			fs.mkdtempSync(
+				path.join(os.tmpdir(), 'dispatch-manifest-root-detect-delete-'),
+			),
+		);
+		const packageRoot = path.join(tempDir, 'package-root');
+		const closerRoot = path.join(packageRoot, 'packages', 'worker');
+		const sourceDir = path.join(closerRoot, 'src');
+		const cargoManifest = path.join(closerRoot, 'Cargo.toml');
+		fs.mkdirSync(sourceDir, { recursive: true });
+		fs.writeFileSync(path.join(packageRoot, 'package.json'), '{}');
+		fs.writeFileSync(cargoManifest, '[package]\nname = "worker"\n');
+
+		const realDetect = dispatchInternals.detectProjectLanguages;
+		let deleteDuringNextDetection = false;
+		let deletedDuringDetection = false;
+		dispatchInternals.detectProjectLanguages = async (directory) => {
+			if (
+				deleteDuringNextDetection &&
+				!deletedDuringDetection &&
+				path.resolve(directory) === closerRoot
+			) {
+				deletedDuringDetection = true;
+				fs.unlinkSync(cargoManifest);
+			}
+			return realDetect(directory);
+		};
+		try {
+			// Warm the nearer Rust root, then change its manifest so this call must
+			// invoke detection rather than reuse the previous profile cache.
+			expect((await pickBackend(sourceDir))?.id).toBe('rust');
+			fs.writeFileSync(cargoManifest, '[package]\nname = "worker-rewritten"\n');
+			deleteDuringNextDetection = true;
+
+			// Without post-detection validation this call cached null for the deleted
+			// Cargo root and only the following call found the TypeScript ancestor.
+			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
+			expect(deletedDuringDetection).toBe(true);
+			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
+		} finally {
+			dispatchInternals.detectProjectLanguages = realDetect;
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	test('bounds async stat fanout for a 30-directory cold walk', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-manifest-root-budget-')),
@@ -195,11 +241,11 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 		try {
 			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
 
-			// The old pre-stat + readdir + post-stat proof cost two async stats per
-			// directory. Keep the new traversal to one async stat per directory;
-			// the following timeout test covers latency across every async FS op.
+			// The walk uses one async stat per visited directory plus one manifest
+			// stat for hashing and one selected-root stat for post-detection
+			// validation; the timeout test covers latency across every async FS op.
 			const statCalls = statSpy.mock.calls.length;
-			expect(statCalls).toBeLessThanOrEqual(directoryVisits + 1);
+			expect(statCalls).toBeLessThanOrEqual(directoryVisits + 2);
 		} finally {
 			statSpy.mockRestore();
 			fs.rmSync(tempDir, { recursive: true, force: true });

@@ -255,6 +255,33 @@ async function isManifestRootCacheEntryValid(
 	return true;
 }
 
+/**
+ * Check that the root selected before language detection still describes the
+ * same project once detection has yielded. Detection reads the filesystem too,
+ * so publishing its result without this check could cache `null` for a manifest
+ * removed between the hash observation and the detector's own directory walk.
+ */
+async function isSelectedRootObservationStillValid(
+	resolution: ManifestRootResolution,
+	hash: string,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	const currentHash = await manifestHash(resolution.root, signal);
+	throwIfAborted(signal);
+	if (
+		currentHash !== hash ||
+		(resolution.rootHadManifest && currentHash === '')
+	) {
+		return false;
+	}
+
+	// Checking the selected root keeps the hot path bounded: replaying each
+	// ancestor fingerprint after detection would add another stat per directory
+	// to a cold walk. A new closer manifest after this observation linearizes to
+	// the next call, just as it does for a warm root-cache hit.
+	return true;
+}
+
 function evictManifestRootCacheIfNeeded(): void {
 	if (manifestRootCache.size <= _internals.cacheCapacity) return;
 	let oldestKey: string | undefined;
@@ -413,83 +440,114 @@ export async function pickBackend(
 	dir: string,
 	signal?: AbortSignal,
 ): Promise<LanguageBackend | null> {
-	let resolution = await findManifestRoot(dir, signal);
-	let { root } = resolution;
-	throwIfAborted(signal);
-	let hash = await manifestHash(root, signal);
-	throwIfAborted(signal);
-	if (resolution.rootHadManifest && hash === '') {
-		// A warm trace can validate immediately before its selected manifest is
-		// deleted. Hashing then observes that deletion, so discard the stale root
-		// and re-walk once to select the nearest ancestor visible at that point.
-		manifestRootCache.delete(resolution.key);
-		resolution = await findManifestRoot(dir, signal);
-		root = resolution.root;
+	// A filesystem mutation can race either root discovery or language
+	// detection. Make one fresh, abort-aware retry after a failed observation;
+	// a second instability fails closed without publishing a stale result.
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const resolution = await findManifestRoot(dir, signal);
+		const { root } = resolution;
 		throwIfAborted(signal);
-		hash = await manifestHash(root, signal);
+		const hash = await manifestHash(root, signal);
 		throwIfAborted(signal);
-	}
-	cacheManifestRoot(
-		resolution.key,
-		root,
-		resolution.rootHadManifest,
-		resolution.trace,
-		resolution.cacheable,
-		signal,
-	);
-	const cacheKey = await canonicalRootKeyFreshAsync(root);
-	throwIfAborted(signal);
-	const cached = cache.get(cacheKey);
-	if (cached && cached.hash === hash) {
-		cacheProfileKey(dir, cacheKey);
-		return cached.backend;
-	}
+		if (resolution.rootHadManifest && hash === '') {
+			// A warm trace can validate immediately before its selected manifest is
+			// deleted. Hashing then observes that deletion, so discard the stale root
+			// and re-walk once to select the nearest ancestor visible at that point.
+			manifestRootCache.delete(resolution.key);
+			if (attempt === 0) continue;
+			profileCacheKeyByInput.delete(path.resolve(dir));
+			return null;
+		}
 
-	// Short-circuit: no manifests anywhere → no language detection possible.
-	// Skip the (potentially expensive) detectProjectLanguages walk and
-	// return null immediately. Saves a full repo scan on workspaces that
-	// don't have any of the 20 known manifests — including the repro-704
-	// T1 fixture which is a synthetic 500-file source-only workspace under
-	// a hard 400ms server() deadline.
-	if (hash === '') {
+		const cacheKey = await canonicalRootKeyFreshAsync(root);
+		throwIfAborted(signal);
+		const cached = cache.get(cacheKey);
+		if (cached && cached.hash === hash) {
+			cacheManifestRoot(
+				resolution.key,
+				root,
+				resolution.rootHadManifest,
+				resolution.trace,
+				resolution.cacheable,
+				signal,
+			);
+			cacheProfileKey(dir, cacheKey);
+			return cached.backend;
+		}
+
+		// Short-circuit: no manifests anywhere → no language detection possible.
+		// Skip the (potentially expensive) detectProjectLanguages walk and
+		// return null immediately. Saves a full repo scan on workspaces that
+		// don't have any of the 20 known manifests — including the repro-704
+		// T1 fixture which is a synthetic 500-file source-only workspace under
+		// a hard 400ms server() deadline.
+		if (hash === '') {
+			cacheManifestRoot(
+				resolution.key,
+				root,
+				resolution.rootHadManifest,
+				resolution.trace,
+				resolution.cacheable,
+				signal,
+			);
+			cache.set(cacheKey, {
+				hash,
+				backend: null,
+				profiles: [],
+				insertOrder: insertCounter++,
+			});
+			evictIfNeeded();
+			cacheProfileKey(dir, cacheKey);
+			return null;
+		}
+
+		const profiles = await _internals.detectProjectLanguages(root);
+		throwIfAborted(signal);
+		if (
+			!(await isSelectedRootObservationStillValid(resolution, hash, signal))
+		) {
+			manifestRootCache.delete(resolution.key);
+			if (attempt === 0) continue;
+			profileCacheKeyByInput.delete(path.resolve(dir));
+			return null;
+		}
+
+		cacheManifestRoot(
+			resolution.key,
+			root,
+			resolution.rootHadManifest,
+			resolution.trace,
+			resolution.cacheable,
+			signal,
+		);
+		if (profiles.length === 0) {
+			cache.set(cacheKey, {
+				hash,
+				backend: null,
+				profiles: [],
+				insertOrder: insertCounter++,
+			});
+			evictIfNeeded();
+			cacheProfileKey(dir, cacheKey);
+			return null;
+		}
+		// detectProjectLanguages returns profiles tier-sorted (lowest tier first).
+		// Pick the first one — caller can list secondary languages via
+		// `pickedProfiles(dir)` which exposes the cached ranked list.
+		const winner = profiles[0];
+		const backend = LANGUAGE_BACKEND_REGISTRY.getOrDefault(winner.id) ?? null;
 		cache.set(cacheKey, {
 			hash,
-			backend: null,
-			profiles: [],
+			backend,
+			profiles: profiles.map((p) => ({ id: p.id })),
 			insertOrder: insertCounter++,
 		});
 		evictIfNeeded();
 		cacheProfileKey(dir, cacheKey);
-		return null;
+		return backend;
 	}
 
-	const profiles = await _internals.detectProjectLanguages(root);
-	throwIfAborted(signal);
-	if (profiles.length === 0) {
-		cache.set(cacheKey, {
-			hash,
-			backend: null,
-			profiles: [],
-			insertOrder: insertCounter++,
-		});
-		evictIfNeeded();
-		cacheProfileKey(dir, cacheKey);
-		return null;
-	}
-	// detectProjectLanguages returns profiles tier-sorted (lowest tier first).
-	// Pick the first one — caller can list secondary languages via
-	// `pickedProfiles(dir)` which exposes the cached ranked list.
-	const winner = profiles[0];
-	const backend = LANGUAGE_BACKEND_REGISTRY.getOrDefault(winner.id) ?? null;
-	cache.set(cacheKey, {
-		hash,
-		backend,
-		profiles: profiles.map((p) => ({ id: p.id })),
-		insertOrder: insertCounter++,
-	});
-	evictIfNeeded();
-	cacheProfileKey(dir, cacheKey);
-	return backend;
+	return null;
 }
 
 /**
