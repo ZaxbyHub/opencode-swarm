@@ -100,8 +100,15 @@ function hostLaunchCount(ops: SessionOps): number {
 	);
 }
 
-/** Same-model transient retries observed at launch (bounded to 0 by contract). */
-const OBSERVED_SAME_MODEL_RETRIES_AT_LAUNCH = 0;
+/**
+ * Same-model transient retries observed at launch. DERIVED from the frozen
+ * manifest contract constant (not an independent hardcode): a manifest-side
+ * change to the launch same-model retry bound propagates here, so the
+ * `attempts` observations can never silently diverge from the declared
+ * mechanism bound (review finding CC-2/PRR-004 follow-up).
+ */
+const OBSERVED_SAME_MODEL_RETRIES_AT_LAUNCH =
+	CONTRACT_SAME_MODEL_TRANSIENT_RETRIES_AT_LAUNCH;
 
 afterEach(() => {
 	Object.assign(_internals, originalInternals);
@@ -229,6 +236,7 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 		};
 		_internals.getSessionOps = () => ops;
 
+		const startedAt = performance.now();
 		await executeDispatchLanesAsync(
 			{
 				batch_id: 'budget-ambiguity',
@@ -240,11 +248,17 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 			directory,
 		);
 		await awaitSignal(aborted, 'ambiguous launch abort');
+		await waitFor(
+			() => ops.delete.mock.calls.length > 0,
+			'session deleted after ambiguous launch error',
+		);
+		expect(ops.delete).toHaveBeenCalledTimes(1);
 
 		const hostLaunches = hostLaunchCount(ops);
 		assertWithinBudget(getScenarioBudget('ambiguous-transport-single-shot'), {
 			host_launches: hostLaunches,
 			attempts: hostLaunches + OBSERVED_SAME_MODEL_RETRIES_AT_LAUNCH,
+			wall_clock_ms: Math.round(performance.now() - startedAt),
 		});
 		expect(hostLaunches).toBe(2);
 		expect(findByBatchId(directory, 'budget-ambiguity')[0]?.status).toBe(
@@ -270,6 +284,7 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 		};
 		_internals.getSessionOps = () => ops;
 
+		const startedAt = performance.now();
 		await executeDispatchLanesAsync(
 			{
 				batch_id: 'budget-definitive',
@@ -288,6 +303,7 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 		assertWithinBudget(getScenarioBudget('definitive-rejection-fallback'), {
 			host_launches: hostLaunches,
 			attempts: hostLaunches + OBSERVED_SAME_MODEL_RETRIES_AT_LAUNCH,
+			wall_clock_ms: Math.round(performance.now() - startedAt),
 		});
 		expect(hostLaunches).toBe(3);
 	});
@@ -310,6 +326,7 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 		};
 		_internals.getSessionOps = () => ops;
 
+		const startedAt = performance.now();
 		await executeDispatchLanesAsync(
 			{
 				batch_id: 'budget-timeout',
@@ -319,11 +336,17 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 			directory,
 		);
 		await awaitSignal(aborted, 'timeout launch abort');
+		await waitFor(
+			() => ops.delete.mock.calls.length > 0,
+			'session deleted after launch timeout error',
+		);
+		expect(ops.delete).toHaveBeenCalledTimes(1);
 
 		const hostLaunches = hostLaunchCount(ops);
 		assertWithinBudget(getScenarioBudget('timeout-no-retry'), {
 			host_launches: hostLaunches,
 			attempts: hostLaunches + OBSERVED_SAME_MODEL_RETRIES_AT_LAUNCH,
+			wall_clock_ms: Math.round(performance.now() - startedAt),
 		});
 		expect(hostLaunches).toBe(2);
 	});
@@ -337,6 +360,7 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 		};
 		_internals.getSessionOps = () => ops;
 
+		const startedAt = performance.now();
 		const result = await executeDispatchLanes(
 			{ lanes: [{ id: 'budget-cap-lane', agent: 'explorer', prompt: 'x' }] },
 			directory,
@@ -347,6 +371,7 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 		assertWithinBudget(getScenarioBudget('create-cap-exhaustion'), {
 			host_launches: hostLaunches,
 			attempts: hostLaunches + OBSERVED_SAME_MODEL_RETRIES_AT_LAUNCH,
+			wall_clock_ms: Math.round(performance.now() - startedAt),
 		});
 		expect(hostLaunches).toBe(CONTRACT_MAX_SESSION_CREATE_GENERATIONS);
 	});
@@ -371,6 +396,7 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 		};
 		_internals.getSessionOps = () => ops;
 
+		const startedAt = performance.now();
 		const launched = await executeDispatchLanesAsync(
 			{
 				batch_id: 'budget-late-stale',
@@ -393,11 +419,13 @@ describe('launch budget manifest (issue 2473 AC6)', () => {
 				),
 			'late generation-1 session deleted',
 		);
+		expect(ops.delete).toHaveBeenCalledTimes(1);
 
 		const hostLaunches = hostLaunchCount(ops);
 		assertWithinBudget(getScenarioBudget('late-stale-generation-ignored'), {
 			host_launches: hostLaunches,
 			attempts: hostLaunches + OBSERVED_SAME_MODEL_RETRIES_AT_LAUNCH,
+			wall_clock_ms: Math.round(performance.now() - startedAt),
 		});
 		expect(hostLaunches).toBe(3);
 	});

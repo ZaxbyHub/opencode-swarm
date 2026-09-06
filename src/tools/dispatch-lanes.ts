@@ -3398,14 +3398,16 @@ function consumePrReviewReceiptAppendFailureLog(
 }
 
 /**
- * Issue #2473: thrown ONLY when the host returned a definitive rejection
- * envelope (`result.error`) for a prompt/promptAsync LAUNCH call — the server
- * responded, so the prompt was provably never accepted. Transport-level
- * throws (ECONNRESET/ETIMEDOUT/broken pipe — no server response) and
- * withTimeout deadlines stay plain Errors: acceptance is unknowable there, so
- * the launch classify callbacks must treat them as permanent (single-shot)
- * instead of failover-eligible. Extends Error with the byte-identical message
- * (#2349): the distinction rides on the class, never on the message text.
+ * Issue #2473: thrown when the host RESPONDED to a prompt/promptAsync LAUNCH
+ * call without an accept payload — the SDK `result.error` rejection envelope
+ * (async site) or any response lacking `result.data` (sync site, which reads
+ * `result.error` for the message when present). The server responded, so the
+ * prompt was provably never accepted. Transport-level throws
+ * (ECONNRESET/ETIMEDOUT/broken pipe — no server response) and withTimeout
+ * deadlines stay plain Errors: acceptance is unknowable there, so the launch
+ * classify callbacks must treat them as permanent (single-shot) instead of
+ * failover-eligible. Extends Error with the byte-identical message (#2349):
+ * the distinction rides on the class, never on the message text.
  */
 class LanePromptLaunchRejectionError extends Error {
 	constructor(message: string) {

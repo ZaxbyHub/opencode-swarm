@@ -23,7 +23,6 @@
  */
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { getAgentConfigs } from '../../../src/agents/index.js';
 import { findByBatchId } from '../../../src/background/pending-delegations.js';
 import type { PluginConfig } from '../../../src/config/index.js';
@@ -95,6 +94,21 @@ async function awaitSignal(
 	}
 }
 
+/** Bounded attempt-counted poll — fails loudly instead of hanging on a missed condition. */
+async function waitFor(
+	predicate: () => boolean,
+	what: string,
+	maxAttempts = 500,
+): Promise<void> {
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		if (predicate()) return;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(
+		`condition not observed within ${maxAttempts} attempts: ${what}`,
+	);
+}
+
 const AMBIGUOUS_MESSAGES = [
 	'fetch failed: ECONNRESET',
 	'fetch failed: ETIMEDOUT',
@@ -162,6 +176,15 @@ describe('dispatch-lanes launch ambiguity (issue 2473 AC1/AC4)', () => {
 				seenModels,
 			);
 			expect(seenModels).toEqual(['primary-reviewer']);
+			// The launch-error settlement tears the never-accepted session down
+			// (abort -> delete); a wedged or skipped delete would strand the host
+			// session behind a terminal record. Teardown is fire-and-forget, so
+			// poll for the delete rather than assuming it landed with the abort.
+			await waitFor(
+				() => ops.delete.mock.calls.length > 0,
+				'session deleted after launch error',
+			);
+			expect(ops.delete).toHaveBeenCalledTimes(1);
 			const record = findByBatchId(directory, `ambiguity-async-${slug}`)[0];
 			expect(record?.status).toBe('error');
 			expect(record?.generation).toBe(1);

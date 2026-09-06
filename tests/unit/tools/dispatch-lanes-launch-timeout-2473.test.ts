@@ -72,6 +72,21 @@ async function awaitSignal(
 	}
 }
 
+/** Bounded attempt-counted poll — fails loudly instead of hanging on a missed condition. */
+async function waitFor(
+	predicate: () => boolean,
+	what: string,
+	maxAttempts = 500,
+): Promise<void> {
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		if (predicate()) return;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(
+		`condition not observed within ${maxAttempts} attempts: ${what}`,
+	);
+}
+
 afterEach(() => {
 	Object.assign(_internals, originalInternals);
 	getAgentConfigs({ agents: {} } as unknown as PluginConfig);
@@ -116,9 +131,68 @@ describe('launch timeout and create cap bounds (issue 2473 AC5)', () => {
 
 		expect(ops.promptAsync).toHaveBeenCalledTimes(1);
 		expect(ops.create).toHaveBeenCalledTimes(1);
+		// Launch-error settlement tears the never-accepted session down
+		// (abort -> delete); a wedged or skipped delete would strand the host
+		// session behind a terminal record. Teardown is fire-and-forget, so
+		// poll for the delete rather than assuming it landed with the abort.
+		await waitFor(
+			() => ops.delete.mock.calls.length > 0,
+			'session deleted after launch error',
+		);
+		expect(ops.delete).toHaveBeenCalledTimes(1);
 		const record = findByBatchId(directory, 'timeout-no-retry-async')[0];
 		expect(record?.status).toBe('error');
 		expect(record?.generation).toBe(1);
+	});
+
+	test('a definitive rejection whose message mentions "timed out" WITH a transient token still fails over (clause-removal pin)', async () => {
+		// The pre-#2473 classify had a `/timed out/i -> permanent` clause that
+		// ran BEFORE the transient-pattern check, so a definitive server
+		// rejection (result.error envelope) carrying both "timed out" and a
+		// transient token (here: 504) was permanently single-shot. The
+		// instanceof-based gate removed that precedence: a rejection class with
+		// a transient-matching message is failover-eligible. This test fails on
+		// the pre-fix clause (1 launch) and passes on the fix (2 launches).
+		seedReviewerFallback();
+		const directory = tempProject();
+		const seenModels: string[] = [];
+		const ops: SessionOps = {
+			create: mock(async () => ({ data: { id: 'timeout-504-session' } })),
+			prompt: mock(async () => ({ data: { parts: [] } })),
+			promptAsync: mock(async (input) => {
+				seenModels.push(input.body.model?.modelID ?? '(default)');
+				if (input.body.model?.modelID === 'primary-reviewer') {
+					return {
+						error: { message: '504 gateway timeout: request timed out' },
+					};
+				}
+				return { data: { accepted: true } };
+			}),
+			delete: mock(async () => undefined),
+		};
+		_internals.getSessionOps = () => ops;
+
+		await executeDispatchLanesAsync(
+			{
+				batch_id: 'timeout-504-failover',
+				launch_timeout_ms: 5_000,
+				lanes: [
+					{ id: 'timeout-504-lane', agent: 'reviewer', prompt: 'inspect' },
+				],
+			},
+			directory,
+		);
+		await waitFor(
+			() =>
+				findByBatchId(directory, 'timeout-504-failover')[0]?.status ===
+				'running',
+			'fallback record reaches running',
+		);
+
+		expect(ops.promptAsync).toHaveBeenCalledTimes(2);
+		expect(seenModels).toEqual(['primary-reviewer', 'fb1']);
+		const record = findByBatchId(directory, 'timeout-504-failover')[0];
+		expect(record?.status).toBe('running');
 	});
 
 	test('blocking prompt timeout is never retried, even with a fallback model configured', async () => {
