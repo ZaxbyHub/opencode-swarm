@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.46.3",
+  "tagCommit": "866fc1886ca14f488aa32b4ed16384317c76ef3b",
+  "targetCommitish": "866fc1886ca14f488aa32b4ed16384317c76ef3b",
+  "releaseBodySha256": "234e26e474443340426d478c64de04c6be5630d7a083f7a0f0cdc48b63fcef07",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/realpath-hardening-765.md",
+      "sha256": "581cbbe3ded205f0595dc12797c7a9bdd57159e81bd85a2c605ab82e8509118b"
+    }
+  ]
+}

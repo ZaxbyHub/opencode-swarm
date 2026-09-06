@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.30.0",
+  "tagCommit": "15babc024979d5afaa11e68e8cc29e318ec89d6a",
+  "targetCommitish": "15babc024979d5afaa11e68e8cc29e318ec89d6a",
+  "releaseBodySha256": "f65552c78ba71efb3ac3c1058e92582b286bf35200de10a452251a633ea58a3e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/swarm-memory-core.md",
+      "sha256": "9bc97bb1fc1944fc8f2af99e5376c58b3c2ed44e2aff454c7a30b03f4a417187"
+    }
+  ]
+}

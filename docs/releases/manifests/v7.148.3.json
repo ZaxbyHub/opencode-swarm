@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.148.3",
+  "tagCommit": "4d10180383517324dc645c3c9dd846838cc7e48d",
+  "targetCommitish": "4d10180383517324dc645c3c9dd846838cc7e48d",
+  "releaseBodySha256": "088f1e9167d30b12d4e032bc1146159c0aea1a35a8e9e429b908caf26a894067",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2354-knowledge-recall-gemini-schema-fix.md",
+      "sha256": "36bed29397948eeea31e148415cc2db13233ee57da6373b12b78cbe61ec34cc9"
+    }
+  ]
+}

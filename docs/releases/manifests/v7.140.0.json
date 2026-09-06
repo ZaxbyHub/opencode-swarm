@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.140.0",
+  "tagCommit": "f958b45bf3e89fd641641c5f19cb11312c977402",
+  "targetCommitish": "f958b45bf3e89fd641641c5f19cb11312c977402",
+  "releaseBodySha256": "c9f0b82e970c534cb970925a857e3e7b6a35c173ae06bd24e7445a712ac15cf9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1987-repo-map-ask-context-pack.md",
+      "sha256": "304b1292ace1ad79a90934043e3eb3282e0d75f64310a164daaaf189fe5f736b"
+    }
+  ]
+}

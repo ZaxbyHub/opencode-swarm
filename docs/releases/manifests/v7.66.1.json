@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.66.1",
+  "tagCommit": "5d5bd0830fdf15ca0dabdc369ddfc1c301f69874",
+  "targetCommitish": "5d5bd0830fdf15ca0dabdc369ddfc1c301f69874",
+  "releaseBodySha256": "2cec31f3ccc4672afd8a8b1ea0cc4e5f5f0d20e5a47a2648a2f7652b3ee2a75d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/903-auto-select-architect.md",
+      "sha256": "cfcaeefa95376cd93d267f20b2210e3237d9c3ceb07e52937fed46c851dd0b1d"
+    }
+  ]
+}

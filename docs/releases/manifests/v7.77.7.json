@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.77.7",
+  "tagCommit": "8e7b0d1935c9a664561d580d5c6f23ed697ed4d9",
+  "targetCommitish": "8e7b0d1935c9a664561d580d5c6f23ed697ed4d9",
+  "releaseBodySha256": "6a76309f73f9a5575331dd178ea95bfb4714d10037528673a251b1251f6c4bca",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/fix-fk-session-delete-race.md",
+      "sha256": "278f5c8ae9c101078dc6770af76ca8a77c7a5d6d13c965a98554934a9cbb4220"
+    }
+  ]
+}

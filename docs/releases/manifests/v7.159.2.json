@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.159.2",
+  "tagCommit": "9adf43401334ea22330ff2f94d8efae0b45094d6",
+  "targetCommitish": "9adf43401334ea22330ff2f94d8efae0b45094d6",
+  "releaseBodySha256": "1ac37366ccbd4e826952f26e82bada5eb4277a0516e44e8b704133e831dde2cf",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2302-sast-baseline-reflow-triage.md",
+      "sha256": "c2b5f3e06eaf0c6a27be23173093f85a6e22532cff4998e5b2faf99fd27314d8"
+    }
+  ]
+}

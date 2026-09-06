@@ -331,6 +331,7 @@ describe('reconcileTaggedRelease', () => {
 		put(root, 'docs/releases/pending/b.md', 'b');
 		const result = await reconcileTaggedRelease({
 			...options(root),
+			release: { tagName: 'v1.2.3', body: '' },
 			entries: [],
 			maxPendingFragments: 1,
 		});
@@ -367,6 +368,7 @@ describe('reconcileTaggedRelease', () => {
 
 		const result = await reconcileTaggedRelease({
 			...options(root),
+			release: { tagName: 'v1.2.3', body: '' },
 			entries: [],
 			maxPendingFragments: 1,
 			dryRun: false,

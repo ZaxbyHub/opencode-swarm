@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.116.0",
+  "tagCommit": "99d1c65438b0d00bf7777162f10db2ac50ec21e5",
+  "targetCommitish": "99d1c65438b0d00bf7777162f10db2ac50ec21e5",
+  "releaseBodySha256": "89d24e9ebcb2acba85ca3059134fede6fc95f3b54be82cec1fb78d37bb2b2cd0",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1820-evaluation-substrate.md",
+      "sha256": "f025378a6d17c262fe2fa00a7e123c3a3651f630f0abf20318219b77193d2395"
+    }
+  ]
+}

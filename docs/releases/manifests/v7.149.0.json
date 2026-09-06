@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.149.0",
+  "tagCommit": "b08cac711510561e5afb15bb5aa6db19747ed879",
+  "targetCommitish": "b08cac711510561e5afb15bb5aa6db19747ed879",
+  "releaseBodySha256": "a851efe60033d5b47083d4ad6948fa61cc7f4ff07cf3b53279ff0b5bac38c3b5",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2039-core-events-bounded-store.md",
+      "sha256": "e8486d677bc2f761724eb3896d4247d4d450bea050f2422a80433c630332c443"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.43.1",
+  "tagCommit": "ccd355fae4de0b36411f917100b2c998780d3bfa",
+  "targetCommitish": "ccd355fae4de0b36411f917100b2c998780d3bfa",
+  "releaseBodySha256": "46b231d4210c965941dc55d294b07014095efd2542b795cfc8807f7d3887aafe",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/extract-remaining-architect-mode-skills.md",
+      "sha256": "f48edac6e7d6fb6b71d7d95808dcd3f9d25cb3cdce417111f1f3e867bd7299a2"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.78.1",
+  "tagCommit": "0831accd051d07a14fdf8fab2000a0f9cf132ef8",
+  "targetCommitish": "0831accd051d07a14fdf8fab2000a0f9cf132ef8",
+  "releaseBodySha256": "95d5d4baffa11a4d079462e4f98f09ce656d71ef5e1da42191124c42f7fb895e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1285-knowledge-toctou-bumpcountersbatch-knowledge-archive.md",
+      "sha256": "a3c983ec0cbdc2d275d5f8529bbb340af499ad3d024d67899d708c79b74e5e64"
+    }
+  ]
+}

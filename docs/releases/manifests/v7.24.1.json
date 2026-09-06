@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.24.1",
+  "tagCommit": "8efe8756c3e97367ef76ddda886f3fa5e30af310",
+  "targetCommitish": "8efe8756c3e97367ef76ddda886f3fa5e30af310",
+  "releaseBodySha256": "cd25e154046dc10dff85d155caa3d3b8044cd7b062d3e33f37b244ed96a1930d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/finalize-hive-eligibility-gate.md",
+      "sha256": "62535c873ee762368d336ade03ca15de1954c3abbbe9307f42f151b48d97ee70"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/knowledge-query-encounter-score-null-fix.md",
+      "sha256": "d3f215a058b22df1e8000c2540c2b8f74825aab69e0f7be6a23becc647c443ec"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.112.2",
+  "tagCommit": "2616d6f31a34ec8eb3697e7f4152d389186efc7c",
+  "targetCommitish": "2616d6f31a34ec8eb3697e7f4152d389186efc7c",
+  "releaseBodySha256": "237c1c855f9b20df974a2ff1285ae7b77ffd768f5a8cb75b46655b8174c767e7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/fix-release-notes-commit-sha-resolution.md",
+      "sha256": "d44985a11a0bae1691e962b6ae872ab1905567ab531a51323e7cd8b8c9312f1f"
+    }
+  ]
+}

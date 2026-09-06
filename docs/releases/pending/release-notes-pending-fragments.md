@@ -78,20 +78,9 @@ just relocate the same conflict surface).
 
 ## Known caveats
 
-- After a release ships, the exact tag job prepares a bounded cleanup plan
-  containing the full published release body, the peeled tag commit, and
-  SHA-256 provenance for every consumed fragment. A fresh `main` checkout
-  dry-runs and applies that plan, then opens a cleanup PR. It never pushes to
-  `main` directly.
-- Cleanup deletes only a regular, non-symlink pending file whose current raw
-  bytes match the tagged hash. Renamed, edited, missing, ambiguous,
-  user-authored, or otherwise unconsumed files remain visible in diagnostics.
-- The cleanup PR materializes `docs/releases/v<version>.md` and a deterministic
-  manifest under `docs/releases/manifests/`. Identical reruns are no-ops and
-  conflicting history fails closed.
-- `verify-retention` is enforced by drift CI. It rejects a byte-identical
-  manifest-consumed fragment that remains pending and caps the total pending
-  set, while a separate hard scan cap bounds filesystem work.
+- Pending fragments are NOT automatically deleted after release. A
+  maintainer prunes `docs/releases/pending/` after a release ships
+  (kept human-in-the-loop to avoid silently dropping notes).
 - The aggregation runs only when a release PR exists (post-merge to
   `main`) or when a tag is cut. Local PR previews don't show the
   aggregated body — that's by design, since the aggregation depends

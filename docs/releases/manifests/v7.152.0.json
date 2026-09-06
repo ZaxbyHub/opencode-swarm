@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.152.0",
+  "tagCommit": "911787b1252e848525ddd86f58e677478d0a3ca2",
+  "targetCommitish": "911787b1252e848525ddd86f58e677478d0a3ca2",
+  "releaseBodySha256": "2dfea5d1838521e2c9cd7c8eeb5f51d27eafee8ed7d5df8225faf10156b093f2",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/1532-symbol-edge-v2.md",
+      "sha256": "2de61cbccc9a459fd4a25f4f8ba23c082c0197c4356b0d1743c4f28355235290"
+    }
+  ]
+}

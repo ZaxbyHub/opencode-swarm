@@ -6,6 +6,7 @@ import {
 	auditFragmentRetention,
 	createHistoricalReplayBatch,
 	HISTORICAL_REPLAY_STATE,
+	HISTORICAL_REPLAY_TTL_MS,
 	MAX_FRAGMENT_BYTES,
 	readDirectoryNamesBounded,
 	readFragmentFromWorkspace,
@@ -142,5 +143,35 @@ describe('release note input bounds', () => {
 		});
 		expect(existsSync(path.join(root, HISTORICAL_REPLAY_STATE))).toBe(false);
 		expect(auditFragmentRetention(root, 1).violation).toBe(false);
+	});
+
+	test('fails retention when an interrupted replay authorization expires', async () => {
+		const root = fixtureRoot();
+		writeFileSync(path.join(root, 'docs/releases/pending/a.md'), 'a');
+		writeFileSync(path.join(root, 'docs/releases/pending/b.md'), 'b');
+		const nowMs = Date.parse('2026-09-06T00:00:00.000Z');
+		await reconcileTaggedRelease({
+			repoRoot: root,
+			tagName: 'v1.2.3',
+			tagCommit: '0123456789abcdef0123456789abcdef01234567',
+			release: { tagName: 'v1.2.3', body: '' },
+			entries: [],
+			dryRun: false,
+			maxPendingFragments: 1,
+			nowMs,
+			historicalReplay: createHistoricalReplayBatch(
+				['v1.2.3', 'v1.2.4'],
+				'0',
+				2,
+			),
+		});
+
+		const expired = auditFragmentRetention(
+			root,
+			1,
+			nowMs + HISTORICAL_REPLAY_TTL_MS + 1,
+		);
+		expect(expired.violation).toBe(true);
+		expect(expired.diagnostics.join('\n')).toMatch(/authorization expired/i);
 	});
 });

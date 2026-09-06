@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.91.1",
+  "tagCommit": "09c70f93b8e6684f9be5a5cf0a78ea06db5670d2",
+  "targetCommitish": "09c70f93b8e6684f9be5a5cf0a78ea06db5670d2",
+  "releaseBodySha256": "eb86a6218f3ed53b8483664fc43d2cdd32e99978c0dcf5a988425d4197dfea66",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/skill-improvements-pr1503-retro.md",
+      "sha256": "19d9f63c4c01fee795c0bd6ad439814af2a445a0f3bcd728c5d7099601bb49e7"
+    }
+  ]
+}

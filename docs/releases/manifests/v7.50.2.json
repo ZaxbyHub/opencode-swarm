@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.50.2",
+  "tagCommit": "e4f5dc6d09166a939d2ffb85df5d6da145922350",
+  "targetCommitish": "e4f5dc6d09166a939d2ffb85df5d6da145922350",
+  "releaseBodySha256": "f97b38a8d99ed561d8500abf16df655739453248b2c158541916bf22dfd7b80a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-1109-concurrent-write-safety.md",
+      "sha256": "6bed45b9b09c91cd59547afa48e6e0782971ff7e243c20141a3be1428dea14b7"
+    }
+  ]
+}

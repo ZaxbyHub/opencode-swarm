@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.113.2",
+  "tagCommit": "ff7b690dcbc536125ac101dd9d221ca402f95d59",
+  "targetCommitish": "ff7b690dcbc536125ac101dd9d221ca402f95d59",
+  "releaseBodySha256": "9bac003e2945796272e08c62c5f62fe13b2d9c821696c0635758d33b68d0da87",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-1764-skill-tool-hardening.md",
+      "sha256": "6114f74a9ac9b5f328afdf4228659d44d9c2911fef78cf2d3c698e4a3b607cc8"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.28.2",
+  "tagCommit": "36253e04a43fb812bd46601c2a140e1e01e70ee4",
+  "targetCommitish": "36253e04a43fb812bd46601c2a140e1e01e70ee4",
+  "releaseBodySha256": "19d90e8ec7b6918b3ac65d993249de4688f826249bc5598edad8c4887e0521c2",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/970-parallel-evidence-taskid.md",
+      "sha256": "42668be215f10db9c99ca00c3f62733b0db8c70bf701721bf42c179c283f0596"
+    }
+  ]
+}

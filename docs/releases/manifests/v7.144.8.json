@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.144.8",
+  "tagCommit": "aa5addd948aa847d2343b4c4c812c7dd139cc366",
+  "targetCommitish": "aa5addd948aa847d2343b4c4c812c7dd139cc366",
+  "releaseBodySha256": "822396b0be5f0caa454eb5689672818e6c14755b59d10ab18d184d8cac564587",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2263-lane-env-denylist.md",
+      "sha256": "55065b8d91ef362adb26668fbab1099b46591c0e47bced23a076294476c635f0"
+    }
+  ]
+}

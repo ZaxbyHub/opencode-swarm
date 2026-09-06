@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.46.1",
+  "tagCommit": "04bae85e00eb9f66948e8f8034e3259192e5d606",
+  "targetCommitish": "04bae85e00eb9f66948e8f8034e3259192e5d606",
+  "releaseBodySha256": "c96cf62e11596a9fec11358ec162e9f1ae1cc88750659edb1d6e8486a9841cbb",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/critic-funnel-fixes.md",
+      "sha256": "6e40e8fce7ccbeee72ef443f1bbb453702ad0054e418a0e9f0e6aa1e99f933c7"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.78.6",
+  "tagCommit": "edb91b5fc74a85def2b8e143fff962d6980ef575",
+  "targetCommitish": "edb91b5fc74a85def2b8e143fff962d6980ef575",
+  "releaseBodySha256": "46f724e7285b341f0ce557e1b7527c9ea2740dc13d18b67ec35783139720d1cf",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2026-06-11-close-git-status-finalize.md",
+      "sha256": "f83b78b7491584e74121226c9ef1d5f719e0a5d6dc22b688386a5a27cdbb8084"
+    }
+  ]
+}

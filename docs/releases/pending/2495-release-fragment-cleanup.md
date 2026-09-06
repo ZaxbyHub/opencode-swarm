@@ -9,3 +9,6 @@
   fragments that were accidentally left behind.
 - Historical reconstruction uses capped tag batches with snapshot-bound resume
   cursors, so partial backfills cannot silently truncate or lose their place.
+- The initial exact-tag backfill materializes 226 release bodies/manifests and
+  removes 252 byte-identical consumed fragments; 383 changed, ambiguous, or
+  genuinely unconsumed fragments remain visible instead of being guessed away.

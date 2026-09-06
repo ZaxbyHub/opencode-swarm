@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.144.5",
+  "tagCommit": "12a90324f08a3f83f992285a9b898f126c889da2",
+  "targetCommitish": "12a90324f08a3f83f992285a9b898f126c889da2",
+  "releaseBodySha256": "4c71b9fd7c38f71c5ff375dd462c5a30ba77b46e7cc8ef1e8c53ce15c06cd2fc",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2276-lane-delivery-budgets-shell-rules.md",
+      "sha256": "5856a70d7ad8342a336cdcb6291ba3fd8e7fef20dbc6e567f756581a6ff5279c"
+    }
+  ]
+}

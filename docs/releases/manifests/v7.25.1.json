@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.25.1",
+  "tagCommit": "2363694ef0ab42ababa4bc3b0c350220e1e9dfe1",
+  "targetCommitish": "2363694ef0ab42ababa4bc3b0c350220e1e9dfe1",
+  "releaseBodySha256": "e651782a3299e826ecdcdb0a6ecd2ebafe1c9b0893efcd4e5f6641207d0119c6",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/gate-pass2-cross-task-isolation.md",
+      "sha256": "9b3c623e91d5ff5128c4d937006e68642737856f49aabb5e0893243f9780a545"
+    }
+  ]
+}

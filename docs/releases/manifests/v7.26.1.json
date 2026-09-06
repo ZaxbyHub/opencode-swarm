@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.26.1",
+  "tagCommit": "5f934bd3a4b6726e0c605049819b93fd2ea1d09f",
+  "targetCommitish": "5f934bd3a4b6726e0c605049819b93fd2ea1d09f",
+  "releaseBodySha256": "a851c493033e552dafa4b22651432c5d9ee928894b84cf6d6c2bc1127153cf00",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/prm-hard-stop-delegation-guard.md",
+      "sha256": "7aa4243f02ce8d6d49cf21be904d64629e50062e8675fa1eb5016a582e4062a7"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.48.0",
+  "tagCommit": "a4cfa0ac004252d9d850b5fbc89c4bdb63f72480",
+  "targetCommitish": "a4cfa0ac004252d9d850b5fbc89c4bdb63f72480",
+  "releaseBodySha256": "feffd79f6c5ee5cfee4b9dabeb13cf6f0b545138ebbbda05ee9834b171f7b9f2",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-review-quality-hardening.md",
+      "sha256": "7e48e3084fa899dd947172f74d6a02902ab195793c02fc6ab44699c04a291463"
+    }
+  ]
+}

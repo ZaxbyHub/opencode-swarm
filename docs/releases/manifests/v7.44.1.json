@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.44.1",
+  "tagCommit": "7b1de2f8d2dd871713955c2db46d36f5ff8bb21a",
+  "targetCommitish": "7b1de2f8d2dd871713955c2db46d36f5ff8bb21a",
+  "releaseBodySha256": "1da7decd475865d876a7992ba58dfa23c79f30b683403387145fce9a43a65496",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/fix-analyzer-ranked-suffix-matching.md",
+      "sha256": "9d6428d7a3ce0f9f60a3f7fdb73df27e4d1a324b26442c6fd54c70430ee0c5d0"
+    }
+  ]
+}

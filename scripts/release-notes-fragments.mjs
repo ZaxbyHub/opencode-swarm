@@ -53,6 +53,7 @@ export const MARKER_END = '<!-- custom-release-notes:end -->';
 export const FRAGMENT_DIR = 'docs/releases/pending';
 export const HISTORICAL_REPLAY_STATE =
 	'docs/releases/manifests/historical-replay-state.json';
+export const HISTORICAL_REPLAY_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 
 // -----------------------------------------------------------------------------
 // Pure helpers — exported for unit tests. No I/O, no gh CLI.
@@ -85,6 +86,123 @@ export function stripCustomReleaseNotesBlock(body) {
 	const endIdx = body.lastIndexOf(MARKER_END);
 	if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return body;
 	return body.slice(0, startIdx) + body.slice(endIdx + MARKER_END.length);
+}
+
+function hasNonEmptyCustomReleaseNotesBlock(body) {
+	if (typeof body !== 'string' || body.length === 0) return false;
+	const startIdx = body.indexOf(MARKER_START);
+	const endIdx = body.lastIndexOf(MARKER_END);
+	if (startIdx === -1 || endIdx <= startIdx) return false;
+	return body
+		.slice(startIdx + MARKER_START.length, endIdx)
+		.trim().length > 0;
+}
+
+function customReleaseNotesPayload(body) {
+	if (typeof body !== 'string') return null;
+	const startIdx = body.indexOf(MARKER_START);
+	const endIdx = body.lastIndexOf(MARKER_END);
+	if (startIdx === -1 || endIdx <= startIdx) return null;
+	return body.slice(startIdx + MARKER_START.length, endIdx).trim();
+}
+
+function normalizePublishedFragmentText(text) {
+	return text.replace(/\x07/g, '^G');
+}
+
+function publishedBlockMatchesEntries(releaseBody, entries) {
+	const combined = combineFragments(entries);
+	return (
+		upsertReleaseNotesBlock(releaseBody, combined) === releaseBody ||
+		upsertReleaseNotesBlock(
+			releaseBody,
+			normalizePublishedFragmentText(combined),
+		) === releaseBody
+	);
+}
+
+export function selectEntriesForPublishedBlock(entries, releaseBody) {
+	const payload = customReleaseNotesPayload(releaseBody);
+	if (!payload) return [];
+	const selected = [];
+	const usedPaths = new Set();
+	for (const part of payload.split('\n\n---\n\n')) {
+		const matches = entries.filter(
+			(entry) =>
+				typeof entry?.filePath === 'string' &&
+				typeof entry?.content === 'string' &&
+				normalizePublishedFragmentText(entry.content.replace(/\s+$/, '')) ===
+					part &&
+				!usedPaths.has(entry.filePath),
+		);
+		if (matches.length !== 1) return null;
+		selected.push(matches[0]);
+		usedPaths.add(matches[0].filePath);
+	}
+	return publishedBlockMatchesEntries(releaseBody, selected) ? selected : null;
+}
+
+export function reconstructPublishedBlockFromWorkspace(
+	repoRoot,
+	releaseBody,
+	options = {},
+) {
+	const payload = customReleaseNotesPayload(releaseBody);
+	if (!payload) return [];
+	const {
+		listFragments = listPendingFragmentState,
+		readFragment = readFragmentFromWorkspace,
+	} = options;
+	const pending = listFragments(repoRoot).filter((item) => item.regular);
+	if (pending.length > MAX_PENDING_FRAGMENT_SCAN) {
+		throw new Error('pending fragment hard scan cap exceeded');
+	}
+	let totalBytes = 0;
+	const available = pending.flatMap((item) => {
+		const size = Number.isInteger(item.size)
+			? item.size
+			: lstatSync(item.absolute).size;
+		totalBytes += size;
+		if (totalBytes > MAX_FRAGMENT_SCAN_BYTES) {
+			throw new Error('historical fragment scan byte cap exceeded');
+		}
+		try {
+			const fragment = readFragment(repoRoot, item.relativePath);
+			if (fragment === null) return [];
+			return [{ filePath: item.relativePath, ...fragment }];
+		} catch (error) {
+			if (error instanceof Error && /not valid UTF-8/i.test(error.message)) {
+				return [];
+			}
+			throw error;
+		}
+	});
+	const selected = [];
+	const usedPaths = new Set();
+	const parts = payload.split('\n\n---\n\n');
+	for (let order = 0; order < parts.length; order += 1) {
+		const matches = available.filter(
+			(entry) =>
+				normalizePublishedFragmentText(entry.content.replace(/\s+$/, '')) ===
+					parts[order] &&
+				!usedPaths.has(entry.filePath),
+		);
+		if (matches.length !== 1) {
+			throw new Error(
+				'incomplete release provenance: published fragment has ' +
+					matches.length +
+					' exact workspace matches',
+			);
+		}
+		selected.push({ ...matches[0], prNumber: null, order });
+		usedPaths.add(matches[0].filePath);
+	}
+	if (!publishedBlockMatchesEntries(releaseBody, selected)) {
+		throw new Error(
+			'incomplete release provenance: workspace fragments do not reconstruct the published block',
+		);
+	}
+	return selected;
 }
 
 /**
@@ -231,6 +349,11 @@ export function combineFragments(entries) {
 		if (!dedup.has(fp)) dedup.set(fp, e);
 	}
 	const sorted = [...dedup.values()].sort((a, b) => {
+		if (Number.isInteger(a.order) || Number.isInteger(b.order)) {
+			const oa = Number.isInteger(a.order) ? a.order : Number.MAX_SAFE_INTEGER;
+			const ob = Number.isInteger(b.order) ? b.order : Number.MAX_SAFE_INTEGER;
+			if (oa !== ob) return oa - ob;
+		}
 		const pa = Number.isFinite(a.prNumber) ? a.prNumber : Number.MAX_SAFE_INTEGER;
 		const pb = Number.isFinite(b.prNumber) ? b.prNumber : Number.MAX_SAFE_INTEGER;
 		if (pa !== pb) return pa - pb;
@@ -303,6 +426,7 @@ const MAX_RELEASE_MANIFEST_BYTES = 1024 * 1024;
 export const MAX_RELEASE_CANDIDATES = 1_000;
 export const MAX_FRAGMENT_ENTRIES = 5_000;
 export const MAX_FRAGMENT_BYTES = 256 * 1024;
+export const MAX_FRAGMENT_SCAN_BYTES = 64 * 1024 * 1024;
 
 function sha256(value) {
 	const hash = createHash('sha256');
@@ -457,7 +581,9 @@ function listPendingFragmentState(repoRoot) {
 export function auditFragmentRetention(
 	repoRoot,
 	maxPendingFragments = MAX_PENDING_FRAGMENT_RETENTION,
+	nowMs = Date.now(),
 ) {
+	if (!Number.isFinite(nowMs)) throw new Error('retention audit time must be finite');
 	const pending = listPendingFragmentState(repoRoot);
 	const manifestsRoot = path.resolve(repoRoot, 'docs/releases/manifests');
 	const consumedHashesByPath = new Map();
@@ -511,6 +637,7 @@ export function auditFragmentRetention(
 		}
 	}
 	let activeHistoricalReplay = false;
+	let staleHistoricalReplay = false;
 	const replayStatePath = safeRepositoryFilePath(repoRoot, HISTORICAL_REPLAY_STATE);
 	if (existsSync(replayStatePath)) {
 		const stateStat = lstatSync(replayStatePath);
@@ -518,14 +645,23 @@ export function auditFragmentRetention(
 			throw new Error('historical replay state size cap exceeded');
 		}
 		const state = JSON.parse(readFileSync(replayStatePath, 'utf8'));
-		if (state?.schemaVersion !== 1 || typeof state.tagName !== 'string') {
+		if (
+			state?.schemaVersion !== 1 ||
+			typeof state.tagName !== 'string' ||
+			typeof state.expiresAt !== 'string'
+		) {
 			throw new Error('historical replay state is malformed');
 		}
 		const authorization = validateHistoricalReplayProof(state.replay, state.tagName);
 		if (!authorization?.hasMoreWork) {
 			throw new Error('historical replay state does not authorize more work');
 		}
-		activeHistoricalReplay = true;
+		const expiresAt = Date.parse(state.expiresAt);
+		if (!Number.isFinite(expiresAt)) {
+			throw new Error('historical replay state expiry is malformed');
+		}
+		if (expiresAt <= nowMs) staleHistoricalReplay = true;
+		else activeHistoricalReplay = true;
 	}
 	const countViolation =
 		pending.length > maxPendingFragments && !activeHistoricalReplay;
@@ -533,7 +669,8 @@ export function auditFragmentRetention(
 		pending: pending.length,
 		limit: maxPendingFragments,
 		consumedPending,
-		violation: countViolation || consumedPending.length > 0,
+		violation:
+			countViolation || consumedPending.length > 0 || staleHistoricalReplay,
 		diagnostics: [
 			'retention: ' +
 				pending.length +
@@ -548,6 +685,9 @@ export function auditFragmentRetention(
 				: []),
 			...(activeHistoricalReplay
 				? ['retention: authorized historical replay remains in progress']
+				: []),
+			...(staleHistoricalReplay
+				? ['retention: historical replay authorization expired before completion']
 				: []),
 		],
 	};
@@ -577,6 +717,7 @@ export async function reconcileTaggedRelease(options) {
 		dryRun = true,
 		historicalReplay = null,
 		maxPendingFragments = MAX_PENDING_FRAGMENT_RETENTION,
+		nowMs = Date.now(),
 		log = () => {},
 	} = options ?? {};
 	if (typeof repoRoot !== 'string' || repoRoot.length === 0) {
@@ -614,7 +755,7 @@ export async function reconcileTaggedRelease(options) {
 	for (const entry of entries) {
 		if (
 			!entry ||
-			!Number.isInteger(entry.prNumber) ||
+			(!Number.isInteger(entry.prNumber) && !Number.isInteger(entry.order)) ||
 			typeof entry.filePath !== 'string' ||
 			typeof entry.content !== 'string'
 		) {
@@ -703,10 +844,12 @@ export async function reconcileTaggedRelease(options) {
 	if (!markerShapeValid) {
 		throw new Error('release body has an invalid custom release-notes block');
 	}
-	if (
-		entryByPath.size > 0 &&
-		upsertReleaseNotesBlock(release.body, combineFragments(entries)) !== release.body
-	) {
+	if (entryByPath.size === 0 && hasNonEmptyCustomReleaseNotesBlock(release.body)) {
+		throw new Error(
+			'published custom release-notes block is non-empty but consumed-fragment provenance is empty',
+		);
+	}
+	if (entryByPath.size > 0 && !publishedBlockMatchesEntries(release.body, entries)) {
 		throw new Error('published custom release-notes block does not match consumed fragments');
 	}
 
@@ -722,7 +865,8 @@ export async function reconcileTaggedRelease(options) {
 		fragments: [...entryByPath.values()]
 			.sort((a, b) => a.filePath.localeCompare(b.filePath))
 			.map((entry) => ({
-				prNumber: entry.prNumber,
+				prNumber: Number.isInteger(entry.prNumber) ? entry.prNumber : null,
+				...(Number.isInteger(entry.order) ? { order: entry.order } : {}),
 				path: entry.filePath,
 				sha256: entry.contentSha256,
 			})),
@@ -773,10 +917,16 @@ export async function reconcileTaggedRelease(options) {
 			log('deleted consumed fragment ' + relativePath);
 		}
 		if (replayAuthorization?.hasMoreWork) {
+			const expiresAt = new Date(nowMs + HISTORICAL_REPLAY_TTL_MS).toISOString();
 			await io.writeText(
 				HISTORICAL_REPLAY_STATE,
 				JSON.stringify(
-					{ schemaVersion: 1, tagName, replay: historicalReplay },
+					{
+						schemaVersion: 1,
+						tagName,
+						expiresAt,
+						replay: historicalReplay,
+					},
 					null,
 					2,
 				) + '\n',
@@ -965,10 +1115,15 @@ export function selectValidPrNumbers(prs) {
  *
  * Returns a deduplicated array of PR numbers in first-seen order.
  */
-function resolveCommitShasToPrNumbers(shas, log) {
+function resolveCommitShasToPrNumbers(shas, log, requireComplete = false) {
 	if (!Array.isArray(shas) || shas.length === 0) return [];
 	const repoSlug = process.env.GITHUB_REPOSITORY;
 	if (!repoSlug) {
+		if (requireComplete) {
+			throw new Error(
+				'incomplete release provenance: GITHUB_REPOSITORY is required for commit SHA resolution',
+			);
+		}
 		log('GITHUB_REPOSITORY not set — cannot resolve commit SHAs to PR numbers');
 		return [];
 	}
@@ -977,6 +1132,11 @@ function resolveCommitShasToPrNumbers(shas, log) {
 	for (const sha of shas) {
 		const res = tryGhJson(['api', '--paginate', '--slurp', `repos/${repoSlug}/commits/${sha}/pulls`]);
 		if (!res.ok || !Array.isArray(res.value)) {
+			if (requireComplete) {
+				throw new Error(
+					'incomplete release provenance: failed to resolve commit SHA ' + sha,
+				);
+			}
 			log(`skip SHA ${sha.slice(0, 7)} — API lookup failed`);
 			continue;
 		}
@@ -1018,7 +1178,8 @@ function resolveCommitShasToPrNumbers(shas, log) {
 const MAX_CHANGELOG_FALLBACK_BYTES = 2 * 1024 * 1024;
 const MAX_FALLBACK_CANDIDATES = 50;
 
-export function resolveAllCandidates(strippedBody, log) {
+export function resolveAllCandidates(strippedBody, log, options = {}) {
+	const { requireComplete = false } = options;
 	const directCandidates = extractCandidatePrNumbers(strippedBody);
 	if (directCandidates.length > MAX_RELEASE_CANDIDATES) {
 		throw new Error('release candidate PR cap exceeded');
@@ -1033,8 +1194,13 @@ export function resolveAllCandidates(strippedBody, log) {
 	let shaResolved = [];
 	if (commitShas.length > 0) {
 		try {
-			shaResolved = resolveCommitShasToPrNumbers(commitShas, log);
+			shaResolved = resolveCommitShasToPrNumbers(
+				commitShas,
+				log,
+				requireComplete,
+			);
 		} catch (err) {
+			if (requireComplete) throw err;
 			log(`commit-SHA resolution failed unexpectedly — continuing with direct candidates only: ${err instanceof Error ? err.message : String(err)}`);
 			shaResolved = [];
 		}
@@ -1175,15 +1341,34 @@ export async function verifyBlockSurvived(opts) {
  * workspace. Returns the `entries` array shape expected by
  * `combineFragments`.
  */
-function collectFragmentsForPrs(candidates, repoRoot, log) {
+export function collectFragmentsForPrs(
+	candidates,
+	repoRoot,
+	log,
+	options = {},
+) {
 	if (!Array.isArray(candidates) || candidates.length > MAX_RELEASE_CANDIDATES) {
 		throw new Error('release candidate PR cap exceeded');
 	}
+	const {
+		requireComplete = false,
+		verifyCandidate = verifyPr,
+		readFragment = readFragmentFromWorkspace,
+	} = options;
 	const entries = [];
 	const seenPaths = new Set();
 	for (const num of candidates) {
-		const pr = verifyPr(num);
+		const pr = verifyCandidate(num);
+		if (pr?.kind === 'non-pr') {
+			log(`skip #${num} — reference is an issue, not a PR`);
+			continue;
+		}
 		if (!pr || !Array.isArray(pr.files)) {
+			if (requireComplete) {
+				throw new Error(
+					'incomplete release provenance: failed to resolve candidate PR #' + num,
+				);
+			}
 			log(`skip #${num} — not a PR or no files`);
 			continue;
 		}
@@ -1195,8 +1380,16 @@ function collectFragmentsForPrs(candidates, repoRoot, log) {
 		for (const fp of fragPaths) {
 			if (seenPaths.has(fp)) continue;
 			seenPaths.add(fp);
-			const fragment = readFragmentFromWorkspace(repoRoot, fp);
+			const fragment = readFragment(repoRoot, fp);
 			if (fragment === null) {
+				if (requireComplete) {
+					throw new Error(
+						'incomplete release provenance: fragment referenced by #' +
+							num +
+							' is unavailable: ' +
+							fp,
+					);
+				}
 				log(`fragment ${fp} referenced by #${num} not found in workspace`);
 				continue;
 			}
@@ -1207,6 +1400,17 @@ function collectFragmentsForPrs(candidates, repoRoot, log) {
 		}
 	}
 	return entries;
+}
+
+export function verifyProvenanceCandidate(num) {
+	const pr = tryGhJson(['pr', 'view', String(num), '--json', 'number,files']);
+	if (pr.ok) return pr.value;
+	const repoSlug = requireRepoSlug();
+	const issue = tryGhJson(['api', `repos/${repoSlug}/issues/${num}`]);
+	if (issue.ok && !issue.value?.pull_request) return { kind: 'non-pr' };
+	throw new Error(
+		'incomplete release provenance: failed to classify candidate #' + num,
+	);
 }
 
 /**
@@ -1620,17 +1824,65 @@ export function validateExactTagProof(remoteCommit, localCommit, headCommit) {
 	return remoteCommit;
 }
 
-async function resolveReleaseEntries(tagName, releaseBody, repoRoot, log) {
+export async function resolveReleaseEntries(
+	tagName,
+	releaseBody,
+	repoRoot,
+	log,
+	options = {},
+) {
+	const {
+		readChangelog = (filePath) => readFileSync(filePath, 'utf8'),
+		statChangelog = (filePath) => statSync(filePath),
+		readFragment = readFragmentFromWorkspace,
+		listFragments = listPendingFragmentState,
+		verifyCandidate = verifyProvenanceCandidate,
+	} = options;
+	const payload = customReleaseNotesPayload(releaseBody);
+	if (payload) {
+		try {
+			const markerCandidates = resolveAllCandidates(payload, log);
+			const markerEntries = collectFragmentsForPrs(
+				markerCandidates,
+				repoRoot,
+				log,
+				{ readFragment, verifyCandidate },
+			);
+			const exactMarkerEntries = selectEntriesForPublishedBlock(
+				markerEntries,
+				releaseBody,
+			);
+			if (exactMarkerEntries?.length > 0) return exactMarkerEntries;
+		} catch (error) {
+			log(
+				'marker-derived provenance did not resolve exactly: ' +
+					(error instanceof Error ? error.message : String(error)),
+			);
+		}
+		try {
+			return reconstructPublishedBlockFromWorkspace(repoRoot, releaseBody, {
+				listFragments,
+				readFragment,
+			});
+		} catch (error) {
+			log(
+				'bounded workspace provenance scan did not resolve exactly: ' +
+					(error instanceof Error ? error.message : String(error)),
+			);
+		}
+	}
 	const strippedBody = stripCustomReleaseNotesBlock(releaseBody);
-	let candidates = resolveAllCandidates(strippedBody, log);
+	let candidates = resolveAllCandidates(strippedBody, log, {
+		requireComplete: true,
+	});
 	if (candidates.length === 0) {
 		const decision = await decideChangelogFallback({
 			tagName,
 			repoRoot,
-			readChangelog: (filePath) => readFileSync(filePath, 'utf8'),
-			statChangelog: (filePath) => statSync(filePath),
+			readChangelog,
+			statChangelog,
 			resolveCandidates: (section, nestedLog) =>
-				resolveAllCandidates(section, nestedLog),
+				resolveAllCandidates(section, nestedLog, { requireComplete: true }),
 			log,
 		});
 		if (decision.exitCode !== 0) {
@@ -1638,7 +1890,17 @@ async function resolveReleaseEntries(tagName, releaseBody, repoRoot, log) {
 		}
 		candidates = decision.candidates;
 	}
-	return collectFragmentsForPrs(candidates, repoRoot, log);
+	const entries = collectFragmentsForPrs(candidates, repoRoot, log, {
+		requireComplete: true,
+		verifyCandidate,
+		readFragment,
+	});
+	if (payload && !selectEntriesForPublishedBlock(entries, releaseBody)) {
+		throw new Error(
+			'incomplete release provenance: published block could not be reconstructed exactly',
+		);
+	}
+	return entries;
 }
 
 function writeAtomicJson(filePath, value) {

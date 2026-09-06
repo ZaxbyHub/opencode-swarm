@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.136.4",
+  "tagCommit": "3811fe5981072c7fa541523e9f08430f18594590",
+  "targetCommitish": "3811fe5981072c7fa541523e9f08430f18594590",
+  "releaseBodySha256": "2d8fc7dc3f4718c6a07aeb79c487a54757c9cafc62bdda4f92c8d7be193e9b84",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2068-context-budget-tool-output-pruning.md",
+      "sha256": "bfa2b8161ddc370219e93cc052d89d150779523180fb18d3d48d8495c89cdb75"
+    }
+  ]
+}

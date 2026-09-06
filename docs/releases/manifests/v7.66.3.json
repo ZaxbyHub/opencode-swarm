@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.66.3",
+  "tagCommit": "7bcedd84c2b22723b2fb93dec9aefdc8fa18468c",
+  "targetCommitish": "7bcedd84c2b22723b2fb93dec9aefdc8fa18468c",
+  "releaseBodySha256": "2ed299a44712d87e5d14801468eca21925a811003d5b946be68bd96ca54b329d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/multi-swarm-agent-config-fallback.md",
+      "sha256": "bae3e7560223de839539aaa249c6ba27aaa25620f1625650af970cb4a7d1985a"
+    }
+  ]
+}

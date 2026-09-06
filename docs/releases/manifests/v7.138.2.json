@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.138.2",
+  "tagCommit": "e7e0029ffd704d18d2144fe0dc70a882b5cca83b",
+  "targetCommitish": "e7e0029ffd704d18d2144fe0dc70a882b5cca83b",
+  "releaseBodySha256": "047ebba54da9929db018c6765bb1f30e61c0b086016e7ead4e27d01646a9e940",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/pr-review-discovery-salvage.md",
+      "sha256": "dbd99764e80ffe9d1fd55720441f013db914f6757365bcbe144a7828043d4712"
+    }
+  ]
+}
