@@ -210,6 +210,11 @@ export async function buildProjectContext(
 ): Promise<ProjectContext | null> {
 	const backend = await _internals.pickBackend(directory, signal);
 	if (!backend) return null;
+	// Capture the ranked profiles before any await after pickBackend. The
+	// dispatch profile-key side table is bounded and process-global, so another
+	// concurrent lookup could otherwise evict or retarget this directory's entry
+	// while framework/entry-point selectors are pending.
+	const profiles = _internals.pickedProfiles(directory);
 
 	const ctx: ProjectContext = emptyProjectContext();
 	ctx.PROJECT_LANGUAGE = backend.displayName;
@@ -270,7 +275,6 @@ export async function buildProjectContext(
 	// Secondary languages: reuse the ranked list pickBackend already cached
 	// (B1 fix from PR #825 adversarial review — avoids a second
 	// detectProjectLanguages call on the 300ms critical path).
-	const profiles = _internals.pickedProfiles(directory);
 	if (profiles.length > 1) {
 		ctx.PROJECT_CONTEXT_SECONDARY_LANGUAGES = profiles
 			.slice(1)

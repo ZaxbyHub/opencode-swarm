@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -11,12 +11,16 @@ import { withTimeoutSignal } from '../../../src/utils/timeout';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('language dispatch manifest-root cache capacity (#2489)', () => {
+	beforeEach(() => {
+		clearDispatchCache();
+	});
+
 	afterEach(() => {
 		clearDispatchCache();
 	});
 
 	test('bounds manifest-root entries by the shared dispatch cache capacity', async () => {
-		const tempDir = canonicalMkdtemp('dispatch-manifest-root-lru-');
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-bounded-');
 		const originalCapacity = dispatchInternals.cacheCapacity;
 		dispatchInternals.cacheCapacity = 2;
 		try {
@@ -219,17 +223,74 @@ describe('language dispatch manifest-root cache capacity (#2489)', () => {
 		fs.mkdirSync(sourceDir, { recursive: true });
 		fs.writeFileSync(path.join(tempDir, 'package.json'), '{}');
 
+		const readdirSpy = spyOn(fs.promises, 'readdir');
 		const statSpy = spyOn(fs.promises, 'stat');
 		try {
 			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
 
-			// The walk uses one async stat per visited directory plus one manifest
-			// stat for hashing and one selected-root stat for post-detection
-			// validation; the timeout test covers latency across every async FS op.
+			// The walk uses two async readdir calls and one stat per visited
+			// directory, plus bounded manifest/selected-root checks. The timeout
+			// test covers latency across every async FS op.
+			const readdirCalls = readdirSpy.mock.calls.length;
 			const statCalls = statSpy.mock.calls.length;
+			expect(readdirCalls).toBeLessThanOrEqual(directoryVisits * 2 + 2);
 			expect(statCalls).toBeLessThanOrEqual(directoryVisits + 2);
 		} finally {
+			readdirSpy.mockRestore();
 			statSpy.mockRestore();
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('stops at an unverified directory instead of crossing a project boundary (pr2609-review-correctness-C002)', async () => {
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-stat-failure-');
+		const parentRoot = path.join(tempDir, 'parent');
+		const projectRoot = path.join(parentRoot, 'project');
+		const sourceDir = path.join(projectRoot, 'src');
+		fs.mkdirSync(sourceDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(parentRoot, 'Cargo.toml'),
+			'[package]\nname = "parent"\n',
+		);
+		fs.writeFileSync(path.join(projectRoot, 'package.json'), '{}');
+		fs.writeFileSync(path.join(projectRoot, '.git'), 'gitdir: parent\n');
+		const realStat = fs.promises.stat;
+		let forcedFailure = false;
+		const statSpy = spyOn(fs.promises, 'stat').mockImplementation((async (
+			file: fs.PathLike,
+			options?: Parameters<typeof fs.promises.stat>[1],
+		) => {
+			if (!forcedFailure && path.resolve(String(file)) === projectRoot) {
+				forcedFailure = true;
+				throw new Error('simulated directory stat failure');
+			}
+			return realStat(file, options);
+		}) as typeof fs.promises.stat);
+		try {
+			// Before this guard, an incomplete projectRoot snapshot was treated as
+			// an ordinary empty directory and the parent Cargo.toml won selection.
+			expect((await pickBackend(sourceDir))?.id).toBe('typescript');
+			expect(forcedFailure).toBe(true);
+			expect(dispatchInternals.manifestRootCacheSize).toBe(0);
+		} finally {
+			statSpy.mockRestore();
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test('keeps overlapping dispatch lookups consistent (FB-006)', async () => {
+		const tempDir = canonicalMkdtemp('dispatch-manifest-root-overlap-');
+		fs.writeFileSync(path.join(tempDir, 'package.json'), '{}');
+		try {
+			const results = await Promise.all([
+				pickBackend(tempDir),
+				pickBackend(tempDir),
+			]);
+			expect(results.map((backend) => backend?.id)).toEqual([
+				'typescript',
+				'typescript',
+			]);
+		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

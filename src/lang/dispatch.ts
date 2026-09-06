@@ -4,7 +4,7 @@
  * `pickBackend(dir)` walks up from `dir` to find the nearest project
  * manifest, runs language detection on that root, and returns the
  * registered (or defaulted) backend for the dominant language. Caches
- * results in a bounded LRU keyed by (dir, manifest-hash) so repeated calls
+ * results in a bounded insertion-order cache keyed by (dir, manifest-hash) so repeated calls
  * during a session do not re-walk the filesystem.
  *
  * Callers supply any timeout policy. Plugin initialization wraps this in
@@ -161,6 +161,7 @@ type DirectoryWalkSnapshot =
 	| {
 			entries: Set<string> | null;
 			complete: false;
+			stopAtCurrent: boolean;
 	  };
 
 const manifestRootCache: Map<string, ManifestRootCacheValue> = new Map();
@@ -231,17 +232,17 @@ async function readDirectoryForManifestWalk(
 	const entries = await tryReadDirectoryAsync(dir);
 	const fingerprint = await directoryFingerprint(dir);
 	const after = await tryReadDirectoryAsync(dir);
+	if (entries === null || fingerprint === null || after === null) {
+		return { entries: null, complete: false, stopAtCurrent: true };
+	}
 	if (
-		entries === null ||
-		fingerprint === null ||
-		after === null ||
 		entries.size !== after.size ||
 		[...entries].some((entry) => !after.has(entry))
 	) {
 		// Never select from the first listing after validation fails: it can
 		// name a manifest deleted before the second listing. Continue the
 		// bounded ancestor walk from a fresh-safe empty result instead.
-		return { entries: null, complete: false };
+		return { entries: null, complete: false, stopAtCurrent: false };
 	}
 	return { entries, fingerprint, complete: true };
 }
@@ -374,6 +375,18 @@ async function findManifestRoot(
 		const snapshot = await readDirectoryForManifestWalk(cur);
 		throwIfAborted(signal);
 		if (!snapshot.complete) {
+			if (snapshot.stopAtCurrent) {
+				// A failed directory read/stat cannot prove either a manifest or a
+				// .git boundary. Stop at the unverifiable directory instead of
+				// walking into an ancestor project whose backend could be wrong.
+				return {
+					root: cur,
+					rootHadManifest: false,
+					key,
+					trace,
+					cacheable: false,
+				};
+			}
 			cacheable = false;
 		} else {
 			trace.push(snapshot.fingerprint);
@@ -413,7 +426,7 @@ async function findManifestRoot(
 }
 
 /**
- * Bounded LRU eviction. Removes the oldest insertion when cache exceeds
+ * Bounded insertion-order eviction. Removes the oldest insertion when cache exceeds
  * capacity. Simple insertCounter ordering — sufficient for our use case
  * (per-session, ~tens of distinct directories at most).
  */

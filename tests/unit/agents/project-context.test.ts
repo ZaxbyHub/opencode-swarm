@@ -8,6 +8,7 @@ import {
 	_internals as projectContextInternals,
 } from '../../../src/agents/project-context';
 import { UNRESOLVED } from '../../../src/agents/template';
+import { LANGUAGE_BACKEND_REGISTRY } from '../../../src/lang/registry-backend';
 import { withTimeoutSignal } from '../../../src/utils/timeout';
 
 /**
@@ -147,6 +148,37 @@ describe('buildProjectContext', () => {
 		expect(ctx).not.toBeNull();
 		expect(ctx!.PROJECT_CONTEXT_SECONDARY_LANGUAGES).toContain('python');
 		expect(ctx!.PROJECT_CONTEXT_SECONDARY_LANGUAGES).toContain('rust');
+	});
+
+	test('captures profiles before selector awaits (correctness-state-C001)', async () => {
+		const realBackend = LANGUAGE_BACKEND_REGISTRY.getOrDefault('typescript');
+		expect(realBackend).toBeDefined();
+		let selectorsStarted = false;
+		let profilesReadBeforeSelectors = false;
+		const backend = {
+			...realBackend!,
+			selectFramework: async () => {
+				selectorsStarted = true;
+				await Promise.resolve();
+				return null;
+			},
+			selectEntryPoints: async () => [],
+		};
+		const realPickBackend = projectContextInternals.pickBackend;
+		const realPickedProfiles = projectContextInternals.pickedProfiles;
+		try {
+			projectContextInternals.pickBackend = async () => backend;
+			projectContextInternals.pickedProfiles = () => {
+				profilesReadBeforeSelectors = !selectorsStarted;
+				return [{ id: 'typescript' }, { id: 'javascript' }];
+			};
+			const ctx = await buildProjectContext(tempDir);
+			expect(profilesReadBeforeSelectors).toBe(true);
+			expect(ctx?.PROJECT_CONTEXT_SECONDARY_LANGUAGES).toBe('javascript');
+		} finally {
+			projectContextInternals.pickBackend = realPickBackend;
+			projectContextInternals.pickedProfiles = realPickedProfiles;
+		}
 	});
 });
 
