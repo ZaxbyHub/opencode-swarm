@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Plan } from '../../../src/config/plan-schema';
 import {
 	handleResetCommand,
 	_internals as resetInternals,
 } from '../../../src/commands/reset';
+import type { Plan } from '../../../src/config/plan-schema';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { getPlanLedgerState } from '../../../src/plan/ledger-sqlite';
 import { savePlan } from '../../../src/plan/manager';
