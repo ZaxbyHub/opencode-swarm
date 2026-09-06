@@ -9,8 +9,36 @@ import { _internals, type SessionOps } from '../../../src/tools/dispatch-lanes';
 export const BASE_HEADER =
 	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
-export function createCollectLaneTimeoutFixture() {
+/**
+ * Issue #2572: a fixed collection clock epoch. Freshly recorded delegations carry
+ * `updatedAt` from the real clock (~1.79e12), so `DETERMINISTIC_EPOCH - updatedAt` is
+ * negative ~9e10 — the stale sweep correctly reads that as not-stale, while the
+ * budget math (`deadline - now`) stays constant instead of eroding under CI stalls.
+ */
+const DETERMINISTIC_COLLECTION_EPOCH = 1_700_000_000_000;
+
+export function createCollectLaneTimeoutFixture(
+	options: { deterministicClock?: boolean } = {},
+) {
 	const originalInternals = { ..._internals };
+	// Issue #2572: the merge-group flake's outcome-flip family. The budget
+	// reservation reads `_internals.now()` at call time, so any event-loop
+	// stall >= timeout_ms between the deadline assignment and the first
+	// per-lane slice zeroed every budget and flipped salvage outcomes to
+	// pending. Pinning the clock keeps `remainingMs === timeout_ms` forever;
+	// real-timer slices still bound the hung host calls. Consumers whose
+	// wait:true scenarios depend on real deadline progression opt out with
+	// `{ deterministicClock: false }` (their files say so in comments).
+	// The runbook cure: docs/testing/test-stability.md, Class 1/2. The pin is
+	// re-appliable because restoreInternals() (afterEach) puts the real clock
+	// back — the owning test file re-pins in beforeEach so every test starts
+	// deterministic while the process is left clean after the final restore.
+	const pinCollectionClock = () => {
+		_internals.now = () => DETERMINISTIC_COLLECTION_EPOCH;
+	};
+	if (options.deterministicClock !== false) {
+		pinCollectionClock();
+	}
 	const directories: string[] = [];
 
 	async function withTestDeadline<T>(promise: Promise<T>): Promise<T> {
@@ -21,7 +49,15 @@ export function createCollectLaneTimeoutFixture() {
 				new Promise<never>((_resolve, reject) => {
 					timeout = setTimeout(
 						() => reject(new Error('test deadline exceeded')),
-						500,
+						// Issue #2572 hang-guard arithmetic: correct wiring costs
+						// <= ~150ms idle (measured; the heaviest salvage scenario
+						// runs ~138-151ms), and PR #2587-class runner stalls run
+						// into the hundreds of ms, so 500ms left only ~3.4x
+						// headroom. 2500ms keeps the guard a true hang bound (any
+						// bounding regression still trips) while tolerating those
+						// stalls; worst case 12 x 2.5s = 30s stays inside the
+						// per-file 60s coverage budget.
+						2500,
 					);
 				}),
 			]);
@@ -128,6 +164,7 @@ export function createCollectLaneTimeoutFixture() {
 		baseOps,
 		cleanupTempDirs,
 		makeTempDir,
+		pinCollectionClock,
 		recordPending,
 		restoreInternals,
 		withTestDeadline,

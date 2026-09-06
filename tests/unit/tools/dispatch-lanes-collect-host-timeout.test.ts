@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
 	_internals,
 	_test_exports,
@@ -11,10 +11,17 @@ const {
 	baseOps,
 	cleanupTempDirs,
 	makeTempDir,
+	pinCollectionClock,
 	recordPending,
 	restoreInternals,
 	withTestDeadline,
 } = createCollectLaneTimeoutFixture();
+
+// Issue #2572: restoreInternals() (afterEach) puts the real clock back, so
+// re-pin per test (the 8-lane test overrides _internals.now itself).
+beforeEach(() => {
+	pinCollectionClock();
+});
 
 afterEach(async () => {
 	restoreInternals();
@@ -89,6 +96,52 @@ describe('collect_lane_results host-call deadline', () => {
 		expect(result.errors?.join('; ')).toContain('session.status');
 		expect(result.lane_results[0]?.output_ref).toMatch(/^L1:/);
 		expect(result.lane_results[0]?.output).toContain('durable lane evidence');
+	});
+
+	test('stays salvage-complete when the event loop stalls before the first host call', async () => {
+		const directory = makeTempDir();
+		const batchId = 'stall-before-first-host-call';
+		await recordPending({ directory, batchId });
+		const status = mock(() => new Promise<never>(() => {}));
+		const messages = mock(async () => ({
+			data: [assistantMessage('durable lane evidence through a stall')],
+		}));
+		let stallCount = 0;
+		// Issue #2572 regression guard: a runner stall >= timeout_ms between the
+		// deadline assignment and the first budget reservation used to zero every
+		// slice and flip this outcome to pending. The fixture pins the collection
+		// clock, so a true synchronous stall (Atomics.wait; no raw clock usage)
+		// cannot consume the budget; reverting the fixture's pin turns this red.
+		_internals.getSessionOps = () => {
+			if (stallCount++ === 0) {
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120);
+			}
+			return { ...baseOps(), status, messages };
+		};
+
+		const result = await withTestDeadline(
+			executeCollectLaneResults(
+				{
+					batch_id: batchId,
+					wait: false,
+					include_pending: true,
+					timeout_ms: 90,
+				},
+				directory,
+			),
+		);
+
+		expect(status).toHaveBeenCalledTimes(1);
+		expect(messages).toHaveBeenCalledTimes(1);
+		expect(result.success).toBe(true);
+		expect(result.completed).toBe(1);
+		expect(result.pending).toBe(0);
+		expect(result.message).toBe(
+			'Collection recovered and settled all lanes despite bounded OpenCode host-call timeouts; no collection retry is required.',
+		);
+		expect(result.lane_results[0]?.output).toContain(
+			'durable lane evidence through a stall',
+		);
 	});
 
 	test('treats an absent session.status as unknown but still accepts terminal assistant proof', async () => {
