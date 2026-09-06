@@ -1562,14 +1562,14 @@ export async function executeUpdateTaskStatus(
 	if (loadedPlan._ledgerReplayStale === true) {
 		const staleReason =
 			loadedPlan._ledgerReplayStaleReason ??
-			'plan.json is stale relative to the authoritative ledger (.swarm/plan-ledger.jsonl)';
+			'plan.json is stale relative to the active plan-ledger authority';
 		return {
 			success: false,
 			message: `Task status update refused: plan.json is stale relative to the ledger (ledger replay failed). ${staleReason}`,
 			errors: [staleReason],
 			recovery_guidance:
-				'Plan state could not be reconciled with the authoritative ledger (.swarm/plan-ledger.jsonl). ' +
-				'Retry save_plan with the unchanged loaded plan so it can reconverge the projection/hash with the authoritative ledger, then retry update_task_status.',
+				'Plan state could not be reconciled with the active plan-ledger authority. ' +
+				'Retry save_plan with the unchanged loaded plan so it can reconverge the projections and authority metadata, then retry update_task_status.',
 		};
 	}
 

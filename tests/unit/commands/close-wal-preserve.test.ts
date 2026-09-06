@@ -23,6 +23,10 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {
+	closeAllProjectDbs,
+	closeProjectDb,
+} from '../../../src/db/project-db.js';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
@@ -109,22 +113,24 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	closeAllProjectDbs();
 	if (existsSync(testDir)) rmSync(testDir, { recursive: true, force: true });
 	mock.restore();
 });
 
 /** Create a minimal valid WAL-mode swarm.db so the clean stage reaches its unlink. */
 function writeRealSwarmDb(): void {
+	closeProjectDb(testDir);
 	const Db = loadDatabaseCtor();
 	const db = new Db(path.join(swarmDir(), 'swarm.db'));
 	db.run('PRAGMA journal_mode = WAL;');
 	db.run(
-		'CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT);',
+		'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT);',
 	);
-	db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
-		1,
-		'init',
-	]);
+	db.run(
+		'INSERT OR IGNORE INTO schema_migrations (version, name) VALUES (?, ?)',
+		[1, 'init'],
+	);
 	db.close();
 }
 

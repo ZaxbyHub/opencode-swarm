@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { closeProjectDb } from '../../src/db/project-db.js';
+import { collectGarbageBestEffort } from '../../src/utils/bun-compat.js';
 
 /** Native-first realpath keeps test fixtures aligned with production identity. */
 export const _internals: {
@@ -142,6 +143,7 @@ export function safeRmRecursive(targetPath: string): void {
 				(code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY')
 			)
 				throw error;
+			if (attempt === 0) collectGarbageBestEffort();
 			Atomics.wait(retryWait, 0, 0, 100);
 		}
 	}

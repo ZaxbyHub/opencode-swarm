@@ -51,6 +51,8 @@ export const EVOLUTION_BACKSTOP_AGE_DAYS = 90;
 export const PR_REVIEW_KEEP_NEWEST_RUNS = 50;
 export const LANE_RESULTS_KEEP_NEWEST_BATCHES = 100;
 export const REVIEW_RECEIPTS_KEEP_NEWEST = 1000;
+/** Legacy plan-ledger imports are forensic only; keep a bounded recent window. */
+export const LEGACY_LEDGER_ARCHIVES_KEEP_NEWEST = 16;
 
 export interface RetentionSweepOptions {
 	/** Clock injection point for tests/checks. */
@@ -185,8 +187,7 @@ export async function runRetentionSweep(
 	// remaining work.
 	const cancelled = (label: string): boolean => {
 		if (options.shouldContinue && !options.shouldContinue()) {
-			result.errors.sweep_cancelled =
-				'sweep cancelled by shouldContinue token before ' + label;
+			result.errors.sweep_cancelled = `sweep cancelled by shouldContinue token before ${label}`;
 			return true;
 		}
 		return false;
@@ -273,6 +274,48 @@ export async function runRetentionSweep(
 		if (legacyPruned > 0) result.pruned['doc-drift-imported'] = legacyPruned;
 	} catch (error) {
 		result.errors['doc-drift-imported'] =
+			error instanceof Error ? error.message : String(error);
+	}
+
+	// 3b. Legacy plan-ledger archives are immutable recovery inputs, but an
+	// import on every old project can otherwise grow without bound. Keep the
+	// newest bounded window and age out older entries. Never follow links.
+	if (cancelled('legacy-ledger-archives')) return result;
+	try {
+		const names = (await fs.promises.readdir(swarmRoot)).filter((name) =>
+			/^plan-ledger\.legacy-archive\.[0-9a-f]{64}\.jsonl$/.test(name),
+		);
+		const entries = (
+			await Promise.all(
+				names.map(async (name) => {
+					const filePath = path.join(swarmRoot, name);
+					const stat = await fs.promises.lstat(filePath).catch(() => null);
+					return stat?.isFile() && !stat.isSymbolicLink()
+						? { name, filePath, mtimeMs: stat.mtimeMs }
+						: null;
+				}),
+			)
+		)
+			.filter(
+				(entry): entry is { name: string; filePath: string; mtimeMs: number } =>
+					entry !== null,
+			)
+			.sort((a, b) => b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name));
+		let removed = 0;
+		for (const [index, entry] of entries.entries()) {
+			if (index < LEGACY_LEDGER_ARCHIVES_KEEP_NEWEST) continue;
+			if (
+				entry.mtimeMs > now ||
+				entry.mtimeMs >= now - DEFAULT_FAMILY_AGE_DAYS * DAY_MS
+			)
+				continue;
+			if (!dryRun)
+				await fs.promises.unlink(entry.filePath).catch(() => undefined);
+			removed++;
+		}
+		if (removed > 0) result.pruned['legacy-ledger-archives'] = removed;
+	} catch (error) {
+		result.errors['legacy-ledger-archives'] =
 			error instanceof Error ? error.message : String(error);
 	}
 

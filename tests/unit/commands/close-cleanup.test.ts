@@ -1003,13 +1003,6 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			const Db = loadDatabaseCtor();
 			const db = new Db(path.join(swarmDir(), 'swarm.db'));
 			db.run('PRAGMA journal_mode = WAL;');
-			db.run(
-				'CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT);',
-			);
-			db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
-				1,
-				'init',
-			]);
 			db.close();
 
 			// Directories

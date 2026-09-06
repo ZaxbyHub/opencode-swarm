@@ -30,6 +30,7 @@ import { performance } from 'node:perf_hooks';
 import { _internals, readSwarmFileAsync } from '../../../src/hooks/utils';
 import { resetSwarmState } from '../../../src/state';
 import { atomicWriteSwarmFileSync } from '../../../src/utils/atomic-write';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const realReadCachedTextFile = _internals.readCachedTextFile;
 
@@ -220,6 +221,39 @@ describe('readSwarmFileAsync retry behavior (issue #1782)', () => {
 			// budget (4 × 10ms), catching a regression back to any retrying
 			// ladder while tolerating timer/scheduling overhead.
 			expect(elapsed).toBeLessThan(40);
+		} finally {
+			rmSyncHardened(tmp);
+		}
+	});
+
+	test('custom readers can bypass the replacement-decoding artifact cache', async () => {
+		const tmp = canonicalMkdtemp('readswarm-reader-');
+		try {
+			fs.mkdirSync(path.join(tmp, '.swarm'), { recursive: true });
+			const planPath = path.join(tmp, '.swarm', 'plan.json');
+			fs.writeFileSync(planPath, '{"strict":true}');
+
+			let cacheCalls = 0;
+			_internals.readCachedTextFile = (() => {
+				cacheCalls++;
+				return Promise.resolve('{"lossy":true}');
+			}) as typeof _internals.readCachedTextFile;
+
+			let readerCalls = 0;
+			const result = await readSwarmFileAsync(
+				tmp,
+				'plan.json',
+				undefined,
+				async (resolvedPath) => {
+					readerCalls++;
+					return fs.promises.readFile(resolvedPath, 'utf8');
+				},
+				false,
+			);
+
+			expect(result).toBe('{"strict":true}');
+			expect(readerCalls).toBe(1);
+			expect(cacheCalls).toBe(0);
 		} finally {
 			rmSyncHardened(tmp);
 		}

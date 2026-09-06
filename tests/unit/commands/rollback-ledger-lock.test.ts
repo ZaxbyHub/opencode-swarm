@@ -1,9 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from 'bun:test';
 import * as realFs from 'node:fs';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import type { Plan } from '../../../src/config/plan-schema';
 import * as realHookUtils from '../../../src/hooks/utils.js';
+import { peekPlanFromLedger } from '../../../src/plan/ledger';
+import { savePlan } from '../../../src/plan/manager';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+
+const nowIso = (): string => withFrozenClock(() => new Date().toISOString());
 
 // Mock validateSwarmPath before importing rollback.ts (it binds at module load)
 mock.module('../../../src/hooks/utils.js', () => ({
@@ -12,7 +26,7 @@ mock.module('../../../src/hooks/utils.js', () => ({
 		path.join(directory, '.swarm', filename),
 }));
 
-const { handleRollbackCommand } = await import(
+const { handleRollbackCommand, _internals: rollbackInternals } = await import(
 	'../../../src/commands/rollback.js'
 );
 
@@ -27,7 +41,7 @@ function getManifestPath(): string {
 }
 
 function getCheckpointDir(phase: number): string {
-	return path.join(testDir, '.swarm', 'checkpoints', `phase-${phase}`);
+	return path.join(testDir, '.swarm', 'checkpoints', 'phase-' + phase);
 }
 
 function createManifest(
@@ -38,12 +52,45 @@ function createManifest(
 	writeFileSync(getManifestPath(), JSON.stringify({ checkpoints }));
 }
 
-function createCheckpointDir(phase: number, files: string[] = ['plan.md']) {
-	const cpDir = getCheckpointDir(phase);
-	mkdirSync(cpDir, { recursive: true });
-	for (const f of files) {
-		writeFileSync(path.join(cpDir, f), `content of ${f}`);
-	}
+function createValidPlan(): Plan {
+	return {
+		schema_version: '1.0.0',
+		title: 'Rollback test plan',
+		swarm: 'rollback-ledger-test',
+		current_phase: 1,
+		phases: [
+			{
+				id: 1,
+				name: 'Phase 1',
+				status: 'in_progress',
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'pending',
+						size: 'small',
+						description: 'Restore the rollback fixture',
+						depends: [],
+						files_touched: [],
+					},
+				],
+			},
+		],
+	};
+}
+
+function createRollbackCheckpoint(plan: Plan = createValidPlan()) {
+	createManifest([
+		{
+			phase: 1,
+			label: 'Phase 1 complete',
+			timestamp: nowIso(),
+		},
+	]);
+	const checkpointDir = getCheckpointDir(1);
+	mkdirSync(checkpointDir, { recursive: true });
+	writeFileSync(path.join(checkpointDir, 'plan.md'), '# Rollback test plan\n');
+	writeFileSync(path.join(checkpointDir, 'plan.json'), JSON.stringify(plan));
 }
 
 beforeEach(() => {
@@ -58,123 +105,132 @@ afterEach(() => {
 	mock.restore();
 });
 
-describe('handleRollbackCommand — ledger EBUSY stale-warning (FR-006 SC-011)', () => {
-	it('unlinkSync EBUSY → warning returned (not raw exception)', async () => {
-		const ebusiError = Object.assign(new Error('EBUSY: resource busy'), {
+describe('handleRollbackCommand — ledger replacement failure (issue #2484)', () => {
+	it('surfaces replacement failures instead of throwing raw EBUSY', async () => {
+		const replacementError = Object.assign(new Error('EBUSY: resource busy'), {
 			code: 'EBUSY',
 		});
+		const originalReplace = rollbackInternals.replacePlanLedgerWithRoot;
+		rollbackInternals.replacePlanLedgerWithRoot = async () => {
+			throw replacementError;
+		};
 
-		await mock.module('node:fs', () => ({
-			...realFs,
-			unlinkSync: mock((p: string) => {
-				if (p.endsWith('plan-ledger.jsonl')) {
-					throw ebusiError;
-				}
-				// succeed silently for other files
-			}),
-		}));
+		try {
+			createRollbackCheckpoint();
+			const result = await handleRollbackCommand(testDir, ['1']);
 
-		createManifest([
-			{
-				phase: 1,
-				label: 'Phase 1 complete',
-				timestamp: new Date().toISOString(),
-			},
-		]);
-		createCheckpointDir(1, ['plan.md']);
-		writeFileSync(
-			path.join(getSwarmDir(), 'plan-ledger.jsonl'),
-			'ledger content',
-		);
-		writeFileSync(
-			path.join(getSwarmDir(), 'plan.json'),
-			JSON.stringify({ title: 'test', schema_version: '1.0.0', phases: [] }),
-		);
-
-		const result = await handleRollbackCommand(testDir, ['1']);
-
-		expect(result).toContain('⚠️ Warning: Could not delete stale ledger');
-		expect(result).toContain('EBUSY');
+			expect(result).toContain('failed to replace the authoritative ledger');
+			expect(result).toContain('EBUSY');
+			// The checkpoint projection must remain staged until its replacement
+			// authority commits; the old implementation copied it before this throw.
+			expect(existsSync(path.join(getSwarmDir(), 'plan.json'))).toBe(false);
+		} finally {
+			rollbackInternals.replacePlanLedgerWithRoot = originalReplace;
+		}
 	});
 
-	it('Warning suggests /swarm reset-session', async () => {
-		const ebusiError = Object.assign(new Error('EBUSY: resource busy'), {
-			code: 'EBUSY',
-		});
+	it('reports that checkpoint projections were withheld on re-root failure', async () => {
+		const originalReplace = rollbackInternals.replacePlanLedgerWithRoot;
+		rollbackInternals.replacePlanLedgerWithRoot = async () => {
+			throw new Error('ledger locked');
+		};
 
-		await mock.module('node:fs', () => ({
-			...realFs,
-			unlinkSync: mock((p: string) => {
-				if (p.endsWith('plan-ledger.jsonl')) {
-					throw ebusiError;
-				}
-				// succeed silently for other files
-			}),
-		}));
+		try {
+			createRollbackCheckpoint();
+			const result = await handleRollbackCommand(testDir, ['1']);
 
-		createManifest([
-			{
-				phase: 1,
-				label: 'Phase 1 complete',
-				timestamp: new Date().toISOString(),
-			},
-		]);
-		createCheckpointDir(1, ['plan.md']);
-		writeFileSync(
-			path.join(getSwarmDir(), 'plan-ledger.jsonl'),
-			'ledger content',
-		);
-		writeFileSync(
-			path.join(getSwarmDir(), 'plan.json'),
-			JSON.stringify({ title: 'test', schema_version: '1.0.0', phases: [] }),
-		);
-
-		const result = await handleRollbackCommand(testDir, ['1']);
-
-		expect(result).toContain('/swarm reset-session');
+			expect(result).toContain('ledger locked');
+			expect(result).toContain(
+				'Checkpoint plan projections were not published',
+			);
+		} finally {
+			rollbackInternals.replacePlanLedgerWithRoot = originalReplace;
+		}
 	});
 
-	it('ledgerDeletionFailed flag skips ledger re-init', async () => {
-		const ebusiError = Object.assign(new Error('EBUSY: resource busy'), {
-			code: 'EBUSY',
-		});
+	it('passes the restored valid Plan to the replacement API', async () => {
+		const plan = createValidPlan();
+		const calls: Array<[string, Plan, string]> = [];
+		const originalReplace = rollbackInternals.replacePlanLedgerWithRoot;
+		rollbackInternals.replacePlanLedgerWithRoot = async (...args) => {
+			calls.push(args);
+		};
 
-		await mock.module('node:fs', () => ({
-			...realFs,
-			unlinkSync: mock((p: string) => {
-				if (p.endsWith('plan-ledger.jsonl')) {
-					throw ebusiError;
+		try {
+			createRollbackCheckpoint(plan);
+			const result = await handleRollbackCommand(testDir, ['1']);
+
+			expect(result).toContain('Rolled back to phase 1: Phase 1 complete');
+			expect(calls).toHaveLength(1);
+			expect(calls[0]?.[0]).toBe(testDir);
+			expect(calls[0]?.[1]).toEqual(plan);
+			expect(calls[0]?.[2]).toBe('rollback');
+		} finally {
+			rollbackInternals.replacePlanLedgerWithRoot = originalReplace;
+		}
+	});
+
+	it('compensates authority and projections when checkpoint projection publish fails', async () => {
+		const priorPlan = createValidPlan();
+		priorPlan.title = 'Before rollback';
+		const checkpointPlan = createValidPlan();
+		checkpointPlan.title = 'Checkpoint rollback';
+		await savePlan(testDir, priorPlan);
+		createRollbackCheckpoint(checkpointPlan);
+
+		const originalCopy = realFs.cpSync;
+		spyOn(realFs, 'cpSync').mockImplementation(
+			(source, destination, options) => {
+				if (String(destination).endsWith(`${path.sep}plan.json`)) {
+					throw new Error('simulated projection publish failure');
 				}
-				// succeed silently for other files
-			}),
-		}));
-
-		createManifest([
-			{
-				phase: 1,
-				label: 'Phase 1 complete',
-				timestamp: new Date().toISOString(),
+				return originalCopy(source, destination, options);
 			},
-		]);
-		createCheckpointDir(1, ['plan.md']);
-		writeFileSync(
-			path.join(getSwarmDir(), 'plan-ledger.jsonl'),
-			'ledger content',
-		);
-		// Create a plan.json so that if initLedger were called, it would attempt to run.
-		// The presence of this file proves the init block was skipped due to
-		// ledgerDeletionFailed=true, not due to a missing plan.json.
-		writeFileSync(
-			path.join(getSwarmDir(), 'plan.json'),
-			JSON.stringify({ title: 'test', schema_version: '1.0.0', phases: [] }),
 		);
 
 		const result = await handleRollbackCommand(testDir, ['1']);
 
-		// If initLedger were called and failed, the output would contain
-		// "Rollback restored files but failed to initialize ledger".
-		// The success message below proves the init block was skipped.
-		expect(result).toContain('Rolled back to phase 1: Phase 1 complete');
-		expect(result).not.toContain('failed to initialize ledger');
+		expect(result).toContain('failed to replace the authoritative ledger');
+		expect(result).toContain('compensation completed');
+		expect(
+			JSON.parse(
+				realFs.readFileSync(path.join(getSwarmDir(), 'plan.json'), 'utf-8'),
+			).title,
+		).toBe('Before rollback');
+		expect((await peekPlanFromLedger(testDir)).plan?.title).toBe(
+			'Before rollback',
+		);
+	});
+
+	it('restores an empty authority when first-plan projection publication fails', async () => {
+		const checkpointPlan = createValidPlan();
+		checkpointPlan.title = 'First checkpoint plan';
+		createRollbackCheckpoint(checkpointPlan);
+
+		const originalCopy = realFs.cpSync;
+		spyOn(realFs, 'cpSync').mockImplementation(
+			(source, destination, options) => {
+				if (String(destination).endsWith(`${path.sep}plan.json`)) {
+					throw new Error('simulated first projection failure');
+				}
+				return originalCopy(source, destination, options);
+			},
+		);
+
+		const result = await handleRollbackCommand(testDir, ['1']);
+
+		expect(result).toContain('compensation failed');
+		expect(existsSync(path.join(getSwarmDir(), 'plan.json'))).toBe(false);
+		expect((await peekPlanFromLedger(testDir)).plan).toBeNull();
+	});
+
+	it('read-only previews hide ledger state while reset is in progress', async () => {
+		await savePlan(testDir, createValidPlan());
+		writeFileSync(
+			path.join(getSwarmDir(), 'plan-ledger.resetting'),
+			'resetting\n',
+		);
+
+		expect((await peekPlanFromLedger(testDir)).plan).toBeNull();
 	});
 });

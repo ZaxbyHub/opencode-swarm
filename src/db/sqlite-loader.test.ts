@@ -31,6 +31,10 @@ interface FakeCalls {
 	enableLoadExtension: boolean[];
 	loadExtension: string[];
 	closed: number;
+	opened: Array<{
+		filename: string | URL;
+		options?: { allowExtension?: boolean; readOnly?: boolean };
+	}>;
 }
 
 function makeFake(probeRow: { c: number; r: number } = { c: 1, r: 1 }) {
@@ -44,6 +48,7 @@ function makeFake(probeRow: { c: number; r: number } = { c: 1, r: 1 }) {
 		enableLoadExtension: [],
 		loadExtension: [],
 		closed: 0,
+		opened: [],
 	};
 
 	class FakeStatement {
@@ -102,13 +107,14 @@ function makeFake(probeRow: { c: number; r: number } = { c: 1, r: 1 }) {
 
 	class FakeDatabaseSync {
 		isTransaction = false;
-		readonly options?: { allowExtension?: boolean };
+		readonly options?: { allowExtension?: boolean; readOnly?: boolean };
 		private readonly statements = new Map<string, FakeStatement>();
 		constructor(
-			readonly filename: string,
-			options?: { allowExtension?: boolean },
+			readonly filename: string | URL,
+			options?: { allowExtension?: boolean; readOnly?: boolean },
 		) {
 			this.options = options;
+			calls.opened.push({ filename, options });
 		}
 		exec(sql: string): void {
 			calls.exec.push(sql);
@@ -212,6 +218,22 @@ describe('loadDatabaseCtor — runtime selection', () => {
 });
 
 describe('createNodeDatabaseCtor — adapter translation', () => {
+	test('maps immutable URI flags to a true read-only node:sqlite open', () => {
+		const { FakeDatabaseSync, calls } = makeFake();
+		const Ctor = createNodeDatabaseCtor(FakeDatabaseSync);
+		const uri = 'file:///tmp/project.sqlite3?immutable=1';
+		const db = new Ctor(uri, 0x01 | 0x40) as unknown as AdapterDb;
+		db.close();
+
+		expect(calls.opened).toHaveLength(1);
+		expect(calls.opened[0]?.filename).toBeInstanceOf(URL);
+		expect(String(calls.opened[0]?.filename)).toBe(uri);
+		expect(calls.opened[0]?.options).toEqual({
+			allowExtension: false,
+			readOnly: true,
+		});
+	});
+
 	test('run(sql) with no params routes to exec()', () => {
 		const { FakeDatabaseSync, calls } = makeFake();
 		const db = new (createNodeDatabaseCtor(FakeDatabaseSync))(

@@ -103,6 +103,37 @@ afterEach(() => {
 });
 
 describe('retention sweep families: prune old, keep recent (issue #2483)', () => {
+	it('legacy plan-ledger archives keep the newest bounded window and prune older history', async () => {
+		const root = makeRoot('legacy-ledger-archives');
+		const archiveNames = Array.from(
+			{ length: 18 },
+			(_, index) =>
+				`plan-ledger.legacy-archive.${String(index).padStart(64, '0')}.jsonl`,
+		);
+		for (const [index, name] of archiveNames.entries()) {
+			seedFile(
+				root,
+				name,
+				index < 16 ? NOW - index * DAY_MS : NOW - (40 + index) * DAY_MS,
+				`archive-${index}`,
+			);
+		}
+
+		const result = await runRetentionSweep(root, { now: NOW });
+
+		expect(
+			archiveNames
+				.slice(0, 16)
+				.every((name) => existsSync(path.join(root, '.swarm', name))),
+		).toBe(true);
+		expect(
+			archiveNames
+				.slice(16)
+				.every((name) => !existsSync(path.join(root, '.swarm', name))),
+		).toBe(true);
+		expect(result.pruned['legacy-ledger-archives']).toBe(2);
+	});
+
 	it.each([
 		['pr-feedback-events', 'pr-feedback-events', 'pr-feedback-events'],
 		[

@@ -8,7 +8,7 @@ import {
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
-import { takeSnapshotEvent } from '../plan/ledger.js';
+import { readLedgerEvents, takeSnapshotEvent } from '../plan/ledger.js';
 import { loadPlanJsonOnly, savePlan } from '../plan/manager.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec.js';
 import type {
@@ -76,6 +76,7 @@ export const _internals: {
 	parseMarker: typeof parseMarker;
 	parseWal: typeof parseWal;
 	readEffectiveSpecSync: typeof readEffectiveSpecSync;
+	readLedgerEvents: typeof readLedgerEvents;
 	readFileText: typeof readFileText;
 	savePlan: typeof savePlan;
 	tryAcquireLock: typeof tryAcquireLock;
@@ -96,6 +97,7 @@ export const _internals: {
 	parseMarker,
 	parseWal,
 	readEffectiveSpecSync,
+	readLedgerEvents,
 	readFileText,
 	savePlan,
 	tryAcquireLock,
@@ -245,31 +247,15 @@ async function ensureSnapshotEvent(
 	plan: NonNullable<Awaited<ReturnType<typeof loadPlanJsonOnly>>>,
 	transitionId: string,
 ): Promise<void> {
-	const ledgerPath = _internals.validateSwarmPath(
-		directory,
-		'plan-ledger.jsonl',
-	);
-	const raw = await _internals.readFileText(ledgerPath);
-	if (raw !== null) {
-		for (const line of raw.split('\n')) {
-			const trimmed = line.trim();
-			if (!trimmed) continue;
-			let event: Record<string, unknown>;
-			try {
-				event = JSON.parse(trimmed) as Record<string, unknown>;
-			} catch (error) {
-				throw new Error(
-					`plan ledger is not valid JSONL while checking spec recovery snapshot: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-			const payload = event.payload as Record<string, unknown> | undefined;
-			const approval = payload?.approval as Record<string, unknown> | undefined;
-			if (
-				event.event_type === 'snapshot' &&
-				approval?.specDriftTransitionId === transitionId
-			) {
-				return;
-			}
+	const events = await _internals.readLedgerEvents(directory);
+	for (const event of events) {
+		const payload = event.payload as Record<string, unknown> | undefined;
+		const approval = payload?.approval as Record<string, unknown> | undefined;
+		if (
+			event.event_type === 'snapshot' &&
+			approval?.specDriftTransitionId === transitionId
+		) {
+			return;
 		}
 	}
 

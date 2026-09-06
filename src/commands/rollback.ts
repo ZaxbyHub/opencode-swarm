@@ -5,15 +5,23 @@ import { type Plan, PlanSchema } from '../config/plan-schema';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { validateSwarmPath } from '../hooks/utils';
 import {
-	appendLedgerEvent,
-	computePlanLedgerHash,
-	initLedger,
+	clearPlanLedgerForReset,
+	peekPlanFromLedger,
+	replacePlanLedgerWithRoot,
 } from '../plan/ledger';
-import { derivePlanId } from '../plan/utils.js';
+import { withPlanLifecycleLock } from '../plan/manager';
 import { checkpoint as checkpointTool } from '../tools/checkpoint.js';
 import type { ToolResult } from '../tools/create-tool';
 import { log } from '../utils/logger';
 import { resetSwarmArtifactCache } from '../utils/swarm-artifact-cache';
+
+/** Test-only seam for the atomic ledger re-root lifecycle transition. */
+export const _internals = {
+	replacePlanLedgerWithRoot,
+	clearPlanLedgerForReset,
+	peekPlanFromLedger,
+	withPlanLifecycleLock,
+};
 
 type LegacyCheckpoint = { phase: number; label?: string; timestamp: string };
 type GitCheckpoint = { label: string; sha: string; timestamp: string };
@@ -230,6 +238,22 @@ export async function handleRollbackCommand(
 		return `Error: Checkpoint for phase ${targetPhase} is empty. Cannot rollback.`;
 	}
 
+	// Validate the checkpoint plan before mutating any active state. The root is
+	// published before its projections, so malformed checkpoint JSON must fail
+	// before the transition begins.
+	let checkpointPlan: Plan | null = null;
+	if (checkpointFiles.includes('plan.json')) {
+		try {
+			checkpointPlan = PlanSchema.parse(
+				JSON.parse(
+					fs.readFileSync(path.join(checkpointDir, 'plan.json'), 'utf-8'),
+				),
+			);
+		} catch (error) {
+			return `Error: Checkpoint plan.json is invalid. Cannot rollback: ${error instanceof Error ? error.message : String(error)}`;
+		}
+	}
+
 	// Get absolute paths.
 	//
 	// `validateSwarmPath` requires a NON-EMPTY filename: both platform branches
@@ -256,6 +280,7 @@ export async function handleRollbackCommand(
 		'plan-ledger.jsonl',
 		'plan-ledger.quarantine',
 	]);
+	const PLAN_PROJECTION_FILES = new Set(['plan.json', 'plan.md']);
 
 	const successes: string[] = [];
 	const failures: { file: string; error: string }[] = [];
@@ -266,6 +291,10 @@ export async function handleRollbackCommand(
 		if (EXCLUDE_FILES.has(file) || file.startsWith('plan-ledger.archived-')) {
 			continue;
 		}
+		// A checkpoint plan is committed through the lifecycle transaction below.
+		// Publishing it here used to make rollback failure leave new projections
+		// paired with the old authoritative ledger.
+		if (checkpointPlan && PLAN_PROJECTION_FILES.has(file)) continue;
 
 		const src = path.join(checkpointDir, file);
 		const dest = path.join(swarmDir, file);
@@ -307,55 +336,100 @@ export async function handleRollbackCommand(
 		].join('\n');
 	}
 
-	// Delete any existing ledger unconditionally — we're rolling back to a
-	// checkpoint state and the old ledger belongs to the pre-rollback state.
-	const existingLedgerPath = path.join(swarmDir, 'plan-ledger.jsonl');
-	let ledgerDeletionFailed = false;
-	if (fs.existsSync(existingLedgerPath)) {
-		try {
-			fs.unlinkSync(existingLedgerPath);
-		} catch (err) {
-			ledgerDeletionFailed = true;
-			const errMsg = err instanceof Error ? err.message : String(err);
-			warnings.push(
-				`⚠️ Warning: Could not delete stale ledger (${errMsg}). The ledger may be inconsistent with the restored plan. Run /swarm reset-session to clean up session state.`,
+	// The checkpoint copy intentionally excludes the old ledger. Re-root the
+	// active ledger authority and portable JSONL before publishing checkpoint
+	// projections. The enclosing plan lock is always acquired before the ledger
+	// lock taken by replacePlanLedgerWithRoot, matching savePlan's lock order.
+	try {
+		if (checkpointPlan) {
+			await _internals.withPlanLifecycleLock(
+				directory,
+				'rollback-plan-lifecycle',
+				async () => {
+					const prior = await _internals.peekPlanFromLedger(directory);
+					const previousProjection = new Map<string, Buffer | null>();
+					for (const file of PLAN_PROJECTION_FILES) {
+						const destination = path.join(swarmDir, file);
+						previousProjection.set(
+							file,
+							fs.existsSync(destination) ? fs.readFileSync(destination) : null,
+						);
+					}
+
+					await _internals.replacePlanLedgerWithRoot(
+						directory,
+						checkpointPlan,
+						'rollback',
+					);
+					try {
+						for (const file of checkpointFiles) {
+							if (!PLAN_PROJECTION_FILES.has(file)) continue;
+							fs.cpSync(
+								path.join(checkpointDir, file),
+								path.join(swarmDir, file),
+								{ recursive: true, force: true },
+							);
+						}
+						// A checkpoint with plan.json but no Markdown projection must not
+						// inherit an old plan.md for a different authoritative root.
+						if (!checkpointFiles.includes('plan.md')) {
+							const markdownPath = path.join(swarmDir, 'plan.md');
+							if (fs.existsSync(markdownPath)) fs.unlinkSync(markdownPath);
+						}
+					} catch (publishError) {
+						// The root is already durable. Restore both projections and the
+						// prior root before surfacing the error, so a failed publish cannot
+						// leave the workspace pointing at two different plans.
+						const compensationFailures: string[] = [];
+						for (const [file, previous] of previousProjection) {
+							const destination = path.join(swarmDir, file);
+							if (previous === null) {
+								try {
+									fs.unlinkSync(destination);
+								} catch (error) {
+									compensationFailures.push(
+										`${file}: ${error instanceof Error ? error.message : String(error)}`,
+									);
+								}
+							} else {
+								try {
+									fs.writeFileSync(destination, previous);
+								} catch (error) {
+									compensationFailures.push(
+										`${file}: ${error instanceof Error ? error.message : String(error)}`,
+									);
+								}
+							}
+						}
+						try {
+							if (prior.plan)
+								await _internals.replacePlanLedgerWithRoot(
+									directory,
+									prior.plan,
+									'rollback_projection_compensation',
+								);
+							else await _internals.clearPlanLedgerForReset(directory);
+						} catch (error) {
+							compensationFailures.push(
+								`authoritative state: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
+						throw new Error(
+							`checkpoint projection publish failed (${publishError instanceof Error ? publishError.message : String(publishError)}); compensation ${compensationFailures.length ? `failed: ${compensationFailures.join('; ')}` : 'completed'}`,
+						);
+					}
+				},
 			);
 		}
+	} catch (replaceError) {
+		return [
+			`Rollback restored files but failed to replace the authoritative ledger: ${replaceError instanceof Error ? replaceError.message : String(replaceError)}`,
+			'Checkpoint plan projections were not published unless authority changed successfully; any publish failure attempted compensation to the prior state.',
+			'Inspect the reported error and retry the rollback after resolving filesystem or ledger access.',
+		].join('\n');
 	}
 
-	// Only re-initialize ledger if deletion succeeded (or ledger didn't exist).
-	// If deletion failed, the stale ledger remains and initLedger would throw
-	// "Ledger already initialized" — skipping preserves the warning path above.
-	if (!ledgerDeletionFailed) {
-		// Initialize a fresh ledger with the restored plan (if available)
-		// We excluded plan-ledger.jsonl from the checkpoint copy above and
-		// create a brand-new ledger here so the ledger matches the restored state.
-		try {
-			const planJsonPath = path.join(swarmDir, 'plan.json');
-			if (fs.existsSync(planJsonPath)) {
-				const planRaw = fs.readFileSync(planJsonPath, 'utf-8');
-				const plan = PlanSchema.parse(JSON.parse(planRaw) as Plan);
-				const planId = derivePlanId(plan);
-
-				const planHash = computePlanLedgerHash(plan);
-				await initLedger(directory, planId, planHash, plan);
-
-				await appendLedgerEvent(directory, {
-					event_type: 'plan_rebuilt',
-					source: 'rollback',
-					plan_id: planId,
-				});
-			}
-		} catch (initError) {
-			return [
-				`Rollback restored files but failed to initialize ledger: ${initError instanceof Error ? initError.message : String(initError)}`,
-				'The .swarm/plan.json has been restored but the ledger may be out of sync.',
-				'Run /swarm reset-session to reinitialize the ledger.',
-			].join('\n');
-		}
-	}
-
-	// Write rollback event to JSONL
+	// Write the separate operational rollback audit event.
 	const rollbackEvent = {
 		type: 'rollback',
 		phase: targetPhase,
