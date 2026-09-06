@@ -89,6 +89,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `hooks` | object | — | Hook subsystem toggles and settings. |
 | `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. |
 | `lane_liveness_watchdog` | object (strict) | — | Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes. |
+| `dispatch_protection` | object (strict) | — | Dispatch protection: action-local spawn-failure circuit breaker and token-bucket rate limiting for native task delegations. |
 | `pr_review_legacy_transcript_compatibility` | boolean | — | Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes. |
 | `gates` | object | — | Quality gate configuration (v6.9 anti-slop features). |
 | `context_budget` | object | — | Context budget thresholds. |
@@ -862,8 +863,11 @@ Behavior notes:
 - Per-project bucket state persists in the existing coordination store
   (namespace `dispatch.token-bucket`); a fresh process rehydrates from that
   row, so an exhausted bucket does not grant a fresh burst after a restart.
-  If persistence writes fail, the in-memory bucket keeps pacing the live
-  process (fail-open) and a restart grants one fresh burst.
+  Persistence is debounced to PACED acquires (those that had to wait): a
+  burst fully consumed without ever pacing writes no row, so a restart in
+  that window grants one fresh burst. If persistence writes fail, the
+  in-memory bucket keeps pacing the live process (fail-open) and a restart
+  likewise grants one fresh burst.
 
 **Example** — opt out entirely:
 

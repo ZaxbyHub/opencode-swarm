@@ -77,13 +77,14 @@ import { closeProjectDb } from './db/project-db.js';
 import {
 	armDispatchIdentity,
 	assertDispatchSpawnCircuitAdmits,
+	dispatchIdentityFor,
 	invocationIdForSession,
 	noteDispatchSpawnFailure,
 	noteDispatchSpawnSuccess,
 	spawnCircuitIsTaskTool,
 	takeArmedDispatchIdentity,
-} from './dispatch/spawn-circuit';
-import { acquireDispatchToken } from './dispatch/token-bucket';
+} from './dispatch/spawn-circuit.js';
+import { acquireDispatchToken } from './dispatch/token-bucket.js';
 import { createEvaluationModelDispatcher } from './evaluation/model-dispatcher.js';
 import {
 	observePhaseParticipationToolResult,
@@ -4554,22 +4555,26 @@ async function initializeOpenCodeSwarm(
 			// after-hook). Consumes the digest ARMED at toolBefore step 0
 			// (pre-mutation args) so a corrected success clears exactly the
 			// circuit the before-hook keyed; falls back to recomputing from
-			// the stored args snapshot when no armed digest exists. Denials
-			// never fire toolAfter (#2214), so policy denials cannot count
-			// as spawn failures.
-			if (dispatchProtectionConfig.enabled && isTaskTool) {
+			// the stored args snapshot when no armed digest exists (pure
+			// compute — never re-inserts into the bounded armed map). The
+			// recorder gate uses the same shared normalizer as the before
+			// gate so a prefixed spelling cannot arm without recording.
+			// Denials never fire toolAfter (#2214), so policy denials cannot
+			// count as spawn failures.
+			if (
+				dispatchProtectionConfig.enabled &&
+				spawnCircuitIsTaskTool(input.tool)
+			) {
 				try {
 					const armed = takeArmedDispatchIdentity(input.callID);
 					const identity =
-						armed ??
-						armDispatchIdentity(input.callID, input.tool, afterCtx.args);
+						armed ?? dispatchIdentityFor(input.tool, afterCtx.args);
 					const invocationID = invocationIdForSession(input.sessionID);
 					if (output?.state === 'error') {
 						const { opened } = noteDispatchSpawnFailure({
 							sessionID: input.sessionID,
 							invocationID,
 							actionDigest: identity.digest,
-							actionPattern: identity.pattern,
 							threshold: dispatchProtectionConfig.spawn_failure_threshold,
 							halfOpenAfterMs: dispatchProtectionConfig.half_open_after_ms,
 						});

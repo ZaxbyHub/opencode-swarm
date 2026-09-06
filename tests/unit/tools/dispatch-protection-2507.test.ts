@@ -7,7 +7,11 @@
  */
 import { afterEach, describe, expect, it } from 'bun:test';
 import { _clearAllSpawnCircuits } from '../../../src/dispatch/spawn-circuit';
-import { _resetDispatchTokenBuckets } from '../../../src/dispatch/token-bucket';
+import {
+	_resetDispatchTokenBuckets,
+	acquireDispatchToken,
+	_internals as tokenInternals,
+} from '../../../src/dispatch/token-bucket';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
 	bootKnowledgeHost,
@@ -17,7 +21,9 @@ import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import {
 	assertWithinDispatchProtectionBudget,
 	DISPATCH_PROTECTION_SCENARIO_BUDGETS,
+	type DispatchProtectionBudgetRow,
 	type DispatchProtectionObserved,
+	validateDispatchProtectionBudgetRow,
 } from './dispatch-protection-budget-manifest';
 
 const SPAWN_ROW = DISPATCH_PROTECTION_SCENARIO_BUDGETS.find(
@@ -216,6 +222,184 @@ describe('dispatch-protection budget manifest (#2507)', () => {
 		// pacing floor guards against a vacuous pass.
 		expect(observed.wall_clock_ms).toBeGreaterThanOrEqual(1500);
 	}, 20_000);
+});
+
+describe('dispatch-protection disable path (#2507 review TC-1)', () => {
+	it('enabled:false runs the composed hook chain with no denial and no failure accounting', async () => {
+		const plugin = await boot(
+			{
+				enabled: false,
+				spawn_failure_threshold: 1,
+				half_open_after_ms: 60_000,
+				rate_per_second: 0,
+			},
+			'budget-disabled',
+		);
+		const s1 = 'budget-disabled';
+		for (let i = 1; i <= 3; i++) {
+			expect(await beforeCall(plugin, s1, `bd-x-${i}`, X_ARGS)).toBe('');
+			await afterState(plugin, s1, `bd-x-${i}`, 'error');
+		}
+		// Threshold 1 would deny immediately if the circuit were armed;
+		// disabled means every dispatch passes.
+		expect(await beforeCall(plugin, s1, 'bd-x-4', X_ARGS)).toBe('');
+	}, 20_000);
+});
+
+describe('token-bucket restart + clock-safety (#2507 review PRIOR-M1 / RB-1)', () => {
+	interface FakeClock {
+		now: number;
+		sleeps: number[];
+	}
+	let clock: FakeClock;
+	const realNow = tokenInternals.now;
+	const realSleep = tokenInternals.sleep;
+	const realReadState = tokenInternals.readState;
+
+	afterEach(() => {
+		tokenInternals.now = realNow;
+		tokenInternals.sleep = realSleep;
+		tokenInternals.readState = realReadState;
+	});
+
+	function installFakeClock(start: number): FakeClock {
+		clock = { now: start, sleeps: [] };
+		tokenInternals.now = () => clock.now;
+		tokenInternals.sleep = async (ms: number) => {
+			clock.sleeps.push(ms);
+			clock.now += ms;
+		};
+		return clock;
+	}
+
+	it('a fresh process rehydrates the persisted level instead of granting a fresh burst', async () => {
+		const directory = createKnowledgeProject();
+		directories.push(directory);
+		_resetDispatchTokenBuckets();
+		// Burn the burst with the REAL store so a row is persisted by a
+		// paced acquire (rate 0.2/s -> the paced wait writes level ~0).
+		installFakeClock(1_000_000);
+		await acquireDispatchToken({
+			directory,
+			ratePerSecond: 0.2,
+			burstCapacity: 1,
+		}); // instant burst
+		await acquireDispatchToken({
+			directory,
+			ratePerSecond: 0.2,
+			burstCapacity: 1,
+		}); // paced -> persists
+		const sleepsBefore = clock.sleeps.length;
+		// Simulate a restart: forget in-memory buckets, rehydrate from the
+		// REAL persisted row.
+		_resetDispatchTokenBuckets();
+		await acquireDispatchToken({
+			directory,
+			ratePerSecond: 0.2,
+			burstCapacity: 1,
+		});
+		// A fresh full burst would answer with ZERO sleeps; rehydration must
+		// pace from the persisted ~0 level (>= 4 fake seconds of refill).
+		expect(clock.sleeps.length).toBeGreaterThan(sleepsBefore);
+		expect(clock.now).toBeGreaterThanOrEqual(1_000_000 + 4000);
+	}, 10_000);
+
+	it('a future persisted refill stamp cannot stall the acquire loop (clock skew)', async () => {
+		const directory = createKnowledgeProject();
+		directories.push(directory);
+		_resetDispatchTokenBuckets();
+		installFakeClock(2_000_000);
+		tokenInternals.readState = () =>
+			({
+				payload: JSON.stringify({
+					level: 0,
+					// One hour in the future: unclamped, elapsed stays 0 forever
+					// and the acquire loop never terminates.
+					lastRefillMs: 2_000_000 + 3_600_000,
+				}),
+			}) as ReturnType<typeof realReadState>;
+		await acquireDispatchToken({
+			directory,
+			ratePerSecond: 2,
+			burstCapacity: 2,
+		});
+		// Two 500ms refills at 2/s fill one token; the clamp made refill
+		// progress at all. Without it this test times out.
+		expect(clock.sleeps.length).toBeLessThanOrEqual(4);
+	}, 5_000);
+
+	it('a persisted level above the current burst capacity is clamped down', async () => {
+		const directory = createKnowledgeProject();
+		directories.push(directory);
+		_resetDispatchTokenBuckets();
+		installFakeClock(3_000_000);
+		tokenInternals.readState = () =>
+			({
+				payload: JSON.stringify({ level: 999, lastRefillMs: 3_000_000 }),
+			}) as ReturnType<typeof realReadState>;
+		// Capacity 2: two instant acquires drain the clamped bucket; the
+		// THIRD must pace. An unclamped 999-level bucket would answer
+		// hundreds of acquires instantly.
+		await acquireDispatchToken({
+			directory,
+			ratePerSecond: 50,
+			burstCapacity: 2,
+		});
+		await acquireDispatchToken({
+			directory,
+			ratePerSecond: 50,
+			burstCapacity: 2,
+		});
+		expect(clock.sleeps.length).toBe(0);
+		await acquireDispatchToken({
+			directory,
+			ratePerSecond: 50,
+			burstCapacity: 2,
+		});
+		expect(clock.sleeps.length).toBe(1);
+	}, 5_000);
+});
+
+describe('budget manifest validator falsification (#2507 review TC-3)', () => {
+	const base = (): DispatchProtectionBudgetRow =>
+		JSON.parse(JSON.stringify(SPAWN_ROW)) as DispatchProtectionBudgetRow;
+
+	it('rejects non-positive, non-integer, and over-ceiling budgets', () => {
+		const bad: Array<[keyof DispatchProtectionBudgetRow, unknown]> = [
+			['max_attempts', 0],
+			['max_attempts', -1],
+			['max_attempts', 1.5],
+			['max_host_launches', 0],
+			['max_host_launches', Number.NaN],
+			['wall_clock_ms', 0],
+			['wall_clock_ms', 300_001],
+		];
+		for (const [key, value] of bad) {
+			const row = base();
+			(row[key] as unknown) = value;
+			expect(validateDispatchProtectionBudgetRow(row).length).toBeGreaterThan(
+				0,
+			);
+		}
+	});
+
+	it('rejects empty ownership metadata and misordered bounds', () => {
+		const emptyOwner = base();
+		emptyOwner.retry_owner = '';
+		expect(
+			validateDispatchProtectionBudgetRow(emptyOwner).length,
+		).toBeGreaterThan(0);
+		const emptyConfig = base();
+		emptyConfig.effective_configuration = {};
+		expect(
+			validateDispatchProtectionBudgetRow(emptyConfig).length,
+		).toBeGreaterThan(0);
+		const misordered = base();
+		misordered.max_host_launches = misordered.max_attempts + 1;
+		expect(
+			validateDispatchProtectionBudgetRow(misordered).length,
+		).toBeGreaterThan(0);
+	});
 });
 
 function DISTRIBUTED_ROW_CHECKS(): boolean {

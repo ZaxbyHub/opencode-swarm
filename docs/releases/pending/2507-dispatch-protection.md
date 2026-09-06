@@ -45,8 +45,9 @@ protection for native `task` delegations.
   retry, and #2506 liveness keep their existing owners.
 - **Config.** New `dispatch_protection` section (`enabled` default true,
   `spawn_failure_threshold` 3, `half_open_after_ms` 30000, `rate_per_second`
-  10, `burst_capacity` 10), documented in `docs/configuration.md`, validated by
-  config-doctor. Set `enabled: false` to opt out entirely.
+  10, `burst_capacity` 10), documented in `docs/configuration.md` and covered
+  by config-doctor's object-type check for the section. Set `enabled: false`
+  to opt out entirely.
 - **Budget manifest.** `tests/unit/tools/dispatch-protection-budget-manifest.ts`
   freezes the two composed scenarios (threshold-opening, rate-limited sequence)
   with integer max attempts / host launches / wall-clock bounds and

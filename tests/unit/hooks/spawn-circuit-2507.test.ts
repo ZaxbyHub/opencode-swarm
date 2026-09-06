@@ -37,7 +37,6 @@ function fail(
 		sessionID,
 		invocationID,
 		actionDigest: digest,
-		actionPattern: `pattern:${digest}`,
 		threshold,
 		halfOpenAfterMs,
 		now,
@@ -133,9 +132,11 @@ describe('spawn-protection circuit state machine (#2507)', () => {
 			halfOpenAfterMs: 100,
 			now,
 		});
-		// The probe FAILS -> re-open.
+		// The probe FAILS -> re-open. The re-arm is NOT a CLOSED->OPEN
+		// transition: opened stays false (one telemetry event per episode).
 		const reopened = fail('s2', 'inv1', 'dX', now);
 		expect(reopened.entry.state).toBe('OPEN');
+		expect(reopened.opened).toBe(false);
 		expect(() =>
 			assertDispatchSpawnCircuitAdmits({
 				sessionID: 's2',
@@ -204,6 +205,81 @@ describe('spawn-protection circuit state machine (#2507)', () => {
 				actionDigest: 'dB',
 			}),
 		).toBeDefined();
+	});
+
+	it('combined: X at half-open succeeds and clears while Y at half-open fails and re-opens', () => {
+		_clearAllSpawnCircuits();
+		let now = 25_000;
+		// Drive X and Y to threshold together.
+		for (let i = 0; i < 3; i++) {
+			fail('s7', 'inv1', 'dX', now);
+			fail('s7', 'inv1', 'dY', now);
+		}
+		now += 500;
+		// Deny once per episode, then admit each action's probe.
+		expect(() =>
+			assertDispatchSpawnCircuitAdmits({
+				sessionID: 's7',
+				invocationID: 'inv1',
+				actionDigest: 'dX',
+				threshold: 3,
+				halfOpenAfterMs: 100,
+				now,
+			}),
+		).toThrow(SPAWN_CIRCUIT_DENIAL_CODE);
+		expect(() =>
+			assertDispatchSpawnCircuitAdmits({
+				sessionID: 's7',
+				invocationID: 'inv1',
+				actionDigest: 'dY',
+				threshold: 3,
+				halfOpenAfterMs: 100,
+				now,
+			}),
+		).toThrow(SPAWN_CIRCUIT_DENIAL_CODE);
+		assertDispatchSpawnCircuitAdmits({
+			sessionID: 's7',
+			invocationID: 'inv1',
+			actionDigest: 'dX',
+			threshold: 3,
+			halfOpenAfterMs: 100,
+			now,
+		});
+		assertDispatchSpawnCircuitAdmits({
+			sessionID: 's7',
+			invocationID: 'inv1',
+			actionDigest: 'dY',
+			threshold: 3,
+			halfOpenAfterMs: 100,
+			now,
+		});
+		// X's probe SUCCEEDS -> X cleared; Y's probe FAILS -> Y re-opens.
+		noteDispatchSpawnSuccess({
+			sessionID: 's7',
+			invocationID: 'inv1',
+			actionDigest: 'dX',
+		});
+		fail('s7', 'inv1', 'dY', now);
+		// X's success must NOT have cleared Y: Y is denied again...
+		expect(() =>
+			assertDispatchSpawnCircuitAdmits({
+				sessionID: 's7',
+				invocationID: 'inv1',
+				actionDigest: 'dY',
+				threshold: 3,
+				halfOpenAfterMs: 100,
+				now,
+			}),
+		).toThrow(SPAWN_CIRCUIT_DENIAL_CODE);
+		// ...while X admits (circuit gone).
+		assertDispatchSpawnCircuitAdmits({
+			sessionID: 's7',
+			invocationID: 'inv1',
+			actionDigest: 'dX',
+			threshold: 3,
+			halfOpenAfterMs: 100,
+			now,
+		});
 	});
 
 	it('sessions and invocations are isolated key spaces', () => {
@@ -292,15 +368,53 @@ describe('gate-denial tracker exemption (#2507 plan revision 1)', () => {
 			expect(outcome.stopped).toBe(false);
 			expect(outcome.decorated).toBe(false);
 		}
-		// A non-exempt code still counts (differential positive control).
-		const counted = noteGateDenial(
+		// A non-exempt code still counts (differential positive control) and
+		// the tracker's own rung arithmetic is unaffected by the exemption:
+		// warn fires at the 3rd non-exempt denial, stop at the 5th.
+		const warnThreshold = { enabled: true, warnThreshold: 3, stopThreshold: 5 };
+		const first = noteGateDenial(
 			'gdx',
 			'task',
 			new Error('SCOPE_NOT_DECLARED: no scope'),
-			{ enabled: true, warnThreshold: 3, stopThreshold: 5 },
+			warnThreshold,
 			{ subagent_type: 'mega_explorer' },
 		);
-		expect(counted.count).toBe(1);
+		expect(first.count).toBe(1);
+		expect(first.warned).toBe(false);
+		const second = noteGateDenial(
+			'gdx',
+			'task',
+			new Error('SCOPE_NOT_DECLARED: no scope'),
+			warnThreshold,
+			{ subagent_type: 'mega_explorer' },
+		);
+		expect(second.count).toBe(2);
+		const third = noteGateDenial(
+			'gdx',
+			'task',
+			new Error('SCOPE_NOT_DECLARED: no scope'),
+			warnThreshold,
+			{ subagent_type: 'mega_explorer' },
+		);
+		expect(third.count).toBe(3);
+		expect(third.warned).toBe(true);
+		const fourth = noteGateDenial(
+			'gdx',
+			'task',
+			new Error('SCOPE_NOT_DECLARED: no scope'),
+			warnThreshold,
+			{ subagent_type: 'mega_explorer' },
+		);
+		expect(fourth.count).toBe(4);
+		const fifth = noteGateDenial(
+			'gdx',
+			'task',
+			new Error('SCOPE_NOT_DECLARED: no scope'),
+			warnThreshold,
+			{ subagent_type: 'mega_explorer' },
+		);
+		expect(fifth.count).toBe(5);
+		expect(fifth.stopped).toBe(true);
 	});
 });
 

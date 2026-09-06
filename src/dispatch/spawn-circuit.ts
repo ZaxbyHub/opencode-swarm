@@ -11,7 +11,7 @@
  * #2473, and lane liveness with #2506.
  *
  * State machine (the src/pr-review/circuit.ts timed HALF_OPEN precedent):
- * CLOSED -> (threshold failures) -> OPEN -> (openUntil elapses, next dispatch
+ * CLOSED -> (threshold failures) -> OPEN -> (denyUntil elapses, next dispatch
  * admitted) -> HALF_OPEN (exactly one probe) -> completed probe closes |
  * failed probe re-opens with a fresh interval.
  *
@@ -20,10 +20,9 @@
  * PR-review resilience circuit is durable).
  */
 
-import type { DispatchProtectionConfig } from '../config/schema';
-import { createActionIdentity } from '../failures/action-identity';
-import { normalizeToolNameLowerCase } from '../hooks/normalize-tool-name';
-import { getAgentSession } from '../state';
+import { createActionIdentity } from '../failures/action-identity.js';
+import { normalizeToolNameLowerCase } from '../hooks/normalize-tool-name.js';
+import { getAgentSession } from '../state.js';
 
 /** Bounded memory: same discipline as MAX_TRACKED_ACTION_CIRCUITS. */
 export const MAX_TRACKED_SPAWN_CIRCUITS = 500;
@@ -39,11 +38,9 @@ export interface SpawnCircuitEntry {
 	sessionID: string;
 	invocationID: string;
 	actionDigest: string;
-	actionPattern: string;
 	failureCount: number;
 	openedAt: number;
-	openUntil: number;
-	probeAdmitted: boolean;
+	denyUntil: number;
 	/** Denials issued in the current OPEN episode (reset on each OPEN). */
 	denialsInEpisode: number;
 	updatedAt: number;
@@ -93,6 +90,27 @@ function evictExpired(now: number): void {
 }
 
 /**
+ * Compute the dispatch identity for a tool + args WITHOUT storing anything.
+ * Shared by armDispatchIdentity (before-hook step 0) and by the after-hook
+ * recorder's fallback (which must not re-insert into the bounded armed map
+ * — a stored-but-never-consumed entry would evict legitimate pending
+ * identities under review feedback WD-1).
+ */
+export function dispatchIdentityFor(
+	tool: string,
+	args: unknown,
+): { digest: string; pattern: string } {
+	const identity = createActionIdentity({
+		tool,
+		args:
+			args != null && typeof args === 'object' && !Array.isArray(args)
+				? (args as Record<string, unknown>)
+				: undefined,
+	});
+	return { digest: identity.digest, pattern: identity.pattern };
+}
+
+/**
  * Arm the pre-mutation dispatch identity for a callID. Step 0 of the
  * fail-closed tool.execute.before region calls this BEFORE any hook can
  * mutate `output.args` (skill / delegate-directive injection), so the
@@ -105,13 +123,7 @@ export function armDispatchIdentity(
 	tool: string,
 	args: unknown,
 ): { digest: string; pattern: string } {
-	const identity = createActionIdentity({
-		tool,
-		args:
-			args != null && typeof args === 'object' && !Array.isArray(args)
-				? (args as Record<string, unknown>)
-				: undefined,
-	});
+	const identity = dispatchIdentityFor(tool, args);
 	if (armedIdentities.size >= MAX_ARMED_DISPATCH_IDENTITIES) {
 		const oldest = armedIdentities.keys().next().value;
 		if (oldest !== undefined) armedIdentities.delete(oldest);
@@ -141,7 +153,6 @@ export function noteDispatchSpawnFailure(input: {
 	sessionID: string;
 	invocationID: string;
 	actionDigest: string;
-	actionPattern: string;
 	threshold: number;
 	halfOpenAfterMs: number;
 	now?: number;
@@ -156,34 +167,32 @@ export function noteDispatchSpawnFailure(input: {
 				sessionID: input.sessionID,
 				invocationID: input.invocationID,
 				actionDigest: input.actionDigest,
-				actionPattern: input.actionPattern,
 				failureCount: 1,
 				openedAt: 0,
-				openUntil: 0,
-				probeAdmitted: false,
+				denyUntil: 0,
 				denialsInEpisode: 0,
 				updatedAt: now,
 			};
 	let opened = false;
-	if (
+	if (entry.state === 'HALF_OPEN') {
+		// A failure while a half-open probe is in flight re-opens the
+		// circuit with a fresh interval (pr-review HALF_OPEN precedent).
+		// This is a HALF_OPEN->OPEN re-arm, NOT the CLOSED->OPEN transition:
+		// `opened` stays false so the caller emits no duplicate telemetry
+		// (one bounded event per episode, per the caller contract).
+		entry.state = 'OPEN';
+		entry.openedAt = now;
+		entry.denyUntil = now + Math.max(1, input.halfOpenAfterMs);
+		entry.denialsInEpisode = 0;
+	} else if (
 		entry.state !== 'OPEN' &&
 		entry.failureCount >= Math.max(1, input.threshold)
 	) {
 		entry.state = 'OPEN';
 		entry.openedAt = now;
-		entry.openUntil = now + Math.max(1, input.halfOpenAfterMs);
-		entry.probeAdmitted = false;
+		entry.denyUntil = now + Math.max(1, input.halfOpenAfterMs);
 		entry.denialsInEpisode = 0;
 		opened = true;
-	}
-	if (entry.state === 'HALF_OPEN') {
-		// A failure while a half-open probe is in flight re-opens the
-		// circuit with a fresh interval (pr-review HALF_OPEN precedent).
-		entry.state = 'OPEN';
-		entry.openedAt = now;
-		entry.openUntil = now + Math.max(1, input.halfOpenAfterMs);
-		entry.probeAdmitted = false;
-		entry.denialsInEpisode = 0;
 	}
 	entry.updatedAt = now;
 	spawnCircuits.set(key, entry);
@@ -217,7 +226,7 @@ export function assertDispatchSpawnCircuitAdmits(input: {
 		// open interval that elapses during post-failure bookkeeping (the
 		// composed after-hook chain) would silently skip the denial phase
 		// entirely.
-		if (now < entry.openUntil || entry.denialsInEpisode === 0) {
+		if (now < entry.denyUntil || entry.denialsInEpisode === 0) {
 			entry.denialsInEpisode += 1;
 			entry.updatedAt = now;
 			throw new Error(
@@ -225,7 +234,6 @@ export function assertDispatchSpawnCircuitAdmits(input: {
 			);
 		}
 		entry.state = 'HALF_OPEN';
-		entry.probeAdmitted = true;
 		entry.updatedAt = now;
 		return;
 	}
@@ -262,12 +270,6 @@ export function getSpawnCircuitEntry(input: {
 
 export function spawnCircuitIsTaskTool(tool: string): boolean {
 	return normalizeToolNameLowerCase(tool) === 'task';
-}
-
-export function protectionEnabled(
-	config: DispatchProtectionConfig | undefined,
-): boolean {
-	return (config?.enabled ?? true) === true;
 }
 
 /** Test seam: reset all circuits + armed identities between test files. */

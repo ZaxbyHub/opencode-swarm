@@ -22,8 +22,8 @@
 import {
 	getCoordinationState,
 	transitionCoordinationState,
-} from '../db/coordination-store';
-import { log } from '../utils/logger';
+} from '../db/coordination-store.js';
+import { log } from '../utils/logger.js';
 
 export const TOKEN_BUCKET_NAMESPACE = 'dispatch.token-bucket';
 export const TOKEN_BUCKET_ENTITY_KEY = 'project';
@@ -47,7 +47,12 @@ function refill(
 	capacity: number,
 	now: number,
 ): void {
-	const elapsedSeconds = Math.max(0, (now - bucket.lastRefillMs) / 1000);
+	// Clock safety (review RB-1): a future stamp — persisted clock skew or a
+	// backward wall-clock step while the in-memory bucket is empty — must
+	// never stall refill (elapsed clamped to 0 forever = unbounded pacing
+	// await). Pull the stamp back to running now so elapsed always advances.
+	if (now < bucket.lastRefillMs) bucket.lastRefillMs = now;
+	const elapsedSeconds = (now - bucket.lastRefillMs) / 1000;
 	if (elapsedSeconds > 0 && ratePerSecond > 0) {
 		bucket.level = Math.min(
 			capacity,
@@ -91,14 +96,20 @@ function hydrate(directory: string, capacity: number): BucketState {
 		if (row) {
 			const parsed = JSON.parse(row.payload) as Partial<BucketPayload>;
 			if (typeof parsed.level === 'number' && Number.isFinite(parsed.level)) {
+				const nowMs = _internals.now();
 				bucket = {
-					// Rehydrate at >= 0; refill below clamps to capacity.
-					level: Math.max(0, parsed.level),
+					// Rehydrate within [0, capacity] — a persisted level above the
+					// current capacity (config shrank across restart) must not
+					// grant over-burst; refill keeps it there.
+					level: Math.min(capacity, Math.max(0, parsed.level)),
 					lastRefillMs:
 						typeof parsed.lastRefillMs === 'number' &&
 						Number.isFinite(parsed.lastRefillMs)
-							? parsed.lastRefillMs
-							: _internals.now(),
+							? // Clock safety (review RB-1): a future persisted stamp
+								// (clock stepped back after the write) must not stall
+								// refill; clamp to running now.
+								Math.min(parsed.lastRefillMs, nowMs)
+							: nowMs,
 					hydrated: true,
 				};
 			}
