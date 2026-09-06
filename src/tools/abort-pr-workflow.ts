@@ -60,6 +60,11 @@ const AbortOrRecoverArgsSchema = z.union([
 	ArmedRecoveryArgsSchema,
 ]);
 
+const RegisteredAbortKindSchema = z.union([
+	AbortPrWorkflowArgsSchema.shape.kind,
+	ArmedRecoveryArgsSchema.shape.kind,
+]);
+
 export async function executeAbortPrWorkflow(
 	args: unknown,
 	directory: string,
@@ -182,6 +187,9 @@ export async function executeAbortPrWorkflow(
 		return JSON.stringify({
 			success: true,
 			mode: summary.mode,
+			...(parsed.data.kind === 'cancel-publication'
+				? { status: 'cancelled_without_publication' }
+				: {}),
 			...(summary.prHeadSha ? { pr_head_sha: summary.prHeadSha } : {}),
 			open_lanes: summary.openLanes,
 			// Issue #2242 R2 (W-4): lanes settled as presumed-stale rather than
@@ -201,7 +209,7 @@ export async function executeAbortPrWorkflow(
 			// Deliberately NOT surfacing `probeRetainedLanes` /
 			// `probeRetentionOverrideDisclosure` here: a retained lane keeps
 			// `openLanes > 0`, and only a `force` abort may override that. This tool
-			// admits `kind: 'recovery'` ONLY, so on any response that reaches this
+			// admits only non-armed abort kinds, so on any response that reaches this
 			// point those two fields are unreachable — a spread that could never
 			// fire is unwired code, not defence in depth. They are surfaced on the
 			// human-only `/swarm abort-pr-workflow` force path
@@ -245,7 +253,7 @@ export const abort_pr_workflow: ReturnType<typeof createSwarmTool> =
 			'Abort an active PR_REVIEW or PR_FEEDBACK mechanical gate and clear its durable session state, stopping the auto-resume loop. Requires kind: "recovery" and a one-line `reason`. Use after bounded recovery is exhausted, including a bound review or feedback workflow; do NOT use as a shortcut while useful recovery work remains. Refuses to abort while the workflow is armed for publication (call complete_pr_workflow instead) or while PR workflow lanes are still in flight (collect their results first). To change approved content after arming, use invalidate_pr_feedback_publication (audited invalidation; the full ladder re-runs). To cancel an armed PR_FEEDBACK workflow WITHOUT publication, use kind: "cancel-publication" with cancel_publication: true and a reason: the publication generation is recorded as cancelled_without_publication (terminal, never grants push authority, observed remote head disclosed) before the gate clears. kind "armed_recovery" (issue #2383) is the audited, identity-correlated escape for a publication-armed workflow whose exact publication cannot proceed: pass armed_recovery {pr_head_sha, revision_digest, generation, workflow_instance_id?} plus a reason; it settles lanes first, appends one bounded audit event, invalidates the staged publication authorization, and leaves a recoverable terminal state that preserves validated work (exact approved publication via complete_pr_workflow remains available and preferred). Identity/revision mismatches fail closed and no force variant exists. A lane past the staleness horizon whose session a liveness probe still reports as running also refuses the abort, and only the human-only /swarm abort-pr-workflow force path can override that retention; probe_status reports when a lane was instead settled without re-verification because the probe itself could not run. Reports checkout_restore_required when preserved pre-workflow changes remain. Reports state_salvaged with state_salvage_disclosure when the durable gate state was schema-invalid and had to be salvaged to clear it, and cas_escape_disclosure when the state revision was unsalvageable and the gate was therefore cleared without its compare-and-swap guard — treat either as a signal to re-verify the workflow before proceeding. Records a best-effort audit event to .swarm/events.jsonl.',
 		args: {
 			mode: AbortPrWorkflowArgsSchema.shape.mode,
-			kind: z.enum(['recovery', 'armed_recovery']),
+			kind: RegisteredAbortKindSchema,
 			reason: AbortPrWorkflowArgsSchema.shape.reason,
 			cancel_publication: AbortPrWorkflowArgsSchema.shape.cancel_publication,
 			armed_recovery: ArmedRecoveryArgsSchema.shape.armed_recovery.optional(),
