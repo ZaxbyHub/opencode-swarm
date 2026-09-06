@@ -1839,6 +1839,11 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'lane_liveness_watchdog': {
+			emitObjectTypeMismatch('lane_liveness_watchdog', value, findings);
+			break;
+		}
+
 		case 'pr_review_legacy_transcript_compatibility': {
 			if (value !== undefined && typeof value !== 'boolean') {
 				findings.push({
