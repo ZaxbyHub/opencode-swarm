@@ -115,8 +115,13 @@ async function seedCandidate(
 		sha256 = createHash('sha256').update(skillBody).digest('hex');
 	}
 
-	// Use a recent fetched_at so TTL gate passes
-	const fetchedAt = overrides.fetched_at ?? '2026-06-08T12:00:00.000Z';
+	// Use a recent fetched_at so the TTL gate passes. Computed relative to
+	// now — a hardcoded date goes stale when ttl_days (90) elapses and every
+	// promote-success test starts failing repo-wide (observed 2026-09-06:
+	// '2026-06-08T12:00:00Z' + ttl_days 90 expired mid-day and broke CI).
+	const fetchedAt =
+		overrides.fetched_at ??
+		new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
 	return store.add({
 		source_url: 'https://example.com/skill.md',

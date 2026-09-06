@@ -125,7 +125,12 @@ async function seedCandidate(
 	const store = createExternalSkillStore(directory, { max_candidates: 500 });
 	const skillBody = overrides.skill_body ?? 'Safe skill body content.';
 	const sha256 = overrides.sha256 ?? computeHash(skillBody);
-	const fetchedAt = overrides.fetched_at ?? '2026-06-09T12:00:00.000Z';
+	// Seed with the same frozen timestamp the internals' getTimestamp is
+	// pinned to (FIXED_TIMESTAMP, :148) — TTL age is then permanently 0 and
+	// never goes stale. A hardcoded wall-clock date here went stale when
+	// ttl_days (90) elapsed: the identical date bomb broke
+	// external-skill-promote repo-wide on 2026-09-06.
+	const fetchedAt = overrides.fetched_at ?? FIXED_TIMESTAMP;
 	return store.add({
 		source_url: 'https://example.com/skill.md',
 		source_type: 'github',
