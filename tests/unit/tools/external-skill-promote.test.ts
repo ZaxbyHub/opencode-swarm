@@ -1,8 +1,5 @@
 /**
- * Tests for external-skill-promote tool.
- *
- * Uses _internals DI seam for config injection and file I/O — no mock.module leakage.
- * Uses real temp directories for store I/O via createExternalSkillStore.
+ * Tests for external-skill-promote tool (_internals DI seam, real temp dirs).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -11,14 +8,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
 import { createExternalSkillStore } from '../../../src/services/external-skill-store.js';
+import { _internals as validatorInternals } from '../../../src/services/external-skill-validator.js';
 import {
 	_internals,
 	external_skill_promote,
 } from '../../../src/tools/external-skill-promote.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
-/**
- * Call the tool's execute function with a directory context.
- */
+/** Call the tool's execute function with a directory context. */
 async function callTool(args: unknown, directory: string): Promise<string> {
 	return (
 		external_skill_promote as unknown as {
@@ -111,13 +108,11 @@ async function seedCandidate(
 		sha256 = createHash('sha256').update(skillBody).digest('hex');
 	}
 
-	// Use a recent fetched_at so the TTL gate passes. Computed relative to
-	// now — a hardcoded date goes stale when ttl_days (90) elapses and every
-	// promote-success test starts failing repo-wide (observed 2026-09-06:
-	// '2026-06-08T12:00:00Z' + ttl_days 90 expired mid-day and broke CI).
 	const fetchedAt =
 		overrides.fetched_at ??
-		new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+		withFrozenClock(() => new Date(Date.now() - 60_000).toISOString(), {
+			fixedNow: Date.parse('2026-09-06T12:00:00.000Z'),
+		});
 
 	return store.add({
 		source_url: 'https://example.com/skill.md',
@@ -144,6 +139,7 @@ describe('external_skill_promote', () => {
 	let originalWriteSkillFile: typeof _internals.writeSkillFile;
 	let originalGetTimestamp: typeof _internals.getTimestamp;
 	let originalFileExists: typeof _internals.fileExists;
+	let originalValidatorGetTimestamp: typeof validatorInternals.getTimestamp;
 	let writtenFilePath: string | null;
 	let writtenFileContent: string | null;
 
@@ -153,6 +149,7 @@ describe('external_skill_promote', () => {
 		originalWriteSkillFile = _internals.writeSkillFile;
 		originalGetTimestamp = _internals.getTimestamp;
 		originalFileExists = _internals.fileExists;
+		originalValidatorGetTimestamp = validatorInternals.getTimestamp;
 		writtenFilePath = null;
 		writtenFileContent = null;
 
@@ -171,6 +168,9 @@ describe('external_skill_promote', () => {
 
 		// Fixed timestamp for deterministic assertions
 		_internals.getTimestamp = () => '2026-06-09T12:00:00.000Z';
+		// Validator TTL-gate seam: same frozen instant as the seed's fixedNow
+		// below, so the 90-day TTL comparison never depends on the real clock.
+		validatorInternals.getTimestamp = () => '2026-09-06T12:00:00.000Z';
 	});
 
 	afterEach(async () => {
@@ -178,6 +178,7 @@ describe('external_skill_promote', () => {
 		_internals.writeSkillFile = originalWriteSkillFile;
 		_internals.getTimestamp = originalGetTimestamp;
 		_internals.fileExists = originalFileExists;
+		validatorInternals.getTimestamp = originalValidatorGetTimestamp;
 		await removeTempDir(tmpDir);
 	});
 
@@ -576,10 +577,7 @@ describe('external_skill_promote', () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Test 13: Audit record includes gate_results, risk_assessment,
-	//           provenance_snapshot (with fetched_at), candidate_id,
-	//           original_verdict, target_path, promoted_content_hash,
-	//           and original_evaluation (FR-006)
+	// Test 13: rich audit record (FR-006)
 	// -------------------------------------------------------------------------
 	test('audit record includes gate results, risk assessment, candidate_id, original verdict, provenance snapshot with fetched_at, target path, promoted content hash, and original evaluation', async () => {
 		await writeTestConfig(tmpDir);
