@@ -71,6 +71,7 @@ export async function executeCompletePrWorkflow(
 		presumed_stale_disclosure?: string | undefined;
 		probe_retained_lanes?: string[];
 		probe_status?: string;
+		horizon_conflict?: string;
 	} = {};
 	// Issue #2506: resolve the lane-liveness watchdog policy from the same
 	// directory-scoped plugin config the resilience policy uses
@@ -117,6 +118,13 @@ export async function executeCompletePrWorkflow(
 		}
 		if (settlement.probeDegradedReason) {
 			staleDisclosure.probe_status = settlement.probeDegradedReason;
+		}
+		// Issue #2506 review round 2: surface the horizon disagreement (AC2
+		// conflictDisclosed) on the response whenever it exists — not gated on
+		// anything having settled, because a silently absorbed config conflict
+		// is exactly what the operator needs to see even on success paths.
+		if (settlement.horizonConflictNote) {
+			staleDisclosure.horizon_conflict = settlement.horizonConflictNote;
 		}
 	} catch {
 		// Observation only. A settlement-read failure must never convert a

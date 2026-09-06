@@ -260,11 +260,13 @@ describe('C7 — fixture D: disabled watchdog launches nothing of its own', () =
 	});
 });
 
-describe('C7 — whole-file wall-clock budget (iterations, frozen clock)', () => {
-	test('total host round-trips across every fixture stay under the frozen iteration budget', async () => {
-		// A final composite fixture: 2 lanes, one repeat attempt — the
-		// maximum additional load this file can generate after the fixtures
-		// above is bounded by the same constants.
+describe('C7 — wall-clock budget, final composite fixture (iterations, frozen clock)', () => {
+	test('the composite fixture stays under the frozen iteration budget', async () => {
+		// This fixture's OWN host round-trips are what the budget binds:
+		// beforeEach re-zeros the shared tally per test (see above), so the
+		// assertion covers this final composite fixture — 2 lanes, one
+		// repeat attempt, the heaviest single fixture in the file — not a
+		// cumulative file total.
 		const ids = ['c-wall-0', 'c-wall-1'];
 		for (let i = 0; i < ids.length; i += 1) {
 			await recordOpenPrWorkflowLane(
@@ -284,7 +286,7 @@ describe('C7 — whole-file wall-clock budget (iterations, frozen clock)', () =>
 			laneLivenessWatchdog: enabledWatchdog,
 		});
 
-		// Everything this file launched, against the frozen ceiling. With
+		// Everything this fixture launched, against the frozen ceiling. With
 		// the clock frozen the ONLY consumable resource is host round-trips,
 		// so this is the wall-clock budget expressed as iterations.
 		expect(hostLaunches.status + hostLaunches.abort).toBeLessThanOrEqual(

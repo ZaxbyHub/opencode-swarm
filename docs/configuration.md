@@ -870,7 +870,7 @@ distinguishable, with the frozen precedence `completed_failure` >
 - `observer_deadline` — the caller's collection wait budget expired while the session is live or unknown; observer noise, never child failure, never a terminal transition.
 - `provider_retry_in_flight` — the host reports the session in `retry`: provider latency with its own bounded retry owner; retained even past the horizon.
 - `completed_failure` — the ledger already holds a terminal error: the lane completed with a real (failed) outcome, not a liveness signal.
-- `idle_failed_child` — an open record whose session is idle or absent below the horizon: the child failed without a terminal write.
+- `idle_failed_child` — an open record whose session is idle or absent below the horizon: no terminal write AND no observed progress. This is also the condition family stall-escalation events carry for lanes that are still running but producing below both thresholds.
 - `execution_deadline` — the lane exceeded the effective execution horizon: aborted best-effort and settled with its real outcome. With the deadline active this overrides probe retention for `busy` lanes (a `retry` lane stays retained — provider latency owns its retry).
 
 **Stall escalation and the `pr_workflow_lane_watchdog` event.** When stall
@@ -885,17 +885,29 @@ escalation and progression observation is disclosed as a
 `pr_workflow_lane_watchdog` event in `.swarm/events.jsonl`, carrying the
 typed condition, the effective horizon and its source, the escalated lane
 ids (bounded to 10), and the stall thresholds. Re-escalation is durably
-deduped: a lane is not escalated again until activity is observed since its
-last escalation, proven from the durable event log itself (an
-`escalated: false` + `activityObserved: true` observation record), so the
-dedup survives state resets without forking a second durable state file.
+deduped per (session, lane label): a lane is not escalated again until
+activity is observed since its last escalation, proven from the durable
+event log itself (an `escalated: false` + `activityObserved: true`
+observation record), so the dedup survives state resets without forking a
+second durable state file. The suppression window is bounded by the event
+log's retention — an escalation stops suppressing once it folds out of the
+log (7-day fold or tail truncation, whichever comes first). Sessions never
+suppress each other: the dedup only reads events written by the settling
+session's own ID.
 
-**Token counts are estimates.** The host API exposes no provider-true
-per-session token counts; `estimatedTokens` is derived from transcript text
-length, and every surface that reports it (including the stall disclosure)
-labels it an estimate. A lane whose transcript cannot be read reads as zero
-activity — the conservative direction for stall escalation (escalate, then
-let the operator inspect).
+**Activity reading in v1 is zero-by-default.** The host API exposes no
+provider-true per-session token counts and no bounded per-lane transcript
+read that fits the frozen one-status-call probe budget, so the built-in
+activity reader treats EVERY lane as zero activity: each open `busy`/`retry`
+lane escalates once per (session, label) when the stall window fires, and
+the progression/re-arm path activates when a transcript-backed reader is
+wired (the `readLaneActivity` seam exists for exactly that). The
+`stall_min_steps` and `stall_token_threshold` values are the thresholds the
+escalation disclosure reports and the bounds a future reader satisfies;
+with the v1 zero reader no activity input can exceed them, which is the
+conservative direction for stall escalation (escalate, then let the
+operator inspect). A structured `stall` block on each escalation event
+carries the first escalated lane's observed values beside those thresholds.
 
 **Example** — opt in with the frozen defaults (30-minute horizon, 5-minute stall window, 5 steps / ~200 estimated tokens):
 

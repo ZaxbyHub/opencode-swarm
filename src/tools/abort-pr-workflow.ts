@@ -122,7 +122,7 @@ export async function executeAbortPrWorkflow(
 							}
 						: {}),
 					reason: parsed.data.reason,
-					laneLiveness,
+					...(laneLiveness ? { laneLiveness } : {}),
 				},
 			);
 			return JSON.stringify({

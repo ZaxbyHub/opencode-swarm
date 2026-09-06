@@ -206,6 +206,8 @@ import {
 	classifyLaneLivenessCondition,
 	defaultReadLaneActivity,
 	type EffectivePrLaneHorizon,
+	type LaneActivity,
+	type LaneLivenessCondition,
 	laneLivenessWatchdogFeatures,
 	MAX_LANE_LIVENESS_DISCLOSED_IDS,
 	resolveEffectivePrLaneHorizonMs,
@@ -2599,6 +2601,14 @@ export interface PrWorkflowStaleLaneSettlement {
 	/** Lanes stale past the horizon, treated as settled with disclosure. */
 	presumedStaleLaneIds: string[];
 	/**
+	 * Present ONLY when the configured `hooks.background_pending_timeout_minutes`
+	 * disagrees with the ONE effective horizon this settlement used (issue
+	 * #2506 AC2). Fixed template, no second horizon is created — the field
+	 * exists so the disagreement is observable on tool responses instead of
+	 * being silently absorbed.
+	 */
+	horizonConflictNote?: string;
+	/**
 	 * Lanes past the horizon that the probe spared. Present only when non-empty.
 	 */
 	probedAliveLaneIds?: string[];
@@ -2702,23 +2712,19 @@ export interface PrWorkflowLaneLivenessOptions {
 }
 
 /**
- * The #2506 watchdog budget counters (issue AC7). Mutated in place so the
- * `_test_exports.laneLivenessWatchdog` surface reads live values; zeroed by
- * `resetTrackedStateCache()`.
+ * The #2506 watchdog seam surface exposed through `_test_exports`. The budget
+ * counters (issue AC7) are OWNED by this object — every increment and the
+ * `resetTrackedStateCache()` zeroing go through these properties, so there is
+ * deliberately no second counters object a spread could orphan.
  */
-const laneLivenessWatchdogCounters = {
-	hostStatusCalls: 0,
-	hostAbortCalls: 0,
-	evaluations: 0,
-};
-
-/** The #2506 watchdog seam surface exposed through `_test_exports`. */
 const laneLivenessWatchdogSurface = {
 	resolveEffectivePrLaneHorizonMs,
 	classifyLaneLivenessCondition,
 	evaluateLaneLivenessWatchdog: evaluateLaneLivenessWatchdogEscalation,
 	readLaneActivity: defaultReadLaneActivity,
-	...laneLivenessWatchdogCounters,
+	hostStatusCalls: 0,
+	hostAbortCalls: 0,
+	evaluations: 0,
 };
 
 /**
@@ -2754,9 +2760,14 @@ async function abortLaneSessionForWatchdog(
  * durable event log — the registered, bounded, already-disclosed channel
  * (`.swarm/events.jsonl`). Disk-derived on purpose: the dedup must survive
  * `resetTrackedStateCache()` (frozen C4 contract) and must not fork a second
- * durable state file. Reading is a single bounded scan; events older than
- * the 7-day retention window fold into the manifest header, after which a
- * stale escalation no longer suppresses a fresh one — the correct behavior.
+ * durable state file. Reading is a single bounded scan (the store's tail
+ * read); an event suppresses only while it stays inside that bounded window
+ * — a 7-day fold or a tail truncation drops it, after which a stale
+ * escalation no longer suppresses a fresh one — the correct behavior.
+ *
+ * When `sessionID` is provided, only events written by THAT session count:
+ * dedup keys are `(sessionID, lane label)`, so two sessions sharing a
+ * directory (and a lane-role label) never suppress each other's advisories.
  *
  * The same scan also indexes the ACTIVITY OBSERVATION events
  * (`escalated: false` + `activityObserved: true`) written by
@@ -2764,20 +2775,32 @@ async function abortLaneSessionForWatchdog(
  * progressed since the last escalation, which is what re-arms a suppressed
  * lane for its next stall. The `execution_deadline` disclosure event is also
  * `escalated: false` but is NOT an activity observation (no activity was
- * observed — the opposite), so the marker field, not the absence of
- * `escalated`, decides membership.
+ * observed — the opposite); it lands in `deadlineLabels` instead, which is
+ * the durable abort-once marker: a lane whose deadline event survived in the
+ * window is never re-aborted by a later settlement pass.
+ *
+ * Concurrency note: this read-scan and the later event append are not under
+ * one lock. Two genuinely concurrent settlements for the same session could
+ * each decide "not yet escalated" and emit a duplicate advisory event; the
+ * append itself is store-lock-protected so no log corruption results, and
+ * the duplicate is an extra advisory, never a missed one.
  */
-function lastWatchdogEscalationsByLaneLabel(directory: string): {
+function lastWatchdogEscalationsByLaneLabel(
+	directory: string,
+	sessionID?: string,
+): {
 	escalations: Map<string, number>;
 	activityObservations: Map<string, number>;
+	deadlineLabels: Set<string>;
 } {
 	const escalations = new Map<string, number>();
 	const activityObservations = new Map<string, number>();
+	const deadlineLabels = new Set<string>();
 	let text = '';
 	try {
 		text = readCoreEvents(directory).text;
 	} catch {
-		return { escalations, activityObservations };
+		return { escalations, activityObservations, deadlineLabels };
 	}
 	for (const line of text.split('\n')) {
 		const trimmed = line.trim();
@@ -2789,10 +2812,15 @@ function lastWatchdogEscalationsByLaneLabel(directory: string): {
 			continue;
 		}
 		if (event.type !== 'pr_workflow_lane_watchdog') continue;
+		if (sessionID !== undefined && event.sessionID !== sessionID) continue;
 		const isEscalation = event.escalated === true;
 		const isActivityObservation =
 			!isEscalation && event.activityObserved === true;
-		if (!isEscalation && !isActivityObservation) continue;
+		const isDeadlineEvent =
+			!isEscalation &&
+			!isActivityObservation &&
+			event.condition === 'execution_deadline';
+		if (!isEscalation && !isActivityObservation && !isDeadlineEvent) continue;
 		const timestamp = Date.parse(`${event.timestamp}`);
 		if (!Number.isFinite(timestamp)) continue;
 		const laneIds = event.laneIds;
@@ -2800,12 +2828,16 @@ function lastWatchdogEscalationsByLaneLabel(directory: string): {
 		const target = isEscalation ? escalations : activityObservations;
 		for (const label of laneIds) {
 			if (typeof label !== 'string') continue;
+			if (isDeadlineEvent) {
+				deadlineLabels.add(label);
+				continue;
+			}
 			const prior = target.get(label);
 			if (prior === undefined || timestamp > prior)
 				target.set(label, timestamp);
 		}
 	}
-	return { escalations, activityObservations };
+	return { escalations, activityObservations, deadlineLabels };
 }
 
 /**
@@ -2820,13 +2852,17 @@ function appendWatchdogActivityObservation(
 	sessionID: string,
 	labels: string[],
 	horizon: EffectivePrLaneHorizon,
+	condition: LaneLivenessCondition,
 ): void {
 	try {
 		appendCoreEventSync(directory, {
 			type: 'pr_workflow_lane_watchdog',
 			timestamp: isoNow(),
 			sessionID,
-			condition: 'provider_retry_in_flight',
+			// On an OBSERVATION event this field names the condition family the
+			// evaluation is watching for (derived from the progressed lane's own
+			// session type), not an assertion that the lane is in that state.
+			condition,
 			laneIds: labels.slice(0, MAX_LANE_LIVENESS_DISCLOSED_IDS),
 			effectiveHorizonMs: horizon.horizonMs,
 			horizonSource: horizon.source,
@@ -2868,14 +2904,28 @@ async function evaluateLaneLivenessWatchdogEscalation(args: {
 		return type === 'busy' || type === 'retry';
 	});
 	if (candidates.length === 0) return;
-	const lastEscalations = lastWatchdogEscalationsByLaneLabel(directory);
+	const lastEscalations = lastWatchdogEscalationsByLaneLabel(
+		directory,
+		sessionID,
+	);
 	const escalated: BackgroundDelegationRecord[] = [];
 	const progressed: BackgroundDelegationRecord[] = [];
+	let firstEscalatedSteps = 0;
+	let firstEscalatedTokens = 0;
 	for (const record of candidates) {
-		const activity = await laneLivenessWatchdogSurface.readLaneActivity(
-			directory,
-			record.subagentSessionId as string,
-		);
+		// The activity seam is mutable and this function has call sites with no
+		// try/catch of their own (R5): a throwing reader degrades to zero
+		// activity here instead of converting the advisory pass into an
+		// unhandled rejection that escapes the settlement.
+		let activity: LaneActivity | null = null;
+		try {
+			activity = await laneLivenessWatchdogSurface.readLaneActivity(
+				directory,
+				record.subagentSessionId as string,
+			);
+		} catch {
+			activity = null;
+		}
 		const steps = activity?.stepsObserved ?? 0;
 		const tokens = activity?.estimatedTokens ?? 0;
 		const progressing =
@@ -2904,14 +2954,25 @@ async function evaluateLaneLivenessWatchdogEscalation(args: {
 					lastEscalation;
 			if (!activitySince) continue;
 		}
+		if (escalated.length === 0) {
+			firstEscalatedSteps = steps;
+			firstEscalatedTokens = tokens;
+		}
 		escalated.push(record);
 	}
 	if (progressed.length > 0) {
+		const firstProgressed = progressed[0];
+		const firstProgressedType = firstProgressed.subagentSessionId
+			? sessionTypes.get(firstProgressed.subagentSessionId)
+			: undefined;
 		appendWatchdogActivityObservation(
 			directory,
 			sessionID,
 			progressed.map(prWorkflowLaneLabel),
 			horizon,
+			firstProgressedType === 'retry'
+				? 'provider_retry_in_flight'
+				: 'idle_failed_child',
 		);
 	}
 	if (escalated.length === 0) return;
@@ -2943,8 +3004,13 @@ async function evaluateLaneLivenessWatchdogEscalation(args: {
 			horizonSource: horizon.source,
 			escalated: true,
 			stall: {
-				stepsObserved: 0,
-				estimatedTokens: 0,
+				// Batch-scalar event, so the structured values are the FIRST
+				// escalated lane's observed activity (never fabricated zeros);
+				// the thresholds beside them are the discriminating bounds the
+				// values missed. Multi-lane batches are itemized in `laneIds`
+				// and quantified in the disclosure text.
+				stepsObserved: firstEscalatedSteps,
+				estimatedTokens: firstEscalatedTokens,
 				stallThresholdMs: watchdog.stall_threshold_ms,
 				stallMinSteps: watchdog.stall_min_steps,
 				stallTokenThreshold: watchdog.stall_token_threshold,
@@ -2973,6 +3039,15 @@ export async function settlePresumedStalePrWorkflowLanes(
 		watchdog,
 		options?.backgroundPendingTimeoutMs,
 	);
+	// Issue #2506 review round 2: the horizon disagreement must be OBSERVABLE,
+	// not silently absorbed. Fixed template, carried on every settlement
+	// result (regardless of what settled) so the operator sees which value
+	// won whenever the two configured timeouts disagree.
+	const horizonConflictNote = horizon.conflictDisclosed
+		? horizon.source === 'watchdog-timeout'
+			? `lane_liveness_watchdog.timeout_ms (${horizon.horizonMs}ms) governs the PR-lane settlement horizon; hooks.background_pending_timeout_minutes was also set and disagrees — it was not applied (one effective horizon)`
+			: `PR-lane settlement uses the ${Math.round(horizon.horizonMs / 60_000)}min reachability floor; hooks.background_pending_timeout_minutes disagrees with it and does not change this horizon`
+		: undefined;
 	const now = Date.now();
 	const open: BackgroundDelegationRecord[] = [];
 	const presumedStale: BackgroundDelegationRecord[] = [];
@@ -3022,6 +3097,7 @@ export async function settlePresumedStalePrWorkflowLanes(
 			openLanes: open.length,
 			freshOpenLanes: open.length,
 			presumedStaleLaneIds: [],
+			...(horizonConflictNote ? { horizonConflictNote } : {}),
 		};
 	}
 	// R5: the seam is mutable and this function has call sites with no try/catch
@@ -3148,6 +3224,7 @@ export async function settlePresumedStalePrWorkflowLanes(
 			openLanes: openLaneIds.length,
 			freshOpenLanes: open.length,
 			presumedStaleLaneIds: [],
+			...(horizonConflictNote ? { horizonConflictNote } : {}),
 			...retentionFields,
 			disclosure: retentionDisclosure,
 		};
@@ -3155,12 +3232,30 @@ export async function settlePresumedStalePrWorkflowLanes(
 	// Issue #2506: abort each deadline lane's session ONCE, best-effort, and
 	// only while it is actually running (busy). A lane the probe could not see
 	// has nothing left to abort; its settlement keeps the real outcome.
+	//
+	// Review round 2: "once" is enforced durably per (session, lane label) — a
+	// lane whose `execution_deadline` event survived in the bounded read
+	// window is never re-aborted by a LATER settlement pass (the abort target
+	// is already dead; a second host call adds nothing). Within one tool call
+	// there can be up to three settlement passes (tool observation, gate
+	// completion, PR-review readiness); this marker is what keeps the total
+	// aborts per lane at one across them, not just per pass. Wall-clock note:
+	// the loop is sequential with a per-lane `withTimeout` bound, so the worst
+	// case adds N×probeTimeout to the tool path — bounded by the deadline-lane
+	// count, which the probe itself gates to genuinely-`busy` lanes.
 	if (deadlineActive) {
+		const priorDeadlineLabels = lastWatchdogEscalationsByLaneLabel(
+			directory,
+			sessionID,
+		).deadlineLabels;
+		let abortAttempted = false;
 		for (const record of deadlineLanes) {
 			const type = record.subagentSessionId
 				? sessionTypes.get(record.subagentSessionId)
 				: undefined;
 			if (type !== 'busy' || !record.subagentSessionId) continue;
+			if (priorDeadlineLabels.has(prWorkflowLaneLabel(record))) continue;
+			abortAttempted = true;
 			const aborted = await abortLaneSessionForWatchdog(record);
 			if (aborted) laneLivenessWatchdogSurface.hostAbortCalls += 1;
 		}
@@ -3177,11 +3272,19 @@ export async function settlePresumedStalePrWorkflowLanes(
 					effectiveHorizonMs: horizon.horizonMs,
 					horizonSource: horizon.source,
 					escalated: false,
+					// Truthful in both arms (issue #2506 review): a degraded probe
+					// cannot confirm the sessions were running, so no abort is
+					// attempted and the disclosure must not claim one. "No output
+					// observed" stays: this settlement collected no transcript
+					// activity evidence for these lanes.
 					disclosure:
 						`${deadlineLanes.length} lane(s) exceeded the ${horizon.horizonMs}ms execution ` +
-						`deadline (${horizon.source}); sessions aborted best-effort and settled through ` +
-						`the shared path with the real outcome: no output observed (no transcript ` +
-						`activity recorded for these lanes)`,
+						`deadline (${horizon.source}); ` +
+						(abortAttempted
+							? 'sessions aborted best-effort and settled through '
+							: 'no session abort was attempted (the liveness probe could not confirm these sessions were running); lanes settled ') +
+						`through the shared path with the real outcome: no output observed (no ` +
+						`transcript activity recorded for these lanes)`,
 				});
 			} catch {
 				// Best-effort audit; the settlement below is the durable fact.
@@ -3224,7 +3327,12 @@ export async function settlePresumedStalePrWorkflowLanes(
 	//
 	// Issue #2506: the sweep runs at the EFFECTIVE horizon (identical to the
 	// constant whenever the watchdog is off), and a watchdog deadline lane is
-	// deliberately NOT excluded — its settlement IS the decision.
+	// deliberately NOT excluded — its settlement IS the decision. Clock note:
+	// the classification above froze `now` once, while the sweep re-reads the
+	// clock under its own lock — a lane classified open can cross the horizon
+	// during the probe/abort awaits and be durably flipped here. That two-clock
+	// window is pre-existing substrate behavior; the watchdog's bounded awaits
+	// widen it by at most one probe/abort budget, never past it.
 	try {
 		await _test_exports.sweepStaleDelegationsAsync(
 			directory,
@@ -3281,6 +3389,7 @@ export async function settlePresumedStalePrWorkflowLanes(
 		openLanes: openLaneIds.length,
 		freshOpenLanes: open.length,
 		presumedStaleLaneIds,
+		...(horizonConflictNote ? { horizonConflictNote } : {}),
 		...retentionFields,
 		disclosure,
 	};
@@ -3413,11 +3522,18 @@ async function finalizeOverriddenProbeRetainedLanes(
 	directory: string,
 	sessionID: string,
 	correlationIds: readonly string[],
+	horizonMs: number = PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
 ): Promise<OverriddenProbeRetainedLaneOutcome> {
 	try {
 		await _test_exports.sweepStaleDelegationsAsync(
 			directory,
-			PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+			// Issue #2506 review round 2: the finalize sweep runs at the SAME
+			// ONE effective horizon the settlement used, so a probe-retained
+			// lane past a shorter configured watchdog deadline is finalized by
+			// the override instead of surviving between the two horizons and
+			// keeping the session un-restartable. With no watchdog config (or
+			// the default resolution) this IS PR_WORKFLOW_STALE_LANE_TIMEOUT_MS.
+			horizonMs,
 			{
 				statuses: PR_WORKFLOW_SWEEPABLE_LANE_STATUSES,
 				includeCorrelationIds: new Set(correlationIds),
@@ -3867,6 +3983,12 @@ export async function abortPrWorkflow(
 					directory,
 					state.sessionID,
 					overrideTargetedLaneIds,
+					// The override finalizes at the SAME effective horizon the
+					// settlement used (issue #2506 review round 2).
+					resolveEffectivePrLaneHorizonMs(
+						options.laneLiveness?.laneLivenessWatchdog,
+						options.laneLiveness?.backgroundPendingTimeoutMs,
+					).horizonMs,
 				)
 			: {
 					sessionOpenLaneIds: [],
@@ -10646,6 +10768,8 @@ export async function transitionPrReviewToFeedback(
 		prUrl?: string;
 		exactCommand?: string;
 		confirmedByUser?: boolean;
+		/** Issue #2506 review round 2: watchdog policy for the readiness settle. */
+		laneLiveness?: PrWorkflowLaneLivenessOptions;
 	},
 ): Promise<PrWorkflowGateState> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
@@ -10699,7 +10823,14 @@ export async function transitionPrReviewToFeedback(
 			throw wrongModeError(preliminary, 'PR_REVIEW');
 		}
 		const ready = (
-			await assertPrReviewTerminalReady(directory, normalizedSessionID)
+			await assertPrReviewTerminalReady(
+				directory,
+				normalizedSessionID,
+				// Issue #2506 review round 2: the PR_REVIEW→PR_FEEDBACK
+				// continuation settles its lanes at the SAME effective horizon
+				// as every other settlement entry point.
+				request.laneLiveness,
+			)
 		).state;
 		if (
 			workflowIdentity(ready) !== workflowIdentity(preliminary) ||

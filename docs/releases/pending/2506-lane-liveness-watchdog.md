@@ -71,7 +71,8 @@ falls back to the 30-minute reachability floor
 the guarantee that abort and completion cannot be permanently blocked by a
 lane whose backing process died. If `hooks.background_pending_timeout_minutes`
 disagrees with the effective horizon, the disagreement is *disclosed*
-(`conflictDisclosed` on the horizon resolution consumed by the gate) but
+on the settlement result and completion responses (`horizon_conflict`, from
+`conflictDisclosed` on the horizon resolution) but
 never resolved into a second horizon: the effective horizon remains the one
 settlement authority, and the background-pending sweep never becomes a
 competing deadline for PR lanes.
@@ -97,21 +98,29 @@ never reported as child failure.
 Escalation and progression observations are disclosed as
 `pr_workflow_lane_watchdog` events in `.swarm/events.jsonl`, carrying the
 typed condition, the effective horizon and its source, the lane ids (bounded
-to 10), and the stall thresholds. Re-escalation is deduped per lane against
+to 10), and the stall thresholds. Re-escalation is deduped per (session, lane label) against
 the last escalation *durably* — derived from the existing bounded event log,
 not a module-level map, so the dedup survives `resetTrackedStateCache()`
-and forks no second durable state file. "Activity since the last
-escalation" is falsifiable from disk alone: a progressing lane writes an
+and forks no second durable state file, and two sessions sharing a lane
+role label never suppress each other. “Activity since the last
+escalation” is falsifiable from disk alone: a progressing lane writes an
 `escalated: false` + `activityObserved: true` observation record, and that
-record (or the live reader's `lastActivityAtMs`) is what re-arms a
-suppressed lane for its next stall. Events older than the 7-day retention
-window fold into the manifest header, after which a stale escalation no
-longer suppresses a fresh one.
+record (or the live reader’s `lastActivityAtMs`) is what re-arms a
+suppressed lane for its next stall. An escalation stops suppressing once it
+folds out of the bounded event-log window (7-day fold or tail truncation,
+whichever comes first).
 
-Token counts in the stall surface are transcript-derived **estimates** — the
-host API exposes no provider-true per-session token counts — and a lane
-whose transcript cannot be read reads as zero activity: the conservative
-direction (escalate, then let the operator inspect).
+Activity reading in v1 is zero-by-default: the host API exposes no
+provider-true per-session token counts and no bounded per-lane transcript
+read that fits the frozen one-status-call probe budget, so the built-in
+reader treats every open lane as zero activity — each stalled lane escalates
+once per (session, label) and the progression/re-arm path activates when a
+transcript-backed reader is wired onto the existing `readLaneActivity`
+seam. `stall_min_steps`/`stall_token_threshold` are the thresholds the
+disclosure reports and a future reader satisfies; the escalation event's
+structured `stall` block carries the first escalated lane's observed values
+beside them. This is the conservative direction (escalate, then let the
+operator inspect).
 
 ## OBSERVABILITY-1/-2 rebaseline
 
@@ -135,14 +144,16 @@ current production source instead:
   feeds the durable counters, so the observability gap is real once the
   "no producer" claim is corrected to "no counter incrementer".
 
-This section is the executable rebaseline record; the frozen check
-(`observability-rebaseline.sh`) verifies both source facts and this
-fragment's presence every run.
+This section is the executable rebaseline record. Its check script ran
+during this PR's issue-tracer validation (re-run at the shipped head; see
+the trace's test-results record); it lives in the issue-trace working
+notes, not in the repository, so it is a validation artifact rather than a
+CI gate.
 
 ## Breaking changes
 
 None. The config block is new, strict, and default-off; the disabled path is
-byte-identical to the pre-#2506 substrate, no signature changed, and no new
+byte-identical to the pre-#2506 substrate, no signature change is breaking (several gate functions gained optional parameters), and no new
 durable state file exists (watchdog disclosures ride the existing
 `.swarm/events.jsonl` log).
 
