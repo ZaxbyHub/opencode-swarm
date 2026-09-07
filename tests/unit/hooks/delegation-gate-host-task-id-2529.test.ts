@@ -55,11 +55,11 @@ describe('delegation gate host task tool id (issue #2529)', () => {
 		expect(violations.map((v) => `${v.kind}:${v.line}: ${v.source}`)).toEqual(
 			[],
 		);
-		// Five guards call the boundary directly (toolBefore coder-scope prep,
-		// toolAfter background-noop, critic preflight, post-preflight
-		// early-out, the isTaskTool projection); the sixth (the
-		// completion-revoke block) reuses that projected variable.
+		// Exactly five guards call the boundary directly (toolBefore
+		// coder-scope prep, toolAfter background-noop, critic preflight,
+		// post-preflight early-out, the isTaskTool projection); the
+		// completion-revoke block reuses that projected boolean.
 		const boundaryUses = source.match(/\bisTaskToolId\(/g)?.length ?? 0;
-		expect(boundaryUses).toBeGreaterThanOrEqual(5);
+		expect(boundaryUses).toBe(5);
 	});
 });

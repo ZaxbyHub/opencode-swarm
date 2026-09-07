@@ -694,8 +694,11 @@ function extractTaskToolPrompt(messages: unknown[]): string | null {
 				// `{type:'tool', tool:'task', state:{...}}` parts, and every
 				// ToolState variant carries `input` (SDK v2 types), so the
 				// delegation prompt is recoverable there too (issue #2529).
-				// Array prompts on this host shape fall through to latestUserText
-				// below (same end behavior as before the host-shape branch).
+				// An SDK ToolState whose `input` is not a {prompt: string} record
+				// (e.g. an array) yields nothing from this branch; the caller
+				// falls back via its coalescing to the latest user text. Same net
+				// behavior as before this branch existed (it never matched host
+				// parts).
 				if (b.type === 'tool' && isTaskToolId(b.tool as string)) {
 					const state = b.state as { input?: unknown } | undefined;
 					const stateInput = state?.input as

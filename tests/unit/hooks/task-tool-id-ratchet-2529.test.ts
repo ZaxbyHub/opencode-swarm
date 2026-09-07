@@ -80,6 +80,13 @@ describe('task tool id ratchet (issue #2529)', () => {
 			'}',
 		].join('\n');
 		expect(scanSourceText('f.ts', rawLower)).toEqual([]);
+		// A cross-operand pairing is NOT a pair: flagged by predicate A.
+		expect(
+			scanSourceText(
+				'f.ts',
+				"if (tool !== 'Task' && other !== 'task') return;",
+			).map((v) => v.kind),
+		).toEqual(['exclusive-task']);
 		// A normalizer call near a comparison of a DIFFERENT operand is not
 		// provenance (operand-match guard against coincidental proximity).
 		const coincidental = [

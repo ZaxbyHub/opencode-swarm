@@ -100,10 +100,25 @@ export function scanSourceText(
 		const line = lines[i];
 		if (isCommentLine(line)) continue;
 		if (EXCLUSIVE_TASK_COMPARISON.test(line)) {
-			// Predicate A: paired both-spelling comparison (this line + next 2)
-			// on a raw operand is the dot-safe legacy idiom, not the defect.
-			const window = lines.slice(i, i + 3).filter((l) => !isCommentLine(l));
-			if (!LOWERCASE_TASK_COMPARISON.test(window.join('\n'))) {
+			// Predicate A: a paired both-spelling comparison of the SAME
+			// operand (this line + next 2) on a raw operand is the dot-safe
+			// legacy idiom. The lowercase comparison must test the same
+			// identifier: a cross-operand pairing such as
+			// `tool !== 'Task' && other !== 'task'` is not a pair and stays
+			// flagged.
+			const operand = comparisonOperand(line);
+			const paired = lines.slice(i, i + 3).some((windowLine) => {
+				if (isCommentLine(windowLine)) return false;
+				const lower = LOWERCASE_TASK_COMPARISON.exec(windowLine);
+				if (!lower || lower.index === undefined) return false;
+				if (operand === null) return false;
+				// Operand of the LOWERCASE match itself, so a cross-operand
+				// pairing (tool !== 'Task' && other !== 'task') stays flagged.
+				const before = windowLine.slice(0, lower.index).trim();
+				const ident = /([A-Za-z_$][\w$]*)\s*$/.exec(before);
+				return ident !== null && ident[1] === operand;
+			});
+			if (!paired) {
 				violations.push({
 					kind: 'exclusive-task',
 					file,
