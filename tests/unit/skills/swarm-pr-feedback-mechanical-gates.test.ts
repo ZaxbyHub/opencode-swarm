@@ -34,6 +34,11 @@ describe('swarm-pr-feedback mechanical gates', () => {
 			'exact failing CI/test reproduction',
 			'repo-appropriate targeted regression/test command',
 			'session task-gates artifact',
+			'cancel-publication',
+			'cancel_publication: true',
+			'cancelled_without_publication',
+			'never grants push authority',
+			'invalidate_pr_feedback_publication',
 		]) {
 			expect(source).toContain(required);
 		}
@@ -46,6 +51,15 @@ describe('swarm-pr-feedback mechanical gates', () => {
 		expect(source).toContain('**Without the controller (Profiles B/C).**');
 		expect(source).toContain(
 			'Controller-tool absence is NOT a blocker; Profiles B and C are first-class',
+		);
+	});
+
+	test('canonical cancellation path is explicit and plain armed abort remains prohibited', () => {
+		const source = read(CANONICAL);
+		expect(source).toContain('Plain recovery/force aborts');
+		expect(source).toContain('Do not substitute a plain abort');
+		expect(source).toContain(
+			'A published generation is never cleared by abort',
 		);
 	});
 

@@ -302,6 +302,20 @@ describe('Architect Agent - Agent Delegation Patterns', () => {
 		);
 	});
 
+	it('PR_FEEDBACK guidance exposes audited cancellation and protects publication state', () => {
+		const p = createArchitectAgent('test-model').config.prompt!;
+		const idx = p.indexOf('### MODE: PR_FEEDBACK');
+		const next = p.indexOf('### MODE: CI_MONITOR', idx + 1);
+		const section = p.slice(idx, next);
+		expect(section).toContain('cancel-publication');
+		expect(section).toContain('cancel_publication: true');
+		expect(section).toContain('cancelled_without_publication');
+		expect(section).toContain('never grants push authority');
+		expect(section).toContain('invalidate_pr_feedback_publication');
+		expect(section).toContain('published generation is never cleared by abort');
+		expect(section).toContain('Do not substitute a plain abort');
+	});
+
 	it('async signal-triggered mode stubs direct architect work while lanes run', () => {
 		const modeNeedles = [
 			'When reality-check lanes are dispatched asynchronously',

@@ -7,12 +7,14 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	_test_exports,
 	abortPrWorkflow,
+	completePrWorkflow,
 	enforcePrWorkflowToolBefore,
 	invalidatePrFeedbackPublication,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	createPublicationFixture,
+	HEAD_SHA,
 	POST_COMMIT_SHA,
 	type PublicationFixture,
 } from './pr-workflow-publication.test-fixtures.js';
@@ -37,6 +39,7 @@ describe('cancellation without publication (issue #2108 §6)', () => {
 			cancelPublication: true,
 		});
 		expect(summary.mode).toBe('PR_FEEDBACK');
+		expect(summary.observedRemoteHead).toBe(POST_COMMIT_SHA);
 		await expect(
 			readPrWorkflowGateState(fixture.directory, SESSION_ID),
 		).resolves.toBeNull();
@@ -78,6 +81,22 @@ describe('cancellation without publication (issue #2108 §6)', () => {
 		).rejects.toThrow(/armed for publication; abort is blocked/i);
 		const state = await readPrWorkflowGateState(fixture.directory, SESSION_ID);
 		expect(state?.prFeedbackReadyToPublish).toBeDefined();
+	});
+
+	test('cancellation flag cannot be smuggled through the recovery kind (FB-001)', async () => {
+		await fixture.prepareArmedGeneration(SESSION_ID);
+		await expect(
+			abortPrWorkflow(fixture.directory, SESSION_ID, {
+				kind: 'recovery',
+				reason: 'attempt the wrong cancellation tuple',
+				cancelPublication: true,
+			}),
+		).rejects.toThrow(/requires kind "cancel-publication"/);
+		await expect(
+			readPrWorkflowGateState(fixture.directory, SESSION_ID),
+		).resolves.toMatchObject({
+			prFeedbackPublication: { active: { state: 'armed' } },
+		});
 	});
 
 	test('plain recovery/force aborts remain refused while armed', async () => {
@@ -160,9 +179,68 @@ describe('cancellation without publication (issue #2108 §6)', () => {
 			.find((event) => event.type === 'pr_feedback_publication_cancelled');
 		expect(cancelledEvent).toBeDefined();
 		expect(cancelledEvent?.attemptsFinalized).toBe(1);
+		expect(cancelledEvent?.observedRemoteHead).toBe('0'.repeat(40));
 		await expect(
 			readPrWorkflowGateState(fixture.directory, SESSION_ID),
 		).resolves.toBeNull();
+	});
+
+	test('published state cannot be cleared by cancellation or recovery (F-002)', async () => {
+		await fixture.prepareArmedGeneration(SESSION_ID);
+		await enforcePrWorkflowToolBefore(
+			fixture.directory,
+			SESSION_ID,
+			'shell',
+			{ command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head` },
+			[],
+			'call-published-crash',
+		);
+		_test_exports.beforeTerminalClear = async () => {
+			throw new Error('leave the published state for crash recovery');
+		};
+		await expect(
+			completePrWorkflow(
+				fixture.directory,
+				SESSION_ID,
+				'PR_FEEDBACK',
+				HEAD_SHA,
+			),
+		).rejects.toThrow('leave the published state');
+		await expect(fixture.readActive(SESSION_ID)).resolves.toMatchObject({
+			active: { state: 'published' },
+		});
+		await expect(
+			abortPrWorkflow(fixture.directory, SESSION_ID, {
+				kind: 'cancel-publication',
+				reason: 'try to clear a published generation',
+				cancelPublication: true,
+			}),
+		).rejects.toThrow(/already marked published/);
+		await expect(
+			abortPrWorkflow(fixture.directory, SESSION_ID, {
+				kind: 'recovery',
+				reason: 'try to clear a published generation',
+			}),
+		).rejects.toThrow(/already marked published/);
+		_test_exports.beforeTerminalClear = undefined;
+		fixture.mutators.remoteHead('different-remote-head');
+		await expect(
+			completePrWorkflow(
+				fixture.directory,
+				SESSION_ID,
+				'PR_FEEDBACK',
+				HEAD_SHA,
+			),
+		).rejects.toThrow(/remote verification no longer holds/);
+		fixture.mutators.remoteHead(POST_COMMIT_SHA);
+		await expect(
+			completePrWorkflow(
+				fixture.directory,
+				SESSION_ID,
+				'PR_FEEDBACK',
+				HEAD_SHA,
+			),
+		).resolves.toBe('completed');
 	});
 
 	test('cancellation applies only to a PR_FEEDBACK publication workflow', async () => {
