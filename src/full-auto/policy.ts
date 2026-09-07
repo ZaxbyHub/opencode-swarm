@@ -36,6 +36,10 @@ import {
 	isKnownCanonicalRole,
 	resolveGeneratedAgentRole,
 } from '../config/schema';
+import {
+	isTaskToolId,
+	normalizeToolNameLowerCase,
+} from '../hooks/normalize-tool-name';
 import { classifyCommand } from '../security/command-classifier.js';
 import { isPolicyProtectedPath } from '../security/protected-path-policy.js';
 import { normalizePath } from '../utils/path';
@@ -263,10 +267,13 @@ export function isSubagentDelegation(
 	toolName: string,
 	args: Record<string, unknown> | undefined,
 ): boolean {
-	const lower = toolName?.toLowerCase() ?? '';
-	if (SUBAGENT_TOOLS.has(lower)) return true;
-	if (lower === 'task' && args && typeof args === 'object') return true;
-	return false;
+	// Task leg via the #2529 boundary on the RAW tool id: a dotted
+	// custom tool id (`notes.task`) is never truncated into the task tool.
+	if (isTaskToolId(toolName) && args && typeof args === 'object') {
+		return true;
+	}
+	const lower = normalizeToolNameLowerCase(toolName ?? '');
+	return SUBAGENT_TOOLS.has(lower);
 }
 
 function isWithinDirectory(target: string, root: string): boolean {
