@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.170.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.170.0...v7.170.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **knowledge:** bound reviewer directives_to_verify block to one obligation per entry ([78d99d5](https://github.com/ZaxbyHub/opencode-swarm/commit/78d99d5a1637988210d5b66510ee38bfdb784fd8))
+* **knowledge:** bound reviewer directives_to_verify block to one obligation per entry ([dae54a3](https://github.com/ZaxbyHub/opencode-swarm/commit/dae54a3710446ade6a870af4cd916a866bdb83ab)), closes [#2628](https://github.com/ZaxbyHub/opencode-swarm/issues/2628)
+* **knowledge:** close PR [#2636](https://github.com/ZaxbyHub/opencode-swarm/issues/2636) review findings (contradicted remediation, hard-tail budget, parser hardening) ([31c972e](https://github.com/ZaxbyHub/opencode-swarm/commit/31c972ec7b03d46fc191da447d00697bdd2d181c))
+
 ## [7.170.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.169.0...v7.170.0) (2026-09-07)
 
 
