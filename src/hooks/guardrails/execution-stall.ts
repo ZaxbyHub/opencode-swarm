@@ -108,7 +108,10 @@ import {
 import { ensureAgentSession, swarmState } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { pushAdvisory } from '../../utils/advisory-queue';
-import { normalizeToolNameLowerCase } from '../normalize-tool-name';
+import {
+	isTaskToolId,
+	normalizeToolNameLowerCase,
+} from '../normalize-tool-name';
 import { classifyTaskResult } from '../task-result-classifier';
 import { setExecutionEpisodeArmed } from './execution-episode';
 
@@ -325,8 +328,7 @@ export function canonicalDispatchRole(
 	tool: string,
 	args: unknown,
 ): string | null {
-	const normalized = normalizeToolNameLowerCase(tool ?? '');
-	if (normalized !== 'task') return null;
+	if (!isTaskToolId(tool ?? '')) return null;
 	const subagentType = (args as Record<string, unknown> | undefined)
 		?.subagent_type;
 	if (typeof subagentType !== 'string' || subagentType.length === 0) {

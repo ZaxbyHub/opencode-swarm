@@ -282,6 +282,71 @@ describe('index task-model routing integration', () => {
 		).rejects.toThrow('MODEL_FALLBACK_EXHAUSTED');
 	});
 
+	test('registers routes and serves fallback for the host lowercase task id under an SDK-shaped 429 (issue #2529)', async () => {
+		const plugin = await bootPlugin(directory);
+		// Host spelling: the OpenCode host invokes the task tool as lowercase `task`.
+		await plugin['chat.message']?.(
+			{ sessionID: PARENT_SESSION, agent: 'architect' } as never,
+			{} as never,
+		);
+		await plugin['tool.execute.before']?.(
+			{ tool: 'task', sessionID: PARENT_SESSION, callID: 'call-host' } as never,
+			{
+				args: {
+					subagent_type: 'coder',
+					prompt: 'TASK: 1.1\nACCEPTANCE: host id registers a model route',
+				},
+			} as never,
+		);
+		expect(getTaskModelRoutingStateSnapshot().routes).toHaveLength(1);
+
+		await plugin.event?.({
+			event: {
+				type: 'message.part.updated',
+				properties: {
+					part: {
+						sessionID: PARENT_SESSION,
+						callID: 'call-host',
+						type: 'tool',
+						tool: 'task',
+						state: { metadata: { sessionId: CHILD_SESSION } },
+					},
+				},
+			},
+		});
+
+		// SDK-shaped provider error: the text nests under error.data, which the
+		// session.error signal extractor must descend into (issue #2529).
+		await plugin.event?.({
+			event: {
+				type: 'session.error',
+				properties: {
+					sessionID: CHILD_SESSION,
+					error: {
+						name: 'APIError',
+						data: {
+							message: '429 rate_limit_exceeded: too many requests',
+							statusCode: 429,
+							isRetryable: true,
+						},
+					},
+				},
+			},
+		});
+
+		const output = {
+			message: {} as { model?: { providerID: string; modelID: string } },
+		};
+		await plugin['chat.message']?.(
+			{ sessionID: CHILD_SESSION, agent: 'coder' } as never,
+			output as never,
+		);
+		expect(output.message.model).toEqual({
+			providerID: 'prov',
+			modelID: 'fb1',
+		});
+	}, 30000);
+
 	test('cleans task-model and severe child state on session deletion', async () => {
 		const plugin = await bootPlugin(directory);
 		await dispatchCoderTask(

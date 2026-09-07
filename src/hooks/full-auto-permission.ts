@@ -66,7 +66,6 @@ import {
 	peekPendingInputWarning,
 } from './full-auto-input-probe';
 import { hashArgs } from './guardrails/file-authority';
-import { normalizeToolName } from './normalize-tool-name';
 
 export const _internals = {
 	assessSandboxEnforcement,
@@ -96,7 +95,9 @@ export function createFullAutoPermissionHook(
 	// `/swarm full-auto on` pay only a cheap state lookup per tool call.
 	return {
 		toolBefore: async (input, output) => {
-			const toolName = normalizeToolName(input.tool) ?? input.tool;
+			// Raw id: the classifier task leg routes through isTaskToolId (#2529),
+			// so a dotted custom tool id is not truncated into the task tool.
+			const toolName = input.tool;
 			const sessionID = input.sessionID;
 			if (!sessionID) return;
 

@@ -5,7 +5,7 @@ import {
 } from '../agents/agent-output-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import type { MessageWithParts } from '../hooks/knowledge-types';
-import { normalizeToolName } from '../hooks/normalize-tool-name';
+import { isTaskToolId } from '../hooks/normalize-tool-name';
 import {
 	deliveredGuidanceDelta,
 	insertGuidanceCarrier,
@@ -565,10 +565,7 @@ function parseTaskToolInput(input: unknown): ParsedTaskInput | null {
 		agent?: unknown;
 	};
 	const rawTool = typeof record.tool === 'string' ? record.tool : undefined;
-	const toolName = rawTool
-		? (normalizeToolName(rawTool) ?? rawTool)
-		: undefined;
-	if (toolName !== 'Task' && toolName !== 'task') return null;
+	if (!isTaskToolId(rawTool)) return null;
 	if (!record.args || typeof record.args !== 'object') return null;
 	const args = record.args as Record<string, unknown>;
 	const prompt = args.prompt;
@@ -679,9 +676,35 @@ function extractTaskToolPrompt(messages: unknown[]): string | null {
 			const block = content[j];
 			if (block && typeof block === 'object') {
 				const b = block as Record<string, unknown>;
-				if (b.type === 'tool_use' && b.name === 'Task') {
+				// Anthropic-shaped tool_use block. The name may arrive in the
+				// host's lowercase spelling (`task`) or the legacy capitalised
+				// one — both route through the shared task-tool boundary
+				// (issue #2529).
+				if (
+					b.type === 'tool_use' &&
+					isTaskToolId(typeof b.name === 'string' ? b.name : undefined)
+				) {
 					const input = b.input as Record<string, unknown> | undefined;
 					const prompt = input?.prompt;
+					if (typeof prompt === 'string' && prompt.length > 0) {
+						return prompt;
+					}
+				}
+				// Host-shaped tool part: the host's assistant messages carry
+				// `{type:'tool', tool:'task', state:{...}}` parts, and every
+				// ToolState variant carries `input` (SDK v2 types), so the
+				// delegation prompt is recoverable there too (issue #2529).
+				// An SDK ToolState whose `input` is not a {prompt: string} record
+				// (e.g. an array) yields nothing from this branch; the caller
+				// falls back via its coalescing to the latest user text. Same net
+				// behavior as before this branch existed (it never matched host
+				// parts).
+				if (b.type === 'tool' && isTaskToolId(b.tool as string)) {
+					const state = b.state as { input?: unknown } | undefined;
+					const stateInput = state?.input as
+						| Record<string, unknown>
+						| undefined;
+					const prompt = stateInput?.prompt;
 					if (typeof prompt === 'string' && prompt.length > 0) {
 						return prompt;
 					}

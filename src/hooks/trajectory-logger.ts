@@ -17,7 +17,10 @@ import { swarmState } from '../state';
 import { compositeSessionKey, sessionKeySuffix } from '../utils/canonical-root';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { deriveGateDenialCode } from './gate-denial-tracker';
-import { normalizeToolNameLowerCase } from './normalize-tool-name';
+import {
+	isTaskToolId,
+	normalizeToolNameLowerCase,
+} from './normalize-tool-name';
 import {
 	clearTrajectoryStepCounters,
 	nextTrajectoryStep,
@@ -157,7 +160,7 @@ export async function truncateTrajectoryFile(
  */
 function deriveAction(tool: string): string {
 	const toolLower = normalizeToolNameLowerCase(tool ?? '');
-	if (toolLower === 'task') return 'delegate';
+	if (isTaskToolId(tool)) return 'delegate';
 	if (['write', 'edit', 'apply_patch', 'swarm_apply_patch'].includes(toolLower))
 		return 'edit';
 	if (['read', 'glob', 'grep', 'search'].includes(toolLower)) return 'read';

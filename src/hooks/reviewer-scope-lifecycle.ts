@@ -29,7 +29,7 @@ import {
 	abortStandardWorktreeDispatch,
 	standardWorktreeByCallID,
 } from './delegation-gate/worktree-isolation.js';
-import { normalizeToolName } from './normalize-tool-name.js';
+import { isTaskToolId } from './normalize-tool-name.js';
 import { computeScopeFingerprint } from './review-receipt.js';
 import {
 	buildReviewerTaskScope,
@@ -85,9 +85,7 @@ function lifecycleTarget(args: unknown): string {
 }
 
 function isTaskTool(tool: unknown): boolean {
-	if (typeof tool !== 'string') return false;
-	const normalized = normalizeToolName(tool);
-	return normalized === 'Task' || normalized === 'task';
+	return typeof tool === 'string' && isTaskToolId(tool);
 }
 
 type FreshnessOutcome =

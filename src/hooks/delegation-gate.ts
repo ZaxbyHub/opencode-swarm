@@ -154,7 +154,7 @@ import {
 	recordWorktreeMergeFailure,
 } from './delegation-gate/worktree-merge-status';
 import { deleteStoredInputArgs, getStoredInputArgs } from './guardrails';
-import { normalizeToolName } from './normalize-tool-name';
+import { isTaskToolId, normalizeToolName } from './normalize-tool-name';
 import {
 	insertGuidanceCarrier,
 	isGuidanceCarrier,
@@ -3395,10 +3395,9 @@ export function createDelegationGateHook(
 				// No-op when delegation gate is disabled
 			},
 			toolBefore: async (input, output): Promise<void> => {
-				const normalized = normalizeToolName(input.tool);
 				const args = output.args as Record<string, unknown> | undefined;
 				if (
-					(normalized !== 'Task' && normalized !== 'task') ||
+					!isTaskToolId(input.tool) ||
 					!args ||
 					typeof args.subagent_type !== 'string' ||
 					stripKnownSwarmPrefix(args.subagent_type) !== 'coder'
@@ -3409,8 +3408,7 @@ export function createDelegationGateHook(
 			},
 			toolAfter: async (input, output): Promise<void> => {
 				if (
-					(normalizeToolName(input.tool) === 'Task' ||
-						normalizeToolName(input.tool) === 'task') &&
+					isTaskToolId(input.tool) &&
 					outputLooksLikeBackgroundRunning(output)
 				)
 					return;
@@ -3448,7 +3446,7 @@ export function createDelegationGateHook(
 		// the dispatch proceed (existing retry classification still applies).
 		const preflightArgs = output.args as Record<string, unknown> | undefined;
 		if (
-			(normalized === 'Task' || normalized === 'task') &&
+			isTaskToolId(input.tool) &&
 			preflightArgs &&
 			typeof preflightArgs.subagent_type === 'string'
 		) {
@@ -3626,7 +3624,7 @@ export function createDelegationGateHook(
 			}
 		}
 
-		if (normalized !== 'Task' && normalized !== 'task') return;
+		if (!isTaskToolId(input.tool)) return;
 
 		const args = output.args as Record<string, unknown> | undefined;
 		if (!args) return;
@@ -4633,7 +4631,7 @@ export function createDelegationGateHook(
 		_output: unknown,
 	): Promise<void> => {
 		const normalized = normalizeToolName(input.tool);
-		const isTaskTool = normalized === 'Task' || normalized === 'task';
+		const isTaskTool = isTaskToolId(input.tool);
 		if (!input.sessionID) {
 			if (isTaskTool && !outputLooksLikeBackgroundRunning(_output))
 				clearPublishedScopeBindings(input.callID);
@@ -4739,7 +4737,7 @@ export function createDelegationGateHook(
 			return;
 		}
 
-		if (normalized === 'Task' || normalized === 'task') {
+		if (isTaskTool) {
 			// The delegated tool has returned (success or failure). Revoke the exact
 			// Task-call authorization before any merge/QA bookkeeping runs.
 			// Primary source: input.args from OpenCode's tool.execute.after hook (authoritative)

@@ -36,6 +36,10 @@ import {
 	isKnownCanonicalRole,
 	resolveGeneratedAgentRole,
 } from '../config/schema';
+import {
+	isTaskToolId,
+	normalizeToolNameLowerCase,
+} from '../hooks/normalize-tool-name';
 import { classifyCommand } from '../security/command-classifier.js';
 import { isPolicyProtectedPath } from '../security/protected-path-policy.js';
 import { normalizePath } from '../utils/path';
@@ -202,7 +206,9 @@ const NETWORK_TOOLS = new Set<string>([
 	'gitingest',
 ]);
 
-const SUBAGENT_TOOLS = new Set<string>(['task', 'agent', 'delegate']);
+// 'task' is deliberately absent: the task leg routes through isTaskToolId
+// (#2529), and a dot-stripping set lookup here would re-admit dotted ids.
+const SUBAGENT_TOOLS = new Set<string>(['agent', 'delegate']);
 
 const HIGH_RISK_BUILD_PATHS = [
 	'src/index.ts',
@@ -263,10 +269,13 @@ export function isSubagentDelegation(
 	toolName: string,
 	args: Record<string, unknown> | undefined,
 ): boolean {
-	const lower = toolName?.toLowerCase() ?? '';
-	if (SUBAGENT_TOOLS.has(lower)) return true;
-	if (lower === 'task' && args && typeof args === 'object') return true;
-	return false;
+	// Task leg via the #2529 boundary on the RAW tool id: a dotted
+	// custom tool id (`notes.task`) is never truncated into the task tool.
+	if (isTaskToolId(toolName) && args && typeof args === 'object') {
+		return true;
+	}
+	const lower = normalizeToolNameLowerCase(toolName ?? '');
+	return SUBAGENT_TOOLS.has(lower);
 }
 
 function isWithinDirectory(target: string, root: string): boolean {

@@ -145,12 +145,14 @@ describe('gate-denial tracker wiring in src/index.ts', () => {
 		const catchBody = toolBeforeBlock.slice(catchIdx);
 
 		// The rollback must fire for EVERY Task-call throw — the eligibility
-		// condition must NOT consult failClosedRegionCompleted...
+		// condition must NOT consult failClosedRegionCompleted. Issue #2529
+		// routed the rollback trigger through the shared task-tool boundary
+		// (isTaskToolId: host `task`, legacy `Task`, colon-namespaced ids).
 		expect(catchBody).toMatch(
-			/if\s*\(\s*normalizeToolName\(input\.tool\) === 'Task'\s*\|\|\s*normalizeToolName\(input\.tool\) === 'task'\s*\)\s*\{/,
+			/if\s*\(\s*isTaskToolId\(input\.tool\)\s*\)\s*\{/,
 		);
 		const rollbackIfMatch = catchBody.match(
-			/if\s*\(\s*normalizeToolName\(input\.tool\) === 'Task'/,
+			/if\s*\(\s*isTaskToolId\(input\.tool\)/,
 		);
 		expect(rollbackIfMatch).not.toBeNull();
 		// ...the flag gate must not appear between the catch keyword and the

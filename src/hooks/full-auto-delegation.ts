@@ -44,7 +44,10 @@ import {
 } from '../full-auto/state';
 import { swarmState } from '../state';
 import * as logger from '../utils/logger';
-import { normalizeToolName } from './normalize-tool-name';
+import {
+	isTaskToolId,
+	normalizeToolNameLowerCase,
+} from './normalize-tool-name';
 
 /**
  * The plugin recognises canonical agent ROLES, not full generated agent
@@ -125,8 +128,11 @@ function isExactCanonicalRole(name: string): boolean {
 }
 
 function isTaskTool(toolName: string): boolean {
-	const lower = toolName?.toLowerCase() ?? '';
-	return lower === 'task' || lower === 'agent' || lower === 'delegate';
+	// Task leg via the #2529 boundary: a dotted custom tool id
+	// (`notes.task`) is never truncated into the task tool.
+	if (isTaskToolId(toolName)) return true;
+	const lower = normalizeToolNameLowerCase(toolName ?? '');
+	return lower === 'agent' || lower === 'delegate';
 }
 
 function extractText(value: unknown): string {
@@ -275,11 +281,7 @@ export function createFullAutoDelegationHook(
 	// the durable per-session run state (status !== 'running' → return).
 	return {
 		toolBefore: async (input, output) => {
-			const tool = (
-				normalizeToolName(input.tool) ??
-				input.tool ??
-				''
-			).toLowerCase();
+			const tool = input.tool ?? '';
 			if (!isTaskTool(tool)) return;
 			const sessionID = input.sessionID;
 			if (!sessionID) return;
@@ -403,11 +405,7 @@ export function createFullAutoDelegationHook(
 		},
 
 		toolAfter: async (input, output) => {
-			const tool = (
-				normalizeToolName(input.tool) ??
-				input.tool ??
-				''
-			).toLowerCase();
+			const tool = input.tool ?? '';
 			if (!isTaskTool(tool)) return;
 			const sessionID = input.sessionID;
 			if (!sessionID) return;
