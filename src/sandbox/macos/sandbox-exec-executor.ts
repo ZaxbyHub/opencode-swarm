@@ -488,9 +488,12 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 	/**
 	 * Return environment variable overrides required for the macOS sandbox.
 	 *
-	 * DYLD_INSERT_LIBRARIES, DYLD_LIBRARY_PATH, DYLD_FRAMEWORK_PATH, and
-	 * DYLD_ROOT_PATH can be used to bypass sandbox restrictions by injecting
-	 * dynamic libraries. Unsetting them improves sandbox enforcement (defense in depth).
+	 * DYLD_INSERT_LIBRARIES, DYLD_LIBRARY_PATH, DYLD_FRAMEWORK_PATH,
+	 * DYLD_ROOT_PATH, and DYLD_FORCE_FLAT_NAMESPACE can be used to bypass
+	 * sandbox restrictions by injecting or redirecting dynamic-library
+	 * loading. Unsetting them improves sandbox enforcement (defense in
+	 * depth); DYLD_FORCE_FLAT_NAMESPACE matches the Windows executors'
+	 * scrub lists (review PRR-006, PR #2630).
 	 */
 	getEnvOverrides(): Record<string, string | null> {
 		return {
@@ -498,6 +501,7 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 			DYLD_LIBRARY_PATH: null,
 			DYLD_FRAMEWORK_PATH: null,
 			DYLD_ROOT_PATH: null,
+			DYLD_FORCE_FLAT_NAMESPACE: null,
 			PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
 		};
 	}

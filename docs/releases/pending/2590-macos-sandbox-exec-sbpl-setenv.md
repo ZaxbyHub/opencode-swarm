@@ -9,7 +9,9 @@ Fix: macOS sandbox-exec profiles unparseable — executor silently disabled (#25
   same invalid pair, the probe failed on every macOS host and the whole
   sandbox-exec executor silently fell back to unsandboxed tool-layer enforcement.
   The env directives are gone from both the probe and production profiles, and the
-  DYLD_* unset / PATH-pin hardening is now applied inside the wrapped command (the
+  DYLD_* unset (five injection/redirect variables, including
+  `DYLD_FORCE_FLAT_NAMESPACE`) / PATH-pin hardening is now applied inside the wrapped
+  command (the
   inner shell runs it before the user command) — the only place it can work, since
   SBPL cannot mutate a process's environment.
 

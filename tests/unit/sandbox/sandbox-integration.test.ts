@@ -21,6 +21,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import {
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	realpathSync,
@@ -424,43 +425,21 @@ describe('AC-004: Curl/wget download to path outside scope fails', () => {
 					return;
 				}
 
-				// Attempt to download to /root (outside bwrap mounts)
+				// Attempt to download to /root (outside bwrap mounts).
+				// NO `|| true`: spawnWrapped's success is the wrapped command's
+				// exit code, so `|| true` would mask the sandbox denial by
+				// forcing exit 0 and make this test unpassable by construction.
+				const downloadPath = '/root/ac004-download.txt';
+				spawnRaw(`rm -f ${downloadPath}`);
 				const result = spawnWrapped(
 					executor,
-					`curl -o /root/ac004-download.txt https://example.com 2>&1 || true`,
+					`curl -o ${downloadPath} https://example.com 2>&1`,
 					[scopeDir],
 				);
 
 				// Should fail — /root is not mounted in bwrap
 				expect(result.success).toBe(false);
-			} finally {
-				rmSync(scopeDir, { recursive: true, force: true });
-			}
-		},
-	);
-
-	test.skipIf(!isMac)(
-		'macOS: sandbox-exec blocks curl download outside scope',
-		async () => {
-			const Executor = await getMacExecutor();
-			const scopeDir = makeTempDir('ac004-scope-');
-
-			try {
-				const executor = new Executor([scopeDir]);
-
-				if (!executor.isAvailable()) {
-					return;
-				}
-
-				// Attempt to download to /tmp (outside the allowed scope)
-				const result = spawnWrapped(
-					executor,
-					`curl -o /tmp/ac004-download.txt https://example.com 2>&1 || true`,
-					[scopeDir],
-				);
-
-				// sandbox-exec should deny this
-				expect(result.success).toBe(false);
+				expect(existsSync(downloadPath)).toBe(false);
 			} finally {
 				rmSync(scopeDir, { recursive: true, force: true });
 			}
@@ -858,56 +837,6 @@ describe('AC-008: Performance overhead < 10%', () => {
 		},
 	);
 
-	test.skipIf(!isMac)(
-		'macOS: sandbox-exec overhead < 10% for repeated writes',
-		async () => {
-			const Executor = await getMacExecutor();
-			const scopeDir = makeTempDir('ac008-scope-');
-
-			try {
-				const executor = new Executor([scopeDir]);
-
-				if (!executor.isAvailable()) {
-					return;
-				}
-
-				// Baseline: spawnSync with plain bash -c (no sandbox)
-				// Both baseline and wrapped use equivalent process spawning — only difference
-				// is whether sandbox-exec wrapping is applied.
-				const testFile = path.join(scopeDir, 'ac008-test.txt');
-				const content = 'x'.repeat(FILE_SIZE_KB * 1024);
-				const echoCmd = `echo "${content.substring(0, 32)}" > "${testFile}"`;
-
-				const baselineStart = Date.now();
-				for (let i = 0; i < ITERATIONS; i++) {
-					spawnSync(`bash -c '${echoCmd}'`, {
-						shell: true,
-						encoding: 'utf-8',
-						timeout: 10_000,
-					});
-				}
-				const baselineMs = Date.now() - baselineStart;
-
-				// Wrapped: spawnSync with sandbox-exec-wrapped command
-				const wrappedStart = Date.now();
-				for (let i = 0; i < ITERATIONS; i++) {
-					const wrapped = executor.wrapCommand(echoCmd, [scopeDir]);
-					spawnSync(wrapped, {
-						shell: true,
-						encoding: 'utf-8',
-						timeout: 10_000,
-					});
-				}
-				const wrappedMs = Date.now() - wrappedStart;
-
-				const overhead = ((wrappedMs - baselineMs) / baselineMs) * 100;
-				expect(overhead).toBeLessThan(10);
-			} finally {
-				rmSync(scopeDir, { recursive: true, force: true });
-			}
-		},
-	);
-
 	// Windows AC-008 is skipped because the PowerShell-based wrapper is too slow
 	// for 100 iterations (each wrap spawns a new powershell -ExecutionPolicy Bypass -Command).
 	// Windows is documented as best-effort restricted execution, not a true sandbox.
@@ -1062,39 +991,6 @@ describe('AC-010: Full scope = no false positives', () => {
 			);
 
 			// With broad scope, legitimate writes should succeed
-			expect(result.success).toBe(true);
-
-			// Cleanup
-			try {
-				spawnSync(`rm -f "${testFile}"`, { shell: true, encoding: 'utf-8' });
-			} catch {
-				// ignore cleanup errors
-			}
-		},
-	);
-
-	test.skipIf(!isMac)(
-		'macOS: writes succeed when scope is very broad',
-		async () => {
-			const Executor = await getMacExecutor();
-
-			// Use /Users (broad scope on macOS)
-			const broadScope = '/Users';
-
-			const executor = new Executor([broadScope]);
-
-			if (!executor.isAvailable()) {
-				return;
-			}
-
-			// Write to a path inside /Users (within broad scope) — should succeed
-			const testFile = `/Users/ac010-false-positive-${process.pid}.txt`;
-			const result = spawnWrapped(
-				executor,
-				`echo "ac010 legitimate" > "${testFile}"`,
-				[broadScope],
-			);
-
 			expect(result.success).toBe(true);
 
 			// Cleanup

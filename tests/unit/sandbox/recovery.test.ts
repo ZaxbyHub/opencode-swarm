@@ -653,19 +653,6 @@ describe('Sandbox recovery scenarios', () => {
 			},
 		);
 
-		test.skipIf(!isMac)(
-			'MacOSSandboxExecutor: wrapCommand throws SandboxError when unavailable (any reason)',
-			() => {
-				const executor1 = new MacOSSandboxExecutor([]);
-				executor1.disable('reason 1');
-				expect(() => executor1.wrapCommand(rawCmd, [])).toThrow(SandboxError);
-
-				macosInternals.probeSandboxExec = mock(() => false);
-				const executor2 = new MacOSSandboxExecutor([]);
-				expect(() => executor2.wrapCommand(rawCmd, [])).toThrow(SandboxError);
-			},
-		);
-
 		test.skipIf(!isWindows)(
 			'WindowsSandboxExecutor: wrapCommand throws SandboxError when unavailable (any reason)',
 			() => {

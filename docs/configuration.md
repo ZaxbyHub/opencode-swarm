@@ -1249,7 +1249,8 @@ under a real `sandbox-exec -f <profile>` invocation.
 When enabled on macOS, `applySandboxExecution` also applies the DYLD
 injection-variable hardening declared by
 `MacOSSandboxExecutor.getEnvOverrides()` — unsetting `DYLD_INSERT_LIBRARIES`,
-`DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`, and `DYLD_ROOT_PATH`, and pinning
+`DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`, `DYLD_ROOT_PATH`, and
+`DYLD_FORCE_FLAT_NAMESPACE`, and pinning
 `PATH` to the base-OS bin directories — inside the wrapped command itself: the
 inner shell runs the unsets and exports before the user command. The SBPL
 profile carries no environment directives because the Sandbox Profile Language
