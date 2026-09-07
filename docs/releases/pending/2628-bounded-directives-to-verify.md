@@ -9,8 +9,9 @@
   (measured 813 KB in the field) until the reviewer's session could not be
   created and the verification gate permanently blocked.
 - `readPhaseDirectivesToVerify` now returns at most one obligation per entry:
-  a membership whose terminal is `violated` is preferred (it carries the
-  remediation obligation), otherwise the most recently committed membership;
+  a membership whose terminal is `violated` or `contradicted` is preferred
+  (it carries the remediation obligation), otherwise the most recently
+  committed membership;
   ties break by greatest trace_id.
 - The rendered block obeys a hard character ceiling
   (`min(inject_char_budget ?? 24000, DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP)`,
