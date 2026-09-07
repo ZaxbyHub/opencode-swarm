@@ -397,6 +397,8 @@ export const WRITER_CLASSIFICATION: Readonly<
 	// registered-bespoke: grammar registered, writer kept (see grammar notes)
 	// issue #2483 bounded writers: bespoke crash-atomic tmp+rename rewrites,
 	// grammars registered (target-suffix-tmp-dash / target-constant-tmp)
+	// issue #2485: opt-in OTLP export spool/state atomic rewrites
+	'src/observability/otlp-exporter.ts': 'registered-bespoke',
 	'src/retention/jsonl-cap.ts': 'registered-bespoke',
 	'src/services/skill-changelog.ts': 'registered-bespoke',
 	'src/turbo/epic/divergence-recorder.ts': 'registered-bespoke',

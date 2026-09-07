@@ -1659,6 +1659,60 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'observability': {
+			emitObjectTypeMismatch('observability', value, findings);
+			// #2485: useful, bounded advisories for the opt-in OTLP export.
+			// Shape errors themselves are already surfaced by schema parsing;
+			// these catch the two misconfigurations that would silently
+			// no-op or ship secrets to a plaintext remote endpoint.
+			if (
+				typeof value === 'object' &&
+				value !== null &&
+				!Array.isArray(value)
+			) {
+				const exportCfg = (value as Record<string, unknown>).export;
+				if (
+					typeof exportCfg === 'object' &&
+					exportCfg !== null &&
+					(exportCfg as Record<string, unknown>).enabled === true
+				) {
+					const endpoint = (exportCfg as Record<string, unknown>).endpoint;
+					let problem: string | null = null;
+					if (typeof endpoint !== 'string' || endpoint.length === 0) {
+						problem =
+							'observability.export.enabled is true but endpoint is empty — the exporter stays disabled until an endpoint is configured.';
+					} else {
+						try {
+							const url = new URL(endpoint);
+							// IPv6 hostnames keep brackets in url.hostname
+							// ('[::1]'); strip them like endpointUrl does.
+							const host = url.hostname.replace(/^\[|\]$/g, '');
+							const isLoopback =
+								host === 'localhost' || host === '127.0.0.1' || host === '::1';
+							if (url.protocol !== 'https:' && !isLoopback) {
+								problem =
+									'observability.export.endpoint uses plain http: for a non-loopback host — exported telemetry would travel unencrypted; use https: outside local test collectors.';
+							}
+						} catch {
+							problem =
+								'observability.export.endpoint is not a valid URL — the exporter stays disabled.';
+						}
+					}
+					if (problem !== null) {
+						findings.push({
+							id: 'observability-export-endpoint-policy',
+							title: 'OTLP export endpoint policy',
+							description: problem,
+							severity: 'warn',
+							path: 'observability.export.endpoint',
+							autoFixable: false,
+						});
+					}
+				}
+			}
+			break;
+		}
+
 		case 'learning': {
 			emitObjectTypeMismatch('learning', value, findings);
 			break;

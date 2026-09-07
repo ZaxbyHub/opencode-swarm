@@ -1798,6 +1798,69 @@ export const ConsensusConfigSchema = z.object({
 
 export type ConsensusConfig = z.infer<typeof ConsensusConfigSchema>;
 
+/**
+ * Opt-in remote OTLP/OpenInference observability export (issue #2485).
+ *
+ * Disabled by default: local operation — plugin init, the SQLite sink, the
+ * legacy telemetry stream, /swarm report — is fully independent of the
+ * exporter and of any collector/network. When enabled, the exporter
+ * registers as a telemetry listener (the same O(1) shape as the SQLite
+ * observability sink), persists privacy-filtered records in a bounded
+ * spool under `.swarm/otlp-export/`, and ships them as OTLP/HTTP JSON to
+ * `endpoint` with bounded retry/backoff and a cooldown circuit. Endpoint
+ * policy: `https:` required for remote collectors; plain `http:` is
+ * accepted only for loopback test collectors.
+ */
+export const OtlpExportConfigSchema = z.object({
+	/** Master switch. Default false — no listener, no spool, no network. */
+	enabled: z.boolean().default(false),
+	/** Collector base URL. POST {endpoint}/v1/traces. Required when enabled. */
+	endpoint: z.string().min(1).default(''),
+	/** Pinned external convention table to project onto (see otel-mapping.ts). */
+	convention: z.enum(['genai', 'openinference']).default('genai'),
+	/** Extra headers (e.g. Authorization). Values are secrets — never logged. */
+	headers: z.record(z.string(), z.string()).optional(),
+	/** Max spans per export request. */
+	batchSize: z.number().int().min(1).max(512).default(64),
+	/** Interval flush trigger while records are pending. */
+	flushIntervalMs: z.number().int().min(250).max(300_000).default(5_000),
+	/** Per-request timeout. */
+	requestTimeoutMs: z.number().int().min(250).max(60_000).default(5_000),
+	/** Spool byte budget — oldest records are dropped (reason spool_cap) over it. */
+	spoolMaxBytes: z
+		.number()
+		.int()
+		.min(16 * 1024)
+		.max(16 * 1024 * 1024)
+		.default(1024 * 1024),
+	/** Spool age budget — records older than this are dropped (reason spool_age). */
+	spoolMaxAgeMs: z
+		.number()
+		.int()
+		.min(60_000)
+		.max(30 * 24 * 60 * 60_000)
+		.default(24 * 60 * 60_000),
+	/** Transient-failure retries per flush cycle. */
+	maxRetries: z.number().int().min(0).max(10).default(3),
+	/** Exponential backoff base; attempt n sleeps base*2^n + jitter, capped. */
+	backoffBaseMs: z.number().int().min(10).max(10_000).default(200),
+	/** Backoff cap (also caps a 429 Retry-After honor window). */
+	backoffMaxMs: z.number().int().min(100).max(300_000).default(30_000),
+	/** Consecutive failed flush cycles before the circuit opens. */
+	circuitThreshold: z.number().int().min(1).max(50).default(5),
+	/** Cooldown while the circuit is open (one recovery probe afterwards). */
+	circuitCooldownMs: z.number().int().min(1_000).max(600_000).default(60_000),
+});
+
+export type OtlpExportConfig = z.infer<typeof OtlpExportConfigSchema>;
+
+/** Observability block. Only the opt-in remote export today. */
+export const ObservabilityConfigSchema = z.object({
+	export: OtlpExportConfigSchema.optional(),
+});
+
+export type ObservabilityConfig = z.infer<typeof ObservabilityConfigSchema>;
+
 export const MemoryConfigSchema = z.object({
 	/** Enable Swarm memory tools and local memory storage. Default: false. */
 	enabled: z.boolean().default(false),
@@ -3795,6 +3858,12 @@ export const PluginConfigSchema = z.object({
 	// Swarm memory substrate. Disabled by default so existing flows are unchanged.
 	memory: MemoryConfigSchema.optional().describe(
 		'Swarm memory substrate — disabled by default so existing flows are unchanged.',
+	),
+
+	// Remote OTLP/OpenInference observability export (issue #2485). Opt-in;
+	// local operation is fully independent of the exporter and the collector.
+	observability: ObservabilityConfigSchema.optional().describe(
+		'Observability options — remote OTLP/OpenInference export is opt-in and disabled by default (issue #2485).',
 	),
 
 	// Learning subsystem — real-time admission, PRM persistence, dedup sweep (issue #1821)

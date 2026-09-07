@@ -3082,6 +3082,103 @@
         }
       }
     },
+    "observability": {
+      "description": "Observability options — remote OTLP/OpenInference export is opt-in and disabled by default (issue #2485).",
+      "type": "object",
+      "properties": {
+        "export": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "endpoint": {
+              "default": "",
+              "type": "string",
+              "minLength": 1
+            },
+            "convention": {
+              "default": "genai",
+              "type": "string",
+              "enum": [
+                "genai",
+                "openinference"
+              ]
+            },
+            "headers": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "batchSize": {
+              "default": 64,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 512
+            },
+            "flushIntervalMs": {
+              "default": 5000,
+              "type": "integer",
+              "minimum": 250,
+              "maximum": 300000
+            },
+            "requestTimeoutMs": {
+              "default": 5000,
+              "type": "integer",
+              "minimum": 250,
+              "maximum": 60000
+            },
+            "spoolMaxBytes": {
+              "default": 1048576,
+              "type": "integer",
+              "minimum": 16384,
+              "maximum": 16777216
+            },
+            "spoolMaxAgeMs": {
+              "default": 86400000,
+              "type": "integer",
+              "minimum": 60000,
+              "maximum": 2592000000
+            },
+            "maxRetries": {
+              "default": 3,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "backoffBaseMs": {
+              "default": 200,
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 10000
+            },
+            "backoffMaxMs": {
+              "default": 30000,
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 300000
+            },
+            "circuitThreshold": {
+              "default": 5,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "circuitCooldownMs": {
+              "default": 60000,
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 600000
+            }
+          }
+        }
+      }
+    },
     "learning": {
       "description": "Learning subsystem: real-time admission, PRM persistence, dedup sweep (issue #1821).",
       "type": "object",
