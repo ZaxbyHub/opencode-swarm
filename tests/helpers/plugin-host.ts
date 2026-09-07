@@ -41,9 +41,11 @@ export interface BootedPluginHost {
  * calling hook factories directly (issue #2533; reused by #2585's
  * interrupt/restart/compaction scenarios).
  *
- * `configOverrides` deep-merge over `{ version_check: false }` in the
- * project's `.opencode/opencode-swarm.json`. Note the loader also merges the
- * user-level config; tests that care about a flag must set it explicitly.
+ * `configOverrides` is shallow-merged over `{ version_check: false }` at the
+ * top level (a nested key like `hooks` replaces that key wholesale), then
+ * written to the project's `.opencode/opencode-swarm.json`. The config loader
+ * itself deep-merges this project config over the user-level config; tests
+ * that care about a flag must set it explicitly.
  */
 export async function bootSwarmPluginHost(
 	directory: string,

@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
+import { rmSync } from 'node:fs';
+import { swarmState } from '../../../src/state';
 import {
 	bootSwarmPluginHost,
 	createPluginHostProject,
@@ -20,8 +22,11 @@ import {
  * (filter(Boolean) compose arrays, no-op-method factories, in-handler flag
  * checks) — this test exists so a future regression of the class fails CI.
  *
- * Note on delegation_tracker: it defaults to false (opt-in), so both its
- * default-off and explicit-on states are exercised.
+ * Surface notes (review PRR-005/PRR-006): agent_activity's registered surface
+ * is tool.execute.before/after (no-op methods when disabled), so a dedicated
+ * boot below fires those keys directly. delegation_tracker is gated
+ * in-handler (delegation-tracker.ts), so its default-off state is covered by
+ * the hooks-absent boot; the explicit-on boot exercises the enabled branch.
  */
 
 const BOOTS = [
@@ -34,7 +39,7 @@ const BOOTS = [
 		overrides: { hooks: { agent_activity: false } },
 	},
 	{
-		label: 'delegation_tracker=true (opt-in)',
+		label: 'delegation_tracker=true (opt-in, in-handler enabled branch)',
 		overrides: { hooks: { delegation_tracker: true } },
 	},
 	{ label: 'hooks absent (all defaults)', overrides: {} },
@@ -50,38 +55,102 @@ const BOOTS = [
 	},
 ] as const;
 
+const createdDirs: string[] = [];
+
+afterEach(async () => {
+	for (const dir of createdDirs.splice(0)) {
+		// Bounded retry: a freshly-booted plugin can hold open handles in the
+		// project dir on Windows (EBUSY). Hygiene never fails the test, but a
+		// dir that stays unreclaimed after the retries is reported, not
+		// silently leaked.
+		for (let attempt = 0; attempt < 4; attempt += 1) {
+			try {
+				rmSync(dir, { recursive: true, force: true });
+				break;
+			} catch {
+				if (attempt === 3) {
+					console.warn(
+						`[gated-hook-registration-class] temp dir not reclaimed: ${dir}`,
+					);
+				} else {
+					await Bun.sleep(50);
+				}
+			}
+		}
+	}
+});
+
+async function bootAndTrack(
+	overrides: Record<string, unknown>,
+): Promise<Record<string, (...args: unknown[]) => Promise<unknown>>> {
+	const host = await bootSwarmPluginHost(
+		createPluginHostProject('swarm-2533-class-'),
+		{ ...overrides },
+	);
+	createdDirs.push(host.directory);
+	return host.hooks;
+}
+
 describe('config-gated hook factories never throw through the registered compose chains (#2533 class)', () => {
 	for (const { label, overrides } of BOOTS) {
 		it(`resolves messages.transform and system.transform with ${label}`, async () => {
-			const host = await bootSwarmPluginHost(
-				createPluginHostProject('swarm-2533-class-'),
-				{ ...overrides },
-			);
+			const hooks = await bootAndTrack({ ...overrides });
 			const sessionID = 'class-audit-session';
 			const messagesOutput = { messages: [] as unknown[] };
-			await host.hooks['experimental.chat.messages.transform'](
+			await hooks['experimental.chat.messages.transform'](
 				{ messages: [], sessionID },
 				messagesOutput,
 			);
 			const systemOutput = { system: [] as unknown[] };
-			await host.hooks['experimental.chat.system.transform'](
+			await hooks['experimental.chat.system.transform'](
 				{ sessionID },
 				systemOutput,
 			);
-			expect(true).toBe(true);
+			// Both chains mutate their outputs in place; resolution plus intact
+			// array surfaces is the disabled-state postcondition.
+			expect(Array.isArray(messagesOutput.messages)).toBe(true);
+			expect(Array.isArray(systemOutput.system)).toBe(true);
 		});
 
 		it(`resolves compaction with ${label}`, async () => {
-			const host = await bootSwarmPluginHost(
-				createPluginHostProject('swarm-2533-class-'),
-				{ ...overrides },
-			);
+			const hooks = await bootAndTrack({ ...overrides });
 			const output = { context: [] as string[] };
-			await host.hooks['experimental.session.compacting'](
+			await hooks['experimental.session.compacting'](
 				{ sessionID: 'class-audit-compaction' },
 				output,
 			);
 			expect(Array.isArray(output.context)).toBe(true);
 		});
 	}
+
+	it('proves the agent_activity disabled branch is a no-op through its registered surface', async () => {
+		// Enabled control: toolBefore seeds swarmState.activeToolCalls and
+		// toolAfter consumes the entry (src/hooks/agent-activity.ts).
+		const enabled = await bootAndTrack({
+			hooks: { agent_activity: true },
+		});
+		const enabledInput = {
+			tool: 'class-audit-tool',
+			sessionID: 'class-audit-tool-session',
+			callID: 'class-audit-tool-call-enabled',
+		};
+		await enabled['tool.execute.before'](enabledInput, { args: {} });
+		expect(swarmState.activeToolCalls.has(enabledInput.callID)).toBe(true);
+		await enabled['tool.execute.after'](enabledInput, {});
+		expect(swarmState.activeToolCalls.has(enabledInput.callID)).toBe(false);
+
+		// Disabled: the factory's no-op branch must neither throw nor track.
+		const disabled = await bootAndTrack({
+			hooks: { agent_activity: false },
+		});
+		const disabledInput = {
+			tool: 'class-audit-tool',
+			sessionID: 'class-audit-tool-session',
+			callID: 'class-audit-tool-call-disabled',
+		};
+		await disabled['tool.execute.before'](disabledInput, { args: {} });
+		expect(swarmState.activeToolCalls.has(disabledInput.callID)).toBe(false);
+		await disabled['tool.execute.after'](disabledInput, {});
+		expect(swarmState.activeToolCalls.has(disabledInput.callID)).toBe(false);
+	});
 });

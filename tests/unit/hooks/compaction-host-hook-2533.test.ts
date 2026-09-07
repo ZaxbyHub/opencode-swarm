@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import OpenCodeSwarmPlugin from '../../../src/index';
 import {
@@ -32,11 +32,34 @@ const SESSION_IDS = [
 	'2533-ledger-enabled-',
 ] as const;
 
-afterEach(() => {
+const createdDirs: string[] = [];
+
+afterEach(async () => {
 	// Ledger state is module-scoped; clear the sessions this file seeded so a
 	// later co-run test file sees a clean surface.
 	for (const sessionID of SESSION_IDS) {
 		clearTurnLedger(`${sessionID}session`);
+	}
+	// Remove the temp project dirs this file created (repo convention).
+	// Bounded retry: a freshly-booted plugin can hold open handles in the
+	// project dir on Windows (EBUSY). Hygiene never fails the test, but a dir
+	// that stays unreclaimed after the retries is reported, not silently
+	// leaked.
+	for (const dir of createdDirs.splice(0)) {
+		for (let attempt = 0; attempt < 4; attempt += 1) {
+			try {
+				rmSync(dir, { recursive: true, force: true });
+				break;
+			} catch {
+				if (attempt === 3) {
+					console.warn(
+						`[compaction-host-hook-2533] temp dir not reclaimed: ${dir}`,
+					);
+				} else {
+					await Bun.sleep(50);
+				}
+			}
+		}
 	}
 });
 
@@ -44,6 +67,7 @@ async function bootRegisteredHooks(
 	overrides: Record<string, unknown>,
 ): Promise<Record<string, (...args: unknown[]) => Promise<unknown>>> {
 	const directory = canonicalMkdtemp('swarm-2533-');
+	createdDirs.push(directory);
 	const opencodeDir = path.join(directory, '.opencode');
 	mkdirSync(opencodeDir, { recursive: true });
 	writeFileSync(
