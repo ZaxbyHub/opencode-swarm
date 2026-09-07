@@ -929,21 +929,21 @@ Report:
 
 End with a complete ledger mapping every original item to its outcome.
 
-## Aborting an unrecoverable feedback workflow (Profile A, pre-armed only)
+## Aborting or cancelling an unrecoverable feedback workflow (Profile A)
 
 If the verification bind is genuinely unreachable (the PR head cannot be
 fetched or checked out, or a compound `git fetch … && git checkout …` keeps
 being rejected — run them as TWO separate standalone commands first), call
 `abort_pr_workflow` with `mode: "PR_FEEDBACK"`, `kind: "recovery"`, and a
-one-line `reason` instead of looping. The tool refuses while PR workflow lanes are in flight
-(collect their results with `collect_lane_results` first) AND refuses once
-the workflow is armed for publication (`prFeedbackReadyToPublish`) — after
-arming you MUST complete via `complete_pr_workflow` (or push the bound
-commit first), because aborting an armed gate would drop the immutable-
-commit binding and leave a half-published commit. The user can also run
-`/swarm abort-pr-workflow` once the wake budget suspends. Abort is a
-recovery tool for unbound or bound pre-publication workflows after bounded
-recovery is exhausted, not a gate-skip shortcut. When abort reports
-`checkout_restore_required`, call `prepare_pr_workflow_checkout` with
+one-line `reason` while the workflow is pre-armed. Plain recovery/force aborts
+refuse once publication is armed. To terminate an armed publication without
+publishing, use `kind: "cancel-publication"`, `cancel_publication: true`, and a
+non-empty `reason`. This records terminal `cancelled_without_publication` with
+the observed remote head, never grants push authority, and then clears the gate.
+Do not substitute a plain abort. To change approved content, use
+`invalidate_pr_feedback_publication`; the full Stage A and ordered independent
+gates must run again. A published generation is never cleared by abort; use
+`complete_pr_workflow` so the actual remote branch is re-verified. When abort
+reports `checkout_restore_required`, call `prepare_pr_workflow_checkout` with
 `operation: "restore"` before returning. On Profiles B/C there is no durable
 gate to abort: report the blocker to the user and stop.

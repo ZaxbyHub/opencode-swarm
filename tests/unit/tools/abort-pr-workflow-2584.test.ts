@@ -8,6 +8,7 @@ import {
 import { abort_pr_workflow } from '../../../src/tools/index.js';
 import {
 	createPublicationFixture,
+	POST_COMMIT_SHA,
 	type PublicationFixture,
 } from '../hooks/pr-workflow-publication.test-fixtures.js';
 
@@ -28,6 +29,7 @@ type AbortResponse = {
 	message?: string;
 	mode?: string;
 	status?: string;
+	observed_remote_head?: string | null;
 	gate_cleared?: boolean;
 	checkout_restore_required?: boolean;
 	checkout_restore_receipts?: unknown[];
@@ -129,6 +131,7 @@ describe('abort_pr_workflow registered cancellation contract (issue #2584)', () 
 			success: true,
 			mode: 'PR_FEEDBACK',
 			status: 'cancelled_without_publication',
+			observed_remote_head: POST_COMMIT_SHA,
 			gate_cleared: true,
 			checkout_restore_required: false,
 			checkout_restore_receipts: [],
@@ -152,6 +155,7 @@ describe('abort_pr_workflow registered cancellation contract (issue #2584)', () 
 		expect(cancellation).toMatchObject({
 			type: 'pr_feedback_publication_cancelled',
 			reason: 'publication cannot proceed in this checkout',
+			observedRemoteHead: POST_COMMIT_SHA,
 		});
 	});
 
@@ -178,5 +182,18 @@ describe('abort_pr_workflow registered cancellation contract (issue #2584)', () 
 		);
 		expect(force.success).toBe(false);
 		expect(force.message).toContain('Invalid PR workflow abort');
+
+		const inverseTuple = await executeRegistered(
+			{
+				kind: 'recovery',
+				cancel_publication: true,
+				reason: 'try the cancellation flag with recovery',
+			},
+			'issue-2584-malformed',
+		);
+		expect(inverseTuple.success).toBe(false);
+		expect(inverseTuple.message).toContain(
+			'requires kind "cancel-publication"',
+		);
 	});
 });

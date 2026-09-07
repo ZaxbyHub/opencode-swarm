@@ -150,6 +150,15 @@ export async function executeAbortPrWorkflow(
 		}
 	}
 	try {
+		if (parsed.data.cancel_publication === true) {
+			if (parsed.data.kind !== 'cancel-publication') {
+				return JSON.stringify({
+					success: false,
+					message:
+						'Invalid PR workflow abort: cancel_publication: true requires kind "cancel-publication"',
+				});
+			}
+		}
 		if (parsed.data.kind === 'cancel-publication') {
 			if (parsed.data.cancel_publication !== true) {
 				return JSON.stringify({
@@ -187,8 +196,11 @@ export async function executeAbortPrWorkflow(
 		return JSON.stringify({
 			success: true,
 			mode: summary.mode,
-			...(parsed.data.kind === 'cancel-publication'
-				? { status: 'cancelled_without_publication' }
+			...(parsed.data.cancel_publication === true
+				? {
+						status: 'cancelled_without_publication',
+						observed_remote_head: summary.observedRemoteHead ?? null,
+					}
 				: {}),
 			...(summary.prHeadSha ? { pr_head_sha: summary.prHeadSha } : {}),
 			open_lanes: summary.openLanes,

@@ -3625,6 +3625,8 @@ export async function abortPrWorkflow(
 ): Promise<{
 	mode: PrWorkflowMode;
 	prHeadSha?: string;
+	/** Remote branch head observed while cancelling a publication generation. */
+	observedRemoteHead?: string | null;
 	openLanes: number;
 	presumedStaleLanes?: string[];
 	presumedStaleDisclosure?: string;
@@ -3674,9 +3676,11 @@ export async function abortPrWorkflow(
 				generation: dangling.generation,
 				reason: options.reason.trim(),
 				stateFileAbsent: true,
+				observedRemoteHead: null,
 			});
 			return {
 				mode: 'PR_FEEDBACK',
+				observedRemoteHead: null,
 				openLanes: 0,
 				stateSalvaged: false,
 				stateSalvageDisclosure:
@@ -3689,6 +3693,7 @@ export async function abortPrWorkflow(
 	// Issue #2108: when the cancel-publication arm writes a cancellation
 	// transition, the CAS clear below must compare against the NEW revision.
 	let cancelRevision: number | null = null;
+	let cancellationObservedRemoteHead: string | null | undefined;
 	if (options.expectedMode && state.mode !== options.expectedMode) {
 		throw wrongModeError(state, options.expectedMode);
 	}
@@ -3703,25 +3708,47 @@ export async function abortPrWorkflow(
 				'BLOCKED: cancel_publication cannot be combined with kind "force"; use kind "cancel-publication" with a reason',
 			);
 		}
+		if (options.kind !== 'cancel-publication') {
+			throw new Error(
+				'BLOCKED: cancel_publication requires kind "cancel-publication"; do not combine it with kind "recovery" or "force"',
+			);
+		}
 		if (!options.reason.trim()) {
 			throw new Error(
 				'BLOCKED: cancel_publication requires a non-empty reason; the cancellation reason is part of the durable audit trail',
+			);
+		}
+		const activeState = state.prFeedbackPublication?.active?.state;
+		if (activeState === 'published') {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK publication is already marked published; use complete_pr_workflow so the actual remote branch is re-verified before the gate clears',
 			);
 		}
 		if (
 			state.mode !== 'PR_FEEDBACK' ||
 			(!state.prFeedbackReadyToPublish &&
 				!recovery.armedShapeUnreadable &&
-				!state.prFeedbackPublication?.active)
+				activeState !== 'armed' &&
+				activeState !== 'push_in_flight' &&
+				activeState !== 'invalidated' &&
+				activeState !== 'cancelled_without_publication')
 		) {
 			throw new Error(
 				'BLOCKED: cancel_publication applies only to a PR_FEEDBACK workflow with a publication generation (armed, push_in_flight, or invalidated)',
 			);
 		}
-		cancelRevision = await cancelPrFeedbackPublication(
+		const cancellation = await cancelPrFeedbackPublication(
 			directory,
 			sessionID,
 			options.reason.trim(),
+		);
+		cancelRevision = cancellation.revision;
+		cancellationObservedRemoteHead = cancellation.observedRemoteHead;
+	}
+	const activePublicationState = state.prFeedbackPublication?.active?.state;
+	if (activePublicationState === 'published') {
+		throw new Error(
+			'BLOCKED: PR_FEEDBACK publication is already marked published; use complete_pr_workflow so the actual remote branch is re-verified before the gate clears',
 		);
 	}
 	// An armed marker that is PRESENT but unreadable is treated as armed. Any
@@ -4050,6 +4077,9 @@ export async function abortPrWorkflow(
 	return {
 		mode: state.mode,
 		...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
+		...(cancellationObservedRemoteHead !== undefined
+			? { observedRemoteHead: cancellationObservedRemoteHead }
+			: {}),
 		openLanes: laneSettlement.openLanes,
 		...(laneSettlement.presumedStaleLaneIds.length > 0
 			? {
@@ -9197,15 +9227,20 @@ export async function recordPrFeedbackPushAttemptResult(
  * appends the audit event, and NEVER manufactures push authority. Used only
  * by `abortPrWorkflow`'s explicit `cancelPublication` arm. Returns the NEW
  * state revision when a state write landed (the abort clear must CAS against
- * it), or null when the generation state was absent/unreadable.
+ * it), and the exact remote-head observation (including null when it could not
+ * be resolved).
  */
 async function cancelPrFeedbackPublication(
 	directory: string,
 	sessionID: string,
 	reason: string,
-): Promise<number | null> {
+): Promise<{
+	revision: number | null;
+	observedRemoteHead: string | null;
+}> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	let nextRevision: number | null = null;
+	let observedRemoteHead: string | null = null;
 	let cancelledGeneration: number | null = null;
 	let cancelledAttemptsFinalized = 0;
 	try {
@@ -9222,15 +9257,21 @@ async function cancelPrFeedbackPublication(
 				// durable; the abort clearing that follows removes the gate.
 				return;
 			}
+			if (active.state === 'cancelled_without_publication') {
+				nextRevision = state.revision;
+				return;
+			}
 			if (
 				active.state !== 'armed' &&
 				active.state !== 'push_in_flight' &&
 				active.state !== 'invalidated'
 			) {
-				return;
+				throw new Error(
+					`BLOCKED: PR_FEEDBACK publication generation ${active.generation} is ${active.state}; only armed, push_in_flight, or invalidated generations may be cancelled`,
+				);
 			}
 			const now = isoNow();
-			const observedRemoteHead =
+			observedRemoteHead =
 				await _test_exports.resolveExactRemoteBranchHeadAsync(
 					directory,
 					active.remoteName,
@@ -9274,7 +9315,13 @@ async function cancelPrFeedbackPublication(
 				(attempt) => attempt.result?.outcome === 'cancelled',
 			).length;
 		});
-	} catch {
+	} catch (error) {
+		if (
+			error instanceof Error &&
+			error.message.startsWith('BLOCKED: PR_FEEDBACK publication generation')
+		) {
+			throw error;
+		}
 		// The cancellation event below is the durable floor; a failed
 		// state write here must not block the audited abort clearing.
 	}
@@ -9288,8 +9335,9 @@ async function cancelPrFeedbackPublication(
 		...(cancelledAttemptsFinalized > 0
 			? { attemptsFinalized: cancelledAttemptsFinalized }
 			: {}),
+		observedRemoteHead,
 	});
-	return nextRevision;
+	return { revision: nextRevision, observedRemoteHead };
 }
 
 async function assertPrFeedbackPublicationArmed(
