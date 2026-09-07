@@ -15,8 +15,9 @@ merge-queue settings, or runner implementation.
 
 The retained policy is:
 
-- `cancellation=false`, because the current sample has zero same-reference
-  overlap and zero cancellations;
+- event-scoped cancellation: `merge_group` runs may cancel a superseded run
+  sharing the same queue ref, while `pull_request` and manual runs remain
+  non-cancelling;
 - a `timeout=90m` status-check timeout;
 - `build_concurrency=5`; and
 - `ALLGREEN` / only-non-failing merge eligibility.
@@ -143,21 +144,27 @@ eligibility.
 
 ### Cancellation
 
-**Decision:** retain `cancellation=false`.
+**Decision:** use `cancel-in-progress: ${{ github.event_name == 'merge_group' }}`.
+Pull-request and manual runs evaluate to false; merge-group runs evaluate to
+true when a newer head supersedes the same queue ref.
 
-**Expected benefit.** Avoid changing cancellation behavior when the evidence
-shows no current same-reference overlap and no cancelled samples.
+**Expected benefit.** Let a stale merge-group candidate release its shared queue
+ref while preserving the pull-request check status behavior that motivated the
+original non-cancelling safeguard.
 
 **Preserved gates.** Cancellation remains independent from the required-check
 and `ALLGREEN` decisions; a cancelled or evicted run cannot be reclassified as
 passing.
 
-**Validation.** Continue recording cancellations and same-reference overlaps
-in each evidence window. A non-zero overlap must be reviewed as a new decision,
-not inferred from this zero-overlap baseline.
+**Validation.** Continue recording cancellations and same-reference overlaps in
+each evidence window. A cancelled merge-group run must be paired with its newer
+head and must not be counted as a passing required check. Pull-request and manual
+runs must remain non-cancelling.
 
-**Rollback.** If a future, attributable overlap is demonstrated, revisit the
-setting in a follow-up decision record with receipts and a bounded experiment.
+**Rollback.** If a cancelled merge-group candidate removes a live queue item or
+leaves a stale required status, use a unique per-run concurrency group key
+through a follow-up decision record with attributable receipts. Do not restore
+unconditional cancellation settings without that scoped rollback decision.
 
 ## Host check-name gate and Stage A decision
 
@@ -270,6 +277,7 @@ timeline_removed_at=2026-09-06T18:55:43Z
 unit_shards_executed=6
 completed_at=2026-09-06T18:55:17Z
 terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
+preserved_checks=unit-passed; recursive integration discovery; cross-contamination gate
 ```
 
 ```text
@@ -285,6 +293,7 @@ timeline_removed_at=2026-09-06T21:48:11Z
 unit_shards_executed=6
 completed_at=2026-09-06T21:48:07Z
 terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
+preserved_checks=unit-passed; recursive integration discovery; cross-contamination gate
 ```
 
 ```text
@@ -300,13 +309,53 @@ timeline_removed_at=2026-09-06T22:10:30Z
 unit_shards_executed=6
 completed_at=2026-09-06T22:10:05Z
 terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
+preserved_checks=unit-passed; recursive integration discovery; cross-contamination gate
 ```
 
-### Stage-A post-land receipts — pending
+### Stage-A post-land receipts
 
-Stage-A post-land receipts remain **pending** until three real full-matrix runs
-after this decision is published. No pre-publication or local run is labeled
-as Stage-A post-land evidence.
+Two qualifying full-matrix runs below were created after PR #2624 merged at
+`2026-09-07T06:07:23Z`. Each run completed successfully and its merge-queue
+timeline shows the initial add followed by an adjacent terminal merge/remove
+pair, with no intervening re-add. The receipts use `queue_wait_ms=unavailable`
+because no canonical run-level runner-wait aggregation exists. A third
+qualifying Stage-A receipt remains pending.
+
+Run `34121635625` is explicitly excluded from the qualifying receipt set: its
+release-please short-circuit skipped the CI matrix, so it is not a full-matrix
+receipt despite its successful terminal timeline.
+
+```text
+identifier=stage-a-post-land-1
+actions=https://github.com/ZaxbyHub/opencode-swarm/actions/runs/34091796997
+run_duration_ms=4351000
+queue_wait_ms=unavailable
+eviction=none
+eviction_evidence=timeline:add→terminal-merge/remove-pair
+timeline_added_at=2026-09-07T06:38:55Z
+timeline_merged_at=2026-09-07T07:52:10Z
+timeline_removed_at=2026-09-07T07:52:10Z
+unit_shards_executed=6
+completed_at=2026-09-07T07:51:44Z
+preserved_checks=unit-passed; recursive integration discovery; cross-contamination gate
+terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
+```
+
+```text
+identifier=stage-a-post-land-2
+actions=https://github.com/ZaxbyHub/opencode-swarm/actions/runs/34092376492
+run_duration_ms=4251000
+queue_wait_ms=unavailable
+eviction=none
+eviction_evidence=timeline:add→terminal-merge/remove-pair
+timeline_added_at=2026-09-07T06:46:59Z
+timeline_merged_at=2026-09-07T07:58:25Z
+timeline_removed_at=2026-09-07T07:58:25Z
+unit_shards_executed=6
+completed_at=2026-09-07T07:57:59Z
+preserved_checks=unit-passed; recursive integration discovery; cross-contamination gate
+terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
+```
 
 ## Cross-contamination warning language
 

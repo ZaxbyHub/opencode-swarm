@@ -106,7 +106,7 @@ describe('Stage-A policy and six-way CI agreement (issue #2552)', () => {
 		expect(policy).toContain('No Windows-ten workflow or ruleset change');
 	});
 
-	test('C9 defines timeline eviction evidence and records all three Stage-D receipts', () => {
+	test('C9 defines timeline eviction evidence and records Stage-D receipts', () => {
 		const contractStart = policy.indexOf('## C9 post-land receipt contract');
 		const contractEnd = policy.indexOf(
 			'## Cross-contamination warning language',
@@ -178,10 +178,77 @@ describe('Stage-A policy and six-way CI agreement (issue #2552)', () => {
 			expect(block).toContain(`completed_at=${receipt.completed}`);
 			expect(block).toContain('no intervening re-add');
 		}
+	});
 
-		expect(policy).toMatch(/Stage-A post-land receipts[^\n]*pending/i);
+	test('Stage-A receipt accounting — regression: excludes a skipped release matrix (FB-002/FB-003)', () => {
+		const stageAStart = policy.indexOf('### Stage-A post-land receipts');
+		const stageAEnd = policy.indexOf('## Cross-contamination warning language');
+		const stageAReceiptsSection = policy.slice(stageAStart, stageAEnd);
+
+		// Previously, the record counted a release-please short-circuit with a
+		// skipped CI matrix as the third full-matrix receipt.
+		expect(stageAReceiptsSection).toContain(
+			'Two qualifying full-matrix runs below',
+		);
+		expect(stageAReceiptsSection).toMatch(
+			/A third\s+qualifying Stage-A receipt remains pending\./,
+		);
+		expect(stageAReceiptsSection).toContain(
+			'Run `34121635625` is explicitly excluded',
+		);
+		expect(stageAReceiptsSection).toContain(
+			'release-please short-circuit skipped the CI matrix',
+		);
+		expect(stageAReceiptsSection).not.toContain(
+			'identifier=stage-a-post-land-3',
+		);
+
+		const stageAReceipts = [
+			{
+				identifier: 'stage-a-post-land-1',
+				run: '34091796997',
+				duration: '4351000',
+				completed: '2026-09-07T07:51:44Z',
+				added: '2026-09-07T06:38:55Z',
+				merged: '2026-09-07T07:52:10Z',
+				removed: '2026-09-07T07:52:10Z',
+			},
+			{
+				identifier: 'stage-a-post-land-2',
+				run: '34092376492',
+				duration: '4251000',
+				completed: '2026-09-07T07:57:59Z',
+				added: '2026-09-07T06:46:59Z',
+				merged: '2026-09-07T07:58:25Z',
+				removed: '2026-09-07T07:58:25Z',
+			},
+		] as const;
+
 		expect(
-			policy.match(/^identifier=stage-a-post-land-\d+$/gm) ?? [],
-		).toHaveLength(0);
+			stageAReceiptsSection.match(/^identifier=stage-a-post-land-\d+$/gm) ?? [],
+		).toHaveLength(2);
+		for (const receipt of stageAReceipts) {
+			const block = extractReceipt(
+				stageAReceiptsSection,
+				`identifier=${receipt.identifier}`,
+			);
+			expect(block).not.toBe('');
+			expect(block).toContain(
+				`actions=https://github.com/ZaxbyHub/opencode-swarm/actions/runs/${receipt.run}`,
+			);
+			expect(block).toContain(`run_duration_ms=${receipt.duration}`);
+			expect(block).toContain('queue_wait_ms=unavailable');
+			expect(block).toContain('eviction=none');
+			expect(block).toContain(
+				'eviction_evidence=timeline:add→terminal-merge/remove-pair',
+			);
+			expect(block).toContain(`timeline_added_at=${receipt.added}`);
+			expect(block).toContain(`timeline_merged_at=${receipt.merged}`);
+			expect(block).toContain(`timeline_removed_at=${receipt.removed}`);
+			expect(block).toContain('unit_shards_executed=6');
+			expect(block).toContain(`completed_at=${receipt.completed}`);
+			expect(block).toContain('preserved_checks=');
+			expect(block).toContain('no intervening re-add');
+		}
 	});
 });

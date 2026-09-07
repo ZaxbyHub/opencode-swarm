@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 const REPO_ROOT = join(import.meta.dir, '../../../..');
 const CI_YML_PATH = join(REPO_ROOT, '.github/workflows/ci.yml');
+const POLICY_PATH = join(REPO_ROOT, 'docs/ci/merge-queue-policy.md');
 
 // Every top-level tests/ directory that currently contains test files must be
 // listed here with the job that owns it. Adding a new test tree without a
@@ -70,6 +71,7 @@ function topLevelTestDirectories(): string[] {
 
 describe('CI gate policy — Stage-D discovery anchors (issue #2552)', () => {
 	const yml = readCiWorkflow();
+	const policy = readFileSync(POLICY_PATH, 'utf8').replace(/\r\n/g, '\n');
 
 	test('every populated top-level tests/ directory has a known CI owner or exemption', () => {
 		const populatedDirectories = topLevelTestDirectories();
@@ -112,7 +114,7 @@ describe('CI gate policy — Stage-D discovery anchors (issue #2552)', () => {
 		}
 	});
 
-	test('unit-passed remains the required aggregate and concurrency stays non-cancelling', () => {
+	test('unit-passed remains required and cancellation is merge-group scoped', () => {
 		const unitPassed = extractJob(yml, 'unit-passed');
 		const concurrency =
 			yml.match(/^concurrency:[\s\S]*?(?=^permissions:)/m)?.[0] ?? '';
@@ -120,7 +122,26 @@ describe('CI gate policy — Stage-D discovery anchors (issue #2552)', () => {
 		expect(unitPassed).toContain('needs: [unit]');
 		expect(unitPassed).toContain('if: always()');
 		expect(unitPassed).toContain('UNIT_RESULT: ${{ needs.unit.result }}');
-		expect(concurrency).toContain('cancel-in-progress: false');
-		expect(concurrency).not.toMatch(/cancel-in-progress:\s*true/);
+		expect(concurrency).toContain(
+			"cancel-in-progress: ${{ github.event_name == 'merge_group' }}",
+		);
+		expect(concurrency).not.toMatch(
+			/cancel-in-progress:\s*(?:true|false)\s*$/m,
+		);
+	});
+
+	test('cancellation rollback — regression: preserves event-scoped isolation (FB-004)', () => {
+		const cancellationStart = policy.indexOf('### Cancellation');
+		const cancellationEnd = policy.indexOf(
+			'## Host check-name gate and Stage A decision',
+		);
+		const cancellation = policy.slice(cancellationStart, cancellationEnd);
+
+		// Previously, the rollback prescribed unconditional false, which would
+		// remove cancellation isolation for all future merge-group runs.
+		expect(cancellation).toContain(
+			'use a unique per-run concurrency group key',
+		);
+		expect(cancellation).not.toContain('restore unconditional false');
 	});
 });
