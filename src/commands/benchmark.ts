@@ -1,29 +1,19 @@
-import type { QualityBudgetEvidence } from '../config/evidence-schema';
+import {
+	CI_QUALITY_THRESHOLDS,
+	computeEvidenceQualitySummary,
+} from '../ci/quality-checks.js';
 import {
 	computeGateStatistics,
 	type GateStatisticsReport,
 } from '../evaluation/gate-stats.js';
 import { readGateAuditResult } from '../evaluation/store.js';
-import {
-	isValidEvidenceType,
-	listEvidenceTaskIds,
-	loadEvidence,
-} from '../evidence/manager';
 import { summarizeTelemetryCosts } from '../services/cost-accounting.js';
 import { swarmState } from '../state';
-import { warn } from '../utils';
 
-const CI = {
-	review_pass_rate: 70,
-	test_pass_rate: 80,
-	max_agent_error_rate: 20,
-	max_hard_limit_hits: 1,
-	// Quality budget thresholds
-	max_complexity_delta: 5,
-	max_public_api_delta: 10,
-	max_duplication_ratio: 5, // percentage (5%)
-	min_test_to_code_ratio: 30, // percentage (30%)
-};
+// Shared with the host-decoupled advisory CI evaluator (`swarm ci`, #2497):
+// one definition of the evidence-quality thresholds and computation for both
+// the plugin surface and the headless surface.
+const CI = CI_QUALITY_THRESHOLDS;
 
 const GATE_AUDIT_MIN_SAMPLES = 6;
 
@@ -177,105 +167,22 @@ export async function handleBenchmarkCommand(
 		  }
 		| undefined;
 	if (cumulative) {
-		let reviewPasses = 0,
-			reviewFails = 0,
-			testPasses = 0,
-			testFails = 0,
-			additions = 0,
-			deletions = 0;
-		// Quality metrics accumulation
-		let totalComplexityDelta = 0;
-		let totalPublicApiDelta = 0;
-		let totalDuplicationRatio = 0;
-		let totalTestToCodeRatio = 0;
-		let qualityEvidenceCount = 0;
-		for (const tid of await listEvidenceTaskIds(directory)) {
-			let result: Awaited<ReturnType<typeof loadEvidence>>;
-			try {
-				result = await loadEvidence(directory, tid);
-			} catch (_evidenceErr) {
-				warn(
-					'benchmark: skipping corrupt or unreadable evidence for task',
-					tid,
-				);
-				continue;
-			}
-			if (result.status !== 'found') continue;
-			for (const e of result.bundle.entries) {
-				// Skip unknown evidence types gracefully with warning
-				if (!isValidEvidenceType(e.type)) {
-					warn(`Unknown evidence type '${e.type}' in task ${tid}, skipping`);
-					continue;
-				}
-
-				if (e.type === 'review') {
-					if (e.verdict === 'approved') reviewPasses++;
-					else if (e.verdict === 'rejected') reviewFails++;
-				} else if (e.type === 'test') {
-					testPasses += e.tests_passed;
-					testFails += e.tests_failed;
-				} else if (e.type === 'diff') {
-					additions += e.additions;
-					deletions += e.deletions;
-				} else if (e.type === 'quality_budget') {
-					const qe = e as QualityBudgetEvidence;
-					totalComplexityDelta += qe.metrics.complexity_delta;
-					totalPublicApiDelta += qe.metrics.public_api_delta;
-					totalDuplicationRatio += qe.metrics.duplication_ratio * 100; // Convert to percentage
-					totalTestToCodeRatio += qe.metrics.test_to_code_ratio * 100; // Convert to percentage
-					qualityEvidenceCount++;
-				}
-			}
-		}
-		const totalReviews = reviewPasses + reviewFails,
-			totalTests = testPasses + testFails;
+		// Evidence-derived quality signals come from the shared service
+		// (src/ci/quality-checks.ts) so `/swarm benchmark --ci-gate` and the
+		// host-decoupled `swarm ci` evaluator use ONE implementation (#2497).
+		// Behavior-identical to the loop that used to live inline here
+		// (same rounding, same warn() side effects on corrupt/unknown entries).
+		const summary = await computeEvidenceQualitySummary(directory);
 		quality = {
-			reviewPassRate: totalReviews
-				? Math.round((reviewPasses / totalReviews) * 1000) / 10
-				: null,
-			testPassRate: totalTests
-				? Math.round((testPasses / totalTests) * 1000) / 10
-				: null,
-			totalReviews,
-			testsPassed: testPasses,
-			testsFailed: testFails,
-			additions,
-			deletions,
+			reviewPassRate: summary.reviewPassRate,
+			testPassRate: summary.testPassRate,
+			totalReviews: summary.totalReviews,
+			testsPassed: summary.testsPassed,
+			testsFailed: summary.testsFailed,
+			additions: summary.additions,
+			deletions: summary.deletions,
 		};
-		// Calculate average quality metrics
-		if (qualityEvidenceCount > 0) {
-			qualityMetrics = {
-				complexityDelta:
-					Math.round((totalComplexityDelta / qualityEvidenceCount) * 10) / 10,
-				publicApiDelta:
-					Math.round((totalPublicApiDelta / qualityEvidenceCount) * 10) / 10,
-				duplicationRatio:
-					Math.round((totalDuplicationRatio / qualityEvidenceCount) * 10) / 10,
-				testToCodeRatio:
-					Math.round((totalTestToCodeRatio / qualityEvidenceCount) * 10) / 10,
-				thresholds: {
-					maxComplexityDelta: CI.max_complexity_delta,
-					maxPublicApiDelta: CI.max_public_api_delta,
-					maxDuplicationRatio: CI.max_duplication_ratio,
-					minTestToCodeRatio: CI.min_test_to_code_ratio,
-				},
-				hasEvidence: true,
-			};
-		} else {
-			qualityMetrics = {
-				complexityDelta: 0,
-				publicApiDelta: 0,
-				duplicationRatio: 0,
-				testToCodeRatio: 0,
-				thresholds: {
-					maxComplexityDelta: CI.max_complexity_delta,
-					maxPublicApiDelta: CI.max_public_api_delta,
-					maxDuplicationRatio: CI.max_duplication_ratio,
-					minTestToCodeRatio: CI.min_test_to_code_ratio,
-				},
-				hasEvidence: false,
-			};
-		}
+		qualityMetrics = summary.qualityMetrics;
 	}
 
 	// CI gate
