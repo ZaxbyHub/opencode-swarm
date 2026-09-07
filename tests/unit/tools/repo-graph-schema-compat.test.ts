@@ -89,4 +89,15 @@ describe('schema 1.2.0 graph compatibility (A1)', () => {
 		// getCallers on helper's 'helper' export resolves via the node edge.
 		expect(getCallers(loaded, 'src/helper.ts', 'helper').length).toBe(1);
 	});
+
+	test('a null graph document reports structured schema corruption', async () => {
+		const graphPath = path.join(tmp, '.swarm', 'repo-graph.json');
+		fs.writeFileSync(graphPath, 'null', 'utf8');
+		clearCache(tmp);
+
+		await expect(loadGraph(tmp)).rejects.toMatchObject({
+			code: 'CORRUPTION',
+			message: 'repo-graph.json has unsupported schema_version: undefined',
+		});
+	});
 });

@@ -43,6 +43,7 @@ import {
 import type { RepoGraph } from './types';
 import {
 	createEmptyGraph,
+	isGraphSchemaVersionCompatible,
 	REPO_GRAPH_FILENAME,
 	updateGraphMetadata,
 } from './types';
@@ -156,8 +157,26 @@ function bindGraphToWorkspace(graph: RepoGraph, workspace: string): void {
 }
 
 function validateLoadedGraph(parsed: RepoGraph, workspace: string): void {
-	if (!parsed.schema_version) {
+	const schemaVersion =
+		parsed && typeof parsed === 'object'
+			? (parsed as { schema_version?: unknown }).schema_version
+			: undefined;
+	if (
+		parsed &&
+		typeof parsed === 'object' &&
+		!Object.hasOwn(parsed, 'schema_version')
+	) {
 		throw corruption('repo-graph.json missing schema_version');
+	}
+	if (
+		!parsed ||
+		typeof parsed !== 'object' ||
+		typeof schemaVersion !== 'string' ||
+		!isGraphSchemaVersionCompatible(schemaVersion)
+	) {
+		throw corruption(
+			`repo-graph.json has unsupported schema_version: ${String(schemaVersion)}`,
+		);
 	}
 	if (!parsed.nodes || typeof parsed.nodes !== 'object') {
 		throw corruption('repo-graph.json missing or invalid nodes');

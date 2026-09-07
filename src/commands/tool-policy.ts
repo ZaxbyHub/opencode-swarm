@@ -188,10 +188,19 @@ export function classifySwarmCommandToolUse(
 	if (canonicalKey === 'memory evaluate') {
 		if (args.length === 0) return { allowed: true };
 		if (args.length === 1 && args[0] === '--json') return { allowed: true };
+		if (
+			args.length === 3 &&
+			args[0] === '--json' &&
+			args[1] === '--profiles' &&
+			/^(?:lexical|hybrid|hybrid\+rerank)(?:,(?:lexical|hybrid|hybrid\+rerank))*$/.test(
+				args[2],
+			)
+		)
+			return { allowed: true };
 		return {
 			allowed: false,
 			message:
-				'Usage through swarm_command: `/swarm memory evaluate --json`. Custom fixture directories are only available through direct user command execution.',
+				'Usage through swarm_command: `/swarm memory evaluate --json` or `/swarm memory evaluate --json --profiles <lexical,hybrid,hybrid+rerank>`. Custom fixtures and manifests are only available through direct user command execution.',
 		};
 	}
 

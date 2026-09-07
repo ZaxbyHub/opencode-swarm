@@ -40,6 +40,17 @@ export {
 export * from './pr-review-recovery.js';
 export * from './public-api.js';
 export * from './retention.js';
+export {
+	type AggregateExactMeasurement,
+	type ExactMeasurement,
+	evaluateHeldoutGraphRetrievalQuality,
+	type HeldoutGraphQualityCase,
+	type HeldoutGraphQualityReport,
+	type RetrievalQualityOptions,
+	type RetrievalQualityResourceCaps,
+	type RetrievalQualityStatus,
+	type RetrievalRouteMeasurement,
+} from './retrieval-quality.js';
 export type {
 	EvaluationExecutor,
 	EvaluationExecutorResult,

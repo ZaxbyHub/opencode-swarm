@@ -310,27 +310,6 @@
 			"note": "Pre-existing debt, not approved drift: \"recordEmittedRecommendations\" exists in src/services/recommendation-ledger.ts but not inside src/services/recommendation-ledger.ts:623 (recommendation-ledger.writerCitations[0])."
 		},
 		{
-			"rowId": "repo-graph",
-			"file": "src/tools/repo-graph/storage.ts",
-			"identifier": "loadGraph",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadGraph\" exists in src/tools/repo-graph/storage.ts but not inside src/tools/repo-graph/storage.ts:204 (repo-graph.readerCitations[0])."
-		},
-		{
-			"rowId": "repo-graph",
-			"file": "src/tools/repo-graph/storage.ts",
-			"identifier": "loadOrCreateGraph",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadOrCreateGraph\" exists in src/tools/repo-graph/storage.ts but not inside :506 (repo-graph.writerCitations[0])."
-		},
-		{
-			"rowId": "repo-graph",
-			"file": "src/tools/repo-graph/storage.ts",
-			"identifier": "saveGraph",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"saveGraph\" exists in src/tools/repo-graph/storage.ts but not inside src/tools/repo-graph/storage.ts:339 (repo-graph.writerCitations[0])."
-		},
-		{
 			"rowId": "session-state-snapshot",
 			"file": "src/services/context-budget-service.ts",
 			"identifier": "writeBudgetState",

@@ -19,8 +19,7 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * the importing file) and per-node `exportLines`, enabling the `callers` and
  * `dead_exports` queries. Both fields are optional, so graphs written by older
  * versions (1.0.0) still load — but `dead_exports` requires >= 1.1.0 data and
- * self-gates via {@link isSchemaVersionAtLeast} rather than relying on the
- * loader (which only checks that a version string is present, not its value).
+ * self-gates via {@link isSchemaVersionAtLeast}.
  *
  * 1.2.0 adds per-node `exportRanges` (1-based inclusive line spans keyed by
  * symbol name — exported symbols for every grammar, plus non-exported member
@@ -34,8 +33,8 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * that distinguishes edges whose resolved target is a scannable source file
  * (a graph node) from edges whose target is an asset (JSON/CSS/etc. — a real
  * file that never becomes a node). The field is optional, so 1.0.0–1.2.0
- * graphs still load; `storage.ts` only checks that a version string is
- * present, and feature gating is per-query via {@link isSchemaVersionAtLeast}.
+ * graphs still load; feature gating is per-query via
+ * {@link isSchemaVersionAtLeast}.
  * For pre-1.3.0 graphs the loader/queries fall back to an extension check
  * (`isScannableSourcePath`) to classify an untagged edge's target kind.
  *
@@ -71,6 +70,9 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  */
 export const GRAPH_SCHEMA_VERSION = '1.7.0';
 
+/** The oldest graph schema whose persisted shape this build can interpret. */
+export const MIN_SUPPORTED_GRAPH_SCHEMA_VERSION = '1.0.0';
+
 /**
  * Default per-file source-size ceiling shared by graph construction and
  * query-time source reads. The builder treats this as the default value of
@@ -103,6 +105,36 @@ export function isSchemaVersionAtLeast(
 		const bv = b[i] ?? 0;
 		if (av > bv) return true;
 		if (av < bv) return false;
+	}
+	return true;
+}
+
+/**
+ * Return whether a persisted graph schema is a canonical numeric semver in
+ * the supported compatibility window. This is deliberately stricter than
+ * {@link isSchemaVersionAtLeast}: feature gates may tolerate malformed input
+ * by treating missing components as zero, but a persistence boundary must
+ * never trust an unknown or future graph shape.
+ */
+export function isGraphSchemaVersionCompatible(
+	version: unknown,
+): version is string {
+	if (typeof version !== 'string') return false;
+	const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(version);
+	if (!match) return false;
+	const parsed = match.slice(1).map(Number);
+	if (!parsed.every((part) => Number.isSafeInteger(part))) return false;
+	const minimum = MIN_SUPPORTED_GRAPH_SCHEMA_VERSION.split('.').map(Number);
+	const current = GRAPH_SCHEMA_VERSION.split('.').map(Number);
+	for (const [candidate, bound] of [
+		[parsed, minimum],
+		[current, parsed],
+	] as const) {
+		for (let index = 0; index < 3; index++) {
+			const delta = candidate[index]! - bound[index]!;
+			if (delta > 0) break;
+			if (delta < 0) return false;
+		}
 	}
 	return true;
 }

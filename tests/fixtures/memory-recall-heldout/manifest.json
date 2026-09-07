@@ -1,0 +1,311 @@
+{
+	"corpus_id": "opencode-swarm-memory-recall-heldout-v1",
+	"split": "heldout",
+	"version": "1.0.0",
+	"supported_languages": [
+		"javascript",
+		"typescript",
+		"python",
+		"go",
+		"rust",
+		"php",
+		"java",
+		"c",
+		"cpp",
+		"csharp",
+		"ruby",
+		"swift",
+		"kotlin",
+		"dart",
+		"css",
+		"bash",
+		"powershell",
+		"ini",
+		"regex",
+		"tsx"
+	],
+	"analyzer_extensions": [
+		{ "language": "typescript", "extractor_id": "backend:typescript:v1" },
+		{ "language": "javascript", "extractor_id": "backend:javascript:v1" },
+		{ "language": "python", "extractor_id": "backend:python:v1" },
+		{ "language": "go", "extractor_id": "backend:go:v1" },
+		{ "language": "rust", "extractor_id": "backend:rust:v1" },
+		{ "language": "php", "extractor_id": "backend:php:v1" },
+		{ "language": "java", "extractor_id": "backend:java:v1" },
+		{ "language": "cpp", "extractor_id": "backend:cpp:v1" },
+		{ "language": "csharp", "extractor_id": "backend:csharp:v1" },
+		{ "language": "ruby", "extractor_id": "backend:ruby:v1" },
+		{ "language": "swift", "extractor_id": "backend:swift:v1" },
+		{ "language": "kotlin", "extractor_id": "backend:kotlin:v1" },
+		{ "language": "dart", "extractor_id": "backend:dart:v1" }
+	],
+	"os_gates": {
+		"linux": {
+			"id": "retrieval-quality-linux",
+			"command": "bun run check:retrieval-quality"
+		},
+		"macos": {
+			"id": "retrieval-quality-macos",
+			"command": "bun --smol test tests/unit/memory"
+		},
+		"windows": {
+			"id": "retrieval-quality-windows",
+			"command": "bun --smol test tests/unit/memory"
+		}
+	},
+	"thresholds": {
+		"precision_at_k": 0.25,
+		"recall_at_k": 0.25,
+		"max_spurious_edges": 2,
+		"max_known_misses": 2,
+		"direct_source_positive_hits": 14
+	},
+	"cases": [
+		{
+			"id": "javascript-profile",
+			"language": "javascript",
+			"source_path": "sources/javascript.js",
+			"content_hash": "B9638E337E7EB634ACA045E77B4561DE635466D9D7B6AA611EDA03D1468AFFD8",
+			"expected_symbols": ["loadUserProfile", "userId"],
+			"expected_edges": ["loadUserProfile -> fetch"],
+			"known_misses": ["userId"],
+			"spurious_edges": ["loadUserProfile -> userId"],
+			"paraphrase": "retrieve account details through a remote service",
+			"analyzer_id": "backend:javascript:v1"
+		},
+		{
+			"id": "typescript-profile",
+			"language": "typescript",
+			"source_path": "sources/typescript.ts",
+			"content_hash": "0C8303B36471F750A1A9BE5BAE1C6759265669E492E49C7A62589C263C739497",
+			"expected_symbols": ["saveInvoice", "invoiceId"],
+			"expected_edges": ["saveInvoice -> fetch"],
+			"known_misses": ["invoiceId"],
+			"spurious_edges": ["saveInvoice -> invoiceId"],
+			"paraphrase": "persist a billing document through an HTTP request",
+			"analyzer_id": "backend:typescript:v1"
+		},
+		{
+			"id": "python-profile",
+			"language": "python",
+			"source_path": "sources/python.py",
+			"content_hash": "B02409456CDD546DD81616637265866EECE08CBD58AC25A74BF97F05BC87AA9D",
+			"expected_symbols": ["rotate_api_key", "api_key"],
+			"expected_edges": ["rotate_api_key -> rotate_secret"],
+			"known_misses": ["api_key"],
+			"spurious_edges": ["rotate_api_key -> api_key"],
+			"paraphrase": "replace a secret credential with a newly rotated key",
+			"analyzer_id": "backend:python:v1"
+		},
+		{
+			"id": "go-profile",
+			"language": "go",
+			"source_path": "sources/go.go",
+			"content_hash": "FBD76CEC751667AE095543444E3731CAD8005AFC605801637673795FB5FB0EC8",
+			"expected_symbols": ["ParseConfig", "configPath"],
+			"expected_edges": ["ParseConfig -> string"],
+			"known_misses": ["configPath"],
+			"spurious_edges": ["ParseConfig -> configPath"],
+			"paraphrase": "read settings from a configuration path",
+			"analyzer_id": "backend:go:v1"
+		},
+		{
+			"id": "rust-profile",
+			"language": "rust",
+			"source_path": "sources/rust.rs",
+			"content_hash": "C45037A40930367399DB3643615E7505425E3146C6F6737B886E0FE843C53226",
+			"expected_symbols": ["publish_artifact", "artifact_id"],
+			"expected_edges": ["publish_artifact -> format"],
+			"known_misses": ["artifact_id"],
+			"spurious_edges": ["publish_artifact -> artifact_id"],
+			"paraphrase": "publish a build artifact using its identifier",
+			"analyzer_id": "backend:rust:v1"
+		},
+		{
+			"id": "php-profile",
+			"language": "php",
+			"source_path": "sources/php.php",
+			"content_hash": "6A22BE82C25024874413438ECD550360628A25CBFFA528E3FC6E9480636D1BFA",
+			"expected_symbols": ["find_order", "orderId"],
+			"expected_edges": ["find_order -> string"],
+			"known_misses": ["orderId"],
+			"spurious_edges": ["find_order -> orderId"],
+			"paraphrase": "look up a purchase using its order identifier",
+			"analyzer_id": "backend:php:v1"
+		},
+		{
+			"id": "java-profile",
+			"language": "java",
+			"source_path": "sources/java.java",
+			"content_hash": "6F6A7B2DBE906137856D71C60DDDB0F2A0BC6D3FBA46204ACE4CF5F9BB43669F",
+			"expected_symbols": ["sendWebhook", "webhookUrl"],
+			"expected_edges": ["sendWebhook -> String"],
+			"known_misses": ["webhookUrl"],
+			"spurious_edges": ["Webhooks -> webhookUrl"],
+			"paraphrase": "deliver an event to a callback URL",
+			"analyzer_id": "backend:java:v1"
+		},
+		{
+			"id": "c-profile",
+			"language": "c",
+			"source_path": "sources/c.c",
+			"content_hash": "C2CF3904D71ED57B52D204C9B1A7A7BAB90E30DF636F725FB939F0D14759B63F",
+			"expected_symbols": ["open_socket", "socket_fd"],
+			"expected_edges": ["open_socket -> char"],
+			"known_misses": ["socket_fd"],
+			"spurious_edges": ["open_socket -> close_socket"],
+			"paraphrase": "open a network channel from its descriptor",
+			"analyzer_id": "parser-only:c:v1"
+		},
+		{
+			"id": "cpp-profile",
+			"language": "cpp",
+			"source_path": "sources/cpp.cpp",
+			"content_hash": "25F855671A74CE618980E69790589ED2AC027566674ABCACB2E54EA3C3B8B3DD",
+			"expected_symbols": ["render_widget", "widget_id"],
+			"expected_edges": ["render_widget -> string"],
+			"known_misses": ["widget_id"],
+			"spurious_edges": ["render_widget -> widget_id", "render_widget -> std"],
+			"paraphrase": "draw a user interface component by identifier",
+			"analyzer_id": "backend:cpp:v1"
+		},
+		{
+			"id": "csharp-profile",
+			"language": "csharp",
+			"source_path": "sources/csharp.cs",
+			"content_hash": "CFD8618108A02D2EB98D122313198DEE4684C204BA676347550C3310FBD8566D",
+			"expected_symbols": ["AuthorizeRequest", "requestId"],
+			"expected_edges": ["AuthorizeRequest -> string"],
+			"known_misses": ["requestId"],
+			"spurious_edges": [
+				"<module> -> AuthorizeRequest",
+				"<module> -> requestId"
+			],
+			"paraphrase": "check whether an incoming request is permitted",
+			"analyzer_id": "backend:csharp:v1"
+		},
+		{
+			"id": "ruby-profile",
+			"language": "ruby",
+			"source_path": "sources/ruby.rb",
+			"content_hash": "47BC5872B2085EE4C738484E2261F20CDF7A36115F97F1FD904813A9BDACA6F8",
+			"expected_symbols": ["normalize_email", "email"],
+			"expected_edges": ["normalize_email -> strip"],
+			"known_misses": ["email"],
+			"spurious_edges": [
+				"normalize_email -> email",
+				"normalize_email -> downcase"
+			],
+			"paraphrase": "canonicalize an address before storing it",
+			"analyzer_id": "backend:ruby:v1"
+		},
+		{
+			"id": "swift-profile",
+			"language": "swift",
+			"source_path": "sources/swift.swift",
+			"content_hash": "9AA176B51176FC6DFF98097678E04AC5B57B787E2F0A5E16B6B3C5F0433839BA",
+			"expected_symbols": ["cacheImage", "imageURL"],
+			"expected_edges": ["cacheImage -> String"],
+			"known_misses": ["imageURL"],
+			"spurious_edges": ["cacheImage -> imageURL"],
+			"paraphrase": "store a downloaded picture for later display",
+			"analyzer_id": "backend:swift:v1"
+		},
+		{
+			"id": "kotlin-profile",
+			"language": "kotlin",
+			"source_path": "sources/kotlin.kt",
+			"content_hash": "102FA601E66DB4AC3AF2C0E30BE865077980F58252C7A438968820C8D2AA23B2",
+			"expected_symbols": ["syncCalendar", "calendarId"],
+			"expected_edges": ["syncCalendar -> String"],
+			"known_misses": ["calendarId"],
+			"spurious_edges": ["syncCalendar -> calendarId"],
+			"paraphrase": "synchronize an appointment calendar by identifier",
+			"analyzer_id": "backend:kotlin:v1"
+		},
+		{
+			"id": "dart-profile",
+			"language": "dart",
+			"source_path": "sources/dart.dart",
+			"content_hash": "4E21F3AC09BF159D68CEA641DB11AC8EA68B1BF2E61F3098028E40DF1AE25808",
+			"expected_symbols": ["decodeToken", "token"],
+			"expected_edges": ["decodeToken -> String"],
+			"known_misses": ["token"],
+			"spurious_edges": ["decodeToken -> token"],
+			"paraphrase": "interpret a signed credential for a session",
+			"analyzer_id": "backend:dart:v1"
+		},
+		{
+			"id": "css-profile",
+			"language": "css",
+			"source_path": "sources/css.css",
+			"content_hash": "4D9C610B3F17E60A83CAB953BF9CAC157F001A1CB06CDAA089ADE0A9886E1411",
+			"expected_symbols": ["notification-banner", "notification-hue"],
+			"expected_edges": ["notification-banner -> notification-hue"],
+			"known_misses": ["notification-hue"],
+			"spurious_edges": ["notification-banner -> danger-color"],
+			"paraphrase": "style a notice banner with its theme hue",
+			"analyzer_id": "parser-only:css:v1"
+		},
+		{
+			"id": "bash-profile",
+			"language": "bash",
+			"source_path": "sources/bash.sh",
+			"content_hash": "74ED9524EBC70CB288D4F039212753A29E834E4DBA4DEEBC717F73D2481CAE28",
+			"expected_symbols": ["rotate_logs", "log_file"],
+			"expected_edges": ["rotate_logs -> printf"],
+			"known_misses": ["log_file"],
+			"spurious_edges": ["rotate_logs -> delete_logs"],
+			"paraphrase": "cycle archived application log files",
+			"analyzer_id": "parser-only:bash:v1"
+		},
+		{
+			"id": "powershell-profile",
+			"language": "powershell",
+			"source_path": "sources/powershell.ps1",
+			"content_hash": "15C73C8B30FF023F6977E6268BC1355C0E21121D95DE3D8D10D81AE1BAF56954",
+			"expected_symbols": ["Get-InventoryItem", "ItemId"],
+			"expected_edges": ["Get-InventoryItem -> string"],
+			"known_misses": ["ItemId"],
+			"spurious_edges": ["Get-InventoryItem -> Remove-InventoryItem"],
+			"paraphrase": "look up a stock item by its identifier",
+			"analyzer_id": "parser-only:powershell:v1"
+		},
+		{
+			"id": "ini-profile",
+			"language": "ini",
+			"source_path": "sources/ini.ini",
+			"content_hash": "FDD0199E49555EA760845F23B7DF6F2178B86FC552A29D1E8A39EAD39E20FF3A",
+			"expected_symbols": ["database", "connect_timeout"],
+			"expected_edges": ["database -> connect_timeout"],
+			"known_misses": ["connect_timeout"],
+			"spurious_edges": ["database -> delete_database"],
+			"paraphrase": "configure a database connection timeout",
+			"analyzer_id": "parser-only:ini:v1"
+		},
+		{
+			"id": "regex-profile",
+			"language": "regex",
+			"source_path": "sources/regex.regex",
+			"content_hash": "1413547E127815DDB2AC3A0B25FC2EAA02F3FD6B453FEF15210BA53A90BA1F90",
+			"expected_symbols": ["invoice_lookup", "invoice_id"],
+			"expected_edges": ["invoice_lookup -> invoice_id"],
+			"known_misses": ["invoice_id"],
+			"spurious_edges": ["invoice_lookup -> customer_id"],
+			"paraphrase": "match an invoice lookup call",
+			"analyzer_id": "parser-only:regex:v1"
+		},
+		{
+			"id": "tsx-profile",
+			"language": "tsx",
+			"source_path": "sources/tsx.tsx",
+			"content_hash": "17C67D0709FD2C10E8E619F3E1AB4A836F36C5CD7E4645DB948CAD67B5BD93EE",
+			"expected_symbols": ["InvoiceBadge", "invoiceId"],
+			"expected_edges": ["InvoiceBadge -> span"],
+			"known_misses": ["invoiceId"],
+			"spurious_edges": ["InvoiceBadge -> invoiceId"],
+			"paraphrase": "render a billing badge from its identifier",
+			"analyzer_id": "parser-only:tsx:v1"
+		}
+	]
+}

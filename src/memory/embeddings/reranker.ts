@@ -11,6 +11,21 @@ export interface RerankCandidate {
 }
 
 /**
+ * The narrow reranking contract used by the SQLite retrieval pipeline.
+ * Keeping this structural makes deterministic, offline evaluation possible
+ * without making the optional transformers dependency part of the evaluator.
+ */
+export interface MemoryReranker {
+	readonly available: boolean;
+	readonly modelVersion?: string;
+	rerank<T extends RerankCandidate>(
+		candidates: T[],
+		query?: string,
+		topN?: number,
+	): Promise<T[]>;
+}
+
+/**
  * Latency gate: skip reranking when the previous recall step already
  * exceeded the caller's latency budget.
  */
@@ -31,7 +46,8 @@ export function shouldRerank(
  * Graceful degradation: if the package is missing or the model fails to
  * load, `available` is false and rerank() returns candidates unchanged.
  */
-export class CrossEncoderReranker {
+export class CrossEncoderReranker implements MemoryReranker {
+	readonly modelVersion: string;
 	private loadFailed = false;
 	private _available = false;
 	private pipeline:
@@ -39,6 +55,7 @@ export class CrossEncoderReranker {
 		| null = null;
 
 	constructor(private readonly options: { model?: string }) {
+		this.modelVersion = options.model ?? 'Xenova/ms-marco-MiniLM-L-6-v2';
 		// _available starts false; flips to true only after a successful pipeline load.
 	}
 
@@ -89,11 +106,11 @@ export class CrossEncoderReranker {
 	 * Returns the top `topN` candidates sorted descending by cross-encoder
 	 * score. If the model is unavailable, returns candidates unchanged.
 	 */
-	async rerank(
-		candidates: RerankCandidate[],
-		query: string,
+	async rerank<T extends RerankCandidate>(
+		candidates: T[],
+		query?: string,
 		topN?: number,
-	): Promise<RerankCandidate[]> {
+	): Promise<T[]> {
 		if (candidates.length === 0) return candidates;
 
 		const pipeline = await this.ensurePipeline();
@@ -101,7 +118,10 @@ export class CrossEncoderReranker {
 
 		try {
 			// Build [query, text] pairs for the cross-encoder.
-			const inputs: [string, string][] = candidates.map((c) => [query, c.text]);
+			const inputs: [string, string][] = candidates.map((c) => [
+				query ?? '',
+				c.text,
+			]);
 
 			const results: { label?: string; score?: number }[] = (await pipeline(
 				inputs,
@@ -109,10 +129,10 @@ export class CrossEncoderReranker {
 			)) as { label?: string; score?: number }[];
 
 			// Pair each candidate with its cross-encoder score.
-			const scored: RerankCandidate[] = candidates.map((c, idx) => ({
+			const scored: T[] = candidates.map((c, idx) => ({
 				...c,
 				score: results[idx]?.score ?? 0,
-			}));
+			})) as T[];
 
 			// Sort descending by score.
 			scored.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
