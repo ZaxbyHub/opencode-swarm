@@ -37,3 +37,21 @@ export function normalizeToolName(
 export function normalizeToolNameLowerCase(toolName: string): string {
 	return toolName.replace(NAMESPACE_PREFIX_PATTERN, '').toLowerCase();
 }
+
+/**
+ * Boundary predicate for the OpenCode host's native subagent tool.
+ *
+ * The host invokes the task tool with the lowercase id `task` (verified against
+ * the pinned host source, `anomalyco/opencode` v1.18.3
+ * `packages/opencode/src/tool/task.ts`: `const id = "task"`); the capitalised
+ * `Task` spelling is accepted as legacy input. Namespace-prefixed ids resolve
+ * through the shared normalizer (e.g. `opencode:task`). An id containing a dot
+ * is a filesystem-loaded custom tool and is NEVER truncated into the task tool
+ * (issue #2529 / audit hostcontract-1-NEW-1).
+ */
+export function isTaskToolId(toolName: string | null | undefined): boolean {
+	if (!toolName) return false;
+	return (
+		normalizeToolNameLowerCase(toolName) === 'task' && !toolName.includes('.')
+	);
+}

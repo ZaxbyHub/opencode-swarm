@@ -59,7 +59,10 @@ import { createActionIdentity } from '../failures/action-identity.js';
 import { ensureAgentSession, getAgentSession } from '../state';
 import { telemetry } from '../telemetry.js';
 import { pushAdvisory } from '../utils/advisory-queue';
-import { normalizeToolNameLowerCase } from './normalize-tool-name';
+import {
+	isTaskToolId,
+	normalizeToolNameLowerCase,
+} from './normalize-tool-name';
 
 /** Default streak length at which the "do not retry" guidance is appended. */
 export const DEFAULT_GATE_DENIAL_WARN_THRESHOLD = 3;
@@ -94,7 +97,7 @@ function gateActionArgs(
 	_args: unknown,
 	discriminator: string,
 ): Record<string, unknown> {
-	if (normalizeToolNameLowerCase(tool ?? '') !== 'task') return {};
+	if (!isTaskToolId(tool ?? '')) return {};
 	return discriminator ? { subagent_type: discriminator } : {};
 }
 
@@ -125,7 +128,7 @@ const MAX_DISCRIMINATOR_LENGTH = 64;
  */
 export function gateDenialDiscriminator(tool: string, args: unknown): string {
 	try {
-		if (normalizeToolNameLowerCase(tool ?? '') !== 'task') return '';
+		if (!isTaskToolId(tool ?? '')) return '';
 		const subagentType = (args as Record<string, unknown> | undefined)
 			?.subagent_type;
 		if (typeof subagentType !== 'string' || subagentType.length === 0) {

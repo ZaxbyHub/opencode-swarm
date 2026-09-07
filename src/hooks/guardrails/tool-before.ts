@@ -57,6 +57,7 @@ import { normalizePatchIndentation } from '../../utils/patch-dedent';
 import { isPathUnderSwarmWorktreeBase } from '../../worktree/core.js';
 import { detectLoop } from '../loop-detector';
 import {
+	isTaskToolId,
 	normalizeToolName,
 	normalizeToolNameLowerCase,
 } from '../normalize-tool-name';
@@ -1768,7 +1769,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		tool: string,
 		args: unknown,
 	): void {
-		if (normalizeToolNameLowerCase(tool) !== 'task') return;
+		if (!isTaskToolId(tool)) return;
 
 		const loopArgs = args as Record<string, unknown> | undefined;
 		const loopResult = detectLoop(sessionID, tool, loopArgs);

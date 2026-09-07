@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+	isTaskToolId,
 	normalizeToolName,
 	normalizeToolNameLowerCase,
 } from '../../../src/hooks/normalize-tool-name';
@@ -104,5 +105,29 @@ describe('normalizeToolNameLowerCase', () => {
 			);
 			expect(normalizeToolNameLowerCase('opencode.my.tool')).toBe('tool');
 		});
+	});
+});
+
+describe('isTaskToolId (issue #2529 host task tool boundary)', () => {
+	test('accepts the host id, the legacy capitalised spelling, and colon-namespaced ids', () => {
+		expect(isTaskToolId('task')).toBe(true);
+		expect(isTaskToolId('Task')).toBe(true);
+		expect(isTaskToolId('TASK')).toBe(true);
+		expect(isTaskToolId('opencode:task')).toBe(true);
+		expect(isTaskToolId('mega:task')).toBe(true);
+	});
+
+	test('rejects dotted custom tool ids (no silent truncation)', () => {
+		expect(isTaskToolId('notes.task')).toBe(false);
+		expect(isTaskToolId('my.custom.task')).toBe(false);
+	});
+
+	test('rejects other tools, malformed prefixes, and empty input', () => {
+		expect(isTaskToolId('bash')).toBe(false);
+		expect(isTaskToolId('read')).toBe(false);
+		expect(isTaskToolId(':task')).toBe(false);
+		expect(isTaskToolId('')).toBe(false);
+		expect(isTaskToolId(undefined)).toBe(false);
+		expect(isTaskToolId(null)).toBe(false);
 	});
 });

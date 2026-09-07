@@ -176,7 +176,7 @@ import {
 import { materializeSystemGuidanceInPlace } from './hooks/messages-transform.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { maybeEmitNonArchitectAdvisory } from './hooks/non-architect-advisory.js';
-import { normalizeToolName } from './hooks/normalize-tool-name';
+import { isTaskToolId, normalizeToolName } from './hooks/normalize-tool-name';
 import {
 	loadPlanTaskIdContext,
 	toTaskIdPlanContextOptions,
@@ -1710,6 +1710,12 @@ async function initializeOpenCodeSwarm(
 			'cause',
 			'detail',
 			'details',
+			// Issue #2529: SDK session.error payloads nest the provider text
+			// under error.data (e.g. {name:'APIError', data:{message:'429…',
+			// statusCode:429}}); without these keys the signal is empty and
+			// the task-route fallback never advances.
+			'data',
+			'name',
 		]) {
 			parts.push(...extractBoundedErrorSignal(record[key], depth + 1));
 		}
@@ -4395,7 +4401,11 @@ async function initializeOpenCodeSwarm(
 					policy: config.phase_complete,
 				});
 				if (
-					(normalizeToolName(input.tool) ?? input.tool) === 'Task' &&
+					// Issue #2529: the host's task tool id is lowercase `task`;
+					// route through the shared boundary so the host id, the
+					// legacy capitalised spelling, and colon-namespaced ids all
+					// register, while a dotted custom tool id never does.
+					isTaskToolId(input.tool) &&
 					typeof toolBeforeArgs.subagent_type === 'string' &&
 					toolBeforeArgs.subagent_type.trim() !== ''
 				) {
@@ -4423,48 +4433,28 @@ async function initializeOpenCodeSwarm(
 				// erase an in-progress `Task` → `coder` one. `toolBeforeArgs` is the
 				// resolved args of the call that just succeeded.
 				resetGateDenialStreaks(input.sessionID, input.tool, toolBeforeArgs);
-
-				// Delegation lifecycle telemetry — the paired counterpart of the
-				// `delegation_end` emitted by the Task handoff in tool.execute.after.
-				// Emitted here (last statement of the handler) so a Task call denied
-				// or rejected by ANY gate above never records a begin, and NEVER gated
-				// on guardrails: the previous emission lived inside `beginInvocation`
-				// (guardrails invocation-window bookkeeping) whose every call site is
-				// guardrails-gated, so `guardrails.enabled: false` produced
-				// delegation_end events with no delegation_begin ever.
-				// `subagent_type` is the delegated agent as dispatched (raw, matching
-				// the raw activeAgent names delegation_end historically carried);
-				// activeAgent is only a fallback for malformed Task args.
-				{
-					const beforeToolNormalized =
-						normalizeToolName(input.tool) ?? input.tool;
-					if (
-						beforeToolNormalized === 'Task' ||
-						beforeToolNormalized === 'task'
-					) {
-						const delegatedAgent =
-							typeof toolBeforeArgs.subagent_type === 'string' &&
-							toolBeforeArgs.subagent_type.length > 0
-								? toolBeforeArgs.subagent_type
-								: (swarmState.activeAgent.get(input.sessionID) ?? 'unknown');
-						const delegationTaskId =
-							swarmState.agentSessions.get(input.sessionID)?.currentTaskId ??
-							'';
-						_delegationTelemetryByCallID.set(input.callID, {
-							agentName: delegatedAgent,
-							taskId: delegationTaskId,
-						});
-						capSessionMap(
-							_delegationTelemetryByCallID,
-							MAX_TRACKED_DELEGATION_TELEMETRY,
-							input.callID,
-						);
-						telemetry.delegationBegin(
-							input.sessionID,
-							delegatedAgent,
-							delegationTaskId,
-						);
-					}
+				if (isTaskToolId(input.tool)) {
+					const delegatedAgent =
+						typeof toolBeforeArgs.subagent_type === 'string' &&
+						toolBeforeArgs.subagent_type.length > 0
+							? toolBeforeArgs.subagent_type
+							: (swarmState.activeAgent.get(input.sessionID) ?? 'unknown');
+					const delegationTaskId =
+						swarmState.agentSessions.get(input.sessionID)?.currentTaskId ?? '';
+					_delegationTelemetryByCallID.set(input.callID, {
+						agentName: delegatedAgent,
+						taskId: delegationTaskId,
+					});
+					capSessionMap(
+						_delegationTelemetryByCallID,
+						MAX_TRACKED_DELEGATION_TELEMETRY,
+						input.callID,
+					);
+					telemetry.delegationBegin(
+						input.sessionID,
+						delegatedAgent,
+						delegationTaskId,
+					);
 				}
 			} catch (err) {
 				// A fail-closed gate denied this call. Count the denial, record it as
@@ -4552,10 +4542,7 @@ async function initializeOpenCodeSwarm(
 				// unconditionally is safe for non-settlement throws (reviewer/
 				// docs/other tools). The gate-denial-wiring static guard pins
 				// this contract.
-				if (
-					normalizeToolName(input.tool) === 'Task' ||
-					normalizeToolName(input.tool) === 'task'
-				) {
+				if (isTaskToolId(input.tool)) {
 					try {
 						await delegationGateHooks.abortDeniedSettlementForCall(
 							input.callID,
@@ -4580,8 +4567,7 @@ async function initializeOpenCodeSwarm(
 					`[DIAG] toolAfter START tool=${_toolName} session=${input.sessionID}`,
 				);
 
-			const normalizedTool = normalizeToolName(input.tool);
-			const isTaskTool = normalizedTool === 'Task' || normalizedTool === 'task';
+			const isTaskTool = isTaskToolId(input.tool);
 			// (#1849) Resolve tool.execute.after args ONCE from the callID snapshot
 			// (the SDK toolAfter input has NO args). Reused by the knowledge ack/
 			// verdict/receipt collectors below so they see the delegation prompt +
@@ -4888,7 +4874,7 @@ async function initializeOpenCodeSwarm(
 					// (#1849) tool.execute.after input has no args; recover from the
 					// callID snapshot taken in toolBefore (guardrails/tool-before.ts).
 					recordToolCall(
-						normalizedTool,
+						_toolName,
 						resolveToolAfterContext(
 							input as { tool: string; sessionID: string; callID: string },
 						).args,

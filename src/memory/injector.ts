@@ -5,7 +5,7 @@ import {
 } from '../agents/agent-output-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import type { MessageWithParts } from '../hooks/knowledge-types';
-import { normalizeToolName } from '../hooks/normalize-tool-name';
+import { isTaskToolId, normalizeToolName } from '../hooks/normalize-tool-name';
 import {
 	deliveredGuidanceDelta,
 	insertGuidanceCarrier,
@@ -679,9 +679,30 @@ function extractTaskToolPrompt(messages: unknown[]): string | null {
 			const block = content[j];
 			if (block && typeof block === 'object') {
 				const b = block as Record<string, unknown>;
-				if (b.type === 'tool_use' && b.name === 'Task') {
+				// Anthropic-shaped tool_use block. The name may arrive in the
+				// host's lowercase spelling (`task`) or the legacy capitalised
+				// one — both route through the shared task-tool boundary
+				// (issue #2529).
+				if (
+					b.type === 'tool_use' &&
+					isTaskToolId(typeof b.name === 'string' ? b.name : undefined)
+				) {
 					const input = b.input as Record<string, unknown> | undefined;
 					const prompt = input?.prompt;
+					if (typeof prompt === 'string' && prompt.length > 0) {
+						return prompt;
+					}
+				}
+				// Host-shaped tool part: the host's assistant messages carry
+				// `{type:'tool', tool:'task', state:{...}}` parts, and every
+				// ToolState variant carries `input` (SDK v2 types), so the
+				// delegation prompt is recoverable there too (issue #2529).
+				if (b.type === 'tool' && isTaskToolId(b.tool as string)) {
+					const state = b.state as { input?: unknown } | undefined;
+					const stateInput = state?.input as
+						| Record<string, unknown>
+						| undefined;
+					const prompt = stateInput?.prompt;
 					if (typeof prompt === 'string' && prompt.length > 0) {
 						return prompt;
 					}
