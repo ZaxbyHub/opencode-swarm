@@ -547,24 +547,6 @@ Human-only governed dataset export (deterministic bundle + manifest, two-step co
 
 Issue #2486 (D7). Side-effect-free preview by default: export id, record counts (train/validation split, quarantined excluded), estimated size, destination, and a 15-minute confirmation token. --confirm=<token> writes the deterministic bundle (records.jsonl, train.jsonl, validation.jsonl, manifest.json with sha256 checksums, schema version, echoed filters, and a session-coherent split) under .swarm/training/v1/exports/<export-id>/; identical re-exports are idempotent. The existing /swarm export (plan+context JSON) is unchanged.
 
-### `/swarm dataset-consent`
-
-Human-only grant/revoke of the training-content consent record (two-step confirm token)
-
-Deprecated: use `/swarm dataset consent` instead.
-
-### `/swarm dataset-withdraw`
-
-Human-only destructive withdrawal: purge vault content, tombstone, revoke exports
-
-Deprecated: use `/swarm dataset withdraw` instead.
-
-### `/swarm dataset-export`
-
-Human-only governed dataset export (deterministic bundle + manifest, two-step confirm token)
-
-Deprecated: use `/swarm dataset export` instead.
-
 ### `/swarm evidence`
 
 Show evidence bundles [taskId]

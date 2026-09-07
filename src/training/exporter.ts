@@ -18,7 +18,11 @@ import { z } from 'zod';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 import { TRAINING_EXPORT_QUOTA_CEILINGS } from './consent';
 import { trainingExportsDir, trainingPendingOpPath } from './paths';
-import { readTrainingVault, type TrainingVaultRecord } from './vault';
+import {
+	listTrainingTombstones,
+	readTrainingVault,
+	type TrainingVaultRecord,
+} from './vault';
 
 export const TRAINING_EXPORT_SCHEMA_VERSION = 1;
 
@@ -64,7 +68,8 @@ export interface ExportExecution {
 		| 'token_expired'
 		| 'scope_changed'
 		| 'empty'
-		| 'export_quota';
+		| 'export_quota'
+		| 'export_revoked';
 }
 
 export type ExportFiles = Record<
@@ -360,10 +365,22 @@ function countExportDirs(directory: string): number {
 		return fs
 			.readdirSync(trainingExportsDir(directory), { withFileTypes: true })
 			.filter((entry) => entry.isDirectory()).length;
-	} catch {
-		return 0;
+	} catch (error) {
+		// A missing exports dir means zero exports exist (legit). Any OTHER
+		// read failure (EACCES, EBUSY, ...) must not silently fail the quota
+		// open — treat it as at-capacity so the export is refused instead.
+		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return 0;
+		return TRAINING_EXPORT_QUOTA_CEILINGS.maxExports;
 	}
 }
+
+export const _internals: {
+	countExportDirs: typeof countExportDirs;
+	listTombstones: typeof listTrainingTombstones;
+} = {
+	countExportDirs,
+	listTombstones: listTrainingTombstones,
+};
 
 /**
  * Execute the confirmed export: consumes the token (single use), re-derives
@@ -388,17 +405,11 @@ export function executeTrainingExport(
 	if (check.record.scope_digest !== preview.exportId) {
 		return { written: false, reason: 'scope_changed' };
 	}
-	consumeTrainingPendingOp(directory);
+	// Refuse an empty export BEFORE consuming the token so the human keeps
+	// the confirmation valid until TTL (no burned token on a filters-matched-
+	// nothing preview).
 	if (preview.recordCount === 0) {
 		return { written: false, reason: 'empty' };
-	}
-	const destination = preview.destination;
-	const alreadyPresent = fs.existsSync(destination);
-	if (
-		!alreadyPresent &&
-		countExportDirs(directory) >= TRAINING_EXPORT_QUOTA_CEILINGS.maxExports
-	) {
-		return { written: false, reason: 'export_quota' };
 	}
 	const bundle = buildTrainingExportBundle(
 		readTrainingVault(directory).records,
@@ -408,14 +419,51 @@ export function executeTrainingExport(
 			expiredExcluded: preview.expiredExcluded,
 		},
 	);
+	// A withdrawn export id must never be re-created, even if its directory
+	// was removed after withdrawal (deterministic ids make this reachable).
+	const revoked = _internals
+		.listTombstones(directory)
+		.some((tombstone) =>
+			tombstone.revoked_export_ids.includes(bundle.exportId),
+		);
+	if (revoked) {
+		return { written: false, reason: 'export_revoked' };
+	}
+	const destination = preview.destination;
+	const alreadyPresent = fs.existsSync(destination);
+	if (
+		!alreadyPresent &&
+		_internals.countExportDirs(directory) >=
+			TRAINING_EXPORT_QUOTA_CEILINGS.maxExports
+	) {
+		return { written: false, reason: 'export_quota' };
+	}
+	consumeTrainingPendingOp(directory);
 	fs.mkdirSync(destination, { recursive: true });
-	for (const name of [
-		'records.jsonl',
-		'train.jsonl',
-		'validation.jsonl',
-		'manifest.json',
-	] as const) {
-		atomicWriteSwarmFileSync(path.join(destination, name), bundle.files[name]);
+	try {
+		for (const name of [
+			'records.jsonl',
+			'train.jsonl',
+			'validation.jsonl',
+			'manifest.json',
+		] as const) {
+			atomicWriteSwarmFileSync(
+				path.join(destination, name),
+				bundle.files[name],
+			);
+		}
+	} catch (error) {
+		// A mid-sequence write failure must not leave a partial export dir
+		// behind (only clean up a dir this call created — an idempotent
+		// re-export over an existing bundle stays untouched).
+		if (!alreadyPresent) {
+			try {
+				fs.rmSync(destination, { recursive: true, force: true });
+			} catch {
+				// best-effort; the thrown error below is the primary signal
+			}
+		}
+		throw error;
 	}
 	return { written: true, exportId: bundle.exportId, destination };
 }

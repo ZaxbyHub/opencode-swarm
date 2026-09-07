@@ -1086,7 +1086,12 @@ export const telemetry = {
 	 */
 	trainingVaultHealth(data: {
 		project_ref: string;
-		reason: string;
+		reason:
+			| 'quota_bytes'
+			| 'quota_records'
+			| 'disk_floor'
+			| 'consent_missing'
+			| 'withdrawal_executed';
 		count: number;
 	}): void {
 		_internals.emit('training_vault_health', data);

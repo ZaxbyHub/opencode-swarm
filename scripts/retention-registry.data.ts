@@ -3993,8 +3993,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/training/consent.ts', 'src/training/vault.ts'],
 		writerCitations: [
 			'src/training/consent.ts:148 (grantTrainingConsent — consent.json)',
-			'src/training/vault.ts:337 (appendTrainingVaultRecord — records.jsonl, only consented path)',
-			'src/training/vault.ts:586 (purgeTrainingVaultContent — withdrawal rewrite + tombstones)',
+			'src/training/vault.ts:348 (appendTrainingVaultRecord — records.jsonl, only consented path)',
+			'src/training/vault.ts:615 purgeTrainingVaultContent — withdrawal rewrite + tombstones',
 		],
 		readerCitations: [
 			'/swarm dataset export — deterministic reads via previewTrainingExport (src/training/exporter.ts)',
@@ -4003,7 +4003,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'consent v1 / vault record v1 / tombstone v1 (zod-strict, src/training)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
-		writeLimits: { bound: 'consent-clamped: max 1 GiB / 250k records / 30 days (TRAINING_QUOTA_CEILINGS); capture stops with typed reason at cap — never evicts unexpired records; tombstones never deleted; disk floor max(2 GiB, 10% volume)', scope: 'global', citation: 'src/training/vault.ts:337 (appendTrainingVaultRecord gates)' },
+		writeLimits: { bound: 'consent-clamped: max 1 GiB / 250k records / 30 days (TRAINING_QUOTA_CEILINGS); capture stops with typed reason at cap — never evicts unexpired records; tombstones never deleted; disk floor max(2 GiB, 10% volume)', scope: 'global', citation: 'src/training/vault.ts:348 (appendTrainingVaultRecord gates)' },
 		readBound: { pattern: 'indexed', bound: 'consent-gated reads only; corrupt items quarantined with typed reason', sync: false, citation: 'src/training/vault.ts (readTrainingVault quarantine)' },
 		lockModel: 'single-writer per project; synchronous append critical section; atomic rewrites via atomicWriteSwarmFileSync',
 		crashBehavior: 'torn tail line tolerated — read path quarantines it as malformed_json, never silently included',
@@ -4012,7 +4012,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		legacyCompatibility: 'n/a (new tree)',
 		healthSignal: 'training_vault_health telemetry (counts-only: project_ref, reason, count) + health.json stop reasons',
 		owner: '#2486',
-		disposition: { kind: 'retain-by-design', issue: 2486, citation: 'src/training/vault.ts:337', note: 'Consented training vault delivered by #2486 (D7): consent-bound capture, quota/disk stop reasons, corrupt quarantine, withdrawal tombstones.' },
+		disposition: { kind: 'retain-by-design', issue: 2486, citation: 'src/training/vault.ts:348', note: 'Consented training vault delivered by #2486 (D7): consent-bound capture, quota/disk stop reasons, corrupt quarantine, withdrawal tombstones.' },
 	},
 	{
 		id: 'training-exports',

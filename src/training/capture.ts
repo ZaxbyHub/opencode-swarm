@@ -25,6 +25,10 @@ import {
 
 const PLUGIN_VERSION: string = packageJson.version;
 const MAX_DEDUP_PER_SESSION = 4096;
+// Parent-map bound per AGENTS.md invariant 8 (session-keyed state needs an
+// explicit eviction strategy — mirror of candidate-queue.ts/adversarial-
+// detector.ts MAX_TRACKED_SESSIONS FIFO); only new-session inserts evict.
+const MAX_TRACKED_DEDUP_SESSIONS = 500;
 const GUIDANCE_CARRIER_ID_PREFIX = 'swarm-guidance:';
 const DIRECTIVE_TEXT_PREFIX = '<swarm_system_directive';
 
@@ -91,6 +95,13 @@ export function createTrainingCaptureObserver(
 		if (!entry) {
 			entry = { order: [], seen: new Set<string>() };
 			dedupBySession.set(sessionId, entry);
+			// Invariant 8: bound the session-keyed parent map (FIFO on the
+			// oldest-inserted session when a new session arrives).
+			while (dedupBySession.size > MAX_TRACKED_DEDUP_SESSIONS) {
+				const oldest = dedupBySession.keys().next().value;
+				if (oldest === undefined) break;
+				dedupBySession.delete(oldest);
+			}
 		}
 		if (entry.seen.has(recordId)) return false;
 		entry.seen.add(recordId);

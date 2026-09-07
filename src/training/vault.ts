@@ -259,6 +259,10 @@ interface VaultHealth {
 	appended_total: number;
 }
 
+// A health file written by a FUTURE schema version is intentionally treated
+// the same as absent/malformed: fresh v1 counters. The next writeHealth
+// persists the v1 shape (the chosen forward-migration behavior — documented
+// here so the reset is specified, not silent).
 function readHealth(directory: string): VaultHealth {
 	try {
 		const parsed = JSON.parse(
@@ -433,6 +437,10 @@ function countRecordLines(directory: string): number {
 // ---------------------------------------------------------------------------
 // Read path + quarantine
 
+// Process-lifetime dedup of quarantine journal entries (bounded at
+// MAX_JOURNALED by raw-line hash): the SAME corrupt line is journaled only
+// on first sight per process, so journal reads are per-process, not a
+// per-read guarantee.
 const journaledQuarantineLines = new Set<string>();
 const MAX_JOURNALED = 4096;
 
@@ -578,6 +586,9 @@ export function sweepTrainingVaultExpiry(
 // ---------------------------------------------------------------------------
 // Withdrawal
 
+// Best-effort listing for read/revoke-reporting surfaces: an unreadable
+// exports dir reports as [] (documented). The DESTRUCTIVE purge path does
+// NOT use this — it lists fail-loud above destroying anything.
 function listExportIds(directory: string): string[] {
 	const dir = trainingExportsDir(directory);
 	try {
@@ -595,6 +606,11 @@ function listExportIds(directory: string): string[] {
  * Physically delete ALL vault content, append a durable withdrawal tombstone,
  * and revoke every export still under plugin control with a `REVOKED.json`
  * revocation manifest. Tombstones from prior withdrawals are never touched.
+ *
+ * The export listing happens BEFORE any destruction: if the exports dir is
+ * unreadable (not merely absent), the purge refuses rather than truncating
+ * records and then silently writing a tombstone that under-reports the
+ * revocation set.
  */
 export function purgeTrainingVaultContent(
 	directory: string,
@@ -604,6 +620,22 @@ export function purgeTrainingVaultContent(
 	const withdrawnAt = new Date(now.getTime()).toISOString();
 	const target = trainingVaultRecordsPath(directory);
 	const { records } = readTrainingVault(directory);
+	let exportIds: string[];
+	try {
+		exportIds = fs
+			.readdirSync(trainingExportsDir(directory), { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name)
+			.sort();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+			exportIds = [];
+		} else {
+			// Unreadable-nonempty exports dir: refuse the destructive purge
+			// instead of guessing the revocation set.
+			throw error;
+		}
+	}
 	const sortedIds = records.map((record) => record.record_id).sort();
 	const tombstone: TrainingWithdrawalTombstone = {
 		schema_version: 1,
@@ -618,7 +650,7 @@ export function purgeTrainingVaultContent(
 	fs.mkdirSync(path.dirname(target), { recursive: true });
 	atomicWriteSwarmFileSync(target, '');
 	const revokedExports: string[] = [];
-	for (const exportId of listExportIds(directory)) {
+	for (const exportId of exportIds) {
 		const revokedPath = path.join(
 			trainingExportsDir(directory),
 			exportId,

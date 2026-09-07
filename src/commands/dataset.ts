@@ -193,7 +193,7 @@ export async function handleDatasetWithdrawCommand(
 	return [
 		'Withdrawal preview (destructive):',
 		`  - vault records to DELETE: ${status.recordCount} (${status.vaultBytes} bytes)`,
-		`  - exports to revoke: ${exportIds === 0 ? 'none under plugin control' : `${exportIds} already-revoked listed; live exports will get REVOKED.json`}`,
+		`  - exports to revoke: ${exportIds === 0 ? 'none under plugin control' : `${exportIds} previously revoked (REVOKED.json present); any remaining live exports will get REVOKED.json`}`,
 		`  - withdrawal tombstone will be appended (existing tombstones: ${status.tombstoneCount}, never deleted)`,
 		`  - consent will be marked withdrawn (capture stops immediately)`,
 		'This destroys the consented vault content on disk.',
