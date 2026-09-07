@@ -34,10 +34,11 @@ is now a typed, catalogued kind.
 - **No SQLite query index.** The SQLite-backed memory stores (`memory_events`,
   `memory_recall_usage`, `memory_reward_events`) are inventoried in the matrix
   below but their query/index design is owned by **#2048**.
-- **No OTLP network path.** `otel-mapping.ts` is a pure, inert lookup table.
-  There is no OpenTelemetry SDK dependency, no exporter, and no network call
-  anywhere in `src/observability/`. The runtime OTel consumer is owned by
-  **#2049**.
+- **Single, opt-in OTLP network path.** The runtime consumer is the opt-in
+  exporter `src/observability/otlp-exporter.ts` (**#2485**), the only module in
+  `src/observability/` permitted network I/O (registered as the no-I/O
+  contract's single sanctioned exception); `otel-mapping.ts` itself remains a
+  pure lookup table with no OpenTelemetry SDK dependency.
 - **No content capture.** No event in the current catalog is classified
   `privacyClass: 'content'`. This contract does not capture prompts, responses,
   code, documents, tool payloads, or hidden reasoning — see §5 for the
@@ -1033,9 +1034,10 @@ identifier suffix (`/id$/i`) or a high-cardinality shape prefix
 
 ## 9. OTel mapping pin
 
-`src/observability/otel-mapping.ts` is an **inert lookup table** — no
-OpenTelemetry SDK dependency, no exporter, no runtime consumer in this change.
-It maps envelope paths onto two external vocabularies:
+`src/observability/otel-mapping.ts` is a **pure lookup table** — no
+OpenTelemetry SDK dependency. Its live runtime consumer is the opt-in exporter
+`src/observability/otlp-exporter.ts` (**#2485**). It maps envelope paths onto
+two external vocabularies:
 
 - `OTEL_GENAI_ATTRIBUTES` — OpenTelemetry GenAI semantic conventions, pinned at
   `OTEL_GENAI_MAPPING_VERSION = '1.29.0'`.
@@ -1054,9 +1056,10 @@ It maps envelope paths onto two external vocabularies:
 `mappingForEntry('none')` returns an empty, frozen table rather than
 `undefined` — `'none'` is a real, recorded decision ("this kind has no
 external equivalent"), not a missing value, so a consumer never has to
-distinguish "no mapping" from "not asked." The runtime consumer of these
-tables (an actual OTel/OpenInference exporter) is owned by **#2049**; here they
-are consumed only as data, by the static contract check and by this document.
+distinguish "no mapping" from "not asked." Since **#2485** these tables have a
+live runtime consumer — the opt-in exporter `src/observability/otlp-exporter.ts`
+— and they remain consumable as data by the static contract check and this
+document.
 
 ---
 

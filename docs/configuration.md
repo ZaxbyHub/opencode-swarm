@@ -122,6 +122,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `automation` | object | — | Background automation mode and per-feature toggles (v6.7 background-first rollout). |
 | `knowledge` | object | — | Two-tier cross-project knowledge base (v6.17). |
 | `memory` | object | — | Swarm memory substrate — disabled by default so existing flows are unchanged. |
+| `observability` | object | — | Observability options — remote OTLP/OpenInference export is opt-in and disabled by default (issue #2485). |
 | `learning` | object | — | Learning subsystem: real-time admission, PRM persistence, dedup sweep (issue #1821). |
 | `consensus` | object | — | Consensus mining over completed run evidence (issue #1821). |
 | `curator` | object | — | Phase context consolidation and drift detection. |
@@ -1488,6 +1489,28 @@ Honest performance tradeoff — this is not a blanket speedup:
   full parse — on top of the subgraph query the first block already did.
   Single-block turns, and turns after the full-graph cache is already warm,
   are unaffected by this.
+
+## Observability export (issue #2485)
+
+Opt-in remote OTLP/OpenInference export, disabled by default. When enabled, canonical observability events are projected onto the pinned attribute tables (OTLP GenAI 1.29.0 / OpenInference 0.1.14 — see `src/observability/otel-mapping.ts`) and shipped as OTLP/HTTP JSON to `{endpoint}/v1/traces`.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `observability.export.enabled` | boolean | `false` | Master switch. Off ⇒ no listener, no timers, no network, no `.swarm/otlp-export/` directory. |
+| `observability.export.endpoint` | string | `""` | Collector base URL. `https:` required for remote hosts; plain `http:` is accepted only for loopback test collectors. |
+| `observability.export.convention` | `genai` \| `openinference` | `genai` | Which pinned attribute table projects. |
+| `observability.export.headers` | record | — | Extra headers (e.g. `Authorization`). Values are secrets: never logged or included in health. |
+| `observability.export.batchSize` | number | `64` | Max spans per export request (1–512). |
+| `observability.export.flushIntervalMs` | number | `5000` | Interval flush trigger while records are pending (250–300000). |
+| `observability.export.requestTimeoutMs` | number | `5000` | Per-request timeout (250–60000). |
+| `observability.export.spoolMaxBytes` | number | `1048576` | Spool byte budget; oldest records dropped with reason `spool_cap` (16 KiB–16 MiB). |
+| `observability.export.spoolMaxAgeMs` | number | `86400000` | Spool age budget; expired records dropped with reason `spool_age` (1 min–30 days). |
+| `observability.export.maxRetries` | number | `3` | Transient-failure retries per flush cycle (0–10). |
+| `observability.export.backoffBaseMs` / `backoffMaxMs` | number | `200` / `30000` | Capped exponential backoff with jitter; also caps an honored 429 `Retry-After`. |
+| `observability.export.circuitThreshold` | number | `5` | Consecutive failed flush cycles before the circuit opens. |
+| `observability.export.circuitCooldownMs` | number | `60000` | Cooldown while open; one recovery probe afterwards. |
+
+Independent kill switch: set `SWARM_OTLP_EXPORT_DISABLE=1` to force the exporter off even when config-enabled. Local operation (init, SQLite sink, `/swarm report`, recovery) never depends on the exporter or the collector. Exporter health is surfaced through `/swarm report` (state, mapping version, spooled records/bytes, accepted/exported/retried/dropped by reason, circuit state). Privacy: attributes come only from the pinned tables plus a closed `swarm.*` set, `content`-class events never export, and records are filtered before the spool append — no prompt/command/code/path/tool payload text reaches the spool or the wire. Known limitation: corporate HTTP proxies are not supported in this first bounded exporter.
 
 ## Evidence Retention Configuration
 

@@ -231,6 +231,11 @@ import {
 	resolveTaskChatModelOverride,
 } from './models/task-model-routing.js';
 import { initObservability } from './observability/index.js';
+import {
+	flushOtlpExporterForTesting,
+	isOtlpExporterActive,
+	registerOtlpExporter,
+} from './observability/otlp-exporter.js';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
 import { cleanupOldTrajectoryFiles } from './prm/trajectory-store';
@@ -1251,6 +1256,29 @@ async function initializeOpenCodeSwarm(
 	registerObservabilityEventSink(ctx.directory);
 	initTelemetry(ctx.directory);
 	startHeartbeatTracking();
+
+	// #2485: opt-in remote OTLP/OpenInference export. Registration is O(1)
+	// (one listener push + one unref'd interval), never throws, and performs
+	// no I/O — safe on the init path (invariant 1). With the default config
+	// (exporter off), the kill switch set, or an invalid endpoint, NOTHING is
+	// registered and no `.swarm/otlp-export/` directory is created.
+	const otlpExportConfig = config.observability?.export;
+	if (otlpExportConfig !== undefined) {
+		registerOtlpExporter(ctx.directory, otlpExportConfig);
+		if (isOtlpExporterActive()) {
+			postResolutionTasks.push(() => {
+				// Post-resolution first flush (spool replay after restart).
+				// Fire-and-forget by design — the queue retains nothing; the
+				// flush is bounded internally and the interval owns ongoing
+				// work. `flushOtlpExporterForTesting` is the drain-now entry
+				// point (single-flight, bounded iterations), used here and by
+				// checks/tests alike.
+				void flushOtlpExporterForTesting(ctx.directory).catch(() => {
+					/* fail-open: the interval retries */
+				});
+			});
+		}
+	}
 
 	const repoGraphConfig = RepoGraphConfigSchema.parse(config.repo_graph ?? {});
 	const repoGraphHookFactory = createRepoGraphBuilderHookForInit;

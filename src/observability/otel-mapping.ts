@@ -1,11 +1,11 @@
 /**
  * External-convention attribute mappings (issue #2029 item 6).
  *
- * These are INERT LOOKUP TABLES. There is no OpenTelemetry SDK dependency, no
- * exporter, and no runtime consumer in this change: the tables are consumed as
- * data by the static contract check (which asserts every catalog entry records a
- * mapping decision) and by `docs/observability-event-contract.md`. The runtime
- * consumer lands in #2049.
+ * These tables are DATA consumed by the static contract check (which asserts
+ * every catalog entry records a mapping decision), by
+ * `docs/observability-event-contract.md`, and — since issue #2485 — by the
+ * opt-in runtime exporter (`src/observability/otlp-exporter.ts`), the runtime
+ * consumer originally deferred here to #2049.
  *
  * Import rules: no filesystem, network, subprocess, or OTel SDK.
  */

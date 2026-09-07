@@ -156,23 +156,103 @@ function tolerantKeyword(word: string): string {
 	return word.split('').join(FILL);
 }
 
-const CREDENTIAL_KEYWORDS_LOWER = [
-	'bearer',
-	'token',
-	'secret',
-	'password',
-	'authorization',
-].map(tolerantKeyword);
-const API_KEY_PATTERN = `${tolerantKeyword('api')}${FILL}[_-]?${FILL}${tolerantKeyword('key')}`;
-const CREDENTIAL_KEYWORD_ALTERNATION = `(?:${API_KEY_PATTERN}|${CREDENTIAL_KEYWORDS_LOWER.join('|')})`;
+// #2485 note: the pre-#2485 keyword list (`bearer`, `token`, `secret`,
+// `password`, `authorization`, plus a bespoke `api[_-]?key` shape) was
+// replaced by CREDENTIAL_MORPHEMES below — see the Gap 1 doc comment there.
 
 const SCREAMING_SUFFIXES = ['TOKEN', 'KEY', 'SECRET', 'PASSWORD', 'AUTH'];
 
 const TOLERANT_BEARER_PREFIX = tolerantKeyword('Bearer');
+/**
+ * Fill-tolerant auth SCHEME words tolerated between the separator and the
+ * credential value. #2369 Gap 1: only `Bearer` was recognized, so
+ * `Authorization: Basic <base64>` redacted the scheme word and left the
+ * credential itself in cleartext. The scheme set is the IANA-registered
+ * HTTP auth schemes plus `ApiKey` (common in vendor diagnostics).
+ */
+const TOLERANT_AUTH_SCHEME_PREFIX = `(?:${[
+	'Bearer',
+	'Basic',
+	'Digest',
+	'Negotiate',
+	'HOBA',
+	'Mutual',
+	'ApiKey',
+]
+	.map(tolerantKeyword)
+	.join('|')})`;
+/**
+ * #2369 Gap 1: the credential keyword match is deliberately NOT `\b`-anchored
+ * and matches a whole identifier SHAPE — a bounded identifier prefix (≤24
+ * identifier chars), one fill-tolerant credential MORPHEME, and a bounded
+ * identifier suffix (≤24). `\b` required a genuine word/non-word transition,
+ * so glued key names (`access_token=`, `refresh_token=`, `client_secret=`,
+ * `private_key=`, `session_key=`, `my_secret=`), prefix-glued `…_key` names,
+ * and keyword-suffixed names (`tokenX=`) never matched. Matching the whole
+ * identifier shape instead of a lone anchored keyword closes the whole glued
+ * family at once; `key`/`credential` join the morpheme set because
+ * `private_key`/`session_key` end in `key` without containing any prior
+ * morpheme (`auth` is deliberately NOT a morpheme: it would redact every
+ * `author=` field in legitimate diagnostics).
+ *
+ * Consequence, accepted on purpose as defense-in-depth (#2369's own suggested
+ * direction): benign identifiers CONTAINING a morpheme (`tokenize=…`,
+ * `keyboard=…`) are also redacted. Over-redaction of a log-display string is
+ * the safe side of the trade; the value matchers stay whitespace-bounded so
+ * the #2363 round-8 cross-line merge regression cannot reopen.
+ */
+const CREDENTIAL_MORPHEMES = [
+	'token',
+	'secret',
+	'password',
+	'authorization',
+	'credential',
+	'bearer',
+	'key',
+].map(tolerantKeyword);
+/**
+ * Suffix charset: identifier characters PLUS every fill class except
+ * horizontal space (`\p{Zs}` / U+0020), so a fill byte inserted anywhere in
+ * the key tail — between morpheme and suffix identifier chars, or inside the
+ * suffix — cannot split the key shape. Space is deliberately excluded: with
+ * it, the key could span whole words of prose ("the token count = 42" would
+ * redact). A flat class (not a repeated group) keeps this ReDoS-safe — the
+ * #2363 round-5 lesson. Accepted residual, documented: a vertical-whitespace
+ * byte DIRECTLY between a morpheme and more identifier chars (`TOKEN\nX_ID=`)
+ * is tolerated, so a directly-newline-glued identifier pair can be
+ * over-redacted as one key; ordinary log lines (which separate the next
+ * identifier with a space) are unaffected, exactly like the SCREAMING arm's
+ * own trade. The prefix stays pure-identifier: it is opportunistic (output
+ * fidelity only); the morpheme alone always matches.
+ */
+const CREDENTIAL_KEY_SUFFIX_CHARS =
+	'\\p{L}\\p{N}_\\-\\x00-\\x1f\\x7f-\\x9f\\p{Cf}\\p{Default_Ignorable_Code_Point}';
+const CREDENTIAL_KEY_IDENTIFIER = `[\\p{L}\\p{N}_-]{0,24}(?:${CREDENTIAL_MORPHEMES.join('|')})[${CREDENTIAL_KEY_SUFFIX_CHARS}]{0,24}`;
 const CREDENTIAL_KV_PATTERN = new RegExp(
-	`\\b(${CREDENTIAL_KEYWORD_ALTERNATION})\\b${FILL}[:=]${FILL}(?:${TOLERANT_BEARER_PREFIX}${FILL})?[^\\s,;]+`,
+	`(${CREDENTIAL_KEY_IDENTIFIER})${FILL}[:=]${FILL}(?:${TOLERANT_AUTH_SCHEME_PREFIX}${FILL})?(?:${TOLERANT_BEARER_PREFIX}${FILL})?[^\\s,;]+`,
 	'giu',
 );
+/**
+ * #2369 Gap 2: ANSI CSI sequences are neutralized to a single space BEFORE
+ * redaction runs. An SGR sequence like `\x1b[31m` ends in `m` — a word
+ * character — so `\x1b[31mtoken=…` had no `\b` boundary before the keyword
+ * and the value shipped in cleartext. Replacing the whole CSI sequence with a
+ * space can only CREATE boundaries, never remove them (a separator is
+ * substituted, nothing is deleted or joined), so the #2363 split/join fixes
+ * stay closed. Parameter runs are bounded (≤32); the
+ * {@link BARE_SGR_PARAMETER_RUN} sweep below catches the over-long tail.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: the ESC byte IS the match target - a CSI sequence is defined by it (#2485 Gap 2)
+const CSI_SEQUENCE = /\x1b\[[0-9;:;<=>?]{0,32}[ !-/]{0,4}[@-~]/gu;
+/**
+ * Fallback for CSI parameter runs longer than {@link CSI_SEQUENCE}'s bound:
+ * after redaction, a residual bare `[<params>m` SGR body (digits/semicolons
+ * only, ≥17 chars so ordinary prose like `[0m`-adjacent text is untouched by
+ * this arm and handled by the bounded pattern instead) is also replaced with
+ * a space so an adversarial 30-digit parameter run cannot both survive and
+ * shield an adjacent keyword.
+ */
+const BARE_SGR_PARAMETER_RUN = /\[[0-9;:]{17,64}m/gu;
 /**
  * Matches a candidate SCREAMING_CASE `KEY=value` span using a single flat
  * character class for the key run (bounded to 80 chars) instead of the
@@ -214,23 +294,45 @@ function screamingKeyContainsSuffix(key: string): boolean {
 
 /**
  * Redacts secrets/URLs and strips control chars for terminal/display safety.
- * Redaction runs FIRST against the raw value so `\b` sees genuine boundaries;
- * control-char stripping runs LAST so it can't interfere with matching. See
- * the FILL doc comment above for why control chars and whitespace are both
- * treated as tolerated fill throughout the redaction patterns.
+ * Order of operations (each step exists to keep a prior fix closed):
+ *   1. slice to MAX_SANITIZE_INPUT_CHARS (regex-work bound)
+ *   2. neutralize ANSI CSI sequences to a single space (#2369 Gap 2 — an SGR
+ *      final byte `m` is a word character and defeated `\b`; substituting a
+ *      separator can only create boundaries, never remove one, so the #2363
+ *      split/join fixes stay closed)
+ *   3. redact URLs (against the CSI-neutralized view)
+ *   4. redact credential KV pairs — keyword match is UNANCHORED and tolerant
+ *      of glued key names and identifier suffixes (#2369 Gap 1), and the
+ *      value matcher tolerates a fill-tolerant auth scheme word (Basic,
+ *      Digest, …) between separator and credential so `Authorization: Basic
+ *      <base64>` redacts the credential, not just the scheme
+ *   5. redact SCREAMING_CASE KV pairs (unchanged shape)
+ *   6. strip residual control/format/DI runs to spaces
+ *   7. sweep residual over-long bare `[<params>m` SGR bodies (the >32-char
+ *      CSI tail the bounded pre-pass cannot match)
+ *   8. trim + 512-byte UTF-8 bound
+ *
+ * Best-effort defense-in-depth for a log-display string, NOT a security
+ * boundary: combining marks (U+0300 class) still defeat keyword matching and
+ * are deliberately not fixed (#2369 Gap 3 — sweeping `\p{Mn}` would over-redact
+ * every legitimate combining accent in non-Latin diagnostics). Glued-key
+ * matching (Gap 1) and the CSI pre-pass (Gap 2) were added by #2485.
  */
 export function sanitizeFailureEvidenceDisplay(value: string): string {
 	const bounded = value.slice(0, MAX_SANITIZE_INPUT_CHARS);
-	const redacted = bounded
+	const neutralized = bounded.replace(CSI_SEQUENCE, ' ');
+	const redacted = neutralized
 		.replace(/\bhttps?:\/\/[^\s'"<>]+/gi, (match) => redactUrl(match))
-		.replace(CREDENTIAL_KV_PATTERN, (_, key: string) => {
-			return `${key.replace(CONTROL_CHAR_RUN, '')}=<redacted>`;
-		})
+		.replace(
+			CREDENTIAL_KV_PATTERN,
+			(_, key: string) => `${key.replace(CONTROL_CHAR_RUN, '')}=<redacted>`,
+		)
 		.replace(SCREAMING_KV_CANDIDATE_PATTERN, (match, key: string) => {
 			if (!screamingKeyContainsSuffix(key)) return match;
 			return `${key.replace(CONTROL_CHAR_RUN, '').replace(/\s+/g, '')}=<redacted>`;
 		})
-		.replace(CONTROL_CHAR_RUN, ' ');
+		.replace(CONTROL_CHAR_RUN, ' ')
+		.replace(BARE_SGR_PARAMETER_RUN, ' ');
 	return boundedUtf8(redacted.trim());
 }
 
