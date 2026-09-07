@@ -206,7 +206,9 @@ const NETWORK_TOOLS = new Set<string>([
 	'gitingest',
 ]);
 
-const SUBAGENT_TOOLS = new Set<string>(['task', 'agent', 'delegate']);
+// 'task' is deliberately absent: the task leg routes through isTaskToolId
+// (#2529), and a dot-stripping set lookup here would re-admit dotted ids.
+const SUBAGENT_TOOLS = new Set<string>(['agent', 'delegate']);
 
 const HIGH_RISK_BUILD_PATHS = [
 	'src/index.ts',
