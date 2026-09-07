@@ -1676,8 +1676,7 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 					exportCfg !== null &&
 					(exportCfg as Record<string, unknown>).enabled === true
 				) {
-					const endpoint = (exportCfg as Record<string, unknown>)
-						.endpoint;
+					const endpoint = (exportCfg as Record<string, unknown>).endpoint;
 					let problem: string | null = null;
 					if (typeof endpoint !== 'string' || endpoint.length === 0) {
 						problem =

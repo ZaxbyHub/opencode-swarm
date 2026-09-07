@@ -65,7 +65,7 @@ describe('src/observability/*.ts — no I/O', () => {
 			test(`does not contain "${label}"`, () => {
 				if (ioExempt) {
 					// #2485 carve-out: the exporter's sanctioned I/O surface.
-									// It still may not use bun: or Bun. (invariant 2)
+					// It still may not use bun: or Bun. (invariant 2)
 					// nor node:child_process (invariant 3).
 					expect(
 						pattern.test(content) &&

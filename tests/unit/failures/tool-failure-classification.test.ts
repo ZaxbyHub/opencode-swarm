@@ -331,22 +331,19 @@ describe('tool failure classification', () => {
 	});
 
 	it('redacts the credential after every auth scheme word, not just Bearer (#2369 Gap 1)', () => {
-		const basic =
-			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
-				'Authorization: Basic dXNlcjpwYXNzd29yZA==',
-			);
+		const basic = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			'Authorization: Basic dXNlcjpwYXNzd29yZA==',
+		);
 		expect(basic).not.toContain('dXNlcjpwYXNzd29yZA');
 		expect(basic).toContain('Authorization=<redacted>');
 
-		const digest =
-			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
-				'authorization: Digest deadbeefcafef00d',
-			);
+		const digest = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			'authorization: Digest deadbeefcafef00d',
+		);
 		expect(digest).not.toContain('deadbeefcafef00d');
 
-		const plain = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
-			'token=abc',
-		);
+		const plain =
+			invocationFailureTestExports.sanitizeFailureEvidenceDisplay('token=abc');
 		expect(plain).toBe('token=<redacted>');
 	});
 
@@ -364,10 +361,9 @@ describe('tool failure classification', () => {
 		// >32-char parameter run: beyond CSI_SEQUENCE's bound, so the bare-SGR
 		// fallback sweep must remove the parameter body before it can shield
 		// the keyword.
-		const longRun =
-			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
-				'x \x1b[123456789012345678901234567890123m token=leakme9z y',
-			);
+		const longRun = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			'x \x1b[123456789012345678901234567890123m token=leakme9z y',
+		);
 		expect(longRun).not.toContain('leakme9z');
 		expect(longRun).not.toContain('123456789012345678901234567890123');
 
