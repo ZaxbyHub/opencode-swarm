@@ -504,7 +504,11 @@ async function postBatch(
 				Number.isFinite(declaredLength) &&
 				declaredLength > MAX_RESPONSE_BODY_BYTES
 			) {
-				return { ok: false, category: 'malformed_response', retryAfterMs: null };
+				return {
+					ok: false,
+					category: 'malformed_response',
+					retryAfterMs: null,
+				};
 			}
 			try {
 				const text = await response.text();
@@ -596,7 +600,10 @@ async function runFlushCycle(): Promise<void> {
 					agedIds.add(parsed.id);
 					continue;
 				}
-				records.push({ id: parsed.id, span: parsed.r as Record<string, unknown> });
+				records.push({
+					id: parsed.id,
+					span: parsed.r as Record<string, unknown>,
+				});
 			} catch {
 				noteDrop('spool_corrupt');
 			}
