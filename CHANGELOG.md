@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.170.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.169.0...v7.170.0) (2026-09-07)
+
+
+### Features
+
+* **ci:** ship advisory headless CI with a host-decoupled runtime ([#2497](https://github.com/ZaxbyHub/opencode-swarm/issues/2497)) ([a5923b3](https://github.com/ZaxbyHub/opencode-swarm/commit/a5923b30f9d7806d1ca0ddac977945c9ebd5d2a3))
+* **ci:** ship advisory headless CI with a host-decoupled runtime ([#2497](https://github.com/ZaxbyHub/opencode-swarm/issues/2497)) ([4436e6c](https://github.com/ZaxbyHub/opencode-swarm/commit/4436e6ca0a061712183a7ed9853aad35fdd709f8))
+
+
+### Bug Fixes
+
+* **ci:** close PR-review and Copilot findings on the advisory headless CI ([b974ef1](https://github.com/ZaxbyHub/opencode-swarm/commit/b974ef159676b22d3b270b274d5e970f8b936f0a))
+* **ci:** correct merge-queue feedback evidence ([e4b51d7](https://github.com/ZaxbyHub/opencode-swarm/commit/e4b51d75c845ffde3b34ccff3b210158afe84bfa))
+* **guardrails:** scope gate denial status transitions ([e0ab8b3](https://github.com/ZaxbyHub/opencode-swarm/commit/e0ab8b368f37f13dbefc37b9aaf8ebe9c0a27737))
+* **guardrails:** scope gate denials by cause and action ([81e893a](https://github.com/ZaxbyHub/opencode-swarm/commit/81e893aa6fecc5d85dee50d7c5498331883462a5))
+* **guardrails:** scope gate denials by cause and action ([77217e7](https://github.com/ZaxbyHub/opencode-swarm/commit/77217e72fca705c7ab717d3df91c970281c0e087))
+* **sandbox:** stop emitting invalid SBPL setenv/unsetenv; apply env overrides at command level ([d0d3cbd](https://github.com/ZaxbyHub/opencode-swarm/commit/d0d3cbdd31378d52b2db4b74755fc04ddbdcbedf))
+
 ## [7.169.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.168.1...v7.169.0) (2026-09-07)
 
 
