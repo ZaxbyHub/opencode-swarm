@@ -1,5 +1,31 @@
 # Changelog
 
+## [7.169.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.168.1...v7.169.0) (2026-09-07)
+
+
+### Features
+
+* **observability:** add bounded remote OTLP export and privacy controls ([#2485](https://github.com/ZaxbyHub/opencode-swarm/issues/2485)) ([5310dbe](https://github.com/ZaxbyHub/opencode-swarm/commit/5310dbeaf45e4d37cb5b1f2858cd440c7f0bc3ba))
+* **retrieval:** add deterministic quality evaluation ([572fc62](https://github.com/ZaxbyHub/opencode-swarm/commit/572fc623a6f865aa10f2acdd47a2a1966c5945d1))
+* **retrieval:** add deterministic quality evaluation ([a2f2def](https://github.com/ZaxbyHub/opencode-swarm/commit/a2f2def878d86f3f3ff8bbc509b7fc63dc719914))
+
+
+### Bug Fixes
+
+* **#2485:** re-pin registry anchors after biome formatting ([5ce163e](https://github.com/ZaxbyHub/opencode-swarm/commit/5ce163e80a29cf0fb4aa470d0b7d0770733da7d5))
+* **#2485:** reclaim aged spool lines on the flush path ([890efff](https://github.com/ZaxbyHub/opencode-swarm/commit/890efffead05ff882a5b05cba2816c08c2dbad44))
+* **#2485:** resolve swarm-pr-review findings (3 HIGH + mediums) ([7e49668](https://github.com/ZaxbyHub/opencode-swarm/commit/7e496687cacf956bf61d7fb509df934e99a74fc4))
+* **agents:** add prompt budget safety margin ([aa1d667](https://github.com/ZaxbyHub/opencode-swarm/commit/aa1d66796443a7adcf2e239916617606d2be11ff))
+* **agents:** keep feedback guidance within prompt budget ([032c224](https://github.com/ZaxbyHub/opencode-swarm/commit/032c224f9026882ff79d654e659e18c88a8fafd9))
+* **ci:** restore LF checkout and document Stage A policy ([9ba9c7d](https://github.com/ZaxbyHub/opencode-swarm/commit/9ba9c7d5959a0e0abd9b3357a5727126f2f2ba2a))
+* close PR feedback for graph retrieval quality ([9fdf9dd](https://github.com/ZaxbyHub/opencode-swarm/commit/9fdf9dd7ecee80506c02f5ea473f7064bffd13b8))
+* **pr-workflow:** close audited publication cancellation gaps ([b31a66e](https://github.com/ZaxbyHub/opencode-swarm/commit/b31a66ea297d2118451c5b0d5ece7fdb61fc113d))
+* **runtime:** bound subprocess output capture ([726346a](https://github.com/ZaxbyHub/opencode-swarm/commit/726346ab0b1cb7f5903e24523939d9088199820b))
+* **runtime:** contain bounded subprocess output failures ([a7f6bc2](https://github.com/ZaxbyHub/opencode-swarm/commit/a7f6bc21fa34311ccb90bc091ce7185ec024eca8))
+* **tools:** expose publication cancellation ([ef22de4](https://github.com/ZaxbyHub/opencode-swarm/commit/ef22de4f271a685f60a870768112313621afe927))
+* **worktree:** ownership-gate reclamation, project-internal base with migration, durable lane owners, confirm-token purge (issue [#2527](https://github.com/ZaxbyHub/opencode-swarm/issues/2527)) ([ca4ced9](https://github.com/ZaxbyHub/opencode-swarm/commit/ca4ced940bfb60ff6120a79c21f33f82bc602290))
+* **worktree:** resolve worktree ownership via dev+ino identity when path spellings diverge ([3082403](https://github.com/ZaxbyHub/opencode-swarm/commit/30824035449d3f925cba97645b0868ebfc64041b))
+
 ## [7.168.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.168.0...v7.168.1) (2026-09-07)
 
 
