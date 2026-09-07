@@ -3997,11 +3997,18 @@ async function initializeOpenCodeSwarm(
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		) as any,
 
-		// Handle session compaction. The wrapper advances the per-turn injection
-		// ledger generation (#2107 §4): compaction changes the message surface,
-		// so per-turn accounting/dedup state must not survive into the next
-		// request composition. compactionHook's input carries { sessionID }
-		// (src/hooks/compaction-customizer.ts).
+		// Handle session compaction. Two obligations live here, deliberately in
+		// one always-registered wrapper (issue #2533):
+		// 1. Advance the per-turn injection ledger generation (#2107 §4):
+		//    compaction changes the message surface, so per-turn
+		//    accounting/dedup state must not survive into the next request
+		//    composition. This must fire on EVERY host compaction — the host
+		//    still compacts when the plugin's customization is disabled.
+		// 2. Delegate to the compaction customizer, which enriches the summary
+		//    with bounded plan/context facts. createCompactionCustomizerHook
+		//    omits the handler when hooks.compaction is false, so the delegate
+		//    is optional and must never be called unguarded. compactionHook's
+		//    input carries { sessionID } (src/hooks/compaction-customizer.ts).
 		'experimental.session.compacting': (async (
 			input: unknown,
 			output: unknown,
@@ -4010,12 +4017,12 @@ async function initializeOpenCodeSwarm(
 			if (sessionID) {
 				advanceTurnGeneration(sessionID);
 			}
-			await (
-				compactionHook['experimental.session.compacting'] as (
-					input: unknown,
-					output: unknown,
-				) => Promise<void>
-			)(input, output);
+			const delegate = compactionHook['experimental.session.compacting'] as
+				| ((input: unknown, output: unknown) => Promise<void>)
+				| undefined;
+			if (typeof delegate === 'function') {
+				await delegate(input, output);
+			}
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		}) as any,
 
