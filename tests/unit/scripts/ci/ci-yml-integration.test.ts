@@ -137,6 +137,33 @@ describe('ci.yml integration — Task 1.2 wrapper script structural validation',
 	});
 });
 
+describe('ci.yml parser helpers — CRLF normalization', () => {
+	const yml = readFileSync(CI_YML_PATH, 'utf8').replace(/\r\n/g, '\n');
+	const crlfYml = yml.replace(/\n/g, '\r\n');
+
+	test('all YAML extractors produce the same slices for LF and CRLF input', () => {
+		expect(extractRunUnitTestsStep(crlfYml)).toBe(extractRunUnitTestsStep(yml));
+		expect(extractCollectAndPartitionStep(crlfYml)).toBe(
+			extractCollectAndPartitionStep(yml),
+		);
+		expect(extractCoverageMeasurementStep(crlfYml)).toBe(
+			extractCoverageMeasurementStep(yml),
+		);
+		expect(extractIntegrationTestsStep(crlfYml)).toBe(
+			extractIntegrationTestsStep(yml),
+		);
+		expect(extractUnitFlakeAnnotationsUploadStep(crlfYml)).toBe(
+			extractUnitFlakeAnnotationsUploadStep(yml),
+		);
+		expect(extractCoverageFlakeAnnotationsUploadStep(crlfYml)).toBe(
+			extractCoverageFlakeAnnotationsUploadStep(yml),
+		);
+		expect(
+			extractIntegrationFindCommand(extractIntegrationTestsStep(crlfYml)),
+		).toBe(extractIntegrationFindCommand(extractIntegrationTestsStep(yml)));
+	});
+});
+
 describe('ci.yml integration — integration quarantine extraction', () => {
 	const yml = readFileSync(CI_YML_PATH, 'utf8');
 	const step = extractIntegrationTestsStep(yml);

@@ -30,6 +30,9 @@ function extractReceipt(policy: string, identifier: string): string {
 describe('Stage-A policy and six-way CI agreement (issue #2552)', () => {
 	const workflow = readText(CI_YML_PATH);
 	const policy = readText(POLICY_PATH);
+	// Workflow assertions below protect live CI topology from drift. Policy
+	// assertions protect the committed decision record's internal consistency;
+	// they intentionally do not claim to re-prove the historical evidence.
 
 	test('unit keeps six-way matrix and runtime partition denominator', () => {
 		const unit = extractJob(workflow, 'unit');
@@ -177,5 +180,8 @@ describe('Stage-A policy and six-way CI agreement (issue #2552)', () => {
 		}
 
 		expect(policy).toMatch(/Stage-A post-land receipts[^\n]*pending/i);
+		expect(
+			policy.match(/^identifier=stage-a-post-land-\d+$/gm) ?? [],
+		).toHaveLength(0);
 	});
 });

@@ -16,6 +16,7 @@ const CI_PARSER_TEST_PATH = join(
 );
 const GITATTRIBUTES_PREFIX = '* text=auto eol=lf';
 const BOM_HEX = 'efbbbf';
+const CHECKOUT_TEST_TIMEOUT_MS = 120_000;
 
 let checkoutRoot = '';
 
@@ -30,7 +31,7 @@ function runGit(args: string[], cwd: string): string {
 		encoding: 'utf8',
 		maxBuffer: 4 * 1024 * 1024,
 		stdio: ['ignore', 'pipe', 'pipe'],
-		timeout: 30_000,
+		timeout: CHECKOUT_TEST_TIMEOUT_MS,
 	});
 }
 
@@ -79,10 +80,12 @@ beforeAll(() => {
 	);
 	runGit(['config', 'core.autocrlf', 'true'], clonePath);
 	runGit(['checkout', '--force', '--detach', 'HEAD'], clonePath);
-});
+}, CHECKOUT_TEST_TIMEOUT_MS);
 
 afterAll(() => {
 	if (!checkoutRoot) return;
+	// Defense-in-depth: keep the recursive cleanup constrained even if future
+	// setup changes mutate checkoutRoot after the validated temp directory is made.
 	const realTempRoot = realpathSync(tmpdir());
 	if (
 		dirname(checkoutRoot) !== realTempRoot ||
