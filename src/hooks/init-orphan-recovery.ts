@@ -47,8 +47,8 @@ import {
 	cleanupOrphanedBranches,
 	scanRegisteredWorktreeLiveness,
 } from '../worktree/merge';
-import { reclaimDeadLanes } from './delegation-gate/dead-lane-reclaim';
 import { removeOwnedWorktreeDir } from '../worktree/ownership';
+import { reclaimDeadLanes } from './delegation-gate/dead-lane-reclaim';
 import { scanWorktreeMergeFailuresForRecovery } from './delegation-gate/worktree-merge-status';
 import { scanBackgroundWorktreeOwnershipTagsForRecovery } from './delegation-gate/worktree-ownership-tag';
 import {

@@ -731,7 +731,8 @@ export async function handleResetSessionCommand(
 			}
 		}
 	} catch (err) {
-		results.push(`⚠️ Failed to reclaim worktree lanes: ${errorMessage(err)}`);	}
+		results.push(`⚠️ Failed to reclaim worktree lanes: ${errorMessage(err)}`);
+	}
 
 	try {
 		const branchResult = await _internals.cleanupOrphanedBranches(
