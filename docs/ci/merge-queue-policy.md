@@ -162,8 +162,9 @@ head and must not be counted as a passing required check. Pull-request and manua
 runs must remain non-cancelling.
 
 **Rollback.** If a cancelled merge-group candidate removes a live queue item or
-leaves a stale required status, restore unconditional false through a follow-up
-decision record with attributable receipts.
+leaves a stale required status, use a unique per-run concurrency group key
+through a follow-up decision record with attributable receipts. Do not restore
+unconditional cancellation settings without that scoped rollback decision.
 
 ## Host check-name gate and Stage A decision
 
@@ -313,11 +314,16 @@ preserved_checks=unit-passed; recursive integration discovery; cross-contaminati
 
 ### Stage-A post-land receipts
 
-The three qualifying full-matrix runs below were created after PR #2624 merged
-at `2026-09-07T06:07:23Z`. Each run completed successfully and its merge-queue
+Two qualifying full-matrix runs below were created after PR #2624 merged at
+`2026-09-07T06:07:23Z`. Each run completed successfully and its merge-queue
 timeline shows the initial add followed by an adjacent terminal merge/remove
 pair, with no intervening re-add. The receipts use `queue_wait_ms=unavailable`
-because no canonical run-level runner-wait aggregation exists.
+because no canonical run-level runner-wait aggregation exists. A third
+qualifying Stage-A receipt remains pending.
+
+Run `34121635625` is explicitly excluded from the qualifying receipt set: its
+release-please short-circuit skipped the CI matrix, so it is not a full-matrix
+receipt despite its successful terminal timeline.
 
 ```text
 identifier=stage-a-post-land-1
@@ -347,22 +353,6 @@ timeline_merged_at=2026-09-07T07:58:25Z
 timeline_removed_at=2026-09-07T07:58:25Z
 unit_shards_executed=6
 completed_at=2026-09-07T07:57:59Z
-preserved_checks=unit-passed; recursive integration discovery; cross-contamination gate
-terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
-```
-
-```text
-identifier=stage-a-post-land-3
-actions=https://github.com/ZaxbyHub/opencode-swarm/actions/runs/34121635625
-run_duration_ms=49000
-queue_wait_ms=unavailable
-eviction=none
-eviction_evidence=timeline:add→terminal-merge/remove-pair
-timeline_added_at=2026-09-07T12:23:33Z
-timeline_merged_at=2026-09-07T12:24:55Z
-timeline_removed_at=2026-09-07T12:24:55Z
-unit_shards_executed=6
-completed_at=2026-09-07T12:24:39Z
 preserved_checks=unit-passed; recursive integration discovery; cross-contamination gate
 terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
 ```

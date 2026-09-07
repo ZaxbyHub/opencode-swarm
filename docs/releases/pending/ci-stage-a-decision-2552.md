@@ -30,6 +30,8 @@ required `unit-passed` and coverage gates are unchanged.
 
 ## Caveats
 
-The three Stage-A post-land receipts are now recorded in the policy decision
-record. The account concurrency cap is unavailable, and the record does not
-treat that unknown as zero.
+Two qualifying Stage-A post-land full-matrix receipts are recorded in the
+policy decision record; a third remains pending. Run `34121635625` is excluded
+because its release-please short-circuit skipped the CI matrix. The account
+concurrency cap is unavailable, and the record does not treat that unknown as
+zero.
