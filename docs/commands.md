@@ -802,14 +802,6 @@ Run golden Swarm memory recall evaluation fixtures
 
 **Args:** `--json, --fixtures <directory>, --profiles <list>, --manifest <file>`
 
-Optional `--profiles lexical,hybrid,hybrid+rerank` compares the production
-recall stages with identical bounded candidate and token budgets. `--manifest
-<file>` accepts a packaged held-out corpus `manifest.json`; the command rejects
-other filenames because the loader resolves the selected corpus directory's
-`manifest.json`, then loads that corpus (rather than merely displaying the path)
-and verifies canonical containment after symlink resolution. Report manifests are rejected. The legacy provider-by-mode
-report remains the default when `--profiles` is omitted.
-
 #### `/swarm memory audit-verify`
 
 Verify the memory audit-log hash chain (tamper detection)

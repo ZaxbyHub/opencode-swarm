@@ -238,9 +238,17 @@ export async function evaluateMemoryRecallFixtures(
 		? await loadHeldoutRecallEvaluationScenarios(options.heldoutCorpusDirectory)
 		: undefined;
 	const fixtures = heldout
-		? heldout.scenarios.map((scenario) =>
-				materializeHeldoutScenario(scenario, heldout.scenarios),
-			)
+		? (() => {
+				// The candidate corpus is identical for every held-out scenario. Build
+				// these immutable fixture records once instead of remapping the full
+				// corpus for every scenario (the corpus itself remains bounded).
+				const candidateRecords = materializeHeldoutCandidateRecords(
+					heldout.scenarios,
+				);
+				return heldout.scenarios.map((scenario) =>
+					materializeHeldoutScenario(scenario, candidateRecords),
+				);
+			})()
 		: await loadRecallEvaluationFixtures(fixtureDirectory);
 	const runs: RecallEvaluationRun[] = [];
 
@@ -376,7 +384,7 @@ export async function loadRecallEvaluationFixtures(
 
 function materializeHeldoutScenario(
 	scenario: LoadedHeldoutRecallScenario,
-	candidateCorpus: readonly LoadedHeldoutRecallScenario[],
+	candidateRecords: readonly FixtureRecord[],
 ): RecallEvaluationFixture {
 	const scope: MemoryScopeRef = {
 		type: 'repository',
@@ -395,18 +403,7 @@ function materializeHeldoutScenario(
 		expectedLabels: [label],
 		// Every paraphrase ranks against the same bounded corpus. This prevents a
 		// one-record scope from turning every profile into a vacuous perfect hit.
-		records: candidateCorpus.map((candidate) => ({
-			label: `heldout:${candidate.id}`,
-			scope,
-			kind: 'code_pattern' as const,
-			// The direct source is what production recall indexes. Expected graph
-			// evidence remains report metadata, never injected into scoring text.
-			text: candidate.source_text,
-			tags: [candidate.language, candidate.analyzer_id ?? 'direct-source'],
-			confidence: 1,
-			source: { type: 'file' as const, filePath: candidate.source_path },
-			metadata: { sourceHash: candidate.source_hash },
-		})),
+		records: [...candidateRecords],
 		sourceHash: scenario.source_hash,
 		scenario: {
 			id: scenario.id,
@@ -425,6 +422,27 @@ function materializeHeldoutScenario(
 			spurious_edges: scenario.spurious_edges,
 		},
 	};
+}
+
+function materializeHeldoutCandidateRecords(
+	candidateCorpus: readonly LoadedHeldoutRecallScenario[],
+): FixtureRecord[] {
+	const scope: MemoryScopeRef = {
+		type: 'repository',
+		repoId: 'heldout-retrieval-corpus',
+	};
+	return candidateCorpus.map((candidate) => ({
+		label: `heldout:${candidate.id}`,
+		scope,
+		kind: 'code_pattern' as const,
+		// The direct source is what production recall indexes. Expected graph
+		// evidence remains report metadata, never injected into scoring text.
+		text: candidate.source_text,
+		tags: [candidate.language, candidate.analyzer_id ?? 'direct-source'],
+		confidence: 1,
+		source: { type: 'file' as const, filePath: candidate.source_path },
+		metadata: { sourceHash: candidate.source_hash },
+	}));
 }
 
 function createEvaluationProvider(
@@ -674,7 +692,7 @@ function buildRun(args: {
 		resource_cap: resourceCaps,
 		resource_usage: normalizeResourceUsage(trace?.resourceUsage),
 		latency_ms: Number.isFinite(trace?.latencyMs)
-			? trace!.latencyMs
+			? (trace?.latencyMs ?? latencyMs)
 			: latencyMs,
 		cost_provenance: 'offline-deterministic-unavailable',
 		cost: { provenance: 'offline-deterministic-unavailable', amount: null },

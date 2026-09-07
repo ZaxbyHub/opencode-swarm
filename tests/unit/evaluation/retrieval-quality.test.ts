@@ -2,12 +2,17 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { evaluateHeldoutGraphRetrievalQuality } from '../../../src/evaluation/retrieval-quality';
+import {
+	_internals,
+	evaluateHeldoutGraphRetrievalQuality,
+} from '../../../src/evaluation/retrieval-quality';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const roots: string[] = [];
+const originalBuildWorkspaceGraphAsync = _internals.buildWorkspaceGraphAsync;
 
 afterEach(async () => {
+	_internals.buildWorkspaceGraphAsync = originalBuildWorkspaceGraphAsync;
 	for (const root of roots.splice(0)) {
 		await fs.rm(root, { recursive: true, force: true });
 	}
@@ -122,5 +127,17 @@ describe('evaluateHeldoutGraphRetrievalQuality', () => {
 		});
 
 		expect(changed.corpus.hash).not.toBe(baseline.corpus.hash);
+	});
+
+	test('propagates graph construction failures without dereferencing a null graph', async () => {
+		_internals.buildWorkspaceGraphAsync = async () => {
+			throw new Error('synthetic graph construction failure');
+		};
+
+		await expect(
+			evaluateHeldoutGraphRetrievalQuality({
+				corpusDirectory: await makeCorpus(),
+			}),
+		).rejects.toThrow('synthetic graph construction failure');
 	});
 });

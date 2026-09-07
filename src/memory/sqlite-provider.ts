@@ -319,6 +319,9 @@ function capQualityRecallItemsByTokenBudget(
 	let tokenEstimate = 0;
 	for (const item of items) {
 		const itemTokens = estimateTokens(item.record.text);
+		// This is an order-preserving greedy packer. Skip an oversized candidate
+		// so a later, smaller ranked candidate can still fit in the budget; the
+		// evaluator reports the resulting returned-token estimate explicitly.
 		if (tokenEstimate + itemTokens > boundedTokenBudget) continue;
 		selected.push(item);
 		tokenEstimate += itemTokens;
@@ -4185,4 +4188,5 @@ export const _test_exports = {
 	extractFtsTerms,
 	FTS_SCHEMA_MIGRATION_NAME,
 	FTS_SCHEMA_MIGRATION_VERSION,
+	capQualityRecallItemsByTokenBudget,
 };

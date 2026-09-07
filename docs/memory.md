@@ -194,6 +194,8 @@ For retrieval-quality comparisons, pass `--profiles lexical,hybrid,hybrid+rerank
 
 `--manifest <file>` is an additive, containment-checked option for a held-out corpus named `manifest.json` (including the packaged `tests/fixtures/memory-recall-heldout/manifest.json` or an equivalent corpus under the project root). Other filenames are rejected because the loader resolves the selected corpus directory's `manifest.json`. It loads and evaluates that corpus; report manifests are not accepted as inert display inputs. The held-out corpus is content-addressed and records exact symbols, edges, known misses, spurious edges, paraphrases, analyzer identities, profile thresholds, and Linux/macOS/Windows gate IDs. Known limitations are bounded offline evaluation, deterministic injected dense adapters in the regression gate, and no model downloads or network access; missing optional components degrade honestly to lexical retrieval.
 
+The CLI rejects held-out manifest files larger than 1 MiB before parsing them; each source file and the aggregate source set have separate byte caps in the loader.
+
 Rollback to JSONL provider:
 
 1. Stop using memory tools for the project.

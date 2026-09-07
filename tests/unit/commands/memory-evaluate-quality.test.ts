@@ -81,4 +81,15 @@ describe('/swarm memory evaluate retrieval-quality wiring', () => {
 		]);
 		expect(output).toContain('escaped the allowed roots');
 	});
+
+	test('manifest rejects oversized files before parsing JSON', async () => {
+		const manifest = path.join(projectDir, 'manifest.json');
+		await fs.writeFile(manifest, `{"padding":"${'x'.repeat(1024 * 1024)}"}`);
+
+		const output = await handleMemoryEvaluateCommand(projectDir, [
+			'--manifest',
+			manifest,
+		]);
+		expect(output).toContain('exceeds the 1048576-byte limit');
+	});
 });

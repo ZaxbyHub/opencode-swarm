@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPluginConfig } from '../config/loader';
@@ -23,6 +23,7 @@ import {
 } from '../memory';
 import type { MemoryConfig, QLearningConfig } from '../memory/config';
 import { readConsolidationLog } from '../memory/consolidation-log';
+import { MAX_HELDOUT_MANIFEST_BYTES } from '../memory/heldout-evaluation-corpus';
 import type {
 	MemoryCompactResult,
 	MemoryProposalStore,
@@ -776,6 +777,11 @@ function parseEvaluateArgs(
 			}
 			try {
 				manifestPath = realpathSync(resolvedManifest);
+				if (statSync(manifestPath).size > MAX_HELDOUT_MANIFEST_BYTES) {
+					return {
+						error: `--manifest <file> exceeds the ${MAX_HELDOUT_MANIFEST_BYTES}-byte limit`,
+					};
+				}
 				const realRoots = [projectRoot, bundledRoot]
 					.map((root) => {
 						try {

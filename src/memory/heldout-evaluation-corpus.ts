@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 const MAX_CORPUS_CASES = 256;
-const MAX_MANIFEST_BYTES = 1024 * 1024;
+export const MAX_HELDOUT_MANIFEST_BYTES = 1024 * 1024;
 const MAX_SOURCE_BYTES = 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES = 4 * 1024 * 1024;
 
@@ -190,7 +190,7 @@ export async function loadHeldoutRecallEvaluationScenarios(
 	const stat = await fs.stat(manifestPath);
 	if (!stat.isFile())
 		throw new Error('held-out corpus manifest must be a regular file');
-	if (stat.size > MAX_MANIFEST_BYTES)
+	if (stat.size > MAX_HELDOUT_MANIFEST_BYTES)
 		throw new Error('held-out corpus manifest exceeds byte limit');
 	const manifest = JSON.parse(
 		await fs.readFile(manifestPath, 'utf8'),

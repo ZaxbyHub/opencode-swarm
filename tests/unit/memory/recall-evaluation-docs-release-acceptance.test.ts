@@ -38,6 +38,18 @@ describe('issue #2490 AC13 — evaluator documentation and release evidence', ()
 				`missing evaluator documentation term: ${term}`,
 			).toContain(term);
 		}
+		for (const contractAnchor of [
+			'--profiles lexical,hybrid,hybrid+rerank',
+			'returned_token_estimate',
+			'linux/macos/windows gate ids',
+			'no model downloads or network access',
+			'bun run check:retrieval-quality',
+		]) {
+			expect(
+				documentation,
+				`missing evaluator contract anchor: ${contractAnchor}`,
+			).toContain(contractAnchor);
+		}
 	});
 
 	test('has one unique pending release fragment naming both issues', () => {

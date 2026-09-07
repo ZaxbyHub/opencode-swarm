@@ -21,6 +21,10 @@ import {
 import { saveGraph } from '../tools/repo-graph/storage';
 import type { RepoGraph } from '../tools/repo-graph/types';
 
+export const _internals = {
+	buildWorkspaceGraphAsync,
+};
+
 const DEFAULT_RESOURCE_CAPS = {
 	max_files: 64,
 	walk_budget_ms: 1_000,
@@ -160,13 +164,12 @@ export async function evaluateHeldoutGraphRetrievalQuality(
 	const tempRoot = await fs.realpath(
 		await fs.mkdtemp(path.join(os.tmpdir(), 'swarm-retrieval-quality-')),
 	);
-	let graph: RepoGraph | null = null;
 	let indexedAvailable = false;
 	let indexedWorkspace: string | null = null;
 	let indexedReason: string | undefined;
 	try {
 		await materializeDisposableWorkspace(tempRoot, loaded.scenarios);
-		graph = await buildWorkspaceGraphAsync(tempRoot, {
+		const graph = await _internals.buildWorkspaceGraphAsync(tempRoot, {
 			maxFiles: caps.max_files,
 			walkBudgetMs: caps.walk_budget_ms,
 		});
@@ -188,13 +191,7 @@ export async function evaluateHeldoutGraphRetrievalQuality(
 
 		const cases = await Promise.all(
 			loaded.scenarios.map((scenario) =>
-				measureScenario(
-					scenario,
-					graph!,
-					indexedWorkspace,
-					indexedReason,
-					caps,
-				),
+				measureScenario(scenario, graph, indexedWorkspace, indexedReason, caps),
 			),
 		);
 		const degradationReasons = unique(
