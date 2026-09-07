@@ -290,8 +290,10 @@ export interface BunCompatSpawnOptions {
 	timeout?: number;
 	/**
 	 * Maximum bytes retained for each buffered stdout/stderr stream. Invalid
-	 * values fall back to `DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES` so `bunSpawn`
-	 * keeps its no-throw compatibility contract.
+	 * values fall back to `DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES` so asynchronous
+	 * `bunSpawn` keeps its no-throw compatibility contract. Synchronous
+	 * `bunSpawnSync` delegates to the host synchronous API and does not apply
+	 * this asynchronous stream-capture option.
 	 */
 	maxBuffer?: number;
 	/** Preserve the caller's exact Windows argv quoting (required for cmd.exe /c). */

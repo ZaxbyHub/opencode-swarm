@@ -156,6 +156,34 @@ describe('native bunSpawn buffered output coherence (#2530)', () => {
 		});
 	});
 
+	test('shares the overflow error when stderr alone exceeds the configured limit (FB-002)', async () => {
+		const limit = 64 * 1024;
+		const overflowingBytes = limit + 1;
+		const proc = spawnNativeChild(
+			`process.stdout.write('below-limit'); process.stderr.write('E'.repeat(${overflowingBytes}))`,
+			limit,
+		);
+		const [stdout, stderr] = await Promise.allSettled([
+			proc.stdout.text(),
+			proc.stderr.text(),
+		]);
+		await proc.exited;
+
+		// Before this regression was added, only stdout-triggered overflow was pinned.
+		expect(stdout.status).toBe('rejected');
+		expect(stderr.status).toBe('rejected');
+		if (stdout.status !== 'rejected' || stderr.status !== 'rejected') {
+			throw new Error('both buffered pipes must reject after stderr overflow');
+		}
+		expect(stderr.reason).toBe(stdout.reason);
+		expect(stderr.reason).toBeInstanceOf(BunCompatOutputLimitError);
+		expect(stderr.reason).toMatchObject({
+			limit,
+			captured: limit,
+			total: overflowingBytes,
+		});
+	});
+
 	test('plain Node preserves synchronous getReader ownership and exact output', () => {
 		const expected = 'node reader ownership';
 		const childScript = `process.stdout.write(${JSON.stringify(expected)})`;
@@ -233,6 +261,51 @@ describe('native bunSpawn buffered output coherence (#2530)', () => {
 				captured: limit,
 				total: overflowingBytes,
 			},
+		});
+	});
+
+	test('plain Node shares the overflow error when stderr alone exceeds the configured limit (FB-002)', () => {
+		const limit = 32 * 1024;
+		const overflowingBytes = limit + 1;
+		const childScript = `process.stdout.write('below-limit'); process.stderr.write('E'.repeat(${overflowingBytes}))`;
+		const result = runNodeProbe(
+			(moduleUrl) => `
+				const { bunSpawn, BunCompatOutputLimitError } = await import(${JSON.stringify(moduleUrl)});
+				const proc = bunSpawn([process.execPath, '--eval', ${JSON.stringify(childScript)}], {
+					cwd: ${JSON.stringify(TEST_CWD)}, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
+					timeout: ${TIMEOUT_MS}, maxBuffer: ${limit},
+				});
+				const reads = await Promise.allSettled([proc.stdout.text(), proc.stderr.text()]);
+				const describe = (read) => read.status === 'rejected'
+					? { name: read.reason?.name, limit: read.reason?.limit, captured: read.reason?.captured,
+						total: read.reason?.total, instanceOf: read.reason instanceof BunCompatOutputLimitError }
+					: { status: 'fulfilled', value: read.value };
+				console.log(JSON.stringify({ exitCode: await proc.exited,
+					sameErrorIdentity: reads[0].status === 'rejected' && reads[1].status === 'rejected'
+						&& reads[0].reason === reads[1].reason,
+					reads: reads.map(describe) }));
+			`,
+		);
+		expect(result.status).toBe(0);
+		expect(JSON.parse(result.stdout.trim())).toEqual({
+			exitCode: expect.any(Number),
+			sameErrorIdentity: true,
+			reads: [
+				{
+					name: 'BunCompatOutputLimitError',
+					limit,
+					captured: limit,
+					total: overflowingBytes,
+					instanceOf: true,
+				},
+				{
+					name: 'BunCompatOutputLimitError',
+					limit,
+					captured: limit,
+					total: overflowingBytes,
+					instanceOf: true,
+				},
+			],
 		});
 	});
 

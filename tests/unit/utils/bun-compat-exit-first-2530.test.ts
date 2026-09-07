@@ -239,23 +239,22 @@ async function nativeTimeoutProbe() {
 	return {
 		exitCode,
 		signalCode: proc.signalCode ?? null,
-		stdoutLength: stdout.length,
-		stderrLength: stderr.length,
+		stdout,
+		stderr,
+		terminationObserved: exitCode !== 0 || proc.signalCode !== null,
 	};
 }
-
 function assertTimeoutReceipt(receipt: unknown) {
 	const result = receipt as {
-		exitCode: number;
-		signalCode: string | null;
-		stdoutLength: number;
-		stderrLength: number;
+		stdout: string;
+		stderr: string;
+		terminationObserved: boolean;
 	};
-	expect(result.stdoutLength).toBeGreaterThan(0);
-	expect(result.stderrLength).toBeGreaterThan(0);
-	expect(result.exitCode !== 0 || result.signalCode !== null).toBe(true);
+	expect(result.stdout).toBe('partial-out');
+	expect(result.stderr).toBe('partial-err');
+	// A timeout must terminate the interval-owning child, not merely return partial output.
+	expect(result.terminationObserved).toBe(true);
 }
-
 function runPublicCleanProbe() {
 	const repo = realpathSync(
 		mkdtempSync(path.join(realpathSync(os.tmpdir()), 'is-clean-2530-')),
@@ -480,7 +479,8 @@ describe('bunSpawn Node fallback exit-first output consumption (#2530)', () => {
 			]);
 			const [stdout, stderr] = await Promise.all([read(proc.stdout), read(proc.stderr)]);
 			console.log(JSON.stringify({ exitCode, signalCode: proc.signalCode ?? null,
-				stdoutLength: stdout.length, stderrLength: stderr.length }));
+				stdout, stderr,
+				terminationObserved: exitCode !== 0 || proc.signalCode !== null }));
 		`,
 		);
 		expect(result.status).toBe(0);
