@@ -1439,10 +1439,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		];
 
 		try {
-			// Issues #2236 F6b / #2259 / #2475: bake every PLUGIN-OWNED
+			// Issues #2236 F6b / #2259 / #2475 / #2590: bake every PLUGIN-OWNED
 			// executor's declared env hardening into the wrapped command via
 			// wrapCommand's 4th parameter:
-			//   - macOS sandbox-exec emits SBPL (setenv)/(unsetenv).
+			//   - macOS sandbox-exec applies the overrides inside the wrapped
+			//     bash command (unset/export before the user command) — SBPL
+			//     cannot mutate the sandboxed process's environment, and its
+			//     non-existent setenv/unsetenv ops made every profile
+			//     unparseable until #2590 removed that emission.
 			//   - Windows native-runner policies carry strings in env_overrides
 			//     and nulls in env_unsets (removed from the allowlist); the
 			//     runner's managed PATH/TEMP/TMP rewrites keep ordinary commands

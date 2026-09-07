@@ -74,20 +74,24 @@ function resolveProbeTargetBinary(): string {
  *
  * F6a item 2 (issue #2236): this deliberately shares the same primitives and
  * ordering as buildSandboxProfile's production profile — a blanket
- * `(deny file-write*)` followed by a scoped `(allow file-write* (subpath …))`,
- * plus a `(setenv …)`/`(unsetenv …)` pair (F6b) — so that probe success
- * implies the production profile's primitives actually parse under this
- * host's sandbox-exec. A trivial `(allow default)`-only probe would pass
- * even when the production profile is unparseable, which is the exact
- * probe-passes/production-fails failure mode this guards against.
+ * `(deny file-write*)` followed by a scoped `(allow file-write* (subpath …))` —
+ * so that probe success implies the production profile's primitives actually
+ * parse under this host's sandbox-exec. A trivial `(allow default)`-only probe
+ * would pass even when the production profile is unparseable, which is the
+ * exact probe-passes/production-fails failure mode this guards against.
+ *
+ * NEVER add env directives here or to buildSandboxProfile: `setenv`/`unsetenv`
+ * are not SBPL operations — the profile parser treats them as unbound
+ * variables and rejects the whole profile (exit 65), which silently disabled
+ * this executor on every macOS host (issue #2590). SBPL cannot mutate the
+ * sandboxed process's environment at all; env overrides are applied inside the
+ * wrapped command instead (see buildEnvOverridePrefix / wrapCommand).
  */
 function buildProbeProfile(tempDir: string): string {
 	return `(version 1)
 (allow default)
 (deny file-write*)
-(allow file-write* (subpath "${sbplEscapePath(tempDir)}"))
-(setenv SWARM_SANDBOX_PROBE "1")
-(unsetenv SWARM_SANDBOX_PROBE)`;
+(allow file-write* (subpath "${sbplEscapePath(tempDir)}"))`;
 }
 
 /**
@@ -196,6 +200,7 @@ export const _internals: {
 	resetProbeMemo: typeof resetProbeMemo;
 	buildSandboxProfile: typeof buildSandboxProfile;
 	buildProbeProfile: typeof buildProbeProfile;
+	buildEnvOverridePrefix: typeof buildEnvOverridePrefix;
 	resolveSandboxExecBinary: typeof resolveSandboxExecBinary;
 	resolveProbeTargetBinary: typeof resolveProbeTargetBinary;
 	exists: typeof existsSync;
@@ -206,6 +211,7 @@ export const _internals: {
 	resetProbeMemo,
 	buildSandboxProfile,
 	buildProbeProfile,
+	buildEnvOverridePrefix,
 	resolveSandboxExecBinary,
 	resolveProbeTargetBinary,
 	exists: existsSync,
@@ -218,6 +224,52 @@ export const _internals: {
  */
 function shellEscape(s: string): string {
 	return s.replace(/'/g, "'\\''");
+}
+
+/**
+ * Build the shell prefix that applies env overrides inside the wrapped
+ * command's `bash -c` payload (issue #2590).
+ *
+ * SBPL cannot mutate the sandboxed process's environment, so the hardening
+ * declared by getEnvOverrides() (DYLD_* unsets, PATH pin) and any per-call
+ * overrides are applied by the inner shell itself, before the user command:
+ * null-valued keys are unset via a single `unset` builtin, string-valued keys
+ * are exported with the value single-quote-escaped via shellEscape. Keys
+ * failing isValidEnvKey are silently dropped — the same contract the (broken)
+ * SBPL emitter applied, and required for shell safety too: an invalid key is
+ * neither a safe shell word nor a safe SBPL token.
+ *
+ * Returns '' when there is nothing to apply, so the no-override payload is
+ * byte-identical to the pre-#2590 wrapped command. The trailing '; ' lets the
+ * prefix compose with arbitrary user payloads.
+ */
+function buildEnvOverridePrefix(
+	envOverrides?: Record<string, string | null>,
+): string {
+	if (!envOverrides) {
+		return '';
+	}
+	const unsetKeys: string[] = [];
+	const exportLines: string[] = [];
+	for (const [key, value] of Object.entries(envOverrides)) {
+		if (!isValidEnvKey(key)) {
+			continue;
+		}
+		if (value === null) {
+			unsetKeys.push(key);
+		} else {
+			exportLines.push(`export ${key}='${shellEscape(value)}'`);
+		}
+	}
+	const parts: string[] = [];
+	if (unsetKeys.length > 0) {
+		parts.push(`unset ${unsetKeys.join(' ')}`);
+	}
+	parts.push(...exportLines);
+	if (parts.length === 0) {
+		return '';
+	}
+	return `${parts.join('; ')}; `;
 }
 
 /**
@@ -246,13 +298,16 @@ function sbplEscapePath(path: string): string {
 }
 
 /**
- * Build a sandbox-exec profile string for the given scope paths, temp dir, and optional env overrides.
+ * Build a sandbox-exec profile string for the given scope paths and temp dir.
+ *
+ * NOTE: there are deliberately NO environment directives in the profile.
+ * `setenv`/`unsetenv` are not SBPL operations — sandbox-exec rejects them as
+ * unbound variables (exit 65), which silently disabled this executor on every
+ * macOS host (issue #2590). SBPL cannot mutate the sandboxed process's
+ * environment at all; env overrides are applied by the inner shell instead
+ * (see buildEnvOverridePrefix / wrapCommand).
  */
-function buildSandboxProfile(
-	scopePaths: string[],
-	tempDir: string,
-	envOverrides?: Record<string, string | null>,
-): string {
+function buildSandboxProfile(scopePaths: string[], tempDir: string): string {
 	// Collect unique paths to allow read-write
 	const rwPaths = [...scopePaths];
 	if (tempDir) {
@@ -264,28 +319,6 @@ function buildSandboxProfile(
 	const rwAllowLines = rwPaths
 		.map((p) => `(allow file-write* (subpath "${sbplEscapePath(p)}"))`)
 		.join('\n');
-
-	// Build SBPL env override primitives.
-	// (setenv KEY "VALUE") sets a var; (unsetenv KEY) removes it.
-	// Keys are validated to prevent SBPL syntax injection (parentheses, etc.).
-	// Values are embedded inside a double-quoted SBPL string, so escape double quotes.
-	const envLines: string[] = [];
-	if (envOverrides) {
-		for (const [key, value] of Object.entries(envOverrides)) {
-			// Reject invalid env var names silently — invalid keys cannot be safely
-			// interpolated into SBPL syntax.
-			if (!isValidEnvKey(key)) {
-				continue;
-			}
-			if (value === null) {
-				envLines.push(`(unsetenv ${key})`);
-			} else {
-				// Escape double quotes and backslashes for SBPL double-quoted string
-				const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-				envLines.push(`(setenv ${key} "${escaped}")`);
-			}
-		}
-	}
 
 	// Core profile: allow non-file ops (network, IPC, process creation) via
 	// (allow default), allow system read-only paths, then confine writes to the
@@ -309,8 +342,7 @@ function buildSandboxProfile(
 (allow file-read* (subpath "/lib"))
 (allow file-read* (subpath "/lib64"))
 (deny file-write*)
-${rwAllowLines}
-${envLines.join('\n')}`;
+${rwAllowLines}`;
 
 	return profile;
 }
@@ -386,6 +418,8 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 	 * @param scopePaths - Additional scope paths to bind (merged with constructor scope)
 	 * @param tempDir   - Optional temp directory override
 	 * @param envOverrides - Optional per-call env overrides: string sets the var, null unsets it.
+	 *                      Applied by the inner shell BEFORE the user command runs — SBPL
+	 *                      cannot mutate the sandboxed process's environment (issue #2590).
 	 *                      When omitted, no per-call env override is applied.
 	 * @returns A sandbox-exec wrapped command string ready for shell execution,
 	 *          or the raw command string when the sandbox is unavailable (passthrough mode)
@@ -414,7 +448,7 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 		const temp = tempDir ?? this._tempDir ?? os.tmpdir();
 		const allScopes = [...this._scopePaths, ...scopePaths];
 
-		const profile = buildSandboxProfile(allScopes, temp, envOverrides);
+		const profile = buildSandboxProfile(allScopes, temp);
 
 		// Write profile to a dedicated temp directory (mkdtempSync ensures a unique dir per call)
 		let profilePath: string;
@@ -441,7 +475,12 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 		// Note: profile files accumulate in os.tmpdir() over time. This is
 		// acceptable — they are small text files with allowlist rules, no secrets.
 		const binary = _internals.resolveSandboxExecBinary();
-		const escapedCommand = shellEscape(command);
+		// Env overrides run FIRST, inside the inner shell, before the user
+		// command (issue #2590): the prefix ends in '; ' so it composes with
+		// arbitrary payloads, and the whole payload is single-quote-escaped
+		// below for the outer `bash -c '…'` context.
+		const envPrefix = buildEnvOverridePrefix(envOverrides);
+		const escapedCommand = shellEscape(`${envPrefix}${command}`);
 		const escapedProfilePath = shellEscape(profilePath);
 		return `${binary} -f '${escapedProfilePath}' bash -c '${escapedCommand}'`;
 	}
@@ -449,9 +488,12 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 	/**
 	 * Return environment variable overrides required for the macOS sandbox.
 	 *
-	 * DYLD_INSERT_LIBRARIES, DYLD_LIBRARY_PATH, DYLD_FRAMEWORK_PATH, and
-	 * DYLD_ROOT_PATH can be used to bypass sandbox restrictions by injecting
-	 * dynamic libraries. Unsetting them improves sandbox enforcement (defense in depth).
+	 * DYLD_INSERT_LIBRARIES, DYLD_LIBRARY_PATH, DYLD_FRAMEWORK_PATH,
+	 * DYLD_ROOT_PATH, and DYLD_FORCE_FLAT_NAMESPACE can be used to bypass
+	 * sandbox restrictions by injecting or redirecting dynamic-library
+	 * loading. Unsetting them improves sandbox enforcement (defense in
+	 * depth); DYLD_FORCE_FLAT_NAMESPACE matches the Windows executors'
+	 * scrub lists (review PRR-006, PR #2630).
 	 */
 	getEnvOverrides(): Record<string, string | null> {
 		return {
@@ -459,6 +501,7 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 			DYLD_LIBRARY_PATH: null,
 			DYLD_FRAMEWORK_PATH: null,
 			DYLD_ROOT_PATH: null,
+			DYLD_FORCE_FLAT_NAMESPACE: null,
 			PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
 		};
 	}
