@@ -150,6 +150,10 @@ describe('Command registration parity — classification baselines', () => {
 			// `approve-plan-critic` is a restricted human-only escape hatch for
 			// the ratchet-tighter critic_pre_plan execution gate (issue #2012).
 			humanOnly: new Set([
+				// #2486: governed training vault — consent/withdraw/export are human-only.
+				'dataset consent',
+				'dataset export',
+				'dataset withdraw',
 				'full-auto',
 				'memory-import',
 				'memory-migrate',
@@ -170,6 +174,9 @@ describe('Command registration parity — classification baselines', () => {
 			]),
 			toolCommands: new Set([
 				'full-auto',
+				'dataset consent',
+				'dataset export',
+				'dataset withdraw',
 				'pr subscribe',
 				'pr unsubscribe',
 				'pr status',

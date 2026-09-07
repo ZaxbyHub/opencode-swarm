@@ -316,7 +316,7 @@ per row.
 | `status-artifacts` | .swarm/automation-status.json + .swarm/evidence-summary.json | operational | single rewritten snapshot (filename ≤255 chars :66) (global) | indexed: single small JSON | untouched | not a defect — this-gate |
 | `locks-dir` | .swarm/locks/{sha256|.base64}.lock + .meta sidecars | operational | LOCK_TIMEOUT_MS 5 min stale expiry; cleanupExpiredLocks sweep (:250-297) (global) | directory-scan: live locks only (expired filtered) | untouched — deliberately excluded from close (`src/commands/close/constants.ts:253-268` omits `locks`) | not a defect — #2035 (merged) |
 
-### Category 3 — Evidence trajectories, PRM, insight, observability sink, postmortems, consensus, epic/turbo (13 rows)
+### Category 3 — Evidence trajectories, PRM, insight, observability sink, postmortems, consensus, epic/turbo, #2486 training vault (15 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -333,6 +333,8 @@ per row.
 | `evidence-gate-artifacts` | .swarm/evidence/{phase}/{drift-verifier,hallucination-guard,mutation-… | governed-content | per-phase overwrite or bounded per-run artifacts; whole tree archived+cleaned at close (session-scoped) | indexed: single small JSON per gate | cleaned — evidence/ dir lifecycle | not a defect — this-gate |
 | `drift-reports` | swarm.db table phase_report kind=curator_drift (#2480; legacy .swarm/drift-report-phase-{N}.json cold-archived .json.imported) | governed-content | one row per phase, PK(kind,phase) last-write-wins (session-scoped) | indexed: ordered per-phase rows via PK | rows archived+cleaned with swarm.db (`project-db` row); legacy files still archived+cleaned by the close dynamic regex | not a defect — this-gate |
 | `doc-drift-signals` | swarm.db table phase_report kind=design_doc_drift (#2480; legacy .swarm/doc-drift-phase-{N}.json cold-archived .json.imported) | operational | one row per phase, PK(kind,phase); legacy .imported cold archives swept at 30 d (global) | indexed: per-phase rows via PK | untouched — accumulates in swarm.db | not a defect — #2483 |
+| `training-vault` | .swarm/training/v1/ consent + vault + tombstones (governed content) | content | consent-clamped: 1 GiB / 250k records / 30 days ceilings; stop-not-evict; disk floor max(2 GiB, 10%) (global) | indexed: consent-gated; corrupt items quarantined | withdrawal empties records, tombstone durable, exports revoked | **implemented #2486** — #2486 |
+| `training-exports` | .swarm/training/v1/exports/<id>/ deterministic bundles + manifests | content | max 20 exports / 1 GiB total / 30 days; identical re-export idempotent (global) | indexed: deterministic byte-identical bundles | REVOKED.json revocation manifests on withdrawal | **implemented #2486** — #2486 |
 
 ### Category 4 — Guardrail audit, attestations, scope evidence (9 rows)
 
@@ -432,14 +434,13 @@ per row.
 | `outside-swarm-tool-outputs` | .mutation_patch_{id}.diff (workdir) + extract_code_blocks outputs (us… | governed-content | batch-scoped or user-directed outputs outside swarm state; apply-patch temps always clean… (per-trigger) | write-only: n/a | outside .swarm — out of swarm retention scope by defin… | not a defect — this-gate |
 | `residue-quarantine` | .swarm/quarantine/{batch}/ (+ per-batch manifest with sha256/original… | governed-content | bounded by verified stale-residue discovery (old, unlocked, untracked, exact-grammar matc… (per-trigger) | indexed: manifest-driven reads | untouched — recoverable quarantine is preserved across… | retain by design — #2035 (merged) |
 
-### Category 9 — Planned streams (PRs 19-23) (5 rows)
+### Category 9 — Planned streams (PRs 19-23) (4 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
 | `planned-observability-sink` | swarm.db table observability_event (#2482 — the planned .swarm/observability/v1/ segment surface was superseded by the merged SQLite sink, owned by `observability-events-sqlite`) | operational | superseded by #2482: MAX_OBSERVABILITY_EVENT_ROWS 50000 global DELETE-oldest + 16 KiB per-payload cap (global) | indexed: deterministic SELECTs with report LIMIT 5000 | superseded by #2482: rows live in swarm.db (project-db row lifecycle) | not a defect — superseded by #2482 |
 | `planned-rebuildable-index` | swarm.db table observability_event idx_obs_event_* indexes (#2482 — the planned separate derived index was superseded by in-table indexes + /swarm report, owned by `observability-events-sqlite`) | derived-rebuildable | superseded by #2482: indexed columns on a 50000-row-retention table (global) | indexed: indexed-column lookups with report LIMIT 5000 | superseded by #2482: never authoritative (project-db row lifecycle) | not a defect — superseded by #2482 |
 | `otlp-export-spool` | .swarm/otlp-export/ (spool.jsonl + state.json; opt-in, absent unless enabled) | operational | spoolMaxBytes (default 1 MiB) drop-oldest + spoolMaxAgeMs (default 24h) age sweep with terminal drop reasons; MAX_SPOOL_LINES_PER_FLUSH 2048; MAX_FLUSH_ITERATIONS 100 (global) | line-bounded: flush reads at most 2048 lines + health stat, sync | untouched — opt-in export state survives close | retain by design — #2485 |
-| `planned-training-vault` | planned consented training vault + derivatives + dataset exports | governed-content | planned: quotas/expiry/withdrawal; content OFF by default, human-only consent (#2486 Trus… (global) | indexed: planned authorized reads only | planned: withdrawal removes lineage-tracked content | **fix in #2486** — #2486 |
 | `planned-legacy-retirement` | legacy stream retirement map (telemetry.jsonl, knowledge-application,… | derived-rebuildable | planned: controlled dual-write/read shadowing with kill switches (global) | indexed: planned parity comparisons | planned: archived-session compatibility | **fix in #2487** — #2487 |
 
 ---

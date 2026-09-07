@@ -30,6 +30,9 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm history` — show completed phases summary
 - `/swarm config` — show current resolved configuration
 - `/swarm export` — export plan and context as JSON
+- `/swarm dataset consent` — HUMAN-ONLY: grant or revoke the training-content consent (two-step confirm token; quotas clamp to hard ceilings)
+- `/swarm dataset withdraw` — HUMAN-ONLY: confirmed destructive withdrawal — purge vault content, write a tombstone, revoke exports
+- `/swarm dataset export` — HUMAN-ONLY: governed deterministic dataset export (preview + confirm token; manifest with sha256 checksums)
 - `/swarm evidence` — show evidence bundles `[taskId]`
 - `/swarm evidence summary` — generate evidence summary with completion ratio and blockers
 - `/swarm evidence-summary` — deprecated alias for `/swarm evidence summary`
