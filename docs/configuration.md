@@ -1250,11 +1250,19 @@ When enabled on macOS, `applySandboxExecution` also applies the DYLD
 injection-variable hardening declared by
 `MacOSSandboxExecutor.getEnvOverrides()` — unsetting `DYLD_INSERT_LIBRARIES`,
 `DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`, and `DYLD_ROOT_PATH`, and pinning
-`PATH` to the base-OS bin directories — baked into the wrapped command via
-SBPL `(setenv)`/`(unsetenv)` primitives. This wiring is macOS-only: Windows
+`PATH` to the base-OS bin directories — inside the wrapped command itself: the
+inner shell runs the unsets and exports before the user command. The SBPL
+profile carries no environment directives because the Sandbox Profile Language
+cannot mutate the sandboxed process's environment (`setenv`/`unsetenv` are not
+SBPL operations; emitting them made every profile unparseable and silently
+disabled the executor until issue #2590 removed that emission). This wiring is
+macOS-only: Windows
 and Linux `getEnvOverrides()` implementations remain unwired in this release
 (Windows strong mode's `PATH: null` would be a separate, riskier behavior
-change applied to real commands for the first time).
+change applied to real commands for the first time). Note that the #2590 fix
+makes the macOS hardening effective for the first time: commands that need
+non-system `PATH` entries (for example Homebrew or a version manager) must
+extend `PATH` themselves when the macOS sandbox is enabled.
 
 ```json
 {

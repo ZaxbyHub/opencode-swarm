@@ -7,9 +7,11 @@
  * DYLD_LIBRARY_PATH, DYLD_FRAMEWORK_PATH, DYLD_ROOT_PATH -> null, plus
  * PATH -> the base-OS bin dirs) had never actually been applied to a
  * sandboxed command. This file covers `MacOSSandboxExecutor`'s own
- * getEnvOverrides() shape and its SBPL (setenv)/(unsetenv) emission through
- * `buildSandboxProfile`/`wrapCommand`'s 4th parameter — the wiring at the
- * `applySandboxExecution` call site (macOS-only gate by `mechanism`) is
+ * getEnvOverrides() shape and its command-level application inside the
+ * wrapped command (`buildEnvOverridePrefix` / `wrapCommand`'s 4th parameter
+ * — issue #2590: SBPL cannot mutate the sandboxed process's environment, so
+ * the overrides ride the inner shell instead of the profile). The wiring at
+ * the `applySandboxExecution` call site (macOS-only gate by `mechanism`) is
  * covered separately in
  * tests/unit/hooks/guardrails-sandbox-env-wiring.test.ts.
  *
@@ -83,7 +85,7 @@ describe('MacOSSandboxExecutor.getEnvOverrides() — F6b shape', () => {
 	});
 });
 
-describe('wrapCommand() env overrides — SBPL emission through buildSandboxProfile (F6b)', () => {
+describe('wrapCommand() env overrides — command-level application (issue #2590)', () => {
 	test('wrapCommand accepts getEnvOverrides() output as its 4th parameter without throwing', () => {
 		const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
 		const env = executor.getEnvOverrides();
@@ -100,54 +102,67 @@ describe('wrapCommand() env overrides — SBPL emission through buildSandboxProf
 		expect(result).toContain('-f');
 	});
 
-	test('buildSandboxProfile emits (unsetenv DYLD_*) for every null-valued F6b override', () => {
-		const env = {
-			DYLD_INSERT_LIBRARIES: null,
-			DYLD_LIBRARY_PATH: null,
-			DYLD_FRAMEWORK_PATH: null,
-			DYLD_ROOT_PATH: null,
-			PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
-		};
-		const profile = _internals.buildSandboxProfile(['/scope'], '/tmp', env);
+	test('the DYLD_* unsets and the PATH pin are applied by the inner shell BEFORE the user command', () => {
+		const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
+		const env = executor.getEnvOverrides();
+		const wrapped = executor.wrapCommand('echo hello', [], undefined, env);
 
-		expect(profile).toContain('(unsetenv DYLD_INSERT_LIBRARIES)');
-		expect(profile).toContain('(unsetenv DYLD_LIBRARY_PATH)');
-		expect(profile).toContain('(unsetenv DYLD_FRAMEWORK_PATH)');
-		expect(profile).toContain('(unsetenv DYLD_ROOT_PATH)');
+		// One `unset` builtin covering all four DYLD injection variables...
+		expect(wrapped).toContain(
+			'unset DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_ROOT_PATH',
+		);
+		// ...and an export pinning PATH to the base-OS bin dirs. The value is
+		// single-quote-escaped for the outer bash -c context, so assert the
+		// assignment and the verbatim value separately.
+		expect(wrapped).toContain('export PATH=');
+		expect(wrapped).toContain('/usr/bin:/bin:/usr/sbin:/sbin');
+		// Env ops run BEFORE the user command.
+		expect(wrapped.indexOf('unset DYLD_INSERT_LIBRARIES')).toBeLessThan(
+			wrapped.indexOf('echo hello'),
+		);
 	});
 
-	test('buildSandboxProfile emits (setenv PATH "...") for the F6b PATH override', () => {
-		const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' };
-		const profile = _internals.buildSandboxProfile(['/scope'], '/tmp', env);
-		expect(profile).toContain('(setenv PATH "/usr/bin:/bin:/usr/sbin:/sbin")');
+	test('buildSandboxProfile contains NO env directives for the F6b overrides (issue #2590)', () => {
+		// envOverrides is no longer a buildSandboxProfile parameter — the
+		// 2-arg call below is the compile-checked contract. The profile must
+		// never carry env directives: SBPL has no setenv/unsetenv ops and
+		// emitting them made the profile unparseable (#2590).
+		const profile = _internals.buildSandboxProfile(['/scope'], '/tmp');
+		expect(profile).not.toContain('setenv');
+		expect(profile).not.toContain('unsetenv');
 	});
 
-	test('buildSandboxProfile(scopePaths, tempDir, MacOSSandboxExecutor.getEnvOverrides()) round-trips exactly', () => {
-		// Direct regression test: the actual getEnvOverrides() output, fed
-		// through the actual profile builder wrapCommand uses internally.
+	test('getEnvOverrides() round-trips through wrapCommand to the inner-shell prefix', () => {
 		const executor = new MacOSSandboxExecutor([], '/tmp');
 		const env = executor.getEnvOverrides();
-		const profile = _internals.buildSandboxProfile(['/scope'], '/tmp', env);
+		const wrapped = executor.wrapCommand('echo hello', [], undefined, env);
+		// One `unset` builtin covers all four DYLD keys, in getEnvOverrides()
+		// insertion order; PATH is exported right after.
+		expect(wrapped).toContain(
+			'unset DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_ROOT_PATH',
+		);
+		expect(wrapped).toContain('export PATH=');
+	});
 
-		for (const key of [
-			'DYLD_INSERT_LIBRARIES',
-			'DYLD_LIBRARY_PATH',
-			'DYLD_FRAMEWORK_PATH',
-			'DYLD_ROOT_PATH',
-		]) {
-			expect(profile).toContain(`(unsetenv ${key})`);
-		}
-		expect(profile).toContain(`(setenv PATH "${env.PATH}")`);
+	test('no-override wrapCommand output carries no env ops (byte-shape preserved)', () => {
+		const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
+		const wrapped = executor.wrapCommand(
+			'echo hello',
+			[],
+			undefined,
+			undefined,
+		);
+		expect(wrapped).not.toContain('unset ');
+		expect(wrapped).not.toContain('export ');
+		expect(wrapped).toContain('sandbox-exec');
 	});
 });
 
-// NOTE (F6b, not test-automatable from this host): the assertions above
-// prove the (setenv)/(unsetenv) primitives are PARSEABLE-SHAPED and reach
-// the wrapped command string. They cannot prove the primitives actually
-// alter a live child process's environment — a parseability probe cannot
-// distinguish "valid primitive" from "valid but no-op." Confirming the DYLD
-// variables are genuinely absent from a real sandbox-exec-wrapped child's
-// environment requires spawning that child on a real macOS host and
-// inspecting `/proc`-equivalent env state, which is not reproducible here.
-// This is recorded as an open verification gap in the PR report rather than
-// papered over with a placeholder assertion.
+// NOTE (not test-automatable from this host): the assertions above prove the
+// env overrides are correctly shaped, ordered, and escaped inside the wrapped
+// command string, and that no profile carries env directives (#2590). They
+// cannot prove a live sandbox-exec-wrapped child on real macOS hardware
+// actually observes the DYLD variables unset — that requires spawning the
+// child on macOS and inspecting its environment, which is not reproducible
+// here. This remains an on-host verification item (trace NE1), recorded in the
+// PR report rather than papered over with a placeholder assertion.
