@@ -889,6 +889,7 @@ Commands:
   update      Refresh OpenCode's plugin cache so the next start fetches latest from npm
   uninstall   Remove the plugin from OpenCode config
   run         Run a plugin command directly (for use outside OpenCode)
+  ci          Advisory headless CI: evaluate gate/evidence state read-only (exit 0 only if all gates pass)
 
 Options:
   --clean     Also remove config files and custom prompts (with uninstall)
@@ -915,6 +916,7 @@ Examples:
   bunx opencode-swarm uninstall
   bunx opencode-swarm uninstall --clean
   bunx opencode-swarm --help
+  bunx opencode-swarm ci                 # advisory headless CI (exit 0 = all gates pass)
   bunx opencode-swarm run status
   bunx opencode-swarm run sync-plan
   bunx opencode-swarm run knowledge migrate
@@ -951,6 +953,12 @@ async function main(): Promise<void> {
 		process.exit(exitCode);
 	} else if (command === 'run') {
 		const exitCode = await run(args.slice(1));
+		process.exit(exitCode);
+	} else if (command === 'ci') {
+		// Top-level entry for advisory headless CI (#2497): delegates to the
+		// shared registry dispatcher so both surfaces get identical parity
+		// behaviors (did-you-mean, deprecation warnings, policy gates).
+		const exitCode = await run(['ci', ...args.slice(1)]);
 		process.exit(exitCode);
 	} else {
 		console.error(`Unknown command: ${command}`);

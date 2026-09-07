@@ -38,6 +38,11 @@ export { handleAutoProceedCommand } from './auto-proceed';
 export { handleBenchmarkCommand } from './benchmark';
 export { handleBrainstormCommand } from './brainstorm';
 export { handleCheckpointCommand } from './checkpoint';
+export {
+	createSignalCancellation,
+	DEFAULT_CI_DEADLINE_MS,
+	handleCiCommand,
+} from './ci';
 export { handleCiSimulateCommand } from './ci-simulate';
 export { handleClarifyCommand } from './clarify';
 export { handleCloseCommand } from './close';

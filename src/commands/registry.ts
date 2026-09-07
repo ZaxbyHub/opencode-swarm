@@ -26,6 +26,7 @@ import { handleAutoProceedCommand } from './auto-proceed.js';
 import { handleBenchmarkCommand } from './benchmark.js';
 import { handleBrainstormCommand } from './brainstorm.js';
 import { handleCheckpointCommand } from './checkpoint.js';
+import { handleCiCommand } from './ci.js';
 import { handleCiMonitorCommand } from './ci-monitor.js';
 import { handleCiSimulateCommand } from './ci-simulate.js';
 import { handleClarifyCommand } from './clarify.js';
@@ -1412,6 +1413,16 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
 		category: 'agent',
+		toolPolicy: 'none',
+	},
+	ci: {
+		handler: (ctx) => handleCiCommand(ctx),
+		description:
+			'Advisory headless CI: evaluate the repo gate/evidence state read-only with machine exit codes [--timeout-ms <n>] [--json]',
+		args: '--timeout-ms <n>, --json',
+		details:
+			'Host-decoupled, read-only evaluation of the checked-out repo (#2497): per-task required gates (tri-state evidence), plan-critic approval, and evidence-quality thresholds, composed from the authoritative readers. Exits 0 only when every evaluated gate passes; 1 on any violation, no-data, corrupt evidence, or a missing plan; 2 on cancellation (SIGINT/SIGTERM); 3 on deadline/internal error. Emits a Markdown report plus a [SWARM_CI_JSON] machine block. Never writes to .swarm and cannot satisfy or bypass any gate; runs with no TTY and no OpenCode host.',
+		category: 'diagnostics',
 		toolPolicy: 'none',
 	},
 	'ci-monitor': {
