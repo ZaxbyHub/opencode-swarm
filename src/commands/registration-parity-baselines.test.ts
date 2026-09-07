@@ -154,6 +154,11 @@ describe('Command registration parity — classification baselines', () => {
 				'dataset consent',
 				'dataset export',
 				'dataset withdraw',
+				// #2486 TUI shortcut dash aliases (swarm-dataset-*) — inherit the
+				// human-only canonical policy via canonicalCommandKey (aliasOf).
+				'dataset-consent',
+				'dataset-export',
+				'dataset-withdraw',
 				'full-auto',
 				'memory-import',
 				'memory-migrate',

@@ -1083,6 +1083,30 @@ export const COMMAND_REGISTRY = {
 		category: 'utility',
 		toolPolicy: 'human-only',
 	},
+	// Aliases for the TUI shortcuts 'swarm-dataset-{consent,withdraw,export}',
+	// which normalize to the single dash tokens 'dataset-consent' etc. Without
+	// these aliases resolveCommand(['dataset-consent']) returns null and the TUI
+	// reports "command not found" (src/commands/shortcut-resolution.test.ts).
+	// Mirrors the 'pr-subscribe' alias pattern; each alias inherits the
+	// canonical human-only tool policy via canonicalCommandKey (aliasOf).
+	'dataset-consent': {
+		description:
+			'Human-only grant/revoke of the training-content consent record (two-step confirm token)',
+		aliasOf: 'dataset consent',
+		deprecated: true,
+	},
+	'dataset-withdraw': {
+		description:
+			'Human-only destructive withdrawal: purge vault content, tombstone, revoke exports',
+		aliasOf: 'dataset withdraw',
+		deprecated: true,
+	},
+	'dataset-export': {
+		description:
+			'Human-only governed dataset export (deterministic bundle + manifest, two-step confirm token)',
+		aliasOf: 'dataset export',
+		deprecated: true,
+	},
 	evidence: {
 		handler: (ctx) => handleEvidenceCommand(ctx.directory, ctx.args),
 		description: 'Show evidence bundles [taskId]',
