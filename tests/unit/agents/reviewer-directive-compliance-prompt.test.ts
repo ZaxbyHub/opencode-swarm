@@ -66,11 +66,11 @@ describe('buildDirectiveComplianceBlock', () => {
 			'  lesson: "Document edge cases"',
 			'</directives_to_verify>',
 			'',
-			'DIRECTIVE_COMPLIANCE: one line per retrieval membership shown during this phase. Copy the encoded trace_id and entry_id tokens exactly from the DIRECTIVES TO VERIFY block. Use exactly one of:',
+			'DIRECTIVE_COMPLIANCE: one line per listed obligation. Copy the encoded trace_id and entry_id tokens exactly from the DIRECTIVES TO VERIFY block. Use exactly one of:',
 			'  VERIFIED:<trace_id>:<entry_id> evidence=<file:line | predicate_passed>',
 			'  VIOLATED:<trace_id>:<entry_id> evidence=<file:line | failing_predicate>',
 			'  N/A:<trace_id>:<entry_id> reason=<why it does not apply to this change>',
-			'Every listed trace_id + entry_id pair MUST appear exactly once. The same entry_id may appear under more than one trace_id and requires one verdict per pair. If a directive carries a verification_predicate, you MUST run it and report predicate_passed / failing_predicate as the evidence. Omitting a listed CRITICAL pair is itself a VIOLATED verdict.',
+			'Every listed trace_id + entry_id pair MUST appear exactly once in your verdicts. If a directive carries a verification_predicate, you MUST run it and report predicate_passed / failing_predicate as the evidence. Omitting a listed CRITICAL pair is itself a VIOLATED verdict.',
 		].join('\n');
 
 		expect(block).toBe(expected);

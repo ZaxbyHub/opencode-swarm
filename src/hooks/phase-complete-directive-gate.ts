@@ -20,6 +20,7 @@
 import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	queryLiveMemberships,
+	type ReceiptMembership,
 	type ReceiptUnavailable,
 	validateAndCommitTerminalBatch,
 } from './knowledge-receipt-ledger.js';
@@ -175,6 +176,19 @@ function classifyDirectiveGateFailure(
 
 /**
  * Evaluate all critical directives shown during the phase. Fail-closed.
+ *
+ * Since #2628 the reviewer-facing obligation unit is the ENTRY (one shown
+ * obligation per entry), so resolution is evaluated per entry: an entry is
+ * resolved when (a) at least one of its phase-window memberships carries a
+ * satisfying terminal (authorized override, applied, or ignored/n_a with a
+ * reason), AND (b) every violated/contradicted membership is remediated by an
+ * `applied` terminal committed STRICTLY LATER on some membership of the same
+ * entry (an earlier applied never hides a later violation; the same-membership
+ * case is the historical in-place remediation flow, where the current terminal
+ * is `applied` and the violated state moved to terminal_history). The reported
+ * trace_id is the representative the reviewer was shown: a violated membership
+ * when one exists, else the most recently committed one (ties by greatest
+ * trace_id) — mirroring `pickDirectiveRepresentatives` in phase-directives.ts.
  */
 export async function evaluatePhaseCriticalDirectives(params: {
 	directory: string;
@@ -218,34 +232,79 @@ export async function evaluatePhaseCriticalDirectives(params: {
 			};
 		}
 
+		const byEntry = new Map<string, ReceiptMembership[]>();
+		for (const membership of criticals) {
+			const group = byEntry.get(membership.entry_id) ?? [];
+			group.push(membership);
+			byEntry.set(membership.entry_id, group);
+		}
+
+		const isSatisfied = (membership: ReceiptMembership): boolean => {
+			const terminal = membership.terminal;
+			if (terminal?.authorized_transition) return true;
+			if (terminal?.outcome === 'applied') return true;
+			return (
+				(terminal?.outcome === 'ignored' || terminal?.outcome === 'n_a') &&
+				Boolean(terminal.reason?.trim())
+			);
+		};
+		const isViolation = (outcome: string): boolean =>
+			outcome === 'violated' || outcome === 'contradicted';
+
 		const unresolved: DirectiveGateResult['unresolved'] = [];
 		const overridden: string[] = [];
-		for (const membership of criticals) {
-			const terminal = membership.terminal;
-			if (terminal?.authorized_transition) {
-				overridden.push(membership.entry_id);
-				continue;
+		for (const [entryId, members] of byEntry) {
+			for (const membership of members) {
+				if (membership.terminal?.authorized_transition) {
+					overridden.push(entryId);
+				}
 			}
-			if (terminal?.outcome === 'applied') continue;
-			if (
-				(terminal?.outcome === 'ignored' || terminal?.outcome === 'n_a') &&
-				terminal.reason?.trim()
-			)
-				continue;
+			const hasSatisfied = members.some((membership) =>
+				isSatisfied(membership),
+			);
+			const violated = members.filter(
+				(membership) =>
+					membership.terminal !== undefined &&
+					// An authorized override is a terminal disposition (the architect
+					// accepted the violation), not an unremediated one — mirrors the
+					// pre-#2628 short-circuit.
+					!membership.terminal.authorized_transition &&
+					isViolation(membership.terminal.outcome),
+			);
+			const unremediated = violated.filter(
+				(membership) =>
+					!members.some(
+						(other) =>
+							other.terminal?.outcome === 'applied' &&
+							other.terminal.committed_at > membership.terminal!.committed_at,
+					),
+			);
+			if (hasSatisfied && unremediated.length === 0) continue;
+			// Representative membership: violated preferred (the obligation the
+			// reviewer was asked to remediate), else most recently committed, ties
+			// by greatest trace_id — same precedence as the shown block.
+			const representative = [...members].sort((a, b) => {
+				const aViolated =
+					a.terminal !== undefined && isViolation(a.terminal.outcome) ? 0 : 1;
+				const bViolated =
+					b.terminal !== undefined && isViolation(b.terminal.outcome) ? 0 : 1;
+				if (aViolated !== bViolated) return aViolated - bViolated;
+				if (a.committed_at !== b.committed_at) {
+					return a.committed_at < b.committed_at ? 1 : -1;
+				}
+				return a.trace_id < b.trace_id ? 1 : -1;
+			})[0];
 			unresolved.push({
-				id: membership.entry_id,
-				trace_id: membership.trace_id,
-				reason:
-					terminal?.outcome === 'violated' ||
-					terminal?.outcome === 'contradicted'
-						? 'unremediated_violation'
-						: 'no_verdict',
+				id: entryId,
+				trace_id: representative.trace_id,
+				reason: violated.length > 0 ? 'unremediated_violation' : 'no_verdict',
 			});
 		}
+		unresolved.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 		return {
 			blocked: unresolved.length > 0,
 			unresolved,
-			overridden,
+			overridden: [...new Set(overridden)],
 			failedClosed: false,
 		};
 	} catch (error) {

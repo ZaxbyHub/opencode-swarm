@@ -75,7 +75,17 @@ describe('evaluatePhaseCriticalDirectives V2 authority', () => {
 		]);
 	});
 
-	it('does not let a terminal on one trace hide the repeated entry on another', async () => {
+	it('resolves an entry verified once even when retrieved under multiple traces (#2628 intent)', async () => {
+		// #2628 intent amendment: the reviewer is shown ONE obligation per entry
+		// (per-entry dedupe in readPhaseDirectivesToVerify), so the gate's
+		// resolution unit moved from membership (pair) to entry. Pre-#2628 this
+		// scenario stayed blocked on the terminal-less sibling trace ("does not
+		// let a terminal on one trace hide the repeated entry on another"),
+		// which re-created one verdict per historical exposure. The
+		// no-hidden-resolution invariant is preserved where it matters by the
+		// two assertions that follow this test: an EARLIER applied never
+		// resolves a LATER violated sibling, and a different unterminal'd entry
+		// still blocks.
 		await display('trace-closed');
 		await display('trace-open');
 		await terminal('trace-closed', 'applied');
@@ -86,8 +96,50 @@ describe('evaluatePhaseCriticalDirectives V2 authority', () => {
 			phaseLabel: PHASE,
 		});
 
+		expect(result).toMatchObject({ blocked: false, failedClosed: false });
+		expect(result.unresolved).toEqual([]);
+	});
+
+	it('does not let an earlier applied terminal resolve a later violated sibling (#2628)', async () => {
+		await display('trace-remediated');
+		await display('trace-violated');
+		await terminal('trace-remediated', 'applied');
+		await terminal('trace-violated', 'violated');
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+
+		expect(result.blocked).toBe(true);
 		expect(result.unresolved).toEqual([
-			{ id: ENTRY, trace_id: 'trace-open', reason: 'no_verdict' },
+			{
+				id: ENTRY,
+				trace_id: 'trace-violated',
+				reason: 'unremediated_violation',
+			},
+		]);
+	});
+
+	it('still blocks a different unterminal entry alongside a resolved one (#2628)', async () => {
+		await display('trace-closed', ENTRY);
+		await terminal('trace-closed', 'applied');
+		await display('trace-open', 'entry-other-unterminal');
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+
+		expect(result.blocked).toBe(true);
+		expect(result.unresolved).toEqual([
+			{
+				id: 'entry-other-unterminal',
+				trace_id: 'trace-open',
+				reason: 'no_verdict',
+			},
 		]);
 	});
 
