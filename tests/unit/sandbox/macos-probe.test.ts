@@ -204,10 +204,14 @@ describe('buildProbeProfile — F6a item 2 shape parity with production', () => 
 		);
 	});
 
-	test('includes a setenv/unsetenv pair so an invalid env primitive is caught by the probe (F6b caveat)', () => {
+	test('contains NO setenv/unsetenv — they are not SBPL ops and broke the probe (issue #2590)', () => {
 		const profile = _internals.buildProbeProfile('/tmp/swarm-probe');
-		expect(profile).toContain('(setenv');
-		expect(profile).toContain('(unsetenv');
+		// `setenv`/`unsetenv` are rejected by sandbox-exec as unbound variables
+		// (exit 65); emitting them disabled the whole executor on every macOS
+		// host. `not.toContain('setenv')` alone subsumes 'unsetenv', but the
+		// explicit pair documents both forbidden spellings.
+		expect(profile).not.toContain('(setenv');
+		expect(profile).not.toContain('(unsetenv');
 	});
 
 	test('is NOT the trivial (allow default)-only profile — a trivial probe would pass even when production is unparseable', () => {

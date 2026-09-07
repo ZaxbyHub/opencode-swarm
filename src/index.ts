@@ -3671,6 +3671,10 @@ async function initializeOpenCodeSwarm(
 					template: '/swarm ci-simulate $ARGUMENTS',
 					description: shortcutDescription('ci-simulate'),
 				},
+				'swarm-ci': {
+					template: '/swarm ci $ARGUMENTS',
+					description: shortcutDescription('ci'),
+				},
 				'swarm-learning': {
 					template: '/swarm learning',
 					description: shortcutDescription('learning'),

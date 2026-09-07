@@ -18,7 +18,6 @@ import {
 	DEFAULT_GATE_DENIAL_STOP_THRESHOLD,
 	DEFAULT_GATE_DENIAL_WARN_THRESHOLD,
 	deriveGateDenialCode,
-	gateDenialStopText,
 	gateDenialWarnText,
 	isAbortLikeError,
 	noteGateDenial,
@@ -132,25 +131,29 @@ describe('escalation ladder', () => {
 		startAgentSession(session, 'architect');
 
 		let last: Error | null = null;
+		const args = { path: 'C:/private/secret-project/file.ts' };
 		for (let i = 0; i < DEFAULT_GATE_DENIAL_STOP_THRESHOLD; i++) {
 			last = denial();
-			noteGateDenial(session, 'Task', last);
+			noteGateDenial(session, 'Task', last, undefined, args);
 		}
 		const err = last as Error;
 
-		// Both rungs are present at the hard rung — warn first, then STOP.
-		expect(err.message).toBe(
-			`${DENY}: task 1.1 has no active scope binding` +
-				gateDenialWarnText(5, DENY) +
-				gateDenialStopText(5, DENY, 'task'),
-		);
+		// Both rungs are present at the hard rung — warn first, then recovery.
+		expect(err.message).toContain(gateDenialWarnText(5, DENY));
 		expect(err.message).toContain(
-			'STOP tool calls and report the blocker to the user with the full error text.',
+			`GATE DENIAL LOOP: 5 consecutive ${DENY} denial(s) for action `,
 		);
+		expect(err.message).toContain('Do not retry this exact action unchanged.');
+		expect(err.message).toContain('Diagnose the current cause');
+		expect(err.message).toContain('repair or rescope');
+		expect(err.message).toContain('handoff, abort, or exit Full-Auto');
 
 		const advisories = advisoriesFor(session);
 		expect(advisories).toHaveLength(1);
-		expect(advisories[0]).toContain(`[swarm:gate-denial-loop:${DENY}]`);
+		expect(advisories[0]).toMatch(
+			new RegExp(`^\\[swarm:gate-denial-loop:${DENY}:[0-9a-f]{12}\\]`),
+		);
+		expect(advisories[0]).not.toContain(args.path);
 
 		const emitted = events.filter((e) => e.event === 'gate_denial_loop');
 		expect(emitted).toHaveLength(1);

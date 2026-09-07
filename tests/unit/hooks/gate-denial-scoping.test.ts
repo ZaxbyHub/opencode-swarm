@@ -27,7 +27,6 @@ import {
 	clearGateDenialStreaks,
 	DEFAULT_GATE_DENIAL_STOP_THRESHOLD,
 	gateDenialDiscriminator,
-	gateDenialStopText,
 	noteGateDenial,
 	resetGateDenialStreaks,
 	UNCLASSIFIED_GATE_DENIAL_CODE,
@@ -143,11 +142,10 @@ describe('#2063 B1 — per-discriminator streak scoping (reviewer r4)', () => {
 		expect(outcome.count).toBe(DEFAULT_GATE_DENIAL_STOP_THRESHOLD);
 		expect(outcome.stopped).toBe(true);
 		expect(fifth.message).toContain(
-			gateDenialStopText(
-				DEFAULT_GATE_DENIAL_STOP_THRESHOLD,
-				ACCEPTANCE,
-				'task',
-			),
+			`GATE DENIAL LOOP: ${DEFAULT_GATE_DENIAL_STOP_THRESHOLD} consecutive ${ACCEPTANCE} denial(s) for action `,
+		);
+		expect(fifth.message).toContain(
+			'Do not retry this exact action unchanged.',
 		);
 		expect(advisoriesFor(session)).toHaveLength(1);
 		expect(events.filter((e) => e.event === 'gate_denial_loop')).toHaveLength(

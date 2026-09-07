@@ -79,6 +79,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm dark-matter` — detect hidden file couplings via co-change NPMI analysis
 - `/swarm simulate` — dry-run hidden coupling analysis with configurable thresholds
 - `/swarm ci-simulate` — create a temporary merge-result worktree and run CI pre-merge
+- `/swarm ci` — advisory headless CI: read-only gate/evidence evaluation with machine exit codes (0 = all gates pass; Markdown + [SWARM_CI_JSON] report; `bunx opencode-swarm ci` outside OpenCode)
 - `/swarm qa-gates` — view or modify QA gate profile for the current plan
 - `/swarm report` — query the SQLite observability sink (filters: --task/--session/--trace/--run/--since, --json)
 - `/swarm acknowledge-spec-drift` — acknowledge spec drift and suppress further warnings

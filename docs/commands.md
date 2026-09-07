@@ -391,6 +391,14 @@ Dry-run hidden coupling analysis with configurable thresholds
 
 **Args:** `--threshold <number>, --min-commits <number>`
 
+### `/swarm ci`
+
+Advisory headless CI: evaluate the repo gate/evidence state read-only with machine exit codes [--timeout-ms <n>] [--json]
+
+**Args:** `--timeout-ms <n>, --json`
+
+Host-decoupled, read-only evaluation of the checked-out repo (#2497): per-task required gates (tri-state evidence), plan-critic approval, and evidence-quality thresholds, composed from the authoritative readers. Exits 0 only when every evaluated gate passes; 1 on any violation, no-data, corrupt evidence, or a missing plan; 2 on cancellation (SIGINT/SIGTERM); 3 on deadline/internal error. Emits a Markdown report plus a [SWARM_CI_JSON] machine block. Never writes to .swarm and cannot satisfy or bypass any gate; runs with no TTY and no OpenCode host.
+
 ## Utility
 
 ### `/swarm blueprint validate`

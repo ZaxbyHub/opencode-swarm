@@ -8,21 +8,18 @@
  *
  * This module owns that counter. `noteGateDenial` is called from the single
  * catch site wrapping the fail-closed chain in `src/index.ts`. It:
- *   1. classifies the denial by the leading code token of the error message,
- *   2. increments a per-(sessionID, toolName, discriminator, code) streak,
+ *   1. classifies the denial by its bounded structured cause (falling back to
+ *      the leading code token of the error message),
+ *   2. increments a per-(sessionID, invocationID, stable action, cause) streak,
  *   3. APPENDS (never rewrites) escalating guidance to the error message so the
  *      model reads it in the tool-rejection text, and
  *   4. at the hard rung, pushes an advisory + emits telemetry.
  *
- * The DISCRIMINATOR (reviewer round-4 REQUIRED 2) is the canonicalized
- * `subagent_type` of a `Task` call, and the empty string for every other tool.
- * Without it the reset was too wide: `resetGateDenialStreaks` drops a whole
- * (session, tool) prefix on any successful completion of that tool, so ONE
- * successful `Task` → `explorer` erased a 4-deep `ACCEPTANCE_FIELD_REQUIRED`
- * streak on `Task` → `coder`. Under the interleaving the loop actually
- * exhibits — deny coder, delegate an explorer to investigate, deny coder again —
- * the STOP rung was unreachable. Sub-scoping both the count and the reset by
- * dispatch target makes a success clear only what plausibly succeeded.
+ * The action projection intentionally retains only stable routing fields. It
+ * canonicalizes the `Task` role and target aliases, while omitting prompts,
+ * command content, and other retry-varying payloads. The same projection is
+ * used by note, reset, and the test peek/expiry seams, so a success can clear
+ * only what plausibly succeeded.
  *
  * Invariants this module must not break:
  *   - The caller ALWAYS rethrows. Decoration is append-only, so the leading
@@ -44,6 +41,7 @@
  * import would create a cycle.
  */
 
+import { createHash } from 'node:crypto';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { SPAWN_CIRCUIT_DENIAL_CODE } from '../dispatch/spawn-circuit.js';
 import {
@@ -88,17 +86,199 @@ export const DEFAULT_GATE_DENIAL_STOP_THRESHOLD = 5;
  * streak into singletons.
  */
 const MAX_CODE_LENGTH = 64;
+const MAX_ACTION_STRING_LENGTH = 128;
+const MAX_ACTION_PATH_PREFIX_ITEMS = 64;
+const STABLE_TARGET_KEYS = ['url', 'uri', 'source_url', 'pr_url'] as const;
 
 /** Classification used when the message carries no recognisable code token. */
 export const UNCLASSIFIED_GATE_DENIAL_CODE = 'UNCLASSIFIED';
 
-function gateActionArgs(
-	tool: string,
-	_args: unknown,
-	discriminator: string,
-): Record<string, unknown> {
-	if (!isTaskToolId(tool ?? '')) return {};
-	return discriminator ? { subagent_type: discriminator } : {};
+function readOwnDataValue(record: unknown, key: string): unknown {
+	if (!record || typeof record !== 'object' || Array.isArray(record))
+		return undefined;
+	try {
+		const descriptor = Object.getOwnPropertyDescriptor(record, key);
+		return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function readFirstNormalizedOwnDataValue<T>(
+	record: unknown,
+	keys: readonly string[],
+	normalize: (value: unknown) => T | undefined,
+): T | undefined {
+	for (const key of keys) {
+		const value = readOwnDataValue(record, key);
+		try {
+			const normalized = normalize(value);
+			if (normalized !== undefined) return normalized;
+		} catch {
+			/* A malformed argument cannot break the fail-closed caller. */
+		}
+	}
+	return undefined;
+}
+
+function boundedActionString(value: unknown): string | undefined {
+	if (typeof value !== 'string') return undefined;
+	const trimmed = value.trim();
+	if (trimmed.length === 0) return undefined;
+	// Keep the semantic value intact here. `createActionIdentity` applies the
+	// shared bounded hashing policy to public fields and path collections; raw
+	// prefix truncation would make two long targets collide.
+	return trimmed;
+}
+
+function boundedActionScalar(
+	value: unknown,
+): string | number | boolean | undefined {
+	if (typeof value === 'string') return boundedActionString(value);
+	if (typeof value === 'number' && Number.isFinite(value)) return value;
+	if (typeof value === 'boolean') return value;
+	return undefined;
+}
+
+function boundedStableTarget(value: unknown): string | undefined {
+	const normalized = boundedActionString(value);
+	if (normalized === undefined || hasControlCharacters(normalized)) {
+		return undefined;
+	}
+	return normalized;
+}
+
+interface PathAliasProjection {
+	value: string | string[];
+	tailDigest?: string;
+}
+
+function boundedPathAlias(value: unknown): PathAliasProjection | undefined {
+	if (typeof value === 'string') {
+		const normalized = boundedActionString(value);
+		return normalized === undefined ? undefined : { value: normalized };
+	}
+	if (!Array.isArray(value)) return undefined;
+	try {
+		const paths = value
+			.map((entry) => boundedActionString(entry))
+			.filter((entry): entry is string => entry !== undefined);
+		if (paths.length === 0) return undefined;
+		const normalizedPaths = [...new Set(paths)].sort();
+		if (normalizedPaths.length <= MAX_ACTION_PATH_PREFIX_ITEMS) {
+			return { value: normalizedPaths };
+		}
+		const tailHasher = createHash('sha256');
+		tailHasher.update(
+			`tail-count:${normalizedPaths.length - MAX_ACTION_PATH_PREFIX_ITEMS};`,
+		);
+		for (
+			let index = MAX_ACTION_PATH_PREFIX_ITEMS;
+			index < normalizedPaths.length;
+			index += 1
+		) {
+			const pathValue = normalizedPaths[index];
+			// Index and value length framing keeps concatenations unambiguous while
+			// the hash keeps raw paths out of the action projection.
+			tailHasher.update(`entry-index:${index};length:${pathValue.length};`);
+			tailHasher.update(pathValue);
+		}
+		const tailDigest = tailHasher.digest('hex').slice(0, 16);
+		return { value: normalizedPaths, tailDigest };
+	} catch {
+		return undefined;
+	}
+}
+
+function gateActionArgs(tool: string, args: unknown): Record<string, unknown> {
+	const projection: Record<string, unknown> = {};
+	const normalizedTool = normalizeToolNameLowerCase(tool ?? '');
+	if (isTaskToolId(tool)) {
+		const discriminator = gateDenialDiscriminator(tool, args);
+		if (discriminator) projection.subagent_type = discriminator;
+	}
+
+	const record = args;
+	const taskId = readFirstNormalizedOwnDataValue(
+		record,
+		['taskId', 'task_id', 'id'],
+		boundedActionScalar,
+	);
+	if (taskId !== undefined) projection.taskId = taskId;
+	if (normalizedTool === 'update_task_status') {
+		const status = readFirstNormalizedOwnDataValue(
+			record,
+			['status'],
+			boundedActionScalar,
+		);
+		if (status !== undefined) projection.status = status;
+	}
+	const phase = readFirstNormalizedOwnDataValue(
+		record,
+		['phase', 'phase_number'],
+		boundedActionScalar,
+	);
+	if (phase !== undefined) projection.phase = phase;
+	const mode = readFirstNormalizedOwnDataValue(
+		record,
+		['mode', 'execution_mode'],
+		boundedActionScalar,
+	);
+	if (mode !== undefined) projection.mode = mode;
+	const background = readFirstNormalizedOwnDataValue(
+		record,
+		['background', 'run_in_background', 'runInBackground'],
+		(value) => {
+			if (typeof value === 'boolean') return value;
+			if (typeof value !== 'string') return undefined;
+			const normalized = value.trim().toLowerCase();
+			return normalized === 'true'
+				? true
+				: normalized === 'false'
+					? false
+					: undefined;
+		},
+	);
+	if (background !== undefined) projection.background = background;
+	const workingDirectory = readFirstNormalizedOwnDataValue(
+		record,
+		['working_directory', 'workingDirectory'],
+		boundedActionScalar,
+	);
+	if (workingDirectory !== undefined) {
+		projection.working_directory = workingDirectory;
+	}
+	const scopeId = readFirstNormalizedOwnDataValue(
+		record,
+		['scope_id', 'scopeId', 'scope'],
+		boundedActionScalar,
+	);
+	if (scopeId !== undefined) projection.scope_id = scopeId;
+	const pathAlias = readFirstNormalizedOwnDataValue(
+		record,
+		['filePath', 'file', 'path', 'paths', 'files'],
+		boundedPathAlias,
+	);
+	if (pathAlias !== undefined) {
+		projection.path = pathAlias.value;
+		if (pathAlias.tailDigest !== undefined) {
+			projection.path_tail_digest = pathAlias.tailDigest;
+		}
+	}
+	const stableTarget = readFirstNormalizedOwnDataValue(
+		record,
+		STABLE_TARGET_KEYS,
+		boundedStableTarget,
+	);
+	if (stableTarget !== undefined) projection.url = stableTarget;
+	return projection;
+}
+
+function gateActionIdentity(tool: string, args: unknown) {
+	return createActionIdentity({
+		tool: normalizeToolNameLowerCase(tool ?? ''),
+		args: gateActionArgs(tool, args),
+	});
 }
 
 /**
@@ -129,8 +309,7 @@ const MAX_DISCRIMINATOR_LENGTH = 64;
 export function gateDenialDiscriminator(tool: string, args: unknown): string {
 	try {
 		if (!isTaskToolId(tool ?? '')) return '';
-		const subagentType = (args as Record<string, unknown> | undefined)
-			?.subagent_type;
+		const subagentType = readOwnDataValue(args, 'subagent_type');
 		if (typeof subagentType !== 'string' || subagentType.length === 0) {
 			return '';
 		}
@@ -163,7 +342,63 @@ export function deriveGateDenialCode(message: string): string {
 	if (candidate.length === 0 || candidate.length > MAX_CODE_LENGTH) {
 		return UNCLASSIFIED_GATE_DENIAL_CODE;
 	}
+	if (isGenericLegacyGateCode(candidate)) {
+		return UNCLASSIFIED_GATE_DENIAL_CODE;
+	}
 	return candidate;
+}
+
+function isGenericLegacyGateCode(candidate: string): boolean {
+	const normalized = candidate.trim().replace(/\s+/g, ' ').toUpperCase();
+	return (
+		normalized === 'BLOCKED' ||
+		normalized === 'WRITE BLOCKED' ||
+		normalized.startsWith('[SANDBOX] BLOCKED') ||
+		normalized.startsWith('SANDBOX BLOCKED') ||
+		normalized.startsWith('SANDBOX_')
+	);
+}
+
+function boundedStructuredGateCode(value: unknown): string | undefined {
+	if (typeof value !== 'string') return undefined;
+	const candidate = value.trim();
+	if (
+		candidate.length === 0 ||
+		candidate.length > MAX_CODE_LENGTH ||
+		hasControlCharacters(candidate)
+	) {
+		return undefined;
+	}
+	if (isGenericLegacyGateCode(candidate)) return undefined;
+	return candidate;
+}
+
+function hasControlCharacters(value: string): boolean {
+	for (const character of value) {
+		const code = character.charCodeAt(0);
+		if (code <= 0x1f || code === 0x7f) return true;
+	}
+	return false;
+}
+
+/**
+ * Resolve a denial cause from an own data property only. Accessors and
+ * inherited values are intentionally ignored so a hostile/frozen error cannot
+ * make tracking invoke arbitrary code. The message parser remains the
+ * trajectory logger's message-only boundary.
+ */
+export function deriveStructuredGateDenialCode(
+	err: unknown,
+): string | undefined {
+	for (const key of ['gateCode', 'code'] as const) {
+		const candidate = boundedStructuredGateCode(readOwnDataValue(err, key));
+		if (candidate !== undefined) return candidate;
+	}
+	return undefined;
+}
+
+function deriveGateDenialCause(err: unknown, message: string): string {
+	return deriveStructuredGateDenialCode(err) ?? deriveGateDenialCode(message);
 }
 
 /**
@@ -185,6 +420,9 @@ export function isAbortLikeError(err: unknown): boolean {
 
 /** The append-only warn rung. Exported so tests assert the exact wording. */
 export function gateDenialWarnText(count: number, code: string): string {
+	if (code === UNCLASSIFIED_GATE_DENIAL_CODE) {
+		return `\n[swarm] This is denial #${count} with no stable cause classification. Do NOT retry the same dispatch; diagnose the current blocker and present it to the user if it persists.`;
+	}
 	return `\n[swarm] This is denial #${count} with the same cause (${code}). Do NOT retry the same dispatch; fix the named cause or present the blocker to the user.`;
 }
 
@@ -196,8 +434,12 @@ export function gateDenialStopText(
 	count: number,
 	code: string,
 	tool: string,
+	actionPattern = tool,
 ): string {
-	return `\n[swarm] GATE DENIAL LOOP: ${count} consecutive ${code} denial(s) for tool ${tool}. STOP tool calls and report the blocker to the user with the full error text.`;
+	const safePattern = actionPattern
+		.slice(0, MAX_ACTION_STRING_LENGTH)
+		.replace(/[^a-zA-Z0-9_.:-]/g, '_');
+	return `\n[swarm] GATE DENIAL LOOP: ${count} consecutive ${code} denial(s) for action ${safePattern}. Do not retry this exact action unchanged. Diagnose the current cause, then repair or rescope it; otherwise handoff, abort, or exit Full-Auto.`;
 }
 
 export interface GateDenialOptions {
@@ -283,20 +525,16 @@ export function noteGateDenial(
 		// 9); every retry of an open action is already denied before any
 		// host launch, so containment does not depend on a second STOP rung.
 		const errorObject = err as { message: string };
-		const code = deriveGateDenialCode(errorObject.message);
+		const code = deriveGateDenialCause(err, errorObject.message);
 		if (code === SPAWN_CIRCUIT_DENIAL_CODE) {
 			return NOT_COUNTED;
 		}
 
 		const originalMessage = errorObject.message;
 		const normalizedTool = normalizeToolNameLowerCase(tool ?? '');
-		const discriminator = gateDenialDiscriminator(tool, args);
 		const session = ensureAgentSession(sessionID);
 		const invocationID = session.activeInvocationId ?? 0;
-		const action = createActionIdentity({
-			tool: normalizedTool,
-			args: gateActionArgs(tool, args, discriminator),
-		});
+		const action = gateActionIdentity(tool, args);
 		const generationToken = armActionCircuitAttempt(
 			sessionID,
 			invocationID,
@@ -344,7 +582,14 @@ export function noteGateDenial(
 
 		let appended = '';
 		if (warned) appended += gateDenialWarnText(count, code);
-		if (stopped) appended += gateDenialStopText(count, code, normalizedTool);
+		if (stopped) {
+			appended += gateDenialStopText(
+				count,
+				code,
+				normalizedTool,
+				action.pattern,
+			);
+		}
 
 		let decorated = false;
 		try {
@@ -358,12 +603,17 @@ export function noteGateDenial(
 		}
 
 		if (stopped) {
+			const stopText = gateDenialStopText(
+				count,
+				code,
+				normalizedTool,
+				action.pattern,
+			);
+			const advisoryKey = `[swarm:gate-denial-loop:${code}:${action.digest.slice(0, 12)}]`;
 			try {
-				pushAdvisory(
-					session,
-					`[swarm:gate-denial-loop:${code}] GATE DENIAL LOOP: ${count} consecutive ${code} denial(s) for tool ${normalizedTool}. STOP tool calls and report the blocker to the user with the full error text.`,
-					{ dedupeKey: `[swarm:gate-denial-loop:${code}]` },
-				);
+				pushAdvisory(session, `${advisoryKey}${stopText}`, {
+					dedupeKey: advisoryKey,
+				});
 			} catch {
 				/* advisory delivery is best-effort; never blocks the rethrow */
 			}
@@ -414,10 +664,7 @@ export function resetGateDenialStreaks(
 	try {
 		const session = getAgentSession(sessionID);
 		const invocationID = session?.activeInvocationId ?? 0;
-		const action = createActionIdentity({
-			tool: normalizeToolNameLowerCase(tool ?? ''),
-			args: gateActionArgs(tool, args, gateDenialDiscriminator(tool, args)),
-		});
+		const action = gateActionIdentity(tool, args);
 		clearActionCircuit(sessionID, invocationID, action.digest, {
 			reason: 'success',
 		});
@@ -450,15 +697,15 @@ export const _test_exports = {
 		sessionID: string,
 		tool: string,
 		code: string,
-		discriminator = '',
+		target: unknown = undefined,
 	): number =>
 		peekActionCircuitCount(
 			sessionID,
 			getAgentSession(sessionID)?.activeInvocationId ?? 0,
-			createActionIdentity({
-				tool: normalizeToolNameLowerCase(tool),
-				args: gateActionArgs(tool, undefined, discriminator),
-			}).digest,
+			gateActionIdentity(
+				tool,
+				typeof target === 'string' ? { subagent_type: target } : target,
+			).digest,
 			`policy.gate_denial:${code}`,
 		),
 	/** Force a streak's TTL into the past so eviction can be tested. */
@@ -466,15 +713,15 @@ export const _test_exports = {
 		sessionID: string,
 		tool: string,
 		code: string,
-		discriminator = '',
+		target: unknown = undefined,
 	): void => {
 		expireActionCircuit(
 			sessionID,
 			getAgentSession(sessionID)?.activeInvocationId ?? 0,
-			createActionIdentity({
-				tool: normalizeToolNameLowerCase(tool),
-				args: gateActionArgs(tool, undefined, discriminator),
-			}).digest,
+			gateActionIdentity(
+				tool,
+				typeof target === 'string' ? { subagent_type: target } : target,
+			).digest,
 			`policy.gate_denial:${code}`,
 		);
 	},
