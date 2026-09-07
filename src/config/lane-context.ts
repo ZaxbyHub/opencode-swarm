@@ -83,6 +83,68 @@ const MAX_CACHED_DIRECTORIES = 256;
 const laneContextCache = new Map<string, LaneContext | null>();
 
 /**
+ * Issue #2527: repo-ownership answer for destructive reclamation.
+ *
+ * `owned === true` (and `uncertain === false`) is the ONLY answer that
+ * permits deleting a worktree directory from a reclamation path: the
+ * candidate's `.git` pointer must resolve, through git's own `commondir`
+ * metadata, back to a main working tree that IS the expected project root.
+ * Anything else — foreign repo (the common shared-base case: `git worktree
+ * remove` says "is not a working tree"), unreadable/malformed pointer, or a
+ * main-working-tree candidate we were not asked about — is NOT deletable.
+ * Comparison is case-insensitive on Windows, matching
+ * `isPathUnderSwarmWorktreeBase` in `src/worktree/core.ts`.
+ */
+export interface WorktreeRepoOwnership {
+	owned: boolean;
+	mainWorktree?: string;
+	uncertain: boolean;
+}
+
+export function resolveWorktreeRepoOwnership(
+	worktreePath: string,
+	expectedProjectRoot: string,
+): WorktreeRepoOwnership {
+	const io = { failed: false };
+	const gitDir = readLinkedWorktreeGitDir(worktreePath, io);
+	if (io.failed || !gitDir) {
+		// No readable `.git` FILE pointer: either not a linked worktree at all
+		// (plain directory — caller decides via containment) or an I/O problem.
+		// Both are "not provably ours": never deletable on this evidence.
+		return { owned: false, uncertain: io.failed };
+	}
+	const mainWorktree = resolveMainWorktree(gitDir, io);
+	if (io.failed || !mainWorktree) {
+		return { owned: false, uncertain: true };
+	}
+	const cmp =
+		process.platform === 'win32'
+			? (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
+			: (a: string, b: string) => a === b;
+	// Canonicalize both sides through realpathSync (matching the sibling
+	// containment primitive's 8.3/junction discipline) so a symlinked
+	// project-root spelling cannot diverge from the git-recorded pointer
+	// path. Unresolvable paths (deleted/racing) fall back to lexical
+	// resolution — the comparison then fails toward owned:false (retain),
+	// which is the safe direction.
+	const canonical = (p: string): string => {
+		try {
+			return fs.realpathSync(p);
+		} catch {
+			return p;
+		}
+	};
+	return {
+		owned: cmp(
+			path.resolve(canonical(mainWorktree)),
+			path.resolve(canonical(expectedProjectRoot)),
+		),
+		mainWorktree,
+		uncertain: false,
+	};
+}
+
+/**
  * Test-only dependency-injection seam (AGENTS.md invariant 7 — prefer
  * `_internals` over `mock.module`, which leaks across files in Bun's shared
  * test-runner process). Tests replace these to simulate unreadable `.git`

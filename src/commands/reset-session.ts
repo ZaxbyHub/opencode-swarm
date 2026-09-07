@@ -1,16 +1,17 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
+import { resolveWorktreeRepoOwnership } from '../config/lane-context';
 import { closeProjectDb } from '../db/project-db';
 import { appendCoreEventSync } from '../events/core-events';
 import { clearSessionActionCircuits } from '../failures/action-circuit.js';
-import { recordDeadLaneReclaim } from '../hooks/delegation-gate/dead-lane-reclaim';
+import { resolveWorktreeEnumerationBases } from '../hooks/init-orphan-recovery';
 import {
 	commitGateReleaseBatch,
 	queryLiveMemberships,
 } from '../hooks/knowledge-receipt-ledger';
 import { clearTrajectoryStep } from '../hooks/trajectory-logger';
 import { validateSwarmPath } from '../hooks/utils';
+import { listLiveLaneOwners } from '../parallel/lane-owners';
 import { resetPrmSessionState } from '../prm';
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import {
@@ -24,10 +25,18 @@ import {
 import { SNAPSHOT_PROJECTION_FILE } from '../session/snapshot-writer.js';
 import { swarmState } from '../state';
 import { recoverStaleCoderSettlements } from '../workflow/coder-settlement.js';
+import { isPathUnderSwarmWorktreeBase } from '../worktree/core';
 import {
 	cleanupOrphanedBranches,
 	type OrphanCleanupResult,
 } from '../worktree/merge';
+import { probeGitMarker, removeOwnedWorktreeDir } from '../worktree/ownership';
+import {
+	executeDestructivePurge,
+	issueConfirmToken,
+	type PurgeCandidate,
+	previewDestructivePurge,
+} from './destructive-purge';
 import {
 	backupSwarmStateBeforeReset,
 	type ResetBackupResult,
@@ -44,6 +53,8 @@ export const _internals: {
 		directory: string,
 		activeSessionIds: string[],
 	) => Promise<OrphanCleanupResult>;
+	removeOwnedWorktreeDir: typeof removeOwnedWorktreeDir;
+	listLiveLaneOwners: typeof listLiveLaneOwners;
 	backupSwarmStateBeforeReset: (
 		directory: string,
 		kind: 'reset' | 'reset-session',
@@ -60,6 +71,8 @@ export const _internals: {
 	) => Promise<string[]>;
 } = {
 	cleanupOrphanedBranches,
+	removeOwnedWorktreeDir,
+	listLiveLaneOwners,
 	backupSwarmStateBeforeReset,
 	recoverStaleCoderSettlements,
 	queryLiveMemberships,
@@ -191,7 +204,7 @@ async function releaseKnowledgeGateObligations(
  * directories only; unreadable/absent ⇒ empty (the caller treats removal as
  * best-effort anyway).
  */
-function listChildDirs(dir: string): string[] {
+function _listChildDirs(dir: string): string[] {
 	try {
 		return fs
 			.readdirSync(dir, { withFileTypes: true })
@@ -212,7 +225,7 @@ function listChildDirs(dir: string): string[] {
  */
 export async function handleResetSessionCommand(
 	directory: string,
-	_args: string[],
+	args: string[],
 	sessionID?: string,
 ): Promise<string> {
 	const results: string[] = [];
@@ -544,63 +557,181 @@ export async function handleResetSessionCommand(
 		);
 	}
 
-	// Best-effort: clean stale worktree directories and orphan branches
-	const worktreesDir = path.resolve(
-		path.dirname(directory),
-		SWARM_WORKTREE_DIR_NAME,
-	);
+	// Issue #2527: the pre-fix code rmSync'd the ENTIRE parent-level shared
+	// base — destroying sibling projects' lanes and uncommitted work with a
+	// success line. Now: enumerate THIS project's own base, never delete a
+	// lane owned by a different repository, and require the shared two-step
+	// confirm token (issue #2508 primitive) for anything that would destroy
+	// uncommitted or live-owned work. Clean own lanes still go without
+	// confirmation (today's UX for the common case).
 	try {
-		if (fs.existsSync(worktreesDir)) {
-			if (preserveWorktrees) {
-				results.push('⏭️ Skipped .swarm-worktrees/ removal (see above)');
-			} else {
-				// Issue #2599 AC5: release in-process handles on every lane's
-				// swarm.db BEFORE the bulk removal (Windows WAL lock ⇒ EBUSY).
-				// Enumerates the default <session>/<lane> layout only — lanes
-				// provisioned under a `worktree_dir` override live elsewhere and
-				// are documented as a known limitation (see the release note);
-				// handle-release for them is deferred to #2527's shared surface.
-				const sessionDirs = fs
-					.readdirSync(worktreesDir, { withFileTypes: true })
-					.filter((entry) => entry.isDirectory())
-					.map((entry) => path.join(worktreesDir, entry.name));
-				for (const sessionDir of sessionDirs) {
+		if (preserveWorktrees) {
+			results.push('⏭️ Skipped worktree reclamation (see above)');
+		} else {
+			const confirmArg = args.find((a) => a.startsWith('--confirm='));
+			const confirmToken = confirmArg
+				? confirmArg.slice('--confirm='.length)
+				: undefined;
+			// Same enumeration scope as init orphan recovery (default project
+			// base + every configured worktree_dir override) so the two
+			// destructive entry points cannot disagree about what is in scope.
+			const candidates: string[] = [];
+			for (const base of resolveWorktreeEnumerationBases(directory)) {
+				if (!fs.existsSync(base)) continue;
+				for (const sessionEntry of fs.readdirSync(base, {
+					withFileTypes: true,
+				})) {
+					if (!sessionEntry.isDirectory()) continue;
+					const sessionDir = path.join(base, sessionEntry.name);
 					for (const laneEntry of fs.readdirSync(sessionDir, {
 						withFileTypes: true,
 					})) {
 						if (laneEntry.isDirectory()) {
-							closeProjectDb(path.join(sessionDir, laneEntry.name));
+							candidates.push(path.join(sessionDir, laneEntry.name));
 						}
 					}
 				}
-				fs.rmSync(worktreesDir, { recursive: true, force: true });
-				results.push('✅ Removed .swarm-worktrees/ directory');
+			}
+			if (candidates.length === 0) {
+				results.push('⏭️ No worktree lanes to reclaim');
+			} else {
+				// Issue #2599 AC5 (integrated): release each lane's swarm.db
+				// handle BEFORE any removal (Windows WAL lock would EBUSY the
+				// rm). Closing a handle this process never opened is a no-op.
+				for (const lane of candidates) {
+					closeProjectDb(lane);
+				}
+				const livePaths = new Set(
+					_internals
+						.listLiveLaneOwners(directory)
+						.live.map((owner) => owner.lanePath),
+				);
+				// Foreign and ownership-unprovable lanes are NEVER deletable —
+				// with or without a token. A `.git`-less remnant is ours only
+				// INSIDE the default project worktree base (ours by
+				// construction); under a configured `worktree_dir` override —
+				// which may point anywhere — ownership of a bare directory
+				// cannot be proven, so it is preserved and reported.
+				const own: string[] = [];
+				const foreign: string[] = [];
+				const unprovable: string[] = [];
+				for (const candidate of candidates) {
+					const marker = probeGitMarker(path.join(candidate, '.git'));
+					if (marker === 'uncertain') {
+						unprovable.push(candidate);
+						continue;
+					}
+					if (marker === 'gitless') {
+						if (isPathUnderSwarmWorktreeBase(candidate, directory)) {
+							own.push(candidate);
+						} else {
+							unprovable.push(candidate);
+						}
+						continue;
+					}
+					const ownership = resolveWorktreeRepoOwnership(candidate, directory);
+					if (ownership.owned) {
+						own.push(candidate);
+					} else {
+						foreign.push(candidate);
+					}
+				}
+				for (const lane of foreign) {
+					results.push(
+						`ℹ️ Preserved "${lane}" — owned by a different repository; never deleted by this project.`,
+					);
+				}
+				for (const lane of unprovable) {
+					results.push(
+						`ℹ️ Preserved "${lane}" — ownership unprovable (git-less outside the project worktree base, or unreadable metadata); never deleted by this project.`,
+					);
+				}
+
+				if (confirmToken) {
+					// Operator echoed the exact confirmation: purge the full
+					// own scope through the shared primitive (single-use token,
+					// set-digest bound). Belt-and-suspenders: every scope
+					// member must be a proven-owned `.git`-bearing lane or a
+					// git-less remnant inside the project base — the classifier
+					// above already guarantees this, so a violation is a bug
+					// and the candidate is dropped rather than purged.
+					const purgeScope = own.filter(
+						(lane) =>
+							probeGitMarker(path.join(lane, '.git')) === 'present' ||
+							isPathUnderSwarmWorktreeBase(lane, directory),
+					);
+					const scope: PurgeCandidate[] = purgeScope.map((lane) => ({
+						path: lane,
+						reason: 'confirmed reset-session purge',
+					}));
+					const execution = executeDestructivePurge(
+						own[0] ?? '',
+						directory,
+						confirmToken,
+						{ candidates: scope },
+					);
+					if (execution.ok) {
+						results.push(
+							`✅ Removed ${execution.purged?.length ?? 0} confirmed worktree lane(s)`,
+						);
+					} else {
+						results.push(`⚠️ Confirmed purge rejected: ${execution.reason}`);
+					}
+				} else {
+					// No token: delete clean own lanes only (git itself refuses
+					// dirty worktrees — that refusal is a stop, never an
+					// escalation); live-owned and dirty-refused lanes are
+					// preserved and surfaced with the confirm token.
+					let removedCount = 0;
+					const preservedOwn: string[] = [];
+					for (const lane of own) {
+						if (livePaths.has(lane)) {
+							preservedOwn.push(lane);
+							continue;
+						}
+						const outcome = await _internals.removeOwnedWorktreeDir(
+							lane,
+							directory,
+						);
+						if (outcome.status === 'removed') {
+							removedCount++;
+						} else {
+							preservedOwn.push(lane);
+						}
+					}
+					if (removedCount > 0) {
+						results.push(`✅ Removed ${removedCount} clean worktree lane(s)`);
+					}
+					if (preservedOwn.length > 0) {
+						const scope: PurgeCandidate[] = preservedOwn.map((lane) => ({
+							path: lane,
+							reason: 'uncommitted or live-owned work',
+						}));
+						// Disclosure: show the operator exactly what a confirmed
+						// purge would destroy (dirty vs live is indistinguishable
+						// from a bare count) before arming the token.
+						const preview = previewDestructivePurge(
+							preservedOwn[0],
+							directory,
+							{ candidates: scope },
+						);
+						for (const line of preview.previewLines) {
+							results.push(`   ${line}`);
+						}
+						const token = issueConfirmToken(preservedOwn[0], directory, {
+							candidates: scope,
+						});
+						results.push(
+							`🔐 Preserved ${preservedOwn.length} lane(s) containing uncommitted or live work. ` +
+								'Destroying them requires confirmation: re-run /swarm reset-session with ' +
+								`--confirm=${token} (valid 15 minutes).`,
+						);
+					}
+				}
 			}
 		}
 	} catch (err) {
-		// Issue #2599 AC6: a locked lane is recorded for next-start reclaim
-		// and reported with a typed, actionable diagnostic instead of a bare
-		// warning that leaves the task wedged until host restart.
-		const stranded = listChildDirs(worktreesDir)
-			.map((sessionId) => path.join(worktreesDir, sessionId))
-			.flatMap((sessionDir) =>
-				listChildDirs(sessionDir).map((laneId) =>
-					path.join(sessionDir, laneId),
-				),
-			);
-		for (const lanePath of stranded) {
-			recordDeadLaneReclaim(directory, {
-				lanePath,
-				branchName: '',
-				parentSessionId: path.basename(path.dirname(lanePath)),
-				taskId: path.basename(lanePath),
-				reason: errorMessage(err),
-			});
-		}
-		results.push(
-			`⚠️ WORKTREE_LANE_STRANDED: Failed to remove .swarm-worktrees/: ${errorMessage(err)}. ` +
-				`${stranded.length} lane(s) recorded. A child session or system process may hold .swarm/swarm.db (WAL). reclaim scheduled at next start.`,
-		);
+		results.push(`⚠️ Failed to reclaim worktree lanes: ${errorMessage(err)}`);
 	}
 
 	try {

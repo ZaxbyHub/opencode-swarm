@@ -104,7 +104,8 @@ describe('init orphan recovery ownership scan fails closed', () => {
 		const project = path.join(root, 'project');
 		await initGitRepo(project);
 		const sessionId = 'ses_stale';
-		const worktreePath = createOrphan(root, sessionId);
+		// Issue #2527: enumeration covers the project-internal base only.
+		const worktreePath = createOrphan(project, sessionId);
 		recordWorktreeProvisioningOwner(project, {
 			callID: 'expired-owner',
 			parentSessionId: sessionId,
@@ -127,8 +128,10 @@ describe('init orphan recovery ownership scan fails closed', () => {
 		const project = path.join(root, 'project');
 		await initGitRepo(project);
 		const sessionId = 'ses_live';
+		// Issue #2527: enumeration covers the project-internal base only; the
+		// registered lane must live there to face (and survive) enumeration.
 		const worktreePath = path.join(
-			root,
+			project,
 			'.swarm-worktrees',
 			sessionId,
 			'lane-1',

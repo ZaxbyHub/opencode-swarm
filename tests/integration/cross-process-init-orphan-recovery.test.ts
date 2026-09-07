@@ -141,7 +141,8 @@ describe('SC-105: cross-process lock held → orphaned worktrees preserved', () 
 			'(crossProcessLockHeld=true, removedWorktrees=[], prunedWorktrees=false)',
 		async () => {
 			// Create orphaned worktree directories
-			const worktreeRoot = path.join(tmpDir, '.swarm-worktrees');
+			// (issue #2527: enumeration base is <project>/.swarm-worktrees)
+			const worktreeRoot = path.join(gitRepoDir, '.swarm-worktrees');
 			const orphanedWtPath = path.join(
 				worktreeRoot,
 				'session-parent-held',
@@ -196,7 +197,7 @@ describe('SC-105: cross-process lock held → orphaned worktrees preserved', () 
 			'and contains lock warning but no removedWorktrees',
 		async () => {
 			const orphanedWtPath = path.join(
-				tmpDir,
+				gitRepoDir,
 				'.swarm-worktrees',
 				'session-adv-held',
 				'lane-1',
@@ -246,7 +247,8 @@ describe('SC-105: cross-process lock held → orphaned worktrees preserved', () 
 describe('SC-106: lock released → cleanup proceeds', () => {
 	test('runInitOrphanRecovery reclaims orphaned worktrees after lock is released', async () => {
 		// Create orphaned worktree directories
-		const worktreeRoot = path.join(tmpDir, '.swarm-worktrees');
+		// (issue #2527: enumeration base is <project>/.swarm-worktrees)
+		const worktreeRoot = path.join(gitRepoDir, '.swarm-worktrees');
 		const orphanedWtPath = path.join(
 			worktreeRoot,
 			'session-after-release',
@@ -287,7 +289,7 @@ describe('SC-106: lock released → cleanup proceeds', () => {
 	});
 
 	test('SC-106: multiple orphaned worktrees are all reclaimed after lock release', async () => {
-		const worktreeRoot = path.join(tmpDir, '.swarm-worktrees');
+		const worktreeRoot = path.join(gitRepoDir, '.swarm-worktrees');
 
 		// Create three orphaned worktree directories
 		const sessions = [
@@ -421,7 +423,7 @@ function waitForLockReady(
 
 describe('cross-process simulation (real child process holding lock)', () => {
 	test('SC-105: real child process lock → worktrees preserved, crossProcessLockHeld=true', async () => {
-		const worktreeRoot = path.join(tmpDir, '.swarm-worktrees');
+		const worktreeRoot = path.join(gitRepoDir, '.swarm-worktrees');
 		const orphanedWtPath = path.join(
 			worktreeRoot,
 			'session-child-real',

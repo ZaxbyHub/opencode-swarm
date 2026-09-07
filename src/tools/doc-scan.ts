@@ -43,6 +43,9 @@ const SKIP_DIRECTORIES = new Set([
 	'node_modules',
 	'.git',
 	'.swarm',
+	// Issue #2527: project-internal worktree lanes are full nested git
+	// checkouts — never doc-scan them (repo-graph builder skips both too).
+	'.swarm-worktrees',
 	'dist',
 	'build',
 	'.next',

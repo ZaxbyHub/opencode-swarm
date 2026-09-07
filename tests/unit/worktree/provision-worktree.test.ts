@@ -264,9 +264,13 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		await initGitRepo(repoDir);
 
 		const branchName = 'swarm/lane/ses_parentSession/3.1';
+		// Issue #2527: the expected lane path is now INSIDE the project
+		// (<repo>/.swarm-worktrees/...), so this active collision must live at a
+		// NON-expected path for the "registered elsewhere → error" branch to fire
+		// (a worktree at the expected path is the adopt/recreate case instead).
 		const worktreePath = path.join(
-			repoDir,
-			'.swarm-worktrees',
+			path.dirname(repoDir),
+			'swarm-worktrees-elsewhere',
 			'ses_parentSession',
 			'3.1',
 		);
@@ -292,7 +296,7 @@ describe('provisionWorktree — verification (FR-004)', () => {
 
 		// Cleanup
 		await runGit(['worktree', 'remove', worktreePath], repoDir);
-		fs.rmSync(worktreePath, { recursive: true, force: true });
+		fs.rmSync(path.dirname(worktreePath), { recursive: true, force: true });
 		await runGit(['branch', '-D', branchName], repoDir);
 		fs.rmSync(repoDir, { recursive: true, force: true });
 	});

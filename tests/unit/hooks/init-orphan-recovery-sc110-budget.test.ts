@@ -19,11 +19,9 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import {
-	_internals as InitOrphanRecoveryInternals,
-	runInitOrphanRecovery,
-} from '../../../src/hooks/init-orphan-recovery';
+import { runInitOrphanRecovery } from '../../../src/hooks/init-orphan-recovery';
 import { _internals as MergeInternals } from '../../../src/worktree/merge';
+import { _internals as OwnershipInternals } from '../../../src/worktree/ownership';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -109,10 +107,7 @@ describe('SC-110: bounded budget — enumeration exceeds 10s → attempted:false
 		await initGitRepo(freshDir);
 
 		// Create many orphaned worktree directories to exercise enumeration
-		const worktreeRoot = path.resolve(
-			path.dirname(freshDir),
-			'.swarm-worktrees',
-		);
+		const worktreeRoot = path.resolve(freshDir, '.swarm-worktrees');
 		const largeCount = 100;
 		for (let i = 0; i < largeCount; i++) {
 			const sessionDir = path.join(worktreeRoot, `sess-timeout-${i}`, 'lane-1');
@@ -144,10 +139,7 @@ describe('SC-110: bounded budget — enumeration exceeds 10s → attempted:false
 		await initGitRepo(freshDir);
 
 		// Create orphaned worktree dirs so enumeration has work to do
-		const worktreeRoot = path.resolve(
-			path.dirname(freshDir),
-			'.swarm-worktrees',
-		);
+		const worktreeRoot = path.resolve(freshDir, '.swarm-worktrees');
 		mkdirSync(path.join(worktreeRoot, 'crashed-session', 'lane-1'), {
 			recursive: true,
 		});
@@ -178,41 +170,36 @@ describe('SC-110: bounded budget — enumeration exceeds 10s → attempted:false
 		}
 	});
 
-	test('runInitOrphanRecovery does not throw when removeWorktree+rmSync both fail with EBUSY — best-effort', async () => {
+	test('runInitOrphanRecovery does not throw when git removal fails with EBUSY — refusal is a stop', async () => {
 		const freshDir = realpathSync(
 			mkdtempSync(path.join(tmpdir(), 'init-orphan-ebusy-best-effort-')),
 		);
 		await initGitRepo(freshDir);
 
-		// Create a worktree-shaped orphan so recovery exercises git removal first.
-		const worktreeRoot = path.resolve(
-			path.dirname(freshDir),
+		// Issue #2527: a real registered worktree inside the project base, so
+		// reclamation goes through the ownership-gated helper — a git removal
+		// failure is a STOP that must preserve the candidate (never rmSync).
+		const orphanedPath = path.join(
+			freshDir,
 			'.swarm-worktrees',
+			'crashed-session',
+			'lane-1',
 		);
-		const orphanedPath = path.join(worktreeRoot, 'crashed-session', 'lane-1');
-		mkdirSync(orphanedPath, { recursive: true });
-		writeFileSync(path.join(orphanedPath, 'locked.txt'), 'locked\n');
-		writeFileSync(path.join(orphanedPath, '.git'), 'gitdir: unavailable\n');
+		const addResult = await runGit(freshDir, [
+			'worktree',
+			'add',
+			'-b',
+			'swarm-lane/crashed-session/lane-1',
+			orphanedPath,
+		]);
+		if (addResult.exitCode !== 0)
+			throw new Error('worktree add failed: ' + addResult.stderr);
 
-		// Save real removeWorktree and rmSync
-		const realRemoveWorktree = InitOrphanRecoveryInternals.removeWorktree;
-		const realRmSync = InitOrphanRecoveryInternals.rmSync;
-
-		// Mock removeWorktree to return an EBUSY-like error (simulates git worktree remove failing)
-		InitOrphanRecoveryInternals.removeWorktree = mock(
-			async (_wtPath: string, _projRoot: string) => {
-				return { error: 'EBUSY: worktree is locked by another process' };
-			},
-		);
-
-		// Mock rmSync to also throw EBUSY (simulates Windows file lock)
-		InitOrphanRecoveryInternals.rmSync = mock(
-			(_path: string, _options?: { recursive?: boolean; force?: boolean }) => {
-				throw Object.assign(new Error('EBUSY: directory is locked'), {
-					code: 'EBUSY',
-				});
-			},
-		);
+		// Mock the ownership-gated git removal to return an EBUSY-like error
+		const realRemoveWorktree = OwnershipInternals.removeWorktree;
+		OwnershipInternals.removeWorktree = mock(async () => ({
+			error: 'EBUSY: worktree is locked by another process',
+		}));
 
 		try {
 			const result = await runInitOrphanRecovery(freshDir);
@@ -221,7 +208,7 @@ describe('SC-110: bounded budget — enumeration exceeds 10s → attempted:false
 			expect(result).toBeDefined();
 			expect(typeof result.attempted).toBe('boolean');
 
-			// EBUSY warning should appear (from removeWorktree's error)
+			// EBUSY warning should appear (from the refused removal)
 			expect(result.warnings.some((w) => w.includes('EBUSY'))).toBe(true);
 
 			// The failed path should NOT be in removedWorktrees
@@ -229,12 +216,10 @@ describe('SC-110: bounded budget — enumeration exceeds 10s → attempted:false
 				result.removedWorktrees.some((p) => p.includes('crashed-session')),
 			).toBe(false);
 
-			// The directory should still exist (best-effort — lock prevented removal)
+			// The worktree must survive the refusal (never rmSync-escalated)
 			expect(existsSync(orphanedPath)).toBe(true);
 		} finally {
-			InitOrphanRecoveryInternals.removeWorktree = realRemoveWorktree;
-			InitOrphanRecoveryInternals.rmSync = realRmSync;
-			rmSync(worktreeRoot, { recursive: true, force: true });
+			OwnershipInternals.removeWorktree = realRemoveWorktree;
 			rmSync(freshDir, { recursive: true, force: true });
 		}
 	});

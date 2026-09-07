@@ -22,7 +22,9 @@ let rootDir: string;
 let projectDir: string;
 
 function worktreePath(sessionId: string, laneId: string): string {
-	return path.join(rootDir, '.swarm-worktrees', sessionId, laneId);
+	// Issue #2527: enumeration covers the project-INTERNAL base
+	// (<project>/.swarm-worktrees), never the legacy parent-level base.
+	return path.join(projectDir, '.swarm-worktrees', sessionId, laneId);
 }
 
 function makeWorktree(sessionId: string, laneId: string): string {
@@ -52,8 +54,10 @@ beforeEach(() => {
 			_release: async () => {},
 		},
 	}));
-	// Force the production filesystem fallback so each test observes whether the
-	// candidate directory was actually deleted.
+	// Post-#2527, .git-less lanes inside the project's own base are removed by
+	// the ownership-gated rmSync path directly; the mock keeps any git removal
+	// attempt out of the picture so each test observes pure filesystem
+	// deletion of the candidate directory.
 	_internals.removeWorktree = mock(async () => ({
 		error: 'not a registered git worktree',
 	}));
