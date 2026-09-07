@@ -349,7 +349,8 @@ describe('#2628 per-entry gate resolution (evaluatePhaseCriticalDirectives)', ()
 		// Deterministic clock: the gate requires the applied terminal's
 		// committed_at to be STRICTLY greater than the violated terminal's, and
 		// wall-clock granularity can tie two adjacent commits on fast CI hosts.
-		const clock = { tick: Date.now() - 10_000 };
+		const realNowMs = ledgerInternals.nowMs;
+		const clock = { tick: 1_000_000 };
 		ledgerInternals.nowMs = () => (clock.tick += 1_000);
 		try {
 			await seedDisplay(PHASE, 'gate-violated', [id], SESSION);
@@ -357,7 +358,7 @@ describe('#2628 per-entry gate resolution (evaluatePhaseCriticalDirectives)', ()
 			await seedDisplay(PHASE, 'gate-applied', [id], SESSION);
 			await seedTerminal('gate-applied', id, 'applied', SESSION);
 		} finally {
-			ledgerInternals.nowMs = () => Date.now();
+			ledgerInternals.nowMs = realNowMs;
 		}
 
 		const result = await evaluatePhaseCriticalDirectives({
@@ -378,7 +379,8 @@ describe('#2628 per-entry gate resolution (evaluatePhaseCriticalDirectives)', ()
 		const kp = resolveSwarmKnowledgePath(dir);
 		const id = 'directive-2628-contradicted-000000000008';
 		await appendKnowledge(kp, makeEntry(id, 'critical'));
-		const clock = { tick: Date.now() - 10_000 };
+		const realNowMs = ledgerInternals.nowMs;
+		const clock = { tick: 1_000_000 };
 		ledgerInternals.nowMs = () => (clock.tick += 1_000);
 		try {
 			await seedDisplay(PHASE, 'gate-contradicted', [id], SESSION);
@@ -398,7 +400,7 @@ describe('#2628 per-entry gate resolution (evaluatePhaseCriticalDirectives)', ()
 			await seedDisplay(PHASE, 'gate-contradicted-applied', [id], SESSION);
 			await seedTerminal('gate-contradicted-applied', id, 'applied', SESSION);
 		} finally {
-			ledgerInternals.nowMs = () => Date.now();
+			ledgerInternals.nowMs = realNowMs;
 		}
 
 		const result = await evaluatePhaseCriticalDirectives({
