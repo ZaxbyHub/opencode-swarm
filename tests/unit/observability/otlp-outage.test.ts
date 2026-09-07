@@ -229,6 +229,35 @@ describe('circuit', () => {
 		expect(closed?.exported).toBeGreaterThanOrEqual(1);
 		await stub.close();
 	}, 30_000);
+
+	test('post-restart health display uses the persisted circuitCooldownMs, not a fixed default', async () => {
+		const dead = await deadEndpointUrl();
+		const dir = freshProjectDir();
+		initTelemetry(dir);
+		registerOtlpExporter(
+			dir,
+			testExportConfig(dead, {
+				maxRetries: 0,
+				backoffBaseMs: 5,
+				backoffMaxMs: 10,
+				circuitThreshold: 1,
+				circuitCooldownMs: 200,
+			}),
+		);
+		const { emit } = await import('../../../src/telemetry.js');
+		emit('delegation_begin' as never, { ...PAYLOAD } as never);
+		await flushOtlpExporterForTesting(dir);
+		expect(readOtlpExporterHealth(dir)?.circuitOpen).toBe(true);
+
+		// Restart: the in-memory config is gone; only persisted state remains.
+		resetOtlpExporterForTesting();
+		// Past the CONFIGURED 200 ms cooldown but far inside a fixed 60 s
+		// fallback — the persisted cooldown must report the circuit closed.
+		await new Promise((r) => setTimeout(r, 260));
+		const afterRestart = readOtlpExporterHealth(dir);
+		expect(afterRestart?.circuitOpen).toBe(false);
+		expect(afterRestart?.state).toBe('disabled');
+	}, 20_000);
 });
 
 describe('TLS/auth failure classification (secret-safe diagnostics)', () => {

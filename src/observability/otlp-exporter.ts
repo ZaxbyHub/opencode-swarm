@@ -129,6 +129,7 @@ interface PersistedState {
 	consecutiveFailures: number;
 	circuitOpenAt: number | null;
 	nextAttemptAt: number;
+	circuitCooldownMs: number;
 }
 
 interface SpoolRecord {
@@ -260,7 +261,10 @@ function statePath(directory: string): string {
 	return join(directory, OTLP_EXPORT_SPOOL_DIR, STATE_FILE);
 }
 
-function emptyState(convention: 'genai' | 'openinference'): PersistedState {
+function emptyState(
+	convention: 'genai' | 'openinference',
+	circuitCooldownMs: number,
+): PersistedState {
 	return {
 		v: STATE_VERSION,
 		convention,
@@ -274,6 +278,7 @@ function emptyState(convention: 'genai' | 'openinference'): PersistedState {
 		consecutiveFailures: 0,
 		circuitOpenAt: null,
 		nextAttemptAt: 0,
+		circuitCooldownMs,
 	};
 }
 
@@ -661,8 +666,11 @@ export function registerOtlpExporter(
 		if (endpointUrl(config) === null) return;
 		_directory = directory;
 		_config = config;
-		_state = loadState(directory) ?? emptyState(config.convention);
+		_state =
+			loadState(directory) ??
+			emptyState(config.convention, config.circuitCooldownMs);
 		_state.convention = config.convention;
+		_state.circuitCooldownMs = config.circuitCooldownMs;
 		_listener = (_event, _data, canonical?: ObservabilityEvent) => {
 			// Fully guarded: a listener error must never propagate into
 			// emit() (the bus also guards, but the exporter owns its failure).
@@ -742,8 +750,7 @@ export function readOtlpExporterHealth(
 		persisted.circuitOpenAt !== null &&
 		_internals.now() <
 			persisted.circuitOpenAt +
-				(cfg?.circuitCooldownMs ??
-					(persisted.convention === undefined ? 60_000 : 60_000));
+				(cfg?.circuitCooldownMs ?? persisted.circuitCooldownMs ?? 60_000);
 	const activeHere = _active && _directory === directory;
 	return {
 		state: circuitOpen ? 'cooldown' : activeHere ? 'active' : 'disabled',
