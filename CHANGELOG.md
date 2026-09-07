@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.168.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.168.0...v7.168.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **compaction:** guard the registered host hook when hooks.compaction is disabled ([#2533](https://github.com/ZaxbyHub/opencode-swarm/issues/2533)) ([f35f785](https://github.com/ZaxbyHub/opencode-swarm/commit/f35f7856c011fed2b732e2b76f04f39151549d13))
+* **compaction:** make disabled compaction safe through the registered host hook ([4ef11b7](https://github.com/ZaxbyHub/opencode-swarm/commit/4ef11b788b02c36e91439f44187980ead53d1b41))
+
 ## [7.168.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.167.2...v7.168.0) (2026-09-06)
 
 
