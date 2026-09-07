@@ -188,9 +188,9 @@ describe('Stage-A policy and six-way CI agreement (issue #2552)', () => {
 		// Previously, the record counted a release-please short-circuit with a
 		// skipped CI matrix as the third full-matrix receipt.
 		expect(stageAReceiptsSection).toContain(
-			'Two qualifying full-matrix runs below',
+			'Three qualifying full-matrix runs below',
 		);
-		expect(stageAReceiptsSection).toMatch(
+		expect(stageAReceiptsSection).not.toMatch(
 			/A third\s+qualifying Stage-A receipt remains pending\./,
 		);
 		expect(stageAReceiptsSection).toContain(
@@ -198,9 +198,6 @@ describe('Stage-A policy and six-way CI agreement (issue #2552)', () => {
 		);
 		expect(stageAReceiptsSection).toContain(
 			'release-please short-circuit skipped the CI matrix',
-		);
-		expect(stageAReceiptsSection).not.toContain(
-			'identifier=stage-a-post-land-3',
 		);
 
 		const stageAReceipts = [
@@ -222,11 +219,20 @@ describe('Stage-A policy and six-way CI agreement (issue #2552)', () => {
 				merged: '2026-09-07T07:58:25Z',
 				removed: '2026-09-07T07:58:25Z',
 			},
+			{
+				identifier: 'stage-a-post-land-3',
+				run: '34162959243',
+				duration: '2113000',
+				completed: '2026-09-07T21:58:42Z',
+				added: '2026-09-07T21:23:12Z',
+				merged: '2026-09-07T21:59:07Z',
+				removed: '2026-09-07T21:59:07Z',
+			},
 		] as const;
 
 		expect(
 			stageAReceiptsSection.match(/^identifier=stage-a-post-land-\d+$/gm) ?? [],
-		).toHaveLength(2);
+		).toHaveLength(3);
 		for (const receipt of stageAReceipts) {
 			const block = extractReceipt(
 				stageAReceiptsSection,

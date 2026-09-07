@@ -314,12 +314,14 @@ preserved_checks=unit-passed; recursive integration discovery; cross-contaminati
 
 ### Stage-A post-land receipts
 
-Two qualifying full-matrix runs below were created after PR #2624 merged at
+Three qualifying full-matrix runs below were created after PR #2624 merged at
 `2026-09-07T06:07:23Z`. Each run completed successfully and its merge-queue
 timeline shows the initial add followed by an adjacent terminal merge/remove
 pair, with no intervening re-add. The receipts use `queue_wait_ms=unavailable`
-because no canonical run-level runner-wait aggregation exists. A third
-qualifying Stage-A receipt remains pending.
+because no canonical run-level runner-wait aggregation exists. The third, run
+`34162959243`, was collected after the event-scoped cancellation change (PR
+#2632) merged at `2026-09-07T16:39:21Z`, so the Stage-A set post-dates every
+#2552 code change.
 
 Run `34121635625` is explicitly excluded from the qualifying receipt set: its
 release-please short-circuit skipped the CI matrix, so it is not a full-matrix
@@ -357,6 +359,22 @@ preserved_checks=unit-passed; recursive integration discovery; cross-contaminati
 terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
 ```
 
+```text
+identifier=stage-a-post-land-3
+actions=https://github.com/ZaxbyHub/opencode-swarm/actions/runs/34162959243
+run_duration_ms=2113000
+queue_wait_ms=unavailable
+eviction=none
+eviction_evidence=timeline:add→terminal-merge/remove-pair
+timeline_added_at=2026-09-07T21:23:12Z
+timeline_merged_at=2026-09-07T21:59:07Z
+timeline_removed_at=2026-09-07T21:59:07Z
+unit_shards_executed=6
+completed_at=2026-09-07T21:58:42Z
+preserved_checks=unit-passed; recursive integration discovery; cross-contamination gate
+terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
+```
+
 ## Cross-contamination warning language
 
 The decision record uses two distinct outcomes: a newly introduced
@@ -376,8 +394,8 @@ underlying check.
   conservative rather than a provider-capacity claim.
 - The retain-six Windows decision is landed for this evidence window; a future
   Windows-ten experiment remains gated and unlanded.
-- The C9 contract requires three receipts per stage; missing receipts keep
-  closure open.
+- The C9 contract requires three receipts per stage; all three Stage-D and
+  all three Stage-A receipts are recorded as of 2026-09-07.
 
 ### Migration
 
