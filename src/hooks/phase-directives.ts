@@ -72,19 +72,23 @@ export interface DirectiveCandidate {
 
 /**
  * True when `next` is a better per-entry representative than `incumbent`.
- * Precedence (#2628): a membership whose current terminal is `violated` wins
- * (it carries the remediation obligation via prior_terminal_*), then the most
- * recently committed membership, then the lexicographically greatest trace_id
- * (code-unit order — locale-independent determinism).
+ * Precedence (#2628): a membership whose current terminal is a violation
+ * (`violated` or `contradicted`) wins (it carries the remediation obligation
+ * via prior_terminal_*), then the most recently committed membership, then the
+ * lexicographically greatest trace_id (code-unit order — locale-independent
+ * determinism).
  */
 export function isPreferredDirectiveCandidate(
 	next: DirectiveCandidate,
 	incumbent: DirectiveCandidate,
 ): boolean {
-	const nextViolated = next.directive.prior_terminal_outcome === 'violated';
-	const incumbentViolated =
-		incumbent.directive.prior_terminal_outcome === 'violated';
-	if (nextViolated !== incumbentViolated) return nextViolated;
+	const nextViolation =
+		next.directive.prior_terminal_outcome === 'violated' ||
+		next.directive.prior_terminal_outcome === 'contradicted';
+	const incumbentViolation =
+		incumbent.directive.prior_terminal_outcome === 'violated' ||
+		incumbent.directive.prior_terminal_outcome === 'contradicted';
+	if (nextViolation !== incumbentViolation) return nextViolation;
 	if (next.committed_at !== incumbent.committed_at) {
 		return next.committed_at > incumbent.committed_at;
 	}
@@ -133,7 +137,17 @@ export async function readPhaseDirectivesToVerify(
 		const entries = await readEntriesById(directory);
 		const candidates: DirectiveCandidate[] = [];
 		for (const membership of result.memberships) {
-			if (membership.terminal && membership.terminal.outcome !== 'violated') {
+			// Violation-class terminals (violated / contradicted) stay in the
+			// shown set as remediation obligations — the gate treats both as
+			// blocking, so the reviewer must see them to resolve the phase
+			// (PR #2636 review: a contradicted-only entry previously blocked
+			// the phase with no reviewer path). Satisfying terminals are
+			// already resolved and drop out.
+			if (
+				membership.terminal &&
+				membership.terminal.outcome !== 'violated' &&
+				membership.terminal.outcome !== 'contradicted'
+			) {
 				continue;
 			}
 			const e = entries.get(membership.entry_id);
@@ -142,6 +156,7 @@ export async function readPhaseDirectivesToVerify(
 			// source of truth — also excludes `quarantined_unactionable` (failed
 			// the actionability gate; should not be re-injected as a directive).
 			if (!isActiveStatus(e.status)) continue;
+			const outcome = membership.terminal?.outcome;
 			candidates.push({
 				committed_at: membership.committed_at,
 				directive: {
@@ -151,12 +166,12 @@ export async function readPhaseDirectivesToVerify(
 					cohort_id: membership.cohort_id,
 					source_link_id: membership.source_link_id,
 					prior_terminal_outcome:
-						membership.terminal?.outcome === 'violated'
-							? 'violated'
+						outcome === 'violated' || outcome === 'contradicted'
+							? outcome
 							: undefined,
 					prior_terminal_event_id:
-						membership.terminal?.outcome === 'violated'
-							? membership.terminal.event_id
+						outcome === 'violated' || outcome === 'contradicted'
+							? membership.terminal?.event_id
 							: undefined,
 					priority: membership.critical
 						? 'critical'

@@ -20,6 +20,11 @@
   the block carries a distinct `critical overflow` notice instead of hiding a
   phase-blocking obligation. Per-entry lesson/verification_predicate prose is
   truncated to 400 characters; pair identity and priority stay exact.
+- Violation-class terminals now reach the reviewer for remediation: a
+  membership whose terminal is `contradicted` (like `violated`) is shown in the
+  compliance block as a remediation obligation, so a contradicted critical
+  directive can be resolved by a later reviewer verification instead of
+  permanently blocking the phase.
 - The phase-complete critical-directive gate now resolves obligations per
   ENTRY rather than per membership: verifying a directive once (on the shown
   representative) satisfies the entry's other exposures in the same phase

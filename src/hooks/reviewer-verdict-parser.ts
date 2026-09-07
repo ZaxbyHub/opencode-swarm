@@ -254,7 +254,8 @@ export async function reconcileReviewerVerdicts(
 	for (const group of groups.values()) {
 		const first = group[0].directive;
 		const remediationAuthorization =
-			first.prior_terminal_outcome === 'violated' &&
+			(first.prior_terminal_outcome === 'violated' ||
+				first.prior_terminal_outcome === 'contradicted') &&
 			first.prior_terminal_event_id &&
 			group.some((item) => item.type !== 'violated')
 				? {

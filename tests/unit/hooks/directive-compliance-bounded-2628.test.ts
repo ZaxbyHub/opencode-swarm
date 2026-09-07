@@ -28,6 +28,7 @@ import {
 import { appendKnowledgeEvent } from '../../../src/hooks/knowledge-events.js';
 import {
 	commitDisplayedMembership,
+	_internals as ledgerInternals,
 	queryLiveMemberships,
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
@@ -109,7 +110,7 @@ async function seedDisplay(
 async function seedTerminal(
 	traceId: string,
 	entryId: string,
-	outcome: 'applied' | 'violated',
+	outcome: 'applied' | 'violated' | 'contradicted',
 	sessionId = 'session-1',
 ): Promise<void> {
 	const terminal = await validateAndCommitTerminalBatch(dir, {
@@ -345,13 +346,19 @@ describe('#2628 per-entry gate resolution (evaluatePhaseCriticalDirectives)', ()
 		const kp = resolveSwarmKnowledgePath(dir);
 		const id = 'directive-2628-later-rem-00000000000005';
 		await appendKnowledge(kp, makeEntry(id, 'critical'));
-		await seedDisplay(PHASE, 'gate-violated', [id], SESSION);
-		await seedTerminal('gate-violated', id, 'violated', SESSION);
-		// Committed strictly later (separate awaits guarantee monotonic journal
-		// order; the gate requires the applied committed_at to be strictly
-		// greater than the violated's).
-		await seedDisplay(PHASE, 'gate-applied', [id], SESSION);
-		await seedTerminal('gate-applied', id, 'applied', SESSION);
+		// Deterministic clock: the gate requires the applied terminal's
+		// committed_at to be STRICTLY greater than the violated terminal's, and
+		// wall-clock granularity can tie two adjacent commits on fast CI hosts.
+		const clock = { tick: Date.now() - 10_000 };
+		ledgerInternals.nowMs = () => (clock.tick += 1_000);
+		try {
+			await seedDisplay(PHASE, 'gate-violated', [id], SESSION);
+			await seedTerminal('gate-violated', id, 'violated', SESSION);
+			await seedDisplay(PHASE, 'gate-applied', [id], SESSION);
+			await seedTerminal('gate-applied', id, 'applied', SESSION);
+		} finally {
+			ledgerInternals.nowMs = () => Date.now();
+		}
 
 		const result = await evaluatePhaseCriticalDirectives({
 			directory: dir,
@@ -361,6 +368,45 @@ describe('#2628 per-entry gate resolution (evaluatePhaseCriticalDirectives)', ()
 
 		expect(result).toMatchObject({ blocked: false, failedClosed: false });
 		expect(result.unresolved).toEqual([]);
+	});
+
+	it('shows a contradicted-terminal entry to the reviewer as a remediation obligation (#2636 review)', async () => {
+		// A 'contradicted' terminal blocks the phase gate (isViolation includes
+		// it), so the reviewer must SEE the obligation to remediate it. Before
+		// this fix the read filter skipped contradicted terminals entirely and
+		// the phase could never resolve through the reviewer path.
+		const kp = resolveSwarmKnowledgePath(dir);
+		const id = 'directive-2628-contradicted-000000000008';
+		await appendKnowledge(kp, makeEntry(id, 'critical'));
+		const clock = { tick: Date.now() - 10_000 };
+		ledgerInternals.nowMs = () => (clock.tick += 1_000);
+		try {
+			await seedDisplay(PHASE, 'gate-contradicted', [id], SESSION);
+			await seedTerminal('gate-contradicted', id, 'contradicted', SESSION);
+
+			const directives = await readPhaseDirectivesToVerify(dir, PHASE);
+			expect(directives).toHaveLength(1);
+			expect(directives[0]).toMatchObject({
+				trace_id: 'gate-contradicted',
+				entry_id: id,
+				prior_terminal_outcome: 'contradicted',
+			});
+			expect(directives[0]?.prior_terminal_event_id).toBeString();
+
+			// A strictly-later applied terminal on a sibling membership
+			// remediates the contradiction and resolves the entry.
+			await seedDisplay(PHASE, 'gate-contradicted-applied', [id], SESSION);
+			await seedTerminal('gate-contradicted-applied', id, 'applied', SESSION);
+		} finally {
+			ledgerInternals.nowMs = () => Date.now();
+		}
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory: dir,
+			sessionId: SESSION,
+			phaseLabel: PHASE,
+		});
+		expect(result).toMatchObject({ blocked: false, failedClosed: false });
 	});
 
 	it('reports the shown (violated-preferred) trace for an unresolved entry', async () => {

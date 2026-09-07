@@ -49,7 +49,7 @@ export interface DirectiveToVerify {
 	session_id: string;
 	cohort_id?: string;
 	source_link_id?: string;
-	prior_terminal_outcome?: 'violated';
+	prior_terminal_outcome?: 'violated' | 'contradicted';
 	prior_terminal_event_id?: string;
 	priority: DirectivePriority;
 	lesson?: string;
@@ -97,13 +97,21 @@ function renderOptionalText(value: string): string {
 	return JSON.stringify(value);
 }
 
-/** Truncate prose payloads so one huge entry cannot consume the budget. */
+/** Truncate prose payloads so one huge entry cannot consume the budget. The
+ * post-stringify `</` escape (`\/` is valid JSON and round-trips through
+ * JSON.parse) keeps a crafted lesson from embedding a literal
+ * `</directives_to_verify>` close tag that would truncate the parsed
+ * verify-set at reconcile time. */
 function renderTruncatedOptionalText(value: string): string {
 	const truncated =
 		value.length > MAX_FIELD_RENDER_CHARS
 			? `${value.slice(0, MAX_FIELD_RENDER_CHARS)}...`
 			: value;
-	return renderOptionalText(truncated);
+	// The per-field cap is a prose-hygiene limit measured in UTF-16 code units;
+	// budget admission is measured in UTF-8 bytes (Buffer.byteLength below), so
+	// multi-byte content cannot widen the block's ceiling — it only changes how
+	// much prose one field carries.
+	return renderOptionalText(truncated).replace(/<\//g, '<\\/');
 }
 
 function parseOptionalText(value: string): string | undefined {
@@ -162,9 +170,20 @@ export function buildDirectiveComplianceBlock(
 	charBudget?: number,
 ): string | null {
 	if (directives.length === 0) return null;
-	const effectiveBudget = Math.min(
-		charBudget ?? DIRECTIVE_COMPLIANCE_DEFAULT_CHAR_BUDGET,
-		DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP,
+	// Reserve the fixed post-loop tail (notices allowance + closing tag + blank
+	// line + the static output spec) so admission accounting covers the ENTIRE
+	// rendered block, keeping the ceiling genuinely hard (PR #2636 review).
+	const tailReserve =
+		Buffer.byteLength(
+			`</directives_to_verify>\n\n${DIRECTIVE_COMPLIANCE_OUTPUT_SPEC}`,
+			'utf-8',
+		) + 256; // + bounded allowance for the two count-only notice lines
+	const effectiveBudget = Math.max(
+		0,
+		Math.min(
+			charBudget ?? DIRECTIVE_COMPLIANCE_DEFAULT_CHAR_BUDGET,
+			DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP,
+		) - tailReserve,
 	);
 	const sorted = [...directives].sort((a, b) => {
 		const pr =
@@ -282,11 +301,12 @@ export function parseDirectivesToVerifyBlock(
 			if (sourceLinkId) current.source_link_id = sourceLinkId;
 			continue;
 		}
-		const priorOutcomeM = /^\s+prior_terminal_outcome:\s*(violated)\s*$/.exec(
-			line,
-		);
+		const priorOutcomeM =
+			/^\s+prior_terminal_outcome:\s*(violated|contradicted)\s*$/.exec(line);
 		if (priorOutcomeM) {
-			current.prior_terminal_outcome = 'violated';
+			current.prior_terminal_outcome = priorOutcomeM[1] as
+				| 'violated'
+				| 'contradicted';
 			continue;
 		}
 		const priorEventM =

@@ -76,3 +76,25 @@ describe('prompt-block budget guardrail (#2628 defect class)', () => {
 		expect(unbounded).toEqual([]);
 	});
 });
+
+describe('compliance budget wiring pin (#2636 review PRR-005)', () => {
+	it('pins the budget clamp wiring at both injection call sites', () => {
+		// The two reviewer-dispatch paths must pass the clamped compliance
+		// budget (configured knob clamped to the hard cap) to
+		// buildDirectiveComplianceBlock. This source-level pin catches a
+		// silent revert to the unbounded one-argument call.
+		const taskPath = readFileSync(
+			path.resolve(SRC_ROOT, 'hooks/delegate-directive-injection.ts'),
+			'utf-8',
+		);
+		const lanePath = readFileSync(
+			path.resolve(SRC_ROOT, 'hooks/knowledge-injector.ts'),
+			'utf-8',
+		);
+		const wiring = /DIRECTIVE_COMPLIANCE_(?:DEFAULT_CHAR_BUDGET|HARD_CHAR_CAP)/;
+		expect(taskPath).toMatch(wiring);
+		expect(lanePath).toMatch(wiring);
+		expect(taskPath).toMatch(/buildDirectiveComplianceBlock\(\s*toVerify,/);
+		expect(lanePath).toMatch(/buildDirectiveComplianceBlock\(\s*toVerify,/);
+	});
+});
