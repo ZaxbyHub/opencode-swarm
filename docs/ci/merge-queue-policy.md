@@ -1,10 +1,11 @@
-# Merge-queue CI policy — Stage D decision record (#2552)
+# Merge-queue CI policy — Stage D and Stage A decision record (#2552)
 
 ## Status and scope
 
 **Record date:** 2026-09-06
 **Evidence:** post-#2551 baseline, 2026-09-03T21:55:18Z through
-2026-09-05T23:27:21Z.
+2026-09-05T23:27:21Z; current Stage-A window, 2026-09-03T21:57:31Z through
+2026-09-06T22:14:18Z.
 
 This document accompanies the Stage-D recursive integration and gate-hygiene
 changes for issue #2552. It records what the observed data supports and what
@@ -20,8 +21,9 @@ The retained policy is:
 - `build_concurrency=5`; and
 - `ALLGREEN` / only-non-failing merge eligibility.
 
-The Stage A Windows10 decision is planned separately. No Windows implementation
-is landed or claimed by this record.
+The Stage-A retain-six decision is landed by this record for the current
+evidence window. No Windows-ten implementation is landed; only a future
+Windows-ten experiment remains unlanded and gated by the reopening criteria.
 
 ## Post-#2551 baseline
 
@@ -157,7 +159,7 @@ not inferred from this zero-overlap baseline.
 **Rollback.** If a future, attributable overlap is demonstrated, revisit the
 setting in a follow-up decision record with receipts and a bounded experiment.
 
-## Host check-name gate and the planned Stage A decision
+## Host check-name gate and Stage A decision
 
 The host check-name gate is a prerequisite for any merge-queue or branch-
 protection decision: inspect the names emitted by the host for the exact commit
@@ -165,11 +167,57 @@ and compare them with the required-check configuration. Matrix jobs must be
 matched by their emitted leg names; an assumed aggregate name is not evidence.
 Record the host/version, event, commit, and observed names with the decision.
 
-The Stage A Windows10 decision is planned separately and is not landed by
-#2552's Stage-D record. This document records only the gate that must protect
-that future decision and the observed Windows timing baseline. It makes no
-claim that Windows10 support, a Windows workflow change, or a Windows
-implementation has shipped.
+### Stage A decision window
+
+The current Stage A evidence window contains **56 `merge_group` runs** from
+2026-09-03T21:57:31Z through 2026-09-06T22:14:18Z: **39 successful and 17 failed**.
+The merge-group run-duration tail was **P50 `30m36s`, P95 `51m25s`,
+and maximum `58m47s`**. Retries and duplicate merge-group attempts remain
+separately accounted for rather than being folded into the outcome count. The
+Actions timing records report `total_ms=0` for the Ubuntu, Windows, and macOS
+jobs; account-level concurrency capacity remains unknown, not zero.
+
+Runner queue time is the interval waiting for a runner before a job starts.
+The separately observed **39m41s** figure is end-to-end merge-group queue and
+group/`ALLGREEN` serialization, not runner queue time and not a quantity that
+Windows re-sharding can directly change. The sampled Windows runner queue
+delay reached 6.7–14.7 minutes.
+
+**Decision:** Retain six Windows unit shards for this evidence window as a
+capacity/risk decision. The workflow remains six shards on Ubuntu, macOS, and
+Windows (`shard: [1, 2, 3, 4, 5, 6]` and `num_shards=6`), and Ubuntu coverage
+continues to use the six-way partition. Two full post-Stage-D runs show
+Windows shard-job medians of **20.4–22.7m**, with about **21m** of divisible
+test work and about **1.6m** of fixed overhead. Ten shards project an
+approximately **8m** service-time benefit when all ten can run concurrently,
+but at `max_entries_to_build=5` the theoretical Windows-cell request grows
+from **30 to 50**. The account cap is unknown, so this is capacity risk rather
+than a claim that Windows service time is insignificant.
+
+**Expected benefit.** Preserve the current six-way partition and avoid moving
+the projected eight-minute service reduction into an unmeasured runner queue
+or an unknown account-capacity boundary.
+
+**Preserved gates.** Required Ubuntu unit cells 1 through 4, the `unit-passed`
+aggregate, the six-way coverage matrix and six-file loops, the exact host
+check-name gate, `ALLGREEN`, and cross-contamination blocking remain required.
+No Windows-ten workflow or ruleset change is included in this decision.
+
+**Validation.** Recompute a bounded 20-run window with Windows test-step
+median, P95 runner queue, merge-group wall time, failures, retries, and the
+host-emitted check names. A staged A/B must retain six Ubuntu coverage shards
+and compare the same required gates before changing the denominator.
+
+**Rollback.** Revert this documentation/test/release decision as a unit if
+the evidence is corrected. If the reopening gate is met, update the Windows
+matrix, per-cell denominator, coverage owners, and this record together;
+otherwise leave the workflow at six.
+
+**Reopening gate.** Reopen a Windows-ten experiment when a 20-run window shows
+median Windows test-step duration **>=18m AND P95 runner queue <=5m**, **or** a
+staged A/B shows **>=5m P95 merge-group wall-time gain without >5m marginal
+runner-queue growth**. This gate separates divisible Windows test work from
+runner and end-to-end queue serialization.
 
 ## C9 post-land receipt contract
 
@@ -182,14 +230,83 @@ identifier=stage-{d,a}-post-land-N
 actions=URL
 run_duration_ms=<integer>
 queue_wait_ms=integer|unavailable
-eviction=<recorded value>
+eviction=none
+eviction_evidence=timeline:add→terminal-merge/remove-pair
+timeline_added_at=ISO Z
+timeline_merged_at=ISO Z
+timeline_removed_at=ISO Z
+unit_shards_executed=6
 completed_at=ISO Z
+terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
 ```
+
+For these receipts, `queue_wait_ms=unavailable` is honest: queue wait is a
+per-job runner-wait measure, and no canonical run-level aggregation was defined
+for these full-matrix receipts. Do not infer zero from the unavailable value.
 
 Closure requires **3 receipts per stage**: three Stage-D receipts and three
 Stage-A receipts. A stage is not closed by a partial set, a dashboard screenshot,
 or a receipt that omits `queue_wait_ms` instead of using the literal
 `unavailable` value.
+
+For `eviction=none`, the receipt must show the initial timeline add followed by
+the adjacent terminal `merged`/`removed_from_merge_queue` pair. The terminal
+events may be timestamped in either order; `timeline_added_at`,
+`timeline_merged_at`, and `timeline_removed_at` must all be retained, with no
+intervening nonterminal removal/re-add. The Stage-D receipts below are full CI
+matrix runs with all six Windows unit shards; matrix-skipped release runs and
+the short PR-Standards sibling workflow do not qualify.
+
+```text
+identifier=stage-d-post-land-1
+actions=https://github.com/ZaxbyHub/opencode-swarm/actions/runs/34051617672
+run_duration_ms=1841000
+queue_wait_ms=unavailable
+eviction=none
+eviction_evidence=timeline:add→terminal-merge/remove-pair
+timeline_added_at=2026-09-06T18:24:18Z
+timeline_merged_at=2026-09-06T18:55:43Z
+timeline_removed_at=2026-09-06T18:55:43Z
+unit_shards_executed=6
+completed_at=2026-09-06T18:55:17Z
+terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
+```
+
+```text
+identifier=stage-d-post-land-2
+actions=https://github.com/ZaxbyHub/opencode-swarm/actions/runs/34060659584
+run_duration_ms=1781000
+queue_wait_ms=unavailable
+eviction=none
+eviction_evidence=timeline:add→terminal-merge/remove-pair
+timeline_added_at=2026-09-06T21:18:08Z
+timeline_merged_at=2026-09-06T21:48:11Z
+timeline_removed_at=2026-09-06T21:48:11Z
+unit_shards_executed=6
+completed_at=2026-09-06T21:48:07Z
+terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
+```
+
+```text
+identifier=stage-d-post-land-3
+actions=https://github.com/ZaxbyHub/opencode-swarm/actions/runs/34061223031
+run_duration_ms=2435000
+queue_wait_ms=unavailable
+eviction=none
+eviction_evidence=timeline:add→terminal-merge/remove-pair
+timeline_added_at=2026-09-06T21:29:16Z
+timeline_merged_at=2026-09-06T22:10:31Z
+timeline_removed_at=2026-09-06T22:10:30Z
+unit_shards_executed=6
+completed_at=2026-09-06T22:10:05Z
+terminal_pair_evidence=adjacent terminal merge/remove pair; no intervening re-add
+```
+
+### Stage-A post-land receipts — pending
+
+Stage-A post-land receipts remain **pending** until three real full-matrix runs
+after this decision is published. No pre-publication or local run is labeled
+as Stage-A post-land evidence.
 
 ## Cross-contamination warning language
 
@@ -208,8 +325,8 @@ underlying check.
   record does not infer why the two counts differ.
 - Account concurrency is unknown, so the concurrency decision is intentionally
   conservative rather than a provider-capacity claim.
-- The Windows figures are observational timing evidence only. They do not land
-  the separate Stage A Windows10 decision.
+- The retain-six Windows decision is landed for this evidence window; a future
+  Windows-ten experiment remains gated and unlanded.
 - The C9 contract requires three receipts per stage; missing receipts keep
   closure open.
 
