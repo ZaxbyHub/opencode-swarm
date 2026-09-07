@@ -3882,7 +3882,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		],
 		readerCitations: [
 			'src/observability/otlp-exporter.ts:332 readSpoolLines — flush-bounded read, sync',
-			'src/observability/otlp-exporter.ts:813 readOtlpExporterHealth — health/report read, sync',
+			'src/observability/otlp-exporter.ts:823 readOtlpExporterHealth — health/report read, sync',
 		],
 		schemaVersion: 'spool record v1 / state v1 (SPOOL_RECORD_VERSION/STATE_VERSION; mapping versions pinned separately #2029)',
 		stateClass: 'operational',

@@ -582,14 +582,18 @@ async function runFlushCycle(): Promise<void> {
 			return;
 		}
 		// Parse once and sweep aged records here too (the append path sweeps
-		// on write, but records can age while the exporter sits idle).
+		// on write, but records can age while the exporter sits idle). Aged
+		// ids are reclaimed from the file in the same removal pass as the
+		// shipped batch, so the spool never keeps counting them.
 		const nowMs = _internals.now();
 		const records: Array<{ id: string; span: Record<string, unknown> }> = [];
+		const agedIds = new Set<string>();
 		for (const line of lines) {
 			try {
 				const parsed = JSON.parse(line) as SpoolRecord;
 				if (nowMs - parsed.t > cfg.spoolMaxAgeMs) {
 					noteDrop('spool_age');
+					agedIds.add(parsed.id);
 					continue;
 				}
 				records.push({ id: parsed.id, span: parsed.r as Record<string, unknown> });
@@ -598,6 +602,11 @@ async function runFlushCycle(): Promise<void> {
 			}
 		}
 		if (records.length === 0) {
+			// Everything scanned was aged (or corrupt): reclaim the aged
+			// lines before returning so the spool actually drains.
+			if (agedIds.size > 0) {
+				removeSpoolRecords(_directory, agedIds);
+			}
 			persistState();
 			return;
 		}
@@ -637,6 +646,7 @@ async function runFlushCycle(): Promise<void> {
 			// dropped, matched by id: a blind front slice can consume records
 			// appended (or cap-dropped) by the listener during the network
 			// await above, silently losing unshipped records.
+			for (const aged of agedIds) batchIds.add(aged);
 			removeSpoolRecords(_directory, batchIds);
 			continue;
 		}

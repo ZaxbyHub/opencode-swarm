@@ -393,6 +393,7 @@ describe('TLS/auth failure classification (secret-safe diagnostics)', () => {
 		const health = readOtlpExporterHealth(dir);
 		expect(health?.dropped['spool_age'] ?? 0).toBeGreaterThanOrEqual(1);
 		expect(health?.exported).toBe(0);
+		expect(health?.spoolRecords).toBe(0);
 		expect(stub.requests.length).toBe(0);
 		await stub.close();
 	}, 20_000);
