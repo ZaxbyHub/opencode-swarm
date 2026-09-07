@@ -204,7 +204,7 @@ async function releaseKnowledgeGateObligations(
  * directories only; unreadable/absent ⇒ empty (the caller treats removal as
  * best-effort anyway).
  */
-function listChildDirs(dir: string): string[] {
+function _listChildDirs(dir: string): string[] {
 	try {
 		return fs
 			.readdirSync(dir, { withFileTypes: true })

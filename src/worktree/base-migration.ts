@@ -27,10 +27,7 @@ import * as path from 'node:path';
 import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
 import { resolveWorktreeRepoOwnership } from '../config/lane-context';
 import type { LiveLaneOwnerEntry } from '../parallel/lane-owners';
-import {
-	type BunCompatSpawnOptions,
-	bunSpawn,
-} from '../utils/bun-compat';
+import { type BunCompatSpawnOptions, bunSpawn } from '../utils/bun-compat';
 import { canonicalRootKeyFresh } from '../utils/canonical-root';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import * as logger from '../utils/logger.js';
@@ -76,9 +73,12 @@ function listLegacyLanes(legacyBase: string): MigrationLane[] {
 		if (!session.isDirectory()) continue;
 		let laneEntries: fs.Dirent[];
 		try {
-			laneEntries = _internals.readdirSync(path.join(legacyBase, session.name), {
-				withFileTypes: true,
-			});
+			laneEntries = _internals.readdirSync(
+				path.join(legacyBase, session.name),
+				{
+					withFileTypes: true,
+				},
+			);
 		} catch {
 			continue;
 		}
@@ -134,7 +134,10 @@ async function gitWorktreeMove(
 	}
 }
 
-function isLive(entry: MigrationLane, liveOwners: LiveLaneOwnerEntry[]): boolean {
+function isLive(
+	entry: MigrationLane,
+	liveOwners: LiveLaneOwnerEntry[],
+): boolean {
 	const canonical = canonicalRootKeyFresh(entry.lanePath);
 	return liveOwners.some(
 		(owner) =>
@@ -199,7 +202,8 @@ export async function migrateLegacyWorktreeBase(
 		if (isLive(lane, liveOwners)) {
 			result.retained.push({
 				lanePath: lane.lanePath,
-				reason: 'live lane (owner process running) — migrates after its dispatch ends',
+				reason:
+					'live lane (owner process running) — migrates after its dispatch ends',
 			});
 			continue;
 		}
@@ -210,7 +214,11 @@ export async function migrateLegacyWorktreeBase(
 			});
 			continue;
 		}
-		const target = path.join(newBase, lane.sessionId, path.basename(lane.lanePath));
+		const target = path.join(
+			newBase,
+			lane.sessionId,
+			path.basename(lane.lanePath),
+		);
 		try {
 			_internals.mkdirSync(path.dirname(target), { recursive: true });
 		} catch (error) {

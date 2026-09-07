@@ -14,11 +14,11 @@ import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
-import { clearLiveLaneOwner } from '../parallel/lane-owners';
 import {
 	buildSwarmBranchName,
 	matchSwarmLaneBranch,
 } from '../config/swarm-branch';
+import { clearLiveLaneOwner } from '../parallel/lane-owners';
 import { advisoryWarn } from '../services/warning-buffer';
 import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';

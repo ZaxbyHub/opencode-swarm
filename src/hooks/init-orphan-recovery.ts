@@ -24,7 +24,6 @@ import {
 	scanDelegationFallbacksForRecovery,
 	scanDelegationsForRecovery,
 } from '../background/pending-delegations.js';
-import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
 import { loadPluginConfig } from '../config/loader';
 import { closeProjectDb } from '../db/project-db';
 import {
