@@ -22,10 +22,10 @@
 - Documented the C9 post-land receipt schema and the requirement for three
   receipts per stage before closure.
 
-The documented decisions retain `cancellation=false`, the 90-minute status
-check timeout, build concurrency 5, and `ALLGREEN` / only-non-failing merge
-eligibility. The workflow change is limited to recursive integration discovery;
-it does not change branch protection or claim a Windows implementation.
+The documented decisions retain the 90-minute status-check timeout, build concurrency 5, and `ALLGREEN` / only-non-failing merge eligibility. Cancellation
+is now event-scoped: merge-group runs may cancel superseded queue refs while
+pull-request and manual runs remain non-cancelling. The workflow change does not
+change branch protection or claim a Windows implementation.
 
 ## Why
 

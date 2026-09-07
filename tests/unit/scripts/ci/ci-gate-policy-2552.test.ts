@@ -112,7 +112,7 @@ describe('CI gate policy — Stage-D discovery anchors (issue #2552)', () => {
 		}
 	});
 
-	test('unit-passed remains the required aggregate and concurrency stays non-cancelling', () => {
+	test('unit-passed remains required and cancellation is merge-group scoped', () => {
 		const unitPassed = extractJob(yml, 'unit-passed');
 		const concurrency =
 			yml.match(/^concurrency:[\s\S]*?(?=^permissions:)/m)?.[0] ?? '';
@@ -120,7 +120,11 @@ describe('CI gate policy — Stage-D discovery anchors (issue #2552)', () => {
 		expect(unitPassed).toContain('needs: [unit]');
 		expect(unitPassed).toContain('if: always()');
 		expect(unitPassed).toContain('UNIT_RESULT: ${{ needs.unit.result }}');
-		expect(concurrency).toContain('cancel-in-progress: false');
-		expect(concurrency).not.toMatch(/cancel-in-progress:\s*true/);
+		expect(concurrency).toContain(
+			"cancel-in-progress: ${{ github.event_name == 'merge_group' }}",
+		);
+		expect(concurrency).not.toMatch(
+			/cancel-in-progress:\s*(?:true|false)\s*$/m,
+		);
 	});
 });

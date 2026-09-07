@@ -38,4 +38,6 @@ workflows depend on.
 
 - `shivammathur/setup-php` was already on Node.js 24 (pinned to `2.37.0`), so it was left
   unchanged despite being listed in the issue.
-- `concurrency.cancel-in-progress: false` in `ci.yml` is preserved.
+- CI concurrency cancellation is event-scoped in `ci.yml`: merge-group runs may
+  cancel superseded queue refs, while pull-request and manual runs remain
+  non-cancelling.

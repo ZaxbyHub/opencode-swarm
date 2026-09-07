@@ -10,12 +10,12 @@ on:
   merge_group:
     types: [checks_requested]
 
-# Serialize CI runs for the same branch/PR. Old runs are NOT cancelled because
-# cancelling leaves stale check statuses that persist on PRs and block merging
-# even after a new successful run completes.
+# Serialize CI runs for the same branch/PR. Pull-request and manual runs are
+# not cancelled because stale check statuses can persist on PRs; merge-group
+# runs are safe to cancel when a newer head supersedes the same queue ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'merge_group' }}
 
 permissions:
   contents: read

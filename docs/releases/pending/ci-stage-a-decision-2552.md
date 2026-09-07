@@ -30,6 +30,6 @@ required `unit-passed` and coverage gates are unchanged.
 
 ## Caveats
 
-Stage-A post-land receipts remain pending until three real runs after this
-decision is published. The account concurrency cap is unavailable, and the
-record does not treat that unknown as zero.
+The three Stage-A post-land receipts are now recorded in the policy decision
+record. The account concurrency cap is unavailable, and the record does not
+treat that unknown as zero.
