@@ -4,11 +4,16 @@
  *
  * Parses a reviewer's `DIRECTIVE_COMPLIANCE` block (VERIFIED / VIOLATED / N/A
  * lines) and reconciles it against the exact retrieval memberships the reviewer
- * was asked to verify, committing one authoritative terminal per pair:
+ * was asked to verify, committing one authoritative terminal per shown pair:
  *
  *   VERIFIED:<trace_id>:<entry_id> -> outcome:'applied'
  *   VIOLATED:<trace_id>:<entry_id> -> outcome:'violated'
  *   N/A:<trace_id>:<entry_id>      -> outcome:'n_a'
+ *
+ * Since #2628 the shown set carries at most one pair per entry, so the pair
+ * shown is the entry's single obligation for the phase; the phase-complete gate
+ * resolves the ENTRY once that pair's terminal commits (see
+ * phase-complete-directive-gate.ts).
  *
  * Anti-spoofing: verdicts for pairs that were not in the verify-set are dropped.
  * An omitted CRITICAL pair gets a `violated` / `reviewer_omitted` terminal.

@@ -20,6 +20,26 @@ import type { DirectivePriority } from '../hooks/knowledge-types.js';
 /** Marker tag wrapping the per-phase "directives to verify" block. */
 export const DIRECTIVES_TO_VERIFY_TAG = '<directives_to_verify>';
 
+/**
+ * Hard character ceiling for the rendered compliance block (issue #2628,
+ * mirroring the #2045 delegate-block bound). The effective budget is
+ * `min(inject_char_budget ?? DIRECTIVE_COMPLIANCE_DEFAULT_CHAR_BUDGET,
+ * DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP)`; overflow drops NON-critical entries
+ * only — critical obligations are always rendered (see below), so a phase's
+ * blocking set can never be hidden from the one agent that resolves it.
+ */
+export const DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP = 24_000;
+
+/** Default budget when the caller has no configured injection budget. */
+export const DIRECTIVE_COMPLIANCE_DEFAULT_CHAR_BUDGET = 24_000;
+
+/**
+ * Per-entry lesson/verification_predicate render cap. The pair identity,
+ * priority, and predicate PRESENCE stay exact; only the prose payload is
+ * truncated so a single huge entry cannot eat the whole budget.
+ */
+const MAX_FIELD_RENDER_CHARS = 400;
+
 /** A directive the reviewer must produce a verdict for. */
 export interface DirectiveToVerify {
 	/** Exact retrieval membership this verdict must close. */
@@ -38,13 +58,15 @@ export interface DirectiveToVerify {
 
 /**
  * Static spec embedded in the reviewer system prompt. Documents the mandatory
- * DIRECTIVE_COMPLIANCE output section and its verdict grammar.
+ * DIRECTIVE_COMPLIANCE output section and its verdict grammar. Since #2628 the
+ * shown set carries at most one obligation per entry, so "every listed pair"
+ * is the whole contract — pair identity is still copied exactly.
  */
-export const DIRECTIVE_COMPLIANCE_OUTPUT_SPEC = `DIRECTIVE_COMPLIANCE: one line per retrieval membership shown during this phase. Copy the encoded trace_id and entry_id tokens exactly from the DIRECTIVES TO VERIFY block. Use exactly one of:
+export const DIRECTIVE_COMPLIANCE_OUTPUT_SPEC = `DIRECTIVE_COMPLIANCE: one line per listed obligation. Copy the encoded trace_id and entry_id tokens exactly from the DIRECTIVES TO VERIFY block. Use exactly one of:
   VERIFIED:<trace_id>:<entry_id> evidence=<file:line | predicate_passed>
   VIOLATED:<trace_id>:<entry_id> evidence=<file:line | failing_predicate>
   N/A:<trace_id>:<entry_id> reason=<why it does not apply to this change>
-Every listed trace_id + entry_id pair MUST appear exactly once. The same entry_id may appear under more than one trace_id and requires one verdict per pair. If a directive carries a verification_predicate, you MUST run it and report predicate_passed / failing_predicate as the evidence. Omitting a listed CRITICAL pair is itself a VIOLATED verdict.`;
+Every listed trace_id + entry_id pair MUST appear exactly once in your verdicts. If a directive carries a verification_predicate, you MUST run it and report predicate_passed / failing_predicate as the evidence. Omitting a listed CRITICAL pair is itself a VIOLATED verdict.`;
 
 const PRIORITY_RANK: Record<DirectivePriority, number> = {
 	critical: 0,
@@ -75,6 +97,15 @@ function renderOptionalText(value: string): string {
 	return JSON.stringify(value);
 }
 
+/** Truncate prose payloads so one huge entry cannot consume the budget. */
+function renderTruncatedOptionalText(value: string): string {
+	const truncated =
+		value.length > MAX_FIELD_RENDER_CHARS
+			? `${value.slice(0, MAX_FIELD_RENDER_CHARS)}...`
+			: value;
+	return renderOptionalText(truncated);
+}
+
 function parseOptionalText(value: string): string | undefined {
 	try {
 		const parsed = JSON.parse(value);
@@ -84,16 +115,57 @@ function parseOptionalText(value: string): string | undefined {
 	}
 }
 
+function renderDirectiveLines(d: DirectiveToVerify): string[] {
+	const lines = [
+		`- trace_id: ${encodeDirectiveCorrelationId(d.trace_id)}`,
+		`  entry_id: ${encodeDirectiveCorrelationId(d.entry_id)}`,
+		`  session_id: ${encodeDirectiveCorrelationId(d.session_id)}`,
+	];
+	if (d.cohort_id) {
+		lines.push(`  cohort_id: ${encodeDirectiveCorrelationId(d.cohort_id)}`);
+	}
+	if (d.source_link_id) {
+		lines.push(
+			`  source_link_id: ${encodeDirectiveCorrelationId(d.source_link_id)}`,
+		);
+	}
+	if (d.prior_terminal_outcome) {
+		lines.push(`  prior_terminal_outcome: ${d.prior_terminal_outcome}`);
+	}
+	if (d.prior_terminal_event_id) {
+		lines.push(
+			`  prior_terminal_event_id: ${encodeDirectiveCorrelationId(d.prior_terminal_event_id)}`,
+		);
+	}
+	lines.push(`  priority: ${d.priority}`);
+	if (d.lesson)
+		lines.push(`  lesson: ${renderTruncatedOptionalText(d.lesson)}`);
+	if (d.verification_predicate) {
+		lines.push(
+			`  verification_predicate: ${renderTruncatedOptionalText(d.verification_predicate)}`,
+		);
+	}
+	return lines;
+}
+
 /**
  * Render the per-phase "DIRECTIVES TO VERIFY" block injected into the reviewer's
- * delegation prompt. Deterministic (sorted by priority then entry + trace).
- * Returns null
- * when there is nothing to verify (no block emitted).
+ * delegation prompt. Deterministic (sorted by priority then entry + trace) and
+ * bounded (issue #2628): non-critical entries that no longer fit the effective
+ * budget are dropped lowest-priority-first with a count note; CRITICAL entries
+ * are always rendered — even beyond the budget, with a distinct overflow notice
+ * — because hiding one would permanently block the phase-complete gate. Returns
+ * null when there is nothing to verify (no block emitted).
  */
 export function buildDirectiveComplianceBlock(
 	directives: DirectiveToVerify[],
+	charBudget?: number,
 ): string | null {
 	if (directives.length === 0) return null;
+	const effectiveBudget = Math.min(
+		charBudget ?? DIRECTIVE_COMPLIANCE_DEFAULT_CHAR_BUDGET,
+		DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP,
+	);
 	const sorted = [...directives].sort((a, b) => {
 		const pr =
 			(PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2);
@@ -108,33 +180,34 @@ export function buildDirectiveComplianceBlock(
 	lines.push(
 		'Produce a DIRECTIVE_COMPLIANCE verdict for EVERY trace_id + entry_id pair below. Copy the encoded tokens exactly and run any verification_predicate provided.',
 	);
+	let usedBytes = Buffer.byteLength(lines.join('\n'), 'utf-8');
+	const omittedNonCritical: string[] = [];
+	let criticalOverflowCount = 0;
 	for (const d of sorted) {
-		lines.push(`- trace_id: ${encodeDirectiveCorrelationId(d.trace_id)}`);
-		lines.push(`  entry_id: ${encodeDirectiveCorrelationId(d.entry_id)}`);
-		lines.push(`  session_id: ${encodeDirectiveCorrelationId(d.session_id)}`);
-		if (d.cohort_id) {
-			lines.push(`  cohort_id: ${encodeDirectiveCorrelationId(d.cohort_id)}`);
+		const entryLines = renderDirectiveLines(d);
+		const entryBytes = Buffer.byteLength(entryLines.join('\n'), 'utf-8') + 1;
+		if (d.priority === 'critical') {
+			lines.push(...entryLines);
+			usedBytes += entryBytes;
+			if (usedBytes > effectiveBudget) criticalOverflowCount += 1;
+			continue;
 		}
-		if (d.source_link_id) {
-			lines.push(
-				`  source_link_id: ${encodeDirectiveCorrelationId(d.source_link_id)}`,
-			);
+		if (usedBytes + entryBytes > effectiveBudget) {
+			omittedNonCritical.push(d.entry_id);
+			continue;
 		}
-		if (d.prior_terminal_outcome) {
-			lines.push(`  prior_terminal_outcome: ${d.prior_terminal_outcome}`);
-		}
-		if (d.prior_terminal_event_id) {
-			lines.push(
-				`  prior_terminal_event_id: ${encodeDirectiveCorrelationId(d.prior_terminal_event_id)}`,
-			);
-		}
-		lines.push(`  priority: ${d.priority}`);
-		if (d.lesson) lines.push(`  lesson: ${renderOptionalText(d.lesson)}`);
-		if (d.verification_predicate) {
-			lines.push(
-				`  verification_predicate: ${renderOptionalText(d.verification_predicate)}`,
-			);
-		}
+		lines.push(...entryLines);
+		usedBytes += entryBytes;
+	}
+	if (criticalOverflowCount > 0) {
+		lines.push(
+			`critical overflow: ${criticalOverflowCount} critical directive(s) rendered beyond the char budget`,
+		);
+	}
+	if (omittedNonCritical.length > 0) {
+		lines.push(
+			`(+${omittedNonCritical.length} non-critical directive(s) omitted this phase; they remain live and will resurface)`,
+		);
 	}
 	lines.push('</directives_to_verify>');
 	lines.push('');
