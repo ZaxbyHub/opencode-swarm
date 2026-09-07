@@ -15,6 +15,13 @@
  * native tool registry itself, so the pinned id lives here as a
  * provenance-headed fixture — the same pattern as
  * `tests/helpers/host-contract-v1_18_3.ts` (issue #2526).
+ *
+ * Tamper evidence (review PRR-004, wontfix): the fixture carries no
+ * content checksum. An offline hash would itself be a hand-pinned
+ * constant with no independent verification path, so it adds no real
+ * tamper resistance; the practical check remains the version + lockfile
+ * pinning asserted in host-task-tool-id-contract-2529.test.ts, which
+ * fails loudly if the installed host packages move.
  */
 
 /** The tool id the pinned host uses for its native subagent dispatch tool. */

@@ -5,7 +5,7 @@ import {
 } from '../agents/agent-output-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import type { MessageWithParts } from '../hooks/knowledge-types';
-import { isTaskToolId, normalizeToolName } from '../hooks/normalize-tool-name';
+import { isTaskToolId } from '../hooks/normalize-tool-name';
 import {
 	deliveredGuidanceDelta,
 	insertGuidanceCarrier,
@@ -565,10 +565,7 @@ function parseTaskToolInput(input: unknown): ParsedTaskInput | null {
 		agent?: unknown;
 	};
 	const rawTool = typeof record.tool === 'string' ? record.tool : undefined;
-	const toolName = rawTool
-		? (normalizeToolName(rawTool) ?? rawTool)
-		: undefined;
-	if (toolName !== 'Task' && toolName !== 'task') return null;
+	if (!isTaskToolId(rawTool)) return null;
 	if (!record.args || typeof record.args !== 'object') return null;
 	const args = record.args as Record<string, unknown>;
 	const prompt = args.prompt;
@@ -697,6 +694,8 @@ function extractTaskToolPrompt(messages: unknown[]): string | null {
 				// `{type:'tool', tool:'task', state:{...}}` parts, and every
 				// ToolState variant carries `input` (SDK v2 types), so the
 				// delegation prompt is recoverable there too (issue #2529).
+				// Array prompts on this host shape fall through to latestUserText
+				// below (same end behavior as before the host-shape branch).
 				if (b.type === 'tool' && isTaskToolId(b.tool as string)) {
 					const state = b.state as { input?: unknown } | undefined;
 					const stateInput = state?.input as

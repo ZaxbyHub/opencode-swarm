@@ -1,91 +1,130 @@
 import { describe, expect, test } from 'bun:test';
-import * as fs from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
+import {
+	type ScanViolation,
+	scanSourceText,
+	scanSourceTree,
+} from '../../helpers/task-tool-id-scanner';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 /**
  * Issue #2529 ratchet: the OpenCode host invokes its native subagent tool with
- * the lowercase id `task`. An EXCLUSIVE comparison against the capitalised
- * literal `'Task'` is dead code against the real host — every such site must
- * route through the shared `isTaskToolId` boundary (or pair the literal with a
- * `'task'` comparison, which is dot-safe legacy compat). This scan fails when
- * a bare `=== 'Task'` / `!== 'Task'` comparison is reintroduced anywhere in
- * `src/` production code.
+ * the lowercase id `task`. Two defect forms are ratcheted to zero across
+ * `src/` production code (see tests/helpers/task-tool-id-scanner.ts):
+ *   A. an EXCLUSIVE `=== 'Task'` comparison (dead against the real host), and
+ *   B. any 'Task'/'task' literal comparison whose operand is derived from
+ *      `normalizeToolName`/`normalizeToolNameLowerCase` — those normalizers
+ *      strip a dot-separated segment, so `notes.task` misclassifies as the
+ *      task tool. The paired both-spelling idiom is NOT an exemption from B.
+ *
+ * Falsifiability is proven against a temp fixture tree: both violation forms
+ * must be flagged, and the legitimate raw-paired idiom must pass clean.
  */
 
 const REPO_ROOT = path.join(import.meta.dir, '..', '..', '..');
 const SRC_DIR = path.join(REPO_ROOT, 'src');
 
-const EXCLUSIVE_TASK_COMPARISON = /(?:===|!==)\s*(['"])Task\1/;
-const LOWERCASE_TASK_COMPARISON = /(?:===|!==)\s*['"]task['"]/;
-const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*)/;
-
-function* listSourceFiles(dir: string): Generator<string> {
-	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-		const full = path.join(dir, entry.name);
-		if (entry.isDirectory()) {
-			yield* listSourceFiles(full);
-			continue;
-		}
-		if (!entry.name.endsWith('.ts')) continue;
-		if (/\.(test|spec)\.ts$/.test(entry.name)) continue;
-		if (entry.name.endsWith('.d.ts')) continue;
-		yield full;
-	}
-}
-
-function exclusiveTaskComparisons(): string[] {
-	const offenders: string[] = [];
-	for (const file of listSourceFiles(SRC_DIR)) {
-		const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
-		for (let i = 0; i < lines.length; i += 1) {
-			const line = lines[i];
-			if (COMMENT_LINE.test(line)) continue;
-			if (!EXCLUSIVE_TASK_COMPARISON.test(line)) continue;
-			// Paired both-spelling comparison (this line + next 2) is the
-			// dot-safe legacy idiom, not the defect.
-			const window = lines.slice(i, i + 3).join('\n');
-			if (LOWERCASE_TASK_COMPARISON.test(window)) continue;
-			const rel = path.relative(REPO_ROOT, file).split(path.sep).join('/');
-			offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
-		}
-	}
-	return offenders;
-}
-
 describe('task tool id ratchet (issue #2529)', () => {
-	test('no exclusive Task comparison exists in src/ production code', () => {
-		expect(exclusiveTaskComparisons()).toEqual([]);
+	test('no exclusive or normalizer-provenance task comparison exists in src/', () => {
+		const violations = scanSourceTree(SRC_DIR, {
+			// Paths are relative to the scanned root (SRC_DIR).
+			exemptProvenanceFiles: ['hooks/normalize-tool-name.ts'],
+		});
+		expect(
+			violations.map((v) => `${v.kind} ${v.file}:${v.line}: ${v.source}`),
+		).toEqual([]);
 	});
 
-	// Falsifiability: the detector must catch every reintroduction form.
-	test('detector catches single-quoted, double-quoted, and no-space forms', () => {
-		expect(EXCLUSIVE_TASK_COMPARISON.test("x === 'Task'")).toBe(true);
-		expect(EXCLUSIVE_TASK_COMPARISON.test('x === "Task"')).toBe(true);
-		expect(EXCLUSIVE_TASK_COMPARISON.test("x==='Task'")).toBe(true);
-		expect(EXCLUSIVE_TASK_COMPARISON.test("x !== 'Task'")).toBe(true);
-	});
-
-	test('detector ignores comments, prose, and other identifiers', () => {
-		expect(EXCLUSIVE_TASK_COMPARISON.test("// if (x === 'Task') legacy")).toBe(
-			true,
-		); // the REGEX matches — comment skipping is what must exclude it
-		expect(COMMENT_LINE.test("\t// if (x === 'Task') legacy")).toBe(true);
-		expect(EXCLUSIVE_TASK_COMPARISON.test("const name = 'Taskforce'")).toBe(
-			false,
+	test('predicate A catches exclusive Task comparisons in every quote/space form', () => {
+		expect(scanSourceText('f.ts', "if (tool === 'Task') return;")).toHaveLength(
+			1,
 		);
-		expect(EXCLUSIVE_TASK_COMPARISON.test("x === 'TaskId'")).toBe(false);
+		expect(scanSourceText('f.ts', 'if (tool === "Task") return;')).toHaveLength(
+			1,
+		);
+		expect(scanSourceText('f.ts', "if(tool!=='Task')return;")).toHaveLength(1);
+		expect(scanSourceText('f.ts', "const name = 'Taskforce';")).toHaveLength(0);
 	});
 
-	test('paired both-spelling comparison is not flagged (legacy idiom)', () => {
-		const lines = [
-			'\t\t\tif (',
-			"\t\t\t\tnormalized === 'Task' ||",
-			"\t\t\t\tnormalized === 'task'",
-			'\t\t\t) {',
-		];
-		const i = 1; // the 'Task' line
-		const window = lines.slice(i, i + 3).join('\n');
-		expect(EXCLUSIVE_TASK_COMPARISON.test(lines[i])).toBe(true);
-		expect(LOWERCASE_TASK_COMPARISON.test(window)).toBe(true); // pairing excludes it
+	test('predicate B catches normalizer-derived task comparisons (paired or bare)', () => {
+		const paired = [
+			'function isDelegation(tool: string): boolean {',
+			'\tconst normalized = normalizeToolName(tool);',
+			"\treturn normalized === 'Task' || normalized === 'task';",
+			'}',
+		].join('\n');
+		expect(scanSourceText('f.ts', paired).map((v) => v.kind)).toEqual([
+			'normalizer-provenance-task',
+		]);
+		const lowered = [
+			'function isDelegation(tool: string): boolean {',
+			"\treturn normalizeToolNameLowerCase(tool ?? '') === 'task';",
+			'}',
+		].join('\n');
+		expect(scanSourceText('f.ts', lowered).map((v) => v.kind)).toEqual([
+			'normalizer-provenance-task',
+		]);
+	});
+
+	test('legitimate raw-operand forms are not flagged', () => {
+		const rawPaired = [
+			'function isDelegation(tool: string): boolean {',
+			"\treturn tool === 'Task' || tool === 'task';",
+			'}',
+		].join('\n');
+		expect(scanSourceText('f.ts', rawPaired)).toEqual([]);
+		const rawLower = [
+			'function isDelegation(tool: string): boolean {',
+			"\treturn tool.toLowerCase() === 'task';",
+			'}',
+		].join('\n');
+		expect(scanSourceText('f.ts', rawLower)).toEqual([]);
+		// A normalizer call near a comparison of a DIFFERENT operand is not
+		// provenance (operand-match guard against coincidental proximity).
+		const coincidental = [
+			"\tconst action = normalizeToolNameLowerCase(tool ?? '');",
+			"\tif (tool === 'Task' || tool === 'task') run(tool);",
+		].join('\n');
+		expect(scanSourceText('f.ts', coincidental)).toEqual([]);
+	});
+
+	test('comment-masked comparisons are not flagged', () => {
+		const masked = [
+			"// legacy: if (tool === 'Task') return;",
+			'if (isTaskToolId(tool)) run(tool);',
+		].join('\n');
+		expect(scanSourceText('f.ts', masked)).toEqual([]);
+	});
+
+	test('fixture tree: both violation forms detected, clean forms pass', () => {
+		const root = canonicalMkdtemp('task-id-ratchet-');
+		try {
+			mkdirSync(path.join(root, 'hooks'), { recursive: true });
+			writeFileSync(
+				path.join(root, 'hooks', 'exclusive-violation.ts'),
+				"export function gate(tool: string) {\n\tif (tool === 'Task') return 'blocked';\n\treturn 'ok';\n}\n",
+			);
+			writeFileSync(
+				path.join(root, 'hooks', 'provenance-violation.ts'),
+				"import { normalizeToolName } from './normalize-tool-name';\nexport function gate(tool: string) {\n\tconst normalized = normalizeToolName(tool);\n\treturn normalized === 'Task' || normalized === 'task';\n}\n",
+			);
+			writeFileSync(
+				path.join(root, 'hooks', 'legit-raw-paired.ts'),
+				"export function gate(tool: string) {\n\treturn tool === 'Task' || tool === 'task';\n}\n",
+			);
+			const violations: ScanViolation[] = scanSourceTree(root);
+			const flagged = violations.map((v) => path.basename(v.file)).sort();
+			expect(flagged).toEqual([
+				'exclusive-violation.ts',
+				'provenance-violation.ts',
+			]);
+			expect(violations.map((v) => v.kind).sort()).toEqual([
+				'exclusive-task',
+				'normalizer-provenance-task',
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

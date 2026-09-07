@@ -3115,10 +3115,6 @@ async function initializeOpenCodeSwarm(
 				if (lifecycleEvent?.type === 'message.part.updated') {
 					const part = lifecycleEvent.properties?.part;
 					const metadata = part?.state?.metadata;
-					const partTool =
-						typeof part?.tool === 'string'
-							? normalizeToolName(part.tool)?.toLowerCase()
-							: undefined;
 					// Scope-activation event sourcing: the PARENT is the SDK-typed
 					// `part.sessionID` — the Task ToolPart lives in the parent
 					// (architect) session's message stream, and `sessionID` is required
@@ -3141,7 +3137,8 @@ async function initializeOpenCodeSwarm(
 							: undefined;
 					if (
 						part?.type === 'tool' &&
-						partTool === 'task' &&
+						typeof part?.tool === 'string' &&
+						isTaskToolId(part.tool) &&
 						typeof part.callID === 'string' &&
 						part.callID.trim() !== '' &&
 						eventParentSessionID !== undefined &&

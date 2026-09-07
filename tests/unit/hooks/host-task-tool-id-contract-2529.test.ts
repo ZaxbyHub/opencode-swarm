@@ -23,10 +23,28 @@ import {
 
 const REPO_ROOT = path.join(import.meta.dir, '..', '..', '..');
 
+function resolveNodeModulesDir(): string {
+	// Walk up from this test's directory until an installed @opencode-ai
+	// scope exists. Linked git worktrees have no node_modules of their own;
+	// Bun resolves imports by walking up but an explicitly-joined path does
+	// not, so a hardcoded REPO_ROOT/node_modules read is worktree-brittle
+	// (issue #2529 review PRR-003).
+	let dir = import.meta.dir;
+	for (let i = 0; i < 12; i += 1) {
+		if (fs.existsSync(path.join(dir, 'node_modules', '@opencode-ai'))) {
+			return path.join(dir, 'node_modules');
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return path.join(REPO_ROOT, 'node_modules');
+}
+
 function readInstalledVersion(pkg: string): string {
 	const manifest = JSON.parse(
 		fs.readFileSync(
-			path.join(REPO_ROOT, 'node_modules', '@opencode-ai', pkg, 'package.json'),
+			path.join(resolveNodeModulesDir(), '@opencode-ai', pkg, 'package.json'),
 			'utf8',
 		),
 	) as { version?: string };

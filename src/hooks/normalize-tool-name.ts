@@ -47,7 +47,11 @@ export function normalizeToolNameLowerCase(toolName: string): string {
  * `Task` spelling is accepted as legacy input. Namespace-prefixed ids resolve
  * through the shared normalizer (e.g. `opencode:task`). An id containing a dot
  * is a filesystem-loaded custom tool and is NEVER truncated into the task tool
- * (issue #2529 / audit hostcontract-1-NEW-1).
+ * (issue #2529 / audit hostcontract-1-NEW-1). Edge cases all fail closed:
+ * `':task'`, `'task:'`, and `'task.'` are not the host id (a colon/dot
+ * marker without a namespace prefix normalizes to '' or keeps its marker),
+ * and whitespace-padded ids (`' task'`, `'task '`) are rejected without
+ * trimming.
  */
 export function isTaskToolId(toolName: string | null | undefined): boolean {
 	if (!toolName) return false;
