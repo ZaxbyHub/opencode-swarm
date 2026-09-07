@@ -32,6 +32,8 @@ describe('delegation gate host task tool id (issue #2529)', () => {
 		expect(isTaskToolId('TASK')).toBe(true); // case-insensitive compat
 		expect(isTaskToolId('opencode:task')).toBe(true); // namespaced host id
 		expect(isTaskToolId('mega:Task')).toBe(true);
+		expect(isTaskToolId('tool.execute.Task')).toBe(true); // SDK hook namespace
+		expect(isTaskToolId('tool.execute.TASK')).toBe(true);
 	});
 
 	test('the boundary rejects dot-bearing custom tool ids and malformed spellings', () => {

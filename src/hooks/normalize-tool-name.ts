@@ -55,7 +55,12 @@ export function normalizeToolNameLowerCase(toolName: string): string {
  */
 export function isTaskToolId(toolName: string | null | undefined): boolean {
 	if (!toolName) return false;
-	return (
-		normalizeToolNameLowerCase(toolName) === 'task' && !toolName.includes('.')
-	);
+	if (toolName.includes('.')) {
+		// The SDK hook surface reports the id as `tool.execute.<Tool>`; that
+		// host-internal namespace is accepted. Any other dot-bearing id is a
+		// filesystem custom tool and is never truncated into the task tool
+		// (issue #2529 / review round: delegation-gate.qa regression).
+		return /^tool\.[^.:]+\.task$/i.test(toolName);
+	}
+	return normalizeToolNameLowerCase(toolName) === 'task';
 }
