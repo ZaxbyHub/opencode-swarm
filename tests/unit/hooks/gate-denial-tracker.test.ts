@@ -131,9 +131,10 @@ describe('escalation ladder', () => {
 		startAgentSession(session, 'architect');
 
 		let last: Error | null = null;
+		const args = { path: 'C:/private/secret-project/file.ts' };
 		for (let i = 0; i < DEFAULT_GATE_DENIAL_STOP_THRESHOLD; i++) {
 			last = denial();
-			noteGateDenial(session, 'Task', last);
+			noteGateDenial(session, 'Task', last, undefined, args);
 		}
 		const err = last as Error;
 
@@ -152,6 +153,7 @@ describe('escalation ladder', () => {
 		expect(advisories[0]).toMatch(
 			new RegExp(`^\\[swarm:gate-denial-loop:${DENY}:[0-9a-f]{12}\\]`),
 		);
+		expect(advisories[0]).not.toContain(args.path);
 
 		const emitted = events.filter((e) => e.event === 'gate_denial_loop');
 		expect(emitted).toHaveLength(1);

@@ -79,6 +79,41 @@ describe('issue #2574 stable action and cause identity', () => {
 		).toBe(1);
 	});
 
+	test('semantic status transitions do not pool one update_task_status action', () => {
+		const session = '2574-status-action';
+		startAgentSession(session, 'architect');
+		const completed = { task_id: '1.1', status: 'completed' };
+		const blocked = { task_id: '1.1', status: 'blocked' };
+
+		expect(
+			noteGateDenial(
+				session,
+				'update_task_status',
+				cause('CAUSE'),
+				undefined,
+				completed,
+			).count,
+		).toBe(1);
+		expect(
+			noteGateDenial(
+				session,
+				'update_task_status',
+				cause('CAUSE'),
+				undefined,
+				blocked,
+			).count,
+		).toBe(1);
+		expect(
+			noteGateDenial(
+				session,
+				'update_task_status',
+				cause('CAUSE'),
+				undefined,
+				completed,
+			).count,
+		).toBe(2);
+	});
+
 	test('C2: identical stable action and cause still reaches the ladder', () => {
 		const session = '2574-c2';
 		startAgentSession(session, 'architect');

@@ -202,6 +202,14 @@ function gateActionArgs(tool: string, args: unknown): Record<string, unknown> {
 		boundedActionScalar,
 	);
 	if (taskId !== undefined) projection.taskId = taskId;
+	if (normalizedTool === 'update_task_status') {
+		const status = readFirstNormalizedOwnDataValue(
+			record,
+			['status'],
+			boundedActionScalar,
+		);
+		if (status !== undefined) projection.status = status;
+	}
 	const phase = readFirstNormalizedOwnDataValue(
 		record,
 		['phase', 'phase_number'],
