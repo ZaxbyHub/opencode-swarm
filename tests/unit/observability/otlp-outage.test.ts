@@ -18,7 +18,6 @@ import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry.js';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 import {
 	deadEndpointUrl,
 	freshProjectDir,
@@ -218,8 +217,6 @@ describe('circuit', () => {
 		const open = readOtlpExporterHealth(dir);
 		expect(open?.circuitOpen).toBe(true);
 		expect(open?.state).toBe('cooldown');
-		// Clock read for the cooldown assertion stays deterministic.
-		withFrozenClock(() => Date.now());
 
 		// Rebind to a healthy collector with a SHORT cooldown; after it
 		// elapses, the recovery probe ships and closes the circuit.
@@ -294,6 +291,18 @@ describe('TLS/auth failure classification (secret-safe diagnostics)', () => {
 			1,
 		);
 		expect(health?.spoolRecords).toBe(0);
+		// PR review PRR-002 pin: a terminally rejected batch is a DROP, not
+		// an export — no exported credit, no success timestamp, and the
+		// circuit-failure accounting is left untouched (neither reset nor
+		// incremented by a 4xx).
+		expect(health?.exported).toBe(0);
+		expect(health?.lastSuccessAt).toBeNull();
+		// Config headers reach the wire (PRR-019) — and the secret must not
+		// leak into diagnostics either way.
+		const sawAuth = stub.requests.some(
+			(r) => r.headers['authorization'] === 'Bearer SECRETTOKEN99',
+		);
+		expect(sawAuth).toBe(true);
 		// Diagnostics stay secret-safe: category only, never header values or
 		// endpoint strings. The whole persisted state is checked.
 		const stateText = readFileSync(
@@ -303,4 +312,137 @@ describe('TLS/auth failure classification (secret-safe diagnostics)', () => {
 		expect(stateText).not.toContain('SECRETTOKEN99');
 		await stub.close();
 	}, 20_000);
+
+	test('a TLS-level connect failure (https to a plain-http port) is classified transient, never a success', async () => {
+		// The issue's "TLS/auth failure" obligation: point the exporter at
+		// https:// on the stub's plain-http port — the TLS handshake fails
+		// before any HTTP exchange. Records stay spooled for replay, the
+		// error category is set, and no header material leaks.
+		const stub = await startStubCollector();
+		const dir = freshProjectDir();
+		initTelemetry(dir);
+		const tlsUrl = stub.url.replace('http://', 'https://');
+		registerOtlpExporter(
+			dir,
+			testExportConfig(tlsUrl, {
+				headers: { Authorization: 'Bearer SECRETTOKEN99' },
+				maxRetries: 0,
+				backoffBaseMs: 5,
+			}),
+		);
+		const { emit } = await import('../../../src/telemetry.js');
+		emit('delegation_begin' as never, { ...PAYLOAD } as never);
+		await flushOtlpExporterForTesting(dir);
+		const health = readOtlpExporterHealth(dir);
+		// Handshake failure is transient network: batch retained for replay.
+		expect(health?.spoolRecords).toBe(1);
+		expect(health?.exported).toBe(0);
+		expect(health?.lastErrorCategory ?? null).not.toBeNull();
+		expect(health?.lastErrorCategory).not.toBe('rejected_permanent');
+		const stateText = readFileSync(
+			join(dir, OTLP_EXPORT_SPOOL_DIR, 'state.json'),
+			'utf-8',
+		);
+		expect(stateText).not.toContain('SECRETTOKEN99');
+		await stub.close();
+	}, 20_000);
+
+	test('a negative Retry-After hint is ignored (backoff still applies)', async () => {
+		const stub = await startStubCollector();
+		const dir = freshProjectDir();
+		initTelemetry(dir);
+		registerOtlpExporter(
+			dir,
+			testExportConfig(stub.url, {
+				maxRetries: 1,
+				backoffBaseMs: 5,
+				backoffMaxMs: 20,
+			}),
+		);
+		const { emit } = await import('../../../src/telemetry.js');
+		emit('delegation_begin' as never, { ...PAYLOAD } as never);
+		stub.respond(429, { 'retry-after': '-1' });
+		await flushOtlpExporterForTesting(dir);
+		// The negative hint must not produce an immediate tight retry: with
+		// the hint ignored, attempts stay bounded and the records remain
+		// spooled (retry budget exhausted within this cycle).
+		const health = readOtlpExporterHealth(dir);
+		expect(health?.spoolRecords).toBe(1);
+		expect(health?.exported).toBe(0);
+		await stub.close();
+	}, 20_000);
+
+	test('flush-path age sweep drops records that aged while idle (spool_age)', async () => {
+		const stub = await startStubCollector();
+		const dir = freshProjectDir();
+		initTelemetry(dir);
+		registerOtlpExporter(
+			dir,
+			testExportConfig(stub.url, {
+				batchSize: 8,
+				maxRetries: 0,
+				spoolMaxAgeMs: 50,
+			}),
+		);
+		const { emit } = await import('../../../src/telemetry.js');
+		emit('delegation_begin' as never, { ...PAYLOAD } as never);
+		// Let the record age past the 50ms budget BEFORE the first flush:
+		// the flush read path (not just the append path) must sweep it.
+		await new Promise((r) => setTimeout(r, 90));
+		await flushOtlpExporterForTesting(dir);
+		const health = readOtlpExporterHealth(dir);
+		expect(health?.dropped['spool_age'] ?? 0).toBeGreaterThanOrEqual(1);
+		expect(health?.exported).toBe(0);
+		expect(stub.requests.length).toBe(0);
+		await stub.close();
+	}, 20_000);
+
+	test('records appended during a flush await survive the shipped-removal (id-matched)', async () => {
+		// PRR-009 regression: with a tiny spool budget, the record appended
+		// by the listener DURING the flush's network await forces a cap-drop
+		// from the front. The post-await removal must be id-matched — the
+		// still-unshipped appended record must survive (a blind front slice
+		// would silently erase it).
+		const stub = await startStubCollector({ delayMs: 150 });
+		const dir = freshProjectDir();
+		initTelemetry(dir);
+		registerOtlpExporter(
+			dir,
+			testExportConfig(stub.url, {
+				batchSize: 1,
+				maxRetries: 0,
+				backoffBaseMs: 5,
+				spoolMaxBytes: 700, // ~2 records; forces drop-oldest on append
+			}),
+		);
+		const { emit } = await import('../../../src/telemetry.js');
+		emit(
+			'delegation_begin' as never,
+			{ ...PAYLOAD, sessionId: 'race-alpha' } as never,
+		);
+		const flushPromise = flushOtlpExporterForTesting(dir);
+		// Land inside the flush's network await: append a second record that
+		// trips the byte-cap drop-oldest of the first (front mutation).
+		await new Promise((r) => setTimeout(r, 40));
+		emit(
+			'delegation_begin' as never,
+			{ ...PAYLOAD, sessionId: 'race-beta' } as never,
+		);
+		await flushPromise;
+		// Second flush ships whatever survived; BOTH session ids must
+		// eventually reach the collector or be terminal-dropped with a
+		// reason — neither may vanish silently.
+		await flushOtlpExporterForTesting(dir);
+		const allSerialized = stub.requests
+			.map((r) => JSON.stringify(r.body))
+			.join(' ');
+		const sawAlpha = allSerialized.includes('race-alpha');
+		const sawBeta = allSerialized.includes('race-beta');
+		const health = readOtlpExporterHealth(dir);
+		const accounted =
+			(health?.dropped['spool_cap'] ?? 0) + (health?.dropped['spool_age'] ?? 0);
+		expect(sawAlpha || accounted >= 1).toBe(true);
+		expect(sawBeta).toBe(true);
+		await stub.close();
+	}, 30_000);
 });

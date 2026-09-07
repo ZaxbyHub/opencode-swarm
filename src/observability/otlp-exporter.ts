@@ -78,6 +78,8 @@ export const MAX_FLUSH_ITERATIONS = 100;
 const MAX_ATTRIBUTE_STRING = 128;
 /** Hard cap on spool lines read per flush (read bound, independent of bytes). */
 const MAX_SPOOL_LINES_PER_FLUSH = 2048;
+/** Hard cap on a 2xx response body before it may be parsed (bounded input). */
+const MAX_RESPONSE_BODY_BYTES = 1024 * 1024;
 /** Env kill switch: forces the exporter off even when config-enabled. */
 const KILL_SWITCH_ENV = 'SWARM_OTLP_EXPORT_DISABLE';
 
@@ -374,9 +376,15 @@ function appendSpoolRecord(record: SpoolRecord): void {
 		return true;
 	});
 	fresh.push(line);
-	while (fresh.length > 1 && spoolByteSize(fresh) > cfg.spoolMaxBytes) {
+	// Incremental size accounting: recomputing spoolByteSize per shift is
+	// O(n^2) when a lowered cap must drop many records at once.
+	let size = spoolByteSize(fresh);
+	while (fresh.length > 1 && size > cfg.spoolMaxBytes) {
 		const dropped = fresh.shift();
-		if (dropped !== undefined) noteDrop('spool_cap');
+		if (dropped !== undefined) {
+			size -= Buffer.byteLength(dropped, 'utf8') + 1;
+			noteDrop('spool_cap');
+		}
 	}
 	writeSpoolLines(_directory, fresh);
 }
@@ -386,10 +394,12 @@ function appendSpoolRecord(record: SpoolRecord): void {
 function endpointUrl(cfg: OtlpExportConfig): string | null {
 	try {
 		const url = new URL(cfg.endpoint);
+		// IPv6 hostnames keep their brackets in url.hostname ('[::1]');
+		// strip them so http://[::1] is recognized as loopback (same
+		// normalization as src/commands/_shared/url-security.ts).
+		const host = url.hostname.replace(/^\[|\]$/g, '');
 		const isLoopback =
-			url.hostname === 'localhost' ||
-			url.hostname === '127.0.0.1' ||
-			url.hostname === '::1';
+			host === 'localhost' || host === '127.0.0.1' || host === '::1';
 		if (url.protocol !== 'https:' && !isLoopback) return null;
 		return `${cfg.endpoint.replace(/\/+$/, '')}/v1/traces`;
 	} catch {
@@ -479,14 +489,29 @@ async function postBatch(
 			headers,
 			body,
 			signal: controller.signal,
+			// Never follow redirects: a 30x to http:// would silently downgrade
+			// TLS and re-send auth headers to the redirect target.
+			redirect: 'error',
 		});
 		if (response.ok) {
 			// partialSuccess is informational: the request was accepted, so the
 			// batch is removed either way; rejections are counted, not re-sent
-			// (the collector does not identify WHICH spans it rejected).
+			// (the collector does not identify WHICH spans it rejected). The
+			// body itself is bounded: a hostile collector cannot make the host
+			// buffer or parse an arbitrarily large 2xx body.
+			const declaredLength = Number(response.headers.get('content-length'));
+			if (
+				Number.isFinite(declaredLength) &&
+				declaredLength > MAX_RESPONSE_BODY_BYTES
+			) {
+				return { ok: false, category: 'malformed_response', retryAfterMs: null };
+			}
 			try {
 				const text = await response.text();
-				if (text.includes('"partialSuccess"')) {
+				if (
+					text.length <= MAX_RESPONSE_BODY_BYTES &&
+					text.includes('"partialSuccess"')
+				) {
 					const parsed = JSON.parse(text) as {
 						partialSuccess?: { rejectedSpans?: number | string };
 					};
@@ -507,7 +532,9 @@ async function postBatch(
 		let retryAfterMs: number | null = null;
 		if (retryAfterRaw !== null) {
 			const seconds = Number(retryAfterRaw);
-			if (Number.isFinite(seconds)) {
+			// Negative or non-finite hints are ignored: a negative value would
+			// make sleep() resolve immediately and defeat the backoff.
+			if (Number.isFinite(seconds) && seconds >= 0) {
 				retryAfterMs = Math.min(seconds * 1000, cfg.backoffMaxMs);
 			}
 		}
@@ -554,27 +581,49 @@ async function runFlushCycle(): Promise<void> {
 			persistState();
 			return;
 		}
-		const batchLines = lines.slice(0, cfg.batchSize);
-		const batch: Array<Record<string, unknown>> = [];
-		for (const line of batchLines) {
+		// Parse once and sweep aged records here too (the append path sweeps
+		// on write, but records can age while the exporter sits idle).
+		const nowMs = _internals.now();
+		const records: Array<{ id: string; span: Record<string, unknown> }> = [];
+		for (const line of lines) {
 			try {
-				batch.push(JSON.parse(line).r as Record<string, unknown>);
+				const parsed = JSON.parse(line) as SpoolRecord;
+				if (nowMs - parsed.t > cfg.spoolMaxAgeMs) {
+					noteDrop('spool_age');
+					continue;
+				}
+				records.push({ id: parsed.id, span: parsed.r as Record<string, unknown> });
 			} catch {
 				noteDrop('spool_corrupt');
 			}
 		}
-		let shipped = false;
+		if (records.length === 0) {
+			persistState();
+			return;
+		}
+		const batchRecords = records.slice(0, cfg.batchSize);
+		const batch = batchRecords.map((r) => r.span);
+		const batchIds = new Set(batchRecords.map((r) => r.id));
+		let outcome: 'ok' | 'terminal' | 'failed' = 'failed';
 		for (let attempt = 0; attempt <= cfg.maxRetries; attempt++) {
 			if (attempt > 0) _state.retried += 1;
 			const result = await postBatch(cfg, url, batch);
 			if (result.ok) {
-				shipped = true;
+				// Success bookkeeping ONLY on an accepted batch: a terminally
+				// rejected batch (below) is a drop, not an export.
+				_state.exported += batch.length;
+				_state.consecutiveFailures = 0;
+				_state.circuitOpenAt = null;
+				_state.lastSuccessAt = new Date().toISOString();
+				outcome = 'ok';
 				break;
 			}
 			if (result.category === 'rejected_permanent') {
-				for (let d = 0; d < batchLines.length; d++)
-					noteDrop('rejected_permanent');
-				shipped = true; // terminally dropped, not re-sent
+				for (let d = 0; d < batch.length; d++) noteDrop('rejected_permanent');
+				outcome = 'terminal'; // terminally dropped, not re-sent
+				// Leave consecutiveFailures/circuit state untouched: a 4xx is
+				// not a transient failure, but it must not clear an open
+				// circuit either — the collector is still refusing exports.
 				break;
 			}
 			const wait =
@@ -583,27 +632,53 @@ async function runFlushCycle(): Promise<void> {
 					: backoffMs(cfg, attempt);
 			if (attempt < cfg.maxRetries) await _internals.sleep(wait);
 		}
-		if (!shipped) {
-			// Transient failure exhausted the retry budget: keep the batch
-			// spooled (restart replay), open/extend the circuit, back off.
-			_state.consecutiveFailures += 1;
-			if (_state.consecutiveFailures >= cfg.circuitThreshold) {
-				_state.circuitOpenAt = _internals.now();
-			}
-			_state.nextAttemptAt = _internals.now() + backoffMs(cfg, cfg.maxRetries);
-			noteDrop('flush_failed');
-			persistState();
-			return;
+		if (outcome !== 'failed') {
+			// Remove exactly the records that were shipped or terminally
+			// dropped, matched by id: a blind front slice can consume records
+			// appended (or cap-dropped) by the listener during the network
+			// await above, silently losing unshipped records.
+			removeSpoolRecords(_directory, batchIds);
+			continue;
 		}
-		// Success (or terminal drop): remove the shipped lines and continue.
-		_state.exported += batch.length;
-		_state.consecutiveFailures = 0;
-		_state.circuitOpenAt = null;
-		_state.lastSuccessAt = new Date().toISOString();
-		const remaining = readSpoolLines(_directory).slice(batchLines.length);
-		writeSpoolLines(_directory, remaining);
+		// Transient failure exhausted the retry budget: keep the batch
+		// spooled (restart replay), open/extend the circuit, back off.
+		_state.consecutiveFailures += 1;
+		if (_state.consecutiveFailures >= cfg.circuitThreshold) {
+			_state.circuitOpenAt = _internals.now();
+		}
+		_state.nextAttemptAt = _internals.now() + backoffMs(cfg, cfg.maxRetries);
+		noteDrop('flush_failed');
+		persistState();
+		return;
 	}
 	persistState();
+}
+
+/**
+ * Remove spool records whose parsed `id` is in `ids`. Id-matched (never a
+ * positional slice): records appended by the listener during a flush's
+ * network await must never be consumed by the flush's cleanup. Unparseable
+ * lines are dropped with `spool_corrupt` — they can never ship.
+ */
+function removeSpoolRecords(directory: string, ids: Set<string>): void {
+	const lines = readSpoolLines(directory);
+	if (lines.length === 0) return;
+	const kept: string[] = [];
+	let changed = false;
+	for (const line of lines) {
+		try {
+			const parsed = JSON.parse(line) as SpoolRecord;
+			if (ids.has(parsed.id)) {
+				changed = true;
+				continue;
+			}
+			kept.push(line);
+		} catch {
+			changed = true;
+			noteDrop('spool_corrupt');
+		}
+	}
+	if (changed) writeSpoolLines(directory, kept);
 }
 
 function flushSingleFlight(): Promise<void> {
@@ -638,10 +713,13 @@ function stopTimer(): void {
 
 /**
  * Register the OTLP exporter for this project root. O(1), idempotent, never
- * throws — safe on the plugin init path (invariant 1); all real I/O happens
- * on the listener/flush paths, post-resolution. When disabled (default), the
- * kill switch is set, or the endpoint violates policy, NOTHING is registered
- * and no `.swarm/otlp-export/` directory is created.
+ * throws — safe on the plugin init path (invariant 1). All flush/listener
+ * I/O is post-resolution; the ONE init-path exception is a small
+ * (state.json-sized) synchronous read performed only when the exporter is
+ * enabled — fail-open and far inside the invariant's latency budget. When
+ * disabled (default), the kill switch is set, or the endpoint violates
+ * policy, NOTHING is registered and no `.swarm/otlp-export/` directory is
+ * created.
  */
 export function registerOtlpExporter(
 	directory: string,
@@ -678,13 +756,15 @@ export function registerOtlpExporter(
 				if (canonical === undefined) return;
 				const span = buildOtlpSpan(canonical, config.convention);
 				if (span === null) return; // content class: no record at all
-				if (_state !== null) _state.accepted += 1;
 				appendSpoolRecord({
 					v: SPOOL_RECORD_VERSION,
 					id: canonical.eventId,
 					t: _internals.now(),
 					r: span,
 				});
+				// Count AFTER a successful append so accepted never includes a
+				// record that was dropped as listener_error.
+				if (_state !== null) _state.accepted += 1;
 			} catch {
 				noteDrop('listener_error');
 			}

@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { _test_exports as invocationFailureTestExports } from '../../../src/failures/invocation-failure.js';
 import type { ObservabilityEvent } from '../../../src/observability/envelope.js';
 import { createObservation } from '../../../src/observability/observe.js';
 import {
@@ -22,7 +23,6 @@ import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry.js';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 import {
 	freshProjectDir,
 	spansOf,
@@ -169,8 +169,14 @@ describe('Unicode and control sequences (required adversarial set)', () => {
 		const attrs = projectOtlpAttributes(longPayload, 'genai');
 		const value = attrs['gen_ai.response.model'];
 		expect(typeof value === 'string' && value.length <= 128).toBe(true);
-		// Timestamp determinism note: span time conversion is pure from the
-		// envelope's ISO strings; freeze reads for stable assertions.
-		withFrozenClock(() => new Date().toISOString());
+	});
+
+	test('JSON-quoted credential keys are redacted (quote between key and separator)', async () => {
+		// PRR-022 pin: the fill class between key and [:=] must admit the
+		// closing quote so '"api_key": "secret"' shapes are covered.
+		const fn = invocationFailureTestExports.sanitizeFailureEvidenceDisplay;
+		const out = fn('{"api_key": "sk-supersecret123"}');
+		expect(out).not.toContain('sk-supersecret123');
+		expect(out).toContain('<redacted>');
 	});
 });

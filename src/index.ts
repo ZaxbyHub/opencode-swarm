@@ -1258,10 +1258,11 @@ async function initializeOpenCodeSwarm(
 	startHeartbeatTracking();
 
 	// #2485: opt-in remote OTLP/OpenInference export. Registration is O(1)
-	// (one listener push + one unref'd interval), never throws, and performs
-	// no I/O — safe on the init path (invariant 1). With the default config
-	// (exporter off), the kill switch set, or an invalid endpoint, NOTHING is
-	// registered and no `.swarm/otlp-export/` directory is created.
+	// (one listener push + one unref'd interval), never throws, and its only
+	// I/O is one small state read, gated on enabled — safe on the init path
+	// (invariant 1). With the default config (exporter off), the kill switch
+	// set, or an invalid endpoint, NOTHING is registered and no
+	// `.swarm/otlp-export/` directory is created.
 	const otlpExportConfig = config.observability?.export;
 	if (otlpExportConfig !== undefined) {
 		registerOtlpExporter(ctx.directory, otlpExportConfig);

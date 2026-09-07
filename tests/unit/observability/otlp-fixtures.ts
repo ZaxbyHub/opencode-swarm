@@ -63,20 +63,37 @@ export function freshProjectDir(): string {
 
 export interface StubCollector {
 	url: string;
-	requests: Array<{ status: number; body: unknown }>;
-	respond: (status: number, headers?: Record<string, string>) => void;
+	requests: Array<{
+		status: number;
+		body: unknown;
+		headers: Record<string, string>;
+	}>;
+	respond: (
+		status: number,
+		headers?: Record<string, string>,
+		body?: string,
+	) => void;
 	close: () => Promise<void>;
 }
 
 /**
  * Loopback OTLP collector stub. Real HTTP on 127.0.0.1:0 — the same surface
  * production uses. Starts in 200-OK mode; `respond()` flips the status.
+ * `delayMs` holds every response open (deterministic flush-await window for
+ * concurrency tests).
  */
-export function startStubCollector(): Promise<StubCollector> {
+export function startStubCollector(
+	opts: { delayMs?: number } = {},
+): Promise<StubCollector> {
 	return new Promise((resolve) => {
-		const requests: Array<{ status: number; body: unknown }> = [];
+		const requests: Array<{
+			status: number;
+			body: unknown;
+			headers: Record<string, string>;
+		}> = [];
 		let status = 200;
 		let extraHeaders: Record<string, string> = {};
+		let responseBody = '{}';
 		const server = Bun.serve({
 			port: 0,
 			hostname: '127.0.0.1',
@@ -88,8 +105,15 @@ export function startStubCollector(): Promise<StubCollector> {
 				} catch {
 					/* keep raw */
 				}
-				requests.push({ status, body });
-				return new Response('{}', {
+				const headers: Record<string, string> = {};
+				req.headers.forEach((value, key) => {
+					headers[key] = value;
+				});
+				requests.push({ status, body, headers });
+				if (opts.delayMs !== undefined && opts.delayMs > 0) {
+					await new Promise((r) => setTimeout(r, opts.delayMs));
+				}
+				return new Response(responseBody, {
 					status,
 					headers: extraHeaders,
 				});
@@ -98,9 +122,14 @@ export function startStubCollector(): Promise<StubCollector> {
 		resolve({
 			url: `http://127.0.0.1:${server.port}`,
 			requests,
-			respond(nextStatus: number, headers: Record<string, string> = {}) {
+			respond(
+				nextStatus: number,
+				headers: Record<string, string> = {},
+				body?: string,
+			) {
 				status = nextStatus;
 				extraHeaders = headers;
+				if (body !== undefined) responseBody = body;
 			},
 			async close() {
 				server.stop(true);

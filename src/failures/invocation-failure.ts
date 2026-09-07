@@ -138,7 +138,7 @@ function redactUrl(match: string): string {
  * relying on more than it provides.
  */
 const FILL_MAX_RUN = 8;
-const FILL = `[\\s\\p{Cc}\\p{Cf}\\p{Default_Ignorable_Code_Point}]{0,${FILL_MAX_RUN}}`;
+const FILL = `[\\s"'\\p{Cc}\\p{Cf}\\p{Default_Ignorable_Code_Point}]{0,${FILL_MAX_RUN}}`;
 const CONTROL_CHAR_RUN = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]+/gu;
 
 /** Hard cap on input length before any redaction regex runs, independent of

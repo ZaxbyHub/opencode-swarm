@@ -1684,10 +1684,13 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 					} else {
 						try {
 							const url = new URL(endpoint);
+							// IPv6 hostnames keep brackets in url.hostname
+							// ('[::1]'); strip them like endpointUrl does.
+							const host = url.hostname.replace(/^\[|\]$/g, '');
 							const isLoopback =
-								url.hostname === 'localhost' ||
-								url.hostname === '127.0.0.1' ||
-								url.hostname === '::1';
+								host === 'localhost' ||
+								host === '127.0.0.1' ||
+								host === '::1';
 							if (url.protocol !== 'https:' && !isLoopback) {
 								problem =
 									'observability.export.endpoint uses plain http: for a non-loopback host — exported telemetry would travel unencrypted; use https: outside local test collectors.';

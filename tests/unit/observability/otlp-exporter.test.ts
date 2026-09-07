@@ -32,7 +32,6 @@ import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry.js';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 import {
 	attributeKeysOf,
 	freshProjectDir,
@@ -261,8 +260,25 @@ describe('transport happy path (real loopback collector)', () => {
 				}
 			}
 		}
-		// Deterministic timestamp sanity under a frozen read of the clock.
-		withFrozenClock(() => new Date().toISOString());
+		// Value-level pin: the sessionId VALUE travels on the wire under the
+		// mapped conversation-id key (encoding-agnostic: OTLP array or flat).
+		const allBodies = JSON.stringify(stub.requests.map((r) => r.body));
+		expect(allBodies).toContain('gen_ai.conversation.id');
+		expect(allBodies).toContain('sess-2485-a');
+	}, 20_000);
+
+	test('IPv6 loopback endpoint (http://[::1]) is accepted as loopback', async () => {
+		// PRR-001 regression pin: url.hostname keeps IPv6 brackets ('[::1]'),
+		// so a naive === '::1' comparison silently disabled the exporter. The
+		// stub binds IPv4-only, so this pins the POLICY decision (registration
+		// accepts a bracketed-IPv6 loopback http endpoint), not the transport.
+		const dir = freshProjectDir();
+		initTelemetry(dir);
+		registerOtlpExporter(
+			dir,
+			testExportConfig('http://[::1]:4318', { batchSize: 8 }),
+		);
+		expect(isOtlpExporterActive()).toBe(true);
 	}, 20_000);
 
 	test('openinference convention works end to end', async () => {
@@ -291,20 +307,43 @@ describe('transport happy path (real loopback collector)', () => {
 	}, 20_000);
 
 	test('partial success accounting: a 200 with partialSuccess counts rejected spans without re-sending', async () => {
-		// Cover partialSuccess parsing with a direct seam-level probe: the
-		// stub returns {} by default; rejectedSpans handling reads the body.
+		// Real 200-with-partialSuccess: the collector accepted the batch, so
+		// the records are removed, and rejectedSpans lands in partial_rejected.
+		const stub = await startStubCollector();
+		collectors.push(stub.close);
 		const dir = freshProjectDir();
 		initTelemetry(dir);
 		registerOtlpExporter(
 			dir,
-			testExportConfig('http://127.0.0.1:9', { maxRetries: 0 }),
+			testExportConfig(stub.url, { batchSize: 2, maxRetries: 0 }),
 		);
 		const { emit } = await import('../../../src/telemetry.js');
 		emit('delegation_begin' as never, { ...JUNK } as never);
-		// Endpoint is dead (port 9): transient failure path, records retained.
 		await flushOtlpExporterForTesting(dir);
+		expect(stub.requests.length).toBeGreaterThanOrEqual(1);
 		const health = readOtlpExporterHealth(dir);
-		expect(health?.spoolRecords).toBe(1);
-		expect(health?.lastErrorCategory).not.toBeNull();
+		expect(health?.spoolRecords).toBe(0);
+		expect(health?.exported).toBeGreaterThanOrEqual(1);
+	}, 20_000);
+
+	test('stub 200 with a partialSuccess body counts rejected spans as partial_rejected', async () => {
+		const stub = await startStubCollector();
+		collectors.push(stub.close);
+		stub.respond(
+			200,
+			{},
+			JSON.stringify({ partialSuccess: { rejectedSpans: 2 } }),
+		);
+		const dir = freshProjectDir();
+		initTelemetry(dir);
+		registerOtlpExporter(dir, testExportConfig(stub.url, { batchSize: 8 }));
+		const { emit } = await import('../../../src/telemetry.js');
+		emit('delegation_begin' as never, { ...JUNK } as never);
+		await flushOtlpExporterForTesting(dir);
+		// The batch was accepted (removed), but the collector-reported
+		// rejections are counted, not re-sent.
+		const health = readOtlpExporterHealth(dir);
+		expect(health?.spoolRecords).toBe(0);
+		expect(health?.dropped['partial_rejected'] ?? 0).toBe(2);
 	}, 20_000);
 });
