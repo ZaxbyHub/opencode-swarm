@@ -137,11 +137,22 @@ describe('restart replay', () => {
 			dir,
 			testExportConfig(stub.url, { maxRetries: 1, backoffBaseMs: 5 }),
 		);
-		await flushOtlpExporterForTesting(dir);
-
-		const allSerialized = stub.requests
-			.map((r) => JSON.stringify(r.body))
-			.join(' ');
+		// A single flush can race the persisted backoff window on a loaded
+		// host; poll with bounded retries until both markers have shipped.
+		let allSerialized = '';
+		for (let attempt = 0; attempt < 20; attempt++) {
+			await flushOtlpExporterForTesting(dir);
+			allSerialized = stub.requests
+				.map((r) => JSON.stringify(r.body))
+				.join(' ');
+			if (
+				allSerialized.includes('replay-alpha-4d2f') &&
+				allSerialized.includes('replay-beta-8c71')
+			) {
+				break;
+			}
+			await new Promise((r) => setTimeout(r, 50));
+		}
 		expect(allSerialized).toContain('replay-alpha-4d2f');
 		expect(allSerialized).toContain('replay-beta-8c71');
 		expect(readOtlpExporterHealth(dir)?.spoolRecords).toBe(0);
