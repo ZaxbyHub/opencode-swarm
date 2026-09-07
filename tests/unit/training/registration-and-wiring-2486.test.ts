@@ -88,6 +88,68 @@ describe('AC10 wiring - capture is registered through the real hook chain', () =
 		expect(src).toContain('messagesTransformTrainingCaptureStep');
 		expect(src).toContain('observeToolExecution');
 	});
+
+	/**
+	 * Structural registration assertions (implementation-review round 1): the
+	 * bare contains-checks above are tautological — a reviewer probe that
+	 * replaced the registered element with a no-op Promise while leaving the
+	 * identifier declared kept the test green. These extract the actual
+	 * composeHandlers argument region and require the step to be registered
+	 * as a bare array element inside it, and the step's own body to call the
+	 * observer (catching both "registration removed" and "body no-oped").
+	 */
+	test('messagesTransformTrainingCaptureStep is registered inside the chat messages.transform composeHandlers array', () => {
+		const src = fs.readFileSync(
+			path.join(REPO_ROOT, 'src', 'index.ts'),
+			'utf-8',
+		);
+		const chainStart = src.indexOf(
+			"'experimental.chat.messages.transform': composeHandlers(",
+		);
+		expect(chainStart).toBeGreaterThanOrEqual(0);
+		// The argument array of THIS composeHandlers call ends at the first
+		// `) as any` closer that follows it (the repo's registration shape).
+		const chainEnd = src.indexOf(') as any', chainStart);
+		expect(chainEnd).toBeGreaterThan(chainStart);
+		const chainBody = src.slice(chainStart, chainEnd);
+		expect(chainBody).toMatch(
+			/(^|\n)\s*messagesTransformTrainingCaptureStep,\s*(\n|\r)/,
+		);
+	});
+
+	test('the step declaration actually calls the observer (no-op bodies fail)', () => {
+		const src = fs.readFileSync(
+			path.join(REPO_ROOT, 'src', 'index.ts'),
+			'utf-8',
+		);
+		const declStart = src.indexOf(
+			'const messagesTransformTrainingCaptureStep =',
+		);
+		expect(declStart).toBeGreaterThanOrEqual(0);
+		const declEnd = src.indexOf('};', declStart);
+		expect(declEnd).toBeGreaterThan(declStart);
+		const declBody = src.slice(declStart, declEnd);
+		expect(declBody).toContain('trainingCaptureObserver.observeMessages(');
+	});
+
+	test('tool.execute.after chain invokes the observer via safeHook', () => {
+		const src = fs.readFileSync(
+			path.join(REPO_ROOT, 'src', 'index.ts'),
+			'utf-8',
+		);
+		const afterStart = src.indexOf("'tool.execute.after':");
+		expect(afterStart).toBeGreaterThanOrEqual(0);
+		// 'tool.execute.after' is the last hook registration in the hooks
+		// object; the invocation must live INSIDE its handler (after its key)
+		// and be wrapped by a safeHook call that also follows the key.
+		const invocation = src.indexOf(
+			'trainingCaptureObserver.observeToolExecution(',
+		);
+		expect(invocation).toBeGreaterThan(afterStart);
+		const safeHookCall = src.indexOf('await safeHook(', afterStart);
+		expect(safeHookCall).toBeGreaterThan(afterStart);
+		expect(safeHookCall).toBeLessThan(invocation);
+	});
 });
 
 describe('PRESERVING - /swarm export untouched by issue #2486', () => {
