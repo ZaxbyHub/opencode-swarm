@@ -15,7 +15,13 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import { removeOwnedWorktreeDir } from '../../../src/worktree/ownership';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
@@ -49,6 +55,21 @@ function addWorktree(repo: string, branch: string, lanePath: string): void {
 function porcelainPath(p: string): string {
 	const norm = p.replaceAll('\\', '/');
 	return process.platform === 'win32' ? norm.toLowerCase() : norm;
+}
+
+/**
+ * Runner environment (GitHub Windows) spells the temp root with an 8.3 short
+ * name while git records worktrees under its own long-form normalization, so
+ * a registration assertion cannot match by spelling alone. dev+ino identity
+ * is spelling-agnostic.
+ */
+function statId(p: string): string | undefined {
+	try {
+		const st = statSync(p, { bigint: true });
+		return `${st.dev}:${st.ino}`;
+	} catch {
+		return undefined;
+	}
 }
 
 let root: string;
@@ -160,6 +181,21 @@ describe('removeOwnedWorktreeDir (issue #2527)', () => {
 		expect(existsSync(dirtyLane)).toBe(true);
 		expect(existsSync(uncommitted)).toBe(true);
 		const porcelain = git(repoA, ['worktree', 'list', '--porcelain']);
-		expect(porcelainPath(porcelain)).toContain(porcelainPath(dirtyLane));
+		// git may print the registered path under its own long-form
+		// normalization of the temp root (8.3 alias on GitHub's Windows
+		// runners), so accept either the fixture spelling or dev+ino identity.
+		const dirtyId = statId(dirtyLane);
+		expect(
+			porcelain
+				.split('\n')
+				.filter((l) => l.startsWith('worktree '))
+				.some((l) => {
+					const recorded = l.slice('worktree '.length).trim();
+					return (
+						porcelainPath(recorded) === porcelainPath(dirtyLane) ||
+						(dirtyId !== undefined && statId(recorded) === dirtyId)
+					);
+				}),
+		).toBe(true);
 	}, 60_000);
 });

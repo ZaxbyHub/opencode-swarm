@@ -15,6 +15,7 @@ import {
 	mkdirSync,
 	readdirSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from 'node:fs';
 import * as path from 'node:path';
@@ -54,6 +55,21 @@ function addWorktree(repo: string, branch: string, lanePath: string): void {
 function norm(p: string): string {
 	const forward = p.replaceAll('\\', '/');
 	return process.platform === 'win32' ? forward.toLowerCase() : forward;
+}
+
+/**
+ * Runner environment (GitHub Windows) spells the temp root with an 8.3 short
+ * name while git re-registers moved worktrees under its own long-form
+ * normalization, so a registered-path assertion cannot match by spelling.
+ * dev+ino identity is spelling-agnostic.
+ */
+function statId(p: string): string | undefined {
+	try {
+		const st = statSync(p, { bigint: true });
+		return `${st.dev}:${st.ino}`;
+	} catch {
+		return undefined;
+	}
 }
 
 /** Parses `git worktree list --porcelain` into per-worktree blocks. */
@@ -103,10 +119,21 @@ describe('migrateLegacyWorktreeBase (issue #2527 F4)', () => {
 		expect(result.moved).toEqual([movedLane]);
 		expect(existsSync(movedLane)).toBe(true);
 		expect(existsSync(legacyLane)).toBe(false);
-		// Registered at the NEW path and healthy (not prunable).
-		const block = worktreeBlocks(project).find((b) =>
-			norm(b.header).includes(norm(movedLane)),
-		);
+		// Registered at the NEW path and healthy (not prunable). The block is
+		// matched spelling-agnostically: git may re-register the moved lane
+		// under its own long-form normalization of the temp root (8.3 alias
+		// on GitHub's Windows runners), so the header path can diverge from
+		// the fixture spelling while naming the same directory.
+		const movedId = statId(movedLane);
+		const block = worktreeBlocks(project).find((b) => {
+			const headerPath = b.header.startsWith('worktree ')
+				? b.header.slice('worktree '.length).trim()
+				: b.header;
+			return (
+				norm(b.header).includes(norm(movedLane)) ||
+				(movedId !== undefined && statId(headerPath) === movedId)
+			);
+		});
 		expect(block).toBeDefined();
 		expect(block?.lines.some((l) => l.startsWith('prunable'))).toBe(false);
 		// No lane CONTENT is retained at the legacy path, and the emptied
