@@ -122,11 +122,17 @@ export function resolveWorktreeRepoOwnership(
 			? (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 			: (a: string, b: string) => a === b;
 	// Canonicalize both sides through realpathSync (matching the sibling
-	// containment primitive's 8.3/junction discipline) so a symlinked
-	// project-root spelling cannot diverge from the git-recorded pointer
-	// path. Unresolvable paths (deleted/racing) fall back to lexical
-	// resolution — the comparison then fails toward owned:false (retain),
-	// which is the safe direction.
+	// containment primitive's junction discipline) AND compare against the
+	// lexical pair too, accepting EITHER match. Two Windows realities make a
+	// single strategy insufficient (final-critic B5 / CI round 2):
+	//  - realpathSync PRESERVES 8.3 short names (RUNNER~1) rather than
+	//    expanding them, while git records the LONG path in its pointer
+	//    files — so the realpath pair can disagree for the SAME directory;
+	//  - a junctioned/symlinked project-root spelling diverges lexically
+	//    but converges under realpath.
+	// A foreign repository matches NEITHER form, so the widened comparison
+	// still fails closed. Unresolvable paths fall back to lexical — again
+	// failing toward owned:false (retain), the safe direction.
 	const canonical = (p: string): string => {
 		try {
 			return fs.realpathSync(p);
@@ -134,11 +140,16 @@ export function resolveWorktreeRepoOwnership(
 			return p;
 		}
 	};
+	const mainReal = path.resolve(canonical(mainWorktree));
+	const rootReal = path.resolve(canonical(expectedProjectRoot));
+	const mainLex = path.resolve(mainWorktree);
+	const rootLex = path.resolve(expectedProjectRoot);
 	return {
-		owned: cmp(
-			path.resolve(canonical(mainWorktree)),
-			path.resolve(canonical(expectedProjectRoot)),
-		),
+		owned:
+			cmp(mainReal, rootReal) ||
+			cmp(mainLex, rootLex) ||
+			cmp(mainReal, rootLex) ||
+			cmp(mainLex, rootReal),
 		mainWorktree,
 		uncertain: false,
 	};
