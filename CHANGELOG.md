@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.170.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.170.1...v7.170.2) (2026-09-07)
+
+
+### Bug Fixes
+
+* **host-contract:** route task tool-id comparisons through shared isTaskToolId boundary (issue [#2529](https://github.com/ZaxbyHub/opencode-swarm/issues/2529)) ([4cc1962](https://github.com/ZaxbyHub/opencode-swarm/commit/4cc1962f623de74b538b3824eeac82fcbc4c75da))
+
 ## [7.170.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.170.0...v7.170.1) (2026-09-07)
 
 
