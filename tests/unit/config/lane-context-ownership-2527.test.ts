@@ -143,3 +143,58 @@ describe('resolveWorktreeRepoOwnership (issue #2527)', () => {
 		});
 	},
 );
+
+/**
+ * Runner-environment pin (CI round 3): on GitHub's Windows runners the temp
+ * root is spelled with an 8.3 short name (`RUNNER~1`), git expands that alias
+ * to the long form when it records worktree pointer files, and Bun's
+ * realpathSync preserves the alias — so NO string spelling converges for the
+ * same directory and every real-worktree ownership fixture failed closed to
+ * owned:false (7 test files red across 4 shards). The resolver must fall
+ * through to dev+ino identity. The condition only reproduces where the
+ * volume generates 8.3 aliases, so the fixture detects one and skips
+ * otherwise (everywhere except typical NTFS system volumes).
+ */
+(process.platform === 'win32' ? describe : describe.skip)(
+	'win32-only 8.3 short-name divergence',
+	() => {
+		function shortSpelling(p: string): string {
+			return execFileSync(
+				'cmd.exe',
+				['/c', 'for', '%I', `in ("${p}") do @echo %~sI`],
+				{ shell: true, encoding: 'utf-8', timeout: 30_000 },
+			)
+				.toString()
+				.trim();
+		}
+
+		test('alias-spelled project root still owns its git-recorded worktree', () => {
+			const aliasRoot = canonicalMkdtemp('laneown-8p3-2527-');
+			try {
+				const shortRoot = shortSpelling(aliasRoot);
+				if (shortRoot === aliasRoot || !/~\d/.test(shortRoot)) {
+					// Volume does not generate 8.3 aliases — the divergence
+					// cannot exist here; the string comparisons already cover
+					// it (and the runner matrix exercises the aliased form).
+					return;
+				}
+				const shortRepo = path.join(shortRoot, 'repoA');
+				initRepo(shortRepo);
+				const lane = path.join(shortRoot, 'lanes', 'lane-1');
+				mkdirSync(path.dirname(lane), { recursive: true });
+				git(shortRepo, ['worktree', 'add', '-b', 'alias-branch', lane]);
+
+				const ownership = resolveWorktreeRepoOwnership(lane, shortRepo);
+
+				expect(ownership.owned).toBe(true);
+				expect(ownership.uncertain).toBe(false);
+			} finally {
+				try {
+					rmSync(aliasRoot, { recursive: true, force: true });
+				} catch {
+					// Teardown is best-effort (Windows git file handles).
+				}
+			}
+		}, 60_000);
+	},
+);

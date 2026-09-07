@@ -144,12 +144,41 @@ export function resolveWorktreeRepoOwnership(
 	const rootReal = path.resolve(canonical(expectedProjectRoot));
 	const mainLex = path.resolve(mainWorktree);
 	const rootLex = path.resolve(expectedProjectRoot);
+	if (
+		cmp(mainReal, rootReal) ||
+		cmp(mainLex, rootLex) ||
+		cmp(mainReal, rootLex) ||
+		cmp(mainLex, rootReal)
+	) {
+		return { owned: true, mainWorktree, uncertain: false };
+	}
+	// Last resort: filesystem identity. On runners whose temp root is spelled
+	// with an 8.3 short name (RUNNER~1), Bun's realpathSync preserves the
+	// alias on our side while git expands it to the long form in the pointer
+	// files — no string spelling can then converge for the SAME directory.
+	// dev+ino equality (bigint stat) is alias-, case-, and junction-proof;
+	// it is only consulted after the string comparisons disagree, and a
+	// foreign repository never shares a dev+ino pair with the project root,
+	// so this still fails closed. Non-Windows FS identity is equally sound
+	// (same-device same-inode directories), so the fallback is unconditional.
+	const statOf = (p: string): { dev: bigint; ino: bigint } | undefined => {
+		try {
+			const st = fs.statSync(p, { bigint: true });
+			return { dev: st.dev, ino: st.ino };
+		} catch {
+			return undefined;
+		}
+	};
+	const mainStat = statOf(mainWorktree);
+	const rootStat = statOf(expectedProjectRoot);
 	return {
 		owned:
-			cmp(mainReal, rootReal) ||
-			cmp(mainLex, rootLex) ||
-			cmp(mainReal, rootLex) ||
-			cmp(mainLex, rootReal),
+			mainStat !== undefined &&
+			rootStat !== undefined &&
+			mainStat.dev > 0n &&
+			mainStat.ino > 0n &&
+			mainStat.dev === rootStat.dev &&
+			mainStat.ino === rootStat.ino,
 		mainWorktree,
 		uncertain: false,
 	};
