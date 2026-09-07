@@ -158,7 +158,7 @@ describe('cross-process interference: second process must not delete first proce
 
 			// Create orphaned worktree directory (would be deleted in normal case)
 			const orphanedWorktreePath = path.join(
-				path.dirname(freshDir),
+				freshDir, // issue #2527: enumeration base is <project>/.swarm-worktrees
 				'.swarm-worktrees',
 				'crashed-session-cross',
 				'lane-1',
@@ -243,7 +243,7 @@ describe('cross-process interference: second process must not delete first proce
 
 			// Create orphaned worktree directory (no active sessions in this process)
 			const orphanedWorktreePath = path.join(
-				path.dirname(freshDir),
+				freshDir,
 				'.swarm-worktrees',
 				'session-alone',
 				'lane-1',
@@ -292,7 +292,7 @@ describe('cross-process interference: second process must not delete first proce
 
 			// Create orphaned worktree dir
 			const orphanedWorktreePath = path.join(
-				path.dirname(freshDir),
+				freshDir,
 				'.swarm-worktrees',
 				'session-adv-cross',
 				'lane-1',
@@ -359,18 +359,20 @@ describe('SC-107: orphaned worktree directories removed and branches deleted', (
 		// Create ONE orphaned worktree directory with corresponding git branch
 		const crashedSession = 'crashed-sess-single';
 
+		// Create corresponding git branch FIRST — the helper runs `git add .`
+		// in the repo, which would swallow a lane dir already placed inside
+		// the project-internal base (issue #2527) and delete it on checkout.
+		await createSwarmLaneBranch(freshDir, crashedSession, 'lane-1');
+
 		// Orphaned worktree directory
 		const wtPath = path.join(
-			path.dirname(freshDir),
+			freshDir,
 			'.swarm-worktrees',
 			crashedSession,
 			'lane-1',
 		);
 		mkdirSync(wtPath, { recursive: true });
 		writeFileSync(path.join(wtPath, 'orphan.txt'), 'orphan content\n');
-
-		// Create corresponding git branch
-		await createSwarmLaneBranch(freshDir, crashedSession, 'lane-1');
 
 		// Verify orphaned dir exists before
 		expect(existsSync(wtPath)).toBe(true);
@@ -423,10 +425,7 @@ describe('SC-107: orphaned worktree directories removed and branches deleted', (
 		);
 		await initGitRepo(freshDir);
 
-		const worktreeRoot = path.resolve(
-			path.dirname(freshDir),
-			'.swarm-worktrees',
-		);
+		const worktreeRoot = path.resolve(freshDir, '.swarm-worktrees');
 
 		// Create three orphaned worktree directories (no git branches needed)
 		const sessions = ['multi-orphan-1', 'multi-orphan-2', 'multi-orphan-3'];

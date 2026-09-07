@@ -174,7 +174,9 @@ describe('issue #2268 — reset-session recovers stale coder settlements', () =>
 		);
 		expect(out).not.toContain('evil\u0007');
 		expect(out).toContain('Preserved .swarm-worktrees/');
-		expect(out).toContain('Skipped .swarm-worktrees/ removal');
+		// Issue #2527: the blanket ".swarm-worktrees/ removal" skip line became
+		// the per-lane "worktree reclamation" skip line.
+		expect(out).toContain('Skipped worktree reclamation (see above)');
 		expect(fs.existsSync(path.join(worktreesDir, 'lane-marker'))).toBe(true);
 	});
 
@@ -203,7 +205,7 @@ describe('issue #2268 — reset-session recovers stale coder settlements', () =>
 		expect(out).toContain(
 			'Coder settlement recovery failed (continuing with reset)',
 		);
-		expect(out).toContain('Skipped .swarm-worktrees/ removal');
+		expect(out).toContain('Skipped worktree reclamation (see above)');
 		expect(fs.existsSync(path.join(worktreesDir, 'lane-marker'))).toBe(true);
 	});
 

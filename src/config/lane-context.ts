@@ -83,6 +83,108 @@ const MAX_CACHED_DIRECTORIES = 256;
 const laneContextCache = new Map<string, LaneContext | null>();
 
 /**
+ * Issue #2527: repo-ownership answer for destructive reclamation.
+ *
+ * `owned === true` (and `uncertain === false`) is the ONLY answer that
+ * permits deleting a worktree directory from a reclamation path: the
+ * candidate's `.git` pointer must resolve, through git's own `commondir`
+ * metadata, back to a main working tree that IS the expected project root.
+ * Anything else — foreign repo (the common shared-base case: `git worktree
+ * remove` says "is not a working tree"), unreadable/malformed pointer, or a
+ * main-working-tree candidate we were not asked about — is NOT deletable.
+ * Comparison is case-insensitive on Windows, matching
+ * `isPathUnderSwarmWorktreeBase` in `src/worktree/core.ts`.
+ */
+export interface WorktreeRepoOwnership {
+	owned: boolean;
+	mainWorktree?: string;
+	uncertain: boolean;
+}
+
+export function resolveWorktreeRepoOwnership(
+	worktreePath: string,
+	expectedProjectRoot: string,
+): WorktreeRepoOwnership {
+	const io = { failed: false };
+	const gitDir = readLinkedWorktreeGitDir(worktreePath, io);
+	if (io.failed || !gitDir) {
+		// No readable `.git` FILE pointer: either not a linked worktree at all
+		// (plain directory — caller decides via containment) or an I/O problem.
+		// Both are "not provably ours": never deletable on this evidence.
+		return { owned: false, uncertain: io.failed };
+	}
+	const mainWorktree = resolveMainWorktree(gitDir, io);
+	if (io.failed || !mainWorktree) {
+		return { owned: false, uncertain: true };
+	}
+	const cmp =
+		process.platform === 'win32'
+			? (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
+			: (a: string, b: string) => a === b;
+	// Canonicalize both sides through realpathSync (matching the sibling
+	// containment primitive's junction discipline) AND compare against the
+	// lexical pair too, accepting EITHER match. Two Windows realities make a
+	// single strategy insufficient (final-critic B5 / CI round 2):
+	//  - realpathSync PRESERVES 8.3 short names (RUNNER~1) rather than
+	//    expanding them, while git records the LONG path in its pointer
+	//    files — so the realpath pair can disagree for the SAME directory;
+	//  - a junctioned/symlinked project-root spelling diverges lexically
+	//    but converges under realpath.
+	// A foreign repository matches NEITHER form, so the widened comparison
+	// still fails closed. Unresolvable paths fall back to lexical — again
+	// failing toward owned:false (retain), the safe direction.
+	const canonical = (p: string): string => {
+		try {
+			return fs.realpathSync(p);
+		} catch {
+			return p;
+		}
+	};
+	const mainReal = path.resolve(canonical(mainWorktree));
+	const rootReal = path.resolve(canonical(expectedProjectRoot));
+	const mainLex = path.resolve(mainWorktree);
+	const rootLex = path.resolve(expectedProjectRoot);
+	if (
+		cmp(mainReal, rootReal) ||
+		cmp(mainLex, rootLex) ||
+		cmp(mainReal, rootLex) ||
+		cmp(mainLex, rootReal)
+	) {
+		return { owned: true, mainWorktree, uncertain: false };
+	}
+	// Last resort: filesystem identity. On runners whose temp root is spelled
+	// with an 8.3 short name (RUNNER~1), Bun's realpathSync preserves the
+	// alias on our side while git expands it to the long form in the pointer
+	// files — no string spelling can then converge for the SAME directory.
+	// dev+ino equality (bigint stat) is alias-, case-, and junction-proof;
+	// it is only consulted after the string comparisons disagree, and a
+	// foreign repository never shares a dev+ino pair with the project root,
+	// so this still fails closed. Non-Windows FS identity is equally sound
+	// (same-device same-inode directories), so the fallback is unconditional.
+	const statOf = (p: string): { dev: bigint; ino: bigint } | undefined => {
+		try {
+			const st = fs.statSync(p, { bigint: true });
+			return { dev: st.dev, ino: st.ino };
+		} catch {
+			return undefined;
+		}
+	};
+	const mainStat = statOf(mainWorktree);
+	const rootStat = statOf(expectedProjectRoot);
+	return {
+		owned:
+			mainStat !== undefined &&
+			rootStat !== undefined &&
+			mainStat.dev > 0n &&
+			mainStat.ino > 0n &&
+			mainStat.dev === rootStat.dev &&
+			mainStat.ino === rootStat.ino,
+		mainWorktree,
+		uncertain: false,
+	};
+}
+
+/**
  * Test-only dependency-injection seam (AGENTS.md invariant 7 — prefer
  * `_internals` over `mock.module`, which leaks across files in Bun's shared
  * test-runner process). Tests replace these to simulate unreadable `.git`

@@ -57,9 +57,11 @@ describe('issue #2271 bug 1 — provisionWorktree lane verification', () => {
 	let origBunSpawn: typeof worktreeInternals.bunSpawn;
 	const created: string[] = [];
 
-	// Lanes live under <tmp>/.swarm-worktrees/<sessionId>/<taskId> — a fixed
-	// session id would collide with a previous run's lane base on this machine
-	// ("branch already exists"), so every run uses a fresh session id.
+	// Lanes default to <repo>/.swarm-worktrees/<sessionId>/<taskId> since issue
+	// #2527 (the sabotage test below uses an external worktree_dir override —
+	// see its comment). A fixed session id would collide with a previous run's
+	// lane base on this machine ("branch already exists"), so every run uses a
+	// fresh session id.
 	function sessionId(): string {
 		return `ses_p${Math.random().toString(36).slice(2, 12)}`;
 	}
@@ -95,6 +97,20 @@ describe('issue #2271 bug 1 — provisionWorktree lane verification', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
+		// Issue #2527: the default lane base moved INSIDE the project, where
+		// `git rev-parse --git-dir` succeeds from any subdirectory by walking up to
+		// the project's own .git — so a lane with a deleted .git link is only
+		// detectable where the lane lives OUTSIDE any repository. This sabotage
+		// test therefore provisions through an explicit absolute worktree_dir
+		// override outside the repo (still first-class production behavior), which
+		// is exactly the #2271 premise: rev-parse succeeds only in a genuinely
+		// registered worktree.
+		const externalLanesDir = path.join(
+			path.dirname(repoDir),
+			'pw-verify-2271-external',
+		);
+		created.push(externalLanesDir);
+
 		// Simulate the reported race: let the REAL `git worktree add` run and
 		// succeed, then delete the lane's .git link before provisionWorktree
 		// proceeds to its verification probes — exactly the "lane directory
@@ -124,6 +140,7 @@ describe('issue #2271 bug 1 — provisionWorktree lane verification', () => {
 
 		const result = await provisionWorktree(repoDir, '2.1', sessionId(), {
 			purpose: 'lane',
+			worktreeDir: externalLanesDir,
 		});
 		if (!('error' in result)) {
 			throw new Error('expected provisioning to fail verification');

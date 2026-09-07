@@ -635,6 +635,8 @@ DELETES plan.md, plan.json, context.md, events.jsonl, run-memory.jsonl, and summ
 
 Clear session state while preserving plan, evidence, and knowledge
 
+**Args:** `--confirm=<token> (purge dirty/live lanes)`
+
 Deletes only .swarm/session/state.json and other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge. Also releases this session's pending knowledge-gate obligations (#2398) and recovers stale coder settlements so dispatches cannot wedge on CODER_DISPATCH_IN_PROGRESS (#2268). Auto-backs up removed files to .swarm/reset-backups/ (newest 5 kept).
 
 ### `/swarm recover`

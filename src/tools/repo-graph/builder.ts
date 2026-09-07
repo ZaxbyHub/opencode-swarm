@@ -133,6 +133,11 @@ const SKIP_DIRECTORIES = new Set([
 	// SvelteKit build output (issue #1448): minified chunks here are generated
 	// artifacts, never source, and previously crashed the graph build.
 	'.svelte-kit',
+	// opencode-swarm runtime state + project-internal worktree lanes (issue #2527:
+	// the lane base default moved inside the project; a lane is a full nested
+	// checkout that must never enter the graph).
+	'.swarm',
+	'.swarm-worktrees',
 ]);
 
 /**

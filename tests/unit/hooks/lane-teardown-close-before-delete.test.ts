@@ -44,34 +44,36 @@ describe('close-before-delete guardrail (#2599 AC5)', () => {
 		expect(failures).toEqual([]);
 	});
 
-	test('init-orphan-recovery: removeOrphanedWorktreeDir closes the DB before both deletion branches', () => {
+	test('init-orphan-recovery: the gated removal loop closes the DB before removeOwnedWorktreeDir (post-#2527)', () => {
+		// Post-#2527 the rmSync-fallback helper was replaced by the
+		// ownership-gated removeOwnedWorktreeDir flow; the invariant under
+		// guard is unchanged: closeProjectDb precedes the gated removal.
 		const source = read('src/hooks/init-orphan-recovery.ts');
 		const lines = nonCommentLines(source);
-		const fnStart = lines.findIndex((line) =>
-			/async function removeOrphanedWorktreeDir\(/.test(line),
-		);
-		expect(fnStart).toBeGreaterThanOrEqual(0);
-		const fnBody = lines.slice(fnStart, fnStart + 45);
-		const closeIdx = fnBody.findIndex((line) => /closeProjectDb\(/.test(line));
-		const rmSyncIdx = fnBody.findIndex((line) =>
-			/_internals\.rmSync\(/.test(line),
-		);
-		const gitRemoveIdx = fnBody.findIndex((line) =>
-			/_internals\.removeWorktree\(/.test(line),
+		const closeIdx = lines.findIndex((line) => /closeProjectDb\(/.test(line));
+		const removalIdx = lines.findIndex((line) =>
+			/removeOwnedWorktreeDir\(/.test(line),
 		);
 		expect(closeIdx).toBeGreaterThanOrEqual(0);
-		expect(rmSyncIdx).toBeGreaterThan(closeIdx);
-		expect(gitRemoveIdx).toBeGreaterThan(closeIdx);
+		expect(removalIdx).toBeGreaterThan(closeIdx);
 	});
 
-	test('reset-session: the bulk .swarm-worktrees removal enumerates lanes and closes each DB first', () => {
+	test('reset-session: the gated reclamation enumerates lanes and closes each DB first (post-#2527)', () => {
+		// Post-#2527 reset-session reclaims per-lane through the ownership
+		// gate (never a bulk rmSync); the invariant under guard is unchanged:
+		// enumeration happens and closeProjectDb precedes the removal loop.
 		const source = read('src/commands/reset-session.ts');
 		const lines = nonCommentLines(source);
-		const rmIdx = lines.findIndex((line) => /rmSync\(worktreesDir/.test(line));
-		expect(rmIdx).toBeGreaterThanOrEqual(0);
-		const window = lines.slice(Math.max(0, rmIdx - 60), rmIdx).join('\n');
-		expect(window).toContain('closeProjectDb(');
-		expect(/readdirSync/.test(window)).toBe(true);
+		const enumIdx = lines.findIndex((line) =>
+			/for \(const base of resolveWorktreeEnumerationBases\(/.test(line),
+		);
+		expect(enumIdx).toBeGreaterThanOrEqual(0);
+		const closeIdx = lines.findIndex((line) => /closeProjectDb\(/.test(line));
+		const removalIdx = lines.findIndex((line) =>
+			/removeOwnedWorktreeDir\(/.test(line),
+		);
+		expect(closeIdx).toBeGreaterThan(enumIdx);
+		expect(closeIdx).toBeLessThan(removalIdx);
 	});
 
 	test('delegation-gate terminal-failure cleanup closes the lane DB before removal', () => {

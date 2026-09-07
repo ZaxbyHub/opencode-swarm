@@ -23,6 +23,7 @@ import type { LeanTurboConfig } from '../../config/schema';
 import { stripKnownSwarmPrefix } from '../../config/schema';
 import { loadFullAutoRunState } from '../../full-auto/state';
 import { acquireLaneLocks, releaseLaneLocks } from '../../parallel/file-locks';
+import { recordLiveLaneOwner } from '../../parallel/lane-owners';
 import { loadPlanJsonOnly } from '../../plan/manager';
 import { derivePlanId } from '../../plan/utils';
 import {
@@ -1341,6 +1342,14 @@ export class LeanTurboRunner {
 						provisionResult.worktreePath,
 						provisionResult.branchName,
 					);
+					// Issue #2527 F3: durable owner record whose lifetime is
+					// the lane's, not the five-minute lock TTL.
+					recordLiveLaneOwner(this._directory, {
+						lanePath: provisionResult.worktreePath,
+						branchName: provisionResult.branchName,
+						sessionId: this._sessionID,
+						taskId: lane.laneId,
+					});
 				} else {
 					provisionError = provisionResult.error;
 				}
@@ -1377,6 +1386,12 @@ export class LeanTurboRunner {
 								retryResult.worktreePath,
 								retryResult.branchName,
 							);
+							recordLiveLaneOwner(this._directory, {
+								lanePath: retryResult.worktreePath,
+								branchName: retryResult.branchName,
+								sessionId: this._sessionID,
+								taskId: lane.laneId,
+							});
 							log(
 								`[lean-turbo] worktree provision retry succeeded for lane ${lane.laneId}`,
 							);

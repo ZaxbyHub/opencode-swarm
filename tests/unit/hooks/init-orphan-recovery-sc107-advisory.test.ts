@@ -22,15 +22,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import {
-	_internals as InitOrphanRecoveryInternals,
-	runInitOrphanRecovery,
-} from '../../../src/hooks/init-orphan-recovery';
+import { runInitOrphanRecovery } from '../../../src/hooks/init-orphan-recovery';
 import {
 	createInitOrphanRecoveryAdvisoryHook,
 	type InitOrphanAdvisory,
 } from '../../../src/hooks/init-orphan-recovery-advisory';
 import { ensureAgentSession, swarmState } from '../../../src/state';
+import { _internals as OwnershipInternals } from '../../../src/worktree/ownership';
 
 // A fixed literal, replacing what were real-clock reads. No assertion in this
 // file depends on the value — it is filler for a required field — so reading the
@@ -136,7 +134,7 @@ describe('SC-107 (worktree-dir): orphaned worktree directories are removed', () 
 			// Create an orphaned worktree directory (no matching active session)
 			const crashedSessionId = 'crashed-session-xyz';
 			const orphanedWorktreePath = path.join(
-				path.dirname(freshDir), // worktree root is at project-parent/.swarm-worktrees
+				freshDir, // issue #2527: enumeration base is <project>/.swarm-worktrees
 				'.swarm-worktrees',
 				crashedSessionId,
 				'lane-1',
@@ -161,9 +159,12 @@ describe('SC-107 (worktree-dir): orphaned worktree directories are removed', () 
 				result.removedWorktrees.some((p) => p.includes(crashedSessionId)),
 			).toBe(true);
 
-			// The orphaned worktree directory should be gone (or at least reported as removed)
-			// Note: if removeWorktree fails, it falls back to fs.rmSync which should succeed
-			// The key assertion is that removedWorktrees contains the path
+			// The orphaned worktree directory should be gone (or at least reported as removed).
+			// Post-#2527 the removal routes through removeOwnedWorktreeDir; this
+			// fixture dir carries no .git link inside the project base, so it takes
+			// the gitless-internal-removal branch (a git refusal on a .git-bearing
+			// candidate is a STOP, never an rmSync escalation). The key assertion
+			// is that removedWorktrees contains the path.
 		},
 	);
 
@@ -179,7 +180,7 @@ describe('SC-107 (worktree-dir): orphaned worktree directories are removed', () 
 
 		// Create a worktree directory for the active session
 		const activeWorktreePath = path.join(
-			path.dirname(freshDir),
+			freshDir,
 			'.swarm-worktrees',
 			activeSessionId,
 			'lane-active',
@@ -210,58 +211,39 @@ describe('SC-107 (worktree-dir): orphaned worktree directories are removed', () 
 	});
 
 	test(
-		'when removeWorktree fails (EBUSY), advisory captures the error ' +
-			'and worktree remains in place (best-effort recovery)',
+		'when git removal fails (EBUSY), advisory captures the error ' +
+			'and worktree remains in place (refusal is a stop, never rmSync)',
 		async () => {
 			const freshDir = realpathSync(
 				mkdtempSync(path.join(tmpdir(), 'init-orphan-wtdir-ebusy-')),
 			);
 			await initGitRepo(freshDir);
 
-			// Create an orphaned worktree directory
+			// Issue #2527: a real registered worktree inside the project base, so
+			// reclamation goes through the ownership-gated helper — and a git
+			// removal failure is a STOP that must preserve the candidate.
 			const crashedSessionId = 'crashed-session-ebusy';
 			const orphanedWorktreePath = path.join(
-				path.dirname(freshDir),
+				freshDir,
 				'.swarm-worktrees',
 				crashedSessionId,
 				'lane-1',
 			);
-			mkdirSync(orphanedWorktreePath, { recursive: true });
-			writeFileSync(
-				path.join(orphanedWorktreePath, 'locked.txt'),
-				'locked content\n',
-			);
-			writeFileSync(
-				path.join(orphanedWorktreePath, '.git'),
-				'gitdir: unavailable\n',
-			);
+			const addResult = await runGit(freshDir, [
+				'worktree',
+				'add',
+				'-b',
+				`swarm-lane/${crashedSessionId}/lane-1`,
+				orphanedWorktreePath,
+			]);
+			if (addResult.exitCode !== 0)
+				throw new Error('worktree add failed: ' + addResult.stderr);
 
-			// Save real removeWorktree and rmSync
-			const realRemoveWorktree = InitOrphanRecoveryInternals.removeWorktree;
-			const realRmSync = InitOrphanRecoveryInternals.rmSync;
-
-			// Mock removeWorktree to fail with EBUSY
-			InitOrphanRecoveryInternals.removeWorktree = mock(
-				async (
-					_worktreePath: string,
-					_projectRoot: string,
-				): Promise<{ success: false; error: string }> => {
-					return {
-						success: false,
-						error: 'EBUSY: directory is locked by another process',
-					};
-				},
-			);
-
-			// Mock rmSync to also fail (to simulate true EBUSY where even filesystem removal fails)
-			InitOrphanRecoveryInternals.rmSync = mock(
-				(
-					_path: string,
-					_options?: { recursive?: boolean; force?: boolean },
-				) => {
-					throw new Error('EBUSY: directory is locked by another process');
-				},
-			);
+			// Mock the ownership-gated git removal to fail with EBUSY
+			const realRemoveWorktree = OwnershipInternals.removeWorktree;
+			OwnershipInternals.removeWorktree = mock(async () => ({
+				error: 'EBUSY: directory is locked by another process',
+			}));
 
 			try {
 				const result = await runInitOrphanRecovery(freshDir);
@@ -296,11 +278,10 @@ describe('SC-107 (worktree-dir): orphaned worktree directories are removed', () 
 					expect(content.warnings.some((w) => w.includes('EBUSY'))).toBe(true);
 				}
 
-				// The worktree directory should still exist (best-effort — lock prevented removal)
+				// The worktree must survive the refused removal (best-effort)
 				expect(existsSync(orphanedWorktreePath)).toBe(true);
 			} finally {
-				InitOrphanRecoveryInternals.removeWorktree = realRemoveWorktree;
-				InitOrphanRecoveryInternals.rmSync = realRmSync;
+				OwnershipInternals.removeWorktree = realRemoveWorktree;
 				rmSync(freshDir, { recursive: true, force: true });
 			}
 		},
@@ -315,7 +296,7 @@ describe('SC-107 (worktree-dir): orphaned worktree directories are removed', () 
 		// Create orphaned worktree dir and branch
 		const crashedSessionId = 'crashed-adv-wt';
 		const orphanedWorktreePath = path.join(
-			path.dirname(freshDir),
+			freshDir,
 			'.swarm-worktrees',
 			crashedSessionId,
 			'lane-1',

@@ -48,7 +48,7 @@ function resolveAuditCommandDefault(name: 'npm' | 'cargo'): string[] {
 	const lowered = resolved.toLowerCase();
 	if (lowered.endsWith('.cmd') || lowered.endsWith('.bat')) {
 		if (/["&|<>^!%]/.test(resolved)) return [name];
-		return ['cmd.exe', '/d', '/s', '/c', 'call "' + resolved + '"'];
+		return ['cmd.exe', '/d', '/s', '/c', `call "${resolved}"`];
 	}
 	return [resolved];
 }

@@ -780,7 +780,10 @@ export const DEFAULT_LEAN_TURBO_CONFIG: LeanTurboConfig = {
 
 /**
  * Directory name of the DD-6 default swarm-managed worktree base, created as a
- * SIBLING of the project root (`<project-parent>/.swarm-worktrees`).
+ * child of the project root (`<project>/.swarm-worktrees`) — moved inside the
+ * project by issue #2527 (the pre-#2527 parent-level default was shared by
+ * every sibling checkout and enabled cross-project reclamation destruction);
+ * a start-time migration moves owned legacy-base lanes into the project.
  *
  * Single source of truth shared by `resolveWorktreeBaseDir` in
  * `src/worktree/core.ts` (which BUILDS lane paths) and

@@ -83,7 +83,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Synchronous retry: reserved for sync-only writers (divergence-recorder). */
-function renameWithRetrySync(from: string, to: string): void {
+function _renameWithRetrySync(from: string, to: string): void {
 	let lastError: unknown;
 	for (let attempt = 1; attempt <= RENAME_MAX_ATTEMPTS; attempt++) {
 		try {
