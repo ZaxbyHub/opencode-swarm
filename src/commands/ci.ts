@@ -17,11 +17,13 @@
  */
 
 import {
+	type AdvisoryCiReport,
 	evaluateAdvisoryCi,
 	renderFullReport,
 	renderJsonBlock,
 	runAdvisoryCiRuntime,
 } from '../ci/index.js';
+import { DEFAULT_QA_GATES } from '../db/qa-gate-profile.js';
 import type { CommandContext, CommandFailure } from './registry.js';
 
 export const DEFAULT_CI_DEADLINE_MS = 300_000;
@@ -108,7 +110,7 @@ export async function handleCiCommand(
 	signals.install();
 
 	try {
-		const result = await runAdvisoryCiRuntime({
+		const result = await _internals.runAdvisoryCiRuntime({
 			directory: ctx.directory,
 			deadlineMs,
 			signal: controller.signal,
@@ -135,29 +137,43 @@ export async function handleCiCommand(
 				exitCode: 1,
 			};
 		}
-		// cancelled / deadline / error — the report may be absent; emit a
-		// bounded diagnostic plus the journal tail.
+		// cancelled / deadline / error — evaluation never completed, so the
+		// machine block carries the full report shape with neutral evaluation
+		// fields. One `version: 1` schema for every exit code keeps the
+		// #2498 consumer contract branch-independent.
 		const tail = result.journal
 			.slice(-5)
 			.map((e) => `${e.type}${e.detail ? `: ${e.detail}` : ''}`)
 			.join('; ');
 		const detail = result.detail ?? result.outcome;
+		// 'pass'/'violations' returned above, so only the abort outcomes reach
+		// this diagnostic branch.
+		const diagnosticReason =
+			result.outcome === 'cancelled' ||
+			result.outcome === 'deadline' ||
+			result.outcome === 'error'
+				? result.outcome
+				: 'error';
+		const diagnosticReport: AdvisoryCiReport = {
+			version: 1,
+			verdict: 'fail',
+			exit_reason: diagnosticReason,
+			gates: [],
+			tasks: [],
+			plan: { present: false, task_count: 0 },
+			environment: { mode: 'advisory', tty, host: 'none' },
+			gate_profile: 'default',
+			effective_gates: { ...DEFAULT_QA_GATES },
+			not_evaluated: [],
+			not_evaluable: [],
+			counts: { pass: 0, fail: 0, no_data: 0, corrupt: 0, error: 0 },
+		};
 		return {
-			text:
-				`swarm ci ${result.outcome}: ${detail}\n` +
-				`journal tail: ${tail || '(empty)'}\n` +
-				`[SWARM_CI_JSON]\n${JSON.stringify(
-					{
-						version: 1,
-						verdict: 'fail',
-						exit_reason: result.outcome,
-						gates: [],
-						tasks: [],
-						environment: { mode: 'advisory', tty, host: 'none' },
-					},
-					null,
-					2,
-				)}\n[/SWARM_CI_JSON]`,
+			text: jsonOnly
+				? renderJsonBlock(diagnosticReport)
+				: `swarm ci ${result.outcome}: ${detail}\n` +
+					`journal tail: ${tail || '(empty)'}\n` +
+					renderJsonBlock(diagnosticReport),
 			ok: false as const,
 			exitCode: result.outcome === 'cancelled' ? 2 : 3,
 		};
@@ -165,3 +181,9 @@ export async function handleCiCommand(
 		signals.dispose();
 	}
 }
+
+/** Test seam: dependency injection over the runtime entry so handler-level
+ * diagnostic-branch tests can drive cancelled/deadline outcomes without
+ * timing or signal-delivery dependence (repo convention: DI over mock.module;
+ * restore in afterEach). */
+export const _internals = { runAdvisoryCiRuntime };

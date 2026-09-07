@@ -8,10 +8,11 @@
  * signal-cancellation seam (SIGINT/SIGTERM → abort; exit 2).
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	_internals,
 	createSignalCancellation,
 	handleCiCommand,
 } from '../../../src/commands/ci.js';
@@ -148,4 +149,90 @@ describe('signal cancellation seam', () => {
 		seam.dispose(); // second dispose is a no-op
 		expect(process.listenerCount('SIGINT')).toBe(before);
 	});
+});
+
+describe('swarm ci diagnostic branch (exit 2/3)', () => {
+	const realRuntime = _internals.runAdvisoryCiRuntime;
+
+	afterEach(() => {
+		_internals.runAdvisoryCiRuntime = realRuntime;
+	});
+
+	function stubOutcome(
+		outcome: 'cancelled' | 'deadline' | 'error',
+		detail: string,
+	) {
+		_internals.runAdvisoryCiRuntime = async () => ({
+			outcome,
+			journal: [
+				{ seq: 1, type: 'run_started', detail: 'evaluating' },
+				{ seq: 2, type: `run_${outcome}` },
+			],
+			journalTruncated: 0,
+			cleanupRan: true,
+			detail,
+		});
+	}
+
+	function parseDiagnosticBlock(text: string): Record<string, unknown> {
+		const start = text.indexOf('[SWARM_CI_JSON]');
+		const end = text.indexOf('[/SWARM_CI_JSON]');
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		return JSON.parse(
+			text.slice(start + '[SWARM_CI_JSON]'.length, end),
+		) as Record<string, unknown>;
+	}
+
+	test('deadline path (exit 3) emits the full version-1 report shape', async () => {
+		stubOutcome('deadline', 'advisory CI run deadline exceeded');
+		const dir = makeFixtureDir('swarm-ci-cmd-deadline-');
+		const result = await handleCiCommand(ctx(dir));
+		expect(isCommandFailure(result)).toBe(true);
+		if (!isCommandFailure(result)) return;
+		expect(result.exitCode).toBe(3);
+		// Human diagnostic + journal tail around the machine block.
+		expect(result.text).toContain('swarm ci deadline:');
+		expect(result.text).toContain('journal tail: run_started');
+		const parsed = parseDiagnosticBlock(result.text);
+		expect(parsed.version).toBe(1);
+		expect(parsed.verdict).toBe('fail');
+		expect(parsed.exit_reason).toBe('deadline');
+		// One schema for every exit code: the fields the reduced diagnostic
+		// used to drop are present (neutral values) on this branch too.
+		for (const key of [
+			'gates',
+			'tasks',
+			'plan',
+			'environment',
+			'gate_profile',
+			'effective_gates',
+			'not_evaluated',
+			'not_evaluable',
+			'counts',
+		]) {
+			expect(parsed).toHaveProperty(key);
+		}
+		expect(parsed.counts).toEqual({
+			pass: 0,
+			fail: 0,
+			no_data: 0,
+			corrupt: 0,
+			error: 0,
+		});
+	}, 15000);
+
+	test('cancelled path with --json emits the machine block only (exit 2)', async () => {
+		stubOutcome('cancelled', 'advisory CI run cancelled');
+		const dir = makeFixtureDir('swarm-ci-cmd-cancel-');
+		const result = await handleCiCommand(ctx(dir, ['--json']));
+		expect(isCommandFailure(result)).toBe(true);
+		if (!isCommandFailure(result)) return;
+		expect(result.exitCode).toBe(2);
+		// --json means the machine block only, on every exit path.
+		expect(result.text.startsWith('[SWARM_CI_JSON]')).toBe(true);
+		expect(result.text).not.toContain('journal tail');
+		const parsed = parseDiagnosticBlock(result.text);
+		expect(parsed.exit_reason).toBe('cancelled');
+	}, 15000);
 });

@@ -132,4 +132,50 @@ describe('computeEvidenceQualitySummary', () => {
 		expect(summary.totalReviews).toBe(1);
 		expect(summary.reviewPassRate).toBe(100);
 	});
+
+	test('legacy flat-retrospective bundle: pure read, no in-place write-back (PR #2629 Copilot finding)', async () => {
+		// The `.git` marker matters: without a project root, the evidence-lock
+		// path throws before writing and the test would pass vacuously even if
+		// the migration were re-enabled. With it, the default loadEvidence
+		// path takes the lock and renames a temp file over the bundle.
+		const dir = canonicalMkdtemp('swarm-ci-quality-flatretro-');
+		fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
+		const bundlePath = path.join(
+			dir,
+			'.swarm',
+			'evidence',
+			'4.2',
+			'evidence.json',
+		);
+		fs.mkdirSync(path.dirname(bundlePath), { recursive: true });
+		// Flat-retrospective shape (type 'retrospective', no schema_version)
+		// that wraps to a schema-valid bundle — the exact input that triggers
+		// the in-place migration write-back.
+		const legacy = JSON.stringify({
+			type: 'retrospective',
+			task_id: '4.2',
+			timestamp: TS,
+			agent: 'architect',
+			verdict: 'info',
+			summary: 'legacy flat retro',
+			phase_number: 1,
+			total_tool_calls: 10,
+			coder_revisions: 0,
+			reviewer_rejections: 0,
+			test_failures: 0,
+			security_findings: 0,
+			integration_issues: 0,
+			task_count: 1,
+			task_complexity: 'simple',
+		});
+		fs.writeFileSync(bundlePath, legacy);
+		const summary = await computeEvidenceQualitySummary(dir);
+		// The bundle is still readable and counted (the wrapped form is
+		// equivalent for aggregation).
+		expect(summary.totalReviews).toBe(0);
+		// Byte-identity: the read must not rewrite the bundle in place and
+		// must not leave an evidence-loader lock sentinel behind.
+		expect(fs.readFileSync(bundlePath, 'utf8')).toBe(legacy);
+		expect(fs.existsSync(path.join(dir, '.swarm', 'locks'))).toBe(false);
+	});
 });

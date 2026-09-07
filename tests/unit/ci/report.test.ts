@@ -153,4 +153,25 @@ describe('swarm ci report rendering', () => {
 		expect(md).toContain('a \\| b \\| c');
 		expect(md).not.toContain('a | b | c');
 	});
+
+	test('newlines in plan-controlled cells cannot break the table structure (PRR-009)', () => {
+		// Gate names, task ids, and reasons originate from repo-controlled
+		// plan.json strings; a raw newline would forge extra table rows when
+		// the report is posted as a PR comment.
+		const report = sampleReport();
+		report.gates[0].name = 'evil\ngate | injected';
+		report.gates[2].detail = 'ok\n| forged | row |';
+		report.tasks[0].task_id = '1.1\n| hack |';
+		report.not_evaluated[0].reason = 'reason\n- forged bullet';
+		const md = renderMarkdownReport(report);
+		// Every table row is a single line: the injected newlines are gone.
+		expect(md).not.toContain('evil\ngate');
+		expect(md).not.toContain('ok\n| forged');
+		expect(md).not.toContain('1.1\n| hack');
+		expect(md).not.toContain('reason\n- forged');
+		// The cell content survives, flattened and pipe-escaped.
+		expect(md).toContain('evil gate \\| injected');
+		expect(md).toContain('ok \\| forged \\| row \\|');
+		expect(md).toContain('1.1 \\| hack \\|');
+	});
 });

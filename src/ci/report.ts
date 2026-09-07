@@ -26,6 +26,16 @@ const STATUS_ICONS: Record<string, string> = {
 	error: '💥',
 };
 
+/**
+ * Make plan-controlled strings safe inside a Markdown table cell or bullet:
+ * newlines would break out of the row/list structure (gate names, task ids,
+ * and reasons originate from repo-controlled plan.json content), and pipes
+ * would split the cell.
+ */
+function mdCell(text: string): string {
+	return text.replace(/[\r\n]+/g, ' ').replace(/\|/g, '\\|');
+}
+
 export function renderJsonBlock(report: AdvisoryCiReport): string {
 	return [
 		SWARM_CI_JSON_OPEN,
@@ -48,8 +58,8 @@ export function renderMarkdownReport(report: AdvisoryCiReport): string {
 	];
 	for (const gate of report.gates) {
 		const icon = STATUS_ICONS[gate.status] ?? '';
-		const detail = (gate.detail ?? '').replace(/\|/g, '\\|');
-		lines.push(`| ${gate.name} | ${icon} ${gate.status} | ${detail} |`);
+		const detail = mdCell(gate.detail ?? '');
+		lines.push(`| ${mdCell(gate.name)} | ${icon} ${gate.status} | ${detail} |`);
 	}
 
 	if (report.tasks.length > 0) {
@@ -60,7 +70,7 @@ export function renderMarkdownReport(report: AdvisoryCiReport): string {
 		);
 		for (const task of report.tasks) {
 			lines.push(
-				`| ${task.task_id} | ${task.evidence_state} | ${task.required_gates.join(', ') || '-'} | ${task.missing_gates.join(', ') || '-'} | ${task.workflow_state ?? '-'} | ${task.satisfied ? '✅' : '❌'} |`,
+				`| ${mdCell(task.task_id)} | ${task.evidence_state} | ${task.required_gates.map(mdCell).join(', ') || '-'} | ${task.missing_gates.map(mdCell).join(', ') || '-'} | ${task.workflow_state ? mdCell(task.workflow_state) : '-'} | ${task.satisfied ? '✅' : '❌'} |`,
 			);
 		}
 	}
@@ -72,13 +82,13 @@ export function renderMarkdownReport(report: AdvisoryCiReport): string {
 			'',
 		);
 		for (const item of report.not_evaluated) {
-			lines.push(`- ${item.name}: ${item.reason}`);
+			lines.push(`- ${mdCell(item.name)}: ${mdCell(item.reason)}`);
 		}
 	}
 	if (report.not_evaluable.length > 0) {
 		lines.push('', '### Not evaluable headless', '');
 		for (const item of report.not_evaluable) {
-			lines.push(`- ${item.name}: ${item.reason}`);
+			lines.push(`- ${mdCell(item.name)}: ${mdCell(item.reason)}`);
 		}
 	}
 

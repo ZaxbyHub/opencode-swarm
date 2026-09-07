@@ -82,12 +82,18 @@ export interface AdvisoryCiTaskEntry {
 export interface AdvisoryCiReport {
 	version: 1;
 	verdict: 'pass' | 'fail';
+	/** Evaluation exits come from the runtime; `cancelled`/`deadline`/`error`
+	 * are emitted by the command layer when evaluation never completed, so
+	 * every `version: 1` payload shares one shape regardless of exit code. */
 	exit_reason:
 		| 'all_gates_passed'
 		| 'plan_missing'
 		| 'plan_corrupt'
 		| 'no_tasks'
-		| 'gate_violations';
+		| 'gate_violations'
+		| 'cancelled'
+		| 'deadline'
+		| 'error';
 	gates: AdvisoryCiGateRow[];
 	tasks: AdvisoryCiTaskEntry[];
 	plan: {

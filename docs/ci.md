@@ -82,7 +82,10 @@ report=$(printf '%s\n' "$output" | sed -n '/^\[SWARM_CI_JSON\]$/,/^\[\/SWARM_CI_
 
 Startup and evaluation run under an overall deadline (`--timeout-ms`, default
 300000). SIGINT/SIGTERM abort the run (exit 2) and run registered cleanup
-exactly once; the run journal is capped at 200 events.
+exactly once; the run journal is capped at 200 events. Note that POSIX-style
+self-signalling is unreliable on Windows (Git Bash in particular), so treat
+signal-driven exit 2 there as best-effort; the `--timeout-ms` deadline is the
+portable bound.
 
 ## Related
 

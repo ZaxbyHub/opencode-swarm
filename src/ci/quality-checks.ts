@@ -85,7 +85,13 @@ export async function computeEvidenceQualitySummary(
 	for (const tid of await listEvidenceTaskIds(directory)) {
 		let result: Awaited<ReturnType<typeof loadEvidence>>;
 		try {
-			result = await loadEvidence(directory, tid);
+			// `{ migrate: false }` keeps this a pure read: the default load
+			// path would otherwise take the evidence-loader lock and rename a
+			// temp file over a legacy flat-retrospective bundle in place,
+			// mutating the evaluated repo during read-only advisory CI
+			// evaluation (`swarm ci`). The returned bundle is identical either
+			// way, so benchmark output is unchanged.
+			result = await loadEvidence(directory, tid, { migrate: false });
 		} catch (_evidenceErr) {
 			warn('benchmark: skipping corrupt or unreadable evidence for task', tid);
 			continue;

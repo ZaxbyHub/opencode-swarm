@@ -11,6 +11,7 @@ describe('toolPolicy none classification snapshot', () => {
 			'codebase-review',
 			'concurrency',
 			'council',
+			'ci',
 			'ci-monitor',
 			'coupling',
 			'curate',

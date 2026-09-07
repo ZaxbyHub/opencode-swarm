@@ -21,7 +21,17 @@
   bounded, discarded shadow copy of `.swarm/` so the evaluated repo is never
   modified; advisory evaluation is strictly read-only and cannot satisfy or
   bypass any gate. Enabled profile gates without a durable whole-plan reader
-  are reported as `not_evaluated` instead of being silently skipped.
+  are reported as `not_evaluated` instead of being silently skipped. The
+  shared evidence-quality reader is a guaranteed pure read (`migrate: false`)
+  so a legacy flat-retrospective bundle is never rewritten in place.
+- The `[SWARM_CI_JSON]` block carries one stable `version: 1` shape on every
+  exit path: cancelled / deadline / error runs emit the full report schema
+  (`plan`, `gate_profile`, `effective_gates`, `not_evaluated`,
+  `not_evaluable`, `counts` present with neutral values) instead of a
+  reduced diagnostic object, so machine consumers parse identically across
+  exit codes 0–3. Markdown table cells and bullets flatten embedded newlines
+  and escape pipes, so repo-controlled plan strings cannot break the report
+  layout.
 - `/swarm benchmark --ci-gate` now computes its evidence-derived quality
   signals through the same shared service as `swarm ci`
   (`src/ci/quality-checks.ts`) — one implementation, byte-compatible
