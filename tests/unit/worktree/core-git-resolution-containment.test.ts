@@ -29,7 +29,11 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import type { BunCompatSubprocess } from '../../../src/utils/bun-compat';
+import {
+	BunCompatOutputLimitError,
+	type BunCompatSubprocess,
+	DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES,
+} from '../../../src/utils/bun-compat';
 import { GitBinaryMissingError } from '../../../src/utils/git-binary-missing-error';
 import {
 	_internals,
@@ -58,6 +62,23 @@ function mockProc(
 		exitCode,
 		stdout: { text: () => Promise.resolve(stdout) },
 		stderr: { text: () => Promise.resolve('') },
+		kill: () => onKill?.(),
+	} as unknown as BunCompatSubprocess;
+}
+
+function mockDefaultLimitOverflowProc(
+	onKill?: () => void,
+): BunCompatSubprocess {
+	const error = new BunCompatOutputLimitError(
+		DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES,
+		DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES,
+		DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES + 1,
+	);
+	return {
+		exited: Promise.resolve(1),
+		exitCode: 1,
+		stdout: { text: () => Promise.reject(error) },
+		stderr: { text: () => Promise.reject(error) },
 		kill: () => onKill?.(),
 	} as unknown as BunCompatSubprocess;
 }
@@ -186,5 +207,40 @@ describe('checkPathBudget stays fail-open on a git-resolution failure (#2236)', 
 		const result = await checkPathBudget('C:\\'.padEnd(60, 'w'), directory);
 
 		expect(result.ok).toBe(false);
+	});
+});
+
+describe('worktree callers contain default output-limit overflow (#2530)', () => {
+	test('isCleanWorktree treats an overflowing git result as dirty and cleans up both subprocesses (FB-006)', async () => {
+		const directory = tempRoot('clean-overflow');
+		let spawns = 0;
+		let kills = 0;
+		_internals.bunSpawn = (() => {
+			spawns++;
+			return mockDefaultLimitOverflowProc(() => {
+				kills++;
+			});
+		}) as typeof _internals.bunSpawn;
+
+		// Before the output-limit containment fix, pipe.text() rejected through runGit.
+		await expect(isCleanWorktree(directory)).resolves.toBe(false);
+		expect(spawns).toBe(2);
+		expect(kills).toBe(2);
+	});
+
+	test('checkPathBudget remains fail-open after a default-limit overflow', async () => {
+		const directory = tempRoot('budget-overflow');
+		let kills = 0;
+		_internals.platform = 'win32';
+		_internals.getCoreLongPaths = async () => undefined;
+		_internals.bunSpawn = (() =>
+			mockDefaultLimitOverflowProc(() => {
+				kills++;
+			})) as typeof _internals.bunSpawn;
+
+		await expect(
+			checkPathBudget('C:\\worktrees\\lane-1', directory),
+		).resolves.toEqual({ ok: true });
+		expect(kills).toBe(1);
 	});
 });

@@ -329,6 +329,12 @@ async function runGit(
 		const stdout = await proc.stdout.text();
 		const stderr = await proc.stderr.text();
 		return { exitCode, stdout, stderr };
+	} catch {
+		return {
+			exitCode: GIT_SPAWN_FAILURE_EXIT_CODE,
+			stdout: '',
+			stderr: `git ${args[0] ?? 'command'} output could not be read in ${cwd}`,
+		};
 	} finally {
 		try {
 			proc.kill();
@@ -447,6 +453,9 @@ export async function checkPathBudget(
 			};
 		}
 
+		return { ok: true };
+	} catch {
+		// The path budget is advisory: unreadable bounded output must not block a lane.
 		return { ok: true };
 	} finally {
 		try {
