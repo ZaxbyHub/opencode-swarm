@@ -8,8 +8,10 @@
   Windows unit shards executed, `run_duration_ms=2113000`, terminal
   merge/remove timeline pair with no intervening re-add). The run post-dates
   both the Stage-A publication (PR #2624) and the event-scoped cancellation
-  change (PR #2632), so the three-receipt Stage-A set jointly satisfies the
-  issue's "three merge groups after each code change" exit gate.
+  change (PR #2632), so recording it completes the issue's checked-in C9
+  receipt contract (three qualifying full-matrix receipts per stage) for both
+  stages; receipt 3 also post-dates the last #2552 code change (PR #2632) for
+  attributability.
 - Updated the pinned Stage-A policy test
   (`tests/unit/scripts/ci/ci-stage-a-policy-2552.test.ts`) from the
   two-receipt pending state to the closed three-receipt state: the pending
