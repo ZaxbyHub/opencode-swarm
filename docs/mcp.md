@@ -21,11 +21,16 @@ The read-only guarantee extends into the recall paths. `swarm_memory_recall`
 degrades to `available:false` unless the configured memory provider's store
 artifact (`memory.db` / `memories.jsonl`) already exists, then recalls through
 the registered tool's compute core with usage telemetry disabled — so a query
-never creates the sqlite store, runs migrations, or appends recall-usage rows.
+never creates the sqlite store and never appends recall-usage rows.
 `knowledge_recall` skips the receipt-ledger rollup read while the
-`knowledge-receipts-v2.jsonl` journal does not exist, so a query never performs
-the ledger's one-time genesis. Pinned by
-`tests/unit/mcp/readonly-recall-no-writes-2499.test.ts`.
+`knowledge-receipts-v2.jsonl` journal is absent or empty, so a query never
+performs the ledger's one-time genesis. Against an already-initialized,
+current-schema store these recalls are write-free (identical file set and
+sizes), pinned by `tests/unit/mcp/readonly-recall-no-writes-2499.test.ts`.
+Two transitional write paths remain by design and are outside that promise: a
+stale-schema `memory.db` is migrated on open (normal upgrade behavior), and a
+local-jsonl store with a truncated tail is self-healed (rewritten plus an
+audit row) on read.
 
 ## Tools
 

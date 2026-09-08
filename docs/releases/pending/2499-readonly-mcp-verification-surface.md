@@ -47,6 +47,9 @@ the registered tool's compute core with usage telemetry disabled
 (`gateway.recall(..., {recordUsage: false})`); `knowledge_recall` skips the
 receipt-ledger rollup read while the receipts journal is absent or empty
 (rank-neutral — both yield empty rollups). A committed suite
-(`tests/unit/mcp/readonly-recall-no-writes-2499.test.ts`) pins byte-identical
-project trees for both recall tools in enabled configurations, with
-load-bearing-flag falsifiability tests for both seams.
+(`tests/unit/mcp/readonly-recall-no-writes-2499.test.ts`) pins write-free
+recalls (identical file set and sizes) for both recall tools in enabled
+configurations against initialized, current-schema stores, with
+load-bearing-flag falsifiability tests for both seams. Stale-schema sqlite
+stores (migrated on open) and truncated local-jsonl tails (self-healed on
+read) remain documented transitional write paths.
