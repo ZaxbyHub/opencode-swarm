@@ -16,8 +16,8 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const config = {
 	hooks: { delegation_gate: true },
@@ -205,7 +205,12 @@ describe('issue #2491 direct delegation-gate route authorization', () => {
 			// A fresh call identity must be able to reclaim the released first slot;
 			// if the denied call's live binding were stranded, it would be assigned
 			// the second slot instead.
-			await completeDispatch(hook, role, `${role}-retry-call`, `${role}-retry-child`);
+			await completeDispatch(
+				hook,
+				role,
+				`${role}-retry-call`,
+				`${role}-retry-child`,
+			);
 			expect(session.stageBRouteEvidence?.get('1.1')).toHaveLength(1);
 			expect(session.stageBRouteEvidence?.get('1.1')?.[0]?.slotId).toBe(
 				`1.1:${role}:1`,

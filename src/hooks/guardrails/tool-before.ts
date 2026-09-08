@@ -56,11 +56,7 @@ import { criticalWarn, warn } from '../../utils';
 import { normalizePatchIndentation } from '../../utils/patch-dedent';
 import { isPathUnderSwarmWorktreeBase } from '../../worktree/core.js';
 import { detectLoop } from '../loop-detector';
-import {
-	isTaskToolId,
-	normalizeToolName,
-	normalizeToolNameLowerCase,
-} from '../normalize-tool-name';
+import { isTaskToolId, normalizeToolName } from '../normalize-tool-name';
 import {
 	detectInteractiveSession,
 	detectPosixWrites,
