@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -40,17 +40,22 @@ describe('MCP server composition (#2499 review feedback)', () => {
 		const root = canonicalMkdtemp('mcp-compose-2499-');
 		mkdirSync(path.join(root, 'in-root'), { recursive: true });
 		writeFileSync(path.join(root, 'in-root', 'a.ts'), 'export const a = 1;\n');
+		// Relative traversal: the caller does NOT embed the root in the input,
+		// so any root path in the response would come from the server side —
+		// exactly what the no-disclosure contract forbids (on CI the caller
+		// embedding an absolute root would itself echo into the raw value).
+		const realRoot = realpathSync(root);
 		await withServer(root, async (client) => {
 			const result = await client.callTool({
 				name: 'placeholder_scan',
 				arguments: {
-					changed_files: [`${root}/../outside/secret.ts`],
+					changed_files: ['../outside/secret.ts'],
 				},
 			});
 			expect(result.isError).toBe(true);
 			const text = JSON.stringify(result.content);
 			expect(text).toContain('path rejected by containment');
-			expect(text).not.toContain(root);
+			expect(text).not.toContain(realRoot);
 		});
 	}, 30000);
 
