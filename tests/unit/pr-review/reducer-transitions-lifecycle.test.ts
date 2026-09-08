@@ -17,7 +17,6 @@ describe('reducer: base admission lifecycle', () => {
 			type: 'base_admission_requested',
 			batchId: 'batch-1',
 			lanes: [{ ...LANE }],
-			depthTier: 'M',
 			maxBatches: 128,
 			validatedAt: '2026-09-01T00:00:00.000Z',
 		});
@@ -40,7 +39,6 @@ describe('reducer: base admission lifecycle', () => {
 			type: 'base_admission_requested',
 			batchId: 'batch-129',
 			lanes: [{ ...LANE }],
-			depthTier: 'M',
 			maxBatches: 128,
 			validatedAt: '2026-09-01T00:00:00.000Z',
 		});
@@ -204,153 +202,16 @@ describe('reducer: structured result submission (exactly-once)', () => {
 	});
 });
 
-describe('reducer: transcript evidence cannot downgrade a receipt', () => {
-	test('transcript evidence for a receipted lane is rejected', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'transcript_evidence_presented',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			laneHasStructuredReceipt: true,
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('receipt_cannot_be_downgraded');
-	});
-
-	test('transcript evidence for a receipt-less lane is inert (adapter decides)', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'transcript_evidence_presented',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			laneHasStructuredReceipt: false,
-		});
-		expect(result.status).toBe('applied');
-	});
-});
-
-describe('reducer: provider-terminal evidence classification', () => {
-	test('an observer deadline is never terminal evidence', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-			evidence: { source: 'observer_deadline' },
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe(
-			'observer_deadline_not_terminal_evidence',
-		);
-	});
-
-	test('client absence is never terminal evidence', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-			evidence: { source: 'client_unavailable' },
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('client_absence_not_terminal_evidence');
-	});
-
-	test('parser/transcript rejection is never a provider signal', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-			evidence: { source: 'parser_or_transcript' },
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('parser_failure_not_provider_signal');
-	});
-
-	test('a stale observation is never a provider signal', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-			evidence: { source: 'stale_observation' },
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('stale_observation_not_provider_signal');
-	});
-
-	test('a typed terminal error class of the current generation is admitted', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-			evidence: {
-				source: 'typed_terminal_error_class',
-				category: 'anthropic',
-				kind: 'provider',
-			},
-		});
-		expect(result.status).toBe('applied');
-	});
-
-	test('a typed terminal error class of an old generation is rejected', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 2,
-			evidence: {
-				source: 'typed_terminal_error_class',
-				category: 'anthropic',
-				kind: 'provider',
-			},
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('stale_generation_result');
-	});
-});
-
-describe('reducer: cancellation and presumed-stale sweep', () => {
-	test('a current-generation explicit cancel settles cancelled', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'lane_cancelled',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-		});
-		expect(result.status).toBe('applied');
-		if (result.status !== 'applied') return;
-		expect(result.effects[0]).toMatchObject({ status: 'cancelled' });
-	});
-
-	test('an old-generation cancel is rejected', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'lane_cancelled',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 1,
-		});
-		expect(result.status).toBe('rejected');
-	});
-
-	test('a non-PER-recovery cancellation preserves the dimension (event-driven, no autonomous sweep)', () => {
-		// Issue #2385 closeout: the `presumed_stale_swept` reducer event was
-		// removed because no production adapter dispatched it; the two real
-		// stale-sweep paths (dispatch-lanes.ts sweepStaleAsyncLaneRecords,
-		// pr-workflow-gate.ts settlePresumedStalePrWorkflowLanes) retain
-		// their own inline rules. A regression here would be a reintroduction.
-		const result = reducePrReviewEvent(BASE, {
-			type: 'lane_cancelled',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-		});
-		expect(result.status).toBe('applied');
-	});
-});
+// Issue #2512 wire-or-retire census: `transcript_evidence_presented`,
+// `provider_terminal_observed`, and `lane_cancelled` were RETIRED from the
+// PrReviewEvent union. Their rules live at the richer production authorities:
+// - no-receipt-downgrade: validateExactStructuredReceiptCoverage + the
+//   legacy-transcript compatibility gate in pr-workflow-gate.ts (covered by
+//   tests/unit/pr-review/replay-corpus-transcript.test.ts);
+// - invalid provider-terminal evidence classification:
+//   classifyPrReviewCircuitSignal in src/pr-review/circuit.ts (covered by the
+//   circuit classifier suites);
+// - operator lane cancellation: collectOnce cancel_pending in
+//   src/tools/dispatch-lanes.ts (covered by the dispatch-lanes cancel suites).
+// The retired reducer cases were never dispatched in production; the
+// registered-path table is docs/pr-review-transition-authority.md.
