@@ -178,10 +178,13 @@ describe('loadLastApprovedPlan', () => {
 			phases: [
 				{
 					...plan.phases[0],
-					status: 'complete',
+					// Valid enum value — loadLastApprovedPlan schema-validates embedded
+					// plans (#2531), so an out-of-enum status would make this snapshot
+					// be skipped instead of served.
+					status: 'completed',
 					tasks: plan.phases[0].tasks.map((t) => ({
 						...t,
-						status: 'complete',
+						status: 'completed',
 					})),
 				},
 			],
