@@ -41,6 +41,7 @@ import {
 	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 /** Raw pending open-lane record (fresh `updatedAt` => fresh-open, not stale). */
 function writeOpenLaneStore(tornManifest: boolean): void {
@@ -79,12 +80,18 @@ function writeOpenLaneStore(tornManifest: boolean): void {
 }
 
 describe('PR workflow gate — delegation-read uncertainty fail-closed paths (issue #2511)', () => {
+	let restoreClock: (() => void) | null = null;
+
 	beforeEach(() => {
+		// Shared frozen instant: fixture `updatedAt` and the gate's staleness
+		// reads must agree, so fresh-seeded lanes stay fresh deterministically.
+		restoreClock = freezeClock({ fixedNow: Date.now() });
 		setupPrWorkflowGateFixtures();
 	});
 
 	afterEach(async () => {
 		await teardownPrWorkflowGateFixtures();
+		restoreClock?.();
 	});
 
 	test('settlement on an uncertain store reports uncertainty, never a zero-lane all-clear', async () => {

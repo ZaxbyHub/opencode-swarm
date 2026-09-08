@@ -48,6 +48,7 @@ import { PR_REVIEW_BASE_DIMENSION_IDS } from '../../../src/background/pr-review-
 import { derivePrReviewDimensionSettlement } from '../../../src/pr-review/completion.js';
 import * as logger from '../../../src/utils/logger.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 const SESSION_ID = 'sess_controller';
 const CORRELATION_ID = 'ses_open_lane';
@@ -121,13 +122,19 @@ function completionState(dir: string) {
 describe('PR-review completion — delegation-read uncertainty (issue #2511)', () => {
 	let store: StoreFixture;
 
+	let restoreClock: (() => void) | null = null;
+
 	beforeEach(() => {
+		// Shared frozen instant: fixture timestamps and any staleness reads in
+		// the modules under test must agree for the fresh-lane semantics.
+		restoreClock = freezeClock({ fixedNow: Date.now() });
 		store = createStore(true);
 	});
 
 	afterEach(() => {
 		mock.restore();
 		store.cleanup();
+		restoreClock?.();
 	});
 
 	test('an uncertain batch store fails settlement closed instead of deriving NOT_LAUNCHED labels', () => {
