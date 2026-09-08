@@ -155,11 +155,11 @@ describe('retention sweep families: prune old, keep recent (issue #2483)', () =>
 		['recovery', 'recovery', 'recovery'],
 	])('%s: 40d-old entry pruned, recent entry kept', async (_label, relDir, prunedKey) => {
 		const root = makeRoot('family');
-		const oldEntry = seedFile(
-			root,
-			path.join(relDir, 'old-entry.json'),
-			OLD_40D,
-		);
+		const oldEntryName =
+			relDir === 'pr-workflow-gates'
+				? 'session-old-000000000000.json'
+				: 'old-entry.json';
+		const oldEntry = seedFile(root, path.join(relDir, oldEntryName), OLD_40D);
 		const freshEntry = seedFile(root, path.join(relDir, 'fresh-entry.json'));
 		const result = await runRetentionSweep(root, { now: NOW });
 		expect(existsSync(oldEntry)).toBe(false);

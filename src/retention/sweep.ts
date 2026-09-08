@@ -32,6 +32,7 @@ import { isTerminal } from '../services/skill-optimizer/lifecycle';
 import type { SkillOptState } from '../services/skill-optimizer/store';
 import { cleanupSummaries, listStaleSummaryIds } from '../summaries/manager';
 import { log } from '../utils/logger';
+import type { PruneEntryFilter } from './dir-prune';
 import {
 	pruneDirectory,
 	SUBTREE_SCAN_CAP,
@@ -85,24 +86,40 @@ interface Family {
 	dir: string;
 	maxAgeMs?: number;
 	maxEntries?: number;
+	includeEntry?: PruneEntryFilter;
 }
+
+// Canonical gate-state projections are the only pruneable entries in this
+// directory. Locks, projection/import markers, and atomic-write temps are
+// intentionally retained, including after a timed-out checkout action.
+const PR_WORKFLOW_GATE_STATE_NAME = /^[A-Za-z0-9_.-]+-[0-9a-f]{12}\.json$/;
+const isPrWorkflowGateStateProjection: PruneEntryFilter = (name, stat) =>
+	stat.isFile() && PR_WORKFLOW_GATE_STATE_NAME.test(name);
 
 function familiesFor(swarmRoot: string, now: number): Family[] {
 	const age = (days: number) => days * DAY_MS;
 	const f = (
 		label: string,
 		rel: string,
-		opts: { maxAgeDays?: number; maxEntries?: number },
+		opts: {
+			maxAgeDays?: number;
+			maxEntries?: number;
+			includeEntry?: PruneEntryFilter;
+		},
 	): Family => ({
 		label,
 		dir: path.join(swarmRoot, rel),
 		maxAgeMs: opts.maxAgeDays !== undefined ? age(opts.maxAgeDays) : undefined,
 		maxEntries: opts.maxEntries,
+		includeEntry: opts.includeEntry,
 	});
 	void now;
 	return [
 		f('pr-feedback-events', 'pr-feedback-events', { maxAgeDays: 30 }),
-		f('pr-workflow-gates', 'pr-workflow-gates', { maxAgeDays: 30 }),
+		f('pr-workflow-gates', 'pr-workflow-gates', {
+			maxAgeDays: 30,
+			includeEntry: isPrWorkflowGateStateProjection,
+		}),
 		f(
 			'pr-review-reentry-shadows',
 			path.join('pr-review', 'reentry-authorizations'),
@@ -201,6 +218,7 @@ export async function runRetentionSweep(
 				maxEntries: family.maxEntries,
 				now,
 				dryRun,
+				includeEntry: family.includeEntry,
 			});
 			if (pruned > 0) result.pruned[family.label] = pruned;
 		} catch (error) {
