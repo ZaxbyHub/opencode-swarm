@@ -4,6 +4,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
+	_internals,
 	derivePlanMarkdown,
 	loadPlan,
 	resetStartupLedgerCheck,
@@ -62,6 +63,16 @@ function provenanceRecorded(ledgerText: string): boolean {
 	return false;
 }
 
+// Real seam bindings captured at module scope (AGENTS.md invariant 7: restore
+// in afterEach so Bun's shared test-runner process never leaks the pin).
+// Pinning these seams ALSO sanitizes this file against process-wide
+// mock.module pollution from sibling test files that mock the ledger module
+// (the loadPlan recovery rungs and savePlan's projection replay route
+// through _internals, so a module-level mock cannot distort them here).
+const realLedgerExists = _internals.ledgerExists;
+const realReplayFromLedger = _internals.replayFromLedger;
+const realLoadLastApprovedPlan = _internals.loadLastApprovedPlan;
+
 describe('markdown migration provenance (#2531 AC4)', () => {
 	let directory: string;
 
@@ -70,9 +81,18 @@ describe('markdown migration provenance (#2531 AC4)', () => {
 		await mkdir(join(directory, '.swarm'), { recursive: true });
 		await mkdir(join(directory, '.git'));
 		resetStartupLedgerCheck();
+		// Fixture semantics: ledger-absent migration. Pin the recovery seams
+		// to their real ledger-absent outcomes instead of relying on the
+		// module bindings a sibling file may have mocked.
+		_internals.ledgerExists = async () => false;
+		_internals.replayFromLedger = async () => null;
+		_internals.loadLastApprovedPlan = async () => null;
 	});
 
 	afterEach(async () => {
+		_internals.ledgerExists = realLedgerExists;
+		_internals.replayFromLedger = realReplayFromLedger;
+		_internals.loadLastApprovedPlan = realLoadLastApprovedPlan;
 		resetStartupLedgerCheck();
 		try {
 			await rm(directory, {

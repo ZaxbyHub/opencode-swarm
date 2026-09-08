@@ -174,6 +174,9 @@ export const _internals: {
 	readPlanJsonUtf8: typeof readPlanJsonUtf8;
 	readPlanFileUtf8: typeof readPlanFileUtf8;
 	verifyWrittenPlanJson: typeof verifyWrittenPlanJson;
+	ledgerExists: typeof ledgerExists;
+	replayFromLedger: typeof replayFromLedger;
+	loadLastApprovedPlan: typeof loadLastApprovedPlan;
 	regeneratePlanMarkdown: typeof regeneratePlanMarkdown;
 	isGitRepo: typeof isGitRepo;
 	isEpicModeActiveForProject: typeof isEpicModeActiveForProject;
@@ -187,6 +190,9 @@ export const _internals: {
 	readPlanJsonUtf8,
 	readPlanFileUtf8,
 	verifyWrittenPlanJson,
+	ledgerExists,
+	replayFromLedger,
+	loadLastApprovedPlan,
 	regeneratePlanMarkdown,
 	isGitRepo,
 	isEpicModeActiveForProject,
@@ -992,8 +998,11 @@ export async function loadPlan(
 				} catch {
 					// JSON itself is malformed — rawPlanId stays null (conservative: skip ledger)
 				}
-				// Try replay from ledger before legacy migration
-				if (await ledgerExists(directory)) {
+				// Try replay from ledger before legacy migration. The
+				// recovery rungs route through _internals (#2531) so a
+				// process-wide module mock installed by an unrelated test
+				// file cannot distort recovery decisions (invariant 7).
+				if (await _internals.ledgerExists(directory)) {
 					// #2531: the identity anchor must come from the
 					// integrity-checked verified prefix — a truncated ledger has
 					// no verified anchor identity, and the conservative skip
@@ -1018,7 +1027,7 @@ export async function loadPlan(
 						// missing-projection path's ladder.
 						let rebuilt: Plan | null = null;
 						try {
-							rebuilt = await replayFromLedger(directory);
+							rebuilt = await _internals.replayFromLedger(directory);
 						} catch (replayError) {
 							warn(
 								`[loadPlan] Ledger replay threw in validation-failure path: ${replayError instanceof Error ? replayError.message : String(replayError)}. Falling back to critic-approved snapshot before legacy migration.`,
@@ -1039,7 +1048,7 @@ export async function loadPlan(
 						// never be silently replaced by a derived projection. Same
 						// ladder as the missing-projection path (Step 3 below).
 						try {
-							const approved = await loadLastApprovedPlan(
+							const approved = await _internals.loadLastApprovedPlan(
 								directory,
 								catchFirstEvent.plan_id,
 							);
@@ -1119,7 +1128,7 @@ export async function loadPlan(
 	// before consulting lossy legacy Markdown.
 	// Guarded by an in-process mutex to prevent concurrent loadPlan calls from
 	// racing through recovery and both calling savePlan (#444 item 6).
-	if (await ledgerExists(directory)) {
+	if (await _internals.ledgerExists(directory)) {
 		const resolvedDir = canonicalRootKeyFresh(directory);
 		const existingMutex = recoveryMutexes.get(resolvedDir);
 		if (existingMutex) {
@@ -1136,7 +1145,17 @@ export async function loadPlan(
 		recoveryMutexes.set(resolvedDir, mutex);
 
 		try {
-			const rebuilt = await replayFromLedger(directory);
+			// #2531: a replay error must not escape loadPlan on this path any
+			// more than on the validation-failure path — it falls through to
+			// the critic-approved-snapshot rung below, then markdown.
+			let rebuilt: Plan | null = null;
+			try {
+				rebuilt = await _internals.replayFromLedger(directory);
+			} catch (replayError) {
+				warn(
+					`[loadPlan] Ledger replay threw in missing-projection path: ${replayError instanceof Error ? replayError.message : String(replayError)}. Falling back to critic-approved snapshot before legacy migration.`,
+				);
+			}
 			if (rebuilt) {
 				const { removedCount } = await savePlanWithAutoAcknowledgedRemovals(
 					directory,
@@ -1184,7 +1203,10 @@ export async function loadPlan(
 					return null;
 				}
 				const expectedPlanId = anchorEvents[0].plan_id;
-				const approved = await loadLastApprovedPlan(directory, expectedPlanId);
+				const approved = await _internals.loadLastApprovedPlan(
+					directory,
+					expectedPlanId,
+				);
 				if (approved) {
 					const approvedPhase =
 						approved.approval &&
@@ -1373,8 +1395,8 @@ export class PlanWriteVerificationError extends Error {
 
 /**
  * #2531 (AC5): read the freshly persisted canonical plan.json projection back
- * and verify it is fatally-decodable UTF-8 that parses to exactly the
- * projected plan. Routed through the shared retry-aware reader
+ * and verify it parses as UTF-8 that round-trips to exactly the projected
+ * plan. Routed through the shared retry-aware reader
  * (`readSwarmFileAsync`) so transient Windows AV/indexer locks and macOS
  * rename-visibility races are retried before the save is declared failed.
  * Exposed via `_internals` for fault-injecting tests (AGENTS.md invariant 7 DI
@@ -1847,7 +1869,7 @@ export async function savePlan(
 	const ledgerStatusTaskIds = collectLedgerStatusTaskIds(
 		await readLedgerEvents(directory),
 	);
-	const replayedBeforeProjection = await replayFromLedger(directory);
+	const replayedBeforeProjection = await _internals.replayFromLedger(directory);
 	const projectionCandidate = replayedBeforeProjection
 		? mergeStatusesTakingPrecedence(
 				validated,
