@@ -1,0 +1,248 @@
+name: OpenCode Swarm gated publisher
+description: Run a bounded, two-phase OpenCode Swarm issue workflow and publish only after independent gates and human approval.
+author: ZaxbyHub
+
+inputs:
+  mode:
+    description: 'Execution mode: prepare creates a bound artifact; publish verifies and publishes that artifact.'
+    required: true
+    default: prepare
+  repository:
+    description: 'The trusted owner/repository identity (for example, ZaxbyHub/opencode-swarm).'
+    required: true
+  issue-number:
+    description: 'Issue number being processed.'
+    required: true
+  issue-url:
+    description: 'Canonical https://github.com/OWNER/REPOSITORY/issues/NUMBER URL bound to the request.'
+    required: true
+  issue-title:
+    description: 'Issue title, treated as untrusted data during prepare.'
+    required: false
+    default: ''
+  issue-body:
+    description: 'Issue body, treated as untrusted data during prepare.'
+    required: false
+    default: ''
+  delivery-id:
+    description: 'Stable event delivery identity used for idempotency.'
+    required: true
+  label:
+    description: 'Required trusted trigger label.'
+    required: false
+    default: swarm-auto
+  labeler:
+    description: 'Actor that supplied the trigger label.'
+    required: false
+    default: ''
+  base-sha:
+    description: 'Base commit SHA bound into the prepare artifact.'
+    required: true
+  expected-base-sha:
+    description: 'Base commit SHA expected by publish; stale artifacts fail closed.'
+    required: false
+    default: ''
+  deadline-ms:
+    description: 'Total runtime deadline in milliseconds.'
+    required: false
+    default: '900000'
+  max-attempts:
+    description: 'Maximum number of transient prepare attempts.'
+    required: false
+    default: '3'
+  model:
+    description: 'OpenCode model/provider selection used by prepare.'
+    required: false
+    default: opencode/big-pickle
+  provider-env:
+    description: 'Optional comma-separated names from the documented provider allowlist. Their caller-supplied values are passed only to the OpenCode child during prepare; bootstrap, Git, CI, artifacts, and publish never receive them.'
+    required: false
+    default: ''
+  agent:
+    description: 'OpenCode primary agent used by prepare.'
+    required: false
+    default: architect
+  opencode-version:
+    description: 'Pinned OpenCode version selected by the caller bootstrap.'
+    required: true
+  bun-version:
+    description: 'Pinned Bun version selected by the caller bootstrap.'
+    required: true
+  plugin-ref:
+    description: 'Pinned opencode-swarm Git ref selected by the caller bootstrap.'
+    required: true
+  artifact-path:
+    description: 'Relative path for the prepare artifact under the checked-out repository.'
+    required: false
+    default: .swarm/github-action/artifact.json
+  publication-token:
+    description: 'Write-capable GitHub token. Supply this only to publish after Environment approval.'
+    required: false
+  expected-run-id:
+    description: 'GitHub run identity binding checked against the artifact.'
+    required: true
+  run-attempt:
+    description: 'GitHub run attempt binding used with the delivery identity.'
+    required: true
+  expected-issue-trace:
+    description: 'Expected issue-tracer identity; prepare fails closed unless the transcript proves it.'
+    required: true
+  base-branch:
+    description: 'Live default branch bound to the prepare artifact and verified again before publish.'
+    required: true
+
+outputs:
+  status:
+    description: 'Bounded status: prepared, published, reused, denied, or failed.'
+    value: ${{ steps.run-prepare.outputs.status || steps.run-publish.outputs.status }}
+  pr-url:
+    description: 'Published or reused pull request URL, when available.'
+    value: ${{ steps.run-prepare.outputs.pr-url || steps.run-publish.outputs.pr-url }}
+  pr-number:
+    description: 'Published or reused pull request number, when available.'
+    value: ${{ steps.run-prepare.outputs.pr-number || steps.run-publish.outputs.pr-number }}
+  evidence-path:
+    description: 'Path to the bounded evidence artifact, when available.'
+    value: ${{ steps.run-prepare.outputs.evidence-path || steps.run-publish.outputs.evidence-path }}
+  run-key:
+    description: 'Stable repository/issue/delivery publication key.'
+    value: ${{ steps.run-prepare.outputs.run-key || steps.run-publish.outputs.run-key }}
+
+runs:
+  using: composite
+  steps:
+    - id: validate-mode
+      name: Validate bounded Swarm phase
+      shell: bash
+      env:
+        SWARM_ACTION_MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+        case "$SWARM_ACTION_MODE" in
+          prepare|publish) ;;
+          *) echo 'mode must be prepare or publish' >&2; exit 1 ;;
+        esac
+    - id: run-prepare
+      if: inputs.mode == 'prepare'
+      name: Run bounded Swarm prepare phase
+      shell: bash
+      env:
+        SWARM_ACTION_MODE: prepare
+        SWARM_ACTION_REPOSITORY: ${{ inputs.repository }}
+        SWARM_ACTION_ISSUE_NUMBER: ${{ inputs.issue-number }}
+        SWARM_ACTION_ISSUE_URL: ${{ inputs.issue-url }}
+        SWARM_ACTION_ISSUE_TITLE: ${{ inputs.issue-title }}
+        SWARM_ACTION_ISSUE_BODY: ${{ inputs.issue-body }}
+        SWARM_ACTION_DELIVERY_ID: ${{ inputs.delivery-id }}
+        SWARM_ACTION_LABEL: ${{ inputs.label }}
+        SWARM_ACTION_LABELER: ${{ inputs.labeler }}
+        SWARM_ACTION_BASE_SHA: ${{ inputs.base-sha }}
+        SWARM_ACTION_EXPECTED_BASE_SHA: ${{ inputs.expected-base-sha }}
+        SWARM_ACTION_DEADLINE_MS: ${{ inputs.deadline-ms }}
+        SWARM_ACTION_MAX_ATTEMPTS: ${{ inputs.max-attempts }}
+        SWARM_ACTION_MODEL: ${{ inputs.model }}
+        SWARM_ACTION_PROVIDER_ENV_KEYS: ${{ inputs.provider-env }}
+        SWARM_ACTION_AGENT: ${{ inputs.agent }}
+        SWARM_ACTION_OPENCODE_VERSION: ${{ inputs.opencode-version }}
+        SWARM_ACTION_BUN_VERSION: ${{ inputs.bun-version }}
+        SWARM_ACTION_PLUGIN_REF: ${{ inputs.plugin-ref }}
+        GITHUB_ACTION_REF: ${{ github.action_ref }}
+        SWARM_ACTION_ARTIFACT_PATH: ${{ inputs.artifact-path }}
+        SWARM_ACTION_EXPECTED_RUN_ID: ${{ inputs.expected-run-id }}
+        SWARM_ACTION_RUN_ATTEMPT: ${{ inputs.run-attempt }}
+        SWARM_ACTION_ISSUE_TRACE: ${{ inputs.expected-issue-trace }}
+        SWARM_ACTION_BASE_BRANCH: ${{ inputs.base-branch }}
+      run: |
+        set -euo pipefail
+        if [[ -n "${SWARM_ACTION_PLUGIN_REF:-}" && -n "${GITHUB_ACTION_REF:-}" && "$SWARM_ACTION_PLUGIN_REF" != "$GITHUB_ACTION_REF" ]]; then
+          echo 'plugin-ref does not match the immutable Action ref' >&2
+          exit 1
+        fi
+        test -n "${SWARM_ACTION_ISSUE_URL:-}"
+        [[ "$SWARM_ACTION_ISSUE_URL" =~ ^https://github\.com/[^/]+/[^/]+/issues/[1-9][0-9]*$ ]]
+        test -n "${SWARM_ACTION_EXPECTED_RUN_ID:-}"
+        test -n "${SWARM_ACTION_RUN_ATTEMPT:-}"
+        test -n "${SWARM_ACTION_ISSUE_TRACE:-}"
+        test -n "${SWARM_ACTION_BASE_BRANCH:-}"
+        if [[ "$SWARM_ACTION_MODE" == prepare ]]; then
+          test -n "${SWARM_ACTION_OPENCODE_VERSION:-}"
+          test -n "${SWARM_ACTION_BUN_VERSION:-}"
+          command -v opencode >/dev/null
+          test "$(opencode --version)" = "$SWARM_ACTION_OPENCODE_VERSION"
+          command -v bun >/dev/null
+          test "$(bun --version)" = "$SWARM_ACTION_BUN_VERSION"
+          test -n "${GITHUB_ACTION_PATH:-}"
+          command -v timeout >/dev/null
+          cd "$GITHUB_ACTION_PATH"
+          # Provider credentials may be inherited from the caller job. Keep
+          # them out of Action dependency installation and build subprocesses;
+          # runner.mjs reintroduces only explicitly declared keys for OpenCode.
+          bootstrap_without_credentials() {
+            env \
+              -u SWARM_ACTION_PROVIDER_SECRET \
+              -u SWARM_ACTION_PUBLICATION_TOKEN \
+              -u GH_TOKEN \
+              -u GITHUB_TOKEN \
+              -u AI21_API_KEY -u ANTHROPIC_API_KEY -u ANTHROPIC_BASE_URL \
+              -u AWS_ACCESS_KEY_ID -u AWS_DEFAULT_REGION -u AWS_REGION \
+              -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+              -u AZURE_API_KEY -u AZURE_OPENAI_API_KEY -u AZURE_OPENAI_ENDPOINT \
+              -u BRAVE_SEARCH_API_KEY -u CEREBRAS_API_KEY -u COHERE_API_KEY \
+              -u DEEPINFRA_API_KEY -u DEEPSEEK_API_KEY -u FIREWORKS_API_KEY \
+              -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_GENERATIVE_AI_API_KEY \
+              -u GROQ_API_KEY -u MISTRAL_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
+              -u OPENROUTER_API_KEY -u OPENCODE_API_KEY -u PERPLEXITYAI_API_KEY \
+              -u SAMBANOVA_API_KEY -u TAVILY_API_KEY \
+              -u TOGETHER_API_KEY -u TOGETHER_AI_API_KEY -u XAI_API_KEY \
+              timeout --signal=TERM --kill-after=10s 600s "$@"
+          }
+          bootstrap_without_credentials bun install --frozen-lockfile
+          bootstrap_without_credentials bun run build
+          test -f "$GITHUB_ACTION_PATH/dist/cli/index.js"
+          test ! -L "$GITHUB_ACTION_PATH/dist/cli/index.js"
+        fi
+        exec node "$GITHUB_ACTION_PATH/scripts/github-action/runner.mjs"
+    - id: run-publish
+      if: inputs.mode == 'publish'
+      name: Run bounded Swarm publish phase
+      shell: bash
+      env:
+        SWARM_ACTION_MODE: publish
+        SWARM_ACTION_REPOSITORY: ${{ inputs.repository }}
+        SWARM_ACTION_ISSUE_NUMBER: ${{ inputs.issue-number }}
+        SWARM_ACTION_ISSUE_URL: ${{ inputs.issue-url }}
+        SWARM_ACTION_ISSUE_TITLE: ${{ inputs.issue-title }}
+        SWARM_ACTION_ISSUE_BODY: ${{ inputs.issue-body }}
+        SWARM_ACTION_DELIVERY_ID: ${{ inputs.delivery-id }}
+        SWARM_ACTION_LABEL: ${{ inputs.label }}
+        SWARM_ACTION_LABELER: ${{ inputs.labeler }}
+        SWARM_ACTION_BASE_SHA: ${{ inputs.base-sha }}
+        SWARM_ACTION_EXPECTED_BASE_SHA: ${{ inputs.expected-base-sha }}
+        SWARM_ACTION_DEADLINE_MS: ${{ inputs.deadline-ms }}
+        SWARM_ACTION_MAX_ATTEMPTS: ${{ inputs.max-attempts }}
+        SWARM_ACTION_MODEL: ${{ inputs.model }}
+        SWARM_ACTION_AGENT: ${{ inputs.agent }}
+        SWARM_ACTION_OPENCODE_VERSION: ${{ inputs.opencode-version }}
+        SWARM_ACTION_BUN_VERSION: ${{ inputs.bun-version }}
+        SWARM_ACTION_PLUGIN_REF: ${{ inputs.plugin-ref }}
+        GITHUB_ACTION_REF: ${{ github.action_ref }}
+        SWARM_ACTION_ARTIFACT_PATH: ${{ inputs.artifact-path }}
+        SWARM_ACTION_EXPECTED_RUN_ID: ${{ inputs.expected-run-id }}
+        SWARM_ACTION_RUN_ATTEMPT: ${{ inputs.run-attempt }}
+        SWARM_ACTION_ISSUE_TRACE: ${{ inputs.expected-issue-trace }}
+        SWARM_ACTION_BASE_BRANCH: ${{ inputs.base-branch }}
+        SWARM_ACTION_PUBLICATION_TOKEN: ${{ inputs.publication-token }}
+      run: |
+        set -euo pipefail
+        if [[ -n "${SWARM_ACTION_PLUGIN_REF:-}" && -n "${GITHUB_ACTION_REF:-}" && "$SWARM_ACTION_PLUGIN_REF" != "$GITHUB_ACTION_REF" ]]; then
+          echo 'plugin-ref does not match the immutable Action ref' >&2
+          exit 1
+        fi
+        test -n "${SWARM_ACTION_ISSUE_URL:-}"
+        [[ "$SWARM_ACTION_ISSUE_URL" =~ ^https://github\.com/[^/]+/[^/]+/issues/[1-9][0-9]*$ ]]
+        test -n "${SWARM_ACTION_EXPECTED_RUN_ID:-}"
+        test -n "${SWARM_ACTION_RUN_ATTEMPT:-}"
+        test -n "${SWARM_ACTION_ISSUE_TRACE:-}"
+        test -n "${SWARM_ACTION_BASE_BRANCH:-}"
+        test -n "${SWARM_ACTION_PUBLICATION_TOKEN:-}"
+        exec node "$GITHUB_ACTION_PATH/scripts/github-action/runner.mjs"
