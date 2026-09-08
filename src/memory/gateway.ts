@@ -94,6 +94,15 @@ export interface ProposeMemoryInput {
 	evidenceRefs?: string[];
 }
 
+/**
+ * Recall options for read-only surfaces. `recordUsage: false` skips the
+ * recall-usage telemetry write (the sqlite/jsonl `recordRecallUsage` insert)
+ * while keeping the identical retrieval path (#2499).
+ */
+export interface RecallUsageOptions {
+	recordUsage?: boolean;
+}
+
 export interface RecallMemoryInput {
 	query: string;
 	task?: string;
@@ -202,7 +211,10 @@ export class MemoryGateway {
 		return scopes;
 	}
 
-	async recall(input: RecallMemoryInput): Promise<RecallBundle> {
+	async recall(
+		input: RecallMemoryInput,
+		options?: RecallUsageOptions,
+	): Promise<RecallBundle> {
 		this.assertEnabled();
 		const query = normalizeMemoryText(input.query);
 		if (query.length < 3) {
@@ -259,6 +271,11 @@ export class MemoryGateway {
 					}
 				: undefined,
 		});
+		if (options?.recordUsage === false) {
+			// Read-only surfaces (#2499 MCP verification) recall without the
+			// usage-telemetry write; every other caller keeps the default.
+			return bundle;
+		}
 		await this.provider.recordRecallUsage?.({
 			bundleId: bundle.id,
 			query,

@@ -2,12 +2,14 @@
  * Knowledge + memory adapters for the read-only MCP surface (#2499).
  *
  * `knowledge_recall` calls `searchKnowledge` — the exact retrieval core the
- * registered `knowledge_recall` tool uses — WITHOUT the receipt-ledger writes
- * (those commits are session display-membership bookkeeping, not part of
- * retrieval). `swarm_memory_recall` goes through the registered tool with a
- * synthetic sessionless context, but ONLY after read-only probes confirm the
- * feature is enabled AND a store already exists, so no `.swarm/` state is
- * ever materialized by a query.
+ * registered `knowledge_recall` tool uses — with `skipLedgerGenesis` so a
+ * query never performs the receipt ledger's one-time `runLocked` genesis.
+ * `swarm_memory_recall` calls the registered tool's compute core with
+ * `{recordUsage: false}` (identical retrieval, no telemetry write) — but ONLY
+ * after read-only probes confirm the feature is enabled AND the configured
+ * provider's store artifact already exists, so no `.swarm/` state (sqlite
+ * `memory.db` genesis, WAL/SHM files, migration reports) is ever materialized
+ * by a query.
  */
 
 import { existsSync } from 'node:fs';
@@ -16,7 +18,7 @@ import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../../config';
 import { KnowledgeConfigSchema } from '../../config/schema.js';
 import { searchKnowledge } from '../../hooks/search-knowledge.js';
-import { swarm_memory_recall } from '../../tools/swarm-memory-recall.js';
+import { computeSwarmMemoryRecall } from '../../tools/swarm-memory-recall.js';
 import type { McpReadTool } from '../registry.js';
 import { mcpToolContext, safeParseJson } from './verification.js';
 
@@ -80,6 +82,8 @@ export const knowledgeRecallAdapter: McpReadTool = {
 			applyScopeFilter: false,
 			forceReadHive: true,
 			applyRoleScope: false,
+			// Read-only surface: never materialize the receipts ledger (#2499).
+			skipLedgerGenesis: true,
 		});
 		return { trace_id, results, total: results.length };
 	},
@@ -103,10 +107,15 @@ export const swarmMemoryRecallAdapter: McpReadTool = {
 				message: 'Swarm memory is disabled. Set swarm.memory.enabled=true.',
 			};
 		}
-		// Probe 2: an existing store. `createConfiguredMemoryProviderForRoot`
-		// lazily creates storage directories, so a storeless root must degrade
-		// instead of constructing any provider.
-		if (!existsSync(path.join(root, '.swarm', 'memory'))) {
+		// Probe 2: the configured provider's INITIALIZED store artifact. The
+		// sqlite provider lazily creates `memory.db` (migrations + WAL/SHM) on
+		// construction, so a root whose provider has never persisted anything
+		// must degrade instead of letting a query perform that genesis.
+		const storeArtifact =
+			(config.memory.provider ?? 'sqlite') === 'sqlite'
+				? path.join(root, '.swarm', 'memory', 'memory.db')
+				: path.join(root, '.swarm', 'memory', 'memories.jsonl');
+		if (!existsSync(storeArtifact)) {
 			return {
 				available: false,
 				reason: 'no_store',
@@ -114,13 +123,16 @@ export const swarmMemoryRecallAdapter: McpReadTool = {
 					'No memory store exists under this project root; a read-only query never creates one.',
 			};
 		}
-		// Registered production path with a sessionless synthetic context.
-		const result = await swarm_memory_recall.execute(
+		// Registered production compute core with a sessionless synthetic
+		// context and usage telemetry disabled — identical retrieval, no write.
+		const result = await computeSwarmMemoryRecall(
 			{ query: args.query },
+			root,
 			// The registered tool reads only directory/sessionID off the context;
 			// the empty session id keeps attribution session-scoped and read-only.
 			{ ...mcpToolContext(root), sessionID: '' },
+			{ recordUsage: false },
 		);
-		return typeof result === 'string' ? safeParseJson(result) : result;
+		return safeParseJson(result);
 	},
 };

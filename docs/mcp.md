@@ -17,6 +17,16 @@ project tree (no `.swarm/` state, no evidence, no git hygiene edits). The
 authorized write surface (#2500) and adds no write tools today — the
 registry's write-tool denylist fails closed either way.
 
+The read-only guarantee extends into the recall paths. `swarm_memory_recall`
+degrades to `available:false` unless the configured memory provider's store
+artifact (`memory.db` / `memories.jsonl`) already exists, then recalls through
+the registered tool's compute core with usage telemetry disabled — so a query
+never creates the sqlite store, runs migrations, or appends recall-usage rows.
+`knowledge_recall` skips the receipt-ledger rollup read while the
+`knowledge-receipts-v2.jsonl` journal does not exist, so a query never performs
+the ledger's one-time genesis. Pinned by
+`tests/unit/mcp/readonly-recall-no-writes-2499.test.ts`.
+
 ## Tools
 
 | Tool | Capability |

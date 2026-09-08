@@ -21,6 +21,8 @@
  *   (critical force-include) → emit a `retrieved` event → return trace_id.
  */
 
+import { existsSync, statSync } from 'node:fs';
+import path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
 	buildSynonymIndex,
@@ -120,6 +122,13 @@ export interface SearchKnowledgeParams {
 	 * passes false so an explicit query is not silently role-gated.
 	 */
 	applyRoleScope?: boolean;
+	/**
+	 * Skip the receipt-authority rollup read when the receipts-v2 journal does
+	 * not exist yet (default false). Read-only surfaces (#2499 MCP) set this so
+	 * a query never materializes the ledger; ranking is unchanged because an
+	 * absent ledger yields empty rollups anyway.
+	 */
+	skipLedgerGenesis?: boolean;
 }
 
 export interface SearchKnowledgeResult {
@@ -270,6 +279,7 @@ export async function searchKnowledge(
 		applyScopeFilter = true,
 		forceReadHive = false,
 		applyRoleScope = true,
+		skipLedgerGenesis = false,
 	} = params;
 
 	const traceId = newTraceId();
@@ -312,8 +322,20 @@ export async function searchKnowledge(
 				skipScopeFilter: !applyScopeFilter,
 			},
 		);
+		// A read-only surface must not perform the one-time ledger genesis that
+		// `runLocked` inside the rollup read triggers on an absent or empty
+		// journal; both yield empty rollups, so skipping is rank-neutral.
+		const journalPath = path.join(
+			directory,
+			'.swarm',
+			'knowledge-receipts-v2.jsonl',
+		);
+		const journalReadable =
+			existsSync(journalPath) && statSync(journalPath).size > 0;
 		const counterRollups =
-			await readAuthoritativeKnowledgeCounterRollups(directory);
+			skipLedgerGenesis && !journalReadable
+				? new Map<string, never>()
+				: await readAuthoritativeKnowledgeCounterRollups(directory);
 
 		// Tier post-filter (hive-only) + inactive-status exclusion.
 		// G4 (#1716): use the canonical `isActiveStatus` helper so any future

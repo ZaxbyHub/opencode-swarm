@@ -37,3 +37,16 @@ quality/scope checks) was reachable only through the OpenCode plugin host or
 the CLI. Any MCP-capable client (Claude Code, Cursor, VS Code, JetBrains)
 can now query it read-only for one project root — the largest audience
 expansion without rewriting the orchestration core (#1227).
+
+### Hardening (final-critic round)
+
+The recall adapters are now write-free in the configurations where their
+writers actually live: `swarm_memory_recall` probes the configured provider's
+initialized store artifact before constructing anything and recalls through
+the registered tool's compute core with usage telemetry disabled
+(`gateway.recall(..., {recordUsage: false})`); `knowledge_recall` skips the
+receipt-ledger rollup read while the receipts journal is absent or empty
+(rank-neutral — both yield empty rollups). A committed suite
+(`tests/unit/mcp/readonly-recall-no-writes-2499.test.ts`) pins byte-identical
+project trees for both recall tools in enabled configurations, with
+load-bearing-flag falsifiability tests for both seams.
