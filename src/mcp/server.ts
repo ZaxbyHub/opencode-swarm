@@ -34,11 +34,7 @@ export class McpContainmentError extends Error {
 	}
 }
 
-function validatePathValue(
-	field: string,
-	value: string,
-	root: string,
-): void {
+function validatePathValue(field: string, value: string, root: string): void {
 	if (typeof value !== 'string' || value === '') return;
 	if (path.isAbsolute(value) || /^[A-Za-z]:[/\\]/.test(value)) {
 		// Absolute argument: acceptable only when it stays inside the root,
@@ -92,7 +88,10 @@ export function validatePathField(
 		}
 		return;
 	}
-	if (typeof value === 'object' && typeof (value as { file?: unknown }).file === 'string') {
+	if (
+		typeof value === 'object' &&
+		typeof (value as { file?: unknown }).file === 'string'
+	) {
 		validatePathValue(`${field}.file`, (value as { file: string }).file, root);
 	}
 }
@@ -132,9 +131,9 @@ export function createMcpServer(options: RunMcpServerOptions): McpServer {
 				}
 				try {
 					const raw = await tool.execute(args, root);
-					const { serialized } = applyResponsePipeline(raw);
+					const { text } = applyResponsePipeline(raw);
 					return {
-						content: [{ type: 'text' as const, text: serialized }],
+						content: [{ type: 'text' as const, text }],
 					};
 				} catch (error) {
 					if (error instanceof McpContainmentError) {

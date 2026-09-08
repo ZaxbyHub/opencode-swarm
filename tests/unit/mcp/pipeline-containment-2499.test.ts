@@ -3,7 +3,10 @@ import {
 	applyResponsePipeline,
 	MCP_MAX_RESPONSE_CHARS,
 } from '../../../src/mcp/pipeline';
-import { McpContainmentError, validatePathField } from '../../../src/mcp/server';
+import {
+	McpContainmentError,
+	validatePathField,
+} from '../../../src/mcp/server';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('MCP response pipeline (#2499)', () => {
@@ -19,29 +22,31 @@ describe('MCP response pipeline (#2499)', () => {
 			],
 			safe: 'nothing to redact here',
 		};
-		const { serialized, redacted } = applyResponsePipeline(payload);
-		expect(serialized).not.toContain('ghp_0123');
-		expect(serialized).not.toContain('AKIAIOSFODNN7EXAMPLE');
-		expect(serialized).not.toContain('sk-proj-0123');
-		expect(serialized).not.toContain('MY_SERVICE_TOKEN="abc123');
-		expect(serialized).toContain('[REDACTED:');
-		expect(serialized).toContain('nothing to redact here');
-		expect((redacted as { safe: string }).safe).toBe('nothing to redact here');
+		const { text } = applyResponsePipeline(payload);
+		expect(text).not.toContain('ghp_0123');
+		expect(text).not.toContain('AKIAIOSFODNN7EXAMPLE');
+		expect(text).not.toContain('sk-proj-0123');
+		expect(text).not.toContain('MY_SERVICE_TOKEN="abc123');
+		expect(text).toContain('[REDACTED:');
+		expect(text).toContain('nothing to redact here');
 	});
 
 	test('bounds a 2 MiB payload to the frozen cap with a truncation marker', () => {
 		const huge = 'x'.repeat(2 * 1024 * 1024);
-		const { serialized, truncated } = applyResponsePipeline({ huge });
-		expect(serialized.length).toBeLessThanOrEqual(MCP_MAX_RESPONSE_CHARS);
-		expect(serialized.length).toBe(MCP_MAX_RESPONSE_CHARS);
+		const { text, truncated } = applyResponsePipeline({ huge });
+		expect(text.length).toBeLessThanOrEqual(MCP_MAX_RESPONSE_CHARS);
+		// The whole RETURN VALUE is bounded, not just one field (frozen C8).
+		expect(JSON.stringify({ text, truncated }).length).toBeLessThanOrEqual(
+			MCP_MAX_RESPONSE_CHARS,
+		);
 		expect(truncated).toBe(true);
-		expect(serialized).toContain('response truncated to bound');
+		expect(text).toContain('response truncated to bound');
 	});
 
 	test('bounds a 50k-line log-shaped payload', () => {
 		const lines = Array.from({ length: 50_000 }, (_, i) => `line-${i}`);
-		const { serialized } = applyResponsePipeline({ lines });
-		expect(serialized.length).toBeLessThanOrEqual(MCP_MAX_RESPONSE_CHARS);
+		const { text } = applyResponsePipeline({ lines });
+		expect(text.length).toBeLessThanOrEqual(MCP_MAX_RESPONSE_CHARS);
 	});
 
 	test('bounds a 20k-row wide array', () => {
@@ -50,17 +55,17 @@ describe('MCP response pipeline (#2499)', () => {
 			name: `row-${i}`,
 			value: i * 2,
 		}));
-		const { serialized } = applyResponsePipeline({ rows });
-		expect(serialized.length).toBeLessThanOrEqual(MCP_MAX_RESPONSE_CHARS);
+		const { text } = applyResponsePipeline({ rows });
+		expect(text.length).toBeLessThanOrEqual(MCP_MAX_RESPONSE_CHARS);
 	});
 
 	test('small payloads pass through untruncated with content preserved', () => {
-		const { serialized, truncated } = applyResponsePipeline({
+		const { text, truncated } = applyResponsePipeline({
 			verdict: 'pass',
 			summary: 'All 2 files passed syntax check',
 		});
 		expect(truncated).toBe(false);
-		expect(serialized).toContain('All 2 files passed syntax check');
+		expect(text).toContain('All 2 files passed syntax check');
 	});
 
 	test('redaction runs BEFORE bounding (split secrets cannot survive)', () => {
@@ -69,8 +74,8 @@ describe('MCP response pipeline (#2499)', () => {
 		// leak through the truncation window by being split around.
 		const huge = 'y'.repeat(MCP_MAX_RESPONSE_CHARS * 2);
 		const secret = 'ghp_0123456789abcdefghijklmnopqrstuvwxyzAB';
-		const { serialized } = applyResponsePipeline({ head: huge, tail: secret });
-		expect(serialized.includes('ghp_0123456789')).toBe(false);
+		const { text } = applyResponsePipeline({ head: huge, tail: secret });
+		expect(text.includes('ghp_0123456789')).toBe(false);
 	});
 });
 
@@ -78,7 +83,8 @@ describe('MCP path containment (#2499)', () => {
 	const root = canonicalMkdtemp('mcp-containment-2499-');
 
 	test('positive control: an in-root path validates', () => {
-		const { writeFileSync, mkdirSync } = require('node:fs') as typeof import('node:fs');
+		const { writeFileSync, mkdirSync } =
+			require('node:fs') as typeof import('node:fs');
 		mkdirSync(`${root}/src`, { recursive: true });
 		writeFileSync(`${root}/src/probe.ts`, 'export const x = 1;\n');
 		expect(() =>
@@ -95,7 +101,11 @@ describe('MCP path containment (#2499)', () => {
 
 	test('unnormalized .. traversal is rejected', () => {
 		expect(() =>
-			validatePathField('changed_files', [`${root}/../outside/secret.ts`], root),
+			validatePathField(
+				'changed_files',
+				[`${root}/../outside/secret.ts`],
+				root,
+			),
 		).toThrow(McpContainmentError);
 	});
 

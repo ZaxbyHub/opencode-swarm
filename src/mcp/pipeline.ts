@@ -14,6 +14,12 @@ import { redactSecrets } from '../memory/redaction.js';
  * JSON-serialized pipeline output may never exceed this many characters. */
 export const MCP_MAX_RESPONSE_CHARS = 65_536;
 
+/** The serialized payload itself is bounded below the cap so that the
+ * pipeline's full return value (`{ text, truncated }`) — including JSON
+ * wrapper keys and quote-escaping when the caller re-serializes it — still
+ * fits inside {@link MCP_MAX_RESPONSE_CHARS}. */
+const INTERNAL_TEXT_BUDGET = MCP_MAX_RESPONSE_CHARS - 2048;
+
 const TRUNCATION_NOTE = '\n[swarm-mcp: response truncated to bound]';
 
 function redactStringsDeep(value: unknown, depth = 0): unknown {
@@ -29,7 +35,10 @@ function redactStringsDeep(value: unknown, depth = 0): unknown {
 	if (value instanceof Map) {
 		const next = new Map();
 		for (const [k, v] of value) {
-			next.set(redactStringsDeep(k, depth + 1), redactStringsDeep(v, depth + 1));
+			next.set(
+				redactStringsDeep(k, depth + 1),
+				redactStringsDeep(v, depth + 1),
+			);
 		}
 		return next;
 	}
@@ -56,34 +65,35 @@ function redactStringsDeep(value: unknown, depth = 0): unknown {
 
 function serializeBounded(value: unknown): string {
 	const json = JSON.stringify(value, null, 2) ?? 'null';
-	if (json.length <= MCP_MAX_RESPONSE_CHARS) {
+	if (json.length <= INTERNAL_TEXT_BUDGET) {
 		return json;
 	}
 	// Deterministic bound: keep the head of the serialized form and append the
-	// truncation marker inside the cap.
-	const keep = Math.max(0, MCP_MAX_RESPONSE_CHARS - TRUNCATION_NOTE.length);
+	// truncation marker inside the internal budget.
+	const keep = Math.max(0, INTERNAL_TEXT_BUDGET - TRUNCATION_NOTE.length);
 	return `${json.slice(0, keep)}${TRUNCATION_NOTE}`;
 }
 
 export interface ResponsePipelineResult {
-	/** The redacted (still structured) payload. */
-	redacted: unknown;
-	/** The bounded serialized form actually sent to the client. */
-	serialized: string;
+	/** The bounded, redacted serialized form actually sent to the client. */
+	text: string;
+	/** True when the serialized form was cut to fit the cap. */
 	truncated: boolean;
 }
 
 /**
  * Redact every string in the payload (top-level and nested, including MCP
  * `content` arrays), then bound the serialized output to
- * {@link MCP_MAX_RESPONSE_CHARS} characters.
+ * {@link MCP_MAX_RESPONSE_CHARS} characters. The RETURN VALUE itself is
+ * bounded — the full (unbounded) redacted payload never leaves the pipeline.
  */
-export function applyResponsePipeline(payload: unknown): ResponsePipelineResult {
+export function applyResponsePipeline(
+	payload: unknown,
+): ResponsePipelineResult {
 	const redacted = redactStringsDeep(payload);
-	const serialized = serializeBounded(redacted);
+	const text = serializeBounded(redacted);
 	return {
-		redacted,
-		serialized,
-		truncated: serialized.includes(TRUNCATION_NOTE),
+		text,
+		truncated: text.includes(TRUNCATION_NOTE),
 	};
 }
