@@ -29,7 +29,15 @@ function listTsFiles(dir: string): string[] {
 	return out;
 }
 
-/** The declared event discriminants from the closed union in types.ts. */
+/**
+ * The declared event discriminants from the closed union in types.ts.
+ *
+ * Limitation (issue #2512 review PRR-004): the census below counts textual
+ * `type: '<event>'` occurrences in src/*.ts, so a literal surviving only in a
+ * comment or string would satisfy it. The companion dispatch-site assertions
+ * for the ten current events pin the real sites; a future event must add its
+ * own literal there.
+ */
 function declaredEventTypes(): string[] {
 	const text = readFileSync(join(SRC_ROOT, 'pr-review', 'types.ts'), 'utf-8');
 	const start = text.indexOf('export type PrReviewEvent =');
@@ -136,7 +144,8 @@ describe('adapter applies returned state and effects', () => {
 			source: 'armed_recovery',
 		});
 		// Integration coverage of the persisted record through the real
-		// executor (unchanged by the wiring): pr-workflow-armed-recovery.test.ts.
+		// executor (including the PR_REVIEW-mode reducer dispatch):
+		// pr-workflow-armed-recovery.test.ts.
 		expect(result.effects).toEqual([{ kind: 'persist_state' }]);
 	});
 
@@ -156,7 +165,9 @@ describe('adapter applies returned state and effects', () => {
 		expect(result.status).toBe('applied');
 		if (result.status !== 'applied') return;
 		expect(result.state).toBe(BASE);
-		expect(result.effects).toEqual([{ kind: 'persist_state' }]);
+		// Validation-only transition: no effects (persistence stays with the
+		// completion adapter's terminal clear).
+		expect(result.effects).toEqual([]);
 	});
 });
 

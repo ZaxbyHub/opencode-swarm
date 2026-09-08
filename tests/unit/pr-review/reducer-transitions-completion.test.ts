@@ -161,7 +161,7 @@ describe('reducer: coverage finalization (N-of-6 truthfulness)', () => {
 		expect(result.status).toBe('applied');
 	});
 
-	test('finalization persists; the durable disclosure carries the unresolved list', () => {
+	test('finalization is validation-only; persistence stays with the completion adapter', () => {
 		const result = reducePrReviewEvent(BASE, {
 			type: 'coverage_finalization_requested',
 			settlement: settlement({
@@ -175,7 +175,10 @@ describe('reducer: coverage finalization (N-of-6 truthfulness)', () => {
 		// completion module's durable artifact (coverage-disclosure.json),
 		// written by the gate when it executes persist_state — not an
 		// audit-event effect.
-		expect(result.effects).toEqual([{ kind: 'persist_state' }]);
+		// Issue #2512 review PRR-006: the transition mutates no state, so it
+		// emits no effects — the completion adapter persists at its own
+		// terminal clear.
+		expect(result.effects).toEqual([]);
 	});
 });
 

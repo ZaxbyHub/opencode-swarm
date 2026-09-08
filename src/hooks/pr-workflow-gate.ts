@@ -5833,7 +5833,6 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 		type: 'base_admission_requested',
 		batchId,
 		lanes: record.lanes,
-		depthTier,
 		maxBatches: MAX_WORKFLOW_BATCHES,
 		validatedAt: record.validatedAt,
 	});
@@ -10830,9 +10829,10 @@ async function assertPrReviewTerminalReady(
 		// claims) and dispatches `critic_result_recorded`. A required finding
 		// whose only critic verdict is NEEDS_MORE_EVIDENCE has no settled
 		// receipt and the transition is rejected — NEEDS_MORE_EVIDENCE never
-		// satisfies critic coverage. This also closes the hole where a
-		// reviewer re-settlement added NEW required items after the critic
-		// dispatch: those items have no receipt and block here.
+		// satisfies critic coverage; receipts without a current reviewer-row
+		// digest are skipped here, so unbound items fail closed as defense in
+		// depth (the settlement assertion above already blocks most of these
+		// cases with its own message).
 		const criticVerdicts = deriveLatestPrReviewCriticVerdicts(
 			directory,
 			state,

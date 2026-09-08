@@ -175,7 +175,6 @@ export type PrReviewEvent =
 			type: 'base_admission_requested';
 			batchId: string;
 			lanes: PrReviewBaseDispatchLane[];
-			depthTier: 'S' | 'M' | 'L';
 			maxBatches: number;
 			validatedAt: string;
 	  }

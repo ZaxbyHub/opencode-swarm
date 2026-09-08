@@ -385,7 +385,9 @@ export function reducePrReviewEvent(
 					);
 				}
 			}
-			return applied(state, [{ kind: 'persist_state' }]);
+			// No persist_state effect: the transition mutates no state; the
+			// completion adapter persists at its own terminal clear.
+			return applied(state);
 		}
 
 		case 'critic_result_recorded': {
@@ -414,7 +416,9 @@ export function reducePrReviewEvent(
 					`critic confirmation missing for finding(s): ${unfulfilled.join(', ')}`,
 				);
 			}
-			return applied(state, [{ kind: 'persist_state' }]);
+			// No persist_state effect: receipts are not workflow state; the
+			// terminal artifact ladder owns persistence.
+			return applied(state);
 		}
 
 		// -----------------------------------------------------------------

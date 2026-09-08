@@ -64,7 +64,6 @@ function generatorEvent(rand: () => number, step: number): PrReviewEvent {
 				type: 'base_admission_requested',
 				batchId: batch,
 				lanes: [{ laneId: lane, workflowLane: 'tests' }],
-				depthTier: pick(['S', 'M', 'L'] as const),
 				maxBatches: 128,
 				validatedAt: `t${step}`,
 			};
