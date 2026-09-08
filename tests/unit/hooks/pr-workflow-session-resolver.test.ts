@@ -208,6 +208,24 @@ describe('resolvePrWorkflowControllerSession — typed observation walk (issue #
 		if (outcome.kind === 'uncertain') expect(outcome.sessionID).toBeNull();
 	});
 
+	test('a throwing readGate resolves to typed uncertain, never propagates', async () => {
+		const directory = await tempDirectory();
+		// FIX-6 (review P-005): before the try/catch around `options.readGate`,
+		// a gate reader that THREW (corrupt or unreadable gate record) aborted
+		// the whole observation walk and propagated the raw error to the caller
+		// instead of honoring the typed contract — the exact "store uncertainty,
+		// not a walk abort" case the uncertain variant exists for.
+		const outcome = await resolvePrWorkflowControllerSession({
+			directory,
+			sessionID: 'gate-read-fails',
+			readGate: async () => {
+				throw new Error('gate record is corrupt');
+			},
+		});
+
+		expect(outcome).toEqual({ kind: 'uncertain', sessionID: null });
+	});
+
 	test('no linkage at the first hop is an ordinary gate-less session, not uncertainty', async () => {
 		const directory = await tempDirectory();
 		const get = mock(async () => ({

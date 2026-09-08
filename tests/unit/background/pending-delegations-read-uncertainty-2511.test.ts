@@ -45,6 +45,7 @@ import {
 	readDelegationsDetailed,
 } from '../../../src/background/pending-delegations.js';
 import { telemetry } from '../../../src/telemetry.js';
+import { canonicalRootKeyFresh } from '../../../src/utils/canonical-root.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
 interface FixtureRecord {
@@ -83,8 +84,14 @@ interface StoreFixture {
 /**
  * Builds a store root with the requested ledger lines and an optional torn
  * manifest. `.git` marks the temp root as a project root for path policy.
+ * `manifestContent` (when provided) overrides the default short torn payload —
+ * used to drive a fold reason whose raw parse-error text exceeds the cap.
  */
-function createStore(records: string[], tornManifest: boolean): StoreFixture {
+function createStore(
+	records: string[],
+	tornManifest: boolean,
+	manifestContent?: string,
+): StoreFixture {
 	const safe = createSafeTestDir('swarm-bg-read-uncertain-');
 	fs.mkdirSync(path.join(safe.dir, '.git'), { recursive: true });
 	fs.mkdirSync(path.join(safe.dir, '.swarm'), { recursive: true });
@@ -95,7 +102,13 @@ function createStore(records: string[], tornManifest: boolean): StoreFixture {
 			'utf-8',
 		);
 	}
-	if (tornManifest) {
+	if (manifestContent !== undefined) {
+		fs.writeFileSync(
+			path.join(safe.dir, '.swarm', BACKGROUND_DELEGATIONS_MANIFEST_FILE),
+			manifestContent,
+			'utf-8',
+		);
+	} else if (tornManifest) {
 		fs.writeFileSync(
 			path.join(safe.dir, '.swarm', BACKGROUND_DELEGATIONS_MANIFEST_FILE),
 			'{"schemaVersion": 1, "sequence": ',
@@ -156,6 +169,32 @@ describe('readDelegationsDetailed — typed read uncertainty (issue #2511)', () 
 			expect(outcome.reason.length).toBeGreaterThan(0);
 			expect(outcome.source).toBe('fold');
 			expect(outcome.repairHint).toBeTruthy();
+		} finally {
+			store.cleanup();
+		}
+	});
+
+	test('fold-uncertain reason is capped at 200 chars past the fixed prefix (review P-004)', () => {
+		// FIX-6: before the cap, the fold reason embedded the RAW parse-error
+		// text unbounded — a malformed manifest whose JSON parse error carries a
+		// long identifier snippet (Bun's caps at 245 chars for any oversized
+		// input) flowed at full length into telemetry payloads, health
+		// artifacts, and BLOCKED operator messages.
+		const store = createStore([openLaneLine()], false, 'x'.repeat(600));
+		try {
+			const outcome = readDelegationsDetailed(store.dir);
+			expect(outcome.status).toBe('uncertain');
+			if (outcome.status !== 'uncertain') return;
+			expect(
+				outcome.reason.startsWith(
+					'background delegation store is unreadable: ',
+				),
+			).toBe(true);
+			// Fixed prefix (~43) + DELEGATION_READ_REASON_MAX_CHARS (200) + slack.
+			expect(outcome.reason.length).toBeLessThanOrEqual(260);
+			// The raw fold reason is ~305 chars on Bun, so the cap must actually
+			// truncate: the bounded reason still exceeds the bare prefix + 160.
+			expect(outcome.reason.length).toBeGreaterThan(200);
 		} finally {
 			store.cleanup();
 		}
@@ -247,6 +286,88 @@ describe('readDelegationsDetailed — typed read uncertainty (issue #2511)', () 
 			}
 		} finally {
 			store.cleanup();
+		}
+	});
+});
+
+describe('delegation_read_uncertain emit registry — FIFO/dedup bounds (FIX-6, review P-003)', () => {
+	const ORIGINAL_EMIT_COOLDOWN_MS =
+		_internals.delegationReadUncertainEmitCooldownMs;
+
+	beforeEach(() => {
+		// Collapse the retry delay and the per-root emit cooldown so every
+		// uncertain read emits; registry state is reset so earlier tests'
+		// roots cannot pollute the counts below.
+		_internals.readRetryDelayMs = 0;
+		_internals.delegationReadUncertainEmitCooldownMs = 0;
+		_internals.resetDelegationReadUncertainRegistry();
+	});
+
+	afterEach(() => {
+		_internals.readRetryDelayMs = DELEGATION_READ_RETRY_DELAY_MS;
+		_internals.delegationReadUncertainEmitCooldownMs =
+			ORIGINAL_EMIT_COOLDOWN_MS;
+		_internals.resetDelegationReadUncertainRegistry();
+		mock.restore();
+	});
+
+	test('emit order stays duplicate-free so FIFO eviction only drops the oldest distinct root', () => {
+		const stores: StoreFixture[] = [];
+		try {
+			// FIX-6: before the dedup (indexOf/splice) in
+			// emitDelegationReadUncertainBounded, a re-read root APPENDED a
+			// second order entry. The stale duplicate survived at the array
+			// front, so the FIFO eviction below deleted that root's
+			// freshly-refreshed cooldown while the duplicate entry kept
+			// occupying a capacity slot — order and cooldown map desynced.
+			const firstThree = [0, 1, 2].map(() =>
+				createStore([openLaneLine()], true),
+			);
+			stores.push(...firstThree);
+			const dirA = firstThree[0].dir;
+			const keyA = canonicalRootKeyFresh(dirA);
+
+			readDelegationsDetailed(dirA);
+			readDelegationsDetailed(dirA);
+			// Dedup: dirA's second emission moved its existing order entry to
+			// the back instead of appending a duplicate.
+			const orderAfterDedup =
+				_internals.delegationReadUncertainEmitOrderSnapshot();
+			expect(orderAfterDedup.filter((key) => key === keyA).length).toBe(1);
+
+			// 31 more distinct torn roots read once each: 33 emissions, 32
+			// distinct roots — exactly MAX_TRACKED_DELEGATION_READ_UNCERTAIN_ROOTS.
+			for (let index = 0; index < 31; index += 1) {
+				const store = createStore([openLaneLine()], true);
+				stores.push(store);
+				readDelegationsDetailed(store.dir);
+			}
+			const order = _internals.delegationReadUncertainEmitOrderSnapshot();
+			expect(order.length).toBe(32);
+			expect(new Set(order).size).toBe(32);
+			const cooldowns = _internals.delegationReadUncertainCooldownsSnapshot();
+			expect(cooldowns.size).toBe(order.length);
+			// dirA — the FIRST root — still carries its live cooldown: with the
+			// stale duplicate, the 33rd emission's FIFO eviction deleted dirA's
+			// cooldown even though dirA remained tracked in the order array.
+			expect(cooldowns.has(keyA)).toBe(true);
+
+			// A 34th distinct root forces real eviction in the fixed code too:
+			// the FIFO drops the TRUE oldest distinct root (dirA) and every
+			// surviving entry stays paired with its cooldown entry.
+			const store34 = createStore([openLaneLine()], true);
+			stores.push(store34);
+			readDelegationsDetailed(store34.dir);
+			const orderAfterEviction =
+				_internals.delegationReadUncertainEmitOrderSnapshot();
+			expect(orderAfterEviction.length).toBe(32);
+			expect(orderAfterEviction).not.toContain(keyA);
+			const cooldownsAfterEviction =
+				_internals.delegationReadUncertainCooldownsSnapshot();
+			expect(cooldownsAfterEviction.size).toBe(orderAfterEviction.length);
+			expect(cooldownsAfterEviction.has(orderAfterEviction[0])).toBe(true);
+		} finally {
+			for (const store of stores) store.cleanup();
 		}
 	});
 });

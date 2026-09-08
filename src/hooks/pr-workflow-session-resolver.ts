@@ -159,7 +159,15 @@ export async function resolvePrWorkflowControllerSession<T>(options: {
 			return { kind: 'uncertain', sessionID: null };
 		}
 		visited.add(current);
-		const gate = await options.readGate(current);
+		let gate: Awaited<ReturnType<typeof options.readGate>>;
+		try {
+			gate = await options.readGate(current);
+		} catch {
+			// A corrupt/unreadable gate record is store uncertainty, not a walk
+			// abort: the typed contract holds even when the gate reader throws
+			// (review P-005).
+			return { kind: 'uncertain', sessionID: null };
+		}
 		if (gate !== null && gate !== undefined) {
 			return { kind: 'gate-owner', sessionID: current, gate };
 		}

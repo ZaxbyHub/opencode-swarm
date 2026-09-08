@@ -333,7 +333,9 @@ bounded retry (budget: 2 attempts + a 25 ms delay, the
 `DELEGATION_READ_RETRY_DELAY_MS` contract). Payload is content-free:
 `attempt` (always 2 — a successful retry emits nothing), `reasonCode`
 (≤64 chars, stable code derived from the failure reason prefix), and
-`source` (`coordination-import` | `coordination-read` | `fold`). No
+`source` — expected values `coordination-import` | `coordination-read` |
+`fold` (TypeScript-typed at the emit site; not separately validated at
+runtime). No
 consumers yet; future owner **#2511**. Retention: **#2511**. OTel mapping:
 `none`.
 

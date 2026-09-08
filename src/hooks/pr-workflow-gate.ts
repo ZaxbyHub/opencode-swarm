@@ -4123,13 +4123,15 @@ export async function abortPrWorkflow(
 						.join(
 							', ',
 						)}). This abort did not discard them — check collect_lane_results before assuming that work is gone.`) +
-			(overrideOutcome.sessionOpenLaneIds.length === 0
-				? ' A new PR workflow can now be started for this session.'
-				: ` WARNING: ${overrideOutcome.sessionOpenLaneIds.length} PR workflow delegation record(s) for this session are still open (correlationId: ${overrideOutcome.sessionOpenLaneIds
-						.slice(0, MAX_DISCLOSED_LANE_IDS)
-						.join(
-							', ',
-						)}) and will keep refusing PR workflow checkout preparation for this session until they settle.`)
+			(overrideOutcome.delegationReadUncertain !== undefined
+				? ` WARNING: the post-abort delegation-store re-read was unreadable (${overrideOutcome.delegationReadUncertain}); whether any PR workflow delegation record(s) for this session remain open is UNKNOWN — revalidate with pr_workflow_status before assuming a new PR workflow can start.`
+				: overrideOutcome.sessionOpenLaneIds.length === 0
+					? ' A new PR workflow can now be started for this session.'
+					: ` WARNING: ${overrideOutcome.sessionOpenLaneIds.length} PR workflow delegation record(s) for this session are still open (correlationId: ${overrideOutcome.sessionOpenLaneIds
+							.slice(0, MAX_DISCLOSED_LANE_IDS)
+							.join(
+								', ',
+							)}) and will keep refusing PR workflow checkout preparation for this session until they settle.`)
 		: undefined;
 	return {
 		mode: state.mode,

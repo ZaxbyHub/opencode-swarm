@@ -32,7 +32,8 @@
  * `context_source_attribution` and the 61st is `verdict_row_pipe_recovery` and the 62nd is `training_vault_health`
  * (issue #2482 — D3: honest savings attribution with the omit-when-unknown
  * rule, and the #2184 verdict-row pipe-recovery fidelity class in the event
- * lifecycle). These late
+ * lifecycle). The 63rd is `delegation_read_uncertain` (issue #2511 —
+ * bounded advisory-reader uncertainty signal). These late
  * additions are instances
  * of the defect class this contract exists to close: an event kind entering
  * the stream with no registration.

@@ -1395,6 +1395,21 @@ const ManifestSchema = z
 /** Per-process diagnostic writer identity (issue #2034 requirement 2). */
 const WRITER_ID = `w-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
 
+// Portable sleep (transient-retry.ts precedent): Atomics.wait throws on some
+// platforms/threads (Electron renderer main threads, some worker contexts);
+// fall back to a bounded busy-wait. Shared by the checkpoint rename retries
+// and the advisory-read retry below.
+function portableSyncSleep(ms: number): void {
+	try {
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+	} catch {
+		const start = Date.now();
+		while (Date.now() - start < ms) {
+			/* bounded busy-wait */
+		}
+	}
+}
+
 export const _checkpointInternals: {
 	renameWithRetry: (from: string, to: string) => void;
 	renameOnce: (from: string, to: string) => void;
@@ -1421,18 +1436,7 @@ export const _checkpointInternals: {
 	renameOnce: (from, to) => {
 		fs.renameSync(from, to);
 	},
-	syncSleep: (ms) => {
-		// Portable sleep (transient-retry.ts precedent): Atomics.wait throws
-		// on some platforms/threads; fall back to a bounded busy-wait.
-		try {
-			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-		} catch {
-			const start = Date.now();
-			while (Date.now() - start < ms) {
-				/* bounded busy-wait */
-			}
-		}
-	},
+	syncSleep: portableSyncSleep,
 };
 
 /**
@@ -2889,6 +2893,11 @@ export type DelegationReadOutcome =
 			attempts: number;
 	  };
 
+// Reason strings may embed raw fs/JSON error text from the store; bound them
+// before they reach telemetry payloads, health artifacts, and BLOCKED
+// operator messages (review P-004).
+const DELEGATION_READ_REASON_MAX_CHARS = 200;
+
 function readDelegationLoadAttempt(directory: string): DelegationReadOutcome {
 	const importState = ensureDelegationCoordinationImported(directory, false);
 	if (importState === 'uncertain') {
@@ -2919,7 +2928,10 @@ function readDelegationLoadAttempt(directory: string): DelegationReadOutcome {
 	if (load.status === 'uncertain') {
 		return {
 			status: 'uncertain',
-			reason: load.reason,
+			// The fold reader embeds raw fs/JSON error text; bound it before the
+			// reason reaches telemetry payloads, health artifacts, and BLOCKED
+			// operator messages (review P-004).
+			reason: `background delegation store is unreadable: ${load.reason.slice(0, DELEGATION_READ_REASON_MAX_CHARS)}`,
 			source: 'fold',
 			attempts: 1,
 			...(load.repairHint ? { repairHint: load.repairHint } : {}),
@@ -2952,12 +2964,19 @@ function emitDelegationReadUncertainBounded(
 		const last = delegationReadUncertainEmitAtByRoot.get(rootKey);
 		if (
 			last !== undefined &&
-			now - last < DELEGATION_READ_UNCERTAIN_EMIT_COOLDOWN_MS
+			now - last < _internals.delegationReadUncertainEmitCooldownMs
 		) {
 			return;
 		}
 		delegationReadUncertainEmitAtByRoot.delete(rootKey);
 		delegationReadUncertainEmitAtByRoot.set(rootKey, now);
+		// Keep the order array duplicate-free: a stale duplicate surviving at
+		// the array front would let the FIFO eviction below delete this root's
+		// freshly-refreshed cooldown record (review P-003).
+		const priorOccurrence = delegationReadUncertainEmitOrder.indexOf(rootKey);
+		if (priorOccurrence >= 0) {
+			delegationReadUncertainEmitOrder.splice(priorOccurrence, 1);
+		}
 		delegationReadUncertainEmitOrder.push(rootKey);
 		while (delegationReadUncertainEmitOrder.length > 0) {
 			if (
@@ -3009,12 +3028,7 @@ export function readDelegationsDetailed(
 ): DelegationReadOutcome {
 	const first = readDelegationLoadAttempt(directory);
 	if (first.status === 'ok') return first;
-	Atomics.wait(
-		new Int32Array(new SharedArrayBuffer(4)),
-		0,
-		0,
-		_internals.readRetryDelayMs,
-	);
+	portableSyncSleep(_internals.readRetryDelayMs);
 	const second = readDelegationLoadAttempt(directory);
 	if (second.status === 'ok') return second;
 	const finalOutcome: DelegationReadOutcome = { ...second, attempts: 2 };
@@ -4328,6 +4342,18 @@ function getLegacyCoderSettlementReconciler(
 /** Test-only seam for the bounded legacy-settlement reconciler registry. */
 export const _internals = {
 	readRetryDelayMs: DELEGATION_READ_RETRY_DELAY_MS,
+	/** Test-only seam for the delegation_read_uncertain emit registry. */
+	delegationReadUncertainEmitCooldownMs:
+		DELEGATION_READ_UNCERTAIN_EMIT_COOLDOWN_MS,
+	resetDelegationReadUncertainRegistry: () => {
+		delegationReadUncertainEmitAtByRoot.clear();
+		delegationReadUncertainEmitOrder.length = 0;
+	},
+	delegationReadUncertainEmitOrderSnapshot: () => [
+		...delegationReadUncertainEmitOrder,
+	],
+	delegationReadUncertainCooldownsSnapshot: () =>
+		new Map(delegationReadUncertainEmitAtByRoot),
 	getLegacyCoderSettlementReconciler,
 	readFallbackDirectory,
 	getLegacyCoderSettlementReconcilerOrder: () => [
