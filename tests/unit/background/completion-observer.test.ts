@@ -25,12 +25,18 @@ import {
 	resetSwarmState,
 } from '../../../src/state';
 import { checkReviewerGate } from '../../../src/tools/update-task-status';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 
 function makeTempProject(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bgobs-'));
 	const real = fs.realpathSync(dir);
 	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
+	fs.mkdirSync(path.join(real, '.opencode'), { recursive: true });
+	fs.writeFileSync(
+		path.join(real, '.opencode', 'opencode-swarm.json'),
+		JSON.stringify({ review_routing: { enforce_receipts: false } }),
+	);
 	return real;
 }
 
@@ -63,8 +69,10 @@ const completedEnvelope = (id: string, taskId?: string) =>
 
 describe('background completion observer', () => {
 	let dir: string;
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 	const realSpawnSync = workspaceSnapshotInternals.spawnSync;
 	beforeEach(() => {
+		isolatedEnv = createIsolatedTestEnv();
 		resetSwarmState();
 		workspaceSnapshotInternals.spawnSync = realSpawnSync;
 		dir = makeTempProject();
@@ -73,6 +81,8 @@ describe('background completion observer', () => {
 		workspaceSnapshotInternals.spawnSync = realSpawnSync;
 		resetSwarmState();
 		fs.rmSync(dir, { recursive: true, force: true });
+		isolatedEnv?.cleanup();
+		isolatedEnv = undefined;
 	});
 
 	it('is a no-op when disabled', async () => {

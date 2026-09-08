@@ -1,20 +1,36 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdirSync } from 'node:fs';
+import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
 	ensureAgentSession,
 	recordModifiedFilesForTask,
 	resetSwarmState,
+	swarmState,
 } from '../../../src/state';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
-describe('review routing task-keyed modified files', () => {
-	afterEach(() => resetSwarmState());
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
+beforeEach(() => {
+	isolatedEnv = createIsolatedTestEnv();
+});
+
+afterEach(() => {
+	resetSwarmState();
+	isolatedEnv?.cleanup();
+	isolatedEnv = undefined;
+});
+
+describe('review routing task-keyed modified files', () => {
 	test('routes a non-active reverse-order task from its exact attribution key', async () => {
 		const { dir, cleanup } = createSafeTestDir('swarm-review-routing-');
 		try {
+			mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 			const session = ensureAgentSession('parent', 'architect', dir);
+			await Promise.allSettled([...swarmState.pendingRehydrations]);
 			session.currentTaskId = '1.1';
 			session.modifiedFilesThisCoderTask = [];
 			recordModifiedFilesForTask(session, '1.1', []);

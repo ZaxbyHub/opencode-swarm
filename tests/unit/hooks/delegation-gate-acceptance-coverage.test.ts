@@ -30,6 +30,7 @@ import {
 	normalizeAcceptanceText,
 } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import {
 	recordPlanCriticApproval,
 	seedAuthoritativeTaskWorkflow,
@@ -250,6 +251,7 @@ function makeConfig(): PluginConfig {
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	const real = fs.realpathSync(dir);
+	fs.mkdirSync(path.join(real, '.opencode'), { recursive: true });
 	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
 	return real;
 }
@@ -310,8 +312,10 @@ function toolBeforeInput(sessionID: string, callID = 'call-1') {
 
 describe('toolBefore ACCEPTANCE coverage gate (integration, F-007/#1687)', () => {
 	let tempDir: string;
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 	beforeEach(async () => {
+		isolatedEnv = createIsolatedTestEnv();
 		resetSwarmState();
 		tempDir = makeTempProject('c1687-cov-');
 		await writeFixturePlan(tempDir);
@@ -324,6 +328,8 @@ describe('toolBefore ACCEPTANCE coverage gate (integration, F-007/#1687)', () =>
 		} catch {
 			// best-effort cleanup
 		}
+		isolatedEnv?.cleanup();
+		isolatedEnv = undefined;
 	});
 
 	it('coder, mapped task, verbatim FR body in ACCEPTANCE => resolves', async () => {
