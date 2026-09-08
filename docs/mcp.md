@@ -12,7 +12,9 @@ bunx opencode-swarm mcp serve --dir /path/to/project
 
 The server speaks MCP over **stdio**, binds to exactly ONE project root per
 process, and is **read-only by default**: it never writes anywhere under the
-project tree (no `.swarm/` state, no evidence, no git hygiene edits). The
+project tree (no `.swarm/` state, no evidence, no git hygiene edits). Diff
+refs are validated against flag-shaped values, so a tool argument cannot
+redirect git output into a file. The
 `--allow-write` flag is a forward-compatibility seam for the explicitly
 authorized write surface (#2500) and adds no write tools today — the
 registry's write-tool denylist fails closed either way.
@@ -33,6 +35,9 @@ local-jsonl store with a truncated tail is self-healed (rewritten plus an
 audit row) on read.
 
 ## Tools
+
+(`knowledge_query` is deferred out of the Phase-1 surface — its capability
+area is covered by `knowledge_recall`; it becomes available in-session.)
 
 | Tool | Capability |
 | --- | --- |
@@ -60,12 +65,15 @@ so what an MCP client sees matches the in-session tools exactly.
   rejected with a containment error; the outside-root file content never
   enters a response. The checks reuse the same `path-security` helpers the
   write tools rely on.
-- **Redaction then bounds.** Every response passes through the repo's secret
-  redaction (12 pattern families) FIRST, then is bounded to 65,536 serialized
-  characters, so a large corpus can never produce an unbounded response and
-  truncation can never split a secret pattern in half.
-- **No subprocesses.** The SAST adapter forces offline-only mode; no
-  `Bun.spawn`/`child_process` call is reachable from the MCP surface.
+- **Redaction then bounds.** Every response — success and error text alike —
+  passes through the repo's secret redaction (12 pattern families) FIRST, then
+  is bounded to 65,536 serialized characters, so a large corpus can never
+  produce an unbounded response and truncation can never split a secret
+  pattern in half. Containment errors never disclose the host-side root path.
+- **Bounded subprocess reach.** The SAST adapter forces offline-only mode, so
+  the Semgrep subprocess is unreachable from the MCP surface. The `diff`
+  adapter does transit git (read-only) via the registered tool; its refs are
+  dash-validated so an argument cannot redirect git output into a file.
 
 ## Client setup
 

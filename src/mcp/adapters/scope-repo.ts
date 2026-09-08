@@ -42,12 +42,18 @@ const diffSchema = z.object({
 
 const symbolsSchema = z.object({
 	file: z.string().optional().describe('Specific file to extract symbols from'),
+	// The registered tool gates workspace mode on a strict boolean
+	// (obj.workspace === true); a string could never enable it, and the tool
+	// has no subdirectory-scoping parameter (#2499 review finding).
 	workspace: z
-		.string()
+		.boolean()
 		.optional()
-		.describe('Workspace-relative directory to search'),
+		.describe('Search the whole workspace instead of a single file'),
 	name: z.string().optional().describe('Symbol name pattern to search'),
-	limit: z.number().int().min(1).max(500).optional().describe('Max results'),
+	exported_only: z
+		.boolean()
+		.optional()
+		.describe('Only include exported symbols (default true)'),
 });
 
 export const planConflictCheckAdapter: McpReadTool = {

@@ -72,7 +72,7 @@ export async function handleMcpCommand(argv: string[]): Promise<number> {
 		console.error(
 			'Usage: opencode-swarm mcp serve --dir <project-root> [--allow-write]',
 		);
-		return argv.length === 0 ? 1 : 1;
+		return 1;
 	}
 	const parsed = parseMcpServeArgs(argv.slice(1));
 	if ('error' in parsed) {

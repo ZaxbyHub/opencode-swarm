@@ -118,23 +118,32 @@ describe('MCP path containment (#2499)', () => {
 
 	test('a symlinked escape is rejected (lexical-in, canonical-out)', () => {
 		const outside = canonicalMkdtemp('mcp-outside-link-2499-');
-		const { symlinkSync } = require('node:fs') as typeof import('node:fs');
-		const link = `${root}/leak-link`;
+		const fs = require('node:fs') as typeof import('node:fs');
+		// Expand 8.3 short-name temp segments (RUNNER~1 on Windows CI): removing
+		// a symlink whose path keeps the short form can fail with EFAULT.
+		const realRoot = fs.realpathSync(root);
+		const link = `${realRoot}/leak-link`;
 		let linkCreated = false;
 		try {
-			symlinkSync(outside, link, 'dir');
+			fs.symlinkSync(outside, link, 'dir');
 			linkCreated = true;
 		} catch {
-			// Windows without symlink privilege: this vector is covered by the
-			// frozen C7 junction check instead; skip without failing.
+			// Symlink privilege unavailable on this host (Windows CI runners):
+			// skip the symlink-specific vector explicitly rather than failing.
+			console.log(
+				'SKIP: symlink privilege unavailable; symlink escape vector not exercised',
+			);
 		}
 		if (linkCreated) {
 			expect(() =>
 				validatePathField('changed_files', [`leak-link/secret.ts`], root),
 			).toThrow(McpContainmentError);
-			(require('node:fs') as typeof import('node:fs')).rmSync(link, {
-				force: true,
-			});
+			try {
+				fs.rmSync(link, { force: true });
+			} catch {
+				// Cleanup is best-effort: some hosts EFAULT on rm of a symlink
+				// under short-name temp paths; the mkdtemp teardown retries.
+			}
 		}
 	});
 

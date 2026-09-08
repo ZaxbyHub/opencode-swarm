@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import {
 	existsSync,
 	mkdirSync,
 	readdirSync,
+	readFileSync,
 	statSync,
 	writeFileSync,
 } from 'node:fs';
@@ -25,14 +27,28 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
  * ledger genesis).
  */
 
-function snapshotTree(root: string): Map<string, number> {
-	const files = new Map<string, number>();
+// Maps each file to "size:sha256" so a same-size rewrite (e.g. a SQLite page
+// churn) is detected, not just file-set membership. `volatileSidecars`
+// normalizes sqlite's `-shm`/`-wal` files to a size-only signature: they are
+// shared-memory indexes that legitimately churn on any read (even read-only
+// queries re-map the WAL index) and carry no durable state — the no-write
+// guarantee covers the durable store and all non-sidecar files.
+const VOLATILE_SIDECAR = /-shm$/;
+
+function snapshotTree(root: string): Map<string, string> {
+	const files = new Map<string, string>();
 	const walk = (dir: string, rel: string) => {
 		for (const entry of readdirSync(dir, { withFileTypes: true })) {
 			const relPath = rel ? `${rel}/${entry.name}` : entry.name;
 			const abs = path.join(dir, entry.name);
 			if (entry.isDirectory()) walk(abs, relPath);
-			else files.set(relPath, statSync(abs).size);
+			else {
+				const data = readFileSync(abs);
+				const sig = VOLATILE_SIDECAR.test(relPath)
+					? `volatile:${data.length}`
+					: `${data.length}:${createHash('sha256').update(data).digest('hex')}`;
+				files.set(relPath, sig);
+			}
 		}
 	};
 	walk(root, '');
@@ -40,17 +56,17 @@ function snapshotTree(root: string): Map<string, number> {
 }
 
 function diffTree(
-	before: Map<string, number>,
-	after: Map<string, number>,
+	before: Map<string, string>,
+	after: Map<string, string>,
 ): string[] {
 	const changes: string[] = [];
-	for (const [name, size] of after) {
-		if (!before.has(name)) changes.push(`new ${name} (${size}b)`);
+	for (const [name, sig] of after) {
+		if (!before.has(name)) changes.push(`new ${name} (${sig})`);
 	}
-	for (const [name, size] of before) {
+	for (const [name, sig] of before) {
 		if (!after.has(name)) changes.push(`gone ${name}`);
-		else if (after.get(name) !== size) {
-			changes.push(`changed ${name} ${size}b -> ${after.get(name)}b`);
+		else if (after.get(name) !== sig) {
+			changes.push(`changed ${name} ${before.get(name)} -> ${sig}`);
 		}
 	}
 	return changes;

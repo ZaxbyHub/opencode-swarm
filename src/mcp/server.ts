@@ -27,8 +27,12 @@ export class McpContainmentError extends Error {
 		readonly value: string,
 		readonly root: string,
 	) {
+		// The message deliberately omits `root`: it is returned to the MCP
+		// client verbatim, and disclosing the host-side project root would leak
+		// filesystem topology (#2499 review finding). The field is kept on the
+		// error object for local diagnostics.
 		super(
-			`path rejected by containment: field ${field} value ${value} resolves outside the configured root ${root}`,
+			`path rejected by containment: field ${field} value ${value} is outside the configured project root`,
 		);
 		this.name = 'McpContainmentError';
 	}
@@ -126,26 +130,26 @@ export function createMcpServer(options: RunMcpServerOptions): McpServer {
 				inputSchema: tool.inputSchema,
 			},
 			async (args: Record<string, unknown>) => {
-				for (const field of tool.pathFields) {
-					validatePathField(field, args[field], root);
-				}
+				// Containment validation sits INSIDE the try: a rejection must
+				// surface as a graceful isError result, not a protocol-level
+				// exception that bypasses the response pipeline (#2499 review).
 				try {
+					for (const field of tool.pathFields) {
+						validatePathField(field, args[field], root);
+					}
 					const raw = await tool.execute(args, root);
 					const { text } = applyResponsePipeline(raw);
 					return {
 						content: [{ type: 'text' as const, text }],
 					};
 				} catch (error) {
-					if (error instanceof McpContainmentError) {
-						return {
-							content: [{ type: 'text' as const, text: error.message }],
-							isError: true,
-						};
-					}
-					const message =
-						error instanceof Error ? error.message : String(error);
+					// Error text takes the same redact+bound pipeline as success
+					// payloads: the read-only contract covers ALL outbound text
+					// (#2499 review finding — errors previously bypassed it).
+					const raw = error instanceof Error ? error.message : String(error);
+					const { text } = applyResponsePipeline({ error: raw });
 					return {
-						content: [{ type: 'text' as const, text: `error: ${message}` }],
+						content: [{ type: 'text' as const, text }],
 						isError: true,
 					};
 				}

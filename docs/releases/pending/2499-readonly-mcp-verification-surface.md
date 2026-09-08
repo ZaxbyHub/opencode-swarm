@@ -22,7 +22,7 @@
   (traversal, absolute-outside-root, and symlink/junction escapes rejected,
   reusing `path-security` helpers), responses redacted (`redactSecrets`)
   before being bounded to 65,536 serialized chars (redact-then-bound order),
-  and SAST forced offline-only so no subprocess is reachable from the server.
+  with SAST forced offline-only so the Semgrep subprocess is unreachable from the server (the diff adapter transit git read-only, with dash-validated refs).
 - `docs/mcp.md` documents the server, its tools, the security model, and
   client setup for Claude Code, Cursor, and VS Code.
 - MCP conformance and two-client evidence: the official SDK client AND a
@@ -53,3 +53,19 @@ configurations against initialized, current-schema stores, with
 load-bearing-flag falsifiability tests for both seams. Stale-schema sqlite
 stores (migrated on open) and truncated local-jsonl tails (self-healed on
 read) remain documented transitional write paths.
+
+### Review feedback (swarm-pr-feedback round)
+
+- `diff` base refs are dash-validated (a flag-shaped ref could previously
+  redirect git output into a file inside the root); covered by committed
+  rejection tests.
+- The MCP `symbols` adapter now exposes the registered tool's real contract
+  (`workspace` boolean, `exported_only`) instead of an unwired string field
+  and dead `limit`.
+- Error responses now pass the same redact+bound pipeline as success
+  responses, and containment errors no longer disclose the host-side root
+  path.
+- The `knowledge_query` deferral is documented here and in `docs/mcp.md`.
+- Disclosure: adding `@modelcontextprotocol/sdk` pulls a transitive HTTP
+  stack the stdio-only usage never imports (upstream SDK packaging; not
+  reachable from the stdio server path).
