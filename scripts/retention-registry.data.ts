@@ -165,6 +165,18 @@ export interface RetentionRow {
 	/** What `/swarm reset-session` and `/swarm reset` do. */
 	resetPolicy: string;
 	legacyCompatibility: string;
+	/**
+	 * A legacy surface enrolled in a bounded, cross-driver compatibility
+	 * program.  The program data lives with the authoritative retention row so
+	 * a migration/retirement path cannot be maintained in a second checklist.
+	 */
+	issue2487Legacy?: {
+		path: string;
+		sourceFile: string;
+		tokens: readonly string[];
+		readers: readonly string[];
+		writers: readonly string[];
+	};
 	healthSignal: string;
 	/** Owning issue ("#NNNN") or "this-gate" for rows this PR ratifies. */
 	owner: string;
@@ -214,6 +226,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset-session does not touch it; /swarm close is the lifecycle boundary',
 		legacyCompatibility: 'LEGACY_TELEMETRY_SOURCE_STORE (src/observability/legacy.ts:22); toLegacyTelemetryLine byte-identical projection (src/observability/observe.ts:334)',
+		issue2487Legacy: { path: '.swarm/telemetry.jsonl(.1)', sourceFile: 'src/observability/legacy.ts', tokens: ['telemetry.jsonl', 'LEGACY_TELEMETRY_SOURCE_STORE'], readers: ['src/db/observability-event-store.ts:syncObservabilityImport', 'src/observability/legacy.ts:LEGACY_TELEMETRY_SOURCE_STORE'], writers: ['src/telemetry.ts:emit'] },
 		healthSignal: 'rotation events observable via file presence; consumers degrade on malformed lines',
 		owner: '#2051 (legacy-path retirement/migration owner); this gate (ratification)',
 		disposition: {
@@ -264,6 +277,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset-session unlinks events.jsonl + events-authority-index.json',
 		legacyCompatibility: 'header-less files read bounded (newest window); authority lookups fall back to the retained-window scan so pre-store authority events stay answerable until folded; the fold pass indexes authority lines BEFORE removing them',
+		issue2487Legacy: { path: '.swarm/events.jsonl', sourceFile: 'src/events/core-events.ts', tokens: ['events.jsonl', 'appendCoreEventSync'], readers: ['src/events/core-events.ts:readCoreEvents'], writers: ['src/events/core-events.ts:appendCoreEventSync'] },
 		healthSignal: 'core_events_health (counts-only: accepted/compacted/retained/dropped/corrupt/authority_index_count/authority_evicted_count + timestamps + bytes)',
 		owner: '#2051 (legacy-path retirement/migration owner); #2039 shipped the bounded store',
 		disposition: {
@@ -348,6 +362,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'not reset; persists',
 		legacyCompatibility: 'pre-#2037 header-less JSONL migrated in bounded passes on the write/close path; retained raw window + lifetime aggregate are backward-compatible with existing field surface',
+		issue2487Legacy: { path: '.swarm/context-telemetry.jsonl', sourceFile: 'src/context-map/telemetry.ts', tokens: ['context-telemetry.jsonl', 'recordTelemetry'], readers: ['src/context-map/telemetry.ts:readTelemetry'], writers: ['src/context-map/telemetry.ts:recordTelemetry'] },
 		healthSignal: 'context_telemetry_health (counts-only; accepted/compacted/retained/dropped/corrupt/oldest/newest/bytes), emitted on compaction & close (issue #2037)',
 		owner: '#2037',
 		disposition: {
@@ -518,6 +533,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
 			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1886)',
+		issue2487Legacy: { path: '.swarm/background-delegations.jsonl (+ checkpoint and manifest)', sourceFile: 'src/background/pending-delegations.ts', tokens: ['BACKGROUND_DELEGATIONS_FILE', 'loadLegacyLedger', 'ensureDelegationCoordinationImported'], readers: ['src/background/pending-delegations.ts:loadLegacyLedger', 'src/background/pending-delegations.ts:ensureDelegationCoordinationImported'], writers: ['src/background/pending-delegations.ts:BACKGROUND_DELEGATIONS_FILE'] },
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
 		disposition: {
@@ -621,6 +637,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
+		issue2487Legacy: { path: '.swarm/background-delegation-fallback/*.json + background-coder-reservations.json', sourceFile: 'src/background/pending-delegations.ts', tokens: ['BACKGROUND_DELEGATION_FALLBACK_DIR', 'BACKGROUND_CODER_RESERVATIONS_FILE', 'scanBackgroundCoderReservationsForAdmission', 'readFallbackDirectory'], readers: ['src/background/pending-delegations.ts:readFallbackDirectory', 'src/background/pending-delegations.ts:scanBackgroundCoderReservationsForAdmission'], writers: ['src/background/pending-delegations.ts:BACKGROUND_DELEGATION_FALLBACK_DIR', 'src/background/pending-delegations.ts:BACKGROUND_CODER_RESERVATIONS_FILE'] },
 		healthSignal: 'recovery scans report fallback promotion',
 		owner: '#2034 (merged)',
 		disposition: { kind: 'not-a-defect', proof: 'Hard capacity bounds: 256 fallback artifacts / 1 MiB each, 256 reservations / 2 MiB store, enforced on write and scan (src/background/pending-delegations.ts:82-95,4808).' },
@@ -654,6 +671,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		closePolicy: 'untouched (bounded at write; terminal/audit compaction + archive TTL own reaping)',
 		resetPolicy: 're-subscribe overwrites per correlationId; foreign/corrupt recovery rebinds (maintenance.resets counted, quarantined copy retained); operator may delete the archive/quarantine files',
 		legacyCompatibility: 'pre-#2042 append-only subscriptions.jsonl migrated incrementally under bounded bytes/work; v1 positional last-line-wins preserved (overlay tie → legacy-fold result wins); malformed/oversize lines skipped and counted, never silently dropped',
+		issue2487Legacy: { path: '.swarm/pr-monitor/subscriptions.jsonl (+ subscriptions.checkpoint.json and subscriptions.legacy.jsonl)', sourceFile: 'src/background/pr-subscriptions.ts', tokens: ['PR_SUBSCRIPTIONS_FILE', 'PR_SUBSCRIPTIONS_CHECKPOINT_FILE', 'LEGACY_ARCHIVE_FILE', 'importCoordinationOnce'], readers: ['src/background/pr-subscriptions.ts:loadLegacyPrSubscriptionViewStrict', 'src/background/pr-subscriptions.ts:importCoordinationOnce'], writers: ['src/background/pr-subscriptions.ts:PR_SUBSCRIPTIONS_FILE', 'src/background/pr-subscriptions.ts:LEGACY_ARCHIVE_FILE'] },
 		healthSignal: 'pr_subscription_health (trigger compact/migrate-complete/archive/foreign-rebind/corrupt-quarantine; counts only) + /swarm pr status storage footer + getPrSubscriptionHealth',
 		owner: '#2042',
 		disposition: {
@@ -987,6 +1005,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		closePolicy: 'untouched by close — the 30 d sweep owns the shadow-file reap; the coordination_state authority rides the project-db row',
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'absent store reads as null (fail-closed normal gating)',
+		issue2487Legacy: { path: '.swarm/pr-review/reentry-authorizations/{session-stem}.json', sourceFile: 'src/pr-review/authorization.ts', tokens: ['AUTHORIZATION_COORDINATION_PREFIX', 'reentryAuthorizationFilePath', 'importCoordinationOnce'], readers: ['src/pr-review/authorization.ts:readAuthorizationsAuthoritative', 'src/pr-review/authorization.ts:reentryAuthorizationFilePath'], writers: ['src/pr-review/authorization.ts:writeAuthorizationFile'] },
 		healthSignal: 'consume-time binding mismatch (stale/expired/replayed) returns null',
 		owner: '#2483',
 		disposition: {
@@ -1035,6 +1054,33 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			proof:
 				'Per-run artifacts were already individually bounded (≤1000 records/call + 10 MiB read guard, src/tools/write-pr-review-artifact.ts:60,89); the #2483 retention sweep\'s pr-review-run-artifacts family (src/retention/sweep.ts:95) now age-prunes the run directories at 30 d, closing the no-lifecycle-decision gap behind the #2309 row.',
 		},
+	},
+	{
+		id: 'pr-review-workflow-gate-state',
+		category: 2,
+		pathGrammar: '.swarm/pr-workflow-gates/{session-stem}.json (+ .lock)',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/pr-review/persistence.ts'],
+		writerCitations: ['src/pr-review/persistence.ts:writeWorkflowGateState — SQLite coordination authority with post-commit JSON projection'],
+		readerCitations: ['src/pr-review/persistence.ts:importLegacyPrWorkflowGateStateIfNeeded — bounded single-file legacy import'],
+		schemaVersion: 'PR workflow persisted state schema (Zod-bound gate codec)',
+		stateClass: 'authoritative',
+		privacyClass: 'metadata',
+		directFileExemption: {
+			reason: 'The gate-state projection is required for pre-DB recovery and remains bounded per workflow session; SQLite coordination state is authoritative after one-time import.',
+			reviewedIssue: 2385,
+		},
+		writeLimits: { bound: 'one bounded state object per workflow session; atomic projection under the gate lock', scope: 'per-key', keyspaceBound: 'FINITE BY REAPER: workflow session files are age-pruned with the PR workflow retention family', citation: 'src/pr-review/persistence.ts; src/retention/sweep.ts' },
+		readBound: { pattern: 'indexed', bound: 'one bounded session file', sync: false, citation: 'src/pr-review/persistence.ts:readPrWorkflowGateStateFromDisk' },
+		lockModel: 'workflow-session lock plus SQLite coordination transaction',
+		crashBehavior: 'SQLite WAL recovery; projection/archive repair is replayable after a crash-window import',
+		closePolicy: 'untouched by close — retention sweep owns workflow shadow lifecycle',
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'legacy pr-workflow-gates state is imported once into coordination_state and retained as a repaired projection',
+		issue2487Legacy: { path: '.swarm/pr-workflow-gates/{session-stem}.json', sourceFile: 'src/pr-review/persistence.ts', tokens: ['WORKFLOW_GATE_DIR', 'workflowGateStateRelativePath', 'importLegacyPrWorkflowGateStateIfNeeded', 'importCoordinationOnce'], readers: ['src/pr-review/persistence.ts:importLegacyPrWorkflowGateStateIfNeeded'], writers: ['src/pr-review/persistence.ts:workflowGateStateRelativePath'] },
+		healthSignal: 'workflow-state import/recovery failures are surfaced to the gate',
+		owner: '#2385',
+		disposition: { kind: 'not-a-defect', proof: 'Per-session workflow state is bounded and imported exactly once into coordination authority; malformed or stale projections fail closed through the gate persistence boundary.' },
 	},
 	{
 		id: 'status-artifacts',
@@ -1228,6 +1274,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'legacy .jsonl imported once (one-txn, table-empty guard) then renamed .jsonl.imported; corrupt lines skipped and counted; id recomputed from content',
+		issue2487Legacy: { path: '.swarm/insight-candidates.jsonl', sourceFile: 'src/db/insight-candidate-store.ts', tokens: ['insight-candidates.jsonl', 'INSIGHT_CANDIDATES_LEGACY_FILE', 'ensureInsightLegacyImported'], readers: ['src/db/insight-candidate-store.ts:ensureInsightLegacyImported', 'src/db/legacy-import.ts:importLegacyJsonl'], writers: ['src/db/insight-candidate-store.ts:INSIGHT_CANDIDATES_LEGACY_FILE'] },
 		healthSignal: 'consumption counts',
 		owner: 'this-gate',
 		disposition: {
@@ -1395,7 +1442,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'turbo-state.json': 'archive+clean',
 		},
 		resetPolicy: 'per-session reset functions only (resetEpicSession :309, resetLeanTurboRun :340)',
-		legacyCompatibility: 'seed-empty on first read',
+		legacyCompatibility: 'seed-empty on first read; epic-state.json and turbo-state.json are imported once into coordination_state and retained as bounded projections',
+		issue2487Legacy: { path: '.swarm/epic-state.json + .swarm/turbo-state.json', sourceFile: 'src/turbo/epic/state.ts', tokens: ['turbo.epic.session', 'turbo.lean.session', 'importLegacyStateIfNeeded', 'importCoordinationOnce'], readers: ['src/turbo/epic/state.ts:importLegacyStateIfNeeded', 'src/turbo/lean/state.ts:importLegacyStateIfNeeded'], writers: ['src/turbo/epic/state.ts:STATE_FILE', 'src/turbo/lean/state.ts:STATE_FILE'] },
 		healthSignal: 'fail-closed unreadable markers',
 		owner: '#2481 (session maps); #2483 (calibration/divergence bounds + close/sweep lifecycle)',
 		disposition: {
@@ -1570,6 +1618,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		closePolicy: 'cleaned-only — clearAllScopes rmSync, NOT archived ("scope files are ephemeral state", src/commands/close/clean-stage.ts:358-362)',
 		resetPolicy: 'reset-session does not clear scopes (close does)',
 		legacyCompatibility: 'v1 disk + plan.json + pending-map fallback chain (:2655)',
+		issue2487Legacy: { path: '.swarm/scopes/{scope-{taskId}.json,binding-*.json,claim-{digest}.json}', sourceFile: 'src/scope/scope-persistence.ts', tokens: ['SCOPE_BINDING_COORDINATION_IMPORT_SOURCE', 'collectLegacyScopeBindingsForImport', 'binding-', 'claim-'], readers: ['src/scope/scope-persistence.ts:collectLegacyScopeBindingsForImport', 'src/scope/scope-persistence.ts:readScopeFromDisk'], writers: ['src/scope/scope-persistence.ts:writeScopeToDisk', 'src/scope/scope-persistence.ts:writeScopeBindingToDisk'] },
 		healthSignal: 'typed persistence results',
 		owner: 'this-gate',
 		disposition: { kind: 'not-a-defect', proof: 'Fully bounded constant set (10k/2 MiB/256/7d) with per-binding locks and deliberate ephemeral close cleanup (src/scope/scope-persistence.ts:87-92; src/commands/close/clean-stage.ts:358-362).' },
@@ -1825,6 +1874,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'close/finalize is the lifecycle boundary',
 		legacyCompatibility: 'checkpoints read 3 legacy locations with deprecation warnings (plan/checkpoint.ts:95-119); plan-ledger legacy archives are content-addressed and retention-bounded to newest 16 after a 30 d horizon (src/retention/sweep.ts)',
+		issue2487Legacy: { path: '.swarm/plan-ledger.jsonl', sourceFile: 'src/plan/ledger.ts', tokens: ['plan-ledger.jsonl', 'LEDGER_FILENAME', 'importSqliteLedger'], readers: ['src/plan/ledger-sqlite.ts:importSqliteLedger'], writers: ['src/plan/ledger.ts:LEDGER_FILENAME'] },
 		healthSignal: 'authority_mode + parity_status/replay hashes in plan_ledger_state; truncated flag + quarantine file presence during file-shadow recovery',
 		owner: 'this-gate',
 		disposition: {
@@ -2317,6 +2367,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'IS the legacy stream — post-#2031 correctness lives in receipts-v2; retirement owned by #2051',
+		issue2487Legacy: { path: '.swarm/knowledge-application.jsonl', sourceFile: 'src/hooks/knowledge-application.ts', tokens: ['knowledge-application.jsonl', 'appendAudit'], readers: ['src/hooks/knowledge-application.ts:getShownButNotAcknowledged', 'src/hooks/knowledge-events.ts:readLegacyApplicationRecords'], writers: ['src/hooks/knowledge-application.ts:appendAudit'] },
 		healthSignal: 'n/a',
 		owner: '#2051 (retirement owner)',
 		disposition: { kind: 'not-a-defect', proof: 'Bounded 5000-entry FIFO compatibility stream; authoritative correctness partitioned to receipts-v2 by #2031 (src/hooks/knowledge-application.ts:40; docs/engineering-invariants.md #2031).' },
@@ -2563,14 +2614,14 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/commands/archive-sqlite.ts',
 		],
 		writerCitations: [
-			'src/db/project-db.ts getProjectDb — canonical-identity cache key, WAL + synchronous NORMAL default + busy_timeout 5000 + foreign_keys; versioned migrations v1-v28 with failed-migration recovery (migration_failures + marker fallback); closeProjectDb runs a best-effort TRUNCATE→PASSIVE WAL checkpoint',
+			'src/db/project-db.ts getProjectDb — canonical-identity cache key, WAL + synchronous NORMAL default + busy_timeout 5000 + foreign_keys; versioned migrations v1-v37 with failed-migration recovery (migration_failures + marker fallback); closeProjectDb runs a best-effort TRUNCATE→PASSIVE WAL checkpoint; scripts/check-issue-2487-compatibility.ts independently derives the current schema/table set',
 			'src/db/coordination-store.ts transitionCoordinationState — FULL-durability event+state CAS, events capped at 2,048/stream and pruned toward 100,000 globally, idempotency fences capped at 8,192/stream and 400,000 globally, leases, and one-time imports (#2481)',
 			'src/db/group-commit-writer.ts — queue → one BEGIN IMMEDIATE txn per flush with per-batch durability escalation (#2480)',
 			'src/db/legacy-import.ts — one-txn idempotent legacy .jsonl/.json import + .imported cold-archive rename (#2480)',
 			'src/commands/archive-sqlite.ts — WAL-consistent archive participant (#2030)',
 		],
 		readerCitations: ['qa-gate profile/constraint/checkpoint-receipt/insight-candidate/phase-report consumers — indexed SQL via the canonical cached handle'],
-		schemaVersion: 'schema_migrations versioned (28)',
+		schemaVersion: 'schema_migrations versioned (37; independently qualified by check:issue-2487-compatibility)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: { bound: 'bounded stores per DURABILITY_CLASSES; coordination events retain ≤2,048/stream and prune toward 100,000 globally; idempotency fences retain ≤8,192/stream and ≤400,000 globally; DB archived (WAL-consistent, #2030) + cleaned at close', scope: 'session-scoped', citation: 'src/db/coordination-store.ts; src/db/durability.ts; close.ts (swarm.db; -shm/-wal deliberately survive)' },
@@ -3163,6 +3214,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		closePolicy: 'cleaned — session/ dir lifecycle',
 		resetPolicy: 'reset-session deletes session/ contents (state.json explicitly :91-94)',
 		legacyCompatibility: 'snapshot version migration 1→3',
+		issue2487Legacy: { path: '.swarm/session/state.json', sourceFile: 'src/session/snapshot-store.ts', tokens: ['SNAPSHOT_PROJECTION_SOURCE', 'importSnapshotRowsOnce', 'session/state.json'], readers: ['src/session/snapshot-reader.ts:readSnapshot'], writers: ['src/session/snapshot-store.ts:importSnapshotRowsOnce'] },
 		healthSignal: 'quarantine presence',
 		owner: 'this-gate',
 		disposition: { kind: 'not-a-defect', proof: 'Session-scoped snapshot family under the close/reset-cleaned session/ directory with version-quarantine safety (src/commands/close/constants.ts:257; snapshot-reader.ts:334-347).' },
@@ -3801,6 +3853,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		closePolicy: 'rows live in swarm.db (archived+cleaned by the project-db row); legacy drift-report-phase-*.json files that reappear are still archived+cleaned by the close dynamic regex',
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'legacy files imported once (one-txn, per-kind empty guard) then renamed .json.imported; corrupt files skipped and counted',
+		issue2487Legacy: { path: '.swarm/drift-report-phase-{N}.json', sourceFile: 'src/db/phase-report-store.ts', tokens: ['drift-report-phase-', 'curator_drift'], readers: ['src/db/phase-report-store.ts:readPhaseReportsDb', 'src/db/legacy-import.ts:importLegacyJsonFiles'], writers: ['src/hooks/curator-drift.ts:writeDriftReport'] },
 		healthSignal: 'n/a',
 		owner: 'this-gate',
 		disposition: { kind: 'not-a-defect', proof: 'Session-scoped per-phase reports, one row per phase with verified close lifecycle for both the swarm.db rows (project-db row) and any legacy files (close.ts dynamic regex).' },
@@ -3831,6 +3884,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		closePolicy: 'untouched — accumulates in swarm.db (swarm.db itself archived+cleaned by the project-db row)',
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'legacy files imported once (one-txn, per-kind empty guard) then renamed .json.imported',
+		issue2487Legacy: { path: '.swarm/doc-drift-phase-{N}.json', sourceFile: 'src/db/phase-report-store.ts', tokens: ['doc-drift-phase-', 'design_doc_drift'], readers: ['src/db/phase-report-store.ts:readPhaseReportsDb', 'src/db/legacy-import.ts:importLegacyJsonFiles'], writers: ['src/hooks/design-doc-drift.ts:runDesignDocDriftCheck'] },
 		healthSignal: 'doc-drift gate state',
 		owner: '#2483',
 		disposition: {
@@ -4042,24 +4096,24 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 	{
 		id: 'planned-legacy-retirement',
 		category: 9,
-		pathGrammar: 'legacy stream retirement map (telemetry.jsonl, knowledge-application, events readers per PRs 09-14 outcomes)',
+		pathGrammar: 'retention-owned issue #2487 legacy compatibility program (independent production-source census plus tagged ownership rows)',
 		canonicalRoot: 'planned',
 		writerModules: [],
-		writerCitations: ['migration matrix built from this registry (#2051 Required 1)'],
-		readerCitations: ['parity/coverage proofs planned (#2051)'],
-		schemaVersion: 'n/a',
+		writerCitations: ['no runtime writer — scripts/issue-2487-legacy-census.data.ts names production source symbols independently of the retention rows; issue2487Legacy metadata supplies ownership evidence'],
+		readerCitations: ['scripts/check-issue-2487-compatibility.ts scans the independent census and rejects an omitted tag, row, or reachable retired row'],
+		schemaVersion: 'issue-2487 compatibility metadata v1',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'planned: controlled dual-write/read shadowing with kill switches', scope: 'global', citation: 'issue #2051' },
-		readBound: { pattern: 'indexed', bound: 'planned parity comparisons', sync: false, citation: 'issue #2051' },
-		lockModel: 'planned',
-		crashBehavior: 'planned: reversible kill switches',
-		closePolicy: 'planned: archived-session compatibility',
-		resetPolicy: 'planned',
-		legacyCompatibility: 'IS the legacy compatibility program',
-		healthSignal: 'planned parity budgets',
-		owner: '#2487',
-		disposition: { kind: 'fix-in-issue', issue: 2487, note: 'Shadow rollout, parity proofs, and source-proven retirement of each legacy path are re-pointed from the closed #2051 sequence slot to open follow-up #2487 (roadmap re-baseline; #2483 re-disposition) — still the recorded migration owner for telemetry.jsonl and knowledge-application.jsonl.' },
+		writeLimits: { bound: 'no runtime state; program metadata is version-controlled and checked as part of every qualification run', scope: 'global', citation: 'scripts/check-issue-2487-compatibility.ts' },
+		readBound: { pattern: 'indexed', bound: 'the checker reads the fixed census and scans each bounded production source symbol; retention tags are compared afterward', sync: true, citation: 'scripts/check-issue-2487-compatibility.ts' },
+		lockModel: 'not applicable — no runtime mutable state',
+		crashBehavior: 'not applicable — the compatibility program creates no project artifact',
+		closePolicy: 'not applicable — source rows retain their own close policy',
+		resetPolicy: 'not applicable',
+		legacyCompatibility: 'the independent production-source census names every issue-2487 legacy path; each census entry must have matching retention metadata and a compatibility row, so removing a tag or row cannot hide a reachable source',
+		healthSignal: 'check:issue-2487-compatibility result',
+		owner: 'this-gate',
+		disposition: { kind: 'not-a-defect', proof: 'The program has no runtime writer. Its code-defined census is independently scanned against production symbols, and the compatibility checker fails if metadata, a row, or a retirement tag is omitted while the source remains reachable.' },
 	},
 ];
 
@@ -4137,7 +4191,6 @@ export const PROJECT_SWARM_ROWS_WITH_INDIRECT_ROOT: readonly string[] =
  */
 export const EXEMPT_WRITER_MODULES: Readonly<Record<string, string>> = Object.freeze({
 	'src/utils/atomic-write.ts': 'canonical atomic-write helper — callers own the streams (issue #2035)',
-	'src/pr-review/persistence.ts': 'PR-review workflow-state persistence plumbing (issue #2385) — the only durable stream this module writes is the gate-state file .swarm/pr-workflow-gates/*.json via writeStateWhileLocked; that stream is currently UNREGISTERED in this data set (F-PRR-013 — separate follow-up row needed); until then the gate-state writes are exempt plumbing',
 	'src/utils/bun-compat.ts': 'bunWrite Node-fallback helper — callers own the streams',
 	'src/evidence/task-file.ts': 'atomic-write adapter for evidence/{taskId}.json — rows task-workflow-evidence/council-evidence-files own the stream',
 	'src/evidence/immutable-store.ts': 'writeImmutableArtifact executes on behalf of the evaluation-store row owners',

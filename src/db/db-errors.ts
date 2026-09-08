@@ -11,7 +11,8 @@ export type ProjectDbErrorCategory =
 	| 'mkdir_failed'
 	| 'driver_unavailable'
 	| 'open_failed'
-	| 'migration_failed';
+	| 'migration_failed'
+	| 'schema_incompatible';
 
 export type DbWriteErrorCategory =
 	| 'disk_full'

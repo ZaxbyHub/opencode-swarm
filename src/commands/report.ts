@@ -33,6 +33,7 @@ import {
 	syncObservabilityImport,
 } from '../db/observability-event-store.js';
 import { readOtlpExporterHealth } from '../observability/otlp-exporter.js';
+import { getTelemetryWriterStatus } from '../telemetry.js';
 
 export const REPORT_JSON_SCHEMA_VERSION = 1;
 
@@ -219,12 +220,14 @@ export async function handleReportCommand(
 	// gets an explicit empty report — and must not materialize a DB here.
 	const coverage = readObservabilityCoverage(directory);
 	if (coverage === null) {
+		const telemetryWriter = getTelemetryWriterStatus(directory);
 		// Fail-open: no store at all — an honest empty report, not an error.
 		return parsed.json
 			? `[REPORT_JSON]${JSON.stringify({
 					schemaVersion: REPORT_JSON_SCHEMA_VERSION,
 					filters: parsed.filter,
 					coverage: { unavailable: true },
+					telemetryWriter,
 					timeline: [],
 				})}[/REPORT_JSON]`
 			: 'No observability store found for this project yet — events land here once the swarm runs.';
@@ -245,6 +248,7 @@ export async function handleReportCommand(
 		outcome: row.outcome_status,
 	}));
 	const health = readObservabilitySinkHealth(directory);
+	const telemetryWriter = getTelemetryWriterStatus(directory);
 	// #2485: OTLP export health (null when the exporter never ran here — the
 	// default-off population sees no section).
 	const otlpHealth = readOtlpExporterHealth(directory);
@@ -270,6 +274,7 @@ export async function handleReportCommand(
 		},
 		savings: savings.map((s) => ({ ...s, estimate: true })),
 		health,
+		telemetryWriter,
 		otlpExport: otlpHealth,
 		timeline,
 	};
@@ -316,6 +321,9 @@ export async function handleReportCommand(
 	}
 	lines.push(
 		`**Sink health** — accepted ${health?.accepted ?? 0}, quarantined ${health?.quarantined ?? 0}, dropped ${health?.dropped ?? 0}`,
+	);
+	lines.push(
+		`**Legacy telemetry writer** — ${telemetryWriter.state}, failures ${telemetryWriter.failureCount}${telemetryWriter.lastFailureReason !== null ? ` (last: ${telemetryWriter.lastFailureReason})` : ''}`,
 	);
 	if (otlpHealth !== null) {
 		const drops = Object.entries(otlpHealth.dropped)

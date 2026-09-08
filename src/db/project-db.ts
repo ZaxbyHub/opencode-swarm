@@ -493,6 +493,8 @@ const MIGRATIONS: Migration[] = [
 	},
 ];
 
+const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
+
 interface ProjectDbRecord {
 	db: Database;
 	primaryAlias: string;
@@ -688,6 +690,12 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
 		)
 		.get();
 	const currentVersion = row?.version ?? 0;
+	if (currentVersion > LATEST_SCHEMA_VERSION) {
+		throw new ProjectDbError(
+			'schema_incompatible',
+			`swarm.db has newer schema version ${currentVersion}; this build supports up to ${LATEST_SCHEMA_VERSION}`,
+		);
+	}
 
 	for (const migration of MIGRATIONS) {
 		if (migration.version <= currentVersion) continue;

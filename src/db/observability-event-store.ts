@@ -31,9 +31,9 @@
  *   excluded from report timelines while remaining countable.
  * - Rebuildable: `syncObservabilityImport` (report path only — never per
  *   emit, never at init) incrementally imports the bounded legacy
- *   `telemetry.jsonl(.1)` stream using deterministic per-line synthetic ids,
- *   so deleting the imported rows and re-syncing reproduces byte-identical
- *   content (proven by test).
+ *   `telemetry.jsonl(.1)` stream. Existing import rows are matched one-to-one
+ *   by their legacy projection across rotation, while deterministic synthetic
+ *   ids cover genuinely new occurrences.
  */
 
 import { createHash } from 'node:crypto';
@@ -42,7 +42,13 @@ import { join } from 'node:path';
 import type { ObservabilityEvent } from '../observability/envelope.js';
 import { extractWorkflowIds } from '../observability/legacy.js';
 import type { TelemetryEvent, TelemetryListener } from '../telemetry.js';
-import { addTelemetryListener, removeTelemetryListener } from '../telemetry.js';
+import {
+	addTelemetryListener,
+	LEGACY_OBSERVATION_ID_FIELD,
+	LEGACY_OBSERVATION_ID_PROVENANCE_PREFIX,
+	removeTelemetryListener,
+	setLegacyIdentityProjectionEnabled,
+} from '../telemetry.js';
 import { canonicalProjectKey } from './canonical-project.js';
 import { DURABILITY_CLASSES } from './durability.js';
 import { getGroupCommitWriter } from './group-commit-writer.js';
@@ -63,7 +69,7 @@ export const MAX_EVENT_PAYLOAD_BYTES = 16 * 1024;
 /** Legacy stream filenames imported by `syncObservabilityImport`. */
 const LEGACY_STREAM_FILES = ['telemetry.jsonl.1', 'telemetry.jsonl'] as const;
 
-/** Import id namespace — synthetic event ids are content-derived and stable. */
+/** Import id namespace — synthetic event ids are occurrence-derived and stable. */
 const IMPORT_ID_NAMESPACE = 'obs-import-v1';
 
 /**
@@ -209,6 +215,7 @@ export function registerObservabilityEventSink(directory: string): void {
 			_sinkListener = null;
 		}
 		_sinkDirectory = key;
+		setLegacyIdentityProjectionEnabled(true);
 		_sinkListener = (
 			_event: TelemetryEvent,
 			_data: Record<string, unknown>,
@@ -243,6 +250,7 @@ export function resetObservabilityEventSinkForTesting(): void {
 	}
 	_sinkListener = null;
 	_sinkDirectory = null;
+	setLegacyIdentityProjectionEnabled(false);
 	_healthDeltas.clear();
 	_eventsSinceRetentionCheck.clear();
 	_eventsSinceHealthUpsert.clear();
@@ -375,6 +383,482 @@ const INSERT_EVENT_SQL = `INSERT OR IGNORE INTO observability_event (
 	quarantined, quarantine_reason, ingested_via
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
+interface ProjectionColumns {
+	event_id?: string;
+	kind: string;
+	occurred_at: string;
+	quarantined: number;
+	quarantine_reason: string | null;
+	payload_json: string;
+}
+
+interface ProjectionCandidate extends ProjectionColumns {
+	rowid: number;
+	consumed?: boolean;
+}
+
+interface LiveProjectionCandidates {
+	byDigest: Map<string, ProjectionCandidate[]>;
+	byIdentity: Map<string, ProjectionCandidate[]>;
+	byEventId: Map<string, ProjectionCandidate[]>;
+}
+
+/**
+ * Digest the exact legacy projection, not the canonical envelope. The legacy
+ * writer deliberately preserves caller key order and collision semantics, so
+ * reconstituting that object from a live row lets the importer recognize rows
+ * written by older processes without changing the legacy line bytes.
+ */
+function projectionDigest(value: unknown): string | null {
+	try {
+		const encoded = JSON.stringify(value);
+		if (encoded === undefined) return null;
+		return createHash('sha256').update(encoded).digest('hex');
+	} catch {
+		return null;
+	}
+}
+
+function liveProjection(
+	columns: ProjectionColumns,
+): { digest: string; occurredAt: string; kind: string } | null {
+	try {
+		const raw = JSON.parse(columns.payload_json) as unknown;
+		const projectedRaw =
+			raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+				? { ...(raw as Record<string, unknown>) }
+				: {};
+		// The canonical sink stores the caller payload, while the telemetry
+		// writer owns this reserved field in the legacy projection. Remove a
+		// caller collision before comparing the two projections.
+		delete projectedRaw[LEGACY_OBSERVATION_ID_FIELD];
+		const projected = {
+			timestamp: columns.occurred_at,
+			event: columns.kind,
+			...projectedRaw,
+		};
+		if (typeof projected.timestamp !== 'string') return null;
+		const digest = projectionDigest(projected);
+		return digest === null
+			? null
+			: {
+					digest,
+					occurredAt: projected.timestamp,
+					kind:
+						typeof projected.event === 'string' && projected.event.length > 0
+							? projected.event
+							: 'unknown',
+				};
+	} catch {
+		return null;
+	}
+}
+
+function importProjectionDigest(columns: ProjectionColumns): string | null {
+	try {
+		const parsed = JSON.parse(columns.payload_json) as unknown;
+		if (columns.quarantined !== 0) {
+			// Unparseable legacy lines retain their exact source text in the
+			// quarantined stub. It is safe to reconcile those rows by source text;
+			// bucket consumption still preserves duplicate occurrences one-to-one.
+			if (
+				parsed !== null &&
+				typeof parsed === 'object' &&
+				!Array.isArray(parsed)
+			) {
+				const object = parsed as Record<string, unknown>;
+				if (typeof object.raw_line === 'string')
+					return projectionDigest(object);
+				// Oversized but parseable legacy lines retain only the bounded
+				// versioned identity marker. Keep that marker stable across rotation
+				// so the existing synthetic import row can be reused.
+				const identity = provenanceLegacyObservationId(object);
+				if (identity !== null) {
+					return projectionDigest({
+						[LEGACY_OBSERVATION_ID_FIELD]: `${LEGACY_OBSERVATION_ID_PROVENANCE_PREFIX}${identity}`,
+					});
+				}
+			}
+			return null;
+		}
+		if (
+			parsed !== null &&
+			typeof parsed === 'object' &&
+			!Array.isArray(parsed)
+		) {
+			const normalized = { ...(parsed as Record<string, unknown>) };
+			delete normalized[LEGACY_OBSERVATION_ID_FIELD];
+			return projectionDigest(normalized);
+		}
+		return projectionDigest(parsed);
+	} catch {
+		return null;
+	}
+}
+
+function isUsableLegacyObservationId(value: string): boolean {
+	// Canonical ids are UUID-shaped; synthetic import ids and recovered
+	// delegation ids are hexadecimal digests. An arbitrary caller field must
+	// never become a primary key or spoof a canonical event identity.
+	return /^(?:[0-9a-f]{32}|[0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(
+		value,
+	);
+}
+
+function provenanceLegacyObservationId(
+	parsed: Record<string, unknown>,
+): string | null {
+	const encoded = parsed[LEGACY_OBSERVATION_ID_FIELD];
+	if (
+		typeof encoded !== 'string' ||
+		!encoded.startsWith(LEGACY_OBSERVATION_ID_PROVENANCE_PREFIX)
+	)
+		return null;
+	const identity = encoded.slice(
+		LEGACY_OBSERVATION_ID_PROVENANCE_PREFIX.length,
+	);
+	return isUsableLegacyObservationId(identity) ? identity : null;
+}
+
+function importIdentity(columns: ProjectionColumns): string | null {
+	try {
+		const parsed = JSON.parse(columns.payload_json) as Record<string, unknown>;
+		return provenanceLegacyObservationId(parsed);
+	} catch {
+		return null;
+	}
+}
+
+function isRecoveredLegacyProjection(columns: ProjectionColumns): boolean {
+	try {
+		const parsed = JSON.parse(columns.payload_json) as Record<string, unknown>;
+		return (
+			parsed.recovered === true &&
+			typeof parsed.record_id === 'string' &&
+			parsed.record_id.length > 0 &&
+			typeof parsed.result === 'string'
+		);
+	} catch {
+		return false;
+	}
+}
+
+function identityCompatible(
+	imported: ProjectionColumns,
+	liveEventId: string | undefined,
+): boolean {
+	const identity = importIdentity(imported);
+	return (
+		identity === null ||
+		identity === liveEventId ||
+		// Recovered delegation ends intentionally use a deterministic sink id
+		// derived from record_id/result, so the legacy projection's envelope id
+		// is not the row's final primary key.
+		isRecoveredLegacyProjection(imported)
+	);
+}
+
+/**
+ * Build one-to-one live candidates for a sync pass. Removing a candidate when
+ * it is paired is the important part of the compatibility policy: two
+ * byte-identical live occurrences remain two rows, while one legacy line can
+ * never claim the same live occurrence twice.
+ */
+function loadLiveProjectionCandidates(
+	db: ReturnType<typeof getProjectDb>,
+): LiveProjectionCandidates {
+	const candidates: LiveProjectionCandidates = {
+		byDigest: new Map(),
+		byIdentity: new Map(),
+		byEventId: new Map(),
+	};
+	const rows = db
+		.query<ProjectionCandidate, []>(
+			`SELECT rowid, event_id, kind, occurred_at, quarantined, quarantine_reason, payload_json
+			 FROM observability_event
+			 WHERE ingested_via = 'live'
+			 ORDER BY rowid ASC`,
+		)
+		.all();
+	for (const row of rows) {
+		const projected = liveProjection(row);
+		if (projected !== null) {
+			const bucket = candidates.byDigest.get(projected.digest) ?? [];
+			bucket.push(row);
+			candidates.byDigest.set(projected.digest, bucket);
+		}
+		if (row.event_id !== undefined) {
+			const eventIdBucket = candidates.byEventId.get(row.event_id) ?? [];
+			eventIdBucket.push(row);
+			candidates.byEventId.set(row.event_id, eventIdBucket);
+			const identityKey = `${row.event_id}\u0000${row.kind}\u0000${row.occurred_at}`;
+			const bucket = candidates.byIdentity.get(identityKey) ?? [];
+			bucket.push(row);
+			candidates.byIdentity.set(identityKey, bucket);
+		}
+	}
+	return candidates;
+}
+
+function loadImportProjectionCandidates(
+	db: ReturnType<typeof getProjectDb>,
+): Map<string, ProjectionCandidate[]> {
+	const candidates = new Map<string, ProjectionCandidate[]>();
+	const rows = db
+		.query<ProjectionCandidate, []>(
+			`SELECT rowid, event_id, kind, occurred_at, quarantined, quarantine_reason, payload_json
+			 FROM observability_event
+			 WHERE ingested_via = 'import'
+			 ORDER BY rowid ASC`,
+		)
+		.all();
+	for (const row of rows) {
+		const digest = importProjectionDigest(row);
+		if (digest === null) continue;
+		const bucket = candidates.get(digest) ?? [];
+		bucket.push({ ...row });
+		candidates.set(digest, bucket);
+	}
+	return candidates;
+}
+
+function takeLiveProjectionCandidate(
+	candidates: LiveProjectionCandidates,
+	columns: ProjectionColumns,
+): ProjectionCandidate | null {
+	const identity = importIdentity(columns);
+	// Oversized legacy rows retain only the sink-owned canonical marker. Their
+	// caller-supplied `event` and `timestamp` may override the canonical kind and
+	// time, so use the marker as an identity-only join only when both rows carry
+	// the expected oversized quarantine reasons. Require exactly one candidate to
+	// fail closed if a malformed database contains an event-id collision.
+	if (
+		identity !== null &&
+		columns.quarantined === 1 &&
+		columns.quarantine_reason === 'import_payload_oversize'
+	) {
+		const eventIdCandidates = candidates.byEventId
+			.get(identity)
+			?.filter(
+				(candidate) =>
+					!candidate.consumed &&
+					candidate.quarantined === 1 &&
+					candidate.quarantine_reason === 'payload_oversize',
+			);
+		if (eventIdCandidates?.length === 1) {
+			const [candidate] = eventIdCandidates;
+			if (candidate !== undefined) {
+				candidate.consumed = true;
+				return candidate;
+			}
+		}
+	}
+	if (identity !== null) {
+		const identityKey = `${identity}\u0000${columns.kind}\u0000${columns.occurred_at}`;
+		const identityBucket = candidates.byIdentity.get(identityKey);
+		const identityCandidate = identityBucket?.find(
+			(candidate) => !candidate.consumed,
+		);
+		if (identityCandidate !== undefined) {
+			identityCandidate.consumed = true;
+			return identityCandidate;
+		}
+	}
+	const digest = importProjectionDigest(columns);
+	if (digest === null) return null;
+	const bucket = candidates.byDigest.get(digest);
+	if (bucket === undefined || bucket.length === 0) return null;
+	const candidateIndex = bucket.findIndex(
+		(candidate) =>
+			!candidate.consumed &&
+			(identity === null || identityCompatible(columns, candidate.event_id)),
+	);
+	if (candidateIndex < 0) return null;
+	const [candidate] = bucket.splice(candidateIndex, 1);
+	if (candidate !== undefined) candidate.consumed = true;
+	if (bucket.length === 0) candidates.byDigest.delete(digest);
+	return candidate ?? null;
+}
+
+function takeImportProjectionCandidate(
+	candidates: Map<string, ProjectionCandidate[]>,
+	columns: ProjectionColumns,
+): ProjectionCandidate | null {
+	const digest = importProjectionDigest(columns);
+	if (digest === null) return null;
+	const bucket = candidates.get(digest);
+	if (bucket === undefined || bucket.length === 0) return null;
+	const identity = importIdentity(columns);
+	const candidateIndex = bucket.findIndex((candidate) => {
+		const candidateIdentity = importIdentity(candidate);
+		// If either side carries an explicit identity, require exact equality.
+		// This prevents two identical projections with distinct canonical ids
+		// from being falsely merged during a rotation rescan.
+		return candidateIdentity === identity;
+	});
+	if (candidateIndex < 0) return null;
+	const [candidate] = bucket.splice(candidateIndex, 1);
+	if (bucket.length === 0) candidates.delete(digest);
+	return candidate ?? null;
+}
+
+interface UnchangedImportSource {
+	filePath: string;
+	generationOffset: number;
+}
+
+/**
+ * Reserve one existing import candidate for every occurrence in a source that
+ * was unchanged this pass. Rows do not carry a source column (intentionally —
+ * the store remains rebuildable without another migration), so this bounded
+ * reservation prevents an unchanged rotated generation from lending its
+ * candidate to a byte-identical *new* occurrence in the current generation.
+ *
+ * This is needed only when a later source has a full rescan. Normal unchanged
+ * runs retain their stat-only fast path; each telemetry generation is bounded
+ * by rotation when this compatibility path reads it.
+ */
+function reserveUnchangedImportCandidates(
+	candidates: Map<string, ProjectionCandidate[]>,
+	sources: readonly UnchangedImportSource[],
+): void {
+	for (const source of sources) {
+		let content: string;
+		try {
+			content = readFileSync(source.filePath, 'utf-8');
+		} catch {
+			continue;
+		}
+		const lines = content.split('\n');
+		for (let index = 0; index < lines.length; index++) {
+			const line = lines[index] as string;
+			const built = buildImportRow(
+				line,
+				syntheticImportEventId(line, source.generationOffset + index),
+			);
+			if (built !== null)
+				takeImportProjectionCandidate(candidates, built.columns);
+		}
+	}
+}
+
+/**
+ * When import wins the race, upgrade exactly one matching import row in place
+ * when the canonical live event arrives. This preserves its row position while
+ * replacing the synthetic identity and legacy-only payload with the canonical
+ * fields. A canonical id collision is handled by deleting only the matched
+ * import row; it cannot create a duplicate primary-key row.
+ */
+function reconcileImportedRow(
+	db: ReturnType<typeof getProjectDb>,
+	columns: BuiltRow['columns'],
+): boolean {
+	const projected = liveProjection(columns);
+	// Normal live appends retain the indexed kind/time probe. Only an oversized
+	// canonical row can have caller-overridden legacy kind/time, so only that
+	// bounded quarantine path needs the marker scan across all import rows.
+	const candidates =
+		columns.quarantined === 1 &&
+		columns.quarantine_reason === 'payload_oversize'
+			? db
+					.query<ProjectionCandidate, []>(
+						`SELECT rowid, event_id, kind, occurred_at, quarantined, quarantine_reason, payload_json
+						 FROM observability_event
+						 WHERE ingested_via = 'import'
+						 ORDER BY rowid ASC`,
+					)
+					.all()
+			: db
+					.query<ProjectionCandidate, [string, string]>(
+						`SELECT rowid, event_id, kind, occurred_at, quarantined, quarantine_reason, payload_json
+						 FROM observability_event
+						 WHERE ingested_via = 'import'
+						   AND kind = ?
+						   AND occurred_at = ?
+						 ORDER BY rowid ASC`,
+					)
+					.all(columns.kind, columns.occurred_at);
+	const oversizedMarkerCandidates = candidates.filter(
+		(row) =>
+			row.quarantined === 1 &&
+			row.quarantine_reason === 'import_payload_oversize' &&
+			importIdentity(row) === columns.event_id,
+	);
+	const candidate =
+		columns.quarantined === 1 &&
+		columns.quarantine_reason === 'payload_oversize' &&
+		oversizedMarkerCandidates.length === 1
+			? oversizedMarkerCandidates[0]
+			: (candidates.find(
+					(row) =>
+						row.kind === columns.kind &&
+						row.occurred_at === columns.occurred_at &&
+						importIdentity(row) === columns.event_id,
+				) ??
+				(projected === null
+					? undefined
+					: candidates.find((row) => {
+							if (
+								row.kind !== columns.kind ||
+								row.occurred_at !== columns.occurred_at
+							)
+								return false;
+							if (importProjectionDigest(row) !== projected.digest)
+								return false;
+							return identityCompatible(row, columns.event_id);
+						})));
+	if (candidate === undefined) return false;
+	const existing = db
+		.query<{ rowid: number }, [string]>(
+			'SELECT rowid FROM observability_event WHERE event_id = ?',
+		)
+		.get(columns.event_id);
+	if (existing !== undefined && existing !== null) {
+		db.run('DELETE FROM observability_event WHERE rowid = ?', [
+			candidate.rowid,
+		]);
+		return true;
+	}
+	db.run(
+		`UPDATE observability_event SET
+			event_id = ?, kind = ?, category = ?, severity = ?, occurred_at = ?,
+			writer_sequence = ?, trace_id = ?, span_id = ?, host_session_id = ?,
+			task_id = ?, lane_id = ?, batch_id = ?, phase_id = ?,
+			council_round_id = ?, project_ref = ?, outcome_status = ?, retry_index = ?,
+			privacy_class = ?, sampled = ?, payload_json = ?,
+			relationship_violations = ?, quarantined = ?, quarantine_reason = ?,
+			ingested_via = 'live'
+		 WHERE rowid = ?`,
+		[
+			columns.event_id,
+			columns.kind,
+			columns.category,
+			columns.severity,
+			columns.occurred_at,
+			columns.writer_sequence,
+			columns.trace_id,
+			columns.span_id,
+			columns.host_session_id,
+			columns.task_id,
+			columns.lane_id,
+			columns.batch_id,
+			columns.phase_id,
+			columns.council_round_id,
+			columns.project_ref,
+			columns.outcome_status,
+			columns.retry_index,
+			columns.privacy_class,
+			columns.sampled,
+			columns.payload_json,
+			columns.relationship_violations,
+			columns.quarantined,
+			columns.quarantine_reason,
+			candidate.rowid,
+		],
+	);
+	return true;
+}
+
 function insertRow(
 	db: ReturnType<typeof getProjectDb>,
 	columns: BuiltRow['columns'],
@@ -485,7 +969,9 @@ export function appendObservabilityEventDb(
 	writer.enqueue({
 		durability: DURABILITY_CLASSES.observability_event,
 		run: (db) => {
-			insertRow(db, row.columns, 'live');
+			if (!reconcileImportedRow(db, row.columns)) {
+				insertRow(db, row.columns, 'live');
+			}
 			if (eventsSinceCheck >= RETENTION_CHECK_INTERVAL) {
 				_eventsSinceRetentionCheck.set(root, 0);
 				runRetentionIfOverCap(db);
@@ -510,22 +996,68 @@ interface ImportMarker {
 	fingerprint_size: number;
 	fingerprint_mtime_ms: number;
 	lines_seen: number;
+	imported_at: string | null;
 }
 
-function syntheticImportEventId(line: string): string {
+function syntheticImportEventId(
+	line: string,
+	occurrenceOrdinal: number,
+): string {
 	return createHash('sha256')
-		.update(`${IMPORT_ID_NAMESPACE}\0${line}`)
+		.update(`${IMPORT_ID_NAMESPACE}\0${occurrenceOrdinal}\0${line}`)
 		.digest('hex');
+}
+
+const IMPORT_PREFIX_MARKER = 'obs-import-prefix-v1:';
+
+function contentPrefix(content: string, contentLineCount: number): string {
+	if (contentLineCount <= 0) return '';
+	let lineBreaks = 0;
+	for (let index = 0; index < content.length; index++) {
+		if (content.charCodeAt(index) !== 10) continue;
+		lineBreaks += 1;
+		if (lineBreaks === contentLineCount) return content.slice(0, index + 1);
+	}
+	return content;
+}
+
+function contentPrefixMarker(
+	content: string,
+	contentLineCount: number,
+): string {
+	return `${IMPORT_PREFIX_MARKER}${createHash('sha256')
+		.update(contentPrefix(content, contentLineCount))
+		.digest('hex')}`;
+}
+
+function markerMatchesContent(
+	marker: ImportMarker,
+	content: string,
+	contentLineCount: number,
+): boolean {
+	const expected = contentPrefixMarker(content, marker.lines_seen);
+	return (
+		marker.lines_seen <= contentLineCount &&
+		(marker.imported_at === expected ||
+			Boolean(marker.imported_at?.endsWith(`|${expected}`)))
+	);
+}
+
+function importedAtMarker(content: string, contentLineCount: number): string {
+	// Preserve the column's historical timestamp prefix while appending the
+	// bounded prefix identity needed to distinguish append from rewrite.
+	return `${new Date().toISOString()}|${contentPrefixMarker(content, contentLineCount)}`;
 }
 
 /** Stub row for a line that cannot (or should not) be parsed. */
 function unparseableImportRow(
 	line: string,
 	reason: 'import_unparseable_line' | 'import_oversize_line',
+	eventId: string,
 ): { columns: BuiltRow['columns']; quarantined: boolean } {
 	return {
 		columns: {
-			event_id: syntheticImportEventId(line),
+			event_id: eventId,
 			kind: 'unknown',
 			category: null,
 			severity: null,
@@ -559,17 +1091,22 @@ function unparseableImportRow(
 /** Build an import row from one legacy JSONL line; null → skip (blank). */
 function buildImportRow(
 	line: string,
+	syntheticEventId: string,
 ): { columns: BuiltRow['columns']; quarantined: boolean } | null {
 	if (line.trim().length === 0) return null;
 	// PRR-002: quarantine pathological lines WITHOUT parsing them.
 	if (line.length > MAX_IMPORT_LINE_BYTES) {
-		return unparseableImportRow(line, 'import_oversize_line');
+		return unparseableImportRow(line, 'import_oversize_line', syntheticEventId);
 	}
 	let parsed: Record<string, unknown>;
 	try {
 		parsed = JSON.parse(line) as Record<string, unknown>;
 	} catch {
-		return unparseableImportRow(line, 'import_unparseable_line');
+		return unparseableImportRow(
+			line,
+			'import_unparseable_line',
+			syntheticEventId,
+		);
 	}
 	const workflow = _internals.extractWorkflowIds(parsed);
 	const timestamp =
@@ -579,9 +1116,24 @@ function buildImportRow(
 			? parsed.event
 			: 'unknown';
 	const payloadJson = JSON.stringify(parsed);
+	const provenanceIdentity = provenanceLegacyObservationId(parsed);
+	const boundedPayloadJson =
+		payloadJson.length > MAX_EVENT_PAYLOAD_BYTES && provenanceIdentity !== null
+			? JSON.stringify({
+					[LEGACY_OBSERVATION_ID_FIELD]: `${LEGACY_OBSERVATION_ID_PROVENANCE_PREFIX}${provenanceIdentity}`,
+				})
+			: payloadJson.length > MAX_EVENT_PAYLOAD_BYTES
+				? '{"truncated":true}'
+				: payloadJson;
+	// Import rows never adopt a legacy payload field as their primary key — not
+	// even a versioned provenance marker. The marker is only a reconciliation
+	// hint for a matching live canonical row. This makes a bare caller collision
+	// (or a manually forged marker) unable to trigger INSERT OR IGNORE data loss,
+	// while a later live write upgrades the synthetic import row in place.
+	const eventId = syntheticEventId;
 	return {
 		columns: {
-			event_id: syntheticImportEventId(line),
+			event_id: eventId,
 			kind,
 			category: null,
 			severity: null,
@@ -600,32 +1152,46 @@ function buildImportRow(
 			retry_index: null,
 			privacy_class: null,
 			sampled: null,
-			payload_json:
-				payloadJson.length > MAX_EVENT_PAYLOAD_BYTES
-					? '{"truncated":true}'
-					: payloadJson,
+			payload_json: boundedPayloadJson,
 			relationship_violations: null,
-			quarantined: timestamp === null ? 1 : 0,
-			quarantine_reason: timestamp === null ? 'import_missing_timestamp' : null,
+			quarantined:
+				timestamp === null || payloadJson.length > MAX_EVENT_PAYLOAD_BYTES
+					? 1
+					: 0,
+			quarantine_reason:
+				timestamp === null
+					? 'import_missing_timestamp'
+					: payloadJson.length > MAX_EVENT_PAYLOAD_BYTES
+						? 'import_payload_oversize'
+						: null,
 		},
-		quarantined: timestamp === null,
+		quarantined:
+			timestamp === null || payloadJson.length > MAX_EVENT_PAYLOAD_BYTES,
 	};
 }
 
 /**
  * Incrementally import the bounded legacy `telemetry.jsonl(.1)` stream into
- * the query authority. Deterministic and idempotent: per-file markers record
- * (size, mtime, lines_seen); append-only growth imports just the delta;
- * rotation/shrink (or a deleted/recreated file) triggers a full rescan whose
- * content-derived synthetic ids make every re-insert a no-op (`INSERT OR
- * IGNORE`). Runs only from the report path — never per emit, never at init.
- * Files are read oldest-generation first so rowid order tracks event order.
+ * the query authority. Per-file markers record (size, mtime, lines_seen) plus
+ * a hash of the previously consumed prefix, so a rewrite with the same line
+ * count cannot be mistaken for append-only growth. Full rescans reuse existing
+ * import rows one-to-one across rotation; synthetic ids cover new occurrences.
+ * Runs only from the report path — never per emit, never at init. Files are
+ * read oldest-generation first so rowid order tracks event order.
  */
 export function syncObservabilityImport(
 	directory: string,
 ): ObservabilityImportResult {
 	flushPendingWrites(directory);
 	const root = canonicalProjectKey(directory);
+	const db = _internals.getProjectDb(directory);
+	// Build both maps once for the complete rotated-file window. Rebuilding a
+	// live map for each source lets the same canonical row be claimed twice when
+	// identical occurrences are split between `.1` and the current file.
+	const liveCandidates = loadLiveProjectionCandidates(db);
+	const importCandidates = loadImportProjectionCandidates(db);
+	let generationOffset = 0;
+	const unchangedSources: UnchangedImportSource[] = [];
 	const result: ObservabilityImportResult = {
 		imported: 0,
 		quarantined: 0,
@@ -640,10 +1206,9 @@ export function syncObservabilityImport(
 		} catch {
 			continue;
 		}
-		const db = _internals.getProjectDb(directory);
 		const marker = db
 			.query<ImportMarker | null, [string]>(
-				'SELECT fingerprint_size, fingerprint_mtime_ms, lines_seen FROM observability_import WHERE source = ?',
+				'SELECT fingerprint_size, fingerprint_mtime_ms, lines_seen, imported_at FROM observability_import WHERE source = ?',
 			)
 			.get(fileName);
 		if (
@@ -652,6 +1217,11 @@ export function syncObservabilityImport(
 			marker.fingerprint_size === stats.size &&
 			marker.fingerprint_mtime_ms === stats.mtimeMs
 		) {
+			unchangedSources.push({
+				filePath,
+				generationOffset,
+			});
+			generationOffset += marker.lines_seen;
 			continue;
 		}
 		result.skippedUnchanged = false;
@@ -672,13 +1242,20 @@ export function syncObservabilityImport(
 				: lines.length;
 		const hasMarker = marker !== null && marker !== undefined;
 		const start =
-			hasMarker && contentLineCount >= (marker as ImportMarker).lines_seen
+			hasMarker &&
+			markerMatchesContent(marker as ImportMarker, content, contentLineCount)
 				? (marker as ImportMarker).lines_seen
 				: 0;
+		if (start === 0 && unchangedSources.length > 0) {
+			reserveUnchangedImportCandidates(importCandidates, unchangedSources);
+			unchangedSources.length = 0;
+		}
 		const rows: Array<{ columns: BuiltRow['columns']; quarantined: boolean }> =
 			[];
 		for (let i = start; i < lines.length; i++) {
-			const built = buildImportRow(lines[i] as string);
+			const line = lines[i] as string;
+			const eventId = syntheticImportEventId(line, generationOffset + i);
+			const built = buildImportRow(line, eventId);
 			if (built === null) continue;
 			rows.push(built);
 		}
@@ -686,7 +1263,24 @@ export function syncObservabilityImport(
 		const quarantined = rows.filter((r) => r.quarantined).length;
 		db.run('BEGIN IMMEDIATE');
 		try {
-			for (const row of rows) insertRow(db, row.columns, 'import');
+			for (const row of rows) {
+				// A live canonical row is authoritative. Consume one matching
+				// candidate per legacy occurrence, preserving duplicate occurrences
+				// instead of collapsing them by content alone.
+				if (takeLiveProjectionCandidate(liveCandidates, row.columns) !== null)
+					continue;
+				// On a full rescan, an unchanged legacy occurrence may have moved
+				// from the current file to `.1` (or vice versa). Reuse its existing
+				// import row by projection and explicit identity, preserving the
+				// original event id. Append-only deltas intentionally do not do this:
+				// a new identical line is a distinct occurrence.
+				if (
+					start === 0 &&
+					takeImportProjectionCandidate(importCandidates, row.columns) !== null
+				)
+					continue;
+				insertRow(db, row.columns, 'import');
+			}
 			db.run(
 				`INSERT INTO observability_import (source, fingerprint_size, fingerprint_mtime_ms, lines_seen, imported_at)
 				VALUES (?, ?, ?, ?, ?)
@@ -700,7 +1294,7 @@ export function syncObservabilityImport(
 					stats.size,
 					stats.mtimeMs,
 					contentLineCount,
-					new Date().toISOString(),
+					importedAtMarker(content, contentLineCount),
 				],
 			);
 			runRetentionIfOverCap(db);
@@ -715,6 +1309,7 @@ export function syncObservabilityImport(
 		}
 		result.imported += imported;
 		result.quarantined += quarantined;
+		generationOffset += contentLineCount;
 	}
 	return result;
 }
