@@ -172,6 +172,9 @@ if [ "$SWARM_CI_EXIT" -eq 0 ]; then
 	if [ "$DRY_RUN" = "1" ]; then
 		printf '%s\n' "publish=ready (dry-run: gh pr create deferred)" > "$EVIDENCE_DIR/publish-decision.txt"
 	else
+		# GH_TOKEN authenticates the gh CLI; git itself needs credentials
+		# configured (the checkout persists none by design).
+		gh auth setup-git
 		git push origin "$BRANCH"
 		gh pr create --title "swarm: implement issue #$ISSUE_NUMBER" --body-file "$EVIDENCE_DIR/pr-body.md" --head "$BRANCH" > "$EVIDENCE_DIR/pr-url.txt"
 		printf '%s\n' "publish=done" > "$EVIDENCE_DIR/publish-decision.txt"

@@ -70,6 +70,6 @@ jobs:
           if [ -f .swarm/pipeline-evidence/run-status.txt ]; then
             cat .swarm/pipeline-evidence/run-status.txt
           fi
-          if grep -q "OVERSIGHT_PAUSE" .swarm/pipeline-evidence/phases.txt 2>/dev/null; then
+          if grep -q "OVERSIGHT_PAUSE" .swarm/pipeline-evidence/run-status.txt 2>/dev/null; then
             echo "Full-Auto oversight paused this run (OVERSIGHT_PAUSE). The pipeline treats the pause as terminal and does not retry past the denial; the pause reason is in the step summary."
           fi
