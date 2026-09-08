@@ -8,7 +8,7 @@ import {
 	loadPlan,
 	PlanWriteVerificationError,
 	resetStartupLedgerCheck,
-	type SavePlanResult,
+	type PlanSaveDurability,
 	savePlan,
 } from '../../../src/plan/manager';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
@@ -127,7 +127,7 @@ describe('savePlan durability verification (#2531 AC5)', () => {
 		// the six escaped characters \uFFFD in acceptance (JSON escape form).
 		plan.phases[0].tasks[0].description = 'keeps literal \uFFFD data';
 		plan.phases[0].tasks[0].acceptance = 'keeps escaped \\ufffd text';
-		const result: SavePlanResult = await savePlan(directory, plan);
+		const result: PlanSaveDurability = await savePlan(directory, plan);
 		expect(result.durability).toBe('complete');
 		const loaded = await loadPlan(directory);
 		expect(loaded?.phases[0].tasks[0].description).toBe(

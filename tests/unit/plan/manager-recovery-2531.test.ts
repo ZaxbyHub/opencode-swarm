@@ -145,10 +145,48 @@ describe('loadPlan recovery ladder (#2531)', () => {
 		assertRichMetadata(loaded);
 	});
 
-	test('invalid UTF-8 bytes in plan.json never surface as mojibake authoritative state', async () => {
+	test('invalid UTF-8 bytes in plan.json recover from the ledger without mojibake', async () => {
 		directory = await freshDir('fatal-bootstrap');
 		const bootstrapPlan = makeRichPlan('Ledger bootstrap plan');
-		// Legacy ledger: plan_created without an embedded plan.
+		// Legacy ledger WITH an embedded plan: the replay rung has a
+		// recoverable authoritative plan, so loadPlan must return it (not
+		// null) and it must carry no decode-introduced U+FFFD.
+		await initLedger(
+			directory,
+			derivePlanId(bootstrapPlan),
+			computePlanLedgerHash(bootstrapPlan),
+			bootstrapPlan,
+		);
+		const json = JSON.stringify(bootstrapPlan, null, 2);
+		const marker = 'Rich metadata task';
+		const idx = json.indexOf(marker);
+		const corrupted = Buffer.concat([
+			Buffer.from(json.slice(0, idx), 'utf8'),
+			Buffer.from([0xc3, 0x28]),
+			Buffer.from(json.slice(idx + marker.length), 'utf8'),
+		]);
+		await writeFile(join(directory, '.swarm', 'plan.json'), corrupted);
+
+		const loaded = await loadPlan(directory);
+
+		// The recovered plan is the ledger's embedded plan, byte-faithful —
+		// never a lenient-decoded mojibake rendering of the corrupted file.
+		expect(loaded).not.toBeNull();
+		expect(loaded?.title).toBe('Ledger bootstrap plan');
+		const serialized = JSON.stringify([
+			loaded?.title,
+			...(loaded?.phases.flatMap((p) => p.tasks.map((t) => t.description)) ??
+				[]),
+		]);
+		expect(serialized.includes('\uFFFD')).toBe(false);
+	});
+
+	test('invalid UTF-8 plan.json with no recoverable ledger plan returns null, never mojibake', async () => {
+		directory = await freshDir('fatal-bootstrap-null');
+		const bootstrapPlan = makeRichPlan('Ledger bootstrap plan');
+		// Legacy ledger: plan_created WITHOUT an embedded plan — no rung has
+		// a recoverable plan, so loadPlan must return null rather than a
+		// lenient-decoded plan.
 		await initLedger(
 			directory,
 			derivePlanId(bootstrapPlan),
@@ -166,18 +204,7 @@ describe('loadPlan recovery ladder (#2531)', () => {
 
 		const loaded = await loadPlan(directory);
 
-		// The recovery either yields a plan whose checked strings carry no
-		// decode-introduced U+FFFD, or no plan at all — never mojibake
-		// presented as recovered authoritative state.
-		if (loaded) {
-			const serialized = JSON.stringify([
-				loaded.title,
-				...loaded.phases.flatMap((p) => p.tasks.map((t) => t.description)),
-			]);
-			expect(serialized.includes('\uFFFD')).toBe(false);
-		} else {
-			expect(loaded).toBeNull();
-		}
+		expect(loaded).toBeNull();
 	});
 
 	test('degraded latest snapshot falls back to recoverable older history', async () => {

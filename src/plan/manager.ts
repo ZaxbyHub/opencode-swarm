@@ -177,6 +177,7 @@ export const _internals: {
 	ledgerExists: typeof ledgerExists;
 	replayFromLedger: typeof replayFromLedger;
 	loadLastApprovedPlan: typeof loadLastApprovedPlan;
+	readLedgerEventsWithIntegrity: typeof readLedgerEventsWithIntegrity;
 	regeneratePlanMarkdown: typeof regeneratePlanMarkdown;
 	isGitRepo: typeof isGitRepo;
 	isEpicModeActiveForProject: typeof isEpicModeActiveForProject;
@@ -193,6 +194,7 @@ export const _internals: {
 	ledgerExists,
 	replayFromLedger,
 	loadLastApprovedPlan,
+	readLedgerEventsWithIntegrity,
 	regeneratePlanMarkdown,
 	isGitRepo,
 	isEpicModeActiveForProject,
@@ -1008,7 +1010,16 @@ export async function loadPlan(
 					// no verified anchor identity, and the conservative skip
 					// below keeps untrusted lenient (post-poison) events out of
 					// recovery decisions.
-					const catchIntegrity = await readLedgerEventsWithIntegrity(directory);
+					// Fail-open residual (#2531 feedback PRR-011): without
+					// failClosedOnReadError, a transiently-unreadable ledger
+					// reads as empty and the replay below is skipped (the
+					// catch path then degrades to the markdown-migration
+					// rung). Opting in here would turn a transient EIO into a
+					// thrown error escaping loadPlan's recovery catch, so the
+					// availability-only fallback is the accepted residual —
+					// see readLedgerEventsWithIntegrity's docblock.
+					const catchIntegrity =
+						await _internals.readLedgerEventsWithIntegrity(directory);
 					const ledgerEventsForCatch = catchIntegrity.events;
 					const catchFirstEvent =
 						ledgerEventsForCatch.length > 0 ? ledgerEventsForCatch[0] : null;
@@ -1188,7 +1199,13 @@ export async function loadPlan(
 				// prefix (readLedgerEventsWithIntegrity), so approved-snapshot
 				// recovery can never be anchored (or satisfied) by untrusted
 				// post-poison events.
-				const anchorIntegrity = await readLedgerEventsWithIntegrity(directory);
+				// Fail-open residual (#2531 feedback PRR-011): an unreadable
+				// ledger reads as empty and the empty-events guard below
+				// refuses the rung (returns null), so the net effect is
+				// availability-only; see readLedgerEventsWithIntegrity's
+				// docblock before changing.
+				const anchorIntegrity =
+					await _internals.readLedgerEventsWithIntegrity(directory);
 				const anchorEvents = anchorIntegrity.events;
 				// Empty-events guard: ledgerExists() returned true above, but
 				// readLedgerEvents() can also return [] for an unreadable/corrupt
@@ -1375,7 +1392,7 @@ export async function withPlanLifecycleLock<T>(
  * (ledger + plan.json), and the failure is disclosed here and via the
  * `plan_md_write_failed` telemetry event instead of being silently swallowed.
  */
-export interface SavePlanResult {
+export interface PlanSaveDurability {
 	durability: 'complete' | 'incomplete';
 	degraded_surfaces: string[];
 	md_write_error?: string;
@@ -1392,6 +1409,16 @@ export class PlanWriteVerificationError extends Error {
 		this.name = 'PlanWriteVerificationError';
 	}
 }
+
+/**
+ * Extra bounded read-back window beyond readSwarmFileAsync's own AV retry
+ * budget (#2531 feedback): a Windows AV/indexer hold that starts right after
+ * the atomic rename can outlast that budget, and declaring a save unverified
+ * because of an environmental lock is a false failure. Retries cover the
+ * typical hold; a content mismatch or decode error below is never retried.
+ */
+const PLAN_WRITE_VERIFY_READ_RETRIES = 4;
+const PLAN_WRITE_VERIFY_READ_BACKOFF_MS = 200;
 
 /**
  * #2531 (AC5): read the freshly persisted canonical plan.json projection back
@@ -1419,6 +1446,27 @@ async function verifyWrittenPlanJson(
 		throw new PlanWriteVerificationError(
 			`PLAN_WRITE_VERIFICATION_FAILED: plan.json read-back could not be read (${error instanceof Error ? error.message : String(error)})`,
 		);
+	}
+	for (
+		let attempt = 0;
+		content === null && attempt < PLAN_WRITE_VERIFY_READ_RETRIES;
+		attempt++
+	) {
+		await new Promise((resolve) =>
+			setTimeout(resolve, PLAN_WRITE_VERIFY_READ_BACKOFF_MS * (attempt + 1)),
+		);
+		try {
+			content = await readSwarmFileAsync(
+				directory,
+				'plan.json',
+				undefined,
+				(filePath) => _internals.readPlanFileUtf8(filePath),
+				false,
+			);
+		} catch {
+			// Mid-retry transient read error: keep retrying until the window
+			// is exhausted, then report the verification failure below.
+		}
 	}
 	if (content === null) {
 		throw new PlanWriteVerificationError(
@@ -1501,7 +1549,7 @@ export async function savePlan(
 		 */
 		preCommitCheck?: () => void;
 	},
-): Promise<SavePlanResult> {
+): Promise<PlanSaveDurability> {
 	// Fail-fast: reject blank or whitespace-only directory inputs before any I/O
 	if (
 		directory === null ||
@@ -1672,7 +1720,8 @@ export async function savePlan(
 		}
 
 		try {
-			const integrity = await readLedgerEventsWithIntegrity(directory);
+			const integrity =
+				await _internals.readLedgerEventsWithIntegrity(directory);
 			if (integrity.truncated) {
 				await replaceTruncatedLedgerWithRecoveryRoot(directory, validated, {
 					seq: expected.expectedSeq,

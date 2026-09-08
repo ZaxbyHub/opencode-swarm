@@ -139,4 +139,71 @@ describe('approved-snapshot reads are scoped to the verified prefix (#2531 AC7)'
 		const gateApproved = await loadLastPlanCriticApprovedSnapshot(healthy);
 		expect(gateApproved?.plan.title).toBe('Approved on verified prefix');
 	});
+
+	test('a schema-invalid newest snapshot is skipped; an older valid snapshot is served', async () => {
+		// #2531 feedback: the critic-approved-snapshot rung must schema-validate
+		// the embedded plan exactly like the sibling recovery rungs. A newest
+		// snapshot whose plan is schema-invalid is skipped (with a warning) and
+		// the scan continues to older history instead of serving an
+		// unvalidated plan.
+		await seedDonor();
+		const ledgerPath = join(donor, '.swarm', 'plan-ledger.jsonl');
+		const lines = readFileSync(ledgerPath, 'utf8')
+			.split('\n')
+			.filter((line) => line.trim() !== '');
+		const newest = JSON.parse(lines[lines.length - 1]) as {
+			seq: number;
+			payload: { plan: unknown; payload_hash: string };
+		};
+		const degraded = {
+			...newest,
+			seq: newest.seq + 1,
+			payload: {
+				...newest.payload,
+				// Schema-invalid but JSON-valid: wrong schema_version.
+				plan: { ...(newest.payload.plan as object), schema_version: '9.9.9' },
+			},
+		};
+		await writeFile(
+			join(healthy, '.swarm', 'plan-ledger.jsonl'),
+			`${lines.join('\n')}\n${JSON.stringify(degraded)}\n`,
+			'utf8',
+		);
+
+		const approved = await loadLastApprovedPlan(healthy);
+		expect(approved?.plan.title).toBe('Approved on verified prefix');
+		const gateApproved = await loadLastPlanCriticApprovedSnapshot(healthy);
+		expect(gateApproved?.plan.title).toBe('Approved on verified prefix');
+	});
+
+	test('a schema-invalid snapshot with no valid fallback is NOT served', async () => {
+		await seedDonor();
+		const ledgerPath = join(donor, '.swarm', 'plan-ledger.jsonl');
+		const lines = readFileSync(ledgerPath, 'utf8')
+			.split('\n')
+			.filter((line) => line.trim() !== '');
+		const newest = JSON.parse(lines[lines.length - 1]) as {
+			seq: number;
+			payload: { plan: unknown };
+		};
+		const degraded = {
+			...newest,
+			seq: newest.seq + 1,
+			payload: {
+				...newest.payload,
+				plan: { ...(newest.payload.plan as object), schema_version: '9.9.9' },
+			},
+		};
+		// Replace the valid snapshot with only the degraded one.
+		await writeFile(
+			join(healthy, '.swarm', 'plan-ledger.jsonl'),
+			`${lines[0]}\n${JSON.stringify(degraded)}\n`,
+			'utf8',
+		);
+
+		await expect(loadLastApprovedPlan(healthy)).resolves.toBeNull();
+		await expect(
+			loadLastPlanCriticApprovedSnapshot(healthy),
+		).resolves.toBeNull();
+	});
 });

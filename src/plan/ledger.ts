@@ -2361,6 +2361,16 @@ export interface LedgerIntegrityResult {
  * Read ledger events with integrity checking.
  * Stops at the first malformed/unparseable line and returns the remainder for quarantine.
  *
+ * Residual fail-open callers (accepted, do not silently grow this list):
+ * the terminal-recovery `replayFromLedgerWithStatus` trio (`close-terminal.ts`,
+ * `task-terminal.ts`, `task-repair.ts` — see `readLedgerEventsForEpoch`'s
+ * docblock for that caller analysis) and the two loadPlan recovery identity
+ * anchors in `manager.ts` (validation-failure catch path and Step 3). In the
+ * manager.ts sites a fail-closed throw would escape the surrounding recovery
+ * catch/try as a hard loadPlan failure, so the default fail-open behavior is
+ * the accepted residual: an unreadable ledger degrades the rung
+ * (replay skipped / rung refused) — availability-only, never integrity loss.
+ *
  * @param directory - The working directory
  * @returns LedgerIntegrityResult with events, truncated flag, and bad suffix
  */
@@ -2643,6 +2653,20 @@ function findLastApprovedSnapshot(
 			continue;
 		}
 
+		// #2531 feedback: schema-validate the embedded plan exactly like the
+		// sibling recovery rungs (in-ledger snapshot scan, plan_created
+		// bootstrap, plan_epoch adoption). A schema-invalid critic_approved
+		// snapshot is SKIPPED — the scan keeps looking at older history —
+		// so an unvalidated plan can never surface through
+		// loadLastApprovedPlan / loadLastPlanCriticApprovedSnapshot.
+		const parsedPlan = PlanSchema.safeParse(payload.plan);
+		if (!parsedPlan.success) {
+			criticalWarn(
+				`[ledger] Skipping schema-invalid critic_approved snapshot at seq ${event.seq}: ${parsedPlan.error.issues[0]?.message ?? 'unknown schema error'}`,
+			);
+			continue;
+		}
+
 		// Belt-and-suspenders: the embedded plan's identity must also match
 		// the event's plan_id. Guards against a snapshot whose payload was
 		// mutated on disk out-of-band from the event metadata.
@@ -2660,7 +2684,7 @@ function findLastApprovedSnapshot(
 		}
 
 		return {
-			plan: payload.plan,
+			plan: parsedPlan.data,
 			seq: event.seq,
 			timestamp: event.timestamp,
 			approval: payload.approval,

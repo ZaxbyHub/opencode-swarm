@@ -302,10 +302,11 @@ Approved-snapshot reads (`loadLastApprovedPlan`,
 `loadLastPlanCriticApprovedSnapshot`) are scoped to the verified prefix, so
 `get_approved_plan` and the delegation gate can never serve a
 `critic_approved` snapshot from behind a poison line that replay quarantines.
-On a truncated ledger the plan-critic gate therefore fails closed; recovery is
-to review the quarantined suffix (`quarantineLedgerSuffix` archives it
-non-destructively) and re-run the plan critic, which appends a fresh
-`critic_approved` snapshot on the healthy tail.
+A snapshot inside the verified prefix is still served even when the ledger is
+truncated; the gate only fails closed when no valid approval exists in the
+prefix. Recovery is to review the quarantined suffix (`quarantineLedgerSuffix`
+archives it non-destructively) and re-run the plan critic, which appends a
+fresh `critic_approved` snapshot on the healthy tail.
 
 Replay validates each candidate snapshot payload with `PlanSchema.safeParse`
 (same as the `plan_created` bootstrap). A JSON-valid but schema-invalid
@@ -323,9 +324,11 @@ projection through the shared retry-aware reader and throws
 `PlanWriteVerificationError` when the write cannot be verified — a save never
 claims successful readable state falsely. `plan.md` remains an advisory
 projection (#444 item 2): a write failure does not fail the save, but it is
-disclosed in the resolved `SavePlanResult`
+disclosed in the resolved `PlanSaveDurability`
 (`{ durability: "incomplete", degraded_surfaces: ["plan.md"], md_write_error }`)
-and via the `plan_md_write_failed` telemetry event.
+and via the `plan_md_write_failed` telemetry event. The disclosure is wired to
+agent-facing surfaces: `save_plan` and `phase_complete` append an
+incomplete-durability warning to their response `warnings`.
 
 ### Import
 

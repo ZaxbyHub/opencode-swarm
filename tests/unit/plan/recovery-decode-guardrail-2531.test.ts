@@ -34,15 +34,28 @@ function listFilesRecursive(dir: string): string[] {
 }
 
 describe('#2531 recovery/decode defect-class guardrail', () => {
-	test('no lenient utf8 decode of plan.json remains under src/plan/', () => {
+	test('no lenient utf8 decode remains under src/plan/ outside the explicit allowlist', () => {
+		// Hardened (#2531 feedback PRR-009): match ANY same-line lenient
+		// `readFileSync(<firstArg>, 'utf8')` regardless of variable name or
+		// quote style, and require every hit to be one of the two pre-existing,
+		// internally-consistent lenient readers (computeCurrentPlanHash's hash
+		// input and the quarantine-salvage byte compare). A NEW lenient plan
+		// decode with a different variable name fails this test loudly.
+		const ALLOWED_FIRST_ARGS = new Set(['planPath', 'existingPath']);
 		const offenders: string[] = [];
+		const lenientCall =
+			/readFileSync\(\s*([A-Za-z_$][\w$.]*)\s*,\s*['"]utf8['"]\s*\)/g;
 		for (const file of listFilesRecursive(PLAN_SRC)) {
-			const lines = readFileSync(file, 'utf8').split('\n');
-			lines.forEach((line, index) => {
-				if (/readFileSync\([^)]*planJsonPath[^)]*,\s*'utf8'\s*\)/.test(line)) {
-					offenders.push(`${file}:${index + 1}: ${line.trim()}`);
+			const source = readFileSync(file, 'utf8');
+			for (const match of source.matchAll(lenientCall)) {
+				const firstArg = match[1];
+				if (!ALLOWED_FIRST_ARGS.has(firstArg)) {
+					const lineNo = source.slice(0, match.index).split('\n').length;
+					offenders.push(
+						`${file}:${lineNo}: lenient utf8 readFileSync on "${firstArg}"`,
+					);
 				}
-			});
+			}
 		}
 		expect(offenders).toEqual([]);
 	});
@@ -61,6 +74,14 @@ describe('#2531 recovery/decode defect-class guardrail', () => {
 			),
 			ledgerSource.indexOf('function findLastApprovedSnapshot'),
 		);
+		// Slice-marker integrity (#2531 feedback PRR-009): a renamed marker
+		// makes indexOf return -1 and silently widens the slice window, so a
+		// widened window must fail this test instead of passing vacuously.
+		expect(ledgerSource.indexOf('export async function loadLastApprovedPlan')).toBeGreaterThanOrEqual(0);
+		expect(
+			ledgerSource.indexOf('export async function loadLastPlanCriticApprovedSnapshot'),
+		).toBeGreaterThan(0);
+		expect(ledgerSource.indexOf('function findLastApprovedSnapshot')).toBeGreaterThan(0);
 		expect(loadLastApproved.includes('readLedgerEventsWithIntegrity')).toBe(
 			true,
 		);

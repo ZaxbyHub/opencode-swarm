@@ -12,7 +12,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -108,6 +108,34 @@ describe('get_approved_plan tool', () => {
 	});
 
 	test('returns error when no approved snapshot exists', async () => {
+		const result = await executeGetApprovedPlan({}, dir);
+		expect(result.success).toBe(false);
+		expect(result.reason).toBe('no_approved_snapshot');
+		expect(result.approved_plan).toBeUndefined();
+	});
+
+	test('a critic_approved snapshot behind a poison line is not served through the tool surface', async () => {
+		// #2531 feedback: prove the fail-closed behavior through the PUBLIC
+		// get_approved_plan surface, not just the loadLastApprovedPlan loader.
+		// The poison line is appended BEFORE the approval, so the approval
+		// event lands behind it (quarantined suffix) and the tool must report
+		// no_approved_snapshot instead of resurrecting it.
+		const ledgerPath = join(dir, '.swarm', 'plan-ledger.jsonl');
+		appendFileSync(
+			ledgerPath,
+			'{"poison": true, "not": "a ledger event"}\n',
+			'utf8',
+		);
+		await takeSnapshotEvent(dir, plan, {
+			source: 'critic_approved',
+			approvalMetadata: {
+				phase: 1,
+				verdict: 'APPROVED',
+				summary: 'post-poison approval must stay unreachable',
+				source: 'plan_critic_gate',
+			},
+		});
+
 		const result = await executeGetApprovedPlan({}, dir);
 		expect(result.success).toBe(false);
 		expect(result.reason).toBe('no_approved_snapshot');

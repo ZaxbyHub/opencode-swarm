@@ -1801,7 +1801,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/plan/ledger-sqlite.ts — registry-backed SQLite event/state/import mutations; every transaction uses synchronous=FULL through the project DB durability policy',
 		],
 		readerCitations: [
-			'src/plan/ledger.ts:998 readLedgerEvents / :2367 readLedgerEventsWithIntegrity — authority-mode coordinator; JSONL full-file replay in file-shadow mode, ordered SQLite rows after cutover',
+			'src/plan/ledger.ts:998 readLedgerEvents / :2377 readLedgerEventsWithIntegrity — authority-mode coordinator; JSONL full-file replay in file-shadow mode, ordered SQLite rows after cutover',
 			'src/plan/ledger.ts:984 getLatestLedgerSeq / loadLastApprovedPlan — coordinated authority reads',
 		],
 		schemaVersion: 'versioned plan events (docs/plan-durability.md)',
@@ -1844,11 +1844,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/commands/reset.ts',
 		],
 		writerCitations: [
-			'src/plan/manager.ts:1715 savePlan — plan.json temp+rename; :1761 plan.md; :1901 rebuildPlan; :2090 closePlanTerminalState',
+			'src/plan/manager.ts:1721 savePlan — plan.json temp+rename; :1761 plan.md; :1901 rebuildPlan; :2090 closePlanTerminalState',
 			'src/commands/rollback.ts — lifecycle-locked checkpoint projection publication with prior-byte compensation after authoritative re-root',
 			'src/commands/reset.ts — lifecycle-locked critical projection deletion with prior-byte compensation when authority cleanup aborts',
 		],
-		readerCitations: ['src/plan/manager.ts:656 loadPlan — full-file with auto-heal + ledger-replay fallback, async; :366 loadPlanJsonOnly'],
+		readerCitations: ['src/plan/manager.ts:658 loadPlan — full-file with auto-heal + ledger-replay fallback, async; :366 loadPlanJsonOnly'],
 		schemaVersion: 'plan schema (projections of the ledger)',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'content',
