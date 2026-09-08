@@ -73,6 +73,24 @@ export async function qualityBudget(
 	directory: string,
 	abortSignal?: AbortSignal,
 ): Promise<QualityBudgetResult> {
+	return computeQualityBudget(input, directory, abortSignal, {
+		persistEvidence: true,
+	});
+}
+
+/**
+ * Persistence-free compute core of the quality budget check (#2499).
+ *
+ * Never persists evidence unless `persistEvidence: true` is passed, so
+ * read-only surfaces (the MCP verification server) can run the exact same
+ * analysis without writing `.swarm/` state.
+ */
+export async function computeQualityBudget(
+	input: QualityBudgetInput,
+	directory: string,
+	abortSignal?: AbortSignal,
+	options?: { persistEvidence?: boolean },
+): Promise<QualityBudgetResult> {
 	abortSignal?.throwIfAborted();
 	// Validate input
 	const validation = validateInput(input);
@@ -141,41 +159,44 @@ export async function qualityBudget(
 	// Determine verdict: fail if any errors, pass otherwise
 	const verdict: 'pass' | 'fail' = errorsCount > 0 ? 'fail' : 'pass';
 
-	// Save evidence
+	// Persist evidence only for the evidence-contract callers (the registered
+	// tool wrapper passes persistEvidence: true; read-only surfaces omit it).
 	abortSignal?.throwIfAborted();
-	await saveEvidence(
-		directory,
-		'quality_budget',
-		{
-			task_id: 'quality_budget',
-			type: 'quality_budget',
-			timestamp: new Date().toISOString(),
-			agent: 'quality_budget',
-			verdict,
-			summary: `Quality budget check: ${metrics.files_analyzed.length} files analyzed, ${metrics.violations.length} violation(s) found (${errorsCount} errors, ${warningsCount} warnings)`,
-			metrics: {
-				complexity_delta: metrics.complexity_delta,
-				public_api_delta: metrics.public_api_delta,
-				duplication_ratio: metrics.duplication_ratio,
-				test_to_code_ratio: metrics.test_to_code_ratio,
-				base_resolved: metrics.base_resolved,
+	if (options?.persistEvidence === true) {
+		await saveEvidence(
+			directory,
+			'quality_budget',
+			{
+				task_id: 'quality_budget',
+				type: 'quality_budget',
+				timestamp: new Date().toISOString(),
+				agent: 'quality_budget',
+				verdict,
+				summary: `Quality budget check: ${metrics.files_analyzed.length} files analyzed, ${metrics.violations.length} violation(s) found (${errorsCount} errors, ${warningsCount} warnings)`,
+				metrics: {
+					complexity_delta: metrics.complexity_delta,
+					public_api_delta: metrics.public_api_delta,
+					duplication_ratio: metrics.duplication_ratio,
+					test_to_code_ratio: metrics.test_to_code_ratio,
+					base_resolved: metrics.base_resolved,
+				},
+				thresholds: {
+					max_complexity_delta: thresholds.max_complexity_delta,
+					max_public_api_delta: thresholds.max_public_api_delta,
+					max_duplication_ratio: thresholds.max_duplication_ratio,
+					min_test_to_code_ratio: thresholds.min_test_to_code_ratio,
+				},
+				violations: metrics.violations.map((v) => ({
+					type: v.type,
+					message: v.message,
+					severity: v.severity,
+					files: v.files,
+				})),
+				files_analyzed: metrics.files_analyzed,
 			},
-			thresholds: {
-				max_complexity_delta: thresholds.max_complexity_delta,
-				max_public_api_delta: thresholds.max_public_api_delta,
-				max_duplication_ratio: thresholds.max_duplication_ratio,
-				min_test_to_code_ratio: thresholds.min_test_to_code_ratio,
-			},
-			violations: metrics.violations.map((v) => ({
-				type: v.type,
-				message: v.message,
-				severity: v.severity,
-				files: v.files,
-			})),
-			files_analyzed: metrics.files_analyzed,
-		},
-		abortSignal,
-	);
+			abortSignal,
+		);
+	}
 	abortSignal?.throwIfAborted();
 
 	return {
