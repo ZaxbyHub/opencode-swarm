@@ -1,0 +1,20 @@
+# Ledger-first plan recovery, fatal bootstrap decode, snapshot validation, and save verification (#2531)
+
+## What changed
+
+- **`loadPlan` recovery ladder is now uniform across every projection-failure mode.** When plan.json is missing, undecodable, or schema-invalid, recovery always climbs the same rungs: integrity-checked ledger replay → critic-approved snapshot (anchored to the verified prefix's plan identity, with a heal snapshot so the next process doesn't re-enter recovery) → legacy plan.md migration as the last resort. A replay error no longer escapes `loadPlan` on either path. Previously, a schema-invalid plan.json jumped straight to the lossy markdown migration, silently discarding an intact ledger's approved plan (acceptance criteria, file lists, fr_refs, evidence paths, LOCKED execution profile).
+- **Approved-snapshot reads are scoped to the verified prefix.** `loadLastApprovedPlan` and `loadLastPlanCriticApprovedSnapshot` use `readLedgerEventsWithIntegrity`, so `get_approved_plan` and the delegation gate's plan-critic approval lookup can never serve a `critic_approved` snapshot from behind a poison line that replay quarantines. On a truncated ledger the gate fails closed; recovery is to review the archived quarantine and re-run the plan critic.
+- **Replay validates snapshot payloads.** A JSON-valid but schema-invalid (degraded) latest snapshot is skipped and recoverable older snapshot history is used instead of crashing recovery; the legacy plan.json bootstrap in `reconstructPlanFromEvents` and `initLedger`'s hash fallback decode fatally (`TextDecoder` fatal), so invalid UTF-8 bytes can never surface as silent U+FFFD mojibake presented as authoritative state. A valid literal U+FFFD in plan.json remains ordinary plan data.
+- **`savePlan` verifies its written state.** The freshly persisted plan.json projection is read back through the retry-aware reader and must round-trip to exactly the projected plan; a save that cannot verify its write throws `PlanWriteVerificationError` instead of claiming success. The advisory plan.md projection stays non-fatal but is now disclosed in the returned `SavePlanResult` (`durability: 'incomplete'`, `degraded_surfaces`, `md_write_error`) alongside the existing `plan_md_write_failed` telemetry.
+- **Markdown migration records durable provenance.** Both migration paths persist `migration_status: 'migrated'` AND append a `plan_rebuilt` ledger event with `source: 'load_plan_migration_from_md'` (mirroring the rebuildPlan/importCheckpoint precedents); the ledger stays append-only.
+- **Recovery rungs route through `_internals` DI seams** (`ledgerExists`, `replayFromLedger`, `loadLastApprovedPlan`), so process-wide module mocks installed by unrelated test files cannot distort recovery decisions (invariant 7 hardening).
+- `docs/plan-durability.md` documents the ladder, the verified-prefix read scope, save verification, and truncated-ledger behavior; citation registries re-anchored.
+
+## Why
+
+Issue #2531 (Workstream D9): at the audit revision, a missing or unreadable plan projection took the lossy Markdown migration before an intact ledger (AUDIT-002, HIGH), and valid literal U+FFFD text triggered the same path (AUDIT-003, MEDIUM). Five residues were reproduced at main HEAD 0b5809745 by frozen acceptance checks (7 discriminating RED, 1 preserving GREEN) and are all GREEN at this change; a revert probe confirmed each discriminator fails when its fix line is removed.
+
+## Notes
+
+- New tests: `tests/unit/plan/manager-recovery-2531.test.ts`, `save-verification-2531.test.ts`, `ledger-approved-prefix-2531.test.ts`, `md-migration-provenance-2531.test.ts`, and the `recovery-decode-guardrail-2531.test.ts` source-scan ratchet (no lenient plan.json decode under `src/plan/`; loaders prefix-scoped).
+- No schema/authority changes; the ledger stays append-only and SQLite coordination is untouched. #2484's SQLite cutover can now consume this repaired replay/recovery contract.
