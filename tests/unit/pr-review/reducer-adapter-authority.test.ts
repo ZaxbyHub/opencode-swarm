@@ -106,7 +106,6 @@ describe('adapter applies returned state and effects', () => {
 			type: 'base_admission_requested',
 			batchId: 'batch-wired',
 			lanes: [{ laneId: 'lane-1', workflowLane: 'tests' }],
-			depthTier: 'L',
 			maxBatches: 128,
 			validatedAt: '2026-09-07T00:00:00.000Z',
 		});

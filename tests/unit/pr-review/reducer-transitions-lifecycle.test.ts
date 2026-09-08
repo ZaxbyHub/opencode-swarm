@@ -17,7 +17,6 @@ describe('reducer: base admission lifecycle', () => {
 			type: 'base_admission_requested',
 			batchId: 'batch-1',
 			lanes: [{ ...LANE }],
-			depthTier: 'M',
 			maxBatches: 128,
 			validatedAt: '2026-09-01T00:00:00.000Z',
 		});
@@ -40,7 +39,6 @@ describe('reducer: base admission lifecycle', () => {
 			type: 'base_admission_requested',
 			batchId: 'batch-129',
 			lanes: [{ ...LANE }],
-			depthTier: 'M',
 			maxBatches: 128,
 			validatedAt: '2026-09-01T00:00:00.000Z',
 		});
