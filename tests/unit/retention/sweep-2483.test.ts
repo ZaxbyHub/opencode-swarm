@@ -136,6 +136,7 @@ describe('retention sweep families: prune old, keep recent (issue #2483)', () =>
 
 	it.each([
 		['pr-feedback-events', 'pr-feedback-events', 'pr-feedback-events'],
+		['pr-workflow-gates', 'pr-workflow-gates', 'pr-workflow-gates'],
 		[
 			'reentry-shadows',
 			'pr-review/reentry-authorizations',

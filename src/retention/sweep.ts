@@ -102,6 +102,7 @@ function familiesFor(swarmRoot: string, now: number): Family[] {
 	void now;
 	return [
 		f('pr-feedback-events', 'pr-feedback-events', { maxAgeDays: 30 }),
+		f('pr-workflow-gates', 'pr-workflow-gates', { maxAgeDays: 30 }),
 		f(
 			'pr-review-reentry-shadows',
 			path.join('pr-review', 'reentry-authorizations'),
