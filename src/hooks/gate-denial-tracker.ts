@@ -57,7 +57,10 @@ import { createActionIdentity } from '../failures/action-identity.js';
 import { ensureAgentSession, getAgentSession } from '../state';
 import { telemetry } from '../telemetry.js';
 import { pushAdvisory } from '../utils/advisory-queue';
-import { normalizeToolNameLowerCase } from './normalize-tool-name';
+import {
+	isTaskToolId,
+	normalizeToolNameLowerCase,
+} from './normalize-tool-name';
 
 /** Default streak length at which the "do not retry" guidance is appended. */
 export const DEFAULT_GATE_DENIAL_WARN_THRESHOLD = 3;
@@ -190,7 +193,7 @@ function boundedPathAlias(value: unknown): PathAliasProjection | undefined {
 function gateActionArgs(tool: string, args: unknown): Record<string, unknown> {
 	const projection: Record<string, unknown> = {};
 	const normalizedTool = normalizeToolNameLowerCase(tool ?? '');
-	if (normalizedTool === 'task') {
+	if (isTaskToolId(tool)) {
 		const discriminator = gateDenialDiscriminator(tool, args);
 		if (discriminator) projection.subagent_type = discriminator;
 	}
@@ -305,7 +308,7 @@ const MAX_DISCRIMINATOR_LENGTH = 64;
  */
 export function gateDenialDiscriminator(tool: string, args: unknown): string {
 	try {
-		if (normalizeToolNameLowerCase(tool ?? '') !== 'task') return '';
+		if (!isTaskToolId(tool ?? '')) return '';
 		const subagentType = readOwnDataValue(args, 'subagent_type');
 		if (typeof subagentType !== 'string' || subagentType.length === 0) {
 			return '';

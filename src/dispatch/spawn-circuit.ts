@@ -21,7 +21,7 @@
  */
 
 import { createActionIdentity } from '../failures/action-identity.js';
-import { normalizeToolNameLowerCase } from '../hooks/normalize-tool-name.js';
+import { isTaskToolId } from '../hooks/normalize-tool-name.js';
 import { getAgentSession } from '../state.js';
 
 /** Bounded memory: same discipline as MAX_TRACKED_ACTION_CIRCUITS. */
@@ -269,7 +269,7 @@ export function getSpawnCircuitEntry(input: {
 }
 
 export function spawnCircuitIsTaskTool(tool: string): boolean {
-	return normalizeToolNameLowerCase(tool) === 'task';
+	return isTaskToolId(tool);
 }
 
 /** Test seam: reset all circuits + armed identities between test files. */

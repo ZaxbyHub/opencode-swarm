@@ -21,6 +21,8 @@
 
 import {
 	buildDirectiveComplianceBlock,
+	DIRECTIVE_COMPLIANCE_DEFAULT_CHAR_BUDGET,
+	DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP,
 	parseDirectivesToVerifyBlock,
 } from '../agents/reviewer-directive-compliance.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
@@ -243,9 +245,17 @@ export async function injectDelegateDirectivesBefore(
 		// Reviewer delegations also receive the per-phase "directives to verify"
 		// block so the reviewer can emit a DIRECTIVE_COMPLIANCE verdict per ID
 		// (Change 2, Task 2.1). Sourced from this phase's retrieved events.
+		// Issue #2628: the block obeys the same budget-clamp pattern as the
+		// delegate block (configured budget clamped to the hard cap).
 		if (stripKnownSwarmPrefix(targetAgent).toLowerCase() === 'reviewer') {
 			const toVerify = await readPhaseDirectivesToVerify(directory, phaseLabel);
-			const complianceBlock = buildDirectiveComplianceBlock(toVerify);
+			const complianceBlock = buildDirectiveComplianceBlock(
+				toVerify,
+				Math.min(
+					config.inject_char_budget ?? DIRECTIVE_COMPLIANCE_DEFAULT_CHAR_BUDGET,
+					DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP,
+				),
+			);
 			if (complianceBlock) prefixParts.push(complianceBlock);
 		}
 

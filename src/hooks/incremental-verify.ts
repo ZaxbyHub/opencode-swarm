@@ -1,6 +1,8 @@
 /**
  * Incremental verification hook — runs a typecheck after each coder Task delegation.
- * Fires in tool.execute.after when input.tool === 'Task' and the delegated agent was 'coder'.
+ * Fires in tool.execute.after when the tool id is the host's task tool (lowercase
+ * `task`, legacy `Task`, or a colon-namespaced spelling — `isTaskToolId`) and the
+ * delegated agent was 'coder'.
  * Advisory only — never blocks. 30-second hard timeout. Uses directory from context.
  */
 
@@ -9,6 +11,7 @@ import * as path from 'node:path';
 import { resolveLocalNodeTool } from '../build/command-resolution';
 import type { IncrementalVerifyConfig } from '../config/schema';
 import { getStoredInputArgs } from './guardrails/stored-input-args';
+import { isTaskToolId } from './normalize-tool-name';
 import { spawnAsync } from './spawn-helper';
 export type { IncrementalVerifyConfig };
 export { detectTypecheckCommand };
@@ -168,7 +171,7 @@ export function createIncrementalVerifyHook(
 	return {
 		toolAfter: async (input, output) => {
 			if (!config.enabled) return;
-			if (input.tool !== 'Task') return;
+			if (!isTaskToolId(input.tool)) return;
 
 			// (#1849) Identify which agent was delegated to. The SDK
 			// tool.execute.after input has NO args (and the after output has no

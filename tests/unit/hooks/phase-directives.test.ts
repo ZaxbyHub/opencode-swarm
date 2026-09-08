@@ -259,7 +259,15 @@ describe('phase-directives', () => {
 			expect(directives).toHaveLength(2);
 		});
 
-		it('preserves the same entry retrieved under distinct traces', async () => {
+		it('returns ONE obligation per entry when the same entry is retrieved under distinct traces (#2628)', async () => {
+			// #2628 intent: the reviewer's obligation unit is the directive
+			// (entry), not the (trace_id, entry_id) pair. Pair multiplicity
+			// re-created one verification per historical exposure and grew the
+			// injected compliance block O(entries x trace_ids) until reviewer
+			// sessions could not be created. The retained membership is
+			// deterministic: most recently committed, ties by greatest trace_id
+			// (this seed commits trace-a before trace-b, so trace-b wins either
+			// way).
 			const id = 'directive-shared-across-traces';
 			await appendKnowledge(
 				resolveSwarmKnowledgePath(dir),
@@ -270,12 +278,11 @@ describe('phase-directives', () => {
 
 			const directives = await readPhaseDirectivesToVerify(dir, 'Phase 1');
 
-			expect(
-				directives.map(({ trace_id, entry_id }) => ({ trace_id, entry_id })),
-			).toEqual([
-				{ trace_id: 'trace-a', entry_id: id },
-				{ trace_id: 'trace-b', entry_id: id },
-			]);
+			expect(directives).toHaveLength(1);
+			expect(directives[0]).toMatchObject({
+				trace_id: 'trace-b',
+				entry_id: id,
+			});
 		});
 
 		it('re-enumerates violated terminals for remediation but excludes resolved terminals', async () => {

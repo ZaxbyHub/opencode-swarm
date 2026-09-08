@@ -54,7 +54,7 @@ import { isStrictTaskId } from '../../validation/task-id.js';
 import { listCoderSettlementWalStates } from '../../workflow/coder-settlement.js';
 import { resolveAgentConflict } from '../conflict-resolution';
 import { extractCurrentPhaseFromPlan } from '../extractors';
-import { normalizeToolName } from '../normalize-tool-name';
+import { isTaskToolId, normalizeToolName } from '../normalize-tool-name';
 import {
 	captureReviewerScopeFileFingerprint,
 	REVIEWER_SCOPE_CAPTURE_ATTEMPTS,
@@ -651,8 +651,7 @@ function isAgentDelegation(
 	toolName: string,
 	args: unknown,
 ): { isDelegation: boolean; targetAgent: string | null } {
-	const normalized = normalizeToolName(toolName);
-	if (normalized !== 'Task' && normalized !== 'task') {
+	if (!isTaskToolId(toolName)) {
 		return { isDelegation: false, targetAgent: null };
 	}
 

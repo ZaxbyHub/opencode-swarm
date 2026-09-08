@@ -7,7 +7,7 @@
 
 import { createActionIdentity } from '../failures/action-identity.js';
 import { swarmState } from '../state';
-import { normalizeToolNameLowerCase } from './normalize-tool-name.js';
+import { isTaskToolId } from './normalize-tool-name.js';
 
 export interface LoopDetectResult {
 	looping: boolean;
@@ -26,9 +26,10 @@ export function detectLoop(
 	args: unknown,
 ): LoopDetectResult {
 	// Only track native task delegations. The host's tool id is lowercase
-	// `task` (issue #2507 / HOOKS-2); the shared normalizer also strips
-	// namespace prefixes, so the legacy capitalised spelling keeps working.
-	if (normalizeToolNameLowerCase(toolName) !== 'task') {
+	// `task` (issue #2507 / HOOKS-2); the shared boundary also accepts the
+	// legacy capitalised spelling and colon-namespaced ids, while a dotted
+	// custom tool id is never the task tool (issue #2529).
+	if (!isTaskToolId(toolName)) {
 		return { looping: false, count: 0, pattern: '' };
 	}
 

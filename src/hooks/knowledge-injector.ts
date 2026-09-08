@@ -9,6 +9,8 @@
 import { createHash } from 'node:crypto';
 import {
 	buildDirectiveComplianceBlock,
+	DIRECTIVE_COMPLIANCE_DEFAULT_CHAR_BUDGET,
+	DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP,
 	parseDirectivesToVerifyBlock,
 } from '../agents/reviewer-directive-compliance.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
@@ -817,7 +819,16 @@ async function injectForDelegateIntoMessages(
 	if (block) injectKnowledgeMessage(output, block, sessionId);
 	if (isReviewer && !alreadyVerified) {
 		const toVerify = await readPhaseDirectivesToVerify(directory, phaseLabel);
-		const complianceBlock = buildDirectiveComplianceBlock(toVerify);
+		// Issue #2628: same budget-clamp pattern as the Task prompt-prepend path
+		// (configured budget clamped to the compliance hard cap) so both reviewer
+		// dispatch paths render the block under the same bound.
+		const complianceBlock = buildDirectiveComplianceBlock(
+			toVerify,
+			Math.min(
+				config.inject_char_budget ?? DIRECTIVE_COMPLIANCE_DEFAULT_CHAR_BUDGET,
+				DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP,
+			),
+		);
 		if (complianceBlock) {
 			injectReviewerComplianceMessage(output, complianceBlock, sessionId);
 		}
