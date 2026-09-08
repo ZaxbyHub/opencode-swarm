@@ -34,6 +34,7 @@ import {
 	settlePresumedStalePrWorkflowLanes,
 	submitPrReviewResult,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 import {
 	HEAD_SHA,
 	SESSION_ID,
@@ -41,7 +42,6 @@ import {
 	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
-import { freezeClock } from '../../helpers/test-clock.js';
 
 /** Raw pending open-lane record (fresh `updatedAt` => fresh-open, not stale). */
 function writeOpenLaneStore(tornManifest: boolean): void {
