@@ -62,6 +62,7 @@ import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
 import { clearTrajectoryCache } from './prm/trajectory-store.js';
 import type { PatternMatch } from './prm/types.js';
+import type { ReviewRouteEvidence } from './review/routing-enforcement.js';
 import { clearScopeBindings } from './scope/scope-binding.js';
 import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
 import { clearAllTurnLedgers } from './services/injection-budget';
@@ -440,6 +441,13 @@ export interface AgentSessionState {
 	 * Always populated — Stage B is unconditionally parallel.
 	 */
 	stageBCompletion?: Map<string, Set<'reviewer' | 'test_engineer'>>;
+	/** Exact route-bound Stage B evidence; role presence alone is not authoritative. */
+	stageBRouteEvidence?: Map<string, ReviewRouteEvidence[]>;
+	/**
+	 * Tasks dispatched through v1 review routing. This positive marker prevents a
+	 * missing route receipt from being mistaken for pre-v1 legacy state.
+	 */
+	stageBRouteRequiredTasks?: Set<string>;
 	/** v6.71+ Council mode: per-task council verdict, recorded by delegation-gate when submit_council_verdicts resolves. */
 	taskCouncilApproved?: Map<
 		string,
@@ -2122,6 +2130,8 @@ export function startAgentSession(
 		taskWorkflowStates: new Map(),
 		taskWorkflowCache: new Map(),
 		stageBCompletion: new Map(),
+		stageBRouteEvidence: new Map(),
+		stageBRouteRequiredTasks: new Set(),
 		taskCouncilApproved: new Map(),
 		taskCouncilWorkflowGeneration: new Map(),
 		pendingCouncilRequirements: new Map(),
@@ -2436,6 +2446,12 @@ export function ensureAgentSession(
 		// PR 2 Stage B barrier migration safety
 		if (!session.stageBCompletion) {
 			session.stageBCompletion = new Map();
+		}
+		if (!session.stageBRouteEvidence) {
+			session.stageBRouteEvidence = new Map();
+		}
+		if (!session.stageBRouteRequiredTasks) {
+			session.stageBRouteRequiredTasks = new Set();
 		}
 		// v6.71+ Council mode migration safety
 		if (!session.taskCouncilApproved) {
@@ -3104,6 +3120,8 @@ export function advanceTaskState(
 	// fire prematurely from stale completion data.
 	if (newState === 'complete') {
 		session.stageBCompletion?.delete(taskId);
+		session.stageBRouteEvidence?.delete(taskId);
+		session.stageBRouteRequiredTasks?.delete(taskId);
 		completeModifiedFilesForTask(session, taskId);
 	}
 	if (options?.emitTelemetry !== false) {
@@ -3239,6 +3257,102 @@ export function recordStageBCompletion(
 	} else {
 		session.stageBCompletion.set(taskId, new Set([agent]));
 	}
+}
+
+/**
+ * Record the identity-bearing Stage B receipt in the in-memory session
+ * projection. The durable route receipt remains authoritative; this bounded
+ * projection lets synchronous gate callers validate exact independent slots
+ * without reconstructing identity from a boolean role marker.
+ */
+export function recordStageBRouteEvidence(
+	session: AgentSessionState,
+	taskId: string,
+	evidence: ReviewRouteEvidence,
+): void {
+	if (!isValidTaskId(taskId)) return;
+	if (!session.stageBRouteEvidence) session.stageBRouteEvidence = new Map();
+	const entries = session.stageBRouteEvidence.get(taskId) ?? [];
+	const dispatchIdentity = (entry: ReviewRouteEvidence): string | null => {
+		if (
+			!entry.callId ||
+			!entry.childSessionId ||
+			typeof entry.generation !== 'number'
+		) {
+			return null;
+		}
+		return [
+			entry.role,
+			entry.sessionId ?? '',
+			entry.taskId ?? '',
+			entry.callId,
+			entry.childSessionId,
+			String(entry.generation),
+		].join('\u0000');
+	};
+	const incomingDispatchIdentity = dispatchIdentity(evidence);
+	const existingIndex = entries.findIndex(
+		(entry) =>
+			entry.role === evidence.role &&
+			((incomingDispatchIdentity !== null &&
+				dispatchIdentity(entry) === incomingDispatchIdentity) ||
+				(incomingDispatchIdentity === null &&
+					dispatchIdentity(entry) === null &&
+					entry.identity === evidence.identity)),
+	);
+	if (existingIndex >= 0) {
+		// A retry replaces the same deterministic slot binding. Keeping one
+		// entry prevents a later successful retry from counting twice.
+		entries[existingIndex] = { ...evidence };
+		session.stageBRouteEvidence.set(taskId, entries);
+		return;
+	}
+	if (entries.length >= 32) return;
+	entries.push({ ...evidence });
+	session.stageBRouteEvidence.set(taskId, entries);
+}
+
+export function getStageBRouteEvidence(
+	session: AgentSessionState,
+	taskId: string,
+): ReviewRouteEvidence[] {
+	return (session.stageBRouteEvidence?.get(taskId) ?? []).map((entry) => ({
+		...entry,
+	}));
+}
+
+export function clearStageBRouteEvidence(
+	session: AgentSessionState,
+	taskId: string,
+): void {
+	session.stageBRouteEvidence?.delete(taskId);
+}
+
+/** Mark a task as requiring the versioned review-route receipt contract. */
+export function markStageBRouteRequired(
+	session: AgentSessionState,
+	taskId: string,
+): void {
+	if (!session.stageBRouteRequiredTasks) {
+		session.stageBRouteRequiredTasks = new Set();
+	}
+	session.stageBRouteRequiredTasks.add(taskId);
+}
+
+/** True only for a task positively marked as v1-routed in this session. */
+export function isStageBRouteRequired(
+	session: AgentSessionState,
+	taskId: string,
+): boolean {
+	return session.stageBRouteRequiredTasks?.has(taskId) === true;
+}
+
+/** Clear the route requirement after a task reaches its terminal state. */
+export function clearStageBRouteRequired(
+	session: AgentSessionState,
+	taskId: string,
+): void {
+	session.stageBRouteRequiredTasks?.delete(taskId);
 }
 
 /**

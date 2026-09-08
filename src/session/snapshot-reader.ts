@@ -179,6 +179,14 @@ export function deserializeAgentSession(
 			);
 		}
 	}
+	const stageBRouteRequiredTasks = new Set(
+		Array.isArray(s.stageBRouteRequiredTasks)
+			? s.stageBRouteRequiredTasks.filter(
+					(taskId): taskId is string =>
+						typeof taskId === 'string' && taskId.length > 0,
+				)
+			: [],
+	);
 
 	// Migration: ensure transientRetryCount exists on all windows (v6.86.14)
 	const windows: Record<string, SerializedInvocationWindow> = {};
@@ -290,6 +298,7 @@ export function deserializeAgentSession(
 		executionEpisodeArmed: false,
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
 		stageBCompletion,
+		stageBRouteRequiredTasks,
 		prSubscriptions: new Map(),
 		// (issue #1849) cohort id cache: undefined on older snapshots — callers
 		// re-resolve on cache-miss via a bounded fallback.

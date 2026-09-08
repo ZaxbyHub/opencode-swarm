@@ -325,7 +325,8 @@ export const _internals = {
 // Paths
 // ---------------------------------------------------------------------------
 
-function eventsFilePath(directory: string): string {
+/** Canonical project-root path for the bounded core-event store. */
+export function coreEventsFilePath(directory: string): string {
 	return path.join(directory, '.swarm', 'events.jsonl');
 }
 
@@ -642,7 +643,7 @@ function atomicReplace(directory: string, content: string): void {
 		JSON.parse(line); // throws => abort before touching the file
 	}
 
-	const finalPath = eventsFilePath(directory);
+	const finalPath = coreEventsFilePath(directory);
 	const tmpPath = tmpPathFor(finalPath);
 	try {
 		if (_internals.existsSync(tmpPath)) {
@@ -842,7 +843,7 @@ interface StoreView {
 }
 
 function readStoreFull(directory: string): StoreView {
-	const filePath = eventsFilePath(directory);
+	const filePath = coreEventsFilePath(directory);
 	if (!_internals.existsSync(filePath)) {
 		return { manifest: null, lines: [], corruptLines: 0 };
 	}
@@ -902,7 +903,7 @@ function coverageFor(
  * the window as complete history.
  */
 export function readCoreEvents(directory: string): CoreEventReadResult {
-	const filePath = eventsFilePath(directory);
+	const filePath = coreEventsFilePath(directory);
 	if (!_internals.existsSync(filePath)) {
 		return { text: '', truncated: false, coverage: 'empty' };
 	}
@@ -948,7 +949,7 @@ export function readCoreEvents(directory: string): CoreEventReadResult {
 
 /** Coverage disclosure without reading the window body. */
 export function getCoreEventCoverage(directory: string): CoreEventCoverage {
-	const filePath = eventsFilePath(directory);
+	const filePath = coreEventsFilePath(directory);
 	if (!_internals.existsSync(filePath)) return 'empty';
 	const size = fileSizeOrZero(filePath);
 	if (size === 0) return 'empty';
@@ -968,7 +969,7 @@ export function getCoreEventCoverage(directory: string): CoreEventCoverage {
  * not required.
  */
 export function getCoreEventLifetimeCount(directory: string): number {
-	const filePath = eventsFilePath(directory);
+	const filePath = coreEventsFilePath(directory);
 	if (!_internals.existsSync(filePath)) return 0;
 	const head = readBoundedChunk(
 		filePath,
@@ -1030,7 +1031,7 @@ export function appendCoreEventSync(
 	if (lineBytes - 1 > _internals.limits.maxLineBytes) {
 		throw new Error(CORE_EVENT_LINE_TOO_LARGE);
 	}
-	const filePath = eventsFilePath(directory);
+	const filePath = coreEventsFilePath(directory);
 	const swarmDir = path.join(directory, '.swarm');
 
 	// ensureSwarmDir:false restores the pre-#2039 append-only contract for
@@ -1123,7 +1124,7 @@ export function appendCoreEventsSync(
 			throw new Error(CORE_EVENT_LINE_TOO_LARGE);
 		}
 	}
-	const filePath = eventsFilePath(directory);
+	const filePath = coreEventsFilePath(directory);
 	const swarmDir = path.join(directory, '.swarm');
 
 	// ensureSwarmDir:false restores the pre-#2039 append-only contract for
@@ -1342,7 +1343,7 @@ function foldPass(
 	forceFull: boolean,
 	preloadedAuthorityState?: AuthorityIndexState,
 ): void {
-	const filePath = eventsFilePath(directory);
+	const filePath = coreEventsFilePath(directory);
 	if (!_internals.existsSync(filePath)) return;
 
 	const view = readStoreFull(directory);
@@ -1501,7 +1502,7 @@ export function compactCoreEvents(directory: string): void {
  *  batch must not count as one append). */
 function runMaintenance(directory: string): void {
 	try {
-		const filePath = eventsFilePath(directory);
+		const filePath = coreEventsFilePath(directory);
 		if (!_internals.existsSync(filePath)) return;
 		const drainThreshold =
 			_internals.limits.activeMaxBytes +
@@ -1543,7 +1544,7 @@ function runMaintenance(directory: string): void {
  */
 export function finalizeCoreEventsForClose(directory: string): void {
 	try {
-		const filePath = eventsFilePath(directory);
+		const filePath = coreEventsFilePath(directory);
 		if (!_internals.existsSync(filePath)) return;
 		withCoreEventStoreLock(directory, () => {
 			// Same PRR-014 snapshot semantics as runMaintenance (see note there).

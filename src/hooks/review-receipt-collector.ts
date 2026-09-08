@@ -317,7 +317,9 @@ function effectiveSeverityForFinding(
 ): ReviewFindingSeverity {
 	// Match the shared review engine exactly: equality retains the declared
 	// severity, while only confidence strictly below the threshold is demoted.
-	return finding.confidence < minConfidence ? 'info' : finding.severity;
+	return finding.severity !== 'critical' && finding.confidence < minConfidence
+		? 'info'
+		: finding.severity;
 }
 
 function isValidationCandidate(

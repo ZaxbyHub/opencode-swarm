@@ -5,6 +5,7 @@ import {
 	type PrFeedbackInventoryAmendmentRecord,
 	type PrWorkflowLaneLivenessOptions,
 	type PrWorkflowMode,
+	readPrReviewFinalFindingPolicyForReport,
 	readPrReviewTerminalCoverageForReport,
 	readPrWorkflowGateState,
 	settlePresumedStalePrWorkflowLanes,
@@ -161,12 +162,24 @@ export async function executeCompletePrWorkflow(
 					context.sessionID,
 				);
 				if (coverage) {
+					const findingPolicy =
+						await _internals.readPrReviewFinalFindingPolicyForReport(
+							directory,
+							context.sessionID,
+						);
 					terminalReport = {
 						kind: coverage.kind,
 						covered_dimensions: coverage.coveredDimensions,
 						unresolved_dimensions: coverage.unresolvedDimensions,
 						live_dimensions: coverage.liveDimensions,
-						allowed_verdicts: coverage.allowedVerdicts,
+						allowed_verdicts:
+							findingPolicy?.permittedVerdicts ?? coverage.allowedVerdicts,
+						...(findingPolicy
+							? {
+									finding_policy_version: findingPolicy.policyVersion,
+									blocking_finding_ids: findingPolicy.blockingFindingIds,
+								}
+							: {}),
 						report_verdict: parsed.data.report_verdict,
 					};
 				}
@@ -252,11 +265,13 @@ export const _internals: {
 	listPendingPrWorkflowCheckoutRestores: typeof listPendingPrWorkflowCheckoutRestores;
 	readPrWorkflowGateState: typeof readPrWorkflowGateState;
 	readPrReviewTerminalCoverageForReport: typeof readPrReviewTerminalCoverageForReport;
+	readPrReviewFinalFindingPolicyForReport: typeof readPrReviewFinalFindingPolicyForReport;
 	settlePresumedStalePrWorkflowLanes: typeof settlePresumedStalePrWorkflowLanes;
 } = {
 	completePrWorkflow,
 	listPendingPrWorkflowCheckoutRestores,
 	readPrWorkflowGateState,
 	readPrReviewTerminalCoverageForReport,
+	readPrReviewFinalFindingPolicyForReport,
 	settlePresumedStalePrWorkflowLanes,
 };

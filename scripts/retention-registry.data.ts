@@ -1017,32 +1017,39 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 	{
 		id: 'pr-review-run-artifacts',
 		category: 2,
-		pathGrammar: '.swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, trigger-eval.json}',
+		pathGrammar:
+			'.swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, trigger-eval.json} + .swarm/pr-review/route-receipts/{session}--{task}.json',
 		canonicalRoot: 'project-swarm',
 		writerModules: [
 			'src/tools/write-pr-review-artifact.ts',
 			'src/tools/write-pr-review-trigger-eval.ts',
 			'src/background/pr-feedback-event-queue.ts',
 			'src/review/evidence.ts',
+			'src/review/routing-enforcement.ts',
 		],
 		writerCitations: [
 			'src/tools/write-pr-review-artifact.ts:198/:255 — findings JSONL append (≤1000 records/call) + handoff JSON, atomic',
 			'src/tools/write-pr-review-trigger-eval.ts:574-591 — atomic write, refuses overwrite (:567-570)',
 			'src/background/pr-feedback-event-queue.ts:331 — feedback-handoff lock/content writes',
+			'src/review/routing-enforcement.ts:297 persistReviewRouteReceipt — schema-validated route-receipt replacement, atomic, ≤64 KiB',
 		],
-		readerCitations: ['src/tools/write-pr-review-artifact.ts:86-101 readFindings — 10 MiB read guard'],
-		schemaVersion: 'per-artifact schemas (Zod-validated rows)',
+		readerCitations: [
+			'src/tools/write-pr-review-artifact.ts:86-101 readFindings — 10 MiB read guard',
+			'src/review/routing-enforcement.ts:325 readReviewRouteReceipt — bounded regular-file read, ≤64 KiB',
+			'src/review/routing-enforcement.ts:394 readReviewRouteReceiptSync — bounded regular-file read, ≤64 KiB',
+		],
+		schemaVersion: 'per-artifact schemas (Zod-validated rows); review route receipts schema version 1',
 		stateClass: 'governed-content',
 		privacyClass: 'mixed',
 		writeLimits: {
-			bound: 'per-run: findings ≤1000 records/call + 10 MiB read guard; run directories age-prune at 30 d via the retention sweep (src/retention/sweep.ts:95)',
+			bound: 'per-run: findings ≤1000 records/call + 10 MiB read guard; route receipts ≤64 KiB/file; pr-review entries age-prune at 30 d via the retention sweep (src/retention/sweep.ts:95)',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER: the retention sweep\'s pr-review-run-artifacts family age-prunes .swarm/pr-review/ run directories at 30 d (src/retention/sweep.ts:95), so the run-id keyspace cannot outgrow the sweep horizon.',
+				'FINITE BY REAPER: the retention sweep\'s pr-review-run-artifacts family age-prunes .swarm/pr-review/ entries at 30 d (src/retention/sweep.ts:95), so run-artifact and route-receipt entries are covered by the same sweep horizon.',
 			citation: 'src/tools/write-pr-review-artifact.ts:60,89; src/retention/sweep.ts:95',
 		},
-		readBound: { pattern: 'line-bounded', bound: '10 MiB read guard', sync: true, citation: 'src/tools/write-pr-review-artifact.ts:89' },
-		lockModel: 'artifact-boundary assertions rather than file locks',
+		readBound: { pattern: 'line-bounded', bound: '10 MiB findings read guard; route receipts 64 KiB hard read bound', sync: true, citation: 'src/tools/write-pr-review-artifact.ts:89; src/review/routing-enforcement.ts:319-345,388-416' },
+		lockModel: 'artifact-boundary assertions rather than file locks; route receipts use canonical atomic replacement',
 		crashBehavior: 'atomic temp+rename',
 		closePolicy: 'untouched by close — the 30 d sweep owns the run-dir reap',
 		resetPolicy: 'not reset',
@@ -1648,7 +1655,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'retryHistory ≤3 (schema :303); per-task file; evidence/ archived+cleaned at close',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:764 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close/constants.ts:253-269) and the close clean loop recursively removes the whole tree (src/commands/close/clean-stage.ts:176-190), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close/clean-stage.ts:176-185) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
+				'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:786 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close/constants.ts:253-269) and the close clean loop recursively removes the whole tree (src/commands/close/clean-stage.ts:176-190), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close/clean-stage.ts:176-185) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
 			citation: 'src/gate-evidence.ts:303; src/commands/close/constants.ts:253-269 ACTIVE_STATE_DIRS_TO_CLEAN',
 		},
 		readBound: { pattern: 'full-file', bound: 'single per-task JSON', sync: true, citation: 'src/gate-evidence.ts:1054-1089' },
@@ -1770,11 +1777,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/evidence/task-gate-repair.ts', 'src/evidence/task-gate-requirements.ts'],
 		writerCitations: [
-			'src/evidence/task-gate-requirements.ts:271 appendTaskGateRequirementsReceiptIfNeeded via atomicWriteFile (schemaVersion 1 records); :282 read-back before append',
+			'src/evidence/task-gate-requirements.ts:415 appendTaskGateRequirementsReceiptIfNeeded via atomicWriteFile (schemaVersion 1 records); :434 read-back before append',
 			'src/evidence/task-gate-repair.ts:496 fileHandle.writeFile repaired evidence under withTaskEvidenceLock; :955 atomicWriteFile; quarantine moves into task-gate-quarantine/ (:29-31)',
 		],
 		readerCitations: [
-			'src/evidence/task-gate-requirements.ts:181 readTaskGateRequirementsReceipts — bounded read (256 KiB cap enforced :149-175), async',
+			'src/evidence/task-gate-requirements.ts:245 readTaskGateRequirementsReceipts — bounded read (256 KiB cap enforced :149-175), async',
 			'src/tools/repair-gate-evidence.ts + src/gate-evidence.ts consumers of the repaired evidence',
 		],
 		schemaVersion: 'schemaVersion 1 (z.literal(1), task-gate-requirements.ts:17)',
@@ -3194,7 +3201,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/session/snapshot-writer.ts', 'src/session/snapshot-store.ts', 'src/session/session-start-store.ts', 'src/services/context-budget-service.ts'],
 		writerCitations: [
-			'src/session/snapshot-writer.ts:505 writeSnapshot — per-key SQLite snapshot authority via snapshot-store with serialized post-commit projection',
+			'src/session/snapshot-writer.ts:511 writeSnapshot — per-key SQLite snapshot authority via snapshot-store with serialized post-commit projection',
 			'src/session/snapshot-store.ts writeSnapshotRows — FULL transaction with per-session tombstones and cross-process-safe disjoint updates',
 			'src/session/session-start-store.ts:6 recordSessionStart — append flag a, fail-open',
 			'src/services/context-budget-service.ts:196 writeBudgetState — bunWrite + cache invalidation',

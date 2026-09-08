@@ -3454,6 +3454,24 @@ export const PrReviewResilienceConfigSchema = z
 	.strict();
 
 /**
+ * Issue #2491 semantic-review routing enforcement. Versioned route receipts
+ * are enabled by default for newly routed Stage-B work. Operators may set the
+ * flag false for a one-release rollback while migrating legacy in-flight
+ * tasks; the route producer still records its outcome either way.
+ */
+export const ReviewRoutingConfigSchema = z
+	.object({
+		enforce_receipts: z.boolean().default(true),
+	})
+	.strict();
+
+export type ReviewRoutingConfig = z.infer<typeof ReviewRoutingConfigSchema>;
+
+export const DEFAULT_REVIEW_ROUTING_CONFIG: ReviewRoutingConfig = {
+	enforce_receipts: true,
+};
+
+/**
  * Issue #2506 (G2): the lane-liveness watchdog. Default OFF; each numeric knob
  * disables its own feature at 0. When enabled, `timeout_ms` becomes the ONE
  * effective PR-lane settlement horizon (the 30-minute reachability floor
@@ -3674,6 +3692,14 @@ export const PluginConfigSchema = z.object({
 	// PR_REVIEW base-wave staged canary/fanout resilience.
 	pr_review_resilience: PrReviewResilienceConfigSchema.optional().describe(
 		'PR review base-wave staged canary/fanout resilience settings.',
+	),
+
+	// Issue #2491: exact semantic-review route receipts for Stage B. The
+	// nested default is materialized whenever this section is provided; callers
+	// that need the default should use `config.review_routing?.enforce_receipts
+	// ?? true` so legacy configs remain compatible during the one-release rollout.
+	review_routing: ReviewRoutingConfigSchema.optional().describe(
+		'Semantic review routing receipt enforcement for Stage B (default on; set enforce_receipts=false only as a one-release rollback).',
 	),
 
 	// Issue #2506 (G2): lane-liveness watchdog (default-off; 0 disables each

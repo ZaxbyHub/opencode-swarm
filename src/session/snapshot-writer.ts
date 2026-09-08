@@ -169,6 +169,8 @@ export interface SerializedAgentSession {
 	sessionRehydratedAt?: number;
 	/** Stage B completion tracking: per-task set of completed Stage B agents. Optional for backward compat with old snapshots. */
 	stageBCompletion?: Record<string, string[]>;
+	/** v1 review-routing requirement markers, persisted so missing receipts fail closed after restart. */
+	stageBRouteRequiredTasks?: string[];
 	/** Session-scoped concurrency override for max_concurrent_tasks (Issue #761) */
 	maxConcurrencyOverride?: number;
 	/** Session-level auto-proceed override (Phase 1) */
@@ -234,6 +236,8 @@ export const SESSION_TRANSIENT_FIELDS: Readonly<
 		'Bounded in-memory correlation for wrapper-replaced commands; the pending execution dies with the process.',
 	taskWorkflowCache:
 		'Durable evidence stays authoritative; the exact-task cache is rebuilt from plan+evidence on rehydrate.',
+	stageBRouteEvidence:
+		'Exact route-bound Stage B evidence is an in-memory projection; durable route receipts are re-read from .swarm after restart.',
 	taskCouncilApproved:
 		'Council verdicts live in durable evidence; rehydrate recomputes from evidence instead of trusting a snapshot.',
 	taskCouncilWorkflowGeneration:
@@ -401,6 +405,7 @@ export function serializeAgentSession(
 			stageBCompletion[taskId] = Array.from(agents);
 		}
 	}
+	const stageBRouteRequiredTasks = Array.from(s.stageBRouteRequiredTasks ?? []);
 
 	const modifiedFilesByTask: Record<string, string[]> = Object.create(null);
 	for (const [taskId, files] of s.modifiedFilesByTask ?? new Map()) {
@@ -477,6 +482,7 @@ export function serializeAgentSession(
 		fullAutoLastQuestionHash: s.fullAutoLastQuestionHash ?? null,
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
 		...(Object.keys(stageBCompletion).length > 0 && { stageBCompletion }),
+		...(stageBRouteRequiredTasks.length > 0 && { stageBRouteRequiredTasks }),
 		...(s.maxConcurrencyOverride !== undefined && {
 			maxConcurrencyOverride: s.maxConcurrencyOverride,
 		}),

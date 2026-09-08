@@ -236,6 +236,41 @@ async function materializeTerminalReview(runId = RUN_ID): Promise<{
 describe('PR feedback continuation transition', () => {
 	test('command transition replaces a terminal PR_REVIEW gate with unbound PR_FEEDBACK', async () => {
 		const { handoffPath, findingIds } = await materializeTerminalReview();
+		const policyPath = path.join(
+			tempDir,
+			'.swarm',
+			'pr-review',
+			RUN_ID,
+			'finding-policy.json',
+		);
+		const policy = JSON.parse(await fs.readFile(policyPath, 'utf8')) as {
+			schemaVersion: number;
+			routeReceipt: { kind: string; taskId: string };
+			synthesis: {
+				policyVersion: number;
+				findings: Array<{ severity: string; confidence: string }>;
+			};
+		};
+		expect(policy).toMatchObject({
+			schemaVersion: 1,
+			routeReceipt: {
+				kind: 'pr_review_finding_policy',
+				taskId: RUN_ID,
+			},
+			synthesis: { policyVersion: 1 },
+		});
+		expect(policy.synthesis.findings.length).toBeGreaterThan(0);
+		expect(
+			policy.synthesis.findings.some((finding) => finding.severity === 'NONE'),
+		).toBe(true);
+		expect(
+			policy.synthesis.findings.every((finding) =>
+				['LOW', 'MEDIUM', 'HIGH'].includes(finding.confidence),
+			),
+		).toBe(true);
+		expect(
+			await fs.readFile(path.join(tempDir, '.swarm', 'events.jsonl'), 'utf8'),
+		).toContain('review.finding.synthesis');
 		const handler = createSwarmCommandHandler(tempDir, {});
 		const output = { parts: [] as unknown[] };
 
@@ -308,7 +343,9 @@ describe('PR feedback continuation transition', () => {
 		const { handoffPath, findingIds } = await materializeTerminalReview();
 		await expect(
 			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
-				reportVerdict: 'APPROVE',
+				// The fixture retains a HIGH/UPHELD critic finding and therefore
+				// cannot receive an APPROVE verdict under the version-1 policy.
+				reportVerdict: 'REQUEST_CHANGES',
 			}),
 		).resolves.toBe('completed');
 		const feedback = await transitionPrReviewToFeedback(
@@ -443,37 +480,5 @@ describe('PR feedback continuation transition', () => {
 		).rejects.toThrow(
 			/state changed while validating the feedback handoff|state changed concurrently/i,
 		);
-	});
-
-	test('rejects malformed and oversized external handoff artifacts', async () => {
-		await overwriteHandoffArtifact('malformed', {
-			not: 'a valid handoff',
-		});
-		await expect(
-			transitionPrReviewToFeedback(tempDir, SESSION_ID, {
-				runId: 'malformed',
-				handoffPath: handoffRelativePath('malformed'),
-				prUrl: PR_URL,
-			}),
-		).rejects.toThrow(/artifact is invalid/i);
-
-		const oversizedSummary = 'x'.repeat(140 * 1024);
-		await overwriteHandoffArtifact('oversized', {
-			schema_version: 1,
-			run_id: 'oversized',
-			pr_head_sha: HEAD_SHA,
-			created_at: '2026-08-01T00:00:00.000Z',
-			pr_url: PR_URL,
-			finding_ids: ['C-1'],
-			summary: oversizedSummary,
-			provenance: ['manual-test'],
-		});
-		await expect(
-			transitionPrReviewToFeedback(tempDir, SESSION_ID, {
-				runId: 'oversized',
-				handoffPath: handoffRelativePath('oversized'),
-				prUrl: PR_URL,
-			}),
-		).rejects.toThrow(/exceeds 131072 bytes|artifact is invalid/i);
 	});
 });

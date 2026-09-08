@@ -140,6 +140,14 @@ import {
 	type PrReviewTerminalCoverageSettlement,
 	summarizePrReviewBaseDimensionAttempts,
 } from '../pr-review/completion.js';
+import {
+	assessTerminalReadiness,
+	type CriticOutcome,
+	deriveFeedbackHandoffFindingIds,
+	evaluateFinalFindingPolicy,
+	FINDING_POLICY_VERSION,
+	readReviewOutcome,
+} from '../pr-review/finding-policy.js';
 // Issue #2385: the legacy transcript adapter boundary. Raw transcript /
 // artifact-text -> canonical conversion exists only in
 // src/pr-review/legacy-transcript-adapter.ts; the guardrail scanner
@@ -10763,6 +10771,33 @@ const PrReviewFindingProjectionSchema = z
 	})
 	.passthrough();
 
+const PrReviewFindingPolicySynthesisFindingSchema = z
+	.object({
+		id: z.string().min(1).max(128),
+		status: z.string().min(1),
+		severity: z.string().min(1),
+		action: z.string().min(1),
+	})
+	.passthrough();
+
+const PrReviewCriticSettlementEvidenceSchema = z
+	.object({
+		findingId: z.string().min(1).max(128),
+		terminal: z.boolean(),
+		status: z.enum([
+			'UPHELD',
+			'DOWNGRADED',
+			'DISPROVED',
+			'NEEDS_MORE_EVIDENCE',
+		]),
+	})
+	.passthrough();
+
+const PrReviewFindingPolicySynthesisSchema = z.object({
+	findings: z.array(PrReviewFindingPolicySynthesisFindingSchema),
+	criticSettlements: z.array(PrReviewCriticSettlementEvidenceSchema).optional(),
+});
+
 async function readActionableReviewFindingIds(
 	directory: string,
 	state: PrWorkflowGateState,
@@ -10802,14 +10837,143 @@ async function readActionableReviewFindingIds(
 		}
 		latest.set(parsed.data.finding_id, parsed.data);
 	}
-	return [...latest.values()]
-		.filter(
-			(record) =>
-				record.status === 'CONFIRMED' &&
-				record.next_action === 'handoff_to_feedback',
-		)
-		.map((record) => record.finding_id)
+	return deriveFeedbackHandoffFindingIds([...latest.values()]);
+}
+
+interface PrReviewFindingPolicyAuthority {
+	policyFindings: Array<{
+		id: string;
+		status: string;
+		severity: string;
+		action: string;
+		[key: string]: unknown;
+	}>;
+	criticSettlements: Array<{
+		findingId: string;
+		terminal: boolean;
+		status: CriticOutcome;
+	}>;
+}
+
+/**
+ * Read the policy sidecar as an integrity-bound projection of the final
+ * findings artifact.  A write-only sidecar is not evidence: the route receipt
+ * pins the PR head and exact findings bytes, while the sidecar digest pins the
+ * synthesized projection itself.
+ */
+async function readAuthoritativeFindingPolicy(
+	directory: string,
+	state: PrWorkflowGateState,
+): Promise<PrReviewFindingPolicyAuthority> {
+	const runId = state.prReviewArtifactRunId;
+	if (!runId || !state.prReviewFindingsPath || !state.prHeadSha) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW terminal finding policy evidence is not bound to the active run',
+		);
+	}
+	const outcome = await readReviewOutcome({
+		projectRoot: directory,
+		sessionId: state.sessionID,
+		taskId: runId,
+	}).catch((error) => {
+		throw new Error(
+			`BLOCKED: PR_REVIEW finding-policy evidence is missing or invalid: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	});
+	const routeReceipt = outcome.evidence.routeReceipt;
+	if (!routeReceipt || typeof routeReceipt !== 'object') {
+		throw new Error(
+			'BLOCKED: PR_REVIEW finding-policy evidence has no route receipt',
+		);
+	}
+	const receipt = routeReceipt as Record<string, unknown>;
+	const expectedPath = `pr-review/${runId}/findings.jsonl`;
+	const raw = await readBoundedSwarmRegularFile(
+		directory,
+		state.prReviewFindingsPath,
+		PR_REVIEW_FINDINGS_MAX_BYTES,
+		'PR_REVIEW final findings artifact',
+	);
+	const findingsDigest = createHash('sha256').update(raw, 'utf8').digest('hex');
+	if (
+		receipt.kind !== 'pr_review_finding_policy' ||
+		receipt.version !== FINDING_POLICY_VERSION ||
+		receipt.sessionId !== state.sessionID ||
+		receipt.taskId !== runId ||
+		receipt.boundary !== 'post_critic' ||
+		receipt.prHeadSha !== state.prHeadSha ||
+		receipt.findingsPath !== expectedPath ||
+		receipt.findingsDigest !== findingsDigest
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW finding-policy route receipt is stale or does not bind the final findings artifact',
+		);
+	}
+	const synthesis = PrReviewFindingPolicySynthesisSchema.safeParse(
+		outcome.evidence.synthesis,
+	);
+	if (!synthesis.success) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW finding-policy synthesis is invalid or incomplete',
+		);
+	}
+	return {
+		policyFindings: synthesis.data.findings,
+		criticSettlements: synthesis.data.criticSettlements ?? [],
+	};
+}
+
+/** Read-only final finding-policy projection for completion reports. */
+export async function readPrReviewFinalFindingPolicyForReport(
+	directory: string,
+	sessionID: string,
+): Promise<{
+	policyVersion: 1;
+	permittedVerdicts: readonly PrReviewReportVerdict[];
+	blockingFindingIds: string[];
+} | null> {
+	const state = await readPrWorkflowGateStateFromDisk(
+		directory,
+		normalizeSessionID(sessionID),
+	);
+	if (!state || state.mode !== 'PR_REVIEW' || !state.prHeadSha) return null;
+	const ctx = await createPrReviewGateContext(directory, state);
+	const settlement = derivePrReviewDimensionSettlement(
+		directory,
+		state,
+		ctx.revisionDigest,
+	);
+	const authority = await readAuthoritativeFindingPolicy(directory, state);
+	const findings = authority.policyFindings;
+	const permittedVerdicts = allowedPrReviewReportVerdicts(
+		settlement.kind,
+		findings,
+	);
+	const policyProjection = evaluateFinalFindingPolicy({
+		policyVersion: FINDING_POLICY_VERSION,
+		finalStatus: 'COMPLETE',
+		coverage:
+			settlement.kind === 'COMPLETE'
+				? { kind: 'base', quality: 'complete', provenance: 'valid' }
+				: settlement.kind === 'PARTIAL'
+					? { kind: 'base', quality: 'partial', provenance: 'valid' }
+					: { kind: 'base', quality: 'none', provenance: 'valid' },
+		findings,
+	});
+	const sourceIdsByPolicyFindingId = new Map(
+		findings.map((finding) => [
+			finding.id,
+			Array.isArray(finding.sourceFindingIds)
+				? finding.sourceFindingIds.filter(
+						(value): value is string => typeof value === 'string',
+					)
+				: [],
+		]),
+	);
+	const blockingFindingIds = policyProjection.blockingFindingIds
+		.flatMap((id) => sourceIdsByPolicyFindingId.get(id) ?? [id])
 		.sort();
+	return { policyVersion: 1, permittedVerdicts, blockingFindingIds };
 }
 
 function canonicalGitHubPrUrl(value: string): string | null {
@@ -10976,6 +11140,11 @@ async function assertPrReviewTerminalReady(
 		ctx,
 		'completePrWorkflow critic-coverage gate',
 	);
+	let authoritativeCriticSettlements: Array<{
+		findingId: string;
+		terminal: boolean;
+		status: CriticOutcome;
+	}> = [];
 	if (criticInventory.length > 0) {
 		if (
 			!(state.prReviewValidationBatches ?? []).some(
@@ -10986,7 +11155,21 @@ async function assertPrReviewTerminalReady(
 				`BLOCKED: PR_REVIEW reviewer verdicts require critic coverage for: ${criticInventory.join(', ')}`,
 			);
 		}
-		await assertPrReviewValidationSettled(directory, sessionID, 'critic', ctx);
+		authoritativeCriticSettlements = deriveAuthoritativeCriticSettlements(
+			directory,
+			state,
+			ctx,
+			criticInventory,
+		);
+		if (
+			authoritativeCriticSettlements.every((settlement) => settlement.terminal)
+		) {
+			await assertPrReviewValidationSettled(
+				directory,
+				sessionID,
+				'critic',
+				ctx,
+			);
 		// Issue #2512: critic settlement is REDUCER-OWNED — the adapter derives
 		// valid settled receipts (UPHELD / DOWNGRADED / DISPROVED, each bound
 		// to the current authoritative reviewer row digest via
@@ -11051,6 +11234,82 @@ async function assertPrReviewTerminalReady(
 	if (state.prReviewHandoffRequired && !state.prReviewHandoffPath) {
 		throw new Error(
 			'BLOCKED: PR_REVIEW actionable findings require a persisted feedback handoff artifact',
+		);
+	}
+	const criticSettlementIncomplete = authoritativeCriticSettlements.some(
+		(settlement) => !settlement.terminal,
+	);
+	const findingPolicyAuthority = criticSettlementIncomplete
+		? null
+		: await readAuthoritativeFindingPolicy(directory, state);
+	if (!criticSettlementIncomplete && criticInventory.length > 0) {
+		const persistedSettlements =
+			findingPolicyAuthority?.criticSettlements ?? [];
+		const actualById = new Map(
+			authoritativeCriticSettlements.map((settlement) => [
+				settlement.findingId,
+				settlement,
+			]),
+		);
+		if (
+			persistedSettlements.length !== authoritativeCriticSettlements.length ||
+			persistedSettlements.some((settlement) => {
+				const actual = actualById.get(settlement.findingId);
+				return (
+					!actual ||
+					actual.terminal !== settlement.terminal ||
+					actual.status !== settlement.status
+				);
+			})
+		) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW finding-policy critic settlements are stale or do not match the authenticated critic verdict map',
+			);
+		}
+	}
+	const reviewerReceipts = (state.prReviewValidationBatches ?? [])
+		.filter((batch) => batch.phase === 'reviewer')
+		.map((batch) => ({ id: batch.batchId, valid: true }));
+	const councilEnabled = (state.prReviewValidationBatches ?? []).some(
+		(batch) => batch.phase === 'council',
+	);
+	const criticEnabled = criticInventory.length > 0;
+	const policyReadiness = assessTerminalReadiness({
+		baseReceipt: {
+			id: 'base-coverage-settlement',
+			valid: Boolean(
+				(state.prReviewBaseDispatches ?? []).length > 0 ||
+					state.prReviewBaseDispatch,
+			),
+		},
+		reviewerReceipts,
+		criticReceipt: {
+			id: 'critic-coverage-settlement',
+			valid:
+				!criticEnabled ||
+				(!criticSettlementIncomplete &&
+					(state.prReviewValidationBatches ?? []).some(
+						(batch) => batch.phase === 'critic',
+					)),
+		},
+		coverage: {
+			kind: 'base',
+			quality: settlement.kind === 'COMPLETE' ? 'complete' : 'partial',
+			provenance: 'valid',
+		},
+		council: {
+			enabled: councilEnabled,
+			receipt: councilEnabled
+				? { id: 'council-settlement', valid: true }
+				: null,
+		},
+		criticSettlements: criticEnabled
+			? authoritativeCriticSettlements
+			: undefined,
+	});
+	if (!policyReadiness.ready) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW terminal finding readiness is incomplete: ${policyReadiness.blockers.join(', ')}`,
 		);
 	}
 	return { state, settlement };
@@ -12198,6 +12457,19 @@ export async function completePrWorkflow(
 				);
 			}
 			dispatchCoverageFinalization(ready.settlement);
+			const finalFindingAuthority = await readAuthoritativeFindingPolicy(
+				directory,
+				readyState,
+			);
+			const policyAllowed = allowedPrReviewReportVerdicts(
+				ready.settlement.kind,
+				finalFindingAuthority.policyFindings,
+			);
+			if (!policyAllowed.includes(verdict)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${ready.settlement.kind} completion allows report_verdict ${policyAllowed.join(' | ')}; got "${verdict}". Final finding policy and coverage do not permit this report.`,
+				);
+			}
 		}
 	} else {
 		// Issue #2108: legacy armed records migrate (conservatively) before this
@@ -15028,6 +15300,61 @@ function deriveLatestPrReviewCriticVerdicts(
 	);
 }
 
+/**
+ * Project the authenticated critic phase into policy settlements.  A critic
+ * item with no settled claim is an actual durable nonterminal state, not a
+ * caller-provided verdict; it is represented as NEEDS_MORE_EVIDENCE so the
+ * finding-policy readiness gate can preserve the reason while blocking.
+ */
+function deriveAuthoritativeCriticSettlements(
+	directory: string,
+	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
+	criticInventory: readonly string[],
+): Array<{ findingId: string; terminal: boolean; status: CriticOutcome }> {
+	const verdicts = deriveLatestPrReviewCriticVerdicts(directory, state, ctx);
+	return criticInventory.map((findingId) => {
+		const verdict = verdicts.get(findingId);
+		if (!verdict || verdict.status === 'NEEDS_MORE_EVIDENCE') {
+			return {
+				findingId,
+				terminal: false,
+				status: 'NEEDS_MORE_EVIDENCE',
+			};
+		}
+		if (
+			verdict.status === 'UPHELD' ||
+			verdict.status === 'DOWNGRADED' ||
+			verdict.status === 'DISPROVED'
+		) {
+			return { findingId, terminal: true, status: verdict.status };
+		}
+		return {
+			findingId,
+			terminal: false,
+			status: 'NEEDS_MORE_EVIDENCE',
+		};
+	});
+}
+
+/** Read the durable critic settlement projection used by terminal readiness. */
+export async function readAuthoritativePrReviewCriticSettlements(
+	directory: string,
+	sessionID: string,
+): Promise<
+	Array<{ findingId: string; terminal: boolean; status: CriticOutcome }>
+> {
+	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	const ctx = await createPrReviewGateContext(directory, state);
+	const inventory = derivePrReviewCriticInventoryForCoverageGate(
+		directory,
+		state,
+		ctx,
+		'readAuthoritativePrReviewCriticSettlements',
+	);
+	return deriveAuthoritativeCriticSettlements(directory, state, ctx, inventory);
+}
+
 /** Thin projection of the composed reviewer phase. Empty unless item-complete. */
 function deriveLatestPrReviewReviewerVerdicts(
 	directory: string,
@@ -15144,6 +15471,25 @@ function authoritativeCriticVerdictsForGate(
 		origin,
 	);
 	return verdicts;
+}
+
+/**
+ * Read the authenticated critic verdict map for artifact adapters.  Keeping
+ * this behind the same B1-guarded accessor prevents a caller-supplied policy
+ * field from becoming a second authority for critic settlement.
+ */
+export async function readAuthoritativePrReviewCriticVerdicts(
+	directory: string,
+	sessionID: string,
+): Promise<Map<string, { status: string; severity: string }>> {
+	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	const ctx = await createPrReviewGateContext(directory, state);
+	return authoritativeCriticVerdictsForGate(
+		directory,
+		state,
+		ctx,
+		'write_pr_review_artifact critic settlement',
+	);
 }
 
 /**

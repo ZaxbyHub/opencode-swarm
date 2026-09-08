@@ -61,6 +61,10 @@ import {
 import { validateSwarmPath } from '../hooks/utils.js';
 import { CIRCUIT_TERMINAL_DELEGATION_STATUSES } from './circuit.js';
 import {
+	evaluateFinalFindingPolicy,
+	type FinalPolicyFinding,
+} from './finding-policy.js';
+import {
 	isoNow,
 	normalizeSessionID,
 	withSessionStateMutation,
@@ -435,7 +439,29 @@ export type PrReviewReportVerdict = (typeof PR_REVIEW_REPORT_VERDICTS)[number];
  */
 export function allowedPrReviewReportVerdicts(
 	kind: PrReviewTerminalCoverageKind,
+	findings?: ReadonlyArray<FinalPolicyFinding>,
 ): readonly PrReviewReportVerdict[] {
+	if (findings !== undefined) {
+		const projection = evaluateFinalFindingPolicy({
+			policyVersion: 1,
+			finalStatus: 'COMPLETE',
+			coverage:
+				kind === 'COMPLETE'
+					? { kind: 'base', quality: 'complete', provenance: 'valid' }
+					: kind === 'PARTIAL'
+						? { kind: 'base', quality: 'partial', provenance: 'valid' }
+						: { kind: 'base', quality: 'none', provenance: 'valid' },
+			findings: [...findings],
+		});
+		const supported = projection.permittedVerdicts.filter(
+			(value): value is PrReviewReportVerdict =>
+				(value === 'APPROVE' ||
+					value === 'REQUEST_CHANGES' ||
+					value === 'INCOMPLETE') &&
+				(kind === 'COMPLETE' || value !== 'APPROVE'),
+		);
+		return supported.length > 0 ? supported : ['INCOMPLETE'];
+	}
 	if (kind === 'COMPLETE') return PR_REVIEW_REPORT_VERDICTS;
 	if (kind === 'PARTIAL') return ['REQUEST_CHANGES', 'INCOMPLETE'];
 	return ['INCOMPLETE'];

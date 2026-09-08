@@ -11,7 +11,11 @@ import {
 	getAgentConfigs,
 	getSwarmAgents,
 } from './agents';
-import { parseSoundingBoardResponse } from './agents/critic.js';
+import {
+	applyAlwaysSurfacePolicy,
+	parseSoundingBoardResponse,
+	type SoundingBoardResponse,
+} from './agents/critic.js';
 import {
 	type AutomationStatusArtifact,
 	type BackgroundAutomationManager,
@@ -331,6 +335,63 @@ export function capSessionMap<K, V>(
 		if (oldest === undefined || oldest === justInserted) break;
 		map.delete(oldest);
 	}
+}
+
+const SOUNDING_BOARD_CATEGORY_LINE = /^\s*Category\s*:\s*([^\r\n]+)\s*$/im;
+
+/**
+ * Resolve a category from the architect-owned sounding-board dispatch packet.
+ * The explicit `category` field wins over text fields; an explicitly present
+ * malformed value is retained as a protocol error instead of falling back to
+ * a model echo.
+ */
+function resolveSoundingBoardCallerCategory(args: unknown): {
+	supplied: boolean;
+	value?: unknown;
+} {
+	if (!args || typeof args !== 'object' || Array.isArray(args)) {
+		return { supplied: false };
+	}
+	const record = args as Record<string, unknown>;
+	if (Object.hasOwn(record, 'category')) {
+		return { supplied: true, value: record.category };
+	}
+	for (const key of ['prompt', 'description', 'task', 'context']) {
+		const text = record[key];
+		if (typeof text !== 'string') continue;
+		const match = text.match(SOUNDING_BOARD_CATEGORY_LINE);
+		if (match) return { supplied: true, value: match[1].trim() };
+	}
+	return { supplied: false };
+}
+
+/**
+ * Apply the sounding-board response contract at the host handoff boundary.
+ * Missing/malformed category metadata may never preserve UNNECESSARY: the
+ * response is surfaced as APPROVED with an observable warning. A caller-owned
+ * category is passed separately so a model cannot relabel a sticky decision.
+ */
+export function applySoundingBoardResponsePolicy(
+	rawResponse: string,
+	args?: unknown,
+): SoundingBoardResponse | null {
+	const callerCategory = resolveSoundingBoardCallerCategory(args);
+	const parsed = parseSoundingBoardResponse(
+		rawResponse,
+		callerCategory.supplied ? { category: callerCategory.value } : undefined,
+	);
+	if (!parsed) return null;
+	const guarded = applyAlwaysSurfacePolicy(parsed);
+	if (guarded.protocolError && guarded.verdict === 'UNNECESSARY') {
+		return {
+			...guarded,
+			verdict: 'APPROVED',
+			warning:
+				guarded.warning ??
+				'Invalid or missing Category metadata; verdict was surfaced as APPROVED.',
+		};
+	}
+	return guarded;
 }
 
 // ---------------------------------------------------------------------------
@@ -5222,9 +5283,14 @@ async function initializeOpenCodeSwarm(
 						if (baseAgentName === 'critic_sounding_board') {
 							const rawResponse =
 								typeof output.output === 'string' ? output.output : '';
-							const parsed = parseSoundingBoardResponse(rawResponse);
+							const parsed = applySoundingBoardResponsePolicy(
+								rawResponse,
+								afterCtx.args,
+							);
 							if (parsed) {
 								let verdictMsg = `[SOUNDING_BOARD] Verdict: ${parsed.verdict}. ${parsed.reasoning}`;
+								if (parsed.category)
+									verdictMsg += ` Category: ${parsed.category}`;
 								if (parsed.improvedQuestion)
 									verdictMsg += ` Rephrase to: ${parsed.improvedQuestion}`;
 								if (parsed.answer) verdictMsg += ` Answer: ${parsed.answer}`;
