@@ -1070,7 +1070,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			reason: 'The gate-state projection is required for pre-DB recovery and remains bounded per workflow session; SQLite coordination state is authoritative after one-time import.',
 			reviewedIssue: 2385,
 		},
-		writeLimits: { bound: 'one bounded state object per workflow session; atomic projection under the gate lock', scope: 'per-key', keyspaceBound: 'FINITE BY REAPER: workflow session files are age-pruned with the PR workflow retention family', citation: 'src/pr-review/persistence.ts; src/retention/sweep.ts' },
+		writeLimits: { bound: 'one bounded state object per workflow session; atomic projection under the gate lock', scope: 'per-key', keyspaceBound: 'FINITE BY REAPER: workflow session files are age-pruned with the PR workflow retention family (src/retention/sweep.ts)', citation: 'src/pr-review/persistence.ts; src/retention/sweep.ts' },
 		readBound: { pattern: 'indexed', bound: 'one bounded session file', sync: false, citation: 'src/pr-review/persistence.ts:readPrWorkflowGateStateFromDisk' },
 		lockModel: 'workflow-session lock plus SQLite coordination transaction',
 		crashBehavior: 'SQLite WAL recovery; projection/archive repair is replayable after a crash-window import',
