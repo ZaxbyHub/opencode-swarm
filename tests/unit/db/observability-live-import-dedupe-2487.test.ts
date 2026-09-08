@@ -7,6 +7,7 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { closeAllGroupCommitWriters } from '../../../src/db/group-commit-writer.js';
 import {
 	_internals,
 	appendObservabilityEventDb,
@@ -93,6 +94,11 @@ describe('observability live/import dedupe (issue #2487)', () => {
 			});
 		}
 		await settleStream();
+		// Simulate the production restart boundary: the report path runs in a
+		// separate process after the sink's writer and DB handle are gone, so
+		// close everything before importing (issue #2487 review PRR-006).
+		closeAllGroupCommitWriters();
+		closeAllProjectDbs();
 
 		const result = syncObservabilityImport(dir);
 		const query = queryObservabilityEvents(dir, {});

@@ -193,4 +193,22 @@ describe('observability sink kill switch + failure classification (issue #2487)'
 			);
 		}
 	});
+
+	// PRR-007 (issue #2487 review): pin the unserializable-payload contract.
+	// JSON.stringify throws on circular structures and BigInt values, so
+	// canonicalLineContent itself throws; containment lives one layer out —
+	// emit() catches before the listener fan-out (src/telemetry.ts, ordering
+	// pinned by src/telemetry.test.ts:137-162) and the sink's hash path
+	// catches to null (buildLiveRow).
+	test('canonicalLineContent throws on circular and BigInt payloads (callers own containment)', () => {
+		const circular: Record<string, unknown> = {};
+		circular.self = circular;
+		const payloads: Record<string, unknown>[] = [circular, { big: 1n }];
+		for (const payload of payloads) {
+			const canonical = createObservation('gate_passed', payload) as ReturnType<
+				typeof createObservation
+			>;
+			expect(() => canonicalLineContent(canonical)).toThrow();
+		}
+	});
 });

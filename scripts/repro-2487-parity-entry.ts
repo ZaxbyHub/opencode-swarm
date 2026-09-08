@@ -66,6 +66,21 @@ function check(label: string, cond: boolean, detail = ''): void {
 	}
 }
 
+/**
+ * Scratch cleanup must never mask the phase result (issue #2487 review
+ * PRR-004): on Windows a lingering handle (AV scan, deferred WAL reclaim) can
+ * make rmSync throw EPERM/EBUSY even after close, and an unguarded finally
+ * would replace the intended exit code. The dir is git-ignored scratch, so a
+ * failed cleanup is harmless.
+ */
+function removeScratchDir(dir: string): void {
+	try {
+		rmSync(dir, { recursive: true, force: true });
+	} catch {
+		/* best-effort */
+	}
+}
+
 function canonicalEventJson(seq: number, title: string): string {
 	return JSON.stringify({
 		seq,
@@ -144,7 +159,7 @@ async function phaseObservabilitySink(): Promise<void> {
 		resetTelemetryForTesting();
 		closeAllGroupCommitWriters();
 		closeAllProjectDbs();
-		rmSync(dir, { recursive: true, force: true });
+		removeScratchDir(dir);
 	}
 }
 
@@ -195,7 +210,7 @@ function phasePlanLedger(): void {
 	} finally {
 		closeAllGroupCommitWriters();
 		closeAllProjectDbs();
-		rmSync(dir, { recursive: true, force: true });
+		removeScratchDir(dir);
 	}
 }
 
@@ -227,7 +242,7 @@ function phaseCoordinationStore(): void {
 	} finally {
 		closeAllGroupCommitWriters();
 		closeAllProjectDbs();
-		rmSync(dir, { recursive: true, force: true });
+		removeScratchDir(dir);
 	}
 }
 

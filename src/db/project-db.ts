@@ -637,24 +637,32 @@ function isDuplicateColumn(err: unknown): boolean {
 }
 
 /**
- * True when this migration is a single `ALTER TABLE <t> ADD COLUMN <c>` whose
- * column verifiably exists already (PRAGMA table_info). The table and column
- * names come from our own static migration SQL — never from the error text —
- * so there is no injection surface.
+ * True when EVERY `ALTER TABLE <t> ADD COLUMN <c>` statement in this
+ * migration's static SQL targets a column that verifiably exists already
+ * (PRAGMA table_info). The table and column names come from our own static
+ * migration SQL — never from the error text — so there is no injection
+ * surface. ALL matched columns must exist: v12 carries two ALTER statements,
+ * so tolerating on the first match alone would stamp the version while its
+ * second column was never added (issue #2487 review PRR-002).
  */
 function alterColumnAlreadyApplied(
 	db: Database,
 	migration: Migration,
 ): boolean {
-	const match = /^ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/i.exec(
-		migration.sql.trim(),
-	);
-	if (match === null) return false;
+	const matches = [
+		...migration.sql
+			.trim()
+			.matchAll(/ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/gi),
+	];
+	if (matches.length === 0) return false;
 	try {
-		const columns = db
-			.query<{ name: string }, []>(`PRAGMA table_info(${match[1]})`)
-			.all();
-		return columns.some((c) => c.name === match[2]);
+		for (const match of matches) {
+			const columns = db
+				.query<{ name: string }, []>(`PRAGMA table_info(${match[1]})`)
+				.all();
+			if (!columns.some((c) => c.name === match[2])) return false;
+		}
+		return true;
 	} catch {
 		return false;
 	}

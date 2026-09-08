@@ -31,10 +31,11 @@ if (!existsSync(ENTRY)) {
 }
 
 try {
-	const mod = await import(pathToFileURL(ENTRY).href);
-	if (mod === undefined || mod === null) {
-		fail('entry module imported but is empty');
-	}
+	// Importing runs the entry's top-level `await main()`: any parity-check
+	// failure throws (or sets process.exitCode) inside the entry, so the catch
+	// below is the only failure surface. (The old `mod === undefined` guard
+	// was dead code — a module namespace object is never nullish.)
+	await import(pathToFileURL(ENTRY).href);
 } catch (error) {
 	fail(`entry failed to run under Node: ${error instanceof Error ? error.message : String(error)}`);
 } finally {

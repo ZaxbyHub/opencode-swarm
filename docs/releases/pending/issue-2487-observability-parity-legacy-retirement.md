@@ -1,7 +1,3 @@
----
-issue: 2487
----
-
 ## Observability parity: live/import overlap suppression, sink kill switch, Node parity harness
 
 The SQLite observability query authority double-counted: every event captured

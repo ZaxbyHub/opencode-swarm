@@ -287,12 +287,13 @@ export function registerObservabilityEventSink(directory: string): void {
 			_event: TelemetryEvent,
 			_data: Record<string, unknown>,
 			canonical?: ObservabilityEvent,
+			canonicalContent?: string,
 		) => {
 			const dir = _sinkDirectory;
 			if (dir === null || canonical === undefined) return;
 			if (isObservabilitySinkDisabled()) return;
 			try {
-				appendObservabilityEventDb(dir, canonical);
+				appendObservabilityEventDb(dir, canonical, canonicalContent);
 			} catch (err) {
 				// Fail-open: the sink never propagates failures into emit().
 				// Typed DB write errors surface their classified category
@@ -396,7 +397,10 @@ function recoveredEndEventId(canonical: ObservabilityEvent): string {
 		.slice(0, 32);
 }
 
-function buildLiveRow(canonical: ObservabilityEvent): BuiltRow {
+function buildLiveRow(
+	canonical: ObservabilityEvent,
+	canonicalContent?: string,
+): BuiltRow {
 	const violations = canonical.relationshipViolations ?? [];
 	const fallbackBuild = violations.includes('observation_build_failed');
 	let payloadJson: string;
@@ -427,10 +431,16 @@ function buildLiveRow(canonical: ObservabilityEvent): BuiltRow {
 	// canonical line content — never from payload_json, which the quarantine
 	// paths above may have stubbed or truncated. Quarantined live rows keep a
 	// hash because their JSONL line exists and an imported copy would be
-	// quarantined too (skipping loses nothing queryable).
+	// quarantined too (skipping loses nothing queryable). emit() hands us the
+	// already-stringified content, so the hash path does not re-stringify
+	// (issue #2487 review PRR-005); direct callers fall back to computing it.
 	let lineHash: string | null = null;
 	try {
-		lineHash = lineHashOf(_internals.canonicalLineContent(canonical));
+		lineHash = lineHashOf(
+			typeof canonicalContent === 'string'
+				? canonicalContent
+				: _internals.canonicalLineContent(canonical),
+		);
 	} catch {
 		lineHash = null;
 	}
@@ -567,10 +577,11 @@ function upsertHealthDelta(
 export function appendObservabilityEventDb(
 	directory: string,
 	canonical: ObservabilityEvent,
+	canonicalContent?: string,
 ): void {
 	if (isObservabilitySinkDisabled()) return;
 	const root = canonicalProjectKey(directory);
-	const row = buildLiveRow(canonical);
+	const row = buildLiveRow(canonical, canonicalContent);
 	const h = _healthDeltas.get(root) ?? emptyHealth();
 	h.accepted += 1;
 	if (row.columns.quarantined === 1) h.quarantined += 1;
