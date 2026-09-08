@@ -1801,7 +1801,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/plan/ledger-sqlite.ts — registry-backed SQLite event/state/import mutations; every transaction uses synchronous=FULL through the project DB durability policy',
 		],
 		readerCitations: [
-			'src/plan/ledger.ts:998 readLedgerEvents / :2335 readLedgerEventsWithIntegrity — authority-mode coordinator; JSONL full-file replay in file-shadow mode, ordered SQLite rows after cutover',
+			'src/plan/ledger.ts:998 readLedgerEvents / :2360 readLedgerEventsWithIntegrity — authority-mode coordinator; JSONL full-file replay in file-shadow mode, ordered SQLite rows after cutover',
 			'src/plan/ledger.ts:984 getLatestLedgerSeq / loadLastApprovedPlan — coordinated authority reads',
 		],
 		schemaVersion: 'versioned plan events (docs/plan-durability.md)',

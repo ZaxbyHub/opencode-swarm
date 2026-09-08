@@ -173,6 +173,7 @@ export const _internals: {
 	loadPlanJsonOnly: typeof loadPlanJsonOnly;
 	readPlanJsonUtf8: typeof readPlanJsonUtf8;
 	readPlanFileUtf8: typeof readPlanFileUtf8;
+	verifyWrittenPlanJson: typeof verifyWrittenPlanJson;
 	regeneratePlanMarkdown: typeof regeneratePlanMarkdown;
 	isGitRepo: typeof isGitRepo;
 	isEpicModeActiveForProject: typeof isEpicModeActiveForProject;
@@ -185,6 +186,7 @@ export const _internals: {
 	loadPlanJsonOnly,
 	readPlanJsonUtf8,
 	readPlanFileUtf8,
+	verifyWrittenPlanJson,
 	regeneratePlanMarkdown,
 	isGitRepo,
 	isEpicModeActiveForProject,
@@ -992,20 +994,36 @@ export async function loadPlan(
 				}
 				// Try replay from ledger before legacy migration
 				if (await ledgerExists(directory)) {
-					const ledgerEventsForCatch = await readLedgerEvents(directory);
+					// #2531: the identity anchor must come from the
+					// integrity-checked verified prefix — a truncated ledger has
+					// no verified anchor identity, and the conservative skip
+					// below keeps untrusted lenient (post-poison) events out of
+					// recovery decisions.
+					const catchIntegrity = await readLedgerEventsWithIntegrity(directory);
+					const ledgerEventsForCatch = catchIntegrity.events;
 					const catchFirstEvent =
 						ledgerEventsForCatch.length > 0 ? ledgerEventsForCatch[0] : null;
 					const identityMatch =
 						rawPlanId === null || // Can't determine identity — skip rebuild (conservative)
-						catchFirstEvent === null || // Empty ledger — no identity to compare
+						catchFirstEvent === null || // Empty verified prefix — no identity to compare
 						catchFirstEvent.plan_id === rawPlanId; // Same identity — safe to rebuild
 					if (!identityMatch) {
 						warn(
 							`[loadPlan] Ledger identity mismatch in validation-failure path (ledger: ${catchFirstEvent?.plan_id}, plan: ${rawPlanId}) — skipping ledger rebuild (migration detected).`,
 						);
 					} else if (catchFirstEvent !== null && rawPlanId !== null) {
-						// Identities match — attempt ledger rebuild
-						const rebuilt = await replayFromLedger(directory);
+						// Identities match — attempt ledger rebuild. A replay error
+						// must not escape loadPlan (#2531): it falls through to the
+						// approved-snapshot rung below, mirroring the
+						// missing-projection path's ladder.
+						let rebuilt: Plan | null = null;
+						try {
+							rebuilt = await replayFromLedger(directory);
+						} catch (replayError) {
+							warn(
+								`[loadPlan] Ledger replay threw in validation-failure path: ${replayError instanceof Error ? replayError.message : String(replayError)}. Falling back to critic-approved snapshot before legacy migration.`,
+							);
+						}
 						if (rebuilt) {
 							await rebuildPlan(directory, rebuilt, {
 								reason: 'validation_failure_recovery',
@@ -1014,6 +1032,53 @@ export async function loadPlan(
 								'[loadPlan] Rebuilt plan from ledger after validation failure. Projection was stale.',
 							);
 							return rebuilt;
+						}
+						// #2531 (AC1): replay exhausted (e.g. a trailing plan_reset).
+						// Consult the critic-approved snapshot BEFORE the lossy
+						// markdown migration — richer authoritative state must
+						// never be silently replaced by a derived projection. Same
+						// ladder as the missing-projection path (Step 3 below).
+						try {
+							const approved = await loadLastApprovedPlan(
+								directory,
+								catchFirstEvent.plan_id,
+							);
+							if (approved) {
+								const { removedCount } =
+									await savePlanWithAutoAcknowledgedRemovals(
+										directory,
+										approved.plan,
+										'load_plan_recovery_from_approved_snapshot',
+										'restore from critic-approved snapshot',
+									);
+								if (removedCount > 0) {
+									(approved.plan as RuntimePlan)._midLoadRemovals = {
+										count: removedCount,
+										source: 'load_plan_recovery_from_approved_snapshot',
+									};
+								}
+								// Heal the ledger tail so a later loadPlan (fresh
+								// process, empty startup cache) does not re-enter
+								// recovery against the same exhausted replay.
+								try {
+									await takeSnapshotEvent(directory, approved.plan, {
+										source: 'recovery_from_approved_snapshot',
+										approvalMetadata: approved.approval,
+									});
+								} catch (healError) {
+									warn(
+										`[loadPlan] Recovery-heal snapshot append failed: ${healError instanceof Error ? healError.message : String(healError)}. Next loadPlan may re-enter recovery path.`,
+									);
+								}
+								warn(
+									`[loadPlan] Recovered from critic-approved snapshot seq=${approved.seq} after validation failure with exhausted ledger replay (approved snapshot beats lossy Markdown migration).`,
+								);
+								return approved.plan;
+							}
+						} catch (approvedError) {
+							warn(
+								`[loadPlan] Approved-snapshot recovery failed in validation-failure path: ${approvedError instanceof Error ? approvedError.message : String(approvedError)}`,
+							);
 						}
 					}
 				}
@@ -1040,6 +1105,9 @@ export async function loadPlan(
 							source: 'load_plan_migration_from_md',
 						};
 					}
+					// #2531 (AC4): durable provenance — the ledger must record
+					// that this plan came from a lossy markdown migration.
+					await appendMigrationProvenanceEvent(directory, migrated);
 					return migrated;
 				}
 				// If plan.md doesn't exist either, fall through to step 3
@@ -1097,7 +1165,12 @@ export async function loadPlan(
 			// ledger contained a stale critic_approved snapshot from a PRIOR swarm
 			// would silently resurrect the wrong plan.
 			try {
-				const anchorEvents = await readLedgerEvents(directory);
+				// #2531: anchor identity from the integrity-checked verified
+				// prefix (readLedgerEventsWithIntegrity), so approved-snapshot
+				// recovery can never be anchored (or satisfied) by untrusted
+				// post-poison events.
+				const anchorIntegrity = await readLedgerEventsWithIntegrity(directory);
+				const anchorEvents = anchorIntegrity.events;
 				// Empty-events guard: ledgerExists() returned true above, but
 				// readLedgerEvents() can also return [] for an unreadable/corrupt
 				// ledger (silent failure mode in src/plan/ledger.ts). In that
@@ -1169,8 +1242,21 @@ export async function loadPlan(
 	const planMdContent = await readSwarmFileAsync(directory, 'plan.md', cache);
 	if (planMdContent !== null) {
 		const migrated = migrateLegacyPlan(planMdContent);
-		// Save the migrated plan (writes both files)
-		await savePlan(directory, migrated);
+		// Save the migrated plan (writes both files) with removal disclosure,
+		// then record durable migration provenance (#2531 AC4).
+		const { removedCount } = await savePlanWithAutoAcknowledgedRemovals(
+			directory,
+			migrated,
+			'load_plan_migration_from_md',
+			'migrate legacy plan.md to plan.json',
+		);
+		if (removedCount > 0) {
+			(migrated as RuntimePlan)._midLoadRemovals = {
+				count: removedCount,
+				source: 'load_plan_migration_from_md',
+			};
+		}
+		await appendMigrationProvenanceEvent(directory, migrated);
 		return migrated;
 	}
 
@@ -1259,6 +1345,114 @@ export async function withPlanLifecycleLock<T>(
  * Validate against PlanSchema (throw on invalid), write to .swarm/plan.json via atomic temp+rename pattern,
  * then derive and write .swarm/plan.md
  */
+/**
+ * #2531 (AC5): explicit durability outcome of a savePlan call. `complete` means
+ * every projection write was performed and the canonical plan.json projection
+ * was read-back verified; `incomplete` means an advisory surface (plan.md)
+ * failed to write — the save still succeeded for the authoritative pair
+ * (ledger + plan.json), and the failure is disclosed here and via the
+ * `plan_md_write_failed` telemetry event instead of being silently swallowed.
+ */
+export interface SavePlanResult {
+	durability: 'complete' | 'incomplete';
+	degraded_surfaces: string[];
+	md_write_error?: string;
+}
+
+/**
+ * #2531 (AC5): thrown when the freshly persisted plan.json cannot be read back
+ * or does not match the projected plan — a save that cannot verify its written
+ * state reports failure instead of claiming successful readable state.
+ */
+export class PlanWriteVerificationError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'PlanWriteVerificationError';
+	}
+}
+
+/**
+ * #2531 (AC5): read the freshly persisted canonical plan.json projection back
+ * and verify it is fatally-decodable UTF-8 that parses to exactly the
+ * projected plan. Routed through the shared retry-aware reader
+ * (`readSwarmFileAsync`) so transient Windows AV/indexer locks and macOS
+ * rename-visibility races are retried before the save is declared failed.
+ * Exposed via `_internals` for fault-injecting tests (AGENTS.md invariant 7 DI
+ * convention — no mock.module).
+ */
+async function verifyWrittenPlanJson(
+	directory: string,
+	expected: Plan,
+): Promise<void> {
+	let content: string | null;
+	try {
+		content = await readSwarmFileAsync(
+			directory,
+			'plan.json',
+			undefined,
+			(filePath) => _internals.readPlanFileUtf8(filePath),
+			false,
+		);
+	} catch (error) {
+		throw new PlanWriteVerificationError(
+			`PLAN_WRITE_VERIFICATION_FAILED: plan.json read-back could not be read (${error instanceof Error ? error.message : String(error)})`,
+		);
+	}
+	if (content === null) {
+		throw new PlanWriteVerificationError(
+			'PLAN_WRITE_VERIFICATION_FAILED: plan.json read-back returned no content after write',
+		);
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(content);
+	} catch (error) {
+		throw new PlanWriteVerificationError(
+			`PLAN_WRITE_VERIFICATION_FAILED: plan.json read-back did not parse (${error instanceof Error ? error.message : String(error)})`,
+		);
+	}
+	// Strict content equality against what this save just serialized. The
+	// ledger-hash normalizer deliberately excludes fields (fr_refs,
+	// specMtime, specHash); the read-back check must NOT — corruption in any
+	// persisted field is a verification failure.
+	if (JSON.stringify(parsed) !== JSON.stringify(expected)) {
+		throw new PlanWriteVerificationError(
+			'PLAN_WRITE_VERIFICATION_FAILED: plan.json read-back content differs from the projected plan',
+		);
+	}
+}
+
+/**
+ * #2531 (AC4): append the durable provenance event recording that the current
+ * plan came from a lossy legacy plan.md migration. Mirrors the rebuildPlan /
+ * importCheckpoint `plan_rebuilt` precedents; the ledger stays append-only and
+ * historical records needed to recover a degraded plan are retained.
+ */
+async function appendMigrationProvenanceEvent(
+	directory: string,
+	plan: Plan,
+): Promise<void> {
+	try {
+		await appendLedgerEvent(directory, {
+			event_type: 'plan_rebuilt',
+			source: 'load_plan_migration_from_md',
+			plan_id: derivePlanId(plan),
+			payload: {
+				reason: 'load_plan_migration_from_md',
+				phases_count: plan.phases.length,
+				tasks_count: plan.phases.reduce(
+					(sum, phase) => sum + phase.tasks.length,
+					0,
+				),
+			},
+		});
+	} catch (error) {
+		warn(
+			`[loadPlan] Markdown-migration provenance event append failed (plan remains migrated): ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
 export async function savePlan(
 	directory: string,
 	plan: Plan,
@@ -1285,7 +1479,7 @@ export async function savePlan(
 		 */
 		preCommitCheck?: () => void;
 	},
-): Promise<void> {
+): Promise<SavePlanResult> {
 	// Fail-fast: reject blank or whitespace-only directory inputs before any I/O
 	if (
 		directory === null ||
@@ -1313,11 +1507,10 @@ export async function savePlan(
 			);
 		}
 		try {
-			await savePlan(directory, plan, {
+			return await savePlan(directory, plan, {
 				...options,
 				planLockAlreadyHeld: true,
 			});
-			return;
 		} finally {
 			if (lockResult.lock._release) {
 				await lockResult.lock._release().catch(() => {});
@@ -1728,6 +1921,11 @@ export async function savePlan(
 		}
 	}
 	invalidateCachedArtifact(planPath);
+	// #2531 (AC5): read the canonical projection back and verify it matches
+	// what this save just wrote. Routed through the retry-aware reader inside
+	// the helper; a genuinely unreadable or mismatched write throws
+	// PlanWriteVerificationError instead of a false success.
+	await _internals.verifyWrittenPlanJson(directory, projectedPlan);
 
 	// Write in-progress marker right after plan.json rename so that
 	// PlanSyncWorker's checkForUnauthorizedWrite() can skip its mtime
@@ -1751,6 +1949,9 @@ export async function savePlan(
 
 	// Derive and write markdown atomically (with content hash for sync detection).
 	// plan.md is a derived/advisory projection — failure here should not fail savePlan (#444 item 2).
+	// #2531 (AC5): the failure is still disclosed as an explicit incomplete-durability
+	// result (below) plus the plan_md_write_failed telemetry event — never a silent success.
+	let mdWriteError: string | undefined;
 	try {
 		const contentHash = computePlanContentHash(projectedPlan);
 		const markdown = derivePlanMarkdown(projectedPlan);
@@ -1774,6 +1975,7 @@ export async function savePlan(
 	} catch (mdError) {
 		const message =
 			mdError instanceof Error ? mdError.message : String(mdError);
+		mdWriteError = message;
 		warn(
 			`[savePlan] plan.md write failed (non-fatal, plan.json is authoritative): ${message}`,
 		);
@@ -1859,6 +2061,17 @@ export async function savePlan(
 			);
 		}
 	}
+
+	// #2531 (AC5): explicit durability outcome — a failed advisory-surface
+	// (plan.md) write is disclosed here instead of a silent plain success.
+	if (mdWriteError !== undefined) {
+		return {
+			durability: 'incomplete',
+			degraded_surfaces: ['plan.md'],
+			md_write_error: mdWriteError,
+		};
+	}
+	return { durability: 'complete', degraded_surfaces: [] };
 }
 
 /**
