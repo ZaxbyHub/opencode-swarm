@@ -4344,6 +4344,12 @@ export async function recoverArmedPrWorkflow(
 						Record<PrReviewBaseDimensionId, PrReviewDimensionCancellationRecord>
 				  >
 				| undefined = state.prReviewDimensionCancellations;
+			// One recovery instant for every surface: the reducer-owned
+			// dimension cancellations, the audit event, the terminal state, and
+			// the returned receipt must all carry the same timestamp (pinned by
+			// the armed-recovery contract tests). A second clock read here can
+			// straddle a millisecond boundary and desync them.
+			const recoveredAt = isoNow();
 			if (state.mode === 'PR_REVIEW' && state.prHeadSha) {
 				const ctx = await createPrReviewGateContext(directory, state);
 				const settlement = derivePrReviewDimensionSettlement(
@@ -4368,7 +4374,7 @@ export async function recoverArmedPrWorkflow(
 							generation: state.revision,
 						},
 						dimensionsToCancel: cancelledDimensions,
-						nowIso: isoNow(),
+						nowIso: recoveredAt,
 						reason: sanitizedReason,
 					});
 					if (recoveryOutcome.status === 'rejected') {
@@ -4381,7 +4387,6 @@ export async function recoverArmedPrWorkflow(
 							.prReviewDimensionCancellations ?? cancellations;
 				}
 			}
-			const recoveredAt = isoNow();
 			// 2. Exactly ONE bounded audit event, appended BEFORE the state
 			// mutation: no lane output, prompts, or secrets — bounded identity and
 			// outcome fields only. Best-effort (non-fatal), same discipline as abort.
