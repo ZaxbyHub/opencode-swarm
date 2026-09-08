@@ -8,17 +8,22 @@
  * treatment.
  */
 
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import { resolveHiveDataDir } from '../knowledge/hive-paths.js';
 import { assertProjectRoot } from '../utils/project-boundary.js';
 
 export const REVIEW_ROUTE_RECEIPT_VERSION = 1 as const;
 
 const IdentitySchema = z.string().trim().min(1).max(256);
+const RouteReceiptMacSchema = z
+	.string()
+	.regex(/^[0-9a-f]{64}$/, 'route receipt MAC must be a SHA-256 HMAC');
 
 export const ReviewRouteReceiptSchema = z
 	.object({
@@ -43,6 +48,8 @@ export const ReviewRouteReceiptSchema = z
 			})
 			.optional(),
 		createdAt: z.string().trim().min(1).max(80).optional(),
+		/** Authenticated when persisted; builders intentionally leave this absent. */
+		mac: RouteReceiptMacSchema.optional(),
 	})
 	.strict();
 
@@ -56,6 +63,7 @@ export const ReviewRouteRouterErrorReceiptSchema = z
 		taskId: IdentitySchema.optional(),
 		detail: z.string().trim().max(512).optional(),
 		createdAt: z.string().trim().min(1).max(80).optional(),
+		mac: RouteReceiptMacSchema.optional(),
 	})
 	.strict();
 
@@ -66,6 +74,7 @@ const ReviewRoutePendingReceiptSchema = z
 		sessionId: IdentitySchema,
 		taskId: IdentitySchema,
 		createdAt: z.string().trim().min(1).max(80).optional(),
+		mac: RouteReceiptMacSchema.optional(),
 	})
 	.strict();
 
@@ -294,6 +303,132 @@ async function ensureSafeParent(
 
 const MAX_ROUTE_RECEIPT_BYTES = 64 * 1024;
 
+/**
+ * Persisted route receipts are workspace data, so their MAC key must not live
+ * beside them. The hive data directory is the existing platform-specific,
+ * user-scoped app-data root (LOCALAPPDATA on Windows, Application Support on
+ * macOS, and XDG data on Linux). It is deliberately not derived from project
+ * contents and is never cached in process memory. This authenticates against
+ * workspace-level mutation by an actor that cannot read private app-data; an
+ * arbitrary process already running as the same OS user can read this key and
+ * remains outside the protection boundary.
+ */
+const ROUTE_RECEIPT_SECRET_FILE = 'review-route-receipts.key';
+const ROUTE_RECEIPT_MAC_CONTEXT = 'opencode-swarm/review-route-receipt/v1\0';
+
+function routeReceiptSecretPath(): string {
+	return path.join(resolveHiveDataDir(), ROUTE_RECEIPT_SECRET_FILE);
+}
+
+function parseRouteReceiptSecret(raw: string): Buffer | null {
+	const value = raw.trim();
+	return /^[0-9a-f]{64}$/.test(value) ? Buffer.from(value, 'hex') : null;
+}
+
+async function readRouteReceiptSecret(): Promise<Buffer> {
+	const secretPath = routeReceiptSecretPath();
+	try {
+		const stat = await fsp.lstat(secretPath);
+		if (stat.isSymbolicLink() || !stat.isFile()) {
+			throw new Error('ROUTE_RECEIPT_SECRET_INVALID');
+		}
+		const secret = parseRouteReceiptSecret(
+			await fsp.readFile(secretPath, 'utf8'),
+		);
+		if (!secret) throw new Error('ROUTE_RECEIPT_SECRET_INVALID');
+		return secret;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+	}
+
+	// Exclusive creation makes concurrent first-use initialization converge on
+	// one user-scoped key. A loser of the race re-reads the winner's key.
+	await fsp.mkdir(path.dirname(secretPath), { recursive: true });
+	const generated = randomBytes(32);
+	try {
+		await fsp.writeFile(secretPath, generated.toString('hex'), {
+			encoding: 'utf8',
+			flag: 'wx',
+			mode: 0o600,
+		});
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+		return readRouteReceiptSecret();
+	}
+	try {
+		await fsp.chmod(secretPath, 0o600);
+	} catch {
+		// Windows user-profile ACLs provide the relevant scope; POSIX mode bits
+		// are best-effort hardening only.
+	}
+	return generated;
+}
+
+function readRouteReceiptSecretSync(): Buffer | null {
+	try {
+		const secretPath = routeReceiptSecretPath();
+		const stat = fs.lstatSync(secretPath);
+		if (stat.isSymbolicLink() || !stat.isFile()) return null;
+		return parseRouteReceiptSecret(fs.readFileSync(secretPath, 'utf8'));
+	} catch {
+		// A missing/unreadable user secret must fail closed at the receipt gate.
+		return null;
+	}
+}
+
+function canonicalRouteReceiptJson(value: unknown): string {
+	if (value === null || typeof value !== 'object') return JSON.stringify(value);
+	if (Array.isArray(value)) {
+		return `[${value.map((entry) => canonicalRouteReceiptJson(entry)).join(',')}]`;
+	}
+	return `{${Object.entries(value as Record<string, unknown>)
+		.filter(([, entry]) => entry !== undefined)
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(
+			([key, entry]) =>
+				`${JSON.stringify(key)}:${canonicalRouteReceiptJson(entry)}`,
+		)
+		.join(',')}}`;
+}
+
+function routeReceiptMacPayload(receipt: ReviewRouteRecord): string {
+	const { mac: _mac, ...payload } = receipt;
+	return `${ROUTE_RECEIPT_MAC_CONTEXT}${canonicalRouteReceiptJson(payload)}`;
+}
+
+function computeRouteReceiptMac(
+	receipt: ReviewRouteRecord,
+	secret: Buffer,
+): string {
+	return createHmac('sha256', secret)
+		.update(routeReceiptMacPayload(receipt), 'utf8')
+		.digest('hex');
+}
+
+function hasValidRouteReceiptMac(
+	receipt: ReviewRouteRecord,
+	secret: Buffer | null,
+): boolean {
+	if (
+		!secret ||
+		!receipt.mac ||
+		!RouteReceiptMacSchema.safeParse(receipt.mac).success
+	)
+		return false;
+	const expected = Buffer.from(computeRouteReceiptMac(receipt, secret), 'hex');
+	const supplied = Buffer.from(receipt.mac, 'hex');
+	return (
+		supplied.length === expected.length && timingSafeEqual(supplied, expected)
+	);
+}
+
+function authenticatePersistedRouteReceipt(
+	receipt: ReviewRouteRecord,
+	secret: Buffer | null,
+): ReviewRouteRecord | null {
+	return hasValidRouteReceiptMac(receipt, secret) ? receipt : null;
+}
+
 export async function persistReviewRouteReceipt(input: {
 	projectRoot: string;
 	receipt: ReviewRouteRecord;
@@ -314,7 +449,11 @@ export async function persistReviewRouteReceipt(input: {
 			: (parsed.taskId ?? 'unknown');
 	const filePath = routeReceiptPath(input.projectRoot, sessionId, taskId);
 	await ensureSafeParent(input.projectRoot, filePath);
-	const encoded = JSON.stringify(parsed, null, 2);
+	const authenticated: ReviewRouteRecord = {
+		...parsed,
+		mac: computeRouteReceiptMac(parsed, await readRouteReceiptSecret()),
+	};
+	const encoded = JSON.stringify(authenticated, null, 2);
 	if (Buffer.byteLength(encoded, 'utf8') > MAX_ROUTE_RECEIPT_BYTES) {
 		throw new Error('ROUTE_RECEIPT_OVERSIZED: receipt exceeds size bound');
 	}
@@ -366,28 +505,33 @@ export async function readReviewRouteReceipt(input: {
 	if (!parsed.success) {
 		throw new Error('ROUTE_RECEIPT_INVALID: receipt failed schema validation');
 	}
+	const authenticated = authenticatePersistedRouteReceipt(
+		parsed.data,
+		readRouteReceiptSecretSync(),
+	);
+	if (!authenticated) return null;
 	if (
-		(parsed.data.kind === 'review_route_receipt' ||
-			parsed.data.kind === 'review_route_pending') &&
-		(parsed.data.sessionId !== input.sessionId ||
-			parsed.data.taskId !== input.taskId)
+		(authenticated.kind === 'review_route_receipt' ||
+			authenticated.kind === 'review_route_pending') &&
+		(authenticated.sessionId !== input.sessionId ||
+			authenticated.taskId !== input.taskId)
 	) {
 		throw new Error(
 			'ROUTE_RECEIPT_IDENTITY_MISMATCH: receipt path and payload differ',
 		);
 	}
 	if (
-		parsed.data.kind === 'review_route_router_error' &&
-		parsed.data.sessionId !== undefined &&
-		parsed.data.taskId !== undefined &&
-		(parsed.data.sessionId !== input.sessionId ||
-			parsed.data.taskId !== input.taskId)
+		authenticated.kind === 'review_route_router_error' &&
+		authenticated.sessionId !== undefined &&
+		authenticated.taskId !== undefined &&
+		(authenticated.sessionId !== input.sessionId ||
+			authenticated.taskId !== input.taskId)
 	) {
 		throw new Error(
 			'ROUTE_RECEIPT_IDENTITY_MISMATCH: receipt path and payload differ',
 		);
 	}
-	return parsed.data;
+	return authenticated;
 }
 
 /** Synchronous twin for the existing synchronous reviewer-gate predicate. */
@@ -437,28 +581,33 @@ export function readReviewRouteReceiptSync(input: {
 	if (!parsed.success) {
 		throw new Error('ROUTE_RECEIPT_INVALID: receipt failed schema validation');
 	}
+	const authenticated = authenticatePersistedRouteReceipt(
+		parsed.data,
+		readRouteReceiptSecretSync(),
+	);
+	if (!authenticated) return null;
 	if (
-		(parsed.data.kind === 'review_route_receipt' ||
-			parsed.data.kind === 'review_route_pending') &&
-		(parsed.data.sessionId !== input.sessionId ||
-			parsed.data.taskId !== input.taskId)
+		(authenticated.kind === 'review_route_receipt' ||
+			authenticated.kind === 'review_route_pending') &&
+		(authenticated.sessionId !== input.sessionId ||
+			authenticated.taskId !== input.taskId)
 	) {
 		throw new Error(
 			'ROUTE_RECEIPT_IDENTITY_MISMATCH: receipt path and payload differ',
 		);
 	}
 	if (
-		parsed.data.kind === 'review_route_router_error' &&
-		parsed.data.sessionId !== undefined &&
-		parsed.data.taskId !== undefined &&
-		(parsed.data.sessionId !== input.sessionId ||
-			parsed.data.taskId !== input.taskId)
+		authenticated.kind === 'review_route_router_error' &&
+		authenticated.sessionId !== undefined &&
+		authenticated.taskId !== undefined &&
+		(authenticated.sessionId !== input.sessionId ||
+			authenticated.taskId !== input.taskId)
 	) {
 		throw new Error(
 			'ROUTE_RECEIPT_IDENTITY_MISMATCH: receipt path and payload differ',
 		);
 	}
-	return parsed.data;
+	return authenticated;
 }
 
 function parseRouteReceipt(value: unknown): ReviewRouteRecord | null {
@@ -554,14 +703,17 @@ export function enforceReviewRouteReceipt(
 			return fail('ROUTE_RECEIPT_BINDING_MISSING');
 		}
 		const identity = evidence.identity.trim();
+		// Validate the identity before looking it up. Otherwise an empty identity
+		// is misreported as merely unlisted, hiding malformed route evidence behind
+		// a weaker diagnostic (FB-019).
+		if (!identity || identity.length > 256) {
+			return fail('ROUTE_RECEIPT_INVALID_IDENTITY');
+		}
 		const expectedRole = expected.get(identity);
 		if (!expectedRole) return fail('ROUTE_RECEIPT_IDENTITY_UNLISTED');
 		if (expectedRole !== evidence.role)
 			return fail('ROUTE_RECEIPT_ROLE_MISMATCH');
 		if (seen.has(identity)) return fail('ROUTE_RECEIPT_DUPLICATE');
-		if (!identity || identity.length > 256) {
-			return fail('ROUTE_RECEIPT_INVALID_IDENTITY');
-		}
 		if (evidence.sessionId && evidence.sessionId !== route.sessionId) {
 			return fail('ROUTE_RECEIPT_SESSION_MISMATCH');
 		}

@@ -11,6 +11,7 @@ import {
 	ingestBackgroundStageBCompletion,
 } from '../../../src/background/stage-b-gates.js';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot.js';
+import { readTaskGateRequirementsReceipts } from '../../../src/evidence/task-gate-requirements.js';
 import {
 	readTaskEvidence,
 	transitionTaskWorkflowEvidence,
@@ -18,6 +19,7 @@ import {
 import {
 	buildReviewRouteReceipt,
 	persistReviewRouteReceipt,
+	routeReceiptPathForTask,
 } from '../../../src/review/routing-enforcement.js';
 import {
 	advanceTaskState,
@@ -29,9 +31,11 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state.js';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory = '';
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 function git(...args: string[]): void {
 	const result = spawnSync('git', args, {
@@ -120,6 +124,7 @@ async function ingest(
 }
 
 beforeEach(() => {
+	isolatedEnv = createIsolatedTestEnv();
 	resetSwarmState();
 	directory = canonicalMkdtemp('issue-2491-stage-b-route-');
 	fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
@@ -135,6 +140,8 @@ beforeEach(() => {
 afterEach(() => {
 	resetSwarmState();
 	fs.rmSync(directory, { recursive: true, force: true });
+	isolatedEnv?.cleanup();
+	isolatedEnv = undefined;
 });
 
 describe('background Stage-B route slots (issue #2491)', () => {
@@ -240,7 +247,52 @@ describe('background Stage-B route slots (issue #2491)', () => {
 		expect(await readTaskEvidence(directory, taskId)).toBeNull();
 	});
 
-	test('live 1+1 completion records each tuple before advancing', async () => {
+	test('parent-unavailable recovery requires an identity-bound router error (F-006)', async () => {
+		const taskId = '1.25';
+		const receiptPath = routeReceiptPathForTask(
+			directory,
+			'parent-2491',
+			taskId,
+		);
+		fs.mkdirSync(path.dirname(receiptPath), { recursive: true });
+		// Previous code accepted this readable router-error marker when the parent
+		// session had disappeared, even though it could not bind recovery to the
+		// exact session/task that was being resumed.
+		fs.writeFileSync(
+			receiptPath,
+			JSON.stringify({
+				kind: 'review_route_router_error',
+				version: 1,
+				code: 'ROUTER_FAILED',
+				failOpen: true,
+			}),
+			'utf8',
+		);
+		resetSwarmState();
+
+		const result = await ingestBackgroundStageBCompletion({
+			directory,
+			record: stageBRecord(
+				taskId,
+				'reviewer',
+				'recovery-call',
+				'recovery-child',
+				captureWorkspaceSnapshot(directory),
+			),
+			result: {
+				text: `[REVIEWED] | task-${taskId} | APPROVED | recovery check`,
+				chars: 60,
+				truncated: false,
+				digest: 'recovery-digest',
+			},
+		});
+
+		expect(result.ok).toBe(false);
+		expect(result.reason).toContain('identity-bound');
+		expect(await readTaskEvidence(directory, taskId)).toBeNull();
+	});
+
+	test('live 1+1 completion records each tuple before advancing (F-008)', async () => {
 		const taskId = '1.3';
 		await prepareTask(taskId);
 		await persistReviewRouteReceipt({
@@ -255,15 +307,51 @@ describe('background Stage-B route slots (issue #2491)', () => {
 			}),
 		});
 
-		expect(
-			await ingest(taskId, 'reviewer', 'review-call-1', 'review-child-1'),
-		).toMatchObject({ ok: true });
+		const reviewerResult = await ingest(
+			taskId,
+			'reviewer',
+			'review-call-1',
+			'review-child-1',
+		);
+		expect(reviewerResult).toMatchObject({ ok: true });
+		// Previous tests stopped at in-memory route counts. Verify the durable
+		// task-gate receipt records the exact reviewer binding before advancing.
+		const reviewerReceipts = await readTaskGateRequirementsReceipts(
+			directory,
+			taskId,
+		);
+		expect(reviewerReceipts.at(-1)?.routeBinding).toMatchObject({
+			role: 'reviewer',
+			identity: 'reviewer-a',
+			callId: 'review-call-1',
+			childSessionId: 'review-child-1',
+			generation: 1,
+		});
 		expect(
 			getTaskState(swarmState.agentSessions.get('parent-2491')!, taskId),
 		).toBe('reviewer_run');
-		expect(
-			await ingest(taskId, 'test_engineer', 'test-call-1', 'test-child-1'),
-		).toMatchObject({ ok: true });
+		const testEngineerResult = await ingest(
+			taskId,
+			'test_engineer',
+			'test-call-1',
+			'test-child-1',
+		);
+		expect(testEngineerResult).toMatchObject({ ok: true });
+		const durableReceipts = await readTaskGateRequirementsReceipts(
+			directory,
+			taskId,
+		);
+		expect(durableReceipts.at(-1)?.routeBinding).toMatchObject({
+			role: 'test_engineer',
+			identity: 'test-a',
+			callId: 'test-call-1',
+			childSessionId: 'test-child-1',
+			generation: 1,
+		});
+		// `routeComplete: true` is represented durably by the exact-task workflow
+		// reaching tests_run after the second bound route tuple is recorded.
+		const durableTaskEvidence = await readTaskEvidence(directory, taskId);
+		expect(durableTaskEvidence?.workflow?.state).toBe('tests_run');
 		expect(
 			getTaskState(swarmState.agentSessions.get('parent-2491')!, taskId),
 		).toBe('tests_run');

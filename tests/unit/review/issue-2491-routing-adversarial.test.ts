@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -18,7 +18,19 @@ import {
 	persistReviewRouteReceipt,
 	readReviewRouteReceipt,
 } from '../../../src/review/routing-enforcement.js';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
+
+beforeEach(() => {
+	isolatedEnv = createIsolatedTestEnv();
+});
+
+afterEach(() => {
+	isolatedEnv?.cleanup();
+	isolatedEnv = undefined;
+});
 
 const route = buildReviewRouteReceipt({
 	sessionId: 'parent-2491',

@@ -12438,10 +12438,18 @@ export async function completePrWorkflow(
 			}
 			// Fall through to the shared terminal clear below.
 		} else {
-			// The pre-ladder verdict-matrix check ran in the dispatch above;
-			// run the terminal ladder, then re-dispatch against the
-			// post-ladder settlement in case state changed underneath the
-			// checks.
+			// Fail fast on an illegal verdict BEFORE the expensive terminal
+			// ladder, then re-validate against the post-ladder settlement in
+			// case state changed underneath the checks.
+			// Coverage-only preflight has no finding-policy artifact yet.  Pass an
+			// explicit empty set so the policy API cannot silently fall back to an
+			// omitted-findings compatibility path.
+			const preAllowed = allowedPrReviewReportVerdicts(settlement.kind, []);
+			if (!preAllowed.includes(verdict)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${settlement.kind} completion allows report_verdict ${preAllowed.join(' | ')}; got "${verdict}". Partial coverage never approves and never claims a full review.`,
+				);
+			}
 			const ready = await assertPrReviewTerminalReady(
 				directory,
 				sessionID,

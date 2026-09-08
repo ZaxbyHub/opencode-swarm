@@ -34,6 +34,15 @@ export const STATE_MOCK_TRANSITIVE_STUBS = {
 	advanceTaskStateAndPersist: async () => undefined,
 	getTaskState: () => undefined,
 	recordStageBCompletion: () => undefined,
+	// Issue #2491 route-bound Stage-B projection. Close-command tests do not
+	// exercise these bindings, but transitive imports resolve every named export
+	// while state.ts is mocked.
+	recordStageBRouteEvidence: () => undefined,
+	getStageBRouteEvidence: () => [],
+	clearStageBRouteEvidence: () => undefined,
+	markStageBRouteRequired: () => undefined,
+	isStageBRouteRequired: () => false,
+	clearStageBRouteRequired: () => undefined,
 	hasBothStageBCompletions: () => false,
 	isCouncilGateActive: async () => false,
 	MAX_REVIEWER_SCOPE_GENERATION_FILES: 256,

@@ -734,12 +734,16 @@ export async function ingestBackgroundStageBCompletion(args: {
 					sessionId: args.record.parentSessionId,
 					taskId,
 				});
-				if (route?.kind !== 'review_route_router_error') {
+				if (
+					route?.kind !== 'review_route_router_error' ||
+					route.sessionId !== args.record.parentSessionId ||
+					route.taskId !== taskId
+				) {
 					return {
 						ok: false,
 						consumed: false,
 						reason:
-							'route receipt blocked before Stage-B evidence publication: parent session is unavailable',
+							'route receipt blocked before Stage-B evidence publication: parent session is unavailable and recovery receipt is not identity-bound',
 					};
 				}
 			}

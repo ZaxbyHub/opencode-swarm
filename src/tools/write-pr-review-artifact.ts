@@ -57,7 +57,13 @@ const PersistedFindingSchema = PrReviewFindingSchema.extend({
 	boundary: z.enum(['post_explorer', 'post_reviewer', 'post_critic']),
 	pr_head_sha: z.string().regex(/^[0-9a-f]{6,64}$/i),
 	recorded_at: z.string().datetime(),
-}).strict();
+})
+	// The write boundary remains strict (`PrReviewFindingSchema`), but readers
+	// must tolerate fields introduced by a newer plugin during a mixed-version
+	// rollout.  Unknown fields are retained in the in-memory projection so a
+	// subsequent append/replay does not silently erase forward-compatible data
+	// (issue #2491 F-009).
+	.passthrough();
 
 const PersistedHandoffSchema = PrReviewHandoffSchema.extend({
 	schema_version: z.literal(1),

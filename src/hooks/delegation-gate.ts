@@ -40,6 +40,10 @@ import {
 	CORE_EVENT_LOCKED,
 	getCoderRetryEscalationActions,
 } from '../events/core-events.js';
+import {
+	isLegacyTaskGateRequirementsChain,
+	readTaskGateRequirementsReceiptsSync,
+} from '../evidence/task-gate-requirements.js';
 import { isReadOnlyTool } from '../full-auto/policy';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import {
@@ -98,6 +102,7 @@ import {
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
 	isCouncilGateActive,
+	isStageBRouteRequired,
 	markStageBRouteRequired,
 	recordStageBCompletion,
 	recordStageBRouteEvidence,
@@ -3130,11 +3135,9 @@ export function createDelegationGateHook(
 		string,
 		Map<string, ReviewRouteEvidence>
 	>();
-	const stageBRouteNextSlotByTaskRole = new Map<string, number>();
 	const reviewRouteTaskKey = (sessionId: string, taskId: string): string =>
 		`${sessionId}\u0000${taskId}`;
 	const MAX_REVIEW_ROUTE_RECORDS = 128;
-	const MAX_STAGE_B_ROUTE_SLOT_COUNTERS = 256;
 	const rememberReviewRoute = (key: string, route: ReviewRouteRecord): void => {
 		// Route records are needed across sibling Task completions, but must not
 		// grow with the lifetime of the hook. Refreshing an existing key keeps the
@@ -3149,26 +3152,10 @@ export function createDelegationGateHook(
 			reviewRouteByTaskKey.delete(oldest);
 		}
 	};
-	const rememberNextRouteSlot = (key: string, next: number): void => {
-		stageBRouteNextSlotByTaskRole.delete(key);
-		stageBRouteNextSlotByTaskRole.set(key, next);
-		while (
-			stageBRouteNextSlotByTaskRole.size > MAX_STAGE_B_ROUTE_SLOT_COUNTERS
-		) {
-			const oldest = stageBRouteNextSlotByTaskRole.keys().next().value as
-				| string
-				| undefined;
-			if (!oldest) break;
-			stageBRouteNextSlotByTaskRole.delete(oldest);
-		}
-	};
 	const clearReviewRouteStateForSession = (sessionId: string): void => {
 		const prefix = `${sessionId}\u0000`;
 		for (const key of reviewRouteByTaskKey.keys()) {
 			if (key.startsWith(prefix)) reviewRouteByTaskKey.delete(key);
-		}
-		for (const key of stageBRouteNextSlotByTaskRole.keys()) {
-			if (key.startsWith(prefix)) stageBRouteNextSlotByTaskRole.delete(key);
 		}
 	};
 	const bindReviewRouteSlots = (
@@ -3193,7 +3180,6 @@ export function createDelegationGateHook(
 					? (route.slots?.reviewers ?? identities)
 					: (route.slots?.testEngineers ?? identities);
 			if (slots.length === 0 || identities.length !== slots.length) continue;
-			const key = reviewRouteTaskKey(sessionId, taskId);
 			const prior = stageBRouteSlotByCallID.get(callID)?.get(taskId);
 			const settled = session
 				? getStageBRouteEvidence(session, taskId).find(
@@ -3207,13 +3193,33 @@ export function createDelegationGateHook(
 					)
 				: undefined;
 			const existing = prior ?? settled;
+			// Slot allocation is based on the durable completions plus live
+			// reservations, rather than a monotonically increasing counter. A
+			// failed or malformed dispatch releases its live reservation during
+			// toolAfter, so a retry can reclaim the same slot (F-001).
+			const occupiedSlots = new Set<string>();
+			for (const entry of session
+				? getStageBRouteEvidence(session, taskId)
+				: []) {
+				if (entry.role === role && entry.slotId)
+					occupiedSlots.add(entry.slotId);
+			}
+			for (const [otherCallId, otherBindings] of stageBRouteSlotByCallID) {
+				if (otherCallId === callID) continue;
+				const other = otherBindings.get(taskId);
+				if (
+					other?.role === role &&
+					other.sessionId === sessionId &&
+					other.taskId === taskId &&
+					other.slotId
+				) {
+					occupiedSlots.add(other.slotId);
+				}
+			}
 			const slotIndex = existing
 				? slots.indexOf(existing.slotId ?? '')
-				: (stageBRouteNextSlotByTaskRole.get(`${key}\u0000${role}`) ?? 0);
+				: slots.findIndex((slotId) => !occupiedSlots.has(slotId));
 			if (slotIndex < 0 || slotIndex >= slots.length) continue;
-			if (!existing) {
-				rememberNextRouteSlot(`${key}\u0000${role}`, slotIndex + 1);
-			}
 			const slotId = slots[slotIndex];
 			bindings.set(taskId, {
 				role,
@@ -5731,6 +5737,21 @@ export function createDelegationGateHook(
 										const routeBinding = stageBRouteSlotByCallID
 											.get(input.callID)
 											?.get(taskId);
+										const legacyUnrouted =
+											!isStageBRouteRequired(session, taskId) &&
+											!routeBinding &&
+											(() => {
+												try {
+													return isLegacyTaskGateRequirementsChain(
+														readTaskGateRequirementsReceiptsSync(
+															directory,
+															taskId,
+														),
+													);
+												} catch {
+													return false;
+												}
+											})();
 										const existingRouteEvidence = getStageBRouteEvidence(
 											session,
 											taskId,
@@ -5758,6 +5779,7 @@ export function createDelegationGateHook(
 											taskId,
 											receipts: prospectiveRouteEvidence,
 											enforcementEnabled: routeEnforcementEnabled,
+											legacyUnrouted,
 											requireEvidenceBindings: true,
 											requireCompleteEvidence: false,
 											expectedDispatch: routeBinding

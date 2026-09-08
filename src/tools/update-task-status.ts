@@ -380,28 +380,56 @@ function routeGateAllowsTask(
 	// pre-v1 compatibility state. This branch is deliberately narrower than
 	// `route === null`: any positively marked task still fails closed below.
 	if (!routeRequired && requirementReceipts.length === 0) return true;
-	if (!sessionID) return legacyUnrouted;
-	try {
-		readReviewRouteReceiptSync({
-			projectRoot: directory,
-			sessionId: sessionID,
-			taskId,
-		});
-	} catch {
-		return false;
-	}
 	const durableEvidence =
 		routeEvidenceFromTaskGateRequirements(requirementReceipts);
-	const liveEvidence = session ? getStageBRouteEvidence(session, taskId) : [];
-	return enforcePersistedReviewRouteReceipt({
-		projectRoot: directory,
-		sessionId: sessionID,
-		taskId,
-		receipts: liveEvidence.length > 0 ? liveEvidence : durableEvidence,
-		enforcementEnabled: true,
-		legacyUnrouted,
-		requireEvidenceBindings: true,
-	}).canAdvance;
+	const routeAllowsSession = (
+		candidateSessionID: string,
+		candidateSession: AgentSessionState | undefined,
+	): boolean => {
+		try {
+			readReviewRouteReceiptSync({
+				projectRoot: directory,
+				sessionId: candidateSessionID,
+				taskId,
+			});
+		} catch {
+			return false;
+		}
+		const liveEvidence = candidateSession
+			? getStageBRouteEvidence(candidateSession, taskId)
+			: [];
+		return enforcePersistedReviewRouteReceipt({
+			projectRoot: directory,
+			sessionId: candidateSessionID,
+			taskId,
+			receipts: liveEvidence.length > 0 ? liveEvidence : durableEvidence,
+			enforcementEnabled: true,
+			legacyUnrouted: false,
+			requireEvidenceBindings: true,
+		}).canAdvance;
+	};
+	if (sessionID) return routeAllowsSession(sessionID, session);
+	if (!routeRequired) return legacyUnrouted;
+	// Older synchronous callers do not pass sessionID. Keep the route marker's
+	// identity boundary intact by evaluating each marked session with its own
+	// persisted receipt instead of treating the missing argument as a bypass.
+	const evidenceSessionIDs = new Set(
+		durableEvidence
+			.map((evidence) => evidence.sessionId)
+			.filter((value): value is string => Boolean(value)),
+	);
+	for (const [
+		candidateSessionID,
+		candidateSession,
+	] of swarmState.agentSessions) {
+		if (
+			!isStageBRouteRequired(candidateSession, taskId) &&
+			!evidenceSessionIDs.has(candidateSessionID)
+		)
+			continue;
+		if (routeAllowsSession(candidateSessionID, candidateSession)) return true;
+	}
+	return false;
 }
 
 export function checkReviewerGate(

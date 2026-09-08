@@ -21,6 +21,7 @@ import {
 	checkReviewerGate,
 	executeUpdateTaskStatus,
 } from '../../../src/tools/update-task-status';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, canonicalTmpDir } from '../../helpers/tmpdir';
 import {
 	makeConfig,
@@ -68,9 +69,13 @@ function makePlan(filesTouched: string[]): Plan {
 
 describe('delegation gate doc-only durable evidence', () => {
 	let directory: string;
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 	const originalWorkspaceSpawnSync = workspaceSnapshotInternals.spawnSync;
 
 	beforeEach(() => {
+		// Stage-B route receipts authenticate with a user-scoped MAC key. Redirect
+		// app-data roots before exercising the hook so tests stay hermetic.
+		isolatedEnv = createIsolatedTestEnv();
 		resetSwarmState();
 		try {
 			const swarmWorktreesInTemp = path.join(
@@ -103,7 +108,12 @@ describe('delegation gate doc-only durable evidence', () => {
 		delegationGateInternals.resetStandardWorktreeIsolationState();
 		swarmState.opencodeClient = undefined;
 		resetSwarmState();
-		fs.rmSync(directory, { recursive: true, force: true });
+		fs.rmSync(directory, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 100,
+		});
 		try {
 			const swarmWorktreesInTemp = path.join(
 				canonicalTmpDir(),
@@ -115,6 +125,8 @@ describe('delegation gate doc-only durable evidence', () => {
 		} catch {
 			/* best-effort */
 		}
+		isolatedEnv?.cleanup();
+		isolatedEnv = undefined;
 	});
 
 	async function runCoder(filesTouched: string[], actualFiles: string[]) {

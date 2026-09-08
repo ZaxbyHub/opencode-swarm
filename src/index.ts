@@ -337,13 +337,11 @@ export function capSessionMap<K, V>(
 	}
 }
 
-const SOUNDING_BOARD_CATEGORY_LINE = /^\s*Category\s*:\s*([^\r\n]+)\s*$/im;
-
 /**
  * Resolve a category from the architect-owned sounding-board dispatch packet.
- * The explicit `category` field wins over text fields; an explicitly present
- * malformed value is retained as a protocol error instead of falling back to
- * a model echo.
+ * Only the explicit `category` field is caller metadata.  Prompt, description,
+ * task, and context are model-controlled/free-text surfaces and must never be
+ * scanned for a protocol category (issue #2491 F-004).
  */
 function resolveSoundingBoardCallerCategory(args: unknown): {
 	supplied: boolean;
@@ -355,12 +353,6 @@ function resolveSoundingBoardCallerCategory(args: unknown): {
 	const record = args as Record<string, unknown>;
 	if (Object.hasOwn(record, 'category')) {
 		return { supplied: true, value: record.category };
-	}
-	for (const key of ['prompt', 'description', 'task', 'context']) {
-		const text = record[key];
-		if (typeof text !== 'string') continue;
-		const match = text.match(SOUNDING_BOARD_CATEGORY_LINE);
-		if (match) return { supplied: true, value: match[1].trim() };
 	}
 	return { supplied: false };
 }

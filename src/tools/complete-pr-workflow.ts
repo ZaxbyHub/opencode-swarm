@@ -156,35 +156,47 @@ export async function executeCompletePrWorkflow(
 		// same discipline as staleDisclosure above).
 		let terminalReport: Record<string, unknown> | undefined;
 		if (parsed.data.mode === 'PR_REVIEW') {
+			let coverage: Awaited<
+				ReturnType<typeof readPrReviewTerminalCoverageForReport>
+			> | null = null;
 			try {
-				const coverage = await _internals.readPrReviewTerminalCoverageForReport(
+				coverage = await _internals.readPrReviewTerminalCoverageForReport(
 					directory,
 					context.sessionID,
 				);
-				if (coverage) {
-					const findingPolicy =
+			} catch {
+				// Coverage is optional observation data; the completion gate remains
+				// authoritative below and still completes without this report.
+			}
+			if (coverage) {
+				let findingPolicy:
+					| Awaited<ReturnType<typeof readPrReviewFinalFindingPolicyForReport>>
+					| undefined;
+				try {
+					findingPolicy =
 						await _internals.readPrReviewFinalFindingPolicyForReport(
 							directory,
 							context.sessionID,
 						);
-					terminalReport = {
-						kind: coverage.kind,
-						covered_dimensions: coverage.coveredDimensions,
-						unresolved_dimensions: coverage.unresolvedDimensions,
-						live_dimensions: coverage.liveDimensions,
-						allowed_verdicts:
-							findingPolicy?.permittedVerdicts ?? coverage.allowedVerdicts,
-						...(findingPolicy
-							? {
-									finding_policy_version: findingPolicy.policyVersion,
-									blocking_finding_ids: findingPolicy.blockingFindingIds,
-								}
-							: {}),
-						report_verdict: parsed.data.report_verdict,
-					};
+				} catch {
+					// The optional finding-policy sidecar must not erase the truthful
+					// coverage-derived terminal report (F-012).
 				}
-			} catch {
-				// Observation only; the gate re-validates everything that matters.
+				terminalReport = {
+					kind: coverage.kind,
+					covered_dimensions: coverage.coveredDimensions,
+					unresolved_dimensions: coverage.unresolvedDimensions,
+					live_dimensions: coverage.liveDimensions,
+					allowed_verdicts:
+						findingPolicy?.permittedVerdicts ?? coverage.allowedVerdicts,
+					...(findingPolicy
+						? {
+								finding_policy_version: findingPolicy.policyVersion,
+								blocking_finding_ids: findingPolicy.blockingFindingIds,
+							}
+						: {}),
+					report_verdict: parsed.data.report_verdict,
+				};
 			}
 		}
 		const status = await _internals.completePrWorkflow(

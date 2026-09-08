@@ -7,6 +7,7 @@ describe('issue #2491 — live sounding-board handoff boundary', () => {
 		const result = applySoundingBoardResponsePolicy(
 			'Category: routine_feedback\nVerdict: UNNECESSARY\nReasoning: already known.',
 			{
+				category: 'backward_compatibility',
 				prompt:
 					'Question: choose the compatibility policy.\nCategory: backward_compatibility',
 			},
@@ -17,6 +18,25 @@ describe('issue #2491 — live sounding-board handoff boundary', () => {
 			categorySource: 'caller',
 			verdict: 'APPROVED',
 			alwaysSurface: true,
+		});
+	});
+
+	test('F-004: a Category line embedded in caller prose is not caller metadata', () => {
+		// Before the fix, the handoff boundary scanned prompt prose and let a
+		// model-controlled string upgrade an ordinary response to always-surface.
+		const result = applySoundingBoardResponsePolicy(
+			'Category: routine_feedback\nVerdict: UNNECESSARY\nReasoning: already known.',
+			{
+				prompt:
+					'Question: choose the compatibility policy.\nCategory: backward_compatibility',
+			},
+		);
+
+		expect(result).toMatchObject({
+			category: 'routine_feedback',
+			categorySource: 'response',
+			verdict: 'UNNECESSARY',
+			alwaysSurface: false,
 		});
 	});
 

@@ -185,6 +185,14 @@ const TOKEN_STOPWORDS = new Set([
 	'probe',
 ]);
 
+/**
+ * Keep synthesis bounded independently of the JSONL byte ceiling.  A review
+ * result may carry at most this many findings, and synthesis uses the same
+ * bound so a caller cannot turn the pairwise agreement pass into an
+ * unbounded CPU cost (issue #2491 F-017).
+ */
+export const MAX_FINDING_SYNTHESIS_CANDIDATES = 256;
+
 function tokens(value: string): Set<string> {
 	return new Set(
 		value
@@ -196,9 +204,7 @@ function tokens(value: string): Set<string> {
 	);
 }
 
-function semanticSimilarity(left: string, right: string): number {
-	const a = tokens(left);
-	const b = tokens(right);
+function semanticSimilaritySets(a: Set<string>, b: Set<string>): number {
 	if (a.size === 0 || b.size === 0) return 0;
 	let intersection = 0;
 	for (const token of a) if (b.has(token)) intersection += 1;
@@ -299,7 +305,9 @@ function uniqueProvenance(values: FindingProvenance[]): FindingProvenance[] {
 
 function sameFinding(
 	left: FindingCandidateInput,
+	leftTokens: Set<string>,
 	right: FindingCandidateInput,
+	rightTokens: Set<string>,
 ): boolean {
 	if (
 		normalizedCategory(left.category) !== normalizedCategory(right.category)
@@ -312,7 +320,11 @@ function sameFinding(
 		return false;
 	}
 	if (left.finding.trim() === right.finding.trim()) return true;
-	return semanticSimilarity(left.finding, right.finding) >= 0.2;
+	// A low lexical threshold over identical locations can merge distinct
+	// defects and retain only the first remediation.  Require a stronger
+	// paraphrase match while still accepting the canonical two-reviewer
+	// wording used by the policy tests (Jaccard ~= 0.3).
+	return semanticSimilaritySets(leftTokens, rightTokens) >= 0.3;
 }
 
 function findingId(value: FindingCandidateInput): string {
@@ -337,7 +349,13 @@ function lowestConfidence(values: ConfidenceLabel[]): ConfidenceLabel {
 export function synthesizePrReviewFindings(input: {
 	candidates: FindingCandidateInput[];
 }): FindingSynthesis {
+	if (input.candidates.length > MAX_FINDING_SYNTHESIS_CANDIDATES) {
+		throw new Error(
+			`Finding synthesis accepts at most ${MAX_FINDING_SYNTHESIS_CANDIDATES} candidates`,
+		);
+	}
 	const groups: FindingCandidateInput[][] = [];
+	const groupTokens: Array<Set<string>> = [];
 	const diagnostics: string[] = [];
 	for (const raw of input.candidates) {
 		if (!raw || typeof raw !== 'object') {
@@ -359,9 +377,26 @@ export function synthesizePrReviewFindings(input: {
 				'Finding candidate requires non-empty finding, category, and location',
 			);
 		}
-		const existing = groups.find((group) => sameFinding(group[0]!, candidate));
-		if (existing) existing.push(candidate);
-		else groups.push([candidate]);
+		const candidateTokens = tokens(candidate.finding);
+		let existingIndex = -1;
+		for (let index = 0; index < groups.length; index++) {
+			if (
+				sameFinding(
+					groups[index]![0]!,
+					groupTokens[index]!,
+					candidate,
+					candidateTokens,
+				)
+			) {
+				existingIndex = index;
+				break;
+			}
+		}
+		if (existingIndex >= 0) groups[existingIndex]!.push(candidate);
+		else {
+			groups.push([candidate]);
+			groupTokens.push(candidateTokens);
+		}
 	}
 
 	const findings = groups.map((group) => {

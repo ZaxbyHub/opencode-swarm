@@ -2,9 +2,11 @@ import { describe, expect, test } from 'bun:test';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { allowedPrReviewReportVerdicts } from '../../../src/pr-review/completion.js';
 import {
 	assessTerminalReadiness,
 	evaluateFinalFindingPolicy,
+	MAX_FINDING_SYNTHESIS_CANDIDATES,
 	parseCandidateConfidence,
 	persistReviewOutcome,
 	readReviewOutcome,
@@ -87,6 +89,78 @@ describe('issue #2491 — finding confidence, settlement, and report policy (AC4
 			severity: 'CRITICAL',
 			action: 'report',
 		});
+	});
+
+	describe('finding synthesis regressions (F-002, F-017)', () => {
+		test('F-002: weak lexical overlap does not merge distinct same-location findings', () => {
+			// Before the fix, a Jaccard threshold of 0.2 merged these two distinct
+			// parser defects and retained only the first finding/remediation.
+			const result = synthesizePrReviewFindings({
+				candidates: [
+					candidate({
+						finding:
+							'The parser accepts untrusted payloads without validation.',
+						sourceFindingId: 'f-parser-validation',
+					}),
+					candidate({
+						finding:
+							'The parser emits a detailed error for malformed payloads.',
+						sourceFindingId: 'f-parser-error',
+					}),
+				],
+			});
+
+			expect(result.findings).toHaveLength(2);
+			expect(
+				result.findings.map((finding) => finding.sourceFindingIds),
+			).toEqual([['f-parser-validation'], ['f-parser-error']]);
+		});
+
+		test('F-017: synthesis rejects input above its explicit candidate bound', () => {
+			// Before the fix, pairwise synthesis accepted arbitrarily large arrays,
+			// allowing a byte-valid artifact to consume unbounded CPU.
+			const candidates = Array.from(
+				{ length: MAX_FINDING_SYNTHESIS_CANDIDATES + 1 },
+				(_, index) =>
+					candidate({
+						finding: `Distinct finding ${index}`,
+						location: { file: 'src/parser.ts', line: index + 1 },
+					}),
+			);
+
+			expect(() => synthesizePrReviewFindings({ candidates })).toThrow(
+				/at most 256 candidates/,
+			);
+		});
+	});
+
+	test('FB-018: complete verdict eligibility requires an explicit finding set', () => {
+		const result = evaluateFinalFindingPolicy({
+			policyVersion: 1,
+			finalStatus: 'COMPLETE',
+			coverage: { kind: 'base', quality: 'complete', provenance: 'valid' },
+			findings: [
+				{
+					id: 'high-finding',
+					severity: 'HIGH',
+					action: 'report',
+					status: 'CONFIRMED',
+				},
+			],
+		});
+		expect(
+			// Callers must pass the authoritative finding projection to the
+			// required second argument; a confirmed HIGH finding cannot approve.
+			allowedPrReviewReportVerdicts(
+				'COMPLETE',
+				result.blockingFindingIds.map((id) => ({
+					id,
+					severity: 'HIGH',
+					action: 'report',
+					status: 'CONFIRMED',
+				})),
+			),
+		).toEqual(['REQUEST_CHANGES', 'INCOMPLETE']);
 	});
 
 	test('projects final status, severity, action, and coverage through a versioned policy', () => {

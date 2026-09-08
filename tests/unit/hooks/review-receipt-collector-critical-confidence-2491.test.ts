@@ -107,5 +107,27 @@ describe('review receipt critical confidence policy — issue #2491', () => {
 		}
 		expect(receiptPath).not.toBeNull();
 		expect(dispatched).toBe(true);
+		// Previous coverage stopped after dispatch and reset the scheduler while
+		// async receipt-validation persistence was still in flight (F-007). Wait for
+		// the owning scheduler to drain before teardown can reset its bookkeeping.
+		for (
+			let attempt = 0;
+			attempt < 100 && validationScheduler.pendingCount > 0;
+			attempt++
+		) {
+			await Bun.sleep(5);
+		}
+		expect(validationScheduler.pendingCount).toBe(0);
+		const persistedReceipt = JSON.parse(
+			await fs.promises.readFile(receiptPath as string, 'utf8'),
+		) as { finding_validations?: unknown[] };
+		expect(persistedReceipt.finding_validations).toEqual([
+			{
+				finding_id: expect.any(String),
+				disposition: 'CONFIRMED',
+				confidence: 0.99,
+				evidence: 'independent critical-finding check',
+			},
+		]);
 	});
 });
