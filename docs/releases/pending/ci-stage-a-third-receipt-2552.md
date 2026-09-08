@@ -23,11 +23,14 @@
 
 ## Why
 
-Issue #2552's exit gate requires three qualifying full-matrix receipts per
-stage as post-land closure evidence. Stage-D had three; Stage-A had two and
-the policy record explicitly kept the issue open on the missing third. The
-qualifying run existed on GitHub Actions; recording it closes the Stage-A
-measurement obligation without any workflow, ruleset, or policy change.
+Issue #2552's checked-in C9 receipt contract requires three qualifying
+full-matrix receipts per stage as post-land closure evidence, and the issue
+author's closure comments track exactly that residual. Stage-D had three;
+Stage-A had two and the policy record explicitly kept the issue open on the
+missing third. The qualifying run existed on GitHub Actions; recording it
+completes the C9 contract for both stages, with receipt 3 collected after the
+last #2552 code change (PR #2632) for attributability. No workflow, ruleset,
+or policy change is involved.
 
 ## How to use
 

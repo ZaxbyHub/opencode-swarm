@@ -320,8 +320,10 @@ timeline shows the initial add followed by an adjacent terminal merge/remove
 pair, with no intervening re-add. The receipts use `queue_wait_ms=unavailable`
 because no canonical run-level runner-wait aggregation exists. The third, run
 `34162959243`, was collected after the event-scoped cancellation change (PR
-#2632) merged at `2026-09-07T16:39:21Z`, so the Stage-A set post-dates every
-#2552 code change.
+#2632) merged at `2026-09-07T16:39:21Z`, so the completed Stage-A set
+includes a receipt post-dating every #2552 code change: receipts 1-2
+post-date the Stage-A publication PR #2624, and receipt 3 also post-dates the
+item-B cancellation PR #2632.
 
 Run `34121635625` is explicitly excluded from the qualifying receipt set: its
 release-please short-circuit skipped the CI matrix, so it is not a full-matrix
