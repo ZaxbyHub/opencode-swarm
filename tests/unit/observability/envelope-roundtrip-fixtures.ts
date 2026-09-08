@@ -463,4 +463,9 @@ export const FIXTURES: Record<string, Record<string, unknown>> = {
 		recovery: 'legacy-fidelity-safe',
 		fieldCount: 6,
 	},
+	training_vault_health: {
+		project_ref: 'a1b2c3d4e5f60718',
+		reason: 'quota_records',
+		count: 2,
+	},
 };

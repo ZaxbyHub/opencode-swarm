@@ -178,7 +178,12 @@ export type TelemetryEvent =
 	// are omitted entirely, never recorded as zeros) and the #2184
 	// verdict-row pipe-recovery fidelity class (identifiers/enums only).
 	| 'context_source_attribution'
-	| 'verdict_row_pipe_recovery';
+	| 'verdict_row_pipe_recovery'
+	// #2486 (D7): counts-only training vault health — stop reasons, quarantine
+	// and withdrawal aggregates for the consented training-content vault.
+	// Payload is a pseudonymous project ref, a reason enum, and a count —
+	// never vault content or raw paths.
+	| 'training_vault_health';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -1072,6 +1077,26 @@ export const telemetry = {
 	 * contract's no-content-in-metrics rule. Enables PR 16 to alarm and PR 20 to
 	 * report without leaking workspace layout or capsule contents.
 	 */
+	/**
+	 * Training vault health (issue #2486). Emitted on capture-stop transitions
+	 * (quota/disk/consent), quarantine aggregates, and withdrawals for the
+	 * consented training-content vault. Bounded payload: the pseudonymous
+	 * project ref, a reason enum, and a count — no vault content, no raw
+	 * paths, matching the observability contract's no-content rule.
+	 */
+	trainingVaultHealth(data: {
+		project_ref: string;
+		reason:
+			| 'quota_bytes'
+			| 'quota_records'
+			| 'disk_floor'
+			| 'consent_missing'
+			| 'withdrawal_executed';
+		count: number;
+	}): void {
+		_internals.emit('training_vault_health', data);
+	},
+
 	contextTelemetryHealth(data: {
 		trigger: 'compaction' | 'close';
 		accepted_count: number;

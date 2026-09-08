@@ -369,7 +369,7 @@ describe('swarm-subcommand-parity', () => {
 		// .claude/skills/swarm/SKILL.md.
 		// 115 → 116: /swarm ci added — advisory headless CI (#2497), documented
 		// in .claude/skills/swarm/SKILL.md.
-		expect(expectedCommands.size).toBe(116);
+		expect(expectedCommands.size).toBe(119);
 
 		console.info(
 			`[swarm-subcommand-parity] skill documented commands (raw): ${skillRawCommands.length}`,

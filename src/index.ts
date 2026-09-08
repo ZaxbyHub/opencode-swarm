@@ -283,6 +283,7 @@ import {
 	telemetry,
 } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
+import { createTrainingCaptureObserver } from './training/capture.js';
 import { error, log, warn } from './utils';
 import { pushAdvisory } from './utils/advisory-queue';
 import { setGitBinaryOverride } from './utils/git-executable';
@@ -2002,6 +2003,10 @@ async function initializeOpenCodeSwarm(
 			});
 		};
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
+	// #2486 (D7): the consent-gated training-content capture observer.
+	// Construction performs NO I/O (invariant 1) — consent is read lazily on
+	// the first observation, so an unconsented project pays nothing.
+	const trainingCaptureObserver = createTrainingCaptureObserver(ctx.directory);
 	const memoryLifecycleHooks = createMemoryLifecycleHooks({
 		directory: ctx.directory,
 		config: config.memory,
@@ -2840,6 +2845,22 @@ async function initializeOpenCodeSwarm(
 	 * messages.transform stage: delegation-ledger resume + [DIAG] start marker.
 	 * Injects the delegation summary when an architect session resumes.
 	 */
+	/**
+	 * messages.transform stage: consent-gated training-content capture
+	 * (issue #2486). Read-only observer — NEVER mutates `output.messages`
+	 * (invariant 10), never throws, and captures nothing unless a durable,
+	 * project-bound consent record exists under `.swarm/training/v1/`.
+	 * Plugin-injected guidance carriers are skipped by construction.
+	 */
+	const messagesTransformTrainingCaptureStep = (
+		_input: unknown,
+		output: unknown,
+	): Promise<void> => {
+		return trainingCaptureObserver.observeMessages(
+			output as Parameters<typeof trainingCaptureObserver.observeMessages>[0],
+		);
+	};
+
 	const messagesTransformDelegationLedgerStep = (
 		_input: unknown,
 		output: unknown,
@@ -3572,6 +3593,21 @@ async function initializeOpenCodeSwarm(
 					template: '/swarm export',
 					description: 'Use /swarm export to export plan and context as JSON',
 				},
+				'swarm-dataset-consent': {
+					template: '/swarm dataset consent $ARGUMENTS',
+					description:
+						'Use /swarm dataset consent to grant or revoke the training-content consent (human-only, confirm token)',
+				},
+				'swarm-dataset-export': {
+					template: '/swarm dataset export $ARGUMENTS',
+					description:
+						'Use /swarm dataset export to preview/write the deterministic governed dataset export (human-only, confirm token)',
+				},
+				'swarm-dataset-withdraw': {
+					template: '/swarm dataset withdraw $ARGUMENTS',
+					description:
+						'Use /swarm dataset withdraw to purge vault content, tombstone, and revoke exports (human-only, confirm token)',
+				},
 				'swarm-reset': {
 					template: '/swarm reset --confirm',
 					description:
@@ -3932,6 +3968,8 @@ async function initializeOpenCodeSwarm(
 		// Inject phase reminders before API calls
 		'experimental.chat.messages.transform': composeHandlers(
 			...[
+				// #2486 (D7): consent-gated training capture (read-only, fail-open).
+				messagesTransformTrainingCaptureStep,
 				// Delegation ledger: inject summary when architect session resumes
 				messagesTransformDelegationLedgerStep,
 				pipelineHook['experimental.chat.messages.transform'],
@@ -4576,6 +4614,20 @@ async function initializeOpenCodeSwarm(
 			const afterCtx = resolveToolAfterContext(
 				input as { tool: string; sessionID: string; callID: string },
 			);
+			// #2486 (D7): consent-gated training-content capture. Fail-open
+			// observational step — never alters the after-hook result. Consumes
+			// the same callID args snapshot as the collectors above (the SDK
+			// toolAfter input has no args); the observer itself re-checks the
+			// active consent on every observation.
+			await safeHook(() =>
+				trainingCaptureObserver.observeToolExecution({
+					tool: input.tool,
+					sessionID: input.sessionID,
+					input: afterCtx.args,
+					output,
+					error: output?.state === 'error' ? output : undefined,
+				}),
+			)(input, output);
 			// Issue #2507 (G3): spawn-protection outcome recorder — native
 			// task route only, fail-open (observational, never alters the
 			// after-hook). Consumes the digest ARMED at toolBefore step 0

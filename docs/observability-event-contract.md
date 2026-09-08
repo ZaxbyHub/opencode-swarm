@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 61-entry event catalog,
+`src/observability/`: the canonical event envelope, the 62-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all eighteen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 61 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 62 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -198,9 +198,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 61-entry catalog
+## 5. The 62-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 61 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 62 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:16-172`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -231,7 +231,7 @@ plus seven further post-#2029 additions that §5 catalogs in place (deliberately
 not re-enumerated here) plus the two issue-#2482 kinds —
 `context_source_attribution` (absorbing #1990) and
 `verdict_row_pipe_recovery` (absorbing #2184) — for the honest
-38 + 14 + 7 + 2 = 61 total.
+38 + 14 + 7 + 3 = 62 total.
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -460,6 +460,13 @@ Recorded once per measured context-source injection. Payload: `sessionId`, optio
 Category `gate`, severity `info`, privacy `pseudonymous` — producer `src/pr-review/legacy-transcript-adapter.ts:691` (issue #2482, absorbing #2184). Consumers: none — owner #2047. Retention: #2045.
 
 Emitted when the verdict-row parser recovers a legacy row with unescaped pipe overflow, carrying the fidelity class into the event lifecycle: `marker`, `itemId`, `recovery` (`legacy-fidelity-safe` | `legacy-lossy`), `fieldCount`. Identifiers and enums only — the 120-character row preview from the debug warning is deliberately NOT included. Mid-row pipes remain accepted per the repository owner's relaxation directive (#2181/#2182); this event makes the safe-vs-lossy distinction observable without debug logging.
+
+
+#### training_vault_health
+
+Category `guardrail`, severity `notice`, privacy `pseudonymous` — producer `src/telemetry.ts:1092` (issue #2486). Consumers: none — owner #2047. Retention: #2045.
+
+Emitted on capture-stop transitions (quota bytes/records, disk floor, missing consent), on withdrawals, and available for quarantine aggregates for the consented training vault. Payload: `project_ref` (the 16-hex lineage pseudonym), `reason` (a stop/withdrawal enum), `count`. The metadata-only contract holds for the governed-content subsystem: no vault content, no raw paths, no session text ever rides this event.
 
 #### budget_updated
 Category `cost`, severity `info`, privacy `pseudonymous`. Producer

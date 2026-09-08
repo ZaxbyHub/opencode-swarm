@@ -76,7 +76,7 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 		expect(r.remainingArgs).toEqual(['preview', 'id-1']);
 	});
 
-	test('registry human-only bucket still contains exactly the expected 12 commands', () => {
+	test('registry human-only bucket still contains exactly the expected 15 commands', () => {
 		// Mirrors the no-regression bucket snapshot in tool-policy.human-only.test.ts
 		// (moved out of the FR-006 over-capped registry.tool-policy.test.ts) —
 		// #2033 and #2268 expanded the bucket; #1824 adds approve-write.
@@ -88,6 +88,9 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 		}
 		expect([...actual].sort()).toEqual(
 			[
+				'dataset consent',
+				'dataset export',
+				'dataset withdraw',
 				'full-auto',
 				'review',
 				'memory compact',

@@ -338,6 +338,7 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 		]),
 		// Issue #2037 context-map telemetry storage health: bounded counts and
 		// timestamps only — no capsule/query content, no paths.
+		training_vault_health: Object.freeze(['project_ref', 'reason', 'count']),
 		context_telemetry_health: Object.freeze([
 			'trigger',
 			'accepted_count',

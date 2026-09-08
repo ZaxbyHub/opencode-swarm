@@ -41,6 +41,11 @@ import { handleCouncilCommand } from './council.js';
 import { handleCouplingCommand } from './coupling.js';
 import { handleCurateCommand } from './curate.js';
 import { handleDarkMatterCommand } from './dark-matter.js';
+import {
+	handleDatasetConsentCommand,
+	handleDatasetExportCommand,
+	handleDatasetWithdrawCommand,
+} from './dataset.js';
 import { handleDeepDiveCommand } from './deep-dive.js';
 import { handleDeepResearchCommand } from './deep-research.js';
 import { handleDesignDocsCommand } from './design-docs.js';
@@ -1047,6 +1052,60 @@ export const COMMAND_REGISTRY = {
 		clashesWithNativeCcCommand: '/export',
 		toolPolicy: 'agent',
 		toolNoArgs: true,
+	},
+	'dataset consent': {
+		handler: (ctx) => handleDatasetConsentCommand(ctx.directory, ctx.args),
+		description:
+			'Human-only grant/revoke of the training-content consent record (two-step confirm token)',
+		args: '[--confirm=<token>] [--revoke] [--max-bytes N] [--max-records N] [--retention-days N]',
+		details:
+			'Issue #2486 (D7). Training-content capture is OFF by default and cannot be enabled by config, env, agents, or tools — only by this durable, project-bound consent record under .swarm/training/v1/consent.json. Bare invocation prints the consent terms (purpose, content classes, redaction, hard quota ceilings) and issues a 15-minute confirmation token; --confirm=<token> writes the grant (quotas clamp to the ceilings, never above); --revoke stops capture immediately (physical deletion is /swarm dataset withdraw).',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	'dataset withdraw': {
+		handler: (ctx) => handleDatasetWithdrawCommand(ctx.directory, ctx.args),
+		description:
+			'Human-only destructive withdrawal: purge vault content, tombstone, revoke exports',
+		args: '[--confirm=<token>]',
+		details:
+			'Issue #2486 (D7). Preview-first: the bare command shows exactly what would be deleted (records, bytes, exports to revoke) and issues a 15-minute confirmation token. --confirm=<token> physically empties the vault records file, appends a durable withdrawal tombstone (never deleted by any later operation), writes REVOKED.json revocation manifests into every export still under plugin control, and marks the consent withdrawn.',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	'dataset export': {
+		handler: (ctx) => handleDatasetExportCommand(ctx.directory, ctx.args),
+		description:
+			'Human-only governed dataset export (deterministic bundle + manifest, two-step confirm token)',
+		args: '[--kind <k>[,<k>]] [--session <id>] [--task <id>] [--since <ISO>] [--validation-ratio <0..0.5>] [--confirm=<token>]',
+		details:
+			'Issue #2486 (D7). Side-effect-free preview by default: export id, record counts (train/validation split, quarantined excluded), estimated size, destination, and a 15-minute confirmation token. --confirm=<token> writes the deterministic bundle (records.jsonl, train.jsonl, validation.jsonl, manifest.json with sha256 checksums, schema version, echoed filters, and a session-coherent split) under .swarm/training/v1/exports/<export-id>/; identical re-exports are idempotent. The existing /swarm export (plan+context JSON) is unchanged.',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	// Aliases for the TUI shortcuts 'swarm-dataset-{consent,withdraw,export}',
+	// which normalize to the single dash tokens 'dataset-consent' etc. Without
+	// these aliases resolveCommand(['dataset-consent']) returns null and the TUI
+	// reports "command not found" (src/commands/shortcut-resolution.test.ts).
+	// Mirrors the 'pr-subscribe' alias pattern; each alias inherits the
+	// canonical human-only tool policy via canonicalCommandKey (aliasOf).
+	'dataset-consent': {
+		description:
+			'Human-only grant/revoke of the training-content consent record (two-step confirm token)',
+		aliasOf: 'dataset consent',
+		deprecated: true,
+	},
+	'dataset-withdraw': {
+		description:
+			'Human-only destructive withdrawal: purge vault content, tombstone, revoke exports',
+		aliasOf: 'dataset withdraw',
+		deprecated: true,
+	},
+	'dataset-export': {
+		description:
+			'Human-only governed dataset export (deterministic bundle + manifest, two-step confirm token)',
+		aliasOf: 'dataset export',
+		deprecated: true,
 	},
 	evidence: {
 		handler: (ctx) => handleEvidenceCommand(ctx.directory, ctx.args),

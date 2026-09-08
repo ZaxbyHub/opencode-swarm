@@ -92,6 +92,11 @@ export const HIDDEN_COMMAND_KEYS: readonly string[] = [
 	'pr-subscribe',
 	'pr-unsubscribe',
 	'pr-status',
+	// #2486 TUI shortcut dash aliases — deprecated alias forms stay hidden
+	// like every peer (they resolve via aliasOf; see the generator preamble).
+	'dataset-consent',
+	'dataset-withdraw',
+	'dataset-export',
 	'diagnosis',
 	'list-agents',
 	'health',
