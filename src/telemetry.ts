@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ObservabilityEvent } from './observability/envelope.js';
 import {
+	canonicalLineContent,
 	createObservation,
 	toLegacyTelemetryLine,
 } from './observability/index.js';
@@ -223,6 +224,13 @@ export type TelemetryListener = (
 	 * (`src/db/observability-event-store.ts`) is the canonical consumer.
 	 */
 	canonical?: ObservabilityEvent,
+	/**
+	 * The canonical JSONL line content for `canonical` (no trailing EOL),
+	 * stringified exactly once by `emit()` and handed to listeners so the
+	 * sink's line-hash path never re-stringifies the same envelope (issue
+	 * #2487 review PRR-005).
+	 */
+	canonicalContent?: string,
 ) => void;
 
 // ============================================================================
@@ -465,8 +473,10 @@ export function emit(
 		// the listener fan-out below — preserving the ordering asserted by
 		// `src/telemetry.test.ts:137-162`.
 		const canonical = _internals.createObservation(event, data);
-		const line =
-			JSON.stringify(_internals.toLegacyTelemetryLine(canonical)) + os.EOL;
+		// Stringify exactly once; both the JSONL write and the sink's
+		// line-hash path consume the same string (issue #2487 review PRR-005).
+		const content = _internals.canonicalLineContent(canonical);
+		const line = content + os.EOL;
 
 		const stream = _writeStream;
 		stream.write(line, (err) => {
@@ -479,7 +489,7 @@ export function emit(
 
 		for (const listener of _listeners) {
 			try {
-				listener(event, data, canonical);
+				listener(event, data, canonical, content);
 			} catch {
 				// Listener errors must NOT propagate
 			}
@@ -1347,6 +1357,7 @@ export const _internals: {
 	heartbeatListenerCount: () => number;
 	createObservation: typeof createObservation;
 	toLegacyTelemetryLine: typeof toLegacyTelemetryLine;
+	canonicalLineContent: typeof canonicalLineContent;
 } = {
 	telemetry,
 	emit,
@@ -1355,4 +1366,5 @@ export const _internals: {
 	heartbeatListenerCount: () => (_heartbeatListener !== null ? 1 : 0),
 	createObservation,
 	toLegacyTelemetryLine,
+	canonicalLineContent,
 };

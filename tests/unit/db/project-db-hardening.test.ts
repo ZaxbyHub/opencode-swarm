@@ -154,6 +154,51 @@ describe('failed-migration recovery', () => {
 		db.close();
 	});
 
+	// Issue #2487 review PRR-002: the duplicate-column tolerance path must
+	// verify EVERY `ALTER TABLE ... ADD COLUMN` in the migration's SQL, not
+	// just the first. v12 carries two ALTERs (generation, completion_active);
+	// a partial-restore state with only `generation` present must FAIL loudly
+	// instead of silently stamping version 12 with completion_active missing.
+	test('v12 two-ALTER migration is tolerated only when BOTH columns exist', () => {
+		const db = new Database(':memory:');
+		runProjectMigrations(db);
+		// Partial-restore simulation: versions 12+ un-applied (the loop keys on
+		// MAX(version)), v12's first column pre-existing, its second missing.
+		db.run('DELETE FROM schema_migrations WHERE version >= 12');
+		db.run('ALTER TABLE task_checkpoint_receipt DROP COLUMN completion_active');
+		let caught: unknown;
+		try {
+			runProjectMigrations(db);
+		} catch (err) {
+			caught = err;
+		}
+		expect(caught).toBeInstanceOf(ProjectDbError);
+		expect((caught as ProjectDbError).category).toBe('migration_failed');
+		// The tolerance path did NOT silently stamp v12: the version stayed
+		// un-bumped and the failure was recorded for diagnosis.
+		expect(
+			db
+				.query<{ version: number }, []>(
+					'SELECT version FROM schema_migrations WHERE version = 12',
+				)
+				.get() ?? null,
+		).toBeNull();
+		// Repair: adding the missing column makes BOTH v12 ALTERs verifiable,
+		// so the SAME run tolerates the duplicate `generation` and proceeds.
+		db.run(
+			'ALTER TABLE task_checkpoint_receipt ADD COLUMN completion_active INTEGER NOT NULL DEFAULT 1',
+		);
+		expect(() => runProjectMigrations(db)).not.toThrow();
+		const versions = db
+			.query<{ version: number }, []>(
+				'SELECT version FROM schema_migrations ORDER BY version',
+			)
+			.all()
+			.map((r) => r.version);
+		expect(versions[versions.length - 1]).toBe(39);
+		db.close();
+	});
+
 	test('v14+ foundation tables and the pending partial index exist', () => {
 		const db = getProjectDb(dir);
 		const tables = db
@@ -197,8 +242,8 @@ describe('failed-migration recovery', () => {
 			)
 			.all()
 			.map((r) => r.version);
-		expect(versions[versions.length - 1]).toBe(37);
-		expect(versions.length).toBe(37);
+		expect(versions[versions.length - 1]).toBe(39);
+		expect(versions.length).toBe(39);
 	});
 
 	test('marker-file fallback: a v14 failure with no migration_failures table writes the marker, and the marker is removed on success', () => {

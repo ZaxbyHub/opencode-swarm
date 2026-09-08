@@ -41,9 +41,11 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ObservabilityEvent } from '../observability/envelope.js';
 import { extractWorkflowIds } from '../observability/legacy.js';
+import { canonicalLineContent } from '../observability/observe.js';
 import type { TelemetryEvent, TelemetryListener } from '../telemetry.js';
 import { addTelemetryListener, removeTelemetryListener } from '../telemetry.js';
 import { canonicalProjectKey } from './canonical-project.js';
+import { DbWriteError } from './db-errors.js';
 import { DURABILITY_CLASSES } from './durability.js';
 import { getGroupCommitWriter } from './group-commit-writer.js';
 import { getProjectDb, projectDbExists } from './project-db.js';
@@ -73,6 +75,55 @@ const IMPORT_ID_NAMESPACE = 'obs-import-v1';
  * quarantined WITHOUT parsing.
  */
 const MAX_IMPORT_LINE_BYTES = 1024 * 1024;
+
+/**
+ * Line-hash namespace (issue #2487): correlates a live-captured event with the
+ * JSONL line `emit()` wrote for it, so the report-path import can skip lines
+ * the live sink already stored. Distinct from IMPORT_ID_NAMESPACE on purpose —
+ * import event ids keep hashing the RAW segment (CR included on Windows) so
+ * pre-existing imported rows stay idempotent under rescan; the line hash
+ * normalizes one trailing `\r` away so both ingestion paths agree per OS file.
+ */
+const LINE_HASH_NAMESPACE = 'obs-line-v1';
+
+/** Existence-check batch size (SQLite bound-parameter budget). */
+const LINE_HASH_QUERY_CHUNK = 500;
+
+/**
+ * One-time marker for the lazy live-row line-hash backfill. Stored in
+ * `observability_import` (present since migration v32; migrations always run
+ * before any store access). Hash UPDATEs and this marker commit atomically in
+ * the same BEGIN IMMEDIATE as the import that triggered the backfill.
+ */
+const LIVE_LINE_HASH_BACKFILL_MARKER = '__live_line_hash_backfill__';
+
+/**
+ * Kill switch for the local SQLite observability sink (issue #2487 AC5),
+ * mirroring `SWARM_OTLP_EXPORT_DISABLE`. Strictly `=== '1'`; read live on
+ * every call so env changes take effect without re-registration. Disables only
+ * the LIVE sink — `syncObservabilityImport` (the report-path legacy import)
+ * is intentionally never gated: JSONL + rebuildable import IS the rollback.
+ */
+export function isObservabilitySinkDisabled(): boolean {
+	return process.env.SWARM_OBSERVABILITY_SINK_DISABLE === '1';
+}
+
+/** Content hash over the EOL-free JSONL line bytes (see LINE_HASH_NAMESPACE). */
+function lineHashOf(content: string): string {
+	return createHash('sha256')
+		.update(`${LINE_HASH_NAMESPACE}\0${content}`)
+		.digest('hex');
+}
+
+/**
+ * Normalize an imported file segment for line hashing: `content.split('\n')`
+ * leaves each CRLF-terminated segment with one trailing `\r`; strip exactly
+ * one so the hash matches the live-side `canonicalLineContent` bytes on every
+ * OS and for files moved across OSes.
+ */
+function normalizeSegmentForLineHash(segment: string): string {
+	return segment.endsWith('\r') ? segment.slice(0, -1) : segment;
+}
 
 export type IngestedVia = 'live' | 'import';
 
@@ -187,6 +238,29 @@ function noteDropped(directory: string, category: string): void {
 export function registerObservabilityEventSink(directory: string): void {
 	try {
 		const key = canonicalProjectKey(directory);
+		if (isObservabilitySinkDisabled()) {
+			// Kill switch: evict any previously registered listener (a stale
+			// registration from before the env var was set must not keep
+			// writing) and register nothing. The JSONL writer and the
+			// report-path import stay available — that is the rollback story.
+			if (_sinkListener !== null) {
+				const previous = _sinkDirectory;
+				if (previous !== null) {
+					if (projectDbExists(previous)) flushPendingWrites(previous);
+					_healthDeltas.delete(previous);
+					_eventsSinceRetentionCheck.delete(previous);
+					_eventsSinceHealthUpsert.delete(previous);
+				}
+				try {
+					removeTelemetryListener(_sinkListener);
+				} catch {
+					// not registered
+				}
+				_sinkListener = null;
+				_sinkDirectory = null;
+			}
+			return;
+		}
 		if (_sinkListener !== null) {
 			if (_sinkDirectory === key) return;
 			const previous = _sinkDirectory;
@@ -213,16 +287,26 @@ export function registerObservabilityEventSink(directory: string): void {
 			_event: TelemetryEvent,
 			_data: Record<string, unknown>,
 			canonical?: ObservabilityEvent,
+			canonicalContent?: string,
 		) => {
 			const dir = _sinkDirectory;
 			if (dir === null || canonical === undefined) return;
+			if (isObservabilitySinkDisabled()) return;
 			try {
-				appendObservabilityEventDb(dir, canonical);
+				appendObservabilityEventDb(dir, canonical, canonicalContent);
 			} catch (err) {
 				// Fail-open: the sink never propagates failures into emit().
+				// Typed DB write errors surface their classified category
+				// (disk_full / read_only / corrupt / busy / unknown) so a
+				// permanent failure is distinguishable from a transient one;
+				// untyped errors keep the constructor-name diagnostic.
 				noteDropped(
 					dir,
-					err instanceof Error ? err.constructor.name : 'unknown',
+					err instanceof DbWriteError
+						? err.category
+						: err instanceof Error
+							? err.constructor.name
+							: 'unknown',
 				);
 			}
 		};
@@ -275,7 +359,10 @@ interface BuiltRow {
 		relationship_violations: string | null;
 		quarantined: 0 | 1;
 		quarantine_reason: string | null;
+		line_hash: string | null;
 	};
+	/** Content hash of the normalized JSONL segment (import candidates only). */
+	contentHash?: string;
 }
 
 /** True when the payload marks this delegation_end as a recovered end. */
@@ -310,7 +397,10 @@ function recoveredEndEventId(canonical: ObservabilityEvent): string {
 		.slice(0, 32);
 }
 
-function buildLiveRow(canonical: ObservabilityEvent): BuiltRow {
+function buildLiveRow(
+	canonical: ObservabilityEvent,
+	canonicalContent?: string,
+): BuiltRow {
 	const violations = canonical.relationshipViolations ?? [];
 	const fallbackBuild = violations.includes('observation_build_failed');
 	let payloadJson: string;
@@ -337,6 +427,23 @@ function buildLiveRow(canonical: ObservabilityEvent): BuiltRow {
 	const lineage = canonical.lineage ?? {};
 	const outcome = canonical.outcome ?? {};
 	const policy = canonical.policy ?? {};
+	// LOAD-BEARING (issue #2487): the line hash is ALWAYS derived from the
+	// canonical line content — never from payload_json, which the quarantine
+	// paths above may have stubbed or truncated. Quarantined live rows keep a
+	// hash because their JSONL line exists and an imported copy would be
+	// quarantined too (skipping loses nothing queryable). emit() hands us the
+	// already-stringified content, so the hash path does not re-stringify
+	// (issue #2487 review PRR-005); direct callers fall back to computing it.
+	let lineHash: string | null = null;
+	try {
+		lineHash = lineHashOf(
+			typeof canonicalContent === 'string'
+				? canonicalContent
+				: _internals.canonicalLineContent(canonical),
+		);
+	} catch {
+		lineHash = null;
+	}
 	return {
 		columns: {
 			event_id: recoveredEndEventId(canonical),
@@ -363,6 +470,7 @@ function buildLiveRow(canonical: ObservabilityEvent): BuiltRow {
 				violations.length > 0 ? JSON.stringify(violations) : null,
 			quarantined,
 			quarantine_reason: quarantineReason,
+			line_hash: lineHash,
 		},
 	};
 }
@@ -372,8 +480,8 @@ const INSERT_EVENT_SQL = `INSERT OR IGNORE INTO observability_event (
 	trace_id, span_id, host_session_id, task_id, lane_id, batch_id,
 	phase_id, council_round_id, project_ref, outcome_status, retry_index,
 	privacy_class, sampled, payload_json, relationship_violations,
-	quarantined, quarantine_reason, ingested_via
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+	quarantined, quarantine_reason, line_hash, ingested_via
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 function insertRow(
 	db: ReturnType<typeof getProjectDb>,
@@ -404,6 +512,7 @@ function insertRow(
 		columns.relationship_violations,
 		columns.quarantined,
 		columns.quarantine_reason,
+		columns.line_hash,
 		ingestedVia,
 	]);
 }
@@ -468,9 +577,11 @@ function upsertHealthDelta(
 export function appendObservabilityEventDb(
 	directory: string,
 	canonical: ObservabilityEvent,
+	canonicalContent?: string,
 ): void {
+	if (isObservabilitySinkDisabled()) return;
 	const root = canonicalProjectKey(directory);
-	const row = buildLiveRow(canonical);
+	const row = buildLiveRow(canonical, canonicalContent);
 	const h = _healthDeltas.get(root) ?? emptyHealth();
 	h.accepted += 1;
 	if (row.columns.quarantined === 1) h.quarantined += 1;
@@ -504,6 +615,12 @@ export interface ObservabilityImportResult {
 	imported: number;
 	quarantined: number;
 	skippedUnchanged: boolean;
+	/**
+	 * Segments skipped because a live row (or a backfilled pre-upgrade live
+	 * row) already carries their content hash — the issue #2487 overlap
+	 * suppression. Always present (0 when nothing matched).
+	 */
+	skippedLive: number;
 }
 
 interface ImportMarker {
@@ -522,7 +639,7 @@ function syntheticImportEventId(line: string): string {
 function unparseableImportRow(
 	line: string,
 	reason: 'import_unparseable_line' | 'import_oversize_line',
-): { columns: BuiltRow['columns']; quarantined: boolean } {
+): { columns: BuiltRow['columns']; quarantined: boolean; contentHash: string } {
 	return {
 		columns: {
 			event_id: syntheticImportEventId(line),
@@ -551,15 +668,19 @@ function unparseableImportRow(
 			relationship_violations: null,
 			quarantined: 1,
 			quarantine_reason: reason,
+			line_hash: null,
 		},
 		quarantined: true,
+		contentHash: lineHashOf(normalizeSegmentForLineHash(line)),
 	};
 }
 
 /** Build an import row from one legacy JSONL line; null → skip (blank). */
-function buildImportRow(
-	line: string,
-): { columns: BuiltRow['columns']; quarantined: boolean } | null {
+function buildImportRow(line: string): {
+	columns: BuiltRow['columns'];
+	quarantined: boolean;
+	contentHash: string;
+} | null {
 	if (line.trim().length === 0) return null;
 	// PRR-002: quarantine pathological lines WITHOUT parsing them.
 	if (line.length > MAX_IMPORT_LINE_BYTES) {
@@ -607,9 +728,146 @@ function buildImportRow(
 			relationship_violations: null,
 			quarantined: timestamp === null ? 1 : 0,
 			quarantine_reason: timestamp === null ? 'import_missing_timestamp' : null,
+			// Imported rows NEVER carry a line hash: their synthetic event ids
+			// already make rescan idempotent, and a hash here would falsely
+			// claim live capture for future overlap checks.
+			line_hash: null,
 		},
 		quarantined: timestamp === null,
+		contentHash: lineHashOf(normalizeSegmentForLineHash(line)),
 	};
+}
+
+/**
+ * Reconstruct the EOL-free JSONL line for a stored LIVE row and hash it, for
+ * the one-time backfill of rows written before `line_hash` existed (migration
+ * v38). Returns null when reconstruction cannot be proven byte-exact: the
+ * spread semantics of `toLegacyTelemetryLine` put a caller-supplied
+ * `timestamp`/`event` key IN PLACE of the envelope's (value overwritten, key
+ * position kept), so column-based reconstruction would produce wrong bytes
+ * for those rows — they stay NULL (a bounded, disclosed residual: their
+ * unmarked lines may import once).
+ */
+function reconstructLiveRowLineHash(row: {
+	occurred_at: string;
+	kind: string;
+	payload_json: string;
+}): string | null {
+	const { payload_json: payloadJson } = row;
+	if (
+		!payloadJson.startsWith('{') ||
+		!payloadJson.endsWith('}') ||
+		payloadJson.length < 2
+	) {
+		return null;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(payloadJson);
+	} catch {
+		return null;
+	}
+	if (
+		typeof parsed !== 'object' ||
+		parsed === null ||
+		Array.isArray(parsed) ||
+		Object.keys(parsed).some((k) => k === 'timestamp' || k === 'event')
+	) {
+		return null;
+	}
+	// payload_json IS JSON.stringify(raw) and its body bytes are spliced
+	// verbatim; only the two string columns are re-serialized.
+	const body = payloadJson.slice(1, -1);
+	const line =
+		body.length === 0
+			? `{"timestamp":${JSON.stringify(row.occurred_at)},"event":${JSON.stringify(row.kind)}}`
+			: `{"timestamp":${JSON.stringify(row.occurred_at)},"event":${JSON.stringify(row.kind)},${body}}`;
+	return lineHashOf(line);
+}
+
+/**
+ * One-time lazy backfill of `line_hash` for pre-v38 live rows. LIVE rows
+ * only (`ingested_via = 'live' AND quarantined = 0`); imported rows are never
+ * backfilled. Must be called INSIDE an open BEGIN IMMEDIATE — the hash UPDATEs
+ * and the completion marker then commit atomically with the import that
+ * triggered them (rollback leaves both absent).
+ */
+function backfillLiveLineHashesOnce(db: ReturnType<typeof getProjectDb>): void {
+	const done = db
+		.query<{ found: number }, [string]>(
+			'SELECT 1 as found FROM observability_import WHERE source = ?',
+		)
+		.get(LIVE_LINE_HASH_BACKFILL_MARKER);
+	if (done !== undefined && done !== null) return;
+	const rows = db
+		.query<
+			{
+				rowid: number;
+				occurred_at: string;
+				kind: string;
+				payload_json: string;
+			},
+			[]
+		>(
+			"SELECT rowid, occurred_at, kind, payload_json FROM observability_event WHERE line_hash IS NULL AND ingested_via = 'live' AND quarantined = 0",
+		)
+		.all();
+	for (const row of rows) {
+		const hash = reconstructLiveRowLineHash(row);
+		if (hash === null) continue;
+		db.run('UPDATE observability_event SET line_hash = ? WHERE rowid = ?', [
+			hash,
+			row.rowid,
+		]);
+	}
+	db.run(
+		'INSERT INTO observability_import (source, fingerprint_size, fingerprint_mtime_ms, lines_seen, imported_at) VALUES (?, 0, 0, 0, ?)',
+		[LIVE_LINE_HASH_BACKFILL_MARKER, new Date().toISOString()],
+	);
+}
+
+/**
+ * Inside the open BEGIN IMMEDIATE: which candidate content hashes already
+ * exist as stored rows (live captures or backfilled pre-upgrade rows)? The
+ * write lock serializes this read against concurrent group-commit flushes.
+ */
+function filterImportCandidates(
+	db: ReturnType<typeof getProjectDb>,
+	rows: Array<{
+		columns: BuiltRow['columns'];
+		quarantined: boolean;
+		contentHash: string;
+	}>,
+): {
+	toInsert: Array<{ columns: BuiltRow['columns']; quarantined: boolean }>;
+	skippedLive: number;
+} {
+	const existing = new Set<string>();
+	for (let i = 0; i < rows.length; i += LINE_HASH_QUERY_CHUNK) {
+		const chunk = rows
+			.slice(i, i + LINE_HASH_QUERY_CHUNK)
+			.map((r) => r.contentHash);
+		const placeholders = chunk.map(() => '?').join(', ');
+		const found = db
+			.query<{ line_hash: string }, string[]>(
+				`SELECT line_hash FROM observability_event WHERE line_hash IN (${placeholders})`,
+			)
+			.all(...chunk);
+		for (const f of found) existing.add(f.line_hash);
+	}
+	const toInsert: Array<{
+		columns: BuiltRow['columns'];
+		quarantined: boolean;
+	}> = [];
+	let skippedLive = 0;
+	for (const row of rows) {
+		if (existing.has(row.contentHash)) {
+			skippedLive += 1;
+			continue;
+		}
+		toInsert.push({ columns: row.columns, quarantined: row.quarantined });
+	}
+	return { toInsert, skippedLive };
 }
 
 /**
@@ -630,6 +888,7 @@ export function syncObservabilityImport(
 		imported: 0,
 		quarantined: 0,
 		skippedUnchanged: true,
+		skippedLive: 0,
 	};
 	for (const fileName of LEGACY_STREAM_FILES) {
 		const filePath = join(root, '.swarm', fileName);
@@ -675,18 +934,25 @@ export function syncObservabilityImport(
 			hasMarker && contentLineCount >= (marker as ImportMarker).lines_seen
 				? (marker as ImportMarker).lines_seen
 				: 0;
-		const rows: Array<{ columns: BuiltRow['columns']; quarantined: boolean }> =
-			[];
+		const rows: Array<{
+			columns: BuiltRow['columns'];
+			quarantined: boolean;
+			contentHash: string;
+		}> = [];
 		for (let i = start; i < lines.length; i++) {
 			const built = buildImportRow(lines[i] as string);
 			if (built === null) continue;
 			rows.push(built);
 		}
-		const imported = rows.length;
-		const quarantined = rows.filter((r) => r.quarantined).length;
 		db.run('BEGIN IMMEDIATE');
 		try {
-			for (const row of rows) insertRow(db, row.columns, 'import');
+			// Issue #2487: populate line hashes for pre-migration live rows
+			// (atomically with this import) BEFORE the overlap check, so a
+			// full rescan of rotated/shrunk files cannot re-import events the
+			// live sink already captured.
+			backfillLiveLineHashesOnce(db);
+			const { toInsert, skippedLive } = filterImportCandidates(db, rows);
+			for (const row of toInsert) insertRow(db, row.columns, 'import');
 			db.run(
 				`INSERT INTO observability_import (source, fingerprint_size, fingerprint_mtime_ms, lines_seen, imported_at)
 				VALUES (?, ?, ?, ?, ?)
@@ -705,6 +971,9 @@ export function syncObservabilityImport(
 			);
 			runRetentionIfOverCap(db);
 			db.run('COMMIT');
+			result.imported += toInsert.length;
+			result.quarantined += toInsert.filter((r) => r.quarantined).length;
+			result.skippedLive += skippedLive;
 		} catch (err) {
 			try {
 				db.run('ROLLBACK');
@@ -713,8 +982,6 @@ export function syncObservabilityImport(
 			}
 			throw err;
 		}
-		result.imported += imported;
-		result.quarantined += quarantined;
 	}
 	return result;
 }
@@ -888,8 +1155,10 @@ export const _internals: {
 	getProjectDb: typeof getProjectDb;
 	getGroupCommitWriter: typeof getGroupCommitWriter;
 	extractWorkflowIds: typeof extractWorkflowIds;
+	canonicalLineContent: typeof canonicalLineContent;
 } = {
 	getProjectDb,
 	getGroupCommitWriter,
 	extractWorkflowIds,
+	canonicalLineContent,
 };

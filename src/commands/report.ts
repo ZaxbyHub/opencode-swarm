@@ -257,6 +257,7 @@ export async function handleReportCommand(
 			...postImportCoverage,
 			importedThisSync: importResult.imported,
 			quarantinedThisSync: importResult.quarantined,
+			skippedLiveThisSync: importResult.skippedLive,
 			rowCap: MAX_REPORT_ROWS,
 			truncated: query.truncated,
 			totalMatching: query.totalMatching,
