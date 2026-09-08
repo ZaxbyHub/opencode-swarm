@@ -59,35 +59,36 @@ function generatorEvent(rand: () => number, step: number): PrReviewEvent {
 					rand() < 0.5 ? `d${Math.floor(rand() * 3)}` : undefined,
 			};
 		case 2:
+			// Issue #2512: wired at enforcePrReviewBaseDimensionsWhileLocked.
 			return {
-				type: 'provider_terminal_observed',
+				type: 'base_admission_requested',
 				batchId: batch,
-				laneId: lane,
-				generation: rand() < 0.8 ? 1 : 0,
-				evidence:
-					rand() < 0.5
-						? {
-								source: 'typed_terminal_error_class',
-								category: 'anthropic',
-								kind: 'provider',
-							}
-						: rand() < 0.5
-							? { source: 'observer_deadline' }
-							: { source: 'parser_or_transcript' },
+				lanes: [{ laneId: lane, workflowLane: 'tests' }],
+				depthTier: pick(['S', 'M', 'L'] as const),
+				maxBatches: 128,
+				validatedAt: `t${step}`,
 			};
 		case 3:
+			// Issue #2512: already wired at rollbackPrReviewBaseAdmissionIfUnlaunched.
+			// Rejects when the batch is absent — both outcomes are exercised.
 			return {
-				type: 'lane_cancelled',
+				type: 'base_admission_rolled_back',
 				batchId: batch,
-				laneId: lane,
-				generation: rand() < 0.8 ? 1 : 0,
+				batchDelegationRecordsExist: rand() < 0.5,
 			};
 		case 4:
+			// Issue #2512: wired at recoverArmedPrWorkflow.
 			return {
-				type: 'transcript_evidence_presented',
-				batchId: batch,
-				laneId: lane,
-				laneHasStructuredReceipt: rand() < 0.5,
+				type: 'armed_recovery_requested',
+				binding: {
+					sessionID: 'ses_props',
+					workflowInstanceId: 'wfi_props',
+					prHeadSha: 'head',
+					generation: 1,
+				},
+				dimensionsToCancel: rand() < 0.5 ? ['tests'] : [],
+				nowIso: `t${step}`,
+				reason: 'prop-recovery',
 			};
 		case 5:
 			return {
@@ -119,19 +120,40 @@ function generatorEvent(rand: () => number, step: number): PrReviewEvent {
 					unresolvedDimensions: [],
 					liveDimensions: rand() < 0.5 ? ['tests'] : [],
 				},
-				requestedVerdict: rand() < 0.5 ? 'APPROVE' : 'INCOMPLETE',
+				requestedVerdict: pick([
+					'APPROVE',
+					'INCOMPLETE',
+					'REQUEST_CHANGES',
+				] as const),
 			};
 		case 8:
+			// Issue #2512: wired at rollbackPrReviewBaseAdmissionIfUnlaunched's
+			// rolled-back HALF_OPEN probe path.
 			return {
-				type: 'publication_armed',
-				coverageKind: pick(['COMPLETE', 'PARTIAL', 'NO_COVERAGE'] as const),
-				verdict: pick(['APPROVE', 'INCOMPLETE', 'REQUEST_CHANGES'] as const),
+				type: 'circuit_probe_settled',
+				outcome: pick([
+					{ result: 'typed_success' },
+					{ result: 'provider_failure', providerClass: 'anthropic' },
+					{ result: 'ignored' },
+					{ result: 'rolled_back_admission' },
+				] as const),
+				nowMs: step * 10_000,
+				policy: POLICY,
 			};
 		case 9:
 			return {
 				type: 'critic_result_recorded',
 				criticRequiredFindingIds: [lane],
-				criticConfirmedFindingIds: [lane],
+				criticSettledReceipts:
+					rand() < 0.8
+						? [
+								{
+									findingId: lane,
+									status: pick(['UPHELD', 'DOWNGRADED', 'DISPROVED'] as const),
+									reviewerRowDigest: `rd-${lane}`,
+								},
+							]
+						: [],
 			};
 		case 10:
 			return {
@@ -145,10 +167,9 @@ function generatorEvent(rand: () => number, step: number): PrReviewEvent {
 			};
 		default:
 			return {
-				type: 'transcript_evidence_presented',
-				batchId: batch,
-				laneId: lane,
-				laneHasStructuredReceipt: rand() < 0.5,
+				type: 'collection_observed',
+				diagnostic: pick(DIAGNOSTICS),
+				pendingLaneIds: [lane],
 			};
 	}
 }
@@ -186,26 +207,30 @@ function runSequence(seed: number, length: number): SequenceObservation {
 		if (event.type === 'collection_observed') {
 			expect(JSON.stringify(result.state)).toBe(before);
 		}
-		// Invariant: no partial approval — arming APPROVE applies only on
-		// COMPLETE coverage.
-		if (
-			event.type === 'publication_armed' &&
-			event.verdict === 'APPROVE' &&
-			event.coverageKind !== 'COMPLETE'
-		) {
-			throw new Error(
-				`seed ${seed} step ${step}: APPROVE armed on ${event.coverageKind}`,
-			);
-		}
+		// Invariant: no partial approval — the #2512 verdict matrix. APPROVE
+		// applies only on COMPLETE coverage, and NO_COVERAGE finalizes only
+		// with INCOMPLETE.
 		if (
 			event.type === 'coverage_finalization_requested' &&
-			event.requestedVerdict === 'APPROVE' &&
-			event.settlement.liveDimensions.length === 0 &&
-			event.settlement.kind !== 'COMPLETE'
+			event.settlement.liveDimensions.length === 0
 		) {
-			throw new Error(
-				`seed ${seed} step ${step}: APPROVE finalized on ${event.settlement.kind}`,
-			);
+			if (
+				event.requestedVerdict === 'APPROVE' &&
+				event.settlement.kind !== 'COMPLETE'
+			) {
+				throw new Error(
+					`seed ${seed} step ${step}: APPROVE finalized on ${event.settlement.kind}`,
+				);
+			}
+			if (
+				event.settlement.kind === 'NO_COVERAGE' &&
+				event.requestedVerdict !== undefined &&
+				event.requestedVerdict !== 'INCOMPLETE'
+			) {
+				throw new Error(
+					`seed ${seed} step ${step}: ${event.requestedVerdict} finalized on NO_COVERAGE`,
+				);
+			}
 		}
 		const circuit = result.state.prReviewResilience?.circuit;
 		if (circuit && 'version' in circuit) {

@@ -114,7 +114,7 @@ export type PrReviewEffect =
 	  }
 	| {
 			kind: 'emit_diagnostic';
-			source: 'collection_observer' | 'legacy_transcript_adapter';
+			source: 'collection_observer';
 			code: string;
 			boundedDetail?: string | undefined;
 	  }
@@ -140,6 +140,35 @@ export type PrReviewCircuitProbeOutcome =
 	| { result: 'ignored' }
 	| { result: 'rolled_back_admission' };
 
+/**
+ * A settled critic receipt: a critic verdict that terminates its assigned
+ * coverage obligation (issue #2512). UPHELD, DOWNGRADED, and DISPROVED each
+ * satisfy the critic coverage their finding was assigned; NEEDS_MORE_EVIDENCE
+ * is deliberately nonterminal and is not representable here. The digest is the
+ * authoritative reviewer verdict row the critic claim was bound to at
+ * composition time (`reviewerVerdictRowDigest`; composition rejects unbound
+ * claims), so a receipt can only be built from the current authoritative
+ * reviewer rows.
+ */
+export interface PrReviewCriticSettledReceipt {
+	findingId: string;
+	status: 'UPHELD' | 'DOWNGRADED' | 'DISPROVED';
+	reviewerRowDigest: string;
+}
+
+/**
+ * The closed event vocabulary for the PR-review transition authority
+ * (`reducer.ts`), issue #2512's registered-path contract: every declared event
+ * member has a production construction site (see
+ * docs/pr-review-transition-authority.md for the wire-or-retire table). Events
+ * whose production authority lives at a richer executor boundary — transcript
+ * downgrade protection (`validateExactStructuredReceiptCoverage`), provider
+ * terminal evidence classification (`classifyPrReviewCircuitSignal`),
+ * operator lane cancellation (`collectOnce` cancel_pending), publication
+ * arming/settlement (`completePrWorkflow`), and reviewer re-entry consumption
+ * (`reservePrReviewReentryAuthorizationAgainstBinding`) — are deliberately
+ * RETIRED from this union rather than declared without a dispatch site.
+ */
 export type PrReviewEvent =
 	// --- lane lifecycle -----------------------------------------------------
 	| {
@@ -175,34 +204,6 @@ export type PrReviewEvent =
 			semanticEnvelopeDigest: string;
 			outcome: 'CLEAN' | 'FINDINGS' | 'INCOMPLETE';
 			existingReceiptDigest?: string | undefined;
-	  }
-	| {
-			type: 'transcript_evidence_presented';
-			batchId: string;
-			laneId: string;
-			laneHasStructuredReceipt: boolean;
-	  }
-	| {
-			type: 'provider_terminal_observed';
-			batchId: string;
-			laneId: string;
-			generation: number;
-			evidence:
-				| {
-						source: 'typed_terminal_error_class';
-						category: string;
-						kind: string;
-				  }
-				| { source: 'observer_deadline' }
-				| { source: 'client_unavailable' }
-				| { source: 'parser_or_transcript' }
-				| { source: 'stale_observation' };
-	  }
-	| {
-			type: 'lane_cancelled';
-			batchId: string;
-			laneId: string;
-			generation: number;
 	  }
 	// --- circuit ------------------------------------------------------------
 	| {
@@ -242,35 +243,29 @@ export type PrReviewEvent =
 	| {
 			type: 'critic_result_recorded';
 			criticRequiredFindingIds: readonly string[];
-			criticConfirmedFindingIds: readonly string[];
+			criticSettledReceipts: readonly PrReviewCriticSettledReceipt[];
 	  }
-	// --- publication / recovery / authorization ------------------------------
-	| {
-			type: 'publication_armed';
-			coverageKind: PrReviewTerminalCoverageKind;
-			verdict: PrReviewReportVerdict;
-	  }
-	| {
-			type: 'publication_published';
-			binding: PrReviewAuthorizationBinding;
-	  }
+	// --- recovery / authorization ---------------------------------------------
 	| {
 			type: 'armed_recovery_requested';
 			binding: PrReviewAuthorizationBinding;
 			dimensionsToCancel: PrReviewBaseDimensionId[];
 			nowIso: string;
-	  }
-	| {
-			type: 'reviewer_authorization_consumed';
-			binding: PrReviewAuthorizationBinding;
-			expectedRole: 'reviewer' | 'test_engineer';
-			role: 'reviewer' | 'test_engineer';
+			/** The operator's sanitized reason; the transition persists it verbatim. */
+			reason: string;
 	  };
 
 /**
- * The exact-identity binding an armed recovery, publication, or re-entry
- * authorization must carry (issue #2383/#2385). Stale or foreign values are
- * rejected with `stale_foreign_authorization`.
+ * The exact-identity binding an armed recovery authorization must carry
+ * (issues #2383/#2385/#2512). Stale or foreign values are rejected with
+ * `stale_foreign_authorization`.
+ *
+ * Authority split (issue #2512): the reducer validates the fields the workflow
+ * state itself carries — `sessionID`, `workflowInstanceId`, `prHeadSha`, and
+ * `generation` (`bindingRejection` in reducer.ts). `revisionDigest` is only
+ * observable by the executor that resolved it (the armed publication record or
+ * the live binding context), so it is validated THERE — never here; a pure
+ * reducer cannot independently observe a concurrent storage mutation.
  */
 export interface PrReviewAuthorizationBinding {
 	sessionID: string;
@@ -285,21 +280,15 @@ export interface PrReviewAuthorizationBinding {
 // ---------------------------------------------------------------------------
 
 export type PrReviewTransitionRejectionCode =
-	| 'observer_deadline_not_terminal_evidence'
-	| 'client_absence_not_terminal_evidence'
-	| 'parser_failure_not_provider_signal'
-	| 'stale_observation_not_provider_signal'
 	| 'live_lane_blocks_coverage'
 	| 'partial_coverage_cannot_approve'
-	| 'no_coverage_cannot_approve'
+	| 'no_coverage_requires_incomplete'
 	| 'critic_required_unfulfilled'
 	| 'stale_foreign_authorization'
 	| 'stale_generation_result'
-	| 'receipt_cannot_be_downgraded'
 	| 'duplicate_conflicting_result'
 	| 'base_batch_limit_reached'
 	| 'rollback_preconditions_failed'
-	| 'lane_not_stale_eligible'
 	| 'unknown_event';
 
 export interface PrReviewTransitionRejection {

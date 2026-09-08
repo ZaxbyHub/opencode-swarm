@@ -1,24 +1,30 @@
 /**
- * PR-review transition authority (issue #2385).
+ * PR-review transition authority (issues #2385, #2512).
  *
  * Pure `(state, event) -> { state, effects }` reducer over the closed
  * `PrReviewEvent` union. Rule computation is delegated to the focused
  * boundary modules (`circuit.ts`, `completion.ts` via its settlement inputs,
  * `critic-routing.ts`, `lifecycle.ts`); this module owns transition
  * composition and the explicit rejection of every invalid transition class
- * named by issue #2385:
+ * named by issue #2385 that is reducer-observable:
  *
- * - observer deadline / client absence → terminal child failure
- * - raw transcript / parser failure → provider circuit signal
- * - one lane → multiple circuit samples (delegated to circuit.ts's
- *   distinct-`(generation, batch, lane)` scan; asserted by property tests)
  * - unresolved/live lane → terminal coverage report
- * - partial/no coverage → approval
+ * - partial coverage → approval; zero coverage → anything but INCOMPLETE
  * - ordinary MEDIUM → critic without typed high-impact/vulnerability evidence
  *   (enforced where critic inventory is composed, via critic-routing.ts)
- * - stale/foreign authorization → reviewer or publication access
+ * - stale/foreign authorization → armed-recovery transition
  * - late old-generation result → current-state mutation
- * - structured receipt → downgrade by later transcript parsing
+ *
+ * Rules that depend on facts this pure boundary cannot observe live at
+ * richer executors and are NOT reducer events (issue #2512 wire-or-retire
+ * census; see docs/pr-review-transition-authority.md): observer-deadline /
+ * client-absence / parser / stale-sweep evidence classification
+ * (`classifyPrReviewCircuitSignal`), structured-receipt downgrade protection
+ * (`validateExactStructuredReceiptCoverage`), operator lane cancellation
+ * (`collectOnce` cancel_pending), publication arming/settlement
+ * (`completePrWorkflow` + `allowedPrReviewReportVerdicts`), and reviewer
+ * re-entry consumption (`reservePrReviewReentryAuthorizationAgainstBinding` —
+ * a pure reducer cannot independently observe a concurrent storage mutation).
  *
  * The owning gate and `dispatch-lanes` are orchestration adapters: they build
  * events from real I/O, apply the returned state, and map typed rejections to
@@ -30,7 +36,9 @@
  * `pending-delegations.ts`; `emit_diagnostic` describes the collect
  * observer's bounded diagnostics channel; `block_dispatch` describes the
  * circuit-open admission refusal. No effect kind is emitted without a real
- * executor (reviewer finding 1, issue #2385 Phase 8b).
+ * executor (reviewer finding 1, issue #2385 Phase 8b), and no event member is
+ * declared without a production construction site (issue #2512; enforced by
+ * tests/unit/pr-review/reducer-adapter-authority.test.ts).
  *
  * Probe outcomes other than an admission rollback are processed by the
  * machine on the NEXT staged admission: the gate feeds the recorded probe's
@@ -228,78 +236,6 @@ export function reducePrReviewEvent(
 			]);
 		}
 
-		case 'transcript_evidence_presented': {
-			// A structured receipt can never be downgraded by later transcript
-			// parsing (issue #2384 invalid-transition rule).
-			if (event.laneHasStructuredReceipt) {
-				return rejected(
-					state,
-					'receipt_cannot_be_downgraded',
-					`lane ${event.laneId} has a structured receipt; transcript evidence cannot alter it`,
-				);
-			}
-			return applied(state);
-		}
-
-		case 'provider_terminal_observed': {
-			if (event.evidence.source === 'observer_deadline') {
-				return rejected(
-					state,
-					'observer_deadline_not_terminal_evidence',
-					'a collection wait deadline is never terminal provider evidence',
-				);
-			}
-			if (event.evidence.source === 'client_unavailable') {
-				return rejected(
-					state,
-					'client_absence_not_terminal_evidence',
-					'an unavailable host messages client is never terminal provider evidence',
-				);
-			}
-			if (event.evidence.source === 'parser_or_transcript') {
-				return rejected(
-					state,
-					'parser_failure_not_provider_signal',
-					'parser/transcript rejection is never a provider circuit signal',
-				);
-			}
-			if (event.evidence.source === 'stale_observation') {
-				return rejected(
-					state,
-					'stale_observation_not_provider_signal',
-					'a presumed-stale sweep is never terminal provider evidence',
-				);
-			}
-			if (event.generation !== currentGeneration(state)) {
-				return rejected(
-					state,
-					'stale_generation_result',
-					`terminal evidence generation ${event.generation} is not the active generation`,
-				);
-			}
-			// Admitted as typed circuit evidence; the durable ledger owns the
-			// record and the next circuit advance consumes it.
-			return applied(state);
-		}
-
-		case 'lane_cancelled': {
-			if (event.generation !== currentGeneration(state)) {
-				return rejected(
-					state,
-					'stale_generation_result',
-					`cancellation generation ${event.generation} does not match the active generation`,
-				);
-			}
-			return applied(state, [
-				{
-					kind: 'settle_delegation',
-					batchId: event.batchId,
-					laneId: event.laneId,
-					status: 'cancelled',
-				},
-			]);
-		}
-
 		// -----------------------------------------------------------------
 		// Circuit
 		// -----------------------------------------------------------------
@@ -427,20 +363,25 @@ export function reducePrReviewEvent(
 					`coverage finalization blocked by live dimension(s): ${settlement.liveDimensions.join(', ')}`,
 				);
 			}
+			// Issue #2512: the transition authority enforces the same verdict
+			// matrix production uses (`allowedPrReviewReportVerdicts`): PARTIAL
+			// never approves, and NO_COVERAGE may only report INCOMPLETE — a
+			// zero-coverage report never approves and never claims a
+			// code-quality review.
 			const verdict = event.requestedVerdict;
-			if (verdict === 'APPROVE') {
-				if (settlement.kind === 'PARTIAL') {
+			if (verdict !== undefined) {
+				if (settlement.kind === 'PARTIAL' && verdict === 'APPROVE') {
 					return rejected(
 						state,
 						'partial_coverage_cannot_approve',
-						'a partial review can never emit APPROVE',
+						`a partial review can never emit ${verdict}`,
 					);
 				}
-				if (settlement.kind === 'NO_COVERAGE') {
+				if (settlement.kind === 'NO_COVERAGE' && verdict !== 'INCOMPLETE') {
 					return rejected(
 						state,
-						'no_coverage_cannot_approve',
-						'a zero-coverage report can never emit APPROVE',
+						'no_coverage_requires_incomplete',
+						`a zero-coverage review must report INCOMPLETE, not ${verdict}`,
 					);
 				}
 			}
@@ -448,8 +389,23 @@ export function reducePrReviewEvent(
 		}
 
 		case 'critic_result_recorded': {
+			// Issue #2512: valid settled critic receipts, not agreement with
+			// the reviewer. UPHELD, DOWNGRADED and DISPROVED each satisfy the
+			// assigned critic coverage; NEEDS_MORE_EVIDENCE is nonterminal and
+			// is not representable on a receipt (the adapter filters to
+			// terminal statuses; the status check here is defensive).
+			const settledFindingIds = new Set(
+				event.criticSettledReceipts
+					.filter(
+						(receipt) =>
+							receipt.status === 'UPHELD' ||
+							receipt.status === 'DOWNGRADED' ||
+							receipt.status === 'DISPROVED',
+					)
+					.map((receipt) => receipt.findingId),
+			);
 			const unfulfilled = event.criticRequiredFindingIds.filter(
-				(id) => !event.criticConfirmedFindingIds.includes(id),
+				(id) => !settledFindingIds.has(id),
 			);
 			if (unfulfilled.length > 0) {
 				return rejected(
@@ -462,59 +418,31 @@ export function reducePrReviewEvent(
 		}
 
 		// -----------------------------------------------------------------
-		// Publication / recovery / authorization
+		// Recovery / authorization
 		// -----------------------------------------------------------------
-		case 'publication_armed': {
-			if (event.verdict === 'APPROVE' && event.coverageKind !== 'COMPLETE') {
-				return rejected(
-					state,
-					event.coverageKind === 'NO_COVERAGE'
-						? 'no_coverage_cannot_approve'
-						: 'partial_coverage_cannot_approve',
-					`cannot arm publication of ${event.verdict} on ${event.coverageKind} coverage`,
-				);
-			}
-			return applied(state, [{ kind: 'persist_state' }]);
-		}
-
-		case 'publication_published':
-		case 'armed_recovery_requested':
-		case 'reviewer_authorization_consumed': {
+		case 'armed_recovery_requested': {
 			const reason = bindingRejection(state, event);
 			if (reason) {
 				return rejected(state, 'stale_foreign_authorization', reason.detail);
 			}
-			if (
-				event.type === 'reviewer_authorization_consumed' &&
-				event.role !== event.expectedRole
-			) {
-				return rejected(
-					state,
-					'stale_foreign_authorization',
-					`authorization role ${event.role} does not match the expected role ${event.expectedRole}`,
-				);
-			}
-			if (event.type === 'armed_recovery_requested') {
-				const cancellations = {
-					...(state.prReviewDimensionCancellations ?? {}),
+			const cancellations = {
+				...(state.prReviewDimensionCancellations ?? {}),
+			};
+			for (const dimension of event.dimensionsToCancel) {
+				cancellations[dimension] = {
+					reason: event.reason,
+					cancelledAt: event.nowIso,
+					source: 'armed_recovery',
 				};
-				for (const dimension of event.dimensionsToCancel) {
-					cancellations[dimension] = {
-						reason: 'armed-recovery cancellation of remaining lanes',
-						cancelledAt: event.nowIso,
-						source: 'armed_recovery',
-					};
-				}
-				// The audited armed-recovery executor (recoverArmedPrWorkflow)
-				// owns the audit event and the publication-authorization
-				// invalidation; this transition owns the dimension
-				// cancellations and their persistence.
-				return applied(
-					{ ...state, prReviewDimensionCancellations: cancellations },
-					[{ kind: 'persist_state' }],
-				);
 			}
-			return applied(state, [{ kind: 'persist_state' }]);
+			// The audited armed-recovery executor (recoverArmedPrWorkflow)
+			// owns the identity/digest validation, the audit event and the
+			// publication-authorization invalidation; this transition owns the
+			// dimension cancellations and their persistence.
+			return applied(
+				{ ...state, prReviewDimensionCancellations: cancellations },
+				[{ kind: 'persist_state' }],
+			);
 		}
 
 		default: {
@@ -534,10 +462,7 @@ export function reducePrReviewEvent(
 
 function bindingRejection(
 	state: PrReviewWorkflowState,
-	event:
-		| Extract<PrReviewEvent, { type: 'publication_published' }>
-		| Extract<PrReviewEvent, { type: 'armed_recovery_requested' }>
-		| Extract<PrReviewEvent, { type: 'reviewer_authorization_consumed' }>,
+	event: Extract<PrReviewEvent, { type: 'armed_recovery_requested' }>,
 ): { detail: string } | null {
 	const binding = event.binding;
 	if (binding.sessionID !== state.sessionID) {

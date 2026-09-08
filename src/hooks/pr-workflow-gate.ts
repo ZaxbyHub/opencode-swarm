@@ -192,6 +192,7 @@ import {
 } from '../pr-review/persistence.js';
 import { reducePrReviewEvent } from '../pr-review/reducer.js';
 import type {
+	PrReviewCriticSettledReceipt,
 	PrReviewEffect,
 	PrReviewEvent,
 	PrReviewWorkflowState,
@@ -4269,7 +4270,11 @@ export async function recoverArmedPrWorkflow(
 			}
 			// PR_REVIEW-origin dimensions still unresolved after settlement are
 			// explicitly cancelled so a later N-of-6 settlement can truthfully
-			// report them as CANCELLED (issue #2383).
+			// report them as CANCELLED (issue #2383). Issue #2512: the
+			// dimension-cancellation write is REDUCER-OWNED — this executor emits
+			// `armed_recovery_requested`, applies the returned state, and keeps
+			// only the identity/digest validation, audit event, and
+			// publication-authorization invalidation for itself.
 			const cancelledDimensions: PrReviewBaseDimensionId[] = [];
 			let cancellations:
 				| Partial<
@@ -4286,14 +4291,31 @@ export async function recoverArmedPrWorkflow(
 				for (const entry of settlement.unresolvedDimensions) {
 					if (entry.terminalState !== 'NOT_LAUNCHED') continue;
 					cancelledDimensions.push(entry.dimension);
-					cancellations = {
-						...cancellations,
-						[entry.dimension]: {
-							reason: sanitizedReason,
-							cancelledAt: isoNow(),
-							source: 'armed_recovery' as const,
+				}
+				if (cancelledDimensions.length > 0) {
+					const recoveryOutcome = reducePrReviewEvent(state, {
+						type: 'armed_recovery_requested',
+						binding: {
+							sessionID: state.sessionID,
+							...(state.workflowInstanceId
+								? { workflowInstanceId: state.workflowInstanceId }
+								: {}),
+							prHeadSha: state.prHeadSha,
+							revisionDigest: armed.revisionDigest,
+							generation: state.revision,
 						},
-					};
+						dimensionsToCancel: cancelledDimensions,
+						nowIso: isoNow(),
+						reason: sanitizedReason,
+					});
+					if (recoveryOutcome.status === 'rejected') {
+						throw new Error(
+							`BLOCKED: armed recovery rejected (${recoveryOutcome.rejection.code}): ${recoveryOutcome.rejection.detail}`,
+						);
+					}
+					cancellations =
+						(recoveryOutcome.state as PrWorkflowGateState)
+							.prReviewDimensionCancellations ?? cancellations;
 				}
 			}
 			const recoveredAt = isoNow();
@@ -5803,11 +5825,28 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 		})),
 		validatedAt: isoNow(),
 	};
+	// Issue #2512: the admission state write is REDUCER-OWNED (symmetry with
+	// the already-wired `base_admission_rolled_back`). The adapter passes the
+	// same cap the inline pre-check enforces; the reducer's rejection is
+	// defense in depth behind it.
+	const admissionOutcome = reducePrReviewEvent(state, {
+		type: 'base_admission_requested',
+		batchId,
+		lanes: record.lanes,
+		depthTier,
+		maxBatches: MAX_WORKFLOW_BATCHES,
+		validatedAt: record.validatedAt,
+	});
+	if (admissionOutcome.status === 'rejected') {
+		// Unreachable behind the inline pre-check above (same constant); the
+		// message is kept identical so a future pre-check removal changes
+		// nothing observable.
+		throw new Error('BLOCKED: PR_REVIEW base batch limit reached');
+	}
+	const admittedState = admissionOutcome.state as PrWorkflowGateState;
 	const nextState: PrWorkflowGateState = {
-		...state,
+		...admittedState,
 		updatedAt: isoNow(),
-		prReviewBaseDispatches: [...previous, record],
-		prReviewBaseDispatch: record,
 		...(requestedContractRetry
 			? {
 					prReviewContractRetryDimensions: [
@@ -10784,6 +10823,51 @@ async function assertPrReviewTerminalReady(
 			);
 		}
 		await assertPrReviewValidationSettled(directory, sessionID, 'critic', ctx);
+		// Issue #2512: critic settlement is REDUCER-OWNED — the adapter derives
+		// valid settled receipts (UPHELD / DOWNGRADED / DISPROVED, each bound
+		// to the current authoritative reviewer row digest via
+		// `reviewerVerdictRowDigest`; composition already rejects unbound
+		// claims) and dispatches `critic_result_recorded`. A required finding
+		// whose only critic verdict is NEEDS_MORE_EVIDENCE has no settled
+		// receipt and the transition is rejected — NEEDS_MORE_EVIDENCE never
+		// satisfies critic coverage. This also closes the hole where a
+		// reviewer re-settlement added NEW required items after the critic
+		// dispatch: those items have no receipt and block here.
+		const criticVerdicts = deriveLatestPrReviewCriticVerdicts(
+			directory,
+			state,
+			ctx,
+		);
+		const reviewerClaims = authoritativeReviewerClaims(directory, state, ctx);
+		const settledReceipts: PrReviewCriticSettledReceipt[] = [];
+		for (const [itemId, verdict] of criticVerdicts) {
+			if (
+				verdict.status !== 'UPHELD' &&
+				verdict.status !== 'DOWNGRADED' &&
+				verdict.status !== 'DISPROVED'
+			) {
+				continue;
+			}
+			const reviewerRowDigest = reviewerClaims.get(itemId)?.rowDigest;
+			if (!reviewerRowDigest) continue;
+			settledReceipts.push({
+				findingId: itemId,
+				status: verdict.status,
+				reviewerRowDigest,
+			});
+		}
+		const criticOutcome = reducePrReviewEvent(state, {
+			type: 'critic_result_recorded',
+			criticRequiredFindingIds: criticInventory,
+			criticSettledReceipts: settledReceipts,
+		});
+		if (criticOutcome.status === 'rejected') {
+			const settledIds = new Set(settledReceipts.map((r) => r.findingId));
+			const unfulfilled = criticInventory.filter((id) => !settledIds.has(id));
+			throw new Error(
+				`BLOCKED: PR_REVIEW reviewer verdicts require critic coverage for: ${unfulfilled.join(', ')}`,
+			);
+		}
 	}
 	const requiredBoundaries: PrReviewArtifactBoundary[] = [
 		'post_explorer',
@@ -11829,6 +11913,50 @@ export async function completePrWorkflow(
 			state,
 			ctx.revisionDigest,
 		);
+		// Issue #2512: coverage finalization is REDUCER-OWNED — the adapter
+		// dispatches `coverage_finalization_requested` and maps the typed
+		// rejections to the operator-facing BLOCKED messages the inline checks
+		// used to produce (the verdict matrix the reducer now enforces matches
+		// `allowedPrReviewReportVerdicts`, which is used here for message
+		// formatting only).
+		const dispatchCoverageFinalization = (
+			finalizationSettlement: typeof settlement,
+		): void => {
+			const outcome = reducePrReviewEvent(state, {
+				type: 'coverage_finalization_requested',
+				settlement: {
+					kind: finalizationSettlement.kind,
+					coveredDimensions: finalizationSettlement.coveredDimensions,
+					unresolvedDimensions: finalizationSettlement.unresolvedDimensions,
+					liveDimensions: finalizationSettlement.liveDimensions,
+				},
+				requestedVerdict: verdict,
+			});
+			if (outcome.status === 'applied') return;
+			const { code } = outcome.rejection;
+			if (code === 'live_lane_blocks_coverage') {
+				if (finalizationSettlement.kind === 'NO_COVERAGE') {
+					throw new Error(
+						`BLOCKED: PR_REVIEW completion has zero covered dimensions and still-live lanes for: ${finalizationSettlement.liveDimensions.join(', ')}. Collect or settle them, then complete with report_verdict INCOMPLETE.`,
+					);
+				}
+				throw new Error(
+					`BLOCKED: PR_REVIEW base coverage is incomplete and still has live lanes for: ${finalizationSettlement.liveDimensions.join(', ')}. Completion is allowed only once every launched lane is terminal or explicitly cancelled.`,
+				);
+			}
+			if (code === 'no_coverage_requires_incomplete') {
+				throw new Error(
+					`BLOCKED: PR_REVIEW NO_COVERAGE completion must report verdict INCOMPLETE; got "${verdict}". A zero-coverage report never approves and never claims a code-quality review.`,
+				);
+			}
+			const allowedList = allowedPrReviewReportVerdicts(
+				finalizationSettlement.kind,
+			).join(' | ');
+			throw new Error(
+				`BLOCKED: PR_REVIEW ${finalizationSettlement.kind} completion allows report_verdict ${allowedList}; got "${verdict}". Partial coverage never approves and never claims a full review.`,
+			);
+		};
+		dispatchCoverageFinalization(settlement);
 		if (settlement.kind === 'NO_COVERAGE') {
 			// NO_COVERAGE settles at completion (issue #2383): zero covered
 			// dimensions means no candidate inventory, no findings ladder, and
@@ -11837,16 +11965,6 @@ export async function completePrWorkflow(
 			// nothing to validate. The run completes as a forced-INCOMPLETE
 			// operational report with explicit reasons; it never claims any
 			// code-quality approval.
-			if (settlement.liveDimensions.length > 0) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW completion has zero covered dimensions and still-live lanes for: ${settlement.liveDimensions.join(', ')}. Collect or settle them, then complete with report_verdict INCOMPLETE.`,
-				);
-			}
-			if (verdict !== 'INCOMPLETE') {
-				throw new Error(
-					`BLOCKED: PR_REVIEW NO_COVERAGE completion must report verdict INCOMPLETE; got "${verdict}". A zero-coverage report never approves and never claims a code-quality review.`,
-				);
-			}
 			// Persist the durable v2 settlement disclosure BEFORE the audit
 			// event and the terminal clear, exactly like a PARTIAL settlement
 			// (plan WS1-8): an external auditor must be able to prove the
@@ -11889,15 +12007,10 @@ export async function completePrWorkflow(
 			}
 			// Fall through to the shared terminal clear below.
 		} else {
-			// Fail fast on an illegal verdict BEFORE the expensive terminal
-			// ladder, then re-validate against the post-ladder settlement in
-			// case state changed underneath the checks.
-			const preAllowed = allowedPrReviewReportVerdicts(settlement.kind);
-			if (!preAllowed.includes(verdict)) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW ${settlement.kind} completion allows report_verdict ${preAllowed.join(' | ')}; got "${verdict}". Partial coverage never approves and never claims a full review.`,
-				);
-			}
+			// The pre-ladder verdict-matrix check ran in the dispatch above;
+			// run the terminal ladder, then re-dispatch against the
+			// post-ladder settlement in case state changed underneath the
+			// checks.
 			const ready = await assertPrReviewTerminalReady(
 				directory,
 				sessionID,
@@ -11912,12 +12025,7 @@ export async function completePrWorkflow(
 					'BLOCKED: PR_REVIEW state changed while checking terminal readiness; retry from current state',
 				);
 			}
-			const allowed = allowedPrReviewReportVerdicts(ready.settlement.kind);
-			if (!allowed.includes(verdict)) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW ${ready.settlement.kind} completion allows report_verdict ${allowed.join(' | ')}; got "${verdict}". Partial coverage never approves and never claims a full review.`,
-				);
-			}
+			dispatchCoverageFinalization(ready.settlement);
 		}
 	} else {
 		// Issue #2108: legacy armed records migrate (conservatively) before this
