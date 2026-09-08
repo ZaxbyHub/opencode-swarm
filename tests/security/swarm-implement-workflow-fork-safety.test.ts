@@ -36,13 +36,31 @@ describe('swarm-implement workflow fork safety (#2498)', () => {
 	});
 
 	test('the write-access gate is the swarm:implement label condition', () => {
-		const gateLines = workflow
-			.split('\n')
-			.filter(
-				(line) => line.includes('if:') && line.includes('swarm:implement'),
-			);
-		expect(gateLines.length).toBeGreaterThan(0);
-		expect(gateLines.every((line) => !line.includes('\n'))).toBe(true);
+		const lines = workflow.split('\n');
+		const gateLines = lines.filter(
+			(line) => line.includes('if:') && line.includes('swarm:implement'),
+		);
+		expect(gateLines.length).toBe(1);
+		// The gate lives on a job-level `if:` (four-space indent), not nested.
+		expect(gateLines[0].startsWith('    if:')).toBe(true);
+	});
+
+	test('least-privilege permissions, timeout, concurrency, and credential posture are pinned', () => {
+		// Committing the workflow's security posture (#2650 review finding:
+		// these guarantees previously rested on manual C1-C12 replays only).
+		expect(/^[ \t]*permissions:/m.test(workflow)).toBe(true);
+		for (const scope of [
+			'contents: write',
+			'issues: read',
+			'pull-requests: write',
+		]) {
+			expect(workflow.includes(scope)).toBe(true);
+		}
+		expect(workflow.includes('write-all')).toBe(false);
+		expect(/^[ \t]*timeout-minutes:/m.test(workflow)).toBe(true);
+		expect(workflow.includes('cancel-in-progress')).toBe(true);
+		expect(workflow.includes('swarm-implement-issue-')).toBe(true);
+		expect(workflow.includes('persist-credentials: false')).toBe(true);
 	});
 
 	test('every secrets reference is a single-line env mapping (no inline interpolation)', () => {

@@ -24,10 +24,6 @@ on:
         description: "Issue number, issue URL, or owner/repo#N to implement"
         required: false
         type: string
-      cost_ceiling:
-        description: "Optional per-agent cost ceiling (wired to the existing per-agent cost circuit breakers)"
-        required: false
-        type: string
 
 # One run per issue: a newer trigger for the same issue supersedes an
 # in-progress run (label-spam mitigation).
@@ -49,7 +45,6 @@ jobs:
     timeout-minutes: 45
     env:
       ISSUE_REF: ${{ github.event.issue.number || inputs.issue }}
-      SWARM_COST_CEILING: ${{ inputs.cost_ceiling || '0' }}
       OPENCODE_MODEL_API_KEY: ${{ secrets.OPENCODE_MODEL_API_KEY }}
     steps:
       - name: Check out the repository

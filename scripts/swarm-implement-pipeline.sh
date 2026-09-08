@@ -21,6 +21,8 @@
 #
 # Exit codes: 0 success; 1 evaluation violations (no PR published);
 # 2 interrupted (SIGINT/SIGTERM); 3 deadline/internal error;
+# 4 branch push failed (transport/auth — distinct from a gate verdict);
+# 5 PR publication rejected;
 # 10 Full-Auto oversight pause (terminal — never retried past).
 #
 # The pipeline wraps the surfaces #2497 shipped (swarm ci) and the host-driven
@@ -40,7 +42,11 @@ record_phase() {
 
 append_summary() {
 	# GITHUB_STEP_SUMMARY is set by the Actions runner; keep local runs quiet.
-	printf '%s\n' "$1" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+	# Best-effort: an unwritable summary must not abort the failure-reporting
+	# path itself under set -e (the fallback returns zero explicitly).
+	if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+		printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || return 0
+	fi
 }
 
 issue_number_from_ref() {
@@ -63,9 +69,9 @@ oversight_pause() {
 }
 
 run_phase() {
-	# Runs one host-driven pipeline phase with a bounded transient retry.
-	# The retry budget applies to provider/infrastructure flakes only; an
-	# oversight pause and a violations verdict are both terminal.
+	# Runs one host-driven pipeline phase with a bounded retry budget
+	# (MAX_RETRIES) for host/provider failures. An oversight pause is
+	# terminal — the retry loop never re-proceeds past a denial.
 	local name="$1"
 	local command="$2"
 	local attempts=0
@@ -81,7 +87,9 @@ run_phase() {
 	fi
 	while [ "$attempts" -lt "$MAX_RETRIES" ]; do
 		attempts=$((attempts + 1))
-		if output="$(opencode run --command "$command" --format json 2>&1)"; then
+		# Per-attempt timeout: a hung host session must not consume the whole
+		# job budget before the bounded retry logic can make a second attempt.
+		if output="$(timeout "${PHASE_TIMEOUT_SECONDS:-600}" opencode run --command "$command" --format json 2>&1)"; then
 			if printf '%s' "$output" | grep -q 'OVERSIGHT_PAUSE'; then
 				oversight_pause "$output"
 			fi
@@ -140,7 +148,7 @@ if [ "$DRY_RUN" = "1" ]; then
 	SWARM_CI_EXIT="${SWARM_DRY_RUN_CI_EXIT:-0}"
 else
 	set +e
-	bunx opencode-swarm ci
+	timeout "${EVAL_TIMEOUT_SECONDS:-900}" bunx opencode-swarm ci
 	SWARM_CI_EXIT=$?
 	set -e
 fi
@@ -172,11 +180,29 @@ if [ "$SWARM_CI_EXIT" -eq 0 ]; then
 	if [ "$DRY_RUN" = "1" ]; then
 		printf '%s\n' "publish=ready (dry-run: gh pr create deferred)" > "$EVIDENCE_DIR/publish-decision.txt"
 	else
+		# Idempotent at the PR boundary too: a re-trigger against an issue
+		# whose PR already exists reuses it instead of failing a duplicate
+		# create (the C5 idempotency contract extended from branch to PR).
+		if gh pr view "$BRANCH" --json url > /dev/null 2>&1; then
+			printf '%s\n' "publish=existing" > "$EVIDENCE_DIR/publish-decision.txt"
+			exit 0
+		fi
 		# GH_TOKEN authenticates the gh CLI; git itself needs credentials
 		# configured (the checkout persists none by design).
 		gh auth setup-git
-		git push origin "$BRANCH"
-		gh pr create --title "swarm: implement issue #$ISSUE_NUMBER" --body-file "$EVIDENCE_DIR/pr-body.md" --head "$BRANCH" > "$EVIDENCE_DIR/pr-url.txt"
+		# Push and PR-create failures get dedicated exit codes (4/5) so an
+		# observer can distinguish a transport failure from a gate verdict
+		# (exit 1) without reading logs.
+		if ! git push origin "$BRANCH"; then
+			append_summary "git push of $BRANCH failed (exit 4): transport or credential problem, not a gate verdict."
+			printf '%s\n' "publish=push-failed" > "$EVIDENCE_DIR/run-status.txt"
+			exit 4
+		fi
+		if ! gh pr create --title "swarm: implement issue #$ISSUE_NUMBER" --body-file "$EVIDENCE_DIR/pr-body.md" --head "$BRANCH" > "$EVIDENCE_DIR/pr-url.txt"; then
+			append_summary "gh pr create failed for $BRANCH (exit 5)."
+			printf '%s\n' "publish=pr-create-failed" > "$EVIDENCE_DIR/run-status.txt"
+			exit 5
+		fi
 		printf '%s\n' "publish=done" > "$EVIDENCE_DIR/publish-decision.txt"
 	fi
 	exit 0
