@@ -1,6 +1,6 @@
+import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, test } from 'bun:test';
 import {
 	handleMcpCommand,
 	parseMcpServeArgs,
@@ -22,7 +22,11 @@ describe('MCP offline guard (#2499 R3)', () => {
 				}
 				if (!entry.name.endsWith('.ts')) continue;
 				const source = fs.readFileSync(full, 'utf-8');
-				if (/from\s+['"]node:child_process|Bun\.spawn|child_process\.spawn/.test(source)) {
+				if (
+					/from\s+['"]node:child_process|Bun\.spawn|child_process\.spawn/.test(
+						source,
+					)
+				) {
 					offenders.push(path.relative(mcpDir, full));
 				}
 			}

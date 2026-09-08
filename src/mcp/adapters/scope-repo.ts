@@ -10,11 +10,11 @@
  */
 
 import { z } from 'zod';
+import { diff as diffTool } from '../../tools/diff.js';
 import {
 	executePlanConflictCheck,
 	plan_conflict_check_args,
 } from '../../tools/plan-conflict-check.js';
-import { diff as diffTool } from '../../tools/diff.js';
 import { symbols as symbolsTool } from '../../tools/symbols.js';
 import type { McpReadTool } from '../registry.js';
 import { mcpToolContext, safeParseJson } from './verification.js';
@@ -47,13 +47,7 @@ const symbolsSchema = z.object({
 		.optional()
 		.describe('Workspace-relative directory to search'),
 	name: z.string().optional().describe('Symbol name pattern to search'),
-	limit: z
-		.number()
-		.int()
-		.min(1)
-		.max(500)
-		.optional()
-		.describe('Max results'),
+	limit: z.number().int().min(1).max(500).optional().describe('Max results'),
 });
 
 export const planConflictCheckAdapter: McpReadTool = {

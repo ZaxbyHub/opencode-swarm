@@ -15,8 +15,8 @@ import {
 	isCanonicalPathWithinRoot,
 	validateTargetWithinRoot,
 } from '../utils/path-security.js';
-import { buildMcpToolRegistry } from './registry.js';
 import { applyResponsePipeline } from './pipeline.js';
+import { buildMcpToolRegistry } from './registry.js';
 
 const SERVER_NAME = 'opencode-swarm';
 

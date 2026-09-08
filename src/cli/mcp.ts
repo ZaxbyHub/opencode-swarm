@@ -21,7 +21,9 @@ export interface McpServeArgs {
 	allowWrite: boolean;
 }
 
-export function parseMcpServeArgs(argv: string[]): McpServeArgs | { error: string } {
+export function parseMcpServeArgs(
+	argv: string[],
+): McpServeArgs | { error: string } {
 	let root = '';
 	let allowWrite = false;
 	for (let i = 0; i < argv.length; i++) {
@@ -67,7 +69,9 @@ export function resolveMcpRoot(
 
 export async function handleMcpCommand(argv: string[]): Promise<number> {
 	if (argv[0] !== 'serve') {
-		console.error("Usage: opencode-swarm mcp serve --dir <project-root> [--allow-write]");
+		console.error(
+			'Usage: opencode-swarm mcp serve --dir <project-root> [--allow-write]',
+		);
 		return argv.length === 0 ? 1 : 1;
 	}
 	const parsed = parseMcpServeArgs(argv.slice(1));

@@ -18,8 +18,15 @@
 import type { z } from 'zod';
 
 import { TOOL_METADATA } from '../tools/tool-metadata.js';
-import { knowledgeRecallAdapter, swarmMemoryRecallAdapter } from './adapters/knowledge-memory.js';
-import { diffAdapter, planConflictCheckAdapter, symbolsAdapter } from './adapters/scope-repo.js';
+import {
+	knowledgeRecallAdapter,
+	swarmMemoryRecallAdapter,
+} from './adapters/knowledge-memory.js';
+import {
+	diffAdapter,
+	planConflictCheckAdapter,
+	symbolsAdapter,
+} from './adapters/scope-repo.js';
 import {
 	evidenceCheckAdapter,
 	placeholderScanAdapter,
