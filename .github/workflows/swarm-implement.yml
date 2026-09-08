@@ -1,0 +1,75 @@
+# .github/workflows/swarm-implement.yml — gated implementation pipeline
+# (#2498, source #1224 phase 2). Wraps the advisory CI surface shipped by
+# #2497 (`swarm ci`) and the host-driven pipeline phases; it reimplements
+# none of them. Trigger paths: the `swarm:implement` issue label (write
+# access is required to label an issue, so fork contributors cannot reach
+# this pipeline), or an explicit workflow_dispatch with an issue reference.
+#
+# Posture: least privilege (contents/issues/pull-requests only), bounded
+# (job timeout + bounded in-script retries), cancellable (per-issue
+# concurrency group with cancel-in-progress), fork-safe (issue-label gated
+# with no fork-PR trigger surface of any kind; secrets reach the run only
+# through the single-line env mappings below), and fail-closed on Full-Auto oversight
+# pauses (the pipeline reports OVERSIGHT_PAUSE with a dedicated terminal
+# exit code and never retries past a denial).
+name: swarm-implement
+
+on:
+  issues:
+    types:
+      - labeled
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "Issue number, issue URL, or owner/repo#N to implement"
+        required: false
+        type: string
+      cost_ceiling:
+        description: "Optional per-agent cost ceiling (wired to the existing per-agent cost circuit breakers)"
+        required: false
+        type: string
+
+# One run per issue: a newer trigger for the same issue supersedes an
+# in-progress run (label-spam mitigation).
+concurrency:
+  group: swarm-implement-issue-${{ github.event.issue.number || inputs.issue || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: read
+  pull-requests: write
+
+jobs:
+  implement:
+    # The issue-label gate: labeling requires write access, so untrusted
+    # fork contributors cannot start this pipeline.
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'swarm:implement'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ISSUE_REF: ${{ github.event.issue.number || inputs.issue }}
+      SWARM_COST_CEILING: ${{ inputs.cost_ceiling || '0' }}
+      OPENCODE_MODEL_API_KEY: ${{ secrets.OPENCODE_MODEL_API_KEY }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@735343b667d3e6f6583c51dd074d965878fd9405 # v2.0.2
+      - name: Install the OpenCode host
+        run: npm install -g opencode@latest
+      - name: Run the gated implementation pipeline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/swarm-implement-pipeline.sh "$ISSUE_REF"
+      - name: Report oversight pause or failure
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f .swarm/pipeline-evidence/run-status.txt ]; then
+            cat .swarm/pipeline-evidence/run-status.txt
+          fi
+          if grep -q "OVERSIGHT_PAUSE" .swarm/pipeline-evidence/phases.txt 2>/dev/null; then
+            echo "Full-Auto oversight paused this run (OVERSIGHT_PAUSE). The pipeline treats the pause as terminal and does not retry past the denial; the pause reason is in the step summary."
+          fi
