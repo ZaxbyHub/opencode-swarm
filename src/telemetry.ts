@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ObservabilityEvent } from './observability/envelope.js';
 import {
+	canonicalLineContent,
 	createObservation,
 	toLegacyTelemetryLine,
 } from './observability/index.js';
@@ -223,40 +224,14 @@ export type TelemetryListener = (
 	 * (`src/db/observability-event-store.ts`) is the canonical consumer.
 	 */
 	canonical?: ObservabilityEvent,
+	/**
+	 * The canonical JSONL line content for `canonical` (no trailing EOL),
+	 * stringified exactly once by `emit()` and handed to listeners so the
+	 * sink's line-hash path never re-stringifies the same envelope (issue
+	 * #2487 review PRR-005).
+	 */
+	canonicalContent?: string,
 ) => void;
-
-/** Closed-vocabulary reasons for a legacy JSONL writer failure. */
-export type TelemetryWriterFailureReason =
-	| 'open_failed'
-	| 'stream_error'
-	| 'serialize_failed'
-	| 'write_failed'
-	| 'flush_failed';
-
-/** Bounded status exposed to report/health consumers. */
-export interface TelemetryWriterStatus {
-	state: 'uninitialized' | 'active' | 'disabled';
-	disabled: boolean;
-	failureCount: number;
-	lastFailureAt: string | null;
-	lastFailureReason: TelemetryWriterFailureReason | null;
-}
-
-/** Reserved additive legacy field used by the canonical sink for exact joins. */
-export const LEGACY_OBSERVATION_ID_FIELD = '__swarm_observation_id';
-/**
- * Versioned provenance prefix for identities written by this plugin.
- *
- * The importer must never treat a bare value in `LEGACY_OBSERVATION_ID_FIELD`
- * as canonical: legacy-only callers have always been able to supply arbitrary
- * payload keys, including UUID- or digest-shaped strings. The sink appends this
- * prefix only after it owns the projection, making a bare caller collision an
- * ordinary legacy payload field rather than an event primary key. Import uses
- * this marker only to reconcile with a matching live canonical row; it never
- * adopts the marker itself as an import-row primary key.
- */
-export const LEGACY_OBSERVATION_ID_PROVENANCE_PREFIX =
-	'opencode-swarm-observation/v1:';
 
 // ============================================================================
 // Internal State
@@ -265,80 +240,7 @@ export const LEGACY_OBSERVATION_ID_PROVENANCE_PREFIX =
 let _writeStream: ReturnType<typeof createWriteStream> | null = null;
 let _projectDirectory: string | null = null;
 const _listeners: TelemetryListener[] = [];
-let _legacyWriterDisabled = false;
-let _legacyWriterFailureCount = 0;
-let _legacyWriterLastFailureAt: string | null = null;
-let _legacyWriterLastFailureReason: TelemetryWriterFailureReason | null = null;
-let _legacyIdentityProjectionEnabled = false;
-const MAX_LEGACY_WRITER_FAILURES = 1024;
-
-function noteLegacyWriterFailure(reason: TelemetryWriterFailureReason): void {
-	_legacyWriterDisabled = true;
-	_legacyWriterFailureCount = Math.min(
-		MAX_LEGACY_WRITER_FAILURES,
-		_legacyWriterFailureCount + 1,
-	);
-	_legacyWriterLastFailureReason = reason;
-	try {
-		_legacyWriterLastFailureAt = new Date().toISOString();
-	} catch {
-		_legacyWriterLastFailureAt = null;
-	}
-}
-
-function clearLegacyWriterFailureLatch(): void {
-	_legacyWriterDisabled = false;
-}
-
-function resetLegacyWriterFailureState(): void {
-	_legacyWriterDisabled = false;
-	_legacyWriterFailureCount = 0;
-	_legacyWriterLastFailureAt = null;
-	_legacyWriterLastFailureReason = null;
-}
-
-/**
- * Return bounded legacy-writer state without exposing paths or error text.
- * Canonical listeners are independent of this latch and continue to receive
- * observations while the rebuildable JSONL projection is unavailable.
- */
-
-export function getTelemetryWriterStatus(
-	projectDirectory?: string,
-): TelemetryWriterStatus {
-	// The process owns one legacy stream (last-init-wins), so a caller that
-	// asks about another root must not inherit the current owner's failure
-	// latch. Keep the no-argument form for existing process-health consumers.
-	if (
-		projectDirectory !== undefined &&
-		(_projectDirectory === null ||
-			!sameProjectRoot(_projectDirectory, projectDirectory))
-	) {
-		return {
-			state: 'uninitialized',
-			disabled: false,
-			failureCount: 0,
-			lastFailureAt: null,
-			lastFailureReason: null,
-		};
-	}
-	return {
-		state: _legacyWriterDisabled
-			? 'disabled'
-			: _writeStream === null
-				? 'uninitialized'
-				: 'active',
-		disabled: _legacyWriterDisabled,
-		failureCount: _legacyWriterFailureCount,
-		lastFailureAt: _legacyWriterLastFailureAt,
-		lastFailureReason: _legacyWriterLastFailureReason,
-	};
-}
-
-/** @internal - enabled only while the canonical observability sink is bound. */
-export function setLegacyIdentityProjectionEnabled(enabled: boolean): void {
-	_legacyIdentityProjectionEnabled = enabled;
-}
+let _disabled: boolean = false;
 
 // ── Heartbeat tracking (FR-010) ───────────────────────────────────
 // Production listener captures latest heartbeat timestamp per sessionId.
@@ -418,15 +320,15 @@ export const ROTATION_CHECK_INTERVAL = 50;
 
 /** @internal - For testing only */
 export function resetTelemetryForTesting(): void {
-	resetLegacyWriterFailureState();
-	_legacyIdentityProjectionEnabled = false;
+	_disabled = false;
 	_projectDirectory = null;
 	_listeners.length = 0;
 	_emitCount = 0;
 	resetHeartbeatTrackingForTesting();
-	const stream = _writeStream;
-	_writeStream = null;
-	if (stream !== null) stream.end();
+	if (_writeStream !== null) {
+		_writeStream.end();
+		_writeStream = null;
+	}
 }
 
 // ============================================================================
@@ -444,9 +346,8 @@ export function resetTelemetryForTesting(): void {
  * server() instance initializing in this process for another project root),
  * telemetry re-initializes for the new directory exactly as a fresh init
  * does — the previous behavior latched the first directory forever, so the
- * second project's `.swarm/telemetry.jsonl` was never created. A legacy
- * writer failure latch is recoverable by a later successful init; canonical
- * listeners are never disabled by this state.
+ * second project's `.swarm/telemetry.jsonl` was never created. A disabled
+ * telemetry state stays disabled.
  *
  * No-drop ordering + fail-open ownership retention (PR #2588, review finding
  * 6 / PRR-019): the NEW stream is created and published FIRST, and only then
@@ -454,8 +355,8 @@ export function resetTelemetryForTesting(): void {
  * close-then-create order nulled `_writeStream` before the replacement
  * existed, so any emit racing the re-home was dropped by the
  * `_writeStream === null` guard, and a new-stream creation FAILURE took the
- * whole process's legacy writer down (`_legacyWriterDisabled = true`) after
- * the old stream was already gone. On creation failure the OLD stream is now retained
+ * whole process's telemetry down (`_disabled = true`) after the old stream
+ * was already gone. On creation failure the OLD stream is now retained
  * (logged non-fatally, no re-home) — events keep flowing to the previous
  * directory until a later successful init.
  *
@@ -471,19 +372,17 @@ export function resetTelemetryForTesting(): void {
  * @param projectDirectory - Absolute path to the project root
  */
 export function initTelemetry(projectDirectory: string): void {
+	if (_disabled) {
+		return;
+	}
 	if (
 		_writeStream !== null &&
 		_projectDirectory !== null &&
 		sameProjectRoot(_projectDirectory, projectDirectory)
 	) {
-		// A successful same-directory re-init is also a recovery point for a
-		// serialization-only failure: the stream is still usable, so clear only
-		// the legacy projection latch and keep canonical delivery untouched.
-		clearLegacyWriterFailureLatch();
 		return;
 	}
 	const oldStream = _writeStream;
-	const previousDirectory = _projectDirectory;
 	try {
 		const swarmDir = path.join(projectDirectory, '.swarm');
 
@@ -497,11 +396,11 @@ export function initTelemetry(projectDirectory: string): void {
 		// Guard on stream identity: a stale stream that was already replaced (by
 		// rotation or re-home) or ended (by resetTelemetryForTesting) must NOT
 		// clobber the currently-active stream's state when it emits a late
-		// 'error' — otherwise one dead stream permanently disables the legacy
-		// projection for the live one.
+		// 'error' — otherwise one dead stream permanently disables telemetry
+		// for the live one.
 		stream.on('error', () => {
 			if (_writeStream === stream) {
-				noteLegacyWriterFailure('stream_error');
+				_disabled = true;
 				_writeStream = null;
 			}
 		});
@@ -512,27 +411,10 @@ export function initTelemetry(projectDirectory: string): void {
 		// `_writeStream === null` window in which racing emits are dropped.
 		_writeStream = stream;
 		_projectDirectory = projectDirectory;
-		// Writer health belongs to the root that owned the stream. A successful
-		// re-home must not report another project's old failure history, while a
-		// same-root recovery deliberately retains its bounded diagnostic count.
-		if (
-			previousDirectory !== null &&
-			!sameProjectRoot(previousDirectory, projectDirectory)
-		) {
-			resetLegacyWriterFailureState();
-		} else {
-			clearLegacyWriterFailureLatch();
-		}
 	} catch (error) {
 		// Fail-open ownership retention: keep the OLD stream latched (when one
 		// exists) and do NOT re-home. Logging only — a failed re-home must not
 		// disable the still-working previous stream.
-		if (oldStream === null) {
-			// Remember the attempted owner so a directory-aware report can expose
-			// the failed initialization instead of borrowing another root's state.
-			_projectDirectory = projectDirectory;
-			noteLegacyWriterFailure('open_failed');
-		}
 		log(
 			`[telemetry] failed to open the new project's telemetry stream (retaining the previous stream, non-fatal): ${
 				error instanceof Error ? error.message : String(error)
@@ -571,50 +453,43 @@ export function emit(
 	data: Record<string, unknown>,
 ): void {
 	try {
+		if (_disabled || _writeStream === null) {
+			return;
+		}
+
 		// Build the canonical observability event (issue #2029), then project it
 		// down to the legacy JSONL line. `createObservation` performs no I/O, never
 		// throws, and never clones or traverses `data` — see
 		// `docs/observability-event-contract.md`.
 		//
-		// Without the canonical sink, the written line is BYTE-IDENTICAL to the
-		// previous inline construction: `toLegacyTelemetryLine` takes `timestamp`
-		// from `canonical.observedAt` and spreads the caller's original `data`
-		// object last. When the sink is bound, one reserved additive observation-id
-		// field is appended so import can make an exact live/import join; legacy
-		// readers ignore that field. The legacy-only parity remains proven by
-		// `tests/unit/telemetry/emit-line-parity.test.ts`.
+		// The written line is BYTE-IDENTICAL to the previous inline construction:
+		// `toLegacyTelemetryLine` takes `timestamp` from `canonical.observedAt`
+		// (stamped with the same `new Date().toISOString()`) and spreads the
+		// caller's original `data` object last. Proven by
+		// `tests/unit/telemetry/emit-line-parity.test.ts` against a corpus captured
+		// from the unmodified tree at e50386b9.
 		//
+		// `JSON.stringify` still throws here for circular/BigInt payloads, before
+		// the listener fan-out below — preserving the ordering asserted by
+		// `src/telemetry.test.ts:137-162`.
 		const canonical = _internals.createObservation(event, data);
-		// The canonical envelope is authoritative for listeners. Legacy JSONL is
-		// a best-effort projection and may fail on circular/BigInt payloads; such
-		// a failure must not strand the canonical sink.
-		if (!_legacyWriterDisabled && _writeStream !== null) {
-			try {
-				const legacyLine = _internals.toLegacyTelemetryLine(canonical);
-				if (_legacyIdentityProjectionEnabled) {
-					// The sink owns this reserved field. Prefixing it makes the
-					// projection versioned and prevents a legacy-only caller's
-					// UUID/digest-shaped payload value from being trusted on import.
-					legacyLine[LEGACY_OBSERVATION_ID_FIELD] =
-						`${LEGACY_OBSERVATION_ID_PROVENANCE_PREFIX}${canonical.eventId}`;
-				}
-				const line = JSON.stringify(legacyLine) + os.EOL;
-				const stream = _writeStream;
-				stream.write(line, (err) => {
-					// Only disable on write error if this is still the active stream.
-					if (err && _writeStream === stream) {
-						noteLegacyWriterFailure('write_failed');
-						_writeStream = null;
-					}
-				});
-			} catch {
-				noteLegacyWriterFailure('serialize_failed');
+		// Stringify exactly once; both the JSONL write and the sink's
+		// line-hash path consume the same string (issue #2487 review PRR-005).
+		const content = _internals.canonicalLineContent(canonical);
+		const line = content + os.EOL;
+
+		const stream = _writeStream;
+		stream.write(line, (err) => {
+			// Only disable on write error if this is still the active stream.
+			if (err && _writeStream === stream) {
+				_disabled = true;
+				_writeStream = null;
 			}
-		}
+		});
 
 		for (const listener of _listeners) {
 			try {
-				listener(event, data, canonical);
+				listener(event, data, canonical, content);
 			} catch {
 				// Listener errors must NOT propagate
 			}
@@ -636,9 +511,8 @@ export function emit(
 
 /**
  * Register a listener for telemetry events.
- * Listeners receive every event that is emitted, independently of the
- * rebuildable legacy JSONL writer state. Listener errors are silently
- * swallowed — they never break execution.
+ * Listeners receive every event that is emitted (if telemetry is not disabled).
+ * Listener errors are silently swallowed — they never break execution.
  * @param callback - Function called with (event, data) on each emit
  */
 export function addTelemetryListener(callback: TelemetryListener): void {
@@ -662,8 +536,7 @@ export function removeTelemetryListener(callback: TelemetryListener): void {
 /**
  * Rotate telemetry file if it exceeds maxBytes.
  * Renames `telemetry.jsonl` → `telemetry.jsonl.1` and reopens a fresh stream.
- * Errors are silently swallowed; a rotation failure affects only the legacy
- * JSONL projection and never disables canonical listeners.
+ * Errors are silently swallowed.
  * @param maxBytes - Size threshold in bytes (default: 10MB)
  */
 export function rotateTelemetryIfNeeded(
@@ -700,10 +573,10 @@ export function rotateTelemetryIfNeeded(
 			_writeStream.end();
 			const stream = createWriteStream(telemetryPath, { flags: 'a' });
 			// Same identity guard as initTelemetry: the just-ended old stream must
-			// not disable the legacy projection for this fresh post-rotation stream.
+			// not disable telemetry for this fresh post-rotation stream.
 			stream.on('error', () => {
 				if (_writeStream === stream) {
-					noteLegacyWriterFailure('stream_error');
+					_disabled = true;
 					_writeStream = null;
 				}
 			});
@@ -727,8 +600,7 @@ export function rotateTelemetryIfNeeded(
  * and assigned to `_writeStream` BEFORE `end()` is called on the old handle, so
  * a concurrent `emit()` that races across the await lands on the live stream.
  * The old handle's write callback would otherwise fire
- * `ERR_STREAM_WRITE_AFTER_END`, latch `_legacyWriterDisabled = true`, and kill
- * the legacy projection for
+ * `ERR_STREAM_WRITE_AFTER_END`, latch `_disabled = true`, and kill telemetry for
  * every subsequent session until restart (server-scoped plugin process). This
  * mirrors the already-safe `rotateTelemetryIfNeeded` ordering.
  *
@@ -736,8 +608,8 @@ export function rotateTelemetryIfNeeded(
  * has been drained to the OS — so awaiting that callback is the documented way
  * to guarantee the on-disk file contains every emitted record up to this point.
  *
- * Fail-open: any error during reopen disables only the legacy projection
- * rather than throwing — a flush failure must never block the close pipeline.
+ * Fail-open: any error during reopen disables telemetry rather than throwing —
+ * a flush failure must never block the close pipeline.
  */
 export async function flushAndDrainTelemetry(): Promise<void> {
 	const stream = _writeStream;
@@ -757,15 +629,14 @@ export async function flushAndDrainTelemetry(): Promise<void> {
 		next = createWriteStream(telemetryPath, { flags: 'a' });
 		next.on('error', () => {
 			if (_writeStream === next) {
-				noteLegacyWriterFailure('stream_error');
+				_disabled = true;
 				_writeStream = null;
 			}
 		});
 		_writeStream = next;
 	} catch {
-		// Reopen failed — leave the legacy projection disabled rather than
-		// throwing. Canonical listeners remain independent of this state.
-		noteLegacyWriterFailure('flush_failed');
+		// Reopen failed — leave telemetry disabled rather than throwing.
+		_disabled = true;
 		_writeStream = null;
 		return;
 	}
@@ -1486,6 +1357,7 @@ export const _internals: {
 	heartbeatListenerCount: () => number;
 	createObservation: typeof createObservation;
 	toLegacyTelemetryLine: typeof toLegacyTelemetryLine;
+	canonicalLineContent: typeof canonicalLineContent;
 } = {
 	telemetry,
 	emit,
@@ -1494,4 +1366,5 @@ export const _internals: {
 	heartbeatListenerCount: () => (_heartbeatListener !== null ? 1 : 0),
 	createObservation,
 	toLegacyTelemetryLine,
+	canonicalLineContent,
 };

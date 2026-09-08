@@ -16,7 +16,6 @@
  * dependent.
  */
 
-import { createHash } from 'node:crypto';
 import { getCatalogEntry } from './catalog.js';
 import {
 	type Lineage,
@@ -60,48 +59,13 @@ let _sampleRate: number = DEFAULT_SAMPLE_RATE;
 const EMPTY_KNOWN_KEYS: readonly string[] = Object.freeze([]);
 
 /**
- * A deterministic process token plus writer sequence make fallback identities
- * distinct within a process and across independent processes/restarts. The
- * token deliberately uses process identity and start timing rather than the
- * CSPRNG that may have failed on the primary path. `Date.now()` alone was not
- * sufficient: two processes can start in the same millisecond. The hash is
- * deterministic and does not draw entropy; its final fallback still includes
- * the process id if a hash implementation is unavailable.
+ * Sentinel identities used only by the fallback event. They are CONSTANTS, not
+ * generated: the fallback exists to survive a failure that may well have been
+ * `randomBytes`/`randomUUID` throwing, so it must not call them again. Both are
+ * W3C-shaped and non-all-zero. They are intentionally NOT unique — an event
+ * carrying them is identifiable as a construction failure.
  */
-const FALLBACK_PROCESS_TOKEN = (() => {
-	let pid = 0;
-	let origin = 0;
-	let now = 0;
-	try {
-		pid =
-			Number.isSafeInteger(process.pid) && process.pid >= 0 ? process.pid : 0;
-	} catch {
-		// Keep the bounded fallback below usable in unusual hosts.
-	}
-	try {
-		origin =
-			typeof performance?.timeOrigin === 'number' &&
-			Number.isFinite(performance.timeOrigin)
-				? Math.trunc(performance.timeOrigin)
-				: 0;
-	} catch {
-		// `performance` is optional in some embedded hosts.
-	}
-	try {
-		now = Date.now();
-		if (!Number.isSafeInteger(now) || now < 0) now = 0;
-	} catch {
-		// Date.now may be the failing source under test; do not retry it.
-	}
-	try {
-		return createHash('sha256')
-			.update(`opencode-swarm-fallback-v2\0${pid}\0${origin}\0${now}`)
-			.digest('hex')
-			.slice(0, 12);
-	} catch {
-		return pid.toString(16).padStart(12, '0').slice(-12);
-	}
-})();
+const FALLBACK_EVENT_ID = '00000000-0000-4000-8000-000000000000';
 const FALLBACK_TRACE_ID = '00000000000000000000000000000001';
 const FALLBACK_SPAN_ID = '0000000000000001';
 const FALLBACK_TIMESTAMP = '1970-01-01T00:00:00.000Z';
@@ -239,16 +203,6 @@ function safeNowIso(): string {
 	}
 }
 
-function fallbackEventId(writerSequence: number): string {
-	// A UUID-shaped id keeps the envelope valid without depending on the same
-	// entropy source that may have failed on the primary path. There are 30
-	// variable hexadecimal nibbles after the required UUID version/variant;
-	// encode a 48-bit process epoch and the full (<=53-bit) sequence within them.
-	const epoch = FALLBACK_PROCESS_TOKEN;
-	const sequence = writerSequence.toString(16).padStart(18, '0').slice(-18);
-	return `${epoch.slice(0, 8)}-${epoch.slice(8)}-4${sequence.slice(0, 3)}-8${sequence.slice(3, 6)}-${sequence.slice(6)}`;
-}
-
 /**
  * Minimal valid event used when construction fails.
  *
@@ -266,7 +220,7 @@ function buildFallbackObservation(
 	const now = safeNowIso();
 	return {
 		schemaVersion: OBSERVABILITY_SCHEMA_VERSION,
-		eventId: fallbackEventId(writerSequence),
+		eventId: FALLBACK_EVENT_ID,
 		kind,
 		category: 'unrecognized',
 		severity: 'error',
@@ -427,6 +381,15 @@ export function toLegacyTelemetryLine(
 		event: event.kind,
 		...(event.legacy.raw as Record<string, unknown>),
 	};
+}
+
+/**
+ * The exact JSONL line content `emit()` writes, without the EOL. Single
+ * definition so the writer (src/telemetry.ts) and the observability store's
+ * content-derived `line_hash` correlation (issue #2487) can never drift apart.
+ */
+export function canonicalLineContent(event: ObservabilityEvent): string {
+	return JSON.stringify(toLegacyTelemetryLine(event));
 }
 
 // ============================================================================

@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { reducePrReviewEvent } from '../../../src/pr-review/reducer.js';
-import type { PrReviewWorkflowState } from '../../../src/pr-review/types.js';
+import type {
+	PrReviewCriticSettledReceipt,
+	PrReviewWorkflowState,
+} from '../../../src/pr-review/types.js';
 
 const BASE: PrReviewWorkflowState = {
 	sessionID: 'ses_completion_1',
@@ -52,6 +55,17 @@ function settlement(overrides: {
 			reasonKind: 'lane_failure',
 		})),
 		liveDimensions: live,
+	};
+}
+
+function receipt(
+	findingId: string,
+	status: PrReviewCriticSettledReceipt['status'],
+): PrReviewCriticSettledReceipt {
+	return {
+		findingId,
+		status,
+		reviewerRowDigest: `row-digest-${findingId}`,
 	};
 }
 
@@ -116,7 +130,7 @@ describe('reducer: coverage finalization (N-of-6 truthfulness)', () => {
 		}
 	});
 
-	test('NO_COVERAGE cannot approve', () => {
+	test('NO_COVERAGE cannot approve (issue #2512: requires INCOMPLETE)', () => {
 		const result = reducePrReviewEvent(BASE, {
 			type: 'coverage_finalization_requested',
 			settlement: settlement({ covered: [] }),
@@ -124,10 +138,30 @@ describe('reducer: coverage finalization (N-of-6 truthfulness)', () => {
 		});
 		expect(result.status).toBe('rejected');
 		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('no_coverage_cannot_approve');
+		expect(result.rejection.code).toBe('no_coverage_requires_incomplete');
 	});
 
-	test('finalization persists; the durable disclosure carries the unresolved list', () => {
+	test('NO_COVERAGE with REQUEST_CHANGES is rejected (production matrix parity)', () => {
+		const result = reducePrReviewEvent(BASE, {
+			type: 'coverage_finalization_requested',
+			settlement: settlement({ covered: [] }),
+			requestedVerdict: 'REQUEST_CHANGES',
+		});
+		expect(result.status).toBe('rejected');
+		if (result.status !== 'rejected') return;
+		expect(result.rejection.code).toBe('no_coverage_requires_incomplete');
+	});
+
+	test('NO_COVERAGE with INCOMPLETE finalizes', () => {
+		const result = reducePrReviewEvent(BASE, {
+			type: 'coverage_finalization_requested',
+			settlement: settlement({ covered: [] }),
+			requestedVerdict: 'INCOMPLETE',
+		});
+		expect(result.status).toBe('applied');
+	});
+
+	test('finalization is validation-only; persistence stays with the completion adapter', () => {
 		const result = reducePrReviewEvent(BASE, {
 			type: 'coverage_finalization_requested',
 			settlement: settlement({
@@ -141,16 +175,52 @@ describe('reducer: coverage finalization (N-of-6 truthfulness)', () => {
 		// completion module's durable artifact (coverage-disclosure.json),
 		// written by the gate when it executes persist_state — not an
 		// audit-event effect.
-		expect(result.effects).toEqual([{ kind: 'persist_state' }]);
+		// Issue #2512 review PRR-006: the transition mutates no state, so it
+		// emits no effects — the completion adapter persists at its own
+		// terminal clear.
+		expect(result.effects).toEqual([]);
 	});
 });
 
-describe('reducer: critic result admission', () => {
-	test('unfulfilled critic-required findings reject settlement', () => {
+describe('critic settled receipts (issue 2512)', () => {
+	test('UPHELD satisfies coverage for its finding', () => {
+		const result = reducePrReviewEvent(BASE, {
+			type: 'critic_result_recorded',
+			criticRequiredFindingIds: ['f-1'],
+			criticSettledReceipts: [receipt('f-1', 'UPHELD')],
+		});
+		expect(result.status).toBe('applied');
+	});
+
+	test('DOWNGRADED satisfies coverage', () => {
+		const result = reducePrReviewEvent(BASE, {
+			type: 'critic_result_recorded',
+			criticRequiredFindingIds: ['f-1', 'f-2'],
+			criticSettledReceipts: [
+				receipt('f-1', 'DOWNGRADED'),
+				receipt('f-2', 'UPHELD'),
+			],
+		});
+		expect(result.status).toBe('applied');
+	});
+
+	test('DISPROVED satisfies coverage', () => {
+		const result = reducePrReviewEvent(BASE, {
+			type: 'critic_result_recorded',
+			criticRequiredFindingIds: ['f-1'],
+			criticSettledReceipts: [receipt('f-1', 'DISPROVED')],
+		});
+		expect(result.status).toBe('applied');
+	});
+
+	test('a required finding with no settled receipt rejects settlement', () => {
 		const result = reducePrReviewEvent(BASE, {
 			type: 'critic_result_recorded',
 			criticRequiredFindingIds: ['f-1', 'f-2', 'f-3'],
-			criticConfirmedFindingIds: ['f-1', 'f-3'],
+			criticSettledReceipts: [
+				receipt('f-1', 'UPHELD'),
+				receipt('f-3', 'UPHELD'),
+			],
 		});
 		expect(result.status).toBe('rejected');
 		if (result.status !== 'rejected') return;
@@ -158,52 +228,35 @@ describe('reducer: critic result admission', () => {
 		expect(result.rejection.detail).toContain('f-2');
 	});
 
-	test('fully confirmed critic inventory settles', () => {
+	test('NEEDS_MORE_EVIDENCE does not satisfy (nonterminal; not a settled receipt)', () => {
+		// NEEDS_MORE_EVIDENCE is not representable on a settled receipt (the
+		// type admits only UPHELD/DOWNGRADED/DISPROVED), so the adapter
+		// cannot emit one for it; the only representable way a finding stays
+		// unfulfilled is the absence of its receipt, asserted here.
 		const result = reducePrReviewEvent(BASE, {
 			type: 'critic_result_recorded',
-			criticRequiredFindingIds: ['f-1', 'f-2'],
-			criticConfirmedFindingIds: ['f-2', 'f-1'],
+			criticRequiredFindingIds: ['f-1'],
+			criticSettledReceipts: [],
 		});
-		expect(result.status).toBe('applied');
+		expect(result.status).toBe('rejected');
+		if (result.status !== 'rejected') return;
+		expect(result.rejection.code).toBe('critic_required_unfulfilled');
+		expect(result.rejection.detail).toContain('f-1');
 	});
 
 	test('an empty critic-required inventory settles trivially', () => {
 		const result = reducePrReviewEvent(BASE, {
 			type: 'critic_result_recorded',
 			criticRequiredFindingIds: [],
-			criticConfirmedFindingIds: [],
+			criticSettledReceipts: [],
 		});
 		expect(result.status).toBe('applied');
 	});
 });
 
-describe('reducer: publication arming', () => {
-	test('arming APPROVAL on COMPLETE coverage is allowed', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'publication_armed',
-			coverageKind: 'COMPLETE',
-			verdict: 'APPROVE',
-		});
-		expect(result.status).toBe('applied');
-	});
-
-	test('arming APPROVAL on PARTIAL coverage is rejected', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'publication_armed',
-			coverageKind: 'PARTIAL',
-			verdict: 'APPROVE',
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('partial_coverage_cannot_approve');
-	});
-
-	test('arming REQUEST_CHANGES on NO_COVERAGE is allowed (truthful verdict)', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'publication_armed',
-			coverageKind: 'NO_COVERAGE',
-			verdict: 'INCOMPLETE',
-		});
-		expect(result.status).toBe('applied');
-	});
-});
+// Issue #2512 wire-or-retire census: `publication_armed` was RETIRED from the
+// PrReviewEvent union. Verdict/coverage compatibility at completion is owned by
+// the wired `coverage_finalization_requested` transition (matrix parity with
+// `allowedPrReviewReportVerdicts`); the PR_FEEDBACK arming write itself is the
+// generation-governed transition documented in
+// docs/pr-feedback-publication-generations.md.

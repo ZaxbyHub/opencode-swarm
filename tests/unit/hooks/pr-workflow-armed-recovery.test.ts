@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import { PR_REVIEW_BASE_DIMENSION_IDS } from '../../../src/background/pr-review-contract.js';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
@@ -26,6 +27,8 @@ const originalResolveCurrentGitHeadAsync =
 const originalResolveWorkingTreeClean = _test_exports.resolveIsWorkingTreeClean;
 const originalResolveWorkingTreeCleanAsync =
 	_test_exports.resolveIsWorkingTreeCleanAsync;
+const originalResolvePrWorkflowRevisionDigestDetailed =
+	_test_exports.resolvePrWorkflowRevisionDigestDetailed;
 
 const ARMED_DIGEST = 'a'.repeat(64);
 const ARMED = {
@@ -53,20 +56,24 @@ afterEach(async () => {
 	_test_exports.resolveIsWorkingTreeClean = originalResolveWorkingTreeClean;
 	_test_exports.resolveIsWorkingTreeCleanAsync =
 		originalResolveWorkingTreeCleanAsync;
+	_test_exports.resolvePrWorkflowRevisionDigestDetailed =
+		originalResolvePrWorkflowRevisionDigestDetailed;
 	closeAllProjectDbs();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
 const ARMED_BASE_SHA = 'fedcba9876543210fedcba9876543210fedcba98';
 
-async function establishArmed(options: { withBase?: boolean } = {}): Promise<{
+async function establishArmed(
+	options: { withBase?: boolean; mode?: 'PR_FEEDBACK' | 'PR_REVIEW' } = {},
+): Promise<{
 	generation: number;
 	workflowInstanceId: string;
 }> {
 	const state = await activatePrWorkflow(
 		directory,
 		PR_ARTIFACT_SESSION_ID,
-		'PR_FEEDBACK',
+		options.mode ?? 'PR_FEEDBACK',
 		{ prHeadSha: PR_ARTIFACT_HEAD_SHA },
 	);
 	const armed = {
@@ -324,5 +331,63 @@ describe('recoverArmedPrWorkflow (issue #2383)', () => {
 				reason: '   ',
 			}),
 		).rejects.toThrow('non-empty reason');
+	});
+});
+
+// Issue #2512 review PRR-001: the PR_REVIEW-mode armed-recovery wiring (the
+// reducer dispatch that owns prReviewDimensionCancellations) previously had
+// zero integration coverage — every prior test in this file activates
+// PR_FEEDBACK. This test drives the real executor in PR_REVIEW mode against a
+// state with no dispatches and no verdicts, so every base dimension derives
+// as NOT_LAUNCHED and the executor must route the cancellation write through
+// the wired `armed_recovery_requested` reducer path and persist it with the
+// operator's sanitized reason.
+describe('armed recovery in PR_REVIEW mode (issue #2512 PRR-001)', () => {
+	test('cancels NOT_LAUNCHED dimensions through the reducer dispatch and persists them', async () => {
+		const armed = await establishArmed({ mode: 'PR_REVIEW' });
+		// The PR_REVIEW recovery branch resolves a bounded current-revision
+		// digest through real git before dispatching; the seam keeps this
+		// fixture hermetic (the temp directory is not a Git repository).
+		_test_exports.resolvePrWorkflowRevisionDigestDetailed = () => ({
+			ok: true,
+			digest: ARMED_DIGEST,
+		});
+
+		const result = await recoverArmedPrWorkflow(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+			{
+				expectedMode: 'PR_REVIEW',
+				prHeadSha: PR_ARTIFACT_HEAD_SHA,
+				revisionDigest: ARMED_DIGEST,
+				generation: armed.generation,
+				workflowInstanceId: armed.workflowInstanceId,
+				reason: 'superseded review window',
+			},
+		);
+
+		expect(result.mode).toBe('PR_REVIEW');
+		expect([...result.cancelledDimensions].sort()).toEqual(
+			[...PR_REVIEW_BASE_DIMENSION_IDS].sort(),
+		);
+		const recovered = await readPrWorkflowGateState(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+		);
+		const cancellations = recovered?.prReviewDimensionCancellations ?? {};
+		expect(Object.keys(cancellations).sort()).toEqual(
+			[...PR_REVIEW_BASE_DIMENSION_IDS].sort(),
+		);
+		expect(cancellations['tests-falsifiability']).toEqual({
+			reason: 'superseded review window',
+			cancelledAt: result.recoveredAt,
+			source: 'armed_recovery',
+		});
+		expect(recovered?.prFeedbackArmedRecovery).toMatchObject({
+			prHeadSha: PR_ARTIFACT_HEAD_SHA,
+			revisionDigest: ARMED_DIGEST,
+			generation: armed.generation,
+			reason: 'superseded review window',
+		});
 	});
 });

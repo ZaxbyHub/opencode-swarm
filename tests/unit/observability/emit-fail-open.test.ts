@@ -5,9 +5,11 @@
  *   (`category: 'unrecognized'`) and never throws.
  * - A real `emit()` with an unrecognized kind STILL writes a line and STILL
  *   notifies listeners — nothing is silently dropped.
- * - A circular payload passed to `emit()` does not throw, writes nothing, and
- *   still reaches canonical listeners. The legacy projection is best-effort;
- *   canonical fan-out remains reachable when `JSON.stringify` fails.
+ * - A circular payload passed to `emit()` does not throw and writes nothing
+ *   (matches `src/telemetry.test.ts:137-162`) — and per the ACTUAL current
+ *   `emit()` implementation, listeners are NOT notified in that case, because
+ *   `JSON.stringify` throws before the listener fan-out loop runs. This test
+ *   asserts the real behavior, not an assumption.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -104,7 +106,7 @@ describe('emit() — unrecognized kind still writes and still notifies listeners
 	});
 });
 
-describe('emit() — circular payload: legacy write fails open, canonical listeners continue', () => {
+describe('emit() — circular payload: no throw, writes nothing, listeners NOT notified', () => {
 	let tmpDir: string;
 
 	beforeEach(() => {
@@ -141,7 +143,7 @@ describe('emit() — circular payload: legacy write fails open, canonical listen
 		}
 	});
 
-	test('still notifies listeners after legacy JSON serialization fails', () => {
+	test('does NOT notify listeners — JSON.stringify throws before the fan-out loop runs (verified against real emit() behavior, not assumed)', () => {
 		initTelemetry(tmpDir);
 		const received: unknown[] = [];
 		addTelemetryListener((event, data) => {
@@ -152,7 +154,6 @@ describe('emit() — circular payload: legacy write fails open, canonical listen
 		circular.self = circular;
 		emit('session_started', circular);
 
-		expect(received.length).toBe(1);
-		expect(received[0]?.event).toBe('session_started');
+		expect(received.length).toBe(0);
 	});
 });

@@ -491,9 +491,18 @@ const MIGRATIONS: Migration[] = [
 		sql: `CREATE INDEX IF NOT EXISTS idx_plan_ledger_import_hash
 			ON plan_ledger_import(source_hash)`,
 	},
+	{
+		version: 38,
+		name: 'add_observability_event_line_hash',
+		sql: 'ALTER TABLE observability_event ADD COLUMN line_hash TEXT',
+	},
+	{
+		version: 39,
+		name: 'create_observability_event_line_hash_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_obs_event_line_hash
+			ON observability_event(line_hash)`,
+	},
 ];
-
-const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
 
 interface ProjectDbRecord {
 	db: Database;
@@ -622,6 +631,43 @@ export function isConcurrentMigrationApply(err: unknown): boolean {
 	);
 }
 
+function isDuplicateColumn(err: unknown): boolean {
+	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+	return msg.includes('duplicate column name');
+}
+
+/**
+ * True when EVERY `ALTER TABLE <t> ADD COLUMN <c>` statement in this
+ * migration's static SQL targets a column that verifiably exists already
+ * (PRAGMA table_info). The table and column names come from our own static
+ * migration SQL — never from the error text — so there is no injection
+ * surface. ALL matched columns must exist: v12 carries two ALTER statements,
+ * so tolerating on the first match alone would stamp the version while its
+ * second column was never added (issue #2487 review PRR-002).
+ */
+function alterColumnAlreadyApplied(
+	db: Database,
+	migration: Migration,
+): boolean {
+	const matches = [
+		...migration.sql
+			.trim()
+			.matchAll(/ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/gi),
+	];
+	if (matches.length === 0) return false;
+	try {
+		for (const match of matches) {
+			const columns = db
+				.query<{ name: string }, []>(`PRAGMA table_info(${match[1]})`)
+				.all();
+			if (!columns.some((c) => c.name === match[2])) return false;
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function isSqliteBusy(err: unknown): boolean {
 	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
 	return (
@@ -690,12 +736,6 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
 		)
 		.get();
 	const currentVersion = row?.version ?? 0;
-	if (currentVersion > LATEST_SCHEMA_VERSION) {
-		throw new ProjectDbError(
-			'schema_incompatible',
-			`swarm.db has newer schema version ${currentVersion}; this build supports up to ${LATEST_SCHEMA_VERSION}`,
-		);
-	}
 
 	for (const migration of MIGRATIONS) {
 		if (migration.version <= currentVersion) continue;
@@ -734,6 +774,19 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
 				isConcurrentMigrationApply(err) &&
 				currentVersionNowCoversSafely(db, migration.version)
 			) {
+				continue;
+			}
+			// ALTER TABLE ADD COLUMN cannot be written idempotently in SQLite
+			// (no IF NOT EXISTS), so a retry after a marker rollback (repair
+			// path, restore-from-backup, or crash-recovery) hits "duplicate
+			// column name" even though the DDL is exactly the desired state.
+			// When the column verifiably exists, the migration IS applied —
+			// stamp the version and continue rather than failing the open.
+			if (isDuplicateColumn(err) && alterColumnAlreadyApplied(db, migration)) {
+				db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
+					migration.version,
+					migration.name,
+				]);
 				continue;
 			}
 			recordMigrationFailure(db, migration, err, markerDir);

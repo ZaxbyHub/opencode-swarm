@@ -1,6 +1,6 @@
 {
 	"name": "opencode-swarm",
-	"version": "7.170.2",
+	"version": "7.171.1",
 	"description": "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -113,8 +113,7 @@
 		"repro:704": "node scripts/repro-704.mjs",
 		"repro:1144": "bun scripts/repro-1144.mjs",
 		"repro:1873": "bun build scripts/repro-1873-entry.ts --outdir dist-build-test/repro-1873 --target node --format esm && node scripts/repro-1873.mjs",
-		"check:issue-2487-compatibility": "bun run scripts/check-issue-2487-compatibility.ts",
-		"repro:2487": "bun build scripts/repro-2487-entry.ts --outdir dist-build-test/repro-2487/node --target node --format esm && bun build scripts/repro-2487-entry.ts --outdir dist-build-test/repro-2487/bun --target bun --format esm && node scripts/repro-2487.mjs",
+		"repro:2487": "bun build scripts/repro-2487-parity-entry.ts --outdir dist-build-test/repro-2487 --target node --format esm && node scripts/repro-2487-parity.mjs",
 		"check:events": "bun run scripts/check-event-contract.ts",
 		"check:retention": "bun run scripts/check-retention-registry.ts",
 		"check:core-events": "bun run scripts/check-core-events-usage.ts",

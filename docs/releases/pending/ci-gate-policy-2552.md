@@ -21,8 +21,10 @@
   the archived Bash fixture remains a separate compatibility oracle.
 - Documented the C9 post-land receipt schema and the requirement for three
   receipts per stage before closure. Two qualifying Stage-A full-matrix
-  receipts are recorded; the third remains pending, and run `34121635625` is
-  excluded because its release-please short-circuit skipped the CI matrix.
+  receipts were recorded at publication time; the third was subsequently
+  collected (run `34162959243`) and is recorded in
+  `docs/ci/merge-queue-policy.md`. Run `34121635625` is excluded because its
+  release-please short-circuit skipped the CI matrix.
 
 The documented decisions retain the 90-minute status-check timeout, build concurrency 5, and `ALLGREEN` / only-non-failing merge eligibility. Cancellation
 is now event-scoped: merge-group runs may cancel superseded queue refs while
@@ -41,9 +43,9 @@ weakening the required gates.
 
 None for runtime or configuration. Any future queue or branch-protection change
 must first pass the host check-name gate and collect three C9 receipts for each
-stage. The current Stage-A set has two qualifying receipts; its third receipt
-remains pending after exclusion of run `34121635625` as a release-please
-short-circuit that skipped the CI matrix.
+stage. The Stage-A set reached its three qualifying receipts when run
+`34162959243` was recorded; run `34121635625` remains excluded as a
+release-please short-circuit that skipped the CI matrix.
 
 ## Breaking changes
 

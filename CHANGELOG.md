@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.171.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.171.0...v7.171.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **observability:** suppress live/import double-counting and prove SQLite parity ([#2487](https://github.com/ZaxbyHub/opencode-swarm/issues/2487)) ([4230171](https://github.com/ZaxbyHub/opencode-swarm/commit/42301715a9d8e341d83ada5890d699b7c9fd3d5a))
+* **pr-review:** complete PR-workflow transition authority and critic settlement wiring ([0b58097](https://github.com/ZaxbyHub/opencode-swarm/commit/0b58097456847f33129eb8a355c4a2de8544e907))
+
+## [7.171.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.170.2...v7.171.0) (2026-09-08)
+
+
+### Features
+
+* **training:** consented training vault and governed dataset export ([#2486](https://github.com/ZaxbyHub/opencode-swarm/issues/2486)) ([61ca75b](https://github.com/ZaxbyHub/opencode-swarm/commit/61ca75bc02956831426089762a8d944a6e2eabc2))
+
 ## [7.170.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.170.1...v7.170.2) (2026-09-07)
 
 
