@@ -11170,6 +11170,7 @@ async function assertPrReviewTerminalReady(
 				'critic',
 				ctx,
 			);
+		}
 		// Issue #2512: critic settlement is REDUCER-OWNED — the adapter derives
 		// valid settled receipts (UPHELD / DOWNGRADED / DISPROVED, each bound
 		// to the current authoritative reviewer row digest via
@@ -12382,6 +12383,7 @@ export async function completePrWorkflow(
 			}
 			const allowedList = allowedPrReviewReportVerdicts(
 				finalizationSettlement.kind,
+				[],
 			).join(' | ');
 			throw new Error(
 				`BLOCKED: PR_REVIEW ${finalizationSettlement.kind} completion allows report_verdict ${allowedList}; got "${verdict}". Partial coverage never approves and never claims a full review.`,
