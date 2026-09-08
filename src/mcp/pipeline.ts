@@ -68,10 +68,25 @@ function serializeBounded(value: unknown): string {
 	if (json.length <= INTERNAL_TEXT_BUDGET) {
 		return json;
 	}
-	// Deterministic bound: keep the head of the serialized form and append the
-	// truncation marker inside the internal budget.
-	const keep = Math.max(0, INTERNAL_TEXT_BUDGET - TRUNCATION_NOTE.length);
-	return `${json.slice(0, keep)}${TRUNCATION_NOTE}`;
+	// Deterministic bound: keep the head of the serialized form and append
+	// the truncation marker. Quote/backslash escaping can expand the string
+	// when the caller re-serializes the return value, so shrink until the
+	// FULL escaped envelope fits the cap (bounded: ~escape-expansion halving
+	// per iteration, hard-capped at 40 iterations).
+	let keep = Math.max(0, INTERNAL_TEXT_BUDGET - TRUNCATION_NOTE.length);
+	let text = `${json.slice(0, keep)}${TRUNCATION_NOTE}`;
+	for (let i = 0; i < 40; i++) {
+		const envelope = JSON.stringify({ text, truncated: true });
+		if (envelope.length <= MCP_MAX_RESPONSE_CHARS) {
+			return text;
+		}
+		keep = Math.floor(keep / 2);
+		if (keep <= 0) {
+			return TRUNCATION_NOTE;
+		}
+		text = `${json.slice(0, keep)}${TRUNCATION_NOTE}`;
+	}
+	return text;
 }
 
 export interface ResponsePipelineResult {
