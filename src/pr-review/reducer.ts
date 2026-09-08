@@ -1,28 +1,20 @@
 /**
- * PR-review transition authority (issue #2385).
+ * PR-review reducer-backed transition slice (issue #2512).
  *
- * Pure `(state, event) -> { state, effects }` reducer over the closed
- * `PrReviewEvent` union. Rule computation is delegated to the focused
- * boundary modules (`circuit.ts`, `completion.ts` via its settlement inputs,
- * `critic-routing.ts`, `lifecycle.ts`); this module owns transition
- * composition and the explicit rejection of every invalid transition class
- * named by issue #2385:
+ * Pure `(state, event) -> { state, effects }` reducer over the six event
+ * shapes that have production creators. Rule computation is delegated to the
+ * focused circuit module; completion, publication, authorization, and
+ * delegation settlement remain in their own lock/CAS-backed authorities. The
+ * historical event census and retired replacement paths live in
+ * `authority.ts`.
  *
- * - observer deadline / client absence → terminal child failure
- * - raw transcript / parser failure → provider circuit signal
  * - one lane → multiple circuit samples (delegated to circuit.ts's
  *   distinct-`(generation, batch, lane)` scan; asserted by property tests)
- * - unresolved/live lane → terminal coverage report
- * - partial/no coverage → approval
- * - ordinary MEDIUM → critic without typed high-impact/vulnerability evidence
- *   (enforced where critic inventory is composed, via critic-routing.ts)
- * - stale/foreign authorization → reviewer or publication access
  * - late old-generation result → current-state mutation
- * - structured receipt → downgrade by later transcript parsing
  *
  * The owning gate and `dispatch-lanes` are orchestration adapters: they build
- * events from real I/O, apply the returned state, and map typed rejections to
- * the operator-facing BLOCKED messages. Effects are the transition's OUTPUT
+ * retained events from real I/O, apply the returned state, and map typed
+ * rejections to operator-facing BLOCKED messages. Effects are the transition's OUTPUT
  * CONTRACT — every effect kind maps to an executor that exists in production
  * (see `PrReviewEffect` in types.ts): the gate executes `persist_state`
  * through the persistence CAS write; `settle_delegation` describes the
@@ -115,31 +107,6 @@ export function reducePrReviewEvent(
 		// -----------------------------------------------------------------
 		// Lane lifecycle
 		// -----------------------------------------------------------------
-		case 'base_admission_requested': {
-			const dispatches = state.prReviewBaseDispatches ?? [];
-			if (dispatches.length >= event.maxBatches) {
-				return rejected(
-					state,
-					'base_batch_limit_reached',
-					`PR_REVIEW base batch limit reached (${dispatches.length} >= ${event.maxBatches})`,
-				);
-			}
-			const record = {
-				batchId: event.batchId,
-				lanes: event.lanes,
-				validatedAt: event.validatedAt,
-			};
-			const nextDispatches = [...dispatches, record];
-			return applied(
-				{
-					...state,
-					prReviewBaseDispatches: nextDispatches,
-					prReviewBaseDispatch: record,
-				},
-				[{ kind: 'persist_state' }],
-			);
-		}
-
 		case 'base_admission_rolled_back': {
 			const dispatches = state.prReviewBaseDispatches ?? [];
 			if (dispatches.at(-1)?.batchId !== event.batchId) {
@@ -224,78 +191,6 @@ export function reducePrReviewEvent(
 					batchId: event.batchId,
 					laneId: event.laneId,
 					status: 'completed',
-				},
-			]);
-		}
-
-		case 'transcript_evidence_presented': {
-			// A structured receipt can never be downgraded by later transcript
-			// parsing (issue #2384 invalid-transition rule).
-			if (event.laneHasStructuredReceipt) {
-				return rejected(
-					state,
-					'receipt_cannot_be_downgraded',
-					`lane ${event.laneId} has a structured receipt; transcript evidence cannot alter it`,
-				);
-			}
-			return applied(state);
-		}
-
-		case 'provider_terminal_observed': {
-			if (event.evidence.source === 'observer_deadline') {
-				return rejected(
-					state,
-					'observer_deadline_not_terminal_evidence',
-					'a collection wait deadline is never terminal provider evidence',
-				);
-			}
-			if (event.evidence.source === 'client_unavailable') {
-				return rejected(
-					state,
-					'client_absence_not_terminal_evidence',
-					'an unavailable host messages client is never terminal provider evidence',
-				);
-			}
-			if (event.evidence.source === 'parser_or_transcript') {
-				return rejected(
-					state,
-					'parser_failure_not_provider_signal',
-					'parser/transcript rejection is never a provider circuit signal',
-				);
-			}
-			if (event.evidence.source === 'stale_observation') {
-				return rejected(
-					state,
-					'stale_observation_not_provider_signal',
-					'a presumed-stale sweep is never terminal provider evidence',
-				);
-			}
-			if (event.generation !== currentGeneration(state)) {
-				return rejected(
-					state,
-					'stale_generation_result',
-					`terminal evidence generation ${event.generation} is not the active generation`,
-				);
-			}
-			// Admitted as typed circuit evidence; the durable ledger owns the
-			// record and the next circuit advance consumes it.
-			return applied(state);
-		}
-
-		case 'lane_cancelled': {
-			if (event.generation !== currentGeneration(state)) {
-				return rejected(
-					state,
-					'stale_generation_result',
-					`cancellation generation ${event.generation} does not match the active generation`,
-				);
-			}
-			return applied(state, [
-				{
-					kind: 'settle_delegation',
-					batchId: event.batchId,
-					laneId: event.laneId,
-					status: 'cancelled',
 				},
 			]);
 		}
@@ -415,108 +310,6 @@ export function reducePrReviewEvent(
 			);
 		}
 
-		// -----------------------------------------------------------------
-		// Coverage / completion
-		// -----------------------------------------------------------------
-		case 'coverage_finalization_requested': {
-			const { settlement } = event;
-			if (settlement.liveDimensions.length > 0) {
-				return rejected(
-					state,
-					'live_lane_blocks_coverage',
-					`coverage finalization blocked by live dimension(s): ${settlement.liveDimensions.join(', ')}`,
-				);
-			}
-			const verdict = event.requestedVerdict;
-			if (verdict === 'APPROVE') {
-				if (settlement.kind === 'PARTIAL') {
-					return rejected(
-						state,
-						'partial_coverage_cannot_approve',
-						'a partial review can never emit APPROVE',
-					);
-				}
-				if (settlement.kind === 'NO_COVERAGE') {
-					return rejected(
-						state,
-						'no_coverage_cannot_approve',
-						'a zero-coverage report can never emit APPROVE',
-					);
-				}
-			}
-			return applied(state, [{ kind: 'persist_state' }]);
-		}
-
-		case 'critic_result_recorded': {
-			const unfulfilled = event.criticRequiredFindingIds.filter(
-				(id) => !event.criticConfirmedFindingIds.includes(id),
-			);
-			if (unfulfilled.length > 0) {
-				return rejected(
-					state,
-					'critic_required_unfulfilled',
-					`critic confirmation missing for finding(s): ${unfulfilled.join(', ')}`,
-				);
-			}
-			return applied(state, [{ kind: 'persist_state' }]);
-		}
-
-		// -----------------------------------------------------------------
-		// Publication / recovery / authorization
-		// -----------------------------------------------------------------
-		case 'publication_armed': {
-			if (event.verdict === 'APPROVE' && event.coverageKind !== 'COMPLETE') {
-				return rejected(
-					state,
-					event.coverageKind === 'NO_COVERAGE'
-						? 'no_coverage_cannot_approve'
-						: 'partial_coverage_cannot_approve',
-					`cannot arm publication of ${event.verdict} on ${event.coverageKind} coverage`,
-				);
-			}
-			return applied(state, [{ kind: 'persist_state' }]);
-		}
-
-		case 'publication_published':
-		case 'armed_recovery_requested':
-		case 'reviewer_authorization_consumed': {
-			const reason = bindingRejection(state, event);
-			if (reason) {
-				return rejected(state, 'stale_foreign_authorization', reason.detail);
-			}
-			if (
-				event.type === 'reviewer_authorization_consumed' &&
-				event.role !== event.expectedRole
-			) {
-				return rejected(
-					state,
-					'stale_foreign_authorization',
-					`authorization role ${event.role} does not match the expected role ${event.expectedRole}`,
-				);
-			}
-			if (event.type === 'armed_recovery_requested') {
-				const cancellations = {
-					...(state.prReviewDimensionCancellations ?? {}),
-				};
-				for (const dimension of event.dimensionsToCancel) {
-					cancellations[dimension] = {
-						reason: 'armed-recovery cancellation of remaining lanes',
-						cancelledAt: event.nowIso,
-						source: 'armed_recovery',
-					};
-				}
-				// The audited armed-recovery executor (recoverArmedPrWorkflow)
-				// owns the audit event and the publication-authorization
-				// invalidation; this transition owns the dimension
-				// cancellations and their persistence.
-				return applied(
-					{ ...state, prReviewDimensionCancellations: cancellations },
-					[{ kind: 'persist_state' }],
-				);
-			}
-			return applied(state, [{ kind: 'persist_state' }]);
-		}
-
 		default: {
 			// Exhaustiveness: an event kind outside the closed union is a
 			// compile error here, and an unknown runtime discriminant is
@@ -530,37 +323,4 @@ export function reducePrReviewEvent(
 			);
 		}
 	}
-}
-
-function bindingRejection(
-	state: PrReviewWorkflowState,
-	event:
-		| Extract<PrReviewEvent, { type: 'publication_published' }>
-		| Extract<PrReviewEvent, { type: 'armed_recovery_requested' }>
-		| Extract<PrReviewEvent, { type: 'reviewer_authorization_consumed' }>,
-): { detail: string } | null {
-	const binding = event.binding;
-	if (binding.sessionID !== state.sessionID) {
-		return {
-			detail: `authorization session ${binding.sessionID} is foreign to the active workflow session`,
-		};
-	}
-	if (
-		binding.workflowInstanceId !== undefined &&
-		state.workflowInstanceId !== undefined &&
-		binding.workflowInstanceId !== state.workflowInstanceId
-	) {
-		return { detail: 'authorization belongs to a different workflow instance' };
-	}
-	if (!state.prHeadSha || binding.prHeadSha !== state.prHeadSha) {
-		return {
-			detail: `authorization head ${binding.prHeadSha} does not match the bound head`,
-		};
-	}
-	if (binding.generation !== currentGeneration(state)) {
-		return {
-			detail: `authorization generation ${binding.generation} is stale (active: ${currentGeneration(state)})`,
-		};
-	}
-	return null;
 }

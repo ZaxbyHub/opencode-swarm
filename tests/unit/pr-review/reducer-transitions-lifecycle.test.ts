@@ -11,45 +11,7 @@ const BASE: PrReviewWorkflowState = {
 
 const LANE = { laneId: 'lane-1', workflowLane: 'correctness-state' } as const;
 
-describe('reducer: base admission lifecycle', () => {
-	test('admits a base batch within the cap and persists', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'base_admission_requested',
-			batchId: 'batch-1',
-			lanes: [{ ...LANE }],
-			depthTier: 'M',
-			maxBatches: 128,
-			validatedAt: '2026-09-01T00:00:00.000Z',
-		});
-		expect(result.status).toBe('applied');
-		if (result.status !== 'applied') return;
-		expect(result.state.prReviewBaseDispatches).toHaveLength(1);
-		expect(result.effects).toEqual([{ kind: 'persist_state' }]);
-	});
-
-	test('rejects admission at the batch cap', () => {
-		const state: PrReviewWorkflowState = {
-			...BASE,
-			prReviewBaseDispatches: Array.from({ length: 128 }, (_, i) => ({
-				batchId: `batch-${i}`,
-				lanes: [{ ...LANE }],
-				validatedAt: '2026-09-01T00:00:00.000Z',
-			})),
-		};
-		const result = reducePrReviewEvent(state, {
-			type: 'base_admission_requested',
-			batchId: 'batch-129',
-			lanes: [{ ...LANE }],
-			depthTier: 'M',
-			maxBatches: 128,
-			validatedAt: '2026-09-01T00:00:00.000Z',
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('base_batch_limit_reached');
-		expect(result.state).toBe(state);
-	});
-
+describe('reducer: base-admission rollback', () => {
 	test('rolls back the last unlaunched batch only', () => {
 		const state: PrReviewWorkflowState = {
 			...BASE,
@@ -58,25 +20,38 @@ describe('reducer: base admission lifecycle', () => {
 				{ batchId: 'batch-2', lanes: [{ ...LANE }], validatedAt: 't' },
 			],
 		};
-		const rollbackLast = reducePrReviewEvent(state, {
+		const result = reducePrReviewEvent(state, {
 			type: 'base_admission_rolled_back',
 			batchId: 'batch-2',
 			batchDelegationRecordsExist: false,
 		});
-		expect(rollbackLast.status).toBe('applied');
-		if (rollbackLast.status !== 'applied') return;
+		expect(result.status).toBe('applied');
+		if (result.status !== 'applied') return;
 		expect(
-			rollbackLast.state.prReviewBaseDispatches?.map((b) => b.batchId),
+			result.state.prReviewBaseDispatches?.map((batch) => batch.batchId),
 		).toEqual(['batch-1']);
+		expect(result.state.prReviewBaseDispatch?.batchId).toBe('batch-1');
+		expect(result.effects).toEqual([{ kind: 'persist_state' }]);
+	});
 
+	test('rejects non-tail and already-launched rollback without mutation', () => {
+		const state: PrReviewWorkflowState = {
+			...BASE,
+			prReviewBaseDispatches: [
+				{ batchId: 'batch-1', lanes: [{ ...LANE }], validatedAt: 't' },
+				{ batchId: 'batch-2', lanes: [{ ...LANE }], validatedAt: 't' },
+			],
+		};
 		const notLast = reducePrReviewEvent(state, {
 			type: 'base_admission_rolled_back',
 			batchId: 'batch-1',
 			batchDelegationRecordsExist: false,
 		});
 		expect(notLast.status).toBe('rejected');
-		if (notLast.status !== 'rejected') return;
-		expect(notLast.rejection.code).toBe('rollback_preconditions_failed');
+		if (notLast.status === 'rejected') {
+			expect(notLast.rejection.code).toBe('rollback_preconditions_failed');
+		}
+		expect(notLast.state).toBe(state);
 
 		const alreadyLaunched = reducePrReviewEvent(state, {
 			type: 'base_admission_rolled_back',
@@ -84,11 +59,17 @@ describe('reducer: base admission lifecycle', () => {
 			batchDelegationRecordsExist: true,
 		});
 		expect(alreadyLaunched.status).toBe('rejected');
+		if (alreadyLaunched.status === 'rejected') {
+			expect(alreadyLaunched.rejection.code).toBe(
+				'rollback_preconditions_failed',
+			);
+		}
+		expect(alreadyLaunched.state).toBe(state);
 	});
 });
 
 describe('reducer: collection observation is side-effect free on state', () => {
-	test('wait expiry produces a bounded diagnostic and NEVER a state mutation', () => {
+	test('wait expiry produces a bounded diagnostic and no state mutation', () => {
 		const result = reducePrReviewEvent(BASE, {
 			type: 'collection_observed',
 			diagnostic: 'wait_expired',
@@ -142,7 +123,7 @@ describe('reducer: structured result submission (exactly-once)', () => {
 		]);
 	});
 
-	test('INCOMPLETE publishes the receipt and leaves the lane UNRESOLVED (never covered, never errored)', () => {
+	test('INCOMPLETE publishes the receipt but leaves the lane unresolved', () => {
 		const result = reducePrReviewEvent(BASE, {
 			type: 'lane_structured_result_submitted',
 			batchId: 'batch-1',
@@ -153,9 +134,6 @@ describe('reducer: structured result submission (exactly-once)', () => {
 		});
 		expect(result.status).toBe('applied');
 		if (result.status !== 'applied') return;
-		// No settle effect: issue #2384 keeps an INCOMPLETE lane unresolved
-		// (the receipt publishes; coverage treats it as an unresolved
-		// dimension — never covered, never a terminal error).
 		expect(result.effects).toEqual([]);
 	});
 
@@ -201,156 +179,6 @@ describe('reducer: structured result submission (exactly-once)', () => {
 		expect(result.status).toBe('rejected');
 		if (result.status !== 'rejected') return;
 		expect(result.rejection.code).toBe('stale_generation_result');
-	});
-});
-
-describe('reducer: transcript evidence cannot downgrade a receipt', () => {
-	test('transcript evidence for a receipted lane is rejected', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'transcript_evidence_presented',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			laneHasStructuredReceipt: true,
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('receipt_cannot_be_downgraded');
-	});
-
-	test('transcript evidence for a receipt-less lane is inert (adapter decides)', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'transcript_evidence_presented',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			laneHasStructuredReceipt: false,
-		});
-		expect(result.status).toBe('applied');
-	});
-});
-
-describe('reducer: provider-terminal evidence classification', () => {
-	test('an observer deadline is never terminal evidence', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-			evidence: { source: 'observer_deadline' },
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe(
-			'observer_deadline_not_terminal_evidence',
-		);
-	});
-
-	test('client absence is never terminal evidence', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-			evidence: { source: 'client_unavailable' },
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('client_absence_not_terminal_evidence');
-	});
-
-	test('parser/transcript rejection is never a provider signal', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-			evidence: { source: 'parser_or_transcript' },
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('parser_failure_not_provider_signal');
-	});
-
-	test('a stale observation is never a provider signal', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-			evidence: { source: 'stale_observation' },
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('stale_observation_not_provider_signal');
-	});
-
-	test('a typed terminal error class of the current generation is admitted', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-			evidence: {
-				source: 'typed_terminal_error_class',
-				category: 'anthropic',
-				kind: 'provider',
-			},
-		});
-		expect(result.status).toBe('applied');
-	});
-
-	test('a typed terminal error class of an old generation is rejected', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'provider_terminal_observed',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 2,
-			evidence: {
-				source: 'typed_terminal_error_class',
-				category: 'anthropic',
-				kind: 'provider',
-			},
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('stale_generation_result');
-	});
-});
-
-describe('reducer: cancellation and presumed-stale sweep', () => {
-	test('a current-generation explicit cancel settles cancelled', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'lane_cancelled',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-		});
-		expect(result.status).toBe('applied');
-		if (result.status !== 'applied') return;
-		expect(result.effects[0]).toMatchObject({ status: 'cancelled' });
-	});
-
-	test('an old-generation cancel is rejected', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'lane_cancelled',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 1,
-		});
-		expect(result.status).toBe('rejected');
-	});
-
-	test('a non-PER-recovery cancellation preserves the dimension (event-driven, no autonomous sweep)', () => {
-		// Issue #2385 closeout: the `presumed_stale_swept` reducer event was
-		// removed because no production adapter dispatched it; the two real
-		// stale-sweep paths (dispatch-lanes.ts sweepStaleAsyncLaneRecords,
-		// pr-workflow-gate.ts settlePresumedStalePrWorkflowLanes) retain
-		// their own inline rules. A regression here would be a reintroduction.
-		const result = reducePrReviewEvent(BASE, {
-			type: 'lane_cancelled',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			generation: 4,
-		});
-		expect(result.status).toBe('applied');
+		expect(result.state).toBe(BASE);
 	});
 });

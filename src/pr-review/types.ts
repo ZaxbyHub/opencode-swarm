@@ -1,16 +1,16 @@
 /**
- * PR-review typed state boundary (issue #2385).
+ * PR-review typed state boundary (issue #2512).
  *
- * The closed event/effect vocabulary for the PR-review transition authority
- * (`reducer.ts`) plus the PR-review slice of the workflow gate state. The
- * owning gate's full `PrWorkflowGateState` satisfies this slice structurally
- * (a compile-time assertion in the gate enforces it), so there is ONE field
- * definition — the gate adds only non-PR-review fields.
+ * The reducer-backed PR-review state slice and the small event/effect
+ * vocabulary used by its six production adapters. The owning gate's full
+ * `PrWorkflowGateState` satisfies this slice structurally (a compile-time
+ * assertion in the gate enforces it), so there is ONE field definition — the
+ * gate adds only non-PR-review fields.
  *
- * Invalid transitions from issue #2385 are rejected with typed codes
- * (`PrReviewTransitionRejectionCode`) rather than made representable-by-type
- * alone: several of them depend on runtime evidence (generations, digests,
- * ledger state), so the reducer is the enforcement point.
+ * Completion, publication, authorization, and delegation settlement have
+ * their own lock/CAS-backed authorities. They are intentionally not mirrored
+ * as reducer events: see `authority.ts` for the historical event census and
+ * each retired event's replacement authority.
  */
 
 import type { PrReviewBaseDimensionId } from '../background/pr-review-contract.js';
@@ -74,32 +74,6 @@ export interface PrReviewWorkflowState {
 }
 
 // ---------------------------------------------------------------------------
-// Terminal coverage (values computed by completion.ts)
-// ---------------------------------------------------------------------------
-
-export type PrReviewTerminalCoverageKind =
-	| 'COMPLETE'
-	| 'PARTIAL'
-	| 'NO_COVERAGE';
-
-export type PrReviewReportVerdict =
-	| 'APPROVE'
-	| 'INCOMPLETE'
-	| 'REQUEST_CHANGES';
-
-export interface PrReviewCoverageSettlementInput {
-	kind: PrReviewTerminalCoverageKind;
-	coveredDimensions: PrReviewBaseDimensionId[];
-	unresolvedDimensions: Array<{
-		dimension: PrReviewBaseDimensionId;
-		terminalState: 'FAILED' | 'CANCELLED' | 'NOT_LAUNCHED';
-		reasonKind: string;
-	}>;
-	/** Dimensions with a live (non-terminal) lane — blocks finalization. */
-	liveDimensions: PrReviewBaseDimensionId[];
-}
-
-// ---------------------------------------------------------------------------
 // Effects
 // ---------------------------------------------------------------------------
 
@@ -143,14 +117,6 @@ export type PrReviewCircuitProbeOutcome =
 export type PrReviewEvent =
 	// --- lane lifecycle -----------------------------------------------------
 	| {
-			type: 'base_admission_requested';
-			batchId: string;
-			lanes: PrReviewBaseDispatchLane[];
-			depthTier: 'S' | 'M' | 'L';
-			maxBatches: number;
-			validatedAt: string;
-	  }
-	| {
 			type: 'base_admission_rolled_back';
 			batchId: string;
 			batchDelegationRecordsExist: boolean;
@@ -175,34 +141,6 @@ export type PrReviewEvent =
 			semanticEnvelopeDigest: string;
 			outcome: 'CLEAN' | 'FINDINGS' | 'INCOMPLETE';
 			existingReceiptDigest?: string | undefined;
-	  }
-	| {
-			type: 'transcript_evidence_presented';
-			batchId: string;
-			laneId: string;
-			laneHasStructuredReceipt: boolean;
-	  }
-	| {
-			type: 'provider_terminal_observed';
-			batchId: string;
-			laneId: string;
-			generation: number;
-			evidence:
-				| {
-						source: 'typed_terminal_error_class';
-						category: string;
-						kind: string;
-				  }
-				| { source: 'observer_deadline' }
-				| { source: 'client_unavailable' }
-				| { source: 'parser_or_transcript' }
-				| { source: 'stale_observation' };
-	  }
-	| {
-			type: 'lane_cancelled';
-			batchId: string;
-			laneId: string;
-			generation: number;
 	  }
 	// --- circuit ------------------------------------------------------------
 	| {
@@ -232,74 +170,16 @@ export type PrReviewEvent =
 				| import('../config/schema.js').PrReviewResilienceConfig
 				| undefined;
 			nowMs: number;
-	  }
-	// --- coverage / completion ----------------------------------------------
-	| {
-			type: 'coverage_finalization_requested';
-			settlement: PrReviewCoverageSettlementInput;
-			requestedVerdict?: PrReviewReportVerdict;
-	  }
-	| {
-			type: 'critic_result_recorded';
-			criticRequiredFindingIds: readonly string[];
-			criticConfirmedFindingIds: readonly string[];
-	  }
-	// --- publication / recovery / authorization ------------------------------
-	| {
-			type: 'publication_armed';
-			coverageKind: PrReviewTerminalCoverageKind;
-			verdict: PrReviewReportVerdict;
-	  }
-	| {
-			type: 'publication_published';
-			binding: PrReviewAuthorizationBinding;
-	  }
-	| {
-			type: 'armed_recovery_requested';
-			binding: PrReviewAuthorizationBinding;
-			dimensionsToCancel: PrReviewBaseDimensionId[];
-			nowIso: string;
-	  }
-	| {
-			type: 'reviewer_authorization_consumed';
-			binding: PrReviewAuthorizationBinding;
-			expectedRole: 'reviewer' | 'test_engineer';
-			role: 'reviewer' | 'test_engineer';
 	  };
-
-/**
- * The exact-identity binding an armed recovery, publication, or re-entry
- * authorization must carry (issue #2383/#2385). Stale or foreign values are
- * rejected with `stale_foreign_authorization`.
- */
-export interface PrReviewAuthorizationBinding {
-	sessionID: string;
-	workflowInstanceId?: string | undefined;
-	prHeadSha: string;
-	revisionDigest?: string;
-	generation: number;
-}
 
 // ---------------------------------------------------------------------------
 // Rejections
 // ---------------------------------------------------------------------------
 
 export type PrReviewTransitionRejectionCode =
-	| 'observer_deadline_not_terminal_evidence'
-	| 'client_absence_not_terminal_evidence'
-	| 'parser_failure_not_provider_signal'
-	| 'stale_observation_not_provider_signal'
-	| 'live_lane_blocks_coverage'
-	| 'partial_coverage_cannot_approve'
-	| 'no_coverage_cannot_approve'
-	| 'critic_required_unfulfilled'
-	| 'stale_foreign_authorization'
 	| 'stale_generation_result'
-	| 'receipt_cannot_be_downgraded'
 	| 'duplicate_conflicting_result'
-	| 'base_batch_limit_reached'
 	| 'rollback_preconditions_failed'
-	| 'lane_not_stale_eligible'
 	| 'unknown_event';
 
 export interface PrReviewTransitionRejection {

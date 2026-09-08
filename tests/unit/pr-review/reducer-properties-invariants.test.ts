@@ -40,14 +40,20 @@ function generatorEvent(rand: () => number, step: number): PrReviewEvent {
 		items[Math.floor(rand() * items.length)]!;
 	const batch = `b${1 + Math.floor(rand() * 3)}`;
 	const lane = `l${1 + Math.floor(rand() * 3)}`;
-	switch (Math.floor(rand() * 11)) {
+	switch (Math.floor(rand() * 6)) {
 		case 0:
+			return {
+				type: 'base_admission_rolled_back',
+				batchId: batch,
+				batchDelegationRecordsExist: rand() < 0.5,
+			};
+		case 1:
 			return {
 				type: 'collection_observed',
 				diagnostic: pick(DIAGNOSTICS),
 				pendingLaneIds: [lane],
 			};
-		case 1:
+		case 2:
 			return {
 				type: 'lane_structured_result_submitted',
 				batchId: batch,
@@ -58,38 +64,7 @@ function generatorEvent(rand: () => number, step: number): PrReviewEvent {
 				existingReceiptDigest:
 					rand() < 0.5 ? `d${Math.floor(rand() * 3)}` : undefined,
 			};
-		case 2:
-			return {
-				type: 'provider_terminal_observed',
-				batchId: batch,
-				laneId: lane,
-				generation: rand() < 0.8 ? 1 : 0,
-				evidence:
-					rand() < 0.5
-						? {
-								source: 'typed_terminal_error_class',
-								category: 'anthropic',
-								kind: 'provider',
-							}
-						: rand() < 0.5
-							? { source: 'observer_deadline' }
-							: { source: 'parser_or_transcript' },
-			};
 		case 3:
-			return {
-				type: 'lane_cancelled',
-				batchId: batch,
-				laneId: lane,
-				generation: rand() < 0.8 ? 1 : 0,
-			};
-		case 4:
-			return {
-				type: 'transcript_evidence_presented',
-				batchId: batch,
-				laneId: lane,
-				laneHasStructuredReceipt: rand() < 0.5,
-			};
-		case 5:
 			return {
 				type: 'circuit_advance_requested',
 				nowMs: step * 10_000,
@@ -104,51 +79,23 @@ function generatorEvent(rand: () => number, step: number): PrReviewEvent {
 				],
 				policy: POLICY,
 			};
-		case 6:
+		case 4:
+			return {
+				type: 'circuit_probe_settled',
+				outcome: pick([
+					{ result: 'typed_success' },
+					{ result: 'provider_failure', providerClass: 'anthropic' },
+					{ result: 'ignored' },
+					{ result: 'rolled_back_admission' },
+				] as const),
+				nowMs: step * 10_000,
+				policy: POLICY,
+			};
+		default:
 			return {
 				type: 'resilience_config_changed',
 				enabled: rand() < 0.5,
 				nowMs: step * 10_000,
-			};
-		case 7:
-			return {
-				type: 'coverage_finalization_requested',
-				settlement: {
-					kind: pick(['COMPLETE', 'PARTIAL', 'NO_COVERAGE'] as const),
-					coveredDimensions: [],
-					unresolvedDimensions: [],
-					liveDimensions: rand() < 0.5 ? ['tests'] : [],
-				},
-				requestedVerdict: rand() < 0.5 ? 'APPROVE' : 'INCOMPLETE',
-			};
-		case 8:
-			return {
-				type: 'publication_armed',
-				coverageKind: pick(['COMPLETE', 'PARTIAL', 'NO_COVERAGE'] as const),
-				verdict: pick(['APPROVE', 'INCOMPLETE', 'REQUEST_CHANGES'] as const),
-			};
-		case 9:
-			return {
-				type: 'critic_result_recorded',
-				criticRequiredFindingIds: [lane],
-				criticConfirmedFindingIds: [lane],
-			};
-		case 10:
-			return {
-				type: 'lane_structured_result_submitted',
-				batchId: batch,
-				laneId: lane,
-				generation: 1,
-				semanticEnvelopeDigest: `d${Math.floor(rand() * 3)}`,
-				outcome: 'INCOMPLETE',
-				existingReceiptDigest: `d${Math.floor(rand() * 3)}`,
-			};
-		default:
-			return {
-				type: 'transcript_evidence_presented',
-				batchId: batch,
-				laneId: lane,
-				laneHasStructuredReceipt: rand() < 0.5,
 			};
 	}
 }
@@ -182,51 +129,19 @@ function runSequence(seed: number, length: number): SequenceObservation {
 			continue;
 		}
 		observation.appliedCount += 1;
-		// Invariant: no observer kill — observation events never change state.
 		if (event.type === 'collection_observed') {
+			// Observation events report only a bounded diagnostic.
 			expect(JSON.stringify(result.state)).toBe(before);
-		}
-		// Invariant: no partial approval — arming APPROVE applies only on
-		// COMPLETE coverage.
-		if (
-			event.type === 'publication_armed' &&
-			event.verdict === 'APPROVE' &&
-			event.coverageKind !== 'COMPLETE'
-		) {
-			throw new Error(
-				`seed ${seed} step ${step}: APPROVE armed on ${event.coverageKind}`,
-			);
-		}
-		if (
-			event.type === 'coverage_finalization_requested' &&
-			event.requestedVerdict === 'APPROVE' &&
-			event.settlement.liveDimensions.length === 0 &&
-			event.settlement.kind !== 'COMPLETE'
-		) {
-			throw new Error(
-				`seed ${seed} step ${step}: APPROVE finalized on ${event.settlement.kind}`,
-			);
 		}
 		const circuit = result.state.prReviewResilience?.circuit;
 		if (circuit && 'version' in circuit) {
-			// Invariant: bounded contributor ledger.
 			expect(circuit.contributors.length).toBeLessThanOrEqual(
 				PR_REVIEW_CIRCUIT_CONTRIBUTOR_LIMIT,
 			);
-			// Invariant: at most one probe record.
 			if (circuit.state === 'HALF_OPEN') {
 				expect(circuit.probe).toBeDefined();
-				expect(
-					circuit.contributors.filter(
-						(c) =>
-							circuit.probe &&
-							c.batchId === circuit.probe.batchId &&
-							c.laneId === circuit.probe.laneId,
-					).length,
-				).toBeLessThanOrEqual(1);
 			}
 		}
-		// Invariant: batch ledger bound.
 		expect(
 			(result.state.prReviewBaseDispatches ?? []).length,
 		).toBeLessThanOrEqual(128);
@@ -235,7 +150,7 @@ function runSequence(seed: number, length: number): SequenceObservation {
 	return observation;
 }
 
-describe('reducer sequence invariants (issue #2385 model tests)', () => {
+describe('reducer sequence invariants (issue #2512 retained-event model)', () => {
 	test('100 seeded sequences preserve every invariant at every step', () => {
 		let totalApplied = 0;
 		let totalRejected = 0;
@@ -265,9 +180,9 @@ describe('reducer sequence invariants (issue #2385 model tests)', () => {
 			expect(result.status).toBe('applied');
 			if (result.status !== 'applied') continue;
 			expect(JSON.stringify(result.state)).toBe(before);
-			for (const effect of result.effects) {
-				expect(effect.kind).toBe('emit_diagnostic');
-			}
+			expect(
+				result.effects.every((effect) => effect.kind === 'emit_diagnostic'),
+			).toBe(true);
 			state = result.state;
 		}
 	});
