@@ -9,9 +9,10 @@
 - Pinned the exact expression and rejected unconditional `true`/`false` values
   in the focused issue #2552 structural test.
 - Recorded two qualifying post-land Stage-A full-matrix receipts and their
-  merge-queue timeline evidence in the policy decision record; a third remains
-  pending. Run `34121635625` is excluded because its release-please
-  short-circuit skipped the CI matrix.
+  merge-queue timeline evidence in the policy decision record at publication
+  time; the third, run `34162959243`, was collected after this change landed
+  and completes the Stage-A set. Run `34121635625` is excluded because its
+  release-please short-circuit skipped the CI matrix.
 
 ## Why
 
@@ -32,5 +33,6 @@ None.
 ## Known caveats
 
 The account-level concurrency cap and canonical run-level runner queue wait are
-unavailable. Post-item-B receipts remain required before issue #2552 can close;
-these Stage-A receipts do not satisfy that later evidence stage.
+unavailable. Post-item-B receipts were required before issue #2552 could close;
+receipt `34162959243` was collected after this change landed and completes that
+evidence stage.

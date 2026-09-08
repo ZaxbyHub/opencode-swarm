@@ -30,8 +30,9 @@ required `unit-passed` and coverage gates are unchanged.
 
 ## Caveats
 
-Two qualifying Stage-A post-land full-matrix receipts are recorded in the
-policy decision record; a third remains pending. Run `34121635625` is excluded
-because its release-please short-circuit skipped the CI matrix. The account
-concurrency cap is unavailable, and the record does not treat that unknown as
-zero.
+Two qualifying Stage-A post-land full-matrix receipts were recorded in the
+policy decision record at publication time; the third, run `34162959243`, was
+collected after the event-scoped cancellation change landed and completes the
+Stage-A set. Run `34121635625` is excluded because its release-please
+short-circuit skipped the CI matrix. The account concurrency cap is
+unavailable, and the record does not treat that unknown as zero.
