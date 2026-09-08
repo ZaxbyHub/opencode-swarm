@@ -17,18 +17,24 @@ import {
 	swarmState,
 } from '../../../src/state.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 
 const config = {
 	hooks: { delegation_gate: true },
 } as PluginConfig;
 
 let directory = '';
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 beforeEach(async () => {
+	isolatedEnv = createIsolatedTestEnv();
 	resetSwarmState();
 	directory = canonicalMkdtemp('issue-2491-direct-route-gate-');
 	fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
 	startAgentSession('parent-2491', 'architect', directory);
+	// Drain the asynchronous session rehydration before mutating the in-memory
+	// workflow; the delegation gate awaits this queue before Stage-B dispatch.
+	await Promise.allSettled([...swarmState.pendingRehydrations]);
 	await transitionTaskWorkflowEvidence(directory, '1.1', {
 		type: 'accepted_mutation',
 		agentType: 'coder',
@@ -50,6 +56,8 @@ beforeEach(async () => {
 afterEach(() => {
 	resetSwarmState();
 	fs.rmSync(directory, { recursive: true, force: true });
+	isolatedEnv?.cleanup();
+	isolatedEnv = undefined;
 });
 
 describe('issue #2491 direct delegation-gate route authorization', () => {
@@ -165,6 +173,45 @@ describe('issue #2491 direct delegation-gate route authorization', () => {
 		);
 		expect(getTaskState(session, '1.1')).toBe('reviewer_run');
 	});
+
+	for (const role of ['reviewer', 'test_engineer'] as const) {
+		test(`${role} retry reclaims a slot after denied dispatch cleanup`, async () => {
+			const session = swarmState.agentSessions.get('parent-2491')!;
+			recordModifiedFilesForTask(session, '1.1', [
+				'src/a.ts',
+				'src/b.ts',
+				'src/c.ts',
+				'src/d.ts',
+				'src/e.ts',
+			]);
+			const hook = createDelegationGateHook(config, directory);
+			const deniedCallID = `${role}-denied-call`;
+
+			// toolBefore reserves the first route slot before a later fail-closed
+			// hook denies the Task. There is intentionally no toolAfter for this
+			// call, so abortDeniedSettlementForCall is the only cleanup path.
+			await hook.toolBefore(
+				{ tool: 'Task', sessionID: 'parent-2491', callID: deniedCallID },
+				{
+					args: {
+						subagent_type: role,
+						task_id: '1.1',
+						prompt: `${role} task-1.1.\nACCEPTANCE: return a structured ${role} result for task-1.1.`,
+					},
+				},
+			);
+			await hook.abortDeniedSettlementForCall(deniedCallID);
+
+			// A fresh call identity must be able to reclaim the released first slot;
+			// if the denied call's live binding were stranded, it would be assigned
+			// the second slot instead.
+			await completeDispatch(hook, role, `${role}-retry-call`, `${role}-retry-child`);
+			expect(session.stageBRouteEvidence?.get('1.1')).toHaveLength(1);
+			expect(session.stageBRouteEvidence?.get('1.1')?.[0]?.slotId).toBe(
+				`1.1:${role}:1`,
+			);
+		});
+	}
 
 	test('preserves sequential Stage-B advancement when receipt enforcement is disabled', async () => {
 		const session = swarmState.agentSessions.get('parent-2491')!;

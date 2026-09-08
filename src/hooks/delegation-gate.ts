@@ -6684,6 +6684,12 @@ ${warningLines.join('\n')}`;
 		 * in-process CODER_DISPATCH_IN_PROGRESS wedge behind.
 		 */
 		abortDeniedSettlementForCall: async (callID: string): Promise<void> => {
+			// Reviewer/test-engineer reservations do not create a coder settlement,
+			// so the early return below must still drain their call-scoped route
+			// bindings. Otherwise a denied dispatch can strand the only slot and make
+			// the retry fail closed as unbound (issue #2491, F-001).
+			stageBRouteSlotByCallID.delete(callID);
+			stageBDispatchContextByCallID.delete(callID);
 			const begun = begunCoderSettlementsByCallID.get(callID);
 			if (!begun?.taskId) return;
 			try {
