@@ -491,6 +491,17 @@ const MIGRATIONS: Migration[] = [
 		sql: `CREATE INDEX IF NOT EXISTS idx_plan_ledger_import_hash
 			ON plan_ledger_import(source_hash)`,
 	},
+	{
+		version: 38,
+		name: 'add_observability_event_line_hash',
+		sql: 'ALTER TABLE observability_event ADD COLUMN line_hash TEXT',
+	},
+	{
+		version: 39,
+		name: 'create_observability_event_line_hash_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_obs_event_line_hash
+			ON observability_event(line_hash)`,
+	},
 ];
 
 interface ProjectDbRecord {
@@ -620,6 +631,35 @@ export function isConcurrentMigrationApply(err: unknown): boolean {
 	);
 }
 
+function isDuplicateColumn(err: unknown): boolean {
+	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+	return msg.includes('duplicate column name');
+}
+
+/**
+ * True when this migration is a single `ALTER TABLE <t> ADD COLUMN <c>` whose
+ * column verifiably exists already (PRAGMA table_info). The table and column
+ * names come from our own static migration SQL — never from the error text —
+ * so there is no injection surface.
+ */
+function alterColumnAlreadyApplied(
+	db: Database,
+	migration: Migration,
+): boolean {
+	const match = /^ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/i.exec(
+		migration.sql.trim(),
+	);
+	if (match === null) return false;
+	try {
+		const columns = db
+			.query<{ name: string }, []>(`PRAGMA table_info(${match[1]})`)
+			.all();
+		return columns.some((c) => c.name === match[2]);
+	} catch {
+		return false;
+	}
+}
+
 function isSqliteBusy(err: unknown): boolean {
 	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
 	return (
@@ -726,6 +766,19 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
 				isConcurrentMigrationApply(err) &&
 				currentVersionNowCoversSafely(db, migration.version)
 			) {
+				continue;
+			}
+			// ALTER TABLE ADD COLUMN cannot be written idempotently in SQLite
+			// (no IF NOT EXISTS), so a retry after a marker rollback (repair
+			// path, restore-from-backup, or crash-recovery) hits "duplicate
+			// column name" even though the DDL is exactly the desired state.
+			// When the column verifiably exists, the migration IS applied —
+			// stamp the version and continue rather than failing the open.
+			if (isDuplicateColumn(err) && alterColumnAlreadyApplied(db, migration)) {
+				db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
+					migration.version,
+					migration.name,
+				]);
 				continue;
 			}
 			recordMigrationFailure(db, migration, err, markerDir);

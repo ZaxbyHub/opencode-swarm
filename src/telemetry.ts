@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ObservabilityEvent } from './observability/envelope.js';
 import {
+	canonicalLineContent,
 	createObservation,
 	toLegacyTelemetryLine,
 } from './observability/index.js';
@@ -465,8 +466,7 @@ export function emit(
 		// the listener fan-out below — preserving the ordering asserted by
 		// `src/telemetry.test.ts:137-162`.
 		const canonical = _internals.createObservation(event, data);
-		const line =
-			JSON.stringify(_internals.toLegacyTelemetryLine(canonical)) + os.EOL;
+		const line = _internals.canonicalLineContent(canonical) + os.EOL;
 
 		const stream = _writeStream;
 		stream.write(line, (err) => {
@@ -1347,6 +1347,7 @@ export const _internals: {
 	heartbeatListenerCount: () => number;
 	createObservation: typeof createObservation;
 	toLegacyTelemetryLine: typeof toLegacyTelemetryLine;
+	canonicalLineContent: typeof canonicalLineContent;
 } = {
 	telemetry,
 	emit,
@@ -1355,4 +1356,5 @@ export const _internals: {
 	heartbeatListenerCount: () => (_heartbeatListener !== null ? 1 : 0),
 	createObservation,
 	toLegacyTelemetryLine,
+	canonicalLineContent,
 };

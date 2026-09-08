@@ -1086,6 +1086,16 @@ jobs:
         shell: bash
         run: bun run repro:1873
 
+      - name: Issue #2487 parity — observability sink, plan ledger, coordination under Node
+        # Close/reopen + restart parity for the three SQLite stores that had no
+        # Node-side proof: canonical-content comparison per event (not row counts
+        # alone), live/import overlap suppression, byte-identical ledger replay
+        # across close/reopen, and a coordination transaction readback. Runs on
+        # Linux, macOS, Windows next to repro:1873.
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        run: bun run repro:2487
+
       # Issue #2475: probe the PACKED artifact, not only target/release. Builds
       # the native sandbox runner, stages it into binaries/win32-x64/ exactly as
       # the release pipeline does, npm-packs the tree, extracts the tarball, and

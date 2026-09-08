@@ -1243,15 +1243,15 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/db/observability-event-store.ts'],
 		writerCitations: [
-			'src/db/observability-event-store.ts appendObservabilityEventDb — telemetry-listener sink; group-commit writer (one BEGIN IMMEDIATE txn per flush, durability class normal); INSERT OR IGNORE by event_id; throttled DELETE retention (MAX_OBSERVABILITY_EVENT_ROWS 50000) and health upsert ride the same batch',
-			'src/db/observability-event-store.ts syncObservabilityImport — report-path-only incremental legacy import (fingerprint markers in observability_import, content-derived synthetic ids, INSERT OR IGNORE; one BEGIN IMMEDIATE per changed file)',
+			'src/db/observability-event-store.ts appendObservabilityEventDb — telemetry-listener sink; group-commit writer (one BEGIN IMMEDIATE txn per flush, durability class normal); INSERT OR IGNORE by event_id; throttled DELETE retention (MAX_OBSERVABILITY_EVENT_ROWS 50000) and health upsert ride the same batch; live rows carry a line_hash over the EOL-free JSONL line bytes (issue #2487, migrations v38/v39, obs-line-v1 namespace) correlating sink capture with the emitted legacy line; SWARM_OBSERVABILITY_SINK_DISABLE=1 gates this live path only',
+			'src/db/observability-event-store.ts syncObservabilityImport — report-path-only incremental legacy import (fingerprint markers in observability_import, content-derived synthetic ids, INSERT OR IGNORE; one BEGIN IMMEDIATE per changed file); segments whose CR-normalized line hash matches an existing live row are skipped and counted in skippedLive (live/import overlap suppression, issue #2487), and a one-time same-transaction backfill (marker __live_line_hash_backfill__) populates hashes for pre-v38 live rows',
 		],
 		readerCitations: [
 			'src/db/observability-event-store.ts queryObservabilityEvents — bounded deterministic SELECT (filters task/session/trace/batch/since; ORDER BY occurred_at,rowid; LIMIT MAX_REPORT_ROWS 5000)',
 			'src/db/observability-event-store.ts readObservabilityCoverage / readObservabilitySinkHealth — coverage + health counters for /swarm report',
-			'src/commands/report.ts handleReportCommand — the /swarm report consumer',
+			'src/commands/report.ts handleReportCommand — the /swarm report consumer (surfaces skippedLiveThisSync in its sync disclosure)',
 		],
-		schemaVersion: 'envelope rows (eventId/kind/workflow ids/payload JSON; imported rows use sha256(obs-import-v1 + line) synthetic ids)',
+		schemaVersion: 'envelope rows (eventId/kind/workflow ids/payload JSON; imported rows use sha256(obs-import-v1 + line) synthetic ids; live rows also carry line_hash = sha256(obs-line-v1 + EOL-free line), migrations v38/v39)',
 		stateClass: 'operational',
 		// ZB-review: the table persists raw payloads verbatim (incl. kinds the
 		// event catalog labels 'sensitive'), so the honest class is 'content'.

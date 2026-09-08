@@ -88,6 +88,7 @@ export {
 export type { InitObservabilityInput } from './observe.js';
 // ── Observation ─────────────────────────────────────────────────────────────
 export {
+	canonicalLineContent,
 	createObservation,
 	initObservability,
 	resetObservabilityForTesting,

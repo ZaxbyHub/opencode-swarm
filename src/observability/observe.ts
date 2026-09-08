@@ -383,6 +383,15 @@ export function toLegacyTelemetryLine(
 	};
 }
 
+/**
+ * The exact JSONL line content `emit()` writes, without the EOL. Single
+ * definition so the writer (src/telemetry.ts) and the observability store's
+ * content-derived `line_hash` correlation (issue #2487) can never drift apart.
+ */
+export function canonicalLineContent(event: ObservabilityEvent): string {
+	return JSON.stringify(toLegacyTelemetryLine(event));
+}
+
 // ============================================================================
 // Test seams
 // ============================================================================

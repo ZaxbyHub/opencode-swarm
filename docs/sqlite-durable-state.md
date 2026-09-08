@@ -231,3 +231,35 @@ bounded explicit retry after settlement.
   D4 (#2483).
 - Human-facing artifacts (`plan.md`, `SWARM_PLAN.*`, evidence files, …) stay
   files, written as projections.
+
+## Storage compatibility matrix
+
+Issue #2487 (Workstream D8). One row per durable store: what the authority is,
+what legacy path is retained, how recovery/import works, the kill switch, and
+the driver floors. Pairing contract: `delegation_begin`/`delegation_end` are
+the joined lifecycle (report pairing + stale-sweep recovered ends); session,
+gate, and phase events are single-sided lifecycles by design (disclosed in
+`/swarm report` coverage, never fabricated into pairs).
+
+| Store | Authority | Retained legacy path | Recovery / import | Kill switch (kill-switch) | Driver floors |
+|---|---|---|---|---|---|
+| Observability events (`observability_event`, src/db/observability-event-store.ts) | swarm.db is the local query authority; `.swarm/telemetry.jsonl(.1)` stays the operational legacy record (by design, registry row `telemetry-jsonl`) | telemetry.jsonl dual-write; live/import overlap suppressed by the `line_hash` content correlation (migrations v38/v39, `obs-line-v1` namespace over the EOL-free line bytes, CR-normalized on import) | `syncObservabilityImport` (report path only): incremental marker + content-derived synthetic ids; `skippedLive` counts live-captured lines; one-time lazy backfill for pre-v38 live rows (marker `__live_line_hash_backfill__`, same transaction) | `SWARM_OBSERVABILITY_SINK_DISABLE=1` (live sink only; import never gated) | Bun >=1.3.13 / Node >=22.13 via src/db/sqlite-loader.ts |
+| Plan ledger (`plan_ledger_*`, src/plan/ledger-sqlite.ts) | `file_shadow` (default) then `sqlite` after parity-clean cutover; ledger hash chain + epochs unchanged | `.swarm/plan-ledger.jsonl` is the authority in shadow mode and a portable export after cutover | One-transaction full-JSONL import with archive; replay + root-hash parity verified before cutover; authority-mode rollback is the kill path | Persisted authority mode (`plan_ledger_state.authority_mode`) | same |
+| Coordination store (`coordination_*`, src/db/coordination-store.ts) | swarm.db transactions (leases, fencing, CAS) | Compatibility projections (e.g. pending-delegations checkpoint/manifest) are post-commit shadows | `importCoordinationOnce` one-time imports with `.imported` archival; `/swarm recover --coordination` bounded retry | none (authority is the safety mechanism itself) | same |
+| Insight candidates (`insight_candidate`, src/db/insight-candidate-store.ts) | swarm.db | `.swarm/insight-candidates.jsonl` retained as `.imported` archive | Lazy one-transaction import; fail-open legacy readers only when the DB is absent/unreadable | none | same |
+| Phase reports (`phase_report`, src/db/phase-report-store.ts) | swarm.db | `drift-report-phase-*.json` / `doc-drift-phase-*.json` retained as import archives | Lazy one-time import; writers already SQLite-only | none | same |
+| QA gate profiles (`qa_gate_profile*`, src/db/qa-gate-profile.ts) | swarm.db identity-bound profiles | `unbound_legacy` rows adoptable under collision checks | `allowLegacyAdoption` per-call recovery; `/swarm doctor` guidance | none | same |
+| Memory provider (memory.db, src/memory/sqlite-provider.ts) | SQLite when `memory.enabled` | `local-jsonl` provider remains selectable (`memory.provider`) | Provider contract parity (sqlite vs local-jsonl) | `memory.enabled=false` (subsystem), `memory.provider=local-jsonl` | same |
+| OTLP export (spool, src/observability/otlp-exporter.ts) | remote collector (opt-in, non-authoritative) | none (local operation independent) | Persistent spool + bounded retry/backoff + circuit | `SWARM_OTLP_EXPORT_DISABLE=1` plus `observability.export.enabled=false` | n/a (network) |
+| Training vault (src/training/) | consent-governed vault content | none | Consent + withdrawal tombstones; deterministic export | training consent (opt-out default) | same as swarm.db |
+
+Disclosed residuals (bounded, intentional): pre-v38 live rows whose payload
+cannot be byte-exactly reconstructed (caller-supplied `timestamp`/`event` keys,
+quarantined rows) keep `line_hash` NULL and may import once; and a
+cross-process live append still queued when another process's import commits
+can produce one overcounting duplicate (never loss) until the emitter's next
+writer flush. Proof locations: `bun run repro:2487` (Node close/reopen parity
+for sink + ledger + coordination; CI smoke 3-OS merge-queue matrix, next to
+`repro:1873`), tests/unit/db/observability-*-2487.test.ts, the C9 crash/
+import/backup/driver-parity suites, and the retention-registry coverage
+ratchet.
