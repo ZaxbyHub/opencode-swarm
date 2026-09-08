@@ -77,11 +77,17 @@ describe('#2531 recovery/decode defect-class guardrail', () => {
 		// Slice-marker integrity (#2531 feedback PRR-009): a renamed marker
 		// makes indexOf return -1 and silently widens the slice window, so a
 		// widened window must fail this test instead of passing vacuously.
-		expect(ledgerSource.indexOf('export async function loadLastApprovedPlan')).toBeGreaterThanOrEqual(0);
 		expect(
-			ledgerSource.indexOf('export async function loadLastPlanCriticApprovedSnapshot'),
+			ledgerSource.indexOf('export async function loadLastApprovedPlan'),
+		).toBeGreaterThanOrEqual(0);
+		expect(
+			ledgerSource.indexOf(
+				'export async function loadLastPlanCriticApprovedSnapshot',
+			),
 		).toBeGreaterThan(0);
-		expect(ledgerSource.indexOf('function findLastApprovedSnapshot')).toBeGreaterThan(0);
+		expect(
+			ledgerSource.indexOf('function findLastApprovedSnapshot'),
+		).toBeGreaterThan(0);
 		expect(loadLastApproved.includes('readLedgerEventsWithIntegrity')).toBe(
 			true,
 		);
