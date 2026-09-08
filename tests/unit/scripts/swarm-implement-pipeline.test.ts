@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -73,7 +72,7 @@ function runPipeline(
 
 describe('swarm-implement pipeline driver (#2498)', () => {
 	test('branch derivation is pure, cwd-independent, and stable across calls', () => {
-		const elsewhere = mkdtempSync(path.join(tmpdir(), 'swarm-impl-elsewhere-'));
+		const elsewhere = canonicalMkdtemp('swarm-impl-elsewhere-');
 		const fromRepo = runPipeline(elsewhere, ['branch', '2498']);
 		const again = runPipeline(elsewhere, ['branch', '2498']);
 		const otherIssue = runPipeline(elsewhere, ['branch', '4242']);
