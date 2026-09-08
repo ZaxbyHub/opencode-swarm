@@ -1037,7 +1037,14 @@ export async function initLedger(
 	if (!initialPlanHash) {
 		try {
 			if (fs.existsSync(planJsonPath)) {
-				const content = fs.readFileSync(planJsonPath, 'utf8');
+				// #2531: fatal decode — the embedded plan_created root must
+				// never carry decode-damage replacement characters into the
+				// authoritative ledger; invalid bytes fall back to the empty
+				// hash branch below.
+				const initBytes = fs.readFileSync(planJsonPath);
+				const content = new TextDecoder('utf-8', { fatal: true }).decode(
+					initBytes,
+				);
 				const plan: Plan = JSON.parse(content);
 				planHashAfter = computePlanLedgerHash(plan);
 				if (!embeddedPlan) embeddedPlan = plan;
