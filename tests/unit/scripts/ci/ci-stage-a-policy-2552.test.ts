@@ -176,6 +176,7 @@ describe('Stage-A policy and six-way CI agreement (issue #2552)', () => {
 			expect(block).toContain(`timeline_removed_at=${receipt.removed}`);
 			expect(block).toContain('unit_shards_executed=6');
 			expect(block).toContain(`completed_at=${receipt.completed}`);
+			expect(block).toContain('preserved_checks=');
 			expect(block).toContain('no intervening re-add');
 		}
 	});
@@ -193,6 +194,7 @@ describe('Stage-A policy and six-way CI agreement (issue #2552)', () => {
 		expect(stageAReceiptsSection).not.toMatch(
 			/A third\s+qualifying Stage-A receipt remains pending\./,
 		);
+		expect(stageAReceiptsSection).not.toContain('remains pending');
 		expect(stageAReceiptsSection).toContain(
 			'Run `34121635625` is explicitly excluded',
 		);

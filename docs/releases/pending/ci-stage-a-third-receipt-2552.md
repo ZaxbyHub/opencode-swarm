@@ -17,8 +17,9 @@
   two-receipt pending state to the closed three-receipt state: the pending
   phrase is now a ratcheted absence, the injection guard is replaced by
   presence assertions, and the receipt table carries the third entry.
-- Reconciled the two earlier pending release fragments
-  (`ci-gate-policy-2552.md`, `ci-stage-a-decision-2552.md`) that still
+- Reconciled the three earlier pending release fragments
+  (`ci-gate-policy-2552.md`, `ci-stage-a-decision-2552.md`,
+  `ci-merge-group-event-scoped-cancellation-2552.md`) that still
   described the third Stage-A receipt as pending: their wording is now
   past-tense-at-publication with an explicit pointer to run `34162959243`,
   so the aggregated release notes cannot contradict the closed state.
