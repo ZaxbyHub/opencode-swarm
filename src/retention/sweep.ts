@@ -89,12 +89,21 @@ interface Family {
 	includeEntry?: PruneEntryFilter;
 }
 
-// Canonical gate-state projections are the only pruneable entries in this
-// directory. Locks, projection/import markers, and atomic-write temps are
-// intentionally retained, including after a timed-out checkout action.
-const PR_WORKFLOW_GATE_STATE_NAME = /^[A-Za-z0-9_.-]+-[0-9a-f]{12}\.json$/;
+// Keep the canonical JSON family and its sidecars separate: locks and
+// atomic-write temps are intentionally retained, including after a timed-out
+// checkout action. The sidecar suffix is deliberately narrow so an arbitrary
+// sibling cannot become age-prunable by sharing the workflow-state stem.
+const PR_WORKFLOW_GATE_STATE_STEM = '[A-Za-z0-9_.-]+-[0-9a-f]{12}';
+const PR_WORKFLOW_GATE_STATE_NAME = new RegExp(
+	`^${PR_WORKFLOW_GATE_STATE_STEM}\\.json$`,
+);
+const PR_WORKFLOW_GATE_SIDECAR_NAME = new RegExp(
+	`^${PR_WORKFLOW_GATE_STATE_STEM}\\.json(?:\\.imported(?:\\.[0-9]+)?|\\.sqlite-projection)$`,
+);
 const isPrWorkflowGateStateProjection: PruneEntryFilter = (name, stat) =>
 	stat.isFile() && PR_WORKFLOW_GATE_STATE_NAME.test(name);
+const isPrWorkflowGateSidecar: PruneEntryFilter = (name, stat) =>
+	stat.isFile() && PR_WORKFLOW_GATE_SIDECAR_NAME.test(name);
 
 function familiesFor(swarmRoot: string, now: number): Family[] {
 	const age = (days: number) => days * DAY_MS;
@@ -119,6 +128,10 @@ function familiesFor(swarmRoot: string, now: number): Family[] {
 		f('pr-workflow-gates', 'pr-workflow-gates', {
 			maxAgeDays: 30,
 			includeEntry: isPrWorkflowGateStateProjection,
+		}),
+		f('pr-workflow-gate-sidecars', 'pr-workflow-gates', {
+			maxAgeDays: 30,
+			includeEntry: isPrWorkflowGateSidecar,
 		}),
 		f(
 			'pr-review-reentry-shadows',

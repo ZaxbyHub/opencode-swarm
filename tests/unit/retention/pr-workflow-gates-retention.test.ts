@@ -82,7 +82,7 @@ describe('pr-workflow-gates retention', () => {
 		}
 	});
 
-	it('sweep removes stale state, keeps fresh state, and retains stale/fresh sidecars and checkout lock', async () => {
+	it('sweep age-prunes stale sidecars but keeps fresh sidecars and protected locks/temps', async () => {
 		const root = makeRoot('sweep');
 		const staleState = seed(root, 'session-old-000000000000.json', OLD);
 		const freshState = seed(root, 'session-fresh-111111111111.json', NOW);
@@ -104,6 +104,11 @@ describe('pr-workflow-gates retention', () => {
 			'session-old-000000000000.json.imported',
 			OLD,
 		);
+		const staleImportedCollision = seed(
+			root,
+			'session-old-000000000000.json.imported.1',
+			OLD,
+		);
 		const freshImported = seed(
 			root,
 			'session-fresh-111111111111.json.imported',
@@ -118,15 +123,17 @@ describe('pr-workflow-gates retention', () => {
 		const result = await runRetentionSweep(root, { now: NOW });
 
 		expect(result.pruned['pr-workflow-gates']).toBe(1);
+		expect(result.pruned['pr-workflow-gate-sidecars']).toBe(3);
 		expect(existsSync(staleState)).toBe(false);
+		expect(existsSync(staleProjection)).toBe(false);
+		expect(existsSync(staleImported)).toBe(false);
+		expect(existsSync(staleImportedCollision)).toBe(false);
 		for (const survivor of [
 			freshState,
 			staleLock,
 			freshLock,
 			checkoutLock,
-			staleProjection,
 			freshProjection,
-			staleImported,
 			freshImported,
 			staleTemp,
 		]) {
