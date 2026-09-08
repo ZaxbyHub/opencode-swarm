@@ -3120,8 +3120,8 @@ export function advanceTaskState(
 	// fire prematurely from stale completion data.
 	if (newState === 'complete') {
 		session.stageBCompletion?.delete(taskId);
-		session.stageBRouteEvidence?.delete(taskId);
-		session.stageBRouteRequiredTasks?.delete(taskId);
+		clearStageBRouteEvidence(session, taskId);
+		clearStageBRouteRequired(session, taskId);
 		completeModifiedFilesForTask(session, taskId);
 	}
 	if (options?.emitTelemetry !== false) {
