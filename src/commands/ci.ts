@@ -28,6 +28,9 @@ import type { CommandContext, CommandFailure } from './registry.js';
 
 export const DEFAULT_CI_DEADLINE_MS = 300_000;
 
+const MIN_CI_DEADLINE_MS = 1;
+const MAX_CI_DEADLINE_MS = DEFAULT_CI_DEADLINE_MS;
+
 export interface CiSignalCancellation {
 	/** The handler invoked on SIGINT/SIGTERM; exported for unit testing the
 	 * wiring without relying on platform signal delivery. */
@@ -78,9 +81,13 @@ function parseTimeoutMs(args: string[]): number {
 		);
 	}
 	const parsed = Number(raw);
-	if (!Number.isFinite(parsed) || parsed <= 0) {
+	if (
+		!Number.isFinite(parsed) ||
+		parsed < MIN_CI_DEADLINE_MS ||
+		parsed > MAX_CI_DEADLINE_MS
+	) {
 		throw new Error(
-			'Invalid --timeout-ms value: expected a positive number of milliseconds.',
+			`Invalid --timeout-ms value: expected a positive finite number from ${MIN_CI_DEADLINE_MS} through ${MAX_CI_DEADLINE_MS} milliseconds.`,
 		);
 	}
 	return parsed;
@@ -141,11 +148,17 @@ export async function handleCiCommand(
 		// machine block carries the full report shape with neutral evaluation
 		// fields. One `version: 1` schema for every exit code keeps the
 		// #2498 consumer contract branch-independent.
+		const redactDirectory = (value: string): string =>
+			ctx.directory.length > 0
+				? value.split(ctx.directory).join('[evaluated-directory]')
+				: value;
 		const tail = result.journal
 			.slice(-5)
-			.map((e) => `${e.type}${e.detail ? `: ${e.detail}` : ''}`)
+			.map(
+				(e) => `${e.type}${e.detail ? `: ${redactDirectory(e.detail)}` : ''}`,
+			)
 			.join('; ');
-		const detail = result.detail ?? result.outcome;
+		const detail = redactDirectory(result.detail ?? result.outcome);
 		// 'pass'/'violations' returned above, so only the abort outcomes reach
 		// this diagnostic branch.
 		const diagnosticReason =

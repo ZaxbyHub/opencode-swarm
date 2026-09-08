@@ -57,6 +57,9 @@ export const TERMINAL_SUCCESS_STATES = ['complete', 'closed'] as const;
  * rather than copying unbounded data into a temp dir. */
 export const MAX_SHADOW_COPY_BYTES = 512 * 1024 * 1024;
 
+/** Maximum number of filesystem entries examined by one shadow-copy census. */
+export const MAX_SHADOW_COPY_ENTRIES = 100_000;
+
 export type AdvisoryCiGateStatus =
 	| 'pass'
 	| 'fail'
@@ -148,43 +151,163 @@ function countStatuses(rows: AdvisoryCiGateRow[]): AdvisoryCiReport['counts'] {
 	return counts;
 }
 
+function removeShadowRoot(shadowRoot: string): void {
+	try {
+		fs.rmSync(shadowRoot, { recursive: true, force: true });
+	} catch {
+		// Best-effort cleanup; the OS reclaims the temp directory eventually.
+	}
+}
+
+const SHADOW_COPY_CHUNK_BYTES = 64 * 1024;
+
+function copyFileBounded(
+	source: string,
+	destination: string,
+	remainingBytes: number,
+): number | null {
+	let sourceFd: number | undefined;
+	let destinationFd: number | undefined;
+	let copiedBytes = 0;
+	try {
+		sourceFd = fs.openSync(source, 'r');
+		destinationFd = fs.openSync(destination, 'w');
+		const buffer = Buffer.allocUnsafe(
+			Math.min(SHADOW_COPY_CHUNK_BYTES, remainingBytes + 1),
+		);
+		while (true) {
+			const bytesRead = fs.readSync(sourceFd, buffer, 0, buffer.length, null);
+			if (bytesRead === 0) return copiedBytes;
+			if (bytesRead > remainingBytes - copiedBytes) return null;
+			let written = 0;
+			while (written < bytesRead) {
+				const bytesWritten = fs.writeSync(
+					destinationFd,
+					buffer,
+					written,
+					bytesRead - written,
+				);
+				if (bytesWritten <= 0) {
+					throw new Error('shadow-copy write made no progress');
+				}
+				written += bytesWritten;
+			}
+			copiedBytes += bytesRead;
+		}
+	} finally {
+		if (destinationFd !== undefined) {
+			try {
+				fs.closeSync(destinationFd);
+			} catch {
+				// Preserve the original copy error, if any.
+			}
+		}
+		if (sourceFd !== undefined) {
+			try {
+				fs.closeSync(sourceFd);
+			} catch {
+				// Preserve the original copy error, if any.
+			}
+		}
+	}
+}
+
+function isClosedDirectoryError(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		(error as { code?: unknown }).code === 'ERR_DIR_CLOSED'
+	);
+}
+
 /** Copy `.swarm/` into a fresh temp dir for DB-mediated reads. Returns null
  * when `.swarm` is absent or exceeds the copy budget. */
-function createShadowCopy(directory: string): string | null {
+function createShadowCopy(
+	directory: string,
+	maxBytes = MAX_SHADOW_COPY_BYTES,
+): string | null {
 	const swarmDir = path.join(directory, '.swarm');
 	if (!fs.existsSync(swarmDir)) return null;
 	let total = 0;
-	const files: Array<{ src: string; dest: string }> = [];
+	let entriesSeen = 0;
+	const files: string[] = [];
+	let budgetExceeded = false;
 	const walk = (dir: string) => {
-		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-			const src = path.join(dir, entry.name);
-			if (entry.isDirectory()) {
-				walk(src);
-				continue;
+		let directoryHandle: fs.Dir | undefined;
+		let traversalError: unknown;
+		let closeError: unknown;
+		try {
+			directoryHandle = fs.opendirSync(dir);
+			while (true) {
+				const entry = directoryHandle.readSync();
+				if (entry === null) break;
+				entriesSeen++;
+				if (entriesSeen > MAX_SHADOW_COPY_ENTRIES) {
+					budgetExceeded = true;
+					break;
+				}
+				const src = path.join(dir, entry.name);
+				if (entry.isDirectory()) {
+					walk(src);
+					if (budgetExceeded) break;
+					continue;
+				}
+				if (!entry.isFile()) continue;
+				const size = fs.statSync(src).size;
+				total += size;
+				if (total > maxBytes) {
+					budgetExceeded = true;
+					break;
+				}
+				files.push(src);
 			}
-			if (!entry.isFile()) continue;
-			const size = fs.statSync(src).size;
-			total += size;
-			if (total > MAX_SHADOW_COPY_BYTES) return;
-			files.push({
-				src,
-				dest: path.join(path.dirname(src), path.basename(src)),
-			});
+		} catch (error) {
+			traversalError = error;
+			throw error;
+		} finally {
+			if (directoryHandle !== undefined) {
+				try {
+					directoryHandle.closeSync();
+				} catch (error) {
+					if (!isClosedDirectoryError(error) && traversalError === undefined) {
+						closeError = error;
+					}
+				}
+			}
 		}
+		if (closeError !== undefined) throw closeError;
 	};
 	walk(swarmDir);
-	if (total > MAX_SHADOW_COPY_BYTES) return null;
+	if (budgetExceeded) return null;
 	const shadowRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-ci-shadow-'));
-	const shadowSwarm = path.join(shadowRoot, '.swarm');
-	fs.mkdirSync(shadowSwarm, { recursive: true });
-	for (const { src } of files) {
-		const rel = path.relative(directory, src);
-		const dest = path.join(shadowRoot, rel);
-		fs.mkdirSync(path.dirname(dest), { recursive: true });
-		fs.copyFileSync(src, dest);
+	try {
+		const shadowSwarm = path.join(shadowRoot, '.swarm');
+		fs.mkdirSync(shadowSwarm, { recursive: true });
+		let copiedBytes = 0;
+		for (const src of files) {
+			const rel = path.relative(directory, src);
+			const dest = path.join(shadowRoot, rel);
+			fs.mkdirSync(path.dirname(dest), { recursive: true });
+			const copied = copyFileBounded(src, dest, maxBytes - copiedBytes);
+			if (copied === null) {
+				removeShadowRoot(shadowRoot);
+				return null;
+			}
+			copiedBytes += copied;
+		}
+		return shadowRoot;
+	} catch (error) {
+		removeShadowRoot(shadowRoot);
+		throw error;
 	}
-	return shadowRoot;
 }
+
+export const _internals = {
+	computeEvidenceQualitySummary,
+	copyFileBounded,
+	createShadowCopy,
+};
 
 /** Gates whose only durable record lives in live plugin state; advisory CI
  * reports them instead of fabricating a pass. */
@@ -226,7 +349,12 @@ export async function evaluateAdvisoryCi(
 ): Promise<AdvisoryCiReport> {
 	const { directory, tty } = options;
 	const journal = options.journal ?? (() => {});
-	const registerCleanup = options.registerCleanup ?? (() => {});
+	const externalRegisterCleanup = options.registerCleanup;
+	let directShadowCleanup: (() => void) | undefined;
+	const registerCleanup = (fn: () => void) => {
+		if (externalRegisterCleanup) externalRegisterCleanup(fn);
+		else directShadowCleanup = fn;
+	};
 	const gates: AdvisoryCiGateRow[] = [];
 	const tasks: AdvisoryCiReport['tasks'] = [];
 
@@ -305,115 +433,130 @@ export async function evaluateAdvisoryCi(
 		shadowDir = null;
 	}
 	if (shadowDir) {
-		registerCleanup(() => {
-			try {
-				fs.rmSync(shadowDir as string, { recursive: true, force: true });
-			} catch {
-				// Best-effort temp cleanup; the OS reclaims tmpdirs.
-			}
-		});
-	}
-
-	// --- effective gate set (R2: default fallback, honest reporting) -------
-	const identity = {
-		swarm: planLike.swarm ?? 'local',
-		title: planLike.title ?? '',
-	};
-	let effectiveGates: QaGates = { ...DEFAULT_QA_GATES };
-	let gateProfile: 'default' | 'profile' = 'default';
-	if (shadowDir) {
-		const lookup = getProfileLookupForIdentity(shadowDir, identity);
-		if (lookup && 'profile' in lookup && lookup.profile) {
-			effectiveGates = getEffectiveGates(lookup.profile, {});
-			gateProfile = 'profile';
-		}
-	}
-	journal('gate_profile', gateProfile);
-
-	gates.push({ name: 'plan', status: 'pass' });
-
-	// --- plan-critic gate (critic_pre_plan) --------------------------------
-	if (effectiveGates.critic_pre_plan) {
-		if (shadowDir) {
-			const approved = await isPlanCriticApproved(shadowDir);
-			gates.push({
-				name: 'plan_critic',
-				status: approved ? 'pass' : 'fail',
-				detail: approved
-					? 'plan-critic APPROVED snapshot matches the current plan structure'
-					: 'no plan_critic_gate APPROVED snapshot matching the current plan (critic_pre_plan is enabled)',
-			});
-		} else {
-			gates.push({
-				name: 'plan_critic',
-				status: 'error',
-				detail:
-					'ledger snapshot read unavailable: durable state exceeds the shadow-copy budget',
-			});
-		}
-	}
-
-	// --- per-task gates (tri-state evidence, terminal workflow) ------------
-	for (const task of planTasks) {
+		const cleanupShadow = () => removeShadowRoot(shadowDir as string);
 		try {
-			const state = await readTaskEvidenceState(directory, task.id);
-			if (state.kind === 'ok') {
-				const evidence = state.evidence;
-				const required = [...evidence.required_gates];
-				const satisfiedKeys = Object.keys(evidence.gates ?? {});
-				const missing = required.filter((g) => !satisfiedKeys.includes(g));
-				const workflowState = evidence.workflow?.state;
-				const terminal = TERMINAL_SUCCESS_STATES.includes(
-					workflowState as (typeof TERMINAL_SUCCESS_STATES)[number],
-				);
-				const satisfied = missing.length === 0 && terminal;
-				tasks.push({
-					task_id: task.id,
-					evidence_state: 'valid',
-					required_gates: required,
-					missing_gates: missing,
-					workflow_state: workflowState,
-					satisfied,
-				});
+			registerCleanup(cleanupShadow);
+		} catch (error) {
+			removeShadowRoot(shadowDir);
+			throw error;
+		}
+	}
+
+	try {
+		// --- effective gate set (R2: default fallback, honest reporting) -------
+		const identity = {
+			swarm: planLike.swarm ?? 'local',
+			title: planLike.title ?? '',
+		};
+		let effectiveGates: QaGates = { ...DEFAULT_QA_GATES };
+		let gateProfile: 'default' | 'profile' = 'default';
+		if (shadowDir) {
+			const lookup = getProfileLookupForIdentity(shadowDir, identity);
+			if (lookup && 'profile' in lookup && lookup.profile) {
+				effectiveGates = getEffectiveGates(lookup.profile, {});
+				gateProfile = 'profile';
+			}
+		}
+		journal('gate_profile', gateProfile);
+
+		gates.push({ name: 'plan', status: 'pass' });
+
+		// --- plan-critic gate (critic_pre_plan) --------------------------------
+		if (effectiveGates.critic_pre_plan) {
+			if (shadowDir) {
+				const approved = await isPlanCriticApproved(shadowDir);
 				gates.push({
-					name: `task ${task.id} gates`,
-					status: satisfied ? 'pass' : 'fail',
-					detail: satisfied
-						? `all required gates satisfied; workflow ${workflowState}`
-						: missing.length > 0
-							? `missing gate evidence: ${missing.join(', ')}${terminal ? '' : `; workflow state ${workflowState} is not terminal`}`
-							: `workflow state ${workflowState} is not a terminal-success state`,
-				});
-			} else if (state.kind === 'missing') {
-				const required = deriveRequiredGates('coder');
-				tasks.push({
-					task_id: task.id,
-					evidence_state: 'missing',
-					required_gates: required,
-					missing_gates: [...required],
-					satisfied: false,
-				});
-				gates.push({
-					name: `task ${task.id} gates`,
-					status: 'no_data',
-					detail: 'no durable task-gate evidence recorded',
-				});
-			} else if (state.kind === 'unparseable') {
-				const required = deriveRequiredGates('coder');
-				tasks.push({
-					task_id: task.id,
-					evidence_state: 'corrupt',
-					required_gates: required,
-					missing_gates: [...required],
-					satisfied: false,
-				});
-				gates.push({
-					name: `task ${task.id} gates`,
-					status: 'corrupt',
-					detail:
-						'task-gate evidence exists but cannot be parsed (#2470 tri-state)',
+					name: 'plan_critic',
+					status: approved ? 'pass' : 'fail',
+					detail: approved
+						? 'plan-critic APPROVED snapshot matches the current plan structure'
+						: 'no plan_critic_gate APPROVED snapshot matching the current plan (critic_pre_plan is enabled)',
 				});
 			} else {
+				gates.push({
+					name: 'plan_critic',
+					status: 'error',
+					detail:
+						'ledger snapshot read unavailable: durable state exceeds the shadow-copy budget',
+				});
+			}
+		}
+
+		// --- per-task gates (tri-state evidence, terminal workflow) ------------
+		for (const task of planTasks) {
+			try {
+				const state = await readTaskEvidenceState(directory, task.id);
+				if (state.kind === 'ok') {
+					const evidence = state.evidence;
+					const required = [...evidence.required_gates];
+					const satisfiedKeys = Object.keys(evidence.gates ?? {});
+					const missing = required.filter((g) => !satisfiedKeys.includes(g));
+					const workflowState = evidence.workflow?.state;
+					const terminal = TERMINAL_SUCCESS_STATES.includes(
+						workflowState as (typeof TERMINAL_SUCCESS_STATES)[number],
+					);
+					const satisfied = missing.length === 0 && terminal;
+					tasks.push({
+						task_id: task.id,
+						evidence_state: 'valid',
+						required_gates: required,
+						missing_gates: missing,
+						workflow_state: workflowState,
+						satisfied,
+					});
+					gates.push({
+						name: `task ${task.id} gates`,
+						status: satisfied ? 'pass' : 'fail',
+						detail: satisfied
+							? `all required gates satisfied; workflow ${workflowState}`
+							: missing.length > 0
+								? `missing gate evidence: ${missing.join(', ')}${terminal ? '' : `; workflow state ${workflowState} is not terminal`}`
+								: `workflow state ${workflowState} is not a terminal-success state`,
+					});
+				} else if (state.kind === 'missing') {
+					const required = deriveRequiredGates('coder');
+					tasks.push({
+						task_id: task.id,
+						evidence_state: 'missing',
+						required_gates: required,
+						missing_gates: [...required],
+						satisfied: false,
+					});
+					gates.push({
+						name: `task ${task.id} gates`,
+						status: 'no_data',
+						detail: 'no durable task-gate evidence recorded',
+					});
+				} else if (state.kind === 'unparseable') {
+					const required = deriveRequiredGates('coder');
+					tasks.push({
+						task_id: task.id,
+						evidence_state: 'corrupt',
+						required_gates: required,
+						missing_gates: [...required],
+						satisfied: false,
+					});
+					gates.push({
+						name: `task ${task.id} gates`,
+						status: 'corrupt',
+						detail:
+							'task-gate evidence exists but cannot be parsed (#2470 tri-state)',
+					});
+				} else {
+					tasks.push({
+						task_id: task.id,
+						evidence_state: 'error',
+						required_gates: deriveRequiredGates('coder'),
+						missing_gates: deriveRequiredGates('coder'),
+						satisfied: false,
+					});
+					gates.push({
+						name: `task ${task.id} gates`,
+						status: 'error',
+						detail: `evidence reader returned unexpected state ${JSON.stringify((state as { kind?: string }).kind)}`,
+					});
+				}
+			} catch (error) {
 				tasks.push({
 					task_id: task.id,
 					evidence_state: 'error',
@@ -424,103 +567,94 @@ export async function evaluateAdvisoryCi(
 				gates.push({
 					name: `task ${task.id} gates`,
 					status: 'error',
-					detail: `evidence reader returned unexpected state ${JSON.stringify((state as { kind?: string }).kind)}`,
+					detail: error instanceof Error ? error.message : String(error),
 				});
 			}
-		} catch (error) {
-			tasks.push({
-				task_id: task.id,
-				evidence_state: 'error',
-				required_gates: deriveRequiredGates('coder'),
-				missing_gates: deriveRequiredGates('coder'),
-				satisfied: false,
-			});
+		}
+
+		// --- evidence-quality thresholds (shared with benchmark) ---------------
+		const summary = await _internals.computeEvidenceQualitySummary(directory);
+		const q = summary.qualityMetrics;
+		const qualityRows: Array<[string, boolean | null, number | null, string]> =
+			[
+				[
+					'review_pass_rate',
+					summary.reviewPassRate === null
+						? null
+						: summary.reviewPassRate >= CI_QUALITY_THRESHOLDS.review_pass_rate,
+					summary.reviewPassRate,
+					`>= ${CI_QUALITY_THRESHOLDS.review_pass_rate}% over ${summary.totalReviews} reviews`,
+				],
+				[
+					'test_pass_rate',
+					summary.testPassRate === null
+						? null
+						: summary.testPassRate >= CI_QUALITY_THRESHOLDS.test_pass_rate,
+					summary.testPassRate,
+					`>= ${CI_QUALITY_THRESHOLDS.test_pass_rate}% over ${summary.testsPassed + summary.testsFailed} tests`,
+				],
+				[
+					'quality_budget.complexity_delta',
+					q.hasEvidence
+						? q.complexityDelta <= CI_QUALITY_THRESHOLDS.max_complexity_delta
+						: null,
+					q.hasEvidence ? q.complexityDelta : null,
+					`<= ${CI_QUALITY_THRESHOLDS.max_complexity_delta}`,
+				],
+				[
+					'quality_budget.public_api_delta',
+					q.hasEvidence
+						? q.publicApiDelta <= CI_QUALITY_THRESHOLDS.max_public_api_delta
+						: null,
+					q.hasEvidence ? q.publicApiDelta : null,
+					`<= ${CI_QUALITY_THRESHOLDS.max_public_api_delta}`,
+				],
+				[
+					'quality_budget.duplication_ratio',
+					q.hasEvidence
+						? q.duplicationRatio <= CI_QUALITY_THRESHOLDS.max_duplication_ratio
+						: null,
+					q.hasEvidence ? q.duplicationRatio : null,
+					`<= ${CI_QUALITY_THRESHOLDS.max_duplication_ratio}%`,
+				],
+				[
+					'quality_budget.test_to_code_ratio',
+					q.hasEvidence
+						? q.testToCodeRatio >= CI_QUALITY_THRESHOLDS.min_test_to_code_ratio
+						: null,
+					q.hasEvidence ? q.testToCodeRatio : null,
+					`>= ${CI_QUALITY_THRESHOLDS.min_test_to_code_ratio}%`,
+				],
+			];
+		for (const [name, passed, value, threshold] of qualityRows) {
 			gates.push({
-				name: `task ${task.id} gates`,
-				status: 'error',
-				detail: error instanceof Error ? error.message : String(error),
+				name,
+				status: passed === null ? 'no_data' : passed ? 'pass' : 'fail',
+				detail:
+					passed === null
+						? `no evidence data (${threshold}); not a pass`
+						: `value ${value} ${threshold}`,
 			});
 		}
-	}
 
-	// --- evidence-quality thresholds (shared with benchmark) ---------------
-	const summary = await computeEvidenceQualitySummary(directory);
-	const q = summary.qualityMetrics;
-	const qualityRows: Array<[string, boolean | null, number | null, string]> = [
-		[
-			'review_pass_rate',
-			summary.reviewPassRate === null
-				? null
-				: summary.reviewPassRate >= CI_QUALITY_THRESHOLDS.review_pass_rate,
-			summary.reviewPassRate,
-			`>= ${CI_QUALITY_THRESHOLDS.review_pass_rate}% over ${summary.totalReviews} reviews`,
-		],
-		[
-			'test_pass_rate',
-			summary.testPassRate === null
-				? null
-				: summary.testPassRate >= CI_QUALITY_THRESHOLDS.test_pass_rate,
-			summary.testPassRate,
-			`>= ${CI_QUALITY_THRESHOLDS.test_pass_rate}% over ${summary.testsPassed + summary.testsFailed} tests`,
-		],
-		[
-			'quality_budget.complexity_delta',
-			q.hasEvidence
-				? q.complexityDelta <= CI_QUALITY_THRESHOLDS.max_complexity_delta
-				: null,
-			q.hasEvidence ? q.complexityDelta : null,
-			`<= ${CI_QUALITY_THRESHOLDS.max_complexity_delta}`,
-		],
-		[
-			'quality_budget.public_api_delta',
-			q.hasEvidence
-				? q.publicApiDelta <= CI_QUALITY_THRESHOLDS.max_public_api_delta
-				: null,
-			q.hasEvidence ? q.publicApiDelta : null,
-			`<= ${CI_QUALITY_THRESHOLDS.max_public_api_delta}`,
-		],
-		[
-			'quality_budget.duplication_ratio',
-			q.hasEvidence
-				? q.duplicationRatio <= CI_QUALITY_THRESHOLDS.max_duplication_ratio
-				: null,
-			q.hasEvidence ? q.duplicationRatio : null,
-			`<= ${CI_QUALITY_THRESHOLDS.max_duplication_ratio}%`,
-		],
-		[
-			'quality_budget.test_to_code_ratio',
-			q.hasEvidence
-				? q.testToCodeRatio >= CI_QUALITY_THRESHOLDS.min_test_to_code_ratio
-				: null,
-			q.hasEvidence ? q.testToCodeRatio : null,
-			`>= ${CI_QUALITY_THRESHOLDS.min_test_to_code_ratio}%`,
-		],
-	];
-	for (const [name, passed, value, threshold] of qualityRows) {
-		gates.push({
-			name,
-			status: passed === null ? 'no_data' : passed ? 'pass' : 'fail',
-			detail:
-				passed === null
-					? `no evidence data (${threshold}); not a pass`
-					: `value ${value} ${threshold}`,
+		const report = finishReport({
+			gates,
+			tasks,
+			planMeta: {
+				present: true,
+				title: planLike.title,
+				swarm: planLike.swarm,
+				task_count: planTasks.length,
+			},
+			tty,
+			exit_reason: 'gate_violations',
+			effectiveGates,
+			gateProfile,
 		});
+		return report;
+	} finally {
+		directShadowCleanup?.();
 	}
-
-	return finishReport({
-		gates,
-		tasks,
-		planMeta: {
-			present: true,
-			title: planLike.title,
-			swarm: planLike.swarm,
-			task_count: planTasks.length,
-		},
-		tty,
-		exit_reason: 'gate_violations',
-		effectiveGates,
-		gateProfile,
-	});
 }
 
 function finishReport(args: {
