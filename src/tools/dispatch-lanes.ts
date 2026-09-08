@@ -30,8 +30,8 @@ import {
 	type BackgroundDelegationResult,
 	type BackgroundDelegationWorkflowLaneRecovery,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
-	findByBatchId,
-	findByCorrelationId,
+	findByBatchIdDetailed,
+	findByCorrelationIdDetailed,
 	recordPendingDelegationDetailed,
 } from '../background/pending-delegations.js';
 import {
@@ -856,7 +856,15 @@ export interface DispatchLanesAsyncResult {
 
 export interface CollectLaneResultsResult {
 	success: boolean;
-	failure_class?: 'invalid_args' | 'not_found' | 'no_client';
+	/**
+	 * 'store_unreadable' (issue #2511) is distinct from 'not_found': the
+	 * delegation store could not be read, so the batch is UNKNOWN, not absent.
+	 */
+	failure_class?:
+		| 'invalid_args'
+		| 'not_found'
+		| 'no_client'
+		| 'store_unreadable';
 	message?: string;
 	batch_id: string;
 	total: number;
@@ -1268,7 +1276,19 @@ export async function executeDispatchLanesAsync(
 	}
 	let lanes = common.lanes;
 	const batchId = requestedBatchId;
-	if (findByBatchId(directory, batchId).length > 0) {
+	const duplicateRead = findByBatchIdDetailed(directory, batchId);
+	if (duplicateRead.status === 'uncertain') {
+		// Issue #2511 fail-closed: uniqueness cannot be verified, so the batch
+		// id must not be treated as fresh.
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message: `batch uniqueness unverifiable: delegation store unreadable after ${duplicateRead.attempts} attempts (${duplicateRead.reason})`,
+			errors: [
+				`batch_id uniqueness could not be verified: ${batchId}; retry once the delegation store is readable`,
+			],
+		});
+	}
+	if (duplicateRead.value.length > 0) {
 		return asyncFailureResult({
 			failure_class: 'invalid_args',
 			message: `Async lane batch already exists: ${batchId}`,
@@ -1988,7 +2008,21 @@ export async function executeCollectLaneResults(
 		context.sessionID !== undefined
 			? { parentSessionId: context.sessionID }
 			: undefined;
-	let records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
+	const initialRead = findByBatchIdDetailed(
+		directory,
+		parsed.data.batch_id,
+		batchFilter,
+	);
+	if (initialRead.status === 'uncertain') {
+		// Issue #2511: an unreadable store is not an empty batch. 'not_found'
+		// stays reserved for genuine, provable absence.
+		return collectFailureResult({
+			failure_class: 'store_unreadable',
+			batch_id: parsed.data.batch_id,
+			message: `Delegation store unreadable after ${initialRead.attempts} attempts; batch ${parsed.data.batch_id} is UNKNOWN, not absent (${initialRead.reason})`,
+		});
+	}
+	let records = initialRead.value;
 	if (records.length === 0) {
 		return collectFailureResult({
 			failure_class: 'not_found',
@@ -2101,10 +2135,31 @@ export async function executeCollectLaneResults(
 			deadline,
 			hostTimeouts,
 		);
-		records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
-		if (allSettled(records) || parsed.data.wait !== true) {
-			keepPolling = false;
-			continue;
+		const pollRead = findByBatchIdDetailed(
+			directory,
+			parsed.data.batch_id,
+			batchFilter,
+		);
+		if (pollRead.status === 'uncertain') {
+			// Issue #2511: an uncertain re-read proves nothing about settlement
+			// — keep the last known records and keep polling within the
+			// deadline; never exit the loop on uncertainty (last-known records
+			// that happen to be all-terminal are not proof of settlement).
+			addLaneDiagnostic(
+				collectionResourceFailures,
+				`batch:${parsed.data.batch_id}`,
+				`collect re-read uncertain: delegation store unreadable after ${pollRead.attempts} attempts (${pollRead.reason}); settlement UNKNOWN, continuing to poll`,
+			);
+			if (parsed.data.wait !== true) {
+				keepPolling = false;
+				continue;
+			}
+		} else {
+			records = pollRead.value;
+			if (allSettled(records) || parsed.data.wait !== true) {
+				keepPolling = false;
+				continue;
+			}
 		}
 		if (_internals.now() >= deadline) {
 			keepPolling = false;
@@ -2854,10 +2909,10 @@ async function collectOnce(
 			);
 			if (settled.kind === 'claimed') {
 				// Only tear down once the terminal write is CONFIRMED.
-				// `settleDelegationTerminal` returns not_open/missing when the
-				// claim did not land; deleting the host session in those cases would
-				// leave the record open with no readable session — a permanent wedge
-				// strictly worse than the bug being fixed.
+				// `settleDelegationTerminal` returns not_open/missing/uncertain
+				// when the claim did not land; deleting the host session in those
+				// cases would leave the record open with no readable session — a
+				// permanent wedge strictly worse than the bug being fixed.
 				clearLaneDiagnostics(settleFailureLogs, laneLabel);
 				cleanupAsyncLaunchSession(session, record.subagentSessionId);
 			} else if (isBenignSettleOutcome(settled.kind)) {
@@ -2868,6 +2923,17 @@ async function collectOnce(
 				// cry wolf on every routine race. Teardown belongs to whoever landed
 				// the write, so we do not perform it here.
 				clearLaneDiagnostics(settleFailureLogs, laneLabel);
+			} else if (settled.kind === 'uncertain') {
+				// Issue #2511: the store could not be re-read to classify the
+				// rejected claim — the lane is not provably settled and not
+				// provably missing, so it stays open for a later pass. Distinct
+				// from the missing/not_open diagnostic below on purpose: no
+				// settle-failure blame, retry-later only.
+				addLaneDiagnostic(
+					settleFailureLogs,
+					laneLabel,
+					`terminal settle deferred for lane "${laneLabel}"; delegation store unreadable (${settled.reason ?? 'unclassified'}); lane left open for retry`,
+				);
 			} else {
 				// Genuine failure: the claim did not land and nothing settled it, so
 				// the reason would otherwise vanish.
@@ -3567,7 +3633,20 @@ async function appendAsyncLaneLaunchError(
 	sessionId: string,
 	message: string,
 ): Promise<void> {
-	const record = findByCorrelationId(directory, sessionId);
+	const recordRead = findByCorrelationIdDetailed(directory, sessionId);
+	if (recordRead.status === 'uncertain') {
+		// Issue #2511 audited safe-skip: neither settle (needs the record) nor
+		// the bare never-launched transition (would fabricate absence) may run.
+		// Host teardown still fires; a later sweep re-derives the durable state
+		// once the store is readable.
+		warnDelegationReadUncertainOnce(
+			`launch-error settle skipped for lane session ${sessionId}`,
+			recordRead,
+		);
+		cleanupAsyncLaunchSession(session, sessionId);
+		return;
+	}
+	const record = recordRead.value;
 	const isPrReviewLane = record?.mode?.startsWith('swarm-pr-review:') === true;
 	const launchErrorResult = {
 		error: message,
@@ -3631,6 +3710,32 @@ async function getLaneCollectionReadiness(
 	}
 }
 
+/**
+ * Bounded delegation-read uncertainty log dedup (issue #2511): label+reason
+ * keyed, FIFO-evicted — safe-skip sites that run inside poll loops log each
+ * distinct (label, reason) once per process instead of once per iteration.
+ */
+const DELEGATION_READ_UNCERTAIN_LOG_LIMIT = 64;
+const delegationReadUncertainLogged = new Set<string>();
+
+function warnDelegationReadUncertainOnce(
+	label: string,
+	uncertain: { reason: string; attempts: number },
+): void {
+	const key = `${label}\0${uncertain.reason}`;
+	if (delegationReadUncertainLogged.has(key)) return;
+	if (
+		delegationReadUncertainLogged.size >= DELEGATION_READ_UNCERTAIN_LOG_LIMIT
+	) {
+		const oldest = delegationReadUncertainLogged.values().next().value;
+		if (oldest !== undefined) delegationReadUncertainLogged.delete(oldest);
+	}
+	delegationReadUncertainLogged.add(key);
+	logger.warn(
+		`${label}: delegation store unreadable after ${uncertain.attempts} attempts (${uncertain.reason}); skipping this pass`,
+	);
+}
+
 async function sweepStaleAsyncLaneRecords(
 	session: SessionOps,
 	directory: string,
@@ -3686,7 +3791,21 @@ function getCurrentStaleSweepCandidate(
 	staleTimeoutMs: number,
 	now: number,
 ): BackgroundDelegationRecord | null {
-	const current = findByCorrelationId(directory, record.correlationId);
+	const currentRead = findByCorrelationIdDetailed(
+		directory,
+		record.correlationId,
+	);
+	if (currentRead.status === 'uncertain') {
+		// Issue #2511 audited safe-skip: staleness cannot be proven on an
+		// unreadable store — skip this record this pass (the sweep re-runs on
+		// every poll), never terminalize on uncertainty.
+		warnDelegationReadUncertainOnce(
+			`stale sweep skipped lane ${record.laneId ?? record.correlationId}`,
+			currentRead,
+		);
+		return null;
+	}
+	const current = currentRead.value;
 	if (!current) return null;
 	if (current.subagentSessionId !== record.subagentSessionId) return null;
 	if ((current.generation ?? 1) !== (record.generation ?? 1)) return null;
@@ -4837,7 +4956,11 @@ function asyncFailureResult(args: {
 }
 
 function collectFailureResult(args: {
-	failure_class: 'invalid_args' | 'not_found' | 'no_client';
+	failure_class:
+		| 'invalid_args'
+		| 'not_found'
+		| 'no_client'
+		| 'store_unreadable';
 	batch_id: string;
 	message: string;
 	errors?: string[];

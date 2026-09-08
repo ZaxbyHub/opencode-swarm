@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { readLaneOutput } from '../background/lane-output-store.js';
-import { findByBatchId } from '../background/pending-delegations.js';
+import { findByBatchIdDetailed } from '../background/pending-delegations.js';
 import {
 	formatPrReviewRuntimeFieldError,
 	formatPrReviewValidationIssues,
@@ -351,9 +351,19 @@ export async function executeWritePrReviewTriggerEval(
 	const coverageDegradations: TriggerCoverageDegradation[] = [];
 	for (const row of validatedRows) {
 		if (row.result !== 'MATCHED') continue;
-		const records = findByBatchId(directory, row.source_batch_id!, {
+		// Issue #2511: provenance decision site — an unreadable store must
+		// fail closed with an honest rejection instead of falling into the
+		// "no verifiable provenance chain" branch below, which would read
+		// UNKNOWN records as a provenance violation.
+		const batchRead = findByBatchIdDetailed(directory, row.source_batch_id!, {
 			parentSessionId: sessionID,
 		});
+		if (batchRead.status === 'uncertain') {
+			return failure(
+				`MATCHED trigger ${row.trigger_id} cannot be validated: the delegation store is unreadable after ${batchRead.attempts} attempts (${batchRead.reason}); the batch's records are UNKNOWN, not absent. Nothing was persisted, so this call is retryable as-is once the store is readable.`,
+			);
+		}
+		const records = batchRead.value;
 		const record = records.find(
 			(candidate) => candidate.laneId === row.source_lane_id,
 		);

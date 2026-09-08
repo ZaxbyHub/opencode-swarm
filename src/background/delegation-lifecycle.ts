@@ -48,8 +48,9 @@ import {
 	buildBackgroundCompletionEventId,
 	claimTerminalResult,
 	findByCorrelationId,
+	findByCorrelationIdDetailed,
 	isTerminalDelegationStatus,
-	readDelegations,
+	readDelegationsDetailed,
 	registerStaleSweepObserver,
 } from './pending-delegations.js';
 
@@ -64,6 +65,12 @@ export type DelegationTerminalStatus = 'completed' | 'error' | 'cancelled';
  * or a legacy status-only writer won the race) is a benign outcome that must
  * not tick the late-terminal audit — the audit belongs to the writer that
  * owns the conflicting *event*, and there is none.
+ *
+ * `uncertain` (issue #2511) means the classifying re-read could not establish
+ * the store's authoritative state: the record is KNOWN to exist (the claim
+ * path raced, not the record), so callers must treat the settle as retryable,
+ * never map it onto `missing`/`not_open` handling, and never tear anything
+ * down on it.
  */
 export type DelegationSettleKind =
 	| 'claimed'
@@ -71,11 +78,14 @@ export type DelegationSettleKind =
 	| 'conflict'
 	| 'already_terminal_without_event'
 	| 'not_open'
-	| 'missing';
+	| 'missing'
+	| 'uncertain';
 
 export interface DelegationSettleOutcome {
 	kind: DelegationSettleKind;
 	record?: BackgroundDelegationRecord;
+	/** Present only on `uncertain`: the delegation-store read failure reason. */
+	reason?: string;
 }
 
 /**
@@ -157,7 +167,8 @@ export function buildDelegationTerminal(
  * See {@link DelegationSettleKind} for the non-claim outcomes; callers map
  * `duplicate`/`conflict`/`already_terminal_without_event` to their benign
  * already-terminal handling and `missing`/`not_open` to their
- * settle-failure diagnostics.
+ * settle-failure diagnostics, and `uncertain` to retry-later (the record is
+ * not provably absent, so no teardown and no missing-style diagnostic fires).
  */
 export async function settleDelegationTerminal(
 	directory: string,
@@ -206,22 +217,28 @@ export async function settleDelegationTerminal(
 	// machinery) would classify a replay as `conflict` rather than `duplicate`;
 	// lane records never reach `consumed`, and the claim-side duplicate check
 	// (terminalResult identity) fires first in every reachable lane path.
-	const reread = _internals.findByCorrelationId(
+	// Issue #2511: an unclassifiable (uncertain) re-read must NOT collapse to
+	// `missing` — the caller would treat a possibly-open lane as absent.
+	const reread = _internals.findByCorrelationIdDetailed(
 		directory,
 		record.correlationId,
 	);
-	if (!reread) return { kind: 'missing' };
-	if (isTerminalDelegationStatus(reread.status)) {
-		if (reread.terminalResult) return { kind: 'conflict', record: reread };
+	if (reread.status === 'uncertain') {
+		return { kind: 'uncertain', reason: reread.reason };
+	}
+	if (!reread.value) return { kind: 'missing' };
+	if (isTerminalDelegationStatus(reread.value.status)) {
+		if (reread.value.terminalResult)
+			return { kind: 'conflict', record: reread.value };
 		// #2482 / #2244: the record reached a terminal status WITHOUT the
 		// claim path ever emitting the terminal event — by definition no
 		// `delegation_end` exists for its begin. Emit the exactly-once
 		// recovered end so the delegation pair completes. (A `conflict` above
 		// has a terminalResult — the original claimer's emission stands.)
-		emitDelegationEventlessTerminalEnd(reread, reread.status);
-		return { kind: 'already_terminal_without_event', record: reread };
+		emitDelegationEventlessTerminalEnd(reread.value, reread.value.status);
+		return { kind: 'already_terminal_without_event', record: reread.value };
 	}
-	return { kind: 'not_open', record: reread };
+	return { kind: 'not_open', record: reread.value };
 }
 
 /**
@@ -608,7 +625,17 @@ export async function recoverTerminalLaneReceipts(
 		}
 		return { recovered, exhaustedBudget: false };
 	}
-	const candidates = readDelegations(directory)
+	// Issue #2511 (audited safe-skip): an uncertain enumeration read defers
+	// this pass — replays are ledger-idempotent, so a later healthy trigger
+	// (collect invocation or session-close maintenance) loses nothing.
+	const enumeration = readDelegationsDetailed(directory);
+	if (enumeration.status === 'uncertain') {
+		logger.warn(
+			`[delegation-lifecycle] terminal-lane receipt recovery deferred: delegation store unreadable after ${enumeration.attempts} attempts (${enumeration.reason})`,
+		);
+		return { recovered: 0, exhaustedBudget: false };
+	}
+	const candidates = enumeration.records
 		.filter(isRecoverableTerminalLaneRecord)
 		.sort((left, right) => {
 			if (left.updatedAt !== right.updatedAt) {
@@ -686,11 +713,13 @@ export async function recoverTerminalLaneReceipts(
 }
 
 /**
- * Test seam (repo convention): the telemetry sink and the claim are injectable
- * so tests can stub them without `mock.module`.
+ * Test seam (repo convention): the telemetry sink, the claim, and the
+ * classifying re-read are injectable so tests can stub them without
+ * `mock.module`.
  */
 export const _internals = {
 	claimTerminalResult,
 	findByCorrelationId,
+	findByCorrelationIdDetailed,
 	telemetry,
 };

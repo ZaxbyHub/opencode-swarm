@@ -29,6 +29,7 @@ export type TelemetryEvent =
 	| 'agent_activated'
 	| 'delegation_begin'
 	| 'delegation_end'
+	| 'delegation_read_uncertain'
 	| 'delegation_cost_correction'
 	| 'delegation_cost_binding'
 	| 'delegation_cost_join'
@@ -688,6 +689,23 @@ export const telemetry = {
 			model: costFields?.model,
 			gate: costFields?.gate,
 			retry_index: costFields?.retry_index,
+		});
+	},
+
+	/**
+	 * Issue #2511: bounded, content-free signal that an advisory delegation
+	 * store read stayed uncertain after its one bounded retry. Payload is
+	 * redaction-by-omission: no paths, no raw reason text, no session content.
+	 */
+	delegationReadUncertain(event: {
+		attempt: number;
+		reasonCode: string;
+		source: string;
+	}): void {
+		_internals.emit('delegation_read_uncertain', {
+			attempt: event.attempt,
+			reasonCode: event.reasonCode.slice(0, 64),
+			source: event.source,
 		});
 	},
 

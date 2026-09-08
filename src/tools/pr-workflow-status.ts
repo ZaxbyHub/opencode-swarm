@@ -1,7 +1,7 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-import { findByCorrelationId } from '../background/pending-delegations';
+import { readDelegationsDetailed } from '../background/pending-delegations';
 import {
 	resolveCurrentGitHeadAsync,
 	resolveIsWorkingTreeCleanAsync,
@@ -10,6 +10,7 @@ import {
 	classifyPrWorkflowGitState,
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state';
+import { isPrWorkflowAutoWakeSuppressed } from '../hooks/pr-workflow-auto-wake';
 import {
 	describePrWorkflowPublicationSection,
 	type PrFeedbackInventoryAmendmentRecord,
@@ -18,6 +19,7 @@ import {
 	prWorkflowSessionFileStem,
 	readPrWorkflowGateStateForRecovery,
 } from '../hooks/pr-workflow-gate';
+import { resolvePrWorkflowControllerSession } from '../hooks/pr-workflow-session-resolver';
 import { validateSwarmPath } from '../hooks/utils';
 import { bunSpawn } from '../utils/bun-compat';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
@@ -29,6 +31,7 @@ const MAX_DIRTY_FILES = 50;
 const MAX_REMOTES = 20;
 const MAX_REMOTE_URL_LEN = 200;
 const MAX_FIELD_LEN = 240;
+const MAX_RECOVERY_REASON_CODE_LEN = 120;
 const RECEIPT_DIR = 'pr-workflow-checkouts';
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
@@ -112,6 +115,48 @@ interface PrWorkflowStatusResult {
 	 * editing state files. Null when the workflow has no publication state.
 	 */
 	publication: string | null;
+	nextStep: string;
+	/**
+	 * Issue #2511 (workstream D, AC6): bounded operator recovery section —
+	 * delegation-store read health, controller identity, durable gate
+	 * progress, auto-wake suspension, and action-circuit observability.
+	 * Additive optional field; every pre-existing field (including the
+	 * top-level nextStep) is unchanged.
+	 */
+	recovery?: PrWorkflowStatusRecoverySection;
+}
+
+/** Bounded delegation-store read outcome for the recovery section (issue #2511). */
+interface PrWorkflowStatusRecoveryDelegationRead {
+	state: 'ok' | 'uncertain';
+	/** Bounded stable reason string; present only when state is 'uncertain'. */
+	reasonCode?: string;
+}
+
+/** Bounded action-circuit observation for the recovery section (issue #2511). */
+interface PrWorkflowStatusRecoveryActionCircuits {
+	state: 'none-observed' | 'blocking' | 'unavailable';
+	count?: number;
+}
+
+/**
+ * Issue #2511 (workstream D, AC6): bounded operator recovery section. Every
+ * value is either observed or typed-unavailable — nothing is invented. The
+ * delegation-store read is advisory (`readDelegationsDetailed` retries once
+ * internally on an uncertain first attempt, which is the accepted budget);
+ * action circuits are keyed by the exact session + invocation + semantic
+ * action digest, and a tool execution carries no live invocationID, so that
+ * field is 'unavailable' rather than a guessed count.
+ */
+interface PrWorkflowStatusRecoverySection {
+	/** From the shared resolver outcome; null when the chain is uncertain. */
+	controllerSessionID: string | null;
+	delegationRead: PrWorkflowStatusRecoveryDelegationRead;
+	/** Durable gate revision + updatedAt from the bound gate state; null when no gate. */
+	lastProgress: { revision: number; updatedAt: string } | null;
+	wakeSuspension: { suspended: boolean };
+	actionCircuits: PrWorkflowStatusRecoveryActionCircuits;
+	/** Short executable recovery guidance; the top-level nextStep is unchanged. */
 	nextStep: string;
 }
 
@@ -276,6 +321,39 @@ async function countCheckoutReceiptFiles(
 	}
 }
 
+/**
+ * Advisory delegation-store read for the recovery section (issue #2511,
+ * workstream D). `ok` covers both a loaded and a healthy-empty store; an
+ * explicitly uncertain read stays typed 'uncertain' with a bounded reason
+ * code — absence is never read as fact here.
+ */
+function describeDelegationRead(
+	directory: string,
+): PrWorkflowStatusRecoveryDelegationRead {
+	try {
+		const outcome = _internals.readDelegationsDetailed(directory);
+		if (outcome.status === 'ok') return { state: 'ok' };
+		return {
+			state: 'uncertain',
+			reasonCode: boundUntrusted(outcome.reason, MAX_RECOVERY_REASON_CODE_LEN),
+		};
+	} catch {
+		// The reader is documented never to throw; if it ever does, the store
+		// state is genuinely unknown — report typed uncertainty, never 'ok'.
+		return { state: 'uncertain', reasonCode: 'reader-threw' };
+	}
+}
+
+/** Short executable recovery guidance for the recovery section (issue #2511). */
+function describeRecoveryNextStep(
+	delegationReadState: PrWorkflowStatusRecoveryDelegationRead['state'],
+): string {
+	if (delegationReadState === 'uncertain') {
+		return 'Delegation store read is uncertain: repair the store, then re-run pr_workflow_status; if abandoning the workflow, abort via abort_pr_workflow.';
+	}
+	return 'Re-run pr_workflow_status after any store repair; if abandoning the workflow, abort via abort_pr_workflow.';
+}
+
 function describeNextStep(
 	gate: PrWorkflowStatusGateSummary,
 	git: PrWorkflowStatusGitState,
@@ -347,14 +425,22 @@ function summarizeGate(
 	};
 }
 
-const MAX_GATE_ANCESTOR_DEPTH = 16;
-
 /**
  * Resolve a lane's own session to the nearest ancestor with a durable gate.
  * This follows only the authenticated caller's delegation chain; it never
  * enumerates sibling gate files. The index hook performs the same resolution
  * before enforcement, so the observer must report the gate it is actually
  * operating under as well.
+ *
+ * Issue #2511 (workstream D): the bounded walk itself now routes through the
+ * shared enforcement resolver machinery
+ * (`resolvePrWorkflowControllerSession` in pr-workflow-session-resolver.ts),
+ * so status and enforcement resolve session identity the same way, under the
+ * same 16-hop depth cap (the resolver's MAX_PARENT_DEPTH). Only the outcome
+ * MAPPING is status-specific — the shared walk reports typed uncertainty for
+ * a missing/cyclic/depth-exhausted chain, which this tool renders as
+ * `sessionID: null` (reason 'delegation-chain-uncertain'), while enforcement
+ * falls back to its own original-session semantics.
  */
 async function resolveWorkflowGate(
 	directory: string,
@@ -363,39 +449,17 @@ async function resolveWorkflowGate(
 	sessionID: string | null;
 	recovery: PrWorkflowGateRecoveryRead | null;
 }> {
-	const currentSessionID = sessionID.trim();
-	const currentRecovery = await _internals.readPrWorkflowGateStateForRecovery(
+	const outcome = await _internals.resolvePrWorkflowControllerSession({
 		directory,
-		currentSessionID,
-	);
-	if (currentRecovery) {
-		return { sessionID: currentSessionID, recovery: currentRecovery };
+		sessionID,
+		readGate: (candidate) =>
+			_internals.readPrWorkflowGateStateForRecovery(directory, candidate),
+	});
+	if (outcome.kind === 'gate-owner') {
+		return { sessionID: outcome.sessionID, recovery: outcome.gate };
 	}
-	const firstRecord = findByCorrelationId(directory, currentSessionID);
-	if (!firstRecord?.parentSessionId?.trim()) {
-		return { sessionID, recovery: null };
-	}
-	let current = firstRecord.parentSessionId.trim();
-	const visited = new Set<string>([currentSessionID]);
-	// The canonical enforcement resolver counts the queried session as depth 0.
-	// Start its parent at depth 1 so status observes the same bounded ancestry.
-	for (let depth = 1; depth < MAX_GATE_ANCESTOR_DEPTH; depth += 1) {
-		if (!current || visited.has(current)) {
-			return { sessionID: null, recovery: null };
-		}
-		visited.add(current);
-		const recovery = await _internals.readPrWorkflowGateStateForRecovery(
-			directory,
-			current,
-		);
-		if (recovery) {
-			return { sessionID: current, recovery };
-		}
-		const parentRecord = findByCorrelationId(directory, current);
-		if (!parentRecord) return { sessionID: null, recovery: null };
-		const parent = parentRecord.parentSessionId?.trim();
-		if (!parent) return { sessionID: null, recovery: null };
-		current = parent;
+	if (outcome.kind === 'no-gate') {
+		return { sessionID: outcome.sessionID, recovery: null };
 	}
 	return { sessionID: null, recovery: null };
 }
@@ -488,6 +552,33 @@ async function executePrWorkflowStatus(
 			}
 		: liveCheckout;
 
+	// Issue #2511 (workstream D, AC6): bounded operator recovery section.
+	// controllerSessionID comes straight from the shared resolver outcome
+	// (null when the chain is uncertain); wakeSuspension is keyed to the
+	// CALLER's session because auto-wake suppression is observed on the
+	// session that runs this tool; actionCircuits is typed 'unavailable' —
+	// circuits are keyed by the exact session + invocation + semantic action
+	// digest and a tool execution carries no live invocationID, so no bounded
+	// read is reachable and no count is invented.
+	const delegationRead = describeDelegationRead(directory);
+	const recoverySection: PrWorkflowStatusRecoverySection = {
+		controllerSessionID: gateSessionID,
+		delegationRead,
+		lastProgress: activeState
+			? {
+					revision: activeState.revision,
+					updatedAt: activeState.updatedAt,
+				}
+			: null,
+		wakeSuspension: {
+			suspended: sessionID
+				? _internals.isPrWorkflowAutoWakeSuppressed(directory, sessionID)
+				: false,
+		},
+		actionCircuits: { state: 'unavailable' },
+		nextStep: describeRecoveryNextStep(delegationRead.state),
+	};
+
 	const result: PrWorkflowStatusResult = {
 		success: true,
 		sessionID,
@@ -498,6 +589,7 @@ async function executePrWorkflowStatus(
 			? describePrWorkflowPublicationSection(activeState)
 			: null,
 		nextStep: describeNextStep(gate, git, checkout),
+		recovery: recoverySection,
 	};
 	return JSON.stringify(result, null, 2);
 }
@@ -514,6 +606,9 @@ export const pr_workflow_status: ReturnType<typeof createSwarmTool> =
 /** Test seam mirroring gh-evidence's `_internals` (issue #507 DI convention). */
 export const _internals: {
 	readPrWorkflowGateStateForRecovery: typeof readPrWorkflowGateStateForRecovery;
+	readDelegationsDetailed: typeof readDelegationsDetailed;
+	isPrWorkflowAutoWakeSuppressed: typeof isPrWorkflowAutoWakeSuppressed;
+	resolvePrWorkflowControllerSession: typeof resolvePrWorkflowControllerSession;
 	resolveCurrentGitHeadAsync: typeof resolveCurrentGitHeadAsync;
 	resolveIsWorkingTreeCleanAsync: typeof resolveIsWorkingTreeCleanAsync;
 	runGitCapture: typeof runGitCapture;
@@ -522,6 +617,9 @@ export const _internals: {
 	resolveWorkflowGateSession: typeof resolveWorkflowGateSession;
 } = {
 	readPrWorkflowGateStateForRecovery,
+	readDelegationsDetailed,
+	isPrWorkflowAutoWakeSuppressed,
+	resolvePrWorkflowControllerSession,
 	resolveCurrentGitHeadAsync,
 	resolveIsWorkingTreeCleanAsync,
 	runGitCapture,
