@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.171.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.171.1...v7.171.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* **retention:** refresh registry for current parity paths ([2521754](https://github.com/ZaxbyHub/opencode-swarm/commit/2521754f9c29aeae926ee676306f4086c07ef6b8))
+* **sqlite:** qualify observability and legacy parity ([00a34a9](https://github.com/ZaxbyHub/opencode-swarm/commit/00a34a9c13de55c3996930e5c3130ff2e5896b18))
+
 ## [7.171.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.171.0...v7.171.1) (2026-09-08)
 
 
