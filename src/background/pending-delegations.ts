@@ -62,6 +62,7 @@ import {
 	withEvidenceLock,
 } from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import { telemetry } from '../telemetry.js';
 import { bunWrite } from '../utils/bun-compat.js';
 import {
 	canonicalRootKeyFresh,
@@ -2851,14 +2852,200 @@ function ensureSwarmDir(directory: string): void {
 }
 
 /**
+ * Bounded retry budget for advisory delegation reads (issue #2511): after a
+ * first uncertain attempt the reader waits this long and re-attempts exactly
+ * once, so the total budget stays at two attempts plus at most this delay
+ * (~25 ms beyond a single read). Retry state is per-invocation only.
+ */
+export const DELEGATION_READ_RETRY_DELAY_MS = 25;
+
+const MAX_TRACKED_DELEGATION_READ_UNCERTAIN_ROOTS = 32;
+const DELEGATION_READ_UNCERTAIN_EMIT_COOLDOWN_MS = 60_000;
+const delegationReadUncertainEmitAtByRoot = new Map<string, number>();
+const delegationReadUncertainEmitOrder: string[] = [];
+
+/**
+ * Epistemic advisory-read result (issue #2511). `ok` covers both a loaded and
+ * a healthy-empty store (empty `records` is a KNOWN-absent answer); `uncertain`
+ * means the authoritative state could not be established — never read as
+ * absence. Mirrors `RecoveryOwnershipScanResult` and the #2199
+ * `readTaskEvidenceState` discriminated-reader precedent.
+ */
+export type DelegationReadOutcome =
+	| {
+			status: 'ok';
+			records: BackgroundDelegationRecord[];
+			source:
+				| 'coordination'
+				| 'legacy-ledger'
+				| 'checkpoint+tail'
+				| 'checkpoint+ledger-suffix';
+	  }
+	| {
+			status: 'uncertain';
+			reason: string;
+			source: 'coordination-import' | 'coordination-read' | 'fold';
+			repairHint?: string;
+			attempts: number;
+	  };
+
+function readDelegationLoadAttempt(directory: string): DelegationReadOutcome {
+	const importState = ensureDelegationCoordinationImported(directory, false);
+	if (importState === 'uncertain') {
+		return {
+			status: 'uncertain',
+			reason: 'background delegation coordination state is uncertain',
+			source: 'coordination-import',
+			attempts: 1,
+		};
+	}
+	if (importState === 'ready') {
+		const coordination = coordinationRowsToDelegations(directory);
+		if (coordination !== null) {
+			return { status: 'ok', records: coordination, source: 'coordination' };
+		}
+		// A ready SQLite authority that cannot be read (including the bounded
+		// pagination ceiling) is uncertainty, never a fall back to a possibly
+		// stale legacy projection (issue #2511; mirrors the strict reader).
+		return {
+			status: 'uncertain',
+			reason:
+				'background delegation coordination state is unreadable or over-bound',
+			source: 'coordination-read',
+			attempts: 1,
+		};
+	}
+	const load = loadFoldedState(directory, { strict: false });
+	if (load.status === 'uncertain') {
+		return {
+			status: 'uncertain',
+			reason: load.reason,
+			source: 'fold',
+			attempts: 1,
+			...(load.repairHint ? { repairHint: load.repairHint } : {}),
+		};
+	}
+	const loadSource =
+		load.mode === 'legacy'
+			? ('legacy-ledger' as const)
+			: (load.mode as 'checkpoint+tail' | 'checkpoint+ledger-suffix');
+	return {
+		status: 'ok',
+		records: [...load.records.values()],
+		source: loadSource,
+	};
+}
+
+/**
+ * Emit the bounded `delegation_read_uncertain` telemetry signal, rate-limited
+ * per store root (bounded registry, FIFO eviction) so repeated reads of a
+ * persistently-unreadable store cannot flood the stream. Payload is
+ * content-free: attempt count, stable reason code, failure surface.
+ */
+function emitDelegationReadUncertainBounded(
+	directory: string,
+	outcome: Extract<DelegationReadOutcome, { status: 'uncertain' }>,
+): void {
+	try {
+		const rootKey = canonicalRootKeyFresh(directory);
+		const now = Date.now();
+		const last = delegationReadUncertainEmitAtByRoot.get(rootKey);
+		if (
+			last !== undefined &&
+			now - last < DELEGATION_READ_UNCERTAIN_EMIT_COOLDOWN_MS
+		) {
+			return;
+		}
+		delegationReadUncertainEmitAtByRoot.delete(rootKey);
+		delegationReadUncertainEmitAtByRoot.set(rootKey, now);
+		delegationReadUncertainEmitOrder.push(rootKey);
+		while (delegationReadUncertainEmitOrder.length > 0) {
+			if (
+				delegationReadUncertainEmitOrder.length <=
+				MAX_TRACKED_DELEGATION_READ_UNCERTAIN_ROOTS
+			) {
+				break;
+			}
+			const evicted = delegationReadUncertainEmitOrder.shift();
+			if (evicted === undefined) break;
+			delegationReadUncertainEmitAtByRoot.delete(evicted);
+		}
+		const reasonCode = outcome.reason
+			.split('(')[0]
+			.trim()
+			.split(/\s+/)
+			.slice(0, 6)
+			.join('_')
+			.slice(0, 64);
+		telemetry.delegationReadUncertain({
+			attempt: outcome.attempts,
+			reasonCode,
+			source: outcome.source,
+		});
+	} catch {
+		// telemetry must never break the store read
+	}
+}
+
+/**
+ * Advisory delegation-store read that preserves epistemic state (issue #2511).
+ *
+ * Lock-free, defensive, never throws. One attempt = the exact composite the
+ * legacy array reader used (coordination gate -> SQLite rows -> folded
+ * checkpoint/ledger); an explicitly uncertain load retries exactly once within
+ * the documented budget (DELEGATION_READ_RETRY_DELAY_MS), and a second failure
+ * stays typed uncertainty: the durable health artifact records the last-known
+ * evidence as stale (never as current proof) and one bounded
+ * `delegation_read_uncertain` telemetry signal is emitted with the attempt
+ * count. Retry-success returns the ok outcome with no telemetry.
+ *
+ * Consumers making decisions (gate settlement, completion coverage, collect,
+ * duplicate-batch admission, receipt ownership) MUST consume this outcome and
+ * propagate uncertainty; `[]` from the legacy wrapper below is reserved for
+ * audited maintenance safe-skips.
+ */
+export function readDelegationsDetailed(
+	directory: string,
+): DelegationReadOutcome {
+	const first = readDelegationLoadAttempt(directory);
+	if (first.status === 'ok') return first;
+	Atomics.wait(
+		new Int32Array(new SharedArrayBuffer(4)),
+		0,
+		0,
+		_internals.readRetryDelayMs,
+	);
+	const second = readDelegationLoadAttempt(directory);
+	if (second.status === 'ok') return second;
+	const finalOutcome: DelegationReadOutcome = { ...second, attempts: 2 };
+	recordLedgerUncertainty(
+		directory,
+		finalOutcome.reason,
+		`advisory-${finalOutcome.source}`,
+		finalOutcome.repairHint,
+	);
+	emitDelegationReadUncertainBounded(directory, finalOutcome);
+	logger.warn(
+		`[background] readDelegationsDetailed: authoritative state uncertain after retry (${finalOutcome.reason}); treating the store as unknown, not empty`,
+	);
+	return finalOutcome;
+}
+
+/**
  * Read and fold the store to the latest snapshot per correlationId. Lock-free and
  * defensive: a missing file yields an empty list, and malformed/partial lines are
  * skipped (never throws). Records are returned in first-seen correlationId order.
  *
  * Checkpoint-aware (issue #2034): when a published checkpoint exists, the fold is
- * checkpoint summaries + the bounded transition tail. When the authoritative
- * state is uncertain (invalid checkpoint/manifest with a rolled tail), this
- * returns [] — the strict recovery scan is the fail-closed authority.
+ * checkpoint summaries + the bounded transition tail.
+ *
+ * MAINTENANCE-READ CONVENIENCE (issue #2511): an explicitly uncertain
+ * authoritative state also yields [] here. That is an audited safe-skip for
+ * maintenance callers only (findOpenAsyncLaneBatches,
+ * reconcileLegacyCoderSettlements, recoverTerminalLaneReceipts) — decision
+ * paths must call `readDelegationsDetailed` and propagate the typed
+ * uncertainty instead of reading absence as fact. The strict recovery scan
+ * (`scanDelegationsForRecovery`) remains the fail-closed authority.
  *
  * Cost: O(checkpoint + tail lines) per call. The tail is bounded by the
  * compaction high-water mark in normal operation.
@@ -2866,21 +3053,8 @@ function ensureSwarmDir(directory: string): void {
 export function readDelegations(
 	directory: string,
 ): BackgroundDelegationRecord[] {
-	const importState = ensureDelegationCoordinationImported(directory, false);
-	if (importState === 'uncertain') return [];
-	if (importState === 'ready') {
-		const coordination = coordinationRowsToDelegations(directory);
-		if (coordination !== null) return coordination;
-		return [];
-	}
-	const load = loadFoldedState(directory, { strict: false });
-	if (load.status === 'uncertain') {
-		logger.warn(
-			`[background] readDelegations: authoritative state uncertain (${load.reason}); returning empty`,
-		);
-		return [];
-	}
-	return [...load.records.values()];
+	const outcome = readDelegationsDetailed(directory);
+	return outcome.status === 'ok' ? outcome.records : [];
 }
 
 /**
@@ -2943,16 +3117,48 @@ export function scanDelegationsForRecovery(
 	return { status: 'ok', owners: [...load.records.values()], source };
 }
 
-/** Returns the folded record for a correlationId, or null. Lock-free read. */
+/** Typed single-lookup result (issue #2511): a found/absent answer, or typed uncertainty. */
+export type DelegationLookupOutcome<T> =
+	| { status: 'ok'; value: T }
+	| {
+			status: 'uncertain';
+			reason: string;
+			source: 'coordination-import' | 'coordination-read' | 'fold';
+			repairHint?: string;
+			attempts: number;
+	  };
+
+/**
+ * Exact-child lookup preserving epistemic state (issue #2511): `ok` with a
+ * record or `null` (genuinely absent), or `uncertain` when the store read
+ * failed — decision callers must not read that as absence.
+ */
+export function findByCorrelationIdDetailed(
+	directory: string,
+	correlationId: string,
+): DelegationLookupOutcome<BackgroundDelegationRecord | null> {
+	if (!correlationId) return { status: 'ok', value: null };
+	const read = readDelegationsDetailed(directory);
+	if (read.status === 'uncertain') return read;
+	for (const record of read.records) {
+		if (record.correlationId === correlationId) {
+			return { status: 'ok', value: record };
+		}
+	}
+	return { status: 'ok', value: null };
+}
+
+/**
+ * Returns the folded record for a correlationId, or null. Lock-free read.
+ * Maintenance convenience (issue #2511): an uncertain store yields null —
+ * decision paths must use `findByCorrelationIdDetailed`.
+ */
 export function findByCorrelationId(
 	directory: string,
 	correlationId: string,
 ): BackgroundDelegationRecord | null {
-	if (!correlationId) return null;
-	for (const record of readDelegations(directory)) {
-		if (record.correlationId === correlationId) return record;
-	}
-	return null;
+	const outcome = findByCorrelationIdDetailed(directory, correlationId);
+	return outcome.status === 'ok' ? outcome.value : null;
 }
 
 function appendRecord(
@@ -4121,6 +4327,7 @@ function getLegacyCoderSettlementReconciler(
 
 /** Test-only seam for the bounded legacy-settlement reconciler registry. */
 export const _internals = {
+	readRetryDelayMs: DELEGATION_READ_RETRY_DELAY_MS,
 	getLegacyCoderSettlementReconciler,
 	readFallbackDirectory,
 	getLegacyCoderSettlementReconcilerOrder: () => [
@@ -4787,20 +4994,51 @@ export async function releasePreparedBackgroundAdvisories(
 	);
 }
 
+/**
+ * Batch lookup preserving epistemic state (issue #2511): `ok` with the batch's
+ * records (possibly empty — a KNOWN-absent answer), or `uncertain` when the
+ * store read failed. Decision callers (terminal/coverage/inventory paths) must
+ * propagate uncertainty rather than treating an unreadable store as an empty
+ * batch.
+ */
+export function findByBatchIdDetailed(
+	directory: string,
+	batchId: string,
+	opts?: { parentSessionId?: string },
+): DelegationLookupOutcome<BackgroundDelegationRecord[]> {
+	if (!batchId) return { status: 'ok', value: [] };
+	const read = readDelegationsDetailed(directory);
+	if (read.status === 'uncertain') return read;
+	return {
+		status: 'ok',
+		value: read.records.filter(
+			(record) =>
+				record.batchId === batchId &&
+				(opts?.parentSessionId === undefined ||
+					record.parentSessionId === opts.parentSessionId),
+		),
+	};
+}
+
+/**
+ * Maintenance convenience over {@link findByBatchIdDetailed} (issue #2511): an
+ * uncertain store yields [] — safe only for audited maintenance callers.
+ */
 export function findByBatchId(
 	directory: string,
 	batchId: string,
 	opts?: { parentSessionId?: string },
 ): BackgroundDelegationRecord[] {
-	if (!batchId) return [];
-	return readDelegations(directory).filter(
-		(record) =>
-			record.batchId === batchId &&
-			(opts?.parentSessionId === undefined ||
-				record.parentSessionId === opts.parentSessionId),
-	);
+	const outcome = findByBatchIdDetailed(directory, batchId, opts);
+	return outcome.status === 'ok' ? outcome.value : [];
 }
 
+/**
+ * Lane-knowledge maintenance pass (issue #2511 audited SAFE-SKIP): an
+ * uncertain store intentionally yields [] — this enumeration is re-run on
+ * every call, so a transiently unreadable store only delays maintenance and
+ * never feeds a decision that treats absence as fact.
+ */
 export function findOpenAsyncLaneBatches(
 	directory: string,
 ): BackgroundDelegationRecord[] {
@@ -5272,14 +5510,36 @@ export interface CompletionDelegationLookup {
 	fallback?: BackgroundDelegationFallbackArtifact;
 }
 
-/** Lookup used by terminal handling: primary ledger first, exact fallback second. */
+/**
+ * Issue #2511: the primary ledger read stayed uncertain. `record` is null —
+ * consumers must check `source === 'uncertain'` (or `'uncertain' in lookup`)
+ * BEFORE the no-owner branch and defer terminal ingestion instead of treating
+ * the trusted receipt as unowned.
+ */
+export type CompletionDelegationLookupResult =
+	| CompletionDelegationLookup
+	| { source: 'uncertain'; record: null; uncertain: string };
+
+/**
+ * Lookup used by terminal handling: primary ledger first, exact fallback
+ * second. Issue #2511: an uncertain primary read is returned typed — the
+ * fallback file is deliberately NOT consulted then, because a durable primary
+ * owner would make the fallback irrelevant and the defer must stand.
+ */
 export async function findDelegationForCompletion(
 	directory: string,
 	correlationId: string,
-): Promise<CompletionDelegationLookup | null> {
+): Promise<CompletionDelegationLookupResult | null> {
 	if (!correlationId) return null;
-	const primary = findByCorrelationId(directory, correlationId);
-	if (primary) return { source: 'primary', record: primary };
+	const primary = findByCorrelationIdDetailed(directory, correlationId);
+	if (primary.status === 'uncertain') {
+		return {
+			source: 'uncertain',
+			record: null,
+			uncertain: `delegation store unreadable after ${primary.attempts} attempts (${primary.reason})`,
+		};
+	}
+	if (primary.value) return { source: 'primary', record: primary.value };
 	const fallback = await readDelegationFallback(directory, correlationId);
 	return fallback
 		? { source: 'fallback', record: fallback.record, fallback }

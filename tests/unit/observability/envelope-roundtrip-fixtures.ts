@@ -72,6 +72,11 @@ export const FIXTURES: Record<string, Record<string, unknown>> = {
 		taskId: '1.1',
 		result: 'success',
 	},
+	delegation_read_uncertain: {
+		attempt: 2,
+		reasonCode: 'background_delegation_manifest_is',
+		source: 'fold',
+	},
 	delegation_cost_correction: {
 		sessionId: 'sess-1',
 		taskId: '1.1',

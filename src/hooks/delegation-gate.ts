@@ -4832,9 +4832,8 @@ export function createDelegationGateHook(
 						const { extractDispatchIds } = await import(
 							'../background/task-envelope.js'
 						);
-						const { buildPromptSnapshot, findByCorrelationId } = await import(
-							'../background/pending-delegations.js'
-						);
+						const { buildPromptSnapshot, findByCorrelationIdDetailed } =
+							await import('../background/pending-delegations.js');
 						// Issue #2472 W7: the ASYNC twin — binding the sync capture here
 						// would put a sync git spawn back on the hot toolAfter path.
 						const { captureWorkspaceSnapshotAsync } = await import(
@@ -4924,10 +4923,24 @@ export function createDelegationGateHook(
 										: undefined,
 								generation: 1,
 							};
-							const existingOwner = findByCorrelationId(
+							// Issue #2511: owner-replay verification — an unreadable
+							// store cannot prove the launch has no existing owner, and
+							// treating it as null would let a genuine re-dispatch skip
+							// the replay hydration and be misreported as a fresh
+							// correlation conflict. Fail closed as "cannot verify
+							// owner"; the surrounding catch routes this into the
+							// established durability-failure advisory (worktree
+							// preserved, task advancement blocked).
+							const existingOwnerRead = findByCorrelationIdDetailed(
 								directory,
 								subagentSessionId,
 							);
+							if (existingOwnerRead.status === 'uncertain') {
+								throw new Error(
+									`delegation store unreadable after ${existingOwnerRead.attempts} attempts (${existingOwnerRead.reason}); cannot verify the existing owner for background correlation ${subagentSessionId}`,
+								);
+							}
+							const existingOwner = existingOwnerRead.value;
 							const pendingInput =
 								existingOwner &&
 								hasStableBackgroundReplayIdentity(
