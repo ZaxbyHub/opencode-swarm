@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { executeSavePlan } from '../../../src/tools/save-plan';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
@@ -23,7 +22,6 @@ function planArgs(dir: string) {
 
 describe('save_plan surfaces the manager durability outcome (#2531 AC5)', () => {
 	let dir: string;
-	let scratch: string;
 
 	beforeEach(async () => {
 		// Same gate-selection bypass the sibling save-plan suite uses.
@@ -35,7 +33,6 @@ describe('save_plan surfaces the manager durability outcome (#2531 AC5)', () => 
 		mkdirSync(join(dir, '.git'));
 		mkdirSync(join(dir, '.swarm'), { recursive: true });
 		writeFileSync(join(dir, '.swarm', 'spec.md'), '# Test Spec\n', 'utf8');
-		scratch = await mkdtemp(join(tmpdir(), 'save-plan-durability-cleanup-'));
 	});
 
 	afterEach(async () => {
@@ -45,7 +42,6 @@ describe('save_plan surfaces the manager durability outcome (#2531 AC5)', () => 
 		} catch {
 			/* best-effort */
 		}
-		rmSync(scratch, { recursive: true, force: true });
 	});
 
 	test('a complete save carries no durability warning', async () => {
