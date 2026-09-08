@@ -136,6 +136,7 @@
 		"check:retrieval-quality": "bun run scripts/retrieval-quality-regression.ts"
 	},
 	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.30.0",
 		"@opencode-ai/plugin": "^1.18.3",
 		"@opencode-ai/sdk": "^1.18.3",
 		"@vscode/tree-sitter-wasm": "^0.3.0",

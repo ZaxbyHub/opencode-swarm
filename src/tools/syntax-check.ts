@@ -133,12 +133,29 @@ function extractSyntaxErrors(
 /**
  * Run syntax check on changed files
  *
- * Respects gates.syntax_check.enabled - returns skipped if disabled
+ * Respects gates.syntax_check.enabled - returns skipped if disabled.
+ * Persists evidence (the registered tool's contract).
  */
 export async function syntaxCheck(
 	input: SyntaxCheckInput,
 	directory: string,
 	gates?: GateConfigOverrides,
+): Promise<SyntaxCheckResult> {
+	return computeSyntaxCheck(input, directory, gates, { persistEvidence: true });
+}
+
+/**
+ * Persistence-free compute core of the syntax check (#2499).
+ *
+ * Never persists evidence unless `persistEvidence: true` is passed, so
+ * read-only surfaces (the MCP verification server) can run the exact same
+ * analysis without writing `.swarm/` state.
+ */
+export async function computeSyntaxCheck(
+	input: SyntaxCheckInput,
+	directory: string,
+	gates?: GateConfigOverrides,
+	options?: { persistEvidence?: boolean },
 ): Promise<SyntaxCheckResult> {
 	// Check feature flag
 	if (gates?.syntax_check?.enabled === false) {
@@ -343,19 +360,22 @@ export async function syntaxCheck(
 				? `No files were checked — ${emptyCheckReasons.join('; ')}. This is NOT a passing syntax check.`
 				: `All ${filesChecked} files passed syntax check`;
 
-	// Save evidence
-	await evidenceInternals.saveEvidence(directory, 'syntax_check', {
-		task_id: 'syntax_check',
-		type: 'syntax',
-		timestamp: new Date().toISOString(),
-		agent: 'syntax_check',
-		verdict,
-		summary,
-		files_checked: filesChecked,
-		files_failed: filesFailed,
-		skipped_count: skippedCount,
-		files: results,
-	});
+	// Persist evidence only for the evidence-contract callers (the registered
+	// tool wrapper passes persistEvidence: true; read-only surfaces omit it).
+	if (options?.persistEvidence === true) {
+		await evidenceInternals.saveEvidence(directory, 'syntax_check', {
+			task_id: 'syntax_check',
+			type: 'syntax',
+			timestamp: new Date().toISOString(),
+			agent: 'syntax_check',
+			verdict,
+			summary,
+			files_checked: filesChecked,
+			files_failed: filesFailed,
+			skipped_count: skippedCount,
+			files: results,
+		});
+	}
 
 	return {
 		verdict,

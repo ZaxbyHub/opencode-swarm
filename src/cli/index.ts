@@ -960,6 +960,14 @@ async function main(): Promise<void> {
 		// behaviors (did-you-mean, deprecation warnings, policy gates).
 		const exitCode = await run(['ci', ...args.slice(1)]);
 		process.exit(exitCode);
+	} else if (command === 'mcp') {
+		// Read-only MCP verification server over stdio (#2499). Long-running
+		// and CLI-only: it owns process stdin/stdout, so it cannot be a
+		// /swarm registry command. The handler dynamic-imports the SDK-backed
+		// server so it stays out of this entry chunk.
+		const { handleMcpCommand } = await import('./mcp.js');
+		const exitCode = await handleMcpCommand(args.slice(1));
+		process.exit(exitCode);
 	} else {
 		console.error(`Unknown command: ${command}`);
 		console.error('Run with --help for usage information');

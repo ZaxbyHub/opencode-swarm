@@ -1037,6 +1037,24 @@ export async function placeholderScan(
 	directory: string,
 	gateOverrides?: GateConfigOverrides['placeholder_scan'],
 ): Promise<PlaceholderScanResult> {
+	return computePlaceholderScan(input, directory, gateOverrides, {
+		persistEvidence: true,
+	});
+}
+
+/**
+ * Persistence-free compute core of the placeholder scan (#2499).
+ *
+ * Never persists evidence unless `persistEvidence: true` is passed, so
+ * read-only surfaces (the MCP verification server) can run the exact same
+ * analysis without writing `.swarm/` state.
+ */
+export async function computePlaceholderScan(
+	input: PlaceholderScanInput,
+	directory: string,
+	gateOverrides?: GateConfigOverrides['placeholder_scan'],
+	options?: { persistEvidence?: boolean },
+): Promise<PlaceholderScanResult> {
 	// Feature flag (issue #2524): a user's `gates.placeholder_scan.enabled: false`
 	// disables the gate — non-blocking pass with an explicit summary, before any
 	// evidence write (same contract as syntax_check / sast_scan).
@@ -1237,24 +1255,27 @@ export async function placeholderScan(
 		0,
 	);
 
-	// Save evidence
-	await _internals.saveEvidence(directory, 'placeholder_scan', {
-		task_id: 'placeholder_scan',
-		type: 'placeholder',
-		timestamp: new Date().toISOString(),
-		agent: 'placeholder_scan',
-		verdict,
-		summary: `Scanned ${filesScanned} files, found ${findings.length} placeholder(s)`,
-		files_scanned: filesScanned,
-		findings_count: findings.length,
-		files_with_findings: filesWithFindings.size,
-		findings,
-		...(diffScoped && {
-			diff_scoped: true,
-			added_lines_files: addedLinesFiles,
-			added_lines_total: addedLinesTotal,
-		}),
-	});
+	// Persist evidence only for the evidence-contract callers (the registered
+	// tool wrapper passes persistEvidence: true; read-only surfaces omit it).
+	if (options?.persistEvidence === true) {
+		await _internals.saveEvidence(directory, 'placeholder_scan', {
+			task_id: 'placeholder_scan',
+			type: 'placeholder',
+			timestamp: new Date().toISOString(),
+			agent: 'placeholder_scan',
+			verdict,
+			summary: `Scanned ${filesScanned} files, found ${findings.length} placeholder(s)`,
+			files_scanned: filesScanned,
+			findings_count: findings.length,
+			files_with_findings: filesWithFindings.size,
+			findings,
+			...(diffScoped && {
+				diff_scoped: true,
+				added_lines_files: addedLinesFiles,
+				added_lines_total: addedLinesTotal,
+			}),
+		});
+	}
 
 	return {
 		verdict,
