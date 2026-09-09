@@ -39,7 +39,7 @@ import {
 } from '../background/lane-output-store.js';
 import {
 	type BackgroundDelegationRecord,
-	findByBatchId,
+	findByBatchIdDetailed,
 } from '../background/pending-delegations.js';
 import {
 	PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
@@ -976,9 +976,20 @@ export function feedbackArtifactCoversItems(
 	laneId: string,
 	itemIds: readonly string[],
 ): boolean {
-	const record = findByBatchId(directory, batchId, {
+	// Issue #2511: coverage decision site — an unreadable store must fail
+	// closed here (the adapter's BLOCKED shape) instead of reading the
+	// batch as empty, which would silently report every item as uncovered.
+	const batchRead = findByBatchIdDetailed(directory, batchId, {
 		parentSessionId: state.sessionID,
-	}).find((candidate) => candidate.laneId === laneId);
+	});
+	if (batchRead.status === 'uncertain') {
+		throw new Error(
+			`BLOCKED: delegation store unreadable after ${batchRead.attempts} attempts (${batchRead.reason}); feedback artifact coverage for batch ${batchId} is UNKNOWN, not absent. Restore the store and re-validate.`,
+		);
+	}
+	const record = batchRead.value.find(
+		(candidate) => candidate.laneId === laneId,
+	);
 	const ref =
 		record?.result?.outputRef?.trim() ??
 		record?.terminalResult?.result.outputRef?.trim();
@@ -1032,9 +1043,21 @@ export function readSettledFeedbackClassifications(
 	const classifications = new Map<string, string>();
 	for (const record of state.prFeedbackVerifications ?? []) {
 		for (const ownership of record.ownership) {
-			const delegation = findByBatchId(directory, record.batchId, {
+			// Issue #2511: classification decision site — an unreadable store
+			// must fail closed (the adapter's BLOCKED shape) instead of reading
+			// the batch as empty, which would silently mark every inventory
+			// item as having no settled classification.
+			const batchRead = findByBatchIdDetailed(directory, record.batchId, {
 				parentSessionId: state.sessionID,
-			}).find((candidate) => candidate.laneId === ownership.laneId);
+			});
+			if (batchRead.status === 'uncertain') {
+				throw new Error(
+					`BLOCKED: delegation store unreadable after ${batchRead.attempts} attempts (${batchRead.reason}); settled feedback classifications for batch ${record.batchId} are UNKNOWN, not absent. Restore the store and re-validate.`,
+				);
+			}
+			const delegation = batchRead.value.find(
+				(candidate) => candidate.laneId === ownership.laneId,
+			);
 			const ref =
 				delegation?.result?.outputRef?.trim() ??
 				delegation?.terminalResult?.result.outputRef?.trim();

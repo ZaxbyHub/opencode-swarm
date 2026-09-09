@@ -3353,18 +3353,4 @@ export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 			'plan.json.rebuild.<time>.<rand> temp file that is renamed onto ' +
 			'plan.json, and that rename IS governed by RULE R.',
 	},
-	{
-		file: 'src/ci/evaluate.ts',
-		rule: 'C',
-		target: 'dest',
-		status: 'not-an-evidence-artifact',
-		reason:
-			'Issue #2497: createShadowCopy() copies .swarm state files into an OS ' +
-			'temporary directory created with fs.mkdtempSync(path.join(os.tmpdir(), ' +
-			"'swarm-ci-shadow-')) so the advisory CI run can evaluate a snapshot " +
-			'without touching the evaluated repo. The `dest` operand is ' +
-			'path.join(shadowRoot, rel), and shadowRoot comes from mkdtempSync, so ' +
-			'the path folds to null — but the target is always OUTSIDE the project ' +
-			'.swarm/evidence/ tree (same shape as cost-accounting.ts|C|snap).',
-	},
 ];

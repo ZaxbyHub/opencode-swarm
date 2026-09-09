@@ -370,6 +370,23 @@ export async function sastScan(
 	directory: string,
 	gates?: GateConfigOverrides,
 ): Promise<SastScanResult> {
+	return computeSastScan(input, directory, gates, { persistEvidence: true });
+}
+
+/**
+ * Persistence-free compute core of the SAST scan (#2499).
+ *
+ * Never persists evidence unless `persistEvidence: true` is passed, so
+ * read-only surfaces (the MCP verification server) can run the exact same
+ * analysis without writing `.swarm/` state. The MCP adapter also forces
+ * `offline_only: true` so no Semgrep subprocess is ever spawned.
+ */
+export async function computeSastScan(
+	input: SastScanInput,
+	directory: string,
+	gates?: GateConfigOverrides,
+	options?: { persistEvidence?: boolean },
+): Promise<SastScanResult> {
 	const {
 		changed_files,
 		severity_threshold = 'medium',
@@ -621,22 +638,24 @@ export async function sastScan(
 		if (abort_signal?.aborted) {
 			return cancelledScanResult(allFindings, filesScanned);
 		}
-		await saveEvidence(
-			directory,
-			'sast_scan',
-			{
-				task_id: 'sast_scan',
-				type: 'sast',
-				timestamp: new Date().toISOString(),
-				agent: 'sast_scan',
-				verdict: 'fail',
-				summary: `Semgrep execution failed: ${semgrepError}`,
-				...summary,
-				findings: finalFindings,
-				baseline_used: false,
-			},
-			abort_signal,
-		);
+		if (options?.persistEvidence === true) {
+			await saveEvidence(
+				directory,
+				'sast_scan',
+				{
+					task_id: 'sast_scan',
+					type: 'sast',
+					timestamp: new Date().toISOString(),
+					agent: 'sast_scan',
+					verdict: 'fail',
+					summary: `Semgrep execution failed: ${semgrepError}`,
+					...summary,
+					findings: finalFindings,
+					baseline_used: false,
+				},
+				abort_signal,
+			);
+		}
 		return {
 			verdict: 'fail',
 			error: `Semgrep execution failed: ${semgrepError}`,
@@ -750,22 +769,24 @@ export async function sastScan(
 		if (abort_signal?.aborted) {
 			return cancelledScanResult(allFindings, filesScanned);
 		}
-		await saveEvidence(
-			directory,
-			'sast_scan',
-			{
-				task_id: 'sast_scan',
-				type: 'sast',
-				timestamp: new Date().toISOString(),
-				agent: 'sast_scan',
-				verdict: 'pass',
-				summary: `Baseline capture: scanned ${filesScanned} files, recorded ${captureFindings.length} finding(s)`,
-				...summary,
-				findings: finalFindings,
-				baseline_used: false,
-			},
-			abort_signal,
-		);
+		if (options?.persistEvidence === true) {
+			await saveEvidence(
+				directory,
+				'sast_scan',
+				{
+					task_id: 'sast_scan',
+					type: 'sast',
+					timestamp: new Date().toISOString(),
+					agent: 'sast_scan',
+					verdict: 'pass',
+					summary: `Baseline capture: scanned ${filesScanned} files, recorded ${captureFindings.length} finding(s)`,
+					...summary,
+					findings: finalFindings,
+					baseline_used: false,
+				},
+				abort_signal,
+			);
+		}
 
 		return {
 			verdict: 'pass',
@@ -905,31 +926,33 @@ export async function sastScan(
 	if (abort_signal?.aborted) {
 		return cancelledScanResult(allFindings, filesScanned);
 	}
-	await saveEvidence(
-		directory,
-		'sast_scan',
-		{
-			task_id: 'sast_scan',
-			type: 'sast',
-			timestamp: new Date().toISOString(),
-			agent: 'sast_scan',
-			verdict,
-			summary: nonCodeOnly
-				? `No scannable code files in input (${nonCodeSkipped} non-code file(s) skipped); nothing to scan`
-				: `Scanned ${filesScanned} files, found ${finalFindings.length} finding(s) using ${engine}`,
-			...summary,
-			findings: finalFindings,
-			...(baselineUsed && {
-				new_findings: newFindings,
-				pre_existing_findings: preExistingFindings,
-				moved_findings: movedFindings,
-				...(truncatedPreExisting ? { truncated_pre_existing: true } : {}),
-				...(truncatedMoved ? { truncated_moved_findings: true } : {}),
-				baseline_used: true,
-			}),
-		},
-		abort_signal,
-	);
+	if (options?.persistEvidence === true) {
+		await saveEvidence(
+			directory,
+			'sast_scan',
+			{
+				task_id: 'sast_scan',
+				type: 'sast',
+				timestamp: new Date().toISOString(),
+				agent: 'sast_scan',
+				verdict,
+				summary: nonCodeOnly
+					? `No scannable code files in input (${nonCodeSkipped} non-code file(s) skipped); nothing to scan`
+					: `Scanned ${filesScanned} files, found ${finalFindings.length} finding(s) using ${engine}`,
+				...summary,
+				findings: finalFindings,
+				...(baselineUsed && {
+					new_findings: newFindings,
+					pre_existing_findings: preExistingFindings,
+					moved_findings: movedFindings,
+					...(truncatedPreExisting ? { truncated_pre_existing: true } : {}),
+					...(truncatedMoved ? { truncated_moved_findings: true } : {}),
+					baseline_used: true,
+				}),
+			},
+			abort_signal,
+		);
+	}
 
 	const result: SastScanResult = {
 		verdict,

@@ -95,7 +95,7 @@ vi.mock('../../../src/plan/manager', () => ({
 		migration_status: 'migrated',
 		phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
 	}),
-	savePlan: vi.fn().mockResolvedValue(undefined),
+	savePlan: vi.fn().mockResolvedValue({ durability: 'complete' }),
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
 }));

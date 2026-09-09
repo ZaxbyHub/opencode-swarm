@@ -32,6 +32,11 @@ Most AI coding tools let one model write code and ask that same model whether th
 
 ### Key Features
 
+| Surface | Entry point |
+|---|---|
+| `swarm-implement.yml` gated GitHub Action | `swarm:implement` issue label or workflow_dispatch — runs the implementation pipeline and opens an evidence PR |
+
+
 - 🏗️ **Specialized core, optional, and conditional agents** — architect, coder, reviewer, test_engineer, critic, critic_finding_validator, explorer, sme, docs, designer, critic_oversight, critic_sounding_board, critic_drift_verifier, critic_hallucination_verifier, curator_init, curator_phase, council_generalist, council_skeptic, council_domain_expert. Run `/swarm agents` for the live roster — that is the source of truth, not this list.
 - 🔒 **Gated pipeline** — code never ships without reviewer + test engineer approval
 - 🔎 **Independent auto-review engine** — bounded whole-diff review in a fresh read-only model session, structured diff-anchored findings, optional independent validation, advisory-by-default phase review, and an evidence-backed opt-in completion gate. v7 remains opt-in; v8's default is pinned to a committed 30-diff cost burn-in.

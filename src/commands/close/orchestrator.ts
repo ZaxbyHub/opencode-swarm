@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -16,17 +16,16 @@ import { buildActionMenu } from '../../services/session-reflection';
 import { closeSnapshotCoordinationInitialization } from '../../session/snapshot-coordination-init.js';
 import { hasActiveFullAuto, swarmState } from '../../state';
 import { atomicWriteSwarmFile } from '../../utils/atomic-write';
+import { resolveGitExecutable } from '../../utils/git-executable.js';
 import { log } from '../../utils/logger';
 import {
-	type ClaimedDestructivePurge,
-	claimDestructivePurge,
-	consumeDestructivePurgeClaim,
+	consumeConfirmToken,
 	issueConfirmToken,
 	type PurgeCandidate,
-	previewDestructivePurge,
-	verifyDestructivePurgeClaim,
 } from '../destructive-purge.js';
-import { emitCloseArchiveResult } from './archive-stage.js';
+import { runAlignStage } from './align-stage.js';
+import { emitCloseArchiveResult, runArchiveStage } from './archive-stage.js';
+import { runCleanStage } from './clean-stage.js';
 import {
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	ACTIVE_STATE_TO_CLEAN,
@@ -39,269 +38,119 @@ import type {
 } from './context.js';
 import { _internals } from './internals.js';
 
-type CloseDestructiveInventory = {
+/**
+ * #2508 two-step destructive close: what the destructive portion of close
+ * would destroy, read-only. The align stage's aggressive reset discards
+ * tracked/staged work (untracked files survive); the clean stage removes
+ * active-state artifacts AFTER archiving them (recoverable, but part of the
+ * preview so the operator sees the full scope).
+ */
+export interface ClosePurgeGate {
+	/** True when git alignment would discard uncommitted tracked work. */
+	wouldDestroyTrackedWork: boolean;
+	/** Tracked-dirty repo-relative paths that alignment would discard. */
+	dirtyPaths: string[];
+	/** Digest scope: dirty paths + present active-state paths (absolute). */
 	candidates: PurgeCandidate[];
-	alignmentPlan?: ConfirmedGitAlignment;
-	error?: string;
-};
-
-function addCloseCandidate(
-	candidates: Map<string, PurgeCandidate>,
-	directory: string,
-	target: string,
-	reason: string,
-	options: { requireExists?: boolean } = {},
-): void {
-	const resolved = path.resolve(target);
-	const root = path.resolve(directory);
-	const relative = path.relative(root, resolved);
-	if (relative === '..' || relative.startsWith(`..${path.sep}`)) return;
-	if (options.requireExists !== false && !fsSync.existsSync(resolved)) return;
-	const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-	if (!candidates.has(key)) candidates.set(key, { path: resolved, reason });
+	/** First candidate path (digest anchor for the #2527 primitive). */
+	scopeAnchor: string;
+	/**
+	 * #2508 fail-closed signal: git status could not be read in a repository
+	 * (spawn failure, timeout, or nonzero exit). The gate cannot prove the
+	 * align stage safe, so the destructive pipeline must be refused — never
+	 * treated as a clean tree. A bare `.git` marker (#2127 project root with
+	 * no repository behind it) carries no git-tracked work to verify and does
+	 * not trip this signal.
+	 */
+	gitStatusFailed: boolean;
 }
+
+function runCloseGateGit(args: string[], cwd: string): string | null {
+	const result = spawnSync(resolveGitExecutable(), args, {
+		cwd,
+		encoding: 'utf8',
+		timeout: 10_000,
+		windowsHide: true,
+		stdio: ['ignore', 'pipe', 'pipe'],
+	});
+	if (result.error || result.status !== 0) return null;
+	return result.stdout ?? '';
+}
+
+/** Test seam for the #2508 gate (simulate git-status read failures). */
+export const _closeGateInternals = { runGit: runCloseGateGit };
 
 /**
- * Read-only close inventory. It deliberately includes every existing state
- * target that close can remove or overwrite, plus the tracked/allowlisted Git
- * paths and branch-prune labels used by alignment. The inventory is the exact
- * scope bound to the confirmation token; any unreadable portion fails closed.
+ * A real git repository root: `.git` is a linked-worktree/submodule pointer
+ * file, or a directory carrying the HEAD ref every repository has. Bare
+ * `.git` marker directories — accepted project roots per #2127 — are not
+ * repositories; git tracks nothing there, so a failed status read is a
+ * determined "no tracked work" answer, not an unreadable status.
  */
-function deriveCloseDestructiveInventory(
-	directory: string,
-	args: string[],
-): CloseDestructiveInventory {
-	const candidates = new Map<string, PurgeCandidate>();
-	const swarmDir = path.join(directory, '.swarm');
-	let alignmentPlan: ConfirmedGitAlignment | undefined;
+function isRealGitRepository(directory: string): boolean {
 	try {
-		for (const name of ACTIVE_STATE_TO_CLEAN) {
-			addCloseCandidate(
-				candidates,
-				directory,
-				path.join(swarmDir, name),
-				`close cleanup: ${name}`,
-			);
-		}
-		for (const name of ACTIVE_STATE_DIRS_TO_CLEAN) {
-			addCloseCandidate(
-				candidates,
-				directory,
-				path.join(swarmDir, name),
-				`close cleanup: ${name}/`,
-			);
-		}
-		for (const name of ARCHIVE_ARTIFACTS) {
-			// These are archived and, for some artifacts, subsequently removed or
-			// rewritten. Including them keeps the authorization conservative even
-			// when archive-first gating later narrows actual deletion.
-			addCloseCandidate(
-				candidates,
-				directory,
-				path.join(swarmDir, name),
-				`close archive/cleanup: ${name}`,
-			);
-		}
-		for (const name of ['SWARM_PLAN.json', 'SWARM_PLAN.md']) {
-			addCloseCandidate(
-				candidates,
-				directory,
-				path.join(swarmDir, name),
-				`close cleanup: .swarm/${name}`,
-			);
-			addCloseCandidate(
-				candidates,
-				directory,
-				path.join(swarmDir, 'plan-export', name),
-				`close cleanup: .swarm/plan-export/${name}`,
-			);
-			addCloseCandidate(
-				candidates,
-				directory,
-				path.join(directory, name),
-				`close cleanup: ${name}`,
-			);
-		}
-		// close rewrites these paths even though they are not removed by the
-		// clean stage; an existing user-owned artifact must be disclosed.
-		for (const name of ['context.md', 'close-summary.md']) {
-			addCloseCandidate(
-				candidates,
-				directory,
-				path.join(swarmDir, name),
-				`close rewrites: ${name}`,
-			);
-		}
-		for (const name of fsSync.existsSync(swarmDir)
-			? fsSync.readdirSync(swarmDir)
-			: []) {
-			if (
-				(name.startsWith('config-backup-') && name.endsWith('.json')) ||
-				((name.startsWith('plan-ledger.archived-') ||
-					name.startsWith('plan-ledger.backup-')) &&
-					name.endsWith('.jsonl')) ||
-				/^post-mortem-[^/\\]+\.md$/.test(name) ||
-				/^drift-report-phase-\d+\.json$/.test(name)
-			) {
-				addCloseCandidate(
-					candidates,
-					directory,
-					path.join(swarmDir, name),
-					`close cleanup: ${name}`,
-				);
+		if (fsSync.statSync(path.join(directory, '.git')).isFile()) return true;
+	} catch {
+		return false;
+	}
+	return fsSync.existsSync(path.join(directory, '.git', 'HEAD'));
+}
+
+export function evaluateClosePurgeGate(
+	directory: string,
+	swarmDir: string,
+): ClosePurgeGate {
+	const statusOutput = _closeGateInternals.runGit(
+		['status', '--porcelain'],
+		directory,
+	);
+	const dirtyPaths: string[] = [];
+	if (statusOutput !== null) {
+		for (const line of statusOutput.split('\n')) {
+			if (!line) continue;
+			// Untracked ('??') entries survive the align reset; every other
+			// porcelain code (staged, unstaged, conflicted) is tracked work
+			// that `git reset --hard` + `checkout -- .` would discard.
+			if (line.startsWith('??')) continue;
+			const filePath = line.slice(3).trim().replace(/^"|"$/g, '');
+			if (!filePath) continue;
+			// #2508: porcelain renames ('R  old -> new') put BOTH sides at
+			// risk — list each side so the preview and digest stay exact.
+			if (line.startsWith('R') && filePath.includes(' -> ')) {
+				for (const side of filePath.split(' -> ')) {
+					if (side) dirtyPaths.push(side);
+				}
+			} else {
+				dirtyPaths.push(filePath);
 			}
 		}
-		for (const name of [
-			'swarm.db-shm',
-			'swarm.db-wal',
-			'repo-memory.sqlite-shm',
-			'repo-memory.sqlite-wal',
-		]) {
-			addCloseCandidate(
-				candidates,
-				directory,
-				path.join(swarmDir, name),
-				`close cleanup: ${name}`,
-			);
-		}
-	} catch (error) {
-		return {
-			candidates: [...candidates.values()],
-			error: `unable to inventory .swarm close state: ${error instanceof Error ? error.message : String(error)}`,
-		};
 	}
-
-	let gitStatus: ReturnType<typeof _internals.getGitRepositoryStatus>;
-	try {
-		gitStatus = _internals.getGitRepositoryStatus(directory);
-	} catch (error) {
-		return {
-			candidates: [...candidates.values()],
-			error: `unable to inventory Git alignment scope: ${error instanceof Error ? error.message : String(error)}`,
-		};
-	}
-	if (gitStatus.isRepo) {
-		let gitInventory: ReturnType<typeof _internals.getGitDestructiveInventory>;
-		try {
-			gitInventory = _internals.getGitDestructiveInventory(
-				directory,
-				args.includes('--prune-branches'),
-			);
-		} catch (error) {
-			return {
-				candidates: [...candidates.values()],
-				error: `unable to inventory Git alignment scope: ${error instanceof Error ? error.message : String(error)}`,
-			};
+	const candidates: PurgeCandidate[] = dirtyPaths.map((p) => ({
+		path: path.join(directory, p),
+		reason: 'uncommitted tracked change — discarded by git alignment',
+	}));
+	for (const entry of [
+		...ACTIVE_STATE_TO_CLEAN,
+		...ACTIVE_STATE_DIRS_TO_CLEAN,
+	]) {
+		const full = path.join(swarmDir, entry);
+		if (fsSync.existsSync(full)) {
+			candidates.push({
+				path: full,
+				reason: 'active swarm state — archived then removed by close',
+			});
 		}
-		if (gitInventory.error) {
-			return {
-				candidates: [...candidates.values()],
-				error: `unable to inventory Git alignment scope: ${gitInventory.error}`,
-			};
-		}
-		for (const target of gitInventory.paths) {
-			addCloseCandidate(
-				candidates,
-				directory,
-				target,
-				'Git alignment may reset or checkout this path',
-			);
-		}
-		for (const [index, branch] of gitInventory.branchLabels.entries()) {
-			// Branch labels are not filesystem purge targets. Bind a stable,
-			// guaranteed-contained sentinel to the label so the digest changes if
-			// the prune set changes, while the claim-only path never deletes it.
-			const fingerprint = gitInventory.branchFingerprints?.[index] ?? branch;
-			const digest = createHash('sha256')
-				.update(fingerprint)
-				.digest('hex')
-				.slice(0, 32);
-			addCloseCandidate(
-				candidates,
-				directory,
-				path.join(swarmDir, `.branch-prune-${digest}`),
-				`Git alignment will prune branch ${branch}`,
-				{ requireExists: false },
-			);
-		}
-		for (const headMovement of gitInventory.headLabels ?? []) {
-			// HEAD movement has no filesystem path to enumerate, but it is still
-			// destructive: a reset/checkout can discard a clean-but-diverged
-			// commit. Bind a stable contained sentinel to the exact preflight
-			// identity so a changed HEAD or alignment target invalidates the token.
-			const digest = createHash('sha256')
-				.update(headMovement)
-				.digest('hex')
-				.slice(0, 32);
-			addCloseCandidate(
-				candidates,
-				directory,
-				path.join(swarmDir, `.head-movement-${digest}`),
-				`Git alignment may reset or checkout HEAD (${headMovement})`,
-				{ requireExists: false },
-			);
-		}
-		alignmentPlan = gitInventory.alignmentPlan;
 	}
 	return {
-		candidates: [...candidates.values()].sort((a, b) =>
-			a.path.localeCompare(b.path),
-		),
-		alignmentPlan,
+		wouldDestroyTrackedWork: dirtyPaths.length > 0,
+		dirtyPaths,
+		candidates,
+		scopeAnchor: candidates[0]?.path ?? directory,
+		// A repository whose status cannot be read is never "clean" — fail
+		// closed. Non-repository `.git` markers (#2127 roots) carry no
+		// git-tracked work, so a failed read there is an answer, not a gap.
+		gitStatusFailed: statusOutput === null && isRealGitRepository(directory),
 	};
-}
-
-function confirmTokenFromArgs(args: string[]): string | undefined {
-	const raw = args.find((arg) => arg.startsWith('--confirm='));
-	if (!raw) return undefined;
-	const token = raw.slice('--confirm='.length).trim();
-	return token || undefined;
-}
-
-function closeScopeTarget(
-	directory: string,
-	candidates: PurgeCandidate[],
-): string {
-	return (
-		candidates[0]?.path ?? path.join(directory, '.swarm', 'close-authorization')
-	);
-}
-
-function closeInventoryDigest(candidates: PurgeCandidate[]): string {
-	return createHash('sha256')
-		.update(
-			`set\0${candidates
-				.map((candidate) => path.resolve(candidate.path))
-				.sort()
-				.join('\n')}`,
-		)
-		.digest('hex');
-}
-
-function closeAlignmentPlanDigest(plan?: ConfirmedGitAlignment): string {
-	return createHash('sha256')
-		.update(JSON.stringify(confirmedGitAlignmentDigestProjection(plan)))
-		.digest('hex');
-}
-
-function closePreview(directory: string, candidates: PurgeCandidate[]): string {
-	const target = closeScopeTarget(directory, candidates);
-	const plan = previewDestructivePurge(target, directory, {
-		kind: 'close',
-		candidates,
-	});
-	const token = issueConfirmToken(target, directory, {
-		kind: 'close',
-		candidates,
-	});
-	return [
-		'## /swarm finalize — destructive confirmation required',
-		'',
-		...plan.previewLines,
-		'',
-		`Run "/swarm finalize --confirm=${token}" to continue. The token is valid for 15 minutes and is single-use.`,
-		'`/swarm close` is an alias and accepts the same confirmation token.',
-	].join('\n');
 }
 
 export async function archiveCloseSummary(
@@ -408,43 +257,58 @@ export async function handleCloseCommand(
 		);
 	}
 
-	// Issue #2508: all close/finalize destructive scope is previewed and
-	// authorized before the finalize lock or any pipeline write. Claiming only
-	// renames the pending authorization; it does not delete a candidate.
-	const preCloseInventory = deriveCloseDestructiveInventory(directory, args);
-	if (preCloseInventory.error) {
-		return `❌ Close paused before acquiring the finalize lock: ${preCloseInventory.error}. No cleanup, archive, alignment, or teardown was performed.`;
+	// #2508 two-step destructive purge. Placed BEFORE lock acquisition so the
+	// preview is fully side-effect-free (no finalize.lock under .swarm/). The
+	// preview fires only when destruction would occur — when the tracked tree
+	// is clean (or this is not a git repo), close keeps its single-call
+	// behavior, mirroring /swarm reset-session's default-safe pattern (#2527).
+	const confirmArg = args.find((a) => a.startsWith('--confirm='));
+	const confirmToken = confirmArg
+		? confirmArg.slice('--confirm='.length)
+		: undefined;
+	const purgeGate = evaluateClosePurgeGate(directory, swarmDir);
+	// #2508 fail-closed: without a readable git status the gate cannot prove
+	// the align stage safe. Refuse the destructive pipeline outright — a
+	// measurement that cannot be taken must never read as "clean tree".
+	if (purgeGate.gitStatusFailed) {
+		return `🛑 /swarm close aborted (fail-closed): git status could not be read in ${directory}, so the destructive-purge gate cannot verify uncommitted tracked work. Nothing was closed, archived, or destroyed. Ensure git is available and the repository is readable, then re-run /swarm close.`;
 	}
-	const preCloseDigest = closeInventoryDigest(preCloseInventory.candidates);
-	const preCloseAlignmentDigest = closeAlignmentPlanDigest(
-		preCloseInventory.alignmentPlan,
-	);
-	let closeClaim: ClaimedDestructivePurge | undefined;
-	if (preCloseInventory.candidates.length > 0) {
-		const confirmToken = confirmTokenFromArgs(args);
-		if (!confirmToken) {
-			try {
-				return closePreview(directory, preCloseInventory.candidates);
-			} catch (error) {
-				return `❌ Close paused before issuing confirmation: ${error instanceof Error ? error.message : String(error)}`;
-			}
-		}
-		const scopeTarget = closeScopeTarget(
-			directory,
-			preCloseInventory.candidates,
-		);
-		const claimResult = claimDestructivePurge(
-			scopeTarget,
+	if (confirmToken !== undefined) {
+		const verdict = consumeConfirmToken(
+			purgeGate.scopeAnchor,
 			directory,
 			confirmToken,
-			{ kind: 'close', candidates: preCloseInventory.candidates },
+			{ kind: 'swarm-close', candidates: purgeGate.candidates },
 		);
-		if (!claimResult.ok || !claimResult.claim) {
-			return `❌ Close confirmation rejected: ${claimResult.reason ?? 'authorization could not be claimed'}. No cleanup, archive, alignment, or teardown was performed.`;
+		if (!verdict.ok) {
+			return `🔐 /swarm close confirmation rejected: ${verdict.reason}. Nothing was closed, archived, or destroyed. Re-run /swarm close (without --confirm) for a fresh preview and token.`;
 		}
-		closeClaim = claimResult.claim;
-	} else if (confirmTokenFromArgs(args)) {
-		return '❌ Close confirmation rejected: the current destructive inventory is empty; re-run /swarm finalize without --confirm to obtain the current status.';
+		// Token verified and consumed (single use): fall through to the full
+		// pipeline — the operator explicitly confirmed this exact scope.
+	} else if (purgeGate.wouldDestroyTrackedWork) {
+		const activeStateCount =
+			purgeGate.candidates.length - purgeGate.dirtyPaths.length;
+		const token = issueConfirmToken(purgeGate.scopeAnchor, directory, {
+			kind: 'swarm-close',
+			candidates: purgeGate.candidates,
+		});
+		const listed = purgeGate.dirtyPaths.slice(0, 10);
+		const overflow = purgeGate.dirtyPaths.length - listed.length;
+		return [
+			'🔐 Destructive close preview — confirmation required.',
+			'',
+			`Git alignment would DISCARD ${purgeGate.dirtyPaths.length} uncommitted tracked change(s):`,
+			...listed.map((p) => `  - ${p}`),
+			...(overflow > 0 ? [`  … and ${overflow} more`] : []),
+			'',
+			`${activeStateCount} active-state artifact(s) will be archived, then removed.`,
+			'',
+			'Nothing has been closed, archived, or destroyed yet. To execute the destructive close, run:',
+			``,
+			`/swarm close --confirm=${token}`,
+			'',
+			'The token is valid for 15 minutes and can be used once. Untracked files are not affected.',
+		].join('\n');
 	}
 
 	// FR-012: acquire finalize lock before any destructive work

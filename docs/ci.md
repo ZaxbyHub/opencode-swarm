@@ -10,7 +10,7 @@ LLMs, and never writes to the repo.
 ```bash
 bunx opencode-swarm ci                 # Markdown report + [SWARM_CI_JSON] block
 bunx opencode-swarm ci --json          # machine block only
-bunx opencode-swarm ci --timeout-ms 600000
+bunx opencode-swarm ci --timeout-ms 300000
 # equivalent inside OpenCode: /swarm ci ... ; registry form: bunx opencode-swarm run ci ...
 ```
 
@@ -70,8 +70,9 @@ report=$(printf '%s\n' "$output" | sed -n '/^\[SWARM_CI_JSON\]$/,/^\[\/SWARM_CI_
 - The evaluated repo is never modified: file-backed reads are pure, and
   DB-mediated reads (gate profile, plan-critic snapshots — which open the
   SQLite store and would create WAL sidecars) run against a bounded, discarded
-  temp **shadow copy** of `.swarm/`. If the shadow exceeds 512 MiB, those rows
-  are reported as errors instead of copying unbounded data.
+  temp **shadow copy** of `.swarm/`. The incremental shadow copy is bounded by
+  both 512 MiB of copied bytes and 100000 filesystem entries. If the shadow exceeds 512 MiB or 100000 entries, those rows are reported as errors instead
+  of copying unbounded data.
 - No gate can be satisfied or bypassed from this path — it only reads and
   reports. The live enforcement points (delegation gate, reviewer/test gates at
   task completion) are unchanged.
@@ -81,11 +82,15 @@ report=$(printf '%s\n' "$output" | sed -n '/^\[SWARM_CI_JSON\]$/,/^\[\/SWARM_CI_
 ## Bounds
 
 Startup and evaluation run under an overall deadline (`--timeout-ms`, default
-300000). SIGINT/SIGTERM abort the run (exit 2) and run registered cleanup
-exactly once; the run journal is capped at 200 events. Note that POSIX-style
-self-signalling is unreliable on Windows (Git Bash in particular), so treat
-signal-driven exit 2 there as best-effort; the `--timeout-ms` deadline is the
-portable bound.
+300000; supported range 1–300000). SIGINT/SIGTERM abort the run (exit 2) and
+run registered cleanup exactly once; the run journal is capped at 200 events.
+The `run_started` journal event intentionally has no `detail`/directory field;
+cancellation/deadline/error diagnostics redact the evaluated directory from
+their bounded detail and journal-tail text. The former 600000ms example is no
+longer accepted: callers must use a value in the supported 1–300000ms range.
+Note that POSIX-style self-signalling is unreliable on Windows (Git Bash in
+particular), so treat signal-driven exit 2 there as best-effort; the
+`--timeout-ms` deadline is the portable bound. A SIGKILL or a host crash cannot be cleaned in-process. Any residue is confined to the OS temporary directory, where the operating system can reclaim it.
 
 ## Related
 
@@ -93,3 +98,32 @@ portable bound.
   context; shares the evidence-quality computation with `swarm ci`).
 - `/swarm ci-simulate` — pre-merge merge-result worktree simulation.
 - `/swarm ci-monitor` — drive an approved PR to green and merged.
+
+## Gated GitHub Action (`swarm-implement`)
+
+The gated implementation pipeline wraps the advisory CI surface above. It lives at `.github/workflows/swarm-implement.yml` and runs `scripts/swarm-implement-pipeline.sh` on the runner.
+
+### Triggers
+
+- **Issue label**: apply the `swarm:implement` label to an issue. Labeling requires write access, so fork contributors cannot start the pipeline.
+- **Manual dispatch**: `workflow_dispatch` with the `issue` input (issue number, issue URL, or `owner/repo#N`).
+
+### Inputs and secrets
+
+| Input | Purpose |
+|---|---|
+| `issue` | The issue reference to implement (dispatch path). |
+
+Secrets reach the run only through single-line env mappings: set the `OPENCODE_MODEL_API_KEY` repository secret to the API key of the model provider your OpenCode config selects (provider-specific env/auth config still applies on the runner); `GITHUB_TOKEN` is scoped by the workflow's least-privilege `permissions` block (`contents: write`, `issues: read`, `pull-requests: write`). Never embed credentials in the workflow or the pipeline script.
+
+### Behavior contract
+
+- **Least privilege** — only the three scopes above; checkout uses `persist-credentials: false`.
+- **Concurrency** — one run per issue (`swarm-implement-issue-<n>` group, `cancel-in-progress`); a newer trigger for the same issue supersedes an in-progress run.
+- **Bounded** — job-level `timeout-minutes`, per-attempt `timeout` on the host and evaluation commands, and a bounded in-script retry budget (`MAX_RETRIES`) for host failures (an oversight pause is never retried).
+- **Fork-safe** — no `pull_request`/`pull_request_target` triggers; the label gate is the only write-path entry.
+- **Fail-closed oversight** — a Full-Auto oversight pause surfaces as `OVERSIGHT_PAUSE: <reason>` with dedicated exit code 10 (distinct from `swarm ci` 0/1/2/3 and from 4=push-failed / 5=PR-create-failed); the run never retries past a denial and the reporting step (`!cancelled()`) prints the pause reason.
+- **No gate bypass** — `swarm ci` exit codes propagate (exit 1 violations fail the job with the violation state in the run summary; no success PR is published on violations). The pipeline reimplements none of the wrapped surfaces; it drives the host-driven phases and evaluates through `swarm ci`.
+
+The pipeline supports `SWARM_PIPELINE_DRY_RUN=1` to record every phase and produce the evidence bundle (branch, `.swarm/pipeline-evidence/`, PR body with plan/gate/oversight sections) without a model, network, or `gh` — the executable proxy pinned by the frozen checks.
+

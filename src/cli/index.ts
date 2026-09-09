@@ -7,6 +7,7 @@ import packageJson from '../../package.json' with { type: 'json' };
 import { formatCommandNotFound } from '../commands/command-dispatch.js';
 import {
 	COMMAND_REGISTRY,
+	handleHelpCommand,
 	isCommandFailure,
 	resolveCommand,
 	VALID_COMMANDS,
@@ -926,11 +927,36 @@ Examples:
 `);
 }
 
+async function printCommandHelp(command: string): Promise<void> {
+	const text = await handleHelpCommand({
+		directory: process.cwd(),
+		args: [command],
+		sessionID: '',
+		agents: {},
+		source: 'cli',
+		packageRoot: PACKAGE_ROOT,
+	});
+	console.log(text);
+}
+
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 
 	if (args.includes('-v') || args.includes('--version')) {
 		console.log(`opencode-swarm ${version}`);
+		process.exit(0);
+	}
+
+	const isHelpFlag = (arg: string | undefined): boolean =>
+		arg === '-h' || arg === '--help';
+	if (
+		(args.length === 2 && args[0] === 'ci' && isHelpFlag(args[1])) ||
+		(args.length === 3 &&
+			args[0] === 'run' &&
+			args[1] === 'ci' &&
+			isHelpFlag(args[2]))
+	) {
+		await printCommandHelp('ci');
 		process.exit(0);
 	}
 
@@ -959,6 +985,14 @@ async function main(): Promise<void> {
 		// shared registry dispatcher so both surfaces get identical parity
 		// behaviors (did-you-mean, deprecation warnings, policy gates).
 		const exitCode = await run(['ci', ...args.slice(1)]);
+		process.exit(exitCode);
+	} else if (command === 'mcp') {
+		// Read-only MCP verification server over stdio (#2499). Long-running
+		// and CLI-only: it owns process stdin/stdout, so it cannot be a
+		// /swarm registry command. The handler dynamic-imports the SDK-backed
+		// server so it stays out of this entry chunk.
+		const { handleMcpCommand } = await import('./mcp.js');
+		const exitCode = await handleMcpCommand(args.slice(1));
 		process.exit(exitCode);
 	} else {
 		console.error(`Unknown command: ${command}`);

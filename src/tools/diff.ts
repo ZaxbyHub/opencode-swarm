@@ -36,6 +36,13 @@ function validateBase(base: string): string | null {
 	if (base.length > MAX_REF_LENGTH) {
 		return `base ref exceeds maximum length of ${MAX_REF_LENGTH}`;
 	}
+	// Reject flag-shaped refs: SAFE_REF_PATTERN admits '-'-prefixed strings,
+	// and the execFileSync argv splices `base` before flags like --numstat, so
+	// an unguarded `--output` would make git consume the next argv as an
+	// output filename (write vector; #2499 review finding).
+	if (base.startsWith('-')) {
+		return 'base ref must not begin with a dash';
+	}
 	if (!SAFE_REF_PATTERN.test(base)) {
 		return 'base contains invalid characters for git ref';
 	}

@@ -1,5 +1,5 @@
 {
-	"$comment": "Issue #2078 recurrence guardrail. Every scripts/**/*.sh referenced from a .github/workflows file — or, recursively, from a local composite action under .github/actions — must be listed here. New Bash-only gates are BLOCKED — implement them as scripts/<name>.ts wired through a package.json script (see scripts/check-test-file-cap.ts). Porting a legacy gate must REMOVE its entry; a stale entry fails the check. Enforced by scripts/check-gate-portability.ts (bun run check:gate-portability).",
+	"$comment": "Issue #2078 recurrence guardrail. Every scripts/**/*.sh referenced from a .github/workflows file \u2014 or, recursively, from a local composite action under .github/actions \u2014 must be listed here. New Bash-only gates are BLOCKED \u2014 implement them as scripts/<name>.ts wired through a package.json script (see scripts/check-test-file-cap.ts). Porting a legacy gate must REMOVE its entry; a stale entry fails the check. Enforced by scripts/check-gate-portability.ts (bun run check:gate-portability).",
 	"entries": [
 		{
 			"script": "scripts/ci/detect-and-quarantine-flakes.sh",
@@ -10,6 +10,11 @@
 			"script": "scripts/ci/run-coverage-gate.sh",
 			"category": "ci-infrastructure",
 			"reason": "Consumes merged lcov artifacts produced by the CI shard matrix. Never a pre-push local gate, so a Windows contributor is not expected to run it."
+		},
+		{
+			"script": "scripts/swarm-implement-pipeline.sh",
+			"category": "ci-infrastructure",
+			"reason": "Runner-side pipeline driver for the swarm-implement workflow (#2498). Runs only inside that workflow on ubuntu runners (never a pre-push local gate), so a Windows contributor is not expected to run it; the frozen C11 dry-run harness exercises it on any host without the real-path tools."
 		}
 	]
 }

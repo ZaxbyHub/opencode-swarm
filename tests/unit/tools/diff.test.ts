@@ -259,17 +259,15 @@ index 1234567..abcdefg 100644
 	});
 
 	describe('validate base parameter — malformed refs', () => {
-		// SECURITY FINDING: Ref starting with dash passes validation
-		// CURRENT BEHAVIOR: Passes validation, git is invoked but fails
-		// EXPECTED: Should be rejected by validation
-		test('SECURITY FINDING: ref starting with dash passes validation', async () => {
+		// Formerly a SECURITY FINDING marker: dash-prefixed refs used to pass
+		// validation and reach the git argv. validateBase now rejects them
+		// before the subprocess (#2499 review fix).
+		test('rejects ref starting with a dash before git is invoked', async () => {
 			const result = await diff.execute({ base: '-p' });
 			const parsed = JSON.parse(result);
 
-			// CURRENT: Validation passes but git fails
-			// This is a defense-in-depth issue - validation should catch it earlier
-			expect(parsed.error).toBeDefined(); // Git fails with error
-			expect(mockExecFileSync).toHaveBeenCalled(); // Git was invoked (should have been blocked earlier)
+			expect(parsed.error).toContain('must not begin with a dash');
+			expect(mockExecFileSync).not.toHaveBeenCalled();
 		});
 
 		test('rejects ref with newline character', async () => {
@@ -338,9 +336,11 @@ index 1234567..abcdefg 100644
 
 		test('accepts commit hashes (40 char hex)', async () => {
 			mockExecFileSync.mockReturnValue('');
-			mockExecFileSync.mockReturnValue('');
 
-			const result = await diff.execute({ base: 'a' * 40 });
+			// 'a' * 40 is NaN in JS (no string multiplication) — the dash guard
+			// exposed that latent fixture bug because validateBase now calls
+			// .startsWith before the pattern coercion. Use a real 40-hex hash.
+			const result = await diff.execute({ base: 'a'.repeat(40) });
 			const parsed = JSON.parse(result);
 
 			expect(parsed.error).toBeUndefined();

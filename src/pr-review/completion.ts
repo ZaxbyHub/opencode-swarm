@@ -49,7 +49,7 @@ import {
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
 	type BackgroundDelegationWorkflowLaneFailureClass,
-	findByBatchId,
+	findByBatchIdDetailed,
 } from '../background/pending-delegations.js';
 import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
@@ -355,12 +355,23 @@ export type PrReviewDimensionTerminalState =
 	| 'CANCELLED'
 	| 'NOT_LAUNCHED';
 
+/**
+ * Disclosure-side failure classes (issue #2615): the live lane vocabulary plus
+ * the legacy `'deadline'` class. `'deadline'` was removed from lane results
+ * with its last producer in #2381, but durable disclosures written before
+ * #2615 and structured `DEADLINE_EXCEEDED` receipts still carry it, so the
+ * disclosure vocabulary keeps it legible instead of failing those reads.
+ */
+export type PrReviewDisclosureFailureClass =
+	| BackgroundDelegationWorkflowLaneFailureClass
+	| 'deadline';
+
 /** Gate-derived per-dimension terminal evidence for an unresolved dimension. */
 export interface PrReviewUnresolvedDimensionRecord {
 	dimension: PrReviewBaseDimensionId;
 	terminalState: 'FAILED' | 'CANCELLED' | 'NOT_LAUNCHED';
 	reasonKind: 'lane_failure' | 'cancelled' | 'not_launched';
-	failureClass?: BackgroundDelegationWorkflowLaneFailureClass;
+	failureClass?: PrReviewDisclosureFailureClass;
 	terminalEventId?: string;
 	/** Contributing lane/batch identity, when available. */
 	batchId?: string;
@@ -392,7 +403,7 @@ export interface PrReviewPartialBaseCoverageRecordV1 {
 	prHeadSha: string;
 	revisionDigest: string;
 	missingDimension: PrReviewBaseDimensionId;
-	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
+	failureClass: PrReviewDisclosureFailureClass;
 	terminalEventId: string;
 	admittedAt: string;
 }
@@ -436,6 +447,12 @@ export interface PrReviewTerminalCoverageSettlement {
 	unresolvedDimensions: PrReviewUnresolvedDimensionRecord[];
 	/** False while any dimension still has a live (in-flight) lane. */
 	allLaunchedTerminal: boolean;
+	/**
+	 * Issue #2511: present when a dispatched-set batch read stayed uncertain.
+	 * Dimensions whose launch evidence is UNKNOWN are carried in
+	 * `liveDimensions` (blocking settlement) — never labeled NOT_LAUNCHED.
+	 */
+	delegationReadUncertain?: string;
 }
 
 /** Per-dimension explicit cancellation, written by armed recovery (issue #2383). */
@@ -450,13 +467,15 @@ export interface PrReviewDimensionCancellationRecord {
 // ---------------------------------------------------------------------------
 
 const PR_REVIEW_FAILURE_CLASS_SAFE_DETAILS: Record<
-	BackgroundDelegationWorkflowLaneFailureClass,
+	PrReviewDisclosureFailureClass,
 	string
 > = {
 	contract:
 		'lane failed its output contract after the bounded retry budget was exhausted',
 	resource: 'lane exhausted its resource budget before producing valid output',
 	deadline: 'lane passed its collection deadline without valid terminal output',
+	liveness:
+		'lane was abandoned by its host (presumed-stale sweep, unobservable host session, or operator cancellation) without an observed agent failure',
 };
 
 const PrReviewUnresolvedDimensionRecordSchema = z
@@ -464,7 +483,9 @@ const PrReviewUnresolvedDimensionRecordSchema = z
 		dimension: z.enum(PR_REVIEW_BASE_DIMENSION_IDS),
 		terminalState: z.enum(['FAILED', 'CANCELLED', 'NOT_LAUNCHED']),
 		reasonKind: z.enum(['lane_failure', 'cancelled', 'not_launched']),
-		failureClass: z.enum(['contract', 'resource', 'deadline']).optional(),
+		failureClass: z
+			.enum(['contract', 'resource', 'deadline', 'liveness'])
+			.optional(),
 		terminalEventId: z.string().min(1).max(256).optional(),
 		batchId: z.string().min(1).max(128).optional(),
 		laneId: z.string().min(1).max(128).optional(),
@@ -637,6 +658,12 @@ export interface PrReviewBaseDimensionAttempts {
 	dedicatedSuccessful: Set<string>;
 	/** Dimensions whose recorded lane ran to a terminal, non-successful end. */
 	terminallyFailed: Set<string>;
+	/**
+	 * Issue #2511: present when a batch's delegation read stayed uncertain.
+	 * The affected lanes' dimensions are carried in `inFlight` (UNKNOWN, not
+	 * settled and not absent) so no consumer reads them as dispatchable.
+	 */
+	delegationReadUncertain?: string;
 }
 
 /**
@@ -669,6 +696,7 @@ export function summarizePrReviewBaseDimensionAttempts(
 	);
 	const dedicatedSuccessful = new Set<string>();
 	const terminallyFailed = new Set<string>();
+	let delegationReadUncertain: string | undefined;
 	for (const batch of state.prReviewBaseDispatches ?? []) {
 		const batchSuccessful = successfulObligationsFromExactBatch(
 			directory,
@@ -703,9 +731,25 @@ export function summarizePrReviewBaseDimensionAttempts(
 				)
 				.map((qualified) => qualified.record.laneId),
 		);
-		const records = findByBatchId(directory, batch.batchId, {
+		const recordsRead = findByBatchIdDetailed(directory, batch.batchId, {
 			parentSessionId: state.sessionID,
 		});
+		if (recordsRead.status === 'uncertain') {
+			// Issue #2511: the batch's lanes are neither settled nor provably
+			// absent — carry them as UNKNOWN (in-flight semantics: excluded
+			// from retry targets, blocking settlement) and disclose the reason.
+			delegationReadUncertain = `delegation store unreadable after ${recordsRead.attempts} attempts (${recordsRead.reason})`;
+			for (const lane of batch.lanes) {
+				if (semanticallyValidLaneIds.has(lane.laneId)) continue;
+				for (const dimension of lane.ownedWorkflowLanes?.length
+					? lane.ownedWorkflowLanes
+					: [lane.workflowLane]) {
+					inFlight.add(dimension);
+				}
+			}
+			continue;
+		}
+		const records = recordsRead.value;
 		for (const lane of batch.lanes) {
 			if (semanticallyValidLaneIds.has(lane.laneId)) continue;
 			const laneRecords = records.filter(
@@ -748,6 +792,7 @@ export function summarizePrReviewBaseDimensionAttempts(
 		contractRetried,
 		dedicatedSuccessful,
 		terminallyFailed,
+		...(delegationReadUncertain ? { delegationReadUncertain } : {}),
 	};
 }
 
@@ -803,18 +848,41 @@ function latestTypedFailureForBaseDimension(
 				? lane.ownedWorkflowLanes
 				: [lane.workflowLane];
 			if (!owned.includes(dimension)) continue;
-			for (const record of findByBatchId(directory, batch.batchId, {
+			const batchRead = findByBatchIdDetailed(directory, batch.batchId, {
 				parentSessionId: state.sessionID,
-			}).filter((candidate) => candidate.laneId === lane.laneId)) {
+			});
+			// Issue #2511: an uncertain read yields no failure evidence (null).
+			// Safe because the sole caller (derivePrReviewDimensionSettlement)
+			// then routes dispatch-uncertain dimensions to liveDimensions, so
+			// null here can never feed a NOT_LAUNCHED label.
+			if (batchRead.status === 'uncertain') continue;
+			for (const record of batchRead.value.filter(
+				(candidate) => candidate.laneId === lane.laneId,
+			)) {
 				const terminal = record.terminalResult;
+				// Issue #2615: a lane can reach a terminal failure status WITHOUT a
+				// claim event — the Task-side presumed-stale sweep settles by a direct
+				// status+result write under the store lock (the #2482/#2244
+				// eventless-terminal precedent; the claim path is not used there),
+				// and the collect-path idle flip transitions without the claim path
+				// (stamping its own class-carrying result). For those records the
+				// class-carrying `record.result` is the typed failure source (the
+				// same fallback the circuit applies); a claimed `terminalResult`
+				// stays authoritative whenever the claim path did run.
+				const eventlessFailure =
+					!terminal && CIRCUIT_TERMINAL_DELEGATION_STATUSES.has(record.status);
 				const result = terminal?.result ?? record.result;
 				const failureClass = result?.workflowLaneFailureClass;
-				if (!terminal || !failureClass || terminal.status === 'completed')
-					continue;
+				if ((!terminal && !eventlessFailure) || !failureClass) continue;
+				if ((terminal?.status ?? record.status) === 'completed') continue;
 				const candidate = {
 					failureClass,
-					terminalEventId: terminal.eventId,
-					recordedAt: terminal.recordedAt,
+					terminalEventId: terminal
+						? terminal.eventId
+						: `eventless:${record.status}:${result?.digest ?? ''}`,
+					recordedAt: terminal
+						? terminal.recordedAt
+						: (record.completedAt ?? record.updatedAt),
 					batchId: batch.batchId,
 					laneId: lane.laneId,
 				};
@@ -833,7 +901,7 @@ function latestTypedFailureForBaseDimension(
 }
 
 interface PrReviewLatestStructuredUnresolved {
-	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
+	failureClass: PrReviewDisclosureFailureClass;
 	recordedAt: number;
 	batchId: string;
 	laneId: string;
@@ -842,7 +910,7 @@ interface PrReviewLatestStructuredUnresolved {
 
 function failureClassFromStructuredUnresolvedReason(
 	reason: PrReviewResultUnresolvedReason,
-): BackgroundDelegationWorkflowLaneFailureClass {
+): PrReviewDisclosureFailureClass {
 	switch (reason) {
 		case 'RESOURCE_LIMIT':
 			return 'resource';
@@ -886,9 +954,15 @@ function latestStructuredReceiptUnresolvedForBaseDimension(
 			? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
 			: undefined;
 	for (const batch of state.prReviewBaseDispatches ?? []) {
-		const records = findByBatchId(directory, batch.batchId, {
+		const recordsRead = findByBatchIdDetailed(directory, batch.batchId, {
 			parentSessionId: state.sessionID,
 		});
+		// Issue #2511: an uncertain read yields no unresolved evidence (null).
+		// Safe because the sole caller (derivePrReviewDimensionSettlement) then
+		// routes dispatch-uncertain dimensions to liveDimensions, so null here
+		// can never feed a NOT_LAUNCHED label.
+		if (recordsRead.status === 'uncertain') continue;
+		const records = recordsRead.value;
 		for (const lane of batch.lanes) {
 			const ownedWorkflowLanes = lane.ownedWorkflowLanes?.length
 				? lane.ownedWorkflowLanes
@@ -989,12 +1063,29 @@ export function derivePrReviewDimensionSettlement(
 	// dimensions NOT_LAUNCHED, mirroring `summarizePrReviewBaseDimension-
 	// Attempts`'s "no record at all: never dispatched" reading.
 	const dispatched = new Set<string>();
+	// Issue #2511: dimensions whose launch evidence is UNKNOWN (the batch read
+	// was uncertain). They must never be labeled NOT_LAUNCHED — they ride
+	// liveDimensions (blocking) until the store is readable again.
+	const dispatchUncertain = new Set<string>();
+	let delegationReadUncertain = attempts.delegationReadUncertain;
 	for (const batch of state.prReviewBaseDispatches ?? []) {
-		const records = findByBatchId(directory, batch.batchId, {
+		const recordsRead = findByBatchIdDetailed(directory, batch.batchId, {
 			parentSessionId: state.sessionID,
 		});
+		if (recordsRead.status === 'uncertain') {
+			delegationReadUncertain = `delegation store unreadable after ${recordsRead.attempts} attempts (${recordsRead.reason})`;
+			for (const lane of batch.lanes) {
+				for (const dimension of lane.ownedWorkflowLanes?.length
+					? lane.ownedWorkflowLanes
+					: [lane.workflowLane]) {
+					dispatchUncertain.add(dimension);
+				}
+			}
+			continue;
+		}
 		for (const lane of batch.lanes) {
-			if (!records.some((record) => record.laneId === lane.laneId)) continue;
+			if (!recordsRead.value.some((record) => record.laneId === lane.laneId))
+				continue;
 			for (const dimension of lane.ownedWorkflowLanes?.length
 				? lane.ownedWorkflowLanes
 				: [lane.workflowLane]) {
@@ -1080,6 +1171,12 @@ export function derivePrReviewDimensionSettlement(
 			liveDimensions.push(dimension);
 			continue;
 		}
+		if (dispatchUncertain.has(dimension)) {
+			// Issue #2511: launch evidence UNKNOWN — same blocking route as a
+			// dispatched-yet-unresolved dimension; never NOT_LAUNCHED.
+			liveDimensions.push(dimension);
+			continue;
+		}
 		unresolvedDimensions.push({
 			dimension,
 			terminalState: 'NOT_LAUNCHED',
@@ -1099,6 +1196,7 @@ export function derivePrReviewDimensionSettlement(
 		unresolvedDimensions,
 		liveDimensions,
 		allLaunchedTerminal: liveDimensions.length === 0,
+		...(delegationReadUncertain ? { delegationReadUncertain } : {}),
 	};
 }
 
@@ -1472,7 +1570,7 @@ export async function readPrReviewTerminalCoverageForReport(
 		dimension: PrReviewBaseDimensionId;
 		terminal_state: PrReviewUnresolvedDimensionRecord['terminalState'];
 		reason_kind: PrReviewUnresolvedDimensionRecord['reasonKind'];
-		failure_class?: BackgroundDelegationWorkflowLaneFailureClass;
+		failure_class?: PrReviewDisclosureFailureClass;
 	}>;
 	liveDimensions: PrReviewBaseDimensionId[];
 	allowedVerdicts: readonly PrReviewReportVerdict[];

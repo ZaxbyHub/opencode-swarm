@@ -15,7 +15,7 @@
  * per-test budget can always preempt it; the deadline uses short
  * millisecond budgets and the assertions are outcome-based, not
  * wall-clock-based, to stay deterministic across CI platforms (Windows
- * timer tick ~15.6ms — deadlines here are >= 50ms).
+ * timer tick ~15.6ms — deadlines here are >= 100ms).
  */
 
 import { describe, expect, test } from 'bun:test';
@@ -66,7 +66,7 @@ describe('runAdvisoryCiRuntime bounds', () => {
 	test('deadline cuts a hung evaluation stage and reports the deadline outcome', async () => {
 		const result = await runAdvisoryCiRuntime({
 			directory: 'C:\\definitely\\not\\used',
-			deadlineMs: 60,
+			deadlineMs: 100,
 			evaluate: () =>
 				// Timer-backed hang: the runtime deadline must win the race.
 				new Promise<AdvisoryCiReport>(() => {}),
@@ -76,6 +76,35 @@ describe('runAdvisoryCiRuntime bounds', () => {
 		expect(result.journal.some((e) => e.type === 'run_deadline')).toBe(true);
 		expect(result.cleanupRan).toBe(true);
 	}, 5000);
+
+	test('direct runtime deadlines normalize to the supported finite range', async () => {
+		const realDateNow = Date.now;
+		Date.now = () => 1_000_000;
+		try {
+			const observe = async (deadlineMs: number) => {
+				let remaining = Number.NaN;
+				const result = await runAdvisoryCiRuntime({
+					directory: 'ci-deadline-normalization',
+					deadlineMs,
+					evaluate: async (ctx) => {
+						remaining = ctx.remainingMs();
+						return minimalReport('pass');
+					},
+				});
+				expect(result.outcome).toBe('pass');
+				return remaining;
+			};
+
+			expect(await observe(0)).toBe(1);
+			expect(await observe(-1)).toBe(1);
+			expect(await observe(Number.NaN)).toBe(1);
+			expect(await observe(Number.POSITIVE_INFINITY)).toBe(300_000);
+			expect(await observe(300_000)).toBe(300_000);
+			expect(await observe(300_001)).toBe(300_000);
+		} finally {
+			Date.now = realDateNow;
+		}
+	});
 
 	test('abort mid-run produces a cancelled outcome and runs cleanup exactly once', async () => {
 		const controller = new AbortController();
@@ -195,4 +224,51 @@ describe('runAdvisoryCiRuntime bounds', () => {
 		// A failing callback is skipped; the remaining ones still run.
 		expect(cleanups).toBe(2);
 	}, 5000);
+
+	test('late cleanup remains best-effort and handles self-registration safely', async () => {
+		let beforeThrowing = 0;
+		let beforeNormal = 0;
+		let lateThrowing = 0;
+		let lateNormal = 0;
+		let registerLate!: (fn: () => void) => void;
+
+		const result = await runAdvisoryCiRuntime({
+			directory: 'ci-late-cleanup',
+			deadlineMs: 5_000,
+			evaluate: async (ctx) => {
+				registerLate = ctx.registerCleanup;
+				ctx.registerCleanup(() => {
+					beforeThrowing++;
+					throw new Error('pre-settlement cleanup failure');
+				});
+				ctx.registerCleanup(() => {
+					beforeNormal++;
+				});
+				return minimalReport('pass');
+			},
+		});
+
+		let selfRuns = 0;
+		let selfRegistering!: () => void;
+		selfRegistering = () => {
+			selfRuns++;
+			registerLate(selfRegistering);
+		};
+		registerLate(() => {
+			lateThrowing++;
+			throw new Error('late cleanup failure');
+		});
+		registerLate(selfRegistering);
+		registerLate(() => {
+			lateNormal++;
+		});
+
+		expect(result.outcome).toBe('pass');
+		expect(result.cleanupRan).toBe(true);
+		expect(beforeThrowing).toBe(1);
+		expect(beforeNormal).toBe(1);
+		expect(lateThrowing).toBe(1);
+		expect(selfRuns).toBe(1);
+		expect(lateNormal).toBe(1);
+	});
 });

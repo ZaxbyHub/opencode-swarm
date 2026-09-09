@@ -244,6 +244,9 @@ for (const strategy of ['merge', 'rebase', 'cherry-pick'] as const) {
 				dispatch.callID,
 				{
 					operationId: `operation-${strategy}`,
+					// #2508: this suite pins the committed-merge reconciliation
+					// contract; the default 'merge' dispatch now lands unstaged.
+					commitLanding: true,
 					onBeforeMerge: async (record) => {
 						beforeMergeCalls++;
 						provenance = record;
@@ -285,6 +288,7 @@ for (const strategy of ['merge', 'rebase', 'cherry-pick'] as const) {
 				dispatch.callID,
 				{
 					operationId: `operation-${strategy}`,
+					commitLanding: true,
 					resume: provenance,
 					onBeforeMerge: async () => {
 						beforeMergeCalls++;
@@ -348,6 +352,7 @@ test('conflict returns a structured partial result and preserves recovery coordi
 		dispatch.callID,
 		{
 			operationId: 'operation-conflict',
+			commitLanding: true,
 			onBeforeMerge: async () => {},
 			onMerged: async () => {
 				throw new Error('must not publish a partial merge');

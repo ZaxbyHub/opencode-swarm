@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 62-entry event catalog,
+`src/observability/`: the canonical event envelope, the 63-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all eighteen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 62 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 63 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -198,9 +198,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 62-entry catalog
+## 5. The 63-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 62 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 63 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:16-172`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -230,8 +230,10 @@ correlation system via the server-derived `councilRoundId`).
 plus seven further post-#2029 additions that §5 catalogs in place (deliberately
 not re-enumerated here) plus the two issue-#2482 kinds —
 `context_source_attribution` (absorbing #1990) and
-`verdict_row_pipe_recovery` (absorbing #2184) — for the honest
-38 + 14 + 7 + 3 = 62 total.
+`verdict_row_pipe_recovery` (absorbing #2184) — plus the issue-#2511 kind
+`delegation_read_uncertain` (advisory delegation-store read stayed uncertain
+after its one bounded retry) for the honest
+38 + 14 + 7 + 3 + 1 = 63 total.
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -320,6 +322,22 @@ Consumer: `src/services/cost-accounting.ts:127`
 `genai`. `agentName` is the delegated agent's `subagent_type` as dispatched
 (resolved from the begin-side pairing entry), not the parent session's
 `activeAgent`.
+
+#### delegation_read_uncertain
+Category `delegation`, severity `info`, privacy `pseudonymous`. Producer
+`src/telemetry.ts:705` (`delegationReadUncertain`, called from the advisory
+reader `readDelegationsDetailed` in `src/background/pending-delegations.ts`
+— issue #2511). Emitted at most once per store root per 60 s cooldown, only
+when the advisory delegation-store read stays uncertain after its one
+bounded retry (budget: 2 attempts + a 25 ms delay, the
+`DELEGATION_READ_RETRY_DELAY_MS` contract). Payload is content-free:
+`attempt` (always 2 — a successful retry emits nothing), `reasonCode`
+(≤64 chars, stable code derived from the failure reason prefix), and
+`source` — expected values `coordination-import` | `coordination-read` |
+`fold` (TypeScript-typed at the emit site; not separately validated at
+runtime). No
+consumers yet; future owner **#2511**. Retention: **#2511**. OTel mapping:
+`none`.
 
 #### delegation_cost_correction
 

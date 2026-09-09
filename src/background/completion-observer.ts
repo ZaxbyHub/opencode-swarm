@@ -220,6 +220,17 @@ export function createBackgroundCompletionObserver(opts: {
 					directory,
 					envelope.sessionId,
 				);
+				if (lookup?.source === 'uncertain') {
+					// Issue #2511: an unreadable store is not proof of no owner.
+					// Leave the source record UNCONSUMED (no ingestion-state
+					// transition) — the record stays pending and visible in
+					// /swarm status, and the next healthy completion event or
+					// settlement reconciliation pass re-attempts this ingestion.
+					logger.warn(
+						`[background] deferring terminal ingestion: delegation store unreadable for ${envelope.sessionId} (${lookup.uncertain})`,
+					);
+					return;
+				}
 				if (!lookup) {
 					logger.log(
 						`[background] trusted completion for ${envelope.sessionId} has no durable primary or fallback owner; ignored`,
@@ -629,7 +640,10 @@ export function createBackgroundCompletionObserver(opts: {
 				directory,
 				record.subagentSessionId,
 			);
-			return refreshed?.record.status === 'consumed';
+			// Issue #2511: an uncertain or unreadable re-read is "not yet
+			// provably consumed" — the replay stays pending and a later healthy
+			// pass re-checks, so this reports false rather than guessing.
+			return refreshed?.record ? refreshed.record.status === 'consumed' : false;
 		} finally {
 			replayInProgress = false;
 		}

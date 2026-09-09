@@ -2,6 +2,12 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { detectDocsClaimDrift } from '../../../scripts/drift-check.ts';
+import {
+	MAX_SHADOW_COPY_BYTES,
+	MAX_SHADOW_COPY_ENTRIES,
+} from '../../../src/ci/evaluate';
+import { MAX_CI_JOURNAL_EVENTS } from '../../../src/ci/runtime';
+import { DEFAULT_CI_DEADLINE_MS } from '../../../src/commands/ci';
 import { QA_GATE_PIPELINE_STEP_COUNT } from '../../../src/config/qa-gate-pipeline';
 import { MAX_LANES } from '../../../src/tools/dispatch-lanes';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
@@ -54,6 +60,13 @@ const QA_GATE_CLAIM_FILES: Record<string, string> = {
 	'docs/swarm-briefing.md': `After every task a ${QA_GATE_PIPELINE_STEP_COUNT}-step QA gate verifies quality.\n\n## Pipeline (${QA_GATE_PIPELINE_STEP_COUNT} Steps)\n`,
 };
 
+const CI_CLAIM_FILES: Record<string, string> = {
+	'docs/ci.md':
+		`bunx opencode-swarm ci --timeout-ms ${DEFAULT_CI_DEADLINE_MS}\n` +
+		`If the shadow exceeds ${MAX_SHADOW_COPY_BYTES / (1024 * 1024)} MiB or ${MAX_SHADOW_COPY_ENTRIES} entries, it is rejected.\n` +
+		`The run journal is capped at ${MAX_CI_JOURNAL_EVENTS} events.\n`,
+};
+
 /** Writes every file the docs-claim detector pins, with optional overrides. */
 function writeDocsClaimFixture(
 	root: string,
@@ -62,6 +75,7 @@ function writeDocsClaimFixture(
 	const files = {
 		...QA_GATE_CLAIM_FILES,
 		...LANE_CAP_CLAIM_FILES,
+		...CI_CLAIM_FILES,
 		...overrides,
 	};
 	for (const [relative, contents] of Object.entries(files)) {
@@ -99,6 +113,7 @@ describe('drift-check: docs numeric claim detection', () => {
 		const { ['docs/planning.md']: _omitted, ...rest } = {
 			...QA_GATE_CLAIM_FILES,
 			...LANE_CAP_CLAIM_FILES,
+			...CI_CLAIM_FILES,
 		};
 		for (const [relative, contents] of Object.entries(rest)) {
 			writeFile(root, relative, contents);

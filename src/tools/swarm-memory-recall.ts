@@ -37,71 +37,86 @@ export const swarm_memory_recall: ReturnType<typeof createSwarmTool> =
 				.optional()
 				.describe('Maximum memories to return'),
 		},
-		execute: async (args: unknown, directory: string, ctx): Promise<string> => {
-			const { config } = _internals.loadPluginConfigWithMeta(directory);
-			if (config.memory?.enabled !== true) {
-				return JSON.stringify({
-					success: false,
-					disabled: true,
-					message: 'Swarm memory is disabled. Set swarm.memory.enabled=true.',
-				});
-			}
-			const parsed = RecallArgsSchema.safeParse(args);
-			if (!parsed.success) {
-				return JSON.stringify({
-					success: false,
-					error: parsed.error.issues.map((issue) => issue.message).join('; '),
-				});
-			}
-			const agent = getContextAgent(ctx);
-			// B.1 — ADDITIVE unit identity. Resolve from THIS session's
-			// currentTaskId only (never a parent session); `?? undefined`
-			// normalizes the null sentinel so an absent id records as NULL and
-			// attribution degrades to session-scoped runId. When the caller (e.g.
-			// the architect) recalls mid-task, currentTaskId is populated and the
-			// recall joins to the reward's unit — one of the cases B.2 makes
-			// effective.
-			const unitId = ctx?.sessionID
-				? (_internals.getAgentSession(ctx.sessionID)?.currentTaskId ??
-					undefined)
-				: undefined;
-			const gateway = _internals.createMemoryGateway(
-				{
-					directory,
-					sessionID: ctx?.sessionID,
-					agentRole: agent,
-					agentId: agent,
-					runId: ctx?.sessionID,
-					unitId,
-				},
-				{
-					config: config.memory,
-				},
-			);
-			try {
-				const bundle = await gateway.recall(parsed.data);
-				return JSON.stringify(
-					{
-						success: true,
-						bundle_id: bundle.id,
-						memory_ids: bundle.items.map((item) => item.record.id),
-						total: bundle.items.length,
-						token_estimate: bundle.tokenEstimate,
-						signals: bundle.items.map((item) => ({
-							memory_id: item.record.id,
-							relation: item.relation,
-							...item.signals,
-						})),
-						prompt_block: bundle.promptBlock,
-					},
-					null,
-					2,
-				);
-			} finally {
-				await gateway.dispose();
-			}
-		},
+		execute: async (args: unknown, directory: string, ctx): Promise<string> =>
+			computeSwarmMemoryRecall(args, directory, ctx),
 	});
+
+/**
+ * Compute core for `swarm_memory_recall` (#2499). The registered tool wraps
+ * this with default options so its behavior is byte-identical; the read-only
+ * MCP surface calls it with `{recordUsage: false}` so a query performs the
+ * identical retrieval without the recall-usage telemetry write.
+ */
+export async function computeSwarmMemoryRecall(
+	args: unknown,
+	directory: string,
+	ctx: { sessionID?: string; agent?: unknown } | undefined,
+	options?: { recordUsage?: boolean },
+): Promise<string> {
+	const { config } = _internals.loadPluginConfigWithMeta(directory);
+	if (config.memory?.enabled !== true) {
+		return JSON.stringify({
+			success: false,
+			disabled: true,
+			message: 'Swarm memory is disabled. Set swarm.memory.enabled=true.',
+		});
+	}
+	const parsed = RecallArgsSchema.safeParse(args);
+	if (!parsed.success) {
+		return JSON.stringify({
+			success: false,
+			error: parsed.error.issues.map((issue) => issue.message).join('; '),
+		});
+	}
+	const agent = getContextAgent(ctx);
+	// B.1 — ADDITIVE unit identity. Resolve from THIS session's
+	// currentTaskId only (never a parent session); `?? undefined`
+	// normalizes the null sentinel so an absent id records as NULL and
+	// attribution degrades to session-scoped runId. When the caller (e.g.
+	// the architect) recalls mid-task, currentTaskId is populated and the
+	// recall joins to the reward's unit — one of the cases B.2 makes
+	// effective.
+	const unitId = ctx?.sessionID
+		? (_internals.getAgentSession(ctx.sessionID)?.currentTaskId ?? undefined)
+		: undefined;
+	const gateway = _internals.createMemoryGateway(
+		{
+			directory,
+			sessionID: ctx?.sessionID,
+			agentRole: agent,
+			agentId: agent,
+			runId: ctx?.sessionID,
+			unitId,
+		},
+		{
+			config: config.memory,
+		},
+	);
+	try {
+		const bundle = await gateway.recall(parsed.data, {
+			recordUsage: options?.recordUsage !== false,
+		});
+		return JSON.stringify(
+			{
+				success: true,
+				bundle_id: bundle.id,
+				memory_ids: bundle.items.map((item) => item.record.id),
+				total: bundle.items.length,
+				token_estimate: bundle.tokenEstimate,
+				signals: bundle.items.map((item) => ({
+					memory_id: item.record.id,
+					relation: item.relation,
+					...item.signals,
+				})),
+				prompt_block: bundle.promptBlock,
+			},
+			null,
+			2,
+		);
+	} finally {
+		await gateway.dispose();
+	}
+}
 
 const RecallArgsSchema = z.object({
 	query: z.string().min(3),

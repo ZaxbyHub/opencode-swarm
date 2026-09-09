@@ -94,6 +94,7 @@ export const _internals = {
 	atomicWriteSwarmFileSync,
 	now: (): number => Date.now(),
 	randomBytes,
+	scopeDigest,
 };
 
 function pendingPath(directory: string, token: string): string {
@@ -113,31 +114,40 @@ function claimedPath(directory: string, token: string, digest: string): string {
 	);
 }
 
-/** Resolve the effective candidate set: the single target, or the explicit set. */
+/**
+ * Resolve the effective candidate set: the single target, or the explicit set.
+ * #2508: an explicit `kind` (e.g. 'swarm-close') binds into the scope digest
+ * so a token minted by one destructive surface cannot be consumed by another
+ * with the same candidate paths.
+ */
 function resolveCandidates(
 	scopeTarget: string,
 	extra?: { kind?: string; candidates?: PurgeCandidate[] },
 ): { kind: string; candidates: PurgeCandidate[] } {
 	if (extra?.candidates && extra.candidates.length > 0) {
-		const requestedKind =
-			typeof extra.kind === 'string' &&
-			/^[a-z][a-z0-9_-]{0,63}$/i.test(extra.kind)
-				? extra.kind
-				: undefined;
-		return { kind: requestedKind ?? 'set', candidates: extra.candidates };
+		return { kind: extra.kind ?? 'set', candidates: extra.candidates };
 	}
 	return {
-		kind: 'single',
+		kind: extra?.kind ?? 'single',
 		candidates: [{ path: scopeTarget, reason: 'operator-requested' }],
 	};
 }
 
 function scopeDigest(kind: string, candidates: PurgeCandidate[]): string {
-	const paths = candidates
-		.map((c) => path.resolve(c.path))
-		.sort()
-		.join('\n');
-	return createHash('sha256').update(`${kind}\0${paths}`).digest('hex');
+	const paths = candidates.map((c) => {
+		const resolved = path.resolve(c.path);
+		// #2508 hardening: NUL or newline inside a path would be indistinguishable
+		// from this digest's own separators. POSIX allows both in filenames, so
+		// reject instead of hashing an ambiguous byte stream.
+		if (resolved.includes('\0') || resolved.includes('\n')) {
+			throw new Error(
+				`Purge candidate path contains a NUL or newline separator character and cannot be scope-bound: ${JSON.stringify(resolved)}`,
+			);
+		}
+		return resolved;
+	});
+	const sorted = paths.sort().join('\n');
+	return createHash('sha256').update(`${kind}\0${sorted}`).digest('hex');
 }
 
 function mintToken(digest: string): string {
@@ -500,14 +510,40 @@ export function issueConfirmToken(
 }
 
 /**
- * Execute the pending purge under the exact token. Re-derives the CURRENT
- * scope digest: token match AND digest match AND fresh TTL required. The
- * exact token-addressed record is atomically renamed to a claimed record
- * before any candidate mutation; only that rename winner can proceed. The
- * claimed record is consumed best-effort after success, but is never
- * executable if cleanup fails or the process crashes.
+ * Validate a pending confirm token WITHOUT deleting anything (#2508): the
+ * same pending-present / exact-token / digest-match / fresh-TTL checks as
+ * `executeDestructivePurge`, with the same single-use consumption of the
+ * pending record. Callers that own non-deletion destructive work (e.g.
+ * `/swarm close`'s clean + align stages) use this to gate their own
+ * pipeline on the operator's exact confirmation.
  */
-export function executeDestructivePurge(
+export function consumeConfirmToken(
+	scopeTarget: string,
+	projectRoot: string,
+	token: string,
+	extra?: { kind?: string; candidates?: PurgeCandidate[] },
+): PurgeExecution {
+	const verdict = verifyPendingConfirmToken(
+		scopeTarget,
+		projectRoot,
+		token,
+		extra,
+	);
+	if (!verdict.ok) return verdict;
+	try {
+		_internals.rmSync(pendingPath(projectRoot), { force: true });
+	} catch (error) {
+		logger.log(
+			`[destructive-purge] could not consume pending record: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+	return { ok: true };
+}
+
+/** Shared validation core: every check except consumption and deletion. */
+function verifyPendingConfirmToken(
 	scopeTarget: string,
 	projectRoot: string,
 	token: string,
@@ -537,9 +573,31 @@ export function executeDestructivePurge(
 			reason: verification.reason ?? 'purge authorization verification failed',
 		};
 	}
-	const currentScope = resolveCandidates(scopeTarget, extra);
+	return { ok: true };
+}
+
+/**
+ * Execute the pending purge under the exact token. Re-derives the CURRENT
+ * scope digest: token match AND digest match AND fresh TTL required; the
+ * record is consumed on success (single use). Deletes ONLY the recorded
+ * candidate paths.
+ */
+export function executeDestructivePurge(
+	scopeTarget: string,
+	projectRoot: string,
+	token: string,
+	extra?: { kind?: string; candidates?: PurgeCandidate[] },
+): PurgeExecution {
+	const verdict = verifyPendingConfirmToken(
+		scopeTarget,
+		projectRoot,
+		token,
+		extra,
+	);
+	if (!verdict.ok) return verdict;
+	const { candidates } = resolveCandidates(scopeTarget, extra);
 	const purged: string[] = [];
-	for (const candidate of currentScope.candidates) {
+	for (const candidate of candidates) {
 		if (!_internals.existsSync(candidate.path)) continue;
 		try {
 			_internals.rmSync(candidate.path, { recursive: true, force: true });

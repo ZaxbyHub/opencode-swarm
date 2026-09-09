@@ -243,7 +243,10 @@ test('disjoint primary dirt still merges successfully', async () => {
 		fixture.worktreePath,
 		fixture.branchName,
 		fixture.root,
+		// #2508: this suite pins #2105 overlap mechanics, not the landing
+		// shape — committed landing keeps its original assertions.
 		'merge',
+		{ commitLanding: true },
 	);
 
 	expect(result).toMatchObject({ merged: true, strategy: 'merge' });

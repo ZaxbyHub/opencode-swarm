@@ -102,6 +102,8 @@ describe('savePlan acknowledged_removals reason hardening', () => {
 	test('accepts non-empty reason and source', async () => {
 		await savePlan(tmpDir, planWith(['1.1', '1.2']));
 
+		// #2531: savePlan now resolves an explicit durability result instead
+		// of void; a save with no degraded advisory surface is 'complete'.
 		await expect(
 			savePlan(tmpDir, planWith(['1.1']), {
 				acknowledged_removals: {
@@ -110,6 +112,6 @@ describe('savePlan acknowledged_removals reason hardening', () => {
 					source: 'test_direct_manager_call',
 				},
 			}),
-		).resolves.toBeUndefined();
+		).resolves.toEqual({ durability: 'complete', degraded_surfaces: [] });
 	});
 });

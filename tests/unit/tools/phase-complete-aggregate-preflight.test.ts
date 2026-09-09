@@ -342,4 +342,60 @@ describe('phase_complete aggregate observational preflight', () => {
 		);
 		expect(plan.phases[0].status).toBe('in_progress');
 	});
+
+	test('an incomplete-durability save is disclosed in the tool response warnings', async () => {
+		// #2531 (AC5): the manager's PlanSaveDurability outcome must reach the
+		// calling agent — a degraded advisory surface (plan.md) may not be
+		// silently swallowed by phase_complete.
+		fs.writeFileSync(
+			path.join(directory, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Durability disclosure',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [
+					{
+						id: 1,
+						name: 'Phase 1',
+						status: 'in_progress',
+						tasks: [],
+					},
+				],
+			}),
+		);
+		phaseCompletePreflightInternals.runCompletionVerifyGate = async () =>
+			pass();
+		phaseCompletePreflightInternals.runDriftGate = async () => pass();
+		phaseCompletePreflightInternals.runFinalReviewGate = async () => pass();
+		phaseCompletePreflightInternals.runHallucinationGate = async () => pass();
+		phaseCompletePreflightInternals.runMutationGate = async () => pass();
+		phaseCompletePreflightInternals.runPhaseCouncilGate = async () => pass();
+		phaseCompletePreflightInternals.runArchitectureSupervisorGate = async () =>
+			pass();
+		phaseCompletePreflightInternals.runFinalCouncilGate = async () => pass();
+		// The seam stub returns the incomplete shape directly (it does not
+		// delegate to the real savePlan), so this test exercises only the
+		// tool-response wiring and stays immune to cross-file mock pollution
+		// from suites that persistently mock the ledger module.
+		phaseCompleteCommitInternals.savePlan = async () => ({
+			durability: 'incomplete' as const,
+			degraded_surfaces: ['plan.md'],
+			md_write_error: 'simulated plan.md write failure',
+		});
+
+		const result = JSON.parse(
+			await executePhaseComplete(
+				{ phase: 1, sessionID: 'durability-disclosure-session' },
+				directory,
+			),
+		);
+
+		expect(result.success).toBe(true);
+		const durabilityWarning = (result.warnings as string[]).find((warning) =>
+			warning.includes('incomplete durability'),
+		);
+		expect(durabilityWarning).toBeDefined();
+		expect(durabilityWarning).toContain('plan.md');
+	});
 });

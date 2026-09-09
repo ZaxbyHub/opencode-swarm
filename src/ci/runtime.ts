@@ -31,6 +31,8 @@ import type { AdvisoryCiReport } from './evaluate.js';
  * line — so 200 covers large plans while still bounding memory. Mirrors the
  * named-cap pattern of MAX_PENDING_ADVISORIES (src/utils/advisory-queue.ts). */
 export const MAX_CI_JOURNAL_EVENTS = 200;
+const DEFAULT_CI_DEADLINE_MS = 300_000;
+const MAX_CI_DEADLINE_MS = 300_000;
 
 /** Terminal outcome vocabulary for an advisory CI run. */
 export type CiRunOutcome =
@@ -40,7 +42,7 @@ export type CiRunOutcome =
 	| 'deadline'
 	| 'error';
 
-export interface CiRunEvent {
+interface CiRunEvent {
 	seq: number;
 	type: string;
 	detail?: string;
@@ -50,8 +52,8 @@ export interface CiRunEvent {
 export interface CiEvaluateContext {
 	/** Append a bounded journal event. */
 	journal: (type: string, detail?: string) => void;
-	/** Register a cleanup callback; all callbacks run exactly once in the
-	 * runtime's finally block (even on cancel/deadline/error). */
+	/** Register a cleanup callback; callbacks run exactly once during or after
+	 * the runtime's cleanup drain (even on cancel/deadline/error). */
 	registerCleanup: (fn: () => void) => void;
 	/** Trips when the caller aborts (SIGINT/SIGTERM at the CLI layer). */
 	signal: AbortSignal;
@@ -62,7 +64,7 @@ export interface CiEvaluateContext {
 
 export interface CiRuntimeOptions {
 	directory: string;
-	/** Overall deadline for the whole run. Default 300s; clamps to >=1ms. */
+	/** Overall deadline for the whole run. Default 300s; clamps to 1..300s. */
 	deadlineMs?: number;
 	/** Caller-owned abort source (CLI wires SIGINT/SIGTERM). */
 	signal?: AbortSignal;
@@ -115,19 +117,42 @@ async function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
  *
  * Bounds: every stage is raced against both the caller's abort signal and
  * the overall deadline; the journal is capped; cleanup callbacks run exactly
- * once in `finally`. The evaluation callback receives the context above and
- * must not outlive the runtime (cleanup disposes its resources).
+ * once during or after the cleanup drain. Losing evaluation work may settle
+ * after the runtime outcome; late cleanup registration runs immediately.
  */
 export async function runAdvisoryCiRuntime(
 	options: CiRuntimeOptions,
 ): Promise<CiRunResult> {
-	const deadlineMs = Math.max(1, options.deadlineMs ?? 300_000);
+	const requestedDeadlineMs = options.deadlineMs ?? DEFAULT_CI_DEADLINE_MS;
+	// Direct callers bypass the CLI parser, so keep the runtime bounded even
+	// when they pass Infinity, NaN, or an out-of-range finite value.
+	const deadlineMs = Number.isFinite(requestedDeadlineMs)
+		? Math.min(MAX_CI_DEADLINE_MS, Math.max(1, requestedDeadlineMs))
+		: requestedDeadlineMs > 0
+			? MAX_CI_DEADLINE_MS
+			: 1;
 	const startedAt = Date.now();
 	const events: CiRunEvent[] = [];
 	let journalTruncated = 0;
 	let seq = 0;
 	const cleanups: Array<() => void> = [];
-	let cleanupsRan = false;
+	let cleanupDrainStarted = false;
+	const activeCleanups = new Set<() => void>();
+
+	const invokeCleanup = (fn: () => void) => {
+		// A pathological callback that registers itself must not recurse forever;
+		// distinct callbacks registered during cleanup still run immediately.
+		if (activeCleanups.has(fn)) return;
+		activeCleanups.add(fn);
+		try {
+			fn();
+		} catch {
+			// Cleanup is best-effort; a failing callback must not block the
+			// remaining ones or the outcome.
+		} finally {
+			activeCleanups.delete(fn);
+		}
+	};
 
 	const journal = (type: string, detail?: string) => {
 		seq++;
@@ -140,19 +165,20 @@ export async function runAdvisoryCiRuntime(
 	};
 
 	const registerCleanup = (fn: () => void) => {
+		if (cleanupDrainStarted) {
+			// Losing evaluation work can register after the runtime has settled.
+			// Run that callback now rather than appending to a closed drain.
+			invokeCleanup(fn);
+			return;
+		}
 		cleanups.push(fn);
 	};
 
 	const runCleanups = () => {
-		if (cleanupsRan) return;
-		cleanupsRan = true;
+		if (cleanupDrainStarted) return;
+		cleanupDrainStarted = true;
 		for (const fn of cleanups) {
-			try {
-				fn();
-			} catch {
-				// Cleanup is best-effort; a failing callback must not block the
-				// remaining ones or the outcome.
-			}
+			invokeCleanup(fn);
 		}
 	};
 
@@ -171,7 +197,7 @@ export async function runAdvisoryCiRuntime(
 	let cancelPromise: Promise<never> | undefined;
 
 	try {
-		journal('run_started', options.directory);
+		journal('run_started');
 
 		// One stage: the whole evaluation. A finer-grained stage split adds
 		// racing overhead without changing the outcome vocabulary; per-stage

@@ -10,6 +10,12 @@ import {
 	TOMBSTONE_MIN_AGE_MS,
 } from '../src/background/pending-delegations';
 import { MAX_RECOVERY_LEDGER_BYTES } from '../src/background/delegation-health';
+import { DEFAULT_CI_DEADLINE_MS } from '../src/commands/ci';
+import {
+	MAX_SHADOW_COPY_BYTES,
+	MAX_SHADOW_COPY_ENTRIES,
+} from '../src/ci/evaluate';
+import { MAX_CI_JOURNAL_EVENTS } from '../src/ci/runtime';
 
 type DriftSeverity = 'error' | 'warning' | 'notice';
 
@@ -116,6 +122,34 @@ const DOCS_NUMERIC_CLAIMS = [
 		regex: /scaled to surface size up to the (\d+)-lane cap/,
 		expected: MAX_LANES,
 		sourceName: 'MAX_LANES',
+	},
+	{
+		file: 'docs/ci.md',
+		label: 'advisory CI timeout example',
+		regex: /opencode-swarm ci --timeout-ms (\d+)/,
+		expected: DEFAULT_CI_DEADLINE_MS,
+		sourceName: 'DEFAULT_CI_DEADLINE_MS',
+	},
+	{
+		file: 'docs/ci.md',
+		label: 'advisory CI shadow-copy byte cap',
+		regex: /shadow exceeds (\d+) MiB/i,
+		expected: MAX_SHADOW_COPY_BYTES / (1024 * 1024),
+		sourceName: 'MAX_SHADOW_COPY_BYTES',
+	},
+	{
+		file: 'docs/ci.md',
+		label: 'advisory CI shadow-copy entry cap',
+		regex: /shadow exceeds \d+ MiB or (\d+) entries/i,
+		expected: MAX_SHADOW_COPY_ENTRIES,
+		sourceName: 'MAX_SHADOW_COPY_ENTRIES',
+	},
+	{
+		file: 'docs/ci.md',
+		label: 'advisory CI journal event cap',
+		regex: /journal is capped at (\d+) events/i,
+		expected: MAX_CI_JOURNAL_EVENTS,
+		sourceName: 'MAX_CI_JOURNAL_EVENTS',
 	},
 ] as const satisfies readonly DocsNumericClaim[];
 

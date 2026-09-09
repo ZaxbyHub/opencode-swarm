@@ -1,5 +1,72 @@
 # Changelog
 
+## [7.172.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.3...v7.172.4) (2026-09-09)
+
+
+### Bug Fixes
+
+* **ci:** close PR feedback for advisory runtime hardening ([c449f1b](https://github.com/ZaxbyHub/opencode-swarm/commit/c449f1be5202bf874e561911ad8522d7cd5192b5))
+* **ci:** harden advisory runtime follow-ups ([a1472fa](https://github.com/ZaxbyHub/opencode-swarm/commit/a1472fac191a6b5d7e9c0bf60b10203c1a71209a))
+
+## [7.172.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.2...v7.172.3) (2026-09-09)
+
+
+### Bug Fixes
+
+* **pr-review:** typed liveness terminal class for accepted-then-dead, stale and cancelled lanes (issue [#2615](https://github.com/ZaxbyHub/opencode-swarm/issues/2615)) ([3ea01cb](https://github.com/ZaxbyHub/opencode-swarm/commit/3ea01cbc736234f34957ffb16f24c24bcc5d8ca7))
+* **pr-review:** typed liveness terminal class for accepted-then-dead, stale and cancelled lanes (issue [#2615](https://github.com/ZaxbyHub/opencode-swarm/issues/2615)) ([283b019](https://github.com/ZaxbyHub/opencode-swarm/commit/283b019772100744dc5b538f44c4434f74948396))
+
+## [7.172.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.1...v7.172.2) (2026-09-09)
+
+
+### Bug Fixes
+
+* **ci:** harden issue pipeline publication ([701e628](https://github.com/ZaxbyHub/opencode-swarm/commit/701e628206badece23c92fefd941a778973b2c84))
+* **ci:** reject malformed issue URL paths ([67baf88](https://github.com/ZaxbyHub/opencode-swarm/commit/67baf88b6e0e5d83ffe0ff8d01995a1db5f402df))
+* **dispatch:** refuse unregistered lane agents at dispatch time (issue [#2614](https://github.com/ZaxbyHub/opencode-swarm/issues/2614)) ([ba38728](https://github.com/ZaxbyHub/opencode-swarm/commit/ba38728ac6f707b443abea5afb9decfd9220689d))
+* **dispatch:** refuse unregistered lane agents at dispatch time (issue [#2614](https://github.com/ZaxbyHub/opencode-swarm/issues/2614)) ([eb45127](https://github.com/ZaxbyHub/opencode-swarm/commit/eb45127ce3fa05662d41583f89903fe4cfa02843))
+
+## [7.172.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.0...v7.172.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **plan:** ledger-first recovery, fatal bootstrap decode, snapshot validation, save verification ([#2531](https://github.com/ZaxbyHub/opencode-swarm/issues/2531)) ([9811f52](https://github.com/ZaxbyHub/opencode-swarm/commit/9811f52c33930de710e490afa08603ec207adfbb))
+
+## [7.172.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.171.2...v7.172.0) (2026-09-09)
+
+
+### Features
+
+* **ci:** gated implementation pipeline GitHub Action ([#2498](https://github.com/ZaxbyHub/opencode-swarm/issues/2498)) ([81f3623](https://github.com/ZaxbyHub/opencode-swarm/commit/81f36230c4f92cd7584c0b776926fe7733e43aad))
+* **mcp:** read-only MCP verification surface over stdio ([#2499](https://github.com/ZaxbyHub/opencode-swarm/issues/2499)) ([3199c3c](https://github.com/ZaxbyHub/opencode-swarm/commit/3199c3cd69d25044f30ee98066379132fac29fa4))
+
+
+### Bug Fixes
+
+* **ci:** close [#2650](https://github.com/ZaxbyHub/opencode-swarm/issues/2650) review feedback — distinct publish exits, PR reuse, timeouts, pinned posture ([8413169](https://github.com/ZaxbyHub/opencode-swarm/commit/84131697a8b40773c883725ad4633505189a8325))
+* **delegation:** preserve read uncertainty, truthful recovery status ([aa876ab](https://github.com/ZaxbyHub/opencode-swarm/commit/aa876ab146779faa57b8d67d58e44c539f40fd37))
+* **pr-review:** resolve validated findings from swarm review ([db9bbf3](https://github.com/ZaxbyHub/opencode-swarm/commit/db9bbf38ebdedaf2c3efc9a9dd62edeba8cd9f70))
+* **test:** canonicalize the pipeline test's cross-repo tmpdir (FR-011) ([4104565](https://github.com/ZaxbyHub/opencode-swarm/commit/4104565730dcdc0599c5640ec0fd32120199d6e9))
+* **test:** compose-test escape input must not embed the project root ([433d59c](https://github.com/ZaxbyHub/opencode-swarm/commit/433d59c2fcf37b61436257d44597cdeffc606bf7))
+* **test:** repair two latent diff.test.ts defects the dash guard exposed ([ff9edd3](https://github.com/ZaxbyHub/opencode-swarm/commit/ff9edd32ec23806e6f9c3ab5f87994c0878c0e5a))
+
+## [7.171.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.171.1...v7.171.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* **retention:** refresh registry for current parity paths ([2521754](https://github.com/ZaxbyHub/opencode-swarm/commit/2521754f9c29aeae926ee676306f4086c07ef6b8))
+* **sqlite:** qualify observability and legacy parity ([00a34a9](https://github.com/ZaxbyHub/opencode-swarm/commit/00a34a9c13de55c3996930e5c3130ff2e5896b18))
+
+## [7.171.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.171.0...v7.171.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **observability:** suppress live/import double-counting and prove SQLite parity ([#2487](https://github.com/ZaxbyHub/opencode-swarm/issues/2487)) ([4230171](https://github.com/ZaxbyHub/opencode-swarm/commit/42301715a9d8e341d83ada5890d699b7c9fd3d5a))
+* **pr-review:** complete PR-workflow transition authority and critic settlement wiring ([0b58097](https://github.com/ZaxbyHub/opencode-swarm/commit/0b58097456847f33129eb8a355c4a2de8544e907))
+
 ## [7.171.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.170.2...v7.171.0) (2026-09-08)
 
 

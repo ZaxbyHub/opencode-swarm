@@ -43,7 +43,11 @@ export interface PruneDirectoryOptions {
 	maxScan?: number;
 	/** Count victims without deleting (blast-radius rehearsal / dry_run). */
 	dryRun?: boolean;
+	/** Optional allow-list for entries eligible for age/count pruning. */
+	includeEntry?: PruneEntryFilter;
 }
+
+export type PruneEntryFilter = (name: string, stat: fs.Stats) => boolean;
 
 export interface PruneCandidate {
 	name: string;
@@ -123,6 +127,7 @@ function effectiveEntryMtime(entryPath: string, ownMtimeMs: number): number {
 export function listPruneCandidates(
 	dir: string,
 	maxScan: number,
+	includeEntry: PruneEntryFilter = () => true,
 ): { candidates: PruneCandidate[]; refusedSymlinks: string[] } {
 	const candidates: PruneCandidate[] = [];
 	const refusedSymlinks: string[] = [];
@@ -140,6 +145,7 @@ export function listPruneCandidates(
 				refusedSymlinks.push(name);
 				continue;
 			}
+			if (!includeEntry(name, stat)) continue;
 			candidates.push({
 				name,
 				mtimeMs: stat.isDirectory()
@@ -163,7 +169,7 @@ export async function pruneDirectory(
 ): Promise<number> {
 	const now = opts.now ?? Date.now();
 	const maxScan = opts.maxScan ?? 100_000;
-	const { candidates } = listPruneCandidates(dir, maxScan);
+	const { candidates } = listPruneCandidates(dir, maxScan, opts.includeEntry);
 	if (candidates.length === 0) return 0;
 
 	// Oldest first: mtime ascending, then code-unit name order for equal

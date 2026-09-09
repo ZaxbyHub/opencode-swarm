@@ -26,9 +26,9 @@ import {
 	type BackgroundDelegationResult,
 	type BackgroundDelegationWorkflowLaneRecovery,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
-	findByBatchId,
+	findByBatchIdDetailed,
 	publishPrReviewResultReceipt,
-	readDelegations,
+	readDelegationsDetailed,
 	type SweepableDelegationStatus,
 	sweepStaleDelegations,
 } from '../background/pending-delegations.js';
@@ -1800,7 +1800,16 @@ export async function submitPrReviewResult(
 			reason: 'invalid child session or result envelope',
 		};
 	}
-	const preliminary = readDelegations(directory).filter(
+	// Issue #2511: an unreadable store is distinct from "no such delegation" —
+	// reject with a typed reason instead of a misleading "found 0".
+	const childRead = readDelegationsDetailed(directory);
+	if (childRead.status === 'uncertain') {
+		return {
+			status: 'rejected',
+			reason: `delegation store unreadable after ${childRead.attempts} attempts; child lookup uncertain (${childRead.reason})`,
+		};
+	}
+	const preliminary = childRead.records.filter(
 		(record) =>
 			record.subagentSessionId === child &&
 			record.correlationId === child &&
@@ -2626,6 +2635,15 @@ export interface PrWorkflowStaleLaneSettlement {
 	probeRetainedCorrelationIds?: string[];
 	/** Set when the probe could not produce evidence; absent when it ran. */
 	probeDegradedReason?: PrWorkflowLaneProbeDegradedReason;
+	/**
+	 * Present ONLY when the advisory delegation-store read stayed uncertain
+	 * after its bounded retry (issue #2511). Every lane count in this
+	 * settlement is then UNKNOWN, not zero: `openLanes`-gated consumers
+	 * (`abortPrWorkflow`, `recoverArmedPrWorkflow`,
+	 * `transitionPrReviewToFeedback`, `completePrWorkflow`) must fail closed
+	 * on this field instead of reading `openLanes === 0` as an all-clear.
+	 */
+	uncertainty?: { reason: string; attempts: number };
 	/** Operator-facing disclosure; `undefined` when nothing was settled or retained. */
 	disclosure?: string;
 }
@@ -3052,7 +3070,21 @@ export async function settlePresumedStalePrWorkflowLanes(
 	const now = Date.now();
 	const open: BackgroundDelegationRecord[] = [];
 	const presumedStale: BackgroundDelegationRecord[] = [];
-	for (const record of readDelegations(directory)) {
+	// Issue #2511: an unreadable store is UNKNOWN lane state, never a clean
+	// zero-lane all-clear. Every openLanes-gated consumer must fail closed on
+	// the carried `uncertainty` instead of reading openLanes === 0 as settled.
+	const laneRead = readDelegationsDetailed(directory);
+	if (laneRead.status === 'uncertain') {
+		return {
+			openLaneIds: [],
+			openLanes: 0,
+			freshOpenLanes: 0,
+			presumedStaleLaneIds: [],
+			...(horizonConflictNote ? { horizonConflictNote } : {}),
+			uncertainty: { reason: laneRead.reason, attempts: laneRead.attempts },
+		};
+	}
+	for (const record of laneRead.records) {
 		if (!isOpenPrWorkflowLane(record, sessionID)) continue;
 		if (now - record.updatedAt > horizon.horizonMs) {
 			presumedStale.push(record);
@@ -3402,6 +3434,13 @@ export async function settlePresumedStalePrWorkflowLanes(
  */
 interface OverriddenProbeRetainedLaneOutcome {
 	/**
+	 * Present when the post-sweep re-read could not establish authoritative
+	 * state (issue #2511): every id list in this outcome is then UNKNOWN, not
+	 * empty, and the recovery disclosure must say so instead of reporting a
+	 * zero-open-lane all-clear.
+	 */
+	delegationReadUncertain?: string;
+	/**
 	 * Every still-open `swarm-pr-*` record of THIS session, targeted or not. This
 	 * is the restartability answer, because `countOpenPrWorkflowLanes` is what
 	 * refuses the next checkout preparation and it ignores which lanes an
@@ -3553,7 +3592,16 @@ async function finalizeOverriddenProbeRetainedLanes(
 		finalizedLaneIds: [],
 		sparedLaneDescriptions: [],
 	};
-	for (const record of readDelegations(directory)) {
+	// Issue #2511: an unreadable store must not render as a zero-open-lane
+	// all-clear in the recovery disclosure — the ids lists are then UNKNOWN.
+	const finalizeRead = readDelegationsDetailed(directory);
+	if (finalizeRead.status === 'uncertain') {
+		return {
+			...outcome,
+			delegationReadUncertain: `${finalizeRead.reason} (after ${finalizeRead.attempts} attempts)`,
+		};
+	}
+	for (const record of finalizeRead.records) {
 		if (isOpenPrWorkflowLane(record, sessionID)) {
 			outcome.sessionOpenLaneIds.push(record.correlationId);
 		}
@@ -3795,6 +3843,14 @@ export async function abortPrWorkflow(
 		options.kind === 'force' &&
 		laneSettlement.freshOpenLanes === 0 &&
 		probeRetainedLanes.length > 0;
+	if (laneSettlement.uncertainty) {
+		// Issue #2511: lane state is UNREADABLE, not empty — aborting here would
+		// clear the gate over possibly-live lanes. `force` does not override an
+		// unreadable store: it overrides probe retention of KNOWN lanes only.
+		throw new Error(
+			`BLOCKED: ${state.mode} abort refused while the delegation store is unreadable after ${laneSettlement.uncertainty.attempts} attempts (${laneSettlement.uncertainty.reason}); open lanes are UNKNOWN, not absent. Restore the store (see the settlement disclosure) or retry once it is readable before aborting.`,
+		);
+	}
 	if (laneSettlement.openLanes > 0 && !overridesProbeRetention) {
 		const laneIds = laneSettlement.openLaneIds
 			.filter(Boolean)
@@ -4067,13 +4123,15 @@ export async function abortPrWorkflow(
 						.join(
 							', ',
 						)}). This abort did not discard them — check collect_lane_results before assuming that work is gone.`) +
-			(overrideOutcome.sessionOpenLaneIds.length === 0
-				? ' A new PR workflow can now be started for this session.'
-				: ` WARNING: ${overrideOutcome.sessionOpenLaneIds.length} PR workflow delegation record(s) for this session are still open (correlationId: ${overrideOutcome.sessionOpenLaneIds
-						.slice(0, MAX_DISCLOSED_LANE_IDS)
-						.join(
-							', ',
-						)}) and will keep refusing PR workflow checkout preparation for this session until they settle.`)
+			(overrideOutcome.delegationReadUncertain !== undefined
+				? ` WARNING: the post-abort delegation-store re-read was unreadable (${overrideOutcome.delegationReadUncertain}); whether any PR workflow delegation record(s) for this session remain open is UNKNOWN — revalidate with pr_workflow_status before assuming a new PR workflow can start.`
+				: overrideOutcome.sessionOpenLaneIds.length === 0
+					? ' A new PR workflow can now be started for this session.'
+					: ` WARNING: ${overrideOutcome.sessionOpenLaneIds.length} PR workflow delegation record(s) for this session are still open (correlationId: ${overrideOutcome.sessionOpenLaneIds
+							.slice(0, MAX_DISCLOSED_LANE_IDS)
+							.join(
+								', ',
+							)}) and will keep refusing PR workflow checkout preparation for this session until they settle.`)
 		: undefined;
 	return {
 		mode: state.mode,
@@ -4258,6 +4316,13 @@ export async function recoverArmedPrWorkflow(
 				state.sessionID,
 				request.laneLiveness,
 			);
+			if (laneSettlement.uncertainty) {
+				// Issue #2511: an unreadable store means lane state is UNKNOWN —
+				// armed recovery must not report an all-clear it cannot see.
+				throw new Error(
+					`BLOCKED: armed recovery refused while the delegation store is unreadable after ${laneSettlement.uncertainty.attempts} attempts (${laneSettlement.uncertainty.reason}); open lanes are UNKNOWN, not absent. Restore the store before recovering.`,
+				);
+			}
 			if (laneSettlement.openLanes > 0) {
 				const laneIds = laneSettlement.openLaneIds
 					.filter(Boolean)
@@ -4281,6 +4346,12 @@ export async function recoverArmedPrWorkflow(
 						Record<PrReviewBaseDimensionId, PrReviewDimensionCancellationRecord>
 				  >
 				| undefined = state.prReviewDimensionCancellations;
+			// One recovery instant for every surface: the reducer-owned
+			// dimension cancellations, the audit event, the terminal state, and
+			// the returned receipt must all carry the same timestamp (pinned by
+			// the armed-recovery contract tests). A second clock read here can
+			// straddle a millisecond boundary and desync them.
+			const recoveredAt = isoNow();
 			if (state.mode === 'PR_REVIEW' && state.prHeadSha) {
 				const ctx = await createPrReviewGateContext(directory, state);
 				const settlement = derivePrReviewDimensionSettlement(
@@ -4305,7 +4376,7 @@ export async function recoverArmedPrWorkflow(
 							generation: state.revision,
 						},
 						dimensionsToCancel: cancelledDimensions,
-						nowIso: isoNow(),
+						nowIso: recoveredAt,
 						reason: sanitizedReason,
 					});
 					if (recoveryOutcome.status === 'rejected') {
@@ -4318,7 +4389,6 @@ export async function recoverArmedPrWorkflow(
 							.prReviewDimensionCancellations ?? cancellations;
 				}
 			}
-			const recoveredAt = isoNow();
 			// 2. Exactly ONE bounded audit event, appended BEFORE the state
 			// mutation: no lane output, prompts, or secrets — bounded identity and
 			// outcome fields only. Best-effort (non-fatal), same discipline as abort.
@@ -4490,7 +4560,15 @@ export async function rebindPrFeedbackHead(
 			'BLOCKED: PR_FEEDBACK rebind is refused while publication is armed; complete the workflow (or push the bound commit) before rebinding.',
 		);
 	}
-	const openLanes = readDelegations(directory).filter(
+	// Issue #2511: an unreadable store must fail closed — the rebind guard
+	// cannot verify in-flight lanes, so rebind is refused until it is readable.
+	const rebindRead = readDelegationsDetailed(directory);
+	if (rebindRead.status === 'uncertain') {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK rebind refused while the delegation store is unreadable after ${rebindRead.attempts} attempts (${rebindRead.reason}); in-flight lanes are UNKNOWN. Restore the store before rebinding.`,
+		);
+	}
+	const openLanes = rebindRead.records.filter(
 		(record) =>
 			record.parentSessionId === state.sessionID &&
 			record.mode?.startsWith('swarm-pr-') &&
@@ -4840,15 +4918,50 @@ function latestDelegationRecord(
 	return sorted[0] ?? null;
 }
 
+/**
+ * Bounded delegation-read uncertainty log dedup (issue #2511): scope+reason
+ * keyed, FIFO-evicted — a persistently unreadable store polled in a loop logs
+ * each distinct (scope, reason) once per process, not once per iteration.
+ */
+const DELEGATION_READ_UNCERTAIN_LOG_LIMIT = 64;
+const delegationReadUncertainLogged = new Set<string>();
+
+function warnDelegationReadUncertainOnce(
+	scope: string,
+	uncertain: { reason: string; attempts: number },
+): void {
+	const key = `${scope}\0${uncertain.reason}`;
+	if (delegationReadUncertainLogged.has(key)) return;
+	if (
+		delegationReadUncertainLogged.size >= DELEGATION_READ_UNCERTAIN_LOG_LIMIT
+	) {
+		const oldest = delegationReadUncertainLogged.values().next().value;
+		if (oldest !== undefined) delegationReadUncertainLogged.delete(oldest);
+	}
+	delegationReadUncertainLogged.add(key);
+	warn(
+		`PR workflow gate: delegation store unreadable after ${uncertain.attempts} attempts (${uncertain.reason}); ${scope} is UNKNOWN, not absent`,
+	);
+}
+
 function batchLaneRecords(
 	directory: string,
 	state: PrWorkflowGateState,
 	batchId: string,
 	laneId: string,
 ): BackgroundDelegationRecord[] {
-	return findByBatchId(directory, batchId, {
+	const outcome = findByBatchIdDetailed(directory, batchId, {
 		parentSessionId: state.sessionID,
-	}).filter((record) => record.laneId === laneId);
+	});
+	if (outcome.status === 'uncertain') {
+		// Issue #2511: circuit/probe classification must never read an
+		// unreadable store as "no records" — the honest answer is unknown, and
+		// an empty set here only degrades signal collection (never claims
+		// terminal).
+		warnDelegationReadUncertainOnce('batch lane records', outcome);
+		return [];
+	}
+	return outcome.value.filter((record) => record.laneId === laneId);
 }
 
 function batchIsTerminal(
@@ -4856,12 +4969,17 @@ function batchIsTerminal(
 	state: PrWorkflowGateState,
 	batchId: string,
 ): boolean {
-	const records = findByBatchId(directory, batchId, {
+	const outcome = findByBatchIdDetailed(directory, batchId, {
 		parentSessionId: state.sessionID,
 	});
+	if (outcome.status === 'uncertain') {
+		// Issue #2511: an unreadable store can never prove terminality.
+		warnDelegationReadUncertainOnce('batch terminality', outcome);
+		return false;
+	}
 	return (
-		records.length > 0 &&
-		records.every(
+		outcome.value.length > 0 &&
+		outcome.value.every(
 			(record) =>
 				TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status) ||
 				record.status === 'consumed',
@@ -5874,9 +5992,21 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 				normalizedSessionID,
 			);
 			if (!state || state.mode !== 'PR_REVIEW') return false;
-			const batchRecords = findByBatchId(directory, normalizedBatchId, {
+			const batchRead = findByBatchIdDetailed(directory, normalizedBatchId, {
 				parentSessionId: normalizedSessionID,
 			});
+			if (batchRead.status === 'uncertain') {
+				// Issue #2511 fail-closed: the rollback depends on proving the
+				// batch has NO delegation records; an unreadable store cannot
+				// prove that, so the admission stays (the dispatch path retries
+				// or the operator restores the store).
+				warnDelegationReadUncertainOnce(
+					'base admission rollback existence guard',
+					batchRead,
+				);
+				return false;
+			}
+			const batchRecords = batchRead.value;
 			// Issue #2385: the rollback transition is REDUCER-OWNED — the
 			// adapter emits `base_admission_rolled_back`, and a typed rejection
 			// (not-last batch / already-launched batch) maps to the same silent
@@ -6471,9 +6601,21 @@ function pruneWorkflowBatches(
 	for (const batch of validationBatches) {
 		if (batch.phase !== 'reviewer') continue;
 		if (survivingValidationIds.has(batch.batchId)) continue;
-		for (const record of findByBatchId(directory, batch.batchId, {
+		const batchRead = findByBatchIdDetailed(directory, batch.batchId, {
 			parentSessionId: state.sessionID,
-		})) {
+		});
+		if (batchRead.status === 'uncertain') {
+			// Issue #2511 audited safe-skip: retiring a batch without its
+			// child-session ledger entries would make forbidden reviewer
+			// sessions silently reusable. Abandon this prune pass — the GC
+			// re-runs on the next state transition once the store is readable.
+			warnDelegationReadUncertainOnce(
+				'retired-reviewer session collection',
+				batchRead,
+			);
+			return null;
+		}
+		for (const record of batchRead.value) {
 			const subagentSessionId = record.subagentSessionId?.trim();
 			if (subagentSessionId) retiredReviewerSessionIds.add(subagentSessionId);
 		}
@@ -7695,9 +7837,17 @@ export async function assertPrFeedbackGatePhaseSettled(
 			`BLOCKED: PR_FEEDBACK ${phase} requires one complete, non-degraded positive verdict row per inventory item`,
 		);
 	}
-	const record = findByBatchId(directory, batch.batchId, {
+	const batchRead = findByBatchIdDetailed(directory, batch.batchId, {
 		parentSessionId: state.sessionID,
-	}).find((candidate) => candidate.laneId === batch.laneId);
+	});
+	if (batchRead.status === 'uncertain') {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK ${phase} gate cannot be validated: the delegation store is unreadable after ${batchRead.attempts} attempts (${batchRead.reason}); the batch's durable child record is UNKNOWN, not absent. Restore the store and re-validate.`,
+		);
+	}
+	const record = batchRead.value.find(
+		(candidate) => candidate.laneId === batch.laneId,
+	);
 	if (record?.workspace?.dirtyHash !== currentDigest) {
 		throw new Error(
 			`BLOCKED: PR_FEEDBACK ${phase} artifact is not bound to the current revision digest`,
@@ -7726,9 +7876,17 @@ function assertIndependentFeedbackGateSessions(
 	);
 	const seenSessions = new Set<string>();
 	for (const batch of batches) {
-		const matching = findByBatchId(directory, batch.batchId, {
+		const batchRead = findByBatchIdDetailed(directory, batch.batchId, {
 			parentSessionId: state.sessionID,
-		}).filter((record) => record.laneId === batch.laneId);
+		});
+		if (batchRead.status === 'uncertain') {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK ${batch.phase} cannot be validated: the delegation store is unreadable after ${batchRead.attempts} attempts (${batchRead.reason}); the batch's durable child session is UNKNOWN, not absent. Restore the store and re-validate.`,
+			);
+		}
+		const matching = batchRead.value.filter(
+			(record) => record.laneId === batch.laneId,
+		);
 		if (matching.length !== 1) {
 			throw new Error(
 				`BLOCKED: PR_FEEDBACK ${batch.phase} must resolve from exactly one durable child session`,
@@ -10775,6 +10933,13 @@ async function assertPrReviewTerminalReady(
 		state.sessionID,
 		laneLiveness,
 	);
+	if (laneSettlement.uncertainty) {
+		// Issue #2511: lane state is UNREADABLE — transitioning on an empty
+		// reading would abandon possibly-live review lanes.
+		throw new Error(
+			`BLOCKED: PR_REVIEW transition refused while the delegation store is unreadable after ${laneSettlement.uncertainty.attempts} attempts (${laneSettlement.uncertainty.reason}); open lanes are UNKNOWN, not absent. Restore the store before transitioning.`,
+		);
+	}
 	if (laneSettlement.openLanes > 0) {
 		throw new Error(
 			`BLOCKED: PR_REVIEW transition has ${laneSettlement.openLanes} unsettled PR workflow lane(s)` +
@@ -11887,6 +12052,13 @@ export async function completePrWorkflow(
 		state.sessionID,
 		options?.laneLiveness,
 	);
+	if (laneSettlement.uncertainty) {
+		// Issue #2511: an unreadable store must not clear the gate or admit a
+		// NO_COVERAGE/approved terminal — lanes are UNKNOWN, not settled.
+		throw new Error(
+			`BLOCKED: ${expectedMode} completion refused while the delegation store is unreadable after ${laneSettlement.uncertainty.attempts} attempts (${laneSettlement.uncertainty.reason}); open lanes are UNKNOWN, not absent. Restore the store and re-run completion (a healthy empty store still completes through its valid INCOMPLETE route).`,
+		);
+	}
 	if (laneSettlement.openLanes > 0) {
 		throw new Error(
 			`BLOCKED: ${expectedMode} completion has ${laneSettlement.openLanes} unsettled PR workflow lane(s)` +
@@ -12394,6 +12566,9 @@ export const _test_exports = {
 		// not carry dedup state between suites — otherwise suite order changes
 		// which diagnostics fire.
 		malformedCircuitDiagnosticsSeen.clear();
+		// Issue #2511: same isolation rule for the delegation-read uncertainty
+		// log dedup.
+		delegationReadUncertainLogged.clear();
 		_test_exports.beforeTerminalClear = undefined;
 		_test_exports.beforeAbortClear = undefined;
 		_test_exports.beforePrFeedbackTransitionLock = undefined;
@@ -14306,9 +14481,17 @@ function derivePrReviewCandidateInventory(
 	const extractedLaneKeys = new Set<string>();
 	for (const source of sources) {
 		let resolvedArtifact = false;
-		for (const record of findByBatchId(directory, source.batchId, {
+		const sourceRead = findByBatchIdDetailed(directory, source.batchId, {
 			parentSessionId: state.sessionID,
-		})) {
+		});
+		if (sourceRead.status === 'uncertain') {
+			// Issue #2511 fail-closed: the inventory must not silently drop a
+			// source family whose provenance records are UNKNOWN.
+			throw new Error(
+				`BLOCKED: PR_REVIEW discovery provenance cannot be read for ${source.workflowLane ?? source.laneId}: the delegation store is unreadable after ${sourceRead.attempts} attempts (${sourceRead.reason}); the lane's records are UNKNOWN, not absent. Restore the store and re-run discovery.`,
+			);
+		}
+		for (const record of sourceRead.value) {
 			// Identity checks stay hard (lane, mode, exact head). Coverage-quality
 			// flags (status, degraded output) deliberately do NOT skip here: a
 			// micro lane that ended degraded after retries was already accepted by
@@ -14655,9 +14838,17 @@ function reviewerSubagentSessionIds(
 	for (const reviewerBatch of (state.prReviewValidationBatches ?? []).filter(
 		(batch) => batch.phase === 'reviewer',
 	)) {
-		for (const record of findByBatchId(directory, reviewerBatch.batchId, {
+		const batchRead = findByBatchIdDetailed(directory, reviewerBatch.batchId, {
 			parentSessionId: state.sessionID,
-		})) {
+		});
+		if (batchRead.status === 'uncertain') {
+			// Issue #2511 fail-closed: an incomplete forbidden set would let a
+			// critic reuse a reviewer session that a pending record can prove.
+			throw new Error(
+				`BLOCKED: PR_REVIEW critic reuse ban cannot be derived: the delegation store is unreadable after ${batchRead.attempts} attempts (${batchRead.reason}); reviewer batch ${reviewerBatch.batchId}'s child sessions are UNKNOWN, not absent. Restore the store and re-derive.`,
+			);
+		}
+		for (const record of batchRead.value) {
 			const subagentSessionId = record.subagentSessionId?.trim();
 			if (subagentSessionId) forbidden.add(subagentSessionId);
 		}
@@ -15012,7 +15203,7 @@ interface ExpectedWorkflowLane {
 }
 
 interface QualifiedBatchRecord {
-	record: ReturnType<typeof findByBatchId>[number];
+	record: BackgroundDelegationRecord;
 	expectedLane: ExpectedWorkflowLane;
 	expectedWorkflowLane: string;
 	expectedOwnedLanes: string[];
@@ -15334,9 +15525,18 @@ function recordsPassingBatchIntegrity(
 	forbiddenSubagentSessionIds: ReadonlySet<string> = new Set(),
 	diagnostics?: string[],
 ): QualifiedBatchRecord[] {
-	const records = findByBatchId(directory, batchId, {
+	const batchRead = findByBatchIdDetailed(directory, batchId, {
 		parentSessionId: state.sessionID,
 	});
+	if (batchRead.status === 'uncertain') {
+		// Issue #2511 fail-closed: integrity analysis over an empty record set
+		// would read "no records" as "no lane ever ran" — an unreadable store
+		// proves nothing either way.
+		throw new Error(
+			`BLOCKED: PR_REVIEW batch integrity cannot be analyzed for ${batchId}: the delegation store is unreadable after ${batchRead.attempts} attempts (${batchRead.reason}); the batch's records are UNKNOWN, not absent. Restore the store and re-validate.`,
+		);
+	}
+	const records = batchRead.value;
 	const analyses = analyzePrReviewBatchRecordIntegrity({
 		batchId,
 		expectedLanes,
@@ -15748,7 +15948,7 @@ function analyzeLaneArtifactIntegrity(args: {
 function loadArtifactPassingLaneIntegrity(
 	directory: string,
 	state: PrWorkflowGateState,
-	record: ReturnType<typeof findByBatchId>[number],
+	record: BackgroundDelegationRecord,
 	expectedMode: string,
 	expectedWorkflowLane: string,
 	expectedRevisionDigest: string,
@@ -15792,7 +15992,7 @@ function loadArtifactPassingLaneIntegrity(
 function workflowArtifactHasContractMarker(
 	directory: string,
 	state: PrWorkflowGateState,
-	record: ReturnType<typeof findByBatchId>[number],
+	record: BackgroundDelegationRecord,
 	expectedMode: string,
 	expectedWorkflowLane: string,
 	reviewItemIds?: readonly string[],

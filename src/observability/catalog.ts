@@ -1,7 +1,7 @@
 /**
  * The event catalog (issue #2029).
  *
- * Exactly 62 entries, matching the `TelemetryEvent` union at
+ * Exactly 63 entries, matching the `TelemetryEvent` union at
  * `src/telemetry.ts:20-172`. Thirty-eight predate the #2029 contract; the 39th is
  * `agent_conflict_detected` (previously emitted through a force-cast past the
  * type system), the 40th is `close_archive_result` (issue #2030 — the
@@ -32,7 +32,8 @@
  * `context_source_attribution` and the 61st is `verdict_row_pipe_recovery` and the 62nd is `training_vault_health`
  * (issue #2482 — D3: honest savings attribution with the omit-when-unknown
  * rule, and the #2184 verdict-row pipe-recovery fidelity class in the event
- * lifecycle). These late
+ * lifecycle). The 63rd is `delegation_read_uncertain` (issue #2511 —
+ * bounded advisory-reader uncertainty signal). These late
  * additions are instances
  * of the defect class this contract exists to close: an event kind entering
  * the stream with no registration.
@@ -95,7 +96,7 @@ export interface CatalogEntry {
 	/**
 	 * Whether an event of this kind must carry `trace.parentSpanId`.
 	 *
-	 * `false` for all 62 entries today, and that is a truthful statement about
+	 * `false` for all 63 entries today, and that is a truthful statement about
 	 * the current system rather than a placeholder: no producer supplies a
 	 * parent span, so `createObservation` never sets one. Setting this to `true`
 	 * for a kind whose producer cannot supply a parent would make every
@@ -185,7 +186,7 @@ const CONSUMER_COST_JOIN = Object.freeze([
 /** Live reader of reviewer-gate decisions. */
 const CONSUMER_GATE_STATS = Object.freeze(['src/evaluation/gate-stats.ts:99']);
 /** In-process listener that tracks last-activity per session. */
-const CONSUMER_HEARTBEAT_LISTENER = Object.freeze(['src/telemetry.ts:268']);
+const CONSUMER_HEARTBEAT_LISTENER = Object.freeze(['src/telemetry.ts:269']);
 
 interface CatalogEntryInput {
 	readonly category: EventCategory;
@@ -236,7 +237,7 @@ function defineEntry(kind: string, input: CatalogEntryInput): CatalogEntry {
  * Producer lines were derived by reading the emit call sites, not by memory:
  * the convenience helpers live at `src/telemetry.ts:597-1218`, the six "dark"
  * kinds (documented at `src/telemetry.ts:44` as "emitted but no live parallel
- * paths") at `src/evidence/lock.ts:86,94,129`, `src/plan/manager.ts:335,1724`
+ * paths") at `src/evidence/lock.ts:86,94,129`, `src/plan/manager.ts:337,1724`
  * and `src/plan/ledger.ts:681`, and the force-cast kind at
  * `src/hooks/conflict-resolution.ts:73`.
  */
@@ -248,7 +249,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:654',
+			producer: 'src/telemetry.ts:655',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -262,7 +263,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:658',
+			producer: 'src/telemetry.ts:659',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -276,7 +277,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:662',
+			producer: 'src/telemetry.ts:663',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -290,7 +291,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:700',
+			producer: 'src/telemetry.ts:718',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -304,7 +305,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:748',
+			producer: 'src/telemetry.ts:766',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -320,7 +321,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'debug',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:930',
+			producer: 'src/telemetry.ts:948',
 			consumers: CONSUMER_HEARTBEAT_LISTENER,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
 			requiredWorkflowIds: REQUIRE_SESSION,
@@ -335,7 +336,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:938',
+			producer: 'src/telemetry.ts:956',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -348,7 +349,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:963',
+			producer: 'src/telemetry.ts:981',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -365,7 +366,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:666',
+			producer: 'src/telemetry.ts:667',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -379,11 +380,24 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:676',
+			producer: 'src/telemetry.ts:677',
 			consumers: CONSUMER_COST_ACCOUNTING,
 			retentionOwnerIssue: ISSUE_COST_RETENTION,
 			requiredWorkflowIds: REQUIRE_SESSION_AND_TASK,
 			otelMapping: 'genai',
+		},
+	],
+	[
+		'delegation_read_uncertain',
+		{
+			category: 'delegation',
+			severity: 'info',
+			privacyClass: 'pseudonymous',
+			producer: 'src/telemetry.ts:705',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: 2511,
+			retentionOwnerIssue: 2511,
+			otelMapping: 'none',
 		},
 	],
 	[
@@ -432,7 +446,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'notice',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:781',
+			producer: 'src/telemetry.ts:799',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -449,7 +463,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:795',
+			producer: 'src/telemetry.ts:813',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -465,7 +479,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'gate',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:709',
+			producer: 'src/telemetry.ts:727',
 			// Verified: `src/evaluation/gate-stats.ts:99` filters for
 			// `reviewer_gate_decision` ONLY. Nothing reads gate_passed.
 			consumers: NO_CONSUMERS,
@@ -480,7 +494,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'gate',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:726',
+			producer: 'src/telemetry.ts:744',
 			// Verified: not read by gate-stats — see `gate_passed` above.
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
@@ -495,7 +509,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// Carries a free-text error message that can embed a path.
 			privacyClass: 'sensitive',
-			producer: 'src/telemetry.ts:713',
+			producer: 'src/telemetry.ts:731',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -512,7 +526,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'gate',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:736',
+			producer: 'src/telemetry.ts:754',
 			consumers: CONSUMER_GATE_STATS,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
 			requiredWorkflowIds: REQUIRE_SESSION_AND_TASK,
@@ -604,7 +618,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'notice',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:1107',
+			producer: 'src/telemetry.ts:1125',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -619,7 +633,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'cost',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:752',
+			producer: 'src/telemetry.ts:770',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_COST_RETENTION,
@@ -632,7 +646,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'notice',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:771',
+			producer: 'src/telemetry.ts:789',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -645,7 +659,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:1340',
+			producer: 'src/telemetry.ts:1358',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -660,7 +674,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'error',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:809',
+			producer: 'src/telemetry.ts:827',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -673,7 +687,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:818',
+			producer: 'src/telemetry.ts:836',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -697,7 +711,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			// passes a clean closed-vocabulary `nontransient:<category>`, but one
 			// clean producer cannot downgrade the kind.
 			privacyClass: 'sensitive',
-			producer: 'src/telemetry.ts:822',
+			producer: 'src/telemetry.ts:840',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -711,7 +725,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// Carries `file`, a repository-relative or absolute path.
 			privacyClass: 'sensitive',
-			producer: 'src/telemetry.ts:918',
+			producer: 'src/telemetry.ts:936',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -724,7 +738,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:926',
+			producer: 'src/telemetry.ts:944',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -737,7 +751,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:948',
+			producer: 'src/telemetry.ts:966',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -755,7 +769,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// Repeated no-op agent turns crossed the strong-warning threshold.
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:836',
+			producer: 'src/telemetry.ts:854',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -769,7 +783,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// The same (session, tool, denial-code) streak reached the hard rung (#2063 B1).
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:857',
+			producer: 'src/telemetry.ts:875',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -783,7 +797,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// An ARMED execution episode reached the advisory rung (#2063 B5).
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:871',
+			producer: 'src/telemetry.ts:889',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -797,7 +811,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// A non-productive tool was hard-denied at the stop rung (#2063 B5).
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:888',
+			producer: 'src/telemetry.ts:906',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -811,7 +825,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// A read resolved inside the installed opencode-swarm package and was denied (#2063 B4).
 			privacyClass: 'sensitive',
-			producer: 'src/telemetry.ts:905',
+			producer: 'src/telemetry.ts:923',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -825,7 +839,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// DELIVERY of a PRM hard stop, distinct from the `prm_hard_stop` TRIGGER (#2063 C2).
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:1321',
+			producer: 'src/telemetry.ts:1339',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -838,7 +852,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'prm',
 			severity: 'notice',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:978',
+			producer: 'src/telemetry.ts:996',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -851,7 +865,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'prm',
 			severity: 'notice',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:992',
+			producer: 'src/telemetry.ts:1010',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -864,7 +878,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'prm',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:1005',
+			producer: 'src/telemetry.ts:1023',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -877,7 +891,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'prm',
 			severity: 'critical',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:1019',
+			producer: 'src/telemetry.ts:1037',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -938,7 +952,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'notice',
 			// Only an attempt counter, a hash PREFIX and a delay. No identifiers.
 			privacyClass: 'operational',
-			producer: 'src/plan/manager.ts:348',
+			producer: 'src/plan/manager.ts:358',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -952,7 +966,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// Carries `directory` and a free-text filesystem error.
 			privacyClass: 'sensitive',
-			producer: 'src/plan/manager.ts:1783',
+			producer: 'src/plan/manager.ts:2056',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -966,7 +980,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// Carries a free-text filesystem error message.
 			privacyClass: 'sensitive',
-			producer: 'src/plan/ledger.ts:1587',
+			producer: 'src/plan/ledger.ts:1594',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -1009,7 +1023,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:1056',
+			producer: 'src/telemetry.ts:1074',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -1066,7 +1080,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:1078',
+			producer: 'src/telemetry.ts:1096',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -1090,7 +1104,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:1122',
+			producer: 'src/telemetry.ts:1140',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -1117,7 +1131,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:1159',
+			producer: 'src/telemetry.ts:1177',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -1141,7 +1155,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:1185',
+			producer: 'src/telemetry.ts:1203',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -1166,7 +1180,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:1209',
+			producer: 'src/telemetry.ts:1227',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -1192,7 +1206,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:1232',
+			producer: 'src/telemetry.ts:1250',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -1219,7 +1233,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:1261',
+			producer: 'src/telemetry.ts:1279',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -1249,7 +1263,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'warning',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:1305',
+			producer: 'src/telemetry.ts:1323',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: 2044,

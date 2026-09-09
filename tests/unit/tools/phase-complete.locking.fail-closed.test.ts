@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { loadPlan } from '../../../src/plan/manager';
+import { loadPlan, savePlan } from '../../../src/plan/manager';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { freezeClock } from '../../helpers/test-clock';
@@ -93,7 +93,10 @@ vi.mock('../../../src/plan/manager', () => ({
 	loadPlan: vi.fn().mockResolvedValue({
 		phases: [{ id: 1, status: 'in_progress', tasks: [] }],
 	}),
-	savePlan: vi.fn().mockResolvedValue(undefined),
+	savePlan: vi.fn().mockResolvedValue({
+		durability: 'complete',
+		degraded_surfaces: [],
+	}),
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
 }));
@@ -159,6 +162,7 @@ import { tryAcquireLock } from '../../../src/parallel/file-locks';
 import { ensureAgentSession } from '../../../src/state';
 
 const mockTryAcquireLock = tryAcquireLock as ReturnType<typeof vi.fn>;
+const mockSavePlan = savePlan as ReturnType<typeof vi.fn>;
 
 describe('executePhaseComplete locking fail-closed behavior', () => {
 	let tempDir: string;
@@ -240,6 +244,12 @@ describe('executePhaseComplete locking fail-closed behavior', () => {
 		session.lastPhaseCompleteTimestamp = 0;
 
 		vi.clearAllMocks();
+		// clearAllMocks resets the savePlan default-resolve; re-arm it with the
+		// PlanSaveDurability shape phase_complete reads back (#2531).
+		mockSavePlan.mockResolvedValue({
+			durability: 'complete',
+			degraded_surfaces: [],
+		});
 	});
 
 	afterEach(() => {

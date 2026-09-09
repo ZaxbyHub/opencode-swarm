@@ -8,11 +8,12 @@
  * plan_missing / plan_corrupt / no_tasks exit reasons.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	_internals,
 	evaluateAdvisoryCi,
 	MAX_SHADOW_COPY_BYTES,
 	TERMINAL_SUCCESS_STATES,
@@ -232,6 +233,120 @@ describe('evaluateAdvisoryCi', () => {
 		const after = snapshotTree(dir);
 		expect(after).toEqual(before);
 	});
+
+	test('direct evaluation removes its shadow copy after success', async () => {
+		const dir = makeFixtureDir('swarm-ci-shadow-cleanup-success-');
+		writePlan(dir, [{ id: '1.1', status: 'pending' }]);
+		let shadowRoot: string | undefined;
+		const realMkdtemp = fs.mkdtempSync.bind(fs);
+		const mkdtempSpy = spyOn(fs, 'mkdtempSync').mockImplementation(((
+			prefix: string,
+			...rest: unknown[]
+		) => {
+			const root = realMkdtemp(prefix, ...(rest as any));
+			if (prefix.includes('swarm-ci-shadow-')) shadowRoot = root;
+			return root;
+		}) as unknown as typeof fs.mkdtempSync);
+		try {
+			await evaluateAdvisoryCi({ directory: dir, tty: false });
+			expect(shadowRoot).toBeDefined();
+			expect(fs.existsSync(shadowRoot as string)).toBe(false);
+		} finally {
+			mkdtempSpy.mockRestore();
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	}, 10000);
+
+	test('partial shadow-copy failure removes the allocated root', async () => {
+		const dir = makeFixtureDir('swarm-ci-shadow-cleanup-partial-');
+		writePlan(dir, [{ id: '1.1', status: 'pending' }]);
+		let shadowRoot: string | undefined;
+		const realMkdtemp = fs.mkdtempSync.bind(fs);
+		const mkdtempSpy = spyOn(fs, 'mkdtempSync').mockImplementation(((
+			prefix: string,
+			...rest: unknown[]
+		) => {
+			const root = realMkdtemp(prefix, ...(rest as any));
+			if (prefix.includes('swarm-ci-shadow-')) shadowRoot = root;
+			return root;
+		}) as unknown as typeof fs.mkdtempSync);
+		const readSpy = spyOn(fs, 'readSync').mockImplementation((() => {
+			throw new Error('injected shadow-copy failure');
+		}) as unknown as typeof fs.readSync);
+		try {
+			const report = await evaluateAdvisoryCi({ directory: dir, tty: false });
+			expect(
+				report.gates.find((gate) => gate.name === 'plan_critic')?.status,
+			).toBe('error');
+			expect(shadowRoot).toBeDefined();
+			expect(fs.existsSync(shadowRoot as string)).toBe(false);
+		} finally {
+			readSpy.mockRestore();
+			mkdtempSpy.mockRestore();
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	}, 10000);
+
+	test('direct evaluation removes its shadow copy when downstream evaluation throws', async () => {
+		const dir = makeFixtureDir('swarm-ci-shadow-cleanup-downstream-');
+		writePlan(dir, [{ id: '1.1', status: 'pending' }]);
+		let shadowRoot: string | undefined;
+		const realMkdtemp = fs.mkdtempSync.bind(fs);
+		const mkdtempSpy = spyOn(fs, 'mkdtempSync').mockImplementation(((
+			prefix: string,
+			...rest: unknown[]
+		) => {
+			const root = realMkdtemp(prefix, ...(rest as any));
+			if (prefix.includes('swarm-ci-shadow-')) shadowRoot = root;
+			return root;
+		}) as unknown as typeof fs.mkdtempSync);
+		const originalSummary = _internals.computeEvidenceQualitySummary;
+		_internals.computeEvidenceQualitySummary = async () => {
+			throw new Error('injected downstream evaluation failure');
+		};
+		try {
+			await expect(
+				evaluateAdvisoryCi({ directory: dir, tty: false }),
+			).rejects.toThrow('injected downstream evaluation failure');
+			expect(shadowRoot).toBeDefined();
+			expect(fs.existsSync(shadowRoot as string)).toBe(false);
+		} finally {
+			_internals.computeEvidenceQualitySummary = originalSummary;
+			mkdtempSpy.mockRestore();
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	}, 10000);
+
+	test('cleanup-registration failure removes its shadow copy before rethrowing', async () => {
+		const dir = makeFixtureDir('swarm-ci-shadow-cleanup-registration-');
+		writePlan(dir, [{ id: '1.1', status: 'pending' }]);
+		let shadowRoot: string | undefined;
+		const realMkdtemp = fs.mkdtempSync.bind(fs);
+		const mkdtempSpy = spyOn(fs, 'mkdtempSync').mockImplementation(((
+			prefix: string,
+			...rest: unknown[]
+		) => {
+			const root = realMkdtemp(prefix, ...(rest as any));
+			if (prefix.includes('swarm-ci-shadow-')) shadowRoot = root;
+			return root;
+		}) as unknown as typeof fs.mkdtempSync);
+		try {
+			await expect(
+				evaluateAdvisoryCi({
+					directory: dir,
+					tty: false,
+					registerCleanup: () => {
+						throw new Error('injected cleanup-registration failure');
+					},
+				}),
+			).rejects.toThrow('injected cleanup-registration failure');
+			expect(shadowRoot).toBeDefined();
+			expect(fs.existsSync(shadowRoot as string)).toBe(false);
+		} finally {
+			mkdtempSpy.mockRestore();
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	}, 10000);
 });
 
 function snapshotTree(root: string): Array<[string, string]> {

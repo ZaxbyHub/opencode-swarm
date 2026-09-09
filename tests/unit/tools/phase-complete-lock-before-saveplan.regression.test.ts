@@ -118,7 +118,10 @@ vi.mock('../../../src/plan/manager', () => ({
 	loadPlan: vi.fn().mockResolvedValue({
 		phases: [{ id: 1, status: 'in_progress', tasks: [] }],
 	}),
-	savePlan: vi.fn().mockResolvedValue(undefined),
+	savePlan: vi.fn().mockResolvedValue({
+		durability: 'complete',
+		degraded_surfaces: [],
+	}),
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
 }));
@@ -261,8 +264,12 @@ describe('phase_complete — regression: acquires plan.json lock before savePlan
 		session.lastPhaseCompleteTimestamp = 0;
 
 		vi.clearAllMocks();
-		// vi.clearAllMocks resets the savePlan default-resolve, so re-arm it.
-		mockSavePlan.mockResolvedValue(undefined);
+		// vi.clearAllMocks resets the savePlan default-resolve, so re-arm it
+		// with the PlanSaveDurability shape phase_complete reads back (#2531).
+		mockSavePlan.mockResolvedValue({
+			durability: 'complete',
+			degraded_surfaces: [],
+		});
 	});
 
 	afterEach(() => {
@@ -284,6 +291,7 @@ describe('phase_complete — regression: acquires plan.json lock before savePlan
 		);
 		mockSavePlan.mockImplementation(async () => {
 			order.push('savePlan');
+			return { durability: 'complete', degraded_surfaces: [] };
 		});
 
 		const result = await executePhaseComplete(

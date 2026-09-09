@@ -55,6 +55,7 @@ import {
 	SOURCE_WORKTREE_GONE_STAGE,
 	SOURCE_WORKTREE_UNCERTAIN_STAGE,
 } from '../../worktree/merge';
+import type { MergeStrategy } from '../../worktree/types';
 import { verifyReviewerScopeGenerationMergeBack } from '../reviewer-scope-mergeback';
 import { recordDeadLaneReclaim } from './dead-lane-reclaim';
 import {
@@ -229,7 +230,10 @@ export interface StandardWorktreeDispatch {
 }
 
 export interface StandardWorktreeSettlementOptions
-	extends Pick<DirtyMergeOptions, 'operationId' | 'resume' | 'onBeforeMerge'> {
+	extends Pick<
+		DirtyMergeOptions,
+		'operationId' | 'resume' | 'onBeforeMerge' | 'commitLanding'
+	> {
 	/**
 	 * Awaited after Git reports success (including reconciled success) and before
 	 * destructive worktree/branch cleanup. A rejection preserves the lane.
@@ -239,7 +243,7 @@ export interface StandardWorktreeSettlementOptions
 
 export interface StandardWorktreeMergedSettlement {
 	outcome: 'merged';
-	strategy: string;
+	strategy: MergeStrategy;
 	autoCommitted: boolean;
 	cleaned: boolean;
 	reconciled: boolean;
@@ -253,6 +257,10 @@ export interface StandardWorktreePartialSettlement {
 	autoCommitted: boolean;
 	cleaned: boolean;
 	conflictFiles?: string[];
+	/** #2508: stable machine-readable diagnostic code (e.g. SETTLEMENT_OVERLAP_BLOCKED). */
+	code?: string;
+	/** #2508: imperative recovery instruction in the ACTION[...] house style. */
+	recoveryHint?: string;
 	provenance?: MergeOperationProvenance;
 }
 
@@ -2718,6 +2726,14 @@ export async function cleanupStandardWorktreeForCallId(
 	reason: 'success' | 'denied' | 'cancelled',
 	directory: string,
 	worktree_dir?: string,
+	/**
+	 * #2508: `retainBranch` removes the lane WORKTREE but keeps the lane
+	 * BRANCH. Used after a squash-unstaged landing — the lane's work then
+	 * exists only as unstaged working-tree bytes in the primary, so the
+	 * branch is the recovery backup until the user commits (serves the
+	 * #1970 data-loss class one level down).
+	 */
+	options?: { retainBranch?: boolean },
 ): Promise<CleanupStandardWorktreeResult> {
 	// Look in standardWorktreeByCallID first (active dispatch).
 	const dispatch = standardWorktreeByCallID.get(callID);
@@ -2917,37 +2933,29 @@ export async function cleanupStandardWorktreeForCallId(
 		);
 	}
 
-	// Squash settlement leaves a reviewable artifact in the primary worktree.
-	// Retain its lane branch as the recovery source; the durable recovery
-	// authority published by settlement keeps orphan cleanup from deleting it.
-	if (reason === 'success' && mergeStrategy === 'squash') {
-		standardWorktreeByCallID.delete(callID);
-		awaitingMergeByCallID.delete(callID);
-		const session = ensureAgentSession(parentSessionID);
-		pushAdvisory(
-			session,
-			`STANDARD_WORKTREE_SQUASH_RETAINED: dispatch ${callID} left a reviewable artifact in the primary worktree; branch ${branchName} is retained for recovery until committed or explicitly cleaned up.`,
-		);
-		return {
-			removedWorktree,
-			cleanedBranch: false,
-			preservedRecoveryLane: true,
-		};
-	}
-
-	// BRANCH DELETION: unconditionally on every non-squash dispatch outcome.
+	// BRANCH DELETION: on every dispatch outcome unless #2508 branch
+	// retention is active (squash-unstaged landing — the branch is the
+	// recovery backup for unstaged bytes).
 	// The branch is deleted on success (merge-back completed cleanly), denied
 	// (orchestrator denied the dispatch), and cancelled (user/system cancelled).
-	// Branch deletion is safe in all cases — the user's work is preserved in
-	// the commit history via the lane branch reflog until GC.
+	// Branch deletion is safe in all non-retained cases — the user's work is
+	// preserved in the commit history via the lane branch reflog until GC.
 	let cleanedBranch = false;
-	try {
-		const result = await _internals.postMergeCleanup(directory, branchName);
-		cleanedBranch = !('error' in result);
-	} catch (err) {
-		logger.log(
-			`[swarm] cleanupStandardWorktreeForCallId: postMergeCleanup failed for ${callID}: ${err}`,
+	if (options?.retainBranch) {
+		const retainedSession = ensureAgentSession(parentSessionID);
+		pushAdvisory(
+			retainedSession,
+			`STANDARD_WORKTREE_BRANCH_RETAINED: dispatch ${callID} removed worktree ${worktreePath} but retained branch ${branchName} (unstaged landing); the branch is the recovery backup until the landed changes are committed.`,
 		);
+	} else {
+		try {
+			const result = await _internals.postMergeCleanup(directory, branchName);
+			cleanedBranch = !('error' in result);
+		} catch (err) {
+			logger.log(
+				`[swarm] cleanupStandardWorktreeForCallId: postMergeCleanup failed for ${callID}: ${err}`,
+			);
+		}
 	}
 
 	// Remove entries from in-memory tracking maps.
@@ -3140,6 +3148,7 @@ export async function finishStandardWorktreeDispatch(
 						operationId: settlement.operationId,
 						resume: settlement.resume,
 						onBeforeMerge: settlement.onBeforeMerge,
+						commitLanding: settlement.commitLanding,
 					},
 				);
 			}
@@ -3278,11 +3287,18 @@ export async function finishStandardWorktreeDispatch(
 
 			// Clean merge supersedes any earlier failure for this task so a
 			// successful re-dispatch re-enables Rule 2's marker commit.
+			// #2508: key retention on the RESULT strategy — never on
+			// dispatch.mergeStrategy (the legacy dispatch value 'merge' also
+			// covers committed recovery merges, which must keep deleting the
+			// branch so the recovery-claim finalize path stays reachable).
 			const cleanupResult = await cleanupStandardWorktreeForCallId(
 				resolvedCallID,
 				'success',
 				directory,
 				dispatch.worktree_dir,
+				{
+					retainBranch: mergeResult.strategy === 'squash-unstaged',
+				},
 			);
 			if (dispatch.recoveryClaim) {
 				const request = {
@@ -3382,9 +3398,13 @@ export async function finishStandardWorktreeDispatch(
 				completedAt: Date.now(),
 			});
 			const session = ensureAgentSession(dispatch.parentSessionID);
+			// #2508: surface the typed diagnostic code + recovery hint on the
+			// overlap block (and any future typed partial) in the advisory.
 			pushAdvisory(
 				session,
-				`STANDARD_WORKTREE_MERGE_PARTIAL: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}`,
+				`STANDARD_WORKTREE_MERGE_PARTIAL: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}` +
+					(mergeResult.code ? ` (code: ${mergeResult.code})` : '') +
+					(mergeResult.recoveryHint ? ` ${mergeResult.recoveryHint}` : ''),
 			);
 
 			// F-C004: merge conflicts retain the lane worktree and branch for
@@ -3409,6 +3429,8 @@ export async function finishStandardWorktreeDispatch(
 				autoCommitted: mergeResult.autoCommitted,
 				cleaned: mergeResult.cleaned,
 				conflictFiles: mergeResult.conflictFiles,
+				code: mergeResult.code,
+				recoveryHint: mergeResult.recoveryHint,
 				provenance: mergeResult.provenance,
 			};
 		}
