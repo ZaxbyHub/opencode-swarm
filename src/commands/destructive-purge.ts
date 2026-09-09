@@ -193,12 +193,40 @@ export function issueConfirmToken(
 }
 
 /**
- * Execute the pending purge under the exact token. Re-derives the CURRENT
- * scope digest: token match AND digest match AND fresh TTL required; the
- * record is consumed on success (single use). Deletes ONLY the recorded
- * candidate paths.
+ * Validate a pending confirm token WITHOUT deleting anything (#2508): the
+ * same pending-present / exact-token / digest-match / fresh-TTL checks as
+ * `executeDestructivePurge`, with the same single-use consumption of the
+ * pending record. Callers that own non-deletion destructive work (e.g.
+ * `/swarm close`'s clean + align stages) use this to gate their own
+ * pipeline on the operator's exact confirmation.
  */
-export function executeDestructivePurge(
+export function consumeConfirmToken(
+	scopeTarget: string,
+	projectRoot: string,
+	token: string,
+	extra?: { kind?: string; candidates?: PurgeCandidate[] },
+): PurgeExecution {
+	const verdict = verifyPendingConfirmToken(
+		scopeTarget,
+		projectRoot,
+		token,
+		extra,
+	);
+	if (!verdict.ok) return verdict;
+	try {
+		_internals.rmSync(pendingPath(projectRoot), { force: true });
+	} catch (error) {
+		logger.log(
+			`[destructive-purge] could not consume pending record: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+	return { ok: true };
+}
+
+/** Shared validation core: every check except consumption and deletion. */
+function verifyPendingConfirmToken(
 	scopeTarget: string,
 	projectRoot: string,
 	token: string,
@@ -224,8 +252,31 @@ export function executeDestructivePurge(
 				'purge scope changed since the token was issued — re-run the preview and confirm the new token',
 		};
 	}
+	return { ok: true };
+}
+
+/**
+ * Execute the pending purge under the exact token. Re-derives the CURRENT
+ * scope digest: token match AND digest match AND fresh TTL required; the
+ * record is consumed on success (single use). Deletes ONLY the recorded
+ * candidate paths.
+ */
+export function executeDestructivePurge(
+	scopeTarget: string,
+	projectRoot: string,
+	token: string,
+	extra?: { kind?: string; candidates?: PurgeCandidate[] },
+): PurgeExecution {
+	const verdict = verifyPendingConfirmToken(
+		scopeTarget,
+		projectRoot,
+		token,
+		extra,
+	);
+	if (!verdict.ok) return verdict;
+	const { candidates } = resolveCandidates(scopeTarget, extra);
 	const purged: string[] = [];
-	for (const candidate of scope.candidates) {
+	for (const candidate of candidates) {
 		if (!_internals.existsSync(candidate.path)) continue;
 		try {
 			_internals.rmSync(candidate.path, { recursive: true, force: true });

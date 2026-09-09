@@ -1687,6 +1687,10 @@ export class LeanTurboRunner {
 							laneInState.branchName,
 							this._directory,
 							strategy,
+							// #2508: Lean merge-back owns a committed-merge cleanup
+							// with no branch retention, so it keeps the committed
+							// landing instead of the new squash-unstaged default.
+							{ commitLanding: true },
 						);
 					if ('merged' in mergeResult && mergeResult.merged) {
 						// Mark for post-merge cleanup AFTER worktree removal (branch delete

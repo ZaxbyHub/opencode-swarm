@@ -767,6 +767,13 @@ function probeBranchExists(directory: string, branchName: string): boolean {
 async function cleanupRecoveredWorktree(
 	directory: string,
 	descriptor: BackgroundWorktreeDescriptor,
+	/**
+	 * #2508: when the recovered settlement landed via the squash-unstaged
+	 * shape, the lane BRANCH is intentionally retained as the recovery backup
+	 * for the unstaged bytes — its existence is expected, not residue, and
+	 * must not re-throw CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED forever.
+	 */
+	options?: { retainBranch?: boolean },
 ): Promise<void> {
 	const branchExists = (): boolean =>
 		_internals.branchExists(directory, descriptor.branchName);
@@ -794,9 +801,13 @@ async function cleanupRecoveredWorktree(
 			'success',
 			directory,
 			descriptor.worktreeDir ?? undefined,
+			options?.retainBranch ? { retainBranch: true } : undefined,
 		);
 	}
-	if (existsSync(descriptor.worktreePath) || branchExists()) {
+	if (
+		existsSync(descriptor.worktreePath) ||
+		(branchExists() && !options?.retainBranch)
+	) {
 		throw new Error('CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED');
 	}
 	const provisioningOwner =
@@ -1074,7 +1085,11 @@ export async function recoverCoderSettlement(
 						`CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED: transition ${wal.transitionId} for task ${taskId} worktree merge-back did not reach merged (${filePath}, state ${wal.state}, outcome ${mergeResult.outcome}${mergeResult.outcome === 'failed' && mergeResult.message ? `: ${mergeResult.message}` : ''}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 					);
 				}
-				await cleanupRecoveredWorktree(directory, descriptor);
+				await cleanupRecoveredWorktree(directory, descriptor, {
+					// #2508: a squash-unstaged landing intentionally keeps the lane
+					// branch as the backup for the unstaged bytes.
+					retainBranch: mergeResult.strategy === 'squash-unstaged',
+				});
 				const committedWal = await readWal(filePath, taskId);
 				if (committedWal === null) {
 					throw new Error('CODER_SETTLEMENT_WAL_MISSING');

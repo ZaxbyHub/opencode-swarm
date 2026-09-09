@@ -26,9 +26,7 @@ import { _internals as worktreeInternals } from '../../../../src/turbo/lean/work
 import type { BunCompatSubprocess } from '../../../../src/utils/bun-compat';
 import { cleanMergeOverlapSnapshot } from '../../../helpers/merge-overlap-fixture';
 
-// ---------------------------------------------------------------------------
 // Mock helpers
-// ---------------------------------------------------------------------------
 
 /** Saves the real bunSpawn so tests can restore it in afterEach. */
 const realBunSpawn = _internals.bunSpawn;
@@ -70,9 +68,7 @@ afterEach(() => {
 	clearDeferredWarnings();
 });
 
-// ---------------------------------------------------------------------------
 // getMergeStrategy
-// ---------------------------------------------------------------------------
 
 describe('getMergeStrategy', () => {
 	test('returns config.merge_strategy when set to merge', () => {
@@ -96,9 +92,7 @@ describe('getMergeStrategy', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // mergeLaneBranch
-// ---------------------------------------------------------------------------
 
 describe('mergeLaneBranch', () => {
 	const fakeDir = 'C:\\project-root';
@@ -388,9 +382,7 @@ describe('mergeLaneBranch', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // postMergeCleanup
-// ---------------------------------------------------------------------------
 
 describe('postMergeCleanup', () => {
 	const fakeDir = 'C:\\project-root';
@@ -486,9 +478,7 @@ describe('postMergeCleanup', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // handleMergeConflict
-// ---------------------------------------------------------------------------
 
 describe('handleMergeConflict', () => {
 	const fakeDir = 'C:\\project-root';
@@ -645,9 +635,7 @@ describe('handleMergeConflict', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // attemptMergeBackFromDirty (DD-7 progressive dirty cleanup)
-// ---------------------------------------------------------------------------
 
 describe('attemptMergeBackFromDirty', () => {
 	const fakeWorktree = 'C:\\project-root\\.swarm-worktrees\\session-1\\lane-1';
@@ -738,6 +726,7 @@ describe('attemptMergeBackFromDirty', () => {
 			fakeBranch,
 			fakePrimary,
 			'merge',
+			{ commitLanding: true },
 		);
 
 		expect(result).toEqual({
@@ -762,6 +751,7 @@ describe('attemptMergeBackFromDirty', () => {
 			fakeBranch,
 			fakePrimary,
 			'merge',
+			{ commitLanding: true },
 		);
 
 		expect(result).toEqual({
@@ -785,6 +775,7 @@ describe('attemptMergeBackFromDirty', () => {
 			fakeBranch,
 			fakePrimary,
 			'merge',
+			{ commitLanding: true },
 		);
 
 		expect(result).toEqual({
@@ -809,6 +800,7 @@ describe('attemptMergeBackFromDirty', () => {
 			fakeBranch,
 			fakePrimary,
 			'merge',
+			{ commitLanding: true },
 		);
 
 		expect(result).toEqual({
@@ -850,6 +842,7 @@ describe('attemptMergeBackFromDirty', () => {
 			fakeBranch,
 			fakePrimary,
 			'merge',
+			{ commitLanding: true },
 		);
 
 		expect(result).toMatchObject({
@@ -875,6 +868,7 @@ describe('attemptMergeBackFromDirty', () => {
 			fakeBranch,
 			fakePrimary,
 			'merge',
+			{ commitLanding: true },
 		);
 
 		expect(result).toEqual({
@@ -897,6 +891,7 @@ describe('attemptMergeBackFromDirty', () => {
 			fakeBranch,
 			fakePrimary,
 			'merge',
+			{ commitLanding: true },
 		);
 
 		expect(result).toEqual({
@@ -907,9 +902,7 @@ describe('attemptMergeBackFromDirty', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // _internals DI seam
-// ---------------------------------------------------------------------------
 
 describe('_internals.bunSpawn', () => {
 	test('_internals.bunSpawn can be replaced for testing', () => {
@@ -925,9 +918,7 @@ describe('_internals.bunSpawn', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // cleanupOrphanedBranches
-// ---------------------------------------------------------------------------
 
 describe('cleanupOrphanedBranches', () => {
 	const fakeDir = 'C:\\project-root';
@@ -1090,9 +1081,7 @@ describe('cleanupOrphanedBranches', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // startupOrphanRecovery
-// ---------------------------------------------------------------------------
 
 describe('startupOrphanRecovery', () => {
 	const fakeDir = 'C:\\project-root';

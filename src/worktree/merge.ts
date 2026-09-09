@@ -304,6 +304,10 @@ export interface DirtyMergePartial {
 	cleaned: boolean;
 	message: string;
 	conflictFiles?: string[];
+	/** #2508: stable machine-readable diagnostic code (e.g. SETTLEMENT_OVERLAP_BLOCKED). */
+	code?: string;
+	/** #2508: imperative recovery instruction in the ACTION[...] house style. */
+	recoveryHint?: string;
 	provenance?: MergeOperationProvenance;
 }
 
@@ -326,7 +330,12 @@ export interface MergeOperationProvenance {
 	sourceHead: string;
 	targetHeadBefore: string;
 	branchName: string;
-	strategy: MergeStrategy;
+	/**
+	 * Always the PASSED dispatch strategy, never the internal
+	 * `'squash-unstaged'` landing value (#2508): this struct is persisted into
+	 * the settlement WAL, whose schema only accepts the three legacy values.
+	 */
+	strategy: Exclude<MergeStrategy, 'squash-unstaged'>;
 }
 
 /**
@@ -367,7 +376,11 @@ export interface ImmutableMergeRecoveryCoordinates {
 	sourceBaseOid: string;
 	sourceHeadOid: string;
 	targetHeadOid: string;
-	strategy: MergeStrategy;
+	/**
+	 * Persisted recovery identity — always one of the three legacy dispatch
+	 * strategies, never the internal `'squash-unstaged'` landing value (#2508).
+	 */
+	strategy: Exclude<MergeStrategy, 'squash-unstaged'>;
 }
 
 export type ImmutableMergeRecoveryResult =
@@ -383,6 +396,13 @@ export interface DirtyMergeOptions {
 	operationId?: string;
 	/** Previously persisted provenance when resuming a `settling` operation. */
 	resume?: MergeOperationProvenance;
+	/**
+	 * #2508: opt OUT of the squash-merge-unstaged default landing for a
+	 * `'merge'` dispatch. Callers that own their own committed-merge cleanup
+	 * (Lean Turbo merge-back) pass `true` to keep `git merge --no-edit`.
+	 * `'rebase'` and `'cherry-pick'` always land committed regardless.
+	 */
+	commitLanding?: boolean;
 	/**
 	 * Awaited after auto-commit and HEAD capture, but before the Git merge.
 	 * A rejection fails closed without invoking the merge.
@@ -850,9 +870,12 @@ export interface StartupRecoveryResult {
  * @returns The merge strategy to use: `'merge'`, `'rebase'`, or `'cherry-pick'`.
  */
 export function getMergeStrategy(config: {
-	mergeStrategy?: MergeStrategy;
-	merge_strategy?: MergeStrategy;
-}): MergeStrategy {
+	mergeStrategy?: Exclude<MergeStrategy, 'squash-unstaged'>;
+	merge_strategy?: Exclude<MergeStrategy, 'squash-unstaged'>;
+}): Exclude<MergeStrategy, 'squash-unstaged'> {
+	// Config only ever carries the three persisted strategy values; the
+	// internal 'squash-unstaged' landing mode is produced by
+	// attemptMergeBackFromDirty's remap, never by configuration (#2508).
 	return config.mergeStrategy ?? config.merge_strategy ?? 'merge';
 }
 
@@ -879,6 +902,104 @@ export async function mergeLaneBranch(
 		case 'merge':
 			result = await runGit(['merge', '--no-edit', branchName], primaryDir);
 			break;
+		case 'squash-unstaged': {
+			// #2508 squash-merge-unstaged landing: apply the lane's changes to
+			// the working tree WITHOUT committing, then unstage only the lane's
+			// incoming paths so the user's pre-existing staged entries survive
+			// and the lane work lands as reviewable unstaged modifications.
+			const mergeBaseResult = await runGit(
+				['merge-base', 'HEAD', branchName],
+				primaryDir,
+			);
+			const mergeBase = mergeBaseResult.stdout.trim();
+			if (
+				mergeBaseResult.exitCode !== 0 ||
+				!GIT_OBJECT_ID_PATTERN.test(mergeBase)
+			) {
+				return {
+					error: `Unable to determine merge base for squash-unstaged landing of ${branchName}`,
+				};
+			}
+			const incomingResult = await runGit(
+				[
+					'diff',
+					'--name-status',
+					'-z',
+					'--find-renames',
+					`${mergeBase}..${branchName}`,
+				],
+				primaryDir,
+			);
+			if (incomingResult.exitCode !== 0) {
+				return {
+					error: `Unable to enumerate incoming paths for squash-unstaged landing of ${branchName}`,
+				};
+			}
+			const parsedIncoming = parseIncomingPaths(
+				incomingResult.stdout,
+				currentPathCasePolicy(),
+			);
+			if ('error' in parsedIncoming || parsedIncoming.paths.size === 0) {
+				return {
+					error: `No parsable incoming paths for squash-unstaged landing of ${branchName}`,
+				};
+			}
+			// Both sides of every rename record must be handled; a one-sided
+			// pathspec splits a rename into a deletion + untracked file.
+			const incomingPaths = [...parsedIncoming.paths.values()];
+			const squashResult = await runGit(
+				['merge', '--squash', '--no-commit', branchName],
+				primaryDir,
+			);
+			if (squashResult.exitCode !== 0) {
+				// A conflicted `git merge --squash --no-commit` writes NO
+				// MERGE_HEAD, so `git merge --abort` cannot clean it. Restore
+				// ONLY the incoming paths — the overlap preflight proved they
+				// were clean before the merge, so resetting them to HEAD is
+				// exactly the pre-merge state; the user's unrelated staged and
+				// unstaged entries are untouched.
+				const combined = `${squashResult.stderr}\n${squashResult.stdout}`;
+				const restore = await runGit(
+					['checkout', '-q', 'HEAD', '--', ...incomingPaths],
+					primaryDir,
+				);
+				if (/CONFLICT/i.test(combined)) {
+					return {
+						conflict: true,
+						files: parseConflictFiles(combined),
+						message:
+							squashResult.stderr.trim() ||
+							squashResult.stdout.trim() ||
+							'squash merge reported a conflict',
+					};
+				}
+				if (restore.exitCode !== 0) {
+					advisoryWarn(
+						`[worktree] mergeLaneBranch: squash merge failed and targeted restore also failed for ${branchName}: ${
+							restore.stderr.trim() || restore.stdout.trim()
+						}`,
+					);
+				}
+				return {
+					error:
+						squashResult.stderr.trim() ||
+						squashResult.stdout.trim() ||
+						'squash merge failed',
+				};
+			}
+			const resetResult = await runGit(
+				['reset', '-q', 'HEAD', '--', ...incomingPaths],
+				primaryDir,
+			);
+			if (resetResult.exitCode !== 0) {
+				// Fail-safe: the changes are staged (reviewable, nothing lost).
+				// Leave them staged rather than guessing a wider reset scope.
+				advisoryWarn(
+					`[worktree] mergeLaneBranch: targeted unstage failed for ${branchName} (${resetResult.stderr.trim() || resetResult.stdout.trim()}); lane changes remain staged`,
+				);
+			}
+			return { merged: true, strategy };
+		}
 		case 'rebase':
 			result = await runGit(['rebase', branchName], primaryDir);
 			break;
@@ -1561,7 +1682,13 @@ export async function attemptMergeBackFromDirty(
 	worktreePath: string,
 	branchName: string,
 	primaryDir: string,
-	strategy: MergeStrategy,
+	/**
+	 * The PASSED dispatch strategy (persisted identity). `'squash-unstaged'` is
+	 * produced internally by the #2508 landing remap and is never a valid
+	 * input — callers that want the committed merge pass `'merge'` with
+	 * `options.commitLanding: true`.
+	 */
+	strategy: Exclude<MergeStrategy, 'squash-unstaged'>,
 	options: DirtyMergeOptions = {},
 ): Promise<DirtyMergeSuccess | DirtyMergePartial | DirtyMergeFailure> {
 	let autoCommitted = false;
@@ -1774,6 +1901,11 @@ export async function attemptMergeBackFromDirty(
 			cleaned,
 			message: `Primary checkout has overlapping dirty paths with incoming lane changes: ${finalOverlapSnapshot.snapshot.overlapPaths.join(', ')}`,
 			conflictFiles: finalOverlapSnapshot.snapshot.overlapPaths,
+			// #2508: typed diagnostic + recovery hint on the overlap block so
+			// consumers (/swarm status, architect prompts) can branch on the
+			// stable code instead of parsing prose.
+			code: 'SETTLEMENT_OVERLAP_BLOCKED',
+			recoveryHint: `ACTION: commit or stash your local changes to the overlapping paths (or run /swarm recover for the preserved lane), then re-dispatch the lane. Overlapping paths: ${finalOverlapSnapshot.snapshot.overlapPaths.join(', ')}`,
 			...(provenance ? { provenance } : {}),
 		};
 	}
@@ -1792,13 +1924,27 @@ export async function attemptMergeBackFromDirty(
 		};
 	}
 
-	// Step 3b: Attempt merge-back
-	const mergeResult = await mergeLaneBranch(primaryDir, branchName, strategy);
+	// Step 3b: Attempt merge-back.
+	// #2508: a 'merge' dispatch lands via the internal squash-unstaged shape
+	// unless the caller opted into a committed landing. The remap is
+	// behavioral ONLY — `provenance` (persisted into the settlement WAL)
+	// records the PASSED strategy above and must never see 'squash-unstaged'
+	// (the WAL schema validates provenance.strategy against the three legacy
+	// values and cross-checks it against the dispatch strategy).
+	const landingStrategy: MergeStrategy =
+		strategy === 'merge' && !options.commitLanding
+			? 'squash-unstaged'
+			: strategy;
+	const mergeResult = await mergeLaneBranch(
+		primaryDir,
+		branchName,
+		landingStrategy,
+	);
 
 	if ('merged' in mergeResult && mergeResult.merged) {
 		return {
 			merged: true,
-			strategy,
+			strategy: landingStrategy,
 			autoCommitted,
 			cleaned,
 			...(provenance ? { reconciled: false, provenance } : {}),
