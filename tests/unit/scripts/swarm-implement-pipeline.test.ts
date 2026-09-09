@@ -82,6 +82,25 @@ describe('swarm-implement pipeline driver (#2498)', () => {
 		expect(otherIssue.stdout).toBe('swarm/implement-4242\n');
 	}, 30000);
 
+	test('regression F1: issue URLs discard fragments before deriving the branch', () => {
+		// Before the fix, the URL fragment remained attached to the issue number,
+		// so validation rejected an otherwise valid issue URL.
+		const repo = makeDemoRepo();
+		const result = runPipeline(
+			repo,
+			['https://github.com/example/project/issues/2650#discussion_r123'],
+			{ SWARM_PIPELINE_DRY_RUN: '1' },
+		);
+
+		expect(result.status).toBe(0);
+		expect(
+			readFileSync(
+				path.join(repo, '.swarm/pipeline-evidence/pr-body.md'),
+				'utf8',
+			),
+		).toContain('swarm/implement-2650');
+	}, 30000);
+
 	test('dry run creates the branch, evidence bundle, and PR body; second run is idempotent', () => {
 		const repo = makeDemoRepo();
 		const first = runPipeline(repo, ['1234'], { SWARM_PIPELINE_DRY_RUN: '1' });
