@@ -400,10 +400,17 @@ export interface BackgroundDelegationWorkflowLaneRecovery {
 	reason: string;
 }
 
+// Issue #2615: the union is closed against declared-but-unproduced members by
+// tests/unit/pr-review/lane-failure-class-parity.test.ts — every member must
+// have a live producer. The 'deadline' member was removed in #2615; its last
+// producer had already been deleted in #2381. 'liveness' covers
+// host-accepted-then-abandoned, stale-swept and operator-cancelled lanes
+// (producers: the collect-path stale sweep, the Task-side stale flip, and
+// cancel_pending in src/tools/dispatch-lanes.ts).
 export type BackgroundDelegationWorkflowLaneFailureClass =
 	| 'contract'
 	| 'resource'
-	| 'deadline';
+	| 'liveness';
 
 /**
  * Issue #2382: structured, bounded classification of the terminal error that
@@ -600,7 +607,7 @@ const ResultSchema = z
 		messageCount: z.number().optional(),
 		prReviewResultReceipt: PrReviewResultReceiptSchema.optional(),
 		workflowLaneFailureClass: z
-			.enum(['contract', 'resource', 'deadline'])
+			.enum(['contract', 'resource', 'liveness'])
 			.optional(),
 		// Issue #2382: must be declared here (schema is .strict()) — see the
 		// interface comment and the parity guard below this schema.
@@ -5164,10 +5171,30 @@ function sweepStaleLocked(
 		if (excludeCorrelationIds?.has(record.correlationId)) continue;
 		if (!statuses.has(record.status)) continue;
 		if (now - record.updatedAt <= timeoutMs) continue;
+		// Issue #2615: the presumed-stale flip must carry a typed failure
+		// class so PR-review partial-coverage admission can settle a
+		// stale-swept dimension without abort_pr_workflow. 'liveness' marks a
+		// lane abandoned without an observed host failure.
+		const staleReason = `lane presumed stale after ${timeoutMs}ms without a terminal event`;
+		// Issue #2615 (review finding): a pre-existing result (e.g. a classless
+		// partial-transcript preview stamped before the flip) must not silently
+		// survive the stale transition untyped — merge the 'liveness' class over
+		// it while preserving its original error/digest evidence. Only a record
+		// with NO result gets the synthesized stale-reason result (fresh digest).
+		const livenessResult: BackgroundDelegationResult = record.result
+			? { ...record.result, workflowLaneFailureClass: 'liveness' }
+			: {
+					error: staleReason,
+					chars: staleReason.length,
+					truncated: false,
+					digest: createHash('sha256').update(staleReason).digest('hex'),
+					workflowLaneFailureClass: 'liveness',
+				};
 		appendRecord(directory, {
 			...record,
 			status: 'stale',
 			updatedAt: now,
+			result: livenessResult,
 		});
 		// #2482 / #2244: the sweep just moved an open record to a durable
 		// terminal status WITHOUT the claim path emitting the terminal event

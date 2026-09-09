@@ -355,12 +355,23 @@ export type PrReviewDimensionTerminalState =
 	| 'CANCELLED'
 	| 'NOT_LAUNCHED';
 
+/**
+ * Disclosure-side failure classes (issue #2615): the live lane vocabulary plus
+ * the legacy `'deadline'` class. `'deadline'` was removed from lane results
+ * with its last producer in #2381, but durable disclosures written before
+ * #2615 and structured `DEADLINE_EXCEEDED` receipts still carry it, so the
+ * disclosure vocabulary keeps it legible instead of failing those reads.
+ */
+export type PrReviewDisclosureFailureClass =
+	| BackgroundDelegationWorkflowLaneFailureClass
+	| 'deadline';
+
 /** Gate-derived per-dimension terminal evidence for an unresolved dimension. */
 export interface PrReviewUnresolvedDimensionRecord {
 	dimension: PrReviewBaseDimensionId;
 	terminalState: 'FAILED' | 'CANCELLED' | 'NOT_LAUNCHED';
 	reasonKind: 'lane_failure' | 'cancelled' | 'not_launched';
-	failureClass?: BackgroundDelegationWorkflowLaneFailureClass;
+	failureClass?: PrReviewDisclosureFailureClass;
 	terminalEventId?: string;
 	/** Contributing lane/batch identity, when available. */
 	batchId?: string;
@@ -392,7 +403,7 @@ export interface PrReviewPartialBaseCoverageRecordV1 {
 	prHeadSha: string;
 	revisionDigest: string;
 	missingDimension: PrReviewBaseDimensionId;
-	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
+	failureClass: PrReviewDisclosureFailureClass;
 	terminalEventId: string;
 	admittedAt: string;
 }
@@ -456,13 +467,15 @@ export interface PrReviewDimensionCancellationRecord {
 // ---------------------------------------------------------------------------
 
 const PR_REVIEW_FAILURE_CLASS_SAFE_DETAILS: Record<
-	BackgroundDelegationWorkflowLaneFailureClass,
+	PrReviewDisclosureFailureClass,
 	string
 > = {
 	contract:
 		'lane failed its output contract after the bounded retry budget was exhausted',
 	resource: 'lane exhausted its resource budget before producing valid output',
 	deadline: 'lane passed its collection deadline without valid terminal output',
+	liveness:
+		'lane was abandoned by its host (presumed-stale sweep, unobservable host session, or operator cancellation) without an observed agent failure',
 };
 
 const PrReviewUnresolvedDimensionRecordSchema = z
@@ -470,7 +483,9 @@ const PrReviewUnresolvedDimensionRecordSchema = z
 		dimension: z.enum(PR_REVIEW_BASE_DIMENSION_IDS),
 		terminalState: z.enum(['FAILED', 'CANCELLED', 'NOT_LAUNCHED']),
 		reasonKind: z.enum(['lane_failure', 'cancelled', 'not_launched']),
-		failureClass: z.enum(['contract', 'resource', 'deadline']).optional(),
+		failureClass: z
+			.enum(['contract', 'resource', 'deadline', 'liveness'])
+			.optional(),
 		terminalEventId: z.string().min(1).max(256).optional(),
 		batchId: z.string().min(1).max(128).optional(),
 		laneId: z.string().min(1).max(128).optional(),
@@ -845,14 +860,29 @@ function latestTypedFailureForBaseDimension(
 				(candidate) => candidate.laneId === lane.laneId,
 			)) {
 				const terminal = record.terminalResult;
+				// Issue #2615: a lane can reach a terminal failure status WITHOUT a
+				// claim event — the Task-side presumed-stale sweep settles by a direct
+				// status+result write under the store lock (the #2482/#2244
+				// eventless-terminal precedent; the claim path is not used there),
+				// and the collect-path idle flip transitions without the claim path
+				// (stamping its own class-carrying result). For those records the
+				// class-carrying `record.result` is the typed failure source (the
+				// same fallback the circuit applies); a claimed `terminalResult`
+				// stays authoritative whenever the claim path did run.
+				const eventlessFailure =
+					!terminal && CIRCUIT_TERMINAL_DELEGATION_STATUSES.has(record.status);
 				const result = terminal?.result ?? record.result;
 				const failureClass = result?.workflowLaneFailureClass;
-				if (!terminal || !failureClass || terminal.status === 'completed')
-					continue;
+				if ((!terminal && !eventlessFailure) || !failureClass) continue;
+				if ((terminal?.status ?? record.status) === 'completed') continue;
 				const candidate = {
 					failureClass,
-					terminalEventId: terminal.eventId,
-					recordedAt: terminal.recordedAt,
+					terminalEventId: terminal
+						? terminal.eventId
+						: `eventless:${record.status}:${result?.digest ?? ''}`,
+					recordedAt: terminal
+						? terminal.recordedAt
+						: (record.completedAt ?? record.updatedAt),
 					batchId: batch.batchId,
 					laneId: lane.laneId,
 				};
@@ -871,7 +901,7 @@ function latestTypedFailureForBaseDimension(
 }
 
 interface PrReviewLatestStructuredUnresolved {
-	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
+	failureClass: PrReviewDisclosureFailureClass;
 	recordedAt: number;
 	batchId: string;
 	laneId: string;
@@ -880,7 +910,7 @@ interface PrReviewLatestStructuredUnresolved {
 
 function failureClassFromStructuredUnresolvedReason(
 	reason: PrReviewResultUnresolvedReason,
-): BackgroundDelegationWorkflowLaneFailureClass {
+): PrReviewDisclosureFailureClass {
 	switch (reason) {
 		case 'RESOURCE_LIMIT':
 			return 'resource';
@@ -1540,7 +1570,7 @@ export async function readPrReviewTerminalCoverageForReport(
 		dimension: PrReviewBaseDimensionId;
 		terminal_state: PrReviewUnresolvedDimensionRecord['terminalState'];
 		reason_kind: PrReviewUnresolvedDimensionRecord['reasonKind'];
-		failure_class?: BackgroundDelegationWorkflowLaneFailureClass;
+		failure_class?: PrReviewDisclosureFailureClass;
 	}>;
 	liveDimensions: PrReviewBaseDimensionId[];
 	allowedVerdicts: readonly PrReviewReportVerdict[];
