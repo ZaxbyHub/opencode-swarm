@@ -2604,19 +2604,45 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// Issue #2664: the patch-payload size bound is STRUCTURAL, not policy —
 		// authority/observation cannot be verified over an unbounded write set,
 		// so it fails closed in BOTH modes (independent of enforcePolicy above,
-		// which only gates the architect-scoped plan/config checks).
+		// which only gates the architect-scoped plan/config checks). Resolves
+		// the payload with the same legacy precedence as extractPatchTargetPaths
+		// (input > patch > diff > aliases > cmd[1]) so every recognized field
+		// carries the bound, not just args.patch (implementation-review MINOR 4).
 		if (
-			(input.tool === 'apply_patch' ||
-				input.tool === 'swarm_apply_patch' ||
-				input.tool === 'patch') &&
-			typeof (output.args as Record<string, unknown> | undefined)?.patch ===
-				'string' &&
-			((output.args as Record<string, unknown>).patch as string).length >
-				1_000_000
+			input.tool === 'apply_patch' ||
+			input.tool === 'swarm_apply_patch' ||
+			input.tool === 'patch'
 		) {
-			throw new Error(
-				'WRITE BLOCKED: Patch payload exceeds 1 MB — authority cannot be verified for all modified paths. Split into smaller patches.',
-			);
+			const patchArgs = output.args as Record<string, unknown> | undefined;
+			let structuralPatch: string | undefined =
+				typeof patchArgs?.input === 'string'
+					? patchArgs.input
+					: typeof patchArgs?.patch === 'string'
+						? patchArgs.patch
+						: typeof patchArgs?.diff === 'string'
+							? patchArgs.diff
+							: undefined;
+			if (structuralPatch === undefined) {
+				for (const key of PATCH_PAYLOAD_KEYS) {
+					const value = patchArgs?.[key];
+					if (typeof value === 'string') {
+						structuralPatch = value;
+						break;
+					}
+				}
+			}
+			if (
+				structuralPatch === undefined &&
+				Array.isArray(patchArgs?.cmd) &&
+				typeof (patchArgs.cmd as unknown[])[1] === 'string'
+			) {
+				structuralPatch = (patchArgs.cmd as unknown[])[1] as string;
+			}
+			if ((structuralPatch ?? '').length > 1_000_000) {
+				throw new Error(
+					'WRITE BLOCKED: Patch payload exceeds 1 MB — authority cannot be verified for all modified paths. Split into smaller patches.',
+				);
+			}
 		}
 
 		// Issue #1875: resolve the complete write set once, before any authority,
