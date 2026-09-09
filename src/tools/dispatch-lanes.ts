@@ -2744,6 +2744,10 @@ async function collectOnce(
 			// terminal claim (Task parity) instead of a bare status write. The
 			// synthetic result carries a stable identity — empty body digest — and
 			// a bounded reason so the record states why it was cancelled.
+			// Issue #2615: the cancelled record carries the 'liveness' failure
+			// class so a cancelled PR-review dimension is a typed terminal
+			// failure (complete_pr_workflow INCOMPLETE can admit it) instead of
+			// an unadmittable classless terminal.
 			await settleDelegationTerminal(
 				directory,
 				record,
@@ -2754,6 +2758,7 @@ async function collectOnce(
 						chars: 0,
 						truncated: false,
 						digest: digestText(''),
+						workflowLaneFailureClass: 'liveness',
 					},
 				},
 				{},
@@ -3440,11 +3445,16 @@ function laneConfiguredModel(
 // PR_WORKFLOW_STALE_LANE_TIMEOUT_MS, issue #2251) remains the only terminal
 // backstop for an active PR-review lane.
 //
-// Known consequence: this removed the only producer of
-// `workflowLaneFailureClass: 'deadline'`. The stale sweep writes `status: 'stale'`
-// with no `result`, so a pure-wedge lane now carries no typed failure class and
-// the partial-base-coverage admission gate (pr-workflow-gate.ts,
-// `latestTypedFailureForBaseDimension`) is unavailable for that case. The
+// Known consequence: the `'deadline'` failure class is gone — its last
+// producer was deleted in #2381, and the union member itself was removed in
+// #2615. Presumed-stale flips carry a typed `liveness` result since #2615 on
+// every path — the Task-side sweep writes status+result directly under the
+// store lock, and this file's collect-path sweep stamps both the idle-host
+// stale flip and the unobservable-host settle — so the partial-base-coverage
+// admission gate sees them: the claim-settled shapes (cancel, unobservable
+// host) through their claimed `terminalResult`, and the claim-less stale
+// flips through the gate's class-carrying `record.result` admission fallback
+// (`latestTypedFailureForBaseDimension`, src/pr-review/completion.ts). The
 // `'contract'` and `'resource'` producers that classify a lane on the CHILD's own
 // evidence are unaffected (`settleCollectedLane`, `appendAsyncLaneLaunchError`),
 // and normal six-of-six completion is unaffected. Note the removed no-client
@@ -3676,15 +3686,14 @@ async function appendAsyncLaneLaunchError(
 		return;
 	}
 	const record = recordRead.value;
-	const isPrReviewLane = record?.mode?.startsWith('swarm-pr-review:') === true;
+	// Issue #2615: every launch rejection is typed 'resource' — the lane never
+	// started, so no transcript evidence can exist — not only PR-review lanes.
 	const launchErrorResult = {
 		error: message,
 		chars: message.length,
 		truncated: false,
 		digest: digestText(message),
-		...(isPrReviewLane
-			? { workflowLaneFailureClass: 'resource' as const }
-			: {}),
+		workflowLaneFailureClass: 'resource' as const,
 	};
 	if (record) {
 		// Issue #2045: launch failures are terminal events on the shared
@@ -3765,6 +3774,20 @@ function warnDelegationReadUncertainOnce(
 	);
 }
 
+/**
+ * Issue #2615 (review finding): dedicated budget slice for the stale sweep's
+ * dead-lane liveness settle, independent of the shared per-lane status budget.
+ * In a busy batch (`reserveCollectionLaneCallBudgets` divides the remaining
+ * deadline by the FULL record count) the shared status budget floors to zero
+ * even while wall-clock budget remains — the #2609 12-lane wedge, where the
+ * sweep could never ask the status question and an unobservable-host lane
+ * stayed open for the whole wait window. The reserve is bounded by the
+ * REMAINING deadline at sweep entry; when it is empty the deadline itself is
+ * exhausted and the #2381 non-destructive observer contract applies (no
+ * settle, lane left open).
+ */
+const SWEEP_LIVENESS_SETTLE_BUDGET_MS = 250;
+
 async function sweepStaleAsyncLaneRecords(
 	session: SessionOps,
 	directory: string,
@@ -3775,6 +3798,10 @@ async function sweepStaleAsyncLaneRecords(
 ): Promise<void> {
 	if (staleTimeoutMs <= 0) return;
 	const now = _internals.now();
+	const settleReserveMs = Math.min(
+		SWEEP_LIVENESS_SETTLE_BUDGET_MS,
+		Math.max(0, deadline - now),
+	);
 	for (const record of records) {
 		const currentBeforeReadiness = getCurrentStaleSweepCandidate(
 			directory,
@@ -3783,19 +3810,69 @@ async function sweepStaleAsyncLaneRecords(
 			now,
 		);
 		if (!currentBeforeReadiness) continue;
+		const statusBudgetMs = reserveCollectionLaneCallBudgets(
+			deadline,
+			records.length,
+			typeof session.status === 'function',
+		).statusBudgetMs;
+		// Issue #2381/#2615: the unobservable-host settle below is only valid
+		// when the status question was actually asked (or unaskable because the
+		// host has no status client). Askability keys on the sweep's dedicated
+		// settle reserve, NOT the shared per-lane status budget — busy-batch
+		// lane pressure floors that budget to zero while wall-clock budget
+		// remains (#2609 12-lane wedge). The question itself still prefers the
+		// shared budget when it survived; the reserve funds it only when the
+		// shared budget starved. When even the reserve is empty the pass proves
+		// nothing about the host session — skip and leave the record open,
+		// preserving the non-destructive observer contract (a wait-budget
+		// expiry never terminalizes a lane).
+		const statusQuestionAskable =
+			typeof session.status !== 'function' ||
+			(settleReserveMs > 0 && deadline - _internals.now() > 0);
+		if (!statusQuestionAskable) continue;
 		const readiness = await getLaneCollectionReadiness(
 			session,
 			directory,
 			currentBeforeReadiness.subagentSessionId,
 			deadline,
 			hostTimeouts,
-			reserveCollectionLaneCallBudgets(
-				deadline,
-				records.length,
-				typeof session.status === 'function',
-			).statusBudgetMs,
+			Math.max(statusBudgetMs, settleReserveMs),
 		);
-		if (readiness !== 'idle') continue;
+		if (readiness === 'busy') continue;
+		if (readiness === 'unknown') {
+			// Issue #2615: an unobservable host session (absent from the status
+			// map, or no status client at all) used to be retained forever as an
+			// open row. Past the stale horizon with no transcript result, it is a
+			// host-side abandonment — settle a typed 'liveness' terminal, never a
+			// child-failure class.
+			const currentUnknown = getCurrentStaleSweepCandidate(
+				directory,
+				record,
+				staleTimeoutMs,
+				now,
+			);
+			if (!currentUnknown) continue;
+			if (currentUnknown.result) continue;
+			const laneLabel = currentUnknown.laneId ?? currentUnknown.correlationId;
+			const reason = `lane ${laneLabel} presumed dead: host session unobservable`;
+			await settleDelegationTerminal(
+				directory,
+				currentUnknown,
+				{
+					status: 'error',
+					result: {
+						error: reason,
+						chars: reason.length,
+						truncated: false,
+						digest: digestText(reason),
+						workflowLaneFailureClass: 'liveness',
+					},
+				},
+				{},
+				_internals.now(),
+			);
+			continue;
+		}
 		const currentAfterReadiness = getCurrentStaleSweepCandidate(
 			directory,
 			record,
@@ -3803,11 +3880,34 @@ async function sweepStaleAsyncLaneRecords(
 			now,
 		);
 		if (!currentAfterReadiness) continue;
+		// Issue #2615: the idle-host stale flip must carry the typed 'liveness'
+		// class (same bounded shape as the unobservable-host settle above, same
+		// pre-existing-result merge as the Task-side sweep) so the
+		// partial-base-coverage admission gate can settle a stale-swept dimension
+		// through its record.result fallback instead of refusing an untyped
+		// terminal.
+		const idleLaneLabel =
+			currentAfterReadiness.laneId ?? currentAfterReadiness.correlationId;
+		const idleStaleReason = `lane ${idleLaneLabel} presumed stale: idle host session past the stale horizon`;
+		const idleLivenessResult: BackgroundDelegationResult =
+			currentAfterReadiness.result
+				? {
+						...currentAfterReadiness.result,
+						workflowLaneFailureClass: 'liveness',
+					}
+				: {
+						error: idleStaleReason,
+						chars: idleStaleReason.length,
+						truncated: false,
+						digest: digestText(idleStaleReason),
+						workflowLaneFailureClass: 'liveness',
+					};
 		await appendDelegationTransition(
 			directory,
 			currentAfterReadiness.correlationId,
 			{
 				status: 'stale',
+				result: idleLivenessResult,
 				expectedCurrentStatuses: ['pending', 'running', 'ingestion_error'],
 			},
 		);
@@ -5732,7 +5832,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async batch. This tool is a pure OBSERVER of lane state: it never cancels or terminalizes child work except when you explicitly pass cancel_pending. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status plus any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. The wait budget (timeout_ms) bounds THIS OBSERVER CALL ONLY: its expiry does not cancel, kill, or fail the lanes, and it is not evidence that a lane died. timeout_ms: 0 is a valid immediate, non-destructive snapshot. Whenever any lane is still unsettled the result carries pending_lanes (batch_id, lane_id, stored status, and output_ref when one exists) regardless of include_pending, so outstanding work is never silently omitted. If a collection returns pending lanes, poll again, cancel explicitly with cancel_pending, or let the presumed-stale backstop settle genuinely dead lanes — do NOT abort the workflow merely because an observer call expired or because the host messages client was unavailable. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes additionally carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect, degradedReason) that never cancels or replaces anything and never proves provider failure. A lane whose backing session records a terminal provider error (quota/billing/auth) AND produced no output AND has an over turn (a completed timestamp, or an idle host) settles immediately with the classified reason instead of staying pending — as failed, or as cancelled when the host reports the turn was aborted. A lane that produced output, or whose turn may still be retrying, keeps polling. Does not advance workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch. A presumed-stale sweep runs on EVERY call: lanes past the stale horizon settle — idle host sessions to stale, unobservable host sessions to a typed liveness error — and cancel_pending cancels remaining pending lanes. Otherwise it only observes. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status plus any settled results while you continue independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. The wait budget (timeout_ms) bounds THIS OBSERVER CALL ONLY: its expiry does not cancel, kill, or fail the lanes, and it is not evidence that a lane died. timeout_ms: 0 is a valid immediate, non-destructive snapshot. Any unsettled lane is reported in pending_lanes (batch_id, lane_id, stored status, output_ref when one exists) regardless of include_pending, so outstanding work is never silently omitted. If a collection returns pending lanes, poll again, cancel explicitly with cancel_pending, or let the presumed-stale sweep settle dead lanes — do NOT abort the workflow because an observer call expired or the host messages client was unavailable. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect, degradedReason) that never cancels anything or proves provider failure. A lane whose backing session records a terminal provider error (quota/billing/auth) AND produced no output AND has an over turn (a completed timestamp, or an idle host) settles immediately with the classified reason instead of staying pending — as failed, or as cancelled when the host reports the turn was aborted. A lane that produced output, or whose turn may still be retrying, keeps polling. Does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,
