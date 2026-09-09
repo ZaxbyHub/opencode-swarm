@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.172.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.171.2...v7.172.0) (2026-09-09)
+
+
+### Features
+
+* **ci:** gated implementation pipeline GitHub Action ([#2498](https://github.com/ZaxbyHub/opencode-swarm/issues/2498)) ([81f3623](https://github.com/ZaxbyHub/opencode-swarm/commit/81f36230c4f92cd7584c0b776926fe7733e43aad))
+* **mcp:** read-only MCP verification surface over stdio ([#2499](https://github.com/ZaxbyHub/opencode-swarm/issues/2499)) ([3199c3c](https://github.com/ZaxbyHub/opencode-swarm/commit/3199c3cd69d25044f30ee98066379132fac29fa4))
+
+
+### Bug Fixes
+
+* **ci:** close [#2650](https://github.com/ZaxbyHub/opencode-swarm/issues/2650) review feedback — distinct publish exits, PR reuse, timeouts, pinned posture ([8413169](https://github.com/ZaxbyHub/opencode-swarm/commit/84131697a8b40773c883725ad4633505189a8325))
+* **delegation:** preserve read uncertainty, truthful recovery status ([aa876ab](https://github.com/ZaxbyHub/opencode-swarm/commit/aa876ab146779faa57b8d67d58e44c539f40fd37))
+* **pr-review:** resolve validated findings from swarm review ([db9bbf3](https://github.com/ZaxbyHub/opencode-swarm/commit/db9bbf38ebdedaf2c3efc9a9dd62edeba8cd9f70))
+* **test:** canonicalize the pipeline test's cross-repo tmpdir (FR-011) ([4104565](https://github.com/ZaxbyHub/opencode-swarm/commit/4104565730dcdc0599c5640ec0fd32120199d6e9))
+* **test:** compose-test escape input must not embed the project root ([433d59c](https://github.com/ZaxbyHub/opencode-swarm/commit/433d59c2fcf37b61436257d44597cdeffc606bf7))
+* **test:** repair two latent diff.test.ts defects the dash guard exposed ([ff9edd3](https://github.com/ZaxbyHub/opencode-swarm/commit/ff9edd32ec23806e6f9c3ab5f87994c0878c0e5a))
+
 ## [7.171.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.171.1...v7.171.2) (2026-09-08)
 
 
