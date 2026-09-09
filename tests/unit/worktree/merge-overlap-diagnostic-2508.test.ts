@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { attemptMergeBackFromDirty } from '../../../src/worktree/merge';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const GIT_TIMEOUT_MS = 10_000;
 const tempRoots: string[] = [];
@@ -24,9 +25,7 @@ function createOverlapFixture(name: string): {
 	lanePath: string;
 	branch: string;
 } {
-	const root = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), `2508-overlap-${name}-`)),
-	);
+	const root = canonicalMkdtemp(`2508-overlap-${name}-`);
 	tempRoots.push(root);
 	git(root, 'init', '--initial-branch=main');
 	git(root, 'config', 'user.email', 'swarm-test@example.invalid');

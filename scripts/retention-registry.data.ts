@@ -694,7 +694,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'MAX_PR_FEEDBACK_MONITOR_EVENTS 20 per queue (:14); MAX_QUEUE_BYTES 512 KiB per file (:15); in-memory cache MAX_TRACKED_SESSIONS 200 FIFO (:16); the retention sweep\'s pr-feedback-events family age-prunes every queue file at 30 d (src/retention/sweep.ts:91)',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER: the retention-sweep family pr-feedback-events (src/retention/sweep.ts:91) age-prunes every session queue file at 30 d — wired post-init (src/index.ts:1293) and pre-close (src/commands/close/orchestrator.ts:269-286) — so the session-file keyspace cannot outgrow the sweep horizon. The in-process MAX_TRACKED_SESSIONS=200 FIFO (src/background/pr-feedback-event-queue.ts:16) remains an in-memory bound only. This closes the #2038-class keyspace gap this row recorded under #2309.',
+				'FINITE BY REAPER: the retention-sweep family pr-feedback-events (src/retention/sweep.ts:91) age-prunes every session queue file at 30 d — wired post-init (src/index.ts:1293) and pre-close (src/commands/close/orchestrator.ts:288-305) — so the session-file keyspace cannot outgrow the sweep horizon. The in-process MAX_TRACKED_SESSIONS=200 FIFO (src/background/pr-feedback-event-queue.ts:16) remains an in-memory bound only. This closes the #2038-class keyspace gap this row recorded under #2309.',
 			citation: 'src/background/pr-feedback-event-queue.ts:14-19; src/retention/sweep.ts:91',
 		},
 		readBound: { pattern: 'indexed', bound: '≤512 KiB hard read bound', sync: false, citation: 'src/background/pr-feedback-event-queue.ts:440-470' },
@@ -708,7 +708,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'not-a-defect',
 			proof:
-				'The #2483 retention sweep\'s pr-feedback-events family age-prunes every session queue file at 30 d (src/retention/sweep.ts:91), wired post-init (src/index.ts:1293) and pre-close (src/commands/close/orchestrator.ts:269-286) — the keyspace gap behind the #2309/#2038 reclassification is closed; per-file caps 20 events / 512 KiB (src/background/pr-feedback-event-queue.ts:14-15) bound each key.',
+				'The #2483 retention sweep\'s pr-feedback-events family age-prunes every session queue file at 30 d (src/retention/sweep.ts:91), wired post-init (src/index.ts:1293) and pre-close (src/commands/close/orchestrator.ts:288-305) — the keyspace gap behind the #2309/#2038 reclassification is closed; per-file caps 20 events / 512 KiB (src/background/pr-feedback-event-queue.ts:14-15) bound each key.',
 		},
 	},
 	{
@@ -3026,7 +3026,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/commands/close/archive-stage.ts'],
 		writerCitations: ['src/commands/close/archive-stage.ts runArchiveStage — bundle swarm-{ts}-{suffix}; archive-first guard'],
 		readerCitations: [
-			'src/commands/close/orchestrator.ts:142-146 finalize idempotency — readdir + startsWith(swarm-) (filename-only)',
+			'src/commands/close/orchestrator.ts:161-165 finalize idempotency — readdir + startsWith(swarm-) (filename-only)',
 			'session-reflection.ts:424 — filename-only scan for reflection signals',
 			'no production reader of bundle CONTENTS (verified)',
 		],
@@ -3038,8 +3038,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			scope: 'per-trigger',
 			citation: 'src/commands/close/archive-stage.ts:143-497 (no prune path — verified against source)',
 		},
-		readBound: { pattern: 'directory-scan', bound: 'filename-only scans; contents never re-read', sync: false, citation: 'src/commands/close/orchestrator.ts:142-146; session-reflection.ts:424' },
-		lockModel: 'finalize.lock cross-process (src/commands/close/orchestrator.ts:535-557)',
+		readBound: { pattern: 'directory-scan', bound: 'filename-only scans; contents never re-read', sync: false, citation: 'src/commands/close/orchestrator.ts:161-165; session-reflection.ts:424' },
+		lockModel: 'finalize.lock cross-process (src/commands/close/orchestrator.ts:554-576)',
 		crashBehavior: 'archive-before-clean guard: active files unlinked only if archived (:1637-1671); archiveStageFailed prevents truthful-looking empty results',
 		closePolicy: 'IS the close archive',
 		resetPolicy: 'not reset; operator-managed',
@@ -3539,7 +3539,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
 		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Single-session documents with explicit archive/clean/stub semantics in the close lists themselves (src/commands/close/constants.ts:16-95; src/commands/close/clean-stage.ts:364-380; src/commands/close/orchestrator.ts:397-406).' },
+		disposition: { kind: 'not-a-defect', proof: 'Single-session documents with explicit archive/clean/stub semantics in the close lists themselves (src/commands/close/constants.ts:16-95; src/commands/close/clean-stage.ts:364-380; src/commands/close/orchestrator.ts:416-425).' },
 	},
 	{
 		id: 'command-reports',

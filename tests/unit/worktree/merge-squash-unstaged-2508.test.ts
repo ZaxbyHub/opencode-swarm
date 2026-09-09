@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { attemptMergeBackFromDirty } from '../../../src/worktree/merge';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const GIT_TIMEOUT_MS = 10_000;
 const tempRoots: string[] = [];
@@ -37,9 +38,7 @@ interface Fixture {
 
 /** Primary repo + lane worktree; lane commits edit b.txt and add new.txt. */
 function createFixture(name: string): Fixture {
-	const root = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), `2508-squash-${name}-`)),
-	);
+	const root = canonicalMkdtemp(`2508-squash-${name}-`);
 	tempRoots.push(root);
 	git(root, 'init', '--initial-branch=main');
 	git(root, 'config', 'user.email', 'swarm-test@example.invalid');
@@ -154,9 +153,7 @@ describe('#2508 squash-merge-unstaged settlement landing', () => {
 	});
 
 	test('rename lands both sides unstaged (no delete+untracked split)', async () => {
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), '2508-squash-rename-')),
-		);
+		const root = canonicalMkdtemp('2508-squash-rename-');
 		tempRoots.push(root);
 		git(root, 'init', '--initial-branch=main');
 		git(root, 'config', 'user.email', 'swarm-test@example.invalid');

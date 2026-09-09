@@ -8,6 +8,7 @@ import {
 	handleCloseCommand,
 } from '../../../src/commands/close/orchestrator';
 import { closeProjectDb } from '../../../src/db/project-db';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const GIT_TIMEOUT_MS = 10_000;
 const tempRoots: string[] = [];
@@ -32,9 +33,7 @@ function extractToken(out: string): string | null {
  * branch detection works) + complete plan backed by the durable ledger.
  */
 function createCloseFixture(name: string): { root: string; bare: string } {
-	const root = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), `2508-close-${name}-`)),
-	);
+	const root = canonicalMkdtemp(`2508-close-${name}-`);
 	tempRoots.push(root);
 	const bare = `${root}-origin.git`;
 	execFileSync('git', ['init', '--bare', '--initial-branch=main', bare], {
@@ -204,6 +203,20 @@ describe('#2508 two-step destructive purge for /swarm close', () => {
 			_closeGateInternals.runGit = realRunGit;
 		}
 	});
+
+	test('bare .git marker root: close proceeds despite unreadable git status', async () => {
+		const { root } = createCloseFixture('markerroot');
+		// #2127 marker root: a .git with no repository behind it. The gate's
+		// real `git status` read fails here, but a marker root carries no
+		// git-tracked work, so the fail-closed signal must NOT fire.
+		fs.rmSync(path.join(root, '.git'), { recursive: true, force: true });
+		fs.mkdirSync(path.join(root, '.git'));
+		await initLedgerFor(root);
+
+		const out = await handleCloseCommand(root, [], {});
+
+		expect(out).not.toMatch(/fail-closed/);
+	}, 120_000);
 
 	test('clean tree: bare close keeps its single-call behavior', async () => {
 		const { root } = createCloseFixture('clean');

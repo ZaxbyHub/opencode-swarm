@@ -52,9 +52,11 @@ export interface ClosePurgeGate {
 	scopeAnchor: string;
 	/**
 	 * #2508 fail-closed signal: git status could not be read in a repository
-	 * (spawn failure, timeout, or output overflow). The gate cannot prove the
+	 * (spawn failure, timeout, or nonzero exit). The gate cannot prove the
 	 * align stage safe, so the destructive pipeline must be refused — never
-	 * treated as a clean tree.
+	 * treated as a clean tree. A bare `.git` marker (#2127 project root with
+	 * no repository behind it) carries no git-tracked work to verify and does
+	 * not trip this signal.
 	 */
 	gitStatusFailed: boolean;
 }
@@ -73,6 +75,22 @@ function runCloseGateGit(args: string[], cwd: string): string | null {
 
 /** Test seam for the #2508 gate (simulate git-status read failures). */
 export const _closeGateInternals = { runGit: runCloseGateGit };
+
+/**
+ * A real git repository root: `.git` is a linked-worktree/submodule pointer
+ * file, or a directory carrying the HEAD ref every repository has. Bare
+ * `.git` marker directories — accepted project roots per #2127 — are not
+ * repositories; git tracks nothing there, so a failed status read is a
+ * determined "no tracked work" answer, not an unreadable status.
+ */
+function isRealGitRepository(directory: string): boolean {
+	try {
+		if (fsSync.statSync(path.join(directory, '.git')).isFile()) return true;
+	} catch {
+		return false;
+	}
+	return fsSync.existsSync(path.join(directory, '.git', 'HEAD'));
+}
 
 export function evaluateClosePurgeGate(
 	directory: string,
@@ -124,9 +142,10 @@ export function evaluateClosePurgeGate(
 		dirtyPaths,
 		candidates,
 		scopeAnchor: candidates[0]?.path ?? directory,
-		// A repo whose status cannot be read is never "clean" — fail closed.
-		gitStatusFailed:
-			statusOutput === null && fsSync.existsSync(path.join(directory, '.git')),
+		// A repository whose status cannot be read is never "clean" — fail
+		// closed. Non-repository `.git` markers (#2127 roots) carry no
+		// git-tracked work, so a failed read there is an answer, not a gap.
+		gitStatusFailed: statusOutput === null && isRealGitRepository(directory),
 	};
 }
 

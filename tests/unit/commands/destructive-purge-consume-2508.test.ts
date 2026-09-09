@@ -9,14 +9,13 @@ import {
 	issueConfirmToken,
 	previewDestructivePurge,
 } from '../../../src/commands/destructive-purge';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const tempRoots: string[] = [];
 const REAL_NOW = _internals.now;
 
 function makeProject(name: string): { root: string; target: string } {
-	const root = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), `2508-consume-${name}-`)),
-	);
+	const root = canonicalMkdtemp(`2508-consume-${name}-`);
 	tempRoots.push(root);
 	fs.mkdirSync(path.join(root, '.swarm'), { recursive: true });
 	const target = path.join(root, 'lane-a');
