@@ -479,12 +479,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2958 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
-			'src/background/pending-delegations.ts:1442 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
+			'src/background/pending-delegations.ts:2985 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
+			'src/background/pending-delegations.ts:1469 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:2866 readDelegations — SQLite authority with bounded legacy compatibility, sync',
-			'src/background/pending-delegations.ts:2894 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:2893 readDelegations — SQLite authority with bounded legacy compatibility, sync',
+			'src/background/pending-delegations.ts:2921 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
@@ -593,12 +593,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:5190 writeDelegationFallback / :5241 removeDelegationFallback',
-			'src/background/pending-delegations.ts:5670 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:5225 writeDelegationFallback / :5276 removeDelegationFallback',
+			'src/background/pending-delegations.ts:5705 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:5045 readDelegationFallback / :5057 listDelegationFallbacks / :5091 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:5648 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:5080 readDelegationFallback / :5092 listDelegationFallbacks / :5126 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:5683 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:971)',
 		stateClass: 'authoritative',
@@ -3036,13 +3036,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/worktree/merge.ts',
 		],
 		writerCitations: [
-			'src/hooks/delegation-gate/worktree-merge-status.ts:259 recordWorktreeMergeFailure / :273 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-125)',
+			'src/hooks/delegation-gate/worktree-merge-status.ts:277 recordWorktreeMergeFailure / :291 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-125)',
 			'src/hooks/delegation-gate/worktree-provisioning-owner.ts recordWorktreeProvisioningOwner/removeWorktreeProvisioningOwner — atomic per-owner files plus bounded lifecycle journal',
 			'src/hooks/delegation-gate/worktree-recovery-authority.ts publish/claim/renew/release/finalize/replay — atomic authority, journal, and credential writes under one cross-process lock',
 			'src/worktree/merge.ts:1034/1363 — atomic merge-settlement patch records preserve squash settlement and recovery across crashes',
 		],
 		readerCitations: [
-			'worktree-merge-status.ts:166 scanWorktreeMergeFailuresForRecovery — bounded 2 MiB / 512 entries (:59-60)',
+			'worktree-merge-status.ts:184 scanWorktreeMergeFailuresForRecovery — bounded 2 MiB / 512 entries (:59-60)',
 			'worktree-provisioning-owner.ts scanWorktreeProvisioningOwnersForRecovery/scanWorktreeProvisioningLifecycleJournalForRecovery — ≤512 files / 16 KiB per file plus ≤256 KiB / 512-entry journal, fail-closed uncertain',
 			'worktree-recovery-authority.ts bounded store/journal/credential readers and recovery scans — ≤2 MiB / 512 authority or journal entries and ≤16 KiB per credential',
 		],
