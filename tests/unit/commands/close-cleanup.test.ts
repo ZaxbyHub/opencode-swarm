@@ -48,7 +48,6 @@ import { derivePlanId } from '../../../src/plan/utils.js';
 // and only override the entry points this suite needs deterministic/no-op
 // behavior for.
 import * as actualState from '../../../src/state.js';
-import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
 
@@ -157,35 +156,7 @@ mock.module('../../../src/plan/checkpoint.js', () => ({
 }));
 
 // ── Import under test ────────────────────────────────────────────────
-const {
-	handleCloseCommand: rawHandleCloseCommand,
-	_internals: closeInternals,
-} = await import('../../../src/commands/close.js');
-
-const mockCheckHivePromotions = mock(async () => ({
-	timestamp: '2026-01-01T00:00:00.000Z',
-	new_promotions: 0,
-	encounters_incremented: 0,
-	advancements: 0,
-	total_hive_entries: 0,
-}));
-const mockRunCuratorPostMortem = mock(async () => ({
-	success: true,
-	planId: null,
-	reportPath: null,
-	summary: null,
-	warnings: [],
-}));
-const realCloseInternals = {
-	curateAndStoreSwarm: closeInternals.curateAndStoreSwarm,
-	checkHivePromotions: closeInternals.checkHivePromotions,
-	runCuratorPostMortem: closeInternals.runCuratorPostMortem,
-};
-const handleCloseCommand = (
-	directory: string,
-	args: string[],
-	options?: Parameters<typeof rawHandleCloseCommand>[2],
-) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
+const { handleCloseCommand } = await import('../../../src/commands/close.js');
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -253,13 +224,8 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 	beforeEach(() => {
 		mockExecuteWriteRetro.mockClear();
 		mockCurateAndStoreSwarm.mockClear();
-		mockCheckHivePromotions.mockClear();
-		mockRunCuratorPostMortem.mockClear();
 		mockArchiveEvidence.mockClear();
 		mockFlushPendingSnapshot.mockClear();
-		closeInternals.curateAndStoreSwarm = mockCurateAndStoreSwarm;
-		closeInternals.checkHivePromotions = mockCheckHivePromotions;
-		closeInternals.runCuratorPostMortem = mockRunCuratorPostMortem;
 		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-cleanup-test-'));
 		mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
 
@@ -292,10 +258,6 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			// Ignore cleanup errors
 		}
 		spawnSyncSpy.mockRestore();
-		closeInternals.curateAndStoreSwarm = realCloseInternals.curateAndStoreSwarm;
-		closeInternals.checkHivePromotions = realCloseInternals.checkHivePromotions;
-		closeInternals.runCuratorPostMortem =
-			realCloseInternals.runCuratorPostMortem;
 		mock.restore();
 	});
 
@@ -964,7 +926,68 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 	});
 
-	// ── Test 9: Combined full cleanup ─────────────────────────────────
+	// ── Test 9: All 4 active-state directories archived and deleted ──
+
+	describe('All 4 active-state directories are archived and deleted', () => {
+		it('all four directories are archived and removed', async () => {
+			await writePlan();
+
+			// Create all 4 directories with unique marker files
+			mkdirSync(path.join(swarmDir(), 'evidence', 'retro-x'), {
+				recursive: true,
+			});
+			writeFileSync(
+				path.join(swarmDir(), 'evidence', 'marker.txt'),
+				'evidence-marker',
+			);
+
+			mkdirSync(path.join(swarmDir(), 'session', 'sess-y'), {
+				recursive: true,
+			});
+			writeFileSync(
+				path.join(swarmDir(), 'session', 'marker.txt'),
+				'session-marker',
+			);
+
+			mkdirSync(path.join(swarmDir(), 'scopes'));
+			writeFileSync(
+				path.join(swarmDir(), 'scopes', 'marker.txt'),
+				'scopes-marker',
+			);
+
+			mkdirSync(path.join(swarmDir(), 'spec-archive'));
+			writeFileSync(
+				path.join(swarmDir(), 'spec-archive', 'marker.txt'),
+				'spec-archive-marker',
+			);
+
+			await handleCloseCommand(testDir, []);
+
+			const archivePath = getLatestArchivePath();
+
+			// All four directories should be in the archive
+			expect(existsSync(path.join(archivePath, 'evidence', 'marker.txt'))).toBe(
+				true,
+			);
+			expect(existsSync(path.join(archivePath, 'session', 'marker.txt'))).toBe(
+				true,
+			);
+			expect(existsSync(path.join(archivePath, 'scopes', 'marker.txt'))).toBe(
+				true,
+			);
+			expect(
+				existsSync(path.join(archivePath, 'spec-archive', 'marker.txt')),
+			).toBe(true);
+
+			// All four directories should be deleted from .swarm/
+			expect(existsSync(path.join(swarmDir(), 'evidence'))).toBe(false);
+			expect(existsSync(path.join(swarmDir(), 'session'))).toBe(false);
+			expect(existsSync(path.join(swarmDir(), 'scopes'))).toBe(false);
+			expect(existsSync(path.join(swarmDir(), 'spec-archive'))).toBe(false);
+		});
+	});
+
+	// ── Test 10: Combined full cleanup ────────────────────────────────
 
 	describe('Full cleanup — all artifact types removed together', () => {
 		it('flat files, db files, and directories are all removed after close', async () => {

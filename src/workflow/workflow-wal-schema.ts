@@ -109,22 +109,6 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 // matches WorktreeDescriptorSchema in src/background/pending-delegations.ts,
 // the writer-side schema for this field.
 const BRANCH_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._/-]{0,1023}$/;
-const MAX_SQUASH_CHANGED_PATHS = 50_000;
-const MAX_SQUASH_CHANGED_PATH_LENGTH = 4096;
-
-function isSafeSquashChangedPaths(value: unknown): value is string[] {
-	return (
-		Array.isArray(value) &&
-		value.length <= MAX_SQUASH_CHANGED_PATHS &&
-		value.every(
-			(candidatePath) =>
-				typeof candidatePath === 'string' &&
-				candidatePath.length > 0 &&
-				candidatePath.length <= MAX_SQUASH_CHANGED_PATH_LENGTH &&
-				!candidatePath.includes('\0'),
-		)
-	);
-}
 
 function isSafeGitBranchName(value: unknown): value is string {
 	if (typeof value !== 'string' || !BRANCH_NAME_PATTERN.test(value)) {
@@ -237,29 +221,6 @@ export function parseCoderSettlementWal(
 	const provenance = parsed.mergeProvenance as
 		| Partial<MergeOperationProvenance>
 		| undefined;
-	const invalidProvenance =
-		provenance !== undefined &&
-		(typeof provenance.operationId !== 'string' ||
-			provenance.operationId !== parsed.transitionId ||
-			typeof provenance.sourceHead !== 'string' ||
-			!GIT_OBJECT_ID_PATTERN.test(provenance.sourceHead) ||
-			typeof provenance.targetHeadBefore !== 'string' ||
-			!GIT_OBJECT_ID_PATTERN.test(provenance.targetHeadBefore) ||
-			!isSafeGitBranchName(provenance.branchName) ||
-			(worktree !== undefined &&
-				(provenance.branchName !== worktree.branchName ||
-					provenance.strategy !== worktree.mergeStrategy)) ||
-			!['merge', 'rebase', 'cherry-pick', 'squash'].includes(
-				String(provenance.strategy),
-			) ||
-			(provenance.resultTree !== undefined &&
-				(typeof provenance.resultTree !== 'string' ||
-					!GIT_OBJECT_ID_PATTERN.test(provenance.resultTree))) ||
-			(provenance.changedPaths !== undefined &&
-				!isSafeSquashChangedPaths(provenance.changedPaths)) ||
-			(provenance.strategy === 'squash' &&
-				(!GIT_OBJECT_ID_PATTERN.test(String(provenance.resultTree ?? '')) ||
-					!isSafeSquashChangedPaths(provenance.changedPaths))));
 	if (
 		parsed.version !== 1 ||
 		!['ABORTED', 'COMMITTED', 'DISPATCHED', 'PREPARED'].includes(
@@ -326,11 +287,24 @@ export function parseCoderSettlementWal(
 				!isSafeGitBranchName(worktree.branchName) ||
 				typeof worktree.worktreeId !== 'string' ||
 				typeof worktree.worktreeSessionId !== 'string' ||
-				!['merge', 'rebase', 'cherry-pick', 'squash'].includes(
+				!['merge', 'rebase', 'cherry-pick'].includes(
 					String(worktree.mergeStrategy),
 				) ||
 				!Number.isInteger(worktree.laneIndex))) ||
-		invalidProvenance ||
+		(provenance !== undefined &&
+			(typeof provenance.operationId !== 'string' ||
+				provenance.operationId !== parsed.transitionId ||
+				typeof provenance.sourceHead !== 'string' ||
+				!GIT_OBJECT_ID_PATTERN.test(provenance.sourceHead) ||
+				typeof provenance.targetHeadBefore !== 'string' ||
+				!GIT_OBJECT_ID_PATTERN.test(provenance.targetHeadBefore) ||
+				!isSafeGitBranchName(provenance.branchName) ||
+				(worktree !== undefined &&
+					(provenance.branchName !== worktree.branchName ||
+						provenance.strategy !== worktree.mergeStrategy)) ||
+				!['merge', 'rebase', 'cherry-pick'].includes(
+					String(provenance.strategy),
+				))) ||
 		typeof parsed.recordedAt !== 'string' ||
 		(parsed.state === 'PREPARED' && typeof parsed.accepted !== 'boolean') ||
 		(parsed.cleanupComplete !== undefined &&

@@ -32,7 +32,7 @@ export interface LaneRecord {
 	taskId: string;
 	planTaskId?: string;
 	parentSessionID: string;
-	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick' | 'squash' | 'unknown';
+	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
 	mergeOutcome?: WorktreeMergeFailure;
 	recovery?: LaneRecoveryView;
 	manualRecoveryHint?: string;
@@ -182,9 +182,6 @@ function buildManualRecoveryHint(
 	if (failure.stage === 'conflict') {
 		return `Merge conflict at ${worktreePath}. Resolve manually, then re-run merge.`;
 	}
-	if (failure.stage === 'pre-merge-overlap') {
-		return `Overlapping primary changes were preserved at ${worktreePath}. Review the listed paths, commit or stash the primary changes, then re-run merge.`;
-	}
 	if (failure.outcome === 'partial') {
 		return `Partial merge preserved at ${worktreePath}. Stage and commit, then re-run merge.`;
 	}
@@ -312,10 +309,7 @@ export function handleLanesCommand(directory: string, args: string[]): string {
 			taskId,
 			planTaskId: undefined,
 			parentSessionID: '',
-			// Legacy durable failures predate strategy persistence. Never label
-			// those records as `merge`; that is materially misleading when the
-			// failed lane used squash/rebase/cherry-pick.
-			mergeStrategy: failure.mergeStrategy ?? 'unknown',
+			mergeStrategy: 'merge',
 			mergeOutcome: failure,
 			manualRecoveryHint: buildManualRecoveryHint(failure, worktreePath),
 			recovery,

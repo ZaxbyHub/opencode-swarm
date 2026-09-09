@@ -84,9 +84,6 @@ export const ARCHIVE_ARTIFACTS = [
 	// its bounded-retention mechanism is compaction (not close), so active state
 	// stays usable after close.
 	'context-telemetry.jsonl',
-	// Retained squash recovery authority is archived before confirmed close
-	// removes only the exact authority record whose frozen lane branch was deleted.
-	'worktree-merge-recovery-v2.json',
 	// workspace-snapshot.digest (issue #2472 W7 / PR #2588 PRR-015): the
 	// content-digest skip marker written by captureWorkspaceSnapshotAsync
 	// (SNAPSHOT_DIGEST_MARKER_FILENAME, src/background/workspace-snapshot.ts —

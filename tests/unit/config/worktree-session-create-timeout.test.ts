@@ -47,23 +47,6 @@ describe('worktree.session_create_timeout_ms (issue #2599)', () => {
 			worktree: { policy: 'auto' },
 		} as Parameters<typeof resolveWorktreeIsolationConfig>[0]);
 		expect(resolved.session_create_timeout_ms).toBe(30_000);
-		expect(resolved.merge_strategy).toBe('squash');
-	});
-
-	test('standard resolver fallback uses squash while Lean keeps explicit merge', () => {
-		const standard = resolveWorktreeIsolationConfig(
-			{} as Parameters<typeof resolveWorktreeIsolationConfig>[0],
-		);
-		expect(standard.merge_strategy).toBe('squash');
-
-		const lean = resolveWorktreeIsolationConfig({
-			worktree: undefined,
-			turbo: {
-				strategy: 'lean',
-				lean: { worktree_isolation: true },
-			},
-		} as unknown as Parameters<typeof resolveWorktreeIsolationConfig>[0]);
-		expect(lean.merge_strategy).toBe('merge');
 	});
 
 	test('lean-turbo synthesis resolves to the default (worktree_isolation is a boolean flag, not a knob surface — BOT-2 refuted)', () => {

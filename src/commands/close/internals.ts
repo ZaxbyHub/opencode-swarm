@@ -48,25 +48,6 @@ export const _internals = {
 		undefined as unknown as typeof import('./finalize-stage.js').guaranteeAllPlansComplete,
 	getGitRepositoryStatus:
 		undefined as unknown as typeof import('../../git/branch.js').getGitRepositoryStatus,
-	/** Read-only inventory of paths/branches the alignment stage may destroy. */
-	getGitDestructiveInventory: undefined as unknown as (
-		directory: string,
-		pruneBranches: boolean,
-	) => {
-		paths: string[];
-		branchLabels: string[];
-		/** Canonical name/tip/reason fingerprints for authorization binding. */
-		branchFingerprints?: string[];
-		headLabels?: string[];
-		alignmentPlan?: import('../../git/branch.js').ConfirmedGitAlignment;
-		error?: string;
-	},
-	removeConfirmedRecoveryAuthority: undefined as unknown as (
-		directory: string,
-		authority: NonNullable<
-			import('../../git/branch.js').ConfirmedGitAlignment['retainedRecoveryAuthorities']
-		>[number],
-	) => { ok: boolean; reason?: string },
 	resetToMainAfterMerge:
 		undefined as unknown as typeof import('../../git/branch.js').resetToMainAfterMerge,
 	resetToRemoteBranch:

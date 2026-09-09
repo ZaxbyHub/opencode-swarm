@@ -30,15 +30,6 @@ const MAX_JOURNAL_ENTRIES = 512;
 const MAX_CREDENTIAL_BYTES = 16 * 1024;
 const DEFAULT_MAX_ATTEMPTS = 8;
 const HEX_40_RE = /^[0-9a-f]{40}$/i;
-const HEX_64_RE = /^[0-9a-f]{64}$/i;
-const MAX_SQUASH_CHANGED_PATHS = 50_000;
-const MAX_SQUASH_CHANGED_PATH_LENGTH = 4096;
-/**
- * Digest version for immutable recovery provenance.  The store schema remains
- * v2 so existing non-squash authorities can be read, but new records carry
- * this marker and include squash settlement fields in their digest.
- */
-const CURRENT_AUTHORITY_DIGEST_VERSION = 2 as const;
 
 export const WORKTREE_RECOVERY_MUTATOR_NAMES = [
 	'publish',
@@ -52,11 +43,7 @@ export const WORKTREE_RECOVERY_MUTATOR_NAMES = [
 export type WorktreeRecoveryMutatorName =
 	(typeof WORKTREE_RECOVERY_MUTATOR_NAMES)[number];
 
-export type WorktreeRecoveryStrategy =
-	| 'merge'
-	| 'rebase'
-	| 'cherry-pick'
-	| 'squash';
+export type WorktreeRecoveryStrategy = 'merge' | 'rebase' | 'cherry-pick';
 export type WorktreeRecoveryStatus =
 	| 'preserved'
 	| 'claimed'
@@ -85,8 +72,6 @@ export interface WorktreeRecoveryImmutableIdentityInput {
 	sourceHeadOid: string;
 	targetHeadOid: string;
 	strategy: WorktreeRecoveryStrategy;
-	resultTree?: string;
-	changedPaths?: string[];
 	declaredConflictFiles?: string[];
 }
 
@@ -109,8 +94,6 @@ export interface WorktreeRecoveryClaimState {
 export interface WorktreeRecoveryAuthorityRecord {
 	schemaVersion: 2;
 	authorityDigest: string;
-	/** Digest algorithm version; absent only on legacy v2 records. */
-	authorityDigestVersion?: typeof CURRENT_AUTHORITY_DIGEST_VERSION;
 	immutable: WorktreeRecoveryImmutableIdentity;
 	status: WorktreeRecoveryStatus;
 	claim?: WorktreeRecoveryClaimState;
@@ -212,28 +195,6 @@ export type ClaimWorktreeRecoveryAuthorityResult =
 export type MutateWorktreeRecoveryClaimResult =
 	| { ok: true; authority: WorktreeRecoveryAuthorityRecord }
 	| BaseMutationFailure;
-
-export interface RemoveWorktreeRecoveryAuthorityRequest {
-	authorityDigest: string;
-	branchName: string;
-	branchTipSha: string;
-	readBranchTip: () => string | undefined;
-	/**
-	 * Optional exact squash provenance fence. When supplied, the retained
-	 * authority must still carry the same synthetic tree and changed paths.
-	 */
-	resultTree?: string;
-	changedPaths?: string[];
-	/**
-	 * Atomically remove the retained branch while the authority lock is held.
-	 * Returning false preserves the authority for retry.
-	 */
-	deleteBranchIfTip?: () => boolean;
-}
-
-export type RemoveWorktreeRecoveryAuthorityResult =
-	| { ok: true }
-	| { ok: false; reason: string };
 
 export interface ClaimWorktreeRecoveryAuthorityRequest {
 	authorityDigest: string;
@@ -446,38 +407,6 @@ function digestAuthorityIdentity(
 			sourceHeadOid: input.sourceHeadOid,
 			targetHeadOid: input.targetHeadOid,
 			strategy: input.strategy,
-			resultTree: input.resultTree ?? null,
-			changedPaths: input.changedPaths ?? [],
-			declaredConflictFiles: input.declaredConflictFiles ?? [],
-		}),
-	);
-}
-
-/**
- * Digest projection used by pre-v2 persisted records.  It deliberately stays
- * separate from the current projection so accepting a legacy non-squash
- * record can never accidentally bless a squash record whose artifact fields
- * were not covered by its original digest.
- */
-function digestLegacyAuthorityIdentity(
-	input: WorktreeRecoveryImmutableIdentityInput,
-): string {
-	return sha256(
-		stableStringify({
-			originalCallID: input.originalCallID,
-			parentSessionId: input.parentSessionId,
-			taskId: input.taskId,
-			reservationId: input.reservationId,
-			generation: input.generation,
-			canonicalBranch: input.canonicalBranch,
-			canonicalPath: input.canonicalPath,
-			laneBranch: input.laneBranch,
-			lanePath: input.lanePath,
-			expectedPrimaryHead: input.expectedPrimaryHead,
-			sourceBaseOid: input.sourceBaseOid,
-			sourceHeadOid: input.sourceHeadOid,
-			targetHeadOid: input.targetHeadOid,
-			strategy: input.strategy,
 			declaredConflictFiles: input.declaredConflictFiles ?? [],
 		}),
 	);
@@ -489,27 +418,6 @@ function nonEmpty(value: unknown): value is string {
 
 function isHex40(value: unknown): value is string {
 	return typeof value === 'string' && HEX_40_RE.test(value);
-}
-
-function isObjectId(value: unknown): value is string {
-	return (
-		typeof value === 'string' &&
-		(HEX_40_RE.test(value) || HEX_64_RE.test(value))
-	);
-}
-
-function isChangedPathArray(value: unknown): value is string[] {
-	return (
-		Array.isArray(value) &&
-		value.length <= MAX_SQUASH_CHANGED_PATHS &&
-		value.every(
-			(candidatePath) =>
-				typeof candidatePath === 'string' &&
-				candidatePath.length > 0 &&
-				candidatePath.length <= MAX_SQUASH_CHANGED_PATH_LENGTH &&
-				!candidatePath.includes('\0'),
-		)
-	);
 }
 
 function isOidArray(value: unknown): value is string[] {
@@ -529,12 +437,7 @@ function isSettlementEvidence(
 }
 
 function isStrategy(value: unknown): value is WorktreeRecoveryStrategy {
-	return (
-		value === 'merge' ||
-		value === 'rebase' ||
-		value === 'cherry-pick' ||
-		value === 'squash'
-	);
+	return value === 'merge' || value === 'rebase' || value === 'cherry-pick';
 }
 
 function isImmutableIdentity(
@@ -559,12 +462,6 @@ function isImmutableIdentity(
 		isHex40(candidate.sourceHeadOid) &&
 		isHex40(candidate.targetHeadOid) &&
 		isStrategy(candidate.strategy) &&
-		(candidate.resultTree === undefined || isObjectId(candidate.resultTree)) &&
-		(candidate.changedPaths === undefined ||
-			isChangedPathArray(candidate.changedPaths)) &&
-		(candidate.strategy !== 'squash' ||
-			(isObjectId(candidate.resultTree) &&
-				isChangedPathArray(candidate.changedPaths))) &&
 		(candidate.declaredConflictFiles === undefined ||
 			(Array.isArray(candidate.declaredConflictFiles) &&
 				candidate.declaredConflictFiles.every((item) => nonEmpty(item)))) &&
@@ -600,7 +497,6 @@ function isClaimState(value: unknown): value is WorktreeRecoveryClaimState {
 function isAuthority(value: unknown): value is WorktreeRecoveryAuthorityRecord {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
 	const candidate = value as Record<string, unknown>;
-	if (!isImmutableIdentity(candidate.immutable)) return false;
 	const claimCursor =
 		candidate.claimCursor && typeof candidate.claimCursor === 'object'
 			? (candidate.claimCursor as Record<string, unknown>)
@@ -610,21 +506,10 @@ function isAuthority(value: unknown): value is WorktreeRecoveryAuthorityRecord {
 		candidate.status === 'claimed' ||
 		candidate.status === 'released' ||
 		candidate.status === 'finalized';
-	const immutable = candidate.immutable as WorktreeRecoveryImmutableIdentity;
-	const currentDigest =
-		candidate.authorityDigestVersion === CURRENT_AUTHORITY_DIGEST_VERSION &&
-		candidate.authorityDigest === digestAuthorityIdentity(immutable);
-	// A legacy v2 record is accepted only when it is not a squash authority.
-	// Legacy squash records are rejected because their resultTree/changedPaths
-	// were not covered by the old digest and therefore cannot be trusted.
-	const legacyDigest =
-		candidate.authorityDigestVersion === undefined &&
-		immutable.strategy !== 'squash' &&
-		candidate.authorityDigest === digestLegacyAuthorityIdentity(immutable);
 	return (
 		candidate.schemaVersion === 2 &&
 		nonEmpty(candidate.authorityDigest) &&
-		(currentDigest || legacyDigest) &&
+		isImmutableIdentity(candidate.immutable) &&
 		validStatus &&
 		(candidate.claim === undefined || isClaimState(candidate.claim)) &&
 		(claimCursor === undefined ||
@@ -986,7 +871,6 @@ function publishWorktreeRecoveryAuthorityUnlocked(
 	const authority: WorktreeRecoveryAuthorityRecord = {
 		schemaVersion: 2,
 		authorityDigest,
-		authorityDigestVersion: CURRENT_AUTHORITY_DIGEST_VERSION,
 		immutable,
 		status: 'preserved',
 	};
@@ -1018,141 +902,6 @@ export function publishWorktreeRecoveryAuthority(
 	}
 	try {
 		return publishWorktreeRecoveryAuthorityUnlocked(directory, input);
-	} finally {
-		release();
-	}
-}
-
-function removeWorktreeRecoveryAuthorityUnlocked(
-	directory: string,
-	request: RemoveWorktreeRecoveryAuthorityRequest,
-): RemoveWorktreeRecoveryAuthorityResult {
-	const store = loadStoreWritable(directory);
-	if ('ok' in store) return { ok: false, reason: store.reason };
-	const index = store.authorities.findIndex(
-		(authority) => authority.authorityDigest === request.authorityDigest,
-	);
-	if (index === -1) {
-		return {
-			ok: false,
-			reason:
-				'retained recovery authority changed; preserving the authority record',
-		};
-	}
-	const authority = store.authorities[index]!;
-	if (
-		authority.status !== 'preserved' ||
-		authority.immutable.strategy !== 'squash' ||
-		authority.immutable.laneBranch !== request.branchName
-	) {
-		return {
-			ok: false,
-			reason:
-				'retained recovery authority changed; preserving the authority record',
-		};
-	}
-	if (request.resultTree !== undefined || request.changedPaths !== undefined) {
-		if (
-			request.resultTree !== authority.immutable.resultTree ||
-			!request.changedPaths ||
-			!authority.immutable.changedPaths ||
-			request.changedPaths.length !== authority.immutable.changedPaths.length ||
-			request.changedPaths.some(
-				(pathName, index) =>
-					pathName !== authority.immutable.changedPaths?.[index],
-			)
-		) {
-			return {
-				ok: false,
-				reason:
-					'retained recovery squash provenance changed; preserving the authority record',
-			};
-		}
-	}
-	let currentTip: string | undefined;
-	try {
-		currentTip = request.readBranchTip();
-	} catch {
-		return {
-			ok: false,
-			reason: 'retained recovery branch state could not be verified',
-		};
-	}
-	if (currentTip && currentTip !== request.branchTipSha) {
-		return {
-			ok: false,
-			reason:
-				'retained recovery branch tip changed; preserving the authority record',
-		};
-	}
-	if (currentTip && request.deleteBranchIfTip) {
-		try {
-			if (!request.deleteBranchIfTip()) {
-				return {
-					ok: false,
-					reason:
-						'retained recovery branch tip changed; preserving the authority record',
-				};
-			}
-		} catch {
-			return {
-				ok: false,
-				reason: 'retained recovery branch could not be removed safely',
-			};
-		}
-		try {
-			if (request.readBranchTip()) {
-				return {
-					ok: false,
-					reason: 'retained recovery branch was not deleted',
-				};
-			}
-		} catch {
-			return {
-				ok: false,
-				reason: 'retained recovery branch state could not be verified',
-			};
-		}
-	} else if (currentTip) {
-		return {
-			ok: false,
-			reason: 'retained recovery branch was not deleted',
-		};
-	}
-	const remaining = store.authorities.filter(
-		(candidate) => candidate.authorityDigest !== request.authorityDigest,
-	);
-	if (remaining.length === 0) {
-		try {
-			fs.unlinkSync(storePath(directory));
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-				return {
-					ok: false,
-					reason: 'recovery authority store changed while finalizing',
-				};
-			}
-		}
-		return { ok: true };
-	}
-	_internals.writeRecoveryStore(
-		storePath(directory),
-		updateStore(store, remaining),
-		'claim-finalize',
-	);
-	return { ok: true };
-}
-
-export function removeWorktreeRecoveryAuthority(
-	directory: string,
-	request: RemoveWorktreeRecoveryAuthorityRequest,
-): RemoveWorktreeRecoveryAuthorityResult {
-	const release = acquireAuthorityLock(directory);
-	if (!release) {
-		return { ok: false, reason: 'recovery authority store is locked' };
-	}
-	try {
-		return removeWorktreeRecoveryAuthorityUnlocked(directory, request);
 	} finally {
 		release();
 	}

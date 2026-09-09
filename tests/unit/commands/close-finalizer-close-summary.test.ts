@@ -28,7 +28,6 @@ import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import * as actualState from '../../../src/state.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
-import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 const realSnapshotWriter = await import(
 	'../../../src/session/snapshot-writer.js'
@@ -142,14 +141,7 @@ mock.module('../../../src/plan/checkpoint.js', () => ({
 }));
 
 // ── Import under test ────────────────────────────────────────────────
-const { handleCloseCommand: rawHandleCloseCommand } = await import(
-	'../../../src/commands/close.js'
-);
-const handleCloseCommand = (
-	directory: string,
-	args: string[] = [],
-	options?: Parameters<typeof rawHandleCloseCommand>[2],
-) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
+const { handleCloseCommand } = await import('../../../src/commands/close.js');
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

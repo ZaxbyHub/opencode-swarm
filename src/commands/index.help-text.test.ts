@@ -39,10 +39,12 @@ describe('buildHelpText()', () => {
 		test('finalize command includes Args: with close flags', () => {
 			const finalizeEntry = COMMAND_REGISTRY.finalize;
 			expect(finalizeEntry.args).toBe(
-				'--prune-branches, --skill-review, --dry-run, --confirm=<token>',
+				'--prune-branches, --skill-review, --dry-run',
 			);
 			// The help text should have Args: indented under the finalize command
-			expect(helpText).toContain(`Args: \`${finalizeEntry.args}\``);
+			expect(helpText).toContain(
+				'Args: `--prune-branches, --skill-review, --dry-run`',
+			);
 		});
 
 		test('benchmark command includes Args:', () => {

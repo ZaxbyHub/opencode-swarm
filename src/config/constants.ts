@@ -802,9 +802,7 @@ export const SWARM_WORKTREE_DIR_NAME = '.swarm-worktrees';
 
 export const DEFAULT_WORKTREE_ISOLATION_CONFIG: WorktreeIsolationConfig = {
 	policy: 'auto',
-	// Standard worktree lanes settle with a synthetic squash by default. Lean
-	// Turbo keeps its explicit historical `merge` default above.
-	merge_strategy: 'squash',
+	merge_strategy: 'merge',
 	worktree_dir: undefined,
 	deps_strategy: 'skip',
 	lane_permissions: 'scoped_allow',

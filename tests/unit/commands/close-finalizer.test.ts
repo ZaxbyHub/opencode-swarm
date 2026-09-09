@@ -28,7 +28,6 @@ import path from 'node:path';
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
-import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
@@ -250,18 +249,10 @@ mock.module('../../../src/services/skill-improver.js', () => ({
 }));
 
 // ── Import under test ────────────────────────────────────────────────
-const {
-	handleCloseCommand: rawHandleCloseCommand,
-	_internals: closeInternals,
-} = await import('../../../src/commands/close.js');
-const handleCloseCommand = (
-	directory: string,
-	args: string[],
-	options?: Parameters<typeof rawHandleCloseCommand>[2],
-) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
+const { handleCloseCommand, _internals: closeInternals } = await import(
+	'../../../src/commands/close.js'
+);
 const realGetGitRepositoryStatus = closeInternals.getGitRepositoryStatus;
-const realGetGitDestructiveInventory =
-	closeInternals.getGitDestructiveInventory;
 const realResetToRemoteBranch = closeInternals.resetToRemoteBranch;
 const realResetToMainAfterMerge = closeInternals.resetToMainAfterMerge;
 const realResetSwarmStatePreservingSingletons =
@@ -367,11 +358,6 @@ describe('handleCloseCommand — finalizer stages', () => {
 			warnings: [] as string[],
 		}));
 		closeInternals.getGitRepositoryStatus = mockGetGitRepositoryStatus;
-		closeInternals.getGitDestructiveInventory = () => ({
-			paths: [],
-			branchLabels: [],
-			headLabels: [],
-		});
 		closeInternals.resetToRemoteBranch = mockResetToRemoteBranch;
 		closeInternals.resetToMainAfterMerge = mockResetToMainAfterMerge;
 		// close.ts's call site (L1884) goes through
@@ -420,7 +406,6 @@ describe('handleCloseCommand — finalizer stages', () => {
 			// Ignore cleanup errors
 		}
 		closeInternals.getGitRepositoryStatus = realGetGitRepositoryStatus;
-		closeInternals.getGitDestructiveInventory = realGetGitDestructiveInventory;
 		closeInternals.resetToRemoteBranch = realResetToRemoteBranch;
 		closeInternals.resetToMainAfterMerge = realResetToMainAfterMerge;
 		// Restore the original reference so it doesn't leak into other test
@@ -1488,5 +1473,49 @@ describe('guaranteeAllPlansComplete via _internals (FR-006b)', () => {
 		expect(result.closedTaskIds).toEqual(['1.1', '1.2', '2.1']);
 		// Phase 2 stayed complete (was already terminal)
 		expect(planData.phases[1].status).toBe('complete');
+	});
+});
+
+// ── copyDirRecursive via _internals (FR-015b) ──────────────────────────
+
+describe('copyDirRecursive via _internals (FR-015b)', () => {
+	test('copies a nested directory tree with files and subdirectories and returns the correct file count', async () => {
+		const { _internals: closeInternals } = await import(
+			'../../../src/commands/close'
+		);
+
+		const tmp = mkdtempSync(path.join(os.tmpdir(), 'copydir-recursive-test-'));
+		try {
+			const src = path.join(tmp, 'src');
+			const dest = path.join(tmp, 'dest');
+
+			// Build nested source: src/file1.txt, src/a/file2.txt, src/a/b/file3.txt
+			mkdirSync(path.join(src, 'a', 'b'), { recursive: true });
+			writeFileSync(path.join(src, 'file1.txt'), 'hello');
+			writeFileSync(path.join(src, 'a', 'file2.txt'), 'world');
+			writeFileSync(path.join(src, 'a', 'b', 'file3.txt'), 'deep');
+
+			const count = await closeInternals.copyDirRecursive(src, dest);
+
+			expect(count).toBe(3);
+
+			// Verify files copied with correct content
+			expect(existsSync(path.join(dest, 'file1.txt'))).toBe(true);
+			expect(readFileSync(path.join(dest, 'file1.txt'), 'utf8')).toBe('hello');
+			expect(existsSync(path.join(dest, 'a', 'file2.txt'))).toBe(true);
+			expect(readFileSync(path.join(dest, 'a', 'file2.txt'), 'utf8')).toBe(
+				'world',
+			);
+			expect(existsSync(path.join(dest, 'a', 'b', 'file3.txt'))).toBe(true);
+			expect(readFileSync(path.join(dest, 'a', 'b', 'file3.txt'), 'utf8')).toBe(
+				'deep',
+			);
+
+			// Verify subdirectories were created
+			expect(existsSync(path.join(dest, 'a'))).toBe(true);
+			expect(existsSync(path.join(dest, 'a', 'b'))).toBe(true);
+		} finally {
+			rmSync(tmp, { recursive: true, force: true });
+		}
 	});
 });

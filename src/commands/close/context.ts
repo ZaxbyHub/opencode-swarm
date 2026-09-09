@@ -1,5 +1,4 @@
 import type { KnowledgeConfig, PluginConfig } from '../../config/schema';
-import type { ConfirmedGitAlignment } from '../../git/branch.js';
 import type { SessionReflectionResult } from '../../services/session-reflection';
 import type { SqliteRowCounts } from '../archive-sqlite';
 
@@ -65,8 +64,6 @@ export interface ArchiveStageContext {
 export interface CloseStageContext {
 	directory: string;
 	swarmDir: string;
-	/** Frozen Git alignment scope captured after confirmation and lock. */
-	alignmentPlan?: ConfirmedGitAlignment;
 	planData: PlanData;
 	planExists: boolean;
 	planAlreadyDone: boolean;

@@ -87,11 +87,6 @@ describe('settlement resume head validation', () => {
 	async function replaySettling(
 		sourceHeadAfterCommit: string,
 		targetHeadBeforeMerge: string,
-		options: {
-			mergeStrategy?: 'merge' | 'rebase' | 'cherry-pick' | 'squash';
-			resultTree?: string;
-			changedPaths?: string[];
-		} = {},
 	): Promise<void> {
 		ensureAgentSession('parent', 'architect', directory);
 		const baseline = captureWorkspaceSnapshot(worktreePath);
@@ -116,7 +111,7 @@ describe('settlement resume head validation', () => {
 				branchName: 'swarm/lane/background-coder',
 				worktreeId: 'lane-1',
 				worktreeSessionId: 'resume-coder',
-				mergeStrategy: options.mergeStrategy ?? 'merge',
+				mergeStrategy: 'merge',
 				laneIndex: 0,
 				worktreeDir: null,
 			},
@@ -141,12 +136,6 @@ describe('settlement resume head validation', () => {
 			state: 'settling',
 			sourceHeadAfterCommit,
 			targetHeadBeforeMerge,
-			...(options.resultTree
-				? {
-						resultTree: options.resultTree,
-						changedPaths: options.changedPaths ?? [],
-					}
-				: {}),
 			observedFiles: ['resume.ts'],
 		});
 
@@ -202,18 +191,5 @@ describe('settlement resume head validation', () => {
 		const record = findByCorrelationId(directory, 'resume-coder');
 		expect(record?.coderSettlement?.state).toBe('preserved');
 		expect(fs.existsSync(worktreePath)).toBe(true);
-	});
-
-	test('persists squash result-tree coordinates across background resume', async () => {
-		await replaySettling(HEX40, HEX40, {
-			mergeStrategy: 'squash',
-			resultTree: HEX40,
-			changedPaths: [' resume.ts '],
-		});
-
-		const record = findByCorrelationId(directory, 'resume-coder');
-		expect(record?.coderSettlement?.state).toBe('preserved');
-		expect(record?.coderSettlement?.resultTree).toBe(HEX40);
-		expect(record?.coderSettlement?.changedPaths).toEqual([' resume.ts ']);
 	});
 });

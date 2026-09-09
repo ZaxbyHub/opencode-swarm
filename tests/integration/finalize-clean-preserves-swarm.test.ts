@@ -23,10 +23,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import {
-	_internals as closeInternals,
-	handleCloseCommand,
-} from '../../src/commands/close.js';
 import { GITIGNORED_BUILD_ARTIFACTS } from '../../src/git/branch';
 import { createSafeTestDir } from '../helpers/safe-test-dir';
 
@@ -43,15 +39,6 @@ const GIT_OK = gitAvailable();
 
 function git(cwd: string, args: string[]): void {
 	execFileSync('git', args, { cwd, stdio: 'pipe' });
-}
-
-function branchExists(cwd: string, branchName: string): boolean {
-	try {
-		git(cwd, ['show-ref', '--verify', `refs/heads/${branchName}`]);
-		return true;
-	} catch {
-		return false;
-	}
 }
 
 function seedRepo(dir: string): void {
@@ -84,13 +71,6 @@ function seedWorkingState(dir: string): void {
 	);
 	fs.writeFileSync(path.join(dir, 'dist', 'out.js'), 'build output\n');
 	fs.writeFileSync(path.join(dir, 'untracked-user-work.txt'), 'user work\n');
-}
-
-function confirmToken(preview: string): string {
-	const token = /--confirm=([0-9a-f]{24})/.exec(preview)?.[1];
-	if (!token)
-		throw new Error(`close preview did not issue a token: ${preview}`);
-	return token;
 }
 
 const exists = (dir: string, rel: string): boolean =>
@@ -145,73 +125,6 @@ describe.skipIf(!GIT_OK)(
 				expect(normalized).not.toBe('.claude');
 				expect(normalized).not.toBe('.opencode');
 				expect(normalized).not.toBe('node_modules');
-			}
-		});
-
-		test('confirmed close with pruning removes dist and a merged branch but preserves .swarm knowledge', async () => {
-			const closeRunFinalizeStage = closeInternals.runFinalizeStage;
-			const closeRunArchiveStage = closeInternals.runArchiveStage;
-			const closeRunCleanStage = closeInternals.runCleanStage;
-			const closeRunAlignStage = closeInternals.runAlignStage;
-			const closeSnapshotInit =
-				closeInternals.closeSnapshotCoordinationInitialization;
-			const closeRewardSweep = closeInternals.runFinalizeRewardSweep;
-			const closeResetState =
-				closeInternals.resetSwarmStatePreservingSingletons;
-			const closeEndSession = closeInternals.endAgentSession;
-			const closeDetectFullAuto = closeInternals.detectFullAuto;
-			try {
-				seedWorkingState(dir);
-				fs.writeFileSync(
-					path.join(dir, '.swarm', 'plan.json'),
-					JSON.stringify({ title: 'confirmed cleanup', phases: [] }),
-				);
-				fs.writeFileSync(path.join(dir, 'feature-marker.txt'), 'tracked\n');
-				git(dir, ['add', 'feature-marker.txt']);
-				git(dir, ['commit', '-qm', 'feature']);
-				git(dir, ['branch', '-M', 'main']);
-				git(dir, ['branch', 'feature']);
-				git(dir, ['remote', 'add', 'origin', path.join(dir, 'remote.git')]);
-				git(dir, ['init', '--bare', path.join(dir, 'remote.git')]);
-				git(dir, ['push', '-qu', 'origin', 'main']);
-				git(dir, ['push', '-qu', 'origin', 'feature']);
-				git(dir, ['remote', 'set-head', 'origin', 'main']);
-				git(dir, ['checkout', '-q', 'feature']);
-
-				// Keep the confirmation, clean, and alignment boundaries real. The
-				// unrelated finalize/archive work is stubbed so this regression stays
-				// deterministic while exercising the production Git lifecycle.
-				closeInternals.closeSnapshotCoordinationInitialization = async () => {};
-				closeInternals.detectFullAuto = () => false;
-				closeInternals.runFinalizeStage = async () => {};
-				closeInternals.runFinalizeRewardSweep = async () => {};
-				closeInternals.runArchiveStage = async () => {};
-				closeInternals.runCleanStage = closeRunCleanStage;
-				closeInternals.runAlignStage = closeRunAlignStage;
-				closeInternals.resetSwarmStatePreservingSingletons = () => {};
-				closeInternals.endAgentSession = () => {};
-
-				const preview = await handleCloseCommand(dir, ['--prune-branches']);
-				const output = await handleCloseCommand(dir, [
-					'--prune-branches',
-					`--confirm=${confirmToken(preview)}`,
-				]);
-
-				expect(output).toContain('Swarm finalized');
-				expect(exists(dir, '.swarm/knowledge.jsonl')).toBe(true);
-				expect(exists(dir, 'dist/out.js')).toBe(false);
-				expect(branchExists(dir, 'feature')).toBe(false);
-			} finally {
-				closeInternals.runFinalizeStage = closeRunFinalizeStage;
-				closeInternals.runArchiveStage = closeRunArchiveStage;
-				closeInternals.runCleanStage = closeRunCleanStage;
-				closeInternals.runAlignStage = closeRunAlignStage;
-				closeInternals.closeSnapshotCoordinationInitialization =
-					closeSnapshotInit;
-				closeInternals.runFinalizeRewardSweep = closeRewardSweep;
-				closeInternals.resetSwarmStatePreservingSingletons = closeResetState;
-				closeInternals.endAgentSession = closeEndSession;
-				closeInternals.detectFullAuto = closeDetectFullAuto;
 			}
 		});
 	},

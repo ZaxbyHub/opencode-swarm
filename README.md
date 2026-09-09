@@ -1171,8 +1171,8 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm deep-dive <scope> [--profile <name>] [--max-explorers <n>]` | Read-only codebase audit with parallel explorers, dual reviewers, and critic challenge |
 | `/swarm design-docs <description> [--out <dir>] [--lang <name>] [--update]` | Generate or sync language-agnostic design docs (requires `design_docs.enabled`) |
 | `/swarm dark-matter` | Detect hidden file couplings from co-change history |
-| `/swarm finalize [--prune-branches] [--skill-review] [--confirm=<token>]` | Idempotent session close-out: previews the exact destructive cleanup/alignment scope, then requires a single-use confirmation token before retrospectives, lesson curation, evidence archive, git reset --hard + clean, optional branch pruning, and optional skill-improver proposal |
-| `/swarm close [--prune-branches] [--skill-review] [--confirm=<token>]` | Deprecated alias for `/swarm finalize [--prune-branches] [--skill-review] [--confirm=<token>]` |
+| `/swarm finalize [--prune-branches] [--skill-review]` | Idempotent session close-out: retrospectives, lesson curation, evidence archive, git reset --hard + clean to align with remote branch (discards uncommitted changes), optional branch pruning, optional skill-improver proposal |
+| `/swarm close [--prune-branches] [--skill-review]` | Deprecated alias for `/swarm finalize [--prune-branches] [--skill-review]` |
 | `/swarm write-retro` | Write a phase retrospective manually |
 | `/swarm handoff` | Generate a handoff summary for context-budget-critical sessions |
 | `/swarm simulate` | Simulate plan execution without writing code |

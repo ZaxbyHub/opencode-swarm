@@ -24,7 +24,6 @@ import { savePlan } from '../../../src/plan/manager.js';
 import * as realSummaries from '../../../src/summaries/manager.js';
 import { installCloseCommandMocks } from '../../helpers/close-command-mocks';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
-import { runConfirmedClose } from '../commands/close-confirmation-test-helpers.js';
 
 installCloseCommandMocks();
 
@@ -48,14 +47,7 @@ mock.module('../../../src/summaries/manager.js', () => ({
 }));
 
 const { runRetentionSweep } = await import('../../../src/retention/sweep.js');
-const { handleCloseCommand: rawHandleCloseCommand } = await import(
-	'../../../src/commands/close.js'
-);
-const handleCloseCommand = (
-	directory: string,
-	args: string[] = [],
-	options?: Parameters<typeof rawHandleCloseCommand>[2],
-) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
+const { handleCloseCommand } = await import('../../../src/commands/close.js');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = 1_757_000_000_000; // fixed epoch anchor (check-test-clock-safe); all mtimes are offsets of this

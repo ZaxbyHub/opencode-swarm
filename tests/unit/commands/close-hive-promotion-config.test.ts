@@ -17,18 +17,11 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { savePlan } from '../../../src/plan/manager';
-import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 // ── Import under test ────────────────────────────────────────────────
-const {
-	handleCloseCommand: rawHandleCloseCommand,
-	_internals: closeInternals,
-} = await import('../../../src/commands/close.js');
-const handleCloseCommand = (
-	directory: string,
-	args: string[] = [],
-	options?: Parameters<typeof rawHandleCloseCommand>[2],
-) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
+const { handleCloseCommand, _internals: closeInternals } = await import(
+	'../../../src/commands/close.js'
+);
 
 // ── Save real _internals ─────────────────────────────────────────────
 

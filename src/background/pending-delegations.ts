@@ -521,9 +521,6 @@ export interface BackgroundCoderSettlement {
 	operationId?: string;
 	sourceHeadAfterCommit?: string | null;
 	targetHeadBeforeMerge?: string | null;
-	/** Synthetic squash tree and exact changed paths captured before apply. */
-	resultTree?: string;
-	changedPaths?: string[];
 	observedFiles: string[] | null;
 	outcome?: BackgroundCoderSettlementOutcome;
 	updatedAt: number;
@@ -760,20 +757,6 @@ const CoderSettlementSchema = z
 		operationId: z.string().min(1).max(256).optional(),
 		sourceHeadAfterCommit: z.string().min(1).max(256).nullable().optional(),
 		targetHeadBeforeMerge: z.string().min(1).max(256).nullable().optional(),
-		resultTree: z
-			.string()
-			.regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
-			.optional(),
-		changedPaths: z
-			.array(
-				z
-					.string()
-					.min(1)
-					.max(4_096)
-					.refine((value) => !value.includes('\0')),
-			)
-			.max(50_000)
-			.optional(),
 		observedFiles: z
 			.array(NormalizedObservedFileSchema)
 			.max(MAX_BACKGROUND_OBSERVED_FILES)
@@ -796,16 +779,6 @@ const CoderSettlementSchema = z
 			context.addIssue({
 				code: z.ZodIssueCode.custom,
 				message: 'terminal settlement state requires outcome',
-			});
-		}
-		if (
-			(value.resultTree === undefined) !==
-			(value.changedPaths === undefined)
-		) {
-			context.addIssue({
-				code: z.ZodIssueCode.custom,
-				message:
-					'squash settlement artifact requires resultTree and changedPaths together',
 			});
 		}
 	});
@@ -4174,8 +4147,6 @@ export interface UpdateCoderSettlementInput {
 	state: 'settling' | 'settled' | 'preserved';
 	sourceHeadAfterCommit?: string | null;
 	targetHeadBeforeMerge?: string | null;
-	resultTree?: string;
-	changedPaths?: string[];
 	observedFiles?: string[] | null;
 	outcome?: BackgroundCoderSettlementOutcome;
 }
@@ -4281,12 +4252,6 @@ export async function updateCoderSettlement(
 						: {}),
 					...(input.targetHeadBeforeMerge !== undefined
 						? { targetHeadBeforeMerge: input.targetHeadBeforeMerge }
-						: {}),
-					...(input.resultTree !== undefined
-						? { resultTree: input.resultTree }
-						: {}),
-					...(input.changedPaths !== undefined
-						? { changedPaths: [...input.changedPaths] }
 						: {}),
 					observedFiles,
 					...(input.outcome ? { outcome: input.outcome } : {}),

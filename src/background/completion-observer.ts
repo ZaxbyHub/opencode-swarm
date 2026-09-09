@@ -999,12 +999,6 @@ async function settleCoder(
 						sourceHeadAfterCommit: provenance.sourceHead,
 						targetHeadBeforeMerge: provenance.targetHeadBefore,
 						observedFiles,
-						...(provenance.resultTree
-							? {
-									resultTree: provenance.resultTree,
-									changedPaths: provenance.changedPaths ?? [],
-								}
-							: {}),
 					},
 				);
 				if (!persisted)
@@ -1024,12 +1018,6 @@ async function settleCoder(
 							? {
 									sourceHeadAfterCommit: provenance.sourceHead,
 									targetHeadBeforeMerge: provenance.targetHeadBefore,
-									...(provenance.resultTree
-										? {
-												resultTree: provenance.resultTree,
-												changedPaths: provenance.changedPaths ?? [],
-											}
-										: {}),
 								}
 							: {}),
 						outcome: {
@@ -1077,12 +1065,6 @@ async function settleCoder(
 				? {
 						sourceHeadAfterCommit: mergeResult.provenance.sourceHead,
 						targetHeadBeforeMerge: mergeResult.provenance.targetHeadBefore,
-						...(mergeResult.provenance.resultTree
-							? {
-									resultTree: mergeResult.provenance.resultTree,
-									changedPaths: mergeResult.provenance.changedPaths ?? [],
-								}
-							: {}),
 					}
 				: {}),
 			outcome: {
@@ -1117,29 +1099,12 @@ function settlementResume(
 	) {
 		return undefined;
 	}
-	if (
-		worktree.mergeStrategy === 'squash' &&
-		(!settlement.resultTree ||
-			!Array.isArray(settlement.changedPaths) ||
-			!GIT_OBJECT_ID_PATTERN.test(settlement.resultTree))
-	) {
-		// The pre-merge checkpoint deliberately has no synthetic tree yet. It is
-		// safe to retry from the frozen source/target heads, but never to resume
-		// a squash apply without both durable artifact coordinates.
-		return undefined;
-	}
 	return {
 		operationId: settlement.operationId,
 		sourceHead: settlement.sourceHeadAfterCommit,
 		targetHeadBefore: settlement.targetHeadBeforeMerge,
 		branchName: worktree.branchName,
 		strategy: worktree.mergeStrategy,
-		...(worktree.mergeStrategy === 'squash'
-			? {
-					resultTree: settlement.resultTree,
-					changedPaths: settlement.changedPaths,
-				}
-			: {}),
 	};
 }
 

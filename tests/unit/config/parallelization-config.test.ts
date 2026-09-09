@@ -80,10 +80,10 @@ describe('PluginConfigSchema — parallelization field', () => {
 });
 
 describe('WorktreeIsolationConfigSchema', () => {
-	test('defaults to auto isolation with squash strategy and no custom directory', () => {
+	test('defaults to auto isolation with merge strategy and no custom directory', () => {
 		const result = WorktreeIsolationConfigSchema.parse({});
 		expect(result.policy).toBe('auto');
-		expect(result.merge_strategy).toBe('squash');
+		expect(result.merge_strategy).toBe('merge');
 		expect(result.deps_strategy).toBe('skip');
 		expect(result.worktree_dir).toBeUndefined();
 	});

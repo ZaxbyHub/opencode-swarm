@@ -69,70 +69,11 @@ function baseWal(
 	});
 }
 
-function squashWal(
-	overrides: { resultTree?: unknown; changedPaths?: unknown } = {},
-): string {
-	const parsed = JSON.parse(baseWal()) as {
-		worktree: { mergeStrategy: string };
-		mergeProvenance: Record<string, unknown>;
-	};
-	parsed.worktree.mergeStrategy = 'squash';
-	parsed.mergeProvenance.strategy = 'squash';
-	Object.assign(parsed.mergeProvenance, {
-		resultTree: HEX40,
-		changedPaths: ['result.txt'],
-		...overrides,
-	});
-	return JSON.stringify(parsed);
-}
-
 describe('coder-settlement WAL worktree and provenance bounds', () => {
 	test('baseline fixture parses, so single-field variations are attributable', () => {
 		const wal = parseCoderSettlementWal(baseWal(), WAL_PATH, '1.1');
 		expect(wal.taskId).toBe('1.1');
 	});
-
-	test('round-trips bounded squash result-tree provenance', () => {
-		const wal = parseCoderSettlementWal(
-			squashWal({
-				resultTree: HEX64,
-				changedPaths: ['result.txt', 'nested/file.bin'],
-			}),
-			WAL_PATH,
-			'1.1',
-		);
-		expect(wal.mergeProvenance).toMatchObject({
-			strategy: 'squash',
-			resultTree: HEX64,
-			changedPaths: ['result.txt', 'nested/file.bin'],
-		});
-	});
-
-	for (const missingField of ['resultTree', 'changedPaths'] as const) {
-		test(`rejects squash provenance missing ${missingField}`, () => {
-			const parsed = JSON.parse(squashWal()) as {
-				mergeProvenance: Record<string, unknown>;
-			};
-			delete parsed.mergeProvenance[missingField];
-			expect(() =>
-				parseCoderSettlementWal(JSON.stringify(parsed), WAL_PATH, '1.1'),
-			).toThrow(/CODER_SETTLEMENT_WAL_UNREADABLE/);
-		});
-	}
-
-	for (const [label, overrides] of [
-		['malformed result tree', { resultTree: 'not-an-oid' }],
-		['non-array changed paths', { changedPaths: 'result.txt' }],
-		['overlong changed path', { changedPaths: ['x'.repeat(4097)] }],
-		['NUL-containing changed path', { changedPaths: ['bad\0path'] }],
-		['over-cap changed path array', { changedPaths: Array(50_001).fill('x') }],
-	] as const) {
-		test(`rejects squash provenance with ${label}`, () => {
-			expect(() =>
-				parseCoderSettlementWal(squashWal(overrides), WAL_PATH, '1.1'),
-			).toThrow(/CODER_SETTLEMENT_WAL_UNREADABLE/);
-		});
-	}
 
 	// F-010: worktreePath is bounded for parity with the other path fields.
 	test('accepts a worktreePath at the 4096 bound', () => {

@@ -18,7 +18,6 @@ import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import { savePlan } from '../../../src/plan/manager.js';
-import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 /**
@@ -88,6 +87,7 @@ async function writeCanonicalPlan(testDirectory: string, input: TestPlanInput) {
 	return plan;
 }
 
+// Mock dependencies before importing the module
 const mockExecuteWriteRetro = mock(async (_args: unknown, _directory: string) =>
 	JSON.stringify({
 		success: true,
@@ -310,10 +310,10 @@ mock.module('../../../src/state.js', () => ({
 	hasActiveEpicMode: () => false,
 	updateTaskWorkflowCache: () => {},
 }));
-const { handleCloseCommand: rawHandleCloseCommand, _internals } = await import(
+// Import after mock setup
+const { handleCloseCommand, _internals } = await import(
 	'../../../src/commands/close.js'
 );
-const handleCloseCommand = runConfirmedClose.bind(null, rawHandleCloseCommand);
 
 //
 // WITHIN-MODULE MOCKS: NONE POSSIBLE

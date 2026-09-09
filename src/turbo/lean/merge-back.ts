@@ -35,9 +35,5 @@ export type {
 } from '../../worktree/merge';
 
 export function getMergeStrategy(config: LeanTurboConfig) {
-	// The shared helper owns the standard worktree default (squash). Lean
-	// Turbo intentionally preserves its historical unset default (merge).
-	return getSharedMergeStrategy({
-		merge_strategy: config.merge_strategy ?? 'merge',
-	});
+	return getSharedMergeStrategy({ merge_strategy: config.merge_strategy });
 }

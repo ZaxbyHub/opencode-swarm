@@ -4,10 +4,6 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { KnowledgeConfigSchema } from '../../config/schema';
 import { isFullAutoRunActive } from '../../full-auto/state.js';
-import {
-	type ConfirmedGitAlignment,
-	confirmedGitAlignmentDigestProjection,
-} from '../../git/branch.js';
 import { validateSwarmPath } from '../../hooks/utils';
 import { tryAcquireLock } from '../../parallel/file-locks.js';
 import { peekPlanFromLedger } from '../../plan/ledger.js';
@@ -29,13 +25,13 @@ import { runCleanStage } from './clean-stage.js';
 import {
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	ACTIVE_STATE_TO_CLEAN,
-	ARCHIVE_ARTIFACTS,
 } from './constants.js';
 import type {
 	CloseCommandOptions,
 	CloseStageContext,
 	PlanData,
 } from './context.js';
+import { runFinalizeStage } from './finalize-stage.js';
 import { _internals } from './internals.js';
 
 /**
@@ -315,47 +311,12 @@ export async function handleCloseCommand(
 	let finalizeLock: { acquired: boolean; release?: () => Promise<void> } = {
 		acquired: false,
 	};
-	let confirmedAlignmentPlan: ConfirmedGitAlignment | undefined;
 	finalizeLock = await _internals.acquireFinalizeLock(directory);
 	if (!finalizeLock.acquired) {
 		return `❌ Another /swarm finalize is already running for this project. If you are certain no other run is active, wait for the lock to expire or remove the stale lock and retry.`;
 	}
 
 	try {
-		// The lock itself is the only write before this revalidation. A scope
-		// change between preview/claim and lock acquisition invalidates the run.
-		const postCloseInventory = deriveCloseDestructiveInventory(directory, args);
-		if (postCloseInventory.error) {
-			return `❌ Close paused after claiming confirmation: ${postCloseInventory.error}. No cleanup, archive, alignment, or teardown was performed.`;
-		}
-		if (
-			closeInventoryDigest(postCloseInventory.candidates) !== preCloseDigest
-		) {
-			return '❌ Close confirmation rejected: the destructive inventory changed before finalization. Re-run /swarm finalize to preview the new scope and receive a new token. No cleanup, archive, alignment, or teardown was performed.';
-		}
-		if (
-			closeAlignmentPlanDigest(postCloseInventory.alignmentPlan) !==
-			preCloseAlignmentDigest
-		) {
-			return '❌ Close confirmation rejected: the Git alignment target changed before finalization. Re-run /swarm finalize to preview the new alignment scope and receive a new token. No cleanup, archive, alignment, or teardown was performed.';
-		}
-		if (closeClaim) {
-			const verified = verifyDestructivePurgeClaim(
-				closeClaim,
-				closeScopeTarget(directory, postCloseInventory.candidates),
-				directory,
-				{ kind: 'close', candidates: postCloseInventory.candidates },
-			);
-			if (!verified.ok || !verified.claim) {
-				return `❌ Close confirmation rejected after lock acquisition: ${verified.reason ?? 'authorization verification failed'}. No cleanup, archive, alignment, or teardown was performed.`;
-			}
-			const consumed = consumeDestructivePurgeClaim(verified.claim, directory);
-			if (!consumed.ok) {
-				return `❌ Close confirmation could not be consumed: ${consumed.reason ?? 'authorization is no longer valid'}. No cleanup, archive, alignment, or teardown was performed.`;
-			}
-		}
-		confirmedAlignmentPlan = postCloseInventory.alignmentPlan;
-
 		// #2481: settle the retained post-resolution import before VACUUM INTO or
 		// cleanup can observe/close swarm.db. If the bounded close wait expires,
 		// the coordination guard stays installed until the underlying attempt
@@ -418,7 +379,6 @@ export async function handleCloseCommand(
 		const ctx: CloseStageContext = {
 			directory,
 			swarmDir,
-			alignmentPlan: confirmedAlignmentPlan,
 			planData,
 			planExists,
 			planAlreadyDone,
@@ -474,7 +434,7 @@ export async function handleCloseCommand(
 			? _internals.detectFullAuto(directory, options.sessionID)
 			: false;
 
-		await _internals.runFinalizeStage(ctx);
+		await runFinalizeStage(ctx);
 		if (ctx.terminalizationError) {
 			return `❌ Close paused before reward, archive, cleanup, teardown, and Git alignment because terminal plan/evidence reconciliation failed: ${ctx.terminalizationError}\n\nNo active state was archived or removed. Fix the reported durable-state problem, then retry /swarm close.`;
 		}
@@ -496,7 +456,7 @@ export async function handleCloseCommand(
 			memoryConfig: loadedConfig.memory,
 		});
 
-		await _internals.runArchiveStage(ctx);
+		await runArchiveStage(ctx);
 		// #2483: one bounded retention sweep between the archive and clean
 		// stages prunes the residual keyspace families close does not own.
 		// Fail-open — a sweep failure never blocks the clean stage.
@@ -519,13 +479,12 @@ export async function handleCloseCommand(
 		} catch (sweepError) {
 			log('[close-command] retention sweep failed (non-fatal):', sweepError);
 		}
-		const cleanResult = await _internals.runCleanStage(ctx);
+		const cleanResult = await runCleanStage(ctx);
 		// Emit the structured archive event AFTER clean so source_disposition
 		// can be finalized truthfully ('removed' for cleaned artifacts).
 		// Swallowed: a telemetry failure never blocks close.
 		emitCloseArchiveResult(ctx, cleanResult);
-		const { gitAlignResult, prunedBranches } =
-			await _internals.runAlignStage(ctx);
+		const { gitAlignResult, prunedBranches } = await runAlignStage(ctx);
 
 		// ─── WRITE CLOSE SUMMARY ─────────────────────────────────────────
 		const closeSummaryPath = validateSwarmPath(

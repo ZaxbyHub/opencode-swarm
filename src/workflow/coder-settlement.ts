@@ -865,60 +865,6 @@ async function cleanupRecoveredWorktree(
 	}
 }
 
-/**
- * A committed squash settlement may still owe worktree cleanup after a crash.
- * Re-establish the durable recovery authority before attempting that cleanup;
- * the retained lane branch is the only safe source for replaying the squash.
- */
-async function publishSquashRecoveryAuthorityForCommittedWal(
-	directory: string,
-	wal: CoderSettlementWal,
-): Promise<void> {
-	const descriptor = wal.worktree;
-	const provenance = wal.mergeProvenance;
-	if (
-		!descriptor ||
-		!provenance ||
-		provenance.strategy !== 'squash' ||
-		!provenance.resultTree ||
-		!provenance.changedPaths
-	) {
-		return;
-	}
-	const { _internals: worktreeInternals } = await import(
-		'../hooks/delegation-gate/worktree-isolation.js'
-	);
-	const published =
-		await worktreeInternals.publishRecoveryAuthorityForSettlement({
-			directory,
-			taskId: wal.taskId,
-			dispatch: {
-				callID: descriptor.callID,
-				parentSessionID: descriptor.parentSessionId,
-				taskId: descriptor.taskId,
-				...(descriptor.planTaskId ? { planTaskId: descriptor.planTaskId } : {}),
-				handle: {
-					worktreePath: descriptor.worktreePath,
-					branchName: descriptor.branchName,
-					purpose: 'lane' as const,
-					id: descriptor.worktreeId,
-					sessionId: descriptor.worktreeSessionId,
-				},
-				mergeStrategy: descriptor.mergeStrategy,
-				laneIndex: descriptor.laneIndex,
-				...(descriptor.worktreeDir
-					? { worktree_dir: descriptor.worktreeDir }
-					: {}),
-			},
-			provenance,
-		});
-	if (!published.ok) {
-		throw new Error(
-			`CODER_SETTLEMENT_RECOVERY_AUTHORITY_FAILED: ${published.reason}`,
-		);
-	}
-}
-
 export async function completeCoderSettlementCleanup(
 	directory: string,
 	taskId: string,
@@ -1018,7 +964,6 @@ export async function recoverCoderSettlement(
 		if (wal.state === 'ABORTED') return null;
 		if (wal.state === 'COMMITTED') {
 			if (wal.worktree && wal.cleanupComplete !== true) {
-				await publishSquashRecoveryAuthorityForCommittedWal(directory, wal);
 				await cleanupRecoveredWorktree(directory, wal.worktree);
 				await writeWal(filePath, { ...wal, cleanupComplete: true });
 			}
@@ -1044,9 +989,11 @@ export async function recoverCoderSettlement(
 						`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: transition ${wal.transitionId} for isolated task ${taskId} could not attribute worktree changes to the declared scope (${filePath}, state ${wal.state}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 					);
 				}
-				const mergeProvenance = wal.mergeProvenance;
-				if (mergeProvenance) {
-					const landed = await reconcileLandedMerge(directory, mergeProvenance);
+				if (wal.mergeProvenance) {
+					const landed = await reconcileLandedMerge(
+						directory,
+						wal.mergeProvenance,
+					);
 					if (landed.landed) {
 						// #2508: a worktree-match reconciliation means the recorded
 						// merge attempt already landed as squash-unstaged — the WAL

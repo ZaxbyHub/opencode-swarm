@@ -555,194 +555,6 @@ export interface ResetToRemoteBranchResult {
 }
 
 /**
- * Read-only alignment scope captured during close confirmation.  The target
- * SHA and branch candidates are immutable: alignment may fetch to validate the
- * remote, but it must never widen this plan from refs discovered afterwards.
- */
-export interface ConfirmedGitAlignment {
-	readonly defaultBranch: string;
-	readonly targetRef: string;
-	readonly targetSha: string;
-	readonly targetAvailable: boolean;
-	readonly currentBranch: string;
-	readonly currentHeadSha: string;
-	readonly branchCandidates: ReadonlyArray<
-		Readonly<{
-			name: string;
-			tipSha: string;
-			reason: string;
-		}>
-	>;
-	readonly retainedRecoveryAuthorities?: ReadonlyArray<
-		Readonly<{
-			authorityDigest: string;
-			branchName: string;
-			branchTipSha: string;
-			resultTree?: string;
-			changedPaths?: ReadonlyArray<string>;
-		}>
-	>;
-}
-
-/** Stable projection used to bind a confirmed alignment plan to close. */
-export function confirmedGitAlignmentDigestProjection(
-	plan?: ConfirmedGitAlignment,
-): Record<string, unknown> | null {
-	if (!plan) return null;
-	return {
-		defaultBranch: plan.defaultBranch,
-		targetRef: plan.targetRef,
-		targetSha: plan.targetSha,
-		targetAvailable: plan.targetAvailable,
-		currentBranch: plan.currentBranch,
-		currentHeadSha: plan.currentHeadSha,
-		branchCandidates: plan.branchCandidates,
-		...(plan.retainedRecoveryAuthorities
-			? { retainedRecoveryAuthorities: plan.retainedRecoveryAuthorities }
-			: {}),
-	};
-}
-
-type AlignmentOptions = {
-	pruneBranches?: boolean;
-	confirmedPlan?: ConfirmedGitAlignment;
-};
-
-function confirmedIdentityError(
-	cwd: string,
-	plan: ConfirmedGitAlignment,
-): string | undefined {
-	try {
-		const targetSha = _internals
-			.gitExec(['rev-parse', plan.targetRef], cwd)
-			.trim();
-		const currentHeadSha = _internals
-			.gitExec(['rev-parse', 'HEAD'], cwd)
-			.trim();
-		const currentBranch = _internals
-			.gitExec(['rev-parse', '--abbrev-ref', 'HEAD'], cwd)
-			.trim();
-		if (
-			targetSha !== plan.targetSha ||
-			currentHeadSha !== plan.currentHeadSha ||
-			currentBranch !== plan.currentBranch
-		) {
-			return 'confirmed Git alignment plan changed after fetch';
-		}
-		return undefined;
-	} catch (error) {
-		return `could not revalidate confirmed Git alignment plan: ${errorMessage(error)}`;
-	}
-}
-
-function retainedSquashArtifactLanded(
-	cwd: string,
-	plan: ConfirmedGitAlignment,
-	retainedRecovery: NonNullable<
-		ConfirmedGitAlignment['retainedRecoveryAuthorities']
-	>[number],
-): boolean {
-	if (
-		!retainedRecovery.resultTree ||
-		retainedRecovery.changedPaths === undefined
-	) {
-		return false;
-	}
-	try {
-		if (retainedRecovery.changedPaths.length === 0) {
-			return (
-				_internals.gitExec(['rev-parse', 'HEAD'], cwd).trim() === plan.targetSha
-			);
-		}
-		_internals.gitExec(
-			[
-				'diff',
-				'--quiet',
-				'--literal-pathspecs',
-				retainedRecovery.resultTree,
-				'HEAD',
-				'--',
-				...retainedRecovery.changedPaths,
-			],
-			cwd,
-		);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-function deleteConfirmedBranchCandidates(
-	cwd: string,
-	plan: ConfirmedGitAlignment,
-	currentBranch: string,
-): { prunedBranches: string[]; warnings: string[] } {
-	const prunedBranches: string[] = [];
-	const warnings: string[] = [];
-	for (const candidate of plan.branchCandidates) {
-		if (
-			candidate.name === plan.defaultBranch ||
-			candidate.name === currentBranch
-		) {
-			continue;
-		}
-		try {
-			assertSafeGitRefArg(candidate.name, 'confirmed branch candidate');
-			assertSafeGitRefArg(candidate.tipSha, 'confirmed branch candidate tip');
-			const currentTip = _internals
-				.gitExec(['rev-parse', `refs/heads/${candidate.name}`], cwd)
-				.trim();
-			if (currentTip !== candidate.tipSha) continue;
-			const retainedRecovery = plan.retainedRecoveryAuthorities?.find(
-				(authority) =>
-					authority.authorityDigest.length > 0 &&
-					authority.branchName === candidate.name &&
-					authority.branchTipSha === candidate.tipSha,
-			);
-			// A retained squash branch is an explicitly authorized recovery
-			// artifact and may intentionally be divergent from the target. All
-			// ordinary candidates still require ancestry to the frozen target.
-			if (!retainedRecovery) {
-				try {
-					_internals.gitExec(
-						['merge-base', '--is-ancestor', candidate.tipSha, plan.targetSha],
-						cwd,
-					);
-				} catch {
-					continue;
-				}
-			}
-			if (retainedRecovery) {
-				if (!retainedSquashArtifactLanded(cwd, plan, retainedRecovery)) {
-					warnings.push(
-						`Could not verify landed squash artifact: ${candidate.name}`,
-					);
-					continue;
-				}
-				// Retained squash branches may be divergent by design. Delete only
-				// the exact frozen name+tip pair; update-ref's expected old OID is
-				// the compare-and-delete boundary against a concurrent ref move.
-				_internals.gitExec(
-					[
-						'update-ref',
-						'-d',
-						`refs/heads/${candidate.name}`,
-						candidate.tipSha,
-					],
-					cwd,
-				);
-			} else {
-				_internals.gitExec(['branch', '-d', '--', candidate.name], cwd);
-			}
-			prunedBranches.push(candidate.name);
-		} catch {
-			warnings.push(`Could not delete confirmed branch: ${candidate.name}`);
-		}
-	}
-	return { prunedBranches, warnings };
-}
-
-/**
  * Detect the default remote branch using multiple fallback methods
  */
 export function detectDefaultRemoteBranch(cwd: string): string | null {
@@ -796,32 +608,17 @@ export function detectDefaultRemoteBranch(cwd: string): string | null {
  */
 export async function resetToRemoteBranch(
 	cwd: string,
-	options?: AlignmentOptions,
+	options?: { pruneBranches?: boolean },
 ): Promise<ResetToRemoteBranchResult> {
 	const warnings: string[] = [];
 	const prunedBranches: string[] = [];
 
 	try {
-		const confirmedPlan = options?.confirmedPlan;
-		// Get current branch. A confirmed plan binds this identity before any
-		// fetch; legacy callers retain the dynamic discovery behavior.
-		const currentBranch = confirmedPlan?.currentBranch ?? getCurrentBranch(cwd);
+		// Get current branch
+		const currentBranch = getCurrentBranch(cwd);
 
 		// Detect default remote branch
-		const defaultRemoteBranch =
-			confirmedPlan?.defaultBranch ?? _internals.detectDefaultRemoteBranch(cwd);
-		if (confirmedPlan && !confirmedPlan.targetAvailable) {
-			return {
-				success: false,
-				targetBranch: confirmedPlan.targetRef,
-				localBranch: currentBranch,
-				message:
-					'Git alignment skipped: no remote target was available at confirmation preview',
-				alreadyAligned: false,
-				prunedBranches: [],
-				warnings: [],
-			};
-		}
+		const defaultRemoteBranch = _internals.detectDefaultRemoteBranch(cwd);
 		if (!defaultRemoteBranch) {
 			return {
 				success: false,
@@ -842,24 +639,7 @@ export async function resetToRemoteBranch(
 			defaultRemoteBranch,
 			'resetToRemoteBranch defaultRemoteBranch',
 		);
-		const targetBranch =
-			confirmedPlan?.targetRef ?? `origin/${defaultRemoteBranch}`;
-		const targetRevision = confirmedPlan?.targetSha ?? targetBranch;
-		assertSafeGitRefArg(targetRevision, 'resetToRemoteBranch target revision');
-		if (confirmedPlan) {
-			const identityError = confirmedIdentityError(cwd, confirmedPlan);
-			if (identityError) {
-				return {
-					success: false,
-					targetBranch,
-					localBranch: currentBranch,
-					message: `Cannot reset: ${identityError}`,
-					alreadyAligned: false,
-					prunedBranches: [],
-					warnings: [],
-				};
-			}
-		}
+		const targetBranch = `origin/${defaultRemoteBranch}`;
 
 		// Safety check: Detached HEAD
 		if (currentBranch === 'HEAD') {
@@ -890,7 +670,7 @@ export async function resetToRemoteBranch(
 		// Safety check: Unpushed commits
 		try {
 			const logOutput = gitExec(
-				['log', `${targetRevision}..HEAD`, '--oneline'],
+				['log', `${targetBranch}..HEAD`, '--oneline'],
 				cwd,
 			);
 			if (logOutput.trim().length > 0) {
@@ -922,26 +702,10 @@ export async function resetToRemoteBranch(
 				warnings: [],
 			};
 		}
-		if (confirmedPlan) {
-			const identityError = confirmedIdentityError(cwd, confirmedPlan);
-			if (identityError) {
-				return {
-					success: false,
-					targetBranch,
-					localBranch: currentBranch,
-					message: `Cannot reset: ${identityError}`,
-					alreadyAligned: false,
-					prunedBranches: [],
-					warnings: [],
-				};
-			}
-		}
 
 		// Check if already aligned
 		const headSha = gitExec(['rev-parse', 'HEAD'], cwd).trim();
-		const remoteSha = confirmedPlan
-			? confirmedPlan.targetSha
-			: gitExec(['rev-parse', `${targetBranch}`], cwd).trim();
+		const remoteSha = gitExec(['rev-parse', `${targetBranch}`], cwd).trim();
 
 		if (headSha === remoteSha) {
 			return {
@@ -980,7 +744,7 @@ export async function resetToRemoteBranch(
 				await new Promise((resolve) => setTimeout(resolve, 500));
 			}
 			try {
-				gitExec(['reset', '--hard', targetRevision], cwd);
+				gitExec(['reset', '--hard', targetBranch], cwd);
 				resetSucceeded = true;
 				break;
 			} catch (err) {
@@ -1000,20 +764,8 @@ export async function resetToRemoteBranch(
 			};
 		}
 
-		// Confirmed plans never rediscover branch candidates after fetch. Delete
-		// only the frozen name+tip pairs that remain ancestors of the frozen
-		// target. Legacy callers retain the historical dynamic pruning behavior.
-		if (confirmedPlan) {
-			if (options?.pruneBranches) {
-				const confirmedPruning = deleteConfirmedBranchCandidates(
-					cwd,
-					confirmedPlan,
-					currentBranch,
-				);
-				prunedBranches.push(...confirmedPruning.prunedBranches);
-				warnings.push(...confirmedPruning.warnings);
-			}
-		} else if (options?.pruneBranches) {
+		// Prune branches if requested
+		if (options?.pruneBranches) {
 			// Get merged branches and prune them
 			try {
 				const mergedOutput = gitExec(['branch', '--merged', targetBranch], cwd);
@@ -1114,7 +866,6 @@ export interface ResetToMainAfterMergeResult {
 	previousBranch: string;
 	message: string;
 	branchDeleted: boolean;
-	prunedBranches?: string[];
 	changesDiscarded: boolean;
 	warnings: string[];
 }
@@ -1144,27 +895,13 @@ export const GITIGNORED_BUILD_ARTIFACTS: readonly string[] = ['dist'];
  */
 export async function resetToMainAfterMerge(
 	cwd: string,
-	options?: AlignmentOptions,
+	options?: { pruneBranches?: boolean },
 ): Promise<ResetToMainAfterMergeResult> {
 	const warnings: string[] = [];
 
 	try {
-		const confirmedPlan = options?.confirmedPlan;
 		// Step 1: Detect default remote branch
-		const defaultBranch =
-			confirmedPlan?.defaultBranch ?? _internals.detectDefaultRemoteBranch(cwd);
-		if (confirmedPlan && !confirmedPlan.targetAvailable) {
-			return {
-				success: false,
-				targetBranch: confirmedPlan.targetRef,
-				previousBranch: confirmedPlan.currentBranch,
-				message:
-					'Git alignment skipped: no remote target was available at confirmation preview',
-				branchDeleted: false,
-				changesDiscarded: false,
-				warnings,
-			};
-		}
+		const defaultBranch = _internals.detectDefaultRemoteBranch(cwd);
 		if (!defaultBranch) {
 			return {
 				success: false,
@@ -1177,32 +914,13 @@ export async function resetToMainAfterMerge(
 			};
 		}
 
-		const currentBranch = confirmedPlan?.currentBranch ?? getCurrentBranch(cwd);
+		const currentBranch = getCurrentBranch(cwd);
 		// Issue #2476 AC3: defaultBranch/currentBranch are repository-derived
 		// (detectDefaultRemoteBranch / getCurrentBranch git output); validate
 		// before they reach checkout / log-range / reset argv positions.
 		assertSafeGitRefArg(currentBranch, 'resetToMainAfterMerge currentBranch');
 		assertSafeGitRefArg(defaultBranch, 'resetToMainAfterMerge defaultBranch');
-		const targetBranch = confirmedPlan?.targetRef ?? `origin/${defaultBranch}`;
-		const targetRevision = confirmedPlan?.targetSha ?? targetBranch;
-		assertSafeGitRefArg(
-			targetRevision,
-			'resetToMainAfterMerge target revision',
-		);
-		if (confirmedPlan) {
-			const identityError = confirmedIdentityError(cwd, confirmedPlan);
-			if (identityError) {
-				return {
-					success: false,
-					targetBranch,
-					previousBranch: currentBranch,
-					message: `Cannot reset: ${identityError}`,
-					branchDeleted: false,
-					changesDiscarded: false,
-					warnings,
-				};
-			}
-		}
+		const targetBranch = `origin/${defaultBranch}`;
 
 		// Step 2: Safety guard — detached HEAD
 		if (currentBranch === 'HEAD') {
@@ -1222,7 +940,7 @@ export async function resetToMainAfterMerge(
 			// On default branch — check if there are unpushed commits
 			try {
 				const logOutput = _internals.gitExec(
-					['log', `${targetRevision}..HEAD`, '--oneline'],
+					['log', `${targetBranch}..HEAD`, '--oneline'],
 					cwd,
 				);
 				if (logOutput.trim().length > 0) {
@@ -1258,7 +976,7 @@ export async function resetToMainAfterMerge(
 						.gitExec(['rev-parse', 'HEAD'], cwd)
 						.trim();
 					const remoteSha = _internals
-						.gitExec(['rev-parse', targetRevision], cwd)
+						.gitExec(['rev-parse', targetBranch], cwd)
 						.trim();
 					if (localSha !== remoteSha) {
 						return {
@@ -1299,20 +1017,6 @@ export async function resetToMainAfterMerge(
 				warnings,
 			};
 		}
-		if (confirmedPlan) {
-			const identityError = confirmedIdentityError(cwd, confirmedPlan);
-			if (identityError) {
-				return {
-					success: false,
-					targetBranch,
-					previousBranch: currentBranch,
-					message: `Cannot reset: ${identityError}`,
-					branchDeleted: false,
-					changesDiscarded: false,
-					warnings,
-				};
-			}
-		}
 
 		// Step 5: Checkout default branch
 		const previousBranch = currentBranch;
@@ -1338,7 +1042,7 @@ export async function resetToMainAfterMerge(
 		// Run BEFORE discard so that if reset fails, the user still has their
 		// uncommitted changes (checked out to default branch but not yet discarded).
 		try {
-			_internals.gitExec(['reset', '--hard', targetRevision], cwd);
+			_internals.gitExec(['reset', '--hard', targetBranch], cwd);
 		} catch (err) {
 			return {
 				success: false,
@@ -1401,17 +1105,7 @@ export async function resetToMainAfterMerge(
 		// Step 8: Delete previous branch if it's not the default
 		// Only delete if the branch was merged into the default branch.
 		let branchDeleted = false;
-		let confirmedPrunedBranches: string[] = [];
-		if (confirmedPlan && options?.pruneBranches) {
-			const confirmedPruning = deleteConfirmedBranchCandidates(
-				cwd,
-				confirmedPlan,
-				defaultBranch,
-			);
-			confirmedPrunedBranches = confirmedPruning.prunedBranches;
-			branchDeleted = confirmedPruning.prunedBranches.includes(previousBranch);
-			warnings.push(...confirmedPruning.warnings);
-		} else if (switchedBranch && previousBranch !== defaultBranch) {
+		if (switchedBranch && previousBranch !== defaultBranch) {
 			try {
 				// Check if the previous branch was merged into default
 				const mergedOutput = _internals.gitExec(
@@ -1449,10 +1143,8 @@ export async function resetToMainAfterMerge(
 			}
 		}
 
-		// Step 9: Prune branches if requested. Confirmed plans were fully handled
-		// above from their frozen candidate set; legacy callers retain dynamic
-		// discovery for compatibility.
-		if (!confirmedPlan && options?.pruneBranches) {
+		// Step 9: Prune branches if requested
+		if (options?.pruneBranches) {
 			try {
 				const mergedOutput = _internals.gitExec(
 					['branch', '--merged', defaultBranch],
@@ -1500,11 +1192,6 @@ export async function resetToMainAfterMerge(
 				? `Reset to ${defaultBranch} and deleted branch ${previousBranch}`
 				: `Reset to ${defaultBranch}`,
 			branchDeleted,
-			prunedBranches: confirmedPlan
-				? confirmedPrunedBranches
-				: branchDeleted
-					? [previousBranch]
-					: [],
 			changesDiscarded,
 			warnings,
 		};

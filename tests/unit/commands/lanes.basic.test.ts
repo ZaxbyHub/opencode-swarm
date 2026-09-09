@@ -94,7 +94,6 @@ function addConflictedDispatch(overrides: {
 		outcome: 'partial' | 'failed';
 		stage: string;
 		message: string;
-		mergeStrategy?: 'merge' | 'rebase' | 'cherry-pick' | 'squash';
 		worktreePath?: string;
 		branch?: string;
 	};
@@ -103,7 +102,6 @@ function addConflictedDispatch(overrides: {
 		outcome: overrides.failure.outcome,
 		stage: overrides.failure.stage,
 		message: overrides.failure.message,
-		mergeStrategy: overrides.failure.mergeStrategy,
 		worktreePath: overrides.failure.worktreePath,
 		branch: overrides.failure.branch,
 	});
@@ -435,35 +433,6 @@ describe('handleLanesCommand', () => {
 		expect(lane.worktreePath).toBe('/tmp/wt-conflicted-ext');
 		expect(lane.branch).toBe('lane/conflicted-ext');
 		expect(lane.mergeOutcome?.outcome).toBe('failed');
-	});
-
-	test('SC-116: conflicted lane preserves squash strategy and unknown legacy records are not mislabeled', () => {
-		addConflictedDispatch({
-			taskId: '13.2',
-			failure: {
-				outcome: 'failed',
-				stage: 'merge',
-				message: 'squash conflict',
-				mergeStrategy: 'squash',
-				worktreePath: '/tmp/wt-squash',
-				branch: 'lane/squash',
-			},
-		});
-		(mergeStatusInternals.failuresByTask as Map<string, unknown>).set('13.3', {
-			outcome: 'failed',
-			stage: 'merge',
-			message: 'legacy failure',
-		});
-
-		const parsed = JSON.parse(handleLanesCommand(tempDir, ['--json'])) as {
-			lanes: Array<{ taskId: string; mergeStrategy: string }>;
-		};
-		expect(
-			parsed.lanes.find((lane) => lane.taskId === '13.2')?.mergeStrategy,
-		).toBe('squash');
-		expect(
-			parsed.lanes.find((lane) => lane.taskId === '13.3')?.mergeStrategy,
-		).toBe('unknown');
 	});
 
 	// -------------------------------------------------------------------------

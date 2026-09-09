@@ -212,7 +212,7 @@ export interface StandardWorktreeDispatch {
 	canonicalBranch?: string;
 	canonicalPath?: string;
 	handle: WorktreeHandle;
-	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick' | 'squash';
+	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
 	recoveryClaim?: {
 		authorityDigest: string;
 		claimRevision: number;
@@ -286,7 +286,7 @@ export interface AwaitingMergeRecord {
 	generation?: number;
 	branch: string;
 	worktreePath: string;
-	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick' | 'squash';
+	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
 	queuedAt: number; // Date.now()
 }
 
@@ -1051,12 +1051,6 @@ async function buildWorktreeRecoveryPublishIdentity(input: {
 		sourceHeadOid: input.provenance.sourceHead,
 		targetHeadOid,
 		strategy: toRecoveryStrategy(input.provenance.strategy),
-		...(input.provenance.resultTree
-			? {
-					resultTree: input.provenance.resultTree,
-					changedPaths: input.provenance.changedPaths ?? [],
-				}
-			: {}),
 		...(input.conflictFiles && input.conflictFiles.length > 0
 			? { declaredConflictFiles: input.conflictFiles }
 			: {}),
@@ -1078,17 +1072,6 @@ async function publishRecoveryAuthorityForSettlement(input: {
 	  }
 > {
 	if (input.dispatch.recoveryClaim || !input.provenance) {
-		return { ok: true };
-	}
-	// A squash recovery authority is only useful when its immutable synthetic
-	// tree and changed-path fence were captured. Conflict/unsupported paths do
-	// not have that provenance, and an oversized patch cannot be reconstructed
-	// within the bounded settlement contract; do not persist an authority that
-	// recovery cannot safely consume.
-	if (
-		input.provenance.strategy === 'squash' &&
-		(!input.provenance.resultTree || !input.provenance.changedPaths)
-	) {
 		return { ok: true };
 	}
 	const identity = await _internals.buildWorktreeRecoveryPublishIdentity({
@@ -1479,14 +1462,6 @@ export async function precreateStandardWorktreeSession(args: {
 							targetHeadOid:
 								recoveryCandidate.authority.immutable.targetHeadOid,
 							strategy: recoveryCandidate.authority.immutable.strategy,
-							...(recoveryCandidate.authority.immutable.resultTree
-								? {
-										resultTree:
-											recoveryCandidate.authority.immutable.resultTree,
-										changedPaths:
-											recoveryCandidate.authority.immutable.changedPaths ?? [],
-									}
-								: {}),
 						},
 					},
 				};
@@ -2740,13 +2715,11 @@ export async function cleanupStandardWorktreeForCallId(
 	let worktreePath: string;
 	let branchName: string;
 	let parentSessionID: string;
-	let mergeStrategy: StandardWorktreeDispatch['mergeStrategy'];
 
 	if (dispatch) {
 		worktreePath = dispatch.handle.worktreePath;
 		branchName = dispatch.handle.branchName;
 		parentSessionID = dispatch.parentSessionID;
-		mergeStrategy = dispatch.mergeStrategy;
 	} else {
 		// Not in active map — check awaiting-merge map (production moves the
 		// entry there BEFORE calling finishStandardWorktreeDispatch).
@@ -2762,7 +2735,6 @@ export async function cleanupStandardWorktreeForCallId(
 		worktreePath = awaiting.worktreePath;
 		branchName = awaiting.branch;
 		parentSessionID = awaiting.parentSessionID;
-		mergeStrategy = awaiting.mergeStrategy;
 	}
 
 	if (
@@ -3042,7 +3014,6 @@ export async function finishStandardWorktreeDispatch(
 		): StandardWorktreeFailedSettlement => {
 			recordWorktreeMergeFailure(statusKey, {
 				outcome: 'failed',
-				mergeStrategy: dispatch.mergeStrategy,
 				stage,
 				message,
 				worktreePath: dispatch.handle.worktreePath,
@@ -3168,12 +3139,6 @@ export async function finishStandardWorktreeDispatch(
 				targetHeadBefore: coordinates.targetHeadOid,
 				branchName: dispatch.handle.branchName,
 				strategy: coordinates.strategy,
-				...(coordinates.resultTree
-					? {
-							resultTree: coordinates.resultTree,
-							changedPaths: coordinates.changedPaths ?? [],
-						}
-					: {}),
 			};
 			if (settlement.onBeforeMerge) {
 				await settlement.onBeforeMerge(provenance);
@@ -3229,16 +3194,6 @@ export async function finishStandardWorktreeDispatch(
 				reconciled: mergeResult.reconciled ?? false,
 				provenance: mergeResult.provenance,
 			};
-			// A successful squash leaves the lane branch as the recovery source.
-			// Publish that authority before onMerged can commit settlement state or
-			// cleanup can retain the branch; otherwise a crash in either window can
-			// leave the only recovery pointer without durable authority.
-			if (mergeResult.strategy === 'squash' && !dispatch.recoveryClaim) {
-				const retainedPublishFailure = await publishRecoveryAuthority(
-					mergeResult.provenance,
-				);
-				if (retainedPublishFailure) return retainedPublishFailure;
-			}
 
 			if (settlement.onMerged) {
 				try {
@@ -3262,7 +3217,6 @@ export async function finishStandardWorktreeDispatch(
 					}
 					recordWorktreeMergeFailure(statusKey, {
 						outcome: 'failed',
-						mergeStrategy: dispatch.mergeStrategy,
 						stage: failedSettlement.stage,
 						message: failedSettlement.message,
 						worktreePath: dispatch.handle.worktreePath,
@@ -3390,7 +3344,6 @@ export async function finishStandardWorktreeDispatch(
 			}
 			recordWorktreeMergeFailure(statusKey, {
 				outcome: 'partial',
-				mergeStrategy: dispatch.mergeStrategy,
 				stage: mergeResult.stage,
 				message: mergeResult.message,
 				worktreePath: dispatch.handle.worktreePath,
@@ -3436,12 +3389,9 @@ export async function finishStandardWorktreeDispatch(
 		}
 
 		if ('failed' in mergeResult) {
-			const oversizedSquash =
-				dispatch.mergeStrategy === 'squash' &&
-				mergeResult.failureKind === 'squash-apply-failed';
-			const publishFailure = oversizedSquash
-				? undefined
-				: await publishRecoveryAuthority(mergeResult.provenance);
+			const publishFailure = await publishRecoveryAuthority(
+				mergeResult.provenance,
+			);
 			if (publishFailure) {
 				return publishFailure;
 			}
@@ -3451,7 +3401,6 @@ export async function finishStandardWorktreeDispatch(
 			}
 			recordWorktreeMergeFailure(statusKey, {
 				outcome: 'failed',
-				mergeStrategy: dispatch.mergeStrategy,
 				stage: mergeResult.stage,
 				message: mergeResult.message,
 				worktreePath: dispatch.handle.worktreePath,
@@ -3531,7 +3480,6 @@ export async function finishStandardWorktreeDispatch(
 		const message = `Unexpected worktree settlement failure: ${error instanceof Error ? error.message : String(error)}`;
 		recordWorktreeMergeFailure(dispatch.planTaskId ?? dispatch.taskId, {
 			outcome: 'failed',
-			mergeStrategy: dispatch.mergeStrategy,
 			stage: 'merge',
 			message,
 			worktreePath: dispatch.handle.worktreePath,
@@ -3660,7 +3608,6 @@ export const _internals = {
 	publishWorktreeRecoveryAuthority,
 	replayWorktreeRecoveryClaimJournal,
 	buildWorktreeRecoveryPublishIdentity,
-	publishRecoveryAuthorityForSettlement,
 	/** FR-001b SC-004: path-based dirty worktree preservation for stale-lane fallback. */
 	preserveDirtyWorktreeAtPath,
 	/** Bounded lane session.create timeout (tests may override). */
