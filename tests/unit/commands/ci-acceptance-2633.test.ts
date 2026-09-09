@@ -21,9 +21,7 @@ import {
 	isCommandFailure,
 } from '../../../src/commands/registry.js';
 import { DEFAULT_QA_GATES } from '../../../src/db/qa-gate-profile.js';
-import {
-	canonicalTmpDir as canonicalProjectTempRoot,
-} from '../../helpers/tmpdir.js';
+import { canonicalTmpDir as canonicalProjectTempRoot } from '../../helpers/tmpdir.js';
 
 function makeContext(directory: string, args: string[] = []): CommandContext {
 	return {
@@ -93,10 +91,10 @@ describe('issue #2633 CLI acceptance checks', () => {
 
 		await expect(
 			handleCiCommand(
-				makeContext(path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac4-over-limit'), [
-					'--timeout-ms',
-					String(DEFAULT_CI_DEADLINE_MS + 1),
-				]),
+				makeContext(
+					path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac4-over-limit'),
+					['--timeout-ms', String(DEFAULT_CI_DEADLINE_MS + 1)],
+				),
 			),
 		).rejects.toThrow(/--timeout-ms/);
 		expect(runtimeCalls).toBe(0);
@@ -116,10 +114,10 @@ describe('issue #2633 CLI acceptance checks', () => {
 		};
 
 		await handleCiCommand(
-			makeContext(path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac4-forward'), [
-				'--timeout-ms',
-				'1234.5',
-			]),
+			makeContext(
+				path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac4-forward'),
+				['--timeout-ms', '1234.5'],
+			),
 		);
 		expect(capturedDeadline).toBe(1234.5);
 	});
@@ -135,7 +133,10 @@ describe('issue #2633 CLI acceptance checks', () => {
 		});
 
 		const result = await handleCiCommand(
-			makeContext(path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac6-json'), ['--json']),
+			makeContext(
+				path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac6-json'),
+				['--json'],
+			),
 		);
 		expect(isCommandFailure(result)).toBe(true);
 		if (!isCommandFailure(result)) return;
@@ -317,7 +318,9 @@ if (red.length === 0) process.exit(1);
 	test('AC13: unknown flags retain the exact diagnostic contract', async () => {
 		await expect(
 			handleCiCommand(
-				makeContext(path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac13'), ['--wat']),
+				makeContext(path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac13'), [
+					'--wat',
+				]),
 			),
 		).rejects.toThrow('Unknown flag: --wat');
 	});
