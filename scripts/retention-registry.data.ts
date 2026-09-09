@@ -494,16 +494,16 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:3181 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
-			'src/background/pending-delegations.ts:1450 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
+			'src/background/pending-delegations.ts:3185 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
+			'src/background/pending-delegations.ts:1454 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:3070 readDelegations — SQLite authority with bounded legacy compatibility, sync',
-			'src/background/pending-delegations.ts:3085 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:3074 readDelegations — SQLite authority with bounded legacy compatibility, sync',
+			'src/background/pending-delegations.ts:3089 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1340,:1361,:1371)',
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1344,:1365,:1375)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		directFileExemption: {
@@ -519,11 +519,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:113-118,1894',
+			citation: 'src/background/pending-delegations.ts:113-118,1898',
 		},
 		lockModel: 'withEvidenceLock agent=background on every mutation (:171-174); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1622-1634)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1626-1638)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (src/commands/close/constants.ts:75-77); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, src/commands/close/constants.ts:70-78 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
@@ -532,7 +532,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1894)',
+			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1898)',
 		issue2487Legacy: { path: '.swarm/background-delegations.jsonl (+ checkpoint and manifest)', sourceFile: 'src/background/pending-delegations.ts', tokens: ['BACKGROUND_DELEGATIONS_FILE', 'loadLegacyLedger', 'ensureDelegationCoordinationImported'], readers: ['src/background/pending-delegations.ts:loadLegacyLedger', 'src/background/pending-delegations.ts:ensureDelegationCoordinationImported'], writers: ['src/background/pending-delegations.ts:BACKGROUND_DELEGATIONS_FILE'] },
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
@@ -609,12 +609,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:5457 writeDelegationFallback / :5508 removeDelegationFallback',
-			'src/background/pending-delegations.ts:5959 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:5481 writeDelegationFallback / :5532 removeDelegationFallback',
+			'src/background/pending-delegations.ts:5983 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:5312 readDelegationFallback / :5324 listDelegationFallbacks / :5358 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:5937 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:5336 readDelegationFallback / :5348 listDelegationFallbacks / :5382 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:5961 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:971)',
 		stateClass: 'authoritative',
@@ -626,9 +626,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'MAX_LIVE_BACKGROUND_FALLBACKS 256 (:82); per-file 1 MiB (:95); reservations ≤256 entries / 2 MiB store (:83, :4808)',
 			scope: 'global',
-			citation: 'src/background/pending-delegations.ts:82-95,4811',
+			citation: 'src/background/pending-delegations.ts:82-95,4808',
 		},
-		readBound: { pattern: 'directory-scan', bound: '≤256 files × 1 MiB', sync: false, citation: 'src/background/pending-delegations.ts:4468-4601' },
+		readBound: { pattern: 'directory-scan', bound: '≤256 files × 1 MiB', sync: false, citation: 'src/background/pending-delegations.ts:4465-4598' },
 		lockModel: 'separate lock tasks FALLBACK_LOCK_TASK / RESERVATION_LOCK_TASK (:147-148)',
 		crashBehavior: 'bunWrite single-file artifacts; strict recovery scans fail closed',
 		closePolicy: 'untouched (cross-session recovery state)',
@@ -640,7 +640,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		issue2487Legacy: { path: '.swarm/background-delegation-fallback/*.json + background-coder-reservations.json', sourceFile: 'src/background/pending-delegations.ts', tokens: ['BACKGROUND_DELEGATION_FALLBACK_DIR', 'BACKGROUND_CODER_RESERVATIONS_FILE', 'scanBackgroundCoderReservationsForAdmission', 'readFallbackDirectory'], readers: ['src/background/pending-delegations.ts:readFallbackDirectory', 'src/background/pending-delegations.ts:scanBackgroundCoderReservationsForAdmission'], writers: ['src/background/pending-delegations.ts:BACKGROUND_DELEGATION_FALLBACK_DIR', 'src/background/pending-delegations.ts:BACKGROUND_CODER_RESERVATIONS_FILE'] },
 		healthSignal: 'recovery scans report fallback promotion',
 		owner: '#2034 (merged)',
-		disposition: { kind: 'not-a-defect', proof: 'Hard capacity bounds: 256 fallback artifacts / 1 MiB each, 256 reservations / 2 MiB store, enforced on write and scan (src/background/pending-delegations.ts:82-95,4811).' },
+		disposition: { kind: 'not-a-defect', proof: 'Hard capacity bounds: 256 fallback artifacts / 1 MiB each, 256 reservations / 2 MiB store, enforced on write and scan (src/background/pending-delegations.ts:82-95,4808).' },
 	},
 	{
 		id: 'pr-monitor-subscriptions',
@@ -1845,12 +1845,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/plan/ledger.ts', 'src/plan/ledger-sqlite.ts'],
 		writerCitations: [
-			'src/plan/ledger.ts:1015 initLedger / :1314 appendLedgerEvent — authority-mode coordinator under LEDGER_LOCK; SQLite event+state uses FULL transactions and JSONL is the exact portable stream',
-			'src/plan/ledger.ts:1626 takeSnapshotEvent; :1688 replaceTruncatedLedgerWithRecoveryRoot (corruption recovery ONLY, original content-addressed before replacement)',
+			'src/plan/ledger.ts:1015 initLedger / :1321 appendLedgerEvent — authority-mode coordinator under LEDGER_LOCK; SQLite event+state uses FULL transactions and JSONL is the exact portable stream',
+			'src/plan/ledger.ts:1633 takeSnapshotEvent; :1695 replaceTruncatedLedgerWithRecoveryRoot (corruption recovery ONLY, original content-addressed before replacement)',
 			'src/plan/ledger-sqlite.ts — registry-backed SQLite event/state/import mutations; every transaction uses synchronous=FULL through the project DB durability policy',
 		],
 		readerCitations: [
-			'src/plan/ledger.ts:998 readLedgerEvents / :2335 readLedgerEventsWithIntegrity — authority-mode coordinator; JSONL full-file replay in file-shadow mode, ordered SQLite rows after cutover',
+			'src/plan/ledger.ts:998 readLedgerEvents / :2377 readLedgerEventsWithIntegrity — authority-mode coordinator; JSONL full-file replay in file-shadow mode, ordered SQLite rows after cutover',
 			'src/plan/ledger.ts:984 getLatestLedgerSeq / loadLastApprovedPlan — coordinated authority reads',
 		],
 		schemaVersion: 'versioned plan events (docs/plan-durability.md)',
@@ -1894,11 +1894,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/commands/reset.ts',
 		],
 		writerCitations: [
-			'src/plan/manager.ts:1715 savePlan — plan.json temp+rename; :1761 plan.md; :1901 rebuildPlan; :2090 closePlanTerminalState',
+			'src/plan/manager.ts:1721 savePlan — plan.json temp+rename; :1761 plan.md; :1901 rebuildPlan; :2090 closePlanTerminalState',
 			'src/commands/rollback.ts — lifecycle-locked checkpoint projection publication with prior-byte compensation after authoritative re-root',
 			'src/commands/reset.ts — lifecycle-locked critical projection deletion with prior-byte compensation when authority cleanup aborts',
 		],
-		readerCitations: ['src/plan/manager.ts:656 loadPlan — full-file with auto-heal + ledger-replay fallback, async; :366 loadPlanJsonOnly'],
+		readerCitations: ['src/plan/manager.ts:658 loadPlan — full-file with auto-heal + ledger-replay fallback, async; :366 loadPlanJsonOnly'],
 		schemaVersion: 'plan schema (projections of the ledger)',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'content',

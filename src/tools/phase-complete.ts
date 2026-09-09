@@ -1324,24 +1324,39 @@ export async function executePhaseComplete(
 		) {
 			phaseObject.status = 'complete';
 			try {
-				await phaseCompleteCommitInternals.savePlan(dir, plan, {
-					preserveCompletedStatuses: true,
-					planLockAlreadyHeld: true,
-					preCommitCheck: () => {
-						const currentPolicyHash = createHash('sha256')
-							.update(JSON.stringify(loadPluginConfigWithMeta(dir).config))
-							.digest('hex');
-						if (
-							computePhaseEvidenceSnapshot(dir) !==
-								expectedCommitEvidenceHash ||
-							currentPolicyHash !== expectedCommitPolicyHash
-						) {
-							throw new Error(
-								'PHASE_PREFLIGHT_STALE: evidence changed at the authoritative transition boundary',
-							);
-						}
+				const saveDurability = await phaseCompleteCommitInternals.savePlan(
+					dir,
+					plan,
+					{
+						preserveCompletedStatuses: true,
+						planLockAlreadyHeld: true,
+						preCommitCheck: () => {
+							const currentPolicyHash = createHash('sha256')
+								.update(JSON.stringify(loadPluginConfigWithMeta(dir).config))
+								.digest('hex');
+							if (
+								computePhaseEvidenceSnapshot(dir) !==
+									expectedCommitEvidenceHash ||
+								currentPolicyHash !== expectedCommitPolicyHash
+							) {
+								throw new Error(
+									'PHASE_PREFLIGHT_STALE: evidence changed at the authoritative transition boundary',
+								);
+							}
+						},
 					},
-				});
+				);
+				// #2531 (AC5): surface the manager's explicit durability outcome
+				// so an advisory-surface (plan.md) write failure reaches the
+				// calling agent instead of being silently swallowed.
+				if (saveDurability.durability === 'incomplete') {
+					warnings.push(
+						`Plan saved with incomplete durability; degraded surfaces: ${saveDurability.degraded_surfaces.join(', ')}` +
+							(saveDurability.md_write_error
+								? ` (${saveDurability.md_write_error})`
+								: ''),
+					);
+				}
 			} catch (error) {
 				if (
 					error instanceof Error &&

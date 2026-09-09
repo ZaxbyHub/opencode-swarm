@@ -892,12 +892,12 @@ export const TOOL_METADATA = {
 	},
 	dispatch_lanes_async: {
 		description:
-			'launch read-only advisory lanes non-blockingly and return a batch id plus lane session handles immediately so you can keep working; launch_timeout_ms is only a promptAsync acceptance budget, not a lane runtime timeout; poll incrementally with collect_lane_results (wait omitted or false) while doing independent investigation, or join with wait: true when you need all results',
+			'launch read-only advisory lanes non-blockingly and return a batch id plus lane session handles immediately; each lane agent must be a registered generated agent name (unregistered bare roles are refused on multi-swarm hosts); launch_timeout_ms is only a promptAsync acceptance budget, not a lane runtime timeout; poll incrementally with collect_lane_results (wait omitted), or join with wait: true for all results',
 		agents: ['architect'],
 	},
 	collect_lane_results: {
 		description:
-			'collect or poll results for a dispatch_lanes_async batch; a pure OBSERVER that never cancels or terminalizes child work unless you explicitly pass cancel_pending. Supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). The wait budget bounds the observer call only — its expiry never kills a lane and is not evidence a lane died, so do not abort the workflow because a collection expired; poll again, cancel explicitly, or rely on the presumed-stale backstop. Any unsettled lane is reported in pending_lanes (batch_id, lane_id, stored status, output_ref when present) regardless of include_pending; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates. Inline output for a settled lane is delivered only once: later polls of the same lane set output_omitted_repeat: true and omit output, but still include output_ref for recovery via retrieve_lane_output.',
+			'collect/poll a dispatch_lanes_async batch; a presumed-stale sweep runs on every call, settling lanes past the horizon: idle host to stale, unobservable host to a typed liveness error; cancel_pending cancels pending lanes; otherwise observe-only. Non-blocking poll (wait omitted or false) and blocking join (wait: true) supported. The wait budget bounds the observer call only — expiry never kills a lane nor proves it died; poll again or cancel explicitly, never abort. Unsettled lanes are reported in pending_lanes (batch_id, lane_id, status, output_ref) regardless of include_pending; busy/retry lanes never go stale for running long. Does not advance workflow gates. Settled-lane inline output is delivered once: later polls set output_omitted_repeat: true and omit output but keep output_ref for retrieval via retrieve_lane_output.',
 		agents: ['architect'],
 	},
 	summarize_work: {

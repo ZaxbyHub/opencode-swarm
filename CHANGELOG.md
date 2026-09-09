@@ -1,5 +1,22 @@
 # Changelog
 
+## [7.172.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.1...v7.172.2) (2026-09-09)
+
+
+### Bug Fixes
+
+* **ci:** harden issue pipeline publication ([701e628](https://github.com/ZaxbyHub/opencode-swarm/commit/701e628206badece23c92fefd941a778973b2c84))
+* **ci:** reject malformed issue URL paths ([67baf88](https://github.com/ZaxbyHub/opencode-swarm/commit/67baf88b6e0e5d83ffe0ff8d01995a1db5f402df))
+* **dispatch:** refuse unregistered lane agents at dispatch time (issue [#2614](https://github.com/ZaxbyHub/opencode-swarm/issues/2614)) ([ba38728](https://github.com/ZaxbyHub/opencode-swarm/commit/ba38728ac6f707b443abea5afb9decfd9220689d))
+* **dispatch:** refuse unregistered lane agents at dispatch time (issue [#2614](https://github.com/ZaxbyHub/opencode-swarm/issues/2614)) ([eb45127](https://github.com/ZaxbyHub/opencode-swarm/commit/eb45127ce3fa05662d41583f89903fe4cfa02843))
+
+## [7.172.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.0...v7.172.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **plan:** ledger-first recovery, fatal bootstrap decode, snapshot validation, save verification ([#2531](https://github.com/ZaxbyHub/opencode-swarm/issues/2531)) ([9811f52](https://github.com/ZaxbyHub/opencode-swarm/commit/9811f52c33930de710e490afa08603ec207adfbb))
+
 ## [7.172.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.171.2...v7.172.0) (2026-09-09)
 
 

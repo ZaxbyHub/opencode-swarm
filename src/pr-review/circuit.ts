@@ -47,6 +47,7 @@ export type PrReviewCircuitIgnoredReason =
 	| 'git'
 	| 'cancellation'
 	| 'stale_observation'
+	| 'host_abandonment'
 	| 'unknown';
 
 export type PrReviewCircuitSignal =
@@ -241,6 +242,12 @@ export function classifyPrReviewCircuitSignal(
 			return { kind: 'ignored', reason: 'validation' };
 		}
 		return { kind: 'ignored', reason: 'unknown' };
+	}
+	if (result?.workflowLaneFailureClass === 'liveness') {
+		// Issue #2615: a typed 'liveness' terminal is host-side abandonment
+		// (stale sweep, unobservable host, or operator cancel) — never evidence
+		// of a repeated typed dispatch failure, so never correlated.
+		return { kind: 'ignored', reason: 'host_abandonment' };
 	}
 	switch (record.status) {
 		case 'error':
