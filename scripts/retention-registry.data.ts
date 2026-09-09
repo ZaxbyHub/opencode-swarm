@@ -2525,6 +2525,50 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 	},
 	{
+		id: 'review-route-receipt-key',
+		category: 6,
+		pathGrammar: '<hive-data-dir>/review-route-receipts.key',
+		canonicalRoot: 'platform-config',
+		writerModules: ['src/review/routing-enforcement.ts'],
+		writerCitations: [
+			'src/review/routing-enforcement.ts:364-400 readRouteReceiptSecret — user-scoped key read/creation; exclusive wx write with 0o600 mode (:385-389)',
+		],
+		readerCitations: [
+			'src/review/routing-enforcement.ts:364-378 readRouteReceiptSecret — regular-file check and exact 64-hex parse',
+			'src/review/routing-enforcement.ts:403-418 readRouteReceiptSecretSync — synchronous regular-file check and parse',
+		],
+		schemaVersion: 'v1 route-receipt MAC key: exactly 32 random bytes stored as 64 lowercase hex characters',
+		stateClass: 'operational',
+		privacyClass: 'content',
+		writeLimits: {
+			bound: 'single fixed-size 64-byte ASCII secret; first-use creation is exclusive (flag wx) and never appends or grows',
+			scope: 'global',
+			citation: 'src/review/routing-enforcement.ts:339-356,380-400',
+		},
+		readBound: {
+			pattern: 'full-file',
+			bound: 'single key file parsed only when it is a regular file and matches exactly 64 lowercase hex characters',
+			sync: true,
+			citation: 'src/review/routing-enforcement.ts:359-378,403-418',
+		},
+		lockModel:
+			'exclusive first-use creation (wx) plus platform user-profile ACLs; concurrent losers re-read the winner key',
+		crashBehavior:
+			'partial or malformed files fail closed as ROUTE_RECEIPT_SECRET_INVALID; an EEXIST race re-reads the complete winner file',
+		closePolicy: 'untouched — cross-project user-scoped authentication material must outlive any single project close',
+		resetPolicy:
+			'not reset — deleting or replacing the key invalidates existing receipt MACs and causes fail-closed regeneration on next first use; no bulk reset path is provided',
+		legacyCompatibility:
+			'n/a for the key file; unsigned or legacy receipts remain rejected and are regenerated under the current key on routed dispatch',
+		healthSignal: 'ROUTE_RECEIPT_SECRET_INVALID and ROUTE_RECEIPT_AUTH_INVALID fail-closed diagnostics',
+		owner: '#2491',
+		disposition: {
+			kind: 'retain-by-design',
+			citation:
+				'The key is deliberate platform-config authentication state, bounded to one fixed-size file and protected by exclusive creation plus user-profile permissions; retaining it across projects is required for receipt verification and its lifecycle is fail-closed on corruption.',
+		},
+	},
+	{
 		id: 'synonym-map',
 		category: 6,
 		pathGrammar: '.swarm/synonym-map.json',

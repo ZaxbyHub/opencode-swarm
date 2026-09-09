@@ -370,7 +370,7 @@ per row.
 | `summaries` | .swarm/summaries/{S*}.json | governed-content | summaries.retention_days (default 7) enforced by the retention sweep via cleanupSummaries; listing capped MAX_SUMMARIES_LISTED 500 (global) | indexed: per-file reads; listing newest-first capped 500 | untouched — the sweep owns the retention_days horizon | not a defect — #2483 |
 | `architecture-summaries` | .swarm/evidence/{taskId}.json agent-summary notes + phase architecture/supervisor sidecars | governed-content | per-task/per-phase artifacts (session-scoped) | indexed: bounded evidence inventory or single-file reads | archived+cleaned with evidence/ | not a defect — #893 |
 
-### Category 6 — Knowledge family (10 rows)
+### Category 6 — Knowledge family (11 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -381,6 +381,7 @@ per row.
 | `knowledge-aux-lists` | .swarm/knowledge-{rejected,quarantined,unactionable,rewrites}.jsonl | governed-content | rejected FIFO 20 (default); quarantined FIFO 100; unactionable FIFO 200 (deduped); rewrit… (global) | full-file: ≤ cap per list (20/100/200/2000) | knowledge-rejected.jsonl archived+cleaned (ACTIVE_STAT… | not a defect — this-gate |
 | `knowledge-retractions` | .swarm/knowledge-retractions.jsonl | governed-content | MAX_RETRACTION_RECORDS 500 FIFO on every append (appendCappedJsonl) (global) | tail: ≤500 newest records at the same cap | untouched | not a defect — #2483 |
 | `hive-stores` | <hive-data-dir>/shared-learnings.jsonl (+ -rejected.jsonl, -events.js… | governed-content | store cap via HiveMutationOutcome.maxEntries under the same transaction; events FIFO 5000… (global) | full-file: store capped by configured maxEntries; events ≤5000; r… | untouched (cross-project hive) | retain by design — #2033 (merged) |
+| `review-route-receipt-key` | <hive-data-dir>/review-route-receipts.key | operational | one fixed-size 64-byte ASCII key, exclusive first-use creation with 0o600 (global) | full-file: regular-file check plus exact 64 lowercase hex parse | untouched (cross-project authentication material) | retain by design — #2491 |
 | `synonym-map` | .swarm/synonym-map.json | derived-rebuildable | DEFAULT_MAX_PAIRS 500 LRU (:40); MAX_TOKEN_LENGTH 64 (:38) (global) | indexed: read ceiling ≈ maxPairs×512 B | untouched | not a defect — this-gate |
 | `recommendation-ledger` | <knowledgeStore>/learning/recommendation-ledger.jsonl | operational | MAX_RECOMMENDATION_LEDGER_ENTRIES 500 FIFO; MAX_ENTRY_BYTES 4096; ceiling ≈2 MiB (:131,14… (global) | full-file: ≤500 entries × 4 KiB | untouched (bounded) | not a defect — this-gate |
 | `link-pointers` | .swarm/link.json + .swarm/memory-link.json | authoritative | single pointer files (global) | indexed: single JSON | untouched (cross-session link state) | not a defect — this-gate; direct-file exemption (#2036) |
