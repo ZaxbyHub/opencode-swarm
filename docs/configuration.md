@@ -1120,6 +1120,45 @@ turns without making progress (issue #2063). Both are per-session, in-memory,
 and additive to the existing `guardrails` block — omit them and the defaults
 below apply.
 
+### Mandatory lifecycle vs optional enforcement (`guardrails.enabled`, issue #2664)
+
+`guardrails.enabled: false` disables OPTIONAL policy enforcement only:
+deny rules, authority/scope denials, destructive-command blocks, sandbox
+enforcement, budget limits, and prompt-directive advisories. MANDATORY
+lifecycle bookkeeping stays active in BOTH modes (AGENTS.md invariant 9):
+
+- Stage A pre-check receipts: every `pre_check_batch` outcome is correlated
+  with its task and durably recorded (`stage_a_passed` / `stage_a_failed`
+  workflow transitions), so accepted and rejected work stays observable.
+- Exact-bound scope-lease maintenance: a successful authorized write still
+  renews the owning scope binding's lease (revision CAS bump + expiry
+  extension). Foreign, expired, and released ownership never renews.
+- One structural bound stays fail-closed in both modes: patch payloads over
+  1 MiB are rejected (`WRITE BLOCKED: Patch payload exceeds 1 MB`) because
+  authority cannot be verified for an unbounded write set.
+
+Every completed `pre_check_batch` call also records exactly ONE bounded
+route event (`type: "stage_a_gate_route"`) in `.swarm/events.jsonl`, with
+fields `route`, `sessionID`, `callID`, `taskId` (null when unattributable),
+`guardrailsEnabled`, each line ≤ 2048 bytes. The closed route vocabulary:
+
+| route | Meaning | Operator recovery |
+|---|---|---|
+| valid_pass | Correlated PASS applied; task advanced to pre_check_passed | None — proceed to Stage B |
+| pre_check_failed | Correlated FAIL applied; task moved to rework_required | Re-dispatch the coder with the findings |
+| invalid_result | Result not decodable as a valid pre_check_batch outcome; no transition | Re-run the gate; check the tool output contract |
+| no_task_correlation | Completed gate call with no attributable task | Run `/swarm recover` to repair attribution, then re-run the gate |
+| attribution_ambiguous | Durable fallback could not safely attribute (multiple candidates, or sole candidate unbound/unverifiable) | Run `/swarm recover` to repair Stage A attribution |
+| late_result | Correlation generation stale (task repaired/re-generated meanwhile); nothing written | Re-run the gate against the current generation |
+| duplicate_result | Idempotent replay of an already-applied receipt; no state change | None — the receipt already landed |
+
+Registered-host validation: `tests/integration/guardrails-registered-host-stage-a.test.ts`
+boots the real plugin `server()` (XDG-hermetic), executes `placeholder_scan`
+and `syntax_check` through the registered tool map, and drives
+valid/rejected receipts through the registered `tool.execute.before/after`
+hooks with guardrails enabled and disabled; expected result classes are
+bounded JSON tool outputs plus the durable states and route events above.
+
 ### Gate-denial escalation
 
 Every fail-closed `tool.execute.before` hook (guardrails authority, scope

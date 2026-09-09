@@ -7,7 +7,7 @@ import { GuardrailsConfigSchema } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 
 describe('guardrails disabled — end-to-end', () => {
-	it('config file with guardrails.enabled:false → createGuardrailsHooks → toolBefore is a noop', async () => {
+	it('config file with guardrails.enabled:false → createGuardrailsHooks → policy denials skipped, handlers still resolve (issue #2664)', async () => {
 		// Write a temp config file with guardrails: { enabled: false }
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-test-'));
 		const originalXDG = process.env.XDG_CONFIG_HOME;
@@ -37,22 +37,32 @@ describe('guardrails disabled — end-to-end', () => {
 				);
 				expect(guardrailsConfig.enabled).toBe(false);
 
-				// Create guardrails hooks — should return noops
-				const hooks = createGuardrailsHooks(guardrailsConfig);
+				// Create guardrails hooks — issue #2664: handlers are REAL, not
+				// no-ops; only the optional policy denials are inert. A shell
+				// command that would be policy-blocked with guardrails on
+				// (destruction-pattern prefix, no registered agent) must pass
+				// through without throwing, and both hook halves must resolve.
+				const hooks = createGuardrailsHooks(projectDir, guardrailsConfig);
 
-				// toolBefore should be a noop (returns undefined, doesn't throw)
 				const result = await hooks.toolBefore(
 					{ tool: 'bash', sessionID: 'test-session', callID: 'call-1' },
 					{ args: { command: 'echo hello' } },
 				);
 				expect(result).toBeUndefined();
 
-				// toolAfter should also be a noop
 				const afterResult = await hooks.toolAfter(
 					{ tool: 'bash', sessionID: 'test-session', callID: 'call-1' },
 					{ title: 'bash', output: 'hello', metadata: {} },
 				);
 				expect(afterResult).toBeUndefined();
+
+				// Optional enforcement is inert: a destructive-pattern shell
+				// command (no file argument — also the test-suite-block shape)
+				// must NOT throw with guardrails disabled.
+				await hooks.toolBefore(
+					{ tool: 'bash', sessionID: 'test-session', callID: 'call-2' },
+					{ args: { command: 'rm -rf /tmp/does-not-matter' } },
+				);
 			} finally {
 				fs.rmSync(projectDir, { recursive: true, force: true });
 			}
