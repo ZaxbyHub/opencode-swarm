@@ -423,9 +423,14 @@ describe('r04 findings-bearing registered run (issue 2585, C4/AC2/R04)', () => {
 			directory,
 			SESSION_ID,
 		))!;
-		const reviewerBatch = reviewerState.prReviewValidationBatches?.find(
+		const reviewerBatch = (reviewerState.prReviewValidationBatches ?? []).find(
 			(batch) => batch.batchId === 'r04-reviewer',
-		)!;
+		);
+		if (reviewerBatch === undefined) {
+			throw new Error(
+				"r04: expected validation batch 'r04-reviewer' in pr-review workflow gate state",
+			);
+		}
 		expect(reviewerBatch.phase).toBe('reviewer');
 		expect(new Set(reviewerBatch.lanes[0]!.reviewItemIds ?? [])).toEqual(
 			new Set(CANDIDATE_IDS),

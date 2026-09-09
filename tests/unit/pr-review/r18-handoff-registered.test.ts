@@ -3,7 +3,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { CANDIDATE_HEADERS } from '../../../src/background/candidate-contract.js';
 import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
-import { claimTerminalResult, findByBatchId } from '../../../src/background/pending-delegations.js';
+import {
+	claimTerminalResult,
+	findByBatchId,
+} from '../../../src/background/pending-delegations.js';
 import type { PrReviewInlineTriggerRow } from '../../../src/background/pr-review-trigger-contract.js';
 import { DEFAULT_PR_REVIEW_RESILIENCE_CONFIG } from '../../../src/config/schema.js';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
@@ -71,8 +74,11 @@ async function removeTempDir(): Promise<void> {
 type Parsed = Record<string, unknown> & { success: boolean };
 const run = async (promise: Promise<unknown>): Promise<Parsed> =>
 	JSON.parse(String(await promise)) as Parsed;
-const stats = () =>
-	({ changedLines: 400, changedFiles: 12, hasSubmoduleChange: false });
+const stats = () => ({
+	changedLines: 400,
+	changedFiles: 12,
+	hasSubmoduleChange: false,
+});
 const envelopeBase = (workflowLane: string) => ({
 	schemaVersion: 1 as const,
 	creditedLanes: [workflowLane],
@@ -153,6 +159,7 @@ async function submitAndFinish(batchId: string): Promise<void> {
 		if (!prompt) throw new Error('missing rendered child prompt');
 		const promptField = (name: string) =>
 			prompt.match(new RegExp(`^${name}: (.+)$`, 'm'))?.[1]?.trim() ?? '';
+		const candidate = laneCandidates.get(record.workflowLane);
 		const result = await run(
 			plugin.tool.submit_pr_review_result.execute(
 				{
@@ -160,10 +167,7 @@ async function submitAndFinish(batchId: string): Promise<void> {
 					batchId: promptField('batch_id'),
 					laneId: promptField('lane_id'),
 					revisionDigest: promptField('revision_digest'),
-					result: envelope(
-						record.workflowLane,
-						laneCandidates.get(record.workflowLane),
-					),
+					result: envelope(record.workflowLane, candidate),
 				},
 				{ directory, sessionID: record.subagentSessionId },
 			),
@@ -173,7 +177,6 @@ async function submitAndFinish(batchId: string): Promise<void> {
 			CANDIDATE_HEADERS[
 				record.mode === 'swarm-pr-review:micro' ? 'micro_lane' : 'base_explorer'
 			];
-		const candidate = laneCandidates.get(record.workflowLane);
 		const row = candidate
 			? `${candidate} | ${record.workflowLane} | HIGH | correctness | src/index.ts:1 | registered claim | registered evidence | impact | HIGH | UNKNOWN | `
 			: `[CLEAN] | ${record.workflowLane} | exact reviewed diff | no actionable finding survived`;
@@ -217,6 +220,8 @@ function lane(
 		...(reviewItemIds ? { review_item_ids: [...reviewItemIds] } : {}),
 	};
 }
+const reviewLane = (id: string) =>
+	lane(id, 'explorer', `Review ${id} on the exact bound diff.`);
 function record(
 	id: string,
 	status: 'PENDING' | 'CONFIRMED' | 'DISPROVED',
@@ -319,39 +324,24 @@ describe('R18 actionable handoff membership and completion side effects (#2585 C
 			prHeadSha: HEAD_SHA,
 		});
 		await dispatch('r18-base', 'swarm-pr-review:base', [
-			...PR_REVIEW_BASE_DIMENSION_IDS.map((dimension) =>
-				lane(
-					dimension,
-					'explorer',
-					`Review ${dimension} on the exact bound diff.`,
-				),
-			),
+			...PR_REVIEW_BASE_DIMENSION_IDS.map(reviewLane),
 		]);
 		await submitAndFinish('r18-base');
-		const inlineTriggers: PrReviewInlineTriggerRow[] =
-			PR_REVIEW_REQUIRED_MICRO_LANE_IDS.map((triggerId) => ({
+		const microIds = PR_REVIEW_REQUIRED_MICRO_LANE_IDS;
+		const inlineTriggers: PrReviewInlineTriggerRow[] = microIds.map(
+			(triggerId) => ({
 				trigger_id: triggerId,
 				result: 'MATCHED',
 				evidence: `The bound diff requires focused review for ${triggerId}.`,
-			}));
+			}),
+		);
 		const triggerRows: Array<Record<string, string>> = [];
-		for (
-			let offset = 0;
-			offset < PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length;
-			offset += 6
-		) {
+		for (let offset = 0; offset < microIds.length; offset += 6) {
 			const batchId = `r18-micro-${offset / 6}`;
 			await dispatch(
 				batchId,
 				'swarm-pr-review:micro',
-				PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(offset, offset + 6).map(
-					(triggerId) =>
-						lane(
-							triggerId,
-							'explorer',
-							`Review ${triggerId} on the exact bound diff.`,
-						),
-				),
+				microIds.slice(offset, offset + 6).map(reviewLane),
 				offset === 0 ? inlineTriggers : undefined,
 			);
 			await submitAndFinish(batchId);
@@ -464,9 +454,8 @@ describe('R18 actionable handoff membership and completion side effects (#2585 C
 			finding_ids: [C_DOWNGRADED, C_UPHELD],
 			provenance: handoffBase.provenance,
 		});
-		expect(
-			(await readPrWorkflowGateState(directory, SESSION_ID))?.prFeedbackPublication,
-		).toBeUndefined();
+		const handoffState = await readPrWorkflowGateState(directory, SESSION_ID);
+		expect(handoffState?.prFeedbackPublication).toBeUndefined();
 		const completion = await run(
 			plugin.tool.complete_pr_workflow.execute(
 				{
@@ -494,7 +483,9 @@ describe('R18 actionable handoff membership and completion side effects (#2585 C
 			.catch(() => [] as string[]);
 		expect(gateFiles.filter((entry) => entry.endsWith('.json'))).toEqual([]);
 		await expect(
-			fs.stat(path.join(directory, '.swarm', 'pr-monitor', 'subscriptions.jsonl')),
+			fs.stat(
+				path.join(directory, '.swarm', 'pr-monitor', 'subscriptions.jsonl'),
+			),
 		).rejects.toThrow(/ENOENT/);
 	}, 60_000);
 });

@@ -26,10 +26,10 @@ import {
 } from '../../helpers/pr-review-artifact-fixtures.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
+
 // #2585 frozen check C5 (AC3/R05), PRESERVING: substantive critic lane via registered
-// mode swarm-pr-review:critic — UPHELD/DOWNGRADED/DISPROVED settle (DOWNGRADED below
-// reviewer severity; DISPROVED NONE + suppress_with_reason); NME never settles;
-// post_critic handoff_required only for CONFIRMED + handoff_to_feedback.
+// mode swarm-pr-review:critic — UPHELD/DOWNGRADED/DISPROVED settle (DOWNGRADED below reviewer
+// severity; DISPROVED NONE + suppress); NME never settles; handoff only CONFIRMED + handoff_to_feedback.
 const SESSION_ID = 'r05-critic-projection';
 const HEAD_SHA = 'a'.repeat(40);
 const BASE_SHA = 'b'.repeat(40);
