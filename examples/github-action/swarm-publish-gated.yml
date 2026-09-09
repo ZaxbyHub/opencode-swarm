@@ -32,6 +32,7 @@ jobs:
     outputs:
       artifact-path: .swarm/github-action/artifact.json
       run-key: ${{ steps.prepare-action.outputs.run-key }}
+      artifact-digest: ${{ steps.prepare-action.outputs.artifact-digest }}
       issue-number: ${{ steps.issue-data.outputs.issue-number }}
       issue-title: ${{ steps.issue-data.outputs.issue-title }}
       issue-body: ${{ steps.issue-data.outputs.issue-body }}
@@ -159,7 +160,6 @@ jobs:
           base-sha: ${{ steps.live-base.outputs.base-sha }}
           base-branch: ${{ steps.issue-data.outputs.base-branch }}
           deadline-ms: '1500000'
-          max-attempts: '3'
           model: ${{ vars.SWARM_MODEL || 'opencode/big-pickle' }}
           agent: architect
           # Optional provider declaration. Supply the matching value through
@@ -223,6 +223,10 @@ jobs:
 
       - name: Publish verified artifact
         id: publish-action
+        env:
+          # This secret is configured on the protected `swarm-publish`
+          # Environment and is unavailable until its reviewers approve.
+          SWARM_ACTION_OVERSIGHT_STATUS: ${{ secrets.SWARM_ACTION_OVERSIGHT_STATUS }}
         uses: ZaxbyHub/opencode-swarm@REPLACE_WITH_40_CHAR_COMMIT_SHA # required: replace this sentinel before enabling
         with:
           mode: publish
@@ -239,6 +243,7 @@ jobs:
           bun-version: ${{ vars.SWARM_BUN_VERSION }}
           plugin-ref: ${{ vars.SWARM_PLUGIN_REF }}
           artifact-path: .swarm/github-action/artifact.json
+          artifact-digest: ${{ needs.prepare.outputs.artifact-digest }}
           expected-run-id: ${{ github.run_id }}
           run-attempt: ${{ github.run_attempt }}
           expected-issue-trace: ${{ vars.SWARM_ISSUE_TRACE }}

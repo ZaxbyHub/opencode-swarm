@@ -15,4 +15,10 @@ describe('issue #2498 — published Action surface', () => {
 		requireDesignatedCaller(surface);
 		requireSecureCaller(surface);
 	});
+
+	test('fails closed before either phase on a non-Linux runner', () => {
+		const { manifestText } = loadActionSurface();
+		const guard = 'if [[ "${RUNNER_OS:-}" != "Linux" ]]; then';
+		expect(manifestText.split(guard).length - 1).toBe(2);
+	});
 });

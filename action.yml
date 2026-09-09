@@ -18,12 +18,10 @@ inputs:
     required: true
   issue-title:
     description: 'Issue title, treated as untrusted data during prepare.'
-    required: false
-    default: ''
+    required: true
   issue-body:
     description: 'Issue body, treated as untrusted data during prepare.'
-    required: false
-    default: ''
+    required: true
   delivery-id:
     description: 'Stable event delivery identity used for idempotency.'
     required: true
@@ -46,10 +44,6 @@ inputs:
     description: 'Total runtime deadline in milliseconds.'
     required: false
     default: '900000'
-  max-attempts:
-    description: 'Maximum number of transient prepare attempts.'
-    required: false
-    default: '3'
   model:
     description: 'OpenCode model/provider selection used by prepare.'
     required: false
@@ -75,6 +69,10 @@ inputs:
     description: 'Relative path for the prepare artifact under the checked-out repository.'
     required: false
     default: .swarm/github-action/artifact.json
+  artifact-digest:
+    description: 'SHA-256 digest output by prepare and required by publish to bind the exact artifact.'
+    required: false
+    default: ''
   publication-token:
     description: 'Write-capable GitHub token. Supply this only to publish after Environment approval.'
     required: false
@@ -107,6 +105,9 @@ outputs:
   run-key:
     description: 'Stable repository/issue/delivery publication key.'
     value: ${{ steps.run-prepare.outputs.run-key || steps.run-publish.outputs.run-key }}
+  artifact-digest:
+    description: 'SHA-256 digest of the bound prepare artifact, when available.'
+    value: ${{ steps.run-prepare.outputs.artifact-digest || steps.run-publish.outputs.artifact-digest }}
 
 runs:
   using: composite
@@ -139,7 +140,6 @@ runs:
         SWARM_ACTION_BASE_SHA: ${{ inputs.base-sha }}
         SWARM_ACTION_EXPECTED_BASE_SHA: ${{ inputs.expected-base-sha }}
         SWARM_ACTION_DEADLINE_MS: ${{ inputs.deadline-ms }}
-        SWARM_ACTION_MAX_ATTEMPTS: ${{ inputs.max-attempts }}
         SWARM_ACTION_MODEL: ${{ inputs.model }}
         SWARM_ACTION_PROVIDER_ENV_KEYS: ${{ inputs.provider-env }}
         SWARM_ACTION_AGENT: ${{ inputs.agent }}
@@ -154,12 +154,18 @@ runs:
         SWARM_ACTION_BASE_BRANCH: ${{ inputs.base-branch }}
       run: |
         set -euo pipefail
+        if [[ "${RUNNER_OS:-}" != "Linux" ]]; then
+          echo 'This Action requires a Linux runner (RUNNER_OS=Linux)' >&2
+          exit 1
+        fi
         if [[ -n "${SWARM_ACTION_PLUGIN_REF:-}" && -n "${GITHUB_ACTION_REF:-}" && "$SWARM_ACTION_PLUGIN_REF" != "$GITHUB_ACTION_REF" ]]; then
           echo 'plugin-ref does not match the immutable Action ref' >&2
           exit 1
         fi
         test -n "${SWARM_ACTION_ISSUE_URL:-}"
         [[ "$SWARM_ACTION_ISSUE_URL" =~ ^https://github\.com/[^/]+/[^/]+/issues/[1-9][0-9]*$ ]]
+        test -n "${SWARM_ACTION_ISSUE_TITLE:-}"
+        test -n "${SWARM_ACTION_ISSUE_BODY:-}"
         test -n "${SWARM_ACTION_EXPECTED_RUN_ID:-}"
         test -n "${SWARM_ACTION_RUN_ATTEMPT:-}"
         test -n "${SWARM_ACTION_ISSUE_TRACE:-}"
@@ -219,7 +225,6 @@ runs:
         SWARM_ACTION_BASE_SHA: ${{ inputs.base-sha }}
         SWARM_ACTION_EXPECTED_BASE_SHA: ${{ inputs.expected-base-sha }}
         SWARM_ACTION_DEADLINE_MS: ${{ inputs.deadline-ms }}
-        SWARM_ACTION_MAX_ATTEMPTS: ${{ inputs.max-attempts }}
         SWARM_ACTION_MODEL: ${{ inputs.model }}
         SWARM_ACTION_AGENT: ${{ inputs.agent }}
         SWARM_ACTION_OPENCODE_VERSION: ${{ inputs.opencode-version }}
@@ -227,6 +232,7 @@ runs:
         SWARM_ACTION_PLUGIN_REF: ${{ inputs.plugin-ref }}
         GITHUB_ACTION_REF: ${{ github.action_ref }}
         SWARM_ACTION_ARTIFACT_PATH: ${{ inputs.artifact-path }}
+        SWARM_ACTION_EXPECTED_ARTIFACT_DIGEST: ${{ inputs.artifact-digest }}
         SWARM_ACTION_EXPECTED_RUN_ID: ${{ inputs.expected-run-id }}
         SWARM_ACTION_RUN_ATTEMPT: ${{ inputs.run-attempt }}
         SWARM_ACTION_ISSUE_TRACE: ${{ inputs.expected-issue-trace }}
@@ -234,15 +240,24 @@ runs:
         SWARM_ACTION_PUBLICATION_TOKEN: ${{ inputs.publication-token }}
       run: |
         set -euo pipefail
+        if [[ "${RUNNER_OS:-}" != "Linux" ]]; then
+          echo 'This Action requires a Linux runner (RUNNER_OS=Linux)' >&2
+          exit 1
+        fi
         if [[ -n "${SWARM_ACTION_PLUGIN_REF:-}" && -n "${GITHUB_ACTION_REF:-}" && "$SWARM_ACTION_PLUGIN_REF" != "$GITHUB_ACTION_REF" ]]; then
           echo 'plugin-ref does not match the immutable Action ref' >&2
           exit 1
         fi
         test -n "${SWARM_ACTION_ISSUE_URL:-}"
         [[ "$SWARM_ACTION_ISSUE_URL" =~ ^https://github\.com/[^/]+/[^/]+/issues/[1-9][0-9]*$ ]]
+        test -n "${SWARM_ACTION_EXPECTED_ARTIFACT_DIGEST:-}"
+        [[ "$SWARM_ACTION_EXPECTED_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
         test -n "${SWARM_ACTION_EXPECTED_RUN_ID:-}"
         test -n "${SWARM_ACTION_RUN_ATTEMPT:-}"
         test -n "${SWARM_ACTION_ISSUE_TRACE:-}"
         test -n "${SWARM_ACTION_BASE_BRANCH:-}"
         test -n "${SWARM_ACTION_PUBLICATION_TOKEN:-}"
+        # This value must come from the protected publish Environment. Missing
+        # or non-approved status is a fail-closed publication refusal.
+        test "${SWARM_ACTION_OVERSIGHT_STATUS:-}" = approved
         exec node "$GITHUB_ACTION_PATH/scripts/github-action/runner.mjs"

@@ -8,7 +8,11 @@ import {
 	type PrepareDependencies,
 	readDemoFixture,
 } from './github-action-contract';
-import { cleanupTempRoots, makeTempRoot } from './github-action-test-helpers';
+import {
+	cleanupTempRoots,
+	makeTempRoot,
+	withEnvironment,
+} from './github-action-test-helpers';
 
 afterEach(cleanupTempRoots);
 
@@ -107,7 +111,7 @@ describe('issue #2498 — bounded runtime and cancellation', () => {
 				) => Promise<{ code: number | null; signal: string | null }>
 			>('spawnBounded');
 		const root = makeTempRoot();
-		const started = Date.now();
+		const started = performance.now();
 		const settled = spawnBounded(process.execPath, ['-e', 'while (true) {}'], {
 			cwd: root,
 			timeout: 25,
@@ -124,7 +128,7 @@ describe('issue #2498 — bounded runtime and cancellation', () => {
 				),
 			),
 		]);
-		expect(Date.now() - started).toBeLessThan(1_000);
+		expect(performance.now() - started).toBeLessThan(1_000);
 		expect(result).toEqual(
 			expect.objectContaining({ name: 'ProcessTimeoutError' }),
 		);
@@ -296,5 +300,23 @@ describe('issue #2498 — bounded runtime and cancellation', () => {
 		});
 		expect(result).toEqual({ status: 'failed' });
 		expect(attempts).toBe(1);
+	});
+
+	test('withEnvironment propagates rejection while releasing its queue', async () => {
+		const failure = new Error('environment action failed');
+		const first = withEnvironment(
+			{ SWARM_TEST_ENVIRONMENT_QUEUE: 'first' },
+			async () => {
+				expect(process.env.SWARM_TEST_ENVIRONMENT_QUEUE).toBe('first');
+				throw failure;
+			},
+		);
+		const second = withEnvironment(
+			{ SWARM_TEST_ENVIRONMENT_QUEUE: 'second' },
+			async () => process.env.SWARM_TEST_ENVIRONMENT_QUEUE,
+		);
+
+		await expect(first).rejects.toBe(failure);
+		await expect(second).resolves.toBe('second');
 	});
 });

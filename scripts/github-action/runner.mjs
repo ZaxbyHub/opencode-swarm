@@ -28,6 +28,7 @@ const MAX_ATTEMPTS = 8;
 const DEFAULT_DEADLINE_MS = 300_000;
 const MAX_DEADLINE_MS = 21_600_000;
 const MAX_PUBLICATION_CHARS = 32_000;
+const MAX_ISSUE_INPUT_CHARS = MAX_PUBLICATION_CHARS;
 const MAX_CAPTURE_BYTES = 1_048_576;
 const MAX_PATCH_BYTES = 32 * 1024 * 1024;
 const ARTIFACT_VERSION = 2;
@@ -152,6 +153,7 @@ const TEST_FIXTURE_ENV_KEYS = Object.freeze([
 	'FAKE_OPENCODE_VERSION',
 	'FAKE_RECEIPT_MODE',
 	'FAKE_SCRIPT',
+	'SWARM_ACTION_TEST_HARNESS',
 ]);
 
 export class ActionAbortError extends Error {
@@ -162,9 +164,11 @@ export class ActionAbortError extends Error {
 }
 
 export class ProcessTimeoutError extends Error {
-	constructor(message = 'subprocess deadline exceeded') {
+	constructor(message = 'subprocess deadline exceeded', details = {}) {
 		super(message);
 		this.name = 'ProcessTimeoutError';
+		this.result = { ...details };
+		Object.assign(this, details);
 	}
 }
 
@@ -176,6 +180,16 @@ function boundedText(value, limit = MAX_PUBLICATION_CHARS) {
 	return asText(value)
 		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
 		.slice(0, limit);
+}
+
+function combineIssueText(title, body) {
+	const titleText = asText(title);
+	const bodyText = asText(body);
+	const separatorLength = titleText.length > 0 && bodyText.length > 0 ? 2 : 0;
+	if (titleText.length + bodyText.length + separatorLength > MAX_ISSUE_INPUT_CHARS) {
+		throw new TypeError('issue title/body exceeds the bounded input size');
+	}
+	return `${titleText}\n\n${bodyText}`.trim();
 }
 
 function redactText(value, secrets = []) {
@@ -213,6 +227,7 @@ function validatePrepareInput(input) {
 	for (const key of ['deliveryId', 'label', 'labeler', 'issueBody']) {
 		if (typeof input[key] !== 'string' || input[key].length === 0) throw new TypeError(`${key} must be a non-empty string`);
 	}
+	if (input.issueBody.length > MAX_ISSUE_INPUT_CHARS) throw new TypeError('issueBody exceeds the bounded input size');
 	if (input.issueUrl !== undefined && (typeof input.issueUrl !== 'string' || input.issueUrl !== `https://github.com/${input.repository}/issues/${input.issueNumber}`)) throw new TypeError('issueUrl must be the canonical GitHub issue URL');
 	if (input.expectedIssueTrace !== undefined && (typeof input.expectedIssueTrace !== 'string' || input.expectedIssueTrace.length === 0)) throw new TypeError('expectedIssueTrace must be a non-empty string');
 	if (input.providerSecret !== undefined && typeof input.providerSecret !== 'string') throw new TypeError('providerSecret must be a string');
@@ -265,14 +280,26 @@ function throwIfAborted(signal, reason) {
 function boundedAwait(operation, runState) {
 	throwIfAborted(runState.controller.signal, runState.reason);
 	const pending = Promise.resolve().then(operation);
+	let onAbort;
+	const observeCompletion = pending.finally(() => {
+		if (onAbort) runState.controller.signal.removeEventListener('abort', onAbort);
+	});
+	observeCompletion.catch((error) => {
+		// Promise.race deliberately preserves abort/deadline priority. The
+		// operation may still reject after that control path wins, so retain the
+		// late failure as a cause instead of silently losing the diagnostic.
+		if (runState.controller.signal.aborted) {
+			const reason = runState.reason();
+			if (reason instanceof Error && reason !== error && reason.cause === undefined) reason.cause = error;
+		}
+	});
 	const aborted = new Promise((_, reject) => {
-		const onAbort = () => {
+		onAbort = () => {
 			runState.controller.signal.removeEventListener('abort', onAbort);
 			reject(runState.reason() ?? new ActionAbortError());
 		};
 		if (runState.controller.signal.aborted) onAbort();
 		else runState.controller.signal.addEventListener('abort', onAbort, { once: true });
-		pending.finally(() => runState.controller.signal.removeEventListener('abort', onAbort)).catch(() => {});
 	});
 	return Promise.race([pending, aborted]);
 }
@@ -381,7 +408,7 @@ function validatePublishInput(input) {
 }
 
 function publicationKey(input) {
-	return createHash('sha256').update(`${input.artifact.repository}\0${input.artifact.issueNumber}\0${input.artifact.deliveryId}\0${input.artifact.baseSha}`).digest('hex');
+	return createHash('sha256').update(`${input.artifact.repository}\0${input.artifact.issueNumber}\0${input.artifact.deliveryId}\0${input.artifact.baseSha}\0${input.expectedBaseSha}`).digest('hex');
 }
 
 function asReused(result) {
@@ -446,8 +473,6 @@ export function spawnBounded(command, args, options = {}) {
 	const signal = options.signal;
 	const childEnv = options.env ?? process.env;
 	return new Promise((resolve, reject) => {
-		let stdout = '';
-		let stderr = '';
 		let settled = false;
 		let closed = false;
 		let timer;
@@ -456,6 +481,7 @@ export function spawnBounded(command, args, options = {}) {
 		let reaping = false;
 		let escalationPending = false;
 		let closeResult;
+		let timeoutError;
 		let child;
 		try {
 			child = spawn(command, args, {
@@ -474,20 +500,30 @@ export function spawnBounded(command, args, options = {}) {
 		const captureLimit = Math.min(MAX_PATCH_BYTES, Math.max(1, Number(options.maxOutputBytes ?? MAX_CAPTURE_BYTES)));
 		const append = (target, chunk) => {
 			const combined = Buffer.concat([Buffer.from(target, 'utf8'), Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))]);
-			if (combined.length <= captureLimit) return { value: combined.toString('utf8'), truncated: false };
-			return { value: combined.subarray(combined.length - captureLimit).toString('utf8'), truncated: true };
+			if (combined.length <= captureLimit) return { value: combined, truncated: false };
+			return { value: combined.subarray(combined.length - captureLimit), truncated: true };
 		};
+		let stdoutBytes = Buffer.alloc(0);
+		let stderrBytes = Buffer.alloc(0);
 		let stdoutTruncated = false;
 		let stderrTruncated = false;
 		child.stdout?.on('data', (chunk) => {
-			const captured = append(stdout, chunk);
-			stdout = captured.value;
+			const captured = append(stdoutBytes, chunk);
+			stdoutBytes = captured.value;
 			stdoutTruncated ||= captured.truncated;
 		});
 		child.stderr?.on('data', (chunk) => {
-			const captured = append(stderr, chunk);
-			stderr = captured.value;
+			const captured = append(stderrBytes, chunk);
+			stderrBytes = captured.value;
 			stderrTruncated ||= captured.truncated;
+		});
+		const capture = () => ({
+			stdout: stdoutBytes.toString('utf8'),
+			stderr: stderrBytes.toString('utf8'),
+			stdoutBytes,
+			stderrBytes,
+			stdoutTruncated,
+			stderrTruncated,
 		});
 		const killTree = (killSignal) => {
 			if (closed && !reaping) return;
@@ -513,8 +549,14 @@ export function spawnBounded(command, args, options = {}) {
 			if (settled) return;
 			settled = true;
 			cleanup();
-			if (error) reject(error);
-			else resolve({ ...result, stdout, stderr, stdoutTruncated, stderrTruncated });
+			if (error) {
+				if (error instanceof ProcessTimeoutError) {
+					const details = { ...capture(), ...(closeResult ?? {}) };
+					error.result = details;
+					Object.assign(error, details);
+				}
+				reject(error);
+			} else resolve({ ...result, ...capture() });
 		};
 		const requestStop = () => {
 			if (timedOut || settled) return;
@@ -529,7 +571,8 @@ export function spawnBounded(command, args, options = {}) {
 				hardTimer = setTimeout(() => {
 					killTree('SIGKILL');
 					escalationPending = false;
-					finish(new ProcessTimeoutError());
+					timeoutError = new ProcessTimeoutError('subprocess deadline exceeded', { ...(closeResult ?? {}), ...capture(), timedOut: true });
+					finish(timeoutError);
 			}, 250);
 		};
 		child.once('error', (error) => {
@@ -560,7 +603,13 @@ export function spawnBounded(command, args, options = {}) {
 		});
 		child.once('close', (code, signalName) => {
 			closed = true;
-			if (timedOut) closeResult = { code, signal: signalName, timedOut: true };
+			if (timedOut) {
+				closeResult = { code, signal: signalName, timedOut: true };
+				if (timeoutError) {
+					Object.assign(timeoutError, closeResult, capture());
+					timeoutError.result = { ...timeoutError.result, ...closeResult, ...capture() };
+				}
+			}
 			else if (reaping) closeResult = { code, signal: signalName, timedOut: false };
 			else finish(null, { code, signal: signalName, timedOut: false });
 		});
@@ -795,7 +844,7 @@ async function collectCanonicalTransport(root, input, signal, timeoutMs, secrets
 		else await gitCommand(root, ['read-tree', 'HEAD'], { timeout: timeoutMs, signal, env });
 		await gitCommand(root, ['add', '-A', '--', '.', ':(exclude).git/**', ':(exclude).swarm/**'], { timeout: timeoutMs, signal, env });
 		const patch = await gitCommand(root, ['diff', '--cached', '--binary', '--full-index', '--find-renames', '--find-copies', 'HEAD', '--', '.', ':(exclude).git/**', ':(exclude).swarm/**'], { timeout: timeoutMs, signal, env, maxOutputBytes: MAX_PATCH_BYTES, requireCompleteOutput: true });
-		const patchBytes = Buffer.from(patch.stdout, 'utf8');
+		const patchBytes = patch.stdoutBytes ?? Buffer.from(patch.stdout, 'utf8');
 		if (patchBytes.length === 0) throw new Error('prepare produced no transportable workspace changes');
 		if (patchBytes.length > MAX_PATCH_BYTES) throw new Error('transport exceeds the Action artifact bound');
 		const names = await gitCommand(root, ['diff', '--cached', '--name-only', '-z', '--find-renames', 'HEAD', '--', '.', ':(exclude).git/**', ':(exclude).swarm/**'], { timeout: timeoutMs, signal, env, maxOutputBytes: MAX_CAPTURE_BYTES, requireCompleteOutput: true });
@@ -814,7 +863,7 @@ async function collectCanonicalTransport(root, input, signal, timeoutMs, secrets
 		for (const file of [...new Set(paths)]) {
 			if (!basePaths.has(file)) continue;
 			const baseBlob = await gitCommand(root, ['show', `HEAD:${file}`], { timeout: timeoutMs, signal, env, maxOutputBytes: MAX_PATCH_BYTES, requireCompleteOutput: true });
-			assertSecretFree(Buffer.from(baseBlob.stdout, 'utf8'), secrets);
+			assertSecretFree(baseBlob.stdoutBytes ?? Buffer.from(baseBlob.stdout, 'utf8'), secrets);
 		}
 		for (const file of [...new Set(paths)]) {
 			const candidate = join(root, file);
@@ -1060,8 +1109,7 @@ async function candidateTreeSha(root, input, signal, timeoutMs, baseEnv = prepar
 
 function writeReviewTranscriptEvidence(root, input, evidence) {
 	const file = safeReceiptPath(root, '.swarm/github-action/review-transcript.json');
-	mkdirSync(dirname(file), { recursive: true });
-	writeFileSync(file, `${JSON.stringify({ version: 1, issueNumber: input.issueNumber, issueUrl: canonicalIssueUrl(input), traceTranscriptSha256: evidence.traceTranscriptSha256, baseSha: input.baseSha, targetTreeSha: evidence.targetTreeSha, parentSession: evidence.parentSession, nested: evidence.nested }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+	writeArtifactFile(file, { version: 1, issueNumber: input.issueNumber, issueUrl: canonicalIssueUrl(input), traceTranscriptSha256: evidence.traceTranscriptSha256, baseSha: input.baseSha, targetTreeSha: evidence.targetTreeSha, parentSession: evidence.parentSession, nested: evidence.nested });
 }
 
 async function verifyActualToolBindings(root, opencode, expectedVersion, expectedPluginRef, signal, timeout, env) {
@@ -1109,6 +1157,22 @@ async function verifyAndApplyCanonicalTransport(root, payload, input, signal, ti
 
 function localBinary(name) {
 	return process.platform === 'win32' ? `${name}.cmd` : name;
+}
+
+async function assertPackageJsonUnchanged(root, baseSha, signal, timeoutMs, env) {
+	const diff = await gitCommand(root, ['diff', '--name-only', baseSha, '--', 'package.json'], {
+		timeout: timeoutMs,
+		signal,
+		env,
+	});
+	const status = await gitCommand(root, ['status', '--porcelain=v1', '--untracked-files=all', '--', 'package.json'], {
+		timeout: timeoutMs,
+		signal,
+		env,
+	});
+	if (diff.stdout.trim() || status.stdout.trim()) {
+		throw new Error('runner-owned checks require package.json to match the bound base revision');
+	}
 }
 
 function trustedPrepareDependencies(input, root) {
@@ -1184,6 +1248,8 @@ function trustedPrepareDependencies(input, root) {
 			if (stage === 'tests') {
 				const bun = envText('SWARM_ACTION_BUN_BIN', localBinary('bun'));
 				const configured = envText('SWARM_ACTION_TEST_COMMANDS');
+				if (configured && envText('SWARM_ACTION_TEST_HARNESS') !== '1') throw new Error('SWARM_ACTION_TEST_COMMANDS is restricted to the unit-test harness');
+				await assertPackageJsonUnchanged(root, input.baseSha, state.signal, remainingTimeout(), prepareEnv);
 				let commands;
 				try { commands = configured ? JSON.parse(configured) : [['run', 'test'], ['run', 'typecheck'], ['run', 'lint:ci']]; } catch { throw new Error('SWARM_ACTION_TEST_COMMANDS must be JSON array form'); }
 				if (!Array.isArray(commands) || commands.some((args) => !Array.isArray(args) || args.some((arg) => typeof arg !== 'string'))) throw new Error('runner test commands must be array-form');
@@ -1225,7 +1291,7 @@ function prepareInputFromEnvironment() {
 		label: envText('SWARM_ACTION_LABEL'),
 		labeler: envText('SWARM_ACTION_LABELER'),
 		baseSha: envText('SWARM_ACTION_BASE_SHA'),
-		issueBody: `${envText('SWARM_ACTION_ISSUE_TITLE')}\n\n${envText('SWARM_ACTION_ISSUE_BODY')}`.trim(),
+		issueBody: combineIssueText(envText('SWARM_ACTION_ISSUE_TITLE'), envText('SWARM_ACTION_ISSUE_BODY')),
 		issueUrl: envText('SWARM_ACTION_ISSUE_URL'),
 		baseBranch: envText('SWARM_ACTION_BASE_BRANCH', 'main'),
 		expectedIssueTrace: envText('SWARM_ACTION_ISSUE_TRACE'),
@@ -1254,7 +1320,7 @@ async function runPrepareCli(root) {
 			const payload = { ...canonical };
 			if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > MAX_ARTIFACT_BYTES) throw new Error('Action artifact exceeds the bounded transport size');
 			writeArtifactFile(artifactPath, payload);
-			writeActionOutputs({ status: 'prepared', 'evidence-path': relative(root, artifactPath), 'run-key': payload.runKey });
+			writeActionOutputs({ status: 'prepared', 'evidence-path': relative(root, artifactPath), 'run-key': payload.runKey, 'artifact-digest': payload.artifactDigest });
 			return 0;
 		}
 		writeActionOutputs({ status: result.status, 'run-key': stableRunKey(input) });
@@ -1317,7 +1383,7 @@ function publishDependenciesFromEnvironment(root, payload, runState) {
 		if (await remoteSha(branch) !== remote) return false;
 		await gitCommand(root, remoteGitArgs(['fetch', '--no-tags', 'origin', `refs/heads/${branch}`]), { timeout: remaining(), signal: runState.controller.signal, env: publishEnv });
 		const diff = await gitCommand(root, ['diff', '--binary', '--full-index', '--find-renames', '--find-copies', baseSha, remote, '--', '.', ':(exclude).git/**', ':(exclude).swarm/**'], { timeout: remaining(), signal: runState.controller.signal, env: publishEnv, maxOutputBytes: MAX_PATCH_BYTES, requireCompleteOutput: true });
-		const patchBytes = Buffer.from(diff.stdout, 'utf8');
+		const patchBytes = diff.stdoutBytes ?? Buffer.from(diff.stdout, 'utf8');
 		const remoteTree = await gitCommand(root, ['ls-tree', '-r', '-z', remote], { timeout: remaining(), signal: runState.controller.signal, env: publishEnv, maxOutputBytes: MAX_PATCH_BYTES, requireCompleteOutput: true });
 		// The patch binds the claimed transition from the approved base; the
 		// complete tree listing independently binds modes, object types, paths,
@@ -1384,7 +1450,7 @@ function publishDependenciesFromEnvironment(root, payload, runState) {
 			return { branch, state: 'claimed' };
 		},
 		publish: async ({ claim }) => {
-			if (envText('SWARM_ACTION_OVERSIGHT_STATUS', 'approved') !== 'approved') throw new Error('publisher oversight status is not approved');
+			if (envText('SWARM_ACTION_OVERSIGHT_STATUS') !== 'approved') throw new Error('publisher requires approved protected-environment oversight');
 			// The caller's protected Environment approved this job.  Bind that
 			// approval to the current remote base immediately before mutation.
 			await assertLiveBase();
@@ -1392,9 +1458,10 @@ function publishDependenciesFromEnvironment(root, payload, runState) {
 			if (claim.state === 'existing' && claim.orphan) {
 				if (!(await verifyRemotePatch(candidateSha))) throw new Error('orphan branch does not match the bound artifact');
 			} else if (claim.state === 'claimed') {
-				await verifyAndApplyCanonicalTransport(root, payload, { repository: payload.repository, issueNumber: payload.issueNumber, deliveryId: payload.deliveryId, expectedBaseSha: baseSha }, runState.controller.signal, remaining());
-				const add = await gitCommand(root, ['add', '-A', '--', '.', ':(exclude).git/**', ':(exclude).swarm/**'], { timeout: remaining(), signal: runState.controller.signal, env: publishEnv });
-				if (add.code !== 0) throw new Error('unable to stage the bound transport');
+				const verifiedTransport = await verifyAndApplyCanonicalTransport(root, payload, { repository: payload.repository, issueNumber: payload.issueNumber, deliveryId: payload.deliveryId, expectedBaseSha: baseSha }, runState.controller.signal, remaining());
+				const stagedTree = (await gitCommand(root, ['write-tree'], { timeout: remaining(), signal: runState.controller.signal, env: publishEnv })).stdout.trim();
+				if (stagedTree !== verifiedTransport.transport.targetTreeSha) throw new Error('staged tree does not match the bound transport');
+				assertSecretFree(verifiedTransport.patchBytes, configuredSecrets());
 				await gitCommand(root, ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=opencode-swarm[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit', '-m', `chore: apply gated swarm issue #${payload.issueNumber}`], { timeout: remaining(), signal: runState.controller.signal, env: publishEnv });
 				candidateSha = (await gitCommand(root, ['rev-parse', 'HEAD'], { timeout: remaining(), signal: runState.controller.signal, env: publishEnv })).stdout.trim();
 				// Empty expected old value is Git's create-only lease.  It cannot
@@ -1423,6 +1490,8 @@ async function runPublishCli(root) {
 	const artifactPath = safeArtifactPath(root, envText('SWARM_ACTION_ARTIFACT_PATH'));
 	const payload = readArtifactFile(artifactPath);
 	const token = envText('SWARM_ACTION_PUBLICATION_TOKEN');
+	const expectedArtifactDigest = envText('SWARM_ACTION_EXPECTED_ARTIFACT_DIGEST');
+	if (expectedArtifactDigest && (!/^[0-9a-f]{64}$/.test(expectedArtifactDigest) || payload.artifactDigest !== expectedArtifactDigest)) throw new Error('publish artifact-digest does not match the prepared artifact');
 	const expectedBaseSha = envText('SWARM_ACTION_EXPECTED_BASE_SHA', envText('SWARM_ACTION_BASE_SHA'));
 	if (!token) throw new Error('publication token is required only for publish mode');
 	const deadlineMs = envInteger('SWARM_ACTION_DEADLINE_MS', DEFAULT_DEADLINE_MS);
@@ -1436,7 +1505,7 @@ async function runPublishCli(root) {
 		const input = { repository: envText('SWARM_ACTION_REPOSITORY', payload.repository), issueNumber: envInteger('SWARM_ACTION_ISSUE_NUMBER', payload.issueNumber), deliveryId: envText('SWARM_ACTION_DELIVERY_ID', payload.deliveryId), artifact: payload.artifact, publicationToken: token, expectedBaseSha, signal: runState.controller.signal };
 		if (input.repository !== payload.repository || input.issueNumber !== payload.issueNumber || input.deliveryId !== payload.deliveryId) throw new Error('publish inputs do not match the bound artifact');
 		const result = await publishVerifiedAction(input, publishDependenciesFromEnvironment(root, payload, runState));
-		writeActionOutputs({ status: result.status, 'pr-url': result.publication?.prUrl ?? '', 'pr-number': result.publication?.prNumber ?? '', summary: result.publication?.summary ?? '', 'evidence-path': relative(root, artifactPath), 'run-key': payload.runKey ?? stableRunKey(payload.artifact) });
+		writeActionOutputs({ status: result.status, 'pr-url': result.publication?.prUrl ?? '', 'pr-number': result.publication?.prNumber ?? '', summary: result.publication?.summary ?? '', 'evidence-path': relative(root, artifactPath), 'run-key': payload.runKey ?? stableRunKey(payload.artifact), 'artifact-digest': payload.artifactDigest });
 		return result.status === 'published' || result.status === 'reused' ? 0 : 1;
 	} finally {
 		runState.close();

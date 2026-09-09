@@ -52,11 +52,19 @@ The caller has two separate jobs and two separate credential domains:
   bound patch/tree is verified; the publisher never force-updates an existing
   branch.
 
+  The protected Environment must provide the
+  `SWARM_ACTION_OVERSIGHT_STATUS=approved` environment secret to the publish
+  Action step. The publisher refuses a missing, denied, or any other status.
+
 The prepare job has no write-capable credential, and the publish token is
 passed only to the publish Action invocation. `.git`, `.swarm/`, credentials,
 trace transcripts, unsafe paths, and secret-bearing summaries are excluded
 from the publication artifact. Fork or repository-mismatched requests fail
 closed before any publication side effect.
+
+Both composite Action phases also fail closed unless GitHub reports
+`RUNNER_OS=Linux`; the caller's `runs-on` selection must therefore remain a
+Linux runner.
 
 ### Setup, inputs, and outputs
 
@@ -87,9 +95,11 @@ Action `uses:` ref immutable and update it only through a reviewed change.
 The Action accepts `mode: prepare|publish`, repository and issue identity,
 canonical issue URL, delivery ID plus run ID/attempt, live base branch and
 base SHA, issue title/body, trigger label/labeler, model and agent selection,
-bounded `deadline-ms` and `max-attempts`, toolchain/plugin pins, expected
-issue-trace identity, artifact path, optional `provider-env`, and (publish
-only) `publication-token`. `provider-env` is a comma-separated declaration of
+bounded `deadline-ms`, toolchain/plugin pins, expected issue-trace identity,
+artifact path, optional `provider-env`, and (publish only) `publication-token`
+plus the prepare output `artifact-digest`. Pass that digest unchanged to the
+publish input so the publisher verifies it is consuming the exact prepared
+artifact. `provider-env` is a comma-separated declaration of
 provider environment-variable names from the Action's documented allowlist
 (for example `OPENAI_API_KEY`); the caller supplies those values through the
 step/job environment. The values are copied only into the OpenCode provider
@@ -98,9 +108,24 @@ artifact, and publish paths receive a sanitized environment, and the names
 are never accepted as arbitrary shell syntax. Omit `provider-env` when the
 selected OpenCode setup does not require caller-supplied provider credentials.
 It exposes
-`status`, `pr-url`, `pr-number`, `evidence-path`, and the stable `run-key`.
-Issue fields are data, not instructions; the runtime fences them before the
-agent phase.
+`status`, `pr-url`, `pr-number`, `evidence-path`, the stable `run-key`, and
+`artifact-digest`. Issue title and body are required Action inputs. They are
+data, not instructions; the runtime fences them before the agent phase.
+
+The Action deliberately has no public retry-count input: the production runtime
+is mutation-capable and is never retried after it starts. The internal
+`SWARM_ACTION_MAX_ATTEMPTS` adapter setting is retained only for injected,
+non-mutation unit-test runtimes and is not wired by the Action. Other
+intentionally internal harness overrides (`SWARM_ACTION_OPENCODE_BIN`,
+`SWARM_ACTION_BUN_BIN`, `SWARM_ACTION_CI_BIN`, `SWARM_ACTION_TEST_COMMANDS`,
+`SWARM_ACTION_TEST_HARNESS`, `SWARM_ACTION_REVIEWER_AGENT`, and
+`SWARM_ACTION_CRITIC_AGENT`) are not public Action inputs or supported consumer
+configuration; do not set them in a production workflow. The runner accepts
+`SWARM_ACTION_TEST_COMMANDS` only when the explicit `SWARM_ACTION_TEST_HARNESS=1`
+marker is present, and rejects any workspace whose `package.json` differs from
+the bound base revision before running the default Bun checks. This keeps
+runner-owned checks from executing mutable package scripts from an untrusted
+candidate.
 
 Every prepare failure, nonzero `swarm ci` result, cancellation, timeout,
 oversight denial, stale base, malformed/tampered artifact, or secret-scan

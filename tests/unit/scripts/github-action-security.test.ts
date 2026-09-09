@@ -114,4 +114,34 @@ describe('issue #2498 — least privilege and trust boundaries', () => {
 		expect(seen).toHaveLength(7);
 		expect(seen.every((body) => body === injectedBody)).toBe(true);
 	});
+
+	test('rejects issue text beyond the bounded publication size before pipeline work', async () => {
+		const prepare = await loadPrepareRunner();
+		const fixture = readDemoFixture();
+		const dependencies: PrepareDependencies = {
+			authorize: async () => {
+				throw new Error('authorization must not run for oversized issue text');
+			},
+			createRuntime: () => {
+				throw new Error('runtime must not be created for oversized issue text');
+			},
+			executeStage: async () => {},
+			evaluateGate: async () => 'approved',
+			bindArtifact: async () => ({
+				repository: fixture.repository,
+				issueNumber: fixture.issueNumber,
+				deliveryId: fixture.deliveryId,
+				baseSha: 'base',
+				evidence: 'green',
+			}),
+			isTransient: () => false,
+			sleep: async () => {},
+		};
+		await expect(
+			prepare(
+				inputFromFixture(fixture, { issueBody: 'x'.repeat(32_001) }),
+				dependencies,
+			),
+		).rejects.toThrow(/bounded input size/);
+	});
 });

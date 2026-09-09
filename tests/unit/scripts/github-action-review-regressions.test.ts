@@ -116,6 +116,7 @@ function publishEnvironment(
 		SWARM_ACTION_BASE_BRANCH: 'main',
 		SWARM_ACTION_EXPECTED_BASE_SHA: baseSha,
 		SWARM_ACTION_EXPECTED_RUN_ID: 'local-run',
+		SWARM_ACTION_OVERSIGHT_STATUS: 'approved',
 		SWARM_ACTION_OPENCODE_VERSION: '1.18.26',
 		SWARM_ACTION_BUN_VERSION: '1.3.14',
 		SWARM_ACTION_PLUGIN_REF: ACTION_REF,
@@ -157,6 +158,12 @@ function runSeparateProcess(environment: Record<string, string>): number {
 		stderr: 'pipe',
 		timeout: 60_000,
 	});
+	if (
+		result.exitCode !== 0 &&
+		environment.SWARM_ACTION_DELIVERY_ID === 'delivery-regression'
+	) {
+		console.error(new TextDecoder().decode(result.stderr));
+	}
 	return result.exitCode;
 }
 
@@ -345,6 +352,37 @@ describe('issue #2498 — reviewer regressions (F3/F4/F5/F6)', () => {
 					'refs/heads/swarm/issue-2498',
 				),
 			).toContain(substitutedSha);
+		},
+	);
+
+	test(
+		'F7: publication succeeds when the optional step summary path is absent',
+		{ timeout: 60_000 },
+		async () => {
+			const prepared = await preparedFixture();
+			copyArtifact(prepared.fixture.seed, prepared.fixture.fresh);
+			const environment = publishEnvironment(
+				prepared.fixture.fresh,
+				prepared.fixture.baseSha,
+				prepared.root,
+				prepared.trace.binDir,
+				{
+					FAKE_GH_STATE: path.join(prepared.root, 'f7-gh-state'),
+					FAKE_GH_PR_AFTER_CREATE_JSON: JSON.stringify([
+						{
+							number: 52,
+							url: 'https://github.com/owner/repository/pull/52',
+							headRefName: 'swarm/issue-2498',
+							headRefOid: '',
+							baseRefName: 'main',
+							baseRefOid: prepared.fixture.baseSha,
+						},
+					]),
+				},
+			);
+			environment.GITHUB_STEP_SUMMARY = '';
+			const code = runSeparateProcess(environment);
+			expect(code).toBe(0);
 		},
 	);
 });

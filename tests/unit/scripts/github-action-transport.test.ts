@@ -103,6 +103,7 @@ function publishEnvironment(
 		SWARM_ACTION_BASE_BRANCH: 'main',
 		SWARM_ACTION_EXPECTED_BASE_SHA: baseSha,
 		SWARM_ACTION_EXPECTED_RUN_ID: 'local-run',
+		SWARM_ACTION_OVERSIGHT_STATUS: 'approved',
 		SWARM_ACTION_ISSUE_URL: 'https://github.com/owner/repository/issues/2498',
 		SWARM_ACTION_ISSUE_TRACE: '2498-publish-gated-action',
 		SWARM_ACTION_OPENCODE_VERSION: '1.18.26',
