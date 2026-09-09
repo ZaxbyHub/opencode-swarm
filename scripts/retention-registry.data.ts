@@ -3033,11 +3033,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/delegation-gate/worktree-merge-status.ts',
 			'src/hooks/delegation-gate/worktree-provisioning-owner.ts',
 			'src/hooks/delegation-gate/worktree-recovery-authority.ts',
+			'src/worktree/merge.ts',
 		],
 		writerCitations: [
 			'src/hooks/delegation-gate/worktree-merge-status.ts:259 recordWorktreeMergeFailure / :273 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-125)',
 			'src/hooks/delegation-gate/worktree-provisioning-owner.ts recordWorktreeProvisioningOwner/removeWorktreeProvisioningOwner — atomic per-owner files plus bounded lifecycle journal',
 			'src/hooks/delegation-gate/worktree-recovery-authority.ts publish/claim/renew/release/finalize/replay — atomic authority, journal, and credential writes under one cross-process lock',
+			'src/worktree/merge.ts:1034/1363 — atomic merge-settlement patch records preserve squash settlement and recovery across crashes',
 		],
 		readerCitations: [
 			'worktree-merge-status.ts:166 scanWorktreeMergeFailuresForRecovery — bounded 2 MiB / 512 entries (:59-60)',
@@ -3070,7 +3072,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			// any of these three filenames in src/commands/close.ts), which is
 			// what this row's `closePolicy: 'untouched'` already asserts.
 			'worktree-provisioning-lifecycle.json': 'neither',
-			'worktree-merge-recovery-v2.json': 'neither',
+			'worktree-merge-recovery-v2.json': 'archive-only',
 			'worktree-merge-recovery-v2-journal.json': 'neither',
 		},
 		resetPolicy: 'not reset',
