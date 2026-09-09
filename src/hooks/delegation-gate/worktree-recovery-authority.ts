@@ -33,6 +33,12 @@ const HEX_40_RE = /^[0-9a-f]{40}$/i;
 const HEX_64_RE = /^[0-9a-f]{64}$/i;
 const MAX_SQUASH_CHANGED_PATHS = 50_000;
 const MAX_SQUASH_CHANGED_PATH_LENGTH = 4096;
+/**
+ * Digest version for immutable recovery provenance.  The store schema remains
+ * v2 so existing non-squash authorities can be read, but new records carry
+ * this marker and include squash settlement fields in their digest.
+ */
+const CURRENT_AUTHORITY_DIGEST_VERSION = 2 as const;
 
 export const WORKTREE_RECOVERY_MUTATOR_NAMES = [
 	'publish',
@@ -103,6 +109,8 @@ export interface WorktreeRecoveryClaimState {
 export interface WorktreeRecoveryAuthorityRecord {
 	schemaVersion: 2;
 	authorityDigest: string;
+	/** Digest algorithm version; absent only on legacy v2 records. */
+	authorityDigestVersion?: typeof CURRENT_AUTHORITY_DIGEST_VERSION;
 	immutable: WorktreeRecoveryImmutableIdentity;
 	status: WorktreeRecoveryStatus;
 	claim?: WorktreeRecoveryClaimState;
@@ -438,6 +446,38 @@ function digestAuthorityIdentity(
 			sourceHeadOid: input.sourceHeadOid,
 			targetHeadOid: input.targetHeadOid,
 			strategy: input.strategy,
+			resultTree: input.resultTree ?? null,
+			changedPaths: input.changedPaths ?? [],
+			declaredConflictFiles: input.declaredConflictFiles ?? [],
+		}),
+	);
+}
+
+/**
+ * Digest projection used by pre-v2 persisted records.  It deliberately stays
+ * separate from the current projection so accepting a legacy non-squash
+ * record can never accidentally bless a squash record whose artifact fields
+ * were not covered by its original digest.
+ */
+function digestLegacyAuthorityIdentity(
+	input: WorktreeRecoveryImmutableIdentityInput,
+): string {
+	return sha256(
+		stableStringify({
+			originalCallID: input.originalCallID,
+			parentSessionId: input.parentSessionId,
+			taskId: input.taskId,
+			reservationId: input.reservationId,
+			generation: input.generation,
+			canonicalBranch: input.canonicalBranch,
+			canonicalPath: input.canonicalPath,
+			laneBranch: input.laneBranch,
+			lanePath: input.lanePath,
+			expectedPrimaryHead: input.expectedPrimaryHead,
+			sourceBaseOid: input.sourceBaseOid,
+			sourceHeadOid: input.sourceHeadOid,
+			targetHeadOid: input.targetHeadOid,
+			strategy: input.strategy,
 			declaredConflictFiles: input.declaredConflictFiles ?? [],
 		}),
 	);
@@ -570,11 +610,21 @@ function isAuthority(value: unknown): value is WorktreeRecoveryAuthorityRecord {
 		candidate.status === 'claimed' ||
 		candidate.status === 'released' ||
 		candidate.status === 'finalized';
+	const immutable = candidate.immutable as WorktreeRecoveryImmutableIdentity;
+	const currentDigest =
+		candidate.authorityDigestVersion === CURRENT_AUTHORITY_DIGEST_VERSION &&
+		candidate.authorityDigest === digestAuthorityIdentity(immutable);
+	// A legacy v2 record is accepted only when it is not a squash authority.
+	// Legacy squash records are rejected because their resultTree/changedPaths
+	// were not covered by the old digest and therefore cannot be trusted.
+	const legacyDigest =
+		candidate.authorityDigestVersion === undefined &&
+		immutable.strategy !== 'squash' &&
+		candidate.authorityDigest === digestLegacyAuthorityIdentity(immutable);
 	return (
 		candidate.schemaVersion === 2 &&
 		nonEmpty(candidate.authorityDigest) &&
-		candidate.authorityDigest ===
-			digestAuthorityIdentity(candidate.immutable) &&
+		(currentDigest || legacyDigest) &&
 		validStatus &&
 		(candidate.claim === undefined || isClaimState(candidate.claim)) &&
 		(claimCursor === undefined ||
@@ -936,6 +986,7 @@ function publishWorktreeRecoveryAuthorityUnlocked(
 	const authority: WorktreeRecoveryAuthorityRecord = {
 		schemaVersion: 2,
 		authorityDigest,
+		authorityDigestVersion: CURRENT_AUTHORITY_DIGEST_VERSION,
 		immutable,
 		status: 'preserved',
 	};

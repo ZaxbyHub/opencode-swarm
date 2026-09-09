@@ -3416,7 +3416,7 @@ export async function finishStandardWorktreeDispatch(
 		if ('failed' in mergeResult) {
 			const oversizedSquash =
 				dispatch.mergeStrategy === 'squash' &&
-				mergeResult.message.startsWith('squash-apply-failed:');
+				mergeResult.failureKind === 'squash-apply-failed';
 			const publishFailure = oversizedSquash
 				? undefined
 				: await publishRecoveryAuthority(mergeResult.provenance);

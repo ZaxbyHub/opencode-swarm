@@ -49,6 +49,8 @@ import type { MergeStrategy } from './types';
  */
 export const _internals: {
 	bunSpawn: typeof bunSpawn;
+	/** Test seam for synchronous Git ref reads/deletes used by cleanup. */
+	spawnSync: typeof childProcess.spawnSync;
 	/** Test seam for process.platform — allows non-Windows CIs to exercise Windows paths. */
 	platform: string;
 	/** Test seam for sleep — allows tests to skip real delays. */
@@ -75,6 +77,7 @@ export const _internals: {
 	parseNulDelimitedPaths: typeof parseNulDelimitedPaths;
 } = {
 	bunSpawn,
+	spawnSync: childProcess.spawnSync,
 	platform: process.platform,
 	sleep: (ms: number) =>
 		new Promise<void>((resolve) => setTimeout(resolve, ms)),
@@ -288,6 +291,7 @@ export interface MergeConflict {
 
 export interface MergeFailure {
 	error: string;
+	failureKind?: 'squash-apply-failed';
 	resultTree?: string;
 	changedPaths?: string[];
 }
@@ -341,6 +345,7 @@ export interface DirtyMergeFailure {
 	failed: true;
 	stage: string;
 	message: string;
+	failureKind?: MergeFailure['failureKind'];
 	provenance?: MergeOperationProvenance;
 }
 
@@ -1056,6 +1061,7 @@ async function mergeLaneBranchSquash(
 	} catch (error) {
 		return {
 			error: `squash-apply-failed: ${String(error)}`,
+			failureKind: 'squash-apply-failed',
 			resultTree,
 			changedPaths,
 		};
@@ -1491,8 +1497,7 @@ export async function reconcileLandedMerge(
 				(pathName) =>
 					typeof pathName !== 'string' ||
 					pathName.length === 0 ||
-					pathName.includes('\0') ||
-					pathName.startsWith('-'),
+					pathName.includes('\0'),
 			)
 		) {
 			return {
@@ -1516,6 +1521,7 @@ export async function reconcileLandedMerge(
 		if (provenance.changedPaths.length > 0) {
 			const cached = await runGit(
 				[
+					'--literal-pathspecs',
 					'diff',
 					'--cached',
 					'--quiet',
@@ -1539,6 +1545,7 @@ export async function reconcileLandedMerge(
 			return { landed: true, method: 'squash-worktree-tree' };
 		}
 		const args = [
+			'--literal-pathspecs',
 			'diff',
 			'--quiet',
 			provenance.resultTree,
@@ -2250,6 +2257,9 @@ export async function attemptMergeBackFromDirty(
 			failed: true,
 			stage: 'merge',
 			message: mergeResult.error,
+			...(mergeResult.failureKind
+				? { failureKind: mergeResult.failureKind }
+				: {}),
 			...(provenance ? { provenance } : {}),
 		};
 	}
@@ -2296,7 +2306,7 @@ function readBranchTipSync(
 	directory: string,
 	branchName: string,
 ): string | undefined {
-	const result = childProcess.spawnSync(
+	const result = _internals.spawnSync(
 		_internals.resolveGitExecutable(),
 		[
 			'-C',
@@ -2336,7 +2346,7 @@ function deleteBranchIfTipSync(
 	branchName: string,
 	branchTipSha: string,
 ): boolean {
-	const result = childProcess.spawnSync(
+	const result = _internals.spawnSync(
 		_internals.resolveGitExecutable(),
 		[
 			'-C',
@@ -2385,6 +2395,7 @@ async function squashArtifactMatchesPrimaryHead(
 	}
 	const comparison = await runGit(
 		[
+			'--literal-pathspecs',
 			'diff',
 			'--quiet',
 			immutable.resultTree,
@@ -2524,7 +2535,10 @@ export async function cleanupOrphanedBranches(
 	}
 	const retainedAuthorityBranches = new Set(
 		authorityScan.authorities
-			.filter((authority) => authority.status === 'preserved')
+			.filter(
+				(authority) =>
+					authority.status === 'preserved' || authority.status === 'claimed',
+			)
 			.map((authority) => authority.immutable.laneBranch),
 	);
 	const branches = await listLaneBranches(directory);

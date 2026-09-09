@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import type { ConfirmedGitAlignment } from '../../../src/git/branch.js';
 import {
 	_internals,
+	confirmedGitAlignmentDigestProjection,
 	resetToMainAfterMerge,
 	resetToRemoteBranch,
 } from '../../../src/git/branch.js';
@@ -41,6 +42,7 @@ function installGitDouble(
 	options: {
 		advanceTargetAfterFetch?: boolean;
 		movedCandidateAfterFetch?: boolean;
+		landedArtifact?: boolean;
 	} = {},
 ): string[][] {
 	const calls: string[][] = [];
@@ -85,6 +87,13 @@ function installGitDouble(
 		}
 		if (subcommand === 'merge-base') {
 			return { status: 0, stdout: '', stderr: '' } as never;
+		}
+		if (subcommand === 'diff') {
+			return {
+				status: options.landedArtifact === false ? 1 : 0,
+				stdout: '',
+				stderr: '',
+			} as never;
 		}
 		return { status: 0, stdout: '', stderr: '' } as never;
 	}) as typeof _internals.spawnSync;
@@ -149,12 +158,26 @@ describe('confirmed Git alignment', () => {
 		const calls = installGitDouble();
 		const result = await resetToMainAfterMerge(cwd, {
 			confirmedPlan: plan(),
+			pruneBranches: true,
 		});
 
 		expect(result.success).toBe(true);
 		expect(result.branchDeleted).toBe(true);
 		expect(calls).toContainEqual(['reset', '--hard', 'target-old']);
 		expect(calls).toContainEqual(['branch', '-d', '--', 'feature']);
+	});
+
+	test('confirmed alignment does not prune without explicit opt-in', async () => {
+		const calls = installGitDouble();
+		const result = await resetToMainAfterMerge(cwd, {
+			confirmedPlan: plan(),
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.branchDeleted).toBe(false);
+		expect(calls.some((args) => args[0] === 'branch' && args[1] === '-d')).toBe(
+			false,
+		);
 	});
 
 	test('moved frozen candidates and newly discovered branches are not deleted', async () => {
@@ -187,6 +210,8 @@ describe('confirmed Git alignment', () => {
 					authorityDigest: 'authority-digest',
 					branchName: 'lane/review',
 					branchTipSha: 'lane-tip',
+					resultTree: 'result-tree',
+					changedPaths: Object.freeze(['artifact.txt']),
 				}),
 			]),
 		});
@@ -206,5 +231,54 @@ describe('confirmed Git alignment', () => {
 		expect(calls.some((args) => args[0] === 'branch' && args[1] === '-d')).toBe(
 			false,
 		);
+	});
+
+	test('retained divergent candidates stay when the landed-artifact fence fails', async () => {
+		const calls = installGitDouble({ landedArtifact: false });
+		const retainedPlan: ConfirmedGitAlignment = Object.freeze({
+			...plan(),
+			branchCandidates: Object.freeze([
+				Object.freeze({
+					name: 'lane/review',
+					tipSha: 'lane-tip',
+					reason: 'retained squash recovery branch',
+				}),
+			]),
+			retainedRecoveryAuthorities: Object.freeze([
+				Object.freeze({
+					authorityDigest: 'authority-digest',
+					branchName: 'lane/review',
+					branchTipSha: 'lane-tip',
+					resultTree: 'result-tree',
+					changedPaths: Object.freeze(['artifact.txt']),
+				}),
+			]),
+		});
+
+		const result = await resetToMainAfterMerge(cwd, {
+			confirmedPlan: retainedPlan,
+			pruneBranches: true,
+		});
+
+		expect(result.success).toBe(true);
+		expect(result.prunedBranches).toEqual([]);
+		expect(result.warnings).toContain(
+			'Could not verify landed squash artifact: lane/review',
+		);
+		expect(calls.some((args) => args[0] === 'update-ref')).toBe(false);
+	});
+
+	test('alignment digest projection follows the confirmed plan shape', () => {
+		const confirmed = plan();
+		expect(confirmedGitAlignmentDigestProjection(confirmed)).toEqual({
+			defaultBranch: 'main',
+			targetRef: 'origin/main',
+			targetSha: 'target-old',
+			targetAvailable: true,
+			currentBranch: 'feature',
+			currentHeadSha: 'feature-head',
+			branchCandidates: confirmed.branchCandidates,
+		});
+		expect(confirmedGitAlignmentDigestProjection()).toBeNull();
 	});
 });

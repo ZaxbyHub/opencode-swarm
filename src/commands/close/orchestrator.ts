@@ -4,7 +4,10 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { KnowledgeConfigSchema } from '../../config/schema';
 import { isFullAutoRunActive } from '../../full-auto/state.js';
-import type { ConfirmedGitAlignment } from '../../git/branch.js';
+import {
+	type ConfirmedGitAlignment,
+	confirmedGitAlignmentDigestProjection,
+} from '../../git/branch.js';
 import { validateSwarmPath } from '../../hooks/utils';
 import { tryAcquireLock } from '../../parallel/file-locks.js';
 import { peekPlanFromLedger } from '../../plan/ledger.js';
@@ -277,22 +280,7 @@ function closeInventoryDigest(candidates: PurgeCandidate[]): string {
 
 function closeAlignmentPlanDigest(plan?: ConfirmedGitAlignment): string {
 	return createHash('sha256')
-		.update(
-			JSON.stringify(
-				plan
-					? {
-							defaultBranch: plan.defaultBranch,
-							targetRef: plan.targetRef,
-							targetSha: plan.targetSha,
-							targetAvailable: plan.targetAvailable,
-							currentBranch: plan.currentBranch,
-							currentHeadSha: plan.currentHeadSha,
-							branchCandidates: plan.branchCandidates,
-							retainedRecoveryAuthorities: plan.retainedRecoveryAuthorities,
-						}
-					: null,
-			),
-		)
+		.update(JSON.stringify(confirmedGitAlignmentDigestProjection(plan)))
 		.digest('hex');
 }
 

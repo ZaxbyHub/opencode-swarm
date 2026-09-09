@@ -128,4 +128,27 @@ describe('squash recovery authority provenance validation', () => {
 		expect(removed.ok).toBe(false);
 		expect(deleteCalls).toBe(0);
 	});
+
+	test('rejects persisted squash provenance tampering', () => {
+		const published = publishWith(fixture.dir, {
+			resultTree: 'e'.repeat(40),
+			changedPaths: ['result.txt'],
+		});
+		expect(published).toMatchObject({ ok: true });
+		if (!published.ok) throw new Error(published.code);
+
+		const storePath = _internals.getRecoveryStorePath(fixture.dir);
+		const store = JSON.parse(fs.readFileSync(storePath, 'utf8')) as {
+			authorities: Array<{
+				immutable: { resultTree?: string; changedPaths?: string[] };
+			}>;
+		};
+		store.authorities[0]!.immutable.resultTree = 'f'.repeat(40);
+		store.authorities[0]!.immutable.changedPaths = ['tampered.txt'];
+		fs.writeFileSync(storePath, JSON.stringify(store), 'utf8');
+
+		expect(
+			scanWorktreeRecoveryAuthoritiesForRecovery(fixture.dir),
+		).toMatchObject({ status: 'uncertain' });
+	});
 });

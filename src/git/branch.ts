@@ -584,6 +584,25 @@ export interface ConfirmedGitAlignment {
 	>;
 }
 
+/** Stable projection used to bind a confirmed alignment plan to close. */
+export function confirmedGitAlignmentDigestProjection(
+	plan?: ConfirmedGitAlignment,
+): Record<string, unknown> | null {
+	if (!plan) return null;
+	return {
+		defaultBranch: plan.defaultBranch,
+		targetRef: plan.targetRef,
+		targetSha: plan.targetSha,
+		targetAvailable: plan.targetAvailable,
+		currentBranch: plan.currentBranch,
+		currentHeadSha: plan.currentHeadSha,
+		branchCandidates: plan.branchCandidates,
+		...(plan.retainedRecoveryAuthorities
+			? { retainedRecoveryAuthorities: plan.retainedRecoveryAuthorities }
+			: {}),
+	};
+}
+
 type AlignmentOptions = {
 	pruneBranches?: boolean;
 	confirmedPlan?: ConfirmedGitAlignment;
@@ -616,6 +635,43 @@ function confirmedIdentityError(
 	}
 }
 
+function retainedSquashArtifactLanded(
+	cwd: string,
+	plan: ConfirmedGitAlignment,
+	retainedRecovery: NonNullable<
+		ConfirmedGitAlignment['retainedRecoveryAuthorities']
+	>[number],
+): boolean {
+	if (
+		!retainedRecovery.resultTree ||
+		retainedRecovery.changedPaths === undefined
+	) {
+		return false;
+	}
+	try {
+		if (retainedRecovery.changedPaths.length === 0) {
+			return (
+				_internals.gitExec(['rev-parse', 'HEAD'], cwd).trim() === plan.targetSha
+			);
+		}
+		_internals.gitExec(
+			[
+				'diff',
+				'--quiet',
+				'--literal-pathspecs',
+				retainedRecovery.resultTree,
+				'HEAD',
+				'--',
+				...retainedRecovery.changedPaths,
+			],
+			cwd,
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function deleteConfirmedBranchCandidates(
 	cwd: string,
 	plan: ConfirmedGitAlignment,
@@ -637,7 +693,7 @@ function deleteConfirmedBranchCandidates(
 				.gitExec(['rev-parse', `refs/heads/${candidate.name}`], cwd)
 				.trim();
 			if (currentTip !== candidate.tipSha) continue;
-			const retainedRecovery = plan.retainedRecoveryAuthorities?.some(
+			const retainedRecovery = plan.retainedRecoveryAuthorities?.find(
 				(authority) =>
 					authority.authorityDigest.length > 0 &&
 					authority.branchName === candidate.name &&
@@ -657,6 +713,12 @@ function deleteConfirmedBranchCandidates(
 				}
 			}
 			if (retainedRecovery) {
+				if (!retainedSquashArtifactLanded(cwd, plan, retainedRecovery)) {
+					warnings.push(
+						`Could not verify landed squash artifact: ${candidate.name}`,
+					);
+					continue;
+				}
 				// Retained squash branches may be divergent by design. Delete only
 				// the exact frozen name+tip pair; update-ref's expected old OID is
 				// the compare-and-delete boundary against a concurrent ref move.
@@ -1340,7 +1402,7 @@ export async function resetToMainAfterMerge(
 		// Only delete if the branch was merged into the default branch.
 		let branchDeleted = false;
 		let confirmedPrunedBranches: string[] = [];
-		if (confirmedPlan) {
+		if (confirmedPlan && options?.pruneBranches) {
 			const confirmedPruning = deleteConfirmedBranchCandidates(
 				cwd,
 				confirmedPlan,

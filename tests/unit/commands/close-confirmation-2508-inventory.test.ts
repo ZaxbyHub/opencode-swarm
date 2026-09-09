@@ -9,8 +9,14 @@ import {
 	COMMAND_REGISTRY,
 	_internals as registryInternals,
 } from '../../../src/commands/registry.js';
-import { _internals as gitInternals } from '../../../src/git/branch.js';
-import { publishWorktreeRecoveryAuthority } from '../../../src/hooks/delegation-gate/worktree-recovery-authority.js';
+import {
+	type ConfirmedGitAlignment,
+	_internals as gitInternals,
+} from '../../../src/git/branch.js';
+import {
+	publishWorktreeRecoveryAuthority,
+	scanWorktreeRecoveryAuthoritiesForRecovery,
+} from '../../../src/hooks/delegation-gate/worktree-recovery-authority.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -342,6 +348,86 @@ describe('close confirmation inventory and retained recovery (#2508)', () => {
 				).authorities,
 			).toHaveLength(1);
 		});
+	});
+
+	test('confirmed close preserves retained recovery authority until explicit pruning', async () => {
+		const authority = publishRetainedAuthority(directory);
+		const alignmentPlan: ConfirmedGitAlignment = Object.freeze({
+			defaultBranch: 'main',
+			targetRef: 'origin/main',
+			targetSha: 'target-head',
+			targetAvailable: true,
+			currentBranch: 'feature',
+			currentHeadSha: 'feature-head',
+			branchCandidates: Object.freeze([
+				Object.freeze({
+					name: 'lane/review',
+					tipSha: 'lane-tip',
+					reason: 'retained squash recovery branch',
+				}),
+			]),
+			retainedRecoveryAuthorities: Object.freeze([
+				Object.freeze({
+					authorityDigest: authority.authorityDigest,
+					branchName: 'lane/review',
+					branchTipSha: 'lane-tip',
+					resultTree: authority.resultTree,
+					changedPaths: authority.changedPaths,
+				}),
+			]),
+		});
+		closeInternals.getGitRepositoryStatus = () => ({ isRepo: true });
+		closeInternals.getGitDestructiveInventory = () => ({
+			paths: [],
+			branchLabels: ['lane/review'],
+			branchFingerprints: [
+				'lane/review\0lane-tip\0retained squash recovery branch',
+			],
+			headLabels: ['feature:feature-head->origin/main:target-head'],
+			alignmentPlan,
+		});
+		const calls = { finalize: 0, archive: 0, clean: 0, align: 0 };
+		installPipelineSpies(calls);
+		closeInternals.runAlignStage = realRunAlignStage;
+		closeInternals.resetToMainAfterMerge = async (_cwd, options) => ({
+			success: true,
+			targetBranch: 'origin/main',
+			previousBranch: 'feature',
+			message: 'alignment stub',
+			branchDeleted: false,
+			prunedBranches: options?.pruneBranches ? ['lane/review'] : [],
+			changesDiscarded: false,
+			warnings: [],
+		});
+
+		const preservePreview = await handleCloseCommand(directory, []);
+		const preserveToken = tokenFromPreview(preservePreview);
+		const preserved = await handleCloseCommand(directory, [
+			`--confirm=${preserveToken}`,
+		]);
+		expect(preserved).toContain('Swarm finalized');
+		expect(scanWorktreeRecoveryAuthoritiesForRecovery(directory)).toMatchObject(
+			{ status: 'ok', authorities: [expect.anything()] },
+		);
+
+		const prunePreview = await handleCloseCommand(directory, [
+			'--prune-branches',
+		]);
+		const pruneToken = tokenFromPreview(prunePreview);
+		gitInternals.gitExec = (args) => {
+			if (args[0] === 'rev-parse' && args[1] === 'refs/heads/lane/review') {
+				throw new Error('branch deleted by confirmed alignment');
+			}
+			return '';
+		};
+		const pruned = await handleCloseCommand(directory, [
+			'--prune-branches',
+			`--confirm=${pruneToken}`,
+		]);
+		expect(pruned).toContain('Swarm finalized');
+		expect(scanWorktreeRecoveryAuthoritiesForRecovery(directory)).toMatchObject(
+			{ status: 'ok', authorities: [] },
+		);
 	});
 
 	test('deprecated close resolves to the exact finalize handler', () => {
