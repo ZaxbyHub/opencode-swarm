@@ -23,7 +23,8 @@ visible and preventing it from being silently converted into approval.
 Migration: none. Existing findings artifacts remain readable; optional
 structured `confidence` and `provenance` metadata is retained when supplied.
 New route receipts use encoded identity segments in filenames (with a bounded
-SHA-256 component for unusually long identities); receipts are rewritten on
+SHA-256 component for unusually long identities and a deterministic pair hash
+when the complete basename would exceed 255 bytes); receipts are rewritten on
 the next dispatch and no manual migration is required.
 
 Known caveat: `NEEDS_MORE_EVIDENCE` remains nonterminal and therefore cannot be

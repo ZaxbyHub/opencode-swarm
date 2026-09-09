@@ -115,7 +115,9 @@ const isPrReviewRouteReceipt: PruneEntryFilter = (name, stat) =>
 	// Include the pre-encoding sanitized grammar's hyphens so stale receipts
 	// from an older plugin are reclaimed too; the directory is already a
 	// dedicated containment boundary and only JSON key-shaped files qualify.
-	stat.isFile() && /^[A-Za-z0-9_.~=-]+--[A-Za-z0-9_.~=-]+\.json$/.test(name);
+	stat.isFile() &&
+	(/^[A-Za-z0-9_.~=-]+--[A-Za-z0-9_.~=-]+\.json$/.test(name) ||
+		/^sha256_[a-f0-9]{64}\.json$/.test(name));
 
 function familiesFor(swarmRoot: string, now: number): Family[] {
 	const age = (days: number) => days * DAY_MS;

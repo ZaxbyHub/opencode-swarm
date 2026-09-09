@@ -251,8 +251,9 @@ function routeReceiptRelativePath(sessionId: string, taskId: string): string {
 	// Encode each identity into an alphabet that cannot contain the `--`
 	// separator. The previous sanitization preserved hyphens, so pairs such as
 	// (a--b, c) and (a, b--c) addressed the same receipt path.
-	const encodeIdentity = (value: string, label: string): string => {
-		const normalized = normalizedIdentity(value, label);
+	const normalizedSessionId = normalizedIdentity(sessionId, 'sessionId');
+	const normalizedTaskId = normalizedIdentity(taskId, 'taskId');
+	const encodeIdentity = (normalized: string): string => {
 		const encoded = Buffer.from(normalized, 'utf8')
 			.toString('base64url')
 			.replace(/-/g, '~');
@@ -262,13 +263,22 @@ function routeReceiptRelativePath(sessionId: string, taskId: string): string {
 			? encoded
 			: `sha256_${createHash('sha256').update(normalized, 'utf8').digest('hex')}`;
 	};
-	const safeSession = encodeIdentity(sessionId, 'sessionId');
-	const safeTask = encodeIdentity(taskId, 'taskId');
-	return path.join(
-		'pr-review',
-		'route-receipts',
-		`${safeSession}--${safeTask}.json`,
-	);
+	const safeSession = encodeIdentity(normalizedSessionId);
+	const safeTask = encodeIdentity(normalizedTaskId);
+	const basename = `${safeSession}--${safeTask}.json`;
+	// Bound the complete directory entry, not only each component. Two valid
+	// 135-byte identities otherwise create a 367-byte basename on common
+	// filesystems. Hash the identity tuple deterministically when needed.
+	const boundedBasename =
+		Buffer.byteLength(basename, 'utf8') <= 255
+			? basename
+			: `sha256_${createHash('sha256')
+					.update(
+						JSON.stringify([normalizedSessionId, normalizedTaskId]),
+						'utf8',
+					)
+					.digest('hex')}.json`;
+	return path.join('pr-review', 'route-receipts', boundedBasename);
 }
 
 function routeReceiptPath(

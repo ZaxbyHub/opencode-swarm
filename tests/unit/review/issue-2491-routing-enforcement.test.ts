@@ -240,6 +240,37 @@ describe('issue #2491 — route receipt and Stage-B enforcement (AC2–AC3)', ()
 		}
 	});
 
+	test('bounds the complete Stage-B receipt filename and keeps long identity pairs distinct', () => {
+		const projectRoot = canonicalMkdtemp('issue-2491-route-long-pair-');
+		try {
+			// Previously each component was bounded independently, allowing two
+			// valid 135-byte identities to produce a 367-byte basename.
+			const sessionId = 's'.repeat(135);
+			const firstTaskId = 't'.repeat(135);
+			const secondTaskId = 'u'.repeat(135);
+			const firstPath = routeReceiptPathForTask(
+				projectRoot,
+				sessionId,
+				firstTaskId,
+			);
+			const secondPath = routeReceiptPathForTask(
+				projectRoot,
+				sessionId,
+				secondTaskId,
+			);
+
+			expect(
+				Buffer.byteLength(basename(firstPath), 'utf8'),
+			).toBeLessThanOrEqual(255);
+			expect(
+				Buffer.byteLength(basename(secondPath), 'utf8'),
+			).toBeLessThanOrEqual(255);
+			expect(firstPath).not.toBe(secondPath);
+		} finally {
+			void rm(projectRoot, { recursive: true, force: true });
+		}
+	});
+
 	test('rejects a project-scoped app-data fallback for the route MAC key (FB-028)', async () => {
 		const projectRoot = canonicalMkdtemp('issue-2491-route-key-scope-');
 		const envKey =

@@ -124,6 +124,37 @@ describe('sweep keep-newest width (review FB-6)', () => {
 		expect(existsSync(fresh)).toBe(true);
 		expect(existsSync(receiptsDir)).toBe(true);
 	});
+
+	it('prunes stale hash-form pair receipts independently from fresh ones', async () => {
+		// Previously the retention allow-list only matched the encoded
+		// `session--task.json` grammar, so complete-basename fallbacks named
+		// `sha256_<pair-hex>.json` were never eligible for age pruning.
+		const root = makeRoot('route-receipts-hash-pair');
+		const receiptsDir = path.join(
+			root,
+			'.swarm',
+			'pr-review',
+			'route-receipts',
+		);
+		mkdirSync(receiptsDir, { recursive: true });
+		const stale = path.join(receiptsDir, `sha256_${'a'.repeat(64)}.json`);
+		const fresh = path.join(receiptsDir, `sha256_${'b'.repeat(64)}.json`);
+		writeFileSync(stale, '{}');
+		writeFileSync(fresh, '{}');
+		utimesSync(
+			stale,
+			new Date(NOW - 40 * 24 * 60 * 60 * 1000),
+			new Date(NOW - 40 * 24 * 60 * 60 * 1000),
+		);
+		utimesSync(fresh, new Date(NOW), new Date(NOW));
+
+		const result = await runRetentionSweep(root, { now: NOW });
+
+		expect(result.pruned['pr-review-route-receipts']).toBe(1);
+		expect(existsSync(stale)).toBe(false);
+		expect(existsSync(fresh)).toBe(true);
+		expect(existsSync(receiptsDir)).toBe(true);
+	});
 });
 
 describe('capsule listing cap width (review FB-18)', () => {
