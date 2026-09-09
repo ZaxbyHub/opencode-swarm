@@ -8,7 +8,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	type ConfirmedGitAlignment,
@@ -20,6 +19,7 @@ import {
 	publishWorktreeRecoveryAuthority,
 	removeWorktreeRecoveryAuthority,
 } from '../../../src/hooks/delegation-gate/worktree-recovery-authority';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function runGit(cwd: string, args: string[]): void {
 	let lastResult: child_process.SpawnSyncReturns<string> | null = null;
@@ -68,9 +68,7 @@ describe('Git branch integration tests (real git)', () => {
 
 	beforeEach(() => {
 		// Create a real temp git directory
-		gitDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'git-repo-test-')),
-		);
+		gitDir = canonicalMkdtemp('git-repo-test-');
 		// Initialize it as a real git repo using real spawnSync
 		runGit(gitDir, ['init']);
 		// Configure git user for this repo (required for commits)
@@ -78,9 +76,7 @@ describe('Git branch integration tests (real git)', () => {
 		runGit(gitDir, ['config', 'user.name', 'Test User']);
 
 		// Create a real temp non-git directory
-		nonGitDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'non-git-dir-test-')),
-		);
+		nonGitDir = canonicalMkdtemp('non-git-dir-test-');
 	});
 
 	afterEach(() => {
@@ -122,9 +118,7 @@ describe('Git branch integration tests (real git)', () => {
 	});
 
 	test('confirmed divergent retained branch uses exact deletion and authority cleanup', async () => {
-		const remoteDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'git-remote-test-')),
-		);
+		const remoteDir = canonicalMkdtemp('git-remote-test-');
 		runGit(remoteDir, ['init', '--bare']);
 		runGit(gitDir, ['branch', '-M', 'main']);
 		runGit(gitDir, ['commit', '--allow-empty', '-m', 'main']);
@@ -212,9 +206,7 @@ describe('Git branch integration tests (real git)', () => {
 	});
 
 	test('confirmed retained tip mismatch preserves the divergent branch and authority', async () => {
-		const remoteDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'git-remote-mismatch-test-')),
-		);
+		const remoteDir = canonicalMkdtemp('git-remote-mismatch-test-');
 		runGit(remoteDir, ['init', '--bare']);
 		runGit(gitDir, ['branch', '-M', 'main']);
 		runGit(gitDir, ['commit', '--allow-empty', '-m', 'main']);

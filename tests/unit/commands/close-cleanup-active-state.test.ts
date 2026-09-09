@@ -15,12 +15,10 @@ import * as childProcess from 'node:child_process';
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readdirSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 import * as actualEvidenceManager from '../../../src/evidence/manager.js';
@@ -28,6 +26,7 @@ import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import * as actualState from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 const mockExecuteWriteRetro = mock(async () =>
@@ -42,7 +41,7 @@ const mockCurateAndStoreSwarm = mock(async () => {});
 const mockArchiveEvidence = mock(async () => {});
 const mockFlushPendingSnapshot = mock(async () => {});
 const mockCheckHivePromotions = mock(async () => ({
-	timestamp: new Date().toISOString(),
+	timestamp: '2026-01-01T00:00:00.000Z',
 	new_promotions: 0,
 	encounters_incremented: 0,
 	advancements: 0,
@@ -207,9 +206,7 @@ describe('active-state directory cleanup', () => {
 		closeInternals.curateAndStoreSwarm = mockCurateAndStoreSwarm;
 		closeInternals.checkHivePromotions = mockCheckHivePromotions;
 		closeInternals.runCuratorPostMortem = mockRunCuratorPostMortem;
-		testDir = mkdtempSync(
-			path.join(os.tmpdir(), 'close-cleanup-active-state-'),
-		);
+		testDir = canonicalMkdtemp('close-cleanup-active-state-');
 		mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
 		spawnSyncSpy = spyOn(childProcess, 'spawnSync').mockImplementation(
 			(...args) => {

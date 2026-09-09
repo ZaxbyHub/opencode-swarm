@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals as closeInternals,
@@ -12,6 +11,8 @@ import {
 } from '../../../src/commands/registry.js';
 import { _internals as gitInternals } from '../../../src/git/branch.js';
 import { publishWorktreeRecoveryAuthority } from '../../../src/hooks/delegation-gate/worktree-recovery-authority.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const realRunFinalizeStage = closeInternals.runFinalizeStage;
 const realRunArchiveStage = closeInternals.runArchiveStage;
@@ -33,9 +34,7 @@ const realGitExec = gitInternals.gitExec;
 const realDetectDefaultRemoteBranch = gitInternals.detectDefaultRemoteBranch;
 
 function tempProject(): string {
-	const directory = fs.mkdtempSync(
-		path.join(os.tmpdir(), 'close-confirm-2508-inventory-'),
-	);
+	const directory = canonicalMkdtemp('close-confirm-2508-inventory-');
 	fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 	fs.writeFileSync(
 		path.join(directory, '.swarm', 'plan.json'),
@@ -303,41 +302,46 @@ describe('close confirmation inventory and retained recovery (#2508)', () => {
 	});
 
 	test('retained-authority cleanup serializes behind the authority-store lock', () => {
-		const authority = publishRetainedAuthority(directory);
-		const lockPath = path.join(
-			directory,
-			'.swarm',
-			'locks',
-			'worktree-recovery-authority.lock',
-		);
-		fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-		fs.writeFileSync(
-			lockPath,
-			JSON.stringify({
-				nonce: 'held',
-				acquiredAt: Date.now(),
-				pid: process.pid,
-			}),
-		);
+		withFrozenClock(() => {
+			const authority = publishRetainedAuthority(directory);
+			const lockPath = path.join(
+				directory,
+				'.swarm',
+				'locks',
+				'worktree-recovery-authority.lock',
+			);
+			fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+			fs.writeFileSync(
+				lockPath,
+				JSON.stringify({
+					nonce: 'held',
+					acquiredAt: Date.now(),
+					pid: process.pid,
+				}),
+			);
 
-		const result = closeInternals.removeConfirmedRecoveryAuthority(directory, {
-			authorityDigest: authority.authorityDigest,
-			branchName: 'lane/review',
-			branchTipSha: 'lane-tip',
-		});
+			const result = closeInternals.removeConfirmedRecoveryAuthority(
+				directory,
+				{
+					authorityDigest: authority.authorityDigest,
+					branchName: 'lane/review',
+					branchTipSha: 'lane-tip',
+				},
+			);
 
-		expect(result).toEqual({
-			ok: false,
-			reason: 'recovery authority store is locked',
+			expect(result).toEqual({
+				ok: false,
+				reason: 'recovery authority store is locked',
+			});
+			expect(
+				JSON.parse(
+					fs.readFileSync(
+						path.join(directory, '.swarm', 'worktree-merge-recovery-v2.json'),
+						'utf8',
+					),
+				).authorities,
+			).toHaveLength(1);
 		});
-		expect(
-			JSON.parse(
-				fs.readFileSync(
-					path.join(directory, '.swarm', 'worktree-merge-recovery-v2.json'),
-					'utf8',
-				),
-			).authorities,
-		).toHaveLength(1);
 	});
 
 	test('deprecated close resolves to the exact finalize handler', () => {

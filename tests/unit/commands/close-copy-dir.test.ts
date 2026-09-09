@@ -3,19 +3,18 @@ import { describe, expect, test } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 import { copyDirRecursive } from '../../../src/commands/close/fs-helpers.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('copyDirRecursive (FR-015b)', () => {
 	test('copies a nested directory tree and returns the file count', async () => {
-		const tmp = mkdtempSync(path.join(os.tmpdir(), 'copydir-recursive-test-'));
+		const tmp = canonicalMkdtemp('copydir-recursive-test-');
 		try {
 			const src = path.join(tmp, 'src');
 			const dest = path.join(tmp, 'dest');

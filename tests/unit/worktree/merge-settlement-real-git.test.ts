@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	awaitingMergeByCallID,
@@ -14,6 +13,8 @@ import {
 	cleanupOrphanedBranches,
 	getMergeStrategy,
 } from '../../../src/worktree/merge';
+import { withFrozenClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const GIT_TIMEOUT_MS = 60_000;
 const GIT_MAX_BUFFER = 32 * 1024 * 1024;
@@ -43,7 +44,7 @@ function createFixture(): {
 	worktreePath: string;
 	dispatch: StandardWorktreeDispatch;
 } {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-squash-real-git-'));
+	const root = canonicalMkdtemp('swarm-squash-real-git-');
 	tempRoots.push(root);
 	git(root, 'init', '--initial-branch=main');
 	git(root, 'config', 'user.email', 'swarm-test@example.invalid');
@@ -83,7 +84,7 @@ function createFixture(): {
 		branch: branchName,
 		worktreePath,
 		mergeStrategy: 'squash',
-		queuedAt: Date.now(),
+		queuedAt: withFrozenClock(() => Date.now()),
 	});
 	return { root, worktreePath, dispatch };
 }

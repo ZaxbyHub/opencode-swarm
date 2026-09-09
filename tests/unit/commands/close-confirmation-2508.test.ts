@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals as closeInternals,
@@ -11,6 +10,7 @@ import {
 	_internals as registryInternals,
 } from '../../../src/commands/registry.js';
 import { _internals as gitInternals } from '../../../src/git/branch.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const realAcquireFinalizeLock = closeInternals.acquireFinalizeLock;
 const realRunFinalizeStage = closeInternals.runFinalizeStage;
@@ -39,9 +39,7 @@ const notGitRepository = () => ({
 });
 
 function tempProject(): string {
-	const directory = fs.mkdtempSync(
-		path.join(os.tmpdir(), 'close-confirm-2508-'),
-	);
+	const directory = canonicalMkdtemp('close-confirm-2508-');
 	fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 	fs.writeFileSync(
 		path.join(directory, '.swarm', 'plan.json'),
