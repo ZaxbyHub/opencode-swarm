@@ -77,6 +77,8 @@ You should see a health check report like:
 **Result**: ✅ All checks passed
 ```
 
+A full reference for every diagnostic check lives in [Configuration](configuration.md).
+
 If you see ❌ failures, fix them before proceeding. Also check:
 
 ```bash
