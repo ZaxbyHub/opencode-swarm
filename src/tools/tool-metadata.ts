@@ -892,7 +892,7 @@ export const TOOL_METADATA = {
 	},
 	dispatch_lanes_async: {
 		description:
-			'launch read-only advisory lanes non-blockingly and return a batch id plus lane session handles immediately so you can keep working; launch_timeout_ms is only a promptAsync acceptance budget, not a lane runtime timeout; poll incrementally with collect_lane_results (wait omitted or false) while doing independent investigation, or join with wait: true when you need all results',
+			'launch read-only advisory lanes non-blockingly and return a batch id plus lane session handles immediately; each lane agent must be a registered generated agent name (unregistered bare roles are refused on multi-swarm hosts); launch_timeout_ms is only a promptAsync acceptance budget, not a lane runtime timeout; poll incrementally with collect_lane_results (wait omitted), or join with wait: true for all results',
 		agents: ['architect'],
 	},
 	collect_lane_results: {
