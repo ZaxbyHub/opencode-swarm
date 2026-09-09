@@ -3,6 +3,16 @@ import pLimit from 'p-limit';
 import { z } from 'zod';
 import { getSwarmAgents } from '../agents/index.js';
 import {
+	type PrWorkflowPersistedStateBase,
+	readPrWorkflowGateStateFromDisk,
+} from '../pr-review/persistence.js';
+
+/** Gate-state shape the collect identity read needs (structural superset of base). */
+interface PrReviewCollectParentGateState
+	extends PrWorkflowPersistedStateBase,
+		PrReviewCollectParentStateSlice {}
+
+import {
 	CANDIDATE_FIELD_COUNT,
 	CANDIDATE_HEADERS,
 	CLEAN_FIELD_COUNT,
@@ -47,6 +57,7 @@ import {
 } from '../background/pr-review-collection-receipt.js';
 import {
 	buildPrReviewContractCard,
+	decodePrReviewWorkflowBinding,
 	encodePrReviewWorkflowBinding,
 	PrReviewLaneResultEnvelopeSchema,
 	prReviewLegacyTranscriptCompatibilityEnabled,
@@ -987,6 +998,7 @@ export const _internals: {
 
 export const _test_exports = {
 	validatePrReviewMicroDispatch,
+	resolveCollectExpectedWorkflowIdentity,
 	applyCommonPrompt,
 	applyExplorerFormatSuffix,
 	applyPrWorkflowPromptContract,
@@ -3105,6 +3117,57 @@ function safeDiagnosticCause(error: unknown): string {
 		: redacted;
 }
 
+/**
+ * Issue #2585 live-proof defect (found by AC11 case-01 against the real host,
+ * present byte-identically on main 3ea01cbc7): the collect-time discovery
+ * validation built its `expected` WITHOUT the workflow identity triple, so
+ * `validateExactStructuredReceiptCoverage` rejected EVERY child-submitted
+ * structured receipt with `missing live workflow instance/revision/base
+ * identity` — deterministic, prompt-insensitive, unrepairable from the
+ * orchestrator — and every base dimension settled as a contract failure
+ * (NO_COVERAGE → forced INCOMPLETE). The dispatch-side record carries the
+ * instance (jobId binding) and revision (workflowGeneration); the live gate
+ * state of the dispatching parent carries the merge-base. Derive the triple
+ * from those two authoritative sources instead of leaving it undefined.
+ *
+ * Pure: exported through `_test_exports` for the regression test. Returns
+ * undefined whenever any leg is missing — callers then keep the validator's
+ * explicit missing-identity rejection (today's behavior) rather than guessing.
+ */
+/** Minimal structural slice of the PR_REVIEW gate state the identity needs. */
+interface PrReviewCollectParentStateSlice {
+	mode?: string;
+	workflowInstanceId?: string;
+	prReviewBaseSha?: string;
+}
+
+export function resolveCollectExpectedWorkflowIdentity(
+	record: BackgroundDelegationRecord,
+	parentState: PrReviewCollectParentStateSlice | null,
+):
+	| { workflowInstanceId: string; workflowRevision: number; baseSha: string }
+	| undefined {
+	if (
+		record.mode !== 'swarm-pr-review:base' &&
+		record.mode !== 'swarm-pr-review:micro' &&
+		record.mode !== 'swarm-pr-review:council'
+	) {
+		return undefined;
+	}
+	const workflowInstanceId = decodePrReviewWorkflowBinding(record.jobId);
+	const workflowRevision = record.workflowGeneration;
+	if (!workflowInstanceId || workflowRevision === undefined) return undefined;
+	if (!parentState || parentState.mode !== 'PR_REVIEW') return undefined;
+	// Cross-check the record's instance against the LIVE gate: a record left
+	// over from an aborted-and-reactivated workflow (new instance id) must not
+	// settle against the new identity — the reducer's stale-generation
+	// protections own that class, and this guard keeps collect consistent.
+	if (parentState.workflowInstanceId !== workflowInstanceId) return undefined;
+	const baseSha = parentState.prReviewBaseSha;
+	if (!baseSha) return undefined;
+	return { workflowInstanceId, workflowRevision, baseSha };
+}
+
 async function settleCollectedLane(args: {
 	directory: string;
 	record: BackgroundDelegationRecord;
@@ -3256,6 +3319,29 @@ async function settleCollectedLane(args: {
 		const artifact = output.output_ref
 			? (readLaneOutput(directory, output.output_ref)?.artifact ?? null)
 			: null;
+		// Issue #2585 live-proof fix: supply the live workflow identity triple
+		// (see resolveCollectExpectedWorkflowIdentity) so an exact child-bound
+		// structured receipt can actually settle. Bounded, fail-open read: an
+		// unreadable gate leaves the identity undefined and the validator keeps
+		// its explicit missing-identity rejection instead of guessing.
+		let collectExpectedIdentity:
+			| ReturnType<typeof resolveCollectExpectedWorkflowIdentity>
+			| undefined;
+		if (record.parentSessionId?.trim()) {
+			try {
+				const parentState =
+					await readPrWorkflowGateStateFromDisk<PrReviewCollectParentGateState>(
+						directory,
+						record.parentSessionId.trim(),
+					);
+				collectExpectedIdentity = resolveCollectExpectedWorkflowIdentity(
+					record,
+					parentState,
+				);
+			} catch {
+				collectExpectedIdentity = undefined;
+			}
+		}
 		const validation = validatePrReviewDiscoveryLaneCompletion({
 			record,
 			result: prospectiveResult,
@@ -3268,6 +3354,7 @@ async function settleCollectedLane(args: {
 				gitHead: record.workspace?.gitHead ?? '',
 				revisionDigest: collectedRevisionDigest ?? '',
 				reviewScope: record.workspace?.scope ?? undefined,
+				...(collectExpectedIdentity ?? {}),
 			},
 		});
 		if (validation.ok && validation.salvaged?.length) {
