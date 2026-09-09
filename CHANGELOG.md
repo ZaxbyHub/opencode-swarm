@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.173.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.4...v7.173.0) (2026-09-09)
+
+
+### Features
+
+* **settlement:** merge safety and two-step destructive purge ([#2508](https://github.com/ZaxbyHub/opencode-swarm/issues/2508)) ([ed75450](https://github.com/ZaxbyHub/opencode-swarm/commit/ed754505d3d2ff23f9bfd0faf6adfdfb09a07ca7))
+
+
+### Bug Fixes
+
+* **guardrails:** keep mandatory lifecycle bookkeeping active and record every Stage A attribution route ([8fb7cb7](https://github.com/ZaxbyHub/opencode-swarm/commit/8fb7cb73a9025b21e6369c0c3ba63f4276256aba))
+* **guardrails:** restore fail-closed shell-write identity gate and factory config contract ([21416a7](https://github.com/ZaxbyHub/opencode-swarm/commit/21416a788527af1dac87b7f06a6a6b06bac76271))
+* **settlement:** worktree-match recovery reconciliation, citation re-anchors, digest hardening ([#2682](https://github.com/ZaxbyHub/opencode-swarm/issues/2682) review) ([bc4329c](https://github.com/ZaxbyHub/opencode-swarm/commit/bc4329c34a983d1a96244d8df6b98a151c8275b9))
+
 ## [7.172.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.3...v7.172.4) (2026-09-09)
 
 
