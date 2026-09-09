@@ -103,10 +103,7 @@ vi.mock('../../../src/plan/manager', () => ({
 		migration_status: 'migrated',
 		phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
 	}),
-	savePlan: vi.fn().mockResolvedValue({
-		durability: 'complete',
-		degraded_surfaces: [],
-	}),
+	savePlan: vi.fn().mockResolvedValue({ durability: 'complete' }),
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
 }));
@@ -172,11 +169,9 @@ vi.mock('../../../src/config/schema', () => ({
 // Imports AFTER vi.mock
 // -----------------------------------------------------------------------
 import { tryAcquireLock } from '../../../src/parallel/file-locks';
-import { savePlan } from '../../../src/plan/manager';
 import { ensureAgentSession } from '../../../src/state';
 
 const mockTryAcquireLock = tryAcquireLock as ReturnType<typeof vi.fn>;
-const mockSavePlan = savePlan as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Helper: write valid retro bundle
@@ -280,12 +275,6 @@ describe('phase_complete adversarial locking + path tests', () => {
 		session.lastPhaseCompleteTimestamp = 0;
 
 		vi.clearAllMocks();
-		// clearAllMocks resets the savePlan default-resolve; re-arm it with the
-		// PlanSaveDurability shape phase_complete reads back (#2531).
-		mockSavePlan.mockResolvedValue({
-			durability: 'complete',
-			degraded_surfaces: [],
-		});
 	});
 
 	afterEach(() => {
