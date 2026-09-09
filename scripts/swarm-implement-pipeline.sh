@@ -52,8 +52,15 @@ append_summary() {
 issue_number_from_ref() {
 	# Accepts a bare number, an issue URL, or owner/repo#N; prints the number.
 	case "$1" in
+		*'/issues/'*)
+			# Strip query strings/fragments from issue URLs before the numeric
+			# validation below; a URL fragment is not part of the issue number.
+			local issue_path="${1#*/issues/}"
+			issue_path="${issue_path%%\?*}"
+			issue_path="${issue_path%%\#*}"
+			printf '%s\n' "$issue_path"
+			;;
 		*'#'*) printf '%s\n' "$1" | sed 's/^.*#//' ;;
-		*'/issues/'*) printf '%s\n' "$1" | sed 's|.*/issues/||' ;;
 		*) printf '%s\n' "$1" ;;
 	esac
 }
@@ -183,7 +190,7 @@ if [ "$SWARM_CI_EXIT" -eq 0 ]; then
 		# Idempotent at the PR boundary too: a re-trigger against an issue
 		# whose PR already exists reuses it instead of failing a duplicate
 		# create (the C5 idempotency contract extended from branch to PR).
-		if gh pr view "$BRANCH" --json url > /dev/null 2>&1; then
+		if timeout "${PR_CHECK_TIMEOUT_SECONDS:-30}" gh pr view "$BRANCH" --json url > /dev/null 2>&1; then
 			printf '%s\n' "publish=existing" > "$EVIDENCE_DIR/publish-decision.txt"
 			exit 0
 		fi
