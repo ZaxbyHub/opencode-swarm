@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.172.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.3...v7.172.4) (2026-09-09)
+
+
+### Bug Fixes
+
+* **ci:** close PR feedback for advisory runtime hardening ([c449f1b](https://github.com/ZaxbyHub/opencode-swarm/commit/c449f1be5202bf874e561911ad8522d7cd5192b5))
+* **ci:** harden advisory runtime follow-ups ([a1472fa](https://github.com/ZaxbyHub/opencode-swarm/commit/a1472fac191a6b5d7e9c0bf60b10203c1a71209a))
+
 ## [7.172.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.2...v7.172.3) (2026-09-09)
 
 
