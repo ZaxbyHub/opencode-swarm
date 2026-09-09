@@ -26,7 +26,7 @@ Skips Stage B (reviewer + test_engineer) for low-risk tasks. The task still goes
 
 This list is enforced at `src/tools/update-task-status.ts:98-109`. You cannot turn it off.
 
-**When to use:** rapid iteration on non-critical code — UI tweaks, documentation, internal refactors.
+**When to use:** rapid iteration on non-critical code — UI tweaks, documentation, internal refactors. Turbo trades automated gate coverage for speed — the syntax, placeholder, and SAST checks are all skipped alongside Stage B.
 
 **Toggle:**
 
@@ -445,7 +445,7 @@ Lean Turbo is controlled via `/swarm turbo lean`:
 
 ### Evidence and Phase Reviewer/Critic Requirements
 
-Lane evidence is written to `.swarm/evidence/{phase}/lean-turbo/` per lane:
+Lane evidence is written to `.swarm/evidence/{phase}/lean-turbo/` per lane (one directory per phase under `.swarm/evidence/lean-turbo/`):
 - Each lane writes its own evidence file (`lane-{n}.json`)
 - Contains task IDs, assigned files, lane status, and completion state
 
