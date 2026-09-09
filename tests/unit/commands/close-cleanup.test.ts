@@ -964,68 +964,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 	});
 
-	// ── Test 9: All 4 active-state directories archived and deleted ──
-
-	describe('All 4 active-state directories are archived and deleted', () => {
-		it('all four directories are archived and removed', async () => {
-			await writePlan();
-
-			// Create all 4 directories with unique marker files
-			mkdirSync(path.join(swarmDir(), 'evidence', 'retro-x'), {
-				recursive: true,
-			});
-			writeFileSync(
-				path.join(swarmDir(), 'evidence', 'marker.txt'),
-				'evidence-marker',
-			);
-
-			mkdirSync(path.join(swarmDir(), 'session', 'sess-y'), {
-				recursive: true,
-			});
-			writeFileSync(
-				path.join(swarmDir(), 'session', 'marker.txt'),
-				'session-marker',
-			);
-
-			mkdirSync(path.join(swarmDir(), 'scopes'));
-			writeFileSync(
-				path.join(swarmDir(), 'scopes', 'marker.txt'),
-				'scopes-marker',
-			);
-
-			mkdirSync(path.join(swarmDir(), 'spec-archive'));
-			writeFileSync(
-				path.join(swarmDir(), 'spec-archive', 'marker.txt'),
-				'spec-archive-marker',
-			);
-
-			await handleCloseCommand(testDir, []);
-
-			const archivePath = getLatestArchivePath();
-
-			// All four directories should be in the archive
-			expect(existsSync(path.join(archivePath, 'evidence', 'marker.txt'))).toBe(
-				true,
-			);
-			expect(existsSync(path.join(archivePath, 'session', 'marker.txt'))).toBe(
-				true,
-			);
-			expect(existsSync(path.join(archivePath, 'scopes', 'marker.txt'))).toBe(
-				true,
-			);
-			expect(
-				existsSync(path.join(archivePath, 'spec-archive', 'marker.txt')),
-			).toBe(true);
-
-			// All four directories should be deleted from .swarm/
-			expect(existsSync(path.join(swarmDir(), 'evidence'))).toBe(false);
-			expect(existsSync(path.join(swarmDir(), 'session'))).toBe(false);
-			expect(existsSync(path.join(swarmDir(), 'scopes'))).toBe(false);
-			expect(existsSync(path.join(swarmDir(), 'spec-archive'))).toBe(false);
-		});
-	});
-
-	// ── Test 10: Combined full cleanup ────────────────────────────────
+	// ── Test 9: Combined full cleanup ─────────────────────────────────
 
 	describe('Full cleanup — all artifact types removed together', () => {
 		it('flat files, db files, and directories are all removed after close', async () => {

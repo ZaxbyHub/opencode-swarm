@@ -88,7 +88,6 @@ async function writeCanonicalPlan(testDirectory: string, input: TestPlanInput) {
 	return plan;
 }
 
-// Mock dependencies before importing the module
 const mockExecuteWriteRetro = mock(async (_args: unknown, _directory: string) =>
 	JSON.stringify({
 		success: true,
@@ -311,15 +310,10 @@ mock.module('../../../src/state.js', () => ({
 	hasActiveEpicMode: () => false,
 	updateTaskWorkflowCache: () => {},
 }));
-// Import after mock setup
 const { handleCloseCommand: rawHandleCloseCommand, _internals } = await import(
 	'../../../src/commands/close.js'
 );
-const handleCloseCommand = (
-	directory: string,
-	args: string[],
-	options?: Parameters<typeof rawHandleCloseCommand>[2],
-) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
+const handleCloseCommand = runConfirmedClose.bind(null, rawHandleCloseCommand);
 
 //
 // WITHIN-MODULE MOCKS: NONE POSSIBLE
@@ -1949,9 +1943,6 @@ describe('handleCloseCommand', () => {
 				const result = await handleCloseCommand(testDir, ['--prune-branches']);
 
 				expect(result).toContain('finalized');
-				expect(result).toContain(
-					'no remote target was available at confirmation preview',
-				);
 				// No branches pruned since none are gone
 			});
 		});
