@@ -181,6 +181,26 @@ describe('#2508 two-step destructive purge for /swarm close', () => {
 		);
 	});
 
+	test('dirty rename preview lists both sides of the porcelain rename', async () => {
+		const { root } = createCloseFixture('rename');
+		await initLedgerFor(root);
+		git(root, 'mv', 'a.txt', 'renamed.txt');
+
+		const out = await handleCloseCommand(root, [], {});
+
+		// #2508 review contract: both names are at risk during alignment, so
+		// both must be visible in the preview and bound into the token scope.
+		expect(out).toMatch(/Destructive close preview/i);
+		expect(out).toMatch(/2 uncommitted tracked change/);
+		expect(out).toMatch(/a\.txt/);
+		expect(out).toMatch(/renamed\.txt/);
+		// The preview remains side-effect-free for the user's rename.
+		expect(fs.existsSync(path.join(root, 'a.txt'))).toBe(false);
+		expect(fs.readFileSync(path.join(root, 'renamed.txt'), 'utf8')).toBe(
+			'base-a\n',
+		);
+	});
+
 	test('git status unreadable: close fails closed without destruction', async () => {
 		const { root } = createCloseFixture('failclosed');
 		await initLedgerFor(root);
