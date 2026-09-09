@@ -11161,16 +11161,11 @@ async function assertPrReviewTerminalReady(
 			ctx,
 			criticInventory,
 		);
-		if (
-			authoritativeCriticSettlements.every((settlement) => settlement.terminal)
-		) {
-			await assertPrReviewValidationSettled(
-				directory,
-				sessionID,
-				'critic',
-				ctx,
-			);
-		}
+		// Preserve the phase-level diagnostic for a declared critic batch whose
+		// attempted rows are still nonterminal (for example,
+		// NEEDS_MORE_EVIDENCE). The no-batch case above intentionally remains the
+		// distinct critic-coverage diagnostic.
+		await assertPrReviewValidationSettled(directory, sessionID, 'critic', ctx);
 		// Issue #2512: critic settlement is REDUCER-OWNED — the adapter derives
 		// valid settled receipts (UPHELD / DOWNGRADED / DISPROVED, each bound
 		// to the current authoritative reviewer row digest via
