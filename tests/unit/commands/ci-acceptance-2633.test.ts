@@ -10,7 +10,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
@@ -22,6 +21,9 @@ import {
 	isCommandFailure,
 } from '../../../src/commands/registry.js';
 import { DEFAULT_QA_GATES } from '../../../src/db/qa-gate-profile.js';
+import {
+	canonicalTmpDir as canonicalProjectTempRoot,
+} from '../../helpers/tmpdir.js';
 
 function makeContext(directory: string, args: string[] = []): CommandContext {
 	return {
@@ -91,7 +93,7 @@ describe('issue #2633 CLI acceptance checks', () => {
 
 		await expect(
 			handleCiCommand(
-				makeContext(path.resolve(os.tmpdir(), 'swarm-ci-ac4-over-limit'), [
+				makeContext(path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac4-over-limit'), [
 					'--timeout-ms',
 					String(DEFAULT_CI_DEADLINE_MS + 1),
 				]),
@@ -114,7 +116,7 @@ describe('issue #2633 CLI acceptance checks', () => {
 		};
 
 		await handleCiCommand(
-			makeContext(path.resolve(os.tmpdir(), 'swarm-ci-ac4-forward'), [
+			makeContext(path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac4-forward'), [
 				'--timeout-ms',
 				'1234.5',
 			]),
@@ -133,7 +135,7 @@ describe('issue #2633 CLI acceptance checks', () => {
 		});
 
 		const result = await handleCiCommand(
-			makeContext(path.resolve(os.tmpdir(), 'swarm-ci-ac6-json'), ['--json']),
+			makeContext(path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac6-json'), ['--json']),
 		);
 		expect(isCommandFailure(result)).toBe(true);
 		if (!isCommandFailure(result)) return;
@@ -164,7 +166,7 @@ describe('issue #2633 CLI acceptance checks', () => {
 
 	test('AC9: cancellation/deadline diagnostics do not echo the absolute evaluated path', async () => {
 		const directory = path.resolve(
-			os.tmpdir(),
+			canonicalProjectTempRoot(),
 			'swarm-ci-ac9-directory-with-sensitive-name',
 		);
 		_internals.runAdvisoryCiRuntime = async () => ({
@@ -315,7 +317,7 @@ if (red.length === 0) process.exit(1);
 	test('AC13: unknown flags retain the exact diagnostic contract', async () => {
 		await expect(
 			handleCiCommand(
-				makeContext(path.resolve(os.tmpdir(), 'swarm-ci-ac13'), ['--wat']),
+				makeContext(path.resolve(canonicalProjectTempRoot(), 'swarm-ci-ac13'), ['--wat']),
 			),
 		).rejects.toThrow('Unknown flag: --wat');
 	});
