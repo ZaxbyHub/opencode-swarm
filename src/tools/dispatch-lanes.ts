@@ -3549,6 +3549,35 @@ async function startAsyncLanePrompt(args: {
 			? args.lane.agent.slice(0, args.lane.agent.length - baseRole.length - 1)
 			: undefined;
 	const swarmAgents = getSwarmAgents(swarmID);
+	// Issue #2614 defense-in-depth: when the generated-name registry proves the
+	// lane agent is NOT registered (non-empty registry, no member match) and the
+	// swarm agent map has no resolvable entry or model, refuse instead of
+	// launching a lane the host cannot run. validateLaneAgent rejects this
+	// shape first on every launchAsyncLane path; this gate protects direct
+	// callers. The empty-registry (legacy/unconfigured) shape must NOT fire —
+	// bare-role launches without a swarm map are the documented legacy path.
+	const lanePrimaryModel = swarmAgents?.[baseRole]?.model;
+	const laneFallbackModels = swarmAgents?.[baseRole]?.fallback_models ?? [];
+	const registry = _internals.getGeneratedAgentNames();
+	const registryProvesUnregistered =
+		registry.length > 0 &&
+		!registry.some(
+			(name) => name.toLowerCase() === args.lane.agent.toLowerCase(),
+		);
+	if (
+		registryProvesUnregistered &&
+		!swarmAgents?.[baseRole] &&
+		!lanePrimaryModel &&
+		laneFallbackModels.length === 0
+	) {
+		await appendAsyncLaneLaunchError(
+			args.directory,
+			args.session,
+			args.sessionId,
+			`Lane "${args.lane.id}" agent "${args.lane.agent}" resolves no registered swarm agent and no model; refusing to launch a lane the host cannot run`,
+		);
+		return;
+	}
 	let promptResult: { data?: unknown; error?: unknown };
 	try {
 		const dispatched = await dispatchWithModelFallback({
@@ -4787,6 +4816,30 @@ function validateLaneAgent(
 			role,
 			error: `Agent role "${role}" is not allowed for read-only lane dispatch`,
 		};
+	}
+
+	// Issue #2614: a bare canonical role (e.g. "explorer") resolves as a known
+	// role before the generated-name registry is consulted, so on multi-swarm
+	// hosts that register only prefixed agents the lane would launch against an
+	// agent the host does not have. Refuse at dispatch time with the registered
+	// names so the caller can self-correct; never auto-prefix (ambiguous).
+	if (generatedAgentNames.length > 0) {
+		const normalized = agent.toLowerCase();
+		const registered = generatedAgentNames.find(
+			(name) => name.toLowerCase() === normalized,
+		);
+		if (!registered) {
+			const shown = generatedAgentNames.slice(0, 8).join(', ');
+			const overflow =
+				generatedAgentNames.length > 8
+					? `, and ${generatedAgentNames.length - 8} more`
+					: '';
+			return {
+				ok: false,
+				role,
+				error: `Agent "${agent}" is not registered on this host. Registered generated agent names: ${shown}${overflow}. Use a registered name (bare canonical roles are only valid when the host registers them).`,
+			};
+		}
 	}
 
 	const callerPrefix = context.callerAgent
