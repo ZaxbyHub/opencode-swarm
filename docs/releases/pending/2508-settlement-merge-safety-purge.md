@@ -24,3 +24,10 @@ Issue #2508 (Workstream G4): lane work must never silently overwrite user-modifi
 
 - The close preview is conditional (fires only when tracked uncommitted work would be destroyed) — a deliberate deviation from the issue's literal "first call returns a preview" following the #2527 escalate-only-on-destruction precedent. Untracked files never trigger it (alignment does not discard them); gitignored build artifacts removed by alignment's allowlisted clean pass are likewise not previewed.
 - `reset-session` behavior is unchanged (delivered by #2527); this change only closes the coverage gap on `/swarm close`.
+
+## Review closure
+
+The merged implementation also hardens the review surfaces around this flow: branch
+pruning remains explicitly opt-in, retained-lane cleanup is guarded by durable
+settlement evidence, and purge scope/digest checks remain fail-closed across
+restart and replay boundaries.
