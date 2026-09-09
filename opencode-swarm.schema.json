@@ -4253,12 +4253,13 @@
           ]
         },
         "merge_strategy": {
-          "default": "merge",
+          "default": "squash",
           "type": "string",
           "enum": [
             "merge",
             "rebase",
-            "cherry-pick"
+            "cherry-pick",
+            "squash"
           ]
         },
         "worktree_dir": {
@@ -4401,7 +4402,8 @@
                   "enum": [
                     "merge",
                     "rebase",
-                    "cherry-pick"
+                    "cherry-pick",
+                    "squash"
                   ]
                 },
                 "worktree_dir": {
@@ -4602,7 +4604,8 @@
                   "enum": [
                     "merge",
                     "rebase",
-                    "cherry-pick"
+                    "cherry-pick",
+                    "squash"
                   ]
                 },
                 "worktree_dir": {

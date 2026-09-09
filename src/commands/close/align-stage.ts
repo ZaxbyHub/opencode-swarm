@@ -15,6 +15,12 @@ export async function runAlignStage(
 	const pruneBranches = ctx.args.includes('--prune-branches');
 	let gitAlignResult = '';
 	const prunedBranches: string[] = [];
+	if (ctx.alignmentPlan && !ctx.alignmentPlan.targetAvailable) {
+		gitAlignResult =
+			'Git alignment skipped — no remote target was available at confirmation preview';
+		ctx.warnings.push(gitAlignResult);
+		return { gitAlignResult, prunedBranches };
+	}
 
 	const gitStatus = _internals.getGitRepositoryStatus(ctx.directory);
 	if (gitStatus.isRepo) {
@@ -23,10 +29,17 @@ export async function runAlignStage(
 			ctx.directory,
 			{
 				pruneBranches,
+				confirmedPlan: ctx.alignmentPlan,
 			},
 		);
 		if (aggressiveResult.success) {
 			gitAlignResult = aggressiveResult.message;
+			prunedBranches.push(
+				...(aggressiveResult.prunedBranches ??
+					(aggressiveResult.branchDeleted
+						? [aggressiveResult.previousBranch]
+						: [])),
+			);
 			for (const w of aggressiveResult.warnings) {
 				ctx.warnings.push(w);
 			}
@@ -39,6 +52,7 @@ export async function runAlignStage(
 			// Fallback to cautious reset (preserves uncommitted changes)
 			const alignResult = await _internals.resetToRemoteBranch(ctx.directory, {
 				pruneBranches,
+				confirmedPlan: ctx.alignmentPlan,
 			});
 			gitAlignResult = alignResult.message;
 			prunedBranches.push(...alignResult.prunedBranches);
@@ -51,6 +65,20 @@ export async function runAlignStage(
 			}
 			for (const w of alignResult.warnings) {
 				ctx.warnings.push(w);
+			}
+		}
+		for (const authority of ctx.alignmentPlan?.retainedRecoveryAuthorities ??
+			[]) {
+			if (!prunedBranches.includes(authority.branchName)) continue;
+			const removed = _internals.removeConfirmedRecoveryAuthority(
+				ctx.directory,
+				authority,
+			);
+			if (!removed.ok) {
+				ctx.warnings.push(
+					'Retained squash recovery authority preserved: ' +
+						(removed.reason ?? 'exact authority cleanup was not verified'),
+				);
 			}
 		}
 	} else if (gitStatus.reason === 'git_unavailable') {

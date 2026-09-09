@@ -10,14 +10,22 @@
  * @module merge-back
  */
 
+import * as childProcess from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+	removeWorktreeRecoveryAuthority,
+	scanWorktreeRecoveryAuthoritiesForRecovery,
+	type WorktreeRecoveryAuthorityRecord,
+} from '../hooks/delegation-gate/worktree-recovery-authority';
 import { advisoryWarn } from '../services/warning-buffer';
 import {
 	hasRecoveryRecordForBranch,
 	recoveryReadErrored,
 } from '../turbo/lean/recovery';
 import { log } from '../utils';
+import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 import { type BunCompatSubprocess, bunSpawn } from '../utils/bun-compat';
 import {
 	isSpawnCwdMissing,
@@ -59,6 +67,12 @@ export const _internals: {
 	 * injection following the `src/worktree/core.ts` convention.
 	 */
 	resolveGitExecutable: typeof resolveGitExecutable;
+	/** Operation-scoped squash patch path generator. */
+	squashPatchPath: typeof squashPatchPath;
+	/** Entropy seam for operation-scoped squash patch names. */
+	randomBytes: typeof randomBytes;
+	/** NUL-delimited Git path parser seam. */
+	parseNulDelimitedPaths: typeof parseNulDelimitedPaths;
 } = {
 	bunSpawn,
 	platform: process.platform,
@@ -69,6 +83,9 @@ export const _internals: {
 	captureMergeOverlapSnapshot,
 	extractSessionId,
 	resolveGitExecutable,
+	squashPatchPath,
+	randomBytes,
+	parseNulDelimitedPaths,
 };
 
 // ---------------------------------------------------------------------------
@@ -107,6 +124,9 @@ interface GitResult {
 
 /** Default timeout for git merge-back operations (30 seconds). */
 const MERGE_TIMEOUT_MS = 30_000;
+
+/** Bounded patch capture for reviewable squash settlement. */
+const SQUASH_DIFF_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
  * Synthetic exit code for a git process that was never created. Non-zero so
@@ -187,6 +207,7 @@ async function runGit(
 	args: string[],
 	cwd: string,
 	timeoutMs = MERGE_TIMEOUT_MS,
+	maxBuffer = 5 * 1024 * 1024,
 ): Promise<GitResult> {
 	let proc: BunCompatSubprocess | undefined;
 	try {
@@ -196,6 +217,7 @@ async function runGit(
 			stdin: 'ignore' as const,
 			stdout: 'pipe' as const,
 			stderr: 'pipe' as const,
+			maxBuffer,
 			env: { ...process.env, LC_ALL: 'C' },
 		});
 		// The Bun path reports process-creation failure synchronously (now as a
@@ -250,16 +272,24 @@ function parseConflictFiles(output: string): string[] {
 export interface MergeSuccess {
 	merged: true;
 	strategy: string;
+	/** Synthetic tree produced by squash settlement, when applicable. */
+	resultTree?: string;
+	/** Paths changed by the synthetic tree relative to target HEAD. */
+	changedPaths?: string[];
 }
 
 export interface MergeConflict {
 	conflict: true;
 	files: string[];
 	message: string;
+	resultTree?: string;
+	changedPaths?: string[];
 }
 
 export interface MergeFailure {
 	error: string;
+	resultTree?: string;
+	changedPaths?: string[];
 }
 
 export interface CleanupSuccess {
@@ -327,6 +357,10 @@ export interface MergeOperationProvenance {
 	targetHeadBefore: string;
 	branchName: string;
 	strategy: MergeStrategy;
+	/** Squash result tree persisted before worktree application. */
+	resultTree?: string;
+	/** Exact path set used to reconcile a crash after squash apply. */
+	changedPaths?: string[];
 }
 
 /**
@@ -350,7 +384,7 @@ export const GIT_OBJECT_ID_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 export type MergeReconciliationResult =
 	| {
 			landed: true;
-			method: 'ancestry' | 'cherry-pick-trailer';
+			method: 'ancestry' | 'cherry-pick-trailer' | 'squash-worktree-tree';
 	  }
 	| {
 			landed: false;
@@ -368,6 +402,8 @@ export interface ImmutableMergeRecoveryCoordinates {
 	sourceHeadOid: string;
 	targetHeadOid: string;
 	strategy: MergeStrategy;
+	resultTree?: string;
+	changedPaths?: string[];
 }
 
 export type ImmutableMergeRecoveryResult =
@@ -745,6 +781,7 @@ async function captureMergeOverlapSnapshot(
 			'--name-status',
 			'-z',
 			'--find-renames',
+			'--find-copies',
 			`${mergeBase}..${laneHead.oid}`,
 		],
 		primaryDir,
@@ -841,19 +878,195 @@ export interface StartupRecoveryResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Reads the merge strategy from the lean turbo configuration.
+ * Reads the merge strategy from a settlement configuration.
  *
- * Returns `config.merge_strategy` if set, otherwise defaults to `'merge'`.
+ * Returns `config.merge_strategy` if set, otherwise defaults to the standard
+ * worktree `'squash'` strategy. Lean Turbo callers pass their explicit
+ * historical `'merge'` default through the config when needed.
  * This is a pure function — no subprocess calls.
  *
- * @param config - Lean turbo configuration.
- * @returns The merge strategy to use: `'merge'`, `'rebase'`, or `'cherry-pick'`.
+ * @param config - Standard or Lean settlement configuration.
+ * @returns The merge strategy to use: `'merge'`, `'rebase'`, `'cherry-pick'`, or `'squash'`.
  */
 export function getMergeStrategy(config: {
 	mergeStrategy?: MergeStrategy;
 	merge_strategy?: MergeStrategy;
 }): MergeStrategy {
-	return config.mergeStrategy ?? config.merge_strategy ?? 'merge';
+	return config.mergeStrategy ?? config.merge_strategy ?? 'squash';
+}
+
+function parseNulDelimitedPaths(raw: string): string[] {
+	return Array.from(
+		new Set(
+			raw
+				.split('\0')
+				// `git diff -z` preserves path bytes verbatim. Do not trim legal
+				// leading/trailing whitespace; only empty NUL records are ignored.
+				.filter((entry) => entry.length > 0),
+		),
+	);
+}
+
+function squashPatchPath(primaryDir: string, branchName: string): string {
+	const safeBranch = branchName.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(-96);
+	const operationToken = _internals.randomBytes(16).toString('hex');
+	return path.join(
+		primaryDir,
+		'.swarm',
+		'merge-settlement',
+		`merge-${safeBranch || 'lane'}-${operationToken}.patch`,
+	);
+}
+
+/**
+ * Build and apply a reviewable squash without touching the target HEAD or
+ * index. `merge-tree --write-tree` is intentionally used as the conflict
+ * oracle: Git can print a tree oid even when it exits non-zero, so stdout
+ * shape is never treated as success.
+ */
+async function mergeLaneBranchSquash(
+	primaryDir: string,
+	branchName: string,
+	onPrepared?: (resultTree: string, changedPaths: string[]) => Promise<void>,
+	frozenRefs?: { targetHead: string; sourceHead: string },
+): Promise<MergeSuccess | MergeConflict | MergeFailure> {
+	if (
+		!frozenRefs ||
+		!GIT_OBJECT_ID_PATTERN.test(frozenRefs.targetHead) ||
+		!GIT_OBJECT_ID_PATTERN.test(frozenRefs.sourceHead)
+	) {
+		return {
+			error:
+				'squash-frozen-refs-required: settlement must provide frozen target and source object ids',
+		};
+	}
+	const treeResult = await runGit(
+		[
+			'merge-tree',
+			'--write-tree',
+			frozenRefs.targetHead,
+			frozenRefs.sourceHead,
+		],
+		primaryDir,
+		MERGE_TIMEOUT_MS,
+		SQUASH_DIFF_MAX_BYTES,
+	);
+	if (treeResult.spawnFailure || treeResult.exitCode === 129) {
+		return {
+			error: `squash-unsupported-git: ${treeResult.stderr.trim() || 'git merge-tree --write-tree is unavailable'}`,
+		};
+	}
+	if (treeResult.exitCode !== 0 && treeResult.exitCode !== 1) {
+		return {
+			error: `squash-merge-tree-failed: ${treeResult.stderr.trim() || treeResult.stdout.trim() || `exit ${treeResult.exitCode}`}`,
+		};
+	}
+	const resultTree = treeResult.stdout
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.find((line) => GIT_OBJECT_ID_PATTERN.test(line));
+	if (treeResult.exitCode === 1) {
+		return {
+			conflict: true,
+			files: parseConflictFiles(`${treeResult.stderr}\n${treeResult.stdout}`),
+			message:
+				treeResult.stderr.trim() ||
+				treeResult.stdout.trim() ||
+				'squash merge-tree reported a conflict before mutation',
+		};
+	}
+	if (!resultTree) {
+		return {
+			error: 'squash-unsupported-git: merge-tree returned no result tree',
+		};
+	}
+
+	const diffResult = await runGit(
+		['diff', '--binary', '--full-index', frozenRefs.targetHead, resultTree],
+		primaryDir,
+		MERGE_TIMEOUT_MS,
+		SQUASH_DIFF_MAX_BYTES,
+	);
+	if (diffResult.spawnFailure) {
+		return { error: `squash-diff-failed: ${diffResult.stderr}` };
+	}
+	if (diffResult.exitCode !== 0) {
+		return {
+			error: `squash-diff-failed: ${diffResult.stderr.trim() || diffResult.stdout.trim()}`,
+		};
+	}
+	const changedResult = await runGit(
+		[
+			'diff',
+			'--name-only',
+			'--no-renames',
+			'-z',
+			frozenRefs.targetHead,
+			resultTree,
+		],
+		primaryDir,
+		MERGE_TIMEOUT_MS,
+		SQUASH_DIFF_MAX_BYTES,
+	);
+	if (changedResult.exitCode !== 0) {
+		return {
+			error: `squash-paths-failed: ${changedResult.stderr.trim() || changedResult.stdout.trim()}`,
+		};
+	}
+	const changedPaths = parseNulDelimitedPaths(changedResult.stdout);
+	if (onPrepared) {
+		try {
+			await onPrepared(resultTree, changedPaths);
+		} catch (error) {
+			return {
+				error: `squash-provenance-failed: ${String(error)}`,
+				resultTree,
+				changedPaths,
+			};
+		}
+	}
+	if (diffResult.stdout.length === 0) {
+		return { merged: true, strategy: 'squash', resultTree, changedPaths };
+	}
+
+	const patchPath = squashPatchPath(primaryDir, branchName);
+	try {
+		atomicWriteSwarmFileSync(patchPath, diffResult.stdout, {
+			maxBytes: SQUASH_DIFF_MAX_BYTES,
+		});
+		const applyResult = await runGit(
+			['apply', '--', patchPath],
+			primaryDir,
+			MERGE_TIMEOUT_MS,
+			SQUASH_DIFF_MAX_BYTES,
+		);
+		if (applyResult.exitCode !== 0) {
+			return {
+				conflict: true,
+				files: changedPaths,
+				resultTree,
+				changedPaths,
+				message:
+					applyResult.stderr.trim() ||
+					applyResult.stdout.trim() ||
+					'squash patch could not be applied; primary worktree was not settled',
+			};
+		}
+		return { merged: true, strategy: 'squash', resultTree, changedPaths };
+	} catch (error) {
+		return {
+			error: `squash-apply-failed: ${String(error)}`,
+			resultTree,
+			changedPaths,
+		};
+	} finally {
+		try {
+			fs.unlinkSync(patchPath);
+		} catch {
+			// The exact operation temp is best-effort cleaned; residue scanners
+			// retain any failed cleanup for diagnosis instead of broad deletion.
+		}
+	}
 }
 
 /**
@@ -872,7 +1085,17 @@ export async function mergeLaneBranch(
 	primaryDir: string,
 	branchName: string,
 	strategy: MergeStrategy,
+	onPrepared?: (resultTree: string, changedPaths: string[]) => Promise<void>,
+	frozenRefs?: { targetHead: string; sourceHead: string },
 ): Promise<MergeSuccess | MergeConflict | MergeFailure> {
+	if (strategy === 'squash') {
+		return mergeLaneBranchSquash(
+			primaryDir,
+			branchName,
+			onPrepared,
+			frozenRefs,
+		);
+	}
 	let result: GitResult;
 
 	switch (strategy) {
@@ -1024,6 +1247,20 @@ export async function recoverMergeBackFromImmutableCoordinates(
 	if (!currentTargetRelation.ok) {
 		return { error: currentTargetRelation.error };
 	}
+	if (coordinates.strategy === 'squash') {
+		const currentHead = await readVerifiedGitObjectId(
+			primaryDir,
+			'HEAD',
+			'current primary HEAD for preserved squash recovery',
+		);
+		if ('error' in currentHead) return { error: currentHead.error };
+		if (currentHead.oid !== coordinates.targetHeadOid) {
+			return {
+				error:
+					'Current primary HEAD changed since preserved squash settlement; refusing re-apply',
+			};
+		}
+	}
 
 	// Recovery must apply the same two-snapshot overlap fence as the dirty
 	// merge-back path. Use only the immutable object ids captured in the
@@ -1038,7 +1275,7 @@ export async function recoverMergeBackFromImmutableCoordinates(
 	}
 	if (initialOverlapSnapshot.snapshot.overlapPaths.length > 0) {
 		return {
-			error: `Primary checkout has overlapping dirty paths with incoming preserved lane changes: ${initialOverlapSnapshot.snapshot.overlapPaths.join(', ')}`,
+			error: `Primary checkout has overlapping dirty paths with incoming preserved lane changes: ${initialOverlapSnapshot.snapshot.overlapPaths.join(', ')}. Preserved lane is retained. Review listed paths, commit or stash primary changes, then re-run merge.`,
 		};
 	}
 	const finalOverlapSnapshot = await captureImmutableMergeOverlapSnapshot(
@@ -1087,6 +1324,74 @@ export async function recoverMergeBackFromImmutableCoordinates(
 			),
 			{},
 		);
+	}
+
+	if (coordinates.strategy === 'squash') {
+		if (
+			!coordinates.resultTree ||
+			!GIT_OBJECT_ID_PATTERN.test(coordinates.resultTree) ||
+			!coordinates.changedPaths
+		) {
+			return {
+				error:
+					'Squash recovery is missing its persisted result tree and changed-path set',
+			};
+		}
+		const diff = await runGit(
+			[
+				'diff',
+				'--binary',
+				'--full-index',
+				coordinates.targetHeadOid,
+				coordinates.resultTree,
+			],
+			primaryDir,
+			MERGE_TIMEOUT_MS,
+			SQUASH_DIFF_MAX_BYTES,
+		);
+		if (diff.exitCode !== 0) {
+			return {
+				error: diff.stderr.trim() || 'Unable to reconstruct squash patch',
+			};
+		}
+		if (diff.stdout.length > 0) {
+			const patchPath = squashPatchPath(
+				primaryDir,
+				`recovery-${coordinates.resultTree}`,
+			);
+			try {
+				atomicWriteSwarmFileSync(patchPath, diff.stdout, {
+					maxBytes: SQUASH_DIFF_MAX_BYTES,
+				});
+				const applied = await runGit(
+					['apply', '--', patchPath],
+					primaryDir,
+					MERGE_TIMEOUT_MS,
+					SQUASH_DIFF_MAX_BYTES,
+				);
+				if (applied.exitCode !== 0) {
+					return {
+						conflict: true,
+						files: coordinates.changedPaths,
+						message:
+							applied.stderr.trim() ||
+							'Unable to apply preserved squash artifact',
+					};
+				}
+			} finally {
+				try {
+					fs.unlinkSync(patchPath);
+				} catch {
+					// preserve residue for the quarantine scanner
+				}
+			}
+		}
+		return {
+			merged: true,
+			strategy: 'squash',
+			resultTree: coordinates.resultTree,
+			changedPaths: coordinates.changedPaths,
+		};
 	}
 
 	const sourceCommitOrder = await readOrderedCommitRange(
@@ -1169,6 +1474,89 @@ export async function reconcileLandedMerge(
 		!provenance.targetHeadBefore
 	) {
 		return { landed: false, error: 'Incomplete merge operation provenance' };
+	}
+	if (
+		!GIT_OBJECT_ID_PATTERN.test(provenance.sourceHead) ||
+		!GIT_OBJECT_ID_PATTERN.test(provenance.targetHeadBefore)
+	) {
+		return { landed: false, error: 'Malformed merge operation provenance' };
+	}
+
+	if (provenance.strategy === 'squash') {
+		if (
+			!provenance.resultTree ||
+			!GIT_OBJECT_ID_PATTERN.test(provenance.resultTree) ||
+			!provenance.changedPaths ||
+			provenance.changedPaths.some(
+				(pathName) =>
+					typeof pathName !== 'string' ||
+					pathName.length === 0 ||
+					pathName.includes('\0') ||
+					pathName.startsWith('-'),
+			)
+		) {
+			return {
+				landed: false,
+				error: 'Incomplete squash settlement provenance',
+			};
+		}
+		const head = await readVerifiedGitObjectId(
+			primaryDir,
+			'HEAD',
+			'current primary HEAD for squash reconciliation',
+		);
+		if ('error' in head) return { landed: false, error: head.error };
+		if (head.oid !== provenance.targetHeadBefore) {
+			return {
+				landed: false,
+				error:
+					'Squash artifact is retained because primary HEAD changed; refusing re-apply',
+			};
+		}
+		if (provenance.changedPaths.length > 0) {
+			const cached = await runGit(
+				[
+					'diff',
+					'--cached',
+					'--quiet',
+					provenance.targetHeadBefore,
+					'--',
+					...provenance.changedPaths,
+				],
+				primaryDir,
+			);
+			if (cached.exitCode !== 0) {
+				return {
+					landed: false,
+					error:
+						cached.exitCode === 1
+							? 'Squash artifact is ambiguous because the index changed on affected paths; refusing re-apply'
+							: cached.stderr.trim() ||
+								'Unable to compare the squash result with the primary index',
+				};
+			}
+		} else {
+			return { landed: true, method: 'squash-worktree-tree' };
+		}
+		const args = [
+			'diff',
+			'--quiet',
+			provenance.resultTree,
+			'--',
+			...provenance.changedPaths,
+		];
+		const equal = await runGit(args, primaryDir);
+		if (equal.exitCode === 0) {
+			return { landed: true, method: 'squash-worktree-tree' };
+		}
+		return {
+			landed: false,
+			error:
+				equal.exitCode === 1
+					? 'Squash artifact is retained for review because the worktree does not exactly match its result tree; refusing re-apply'
+					: equal.stderr.trim() ||
+						'Unable to compare squash result tree with worktree',
+		};
 	}
 
 	// Both heads reach `git` argv below (a revision operand and a revision range).
@@ -1740,7 +2128,7 @@ export async function attemptMergeBackFromDirty(
 			branchName,
 			strategy,
 		};
-		if (options.onBeforeMerge) {
+		if (options.onBeforeMerge && strategy !== 'squash') {
 			try {
 				await options.onBeforeMerge(provenance);
 			} catch (error) {
@@ -1772,7 +2160,7 @@ export async function attemptMergeBackFromDirty(
 			stage: 'pre-merge-overlap',
 			autoCommitted,
 			cleaned,
-			message: `Primary checkout has overlapping dirty paths with incoming lane changes: ${finalOverlapSnapshot.snapshot.overlapPaths.join(', ')}`,
+			message: `Primary checkout has overlapping dirty paths with incoming lane changes: ${finalOverlapSnapshot.snapshot.overlapPaths.join(', ')}. Lane is preserved. Review listed paths, commit or stash primary changes, then re-run merge.`,
 			conflictFiles: finalOverlapSnapshot.snapshot.overlapPaths,
 			...(provenance ? { provenance } : {}),
 		};
@@ -1793,15 +2181,44 @@ export async function attemptMergeBackFromDirty(
 	}
 
 	// Step 3b: Attempt merge-back
-	const mergeResult = await mergeLaneBranch(primaryDir, branchName, strategy);
+	const mergeResult = await mergeLaneBranch(
+		primaryDir,
+		branchName,
+		strategy,
+		strategy === 'squash' && provenance && options.onBeforeMerge
+			? async (resultTree, changedPaths) => {
+					provenance = { ...provenance!, resultTree, changedPaths };
+					await options.onBeforeMerge?.(provenance);
+				}
+			: undefined,
+		strategy === 'squash'
+			? {
+					targetHead: initialOverlapSnapshot.snapshot.targetHead,
+					sourceHead: initialOverlapSnapshot.snapshot.laneHead,
+				}
+			: undefined,
+	);
 
 	if ('merged' in mergeResult && mergeResult.merged) {
+		const settledProvenance = provenance
+			? {
+					...provenance,
+					...(mergeResult.resultTree
+						? {
+								resultTree: mergeResult.resultTree,
+								changedPaths: mergeResult.changedPaths ?? [],
+							}
+						: {}),
+				}
+			: undefined;
 		return {
 			merged: true,
 			strategy,
 			autoCommitted,
 			cleaned,
-			...(provenance ? { reconciled: false, provenance } : {}),
+			...(settledProvenance
+				? { reconciled: false, provenance: settledProvenance }
+				: {}),
 		};
 	}
 
@@ -1813,7 +2230,17 @@ export async function attemptMergeBackFromDirty(
 			cleaned,
 			message: mergeResult.message,
 			conflictFiles: mergeResult.files,
-			...(provenance ? { provenance } : {}),
+			...(provenance
+				? {
+						provenance: mergeResult.resultTree
+							? {
+									...provenance,
+									resultTree: mergeResult.resultTree,
+									changedPaths: mergeResult.changedPaths ?? [],
+								}
+							: provenance,
+					}
+				: {}),
 		};
 	}
 
@@ -1863,6 +2290,157 @@ function extractSessionId(branchName: string): string | null {
 		return segments[2];
 	}
 	return null;
+}
+
+function readBranchTipSync(
+	directory: string,
+	branchName: string,
+): string | undefined {
+	const result = childProcess.spawnSync(
+		_internals.resolveGitExecutable(),
+		[
+			'-C',
+			directory,
+			'for-each-ref',
+			'--format=%(objectname)',
+			`refs/heads/${branchName}`,
+		],
+		{
+			cwd: directory,
+			encoding: 'utf8',
+			stdio: ['ignore', 'pipe', 'pipe'],
+			timeout: MERGE_TIMEOUT_MS,
+			maxBuffer: SQUASH_DIFF_MAX_BYTES,
+			windowsHide: true,
+		},
+	);
+	if (result.error) throw result.error;
+	if (result.status !== 0) {
+		throw new Error(
+			`git branch tip lookup failed: ${String(result.stderr ?? '').trim()}`,
+		);
+	}
+	const tip =
+		String(result.stdout ?? '')
+			.trim()
+			.split(/\s+/, 1)[0] ?? '';
+	if (tip.length === 0) return undefined;
+	if (!GIT_OBJECT_ID_PATTERN.test(tip)) {
+		throw new Error('git branch tip lookup returned an invalid object id');
+	}
+	return tip;
+}
+
+function deleteBranchIfTipSync(
+	directory: string,
+	branchName: string,
+	branchTipSha: string,
+): boolean {
+	const result = childProcess.spawnSync(
+		_internals.resolveGitExecutable(),
+		[
+			'-C',
+			directory,
+			'update-ref',
+			'-d',
+			`refs/heads/${branchName}`,
+			branchTipSha,
+		],
+		{
+			cwd: directory,
+			encoding: 'utf8',
+			stdio: ['ignore', 'pipe', 'pipe'],
+			timeout: MERGE_TIMEOUT_MS,
+			maxBuffer: SQUASH_DIFF_MAX_BYTES,
+			windowsHide: true,
+		},
+	);
+	if (result.error) throw result.error;
+	if (result.status === 0) return true;
+	if (result.status === 1) return false;
+	throw new Error(
+		`git update-ref branch deletion failed: ${String(result.stderr ?? '').trim()}`,
+	);
+}
+
+async function squashArtifactMatchesPrimaryHead(
+	directory: string,
+	authority: WorktreeRecoveryAuthorityRecord,
+): Promise<boolean> {
+	const { immutable } = authority;
+	if (
+		immutable.strategy !== 'squash' ||
+		!immutable.resultTree ||
+		!immutable.changedPaths
+	) {
+		return false;
+	}
+	if (immutable.changedPaths.length === 0) {
+		const head = await readVerifiedGitObjectId(
+			directory,
+			'HEAD',
+			'primary HEAD for retained squash cleanup',
+		);
+		return 'oid' in head && head.oid === immutable.targetHeadOid;
+	}
+	const comparison = await runGit(
+		[
+			'diff',
+			'--quiet',
+			immutable.resultTree,
+			'HEAD',
+			'--',
+			...immutable.changedPaths,
+		],
+		directory,
+	);
+	return comparison.exitCode === 0;
+}
+
+async function clearCommittedRetainedSquashAuthorities(
+	directory: string,
+): Promise<void> {
+	const scanned = scanWorktreeRecoveryAuthoritiesForRecovery(directory);
+	if (scanned.status !== 'ok') {
+		log(
+			`[worktree] retained squash authority scan unavailable; preserving authorities: ${scanned.reason}`,
+		);
+		return;
+	}
+	for (const authority of scanned.authorities) {
+		if (
+			authority.status !== 'preserved' ||
+			authority.immutable.strategy !== 'squash' ||
+			!authority.immutable.resultTree ||
+			!authority.immutable.changedPaths
+		) {
+			continue;
+		}
+		if (!(await squashArtifactMatchesPrimaryHead(directory, authority))) {
+			continue;
+		}
+		const expectedBranchTip = authority.immutable.sourceHeadOid;
+		const removed = removeWorktreeRecoveryAuthority(directory, {
+			authorityDigest: authority.authorityDigest,
+			branchName: authority.immutable.laneBranch,
+			branchTipSha: expectedBranchTip,
+			resultTree: authority.immutable.resultTree,
+			changedPaths: authority.immutable.changedPaths,
+			readBranchTip: () =>
+				readBranchTipSync(directory, authority.immutable.laneBranch),
+			deleteBranchIfTip: () =>
+				deleteBranchIfTipSync(
+					directory,
+					authority.immutable.laneBranch,
+					expectedBranchTip,
+				),
+		});
+		if (!removed.ok) {
+			log(
+				`[worktree] retained squash authority preserved after committed-artifact check: ${removed.reason}`,
+			);
+		}
+	}
 }
 
 async function listLaneBranches(directory: string): Promise<string[]> {
@@ -1932,6 +2510,23 @@ export async function cleanupOrphanedBranches(
 		};
 	}
 
+	await clearCommittedRetainedSquashAuthorities(directory);
+	const authorityScan = scanWorktreeRecoveryAuthoritiesForRecovery(directory);
+	if (authorityScan.status !== 'ok') {
+		const branches = await listLaneBranches(directory);
+		return {
+			removed,
+			skipped: branches,
+			skippedRecoveryBranches: branches,
+			errors,
+			recoveryReadError: true,
+		};
+	}
+	const retainedAuthorityBranches = new Set(
+		authorityScan.authorities
+			.filter((authority) => authority.status === 'preserved')
+			.map((authority) => authority.immutable.laneBranch),
+	);
 	const branches = await listLaneBranches(directory);
 
 	// Prune stale worktree metadata FIRST (DD-9, #2236 BR-2).
@@ -1959,7 +2554,10 @@ export async function cleanupOrphanedBranches(
 		// preserved for manual recovery and must not be force-deleted by routine
 		// orphan cleanup. (A record is auto-cleared on successful merge-back, so
 		// this exemption ends when the lane recovers.)
-		if (hasRecoveryRecordForBranch(directory, branch)) {
+		if (
+			hasRecoveryRecordForBranch(directory, branch) ||
+			retainedAuthorityBranches.has(branch)
+		) {
 			skippedRecoveryBranches.push(branch);
 			continue;
 		}

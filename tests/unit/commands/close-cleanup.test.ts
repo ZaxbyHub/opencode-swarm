@@ -48,6 +48,7 @@ import { derivePlanId } from '../../../src/plan/utils.js';
 // and only override the entry points this suite needs deterministic/no-op
 // behavior for.
 import * as actualState from '../../../src/state.js';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
 
@@ -156,7 +157,35 @@ mock.module('../../../src/plan/checkpoint.js', () => ({
 }));
 
 // ── Import under test ────────────────────────────────────────────────
-const { handleCloseCommand } = await import('../../../src/commands/close.js');
+const {
+	handleCloseCommand: rawHandleCloseCommand,
+	_internals: closeInternals,
+} = await import('../../../src/commands/close.js');
+
+const mockCheckHivePromotions = mock(async () => ({
+	timestamp: new Date().toISOString(),
+	new_promotions: 0,
+	encounters_incremented: 0,
+	advancements: 0,
+	total_hive_entries: 0,
+}));
+const mockRunCuratorPostMortem = mock(async () => ({
+	success: true,
+	planId: null,
+	reportPath: null,
+	summary: null,
+	warnings: [],
+}));
+const realCloseInternals = {
+	curateAndStoreSwarm: closeInternals.curateAndStoreSwarm,
+	checkHivePromotions: closeInternals.checkHivePromotions,
+	runCuratorPostMortem: closeInternals.runCuratorPostMortem,
+};
+const handleCloseCommand = (
+	directory: string,
+	args: string[],
+	options?: Parameters<typeof rawHandleCloseCommand>[2],
+) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -224,8 +253,13 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 	beforeEach(() => {
 		mockExecuteWriteRetro.mockClear();
 		mockCurateAndStoreSwarm.mockClear();
+		mockCheckHivePromotions.mockClear();
+		mockRunCuratorPostMortem.mockClear();
 		mockArchiveEvidence.mockClear();
 		mockFlushPendingSnapshot.mockClear();
+		closeInternals.curateAndStoreSwarm = mockCurateAndStoreSwarm;
+		closeInternals.checkHivePromotions = mockCheckHivePromotions;
+		closeInternals.runCuratorPostMortem = mockRunCuratorPostMortem;
 		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-cleanup-test-'));
 		mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
 
@@ -258,6 +292,10 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			// Ignore cleanup errors
 		}
 		spawnSyncSpy.mockRestore();
+		closeInternals.curateAndStoreSwarm = realCloseInternals.curateAndStoreSwarm;
+		closeInternals.checkHivePromotions = realCloseInternals.checkHivePromotions;
+		closeInternals.runCuratorPostMortem =
+			realCloseInternals.runCuratorPostMortem;
 		mock.restore();
 	});
 

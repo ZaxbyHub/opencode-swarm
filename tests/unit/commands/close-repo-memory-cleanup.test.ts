@@ -31,6 +31,7 @@ import { savePlan } from '../../../src/plan/manager.js';
 import * as actualState from '../../../src/state.js';
 import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 const realSnapshotWriter = await import(
 	'../../../src/session/snapshot-writer.js'
@@ -103,7 +104,14 @@ mock.module('../../../src/plan/checkpoint.js', () => ({
 	writeCheckpoint: async () => {},
 }));
 
-const { handleCloseCommand } = await import('../../../src/commands/close.js');
+const { handleCloseCommand: rawHandleCloseCommand } = await import(
+	'../../../src/commands/close.js'
+);
+const handleCloseCommand = (
+	directory: string,
+	args: string[] = [],
+	options?: Parameters<typeof rawHandleCloseCommand>[2],
+) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
 const { syncIndexFromGraph, REPO_MEMORY_FILENAME, closeAllRepoMemory } =
 	await import('../../../src/tools/repo-graph/indexed-storage.js');
 

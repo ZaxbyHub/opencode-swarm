@@ -18,6 +18,7 @@ import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import { savePlan } from '../../../src/plan/manager.js';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 /**
@@ -311,9 +312,14 @@ mock.module('../../../src/state.js', () => ({
 	updateTaskWorkflowCache: () => {},
 }));
 // Import after mock setup
-const { handleCloseCommand, _internals } = await import(
+const { handleCloseCommand: rawHandleCloseCommand, _internals } = await import(
 	'../../../src/commands/close.js'
 );
+const handleCloseCommand = (
+	directory: string,
+	args: string[],
+	options?: Parameters<typeof rawHandleCloseCommand>[2],
+) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
 
 //
 // WITHIN-MODULE MOCKS: NONE POSSIBLE
@@ -1943,6 +1949,9 @@ describe('handleCloseCommand', () => {
 				const result = await handleCloseCommand(testDir, ['--prune-branches']);
 
 				expect(result).toContain('finalized');
+				expect(result).toContain(
+					'no remote target was available at confirmation preview',
+				);
 				// No branches pruned since none are gone
 			});
 		});

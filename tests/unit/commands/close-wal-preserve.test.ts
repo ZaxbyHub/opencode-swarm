@@ -32,6 +32,7 @@ import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import { savePlan } from '../../../src/plan/manager.js';
 import * as actualState from '../../../src/state.js';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 const realSnapshotWriter = await import(
 	'../../../src/session/snapshot-writer.js'
@@ -100,9 +101,15 @@ mock.module('../../../src/plan/checkpoint.js', () => ({
 	writeCheckpoint: async () => {},
 }));
 
-const { handleCloseCommand, removeSqliteSidecarsAfterClose } = await import(
-	'../../../src/commands/close.js'
-);
+const {
+	handleCloseCommand: rawHandleCloseCommand,
+	removeSqliteSidecarsAfterClose,
+} = await import('../../../src/commands/close.js');
+const handleCloseCommand = (
+	directory: string,
+	args: string[] = [],
+	options?: Parameters<typeof rawHandleCloseCommand>[2],
+) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
 
 let testDir: string;
 const swarmDir = (): string => path.join(testDir, '.swarm');

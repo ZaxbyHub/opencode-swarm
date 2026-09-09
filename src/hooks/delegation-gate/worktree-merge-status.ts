@@ -34,8 +34,17 @@ import * as path from 'node:path';
 /** Why a task's worktree work did not fully reach the main tree. */
 export type WorktreeMergeOutcome = 'partial' | 'failed';
 
+/** Strategy selected for the settlement attempt, when available. */
+export type WorktreeMergeStrategy =
+	| 'merge'
+	| 'rebase'
+	| 'cherry-pick'
+	| 'squash';
+
 export interface WorktreeMergeFailure {
 	outcome: WorktreeMergeOutcome;
+	/** Settlement strategy used by the failed/partial attempt. */
+	mergeStrategy?: WorktreeMergeStrategy;
 	/** Pipeline stage that failed (e.g. 'merge', 'auto-commit'). */
 	stage: string;
 	/** Human-readable detail surfaced in the Rule 2 skip warning. */
@@ -133,6 +142,15 @@ function isRecoveryFailure(value: unknown): value is WorktreeMergeFailure {
 		!candidate.stage ||
 		typeof candidate.message !== 'string' ||
 		!candidate.message
+	) {
+		return false;
+	}
+	if (
+		candidate.mergeStrategy !== undefined &&
+		candidate.mergeStrategy !== 'merge' &&
+		candidate.mergeStrategy !== 'rebase' &&
+		candidate.mergeStrategy !== 'cherry-pick' &&
+		candidate.mergeStrategy !== 'squash'
 	) {
 		return false;
 	}

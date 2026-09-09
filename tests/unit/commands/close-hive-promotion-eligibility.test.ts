@@ -10,6 +10,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 import { savePlan } from '../../../src/plan/manager';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -178,7 +179,6 @@ function makeConfig(hiveEnabled = true): Record<string, unknown> {
 		loadedFromFile: null,
 	};
 }
-
 // ── Test suites ──────────────────────────────────────────────────────
 
 describe('handleCloseCommand — hive promotion eligibility gating (negative paths)', () => {
@@ -264,7 +264,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 				}),
 			]);
 
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir, []);
 
 			// Eligibility gating is handled inside checkHivePromotions;
 			// close.ts delegates and succeeds regardless of eligibility outcome
@@ -294,7 +294,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 				}),
 			]);
 
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir, []);
 
 			expect(closeInternals.checkHivePromotions).toHaveBeenCalledTimes(1);
 			expect(result).toContain('finalized');
@@ -337,7 +337,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 				}),
 			]);
 
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir, []);
 
 			// Eligibility gating is handled inside checkHivePromotions;
 			// close.ts delegates and succeeds regardless of eligibility outcome
@@ -376,7 +376,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 				}),
 			]);
 
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir, []);
 
 			// Eligibility gating is handled inside checkHivePromotions;
 			// close.ts delegates and succeeds regardless of eligibility outcome
@@ -404,7 +404,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 				}),
 			]);
 
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir, []);
 
 			// Eligibility gating is handled inside checkHivePromotions;
 			// close.ts delegates and succeeds regardless of eligibility outcome
@@ -426,7 +426,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 			const { created_at: _created_at, ...entryRest } = entryWithoutCreatedAt;
 			writeKnowledgeJsonl([entryRest as unknown as SwarmKnowledgeEntry]);
 
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir, []);
 
 			// Eligibility gating is handled inside checkHivePromotions;
 			// close.ts delegates and succeeds regardless of eligibility outcome
@@ -454,7 +454,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 				}),
 			]);
 
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir, []);
 
 			// Eligibility gating is handled inside checkHivePromotions;
 			// close.ts delegates and succeeds regardless of eligibility outcome
@@ -495,7 +495,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 				}),
 			]);
 
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir, []);
 
 			// Eligibility gating is handled inside checkHivePromotions;
 			// close.ts delegates and succeeds regardless of eligibility outcome

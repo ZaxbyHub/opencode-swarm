@@ -7,6 +7,7 @@ import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import { savePlan } from '../../../src/plan/manager';
 import { seedStageBGates } from '../../helpers/task-workflow-evidence';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 const { handleCloseCommand, _internals, closeReceiptLifecycleInternals } =
 	await import('../../../src/commands/close.js');
@@ -130,7 +131,7 @@ describe('issue #2098 real close command exact terminalization', () => {
 	test('already-terminal plan with missing evidence is reconciled before archive cleanup', async () => {
 		await savePlan(directory, plan('completed'));
 
-		const output = await handleCloseCommand(directory, [], {
+		const output = await runConfirmedClose(handleCloseCommand, directory, [], {
 			sessionID: 'close-command-test',
 		});
 
@@ -158,9 +159,14 @@ describe('issue #2098 real close command exact terminalization', () => {
 			transitionId: 'already-complete',
 		});
 
-		const output = await handleCloseCommand(directory, ['--force'], {
-			sessionID: 'close-command-test',
-		});
+		const output = await runConfirmedClose(
+			handleCloseCommand,
+			directory,
+			['--force'],
+			{
+				sessionID: 'close-command-test',
+			},
+		);
 
 		expect(output).toContain('0 incomplete task(s) marked closed');
 		expect(rewardSweep).toHaveBeenCalledTimes(1);
@@ -182,7 +188,7 @@ describe('issue #2098 real close command exact terminalization', () => {
 			transitionId: 'blocked-before-close',
 		});
 
-		const output = await handleCloseCommand(directory, [], {
+		const output = await runConfirmedClose(handleCloseCommand, directory, [], {
 			sessionID: 'close-command-test',
 		});
 
@@ -204,9 +210,19 @@ describe('issue #2098 real close command exact terminalization', () => {
 			reason: 'not_git_repo' as const,
 			message: 'test disables git alignment',
 		}));
+		const alignment = mock(() => ({
+			success: true,
+			targetBranch: 'main',
+			previousBranch: 'main',
+			message: 'no-op',
+			branchDeleted: false,
+			warnings: [] as string[],
+		}));
 		const teardown = mock(() => {});
 		const endSession = mock(async () => {});
 		_internals.getGitRepositoryStatus = gitStatus;
+		_internals.resetToMainAfterMerge = alignment;
+		_internals.resetToRemoteBranch = alignment;
 		_internals.resetSwarmStatePreservingSingletons = teardown;
 		_internals.endAgentSession = endSession;
 		closeReceiptLifecycleInternals.recordPhaseCloseIntent = mock(
@@ -219,7 +235,7 @@ describe('issue #2098 real close command exact terminalization', () => {
 				}) as never,
 		);
 
-		const output = await handleCloseCommand(directory, [], {
+		const output = await runConfirmedClose(handleCloseCommand, directory, [], {
 			sessionID: 'close-command-test',
 		});
 
@@ -228,7 +244,7 @@ describe('issue #2098 real close command exact terminalization', () => {
 			'Receipt phase-close intent failed for phase 1: receipt lifecycle scope is ambiguous without an exact session identity. Plan terminalization was not attempted.',
 		);
 		expect(rewardSweep).not.toHaveBeenCalled();
-		expect(gitStatus).not.toHaveBeenCalled();
+		expect(alignment).not.toHaveBeenCalled();
 		expect(teardown).not.toHaveBeenCalled();
 		expect(endSession).not.toHaveBeenCalled();
 		expect(fs.existsSync(path.join(directory, '.swarm', 'archive'))).toBe(
@@ -254,9 +270,19 @@ describe('issue #2098 real close command exact terminalization', () => {
 			reason: 'not_git_repo' as const,
 			message: 'test disables git alignment',
 		}));
+		const alignment = mock(() => ({
+			success: true,
+			targetBranch: 'main',
+			previousBranch: 'main',
+			message: 'no-op',
+			branchDeleted: false,
+			warnings: [] as string[],
+		}));
 		const teardown = mock(() => {});
 		const endSession = mock(async () => {});
 		_internals.getGitRepositoryStatus = gitStatus;
+		_internals.resetToMainAfterMerge = alignment;
+		_internals.resetToRemoteBranch = alignment;
 		_internals.resetSwarmStatePreservingSingletons = teardown;
 		_internals.endAgentSession = endSession;
 		closeReceiptLifecycleInternals.reconcilePhaseClose = mock(
@@ -272,7 +298,7 @@ describe('issue #2098 real close command exact terminalization', () => {
 			},
 		);
 
-		const output = await handleCloseCommand(directory, [], {
+		const output = await runConfirmedClose(handleCloseCommand, directory, [], {
 			sessionID: 'close-command-test',
 		});
 
@@ -281,7 +307,7 @@ describe('issue #2098 real close command exact terminalization', () => {
 			'Receipt phase-close reconciliation failed for phase 1: receipt archive contains an invalid authoritative summary',
 		);
 		expect(rewardSweep).not.toHaveBeenCalled();
-		expect(gitStatus).not.toHaveBeenCalled();
+		expect(alignment).not.toHaveBeenCalled();
 		expect(teardown).not.toHaveBeenCalled();
 		expect(endSession).not.toHaveBeenCalled();
 		expect(fs.existsSync(path.join(directory, '.swarm', 'archive'))).toBe(

@@ -415,7 +415,7 @@ interface LeanTurboLanePlan {
 // cleanUntrackedFiles() → Promise<void>
 
 // src/turbo/lean/merge-back.ts
-// getMergeStrategy(config) → 'merge' | 'rebase' | 'cherry-pick'
+// getMergeStrategy(config) → 'merge' | 'rebase' | 'cherry-pick' | 'squash'
 // mergeLaneBranch(laneId, strategy) → Promise<MergeSuccess | MergeFailure | MergeConflict>
 // postMergeCleanup(laneId) → Promise<CleanupSuccess | CleanupFailure>
 // handleMergeConflict(conflictInfo) → Promise<ConflictHandlingError | null>

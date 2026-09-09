@@ -72,6 +72,16 @@ describe('LeanTurboConfigSchema — merge_strategy field', () => {
 			}
 		});
 
+		test('accepts merge_strategy: "squash" explicitly', () => {
+			const result = LeanTurboConfigSchema.safeParse({
+				merge_strategy: 'squash',
+			});
+			expect(result.success).toBe(true);
+			if (result.success) {
+				expect(result.data.merge_strategy).toBe('squash');
+			}
+		});
+
 		test('accepts merge_strategy omitted (defaults to "merge")', () => {
 			const result = LeanTurboConfigSchema.safeParse({});
 			expect(result.success).toBe(true);
@@ -82,17 +92,6 @@ describe('LeanTurboConfigSchema — merge_strategy field', () => {
 	});
 
 	describe('invalid values', () => {
-		test('rejects merge_strategy: "squash" (not a valid enum value)', () => {
-			const result = LeanTurboConfigSchema.safeParse({
-				merge_strategy: 'squash',
-			});
-			expect(result.success).toBe(false);
-			if (!result.success) {
-				const paths = result.error.issues.map((i) => i.path.join('.'));
-				expect(paths).toContain('merge_strategy');
-			}
-		});
-
 		test('rejects merge_strategy: "fast-forward"', () => {
 			const result = LeanTurboConfigSchema.safeParse({
 				merge_strategy: 'fast-forward',
@@ -208,8 +207,13 @@ describe('LeanTurboConfigSchema — combined worktree fields', () => {
 		}
 	});
 
-	test('accepts all three merge strategies alongside worktree_isolation: true', () => {
-		for (const strategy of ['merge', 'rebase', 'cherry-pick'] as const) {
+	test('accepts all four merge strategies alongside worktree_isolation: true', () => {
+		for (const strategy of [
+			'merge',
+			'rebase',
+			'cherry-pick',
+			'squash',
+		] as const) {
 			const result = LeanTurboConfigSchema.safeParse({
 				worktree_isolation: true,
 				merge_strategy: strategy,

@@ -116,6 +116,17 @@ function makeConfig(): Record<string, unknown> {
 	};
 }
 
+async function runConfirmedClose(args: string[] = []): Promise<string> {
+	const preview = await handleCloseCommand(testDir, args);
+	const token = /--confirm=([0-9a-f]{24})/.exec(preview)?.[1];
+	if (!token) {
+		throw new Error(
+			`close preview did not issue a confirmation token: ${preview}`,
+		);
+	}
+	return handleCloseCommand(testDir, [...args, `--confirm=${token}`]);
+}
+
 // ── Test suites ──────────────────────────────────────────────────────
 
 describe('handleCloseCommand — finalize lock (FR-012)', () => {
@@ -227,7 +238,7 @@ describe('handleCloseCommand — finalize lock (FR-012)', () => {
 				release: mockRelease,
 			}));
 
-			await handleCloseCommand(testDir, []);
+			await runConfirmedClose();
 
 			expect(mockRelease).toHaveBeenCalledTimes(1);
 		});
@@ -241,7 +252,7 @@ describe('handleCloseCommand — finalize lock (FR-012)', () => {
 				release: mockRelease,
 			}));
 
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose();
 
 			expect(result).toContain('finalized');
 			expect(result).not.toContain('❌');
@@ -266,9 +277,7 @@ describe('handleCloseCommand — finalize lock (FR-012)', () => {
 			};
 
 			// The error should propagate out of handleCloseCommand
-			await expect(handleCloseCommand(testDir, [])).rejects.toThrow(
-				'Config load failed',
-			);
+			await expect(runConfirmedClose()).rejects.toThrow('Config load failed');
 
 			// release() must still have been called exactly once
 			expect(mockRelease).toHaveBeenCalledTimes(1);

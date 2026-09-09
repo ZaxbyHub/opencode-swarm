@@ -304,7 +304,7 @@ describe('recoverMergeBackFromImmutableCoordinates', () => {
 
 		expect(result).toMatchObject({
 			error:
-				'Primary checkout has overlapping dirty paths with incoming preserved lane changes: shared.txt',
+				'Primary checkout has overlapping dirty paths with incoming preserved lane changes: shared.txt. Preserved lane is retained. Review listed paths, commit or stash primary changes, then re-run merge.',
 		});
 		expect(readFileNormalized(path.join(fixture.root, 'shared.txt'))).toBe(
 			'primary dirty\n',

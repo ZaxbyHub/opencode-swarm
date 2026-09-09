@@ -2913,7 +2913,11 @@ export const WorktreeIsolationConfigSchema = z.object({
 	 * disabled: preserve current shared-tree behavior.
 	 */
 	policy: z.enum(['auto', 'required', 'disabled']).default('auto'),
-	merge_strategy: z.enum(['merge', 'rebase', 'cherry-pick']).default('merge'),
+	// Standard lane settlement is a reviewable worktree-only squash by default.
+	// Explicit legacy strategies remain available for compatibility.
+	merge_strategy: z
+		.enum(['merge', 'rebase', 'cherry-pick', 'squash'])
+		.default('squash'),
 	worktree_dir: z.string().optional(),
 	deps_strategy: z.enum(['skip', 'copy', 'link']).default('skip'),
 	/**
@@ -3037,7 +3041,9 @@ export const LeanTurboConfigSchema = z.object({
 	worktree_isolation: z.boolean().default(true),
 	/** Branch merge strategy after lane worktree completion. */
 	merge_strategy: z
-		.enum(['merge', 'rebase', 'cherry-pick'])
+		// Lean Turbo retains its historical commit-landing default. Squash is
+		// accepted explicitly, but failure-lane semantics are otherwise unchanged.
+		.enum(['merge', 'rebase', 'cherry-pick', 'squash'])
 		.default('merge')
 		.optional(),
 	/** Optional user-specified worktree directory override. */

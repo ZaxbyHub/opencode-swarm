@@ -13,6 +13,7 @@ import path from 'node:path';
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 const realSnapshotWriter = await import(
@@ -214,7 +215,14 @@ export async function createCloseFinalizerHarness() {
 	const { handleCloseCommand, _internals: closeInternals } = await import(
 		'../../../src/commands/close.js'
 	);
+	const confirmedHandleCloseCommand = (
+		directory: string,
+		args: string[],
+		options?: Parameters<typeof handleCloseCommand>[2],
+	) => runConfirmedClose(handleCloseCommand, directory, args, options);
 	const realGetGitRepositoryStatus = closeInternals.getGitRepositoryStatus;
+	const realGetGitDestructiveInventory =
+		closeInternals.getGitDestructiveInventory;
 	const realResetToRemoteBranch = closeInternals.resetToRemoteBranch;
 	const realResetToMainAfterMerge = closeInternals.resetToMainAfterMerge;
 	const realResetSwarmStatePreservingSingletons =
@@ -299,6 +307,11 @@ export async function createCloseFinalizerHarness() {
 			warnings: [] as string[],
 		}));
 		closeInternals.getGitRepositoryStatus = mockGetGitRepositoryStatus;
+		closeInternals.getGitDestructiveInventory = () => ({
+			paths: [],
+			branchLabels: [],
+			headLabels: [],
+		});
 		closeInternals.resetToRemoteBranch = mockResetToRemoteBranch;
 		closeInternals.resetToMainAfterMerge = mockResetToMainAfterMerge;
 		closeInternals.resetSwarmStatePreservingSingletons =
@@ -334,6 +347,7 @@ export async function createCloseFinalizerHarness() {
 			// Ignore cleanup errors
 		}
 		closeInternals.getGitRepositoryStatus = realGetGitRepositoryStatus;
+		closeInternals.getGitDestructiveInventory = realGetGitDestructiveInventory;
 		closeInternals.resetToRemoteBranch = realResetToRemoteBranch;
 		closeInternals.resetToMainAfterMerge = realResetToMainAfterMerge;
 		closeInternals.resetSwarmStatePreservingSingletons =
@@ -347,7 +361,7 @@ export async function createCloseFinalizerHarness() {
 		},
 		swarmDir,
 		writePlan,
-		handleCloseCommand,
+		handleCloseCommand: confirmedHandleCloseCommand,
 		closeInternals,
 		mockExecuteWriteRetro,
 		mockCurateAndStoreSwarm,

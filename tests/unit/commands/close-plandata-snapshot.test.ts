@@ -24,6 +24,8 @@ const { handleCloseCommand, _internals: closeInternals } = await import(
 	'../../../src/commands/close.js'
 );
 
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
+
 // ── Save real _internals ──────────────────────────────────────────────────
 const realAcquireFinalizeLock = closeInternals.acquireFinalizeLock;
 const realLoadPluginConfigWithMeta = closeInternals.loadPluginConfigWithMeta;
@@ -208,7 +210,7 @@ afterEach(() => {
 describe('planData snapshot — success path', () => {
 	it('returns normal close output when closePlanTerminalState succeeds', async () => {
 		writePlan();
-		const result = await handleCloseCommand(testDir, []);
+		const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 		expect(result).toContain('finalized');
 		expect(result).not.toContain('❌');
@@ -226,7 +228,7 @@ describe('planData snapshot — failure path (FR-014/SC-013)', () => {
 			throw persistError;
 		});
 
-		const result = await handleCloseCommand(testDir, []);
+		const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 		expect(result).toContain('❌ Close paused');
 		expect(result).not.toContain('finalized');
@@ -256,7 +258,7 @@ describe('planData snapshot — failure path (FR-014/SC-013)', () => {
 			throw persistError;
 		});
 
-		const result = await handleCloseCommand(testDir, []);
+		const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 		expect(result).toContain('❌ Close paused');
 

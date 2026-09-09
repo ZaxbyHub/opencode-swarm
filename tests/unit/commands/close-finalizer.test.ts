@@ -28,6 +28,7 @@ import path from 'node:path';
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
@@ -249,10 +250,18 @@ mock.module('../../../src/services/skill-improver.js', () => ({
 }));
 
 // ── Import under test ────────────────────────────────────────────────
-const { handleCloseCommand, _internals: closeInternals } = await import(
-	'../../../src/commands/close.js'
-);
+const {
+	handleCloseCommand: rawHandleCloseCommand,
+	_internals: closeInternals,
+} = await import('../../../src/commands/close.js');
+const handleCloseCommand = (
+	directory: string,
+	args: string[],
+	options?: Parameters<typeof rawHandleCloseCommand>[2],
+) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
 const realGetGitRepositoryStatus = closeInternals.getGitRepositoryStatus;
+const realGetGitDestructiveInventory =
+	closeInternals.getGitDestructiveInventory;
 const realResetToRemoteBranch = closeInternals.resetToRemoteBranch;
 const realResetToMainAfterMerge = closeInternals.resetToMainAfterMerge;
 const realResetSwarmStatePreservingSingletons =
@@ -358,6 +367,11 @@ describe('handleCloseCommand — finalizer stages', () => {
 			warnings: [] as string[],
 		}));
 		closeInternals.getGitRepositoryStatus = mockGetGitRepositoryStatus;
+		closeInternals.getGitDestructiveInventory = () => ({
+			paths: [],
+			branchLabels: [],
+			headLabels: [],
+		});
 		closeInternals.resetToRemoteBranch = mockResetToRemoteBranch;
 		closeInternals.resetToMainAfterMerge = mockResetToMainAfterMerge;
 		// close.ts's call site (L1884) goes through
@@ -406,6 +420,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 			// Ignore cleanup errors
 		}
 		closeInternals.getGitRepositoryStatus = realGetGitRepositoryStatus;
+		closeInternals.getGitDestructiveInventory = realGetGitDestructiveInventory;
 		closeInternals.resetToRemoteBranch = realResetToRemoteBranch;
 		closeInternals.resetToMainAfterMerge = realResetToMainAfterMerge;
 		// Restore the original reference so it doesn't leak into other test

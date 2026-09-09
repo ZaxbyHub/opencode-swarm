@@ -32,6 +32,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 const realSnapshotWriter = await import(
 	'../../../src/session/snapshot-writer.js'
@@ -130,9 +131,13 @@ mock.module('../../../src/plan/checkpoint.js', () => ({
 	writeCheckpoint: async () => {},
 }));
 
-const { handleCloseCommand, runCleanStage } = await import(
-	'../../../src/commands/close.js'
-);
+const { handleCloseCommand: rawHandleCloseCommand, runCleanStage } =
+	await import('../../../src/commands/close.js');
+const handleCloseCommand = (
+	directory: string,
+	args: string[] = [],
+	options?: Parameters<typeof rawHandleCloseCommand>[2],
+) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
 
 let testDir: string;
 

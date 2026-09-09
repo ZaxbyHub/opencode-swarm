@@ -22,17 +22,23 @@ import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 import { savePlan } from '../../../src/plan/manager.js';
 import { installCloseCommandMocks } from '../../helpers/close-command-mocks';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { runConfirmedClose } from '../commands/close-confirmation-test-helpers.js';
 
 installCloseCommandMocks();
 
 const {
-	handleCloseCommand,
+	handleCloseCommand: rawHandleCloseCommand,
 	removeSqliteSidecarsAfterClose,
 	ARCHIVE_ARTIFACTS,
 	ACTIVE_STATE_TO_CLEAN,
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	_internals,
 } = await import('../../../src/commands/close.js');
+const handleCloseCommand = (
+	directory: string,
+	args: string[] = [],
+	options?: Parameters<typeof rawHandleCloseCommand>[2],
+) => runConfirmedClose(rawHandleCloseCommand, directory, args, options);
 
 let testDir: string;
 const swarmDir = (): string => path.join(testDir, '.swarm');

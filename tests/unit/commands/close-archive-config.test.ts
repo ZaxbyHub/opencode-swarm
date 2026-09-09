@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 // ── Import under test ─────────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -205,7 +206,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 			},
 		);
 
-		await handleCloseCommand(testDir, []);
+		await runConfirmedClose(handleCloseCommand, testDir);
 
 		expect(captured).toBeDefined();
 		expect(captured![0]).toBe(60);
@@ -223,7 +224,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 			},
 		);
 
-		await handleCloseCommand(testDir, []);
+		await runConfirmedClose(handleCloseCommand, testDir);
 
 		expect(captured).toBeDefined();
 		expect(captured![0]).toBe(30);
@@ -242,7 +243,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 			},
 		);
 
-		await handleCloseCommand(testDir, []);
+		await runConfirmedClose(handleCloseCommand, testDir);
 
 		expect(captured).toBeDefined();
 		expect(captured![0]).toBe(30);
@@ -261,7 +262,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 			return [];
 		});
 
-		await handleCloseCommand(testDir, []);
+		await runConfirmedClose(handleCloseCommand, testDir);
 
 		expect(capturedDir).toBe(testDir);
 	});
@@ -283,7 +284,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 			return [];
 		});
 
-		await handleCloseCommand(testDir, []);
+		await runConfirmedClose(handleCloseCommand, testDir);
 
 		// archiveEvidence(directory, maxAgeDays, maxBundles, options) — the
 		// 4th arg must be the report-options object carrying the cache caps.
@@ -309,7 +310,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 			return [];
 		});
 
-		await handleCloseCommand(testDir, []);
+		await runConfirmedClose(handleCloseCommand, testDir);
 
 		expect(capturedArgs).toHaveLength(4);
 		const opts = capturedArgs[3] as Record<string, unknown>;

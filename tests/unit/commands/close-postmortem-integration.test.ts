@@ -18,6 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { savePlan } from '../../../src/plan/manager';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -210,7 +211,7 @@ describe('handleCloseCommand — post-mortem integration (FR-001)', () => {
 		});
 
 		it('calls runCuratorPostMortem when postmortem_enabled=true', async () => {
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 			expect(closeInternals.runCuratorPostMortem).toHaveBeenCalledTimes(1);
 			expect(result).toContain('finalized');
@@ -225,7 +226,7 @@ describe('handleCloseCommand — post-mortem integration (FR-001)', () => {
 				warnings: [],
 			}));
 
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 			expect(result).toContain('**Post-Mortem:**');
 			expect(result).toContain('Post-mortem summary for integration test.');
@@ -247,7 +248,7 @@ describe('handleCloseCommand — post-mortem integration (FR-001)', () => {
 		});
 
 		it('does NOT call runCuratorPostMortem when postmortem_enabled=false', async () => {
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 			expect(closeInternals.runCuratorPostMortem).not.toHaveBeenCalled();
 			expect(result).not.toContain('**Post-Mortem:**');
@@ -266,7 +267,7 @@ describe('handleCloseCommand — post-mortem integration (FR-001)', () => {
 		});
 
 		it('includes Post-mortem failed diagnostic warning when runCuratorPostMortem throws', async () => {
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 			expect(result).toContain('Post-mortem failed:');
 			expect(result).toContain('Simulated post-mortem failure');
@@ -274,7 +275,7 @@ describe('handleCloseCommand — post-mortem integration (FR-001)', () => {
 		});
 
 		it('does not include Post-Mortem section when post-mortem throws', async () => {
-			const result = await handleCloseCommand(testDir, []);
+			const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 			expect(result).not.toContain('**Post-Mortem:**');
 		});

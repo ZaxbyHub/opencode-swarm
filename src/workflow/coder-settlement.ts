@@ -788,15 +788,18 @@ async function cleanupRecoveredWorktree(
 			mergeStrategy: descriptor.mergeStrategy,
 			queuedAt: Date.now(),
 		});
-	if (hasResidue) {
-		await cleanupStandardWorktreeForCallId(
-			descriptor.callID,
-			'success',
-			directory,
-			descriptor.worktreeDir ?? undefined,
-		);
-	}
-	if (existsSync(descriptor.worktreePath) || branchExists()) {
+	const cleanupResult = hasResidue
+		? await cleanupStandardWorktreeForCallId(
+				descriptor.callID,
+				'success',
+				directory,
+				descriptor.worktreeDir ?? undefined,
+			)
+		: undefined;
+	if (
+		existsSync(descriptor.worktreePath) ||
+		(branchExists() && cleanupResult?.preservedRecoveryLane !== true)
+	) {
 		throw new Error('CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED');
 	}
 	const provisioningOwner =

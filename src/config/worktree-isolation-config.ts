@@ -31,5 +31,7 @@ export function resolveWorktreeIsolationConfig(
 				DEFAULT_WORKTREE_ISOLATION_CONFIG.runtime_isolation,
 		};
 	}
+	// The standard path inherits DEFAULT_WORKTREE_ISOLATION_CONFIG, whose
+	// squash default is intentionally distinct from Lean Turbo's explicit merge.
 	return DEFAULT_WORKTREE_ISOLATION_CONFIG;
 }

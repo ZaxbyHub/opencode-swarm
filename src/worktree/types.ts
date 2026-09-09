@@ -1,6 +1,6 @@
 export type WorktreePurpose = 'lane' | 'session';
 
-export type MergeStrategy = 'merge' | 'rebase' | 'cherry-pick';
+export type MergeStrategy = 'merge' | 'rebase' | 'cherry-pick' | 'squash';
 
 export type DependencyPreparationStrategy = 'skip' | 'copy' | 'link';
 

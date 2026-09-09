@@ -1246,8 +1246,8 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Use /swarm finalize to finalize the swarm project and archive evidence',
 		details:
-			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs aggressive git reset --hard to the default remote branch, discarding uncommitted changes and gitignored build artifacts (user-created untracked files are preserved); falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed. WARNING: alignment discards local changes and gitignored files. Resets agent sessions, delegation chains, and active-agent mappings. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Cleanup: knowledge.jsonl is preserved; plan.json, plan.md, events.jsonl, handoff.*, run-memory.jsonl, and summaries/ are removed. Use --skill-review to run the quota-bounded skill_improver in proposal mode. Use --dry-run to preview what finalize would archive, clean, and align without taking the lock or changing anything.',
-		args: '--prune-branches, --skill-review, --dry-run',
+			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs aggressive git reset --hard to the default remote branch, discarding uncommitted changes and gitignored build artifacts (user-created untracked files are preserved); falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed. Before any destructive cleanup or alignment, finalize prints an exact inventory and requires a one-shot `--confirm=<token>` received from the preview; the inventory is revalidated after the lock and a changed scope aborts without mutation. Resets agent sessions, delegation chains, and active-agent mappings. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Cleanup: knowledge.jsonl is preserved; plan.json, plan.md, events.jsonl, handoff.*, run-memory.jsonl, and summaries/ are removed. Use --skill-review to run the quota-bounded skill_improver in proposal mode. Use --dry-run to preview what finalize would archive, clean, and align without taking the lock or changing anything.',
+		args: '--prune-branches, --skill-review, --dry-run, --confirm=<token>',
 		category: 'core',
 		toolPolicy: 'none',
 	},
@@ -1256,7 +1256,7 @@ export const COMMAND_REGISTRY = {
 			'Use /swarm close (deprecated alias) to finalize and archive swarm state',
 		details:
 			'Deprecated alias for /swarm finalize. Preserved for backward compatibility. Supports the same flags, including --dry-run.',
-		args: '--prune-branches, --skill-review, --dry-run',
+		args: '--prune-branches, --skill-review, --dry-run, --confirm=<token>',
 		category: 'core',
 		aliasOf: 'finalize',
 		deprecated: true,

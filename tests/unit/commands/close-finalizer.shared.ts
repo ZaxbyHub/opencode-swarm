@@ -16,6 +16,7 @@ import path from 'node:path';
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 const realSnapshotWriter = await import(
@@ -150,6 +151,9 @@ let closeInternals: CloseModule['_internals'] | undefined;
 let realGetGitRepositoryStatus:
 	| CloseModule['_internals']['getGitRepositoryStatus']
 	| undefined;
+let realGetGitDestructiveInventory:
+	| CloseModule['_internals']['getGitDestructiveInventory']
+	| undefined;
 let realResetToRemoteBranch:
 	| CloseModule['_internals']['resetToRemoteBranch']
 	| undefined;
@@ -215,7 +219,13 @@ export async function initializeCloseFinalizerHarness(): Promise<{
 }> {
 	if (closeModule && closeInternals) {
 		return {
-			handleCloseCommand: closeModule.handleCloseCommand,
+			handleCloseCommand: (directory, args, options) =>
+				runConfirmedClose(
+					closeModule!.handleCloseCommand,
+					directory,
+					args,
+					options,
+				),
 			closeInternals,
 			mockExecuteWriteRetro,
 			mockCurateAndStoreSwarm,
@@ -308,7 +318,19 @@ export async function initializeCloseFinalizerHarness(): Promise<{
 
 	closeModule = await import('../../../src/commands/close.js');
 	closeInternals = closeModule._internals;
+	const confirmedHandleCloseCommand = (
+		directory: string,
+		args: string[],
+		options?: Parameters<typeof closeModule.handleCloseCommand>[2],
+	) =>
+		runConfirmedClose(
+			closeModule!.handleCloseCommand,
+			directory,
+			args,
+			options,
+		);
 	realGetGitRepositoryStatus = closeInternals.getGitRepositoryStatus;
+	realGetGitDestructiveInventory = closeInternals.getGitDestructiveInventory;
 	realResetToRemoteBranch = closeInternals.resetToRemoteBranch;
 	realResetToMainAfterMerge = closeInternals.resetToMainAfterMerge;
 	realResetSwarmStatePreservingSingletons =
@@ -317,7 +339,7 @@ export async function initializeCloseFinalizerHarness(): Promise<{
 	resetState();
 
 	return {
-		handleCloseCommand: closeModule.handleCloseCommand,
+		handleCloseCommand: confirmedHandleCloseCommand,
 		closeInternals,
 		mockExecuteWriteRetro,
 		mockCurateAndStoreSwarm,
@@ -374,6 +396,11 @@ export function resetState(): void {
 		warnings: [] as string[],
 	}));
 	closeInternals.getGitRepositoryStatus = mockGetGitRepositoryStatus;
+	closeInternals.getGitDestructiveInventory = () => ({
+		paths: [],
+		branchLabels: [],
+		headLabels: [],
+	});
 	closeInternals.resetToRemoteBranch = mockResetToRemoteBranch;
 	closeInternals.resetToMainAfterMerge = mockResetToMainAfterMerge;
 	closeInternals.resetSwarmStatePreservingSingletons =
@@ -390,6 +417,8 @@ export function restoreInternals(): void {
 
 	closeInternals.getGitRepositoryStatus =
 		realGetGitRepositoryStatus ?? closeInternals.getGitRepositoryStatus;
+	closeInternals.getGitDestructiveInventory =
+		realGetGitDestructiveInventory ?? closeInternals.getGitDestructiveInventory;
 	closeInternals.resetToRemoteBranch =
 		realResetToRemoteBranch ?? closeInternals.resetToRemoteBranch;
 	closeInternals.resetToMainAfterMerge =

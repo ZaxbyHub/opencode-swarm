@@ -360,7 +360,7 @@ export interface BackgroundWorktreeDescriptor {
 	branchName: string;
 	worktreeId: string;
 	worktreeSessionId: string;
-	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
+	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick' | 'squash';
 	laneIndex: number;
 	worktreeDir: string | null;
 	reservationId?: string;
@@ -511,6 +511,9 @@ export interface BackgroundCoderSettlement {
 	operationId?: string;
 	sourceHeadAfterCommit?: string | null;
 	targetHeadBeforeMerge?: string | null;
+	/** Synthetic squash tree and exact changed paths captured before apply. */
+	resultTree?: string;
+	changedPaths?: string[];
 	observedFiles: string[] | null;
 	outcome?: BackgroundCoderSettlementOutcome;
 	updatedAt: number;
@@ -686,7 +689,7 @@ const WorktreeDescriptorSchema = z
 		branchName: z.string().min(1).max(1_024),
 		worktreeId: z.string().min(1).max(256),
 		worktreeSessionId: z.string().min(1).max(256),
-		mergeStrategy: z.enum(['merge', 'rebase', 'cherry-pick']),
+		mergeStrategy: z.enum(['merge', 'rebase', 'cherry-pick', 'squash']),
 		laneIndex: z.number().int().nonnegative().max(255),
 		worktreeDir: z.string().min(1).max(4_096).nullable(),
 		reservationId: z.string().min(1).max(512).optional(),
@@ -746,6 +749,20 @@ const CoderSettlementSchema = z
 		operationId: z.string().min(1).max(256).optional(),
 		sourceHeadAfterCommit: z.string().min(1).max(256).nullable().optional(),
 		targetHeadBeforeMerge: z.string().min(1).max(256).nullable().optional(),
+		resultTree: z
+			.string()
+			.regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
+			.optional(),
+		changedPaths: z
+			.array(
+				z
+					.string()
+					.min(1)
+					.max(4_096)
+					.refine((value) => !value.includes('\0')),
+			)
+			.max(50_000)
+			.optional(),
 		observedFiles: z
 			.array(NormalizedObservedFileSchema)
 			.max(MAX_BACKGROUND_OBSERVED_FILES)
@@ -768,6 +785,16 @@ const CoderSettlementSchema = z
 			context.addIssue({
 				code: z.ZodIssueCode.custom,
 				message: 'terminal settlement state requires outcome',
+			});
+		}
+		if (
+			(value.resultTree === undefined) !==
+			(value.changedPaths === undefined)
+		) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				message:
+					'squash settlement artifact requires resultTree and changedPaths together',
 			});
 		}
 	});
@@ -3917,6 +3944,8 @@ export interface UpdateCoderSettlementInput {
 	state: 'settling' | 'settled' | 'preserved';
 	sourceHeadAfterCommit?: string | null;
 	targetHeadBeforeMerge?: string | null;
+	resultTree?: string;
+	changedPaths?: string[];
 	observedFiles?: string[] | null;
 	outcome?: BackgroundCoderSettlementOutcome;
 }
@@ -4022,6 +4051,12 @@ export async function updateCoderSettlement(
 						: {}),
 					...(input.targetHeadBeforeMerge !== undefined
 						? { targetHeadBeforeMerge: input.targetHeadBeforeMerge }
+						: {}),
+					...(input.resultTree !== undefined
+						? { resultTree: input.resultTree }
+						: {}),
+					...(input.changedPaths !== undefined
+						? { changedPaths: [...input.changedPaths] }
 						: {}),
 					observedFiles,
 					...(input.outcome ? { outcome: input.outcome } : {}),

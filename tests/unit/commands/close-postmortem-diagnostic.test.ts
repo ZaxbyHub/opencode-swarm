@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { savePlan } from '../../../src/plan/manager';
+import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -199,7 +200,7 @@ describe('handleCloseCommand — post-mortem diagnostic catch (FR-005)', () => {
 			throw new Error(errorMessage);
 		});
 
-		const result = await handleCloseCommand(testDir, []);
+		const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 		// Fail-open: close must still succeed
 		expect(result).toContain('finalized');
@@ -215,7 +216,7 @@ describe('handleCloseCommand — post-mortem diagnostic catch (FR-005)', () => {
 			throw 'plain string error from post-mortem';
 		});
 
-		const result = await handleCloseCommand(testDir, []);
+		const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 		// Fail-open: close must still succeed
 		expect(result).toContain('finalized');
@@ -233,7 +234,7 @@ describe('handleCloseCommand — post-mortem diagnostic catch (FR-005)', () => {
 			throw null;
 		});
 
-		const result = await handleCloseCommand(testDir, []);
+		const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 		// Fail-open: close must still succeed
 		expect(result).toContain('finalized');
@@ -248,7 +249,7 @@ describe('handleCloseCommand — post-mortem diagnostic catch (FR-005)', () => {
 			throw undefined;
 		});
 
-		const result = await handleCloseCommand(testDir, []);
+		const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 		// Fail-open: close must still succeed
 		expect(result).toContain('finalized');
@@ -263,7 +264,7 @@ describe('handleCloseCommand — post-mortem diagnostic catch (FR-005)', () => {
 			throw thrown;
 		});
 
-		const result = await handleCloseCommand(testDir, []);
+		const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 		// Fail-open: close must still succeed
 		expect(result).toContain('finalized');
@@ -278,7 +279,7 @@ describe('handleCloseCommand — post-mortem diagnostic catch (FR-005)', () => {
 			throw new Error('irreversible catastrophe');
 		});
 
-		const result = await handleCloseCommand(testDir, []);
+		const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 		// The command must not throw — fail-open means post-mortem never blocks finalize
 		expect(result).toContain('finalized');
@@ -298,7 +299,7 @@ describe('handleCloseCommand — post-mortem diagnostic catch (FR-005)', () => {
 			warnings: [],
 		}));
 
-		const result = await handleCloseCommand(testDir, []);
+		const result = await runConfirmedClose(handleCloseCommand, testDir);
 
 		expect(result).toContain('finalized');
 		// No error warning when post-mortem succeeds
