@@ -235,14 +235,44 @@ describe('stage-a-route-events', () => {
 		});
 
 		test(`non-authoritative evidence never classifies as duplicate (guardrails ${enabled ? 'on' : 'off'})`, async () => {
-			// No durable evidence at all + no pending correlation + a session
-			// whose currentTaskId points at a task that was never settled: the
-			// duplicate predicate must fail closed (authoritative===true is a
-			// precondition) instead of misclassifying.
-			await drive(enabled, 'c-nonauth', PASS_PAYLOAD, 'none');
+			// Production-shaped evidence whose workflow metadata is made
+			// NON-authoritative (schema !== 'exact-task-v1') while its
+			// lastTransitionId equals this call's pre-check receipt.
+			// Without the authoritative precondition this exact shape
+			// misclassifies the replay as duplicate_result (the R1-F4
+			// fail-open window); the precondition fails it closed.
+			await settle('1.1');
+			const evidencePath = path.join(
+				directory,
+				'.swarm',
+				'evidence',
+				'1.1.json',
+			);
+			const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8')) as {
+				workflow: Record<string, unknown>;
+			};
+			evidence.workflow = {
+				...evidence.workflow,
+				schema: 'legacy-v0',
+				lastTransitionId: 'pre-check:c-nonauth',
+				lastOutcome: 'stage_a_passed',
+			};
+			fs.writeFileSync(evidencePath, JSON.stringify(evidence));
+			const session = ensureAgentSession('architect');
+			session.currentTaskId = '1.1';
+			const hooks = createGuardrailsHooks(directory, config(enabled));
+			await hooks.toolAfter(
+				{
+					tool: 'pre_check_batch',
+					sessionID: 'architect',
+					callID: 'c-nonauth',
+				},
+				{ title: '', output: PASS_PAYLOAD, metadata: null },
+			);
 			const events = routeEvents(directory);
 			expect(events).toHaveLength(1);
 			expect(events[0]?.route).toBe('no_task_correlation');
+			expect(events[0]?.taskId).toBeNull();
 		});
 	}
 
