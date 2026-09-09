@@ -12,6 +12,7 @@ import { buildActionMenu } from '../../services/session-reflection';
 import { closeSnapshotCoordinationInitialization } from '../../session/snapshot-coordination-init.js';
 import { hasActiveFullAuto, swarmState } from '../../state';
 import { atomicWriteSwarmFile } from '../../utils/atomic-write';
+import { resolveGitExecutable } from '../../utils/git-executable.js';
 import { log } from '../../utils/logger';
 import {
 	consumeConfirmToken,
@@ -59,7 +60,7 @@ export interface ClosePurgeGate {
 }
 
 function runCloseGateGit(args: string[], cwd: string): string | null {
-	const result = spawnSync('git', args, {
+	const result = spawnSync(resolveGitExecutable(), args, {
 		cwd,
 		encoding: 'utf8',
 		timeout: 10_000,
