@@ -7,3 +7,5 @@ Hardens the gated implementation pipeline’s publication path:
 - Issue URL references now discard query strings and fragments before deriving
   the implementation branch and pull-request metadata, with regression coverage
   for fragment-bearing URLs.
+- Malformed `/issues/<non-number>` references are rejected before pipeline
+  side effects with the standard parse diagnostic.

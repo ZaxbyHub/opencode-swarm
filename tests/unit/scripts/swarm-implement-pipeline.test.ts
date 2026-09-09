@@ -101,6 +101,21 @@ describe('swarm-implement pipeline driver (#2498)', () => {
 		).toContain('swarm/implement-2650');
 	}, 30000);
 
+	test('malformed issue URLs fail before pipeline side effects', () => {
+		const repo = makeDemoRepo();
+		const result = runPipeline(
+			repo,
+			['https://github.com/example/project/issues/triage'],
+			{ SWARM_PIPELINE_DRY_RUN: '1' },
+		);
+
+		expect(result.status).toBe(3);
+		expect(result.stderr).toContain('cannot parse an issue number');
+		expect(
+			existsSync(path.join(repo, '.swarm/pipeline-evidence/phases.txt')),
+		).toBe(false);
+	}, 30000);
+
 	test('dry run creates the branch, evidence bundle, and PR body; second run is idempotent', () => {
 		const repo = makeDemoRepo();
 		const first = runPipeline(repo, ['1234'], { SWARM_PIPELINE_DRY_RUN: '1' });

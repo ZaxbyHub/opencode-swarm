@@ -58,7 +58,13 @@ issue_number_from_ref() {
 			local issue_path="${1#*/issues/}"
 			issue_path="${issue_path%%\?*}"
 			issue_path="${issue_path%%\#*}"
-			printf '%s\n' "$issue_path"
+			if [[ "$issue_path" =~ ^[0-9]+$ ]]; then
+				printf '%s\n' "$issue_path"
+			else
+				# Keep the assignment successful under set -e so the shared
+				# validation below emits the standard parse error and exit 3.
+				printf '\n'
+			fi
 			;;
 		*'#'*) printf '%s\n' "$1" | sed 's/^.*#//' ;;
 		*) printf '%s\n' "$1" ;;
