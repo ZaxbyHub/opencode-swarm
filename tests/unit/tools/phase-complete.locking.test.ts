@@ -98,7 +98,10 @@ vi.mock('../../../src/plan/manager', () => ({
 	loadPlan: vi.fn().mockResolvedValue({
 		phases: [{ id: 1, status: 'in_progress', tasks: [] }],
 	}),
-	savePlan: vi.fn().mockResolvedValue(undefined),
+	savePlan: vi.fn().mockResolvedValue({
+		durability: 'complete',
+		degraded_surfaces: [],
+	}),
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
 }));
@@ -164,9 +167,11 @@ vi.mock('../../../src/config/schema', () => ({
 
 // Import mocked modules after vi.mock calls
 import { tryAcquireLock } from '../../../src/parallel/file-locks';
+import { savePlan } from '../../../src/plan/manager';
 import { ensureAgentSession } from '../../../src/state';
 
 const mockTryAcquireLock = tryAcquireLock as ReturnType<typeof vi.fn>;
+const mockSavePlan = savePlan as ReturnType<typeof vi.fn>;
 
 describe('executePhaseComplete locking behavior', () => {
 	// #2039: the events store lock is the seam's wx lock — assert no leak.
@@ -260,6 +265,12 @@ describe('executePhaseComplete locking behavior', () => {
 
 		// Reset mocks
 		vi.clearAllMocks();
+		// clearAllMocks resets the savePlan default-resolve; re-arm it with the
+		// PlanSaveDurability shape phase_complete reads back (#2531).
+		mockSavePlan.mockResolvedValue({
+			durability: 'complete',
+			degraded_surfaces: [],
+		});
 	});
 
 	afterEach(() => {
