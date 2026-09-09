@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.172.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.0...v7.172.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **plan:** ledger-first recovery, fatal bootstrap decode, snapshot validation, save verification ([#2531](https://github.com/ZaxbyHub/opencode-swarm/issues/2531)) ([9811f52](https://github.com/ZaxbyHub/opencode-swarm/commit/9811f52c33930de710e490afa08603ec207adfbb))
+
 ## [7.172.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.171.2...v7.172.0) (2026-09-09)
 
 
