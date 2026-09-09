@@ -8,7 +8,12 @@
  * treatment.
  */
 
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+	createHash,
+	createHmac,
+	randomBytes,
+	timingSafeEqual,
+} from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
@@ -243,14 +248,22 @@ export function buildReviewRoutePending(input: {
 }
 
 function routeReceiptRelativePath(sessionId: string, taskId: string): string {
-	const safeSession = normalizedIdentity(sessionId, 'sessionId').replace(
-		/[^A-Za-z0-9_.-]/g,
-		'_',
-	);
-	const safeTask = normalizedIdentity(taskId, 'taskId').replace(
-		/[^A-Za-z0-9_.-]/g,
-		'_',
-	);
+	// Encode each identity into an alphabet that cannot contain the `--`
+	// separator. The previous sanitization preserved hyphens, so pairs such as
+	// (a--b, c) and (a, b--c) addressed the same receipt path.
+	const encodeIdentity = (value: string, label: string): string => {
+		const normalized = normalizedIdentity(value, label);
+		const encoded = Buffer.from(normalized, 'utf8')
+			.toString('base64url')
+			.replace(/-/g, '~');
+		// Keep filename components below common filesystem limits while retaining
+		// a deterministic, separator-free identity key.
+		return encoded.length <= 180
+			? encoded
+			: `sha256_${createHash('sha256').update(normalized, 'utf8').digest('hex')}`;
+	};
+	const safeSession = encodeIdentity(sessionId, 'sessionId');
+	const safeTask = encodeIdentity(taskId, 'taskId');
 	return path.join(
 		'pr-review',
 		'route-receipts',
@@ -316,8 +329,21 @@ const MAX_ROUTE_RECEIPT_BYTES = 64 * 1024;
 const ROUTE_RECEIPT_SECRET_FILE = 'review-route-receipts.key';
 const ROUTE_RECEIPT_MAC_CONTEXT = 'opencode-swarm/review-route-receipt/v1\0';
 
-function routeReceiptSecretPath(): string {
-	return path.join(resolveHiveDataDir(), ROUTE_RECEIPT_SECRET_FILE);
+function routeReceiptSecretPath(projectRoot?: string): string {
+	const hiveDir = path.resolve(resolveHiveDataDir());
+	if (projectRoot) {
+		const root = path.resolve(projectRoot);
+		const relative = path.relative(root, hiveDir);
+		if (
+			relative === '' ||
+			(!path.isAbsolute(relative) && !relative.startsWith(`..${path.sep}`))
+		) {
+			throw new Error(
+				'ROUTE_RECEIPT_SECRET_UNSAFE_PATH: app-data key path is inside the project root',
+			);
+		}
+	}
+	return path.join(hiveDir, ROUTE_RECEIPT_SECRET_FILE);
 }
 
 function parseRouteReceiptSecret(raw: string): Buffer | null {
@@ -325,8 +351,8 @@ function parseRouteReceiptSecret(raw: string): Buffer | null {
 	return /^[0-9a-f]{64}$/.test(value) ? Buffer.from(value, 'hex') : null;
 }
 
-async function readRouteReceiptSecret(): Promise<Buffer> {
-	const secretPath = routeReceiptSecretPath();
+async function readRouteReceiptSecret(projectRoot?: string): Promise<Buffer> {
+	const secretPath = routeReceiptSecretPath(projectRoot);
 	try {
 		const stat = await fsp.lstat(secretPath);
 		if (stat.isSymbolicLink() || !stat.isFile()) {
@@ -353,7 +379,7 @@ async function readRouteReceiptSecret(): Promise<Buffer> {
 		});
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-		return readRouteReceiptSecret();
+		return readRouteReceiptSecret(projectRoot);
 	}
 	try {
 		await fsp.chmod(secretPath, 0o600);
@@ -364,13 +390,19 @@ async function readRouteReceiptSecret(): Promise<Buffer> {
 	return generated;
 }
 
-function readRouteReceiptSecretSync(): Buffer | null {
+function readRouteReceiptSecretSync(projectRoot?: string): Buffer | null {
 	try {
-		const secretPath = routeReceiptSecretPath();
+		const secretPath = routeReceiptSecretPath(projectRoot);
 		const stat = fs.lstatSync(secretPath);
 		if (stat.isSymbolicLink() || !stat.isFile()) return null;
 		return parseRouteReceiptSecret(fs.readFileSync(secretPath, 'utf8'));
-	} catch {
+	} catch (error) {
+		if (
+			error instanceof Error &&
+			error.message.startsWith('ROUTE_RECEIPT_SECRET_UNSAFE_PATH:')
+		) {
+			throw error;
+		}
 		// A missing/unreadable user secret must fail closed at the receipt gate.
 		return null;
 	}
@@ -425,8 +457,15 @@ function hasValidRouteReceiptMac(
 function authenticatePersistedRouteReceipt(
 	receipt: ReviewRouteRecord,
 	secret: Buffer | null,
-): ReviewRouteRecord | null {
-	return hasValidRouteReceiptMac(receipt, secret) ? receipt : null;
+): ReviewRouteRecord {
+	if (hasValidRouteReceiptMac(receipt, secret)) return receipt;
+	// A missing receipt is represented by null at the file-read boundary. Once
+	// a bounded, schema-valid file exists, an absent or invalid MAC is a distinct
+	// authentication failure so operators and callers can tell corruption from
+	// a dispatch that never wrote a receipt. Both outcomes remain fail-closed.
+	throw new Error(
+		'ROUTE_RECEIPT_AUTH_INVALID: receipt MAC is missing or invalid',
+	);
 }
 
 export async function persistReviewRouteReceipt(input: {
@@ -451,7 +490,10 @@ export async function persistReviewRouteReceipt(input: {
 	await ensureSafeParent(input.projectRoot, filePath);
 	const authenticated: ReviewRouteRecord = {
 		...parsed,
-		mac: computeRouteReceiptMac(parsed, await readRouteReceiptSecret()),
+		mac: computeRouteReceiptMac(
+			parsed,
+			await readRouteReceiptSecret(input.projectRoot),
+		),
 	};
 	const encoded = JSON.stringify(authenticated, null, 2);
 	if (Buffer.byteLength(encoded, 'utf8') > MAX_ROUTE_RECEIPT_BYTES) {
@@ -507,9 +549,8 @@ export async function readReviewRouteReceipt(input: {
 	}
 	const authenticated = authenticatePersistedRouteReceipt(
 		parsed.data,
-		readRouteReceiptSecretSync(),
+		readRouteReceiptSecretSync(input.projectRoot),
 	);
-	if (!authenticated) return null;
 	if (
 		(authenticated.kind === 'review_route_receipt' ||
 			authenticated.kind === 'review_route_pending') &&
@@ -583,9 +624,8 @@ export function readReviewRouteReceiptSync(input: {
 	}
 	const authenticated = authenticatePersistedRouteReceipt(
 		parsed.data,
-		readRouteReceiptSecretSync(),
+		readRouteReceiptSecretSync(input.projectRoot),
 	);
-	if (!authenticated) return null;
 	if (
 		(authenticated.kind === 'review_route_receipt' ||
 			authenticated.kind === 'review_route_pending') &&
@@ -793,11 +833,22 @@ export function enforcePersistedReviewRouteReceipt(input: {
 	if (!input.enforcementEnabled) {
 		return { canAdvance: true, mode: 'disabled' };
 	}
-	const route = readReviewRouteReceiptSync({
-		projectRoot: input.projectRoot,
-		sessionId: input.sessionId,
-		taskId: input.taskId,
-	});
+	let route: ReviewRouteRecord | null;
+	try {
+		route = readReviewRouteReceiptSync({
+			projectRoot: input.projectRoot,
+			sessionId: input.sessionId,
+			taskId: input.taskId,
+		});
+	} catch (error) {
+		if (
+			error instanceof Error &&
+			error.message.startsWith('ROUTE_RECEIPT_AUTH_INVALID:')
+		) {
+			return fail('ROUTE_RECEIPT_AUTH_INVALID');
+		}
+		throw error;
+	}
 	if (!route && input.legacyUnrouted) {
 		return {
 			canAdvance: true,

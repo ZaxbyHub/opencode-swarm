@@ -3260,17 +3260,21 @@ export function recordStageBCompletion(
 }
 
 /**
- * Record the identity-bearing Stage B receipt in the in-memory session
- * projection. The durable route receipt remains authoritative; this bounded
- * projection lets synchronous gate callers validate exact independent slots
- * without reconstructing identity from a boolean role marker.
+ * Reserve a bounded in-memory route-evidence slot and return a rollback for
+ * callers that still have to publish the corresponding durable evidence.
+ *
+ * The reservation remains visible while the caller awaits its durable write,
+ * which prevents concurrent completions from oversubscribing the 32-entry
+ * projection. If that write fails, invoking the rollback restores the exact
+ * prior slot (or removes a newly-added slot), so a retry is not poisoned by a
+ * failed attempt.
  */
-export function recordStageBRouteEvidence(
+export function reserveStageBRouteEvidence(
 	session: AgentSessionState,
 	taskId: string,
 	evidence: ReviewRouteEvidence,
-): void {
-	if (!isValidTaskId(taskId)) return;
+): (() => void) | null {
+	if (!isValidTaskId(taskId)) return null;
 	if (!session.stageBRouteEvidence) session.stageBRouteEvidence = new Map();
 	const entries = session.stageBRouteEvidence.get(taskId) ?? [];
 	const dispatchIdentity = (entry: ReviewRouteEvidence): string | null => {
@@ -3303,13 +3307,44 @@ export function recordStageBRouteEvidence(
 	if (existingIndex >= 0) {
 		// A retry replaces the same deterministic slot binding. Keeping one
 		// entry prevents a later successful retry from counting twice.
-		entries[existingIndex] = { ...evidence };
+		const previousEntry = entries[existingIndex];
+		const reservedEntry = { ...evidence };
+		entries[existingIndex] = reservedEntry;
 		session.stageBRouteEvidence.set(taskId, entries);
-		return;
+		return () => {
+			// Another completion may have reserved or settled a slot while the
+			// durable evidence write was in flight. Locate our exact token instead
+			// of relying on the original index, and never overwrite that newer
+			// completion when it has already replaced us.
+			if (session.stageBRouteEvidence?.get(taskId) !== entries) return;
+			const reservedIndex = entries.indexOf(reservedEntry);
+			if (reservedIndex < 0) return;
+			entries[reservedIndex] = previousEntry;
+		};
 	}
-	if (entries.length >= 32) return;
-	entries.push({ ...evidence });
+	if (entries.length >= 32) return null;
+	const reservedEntry = { ...evidence };
+	entries.push(reservedEntry);
 	session.stageBRouteEvidence.set(taskId, entries);
+	return () => {
+		// Do not require this reservation to remain the last entry. A concurrent
+		// completion can append its own slot before the durable write settles;
+		// removing by identity releases only the failed dispatch and preserves
+		// that later completion.
+		if (session.stageBRouteEvidence?.get(taskId) !== entries) return;
+		const reservedIndex = entries.indexOf(reservedEntry);
+		if (reservedIndex < 0) return;
+		entries.splice(reservedIndex, 1);
+		if (entries.length === 0) session.stageBRouteEvidence?.delete(taskId);
+	};
+}
+
+export function recordStageBRouteEvidence(
+	session: AgentSessionState,
+	taskId: string,
+	evidence: ReviewRouteEvidence,
+): boolean {
+	return reserveStageBRouteEvidence(session, taskId, evidence) !== null;
 }
 
 export function getStageBRouteEvidence(

@@ -1018,7 +1018,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		id: 'pr-review-run-artifacts',
 		category: 2,
 		pathGrammar:
-			'.swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, trigger-eval.json} + .swarm/pr-review/route-receipts/{session}--{task}.json',
+			'.swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, trigger-eval.json} + .swarm/pr-review/route-receipts/{encoded-session}--{encoded-task}.json',
 		canonicalRoot: 'project-swarm',
 		writerModules: [
 			'src/tools/write-pr-review-artifact.ts',
@@ -1031,22 +1031,22 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/tools/write-pr-review-artifact.ts:198/:255 — findings JSONL append (≤1000 records/call) + handoff JSON, atomic',
 			'src/tools/write-pr-review-trigger-eval.ts:574-591 — atomic write, refuses overwrite (:567-570)',
 			'src/background/pr-feedback-event-queue.ts:331 — feedback-handoff lock/content writes',
-			'src/review/routing-enforcement.ts:432 persistReviewRouteReceipt — schema-validated route-receipt replacement, atomic, ≤64 KiB',
+			'src/review/routing-enforcement.ts:471 persistReviewRouteReceipt — schema-validated route-receipt replacement, atomic, ≤64 KiB',
 		],
 		readerCitations: [
 			'src/tools/write-pr-review-artifact.ts:86-101 readFindings — 10 MiB read guard',
-			'src/review/routing-enforcement.ts:464 readReviewRouteReceipt — bounded regular-file read, ≤64 KiB',
-			'src/review/routing-enforcement.ts:538 readReviewRouteReceiptSync — bounded regular-file read, ≤64 KiB',
+			'src/review/routing-enforcement.ts:506 readReviewRouteReceipt — bounded regular-file read, ≤64 KiB',
+			'src/review/routing-enforcement.ts:579 readReviewRouteReceiptSync — bounded regular-file read, ≤64 KiB',
 		],
 		schemaVersion: 'per-artifact schemas (Zod-validated rows); review route receipts schema version 1',
 		stateClass: 'governed-content',
 		privacyClass: 'mixed',
 		writeLimits: {
-			bound: 'per-run: findings ≤1000 records/call + 10 MiB read guard; route receipts ≤64 KiB/file; pr-review entries age-prune at 30 d via the retention sweep (src/retention/sweep.ts:95)',
+			bound: 'per-run: findings ≤1000 records/call + 10 MiB read guard; route receipts ≤64 KiB/file and each receipt age-prunes at 30 d; run directories age-prune at 30 d via separate retention-sweep families (src/retention/sweep.ts:154-164)',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER: the retention sweep\'s pr-review-run-artifacts family age-prunes .swarm/pr-review/ entries at 30 d (src/retention/sweep.ts:95), so run-artifact and route-receipt entries are covered by the same sweep horizon.',
-			citation: 'src/tools/write-pr-review-artifact.ts:60,89; src/retention/sweep.ts:95',
+				'FINITE BY REAPER: the retention sweep age-prunes run directories and independently age-prunes each .swarm/pr-review/route-receipts/{encoded-session}--{encoded-task}.json file at 30 d, so one fresh receipt cannot keep stale project receipts alive (src/retention/sweep.ts:154-164).',
+			citation: 'src/tools/write-pr-review-artifact.ts:60,89; src/retention/sweep.ts:154-164',
 		},
 		readBound: { pattern: 'line-bounded', bound: '10 MiB findings read guard; route receipts 64 KiB hard read bound', sync: true, citation: 'src/tools/write-pr-review-artifact.ts:89; src/review/routing-enforcement.ts:319-345,388-416' },
 		lockModel: 'artifact-boundary assertions rather than file locks; route receipts use canonical atomic replacement',

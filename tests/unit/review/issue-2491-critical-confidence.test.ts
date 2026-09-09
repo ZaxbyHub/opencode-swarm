@@ -136,4 +136,14 @@ describe('issue #2491 — critical confidence preservation', () => {
 			effective_severity: 'critical',
 		});
 	});
+
+	test('reuses completed low-confidence CRITICAL evidence without integrity failure', async () => {
+		const first = await runReviewEngine(input());
+		const second = await runReviewEngine(input());
+
+		expect(first.findings[0].effective_severity).toBe('critical');
+		expect(second.message).toContain('Reused fresh auto-review evidence');
+		expect(second.modelCalls).toBe(0);
+		expect(second.findings[0].effective_severity).toBe('critical');
+	});
 });

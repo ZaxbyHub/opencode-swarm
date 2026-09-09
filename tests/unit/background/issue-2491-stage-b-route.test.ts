@@ -220,6 +220,93 @@ describe('background Stage-B route slots (issue #2491)', () => {
 		expect(getStageBRouteEvidence(session, taskId)).toHaveLength(2);
 	});
 
+	test('fails closed instead of silently dropping the 33rd route binding (FB-027)', () => {
+		const taskId = '1.3';
+		const session = swarmState.agentSessions.get('parent-2491')!;
+		for (let index = 0; index < 32; index += 1) {
+			expect(
+				recordStageBRouteEvidence(session, taskId, {
+					role: 'reviewer',
+					identity: `reviewer-${index}`,
+					sessionId: 'parent-2491',
+					taskId,
+					slotId: `${taskId}:reviewer:${index + 1}`,
+					callId: `review-call-${index}`,
+					childSessionId: `review-child-${index}`,
+					generation: 1,
+				}),
+			).toBe(true);
+		}
+		expect(
+			recordStageBRouteEvidence(session, taskId, {
+				role: 'reviewer',
+				identity: 'reviewer-overflow',
+				sessionId: 'parent-2491',
+				taskId,
+				slotId: `${taskId}:reviewer:33`,
+				callId: 'review-call-overflow',
+				childSessionId: 'review-child-overflow',
+				generation: 1,
+			}),
+		).toBe(false);
+		expect(getStageBRouteEvidence(session, taskId)).toHaveLength(32);
+	});
+
+	test('capacity rejection happens before durable gate evidence publication (NEW-001)', async () => {
+		const taskId = '1.30';
+		await prepareTask(taskId);
+		fs.writeFileSync(
+			path.join(directory, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ review_routing: { enforce_receipts: false } }),
+		);
+		await persistReviewRouteReceipt({
+			projectRoot: directory,
+			receipt: buildReviewRouteReceipt({
+				sessionId: 'parent-2491',
+				taskId,
+				complexity: 'single',
+				semanticRisk: 'low',
+				requiredReviewers: ['reviewer-1'],
+				requiredTestEngineers: [],
+			}),
+		});
+		const session = swarmState.agentSessions.get('parent-2491')!;
+		for (let index = 0; index < 32; index += 1) {
+			recordStageBRouteEvidence(session, taskId, {
+				role: 'reviewer',
+				identity: `stale-reviewer-${index + 1}`,
+				sessionId: 'parent-2491',
+				taskId,
+				slotId: `${taskId}:stale:${index + 1}`,
+				callId: `review-call-${index}`,
+				childSessionId: `review-child-${index}`,
+				generation: 1,
+			});
+		}
+
+		const result = await ingestBackgroundStageBCompletion({
+			directory,
+			record: stageBRecord(
+				taskId,
+				'reviewer',
+				'review-call-overflow',
+				'review-child-overflow',
+				captureWorkspaceSnapshot(directory),
+			),
+			result: {
+				text: `[REVIEWED] | task-${taskId} | APPROVED | overflow check`,
+				chars: 64,
+				truncated: false,
+				digest: 'overflow-route',
+			},
+		});
+
+		expect(result.ok).toBe(false);
+		expect(result.reason).toContain('capacity exceeded');
+		const evidence = await readTaskEvidence(directory, taskId);
+		expect(evidence?.gates.reviewer).toBeUndefined();
+	});
+
 	test('a marked task with a missing receipt rejects before publishing gate evidence', async () => {
 		const taskId = '1.2';
 		const session = swarmState.agentSessions.get('parent-2491')!;
@@ -247,7 +334,7 @@ describe('background Stage-B route slots (issue #2491)', () => {
 		expect(await readTaskEvidence(directory, taskId)).toBeNull();
 	});
 
-	test('parent-unavailable recovery requires an identity-bound router error (F-006)', async () => {
+	test('parent-unavailable recovery rejects an unauthenticated router error (F-006)', async () => {
 		const taskId = '1.25';
 		const receiptPath = routeReceiptPathForTask(
 			directory,
@@ -288,7 +375,7 @@ describe('background Stage-B route slots (issue #2491)', () => {
 		});
 
 		expect(result.ok).toBe(false);
-		expect(result.reason).toContain('identity-bound');
+		expect(result.reason).toContain('ROUTE_RECEIPT_AUTH_INVALID');
 		expect(await readTaskEvidence(directory, taskId)).toBeNull();
 	});
 

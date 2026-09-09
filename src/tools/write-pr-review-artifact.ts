@@ -194,6 +194,7 @@ export const _internals = {
 	atomicWrite,
 	atomicCreate,
 	assertBoundary: assertPrReviewArtifactBoundary,
+	assertCriticSettlements,
 	/** Exposed so the #2383 read/migration boundary is testable directly. */
 	readFindings,
 };
@@ -305,6 +306,14 @@ function assertCriticSettlements(
 		if (needsCriticAuthority && !authoritative) {
 			throw new Error(
 				`critic settlement for ${record.finding_id} has no authenticated authoritative critic verdict`,
+			);
+		}
+		if (
+			authoritative?.status === 'DOWNGRADED' &&
+			record.severity === undefined
+		) {
+			throw new Error(
+				`critic settlement for ${record.finding_id} DOWNGRADED verdict requires an explicit severity matching the authenticated authoritative critic verdict`,
 			);
 		}
 		if (

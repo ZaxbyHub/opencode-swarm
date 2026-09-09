@@ -96,6 +96,34 @@ describe('sweep keep-newest width (review FB-6)', () => {
 		// The newest run is never a victim.
 		expect(remaining).toContain(names[names.length - 1]);
 	}, 30_000);
+
+	it('prunes route receipts per key without deleting the shared directory', async () => {
+		const root = makeRoot('route-receipts-per-key');
+		const receiptsDir = path.join(
+			root,
+			'.swarm',
+			'pr-review',
+			'route-receipts',
+		);
+		mkdirSync(receiptsDir, { recursive: true });
+		const stale = path.join(receiptsDir, 'legacy-session--legacy-task.json');
+		const fresh = path.join(receiptsDir, 'c2Vzc2lvbg--ZnJlc2g.json');
+		writeFileSync(stale, '{}');
+		writeFileSync(fresh, '{}');
+		utimesSync(
+			stale,
+			new Date(NOW - 40 * 24 * 60 * 60 * 1000),
+			new Date(NOW - 40 * 24 * 60 * 60 * 1000),
+		);
+		utimesSync(fresh, new Date(NOW), new Date(NOW));
+
+		const result = await runRetentionSweep(root, { now: NOW });
+
+		expect(result.pruned['pr-review-route-receipts']).toBe(1);
+		expect(existsSync(stale)).toBe(false);
+		expect(existsSync(fresh)).toBe(true);
+		expect(existsSync(receiptsDir)).toBe(true);
+	});
 });
 
 describe('capsule listing cap width (review FB-18)', () => {
@@ -155,8 +183,8 @@ describe('sweep cancellation token (review FB-10 round-2 regression)', () => {
 
 	it('stops before the FIRST post-family pass when the token expires after the directory families', async () => {
 		const root = makeRoot('cancel-post-family');
-		// familiesFor() currently yields 12 directory families, so polls
-		// 1..12 are the family-loop polls; poll 13 is the first post-family
+		// familiesFor() currently yields 13 directory families, so polls
+		// 1..13 are the family-loop polls; poll 14 is the first post-family
 		// pass (review-receipts index). The token allows exactly the family
 		// polls and expires there — pinning the round-2 six-pass coverage.
 		const staleSummary = path.join(root, '.swarm', 'summaries', 'S1.json');
@@ -171,7 +199,7 @@ describe('sweep cancellation token (review FB-10 round-2 regression)', () => {
 		let polls = 0;
 		const result = await runRetentionSweep(root, {
 			now: NOW,
-			shouldContinue: () => ++polls <= 12,
+			shouldContinue: () => ++polls <= 13,
 		});
 
 		expect(result.errors.sweep_cancelled).toContain('review-receipts-index');

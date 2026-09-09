@@ -12,6 +12,8 @@ import {
 	advanceTaskState,
 	getTaskState,
 	recordModifiedFilesForTask,
+	recordStageBRouteEvidence,
+	reserveStageBRouteEvidence,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
@@ -113,6 +115,116 @@ describe('issue #2491 direct delegation-gate route authorization', () => {
 		expect(
 			getTaskState(swarmState.agentSessions.get('parent-2491')!, '1.1'),
 		).toBe('tests_run');
+	});
+
+	test('requires a routed test engineer when markdown is observed without independent declaration (FB-022)', async () => {
+		const session = swarmState.agentSessions.get('parent-2491')!;
+		recordModifiedFilesForTask(session, '1.1', ['README.md']);
+		const hook = createDelegationGateHook(config, directory);
+		await hook.toolBefore(
+			{ tool: 'Task', sessionID: 'parent-2491', callID: 'review-markdown' },
+			{
+				args: {
+					subagent_type: 'reviewer',
+					task_id: '1.1',
+					prompt: 'Review task-1.1.\nACCEPTANCE: return a structured approval.',
+				},
+			},
+		);
+		const receipt = JSON.parse(
+			fs.readFileSync(
+				routeReceiptPathForTask(directory, 'parent-2491', '1.1'),
+				'utf8',
+			),
+		) as { required?: { testEngineers?: number } };
+		// The route producer only has observed files here; it must not self-prove
+		// the markdown exemption by passing the same array twice.
+		expect(receipt.required?.testEngineers).toBe(1);
+	});
+
+	test('capacity rejection happens before durable gate evidence publication (NEW-001)', async () => {
+		const session = swarmState.agentSessions.get('parent-2491')!;
+		fs.writeFileSync(
+			path.join(directory, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ review_routing: { enforce_receipts: false } }),
+		);
+		for (let index = 0; index < 32; index += 1) {
+			recordStageBRouteEvidence(session, '1.1', {
+				role: 'reviewer',
+				identity: `stale-reviewer-${index + 1}`,
+				sessionId: 'parent-2491',
+				taskId: '1.1',
+				slotId: `1.1:stale:${index + 1}`,
+				callId: `stale-review-call-${index}`,
+				childSessionId: `stale-review-child-${index}`,
+				generation: 1,
+			});
+		}
+		const hook = createDelegationGateHook(config, directory);
+		await hook.toolBefore(
+			{ tool: 'Task', sessionID: 'parent-2491', callID: 'review-overflow' },
+			{
+				args: {
+					subagent_type: 'reviewer',
+					task_id: '1.1',
+					prompt: 'Review task-1.1.\nACCEPTANCE: return a structured approval.',
+				},
+			},
+		);
+		await hook.taskMetadata({
+			callID: 'review-overflow',
+			parentSessionID: 'parent-2491',
+			childSessionID: 'review-overflow-child',
+		});
+		await hook.toolAfter(
+			{
+				tool: 'Task',
+				sessionID: 'parent-2491',
+				callID: 'review-overflow',
+				args: { subagent_type: 'reviewer', task_id: '1.1' },
+			},
+			{ text: '[REVIEWED] | task-1.1 | APPROVED | overflow check' },
+		);
+		const evidence = await readTaskEvidence(directory, '1.1');
+		expect(evidence?.gates.reviewer).toBeUndefined();
+	});
+
+	test('route-evidence reservation rollback restores the prior slot (REG-001)', () => {
+		const session = swarmState.agentSessions.get('parent-2491')!;
+		const taskId = '1.1';
+		const prior = {
+			role: 'reviewer' as const,
+			identity: 'reviewer-prior',
+			sessionId: 'parent-2491',
+			taskId,
+			slotId: `${taskId}:reviewer:1`,
+			callId: 'review-call-prior',
+			childSessionId: 'review-child-prior',
+			generation: 1,
+		};
+		recordStageBRouteEvidence(session, taskId, prior);
+		const before = session.stageBRouteEvidence?.get(taskId)?.[0];
+		const rollback = reserveStageBRouteEvidence(session, taskId, {
+			...prior,
+			identity: 'reviewer-retry',
+		});
+		expect(rollback).not.toBeNull();
+		expect(session.stageBRouteEvidence?.get(taskId)?.[0]?.identity).toBe(
+			'reviewer-retry',
+		);
+		rollback?.();
+		expect(session.stageBRouteEvidence?.get(taskId)?.[0]).toEqual(before);
+
+		const removeRollback = reserveStageBRouteEvidence(session, taskId, {
+			...prior,
+			identity: 'reviewer-new',
+			callId: 'review-call-new',
+			childSessionId: 'review-child-new',
+			slotId: `${taskId}:reviewer:2`,
+		});
+		expect(removeRollback).not.toBeNull();
+		removeRollback?.();
+		expect(session.stageBRouteEvidence?.get(taskId)).toHaveLength(1);
 	});
 
 	test('holds reversed 2+2 completions at the full-route barrier', async () => {

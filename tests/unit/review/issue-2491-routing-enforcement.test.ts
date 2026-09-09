@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import { resolveHiveDataDir } from '../../../src/knowledge/hive-paths.js';
 import {
@@ -9,6 +9,7 @@ import {
 	persistReviewRouteReceipt,
 	readReviewRouteReceipt,
 	readReviewRouteReceiptSync,
+	routeReceiptPathForTask,
 } from '../../../src/review/routing-enforcement.js';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
@@ -97,12 +98,10 @@ describe('issue #2491 — route receipt and Stage-B enforcement (AC2–AC3)', ()
 
 			// Copying the authenticated workspace artifact to a different project
 			// must still verify: the key is user-scoped, not project-local.
-			const copiedPath = join(
+			const copiedPath = routeReceiptPathForTask(
 				secondProjectRoot,
-				'.swarm',
-				'pr-review',
-				'route-receipts',
-				'session-2491--2491-restart-copy.json',
+				'session-2491',
+				'2491-restart-copy',
 			);
 			await mkdir(
 				join(secondProjectRoot, '.swarm', 'pr-review', 'route-receipts'),
@@ -159,23 +158,23 @@ describe('issue #2491 — route receipt and Stage-B enforcement (AC2–AC3)', ()
 				persisted.path,
 				JSON.stringify({ ...original, complexity: 'tampered' }),
 			);
-			expect(
-				await readReviewRouteReceipt({
+			await expect(
+				readReviewRouteReceipt({
 					projectRoot,
 					sessionId: 'session-2491',
 					taskId: '2491-tamper',
 				}),
-			).toBeNull();
+			).rejects.toThrow('ROUTE_RECEIPT_AUTH_INVALID');
 
 			const { mac: _mac, ...withoutMac } = original;
 			await writeFile(persisted.path, JSON.stringify(withoutMac));
-			expect(
+			expect(() =>
 				readReviewRouteReceiptSync({
 					projectRoot,
 					sessionId: 'session-2491',
 					taskId: '2491-tamper',
 				}),
-			).toBeNull();
+			).toThrow('ROUTE_RECEIPT_AUTH_INVALID');
 		} finally {
 			await rm(projectRoot, { recursive: true, force: true });
 		}
@@ -199,15 +198,76 @@ describe('issue #2491 — route receipt and Stage-B enforcement (AC2–AC3)', ()
 			const keyPath = join(resolveHiveDataDir(), 'review-route-receipts.key');
 			await rm(keyPath, { force: true });
 			await mkdir(keyPath, { recursive: true });
-			expect(
+			expect(() =>
 				readReviewRouteReceiptSync({
 					projectRoot,
 					sessionId: 'session-2491',
 					taskId: '2491-key-type',
 				}),
-			).toBeNull();
+			).toThrow('ROUTE_RECEIPT_AUTH_INVALID');
 			await rm(persisted.path, { force: true });
 		} finally {
+			await rm(projectRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('uses distinct receipt paths when identities contain the separator (FB-026)', async () => {
+		// Previously the raw `--` separator made (a--b, c) collide with
+		// (a, b--c), allowing one route receipt to overwrite the other.
+		const projectRoot = canonicalMkdtemp('issue-2491-route-path-');
+		try {
+			expect(routeReceiptPathForTask(projectRoot, 'a--b', 'c')).not.toBe(
+				routeReceiptPathForTask(projectRoot, 'a', 'b--c'),
+			);
+		} finally {
+			await rm(projectRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('bounds long identity receipt filename components', async () => {
+		const projectRoot = canonicalMkdtemp('issue-2491-route-long-path-');
+		try {
+			const receiptPath = routeReceiptPathForTask(
+				projectRoot,
+				'x'.repeat(256),
+				'2491-long-identity',
+			);
+			const fileName = basename(receiptPath);
+			expect(fileName).toContain('sha256_');
+			expect(fileName.length).toBeLessThan(220);
+		} finally {
+			await rm(projectRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('rejects a project-scoped app-data fallback for the route MAC key (FB-028)', async () => {
+		const projectRoot = canonicalMkdtemp('issue-2491-route-key-scope-');
+		const envKey =
+			process.platform === 'win32'
+				? 'LOCALAPPDATA'
+				: process.platform === 'darwin'
+					? 'HOME'
+					: 'XDG_DATA_HOME';
+		const previous = process.env[envKey];
+		try {
+			await mkdir(join(projectRoot, '.opencode'), { recursive: true });
+			process.env[envKey] = projectRoot;
+			await expect(
+				persistReviewRouteReceipt({
+					projectRoot,
+					receipt: buildReviewRouteReceipt({
+						sessionId: 'session-2491',
+						taskId: '2491-key-scope',
+						complexity: 'single',
+						semanticRisk: 'low',
+						requiredReviewers: ['reviewer-a'],
+						requiredTestEngineers: [],
+					}),
+				}),
+			).rejects.toThrow('ROUTE_RECEIPT_SECRET_UNSAFE_PATH');
+		} finally {
+			if (previous === undefined) delete process.env[envKey];
+			else process.env[envKey] = previous;
 			await rm(projectRoot, { recursive: true, force: true });
 		}
 	});

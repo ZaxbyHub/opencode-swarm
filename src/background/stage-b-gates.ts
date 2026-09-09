@@ -44,6 +44,7 @@ import {
 	recordReviewerScopeGenerationFileFingerprint,
 	recordStageBCompletion,
 	recordStageBRouteEvidence,
+	reserveStageBRouteEvidence,
 	reviewerScopeGenerationHasDeclaredOverlap,
 	swarmState,
 	updateTaskWorkflowCache,
@@ -748,22 +749,60 @@ export async function ingestBackgroundStageBCompletion(args: {
 				}
 			}
 		}
-		await recordGateEvidence(
-			args.directory,
-			taskId,
-			args.record.normalizedAgent,
-			args.record.subagentSessionId,
-			hasActiveTurboMode(args.record.parentSessionId),
-			{
-				expectedGeneration: args.record.workflowGeneration,
-				transitionId: `background-gate:${args.record.correlationId}`,
-				// Missing/non-exempt provenance is conservative: require the full
-				// Stage B pair without fabricating a new coder mutation/generation.
-				ensureDefaultStageB: existingEvidence?.test_engineer_exempt !== true,
-				routeBinding: preparedRoute?.binding,
-				routeComplete: routeCompleteForPersistence,
-			},
-		);
+		let routeEvidenceRollback: (() => void) | null = null;
+		if (preparedRoute?.binding) {
+			const parentSession = swarmState.agentSessions.get(
+				args.record.parentSessionId,
+			);
+			if (!parentSession) {
+				logger.warn(
+					`[background-stage-b] route receipt blocked before evidence publication for ${taskId}: parent session unavailable`,
+				);
+				return {
+					ok: false,
+					consumed: false,
+					reason:
+						'route receipt blocked before Stage-B evidence publication: parent session unavailable',
+				};
+			}
+			routeEvidenceRollback = reserveStageBRouteEvidence(
+				parentSession,
+				taskId,
+				preparedRoute.binding,
+			);
+			if (!routeEvidenceRollback) {
+				logger.warn(
+					`[background-stage-b] route receipt blocked before evidence publication for ${taskId}: bounded route evidence capacity exceeded`,
+				);
+				return {
+					ok: false,
+					consumed: false,
+					reason:
+						'route receipt blocked before Stage-B evidence publication: bounded route evidence capacity exceeded',
+				};
+			}
+		}
+		try {
+			await recordGateEvidence(
+				args.directory,
+				taskId,
+				args.record.normalizedAgent,
+				args.record.subagentSessionId,
+				hasActiveTurboMode(args.record.parentSessionId),
+				{
+					expectedGeneration: args.record.workflowGeneration,
+					transitionId: `background-gate:${args.record.correlationId}`,
+					// Missing/non-exempt provenance is conservative: require the full
+					// Stage B pair without fabricating a new coder mutation/generation.
+					ensureDefaultStageB: existingEvidence?.test_engineer_exempt !== true,
+					routeBinding: preparedRoute?.binding,
+					routeComplete: routeCompleteForPersistence,
+				},
+			);
+		} catch (err) {
+			routeEvidenceRollback?.();
+			throw err;
+		}
 
 		if (args.record.normalizedAgent === 'reviewer') {
 			await collectReviewerReceiptFromTranscript(
@@ -1003,7 +1042,12 @@ function applyStageBStateCompletion(
 			);
 			continue;
 		}
-		if (binding) recordStageBRouteEvidence(session, taskId, binding);
+		if (binding && !recordStageBRouteEvidence(session, taskId, binding)) {
+			logger.warn(
+				`[background-stage-b] route receipt blocked before Stage-B evidence publication for ${taskId}: bounded route evidence capacity exceeded`,
+			);
+			continue;
+		}
 		recordStageBCompletion(session, taskId, agent);
 		const state = getTaskState(session, taskId);
 		if (state === 'tests_run' || state === 'complete') continue;

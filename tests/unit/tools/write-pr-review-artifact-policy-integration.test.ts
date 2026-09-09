@@ -14,7 +14,10 @@ import {
 	assessTerminalReadiness,
 	readReviewOutcome,
 } from '../../../src/pr-review/finding-policy.js';
-import { executeWritePrReviewArtifact } from '../../../src/tools/write-pr-review-artifact.js';
+import {
+	_internals as artifactInternals,
+	executeWritePrReviewArtifact,
+} from '../../../src/tools/write-pr-review-artifact.js';
 import {
 	establishPrReviewPrerequisites,
 	persistPrReviewBatch,
@@ -258,5 +261,40 @@ describe('PR-review finding policy writer/reader integration', () => {
 				reportVerdict: 'REQUEST_CHANGES',
 			}),
 		).resolves.toBe('completed');
+	});
+
+	test('rejects an authenticated DOWNGRADED settlement when persisted severity is omitted', () => {
+		const records = [
+			{
+				finding_id: 'finding-nf3',
+				status: 'CONFIRMED',
+				file_line: 'src/index.ts:1',
+				evidence: 'NF-3 fixture evidence',
+				next_action: 'report',
+				risk_impact: 'HIGH_IMPACT',
+				risk_tags: [],
+			},
+		] as Parameters<typeof artifactInternals.assertCriticSettlements>[0];
+		const prior = [
+			{
+				finding_id: 'finding-nf3',
+				status: 'CONFIRMED',
+				file_line: 'src/index.ts:1',
+				evidence: 'NF-3 fixture evidence',
+				next_action: 'route_to_critic',
+				severity: 'MEDIUM',
+				boundary: 'post_reviewer',
+				pr_head_sha: HEAD_SHA,
+				recorded_at: '2026-01-01T00:00:00.000Z',
+			},
+		] as Parameters<typeof artifactInternals.assertCriticSettlements>[1];
+
+		expect(() =>
+			artifactInternals.assertCriticSettlements(
+				records,
+				prior,
+				new Map([['finding-nf3', { status: 'DOWNGRADED', severity: 'LOW' }]]),
+			),
+		).toThrow('requires an explicit severity matching the authenticated');
 	});
 });

@@ -105,6 +105,18 @@ const isPrWorkflowGateStateProjection: PruneEntryFilter = (name, stat) =>
 const isPrWorkflowGateSidecar: PruneEntryFilter = (name, stat) =>
 	stat.isFile() && PR_WORKFLOW_GATE_SIDECAR_NAME.test(name);
 
+// Route receipts live beside run directories but have an independent
+// per-session/task keyspace. Keep the parent run-artifact family from treating
+// the whole receipts directory as one entry; each receipt must age out on its
+// own even when another project's receipt is still fresh.
+const isPrReviewRunArtifact: PruneEntryFilter = (_name, stat) =>
+	stat.isDirectory();
+const isPrReviewRouteReceipt: PruneEntryFilter = (name, stat) =>
+	// Include the pre-encoding sanitized grammar's hyphens so stale receipts
+	// from an older plugin are reclaimed too; the directory is already a
+	// dedicated containment boundary and only JSON key-shaped files qualify.
+	stat.isFile() && /^[A-Za-z0-9_.~=-]+--[A-Za-z0-9_.~=-]+\.json$/.test(name);
+
 function familiesFor(swarmRoot: string, now: number): Family[] {
 	const age = (days: number) => days * DAY_MS;
 	const f = (
@@ -143,6 +155,12 @@ function familiesFor(swarmRoot: string, now: number): Family[] {
 		f('pr-review-run-artifacts', 'pr-review', {
 			maxAgeDays: 30,
 			maxEntries: PR_REVIEW_KEEP_NEWEST_RUNS,
+			includeEntry: (name, stat) =>
+				name !== 'route-receipts' && isPrReviewRunArtifact(name, stat),
+		}),
+		f('pr-review-route-receipts', path.join('pr-review', 'route-receipts'), {
+			maxAgeDays: 30,
+			includeEntry: isPrReviewRouteReceipt,
 		}),
 		f('review-receipts', 'review-receipts', {
 			maxAgeDays: 30,

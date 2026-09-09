@@ -12,6 +12,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
 	appendCoreEventSync,
+	type CoreEventCoverage,
 	coreEventsFilePath,
 	readCoreEvents,
 } from '../events/core-events.js';
@@ -624,6 +625,11 @@ export function settleCriticFinding(
 			handoffFindingIds: [],
 		};
 	}
+	if (input.outcome === 'DOWNGRADED' && input.finalSeverity === undefined) {
+		throw new Error(
+			'DOWNGRADED critic finding requires an explicit final severity',
+		);
+	}
 	const finalSeverity = severity(input.finalSeverity ?? input.finding.severity);
 	if (input.outcome === 'UPHELD' && finalSeverity === 'NONE') {
 		throw new Error('UPHELD critic finding cannot have NONE severity');
@@ -824,8 +830,20 @@ export async function persistReviewOutcome(
 	if (!alreadyPersisted) {
 		await writeAtomicJson(input.projectRoot, evidencePath, evidence);
 	}
-	const events = readReviewEvents(input.projectRoot, sessionId, taskId);
-	if (!events.some((event) => event.type === 'review.route.receipt')) {
+	const reviewEvents = readReviewEvents(input.projectRoot, sessionId, taskId);
+	const { events } = reviewEvents;
+	// A truncated window cannot distinguish an evicted event from a missing
+	// event. A new evidence write still needs its audit companions, but a retry
+	// of an existing sidecar must not append on partial absence: that would
+	// duplicate a valid event that is merely outside the read bound. A later
+	// complete read still repairs genuinely missing events.
+	const auditWindowComplete =
+		reviewEvents.coverage !== 'truncated' && !reviewEvents.truncated;
+	const shouldEnsureAuditEvents = !alreadyPersisted || auditWindowComplete;
+	if (
+		shouldEnsureAuditEvents &&
+		!events.some((event) => event.type === 'review.route.receipt')
+	) {
 		appendCoreEventSync(input.projectRoot, {
 			type: 'review.route.receipt',
 			sessionId,
@@ -833,7 +851,10 @@ export async function persistReviewOutcome(
 			receiptVersion: input.routeReceipt.version,
 		});
 	}
-	if (!events.some((event) => event.type === 'review.finding.synthesis')) {
+	if (
+		shouldEnsureAuditEvents &&
+		!events.some((event) => event.type === 'review.finding.synthesis')
+	) {
 		appendCoreEventSync(input.projectRoot, {
 			type: 'review.finding.synthesis',
 			sessionId,
@@ -853,12 +874,16 @@ export interface ReadReviewOutcomeInput {
 	taskId: string;
 }
 
-export async function readReviewOutcome(
-	input: ReadReviewOutcomeInput,
-): Promise<{
+export interface ReadReviewOutcomeResult {
 	evidence: Record<string, unknown>;
 	events: Array<Record<string, unknown>>;
-}> {
+	/** Coverage of the bounded core-event audit window used for this read. */
+	auditCoverage: CoreEventCoverage;
+}
+
+export async function readReviewOutcome(
+	input: ReadReviewOutcomeInput,
+): Promise<ReadReviewOutcomeResult> {
 	const taskId = safeTaskId(input.taskId);
 	const evidencePath = validateSwarmPath(
 		input.projectRoot,
@@ -881,23 +906,40 @@ export async function readReviewOutcome(
 	) {
 		throw new Error('Review outcome evidence synthesis integrity mismatch');
 	}
-	const events = readReviewEvents(input.projectRoot, input.sessionId, taskId);
+	const reviewEvents = readReviewEvents(
+		input.projectRoot,
+		input.sessionId,
+		taskId,
+	);
+	const { events } = reviewEvents;
+	// The evidence sidecar is the authoritative, integrity-checked outcome;
+	// these identity-only events are an audit companion. A truncated read is
+	// explicitly incomplete, so absence from its bounded tail is not evidence
+	// that persistence failed and must not strand a valid outcome.
 	if (
-		!events.some((event) => event.type === 'review.route.receipt') ||
-		!events.some((event) => event.type === 'review.finding.synthesis')
+		reviewEvents.coverage !== 'truncated' &&
+		!reviewEvents.truncated &&
+		(!events.some((event) => event.type === 'review.route.receipt') ||
+			!events.some((event) => event.type === 'review.finding.synthesis'))
 	) {
 		throw new Error('Review outcome evidence audit events are incomplete');
 	}
-	return { evidence, events };
+	return { evidence, events, auditCoverage: reviewEvents.coverage };
+}
+
+interface ReviewEventsRead {
+	events: Array<Record<string, unknown>>;
+	coverage: CoreEventCoverage;
+	truncated: boolean;
 }
 
 function readReviewEvents(
 	projectRoot: string,
 	sessionId: string,
 	taskId: string,
-): Array<Record<string, unknown>> {
-	const text = readCoreEvents(projectRoot).text;
-	return text.split('\n').flatMap((line) => {
+): ReviewEventsRead {
+	const read = readCoreEvents(projectRoot);
+	const events = read.text.split('\n').flatMap((line) => {
 		try {
 			const event = JSON.parse(line) as Record<string, unknown>;
 			return event.sessionId === sessionId && event.taskId === taskId
@@ -907,4 +949,5 @@ function readReviewEvents(
 			return [];
 		}
 	});
+	return { events, coverage: read.coverage, truncated: read.truncated };
 }

@@ -38,6 +38,7 @@ export const STATE_MOCK_TRANSITIVE_STUBS = {
 	// exercise these bindings, but transitive imports resolve every named export
 	// while state.ts is mocked.
 	recordStageBRouteEvidence: () => undefined,
+	reserveStageBRouteEvidence: () => null,
 	getStageBRouteEvidence: () => [],
 	clearStageBRouteEvidence: () => undefined,
 	markStageBRouteRequired: () => undefined,

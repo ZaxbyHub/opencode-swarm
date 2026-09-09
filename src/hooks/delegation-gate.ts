@@ -105,7 +105,7 @@ import {
 	isStageBRouteRequired,
 	markStageBRouteRequired,
 	recordStageBCompletion,
-	recordStageBRouteEvidence,
+	reserveStageBRouteEvidence,
 	swarmState,
 	updateTaskWorkflowCache,
 } from '../state';
@@ -3862,11 +3862,10 @@ export function createDelegationGateHook(
 								(_, index) => `${routeTaskId}:reviewer:${index + 1}`,
 							),
 							requiredTestEngineers: Array.from(
-								{
-									length: isMarkdownOnlyTaskChange(changedFiles, changedFiles)
-										? 0
-										: routing.testEngineerCount,
-								},
+								// `changedFiles` is observed attribution, not an independent
+								// declared scope. Require the routed count here so an
+								// all-Markdown change cannot self-prove its exemption.
+								{ length: routing.testEngineerCount },
 								(_, index) => `${routeTaskId}:test_engineer:${index + 1}`,
 							),
 						});
@@ -5814,6 +5813,19 @@ export function createDelegationGateHook(
 											routeEnforcementEnabled && routeBinding
 												? (routeCompleteDecision?.canAdvance ?? false)
 												: routeDecision.canAdvance;
+										const routeEvidenceRollback = routeBinding
+											? reserveStageBRouteEvidence(
+													session,
+													taskId,
+													routeBinding,
+												)
+											: null;
+										if (routeBinding && !routeEvidenceRollback) {
+											logger.warn(
+												`[delegation-gate] Stage B route evidence capacity exceeded for ${taskId}`,
+											);
+											continue;
+										}
 										try {
 											const turbo = hasActiveTurboMode(input.sessionID);
 											const { recordGateEvidence } = await import(
@@ -5836,6 +5848,7 @@ export function createDelegationGateHook(
 												},
 											);
 										} catch (err) {
+											routeEvidenceRollback?.();
 											logger.warn(
 												`[delegation-gate] Stage B settlement rejected for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
 											);
@@ -5846,9 +5859,6 @@ export function createDelegationGateHook(
 											taskId,
 											targetAgent as 'reviewer' | 'test_engineer',
 										);
-										if (routeBinding) {
-											recordStageBRouteEvidence(session, taskId, routeBinding);
-										}
 										const taskEvidence = await readTaskEvidence(
 											directory,
 											taskId,
