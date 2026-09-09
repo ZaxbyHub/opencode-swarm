@@ -76,6 +76,34 @@ describe('swarm ci argument validation', () => {
 		).rejects.toThrow(/--timeout-ms/);
 	});
 
+	test('all invalid --timeout-ms forms share one validation diagnostic (PR-TIMEOUT-MSG)', async () => {
+		const dir = makeFixtureDir('swarm-ci-cmd-timeout-message-');
+		const invalidArgs = [
+			['--timeout-ms'],
+			['--timeout-ms', '--json'],
+			['--timeout-ms', 'banana'],
+			['--timeout-ms', '0'],
+			['--timeout-ms', '-5'],
+			['--timeout-ms', 'Infinity'],
+			['--timeout-ms', String(300_001)],
+		];
+		const messages: string[] = [];
+		for (const args of invalidArgs) {
+			try {
+				await handleCiCommand(ctx(dir, args));
+				messages.push('command unexpectedly succeeded');
+			} catch (error) {
+				messages.push(error instanceof Error ? error.message : String(error));
+			}
+		}
+
+		const expected =
+			'Invalid --timeout-ms value: expected a positive finite number from 1 through 300000 milliseconds.';
+		// The missing-value branch and Number() validation branch must expose the
+		// same stable diagnostic, rather than subtly different caller guidance.
+		expect(messages).toEqual(invalidArgs.map(() => expected));
+	});
+
 	test('unknown flag throws before the runtime is entered', async () => {
 		const dir = makeFixtureDir('swarm-ci-cmd-unknown-');
 		await expect(handleCiCommand(ctx(dir, ['--turbo']))).rejects.toThrow(
@@ -235,4 +263,25 @@ describe('swarm ci diagnostic branch (exit 2/3)', () => {
 		const parsed = parseDiagnosticBlock(result.text);
 		expect(parsed.exit_reason).toBe('cancelled');
 	}, 15000);
+
+	test('diagnostics redact an alternate-separator directory form (PR-REDACTION)', async () => {
+		const dir = makeFixtureDir('swarm-ci-cmd-redaction-');
+		const alternateDirectory = dir.replaceAll(
+			path.sep,
+			path.sep === '/' ? '\\' : '/',
+		);
+		_internals.runAdvisoryCiRuntime = async () => ({
+			outcome: 'deadline' as const,
+			journal: [{ seq: 1, type: 'run_started', detail: alternateDirectory }],
+			journalTruncated: 0,
+			cleanupRan: true,
+			detail: `deadline while evaluating ${alternateDirectory}`,
+		});
+
+		const result = await handleCiCommand(ctx(dir));
+		expect(isCommandFailure(result)).toBe(true);
+		if (!isCommandFailure(result)) return;
+		expect(result.text).not.toContain(alternateDirectory);
+		expect(result.text).toContain('[evaluated-directory]');
+	});
 });

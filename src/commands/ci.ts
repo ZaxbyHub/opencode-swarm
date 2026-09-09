@@ -16,6 +16,7 @@
  * consumes no stdin.
  */
 
+import * as path from 'node:path';
 import {
 	type AdvisoryCiReport,
 	evaluateAdvisoryCi,
@@ -30,6 +31,7 @@ export const DEFAULT_CI_DEADLINE_MS = 300_000;
 
 const MIN_CI_DEADLINE_MS = 1;
 const MAX_CI_DEADLINE_MS = DEFAULT_CI_DEADLINE_MS;
+const INVALID_TIMEOUT_MESSAGE = `Invalid --timeout-ms value: expected a positive finite number from ${MIN_CI_DEADLINE_MS} through ${MAX_CI_DEADLINE_MS} milliseconds.`;
 
 export interface CiSignalCancellation {
 	/** The handler invoked on SIGINT/SIGTERM; exported for unit testing the
@@ -76,9 +78,7 @@ function parseTimeoutMs(args: string[]): number {
 	if (index === -1) return DEFAULT_CI_DEADLINE_MS;
 	const raw = args[index + 1];
 	if (raw === undefined || raw.startsWith('--')) {
-		throw new Error(
-			'Invalid --timeout-ms value: expected a positive number of milliseconds.',
-		);
+		throw new Error(INVALID_TIMEOUT_MESSAGE);
 	}
 	const parsed = Number(raw);
 	if (
@@ -86,9 +86,7 @@ function parseTimeoutMs(args: string[]): number {
 		parsed < MIN_CI_DEADLINE_MS ||
 		parsed > MAX_CI_DEADLINE_MS
 	) {
-		throw new Error(
-			`Invalid --timeout-ms value: expected a positive finite number from ${MIN_CI_DEADLINE_MS} through ${MAX_CI_DEADLINE_MS} milliseconds.`,
-		);
+		throw new Error(INVALID_TIMEOUT_MESSAGE);
 	}
 	return parsed;
 }
@@ -101,6 +99,30 @@ function validateNoUnknownFlags(args: string[]): void {
 			throw new Error(`Unknown flag: ${arg}`);
 		}
 	}
+}
+
+function redactDirectory(value: string, directory: string): string {
+	if (directory.length === 0 || value.length === 0) return value;
+
+	// Diagnostics can contain a path rendered by a different layer. Match the
+	// native, normalized, and alternate-separator forms; Windows paths are also
+	// case-insensitive. Sorting longest-first avoids a shorter parent variant
+	// consuming the prefix of a more specific form.
+	const variants = new Set<string>();
+	for (const variant of [directory, path.normalize(directory)]) {
+		variants.add(variant);
+		variants.add(variant.replaceAll('\\', '/'));
+		variants.add(variant.replaceAll('/', '\\'));
+	}
+	const escaped = [...variants]
+		.filter((variant) => variant.length > 0)
+		.sort((a, b) => b.length - a.length)
+		.map((variant) => variant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+	if (escaped.length === 0) return value;
+	return value.replace(
+		new RegExp(escaped.join('|'), process.platform === 'win32' ? 'gi' : 'g'),
+		'[evaluated-directory]',
+	);
 }
 
 export async function handleCiCommand(
@@ -148,17 +170,17 @@ export async function handleCiCommand(
 		// machine block carries the full report shape with neutral evaluation
 		// fields. One `version: 1` schema for every exit code keeps the
 		// #2498 consumer contract branch-independent.
-		const redactDirectory = (value: string): string =>
-			ctx.directory.length > 0
-				? value.split(ctx.directory).join('[evaluated-directory]')
-				: value;
 		const tail = result.journal
 			.slice(-5)
 			.map(
-				(e) => `${e.type}${e.detail ? `: ${redactDirectory(e.detail)}` : ''}`,
+				(e) =>
+					`${e.type}${e.detail ? `: ${redactDirectory(e.detail, ctx.directory)}` : ''}`,
 			)
 			.join('; ');
-		const detail = redactDirectory(result.detail ?? result.outcome);
+		const detail = redactDirectory(
+			result.detail ?? result.outcome,
+			ctx.directory,
+		);
 		// 'pass'/'violations' returned above, so only the abort outcomes reach
 		// this diagnostic branch.
 		const diagnosticReason =

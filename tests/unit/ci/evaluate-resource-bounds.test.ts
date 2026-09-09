@@ -21,6 +21,96 @@ function fakeFileDirent(name: string): fs.Dirent {
 }
 
 describe('advisory CI shadow-copy resource bounds', () => {
+	test('copyFileBounded copies a complete file within the byte budget', () => {
+		const dir = makeFixtureDir('swarm-ci-copy-bounded-success-');
+		const source = path.join(dir, 'source.bin');
+		const destination = path.join(dir, 'destination.bin');
+		const content = 'bounded shadow copy';
+		fs.writeFileSync(source, content);
+		try {
+			const copied = _internals.copyFileBounded(source, destination, 1024);
+			expect(copied).toBe(Buffer.byteLength(content));
+			expect(fs.readFileSync(destination, 'utf8')).toBe(content);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('copyFileBounded rejects a read that exceeds the remaining budget', () => {
+		const dir = makeFixtureDir('swarm-ci-copy-bounded-budget-');
+		const source = path.join(dir, 'source.bin');
+		const destination = path.join(dir, 'destination.bin');
+		fs.writeFileSync(source, '1234');
+		try {
+			const copied = _internals.copyFileBounded(source, destination, 3);
+			expect(copied).toBeNull();
+			expect(fs.readFileSync(destination)).toHaveLength(0);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('copyFileBounded fails closed when a write makes no progress', () => {
+		const dir = makeFixtureDir('swarm-ci-copy-bounded-stall-');
+		const source = path.join(dir, 'source.bin');
+		const destination = path.join(dir, 'destination.bin');
+		fs.writeFileSync(source, '1234');
+		const writeSpy = spyOn(fs, 'writeSync').mockImplementation(
+			(() => 0) as unknown as typeof fs.writeSync,
+		);
+		try {
+			expect(() =>
+				_internals.copyFileBounded(source, destination, 1024),
+			).toThrow('shadow-copy write made no progress');
+			expect(writeSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			writeSpy.mockRestore();
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('ERR_DIR_CLOSED during directory cleanup is ignored', () => {
+		const dir = makeFixtureDir('swarm-ci-shadow-dir-closed-');
+		const swarmDir = path.join(dir, '.swarm');
+		fs.mkdirSync(swarmDir, { recursive: true });
+		let readCount = 0;
+		let closeCount = 0;
+		const fakeDirectory = {
+			readSync: () => {
+				readCount++;
+				return null;
+			},
+			closeSync: () => {
+				closeCount++;
+				const error = new Error(
+					'directory was closed concurrently',
+				) as Error & {
+					code?: string;
+				};
+				error.code = 'ERR_DIR_CLOSED';
+				throw error;
+			},
+		} as unknown as fs.Dir;
+		const realOpendir = fs.opendirSync.bind(fs);
+		const opendirSpy = spyOn(fs, 'opendirSync').mockImplementation(
+			(directory: fs.PathLike) =>
+				path.resolve(String(directory)) === path.resolve(swarmDir)
+					? fakeDirectory
+					: realOpendir(directory as any),
+		) as unknown as typeof fs.opendirSync;
+		let shadowRoot: string | null = null;
+		try {
+			shadowRoot = _internals.createShadowCopy(dir, 0);
+			expect(shadowRoot).not.toBeNull();
+			expect(readCount).toBe(1);
+			expect(closeCount).toBe(1);
+		} finally {
+			opendirSpy.mockRestore();
+			if (shadowRoot) fs.rmSync(shadowRoot, { recursive: true, force: true });
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('source growth is detected before any over-budget bytes are written', () => {
 		const dir = makeFixtureDir('swarm-ci-shadow-growth-bound-');
 		const source = path.join(dir, '.swarm', 'growth.bin');

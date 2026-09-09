@@ -84,6 +84,10 @@ report=$(printf '%s\n' "$output" | sed -n '/^\[SWARM_CI_JSON\]$/,/^\[\/SWARM_CI_
 Startup and evaluation run under an overall deadline (`--timeout-ms`, default
 300000; supported range 1–300000). SIGINT/SIGTERM abort the run (exit 2) and
 run registered cleanup exactly once; the run journal is capped at 200 events.
+The `run_started` journal event intentionally has no `detail`/directory field;
+cancellation/deadline/error diagnostics redact the evaluated directory from
+their bounded detail and journal-tail text. The former 600000ms example is no
+longer accepted: callers must use a value in the supported 1–300000ms range.
 Note that POSIX-style self-signalling is unreliable on Windows (Git Bash in
 particular), so treat signal-driven exit 2 there as best-effort; the
 `--timeout-ms` deadline is the portable bound. A SIGKILL or a host crash cannot be cleaned in-process. Any residue is confined to the OS temporary directory, where the operating system can reclaim it.

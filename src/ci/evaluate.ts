@@ -28,6 +28,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeProjectDb } from '../db/project-db.js';
 import {
 	DEFAULT_QA_GATES,
 	getEffectiveGates,
@@ -40,6 +41,7 @@ import {
 } from '../gate-evidence.js';
 import { isPlanCriticApproved } from '../hooks/delegation-gate.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import {
 	CI_QUALITY_THRESHOLDS,
 	computeEvidenceQualitySummary,
@@ -195,6 +197,10 @@ function copyFileBounded(
 			copiedBytes += bytesRead;
 		}
 	} finally {
+		// This helper writes a transient OS-temp path through an open descriptor.
+		// Invalidate explicitly so the scanner and read-your-own-write contract do
+		// not depend on the copy target remaining below the evaluated project root.
+		invalidateCachedArtifact(destination);
 		if (destinationFd !== undefined) {
 			try {
 				fs.closeSync(destinationFd);
@@ -289,7 +295,11 @@ function createShadowCopy(
 			const rel = path.relative(directory, src);
 			const dest = path.join(shadowRoot, rel);
 			fs.mkdirSync(path.dirname(dest), { recursive: true });
-			const copied = copyFileBounded(src, dest, maxBytes - copiedBytes);
+			const copied = _internals.copyFileBounded(
+				src,
+				dest,
+				maxBytes - copiedBytes,
+			);
 			if (copied === null) {
 				removeShadowRoot(shadowRoot);
 				return null;
@@ -351,9 +361,23 @@ export async function evaluateAdvisoryCi(
 	const journal = options.journal ?? (() => {});
 	const externalRegisterCleanup = options.registerCleanup;
 	let directShadowCleanup: (() => void) | undefined;
+	const directShadowCleanups: Array<() => void> = [];
 	const registerCleanup = (fn: () => void) => {
 		if (externalRegisterCleanup) externalRegisterCleanup(fn);
-		else directShadowCleanup = fn;
+		else {
+			directShadowCleanups.push(fn);
+			directShadowCleanup ??= () => {
+				for (const cleanup of directShadowCleanups.splice(0)) {
+					try {
+						cleanup();
+					} catch {
+						// Direct callers have no runtime cleanup supervisor; one failed
+						// best-effort cleanup must not hide the evaluation result or
+						// prevent later callbacks from running.
+					}
+				}
+			};
+		}
 	};
 	const gates: AdvisoryCiGateRow[] = [];
 	const tasks: AdvisoryCiReport['tasks'] = [];
@@ -433,11 +457,25 @@ export async function evaluateAdvisoryCi(
 		shadowDir = null;
 	}
 	if (shadowDir) {
-		const cleanupShadow = () => removeShadowRoot(shadowDir as string);
+		const cleanupShadow = () => {
+			try {
+				closeProjectDb(shadowDir as string);
+			} finally {
+				// SQLite must release WAL/SHM handles before the temp tree is
+				// removed (especially on Windows). Removal remains best-effort
+				// even if the cached DB is already closed or unavailable.
+				removeShadowRoot(shadowDir as string);
+			}
+		};
 		try {
 			registerCleanup(cleanupShadow);
 		} catch (error) {
-			removeShadowRoot(shadowDir);
+			try {
+				cleanupShadow();
+			} catch {
+				// Preserve the cleanup-registration failure; the shadow root has
+				// still received a best-effort removal attempt above.
+			}
 			throw error;
 		}
 	}

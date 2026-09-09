@@ -4,6 +4,7 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	_internals,
 	evaluateAdvisoryCi,
 	MAX_SHADOW_COPY_BYTES,
 } from '../../../src/ci/evaluate.js';
@@ -34,19 +35,75 @@ function fakeSymlinkDirent(name: string): fs.Dirent {
 	} as fs.Dirent;
 }
 
+function fakeFileDirent(name: string): fs.Dirent {
+	return {
+		name,
+		isBlockDevice: () => false,
+		isCharacterDevice: () => false,
+		isDirectory: () => false,
+		isFIFO: () => false,
+		isFile: () => true,
+		isSocket: () => false,
+		isSymbolicLink: () => false,
+	} as fs.Dirent;
+}
+
+function fakeDirectory(
+	entries: fs.Dirent[],
+	onRead?: (entry: fs.Dirent) => void,
+	onClose?: () => void,
+): fs.Dir {
+	let index = 0;
+	return {
+		readSync: () => {
+			const entry = entries[index++] ?? null;
+			if (entry !== null) onRead?.(entry);
+			return entry;
+		},
+		closeSync: () => onClose?.(),
+	} as unknown as fs.Dir;
+}
+
 describe('advisory CI shadow-copy acceptance checks', () => {
 	test('AC2 — budget overflow stops the complete traversal', async () => {
 		const fixture = overflowFixture('swarm-ci-ac2-');
 		const seenStats: string[] = [];
-		const realReaddir = fs.readdirSync.bind(fs);
+		const rootReadNames: string[] = [];
+		const nestedReadNames: string[] = [];
+		let closeCount = 0;
+		const rootHandle = fakeDirectory(
+			[
+				{
+					...fakeFileDirent('00-overflow'),
+					isDirectory: () => true,
+				} as fs.Dirent,
+				fakeFileDirent('99-sibling.bin'),
+			],
+			(entry) => rootReadNames.push(entry.name),
+			() => closeCount++,
+		);
+		const nestedHandle = fakeDirectory(
+			[fakeFileDirent('payload.bin')],
+			(entry) => nestedReadNames.push(entry.name),
+			() => closeCount++,
+		);
 		const realStat = fs.statSync.bind(fs);
-		const readdirSpy = spyOn(fs, 'readdirSync').mockImplementation(((
-			directory: fs.PathLike,
-			options?: unknown,
-		) =>
-			[...(realReaddir(directory as any, options as any) as fs.Dirent[])].sort(
-				(a, b) => a.name.localeCompare(b.name),
-			)) as unknown as typeof fs.readdirSync);
+		const realOpendir = fs.opendirSync.bind(fs);
+		const opendirSpy = spyOn(fs, 'opendirSync').mockImplementation(
+			(directory: fs.PathLike) => {
+				const resolved = path.resolve(String(directory));
+				if (resolved === path.resolve(path.join(fixture.dir, '.swarm'))) {
+					return rootHandle;
+				}
+				if (
+					resolved ===
+					path.resolve(path.join(fixture.dir, '.swarm', '00-overflow'))
+				) {
+					return nestedHandle;
+				}
+				return realOpendir(directory as any);
+			},
+		) as unknown as typeof fs.opendirSync;
 		const statSpy = spyOn(fs, 'statSync').mockImplementation(((
 			filePath: fs.PathLike,
 			...rest: unknown[]
@@ -62,25 +119,22 @@ describe('advisory CI shadow-copy acceptance checks', () => {
 			await evaluateAdvisoryCi({ directory: fixture.dir, tty: false });
 			// Before the fix, return only unwound the overflowing recursion frame;
 			// the parent then stat'ed this sibling.
+			expect(seenStats).toContain(path.resolve(fixture.overflowFile));
 			expect(seenStats).not.toContain(path.resolve(fixture.siblingFile));
+			expect(rootReadNames).toEqual(['00-overflow']);
+			expect(nestedReadNames).toEqual(['payload.bin']);
+			expect(closeCount).toBe(2);
+			expect(opendirSpy).toHaveBeenCalledTimes(2);
 		} finally {
-			readdirSpy.mockRestore();
 			statSpy.mockRestore();
+			opendirSpy.mockRestore();
 			fs.rmSync(fixture.dir, { recursive: true, force: true });
 		}
 	}, 10000);
 
 	test('AC3 — budget overflow reports an honest error without a large fixture', async () => {
 		const fixture = overflowFixture('swarm-ci-ac3-');
-		const realReaddir = fs.readdirSync.bind(fs);
 		const realStat = fs.statSync.bind(fs);
-		const readdirSpy = spyOn(fs, 'readdirSync').mockImplementation(((
-			directory: fs.PathLike,
-			options?: unknown,
-		) =>
-			[...(realReaddir(directory as any, options as any) as fs.Dirent[])].sort(
-				(a, b) => a.name.localeCompare(b.name),
-			)) as unknown as typeof fs.readdirSync);
 		const statSpy = spyOn(fs, 'statSync').mockImplementation(((
 			filePath: fs.PathLike,
 			...rest: unknown[]
@@ -103,7 +157,6 @@ describe('advisory CI shadow-copy acceptance checks', () => {
 			expect(planCritic?.detail).toContain('shadow-copy budget');
 			expect(report.verdict).toBe('fail');
 		} finally {
-			readdirSpy.mockRestore();
 			statSpy.mockRestore();
 			fs.rmSync(fixture.dir, { recursive: true, force: true });
 		}
@@ -115,27 +168,27 @@ describe('advisory CI shadow-copy acceptance checks', () => {
 		const swarmDir = path.join(dir, '.swarm');
 		const linkedFile = path.join(swarmDir, 'linked-file-target');
 		const linkedDirectory = path.join(swarmDir, 'linked-directory-target');
-		const realReaddir = fs.readdirSync.bind(fs);
 		const realStat = fs.statSync.bind(fs);
-		const realCopy = fs.copyFileSync.bind(fs);
 		const seenStats: string[] = [];
 		const copiedSources: string[] = [];
-		const readdirSpy = spyOn(fs, 'readdirSync').mockImplementation(((
-			directory: fs.PathLike,
-			options?: unknown,
-		) => {
-			const entries = realReaddir(
-				directory as any,
-				options as any,
-			) as fs.Dirent[];
-			return path.resolve(String(directory)) === path.resolve(swarmDir)
-				? [
-						...entries,
-						fakeSymlinkDirent('linked-directory'),
-						fakeSymlinkDirent('linked-file'),
-					]
-				: entries;
-		}) as unknown as typeof fs.readdirSync);
+		const readNames: string[] = [];
+		let closeCount = 0;
+		const rootHandle = fakeDirectory(
+			[
+				fakeFileDirent('plan.json'),
+				fakeSymlinkDirent(path.basename(linkedDirectory)),
+				fakeSymlinkDirent(path.basename(linkedFile)),
+			],
+			(entry) => readNames.push(entry.name),
+			() => closeCount++,
+		);
+		const realOpendir = fs.opendirSync.bind(fs);
+		const opendirSpy = spyOn(fs, 'opendirSync').mockImplementation(
+			(directory: fs.PathLike) =>
+				path.resolve(String(directory)) === path.resolve(swarmDir)
+					? rootHandle
+					: realOpendir(directory as any),
+		) as unknown as typeof fs.opendirSync;
 		const statSpy = spyOn(fs, 'statSync').mockImplementation(((
 			filePath: fs.PathLike,
 			...rest: unknown[]
@@ -143,14 +196,11 @@ describe('advisory CI shadow-copy acceptance checks', () => {
 			seenStats.push(path.resolve(String(filePath)));
 			return realStat(filePath as any, rest[0] as any);
 		}) as unknown as typeof fs.statSync);
-		const copySpy = spyOn(fs, 'copyFileSync').mockImplementation(((
-			source: fs.PathLike,
-			destination: fs.PathLike,
-			...rest: unknown[]
-		) => {
-			copiedSources.push(path.resolve(String(source)));
-			return realCopy(source as any, destination as any, ...(rest as any));
-		}) as unknown as typeof fs.copyFileSync);
+		const originalCopy = _internals.copyFileBounded;
+		_internals.copyFileBounded = (source, destination, remainingBytes) => {
+			copiedSources.push(path.resolve(source));
+			return originalCopy(source, destination, remainingBytes);
+		};
 		const cleanups: Array<() => void> = [];
 		try {
 			await evaluateAdvisoryCi({
@@ -162,11 +212,20 @@ describe('advisory CI shadow-copy acceptance checks', () => {
 			expect(seenStats).not.toContain(path.resolve(linkedDirectory));
 			expect(copiedSources).not.toContain(path.resolve(linkedFile));
 			expect(copiedSources).not.toContain(path.resolve(linkedDirectory));
+			expect(readNames).toEqual([
+				'plan.json',
+				path.basename(linkedDirectory),
+				path.basename(linkedFile),
+			]);
+			expect(seenStats).toContain(path.resolve(swarmDir, 'plan.json'));
+			expect(copiedSources).toEqual([path.resolve(swarmDir, 'plan.json')]);
+			expect(closeCount).toBe(1);
+			expect(opendirSpy).toHaveBeenCalledTimes(1);
 		} finally {
 			for (const cleanup of cleanups) cleanup();
-			copySpy.mockRestore();
+			_internals.copyFileBounded = originalCopy;
 			statSpy.mockRestore();
-			readdirSpy.mockRestore();
+			opendirSpy.mockRestore();
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	}, 10000);
