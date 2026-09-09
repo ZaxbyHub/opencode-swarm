@@ -3220,6 +3220,16 @@ export async function finishStandardWorktreeDispatch(
 				reconciled: mergeResult.reconciled ?? false,
 				provenance: mergeResult.provenance,
 			};
+			// A successful squash leaves the lane branch as the recovery source.
+			// Publish that authority before onMerged can commit settlement state or
+			// cleanup can retain the branch; otherwise a crash in either window can
+			// leave the only recovery pointer without durable authority.
+			if (mergeResult.strategy === 'squash' && !dispatch.recoveryClaim) {
+				const retainedPublishFailure = await publishRecoveryAuthority(
+					mergeResult.provenance,
+				);
+				if (retainedPublishFailure) return retainedPublishFailure;
+			}
 
 			if (settlement.onMerged) {
 				try {
@@ -3257,12 +3267,6 @@ export async function finishStandardWorktreeDispatch(
 					);
 					return failedSettlement;
 				}
-			}
-			if (mergeResult.strategy === 'squash' && !dispatch.recoveryClaim) {
-				const retainedPublishFailure = await publishRecoveryAuthority(
-					mergeResult.provenance,
-				);
-				if (retainedPublishFailure) return retainedPublishFailure;
 			}
 			const preCleanupRenewFailure = renewRecoveryClaimLease(
 				'before cleanup/finalization',

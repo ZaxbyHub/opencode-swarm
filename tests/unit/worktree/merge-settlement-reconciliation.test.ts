@@ -9,6 +9,7 @@ import {
 	resetStandardWorktreeIsolationState,
 	type StandardWorktreeDispatch,
 } from '../../../src/hooks/delegation-gate/worktree-isolation';
+import { lookupWorktreeRecoveryAuthoritiesByTask } from '../../../src/hooks/delegation-gate/worktree-recovery-authority';
 import type { BunCompatSubprocess } from '../../../src/utils/bun-compat';
 
 import {
@@ -384,6 +385,7 @@ test('squash settlement applies a reviewable worktree patch and preserves primar
 		'untracked user change\n',
 	);
 	let provenance: MergeOperationProvenance | undefined;
+	let authorityPublishedBeforeSettlementCommit = false;
 
 	const result = await finishStandardWorktreeDispatch(
 		root,
@@ -395,7 +397,14 @@ test('squash settlement applies a reviewable worktree patch and preserves primar
 			onBeforeMerge: async (record) => {
 				provenance = record;
 			},
-			onMerged: async () => {},
+			onMerged: async () => {
+				const authorities = lookupWorktreeRecoveryAuthoritiesByTask(root, {
+					parentSessionId: dispatch.parentSessionID,
+					taskId: dispatch.taskId,
+				});
+				authorityPublishedBeforeSettlementCommit =
+					authorities.status === 'ok' && authorities.authorities.length === 1;
+			},
 		},
 	);
 
@@ -403,6 +412,7 @@ test('squash settlement applies a reviewable worktree patch and preserves primar
 	expect(result.outcome === 'merged' ? result.strategy : '').toBe('squash');
 	expect(provenance?.resultTree).toMatch(/^[0-9a-f]{40,64}$/);
 	expect(provenance?.changedPaths).toContain('result.txt');
+	expect(authorityPublishedBeforeSettlementCommit).toBe(true);
 	expect(git(root, 'rev-parse', 'HEAD')).toBe(headBefore);
 	expect(
 		fs

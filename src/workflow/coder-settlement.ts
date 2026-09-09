@@ -823,6 +823,62 @@ async function cleanupRecoveredWorktree(
 	}
 }
 
+/**
+ * A committed squash settlement may still owe worktree cleanup after a crash.
+ * Re-establish the durable recovery authority before attempting that cleanup;
+ * the retained lane branch is the only safe source for replaying the squash.
+ */
+async function publishSquashRecoveryAuthorityForCommittedWal(
+	directory: string,
+	wal: CoderSettlementWal,
+): Promise<void> {
+	const descriptor = wal.worktree;
+	const provenance = wal.mergeProvenance;
+	if (
+		!descriptor ||
+		!provenance ||
+		provenance.strategy !== 'squash' ||
+		!provenance.resultTree ||
+		!provenance.changedPaths
+	) {
+		return;
+	}
+	const { _internals: worktreeInternals } = await import(
+		'../hooks/delegation-gate/worktree-isolation.js'
+	);
+	const published =
+		await worktreeInternals.publishRecoveryAuthorityForSettlement({
+			directory,
+			taskId: wal.taskId,
+			dispatch: {
+				callID: descriptor.callID,
+				parentSessionID: descriptor.parentSessionId,
+				taskId: descriptor.taskId,
+				...(descriptor.planTaskId
+					? { planTaskId: descriptor.planTaskId }
+					: {}),
+				handle: {
+					worktreePath: descriptor.worktreePath,
+					branchName: descriptor.branchName,
+					purpose: 'lane' as const,
+					id: descriptor.worktreeId,
+					sessionId: descriptor.worktreeSessionId,
+				},
+				mergeStrategy: descriptor.mergeStrategy,
+				laneIndex: descriptor.laneIndex,
+				...(descriptor.worktreeDir
+					? { worktree_dir: descriptor.worktreeDir }
+					: {}),
+			},
+			provenance,
+		});
+	if (!published.ok) {
+		throw new Error(
+			`CODER_SETTLEMENT_RECOVERY_AUTHORITY_FAILED: ${published.reason}`,
+		);
+	}
+}
+
 export async function completeCoderSettlementCleanup(
 	directory: string,
 	taskId: string,
@@ -922,6 +978,7 @@ export async function recoverCoderSettlement(
 		if (wal.state === 'ABORTED') return null;
 		if (wal.state === 'COMMITTED') {
 			if (wal.worktree && wal.cleanupComplete !== true) {
+				await publishSquashRecoveryAuthorityForCommittedWal(directory, wal);
 				await cleanupRecoveredWorktree(directory, wal.worktree);
 				await writeWal(filePath, { ...wal, cleanupComplete: true });
 			}

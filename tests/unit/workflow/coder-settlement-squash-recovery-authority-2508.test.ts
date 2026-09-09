@@ -261,4 +261,64 @@ describe('issue #2508 squash recovery authority — regression: CS2-001', () => 
 			scanWorktreeRecoveryAuthoritiesForRecovery(fixture.repo).status,
 		).toBe('ok');
 	});
+
+	test('COMMITTED cleanup recovery republishes squash authority before cleanup', async () => {
+		const fixture = createFixture();
+		roots.push(fixture.root);
+		await beginCoderSettlement({
+			directory: fixture.repo,
+			taskId: TASK_ID,
+			transitionId: fixture.transitionId,
+			actor: 'architect',
+			expectedGeneration: 0,
+			context: fixture.context,
+			worktree: fixture.descriptor,
+		});
+		recordWorktreeProvisioningOwner(fixture.repo, {
+			callID: fixture.callID,
+			parentSessionId: fixture.descriptor.parentSessionId,
+			worktreeSessionId: fixture.descriptor.worktreeSessionId,
+			taskId: TASK_ID,
+		});
+		const provenance = prepareLandedSquash(fixture);
+		const wal = readWal(fixture);
+		fs.writeFileSync(
+			walPath(fixture),
+			`${JSON.stringify(
+				{
+					...wal,
+					state: 'COMMITTED',
+					cleanupComplete: false,
+					mergeProvenance: provenance,
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		_internals.liveDispatches.clear();
+
+		await expect(recoverCoderSettlement(fixture.repo, TASK_ID)).resolves.toBeNull();
+		expect(fs.existsSync(fixture.worktree)).toBe(false);
+		expect(branchExists(fixture.repo, fixture.branch)).toBe(true);
+		expect(readWal(fixture)).toMatchObject({
+			state: 'COMMITTED',
+			cleanupComplete: true,
+		});
+		const authorities = lookupWorktreeRecoveryAuthoritiesByTask(fixture.repo, {
+			parentSessionId: fixture.descriptor.parentSessionId,
+			taskId: TASK_ID,
+		});
+		expect(authorities.status).toBe('ok');
+		if (authorities.status === 'ok') {
+			expect(authorities.authorities).toHaveLength(1);
+			expect(authorities.authorities[0]).toMatchObject({
+				status: 'preserved',
+				immutable: {
+					strategy: 'squash',
+					resultTree: provenance.resultTree,
+					changedPaths: provenance.changedPaths,
+				},
+			});
+		}
+	});
 });
