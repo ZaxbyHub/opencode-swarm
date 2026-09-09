@@ -3634,6 +3634,7 @@ export const _internals = {
 	publishWorktreeRecoveryAuthority,
 	replayWorktreeRecoveryClaimJournal,
 	buildWorktreeRecoveryPublishIdentity,
+	publishRecoveryAuthorityForSettlement,
 	/** FR-001b SC-004: path-based dirty worktree preservation for stale-lane fallback. */
 	preserveDirtyWorktreeAtPath,
 	/** Bounded lane session.create timeout (tests may override). */

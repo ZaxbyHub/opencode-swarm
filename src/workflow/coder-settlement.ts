@@ -947,11 +947,9 @@ export async function recoverCoderSettlement(
 						`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: transition ${wal.transitionId} for isolated task ${taskId} could not attribute worktree changes to the declared scope (${filePath}, state ${wal.state}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 					);
 				}
-				if (wal.mergeProvenance) {
-					const landed = await reconcileLandedMerge(
-						directory,
-						wal.mergeProvenance,
-					);
+				const mergeProvenance = wal.mergeProvenance;
+				if (mergeProvenance) {
+					const landed = await reconcileLandedMerge(directory, mergeProvenance);
 					if (landed.landed) {
 						wal = {
 							...wal,
@@ -964,6 +962,46 @@ export async function recoverCoderSettlement(
 							),
 						};
 						await writeWal(filePath, wal);
+						if (
+							mergeProvenance.strategy === 'squash' &&
+							mergeProvenance.resultTree &&
+							mergeProvenance.changedPaths
+						) {
+							const { _internals: worktreeInternals } = await import(
+								'../hooks/delegation-gate/worktree-isolation.js'
+							);
+							const published =
+								await worktreeInternals.publishRecoveryAuthorityForSettlement({
+									directory,
+									taskId,
+									dispatch: {
+										callID: worktree.callID,
+										parentSessionID: worktree.parentSessionId,
+										taskId: worktree.taskId,
+										...(worktree.planTaskId
+											? { planTaskId: worktree.planTaskId }
+											: {}),
+										handle: {
+											worktreePath: worktree.worktreePath,
+											branchName: worktree.branchName,
+											purpose: 'lane' as const,
+											id: worktree.worktreeId,
+											sessionId: worktree.worktreeSessionId,
+										},
+										mergeStrategy: worktree.mergeStrategy,
+										laneIndex: worktree.laneIndex,
+										...(worktree.worktreeDir
+											? { worktree_dir: worktree.worktreeDir }
+											: {}),
+									},
+									provenance: mergeProvenance,
+								});
+							if (!published.ok) {
+								throw new Error(
+									`CODER_SETTLEMENT_RECOVERY_AUTHORITY_FAILED: ${published.reason}`,
+								);
+							}
+						}
 						const committed = await commitPrepared(directory, wal);
 						await cleanupRecoveredWorktree(directory, worktree);
 						await writeWal(filePath, {
