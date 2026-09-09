@@ -19,7 +19,6 @@ import { WRITE_TOOL_NAMES } from '../../config/constants';
 import {
 	type AuthorityConfig,
 	type GuardrailsConfig,
-	GuardrailsConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
 import {
@@ -105,6 +104,8 @@ export const _internals = {
 	allowUncorrelatedGateReceipts: false,
 	MAX_PENDING_GATE_RECEIPTS_PER_SESSION,
 	MAX_PENDING_GATE_RECEIPT_SESSIONS,
+	MAX_PENDING_GATE_ROUTES_PER_SESSION,
+	MAX_PENDING_GATE_ROUTE_SESSIONS,
 	/**
 	 * Test/inspection seams for the no-op detector's bounded session state
 	 * (invariant 8). Production code does not call these; they exist so the
@@ -769,7 +770,15 @@ export function createGuardrailsHooks(
 	const universalDenyPrefixes: string[] =
 		authorityConfig?.universal_deny_prefixes ?? [];
 
-	const cfg = guardrailsConfig ?? GuardrailsConfigSchema.parse({});
+	// Fail closed on a missing config rather than silently absorbing it into
+	// schema defaults: garbage or legacy one-arg calls must keep surfacing as
+	// the programmer error they are (pinned by guardrails-directory.adversarial).
+	if (guardrailsConfig === undefined || guardrailsConfig === null) {
+		throw new TypeError(
+			'createGuardrailsHooks: guardrailsConfig is required — pass the resolved GuardrailsConfig object',
+		);
+	}
+	const cfg = guardrailsConfig;
 	const requiredQaGates = cfg.qa_gates?.required_tools ?? [
 		'diff',
 		'syntax_check',

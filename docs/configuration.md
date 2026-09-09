@@ -1134,13 +1134,15 @@ lifecycle bookkeeping stays active in BOTH modes (AGENTS.md invariant 9):
   renews the owning scope binding's lease (revision CAS bump + expiry
   extension). Foreign, expired, and released ownership never renews.
 - One structural bound stays fail-closed in both modes: patch payloads over
-  1 MiB are rejected (`WRITE BLOCKED: Patch payload exceeds 1 MB`) because
-  authority cannot be verified for an unbounded write set.
+  1 MB (1,000,000 bytes) are rejected (`WRITE BLOCKED: Patch payload exceeds
+  1 MB`) because authority cannot be verified for an unbounded write set.
 
 Every completed `pre_check_batch` call also records exactly ONE bounded
 route event (`type: "stage_a_gate_route"`) in `.swarm/events.jsonl`, with
 fields `route`, `sessionID`, `callID`, `taskId` (null when unattributable),
-`guardrailsEnabled`, each line ≤ 2048 bytes. The closed route vocabulary:
+`guardrailsEnabled`, `ts`. Every string field is sanitized and sliced to at
+most 128 characters, so a worst-case line stays far below the core event
+store's 256 KiB per-line cap. The closed route vocabulary:
 
 | route | Meaning | Operator recovery |
 |---|---|---|

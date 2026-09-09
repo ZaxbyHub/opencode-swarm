@@ -361,14 +361,20 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		}
 	}
 
-	function resolveDeclaredScope(sessionID: string): string[] | null {
+	function resolveDeclaredScope(
+		sessionID: string,
+		observing = false,
+	): string[] | null {
 		const session = swarmState.agentSessions.get(sessionID);
 		if (!session?.currentTaskId) {
 			return session?.declaredCoderScope?.length
 				? [...session.declaredCoderScope]
 				: null;
 		}
-		return resolveActiveScopeBinding(sessionID)?.files ?? null;
+		const binding = observing
+			? resolveActiveScopeBindingObserving(sessionID)
+			: resolveActiveScopeBinding(sessionID);
+		return binding?.files ?? null;
 	}
 
 	/**
@@ -1075,10 +1081,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		if (!analysis.hasWrites || analysis.writes.length === 0) return;
 
-		const declaredScope = resolveDeclaredScope(sessionID);
+		const declaredScope = resolveDeclaredScope(sessionID, !enforce);
 
 		const shellWriteAgent = swarmState.activeAgent.get(sessionID);
 		if (!shellWriteAgent) {
+			if (enforce) {
+				throw new Error(
+					`WRITE BLOCKED: No active agent registered for session "${sessionID}". Agent identity must be established (e.g. via a chat message or Task delegation) before shell writes can be authorized.`,
+				);
+			}
 			// Observe mode cannot determine coder identity without an agent;
 			// lease bookkeeping needs it, so there is nothing to observe.
 			return;
@@ -1418,7 +1429,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			return;
 		}
 
-		const declaredPaths = resolveDeclaredScope(sessionID);
+		const declaredPaths = resolveDeclaredScope(sessionID, !enforcePolicy);
 		if (!declaredPaths || declaredPaths.length === 0) {
 			recordOutcome({
 				finalCommandHash: originalCommandHash,
@@ -2486,7 +2497,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			);
 		} catch (err) {
 			const toolArgs = output.args as Record<string, unknown> | undefined;
-			const declaredScope = resolveDeclaredScope(input.sessionID);
+			// Diagnostics for an in-flight denial must never throw their own
+			// binding diagnostics over the original error: observing mode.
+			const declaredScope = resolveDeclaredScope(input.sessionID, true);
 			const declaredScopeText =
 				declaredScope != null && declaredScope.length > 0
 					? declaredScope.join(', ')
@@ -2638,6 +2651,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			) {
 				structuralPatch = (patchArgs.cmd as unknown[])[1] as string;
 			}
+			if (structuralPatch === undefined && typeof patchArgs?.cmd === 'string') {
+				// Mirrors write-target-resolver: a plain-string cmd is a patch
+				// payload shape, not an argv array.
+				structuralPatch = patchArgs.cmd;
+			}
 			if ((structuralPatch ?? '').length > 1_000_000) {
 				throw new Error(
 					'WRITE BLOCKED: Patch payload exceeds 1 MB — authority cannot be verified for all modified paths. Split into smaller patches.',
@@ -2705,12 +2723,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						`WRITE BLOCKED: No active agent registered for session "${input.sessionID}". Call startAgentSession before issuing write tool calls.`,
 					);
 				}
-				// lstat: block writes through symlinks
+				// lstat: block writes through symlinks. The decision is RECORDED in
+				// both modes (observe-mode audit stays active per issue #2664); only
+				// the denial itself is enforcement-gated.
 				const lstatBlock = checkWriteTargetForSymlink(
 					targetPath,
 					writeDirectory,
 				);
-				if (lstatBlock && enforcePolicy) {
+				if (lstatBlock) {
 					void appendGuardrailDecision(
 						{
 							type: 'file_write',
@@ -2721,7 +2741,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							path: targetPath,
 							reason: lstatBlock,
 							resolvedScope: (() => {
-								const scope = resolveDeclaredScope(input.sessionID);
+								const scope = resolveDeclaredScope(
+									input.sessionID,
+									!enforcePolicy,
+								);
 								return scope != null && scope.length > 0
 									? scope.join(', ')
 									: '';
@@ -2732,7 +2755,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							enabled: shellAuditEnabled,
 						},
 					);
-					throw new Error(lstatBlock);
+					if (enforcePolicy) {
+						throw new Error(lstatBlock);
+					}
 				}
 
 				// Per-agent authority check
@@ -2757,7 +2782,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					},
 				);
 				if (!authorityCheck.allowed) {
-					if (!enforcePolicy) continue;
 					const evidenceEventID =
 						authorityCheck.layer === 'protected-path'
 							? recordFullAutoSevereEvidenceEvent({
@@ -2788,6 +2812,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							enabled: shellAuditEnabled,
 						},
 					);
+					if (!enforcePolicy) {
+						continue;
+					}
 					throw new Error(
 						`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${targetPath}". Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
 					);

@@ -16,7 +16,10 @@ import {
 	readTaskEvidence,
 	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import {
+	_internals,
+	createGuardrailsHooks,
+} from '../../../src/hooks/guardrails';
 import {
 	STAGE_A_ROUTE_EVENT_TYPE,
 	STAGE_A_ROUTES,
@@ -336,5 +339,59 @@ describe('stage-a-route-events', () => {
 				expect(Buffer.byteLength(line, 'utf8')).toBeLessThanOrEqual(2048);
 			}
 		}
+	});
+
+	test('pending-route capacity bounds are pinned via _internals', () => {
+		expect(_internals.MAX_PENDING_GATE_ROUTES_PER_SESSION).toBe(256);
+		expect(_internals.MAX_PENDING_GATE_ROUTE_SESSIONS).toBe(500);
+	});
+
+	test('per-session pending-route overflow is bounded and never throws', async () => {
+		resetSwarmState();
+		ensureAgentSession('architect');
+		const hooks = createGuardrailsHooks(directory, config(false));
+		// Exceed the 256-per-session bound with unresolved toolBefore calls;
+		// the capacity throw must be caught warn-only at the remember site.
+		for (let i = 0; i < 260; i++) {
+			await hooks.toolBefore(
+				{
+					tool: 'pre_check_batch',
+					sessionID: 'architect',
+					callID: `c-overflow-${i}`,
+				},
+				{ args: {} },
+			);
+		}
+		// The lifecycle path stays fully functional after overflow.
+		await hooks.toolAfter(
+			{ tool: 'pre_check_batch', sessionID: 'architect', callID: 'after' },
+			{ title: '', output: PASS_PAYLOAD, metadata: null },
+		);
+		const events = routeEvents(directory);
+		expect(events.length).toBeGreaterThanOrEqual(1);
+	});
+
+	test('cross-session pending-route overflow is bounded and never throws', async () => {
+		for (let i = 0; i < 503; i++) {
+			const sessionID = `cap-session-${i}`;
+			ensureAgentSession(sessionID);
+			const hooks = createGuardrailsHooks(directory, config(false));
+			await hooks.toolBefore(
+				{ tool: 'pre_check_batch', sessionID, callID: `cs-${i}` },
+				{ args: {} },
+			);
+		}
+		resetSwarmState();
+		ensureAgentSession('architect');
+		const hooks = createGuardrailsHooks(directory, config(false));
+		await hooks.toolBefore(
+			{ tool: 'pre_check_batch', sessionID: 'architect', callID: 'cs-final' },
+			{ args: {} },
+		);
+		await hooks.toolAfter(
+			{ tool: 'pre_check_batch', sessionID: 'architect', callID: 'cs-final' },
+			{ title: '', output: PASS_PAYLOAD, metadata: null },
+		);
+		expect(routeEvents(directory).length).toBeGreaterThanOrEqual(1);
 	});
 });
