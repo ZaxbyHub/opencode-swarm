@@ -96,7 +96,10 @@ vi.mock('../../../src/plan/ledger', () => ({
 
 vi.mock('../../../src/plan/manager', () => ({
 	loadPlan: vi.fn().mockResolvedValue(null),
-	savePlan: vi.fn().mockResolvedValue(undefined),
+	savePlan: vi.fn().mockResolvedValue({
+		durability: 'complete',
+		degraded_surfaces: [],
+	}),
 	savePlanWithAutoAcknowledgedRemovals: vi.fn().mockResolvedValue(undefined),
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
@@ -158,12 +161,13 @@ vi.mock('../../../src/config/schema', () => ({
 // Import mocked modules after vi.mock calls.
 import { tryAcquireLock } from '../../../src/parallel/file-locks';
 import { ledgerExists } from '../../../src/plan/ledger';
-import { loadPlan } from '../../../src/plan/manager';
+import { loadPlan, savePlan } from '../../../src/plan/manager';
 import { ensureAgentSession } from '../../../src/state';
 
 const mockTryAcquireLock = tryAcquireLock as ReturnType<typeof vi.fn>;
 const mockLoadPlan = loadPlan as ReturnType<typeof vi.fn>;
 const mockLedgerExists = ledgerExists as ReturnType<typeof vi.fn>;
+const mockSavePlan = savePlan as ReturnType<typeof vi.fn>;
 
 function acquiredLock(filePath: string) {
 	return {
@@ -250,6 +254,10 @@ describe('phase_complete — issue #2101: deprecated direct fallback stays disab
 		vi.clearAllMocks();
 		// vi.clearAllMocks wipes default resolves — re-arm per test.
 		mockLoadPlan.mockResolvedValue(null);
+		mockSavePlan.mockResolvedValue({
+			durability: 'complete',
+			degraded_surfaces: [],
+		});
 		mockLedgerExists.mockResolvedValue(false);
 		mockTryAcquireLock.mockImplementation(async (_dir: string, file: string) =>
 			acquiredLock(file),

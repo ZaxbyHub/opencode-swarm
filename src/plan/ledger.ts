@@ -1037,7 +1037,14 @@ export async function initLedger(
 	if (!initialPlanHash) {
 		try {
 			if (fs.existsSync(planJsonPath)) {
-				const content = fs.readFileSync(planJsonPath, 'utf8');
+				// #2531: fatal decode — the embedded plan_created root must
+				// never carry decode-damage replacement characters into the
+				// authoritative ledger; invalid bytes fall back to the empty
+				// hash branch below.
+				const initBytes = fs.readFileSync(planJsonPath);
+				const content = new TextDecoder('utf-8', { fatal: true }).decode(
+					initBytes,
+				);
 				const plan: Plan = JSON.parse(content);
 				planHashAfter = computePlanLedgerHash(plan);
 				if (!embeddedPlan) embeddedPlan = plan;
@@ -2095,23 +2102,40 @@ function reconstructPlanFromEvents(
 	const targetPlanId = events[0].plan_id;
 	const relevantEvents = events.filter((e) => e.plan_id === targetPlanId);
 
-	// Always check for in-ledger snapshot events first
+	// Always check for in-ledger snapshot events first.
 	{
-		// Find the latest snapshot event
+		// Invariants (#2531): the candidate set is relevantEvents filtered to
+		// event_type 'snapshot' (monotonic in seq by the ledger's append-only
+		// invariant); iterate newest -> oldest and select the FIRST whose
+		// embedded payload.plan passes PlanSchema.safeParse (mirroring the
+		// plan_created validation below); eventsAfterSnapshot is
+		// relevantEvents filtered to seq > chosenSnapshot.seq on the same
+		// slice. A degraded (schema-invalid) latest snapshot is skipped with a
+		// warn so recoverable older history is used instead — snapshots are
+		// never mutated or deleted here.
 		const snapshotEvents = relevantEvents.filter(
 			(e) => e.event_type === 'snapshot',
 		);
-		if (snapshotEvents.length > 0) {
-			const latestSnapshotEvent = snapshotEvents[snapshotEvents.length - 1];
+		for (let i = snapshotEvents.length - 1; i >= 0; i--) {
+			const candidate = snapshotEvents[i];
+			const candidatePayload = candidate.payload as unknown as
+				| SnapshotEventPayload
+				| undefined;
+			const parseResult =
+				candidatePayload && candidatePayload.plan
+					? PlanSchema.safeParse(candidatePayload.plan)
+					: null;
+			if (!parseResult || !parseResult.success) {
+				log(
+					`[ledger] Skipping degraded snapshot event seq=${candidate.seq} (payload failed PlanSchema validation); falling back to older snapshot history.`,
+				);
+				continue;
+			}
+			let plan: Plan | null = parseResult.data;
 
-			// Get the plan from the snapshot payload
-			const snapshotPayload =
-				latestSnapshotEvent.payload as unknown as SnapshotEventPayload;
-			let plan: Plan | null = snapshotPayload.plan;
-
-			// Replay events after the snapshot
+			// Replay events after the chosen snapshot
 			const eventsAfterSnapshot = relevantEvents.filter(
-				(e) => e.seq > latestSnapshotEvent.seq,
+				(e) => e.seq > candidate.seq,
 			);
 
 			for (const event of eventsAfterSnapshot) {
@@ -2124,6 +2148,7 @@ function reconstructPlanFromEvents(
 
 			return plan;
 		}
+		// No schema-validatable snapshot — fall through to plan_created bootstrap.
 	}
 
 	// Try to bootstrap from plan_created event payload (self-sufficient ledger, #444 item 4)
@@ -2160,7 +2185,14 @@ function reconstructPlanFromEvents(
 
 	let plan: Plan | null;
 	try {
-		const content = fs.readFileSync(planJsonPath, 'utf8');
+		// #2531: fatal UTF-8 decode at this boundary. The legacy bootstrap must
+		// not silently convert invalid bytes into U+FFFD replacement characters
+		// and present decode damage as recovered authoritative state. A valid
+		// literal U+FFFD in plan.json is valid UTF-8 and survives untouched.
+		const bootstrapBytes = fs.readFileSync(planJsonPath);
+		const content = new TextDecoder('utf-8', { fatal: true }).decode(
+			bootstrapBytes,
+		);
 		plan = JSON.parse(content);
 	} catch {
 		return null;
@@ -2328,6 +2360,16 @@ export interface LedgerIntegrityResult {
 /**
  * Read ledger events with integrity checking.
  * Stops at the first malformed/unparseable line and returns the remainder for quarantine.
+ *
+ * Residual fail-open callers (accepted, do not silently grow this list):
+ * the terminal-recovery `replayFromLedgerWithStatus` trio (`close-terminal.ts`,
+ * `task-terminal.ts`, `task-repair.ts` — see `readLedgerEventsForEpoch`'s
+ * docblock for that caller analysis) and the two loadPlan recovery identity
+ * anchors in `manager.ts` (validation-failure catch path and Step 3). In the
+ * manager.ts sites a fail-closed throw would escape the surrounding recovery
+ * catch/try as a hard loadPlan failure, so the default fail-open behavior is
+ * the accepted residual: an unreadable ledger degrades the rung
+ * (replay skipped / rung refused) — availability-only, never integrity loss.
  *
  * @param directory - The working directory
  * @returns LedgerIntegrityResult with events, truncated flag, and bad suffix
@@ -2522,8 +2564,12 @@ export async function loadLastApprovedPlan(
 	directory: string,
 	expectedPlanId?: string,
 ): Promise<ApprovedSnapshotInfo | null> {
-	const events = await readLedgerEvents(directory);
-	return findLastApprovedSnapshot(events, expectedPlanId);
+	// #2531: approved-snapshot reads are scoped to the integrity-checked
+	// verified prefix so this surface can never serve a critic_approved
+	// snapshot from behind a poison line that replayFromLedgerWithStatus
+	// quarantines. The quarantined suffix stays archived on disk for forensics.
+	const integrity = await readLedgerEventsWithIntegrity(directory);
+	return findLastApprovedSnapshot(integrity.events, expectedPlanId);
 }
 
 /**
@@ -2555,9 +2601,10 @@ export async function loadLastPlanCriticApprovedSnapshot(
 	directory: string,
 	expectedPlanId?: string,
 ): Promise<ApprovedSnapshotInfo | null> {
-	const events = await readLedgerEvents(directory);
+	// #2531: verified-prefix scope — see loadLastApprovedPlan above.
+	const integrity = await readLedgerEventsWithIntegrity(directory);
 	return findLastApprovedSnapshot(
-		events,
+		integrity.events,
 		expectedPlanId,
 		(payload) => payload.approval?.source === 'plan_critic_gate',
 	);
@@ -2606,6 +2653,20 @@ function findLastApprovedSnapshot(
 			continue;
 		}
 
+		// #2531 feedback: schema-validate the embedded plan exactly like the
+		// sibling recovery rungs (in-ledger snapshot scan, plan_created
+		// bootstrap, plan_epoch adoption). A schema-invalid critic_approved
+		// snapshot is SKIPPED — the scan keeps looking at older history —
+		// so an unvalidated plan can never surface through
+		// loadLastApprovedPlan / loadLastPlanCriticApprovedSnapshot.
+		const parsedPlan = PlanSchema.safeParse(payload.plan);
+		if (!parsedPlan.success) {
+			criticalWarn(
+				`[ledger] Skipping schema-invalid critic_approved snapshot at seq ${event.seq}: ${parsedPlan.error.issues[0]?.message ?? 'unknown schema error'}`,
+			);
+			continue;
+		}
+
 		// Belt-and-suspenders: the embedded plan's identity must also match
 		// the event's plan_id. Guards against a snapshot whose payload was
 		// mutated on disk out-of-band from the event metadata.
@@ -2623,7 +2684,7 @@ function findLastApprovedSnapshot(
 		}
 
 		return {
-			plan: payload.plan,
+			plan: parsedPlan.data,
 			seq: event.seq,
 			timestamp: event.timestamp,
 			approval: payload.approval,

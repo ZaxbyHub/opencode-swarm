@@ -1269,7 +1269,7 @@ export async function executeSavePlan(
 			// fully honoured.  The existingStatusMap was already left empty above, but
 			// savePlan has its own independent guard that would re-read disk and
 			// silently restore 'completed' statuses — so we must also disable it here.
-			await savePlan(dir, plan, {
+			const saveDurability = await savePlan(dir, plan, {
 				preserveCompletedStatuses: !args.reset_statuses,
 				planLockAlreadyHeld: true,
 				...(reconcileLedgerProjection && reconcileLedgerTailCapture
@@ -1347,6 +1347,17 @@ export async function executeSavePlan(
 				// Advisory only - marker write failure does not affect plan save
 			}
 			const warnings: string[] = [];
+			// #2531 (AC5): surface the manager's explicit durability outcome —
+			// an advisory-surface (plan.md) write failure must reach the
+			// calling agent instead of being silently swallowed.
+			if (saveDurability.durability === 'incomplete') {
+				warnings.push(
+					`Plan saved with incomplete durability; degraded surfaces: ${saveDurability.degraded_surfaces.join(', ')}` +
+						(saveDurability.md_write_error
+							? ` (${saveDurability.md_write_error})`
+							: ''),
+				);
+			}
 			if (requirementCoverage?.status === 'override') {
 				const missingIds = requirementCoverage.blocking_missing
 					.map((requirement) => requirement.id)

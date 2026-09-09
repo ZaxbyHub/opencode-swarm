@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
+	_internals,
 	closePlanTerminalState,
 	rebuildPlan,
 	savePlan,
@@ -72,6 +73,13 @@ function createTestPlan(overrides?: Partial<Plan>): Plan {
 // savePlan marker tests
 // ---------------------------------------------------------------------------
 
+// Real seam binding captured at module scope (AGENTS.md invariant 7). These
+// tests simulate the write layer (bunWrite captures calls, nothing lands on
+// disk; renameSync is a no-op), so savePlan's plan.json read-back
+// verification (#2531) cannot observe a real file here — pin it to a no-op
+// for the marker-ordering subject under test and restore it in afterEach.
+const realVerifyWrittenPlanJson = _internals.verifyWrittenPlanJson;
+
 describe('savePlan write-marker in_progress', () => {
 	let tempDir: string;
 
@@ -79,7 +87,12 @@ describe('savePlan write-marker in_progress', () => {
 		tempDir = await mkdtemp(join(tmpdir(), 'saveplan-marker-'));
 	});
 
+	beforeEach(() => {
+		_internals.verifyWrittenPlanJson = realVerifyWrittenPlanJson;
+	});
+
 	afterEach(async () => {
+		_internals.verifyWrittenPlanJson = realVerifyWrittenPlanJson;
 		if (existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -88,6 +101,7 @@ describe('savePlan write-marker in_progress', () => {
 
 	test('1. savePlan writes intermediate marker with in_progress: true DURING execution', async () => {
 		const bunWriteCalls: Array<{ path: string; content: string }> = [];
+		_internals.verifyWrittenPlanJson = async () => {};
 
 		// Mock bunWrite to capture all write calls
 		mock.module('../../../src/utils/bun-compat', () => ({
@@ -144,6 +158,7 @@ describe('savePlan write-marker in_progress', () => {
 
 	test('2. savePlan final marker has in_progress: false (verified via mock)', async () => {
 		const bunWriteCalls: Array<{ path: string; content: string }> = [];
+		_internals.verifyWrittenPlanJson = async () => {};
 
 		mock.module('../../../src/utils/bun-compat', () => ({
 			bunWrite: mock(async (path: string, content: string) => {

@@ -97,7 +97,10 @@ vi.mock('../../../src/plan/ledger', () => ({
 
 vi.mock('../../../src/plan/manager', () => ({
 	loadPlan: vi.fn().mockResolvedValue(null),
-	savePlan: vi.fn().mockResolvedValue(undefined),
+	savePlan: vi.fn().mockResolvedValue({
+		durability: 'complete',
+		degraded_surfaces: [],
+	}),
 	savePlanWithAutoAcknowledgedRemovals: vi.fn().mockResolvedValue(undefined),
 	closePlanTerminalState: async () => {},
 	_snapshot_test_exports: {},
@@ -243,7 +246,10 @@ describe('phase_complete — #1269 finding 2: refuse to complete against a stale
 		session.lastPhaseCompleteTimestamp = 0;
 
 		vi.clearAllMocks();
-		mockSavePlan.mockResolvedValue(undefined);
+		mockSavePlan.mockResolvedValue({
+			durability: 'complete',
+			degraded_surfaces: [],
+		});
 		mockTryAcquireLock.mockImplementation(async (_dir: string, file: string) =>
 			acquiredLock(file),
 		);

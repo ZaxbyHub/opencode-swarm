@@ -280,6 +280,56 @@ loadPlan()
   → if mismatch: replayLedger() → savePlan() → write plan.json + plan.md
 ```
 
+### Recovery ladder and verified-prefix reads (issue #2531)
+
+Every `loadPlan` recovery entry — plan.json missing, undecodable, or
+schema-invalid — climbs the same ladder, and richer authoritative state is
+never silently replaced by a derived projection:
+
+1. Integrity-checked ledger replay (`readLedgerEventsWithIntegrity` verified
+   prefix). A replay error no longer escapes `loadPlan`; it falls to the next
+   rung.
+2. Critic-approved snapshot recovery (`loadLastApprovedPlan`), anchored to the
+   verified prefix's plan identity, with a heal snapshot appended so the next
+   process does not re-enter recovery.
+3. Legacy plan.md migration — the last resort, used only when no
+   ledger-approved state exists. Both markdown migration paths persist
+   `migration_status: "migrated"` AND append a durable `plan_rebuilt` event
+   with `source: "load_plan_migration_from_md"` so the ledger records the
+   plan's provenance. The ledger stays append-only; history is retained.
+
+Approved-snapshot reads (`loadLastApprovedPlan`,
+`loadLastPlanCriticApprovedSnapshot`) are scoped to the verified prefix, so
+`get_approved_plan` and the delegation gate can never serve a
+`critic_approved` snapshot from behind a poison line that replay quarantines.
+A snapshot inside the verified prefix is still served even when the ledger is
+truncated; the gate only fails closed when no valid approval exists in the
+prefix. Recovery is to review the quarantined suffix (`quarantineLedgerSuffix`
+archives it non-destructively) and re-run the plan critic, which appends a
+fresh `critic_approved` snapshot on the healthy tail.
+
+Replay validates each candidate snapshot payload with `PlanSchema.safeParse`
+(same as the `plan_created` bootstrap). A JSON-valid but schema-invalid
+(degraded) latest snapshot is skipped and recoverable older snapshot history
+is used instead; snapshots are never mutated or deleted. The legacy
+plan.json bootstrap decodes fatally (`TextDecoder("utf-8", { fatal: true })`),
+so invalid bytes produce an accurate bootstrap failure instead of silent
+U+FFFD replacement characters; a valid literal U+FFFD in plan.json is valid
+UTF-8 and remains ordinary plan data.
+
+### Save verification (issue #2531)
+
+`savePlan` read-back verifies the freshly persisted canonical `plan.json`
+projection through the shared retry-aware reader and throws
+`PlanWriteVerificationError` when the write cannot be verified — a save never
+claims successful readable state falsely. `plan.md` remains an advisory
+projection (#444 item 2): a write failure does not fail the save, but it is
+disclosed in the resolved `PlanSaveDurability`
+(`{ durability: "incomplete", degraded_surfaces: ["plan.md"], md_write_error }`)
+and via the `plan_md_write_failed` telemetry event. The disclosure is wired to
+agent-facing surfaces: `save_plan` and `phase_complete` append an
+incomplete-durability warning to their response `warnings`.
+
 ### Import
 
 `importCheckpoint()` reads `.swarm/plan-export/SWARM_PLAN.json` (with backward-compat fallback to flat `.swarm/` then project root, each with a deprecation warning) → validates schema → calls `savePlan()` → appends `plan_rebuilt` event to ledger.

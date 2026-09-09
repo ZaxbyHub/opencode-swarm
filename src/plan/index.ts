@@ -1,3 +1,4 @@
+export type { PlanSaveDurability } from './manager';
 export {
 	derivePlanMarkdown,
 	loadPlan,
