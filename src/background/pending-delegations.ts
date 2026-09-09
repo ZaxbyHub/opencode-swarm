@@ -362,6 +362,8 @@ export interface BackgroundWorktreeDescriptor {
 	worktreeId: string;
 	worktreeSessionId: string;
 	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
+	/** #2508: settlement landed via squash-unstaged — cleanup must retain the lane branch. */
+	landedUnstaged?: boolean;
 	laneIndex: number;
 	worktreeDir: string | null;
 	reservationId?: string;
@@ -695,6 +697,7 @@ const WorktreeDescriptorSchema = z
 		worktreeId: z.string().min(1).max(256),
 		worktreeSessionId: z.string().min(1).max(256),
 		mergeStrategy: z.enum(['merge', 'rebase', 'cherry-pick']),
+		landedUnstaged: z.boolean().optional(),
 		laneIndex: z.number().int().nonnegative().max(255),
 		worktreeDir: z.string().min(1).max(4_096).nullable(),
 		reservationId: z.string().min(1).max(512).optional(),

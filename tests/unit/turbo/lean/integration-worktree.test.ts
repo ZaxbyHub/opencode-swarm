@@ -1547,9 +1547,7 @@ describe('DD-10: Windows file-lock retry — EBUSY/EPERM', () => {
 	});
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // DD-7: git clean -fd in cleanup — untracked files cleaned before merge-back
-// ═══════════════════════════════════════════════════════════════════════════════
 
 describe('DD-7: git clean -fd in cleanup — untracked files cleaned', () => {
 	test('attemptMergeBackFromDirty calls autoCommitDirty then cleanUntrackedFiles then merge', async () => {
@@ -1587,7 +1585,9 @@ describe('DD-7: git clean -fd in cleanup — untracked files cleaned', () => {
 			path.join(tmpDir, '.swarm-worktrees', 'lane-1'),
 			'swarm-lane/session-1/lane-1',
 			tmpDir,
+			// #2508: lean keeps committed landing — matches runner.ts.
 			'merge',
+			{ commitLanding: true },
 		);
 
 		restoreAllSeams();

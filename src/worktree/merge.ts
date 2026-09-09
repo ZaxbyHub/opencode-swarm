@@ -249,7 +249,9 @@ function parseConflictFiles(output: string): string[] {
 
 export interface MergeSuccess {
 	merged: true;
-	strategy: string;
+	// Ephemeral landing shape — legitimately carries the internal
+	// 'squash-unstaged' value; only persisted provenance structs exclude it.
+	strategy: MergeStrategy;
 }
 
 export interface MergeConflict {
@@ -288,7 +290,7 @@ export interface ConflictHandlingError {
 
 export interface DirtyMergeSuccess {
 	merged: true;
-	strategy: string;
+	strategy: MergeStrategy;
 	autoCommitted: boolean;
 	cleaned: boolean;
 	/** True when a resumed operation was already present on the target. */
@@ -304,6 +306,10 @@ export interface DirtyMergePartial {
 	cleaned: boolean;
 	message: string;
 	conflictFiles?: string[];
+	/** #2508: stable machine-readable diagnostic code (e.g. SETTLEMENT_OVERLAP_BLOCKED). */
+	code?: string;
+	/** #2508: imperative recovery instruction in the ACTION[...] house style. */
+	recoveryHint?: string;
 	provenance?: MergeOperationProvenance;
 }
 
@@ -326,7 +332,12 @@ export interface MergeOperationProvenance {
 	sourceHead: string;
 	targetHeadBefore: string;
 	branchName: string;
-	strategy: MergeStrategy;
+	/**
+	 * Always the PASSED dispatch strategy, never the internal
+	 * `'squash-unstaged'` landing value (#2508): this struct is persisted into
+	 * the settlement WAL, whose schema only accepts the three legacy values.
+	 */
+	strategy: Exclude<MergeStrategy, 'squash-unstaged'>;
 }
 
 /**
@@ -350,12 +361,116 @@ export const GIT_OBJECT_ID_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 export type MergeReconciliationResult =
 	| {
 			landed: true;
-			method: 'ancestry' | 'cherry-pick-trailer';
+			method: 'ancestry' | 'cherry-pick-trailer' | 'worktree-match';
 	  }
 	| {
 			landed: false;
 			error?: string;
 	  };
+
+/**
+ * Detects an already-applied squash-unstaged landing (#2508). A squash landing
+ * never advances HEAD, so the ancestry probe in `reconcileLandedMerge` can
+ * never see it; recovery would re-enter the merge path and misread the
+ * landing's own unstaged bytes as user work. Instead: every path where
+ * `sourceHead` differs from HEAD must carry exactly `sourceHead`'s content in
+ * the working tree (and index). Anything else — a user edit on an incoming
+ * path, a missing added file, a resurrected deleted file, a quoted path git
+ * escaped — keeps the result conservative (`landed: false`), which routes
+ * recovery back to the overlap preflight and preserves the pre-existing
+ * blocked behavior. Git probe failures surface as `error` so callers can
+ * distinguish "not landed" from "cannot tell".
+ */
+async function matchesSourceHeadWorkingTree(
+	primaryDir: string,
+	sourceHead: string,
+): Promise<MergeReconciliationResult> {
+	// The landing applied exactly mergeBase..sourceHead's diff, so the
+	// incoming set must be scoped to the merge base — HEAD..sourceHead would
+	// wrongly include paths HEAD advanced past the base without the lane
+	// ever touching them.
+	const mergeBase = await runGit(
+		['merge-base', 'HEAD', sourceHead],
+		primaryDir,
+	);
+	if (mergeBase.exitCode !== 0) {
+		return {
+			landed: false,
+			error:
+				mergeBase.stderr.trim() ||
+				`git merge-base exited ${mergeBase.exitCode}`,
+		};
+	}
+	const incoming = await runGit(
+		// --no-renames keeps statuses to A/M/D/T; a rename pair would otherwise
+		// put a second tab inside the status field and corrupt the path parse.
+		[
+			'diff',
+			'--name-status',
+			'--no-renames',
+			mergeBase.stdout.trim(),
+			sourceHead,
+			'--',
+		],
+		primaryDir,
+	);
+	if (incoming.exitCode !== 0) {
+		return {
+			landed: false,
+			error:
+				incoming.stderr.trim() ||
+				incoming.stdout.trim() ||
+				`git diff exited ${incoming.exitCode}`,
+		};
+	}
+	for (const line of incoming.stdout.split('\n')) {
+		if (!line) continue;
+		const tabIndex = line.indexOf('\t');
+		if (tabIndex < 0) continue;
+		const status = line.slice(0, tabIndex);
+		const filePath = line.slice(tabIndex + 1);
+		// Quoted (non-ASCII / special-character) paths are treated as divergent:
+		// un-escaping them here risks a false "landed", and declining keeps the
+		// conservative block.
+		if (filePath.startsWith('"')) return { landed: false };
+		if (status === 'A') {
+			const worktreePath = path.join(primaryDir, filePath);
+			if (!fs.existsSync(worktreePath)) return { landed: false };
+			const expected = await runGit(
+				['rev-parse', `${sourceHead}:${filePath}`],
+				primaryDir,
+			);
+			const actual = await runGit(['hash-object', '--', filePath], primaryDir);
+			if (expected.exitCode !== 0 || actual.exitCode !== 0) {
+				return {
+					landed: false,
+					error:
+						expected.stderr.trim() ||
+						actual.stderr.trim() ||
+						`git content probe exited ${expected.exitCode}/${actual.exitCode}`,
+				};
+			}
+			// hash-object applies the same clean filter that produced the blob,
+			// so equality holds whenever the filters round-trip; a
+			// non-round-tripping config degrades to {landed: false} (the old
+			// blocked behavior), never to a false positive.
+			if (actual.stdout.trim() !== expected.stdout.trim()) {
+				return { landed: false };
+			}
+			continue;
+		}
+		// 'M' / 'T' / 'D': commit-vs-worktree diff spans staged and unstaged,
+		// so a user who staged the landed bytes still reconciles, and a
+		// deleted-in-lane path is landed exactly when it stays absent (a
+		// resurrected file diverges and keeps the conservative block).
+		const diff = await runGit(
+			['diff', '--quiet', sourceHead, '--', filePath],
+			primaryDir,
+		);
+		if (diff.exitCode !== 0) return { landed: false };
+	}
+	return { landed: true, method: 'worktree-match' };
+}
 
 /**
  * Immutable preserved-lane coordinates captured by the #2105 recovery
@@ -367,7 +482,11 @@ export interface ImmutableMergeRecoveryCoordinates {
 	sourceBaseOid: string;
 	sourceHeadOid: string;
 	targetHeadOid: string;
-	strategy: MergeStrategy;
+	/**
+	 * Persisted recovery identity — always one of the three legacy dispatch
+	 * strategies, never the internal `'squash-unstaged'` landing value (#2508).
+	 */
+	strategy: Exclude<MergeStrategy, 'squash-unstaged'>;
 }
 
 export type ImmutableMergeRecoveryResult =
@@ -383,6 +502,13 @@ export interface DirtyMergeOptions {
 	operationId?: string;
 	/** Previously persisted provenance when resuming a `settling` operation. */
 	resume?: MergeOperationProvenance;
+	/**
+	 * #2508: opt OUT of the squash-merge-unstaged default landing for a
+	 * `'merge'` dispatch. Callers that own their own committed-merge cleanup
+	 * (Lean Turbo merge-back) pass `true` to keep `git merge --no-edit`.
+	 * `'rebase'` and `'cherry-pick'` always land committed regardless.
+	 */
+	commitLanding?: boolean;
 	/**
 	 * Awaited after auto-commit and HEAD capture, but before the Git merge.
 	 * A rejection fails closed without invoking the merge.
@@ -850,9 +976,12 @@ export interface StartupRecoveryResult {
  * @returns The merge strategy to use: `'merge'`, `'rebase'`, or `'cherry-pick'`.
  */
 export function getMergeStrategy(config: {
-	mergeStrategy?: MergeStrategy;
-	merge_strategy?: MergeStrategy;
-}): MergeStrategy {
+	mergeStrategy?: Exclude<MergeStrategy, 'squash-unstaged'>;
+	merge_strategy?: Exclude<MergeStrategy, 'squash-unstaged'>;
+}): Exclude<MergeStrategy, 'squash-unstaged'> {
+	// Config only ever carries the three persisted strategy values; the
+	// internal 'squash-unstaged' landing mode is produced by
+	// attemptMergeBackFromDirty's remap, never by configuration (#2508).
 	return config.mergeStrategy ?? config.merge_strategy ?? 'merge';
 }
 
@@ -879,6 +1008,104 @@ export async function mergeLaneBranch(
 		case 'merge':
 			result = await runGit(['merge', '--no-edit', branchName], primaryDir);
 			break;
+		case 'squash-unstaged': {
+			// #2508 squash-merge-unstaged landing: apply the lane's changes to
+			// the working tree WITHOUT committing, then unstage only the lane's
+			// incoming paths so the user's pre-existing staged entries survive
+			// and the lane work lands as reviewable unstaged modifications.
+			const mergeBaseResult = await runGit(
+				['merge-base', 'HEAD', branchName],
+				primaryDir,
+			);
+			const mergeBase = mergeBaseResult.stdout.trim();
+			if (
+				mergeBaseResult.exitCode !== 0 ||
+				!GIT_OBJECT_ID_PATTERN.test(mergeBase)
+			) {
+				return {
+					error: `Unable to determine merge base for squash-unstaged landing of ${branchName}`,
+				};
+			}
+			const incomingResult = await runGit(
+				[
+					'diff',
+					'--name-status',
+					'-z',
+					'--find-renames',
+					`${mergeBase}..${branchName}`,
+				],
+				primaryDir,
+			);
+			if (incomingResult.exitCode !== 0) {
+				return {
+					error: `Unable to enumerate incoming paths for squash-unstaged landing of ${branchName}`,
+				};
+			}
+			const parsedIncoming = parseIncomingPaths(
+				incomingResult.stdout,
+				currentPathCasePolicy(),
+			);
+			if ('error' in parsedIncoming || parsedIncoming.paths.size === 0) {
+				return {
+					error: `No parsable incoming paths for squash-unstaged landing of ${branchName}`,
+				};
+			}
+			// Both sides of every rename record must be handled; a one-sided
+			// pathspec splits a rename into a deletion + untracked file.
+			const incomingPaths = [...parsedIncoming.paths.values()];
+			const squashResult = await runGit(
+				['merge', '--squash', '--no-commit', branchName],
+				primaryDir,
+			);
+			if (squashResult.exitCode !== 0) {
+				// A conflicted `git merge --squash --no-commit` writes NO
+				// MERGE_HEAD, so `git merge --abort` cannot clean it. Restore
+				// ONLY the incoming paths — the overlap preflight proved they
+				// were clean before the merge, so resetting them to HEAD is
+				// exactly the pre-merge state; the user's unrelated staged and
+				// unstaged entries are untouched.
+				const combined = `${squashResult.stderr}\n${squashResult.stdout}`;
+				const restore = await runGit(
+					['checkout', '-q', 'HEAD', '--', ...incomingPaths],
+					primaryDir,
+				);
+				if (/CONFLICT/i.test(combined)) {
+					return {
+						conflict: true,
+						files: parseConflictFiles(combined),
+						message:
+							squashResult.stderr.trim() ||
+							squashResult.stdout.trim() ||
+							'squash merge reported a conflict',
+					};
+				}
+				if (restore.exitCode !== 0) {
+					advisoryWarn(
+						`[worktree] mergeLaneBranch: squash merge failed and targeted restore also failed for ${branchName}: ${
+							restore.stderr.trim() || restore.stdout.trim()
+						}`,
+					);
+				}
+				return {
+					error:
+						squashResult.stderr.trim() ||
+						squashResult.stdout.trim() ||
+						'squash merge failed',
+				};
+			}
+			const resetResult = await runGit(
+				['reset', '-q', 'HEAD', '--', ...incomingPaths],
+				primaryDir,
+			);
+			if (resetResult.exitCode !== 0) {
+				// Fail-safe: the changes are staged (reviewable, nothing lost).
+				// Leave them staged rather than guessing a wider reset scope.
+				advisoryWarn(
+					`[worktree] mergeLaneBranch: targeted unstage failed for ${branchName} (${resetResult.stderr.trim() || resetResult.stdout.trim()}); lane changes remain staged`,
+				);
+			}
+			return { merged: true, strategy };
+		}
 		case 'rebase':
 			result = await runGit(['rebase', branchName], primaryDir);
 			break;
@@ -1191,6 +1418,14 @@ export async function reconcileLandedMerge(
 			return { landed: true, method: 'ancestry' };
 		}
 		if (ancestry.exitCode === 1) {
+			// #2508: a squash-unstaged landing ('merge' dispatch remapped inside
+			// mergeLaneBranch) writes no commit, so ancestry can never see it.
+			// Fall back to working-tree content identity before declaring the
+			// operation unlanded — otherwise recovery re-enters the merge path
+			// and misreads the landing's own unstaged bytes as user work.
+			if (provenance.strategy === 'merge') {
+				return matchesSourceHeadWorkingTree(primaryDir, provenance.sourceHead);
+			}
 			return { landed: false };
 		}
 		return {
@@ -1561,7 +1796,13 @@ export async function attemptMergeBackFromDirty(
 	worktreePath: string,
 	branchName: string,
 	primaryDir: string,
-	strategy: MergeStrategy,
+	/**
+	 * The PASSED dispatch strategy (persisted identity). `'squash-unstaged'` is
+	 * produced internally by the #2508 landing remap and is never a valid
+	 * input — callers that want the committed merge pass `'merge'` with
+	 * `options.commitLanding: true`.
+	 */
+	strategy: Exclude<MergeStrategy, 'squash-unstaged'>,
 	options: DirtyMergeOptions = {},
 ): Promise<DirtyMergeSuccess | DirtyMergePartial | DirtyMergeFailure> {
 	let autoCommitted = false;
@@ -1604,7 +1845,14 @@ export async function attemptMergeBackFromDirty(
 		if (reconciliation.landed) {
 			return {
 				merged: true,
-				strategy,
+				// #2508: a worktree-match reconciliation means the earlier
+				// attempt landed as squash-unstaged — report the actual landing
+				// shape so the caller's landedUnstaged stamp and branch
+				// retention key off it, not off the passed dispatch strategy.
+				strategy:
+					reconciliation.method === 'worktree-match'
+						? 'squash-unstaged'
+						: strategy,
 				autoCommitted: false,
 				cleaned: false,
 				reconciled: true,
@@ -1774,6 +2022,11 @@ export async function attemptMergeBackFromDirty(
 			cleaned,
 			message: `Primary checkout has overlapping dirty paths with incoming lane changes: ${finalOverlapSnapshot.snapshot.overlapPaths.join(', ')}`,
 			conflictFiles: finalOverlapSnapshot.snapshot.overlapPaths,
+			// #2508: typed diagnostic + recovery hint on the overlap block so
+			// consumers (/swarm status, architect prompts) can branch on the
+			// stable code instead of parsing prose.
+			code: 'SETTLEMENT_OVERLAP_BLOCKED',
+			recoveryHint: `ACTION: commit or stash your local changes to the overlapping paths (or run /swarm recover for the preserved lane), then re-dispatch the lane. Overlapping paths: ${finalOverlapSnapshot.snapshot.overlapPaths.join(', ')}`,
 			...(provenance ? { provenance } : {}),
 		};
 	}
@@ -1792,13 +2045,27 @@ export async function attemptMergeBackFromDirty(
 		};
 	}
 
-	// Step 3b: Attempt merge-back
-	const mergeResult = await mergeLaneBranch(primaryDir, branchName, strategy);
+	// Step 3b: Attempt merge-back.
+	// #2508: a 'merge' dispatch lands via the internal squash-unstaged shape
+	// unless the caller opted into a committed landing. The remap is
+	// behavioral ONLY — `provenance` (persisted into the settlement WAL)
+	// records the PASSED strategy above and must never see 'squash-unstaged'
+	// (the WAL schema validates provenance.strategy against the three legacy
+	// values and cross-checks it against the dispatch strategy).
+	const landingStrategy: MergeStrategy =
+		strategy === 'merge' && !options.commitLanding
+			? 'squash-unstaged'
+			: strategy;
+	const mergeResult = await mergeLaneBranch(
+		primaryDir,
+		branchName,
+		landingStrategy,
+	);
 
 	if ('merged' in mergeResult && mergeResult.merged) {
 		return {
 			merged: true,
-			strategy,
+			strategy: landingStrategy,
 			autoCommitted,
 			cleaned,
 			...(provenance ? { reconciled: false, provenance } : {}),

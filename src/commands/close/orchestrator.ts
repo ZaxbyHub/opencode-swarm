@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -11,7 +12,13 @@ import { buildActionMenu } from '../../services/session-reflection';
 import { closeSnapshotCoordinationInitialization } from '../../session/snapshot-coordination-init.js';
 import { hasActiveFullAuto, swarmState } from '../../state';
 import { atomicWriteSwarmFile } from '../../utils/atomic-write';
+import { resolveGitExecutable } from '../../utils/git-executable.js';
 import { log } from '../../utils/logger';
+import {
+	consumeConfirmToken,
+	issueConfirmToken,
+	type PurgeCandidate,
+} from '../destructive-purge.js';
 import { runAlignStage } from './align-stage.js';
 import { emitCloseArchiveResult, runArchiveStage } from './archive-stage.js';
 import { runCleanStage } from './clean-stage.js';
@@ -26,6 +33,121 @@ import type {
 } from './context.js';
 import { runFinalizeStage } from './finalize-stage.js';
 import { _internals } from './internals.js';
+
+/**
+ * #2508 two-step destructive close: what the destructive portion of close
+ * would destroy, read-only. The align stage's aggressive reset discards
+ * tracked/staged work (untracked files survive); the clean stage removes
+ * active-state artifacts AFTER archiving them (recoverable, but part of the
+ * preview so the operator sees the full scope).
+ */
+export interface ClosePurgeGate {
+	/** True when git alignment would discard uncommitted tracked work. */
+	wouldDestroyTrackedWork: boolean;
+	/** Tracked-dirty repo-relative paths that alignment would discard. */
+	dirtyPaths: string[];
+	/** Digest scope: dirty paths + present active-state paths (absolute). */
+	candidates: PurgeCandidate[];
+	/** First candidate path (digest anchor for the #2527 primitive). */
+	scopeAnchor: string;
+	/**
+	 * #2508 fail-closed signal: git status could not be read in a repository
+	 * (spawn failure, timeout, or nonzero exit). The gate cannot prove the
+	 * align stage safe, so the destructive pipeline must be refused — never
+	 * treated as a clean tree. A bare `.git` marker (#2127 project root with
+	 * no repository behind it) carries no git-tracked work to verify and does
+	 * not trip this signal.
+	 */
+	gitStatusFailed: boolean;
+}
+
+function runCloseGateGit(args: string[], cwd: string): string | null {
+	const result = spawnSync(resolveGitExecutable(), args, {
+		cwd,
+		encoding: 'utf8',
+		timeout: 10_000,
+		windowsHide: true,
+		stdio: ['ignore', 'pipe', 'pipe'],
+	});
+	if (result.error || result.status !== 0) return null;
+	return result.stdout ?? '';
+}
+
+/** Test seam for the #2508 gate (simulate git-status read failures). */
+export const _closeGateInternals = { runGit: runCloseGateGit };
+
+/**
+ * A real git repository root: `.git` is a linked-worktree/submodule pointer
+ * file, or a directory carrying the HEAD ref every repository has. Bare
+ * `.git` marker directories — accepted project roots per #2127 — are not
+ * repositories; git tracks nothing there, so a failed status read is a
+ * determined "no tracked work" answer, not an unreadable status.
+ */
+function isRealGitRepository(directory: string): boolean {
+	try {
+		if (fsSync.statSync(path.join(directory, '.git')).isFile()) return true;
+	} catch {
+		return false;
+	}
+	return fsSync.existsSync(path.join(directory, '.git', 'HEAD'));
+}
+
+export function evaluateClosePurgeGate(
+	directory: string,
+	swarmDir: string,
+): ClosePurgeGate {
+	const statusOutput = _closeGateInternals.runGit(
+		['status', '--porcelain'],
+		directory,
+	);
+	const dirtyPaths: string[] = [];
+	if (statusOutput !== null) {
+		for (const line of statusOutput.split('\n')) {
+			if (!line) continue;
+			// Untracked ('??') entries survive the align reset; every other
+			// porcelain code (staged, unstaged, conflicted) is tracked work
+			// that `git reset --hard` + `checkout -- .` would discard.
+			if (line.startsWith('??')) continue;
+			const filePath = line.slice(3).trim().replace(/^"|"$/g, '');
+			if (!filePath) continue;
+			// #2508: porcelain renames ('R  old -> new') put BOTH sides at
+			// risk — list each side so the preview and digest stay exact.
+			if (line.startsWith('R') && filePath.includes(' -> ')) {
+				for (const side of filePath.split(' -> ')) {
+					if (side) dirtyPaths.push(side);
+				}
+			} else {
+				dirtyPaths.push(filePath);
+			}
+		}
+	}
+	const candidates: PurgeCandidate[] = dirtyPaths.map((p) => ({
+		path: path.join(directory, p),
+		reason: 'uncommitted tracked change — discarded by git alignment',
+	}));
+	for (const entry of [
+		...ACTIVE_STATE_TO_CLEAN,
+		...ACTIVE_STATE_DIRS_TO_CLEAN,
+	]) {
+		const full = path.join(swarmDir, entry);
+		if (fsSync.existsSync(full)) {
+			candidates.push({
+				path: full,
+				reason: 'active swarm state — archived then removed by close',
+			});
+		}
+	}
+	return {
+		wouldDestroyTrackedWork: dirtyPaths.length > 0,
+		dirtyPaths,
+		candidates,
+		scopeAnchor: candidates[0]?.path ?? directory,
+		// A repository whose status cannot be read is never "clean" — fail
+		// closed. Non-repository `.git` markers (#2127 roots) carry no
+		// git-tracked work, so a failed read there is an answer, not a gap.
+		gitStatusFailed: statusOutput === null && isRealGitRepository(directory),
+	};
+}
 
 export async function archiveCloseSummary(
 	ctx: Pick<
@@ -129,6 +251,60 @@ export async function handleCloseCommand(
 			planData,
 			planExists,
 		);
+	}
+
+	// #2508 two-step destructive purge. Placed BEFORE lock acquisition so the
+	// preview is fully side-effect-free (no finalize.lock under .swarm/). The
+	// preview fires only when destruction would occur — when the tracked tree
+	// is clean (or this is not a git repo), close keeps its single-call
+	// behavior, mirroring /swarm reset-session's default-safe pattern (#2527).
+	const confirmArg = args.find((a) => a.startsWith('--confirm='));
+	const confirmToken = confirmArg
+		? confirmArg.slice('--confirm='.length)
+		: undefined;
+	const purgeGate = evaluateClosePurgeGate(directory, swarmDir);
+	// #2508 fail-closed: without a readable git status the gate cannot prove
+	// the align stage safe. Refuse the destructive pipeline outright — a
+	// measurement that cannot be taken must never read as "clean tree".
+	if (purgeGate.gitStatusFailed) {
+		return `🛑 /swarm close aborted (fail-closed): git status could not be read in ${directory}, so the destructive-purge gate cannot verify uncommitted tracked work. Nothing was closed, archived, or destroyed. Ensure git is available and the repository is readable, then re-run /swarm close.`;
+	}
+	if (confirmToken !== undefined) {
+		const verdict = consumeConfirmToken(
+			purgeGate.scopeAnchor,
+			directory,
+			confirmToken,
+			{ kind: 'swarm-close', candidates: purgeGate.candidates },
+		);
+		if (!verdict.ok) {
+			return `🔐 /swarm close confirmation rejected: ${verdict.reason}. Nothing was closed, archived, or destroyed. Re-run /swarm close (without --confirm) for a fresh preview and token.`;
+		}
+		// Token verified and consumed (single use): fall through to the full
+		// pipeline — the operator explicitly confirmed this exact scope.
+	} else if (purgeGate.wouldDestroyTrackedWork) {
+		const activeStateCount =
+			purgeGate.candidates.length - purgeGate.dirtyPaths.length;
+		const token = issueConfirmToken(purgeGate.scopeAnchor, directory, {
+			kind: 'swarm-close',
+			candidates: purgeGate.candidates,
+		});
+		const listed = purgeGate.dirtyPaths.slice(0, 10);
+		const overflow = purgeGate.dirtyPaths.length - listed.length;
+		return [
+			'🔐 Destructive close preview — confirmation required.',
+			'',
+			`Git alignment would DISCARD ${purgeGate.dirtyPaths.length} uncommitted tracked change(s):`,
+			...listed.map((p) => `  - ${p}`),
+			...(overflow > 0 ? [`  … and ${overflow} more`] : []),
+			'',
+			`${activeStateCount} active-state artifact(s) will be archived, then removed.`,
+			'',
+			'Nothing has been closed, archived, or destroyed yet. To execute the destructive close, run:',
+			``,
+			`/swarm close --confirm=${token}`,
+			'',
+			'The token is valid for 15 minutes and can be used once. Untracked files are not affected.',
+		].join('\n');
 	}
 
 	// FR-012: acquire finalize lock before any destructive work

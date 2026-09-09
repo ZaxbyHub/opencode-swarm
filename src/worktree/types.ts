@@ -1,6 +1,17 @@
 export type WorktreePurpose = 'lane' | 'session';
 
-export type MergeStrategy = 'merge' | 'rebase' | 'cherry-pick';
+/**
+ * Landing strategies. The three legacy values are the persisted/config surface
+ * (workflow WAL, pending-delegation checkpoints, recovery records all validate
+ * against exactly these). `'squash-unstaged'` is an internal landing mode
+ * (#2508): `attemptMergeBackFromDirty` remaps a `'merge'` dispatch to it unless
+ * the caller opts into a committed landing — it must never be persisted.
+ */
+export type MergeStrategy =
+	| 'merge'
+	| 'rebase'
+	| 'cherry-pick'
+	| 'squash-unstaged';
 
 export type DependencyPreparationStrategy = 'skip' | 'copy' | 'link';
 
