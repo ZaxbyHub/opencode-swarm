@@ -560,6 +560,7 @@ function isClaimState(value: unknown): value is WorktreeRecoveryClaimState {
 function isAuthority(value: unknown): value is WorktreeRecoveryAuthorityRecord {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
 	const candidate = value as Record<string, unknown>;
+	if (!isImmutableIdentity(candidate.immutable)) return false;
 	const claimCursor =
 		candidate.claimCursor && typeof candidate.claimCursor === 'object'
 			? (candidate.claimCursor as Record<string, unknown>)
@@ -572,7 +573,8 @@ function isAuthority(value: unknown): value is WorktreeRecoveryAuthorityRecord {
 	return (
 		candidate.schemaVersion === 2 &&
 		nonEmpty(candidate.authorityDigest) &&
-		isImmutableIdentity(candidate.immutable) &&
+		candidate.authorityDigest ===
+			digestAuthorityIdentity(candidate.immutable) &&
 		validStatus &&
 		(candidate.claim === undefined || isClaimState(candidate.claim)) &&
 		(claimCursor === undefined ||

@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { publishWorktreeRecoveryAuthority } from '../../../src/hooks/delegation-gate/worktree-recovery-authority';
+import * as fs from 'node:fs';
+import {
+	_internals,
+	publishWorktreeRecoveryAuthority,
+	removeWorktreeRecoveryAuthority,
+	scanWorktreeRecoveryAuthoritiesForRecovery,
+} from '../../../src/hooks/delegation-gate/worktree-recovery-authority';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const BASE_AUTHORITY = {
@@ -81,5 +87,45 @@ describe('squash recovery authority provenance validation', () => {
 			changedPaths: [],
 		});
 		expect(result).toMatchObject({ ok: true });
+	});
+
+	test('rejects persisted identity tampering before retained squash cleanup', () => {
+		const published = publishWith(fixture.dir, {
+			resultTree: 'e'.repeat(40),
+			changedPaths: ['result.txt'],
+		});
+		expect(published).toMatchObject({ ok: true });
+		if (!published.ok) throw new Error(published.code);
+
+		const storePath = _internals.getRecoveryStorePath(fixture.dir);
+		const store = JSON.parse(fs.readFileSync(storePath, 'utf8')) as {
+			authorities: Array<{
+				immutable: { laneBranch: string };
+			}>;
+		};
+		store.authorities[0]!.immutable.laneBranch = 'lane/tampered';
+		fs.writeFileSync(storePath, JSON.stringify(store), 'utf8');
+
+		expect(
+			scanWorktreeRecoveryAuthoritiesForRecovery(fixture.dir),
+		).toMatchObject({
+			status: 'uncertain',
+		});
+
+		let branchPresent = true;
+		let deleteCalls = 0;
+		const removed = removeWorktreeRecoveryAuthority(fixture.dir, {
+			authorityDigest: published.authority.authorityDigest,
+			branchName: 'lane/tampered',
+			branchTipSha: 'f'.repeat(40),
+			readBranchTip: () => (branchPresent ? 'f'.repeat(40) : undefined),
+			deleteBranchIfTip: () => {
+				deleteCalls += 1;
+				branchPresent = false;
+				return true;
+			},
+		});
+		expect(removed.ok).toBe(false);
+		expect(deleteCalls).toBe(0);
 	});
 });
