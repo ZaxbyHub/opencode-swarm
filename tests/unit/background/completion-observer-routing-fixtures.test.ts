@@ -6,7 +6,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
 import {
@@ -26,10 +25,10 @@ import {
 import { checkReviewerGate } from '../../../src/tools/update-task-status';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function makeTempProject(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bgobs-gates-'));
-	const real = fs.realpathSync(dir);
+	const real = canonicalMkdtemp('swarm-bgobs-gates-');
 	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
 	fs.mkdirSync(path.join(real, '.opencode'), { recursive: true });
 	fs.writeFileSync(

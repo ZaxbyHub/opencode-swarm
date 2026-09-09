@@ -4,7 +4,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
@@ -15,6 +14,7 @@ import {
 } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
 	recordPlanCriticApproval,
 	seedAuthoritativeTaskWorkflow,
@@ -42,8 +42,7 @@ function makeConfig(): PluginConfig {
 }
 
 function makeTempProject(prefix: string): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-	const real = fs.realpathSync(dir);
+	const real = canonicalMkdtemp(prefix);
 	fs.mkdirSync(path.join(real, '.opencode'), { recursive: true });
 	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
 	return real;
