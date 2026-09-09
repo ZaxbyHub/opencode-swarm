@@ -203,6 +203,15 @@ export type PrReviewEvent =
 			semanticEnvelopeDigest: string;
 			outcome: 'CLEAN' | 'FINDINGS' | 'INCOMPLETE';
 			existingReceiptDigest?: string | undefined;
+			/**
+			 * Issue #2585 (AC13): present only when the lane's dispatching parent
+			 * session (not the dead child) submitted this result through the
+			 * architect-parent repair lever. Construction site:
+			 * `submitPrReviewResult` in `src/hooks/pr-workflow-gate.ts`. The
+			 * reducer does not branch on it — it rides the event so ledger-only
+			 * consumers see the architect provenance.
+			 */
+			submittedBy?: 'workflow_parent' | undefined;
 	  }
 	// --- circuit ------------------------------------------------------------
 	| {

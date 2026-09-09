@@ -609,12 +609,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:5484 writeDelegationFallback / :5535 removeDelegationFallback',
-			'src/background/pending-delegations.ts:5986 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:5509 writeDelegationFallback / :5560 removeDelegationFallback',
+			'src/background/pending-delegations.ts:6011 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:5339 readDelegationFallback / :5351 listDelegationFallbacks / :5385 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:5964 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:5364 readDelegationFallback / :5376 listDelegationFallbacks / :5410 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:5989 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:971)',
 		stateClass: 'authoritative',
