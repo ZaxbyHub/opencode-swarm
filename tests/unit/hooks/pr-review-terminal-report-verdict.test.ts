@@ -137,6 +137,11 @@ describe('terminal report verdict enforcement (issue #2383)', () => {
 			'REQUEST_CHANGES',
 			'INCOMPLETE',
 		]);
+		expect([...allowedPrReviewReportVerdicts('COMPLETE')]).toEqual([
+			'APPROVE',
+			'REQUEST_CHANGES',
+			'INCOMPLETE',
+		]);
 		expect([...allowedPrReviewReportVerdicts('PARTIAL', [])]).toEqual([
 			'REQUEST_CHANGES',
 			'INCOMPLETE',

@@ -439,7 +439,7 @@ export type PrReviewReportVerdict = (typeof PR_REVIEW_REPORT_VERDICTS)[number];
  */
 export function allowedPrReviewReportVerdicts(
 	kind: PrReviewTerminalCoverageKind,
-	findings: ReadonlyArray<FinalPolicyFinding>,
+	findings: ReadonlyArray<FinalPolicyFinding> = [],
 ): readonly PrReviewReportVerdict[] {
 	// PARTIAL is a truthful covered-dimensions settlement even when its
 	// authoritative finding projection is empty.  Keep its coverage-only
