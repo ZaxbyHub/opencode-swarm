@@ -69,6 +69,7 @@ export const _internals = {
 	atomicWriteSwarmFileSync,
 	now: (): number => Date.now(),
 	randomBytes,
+	scopeDigest,
 };
 
 function pendingPath(directory: string): string {
@@ -95,11 +96,20 @@ function resolveCandidates(
 }
 
 function scopeDigest(kind: string, candidates: PurgeCandidate[]): string {
-	const paths = candidates
-		.map((c) => path.resolve(c.path))
-		.sort()
-		.join('\n');
-	return createHash('sha256').update(`${kind}\0${paths}`).digest('hex');
+	const paths = candidates.map((c) => {
+		const resolved = path.resolve(c.path);
+		// #2508 hardening: NUL or newline inside a path would be indistinguishable
+		// from this digest's own separators. POSIX allows both in filenames, so
+		// reject instead of hashing an ambiguous byte stream.
+		if (resolved.includes('\0') || resolved.includes('\n')) {
+			throw new Error(
+				`Purge candidate path contains a NUL or newline separator character and cannot be scope-bound: ${JSON.stringify(resolved)}`,
+			);
+		}
+		return resolved;
+	});
+	const sorted = paths.sort().join('\n');
+	return createHash('sha256').update(`${kind}\0${sorted}`).digest('hex');
 }
 
 function mintToken(digest: string): string {

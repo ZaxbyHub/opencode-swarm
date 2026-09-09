@@ -55,6 +55,7 @@ import {
 	SOURCE_WORKTREE_GONE_STAGE,
 	SOURCE_WORKTREE_UNCERTAIN_STAGE,
 } from '../../worktree/merge';
+import type { MergeStrategy } from '../../worktree/types';
 import { verifyReviewerScopeGenerationMergeBack } from '../reviewer-scope-mergeback';
 import { recordDeadLaneReclaim } from './dead-lane-reclaim';
 import {
@@ -242,7 +243,7 @@ export interface StandardWorktreeSettlementOptions
 
 export interface StandardWorktreeMergedSettlement {
 	outcome: 'merged';
-	strategy: string;
+	strategy: MergeStrategy;
 	autoCommitted: boolean;
 	cleaned: boolean;
 	reconciled: boolean;

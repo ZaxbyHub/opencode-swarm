@@ -995,6 +995,11 @@ export async function recoverCoderSettlement(
 						wal.mergeProvenance,
 					);
 					if (landed.landed) {
+						// #2508: a worktree-match reconciliation means the recorded
+						// merge attempt already landed as squash-unstaged — the WAL
+						// stamp and branch retention must reflect that landing shape,
+						// not the legacy committed-merge cleanup.
+						const landedUnstaged = landed.method === 'worktree-match';
 						wal = {
 							...wal,
 							state: 'PREPARED',
@@ -1006,11 +1011,22 @@ export async function recoverCoderSettlement(
 							),
 						};
 						await writeWal(filePath, wal);
-						const committed = await commitPrepared(directory, wal);
-						await cleanupRecoveredWorktree(directory, worktree);
+						const committed = await commitPrepared(directory, wal, {
+							landedUnstaged,
+						});
+						await cleanupRecoveredWorktree(directory, worktree, {
+							retainBranch: landedUnstaged,
+						});
+						// Re-read before the terminal write so commitPrepared's
+						// durable landedUnstaged stamp is not clobbered by this
+						// spread of the older in-memory wal (mirrors the resume
+						// path below).
+						const reconciledWal = await readWal(filePath, taskId);
+						if (reconciledWal === null) {
+							throw new Error('CODER_SETTLEMENT_WAL_MISSING');
+						}
 						await writeWal(filePath, {
-							...wal,
-							state: 'COMMITTED',
+							...reconciledWal,
 							cleanupComplete: true,
 						});
 						return committed;

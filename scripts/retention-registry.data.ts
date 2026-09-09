@@ -694,7 +694,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'MAX_PR_FEEDBACK_MONITOR_EVENTS 20 per queue (:14); MAX_QUEUE_BYTES 512 KiB per file (:15); in-memory cache MAX_TRACKED_SESSIONS 200 FIFO (:16); the retention sweep\'s pr-feedback-events family age-prunes every queue file at 30 d (src/retention/sweep.ts:91)',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER: the retention-sweep family pr-feedback-events (src/retention/sweep.ts:91) age-prunes every session queue file at 30 d — wired post-init (src/index.ts:1293) and pre-close (src/commands/close/orchestrator.ts:288-305) — so the session-file keyspace cannot outgrow the sweep horizon. The in-process MAX_TRACKED_SESSIONS=200 FIFO (src/background/pr-feedback-event-queue.ts:16) remains an in-memory bound only. This closes the #2038-class keyspace gap this row recorded under #2309.',
+				'FINITE BY REAPER: the retention-sweep family pr-feedback-events (src/retention/sweep.ts:91) age-prunes every session queue file at 30 d — wired post-init (src/index.ts:1293) and pre-close (src/commands/close/orchestrator.ts:470-478) — so the session-file keyspace cannot outgrow the sweep horizon. The in-process MAX_TRACKED_SESSIONS=200 FIFO (src/background/pr-feedback-event-queue.ts:16) remains an in-memory bound only. This closes the #2038-class keyspace gap this row recorded under #2309.',
 			citation: 'src/background/pr-feedback-event-queue.ts:14-19; src/retention/sweep.ts:91',
 		},
 		readBound: { pattern: 'indexed', bound: '≤512 KiB hard read bound', sync: false, citation: 'src/background/pr-feedback-event-queue.ts:440-470' },
@@ -708,7 +708,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'not-a-defect',
 			proof:
-				'The #2483 retention sweep\'s pr-feedback-events family age-prunes every session queue file at 30 d (src/retention/sweep.ts:91), wired post-init (src/index.ts:1293) and pre-close (src/commands/close/orchestrator.ts:288-305) — the keyspace gap behind the #2309/#2038 reclassification is closed; per-file caps 20 events / 512 KiB (src/background/pr-feedback-event-queue.ts:14-15) bound each key.',
+				'The #2483 retention sweep\'s pr-feedback-events family age-prunes every session queue file at 30 d (src/retention/sweep.ts:91), wired post-init (src/index.ts:1293) and pre-close (src/commands/close/orchestrator.ts:470-478) — the keyspace gap behind the #2309/#2038 reclassification is closed; per-file caps 20 events / 512 KiB (src/background/pr-feedback-event-queue.ts:14-15) bound each key.',
 		},
 	},
 	{
@@ -3026,7 +3026,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/commands/close/archive-stage.ts'],
 		writerCitations: ['src/commands/close/archive-stage.ts runArchiveStage — bundle swarm-{ts}-{suffix}; archive-first guard'],
 		readerCitations: [
-			'src/commands/close/orchestrator.ts:161-165 finalize idempotency — readdir + startsWith(swarm-) (filename-only)',
+			'src/commands/close/orchestrator.ts:336-338 finalize idempotency — readdir + startsWith(swarm-) (filename-only)',
 			'session-reflection.ts:424 — filename-only scan for reflection signals',
 			'no production reader of bundle CONTENTS (verified)',
 		],
@@ -3038,8 +3038,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			scope: 'per-trigger',
 			citation: 'src/commands/close/archive-stage.ts:143-497 (no prune path — verified against source)',
 		},
-		readBound: { pattern: 'directory-scan', bound: 'filename-only scans; contents never re-read', sync: false, citation: 'src/commands/close/orchestrator.ts:161-165; session-reflection.ts:424' },
-		lockModel: 'finalize.lock cross-process (src/commands/close/orchestrator.ts:554-576)',
+		readBound: { pattern: 'directory-scan', bound: 'filename-only scans; contents never re-read', sync: false, citation: 'src/commands/close/orchestrator.ts:336-338; session-reflection.ts:424' },
+		lockModel: 'finalize.lock cross-process (src/commands/close/orchestrator.ts:727-740)',
 		crashBehavior: 'archive-before-clean guard: active files unlinked only if archived (:1637-1671); archiveStageFailed prevents truthful-looking empty results',
 		closePolicy: 'IS the close archive',
 		resetPolicy: 'not reset; operator-managed',
@@ -3149,7 +3149,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'one bounded env file per lane per worktree; removed at lane teardown (:219)',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY CONCURRENCY PLUS TEARDOWN — but NOT by the constant one would reach for: MAX_LANES=8 (src/tools/dispatch-lanes.ts:92) governs the unrelated dispatch_lanes fan-out tool and is not on this path (its only uses are src/tools/dispatch-lanes.ts:471,491,1045,1678). allocateStandardLaneIndex is monotonic per session with no clamp and no recycling (src/hooks/delegation-gate/worktree-isolation.ts:161-164), so the set of index VALUES ever issued grows with dispatch count — that is not the bound. The bound is that each {laneIndex}.env lives INSIDE its own worktree (src/worktree/core.ts:202-203, provisioned per session/task at :674-678): concurrently live worktrees sit under MAX_TRACKED_STANDARD_WORKTREE_CALLS=256 above a max_concurrent_tasks ceiling clamped to <=64 (src/hooks/delegation-gate/worktree-isolation.ts:166-173), each file is unlinked at lane teardown (src/worktree/core.ts:219-238), and re-dispatching the same taskId removes the prior worktree wholesale before recreating it (src/worktree/core.ts:863-892). Crash-orphaned worktrees are swept by a global reaper, runInitOrphanRecovery (src/hooks/init-orphan-recovery.ts:200-224, wired at src/index.ts:914). CAVEAT (verified, do not soften): that sweep runs only at plugin init, is timeout-wrapped and non-fatal (src/hooks/init-orphan-recovery.ts:54; src/index.ts:914-918), and enumerates only the default .swarm-worktrees base (src/hooks/init-orphan-recovery.ts:206-209) — worktrees provisioned under a custom worktree_dir (src/worktree/core.ts:581-582) fall outside its scan root entirely and are reclaimed only by their own teardown path.',
+				'FINITE BY CONCURRENCY PLUS TEARDOWN — but NOT by the constant one would reach for: MAX_LANES=8 (src/tools/dispatch-lanes.ts:92) governs the unrelated dispatch_lanes fan-out tool and is not on this path (its only uses are src/tools/dispatch-lanes.ts:471,491,1045,1678). allocateStandardLaneIndex is monotonic per session with no clamp and no recycling (src/hooks/delegation-gate/worktree-isolation.ts:189), so the set of index VALUES ever issued grows with dispatch count — that is not the bound. The bound is that each {laneIndex}.env lives INSIDE its own worktree (src/worktree/core.ts:202-203, provisioned per session/task at :674-678): concurrently live worktrees sit under MAX_TRACKED_STANDARD_WORKTREE_CALLS=256 above a max_concurrent_tasks ceiling clamped to <=64 (src/hooks/delegation-gate/worktree-isolation.ts:166-173), each file is unlinked at lane teardown (src/worktree/core.ts:219-238), and re-dispatching the same taskId removes the prior worktree wholesale before recreating it (src/worktree/core.ts:863-892). Crash-orphaned worktrees are swept by a global reaper, runInitOrphanRecovery (src/hooks/init-orphan-recovery.ts:200-224, wired at src/index.ts:914). CAVEAT (verified, do not soften): that sweep runs only at plugin init, is timeout-wrapped and non-fatal (src/hooks/init-orphan-recovery.ts:54; src/index.ts:914-918), and enumerates only the default .swarm-worktrees base (src/hooks/init-orphan-recovery.ts:206-209) — worktrees provisioned under a custom worktree_dir (src/worktree/core.ts:581-582) fall outside its scan root entirely and are reclaimed only by their own teardown path.',
 			citation: 'src/worktree/core.ts:174-230',
 		},
 		readBound: { pattern: 'write-only', bound: 'n/a', sync: false, citation: 'no plugin reader' },
@@ -3539,7 +3539,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
 		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Single-session documents with explicit archive/clean/stub semantics in the close lists themselves (src/commands/close/constants.ts:16-95; src/commands/close/clean-stage.ts:364-380; src/commands/close/orchestrator.ts:416-425).' },
+		disposition: { kind: 'not-a-defect', proof: 'Single-session documents with explicit archive/clean/stub semantics in the close lists themselves (src/commands/close/constants.ts:16-95; src/commands/close/clean-stage.ts:364-380; src/commands/close/orchestrator.ts:589-598).' },
 	},
 	{
 		id: 'command-reports',

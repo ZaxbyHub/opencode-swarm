@@ -168,4 +168,17 @@ describe('#2508 consumeConfirmToken (token-gate without deletion)', () => {
 		expect(executed.purged).toEqual([target]);
 		expect(fs.existsSync(target)).toBe(false);
 	});
+
+	test('scopeDigest rejects separator characters in candidate paths', () => {
+		expect(() =>
+			_internals.scopeDigest('swarm-close', [
+				{ path: 'a\n.txt', reason: 'probe' },
+			]),
+		).toThrow(/NUL or newline/);
+		expect(() =>
+			_internals.scopeDigest('swarm-close', [
+				{ path: 'a\0.txt', reason: 'probe' },
+			]),
+		).toThrow(/NUL or newline/);
+	});
 });

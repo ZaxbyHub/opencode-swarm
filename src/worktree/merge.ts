@@ -249,7 +249,9 @@ function parseConflictFiles(output: string): string[] {
 
 export interface MergeSuccess {
 	merged: true;
-	strategy: string;
+	// Ephemeral landing shape — legitimately carries the internal
+	// 'squash-unstaged' value; only persisted provenance structs exclude it.
+	strategy: MergeStrategy;
 }
 
 export interface MergeConflict {
@@ -288,7 +290,7 @@ export interface ConflictHandlingError {
 
 export interface DirtyMergeSuccess {
 	merged: true;
-	strategy: string;
+	strategy: MergeStrategy;
 	autoCommitted: boolean;
 	cleaned: boolean;
 	/** True when a resumed operation was already present on the target. */
@@ -359,12 +361,116 @@ export const GIT_OBJECT_ID_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 export type MergeReconciliationResult =
 	| {
 			landed: true;
-			method: 'ancestry' | 'cherry-pick-trailer';
+			method: 'ancestry' | 'cherry-pick-trailer' | 'worktree-match';
 	  }
 	| {
 			landed: false;
 			error?: string;
 	  };
+
+/**
+ * Detects an already-applied squash-unstaged landing (#2508). A squash landing
+ * never advances HEAD, so the ancestry probe in `reconcileLandedMerge` can
+ * never see it; recovery would re-enter the merge path and misread the
+ * landing's own unstaged bytes as user work. Instead: every path where
+ * `sourceHead` differs from HEAD must carry exactly `sourceHead`'s content in
+ * the working tree (and index). Anything else — a user edit on an incoming
+ * path, a missing added file, a resurrected deleted file, a quoted path git
+ * escaped — keeps the result conservative (`landed: false`), which routes
+ * recovery back to the overlap preflight and preserves the pre-existing
+ * blocked behavior. Git probe failures surface as `error` so callers can
+ * distinguish "not landed" from "cannot tell".
+ */
+async function matchesSourceHeadWorkingTree(
+	primaryDir: string,
+	sourceHead: string,
+): Promise<MergeReconciliationResult> {
+	// The landing applied exactly mergeBase..sourceHead's diff, so the
+	// incoming set must be scoped to the merge base — HEAD..sourceHead would
+	// wrongly include paths HEAD advanced past the base without the lane
+	// ever touching them.
+	const mergeBase = await runGit(
+		['merge-base', 'HEAD', sourceHead],
+		primaryDir,
+	);
+	if (mergeBase.exitCode !== 0) {
+		return {
+			landed: false,
+			error:
+				mergeBase.stderr.trim() ||
+				`git merge-base exited ${mergeBase.exitCode}`,
+		};
+	}
+	const incoming = await runGit(
+		// --no-renames keeps statuses to A/M/D/T; a rename pair would otherwise
+		// put a second tab inside the status field and corrupt the path parse.
+		[
+			'diff',
+			'--name-status',
+			'--no-renames',
+			mergeBase.stdout.trim(),
+			sourceHead,
+			'--',
+		],
+		primaryDir,
+	);
+	if (incoming.exitCode !== 0) {
+		return {
+			landed: false,
+			error:
+				incoming.stderr.trim() ||
+				incoming.stdout.trim() ||
+				`git diff exited ${incoming.exitCode}`,
+		};
+	}
+	for (const line of incoming.stdout.split('\n')) {
+		if (!line) continue;
+		const tabIndex = line.indexOf('\t');
+		if (tabIndex < 0) continue;
+		const status = line.slice(0, tabIndex);
+		const filePath = line.slice(tabIndex + 1);
+		// Quoted (non-ASCII / special-character) paths are treated as divergent:
+		// un-escaping them here risks a false "landed", and declining keeps the
+		// conservative block.
+		if (filePath.startsWith('"')) return { landed: false };
+		if (status === 'A') {
+			const worktreePath = path.join(primaryDir, filePath);
+			if (!fs.existsSync(worktreePath)) return { landed: false };
+			const expected = await runGit(
+				['rev-parse', `${sourceHead}:${filePath}`],
+				primaryDir,
+			);
+			const actual = await runGit(['hash-object', '--', filePath], primaryDir);
+			if (expected.exitCode !== 0 || actual.exitCode !== 0) {
+				return {
+					landed: false,
+					error:
+						expected.stderr.trim() ||
+						actual.stderr.trim() ||
+						`git content probe exited ${expected.exitCode}/${actual.exitCode}`,
+				};
+			}
+			// hash-object applies the same clean filter that produced the blob,
+			// so equality holds whenever the filters round-trip; a
+			// non-round-tripping config degrades to {landed: false} (the old
+			// blocked behavior), never to a false positive.
+			if (actual.stdout.trim() !== expected.stdout.trim()) {
+				return { landed: false };
+			}
+			continue;
+		}
+		// 'M' / 'T' / 'D': commit-vs-worktree diff spans staged and unstaged,
+		// so a user who staged the landed bytes still reconciles, and a
+		// deleted-in-lane path is landed exactly when it stays absent (a
+		// resurrected file diverges and keeps the conservative block).
+		const diff = await runGit(
+			['diff', '--quiet', sourceHead, '--', filePath],
+			primaryDir,
+		);
+		if (diff.exitCode !== 0) return { landed: false };
+	}
+	return { landed: true, method: 'worktree-match' };
+}
 
 /**
  * Immutable preserved-lane coordinates captured by the #2105 recovery
@@ -1312,6 +1418,14 @@ export async function reconcileLandedMerge(
 			return { landed: true, method: 'ancestry' };
 		}
 		if (ancestry.exitCode === 1) {
+			// #2508: a squash-unstaged landing ('merge' dispatch remapped inside
+			// mergeLaneBranch) writes no commit, so ancestry can never see it.
+			// Fall back to working-tree content identity before declaring the
+			// operation unlanded — otherwise recovery re-enters the merge path
+			// and misreads the landing's own unstaged bytes as user work.
+			if (provenance.strategy === 'merge') {
+				return matchesSourceHeadWorkingTree(primaryDir, provenance.sourceHead);
+			}
 			return { landed: false };
 		}
 		return {
@@ -1731,7 +1845,14 @@ export async function attemptMergeBackFromDirty(
 		if (reconciliation.landed) {
 			return {
 				merged: true,
-				strategy,
+				// #2508: a worktree-match reconciliation means the earlier
+				// attempt landed as squash-unstaged — report the actual landing
+				// shape so the caller's landedUnstaged stamp and branch
+				// retention key off it, not off the passed dispatch strategy.
+				strategy:
+					reconciliation.method === 'worktree-match'
+						? 'squash-unstaged'
+						: strategy,
 				autoCommitted: false,
 				cleaned: false,
 				reconciled: true,
