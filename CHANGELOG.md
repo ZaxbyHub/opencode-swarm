@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.173.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.173.0...v7.173.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **settlement:** close 2508 review feedback ([e7982bd](https://github.com/ZaxbyHub/opencode-swarm/commit/e7982bdc4f54a68bbf6b5343bb16c22d3cd813e8))
+
 ## [7.173.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.4...v7.173.0) (2026-09-09)
 
 
