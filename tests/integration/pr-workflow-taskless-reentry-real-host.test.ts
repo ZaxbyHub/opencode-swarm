@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
+import path from 'node:path';
 import type { PluginConfig } from '../../src/config';
 import { createDelegationGateHook } from '../../src/hooks/delegation-gate.js';
 import {
@@ -12,6 +13,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../src/state.js';
+import { createIsolatedTestEnv } from '../helpers/isolated-test-env.js';
 import {
 	bootKnowledgeHost,
 	createKnowledgeProject,
@@ -41,10 +43,12 @@ const originalResolveRemoteRefsContainingHeadAsync =
 describe('PR workflow taskless re-entry stays standalone-only', () => {
 	let directory: string;
 	let plugin: Awaited<ReturnType<typeof bootKnowledgeHost>>;
+	let cleanupIsolatedEnv: () => void;
 
 	beforeEach(async () => {
 		resetSwarmState();
 		_test_exports.resetTrackedStateCache();
+		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
 		directory = createKnowledgeProject();
 		plugin = await bootKnowledgeHost(directory);
 		_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
@@ -91,6 +95,7 @@ describe('PR workflow taskless re-entry stays standalone-only', () => {
 		} catch {
 			// Windows may briefly retain a plugin-init handle in the temp project.
 		}
+		cleanupIsolatedEnv();
 	});
 
 	test('plan-free taskless re-entry completes without plan-task state', async () => {
@@ -212,6 +217,7 @@ describe('PR workflow taskless re-entry stays standalone-only', () => {
 	test('taskless re-entry waits for pending durable state before allowing standalone review', async () => {
 		const pendingSessionID = 'pr-workflow-pending-rehydration';
 		const pendingDirectory = createKnowledgeProject();
+		mkdirSync(path.join(pendingDirectory, '.opencode'), { recursive: true });
 		try {
 			await activatePrWorkflow(
 				pendingDirectory,
@@ -231,7 +237,11 @@ describe('PR workflow taskless re-entry stays standalone-only', () => {
 				{ hooks: { delegation_gate: true } } as PluginConfig,
 				pendingDirectory,
 			);
-			const pendingSession = ensureAgentSession(pendingSessionID, 'architect');
+			const pendingSession = ensureAgentSession(
+				pendingSessionID,
+				'architect',
+				pendingDirectory,
+			);
 			let releasePending!: () => void;
 			const pendingRehydration = new Promise<void>((resolve) => {
 				releasePending = () => {
@@ -259,6 +269,7 @@ describe('PR workflow taskless re-entry stays standalone-only', () => {
 				/TASK_WORKFLOW_TASK_ID_REQUIRED/,
 			);
 		} finally {
+			await Promise.allSettled([...swarmState.pendingRehydrations]);
 			swarmState.pendingRehydrations.clear();
 			rmSync(pendingDirectory, { recursive: true, force: true });
 		}
