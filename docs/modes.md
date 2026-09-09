@@ -24,7 +24,7 @@ Skips Stage B (reviewer + test_engineer) for low-risk tasks. The task still goes
 - `architect*.ts`, `delegation*.ts`, `guardrails*.ts`, `adversarial*.ts`, `sanitiz*.ts`
 - `auth*`, `permission*`, `crypto*`, `secret*`, `security*.ts`
 
-This list is enforced at `src/tools/update-task-status.ts:98-109`. You cannot turn it off.
+This list is defined in `src/parallel/tier3-classifier.ts` and enforced at the Turbo bypass check in `src/tools/update-task-status.ts`. You cannot turn it off.
 
 **When to use:** rapid iteration on non-critical code — UI tweaks, documentation, internal refactors.
 
@@ -856,7 +856,7 @@ Read-tolerant of partial-write of the trailing line. Best-effort writer — fail
 The README table names three safety tiers for readability. In the code, the `execution_mode` config key is the persistent setting (`strict` / `balanced` / `fast`), and `/swarm turbo` is the session-scoped override. There is no `/swarm strict` command.
 
 **Can Turbo break a security review?**  
-No. Tier 3 patterns (`auth*`, `crypto*`, `security*.ts`, etc.) always run full review regardless of Turbo. See `src/tools/update-task-status.ts:98-109` for the authoritative list.
+No. Tier 3 patterns (`auth*`, `crypto*`, `security*.ts`, etc.) always run full review regardless of Turbo. See `src/parallel/tier3-classifier.ts` for the authoritative list.
 
 **Does Full-Auto bypass the critic?**  
 No. Full-Auto v2 *increases* critic involvement: every escalate-class action gets a dedicated read-only critic verification before it executes, and phase boundaries require an APPROVED `full_auto_oversight` evidence record before `phase_complete` will succeed. Reactive intercept verdicts are also mirrored into the v2 evidence pipeline when a durable run is active. See `src/full-auto/oversight.ts` and `src/full-auto/phase-approval.ts` for the dispatch and gate.
