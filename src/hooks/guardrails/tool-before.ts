@@ -148,6 +148,16 @@ export interface ToolBeforeContext {
 	}) => void;
 	/** Snapshot an exact authorized write for success-only lease renewal. */
 	rememberScopeLeaseCandidate?: (input: ScopeLeaseCandidateInput) => void;
+	/**
+	 * Issue #2664: whether OPTIONAL policy enforcement is active. When false
+	 * (guardrails.enabled=false), every policy denial below is skipped while
+	 * all mandatory lifecycle bookkeeping (gate correlation in the wrapper,
+	 * lease candidates, modified-file/reviewer-scope tracking) keeps running.
+	 * Defaults to true — direct unit callers are unchanged. Structural
+	 * fail-closed bounds (the 1 MiB patch-payload guard) stay active in both
+	 * modes.
+	 */
+	enforcePolicy?: boolean;
 }
 
 // Shared helper functions extracted to helpers.ts (task 1.4 / FR-005)
@@ -237,6 +247,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		rememberReviewerScopeWrite,
 		rememberScopeLeaseCandidate,
 	} = ctx;
+	// Issue #2664: optional-enforcement gate. Bookkeeping below is mandatory
+	// and runs regardless of this flag.
+	const enforcePolicy = ctx.enforcePolicy !== false;
 
 	// Issue #2236 F6a item 3: propagate the resolved macOS sandbox activation
 	// gate to the sandbox executor factory. Must run here, synchronously, at
@@ -335,14 +348,33 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		return binding;
 	}
 
-	function resolveDeclaredScope(sessionID: string): string[] | null {
+	// Issue #2664: observe-only variant for mandatory lease bookkeeping when
+	// optional enforcement is disabled. Converts the resolver's diagnostic
+	// throw (SCOPE_BINDING_*/STALE/EXPIRED) into a null so observe-mode call
+	// sites simply find no binding — the throwing resolver above is UNCHANGED
+	// and remains the only resolver enforcement call sites use.
+	function resolveActiveScopeBindingObserving(sessionID: string) {
+		try {
+			return resolveActiveScopeBinding(sessionID);
+		} catch {
+			return null;
+		}
+	}
+
+	function resolveDeclaredScope(
+		sessionID: string,
+		observing = false,
+	): string[] | null {
 		const session = swarmState.agentSessions.get(sessionID);
 		if (!session?.currentTaskId) {
 			return session?.declaredCoderScope?.length
 				? [...session.declaredCoderScope]
 				: null;
 		}
-		return resolveActiveScopeBinding(sessionID)?.files ?? null;
+		const binding = observing
+			? resolveActiveScopeBindingObserving(sessionID)
+			: resolveActiveScopeBinding(sessionID);
+		return binding?.files ?? null;
 	}
 
 	/**
@@ -967,7 +999,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		tool: string,
 		args: unknown,
 		commandOverride?: string,
+		options?: { enforce?: boolean },
 	): void {
+		// Issue #2664 observe mode: skip every denial below, keep the
+		// reviewer-scope routing and lease-candidate bookkeeping.
+		const enforce = options?.enforce !== false;
 		if (tool !== 'bash' && tool !== 'shell') return;
 		const session = swarmState.agentSessions.get(sessionID);
 
@@ -998,7 +1034,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		const interactiveShellType =
 			shellType === 'unix' || shellType === 'bash' ? 'posix' : shellType;
-		if (detectInteractiveSession(command, interactiveShellType)) {
+		if (enforce && detectInteractiveSession(command, interactiveShellType)) {
 			throw new Error(
 				`BLOCKED: interactive/session tool detected — rejecting for safety`,
 			);
@@ -1014,7 +1050,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// Fail-closed parse gate runs on the ORIGINAL command so a genuinely
 		// malformed command (e.g. an unclosed quote) is still rejected for safety.
 		const primaryAnalysis = detect(command);
-		if (primaryAnalysis.parseError) {
+		if (enforce && primaryAnalysis.parseError) {
 			throw new Error(
 				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
 			);
@@ -1037,7 +1073,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		// A wrapped command whose unwrapped inner form fails to parse is also
 		// rejected for safety.
-		if (analysis.parseError) {
+		if (enforce && analysis.parseError) {
 			throw new Error(
 				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
 			);
@@ -1045,13 +1081,18 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		if (!analysis.hasWrites || analysis.writes.length === 0) return;
 
-		const declaredScope = resolveDeclaredScope(sessionID);
+		const declaredScope = resolveDeclaredScope(sessionID, !enforce);
 
 		const shellWriteAgent = swarmState.activeAgent.get(sessionID);
 		if (!shellWriteAgent) {
-			throw new Error(
-				`WRITE BLOCKED: No active agent registered for session "${sessionID}". Call startAgentSession before issuing shell write operations.`,
-			);
+			if (enforce) {
+				throw new Error(
+					`WRITE BLOCKED: No active agent registered for session "${sessionID}". Agent identity must be established (e.g. via a chat message or Task delegation) before shell writes can be authorized.`,
+				);
+			}
+			// Observe mode cannot determine coder identity without an agent;
+			// lease bookkeeping needs it, so there is nothing to observe.
+			return;
 		}
 
 		const shellWriteRole = stripKnownSwarmPrefix(shellWriteAgent).toLowerCase();
@@ -1064,7 +1105,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const isImmutableNonWriter =
 			shellRoleCapability === 'read-only' ||
 			shellRoleCapability === 'dedicated-tool-only';
-		if (isCoder && (!declaredScope || declaredScope.length === 0)) {
+		if (enforce && isCoder && (!declaredScope || declaredScope.length === 0)) {
 			throw new Error(
 				`SCOPE_NOT_DECLARED: ${shellWriteAgent} cannot perform shell writes without an active Task-correlated scope binding. ACTION[architect]: call declare_scope with the exact workspace-relative paths and replace_existing=true, then dispatch a new Task call.`,
 			);
@@ -1102,7 +1143,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					// phantom marker instead of hard-blocking the whole command.
 					continue;
 				}
-				if (write.original.category === 'interpreter_eval') {
+				if (enforce && write.original.category === 'interpreter_eval') {
 					// Inline code (`python -c`, `node -e`, …) can write to arbitrary
 					// files whose targets are not statically knowable, so it cannot be
 					// verified against the declared scope. This stays fail-closed (it is
@@ -1115,15 +1156,22 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 				// A concrete redirect/builtin target that resolved to null because it
 				// uses a shell variable or command substitution ($VAR, $(cmd)) —
-				// genuinely unverifiable, so keep failing closed.
-				throw new Error(
-					`BLOCKED: bash/shell write to a dynamic path target${
-						write.original.path ? ` "${write.original.path}"` : ''
-					} that cannot be statically resolved (shell variable or command substitution) — rejecting for safety.`,
-				);
+				// genuinely unverifiable, so keep failing closed. Observe mode
+				// skips this write target; the aggregate lease candidate below
+				// is not remembered (targets must be provable, issue #2664).
+				if (enforce) {
+					throw new Error(
+						`BLOCKED: bash/shell write to a dynamic path target${
+							write.original.path ? ` "${write.original.path}"` : ''
+						} that cannot be statically resolved (shell variable or command substitution) — rejecting for safety.`,
+					);
+				}
+				// Observe mode: an unprovable target cannot participate in
+				// exact-bound lease bookkeeping — skip it (issue #2664).
+				continue;
 			}
 
-			if (noScopeLenient && universalDenyPrefixes.length > 0) {
+			if (enforce && noScopeLenient && universalDenyPrefixes.length > 0) {
 				for (const prefix of universalDenyPrefixes) {
 					if (
 						matchesAuthorityDenyPrefix(
@@ -1155,7 +1203,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					verifierConfigPaths: authorityConfig?.verifier_config_paths,
 				},
 			);
-			if (!authorityCheck.allowed) {
+			if (enforce && !authorityCheck.allowed) {
 				const evidenceEventID =
 					authorityCheck.layer === 'protected-path'
 						? recordFullAutoSevereEvidenceEvent({
@@ -1171,6 +1219,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			}
 
 			if (
+				enforce &&
 				declaredScope &&
 				declaredScope.length > 0 &&
 				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory)
@@ -1186,7 +1235,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				);
 			}
 			if (isCoder && session?.currentTaskId) {
-				const writeBinding = resolveActiveScopeBinding(sessionID);
+				const writeBinding = enforce
+					? resolveActiveScopeBinding(sessionID)
+					: resolveActiveScopeBindingObserving(sessionID);
 				if (
 					writeBinding?.activation === 'active' &&
 					writeBinding.parentOwnerSessionId &&
@@ -1217,7 +1268,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			}
 		}
 		if (isCoder && session?.currentTaskId) {
-			const binding = resolveActiveScopeBinding(sessionID);
+			const binding = enforce
+				? resolveActiveScopeBinding(sessionID)
+				: resolveActiveScopeBindingObserving(sessionID);
 			if (binding) {
 				rememberScopeLeaseCandidate?.({
 					callID,
@@ -1376,7 +1429,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			return;
 		}
 
-		const declaredPaths = resolveDeclaredScope(sessionID);
+		const declaredPaths = resolveDeclaredScope(sessionID, !enforcePolicy);
 		if (!declaredPaths || declaredPaths.length === 0) {
 			recordOutcome({
 				finalCommandHash: originalCommandHash,
@@ -2293,10 +2346,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		input: { tool: string; sessionID: string; callID: string },
 		output: { args: unknown },
 	): Promise<void> => {
-		assertNonTransientCircuitAllowsTool(input.sessionID, {
-			tool: input.tool,
-			args: output.args,
-		});
+		if (enforcePolicy) {
+			assertNonTransientCircuitAllowsTool(input.sessionID, {
+				tool: input.tool,
+				args: output.args,
+			});
+		}
 		// Establish the lazy fallback invocation before recording this tool's
 		// before/after correlation. Beginning it later would clear the command we
 		// just stored, losing whether a parser error came from the sandbox wrapper.
@@ -2346,10 +2401,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		handleDelegatedWriteTracking(input.sessionID, input.tool, output.args);
 
 		// v6.29: Loop detection for Task tool delegations
-		handleLoopDetection(input.sessionID, input.tool, output.args);
+		if (enforcePolicy) {
+			handleLoopDetection(input.sessionID, input.tool, output.args);
+		}
 
 		// Block full test suite execution without file argument
-		handleTestSuiteBlocking(input.tool, output.args);
+		if (enforcePolicy) {
+			handleTestSuiteBlocking(input.tool, output.args);
+		}
 
 		const rawShellCommand = (() => {
 			const bashArgs = output.args as Record<string, unknown> | undefined;
@@ -2384,11 +2443,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		}
 
 		// Interpreter gating
-		handleInterpreterGating(input.sessionID, input.tool);
+		if (enforcePolicy) {
+			handleInterpreterGating(input.sessionID, input.tool);
+		}
 
 		// Block destructive shell commands
 		try {
-			checkDestructiveCommand(input.sessionID, input.tool, output.args);
+			if (enforcePolicy) {
+				checkDestructiveCommand(input.sessionID, input.tool, output.args);
+			}
 		} catch (err) {
 			const destructiveCategory =
 				err instanceof DestructiveCommandBlockedError
@@ -2420,7 +2483,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			throw err;
 		}
 
-		// Shell write scope enforcement
+		// Shell write scope enforcement. Issue #2664: ALWAYS runs — the
+		// observe half (reviewer-scope routing + lease candidate) is mandatory
+		// bookkeeping; only the denials inside are enforcement-gated.
 		try {
 			checkShellWriteScope(
 				input.sessionID,
@@ -2428,10 +2493,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				input.tool,
 				output.args,
 				rawShellCommand,
+				{ enforce: enforcePolicy },
 			);
 		} catch (err) {
 			const toolArgs = output.args as Record<string, unknown> | undefined;
-			const declaredScope = resolveDeclaredScope(input.sessionID);
+			// Diagnostics for an in-flight denial must never throw their own
+			// binding diagnostics over the original error: observing mode.
+			const declaredScope = resolveDeclaredScope(input.sessionID, true);
 			const declaredScopeText =
 				declaredScope != null && declaredScope.length > 0
 					? declaredScope.join(', ')
@@ -2519,23 +2587,80 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			input.tool,
 			rawShellCommand,
 		);
-		await applySandboxExecution(
-			input.sessionID,
-			input.callID,
-			input.tool,
-			output.args,
-			agentNameForSandbox,
-			rawShellCommand,
-			shellAuditEnabled,
-		);
+		if (enforcePolicy) {
+			await applySandboxExecution(
+				input.sessionID,
+				input.callID,
+				input.tool,
+				output.args,
+				agentNameForSandbox,
+				rawShellCommand,
+				shellAuditEnabled,
+			);
+		}
 
 		// Issue #853 Layer B: structural spec-drift block
-		enforceSpecDriftGate(effectiveDirectory, input.tool);
+		if (enforcePolicy) {
+			enforceSpecDriftGate(effectiveDirectory, input.tool);
+		}
 
 		// Preserve architect plan/config protection even when a malformed payload
 		// cannot be fully resolved for the universal guard pass below.
-		if (isArchitect(input.sessionID) && isWriteTool(input.tool)) {
+		if (
+			enforcePolicy &&
+			isArchitect(input.sessionID) &&
+			isWriteTool(input.tool)
+		) {
 			handlePlanAndScopeProtection(input.sessionID, input.tool, output.args);
+		}
+
+		// Issue #2664: the patch-payload size bound is STRUCTURAL, not policy —
+		// authority/observation cannot be verified over an unbounded write set,
+		// so it fails closed in BOTH modes (independent of enforcePolicy above,
+		// which only gates the architect-scoped plan/config checks). Resolves
+		// the payload with the same legacy precedence as extractPatchTargetPaths
+		// (input > patch > diff > aliases > cmd[1]) so every recognized field
+		// carries the bound, not just args.patch (implementation-review MINOR 4).
+		if (
+			input.tool === 'apply_patch' ||
+			input.tool === 'swarm_apply_patch' ||
+			input.tool === 'patch'
+		) {
+			const patchArgs = output.args as Record<string, unknown> | undefined;
+			let structuralPatch: string | undefined =
+				typeof patchArgs?.input === 'string'
+					? patchArgs.input
+					: typeof patchArgs?.patch === 'string'
+						? patchArgs.patch
+						: typeof patchArgs?.diff === 'string'
+							? patchArgs.diff
+							: undefined;
+			if (structuralPatch === undefined) {
+				for (const key of PATCH_PAYLOAD_KEYS) {
+					const value = patchArgs?.[key];
+					if (typeof value === 'string') {
+						structuralPatch = value;
+						break;
+					}
+				}
+			}
+			if (
+				structuralPatch === undefined &&
+				Array.isArray(patchArgs?.cmd) &&
+				typeof (patchArgs.cmd as unknown[])[1] === 'string'
+			) {
+				structuralPatch = (patchArgs.cmd as unknown[])[1] as string;
+			}
+			if (structuralPatch === undefined && typeof patchArgs?.cmd === 'string') {
+				// Mirrors write-target-resolver: a plain-string cmd is a patch
+				// payload shape, not an argv array.
+				structuralPatch = patchArgs.cmd;
+			}
+			if ((structuralPatch ?? '').length > 1_000_000) {
+				throw new Error(
+					'WRITE BLOCKED: Patch payload exceeds 1 MB — authority cannot be verified for all modified paths. Split into smaller patches.',
+				);
+			}
 		}
 
 		// Issue #1875: resolve the complete write set once, before any authority,
@@ -2559,13 +2684,19 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				// Universal deny, containment, and lstat checks cannot be proven when
 				// the complete write set is unknown. This is unsafe for every role,
 				// including architect; plan/config guards remain additional checks.
-				throw new Error(`WRITE TARGET UNVERIFIABLE: ${resolution.reason}`);
+				// Issue #2664: with enforcement off the write proceeds, but exact
+				// lease maintenance still requires provable targets — no candidate.
+				if (enforcePolicy) {
+					throw new Error(`WRITE TARGET UNVERIFIABLE: ${resolution.reason}`);
+				}
 			} else {
 				resolvedFileTargets = resolution.paths;
 			}
 			const writeBinding =
 				session?.currentTaskId && isCoder
-					? resolveActiveScopeBinding(input.sessionID)
+					? enforcePolicy
+						? resolveActiveScopeBinding(input.sessionID)
+						: resolveActiveScopeBindingObserving(input.sessionID)
 					: null;
 			if (writeBinding) {
 				rememberScopeLeaseCandidate?.({
@@ -2587,11 +2718,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			for (const targetPath of resolvedFileTargets ?? []) {
 				const agentName = swarmState.activeAgent.get(input.sessionID);
 				if (!agentName) {
+					if (!enforcePolicy) continue;
 					throw new Error(
 						`WRITE BLOCKED: No active agent registered for session "${input.sessionID}". Call startAgentSession before issuing write tool calls.`,
 					);
 				}
-				// lstat: block writes through symlinks
+				// lstat: block writes through symlinks. The decision is RECORDED in
+				// both modes (observe-mode audit stays active per issue #2664); only
+				// the denial itself is enforcement-gated.
 				const lstatBlock = checkWriteTargetForSymlink(
 					targetPath,
 					writeDirectory,
@@ -2607,7 +2741,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							path: targetPath,
 							reason: lstatBlock,
 							resolvedScope: (() => {
-								const scope = resolveDeclaredScope(input.sessionID);
+								const scope = resolveDeclaredScope(
+									input.sessionID,
+									!enforcePolicy,
+								);
 								return scope != null && scope.length > 0
 									? scope.join(', ')
 									: '';
@@ -2618,13 +2755,17 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							enabled: shellAuditEnabled,
 						},
 					);
-					throw new Error(lstatBlock);
+					if (enforcePolicy) {
+						throw new Error(lstatBlock);
+					}
 				}
 
 				// Per-agent authority check
 				const writeBinding =
 					session?.currentTaskId && isCoder
-						? resolveActiveScopeBinding(input.sessionID)
+						? enforcePolicy
+							? resolveActiveScopeBinding(input.sessionID)
+							: resolveActiveScopeBindingObserving(input.sessionID)
 						: null;
 				const writeDeclaredScope = writeBinding?.files ?? null;
 
@@ -2671,6 +2812,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							enabled: shellAuditEnabled,
 						},
 					);
+					if (!enforcePolicy) {
+						continue;
+					}
 					throw new Error(
 						`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${targetPath}". Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
 					);
@@ -2773,13 +2917,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				output.args,
 			);
 
-			await checkGateLimits({
-				sessionID: input.sessionID,
-				window,
-				agentConfig,
-				elapsedMinutes,
-				repetitionCount,
-			});
+			if (enforcePolicy) {
+				await checkGateLimits({
+					sessionID: input.sessionID,
+					window,
+					agentConfig,
+					elapsedMinutes,
+					repetitionCount,
+				});
+			}
 		}
 
 		// (2) v6.29 / issue #2063 C2+C3: PRM hard stop — DENY once.
@@ -2796,7 +2942,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// proceeds. The stop is a directive to report progress, not a permanent
 		// wedge — and `EscalationTracker` re-arms both tokens on any further
 		// detection at count >= 3, so a session that ignores it is stopped again.
-		{
+		if (enforcePolicy) {
 			const prmSession = swarmState.agentSessions.get(input.sessionID);
 			if (prmSession?.prmHardStopPending) {
 				prmSession.prmHardStopPending = false;

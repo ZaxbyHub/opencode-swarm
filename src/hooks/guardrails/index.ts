@@ -80,11 +80,14 @@ import {
 	takeToolExecution,
 } from './nontransient-circuit';
 import { decodePreCheckResult } from './pre-check-result';
+import { recordStageAGateRoute, type StageAGateRoute } from './stage-a-route';
 import { getStoredInputArgs } from './stored-input-args';
 import { createToolBeforeHandler } from './tool-before';
 
 const MAX_PENDING_GATE_RECEIPTS_PER_SESSION = 256;
 const MAX_PENDING_GATE_RECEIPT_SESSIONS = 500;
+const MAX_PENDING_GATE_ROUTES_PER_SESSION = 256;
+const MAX_PENDING_GATE_ROUTE_SESSIONS = 500;
 
 export const _internals = {
 	extractSwarmIdFromAgentName,
@@ -101,6 +104,8 @@ export const _internals = {
 	allowUncorrelatedGateReceipts: false,
 	MAX_PENDING_GATE_RECEIPTS_PER_SESSION,
 	MAX_PENDING_GATE_RECEIPT_SESSIONS,
+	MAX_PENDING_GATE_ROUTES_PER_SESSION,
+	MAX_PENDING_GATE_ROUTE_SESSIONS,
 	/**
 	 * Test/inspection seams for the no-op detector's bounded session state
 	 * (invariant 8). Production code does not call these; they exist so the
@@ -738,14 +743,13 @@ export function createGuardrailsHooks(
 		return cwd;
 	})();
 
-	// If guardrails are disabled, return no-op handlers
-	if (guardrailsConfig?.enabled === false) {
-		return {
-			toolBefore: async () => {},
-			toolAfter: async () => {},
-			messagesTransform: async () => {},
-		};
-	}
+	// Issue #2664: `guardrails.enabled=false` disables OPTIONAL POLICY
+	// ENFORCEMENT only. Mandatory lifecycle bookkeeping — Stage A gate
+	// receipts (correlation, durable workflow transitions, route events)
+	// and exact-bound scope-lease maintenance — stays active in both modes
+	// (AGENTS.md invariant 9). The factory always builds real handlers; the
+	// enforcement-only paths inside toolBefore are gated on `enforcePolicy`.
+	const enforcementEnabled = guardrailsConfig?.enabled !== false;
 
 	// Pre-compute effective authority rules once
 	const precomputedAuthorityRules = buildEffectiveRules(authorityConfig);
@@ -766,7 +770,15 @@ export function createGuardrailsHooks(
 	const universalDenyPrefixes: string[] =
 		authorityConfig?.universal_deny_prefixes ?? [];
 
-	const cfg = guardrailsConfig!;
+	// Fail closed on a missing config rather than silently absorbing it into
+	// schema defaults: garbage or legacy one-arg calls must keep surfacing as
+	// the programmer error they are (pinned by guardrails-directory.adversarial).
+	if (guardrailsConfig === undefined || guardrailsConfig === null) {
+		throw new TypeError(
+			'createGuardrailsHooks: guardrailsConfig is required — pass the resolved GuardrailsConfig object',
+		);
+	}
+	const cfg = guardrailsConfig;
 	const requiredQaGates = cfg.qa_gates?.required_tools ?? [
 		'diff',
 		'syntax_check',
@@ -837,6 +849,53 @@ export function createGuardrailsHooks(
 		}
 		sessionTasks.set(callID, { sessionID, taskId, generation });
 	};
+	// Issue #2664: pre-classified Stage A routes for gate calls that could
+	// not be correlated with a task at toolBefore time (no session task, no
+	// durable candidate, ambiguity, unbound). Session-keyed, bounded, and
+	// delete-on-read at its single consumption point in toolAfter — entries
+	// never survive a completed delivery (invariant 8; plan-critic R2-F2).
+	const pendingGateRoutesBySession = new Map<
+		string,
+		Map<string, StageAGateRoute>
+	>();
+	const takePendingGateRoute = (
+		sessionID: string,
+		callID: string,
+	): StageAGateRoute | undefined => {
+		const sessionRoutes = pendingGateRoutesBySession.get(sessionID);
+		const route = sessionRoutes?.get(callID);
+		if (sessionRoutes) {
+			sessionRoutes.delete(callID);
+			if (sessionRoutes.size === 0)
+				pendingGateRoutesBySession.delete(sessionID);
+		}
+		return route;
+	};
+	const rememberPendingGateRoute = (
+		sessionID: string,
+		callID: string,
+		route: StageAGateRoute,
+	): void => {
+		let sessionRoutes = pendingGateRoutesBySession.get(sessionID);
+		if (!sessionRoutes) {
+			if (pendingGateRoutesBySession.size >= MAX_PENDING_GATE_ROUTE_SESSIONS) {
+				throw new Error(
+					'GATE_ROUTE_CAPACITY: too many sessions have live gate calls; wait for a pending gate call to finish',
+				);
+			}
+			sessionRoutes = new Map();
+			pendingGateRoutesBySession.set(sessionID, sessionRoutes);
+		}
+		if (
+			!sessionRoutes.has(callID) &&
+			sessionRoutes.size >= MAX_PENDING_GATE_ROUTES_PER_SESSION
+		) {
+			throw new Error(
+				'GATE_ROUTE_CAPACITY: this session has too many live gate calls; wait for a pending gate call to finish',
+			);
+		}
+		sessionRoutes.set(callID, route);
+	};
 	const scopeLeaseRenewal = createScopeLeaseRenewalTracker();
 	const rememberReviewerScopeWrite = (input: {
 		callID: string;
@@ -888,10 +947,14 @@ export function createGuardrailsHooks(
 		episodeMinutes: cfg.execution_stall_episode_minutes,
 	};
 
-	// Create toolBefore handler via factory
+	// Create toolBefore handler via factory. `enforcePolicy` carries the
+	// optional-enforcement half of issue #2664's split: false skips policy
+	// denials inside tool-before while every bookkeeping path (gate
+	// correlation wrapper above, lease candidates, tracking) stays live.
 	const baseToolBefore = createToolBeforeHandler({
 		effectiveDirectory,
 		cfg,
+		enforcePolicy: enforcementEnabled,
 		precomputedAuthorityRules,
 		universalDenyPrefixes,
 		shellAuditEnabled,
@@ -910,6 +973,7 @@ export function createGuardrailsHooks(
 	) => {
 		if (isGateTool(input.tool)) {
 			let taskId = swarmState.agentSessions.get(input.sessionID)?.currentTaskId;
+			let unattributableRoute: StageAGateRoute = 'no_task_correlation';
 			if (!taskId) {
 				// Post-reset durable attribution fallback: reset-session wiped the
 				// in-memory chain (currentTaskId/lastCoderDelegationTaskId), so
@@ -924,6 +988,10 @@ export function createGuardrailsHooks(
 					if ('taskId' in fallback) {
 						taskId = fallback.taskId;
 					} else if ('ambiguous' in fallback && fallback.ambiguous.length > 0) {
+						// Ambiguity and unbound/unverifiable are both durable-fallback
+						// attribution failures with no attributable task (issue #2664
+						// route vocabulary: attribution_ambiguous).
+						unattributableRoute = 'attribution_ambiguous';
 						const shown = fallback.ambiguous.slice(0, 10);
 						const more = fallback.ambiguous.length - shown.length;
 						emitDurableAttributionAdvisory(
@@ -932,6 +1000,7 @@ export function createGuardrailsHooks(
 							`STAGE A ATTRIBUTION AMBIGUOUS: ${fallback.ambiguous.length} tasks are settled at coder_delegated (${shown.join(', ')}${more > 0 ? `, +${more} more` : ''}) but this session has no task correlation after reset-session. Stage A evidence cannot be attributed safely. Run /swarm recover to repair Stage A attribution, then re-run the gate.`,
 						);
 					} else if ('unbound' in fallback) {
+						unattributableRoute = 'attribution_ambiguous';
 						emitDurableAttributionAdvisory(
 							input.sessionID,
 							`${effectiveDirectory}\u0000unbound\u0000${fallback.unbound}`,
@@ -954,6 +1023,26 @@ export function createGuardrailsHooks(
 					taskId,
 					workflow?.generation ?? 0,
 				);
+			} else {
+				// Issue #2664: carry the toolBefore-time classification to
+				// toolAfter so the completed call still records its route.
+				// Capacity exhaustion here must never block the tool call —
+				// the route event is bookkeeping, not enforcement (R3-F2).
+				try {
+					rememberPendingGateRoute(
+						input.sessionID,
+						input.callID,
+						unattributableRoute,
+					);
+				} catch (routeError) {
+					warn('Stage A route classification dropped at capacity', {
+						sessionID: input.sessionID,
+						error:
+							routeError instanceof Error
+								? routeError.message.slice(0, 80)
+								: String(routeError),
+					});
+				}
 			}
 		}
 		try {
@@ -964,16 +1053,22 @@ export function createGuardrailsHooks(
 		}
 	};
 
-	// Create messagesTransform handler via factory
-	const messagesTransform = createMessagesTransformHandler({
-		effectiveDirectory,
-		cfg,
-		requiredQaGates,
-		requireReviewerAndTestEngineer,
-		consecutiveNoToolTurns,
-		lastCountedAssistantMsgId,
-		resolveAgentModel,
-	});
+	// Create messagesTransform handler via factory. Prompt-directive
+	// advisories are the OPTIONAL enforcement channel: with guardrails
+	// disabled the transform stays a no-op (issue #2664 non-goal: never make
+	// optional guardrails mandatory). Stage A operational failures remain
+	// visible via logger.criticalWarn + route events.
+	const messagesTransform = enforcementEnabled
+		? createMessagesTransformHandler({
+				effectiveDirectory,
+				cfg,
+				requiredQaGates,
+				requireReviewerAndTestEngineer,
+				consecutiveNoToolTurns,
+				lastCountedAssistantMsgId,
+				resolveAgentModel,
+			})
+		: async () => {};
 
 	return {
 		toolBefore,
@@ -1026,6 +1121,85 @@ export function createGuardrailsHooks(
 				...input,
 				output: malformedOutput ? null : safeOutput,
 			});
+			// Issue #2664: Stage A route classification + bounded route events.
+			// MANDATORY bookkeeping — runs in BOTH guardrails modes and
+			// OUTSIDE the `if (session)` guard below: the pending-route
+			// carry-over is the source of truth when the session is gone.
+			// Emission is scoped to pre_check_batch, the Stage A verdict
+			// producer; other gate tools feed gateLog but carry no verdict.
+			// The whole classify-and-emit step is fail-open (plan-critic
+			// R3-F2): capacity/append failures skip the event, never throw.
+			const emitStageARoute = (
+				route: StageAGateRoute,
+				taskId: string | null,
+			): void => {
+				recordStageAGateRoute(effectiveDirectory, {
+					route,
+					sessionID: input.sessionID,
+					callID: input.callID,
+					taskId,
+					guardrailsEnabled: enforcementEnabled,
+				});
+			};
+			const stageADuplicateOf = async (
+				taskId: string,
+				appliedOutcome: string,
+			): Promise<boolean> => {
+				try {
+					const snapshot = getTaskWorkflowSnapshot(
+						await readTaskEvidence(effectiveDirectory, taskId),
+					);
+					return (
+						snapshot.authoritative === true &&
+						snapshot.lastTransitionId === `pre-check:${input.callID}` &&
+						snapshot.lastOutcome === appliedOutcome
+					);
+				} catch {
+					return false;
+				}
+			};
+			if (
+				normalizeToolName(input.tool) === 'pre_check_batch' &&
+				!pendingGateTask
+			) {
+				try {
+					const verdict = decodePreCheckResult(safeOutput.output);
+					const sessionTaskId =
+						swarmState.agentSessions.get(input.sessionID)?.currentTaskId ??
+						null;
+					const appliedOutcome =
+						verdict.kind === 'pass'
+							? 'stage_a_passed'
+							: verdict.kind === 'fail'
+								? 'stage_a_failed'
+								: null;
+					if (
+						sessionTaskId &&
+						appliedOutcome &&
+						(await stageADuplicateOf(sessionTaskId, appliedOutcome))
+					) {
+						// Idempotent replay of an already-applied receipt. The
+						// predicate inspects transitionId + type-derived outcome
+						// only (R3-F1): an altered payload at the same callID
+						// still re-classifies as duplicate by design.
+						emitStageARoute('duplicate_result', sessionTaskId);
+					} else {
+						emitStageARoute(
+							takePendingGateRoute(input.sessionID, input.callID) ??
+								'no_task_correlation',
+							null,
+						);
+					}
+				} catch (routeError) {
+					warn('Stage A route classification failed', {
+						sessionID: input.sessionID,
+						error:
+							routeError instanceof Error
+								? routeError.message.slice(0, 80)
+								: String(routeError),
+					});
+				}
+			}
 			// v6.12: Gate completion tracking (moved above window check for architect sessions)
 			const session = swarmState.agentSessions.get(input.sessionID);
 			if (session) {
@@ -1053,6 +1227,16 @@ export function createGuardrailsHooks(
 								timestamp: Date.now(),
 								code: verdict.code,
 							};
+							if (verdict.kind === 'invalid') {
+								// Issue #2664: an undecodable result carries no verdict —
+								// it is recorded as a bounded route event and never
+								// transitions the workflow (invalid is not evidence
+								// of a failed pre-check).
+								emitStageARoute(
+									'invalid_result',
+									isStrictTaskId(taskId) ? taskId : null,
+								);
+							}
 							if (verdict.kind === 'fail' && isStrictTaskId(taskId))
 								try {
 									const updated = await transitionTaskWorkflowEvidence(
@@ -1067,6 +1251,7 @@ export function createGuardrailsHooks(
 									const next = getTaskWorkflowSnapshot(updated);
 									session.taskWorkflowStates.set(taskId, next.state);
 									updateTaskWorkflowCache(session, taskId, next);
+									emitStageARoute('pre_check_failed', taskId);
 								} catch (err) {
 									const code = stageAWriteErrorCode(err);
 									if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
@@ -1095,45 +1280,63 @@ export function createGuardrailsHooks(
 							if (!isStrictTaskId(taskId)) {
 								advanceTaskState(session, taskId, 'pre_check_passed');
 							}
-							try {
-								const updated = await transitionTaskWorkflowEvidence(
-									effectiveDirectory,
-									taskId,
-									{
-										type: 'stage_a_passed',
-										expectedGeneration: pendingGateTask.generation,
-										transitionId: `pre-check:${input.callID}`,
-									},
-								);
-								const next = getTaskWorkflowSnapshot(updated);
-								session.taskWorkflowStates.set(taskId, next.state);
-								updateTaskWorkflowCache(session, taskId, next);
-							} catch (err) {
-								// Duplicate transitions return existing evidence without
-								// throwing, so any error here is abnormal. Attribution-miss
-								// codes are exactly how tasks silently wedge at
-								// coder_delegated post-reset — escalate them to a visible
-								// advisory instead of swallowing (TASK_WORKFLOW_TERMINAL and
-								// WAL-fencing codes stay log-only: late gate results after
-								// close/settlement are expected churn, not a wedge).
-								const code = stageAWriteErrorCode(err);
-								if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
-									logger.criticalWarn(
-										`[guardrails] Stage A write failed for task ${taskId}: ${code} — pre_check_batch result was NOT attributed. Run /swarm recover ${taskId}.`,
-									);
-									pushAdvisory(
-										session,
-										`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch passed but the workflow transition was rejected, so Stage B dispatches will be denied with TASK_WORKFLOW_STAGE_A_REQUIRED. Run /swarm recover ${taskId} to repair attribution.`,
-									);
-								} else {
-									// Non-fatal: state may already be at or past pre_check_passed
-									warn(
-										'Failed to advance task state after pre_check_batch pass',
+							// Issue #2664 duplicate pre-check: the durable receipt
+							// for this exact callID already applied — idempotent
+							// replay, no second transition (R1-F4/R3-F1: the
+							// predicate requires an authoritative snapshot and
+							// keys on transitionId + type-derived outcome only).
+							if (
+								isStrictTaskId(taskId) &&
+								(await stageADuplicateOf(taskId, 'stage_a_passed'))
+							) {
+								emitStageARoute('duplicate_result', taskId);
+							} else {
+								try {
+									const updated = await transitionTaskWorkflowEvidence(
+										effectiveDirectory,
+										taskId,
 										{
-											taskId,
-											error: String(err),
+											type: 'stage_a_passed',
+											expectedGeneration: pendingGateTask.generation,
+											transitionId: `pre-check:${input.callID}`,
 										},
 									);
+									const next = getTaskWorkflowSnapshot(updated);
+									session.taskWorkflowStates.set(taskId, next.state);
+									updateTaskWorkflowCache(session, taskId, next);
+									emitStageARoute('valid_pass', taskId);
+								} catch (err) {
+									// Duplicate transitions return existing evidence without
+									// throwing, so any error here is abnormal. Attribution-miss
+									// codes are exactly how tasks silently wedge at
+									// coder_delegated post-reset — escalate them to a visible
+									// advisory instead of swallowing (TASK_WORKFLOW_TERMINAL and
+									// WAL-fencing codes stay log-only: late gate results after
+									// close/settlement are expected churn, not a wedge).
+									const code = stageAWriteErrorCode(err);
+									if (code === 'TASK_WORKFLOW_GENERATION_MISMATCH') {
+										// Issue #2664: the correlation's generation is stale —
+										// a late result that must not advance the task.
+										emitStageARoute('late_result', taskId);
+									}
+									if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
+										logger.criticalWarn(
+											`[guardrails] Stage A write failed for task ${taskId}: ${code} — pre_check_batch result was NOT attributed. Run /swarm recover ${taskId}.`,
+										);
+										pushAdvisory(
+											session,
+											`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch passed but the workflow transition was rejected, so Stage B dispatches will be denied with TASK_WORKFLOW_STAGE_A_REQUIRED. Run /swarm recover ${taskId} to repair attribution.`,
+										);
+									} else {
+										// Non-fatal: state may already be at or past pre_check_passed
+										warn(
+											'Failed to advance task state after pre_check_batch pass',
+											{
+												taskId,
+												error: String(err),
+											},
+										);
+									}
 								}
 							}
 						}
