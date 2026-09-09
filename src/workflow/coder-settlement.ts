@@ -854,9 +854,7 @@ async function publishSquashRecoveryAuthorityForCommittedWal(
 				callID: descriptor.callID,
 				parentSessionID: descriptor.parentSessionId,
 				taskId: descriptor.taskId,
-				...(descriptor.planTaskId
-					? { planTaskId: descriptor.planTaskId }
-					: {}),
+				...(descriptor.planTaskId ? { planTaskId: descriptor.planTaskId } : {}),
 				handle: {
 					worktreePath: descriptor.worktreePath,
 					branchName: descriptor.branchName,

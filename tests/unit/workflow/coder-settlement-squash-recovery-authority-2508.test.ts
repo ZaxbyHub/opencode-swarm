@@ -297,7 +297,9 @@ describe('issue #2508 squash recovery authority — regression: CS2-001', () => 
 		);
 		_internals.liveDispatches.clear();
 
-		await expect(recoverCoderSettlement(fixture.repo, TASK_ID)).resolves.toBeNull();
+		await expect(
+			recoverCoderSettlement(fixture.repo, TASK_ID),
+		).resolves.toBeNull();
 		expect(fs.existsSync(fixture.worktree)).toBe(false);
 		expect(branchExists(fixture.repo, fixture.branch)).toBe(true);
 		expect(readWal(fixture)).toMatchObject({

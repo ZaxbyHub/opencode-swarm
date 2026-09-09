@@ -31,7 +31,12 @@ import * as actualState from '../../../src/state.js';
 import { runConfirmedClose } from './close-confirmation-test-helpers.js';
 
 const mockExecuteWriteRetro = mock(async () =>
-	JSON.stringify({ success: true, phase: 1, task_id: 'retro-1', message: 'Done' }),
+	JSON.stringify({
+		success: true,
+		phase: 1,
+		task_id: 'retro-1',
+		message: 'Done',
+	}),
 );
 const mockCurateAndStoreSwarm = mock(async () => {});
 const mockArchiveEvidence = mock(async () => {});
@@ -130,7 +135,9 @@ mock.module('../../../src/git/branch.js', () => ({
 		}),
 	},
 }));
-mock.module('../../../src/plan/checkpoint.js', () => ({ writeCheckpoint: async () => {} }));
+mock.module('../../../src/plan/checkpoint.js', () => ({
+	writeCheckpoint: async () => {},
+}));
 
 const {
 	handleCloseCommand: rawHandleCloseCommand,
@@ -178,7 +185,9 @@ async function writePlan(): Promise<void> {
 }
 function getLatestArchivePath(): string {
 	const archiveBase = path.join(swarmDir(), 'archive');
-	const entries = readdirSync(archiveBase).filter((entry) => entry.startsWith('swarm-'));
+	const entries = readdirSync(archiveBase).filter((entry) =>
+		entry.startsWith('swarm-'),
+	);
 	expect(entries.length).toBeGreaterThanOrEqual(1);
 	entries.sort();
 	return path.join(archiveBase, entries[entries.length - 1]);
@@ -198,23 +207,27 @@ describe('active-state directory cleanup', () => {
 		closeInternals.curateAndStoreSwarm = mockCurateAndStoreSwarm;
 		closeInternals.checkHivePromotions = mockCheckHivePromotions;
 		closeInternals.runCuratorPostMortem = mockRunCuratorPostMortem;
-		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-cleanup-active-state-'));
+		testDir = mkdtempSync(
+			path.join(os.tmpdir(), 'close-cleanup-active-state-'),
+		);
 		mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
-		spawnSyncSpy = spyOn(childProcess, 'spawnSync').mockImplementation((...args) => {
-			const [command] = args;
-			if (command === 'sqlite3') {
-				return {
-					status: 0,
-					stdout: '0|0|0\n',
-					stderr: '',
-					error: undefined,
-					pid: 0,
-					output: [],
-					signal: null,
-				} as ReturnType<typeof childProcess.spawnSync>;
-			}
-			return realSpawnSync(...args);
-		});
+		spawnSyncSpy = spyOn(childProcess, 'spawnSync').mockImplementation(
+			(...args) => {
+				const [command] = args;
+				if (command === 'sqlite3') {
+					return {
+						status: 0,
+						stdout: '0|0|0\n',
+						stderr: '',
+						error: undefined,
+						pid: 0,
+						output: [],
+						signal: null,
+					} as ReturnType<typeof childProcess.spawnSync>;
+				}
+				return realSpawnSync(...args);
+			},
+		);
 	});
 
 	afterEach(() => {
@@ -222,25 +235,42 @@ describe('active-state directory cleanup', () => {
 		spawnSyncSpy.mockRestore();
 		closeInternals.curateAndStoreSwarm = realCloseInternals.curateAndStoreSwarm;
 		closeInternals.checkHivePromotions = realCloseInternals.checkHivePromotions;
-		closeInternals.runCuratorPostMortem = realCloseInternals.runCuratorPostMortem;
+		closeInternals.runCuratorPostMortem =
+			realCloseInternals.runCuratorPostMortem;
 		mock.restore();
 	});
 
 	it('archives and removes all four active-state directories', async () => {
 		await writePlan();
-		mkdirSync(path.join(swarmDir(), 'evidence', 'retro-x'), { recursive: true });
-		writeFileSync(path.join(swarmDir(), 'evidence', 'marker.txt'), 'evidence-marker');
+		mkdirSync(path.join(swarmDir(), 'evidence', 'retro-x'), {
+			recursive: true,
+		});
+		writeFileSync(
+			path.join(swarmDir(), 'evidence', 'marker.txt'),
+			'evidence-marker',
+		);
 		mkdirSync(path.join(swarmDir(), 'session', 'sess-y'), { recursive: true });
-		writeFileSync(path.join(swarmDir(), 'session', 'marker.txt'), 'session-marker');
+		writeFileSync(
+			path.join(swarmDir(), 'session', 'marker.txt'),
+			'session-marker',
+		);
 		mkdirSync(path.join(swarmDir(), 'scopes'));
-		writeFileSync(path.join(swarmDir(), 'scopes', 'marker.txt'), 'scopes-marker');
+		writeFileSync(
+			path.join(swarmDir(), 'scopes', 'marker.txt'),
+			'scopes-marker',
+		);
 		mkdirSync(path.join(swarmDir(), 'spec-archive'));
-		writeFileSync(path.join(swarmDir(), 'spec-archive', 'marker.txt'), 'spec-archive-marker');
+		writeFileSync(
+			path.join(swarmDir(), 'spec-archive', 'marker.txt'),
+			'spec-archive-marker',
+		);
 
 		await handleCloseCommand(testDir, []);
 		const archivePath = getLatestArchivePath();
 		for (const directory of ['evidence', 'session', 'scopes', 'spec-archive']) {
-			expect(existsSync(path.join(archivePath, directory, 'marker.txt'))).toBe(true);
+			expect(existsSync(path.join(archivePath, directory, 'marker.txt'))).toBe(
+				true,
+			);
 			expect(existsSync(path.join(swarmDir(), directory))).toBe(false);
 		}
 	});

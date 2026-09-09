@@ -2,8 +2,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
 	existsSync,
-	mkdtempSync,
 	mkdirSync,
+	mkdtempSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
@@ -26,8 +26,12 @@ describe('copyDirRecursive (FR-015b)', () => {
 
 			expect(await copyDirRecursive(src, dest)).toBe(3);
 			expect(readFileSync(path.join(dest, 'file1.txt'), 'utf8')).toBe('hello');
-			expect(readFileSync(path.join(dest, 'a', 'file2.txt'), 'utf8')).toBe('world');
-			expect(readFileSync(path.join(dest, 'a', 'b', 'file3.txt'), 'utf8')).toBe('deep');
+			expect(readFileSync(path.join(dest, 'a', 'file2.txt'), 'utf8')).toBe(
+				'world',
+			);
+			expect(readFileSync(path.join(dest, 'a', 'b', 'file3.txt'), 'utf8')).toBe(
+				'deep',
+			);
 			expect(existsSync(path.join(dest, 'a', 'b'))).toBe(true);
 		} finally {
 			rmSync(tmp, { recursive: true, force: true });
