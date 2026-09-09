@@ -75,16 +75,21 @@ function pendingPath(directory: string): string {
 	return validateSwarmPath(directory, PENDING_PURGE_PATH);
 }
 
-/** Resolve the effective candidate set: the single target, or the explicit set. */
+/**
+ * Resolve the effective candidate set: the single target, or the explicit set.
+ * #2508: an explicit `kind` (e.g. 'swarm-close') binds into the scope digest
+ * so a token minted by one destructive surface cannot be consumed by another
+ * with the same candidate paths.
+ */
 function resolveCandidates(
 	scopeTarget: string,
-	extra?: { candidates?: PurgeCandidate[] },
+	extra?: { kind?: string; candidates?: PurgeCandidate[] },
 ): { kind: string; candidates: PurgeCandidate[] } {
 	if (extra?.candidates && extra.candidates.length > 0) {
-		return { kind: 'set', candidates: extra.candidates };
+		return { kind: extra.kind ?? 'set', candidates: extra.candidates };
 	}
 	return {
-		kind: 'single',
+		kind: extra?.kind ?? 'single',
 		candidates: [{ path: scopeTarget, reason: 'operator-requested' }],
 	};
 }

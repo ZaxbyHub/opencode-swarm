@@ -109,6 +109,28 @@ describe('#2508 consumeConfirmToken (token-gate without deletion)', () => {
 		expect(verdict.reason).toMatch(/scope changed/);
 	});
 
+	test('kind binds the digest: a token minted for one surface cannot be consumed by another', () => {
+		const { root, target } = makeProject('kind');
+		const token = issueConfirmToken(target, root, {
+			kind: 'swarm-close',
+			candidates: [{ path: target, reason: 'confirmed scope' }],
+		});
+		// Same candidate paths, DIFFERENT destructive surface (reset-session):
+		// the digest is kind-bound, so the token is rejected.
+		const verdict = consumeConfirmToken(target, root, token, {
+			kind: 'reset-session',
+			candidates: [{ path: target, reason: 'confirmed scope' }],
+		});
+		expect(verdict.ok).toBe(false);
+		expect(verdict.reason).toMatch(/scope changed/);
+		// The matching kind still consumes it (one-shot).
+		const same = consumeConfirmToken(target, root, token, {
+			kind: 'swarm-close',
+			candidates: [{ path: target, reason: 'confirmed scope' }],
+		});
+		expect(same.ok).toBe(true);
+	});
+
 	test('expired TTL reads as absent (no pending purge)', () => {
 		const { root, target } = makeProject('ttl');
 		const PINNED_NOW = 1_800_000_000_000;

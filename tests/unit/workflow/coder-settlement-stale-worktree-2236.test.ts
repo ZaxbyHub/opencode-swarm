@@ -132,23 +132,24 @@ describe('issue #2236 stale lane worktree recovery', () => {
 		).toContain('feature = 2');
 	});
 
-	test('cleanup leaves no branch behind even though the directory was already gone', async () => {
+	test('cleanup completes even though the directory was already gone (#2508: branch retained)', async () => {
 		const fixture = await interruptedAfterOnBeforeMerge('cleanup');
 		fs.rmSync(fixture.worktree, { recursive: true, force: true });
 
 		await recoverCoderSettlement(fixture.repo, TASK_ID);
 
-		// BR-2: without pruning the stale registration first, `git branch -d`
-		// fails with "cannot delete branch ... used by worktree at ...",
-		// `cleanupRecoveredWorktree` then throws
-		// CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED, and the reported
-		// deadlock returns under a different message.
-		expect(branchExists(fixture)).toBe(false);
+		// BR-2: without pruning the stale registration first, cleanup throws
+		// CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED and the reported
+		// deadlock returns under a different message. Recovery completing and
+		// the WAL reaching cleanupComplete proves the pruning happened.
+		// #2508: the default recovery merge lands UNSTAGED, so the lane branch
+		// is intentionally retained as the recovery backup for those bytes.
 		expect(fs.existsSync(fixture.worktree)).toBe(false);
 		expect(readWal(fixture)).toMatchObject({
 			state: 'COMMITTED',
 			cleanupComplete: true,
 		});
+		expect(branchExists(fixture)).toBe(true);
 		expect(scanWorktreeProvisioningOwnersForRecovery(fixture.repo)).toEqual({
 			status: 'ok',
 			owners: [],
@@ -187,7 +188,8 @@ describe('issue #2236 stale lane worktree recovery', () => {
 		expect(getDeferredWarnings().join('\n')).not.toContain(
 			'STALE_LANE_WORKTREE_DETECTED',
 		);
-		expect(branchExists(fixture)).toBe(false);
+		// #2508: default landing is unstaged — the lane branch is retained.
+		expect(branchExists(fixture)).toBe(true);
 	});
 
 	test('a stale-provenance merge is still refused when the directory is gone', async () => {
@@ -328,7 +330,10 @@ describe('#2236 concurrent recovery of a stale lane worktree', () => {
 			state: 'COMMITTED',
 			cleanupComplete: true,
 		});
-		expect(branchExists(fixture)).toBe(false);
+		// #2508: the default landing is unstaged, so the lane branch is
+		// retained and primary HEAD history gains ZERO 'isolated mutation'
+		// commits; exactly one winner above proves no double-processing.
+		expect(branchExists(fixture)).toBe(true);
 		const merges = git(fixture.repo, [
 			'log',
 			'--format=%s',
@@ -337,6 +342,38 @@ describe('#2236 concurrent recovery of a stale lane worktree', () => {
 		])
 			.split('\n')
 			.filter((line) => line.trim().length > 0);
-		expect(merges).toHaveLength(1);
+		expect(merges).toHaveLength(0);
+	});
+
+	test('#2508: the unstaged recovery landing is durable — a later cleanup pass retains the branch', async () => {
+		const fixture = await interruptedAfterOnBeforeMerge('retained-2508');
+		fs.rmSync(fixture.worktree, { recursive: true, force: true });
+
+		await recoverCoderSettlement(fixture.repo, TASK_ID);
+		expect(branchExists(fixture)).toBe(true);
+		expect(readWal(fixture)).toMatchObject({
+			state: 'COMMITTED',
+			cleanupComplete: true,
+			worktree: { landedUnstaged: true },
+		});
+
+		// Simulate a crash between commit and cleanup-complete: the durable
+		// landedUnstaged stamp must make the later cleanup pass retain the
+		// lane branch instead of deleting it as residue.
+		const wal = readWal(fixture);
+		fs.writeFileSync(
+			walPath(fixture),
+			`${JSON.stringify({ ...wal, cleanupComplete: false }, null, 2)}\n`,
+		);
+		await completeCoderSettlementCleanup(
+			fixture.repo,
+			TASK_ID,
+			fixture.transitionId,
+		);
+		expect(branchExists(fixture)).toBe(true);
+		expect(readWal(fixture)).toMatchObject({
+			state: 'COMMITTED',
+			cleanupComplete: true,
+		});
 	});
 });

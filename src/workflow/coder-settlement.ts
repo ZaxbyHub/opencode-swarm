@@ -223,9 +223,24 @@ function settlementTransitionEvent(
 			};
 }
 
+/**
+ * #2508: stamp the squash-unstaged landing shape onto the WAL's worktree
+ * descriptor so every later cleanup pass (completeCoderSettlementCleanup and
+ * the recovery scans) retains the lane branch — the recovery backup for the
+ * unstaged bytes — instead of deleting it as residue.
+ */
+function withLandedUnstaged(
+	worktree: BackgroundWorktreeDescriptor | undefined,
+	landedUnstaged: boolean | undefined,
+): BackgroundWorktreeDescriptor | undefined {
+	if (worktree === undefined || landedUnstaged === undefined) return worktree;
+	return { ...worktree, landedUnstaged };
+}
+
 async function commitPrepared(
 	directory: string,
 	wal: CoderSettlementWal,
+	options?: { landedUnstaged?: boolean },
 ): Promise<CoderSettlementResult> {
 	return withTaskEvidenceTransaction(
 		directory,
@@ -270,6 +285,10 @@ async function commitPrepared(
 						...lockedWal,
 						state: 'COMMITTED',
 						cleanupComplete: lockedWal.worktree === undefined,
+						worktree: withLandedUnstaged(
+							lockedWal.worktree,
+							options?.landedUnstaged,
+						),
 					};
 					await writeWal(walPath(directory, wal.taskId), lockedWal);
 					await appendSettlementEvent(directory, 'settled', lockedWal, {
@@ -290,6 +309,10 @@ async function commitPrepared(
 				...lockedWal,
 				state: 'COMMITTED',
 				cleanupComplete: lockedWal.worktree === undefined,
+				worktree: withLandedUnstaged(
+					lockedWal.worktree,
+					options?.landedUnstaged,
+				),
 			};
 			await writeWal(walPath(directory, wal.taskId), lockedWal);
 			await appendSettlementEvent(directory, 'settled', lockedWal);
@@ -443,6 +466,8 @@ export async function settleCoderDispatch(options: {
 	accepted: boolean;
 	testEngineerExempt: boolean;
 	settlementFailed?: boolean;
+	/** #2508: landed via squash-unstaged — retain the lane branch at cleanup. */
+	landedUnstaged?: boolean;
 }): Promise<CoderSettlementResult> {
 	return withSettlementLock(
 		options.directory,
@@ -464,7 +489,9 @@ export async function settleCoderDispatch(options: {
 				) {
 					throw new Error('CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT');
 				}
-				return commitPrepared(options.directory, wal);
+				return commitPrepared(options.directory, wal, {
+					landedUnstaged: options.landedUnstaged,
+				});
 			}
 			if (wal.state === 'ABORTED') {
 				throw new Error('CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT');
@@ -489,7 +516,9 @@ export async function settleCoderDispatch(options: {
 				dispatchKey(options.directory, options.taskId, options.transitionId),
 			);
 			try {
-				return await commitPrepared(options.directory, prepared);
+				return await commitPrepared(options.directory, prepared, {
+					landedUnstaged: options.landedUnstaged,
+				});
 			} finally {
 				const finalWal = await readWal(filePath, options.taskId);
 				if (finalWal !== null && finalWal.state === 'COMMITTED') {
@@ -772,9 +801,14 @@ async function cleanupRecoveredWorktree(
 	 * shape, the lane BRANCH is intentionally retained as the recovery backup
 	 * for the unstaged bytes — its existence is expected, not residue, and
 	 * must not re-throw CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED forever.
+	 * Defaults from the WAL descriptor's durable landedUnstaged stamp so every
+	 * cleanup pass (completeCoderSettlementCleanup, recovery scans, resume)
+	 * retains consistently; an explicit option overrides.
 	 */
 	options?: { retainBranch?: boolean },
 ): Promise<void> {
+	const retainBranch =
+		options?.retainBranch ?? descriptor.landedUnstaged === true;
 	const branchExists = (): boolean =>
 		_internals.branchExists(directory, descriptor.branchName);
 	const hasResidue = existsSync(descriptor.worktreePath) || branchExists();
@@ -801,12 +835,12 @@ async function cleanupRecoveredWorktree(
 			'success',
 			directory,
 			descriptor.worktreeDir ?? undefined,
-			options?.retainBranch ? { retainBranch: true } : undefined,
+			retainBranch ? { retainBranch: true } : undefined,
 		);
 	}
 	if (
 		existsSync(descriptor.worktreePath) ||
-		(branchExists() && !options?.retainBranch)
+		(branchExists() && !retainBranch)
 	) {
 		throw new Error('CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED');
 	}
@@ -1044,7 +1078,7 @@ export async function recoverCoderSettlement(
 							};
 							await writeWal(filePath, wal);
 						},
-						onMerged: async () => {
+						onMerged: async (mergedResult) => {
 							wal = {
 								...wal,
 								state: 'PREPARED',
@@ -1055,7 +1089,11 @@ export async function recoverCoderSettlement(
 								),
 							};
 							await writeWal(filePath, wal);
-							recovered = await commitPrepared(directory, wal);
+							recovered = await commitPrepared(directory, wal, {
+								// #2508: stamp the landing shape so the WAL's later
+								// cleanup passes retain the lane branch durably.
+								landedUnstaged: mergedResult.strategy === 'squash-unstaged',
+							});
 						},
 					},
 				);

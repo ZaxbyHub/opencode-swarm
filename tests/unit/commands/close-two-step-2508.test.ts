@@ -3,7 +3,10 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { handleCloseCommand } from '../../../src/commands/close/orchestrator';
+import {
+	_closeGateInternals,
+	handleCloseCommand,
+} from '../../../src/commands/close/orchestrator';
 import { closeProjectDb } from '../../../src/db/project-db';
 
 const GIT_TIMEOUT_MS = 10_000;
@@ -177,6 +180,29 @@ describe('#2508 two-step destructive purge for /swarm close', () => {
 		expect(fs.readFileSync(path.join(root, 'a.txt'), 'utf8')).toBe(
 			'user-uncommitted-a\n',
 		);
+	});
+
+	test('git status unreadable: close fails closed without destruction', async () => {
+		const { root } = createCloseFixture('failclosed');
+		await initLedgerFor(root);
+		fs.writeFileSync(path.join(root, 'a.txt'), 'user-uncommitted-a\n');
+
+		const realRunGit = _closeGateInternals.runGit;
+		_closeGateInternals.runGit = () => null;
+		try {
+			const out = await handleCloseCommand(root, [], {});
+			expect(out).toMatch(/fail-closed/);
+			expect(out).toMatch(/Nothing was closed/);
+			// The user's unconsumed work survived the unreadable gate.
+			expect(fs.readFileSync(path.join(root, 'a.txt'), 'utf8')).toBe(
+				'user-uncommitted-a\n',
+			);
+			expect(
+				fs.existsSync(path.join(root, '.swarm', 'pending-purge.json')),
+			).toBe(false);
+		} finally {
+			_closeGateInternals.runGit = realRunGit;
+		}
 	});
 
 	test('clean tree: bare close keeps its single-call behavior', async () => {

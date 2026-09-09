@@ -49,6 +49,13 @@ export interface ClosePurgeGate {
 	candidates: PurgeCandidate[];
 	/** First candidate path (digest anchor for the #2527 primitive). */
 	scopeAnchor: string;
+	/**
+	 * #2508 fail-closed signal: git status could not be read in a repository
+	 * (spawn failure, timeout, or output overflow). The gate cannot prove the
+	 * align stage safe, so the destructive pipeline must be refused — never
+	 * treated as a clean tree.
+	 */
+	gitStatusFailed: boolean;
 }
 
 function runCloseGateGit(args: string[], cwd: string): string | null {
@@ -63,11 +70,17 @@ function runCloseGateGit(args: string[], cwd: string): string | null {
 	return result.stdout ?? '';
 }
 
+/** Test seam for the #2508 gate (simulate git-status read failures). */
+export const _closeGateInternals = { runGit: runCloseGateGit };
+
 export function evaluateClosePurgeGate(
 	directory: string,
 	swarmDir: string,
 ): ClosePurgeGate {
-	const statusOutput = runCloseGateGit(['status', '--porcelain'], directory);
+	const statusOutput = _closeGateInternals.runGit(
+		['status', '--porcelain'],
+		directory,
+	);
 	const dirtyPaths: string[] = [];
 	if (statusOutput !== null) {
 		for (const line of statusOutput.split('\n')) {
@@ -77,7 +90,16 @@ export function evaluateClosePurgeGate(
 			// that `git reset --hard` + `checkout -- .` would discard.
 			if (line.startsWith('??')) continue;
 			const filePath = line.slice(3).trim().replace(/^"|"$/g, '');
-			if (filePath) dirtyPaths.push(filePath);
+			if (!filePath) continue;
+			// #2508: porcelain renames ('R  old -> new') put BOTH sides at
+			// risk — list each side so the preview and digest stay exact.
+			if (line.startsWith('R') && filePath.includes(' -> ')) {
+				for (const side of filePath.split(' -> ')) {
+					if (side) dirtyPaths.push(side);
+				}
+			} else {
+				dirtyPaths.push(filePath);
+			}
 		}
 	}
 	const candidates: PurgeCandidate[] = dirtyPaths.map((p) => ({
@@ -101,6 +123,9 @@ export function evaluateClosePurgeGate(
 		dirtyPaths,
 		candidates,
 		scopeAnchor: candidates[0]?.path ?? directory,
+		// A repo whose status cannot be read is never "clean" — fail closed.
+		gitStatusFailed:
+			statusOutput === null && fsSync.existsSync(path.join(directory, '.git')),
 	};
 }
 
@@ -218,6 +243,12 @@ export async function handleCloseCommand(
 		? confirmArg.slice('--confirm='.length)
 		: undefined;
 	const purgeGate = evaluateClosePurgeGate(directory, swarmDir);
+	// #2508 fail-closed: without a readable git status the gate cannot prove
+	// the align stage safe. Refuse the destructive pipeline outright — a
+	// measurement that cannot be taken must never read as "clean tree".
+	if (purgeGate.gitStatusFailed) {
+		return `🛑 /swarm close aborted (fail-closed): git status could not be read in ${directory}, so the destructive-purge gate cannot verify uncommitted tracked work. Nothing was closed, archived, or destroyed. Ensure git is available and the repository is readable, then re-run /swarm close.`;
+	}
 	if (confirmToken !== undefined) {
 		const verdict = consumeConfirmToken(
 			purgeGate.scopeAnchor,

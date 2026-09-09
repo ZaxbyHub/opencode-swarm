@@ -5209,7 +5209,7 @@ export function createDelegationGateHook(
 									provenance,
 									observedFiles: observedForMerge,
 								}),
-							onMerged: async () => {
+							onMerged: async (merged) => {
 								const result = await settleCoderDispatch({
 									directory,
 									taskId:
@@ -5221,6 +5221,10 @@ export function createDelegationGateHook(
 											?.declaredFiles,
 										observedForMerge,
 									),
+									// #2508: stamp the landing shape on the WAL so the
+									// later completeCoderSettlementCleanup pass retains
+									// the lane branch instead of deleting it as residue.
+									landedUnstaged: merged.strategy === 'squash-unstaged',
 								});
 								coderSettlementEvidence = result.evidence;
 								coderSettlementCommitted = true;
