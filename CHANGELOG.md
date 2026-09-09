@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.172.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.2...v7.172.3) (2026-09-09)
+
+
+### Bug Fixes
+
+* **pr-review:** typed liveness terminal class for accepted-then-dead, stale and cancelled lanes (issue [#2615](https://github.com/ZaxbyHub/opencode-swarm/issues/2615)) ([3ea01cb](https://github.com/ZaxbyHub/opencode-swarm/commit/3ea01cbc736234f34957ffb16f24c24bcc5d8ca7))
+* **pr-review:** typed liveness terminal class for accepted-then-dead, stale and cancelled lanes (issue [#2615](https://github.com/ZaxbyHub/opencode-swarm/issues/2615)) ([283b019](https://github.com/ZaxbyHub/opencode-swarm/commit/283b019772100744dc5b538f44c4434f74948396))
+
 ## [7.172.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.172.1...v7.172.2) (2026-09-09)
 
 
