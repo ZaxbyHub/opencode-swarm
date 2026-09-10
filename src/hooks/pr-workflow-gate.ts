@@ -1785,10 +1785,41 @@ export type SubmitPrReviewResultOutcome =
 	| { status: 'rejected'; reason: string };
 
 /**
+ * Issue #2585 (AC13): a lane is TERMINAL-UNAVAILABLE with the typed liveness
+ * class when its durable status is one of the unavailability terminals AND the
+ * #2615 producers' 'liveness' stamp is present (the collect-path cancel settle
+ * writes terminalResult.result.workflowLaneFailureClass; the stale sweep and
+ * the Task-side idle-stale flip write result.workflowLaneFailureClass). This
+ * is record-state-gated only — never time-based — so an alive-but-slow child
+ * (non-terminal lane) never admits the architect-parent repair lever.
+ */
+function isLivenessTerminalLaneRecord(
+	record: BackgroundDelegationRecord,
+): boolean {
+	if (
+		record.status !== 'cancelled' &&
+		record.status !== 'stale' &&
+		record.status !== 'error'
+	) {
+		return false;
+	}
+	return (
+		record.terminalResult?.result.workflowLaneFailureClass === 'liveness' ||
+		record.result?.workflowLaneFailureClass === 'liveness'
+	);
+}
+
+/**
  * Publish one structured base/micro discovery result from the exact child
  * session that owns the live delegation. Lock order is deliberately
  * workflow-session -> delegation-evidence; clear/abort takes the same outer
  * lock and terminalization takes the same inner lock.
+ *
+ * Issue #2585 (AC13): when the child died before submitting (a
+ * liveness-terminal lane per the #2615 typed producers), the lane's
+ * DISPATCHING parent session may land exactly one repair receipt; the receipt
+ * stays child-bound and carries architect provenance. Every other session
+ * keeps the frozen exact-child refusal.
  */
 export async function submitPrReviewResult(
 	directory: string,
@@ -1824,14 +1855,51 @@ export async function submitPrReviewResult(
 			(record.mode === 'swarm-pr-review:base' ||
 				record.mode === 'swarm-pr-review:micro'),
 	);
+	// Issue #2585 (AC13): when the exact-child filter would reject, attempt
+	// architect-PARENT repair resolution first. The invoker may be the lane's
+	// DISPATCHING PARENT (record.parentSessionId, written at dispatch as the
+	// dispatching session per dispatch-lanes) landing a receipt for a lane whose
+	// child died before submitting. The lever is strictly record-state-gated
+	// onto liveness-terminal lanes (the #2615 typed producers' stamps) — never
+	// time-based — and requires EXACTLY ONE candidate; anything else falls
+	// through to the unchanged closed-door refusal below.
+	let repairRecord: BackgroundDelegationRecord | null = null;
 	if (preliminary.length !== 1) {
-		return {
-			status: 'rejected',
-			reason: `expected one exact child delegation, found ${preliminary.length}`,
-		};
+		const repairCandidates = childRead.records.filter(
+			(candidate) =>
+				candidate.parentSessionId === child &&
+				(candidate.mode === 'swarm-pr-review:base' ||
+					candidate.mode === 'swarm-pr-review:micro') &&
+				(input.batchId === undefined || input.batchId === candidate.batchId) &&
+				(input.laneId === undefined || input.laneId === candidate.laneId) &&
+				isLivenessTerminalLaneRecord(candidate),
+		);
+		if (repairCandidates.length !== 1) {
+			return {
+				status: 'rejected',
+				reason: `expected one exact child delegation, found ${preliminary.length}`,
+			};
+		}
+		repairRecord = repairCandidates[0];
+		// Issue #2585 review (PRR-003): the repair lever records the TRUTHFUL
+		// unresolved-terminal state of a lane whose child died before
+		// submitting. A CLEAN/FINDINGS outcome would assert coverage the dead
+		// child never produced, so the gate refuses it here, at selection,
+		// rather than letting the record settle under a misleading terminal
+		// disposition downstream.
+		if (parsedResult.data.outcome !== 'INCOMPLETE') {
+			return {
+				status: 'rejected',
+				reason:
+					'architect-parent repair may only record an unresolved-terminal (INCOMPLETE) outcome',
+			};
+		}
 	}
-	const parentSessionId = preliminary[0].parentSessionId;
-	const record = preliminary[0];
+	const parentSessionId = (repairRecord ?? preliminary[0]).parentSessionId;
+	const record = repairRecord ?? preliminary[0];
+	// On the repair path the invoker is the parent, so every child-bound surface
+	// below must name the DEAD CHILD's session, never the invoker.
+	const childOfRecord = record.subagentSessionId;
 	if (!record.batchId || !record.laneId) {
 		return {
 			status: 'rejected',
@@ -1883,6 +1951,17 @@ export async function submitPrReviewResult(
 		if (dispatchWorkflowInstanceId !== state.workflowInstanceId) {
 			return { status: 'rejected', reason: 'stale workflow instance binding' };
 		}
+		// Issue #2585 review (PRR-002): the repair lever is generation-bound too.
+		// A liveness-terminal record dispatched by a SUPERSEDED generation of
+		// this same instance must be refused here, with a typed reason naming
+		// the generation, instead of being selected above and reaching the
+		// publisher only to fail with the masked immutable-identity reason.
+		if (repairRecord && dispatchWorkflowRevision !== state.revision) {
+			return {
+				status: 'rejected',
+				reason: `superseded workflow generation binding (delegation generation ${dispatchWorkflowRevision}, active generation ${state.revision})`,
+			};
+		}
 		// Publication performs the authoritative exact-identity/state recheck while
 		// holding the delegation-evidence lock. Reuse the discovery snapshot here
 		// instead of scanning the durable ledger a third time.
@@ -1923,6 +2002,9 @@ export async function submitPrReviewResult(
 			semanticEnvelopeDigest,
 			outcome: parsedResult.data.outcome,
 			...(existingReceiptDigest !== undefined ? { existingReceiptDigest } : {}),
+			// Issue #2585 (AC13): architect provenance rides the reducer event so
+			// ledger-only consumers see the parent-submitted repair.
+			...(repairRecord ? { submittedBy: 'workflow_parent' as const } : {}),
 		});
 		if (submission.status === 'rejected') {
 			return {
@@ -1935,12 +2017,16 @@ export async function submitPrReviewResult(
 		}
 		const published = await publishPrReviewResultReceipt(directory, {
 			parentSessionId,
-			childSessionId: child,
+			childSessionId: childOfRecord,
 			batchId,
 			laneId,
 			expectedWorkflowInstanceId: state.workflowInstanceId,
 			expectedWorkflowRevision: dispatchWorkflowRevision,
 			expectedBaseSha: state.prReviewBaseSha,
+			// Issue #2585 (AC13): the repair marker admits publication onto this
+			// liveness-terminal lane ONLY for this parent-submitted receipt; the
+			// publisher re-verifies the typed liveness class under its own lock.
+			...(repairRecord ? { parentRepair: true } : {}),
 			receipt: {
 				schemaVersion: 1,
 				mode: record.mode,
@@ -1953,10 +2039,19 @@ export async function submitPrReviewResult(
 				baseSha: state.prReviewBaseSha,
 				headSha: state.prHeadSha,
 				dispatchRevisionDigest: input.revisionDigest,
-				childSessionId: child,
+				childSessionId: childOfRecord,
 				generation: record.generation ?? 1,
 				semanticEnvelopeDigest,
 				envelope: parsedResult.data,
+				// Issue #2585 (AC13): architect-parent repair provenance. Additive
+				// optional fields — child-submitted receipts are byte-unchanged.
+				...(repairRecord
+					? {
+							submittedBy: 'workflow_parent' as const,
+							submittedByParentSessionId: parentSessionId,
+							laneTerminalStateAtSubmission: record.status,
+						}
+					: {}),
 			},
 		});
 		if (published.status === 'recorded' || published.status === 'duplicate') {

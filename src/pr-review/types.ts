@@ -203,6 +203,14 @@ export type PrReviewEvent =
 			semanticEnvelopeDigest: string;
 			outcome: 'CLEAN' | 'FINDINGS' | 'INCOMPLETE';
 			existingReceiptDigest?: string | undefined;
+			/**
+			 * Provenance marker on the reducer event. Currently no consumer reads
+			 * this field — the durable provenance record is the receipt-side
+			 * `submittedBy` / `submittedByParentSessionId` (see
+			 * `PrReviewResultReceiptSchema`). Kept for ledger parity with the
+			 * receipt.
+			 */
+			submittedBy?: 'workflow_parent' | undefined;
 	  }
 	// --- circuit ------------------------------------------------------------
 	| {

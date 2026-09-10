@@ -482,6 +482,17 @@ export const PrReviewResultReceiptSchema = z
 		generation: z.number().int().positive().max(1_000_000),
 		semanticEnvelopeDigest: PrReviewResultDigestSchema,
 		envelope: PrReviewLaneResultEnvelopeSchema,
+		/**
+		 * Issue #2585 (AC13): architect-parent repair provenance. Present ONLY
+		 * when the lane's dispatching parent session (not the dead child)
+		 * submitted this receipt for a liveness-terminal lane. Additive and
+		 * optional — every existing child-submitted receipt is unaffected.
+		 */
+		submittedBy: z.literal('workflow_parent').optional(),
+		/** The dispatching parent session that exercised the repair lever. */
+		submittedByParentSessionId: z.string().trim().min(1).max(256).optional(),
+		/** The lane's terminal delegation status at repair-submission time. */
+		laneTerminalStateAtSubmission: z.string().trim().min(1).max(64).optional(),
 	})
 	.strict()
 	.superRefine((value, ctx) => {

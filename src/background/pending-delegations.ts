@@ -3560,6 +3560,14 @@ export type PublishPrReviewResultReceiptOutcome =
  * still live. The workflow gate performs the outer session-state validation;
  * this inner transaction rechecks immutable delegation identity under the
  * evidence lock and provides semantic exactly-once behavior.
+ *
+ * Issue #2585 (AC13): `parentRepair` marks an architect-PARENT submission for
+ * a lane whose child died before submitting. It NEVER widens child
+ * authentication by itself — the terminal-state gate below still requires the
+ * authoritative under-lock recheck to observe a liveness-terminal record
+ * (cancelled/stale/error carrying the #2615 typed liveness failure class), so
+ * a child submission onto a terminal record fails exactly as before and a
+ * parent marker onto any other terminal shape still refuses.
  */
 export async function publishPrReviewResultReceipt(
 	directory: string,
@@ -3572,6 +3580,8 @@ export async function publishPrReviewResultReceipt(
 		expectedWorkflowRevision: number;
 		expectedBaseSha: string;
 		receipt: PrReviewResultReceipt;
+		/** Issue #2585 AC13: architect-parent repair submission marker. */
+		parentRepair?: boolean;
 	},
 ): Promise<PublishPrReviewResultReceiptOutcome> {
 	const parsed = PrReviewResultReceiptSchema.safeParse(input.receipt);
@@ -3619,11 +3629,26 @@ export async function publishPrReviewResultReceipt(
 					return;
 				}
 				if (current.status !== 'pending' && current.status !== 'running') {
-					outcome = {
-						status: 'terminal',
-						reason: `delegation is already ${current.status}`,
-					};
-					return;
+					// Issue #2585 (AC13): the architect-parent repair lever may
+					// publish onto a liveness-terminal lane ONLY when the submission
+					// carries the parent-repair marker AND the authoritative
+					// under-lock read still observes the typed liveness class — the
+					// marker alone never admits a terminal publication.
+					const livenessTerminalForParentRepair =
+						input.parentRepair === true &&
+						(current.status === 'cancelled' ||
+							current.status === 'stale' ||
+							current.status === 'error') &&
+						(current.terminalResult?.result.workflowLaneFailureClass ===
+							'liveness' ||
+							current.result?.workflowLaneFailureClass === 'liveness');
+					if (!livenessTerminalForParentRepair) {
+						outcome = {
+							status: 'terminal',
+							reason: `delegation is already ${current.status}`,
+						};
+						return;
+					}
 				}
 				const owned = current.ownedWorkflowLanes?.length
 					? current.ownedWorkflowLanes

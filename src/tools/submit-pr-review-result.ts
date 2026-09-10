@@ -51,7 +51,7 @@ export async function executeSubmitPrReviewResult(
 export const submit_pr_review_result: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Submit exactly one typed CLEAN, FINDINGS, or INCOMPLETE result for the active child-bound PR-review base/micro lane. The authenticated child session identifies its exact delegation and supplies authoritative batch/lane provenance; optional batchId/laneId values are checked when present. The receipt is atomically bound to the child session, workflow instance, revision, batch, lane, root, base, and head. Identical replay is idempotent; conflicting or late submissions fail closed. Call once, then stop.',
+			"Submit exactly one typed CLEAN, FINDINGS, or INCOMPLETE result for the active child-bound PR-review base/micro lane. The authenticated child session identifies its exact delegation and supplies authoritative batch/lane provenance; optional batchId/laneId values are checked when present. The receipt is atomically bound to the child session, workflow instance, revision, batch, lane, root, base, and head. Identical replay is idempotent; conflicting or late submissions fail closed. Exception (issue #2585): when a lane's child is terminally unavailable (cancelled, stale, or liveness-error), the lane's dispatching parent session may submit one repair receipt for that lane; the receipt records the architect provenance and stays bound to the dead child session. Every other session is still refused. Call once, then stop.",
 		args: {
 			schemaVersion: SubmitPrReviewResultArgsSchema.shape.schemaVersion,
 			batchId: SubmitPrReviewResultArgsSchema.shape.batchId,
