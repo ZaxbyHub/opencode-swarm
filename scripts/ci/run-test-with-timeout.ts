@@ -13,6 +13,8 @@
 
 import { fileURLToPath } from "node:url";
 
+const PROCESS_KILLER_TIMEOUT_MS = 5_000;
+
 function parseArgs(argv: string[]): {
 	filePath: string;
 	passthroughArgs: string[];
@@ -69,12 +71,14 @@ async function main(): Promise<void> {
 
 	// Spawn child with detached:true so process-group kill works on Unix.
 	// On Windows, detached ensures taskkill /T /F can target the process tree.
-	const child = Bun.spawn(["bun", ...childArgs], {
-		detached: true,
-		stdin: "ignore",
-		stdout: "inherit",
-		stderr: "inherit",
-	});
+  const child = Bun.spawn(["bun", ...childArgs], {
+    cwd: process.cwd(),
+    detached: true,
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+    timeout: killTimeoutMs,
+  });
 
 	let killTimer: Timer | null = null;
 	let resolveTimeoutExit: ((exitCode: number) => void) | null = null;
@@ -86,12 +90,31 @@ async function main(): Promise<void> {
 		timedOut = true;
 		try {
 			if (process.platform === "win32") {
-				// taskkill /T /F /PID kills the entire process tree on Windows
-				const killer = Bun.spawn(
-					["taskkill", "/T", "/F", "/PID", String(child.pid!)],
-					{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
-				);
-				await killer.exited;
+                // taskkill /T /F /PID kills the entire process tree on Windows
+                const killer = Bun.spawn(
+                  ["taskkill", "/T", "/F", "/PID", String(child.pid!)],
+                    {
+                      cwd: process.cwd(),
+                      stdin: "ignore",
+                      stdout: "ignore",
+                      stderr: "ignore",
+                      timeout: PROCESS_KILLER_TIMEOUT_MS,
+                    },
+                  );
+                try {
+                  await Promise.race([
+                    killer.exited,
+                    new Promise<number>((resolve) =>
+                      setTimeout(() => resolve(1), PROCESS_KILLER_TIMEOUT_MS),
+                    ),
+                  ]);
+                } finally {
+                  try {
+                    killer.kill("SIGKILL");
+                  } catch {
+                    // The taskkill process may have already exited.
+                  }
+                }
 			} else {
 				// Negative PID sends SIGKILL to the entire process group (requires detached:true)
 				process.kill(-child.pid!, "SIGKILL");
@@ -113,9 +136,14 @@ async function main(): Promise<void> {
 		rawExitCode = await Promise.race([child.exited, timeoutExit]);
 	} catch {
 		rawExitCode = timedOut ? 124 : 1;
-	} finally {
-		if (killTimer) clearTimeout(killTimer);
-	}
+  } finally {
+    if (killTimer) clearTimeout(killTimer);
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // The child may have already exited.
+    }
+  }
 
 	const endTime = new Date();
 	const durationMs = endTime.getTime() - startTime.getTime();

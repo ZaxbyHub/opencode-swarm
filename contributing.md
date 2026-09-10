@@ -70,6 +70,52 @@ bun run build
 bun test tests/smoke --timeout 120000
 ```
 
+### Canonical repository-validation command (issue #2675)
+
+The CI-equivalent entry point is the shared, bounded repository-validation
+authority. It runs every supported surface in inventory order and persists a
+schema-versioned report under `.swarm/`:
+
+```bash
+# Complete repository matrix
+bun run validate:repo -- --mode full --diff-base origin/main
+
+# Changed-work matrix; no discovered work reports no_op, not passed
+bun run validate:repo -- --mode diff --diff-base origin/main
+```
+
+In diff mode, selection is based on committed branch changes in
+`<diff-base>...HEAD`; unstaged and untracked work is excluded. The complete inventory is:
+`quality`, `unit`, `integration`, `security`,
+`coverage`, `memory-recall-regression`, `package-check`, `smoke`,
+`php-validation`, and `rust-sandbox-runner`. Each report has
+`schemaVersion: 1`, runtime metadata (`bunVersion`, `platform`, `arch`), the
+exact array-form command and cwd for each item, the `origin/main` diff base,
+per-item terminal status, bounded output, timing, signal, and cleanup outcome.
+Terminal statuses are `passed`, `failed`, `crashed`, `timed_out`, `missing`,
+and `skipped`; a run containing an unresolved crash, timeout, missing item, or
+skip is `incomplete` rather than a complete pass. Run-level statuses are
+`passed`, `failed`, `incomplete`, and `no_op`, with `no_op` reserved for an
+empty diff selection.
+
+Use repeatable `--surface <name>` or comma-separated `--surfaces <name,...>`
+for a deliberate subset; omitting both runs the full ten-surface matrix. An
+unavailable required runtime produces a `skipped` item with a reason and an
+`incomplete` run (nonzero exit), including in full-matrix mode; missing tools
+must not be reported as a pass.
+
+Validation bounds are fixed by default at 120000 ms for each test process,
+180000 ms per item, 900000 ms for the whole run, and 65536 bytes per output
+channel after redaction. Test argv uses the keepalive preload
+`scripts/ci/bun-32056-keepalive.ts`, and file paths remain individual argv
+tokens so quoted or spaced paths are reproduced exactly.
+
+The historical `659/3,389` count is an unconfirmed historical count: the raw
+per-item output and provenance were not retained, so that figure cannot be
+used as current reproducible evidence. New validation reports retain the
+bounded raw evidence needed to distinguish pass, failure, crash, timeout,
+missing, and skip.
+
 Fix any failures before proceeding. If a test failure is pre-existing and unrelated to your changes, note it in the PR description but do not skip the other tiers.
 
 ### 5. Push and open a PR

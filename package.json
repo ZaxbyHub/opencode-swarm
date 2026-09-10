@@ -98,6 +98,7 @@
 		"lint": "biome lint .",
 		"lint:ci": "biome ci .",
 		"test:unit:ci": "bun scripts/ci/run-unit-tests-local.ts",
+		"validate:repo": "bun scripts/ci/repository-validation.ts",
 		"drift:check": "bun run scripts/drift-check.ts",
 		"check:pre-push": "bun run scripts/drift-check.ts --enforce --no-report && bun run check:registry-citations",
 		"schema:generate": "bun run scripts/generate-config-schema.ts",

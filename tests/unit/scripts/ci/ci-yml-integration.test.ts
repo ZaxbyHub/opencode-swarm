@@ -72,8 +72,8 @@ function extractIntegrationTestsStep(yml: string): string {
 }
 
 function extractIntegrationFindCommand(step: string): string {
-	const match = step.match(/^\s*find tests\/integration test[^\n]*$/m);
-	return match ? match[0].trim() : '';
+	const matches = step.match(/^\s*find (?:tests\/integration|test) [^\n]*$/gm);
+	return matches ? matches.map((line) => line.trim()).join('\n') : '';
 }
 
 function extractUnitFlakeAnnotationsUploadStep(yml: string): string {
@@ -92,21 +92,25 @@ function extractCoverageFlakeAnnotationsUploadStep(yml: string): string {
 	return match ? match[0] : '';
 }
 
-describe('ci.yml integration — Task 1.2 wrapper script structural validation', () => {
+describe('ci.yml integration — shared repository-validation authority', () => {
 	const yml = readFileSync(CI_YML_PATH, 'utf8');
 	const step = extractRunUnitTestsStep(yml);
 	const collectStep = extractCollectAndPartitionStep(yml);
 
-	test('"Run unit tests" step calls the wrapper script', () => {
-		expect(step).toContain('bun scripts/ci/run-test-with-timeout.ts');
+	test('"Run unit tests" step calls the shared authority', () => {
+		expect(step).toContain('bun scripts/ci/repository-validation.ts');
 	});
 
-	test('"Run unit tests" step includes --kill-timeout 180', () => {
-		expect(step).toContain('--kill-timeout 180');
+	test('"Run unit tests" step includes the 180000 ms kill timeout', () => {
+		expect(step).toContain('--kill-timeout 180000');
+		expect(step.match(/--kill-timeout 180000/g)?.length).toBe(2);
 	});
 
-	test('"Run unit tests" step preserves error detection with grep -qE', () => {
-		expect(step).toContain('grep -qE');
+	test('"Run unit tests" step verifies bounded JSON reports', () => {
+		expect(step).toContain(
+			'bun scripts/ci/verify-repository-validation-reports.ts',
+		);
+		expect(step).not.toContain('grep -qE');
 	});
 
 	test('"Run unit tests" step surfaces bounded issue evidence receipts', () => {
@@ -117,6 +121,38 @@ describe('ci.yml integration — Task 1.2 wrapper script structural validation',
 
 	test('"Run unit tests" step preserves shard file list mechanism', () => {
 		expect(step).toContain('shard-tests.txt');
+	});
+
+	test('unit discovery publishes an independent canonical inventory and shard manifest', () => {
+		expect(collectStep).toContain("git ls-files -z -- '*.test.ts'");
+		expect(collectStep).toContain('canonical-all-tests.txt');
+		expect(collectStep).toContain('cmp -s');
+		expect(collectStep).toContain('unit-inventory.txt');
+		expect(collectStep).toContain('unit-shard-${SHARD}-expected-files.txt');
+	});
+
+	test('unit discovery creates the validation directory before copying manifests', () => {
+		const mkdirIndex = collectStep.indexOf(
+			'mkdir -p .swarm/repository-validation',
+		);
+		const inventoryCopyIndex = collectStep.indexOf(
+			'cp "$tmpdir/gated-tests.txt"',
+		);
+		expect(mkdirIndex).toBeGreaterThanOrEqual(0);
+		expect(inventoryCopyIndex).toBeGreaterThan(mkdirIndex);
+	});
+
+	test('unit-passed verifies reports on a fresh checkout with pinned Bun', () => {
+		const unitPassed =
+			yml.match(
+				/\n {2}unit-passed:[\s\S]*?(?=\n {2}[A-Za-z][\w-]*:|$(?![\s\S]))/m,
+			)?.[0] ?? '';
+		expect(unitPassed).toContain('actions/checkout@');
+		expect(unitPassed).toContain('oven-sh/setup-bun@');
+		expect(unitPassed).toContain('bun-version: "1.3.13"');
+		expect(unitPassed).toContain('bun install --frozen-lockfile');
+		expect(unitPassed).toContain('--inventory-file unit-inventory.txt');
+		expect(unitPassed).not.toContain('needs.detect-');
 	});
 
 	test('"Run unit tests" step tolerates empty quarantine files', () => {
@@ -167,6 +203,11 @@ describe('ci.yml parser helpers — CRLF normalization', () => {
 describe('ci.yml integration — integration quarantine extraction', () => {
 	const yml = readFileSync(CI_YML_PATH, 'utf8');
 	const step = extractIntegrationTestsStep(yml);
+	const findCommand = extractIntegrationFindCommand(step);
+
+	test('"Integration tests" step uses the shared CLI kill-timeout units', () => {
+		expect(step.match(/--kill-timeout 180000/g)?.length).toBe(2);
+	});
 
 	test('"Integration tests" step tolerates empty quarantine files', () => {
 		expect(step).toContain(
@@ -176,7 +217,7 @@ describe('ci.yml integration — integration quarantine extraction', () => {
 
 	test('"Integration tests" step surfaces bounded issue evidence receipts', () => {
 		expect(step).toMatch(
-			/if \[ \$exit_code -eq 0 \]; then\s+# Match the unit wrapper's[\s\S]*?grep -E "\^\\\[ISSUE-\[0-9\]\+\(-\[A-Z0-9-\]\+\)\?-EVIDENCE\\\]" "\$tmp" \|\| true\s+fi/,
+			/if \[ \$exit_code -eq 0 \]; then\s+# Match the shared authority's[\s\S]*?grep -E "\^\\\[ISSUE-\[0-9\]\+\(-\[A-Z0-9-\]\+\)\?-EVIDENCE\\\]" "\$tmp" \|\| true\s+fi/,
 		);
 	});
 });
@@ -190,9 +231,8 @@ describe('ci.yml integration — recursive corpus discovery (issue #2552)', () =
 		// These exact basenames live below tests/integration/lang/. Pinning their
 		// paths against the actual find command catches a regression where a
 		// shallow discovery change silently leaves both files out of merge-queue CI.
-		expect(findCommand).toBe(
-			`find tests/integration test -name '*.test.ts' -type f | sort > "$tmpdir/int-all-tests.txt"`,
-		);
+		expect(step).toContain("find tests/integration -name '*.test.ts' -type f");
+		expect(step).toContain("find test -name '*.test.ts' -type f");
 		for (const relativePath of REQUIRED_RECURSIVE_INTEGRATION_TESTS) {
 			expect(existsSync(join(REPO_ROOT, relativePath))).toBe(true);
 			expect(relativePath.startsWith('tests/integration/')).toBe(true);
