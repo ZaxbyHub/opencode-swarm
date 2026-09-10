@@ -16,6 +16,7 @@ import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import { getDiagnoseData } from '../../../src/services/diagnose-service';
 import { resetSwarmState } from '../../../src/state';
 import { _internals as settlementInternals } from '../../../src/workflow/coder-settlement';
+import { classifySettlementWalState } from '../../../src/workflow/task-recovery-status';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 import { freezeClock } from '../../helpers/test-clock';
@@ -190,12 +191,27 @@ describe('diagnose settlement categories (issue #2665)', () => {
 		expect(detail).toContain('/swarm recover 1.1');
 		expect(detail).toContain('task 1.2 [corrupt]');
 		// The corrupt task's own segment must not suggest /swarm recover
-		// (segments mirror how the row renders: '; '-separated per task).
+		// (segments mirror how the row renders: '; '-separated per task)…
 		const corruptSegment = detail
 			.split('; ')
 			.find((segment) => segment.includes('task 1.2'));
 		expect(corruptSegment).toBeDefined();
 		expect(corruptSegment).not.toMatch(/\/swarm\s+recover/);
+		// …and the classifier's corrupt suggested command is asserted DIRECTLY
+		// (implementation-review round 1: the segment split alone is weak to a
+		// leak into the command field because the corrupt explanation itself
+		// contains '; ').
+		const corruptCommand = classifySettlementWalState(
+			{
+				taskId: '1.2',
+				state: 'unreadable',
+				ownedInProcess: false,
+				ownedByLiveForeignPid: false,
+			},
+			null,
+		).suggestedNextCommand;
+		expect(corruptCommand).toContain('inspect');
+		expect(corruptCommand).not.toMatch(/\/swarm\s+recover/);
 		expect(detail).toContain('task 1.3 [ambiguous]');
 		expect(detail).toContain('live foreign process');
 	}, 60_000);

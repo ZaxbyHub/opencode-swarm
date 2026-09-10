@@ -57,25 +57,6 @@ export const RECOVERY_INVOCATIONS: readonly RecoveryInvocationForm[] = [
 	},
 ] as const;
 
-/** Meaning of each task-recovery status category (runbook glossary source). */
-export const RECOVERY_CATEGORY_GLOSSARY: Readonly<Record<string, string>> = {
-	missing:
-		'No durable receipt exists for the task yet (no settlement WAL, no evidence workflow) — nothing to repair; dispatch normally and re-check.',
-	stale:
-		'A settlement WAL names an owning transition whose process is gone — deterministic repair via /swarm recover is allowed and idempotent.',
-	ambiguous:
-		'Another process (or this process) may still own the dispatch — the external effect stays uncertain; close that instance or wait, never force a foreign owner.',
-	corrupt:
-		'The durable receipt is unparseable — recovery refuses corrupt facts instead of rewriting them; inspect the file and reconcile manually via the runbook.',
-	live_wedge:
-		'The task settled but its Stage A receipt is missing while green post-settlement pre-check proof exists — deterministically repaired by /swarm recover without re-running the coder or editing evidence.',
-	healthy: 'Terminal receipts agree with the workflow state — nothing to do.',
-} as const;
-
-/** Where deterministic repair ends and human reconciliation begins. */
-export const RECOVERY_BOUNDARY_NOTE =
-	'Deterministic repair (dead-owner settlement recovery, wedged Stage A repair) only rewrites local durable state the receipts already justify; it never resolves an external side effect. A live foreign dispatch, an unattributable worktree (CODER_SETTLEMENT_RECOVERY_UNCERTAIN), or a late completion after --force stays uncertain even when local state is repaired — those need a human to reconcile against the other process or provider.';
-
 /** One-line per-shell quick forms for operator-facing output surfaces. */
 export function renderRecoveryInvocationQuickForms(
 	docPath: string = RECOVERY_RUNBOOK_DOC_PATH,
