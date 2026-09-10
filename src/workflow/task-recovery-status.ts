@@ -12,6 +12,7 @@
  */
 
 import type { TaskEvidence, TaskWorkflowSnapshot } from '../gate-evidence.js';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import type { CoderSettlementWalState } from './coder-settlement.js';
 
 export type TaskRecoveryCategory =
@@ -43,7 +44,8 @@ function identitySuffix(status: {
 	generation?: number;
 }): string {
 	const parts: string[] = [];
-	if (status.transitionId) parts.push(`transition ${status.transitionId}`);
+	if (status.transitionId)
+		parts.push(`transition ${sanitizeDiagnosticText(status.transitionId)}`);
 	if (typeof status.generation === 'number')
 		parts.push(`generation ${status.generation}`);
 	return parts.length > 0 ? ` (${parts.join(', ')})` : '';

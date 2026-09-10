@@ -105,9 +105,11 @@ async function writeGreenBundles(directory: string): Promise<void> {
 }
 
 describe('diagnose settlement categories (issue #2665)', () => {
-	// Deterministic fixture instant (explicit-arg Date constructor where possible;
-	// freezeClock pins the Date.now-derived fixture timestamps below so the
-	// recency math in scanStageATask is reproducible under coverage runs).
+	// Deterministic fixture instant. The frozen clock's toISOString mock makes
+	// Date-derived timestamps collapse onto FIXED_NOW_ISO, so the settlement
+	// recordedAt below is an EXPLICIT string 60s before it - that keeps the
+	// recency boundary in scanStageATask (bundle ts must be >= settledAfter)
+	// meaningful instead of comparing FIXED_NOW_ISO with itself.
 	const FIXED_NOW_ISO = '2026-09-09T12:00:00.000Z';
 	let restoreClock: (() => void) | null = null;
 	let directory = '';
@@ -234,7 +236,7 @@ describe('diagnose settlement categories (issue #2665)', () => {
 			state: 'COMMITTED',
 			transitionId: 'coder:setup-2.1',
 			accepted: true,
-			recordedAt: new Date(Date.now() - 60_000).toISOString(),
+			recordedAt: '2026-09-09T11:59:00.000Z',
 		});
 		await writeGreenBundles(directory);
 		// 3.1: healthy terminal receipt.

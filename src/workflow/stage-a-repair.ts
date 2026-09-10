@@ -4,13 +4,17 @@ import { isSecretscanEvidence, loadEvidence } from '../evidence/manager.js';
 import {
 	getTaskWorkflowSnapshot,
 	readTaskEvidence,
+	type TaskEvidence,
 	transitionTaskWorkflowEvidence,
 } from '../gate-evidence.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import * as logger from '../utils/logger.js';
 import { isStrictTaskId } from '../validation/task-id.js';
-import { listCoderSettlementWalStates } from './coder-settlement.js';
+import {
+	type CoderSettlementWalState,
+	listCoderSettlementWalStates,
+} from './coder-settlement.js';
 import {
 	classifyEvidenceRecoveryTask,
 	type TaskRecoveryStatus,
@@ -198,16 +202,18 @@ async function enumerateStageACandidates(
 
 /** Per-task scan verdict shared by the read-only scan and the repair. */
 type StageATaskScan =
-	| { kind: 'not_wedged'; state: string }
+	| { kind: 'not_wedged'; state: string; evidence: TaskEvidence | null }
 	| {
 			kind: 'not_green';
 			reason: 'no_pre_check_bundles' | 'pre_check_failed_or_stale';
+			evidence: TaskEvidence | null;
 	  }
 	| {
 			kind: 'repairable';
 			generation: number;
 			green: boolean;
 			predecessorTransitionId: string | null;
+			evidence: TaskEvidence | null;
 	  };
 
 /**
@@ -219,35 +225,36 @@ type StageATaskScan =
 async function scanStageATask(
 	directory: string,
 	taskId: string,
+	walStates: readonly CoderSettlementWalState[],
 ): Promise<StageATaskScan> {
 	const evidence = await readTaskEvidence(directory, taskId);
 	const workflow = getTaskWorkflowSnapshot(evidence);
 	if (workflow.state !== 'coder_delegated') {
-		return { kind: 'not_wedged', state: workflow.state };
+		return { kind: 'not_wedged', state: workflow.state, evidence };
 	}
 	if (evidence?.gates?.pre_check) {
-		return { kind: 'not_wedged', state: workflow.state };
+		return { kind: 'not_wedged', state: workflow.state, evidence };
 	}
+	// The caller supplies ONE settlement-WAL listing per invocation (hoisted:
+	// neither loop mutates settlement WALs mid-pass), so N candidate tasks cost
+	// one listing instead of N (PR #2697 review, PRR-004).
 	let settledAfterMs: number | null = null;
-	try {
-		const { states } = await listCoderSettlementWalStates(directory);
-		for (const state of states) {
-			if (state.taskId !== taskId) continue;
-			if (state.state !== 'COMMITTED') continue;
-			if (state.recordedAt === undefined) continue;
-			const parsed = Date.parse(state.recordedAt);
-			if (!Number.isFinite(parsed)) continue;
-			// Pre-check bundles are global (not task-scoped): require them
-			// to be newer than the latest committed settlement for this
-			// task so a scan taken before the coder's mutation cannot
-			// repair it.
-			settledAfterMs =
-				settledAfterMs === null ? parsed : Math.max(settledAfterMs, parsed);
-		}
-	} catch {
-		// WAL read failure falls through to the evidence-timestamp
-		// fallback below rather than disabling the recency check.
+	for (const state of walStates) {
+		if (state.taskId !== taskId) continue;
+		if (state.state !== 'COMMITTED') continue;
+		if (state.recordedAt === undefined) continue;
+		const parsed = Date.parse(state.recordedAt);
+		if (!Number.isFinite(parsed)) continue;
+		// Pre-check bundles are global (not task-scoped): require them
+		// to be newer than the latest committed settlement for this
+		// task so a scan taken before the coder's mutation cannot
+		// repair it.
+		settledAfterMs =
+			settledAfterMs === null ? parsed : Math.max(settledAfterMs, parsed);
 	}
+	// An unreadable/failed WAL listing surfaces above (the caller's per-task
+	// error path); here a successful-but-empty listing simply falls through to
+	// the evidence-timestamp fallback below.
 	if (settledAfterMs === null) {
 		// No settlement WAL exists for this task (background-dispatched
 		// coder tasks never create one — see stage-b-gates.ts), or the
@@ -263,13 +270,14 @@ async function scanStageATask(
 		settledAfterMs,
 	);
 	if (!greenness.green) {
-		return { kind: 'not_green', reason: greenness.reason };
+		return { kind: 'not_green', reason: greenness.reason, evidence };
 	}
 	return {
 		kind: 'repairable',
 		generation: workflow.generation,
 		green: true,
 		predecessorTransitionId: workflow.lastTransitionId ?? null,
+		evidence,
 	};
 }
 
@@ -295,24 +303,29 @@ export async function scanWedgedStageA(
 		directory,
 		options?.taskIds,
 	);
+	const { states: walStates } = await listCoderSettlementWalStates(directory);
 	const results: TaskRecoveryStatus[] = [];
 	for (const taskId of selected) {
-		let verdict: StageATaskScan;
+		// Both reads happen inside scanStageATask and share its per-task
+		// error handling: an unreadable evidence file skips the task (its
+		// failure surfaces through the repair path's per-task error outcomes
+		// and the diagnose evidence checks) instead of failing the scan.
 		try {
-			verdict = await scanStageATask(directory, taskId);
-		} catch {
-			continue;
-		}
-		const evidence = await readTaskEvidence(directory, taskId);
-		if (verdict.kind === 'repairable') {
-			results.push(
-				classifyEvidenceRecoveryTask(taskId, evidence, verdict.green),
-			);
-		} else if (verdict.kind === 'not_green') {
-			results.push(classifyEvidenceRecoveryTask(taskId, evidence, false));
-		} else {
-			results.push(classifyEvidenceRecoveryTask(taskId, evidence, null));
-		}
+			const verdict = await scanStageATask(directory, taskId, walStates);
+			if (verdict.kind === 'repairable') {
+				results.push(
+					classifyEvidenceRecoveryTask(taskId, verdict.evidence, verdict.green),
+				);
+			} else if (verdict.kind === 'not_green') {
+				results.push(
+					classifyEvidenceRecoveryTask(taskId, verdict.evidence, false),
+				);
+			} else {
+				results.push(
+					classifyEvidenceRecoveryTask(taskId, verdict.evidence, null),
+				);
+			}
+		} catch {}
 	}
 	return { results, truncated };
 }
@@ -336,10 +349,14 @@ export async function repairWedgedStageA(
 		directory,
 		requested,
 	);
+	// ONE settlement-WAL listing per invocation: the loop never mutates
+	// settlement WALs (only evidence transitions + audit events), so every
+	// task can share the same snapshot (PR #2697 review, PRR-004).
+	const { states: walStates } = await listCoderSettlementWalStates(directory);
 	const results: StageARepairOutcome[] = [];
 	for (const taskId of selected) {
 		try {
-			const scan = await scanStageATask(directory, taskId);
+			const scan = await scanStageATask(directory, taskId, walStates);
 			if (scan.kind === 'not_wedged') {
 				results.push({
 					taskId,
