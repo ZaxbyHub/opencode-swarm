@@ -2421,6 +2421,53 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: { kind: 'not-a-defect', proof: 'The #2031 partition: hard journal/archive caps, phase-close+grace compaction, cross-process lock, quarantine — the authoritative correctness store (src/hooks/knowledge-receipt-ledger.ts:255-261).' },
 	},
 	{
+		id: 'mcp-write-receipts',
+		category: 6,
+		pathGrammar: '.swarm/mcp-write-receipts.jsonl',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/mcp/write-receipts.ts'],
+		writerCitations: [
+			'src/mcp/write-receipts.ts:616-633 writeJournal — bounded JSONL rewrite via atomicWriteSwarmFile',
+			'src/mcp/write-receipts.ts:689-721 withReceiptLock — locked receipt transition persistence',
+		],
+		readerCitations: [
+			'src/mcp/write-receipts.ts:500-600 readJournal — lstat-guarded fixed-buffer read and schema validation',
+			'src/mcp/write-receipts.ts:728-849 prepareReceipt — bounded lifecycle lookup under the receipt lock',
+		],
+		schemaVersion: 'receipt record version 1 (Zod-validated JSONL records)',
+		stateClass: 'authoritative',
+		privacyClass: 'metadata',
+		directFileExemption: {
+			reason: 'MCP write settlement is intentionally a separate direct-file authority: PREPARED is durable before knowledge mutation, the receipt-only lock is released before production execution, and the 500-record / 512 KiB bounded journal preserves uncertainty without nesting the knowledge-store transaction lock.',
+			reviewedIssue: 2500,
+		},
+		writeLimits: {
+			bound: 'MAX_RECEIPT_RECORDS 500; MAX_RECEIPT_JOURNAL_BYTES 512 KiB; MAX_RECEIPT_LINE_BYTES 16 KiB; capacity exhaustion fails closed (:30-33,606-633)',
+			scope: 'global',
+			citation: 'src/mcp/write-receipts.ts:30-33,606-633',
+		},
+		readBound: {
+			pattern: 'line-bounded',
+			bound: '≤512 KiB and MAX_RECEIPT_RECORDS 500 records; fixed-buffer read before parsing',
+			sync: false,
+			citation: 'src/mcp/write-receipts.ts:500-600',
+		},
+		lockModel: 'dedicated proper-lockfile receipt lock around bounded lookup and transitions; released before knowledge_add production mutation (:689-721)',
+		crashBehavior: 'PREPARED is atomically durable before mutation; final failures remain PREPARED or become IN_DOUBT; malformed/truncated history fails closed (:728-849,942-1071)',
+		closePolicy: 'untouched — MCP audit history remains available for reconciliation; capacity exhaustion refuses new writes',
+		closeArrayMembership: {
+			'mcp-write-receipts.jsonl': 'neither',
+		},
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'n/a — new issue #2500 MCP-only receipt surface',
+		healthSignal: 'receipt state, replay/conflict outcomes, and bounded journal failures are surfaced in MCP responses',
+		owner: '#2500',
+		disposition: {
+			kind: 'not-a-defect',
+			proof: 'Hard 500-record / 512 KiB journal and 16 KiB line caps are enforced before every durable transition, reads use the same fixed bounds, and uncertain history is retained rather than evicted (src/mcp/write-receipts.ts:30-33,500-633).',
+		},
+	},
+	{
 		id: 'knowledge-aux-lists',
 		category: 6,
 		pathGrammar: '.swarm/knowledge-{rejected,quarantined,unactionable,rewrites}.jsonl',

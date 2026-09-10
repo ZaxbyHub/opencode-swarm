@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'bun:test';
+import { getAgentConfigs } from '../../../src/agents/index';
 import type { AgentName } from '../../../src/config/constants';
 import {
 	AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
 	MEMORY_TOOL_NAMES,
 } from '../../../src/config/constants';
+import {
+	PluginConfigSchema,
+	stripKnownSwarmPrefix,
+} from '../../../src/config/schema';
 
 describe('AGENT_TOOL_MAP', () => {
 	const allAgentNames: AgentName[] = [
@@ -114,6 +119,38 @@ describe('AGENT_TOOL_MAP', () => {
 		];
 		for (const tool of criticalTools) {
 			expect(architectTools).toContain(tool);
+		}
+	});
+
+	it('scope_validate is architect-only across legacy and multi-swarm agents', () => {
+		expect(AGENT_TOOL_MAP.architect).toContain('scope_validate');
+		for (const [agent, tools] of Object.entries(AGENT_TOOL_MAP)) {
+			if (agent !== 'architect') expect(tools).not.toContain('scope_validate');
+		}
+
+		const legacy = getAgentConfigs(PluginConfigSchema.parse({}));
+		const multiSwarm = getAgentConfigs(
+			PluginConfigSchema.parse({
+				swarms: {
+					local: { name: 'Local', agents: {} },
+					mega: { name: 'Mega', agents: {} },
+				},
+			}),
+		);
+		expect(legacy.architect).toBeDefined();
+		expect(multiSwarm.local_architect).toBeDefined();
+		expect(multiSwarm.mega_architect).toBeDefined();
+
+		for (const [name, config] of Object.entries({ ...legacy, ...multiSwarm })) {
+			const permission = config.permission as
+				| Record<string, unknown>
+				| undefined;
+			const baseName = stripKnownSwarmPrefix(name);
+			if (baseName === 'architect') {
+				expect(permission?.scope_validate).not.toBe('deny');
+			} else {
+				expect(permission?.scope_validate).toBe('deny');
+			}
 		}
 	});
 

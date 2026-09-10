@@ -131,6 +131,13 @@ export {
 	sbom_generate,
 } from './sbom-generate';
 export { schema_drift } from './schema-drift';
+export {
+	evaluateScopeValidate,
+	type ScopeValidateArgs,
+	type ScopeValidateResult,
+	ScopeValidationError,
+	scope_validate,
+} from './scope-validate';
 export { search } from './search';
 export {
 	type SecretFinding,

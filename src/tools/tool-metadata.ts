@@ -536,6 +536,11 @@ export const TOOL_METADATA = {
 		description: 'declare file scope for next coder delegation',
 		agents: ['architect'],
 	},
+	scope_validate: {
+		description:
+			'validate a shell command against an inline workspace scope without executing it; rejects destructive, ambiguous, unresolved, escaping, symlinked, protected, and out-of-scope writes',
+		agents: ['architect'],
+	},
 	knowledge_query: {
 		description: 'query swarm or hive knowledge with optional filters',
 		agents: ['architect', 'skill_improver', 'spec_writer'],
