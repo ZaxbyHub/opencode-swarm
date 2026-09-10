@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.174.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.173.1...v7.174.0) (2026-09-10)
+
+
+### Features
+
+* **review:** enforce routing and finding settlement ([f2f1a37](https://github.com/ZaxbyHub/opencode-swarm/commit/f2f1a37cc7f1c2a4335a908cd69300fd41162b08))
+
+
+### Bug Fixes
+
+* **pr-review:** default omitted findings to empty ([64dfffa](https://github.com/ZaxbyHub/opencode-swarm/commit/64dfffa9166d9508ffe268eadcfffdffa34c10b7))
+* **pr-review:** preserve critic settlement diagnostics ([2a29d78](https://github.com/ZaxbyHub/opencode-swarm/commit/2a29d7872a2f383225021b0d83dec3496dd40997))
+
 ## [7.173.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.173.0...v7.173.1) (2026-09-09)
 
 
