@@ -18,6 +18,7 @@ import { resetSwarmState } from '../../../src/state';
 import { _internals as settlementInternals } from '../../../src/workflow/coder-settlement';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { freezeClock } from '../../helpers/test-clock';
 
 function git(directory: string, args: string[]): void {
 	const result = spawnSync('git', ['-C', directory, ...args], {
@@ -103,10 +104,16 @@ async function writeGreenBundles(directory: string): Promise<void> {
 }
 
 describe('diagnose settlement categories (issue #2665)', () => {
+	// Deterministic fixture instant (explicit-arg Date constructor where possible;
+	// freezeClock pins the Date.now-derived fixture timestamps below so the
+	// recency math in scanStageATask is reproducible under coverage runs).
+	const FIXED_NOW_ISO = '2026-09-09T12:00:00.000Z';
+	let restoreClock: (() => void) | null = null;
 	let directory = '';
 	let cleanup = (): void => {};
 
 	beforeEach(async () => {
+		restoreClock = freezeClock({ isoNow: FIXED_NOW_ISO });
 		resetSwarmState();
 		settlementInternals.liveDispatches.clear();
 		({ dir: directory, cleanup } = createSafeTestDir('diagnose-cat-2665-'));
@@ -127,6 +134,8 @@ describe('diagnose settlement categories (issue #2665)', () => {
 	}, 30_000);
 
 	afterEach(() => {
+		restoreClock?.();
+		restoreClock = null;
 		resetSwarmState();
 		settlementInternals.liveDispatches.clear();
 		cleanup();
