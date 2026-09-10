@@ -98,8 +98,11 @@ describe('diagnose — Coder Settlements check (issue #2268)', () => {
 		const data = await getDiagnoseData(directory);
 		const check = findCheck(data.checks, 'Coder Settlements');
 		expect(check).toBeDefined();
+		// Missing receipts alone are informational (#2665): the plan task has
+		// no receipt yet, which is not a warning.
 		expect(check?.status).toBe('✅');
 		expect(check?.detail).toContain('No coder settlement WALs');
+		expect(check?.detail).toContain('task 1.1 [missing]');
 	});
 
 	test('warns on an in-flight (or wedged) in-process settlement with remediation', async () => {
@@ -112,7 +115,8 @@ describe('diagnose — Coder Settlements check (issue #2268)', () => {
 		const check = findCheck(data.checks, 'Coder Settlements');
 		expect(check?.status).toBe('⚠️');
 		expect(check?.detail).toContain('task 1.1');
-		expect(check?.detail).toContain('in flight or wedged');
+		expect(check?.detail).toContain('in flight, in this process');
+		expect(check?.detail).toContain('ambiguous');
 		expect(check?.detail).toContain('/swarm recover');
 		// Warn-level: a genuinely in-flight dispatch must not fail diagnose.
 		expect(check?.status).not.toBe('❌');
@@ -141,8 +145,9 @@ describe('diagnose — Coder Settlements check (issue #2268)', () => {
 		const data = await getDiagnoseData(directory);
 		const check = findCheck(data.checks, 'Coder Settlements');
 		expect(check?.status).toBe('⚠️');
-		expect(check?.detail).toContain('owner process is gone — stale');
-		expect(check?.detail).toContain('/swarm recover');
+		expect(check?.detail).toContain('task 1.1 [stale]');
+		expect(check?.detail).toContain('owning process is gone');
+		expect(check?.detail).toContain('/swarm recover 1.1');
 	});
 
 	test('passes when every settlement is terminal', async () => {
@@ -208,6 +213,6 @@ describe('diagnose — Coder Settlements check (issue #2268)', () => {
 		expect(check?.detail).toContain(
 			'All shown settlements are terminal, but the scan was truncated.',
 		);
-		expect(check?.detail).toContain('/swarm recover');
+		expect(check?.detail).toContain('/swarm recover <task_id>');
 	});
 });

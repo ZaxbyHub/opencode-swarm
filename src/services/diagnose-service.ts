@@ -16,6 +16,7 @@ import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js'
 import { listEvidenceTaskIds } from '../evidence/manager';
 import { listBlockingActionCircuitsForInvocation } from '../failures/action-circuit.js';
 import { loadFullAutoRunState } from '../full-auto/state.js';
+import { getTaskWorkflowSnapshot, readTaskEvidence } from '../gate-evidence.js';
 import { readLearningHealth } from '../health/learning-health';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { getTaskModelRoutingStateSnapshot } from '../models/task-model-routing.js';
@@ -28,6 +29,14 @@ import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { getAgentSession } from '../state.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
+import { renderRecoveryInvocationQuickForms } from '../workflow/recovery-invocation.js';
+import { scanWedgedStageA } from '../workflow/stage-a-repair.js';
+import {
+	classifyEvidenceRecoveryTask,
+	classifySettlementWalState,
+	renderTaskRecoveryLine,
+	type TaskRecoveryStatus,
+} from '../workflow/task-recovery-status.js';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
 import { inventorySwarmResidue } from './swarm-residue.js';
 import { compareVersions, readVersionCache } from './version-check.js';
@@ -1172,62 +1181,101 @@ export async function getDiagnoseData(
 		}
 	}
 
-	// Check: Coder settlements (issue #2268) — surface the
-	// CODER_DISPATCH_IN_PROGRESS wedge class that used to be invisible to
-	// diagnose: a non-terminal settlement WAL whose dispatch completion never
-	// arrived. Warn-level by design: a genuinely in-flight dispatch also shows
-	// up as non-terminal here and must not fail the health check. Fail-open:
-	// an inspection failure downgrades to a warning, never breaks diagnose.
+	// Check: Coder settlements (issue #2268; per-task/generation
+	// classification by issue #2665) — every durable fact class gets its own
+	// category, suggested next command, and task/transition/generation
+	// identity: corrupt (unreadable WAL — recovery refuses), stale (dead
+	// owner — deterministic repair allowed), ambiguous (live foreign or
+	// in-process owner — external effect stays uncertain), live_wedge
+	// (settled but missing its Stage A receipt), and missing (plan task with
+	// no receipt of any kind). Warn-level by design: a genuinely in-flight
+	// dispatch also shows up as ambiguous and must not fail the health
+	// check. Fail-open: an inspection failure downgrades to a warning, never
+	// breaks diagnose. Healthy tasks are reported as a COUNT only — never a
+	// per-task line — so no category token attaches to a healthy task.
 	try {
 		const { states: settlementStates, truncated } =
 			await listCoderSettlementWalStates(directory);
 		const truncationNote = truncated
 			? ' MORE settlement WALs exist than the scan cap (200) — older ones are not shown.'
 			: '';
-		if (settlementStates.length === 0) {
+		const settlementStatuses: TaskRecoveryStatus[] = [];
+		for (const entry of settlementStates) {
+			let workflow: ReturnType<typeof getTaskWorkflowSnapshot> | null = null;
+			try {
+				workflow = getTaskWorkflowSnapshot(
+					await readTaskEvidence(directory, entry.taskId),
+				);
+			} catch {
+				workflow = null;
+			}
+			settlementStatuses.push(classifySettlementWalState(entry, workflow));
+		}
+		// Read-only wedge scan (no transitions, no writes) + the missing
+		// class over plan tasks, both bounded by their 200-entry scan caps.
+		const wedgeScan = await scanWedgedStageA(directory);
+		const wedgeStatuses = wedgeScan.results.filter(
+			(status) => status.category === 'live_wedge',
+		);
+		const knownTaskIds = new Set([
+			...settlementStates.map((entry) => entry.taskId),
+			...wedgeScan.results.map((status) => status.taskId),
+		]);
+		const missingStatuses: TaskRecoveryStatus[] = [];
+		if (!truncated && !wedgeScan.truncated) {
+			const planTaskIds = (plan?.phases ?? [])
+				.flatMap((phase) => phase.tasks.map((task) => task.id))
+				.slice(0, 200);
+			for (const taskId of planTaskIds) {
+				if (knownTaskIds.has(taskId)) continue;
+				missingStatuses.push(classifyEvidenceRecoveryTask(taskId, null, null));
+			}
+		}
+		const nonHealthy = [
+			...settlementStatuses.filter((s) => s.category !== 'healthy'),
+			...wedgeStatuses,
+		];
+		const missingLines = missingStatuses
+			.map(renderTaskRecoveryLine)
+			.filter(Boolean);
+		const healthyCount = settlementStatuses.filter(
+			(s) => s.category === 'healthy',
+		).length;
+
+		if (nonHealthy.length === 0 && !truncated) {
+			// Missing receipts alone are informational, not a warning: a task
+			// that was never dispatched legitimately has no receipt yet. The
+			// per-task explanation still lands in the detail so the category
+			// stays observable (issue #2665 AC1).
 			checks.push({
 				name: 'Coder Settlements',
-				status: truncated ? '⚠️' : '✅',
-				detail: truncated
-					? `Settlement WAL scan truncated at 200 — additional settlements exist but are not shown.${truncationNote}`
-					: 'No coder settlement WALs',
+				status: '✅',
+				detail: `${
+					missingLines.length > 0 ? `${missingLines.join('; ')}. ` : ''
+				}${
+					settlementStates.length === 0
+						? 'No coder settlement WALs'
+						: `${settlementStates.length} settlement(s) all in terminal state`
+				}`,
+			});
+		} else if (nonHealthy.length === 0 && truncated) {
+			checks.push({
+				name: 'Coder Settlements',
+				status: '⚠️',
+				detail: `All shown settlements are terminal, but the scan was truncated.${truncationNote} ${renderRecoveryInvocationQuickForms()}`,
 			});
 		} else {
-			const nonTerminal = settlementStates.filter(
-				(entry) =>
-					entry.state === 'DISPATCHED' ||
-					entry.state === 'PREPARED' ||
-					entry.state === 'unreadable',
-			);
-			if (nonTerminal.length === 0 && !truncated) {
-				checks.push({
-					name: 'Coder Settlements',
-					status: '✅',
-					detail: `${settlementStates.length} settlement(s) all in terminal state`,
-				});
-			} else {
-				const details = nonTerminal.map((entry) => {
-					if (entry.state === 'unreadable') {
-						return `task ${entry.taskId}: WAL unreadable`;
-					}
-					const owner =
-						entry.ownedInProcess || entry.ownedByLiveForeignPid
-							? `owner pid ${entry.processId ?? '?'} still alive — in flight or wedged`
-							: 'owner process is gone — stale';
-					return `task ${entry.taskId} (${entry.state}, ${owner})`;
-				});
-				checks.push({
-					name: 'Coder Settlements',
-					status: '⚠️',
-					detail: `${
-						nonTerminal.length > 0
-							? `${nonTerminal.length} non-terminal settlement(s): ${details.join(
-									'; ',
-								)}.`
-							: 'All shown settlements are terminal, but the scan was truncated.'
-					} Stale settlements block dispatches with CODER_DISPATCH_IN_PROGRESS — run /swarm recover [task_id] (--force if no dispatch is genuinely running) or /swarm reset-session.${truncationNote}`,
-				});
-			}
+			const lines = [
+				...nonHealthy.map(renderTaskRecoveryLine).filter(Boolean),
+				...missingLines,
+			];
+			checks.push({
+				name: 'Coder Settlements',
+				status: '⚠️',
+				detail: `${lines.join('; ')}${
+					healthyCount > 0 ? `; ${healthyCount} healthy settlement(s)` : ''
+				}. Categories: missing/stale/ambiguous/corrupt/live_wedge — stale settlements block dispatches with CODER_DISPATCH_IN_PROGRESS. ${renderRecoveryInvocationQuickForms()}${truncationNote}`,
+			});
 		}
 	} catch (error) {
 		checks.push({
