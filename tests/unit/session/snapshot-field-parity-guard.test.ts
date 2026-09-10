@@ -99,6 +99,26 @@ function buildFullSessionState(): AgentSessionState {
 		taskWorkflowStates: new Map([['task-1', 'idle']]),
 		taskWorkflowCache: new Map(),
 		stageBCompletion: new Map([['task-1', new Set(['reviewer'])]]),
+		stageBRouteEvidence: new Map([
+			[
+				'task-1',
+				[
+					{
+						role: 'reviewer',
+						identity: 'reviewer-a',
+						sessionId: 'session-1',
+						taskId: 'task-1',
+						slotId: 'task-1:reviewer:1',
+						callId: 'call-1',
+						childSessionId: 'child-1',
+						generation: 1,
+					},
+				],
+			],
+		]),
+		// Route requirements are durable restart markers; the exact route evidence
+		// remains transient and is deliberately covered by SESSION_TRANSIENT_FIELDS.
+		stageBRouteRequiredTasks: new Set(['task-1']),
 		taskCouncilApproved: new Map(),
 		taskCouncilWorkflowGeneration: new Map(),
 		pendingCouncilRequirements: new Map(),

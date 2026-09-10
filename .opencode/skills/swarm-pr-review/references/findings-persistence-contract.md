@@ -93,6 +93,43 @@ reports `no authoritative critic verdict (absent from the settled critic map)`
 At `post_explorer` every record must be `PENDING` with
 `next_action: "route_to_reviewer"`.
 
+## Version-1 final finding policy
+
+The terminal report vocabulary is deliberately closed to the three registered
+machine values: `APPROVE`, `REQUEST_CHANGES`, and `INCOMPLETE`. There is no
+internal `APPROVE_WITH_NOTES` verdict. The policy consumes the latest final
+finding projection after critic settlement; it never trusts an earlier
+candidate/reviewer severity or a caller-supplied handoff list.
+
+| Final coverage / finding state | Final severity/action rule | Permitted report verdicts |
+| --- | --- | --- |
+| `NO_COVERAGE`, invalid provenance, or non-`COMPLETE` final status | No code-review claim is admissible | `INCOMPLETE` |
+| `COMPLETE` with an active `UNRESOLVED`, `UNVERIFIED`, or `CONFIRMED` `CRITICAL`/`HIGH` finding | The finding remains reportable or handoff-actionable; `suppress_with_reason` does not hide an active finding | `REQUEST_CHANGES`, `INCOMPLETE` |
+| `COMPLETE` with an active `MEDIUM` finding whose final action is not `report` | The conservative final action remains reviewer/critic/handoff work | `REQUEST_CHANGES`, `INCOMPLETE` |
+| `COMPLETE` with only terminal `DISPROVED`, `PRE_EXISTING`, `NON_ACTIONABLE`, `NONE`, or reportable `LOW`/`INFO` records | Advisory records may be reported, but do not restrict the registered approval vocabulary | `APPROVE`, `REQUEST_CHANGES`, `INCOMPLETE` |
+| `PARTIAL` or valid `DEGRADED_DISCLOSED` coverage without an active blocking finding | Coverage is truthful but not complete; no approval may claim a full review | `REQUEST_CHANGES`, `INCOMPLETE` |
+
+The version-1 critic settlement projection is authoritative for the final
+finding fields:
+
+| Critic outcome | Terminal state | Final severity | Final action / handoff |
+| --- | --- | --- | --- |
+| `UPHELD` | terminal | reviewer severity, unchanged | reviewer action; handoff only when final action is `handoff_to_feedback` |
+| `DOWNGRADED` | terminal | critic-provided lower severity | critic action; handoff only when final action is `handoff_to_feedback` |
+| `DISPROVED` | terminal | `NONE` | `suppress_with_reason`; never handed off |
+| `NEEDS_MORE_EVIDENCE` | nonterminal | retain current severity | retain current action; completion remains blocked |
+
+The micro-family has no silent waiver. Base, reviewer, critic, and (when
+enabled) council receipts must be present and valid. Micro provenance failures
+block readiness. A retry/degradation may be terminal only when its provenance
+is valid and the degradation is explicitly disclosed; that disclosure projects
+to `DEGRADED_DISCLOSED`, which permits only `REQUEST_CHANGES` or `INCOMPLETE`.
+Candidate confidence is categorical (`LOW`, `MEDIUM`, `HIGH`); independent
+provenance identities may boost agreement, while conflicting severity or
+confidence remains conservative. Final policy evidence is persisted under the
+canonical `.swarm/pr-review/<run_id>/finding-policy.json` and paired with
+identity-only core events.
+
 ## Severity semantics
 
 `severity` is REQUIRED on every findings record, at every boundary. Omitting it

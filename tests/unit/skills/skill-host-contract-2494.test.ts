@@ -75,8 +75,10 @@ describe('skill/host executable-contract guardrail (issue #2494)', () => {
 			'REQUEST_CHANGES',
 			'INCOMPLETE',
 		]);
-		expect(allowedPrReviewReportVerdicts('PARTIAL')).not.toContain('APPROVE');
-		expect(allowedPrReviewReportVerdicts('NO_COVERAGE')).toEqual([
+		expect(allowedPrReviewReportVerdicts('PARTIAL', [])).not.toContain(
+			'APPROVE',
+		);
+		expect(allowedPrReviewReportVerdicts('NO_COVERAGE', [])).toEqual([
 			'INCOMPLETE',
 		]);
 	});

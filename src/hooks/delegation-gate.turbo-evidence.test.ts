@@ -4,8 +4,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createIsolatedTestEnv } from '../../tests/helpers/isolated-test-env.js';
 import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import type { PluginConfig } from '../config';
+import { closeProjectDb } from '../db/project-db.js';
 import {
 	getTaskWorkflowSnapshot,
 	readTaskEvidence,
@@ -15,6 +17,7 @@ import {
 	ensureAgentSession,
 	hasActiveTurboMode,
 	resetSwarmState,
+	swarmState,
 } from '../state';
 import { createDelegationGateHook } from './delegation-gate';
 
@@ -26,16 +29,22 @@ const config = {
 } as PluginConfig;
 
 let tmpDir: string;
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 beforeEach(() => {
+	isolatedEnv = createIsolatedTestEnv();
 	resetSwarmState();
 	tmpDir = mkdtempSync(path.join(canonicalTmpDir(), 'dg-turbo-evidence-'));
+	mkdirSync(path.join(tmpDir, '.opencode'), { recursive: true });
 	mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 });
 
 afterEach(() => {
 	resetSwarmState();
+	closeProjectDb(tmpDir);
 	rmSync(tmpDir, { recursive: true, force: true });
+	isolatedEnv?.cleanup();
+	isolatedEnv = undefined;
 });
 
 async function dispatch(
@@ -80,6 +89,7 @@ async function seedStageA(sessionId: string, taskId: string): Promise<void> {
 		transitionId: `turbo-stage-a:${taskId}`,
 	});
 	const session = ensureAgentSession(sessionId, 'architect', tmpDir);
+	await Promise.allSettled([...swarmState.pendingRehydrations]);
 	session.currentTaskId = taskId;
 	session.taskWorkflowStates.set(taskId, 'pre_check_passed');
 }

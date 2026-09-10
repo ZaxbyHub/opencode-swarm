@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createIsolatedTestEnv } from '../../tests/helpers/isolated-test-env.js';
 import type { PluginConfig } from '../config';
+import { closeProjectDb } from '../db/project-db';
 import {
 	getTaskWorkflowSnapshot,
 	hasPassedAllGates,
@@ -23,16 +25,30 @@ const config = {
 } as PluginConfig;
 
 let tmpDir: string;
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 beforeEach(() => {
+	// Stage-B route receipts authenticate with a user-scoped MAC key. Keep that
+	// key under a test-owned app-data root so the production-store tripwire stays
+	// armed and the suite never touches the developer's real store.
+	isolatedEnv = createIsolatedTestEnv();
 	resetSwarmState();
 	tmpDir = mkdtempSync(path.join(os.tmpdir(), 'dg-evidence-test-'));
+	mkdirSync(path.join(tmpDir, '.opencode'), { recursive: true });
 	mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 });
 
 afterEach(() => {
 	resetSwarmState();
-	rmSync(tmpDir, { recursive: true, force: true });
+	closeProjectDb(tmpDir);
+	rmSync(tmpDir, {
+		recursive: true,
+		force: true,
+		maxRetries: 5,
+		retryDelay: 100,
+	});
+	isolatedEnv?.cleanup();
+	isolatedEnv = undefined;
 });
 
 async function seedStageA(sessionId: string, taskId: string): Promise<number> {

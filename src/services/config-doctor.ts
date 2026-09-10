@@ -1893,6 +1893,32 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		// Issue #2491: semantic-review route receipts.  Keep this explicit case
+		// beside the other top-level object checks so config-doctor's exhaustive
+		// schema ratchet observes the section and reports malformed leaf values
+		// before they are silently ignored by the runtime.
+		case 'review_routing': {
+			emitObjectTypeMismatch('review_routing', value, findings);
+			if (isPlainObject(value)) {
+				const enforceReceipts = value.enforce_receipts;
+				if (
+					enforceReceipts !== undefined &&
+					typeof enforceReceipts !== 'boolean'
+				) {
+					findings.push({
+						id: 'invalid-review_routing-enforce_receipts-type',
+						title: 'Invalid review_routing.enforce_receipts type',
+						description: `"review_routing.enforce_receipts" must be a boolean, got ${typeof enforceReceipts}`,
+						severity: 'error',
+						path: 'review_routing.enforce_receipts',
+						currentValue: enforceReceipts,
+						autoFixable: false,
+					});
+				}
+			}
+			break;
+		}
+
 		case 'lane_liveness_watchdog': {
 			emitObjectTypeMismatch('lane_liveness_watchdog', value, findings);
 			break;

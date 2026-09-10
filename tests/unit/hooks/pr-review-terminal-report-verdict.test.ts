@@ -132,16 +132,21 @@ async function establishPartialCoverage(): Promise<void> {
 
 describe('terminal report verdict enforcement (issue #2383)', () => {
 	test('allowedPrReviewReportVerdicts matches the coverage-kind matrix', () => {
+		expect([...allowedPrReviewReportVerdicts('COMPLETE', [])]).toEqual([
+			'APPROVE',
+			'REQUEST_CHANGES',
+			'INCOMPLETE',
+		]);
 		expect([...allowedPrReviewReportVerdicts('COMPLETE')]).toEqual([
 			'APPROVE',
 			'REQUEST_CHANGES',
 			'INCOMPLETE',
 		]);
-		expect([...allowedPrReviewReportVerdicts('PARTIAL')]).toEqual([
+		expect([...allowedPrReviewReportVerdicts('PARTIAL', [])]).toEqual([
 			'REQUEST_CHANGES',
 			'INCOMPLETE',
 		]);
-		expect([...allowedPrReviewReportVerdicts('NO_COVERAGE')]).toEqual([
+		expect([...allowedPrReviewReportVerdicts('NO_COVERAGE', [])]).toEqual([
 			'INCOMPLETE',
 		]);
 	});

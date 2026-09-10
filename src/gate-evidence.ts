@@ -27,6 +27,7 @@ import {
 } from './evidence/task-file.js';
 import { appendTaskGateRequirementsReceiptIfNeeded } from './evidence/task-gate-requirements.js';
 import { validateSwarmPath } from './hooks/utils.js';
+import type { ReviewRouteEvidence } from './review/routing-enforcement.js';
 import type { TaskWorkflowState } from './state';
 import { telemetry } from './telemetry.js';
 import { assertStrictTaskId, isStrictTaskId } from './validation/task-id';
@@ -252,6 +253,15 @@ export type TaskWorkflowTransitionEvent =
 			type: 'stage_b_completed';
 			gate: 'reviewer' | 'test_engineer';
 			sessionId: string;
+			/** Exact v1 route tuple persisted with durable gate requirements evidence. */
+			routeBinding?: ReviewRouteEvidence;
+			/**
+			 * The v1 route predicate evaluated over this completion's prospective
+			 * tuple set. When false, retain the sequential intermediate state even
+			 * though the role-level gate summary is now present; only true permits
+			 * the durable Stage-B transition to tests_run.
+			 */
+			routeComplete?: boolean;
 			turbo?: boolean;
 			ensureDefaultStageB?: boolean;
 			expectedGeneration: number;
@@ -674,6 +684,18 @@ export function reduceTaskWorkflowSnapshot(
 					`TASK_WORKFLOW_STAGE_A_REQUIRED: cannot record ${event.gate} from ${current.state}`,
 				);
 			}
+			if (event.routeComplete === false) {
+				return {
+					...base,
+					state:
+						event.gate === 'reviewer' || current.state === 'reviewer_run'
+							? 'reviewer_run'
+							: current.state,
+				};
+			}
+			if (event.routeComplete === true) {
+				return { ...base, state: 'tests_run' };
+			}
 			return {
 				...base,
 				state: hasAllRequiredGatesPassed(context.requiredGates, context.gates)
@@ -1033,6 +1055,8 @@ export async function recordGateEvidence(
 		expectedGeneration?: number;
 		transitionId?: string;
 		ensureDefaultStageB?: boolean;
+		routeBinding?: ReviewRouteEvidence;
+		routeComplete?: boolean;
 	} = {},
 ): Promise<void> {
 	assertValidTaskId(taskId);
@@ -1053,6 +1077,8 @@ export async function recordGateEvidence(
 					type: 'stage_b_completed',
 					gate,
 					sessionId,
+					routeBinding: options.routeBinding,
+					routeComplete: options.routeComplete,
 					turbo,
 					ensureDefaultStageB: options.ensureDefaultStageB,
 					expectedGeneration: options.expectedGeneration as number,

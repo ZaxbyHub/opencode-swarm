@@ -22,6 +22,7 @@ import {
 	beginCoderSettlement,
 	settleCoderDispatch,
 } from '../../../src/workflow/coder-settlement.js';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
 const TASK_ID = '1.1';
@@ -55,6 +56,11 @@ function proof(agent: string) {
 }
 
 function writePlan(directory: string): void {
+	fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
+	fs.writeFileSync(
+		path.join(directory, '.opencode', 'opencode-swarm.json'),
+		JSON.stringify({ review_routing: { enforce_receipts: false } }),
+	);
 	fs.mkdirSync(path.join(directory, '.swarm', 'evidence'), { recursive: true });
 	fs.writeFileSync(
 		path.join(directory, 'package.json'),
@@ -148,8 +154,10 @@ async function settleAcceptedCoderMutation(
 describe('repair_gate_evidence legacy reconstruction recovery', () => {
 	let directory: string;
 	let cleanup: () => void;
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 	beforeEach(() => {
+		isolatedEnv = createIsolatedTestEnv();
 		resetSwarmState();
 		({ dir: directory, cleanup } = createSafeTestDir('issue-2525-recovery-'));
 		writePlan(directory);
@@ -158,6 +166,8 @@ describe('repair_gate_evidence legacy reconstruction recovery', () => {
 	afterEach(() => {
 		resetSwarmState();
 		cleanup();
+		isolatedEnv?.cleanup();
+		isolatedEnv = undefined;
 	});
 
 	test('recovers the authoritative poisoned-receipt wedge and emits only clean later receipts', async () => {

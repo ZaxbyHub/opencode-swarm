@@ -524,7 +524,9 @@ function anchorFinding(
 				anchored: false,
 				anchor_rejection: 'nonexistent_current_path',
 				effective_severity:
-					finding.confidence < minConfidence ? 'info' : finding.severity,
+					finding.severity !== 'critical' && finding.confidence < minConfidence
+						? 'info'
+						: finding.severity,
 			};
 		}
 		if (!isWithinRoot(root, currentPath)) {
@@ -545,7 +547,9 @@ function anchorFinding(
 		anchored: anchorRejection === undefined,
 		anchor_rejection: anchorRejection,
 		effective_severity:
-			finding.confidence < minConfidence ? 'info' : finding.severity,
+			finding.severity !== 'critical' && finding.confidence < minConfidence
+				? 'info'
+				: finding.severity,
 	};
 }
 

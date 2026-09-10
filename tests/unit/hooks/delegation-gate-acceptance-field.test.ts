@@ -29,6 +29,7 @@ import {
 	validateCoderReviewerAcceptanceField,
 } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 function makeConfig(): PluginConfig {
@@ -161,13 +162,16 @@ describe('validateCoderReviewerAcceptanceField (unit)', () => {
 
 describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => {
 	let testDir: string;
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 	beforeEach(async () => {
+		isolatedEnv = createIsolatedTestEnv();
 		resetSwarmState();
 		testDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'acceptance-field-')),
 		);
 		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+		fs.mkdirSync(path.join(testDir, '.opencode'), { recursive: true });
 		const plan: Plan = {
 			schema_version: '1.0.0',
 			title: 'Acceptance field integration',
@@ -201,6 +205,8 @@ describe('toolBefore acceptance-field gate (integration, SC-003/SC-004)', () => 
 	afterEach(() => {
 		resetSwarmState();
 		fs.rmSync(testDir, { recursive: true, force: true });
+		isolatedEnv?.cleanup();
+		isolatedEnv = undefined;
 	});
 
 	// ---- coder (a/b/c) ----

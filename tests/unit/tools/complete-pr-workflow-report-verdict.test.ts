@@ -84,7 +84,7 @@ describe('complete_pr_workflow tool report_verdict (issue #2383)', () => {
 		});
 		expect(result.terminal_report.unresolved_dimensions).toHaveLength(6);
 		expect(result.terminal_report.allowed_verdicts).toEqual([
-			...allowedPrReviewReportVerdicts('NO_COVERAGE'),
+			...allowedPrReviewReportVerdicts('NO_COVERAGE', []),
 		]);
 	});
 

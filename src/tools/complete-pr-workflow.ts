@@ -5,6 +5,7 @@ import {
 	type PrFeedbackInventoryAmendmentRecord,
 	type PrWorkflowLaneLivenessOptions,
 	type PrWorkflowMode,
+	readPrReviewFinalFindingPolicyForReport,
 	readPrReviewTerminalCoverageForReport,
 	readPrWorkflowGateState,
 	settlePresumedStalePrWorkflowLanes,
@@ -155,23 +156,47 @@ export async function executeCompletePrWorkflow(
 		// same discipline as staleDisclosure above).
 		let terminalReport: Record<string, unknown> | undefined;
 		if (parsed.data.mode === 'PR_REVIEW') {
+			let coverage: Awaited<
+				ReturnType<typeof readPrReviewTerminalCoverageForReport>
+			> | null = null;
 			try {
-				const coverage = await _internals.readPrReviewTerminalCoverageForReport(
+				coverage = await _internals.readPrReviewTerminalCoverageForReport(
 					directory,
 					context.sessionID,
 				);
-				if (coverage) {
-					terminalReport = {
-						kind: coverage.kind,
-						covered_dimensions: coverage.coveredDimensions,
-						unresolved_dimensions: coverage.unresolvedDimensions,
-						live_dimensions: coverage.liveDimensions,
-						allowed_verdicts: coverage.allowedVerdicts,
-						report_verdict: parsed.data.report_verdict,
-					};
-				}
 			} catch {
-				// Observation only; the gate re-validates everything that matters.
+				// Coverage is optional observation data; the completion gate remains
+				// authoritative below and still completes without this report.
+			}
+			if (coverage) {
+				let findingPolicy:
+					| Awaited<ReturnType<typeof readPrReviewFinalFindingPolicyForReport>>
+					| undefined;
+				try {
+					findingPolicy =
+						await _internals.readPrReviewFinalFindingPolicyForReport(
+							directory,
+							context.sessionID,
+						);
+				} catch {
+					// The optional finding-policy sidecar must not erase the truthful
+					// coverage-derived terminal report (F-012).
+				}
+				terminalReport = {
+					kind: coverage.kind,
+					covered_dimensions: coverage.coveredDimensions,
+					unresolved_dimensions: coverage.unresolvedDimensions,
+					live_dimensions: coverage.liveDimensions,
+					allowed_verdicts:
+						findingPolicy?.permittedVerdicts ?? coverage.allowedVerdicts,
+					...(findingPolicy
+						? {
+								finding_policy_version: findingPolicy.policyVersion,
+								blocking_finding_ids: findingPolicy.blockingFindingIds,
+							}
+						: {}),
+					report_verdict: parsed.data.report_verdict,
+				};
 			}
 		}
 		const status = await _internals.completePrWorkflow(
@@ -252,11 +277,13 @@ export const _internals: {
 	listPendingPrWorkflowCheckoutRestores: typeof listPendingPrWorkflowCheckoutRestores;
 	readPrWorkflowGateState: typeof readPrWorkflowGateState;
 	readPrReviewTerminalCoverageForReport: typeof readPrReviewTerminalCoverageForReport;
+	readPrReviewFinalFindingPolicyForReport: typeof readPrReviewFinalFindingPolicyForReport;
 	settlePresumedStalePrWorkflowLanes: typeof settlePresumedStalePrWorkflowLanes;
 } = {
 	completePrWorkflow,
 	listPendingPrWorkflowCheckoutRestores,
 	readPrWorkflowGateState,
 	readPrReviewTerminalCoverageForReport,
+	readPrReviewFinalFindingPolicyForReport,
 	settlePresumedStalePrWorkflowLanes,
 };

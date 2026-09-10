@@ -25,6 +25,7 @@ import {
 	injectSpecRequirementsIntoAcceptance,
 } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
 	recordPlanCriticApproval,
@@ -251,6 +252,7 @@ describe('injectSpecRequirementsIntoAcceptance (unit, #2205)', () => {
 
 describe('toolBefore ACCEPTANCE injection gate (integration, #2205)', () => {
 	let tempDir: string;
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 	function makeConfig(): PluginConfig {
 		return { hooks: { delegation_gate: true } } as unknown as PluginConfig;
@@ -258,6 +260,7 @@ describe('toolBefore ACCEPTANCE injection gate (integration, #2205)', () => {
 
 	function makeTempProject(prefix: string): string {
 		const dir = canonicalMkdtemp(prefix);
+		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		return dir;
 	}
@@ -297,6 +300,7 @@ describe('toolBefore ACCEPTANCE injection gate (integration, #2205)', () => {
 	}
 
 	beforeEach(async () => {
+		isolatedEnv = createIsolatedTestEnv();
 		resetSwarmState();
 		tempDir = makeTempProject('c2205-inj-');
 		await writeFixturePlan(tempDir);
@@ -309,6 +313,8 @@ describe('toolBefore ACCEPTANCE injection gate (integration, #2205)', () => {
 		} catch {
 			// best-effort cleanup
 		}
+		isolatedEnv?.cleanup();
+		isolatedEnv = undefined;
 	});
 
 	function toolBeforeInput(sessionID: string, callID = 'call-1') {

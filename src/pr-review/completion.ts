@@ -61,6 +61,10 @@ import {
 import { validateSwarmPath } from '../hooks/utils.js';
 import { CIRCUIT_TERMINAL_DELEGATION_STATUSES } from './circuit.js';
 import {
+	evaluateFinalFindingPolicy,
+	type FinalPolicyFinding,
+} from './finding-policy.js';
+import {
 	isoNow,
 	normalizeSessionID,
 	withSessionStateMutation,
@@ -435,10 +439,34 @@ export type PrReviewReportVerdict = (typeof PR_REVIEW_REPORT_VERDICTS)[number];
  */
 export function allowedPrReviewReportVerdicts(
 	kind: PrReviewTerminalCoverageKind,
+	findings: ReadonlyArray<FinalPolicyFinding> = [],
 ): readonly PrReviewReportVerdict[] {
-	if (kind === 'COMPLETE') return PR_REVIEW_REPORT_VERDICTS;
-	if (kind === 'PARTIAL') return ['REQUEST_CHANGES', 'INCOMPLETE'];
-	return ['INCOMPLETE'];
+	// PARTIAL is a truthful covered-dimensions settlement even when its
+	// authoritative finding projection is empty.  Keep its coverage-only
+	// vocabulary explicit; `evaluateFinalFindingPolicy` treats an empty base
+	// partial finding list as NO_COVERAGE for the broader policy API.
+	if (kind === 'PARTIAL' && findings.length === 0) {
+		return ['REQUEST_CHANGES', 'INCOMPLETE'];
+	}
+	const projection = evaluateFinalFindingPolicy({
+		policyVersion: 1,
+		finalStatus: 'COMPLETE',
+		coverage:
+			kind === 'COMPLETE'
+				? { kind: 'base', quality: 'complete', provenance: 'valid' }
+				: kind === 'PARTIAL'
+					? { kind: 'base', quality: 'partial', provenance: 'valid' }
+					: { kind: 'base', quality: 'none', provenance: 'valid' },
+		findings: [...findings],
+	});
+	const supported = projection.permittedVerdicts.filter(
+		(value): value is PrReviewReportVerdict =>
+			(value === 'APPROVE' ||
+				value === 'REQUEST_CHANGES' ||
+				value === 'INCOMPLETE') &&
+			(kind === 'COMPLETE' || value !== 'APPROVE'),
+	);
+	return supported.length > 0 ? supported : ['INCOMPLETE'];
 }
 
 export interface PrReviewTerminalCoverageSettlement {
@@ -1596,6 +1624,9 @@ export async function readPrReviewTerminalCoverageForReport(
 			failure_class: entry.failureClass,
 		})),
 		liveDimensions: settlement.liveDimensions,
-		allowedVerdicts: allowedPrReviewReportVerdicts(settlement.kind),
+		// This report-only projection has no finding-policy artifact available;
+		// pass an explicit empty set instead of relying on an omitted optional
+		// argument that could accidentally permit APPROVE in a future caller.
+		allowedVerdicts: allowedPrReviewReportVerdicts(settlement.kind, []),
 	};
 }

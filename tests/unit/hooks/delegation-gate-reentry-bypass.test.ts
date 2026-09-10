@@ -14,6 +14,7 @@ import {
 	_internals as reentryInternals,
 } from '../../../src/pr-review/authorization';
 import { resetSwarmState } from '../../../src/state';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import {
 	PR_ARTIFACT_HEAD_SHA,
 	PR_ARTIFACT_REVISION_DIGEST,
@@ -29,16 +30,19 @@ const config = {
 } as PluginConfig;
 
 let tmpDir = '';
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 const originalResolveCurrentGitHeadAsync =
 	gateInternals.resolveCurrentGitHeadAsync;
 const originalResolveRevisionDigest =
 	gateInternals.resolvePrWorkflowRevisionDigest;
 
 beforeEach(async () => {
+	isolatedEnv = createIsolatedTestEnv();
 	resetSwarmState();
 	gateInternals.resetTrackedStateCache();
 	tmpDir = canonicalMkdtemp('dg-reentry-test-');
 	await fs.mkdir(`${tmpDir}/.swarm`, { recursive: true });
+	await fs.mkdir(`${tmpDir}/.opencode`, { recursive: true });
 	gateInternals.resolveCurrentGitHeadAsync = async () => PR_ARTIFACT_HEAD_SHA;
 	gateInternals.resolvePrWorkflowRevisionDigest = () =>
 		PR_ARTIFACT_REVISION_DIGEST;
@@ -51,6 +55,8 @@ afterEach(async () => {
 	gateInternals.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
 	closeAllProjectDbs();
 	await fs.rm(tmpDir, { recursive: true, force: true });
+	isolatedEnv?.cleanup();
+	isolatedEnv = undefined;
 });
 
 /** Task evidence at a pre-Stage-A state, so reviewer dispatch needs a bypass. */

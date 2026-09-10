@@ -88,6 +88,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `inject_phase_reminders` | boolean | true | Inject phase reminder directives during execution. |
 | `hooks` | object | — | Hook subsystem toggles and settings. |
 | `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. |
+| `review_routing` | object (strict) | — | Semantic review routing receipt enforcement for Stage B (default on; set enforce_receipts=false only as a one-release rollback). |
 | `lane_liveness_watchdog` | object (strict) | — | Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes. |
 | `dispatch_protection` | object (strict) | — | Dispatch protection: action-local spawn-failure circuit breaker and token-bucket rate limiting for native task delegations. |
 | `pr_review_legacy_transcript_compatibility` | boolean | — | Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes. |
@@ -831,6 +832,35 @@ clean reset.
 {
   "pr_review_resilience": {
     "enabled": false
+  }
+}
+```
+
+### review_routing
+
+Controls the issue #2491 semantic-review route receipt gate. Newly routed
+Stage-B work is checked against a versioned receipt naming the exact reviewer
+and test-engineer identities required by the semantic router. Missing,
+malformed, duplicate, foreign, or wrong-role receipts block advancement.
+Router failures are fail-open only when the producer writes an explicit typed
+router-error receipt (including `NO_CHANGED_FILES`); the outcome remains
+visible in the `.swarm/pr-review/route-receipts/` audit record.
+
+The default is on. Existing in-flight work created before versioned route
+receipts are available follows a one-release `legacy_unrouted` compatibility
+path with disclosure. Set `enforce_receipts` to `false` only as a temporary
+operator rollback; the route producer continues recording receipts.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enforce_receipts` | boolean | `true` | Require exact version-1 semantic-review route receipts before Stage-B advancement. Set `false` for the one-release rollback. |
+
+**Example** — temporary rollback during migration:
+
+```json
+{
+  "review_routing": {
+    "enforce_receipts": false
   }
 }
 ```

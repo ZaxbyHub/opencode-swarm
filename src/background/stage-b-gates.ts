@@ -1,3 +1,8 @@
+import { loadPluginConfig } from '../config/loader.js';
+import {
+	readTaskGateRequirementsReceiptsSync,
+	routeEvidenceFromTaskGateRequirements,
+} from '../evidence/task-gate-requirements.js';
 import {
 	getTaskWorkflowSnapshot,
 	readTaskEvidence,
@@ -15,15 +20,22 @@ import {
 	reviewerScopeCaptureToFingerprint,
 	reviewerScopeFileFingerprintsEqual,
 } from '../hooks/reviewer-scope-file-fingerprint.js';
+import {
+	enforcePersistedReviewRouteReceipt,
+	type ReviewRouteEvidence,
+	readReviewRouteReceiptSync,
+} from '../review/routing-enforcement.js';
 import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import {
 	type AgentSessionState,
 	advanceTaskState,
 	getReviewerScopeGenerationForCoderCall,
 	getReviewerScopeOwnershipHistory,
+	getStageBRouteEvidence,
 	getTaskState,
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
+	isStageBRouteRequired,
 	markReviewerScopeGenerationMergebackPending,
 	markReviewerScopeGenerationNoChange,
 	markReviewerScopeGenerationReady,
@@ -31,6 +43,8 @@ import {
 	recordModifiedFilesForTask,
 	recordReviewerScopeGenerationFileFingerprint,
 	recordStageBCompletion,
+	recordStageBRouteEvidence,
+	reserveStageBRouteEvidence,
 	reviewerScopeGenerationHasDeclaredOverlap,
 	swarmState,
 	updateTaskWorkflowCache,
@@ -642,20 +656,153 @@ export async function ingestBackgroundStageBCompletion(args: {
 						: `background ${stageBRole} returned no valid structured verdict for task ${taskId}`,
 			};
 		}
-		await recordGateEvidence(
-			args.directory,
-			taskId,
-			args.record.normalizedAgent,
-			args.record.subagentSessionId,
-			hasActiveTurboMode(args.record.parentSessionId),
-			{
-				expectedGeneration: args.record.workflowGeneration,
-				transitionId: `background-gate:${args.record.correlationId}`,
-				// Missing/non-exempt provenance is conservative: require the full
-				// Stage B pair without fabricating a new coder mutation/generation.
-				ensureDefaultStageB: existingEvidence?.test_engineer_exempt !== true,
-			},
-		);
+		let preparedRoute:
+			| ReturnType<typeof resolveBackgroundStageBRoute>
+			| undefined;
+		let routeCompleteForPersistence: boolean | undefined;
+		if (stageBRole) {
+			const parentSession = swarmState.agentSessions.get(
+				args.record.parentSessionId,
+			);
+			if (parentSession) {
+				preparedRoute = resolveBackgroundStageBRoute({
+					directory: args.directory,
+					taskId,
+					parentSessionId: args.record.parentSessionId,
+					role: stageBRole,
+					callId: args.record.callID,
+					childSessionId: args.record.subagentSessionId,
+					generation: args.record.workflowGeneration,
+					session: parentSession,
+				});
+				const routeEnabled = (() => {
+					try {
+						return (
+							loadPluginConfig(args.directory).review_routing
+								?.enforce_receipts ?? true
+						);
+					} catch {
+						return true;
+					}
+				})();
+				const routeDecision = enforcePersistedReviewRouteReceipt({
+					projectRoot: args.directory,
+					sessionId: args.record.parentSessionId,
+					taskId,
+					receipts: preparedRoute.prospective,
+					enforcementEnabled: routeEnabled,
+					legacyUnrouted: preparedRoute.legacyUnrouted,
+					requireEvidenceBindings: true,
+					requireCompleteEvidence: false,
+					expectedDispatch: preparedRoute.binding
+						? {
+								role: preparedRoute.binding.role,
+								identity: preparedRoute.binding.identity,
+								callId: preparedRoute.binding.callId,
+								childSessionId: preparedRoute.binding.childSessionId,
+								generation: preparedRoute.binding.generation,
+							}
+						: undefined,
+				});
+				if (!routeDecision.canAdvance) {
+					logger.warn(
+						`[background-stage-b] route receipt blocked before evidence publication for ${taskId}: ${routeDecision.reason ?? 'unknown reason'}`,
+					);
+					return {
+						ok: false,
+						consumed: false,
+						reason: `route receipt blocked before Stage-B evidence publication: ${routeDecision.reason ?? 'unknown reason'}`,
+					};
+				}
+				if (
+					routeEnabled &&
+					preparedRoute.route?.kind === 'review_route_receipt'
+				) {
+					routeCompleteForPersistence = enforcePersistedReviewRouteReceipt({
+						projectRoot: args.directory,
+						sessionId: args.record.parentSessionId,
+						taskId,
+						receipts: preparedRoute.prospective,
+						enforcementEnabled: true,
+						legacyUnrouted: preparedRoute.legacyUnrouted,
+						requireEvidenceBindings: true,
+						requireCompleteEvidence: true,
+					}).canAdvance;
+				}
+			} else {
+				const route = readReviewRouteReceiptSync({
+					projectRoot: args.directory,
+					sessionId: args.record.parentSessionId,
+					taskId,
+				});
+				if (
+					route?.kind !== 'review_route_router_error' ||
+					route.sessionId !== args.record.parentSessionId ||
+					route.taskId !== taskId
+				) {
+					return {
+						ok: false,
+						consumed: false,
+						reason:
+							'route receipt blocked before Stage-B evidence publication: parent session is unavailable and recovery receipt is not identity-bound',
+					};
+				}
+			}
+		}
+		let routeEvidenceRollback: (() => void) | null = null;
+		if (preparedRoute?.binding) {
+			const parentSession = swarmState.agentSessions.get(
+				args.record.parentSessionId,
+			);
+			if (!parentSession) {
+				logger.warn(
+					`[background-stage-b] route receipt blocked before evidence publication for ${taskId}: parent session unavailable`,
+				);
+				return {
+					ok: false,
+					consumed: false,
+					reason:
+						'route receipt blocked before Stage-B evidence publication: parent session unavailable',
+				};
+			}
+			routeEvidenceRollback = reserveStageBRouteEvidence(
+				parentSession,
+				taskId,
+				preparedRoute.binding,
+			);
+			if (!routeEvidenceRollback) {
+				logger.warn(
+					`[background-stage-b] route receipt blocked before evidence publication for ${taskId}: bounded route evidence capacity exceeded`,
+				);
+				return {
+					ok: false,
+					consumed: false,
+					reason:
+						'route receipt blocked before Stage-B evidence publication: bounded route evidence capacity exceeded',
+				};
+			}
+		}
+		try {
+			await recordGateEvidence(
+				args.directory,
+				taskId,
+				args.record.normalizedAgent,
+				args.record.subagentSessionId,
+				hasActiveTurboMode(args.record.parentSessionId),
+				{
+					expectedGeneration: args.record.workflowGeneration,
+					transitionId: `background-gate:${args.record.correlationId}`,
+					// Missing/non-exempt provenance is conservative: require the full
+					// Stage B pair without fabricating a new coder mutation/generation.
+					ensureDefaultStageB: existingEvidence?.test_engineer_exempt !== true,
+					routeBinding: preparedRoute?.binding,
+					routeComplete: routeCompleteForPersistence,
+				},
+			);
+		} catch (err) {
+			routeEvidenceRollback?.();
+			throw err;
+		}
 
 		if (args.record.normalizedAgent === 'reviewer') {
 			await collectReviewerReceiptFromTranscript(
@@ -684,6 +831,11 @@ export async function ingestBackgroundStageBCompletion(args: {
 				args.record.normalizedAgent,
 				args.record.parentSessionId,
 				existingEvidence?.test_engineer_exempt === true,
+				args.directory,
+				args.record.callID,
+				args.record.subagentSessionId,
+				args.record.workflowGeneration,
+				preparedRoute,
 			);
 		}
 
@@ -704,20 +856,217 @@ function candidateSessions(parentSessionId: string): AgentSessionState[] {
 	return parent ? [parent] : [];
 }
 
+function routeDispatchKey(entry: ReviewRouteEvidence): string | null {
+	if (
+		!entry.callId ||
+		!entry.childSessionId ||
+		typeof entry.generation !== 'number'
+	) {
+		return null;
+	}
+	return [
+		entry.role,
+		entry.sessionId ?? '',
+		entry.taskId ?? '',
+		entry.callId,
+		entry.childSessionId,
+		String(entry.generation),
+	].join('\u0000');
+}
+
+function resolveBackgroundStageBRoute(input: {
+	directory: string;
+	taskId: string;
+	parentSessionId: string;
+	role: StageBStateRole;
+	callId: string;
+	childSessionId: string;
+	generation: number;
+	session: AgentSessionState;
+}): {
+	route: ReturnType<typeof readReviewRouteReceiptSync>;
+	binding?: ReviewRouteEvidence;
+	prospective: ReviewRouteEvidence[];
+	legacyUnrouted: boolean;
+} {
+	const route = readReviewRouteReceiptSync({
+		projectRoot: input.directory,
+		sessionId: input.parentSessionId,
+		taskId: input.taskId,
+	});
+	let evidence = getStageBRouteEvidence(input.session, input.taskId);
+	if (evidence.length === 0) {
+		try {
+			evidence = routeEvidenceFromTaskGateRequirements(
+				readTaskGateRequirementsReceiptsSync(input.directory, input.taskId),
+			);
+		} catch {
+			// The durable evidence read will fail closed in the route predicate below.
+		}
+	}
+	const legacyUnrouted =
+		route === null &&
+		!isStageBRouteRequired(input.session, input.taskId) &&
+		(() => {
+			try {
+				const receipts = readTaskGateRequirementsReceiptsSync(
+					input.directory,
+					input.taskId,
+				);
+				return (
+					receipts.length > 0 &&
+					receipts.every((receipt) => !receipt.routeBinding)
+				);
+			} catch {
+				return false;
+			}
+		})();
+	let binding: ReviewRouteEvidence | undefined;
+	let prospective = evidence;
+	if (route?.kind === 'review_route_receipt') {
+		const identities =
+			input.role === 'reviewer'
+				? route.identities.reviewers
+				: route.identities.testEngineers;
+		const slots =
+			input.role === 'reviewer'
+				? (route.slots?.reviewers ?? identities)
+				: (route.slots?.testEngineers ?? identities);
+		const dispatchKey = [
+			input.role,
+			input.parentSessionId,
+			input.taskId,
+			input.callId,
+			input.childSessionId,
+			String(input.generation),
+		].join('\u0000');
+		const retry = evidence.find(
+			(entry) =>
+				entry.role === input.role && routeDispatchKey(entry) === dispatchKey,
+		);
+		const usedSlots = new Set(
+			evidence
+				.filter(
+					(entry) =>
+						entry.role === input.role && entry !== retry && entry.slotId,
+				)
+				.map((entry) => entry.slotId as string),
+		);
+		const slotIndex = retry
+			? slots.indexOf(retry.slotId ?? '')
+			: slots.findIndex((slot) => !usedSlots.has(slot));
+		if (slotIndex >= 0 && slotIndex < identities.length) {
+			const slotId = slots[slotIndex];
+			const identity = identities[slotIndex];
+			binding = {
+				role: input.role,
+				identity,
+				sessionId: input.parentSessionId,
+				taskId: input.taskId,
+				slotId,
+				callId: input.callId,
+				childSessionId: input.childSessionId,
+				generation: input.generation,
+			};
+			prospective = retry
+				? evidence.map((entry) => (entry === retry ? binding! : entry))
+				: [...evidence, binding];
+		}
+	}
+	return { route, binding, prospective, legacyUnrouted };
+}
+
 function applyStageBStateCompletion(
 	taskId: string,
 	agent: StageBStateRole,
 	parentSessionId: string,
 	testEngineerExempt: boolean,
+	directory: string,
+	callId: string,
+	childSessionId: string,
+	generation: number | undefined,
+	preparedRoute?: ReturnType<typeof resolveBackgroundStageBRoute>,
 ): void {
 	for (const session of candidateSessions(parentSessionId)) {
+		const resolvedRoute =
+			preparedRoute ??
+			resolveBackgroundStageBRoute({
+				directory,
+				taskId,
+				parentSessionId,
+				role: agent,
+				callId,
+				childSessionId,
+				generation: generation ?? -1,
+				session,
+			});
+		const {
+			binding,
+			prospective: routeEvidence,
+			legacyUnrouted,
+		} = resolvedRoute;
+		const routeEnabled = (() => {
+			try {
+				return (
+					loadPluginConfig(directory).review_routing?.enforce_receipts ?? true
+				);
+			} catch {
+				return true;
+			}
+		})();
+		// First authorize and record this exact completion. A valid partial route
+		// must be durable even while sibling slots are still outstanding; only the
+		// advancement decision below requires the complete route.
+		const completionDecision = enforcePersistedReviewRouteReceipt({
+			projectRoot: directory,
+			sessionId: parentSessionId,
+			taskId,
+			receipts: routeEvidence,
+			enforcementEnabled: routeEnabled,
+			legacyUnrouted,
+			requireEvidenceBindings: true,
+			requireCompleteEvidence: false,
+			expectedDispatch: binding
+				? {
+						role: binding.role,
+						identity: binding.identity,
+						callId: binding.callId,
+						childSessionId: binding.childSessionId,
+						generation: binding.generation,
+					}
+				: undefined,
+		});
+		if (!completionDecision.canAdvance) {
+			logger.warn(
+				`[background-stage-b] route receipt blocked ${taskId}: ${completionDecision.reason ?? 'unknown reason'}`,
+			);
+			continue;
+		}
+		if (binding && !recordStageBRouteEvidence(session, taskId, binding)) {
+			logger.warn(
+				`[background-stage-b] route receipt blocked before Stage-B evidence publication for ${taskId}: bounded route evidence capacity exceeded`,
+			);
+			continue;
+		}
 		recordStageBCompletion(session, taskId, agent);
 		const state = getTaskState(session, taskId);
 		if (state === 'tests_run' || state === 'complete') continue;
+		const advancementDecision = enforcePersistedReviewRouteReceipt({
+			projectRoot: directory,
+			sessionId: parentSessionId,
+			taskId,
+			receipts: getStageBRouteEvidence(session, taskId),
+			enforcementEnabled: routeEnabled,
+			legacyUnrouted,
+			requireEvidenceBindings: true,
+			requireCompleteEvidence: true,
+		});
+		const routeComplete = advancementDecision.canAdvance;
 
 		if (
-			hasBothStageBCompletions(session, taskId) ||
-			(testEngineerExempt && agent === 'reviewer')
+			routeComplete &&
+			(hasBothStageBCompletions(session, taskId) ||
+				(testEngineerExempt && agent === 'reviewer'))
 		) {
 			try {
 				if (state === 'coder_delegated' || state === 'pre_check_passed') {
@@ -751,7 +1100,11 @@ function applyStageBStateCompletion(
 					`[background-stage-b] could not advance ${taskId} to reviewer_run: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
-		} else if (agent === 'test_engineer' && state === 'reviewer_run') {
+		} else if (
+			routeComplete &&
+			agent === 'test_engineer' &&
+			state === 'reviewer_run'
+		) {
 			try {
 				advanceTaskState(session, taskId, 'tests_run', {
 					telemetrySessionId: parentSessionId,
@@ -764,3 +1117,13 @@ function applyStageBStateCompletion(
 		}
 	}
 }
+
+/**
+ * Focused regression seams for route allocation and state publication. These
+ * keep the adversarial tests on the real resolver/authorizer without exposing
+ * either helper as a runtime tool API.
+ */
+export const _test_exports = {
+	resolveBackgroundStageBRoute,
+	applyStageBStateCompletion,
+};

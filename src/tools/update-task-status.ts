@@ -11,6 +11,11 @@ import { loadPluginConfig } from '../config/loader';
 import type { RuntimePlan, TaskStatus } from '../config/plan-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { getProfileLookupForIdentity } from '../db/qa-gate-profile.js';
+import {
+	isLegacyTaskGateRequirementsChain,
+	readTaskGateRequirementsReceiptsSync,
+	routeEvidenceFromTaskGateRequirements,
+} from '../evidence/task-gate-requirements.js';
 import type { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
 import {
 	getTaskWorkflowSnapshot,
@@ -24,16 +29,23 @@ import { matchesTier3 } from '../parallel/tier3-classifier.js';
 import { loadPlan, updateTaskStatus } from '../plan/manager';
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import {
+	enforcePersistedReviewRouteReceipt,
+	readReviewRouteReceiptSync,
+} from '../review/routing-enforcement.js';
+import {
 	recordTaskAttempt,
 	type TaskAttemptInput,
 } from '../services/run-memory.js';
 import {
+	type AgentSessionState,
 	advanceTaskState,
 	ensureAgentSession,
+	getStageBRouteEvidence,
 	getTaskState,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
+	isStageBRouteRequired,
 	recordStageBCompletion,
 	startAgentSession,
 	swarmState,
@@ -328,6 +340,98 @@ function hasPassedDurableGateEvidence(
  * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
  * @returns ReviewerGateResult indicating whether the gate is blocked
  */
+function routeGateAllowsTask(
+	directory: string | undefined,
+	taskId: string,
+	sessionID?: string,
+): boolean {
+	if (!directory) return true;
+	const enforcementEnabled = (() => {
+		try {
+			return (
+				loadPluginConfig(directory).review_routing?.enforce_receipts ?? true
+			);
+		} catch {
+			return true;
+		}
+	})();
+	if (!enforcementEnabled) return true;
+	const requirementReceipts = (() => {
+		try {
+			return readTaskGateRequirementsReceiptsSync(directory, taskId);
+		} catch {
+			return null;
+		}
+	})();
+	if (!requirementReceipts) return false;
+	const session = sessionID
+		? swarmState.agentSessions.get(sessionID)
+		: undefined;
+	const routeRequired = sessionID
+		? session
+			? isStageBRouteRequired(session, taskId)
+			: false
+		: [...swarmState.agentSessions.values()].some((candidate) =>
+				isStageBRouteRequired(candidate, taskId),
+			);
+	const legacyUnrouted =
+		isLegacyTaskGateRequirementsChain(requirementReceipts) && !routeRequired;
+	// A session/state-only completion with no route marker or durable receipt is
+	// pre-v1 compatibility state. This branch is deliberately narrower than
+	// `route === null`: any positively marked task still fails closed below.
+	if (!routeRequired && requirementReceipts.length === 0) return true;
+	const durableEvidence =
+		routeEvidenceFromTaskGateRequirements(requirementReceipts);
+	const routeAllowsSession = (
+		candidateSessionID: string,
+		candidateSession: AgentSessionState | undefined,
+	): boolean => {
+		try {
+			readReviewRouteReceiptSync({
+				projectRoot: directory,
+				sessionId: candidateSessionID,
+				taskId,
+			});
+		} catch {
+			return false;
+		}
+		const liveEvidence = candidateSession
+			? getStageBRouteEvidence(candidateSession, taskId)
+			: [];
+		return enforcePersistedReviewRouteReceipt({
+			projectRoot: directory,
+			sessionId: candidateSessionID,
+			taskId,
+			receipts: liveEvidence.length > 0 ? liveEvidence : durableEvidence,
+			enforcementEnabled: true,
+			legacyUnrouted: false,
+			requireEvidenceBindings: true,
+		}).canAdvance;
+	};
+	if (sessionID) return routeAllowsSession(sessionID, session);
+	if (!routeRequired) return legacyUnrouted;
+	// Older synchronous callers do not pass sessionID. Keep the route marker's
+	// identity boundary intact by evaluating each marked session with its own
+	// persisted receipt instead of treating the missing argument as a bypass.
+	const evidenceSessionIDs = new Set(
+		durableEvidence
+			.map((evidence) => evidence.sessionId)
+			.filter((value): value is string => Boolean(value)),
+	);
+	for (const [
+		candidateSessionID,
+		candidateSession,
+	] of swarmState.agentSessions) {
+		if (
+			!isStageBRouteRequired(candidateSession, taskId) &&
+			!evidenceSessionIDs.has(candidateSessionID)
+		)
+			continue;
+		if (routeAllowsSession(candidateSessionID, candidateSession)) return true;
+	}
+	return false;
+}
+
 export function checkReviewerGate(
 	taskId: string,
 	workingDirectory?: string,
@@ -546,6 +650,25 @@ export function checkReviewerGate(
 					contradictorySignals.length === 0 &&
 					workflowComplete
 				) {
+					if (!routeGateAllowsTask(authoritativeDir, taskId, sessionID)) {
+						return reviewerGateDecision(
+							taskId,
+							sessionID,
+							{
+								blocked: true,
+								reason: `Task ${taskId} has not satisfied its exact v1 review route receipt. Missing or mismatched route evidence fails closed.`,
+								requiredGates,
+								satisfiedGates,
+								missingGates: ['review_route_receipt'],
+								source: 'durable_exact_task',
+								generation: workflow.generation,
+								nextAction:
+									'Recover the exact route receipt and independent Stage-B bindings before completing this task.',
+							},
+							'required_gates_missing',
+							'block',
+						);
+					}
 					return reviewerGateDecision(
 						taskId,
 						sessionID,
@@ -627,6 +750,10 @@ export function checkReviewerGate(
 			// (test callers that pass tmpDir as workingDirectory)
 			resolvedDir = workingDirectory;
 		}
+		const routeAllowsStageB = (
+			sessionId: string | undefined,
+			_session: AgentSessionState | undefined,
+		): boolean => routeGateAllowsTask(resolvedDir, taskId, sessionId);
 		// When the evidence file exists but gates are incomplete, save the reason and fall
 		// through to session state instead of blocking immediately. Evidence recording can
 		// fail silently (lock timeout, permission error, etc.) while the in-memory session
@@ -654,13 +781,18 @@ export function checkReviewerGate(
 							(gate: string) => evidence.gates![gate] != null,
 						)
 					) {
-						return reviewerGateDecision(
-							taskId,
-							sessionID,
-							{ blocked: false, reason: '' },
-							'durable_evidence_complete',
-							'genuine',
-						);
+						const routeSession = sessionID
+							? swarmState.agentSessions.get(sessionID)
+							: undefined;
+						if (!resolvedDir || routeAllowsStageB(sessionID, routeSession)) {
+							return reviewerGateDecision(
+								taskId,
+								sessionID,
+								{ blocked: false, reason: '' },
+								'durable_evidence_complete',
+								'genuine',
+							);
+						}
 					}
 					// Evidence file shows incomplete gates — save the reason and fall through to
 					// session state. The session state check below may still allow completion if
@@ -732,6 +864,9 @@ export function checkReviewerGate(
 
 			// If task has reached tests_run or complete state, allow through
 			if (state === 'tests_run' || state === 'complete') {
+				if (resolvedDir && !routeAllowsStageB(_sessionId, session)) {
+					continue;
+				}
 				return reviewerGateDecision(
 					taskId,
 					sessionID,
@@ -744,7 +879,11 @@ export function checkReviewerGate(
 			// PR 2 Stage B parallel barrier: both completion markers present is sufficient
 			// even if state machine advancement was delayed (e.g., non-fatal exception
 			// in toolAfter). Only active when flag is on.
-			if (stageBParallelEnabled && hasBothStageBCompletions(session, taskId)) {
+			if (
+				stageBParallelEnabled &&
+				hasBothStageBCompletions(session, taskId) &&
+				(!resolvedDir || routeAllowsStageB(_sessionId, session))
+			) {
 				return reviewerGateDecision(
 					taskId,
 					sessionID,
@@ -1116,9 +1255,62 @@ export function recoverTaskStateFromDelegations(
 		}
 	}
 
+	const recoveryRouteEnforcementEnabled = directory
+		? (() => {
+				try {
+					return (
+						loadPluginConfig(directory).review_routing?.enforce_receipts ?? true
+					);
+				} catch {
+					return true;
+				}
+			})()
+		: false;
 	// Advance the specific task state in all sessions
-	for (const [, session] of swarmState.agentSessions) {
+	for (const [sessionId, session] of swarmState.agentSessions) {
 		if (!(session.taskWorkflowStates instanceof Map)) continue;
+		const routeEvidence = (() => {
+			const live = getStageBRouteEvidence(session, taskId);
+			if (live.length > 0) return live;
+			try {
+				return routeEvidenceFromTaskGateRequirements(
+					readTaskGateRequirementsReceiptsSync(directory!, taskId),
+				);
+			} catch {
+				return [];
+			}
+		})();
+		const routeRequired =
+			isStageBRouteRequired(session, taskId) || routeEvidence.length > 0;
+		if (
+			directory &&
+			recoveryRouteEnforcementEnabled &&
+			routeRequired &&
+			!enforcePersistedReviewRouteReceipt({
+				projectRoot: directory,
+				sessionId,
+				taskId,
+				receipts: routeEvidence,
+				enforcementEnabled: true,
+				legacyUnrouted: (() => {
+					try {
+						return (
+							!isStageBRouteRequired(session, taskId) &&
+							isLegacyTaskGateRequirementsChain(
+								readTaskGateRequirementsReceiptsSync(directory, taskId),
+							)
+						);
+					} catch {
+						return false;
+					}
+				})(),
+				requireEvidenceBindings: true,
+			}).canAdvance
+		) {
+			// Delegation-chain recovery is a diagnostic repair path; it may not
+			// authorize a newly routed task without the exact route receipt.
+			continue;
+		}
 
 		const currentState = getTaskState(session, taskId);
 
