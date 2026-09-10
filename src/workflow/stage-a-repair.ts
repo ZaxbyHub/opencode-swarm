@@ -4,13 +4,21 @@ import { isSecretscanEvidence, loadEvidence } from '../evidence/manager.js';
 import {
 	getTaskWorkflowSnapshot,
 	readTaskEvidence,
+	type TaskEvidence,
 	transitionTaskWorkflowEvidence,
 } from '../gate-evidence.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import * as logger from '../utils/logger.js';
 import { isStrictTaskId } from '../validation/task-id.js';
-import { listCoderSettlementWalStates } from './coder-settlement.js';
+import {
+	type CoderSettlementWalState,
+	listCoderSettlementWalStates,
+} from './coder-settlement.js';
+import {
+	classifyEvidenceRecoveryTask,
+	type TaskRecoveryStatus,
+} from './task-recovery-status.js';
 
 const MAX_STAGE_A_REPAIR_SCAN = 200;
 
@@ -156,6 +164,173 @@ async function hasGreenPostSettlementPreCheck(
 }
 
 /**
+ * Read-only candidate enumeration shared by the scan and the repair: flat
+ * per-task evidence files only (`{taskId}.json` regular files; bundle
+ * directories and non-task-named files are skipped).
+ */
+async function enumerateStageACandidates(
+	directory: string,
+	requested?: string[],
+): Promise<{ selected: string[]; truncated: boolean }> {
+	let entries: string[];
+	try {
+		const evidenceDir = validateSwarmPath(directory, 'evidence');
+		entries = await readdir(evidenceDir);
+	} catch {
+		return { selected: [], truncated: false };
+	}
+	const candidates = entries.filter(
+		(entry) =>
+			entry.endsWith('.json') &&
+			isStrictTaskId(entry.slice(0, -'.json'.length)),
+	);
+	const selected = requested?.length
+		? candidates.filter((entry) =>
+				requested.includes(entry.slice(0, -'.json'.length)),
+			)
+		: candidates;
+	const truncated =
+		!requested?.length && candidates.length > MAX_STAGE_A_REPAIR_SCAN;
+	return {
+		selected: selected
+			.sort()
+			.slice(0, MAX_STAGE_A_REPAIR_SCAN)
+			.map((entry) => entry.slice(0, -'.json'.length)),
+		truncated,
+	};
+}
+
+/** Per-task scan verdict shared by the read-only scan and the repair. */
+type StageATaskScan =
+	| { kind: 'not_wedged'; state: string; evidence: TaskEvidence | null }
+	| {
+			kind: 'not_green';
+			reason: 'no_pre_check_bundles' | 'pre_check_failed_or_stale';
+			evidence: TaskEvidence | null;
+	  }
+	| {
+			kind: 'repairable';
+			generation: number;
+			green: boolean;
+			predecessorTransitionId: string | null;
+			evidence: TaskEvidence | null;
+	  };
+
+/**
+ * The decision core (issue #2665): identical predicates to the pre-refactor
+ * repair loop — wedged means workflow `coder_delegated` with no pre_check
+ * gate proof; the recency proof uses the latest COMMITTED settlement's
+ * recordedAt with the task's own last-transition timestamp as fallback.
+ */
+async function scanStageATask(
+	directory: string,
+	taskId: string,
+	walStates: readonly CoderSettlementWalState[],
+): Promise<StageATaskScan> {
+	const evidence = await readTaskEvidence(directory, taskId);
+	const workflow = getTaskWorkflowSnapshot(evidence);
+	if (workflow.state !== 'coder_delegated') {
+		return { kind: 'not_wedged', state: workflow.state, evidence };
+	}
+	if (evidence?.gates?.pre_check) {
+		return { kind: 'not_wedged', state: workflow.state, evidence };
+	}
+	// The caller supplies ONE settlement-WAL listing per invocation (hoisted:
+	// neither loop mutates settlement WALs mid-pass), so N candidate tasks cost
+	// one listing instead of N (PR #2697 review, PRR-004).
+	let settledAfterMs: number | null = null;
+	for (const state of walStates) {
+		if (state.taskId !== taskId) continue;
+		if (state.state !== 'COMMITTED') continue;
+		if (state.recordedAt === undefined) continue;
+		const parsed = Date.parse(state.recordedAt);
+		if (!Number.isFinite(parsed)) continue;
+		// Pre-check bundles are global (not task-scoped): require them
+		// to be newer than the latest committed settlement for this
+		// task so a scan taken before the coder's mutation cannot
+		// repair it.
+		settledAfterMs =
+			settledAfterMs === null ? parsed : Math.max(settledAfterMs, parsed);
+	}
+	// An unreadable/failed WAL listing surfaces above (the caller's per-task
+	// error path); here a successful-but-empty listing simply falls through to
+	// the evidence-timestamp fallback below.
+	if (settledAfterMs === null) {
+		// No settlement WAL exists for this task (background-dispatched
+		// coder tasks never create one — see stage-b-gates.ts), or the
+		// WAL read failed. Fall back to the task's own last-transition
+		// timestamp (the accepted_mutation that put it at
+		// coder_delegated) so recency is still provable rather than
+		// silently disabled.
+		const fallbackTs = Date.parse(workflow.updatedAt);
+		if (Number.isFinite(fallbackTs)) settledAfterMs = fallbackTs;
+	}
+	const greenness = await hasGreenPostSettlementPreCheck(
+		directory,
+		settledAfterMs,
+	);
+	if (!greenness.green) {
+		return { kind: 'not_green', reason: greenness.reason, evidence };
+	}
+	return {
+		kind: 'repairable',
+		generation: workflow.generation,
+		green: true,
+		predecessorTransitionId: workflow.lastTransitionId ?? null,
+		evidence,
+	};
+}
+
+export interface StageAScanResult {
+	/** One entry per enumerated task, classified in the shared #2665 vocabulary. */
+	results: TaskRecoveryStatus[];
+	truncated: boolean;
+}
+
+/**
+ * Read-only wedge scan (issue #2665): classifies every enumerated task via
+ * the shared recovery vocabulary WITHOUT emitting transitions, writing
+ * evidence, or appending events. Tasks whose evidence cannot be read are
+ * skipped (their failure surfaces through the repair path's per-task error
+ * outcomes and the diagnose evidence checks). `repairAllowed` is true only
+ * for the `live_wedge` category with green post-settlement pre-check proof.
+ */
+export async function scanWedgedStageA(
+	directory: string,
+	options?: { taskIds?: string[] },
+): Promise<StageAScanResult> {
+	const { selected, truncated } = await enumerateStageACandidates(
+		directory,
+		options?.taskIds,
+	);
+	const { states: walStates } = await listCoderSettlementWalStates(directory);
+	const results: TaskRecoveryStatus[] = [];
+	for (const taskId of selected) {
+		// Both reads happen inside scanStageATask and share its per-task
+		// error handling: an unreadable evidence file skips the task (its
+		// failure surfaces through the repair path's per-task error outcomes
+		// and the diagnose evidence checks) instead of failing the scan.
+		try {
+			const verdict = await scanStageATask(directory, taskId, walStates);
+			if (verdict.kind === 'repairable') {
+				results.push(
+					classifyEvidenceRecoveryTask(taskId, verdict.evidence, verdict.green),
+				);
+			} else if (verdict.kind === 'not_green') {
+				results.push(
+					classifyEvidenceRecoveryTask(taskId, verdict.evidence, false),
+				);
+			} else {
+				results.push(
+					classifyEvidenceRecoveryTask(taskId, verdict.evidence, null),
+				);
+			}
+		} catch {}
+	}
+	return { results, truncated };
+}
+
+/**
  * Repair path for tasks already wedged at `coder_delegated`
  * (TASK_WORKFLOW_STAGE_A_REQUIRED post-reset wedge). For each flat task
  * evidence file whose workflow store sits at `coder_delegated` with no
@@ -170,107 +345,54 @@ export async function repairWedgedStageA(
 	options?: { taskIds?: string[] },
 ): Promise<StageARepairResult> {
 	const requested = options?.taskIds;
-	let entries: string[];
-	try {
-		const evidenceDir = validateSwarmPath(directory, 'evidence');
-		entries = await readdir(evidenceDir);
-	} catch {
-		return { results: [], truncated: false };
-	}
-	// Flat per-task evidence files only: `{taskId}.json` regular files. Bundle
-	// directories (`{name}/`) and non-task-named files are skipped.
-	const candidates = entries.filter(
-		(entry) =>
-			entry.endsWith('.json') &&
-			isStrictTaskId(entry.slice(0, -'.json'.length)),
+	const { selected, truncated } = await enumerateStageACandidates(
+		directory,
+		requested,
 	);
-	const selected = requested?.length
-		? candidates.filter((entry) =>
-				requested.includes(entry.slice(0, -'.json'.length)),
-			)
-		: candidates;
-	const truncated =
-		!requested?.length && candidates.length > MAX_STAGE_A_REPAIR_SCAN;
+	// ONE settlement-WAL listing per invocation: the loop never mutates
+	// settlement WALs (only evidence transitions + audit events), so every
+	// task can share the same snapshot (PR #2697 review, PRR-004).
+	const { states: walStates } = await listCoderSettlementWalStates(directory);
 	const results: StageARepairOutcome[] = [];
-	for (const entry of selected.sort().slice(0, MAX_STAGE_A_REPAIR_SCAN)) {
-		const taskId = entry.slice(0, -'.json'.length);
+	for (const taskId of selected) {
 		try {
-			const evidence = await readTaskEvidence(directory, taskId);
-			const workflow = getTaskWorkflowSnapshot(evidence);
-			if (workflow.state !== 'coder_delegated') {
+			const scan = await scanStageATask(directory, taskId, walStates);
+			if (scan.kind === 'not_wedged') {
 				results.push({
 					taskId,
 					outcome: 'skipped_not_wedged',
-					state: workflow.state,
+					state: scan.state,
 				});
 				continue;
 			}
-			if (evidence?.gates?.pre_check) {
-				results.push({
-					taskId,
-					outcome: 'skipped_not_wedged',
-					state: workflow.state,
-				});
-				continue;
-			}
-			let settledAfterMs: number | null = null;
-			try {
-				const { states } = await listCoderSettlementWalStates(directory);
-				for (const state of states) {
-					if (state.taskId !== taskId) continue;
-					if (state.state !== 'COMMITTED') continue;
-					if (state.recordedAt === undefined) continue;
-					const parsed = Date.parse(state.recordedAt);
-					if (!Number.isFinite(parsed)) continue;
-					// Pre-check bundles are global (not task-scoped): require them
-					// to be newer than the latest committed settlement for this
-					// task so a scan taken before the coder's mutation cannot
-					// repair it.
-					settledAfterMs =
-						settledAfterMs === null ? parsed : Math.max(settledAfterMs, parsed);
-				}
-			} catch {
-				// WAL read failure falls through to the evidence-timestamp
-				// fallback below rather than disabling the recency check.
-			}
-			if (settledAfterMs === null) {
-				// No settlement WAL exists for this task (background-dispatched
-				// coder tasks never create one — see stage-b-gates.ts), or the
-				// WAL read failed. Fall back to the task's own last-transition
-				// timestamp (the accepted_mutation that put it at
-				// coder_delegated) so recency is still provable rather than
-				// silently disabled.
-				const fallbackTs = Date.parse(workflow.updatedAt);
-				if (Number.isFinite(fallbackTs)) settledAfterMs = fallbackTs;
-			}
-			const greenness = await hasGreenPostSettlementPreCheck(
-				directory,
-				settledAfterMs,
-			);
-			if (!greenness.green) {
+			if (scan.kind === 'not_green') {
 				results.push({
 					taskId,
 					outcome: 'skipped_not_green',
-					reason: greenness.reason,
+					reason: scan.reason,
 				});
 				continue;
 			}
-			const transitionId = `stage-a-repair:${taskId}:${workflow.generation}`;
+			const transitionId = `stage-a-repair:${taskId}:${scan.generation}`;
 			await transitionTaskWorkflowEvidence(directory, taskId, {
 				type: 'stage_a_passed',
-				expectedGeneration: workflow.generation,
+				expectedGeneration: scan.generation,
 				transitionId,
 			});
 			await appendStageARepairEvent(directory, {
 				action: 'repaired',
 				taskId,
 				transitionId,
-				generation: workflow.generation,
+				generation: scan.generation,
+				// Issue #2665: the new receipt names its predecessor — the
+				// transition that wedged the task (the accepted_mutation that
+				// left the workflow at coder_delegated without Stage A proof).
+				predecessorTransitionId: scan.predecessorTransitionId,
 			});
 			results.push({
 				taskId,
 				outcome: 'repaired',
-				generation: workflow.generation,
+				generation: scan.generation,
 				transitionId,
 			});
 		} catch (error) {

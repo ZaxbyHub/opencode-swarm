@@ -5,6 +5,7 @@ import {
 	recoverStaleCoderSettlements,
 	type StaleSettlementRecoveryOutcome,
 } from '../workflow/coder-settlement.js';
+import { renderRecoveryInvocationQuickForms } from '../workflow/recovery-invocation.js';
 import {
 	repairWedgedStageA,
 	type StageARepairOutcome,
@@ -35,7 +36,7 @@ function renderOutcome(outcome: StaleSettlementRecoveryOutcome): string {
 		case 'owned_by_live_foreign_pid':
 			return `ℹ️ Task ${outcome.taskId}: owned by live process pid ${outcome.processId} (another OpenCode instance). Close that instance or run /swarm recover there; this command never interrupts another live process's dispatch.`;
 		case 'unreadable_wal':
-			return `⚠️ Task ${outcome.taskId}: settlement WAL is unreadable — inspect .swarm/coder-settlements/${outcome.taskId}.json`;
+			return `⚠️ Task ${outcome.taskId}: settlement WAL is unreadable (corrupt) — this command refuses corrupt WALs; inspect .swarm/coder-settlements/${outcome.taskId}.json and consult docs/troubleshooting/recovery-runbook.md; do not delete or hand-edit the file`;
 		case 'error':
 			return `❌ Task ${outcome.taskId}: recovery failed — ${sanitizeDiagnosticText(
 				outcome.message,
@@ -221,6 +222,11 @@ export async function handleRecoverCommand(
 			)}`,
 		);
 	}
+
+	// Shell-correct invocation quick forms (issue #2665 AC3): every run of the
+	// recovery command carries the per-shell guidance so the emitted advice
+	// itself is correct in PowerShell, Git Bash (MSYS), and the CLI.
+	report.push('', renderRecoveryInvocationQuickForms());
 
 	return report.join('\n');
 }

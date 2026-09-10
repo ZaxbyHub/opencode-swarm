@@ -1280,6 +1280,13 @@ export interface CoderSettlementWalState {
 	ownedInProcess: boolean;
 	/** A different, still-alive host process owns the dispatch. Never force-releasable from here. */
 	ownedByLiveForeignPid: boolean;
+	/**
+	 * Generation fence the dispatch declared on its WAL (issue #2665): the
+	 * workflow generation the owning transition expected to CAS against.
+	 * Retained through recovery status so a stale-generation receipt is
+	 * visible without re-reading the WAL bytes.
+	 */
+	expectedGeneration?: number;
 }
 
 /**
@@ -1322,6 +1329,7 @@ export async function listCoderSettlementWalStates(
 				recordedAt: wal.recordedAt,
 				accepted: wal.accepted === true ? true : undefined,
 				declaredFiles: wal.context?.declaredFiles ?? null,
+				expectedGeneration: wal.expectedGeneration,
 				ownedInProcess: liveDispatches.has(
 					dispatchKey(directory, taskId, wal.transitionId),
 				),
@@ -1492,7 +1500,19 @@ export async function recoverStaleCoderSettlements(
 					transitionId: entry.transitionId ?? '',
 					actor: 'swarm-recovery',
 				},
-				{ forced, accepted: recovered.accepted },
+				{
+					forced,
+					accepted: recovered.accepted,
+					// Issue #2665: the recovered receipt names its predecessor —
+					// the wedged dispatch's transition, its pre-recovery state,
+					// and the generation fence it CAS'd against — so status,
+					// recovery, and repair stay bound to the same receipt.
+					previousTransitionId: entry.transitionId ?? '',
+					previousState: entry.state,
+					...(typeof entry.expectedGeneration === 'number'
+						? { expectedGeneration: entry.expectedGeneration }
+						: {}),
+				},
 			);
 			results.push({
 				taskId: entry.taskId,

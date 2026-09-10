@@ -319,6 +319,8 @@ guard, so the session cannot progress on its own.
   same `.swarm/`) are never interrupted: close that instance or run
   `/swarm recover` there.
 
+`/swarm diagnose` classifies every task's recovery facts (missing / stale / ambiguous / corrupt / live_wedge) with its owning transition and generation; shell-correct invocations per host — including the doubled-leading-slash form `"//swarm …"` Git Bash needs under MSYS path conversion — and the deterministic-repair vs external-side-effect boundary are documented in [the task recovery runbook](recovery-runbook.md) (#2665).
+
 **Never delete or hand-edit `.swarm/coder-settlements/*.json`.** The record
 carries the launch baseline that attributes the coder's changes to the task;
 deleting it discards attribution and can strand review debt. `/swarm diagnose`
