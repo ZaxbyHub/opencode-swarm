@@ -61,11 +61,24 @@ export const RECOVERY_INVOCATIONS: readonly RecoveryInvocationForm[] = [
 export function renderRecoveryInvocationQuickForms(
 	docPath: string = RECOVERY_RUNBOOK_DOC_PATH,
 ): string {
+	const labels: Record<RecoveryInvocationForm['surface'], string> = {
+		host: 'host command path',
+		powershell: 'PowerShell headless',
+		'git-bash': 'Git Bash (MSYS) headless',
+		cli: 'shell-neutral CLI',
+	};
+	const notes: Record<RecoveryInvocationForm['surface'], string> = {
+		host: '',
+		powershell: '',
+		'git-bash':
+			' (leading slash doubled \u2014 MSYS rewrites a single leading slash; never set MSYS_NO_PATHCONV=1 for the whole invocation)',
+		cli: '',
+	};
 	return [
 		`Shell-correct invocations (see ${docPath}):`,
-		`- host command path: /swarm recover <task_id>`,
-		`- PowerShell headless: opencode run --dir <project-dir> '/swarm recover <task_id>'`,
-		`- Git Bash (MSYS) headless: opencode run --dir <project-dir> "//swarm recover <task_id>" (leading slash doubled — MSYS rewrites a single leading slash; never set MSYS_NO_PATHCONV=1 for the whole invocation)`,
-		`- shell-neutral CLI: bunx opencode-swarm run recover <task_id> [--force]`,
+		...RECOVERY_INVOCATIONS.map(
+			(form) =>
+				`- ${labels[form.surface]}: ${form.invocation}${notes[form.surface]}`,
+		),
 	].join('\n');
 }
