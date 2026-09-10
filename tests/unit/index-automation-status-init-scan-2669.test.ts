@@ -71,7 +71,10 @@ describe('issue #2669 init-path containment source scan', () => {
 		// PRR-001: the success log must sit INSIDE the try (before the catch
 		// opens), never after it.
 		const tryBody = lines
-			.slice(callIndex, lines.findIndex((line) => line.includes('} catch (err)')))
+			.slice(
+				callIndex,
+				lines.findIndex((line) => line.includes('} catch (err)')),
+			)
 			.join('\n');
 		expect(tryBody.includes('Status artifact updated')).toBe(true);
 	});
