@@ -7,6 +7,49 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { log } from '../utils';
+
+/**
+ * Bounded failure categories for the optional status-artifact write
+ * (issue #2669). These are the operator-facing diagnostic vocabulary; see
+ * docs/automation-status.md. Un-mapped platform codes fall back to
+ * `unknown` by design.
+ */
+export type StatusWriteFailureCategory =
+	| 'dir_conflict'
+	| 'path_is_directory'
+	| 'permission'
+	| 'volume'
+	| 'missing_path'
+	| 'unknown';
+
+function classifyWriteFailure(err: unknown): {
+	category: StatusWriteFailureCategory;
+	code: string;
+} {
+	const code =
+		typeof err === 'object' && err !== null && 'code' in err
+			? String((err as { code?: unknown }).code ?? 'unknown')
+			: 'unknown';
+	switch (code) {
+		case 'EEXIST':
+		case 'ENOTDIR':
+			return { category: 'dir_conflict', code };
+		case 'EISDIR':
+			return { category: 'path_is_directory', code };
+		case 'EACCES':
+		case 'EPERM':
+		case 'EBUSY':
+			return { category: 'permission', code };
+		case 'EROFS':
+		case 'ENOSPC':
+			return { category: 'volume', code };
+		case 'ENOENT':
+			return { category: 'missing_path', code };
+		default:
+			return { category: 'unknown', code };
+	}
+}
 
 /** Automation status snapshot structure */
 export interface AutomationStatusSnapshot {
@@ -173,19 +216,45 @@ export class AutomationStatusArtifact {
 	}
 
 	/**
-	 * Write snapshot to disk
+	 * Write snapshot to disk.
+	 *
+	 * The status artifact is optional output (no production reader): this
+	 * write must never throw across the artifact boundary (issue #2669).
+	 * Every filesystem failure is contained here and surfaces as exactly one
+	 * bounded, categorized, debug-gated diagnostic — the in-memory snapshot
+	 * still advances so callers observe consistent state.
 	 */
 	private write(): void {
 		const filePath = this.getFilePath();
-		// Ensure directory exists
-		if (!fs.existsSync(this.swarmDir)) {
-			fs.mkdirSync(this.swarmDir, { recursive: true });
+		// Ensure directory exists. Separate catch arm so a directory-creation
+		// failure and a file-write failure each keep their own category.
+		try {
+			if (!fs.existsSync(this.swarmDir)) {
+				fs.mkdirSync(this.swarmDir, { recursive: true });
+			}
+		} catch (err) {
+			const { category, code } = classifyWriteFailure(err);
+			_internals.log('status artifact write failed (non-fatal)', {
+				operation: 'mkdir',
+				category,
+				code,
+			});
+			return;
 		}
-		fs.writeFileSync(
-			filePath,
-			JSON.stringify(this.currentSnapshot, null, 2),
-			'utf-8',
-		);
+		try {
+			fs.writeFileSync(
+				filePath,
+				JSON.stringify(this.currentSnapshot, null, 2),
+				'utf-8',
+			);
+		} catch (err) {
+			const { category, code } = classifyWriteFailure(err);
+			_internals.log('status artifact write failed (non-fatal)', {
+				operation: 'write',
+				category,
+				code,
+			});
+		}
 	}
 
 	/**
@@ -363,4 +432,52 @@ export class AutomationStatusArtifact {
 			outcome,
 		};
 	}
+}
+
+/**
+ * DI seam for testability (issue #2669). Internal write-failure diagnostics
+ * route through `_internals.log` instead of `log` directly so tests can
+ * capture the bounded category/code payload without mock.module.
+ */
+export const _internals: {
+	log: typeof log;
+} = {
+	log,
+};
+
+/**
+ * Bounded registry of shared per-project artifact instances (PR #2695
+ * review: stale-load-then-clobber). The class's mutators spread the
+ * IN-MEMORY snapshot and never re-read the disk, so two separate instances
+ * for the same swarmDir race each other: a sibling constructed before the
+ * deferred init write later clobbers it with stale config. Every
+ * production site (the deferred init task, the preflight integration) MUST
+ * share one instance per swarmDir so mutator ordering is irrelevant.
+ *
+ * Eviction: FIFO at MAX_SHARED_INSTANCES keeps the map bounded
+ * (AGENTS.md invariant 8). A long-lived multi-worktree process loses only
+ * in-memory freshness on eviction — the replacement instance's load()
+ * re-reads the last persisted snapshot.
+ */
+const MAX_SHARED_INSTANCES = 8;
+const sharedInstances = new Map<string, AutomationStatusArtifact>();
+
+export function getSharedAutomationStatusArtifact(
+	swarmDir: string,
+): AutomationStatusArtifact {
+	const existing = sharedInstances.get(swarmDir);
+	if (existing) {
+		// Refresh recency for FIFO eviction.
+		sharedInstances.delete(swarmDir);
+		sharedInstances.set(swarmDir, existing);
+		return existing;
+	}
+	const created = new AutomationStatusArtifact(swarmDir);
+	while (sharedInstances.size >= MAX_SHARED_INSTANCES) {
+		const oldest = sharedInstances.keys().next().value;
+		if (oldest === undefined) break;
+		sharedInstances.delete(oldest);
+	}
+	sharedInstances.set(swarmDir, created);
+	return created;
 }

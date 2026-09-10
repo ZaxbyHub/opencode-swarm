@@ -7,7 +7,10 @@
  * - Updates status artifact with results
  */
 
-import { AutomationStatusArtifact } from '../background/status-artifact';
+import {
+	type AutomationStatusArtifact,
+	getSharedAutomationStatusArtifact,
+} from '../background/status-artifact';
 import {
 	type PreflightHandler,
 	type PreflightRequest,
@@ -79,7 +82,7 @@ export function createPreflightIntegration(
 	// Create status artifact if enabled
 	let statusArtifact: AutomationStatusArtifact | null = null;
 	if (updateStatusArtifact && swarmDir) {
-		statusArtifact = new AutomationStatusArtifact(swarmDir);
+		statusArtifact = getSharedAutomationStatusArtifact(swarmDir);
 	}
 
 	// Create preflight handler
@@ -99,16 +102,37 @@ export function createPreflightIntegration(
 			preflightConfig,
 		);
 
-		// Update status artifact if available
+		// Update status artifact if available. The artifact is optional output:
+		// a persistence failure must never reject the preflight handler (the
+		// scheduler wrapper's catch does not apply to handler-time calls), so
+		// this carries its own bounded non-fatal catch (issue #2669, Change 1b)
+		// in addition to the writer's containment.
 		if (statusArtifact) {
 			const state = report.overall === 'pass' ? 'success' : 'failure';
-			statusArtifact.recordOutcome(state, request.currentPhase, report.message);
-
-			logger.log('[PreflightIntegration] Status artifact updated', {
-				state,
-				phase: request.currentPhase,
-				message: report.message,
-			});
+			try {
+				statusArtifact.recordOutcome(
+					state,
+					request.currentPhase,
+					report.message,
+				);
+				// Success line lives inside the try so a contained failure is
+				// never followed by a misleading "updated" record (PR review
+				// PRR-001 on #2669).
+				logger.log('[PreflightIntegration] Status artifact updated', {
+					state,
+					phase: request.currentPhase,
+					message: report.message,
+				});
+			} catch (err) {
+				const code =
+					typeof err === 'object' && err !== null && 'code' in err
+						? String((err as { code?: unknown }).code ?? 'unknown')
+						: 'unknown';
+				logger.log(
+					'[PreflightIntegration] Status artifact update failed (non-fatal)',
+					{ code },
+				);
+			}
 		}
 
 		logger.log('[PreflightIntegration] Preflight complete', {
