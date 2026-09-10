@@ -3,16 +3,6 @@ import pLimit from 'p-limit';
 import { z } from 'zod';
 import { getSwarmAgents } from '../agents/index.js';
 import {
-	type PrWorkflowPersistedStateBase,
-	readPrWorkflowGateStateFromDisk,
-} from '../pr-review/persistence.js';
-
-/** Gate-state shape the collect identity read needs (structural superset of base). */
-interface PrReviewCollectParentGateState
-	extends PrWorkflowPersistedStateBase,
-		PrReviewCollectParentStateSlice {}
-
-import {
 	CANDIDATE_FIELD_COUNT,
 	CANDIDATE_HEADERS,
 	CLEAN_FIELD_COUNT,
@@ -119,6 +109,10 @@ import { buildLaneOrientationBlock } from '../hooks/repo-graph-injection.js';
 import type { ParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { CIRCUIT_TERMINAL_DELEGATION_STATUSES } from '../pr-review/circuit.js';
+import {
+	type PrWorkflowPersistedStateBase,
+	readPrWorkflowGateStateFromDisk,
+} from '../pr-review/persistence.js';
 import { reducePrReviewEvent } from '../pr-review/reducer.js';
 import { swarmState } from '../state.js';
 import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
@@ -127,6 +121,11 @@ import * as logger from '../utils/logger.js';
 import { dispatchWithModelFallback } from '../utils/model-dispatch-fallback.js';
 import { isTransientProviderError } from '../utils/provider-error-classification.js';
 import { createSwarmTool } from './create-tool.js';
+
+/** Gate-state shape the collect identity read needs (structural superset of base). */
+interface PrReviewCollectParentGateState
+	extends PrWorkflowPersistedStateBase,
+		PrReviewCollectParentStateSlice {}
 
 export const MAX_LANES = 8;
 export const MAX_PROMPT_CHARS = 80_000;

@@ -1873,6 +1873,19 @@ export async function submitPrReviewResult(
 			};
 		}
 		repairRecord = repairCandidates[0];
+		// Issue #2585 review (PRR-003): the repair lever records the TRUTHFUL
+		// unresolved-terminal state of a lane whose child died before
+		// submitting. A CLEAN/FINDINGS outcome would assert coverage the dead
+		// child never produced, so the gate refuses it here, at selection,
+		// rather than letting the record settle under a misleading terminal
+		// disposition downstream.
+		if (parsedResult.data.outcome !== 'INCOMPLETE') {
+			return {
+				status: 'rejected',
+				reason:
+					'architect-parent repair may only record an unresolved-terminal (INCOMPLETE) outcome',
+			};
+		}
 	}
 	const parentSessionId = (repairRecord ?? preliminary[0]).parentSessionId;
 	const record = repairRecord ?? preliminary[0];
@@ -1929,6 +1942,17 @@ export async function submitPrReviewResult(
 		}
 		if (dispatchWorkflowInstanceId !== state.workflowInstanceId) {
 			return { status: 'rejected', reason: 'stale workflow instance binding' };
+		}
+		// Issue #2585 review (PRR-002): the repair lever is generation-bound too.
+		// A liveness-terminal record dispatched by a SUPERSEDED generation of
+		// this same instance must be refused here, with a typed reason naming
+		// the generation, instead of being selected above and reaching the
+		// publisher only to fail with the masked immutable-identity reason.
+		if (repairRecord && dispatchWorkflowRevision !== state.revision) {
+			return {
+				status: 'rejected',
+				reason: `superseded workflow generation binding (delegation generation ${dispatchWorkflowRevision}, active generation ${state.revision})`,
+			};
 		}
 		// Publication performs the authoritative exact-identity/state recheck while
 		// holding the delegation-evidence lock. Reuse the discovery snapshot here

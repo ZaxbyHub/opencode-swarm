@@ -1,11 +1,9 @@
 /**
- * Issue #2585 (Roadmap H8) — C8 / AC5 / R11: an ordinary denied action names
- * its ACTUAL cause and the next step; store uncertainty survives every
- * consumer; retry is bounded; `pr_workflow_status` is truthful (current /
- * stale / unknown); repair and abort stay reachable; distinct causes get
- * distinct messages.
- *
- * No mock.module. Seams (`_test_exports` / `_internals`) restored in afterEach.
+ * Issue #2585 (Roadmap H8) — C8 / AC5 / R11: a denied action names its ACTUAL
+ * cause and next step; store uncertainty survives every consumer; retry is
+ * bounded; `pr_workflow_status` is truthful (current/stale/unknown); repair
+ * and abort stay reachable; distinct causes get distinct messages. No
+ * mock.module; seams restored in afterEach.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -74,14 +72,9 @@ const ORIGINALS = {
 let directory = '';
 let restoreClock: (() => void) | null = null;
 
-function parsed(value: unknown): Record<string, unknown> & {
-	success: boolean;
-	message?: string;
-} {
-	return JSON.parse(String(value)) as Record<string, unknown> & {
-		success: boolean;
-		message?: string;
-	};
+type Parsed = Record<string, unknown> & { success: boolean; message?: string };
+function parsed(value: unknown): Parsed {
+	return JSON.parse(String(value)) as Parsed;
 }
 
 interface StatusShape {
@@ -272,7 +265,15 @@ afterEach(async () => {
 	statusInternals.resolveCurrentGitHeadAsync = ORIGINALS.statusHead;
 	statusInternals.resolveIsWorkingTreeCleanAsync = ORIGINALS.statusClean;
 	closeAllProjectDbs();
-	await fs.promises.rm(directory, { recursive: true, force: true });
+	for (let i = 0; ; i++) {
+		try {
+			await fs.promises.rm(directory, { recursive: true, force: true });
+			break;
+		} catch (e) {
+			if (i >= 4 || (e as NodeJS.ErrnoException).code !== 'EBUSY') throw e;
+			await new Promise((r) => setTimeout(r, 20));
+		}
+	}
 	restoreClock?.();
 });
 

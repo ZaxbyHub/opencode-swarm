@@ -28,6 +28,7 @@ import {
 	encodePrReviewWorkflowBinding,
 	prReviewLaneResultEnvelopeDigest,
 } from '../../../src/background/pr-review-contract.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	activatePrWorkflow,
 	bindPrReviewBase,
@@ -91,7 +92,16 @@ afterEach(async () => {
 		originalResolveIsWorkingTreeCleanAsync;
 	gateInternals.resolvePrReviewDiffStatsAsync =
 		originalResolvePrReviewDiffStatsAsync;
-	await fs.rm(directory, { recursive: true, force: true });
+	closeAllProjectDbs();
+	for (let i = 0; ; i++) {
+		try {
+			await fs.rm(directory, { recursive: true, force: true });
+			break;
+		} catch (e) {
+			if (i >= 4 || (e as NodeJS.ErrnoException).code !== 'EBUSY') throw e;
+			await new Promise((r) => setTimeout(r, 20));
+		}
+	}
 });
 
 interface FixtureRecord {

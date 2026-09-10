@@ -228,6 +228,20 @@ function recordedReceipt(
 	return record?.result;
 }
 
+/** Windows EBUSY-safe teardown: bounded rm retry (4 attempts, 20ms apart). */
+async function removeTempDir(): Promise<void> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			await fs.rm(directory, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			if (attempt >= 4 || (error as NodeJS.ErrnoException).code !== 'EBUSY')
+				throw error;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+	}
+}
+
 beforeEach(async () => {
 	restoreClock = freezeClock({ fixedNow: FIXED_NOW });
 	directory = canonicalMkdtemp('pr-review-architect-repair-');
@@ -257,7 +271,7 @@ afterEach(async () => {
 	_test_exports.resolvePrReviewDiffStats = originals.diffStats;
 	_test_exports.resolvePrReviewDiffStatsAsync = originals.diffStatsAsync;
 	closeAllProjectDbs();
-	await fs.rm(directory, { recursive: true, force: true });
+	await removeTempDir();
 	restoreClock?.();
 });
 
@@ -267,7 +281,7 @@ describe('architect-parent repair lever — submitPrReviewResult (issue #2585 AC
 		await seedLane(run);
 		await flipTerminal(CHILD_SESSION_ID, 'cancelled');
 
-		const outcome = await submitRepair(SESSION_ID, cleanEnvelope());
+		const outcome = await submitRepair(SESSION_ID, incompleteEnvelope());
 		if (outcome.status === 'rejected') {
 			throw new Error(`AC13 architect repair lever absent: ${outcome.reason}`);
 		}
@@ -288,7 +302,7 @@ describe('architect-parent repair lever — submitPrReviewResult (issue #2585 AC
 		await seedLane(run);
 		await flipTerminal(CHILD_SESSION_ID, shape);
 
-		const outcome = await submitRepair(SESSION_ID, cleanEnvelope());
+		const outcome = await submitRepair(SESSION_ID, incompleteEnvelope());
 		if (outcome.status === 'rejected') {
 			throw new Error(`AC13 architect repair lever absent: ${outcome.reason}`);
 		}
@@ -328,21 +342,58 @@ describe('architect-parent repair lever — submitPrReviewResult (issue #2585 AC
 		});
 	});
 
-	test('stale workflow binding: a repaired lane from a superseded generation/instance is refused', async () => {
+	test('stale workflow binding (instance only): a repaired lane from a superseded instance is refused', async () => {
 		const run = await establishRun();
-		// A lane dispatched under an older workflow instance AND a generation
-		// that no longer matches state.revision (abort + reactivate shape).
+		// Instance differs, generation EQUAL: isolates the instance-binding leg.
 		await seedLane({
 			workflowInstanceId: 'wf-superseded-instance',
+			generation: run.generation,
+		});
+		await flipTerminal(CHILD_SESSION_ID, 'cancelled');
+
+		const outcome = await submitRepair(SESSION_ID, incompleteEnvelope());
+		expect(outcome).toEqual({
+			status: 'rejected',
+			reason: 'stale workflow instance binding',
+		});
+	});
+
+	test('stale workflow binding (generation only): a same-instance superseded-generation lane is refused with a typed reason', async () => {
+		const run = await establishRun();
+		// Instance EQUAL, generation differs: isolates the generation-binding
+		// leg (the abort + reactivate shape within one workflow instance).
+		await seedLane({
+			workflowInstanceId: run.workflowInstanceId,
 			generation: run.generation + 3,
 		});
 		await flipTerminal(CHILD_SESSION_ID, 'cancelled');
 
-		const outcome = await submitRepair(SESSION_ID, cleanEnvelope());
+		const outcome = await submitRepair(SESSION_ID, incompleteEnvelope());
 		expect(outcome.status).toBe('rejected');
 		if (outcome.status === 'rejected') {
-			expect(outcome.reason).toBe('stale workflow instance binding');
+			expect(outcome.reason).toContain(
+				'superseded workflow generation binding',
+			);
+			expect(outcome.reason).toContain(`${run.generation + 3}`);
+			expect(outcome.reason).toContain(`${run.generation}`);
 		}
+	});
+
+	test('outcome gate: a CLEAN repair envelope is refused — repair may only record INCOMPLETE', async () => {
+		const run = await establishRun();
+		await seedLane(run);
+		await flipTerminal(CHILD_SESSION_ID, 'cancelled');
+
+		// The dead child never produced coverage, so a CLEAN attestation via the
+		// repair lever would be untruthful; the gate must refuse it.
+		expect(await submitRepair(SESSION_ID, cleanEnvelope())).toEqual({
+			status: 'rejected',
+			reason:
+				'architect-parent repair may only record an unresolved-terminal (INCOMPLETE) outcome',
+		});
+		expect(recordedReceipt(CHILD_SESSION_ID)?.prReviewResultReceipt).toBe(
+			undefined,
+		);
 	});
 
 	test('truthful completion: the repaired lane completes as disclosed unresolved-terminal (INCOMPLETE)', async () => {

@@ -1,20 +1,16 @@
 /**
  * Issue #2585 (Roadmap H8) — C6 / AC4 / R06–R08: verdict/coverage policy
- * values runtime-enforced against repo constants, honored end to end.
- *
- * 1. R06 vocabulary: `PR_REVIEW_REPORT_VERDICTS` and every
- *    `allowedPrReviewReportVerdicts` row pinned exactly (completion.ts); the
- *    REAL reducer's acceptance matrix over every (kind, verdict) pair equals
- *    the policy function's matrix.
- * 2. R07 missing base: a five-of-six settlement keeps the missing dimension an
- *    explicit NOT_LAUNCHED record; PARTIAL never admits APPROVE — reducer AND
- *    gate completion refusal.
- * 3. R07 uncertain read: a torn delegation store fails settlement closed
- *    (never NOT_LAUNCHED); PR_REVIEW completion refuses typed while the gate
- *    stays active (#2511 precedent: completion-uncertainty-2511.test.ts).
- * 4. R08 healthy zero coverage: completes ONLY as forced INCOMPLETE through
- *    the gate's NO_COVERAGE path, with the durable v2 disclosure.
- *
+ * values runtime-enforced against repo constants, honored end to end. R06
+ * vocabulary: `PR_REVIEW_REPORT_VERDICTS` and every
+ * `allowedPrReviewReportVerdicts` row pinned exactly (completion.ts); the
+ * REAL reducer's acceptance matrix over every (kind, verdict) pair equals
+ * the policy function's matrix. R07 missing base: a five-of-six settlement
+ * keeps the missing dimension an explicit NOT_LAUNCHED record; PARTIAL never
+ * admits APPROVE — reducer AND gate completion refusal. R07 uncertain read:
+ * a torn delegation store fails settlement closed (never NOT_LAUNCHED);
+ * PR_REVIEW completion refuses typed while the gate stays active (#2511
+ * precedent: completion-uncertainty-2511.test.ts). R08 healthy zero coverage
+ * completes ONLY as forced INCOMPLETE, durable v2 disclosure included.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -24,6 +20,7 @@ import {
 	BACKGROUND_DELEGATIONS_MANIFEST_FILE,
 } from '../../../src/background/pending-delegations.js';
 import { PR_REVIEW_BASE_DIMENSION_IDS } from '../../../src/background/pr-review-contract.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -53,11 +50,8 @@ import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 
-/**
- * `persistPrReviewBatch` stamps its records with `PR_ARTIFACT_SESSION_ID` as
- * the parent session; the settlement reads batches by that exact parent, so
- * the gate session under test must be the same identity.
- */
+/** persistPrReviewBatch stamps PR_ARTIFACT_SESSION_ID as the parent; the
+ * settlement reads batches by that parent, so the gate session must match. */
 const SESSION_ID = PR_ARTIFACT_SESSION_ID;
 const OTHER_SESSION_ID = 'ses_r06_raw_store';
 const BOUND_HEAD = PR_ARTIFACT_HEAD_SHA;
@@ -159,8 +153,7 @@ beforeEach(() => {
 	});
 	_test_exports.resolveIsWorkingTreeClean = () => true;
 	_test_exports.resolveIsWorkingTreeCleanAsync = async () => true;
-	// Pin "no host" so lane settlement probes cannot wait on a real host client
-	// leaked by another file (abort-tool precedent).
+	// Pin "no host" (abort-tool precedent): probes cannot wait on a host client.
 	_test_exports.getSessionOps = () => null;
 });
 
@@ -174,7 +167,16 @@ afterEach(async () => {
 	_test_exports.resolveIsWorkingTreeClean = ORIGINALS.clean;
 	_test_exports.resolveIsWorkingTreeCleanAsync = ORIGINALS.cleanAsync;
 	_test_exports.getSessionOps = ORIGINALS.sessionOps;
-	await fs.promises.rm(directory, { recursive: true, force: true });
+	closeAllProjectDbs();
+	for (let i = 0; ; i++) {
+		try {
+			await fs.promises.rm(directory, { recursive: true, force: true });
+			break;
+		} catch (e) {
+			if (i >= 4 || (e as NodeJS.ErrnoException).code !== 'EBUSY') throw e;
+			await new Promise((r) => setTimeout(r, 20));
+		}
+	}
 	restoreClock?.();
 });
 
@@ -383,8 +385,7 @@ describe('R07 uncertain batch read — unknown, never NOT_LAUNCHED (issue #2511)
 			),
 		).toThrow(/delegation store is unreadable/i);
 
-		// The gate's completion refuses with the typed uncertainty and names the
-		// repair path; the dispatch evidence is UNKNOWN, not absent.
+		// The gate's completion refuses typed and names the repair path (UNKNOWN).
 		await expect(
 			completePrWorkflow(directory, OTHER_SESSION_ID, 'PR_REVIEW', BOUND_HEAD, {
 				reportVerdict: 'INCOMPLETE',
@@ -472,8 +473,7 @@ describe('R08 healthy zero coverage — completes only as forced INCOMPLETE', ()
 			expect(entry.reason_kind).toBe('not_launched');
 		}
 
-		// The gate cleared and the durable v2 disclosure proves the NO_COVERAGE
-		// kind from the immutable artifact, not only the audit line.
+		// The durable v2 disclosure proves the NO_COVERAGE kind from the artifact.
 		expect(await readPrWorkflowGateState(directory, SESSION_ID)).toBeNull();
 		const disclosureRoot = path.join(directory, '.swarm', 'pr-review');
 		const disclosurePaths = fs

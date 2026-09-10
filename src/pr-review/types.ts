@@ -204,12 +204,11 @@ export type PrReviewEvent =
 			outcome: 'CLEAN' | 'FINDINGS' | 'INCOMPLETE';
 			existingReceiptDigest?: string | undefined;
 			/**
-			 * Issue #2585 (AC13): present only when the lane's dispatching parent
-			 * session (not the dead child) submitted this result through the
-			 * architect-parent repair lever. Construction site:
-			 * `submitPrReviewResult` in `src/hooks/pr-workflow-gate.ts`. The
-			 * reducer does not branch on it — it rides the event so ledger-only
-			 * consumers see the architect provenance.
+			 * Provenance marker on the reducer event. Currently no consumer reads
+			 * this field — the durable provenance record is the receipt-side
+			 * `submittedBy` / `submittedByParentSessionId` (see
+			 * `PrReviewResultReceiptSchema`). Kept for ledger parity with the
+			 * receipt.
 			 */
 			submittedBy?: 'workflow_parent' | undefined;
 	  }

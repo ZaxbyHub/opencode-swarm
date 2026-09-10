@@ -308,9 +308,11 @@ beforeEach(async () => {
 			onPrompt: (sessionID, prompt) => deliveredPrompts.set(sessionID, prompt),
 		}),
 	);
-	// Wait out the post-boot config write, then commit the host config so
-	// ONLY the two user changes are dirty/untracked at prepare time.
-	await new Promise((resolve) => setTimeout(resolve, 400));
+	// Race: plugin rewrites the host config post-boot; poll (PRR-006, 20x50ms).
+	const cfg = path.join(directory, '.opencode/opencode-swarm.json');
+	const boot = await fs.readFile(cfg, 'utf8');
+	for (let i = 0; i < 20 && (await fs.readFile(cfg, 'utf8')) === boot; i++)
+		await new Promise((r) => setTimeout(r, 50));
 	await git(['add', '.opencode']);
 	await git(['commit', '-m', 'host config']);
 	baseHead = await git(['rev-parse', 'HEAD']);

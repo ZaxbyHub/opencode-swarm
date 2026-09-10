@@ -271,7 +271,7 @@ afterEach(async () => {
 	dispatchInternals.resolveExactMergeBaseAsync = originals.dispatchBase;
 	dispatchInternals.loadPluginConfig = originals.dispatchConfig;
 	triggerInternals.resolvePrWorkflowRevisionDigest = originals.triggerRevision;
-	triggerInternals.resolvePrReviewRevisionDigestAsync =
+	triggerInternals.resolvePrWorkflowRevisionDigestAsync =
 		originals.triggerRevisionAsync;
 	triggerInternals.resolveMergeBase = originals.triggerBase;
 	triggerInternals.resolveMergeBaseAsync = originals.triggerBaseAsync;
