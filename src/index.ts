@@ -2503,13 +2503,18 @@ async function initializeOpenCodeSwarm(
 		// permission failure can never block manifest delivery, and the
 		// writer itself contains the failure with a bounded categorized
 		// diagnostic.
-		const { AutomationStatusArtifact: ASA } = await import(
+		const { getSharedAutomationStatusArtifact } = await import(
 			'./background/status-artifact'
 		);
 		const swarmDir = path.resolve(ctx.directory, '.swarm');
 		const automationStatusArtifactPostInitTask = async () => {
 			try {
-				const artifact = new ASA(swarmDir);
+				// Shared per-swarmDir instance: the preflight integration
+				// constructs its artifact during init (before this deferred
+				// task runs) and shares the same in-memory snapshot, so a
+				// later recordOutcome can never clobber the config written
+				// here (PR #2695 review: stale-load-then-clobber).
+				const artifact = getSharedAutomationStatusArtifact(swarmDir);
 				artifact.updateConfig(
 					automationConfig.mode,
 					automationConfig.capabilities,

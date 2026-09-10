@@ -55,15 +55,24 @@ describe('issue #2669 init-path containment source scan', () => {
 		);
 		expect(callIndex).toBeGreaterThanOrEqual(0);
 		// The try must open within the 6 lines above the call and the catch's
-		// bounded non-fatal diagnostic (fix plan Change 1b) within the 12
-		// lines below it.
+		// bounded non-fatal diagnostic (fix plan Change 1b) within the same
+		// handler block below it. The window spans the success log that lives
+		// inside the try (PRR-001: the "updated" record must only fire on
+		// success) plus the catch arm's code extraction, hence the 24-line
+		// reach.
 		const tryWindow = lines
 			.slice(Math.max(0, callIndex - 6), callIndex + 1)
 			.join('\n');
-		const catchWindow = lines.slice(callIndex, callIndex + 13).join('\n');
+		const catchWindow = lines.slice(callIndex, callIndex + 24).join('\n');
 		expect(tryWindow.includes('try {')).toBe(true);
 		expect(
 			catchWindow.includes('Status artifact update failed (non-fatal)'),
 		).toBe(true);
+		// PRR-001: the success log must sit INSIDE the try (before the catch
+		// opens), never after it.
+		const tryBody = lines
+			.slice(callIndex, lines.findIndex((line) => line.includes('} catch (err)')))
+			.join('\n');
+		expect(tryBody.includes('Status artifact updated')).toBe(true);
 	});
 });

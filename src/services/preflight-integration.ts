@@ -7,7 +7,10 @@
  * - Updates status artifact with results
  */
 
-import { AutomationStatusArtifact } from '../background/status-artifact';
+import {
+	type AutomationStatusArtifact,
+	getSharedAutomationStatusArtifact,
+} from '../background/status-artifact';
 import {
 	type PreflightHandler,
 	type PreflightRequest,
@@ -79,7 +82,7 @@ export function createPreflightIntegration(
 	// Create status artifact if enabled
 	let statusArtifact: AutomationStatusArtifact | null = null;
 	if (updateStatusArtifact && swarmDir) {
-		statusArtifact = new AutomationStatusArtifact(swarmDir);
+		statusArtifact = getSharedAutomationStatusArtifact(swarmDir);
 	}
 
 	// Create preflight handler
@@ -112,6 +115,14 @@ export function createPreflightIntegration(
 					request.currentPhase,
 					report.message,
 				);
+				// Success line lives inside the try so a contained failure is
+				// never followed by a misleading "updated" record (PR review
+				// PRR-001 on #2669).
+				logger.log('[PreflightIntegration] Status artifact updated', {
+					state,
+					phase: request.currentPhase,
+					message: report.message,
+				});
 			} catch (err) {
 				const code =
 					typeof err === 'object' && err !== null && 'code' in err
@@ -122,12 +133,6 @@ export function createPreflightIntegration(
 					{ code },
 				);
 			}
-
-			logger.log('[PreflightIntegration] Status artifact updated', {
-				state,
-				phase: request.currentPhase,
-				message: report.message,
-			});
 		}
 
 		logger.log('[PreflightIntegration] Preflight complete', {

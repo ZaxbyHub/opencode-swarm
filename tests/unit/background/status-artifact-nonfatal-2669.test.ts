@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import {
 	_internals,
 	AutomationStatusArtifact,
+	getSharedAutomationStatusArtifact,
 	type StatusWriteFailureCategory,
 } from '../../../src/background/status-artifact.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
@@ -169,5 +170,53 @@ describe('AutomationStatusArtifact non-fatal writes (issue #2669)', () => {
 		const failures = failureLogs();
 		expect(failures.length).toBeGreaterThan(0);
 		expect(failures[0].category).toBe('permission');
+	});
+	test('shared-instance registry: preflight-side recordOutcome cannot clobber deferred init config', () => {
+		const swarmDir = path.join(tmpRoot, '.swarm-shared');
+		// Production init ordering: the preflight integration constructs its
+		// artifact DURING init (before the deferred task runs), so a raw
+		// constructor here holds the pre-init (manual) snapshot.
+		const staleSibling = new AutomationStatusArtifact(swarmDir);
+
+		const artifact = getSharedAutomationStatusArtifact(swarmDir);
+
+		// Deferred init task writes the opt-in config...
+		artifact.updateConfig('hybrid', {
+			plan_sync: false,
+			phase_preflight: true,
+			config_doctor_on_startup: false,
+			config_doctor_autofix: false,
+			evidence_auto_summaries: false,
+			decision_drift_detection: false,
+		});
+
+		// ...the preflight integration resolves the SAME instance (it
+		// constructs during init, before the deferred task runs)...
+		expect(getSharedAutomationStatusArtifact(swarmDir)).toBe(artifact);
+
+		// ...so a later handler-time recordOutcome preserves the config
+		// instead of clobbering it with a stale snapshot.
+		artifact.recordOutcome('success', 2, 'ok');
+		const persisted = JSON.parse(
+			fs.readFileSync(path.join(swarmDir, 'automation-status.json'), 'utf-8'),
+		) as {
+			mode: string;
+			enabled: boolean;
+			lastOutcome: { state: string } | null;
+		};
+		expect(persisted.mode).toBe('hybrid');
+		expect(persisted.enabled).toBe(true);
+		expect(persisted.lastOutcome?.state).toBe('success');
+		expect(failureLogs()).toEqual([]);
+
+		// Hazard pin: had the integration kept its own instance, its stale
+		// manual snapshot would clobber the deferred config — this is why
+		// production sites must go through the shared registry.
+		staleSibling.recordOutcome('failure', 1, 'stale');
+		const clobbered = JSON.parse(
+			fs.readFileSync(path.join(swarmDir, 'automation-status.json'), 'utf-8'),
+		) as { mode: string; enabled: boolean };
+		expect(clobbered.mode).toBe('manual');
+		expect(clobbered.enabled).toBe(false);
 	});
 });

@@ -39,6 +39,13 @@ categories are:
 Failures never trigger repair passes or network work; the next successful
 mutator call simply rewrites the artifact.
 
+The table above covers the error-raising classes. Two further notes on file
+integrity: a write that fails mid-way (e.g. `volume`) can leave a truncated
+file on disk until the next successful write replaces it, and writes are not
+locked or atomic, so two processes writing simultaneously could in principle
+interleave — a torn file parses as absent on the next read and heals on the
+next successful write, and neither case can affect the plugin itself.
+
 ## Diagnosing a missing status artifact
 
 1. Run once with `OPENCODE_SWARM_DEBUG=1` and reproduce the state

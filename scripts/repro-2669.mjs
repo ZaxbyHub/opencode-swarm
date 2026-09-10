@@ -16,7 +16,7 @@
  *   diagnostics — with OPENCODE_SWARM_DEBUG=1 and a corrupt fixture, a child
  *                 run must exit 0, print no FATAL banner, and emit at least one
  *                 non-fatal diagnostic line referencing the status artifact.
- * Usage: node check-2669-matrix.mjs <optin|default|artifact|diagnostics>
+ * Usage: node scripts/repro-2669.mjs <optin|default|artifact|diagnostics>  (or: bun run repro:2669 -- <mode>)
  * Targets the tree at process.cwd() (base worktree or live root — the script
  * itself may live elsewhere). Builds dist via `bun run build` first (skip with
  * REPRO_2669_SKIP_BUILD=1 when dist/index.js exists); bootstraps node_modules
@@ -353,7 +353,7 @@ async function main() {
 	else if (mode === 'artifact') await runArtifact(plugin);
 	else if (mode === 'diagnostics') await runDiagnostics();
 	else {
-		console.error('usage: node check-2669-matrix.mjs <optin|default|artifact|diagnostics>');
+		console.error('usage: node scripts/repro-2669.mjs <optin|default|artifact|diagnostics>');
 		process.exit(2);
 	}
 }
