@@ -62,6 +62,7 @@ import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
 import { clearTrajectoryCache } from './prm/trajectory-store.js';
 import type { PatternMatch } from './prm/types.js';
+import type { ReviewRouteEvidence } from './review/routing-enforcement.js';
 import { clearScopeBindings } from './scope/scope-binding.js';
 import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
 import { clearAllTurnLedgers } from './services/injection-budget';
@@ -440,6 +441,13 @@ export interface AgentSessionState {
 	 * Always populated — Stage B is unconditionally parallel.
 	 */
 	stageBCompletion?: Map<string, Set<'reviewer' | 'test_engineer'>>;
+	/** Exact route-bound Stage B evidence; role presence alone is not authoritative. */
+	stageBRouteEvidence?: Map<string, ReviewRouteEvidence[]>;
+	/**
+	 * Tasks dispatched through v1 review routing. This positive marker prevents a
+	 * missing route receipt from being mistaken for pre-v1 legacy state.
+	 */
+	stageBRouteRequiredTasks?: Set<string>;
 	/** v6.71+ Council mode: per-task council verdict, recorded by delegation-gate when submit_council_verdicts resolves. */
 	taskCouncilApproved?: Map<
 		string,
@@ -2122,6 +2130,8 @@ export function startAgentSession(
 		taskWorkflowStates: new Map(),
 		taskWorkflowCache: new Map(),
 		stageBCompletion: new Map(),
+		stageBRouteEvidence: new Map(),
+		stageBRouteRequiredTasks: new Set(),
 		taskCouncilApproved: new Map(),
 		taskCouncilWorkflowGeneration: new Map(),
 		pendingCouncilRequirements: new Map(),
@@ -2436,6 +2446,12 @@ export function ensureAgentSession(
 		// PR 2 Stage B barrier migration safety
 		if (!session.stageBCompletion) {
 			session.stageBCompletion = new Map();
+		}
+		if (!session.stageBRouteEvidence) {
+			session.stageBRouteEvidence = new Map();
+		}
+		if (!session.stageBRouteRequiredTasks) {
+			session.stageBRouteRequiredTasks = new Set();
 		}
 		// v6.71+ Council mode migration safety
 		if (!session.taskCouncilApproved) {
@@ -3104,6 +3120,8 @@ export function advanceTaskState(
 	// fire prematurely from stale completion data.
 	if (newState === 'complete') {
 		session.stageBCompletion?.delete(taskId);
+		clearStageBRouteEvidence(session, taskId);
+		clearStageBRouteRequired(session, taskId);
 		completeModifiedFilesForTask(session, taskId);
 	}
 	if (options?.emitTelemetry !== false) {
@@ -3239,6 +3257,137 @@ export function recordStageBCompletion(
 	} else {
 		session.stageBCompletion.set(taskId, new Set([agent]));
 	}
+}
+
+/**
+ * Reserve a bounded in-memory route-evidence slot and return a rollback for
+ * callers that still have to publish the corresponding durable evidence.
+ *
+ * The reservation remains visible while the caller awaits its durable write,
+ * which prevents concurrent completions from oversubscribing the 32-entry
+ * projection. If that write fails, invoking the rollback restores the exact
+ * prior slot (or removes a newly-added slot), so a retry is not poisoned by a
+ * failed attempt.
+ */
+export function reserveStageBRouteEvidence(
+	session: AgentSessionState,
+	taskId: string,
+	evidence: ReviewRouteEvidence,
+): (() => void) | null {
+	if (!isValidTaskId(taskId)) return null;
+	if (!session.stageBRouteEvidence) session.stageBRouteEvidence = new Map();
+	const entries = session.stageBRouteEvidence.get(taskId) ?? [];
+	const dispatchIdentity = (entry: ReviewRouteEvidence): string | null => {
+		if (
+			!entry.callId ||
+			!entry.childSessionId ||
+			typeof entry.generation !== 'number'
+		) {
+			return null;
+		}
+		return [
+			entry.role,
+			entry.sessionId ?? '',
+			entry.taskId ?? '',
+			entry.callId,
+			entry.childSessionId,
+			String(entry.generation),
+		].join('\u0000');
+	};
+	const incomingDispatchIdentity = dispatchIdentity(evidence);
+	const existingIndex = entries.findIndex(
+		(entry) =>
+			entry.role === evidence.role &&
+			((incomingDispatchIdentity !== null &&
+				dispatchIdentity(entry) === incomingDispatchIdentity) ||
+				(incomingDispatchIdentity === null &&
+					dispatchIdentity(entry) === null &&
+					entry.identity === evidence.identity)),
+	);
+	if (existingIndex >= 0) {
+		// A retry replaces the same deterministic slot binding. Keeping one
+		// entry prevents a later successful retry from counting twice.
+		const previousEntry = entries[existingIndex];
+		const reservedEntry = { ...evidence };
+		entries[existingIndex] = reservedEntry;
+		session.stageBRouteEvidence.set(taskId, entries);
+		return () => {
+			// Another completion may have reserved or settled a slot while the
+			// durable evidence write was in flight. Locate our exact token instead
+			// of relying on the original index, and never overwrite that newer
+			// completion when it has already replaced us.
+			if (session.stageBRouteEvidence?.get(taskId) !== entries) return;
+			const reservedIndex = entries.indexOf(reservedEntry);
+			if (reservedIndex < 0) return;
+			entries[reservedIndex] = previousEntry;
+		};
+	}
+	if (entries.length >= 32) return null;
+	const reservedEntry = { ...evidence };
+	entries.push(reservedEntry);
+	session.stageBRouteEvidence.set(taskId, entries);
+	return () => {
+		// Do not require this reservation to remain the last entry. A concurrent
+		// completion can append its own slot before the durable write settles;
+		// removing by identity releases only the failed dispatch and preserves
+		// that later completion.
+		if (session.stageBRouteEvidence?.get(taskId) !== entries) return;
+		const reservedIndex = entries.indexOf(reservedEntry);
+		if (reservedIndex < 0) return;
+		entries.splice(reservedIndex, 1);
+		if (entries.length === 0) session.stageBRouteEvidence?.delete(taskId);
+	};
+}
+
+export function recordStageBRouteEvidence(
+	session: AgentSessionState,
+	taskId: string,
+	evidence: ReviewRouteEvidence,
+): boolean {
+	return reserveStageBRouteEvidence(session, taskId, evidence) !== null;
+}
+
+export function getStageBRouteEvidence(
+	session: AgentSessionState,
+	taskId: string,
+): ReviewRouteEvidence[] {
+	return (session.stageBRouteEvidence?.get(taskId) ?? []).map((entry) => ({
+		...entry,
+	}));
+}
+
+export function clearStageBRouteEvidence(
+	session: AgentSessionState,
+	taskId: string,
+): void {
+	session.stageBRouteEvidence?.delete(taskId);
+}
+
+/** Mark a task as requiring the versioned review-route receipt contract. */
+export function markStageBRouteRequired(
+	session: AgentSessionState,
+	taskId: string,
+): void {
+	if (!session.stageBRouteRequiredTasks) {
+		session.stageBRouteRequiredTasks = new Set();
+	}
+	session.stageBRouteRequiredTasks.add(taskId);
+}
+
+/** True only for a task positively marked as v1-routed in this session. */
+export function isStageBRouteRequired(
+	session: AgentSessionState,
+	taskId: string,
+): boolean {
+	return session.stageBRouteRequiredTasks?.has(taskId) === true;
+}
+
+/** Clear the route requirement after a task reaches its terminal state. */
+export function clearStageBRouteRequired(
+	session: AgentSessionState,
+	taskId: string,
+): void {
+	session.stageBRouteRequiredTasks?.delete(taskId);
 }
 
 /**

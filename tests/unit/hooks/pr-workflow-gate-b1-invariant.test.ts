@@ -425,3 +425,50 @@ describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory',
 		expect(next?.message).not.toContain('internal invariant violated');
 	});
 });
+
+describe('critic settlement diagnostics — regression: preserve attempted NME evidence (R05)', () => {
+	test('completion names the missing authenticated critic verdict', async () => {
+		await establishReviewPrerequisites();
+		await settleReviewerPhase('rv-nme', reviewed(BASE_IDS));
+		await recordPrReviewValidationBatch(
+			tempDir,
+			SESSION_ID,
+			'critic',
+			[
+				{
+					laneId: 'critic-nme',
+					workflowLane: 'critic-nme',
+					reviewItemIds: [...BASE_IDS],
+				},
+			],
+			{ batchId: 'critic-nme', prHeadSha: HEAD_SHA },
+		);
+		await persistBatch(
+			'critic-nme',
+			'swarm-pr-review:critic',
+			[{ laneId: 'critic-nme', workflowLane: 'critic-nme' }],
+			{
+				// Before R05, terminal readiness projected this attempted-but-unsettled
+				// row into the generic critic-coverage message, hiding the established
+				// authenticated-verdict diagnostic.
+				textOverride: [
+					'[CRITIC] | C-0 | NEEDS_MORE_EVIDENCE | MEDIUM | evidence was inconclusive | gather more evidence',
+					...BASE_IDS.slice(1).map(
+						(id) =>
+							`[CRITIC] | ${id} | UPHELD | HIGH | independently verified | no change`,
+					),
+				].join('\n'),
+				subagentSessionId: 'critic-nme',
+			},
+		);
+		const error = await errorFrom(
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'REQUEST_CHANGES',
+			}),
+		);
+		expect(error?.message).toContain(
+			'critic items lack an authenticated verdict',
+		);
+		expect(error?.message).toContain('C-0');
+	});
+});

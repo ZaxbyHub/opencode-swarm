@@ -188,7 +188,7 @@ async function materializeTerminalReview(
 	return handoffRelativePath(runId);
 }
 
-describe('PR feedback continuation consent gates (#2333)', () => {
+describe('PR feedback continuation consent gates (#2333, F-016)', () => {
 	test('direct transition API rejects a handoff that was not explicitly confirmed by the command path', async () => {
 		const handoffPath = await materializeTerminalReview();
 
@@ -201,11 +201,11 @@ describe('PR feedback continuation consent gates (#2333)', () => {
 		).rejects.toThrow(/confirm|consent|exact command/i);
 	});
 
-	test('post-clear first exact continuation confirms the persisted offer and starts PR_FEEDBACK', async () => {
+	test('post-clear first exact continuation uses an allowed REQUEST_CHANGES report (F-016)', async () => {
 		const handoffPath = await materializeTerminalReview();
 		await expect(
 			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
-				reportVerdict: 'APPROVE',
+				reportVerdict: 'REQUEST_CHANGES',
 			}),
 		).resolves.toBe('completed');
 
@@ -276,7 +276,7 @@ describe('PR feedback continuation consent gates (#2333)', () => {
 	test('post-clear continuation rejects a tampered source workflow identity', async () => {
 		const handoffPath = await materializeTerminalReview();
 		await completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
-			reportVerdict: 'APPROVE',
+			reportVerdict: 'REQUEST_CHANGES',
 		});
 		const consentPath = path.join(
 			tempDir,

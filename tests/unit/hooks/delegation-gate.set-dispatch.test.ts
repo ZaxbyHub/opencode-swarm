@@ -24,11 +24,13 @@ import {
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { createDelegationGateHook } from './_delegation-gate-helpers';
 
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	const real = fs.realpathSync(dir);
+	fs.mkdirSync(path.join(real, '.opencode'), { recursive: true });
 	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
 	return real;
 }
@@ -134,8 +136,12 @@ async function runGateDispatch(
 
 describe('FR-007 set-dispatch per-task attribution', () => {
 	let tempDir: string;
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 	beforeEach(() => {
+		// Stage-B route receipts authenticate with a user-scoped MAC key. Redirect
+		// app-data roots before exercising the hook so tests stay hermetic.
+		isolatedEnv = createIsolatedTestEnv();
 		resetSwarmState();
 		tempDir = makeTempProject('dg-set-dispatch-');
 	});
@@ -143,10 +149,17 @@ describe('FR-007 set-dispatch per-task attribution', () => {
 	afterEach(() => {
 		resetSwarmState();
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			fs.rmSync(tempDir, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 100,
+			});
 		} catch {
 			// best-effort cleanup
 		}
+		isolatedEnv?.cleanup();
+		isolatedEnv = undefined;
 	});
 
 	it('SC-022.1: reviewer covering 3 tasks with parseable verdicts attributes per-task via recordStageBCompletion', async () => {

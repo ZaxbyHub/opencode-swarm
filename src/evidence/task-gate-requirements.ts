@@ -7,10 +7,20 @@ import type {
 	TaskWorkflowTransitionEvent,
 } from '../gate-evidence.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import type { ReviewRouteEvidence } from '../review/routing-enforcement.js';
 import { assertProjectRoot } from '../utils/project-boundary.js';
 import { atomicWriteFile } from './task-file.js';
 
 const MAX_TASK_GATE_REQUIREMENTS_BYTES = 256 * 1024;
+
+type DurableRouteBinding = ReviewRouteEvidence & {
+	sessionId: string;
+	taskId: string;
+	slotId: string;
+	callId: string;
+	childSessionId: string;
+	generation: number;
+};
 
 const TaskGateRequirementsReceiptSchema = z
 	.object({
@@ -23,6 +33,19 @@ const TaskGateRequirementsReceiptSchema = z
 		sourceEvent: z.string().min(1).max(120),
 		sourceTransitionId: z.string().min(1).max(200).nullable(),
 		recordedAt: z.string().min(1).max(128),
+		routeBinding: z
+			.object({
+				role: z.enum(['reviewer', 'test_engineer']),
+				identity: z.string().trim().min(1).max(256),
+				sessionId: z.string().trim().min(1).max(256),
+				taskId: z.string().trim().min(1).max(120),
+				slotId: z.string().trim().min(1).max(256),
+				callId: z.string().trim().min(1).max(256),
+				childSessionId: z.string().trim().min(1).max(256),
+				generation: z.number().int().nonnegative(),
+			})
+			.strict()
+			.optional(),
 		previousChainHash: z
 			.string()
 			.regex(/^[a-f0-9]{64}$/)
@@ -121,9 +144,30 @@ function sha256(value: string): string {
 function canonicalReceiptPayload(
 	receipt: Omit<TaskGateRequirementsReceipt, 'chainHash'>,
 ): string {
+	const routeBinding = receipt.routeBinding
+		? {
+				role: receipt.routeBinding.role,
+				identity: receipt.routeBinding.identity,
+				sessionId: receipt.routeBinding.sessionId,
+				taskId: receipt.routeBinding.taskId,
+				slotId: receipt.routeBinding.slotId,
+				callId: receipt.routeBinding.callId,
+				childSessionId: receipt.routeBinding.childSessionId,
+				generation: receipt.routeBinding.generation,
+			}
+		: undefined;
 	return JSON.stringify({
-		...receipt,
+		schemaVersion: receipt.schemaVersion,
+		taskId: receipt.taskId,
+		generation: receipt.generation,
+		normalizedRole: receipt.normalizedRole,
+		testEngineerExempt: receipt.testEngineerExempt,
 		requiredGates: [...receipt.requiredGates],
+		sourceEvent: receipt.sourceEvent,
+		sourceTransitionId: receipt.sourceTransitionId,
+		recordedAt: receipt.recordedAt,
+		...(routeBinding ? { routeBinding } : {}),
+		previousChainHash: receipt.previousChainHash,
 	});
 }
 
@@ -131,6 +175,26 @@ function computeChainHash(
 	receipt: Omit<TaskGateRequirementsReceipt, 'chainHash'>,
 ): string {
 	return sha256(canonicalReceiptPayload(receipt));
+}
+
+function routeBindingFromEvent(
+	event: TaskWorkflowTransitionEvent,
+): DurableRouteBinding | undefined {
+	if (event.type !== 'stage_b_completed' || !event.routeBinding)
+		return undefined;
+	const binding = event.routeBinding;
+	if (
+		binding.role !== event.gate ||
+		!binding.sessionId ||
+		!binding.taskId ||
+		!binding.slotId ||
+		!binding.callId ||
+		!binding.childSessionId ||
+		typeof binding.generation !== 'number'
+	) {
+		return undefined;
+	}
+	return binding as DurableRouteBinding;
 }
 
 function readBoundedTextFile(filePath: string): string | null {
@@ -193,7 +257,11 @@ export async function readTaskGateRequirementsReceipts(
 	for (const line of text.split('\n')) {
 		if (!line.trim()) continue;
 		const parsed = TaskGateRequirementsReceiptSchema.parse(JSON.parse(line));
-		if (parsed.taskId !== taskId) {
+		if (
+			parsed.taskId !== taskId ||
+			(parsed.routeBinding !== undefined &&
+				parsed.routeBinding.taskId !== taskId)
+		) {
 			throw new Error(
 				`TASK_GATE_REQUIREMENTS_IDENTITY_MISMATCH: expected ${taskId}, found ${parsed.taskId}`,
 			);
@@ -214,6 +282,82 @@ export async function readTaskGateRequirementsReceipts(
 		receipts.push(parsed);
 	}
 	return receipts;
+}
+
+/** Synchronous twin used by the synchronous Stage-B and status predicates. */
+export function readTaskGateRequirementsReceiptsSync(
+	directory: string,
+	taskId: string,
+): TaskGateRequirementsReceipt[] {
+	const filePath = safeTaskGateRequirementsReceiptPath(
+		directory,
+		taskId,
+		false,
+	);
+	const text = readBoundedTextFile(filePath);
+	if (text === null) return [];
+	const receipts: TaskGateRequirementsReceipt[] = [];
+	for (const line of text.split('\n')) {
+		if (!line.trim()) continue;
+		const parsed = TaskGateRequirementsReceiptSchema.parse(JSON.parse(line));
+		if (
+			parsed.taskId !== taskId ||
+			(parsed.routeBinding !== undefined &&
+				parsed.routeBinding.taskId !== taskId)
+		) {
+			throw new Error(
+				`TASK_GATE_REQUIREMENTS_IDENTITY_MISMATCH: expected ${taskId}, found ${parsed.taskId}`,
+			);
+		}
+		const { chainHash, ...withoutChainHash } = parsed;
+		if (computeChainHash(withoutChainHash) !== chainHash) {
+			throw new Error(
+				`TASK_GATE_REQUIREMENTS_CHAIN_MISMATCH: receipt for ${taskId} failed hash validation`,
+			);
+		}
+		const previousChainHash = receipts.at(-1)?.chainHash ?? null;
+		if (parsed.previousChainHash !== previousChainHash) {
+			throw new Error(
+				`TASK_GATE_REQUIREMENTS_CHAIN_MISMATCH: receipt for ${taskId} failed linkage validation`,
+			);
+		}
+		receipts.push(parsed);
+	}
+	return receipts;
+}
+
+/**
+ * Reconstructs exact route evidence from the append-only durable requirement
+ * chain. A retry for the same call/child/generation replaces that dispatch's
+ * row; distinct dispatch identities retain distinct route slots.
+ */
+export function routeEvidenceFromTaskGateRequirements(
+	receipts: readonly TaskGateRequirementsReceipt[],
+): ReviewRouteEvidence[] {
+	const latestByDispatch = new Map<string, ReviewRouteEvidence>();
+	for (const receipt of receipts) {
+		const binding = receipt.routeBinding;
+		if (!binding) continue;
+		const dispatchKey = [
+			binding.role,
+			binding.sessionId,
+			binding.taskId,
+			binding.callId,
+			binding.childSessionId,
+			String(binding.generation),
+		].join('\u0000');
+		latestByDispatch.set(dispatchKey, binding);
+	}
+	return [...latestByDispatch.values()];
+}
+
+/** Positive proof that an evidence chain predates v1 route-bound receipts. */
+export function isLegacyTaskGateRequirementsChain(
+	receipts: readonly TaskGateRequirementsReceipt[],
+): boolean {
+	return (
+		receipts.length > 0 && receipts.every((receipt) => !receipt.routeBinding)
+	);
 }
 
 function deriveReceiptRole(
@@ -276,7 +420,15 @@ export async function appendTaskGateRequirementsReceiptIfNeeded(
 	event: TaskWorkflowTransitionEvent,
 ): Promise<void> {
 	const role = deriveReceiptRole(event);
-	if (!role || !shouldAppendReceipt(current, next, role)) return;
+	const routeBinding = routeBindingFromEvent(event);
+	if (routeBinding && routeBinding.taskId !== taskId) {
+		throw new Error(
+			`TASK_GATE_REQUIREMENTS_ROUTE_IDENTITY_MISMATCH: expected ${taskId}, found ${routeBinding.taskId}`,
+		);
+	}
+	if (!role || (!shouldAppendReceipt(current, next, role) && !routeBinding)) {
+		return;
+	}
 
 	const filePath = safeTaskGateRequirementsReceiptPath(directory, taskId, true);
 	const receipts = await readTaskGateRequirementsReceipts(directory, taskId);
@@ -292,6 +444,7 @@ export async function appendTaskGateRequirementsReceiptIfNeeded(
 		sourceTransitionId: event.transitionId ?? null,
 		recordedAt: new Date().toISOString(),
 		previousChainHash: latest?.chainHash ?? null,
+		...(routeBinding ? { routeBinding } : {}),
 	};
 	const receipt: TaskGateRequirementsReceipt = {
 		...baseReceipt,
@@ -305,7 +458,9 @@ export async function appendTaskGateRequirementsReceiptIfNeeded(
 		latest.testEngineerExempt === receipt.testEngineerExempt &&
 		JSON.stringify(latest.requiredGates) ===
 			JSON.stringify(receipt.requiredGates) &&
-		latest.sourceTransitionId === receipt.sourceTransitionId
+		latest.sourceTransitionId === receipt.sourceTransitionId &&
+		JSON.stringify(latest.routeBinding ?? null) ===
+			JSON.stringify(receipt.routeBinding ?? null)
 	) {
 		return;
 	}

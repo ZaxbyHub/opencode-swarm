@@ -19,6 +19,7 @@ import {
 } from '../../src/hooks/pr-workflow-gate.js';
 import { getScopeBindingForParentDispatch } from '../../src/scope/scope-binding.js';
 import { resetSwarmState, swarmState } from '../../src/state.js';
+import { createIsolatedTestEnv } from '../helpers/isolated-test-env.js';
 import {
 	bootKnowledgeHost,
 	createKnowledgeProject,
@@ -48,10 +49,12 @@ const originalResolveRemoteRefsContainingHeadAsync =
 describe('PR workflow gate has authoritative real-host Task precedence', () => {
 	let directory: string;
 	let plugin: Awaited<ReturnType<typeof bootKnowledgeHost>>;
+	let cleanupIsolatedEnv: () => void;
 
 	beforeEach(async () => {
 		resetSwarmState();
 		_test_exports.resetTrackedStateCache();
+		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
 		directory = createKnowledgeProject();
 		plugin = await bootKnowledgeHost(directory);
 		_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
@@ -98,6 +101,7 @@ describe('PR workflow gate has authoritative real-host Task precedence', () => {
 		} catch {
 			// Windows may briefly retain a plugin-init handle in the temp project.
 		}
+		cleanupIsolatedEnv();
 	});
 
 	function reviewerTask(callID: string) {

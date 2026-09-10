@@ -560,7 +560,8 @@ export function validateAutoReviewEvidenceIntegrity(
 		evidence.findings.some(
 			(finding) =>
 				finding.effective_severity !==
-				(finding.confidence < expected.policy.min_confidence
+				(finding.severity !== 'critical' &&
+				finding.confidence < expected.policy.min_confidence
 					? 'info'
 					: finding.severity),
 		)

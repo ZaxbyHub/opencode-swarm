@@ -44,7 +44,7 @@ const STRUCTURED_REJECTION = [
 		findings: [
 			{
 				title: 'Below threshold critical',
-				body: 'A low-confidence candidate that must remain durable as info.',
+				body: 'A low-confidence critical candidate must remain blocking and eligible.',
 				severity: 'critical',
 				confidence: 0.69,
 				file: 'src/confidence.ts',
@@ -125,7 +125,7 @@ describe('Stage-B confidence policy — regression: low-confidence findings stay
 			const current = JSON.parse(
 				fs.readFileSync(receiptPath as string, 'utf-8'),
 			) as RejectedReviewReceipt;
-			if (current.finding_validations?.length === 2) break;
+			if (current.finding_validations?.length === 3) break;
 			await Bun.sleep(5);
 		}
 		const receipt = JSON.parse(
@@ -135,10 +135,10 @@ describe('Stage-B confidence policy — regression: low-confidence findings stay
 			receipt.blocking_findings.map((finding) => [finding.title, finding]),
 		);
 
-		// Previous code persisted no effective_severity at all, so the 0.69
-		// CRITICAL finding remained blocking even though the engine uses `<`.
+		// CRITICAL findings remain blocking and eligible for validation even below
+		// min_confidence; lower severities still use the strict threshold.
 		expect(byTitle.get('Below threshold critical')?.effective_severity).toBe(
-			'info',
+			'critical',
 		);
 		expect(byTitle.get('At threshold high')?.effective_severity).toBe('high');
 		expect(byTitle.get('Above threshold critical')?.effective_severity).toBe(
@@ -148,16 +148,16 @@ describe('Stage-B confidence policy — regression: low-confidence findings stay
 		const belowId = byTitle.get('Below threshold critical')?.finding_id;
 		const equalId = byTitle.get('At threshold high')?.finding_id;
 		const aboveId = byTitle.get('Above threshold critical')?.finding_id;
-		expect(dispatchedPrompt).not.toContain(belowId as string);
+		expect(dispatchedPrompt).toContain(belowId as string);
 		expect(dispatchedPrompt).toContain(equalId as string);
 		expect(dispatchedPrompt).toContain(aboveId as string);
 		expect(
 			receipt.finding_validations?.map((item) => item.finding_id).sort(),
-		).toEqual([equalId, aboveId].sort());
+		).toEqual([belowId, equalId, aboveId].sort());
 
 		const context = buildReceiptContextForDrift([receipt]);
-		expect(context).toContain('2 blocking finding(s)');
-		expect(context).toContain('1 non-blocking finding(s) retained');
-		expect(context).not.toContain('3 blocking finding(s)');
+		expect(context).toContain('3 blocking finding(s)');
+		expect(context).not.toContain('2 blocking finding(s)');
+		expect(context).not.toContain('1 non-blocking finding(s) retained');
 	});
 });

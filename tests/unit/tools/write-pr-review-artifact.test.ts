@@ -420,7 +420,9 @@ describe('write_pr_review_artifact', () => {
 		).resolves.toContain('feedback-handoff.json');
 		await expect(
 			completePrWorkflow(directory, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
-				reportVerdict: 'APPROVE',
+				// C-1..C-5 remain HIGH/UPHELD and one is handed off, so
+				// version-1 finding policy permits REQUEST_CHANGES, not APPROVE.
+				reportVerdict: 'REQUEST_CHANGES',
 			}),
 		).resolves.toBe('completed');
 	});

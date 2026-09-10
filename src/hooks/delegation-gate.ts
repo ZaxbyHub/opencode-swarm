@@ -40,6 +40,10 @@ import {
 	CORE_EVENT_LOCKED,
 	getCoderRetryEscalationActions,
 } from '../events/core-events.js';
+import {
+	isLegacyTaskGateRequirementsChain,
+	readTaskGateRequirementsReceiptsSync,
+} from '../evidence/task-gate-requirements.js';
 import { isReadOnlyTool } from '../full-auto/policy';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import {
@@ -58,6 +62,15 @@ import {
 } from '../plan/parallel-verdict';
 import { derivePlanId } from '../plan/utils.js';
 import { resetPrmSessionState } from '../prm/index.js';
+import {
+	buildReviewRoutePending,
+	buildReviewRouteReceipt,
+	buildReviewRouteRouterError,
+	enforcePersistedReviewRouteReceipt,
+	persistReviewRouteReceipt,
+	type ReviewRouteEvidence,
+	type ReviewRouteRecord,
+} from '../review/routing-enforcement.js';
 import { isPathWithinDeclaredScope } from '../scope/path-identity';
 import {
 	canonicalWorkspaceIdentity,
@@ -83,12 +96,16 @@ import {
 	advanceTaskState,
 	ensureAgentSession,
 	getModifiedFilesForTask,
+	getStageBRouteEvidence,
 	getTaskState,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
 	isCouncilGateActive,
+	isStageBRouteRequired,
+	markStageBRouteRequired,
 	recordStageBCompletion,
+	reserveStageBRouteEvidence,
 	swarmState,
 	updateTaskWorkflowCache,
 } from '../state';
@@ -3112,6 +3129,113 @@ export function createDelegationGateHook(
 		string,
 		StageBDispatchContext
 	>();
+	/** Versioned route receipts and the exact slot bound to each Task call. */
+	const reviewRouteByTaskKey = new Map<string, ReviewRouteRecord>();
+	const stageBRouteSlotByCallID = new Map<
+		string,
+		Map<string, ReviewRouteEvidence>
+	>();
+	const reviewRouteTaskKey = (sessionId: string, taskId: string): string =>
+		`${sessionId}\u0000${taskId}`;
+	const MAX_REVIEW_ROUTE_RECORDS = 128;
+	const rememberReviewRoute = (key: string, route: ReviewRouteRecord): void => {
+		// Route records are needed across sibling Task completions, but must not
+		// grow with the lifetime of the hook. Refreshing an existing key keeps the
+		// most recent receipt at the hot end of the bounded FIFO.
+		reviewRouteByTaskKey.delete(key);
+		reviewRouteByTaskKey.set(key, route);
+		while (reviewRouteByTaskKey.size > MAX_REVIEW_ROUTE_RECORDS) {
+			const oldest = reviewRouteByTaskKey.keys().next().value as
+				| string
+				| undefined;
+			if (!oldest) break;
+			reviewRouteByTaskKey.delete(oldest);
+		}
+	};
+	const clearReviewRouteStateForSession = (sessionId: string): void => {
+		const prefix = `${sessionId}\u0000`;
+		for (const key of reviewRouteByTaskKey.keys()) {
+			if (key.startsWith(prefix)) reviewRouteByTaskKey.delete(key);
+		}
+	};
+	const bindReviewRouteSlots = (
+		callID: string,
+		sessionId: string,
+		role: 'reviewer' | 'test_engineer',
+		taskIds: Iterable<string>,
+	): void => {
+		const bindings = new Map<string, ReviewRouteEvidence>();
+		const session = swarmState.agentSessions.get(sessionId);
+		for (const taskId of taskIds) {
+			const route = reviewRouteByTaskKey.get(
+				reviewRouteTaskKey(sessionId, taskId),
+			);
+			if (!route || route.kind !== 'review_route_receipt') continue;
+			const identities =
+				role === 'reviewer'
+					? route.identities.reviewers
+					: route.identities.testEngineers;
+			const slots =
+				role === 'reviewer'
+					? (route.slots?.reviewers ?? identities)
+					: (route.slots?.testEngineers ?? identities);
+			if (slots.length === 0 || identities.length !== slots.length) continue;
+			const prior = stageBRouteSlotByCallID.get(callID)?.get(taskId);
+			const settled = session
+				? getStageBRouteEvidence(session, taskId).find(
+						(entry) =>
+							entry.role === role &&
+							entry.sessionId === sessionId &&
+							entry.taskId === taskId &&
+							entry.callId === callID &&
+							entry.generation ===
+								stageBDispatchGenerationsByCallID.get(callID)?.get(taskId),
+					)
+				: undefined;
+			const existing = prior ?? settled;
+			// Slot allocation is based on the durable completions plus live
+			// reservations, rather than a monotonically increasing counter. A
+			// failed or malformed dispatch releases its live reservation during
+			// toolAfter, so a retry can reclaim the same slot (F-001).
+			const occupiedSlots = new Set<string>();
+			for (const entry of session
+				? getStageBRouteEvidence(session, taskId)
+				: []) {
+				if (entry.role === role && entry.slotId)
+					occupiedSlots.add(entry.slotId);
+			}
+			for (const [otherCallId, otherBindings] of stageBRouteSlotByCallID) {
+				if (otherCallId === callID) continue;
+				const other = otherBindings.get(taskId);
+				if (
+					other?.role === role &&
+					other.sessionId === sessionId &&
+					other.taskId === taskId &&
+					other.slotId
+				) {
+					occupiedSlots.add(other.slotId);
+				}
+			}
+			const slotIndex = existing
+				? slots.indexOf(existing.slotId ?? '')
+				: slots.findIndex((slotId) => !occupiedSlots.has(slotId));
+			if (slotIndex < 0 || slotIndex >= slots.length) continue;
+			const slotId = slots[slotIndex];
+			bindings.set(taskId, {
+				role,
+				identity: identities[slotIndex],
+				sessionId,
+				taskId,
+				slotId,
+				callId: callID,
+				...(existing?.childSessionId
+					? { childSessionId: existing.childSessionId }
+					: {}),
+				generation: stageBDispatchGenerationsByCallID.get(callID)?.get(taskId),
+			});
+		}
+		if (bindings.size > 0) stageBRouteSlotByCallID.set(callID, bindings);
+	};
 	const publishedScopeBindingsByCallID = new Map<
 		string,
 		Array<{ directory: string; binding: PreparedCoderScope['binding'] }>
@@ -3162,6 +3286,13 @@ export function createDelegationGateHook(
 		parentSessionID: string;
 		childSessionID: string;
 	}): Promise<void> => {
+		const bindRouteChildSession = (): void => {
+			const routeBindings = stageBRouteSlotByCallID.get(input.callID);
+			if (!routeBindings) return;
+			for (const binding of routeBindings.values()) {
+				binding.childSessionId = input.childSessionID;
+			}
+		};
 		const result = await claimScopeBindingForChildDurably({
 			directory,
 			parentSessionId: input.parentSessionID,
@@ -3169,7 +3300,12 @@ export function createDelegationGateHook(
 			dispatchCallId: input.callID,
 		});
 		if (!result.ok) {
-			if (result.code === 'SCOPE_NOT_DECLARED') return;
+			if (result.code === 'SCOPE_NOT_DECLARED') {
+				// Reviewer/test-engineer tasks do not own coder scope, but their
+				// route tuple still needs the host-provided child identity.
+				bindRouteChildSession();
+				return;
+			}
 			throw new Error(`${result.code}: ${result.message}`);
 		}
 		const { previous, claimed } = result.value;
@@ -3210,12 +3346,14 @@ export function createDelegationGateHook(
 		}
 		childSession.currentTaskId = claimed.taskId;
 		childSession.declaredCoderScope = [...claimed.files];
+		bindRouteChildSession();
 	};
 	const sessionEnded = (
 		sessionID: string,
 		includeOwnedChildren = false,
 	): void => {
 		if (!sessionID) return;
+		clearReviewRouteStateForSession(sessionID);
 		const removed = clearScopeBindings(
 			(binding) =>
 				binding.ownerSessionId === sessionID ||
@@ -3381,6 +3519,7 @@ export function createDelegationGateHook(
 		clearCoderTaskChangeContext(callID);
 		begunCoderSettlementsByCallID.delete(callID);
 		stageBDispatchGenerationsByCallID.delete(callID);
+		stageBRouteSlotByCallID.delete(callID);
 		gateDispatchPrimaryTaskByCallID.delete(callID);
 		stageBDispatchContextByCallID.delete(callID);
 		deleteStoredInputArgs(callID);
@@ -3654,8 +3793,12 @@ export function createDelegationGateHook(
 			throw new Error(SWARM_BACKGROUND_TASK_BLOCKED_MESSAGE);
 		}
 
-		// Review routing: when delegating to reviewer, check if review should be parallelized
-		if (targetAgent === 'reviewer') {
+		// Review routing: every Stage-B dispatch receives a durable route receipt.
+		// The receipt is the authorization boundary; the advisory remains useful
+		// operator feedback but is never consulted for advancement.
+		if (targetAgent === 'reviewer' || targetAgent === 'test_engineer') {
+			let routedTaskId: string | null = null;
+			let routeDispatchStarted = false;
 			try {
 				const reviewSession = swarmState.agentSessions.get(input.sessionID);
 				if (reviewSession) {
@@ -3674,10 +3817,65 @@ export function createDelegationGateHook(
 					const changedFiles = reviewTaskId
 						? getModifiedFilesForTask(reviewSession, reviewTaskId)
 						: [];
-					if (changedFiles.length > 0) {
+					const routeTaskId = reviewTaskId ?? `unresolved-${input.callID}`;
+					routedTaskId = routeTaskId;
+					markStageBRouteRequired(reviewSession, routeTaskId);
+					const pendingRoute = buildReviewRoutePending({
+						sessionId: input.sessionID,
+						taskId: routeTaskId,
+					});
+					await persistReviewRouteReceipt({
+						projectRoot: directory,
+						receipt: pendingRoute,
+					});
+					routeDispatchStarted = true;
+					rememberReviewRoute(
+						reviewRouteTaskKey(input.sessionID, routeTaskId),
+						pendingRoute,
+					);
+					if (changedFiles.length === 0) {
+						const routerError = buildReviewRouteRouterError({
+							code: 'NO_CHANGED_FILES',
+							sessionId: input.sessionID,
+							taskId: routeTaskId,
+						});
+						await persistReviewRouteReceipt({
+							projectRoot: directory,
+							receipt: routerError,
+						});
+						rememberReviewRoute(
+							reviewRouteTaskKey(input.sessionID, routeTaskId),
+							routerError,
+						);
+					} else {
 						const routing = await routeReviewForChanges(
 							directory,
 							changedFiles,
+						);
+						const routeReceipt = buildReviewRouteReceipt({
+							sessionId: input.sessionID,
+							taskId: routeTaskId,
+							complexity: routing.depth,
+							semanticRisk: routing.reason,
+							requiredReviewers: Array.from(
+								{ length: routing.reviewerCount },
+								(_, index) => `${routeTaskId}:reviewer:${index + 1}`,
+							),
+							requiredTestEngineers: Array.from(
+								// `changedFiles` is observed attribution, not an independent
+								// declared scope. Require the routed count here so an
+								// all-Markdown change cannot self-prove its exemption.
+								{ length: routing.testEngineerCount },
+								(_, index) => `${routeTaskId}:test_engineer:${index + 1}`,
+							),
+						});
+						await persistReviewRouteReceipt({
+							projectRoot: directory,
+							receipt: routeReceipt,
+						});
+						rememberReviewRoute(
+							reviewRouteTaskKey(input.sessionID, routeTaskId),
+							routeReceipt,
 						);
 						if (shouldParallelizeReview(routing)) {
 							pushAdvisory(
@@ -3688,8 +3886,41 @@ export function createDelegationGateHook(
 						}
 					}
 				}
-			} catch {
-				// review routing errors must never block delegation
+			} catch (error) {
+				// A route computation failure is fail-open only when an explicit
+				// typed error receipt can be persisted. If persistence itself fails,
+				// the pending marker or missing receipt keeps Stage-B fail closed.
+				const detail = error instanceof Error ? error.message : String(error);
+				if (!routeDispatchStarted) {
+					logger.warn(
+						`[delegation-gate] review route dispatch could not establish its pending receipt: ${detail}`,
+					);
+					return;
+				}
+				const routerError = buildReviewRouteRouterError({
+					code: /unavailable|timed out|timeout|not found/i.test(detail)
+						? 'ROUTER_UNAVAILABLE'
+						: 'ROUTER_FAILED',
+					sessionId: input.sessionID,
+					taskId: routedTaskId ?? `unresolved-${input.callID}`,
+					detail,
+				});
+				try {
+					await persistReviewRouteReceipt({
+						projectRoot: directory,
+						receipt: routerError,
+					});
+					if (routedTaskId) {
+						rememberReviewRoute(
+							reviewRouteTaskKey(input.sessionID, routedTaskId),
+							routerError,
+						);
+					}
+				} catch (persistError) {
+					logger.warn(
+						`[delegation-gate] review route receipt was not recorded: ${detail}; router-error persistence failed: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
+					);
+				}
 			}
 		}
 
@@ -3901,6 +4132,12 @@ export function createDelegationGateHook(
 							targetAgent === 'test_engineer' ? 'TESTED' : 'REVIEWED',
 						standalonePrReviewReentry: true,
 					});
+					bindReviewRouteSlots(
+						input.callID,
+						input.sessionID,
+						targetAgent as 'reviewer' | 'test_engineer',
+						generations.keys(),
+					);
 					return;
 				}
 				if (
@@ -3974,6 +4211,12 @@ export function createDelegationGateHook(
 							expectedVerdictKind:
 								targetAgent === 'test_engineer' ? 'TESTED' : 'REVIEWED',
 						});
+						bindReviewRouteSlots(
+							input.callID,
+							input.sessionID,
+							targetAgent as 'reviewer' | 'test_engineer',
+							generations.keys(),
+						);
 						return;
 					}
 					throw new Error(
@@ -3993,6 +4236,12 @@ export function createDelegationGateHook(
 				expectedVerdictKind:
 					targetAgent === 'test_engineer' ? 'TESTED' : 'REVIEWED',
 			});
+			bindReviewRouteSlots(
+				input.callID,
+				input.sessionID,
+				targetAgent as 'reviewer' | 'test_engineer',
+				generations.keys(),
+			);
 			return;
 		}
 
@@ -5484,6 +5733,99 @@ export function createDelegationGateHook(
 											}
 											continue;
 										}
+										const routeBinding = stageBRouteSlotByCallID
+											.get(input.callID)
+											?.get(taskId);
+										const legacyUnrouted =
+											!isStageBRouteRequired(session, taskId) &&
+											!routeBinding &&
+											(() => {
+												try {
+													return isLegacyTaskGateRequirementsChain(
+														readTaskGateRequirementsReceiptsSync(
+															directory,
+															taskId,
+														),
+													);
+												} catch {
+													return false;
+												}
+											})();
+										const existingRouteEvidence = getStageBRouteEvidence(
+											session,
+											taskId,
+										);
+										const prospectiveRouteEvidence = routeBinding
+											? [
+													...existingRouteEvidence.filter(
+														(entry) =>
+															entry.role !== routeBinding.role ||
+															entry.sessionId !== routeBinding.sessionId ||
+															entry.taskId !== routeBinding.taskId ||
+															entry.callId !== routeBinding.callId ||
+															entry.childSessionId !==
+																routeBinding.childSessionId ||
+															entry.generation !== routeBinding.generation,
+													),
+													routeBinding,
+												]
+											: getStageBRouteEvidence(session, taskId);
+										const routeEnforcementEnabled =
+											config.review_routing?.enforce_receipts ?? true;
+										const routeDecision = enforcePersistedReviewRouteReceipt({
+											projectRoot: directory,
+											sessionId: input.sessionID,
+											taskId,
+											receipts: prospectiveRouteEvidence,
+											enforcementEnabled: routeEnforcementEnabled,
+											legacyUnrouted,
+											requireEvidenceBindings: true,
+											requireCompleteEvidence: false,
+											expectedDispatch: routeBinding
+												? {
+														role: routeBinding.role,
+														identity: routeBinding.identity,
+														callId: routeBinding.callId,
+														childSessionId: routeBinding.childSessionId,
+														generation: routeBinding.generation,
+													}
+												: undefined,
+										});
+										if (!routeDecision.canAdvance) {
+											logger.warn(
+												`[delegation-gate] Stage B route receipt blocked ${taskId}: ${routeDecision.reason ?? 'unknown reason'}`,
+											);
+											continue;
+										}
+										const routeCompleteDecision =
+											routeEnforcementEnabled && routeBinding
+												? enforcePersistedReviewRouteReceipt({
+														projectRoot: directory,
+														sessionId: input.sessionID,
+														taskId,
+														receipts: prospectiveRouteEvidence,
+														enforcementEnabled: true,
+														requireEvidenceBindings: true,
+														requireCompleteEvidence: true,
+													})
+												: undefined;
+										const routeComplete =
+											routeEnforcementEnabled && routeBinding
+												? (routeCompleteDecision?.canAdvance ?? false)
+												: routeDecision.canAdvance;
+										const routeEvidenceRollback = routeBinding
+											? reserveStageBRouteEvidence(
+													session,
+													taskId,
+													routeBinding,
+												)
+											: null;
+										if (routeBinding && !routeEvidenceRollback) {
+											logger.warn(
+												`[delegation-gate] Stage B route evidence capacity exceeded for ${taskId}`,
+											);
+											continue;
+										}
 										try {
 											const turbo = hasActiveTurboMode(input.sessionID);
 											const { recordGateEvidence } = await import(
@@ -5498,9 +5840,15 @@ export function createDelegationGateHook(
 												{
 													expectedGeneration: launchGeneration,
 													transitionId: `gate:${input.callID}:${taskId}`,
+													routeBinding,
+													routeComplete:
+														routeEnforcementEnabled && routeBinding
+															? (routeCompleteDecision?.canAdvance ?? false)
+															: undefined,
 												},
 											);
 										} catch (err) {
+											routeEvidenceRollback?.();
 											logger.warn(
 												`[delegation-gate] Stage B settlement rejected for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
 											);
@@ -5511,7 +5859,6 @@ export function createDelegationGateHook(
 											taskId,
 											targetAgent as 'reviewer' | 'test_engineer',
 										);
-
 										const taskEvidence = await readTaskEvidence(
 											directory,
 											taskId,
@@ -5520,8 +5867,9 @@ export function createDelegationGateHook(
 											targetAgent === 'reviewer' &&
 											taskEvidence?.test_engineer_exempt === true;
 										if (
-											hasBothStageBCompletions(session, taskId) ||
-											reviewerCompletesStageB
+											routeComplete &&
+											(hasBothStageBCompletions(session, taskId) ||
+												reviewerCompletesStageB)
 										) {
 											// Barrier reached: both reviewer and test_engineer have completed.
 											// Advance through reviewer_run → tests_run in a single compound
@@ -5557,6 +5905,7 @@ export function createDelegationGateHook(
 														telemetrySessionId: input.sessionID,
 													});
 												} else if (
+													routeComplete &&
 													targetAgent === 'test_engineer' &&
 													eligibleState === 'reviewer_run'
 												) {
@@ -5886,6 +6235,7 @@ export function createDelegationGateHook(
 				}
 
 				stageBDispatchGenerationsByCallID.delete(input.callID);
+				stageBRouteSlotByCallID.delete(input.callID);
 				gateDispatchPrimaryTaskByCallID.delete(input.callID);
 				stageBDispatchContextByCallID.delete(input.callID);
 
@@ -6344,6 +6694,12 @@ ${warningLines.join('\n')}`;
 		 * in-process CODER_DISPATCH_IN_PROGRESS wedge behind.
 		 */
 		abortDeniedSettlementForCall: async (callID: string): Promise<void> => {
+			// Reviewer/test-engineer reservations do not create a coder settlement,
+			// so the early return below must still drain their call-scoped route
+			// bindings. Otherwise a denied dispatch can strand the only slot and make
+			// the retry fail closed as unbound (issue #2491, F-001).
+			stageBRouteSlotByCallID.delete(callID);
+			stageBDispatchContextByCallID.delete(callID);
 			const begun = begunCoderSettlementsByCallID.get(callID);
 			if (!begun?.taskId) return;
 			try {

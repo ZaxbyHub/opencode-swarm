@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
@@ -22,11 +22,19 @@ import {
 	markPrReviewHandoffComplete,
 	normalizePrReviewPartialBaseCoverageRecord,
 	prWorkflowSessionFileStem,
+	readAuthoritativePrReviewCriticVerdicts,
 	readPrWorkflowGateState,
 	resolvePrReviewWriterRunId,
 	rollbackPrReviewPartialBaseCoverageAdmission,
 } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import {
+	type CriticSettlementRecord,
+	deriveFeedbackHandoffFindingIds,
+	persistReviewOutcome,
+	settleCriticFinding,
+	synthesizePrReviewFindings,
+} from '../pr-review/finding-policy.js';
 import { createSwarmTool } from './create-tool.js';
 
 /**
@@ -49,7 +57,13 @@ const PersistedFindingSchema = PrReviewFindingSchema.extend({
 	boundary: z.enum(['post_explorer', 'post_reviewer', 'post_critic']),
 	pr_head_sha: z.string().regex(/^[0-9a-f]{6,64}$/i),
 	recorded_at: z.string().datetime(),
-}).strict();
+})
+	// The write boundary remains strict (`PrReviewFindingSchema`), but readers
+	// must tolerate fields introduced by a newer plugin during a mixed-version
+	// rollout.  Unknown fields are retained in the in-memory projection so a
+	// subsequent append/replay does not silently erase forward-compatible data
+	// (issue #2491 F-009).
+	.passthrough();
 
 const PersistedHandoffSchema = PrReviewHandoffSchema.extend({
 	schema_version: z.literal(1),
@@ -180,6 +194,7 @@ export const _internals = {
 	atomicWrite,
 	atomicCreate,
 	assertBoundary: assertPrReviewArtifactBoundary,
+	assertCriticSettlements,
 	/** Exposed so the #2383 read/migration boundary is testable directly. */
 	readFindings,
 };
@@ -219,14 +234,146 @@ function canonicalFindingRecords(
 				next_action: record.next_action,
 				severity: record.severity,
 				category: record.category,
+				confidence: record.confidence,
+				provenance: record.provenance,
 				// Typed risk metadata participates in the replay-identity key
 				// (issue #2383): a record whose routing-relevant metadata
 				// differs is never an exact replay.
 				risk_impact: record.risk_impact,
 				risk_tags: record.risk_tags,
+				critic_status: record.critic_status,
 			}))
 			.sort((left, right) => left.finding_id.localeCompare(right.finding_id)),
 	);
+}
+
+type FindingsBoundary = 'post_explorer' | 'post_reviewer' | 'post_critic';
+type FindingsRecord = z.infer<typeof PrReviewFindingSchema>;
+
+function policyLocation(fileLine: string): {
+	file: string;
+	line: number;
+	lineEnd?: number;
+} {
+	const match = fileLine.trim().match(/^(.*?):(\d+)(?:-(\d+))?$/);
+	if (!match) return { file: fileLine.trim(), line: 1 };
+	return {
+		file: match[1]!,
+		line: Number(match[2]),
+		...(match[3] ? { lineEnd: Number(match[3]) } : {}),
+	};
+}
+
+function policyCandidates(
+	records: readonly FindingsRecord[],
+	sessionID: string,
+	boundary: FindingsBoundary,
+) {
+	return records.map((record) => ({
+		finding: record.evidence,
+		severity: record.severity ?? 'NONE',
+		action: record.next_action,
+		confidence: record.confidence ?? 'MEDIUM',
+		category: record.category ?? 'review-finding',
+		location: policyLocation(record.file_line),
+		provenance: (record.provenance?.length
+			? record.provenance
+			: [`session:${sessionID}`]
+		).map((identity) => ({ identity, lane: boundary })),
+		status: record.status,
+		sourceFindingId: record.finding_id,
+	}));
+}
+
+function assertCriticSettlements(
+	records: readonly FindingsRecord[],
+	existing: readonly PersistedFinding[],
+	authoritativeCriticVerdicts: ReadonlyMap<
+		string,
+		{ status: string; severity: string }
+	>,
+): CriticSettlementRecord[] {
+	const priorById = latestFindings(
+		existing.filter((record) => record.boundary === 'post_reviewer'),
+	);
+	const settlements: CriticSettlementRecord[] = [];
+	for (const record of records) {
+		const prior = priorById.get(record.finding_id);
+		const authoritative = authoritativeCriticVerdicts.get(record.finding_id);
+		const needsCriticAuthority =
+			prior?.next_action === 'route_to_critic' ||
+			record.critic_status !== undefined;
+		if (needsCriticAuthority && !authoritative) {
+			throw new Error(
+				`critic settlement for ${record.finding_id} has no authenticated authoritative critic verdict`,
+			);
+		}
+		if (
+			authoritative?.status === 'DOWNGRADED' &&
+			record.severity === undefined
+		) {
+			throw new Error(
+				`critic settlement for ${record.finding_id} DOWNGRADED verdict requires an explicit severity matching the authenticated authoritative critic verdict`,
+			);
+		}
+		if (
+			authoritative &&
+			record.severity !== undefined &&
+			authoritative.severity !== record.severity
+		) {
+			throw new Error(
+				`critic settlement for ${record.finding_id} severity contradicts the authenticated authoritative critic verdict`,
+			);
+		}
+		if (record.critic_status && authoritative) {
+			if (record.critic_status !== authoritative.status) {
+				throw new Error(
+					`critic settlement for ${record.finding_id} status "${record.critic_status}" contradicts the authenticated authoritative critic status "${authoritative.status}"`,
+				);
+			}
+		}
+		const outcome =
+			authoritative?.status === 'DISPROVED' || record.status === 'DISPROVED'
+				? 'DISPROVED'
+				: authoritative?.status === 'DOWNGRADED'
+					? 'DOWNGRADED'
+					: authoritative?.status === 'UPHELD'
+						? 'UPHELD'
+						: prior?.severity &&
+								record.severity &&
+								prior.severity !== record.severity
+							? 'DOWNGRADED'
+							: 'UPHELD';
+		const settled = settleCriticFinding({
+			finding: {
+				id: record.finding_id,
+				status: record.status,
+				severity: record.severity ?? 'NONE',
+				action: record.next_action,
+			},
+			outcome,
+			finalSeverity: record.severity,
+			finalAction: record.next_action,
+		});
+		if (
+			settled.finalFinding.severity !== (record.severity ?? 'NONE') ||
+			settled.finalFinding.action !== record.next_action
+		) {
+			throw new Error(
+				`critic settlement for ${record.finding_id} does not match the final persisted severity/action`,
+			);
+		}
+		if (needsCriticAuthority || authoritative) {
+			settlements.push({
+				findingId: record.finding_id,
+				terminal: settled.terminal,
+				status: settled.status,
+				finalFinding: settled.finalFinding,
+				handoffFindingIds: settled.handoffFindingIds,
+			});
+		}
+	}
+	return settlements;
 }
 
 export async function executeWritePrReviewArtifact(
@@ -530,10 +677,40 @@ export async function executeWritePrReviewArtifact(
 					recorded_at: recordedAt,
 				}));
 		const allRecords = [...existing, ...appended];
+		const serializedFindings =
+			allRecords.map((record) => JSON.stringify(record)).join('\n') +
+			(allRecords.length > 0 ? '\n' : '');
+		const findingsDigest = createHash('sha256')
+			.update(serializedFindings, 'utf8')
+			.digest('hex');
+		let criticSettlements: CriticSettlementRecord[] | undefined;
+		if (findingsInput.boundary === 'post_critic') {
+			try {
+				const criticRouted = existing.some(
+					(record) =>
+						record.boundary === 'post_reviewer' &&
+						record.next_action === 'route_to_critic',
+				);
+				const authoritativeCriticVerdicts = criticRouted
+					? await readAuthoritativePrReviewCriticVerdicts(directory, sessionID)
+					: new Map<string, { status: string; severity: string }>();
+				criticSettlements = assertCriticSettlements(
+					findingsInput.records,
+					existing,
+					authoritativeCriticVerdicts,
+				);
+			} catch (error) {
+				return withPartialAdmissionRollback(
+					operationFailure(
+						'validate',
+						relativeFindingsPath.split(path.sep).join('/'),
+						'an authoritative critic settlement matching the authenticated critic verdict map',
+						error,
+					),
+				);
+			}
+		}
 		if (!isExactReplay) {
-			const serializedFindings =
-				allRecords.map((record) => JSON.stringify(record)).join('\n') +
-				(allRecords.length > 0 ? '\n' : '');
 			const serializedBytes = Buffer.byteLength(serializedFindings, 'utf8');
 			if (serializedBytes > PR_REVIEW_FINDINGS_MAX_BYTES) {
 				return withPartialAdmissionRollback(
@@ -560,11 +737,45 @@ export async function executeWritePrReviewArtifact(
 			}
 		}
 		const latest = latestFindings(allRecords);
-		const handoffRequired = [...latest.values()].some(
-			(record) =>
-				record.status === 'CONFIRMED' &&
-				record.next_action === 'handoff_to_feedback',
-		);
+		if (findingsInput.boundary === 'post_critic') {
+			try {
+				// The critic boundary is the authoritative settlement point. Route
+				// every admitted row through the shared settlement adapter before the
+				// final policy evidence is synthesized and persisted.
+				const synthesis = synthesizePrReviewFindings({
+					candidates: policyCandidates(
+						[...latest.values()],
+						sessionID,
+						findingsInput.boundary,
+					),
+				});
+				await persistReviewOutcome({
+					projectRoot: directory,
+					routeReceipt: {
+						kind: 'pr_review_finding_policy',
+						version: 1,
+						sessionId: sessionID,
+						taskId: resolvedRunId,
+						boundary: findingsInput.boundary,
+						prHeadSha: state.prHeadSha,
+						findingsPath: relativeFindingsPath.split(path.sep).join('/'),
+						findingsDigest,
+					},
+					synthesis: { ...synthesis, criticSettlements },
+				});
+			} catch (error) {
+				return withPartialAdmissionRollback(
+					operationFailure(
+						'persist',
+						`pr-review/${resolvedRunId}/finding-policy.json`,
+						'an authoritative version-1 critic settlement and finding-policy evidence record',
+						error,
+					),
+				);
+			}
+		}
+		const handoffRequired =
+			deriveFeedbackHandoffFindingIds([...latest.values()]).length > 0;
 		if (!isCommittedReplay) {
 			try {
 				await markPrReviewArtifactBoundary(
@@ -620,14 +831,7 @@ export async function executeWritePrReviewArtifact(
 	}
 
 	const latest = latestFindings(existing);
-	const actionableIds = [...latest.values()]
-		.filter(
-			(record) =>
-				record.status === 'CONFIRMED' &&
-				record.next_action === 'handoff_to_feedback',
-		)
-		.map((record) => record.finding_id)
-		.sort();
+	const actionableIds = deriveFeedbackHandoffFindingIds([...latest.values()]);
 	const requestedIds = [...new Set(parsed.data.handoff.finding_ids)].sort();
 	if (
 		actionableIds.length === 0 ||

@@ -165,4 +165,32 @@ describe('readFindings legacy normalization (issue #2383 single boundary)', () =
 			/violates the persisted finding schema/,
 		);
 	});
+
+	test('F-009: readFindings preserves forward-compatible fields from newer writers', async () => {
+		// Before the fix, the strict persisted-reader schema rejected an otherwise
+		// valid row as soon as a newer writer added an optional field.
+		const findingsPath = path.join(
+			directory,
+			'.swarm',
+			'pr-review',
+			'forward-run',
+			'findings.jsonl',
+		);
+		await fs.mkdir(path.dirname(findingsPath), { recursive: true });
+		const futureRow = {
+			...pendingRecord,
+			boundary: 'post_explorer',
+			pr_head_sha: PR_ARTIFACT_HEAD_SHA,
+			recorded_at: '2026-01-01T00:00:00.000Z',
+			future_policy_annotation: { version: 2, note: 'retained' },
+		};
+		await fs.writeFile(findingsPath, `${JSON.stringify(futureRow)}\n`, 'utf8');
+
+		const rows = await _artifactInternals.readFindings(findingsPath);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({
+			finding_id: 'C-1',
+			future_policy_annotation: { version: 2, note: 'retained' },
+		});
+	});
 });

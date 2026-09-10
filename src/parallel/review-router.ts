@@ -36,6 +36,13 @@ const HIGH_RISK_CATEGORIES: ReadonlySet<ChangeCategory> = new Set([
 const MAX_FILES_FOR_AST = 50;
 const MAX_BYTES_FOR_AST = 500_000;
 const AST_TIMEOUT_MS = 5000;
+/**
+ * One bounded budget covers the complete route computation.  The AST helper
+ * has its own per-file guard, but that alone does not bound the surrounding
+ * complexity scan plus the sequence of git/AST operations.
+ */
+export const REVIEW_ROUTING_TIMEOUT_MS = 10_000;
+const MAX_GIT_SHOW_TIMEOUT_MS = 2000;
 
 /**
  * Compute complexity metrics for a set of files
@@ -43,12 +50,14 @@ const AST_TIMEOUT_MS = 5000;
 export async function computeComplexity(
 	directory: string,
 	changedFiles: string[],
+	deadline = Date.now() + REVIEW_ROUTING_TIMEOUT_MS,
 ): Promise<ComplexityMetrics> {
 	let functionCount = 0;
 	let astChangeCount = 0;
 	let maxFileComplexity = 0;
 
 	for (const file of changedFiles) {
+		if (Date.now() >= deadline) break;
 		// Skip non-source files
 		if (!/\.(ts|js|tsx|jsx|py|go|rs)$/.test(file)) {
 			continue;
@@ -128,6 +137,7 @@ export function routeReview(metrics: ComplexityMetrics): ReviewRouting {
 export async function computeSemanticClassifications(
 	directory: string,
 	changedFiles: string[],
+	deadline = Date.now() + AST_TIMEOUT_MS,
 ): Promise<ClassifiedChange[] | null> {
 	if (changedFiles.length > MAX_FILES_FOR_AST) return null;
 
@@ -158,10 +168,10 @@ export async function computeSemanticClassifications(
 		const gitExecutable = await resolveGitExecutableAsync();
 
 		const astResults: ASTDiffResult[] = [];
-		const deadline = Date.now() + AST_TIMEOUT_MS;
+		const analysisDeadline = Math.min(deadline, Date.now() + AST_TIMEOUT_MS);
 
 		for (const file of changedFiles) {
-			if (Date.now() > deadline) break;
+			if (Date.now() >= analysisDeadline) break;
 			if (!/\.(ts|js|tsx|jsx|py|go|rs)$/.test(file)) continue;
 
 			try {
@@ -170,10 +180,14 @@ export async function computeSemanticClassifications(
 				const content = fs.readFileSync(filePath, 'utf-8');
 				let oldContent = '';
 				try {
+					const remainingMs = analysisDeadline - Date.now();
+					if (remainingMs <= 0) break;
 					oldContent = execFileSync(gitExecutable, ['show', `HEAD:${file}`], {
 						cwd: directory,
 						encoding: 'utf-8',
-						timeout: 2000,
+						stdio: ['ignore', 'pipe', 'pipe'],
+						timeout: Math.min(MAX_GIT_SHOW_TIMEOUT_MS, remainingMs),
+						maxBuffer: MAX_BYTES_FOR_AST,
 					});
 				} catch {
 					// new file or not in git — old content stays empty
@@ -227,10 +241,12 @@ export async function routeReviewForChanges(
 	directory: string,
 	changedFiles: string[],
 ): Promise<ReviewRouting> {
-	const metrics = await computeComplexity(directory, changedFiles);
+	const deadline = Date.now() + REVIEW_ROUTING_TIMEOUT_MS;
+	const metrics = await computeComplexity(directory, changedFiles, deadline);
 	const classifications = await computeSemanticClassifications(
 		directory,
 		changedFiles,
+		deadline,
 	);
 
 	if (classifications && classifications.length > 0) {

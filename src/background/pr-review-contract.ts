@@ -569,6 +569,13 @@ export const PrReviewFindingSchema = z
 		next_action: z.enum(PR_REVIEW_FINDING_ACTIONS),
 		severity: z.enum(PR_REVIEW_SEVERITIES).optional(),
 		category: z.string().trim().min(1).max(128).optional(),
+		/** Optional structured policy metadata retained when supplied by a lane. */
+		confidence: z.enum(['LOW', 'MEDIUM', 'HIGH']).optional(),
+		provenance: z.array(z.string().trim().min(1).max(256)).max(16).optional(),
+		/** Structured critic settlement; NEEDS_MORE_EVIDENCE remains non-terminal. */
+		critic_status: z
+			.enum(['UPHELD', 'DOWNGRADED', 'DISPROVED', 'NEEDS_MORE_EVIDENCE'])
+			.optional(),
 		/**
 		 * Typed risk metadata (issue #2383). Required on every NEWLY written
 		 * CONFIRMED finding; optional elsewhere. Legacy persisted rows missing

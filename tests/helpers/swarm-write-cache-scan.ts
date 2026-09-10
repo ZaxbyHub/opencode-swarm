@@ -3353,4 +3353,17 @@ export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 			'plan.json.rebuild.<time>.<rand> temp file that is renamed onto ' +
 			'plan.json, and that rename IS governed by RULE R.',
 	},
+	{
+		file: 'src/review/routing-enforcement.ts',
+		rule: 'W',
+		target: 'secretPath',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'`secretPath` is the user-scoped app-data MAC-key file ' +
+			'`review-route-receipts.key`, resolved beneath the platform hive data ' +
+			'directory. It is deliberately outside the project `.swarm/` tree and is ' +
+			'not consumed by the swarm-artifact cache; the evidence-path candidate ' +
+			'filter matches this file only because the module also persists review ' +
+			'evidence and route receipts.',
+	},
 ];

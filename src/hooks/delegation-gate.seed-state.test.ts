@@ -1,9 +1,10 @@
 /** Cross-session mirroring tests for generation-bound Stage B settlements. */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createIsolatedTestEnv } from '../../tests/helpers/isolated-test-env.js';
 import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import type { PluginConfig } from '../config';
 import {
@@ -11,7 +12,12 @@ import {
 	readTaskEvidence,
 	transitionTaskWorkflowEvidence,
 } from '../gate-evidence';
-import { ensureAgentSession, getTaskState, resetSwarmState } from '../state';
+import {
+	ensureAgentSession,
+	getTaskState,
+	resetSwarmState,
+	swarmState,
+} from '../state';
 import { createDelegationGateHook } from './delegation-gate';
 
 const config = {
@@ -22,15 +28,20 @@ const config = {
 } as PluginConfig;
 
 let tmpDir: string;
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 beforeEach(() => {
+	isolatedEnv = createIsolatedTestEnv();
 	resetSwarmState();
 	tmpDir = mkdtempSync(path.join(canonicalTmpDir(), 'dg-seed-state-'));
+	mkdirSync(path.join(tmpDir, '.opencode'), { recursive: true });
 });
 
 afterEach(() => {
 	resetSwarmState();
 	rmSync(tmpDir, { recursive: true, force: true });
+	isolatedEnv?.cleanup();
+	isolatedEnv = undefined;
 });
 
 async function seedStageA(taskId: string): Promise<number> {
@@ -47,6 +58,10 @@ async function seedStageA(taskId: string): Promise<number> {
 		transitionId: `seed-stage-a:${taskId}`,
 	});
 	return generation;
+}
+
+async function drainPendingRehydrations(): Promise<void> {
+	await Promise.allSettled([...swarmState.pendingRehydrations]);
 }
 
 async function dispatchStageB(
@@ -78,9 +93,11 @@ describe('delegation-gate cross-session exact-state isolation', () => {
 	it('reviewer settlement stays durable without manufacturing peer memory', async () => {
 		await seedStageA('1.1');
 		const origin = ensureAgentSession('session-1', 'architect', tmpDir);
+		await drainPendingRehydrations();
 		origin.currentTaskId = '1.1';
 		origin.taskWorkflowStates.set('1.1', 'pre_check_passed');
 		const peer = ensureAgentSession('session-2', 'architect', tmpDir);
+		await drainPendingRehydrations();
 
 		await dispatchStageB('reviewer', 'reviewer-call');
 
@@ -100,9 +117,11 @@ describe('delegation-gate cross-session exact-state isolation', () => {
 			transitionId: 'seed-reviewer-gate',
 		});
 		const origin = ensureAgentSession('session-1', 'architect', tmpDir);
+		await drainPendingRehydrations();
 		origin.currentTaskId = '1.1';
 		origin.taskWorkflowStates.set('1.1', 'reviewer_run');
 		const peer = ensureAgentSession('session-2', 'architect', tmpDir);
+		await drainPendingRehydrations();
 
 		await dispatchStageB('test_engineer', 'test-call');
 
@@ -115,9 +134,11 @@ describe('delegation-gate cross-session exact-state isolation', () => {
 	it('does not overwrite a peer session already at a later state', async () => {
 		await seedStageA('1.1');
 		const origin = ensureAgentSession('session-1', 'architect', tmpDir);
+		await drainPendingRehydrations();
 		origin.currentTaskId = '1.1';
 		origin.taskWorkflowStates.set('1.1', 'pre_check_passed');
 		const peer = ensureAgentSession('session-2', 'architect', tmpDir);
+		await drainPendingRehydrations();
 		peer.taskWorkflowStates.set('1.1', 'tests_run');
 
 		await dispatchStageB('reviewer', 'no-downgrade-call');
