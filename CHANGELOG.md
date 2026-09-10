@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.175.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.174.0...v7.175.0) (2026-09-10)
+
+
+### Features
+
+* **pr-review:** prove default-path completion; architect-parent repair lever + collect-time identity (issue [#2585](https://github.com/ZaxbyHub/opencode-swarm/issues/2585)) ([d9e6c46](https://github.com/ZaxbyHub/opencode-swarm/commit/d9e6c4638a56a388c805b7b266935ec774c6e1b5))
+
+
+### Bug Fixes
+
+* **init:** make optional automation-status startup failures nonfatal (issue [#2669](https://github.com/ZaxbyHub/opencode-swarm/issues/2669)) ([32e7fc4](https://github.com/ZaxbyHub/opencode-swarm/commit/32e7fc41a7a55979c6fbda047e2af99bc8cc212a))
+* **recovery:** classify task recovery status and link repair receipts to predecessors ([2b7e5fb](https://github.com/ZaxbyHub/opencode-swarm/commit/2b7e5fb297dca2e5b8a6536362f1c3f0d2604111))
+* **recovery:** close PR-review findings PRR-001..004 (issue [#2665](https://github.com/ZaxbyHub/opencode-swarm/issues/2665)) ([dec357f](https://github.com/ZaxbyHub/opencode-swarm/commit/dec357f09c46d850f2f73046344c242e7217a199))
+
 ## [7.174.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.173.1...v7.174.0) (2026-09-10)
 
 
