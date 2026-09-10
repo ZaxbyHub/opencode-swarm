@@ -13,7 +13,6 @@ import {
 } from './agents';
 import { parseSoundingBoardResponse } from './agents/critic.js';
 import {
-	type AutomationStatusArtifact,
 	type BackgroundAutomationManager,
 	createAutomationManager,
 	PlanSyncWorker,
@@ -2483,7 +2482,6 @@ async function initializeOpenCodeSwarm(
 	// Only enabled when automation mode is not 'manual' (default-off behavior)
 	let automationManager: BackgroundAutomationManager | undefined;
 	let preflightTriggerManager: PreflightTriggerManager | undefined;
-	let statusArtifact: AutomationStatusArtifact | undefined;
 	let prMonitorWorker: PrMonitorWorker | null = null;
 	let planSyncWorker: PlanSyncWorker | null = null;
 
@@ -2497,16 +2495,34 @@ async function initializeOpenCodeSwarm(
 		);
 		preflightTriggerManager = new PTM(automationConfig);
 
-		// v6.7 Task 5.5: Initialize status artifact for GUI visibility
+		// v6.7 Task 5.5 + issue #2669: initialize status artifact for GUI
+		// visibility. The artifact is optional output that nothing later in
+		// init reads, so per AGENTS.md invariant 1 ("Bounded is not free")
+		// its write is registered on the wrapper-owned post-resolution queue
+		// rather than the awaited init path: a directory conflict or
+		// permission failure can never block manifest delivery, and the
+		// writer itself contains the failure with a bounded categorized
+		// diagnostic.
 		const { AutomationStatusArtifact: ASA } = await import(
 			'./background/status-artifact'
 		);
 		const swarmDir = path.resolve(ctx.directory, '.swarm');
-		statusArtifact = new ASA(swarmDir);
-		statusArtifact.updateConfig(
-			automationConfig.mode,
-			automationConfig.capabilities,
-		);
+		const automationStatusArtifactPostInitTask = async () => {
+			try {
+				const artifact = new ASA(swarmDir);
+				artifact.updateConfig(
+					automationConfig.mode,
+					automationConfig.capabilities,
+				);
+			} catch (err) {
+				// Belt-and-braces: the writer contains write failures itself;
+				// this guards the (defensive) construction path too.
+				log('automation status artifact init failed (non-fatal)', {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		};
+		postResolutionTasks.push(automationStatusArtifactPostInitTask);
 
 		// v6.8 Task 1.1: Wire evidence summary integration
 		if (automationConfig.capabilities?.evidence_auto_summaries === true) {

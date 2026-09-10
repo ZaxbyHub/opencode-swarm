@@ -99,10 +99,29 @@ export function createPreflightIntegration(
 			preflightConfig,
 		);
 
-		// Update status artifact if available
+		// Update status artifact if available. The artifact is optional output:
+		// a persistence failure must never reject the preflight handler (the
+		// scheduler wrapper's catch does not apply to handler-time calls), so
+		// this carries its own bounded non-fatal catch (issue #2669, Change 1b)
+		// in addition to the writer's containment.
 		if (statusArtifact) {
 			const state = report.overall === 'pass' ? 'success' : 'failure';
-			statusArtifact.recordOutcome(state, request.currentPhase, report.message);
+			try {
+				statusArtifact.recordOutcome(
+					state,
+					request.currentPhase,
+					report.message,
+				);
+			} catch (err) {
+				const code =
+					typeof err === 'object' && err !== null && 'code' in err
+						? String((err as { code?: unknown }).code ?? 'unknown')
+						: 'unknown';
+				logger.log(
+					'[PreflightIntegration] Status artifact update failed (non-fatal)',
+					{ code },
+				);
+			}
 
 			logger.log('[PreflightIntegration] Status artifact updated', {
 				state,
