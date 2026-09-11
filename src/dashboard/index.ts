@@ -22,8 +22,8 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { canonicalProjectKey } from '../db/canonical-project.js';
-import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { log } from '../utils/logger.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { closeDashboardServer, listenDashboardServer } from './server.js';
 
 /** Bounded registry (invariant 8): one handle per canonical project root. */
