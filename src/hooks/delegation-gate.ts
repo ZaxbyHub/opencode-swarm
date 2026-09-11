@@ -38,6 +38,7 @@ import {
 import {
 	appendCoreEventSync,
 	CORE_EVENT_LOCKED,
+	type CoderRetryEscalationAction,
 	getCoderRetryEscalationActions,
 } from '../events/core-events.js';
 import {
@@ -2030,6 +2031,173 @@ export async function forceRecordPlanCriticApproval(
 	};
 }
 
+/**
+ * Issue #2703: architect-facing manual recovery for the coder retry circuit
+ * breaker's critic_sounding_board gate. `enforceCoderRetryEscalation` blocks
+ * every coder dispatch for a task until durable evidence
+ * `gates.critic_sounding_board` exists, but the only foreground writer is the
+ * toolAfter auto-recorder, whose conjunctive preconditions (verdict parse via
+ * the plan-critic rubric, dispatch-time task attribution, launch-generation
+ * binding, non-terminal output state) can each miss on a legitimate APPROVED
+ * verdict — leaving the gate blocked across sessions and resets with no
+ * recovery path (unlike the plan-critic gate's approve_plan_critic, issue
+ * #2012). This helper writes the exact evidence the mechanical recorder would
+ * have written. It records evidence ONLY: it never emits
+ * sounding_board_consultation / simplification / user_escalation, so it cannot
+ * fabricate or skip the escalation protocol — a durable consultation for the
+ * task's CURRENT retry epoch must already exist.
+ */
+export async function forceRecordRetrySoundingBoardApproval(
+	directory: string,
+	sessionID: string,
+	options: { taskId: string; reason?: string },
+): Promise<{
+	taskId: string;
+	generation: number;
+	retryEpoch: number;
+	recordedAt: string;
+}> {
+	// Defense-in-depth mirroring forceRecordPlanCriticApproval: the
+	// approve_retry_sounding_board tool is registered for the architect only,
+	// but require the ACTIVE session to be the architect so a non-architect
+	// context cannot self-unblock the retry gate.
+	const session = ensureAgentSession(sessionID);
+	if (
+		!session ||
+		!session.agentName ||
+		stripKnownSwarmPrefix(session.agentName) !== 'architect'
+	) {
+		throw new Error(
+			'APPROVE_RETRY_SOUNDING_BOARD_ARCHITECT_REQUIRED: approve_retry_sounding_board requires an active architect session. ' +
+				'The coder retry circuit-breaker escape hatch is architect-only; a coder/reviewer cannot self-unblock.',
+		);
+	}
+
+	const taskId =
+		typeof options.taskId === 'string' ? options.taskId.trim() : '';
+	if (!taskId) {
+		throw new Error(
+			'APPROVE_RETRY_UNKNOWN_TASK: approve_retry_sounding_board requires the exact plan task id (e.g. "2.1").',
+		);
+	}
+
+	const plan = await loadPlanJsonOnly(directory);
+	if (!plan) {
+		// Same missing/corrupt distinction as forceRecordPlanCriticApproval.
+		const planPath = path.join(directory, '.swarm', 'plan.json');
+		if (fs.existsSync(planPath)) {
+			throw new Error(
+				'PLAN_CORRUPT: .swarm/plan.json exists but could not be parsed ' +
+					'(corrupt or schema-invalid). Repair or re-save the plan before ' +
+					'recording a retry sounding-board approval.',
+			);
+		}
+		throw new Error(
+			'PLAN_NOT_FOUND: no .swarm/plan.json — cannot record a retry ' +
+				'sounding-board approval without a plan. Save a plan first.',
+		);
+	}
+	const knownTaskIds = new Set(
+		plan.phases.flatMap((phase) => phase.tasks.map((task) => task.id)),
+	);
+	if (!knownTaskIds.has(taskId)) {
+		throw new Error(
+			`APPROVE_RETRY_UNKNOWN_TASK: task ${taskId} is not in the current plan. Refusing to record evidence for a foreign task id.`,
+		);
+	}
+
+	const { getTaskWorkflowSnapshot, readTaskEvidence, recordGateEvidence } =
+		await import('../gate-evidence');
+	const evidence = await readTaskEvidence(directory, taskId);
+	const workflow = getTaskWorkflowSnapshot(evidence);
+	if (!evidence || !workflow.authoritative) {
+		throw new Error(
+			`APPROVE_RETRY_NO_WORKFLOW: no durable task workflow evidence exists for task ${taskId} — there is no retry state to recover.`,
+		);
+	}
+
+	let prior: Set<CoderRetryEscalationAction>;
+	try {
+		prior = readCoderRetryEscalations(directory, taskId, workflow.retryEpoch);
+	} catch (error) {
+		// A corrupt authority index must not wedge the recovery path (plan
+		// critic round 1): remap to a typed error with repair guidance,
+		// mirroring enforceCoderRetryEscalation's own mapping.
+		if (
+			error instanceof Error &&
+			error.message === 'CORE_EVENT_AUTHORITY_INDEX_UNREADABLE'
+		) {
+			throw new Error(
+				'APPROVE_RETRY_AUDIT_INDEX_UNREADABLE: the retry audit authority index is unreadable, ' +
+					'so the prior sounding_board_consultation cannot be verified. Repair the events store (see /swarm doctor) and retry.',
+			);
+		}
+		throw error;
+	}
+	if (!prior.has('sounding_board_consultation')) {
+		throw new Error(
+			`APPROVE_RETRY_CONSULTATION_REQUIRED: task ${taskId} has no durable sounding_board_consultation escalation for retry epoch ${workflow.retryEpoch}. ` +
+				'Dispatch critic_sounding_board first — this tool records an obtained APPROVED verdict, it cannot substitute for the consultation.',
+		);
+	}
+
+	const sanitizedReason =
+		typeof options.reason === 'string' && options.reason.trim().length > 0
+			? options.reason.trim().slice(0, 500)
+			: undefined;
+	const recordedAt = new Date().toISOString();
+
+	// The durable gate artifact the mechanical toolAfter recorder would have
+	// written: same gate_recorded transition, same retention semantics
+	// (clearWorkflowGateProof clears it on accepted_mutation/repair_idle), so
+	// the manual entry cannot outlive its generation any more than a
+	// mechanical one can.
+	await recordGateEvidence(
+		directory,
+		taskId,
+		'critic_sounding_board',
+		sessionID,
+		false,
+		{
+			transitionId: `retry-sb-manual:${sessionID}:${recordedAt}`,
+		},
+	);
+
+	// Best-effort audit event (forceRecordPlanCriticApproval precedent): the
+	// evidence write above is authoritative for the gate; this event is the
+	// human-readable trail distinguishing a manual override from a mechanical
+	// recording. Deduped per (taskId, retryEpoch, action).
+	try {
+		appendCoreEventSync(
+			directory,
+			{
+				type: 'coder_retry_circuit_breaker',
+				timestamp: recordedAt,
+				taskId,
+				generation: workflow.generation,
+				retryEpoch: workflow.retryEpoch,
+				rejectionCount: workflow.retryCount,
+				rejectionHistory: [...workflow.retryHistory],
+				phase: Number(taskId.split('.')[0]) || 0,
+				action: 'sounding_board_manual_approval',
+				...(sanitizedReason ? { reason: sanitizedReason } : {}),
+			},
+			{ dedupeOnAuthorityKey: true },
+		);
+	} catch (err) {
+		logger.warn(
+			`[delegation-gate] sounding_board_manual_approval audit event write failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+
+	return {
+		taskId,
+		generation: workflow.generation,
+		retryEpoch: workflow.retryEpoch,
+		recordedAt,
+	};
+}
+
 const ACTIVE_PARALLEL_TASK_STATES = new Set([
 	'coder_delegated',
 	'pre_check_passed',
@@ -2339,11 +2507,6 @@ function completionGateViolationMessage(
 		'Read-only inspection remains available; a proven-disjoint task may continue; if plan.json is ledger-stale, retry save_plan with reconcile_ledger_projection=true and otherwise-unchanged plan content.'
 	);
 }
-
-type CoderRetryEscalationAction =
-	| 'sounding_board_consultation'
-	| 'simplification'
-	| 'user_escalation';
 
 /**
  * Issue #2039: escalation audit state moved off raw events.jsonl scans to

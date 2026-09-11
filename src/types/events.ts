@@ -57,7 +57,15 @@ export interface CoderRetryCircuitBreakerEvent {
 	rejectionCount: number;
 	rejectionHistory: string[];
 	phase: number;
-	action: 'sounding_board_consultation' | 'simplification' | 'user_escalation';
+	action:
+		| 'sounding_board_consultation'
+		| 'simplification'
+		| 'user_escalation'
+		| 'sounding_board_manual_approval';
+	/** Present only on sounding_board_manual_approval (issue #2703): the
+	 * architect-stated justification for the manual override, bounded to 500
+	 * chars by the recorder. */
+	reason?: string;
 }
 
 export interface AgentConflictDetectedEvent {
