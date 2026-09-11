@@ -49,6 +49,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory evaluate',
 		'memory consolidation-log',
 		'memory audit-verify', // #1466: read-only audit-chain verification
+		'dashboard', // #2509: read-only dashboard status command
 		'sdd',
 		'sdd status',
 		'sdd validate',

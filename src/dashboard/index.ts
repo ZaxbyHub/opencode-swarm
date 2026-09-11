@@ -22,6 +22,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { canonicalProjectKey } from '../db/canonical-project.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { log } from '../utils/logger.js';
 import { closeDashboardServer, listenDashboardServer } from './server.js';
 
@@ -81,8 +82,9 @@ function writeStatusFile(
 	try {
 		const swarmDir = path.join(directory, '.swarm');
 		mkdirSync(swarmDir, { recursive: true });
+		const targetPath = path.join(swarmDir, 'dashboard-status.json');
 		writeFileSync(
-			path.join(swarmDir, 'dashboard-status.json'),
+			targetPath,
 			`${JSON.stringify({
 				status: record.status,
 				port: record.port ?? null,
@@ -91,6 +93,7 @@ function writeStatusFile(
 			})}\n`,
 			'utf8',
 		);
+		invalidateCachedArtifact(targetPath);
 	} catch (err) {
 		// The notice file is best-effort observability, never a start blocker.
 		log('dashboard status file not written (non-fatal)', {
