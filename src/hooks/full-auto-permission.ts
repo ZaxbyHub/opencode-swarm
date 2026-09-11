@@ -39,6 +39,7 @@ import {
 import { isAllowedPausedSwarmCommand } from '../full-auto/recovery';
 import { recordFullAutoSevereEvidenceEvent } from '../full-auto/severe-result.js';
 import {
+	isFullAutoStateLockError,
 	isFullAutoStateUnreadable,
 	loadFullAutoRunState,
 	pauseFullAutoRun,
@@ -379,10 +380,22 @@ export function createFullAutoPermissionHook(
 				// cadence trigger fires, dispatches a critic oversight in the
 				// background. The dispatcher runs concurrently — the next tool
 				// call surfaces any pause/terminate verdict from the critic.
-				tickAndMaybeDispatchCadence(directory, sessionID, 'toolCalls', config, {
-					activeAgent,
-				});
-				resetFullAutoDenials(directory, sessionID);
+				try {
+					tickAndMaybeDispatchCadence(
+						directory,
+						sessionID,
+						'toolCalls',
+						config,
+						{
+							activeAgent,
+						},
+					);
+					resetFullAutoDenials(directory, sessionID);
+				} catch (error) {
+					// Bookkeeping is advisory on an already-allowed action. A state
+					// lock failure must not be converted into a policy denial streak.
+					if (!isFullAutoStateLockError(error)) throw error;
+				}
 				return;
 			}
 
@@ -513,10 +526,20 @@ export function createFullAutoPermissionHook(
 			}
 
 			if (outcome.decision === 'allow') {
-				tickAndMaybeDispatchCadence(directory, sessionID, 'toolCalls', config, {
-					activeAgent,
-				});
-				resetFullAutoDenials(directory, sessionID);
+				try {
+					tickAndMaybeDispatchCadence(
+						directory,
+						sessionID,
+						'toolCalls',
+						config,
+						{
+							activeAgent,
+						},
+					);
+					resetFullAutoDenials(directory, sessionID);
+				} catch (error) {
+					if (!isFullAutoStateLockError(error)) throw error;
+				}
 				return;
 			}
 

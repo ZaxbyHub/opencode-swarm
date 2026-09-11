@@ -220,14 +220,22 @@ export async function handleFullAutoCommand(
 		logger.error(`[full-auto] durable run-state write failed: ${durableError}`);
 	}
 
-	if (newFullAutoMode && durableError) {
-		// Refuse to flip the legacy flag — the v2 permission hook would have
-		// no durable run to consult, and reactive intercept alone is not the
-		// advertised v2 control plane.
+	if (durableError) {
+		// Refuse to flip the legacy flag in either direction — the v2
+		// permission hook must never advertise a transition that was not
+		// durably recorded. In particular, an `off` lock failure must not
+		// claim success while the persisted run remains active.
+		if (newFullAutoMode) {
+			return [
+				'Error: Full-Auto Mode could NOT be enabled — durable run-state write failed.',
+				`Reason: ${durableError}.`,
+				'Inspect .swarm/ permissions and disk space, then retry.',
+			].join(' ');
+		}
 		return [
-			'Error: Full-Auto Mode could NOT be enabled — durable run-state write failed.',
+			'Error: Full-Auto Mode could NOT be disabled — durable run-state write failed.',
 			`Reason: ${durableError}.`,
-			'Inspect .swarm/ permissions and disk space, then retry.',
+			'Keep the current mode until .swarm/ is writable and retry.',
 		].join(' ');
 	}
 
