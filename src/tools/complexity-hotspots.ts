@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
@@ -156,6 +157,16 @@ export const _internals: {
 } = { bunSpawn, resolveGitExecutable };
 
 // ============ Git Churn Analysis ============
+
+// #2674 (AGENTS.md invariant 3): the churn subprocess is bounded, non-
+// interactive, killable, and its output volume is capped. `git log` over a
+// large/frozen history can stall arbitrarily long, and a repo config
+// (alias/hook wrapper) can fork descendants that inherit the pipe — hence
+// the tree-aware kill: a grandchild holding the stdout write-end must not
+// outlive the bound either.
+const GIT_CHURN_TIMEOUT_MS = 10_000;
+const GIT_CHURN_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
+
 async function getGitChurn(
 	days: number,
 	directory: string,
@@ -173,65 +184,124 @@ async function getGitChurn(
 		{
 			stdout: 'pipe',
 			stderr: 'pipe',
+			stdin: 'ignore',
 			cwd: directory,
+			timeout: GIT_CHURN_TIMEOUT_MS,
+			maxBuffer: GIT_CHURN_MAX_BUFFER_BYTES,
+			killProcessTree: true,
+			// Same explicit-env parity as the two sync callers (PRR-011): keeps
+			// git non-interactive and restores live-env semantics under Bun's
+			// process-start env snapshot.
+			env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
 		},
 	);
 
 	// Read stdout concurrently with process exit to avoid pipe deadlock.
 	// git log output can be very large for repos with extensive history.
-	const [stdout] = await Promise.all([proc.stdout.text(), proc.exited]);
-
-	// A spawn failure (process never started — e.g. missing git binary or a
-	// cwd that no longer exists) means the churn data is unproven, not empty.
-	// `analyzeHotspots` drives its entire file iteration off this map, so
-	// silently continuing here previously produced a false "ran fine, found
-	// nothing" success once the Bun spawn path stopped throwing on process-
-	// creation failure (#2236 Sweep A, FIX 1). Throwing preserves the loud
-	// `error: 'analysis failed: ...'` behavior the tool already surfaces via
-	// the try/catch in `execute`.
 	//
-	// Deliberately scoped to `spawnError` only, NOT a general non-zero-exit
-	// check: `git log` legitimately exits non-zero with empty (not erroring)
-	// output on a repo with no commits yet (exit 128, verified empirically),
-	// and treating every non-zero exit as a hard failure would turn that
-	// benign case into a false error. This mirrors FIX 2's scoping in
-	// `pkg-audit.ts`'s `runCargoAudit`.
-	if (proc.spawnError) {
-		throw new Error(`git churn analysis failed: ${proc.spawnError.message}`);
-	}
+	// The caller owns the bound (#2674): a Promise.race deadline converts a
+	// stalled `git log` into a typed failure even when the tree-kill path
+	// (Windows taskkill) reaps the child without a runtime-reported
+	// signalCode. The signalCode check below stays as a second detector for
+	// kills the runtime does report; the finally block's tree kill reaps any
+	// descendant still holding the pipe.
+	let churnTimeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const [stdout, outcome] = await Promise.race([
+			Promise.all([proc.stdout.text(), proc.exited]).then(
+				(churnOutput): [string, number | 'timeout'] => churnOutput,
+			),
+			new Promise<[null, 'timeout']>((resolve) => {
+				churnTimeout = setTimeout(
+					() => resolve([null, 'timeout']),
+					GIT_CHURN_TIMEOUT_MS,
+				);
+			}),
+		]);
+		if (typeof churnTimeout !== 'undefined') clearTimeout(churnTimeout);
 
-	// Split on CRLF for cross-platform handling
-	const lines = stdout.split(/\r?\n/);
-
-	for (const line of lines) {
-		// Normalize path separators: \ to /
-		const normalizedPath = line.replace(/\\/g, '/');
-
-		// Skip empty lines
-		if (!normalizedPath || normalizedPath.trim() === '') {
-			continue;
+		if (outcome === 'timeout') {
+			throw new Error(
+				`git churn analysis failed: git log did not finish within ${GIT_CHURN_TIMEOUT_MS} ms (bounded; child tree killed)`,
+			);
 		}
 
-		// Skip files in excluded directories
-		if (
-			normalizedPath.includes('node_modules') ||
-			normalizedPath.includes('/.git/') ||
-			normalizedPath.includes('/dist/') ||
-			normalizedPath.includes('/build/') ||
-			normalizedPath.includes('__tests__')
-		) {
-			continue;
+		// A spawn failure (process never started — e.g. missing git binary or a
+		// cwd that no longer exists) means the churn data is unproven, not empty.
+		// `analyzeHotspots` drives its entire file iteration off this map, so
+		// silently continuing here previously produced a false "ran fine, found
+		// nothing" success once the Bun spawn path stopped throwing on process-
+		// creation failure (#2236 Sweep A, FIX 1). Throwing preserves the loud
+		// `error: 'analysis failed: ...'` behavior the tool already surfaces via
+		// the try/catch in `execute`.
+		if (proc.spawnError) {
+			throw new Error(`git churn analysis failed: ${proc.spawnError.message}`);
 		}
 
-		// Skip test files
-		if (
-			normalizedPath.includes('.test.') ||
-			normalizedPath.includes('.spec.')
-		) {
-			continue;
+		// A runtime-reported kill (native timeout, overflow auto-kill, external
+		// signal) must surface as a structured failure, never as an empty churn
+		// map (#2674: cancellation must not be mistaken for successful empty
+		// output). A plain non-zero exit (e.g. exit 128 on a repo with no
+		// commits yet) reports no signal and stays tolerated below.
+		if (proc.signalCode) {
+			throw new Error(
+				`git churn analysis failed: git log was killed by ${proc.signalCode} after exceeding the ${GIT_CHURN_TIMEOUT_MS} ms / ${GIT_CHURN_MAX_BUFFER_BYTES}-byte bound`,
+			);
 		}
 
-		churnMap.set(normalizedPath, (churnMap.get(normalizedPath) || 0) + 1);
+		// Third detector (#2674): on some runtime/OS combinations the overflow
+		// controller's rejection loses the race with a clean child exit and the
+		// captured text resolves instead — the retained prefix is capped at
+		// exactly the bound, so the size check is version-independent.
+		if (Buffer.byteLength(stdout) >= GIT_CHURN_MAX_BUFFER_BYTES) {
+			throw new Error(
+				`git churn analysis failed: git log output reached the ${GIT_CHURN_MAX_BUFFER_BYTES}-byte buffer limit`,
+			);
+		}
+
+		// Split on CRLF for cross-platform handling
+		const lines = (stdout as string).split(/\r?\n/);
+
+		for (const line of lines) {
+			// Normalize path separators: \ to /
+			const normalizedPath = line.replace(/\\/g, '/');
+
+			// Skip empty lines
+			if (!normalizedPath || normalizedPath.trim() === '') {
+				continue;
+			}
+
+			// Skip files in excluded directories
+			if (
+				normalizedPath.includes('node_modules') ||
+				normalizedPath.includes('/.git/') ||
+				normalizedPath.includes('/dist/') ||
+				normalizedPath.includes('/build/') ||
+				normalizedPath.includes('__tests__')
+			) {
+				continue;
+			}
+
+			// Skip test files
+			if (
+				normalizedPath.includes('.test.') ||
+				normalizedPath.includes('.spec.')
+			) {
+				continue;
+			}
+
+			churnMap.set(normalizedPath, (churnMap.get(normalizedPath) || 0) + 1);
+		}
+	} finally {
+		// Best-effort cleanup (AGENTS.md invariant 3): an outer timeout alone
+		// lets the awaiter proceed without aborting the child. killProcessTree
+		// is set, so this reaps descendants still holding the pipes too.
+		if (typeof churnTimeout !== 'undefined') clearTimeout(churnTimeout);
+		try {
+			proc.kill();
+		} catch {
+			// already exited
+		}
 	}
 
 	return churnMap;

@@ -125,8 +125,22 @@ async function getSwarmVersion(directory?: string): Promise<string> {
 }
 
 /**
- * Get git remote URL for a directory
+ * Get git remote URL for a directory.
+ *
+ * #2674 (AGENTS.md invariant 3): bounded, non-interactive, killable. A hung
+ * git (credential prompt, AV interception, stalled filesystem) previously
+ * blocked the caller's event loop forever — `execFileSync` is synchronous, so
+ * the freeze was host-wide, not per-await. The option set mirrors the
+ * compliant exemplars (`gitExec` in src/git/branch.ts, `detectGitRemote` in
+ * src/commands/_shared/url-security.ts): explicit `env` with
+ * `GIT_TERMINAL_PROMPT=0` both prevents the credential-prompt hang class
+ * outright and restores live-env semantics under Bun (whose spawn inherits a
+ * process-start env snapshot when no `env` is passed — oven-sh/bun#29237
+ * class, see src/utils/git-executable.ts).
  */
+const GIT_REMOTE_URL_TIMEOUT_MS = 5_000;
+const GIT_REMOTE_URL_MAX_BUFFER_BYTES = 64 * 1024;
+
 function getGitRemoteUrl(directory: string): string | undefined {
 	try {
 		const gitExecutable = resolveGitExecutable();
@@ -134,7 +148,14 @@ function getGitRemoteUrl(directory: string): string | undefined {
 			.execFileSync(gitExecutable, ['remote', 'get-url', 'origin'], {
 				cwd: directory,
 				encoding: 'utf-8',
-				stdio: ['pipe', 'pipe', 'ignore'],
+				stdio: ['ignore', 'pipe', 'ignore'],
+				timeout: GIT_REMOTE_URL_TIMEOUT_MS,
+				// POSIX: a SIGTERM-trapping child must not defeat the bound. On
+				// Windows this is identical to the default TerminateProcess
+				// coercion (documented in docs/engineering-invariants.md §3).
+				killSignal: 'SIGKILL',
+				maxBuffer: GIT_REMOTE_URL_MAX_BUFFER_BYTES,
+				env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
 			})
 			.trim();
 		return remoteUrl;
