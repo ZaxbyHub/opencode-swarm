@@ -6,6 +6,7 @@
  * Max 50 entries to prevent memory growth.
  * Access is restricted via getter to prevent unauthorized mutation.
  */
+import { noteStartupAdvisory } from '../observability/startup-contract.js';
 import { log } from '../utils/logger.js';
 
 const deferredWarnings: string[] = [];
@@ -60,6 +61,11 @@ function sanitizeBufferedLine(s: string): string {
  * inside `advisoryWarn` and missed every direct caller).
  */
 export function addDeferredWarning(warning: string): void {
+	// Startup latency contract (#2670): count startup-window advisories
+	// (readiness warnings) so they are reported SEPARATELY from latency in
+	// the contract's queue_settled row. noteStartupAdvisory is a no-op once
+	// the startup window has closed (late-session warnings never count).
+	noteStartupAdvisory();
 	const sanitized = sanitizeBufferedLine(warning);
 	if (deferredWarnings.length < MAX_DEFERRED_WARNINGS - 1) {
 		deferredWarnings.push(sanitized);

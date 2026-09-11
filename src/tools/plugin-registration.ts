@@ -12,6 +12,7 @@ import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import type { AgentDefinition } from '../agents/index.js';
 import type { PluginConfig } from '../config/index.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
+import { withStartupFirstUseTracking } from '../observability/startup-contract.js';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
 import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import { createLeanTurboCriticTool } from './lean-turbo-critic.js';
@@ -94,5 +95,20 @@ export function buildPluginToolObject(
 		getActiveAgentName,
 	);
 	tools.lean_turbo_run_phase = createLeanTurboRunPhaseTool(reviewAgentNames);
+	// Startup latency contract (#2670): observe the FIRST tool execute per
+	// process with the tool name in scope. The observation wrapper returns
+	// each definition's own execute result untouched and records the
+	// first-tool interval when the invocation settles — no behavior change
+	// on any path (the tool object shape is otherwise byte-identical).
+	for (const [name, def] of Object.entries(tools)) {
+		const execute = (def as { execute?: unknown }).execute;
+		if (typeof execute === 'function') {
+			(def as { execute: unknown }).execute = withStartupFirstUseTracking(
+				'first_tool',
+				name,
+				execute as (...args: unknown[]) => unknown,
+			);
+		}
+	}
 	return tools;
 }
