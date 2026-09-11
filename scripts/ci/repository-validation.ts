@@ -51,6 +51,7 @@ export const DEFAULT_MAX_OUTPUT_BYTES = 65_536;
 export const DEFAULT_DIFF_BASE = 'origin/main';
 const PROCESS_KILLER_TIMEOUT_MS = 5_000;
 const GIT_DIFF_TIMEOUT_MS = 10_000;
+const GIT_DIFF_FILTER = 'ACDMR';
 const REPORT_LOCK_WAIT_MS = 5_000;
 const REPORT_LOCK_RETRY_MS = 50;
 const REPORT_LOCK_STALE_AFTER_MS = 30_000;
@@ -371,8 +372,10 @@ export function discoverTestFiles(root: string, roots: string[] = ['tests/unit']
 		let entries: fs.Dirent[];
 		try {
 			entries = fs.readdirSync(directory, { withFileTypes: true });
-		} catch {
-			return;
+		} catch (error) {
+			throw new Error(
+				`filesystem discovery failed for ${directory}: ${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
 		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
 			const fullPath = path.join(directory, entry.name);
@@ -393,8 +396,10 @@ function discoverTopLevelTestFiles(root: string): string[] {
 			.filter((entry) => entry.isFile() && entry.name.endsWith('.test.ts'))
 			.map((entry) => normalizePathForIdentity(path.join(directory, entry.name)))
 			.sort((a, b) => a.localeCompare(b));
-	} catch {
-		return [];
+	} catch (error) {
+		throw new Error(
+			`filesystem discovery failed for ${directory}: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 }
 
@@ -450,7 +455,7 @@ type GitDiffPathsRunner = (root: string, diffBase: string) => Promise<string[]>;
 
 async function defaultGitDiffPaths(root: string, diffBase: string): Promise<string[]> {
 	const child = Bun.spawn([
-		resolveGitExecutable(), '-C', root, 'diff', '--name-only', '--diff-filter=ACMR', `${diffBase}...HEAD`,
+		resolveGitExecutable(), '-C', root, 'diff', '--name-only', `--diff-filter=${GIT_DIFF_FILTER}`, `${diffBase}...HEAD`,
 	], {
 		cwd: root,
 		stdin: 'ignore',
@@ -460,14 +465,21 @@ async function defaultGitDiffPaths(root: string, diffBase: string): Promise<stri
 	});
 	try {
 		const [stdout, stderr, exitCode] = await Promise.all([
-			readBounded(child.stdout, DEFAULT_MAX_OUTPUT_BYTES, GIT_DIFF_TIMEOUT_MS),
+			_internals.readBoundedWithStatus(child.stdout, DEFAULT_MAX_OUTPUT_BYTES, GIT_DIFF_TIMEOUT_MS),
 			readBounded(child.stderr, DEFAULT_MAX_OUTPUT_BYTES, GIT_DIFF_TIMEOUT_MS),
 			child.exited,
 		]);
+		if (stdout.truncated || !stdout.complete) {
+			throw new Error(
+				stdout.truncated
+					? `git diff output exceeded bounded buffer of ${DEFAULT_MAX_OUTPUT_BYTES} bytes`
+					: 'git diff output ended before the complete changed-path set was read',
+			);
+		}
 		if (exitCode !== 0) {
 			throw new Error(`git diff failed with exit code ${exitCode}: ${redactAndBound(stderr)}`);
 		}
-		return stdout.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean);
+		return stdout.value.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean);
 	} finally {
 		try {
 			child.kill('SIGKILL');
@@ -480,9 +492,17 @@ async function defaultGitDiffPaths(root: string, diffBase: string): Promise<stri
 export const _internals: {
 	runtimeAvailable: typeof runtimeAvailable;
 	gitDiffPaths: GitDiffPathsRunner;
+	diffCommandArgv: typeof diffCommandArgv;
+	discoverTestFiles: typeof discoverTestFiles;
+	discoverTopLevelTestFiles: typeof discoverTopLevelTestFiles;
+	readBoundedWithStatus: typeof readBoundedWithStatus;
 } = {
 	runtimeAvailable,
 	gitDiffPaths: defaultGitDiffPaths,
+	diffCommandArgv,
+	discoverTestFiles,
+	discoverTopLevelTestFiles,
+	readBoundedWithStatus,
 };
 
 function commandItem(
@@ -528,8 +548,8 @@ export function buildSurfaceItems(options: {
 			const files = options.testFiles && (surface === 'unit' || surface === 'integration')
 				? options.testFiles
 				: definition.testRoots.flatMap((testRoot) => {
-					if (testRoot === 'tests:top-level') return discoverTopLevelTestFiles(root);
-					return discoverTestFiles(root, [testRoot]);
+					if (testRoot === 'tests:top-level') return _internals.discoverTopLevelTestFiles(root);
+					return _internals.discoverTestFiles(root, [testRoot]);
 				});
 			const uniqueFiles = Array.from(new Set(files.map((file) => normalizePathForIdentity(file)))).sort((a, b) => a.localeCompare(b));
 			if (uniqueFiles.length === 0) {
@@ -567,6 +587,26 @@ export function buildSurfaceItems(options: {
 
 export const createSurfaceItems = buildSurfaceItems;
 
+function discoveryFailureItem(
+	root: string,
+	surface: ValidationSurface,
+	testTimeoutMs: number,
+	perItemTimeoutMs: number,
+	error: unknown,
+): ValidationItem {
+	return {
+		id: `${surface}:discovery`,
+		surface,
+		file: `surface:${surface}/discovery`,
+		argv: [],
+		cwd: root,
+		kind: 'surface',
+		testTimeoutMs,
+		perItemTimeoutMs,
+		skipReason: `filesystem discovery failed: ${error instanceof Error ? error.message : String(error)}`,
+	};
+}
+
 function changedTestFilesBySurface(root: string, changedPaths: string[]): {
 	unit: string[];
 	integration: string[];
@@ -589,20 +629,27 @@ function changedTestFilesBySurface(root: string, changedPaths: string[]): {
 }
 
 function diffCommandArgv(root: string, diffBase: string): string[] {
-	return [resolveGitExecutable(), '-C', root, 'diff', '--name-only', '--diff-filter=ACMR', `${diffBase}...HEAD`];
+	return [resolveGitExecutable(), '-C', root, 'diff', '--name-only', `--diff-filter=${GIT_DIFF_FILTER}`, `${diffBase}...HEAD`];
 }
 
-async function readBounded(
+interface BoundedReadResult {
+	value: string;
+	truncated: boolean;
+	complete: boolean;
+}
+
+async function readBoundedWithStatus(
 	stream: ReadableStream<Uint8Array> | null | undefined,
 	maxBytes: number,
 	deadlineMs = PROCESS_KILLER_TIMEOUT_MS,
 	stopSignal?: AbortSignal,
-): Promise<string> {
-	if (!stream) return '';
+): Promise<BoundedReadResult> {
+	if (!stream) return { value: '', truncated: false, complete: true };
 	const reader = stream.getReader();
 	const chunks: Uint8Array[] = [];
 	let retained = 0;
-	const retentionLimit = maxBytes + 8192;
+	let truncated = false;
+	let complete = false;
 	let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
 	const deadline = new Promise<void>((resolve) => {
 		deadlineTimer = setTimeout(() => {
@@ -633,9 +680,12 @@ async function readBounded(
 				void reader.cancel().catch(() => undefined);
 				break;
 			}
-			if (next.value.done) break;
+			if (next.value.done) {
+				complete = true;
+				break;
+			}
 			if (!next.value.value) continue;
-			const remaining = retentionLimit - retained;
+			const remaining = maxBytes - retained;
 			if (remaining > 0) {
 				const chunk = next.value.value.byteLength > remaining
 					? next.value.value.subarray(0, remaining)
@@ -643,6 +693,7 @@ async function readBounded(
 				chunks.push(chunk);
 				retained += chunk.byteLength;
 			}
+			if (next.value.value.byteLength > remaining) truncated = true;
 		}
 	} finally {
 		if (deadlineTimer) clearTimeout(deadlineTimer);
@@ -651,7 +702,16 @@ async function readBounded(
 		void reader.cancel().catch(() => undefined);
 	}
 	const output = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
-	return output;
+	return { value: output, truncated, complete };
+}
+
+async function readBounded(
+	stream: ReadableStream<Uint8Array> | null | undefined,
+	maxBytes: number,
+	deadlineMs = PROCESS_KILLER_TIMEOUT_MS,
+	stopSignal?: AbortSignal,
+): Promise<string> {
+	return (await readBoundedWithStatus(stream, maxBytes, deadlineMs, stopSignal)).value;
 }
 
 async function killProcessTree(child: { pid?: number; kill: (signal?: number | string) => void }, root: string): Promise<boolean> {
@@ -797,7 +857,9 @@ function statusResult(
 	if (!TERMINAL_STATUSES.includes(status)) status = 'crashed';
 	// A callback cannot promote a nonzero process to passed by returning a
 	// contradictory status.  Failure terminals always remain failure terminals.
-	if (status === 'passed' && result.exitCode !== 0) status = 'failed';
+	if (status === 'passed' && (result.exitCode !== 0 || result.signal !== null)) {
+		status = result.signal !== null ? 'crashed' : 'failed';
+	}
 	return {
 		...result,
 		status,
@@ -938,10 +1000,22 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 				skipReason: `git diff discovery failed: ${error instanceof Error ? error.message : String(error)}`,
 			}];
 		}
-	} else if (options.testFiles !== undefined && selectedSurfaces.every((surface) => surface === 'unit')) {
-		items = createValidationItems({ root, testFiles: options.testFiles, testTimeoutMs, perItemTimeoutMs });
 	} else {
-		items = buildSurfaceItems({ root, surfaces: selectedSurfaces, testFiles: options.testFiles, testTimeoutMs, perItemTimeoutMs });
+		try {
+			if (options.testFiles !== undefined && selectedSurfaces.every((surface) => surface === 'unit')) {
+				items = createValidationItems({ root, testFiles: options.testFiles, testTimeoutMs, perItemTimeoutMs });
+			} else {
+				items = buildSurfaceItems({ root, surfaces: selectedSurfaces, testFiles: options.testFiles, testTimeoutMs, perItemTimeoutMs });
+			}
+		} catch (error) {
+			items = [discoveryFailureItem(
+				root,
+				selectedSurfaces[0] ?? 'unit',
+				testTimeoutMs,
+				perItemTimeoutMs,
+				error,
+			)];
+		}
 	}
 	const startedAt = new Date().toISOString();
 	const startedClock = Date.now();
@@ -1058,6 +1132,41 @@ function reportPathWithinRoot(root: string, requested?: string): string {
 	return destination;
 }
 
+function isNotFoundError(error: unknown): boolean {
+	return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: string }).code === 'ENOENT';
+}
+
+/** Reject symlink/junction components before any report write can follow them. */
+async function assertSafeReportPath(root: string, destination: string): Promise<void> {
+	const swarmRoot = path.resolve(root, '.swarm');
+	const relative = path.relative(swarmRoot, destination);
+	if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+		throw new Error(`repository validation report must remain under ${swarmRoot}`);
+	}
+
+	let current = swarmRoot;
+	let canonicalSwarmRoot: string | undefined;
+	for (const component of ['', ...relative.split(path.sep).filter(Boolean)]) {
+		if (component) current = path.join(current, component);
+		let stats: fs.Stats;
+		try {
+			stats = await fsp.lstat(current);
+		} catch (error) {
+			if (isNotFoundError(error)) break;
+			throw error;
+		}
+		if (stats.isSymbolicLink()) {
+			throw new Error(`repository validation report path contains a symlink or junction: ${current}`);
+		}
+		if (!canonicalSwarmRoot) canonicalSwarmRoot = await fsp.realpath(swarmRoot);
+		const canonicalCurrent = await fsp.realpath(current);
+		const canonicalRelative = path.relative(canonicalSwarmRoot, canonicalCurrent);
+		if (canonicalRelative === '..' || canonicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRelative)) {
+			throw new Error(`repository validation report path escapes ${swarmRoot}: ${current}`);
+		}
+	}
+}
+
 interface ReportLockOwner {
 	pid: number;
 	token: string;
@@ -1153,13 +1262,16 @@ async function releaseReportLock(lockPath: string, lock: HeldReportLock): Promis
 
 export async function writeValidationReport(report: ValidationReport, requestedPath?: string): Promise<string> {
 	const destination = reportPathWithinRoot(report.root, requestedPath);
+	await assertSafeReportPath(report.root, destination);
 	await fsp.mkdir(path.dirname(destination), { recursive: true });
+	await assertSafeReportPath(report.root, destination);
 	const lockPath = `${destination}.lock`;
 	let lock: HeldReportLock | undefined;
 	let temporaryPath: string | undefined;
 	try {
 		lock = await acquireReportLock(lockPath);
 		temporaryPath = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+		await assertSafeReportPath(report.root, destination);
 		const payload = `${JSON.stringify({ ...report, reportPath: destination }, null, 2)}\n`;
 		await fsp.writeFile(temporaryPath, payload, { encoding: 'utf8', flag: 'wx' });
 		await fsp.rename(temporaryPath, destination);

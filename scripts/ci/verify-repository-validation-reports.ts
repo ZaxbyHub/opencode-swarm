@@ -264,6 +264,9 @@ function validateReport(
 		if (!Array.isArray(result.argv) || result.argv.length === 0) fail(`missing argv in ${reportPath}`);
 		if (typeof result.cleanedUp !== 'boolean') fail(`missing cleanup result in ${reportPath}`);
 		if (result.status === 'passed' && result.cleanedUp !== true) fail(`passed result was not cleaned up in ${reportPath}`);
+		if (result.status === 'passed' && (result.exitCode !== 0 || result.signal !== null)) {
+			fail(`passed result has abnormal process termination in ${reportPath}`);
+		}
 		for (const output of [result.stdout, result.stderr]) {
 			if (typeof output === 'string' && Buffer.byteLength(output, 'utf8') > DEFAULT_BOUNDS.maxOutputBytes) fail(`unbounded output in ${reportPath}`);
 		}

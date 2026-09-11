@@ -351,4 +351,81 @@ describe('repository validation hardening — issue #2675', () => {
 			_internals.gitDiffPaths = originalDiff;
 		}
 	});
+
+	test('deletion-only diff remains incomplete instead of a no-op (F3)', async () => {
+		// Before the deletion filter included D, a deleted test path disappeared
+		// from the diff selection and the run was incorrectly reported as no_op.
+		const originalDiff = _internals.gitDiffPaths;
+		_internals.gitDiffPaths = async () => ['tests/unit/deleted.test.ts'];
+		try {
+			const report = await validateRepository({
+				root: ROOT,
+				mode: 'diff',
+				surfaces: ['unit'],
+				runProcess: () => ({
+					status: 'missing',
+					exitCode: null,
+					signal: null,
+					cleanedUp: true,
+				}),
+			});
+			expect(report.status).toBe('incomplete');
+			expect(report.results[0]?.status).toBe('missing');
+		} finally {
+			_internals.gitDiffPaths = originalDiff;
+		}
+	});
+
+	test('git diff output over the bounded limit fails the diff run closed (F1)', async () => {
+		// Before this guard, a truncated git path list could be treated as a
+		// complete diff and silently omit changed files from validation.
+		const originalDiff = _internals.gitDiffPaths;
+		const originalRead = _internals.readBoundedWithStatus;
+		_internals.readBoundedWithStatus = async () => ({
+			value: 'partial-path-list',
+			truncated: true,
+			complete: false,
+		});
+		try {
+			const report = await validateRepository({
+				root: path.resolve('.'),
+				mode: 'diff',
+				surfaces: ['unit'],
+			});
+			expect(report.status).toBe('incomplete');
+			expect(report.results[0]).toMatchObject({
+				status: 'skipped',
+				reason: expect.stringContaining('bounded buffer'),
+			});
+		} finally {
+			_internals.gitDiffPaths = originalDiff;
+			_internals.readBoundedWithStatus = originalRead;
+		}
+	});
+
+	test('filesystem discovery errors produce an incomplete local report (F5)', async () => {
+		// Before this guard, readdir failures were caught and converted to an
+		// empty discovery result, which could be mistaken for clean validation.
+		const originalDiscovery = _internals.discoverTestFiles;
+		_internals.discoverTestFiles = () => {
+			throw new Error('permission denied');
+		};
+		try {
+			const report = await validateRepository({
+				root: ROOT,
+				mode: 'full',
+				surfaces: ['unit'],
+				runProcess: () => {
+					throw new Error('discovery failure must not spawn');
+				},
+			});
+			expect(report.status).toBe('incomplete');
+			expect(report.results[0]).toMatchObject({
+				status: 'skipped',
+				reason: expect.stringContaining('permission denied'),
+			});
+		} finally {
+			_internals.discoverTestFiles = originalDiscovery;
+		}
+	});
 });
