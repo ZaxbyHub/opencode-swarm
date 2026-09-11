@@ -13,8 +13,6 @@
 
 import { fileURLToPath } from "node:url";
 
-const PROCESS_KILLER_TIMEOUT_MS = 5_000;
-
 function parseArgs(argv: string[]): {
 	filePath: string;
 	passthroughArgs: string[];
@@ -58,129 +56,65 @@ function parseArgs(argv: string[]): {
 	return { filePath, passthroughArgs, killTimeoutMs };
 }
 
-async function killProcessTree(child: ReturnType<typeof Bun.spawn>): Promise<void> {
-	try {
-		if (process.platform === "win32") {
-			// taskkill /T /F /PID kills the entire process tree on Windows.
-			const killer = Bun.spawn(
-				["taskkill", "/T", "/F", "/PID", String(child.pid!)],
-				{
-					cwd: process.cwd(),
-					stdin: "ignore",
-					stdout: "ignore",
-					stderr: "ignore",
-					timeout: PROCESS_KILLER_TIMEOUT_MS,
-				},
-			);
-			let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
-			try {
-				await Promise.race([
-					killer.exited,
-					new Promise<number>((resolve) => {
-						fallbackTimer = setTimeout(
-							() => resolve(1),
-							PROCESS_KILLER_TIMEOUT_MS,
-						);
-					}),
-				]);
-			} finally {
-				if (fallbackTimer) clearTimeout(fallbackTimer);
-				try {
-					killer.kill("SIGKILL");
-				} catch {
-					// The taskkill process may have already exited.
-				}
-			}
-		} else {
-			// Negative PID sends SIGKILL to the entire process group (requires detached:true).
-			process.kill(-child.pid!, "SIGKILL");
-		}
-	} catch {
-		// The child may have already exited between the deadline and cleanup.
-	} finally {
-		try {
-			child.kill("SIGKILL");
-		} catch {
-			// Best-effort fallback only.
-		}
-	}
-}
-
 async function main(): Promise<void> {
 	const { filePath, passthroughArgs, killTimeoutMs } = parseArgs(
 		process.argv.slice(2),
 	);
 
-	const hasTimeout = passthroughArgs.some(
-		(a) => a === "--timeout" || a.startsWith("--timeout="),
-	);
-	const keepalivePreload = fileURLToPath(
-		new URL("./bun-32056-keepalive.ts", import.meta.url),
-	);
-	const childArgs = [
-		"--smol",
-		"--preload",
-		keepalivePreload,
-		"test",
-		filePath,
-		...(hasTimeout ? [] : ["--timeout", "120000"]),
-		...passthroughArgs,
-	];
+	const hasTimeout = passthroughArgs.some(a => a === "--timeout" || a.startsWith("--timeout="));
+	const keepalivePreload = fileURLToPath(new URL("./bun-32056-keepalive.ts", import.meta.url));
+	const childArgs = ["--smol", "--preload", keepalivePreload, "test", filePath, ...(hasTimeout ? [] : ["--timeout", "120000"]), ...passthroughArgs];
 	const startTime = new Date();
-	const deadlineMs = Date.now() + killTimeoutMs;
 	let timedOut = false;
 
 	// Spawn child with detached:true so process-group kill works on Unix.
 	// On Windows, detached ensures taskkill /T /F can target the process tree.
-	// The native deadline is a backup only; the explicit timer below owns timeout
-	// classification and tree cleanup. Keep the deadlines distinct so Bun cannot
-	// reap the child at the same instant that the wrapper starts cleanup.
 	const child = Bun.spawn(["bun", ...childArgs], {
-		cwd: process.cwd(),
 		detached: true,
 		stdin: "ignore",
 		stdout: "inherit",
 		stderr: "inherit",
-		timeout: killTimeoutMs + PROCESS_KILLER_TIMEOUT_MS,
 	});
 
-	let killTimer: ReturnType<typeof setTimeout> | null = null;
+	let killTimer: Timer | null = null;
 	let resolveTimeoutExit: ((exitCode: number) => void) | null = null;
 	const timeoutExit = new Promise<number>((resolve) => {
 		resolveTimeoutExit = resolve;
 	});
-	let timeoutCleanup: Promise<void> | null = null;
-	const enforceTimeout = (): Promise<void> => {
-		if (timeoutCleanup) return timeoutCleanup;
-		timedOut = true;
-		timeoutCleanup = killProcessTree(child).finally(() => {
-			resolveTimeoutExit?.(124);
-		});
-		return timeoutCleanup;
-	};
 
-	killTimer = setTimeout(() => {
-		void enforceTimeout();
+	killTimer = setTimeout(async () => {
+		timedOut = true;
+		try {
+			if (process.platform === "win32") {
+				// taskkill /T /F /PID kills the entire process tree on Windows
+				const killer = Bun.spawn(
+					["taskkill", "/T", "/F", "/PID", String(child.pid!)],
+					{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+				);
+				await killer.exited;
+			} else {
+				// Negative PID sends SIGKILL to the entire process group (requires detached:true)
+				process.kill(-child.pid!, "SIGKILL");
+			}
+		} catch {
+			// Child may have already exited between timer firing and kill attempt
+		} finally {
+			try {
+				child.kill("SIGKILL");
+			} catch {
+				// Best-effort fallback only.
+			}
+			resolveTimeoutExit?.(124);
+		}
 	}, killTimeoutMs);
 
 	let rawExitCode = 0;
 	try {
 		rawExitCode = await Promise.race([child.exited, timeoutExit]);
-		// If Bun's backup deadline reaped the child before the event-loop timer
-		// ran, the wrapper still owns the deadline classification and cleanup.
-		if (!timedOut && Date.now() >= deadlineMs) {
-			await enforceTimeout();
-			rawExitCode = 124;
-		}
 	} catch {
 		rawExitCode = timedOut ? 124 : 1;
 	} finally {
 		if (killTimer) clearTimeout(killTimer);
-		try {
-			child.kill("SIGKILL");
-		} catch {
-			// The child may have already exited.
-		}
 	}
 
 	const endTime = new Date();

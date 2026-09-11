@@ -113,10 +113,11 @@ describe('ci.yml integration — shared repository-validation authority', () => 
 		expect(step).not.toContain('grep -qE');
 	});
 
-	test('"Run unit tests" step surfaces bounded issue evidence receipts', () => {
+	test('"Run unit tests" prints bounded failure reports and preserves issue receipts', () => {
 		expect(step).toMatch(
-			/if \[ \$exit_code -eq 0 \]; then\s+# Preserve bounded,[\s\S]*?grep -E "\^\\\[ISSUE-\[0-9\]\+\(-\[A-Z0-9-\]\+\)\?-EVIDENCE\\\]" "\$tmp" \|\| true\s+fi/,
+			/if \[ \$exit_code -ne 0 \]; then[\s\S]*?cat "\$report_path"[\s\S]*?else[\s\S]*?cat "\$tmp"\s+fi/,
 		);
+		expect(step).not.toMatch(/grep -E "\^\\\[(?:TIMING|TIMEOUT|ISSUE-)/);
 	});
 
 	test('"Run unit tests" step preserves shard file list mechanism', () => {
@@ -230,7 +231,7 @@ describe('ci.yml integration — shared repository-validation authority', () => 
 		);
 	});
 
-	test('unit-passed verifies reports on a fresh checkout with pinned Bun', () => {
+	test('unit-passed verifies reports on a fresh checkout and rejects partial macOS/Windows artifacts', () => {
 		const unitPassed =
 			yml.match(
 				/\n {2}unit-passed:[\s\S]*?(?=\n {2}[A-Za-z][\w-]*:|$(?![\s\S]))/m,
@@ -245,6 +246,9 @@ describe('ci.yml integration — shared repository-validation authority', () => 
 			'Install dependencies for the report verifier',
 		);
 		expect(unitPassed).not.toContain('needs.detect-');
+		expect(unitPassed).toMatch(
+			/elif \[ -d unit-reports\/repository-validation-unit-macos-latest-1 \] \|\| \[ -d unit-reports\/repository-validation-unit-windows-latest-1 \][\s\S]*?if \[ ! -d unit-reports\/repository-validation-unit-macos-latest-1 \] \|\| \[ ! -d unit-reports\/repository-validation-unit-windows-latest-1 \][\s\S]*?exit 1/,
+		);
 	});
 
 	test('"Run unit tests" step tolerates empty quarantine files', () => {
@@ -307,10 +311,11 @@ describe('ci.yml integration — integration quarantine extraction', () => {
 		);
 	});
 
-	test('"Integration tests" step surfaces bounded issue evidence receipts', () => {
+	test('"Integration tests" prints bounded failure reports and preserves issue receipts', () => {
 		expect(step).toMatch(
-			/if \[ \$exit_code -eq 0 \]; then\s+# Match the shared authority's[\s\S]*?grep -E "\^\\\[ISSUE-\[0-9\]\+\(-\[A-Z0-9-\]\+\)\?-EVIDENCE\\\]" "\$tmp" \|\| true\s+fi/,
+			/if \[ \$exit_code -ne 0 \]; then[\s\S]*?cat "\$report_path"[\s\S]*?else[\s\S]*?cat "\$tmp"\s+fi/,
 		);
+		expect(step).not.toMatch(/grep -E "\^\\\[(?:TIMING|TIMEOUT|ISSUE-)/);
 	});
 });
 

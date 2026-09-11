@@ -12,16 +12,9 @@
  * Tests use short timeouts and fast fixtures to keep total runtime < 10s.
  */
 import { describe, expect, test } from 'bun:test';
-import {
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { withFrozenClock } from '../../../helpers/test-clock.js';
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const WRAPPER_PATH = join(
@@ -48,7 +41,6 @@ const HANGING_FIXTURE = join(
 	'fixtures',
 	'hanging-fixture.ts',
 );
-const WRAPPER_SOURCE = readFileSync(WRAPPER_PATH, 'utf8');
 
 // ---------------------------------------------------------------------------
 // Helper: spawn the wrapper and collect output
@@ -312,37 +304,4 @@ test('fail', () => { expect(1).toBe(2); });
 		expect(timeoutLine).toContain('exceeded');
 		expect(timeoutLine).toContain('ms'); // contains the duration
 	}, 15_000);
-});
-
-describe('run-test-with-timeout — regression: one timeout owner performs cleanup before classification (RV-B-004)', () => {
-	test('keeps Bun native timeout behind the wrapper deadline and cleanup owner', () => {
-		withFrozenClock(
-			() => {
-				// Before RV-B-004, Bun's native timeout and the wrapper timer used the same
-				// deadline, so Bun could reap the child before process-tree cleanup ran and
-				// the wrapper could report a crash instead of exit 124.
-				expect(WRAPPER_SOURCE).toContain(
-					'timeout: killTimeoutMs + PROCESS_KILLER_TIMEOUT_MS',
-				);
-				expect(WRAPPER_SOURCE).not.toContain('timeout: killTimeoutMs,');
-
-				const cleanupIndex = WRAPPER_SOURCE.indexOf(
-					'timeoutCleanup = killProcessTree(child)',
-				);
-				const resolveIndex = WRAPPER_SOURCE.indexOf(
-					'resolveTimeoutExit?.(124)',
-				);
-				const timerIndex = WRAPPER_SOURCE.indexOf(
-					'killTimer = setTimeout(() =>',
-				);
-				expect(cleanupIndex).toBeGreaterThan(-1);
-				expect(resolveIndex).toBeGreaterThan(cleanupIndex);
-				expect(timerIndex).toBeGreaterThan(cleanupIndex);
-				expect(WRAPPER_SOURCE).toContain(
-					'if (!timedOut && Date.now() >= deadlineMs)',
-				);
-			},
-			{ fixedNow: 1_700_000_000_000 },
-		);
-	});
 });

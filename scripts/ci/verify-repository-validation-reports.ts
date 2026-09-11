@@ -9,16 +9,16 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+	DEFAULT_BOUNDS,
+	MAX_REPORT_BYTES,
+	MAX_VALIDATION_ATTEMPT_HISTORY,
+} from './repository-validation-constants';
+
+export { DEFAULT_BOUNDS, MAX_REPORT_BYTES } from './repository-validation-constants';
 
 const TERMINAL_STATUSES = new Set(['passed', 'failed', 'crashed', 'timed_out', 'missing', 'skipped']);
 const RUN_STATUSES = new Set(['passed', 'failed', 'incomplete', 'no_op']);
-const DEFAULT_BOUNDS = {
-	testTimeoutMs: 120_000,
-	perItemTimeoutMs: 180_000,
-	suiteTimeoutMs: 900_000,
-	maxOutputBytes: 65_536,
-} as const;
-export const MAX_REPORT_BYTES = 1_048_576;
 export const MAX_REPORT_SCAN_DEPTH = 8;
 export const MAX_REPORT_SCAN_ENTRIES = 50_000;
 // The merge-group verifier reads one report per file for all three operating
@@ -80,6 +80,7 @@ interface JsonResult {
 	cleanedUp?: unknown;
 	stdout?: unknown;
 	stderr?: unknown;
+	attempts?: unknown;
 }
 
 interface VerificationBudget {
@@ -412,6 +413,24 @@ function validateReport(
 		}
 		for (const output of [result.stdout, result.stderr]) {
 			if (typeof output === 'string' && Buffer.byteLength(output, 'utf8') > DEFAULT_BOUNDS.maxOutputBytes) fail(`unbounded output in ${reportPath}`);
+		}
+		if (result.attempts !== undefined) {
+			if (!Array.isArray(result.attempts) || result.attempts.length > MAX_VALIDATION_ATTEMPT_HISTORY) {
+				fail(`invalid attempt history in ${reportPath}`);
+			}
+			for (const attempt of result.attempts) {
+				if (typeof attempt !== 'object' || attempt === null) fail(`invalid attempt history in ${reportPath}`);
+				const value = attempt as Record<string, unknown>;
+				if (!TERMINAL_STATUSES.has(String(value.status))) fail(`invalid attempt status in ${reportPath}`);
+				if (value.startedAt !== null && !validTimestamp(value.startedAt)) fail(`invalid attempt timing schema in ${reportPath}`);
+				if (!validTimestamp(value.endedAt) || typeof value.durationMs !== 'number' || !Number.isFinite(value.durationMs) || value.durationMs < 0) {
+					fail(`invalid attempt timing schema in ${reportPath}`);
+				}
+				if (typeof value.cleanedUp !== 'boolean') fail(`invalid attempt cleanup schema in ${reportPath}`);
+				for (const output of [value.stdout, value.stderr]) {
+					if (typeof output === 'string' && Buffer.byteLength(output, 'utf8') > DEFAULT_BOUNDS.maxOutputBytes) fail(`unbounded attempt output in ${reportPath}`);
+				}
+			}
 		}
 	}
 	validateSummary(report, results, reportPath);

@@ -152,6 +152,30 @@ describe('issue #2675 report verifier', () => {
 		}
 	});
 
+	test('rejects a foreign report root by default', () => {
+		const root = canonicalMkdtemp('validation-verifier-root-');
+		const foreignRoot = canonicalMkdtemp('validation-verifier-foreign-');
+		try {
+			const reports = path.join(root, 'reports');
+			mkdirSync(reports);
+			writeJson(
+				path.join(reports, 'unit-shard-1-0.json'),
+				report(foreignRoot, path.join(foreignRoot, 'foreign.test.ts')),
+			);
+			expect(() =>
+				verifyReports({
+					directory: reports,
+					root,
+					surface: 'unit',
+					filePrefix: 'unit-shard-1-',
+				}),
+			).toThrow(/wrong report root/);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+			rmSync(foreignRoot, { recursive: true, force: true });
+		}
+	});
+
 	test('rejects a report whose summary or result identities are inconsistent', () => {
 		const root = canonicalMkdtemp('validation-verifier-');
 		try {

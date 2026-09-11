@@ -13,6 +13,21 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { redactSecrets } from '../../src/memory/redaction';
 import { resolveGitExecutable } from '../../src/utils/git-executable';
+import {
+	DEFAULT_MAX_OUTPUT_BYTES,
+	DEFAULT_PER_ITEM_TIMEOUT_MS,
+	DEFAULT_SUITE_TIMEOUT_MS,
+	DEFAULT_TEST_TIMEOUT_MS,
+	MAX_REPORT_BYTES,
+	MAX_VALIDATION_ATTEMPT_HISTORY,
+} from './repository-validation-constants';
+
+export {
+	DEFAULT_MAX_OUTPUT_BYTES,
+	DEFAULT_PER_ITEM_TIMEOUT_MS,
+	DEFAULT_SUITE_TIMEOUT_MS,
+	DEFAULT_TEST_TIMEOUT_MS,
+} from './repository-validation-constants';
 
 export const SURFACE_INVENTORY = [
 	'quality',
@@ -44,10 +59,6 @@ export type TerminalStatus = (typeof TERMINAL_STATUSES)[number];
 export type ValidationMode = 'full' | 'diff';
 export type ValidationStatus = 'passed' | 'failed' | 'incomplete' | 'no_op';
 
-export const DEFAULT_TEST_TIMEOUT_MS = 120_000;
-export const DEFAULT_PER_ITEM_TIMEOUT_MS = 180_000;
-export const DEFAULT_SUITE_TIMEOUT_MS = 900_000;
-export const DEFAULT_MAX_OUTPUT_BYTES = 65_536;
 export const DEFAULT_DIFF_BASE = 'origin/main';
 const PROCESS_KILLER_TIMEOUT_MS = 5_000;
 const GIT_DIFF_TIMEOUT_MS = 10_000;
@@ -93,6 +104,13 @@ export interface ValidationProcessResult {
 	reason?: string;
 }
 
+export interface ValidationAttempt extends ValidationProcessResult {
+	startedAt: string | null;
+	endedAt: string;
+	durationMs: number;
+	cleanedUp: boolean;
+}
+
 export interface ValidationResult extends ValidationProcessResult {
 	id: string;
 	surface: ValidationSurface;
@@ -102,6 +120,7 @@ export interface ValidationResult extends ValidationProcessResult {
 	kind: ValidationItem['kind'];
 	startedAt: string | null;
 	endedAt: string;
+	attempts?: ValidationAttempt[];
 }
 
 export interface ValidationSummary {
@@ -590,6 +609,7 @@ export const _internals: {
 	reportLockLstat: typeof fsp.lstat;
 	reportLockOpen: typeof fsp.open;
 	readReportLockOwner: typeof readReportLockOwner;
+	reportPathWithinRoot: typeof reportPathWithinRoot;
 	reportPublicationLstat: typeof fsp.lstat;
 	reportPublicationRealpath: typeof fsp.realpath;
 } = {
@@ -606,6 +626,7 @@ export const _internals: {
 	reportLockLstat: fsp.lstat,
 	reportLockOpen: fsp.open,
 	readReportLockOwner,
+	reportPathWithinRoot,
 	reportPublicationLstat: fsp.lstat,
 	reportPublicationRealpath: fsp.realpath,
 };
@@ -1312,7 +1333,11 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 
 function reportPathWithinRoot(root: string, requested?: string): string {
 	const defaultPath = path.join(root, '.swarm', 'repository-validation.json');
-	const destination = path.resolve(requested ?? defaultPath);
+	const destination = requested === undefined
+		? defaultPath
+		: path.isAbsolute(requested)
+			? path.resolve(requested)
+			: path.resolve(root, requested);
 	const swarmRoot = path.resolve(root, '.swarm');
 	const relative = path.relative(swarmRoot, destination);
 	const validationRoot = path.resolve(swarmRoot, 'repository-validation');
@@ -1323,6 +1348,63 @@ function reportPathWithinRoot(root: string, requested?: string): string {
 		throw new Error(`repository validation report must remain under ${swarmRoot}`);
 	}
 	return destination;
+}
+
+function validationAttempt(result: ValidationResult): ValidationAttempt {
+	return {
+		status: result.status,
+		exitCode: result.exitCode,
+		signal: result.signal,
+		stdout: result.stdout,
+		stderr: result.stderr,
+		durationMs: result.durationMs ?? 0,
+		cleanedUp: result.cleanedUp ?? false,
+		reason: result.reason,
+		startedAt: result.startedAt,
+		endedAt: result.endedAt,
+	};
+}
+
+function withPreviousAttemptHistory(
+	report: ValidationReport,
+	previous: ValidationReport | undefined,
+	safeDestination: string,
+): ValidationReport {
+	if (
+		!previous ||
+		previous.schemaVersion !== 1 ||
+		previous.root !== report.root ||
+		previous.reportPath !== safeDestination ||
+		!Array.isArray(previous.results)
+	) {
+		return report;
+	}
+	const previousById = new Map(previous.results.map((result) => [result.id, result]));
+	return {
+		...report,
+		results: report.results.map((result) => {
+			const prior = previousById.get(result.id);
+			if (!prior) return result;
+			const attempts = [...(prior.attempts ?? []), validationAttempt(prior)]
+				.slice(-MAX_VALIDATION_ATTEMPT_HISTORY);
+			return { ...result, attempts };
+		}),
+	};
+}
+
+async function readPreviousValidationReport(
+	filePath: string,
+): Promise<ValidationReport | undefined> {
+	try {
+		const stats = await fsp.lstat(filePath);
+		if (!stats.isFile() || stats.size > MAX_REPORT_BYTES) return undefined;
+		const raw = await fsp.readFile(filePath, 'utf8');
+		if (Buffer.byteLength(raw, 'utf8') > MAX_REPORT_BYTES) return undefined;
+		const parsed = JSON.parse(raw) as ValidationReport;
+		return parsed.schemaVersion === 1 ? parsed : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function isNotFoundError(error: unknown): boolean {
@@ -1731,7 +1813,9 @@ async function writeValidationReportUnbounded(
 		assertPublicationActive(state);
 		temporaryPath = `${safeDestination}.${process.pid}.${randomUUID()}.tmp`;
 		assertPublicationActive(state);
-		const payload = `${JSON.stringify({ ...report, reportPath: safeDestination }, null, 2)}\n`;
+		const previous = await readPreviousValidationReport(safeDestination);
+		const reportWithHistory = withPreviousAttemptHistory(report, previous, safeDestination);
+		const payload = `${JSON.stringify({ ...reportWithHistory, reportPath: safeDestination }, null, 2)}\n`;
 		await assertStableReportPublicationParent(report.root, destination, publicationIdentity);
 		await fsp.writeFile(temporaryPath, payload, { encoding: 'utf8', flag: 'wx' });
 		assertPublicationActive(state);

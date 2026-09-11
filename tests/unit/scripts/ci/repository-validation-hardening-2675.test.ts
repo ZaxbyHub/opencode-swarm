@@ -224,6 +224,9 @@ describe('repository validation hardening — issue #2675', () => {
 		expect(() => parseValidationArgs(['--surface', 'not-a-surface'])).toThrow(
 			'unknown validation surface',
 		);
+		expect(() =>
+			parseValidationArgs(['--surfaces', 'unit,,integration']),
+		).toThrow('--surfaces contains an empty surface');
 		expect(() => parseValidationArgs(['--report'])).toThrow('requires a value');
 		expect(() => parseValidationArgs(['--diff-base', '-evil'])).toThrow(
 			'diff base',
@@ -259,6 +262,16 @@ describe('repository validation hardening — issue #2675', () => {
 		expect(parsed.suiteTimeoutMs).toBe(987);
 		expect(parsed.maxOutputBytes).toBe(1234);
 		expect(parsed.testFiles).toEqual(['tests/unit/example.test.ts']);
+	});
+
+	test('resolves a relative report path under the explicit root (F4)', () => {
+		const root = path.join(ROOT, 'explicit-root');
+		const requested = path.join('.swarm', 'relative-report.json');
+		// Before F4, path.resolve(requested) used the caller CWD instead of root.
+		expect(path.resolve()).not.toBe(path.resolve(root));
+		expect(_internals.reportPathWithinRoot(root, requested)).toBe(
+			path.resolve(root, requested),
+		);
 	});
 
 	test('builds the selected host surfaces as deterministic command/test items', () => {

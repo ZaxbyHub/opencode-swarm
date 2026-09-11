@@ -622,16 +622,19 @@ jobs:
               echo "::group::Output for $f"
               cat "$tmp"
               echo "::endgroup::"
+              if [ -f "$report_path" ]; then
+                echo "::group::Bounded validation report for $f"
+                cat "$report_path"
+                echo "::endgroup::"
+              fi
               echo "::error file=$f::FAILED: $f"
               echo "::error file=$f::FAILED: $f" >> "$flake_ann"
               failed=1
-            fi
-            # Surface timing and timeout info to CI output (not just temp file)
-            grep -E "^\[TIMING\]|^\[TIMEOUT\]" "$tmp" || true
-            if [ $exit_code -eq 0 ]; then
-              # Preserve bounded, machine-readable issue acceptance receipts from
-              # successful isolated tests without replaying their full stdout.
-              grep -E "^\[ISSUE-[0-9]+(-[A-Z0-9-]+)?-EVIDENCE\]" "$tmp" || true
+            else
+              # The authority emits at most 64 bounded ISSUE-EVIDENCE receipts
+              # plus its bounded summary. Keep those receipts visible without
+              # grepping for markers in the summary wrapper output.
+              cat "$tmp"
             fi
             rm -f "$tmp"
           done < "$tmpdir/shard-tests.txt"
@@ -1076,13 +1079,17 @@ jobs:
               echo "::group::Output for $f"
               cat "$tmp"
               echo "::endgroup::"
+              if [ -f "$report_path" ]; then
+                echo "::group::Bounded validation report for $f"
+                cat "$report_path"
+                echo "::endgroup::"
+              fi
               echo "::error file=$f::FAILED: $f"
               failed=1
-            fi
-            if [ $exit_code -eq 0 ]; then
-              # Match the shared authority's bounded evidence channel so merge-queue
-              # integration fixtures can publish auditable completion receipts.
-              grep -E "^\[ISSUE-[0-9]+(-[A-Z0-9-]+)?-EVIDENCE\]" "$tmp" || true
+            else
+              # Preserve the authority's bounded ISSUE-EVIDENCE receipts and
+              # summary exactly as emitted; do not parse markers in the wrapper.
+              cat "$tmp"
             fi
             rm -f "$tmp"
           done < "$tmpdir/int-gated-tests.txt"
