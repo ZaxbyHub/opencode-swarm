@@ -3302,9 +3302,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			reason: 'Cross-session automation state is a direct JSON projection guarded by proper-lockfile lockSync with realpath:false and caller-owned bounded ELOCKED backoff; acquisition/configuration/storage failures are typed non-successes with no unlocked fallback, while .bak recovery and denialHistory ≤100 keep the single-file rewrite bounded.',
 			reviewedIssue: 2575,
 		},
-		writeLimits: { bound: 'single rewritten state; denialHistory capped 100; bounded by run lifecycle', scope: 'global', citation: 'src/full-auto/state.ts:114,722-727' },
-		readBound: { pattern: 'indexed', bound: 'single JSON', sync: true, citation: 'src/full-auto/state.ts:319-417' },
-		lockModel: 'proper-lockfile lockSync(realpath:false, stale 5 s) with caller-owned bounded ELOCKED backoff [25,50,100,200,400,800] ms; no positive sync retries and no unlocked fallback',
+		writeLimits: { bound: 'single rewritten state; denialHistory capped 100; bounded by run lifecycle', scope: 'global', citation: 'src/full-auto/state.ts:124,621-684' },
+		readBound: { pattern: 'indexed', bound: 'single JSON', sync: true, citation: 'src/full-auto/state.ts:494-598' },
+		lockModel: 'proper-lockfile lockSync(realpath:false, stale 5 s) with caller-owned bounded ELOCKED backoff [25,50,75,100] ms; no unlocked fallback',
 		crashBehavior: '.bak recovery on corrupt canonical; stateUnreadable fail-closed permission hook; lock acquisition/release failures are typed and never run the callback',
 		closePolicy: 'untouched (cross-session automation state)',
 		closeArrayMembership: {

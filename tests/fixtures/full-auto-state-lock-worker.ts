@@ -47,10 +47,10 @@ try {
 			}),
 		);
 		if (mode === 'fixed' && role === 'a') {
-			waitForMarker('release-a', 1_000);
+			waitForMarker('release-a', 5_000);
 		} else if (mode === 'bypass') {
-			waitForMarker('release-bypass', 1_000);
-			if (role === 'b') waitForMarker('allow-bypass-write', 1_000);
+			waitForMarker('release-bypass', 5_000);
+			if (role === 'b') waitForMarker('allow-bypass-write', 5_000);
 		}
 		return persisted;
 	};

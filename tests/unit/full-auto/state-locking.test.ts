@@ -3,9 +3,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	_internals,
+	disarmFullAutoRun,
 	FullAutoStateLockError,
 	incrementFullAutoCounter,
 	loadFullAutoRunState,
+	markFullAutoStateLockFailure,
 	startFullAutoRun,
 } from '../../../src/full-auto/state';
 import {
@@ -167,6 +169,22 @@ describe('Full-Auto state lock acquisition', () => {
 		expect(
 			loadFullAutoRunState(tempDir, 'shared-session')?.counters.toolCalls,
 		).toBe(0);
+	});
+
+	test('clears an in-process lock-failure pause only after an authoritative status mutation', () => {
+		startFullAutoRun(tempDir, 'shared-session', { enabled: true });
+		markFullAutoStateLockFailure(tempDir, 'shared-session');
+		expect(loadFullAutoRunState(tempDir, 'shared-session')?.status).toBe(
+			'paused',
+		);
+		incrementFullAutoCounter(tempDir, 'shared-session', 'toolCalls');
+		expect(loadFullAutoRunState(tempDir, 'shared-session')?.status).toBe(
+			'paused',
+		);
+		disarmFullAutoRun(tempDir, 'shared-session', 'user disabled');
+		expect(loadFullAutoRunState(tempDir, 'shared-session')?.status).toBe(
+			'idle',
+		);
 	});
 
 	test('classifies lock option rejection as configuration without invoking the callback', () => {

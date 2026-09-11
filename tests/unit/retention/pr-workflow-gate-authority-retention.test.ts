@@ -24,10 +24,13 @@ import {
 	workflowGateStatePath,
 } from '../../../src/pr-review/persistence.js';
 import { runRetentionSweep } from '../../../src/retention/sweep.js';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const FIXED_NOW = 1_700_000_000_000;
 const directories: string[] = [];
+let restoreClock: Restore | undefined;
 
 function makeDirectory(prefix: string): string {
 	const directory = canonicalMkdtemp(prefix);
@@ -55,16 +58,22 @@ async function ageProjection(
 }
 
 beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: FIXED_NOW });
 	coordinationInternals.coordinationFaultInjector = undefined;
 	gateInternals.resetTrackedStateCache();
 });
 
 afterEach(async () => {
-	coordinationInternals.coordinationFaultInjector = undefined;
-	gateInternals.resetTrackedStateCache();
-	closeAllProjectDbs();
-	for (const directory of directories.splice(0)) {
-		await fsp.rm(directory, { recursive: true, force: true });
+	try {
+		coordinationInternals.coordinationFaultInjector = undefined;
+		gateInternals.resetTrackedStateCache();
+		closeAllProjectDbs();
+		for (const directory of directories.splice(0)) {
+			await fsp.rm(directory, { recursive: true, force: true });
+		}
+	} finally {
+		restoreClock?.();
+		restoreClock = undefined;
 	}
 });
 
@@ -72,7 +81,7 @@ describe('PR-workflow gate authority retention', () => {
 	test('active and recoverable state survives projection retention and crash-shaped replay', async () => {
 		const directory = makeDirectory('pr-workflow-retention-');
 		const sessionID = 'retention/active';
-		const now = Date.now();
+		const now = FIXED_NOW;
 
 		const activated = await activatePrWorkflow(
 			directory,
@@ -130,12 +139,11 @@ describe('PR-workflow gate authority retention', () => {
 		const legacySessionID = 'retention-crash';
 		const seedDirectory = makeDirectory('pr-workflow-retention-seed-');
 		await activatePrWorkflow(seedDirectory, legacySessionID, 'PR_REVIEW');
+		const seedPath = workflowGateStatePath(seedDirectory, legacySessionID);
+		const persistedPayload = JSON.parse(await fsp.readFile(seedPath, 'utf8'));
 		const legacyPath = workflowGateStatePath(legacyDirectory, legacySessionID);
 		await fsp.mkdir(path.dirname(legacyPath), { recursive: true });
-		await fsp.copyFile(
-			workflowGateStatePath(seedDirectory, legacySessionID),
-			legacyPath,
-		);
+		await fsp.copyFile(seedPath, legacyPath);
 		let injected = false;
 		coordinationInternals.coordinationFaultInjector = (point) => {
 			if (!injected && point === 'after_commit_before_archive') {
@@ -153,6 +161,7 @@ describe('PR-workflow gate authority retention', () => {
 			legacySessionID,
 		);
 		expect(replayed?.sessionID).toBe(legacySessionID);
+		expect(replayed).toEqual(persistedPayload);
 		expect(
 			fs.existsSync(
 				`${workflowGateStatePath(legacyDirectory, legacySessionID)}.imported`,
@@ -183,7 +192,7 @@ describe('PR-workflow gate authority retention', () => {
 			await readPrWorkflowGateStateFromCoordination(directory, sessionID),
 		).toBeNull();
 
-		await runRetentionSweep(directory, { now: Date.now() });
+		await runRetentionSweep(directory, { now: FIXED_NOW });
 		restartPersistence();
 		expect(await readPrWorkflowGateState(directory, sessionID)).toBeNull();
 		expect(fs.existsSync(workflowGateStatePath(directory, sessionID))).toBe(

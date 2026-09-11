@@ -123,8 +123,16 @@ export interface FullAutoConfigShape {
 const STATE_FILE = 'full-auto-state.json';
 const MAX_DENIAL_HISTORY = 100;
 const STATE_LOCK_STALE_MS = 5000;
-const STATE_LOCK_RETRY_DELAYS_MS = [25, 50, 100, 200, 400, 800] as const;
+// Keep caller-owned synchronous retries short. This path runs on the host's
+// main thread; long backoffs starve timers while another process owns the lock.
+const STATE_LOCK_RETRY_DELAYS_MS = [25, 50, 75, 100] as const;
 const stateLockSleepScratch = new Int32Array(new SharedArrayBuffer(4));
+const MAX_LOCK_FAILURE_OVERRIDES = 128;
+const LOCK_FAILURE_OVERRIDE_TTL_MS = 60_000;
+const lockFailureOverrides = new Map<
+	string,
+	{ expiresAt: number; reason: string }
+>();
 
 export type FullAutoStateLockErrorCategory =
 	| 'contention'
@@ -155,6 +163,12 @@ export class FullAutoStateLockError extends Error {
 			`FULL_AUTO_STATE_LOCK_${category.toUpperCase()}` as FullAutoStateLockError['code'];
 		this.cause = cause;
 	}
+}
+
+export function isFullAutoStateLockError(
+	error: unknown,
+): error is FullAutoStateLockError {
+	return error instanceof FullAutoStateLockError;
 }
 
 function nowISO(): string {
@@ -260,19 +274,55 @@ function errorCode(error: unknown): string | undefined {
 		: undefined;
 }
 
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 function makeLockError(
 	category: FullAutoStateLockErrorCategory,
 	message: string,
 	cause?: unknown,
 ): FullAutoStateLockError {
 	const code = errorCode(cause);
-	const detail = errorMessage(cause);
-	const suffix = code ? ` (${code}: ${detail})` : ` (${detail})`;
+	// Do not echo storage/library details into tool-visible errors: they may
+	// contain absolute paths or other host-specific information. Preserve the
+	// typed cause for diagnostics, but expose only the stable code.
+	const suffix = code ? ` (${code})` : '';
 	return new FullAutoStateLockError(category, `${message}${suffix}`, cause);
+}
+
+function lockFailureKey(directory: string, sessionID: string): string {
+	return `${path.resolve(directory)}\0${sessionID}`;
+}
+
+function pruneLockFailureOverrides(now = Date.now()): void {
+	for (const [key, value] of lockFailureOverrides) {
+		if (value.expiresAt <= now) lockFailureOverrides.delete(key);
+	}
+	while (lockFailureOverrides.size > MAX_LOCK_FAILURE_OVERRIDES) {
+		const oldest = lockFailureOverrides.keys().next().value;
+		if (typeof oldest !== 'string') break;
+		lockFailureOverrides.delete(oldest);
+	}
+}
+
+/** Mark a session paused in-process when an observer cannot acquire state. */
+export function markFullAutoStateLockFailure(
+	directory: string,
+	sessionID: string,
+	reason = 'durable state lock unavailable',
+): void {
+	pruneLockFailureOverrides();
+	const key = lockFailureKey(directory, sessionID);
+	lockFailureOverrides.delete(key);
+	lockFailureOverrides.set(key, {
+		expiresAt: Date.now() + LOCK_FAILURE_OVERRIDE_TTL_MS,
+		reason,
+	});
+	pruneLockFailureOverrides();
+}
+
+function clearFullAutoStateLockFailure(
+	directory: string,
+	sessionID: string,
+): void {
+	lockFailureOverrides.delete(lockFailureKey(directory, sessionID));
 }
 
 function acquireStateLock(lockTarget: string): () => void {
@@ -591,7 +641,7 @@ function writePersisted(
 		logger.error(
 			`[full-auto/state] Failed to prepare ${STATE_FILE} write: ${msg}`,
 		);
-		throw new Error(`Full-Auto state persistence prepare failed: ${msg}`);
+		throw new Error('Full-Auto state persistence prepare failed');
 	}
 	// Best-effort backup; never block the primary write.
 	try {
@@ -632,7 +682,7 @@ function writePersisted(
 		logger.error(
 			`[full-auto/state] Failed to persist ${STATE_FILE} atomically: ${msg}`,
 		);
-		throw new Error(`Full-Auto state persistence failed: ${msg}`);
+		throw new Error('Full-Auto state persistence failed');
 	}
 }
 
@@ -640,8 +690,14 @@ export function loadFullAutoRunState(
 	directory: string,
 	sessionID: string,
 ): FullAutoRunState | undefined {
+	pruneLockFailureOverrides();
+	const override = lockFailureOverrides.get(
+		lockFailureKey(directory, sessionID),
+	);
 	const persisted = readPersisted(directory);
-	return persisted.sessions[sessionID];
+	const state = persisted.sessions[sessionID];
+	if (!override || !state) return state;
+	return { ...state, status: 'paused', pauseReason: override.reason };
 }
 
 export function saveFullAutoRunState(
@@ -653,6 +709,7 @@ export function saveFullAutoRunState(
 		state.updatedAt = nowISO();
 		persisted.sessions[state.sessionID] = state;
 		writePersisted(directory, persisted);
+		clearFullAutoStateLockFailure(directory, state.sessionID);
 	});
 }
 
@@ -698,6 +755,7 @@ export function startFullAutoRun(
 				};
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);
+		clearFullAutoStateLockFailure(directory, sessionID);
 		return state;
 	});
 }
@@ -717,6 +775,7 @@ export function pauseFullAutoRun(
 		state.updatedAt = nowISO();
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);
+		clearFullAutoStateLockFailure(directory, sessionID);
 		return state;
 	});
 }
@@ -748,6 +807,7 @@ export function disarmFullAutoRun(
 		state.updatedAt = nowISO();
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);
+		clearFullAutoStateLockFailure(directory, sessionID);
 		return state;
 	});
 }
@@ -768,6 +828,7 @@ export function terminateFullAutoRun(
 		state.updatedAt = nowISO();
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);
+		clearFullAutoStateLockFailure(directory, sessionID);
 		return state;
 	});
 }
@@ -793,6 +854,38 @@ export function incrementFullAutoCounter(
 		const state = persisted.sessions[sessionID];
 		if (!state) return undefined;
 		state.counters[counter] = (state.counters[counter] ?? 0) + delta;
+		state.updatedAt = nowISO();
+		persisted.sessions[sessionID] = state;
+		writePersisted(directory, persisted);
+		return state;
+	});
+}
+
+/**
+ * Record a subagent return and, for an accepted severe envelope, pause the
+ * run in the same locked read-modify-write. This prevents a successful
+ * counter write from being separated from the safety pause by a second lock
+ * acquisition.
+ */
+export function recordFullAutoSubagentOutcome(
+	directory: string,
+	sessionID: string,
+	options: { severe: boolean; pauseReason?: string },
+): FullAutoRunState | undefined {
+	return withStateLock(directory, () => {
+		const persisted = _internals.readPersisted(directory);
+		const state = persisted.sessions[sessionID];
+		if (!state) return undefined;
+		if (options.severe) {
+			state.counters.consecutiveNoProgressTurns =
+				(state.counters.consecutiveNoProgressTurns ?? 0) + 1;
+			if (state.status === 'running') {
+				state.status = 'paused';
+				state.pauseReason =
+					options.pauseReason ?? 'severe subagent return envelope';
+				state.pauseGeneration = (state.pauseGeneration ?? 0) + 1;
+			}
+		}
 		state.updatedAt = nowISO();
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);
