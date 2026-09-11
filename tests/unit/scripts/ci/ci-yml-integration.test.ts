@@ -123,6 +123,13 @@ describe('ci.yml integration — shared repository-validation authority', () => 
 		expect(step).toContain('shard-tests.txt');
 	});
 
+	test('"Run unit tests" binds its matrix shard before constructing report paths (#2701)', () => {
+		expect(step).toMatch(/\n\s+env:\s*\n\s+SHARD: \$\{\{ matrix\.shard \}\}/);
+		expect(step).toContain('if [ -z "$SHARD" ]; then');
+		expect(step).toContain('unit-shard-${SHARD}-${item_index}.json');
+		expect(step).toContain('--file-prefix "unit-shard-${SHARD}-"');
+	});
+
 	test('unit discovery publishes an independent canonical inventory and shard manifest', () => {
 		expect(collectStep).toContain("git ls-files -z -- '*.test.ts'");
 		expect(collectStep).toContain('canonical-all-tests.txt');

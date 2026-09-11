@@ -491,7 +491,13 @@ jobs:
       - name: Run unit tests
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
+          if [ -z "$SHARD" ]; then
+            echo "::error::Unit test shard is empty; refusing to write unscoped validation reports"
+            exit 1
+          fi
           failed=0
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
           trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
