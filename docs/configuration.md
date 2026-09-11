@@ -151,6 +151,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `external_skills` | object | — | External skills: candidate model, discovery, and quarantine store (FR-001) — all subsystems opt-in. |
 | `skills` | object | — | Opt-in gate for the 7 skill_* management tools (FR-004). Default false: the tools are host-denied for every agent except skill_improver (genuinely unreachable, not merely unlisted — issue #2528). |
 | `skill_opt` | object (strict) | — | Governed skill optimizer (issue #1822). Disabled by default; /swarm skill-opt run requires enabled: true. All other subcommands are proposal-only/read-only by default. |
+| `dashboard` | object (strict) | — | Opt-in local mission-control dashboard over durable swarm state (issue #2509). Disabled by default; set port > 0 to enable the loopback-only read-only view. |
 
 Sections marked `(strict)` reject unknown nested keys at config load time - a typo there makes the loader fall back to safe defaults with a startup warning. All other sections silently ignore unknown nested keys.
 
@@ -1591,6 +1592,22 @@ Opt-in remote OTLP/OpenInference export, disabled by default. When enabled, cano
 | `observability.export.circuitCooldownMs` | number | `60000` | Cooldown while open; one recovery probe afterwards. |
 
 Independent kill switch: set `SWARM_OTLP_EXPORT_DISABLE=1` to force the exporter off even when config-enabled. Local operation (init, SQLite sink, `/swarm report`, recovery) never depends on the exporter or the collector. Exporter health is surfaced through `/swarm report` (state, mapping version, spooled records/bytes, accepted/exported/retried/dropped by reason, circuit state). Privacy: attributes come only from the pinned tables plus a closed `swarm.*` set, `content`-class events never export, and records are filtered before the spool append — no prompt/command/code/path/tool payload text reaches the spool or the wire. Known limitation: corporate HTTP proxies are not supported in this first bounded exporter.
+
+## Local mission-control dashboard (issue #2509)
+
+An opt-in, read-only, loopback-only web view over the project's durable swarm state: gates & circuits, pending-delegation age bands, lane liveness, task board, and the activity timeline. It complements (does not replace) `/swarm report` and `/swarm status`. The page is served from inline TS-string assets — no frontend build step, no framework dependency (ADR 0002 reimplementation).
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `dashboard.port` | number | `0` | Loopback port for the dashboard. `0` or absent = fully disabled (the default). Any `1`–`65535` value enables it. |
+
+```json
+{
+	"dashboard": { "port": 47832 }
+}
+```
+
+When `dashboard.port` is `0`/absent the feature is completely inert: no listener, no post-resolution startup task, no `.swarm` artifact. When enabled, the server binds `127.0.0.1` only, starts after plugin init resolves (never on the init await path), mints a fresh per-boot capability token, validates Host/Origin against a loopback allowlist (DNS-rebinding defense), answers `GET`/`HEAD` only (no state-changing verb exists — the CSRF policy), bounds every response, and sanitizes all rendered text. A port conflict disables the dashboard with a notice instead of failing startup. `/swarm dashboard` prints the tokened URL while the listener is live; the token is never written to disk. The dashboard performs no mutations — abort/recover actions remain in the swarm commands and tools.
 
 ## Evidence Retention Configuration
 

@@ -355,6 +355,12 @@ Report swarm observability events from the SQLite query authority [--task <id>] 
 
 Bounded, deterministic query over the observability events store in .swarm/swarm.db (the first run performs a bounded, idempotent legacy-import into the local sink). --run filters the lane/dispatch batch axis (workflow.batchId). Unmatched delegation begins are disclosed, never fabricated into ends. --json emits a schemaVersion-tagged block.
 
+### `/swarm dashboard`
+
+Show the opt-in local mission-control dashboard URL and status (issue #2509)
+
+Read-only status for the opt-in loopback dashboard over durable swarm state (gates & circuits, delegation age bands, lane liveness, task board, activity timeline). Disabled by default; enable with dashboard.port > 0 in opencode-swarm.json. Never starts or stops the listener — lifecycle belongs to plugin init; the dashboard itself performs no mutations.
+
 ### `/swarm learning`
 
 Show learning metrics and violation trends

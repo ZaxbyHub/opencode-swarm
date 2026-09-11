@@ -120,6 +120,7 @@ import { handlePromoteCommand } from './promote.js';
 import { handleQaGatesCommand } from './qa-gates.js';
 import { handleRecoverCommand } from './recover.js';
 import { handleReportCommand } from './report.js';
+import { handleDashboardCommand } from './dashboard.js';
 import { handleResetCommand } from './reset.js';
 import { handleResetSessionCommand } from './reset-session.js';
 import { handleRetrieveCommand } from './retrieve.js';
@@ -1030,6 +1031,15 @@ export const COMMAND_REGISTRY = {
 		args: '--task <id>, --session <id>, --trace <id>, --run <batchId>, --since <ISO-8601>, --json',
 		details:
 			'Bounded, deterministic query over the observability events store in .swarm/swarm.db (the first run performs a bounded, idempotent legacy-import into the local sink). --run filters the lane/dispatch batch axis (workflow.batchId). Unmatched delegation begins are disclosed, never fabricated into ends. --json emits a schemaVersion-tagged block.',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
+	dashboard: {
+		handler: (ctx) => handleDashboardCommand(ctx.directory, ctx.args),
+		description:
+			'Show the opt-in local mission-control dashboard URL and status (issue #2509)',
+		details:
+			'Read-only status for the opt-in loopback dashboard over durable swarm state (gates & circuits, delegation age bands, lane liveness, task board, activity timeline). Disabled by default; enable with dashboard.port > 0 in opencode-swarm.json. Never starts or stops the listener — lifecycle belongs to plugin init; the dashboard itself performs no mutations.',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},

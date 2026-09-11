@@ -77,6 +77,7 @@ import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
 import { closeGroupCommitWriter } from './db/group-commit-writer.js';
 import { registerObservabilityEventSink } from './db/observability-event-store.js';
 import { closeProjectDb } from './db/project-db.js';
+import { closeDashboardServerForRoot } from './dashboard/index.js';
 import {
 	armDispatchIdentity,
 	assertDispatchSpawnCircuitAdmits,
@@ -2790,6 +2791,14 @@ async function initializeOpenCodeSwarm(
 		automationManager?.stop();
 		prMonitorWorker?.stop();
 		planSyncWorker?.stop();
+		// Issue #2509: stop the opt-in dashboard listener. Best-effort: the
+		// server is unref'd, and this closes the listener plus live sockets
+		// on dispose and the process-exit path.
+		try {
+			closeDashboardServerForRoot(ctx.directory);
+		} catch {
+			// best-effort by contract
+		}
 		// Remove THIS instance's per-project worker-handler registry entry
 		// (PR #2588, review finding 5): the dispatcher routes subscription
 		// events per canonical root, so only this project's entry may go —
@@ -2910,6 +2919,47 @@ async function initializeOpenCodeSwarm(
 				},
 			);
 		});
+	}
+
+	// Issue #2509 (Workstream G5): opt-in local mission-control dashboard.
+	// The port IS the opt-in — absent config or 0 schedules NOTHING (zero
+	// footprint: no task, no listener, no `.swarm/` artifact). When enabled,
+	// the listener starts from this wrapper-owned post-resolution queue,
+	// never the awaited init path (AGENTS invariant 1); the server unrefs
+	// itself and this instance's cleanup closes it, so it can never keep the
+	// host alive. The task body carries its own bounded try/catch (#2669
+	// belt-and-braces posture): a missing or broken dashboard module degrades
+	// to one bounded log line and can never reject the queue.
+	const dashboardPort = config.dashboard?.port ?? 0;
+	if (dashboardPort > 0) {
+		postResolutionTasks.push(
+			async function dashboardServerPostResolutionTask() {
+				try {
+					const { startDashboardServer } = await import('./dashboard');
+					const handle = await startDashboardServer({
+						port: dashboardPort,
+						host: '127.0.0.1',
+						directory: ctx.directory,
+					});
+					if (!handle.listening) {
+						// Disable-with-notice (AC3/AC7): the handle + the
+						// `.swarm/dashboard-status.json` notice file carry the
+						// signal; surface one bounded advisory too.
+						advisoryWarn(
+							`Swarm dashboard disabled: port ${dashboardPort} is unavailable (in use or bind failed). Free the port or change dashboard.port in opencode-swarm.json.`,
+						);
+					} else {
+						log('swarm dashboard listening (loopback, token-protected)', {
+							port: handle.port,
+						});
+					}
+				} catch (err) {
+					log('dashboard startup failed (non-fatal)', {
+						error: err instanceof Error ? err.message : String(err),
+					});
+				}
+			},
+		);
 	}
 
 	log('Plugin initialized', {
@@ -3689,6 +3739,11 @@ async function initializeOpenCodeSwarm(
 					template: '/swarm report $ARGUMENTS',
 					description:
 						'Use /swarm report to query swarm observability events (--task/--session/--trace/--run/--since/--json)',
+				},
+				'swarm-dashboard': {
+					template: '/swarm dashboard',
+					description:
+						'Use /swarm dashboard to show the opt-in local mission-control dashboard URL and status',
 				},
 				'swarm-export': {
 					template: '/swarm export',
