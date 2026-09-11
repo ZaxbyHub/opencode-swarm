@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.177.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.176.2...v7.177.0) (2026-09-11)
+
+
+### Features
+
+* **prm:** bound repeated hard stops with an episode state machine ([#2678](https://github.com/ZaxbyHub/opencode-swarm/issues/2678)) ([551c977](https://github.com/ZaxbyHub/opencode-swarm/commit/551c9779a6b7a184a2d29756b7f79953badf2af1))
+
+
+### Bug Fixes
+
+* **ci:** make repository validation reproducible ([2a5ca35](https://github.com/ZaxbyHub/opencode-swarm/commit/2a5ca3576f09c3d1748f599f9a41d1c46f0a2d73))
+* **durable-state:** harden retention and full-auto locking ([66c785d](https://github.com/ZaxbyHub/opencode-swarm/commit/66c785dbfebf8584e2ea53e22d4e09f8ba707fae))
+
 ## [7.176.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.176.1...v7.176.2) (2026-09-11)
 
 
