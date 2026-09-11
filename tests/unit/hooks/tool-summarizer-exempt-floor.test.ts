@@ -18,10 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SummaryConfig } from '../../../src/config/schema';
-import {
-	createToolSummarizerHook,
-	resetSummaryIdCounter,
-} from '../../../src/hooks/tool-summarizer';
+import { createToolSummarizerHook } from '../../../src/hooks/tool-summarizer';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('createToolSummarizerHook - retrieve_lane_output exemption ratchet', () => {
@@ -36,7 +33,6 @@ describe('createToolSummarizerHook - retrieve_lane_output exemption ratchet', ()
 		// (issues #1782, #1737).
 		tempDir = canonicalMkdtemp('.swarm-test-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
-		resetSummaryIdCounter();
 	});
 
 	afterEach(() => {

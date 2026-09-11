@@ -3,10 +3,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { handleRetrieveCommand } from '../../src/commands/retrieve';
 import type { SummaryConfig } from '../../src/config/schema';
-import {
-	createToolSummarizerHook,
-	resetSummaryIdCounter,
-} from '../../src/hooks/tool-summarizer';
+import { createToolSummarizerHook } from '../../src/hooks/tool-summarizer';
 import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 /**
@@ -28,9 +25,6 @@ describe('summarization loop fix integration', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		// Reset summary ID counter before each test
-		resetSummaryIdCounter();
-
 		// Create temporary directory for test. `canonicalMkdtemp` is used rather
 		// than a millisecond-stamp suffix: the clock read it replaced was not a
 		// time-sensitive

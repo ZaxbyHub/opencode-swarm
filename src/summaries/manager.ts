@@ -1,4 +1,11 @@
-import { mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import {
+	linkSync,
+	mkdirSync,
+	readdirSync,
+	rmSync,
+	statSync,
+	unlinkSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { resolveRetentionCap } from '../retention/caps';
@@ -53,6 +60,26 @@ export function sanitizeSummaryId(id: string): string {
 }
 
 /**
+ * Typed collision signal for the no-overwrite store contract (issue #2576):
+ * the destination summary entry already exists and must never be replaced.
+ * Callers distinguish this from storage errors by `instanceof` (or `name`).
+ */
+export class SummaryIdCollisionError extends Error {
+	constructor(public readonly summaryId: string) {
+		super(`Summary ID ${summaryId} already exists; refusing to overwrite`);
+		this.name = 'SummaryIdCollisionError';
+	}
+}
+
+function isEexistError(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		(error as { code?: unknown }).code === 'EEXIST'
+	);
+}
+
+/**
  * Interface for summary storage entry
  */
 interface SummaryEntry {
@@ -65,7 +92,9 @@ interface SummaryEntry {
 
 /**
  * Store a summary entry to .swarm/summaries/{id}.json.
- * Performs atomic write via temp file + rename.
+ * Performs an atomic, no-overwrite install: temp file + exclusive
+ * hard-link install. Throws {@link SummaryIdCollisionError} if an entry
+ * with this ID already exists (it is never replaced — issue #2576).
  * @throws Error if summary ID is invalid or size limit would be exceeded
  */
 export async function storeSummary(
@@ -117,24 +146,37 @@ export async function storeSummary(
 	// Create directory (recursive)
 	mkdirSync(summaryDir, { recursive: true });
 
-	// Write atomically: temp file + rename
+	// Write atomically with no-overwrite install: temp file first, then an
+	// exclusive `linkSync` install that fails with EEXIST when the destination
+	// already exists — a persisted entry can never be replaced, and a reused
+	// ID surfaces as a typed SummaryIdCollisionError instead of silent data
+	// loss (issue #2576). The install and the cache invalidation below stay
+	// adjacent: `loadFullOutput` / `cleanupSummaries` read this path back
+	// through the stat-stamped swarm-artifact cache, so a same-size install
+	// inside one filesystem timestamp tick could otherwise serve the previous
+	// entry — issue #1729. Invalidate right after the install SUCCEEDS; on
+	// failure the catch below removes the temp and rethrows (also on the
+	// collision path, so no `.tmp.*` file is ever left behind), and the
+	// cached bytes still match what is on disk.
 	const tempPath = path.join(
 		summaryDir,
 		`${sanitizedId}.json.tmp.${Date.now()}.${process.pid}`,
 	);
-	// Re-storing the same summary id overwrites this exact path, and
-	// `loadFullOutput` / `cleanupSummaries` read it back through the stat-stamped
-	// swarm-artifact cache (`readSwarmFileAsync(directory, relativePath)`). A
-	// same-size rewrite inside one filesystem timestamp tick would otherwise
-	// serve the previous entry — issue #1729. Invalidate right after the rename
-	// SUCCEEDS; on failure the catch below removes the temp and rethrows, and the
-	// cached bytes still match what is on disk.
 	try {
 		await bunWrite(tempPath, entryJson);
-		renameSync(tempPath, summaryPath);
+		try {
+			linkSync(tempPath, summaryPath);
+		} catch (error) {
+			if (isEexistError(error)) {
+				throw new SummaryIdCollisionError(sanitizedId);
+			}
+			throw error;
+		}
+		unlinkSync(tempPath);
 		invalidateCachedArtifact(summaryPath);
 	} catch (error) {
-		// Clean up temp file on failure
+		// Clean up temp file on failure (including collisions, where the
+		// failed link left the temp in place)
 		try {
 			rmSync(tempPath, { force: true });
 		} catch {}
@@ -242,6 +284,29 @@ function enumerateSummaryIds(directory: string): string[] {
 	}
 
 	return summaryIds;
+}
+
+/**
+ * Durable summary ID allocation (issue #2576): returns the next free numeric
+ * ID (`S<max+1>`) derived from the entries that actually exist on disk, so a
+ * restarted process continues after persisted IDs instead of reusing `S1`.
+ *
+ * The scan uses the strict write-side grammar (`^S\d+`) via
+ * {@link enumerateSummaryIds} — large timestamp-suffixed IDs (e.g. Stage A's
+ * `S<ms><random>`) match and are included; filenames outside the grammar are
+ * ignored. The max is computed with BigInt so 16-digit IDs stay exact past
+ * 2^53 (a float max could alias two distinct large IDs and hand the retry
+ * loop an already-occupied slot); `max + 1n` always stringifies back to a
+ * valid `^S\d+$` ID, and leading-zero legacy entries (`S007`) normalize
+ * numerically so allocation never regresses.
+ */
+export function allocateSummaryId(directory: string): string {
+	let max = 0n;
+	for (const id of enumerateSummaryIds(directory)) {
+		const value = BigInt(id.slice(1));
+		if (value > max) max = value;
+	}
+	return `S${(max + 1n).toString()}`;
 }
 
 /**
