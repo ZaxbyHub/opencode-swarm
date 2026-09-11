@@ -15,6 +15,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfileImport from 'proper-lockfile';
 import { validateSwarmPath } from '../hooks/utils';
+import { compositeSessionKey } from '../utils/canonical-root.js';
 import * as logger from '../utils/logger';
 
 // proper-lockfile ships JS-only with no TS types; cast to a minimal interface
@@ -288,7 +289,7 @@ function makeLockError(
 }
 
 function lockFailureKey(directory: string, sessionID: string): string {
-	return `${path.resolve(directory)}\0${sessionID}`;
+	return compositeSessionKey(directory, sessionID);
 }
 
 function pruneLockFailureOverrides(now = Date.now()): void {
