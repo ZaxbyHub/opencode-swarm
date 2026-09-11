@@ -1248,6 +1248,23 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 	const trimmed = command.trim();
 	if (!trimmed) return results;
 
+	// Encoded PowerShell payloads cannot be inspected without executing or
+	// decoding an untrusted script. Treat the invocation as an unresolved write
+	// effect so scope validation fails closed. Cover the documented switch and
+	// the common unique-prefix aliases accepted by PowerShell (`-e`, `-ec`,
+	// `-enc`).
+	if (
+		/^(?:powershell|pwsh)(?:\.exe)?\s+/i.test(trimmed) &&
+		/(?:^|\s)-(?:e|ec|enc|encodedcommand)(?=\s|=|$)/i.test(trimmed)
+	) {
+		results.push({
+			category: 'interpreter_eval',
+			operator: 'PowerShell -EncodedCommand',
+			path: null,
+		});
+		return results;
+	}
+
 	// Strip -Command wrapper to get inner PowerShell command
 	// Handle: powershell -Command "...", powershell -C "..."
 	let innerCommand = trimmed;
@@ -1295,6 +1312,21 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		results.push({
 			category: 'interpreter_eval',
 			operator: 'nested PowerShell script block',
+			path: null,
+		});
+	}
+
+	// The call operator and Invoke-Expression can execute a command held in a
+	// string or variable. Its eventual write targets are not statically
+	// recoverable, so report an unresolved effect instead of treating a dynamic
+	// invocation such as `& 'Set-Content' outside.txt x` as read-only.
+	if (
+		/(?:^|[;|])\s*&\s*(?:['"$({]|\S+\s*\()/i.test(innerCommand) ||
+		/(?:^|[;|])\s*(?:Invoke-Expression|IEX)\b/i.test(innerCommand)
+	) {
+		results.push({
+			category: 'interpreter_eval',
+			operator: 'dynamic PowerShell invocation',
 			path: null,
 		});
 	}

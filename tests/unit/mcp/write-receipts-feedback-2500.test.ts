@@ -157,7 +157,9 @@ describe('MCP receipt feedback regressions (#2500)', () => {
 		const activePath = getWriteReceiptPath(root);
 		const archivePath = getWriteReceiptArchivePath(root);
 		const activeBefore = readFileSync(activePath, 'utf8');
-		const archiveBefore = readFileSync(archivePath, 'utf8');
+		const archiveBefore = existsSync(archivePath)
+			? readFileSync(archivePath, 'utf8')
+			: '';
 		const writes: string[] = [];
 		await expect(
 			prepareReceipt(
@@ -186,6 +188,59 @@ describe('MCP receipt feedback regressions (#2500)', () => {
 			found: true,
 			status: 'COMMITTED',
 		});
+	}, 30_000);
+
+	test('FB-018: active failure leaves a recoverable PREPARED shadow', async () => {
+		const root = makeTestRoot('mcp-receipt-active-failure-');
+		const firstRequest = {
+			root,
+			tool: 'knowledge_add',
+			idempotencyKey: 'active-failure-first',
+			arguments: { first: true },
+		};
+		const first = await prepareReceipt(firstRequest);
+		if (first.kind !== 'prepared') throw new Error('expected first PREPARED');
+		await commitReceipt(firstRequest, first.receipt, { success: true });
+
+		const activePath = getWriteReceiptPath(root);
+		const archivePath = getWriteReceiptArchivePath(root);
+		const activeBefore = readFileSync(activePath, 'utf8');
+		const archiveBefore = existsSync(archivePath)
+			? readFileSync(archivePath, 'utf8')
+			: '';
+		const writes: string[] = [];
+		await expect(
+			prepareReceipt(
+				{
+					root,
+					tool: 'knowledge_add',
+					idempotencyKey: 'active-failure-next',
+					arguments: { next: true },
+				},
+				{
+					persistStorage: async (kind) => {
+						writes.push(kind);
+						if (kind === 'active') {
+							throw new Error('injected active persistence failure');
+						}
+					},
+				},
+			),
+		).rejects.toMatchObject({ code: 'JOURNAL_UNAVAILABLE' });
+		expect(writes).toEqual(['active']);
+		expect(readFileSync(activePath, 'utf8')).toBe(activeBefore);
+		expect(readFileSync(archivePath, 'utf8')).not.toBe(archiveBefore);
+		expect(
+			await readWriteReceiptStatus(root, 'active-failure-next'),
+		).toMatchObject({
+			found: true,
+			status: 'PREPARED',
+			archived: true,
+			retryable: false,
+		});
+		expect(
+			await readWriteReceiptStatus(root, 'active-failure-first'),
+		).toMatchObject({ status: 'COMMITTED' });
 	}, 30_000);
 
 	test('FB-023: persistReceipt is not called for a settled no-op', async () => {

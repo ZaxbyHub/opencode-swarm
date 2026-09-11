@@ -27,7 +27,9 @@ export const MCP_WRITE_RECEIPTS_RELATIVE_PATH = path.join(
 );
 /**
  * Terminal receipt history is moved here when the active journal reaches its
- * bounded record count.  Unresolved records are never archived or dropped.
+ * bounded record count. Unresolved records remain active; if an active rewrite
+ * fails after archive rotation, a best-effort recovery shadow is written so a
+ * newly prepared attempt cannot disappear before mutation.
  */
 export const MCP_WRITE_RECEIPTS_ARCHIVE_RELATIVE_PATH = path.join(
 	'.swarm',
@@ -803,10 +805,42 @@ async function writeReceiptStorage(
 			},
 		);
 	}
-	await hooks?.persistStorage?.('active', active);
-	await atomicWriteSwarmFile(journalPath(root), activeContent, {
-		maxBytes: MAX_RECEIPT_JOURNAL_BYTES,
-	});
+	try {
+		await hooks?.persistStorage?.('active', active);
+		await atomicWriteSwarmFile(journalPath(root), activeContent, {
+			maxBytes: MAX_RECEIPT_JOURNAL_BYTES,
+		});
+	} catch (error) {
+		// Archive rotation precedes the active rewrite. If the active write fails
+		// while a newly prepared/uncertain attempt is in memory, retain a bounded
+		// recovery copy in the archive. Prepare callers have not executed the
+		// mutation yet; commit callers retain their prior PREPARED active record.
+		if (unresolved.length > 0) {
+			const recoveryByReceipt = new Map(
+				archive.map((record) => [record.receipt_id, record]),
+			);
+			for (const record of unresolved) {
+				recoveryByReceipt.set(record.receipt_id, record);
+			}
+			try {
+				const recoveryArchiveContent = serializeReceiptRecords(
+					[...recoveryByReceipt.values()],
+					{
+						maxBytes: MAX_RECEIPT_ARCHIVE_BYTES,
+						maxRecords: MAX_RECEIPT_ARCHIVE_RECORDS,
+					},
+				);
+				await atomicWriteSwarmFile(
+					getWriteReceiptArchivePath(root),
+					recoveryArchiveContent,
+					{ maxBytes: MAX_RECEIPT_ARCHIVE_BYTES },
+				);
+			} catch {
+				// Preserve the original active-write error and fail closed.
+			}
+		}
+		throw error;
+	}
 }
 
 function nowFrom(hooks?: WriteReceiptHooks): number {

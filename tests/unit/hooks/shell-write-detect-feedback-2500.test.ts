@@ -128,6 +128,51 @@ describe('shell write detector feedback regressions (#2500)', () => {
 		}
 	});
 
+	test('FB-030: treats encoded PowerShell payloads as unresolved writes', () => {
+		for (const command of [
+			'powershell -EncodedCommand SQBFAFgA',
+			'pwsh -enc SQBFAFgA',
+			'powershell.exe -ec SQBFAFgA',
+		]) {
+			const result = detectWindowsWrites(command, 'powershell');
+			expect(result.hasWrites).toBe(true);
+			expect(result.writes).toContainEqual(
+				expect.objectContaining({
+					category: 'interpreter_eval',
+					path: null,
+				}),
+			);
+		}
+	});
+
+	test('FB-030: treats dynamic PowerShell call operators as unresolved writes', () => {
+		for (const command of [
+			`powershell -Command "& 'Set-Content' outside.txt x"`,
+			`powershell -Command "Invoke-Expression 'Set-Content outside.txt x'"`,
+		]) {
+			const result = detectWindowsWrites(command, 'powershell');
+			expect(result.hasWrites).toBe(true);
+			expect(result.writes).toContainEqual(
+				expect.objectContaining({
+					category: 'interpreter_eval',
+					operator: 'dynamic PowerShell invocation',
+					path: null,
+				}),
+			);
+		}
+
+		expect(() =>
+			evaluateScopeValidate(
+				{
+					command: `powershell -Command "& 'Set-Content' outside.txt x"`,
+					shell: 'powershell',
+					scope_files: ['src'],
+				},
+				process.cwd(),
+			),
+		).toThrow(ScopeValidationError);
+	});
+
 	test('FB-027: rejects NUL, DEL, and other ASCII control bytes in commands', () => {
 		for (const control of ['\u0000', '\u007f', '\u0009']) {
 			expect(() =>
