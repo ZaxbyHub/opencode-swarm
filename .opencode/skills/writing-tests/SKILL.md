@@ -543,7 +543,7 @@ Step 6:  adversarial, agents, background, context, diff, evidence, git, helpers,
 
 When writing a test, know which step your file will run in. In batch steps, do not assume isolation from other files in the same step.
 
-**Job timeout: 40 minutes.** A hanging shard will kill the entire platform's test run; the per-file `run-test-with-timeout.ts` wrapper caps each file at 120 s (180 s kill-timeout).
+**Job timeout: 40 minutes.** A hanging shard will kill the entire platform's test run; CI invokes the shared `scripts/ci/repository-validation.ts` authority, which caps each isolated file at 120 s and allows 180 s for process-tree cleanup. The historical `run-test-with-timeout.ts` helper is not the CI execution path.
 
 ## File Placement
 

@@ -368,7 +368,7 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:retrieval-quality
 
-  # Two-tier CI: on pull_request, run ubuntu-only with 4 shards for fast feedback
+  # Two-tier CI: on pull_request, run ubuntu-only with 6 shards for fast feedback
   # UNLESS the diff touches a platform-sensitive path (issue #1737 FR-013,
   # detect-paths job above), in which case the full 3-OS matrix runs on
   # pull_request too. On merge_group (merge queue), the full 3-OS matrix
@@ -423,6 +423,77 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          # Never follow a checked-in .swarm symlink/junction when writing shard
+          # manifests. The TypeScript report guard runs later, so this preflight
+          # must protect the earlier mkdir/cp operations too.
+          if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then
+            echo "::error::.swarm must be a real directory; symlinks, junctions, and non-directories are rejected"
+            exit 1
+          fi
+          if [ -L .swarm/repository-validation ] || { [ -e .swarm/repository-validation ] && [ ! -d .swarm/repository-validation ]; }; then
+            echo "::error::.swarm/repository-validation must be a real directory; symlinks, junctions, and non-directories are rejected"
+            exit 1
+          fi
+          mkdir -p .swarm/repository-validation
+          # Do not let cp follow a pre-existing manifest symlink or overwrite a
+          # special file/hardlink. find -links +1 is supported by both BSD and
+          # GNU find; a failed inspection is rejected rather than guessed safe.
+          check_manifest_target() {
+            local target="$1"
+            if [ -L "$target" ]; then
+              echo "::error::Refusing to overwrite symlink manifest target: $target"
+              return 1
+            fi
+            if [ -e "$target" ] && [ ! -f "$target" ]; then
+              echo "::error::Manifest target must be a regular file: $target"
+              return 1
+            fi
+            if [ -e "$target" ]; then
+              if ! find "$target" -type f -links +1 -print > "$tmpdir/manifest-link-check.txt" 2>/dev/null; then
+                echo "::error::Could not inspect manifest target link count: $target"
+                return 1
+              fi
+              if [ -s "$tmpdir/manifest-link-check.txt" ]; then
+                echo "::error::Refusing to overwrite hardlinked manifest target: $target"
+                return 1
+              fi
+            fi
+            return 0
+          }
+          # Stage each manifest in a newly-created file in the destination
+          # directory, then rename it into place. This keeps the replacement
+          # atomic and means a pre-existing symlink is replaced as a directory
+          # entry instead of being followed by cp. The temporary pathname is
+          # created with mktemp (rather than guessed) and stays on the same
+          # filesystem for BSD/GNU/MSYS portability.
+          write_manifest_atomically() {
+            local source="$1"
+            local target="$2"
+            local temp_record="$tmpdir/manifest-temp-${SHARD}-$$.txt"
+            local temp_path=""
+            rm -f "$temp_record"
+            if ! mktemp "${target}.tmp.XXXXXX" > "$temp_record"; then
+              echo "::error::Could not create temporary manifest for $target"
+              return 1
+            fi
+            if ! read -r temp_path < "$temp_record" || [ -z "$temp_path" ]; then
+              echo "::error::Could not resolve temporary manifest path for $target"
+              rm -f "$temp_record"
+              return 1
+            fi
+            rm -f "$temp_record"
+            if ! cp "$source" "$temp_path"; then
+              echo "::error::Could not stage manifest for $target"
+              rm -f "$temp_path"
+              return 1
+            fi
+            if ! mv -f "$temp_path" "$target"; then
+              echo "::error::Could not atomically replace manifest $target"
+              rm -f "$temp_path"
+              return 1
+            fi
+            return 0
+          }
           # Run the previously-orphaned test trees too (issue #1778 H4): src/**,
           # tests/adversarial, and the other never-gated dirs. tests/integration,
           # tests/security, tests/smoke, and top-level test/ are intentionally
@@ -434,8 +505,19 @@ jobs:
             # a missing-dir find failure here is silent under set -e + pipefail
             # because the find's stderr goes to /dev/null.
             find tests/unit tests/adversarial tests/architect tests/cli tests/tools tests/helpers -name '*.test.ts' -type f 2>/dev/null || true
-            find tests -maxdepth 1 -name '*.test.ts' -type f 2>/dev/null || true
+            for f in tests/*.test.ts; do
+              [ -f "$f" ] && printf '%s\n' "$f"
+            done
           } | sort -u > "$tmpdir/all-tests.txt"
+          # Cross-check the filesystem discovery against Git's tracked-file
+          # inventory before partitioning. This independent inventory prevents
+          # a truncated find result from becoming a self-consistent shard gate.
+          git ls-files -z -- '*.test.ts' | tr '\0' '\n' | awk '/^src\// || /^tests\/(unit|adversarial|architect|cli|tools|helpers)\// || /^tests\/[^\/]+\.test\.ts$/' | sort -u > "$tmpdir/canonical-all-tests.txt"
+          if ! cmp -s "$tmpdir/all-tests.txt" "$tmpdir/canonical-all-tests.txt"; then
+            echo "::error::Filesystem unit discovery differs from the tracked canonical inventory"
+            diff -u "$tmpdir/canonical-all-tests.txt" "$tmpdir/all-tests.txt" || true
+            exit 1
+          fi
           # Drop known-red pre-existing failures (issue #1705) so the gate reflects
           # new regressions, not the debt backlog CI's old broken detection had been
           # silently hiding. See scripts/ci/quarantined-tests.txt for the tracked list.
@@ -451,12 +533,18 @@ jobs:
           fi
           sort -u "$tmpdir/quarantined-raw.txt" > "$tmpdir/quarantined.txt"
           comm -23 "$tmpdir/all-tests.txt" "$tmpdir/quarantined.txt" > "$tmpdir/gated-tests.txt"
+          unit_inventory_path=".swarm/repository-validation/unit-inventory.txt"
+          check_manifest_target "$unit_inventory_path" || exit 1
+          write_manifest_atomically "$tmpdir/gated-tests.txt" "$unit_inventory_path" || exit 1
           num_shards=6
           awk -v s="$SHARD" -v n="$num_shards" '(NR - 1) % n == (s - 1)' "$tmpdir/gated-tests.txt" > "$tmpdir/shard-tests.txt"
           if [ ! -s "$tmpdir/shard-tests.txt" ]; then
             echo "::error::No test files found for shard ${SHARD}"
             exit 1
           fi
+          unit_shard_manifest_path=".swarm/repository-validation/unit-shard-${SHARD}-expected-files.txt"
+          check_manifest_target "$unit_shard_manifest_path" || exit 1
+          write_manifest_atomically "$tmpdir/shard-tests.txt" "$unit_shard_manifest_path" || exit 1
           # Avoid dollar-paren command substitution here: this workflow's own
           # security scan (tests/security/ci-workflow-security.test.ts) flags
           # that syntax inside a run: step as a command-injection risk pattern.
@@ -466,25 +554,50 @@ jobs:
       - name: Run unit tests
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
+          if [ -z "$SHARD" ]; then
+            echo "::error::Unit test shard is empty; refusing to write unscoped validation reports"
+            exit 1
+          fi
           failed=0
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
           trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
+          # Recheck immediately before report writes in case an earlier command
+          # replaced .swarm with a symlink/junction.
+          if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then
+            echo "::error::.swarm must be a real directory; symlinks, junctions, and non-directories are rejected"
+            exit 1
+          fi
+          if [ -L .swarm/repository-validation ] || { [ -e .swarm/repository-validation ] && [ ! -d .swarm/repository-validation ]; }; then
+            echo "::error::.swarm/repository-validation must be a real directory; symlinks, junctions, and non-directories are rejected"
+            exit 1
+          fi
+          mkdir -p .swarm/repository-validation
           # flake-annotations.txt captures retry-flake + hard-failure signals so
           # the downstream flake-detection workflow_run can suggest quarantines
           # (issue #1782). Written to a workspace-relative path (survives the
           # tmpdir trap cleanup) and uploaded if-always below.
           flake_ann="flake-annotations-unit-shard-$SHARD.txt"
           : > "$flake_ann"
+          item_index=0
           while IFS= read -r f; do
-            [ -f "$f" ] || continue
+            if [ ! -f "$f" ]; then
+              echo "::error::Discovered unit test is missing at execution time: $f"
+              echo "::error file=$f::MISSING: $f" >> "$flake_ann"
+              failed=1
+              continue
+            fi
             tmp="$tmpdir/bun-out-$$-${f##*/}"
+            report_path=".swarm/repository-validation/unit-shard-${SHARD}-${item_index}.json"
+            ((item_index+=1))
             exit_code=0
             # No --coverage here: per-file coverage is overwritten each invocation
             # and never aggregated. The coverage gate (the dedicated coverage job)
             # owns the full-suite measurement; instrumenting every sharded test
             # process was pure overhead on every cell.
-            bun scripts/ci/run-test-with-timeout.ts "$f" --timeout 120000 --kill-timeout 180 > "$tmp" 2>&1 || exit_code=$?
+            bun scripts/ci/repository-validation.ts --surface unit --report "$report_path" --timeout 120000 --kill-timeout 180000 --suite-timeout 900000 --max-output-bytes 65536 -- "$f" > "$tmp" 2>&1 || exit_code=$?
             # Real GH Actions runs (not reproducible standalone locally, even
             # under simulated CPU load) have shown a low baseline of
             # single-shard flakes under the shared runners' resource
@@ -497,38 +610,40 @@ jobs:
               let retry_num+=1
               echo "::warning file=$f::Attempt $retry_num failed, retrying ($retry_num/$max_retries): $f"
               exit_code=0
-              bun scripts/ci/run-test-with-timeout.ts "$f" --timeout 120000 --kill-timeout 180 > "$tmp" 2>&1 || exit_code=$?
+              bun scripts/ci/repository-validation.ts --surface unit --report "$report_path" --timeout 120000 --kill-timeout 180000 --suite-timeout 900000 --max-output-bytes 65536 -- "$f" > "$tmp" 2>&1 || exit_code=$?
               if [ $exit_code -eq 0 ]; then
                 echo "::notice file=$f::Passed on retry $retry_num (flaky): $f"
                 echo "::notice file=$f::Passed on retry $retry_num (flaky): $f" >> "$flake_ann"
               fi
             done
             if [ $exit_code -ne 0 ]; then
-              # Informational only — bun 1.3.x's failure markers don't reliably
-              # match this pattern, so it must not gate pass/fail. exit_code is
-              # the sole failure signal.
-              grep -qE "^[[:space:]]*(FAIL|✗|AssertionError|\[TIMEOUT\])" "$tmp" || true
-              # Print the captured output so the actual assertion failure is
-              # visible in the log — the grep above only computes a match and
-              # never printed it, and the temp file is deleted at step end
-              # (trap below), so previously every failure showed only a bare
-              # "FAILED: <path>" with no diagnostic content at all.
+              # Print the bounded authority output so the actual failure,
+              # crash, timeout, or incomplete status is visible in the log.
               echo "::group::Output for $f"
               cat "$tmp"
               echo "::endgroup::"
+              if [ -f "$report_path" ]; then
+                echo "::group::Bounded validation report for $f"
+                cat "$report_path"
+                echo "::endgroup::"
+              fi
               echo "::error file=$f::FAILED: $f"
               echo "::error file=$f::FAILED: $f" >> "$flake_ann"
               failed=1
-            fi
-            # Surface timing and timeout info to CI output (not just temp file)
-            grep -E "^\[TIMING\]|^\[TIMEOUT\]" "$tmp" || true
-            if [ $exit_code -eq 0 ]; then
-              # Preserve bounded, machine-readable issue acceptance receipts from
-              # successful isolated tests without replaying their full stdout.
-              grep -E "^\[ISSUE-[0-9]+(-[A-Z0-9-]+)?-EVIDENCE\]" "$tmp" || true
+            else
+              # The authority emits at most 64 bounded ISSUE-EVIDENCE receipts
+              # plus its bounded summary. Keep those receipts visible without
+              # grepping for markers in the summary wrapper output.
+              cat "$tmp"
             fi
             rm -f "$tmp"
           done < "$tmpdir/shard-tests.txt"
+          validation_exit=0
+          bun scripts/ci/verify-repository-validation-reports.ts --directory .swarm/repository-validation --root "$PWD" --surface unit --file-prefix "unit-shard-${SHARD}-" --expected-files "$tmpdir/shard-tests.txt" || validation_exit=$?
+          if [ "$validation_exit" -ne 0 ]; then
+            echo "::error::Unit validation report verification failed"
+            failed=1
+          fi
           exit $failed
       # Upload the per-shard flake-annotations file `if: always()` so the
       # downstream flake-detection workflow_run can download it and suggest
@@ -541,6 +656,16 @@ jobs:
           name: flake-annotations-unit-shard-${{ matrix.shard }}
           path: flake-annotations-unit-shard-*.txt
           if-no-files-found: ignore
+      - name: Upload repository validation reports
+        if: always() && needs.detect-release.outputs.is-release != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: repository-validation-unit-${{ matrix.os }}-${{ matrix.shard }}
+          path: |
+            .swarm/repository-validation/unit-shard-${{ matrix.shard }}-*.json
+            .swarm/repository-validation/unit-inventory.txt
+            .swarm/repository-validation/unit-shard-${{ matrix.shard }}-expected-files.txt
+          if-no-files-found: error
       # NOTE: the coverage gate used to run here as an extra step on
       # `unit (ubuntu-latest, 1)`, which made that one cell execute the entire
       # unit suite twice (sharded run + full-suite coverage run) inside the 40m
@@ -564,7 +689,19 @@ jobs:
     needs: [unit]
     if: always()
     runs-on: ubuntu-latest
+    # The report verifier is deliberately under `if: always()`, so bound the
+    # whole aggregate job rather than relying on a skipped conditional step.
+    timeout-minutes: 10
     steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        if: always()
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: always()
+        with:
+          bun-version: "1.3.13"
+      - name: Install dependencies for the report verifier
+        if: always()
+        run: bun install --frozen-lockfile
       - name: Check unit job result
         shell: bash
         env:
@@ -575,6 +712,54 @@ jobs:
             exit 1
           fi
           echo "All unit matrix cells that ran succeeded."
+      - name: Download unit validation reports
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: repository-validation-unit-*
+          path: unit-reports
+          merge-multiple: false
+      - name: Verify unit validation matrix completeness
+        if: always()
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+        run: |
+          # Merge groups always expand to 18 cells. On pull_request, infer the
+          # actual matrix from the downloaded artifact directories so this gate
+          # never assumes platform cells that were not scheduled.
+          expected_os="ubuntu-latest"
+          if [ "$EVENT" = "merge_group" ]; then
+            expected_os="ubuntu-latest,macos-latest,windows-latest"
+          elif [ -d unit-reports/repository-validation-unit-macos-latest-1 ] || [ -d unit-reports/repository-validation-unit-windows-latest-1 ]; then
+            if [ ! -d unit-reports/repository-validation-unit-macos-latest-1 ] || [ ! -d unit-reports/repository-validation-unit-windows-latest-1 ]; then
+              echo "::error::Partial platform artifact set; expected both macOS and Windows artifacts"
+              exit 1
+            fi
+            expected_os="ubuntu-latest,macos-latest,windows-latest"
+          fi
+          # Release-please runs intentionally skip unit steps and therefore
+          # upload no reports. A successful unit job with no downloaded JSON is
+          # the only no-op case; any non-success remains a hard failure.
+          find unit-reports -name '*.json' -type f -print -quit > "$RUNNER_TEMP/unit-report-probe.txt" 2>/dev/null || true
+          if [ ! -s "$RUNNER_TEMP/unit-report-probe.txt" ]; then
+            if [ "$UNIT_RESULT" = "success" ]; then
+              echo "No unit validation reports were uploaded; treating this as an intentional no-op."
+              exit 0
+            fi
+            echo "::error::Unit validation reports are missing after a non-successful unit job"
+            exit 1
+          fi
+          if ! bun scripts/ci/verify-repository-validation-reports.ts --directory unit-reports --root "$PWD" --surface unit --artifact-prefix repository-validation-unit- --expected-os "$expected_os" --shards 6 --inventory-file unit-inventory.txt; then
+            echo "::error::Unit validation report completeness or schema verification failed"
+            exit 1
+          fi
+          if [ "$expected_os" = "ubuntu-latest,macos-latest,windows-latest" ]; then
+            echo "Validated 18 unit validation report cells for the full-platform event."
+          else
+            echo "Validated 6 unit validation report cells for the ordinary Ubuntu PR matrix."
+          fi
 
   # Merge-queue-only coverage gate, sharded (issue #2341). The gate used to be
   # one serial job: a single runner executing the entire gated suite per-file
@@ -827,17 +1012,53 @@ jobs:
           failed=0
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
           trap 'rm -f "$tmpdir"/bun-out-int-* "$tmpdir"/int-*.txt' EXIT
-          find tests/integration test -name '*.test.ts' -type f | sort > "$tmpdir/int-all-tests.txt"
+          # Reject symlink/junction redirection before creating integration
+          # manifests; the TypeScript report guard runs only inside the loop.
+          if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then
+            echo "::error::.swarm must be a real directory; symlinks, junctions, and non-directories are rejected"
+            exit 1
+          fi
+          if [ -L .swarm/repository-validation ] || { [ -e .swarm/repository-validation ] && [ ! -d .swarm/repository-validation ]; }; then
+            echo "::error::.swarm/repository-validation must be a real directory; symlinks, junctions, and non-directories are rejected"
+            exit 1
+          fi
+          mkdir -p .swarm/repository-validation
+          {
+            # Keep the canonical two-root discovery anchor for the CI policy
+            # check when both roots exist, while retaining the guarded fallback
+            # for repositories where either optional root is absent.
+            if [ -d tests/integration ] && [ -d test ]; then
+              find tests/integration test -name '*.test.ts' -type f
+            else
+              if [ -d tests/integration ]; then
+                find tests/integration -name '*.test.ts' -type f
+              fi
+              if [ -d test ]; then
+                find test -name '*.test.ts' -type f
+              fi
+            fi
+          } | sort > "$tmpdir/int-all-tests.txt"
+          if [ ! -s "$tmpdir/int-all-tests.txt" ]; then
+            echo "::error::Integration discovery produced no test files"
+            exit 1
+          fi
           # Drop known-red pre-existing failures (issue #1705) — same rationale
           # as the unit/coverage jobs' quarantine lists. See
           # scripts/ci/quarantined-integration-tests.txt for the tracked list.
           grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-integration-tests.txt | sort > "$tmpdir/int-quarantined.txt" || true
           comm -23 "$tmpdir/int-all-tests.txt" "$tmpdir/int-quarantined.txt" > "$tmpdir/int-gated-tests.txt"
+          item_index=0
           while IFS= read -r f; do
-            [ -f "$f" ] || continue
+            if [ ! -f "$f" ]; then
+              echo "::error::Discovered integration test is missing at execution time: $f"
+              failed=1
+              continue
+            fi
             tmp="$tmpdir/bun-out-int-$$-${f##*/}"
+            report_path=".swarm/repository-validation/integration-${item_index}.json"
+            ((item_index+=1))
             exit_code=0
-            bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+            bun scripts/ci/repository-validation.ts --surface integration --report "$report_path" --timeout 120000 --kill-timeout 180000 --suite-timeout 900000 --max-output-bytes 65536 -- "$f" > "$tmp" 2>&1 || exit_code=$?
             # Real GH Actions runs have shown a handful of files that pass
             # standalone locally (even under simulated CPU load) but fail
             # intermittently on the shared runners (matches the unit job's
@@ -849,30 +1070,43 @@ jobs:
               let retry_num+=1
               echo "::warning file=$f::Attempt $retry_num failed, retrying ($retry_num/$max_retries): $f"
               exit_code=0
-              bun --smol test "$f" --timeout 120000 > "$tmp" 2>&1 || exit_code=$?
+              bun scripts/ci/repository-validation.ts --surface integration --report "$report_path" --timeout 120000 --kill-timeout 180000 --suite-timeout 900000 --max-output-bytes 65536 -- "$f" > "$tmp" 2>&1 || exit_code=$?
               if [ $exit_code -eq 0 ]; then
                 echo "::notice file=$f::Passed on retry $retry_num (flaky): $f"
               fi
             done
             if [ $exit_code -ne 0 ]; then
-              # Informational only — bun 1.3.x's failure markers don't reliably
-              # match this pattern, so it must not gate pass/fail. exit_code is
-              # the sole failure signal.
-              grep -qE "^[[:space:]]*(FAIL|✗|AssertionError)" "$tmp" || true
               echo "::group::Output for $f"
               cat "$tmp"
               echo "::endgroup::"
+              if [ -f "$report_path" ]; then
+                echo "::group::Bounded validation report for $f"
+                cat "$report_path"
+                echo "::endgroup::"
+              fi
               echo "::error file=$f::FAILED: $f"
               failed=1
-            fi
-            if [ $exit_code -eq 0 ]; then
-              # Match the unit wrapper's bounded evidence channel so merge-queue
-              # integration fixtures can publish auditable completion receipts.
-              grep -E "^\[ISSUE-[0-9]+(-[A-Z0-9-]+)?-EVIDENCE\]" "$tmp" || true
+            else
+              # Preserve the authority's bounded ISSUE-EVIDENCE receipts and
+              # summary exactly as emitted; do not parse markers in the wrapper.
+              cat "$tmp"
             fi
             rm -f "$tmp"
           done < "$tmpdir/int-gated-tests.txt"
+          validation_exit=0
+          bun scripts/ci/verify-repository-validation-reports.ts --directory .swarm/repository-validation --root "$PWD" --surface integration --file-prefix integration- --expected-files "$tmpdir/int-gated-tests.txt" || validation_exit=$?
+          if [ "$validation_exit" -ne 0 ]; then
+            echo "::error::Integration validation report verification failed"
+            failed=1
+          fi
           exit $failed
+      - name: Upload repository validation reports
+        if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: repository-validation-integration
+          path: .swarm/repository-validation/integration-*.json
+          if-no-files-found: error
 
   # Release-please PRs skip package-check (version bumps don't change the bundle).
   package-check:
