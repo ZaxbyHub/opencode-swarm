@@ -18,18 +18,18 @@ import { validateSwarmPath } from '../hooks/utils';
 import * as logger from '../utils/logger';
 
 // proper-lockfile ships JS-only with no TS types; cast to a minimal interface
-// covering the `lockSync` API we use.
-const lockfile = lockfileImport as unknown as {
+// covering the `lockSync` API we use. The synchronous adapter rejects positive
+// retry options (ESYNC), so retries are owned by this module below.
+type StateLockFile = {
 	lockSync: (
 		file: string,
 		options?: {
-			retries?:
-				| number
-				| { retries?: number; minTimeout?: number; maxTimeout?: number };
 			stale?: number;
+			realpath?: boolean;
 		},
 	) => () => void;
 };
+const lockfile = lockfileImport as unknown as StateLockFile;
 
 export type FullAutoStatus = 'idle' | 'running' | 'paused' | 'terminated';
 
@@ -122,6 +122,40 @@ export interface FullAutoConfigShape {
 
 const STATE_FILE = 'full-auto-state.json';
 const MAX_DENIAL_HISTORY = 100;
+const STATE_LOCK_STALE_MS = 5000;
+const STATE_LOCK_RETRY_DELAYS_MS = [25, 50, 100, 200, 400, 800] as const;
+const stateLockSleepScratch = new Int32Array(new SharedArrayBuffer(4));
+
+export type FullAutoStateLockErrorCategory =
+	| 'contention'
+	| 'configuration'
+	| 'storage';
+
+/**
+ * Typed failure for acquiring or releasing the Full-Auto state lock.
+ *
+ * The callback is never invoked for these failures. Persistence errors thrown
+ * by the callback retain their existing error shape so callers can distinguish
+ * lock failures from read/write failures.
+ */
+export class FullAutoStateLockError extends Error {
+	readonly category: FullAutoStateLockErrorCategory;
+	readonly cause: unknown;
+	readonly code: `FULL_AUTO_STATE_LOCK_${Uppercase<FullAutoStateLockErrorCategory>}`;
+
+	constructor(
+		category: FullAutoStateLockErrorCategory,
+		message: string,
+		cause?: unknown,
+	) {
+		super(message);
+		this.name = 'FullAutoStateLockError';
+		this.category = category;
+		this.code =
+			`FULL_AUTO_STATE_LOCK_${category.toUpperCase()}` as FullAutoStateLockError['code'];
+		this.cause = cause;
+	}
+}
 
 function nowISO(): string {
 	return new Date().toISOString();
@@ -208,60 +242,136 @@ function emptyState(
 	};
 }
 
+/** Bounded synchronous sleep for the caller-owned contention retry loop. */
+function syncSleep(ms: number): void {
+	try {
+		Atomics.wait(stateLockSleepScratch, 0, 0, ms);
+	} catch {
+		const startedAt = Date.now();
+		while (Date.now() - startedAt < ms) {
+			// Bounded portability fallback for runtimes that reject Atomics.wait.
+		}
+	}
+}
+
+function errorCode(error: unknown): string | undefined {
+	return typeof error === 'object' && error !== null && 'code' in error
+		? String((error as { code?: unknown }).code)
+		: undefined;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function makeLockError(
+	category: FullAutoStateLockErrorCategory,
+	message: string,
+	cause?: unknown,
+): FullAutoStateLockError {
+	const code = errorCode(cause);
+	const detail = errorMessage(cause);
+	const suffix = code ? ` (${code}: ${detail})` : ` (${detail})`;
+	return new FullAutoStateLockError(category, `${message}${suffix}`, cause);
+}
+
+function acquireStateLock(lockTarget: string): () => void {
+	let lastError: unknown;
+	for (
+		let attempt = 0;
+		attempt <= STATE_LOCK_RETRY_DELAYS_MS.length;
+		attempt += 1
+	) {
+		try {
+			const release = _internals.lockfile.lockSync(lockTarget, {
+				stale: STATE_LOCK_STALE_MS,
+				realpath: false,
+			});
+			if (typeof release !== 'function') {
+				throw makeLockError(
+					'storage',
+					'Full-Auto state lock returned an invalid release handle',
+					release,
+				);
+			}
+			return release;
+		} catch (error) {
+			lastError = error;
+			if (errorCode(error) === 'ESYNC') {
+				throw makeLockError(
+					'configuration',
+					'Full-Auto state lock configuration is unsupported',
+					error,
+				);
+			}
+			if (errorCode(error) !== 'ELOCKED') {
+				throw makeLockError(
+					'storage',
+					'Full-Auto state lock acquisition failed',
+					error,
+				);
+			}
+			if (attempt < STATE_LOCK_RETRY_DELAYS_MS.length) {
+				syncSleep(STATE_LOCK_RETRY_DELAYS_MS[attempt]);
+			}
+		}
+	}
+	throw makeLockError(
+		'contention',
+		'Full-Auto state lock contention after bounded retries',
+		lastError,
+	);
+}
+
 /**
- * Cross-process lock around the read-modify-write cycle on
+ * Cross-process lock around the complete read-modify-write cycle on
  * `.swarm/full-auto-state.json`. Bun/Node within a single process is
  * single-threaded, so intra-process RMW is already safe; the lock guards
- * against the rare case where two processes (e.g. an OpenCode plugin and
- * a CLI invocation) touch the same project root concurrently. (H8 fix.)
- *
- * On lock acquisition failure, fall back to running the operation without
- * a lock and log a warning — Full-Auto state safety is best-effort and
- * must not deadlock callers.
+ * against two processes (e.g. an OpenCode plugin and a CLI invocation)
+ * touching the same project root concurrently. Lock failures are surfaced as
+ * typed non-successes; no update is ever run unlocked.
  */
 function withStateLock<T>(directory: string, fn: () => T): T {
 	let release: (() => void) | undefined;
 	try {
+		ensureSwarmDir(directory);
 		const lockTarget = validateSwarmPath(directory, STATE_FILE);
-		// Ensure the file exists so proper-lockfile can lock it. Seed with a
-		// valid empty-persisted shape so `readPersisted` does not log a parse
-		// error on first call.
-		if (!fs.existsSync(lockTarget)) {
-			ensureSwarmDir(directory);
-			const seed: FullAutoPersistedState = {
-				version: 2,
-				updatedAt: nowISO(),
-				oversightSequence: 0,
-				sessions: {},
-			};
-			fs.writeFileSync(
-				lockTarget,
-				`${JSON.stringify(seed, null, 2)}\n`,
-				'utf-8',
+		release = acquireStateLock(lockTarget);
+	} catch (error) {
+		const lockError =
+			error instanceof FullAutoStateLockError
+				? error
+				: makeLockError('storage', 'Full-Auto state lock setup failed', error);
+		logger.warn(`[full-auto/state] ${lockError.message}`);
+		throw lockError;
+	}
+	let callbackFailed = false;
+	let callbackError: unknown;
+	let result!: T;
+	try {
+		result = fn();
+	} catch (error) {
+		callbackFailed = true;
+		callbackError = error;
+	}
+	let releaseError: FullAutoStateLockError | undefined;
+	if (release) {
+		try {
+			release();
+		} catch (error) {
+			releaseError = makeLockError(
+				'storage',
+				'Full-Auto state lock release failed',
+				error,
 			);
 		}
-		release = lockfile.lockSync(lockTarget, {
-			retries: { retries: 5, minTimeout: 5, maxTimeout: 50 },
-			stale: 5000,
-		});
-	} catch (error) {
-		logger.warn(
-			`[full-auto/state] cross-process lock unavailable; proceeding unlocked: ${error instanceof Error ? error.message : String(error)}`,
-		);
 	}
-	try {
-		return fn();
-	} finally {
-		if (release) {
-			try {
-				release();
-			} catch (releaseError) {
-				logger.warn(
-					`[full-auto/state] lock release failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
-				);
-			}
-		}
+	if (callbackFailed) {
+		if (releaseError) logger.warn(`[full-auto/state] ${releaseError.message}`);
+		throw callbackError;
 	}
+	if (releaseError) throw releaseError;
+	return result;
 }
 
 function emptyPersisted(): FullAutoPersistedState {
@@ -320,15 +430,24 @@ export function isFullAutoStateUnreadable(): {
  * a single `fs.statSync`. The cache returns a `structuredClone` of the parsed
  * state when the file's mtimeMs+size are unchanged — cloning keeps caller
  * mutations (which are always followed by `writePersisted` under the state
- * lock) from poisoning the cache. Cross-process writers bump mtime, which
- * invalidates the entry.
+ * lock) from poisoning the cache. Locked read-modify-write callbacks use
+ * `readPersistedForMutation`, which bypasses this cache so an external writer
+ * that preserves both metadata fields cannot be overwritten from a stale
+ * snapshot. Unlocked observational reads retain the inexpensive cache path.
  */
 const readCache = new Map<
 	string,
 	{ mtimeMs: number; size: number; state: FullAutoPersistedState }
 >();
 
-function readPersisted(directory: string): FullAutoPersistedState {
+interface ReadPersistedOptions {
+	bypassCache?: boolean;
+}
+
+function readPersisted(
+	directory: string,
+	options: ReadPersistedOptions = {},
+): FullAutoPersistedState {
 	try {
 		const filePath = validateSwarmPath(directory, STATE_FILE);
 		let stats: fs.Stats;
@@ -341,6 +460,7 @@ function readPersisted(directory: string): FullAutoPersistedState {
 		}
 		const cached = readCache.get(filePath);
 		if (
+			!options.bypassCache &&
 			cached &&
 			cached.mtimeMs === stats.mtimeMs &&
 			cached.size === stats.size
@@ -428,6 +548,11 @@ function readPersisted(directory: string): FullAutoPersistedState {
 		readCache.clear();
 		return emptyPersisted();
 	}
+}
+
+/** Always read the canonical file for a locked read-modify-write operation. */
+function readPersistedForMutation(directory: string): FullAutoPersistedState {
+	return readPersisted(directory, { bypassCache: true });
 }
 
 /**
@@ -524,7 +649,7 @@ export function saveFullAutoRunState(
 	state: FullAutoRunState,
 ): void {
 	withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		state.updatedAt = nowISO();
 		persisted.sessions[state.sessionID] = state;
 		writePersisted(directory, persisted);
@@ -538,7 +663,7 @@ export function startFullAutoRun(
 	options: { planID?: string; phase?: number; taskID?: string } = {},
 ): FullAutoRunState {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const existing = persisted.sessions[sessionID];
 		const mode = config?.mode ?? existing?.mode ?? 'supervised';
 		const state: FullAutoRunState = existing
@@ -583,7 +708,7 @@ export function pauseFullAutoRun(
 	reason: string,
 ): FullAutoRunState | undefined {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return undefined;
 		state.status = 'paused';
@@ -613,7 +738,7 @@ export function disarmFullAutoRun(
 	reason: string,
 ): FullAutoRunState | undefined {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return undefined;
 		state.status = 'idle';
@@ -633,7 +758,7 @@ export function terminateFullAutoRun(
 	reason: string,
 ): FullAutoRunState | undefined {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return undefined;
 		state.status = 'terminated';
@@ -664,7 +789,7 @@ export function incrementFullAutoCounter(
 	delta = 1,
 ): FullAutoRunState | undefined {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return undefined;
 		state.counters[counter] = (state.counters[counter] ?? 0) + delta;
@@ -685,7 +810,7 @@ export function incrementOversightFailureCounter(
 ): number {
 	let result = 0;
 	withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return;
 		state.counters.consecutiveOversightFailures =
@@ -709,7 +834,7 @@ export function resetOversightFailureCounter(
 	sessionID: string,
 ): void {
 	withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return;
 		state.counters.consecutiveOversightFailures = 0;
@@ -726,7 +851,7 @@ export function recordFullAutoDenial(
 	denial: { tool?: string; code?: string; reason: string },
 ): FullAutoRunState | undefined {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return undefined;
 		state.denialCounters.consecutive += 1;
@@ -755,7 +880,7 @@ export function resetFullAutoDenials(
 	sessionID: string,
 ): FullAutoRunState | undefined {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return undefined;
 		state.denialCounters.consecutive = 0;
@@ -773,7 +898,7 @@ export function resetFullAutoDenials(
  */
 export function nextFullAutoOversightSequence(directory: string): number {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const next = (persisted.oversightSequence ?? 0) + 1;
 		persisted.oversightSequence = next;
 		writePersisted(directory, persisted);
@@ -788,7 +913,7 @@ export function recordFullAutoOversight(
 	reason: string,
 ): FullAutoRunState | undefined {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return undefined;
 		state.lastOversightAt = nowISO();
@@ -820,7 +945,7 @@ export function recordFullAutoEscalation(
 	},
 ): FullAutoRunState | undefined {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return undefined;
 		state.lastEscalation = {
@@ -850,7 +975,7 @@ export function recordFullAutoRecoveryProbe(
 	},
 ): FullAutoRunState | undefined {
 	return withStateLock(directory, () => {
-		const persisted = readPersisted(directory);
+		const persisted = _internals.readPersisted(directory);
 		const state = persisted.sessions[sessionID];
 		if (!state) return undefined;
 		state.lastRecoveryProbe = probe;
@@ -896,6 +1021,7 @@ export function shouldPauseForDenials(
  * Test-only DI seam — same rationale as `src/state.ts:_internals`.
  */
 export const _internals: {
-	readPersisted: typeof readPersisted;
+	readPersisted: typeof readPersistedForMutation;
 	writePersisted: typeof writePersisted;
-} = { readPersisted, writePersisted };
+	lockfile: StateLockFile;
+} = { readPersisted: readPersistedForMutation, writePersisted, lockfile };

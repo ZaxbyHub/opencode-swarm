@@ -121,27 +121,6 @@
 			"note": "Pre-existing debt, not approved drift: \"storeSummary\" exists in src/summaries/manager.ts but not inside src/summaries/manager.ts:132 (evidence-bundles.writerCitations[2])."
 		},
 		{
-			"rowId": "full-auto-state",
-			"file": "src/full-auto/state.ts",
-			"identifier": "loadFullAutoRunState",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadFullAutoRunState\" exists in src/full-auto/state.ts but not inside :502 (full-auto-state.readerCitations[0])."
-		},
-		{
-			"rowId": "full-auto-state",
-			"file": "src/full-auto/state.ts",
-			"identifier": "readPersisted",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readPersisted\" exists in src/full-auto/state.ts but not inside src/full-auto/state.ts:319 (full-auto-state.readerCitations[0])."
-		},
-		{
-			"rowId": "full-auto-state",
-			"file": "src/full-auto/state.ts",
-			"identifier": "writePersisted",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writePersisted\" exists in src/full-auto/state.ts but not inside src/full-auto/state.ts:437 (full-auto-state.writerCitations[0])."
-		},
-		{
 			"rowId": "knowledge-application-legacy",
 			"file": "src/hooks/knowledge-application-gate.ts",
 			"identifier": "knowledgeApplicationTransformScan",

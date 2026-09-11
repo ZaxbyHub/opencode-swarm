@@ -432,9 +432,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	// src/pr-review/ boundary); UUID-scoped `.${basename}.${uuid}.tmp`
 	'src/pr-review/authorization.ts': 'registered-bespoke',
 	// bespoke atomic single-file rewrite (write tmp + rename) for the PR-review
-	// gate-state and salvage reads (issue #2385; the only durable stream is
-	// `.swarm/pr-workflow-gates/*.json`, currently UNREGISTERED in the retention
-	// data set — F-PRR-013 follow-up); UUID-scoped `.tmp.<pid>.<uuid>`
+	// gate-state and salvage reads (issues #2385/#2510); the logical stream is
+	// registered in the retention data set: swarm.db coordination_state is the
+	// authority and `.swarm/pr-workflow-gates/*.json` is the bounded projection;
+	// UUID-scoped `.tmp.<pid>.<uuid>`
 	'src/pr-review/persistence.ts': 'registered-bespoke',
 	'src/hooks/promotion-evidence-store.ts': 'registered-bespoke',
 	'src/hooks/review-receipt.ts': 'registered-bespoke',
