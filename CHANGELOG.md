@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.176.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.176.0...v7.176.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **subprocess:** close the last unbounded git spawn sites ([#2674](https://github.com/ZaxbyHub/opencode-swarm/issues/2674)) ([9729845](https://github.com/ZaxbyHub/opencode-swarm/commit/9729845f5b16de08e604e3db5f153d6ee61da9e9))
+* **subprocess:** PR-review feedback round — test hygiene + env parity ([ac23a13](https://github.com/ZaxbyHub/opencode-swarm/commit/ac23a13fe78e209be1538c79b4b8ab1e34db7f9c))
+
 ## [7.176.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.175.0...v7.176.0) (2026-09-11)
 
 
