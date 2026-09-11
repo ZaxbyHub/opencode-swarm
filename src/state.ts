@@ -61,7 +61,7 @@ import { loadPlanJsonOnly } from './plan/manager.js';
 import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
 import { clearTrajectoryCache } from './prm/trajectory-store.js';
-import type { PatternMatch } from './prm/types.js';
+import type { PatternMatch, PrmEpisodeState } from './prm/types.js';
 import type { ReviewRouteEvidence } from './review/routing-enforcement.js';
 import { clearScopeBindings } from './scope/scope-binding.js';
 import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
@@ -727,6 +727,13 @@ export interface AgentSessionState {
 	 * mis-restore every count.
 	 */
 	prmLadderCounts?: Map<string, number>;
+	/** Issue #2678 — per-ladder hard-stop episode state mirrored from the
+	 * escalation tracker (terminal flag, cooldown, trigger latch); reset with
+	 * the ladder counts it is keyed alongside. Not serialized. */
+	prmEpisodes?: Map<string, PrmEpisodeState>;
+	/** Issue #2678 — tracker generation mirrored per strike; owner-checked
+	 * PRM resets must match it exactly or fail closed. */
+	prmEpisodeGeneration?: number;
 	/**
 	 * Issue #2134 — dispatch identity of the delegation whose start already reset
 	 * this session's PRM state. Holds the Task tool `callID`, which is unique per
@@ -2188,6 +2195,9 @@ export function startAgentSession(
 		// Issue #2134 follow-up: ladder counts start empty alongside the episode
 		// ledger they are advanced by.
 		prmLadderCounts: new Map<string, number>(),
+		// Issue #2678: no hard-stop episodes yet; generation starts at 0.
+		prmEpisodes: new Map<string, PrmEpisodeState>(),
+		prmEpisodeGeneration: 0,
 		// Issue #2063 B3/B5: no execution episode until this session actually
 		// attempts execution work.
 		executionEpisodeArmed: false,

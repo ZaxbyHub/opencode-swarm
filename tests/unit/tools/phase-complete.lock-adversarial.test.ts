@@ -23,7 +23,6 @@ import { safeRmRecursive } from '../../helpers/safe-test-dir';
 vi.mock('../../../src/parallel/file-locks', () => ({
 	tryAcquireLock: vi.fn(),
 }));
-
 vi.mock('../../../src/evidence/manager', () => ({
 	listEvidenceTaskIds: vi.fn().mockResolvedValue([]),
 	loadEvidence: vi.fn().mockImplementation((_dir: string, taskId: string) => {
@@ -114,6 +113,7 @@ vi.mock('../../../src/session/snapshot-writer', () => ({
 
 vi.mock('../../../src/telemetry', () => ({
 	telemetry: {
+		prmHardStopTerminal: () => {},
 		phaseChanged: vi.fn(),
 		sessionStarted: vi.fn(),
 		agentActivated: vi.fn(),

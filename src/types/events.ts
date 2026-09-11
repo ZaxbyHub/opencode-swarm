@@ -215,6 +215,21 @@ export interface PrmHardStopDeliveredEvent {
 	occurrenceCount: number;
 }
 
+/**
+ * Issue #2678 — a PRM hard-stop EPISODE reached its bounded TERMINAL/handoff
+ * state (fired exactly once per terminal transition). The third of the three
+ * noninterchangeable counters: TRIGGER (`prm_hard_stop`), DELIVERY
+ * (`prm_hard_stop_delivered`), TERMINAL (this event).
+ */
+export interface PrmHardStopTerminalEvent {
+	type: 'prm_hard_stop_terminal';
+	timestamp: string;
+	sessionId: string;
+	pattern: string;
+	level: number;
+	occurrenceCount: number;
+}
+
 // Union type for all v6.19 events
 export type V619Event =
 	| SoundingBoardConsultedEvent
@@ -233,4 +248,5 @@ export type V619Event =
 	| PrmCourseCorrectionInjectedEvent
 	| PrmEscalationTriggeredEvent
 	| PrmHardStopEvent
+	| PrmHardStopTerminalEvent
 	| PrmHardStopDeliveredEvent;

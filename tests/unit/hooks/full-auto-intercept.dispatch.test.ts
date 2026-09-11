@@ -54,7 +54,6 @@ interface SessionState {
 	fullAutoDeadlockCount: number;
 	fullAutoLastQuestionHash: string | undefined;
 }
-
 const globalState = globalThis as typeof globalThis & {
 	_sessionStorage?: Map<string, SessionState>;
 };
@@ -109,6 +108,7 @@ const consoleErrorCalls: string[] = [];
 // Mock telemetry - remains as mock.module (no _internals seam for direct import)
 mock.module('../../../src/telemetry.js', () => ({
 	telemetry: {
+		prmHardStopTerminal: () => {},
 		autoOversightEscalation: mock(() => {}),
 		sessionStarted: mock(() => {}),
 		sessionEnded: mock(() => {}),
