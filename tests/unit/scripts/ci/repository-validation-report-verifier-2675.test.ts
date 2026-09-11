@@ -3,6 +3,16 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { verifyReports } from '../../../../scripts/ci/verify-repository-validation-reports';
+import { withFrozenClock } from '../../../helpers/test-clock.js';
+
+const FIXED_ISO_NOW = '2026-01-01T00:00:00.000Z';
+
+function isoNow(): string {
+	return withFrozenClock(() => new Date().toISOString(), {
+		fixedNow: 1_767_225_600_000,
+		isoNow: FIXED_ISO_NOW,
+	});
+}
 
 const SURFACES = [
 	'quality',
@@ -44,8 +54,8 @@ function report(root: string, file: string, id = file) {
 			'missing',
 			'skipped',
 		],
-		startedAt: new Date().toISOString(),
-		endedAt: new Date().toISOString(),
+		startedAt: isoNow(),
+		endedAt: isoNow(),
 		durationMs: 1,
 		summary: {
 			discovered: 1,
@@ -68,8 +78,8 @@ function report(root: string, file: string, id = file) {
 				signal: null,
 				argv: ['bun', 'test', file],
 				cwd: root,
-				startedAt: new Date().toISOString(),
-				endedAt: new Date().toISOString(),
+				startedAt: isoNow(),
+				endedAt: isoNow(),
 				durationMs: 1,
 				cleanedUp: true,
 				stdout: '',

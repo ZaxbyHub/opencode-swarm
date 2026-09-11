@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { withFrozenClock } from '../../../helpers/test-clock.js';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '../../../..');
 const LOCAL_UNIT_ENTRY = path.join(
@@ -19,6 +20,15 @@ const VALIDATION_ENTRY = path.join(
 	'repository-validation.ts',
 );
 const PACKAGE_JSON = path.join(REPO_ROOT, 'package.json');
+
+const FIXED_ISO_NOW = '2026-01-01T00:00:00.000Z';
+
+function isoNow(): string {
+	return withFrozenClock(() => new Date().toISOString(), {
+		fixedNow: 1_767_225_600_000,
+		isoNow: FIXED_ISO_NOW,
+	});
+}
 
 interface ChildResult {
 	stdout: string;
@@ -198,8 +208,8 @@ describe('issue #2675 report writer safety', () => {
 					skipped: 0,
 				},
 				results: [],
-				startedAt: new Date().toISOString(),
-				endedAt: new Date().toISOString(),
+				startedAt: isoNow(),
+				endedAt: isoNow(),
 				durationMs: 0,
 			};
 			const requested = path.join(root, '.swarm', 'report.json');

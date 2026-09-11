@@ -81,7 +81,7 @@ describe('repository-validation authority real-process fixtures — issue #2675'
 	});
 
 	test('records a real timeout with bounded cleanup and returns promptly', async () => {
-		const started = Date.now();
+		const started = performance.now();
 		const report = await validateRepository({
 			root: REPO_ROOT,
 			mode: 'full',
@@ -95,7 +95,7 @@ describe('repository-validation authority real-process fixtures — issue #2675'
 		expect(result?.cleanedUp).toBe(true);
 		expect(result?.signal).toBe('SIGKILL');
 		expect(report.status).toBe('incomplete');
-		expect(Date.now() - started).toBeLessThan(5_000);
+		expect(performance.now() - started).toBeLessThan(5_000);
 	});
 
 	test.skipIf(process.platform === 'win32')(

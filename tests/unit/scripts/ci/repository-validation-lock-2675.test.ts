@@ -7,7 +7,17 @@ import {
 	type ValidationReport,
 	writeValidationReport,
 } from '../../../../scripts/ci/repository-validation';
+import { withFrozenClock } from '../../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../../helpers/tmpdir';
+
+const FIXED_ISO_NOW = '2026-01-01T00:00:00.000Z';
+
+function isoNow(): string {
+	return withFrozenClock(() => new Date().toISOString(), {
+		fixedNow: 1_767_225_600_000,
+		isoNow: FIXED_ISO_NOW,
+	});
+}
 
 function report(root: string, durationMs = 0): ValidationReport {
 	return {
@@ -41,8 +51,8 @@ function report(root: string, durationMs = 0): ValidationReport {
 			skipped: 0,
 		},
 		results: [],
-		startedAt: new Date().toISOString(),
-		endedAt: new Date().toISOString(),
+		startedAt: isoNow(),
+		endedAt: isoNow(),
 		durationMs,
 	};
 }
@@ -96,7 +106,9 @@ describe('repository validation report lock — issue #2675', () => {
 				JSON.stringify({
 					pid: 2_147_483_647,
 					token: 'dead-owner',
-					createdAt: Date.now(),
+					createdAt: withFrozenClock(() => Date.now(), {
+						fixedNow: 1_767_225_600_000,
+					}),
 				}),
 			);
 

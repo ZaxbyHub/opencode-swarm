@@ -124,7 +124,7 @@ describe('repository validation hardening — issue #2675', () => {
 	});
 
 	test('whole-run deadline emits an explicit timeout row', async () => {
-		const started = Date.now();
+		const started = performance.now();
 		const report = await validateRepository({
 			root: ROOT,
 			mode: 'full',
@@ -133,7 +133,7 @@ describe('repository validation hardening — issue #2675', () => {
 			suiteTimeoutMs: 20,
 			runProcess: () => new Promise(() => undefined),
 		});
-		expect(Date.now() - started).toBeLessThan(500);
+		expect(performance.now() - started).toBeLessThan(500);
 		expect(report.status).toBe('incomplete');
 		expect(report.results[0]).toMatchObject({
 			status: 'timed_out',
@@ -165,7 +165,7 @@ describe('repository validation hardening — issue #2675', () => {
 		const fixture = path.resolve(
 			'tests/unit/scripts/ci/fixtures/inherited-pipe-fixture.ts',
 		);
-		const started = Date.now();
+		const started = performance.now();
 		const report = await validateRepository({
 			root: path.resolve('.'),
 			mode: 'full',
@@ -174,7 +174,7 @@ describe('repository validation hardening — issue #2675', () => {
 			suiteTimeoutMs: 500,
 		});
 		expect(report.results[0]?.status).toBe('timed_out');
-		expect(Date.now() - started).toBeLessThan(7_500);
+		expect(performance.now() - started).toBeLessThan(7_500);
 	}, 15_000);
 
 	test('rejects unknown and malformed CLI arguments', () => {
