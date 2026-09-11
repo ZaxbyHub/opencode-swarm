@@ -1077,6 +1077,18 @@ jobs:
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
         shell: bash
         run: node scripts/repro-704.mjs
+      - name: Issue #2670 repro — startup and first-use latency contract
+        # Fresh-process matrix over the built bundle: import/server/first-turn/
+        # first-tool/readiness intervals separated with hard budgets evaluated
+        # min-of-reps per cell (single cold-runner transients cannot block; the
+        # distribution with outliers is printed and retained), manifest
+        # delivery, natural exit, and a debug-off probe asserting zero
+        # contract rows with the env var unset. Runs on Linux, macOS, Windows.
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        env:
+          REPRO_2670_REPS: '2'
+        run: node scripts/repro-2670.mjs --ci
       - name: Issue #1873 repro — SQLite under Node
         # Drives the REAL project DB, global DB, and SQLite memory provider under
         # Node (no bun:sqlite) via the node:sqlite adapter. Pre-fix this threw

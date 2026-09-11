@@ -239,6 +239,14 @@ import {
 	isOtlpExporterActive,
 	registerOtlpExporter,
 } from './observability/otlp-exporter.js';
+import {
+	beginStartupServerInterval,
+	endStartupServerInterval,
+	markStartupImportComplete,
+	noteQueueScheduled,
+	withStartupFirstUseTracking,
+	wrapPostResolutionTask,
+} from './observability/startup-contract.js';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
 import { cleanupOldTrajectoryFiles } from './prm/trajectory-store';
@@ -296,6 +304,11 @@ import {
 } from './utils/gitignore-warning';
 import { withTimeout, withTimeoutSignal } from './utils/timeout';
 import { truncateToolOutput } from './utils/tool-output';
+
+// Startup latency contract (#2670): one performance.now() capture at the end
+// of module evaluation marks the import stage. This is the only module-load
+// side effect added by the contract — no I/O, no timers (invariant 1).
+markStartupImportComplete();
 
 /**
  * OpenCode Swarm Plugin
@@ -619,10 +632,17 @@ function schedulePostResolutionTasks(
 	tasks: readonly PostResolutionTask[],
 ): void {
 	if (tasks.length === 0) return;
+	// Startup latency contract (#2670): the settle-interval origin is drain
+	// scheduling; every task is wrapped so its outcome (completed/failed,
+	// bounded error) is recorded. The wrapper re-raises, preserving the
+	// non-fatal catch semantics below; it adds no I/O and no new awaits on
+	// the init path (invariant 1 — optional work never gates the manifest).
+	noteQueueScheduled();
 	const timer = setTimeout(() => {
 		for (const task of tasks) {
+			const wrapped = wrapPostResolutionTask(task);
 			try {
-				void Promise.resolve(task()).catch((err: unknown) => {
+				void Promise.resolve(wrapped()).catch((err: unknown) => {
 					log('post-resolution startup task failed (non-fatal)', {
 						error: err instanceof Error ? err.message : String(err),
 					});
@@ -746,10 +766,17 @@ export function computeEffectiveTruncatableTools(
 }
 
 const OpenCodeSwarm: Plugin = async (ctx) => {
+	// Startup latency contract (#2670): server-interval origin. begin() also
+	// opens the startup advisory window and resets per-boot contract state.
+	beginStartupServerInterval();
 	const postResolutionTasks: PostResolutionTask[] = [];
 	try {
 		const hooks = await initializeOpenCodeSwarm(ctx, postResolutionTasks);
 		schedulePostResolutionTasksForInit(postResolutionTasks);
+		// Contract emission happens after the queue is scheduled (so the
+		// settle-interval origin precedes resolution) and before the manifest
+		// is returned. Pure in-memory timing; no I/O, no new awaits.
+		endStartupServerInterval();
 		return hooks;
 	} catch (err) {
 		// OpenCode's plugin loader silently drops plugins whose entry rejects,
@@ -4039,57 +4066,66 @@ async function initializeOpenCodeSwarm(
 			});
 		},
 
-		// Inject phase reminders before API calls
-		'experimental.chat.messages.transform': composeHandlers(
-			...[
-				// #2486 (D7): consent-gated training capture (read-only, fail-open).
-				messagesTransformTrainingCaptureStep,
-				// Delegation ledger: inject summary when architect session resumes
-				messagesTransformDelegationLedgerStep,
-				pipelineHook['experimental.chat.messages.transform'],
-				contextBudgetHandler,
-				initOrphanRecoveryAdvisoryHook.messagesTransform,
-				durableBackgroundAdvisoryMessagesTransform,
-				fullAutoInterceptHook?.messagesTransform,
-				ccCommandInterceptHook?.messagesTransform,
-				delegationGateHooks.messagesTransform,
-				issueTraceHook.messagesTransform,
-				delegationSanitizerHook,
-				memoryLifecycleHooks.messagesTransform,
-				knowledgeInjectorHook, // v6.17 knowledge injection
-				// v2: scan latest architect-authored message for KNOWLEDGE_APPLIED
-				// / KNOWLEDGE_IGNORED / KNOWLEDGE_CONTRADICTED /
-				// KNOWLEDGE_VIOLATED markers and record
-				// each via the dedup-aware path. Best-effort; never throws.
-				messagesTransformKnowledgeApplicationScanStep,
-				// v2: scan for skill propagation warnings and compliance tracking
-				messagesTransformSkillPropagationScanStep,
-				// Final structure-mutating handler: materialize any remaining
-				// role:'system' entries into user-role guidance carriers (issue
-				// #2526). The pinned host's converter drops role:'system' entries
-				// on this surface and throws on flat entries without `parts`, so
-				// every plugin producer now splices carriers directly and this
-				// boundary converts — or drops — anything that still arrives as a
-				// system entry from an un-migrated or third-party injector.
-				// Handles both the production `{info,parts}` shape and the flat
-				// `{role,content}` shape (issue #1778 H1).
-				//
-				// MUST mutate `output.messages` IN PLACE (issue #1619). The host
-				// discards this hook's return value and afterwards reads its own
-				// local message array — a rebind never reaches the model. See
-				// `materializeSystemGuidanceInPlace`.
-				messagesTransformSystemGuidanceMaterializeStep,
-				// #2107 §3: final context accounting. Runs AFTER consolidation
-				// (which remains the last STRUCTURE-mutating handler). Read-mostly:
-				// measures the final model-visible surface once, resolves the real
-				// model limit through the same ladder physical pruning uses, records
-				// the snapshot in session state + telemetry, and may prepend ONE
-				// bounded advisory warning in place to the last user message. The
-				// handler order (advisory drain < memory < knowledge < consolidation <
-				// accounting) is pinned by tests/unit/hooks/hook-composition-order.test.ts.
-				finalContextAccountingStep,
-			].filter((fn): fn is NonNullable<typeof fn> => Boolean(fn)),
-			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
+		// Inject phase reminders before API calls. The startup-contract
+		// observation wrapper (#2670) returns the composed handler's own
+		// result untouched and only records the first-turn interval when the
+		// invocation settles — no extra awaits, no argument writes, no
+		// rebinding (invariant 10 in-place mutation contract unaffected).
+		'experimental.chat.messages.transform': withStartupFirstUseTracking(
+			'first_turn',
+			undefined,
+			composeHandlers(
+				...[
+					// #2486 (D7): consent-gated training capture (read-only, fail-open).
+					messagesTransformTrainingCaptureStep,
+					// Delegation ledger: inject summary when architect session resumes
+					messagesTransformDelegationLedgerStep,
+					pipelineHook['experimental.chat.messages.transform'],
+					contextBudgetHandler,
+					initOrphanRecoveryAdvisoryHook.messagesTransform,
+					durableBackgroundAdvisoryMessagesTransform,
+					fullAutoInterceptHook?.messagesTransform,
+					ccCommandInterceptHook?.messagesTransform,
+					delegationGateHooks.messagesTransform,
+					issueTraceHook.messagesTransform,
+					delegationSanitizerHook,
+					memoryLifecycleHooks.messagesTransform,
+					knowledgeInjectorHook, // v6.17 knowledge injection
+					// v2: scan latest architect-authored message for KNOWLEDGE_APPLIED
+					// / KNOWLEDGE_IGNORED / KNOWLEDGE_CONTRADICTED /
+					// KNOWLEDGE_VIOLATED markers and record
+					// each via the dedup-aware path. Best-effort; never throws.
+					messagesTransformKnowledgeApplicationScanStep,
+					// v2: scan for skill propagation warnings and compliance tracking
+					messagesTransformSkillPropagationScanStep,
+					// Final structure-mutating handler: materialize any remaining
+					// role:'system' entries into user-role guidance carriers (issue
+					// #2526). The pinned host's converter drops role:'system' entries
+					// on this surface and throws on flat entries without `parts`, so
+					// every plugin producer now splices carriers directly and this
+					// boundary converts — or drops — anything that still arrives as a
+					// system entry from an un-migrated or third-party injector.
+					// Handles both the production `{info,parts}` shape and the flat
+					// `{role,content}` shape (issue #1778 H1).
+					//
+					// MUST mutate `output.messages` IN PLACE (issue #1619). The host
+					// discards this hook's return value and afterwards reads its own
+					// local message array — a rebind never reaches the model. See
+					// `materializeSystemGuidanceInPlace`.
+					messagesTransformSystemGuidanceMaterializeStep,
+					// #2107 §3: final context accounting. Runs AFTER consolidation
+					// (which remains the last STRUCTURE-mutating handler). Read-mostly:
+					// measures the final model-visible surface once, resolves the real
+					// model limit through the same ladder physical pruning uses, records
+					// the snapshot in session state + telemetry, and may prepend ONE
+					// bounded advisory warning in place to the last user message. The
+					// handler order (advisory drain < memory < knowledge < consolidation <
+					// accounting) is pinned by tests/unit/hooks/hook-composition-order.test.ts.
+					finalContextAccountingStep,
+				].filter((fn): fn is NonNullable<typeof fn> => Boolean(fn)),
+				// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
+			) as any,
+			// biome-ignore lint/suspicious/noExplicitAny: observation wrapper preserves the any-typed hook surface
 		) as any,
 
 		// Correctness boundary: while a durable PR workflow gate exists, architect
