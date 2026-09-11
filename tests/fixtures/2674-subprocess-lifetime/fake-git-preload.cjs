@@ -95,12 +95,14 @@ function runFakeGit() {
 		}
 		case 'overflow': {
 			// 8 MiB of output in 64 KiB chunks — above the 5 MiB bunSpawn default
-			// cap and far above any 64 KiB sync maxBuffer.
+			// cap and far above any 64 KiB sync maxBuffer. Exit only after the
+			// stream has flushed: process.exit() can drop buffered pipe writes
+			// on POSIX, under-delivering below the bound under test.
 			const chunk = 'F'.repeat(64 * 1024);
 			for (let i = 0; i < 128; i++) {
 				process.stdout.write(chunk);
 			}
-			process.exit(0);
+			process.stdout.end(() => process.exit(0));
 			break;
 		}
 		case 'fork': {
