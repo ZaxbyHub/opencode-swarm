@@ -274,9 +274,12 @@ describe('subprocess lifetime bounds — regression: unbounded probes (#2674)', 
 			})) as typeof hotspotsInternals.bunSpawn;
 
 			try {
-				const started = Date.now();
+				// performance.now (monotonic, wall-clock-independent) is the
+				// sanctioned timer for elapsed-duration assertions; a frozen
+				// Date clock would zero the measurement.
+				const started = performance.now();
 				const result = await complexity_hotspots.execute({}, makeContext(dir));
-				const elapsedMs = Date.now() - started;
+				const elapsedMs = performance.now() - started;
 				const parsed = JSON.parse(result);
 				// Pre-fix behavior (the bug): the await stayed pending forever
 				// with zero kills. Post-fix: a bounded settle with kill evidence
