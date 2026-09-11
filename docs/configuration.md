@@ -1438,6 +1438,11 @@ succeed — generation advances only on owner-verified clears, so late results
 from an older generation can never clear current recovery state. The
 whole-tracker `reset()` remains the delegation/new-session boundary.
 
+`clearAction` is the public corrected-success seam for future integration
+callers (e.g. a corrected-work hook): no built-in hook invokes it yet, so the
+only clears that fire in production today are the whole-tracker `reset()` at
+delegation boundaries and `/swarm reset-session`.
+
 **Operator controls stay reachable.** Because a terminal episode stops
 re-arming the deny token, every control path remains reachable after the
 bound: `read`/`grep`/`glob` tools, `/swarm diagnose`, scope rescope and

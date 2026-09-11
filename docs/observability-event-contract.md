@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 63-entry event catalog,
+`src/observability/`: the canonical event envelope, the 64-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all eighteen known observability
 stores in the repository.
@@ -232,8 +232,9 @@ not re-enumerated here) plus the two issue-#2482 kinds —
 `context_source_attribution` (absorbing #1990) and
 `verdict_row_pipe_recovery` (absorbing #2184) — plus the issue-#2511 kind
 `delegation_read_uncertain` (advisory delegation-store read stayed uncertain
-after its one bounded retry) for the honest
-38 + 14 + 7 + 3 + 1 = 63 total.
+after its one bounded retry) plus the issue-#2678 kind `prm_hard_stop_terminal`
+(the TERMINAL/handoff transition of a PRM hard-stop episode) for the honest
+38 + 14 + 7 + 3 + 1 + 1 = 64 total.
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
