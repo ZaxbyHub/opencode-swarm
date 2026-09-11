@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { discoverTestFiles } from '../../../../scripts/ci/repository-validation';
+import { MAX_REPORT_FILES } from '../../../../scripts/ci/verify-repository-validation-reports';
 
 const SOURCE = readFileSync(
 	new URL('../../../../scripts/ci/repository-validation.ts', import.meta.url),
@@ -51,6 +52,10 @@ describe('repository-validation review hardening — issue #2675', () => {
 		expect(SOURCE).toContain(
 			'const safeDestination = path.join(canonicalParent, path.basename(destination))',
 		);
+	});
+
+	test('artifact verification leaves headroom for the three-OS matrix', () => {
+		expect(MAX_REPORT_FILES).toBeGreaterThanOrEqual(30_000);
 	});
 
 	test('stale-lock recovery is serialized per lock path and re-confirmed', () => {

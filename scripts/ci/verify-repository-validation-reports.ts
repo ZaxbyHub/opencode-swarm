@@ -21,7 +21,10 @@ const DEFAULT_BOUNDS = {
 export const MAX_REPORT_BYTES = 1_048_576;
 export const MAX_REPORT_SCAN_DEPTH = 8;
 export const MAX_REPORT_SCAN_ENTRIES = 50_000;
-export const MAX_REPORT_FILES = 10_000;
+// The merge-group verifier reads one report per file for all three operating
+// systems. Keep generous headroom above the current ~3.3k-file inventory so a
+// normal matrix cannot fail merely because the repository grows modestly.
+export const MAX_REPORT_FILES = 32_768;
 export const MAX_TOTAL_REPORT_BYTES = 256 * 1024 * 1024;
 export const MAX_ARTIFACTS = 64;
 export const MAX_EXPECTED_FILE_BYTES = 4 * 1024 * 1024;

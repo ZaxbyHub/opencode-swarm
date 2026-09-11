@@ -1732,6 +1732,18 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 	});
 	const reportPath = report.reportPath ?? reportPathWithinRoot(report.root);
 	if (!report.reportPath) await writeValidationReport(report, reportPath);
+	let receiptCount = 0;
+	for (const result of report.results) {
+		for (const stream of [result.stdout, result.stderr]) {
+			for (const line of (stream ?? '').split(/\r?\n/)) {
+				if (receiptCount >= 64) break;
+				if (/^\[ISSUE-[^\]]+-EVIDENCE\]/.test(line)) {
+					console.log(line.slice(0, 1_024));
+					receiptCount += 1;
+				}
+			}
+		}
+	}
 	console.log(JSON.stringify({
 		status: report.status,
 		summary: report.summary,
