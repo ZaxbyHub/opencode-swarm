@@ -158,12 +158,47 @@ describe('ci.yml integration — shared repository-validation authority', () => 
 		);
 		const preflightIndex = collectStep.indexOf(swarmPreflight);
 		const inventoryCopyIndex = collectStep.indexOf(
-			'cp "$tmpdir/gated-tests.txt"',
+			'write_manifest_atomically "$tmpdir/gated-tests.txt" "$unit_inventory_path" || exit 1',
 		);
 		expect(preflightIndex).toBeGreaterThanOrEqual(0);
 		expect(preflightIndex).toBeLessThan(mkdirIndex);
 		expect(mkdirIndex).toBeGreaterThanOrEqual(0);
 		expect(inventoryCopyIndex).toBeGreaterThan(mkdirIndex);
+	});
+
+	test('manifest writes reject unsafe destinations and atomically replace files (RV-B-002)', () => {
+		// Before this guard, cp followed a pre-existing symlink and could overwrite
+		// outside .swarm; the atomic same-directory replacement closes the guard/cp
+		// race while also avoiding writes through a hardlink or special file.
+		expect(collectStep).toContain('check_manifest_target()');
+		expect(collectStep).toContain('if [ -L "$target" ]; then');
+		expect(collectStep).toContain(
+			'if [ -e "$target" ] && [ ! -f "$target" ]; then',
+		);
+		expect(collectStep).toContain('find "$target" -type f -links +1 -print');
+		expect(collectStep).toContain(
+			'Could not inspect manifest target link count',
+		);
+		expect(collectStep).toContain('write_manifest_atomically()');
+		expect(collectStep).toContain('mktemp "${target}.tmp.XXXXXX"');
+		expect(collectStep).toContain('mv -f "$temp_path" "$target"');
+
+		const inventoryGuardIndex = collectStep.indexOf(
+			'check_manifest_target "$unit_inventory_path" || exit 1',
+		);
+		const inventoryCopyIndex = collectStep.indexOf(
+			'write_manifest_atomically "$tmpdir/gated-tests.txt" "$unit_inventory_path" || exit 1',
+		);
+		const shardGuardIndex = collectStep.indexOf(
+			'check_manifest_target "$unit_shard_manifest_path" || exit 1',
+		);
+		const shardCopyIndex = collectStep.indexOf(
+			'write_manifest_atomically "$tmpdir/shard-tests.txt" "$unit_shard_manifest_path" || exit 1',
+		);
+		expect(inventoryGuardIndex).toBeGreaterThan(-1);
+		expect(inventoryGuardIndex).toBeLessThan(inventoryCopyIndex);
+		expect(shardGuardIndex).toBeGreaterThan(-1);
+		expect(shardGuardIndex).toBeLessThan(shardCopyIndex);
 	});
 
 	test('all workflow .swarm writers preflight symlink and non-directory paths', () => {
@@ -205,6 +240,10 @@ describe('ci.yml integration — shared repository-validation authority', () => 
 		expect(unitPassed).toContain('bun-version: "1.3.13"');
 		expect(unitPassed).toContain('bun install --frozen-lockfile');
 		expect(unitPassed).toContain('--inventory-file unit-inventory.txt');
+		expect(unitPassed).toMatch(/timeout-minutes:\s*\d+/);
+		expect(unitPassed).toContain(
+			'Install dependencies for the report verifier',
+		);
 		expect(unitPassed).not.toContain('needs.detect-');
 	});
 

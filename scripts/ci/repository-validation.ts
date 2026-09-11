@@ -51,12 +51,13 @@ export const DEFAULT_MAX_OUTPUT_BYTES = 65_536;
 export const DEFAULT_DIFF_BASE = 'origin/main';
 const PROCESS_KILLER_TIMEOUT_MS = 5_000;
 const GIT_DIFF_TIMEOUT_MS = 10_000;
-const GIT_DIFF_FILTER = 'ACDMR';
+const GIT_DIFF_FILTER = 'ACDMRT';
 const REPORT_LOCK_WAIT_MS = 5_000;
 const REPORT_LOCK_RETRY_MS = 50;
 const REPORT_LOCK_STALE_AFTER_MS = 30_000;
 const REPORT_LOCK_MAX_BYTES = 4_096;
 const REPORT_LOCK_INSPECTION_TIMEOUT_MS = 250;
+const REPORT_LOCK_MAX_PENDING_INSPECTIONS = 64;
 
 export interface RuntimeMetadata {
 	bunVersion: string;
@@ -180,7 +181,7 @@ interface SurfaceDefinition {
 	testRoots?: string[];
 	commands?: Array<{
 		id: string;
-		argv: (root: string) => string[];
+		argv: (root: string, testTimeoutMs: number) => string[];
 		cwd?: (root: string) => string;
 		requiredRuntimes: RuntimeRequirement[];
 	}>;
@@ -207,7 +208,7 @@ const PHP_TEST_FILES = [
 
 const command = (
 	id: string,
-	argv: (root: string) => string[],
+	argv: (root: string, testTimeoutMs: number) => string[],
 	requiredRuntimes: RuntimeRequirement[],
 	cwd?: (root: string) => string,
 ) => ({ id, argv, cwd, requiredRuntimes });
@@ -253,7 +254,7 @@ const SURFACE_DEFINITIONS: SurfaceDefinition[] = [
 	{
 		surface: 'security',
 		commands: [
-			command('security-tests', (root) => ['bun', '--smol', '--preload', keepalivePath(root), 'test', path.join(root, 'tests', 'security'), '--timeout', String(DEFAULT_TEST_TIMEOUT_MS)], ['bun']),
+			command('security-tests', (root, testTimeoutMs) => ['bun', 'test', path.join(root, 'tests', 'security'), '--timeout', String(testTimeoutMs)], ['bun']),
 		],
 	},
 	{
@@ -279,7 +280,7 @@ const SURFACE_DEFINITIONS: SurfaceDefinition[] = [
 	{
 		surface: 'smoke',
 		commands: [
-			command('smoke-tests', (root) => ['bun', '--smol', '--preload', keepalivePath(root), 'test', path.join(root, 'tests', 'smoke'), '--timeout', String(DEFAULT_TEST_TIMEOUT_MS)], ['bun']),
+			command('smoke-tests', (root, testTimeoutMs) => ['bun', 'test', path.join(root, 'tests', 'smoke'), '--timeout', String(testTimeoutMs)], ['bun']),
 			command('repro-704', (root) => ['node', path.join(root, 'scripts', 'repro-704.mjs')], ['node']),
 			command('repro-1873', () => ['bun', 'run', 'repro:1873'], ['bun', 'node']),
 			command('repro-2487', () => ['bun', 'run', 'repro:2487'], ['bun', 'node']),
@@ -288,7 +289,14 @@ const SURFACE_DEFINITIONS: SurfaceDefinition[] = [
 	{
 		surface: 'php-validation',
 		commands: PHP_TEST_FILES.map((file) =>
-			command(file, (root) => buildTestArgv(root, path.join(root, file)), ['bun', 'php']),
+			command(file, (root, testTimeoutMs) => [
+				'bun',
+				'--smol',
+				'test',
+				path.join(root, file),
+				'--timeout',
+				String(testTimeoutMs),
+			], ['bun', 'php']),
 		),
 	},
 	{
@@ -527,8 +535,11 @@ export const _internals: {
 	discoverTopLevelTestFiles: typeof discoverTopLevelTestFiles;
 	readBoundedWithStatus: typeof readBoundedWithStatus;
 	platform: string;
+	now: () => number;
 	spawnTaskkill: TaskkillSpawn;
 	killProcessTree: typeof killProcessTree;
+	reportLockLstat: typeof fsp.lstat;
+	reportLockOpen: typeof fsp.open;
 	readReportLockOwner: typeof readReportLockOwner;
 } = {
 	runtimeAvailable,
@@ -538,8 +549,11 @@ export const _internals: {
 	discoverTopLevelTestFiles,
 	readBoundedWithStatus,
 	platform: process.platform,
+	now: () => Date.now(),
 	spawnTaskkill,
 	killProcessTree,
+	reportLockLstat: fsp.lstat,
+	reportLockOpen: fsp.open,
 	readReportLockOwner,
 };
 
@@ -615,7 +629,7 @@ export function buildSurfaceItems(options: {
 		for (const definitionCommand of definition.commands ?? []) {
 			items.push(commandItem(root, surface, {
 				id: definitionCommand.id,
-				argv: definitionCommand.argv(root),
+				argv: definitionCommand.argv(root, testTimeoutMs),
 				cwd: definitionCommand.cwd?.(root),
 				requiredRuntimes: definitionCommand.requiredRuntimes,
 			}, testTimeoutMs, perItemTimeoutMs));
@@ -646,20 +660,47 @@ function discoveryFailureItem(
 	};
 }
 
+function discoveryDeadlineItem(
+	root: string,
+	surface: ValidationSurface,
+	testTimeoutMs: number,
+	perItemTimeoutMs: number,
+): ValidationItem {
+	return {
+		id: `${surface}:discovery-deadline`,
+		surface,
+		file: `surface:${surface}/discovery-deadline`,
+		argv: [],
+		cwd: root,
+		kind: 'surface',
+		testTimeoutMs,
+		perItemTimeoutMs,
+		skipReason: 'whole-run deadline elapsed during discovery',
+	};
+}
+
 function changedTestFilesBySurface(root: string, changedPaths: string[]): {
 	unit: string[];
 	integration: string[];
 } {
 	const unit: string[] = [];
 	const integration: string[] = [];
+	const unitRoots = UNIT_TEST_ROOTS.map((testRoot) => testRoot.replace(/\\/g, '/'));
+	const isUnderRoot = (relative: string, testRoot: string): boolean =>
+		relative === testRoot || relative.startsWith(`${testRoot}/`);
+	const isTopLevelTest = (relative: string): boolean => {
+		const parts = relative.split('/');
+		return parts.length === 2 && parts[0] === 'tests' && parts[1]?.endsWith('.test.ts') === true;
+	};
 	for (const changedPath of changedPaths) {
 		if (!changedPath.endsWith('.test.ts')) continue;
 		const absolute = path.resolve(root, changedPath);
 		const relative = path.relative(root, absolute);
 		if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
 		const normalized = relative.split(path.sep).join('/');
-		if (normalized.startsWith('tests/integration/') || normalized.startsWith('test/')) integration.push(absolute);
-		else unit.push(absolute);
+		if (normalized === 'test' || normalized.startsWith('test/')) integration.push(absolute);
+		else if (normalized === 'tests/integration' || normalized.startsWith('tests/integration/')) integration.push(absolute);
+		else if (isTopLevelTest(normalized) || unitRoots.some((testRoot) => isUnderRoot(normalized, testRoot))) unit.push(absolute);
 	}
 	return {
 		unit: Array.from(new Set(unit)).sort((a, b) => a.localeCompare(b)),
@@ -1001,6 +1042,10 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 	const suiteTimeoutMs = positiveInteger(options.suiteTimeoutMs, DEFAULT_SUITE_TIMEOUT_MS);
 	const maxOutputBytes = positiveInteger(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
 	const diffBase = validateDiffBase(options.diffBase ?? DEFAULT_DIFF_BASE);
+	// The suite clock starts before any filesystem, Git, or item-building work so
+	// discovery latency consumes the same bounded budget as process execution.
+	const startedAt = new Date().toISOString();
+	const startedClock = _internals.now();
 	const selectedSurfaces: ValidationSurface[] = options.surfaces
 		? Array.from(new Set(options.surfaces))
 		: options.testFiles !== undefined ? ['unit'] : [...SURFACE_INVENTORY];
@@ -1060,13 +1105,23 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 			)];
 		}
 	}
-	const startedAt = new Date().toISOString();
-	const startedClock = Date.now();
+	if (_internals.now() - startedClock >= suiteTimeoutMs && items.length === 0) {
+		items = [discoveryDeadlineItem(
+			root,
+			selectedSurfaces[0] ?? 'unit',
+			testTimeoutMs,
+			perItemTimeoutMs,
+		)];
+	}
 	const runProcess = options.runProcess ?? ((item: ValidationItem) =>
 		runDefaultProcess(item, { root, maxOutputBytes, perItemTimeoutMs }));
 	const results: ValidationResult[] = [];
 
 	for (const item of items) {
+		if (_internals.now() - startedClock >= suiteTimeoutMs) {
+			results.push(deadlineResult(item, 'whole-run deadline elapsed before item start', maxOutputBytes));
+			continue;
+		}
 		const missingRuntime = item.requiredRuntimes?.filter((runtime) => !_internals.runtimeAvailable(runtime)) ?? [];
 		if (item.skipReason || missingRuntime.length > 0) {
 			results.push(statusResult(item, {
@@ -1078,16 +1133,12 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 			}, null, new Date().toISOString(), maxOutputBytes));
 			continue;
 		}
-		if (Date.now() - startedClock >= suiteTimeoutMs) {
-			results.push(deadlineResult(item, 'whole-run deadline elapsed before item start', maxOutputBytes));
-			continue;
-		}
 		const itemStarted = new Date().toISOString();
-		const itemStartClock = Date.now();
+		const itemStartClock = _internals.now();
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let timedOut = false;
 		try {
-			const remainingSuiteMs = Math.max(1, suiteTimeoutMs - (Date.now() - startedClock));
+			const remainingSuiteMs = Math.max(1, suiteTimeoutMs - (_internals.now() - startedClock));
 			const timeoutMs = Math.min(perItemTimeoutMs, remainingSuiteMs);
 			const usesInjectedRunner = options.runProcess !== undefined;
 			const processResult = new Promise<ValidationProcessResult>((resolve, reject) => {
@@ -1107,7 +1158,7 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 							signal: 'SIGKILL',
 							cleanedUp: false,
 							reason: 'per-item or whole-run deadline elapsed',
-							durationMs: Date.now() - itemStartClock,
+							durationMs: _internals.now() - itemStartClock,
 						});
 					}, timeoutMs);
 				});
@@ -1128,7 +1179,7 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 						signal: timedOut ? 'SIGKILL' : null,
 						cleanedUp: false,
 						reason: error instanceof Error ? error.message : String(error),
-						durationMs: Date.now() - itemStartClock,
+						durationMs: _internals.now() - itemStartClock,
 					},
 					itemStarted,
 					new Date().toISOString(),
@@ -1156,7 +1207,7 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 		results,
 		startedAt,
 		endedAt,
-		durationMs: Date.now() - startedClock,
+		durationMs: _internals.now() - startedClock,
 	};
 	if (options.reportPath) {
 		report.reportPath = await writeValidationReport(report, options.reportPath);
@@ -1169,7 +1220,11 @@ function reportPathWithinRoot(root: string, requested?: string): string {
 	const destination = path.resolve(requested ?? defaultPath);
 	const swarmRoot = path.resolve(root, '.swarm');
 	const relative = path.relative(swarmRoot, destination);
-	if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+	const validationRoot = path.resolve(swarmRoot, 'repository-validation');
+	if (path.relative(validationRoot, destination) === '') {
+		throw new Error(`repository validation report destination must be a file under ${swarmRoot}`);
+	}
+	if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
 		throw new Error(`repository validation report must remain under ${swarmRoot}`);
 	}
 	return destination;
@@ -1183,7 +1238,11 @@ function isNotFoundError(error: unknown): boolean {
 async function assertSafeReportPath(root: string, destination: string): Promise<void> {
 	const swarmRoot = path.resolve(root, '.swarm');
 	const relative = path.relative(swarmRoot, destination);
-	if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+	const validationRoot = path.resolve(swarmRoot, 'repository-validation');
+	if (path.relative(validationRoot, destination) === '') {
+		throw new Error(`repository validation report destination must be a file under ${swarmRoot}`);
+	}
+	if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
 		throw new Error(`repository validation report must remain under ${swarmRoot}`);
 	}
 
@@ -1226,6 +1285,34 @@ interface ReportLockOwnerInspection {
 	allowAgeFallback: boolean;
 }
 
+const pendingReportLockInspections = new Map<
+	string,
+	Promise<ReportLockOwnerInspection>
+>();
+
+function reportLockInspectionFailClosed(): ReportLockOwnerInspection {
+	return { owner: null, allowAgeFallback: false };
+}
+
+async function raceReportLockInspection(
+	inspection: Promise<ReportLockOwnerInspection>,
+): Promise<ReportLockOwnerInspection> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			inspection,
+			new Promise<ReportLockOwnerInspection>((resolve) => {
+				timer = setTimeout(
+					() => resolve(reportLockInspectionFailClosed()),
+					REPORT_LOCK_INSPECTION_TIMEOUT_MS,
+				);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 function isProcessAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -1244,7 +1331,7 @@ async function readReportLockOwner(lockPath: string): Promise<ReportLockOwnerIns
 	const inspect = async (): Promise<ReportLockOwnerInspection> => {
 		let stats: Awaited<ReturnType<typeof fsp.lstat>>;
 		try {
-			stats = await fsp.lstat(lockPath);
+			stats = await _internals.reportLockLstat(lockPath);
 		} catch {
 			return { owner: null, allowAgeFallback: false };
 		}
@@ -1255,7 +1342,29 @@ async function readReportLockOwner(lockPath: string): Promise<ReportLockOwnerIns
 		}
 		let handle: fsp.FileHandle | undefined;
 		try {
-			handle = await fsp.open(lockPath, 'r');
+			// O_NOFOLLOW prevents a leaf symlink swap from redirecting the read on
+			// POSIX. O_NONBLOCK means a FIFO swap fails closed instead of leaving a
+			// pending open/read behind the bounded inspection race. Windows does not
+			// expose either flag; descriptor identity below still rejects a regular
+			// file redirected after lstat, and Windows has no filesystem FIFOs.
+			const constants = fs.constants as typeof fs.constants & {
+				O_NOFOLLOW?: number;
+				O_NONBLOCK?: number;
+			};
+			const noFollow = process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0);
+			const nonBlock = process.platform === 'win32' ? 0 : (constants.O_NONBLOCK ?? 0);
+			handle = await _internals.reportLockOpen(
+				lockPath,
+				fs.constants.O_RDONLY | noFollow | nonBlock,
+			);
+			const openedStats = await handle.stat();
+			if (
+				!openedStats.isFile() ||
+				openedStats.dev !== stats.dev ||
+				openedStats.ino !== stats.ino
+			) {
+				return { owner: null, allowAgeFallback: false };
+			}
 			const buffer = Buffer.alloc(REPORT_LOCK_MAX_BYTES + 1);
 			let offset = 0;
 			while (offset < buffer.byteLength) {
@@ -1284,20 +1393,21 @@ async function readReportLockOwner(lockPath: string): Promise<ReportLockOwnerIns
 			if (handle) await handle.close().catch(() => undefined);
 		}
 	};
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			inspect(),
-			new Promise<ReportLockOwnerInspection>((resolve) => {
-				timer = setTimeout(
-					() => resolve({ owner: null, allowAgeFallback: false }),
-					REPORT_LOCK_INSPECTION_TIMEOUT_MS,
-				);
-			}),
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
+	const pending = pendingReportLockInspections.get(lockPath);
+	if (pending) {
+		return raceReportLockInspection(pending);
 	}
+	if (pendingReportLockInspections.size >= REPORT_LOCK_MAX_PENDING_INSPECTIONS) {
+		return reportLockInspectionFailClosed();
+	}
+	let inspection: Promise<ReportLockOwnerInspection>;
+	inspection = inspect().finally(() => {
+		if (pendingReportLockInspections.get(lockPath) === inspection) {
+			pendingReportLockInspections.delete(lockPath);
+		}
+	});
+	pendingReportLockInspections.set(lockPath, inspection);
+	return raceReportLockInspection(inspection);
 }
 
 async function reportLockIsStale(lockPath: string): Promise<boolean> {

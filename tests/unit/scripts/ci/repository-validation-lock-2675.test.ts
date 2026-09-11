@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -127,6 +128,139 @@ describe('repository validation report lock — issue #2675', () => {
 			const inspection = await _internals.readReportLockOwner(lockPath);
 			expect(performance.now() - started).toBeLessThan(1_000);
 			expect(inspection).toEqual({ owner: null, allowAgeFallback: false });
+		});
+	});
+
+	test('deduplicates timed-out inspections for one lock path', async () => {
+		await withTempRoot(async (root, destination) => {
+			const lockPath = `${destination}.lock`;
+			const originalLstat = _internals.reportLockLstat;
+			const originalOpen = _internals.reportLockOpen;
+			let openCount = 0;
+			const fakeHandle = {
+				stat: async () => ({ isFile: () => true, dev: 1, ino: 1 }),
+				read: async () => ({ bytesRead: 0 }),
+				close: async () => undefined,
+			} as unknown as fsp.FileHandle;
+			try {
+				_internals.reportLockLstat = async () =>
+					({ isFile: () => true, size: 1, dev: 1, ino: 1 }) as fs.Stats;
+				_internals.reportLockOpen = async () => {
+					openCount += 1;
+					await new Promise<void>((resolve) => setTimeout(resolve, 300));
+					return fakeHandle;
+				};
+
+				const inspections = await Promise.all(
+					Array.from({ length: 16 }, () =>
+						_internals.readReportLockOwner(lockPath),
+					),
+				);
+				expect(openCount).toBe(1);
+				expect(
+					inspections.every(
+						(value) => value.owner === null && !value.allowAgeFallback,
+					),
+				).toBe(true);
+				// Let the shared inspection settle and remove itself from the map before
+				// the test restores the injectable filesystem functions.
+				await new Promise<void>((resolve) => setTimeout(resolve, 100));
+			} finally {
+				_internals.reportLockLstat = originalLstat;
+				_internals.reportLockOpen = originalOpen;
+			}
+		});
+	});
+
+	test('fails closed once the pending inspection cap is reached', async () => {
+		await withTempRoot(async (root, destination) => {
+			const originalLstat = _internals.reportLockLstat;
+			const originalOpen = _internals.reportLockOpen;
+			let openCount = 0;
+			const fakeHandle = {
+				stat: async () => ({ isFile: () => true, dev: 1, ino: 1 }),
+				read: async () => ({ bytesRead: 0 }),
+				close: async () => undefined,
+			} as unknown as fsp.FileHandle;
+			try {
+				_internals.reportLockLstat = async () =>
+					({ isFile: () => true, size: 1, dev: 1, ino: 1 }) as fs.Stats;
+				_internals.reportLockOpen = async () => {
+					openCount += 1;
+					await new Promise<void>((resolve) => setTimeout(resolve, 300));
+					return fakeHandle;
+				};
+
+				const lockPaths = Array.from({ length: 65 }, (_, index) =>
+					path.join(root, '.swarm', `lock-${index}.lock`),
+				);
+				const inspections = await Promise.all(
+					lockPaths.map((lockPath) => _internals.readReportLockOwner(lockPath)),
+				);
+				expect(openCount).toBe(64);
+				expect(inspections[64]).toEqual({
+					owner: null,
+					allowAgeFallback: false,
+				});
+				await new Promise<void>((resolve) => setTimeout(resolve, 100));
+			} finally {
+				_internals.reportLockLstat = originalLstat;
+				_internals.reportLockOpen = originalOpen;
+			}
+		});
+	});
+
+	test('fails closed when a lock descriptor does not match the lstat result (RV-B-003)', async () => {
+		await withTempRoot(async (root, destination) => {
+			const lockPath = `${destination}.lock`;
+			const originalPath = path.join(root, 'original-lock');
+			const redirectedPath = path.join(root, 'redirected-lock');
+			await fsp.mkdir(path.dirname(destination), { recursive: true });
+			await fsp.writeFile(originalPath, 'original');
+			await fsp.writeFile(
+				redirectedPath,
+				JSON.stringify({ pid: 2_147_483_647, token: 'redirected-owner' }),
+			);
+
+			const originalLstat = _internals.reportLockLstat;
+			const originalOpen = _internals.reportLockOpen;
+			let openFlags: string | number | undefined;
+			try {
+				// Simulate the lock being swapped after lstat: the old
+				// lstat-then-open implementation accepted the redirected owner.
+				_internals.reportLockLstat = async (candidate) =>
+					candidate === lockPath
+						? originalLstat(originalPath)
+						: originalLstat(candidate);
+				_internals.reportLockOpen = (candidate, flags) => {
+					openFlags = flags;
+					return originalOpen(
+						candidate === lockPath ? redirectedPath : candidate,
+						flags,
+					);
+				};
+
+				const inspection = await _internals.readReportLockOwner(lockPath);
+				expect(inspection).toEqual({ owner: null, allowAgeFallback: false });
+				expect(typeof openFlags).toBe('number');
+				const constants = fs.constants as typeof fs.constants & {
+					O_NOFOLLOW?: number;
+					O_NONBLOCK?: number;
+				};
+				if (constants.O_NOFOLLOW !== undefined) {
+					expect((openFlags as number) & constants.O_NOFOLLOW).toBe(
+						constants.O_NOFOLLOW,
+					);
+				}
+				if (constants.O_NONBLOCK !== undefined) {
+					expect((openFlags as number) & constants.O_NONBLOCK).toBe(
+						constants.O_NONBLOCK,
+					);
+				}
+			} finally {
+				_internals.reportLockLstat = originalLstat;
+				_internals.reportLockOpen = originalOpen;
+			}
 		});
 	});
 

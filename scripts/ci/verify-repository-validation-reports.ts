@@ -19,6 +19,14 @@ const DEFAULT_BOUNDS = {
 	maxOutputBytes: 65_536,
 } as const;
 export const MAX_REPORT_BYTES = 1_048_576;
+export const MAX_REPORT_SCAN_DEPTH = 8;
+export const MAX_REPORT_SCAN_ENTRIES = 50_000;
+export const MAX_REPORT_FILES = 10_000;
+export const MAX_TOTAL_REPORT_BYTES = 256 * 1024 * 1024;
+export const MAX_ARTIFACTS = 64;
+export const MAX_EXPECTED_FILE_BYTES = 4 * 1024 * 1024;
+export const MAX_EXPECTED_FILE_ENTRIES = 50_000;
+export const MAX_TOTAL_EXPECTED_FILE_BYTES = 64 * 1024 * 1024;
 
 export interface VerifyOptions {
 	directory: string;
@@ -71,6 +79,12 @@ interface JsonResult {
 	stderr?: unknown;
 }
 
+interface VerificationBudget {
+	reportFiles: number;
+	reportBytes: number;
+	expectedFileBytes: number;
+}
+
 function fail(message: string): never {
 	throw new Error(message);
 }
@@ -114,7 +128,30 @@ function validTimestamp(value: unknown): value is string {
 	return typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value));
 }
 
-function readBoundedReport(reportPath: string): JsonReport {
+function readBoundedText(filePath: string, maxBytes: number, label: string): string {
+	const buffer = Buffer.alloc(maxBytes + 1);
+	let bytesRead = 0;
+	let fileDescriptor: number | undefined;
+	try {
+		fileDescriptor = fs.openSync(filePath, 'r');
+		while (bytesRead < buffer.byteLength) {
+			const read = fs.readSync(fileDescriptor, buffer, bytesRead, buffer.byteLength - bytesRead, bytesRead);
+			if (read === 0) break;
+			bytesRead += read;
+		}
+	} catch (error) {
+		fail(`unable to read ${label} ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+	} finally {
+		if (fileDescriptor !== undefined) fs.closeSync(fileDescriptor);
+	}
+	if (bytesRead > maxBytes) fail(`${label} exceeds ${maxBytes} bytes: ${filePath}`);
+	return buffer.toString('utf8', 0, bytesRead);
+}
+
+function readBoundedReport(reportPath: string, budget: VerificationBudget): JsonReport {
+	if (budget.reportFiles >= MAX_REPORT_FILES) {
+		fail(`report file count exceeds ${MAX_REPORT_FILES}: ${reportPath}`);
+	}
 	const buffer = Buffer.alloc(MAX_REPORT_BYTES + 1);
 	let bytesRead = 0;
 	let fileDescriptor: number | undefined;
@@ -131,6 +168,11 @@ function readBoundedReport(reportPath: string): JsonReport {
 		if (fileDescriptor !== undefined) fs.closeSync(fileDescriptor);
 	}
 	if (bytesRead > MAX_REPORT_BYTES) fail(`JSON report exceeds ${MAX_REPORT_BYTES} bytes: ${reportPath}`);
+	budget.reportFiles += 1;
+	budget.reportBytes += bytesRead;
+	if (budget.reportBytes > MAX_TOTAL_REPORT_BYTES) {
+		fail(`aggregate JSON reports exceed ${MAX_TOTAL_REPORT_BYTES} bytes: ${reportPath}`);
+	}
 	try {
 		return JSON.parse(buffer.toString('utf8', 0, bytesRead)) as JsonReport;
 	} catch (error) {
@@ -141,25 +183,69 @@ function readBoundedReport(reportPath: string): JsonReport {
 function jsonFiles(directory: string): string[] {
 	if (!fs.existsSync(directory)) fail(`report directory does not exist: ${directory}`);
 	const files: string[] = [];
-	const visit = (current: string): void => {
-		for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+	let scannedEntries = 0;
+	const visit = (current: string, depth: number): void => {
+		if (depth > MAX_REPORT_SCAN_DEPTH) {
+			fail(`report directory traversal exceeds depth ${MAX_REPORT_SCAN_DEPTH}: ${current}`);
+		}
+		for (const entry of readDirectoryEntries(current)) {
+			scannedEntries += 1;
+			if (scannedEntries > MAX_REPORT_SCAN_ENTRIES) {
+				fail(`report directory traversal exceeds ${MAX_REPORT_SCAN_ENTRIES} entries: ${directory}`);
+			}
 			const fullPath = path.join(current, entry.name);
-			if (entry.isDirectory()) visit(fullPath);
-			else if (entry.isFile() && entry.name.endsWith('.json')) files.push(fullPath);
+			if (entry.isDirectory()) visit(fullPath, depth + 1);
+			else if (entry.isFile() && entry.name.endsWith('.json')) {
+				if (files.length >= MAX_REPORT_FILES) {
+					fail(`report file count exceeds ${MAX_REPORT_FILES}: ${directory}`);
+				}
+				files.push(fullPath);
+			}
 		}
 	};
-	visit(directory);
+	visit(directory, 0);
 	return files.sort();
 }
 
-function expectedEntries(root: string, expectedFilesPath: string, label: string, requireSorted = false): string[] {
+function readDirectoryEntries(directory: string): fs.Dirent[] {
+	const handle = fs.opendirSync(directory);
+	const entries: fs.Dirent[] = [];
+	try {
+		while (true) {
+			if (entries.length >= MAX_REPORT_SCAN_ENTRIES) {
+				fail(`directory entry count exceeds ${MAX_REPORT_SCAN_ENTRIES}: ${directory}`);
+			}
+			const entry = handle.readSync();
+			if (entry === null) break;
+			entries.push(entry);
+		}
+		return entries;
+	} finally {
+		handle.closeSync();
+	}
+}
+
+function expectedEntries(
+	root: string,
+	expectedFilesPath: string,
+	label: string,
+	requireSorted: boolean,
+	budget: VerificationBudget,
+): string[] {
 	if (!fs.existsSync(expectedFilesPath)) fail(`${label} does not exist: ${expectedFilesPath}`);
-	const rawValues = fs
-		.readFileSync(expectedFilesPath, 'utf8')
+	const rawText = readBoundedText(expectedFilesPath, MAX_EXPECTED_FILE_BYTES, label);
+	budget.expectedFileBytes += Buffer.byteLength(rawText, 'utf8');
+	if (budget.expectedFileBytes > MAX_TOTAL_EXPECTED_FILE_BYTES) {
+		fail(`aggregate expected-file manifests exceed ${MAX_TOTAL_EXPECTED_FILE_BYTES} bytes: ${expectedFilesPath}`);
+	}
+	const rawValues = rawText
 		.split(/\r?\n/)
 		.map((line) => line.trim())
 		.filter((line) => line.length > 0 && !line.startsWith('#'))
 		.map((filePath) => normalizeIdentity(root, filePath));
+	if (rawValues.length > MAX_EXPECTED_FILE_ENTRIES) {
+		fail(`${label} exceeds ${MAX_EXPECTED_FILE_ENTRIES} entries: ${expectedFilesPath}`);
+	}
 	const values = new Set<string>();
 	for (const value of rawValues) {
 		if (values.has(value)) fail(`duplicate expected file in ${label}: ${value}`);
@@ -172,9 +258,9 @@ function expectedEntries(root: string, expectedFilesPath: string, label: string,
 	return rawValues;
 }
 
-function expectedFiles(root: string, expectedFilesPath?: string): Set<string> | undefined {
+function expectedFiles(root: string, expectedFilesPath: string | undefined, budget: VerificationBudget): Set<string> | undefined {
 	if (!expectedFilesPath) return undefined;
-	return new Set(expectedEntries(root, expectedFilesPath, 'expected file list'));
+	return new Set(expectedEntries(root, expectedFilesPath, 'expected file list', false, budget));
 }
 
 function compareFileSets(actual: Set<string>, expected: Set<string>, label: string): void {
@@ -227,8 +313,9 @@ function validateReport(
 	options: VerifyOptions,
 	seenIds: Set<string>,
 	seenFiles: Set<string>,
+	budget: VerificationBudget,
 ): JsonResult[] {
-	const report = readBoundedReport(reportPath);
+	const report = readBoundedReport(reportPath, budget);
 	if (report.schemaVersion !== 1) fail(`unsupported schemaVersion in ${reportPath}`);
 	if (!RUN_STATUSES.has(String(report.status))) fail(`invalid run status in ${reportPath}`);
 	if (report.status !== 'passed') fail(`validation report is not passed in ${reportPath}`);
@@ -328,12 +415,19 @@ function parseArgs(argv: string[]): VerifyOptions {
 }
 
 export function verifyReports(options: VerifyOptions): { reports: number; results: number } {
-	const expected = expectedFiles(options.root, options.expectedFilesPath);
+	const budget: VerificationBudget = { reportFiles: 0, reportBytes: 0, expectedFileBytes: 0 };
+	const expected = expectedFiles(options.root, options.expectedFilesPath, budget);
 	if (options.artifactPrefix) {
+		if (!Array.isArray(options.expectedOs) || options.expectedOs.length === 0 || !Number.isInteger(options.shards) || options.shards <= 0) {
+			fail('--artifact-prefix requires expected OS values and a positive shard count');
+		}
+		if (options.expectedOs.length * options.shards > MAX_ARTIFACTS) {
+			fail(`expected validation artifact count exceeds ${MAX_ARTIFACTS}`);
+		}
 		const expectedArtifacts = new Set(
 			options.expectedOs!.flatMap((os) => Array.from({ length: options.shards! }, (_, index) => `${options.artifactPrefix}${os}-${index + 1}`)),
 		);
-		const artifacts = fs.readdirSync(options.directory, { withFileTypes: true })
+		const artifacts = readDirectoryEntries(options.directory)
 			.filter((entry) => entry.isDirectory() && entry.name.startsWith(options.artifactPrefix!))
 			.map((entry) => entry.name);
 		for (const artifact of expectedArtifacts) if (!artifacts.includes(artifact)) fail(`missing validation artifact: ${artifact}`);
@@ -347,7 +441,7 @@ export function verifyReports(options: VerifyOptions): { reports: number; result
 		for (const artifact of artifacts.sort()) {
 			const artifactDirectory = path.join(options.directory, artifact);
 			const { os, shard } = artifactCoordinates(artifact, options.artifactPrefix!);
-			const inventory = expectedEntries(options.root, path.join(artifactDirectory, inventoryFileName), `${artifact} canonical inventory`, true);
+			const inventory = expectedEntries(options.root, path.join(artifactDirectory, inventoryFileName), `${artifact} canonical inventory`, true, budget);
 			const canonicalInventory = canonicalInventoryByOs.get(os);
 			if (!canonicalInventory) canonicalInventoryByOs.set(os, inventory);
 			else if (inventory.length !== canonicalInventory.length || inventory.some((filePath, index) => filePath !== canonicalInventory[index])) {
@@ -358,11 +452,11 @@ export function verifyReports(options: VerifyOptions): { reports: number; result
 			seenIdsByOs.set(os, seenIds);
 			seenFilesByOs.set(os, seenFiles);
 			const expectedShard = new Set(inventory.filter((_filePath, index) => index % options.shards! === shard - 1));
-			const shardManifest = expectedEntries(options.root, path.join(artifactDirectory, `unit-shard-${shard}-expected-files.txt`), `${artifact} shard manifest`, true);
+			const shardManifest = expectedEntries(options.root, path.join(artifactDirectory, `unit-shard-${shard}-expected-files.txt`), `${artifact} shard manifest`, true, budget);
 			compareFileSets(new Set(shardManifest), expectedShard, `${artifact} shard manifest`);
 			const reportPaths = jsonFiles(artifactDirectory);
 			if (reportPaths.length === 0) fail(`no validation JSON reports found in ${artifact}`);
-			const results = reportPaths.flatMap((reportPath) => validateReport(reportPath, { ...options, allowForeignRoots: true }, seenIds, seenFiles));
+			const results = reportPaths.flatMap((reportPath) => validateReport(reportPath, { ...options, allowForeignRoots: true }, seenIds, seenFiles, budget));
 			const actualShard = new Set(results.map((result) => normalizeIdentity(options.root, relativeReportedPath(result.cwd as string, result.file as string))));
 			compareFileSets(actualShard, expectedShard, `${artifact} report identities`);
 			reportCount += reportPaths.length;
@@ -378,7 +472,7 @@ export function verifyReports(options: VerifyOptions): { reports: number; result
 		const seenFiles = new Set<string>();
 		const reportPaths = jsonFiles(options.directory).filter((filePath) => !options.filePrefix || path.basename(filePath).startsWith(options.filePrefix));
 		if (reportPaths.length === 0) fail('no validation JSON reports found');
-		const results = reportPaths.flatMap((reportPath) => validateReport(reportPath, options, seenIds, seenFiles));
+		const results = reportPaths.flatMap((reportPath) => validateReport(reportPath, options, seenIds, seenFiles, budget));
 		if (expected) compareFileSets(seenFiles, expected, 'report identities');
 		return { reports: reportPaths.length, results: results.length };
 	}

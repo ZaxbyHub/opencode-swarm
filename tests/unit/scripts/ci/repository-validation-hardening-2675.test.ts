@@ -390,7 +390,7 @@ describe('repository validation hardening — issue #2675', () => {
 		// Before the deletion filter included D, a deleted test path disappeared
 		// from the diff selection and the run was incorrectly reported as no_op.
 		expect(_internals.diffCommandArgv(ROOT, 'origin/main')).toContain(
-			'--diff-filter=ACDMR',
+			'--diff-filter=ACDMRT',
 		);
 		const originalDiff = _internals.gitDiffPaths;
 		_internals.gitDiffPaths = async () => ['tests/unit/deleted.test.ts'];

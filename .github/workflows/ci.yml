@@ -435,6 +435,65 @@ jobs:
             exit 1
           fi
           mkdir -p .swarm/repository-validation
+          # Do not let cp follow a pre-existing manifest symlink or overwrite a
+          # special file/hardlink. find -links +1 is supported by both BSD and
+          # GNU find; a failed inspection is rejected rather than guessed safe.
+          check_manifest_target() {
+            local target="$1"
+            if [ -L "$target" ]; then
+              echo "::error::Refusing to overwrite symlink manifest target: $target"
+              return 1
+            fi
+            if [ -e "$target" ] && [ ! -f "$target" ]; then
+              echo "::error::Manifest target must be a regular file: $target"
+              return 1
+            fi
+            if [ -e "$target" ]; then
+              if ! find "$target" -type f -links +1 -print > "$tmpdir/manifest-link-check.txt" 2>/dev/null; then
+                echo "::error::Could not inspect manifest target link count: $target"
+                return 1
+              fi
+              if [ -s "$tmpdir/manifest-link-check.txt" ]; then
+                echo "::error::Refusing to overwrite hardlinked manifest target: $target"
+                return 1
+              fi
+            fi
+            return 0
+          }
+          # Stage each manifest in a newly-created file in the destination
+          # directory, then rename it into place. This keeps the replacement
+          # atomic and means a pre-existing symlink is replaced as a directory
+          # entry instead of being followed by cp. The temporary pathname is
+          # created with mktemp (rather than guessed) and stays on the same
+          # filesystem for BSD/GNU/MSYS portability.
+          write_manifest_atomically() {
+            local source="$1"
+            local target="$2"
+            local temp_record="$tmpdir/manifest-temp-${SHARD}-$$.txt"
+            local temp_path=""
+            rm -f "$temp_record"
+            if ! mktemp "${target}.tmp.XXXXXX" > "$temp_record"; then
+              echo "::error::Could not create temporary manifest for $target"
+              return 1
+            fi
+            if ! read -r temp_path < "$temp_record" || [ -z "$temp_path" ]; then
+              echo "::error::Could not resolve temporary manifest path for $target"
+              rm -f "$temp_record"
+              return 1
+            fi
+            rm -f "$temp_record"
+            if ! cp "$source" "$temp_path"; then
+              echo "::error::Could not stage manifest for $target"
+              rm -f "$temp_path"
+              return 1
+            fi
+            if ! mv -f "$temp_path" "$target"; then
+              echo "::error::Could not atomically replace manifest $target"
+              rm -f "$temp_path"
+              return 1
+            fi
+            return 0
+          }
           # Run the previously-orphaned test trees too (issue #1778 H4): src/**,
           # tests/adversarial, and the other never-gated dirs. tests/integration,
           # tests/security, tests/smoke, and top-level test/ are intentionally
@@ -474,14 +533,18 @@ jobs:
           fi
           sort -u "$tmpdir/quarantined-raw.txt" > "$tmpdir/quarantined.txt"
           comm -23 "$tmpdir/all-tests.txt" "$tmpdir/quarantined.txt" > "$tmpdir/gated-tests.txt"
-          cp "$tmpdir/gated-tests.txt" .swarm/repository-validation/unit-inventory.txt
+          unit_inventory_path=".swarm/repository-validation/unit-inventory.txt"
+          check_manifest_target "$unit_inventory_path" || exit 1
+          write_manifest_atomically "$tmpdir/gated-tests.txt" "$unit_inventory_path" || exit 1
           num_shards=6
           awk -v s="$SHARD" -v n="$num_shards" '(NR - 1) % n == (s - 1)' "$tmpdir/gated-tests.txt" > "$tmpdir/shard-tests.txt"
           if [ ! -s "$tmpdir/shard-tests.txt" ]; then
             echo "::error::No test files found for shard ${SHARD}"
             exit 1
           fi
-          cp "$tmpdir/shard-tests.txt" ".swarm/repository-validation/unit-shard-${SHARD}-expected-files.txt"
+          unit_shard_manifest_path=".swarm/repository-validation/unit-shard-${SHARD}-expected-files.txt"
+          check_manifest_target "$unit_shard_manifest_path" || exit 1
+          write_manifest_atomically "$tmpdir/shard-tests.txt" "$unit_shard_manifest_path" || exit 1
           # Avoid dollar-paren command substitution here: this workflow's own
           # security scan (tests/security/ci-workflow-security.test.ts) flags
           # that syntax inside a run: step as a command-injection risk pattern.
@@ -623,6 +686,9 @@ jobs:
     needs: [unit]
     if: always()
     runs-on: ubuntu-latest
+    # The report verifier is deliberately under `if: always()`, so bound the
+    # whole aggregate job rather than relying on a skipped conditional step.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         if: always()
