@@ -47,7 +47,6 @@ vi.mock('../../../src/evidence/manager', () => ({
 		return { status: 'not_found' };
 	}),
 }));
-
 vi.mock('../../../src/hooks/curator', () => ({
 	runCuratorPhase: vi.fn().mockResolvedValue({
 		digest: { summary: 'test' },
@@ -111,7 +110,7 @@ vi.mock('../../../src/session/snapshot-writer', () => ({
 
 vi.mock('../../../src/telemetry', () => ({
 	telemetry: {
-   prmHardStopTerminal: () => {},
+		prmHardStopTerminal: () => {},
 		phaseChanged: vi.fn(),
 		sessionStarted: vi.fn(),
 		agentActivated: vi.fn(),
