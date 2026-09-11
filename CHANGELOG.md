@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.176.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.176.1...v7.176.2) (2026-09-11)
+
+
+### Bug Fixes
+
+* **phase-complete:** accept cursor-stamped docs receipts for the completing phase (issue [#2702](https://github.com/ZaxbyHub/opencode-swarm/issues/2702)) ([21630a0](https://github.com/ZaxbyHub/opencode-swarm/commit/21630a068bf49ca099cefec3c15062831595eb79))
+
 ## [7.176.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.176.0...v7.176.1) (2026-09-11)
 
 
