@@ -1,11 +1,12 @@
-// This fixture intentionally terminates the child with a signal. The authority
+// This fixture intentionally terminates the child with SIGKILL. The authority
 // test skips the signal assertion on Windows, where Bun does not expose POSIX
-// signal termination semantics.
+// signal termination semantics. SIGKILL is uncatchable, so a successful helper
+// exit cannot be mistaken for a normal fixture exit.
 // Send the signal from the platform's kill utility so Bun's test harness cannot
 // defer or otherwise intercept the fixture's own signal delivery.
 let signaler: Bun.Subprocess;
 try {
-	signaler = Bun.spawn(['kill', '-ABRT', String(process.pid)], {
+	signaler = Bun.spawn(['kill', '-KILL', String(process.pid)], {
 		cwd: process.cwd(),
 		stdin: 'ignore',
 		stdout: 'ignore',
