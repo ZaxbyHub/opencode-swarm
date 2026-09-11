@@ -87,6 +87,11 @@ export const ARCHITECT_MEMORY_OUTCOME_GUIDANCE = `After using recalled memory or
  * headroom above the heaviest configuration: raising it requires justifying
  * the growth in the PR that needs it and updating the baseline above.
  *
+ * Issue #2500 adds the architect-owned receipt-status tool to the generated
+ * tool list. Its prefixed feature-heavy render is ≈160.0K chars, so the
+ * 161K ceiling is the smallest round adjustment that preserves this bounded
+ * guard while accommodating that required registration.
+ *
  * This bound applies ONLY to the built-in prompt. User-supplied
  * `customPrompt`/`customAppendPrompt` values are exempt (they are validated
  * for placeholders, not size — a user may legitimately paste a large prompt).
@@ -99,7 +104,7 @@ export const ARCHITECT_MEMORY_OUTCOME_GUIDANCE = `After using recalled memory or
  * constant bounds a runtime-composed prompt payload; this one bounds CI
  * regression of a built-in source string.
  */
-export const ARCHITECT_PROMPT_BUDGET_CHARS = 160_000;
+export const ARCHITECT_PROMPT_BUDGET_CHARS = 161_000;
 
 const ARCHITECT_PROMPT = `You are Architect - orchestrator of a multi-agent swarm.
 
