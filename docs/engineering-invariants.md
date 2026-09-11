@@ -575,7 +575,7 @@ try {
 
 | caller | timeout | output | stdin | cwd | cleanup |
 | --- | --- | --- | --- | --- | --- |
-| `identity.ts` `getGitRemoteUrl` (via `writeProjectIdentity`) | `GIT_REMOTE_URL_TIMEOUT_MS` = 5 000 ms, `killSignal: 'SIGKILL'` | pipe + `maxBuffer` 64 KiB (remote URLs are tiny) | `ignore` | explicit `cwd: directory` | sync `execFileSync` — the timeout IS the kill; any failure degrades to `repoUrl: undefined` |
+| `identity.ts` `getGitRemoteUrl` (via `writeProjectIdentity`) | `GIT_REMOTE_URL_TIMEOUT_MS` = 5 000 ms, `killSignal: 'SIGKILL'` | stdout piped + `maxBuffer` 64 KiB (remote URLs are tiny); stderr ignored | `ignore` | explicit `cwd: directory` | sync `execFileSync` — the timeout IS the kill; any failure degrades to `repoUrl: undefined` |
 | `diagnose-service.ts` `checkGitRepository` (via `getDiagnoseData` / `/swarm diagnose`) | `GIT_REPOSITORY_CHECK_TIMEOUT_MS` = 5 000 ms, `killSignal: 'SIGKILL'` | ignored (`stdio: ['ignore','ignore','ignore']`) + `maxBuffer` 64 KiB defense-in-depth | `ignore` | explicit `cwd: directory` | sync `execFileSync`; timeout renders `⬜ git state unknown`, never the false `❌ Not a git repository` |
 | `complexity-hotspots.ts` `getGitChurn` (via the `complexity_hotspots` tool) | `GIT_CHURN_TIMEOUT_MS` = 10 000 ms — caller-owned `Promise.race` deadline **plus** the wrapper-owned tree-kill timer | pipe + `maxBuffer` 5 MiB (`BunCompatOutputLimitError` auto-kill on breach) | `ignore` | explicit `cwd: directory` | `killProcessTree: true` + best-effort `proc.kill()` in `finally`; any kill/timeout surfaces as the tool's structured `error` JSON, never an empty success |
 

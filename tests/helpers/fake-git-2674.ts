@@ -46,6 +46,8 @@ export interface FakeGitFixture {
 }
 
 let cachedNodeExe: string | null = null;
+/** Caller's NODE_OPTIONS at setup time, restored by teardown (PRR-002). */
+let priorNodeOptions: string | undefined;
 
 function resolveNodeExe(): string {
 	if (cachedNodeExe) return cachedNodeExe;
@@ -113,6 +115,10 @@ export function setupFakeGit(
 		'2674-subprocess-lifetime',
 		'fake-git-preload.cjs',
 	);
+	// Snapshot the caller's NODE_OPTIONS so teardown restores it: bun:test
+	// shares one process across test files, and an unconditional delete would
+	// strip any runner- or sibling-injected value (PRR-002).
+	priorNodeOptions = process.env.NODE_OPTIONS;
 	process.env.NODE_OPTIONS = `--require ${preload.replace(/\\/g, '/')}`;
 	process.env.FAKE_GIT_MODE = mode;
 
@@ -125,7 +131,8 @@ export function setupFakeGit(
 /** Restores the resolver seed, env, and temp dirs. Call in afterEach. */
 export function teardownFakeGit(fixture: FakeGitFixture | null): void {
 	__seedGitExecutableForTests('git');
-	delete process.env.NODE_OPTIONS;
+	if (priorNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+	else process.env.NODE_OPTIONS = priorNodeOptions;
 	delete process.env.FAKE_GIT_MODE;
 	if (fixture) {
 		for (const dir of [dirname(fixture.gitPath), fixture.projectDir]) {

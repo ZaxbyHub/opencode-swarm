@@ -59,10 +59,13 @@ describe('diagnose checkGitRepository subprocess bounds (#2674)', () => {
 		);
 	}, 20_000);
 
-	test('missing executable: row reports ❌', async () => {
+	test('missing executable: row reports ❌ with the not-a-repository detail', async () => {
 		fixture = setupFakeGit('normal', true);
 		const row = await gitRow(fixture.projectDir);
 		expect(row.status).toBe('❌');
+		expect(row.detail).toBe(
+			'Not a git repository — version control recommended',
+		);
 	}, 20_000);
 
 	test('output volume: output is ignored, so an overflowing child still renders ✅ and terminates', async () => {

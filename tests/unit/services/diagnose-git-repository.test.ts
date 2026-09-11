@@ -217,6 +217,7 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 					stdio: ['ignore', 'ignore', 'ignore'],
 					timeout: 5000,
 					killSignal: 'SIGKILL',
+					maxBuffer: 64 * 1024,
 					env: expect.objectContaining({ GIT_TERMINAL_PROMPT: '0' }),
 				}),
 			);

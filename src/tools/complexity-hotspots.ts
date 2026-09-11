@@ -189,6 +189,10 @@ async function getGitChurn(
 			timeout: GIT_CHURN_TIMEOUT_MS,
 			maxBuffer: GIT_CHURN_MAX_BUFFER_BYTES,
 			killProcessTree: true,
+			// Same explicit-env parity as the two sync callers (PRR-011): keeps
+			// git non-interactive and restores live-env semantics under Bun's
+			// process-start env snapshot.
+			env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
 		},
 	);
 

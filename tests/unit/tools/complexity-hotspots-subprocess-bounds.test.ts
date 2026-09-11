@@ -62,10 +62,11 @@ describe('churn getGitChurn end-to-end bounds via real fake git (#2674)', () => 
 		expect(parsed.hotspots).toEqual([]);
 	}, 20_000);
 
-	test('missing executable: structured spawn-failure error', async () => {
+	test('missing executable: structured spawn-failure error with empty hotspots', async () => {
 		fixture = setupFakeGit('normal', true);
 		const parsed = await runTool(fixture.projectDir);
 		expect(parsed.error).toContain('git churn analysis failed');
+		expect(parsed.hotspots).toEqual([]);
 	}, 20_000);
 
 	test('hung child: killed at the bound, surfaces as structured error (not empty success)', async () => {
@@ -99,6 +100,7 @@ describe('churn getGitChurn end-to-end bounds via real fake git (#2674)', () => 
 		const parsed = await runTool(fixture.projectDir);
 		expect(performance.now() - started).toBeLessThan(TERMINATION_SLACK_MS);
 		expect(parsed.error).toContain('git churn analysis failed');
+		expect(parsed.hotspots).toEqual([]);
 	}, 30_000);
 
 	test('output above the bound: BunCompatOutputLimitError surfaces as the structured error', async () => {
@@ -123,11 +125,12 @@ describe('churn kill-shape discrimination via _internals.bunSpawn DI (#2674)', (
 		signalCode: NodeJS.Signals | null;
 		spawnError?: Error | null;
 		stdout?: string;
+		stderr?: string;
 	}) {
 		let killed = false;
 		_internals.bunSpawn = (() => ({
 			stdout: { text: async () => overrides.stdout ?? '' },
-			stderr: { text: async () => '' },
+			stderr: { text: async () => overrides.stderr ?? '' },
 			exited: Promise.resolve(overrides.exitCode ?? -1),
 			exitCode: overrides.exitCode,
 			signalCode: overrides.signalCode,
