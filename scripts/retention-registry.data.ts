@@ -2499,7 +2499,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		],
 		writerCitations: [
 			'src/hooks/hive-transaction.ts:165 transactHiveStore — single cross-process lock spanning read/validate/cap/staged-appends/atomic-persist (:206-316)',
-			'src/knowledge/identity.ts:176 writeProjectIdentity — platform config identity.json',
+			'src/knowledge/identity.ts:205 writeProjectIdentity — platform config identity.json',
 			'src/knowledge/family-migration.ts — staged directory migration writes',
 		],
 		readerCitations: ['readKnowledge over hive paths (inside transactHiveStore); knowledge-events hive readers'],
