@@ -130,6 +130,29 @@ export interface PrmConfig {
 }
 
 /**
+ * Per-ladder hard-stop episode state (issue #2678).
+ *
+ * Keyed by the ladder identity (`resolveLadderKey`), so the episode is scoped
+ * to the exact session (the tracker is per-session) + ladder (pattern|target,
+ * or bare pattern for a growing target set — the pattern type is the failure
+ * category). This is the bounded-episode record that turns an unbounded
+ * repeated-stop loop into: first stop → (one repeat) → TERMINAL handoff with
+ * a cooldown, after which a fresh episode may re-escalate.
+ */
+export interface PrmEpisodeState {
+	/** False-to-true latch for the `prm_hard_stop` TRIGGER telemetry — the
+	 * trigger fires exactly once per episode, on the transition. */
+	hardStopTriggered: boolean;
+	/** Hard-stop detections after the first one, within this episode. */
+	repeats: number;
+	/** This episode has terminally handed off — no further stop re-arming
+	 * for this ladder until the cooldown lapses or an owner-verified clear. */
+	terminal: boolean;
+	/** Epoch-ms deadline until which re-escalation is suppressed. */
+	cooldownUntil: number;
+}
+
+/**
  * Per-session escalation tracking state
  */
 export interface EscalationState {
@@ -151,4 +174,12 @@ export interface EscalationState {
 	lastPatternDetected: PatternMatch | null;
 	/** Whether a hard stop has been triggered */
 	hardStopPending: boolean;
+	/** Issue #2678 — per-ladder bounded hard-stop episodes (terminal state,
+	 * cooldown, and the trigger latch live here, evicted together with the
+	 * ladder's count under `MAX_TRACKED_LADDERS`). */
+	episodes: Map<string, PrmEpisodeState>;
+	/** Issue #2678 — advances on every episode-state transition (hard-stop
+	 * trigger, terminal transition, owner-verified clear). Resets carrying an
+	 * older generation fail closed in `clearAction`. */
+	generation: number;
 }

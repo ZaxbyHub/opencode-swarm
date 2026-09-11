@@ -290,6 +290,10 @@ export const SESSION_TRANSIENT_FIELDS: Readonly<
 		'Episode ledger keyed by trajectory step numbers that restart at 0 (issue #2134); stale keys would blind PRM.',
 	prmLadderCounts:
 		'Ladder counts pair with the episode ledger; a resumed run re-earns its strikes (issue #2134).',
+	prmEpisodes:
+		'Hard-stop episode state pairs with the ladder counts (issue #2678); a resumed run re-earns its episodes.',
+	prmEpisodeGeneration:
+		'Tracker generation is process-local identity for owner-checked PRM resets (issue #2678); it must not survive a restart.',
 	prmDelegationCallId:
 		'Dispatch identity of the reset that already ran; Task callIDs do not survive a restart.',
 	prmEscalationTracker:

@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 63 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 64 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -198,9 +198,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 63-entry catalog
+## 5. The 64-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 63 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 64 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:16-172`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -610,6 +610,14 @@ Required workflow IDs: `hostSessionId`.
 Category `prm`, severity `critical`, privacy `pseudonymous`. Producer
 `src/telemetry.ts:929`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
+
+#### prm_hard_stop_terminal
+Category `prm`, severity `critical`, privacy `pseudonymous`. TERMINAL/handoff
+transition of a PRM hard-stop episode (#2678) — the third noninterchangeable
+counter after the TRIGGER (`prm_hard_stop`) and DELIVERY
+(`prm_hard_stop_delivered`). Producer `src/telemetry.ts:1067`. Consumers:
+none — owner **#2047**. Retention: **#2047**. Required workflow IDs:
+`hostSessionId`.
 
 ### Evidence category (dark — "emitted but no live parallel paths", `src/telemetry.ts:40`)
 

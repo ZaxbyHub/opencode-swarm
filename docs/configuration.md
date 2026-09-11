@@ -1403,6 +1403,59 @@ strikes at 2, 4 and 6 occurrences; a `context_thrash` run strikes at 10, 20 and 
 consecutive brand-new targets with no revisits. What can no longer happen is a
 hard stop earned by making tool calls rather than by repeating the behaviour.
 
+### Hard-stop episode state machine (bounded stops and terminal handoff)
+
+A PRM hard stop is not an endless loop: each ladder (one `pattern|target`
+identity, or bare `pattern` for a growing target set) runs a bounded EPISODE
+state machine whose states are `none -> hard-stop -> terminal (handoff)`:
+
+1. **First hard stop** (3rd strike of the episode). The trigger telemetry
+   (`prm_hard_stop`) fires ONCE on this false-to-true transition, and the
+   one-shot deny/inject tokens arm for delivery.
+2. **Terminal / handoff** (the first repeated stop — one more detection at
+   count >= 3). The episode escalates to its bounded TERMINAL state: the
+   distinct `prm_hard_stop_terminal` telemetry event fires exactly once, the
+   `[HARD STOP (TERMINAL — HAND OFF)]` advisory is delivered once, and the
+   stop tokens are NOT re-armed afterwards. From here the operator, not the
+   loop, owns the outcome.
+3. **Cooldown.** After the terminal transition, re-escalation of the SAME
+   ladder is suppressed for 15 minutes; detections inside the window are
+   absorbed (no count advance, no telemetry, no re-arm). When the cooldown
+   lapses with no corrected-success clear, the episode state resets while the
+   ladder COUNT is preserved — a genuinely continuing pattern may re-escalate
+   through a FRESH episode, firing the trigger again on the new transition.
+
+**Cooldown and reset ownership.** Episode state is keyed by the exact session
+tracker + ladder identity (the pattern type is the failure category), and a
+`generation` counter advances on every episode-state transition. A
+corrected-success clear (`clearAction`) removes ONLY the matching ladder —
+its strike count, its episode record, and the one-shot stop token it armed —
+leaving unrelated ladders untouched. An AUDITED reset carries an owner token
+(`{ sessionId, generation }`): a stale generation or a foreign session fails
+closed and clears nothing; only the exact current session AND generation
+succeeds. Ownerless in-session clears (possession of the tracker) also
+succeed — generation advances only on owner-verified clears, so late results
+from an older generation can never clear current recovery state. The
+whole-tracker `reset()` remains the delegation/new-session boundary.
+
+**Operator controls stay reachable.** Because a terminal episode stops
+re-arming the deny token, every control path remains reachable after the
+bound: `read`/`grep`/`glob` tools, `/swarm diagnose`, scope rescope and
+repair flows, handoff, and abort. The PRM deny is one-shot per arming (it
+never wedges a session permanently), and after the terminal transition it
+does not re-arm at all.
+
+**Three noninterchangeable counters.** `prm_hard_stop` counts TRIGGERS (one
+per false-to-true transition per episode), `prm_hard_stop_delivered` counts
+DELIVERIES (denials actually thrown at the agent, emitted by the guardrails
+consumer), and `prm_hard_stop_terminal` counts TERMINAL handoffs (one per
+episode terminal transition). They answer different questions — armed vs
+reached the model vs terminally handed off — and must never be summed or
+substituted for one another. Historical TRIGGER totals across sessions are
+descriptive observability only: they are NOT causal failure-rate evidence (a
+count of stops says nothing about why patterns recur), and no automation may
+treat them as one.
+
 ### Clearing a stuck escalation
 
 PRM escalation state is per session and entirely in memory — it is never written

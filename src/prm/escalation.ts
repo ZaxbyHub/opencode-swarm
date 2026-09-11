@@ -9,7 +9,30 @@ import type {
 	EscalationState,
 	PatternMatch,
 	PatternType,
+	PrmEpisodeState,
 } from './types';
+
+/**
+ * Issue #2678 — telemetry event name for the TERMINAL/handoff transition of a
+ * PRM hard-stop episode. Distinct from `prm_hard_stop` (the TRIGGER, fired
+ * once per false-to-true transition) and `prm_hard_stop_delivered` (the
+ * DELIVERY, emitted by the guardrails deny consumer): the three counters are
+ * noninterchangeable.
+ */
+export const PRM_HARD_STOP_TERMINAL_EVENT = 'prm_hard_stop_terminal';
+
+/**
+ * Issue #2678 — hard-stop detections after the first one (within one episode)
+ * before the episode escalates to its bounded TERMINAL/handoff state.
+ */
+export const PRM_HARD_STOP_TERMINAL_REPEATS = 1;
+
+/**
+ * Issue #2678 — after a terminal handoff, re-escalation of the SAME ladder is
+ * suppressed for this window unless an owner-verified `clearAction` clears the
+ * episode first. 15 minutes mirrors the pattern-persistence cooldown budget.
+ */
+export const PRM_TERMINAL_COOLDOWN_MS = 15 * 60 * 1000;
 
 /**
  * Upper bound on distinct escalation ladders tracked per session (issue #2134).
@@ -62,6 +85,8 @@ export function createDefaultEscalationState(): EscalationState {
 		escalationLevel: 0,
 		lastPatternDetected: null,
 		hardStopPending: false,
+		episodes: new Map<string, PrmEpisodeState>(),
+		generation: 0,
 	};
 }
 
@@ -81,6 +106,15 @@ function cloneEscalationState(state: EscalationState): EscalationState {
 				}
 			: null,
 		hardStopPending: state.hardStopPending,
+		// Issue #2678: one-level clone per entry is sufficient — each
+		// PrmEpisodeState is a flat literal (no nested maps/arrays).
+		episodes: new Map(
+			[...state.episodes].map(([key, episode]) => [key, { ...episode }]) as [
+				string,
+				PrmEpisodeState,
+			][],
+		),
+		generation: state.generation,
 	};
 }
 
@@ -95,9 +129,16 @@ function cloneEscalationState(state: EscalationState): EscalationState {
 function generateCorrection(
 	match: PatternMatch,
 	level: number,
+	terminal = false,
 ): CourseCorrection {
 	const levelPrefix =
-		level === 1 ? 'GUIDANCE' : level === 2 ? 'STRONG GUIDANCE' : 'HARD STOP';
+		level === 1
+			? 'GUIDANCE'
+			: level === 2
+				? 'STRONG GUIDANCE'
+				: terminal
+					? 'HARD STOP (TERMINAL — HAND OFF)'
+					: 'HARD STOP';
 
 	const alertTemplates: Record<PatternType, string> = {
 		repetition_loop: `${levelPrefix}: Repetitive action loop detected`,
@@ -164,7 +205,14 @@ export class EscalationTracker {
 	 */
 	constructor(sessionId: string, initialState?: EscalationState) {
 		this._sessionId = sessionId;
-		this._state = initialState ?? createDefaultEscalationState();
+		const seed = initialState ?? createDefaultEscalationState();
+		// Issue #2678: partial/legacy seed objects (and tests) may predate the
+		// episode fields — normalize instead of crashing on the first read.
+		this._state = {
+			...seed,
+			episodes: seed.episodes ?? new Map(),
+			generation: seed.generation ?? 0,
+		};
 	}
 
 	/**
@@ -178,12 +226,43 @@ export class EscalationTracker {
 		level: number;
 		correction: CourseCorrection | null;
 		hardStop: boolean;
+		/** Issue #2678 — this detection is the (or is inside the) bounded
+		 * TERMINAL/handoff state of the ladder's episode. */
+		terminal: boolean;
 	} {
 		// Get the current count for this match's LADDER identity — not for its
 		// pattern type. See `resolveLadderKey`: a single-target pattern gets a
 		// ladder per target, so repeating yourself once each on three different
 		// files is three level-1 advisories rather than a hard stop.
 		const ladderKey = resolveLadderKey(match);
+
+		// Issue #2678: the bounded episode. A terminal episode inside its
+		// cooldown absorbs further detections — no count advance, no telemetry,
+		// no stop re-arming (the unbounded stop loop ends here). After the
+		// cooldown lapses the episode reinitializes (count preserved) so a
+		// genuinely continuing pattern may re-escalate through a FRESH episode,
+		// firing the trigger again on the new false-to-true transition.
+		const episode = this._state.episodes.get(ladderKey);
+		if (episode?.terminal) {
+			if (Date.now() < episode.cooldownUntil) {
+				this._state.lastPatternDetected = match;
+				this._state.escalationLevel = 3;
+				return {
+					level: 3,
+					correction: generateCorrection(match, 3, true),
+					hardStop: false,
+					terminal: true,
+				};
+			}
+			// Cooldown lapsed: fresh episode, ladder count continues.
+			this._state.episodes.set(ladderKey, {
+				hardStopTriggered: false,
+				repeats: 0,
+				terminal: false,
+				cooldownUntil: 0,
+			});
+		}
+
 		const currentCount = this._state.patternCounts.get(ladderKey) ?? 0;
 		const newCount = currentCount + 1;
 
@@ -204,6 +283,9 @@ export class EscalationTracker {
 			const oldest = this._state.patternCounts.keys().next().value;
 			if (oldest === undefined) break;
 			this._state.patternCounts.delete(oldest);
+			// Issue #2678: the episode record shares the ladder keyspace — evict
+			// together so neither map outlives its counterpart's identity.
+			this._state.episodes.delete(oldest);
 		}
 
 		// Update last pattern detected
@@ -219,6 +301,7 @@ export class EscalationTracker {
 				level: 1,
 				correction,
 				hardStop: false,
+				terminal: false,
 			};
 		} else if (newCount === 2) {
 			// Level 2: Second detection - stronger guidance
@@ -237,20 +320,75 @@ export class EscalationTracker {
 				level: 2,
 				correction,
 				hardStop: false,
+				terminal: false,
 			};
 		} else {
-			// Level 3: Third or more detection - hard stop
-			const correction = generateCorrection(match, 3);
+			// Level 3: Third or more detection — the bounded hard-stop EPISODE
+			// (issue #2678). The trigger telemetry fires ONCE per episode, on the
+			// false-to-true transition; a repeated stop escalates the episode to
+			// TERMINAL/handoff (emitting the distinct terminal event once) after
+			// which no further stop re-arming happens for this ladder until the
+			// cooldown lapses or an owner-verified clear resets it.
+			const ladderEpisode =
+				this._state.episodes.get(ladderKey) ??
+				({
+					hardStopTriggered: false,
+					repeats: 0,
+					terminal: false,
+					cooldownUntil: 0,
+				} satisfies PrmEpisodeState);
 			this._state.escalationLevel = 3;
+
+			if (!ladderEpisode.hardStopTriggered) {
+				// First hard stop of this episode: the false-to-true transition.
+				ladderEpisode.hardStopTriggered = true;
+				this._state.generation += 1;
+				this._state.hardStopPending = true;
+				this._state.episodes.set(ladderKey, ladderEpisode);
+				telemetry.prmHardStop(this._sessionId, match.pattern, 3, newCount);
+
+				return {
+					level: 3,
+					correction: generateCorrection(match, 3),
+					hardStop: true,
+					terminal: false,
+				};
+			}
+
+			ladderEpisode.repeats += 1;
+			if (ladderEpisode.repeats >= PRM_HARD_STOP_TERMINAL_REPEATS) {
+				// The bounded terminal transition: escalate to handoff, emit the
+				// distinct terminal event ONCE, arm the cooldown, and STOP
+				// re-arming the stop tokens for this ladder.
+				ladderEpisode.terminal = true;
+				ladderEpisode.cooldownUntil = Date.now() + PRM_TERMINAL_COOLDOWN_MS;
+				this._state.generation += 1;
+				this._state.episodes.set(ladderKey, ladderEpisode);
+				telemetry.prmHardStopTerminal(
+					this._sessionId,
+					match.pattern,
+					3,
+					newCount,
+				);
+
+				return {
+					level: 3,
+					correction: generateCorrection(match, 3, true),
+					hardStop: false,
+					terminal: true,
+				};
+			}
+
+			// Between the first stop and the terminal bound: the stop holds
+			// (re-armed) but the trigger does not re-fire — one advisory per
+			// transition.
+			this._state.episodes.set(ladderKey, ladderEpisode);
 			this._state.hardStopPending = true;
-
-			// Emit hard stop event to telemetry
-			telemetry.prmHardStop(this._sessionId, match.pattern, 3, newCount);
-
 			return {
 				level: 3,
-				correction,
+				correction: generateCorrection(match, 3),
 				hardStop: true,
+				terminal: false,
 			};
 		}
 	}
@@ -275,6 +413,69 @@ export class EscalationTracker {
 	 */
 	getLadderCounts(): Map<string, number> {
 		return new Map(this._state.patternCounts);
+	}
+
+	/**
+	 * Defensive copy of the per-ladder episode state (issue #2678) — the
+	 * `getLadderCounts` precedent: producers mirror this onto the session so a
+	 * tracker rebuilt mid-session restores the same episode keyspace.
+	 */
+	getEpisodes(): Map<string, PrmEpisodeState> {
+		return new Map(
+			[...this._state.episodes].map(([key, episode]) => [
+				key,
+				{ ...episode },
+			]) as [string, PrmEpisodeState][],
+		);
+	}
+
+	/** Current generation (issue #2678) — advances on every episode-state
+	 * transition; owner-checked resets must match it exactly. */
+	getGeneration(): number {
+		return this._state.generation;
+	}
+
+	/**
+	 * Action-local corrected-success clear (issue #2678): clears ONLY the
+	 * matching ladder (its strike count and its episode record — the next
+	 * detection starts at level 1) and leaves every unrelated ladder touched.
+	 *
+	 * Owner semantics: an ownerless call (in-session corrected success —
+	 * possession of the tracker IS the session binding) proceeds. When an
+	 * `owner` is provided it must match this tracker's exact `sessionId` AND
+	 * the current `generation`, else the clear fails closed (returns false,
+	 * state untouched) — a stale-generation or foreign-session reset can never
+	 * clear current recovery state. Generation advances only on an
+	 * owner-provided, matching clear.
+	 */
+	clearAction(
+		matchOrKey: PatternMatch | string,
+		owner?: { sessionId: string; generation: number },
+	): boolean {
+		if (
+			owner !== undefined &&
+			(owner.sessionId !== this._sessionId ||
+				owner.generation !== this._state.generation)
+		) {
+			return false;
+		}
+		const ladderKey =
+			typeof matchOrKey === 'string'
+				? matchOrKey
+				: resolveLadderKey(matchOrKey);
+		this._state.patternCounts.delete(ladderKey);
+		this._state.episodes.delete(ladderKey);
+		// A successful clear retires the one-shot stop token: the corrected
+		// action's stop was its source, and the producer re-arms the token on
+		// any further qualifying detection anyway. Without this, an
+		// owner-verified corrected success could still be denied once by the
+		// stop it just cleared (issue #2678: "a corrected successful execution
+		// may clear only its matching action circuits").
+		this._state.hardStopPending = false;
+		if (owner !== undefined) {
+			this._state.generation += 1;
+		}
+		return true;
 	}
 
 	/**
