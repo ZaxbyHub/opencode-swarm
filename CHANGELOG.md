@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.176.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.175.0...v7.176.0) (2026-09-11)
+
+
+### Features
+
+* **init:** measure and enforce the startup and first-use latency contract (issue [#2670](https://github.com/ZaxbyHub/opencode-swarm/issues/2670)) ([0db6a35](https://github.com/ZaxbyHub/opencode-swarm/commit/0db6a35eec87f43a6b98cd22c8be9ac2adaf2b2a))
+* **init:** measure and enforce the startup and first-use latency contract (issue [#2670](https://github.com/ZaxbyHub/opencode-swarm/issues/2670)) ([1d7ecd6](https://github.com/ZaxbyHub/opencode-swarm/commit/1d7ecd6dcfde404fc941cd15fec6ed5d4875ca30))
+
 ## [7.175.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.174.0...v7.175.0) (2026-09-10)
 
 
