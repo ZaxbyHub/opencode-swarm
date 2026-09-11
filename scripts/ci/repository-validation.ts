@@ -58,6 +58,7 @@ const REPORT_LOCK_STALE_AFTER_MS = 30_000;
 const REPORT_LOCK_MAX_BYTES = 4_096;
 const REPORT_LOCK_INSPECTION_TIMEOUT_MS = 250;
 const REPORT_LOCK_MAX_PENDING_INSPECTIONS = 64;
+const REPORT_IO_TIMEOUT_MS = 5_000;
 
 export interface RuntimeMetadata {
 	bunVersion: string;
@@ -397,10 +398,23 @@ export function discoverTestFiles(
 	root: string,
 	roots: string[] = ['tests/unit'],
 	optionalRoots: readonly string[] = ['tests/cli'],
+	options: { deadlineMs?: number } = {},
 ): string[] {
 	const discovered: string[] = [];
+	let visitedEntries = 0;
+	const deadlineMs = options.deadlineMs ?? Number.POSITIVE_INFINITY;
+	const checkBudget = (depth: number): void => {
+		if (depth > 64) throw new Error('filesystem discovery exceeded maximum depth');
+		if (visitedEntries >= 50_000) {
+			throw new Error('filesystem discovery exceeded maximum entry count');
+		}
+		if (_internals.now() >= deadlineMs) {
+			throw new Error('filesystem discovery exceeded the suite deadline');
+		}
+	};
 	const optionalRootSet = new Set(optionalRoots.map((relativeRoot) => path.normalize(relativeRoot)));
-	const visit = (directory: string, optionalRoot = false): void => {
+	const visit = (directory: string, optionalRoot = false, depth = 0): void => {
+		checkBudget(depth);
 		let entries: fs.Dirent[];
 		try {
 			entries = fs.readdirSync(directory, { withFileTypes: true });
@@ -414,9 +428,16 @@ export function discoverTestFiles(
 			);
 		}
 		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			visitedEntries += 1;
+			checkBudget(depth);
 			const fullPath = path.join(directory, entry.name);
-			if (entry.isDirectory()) visit(fullPath);
-			else if (entry.isFile() && entry.name.endsWith('.test.ts')) discovered.push(fullPath);
+			if (entry.isDirectory()) visit(fullPath, false, depth + 1);
+			else if (entry.isFile() && entry.name.endsWith('.test.ts')) {
+				if (discovered.length >= 10_000) {
+					throw new Error('filesystem discovery exceeded maximum test-file count');
+				}
+				discovered.push(fullPath);
+			}
 		}
 	};
 	for (const relativeRoot of roots) {
@@ -584,6 +605,7 @@ export function buildSurfaceItems(options: {
 	testFiles?: string[];
 	testTimeoutMs?: number;
 	perItemTimeoutMs?: number;
+	discoveryDeadlineMs?: number;
 }): ValidationItem[] {
 	const root = resolveRoot(options.root);
 	const testTimeoutMs = positiveInteger(options.testTimeoutMs, DEFAULT_TEST_TIMEOUT_MS);
@@ -602,7 +624,9 @@ export function buildSurfaceItems(options: {
 				? options.testFiles
 				: definition.testRoots.flatMap((testRoot) => {
 					if (testRoot === 'tests:top-level') return _internals.discoverTopLevelTestFiles(root);
-					return _internals.discoverTestFiles(root, [testRoot], optionalRoots);
+					return _internals.discoverTestFiles(root, [testRoot], optionalRoots, {
+						deadlineMs: options.discoveryDeadlineMs,
+					});
 				});
 			const uniqueFiles = Array.from(new Set(files.map((file) => normalizePathForIdentity(file)))).sort((a, b) => a.localeCompare(b));
 			if (uniqueFiles.length === 0) {
@@ -876,11 +900,16 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 	let cleanedUp = true;
 	let treeCleanupSucceeded = true;
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let treeCleanup: Promise<boolean> | undefined;
 	const outputStop = new AbortController();
+	const ensureTreeCleanup = (): Promise<boolean> => {
+		if (!treeCleanup) treeCleanup = killProcessTree(child, options.root);
+		return treeCleanup;
+	};
 	const timeout = new Promise<number>((resolve) => {
 		timer = setTimeout(() => {
 			timedOut = true;
-			void killProcessTree(child, options.root).then((succeeded) => {
+			void ensureTreeCleanup().then((succeeded) => {
 				treeCleanupSucceeded = succeeded;
 				outputStop.abort();
 			}).finally(() => resolve(124));
@@ -905,6 +934,11 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 		rawExitCode = timedOut ? 124 : null;
 	} finally {
 		if (timer) clearTimeout(timer);
+		const cleanupSucceeded = await ensureTreeCleanup().catch(() => false);
+		if (timedOut) treeCleanupSucceeded = treeCleanupSucceeded && cleanupSucceeded;
+		// Detached descendants can keep stdout/stderr pipes open after the direct
+		// child exits. Stop bounded readers once the single cleanup owner finishes.
+		outputStop.abort();
 		try {
 			child.kill('SIGKILL');
 		} catch {
@@ -1065,15 +1099,15 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 			} else if (changedTestsOnly && canOptimizeChangedTests) {
 				items = [];
 				if (selectedSurfaces.includes('unit') && changed.unit.length > 0) {
-					items.push(...buildSurfaceItems({ root, surfaces: ['unit'], testFiles: changed.unit, testTimeoutMs, perItemTimeoutMs }));
+					items.push(...buildSurfaceItems({ root, surfaces: ['unit'], testFiles: changed.unit, testTimeoutMs, perItemTimeoutMs, discoveryDeadlineMs: startedClock + suiteTimeoutMs }));
 				}
 				if (selectedSurfaces.includes('integration') && changed.integration.length > 0) {
-					items.push(...buildSurfaceItems({ root, surfaces: ['integration'], testFiles: changed.integration, testTimeoutMs, perItemTimeoutMs }));
+					items.push(...buildSurfaceItems({ root, surfaces: ['integration'], testFiles: changed.integration, testTimeoutMs, perItemTimeoutMs, discoveryDeadlineMs: startedClock + suiteTimeoutMs }));
 				}
 			} else {
 				// Any non-test change conservatively runs the requested matrix. A
 				// source/config/docs change must never be mistaken for a clean no-op.
-				items = buildSurfaceItems({ root, surfaces: selectedSurfaces, testTimeoutMs, perItemTimeoutMs });
+				items = buildSurfaceItems({ root, surfaces: selectedSurfaces, testTimeoutMs, perItemTimeoutMs, discoveryDeadlineMs: startedClock + suiteTimeoutMs });
 			}
 		} catch (error) {
 			items = [{
@@ -1093,7 +1127,7 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 			if (options.testFiles !== undefined && selectedSurfaces.every((surface) => surface === 'unit')) {
 				items = createValidationItems({ root, testFiles: options.testFiles, testTimeoutMs, perItemTimeoutMs });
 			} else {
-				items = buildSurfaceItems({ root, surfaces: selectedSurfaces, testFiles: options.testFiles, testTimeoutMs, perItemTimeoutMs });
+				items = buildSurfaceItems({ root, surfaces: selectedSurfaces, testFiles: options.testFiles, testTimeoutMs, perItemTimeoutMs, discoveryDeadlineMs: startedClock + suiteTimeoutMs });
 			}
 		} catch (error) {
 			items = [discoveryFailureItem(
@@ -1289,6 +1323,29 @@ const pendingReportLockInspections = new Map<
 	string,
 	Promise<ReportLockOwnerInspection>
 >();
+const reportLockAcquireGuards = new Map<string, Promise<void>>();
+
+async function withReportLockAcquireGuard<T>(
+	lockPath: string,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const previous = reportLockAcquireGuards.get(lockPath) ?? Promise.resolve();
+	let release!: () => void;
+	const current = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const queued = previous.then(() => current);
+	reportLockAcquireGuards.set(lockPath, queued);
+	await previous;
+	try {
+		return await operation();
+	} finally {
+		release();
+		if (reportLockAcquireGuards.get(lockPath) === queued) {
+			reportLockAcquireGuards.delete(lockPath);
+		}
+	}
+}
 
 function reportLockInspectionFailClosed(): ReportLockOwnerInspection {
 	return { owner: null, allowAgeFallback: false };
@@ -1410,17 +1467,22 @@ async function readReportLockOwner(lockPath: string): Promise<ReportLockOwnerIns
 	return raceReportLockInspection(inspection);
 }
 
-async function reportLockIsStale(lockPath: string): Promise<boolean> {
+async function reportLockIsStale(lockPath: string): Promise<{ stale: boolean; token: string | null }> {
 	let stats: Awaited<ReturnType<typeof fsp.stat>>;
 	try {
 		stats = await fsp.stat(lockPath);
 	} catch {
-		return false;
+		return { stale: false, token: null };
 	}
 	const inspection = await readReportLockOwner(lockPath);
-	if (inspection.owner) return !isProcessAlive(inspection.owner.pid);
-	if (!inspection.allowAgeFallback) return false;
-	return Date.now() - stats.mtimeMs >= REPORT_LOCK_STALE_AFTER_MS;
+	if (inspection.owner) {
+		return { stale: !isProcessAlive(inspection.owner.pid), token: inspection.owner.token };
+	}
+	if (!inspection.allowAgeFallback) return { stale: false, token: null };
+	return {
+		stale: Date.now() - stats.mtimeMs >= REPORT_LOCK_STALE_AFTER_MS,
+		token: null,
+	};
 }
 
 async function acquireReportLock(lockPath: string): Promise<HeldReportLock> {
@@ -1443,10 +1505,21 @@ async function acquireReportLock(lockPath: string): Promise<HeldReportLock> {
 				? (error as { code?: string }).code
 				: undefined;
 			if (code !== 'EEXIST') throw error;
-			if (await reportLockIsStale(lockPath)) {
+			const recovered = await withReportLockAcquireGuard(lockPath, async () => {
+				const stale = await reportLockIsStale(lockPath);
+				if (!stale.stale) return false;
+				// Re-read immediately under the per-path guard so a replaced lock is
+				// never removed based on an earlier owner inspection.
+				const confirmation = await readReportLockOwner(lockPath);
+				if (stale.token) {
+					if (confirmation.owner?.token !== stale.token) return false;
+				} else if (confirmation.owner || !confirmation.allowAgeFallback) {
+					return false;
+				}
 				await fsp.unlink(lockPath).catch(() => undefined);
-				continue;
-			}
+				return true;
+			});
+			if (recovered) continue;
 			const elapsed = Date.now() - started;
 			if (elapsed >= REPORT_LOCK_WAIT_MS) {
 				throw new Error(`repository validation report lock busy: ${lockPath}`);
@@ -1462,26 +1535,55 @@ async function releaseReportLock(lockPath: string, lock: HeldReportLock): Promis
 	if (inspection.owner?.token === lock.token) await fsp.unlink(lockPath).catch(() => undefined);
 }
 
-export async function writeValidationReport(report: ValidationReport, requestedPath?: string): Promise<string> {
+async function writeValidationReportUnbounded(report: ValidationReport, requestedPath?: string): Promise<string> {
 	const destination = reportPathWithinRoot(report.root, requestedPath);
 	await assertSafeReportPath(report.root, destination);
 	await fsp.mkdir(path.dirname(destination), { recursive: true });
 	await assertSafeReportPath(report.root, destination);
-	const lockPath = `${destination}.lock`;
+	// Resolve the parent once after creation and use that canonical directory for
+	// every subsequent operation. This prevents a later symlink/junction swap of
+	// the user-facing path from redirecting lock, temp, or report I/O elsewhere.
+	const canonicalParent = await fsp.realpath(path.dirname(destination));
+	const canonicalSwarmRoot = await fsp.realpath(path.resolve(report.root, '.swarm'));
+	const canonicalRelative = path.relative(canonicalSwarmRoot, canonicalParent);
+	if (canonicalRelative === '..' || canonicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRelative)) {
+		throw new Error(`repository validation report path escapes ${path.join(report.root, '.swarm')}`);
+	}
+	const safeDestination = path.join(canonicalParent, path.basename(destination));
+	await assertSafeReportPath(report.root, safeDestination);
+	const lockPath = `${safeDestination}.lock`;
 	let lock: HeldReportLock | undefined;
 	let temporaryPath: string | undefined;
 	try {
 		lock = await acquireReportLock(lockPath);
-		temporaryPath = `${destination}.${process.pid}.${randomUUID()}.tmp`;
-		await assertSafeReportPath(report.root, destination);
-		const payload = `${JSON.stringify({ ...report, reportPath: destination }, null, 2)}\n`;
+		temporaryPath = `${safeDestination}.${process.pid}.${randomUUID()}.tmp`;
+		await assertSafeReportPath(report.root, safeDestination);
+		const payload = `${JSON.stringify({ ...report, reportPath: safeDestination }, null, 2)}\n`;
 		await fsp.writeFile(temporaryPath, payload, { encoding: 'utf8', flag: 'wx' });
-		await fsp.rename(temporaryPath, destination);
-		return destination;
+		await fsp.rename(temporaryPath, safeDestination);
+		return safeDestination;
 	} finally {
 		if (lock) await releaseReportLock(lockPath, lock);
 		if (temporaryPath) await fsp.unlink(temporaryPath).catch(() => undefined);
 	}
+}
+
+/** Keep report publication bounded even when a filesystem operation stalls. */
+export function writeValidationReport(report: ValidationReport, requestedPath?: string): Promise<string> {
+	const operation = writeValidationReportUnbounded(report, requestedPath);
+	// A timed-out filesystem promise cannot be cancelled portably; consume any
+	// eventual rejection while the bounded caller fails closed immediately.
+	void operation.catch(() => undefined);
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_, reject) => {
+		timer = setTimeout(
+			() => reject(new Error(`repository validation report publication exceeded ${REPORT_IO_TIMEOUT_MS}ms`)),
+			REPORT_IO_TIMEOUT_MS,
+		);
+	});
+	return Promise.race([operation, deadline]).finally(() => {
+		if (timer) clearTimeout(timer);
+	});
 }
 
 export const writeValidationReportAtomic = writeValidationReport;
