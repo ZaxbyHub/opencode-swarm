@@ -903,7 +903,7 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 	let treeCleanup: Promise<boolean> | undefined;
 	const outputStop = new AbortController();
 	const ensureTreeCleanup = (): Promise<boolean> => {
-		if (!treeCleanup) treeCleanup = killProcessTree(child, options.root);
+		if (!treeCleanup) treeCleanup = _internals.killProcessTree(child, options.root);
 		return treeCleanup;
 	};
 	const timeout = new Promise<number>((resolve) => {
@@ -915,18 +915,20 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 			}).finally(() => resolve(124));
 		}, options.perItemTimeoutMs);
 	});
-	const stdoutPromise = readBounded(
+	const stdoutPromise = readBoundedWithStatus(
 		child.stdout,
 		options.maxOutputBytes,
 		options.perItemTimeoutMs + PROCESS_KILLER_TIMEOUT_MS,
 		outputStop.signal,
 	);
-	const stderrPromise = readBounded(
+	const stderrPromise = readBoundedWithStatus(
 		child.stderr,
 		options.maxOutputBytes,
 		options.perItemTimeoutMs + PROCESS_KILLER_TIMEOUT_MS,
 		outputStop.signal,
 	);
+	let stdoutResult: Awaited<typeof stdoutPromise> | undefined;
+	let stderrResult: Awaited<typeof stderrPromise> | undefined;
 	let rawExitCode: number | null = null;
 	try {
 		rawExitCode = await Promise.race([child.exited, timeout]);
@@ -934,8 +936,20 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 		rawExitCode = timedOut ? 124 : null;
 	} finally {
 		if (timer) clearTimeout(timer);
-		const cleanupSucceeded = await ensureTreeCleanup().catch(() => false);
-		if (timedOut) treeCleanupSucceeded = treeCleanupSucceeded && cleanupSucceeded;
+		if (timedOut) {
+			const cleanupSucceeded = await ensureTreeCleanup().catch(() => false);
+			treeCleanupSucceeded = treeCleanupSucceeded && cleanupSucceeded;
+		} else {
+			// A direct child can exit successfully while a detached descendant keeps
+			// its inherited stdout/stderr handles open. Wait for the bounded readers
+			// before deciding whether tree cleanup is required; if either reader
+			// reaches its deadline, cleanup failure must remain visible in the row.
+			[stdoutResult, stderrResult] = await Promise.all([stdoutPromise, stderrPromise]);
+			if (!stdoutResult.complete || !stderrResult.complete) {
+				const cleanupSucceeded = await ensureTreeCleanup().catch(() => false);
+				treeCleanupSucceeded = treeCleanupSucceeded && cleanupSucceeded;
+			}
+		}
 		// Detached descendants can keep stdout/stderr pipes open after the direct
 		// child exits. Stop bounded readers once the single cleanup owner finishes.
 		outputStop.abort();
@@ -945,13 +959,17 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 			if (timedOut) cleanedUp = false;
 		}
 	}
-	if (timedOut && !treeCleanupSucceeded) cleanedUp = false;
-	const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+	if (!stdoutResult || !stderrResult) {
+		[stdoutResult, stderrResult] = await Promise.all([stdoutPromise, stderrPromise]);
+	}
+	if (!treeCleanupSucceeded) cleanedUp = false;
+	const stdout = stdoutResult.value;
+	const stderr = stderrResult.value;
 	const signal = (child as unknown as { signalCode?: string | null }).signalCode ?? null;
 	const durationMs = Date.now() - started;
 	const abnormalExit = signal !== null || rawExitCode === null;
 	return {
-		status: timedOut ? 'timed_out' : abnormalExit ? 'crashed' : rawExitCode === 0 ? 'passed' : 'failed',
+		status: timedOut ? 'timed_out' : !treeCleanupSucceeded ? 'crashed' : abnormalExit ? 'crashed' : rawExitCode === 0 ? 'passed' : 'failed',
 		exitCode: timedOut ? 124 : rawExitCode,
 		signal: timedOut ? signal ?? 'SIGKILL' : signal,
 		stdout: redactAndBound(stdout, options.maxOutputBytes),
@@ -1485,6 +1503,42 @@ async function reportLockIsStale(lockPath: string): Promise<{ stale: boolean; to
 	};
 }
 
+/**
+ * Reclaim a stale lock with an atomic same-directory rename. A check-then-
+ * unlink sequence can delete a replacement lock owned by another process;
+ * rename transfers the exact inode being inspected, so a concurrent writer
+ * either wins the rename or keeps its live lock untouched.
+ */
+async function reclaimStaleReportLock(lockPath: string, expectedToken: string): Promise<boolean> {
+	const quarantinePath = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+	try {
+		await fsp.rename(lockPath, quarantinePath);
+	} catch (error) {
+		const code = typeof error === 'object' && error !== null && 'code' in error
+			? (error as { code?: string }).code
+			: undefined;
+		// ENOENT means another contender won the atomic rename. Any other error
+		// is uncertain filesystem state and must fail closed.
+		if (code !== 'ENOENT') return false;
+		return false;
+	}
+	try {
+		const confirmation = await readReportLockOwner(quarantinePath);
+		if (confirmation.owner?.token !== expectedToken) {
+			// Never remove or restore an inode whose token differs from the stale
+			// inspection. Leaving the quarantine inode preserves the evidence and
+			// avoids replacing a concurrent writer's live lock on POSIX.
+			return false;
+		}
+		await fsp.unlink(quarantinePath);
+		return true;
+	} catch {
+		// Preserve uncertain state for a later bounded retry rather than stealing
+		// or deleting a lock whose ownership could not be proved.
+		return false;
+	}
+}
+
 async function acquireReportLock(lockPath: string): Promise<HeldReportLock> {
 	const started = Date.now();
 	while (true) {
@@ -1507,17 +1561,10 @@ async function acquireReportLock(lockPath: string): Promise<HeldReportLock> {
 			if (code !== 'EEXIST') throw error;
 			const recovered = await withReportLockAcquireGuard(lockPath, async () => {
 				const stale = await reportLockIsStale(lockPath);
-				if (!stale.stale) return false;
-				// Re-read immediately under the per-path guard so a replaced lock is
-				// never removed based on an earlier owner inspection.
-				const confirmation = await readReportLockOwner(lockPath);
-				if (stale.token) {
-					if (confirmation.owner?.token !== stale.token) return false;
-				} else if (confirmation.owner || !confirmation.allowAgeFallback) {
-					return false;
-				}
-				await fsp.unlink(lockPath).catch(() => undefined);
-				return true;
+				// Malformed/age-only locks are intentionally not reclaimable: without
+				// an owner token there is no safe cross-process ownership proof.
+				if (!stale.stale || !stale.token) return false;
+				return reclaimStaleReportLock(lockPath, stale.token);
 			});
 			if (recovered) continue;
 			const elapsed = Date.now() - started;
@@ -1535,31 +1582,55 @@ async function releaseReportLock(lockPath: string, lock: HeldReportLock): Promis
 	if (inspection.owner?.token === lock.token) await fsp.unlink(lockPath).catch(() => undefined);
 }
 
-async function writeValidationReportUnbounded(report: ValidationReport, requestedPath?: string): Promise<string> {
+interface ReportPublicationState { cancelled: boolean; deadlineAt: number; }
+
+function assertPublicationActive(state: ReportPublicationState): void {
+	if (state.cancelled || Date.now() >= state.deadlineAt) {
+		state.cancelled = true;
+		throw new Error(`repository validation report publication exceeded ${REPORT_IO_TIMEOUT_MS}ms`);
+	}
+}
+
+async function writeValidationReportUnbounded(
+	report: ValidationReport,
+	requestedPath: string | undefined,
+	state: ReportPublicationState,
+): Promise<string> {
+	assertPublicationActive(state);
 	const destination = reportPathWithinRoot(report.root, requestedPath);
 	await assertSafeReportPath(report.root, destination);
+	assertPublicationActive(state);
 	await fsp.mkdir(path.dirname(destination), { recursive: true });
 	await assertSafeReportPath(report.root, destination);
+	assertPublicationActive(state);
 	// Resolve the parent once after creation and use that canonical directory for
 	// every subsequent operation. This prevents a later symlink/junction swap of
 	// the user-facing path from redirecting lock, temp, or report I/O elsewhere.
 	const canonicalParent = await fsp.realpath(path.dirname(destination));
 	const canonicalSwarmRoot = await fsp.realpath(path.resolve(report.root, '.swarm'));
+	assertPublicationActive(state);
 	const canonicalRelative = path.relative(canonicalSwarmRoot, canonicalParent);
 	if (canonicalRelative === '..' || canonicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRelative)) {
 		throw new Error(`repository validation report path escapes ${path.join(report.root, '.swarm')}`);
 	}
 	const safeDestination = path.join(canonicalParent, path.basename(destination));
-	await assertSafeReportPath(report.root, safeDestination);
+	assertPublicationActive(state);
 	const lockPath = `${safeDestination}.lock`;
 	let lock: HeldReportLock | undefined;
 	let temporaryPath: string | undefined;
 	try {
 		lock = await acquireReportLock(lockPath);
+		assertPublicationActive(state);
 		temporaryPath = `${safeDestination}.${process.pid}.${randomUUID()}.tmp`;
-		await assertSafeReportPath(report.root, safeDestination);
+		assertPublicationActive(state);
 		const payload = `${JSON.stringify({ ...report, reportPath: safeDestination }, null, 2)}\n`;
 		await fsp.writeFile(temporaryPath, payload, { encoding: 'utf8', flag: 'wx' });
+		assertPublicationActive(state);
+		const ownership = await readReportLockOwner(lockPath);
+		if (ownership.owner?.token !== lock.token) {
+			throw new Error('repository validation report lock ownership changed before commit');
+		}
+		assertPublicationActive(state);
 		await fsp.rename(temporaryPath, safeDestination);
 		return safeDestination;
 	} finally {
@@ -1570,14 +1641,21 @@ async function writeValidationReportUnbounded(report: ValidationReport, requeste
 
 /** Keep report publication bounded even when a filesystem operation stalls. */
 export function writeValidationReport(report: ValidationReport, requestedPath?: string): Promise<string> {
-	const operation = writeValidationReportUnbounded(report, requestedPath);
+	const state: ReportPublicationState = {
+		cancelled: false,
+		deadlineAt: Date.now() + REPORT_IO_TIMEOUT_MS,
+	};
+	const operation = writeValidationReportUnbounded(report, requestedPath, state);
 	// A timed-out filesystem promise cannot be cancelled portably; consume any
 	// eventual rejection while the bounded caller fails closed immediately.
 	void operation.catch(() => undefined);
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const deadline = new Promise<never>((_, reject) => {
 		timer = setTimeout(
-			() => reject(new Error(`repository validation report publication exceeded ${REPORT_IO_TIMEOUT_MS}ms`)),
+			() => {
+				state.cancelled = true;
+				reject(new Error(`repository validation report publication exceeded ${REPORT_IO_TIMEOUT_MS}ms`));
+			},
 			REPORT_IO_TIMEOUT_MS,
 		);
 	});

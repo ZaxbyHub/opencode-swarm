@@ -48,6 +48,9 @@ describe('repository-validation review hardening — issue #2675', () => {
 	test('report publication and containment are bounded and canonicalized', () => {
 		expect(SOURCE).toContain('REPORT_IO_TIMEOUT_MS = 5_000');
 		expect(SOURCE).toContain('return Promise.race([operation, deadline])');
+		expect(SOURCE).toContain('assertPublicationActive(state)');
+		expect(SOURCE).toContain('lock ownership changed before commit');
+		expect(SOURCE).toContain('state.cancelled = true');
 		expect(SOURCE).toContain('const canonicalParent = await fsp.realpath');
 		expect(SOURCE).toContain(
 			'const safeDestination = path.join(canonicalParent, path.basename(destination))',
@@ -61,7 +64,8 @@ describe('repository-validation review hardening — issue #2675', () => {
 	test('stale-lock recovery is serialized per lock path and re-confirmed', () => {
 		expect(SOURCE).toContain('withReportLockAcquireGuard');
 		expect(SOURCE).toContain(
-			'const confirmation = await readReportLockOwner(lockPath)',
+			'const confirmation = await readReportLockOwner(quarantinePath)',
 		);
+		expect(SOURCE).toContain('await fsp.rename(lockPath, quarantinePath)');
 	});
 });
