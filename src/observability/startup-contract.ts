@@ -348,6 +348,39 @@ export function withStartupFirstUseTracking<Args extends unknown[], Result>(
 }
 
 /**
+ * Tool-execute specialization of the first-use observation with a FIXED
+ * two-parameter signature: the plugin's ToolDefinition.execute contract is
+ * `(args, ctx) => ...`, and the registration-convention tests assert
+ * `execute.length >= 2` on tool definitions. The wrapper still returns the
+ * wrapped execute's own result untouched and records the interval when the
+ * invocation settles (success or rejection).
+ */
+export function withStartupFirstToolTracking<Args, Result>(
+	name: string,
+	execute: (args: Args, ctx: unknown) => Result,
+): (args: Args, ctx: unknown) => Result {
+	const tracked = (args: Args, ctx: unknown): Result => {
+		const result = execute(args, ctx);
+		const settle = (): void => noteFirstUseSettled('first_tool', name);
+		if (isPromiseLike(result)) {
+			void Promise.resolve(result).then(settle, settle);
+		} else {
+			settle();
+		}
+		return result;
+	};
+	try {
+		Object.defineProperty(tracked, 'name', {
+			value: execute.name || 'trackedFirstToolExecute',
+			configurable: true,
+		});
+	} catch {
+		// Name preservation is cosmetic; never fail the wrap.
+	}
+	return tracked;
+}
+
+/**
  * Count a startup-window advisory (readiness warning). Called from
  * warning-buffer's addDeferredWarning; the window opens at server entry
  * and closes at queue settle (never re-opens), so late-session advisories

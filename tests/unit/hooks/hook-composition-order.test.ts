@@ -47,7 +47,7 @@ function between(start: string, end: string): string {
 }
 
 const messagesChain = between(
-	"'experimental.chat.messages.transform': composeHandlers(",
+	"'experimental.chat.messages.transform': withStartupFirstUseTracking(",
 	"'experimental.text.complete'",
 );
 const systemChain = between(

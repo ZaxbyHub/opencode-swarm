@@ -104,7 +104,7 @@ describe('AC10 wiring - capture is registered through the real hook chain', () =
 			'utf-8',
 		);
 		const chainStart = src.indexOf(
-			"'experimental.chat.messages.transform': composeHandlers(",
+			"'experimental.chat.messages.transform': withStartupFirstUseTracking(",
 		);
 		expect(chainStart).toBeGreaterThanOrEqual(0);
 		// The argument array of THIS composeHandlers call ends at the first
