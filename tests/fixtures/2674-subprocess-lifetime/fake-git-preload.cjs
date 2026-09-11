@@ -68,10 +68,12 @@ function runFakeGit() {
 		case 'normal': {
 			process.stdout.write(outputForSub());
 			process.exit(0);
+			break;
 		}
 		case 'nonzero': {
 			process.stderr.write('fake-git: simulated failure\n');
 			process.exit(3);
+			break;
 		}
 		case 'hang': {
 			process.stdout.write('fake-git: starting (will hang)\n');
@@ -99,6 +101,7 @@ function runFakeGit() {
 				process.stdout.write(chunk);
 			}
 			process.exit(0);
+			break;
 		}
 		case 'fork': {
 			process.stdout.write('fake-git: forking a stdio-holding grandchild\n');
