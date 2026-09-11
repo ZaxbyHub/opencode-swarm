@@ -243,6 +243,14 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget | null {
 	if (tokens.length === 0) return null;
 
 	const name = tokens[0].toLowerCase();
+	// `rmdir /s [/q] <path>` is the Windows spelling of recursive directory
+	// deletion.  The destructive-command guard owns its safety decision for
+	// that form (including allowing trusted `node_modules`/`dist` targets), so
+	// do not also classify the command as an ordinary POSIX write.  Plain
+	// `rmdir <path>` remains a POSIX write and is handled below.
+	if (name === 'rmdir' && tokens.some((token) => /^\/(?:s|q)$/i.test(token))) {
+		return null;
+	}
 	if (BUILTIN_WRITE_COMMANDS.has(name)) {
 		// Last non-flag argument is the destination
 		for (let i = tokens.length - 1; i >= 1; i--) {
@@ -612,6 +620,16 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	if (!BUILTIN_WRITE_COMMANDS.has(lowerName)) return results;
 
 	const suffixWords = getSuffixWords(cmd);
+	// `rmdir /s [/q] <path>` is a cmd.exe destructive form.  Let the
+	// destructive-command guard evaluate its target containment instead of
+	// feeding it through the POSIX write-authority gate used by `bash` calls.
+	// A normal POSIX `rmdir <path>` is still reported as a write.
+	if (
+		lowerName === 'rmdir' &&
+		suffixWords.some((word) => /^\/(?:s|q)$/i.test(word))
+	) {
+		return results;
+	}
 
 	if (lowerName === 'truncate') {
 		// find first word that doesn't start with - and isn't a pure numeric size

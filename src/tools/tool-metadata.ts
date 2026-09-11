@@ -853,7 +853,7 @@ export const TOOL_METADATA = {
 	},
 	knowledge_receipt_status: {
 		description: 'receipt status',
-		agents: [],
+		agents: ['architect'],
 	},
 	knowledge_archive: {
 		description:
