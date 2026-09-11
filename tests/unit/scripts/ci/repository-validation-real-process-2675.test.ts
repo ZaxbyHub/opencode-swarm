@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
 import {
 	discoverTestFiles,
 	validateRepository,
 } from '../../../../scripts/ci/repository-validation';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '../../../..');
 const FIXTURE_ROOT = path.join(
@@ -120,9 +120,7 @@ describe('repository-validation authority real-process fixtures — issue #2675'
 	);
 
 	test('retains a missing terminal when a discovered file vanishes before execution', async () => {
-		const fixtureRoot = mkdtempSync(
-			path.join(tmpdir(), 'repository-validation-missing-'),
-		);
+		const fixtureRoot = canonicalMkdtemp('repository-validation-missing-');
 		const testsRoot = path.join(fixtureRoot, 'tests', 'unit');
 		const missingFixture = path.join(
 			testsRoot,

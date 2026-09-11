@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { withFrozenClock } from '../../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '../../../..');
 const LOCAL_UNIT_ENTRY = path.join(
@@ -95,9 +95,7 @@ describe('issue #2675 compatibility entry point', () => {
 	});
 
 	test('positional file arguments preserve ordering, retry budget, and exit-code semantics', async () => {
-		const fixtureDirectory = mkdtempSync(
-			path.join(tmpdir(), 'repository-validation-compat-'),
-		);
+		const fixtureDirectory = canonicalMkdtemp('repository-validation-compat-');
 		const orderLog = path.join(fixtureDirectory, 'order.log');
 		const retryMarker = path.join(fixtureDirectory, 'retry.marker');
 		const passing = createFixture(
@@ -174,9 +172,7 @@ describe('issue #2675 package and CLI wiring', () => {
 
 describe('issue #2675 report writer safety', () => {
 	test('writes a complete JSON report atomically under .swarm and rejects escape paths', async () => {
-		const root = await fsp.mkdtemp(
-			path.join(tmpdir(), 'repository-validation-report-'),
-		);
+		const root = canonicalMkdtemp('repository-validation-report-');
 		try {
 			const { writeValidationReport } = await import(
 				'../../../../scripts/ci/repository-validation'

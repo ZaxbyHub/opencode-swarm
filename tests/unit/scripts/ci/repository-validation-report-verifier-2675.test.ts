@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { verifyReports } from '../../../../scripts/ci/verify-repository-validation-reports';
 import { withFrozenClock } from '../../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 
 const FIXED_ISO_NOW = '2026-01-01T00:00:00.000Z';
 
@@ -125,7 +125,7 @@ function runnerReport(
 
 describe('issue #2675 report verifier', () => {
 	test('validates flat per-file reports against the discovered expected set', () => {
-		const root = mkdtempSync(path.join(tmpdir(), 'validation-verifier-'));
+		const root = canonicalMkdtemp('validation-verifier-');
 		try {
 			const first = path.join(root, 'first.test.ts');
 			const second = path.join(root, 'second.test.ts');
@@ -153,7 +153,7 @@ describe('issue #2675 report verifier', () => {
 	});
 
 	test('rejects a report whose summary or result identities are inconsistent', () => {
-		const root = mkdtempSync(path.join(tmpdir(), 'validation-verifier-'));
+		const root = canonicalMkdtemp('validation-verifier-');
 		try {
 			const reports = path.join(root, 'reports');
 			mkdirSync(reports);
@@ -174,7 +174,7 @@ describe('issue #2675 report verifier', () => {
 	});
 
 	test('rejects missing expected files and duplicate result identities', () => {
-		const root = mkdtempSync(path.join(tmpdir(), 'validation-verifier-'));
+		const root = canonicalMkdtemp('validation-verifier-');
 		try {
 			const reports = path.join(root, 'reports');
 			mkdirSync(reports);
@@ -291,7 +291,7 @@ describe('issue #2675 report verifier', () => {
 			},
 		],
 	])('rejects invalid %s or non-passing reports', (_label, mutate) => {
-		const root = mkdtempSync(path.join(tmpdir(), 'validation-verifier-'));
+		const root = canonicalMkdtemp('validation-verifier-');
 		try {
 			const reports = path.join(root, 'reports');
 			mkdirSync(reports);
@@ -312,7 +312,7 @@ describe('issue #2675 report verifier', () => {
 	});
 
 	test('rejects a missing matrix artifact', () => {
-		const root = mkdtempSync(path.join(tmpdir(), 'validation-verifier-'));
+		const root = canonicalMkdtemp('validation-verifier-');
 		try {
 			const reports = path.join(root, 'reports');
 			mkdirSync(reports);
@@ -343,7 +343,7 @@ describe('issue #2675 report verifier', () => {
 	});
 
 	test('reconstructs the expected OS-by-shard artifact set', () => {
-		const root = mkdtempSync(path.join(tmpdir(), 'validation-verifier-'));
+		const root = canonicalMkdtemp('validation-verifier-');
 		try {
 			const reports = path.join(root, 'reports');
 			mkdirSync(reports);
@@ -383,7 +383,7 @@ describe('issue #2675 report verifier', () => {
 	});
 
 	test('allows repeated files across OSes while honoring a Windows-specific exclusion', () => {
-		const root = mkdtempSync(path.join(tmpdir(), 'validation-verifier-'));
+		const root = canonicalMkdtemp('validation-verifier-');
 		try {
 			const reports = path.join(root, 'reports');
 			mkdirSync(reports);
@@ -449,7 +449,7 @@ describe('issue #2675 report verifier', () => {
 	});
 
 	test('rejects a shard manifest that omits an item from the canonical inventory', () => {
-		const root = mkdtempSync(path.join(tmpdir(), 'validation-verifier-'));
+		const root = canonicalMkdtemp('validation-verifier-');
 		try {
 			const reports = path.join(root, 'reports');
 			mkdirSync(reports);
