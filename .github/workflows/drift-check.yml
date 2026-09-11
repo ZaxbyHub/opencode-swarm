@@ -15,6 +15,10 @@ on:
     branches: ["**"]
   push:
     branches: [main]
+  # Issue #2677: drift is observable for merge-queue candidates before an
+  # operator promotes it into the active required-context ruleset.
+  merge_group:
+    types: [checks_requested]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}

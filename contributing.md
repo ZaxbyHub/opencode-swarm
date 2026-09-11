@@ -265,23 +265,40 @@ Choose the type that matches the **primary change** in the PR:
 
 ## What CI checks must pass before merging
 
-All of these must be green. They run automatically on every PR.
+The protected `main` ruleset currently requires the exact contexts recorded in
+the [machine-readable required-check contract](scripts/required-check-contract.json)
+and its [fresh external evidence](docs/ci/required-check-evidence.json). That
+contract is the live required set; it is not a claim that every workflow job or
+matrix cell runs on every pull request.
 
-| Check | What it validates |
+| Live required context(s) | What it validates |
 |---|---|
 | `quality` | TypeScript compiles (`tsc --noEmit`), Biome lint + format clean |
-| `unit` (Ubuntu, macOS, Windows) | Unit tests pass on all platforms |
-| `unit-passed` | Aggregate of every `unit` matrix cell (fails fast in the merge queue when any cell fails, instead of leaving the queue to time out on skipped downstream checks) |
-| `coverage` (merge queue only) | Code coverage ≥ 65.00% over the merged union of the 6-way `coverage-shard` matrix (issue #2341; fail-closed if any shard report is missing) |
+| `unit (ubuntu-latest, 1)` through `unit (ubuntu-latest, 4)` | Required Ubuntu unit-test shards |
+| `unit-passed` | Aggregate of the `unit` matrix (additional platform cells are event- or path-scoped) |
+| `security` | Security and adversarial tests pass |
 | `package-check` | Package metadata and publishable artifact checks pass |
 | `integration` (Ubuntu) | Integration tests pass (circuit breakers, gate workflows, state machines) |
-| `security` (Ubuntu) | Security and adversarial tests pass |
+| `smoke (ubuntu-latest)`, `smoke (macos-latest)`, `smoke (windows-latest)` | Package builds successfully and smoke tests pass on each required platform |
 | `php-validation` | PHP language/build fixtures and validation tests pass |
 | `rust-sandbox-runner` | Rust sandbox runner builds and validates |
-| `smoke` (Ubuntu, macOS, Windows) | Package builds successfully and smoke tests pass on all platforms |
-| `pr-standards` | PR title is a valid conventional commit |
-| `check-duplicates` | PR title does not match an already-open PR |
-| `quality` → pending release fragment | Every user-visible PR (`src/`, `package.json`, workflows, shipped skills) adds a `docs/releases/pending/<slug>.md` fragment — release-please aggregates fragments into the release notes, so a missing fragment means the PR ships with no notes. Escape hatch: `FRAGMENT_CHECK_ENFORCE=0` (soft-warn). Release-please branches are exempt |
+| `check-title` and `pr-standards` | PR title and standards checks pass |
+| `coverage` (merge queue only) | Code coverage ≥ 65.00% over the merged union of the 6-way `coverage-shard` matrix (issue #2341; fail-closed if any shard report is missing) |
+
+The `unit` and `smoke` rows expand into event- and path-scoped matrix cells;
+`coverage` is merge-group scoped. `release-owner-guard` is a dependency helper
+for the required `quality` context, not a standalone required context.
+`check-duplicates` is a non-required helper. The local `drift` workflow now
+declares `pull_request`, `push` to `main`, and `merge_group: checks_requested`,
+but `drift` remains an intended context until the live ruleset is promoted;
+the checker reports that pre-promotion divergence as a visible nonblocking
+notice. See [required-check contract details](docs/ci-required-check-contract.md).
+
+Every user-visible PR (`src/`, `package.json`, workflows, shipped skills) still
+adds a `docs/releases/pending/<slug>.md` fragment — release-please aggregates
+fragments into the release notes, so a missing fragment means the PR ships with
+no notes. Escape hatch: `FRAGMENT_CHECK_ENFORCE=0` (soft-warn). Release-please
+branches are exempt.
 
 **Do not ask for a merge if any check is red.** Fix the issue first.
 

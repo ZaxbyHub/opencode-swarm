@@ -60,6 +60,9 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 /** Environment-setup commands in the quality job that are not quality gates. */
 const NON_QUALITY_SETUP_COMMANDS = new Set(['bun install --frozen-lockfile']);
 
+/** YAML block-scalar indicators are syntax, not shell commands. */
+const YAML_BLOCK_SCALAR_MARKER = /^[|>][+-]?$/;
+
 /** Extract the `run:` commands of the CI `quality` job. */
 function qualityJobCommands(): string[] {
 	const workflow = readFileSync(CI_WORKFLOW_PATH, 'utf-8');
@@ -84,6 +87,7 @@ function qualityJobCommands(): string[] {
 		// Normalize the `chmod +x X && bash X` wrapper to the bare script call.
 		command = command.replace(/^chmod \+x \S+ && /, '');
 		if (NON_QUALITY_SETUP_COMMANDS.has(command)) continue;
+		if (YAML_BLOCK_SCALAR_MARKER.test(command)) continue;
 		commands.push(command);
 	}
 	return commands;

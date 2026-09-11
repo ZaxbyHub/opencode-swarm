@@ -31,6 +31,9 @@
  *                         #1899). Env-gated (SWARM_DEP_FRESHNESS_CHECK) and
  *                         fail-open: emits advisory `notice` findings only, never
  *                         blocks, so a stale lockfile can't silently age again.
+ *  11. required-check-contract — exact ruleset-required contexts and workflow
+ *                         event/job ownership against bounded captured evidence
+ *                         (issue #2677). Pre-promotion intended checks are notices.
  *
  * Output:
  *   - GitHub Actions annotations (`::warning file=...::message`) on stdout.
@@ -55,6 +58,7 @@ import { collectShellAuditUsageErrors } from './check-shell-audit-usage';
 import { collectTrajectoryStoreUsageErrors } from './check-trajectory-store-usage';
 import { detectDocsClaimDrift } from './drift-check-docs-claims';
 import { detectGatesConfigDrift } from './drift-check-gates-docs';
+import { collectRequiredCheckContract } from './check-required-check-contract';
 import { checkSkillAssertions, formatBrokenAssertions } from './check-skill-assertions';
 import {
 	CONFIG_DOCS_MARKER_BEGIN,
@@ -1467,6 +1471,19 @@ function firstDifferingLine(a: string, b: string): number {
 	return 0;
 }
 
+/** Adapter for the focused external required-check contract gate (#2677). */
+export function detectRequiredCheckContractDrift(
+	root: string = REPO_ROOT,
+): DriftFinding[] {
+	const result = collectRequiredCheckContract(root);
+	return result.findings.map((finding) => ({
+		category: 'required-check-contract',
+		severity: finding.severity,
+		file: finding.file ?? 'scripts/required-check-contract.json',
+		message: `[${finding.code}] ${finding.message}`,
+	}));
+}
+
 // ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
@@ -1492,6 +1509,7 @@ export const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['config-schema', detectConfigSchemaDrift],
 	['config-docs', detectConfigDocsKeysDrift],
 	['gates-docs', detectGatesConfigDrift],
+	['required-check-contract', detectRequiredCheckContractDrift],
 ];
 
 /**

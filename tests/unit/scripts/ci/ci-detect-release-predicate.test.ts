@@ -15,7 +15,7 @@ const CI_YML = fileURLToPath(
 );
 
 const EXPECTED_PREDICATE =
-	"git log -1 --format='%s' | grep -qE '^Merge pull request #[0-9]+ from [^/ ]+/release-please--|^chore\\(main\\): release '";
+	"git log -1 --format='%s' | grep -qE '^Merge pull request #[0-9]+ from ZaxbyHub/release-please--|^chore\\(main\\): release '";
 
 function readPredicate(): { line: string; regex: RegExp } {
 	const source = readFileSync(CI_YML, 'utf8');
@@ -36,6 +36,23 @@ describe('ci.yml detect-release predicate (merge-group required-check gate)', ()
 		expect(line).not.toContain("--format='%B'");
 	});
 
+	test('pull-request branch fast path requires the trusted automation actor', () => {
+		const source = readFileSync(CI_YML, 'utf8');
+		const line = source
+			.split('\n')
+			.find(
+				(candidate) =>
+					candidate.includes('BRANCH') &&
+					candidate.includes('release-please--*'),
+			);
+		if (!line)
+			throw new Error(
+				'pull-request release branch predicate not found in ci.yml',
+			);
+		expect(line).toContain('"$EVENT" == "pull_request"');
+		expect(line).toContain('"$ACTOR" == "github-actions[bot]"');
+	});
+
 	const positive = [
 		'Merge pull request #2544 from ZaxbyHub/release-please--branches--main--components--opencode-swarm',
 		'chore(main): release 7.164.6',
@@ -45,6 +62,7 @@ describe('ci.yml detect-release predicate (merge-group required-check gate)', ()
 		'Revert "chore(main): release 7.164.6"',
 		'feat(release): add chore(main): release helper',
 		'Merge pull request #1 from evil owner/release-please--x',
+		'Merge pull request #1 from evil/release-please--x',
 		'docs: mention release-please--branches--main in CONTRIBUTING',
 	];
 
