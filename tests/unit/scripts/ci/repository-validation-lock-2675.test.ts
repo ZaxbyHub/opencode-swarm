@@ -71,6 +71,13 @@ async function withTempRoot(
 	}
 }
 
+async function canonicalReportPath(destination: string): Promise<string> {
+	return path.join(
+		await fsp.realpath(path.dirname(destination)),
+		path.basename(destination),
+	);
+}
+
 describe('repository validation report lock — issue #2675', () => {
 	test.skipIf(process.platform === 'win32')(
 		'rejects a .swarm symlink before writing outside the root (F2; Windows junction creation requires elevated setup)',
@@ -112,7 +119,7 @@ describe('repository validation report lock — issue #2675', () => {
 			const saved = JSON.parse(
 				await fsp.readFile(destination, 'utf8'),
 			) as ValidationReport & { reportPath: string };
-			expect(saved.reportPath).toBe(destination);
+			expect(saved.reportPath).toBe(await canonicalReportPath(destination));
 			expect(
 				await fsp.stat(`${destination}.lock`).catch(() => null),
 			).toBeNull();
@@ -332,11 +339,12 @@ describe('repository validation report lock — issue #2675', () => {
 				writeValidationReport(report(root, 1), destination),
 				writeValidationReport(report(root, 2), destination),
 			]);
-			expect(paths).toEqual([destination, destination]);
+			const canonicalDestination = await canonicalReportPath(destination);
+			expect(paths).toEqual([canonicalDestination, canonicalDestination]);
 			const saved = JSON.parse(
 				await fsp.readFile(destination, 'utf8'),
 			) as ValidationReport & { reportPath: string };
-			expect(saved.reportPath).toBe(destination);
+			expect(saved.reportPath).toBe(canonicalDestination);
 			expect([1, 2]).toContain(saved.durationMs);
 			expect(
 				await fsp.stat(`${destination}.lock`).catch(() => null),
