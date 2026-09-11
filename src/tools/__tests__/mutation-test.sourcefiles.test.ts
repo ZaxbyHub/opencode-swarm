@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 // Spread real engine exports so named imports the tool relies on
@@ -43,6 +43,19 @@ let tmpDir: string;
 
 beforeEach(() => {
 	tmpDir = mkdtempSync(path.join(os.tmpdir(), 'mutation-sourcefiles-'));
+	mkdirSync(path.join(tmpDir, 'test'), { recursive: true });
+	for (const name of [
+		'foo.test.ts',
+		'shared.test.ts',
+		'existent.test.ts',
+		'bar.test.ts',
+		'test.test.ts',
+	]) {
+		writeFileSync(
+			path.join(tmpDir, 'test', name),
+			"test('fixture', () => {});\n",
+		);
+	}
 
 	// Reset mock call history between tests
 	mockExecuteMutationSuiteFn.mockReset();
@@ -171,7 +184,7 @@ describe('mutation_test sourceFiles wiring', () => {
 	});
 
 	describe('missing file handling', () => {
-		test('3. when some files missing, readable files are still included', async () => {
+		test('3. when a patch target is missing, mutation execution is skipped', async () => {
 			// Create only one of the two files
 			const readableFilePath = path.join(tmpDir, 'src', 'existent.ts');
 			mkdirSync(path.dirname(readableFilePath), { recursive: true });
@@ -213,22 +226,15 @@ describe('mutation_test sourceFiles wiring', () => {
 				working_directory: tmpDir,
 			};
 
-			await execute(args, tmpDir);
-
-			// Verify executeMutationSuite was called
-			expect(mockExecuteMutationSuiteFn).toHaveBeenCalled();
-
-			const lastCall = mockExecuteMutationSuiteFn.mock.calls[0];
-			const sourceFilesArg = (lastCall as any[])[6];
-
-			// sourceFiles should have only 1 entry (the readable one)
-			expect(sourceFilesArg).toBeInstanceOf(Map);
-			expect(sourceFilesArg!.size).toBe(1);
-			expect(sourceFilesArg!.has('src/existent.ts')).toBe(true);
-			expect(sourceFilesArg!.has('src/missing.ts')).toBe(false);
+			// Missing patch targets are rejected before the engine to avoid applying
+			// an uncontained or otherwise unverifiable mutation.
+			expect(mockExecuteMutationSuiteFn).not.toHaveBeenCalled();
+			const parsed = JSON.parse(await execute(args, tmpDir));
+			expect(parsed.verdict).toBe('skip');
+			expect(parsed.evaluable).toBe(false);
 		});
 
-		test('4. when all files missing, sourceFiles is undefined', async () => {
+		test('4. when all patch targets are missing, mutation execution is skipped', async () => {
 			const { mutation_test } = await import('../mutation-test.js');
 			const execute = mutation_test.execute as unknown as (
 				args: unknown,
@@ -259,16 +265,11 @@ describe('mutation_test sourceFiles wiring', () => {
 				working_directory: tmpDir,
 			};
 
-			await execute(args, tmpDir);
-
-			// Verify executeMutationSuite was called
-			expect(mockExecuteMutationSuiteFn).toHaveBeenCalled();
-
-			const lastCall = mockExecuteMutationSuiteFn.mock.calls[0];
-			const sourceFilesArg = (lastCall as any[])[6];
-
-			// When no files can be read, sourceFiles should be undefined
-			expect(sourceFilesArg).toBeUndefined();
+			// Missing patch targets are rejected before the engine.
+			expect(mockExecuteMutationSuiteFn).not.toHaveBeenCalled();
+			const parsed = JSON.parse(await execute(args, tmpDir));
+			expect(parsed.verdict).toBe('skip');
+			expect(parsed.evaluable).toBe(false);
 		});
 
 		test('5. when all files readable, sourceFiles is a Map (not undefined)', async () => {

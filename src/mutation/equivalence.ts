@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import type { MutationPatch } from './engine.js';
 
 /** Result of equivalence check for a single mutant */
@@ -18,75 +19,129 @@ export type LLMJudgeCallback = (
 
 /**
  * Stage 1: Static equivalence filter.
- * Strips comments (single-line // and multi-line /* *\/), console.log/debugger statements,
- * trailing whitespace, and blank lines. Returns true if the stripped versions are identical.
+ *
+ * Comment syntax is selected from the source path. A missing path is unknown,
+ * so direct callers do not get an unsafe language-specific comment heuristic.
+ * An unknown extension is deliberately conservative and does not discard
+ * comments at all.
  */
 export function isStaticallyEquivalent(
 	originalCode: string,
 	mutatedCode: string,
+	filePath?: string,
 ): boolean {
-	const stripCode = (code: string): string => {
-		// Step 1: Remove multi-line comments /* ... */
-		let inMultiLineComment = false;
-		const afterMultiLine: string[] = [];
-		for (const line of code.split('\n')) {
-			if (!inMultiLineComment) {
-				const openIndex = line.indexOf('/*');
-				if (openIndex !== -1) {
-					const closeIndex = line.indexOf('*/', openIndex + 2);
-					if (closeIndex !== -1) {
-						afterMultiLine.push(
-							line.substring(0, openIndex) + line.substring(closeIndex + 2),
-						);
-					} else {
-						afterMultiLine.push(line.substring(0, openIndex));
-						inMultiLineComment = true;
-					}
-				} else {
-					afterMultiLine.push(line);
-				}
-			} else {
-				const closeIndex = line.indexOf('*/');
-				if (closeIndex !== -1) {
-					afterMultiLine.push(line.substring(closeIndex + 2));
-					inMultiLineComment = false;
-				}
-				// else: entire line is inside multi-line comment, skip
-			}
-		}
+	type CommentFamily = 'c-style' | 'hash' | 'unknown';
+	const extension = filePath ? path.extname(filePath).toLowerCase() : '';
+	const cStyleExtensions = new Set([
+		'.c',
+		'.cc',
+		'.cpp',
+		'.cxx',
+		'.cts',
+		'.cs',
+		'.dart',
+		'.go',
+		'.h',
+		'.java',
+		'.cjs',
+		'.js',
+		'.jsx',
+		'.jsonc',
+		'.kt',
+		'.kts',
+		'.mjs',
+		'.mts',
+		'.php',
+		'.rs',
+		'.scala',
+		'.scss',
+		'.svelte',
+		'.swift',
+		'.ts',
+		'.tsx',
+		'.vue',
+	]);
+	const javaScriptExtensions = new Set([
+		'.cjs',
+		'.cts',
+		'.js',
+		'.jsx',
+		'.mjs',
+		'.mts',
+		'.svelte',
+		'.ts',
+		'.tsx',
+		'.vue',
+	]);
+	const hashExtensions = new Set(['.py', '.pyw', '.rb', '.rake']);
+	const isJavaScriptFamily = javaScriptExtensions.has(extension);
+	const commentFamily: CommentFamily = !filePath
+		? 'unknown'
+		: cStyleExtensions.has(extension)
+			? 'c-style'
+			: hashExtensions.has(extension)
+				? 'hash'
+				: 'unknown';
 
-		// Step 2: Remove single-line comments // (with string state tracking)
-		const afterSingleLine: string[] = [];
-		for (const line of afterMultiLine) {
+	const stripCode = (code: string): string => {
+		const lines = code.split('\n');
+		const withoutComments: string[] = [];
+		let inBlockComment = false;
+		for (const line of lines) {
+			if (commentFamily === 'unknown') {
+				withoutComments.push(line.trimEnd());
+				continue;
+			}
+
+			let output = '';
 			let inString: "'" | '"' | '`' | null = null;
-			let commentStart = -1;
+			let escaped = false;
 			for (let i = 0; i < line.length; i++) {
 				const ch = line[i];
-				if (inString) {
-					if (ch === '\\') {
+				const next = line[i + 1];
+				if (inBlockComment) {
+					if (ch === '*' && next === '/') {
+						inBlockComment = false;
 						i++;
-						continue;
 					}
-					if (ch === inString) {
-						inString = null;
-					}
-				} else {
-					if (ch === "'" || ch === '"' || ch === '`') {
-						inString = ch;
-					} else if (ch === '/' && i + 1 < line.length && line[i + 1] === '/') {
-						commentStart = i;
-						break;
-					}
+					continue;
 				}
+				if (inString) {
+					output += ch;
+					if (escaped) escaped = false;
+					else if (ch === '\\') escaped = true;
+					else if (ch === inString) inString = null;
+					continue;
+				}
+				if (
+					ch === "'" ||
+					ch === '"' ||
+					(ch === '`' && commentFamily === 'c-style')
+				) {
+					inString = ch;
+					output += ch;
+					continue;
+				}
+				if (commentFamily === 'c-style' && ch === '/' && next === '*') {
+					inBlockComment = true;
+					i++;
+					continue;
+				}
+				if (
+					(commentFamily === 'c-style' && ch === '/' && next === '/') ||
+					(commentFamily === 'hash' && ch === '#')
+				) {
+					break;
+				}
+				output += ch;
 			}
-			let processed =
-				commentStart >= 0 ? line.substring(0, commentStart) : line;
-			processed = processed.trimEnd();
-			afterSingleLine.push(processed);
+			withoutComments.push(output.trimEnd());
 		}
 
-		// Step 3: Strip console.log/debugger lines
-		const afterConsole = afterSingleLine.filter((line) => {
+		// Keep the existing JavaScript-family logging/debugger filter. Unknown
+		// and hash-comment languages are intentionally not interpreted as JS.
+		const afterConsole = withoutComments.filter((line) => {
+			if (!isJavaScriptFamily) return true;
 			const trimmedLower = line.toLowerCase().trim();
 			if (/^console\.(log|debug)\s*(\(|$)/.test(trimmedLower)) return false;
 			if (trimmedLower === 'debugger;') return false;
@@ -124,7 +179,7 @@ export async function checkEquivalence(
 	llmJudge?: LLMJudgeCallback,
 ): Promise<EquivalenceResult> {
 	// Stage 1: Static analysis
-	if (isStaticallyEquivalent(originalCode, mutatedCode)) {
+	if (isStaticallyEquivalent(originalCode, mutatedCode, patch.filePath)) {
 		return {
 			patchId: patch.id,
 			isEquivalent: true,

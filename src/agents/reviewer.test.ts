@@ -209,10 +209,10 @@ describe('REVIEWER_PROMPT — graph-first review directive (issue #1988 C1)', ()
 
 	it('directive requires direct-source verification and a fallback when graph evidence is unavailable', () => {
 		expect(prompt).toContain(
-			'Require source anchors and verify the direct source',
+			'Require source anchors, provenance, and direct-source verification',
 		);
 		expect(prompt).toContain(
-			'rely on the direct source, Git diff, and searches',
+			'fall back to the direct source, Git diff, and searches',
 		);
 	});
 });

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
 // Spread the real engine exports so named imports the tool relies on
 // (validateTestCommand, etc.) survive the mock — only executeMutationSuite
 // is overridden. See AGENTS.md invariant 7 (spread-real-exports).
@@ -41,7 +42,18 @@ const mockEvaluateMutationGateFn = mock(() => ({
 }));
 
 describe('mutation_test tool', () => {
+	let tempDir: string;
+
 	beforeEach(() => {
+		tempDir = canonicalMkdtemp('mutation-tool-');
+		fs.writeFileSync(
+			path.join(tempDir, 'test.ts'),
+			'export function fn() { return 1; }\n',
+		);
+		fs.writeFileSync(
+			path.join(tempDir, 'test.test.ts'),
+			"test('fixture', () => {});\n",
+		);
 		// Mock engine and gate modules - these are the actual dependencies we need to control
 		mock.module('../../mutation/engine.js', () => ({
 			...realEngine,
@@ -56,6 +68,7 @@ describe('mutation_test tool', () => {
 
 	afterEach(() => {
 		mock.restore();
+		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
 	describe('tool export and structure', () => {
@@ -99,6 +112,9 @@ describe('mutation_test tool', () => {
 			],
 			files: ['test.test.ts'],
 			test_command: ['npx', 'vitest'],
+			get working_directory() {
+				return tempDir;
+			},
 		};
 
 		test('4. empty patches array returns error', async () => {
@@ -107,7 +123,7 @@ describe('mutation_test tool', () => {
 				args: unknown,
 				directory: string,
 			) => Promise<string>;
-			const result = await execute({ ...defaultArgs, patches: [] }, '/test');
+			const result = await execute({ ...defaultArgs, patches: [] }, tempDir);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
 			expect(parsed.error).toContain('patches must be a non-empty array');
@@ -119,7 +135,7 @@ describe('mutation_test tool', () => {
 				args: unknown,
 				directory: string,
 			) => Promise<string>;
-			const result = await execute({ ...defaultArgs, files: [] }, '/test');
+			const result = await execute({ ...defaultArgs, files: [] }, tempDir);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
 			expect(parsed.error).toContain('files must be a non-empty array');
@@ -133,7 +149,7 @@ describe('mutation_test tool', () => {
 			) => Promise<string>;
 			const result = await execute(
 				{ ...defaultArgs, test_command: [] },
-				'/test',
+				tempDir,
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
@@ -148,14 +164,14 @@ describe('mutation_test tool', () => {
 			) => Promise<string>;
 			const result = await execute(
 				{ files: ['test.test.ts'], test_command: ['npx', 'vitest'] } as unknown,
-				'/test',
+				tempDir,
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
 			expect(parsed.error).toContain('patches must be a non-empty array');
 		});
 
-		test('8. missing files returns error', async () => {
+		test('8. omitted files return a bounded unevaluable result when no impact exists', async () => {
 			const { mutation_test } = await import('../mutation-test.js');
 			const execute = mutation_test.execute as unknown as (
 				args: unknown,
@@ -166,11 +182,12 @@ describe('mutation_test tool', () => {
 					patches: defaultArgs.patches,
 					test_command: ['npx', 'vitest'],
 				} as unknown,
-				'/test',
+				tempDir,
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('files must be a non-empty array');
+			expect(parsed.verdict).toBe('skip');
+			expect(parsed.outcome).toBe('unevaluable');
 		});
 
 		test('9. missing test_command returns error', async () => {
@@ -181,7 +198,7 @@ describe('mutation_test tool', () => {
 			) => Promise<string>;
 			const result = await execute(
 				{ patches: defaultArgs.patches, files: ['test.test.ts'] } as unknown,
-				'/test',
+				tempDir,
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
@@ -202,6 +219,9 @@ describe('mutation_test tool', () => {
 			],
 			files: ['test.test.ts'],
 			test_command: ['npx', 'vitest'],
+			get working_directory() {
+				return tempDir;
+			},
 		};
 
 		test('10. Successful execution returns JSON with verdict/killRate/adjustedKillRate', async () => {
@@ -210,7 +230,7 @@ describe('mutation_test tool', () => {
 				args: unknown,
 				directory: string,
 			) => Promise<string>;
-			const result = await execute(validArgs, '/test');
+			const result = await execute(validArgs, tempDir);
 			const parsed = JSON.parse(result);
 			expect(parsed).toHaveProperty('verdict');
 			expect(parsed).toHaveProperty('killRate');
@@ -226,7 +246,7 @@ describe('mutation_test tool', () => {
 				args: unknown,
 				directory: string,
 			) => Promise<string>;
-			await execute(validArgs, '/test');
+			await execute(validArgs, tempDir);
 
 			expect(mockEvaluateMutationGateFn).toHaveBeenCalledWith(
 				expect.any(Object),
@@ -243,7 +263,7 @@ describe('mutation_test tool', () => {
 			) => Promise<string>;
 			await execute(
 				{ ...validArgs, pass_threshold: 0.7, warn_threshold: 0.5 },
-				'/test',
+				tempDir,
 			);
 
 			expect(mockEvaluateMutationGateFn).toHaveBeenCalledWith(
@@ -267,14 +287,22 @@ describe('mutation_test tool', () => {
 				path.join(os.tmpdir(), 'mutation-wd-'),
 			);
 			try {
+				fs.writeFileSync(
+					path.join(overrideDir, 'test.ts'),
+					'export function fn() { return 1; }\n',
+				);
+				fs.writeFileSync(
+					path.join(overrideDir, 'test.test.ts'),
+					"test('fixture', () => {});\n",
+				);
 				await execute(
 					{ ...validArgs, working_directory: overrideDir },
-					'/test',
+					tempDir,
 				);
 
 				// Resolved override dir is passed as the 4th arg (cwd), taking
-				// precedence over the injected directory '/test'. No source files
-				// exist under it, so sourceFiles is undefined (7th arg).
+				// precedence over the injected directory. Source content is supplied
+				// for equivalence checking through the seventh argument.
 				expect(mockExecuteMutationSuiteFn).toHaveBeenCalledWith(
 					validArgs.patches,
 					validArgs.test_command,
@@ -282,7 +310,7 @@ describe('mutation_test tool', () => {
 					path.resolve(overrideDir),
 					undefined,
 					undefined,
-					undefined,
+					expect.any(Map),
 				);
 			} finally {
 				fs.rmSync(overrideDir, { recursive: true, force: true });
@@ -303,6 +331,9 @@ describe('mutation_test tool', () => {
 			],
 			files: ['test.test.ts'],
 			test_command: ['npx', 'vitest'],
+			get working_directory() {
+				return tempDir;
+			},
 		};
 
 		test('14. Error handling: executeMutationSuite throws → returns error JSON', async () => {
@@ -316,7 +347,7 @@ describe('mutation_test tool', () => {
 				args: unknown,
 				directory: string,
 			) => Promise<string>;
-			const result = await execute(validArgs, '/test');
+			const result = await execute(validArgs, tempDir);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
 			expect(parsed.error).toContain('mutation_test failed');
@@ -353,7 +384,7 @@ describe('mutation_test tool', () => {
 				args: unknown,
 				directory: string,
 			) => Promise<string>;
-			const result = await execute(validArgs, '/test');
+			const result = await execute(validArgs, tempDir);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
 			expect(parsed.error).toContain('mutation_test failed');

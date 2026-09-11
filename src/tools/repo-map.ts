@@ -3,6 +3,7 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config/loader';
 import { type RepoGraphConfig, RepoGraphConfigSchema } from '../config/schema';
+import { LANGUAGE_REGISTRY } from '../lang/profiles';
 import { telemetry } from '../telemetry';
 import {
 	containsControlChars,
@@ -98,6 +99,7 @@ const VALID_ACTIONS = [
 type RepoMapAction = (typeof VALID_ACTIONS)[number];
 
 const MAX_FILE_PATH_LENGTH = 500;
+const MAX_REQUESTED_FILES = 50;
 const MAX_SYMBOL_LENGTH = 256;
 const MAX_QUESTION_LENGTH = 500;
 const MAX_LANGUAGE_LENGTH = 64;
@@ -115,6 +117,13 @@ const ROUTE_METHODS: readonly RouteMethod[] = [
 ];
 const REPO_GRAPH_DISABLED_NOTICE =
 	'Repository graph is disabled by configuration (repo_graph.enabled=false).';
+const FILE_LIST_ACTIONS: readonly RepoMapAction[] = [
+	'blast_radius',
+	'preflight_packet',
+	'diff_context',
+	'test_pack',
+	'retrieve',
+];
 
 export const _internals = {
 	loadPluginConfigWithMeta,
@@ -166,6 +175,20 @@ function validateFile(p: string): string | null {
 	// the workspace or trivially mismatches the graph's relative keys.
 	if (path.isAbsolute(p) || /^[a-zA-Z]:[\\/]/.test(p)) {
 		return 'file must be a workspace-relative path, not absolute';
+	}
+	return null;
+}
+
+function validateFiles(files: unknown): string | null {
+	if (files === undefined) return null;
+	if (!Array.isArray(files)) return 'files must be an array';
+	if (files.length > MAX_REQUESTED_FILES) {
+		return `files accepts at most ${MAX_REQUESTED_FILES} entries`;
+	}
+	for (const file of files) {
+		if (typeof file !== 'string') return 'files entries must be strings';
+		const fileError = validateFile(file);
+		if (fileError) return `files entry: ${fileError}`;
 	}
 	return null;
 }
@@ -489,10 +512,11 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				'Target file (workspace-relative or absolute). Required for importers/dependencies/localization/ontology. Optional for preflight_packet.',
 			),
 		files: z
-			.array(z.string())
+			.array(z.string().min(1).max(MAX_FILE_PATH_LENGTH))
+			.max(MAX_REQUESTED_FILES)
 			.optional()
 			.describe(
-				'Multiple target files for blast_radius/preflight_packet. If omitted, falls back to `file`.',
+				`Multiple target files for blast_radius, preflight_packet, diff_context, test_pack, or retrieve (maximum ${MAX_REQUESTED_FILES}). If omitted, falls back to \`file\`.`,
 			),
 		symbol: z
 			.string()
@@ -629,6 +653,14 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				`unknown action; expected one of: ${VALID_ACTIONS.join(', ')}`,
 			);
 		}
+		if (FILE_LIST_ACTIONS.includes(action)) {
+			const filesError = validateFiles(a.files);
+			if (filesError) return err(action, `invalid files: ${filesError}`);
+			if (a.file !== undefined) {
+				const fileError = validateFile(a.file);
+				if (fileError) return err(action, `invalid file: ${fileError}`);
+			}
+		}
 
 		const repoGraphConfig = resolveRepoGraphConfig(directory);
 		if (action === 'retrieve') {
@@ -638,10 +670,6 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			if (a.file !== undefined) {
 				const fileError = validateFile(a.file);
 				if (fileError) return err(action, fileError);
-			}
-			for (const file of a.files ?? []) {
-				const fileError = validateFile(file);
-				if (fileError) return err(action, `files entry: ${fileError}`);
 			}
 			if (a.symbol !== undefined) {
 				const symbolError = validateSymbol(a.symbol);
@@ -904,6 +932,9 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				fileTarget = toRelativeGraphPath(a.file, directory);
 			}
 			try {
+				const languageSupported =
+					a.language === undefined ||
+					LANGUAGE_REGISTRY.get(a.language) !== undefined;
 				const result = searchSymbols(graph, {
 					query: a.symbol,
 					...(a.kind !== undefined ? { kind: a.kind } : {}),
@@ -912,7 +943,19 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					...(fileTarget !== undefined ? { file: fileTarget } : {}),
 					...(a.top_n !== undefined ? { topN: a.top_n } : {}),
 				});
-				return ok(action, { ...result, ...freshness });
+				return ok(action, {
+					...result,
+					languageSupported,
+					...(languageSupported
+						? {}
+						: {
+								warnings: [
+									...(result.warnings ?? []),
+									`language filter is unsupported or not indexed: ${a.language}`,
+								],
+							}),
+					...freshness,
+				});
 			} catch (e) {
 				return err(action, failureMessage(e));
 			}

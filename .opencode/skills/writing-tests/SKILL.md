@@ -18,7 +18,7 @@ Use `repo_map` `test_pack` to discover focused tests for the changed source, the
 
 ## ⛔ STOP — Read Before Running Any Tests
 
-**`test_runner` scope safety — one rule, no exceptions:**
+**`test_runner` scope safety — keep every selection bounded:**
 
 | Scope | Files param | Safe? |
 |-------|------------|-------|
@@ -26,11 +26,18 @@ Use `repo_map` `test_pack` to discover focused tests for the changed source, the
 | `'convention'` | **multiple source files** | ❌ **Rejected** — guard fires (`scope_exceeded`) before fan-out; use shell loop |
 | `'convention'` | direct test file paths | ✅ Safe — exempt from source-file limit |
 | `'graph'` | single file | ✅ Safe |
-| `'graph'` | **multiple files** | ❌ **Rejected** (`scope_exceeded`) — guard fires before import-graph traversal |
-| `'impact'` | multiple files | ❌ **Rejected** (`scope_exceeded`) — same reason |
+| `'graph'` | up to 50 normalized source files | ✅ Safe — bounded graph traversal; the final unique test resolution is also capped at 50 |
+| `'graph'` | **more than 50 normalized source files** | ❌ **Rejected** (`scope_exceeded`) — narrow or split the source batch |
+| `'impact'` | up to 50 normalized source files | ✅ Safe — bounded impact analysis; the final unique test resolution is also capped at 50 |
+| `'impact'` | **more than 50 normalized source files** | ❌ **Rejected** (`scope_exceeded`) — narrow or split the source batch |
 | `'all'` | any | ❌ **Never in agent context** |
 
-**If you need to run tests across multiple source files: use a per-file shell loop, not `test_runner`.**
+`convention` retains one-source-file discovery semantics. For `graph` and `impact`, bounded
+batches of at most 50 normalized source files are permitted; when a call returns
+`scope_exceeded`, narrow or split the source selection and never widen it to `scope: 'all'`.
+The final normalized unique test resolution is capped at 50 as well. For whole-repository
+validation, retain the per-test-file shell loop below so each test file runs in its own
+process; do not replace that isolation with a broad `test_runner` call.
 
 **Truncated output recovery:** When `bun test` output exceeds the bash tool buffer it is saved to a file whose ID (`tool_abc123...`) cannot be retrieved via `retrieve_summary` (which only accepts `S1`, `S2` format). Workaround — pipe to a temp file instead:
 ```powershell

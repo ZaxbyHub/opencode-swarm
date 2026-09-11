@@ -1,7 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { unlinkSync, writeFileSync } from 'node:fs';
+import {
+	readFileSync,
+	realpathSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
-
+import { MAX_SAFE_TEST_FILES } from '../test-impact/constants.js';
 import {
 	resolveExecutableFromPath,
 	runExternalTool,
@@ -174,6 +180,28 @@ function isMissingExecutableFailure(message: string | undefined): boolean {
 	);
 }
 
+function resolveContainedRegularFile(
+	workingDir: string,
+	filePath: string,
+): string | undefined {
+	try {
+		const realWorkingDir = realpathSync(path.resolve(workingDir));
+		const realFilePath = realpathSync(path.resolve(realWorkingDir, filePath));
+		const relativePath = path.relative(realWorkingDir, realFilePath);
+		if (
+			relativePath === '' ||
+			relativePath === '..' ||
+			relativePath.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(relativePath)
+		) {
+			return undefined;
+		}
+		return statSync(realFilePath).isFile() ? realFilePath : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 export const runMutationCommand: MutationCommandRunner = async (args) => {
 	const resolvedExecutable = _internals.resolveExecutableFromPath([
 		args.executable,
@@ -285,18 +313,59 @@ export async function executeMutation(
 	options: MutationExecutionOptions = {},
 ): Promise<MutationResult> {
 	const startTime = Date.now();
+	// Never let an empty selection widen into `testCommand` without file
+	// arguments. The tool performs the same check, but this defense belongs at
+	// the execution boundary because callers can invoke the engine directly.
+	const safeTestFiles = Array.isArray(testFiles)
+		? testFiles.filter(
+				(file) => typeof file === 'string' && !file.startsWith('-'),
+			)
+		: [];
+	if (safeTestFiles.length === 0) {
+		return {
+			patchId: patch.id,
+			filePath: patch.filePath,
+			functionName: patch.functionName,
+			mutationType: patch.mutationType,
+			outcome: 'skipped',
+			durationMs: Date.now() - startTime,
+			error:
+				'Mutation test selection is empty; refusing to run the full test suite',
+		};
+	}
 	let outcome: MutationOutcome = 'survived';
 	let testOutput: string | undefined;
 	let error: string | undefined;
 	let revertError: Error | undefined;
 	let patchFile: string | undefined;
+	let originalFileBytes: Buffer | undefined;
+	let appliedFileBytes: Buffer | undefined;
+	let preReverseFileBytes: Buffer | undefined;
+	let preReverseFilePath: string | undefined;
+	let reverseApplySucceeded = false;
+	const originalFilePath = resolveContainedRegularFile(
+		workingDir,
+		patch.filePath,
+	);
+	if (originalFilePath) {
+		try {
+			originalFileBytes = readFileSync(originalFilePath);
+		} catch {
+			// Git apply below remains the source of truth for missing/unreadable files.
+		}
+	}
 	const runner = selectRunner(options);
 
 	try {
 		const safeId = patch.id.replace(/[^a-zA-Z0-9_-]/g, '_');
 		patchFile = path.join(workingDir, `.mutation_patch_${safeId}.diff`);
 		try {
-			writeFileSync(patchFile, patch.patch);
+			// Git's unified-diff parser requires a terminating newline for a
+			// one-line hunk; generated patches are allowed to omit it.
+			writeFileSync(
+				patchFile,
+				patch.patch.endsWith('\n') ? patch.patch : `${patch.patch}\n`,
+			);
 		} catch (writeErr) {
 			error = `Failed to write patch file: ${writeErr}`;
 			outcome = 'error';
@@ -333,6 +402,13 @@ export async function executeMutation(
 					`git apply failed with status ${applyResult.exitCode}: ${applyResult.stderr}`,
 				);
 			}
+			if (originalFilePath) {
+				try {
+					appliedFileBytes = readFileSync(originalFilePath);
+				} catch {
+					// Git apply remains authoritative when the target cannot be read.
+				}
+			}
 		} catch (applyErr) {
 			if (outcome !== 'cancelled') outcome = 'error';
 			return {
@@ -351,11 +427,7 @@ export async function executeMutation(
 			// Append specific test files when provided for scoped test execution.
 			// Filter out any entries that look like flags (start with '-') to prevent
 			// test file paths from being misinterpreted as command-line options.
-			const safeTestFiles = testFiles.filter((f) => !f.startsWith('-'));
-			const testArgs =
-				safeTestFiles.length > 0
-					? [...testCommand.slice(1), ...safeTestFiles]
-					: testCommand.slice(1);
+			const testArgs = [...testCommand.slice(1), ...safeTestFiles];
 			const spawnResult = await runner({
 				executable: testCommand[0],
 				args: testArgs,
@@ -394,6 +466,19 @@ export async function executeMutation(
 		outcome = 'error';
 	} finally {
 		if (patchFile) {
+			if (originalFilePath) {
+				preReverseFilePath = resolveContainedRegularFile(
+					workingDir,
+					originalFilePath,
+				);
+				if (preReverseFilePath) {
+					try {
+						preReverseFileBytes = readFileSync(preReverseFilePath);
+					} catch {
+						preReverseFileBytes = undefined;
+					}
+				}
+			}
 			try {
 				const revertResult = await runner({
 					executable: _internals.resolveGitExecutable(),
@@ -409,6 +494,8 @@ export async function executeMutation(
 					revertError = new Error(
 						`Failed to revert mutation ${patch.id}: git apply -R failed with status ${revertResult.exitCode}: ${revertResult.stderr}. Working tree may be dirty.`,
 					);
+				} else {
+					reverseApplySucceeded = true;
 				}
 			} catch (revertErr) {
 				revertError = new Error(
@@ -419,6 +506,31 @@ export async function executeMutation(
 				unlinkSync(patchFile);
 			} catch (_unlinkErr) {
 				// best effort cleanup
+			}
+			if (
+				reverseApplySucceeded &&
+				originalFileBytes &&
+				appliedFileBytes &&
+				preReverseFileBytes &&
+				preReverseFilePath &&
+				preReverseFileBytes.equals(appliedFileBytes)
+			) {
+				try {
+					const targetPath = resolveContainedRegularFile(
+						workingDir,
+						preReverseFilePath,
+					);
+					if (targetPath === preReverseFilePath) {
+						const restoredBytes = readFileSync(targetPath);
+						if (!restoredBytes.equals(originalFileBytes)) {
+							writeFileSync(targetPath, originalFileBytes);
+						}
+					}
+				} catch (restoreBytesErr) {
+					revertError ??= new Error(
+						`Failed to restore original mutation bytes: ${restoreBytesErr}`,
+					);
+				}
 			}
 		}
 	}
@@ -573,6 +685,45 @@ export async function executeMutationSuite(
 		return computeReport([], 0, effectiveBudget);
 	}
 
+	const safeTestFiles = Array.isArray(testFiles)
+		? testFiles.filter(
+				(file) => typeof file === 'string' && !file.startsWith('-'),
+			)
+		: [];
+	if (safeTestFiles.length > MAX_SAFE_TEST_FILES) {
+		const skippedResults = patches.map((patch) => ({
+			patchId: patch.id,
+			filePath: patch.filePath,
+			functionName: patch.functionName,
+			mutationType: patch.mutationType,
+			outcome: 'skipped' as const,
+			durationMs: 0,
+			error: `Mutation test selection exceeds safe maximum of ${MAX_SAFE_TEST_FILES} files`,
+		}));
+		return computeReport(
+			skippedResults,
+			Date.now() - startTime,
+			effectiveBudget,
+		);
+	}
+	if (safeTestFiles.length === 0) {
+		const skippedResults = patches.map((patch) => ({
+			patchId: patch.id,
+			filePath: patch.filePath,
+			functionName: patch.functionName,
+			mutationType: patch.mutationType,
+			outcome: 'skipped' as const,
+			durationMs: 0,
+			error:
+				'Mutation test selection is empty; refusing to run the full test suite',
+		}));
+		return computeReport(
+			skippedResults,
+			Date.now() - startTime,
+			effectiveBudget,
+		);
+	}
+
 	const results: MutationResult[] = [];
 	let _skippedCount = 0;
 
@@ -670,7 +821,7 @@ export async function executeMutationSuite(
 		const result = await executeMutation(
 			patches[i],
 			testCommand,
-			testFiles,
+			safeTestFiles,
 			workingDir,
 			options,
 		);

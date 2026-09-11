@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { validateProjectRoot } from '../evidence/manager.js';
 import { _internals as goInternals } from '../lang/backends/go';
 import { _internals as pythonInternals } from '../lang/backends/python';
+import { IMPACT_CACHE_VERSION } from './constants';
 
 export interface TestImpactResult {
 	impactedTests: string[];
@@ -12,8 +14,44 @@ export interface TestImpactResult {
 	budgetExceeded?: boolean;
 }
 
+export type ImpactCacheStatus =
+	| 'fresh'
+	| 'missing'
+	| 'corrupt'
+	| 'legacy'
+	| 'stale'
+	| 'rebuilt_missing'
+	| 'rebuilt_corrupt'
+	| 'rebuilt_legacy'
+	| 'rebuilt_stale'
+	| 'stale_unverified'
+	| 'missing_unverified'
+	| 'corrupt_unverified'
+	| 'legacy_unverified'
+	| 'fresh_unverified';
+
+export interface ImpactCacheInspection {
+	status: ImpactCacheStatus;
+	cachePath: string;
+}
+
+interface TestFileIdentity {
+	path: string;
+	size: number;
+	mtimeMs: number;
+	digest: string;
+}
+
+interface ImpactCacheEnvelope {
+	version: number;
+	generatedAt: string;
+	fileCount: number;
+	map: Record<string, string[]>;
+	testFiles: TestFileIdentity[];
+}
+
 // TS/JS imports (multi-line aware — matches across newlines).
-const IMPORT_REGEX_ES = /import\s+[\s\S]*?\s+from\s+['"]([^'"]+)['"]/g;
+const IMPORT_REGEX_ES = /import\s+(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g;
 const IMPORT_REGEX_REQUIRE = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 const IMPORT_REGEX_REEXPORT =
 	/export\s+(?:\{[^}]*\}|\*)\s+from\s+['"]([^'"]+)['"]/g;
@@ -46,10 +84,68 @@ function sharedTrailingSegments(a: string, b: string): number {
 	return shared;
 }
 
+function digestContent(content: string): string {
+	return createHash('sha256').update(content).digest('hex');
+}
+
+function buildTestFileManifest(cwd: string): TestFileIdentity[] {
+	const manifest: TestFileIdentity[] = [];
+	for (const testFile of findTestFilesSync(cwd).sort()) {
+		try {
+			const stat = fs.statSync(testFile);
+			const content = fs.readFileSync(testFile, 'utf-8');
+			manifest.push({
+				path: normalizePath(testFile),
+				size: stat.size,
+				mtimeMs: stat.mtimeMs,
+				digest: digestContent(content),
+			});
+		} catch {
+			// A concurrently deleted or unreadable test file makes the identity
+			// unverifiable; the next load will rebuild safely.
+		}
+	}
+	return manifest;
+}
+
+function testManifestChanged(cached: TestFileIdentity[], cwd: string): boolean {
+	const currentFiles = findTestFilesSync(cwd).map(normalizePath).sort();
+	const cachedFiles = cached.map((entry) => normalizePath(entry.path)).sort();
+	if (
+		currentFiles.length !== cachedFiles.length ||
+		currentFiles.some((file, index) => file !== cachedFiles[index])
+	)
+		return true;
+
+	const cachedByPath = new Map(
+		cached.map((entry) => [normalizePath(entry.path), entry]),
+	);
+	for (const file of currentFiles) {
+		const previous = cachedByPath.get(file);
+		if (!previous) return true;
+		try {
+			const stat = fs.statSync(file);
+			const content = fs.readFileSync(file, 'utf-8');
+			if (
+				stat.size !== previous.size ||
+				stat.mtimeMs !== previous.mtimeMs ||
+				digestContent(content) !== previous.digest
+			)
+				return true;
+		} catch {
+			return true;
+		}
+	}
+	return false;
+}
+
 function isCacheStale(
 	impactMap: Record<string, string[]>,
 	generatedAtMs: number,
+	testFiles?: TestFileIdentity[],
+	cwd?: string,
 ): boolean {
+	if (testFiles && cwd && testManifestChanged(testFiles, cwd)) return true;
 	for (const sourcePath of Object.keys(impactMap)) {
 		try {
 			const stat = fs.statSync(sourcePath);
@@ -418,6 +514,111 @@ async function buildImpactMapInternal(
 	return impactMap;
 }
 
+function isValidImpactMap(value: unknown): value is Record<string, string[]> {
+	return (
+		value !== null &&
+		typeof value === 'object' &&
+		!Array.isArray(value) &&
+		Object.values(value).every(
+			(v) => Array.isArray(v) && v.every((item) => typeof item === 'string'),
+		)
+	);
+}
+
+function unverifiedStatus(status: ImpactCacheStatus): ImpactCacheStatus {
+	if (status === 'fresh' || status === 'stale') return 'fresh_unverified';
+	if (status === 'missing') return 'missing_unverified';
+	if (status === 'corrupt') return 'corrupt_unverified';
+	if (status === 'legacy') return 'legacy_unverified';
+	return status;
+}
+
+function readImpactCache(
+	cwd: string,
+	verify = true,
+): {
+	envelope: ImpactCacheEnvelope | null;
+	status: ImpactCacheStatus;
+} {
+	const cachePath = path.join(cwd, '.swarm', 'cache', 'impact-map.json');
+	if (!fs.existsSync(cachePath)) {
+		return {
+			envelope: null,
+			status: verify ? 'missing' : 'missing_unverified',
+		};
+	}
+	try {
+		const data = JSON.parse(
+			fs.readFileSync(cachePath, 'utf-8'),
+		) as Partial<ImpactCacheEnvelope>;
+		if (
+			data.version !== IMPACT_CACHE_VERSION ||
+			typeof data.generatedAt !== 'string' ||
+			!isValidImpactMap(data.map) ||
+			!Array.isArray(data.testFiles) ||
+			!data.testFiles.every(
+				(entry) =>
+					typeof entry === 'object' &&
+					entry !== null &&
+					typeof entry.path === 'string' &&
+					typeof entry.size === 'number' &&
+					typeof entry.mtimeMs === 'number' &&
+					typeof entry.digest === 'string',
+			)
+		) {
+			const status: ImpactCacheStatus =
+				data.map !== undefined &&
+				(data.version === undefined ||
+					(typeof data.version === 'number' &&
+						data.version < IMPACT_CACHE_VERSION))
+					? 'legacy'
+					: 'corrupt';
+			return {
+				envelope: null,
+				status: verify ? status : unverifiedStatus(status),
+			};
+		}
+		const envelope = data as ImpactCacheEnvelope;
+		const generatedAtMs = new Date(envelope.generatedAt).getTime();
+		if (!Number.isFinite(generatedAtMs)) {
+			return {
+				envelope: null,
+				status: verify ? 'corrupt' : 'corrupt_unverified',
+			};
+		}
+		if (!verify) {
+			return { envelope, status: 'fresh_unverified' };
+		}
+		if (
+			_internals.isCacheStale(
+				envelope.map,
+				generatedAtMs,
+				envelope.testFiles,
+				cwd,
+			)
+		) {
+			return { envelope, status: 'stale' };
+		}
+		return { envelope, status: 'fresh' };
+	} catch {
+		return {
+			envelope: null,
+			status: verify ? 'corrupt' : 'corrupt_unverified',
+		};
+	}
+}
+
+export function getImpactCacheStatus(
+	cwd: string,
+	options?: { verify?: boolean },
+): ImpactCacheInspection {
+	const cachePath = path.join(cwd, '.swarm', 'cache', 'impact-map.json');
+	return {
+		status: readImpactCache(cwd, options?.verify ?? true).status,
+		cachePath,
+	};
+}
+
 export const _internals: {
 	validateProjectRoot: typeof validateProjectRoot;
 	normalizePath: typeof normalizePath;
@@ -430,6 +631,7 @@ export const _internals: {
 	loadImpactMap: typeof loadImpactMap;
 	saveImpactMap: typeof saveImpactMap;
 	analyzeImpact: typeof analyzeImpact;
+	getImpactCacheStatus: typeof getImpactCacheStatus;
 	_clearGoModuleCache: typeof _clearGoModuleCache;
 } = {
 	validateProjectRoot,
@@ -443,6 +645,7 @@ export const _internals: {
 	loadImpactMap,
 	saveImpactMap,
 	analyzeImpact,
+	getImpactCacheStatus,
 	_clearGoModuleCache,
 } as const;
 
@@ -464,54 +667,14 @@ export async function loadImpactMap(
 	cwd: string,
 	options?: LoadImpactMapOptions,
 ): Promise<Record<string, string[]>> {
-	const cachePath = path.join(cwd, '.swarm', 'cache', 'impact-map.json');
-
-	if (fs.existsSync(cachePath)) {
-		try {
-			const content = fs.readFileSync(cachePath, 'utf-8');
-			const data = JSON.parse(content);
-
-			// Validate cache structure before using it — a poisoned map file could
-			// inject values into test runner subprocess argv via the impact result.
-			if (
-				data.map !== null &&
-				typeof data.map === 'object' &&
-				!Array.isArray(data.map)
-			) {
-				const map = data.map as Record<string, string[]>;
-				// Verify every value is an array of strings (not null/undefined/other)
-				const hasValidValues = Object.values(map).every(
-					(v) =>
-						Array.isArray(v) && v.every((item) => typeof item === 'string'),
-				);
-				if (hasValidValues) {
-					const generatedAt = new Date(data.generatedAt).getTime();
-					// Check if any source file is newer than cache
-					if (!_internals.isCacheStale(map, generatedAt)) {
-						return map;
-					}
-					// Cache is stale: if skipRebuild, return stale map; otherwise fall through to rebuild
-					if (options?.skipRebuild) {
-						return map;
-					}
-				}
-				// map exists but has invalid values — fall through to rebuild
-			}
-			// Cache corrupted, invalid structure, or unreadable
-			if (options?.skipRebuild) {
-				return {}; // Return empty map rather than rebuilding
-			}
-		} catch {
-			// Cache unreadable (parse error, etc.)
-			if (options?.skipRebuild) {
-				return {}; // Return empty map rather than rebuilding
-			}
+	const inspection = readImpactCache(cwd, !options?.skipRebuild);
+	if (inspection.envelope) {
+		if (inspection.status === 'fresh' || options?.skipRebuild) {
+			return inspection.envelope.map;
 		}
 	}
 
-	if (options?.skipRebuild) {
-		return {}; // No cache or unreadable, return empty rather than rebuilding
-	}
+	if (options?.skipRebuild) return {};
 	return _internals.buildImpactMap(cwd);
 }
 
@@ -537,10 +700,12 @@ async function saveImpactMap(
 		fs.mkdirSync(cacheDir, { recursive: true });
 	}
 
-	const data = {
+	const data: ImpactCacheEnvelope = {
+		version: IMPACT_CACHE_VERSION,
 		generatedAt: new Date().toISOString(),
 		fileCount: Object.keys(impactMap).length,
 		map: impactMap,
+		testFiles: buildTestFileManifest(cwd),
 	};
 
 	fs.writeFileSync(cachePath, JSON.stringify(data, null, 2), 'utf-8');
@@ -550,6 +715,7 @@ export async function analyzeImpact(
 	changedFiles: string[],
 	cwd: string,
 	budget?: number,
+	impactMapOverride?: Record<string, string[]>,
 ): Promise<TestImpactResult> {
 	// Validate input
 	if (!Array.isArray(changedFiles)) {
@@ -568,30 +734,38 @@ export async function analyzeImpact(
 			typeof f === 'string' && f.length > 0 && !f.includes('\0'),
 	);
 
-	const impactMap = await _internals.loadImpactMap(cwd);
+	const impactMap = impactMapOverride ?? (await _internals.loadImpactMap(cwd));
 
 	const impactedTestsSet = new Set<string>();
+	const impactedTestKeys = new Set<string>();
 	const untestedFiles: string[] = [];
-	let visitedCount = 0;
 	let budgetExceeded = false;
 
-	for (const changedFile of validFiles) {
-		if (budget !== undefined && visitedCount >= budget) {
+	const testKey = (test: string): string => {
+		const resolved = path.isAbsolute(test) ? test : path.resolve(cwd, test);
+		const normalized = normalizePath(resolved);
+		return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+	};
+	const addImpactedTest = (test: string): boolean => {
+		const key = testKey(test);
+		if (impactedTestKeys.has(key)) return true;
+		if (budget !== undefined && impactedTestKeys.size >= budget) {
 			budgetExceeded = true;
-			break;
+			return false;
 		}
+		impactedTestKeys.add(key);
+		impactedTestsSet.add(test);
+		return true;
+	};
 
-		const normalizedChanged = normalizePath(path.resolve(changedFile));
+	for (const changedFile of validFiles) {
+		const normalizedChanged = normalizePath(path.resolve(cwd, changedFile));
 
 		const tests = impactMap[normalizedChanged];
 		if (tests && tests.length > 0) {
 			for (const test of tests) {
-				if (budget !== undefined && visitedCount >= budget) {
-					budgetExceeded = true;
-					break;
-				}
-				impactedTestsSet.add(test);
-				visitedCount++;
+				addImpactedTest(test);
+				if (budgetExceeded) break;
 			}
 			if (budgetExceeded) break;
 		} else {
@@ -644,17 +818,9 @@ export async function analyzeImpact(
 			// whether budget allows all its tests to be collected.
 			const found = suffixMatches.length > 0;
 			for (const [, tests] of suffixMatches) {
-				if (budget !== undefined && visitedCount >= budget) {
-					budgetExceeded = true;
-					break;
-				}
 				for (const test of tests) {
-					if (budget !== undefined && visitedCount >= budget) {
-						budgetExceeded = true;
-						break;
-					}
-					impactedTestsSet.add(test);
-					visitedCount++;
+					addImpactedTest(test);
+					if (budgetExceeded) break;
 				}
 				if (budgetExceeded) break;
 			}
@@ -668,15 +834,16 @@ export async function analyzeImpact(
 	const impactedTests = [...impactedTestsSet];
 
 	// Compute unrelated tests (all tests in impact map minus impacted tests)
-	const allTestFiles = new Set<string>();
+	const allTestFiles = new Map<string, string>();
 	for (const tests of Object.values(impactMap)) {
 		for (const test of tests) {
-			allTestFiles.add(test);
+			const key = testKey(test);
+			if (!allTestFiles.has(key)) allTestFiles.set(key, test);
 		}
 	}
-	const unrelatedTests = [...allTestFiles].filter(
-		(t) => !impactedTestsSet.has(t),
-	);
+	const unrelatedTests = [...allTestFiles.entries()]
+		.filter(([key]) => !impactedTestKeys.has(key))
+		.map(([, test]) => test);
 
 	return {
 		impactedTests,
