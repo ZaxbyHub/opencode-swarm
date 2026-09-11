@@ -517,17 +517,23 @@ async function writeStore(directory: string, store: Store): Promise<void> {
 	await atomicWriteFile(storePath(directory), serialized);
 }
 
+function samePlanIdentity(
+	binding: Pick<Binding, 'planId' | 'planIdentityHash' | 'planStructureHash'>,
+	plan: Plan,
+): boolean {
+	return (
+		binding.planId === derivePlanId(plan) &&
+		binding.planIdentityHash === derivePlanIdentityHash(plan) &&
+		binding.planStructureHash === computePlanStructureHash(plan)
+	);
+}
+
 function bindingMatchesPlan(
 	binding: Binding,
 	plan: Plan,
 	phase: number,
 ): boolean {
-	return (
-		binding.planId === derivePlanId(plan) &&
-		binding.planIdentityHash === derivePlanIdentityHash(plan) &&
-		binding.planStructureHash === computePlanStructureHash(plan) &&
-		binding.phase === phase
-	);
+	return samePlanIdentity(binding, plan) && binding.phase === phase;
 }
 
 function workspaceIdentityIsFresh(
@@ -595,23 +601,35 @@ function validateMetadata(
 	return { valid: true, childSessionId: childSessionId ?? metadataChild };
 }
 
+function computeReceiptId(input: {
+	parentSessionId: string;
+	callId: string;
+	childSessionId: string;
+	planIdentityHash: string;
+	planStructureHash: string;
+	phase: number;
+	role: string;
+}): string {
+	return sha256(
+		stableCanonicalStringify({
+			parentSessionId: input.parentSessionId,
+			callId: input.callId,
+			childSessionId: input.childSessionId,
+			planIdentityHash: input.planIdentityHash,
+			planStructureHash: input.planStructureHash,
+			phase: input.phase,
+			role: input.role,
+		}),
+	);
+}
+
 function addReceipt(
 	store: Store,
 	pending: Pending,
 	text: string,
 	childIdentityAvailable: boolean,
 ): void {
-	const receiptId = sha256(
-		stableCanonicalStringify({
-			parentSessionId: pending.parentSessionId,
-			callId: pending.callId,
-			childSessionId: pending.childSessionId,
-			planIdentityHash: pending.planIdentityHash,
-			planStructureHash: pending.planStructureHash,
-			phase: pending.phase,
-			role: pending.role,
-		}),
-	);
+	const receiptId = computeReceiptId(pending);
 	const receipt: Receipt = {
 		...pending,
 		receiptId,
@@ -651,6 +669,12 @@ export async function reserveApprovedPhaseParticipation(input: {
 	}
 	const plan = await loadPlan(input.directory);
 	if (!plan) return;
+	// Issue #2702 contract: `current_phase` is a static authoring field no code
+	// path advances, so this stamp is the plan's authored cursor, not the phase
+	// being worked. Never consume it as an exact gate key:
+	// readPhaseParticipation matches cursor-tagged receipts through its cursor
+	// tolerance, and rebindCursorTaggedReceipts normalizes them to the
+	// completed phase on the phase_complete success path.
 	const binding = await buildBinding({
 		plan,
 		phase: getCurrentPhase(plan),
@@ -830,15 +854,100 @@ export async function readPhaseParticipation(
 	}
 	const canonicalRole = stripKnownSwarmPrefix(role);
 	const currentWorkspace = await captureParticipationWorkspace(directory);
+	// Issue #2702: the recorder stamps the receipt's phase from the plan's
+	// static `current_phase` cursor (see reserveApprovedPhaseParticipation),
+	// a field authored once at plan creation that no code path advances. A
+	// receipt tagged with that cursor value therefore proves the same
+	// participation as an exact-phase match for the phase being completed.
+	// The cursor-mistag arm only ever accepts a tag BEHIND the completing
+	// phase; if the cursor ever becomes a live advancing field, this keeps a
+	// receipt tagged with a later phase from satisfying an earlier one. Any
+	// other phase stays rejected.
+	const cursorPhase = getCurrentPhase(plan);
 	return {
 		status: 'valid',
 		found: read.store.receipts.some(
 			(receipt) =>
 				receipt.role === canonicalRole &&
-				bindingMatchesPlan(receipt, plan, phase) &&
-				workspaceIdentityIsFresh(receipt.workspace, currentWorkspace),
+				samePlanIdentity(receipt, plan) &&
+				workspaceIdentityIsFresh(receipt.workspace, currentWorkspace) &&
+				(receipt.phase === phase ||
+					(receipt.phase === cursorPhase && cursorPhase < phase)),
 		),
 	};
+}
+
+/**
+ * Re-stamp receipts that were tagged with the plan's static `current_phase`
+ * cursor (issue #2702) to the phase whose completion is being recorded. Called
+ * from the phase_complete success path so a cursor-mistagged receipt, once it
+ * has satisfied the completing phase's gate, cannot also satisfy a later
+ * phase — per-phase docs participation stays enforced. Idempotent: a second
+ * run finds nothing left cursor-tagged.
+ *
+ * A lock-free pre-read skips the evidence lock when nothing is cursor-tagged —
+ * the common completion — so callers never contend the store lock for a no-op.
+ * If a writer lands a cursor-tagged receipt between the pre-read and the
+ * decision, the receipt simply stays cursor-tagged: the gate's cursor
+ * tolerance still matches it at the next completion, which rebinds then.
+ */
+export async function rebindCursorTaggedReceipts(
+	directory: string,
+	plan: Plan,
+	phase: number,
+	role: string,
+): Promise<{ rebound: number }> {
+	const canonicalRole = stripKnownSwarmPrefix(role);
+	const cursorPhase = getCurrentPhase(plan);
+	const peek = readRawStore(directory);
+	const hasCandidate =
+		peek.status === 'valid' &&
+		peek.store.receipts.some(
+			(receipt) =>
+				receipt.role === canonicalRole &&
+				samePlanIdentity(receipt, plan) &&
+				receipt.phase === cursorPhase &&
+				cursorPhase < phase,
+		);
+	if (!hasCandidate) return { rebound: 0 };
+	return withEvidenceLock(
+		directory,
+		PHASE_PARTICIPATION_FILE,
+		'docs',
+		'phase-participation',
+		async () => {
+			const store = await loadWritableStoreUnderLock(directory);
+			let rebound = 0;
+			for (const receipt of store.receipts) {
+				if (
+					receipt.role === canonicalRole &&
+					samePlanIdentity(receipt, plan) &&
+					receipt.phase === cursorPhase &&
+					cursorPhase < phase
+				) {
+					receipt.phase = phase;
+					receipt.receiptId = computeReceiptId(receipt);
+					rebound += 1;
+				}
+			}
+			if (rebound > 0) {
+				// Mirrors addReceipt's dedupe key: keep at most one receipt per
+				// (plan identity, structure, phase, role), newest wins.
+				const newestByKey = new Map<string, Receipt>();
+				for (const receipt of store.receipts
+					.slice()
+					.sort((left, right) => left.completedAt - right.completedAt)) {
+					newestByKey.set(
+						`${receipt.planIdentityHash}\u0000${receipt.planStructureHash}\u0000${receipt.phase}\u0000${receipt.role}`,
+						receipt,
+					);
+				}
+				store.receipts = [...newestByKey.values()];
+				await writeStore(directory, store);
+			}
+			return { rebound };
+		},
+	);
 }
 
 export function resetPhaseParticipationForTests(): void {

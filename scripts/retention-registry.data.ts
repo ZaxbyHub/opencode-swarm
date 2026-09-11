@@ -1988,7 +1988,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/evidence/phase-participation.ts'],
 		writerCitations: ['src/evidence/phase-participation.ts:490 writeStore — byte-limit trim evicting oldest pending/receipts; quarantine on corruption :376-446'],
-		readerCitations: ['src/evidence/phase-participation.ts:821 readPhaseParticipation — bounded raw read (:215, ≤256 KiB, symlink guards), sync'],
+		readerCitations: ['src/evidence/phase-participation.ts:845 readPhaseParticipation — bounded raw read (:215, ≤256 KiB, symlink guards), sync'],
 		schemaVersion: 'store schema with workspace freshness validation',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',

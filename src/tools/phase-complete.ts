@@ -24,6 +24,7 @@ import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import {
 	type ParticipationReadResult,
 	readPhaseParticipation,
+	rebindCursorTaggedReceipts,
 } from '../evidence/phase-participation.js';
 import { verifyFullAutoPhaseApproval } from '../full-auto/phase-approval';
 import { hasPassedAllGates } from '../gate-evidence';
@@ -115,6 +116,9 @@ import { resolveWorkingDirectory } from './resolve-working-directory';
 export const phaseCompleteReceiptInternals = {
 	recordPhaseCloseIntent,
 	commitPhaseClosed,
+	rebindCursorTaggedReceipts: (
+		...args: Parameters<typeof rebindCursorTaggedReceipts>
+	) => rebindCursorTaggedReceipts(...args),
 };
 
 /** Narrow seam for guarded-plan commit tests. */
@@ -1389,6 +1393,35 @@ export async function executePhaseComplete(
 				);
 			});
 		}
+	}
+	// Issue #2702: durable docs receipts are stamped from the plan's static
+	// `current_phase` cursor, so a genuine dispatch recorded under a stale
+	// cursor satisfies this completion only through the gate's cursor
+	// tolerance. Re-stamp cursor-tagged receipts to the completed phase now
+	// that the transition committed, so each later phase still requires fresh
+	// docs participation. Runs after the plan lock is released (the evidence
+	// lock serializes all participation-store writes) and best-effort: a
+	// normalization failure must not fail an already-committed completion.
+	try {
+		const normalizedPlan = await loadPlan(dir).catch(() => null);
+		if (normalizedPlan) {
+			const { rebound } =
+				await phaseCompleteReceiptInternals.rebindCursorTaggedReceipts(
+					dir,
+					normalizedPlan,
+					phase,
+					'docs',
+				);
+			if (rebound > 0) {
+				warnings.push(
+					`Re-stamped ${rebound} docs participation receipt(s) from the plan's stale current_phase cursor to phase ${phase}.`,
+				);
+			}
+		}
+	} catch (error) {
+		warnings.push(
+			`Docs participation receipt normalization failed: ${error instanceof Error ? error.message : String(error)}.`,
+		);
 	}
 	if (knowledgeEnabled) {
 		const receiptClose = await phaseCompleteReceiptInternals.commitPhaseClosed(
