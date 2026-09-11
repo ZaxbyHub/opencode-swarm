@@ -173,6 +173,30 @@ describe('shell write detector feedback regressions (#2500)', () => {
 		).toThrow(ScopeValidationError);
 	});
 
+	test('FB-032: detects nested PowerShell writes when the outer shell is CMD', () => {
+		// Before this fix, CMD validation ran only detectCmdWrites, so nested
+		// PowerShell payloads returned allowed:true with no detected targets.
+		for (const command of [
+			'powershell -EncodedCommand AAA',
+			'powershell -Command Set-Content outside.txt x',
+			'powershell.exe -Command Set-Content outside.txt x',
+		]) {
+			const analysis = detectWindowsWrites(command, 'cmd');
+			expect(analysis.hasWrites).toBe(true);
+			expect(analysis.writes).not.toEqual([]);
+			expect(() =>
+				evaluateScopeValidate(
+					{
+						command,
+						shell: 'cmd',
+						scope_files: ['src'],
+					},
+					process.cwd(),
+				),
+			).toThrow(ScopeValidationError);
+		}
+	});
+
 	test('FB-027: rejects NUL, DEL, and other ASCII control bytes in commands', () => {
 		for (const control of ['\u0000', '\u007f', '\u0009']) {
 			expect(() =>

@@ -1297,7 +1297,7 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 	// Handle: powershell -Command "...", powershell -C "..."
 	let innerCommand = trimmed;
 	const cmdMatch = trimmed.match(
-		/^(?:powershell|pwsh)\s+(?:-Command|-C)\s+(.*)$/i,
+		/^(?:powershell|pwsh)(?:\.exe)?\s+(?:-Command|-C)\s+(.*)$/i,
 	);
 	if (cmdMatch) {
 		innerCommand = cmdMatch[1].trim();
@@ -1729,6 +1729,13 @@ function detectCmdWrites(command: string): WriteTarget[] {
 		) {
 			innerCommand = innerCommand.slice(1, -1);
 		}
+	}
+
+	// CMD can launch PowerShell as a nested interpreter. Reuse the PowerShell
+	// detector for a command-position wrapper so encoded payloads and nested
+	// writes are not silently classified as read-only by the CMD detector.
+	if (/^(?:powershell|pwsh)(?:\.exe)?\s+/i.test(innerCommand)) {
+		results.push(...detectPowerShellWrites(innerCommand));
 	}
 
 	// Scan all redirections, including adjacent operators and descriptor forms.
