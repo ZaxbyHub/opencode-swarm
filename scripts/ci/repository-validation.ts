@@ -55,6 +55,8 @@ const GIT_DIFF_FILTER = 'ACDMR';
 const REPORT_LOCK_WAIT_MS = 5_000;
 const REPORT_LOCK_RETRY_MS = 50;
 const REPORT_LOCK_STALE_AFTER_MS = 30_000;
+const REPORT_LOCK_MAX_BYTES = 4_096;
+const REPORT_LOCK_INSPECTION_TIMEOUT_MS = 250;
 
 export interface RuntimeMetadata {
 	bunVersion: string;
@@ -148,6 +150,23 @@ export interface ValidationOptions {
 	reportPath?: string;
 	runProcess?: (item: ValidationItem) => Promise<ValidationProcessResult> | ValidationProcessResult;
 }
+
+type TaskkillSpawnOptions = {
+	cwd: string;
+	stdin: 'ignore';
+	stdout: 'ignore';
+	stderr: 'ignore';
+	timeout: number;
+};
+
+type TaskkillProcess = {
+	exited: Promise<number>;
+	kill: (signal?: number | string) => void;
+};
+
+type TaskkillSpawn = (argv: string[], options: TaskkillSpawnOptions) => TaskkillProcess;
+
+const spawnTaskkill: TaskkillSpawn = (argv, options) => Bun.spawn(argv, options);
 
 export interface SurfaceCommandSpec {
 	id: string;
@@ -507,6 +526,10 @@ export const _internals: {
 	discoverTestFiles: typeof discoverTestFiles;
 	discoverTopLevelTestFiles: typeof discoverTopLevelTestFiles;
 	readBoundedWithStatus: typeof readBoundedWithStatus;
+	platform: string;
+	spawnTaskkill: TaskkillSpawn;
+	killProcessTree: typeof killProcessTree;
+	readReportLockOwner: typeof readReportLockOwner;
 } = {
 	runtimeAvailable,
 	gitDiffPaths: defaultGitDiffPaths,
@@ -514,6 +537,10 @@ export const _internals: {
 	discoverTestFiles,
 	discoverTopLevelTestFiles,
 	readBoundedWithStatus,
+	platform: process.platform,
+	spawnTaskkill,
+	killProcessTree,
+	readReportLockOwner,
 };
 
 function commandItem(
@@ -556,11 +583,12 @@ export function buildSurfaceItems(options: {
 		const definition = SURFACE_DEFINITIONS.find((candidate) => candidate.surface === surface);
 		if (!definition) throw new Error(`unknown validation surface: ${surface}`);
 		if (definition.testRoots) {
+			const optionalRoots = surface === 'integration' ? definition.testRoots : undefined;
 			const files = options.testFiles && (surface === 'unit' || surface === 'integration')
 				? options.testFiles
 				: definition.testRoots.flatMap((testRoot) => {
 					if (testRoot === 'tests:top-level') return _internals.discoverTopLevelTestFiles(root);
-					return _internals.discoverTestFiles(root, [testRoot]);
+					return _internals.discoverTestFiles(root, [testRoot], optionalRoots);
 				});
 			const uniqueFiles = Array.from(new Set(files.map((file) => normalizePathForIdentity(file)))).sort((a, b) => a.localeCompare(b));
 			if (uniqueFiles.length === 0) {
@@ -728,14 +756,14 @@ async function readBounded(
 async function killProcessTree(child: { pid?: number; kill: (signal?: number | string) => void }, root: string): Promise<boolean> {
 	let cleaned = true;
 	try {
-		if (child.pid && process.platform !== 'win32') {
+		if (child.pid && _internals.platform !== 'win32') {
 			try {
 				process.kill(-child.pid, 'SIGKILL');
 			} catch {
 				// The process may have exited between the timer and this call.
 			}
-		} else if (child.pid && process.platform === 'win32') {
-			const killer = Bun.spawn(['taskkill', '/T', '/F', '/PID', String(child.pid)], {
+		} else if (child.pid && _internals.platform === 'win32') {
+			const killer = _internals.spawnTaskkill(['taskkill', '/T', '/F', '/PID', String(child.pid)], {
 				cwd: root,
 				stdin: 'ignore',
 				stdout: 'ignore',
@@ -743,10 +771,11 @@ async function killProcessTree(child: { pid?: number; kill: (signal?: number | s
 				timeout: PROCESS_KILLER_TIMEOUT_MS,
 			});
 			try {
-				await Promise.race([
+				const exitCode = await Promise.race([
 					killer.exited,
-					new Promise<number>((resolve) => setTimeout(() => resolve(1), PROCESS_KILLER_TIMEOUT_MS)),
+					new Promise<number | null>((resolve) => setTimeout(() => resolve(null), PROCESS_KILLER_TIMEOUT_MS)),
 				]);
+				if (exitCode !== 0) cleaned = false;
 			} finally {
 				try {
 					killer.kill('SIGKILL');
@@ -975,6 +1004,9 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 	const selectedSurfaces: ValidationSurface[] = options.surfaces
 		? Array.from(new Set(options.surfaces))
 		: options.testFiles !== undefined ? ['unit'] : [...SURFACE_INVENTORY];
+	const canOptimizeChangedTests = selectedSurfaces.length > 0 && selectedSurfaces.every(
+		(surface) => surface === 'unit' || surface === 'integration',
+	);
 	let items: ValidationItem[];
 	if (options.mode === 'diff' && options.testFiles === undefined) {
 		try {
@@ -985,7 +1017,7 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 				(changed.unit.length > 0 || changed.integration.length > 0);
 			if (!changedPaths.length) {
 				items = [];
-			} else if (changedTestsOnly && selectedSurfaces.some((surface) => surface === 'unit' || surface === 'integration')) {
+			} else if (changedTestsOnly && canOptimizeChangedTests) {
 				items = [];
 				if (selectedSurfaces.includes('unit') && changed.unit.length > 0) {
 					items.push(...buildSurfaceItems({ root, surfaces: ['unit'], testFiles: changed.unit, testTimeoutMs, perItemTimeoutMs }));
@@ -1001,7 +1033,7 @@ export async function validateRepository(options: ValidationOptions): Promise<Va
 		} catch (error) {
 			items = [{
 				id: 'diff:git-discovery',
-				surface: 'unit',
+				surface: selectedSurfaces[0] ?? 'unit',
 				file: 'surface:diff/git-discovery',
 				argv: diffCommandArgv(root, diffBase),
 				cwd: root,
@@ -1189,6 +1221,11 @@ interface HeldReportLock {
 	token: string;
 }
 
+interface ReportLockOwnerInspection {
+	owner: ReportLockOwner | null;
+	allowAgeFallback: boolean;
+}
+
 function isProcessAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -1203,20 +1240,63 @@ function isProcessAlive(pid: number): boolean {
 	}
 }
 
-async function readReportLockOwner(lockPath: string): Promise<ReportLockOwner | null> {
+async function readReportLockOwner(lockPath: string): Promise<ReportLockOwnerInspection> {
+	const inspect = async (): Promise<ReportLockOwnerInspection> => {
+		let stats: Awaited<ReturnType<typeof fsp.lstat>>;
+		try {
+			stats = await fsp.lstat(lockPath);
+		} catch {
+			return { owner: null, allowAgeFallback: false };
+		}
+		// Never open a link, FIFO, socket, or other non-regular lock path. This
+		// avoids blocking on a named pipe and prevents following a redirected lock.
+		if (!stats.isFile() || stats.size > REPORT_LOCK_MAX_BYTES) {
+			return { owner: null, allowAgeFallback: false };
+		}
+		let handle: fsp.FileHandle | undefined;
+		try {
+			handle = await fsp.open(lockPath, 'r');
+			const buffer = Buffer.alloc(REPORT_LOCK_MAX_BYTES + 1);
+			let offset = 0;
+			while (offset < buffer.byteLength) {
+				const read = await handle.read(buffer, offset, buffer.byteLength - offset, offset);
+				if (read.bytesRead === 0) break;
+				offset += read.bytesRead;
+			}
+			if (offset > REPORT_LOCK_MAX_BYTES) return { owner: null, allowAgeFallback: false };
+			const parsed: unknown = JSON.parse(buffer.toString('utf8', 0, offset));
+			if (typeof parsed !== 'object' || parsed === null) return { owner: null, allowAgeFallback: true };
+			const owner = parsed as Partial<ReportLockOwner>;
+			if (!Number.isInteger(owner.pid) || owner.pid <= 0 || typeof owner.token !== 'string') {
+				return { owner: null, allowAgeFallback: true };
+			}
+			return {
+				owner: {
+					pid: owner.pid,
+					token: owner.token,
+					createdAt: typeof owner.createdAt === 'number' ? owner.createdAt : 0,
+				},
+				allowAgeFallback: false,
+			};
+		} catch {
+			return { owner: null, allowAgeFallback: false };
+		} finally {
+			if (handle) await handle.close().catch(() => undefined);
+		}
+	};
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const raw = await fsp.readFile(lockPath, 'utf8');
-		const parsed: unknown = JSON.parse(raw);
-		if (typeof parsed !== 'object' || parsed === null) return null;
-		const owner = parsed as Partial<ReportLockOwner>;
-		if (!Number.isInteger(owner.pid) || owner.pid <= 0 || typeof owner.token !== 'string') return null;
-		return {
-			pid: owner.pid,
-			token: owner.token,
-			createdAt: typeof owner.createdAt === 'number' ? owner.createdAt : 0,
-		};
-	} catch {
-		return null;
+		return await Promise.race([
+			inspect(),
+			new Promise<ReportLockOwnerInspection>((resolve) => {
+				timer = setTimeout(
+					() => resolve({ owner: null, allowAgeFallback: false }),
+					REPORT_LOCK_INSPECTION_TIMEOUT_MS,
+				);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
 	}
 }
 
@@ -1227,8 +1307,9 @@ async function reportLockIsStale(lockPath: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
-	const owner = await readReportLockOwner(lockPath);
-	if (owner) return !isProcessAlive(owner.pid);
+	const inspection = await readReportLockOwner(lockPath);
+	if (inspection.owner) return !isProcessAlive(inspection.owner.pid);
+	if (!inspection.allowAgeFallback) return false;
 	return Date.now() - stats.mtimeMs >= REPORT_LOCK_STALE_AFTER_MS;
 }
 
@@ -1267,8 +1348,8 @@ async function acquireReportLock(lockPath: string): Promise<HeldReportLock> {
 
 async function releaseReportLock(lockPath: string, lock: HeldReportLock): Promise<void> {
 	await lock.handle.close().catch(() => undefined);
-	const owner = await readReportLockOwner(lockPath);
-	if (owner?.token === lock.token) await fsp.unlink(lockPath).catch(() => undefined);
+	const inspection = await readReportLockOwner(lockPath);
+	if (inspection.owner?.token === lock.token) await fsp.unlink(lockPath).catch(() => undefined);
 }
 
 export async function writeValidationReport(report: ValidationReport, requestedPath?: string): Promise<string> {

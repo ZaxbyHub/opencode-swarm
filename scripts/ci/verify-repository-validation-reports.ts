@@ -18,6 +18,7 @@ const DEFAULT_BOUNDS = {
 	suiteTimeoutMs: 900_000,
 	maxOutputBytes: 65_536,
 } as const;
+export const MAX_REPORT_BYTES = 1_048_576;
 
 export interface VerifyOptions {
 	directory: string;
@@ -113,6 +114,30 @@ function validTimestamp(value: unknown): value is string {
 	return typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value));
 }
 
+function readBoundedReport(reportPath: string): JsonReport {
+	const buffer = Buffer.alloc(MAX_REPORT_BYTES + 1);
+	let bytesRead = 0;
+	let fileDescriptor: number | undefined;
+	try {
+		fileDescriptor = fs.openSync(reportPath, 'r');
+		while (bytesRead < buffer.byteLength) {
+			const read = fs.readSync(fileDescriptor, buffer, bytesRead, buffer.byteLength - bytesRead, bytesRead);
+			if (read === 0) break;
+			bytesRead += read;
+		}
+	} catch (error) {
+		fail(`unable to read JSON report ${reportPath}: ${error instanceof Error ? error.message : String(error)}`);
+	} finally {
+		if (fileDescriptor !== undefined) fs.closeSync(fileDescriptor);
+	}
+	if (bytesRead > MAX_REPORT_BYTES) fail(`JSON report exceeds ${MAX_REPORT_BYTES} bytes: ${reportPath}`);
+	try {
+		return JSON.parse(buffer.toString('utf8', 0, bytesRead)) as JsonReport;
+	} catch (error) {
+		fail(`invalid JSON report ${reportPath}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
 function jsonFiles(directory: string): string[] {
 	if (!fs.existsSync(directory)) fail(`report directory does not exist: ${directory}`);
 	const files: string[] = [];
@@ -203,12 +228,7 @@ function validateReport(
 	seenIds: Set<string>,
 	seenFiles: Set<string>,
 ): JsonResult[] {
-	let report: JsonReport;
-	try {
-		report = JSON.parse(fs.readFileSync(reportPath, 'utf8')) as JsonReport;
-	} catch (error) {
-		fail(`invalid JSON report ${reportPath}: ${error instanceof Error ? error.message : String(error)}`);
-	}
+	const report = readBoundedReport(reportPath);
 	if (report.schemaVersion !== 1) fail(`unsupported schemaVersion in ${reportPath}`);
 	if (!RUN_STATUSES.has(String(report.status))) fail(`invalid run status in ${reportPath}`);
 	if (report.status !== 'passed') fail(`validation report is not passed in ${reportPath}`);

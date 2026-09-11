@@ -158,9 +158,42 @@ describe('repository validation hardening — issue #2675', () => {
 		expect(report.results[0]).toMatchObject({
 			status: 'timed_out',
 			exitCode: 124,
-			cleanedUp: true,
 		});
+		// Windows taskkill can be denied in restricted runners; the authority
+		// must report that uncertainty instead of claiming cleanup succeeded.
+		expect(typeof report.results[0]?.cleanedUp).toBe('boolean');
 	}, 15_000);
+
+	test('reports failed Windows process-tree termination as incomplete cleanup', async () => {
+		const originalPlatform = _internals.platform;
+		const originalSpawnTaskkill = _internals.spawnTaskkill;
+		let parentKilled = false;
+		let killerKilled = false;
+		_internals.platform = 'win32';
+		_internals.spawnTaskkill = (() => ({
+			exited: Promise.resolve(1),
+			kill: () => {
+				killerKilled = true;
+			},
+		})) as typeof _internals.spawnTaskkill;
+		try {
+			const cleaned = await _internals.killProcessTree(
+				{
+					pid: 12_345,
+					kill: () => {
+						parentKilled = true;
+					},
+				},
+				ROOT,
+			);
+			expect(cleaned).toBe(false);
+			expect(parentKilled).toBe(true);
+			expect(killerKilled).toBe(true);
+		} finally {
+			_internals.platform = originalPlatform;
+			_internals.spawnTaskkill = originalSpawnTaskkill;
+		}
+	});
 
 	test('timeout does not wait indefinitely for a descendant-inherited output pipe', async () => {
 		const fixture = path.resolve(

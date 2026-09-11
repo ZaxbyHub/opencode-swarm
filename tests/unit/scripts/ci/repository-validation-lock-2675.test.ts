@@ -3,6 +3,7 @@ import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 
 import {
+	_internals,
 	TERMINAL_STATUSES,
 	type ValidationReport,
 	writeValidationReport,
@@ -116,6 +117,48 @@ describe('repository validation report lock — issue #2675', () => {
 			).toBeNull();
 		});
 	});
+
+	test('bounds malformed and oversized lock inspection without stealing uncertain state', async () => {
+		await withTempRoot(async (root, destination) => {
+			await fsp.mkdir(path.dirname(destination), { recursive: true });
+			const lockPath = `${destination}.lock`;
+			await fsp.writeFile(lockPath, 'x'.repeat(4_097), 'utf8');
+			const started = performance.now();
+			const inspection = await _internals.readReportLockOwner(lockPath);
+			expect(performance.now() - started).toBeLessThan(1_000);
+			expect(inspection).toEqual({ owner: null, allowAgeFallback: false });
+		});
+	});
+
+	test.skipIf(process.platform === 'win32')(
+		'does not open a FIFO while inspecting a lock',
+		async () => {
+			await withTempRoot(async (root, destination) => {
+				const lockPath = `${destination}.lock`;
+				await fsp.mkdir(path.dirname(destination), { recursive: true });
+				const fifo = Bun.spawn(['mkfifo', lockPath], {
+					cwd: root,
+					stdin: 'ignore',
+					stdout: 'ignore',
+					stderr: 'ignore',
+					timeout: 1_000,
+				});
+				try {
+					expect(await fifo.exited).toBe(0);
+				} finally {
+					try {
+						fifo.kill('SIGKILL');
+					} catch {
+						// The short-lived mkfifo process may have exited already.
+					}
+				}
+				const started = performance.now();
+				const inspection = await _internals.readReportLockOwner(lockPath);
+				expect(performance.now() - started).toBeLessThan(1_000);
+				expect(inspection).toEqual({ owner: null, allowAgeFallback: false });
+			});
+		},
+	);
 
 	test('serializes concurrent writers and leaves one complete atomic report', async () => {
 		await withTempRoot(async (root, destination) => {

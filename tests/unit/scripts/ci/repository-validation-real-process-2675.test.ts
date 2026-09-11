@@ -92,7 +92,11 @@ describe('repository-validation authority real-process fixtures — issue #2675'
 		const result = report.results[0];
 
 		expect(result?.status).toBe('timed_out');
-		expect(result?.cleanedUp).toBe(true);
+		// Windows taskkill may return nonzero when the process has already exited
+		// during the bounded cleanup race; the authority must preserve that
+		// uncertainty as false. POSIX process-group cleanup is deterministic here.
+		expect(typeof result?.cleanedUp).toBe('boolean');
+		if (process.platform !== 'win32') expect(result?.cleanedUp).toBe(true);
 		expect(result?.signal).toBe('SIGKILL');
 		expect(report.status).toBe('incomplete');
 		expect(performance.now() - started).toBeLessThan(5_000);
