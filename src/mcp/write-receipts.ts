@@ -25,12 +25,24 @@ export const MCP_WRITE_RECEIPTS_RELATIVE_PATH = path.join(
 	'.swarm',
 	'mcp-write-receipts.jsonl',
 );
+/**
+ * Terminal receipt history is moved here when the active journal reaches its
+ * bounded record count.  Unresolved records are never archived or dropped.
+ */
+export const MCP_WRITE_RECEIPTS_ARCHIVE_RELATIVE_PATH = path.join(
+	'.swarm',
+	'mcp-write-receipts-archive.jsonl',
+);
 
 export const PREPARED_LEASE_MS = 30_000;
 export const MAX_RECEIPT_RECORDS = 500;
+export const MAX_RECEIPT_ARCHIVE_RECORDS = 10_000;
 export const MAX_RECEIPT_LINE_BYTES = 16_384;
 export const MAX_RECEIPT_JOURNAL_BYTES = 512 * 1024;
+export const MAX_RECEIPT_ARCHIVE_BYTES = 16 * 1024 * 1024;
 export const MAX_RECEIPT_RESPONSE_BYTES = 8 * 1024;
+/** Immutable receipt identity version for the reviewed knowledge_add policy. */
+export const KNOWLEDGE_ADD_POLICY_VERSION = 'knowledge_add:v1';
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const MAX_ARGUMENT_BYTES = 128 * 1024;
 const MAX_CANONICAL_NODES = 2048;
@@ -51,6 +63,21 @@ const KNOWLEDGE_CATEGORIES = [
 	'todo',
 	'other',
 ] as const;
+
+export const writeReceiptStatusInput = z.object({
+	idempotency_key: z
+		.string()
+		.min(1)
+		.max(MAX_IDEMPOTENCY_KEY_LENGTH)
+		.refine(
+			(value) =>
+				![...value].some((character) => {
+					const code = character.codePointAt(0) ?? 0;
+					return code <= 0x1f || code === 0x7f;
+				}),
+			{ message: 'idempotency_key must not contain control characters' },
+		),
+});
 
 export const WRITE_RECEIPT_STATES = [
 	'PREPARED',
@@ -83,6 +110,15 @@ export interface WriteReceiptHooks {
 	 * supplied record is already sanitized and contains no raw request fields.
 	 */
 	persistReceipt?: (receipt: WriteReceiptRecord) => Promise<void>;
+	/**
+	 * Test-only fault/order seam. It is invoked immediately before each
+	 * physical archive or active-journal rewrite. The records are sanitized
+	 * receipt records and the callback may throw to model an I/O failure.
+	 */
+	persistStorage?: (
+		kind: 'archive' | 'active',
+		records: readonly WriteReceiptRecord[],
+	) => Promise<void>;
 	/** Test-only interruption seam after PREPARED is durable. */
 	afterPrepare?: (receipt: WriteReceiptRecord) => Promise<void>;
 	/** Test-only interruption seam after the production call returns. */
@@ -161,6 +197,9 @@ function assertReceiptPaths(root: string): void {
 		assertSwarmContainedTarget(
 			path.join(lockDirectory, 'mcp-write-receipts.lock'),
 		);
+		assertSwarmContainedTarget(
+			path.join(root, MCP_WRITE_RECEIPTS_ARCHIVE_RELATIVE_PATH),
+		);
 		validateSymlinkBoundary(journal, root);
 		validateSymlinkBoundary(lockDirectory, root);
 	} catch {
@@ -173,6 +212,10 @@ function assertReceiptPaths(root: string): void {
 
 export function getWriteReceiptPath(root: string): string {
 	return journalPath(root);
+}
+
+export function getWriteReceiptArchivePath(root: string): string {
+	return path.join(root, MCP_WRITE_RECEIPTS_ARCHIVE_RELATIVE_PATH);
 }
 
 function hash(value: string): string {
@@ -319,8 +362,21 @@ export function computeWriteReceiptIdentity(
 		root_hash: hash(canonicalRoot(request.root)),
 		idempotency_hash: hash(request.idempotencyKey),
 		arguments_digest: hash(canonicalArguments(request.arguments)),
-		policy_digest: hash(request.policy || 'knowledge_add:v1'),
+		policy_digest: hash(request.policy ?? KNOWLEDGE_ADD_POLICY_VERSION),
 	};
+}
+
+export interface WriteReceiptStatus {
+	found: boolean;
+	status: WriteReceiptState | 'NOT_FOUND';
+	tool?: string;
+	receipt_id?: string;
+	attempt_id?: string;
+	updated_at?: number;
+	lease_expires_at?: number;
+	archived?: boolean;
+	/** A missing receipt is safe to submit; every recorded state is not. */
+	retryable: boolean;
 }
 
 function sanitizeString(value: string, forbidden: readonly string[]): string {
@@ -497,7 +553,53 @@ export function parseReceiptResponse(response: string): unknown {
 	}
 }
 
-async function readJournal(filePath: string): Promise<WriteReceiptRecord[]> {
+/**
+ * Read the latest status for one knowledge_add idempotency key without
+ * creating a lock or any other project state. Response/error payloads are
+ * intentionally omitted: this surface is only an uncertainty/replay probe.
+ */
+export async function readWriteReceiptStatus(
+	root: string,
+	idempotencyKey: string,
+): Promise<WriteReceiptStatus> {
+	const request: WriteReceiptRequest = {
+		root,
+		tool: 'knowledge_add',
+		idempotencyKey,
+		arguments: {},
+	};
+	const identity = computeWriteReceiptIdentity(request);
+	assertReceiptPaths(root);
+	const storage = await readReceiptStorage(root);
+	const records = [...storage.archive, ...storage.active];
+	const record = [...records]
+		.reverse()
+		.find(
+			(candidate) =>
+				candidate.tool === request.tool &&
+				candidate.root_hash === identity.root_hash &&
+				candidate.idempotency_hash === identity.idempotency_hash,
+		);
+	if (!record) {
+		return { found: false, status: 'NOT_FOUND', retryable: true };
+	}
+	return {
+		found: true,
+		status: record.state,
+		tool: record.tool,
+		receipt_id: record.receipt_id,
+		attempt_id: record.attempt_id,
+		updated_at: record.updated_at,
+		lease_expires_at: record.lease_expires_at,
+		archived: storage.archive.includes(record),
+		retryable: false,
+	};
+}
+
+async function readJournal(
+	filePath: string,
+	limits: { maxBytes: number; maxRecords: number },
+): Promise<WriteReceiptRecord[]> {
 	let content: string;
 	let info: Awaited<ReturnType<typeof lstat>>;
 	try {
@@ -515,7 +617,7 @@ async function readJournal(filePath: string): Promise<WriteReceiptRecord[]> {
 			'Write receipt journal could not be read',
 		);
 	}
-	if (info.size > MAX_RECEIPT_JOURNAL_BYTES) {
+	if (info.size > limits.maxBytes) {
 		throw new WriteReceiptError(
 			'JOURNAL_CAPACITY',
 			'Write receipt journal exceeds its bounded capacity',
@@ -524,7 +626,7 @@ async function readJournal(filePath: string): Promise<WriteReceiptRecord[]> {
 	let handle: Awaited<ReturnType<typeof open>> | undefined;
 	try {
 		handle = await open(filePath, 'r');
-		const buffer = Buffer.alloc(MAX_RECEIPT_JOURNAL_BYTES + 1);
+		const buffer = Buffer.alloc(limits.maxBytes + 1);
 		let offset = 0;
 		while (offset < buffer.length) {
 			const read = await handle.read(
@@ -536,7 +638,7 @@ async function readJournal(filePath: string): Promise<WriteReceiptRecord[]> {
 			if (read.bytesRead === 0) break;
 			offset += read.bytesRead;
 		}
-		if (offset > MAX_RECEIPT_JOURNAL_BYTES) {
+		if (offset > limits.maxBytes) {
 			throw new WriteReceiptError(
 				'JOURNAL_CAPACITY',
 				'Write receipt journal exceeds its bounded capacity',
@@ -563,7 +665,7 @@ async function readJournal(filePath: string): Promise<WriteReceiptRecord[]> {
 		);
 	}
 	const lines = content.split('\n');
-	if (lines.length > MAX_RECEIPT_RECORDS + 1) {
+	if (lines.length > limits.maxRecords + 1) {
 		throw new WriteReceiptError(
 			'JOURNAL_CAPACITY',
 			'Write receipt journal exceeds its bounded record capacity',
@@ -599,35 +701,110 @@ async function readJournal(filePath: string): Promise<WriteReceiptRecord[]> {
 	return records;
 }
 
+type ReceiptStorage = {
+	archive: WriteReceiptRecord[];
+	active: WriteReceiptRecord[];
+};
+
+async function readReceiptStorage(root: string): Promise<ReceiptStorage> {
+	const [archive, active] = await Promise.all([
+		readJournal(getWriteReceiptArchivePath(root), {
+			maxBytes: MAX_RECEIPT_ARCHIVE_BYTES,
+			maxRecords: MAX_RECEIPT_ARCHIVE_RECORDS,
+		}),
+		readJournal(journalPath(root), {
+			maxBytes: MAX_RECEIPT_JOURNAL_BYTES,
+			maxRecords: MAX_RECEIPT_RECORDS,
+		}),
+	]);
+	return { archive, active };
+}
+
 function isUnresolved(record: WriteReceiptRecord): boolean {
 	return record.state === 'PREPARED' || record.state === 'IN_DOUBT';
 }
 
-function evictTerminalRecords(
+function serializeReceiptRecords(
 	records: WriteReceiptRecord[],
-): WriteReceiptRecord[] {
-	if (records.length <= MAX_RECEIPT_RECORDS) return records;
-	throw new WriteReceiptError(
-		'JOURNAL_CAPACITY',
-		'Write receipt journal capacity is exhausted; history is retained',
-	);
-}
-
-async function writeJournal(
-	target: string,
-	records: WriteReceiptRecord[],
-): Promise<void> {
-	const compacted = evictTerminalRecords(records);
-	const content =
-		compacted.map((item) => JSON.stringify(item)).join('\n') +
-		(compacted.length > 0 ? '\n' : '');
-	if (Buffer.byteLength(content, 'utf8') > MAX_RECEIPT_JOURNAL_BYTES) {
+	limits: { maxBytes: number; maxRecords: number },
+): string {
+	if (records.length > limits.maxRecords) {
+		throw new WriteReceiptError(
+			'JOURNAL_CAPACITY',
+			'Write receipt journal exceeds its bounded record capacity',
+		);
+	}
+	const lines = records.map((item) => JSON.stringify(item));
+	for (const line of lines) {
+		if (Buffer.byteLength(line, 'utf8') > MAX_RECEIPT_LINE_BYTES) {
+			throw new WriteReceiptError(
+				'JOURNAL_CAPACITY',
+				'Write receipt record exceeds its bounded line size',
+			);
+		}
+	}
+	const content = lines.join('\n') + (lines.length > 0 ? '\n' : '');
+	if (Buffer.byteLength(content, 'utf8') > limits.maxBytes) {
 		throw new WriteReceiptError(
 			'JOURNAL_CAPACITY',
 			'Write receipt journal exceeds its bounded byte capacity',
 		);
 	}
-	await atomicWriteSwarmFile(target, content, {
+	return content;
+}
+
+async function writeReceiptStorage(
+	root: string,
+	records: WriteReceiptRecord[],
+	hooks?: WriteReceiptHooks,
+): Promise<void> {
+	// A PREPARED record is unresolved only until a later record for the same
+	// attempt settles it. Keep the latest state per attempt active; superseded
+	// PREPARED/IN_DOUBT history is terminal audit history and may be archived.
+	const latestByAttempt = new Map<string, WriteReceiptRecord>();
+	for (const record of records) latestByAttempt.set(record.attempt_id, record);
+	const unresolved = records.filter(
+		(record) =>
+			isUnresolved(record) && latestByAttempt.get(record.attempt_id) === record,
+	);
+	const terminal = records.filter((record) => !unresolved.includes(record));
+	// Keep the newest terminal records in the active journal for compatibility
+	// with existing readers. Older terminal history moves to the bounded archive;
+	// unresolved records always stay active and are never discarded.
+	const activeTerminalCount = Math.max(
+		0,
+		MAX_RECEIPT_RECORDS - unresolved.length,
+	);
+	// Filter the original sequence instead of concatenating unresolved records
+	// ahead of terminal history. Readers use journal order to identify the most
+	// recent lifecycle state, and reordering would let stale PREPARED history
+	// mask a later IN_DOUBT or COMMITTED settlement.
+	const activeRecords = new Set<WriteReceiptRecord>([
+		...unresolved,
+		...terminal.slice(-activeTerminalCount),
+	]);
+	const active = records.filter((record) => activeRecords.has(record));
+	const archive = records.filter((record) => !activeRecords.has(record));
+	const activeContent = serializeReceiptRecords(active, {
+		maxBytes: MAX_RECEIPT_JOURNAL_BYTES,
+		maxRecords: MAX_RECEIPT_RECORDS,
+	});
+	const archiveContent = serializeReceiptRecords(archive, {
+		maxBytes: MAX_RECEIPT_ARCHIVE_BYTES,
+		maxRecords: MAX_RECEIPT_ARCHIVE_RECORDS,
+	});
+	if (archive.length > 0 || archiveContent.length > 0) {
+		await hooks?.persistStorage?.('archive', archive);
+		await atomicWriteSwarmFile(
+			getWriteReceiptArchivePath(root),
+			archiveContent,
+			{
+				maxBytes: MAX_RECEIPT_ARCHIVE_BYTES,
+			},
+		);
+	}
+	await hooks?.persistStorage?.('active', active);
+	await atomicWriteSwarmFile(journalPath(root), activeContent, {
 		maxBytes: MAX_RECEIPT_JOURNAL_BYTES,
 	});
 }
@@ -689,6 +866,7 @@ type ReceiptTransition<T> = {
 async function withReceiptLock<T>(
 	root: string,
 	fn: (records: WriteReceiptRecord[]) => Promise<ReceiptTransition<T>>,
+	hooks?: WriteReceiptHooks,
 ): Promise<T> {
 	assertReceiptPaths(root);
 	const lockResult = await tryAcquireLock(
@@ -705,10 +883,11 @@ async function withReceiptLock<T>(
 	}
 	try {
 		assertReceiptPaths(root);
-		const records = await readJournal(journalPath(root));
+		const storage = await readReceiptStorage(root);
+		const records = [...storage.archive, ...storage.active];
 		const result = await fn(records);
 		if (result.changed) {
-			await writeJournal(journalPath(root), result.records);
+			await writeReceiptStorage(root, result.records, hooks);
 		}
 		return result.value;
 	} finally {
@@ -743,102 +922,107 @@ export async function prepareReceipt(
 		lease_expires_at: timestamp + PREPARED_LEASE_MS,
 	};
 	try {
-		return await withReceiptLock(request.root, async (records) => {
-			const decision = {
-				current: undefined as PrepareReceiptResult | undefined,
-			};
-			const nextRecords = (() => {
-				const sameKey = records.filter(
-					(record) =>
-						record.root_hash === identity.root_hash &&
-						record.idempotency_hash === identity.idempotency_hash,
-				);
-				const sameRequest = sameKey.filter(
-					(record) =>
-						record.tool === request.tool &&
-						record.arguments_digest === identity.arguments_digest &&
-						record.policy_digest === identity.policy_digest,
-				);
-				const latest = sameRequest.at(-1);
-				// A late same-attempt settlement may follow IN_DOUBT. Only the
-				// latest record owns the current lifecycle; an older unresolved
-				// record must not mask a later COMMITTED truth.
-				const unresolved = latest && isUnresolved(latest) ? latest : undefined;
-				if (unresolved) {
-					if (
-						unresolved.state === 'PREPARED' &&
-						timestamp >= unresolved.lease_expires_at
-					) {
-						const inDoubt: WriteReceiptRecord = {
-							...unresolved,
-							state: 'IN_DOUBT',
+		return await withReceiptLock(
+			request.root,
+			async (records) => {
+				const decision = {
+					current: undefined as PrepareReceiptResult | undefined,
+				};
+				const nextRecords = (() => {
+					const sameKey = records.filter(
+						(record) =>
+							record.root_hash === identity.root_hash &&
+							record.idempotency_hash === identity.idempotency_hash,
+					);
+					const sameRequest = sameKey.filter(
+						(record) =>
+							record.tool === request.tool &&
+							record.arguments_digest === identity.arguments_digest &&
+							record.policy_digest === identity.policy_digest,
+					);
+					const latest = sameRequest.at(-1);
+					// A late same-attempt settlement may follow IN_DOUBT. Only the
+					// latest record owns the current lifecycle; an older unresolved
+					// record must not mask a later COMMITTED truth.
+					const unresolved =
+						latest && isUnresolved(latest) ? latest : undefined;
+					if (unresolved) {
+						if (
+							unresolved.state === 'PREPARED' &&
+							timestamp >= unresolved.lease_expires_at
+						) {
+							const inDoubt: WriteReceiptRecord = {
+								...unresolved,
+								state: 'IN_DOUBT',
+								updated_at: timestamp,
+								error: 'previous attempt expired before settlement',
+							};
+							decision.current = {
+								kind: 'in_doubt',
+								receipt: copyRecord(inDoubt),
+							};
+							return [...records, inDoubt];
+						}
+						decision.current =
+							unresolved.state === 'PREPARED'
+								? { kind: 'in_progress', receipt: copyRecord(unresolved) }
+								: { kind: 'in_doubt', receipt: copyRecord(unresolved) };
+						return records;
+					}
+					const exact = [...sameRequest]
+						.reverse()
+						.find((record) => !isUnresolved(record));
+					if (exact) {
+						decision.current = {
+							kind: 'replay',
+							receipt: copyRecord(exact),
+							response: responseForRecord(exact),
+						};
+						return records;
+					}
+					if (sameKey.length > 0) {
+						const conflict: WriteReceiptRecord = {
+							...attempt,
+							state: 'FAILED_NO_EFFECT',
 							updated_at: timestamp,
-							error: 'previous attempt expired before settlement',
+							lease_expires_at: timestamp,
+							response: sanitizeReceiptResponse(
+								{ success: false, error: 'idempotency key conflict' },
+								request,
+							),
+							error: 'idempotency key conflict',
 						};
 						decision.current = {
-							kind: 'in_doubt',
-							receipt: copyRecord(inDoubt),
+							kind: 'conflict',
+							receipt: copyRecord(conflict),
+							response: responseForRecord(conflict),
 						};
-						return [...records, inDoubt];
+						return [...records, conflict];
 					}
-					decision.current =
-						unresolved.state === 'PREPARED'
-							? { kind: 'in_progress', receipt: copyRecord(unresolved) }
-							: { kind: 'in_doubt', receipt: copyRecord(unresolved) };
-					return records;
+					decision.current = { kind: 'prepared', receipt: copyRecord(attempt) };
+					return [...records, attempt];
+				})();
+				if (!decision.current) {
+					throw new WriteReceiptError(
+						'TRANSITION_REJECTED',
+						'Write receipt preparation produced no decision',
+					);
 				}
-				const exact = [...sameRequest]
-					.reverse()
-					.find((record) => !isUnresolved(record));
-				if (exact) {
-					decision.current = {
-						kind: 'replay',
-						receipt: copyRecord(exact),
-						response: responseForRecord(exact),
-					};
-					return records;
+				const changed = nextRecords !== records;
+				if (
+					changed &&
+					hooks &&
+					hooks.persistReceipt &&
+					(decision.current.kind === 'prepared' ||
+						decision.current.kind === 'in_doubt' ||
+						decision.current.kind === 'conflict')
+				) {
+					await hooks.persistReceipt(decision.current.receipt);
 				}
-				if (sameKey.length > 0) {
-					const conflict: WriteReceiptRecord = {
-						...attempt,
-						state: 'FAILED_NO_EFFECT',
-						updated_at: timestamp,
-						lease_expires_at: timestamp,
-						response: sanitizeReceiptResponse(
-							{ success: false, error: 'idempotency key conflict' },
-							request,
-						),
-						error: 'idempotency key conflict',
-					};
-					decision.current = {
-						kind: 'conflict',
-						receipt: copyRecord(conflict),
-						response: responseForRecord(conflict),
-					};
-					return [...records, conflict];
-				}
-				decision.current = { kind: 'prepared', receipt: copyRecord(attempt) };
-				return [...records, attempt];
-			})();
-			if (!decision.current) {
-				throw new WriteReceiptError(
-					'TRANSITION_REJECTED',
-					'Write receipt preparation produced no decision',
-				);
-			}
-			const changed = nextRecords !== records;
-			if (
-				changed &&
-				hooks &&
-				hooks.persistReceipt &&
-				(decision.current.kind === 'prepared' ||
-					decision.current.kind === 'in_doubt' ||
-					decision.current.kind === 'conflict')
-			) {
-				await hooks.persistReceipt(decision.current.receipt);
-			}
-			return { value: decision.current, records: nextRecords, changed };
-		});
+				return { value: decision.current, records: nextRecords, changed };
+			},
+			hooks,
+		);
 	} catch (error) {
 		if (error instanceof WriteReceiptError) throw error;
 		throw new WriteReceiptError(
@@ -897,45 +1081,52 @@ async function transitionReceipt(
 					),
 				}),
 	};
-	if (options.hooks?.persistReceipt) {
-		await options.hooks.persistReceipt(nextRecord);
-	}
-	const value = await withReceiptLock(request.root, async (records) => {
-		const current = [...records]
-			.reverse()
-			.find((record) => sameAttempt(record, attempt));
-		if (!current) {
-			throw new WriteReceiptError(
-				'TRANSITION_REJECTED',
-				'Write receipt attempt no longer exists',
-			);
-		}
-		if (current.state === 'COMMITTED') {
-			return { value: current, records, changed: false };
-		}
-		if (
-			current.state === 'IN_DOUBT' &&
-			state !== 'COMMITTED' &&
-			state !== 'IN_DOUBT'
-		) {
-			return { value: current, records, changed: false };
-		}
-		if (current.state === 'IN_DOUBT' && state === 'COMMITTED') {
+	const value = await withReceiptLock(
+		request.root,
+		async (records) => {
+			const current = [...records]
+				.reverse()
+				.find((record) => sameAttempt(record, attempt));
+			if (!current) {
+				throw new WriteReceiptError(
+					'TRANSITION_REJECTED',
+					'Write receipt attempt no longer exists',
+				);
+			}
+			if (current.state === 'COMMITTED') {
+				return { value: current, records, changed: false };
+			}
+			if (
+				current.state === 'IN_DOUBT' &&
+				state !== 'COMMITTED' &&
+				state !== 'IN_DOUBT'
+			) {
+				return { value: current, records, changed: false };
+			}
+			if (current.state === 'IN_DOUBT' && state === 'COMMITTED') {
+				if (options.hooks?.persistReceipt) {
+					await options.hooks.persistReceipt(nextRecord);
+				}
+				return {
+					value: nextRecord,
+					records: [...records, nextRecord],
+					changed: true,
+				};
+			}
+			if (current.state !== 'PREPARED') {
+				return { value: current, records, changed: false };
+			}
+			if (options.hooks?.persistReceipt) {
+				await options.hooks.persistReceipt(nextRecord);
+			}
 			return {
 				value: nextRecord,
 				records: [...records, nextRecord],
 				changed: true,
 			};
-		}
-		if (current.state !== 'PREPARED') {
-			return { value: current, records, changed: false };
-		}
-		return {
-			value: nextRecord,
-			records: [...records, nextRecord],
-			changed: true,
-		};
-	});
+		},
+		options.hooks,
+	);
 	return value;
 }
 
@@ -1179,7 +1370,13 @@ export function buildKnowledgeAddRequest(
 	assertBoundedKnowledgeAddInput(rawArgs);
 	const args = knowledgeAddInput.parse(rawArgs);
 	const idempotencyKey = args.idempotency_key;
-	const productionArgs: Record<string, unknown> = { ...args };
+	// knowledge_add treats an omitted scope as `global`; materialize that
+	// default before hashing so omitted and explicit-global requests replay the
+	// same receipt and invoke production with the same effective arguments.
+	const productionArgs: Record<string, unknown> = {
+		...args,
+		scope: args.scope ?? 'global',
+	};
 	delete productionArgs.idempotency_key;
 	return {
 		request: {
@@ -1187,7 +1384,7 @@ export function buildKnowledgeAddRequest(
 			tool: 'knowledge_add',
 			idempotencyKey,
 			arguments: productionArgs,
-			policy: runtime?.policy,
+			policy: runtime?.policy ?? KNOWLEDGE_ADD_POLICY_VERSION,
 		},
 		productionArgs,
 	};

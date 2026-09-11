@@ -21,6 +21,7 @@ import type {
 	BashWord,
 } from 'bash-parser';
 import parse from 'bash-parser';
+import { unsafePathTextReason } from '../scope/path-identity';
 
 /**
  * All write-operation categories detected by this module.
@@ -122,6 +123,8 @@ const BUILTIN_WRITE_COMMANDS = new Set([
 	'install',
 	'ln',
 	'truncate',
+	'unlink',
+	'rmdir',
 ]);
 
 /** Builtins with in-place editing semantics (modify file argument in place). */
@@ -137,6 +140,12 @@ const INTERPRETER_EVAL_COMMANDS = new Set([
 	'ruby',
 	'perl',
 	'php',
+	'bash',
+	'sh',
+	'dash',
+	'zsh',
+	'ksh',
+	'eval',
 ]);
 
 /** Network downloaders. */
@@ -716,7 +725,20 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		ruby: ['-e'],
 		perl: ['-e', '-E'],
 		php: ['-r', '-R', '-F'],
+		bash: ['-c'],
+		sh: ['-c'],
+		dash: ['-c'],
+		zsh: ['-c'],
+		ksh: ['-c'],
 	};
+	if (lowerName === 'eval') {
+		results.push({
+			category: 'interpreter_eval',
+			operator: 'eval',
+			path: null,
+		});
+		return results;
+	}
 
 	const relevantFlags = evalFlags[lowerName] ?? [];
 	// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
@@ -1015,6 +1037,23 @@ function splitWindowsCommands(
 			parenDepth--;
 		}
 
+		// PowerShell script blocks and statement separators are command
+		// boundaries. Splitting braces themselves is intentional: leaving the
+		// opening brace attached makes the anchored cmdlet matcher miss writes in
+		// `{ Set-Content outside.txt }`. Expressions containing braces are handled
+		// conservatively as smaller command fragments.
+		if (
+			shell === 'powershell' &&
+			(ch === ';' || ch === '{' || ch === '}') &&
+			!inSingleQuote &&
+			!inDoubleQuote &&
+			parenDepth === 0
+		) {
+			if (current.trim()) commands.push(current.trim());
+			current = '';
+			continue;
+		}
+
 		// Split on | (pipe) when not in quotes or parens
 		if (ch === '|' && !inSingleQuote && !inDoubleQuote && parenDepth === 0) {
 			if (current.trim()) commands.push(current.trim());
@@ -1226,6 +1265,40 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		}
 	}
 
+	// Changing the working directory makes relative paths in the same compound
+	// command impossible to resolve without executing PowerShell. Report an
+	// unresolved write effect so callers fail closed instead of resolving a
+	// later path against the original workspace root.
+	if (
+		/(?:^|[;{}|&])\s*(?:Set-Location|Push-Location|Pop-Location|cd|chdir|sl)\b/i.test(
+			innerCommand,
+		)
+	) {
+		results.push({
+			category: 'builtin_write',
+			operator: 'working-directory mutation',
+			path: null,
+		});
+	}
+
+	// Executable/parenthesized script blocks can keep their braces inside a
+	// larger expression (for example `& ({ Set-Content ../outside.txt ... })`),
+	// so splitWindowsCommands cannot expose the cmdlet as a fragment anchored at
+	// the start. Treat any write cmdlet nested behind a grouping delimiter as an
+	// unresolved write effect; static resolution cannot safely determine the
+	// invocation context or working directory.
+	if (
+		/[({]\s*(?:Out-File|Set-Content|Add-Content|Clear-Content|Copy-Item|Move-Item|Remove-Item)\b/i.test(
+			innerCommand,
+		)
+	) {
+		results.push({
+			category: 'interpreter_eval',
+			operator: 'nested PowerShell script block',
+			path: null,
+		});
+	}
+
 	results.push(...detectPowerShellRedirects(innerCommand));
 
 	// Start-Process is handled by detectInteractiveSession — do not double-detect here
@@ -1246,11 +1319,11 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 	}
 
 	// Detect file-writing cmdlets: Out-File, Set-Content, Add-Content, Clear-Content
-	function detectPsContentCmdlet(cmd: string): WriteTarget | null {
+	function detectPsContentCmdlet(cmd: string): WriteTarget[] {
 		const cmdletMatch = cmd.match(
 			/^(Out-File|Set-Content|Add-Content|Clear-Content)\b/i,
 		);
-		if (!cmdletMatch) return null;
+		if (!cmdletMatch) return [];
 		const cmdletName = cmdletMatch[1];
 		const rest = cmd.slice(cmdletMatch[0].length).trim();
 
@@ -1262,12 +1335,20 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		// Match -Path <value>, -FilePath <value>, -LiteralPath <value> (value may be quoted)
 		// Quoted strings must be matched BEFORE \S+ to handle paths with spaces correctly
 		const pathFlagMatch = rest.match(
-			/(?:-Path|-FilePath|-LiteralPath)\s+("([^"]+)"|'([^']+)'|(\S+))/i,
+			/(?:-Path|-FilePath|-LiteralPath)\s+((?:"[^"]*"|'[^']*'|[^,\s]+)(?:\s*,\s*(?:"[^"]*"|'[^']*'|[^,\s]+))*)/i,
 		);
 		if (pathFlagMatch) {
-			const path =
-				pathFlagMatch[2] ?? pathFlagMatch[3] ?? pathFlagMatch[4] ?? '';
-			return { category: 'redirect', operator: cmdletName, path };
+			const paths = pathFlagMatch[1]
+				.split(/\s*,\s*/)
+				.map((value) => value.replace(/^(["'])|(["'])$/g, ''));
+			return paths.map((path) => ({
+				category: 'redirect',
+				operator: cmdletName,
+				path: path || null,
+			}));
+		}
+		if (/(?:-Path|-FilePath|-LiteralPath)(?:\s|$)/i.test(rest)) {
+			return [{ category: 'redirect', operator: cmdletName, path: null }];
 		}
 
 		// No explicit path flag — fall back to first non-flag positional argument
@@ -1278,16 +1359,13 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 			if (token.startsWith('-')) continue;
 			// This is a positional argument — treat it as the path
 			const path = token.replace(/^["']|["']$/g, '');
-			return { category: 'redirect', operator: cmdletName, path };
+			return [{ category: 'redirect', operator: cmdletName, path }];
 		}
 
-		return null;
+		return [];
 	}
 
-	const contentResult = detectPsContentCmdlet(innerCommand);
-	if (contentResult) {
-		results.push(contentResult);
-	}
+	results.push(...detectPsContentCmdlet(innerCommand));
 
 	// Also detect content cmdlets that appear AFTER a pipe
 	// e.g., "echo hello | Out-File path" or "echo data | Set-Content file.txt"
@@ -1436,6 +1514,47 @@ const _CMD_WRITE_BUILTINS = new Set([
 	'ren',
 ]);
 
+/** cmd.exe switches that may appear in a copy/move command. */
+const _CMD_COPY_MOVE_SWITCHES = new Set([
+	'/a',
+	'/b',
+	'/d',
+	'/f',
+	'/n',
+	'/v',
+	'/y',
+	'/-y',
+	'/z',
+]);
+
+/** Tokenize cmd.exe arguments while retaining spaces inside quoted paths. */
+function tokenizeCmdArguments(command: string): string[] {
+	const tokens: string[] = [];
+	let current = '';
+	let inDoubleQuote = false;
+	for (let index = 0; index < command.length; index++) {
+		const character = command[index];
+		if (character === '^' && !inDoubleQuote) {
+			if (index + 1 < command.length) current += command[++index];
+			continue;
+		}
+		if (character === '"') {
+			inDoubleQuote = !inDoubleQuote;
+			continue;
+		}
+		if (/\s/.test(character) && !inDoubleQuote) {
+			if (current) {
+				tokens.push(current);
+				current = '';
+			}
+			continue;
+		}
+		current += character;
+	}
+	if (current) tokens.push(current);
+	return tokens;
+}
+
 /**
  * Scan cmd.exe redirections without requiring whitespace around the operator.
  *
@@ -1559,20 +1678,14 @@ function detectCmdWrites(command: string): WriteTarget[] {
 
 	// Detect copy builtin: copy source dest (handles if exist pattern)
 	function detectCmdCopy(cmd: string): WriteTarget | null {
-		// Direct: copy src dest
-		const directMatch = cmd.match(
-			/^copy\s+(\S+|"[^"]+"|'[^']+')\s+(\S+|"[^"]+"|'[^']+')/i,
-		);
-		if (directMatch) {
-			const dest = directMatch[2].replace(/^["']|["']$/g, '');
-			return { category: 'builtin_write', operator: 'copy', path: dest };
-		}
-		// if exist pattern: if exist <file> copy src dest
-		const ifExistMatch = cmd.match(
-			/if\s+exist\s+\S+.*?copy\s+(\S+|"[^"]+"|'[^']+')\s+(\S+|"[^"]+"|'[^']+')/i,
-		);
-		if (ifExistMatch) {
-			const dest = ifExistMatch[2].replace(/^["']|["']$/g, '');
+		const commandMatch = cmd.match(/(?:^|\s)copy(?=\s|$)/i);
+		if (commandMatch) {
+			const start = (commandMatch.index ?? 0) + commandMatch[0].length;
+			const positional = tokenizeCmdArguments(cmd.slice(start)).filter(
+				(token) => !_CMD_COPY_MOVE_SWITCHES.has(token.toLowerCase()),
+			);
+			if (positional.length < 2) return null;
+			const dest = positional[positional.length - 1];
 			return { category: 'builtin_write', operator: 'copy', path: dest };
 		}
 		return null;
@@ -1580,19 +1693,14 @@ function detectCmdWrites(command: string): WriteTarget[] {
 
 	// Detect move builtin: move source dest
 	function detectCmdMove(cmd: string): WriteTarget | null {
-		const directMatch = cmd.match(
-			/^move\s+(\S+|"[^"]+"|'[^']+')\s+(\S+|"[^"]+"|'[^']+')/i,
-		);
-		if (directMatch) {
-			const dest = directMatch[2].replace(/^["']|["']$/g, '');
-			return { category: 'builtin_write', operator: 'move', path: dest };
-		}
-		// if exist pattern
-		const ifExistMatch = cmd.match(
-			/if\s+exist\s+\S+.*?move\s+(\S+|"[^"]+"|'[^']+')\s+(\S+|"[^"]+"|'[^']+')/i,
-		);
-		if (ifExistMatch) {
-			const dest = ifExistMatch[2].replace(/^["']|["']$/g, '');
+		const commandMatch = cmd.match(/(?:^|\s)move(?=\s|$)/i);
+		if (commandMatch) {
+			const start = (commandMatch.index ?? 0) + commandMatch[0].length;
+			const positional = tokenizeCmdArguments(cmd.slice(start)).filter(
+				(token) => !_CMD_COPY_MOVE_SWITCHES.has(token.toLowerCase()),
+			);
+			if (positional.length < 2) return null;
+			const dest = positional[positional.length - 1];
 			return { category: 'builtin_write', operator: 'move', path: dest };
 		}
 		return null;
@@ -1722,6 +1830,19 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	if (!command || typeof command !== 'string') {
 		return { writes: [], hasWrites: false };
 	}
+	if (unsafePathTextReason(command)) {
+		return {
+			writes: [
+				{
+					category: 'interpreter_eval',
+					operator: 'unsafe command text',
+					path: null,
+				},
+			],
+			hasWrites: true,
+			parseError: true,
+		};
+	}
 
 	let ast: unknown;
 	let parseFailed = false;
@@ -1803,6 +1924,19 @@ export function detectWindowsWrites(
 	if (!command || typeof command !== 'string') {
 		return { writes: [], hasWrites: false };
 	}
+	if (unsafePathTextReason(command)) {
+		return {
+			writes: [
+				{
+					category: 'interpreter_eval',
+					operator: 'unsafe command text',
+					path: null,
+				},
+			],
+			hasWrites: true,
+			parseError: true,
+		};
+	}
 
 	try {
 		// Split compound commands (pipelines, &&, ||)
@@ -1852,6 +1986,11 @@ function isDynamicPath(pathText: string | null): boolean {
 	if (/\$\([^)]+\)/.test(pathText)) return true;
 	// `cmd` (backtick command substitution)
 	if (/`[^`]+`/.test(pathText)) return true;
+	// Tilde expansion is resolved by the shell, not by the static resolver.
+	if (/^~(?:[^/\\\s]*)?(?:[/\\]|$)/.test(pathText)) return true;
+	// cmd.exe batch parameters and modifiers (for example %~dp0, %1, %*).
+	if (/%~[A-Za-z]*(?:\d+|\*)/.test(pathText)) return true;
+	if (/%(?:\d+|\*)/.test(pathText)) return true;
 	return false;
 }
 

@@ -3,6 +3,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	rmSync,
 	symlinkSync,
 	writeFileSync,
 } from 'node:fs';
@@ -25,8 +26,20 @@ import {
 } from '../../../src/mcp/write-receipts';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
+const testRoots = new Set<string>();
+
+function makeTestRoot(prefix: string): string {
+	const root = canonicalMkdtemp(prefix);
+	testRoots.add(root);
+	return root;
+}
+
 afterEach(() => {
 	mock.restore();
+	for (const root of testRoots) {
+		rmSync(root, { recursive: true, force: true });
+	}
+	testRoots.clear();
 });
 
 function request(root: string, suffix = 'one'): WriteReceiptRequest {
@@ -45,7 +58,7 @@ function request(root: string, suffix = 'one'): WriteReceiptRequest {
 
 describe('MCP write receipts (#2500)', () => {
 	test('replays the original settlement after a conflicting request', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		const first = await prepareReceipt(request(root));
 		expect(first.kind).toBe('prepared');
 		if (first.kind !== 'prepared') return;
@@ -83,7 +96,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('durable preparation precedes a failed afterPrepare handoff', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		let calls = 0;
 		await expect(
 			executeWithReceipt(
@@ -105,7 +118,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('stale PREPARED becomes IN_DOUBT without re-executing', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		let now = 1_000;
 		let calls = 0;
 		const hooks = { now: () => now };
@@ -142,7 +155,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('receipt persistence failure blocks the production call', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		let calls = 0;
 		await expect(
 			executeWithReceipt(
@@ -163,7 +176,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('false production results are settled and replayed without re-execution', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		let calls = 0;
 		const write = async () => {
 			calls++;
@@ -187,7 +200,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('preserves a closed category across commit and same-key replay', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		const liveRequest = request(root, 'category-replay');
 		liveRequest.arguments = {
 			...liveRequest.arguments,
@@ -231,7 +244,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('production exceptions are uncertain and cannot be retried', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		let calls = 0;
 		const failing = () => {
 			calls++;
@@ -250,7 +263,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('receipt lock is released while production work is running', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		let release!: () => void;
 		let operationStarted!: () => void;
 		const started = new Promise<void>((resolve) => {
@@ -275,7 +288,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('a concurrent conflicting request cannot mask the live exact attempt', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		const originalRequest = request(root, 'concurrent-conflict');
 		const original = await prepareReceipt(originalRequest);
 		expect(original.kind).toBe('prepared');
@@ -292,7 +305,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('corrupt and truncated journals fail closed', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		const journal = getWriteReceiptPath(root);
 		mkdirSync(path.dirname(journal), { recursive: true });
 		writeFileSync(journal, '{"version":1}\n{"truncated":true}', 'utf8');
@@ -319,7 +332,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('oversized journals are rejected before unbounded reads', async () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		const journal = getWriteReceiptPath(root);
 		mkdirSync(path.dirname(journal), { recursive: true });
 		writeFileSync(journal, 'x'.repeat(MAX_RECEIPT_JOURNAL_BYTES + 1), 'utf8');
@@ -332,8 +345,8 @@ describe('MCP write receipts (#2500)', () => {
 
 	test('receipt paths reject a symlinked .swarm boundary where supported', async () => {
 		if (process.platform === 'win32') return;
-		const root = canonicalMkdtemp('mcp-receipts-');
-		const outside = canonicalMkdtemp('mcp-receipts-outside-');
+		const root = makeTestRoot('mcp-receipts-');
+		const outside = makeTestRoot('mcp-receipts-outside-');
 		symlinkSync(outside, path.join(root, '.swarm'), 'dir');
 		await expect(
 			prepareReceipt(request(root, 'symlink')),
@@ -343,7 +356,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('knowledge_add input bounds arrays before production cloning', () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		const base = {
 			idempotency_key: 'bounded',
 			lesson: 'A durable lesson with enough characters for validation',
@@ -376,7 +389,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('receipt sanitizer keeps only the bounded production result schema', () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		const response = sanitizeReceiptResponse(
 			{
 				success: false,
@@ -397,7 +410,7 @@ describe('MCP write receipts (#2500)', () => {
 	});
 
 	test('knowledge adapter requires and strips idempotency_key', () => {
-		const root = canonicalMkdtemp('mcp-receipts-');
+		const root = makeTestRoot('mcp-receipts-');
 		const args = {
 			idempotency_key: 'adapter-key',
 			lesson: 'A durable lesson with enough characters for validation',

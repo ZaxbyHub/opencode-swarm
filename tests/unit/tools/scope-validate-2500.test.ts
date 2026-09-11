@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
 import {
 	mkdirSync,
 	readFileSync,
@@ -22,6 +22,10 @@ writeFileSync(target, 'before\n');
 const powershellTarget = path.join(root, 'safe', 'note.md');
 mkdirSync(path.dirname(powershellTarget), { recursive: true });
 writeFileSync(powershellTarget, 'before\n');
+
+afterAll(() => {
+	rmSync(root, { recursive: true, force: true });
+});
 
 describe('scope_validate (#2500)', () => {
 	test('is registered for architect only', () => {
@@ -370,26 +374,33 @@ describe('scope_validate (#2500)', () => {
 		}
 	});
 
+	test('keeps the maximum scope validation bounded (F-011)', () => {
+		// Before F-011, every scope entry independently canonicalized the root and
+		// its ancestors, monopolizing the event loop for the 10,000-entry bound.
+		const scopeFiles = Array.from(
+			{ length: 10_000 },
+			(_, index) => `generated/${index}.md`,
+		);
+		const startedAt = performance.now();
+		const result = evaluateScopeValidate(
+			{ command: 'echo ok', shell: 'posix', scope_files: scopeFiles },
+			root,
+		);
+
+		expect(result.allowed).toBe(true);
+		expect(result.targets).toEqual([]);
+		expect(performance.now() - startedAt).toBeLessThan(4_000);
+	});
+
 	test('rejects symlink or junction escapes when creation is available', () => {
 		const outsideRoot = canonicalMkdtemp('scope-validate-2500-outside-');
 		const linkPath = path.join(root, 'in-root', 'linked');
 		try {
-			try {
-				symlinkSync(
-					outsideRoot,
-					linkPath,
-					process.platform === 'win32' ? 'junction' : 'dir',
-				);
-			} catch (error) {
-				const code = (error as NodeJS.ErrnoException).code;
-				if (
-					process.platform === 'win32' &&
-					(code === 'EPERM' || code === 'EACCES' || code === 'UNKNOWN')
-				) {
-					return;
-				}
-				throw error;
-			}
+			symlinkSync(
+				outsideRoot,
+				linkPath,
+				process.platform === 'win32' ? 'junction' : 'dir',
+			);
 			expect(() =>
 				evaluateScopeValidate(
 					{
@@ -402,6 +413,7 @@ describe('scope_validate (#2500)', () => {
 			).toThrow(ScopeValidationError);
 		} finally {
 			rmSync(linkPath, { recursive: true, force: true });
+			rmSync(outsideRoot, { recursive: true, force: true });
 		}
 	});
 

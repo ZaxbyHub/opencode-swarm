@@ -537,8 +537,7 @@ export const TOOL_METADATA = {
 		agents: ['architect'],
 	},
 	scope_validate: {
-		description:
-			'validate a shell command against an inline workspace scope without executing it; rejects destructive, ambiguous, unresolved, escaping, symlinked, protected, and out-of-scope writes',
+		description: 'validate shell writes against an inline file scope',
 		agents: ['architect'],
 	},
 	knowledge_query: {
@@ -851,6 +850,10 @@ export const TOOL_METADATA = {
 			'coder',
 			'test_engineer',
 		],
+	},
+	knowledge_receipt_status: {
+		description: 'receipt status',
+		agents: [],
 	},
 	knowledge_archive: {
 		description:

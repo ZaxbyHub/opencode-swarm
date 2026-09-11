@@ -19,14 +19,15 @@ import {
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect';
 import {
-	isPathWithinDeclaredScope,
+	getPathFlavor,
+	normalizePathIdentity,
 	unsafePathTextReason,
 } from '../scope/path-identity';
 import { normalizeScopeFiles } from '../scope/scope-binding';
 import { classifyCommand } from '../security/command-classifier';
 import {
+	createTargetWithinRootValidator,
 	isCanonicalPathWithinRoot,
-	validateTargetWithinRoot,
 	validateWorkspaceRoot,
 } from '../utils/path-security';
 import { createSwarmTool } from './create-tool';
@@ -88,6 +89,36 @@ function detectWrites(args: ScopeValidateArgs) {
 }
 
 /**
+ * Build an indexed scope predicate. The previous `some()`-per-target scan was
+ * quadratic for the schema's 10,000-entry upper bound. Walking a target's
+ * bounded ancestor chain against a normalized Set keeps the same containment
+ * semantics while making the scope-size cost linear.
+ */
+function createScopeMatcher(
+	scopeEntries: readonly string[],
+	directory: string,
+): (filePath: string) => boolean {
+	const flavor = getPathFlavor();
+	const pathImpl = flavor === 'win32' ? path.win32 : path.posix;
+	const scopeIdentities = new Set(
+		scopeEntries.map((scope) =>
+			normalizePathIdentity(pathImpl.resolve(directory, scope), flavor),
+		),
+	);
+	return (filePath) => {
+		let candidate = pathImpl.resolve(directory, filePath);
+		while (true) {
+			if (scopeIdentities.has(normalizePathIdentity(candidate, flavor))) {
+				return true;
+			}
+			const parent = pathImpl.dirname(candidate);
+			if (parent === candidate) return false;
+			candidate = parent;
+		}
+	};
+}
+
+/**
  * Evaluate a shell command against an inline scope without executing it.
  * Every filesystem path is checked against the supplied root and scope before
  * a successful result is returned.
@@ -113,12 +144,14 @@ export function evaluateScopeValidate(
 			'scope_files must contain safe workspace-relative paths',
 		);
 	}
+	const validateScopeTarget = createTargetWithinRootValidator(directory);
 	for (const scopeFile of normalizedScope) {
 		const unsafeReason = unsafePathTextReason(scopeFile);
 		if (unsafeReason) fail('INVALID_SCOPE', unsafeReason);
-		const reason = validateTargetWithinRoot(scopeFile, directory);
+		const reason = validateScopeTarget(scopeFile);
 		if (reason) fail('INVALID_SCOPE', reason);
 	}
+	const isInScope = createScopeMatcher(normalizedScope, directory);
 
 	const classification = classifyCommand(args.command);
 	if (classification.ambiguous) {
@@ -171,9 +204,7 @@ export function evaluateScopeValidate(
 			);
 		}
 		const relativeTarget = path.relative(directory, resolvedPath);
-		if (
-			!isPathWithinDeclaredScope(relativeTarget, normalizedScope, directory)
-		) {
+		if (!isInScope(relativeTarget)) {
 			fail(
 				'SCOPE_VIOLATION',
 				'a write target is outside the inline declared scope',

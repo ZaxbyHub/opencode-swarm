@@ -78,6 +78,7 @@ import { knowledge_archive } from './knowledge-archive';
 import { knowledge_query } from './knowledge-query';
 import { knowledge_recall } from './knowledge-recall';
 import { knowledge_receipt } from './knowledge-receipt';
+import { knowledge_receipt_status } from './knowledge-receipt-status';
 import { knowledge_remove } from './knowledge-remove';
 import { lean_turbo_acquire_locks } from './lean-turbo-acquire-locks';
 import { lean_turbo_critic } from './lean-turbo-critic';
@@ -275,6 +276,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	skill_improve: () => skill_improve,
 	spec_write: () => spec_write,
 	knowledge_receipt: () => knowledge_receipt,
+	knowledge_receipt_status: () => knowledge_receipt_status,
 	knowledge_archive: () => knowledge_archive,
 	swarm_memory_recall: () => swarm_memory_recall,
 	swarm_memory_propose: () => swarm_memory_propose,

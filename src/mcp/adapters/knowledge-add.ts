@@ -19,7 +19,6 @@ import { mcpToolContext, safeParseJson } from './verification.js';
 
 export interface McpKnowledgeAddWriteAdapter {
 	name: 'knowledge_add';
-	description: string;
 	kind: 'write';
 	pathFields: string[];
 	inputSchema: typeof knowledgeAddInput;
@@ -55,8 +54,6 @@ export async function executeKnowledgeAdd(
 
 export const knowledgeAddAdapter: McpKnowledgeAddWriteAdapter = {
 	name: 'knowledge_add',
-	description:
-		'Store a new lesson in the knowledge base for future reference. This write is available only when the MCP server was started with explicit knowledge_add authorization.',
 	kind: 'write',
 	pathFields: [],
 	inputSchema: knowledgeAddInput,

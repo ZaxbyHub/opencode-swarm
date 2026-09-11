@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
+import { rmSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
@@ -20,6 +21,10 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 describe('MCP explicitly-authorized write wiring (#2500)', () => {
 	const root = canonicalMkdtemp('mcp-wiring-2500-');
 	const originalRunner = cliInternals.runMcpServer;
+
+	afterAll(() => {
+		rmSync(root, { recursive: true, force: true });
+	});
 
 	afterEach(() => {
 		cliInternals.runMcpServer = originalRunner;

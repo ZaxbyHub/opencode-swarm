@@ -21,6 +21,7 @@ import {
 	knowledgeRecallAdapter,
 	swarmMemoryRecallAdapter,
 } from './adapters/knowledge-memory.js';
+import { receiptStatusAdapter } from './adapters/receipt-status.js';
 import {
 	diffAdapter,
 	planConflictCheckAdapter,
@@ -44,7 +45,7 @@ export interface McpReadTool {
 	/** Registered plugin tool name (a TOOL_METADATA key). */
 	name: string;
 	/** Exact TOOL_METADATA description (parity assigned at build time). */
-	description: string;
+	description?: string;
 	kind: 'read';
 	/** Argument field names carrying file-path values (containment-checked). */
 	pathFields: string[];
@@ -57,7 +58,7 @@ export interface McpWriteTool {
 	/** Registered plugin tool name (a TOOL_METADATA key). */
 	name: string;
 	/** Exact TOOL_METADATA description (parity assigned at build time). */
-	description: string;
+	description?: string;
 	kind: 'write';
 	/** Argument field names carrying file-path values (containment-checked). */
 	pathFields: string[];
@@ -85,8 +86,6 @@ export interface BuildMcpToolRegistryOptions {
 	allowWrite?: boolean;
 	/** Exact reviewed write names authorized for this server instance. */
 	writeTools?: string[];
-	/** Test-only fault and clock hooks for the write receipt boundary. */
-	writeHooks?: KnowledgeAddAdapterRuntime['hooks'];
 }
 
 /** The only MCP write adapter reviewed and shipped by #2500. */
@@ -138,6 +137,7 @@ const READ_ADAPTERS: McpReadTool[] = [
 	diffAdapter,
 	symbolsAdapter,
 	scopeValidationAdapter,
+	receiptStatusAdapter,
 ];
 
 export function buildMcpToolRegistry(

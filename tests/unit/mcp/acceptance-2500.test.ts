@@ -1,9 +1,10 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	rmSync,
 	writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -47,6 +48,10 @@ export const ACCEPTANCE_CRITERIA = {
 const root = canonicalMkdtemp('mcp-acceptance-2500-');
 mkdirSync(path.join(root, 'in-root'), { recursive: true });
 writeFileSync(path.join(root, 'in-root', 'note.md'), 'acceptance fixture\n');
+
+afterAll(() => {
+	rmSync(root, { recursive: true, force: true });
+});
 
 function options(extra: Partial<AuthorizedOptions> = {}): AuthorizedOptions {
 	return {
@@ -128,6 +133,7 @@ describe('MCP explicitly authorized writes (#2500)', () => {
 		// scope_validate is a read-only policy check and must not require a
 		// writeTools allowlist entry.
 		await withClient({ root }, async (client) => {
+			const before = readdirSync(root).sort();
 			const allowed = await call(client, 'scope_validate', {
 				command: 'printf x > in-root/note.md',
 				shell: 'posix',
@@ -137,6 +143,26 @@ describe('MCP explicitly authorized writes (#2500)', () => {
 				'Tool scope_validate not found',
 			);
 			expect(allowed.isError).not.toBe(true);
+			const payload = JSON.parse(
+				(allowed.content?.[0] as { text: string }).text,
+			) as {
+				allowed: boolean;
+				shell: string;
+				targets: Array<{ category: string; operator: string; path: string }>;
+			};
+			expect(payload).toMatchObject({
+				allowed: true,
+				shell: 'posix',
+				targets: [
+					{ category: 'redirect', operator: '>', path: 'in-root/note.md' },
+				],
+			});
+			// scope_validate is an evaluator only: the live MCP call must not
+			// materialize .swarm state or mutate the declared fixture.
+			expect(readdirSync(root).sort()).toEqual(before);
+			expect(readFileSync(path.join(root, 'in-root', 'note.md'), 'utf8')).toBe(
+				'acceptance fixture\n',
+			);
 
 			for (const unsafe of [
 				{
@@ -156,6 +182,21 @@ describe('MCP explicitly authorized writes (#2500)', () => {
 				},
 				{
 					command: 'rm -rf in-root',
+					shell: 'posix',
+					scope_files: ['in-root/note.md'],
+				},
+				{
+					command: 'printf x > in-root/note.md',
+					shell: 'posix',
+					scope_files: ['in-root/note.md\u0000'],
+				},
+				{
+					command: 'printf x > in-root/note.md',
+					shell: 'posix',
+					scope_files: ['in-root/note.md\u007f'],
+				},
+				{
+					command: 'printf x > in-root/note.md\u0000',
 					shell: 'posix',
 					scope_files: ['in-root/note.md'],
 				},
@@ -266,6 +307,7 @@ describe('MCP explicitly authorized writes (#2500)', () => {
 	});
 
 	test('AC5c: post-mutation receipt failure never reports success', async () => {
+		const lesson = 'mutation may have happened but receipt did not';
 		await withClient(
 			options({
 				writeHooks: {
@@ -277,7 +319,7 @@ describe('MCP explicitly authorized writes (#2500)', () => {
 			async (client) => {
 				const result = await call(client, 'knowledge_add', {
 					idempotency_key: 'ac5-after-mutation',
-					lesson: 'mutation may have happened but receipt did not',
+					lesson,
 					category: 'testing',
 					applies_to_tools: ['knowledge_add'],
 					required_actions: ['return in doubt'],
@@ -291,6 +333,75 @@ describe('MCP explicitly authorized writes (#2500)', () => {
 				);
 			},
 		);
+		const knowledgePath = path.join(root, '.swarm', 'knowledge.jsonl');
+		expect(existsSync(knowledgePath)).toBe(true);
+		expect(readFileSync(knowledgePath, 'utf8')).toContain(lesson);
+		const receiptPath = path.join(root, '.swarm', 'mcp-write-receipts.jsonl');
+		const receipts = readFileSync(receiptPath, 'utf8')
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line) as { state: string; error?: string });
+		expect(
+			receipts.some(
+				(receipt) =>
+					receipt.state === 'IN_DOUBT' &&
+					receipt.error?.includes('settlement was interrupted'),
+			),
+		).toBe(true);
+	});
+
+	test('AC5d: a severed MCP channel leaves PREPARED without executing the write', async () => {
+		let serverTransport: Awaited<
+			ReturnType<typeof InMemoryTransport.createLinkedPair>
+		>[1];
+		const optionsWithDisconnect: AuthorizedOptions = options({
+			writeHooks: {
+				now: () => 1_000,
+				afterPrepare: async () => {
+					await serverTransport.close();
+					throw new Error('client channel severed after PREPARED');
+				},
+			},
+		});
+		const server = createMcpServer(
+			optionsWithDisconnect as Parameters<typeof createMcpServer>[0],
+		);
+		const pair = InMemoryTransport.createLinkedPair();
+		serverTransport = pair[1];
+		const client = new Client({ name: 'ac5d-disconnect', version: '0.0.0' });
+		await Promise.all([
+			server.connect(serverTransport),
+			client.connect(pair[0]),
+		]);
+		const args = {
+			idempotency_key: 'ac5-real-disconnect',
+			lesson: 'disconnect must not execute production mutation',
+			category: 'testing',
+			applies_to_tools: ['knowledge_add'],
+			required_actions: ['inspect receipt'],
+		};
+		let response: Awaited<ReturnType<Client['callTool']>> | undefined;
+		let rejected = false;
+		try {
+			try {
+				response = await client.callTool({
+					name: 'knowledge_add',
+					arguments: args,
+				});
+			} catch {
+				rejected = true;
+			}
+		} finally {
+			await client.close().catch(() => undefined);
+			await server.close().catch(() => undefined);
+		}
+		expect(rejected || response?.isError === true).toBe(true);
+		const receiptPath = path.join(root, '.swarm', 'mcp-write-receipts.jsonl');
+		expect(readFileSync(receiptPath, 'utf8')).toMatch(/PREPARED/);
+		const knowledgePath = path.join(root, '.swarm', 'knowledge.jsonl');
+		if (existsSync(knowledgePath)) {
+			expect(readFileSync(knowledgePath, 'utf8')).not.toContain(args.lesson);
+		}
 	});
 
 	test('AC6: destructive and unreviewed write names remain absent', async () => {
@@ -348,6 +459,20 @@ describe('MCP explicitly authorized writes (#2500)', () => {
 				true,
 			);
 		});
+	});
+
+	test('AC8: CLI keeps the MCP SDK lazy and stdio-owned', () => {
+		const cliSource = readFileSync(path.resolve('src/cli/mcp.ts'), 'utf8');
+		const serverSource = readFileSync(
+			path.resolve('src/mcp/server.ts'),
+			'utf8',
+		);
+		expect(cliSource).toContain("await import('../mcp/server.js')");
+		expect(cliSource).not.toMatch(
+			/import\s+(?!type\b)[^;\n]*from ['"]\.\.\/mcp\/server/,
+		);
+		expect(serverSource).toContain('new StdioServerTransport()');
+		expect(serverSource).toContain('if (options.transport === undefined)');
 	});
 
 	test('AC9: pending release fragment exists and describes the feature', () => {

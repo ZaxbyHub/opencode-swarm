@@ -123,7 +123,6 @@ export function createMcpServer(options: RunMcpServerOptions): McpServer {
 		root,
 		allowWrite: options.allowWrite,
 		writeTools: options.writeTools,
-		writeHooks: options.writeHooks,
 	});
 	const server = new McpServer({
 		name: SERVER_NAME,

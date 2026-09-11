@@ -8,8 +8,6 @@ import type { McpReadTool } from '../registry.js';
 
 export const scopeValidationAdapter: McpReadTool = {
 	name: 'scope_validate',
-	description:
-		'Validate a shell command against an inline workspace scope without executing it; rejects destructive, ambiguous, unresolved, escaping, symlinked, protected, and out-of-scope writes.',
 	kind: 'read',
 	pathFields: ['scope_files'],
 	inputSchema: scopeValidateSchema,

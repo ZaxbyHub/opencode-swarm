@@ -50,6 +50,7 @@ export { knowledge_archive } from './knowledge-archive';
 export { knowledge_query } from './knowledge-query';
 export { knowledge_recall } from './knowledge-recall';
 export { knowledge_receipt } from './knowledge-receipt';
+export { knowledge_receipt_status } from './knowledge-receipt-status';
 export { knowledge_remove } from './knowledge-remove';
 export { lint } from './lint';
 export { osv_scan } from './osv-scan';

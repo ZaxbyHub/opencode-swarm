@@ -36,9 +36,11 @@ plan, or destructive write tool.
 
 In read-only mode the server never writes anywhere under the project tree (no
 `.swarm/` state, no evidence, no git hygiene edits). An authorized
-`knowledge_add` call may create only the knowledge-store state and the bounded
-receipt journal described below. Diff refs are validated against flag-shaped
-values, so a tool argument cannot redirect git output into a file.
+`knowledge_add` call may create only the knowledge-store state, an
+`mcp-write-receipts.jsonl` journal, its bounded terminal archive, and the
+knowledge validator's `.swarm/knowledge-unactionable.jsonl` sidecar when the
+lesson is not actionable. Diff refs are validated against flag-shaped values,
+so a tool argument cannot redirect git output into a file.
 
 The read-only guarantee extends into the recall paths. `swarm_memory_recall`
 degrades to `available:false` unless the configured memory provider's store
@@ -65,6 +67,7 @@ area is covered by `knowledge_recall`; it becomes available in-session.)
 | `knowledge_recall` | semantic knowledge-base recall (the same `searchKnowledge` core the in-session tool uses, without receipt-ledger writes) |
 | `swarm_memory_recall` | scoped Swarm memory recall (degrades to `available: false` when memory is disabled or no store exists — a query never creates one) |
 | `scope_validate` | read-only command-versus-inline-scope advisory; classifies, resolves, and checks shell write targets without executing the command |
+| `knowledge_receipt_status` | read-only status of a `knowledge_add` receipt; exposes state and bounded timestamps, never the stored payload or error |
 | `evidence_check` | completed-task evidence completeness over `.swarm/plan.md` + `.swarm/evidence/` |
 | `syntax_check` | tree-sitter syntax check over changed files |
 | `placeholder_scan` | TODO/FIXME/stub placeholder scan |
@@ -144,9 +147,12 @@ server's canonical `--dir` root is authoritative.
 ## Write receipts, replay, and uncertainty
 
 Authorized writes use a project-local JSONL journal at
-`.swarm/mcp-write-receipts.jsonl`. The journal is created only when an
+`.swarm/mcp-write-receipts.jsonl`; older terminal records are moved to the
+bounded `.swarm/mcp-write-receipts-archive.jsonl` companion. The active journal
+is created only when an
 authorized write is actually called. Read-only calls, including
-`scope_validate`, never create it. A bounded receipt-only lock protects
+`scope_validate` and `knowledge_receipt_status`, never create or modify either
+file. A bounded receipt-only lock protects
 lookup and individual state transitions; it is released before the knowledge
 mutation runs.
 
@@ -154,18 +160,22 @@ Each record stores bounded metadata: a receipt and attempt identifier, the
 tool, hashed root and idempotency identities, a canonical argument digest,
 policy digest, state, timestamps, and a sanitized bounded result or error.
 Raw lesson text, raw idempotency keys, absolute root paths, secrets, and
-unbounded client fields are never persisted. Journal lines and total journal
-size are capped. A malformed, truncated, oversized, or capacity-exhausted
-journal fails closed for new writes; uncertain history is not silently
-discarded.
+unbounded client fields are never persisted. Active and archived lines, their
+total sizes, and every individual line are capped. Terminal history is archived
+automatically when the active bound is reached; `PREPARED` and `IN_DOUBT`
+records remain in the active journal and are never discarded. A malformed,
+truncated, oversized, or capacity-exhausted store fails closed for new writes;
+uncertain history is not silently discarded. `knowledge_receipt_status` accepts
+`{"idempotency_key":"..."}` and returns `NOT_FOUND`, `PREPARED`,
+`COMMITTED`, `FAILED_NO_EFFECT`, or `IN_DOUBT` without returning payload/error
+text.
 
-If a write reports that the receipt journal is malformed, truncated, or at
-capacity, stop retrying the request. Preserve a copy of
-`.swarm/mcp-write-receipts.jsonl`, manually reconcile its settled states with
-the knowledge store, and repair or archive the journal only after that audit.
-Do not delete it to force a retry: receipt history is the recovery boundary,
-and a new idempotency key is safe only after the prior attempt's outcome is
-known.
+If a write reports that the receipt store is malformed, truncated, or at
+capacity, stop retrying the request. Use `knowledge_receipt_status` to inspect
+the exact idempotency key, preserve copies of both receipt files, and reconcile
+settled states with the knowledge store before any repair. Do not delete either
+file to force a retry: receipt history is the recovery boundary, and a new
+idempotency key is safe only after the prior attempt's outcome is known.
 
 The state machine is:
 
