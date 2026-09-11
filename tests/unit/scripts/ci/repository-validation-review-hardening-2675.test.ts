@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { discoverTestFiles } from '../../../../scripts/ci/repository-validation';
 import { MAX_REPORT_FILES } from '../../../../scripts/ci/verify-repository-validation-reports';
+import { canonicalTmpDir } from '../../../helpers/tmpdir';
 
 const SOURCE = readFileSync(
 	new URL('../../../../scripts/ci/repository-validation.ts', import.meta.url),
@@ -14,7 +14,7 @@ describe('repository-validation review hardening — issue #2675', () => {
 	test('discovery accepts an explicit suite deadline and fails closed before traversal', () => {
 		expect(() =>
 			discoverTestFiles(
-				join(tmpdir(), 'unreachable-fixture'),
+				join(canonicalTmpDir(), 'unreachable-fixture'),
 				['tests/unit'],
 				[],
 				{
