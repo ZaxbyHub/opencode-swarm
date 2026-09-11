@@ -34,82 +34,88 @@
 
 const path = require('node:path');
 
+// Structured as if/else rather than an early top-level `return`: Biome parses
+// .cjs as a module and rejects top-level returns (the repo's quality gate),
+// while Node executes the else-branch identically.
 if (process.env.FAKE_GIT_GRANDCHILD === '1') {
 	// Hold inherited stdio open forever; never exit.
 	setInterval(() => {}, 1000);
-	return;
+} else {
+	runFakeGit();
 }
 
-const mode = process.env.FAKE_GIT_MODE || 'normal';
-// process.argv = [<node-clone>, <main-module-path>, ...rest]; node resolves
-// argv[1] against cwd, so match the git subcommand on its basename.
-const argv = process.argv.slice(1);
-const sub = path.basename(argv[0] || '');
+function runFakeGit() {
+	const mode = process.env.FAKE_GIT_MODE || 'normal';
+	// process.argv = [<node-clone>, <main-module-path>, ...rest]; node resolves
+	// argv[1] against cwd, so match the git subcommand on its basename.
+	const argv = process.argv.slice(1);
+	const sub = path.basename(argv[0] || '');
 
-function outputForSub() {
-	if (sub === 'remote') return 'https://example.com/fake/repo.git\n';
-	if (sub === 'rev-parse') return 'fake-git-preload/.git\n';
-	if (sub === 'log') return 'src/alpha.ts\nsrc/beta.py\nsrc/gamma.rs\n';
-	return 'fake-git-ok\n';
-}
+	function outputForSub() {
+		if (sub === 'remote') return 'https://example.com/fake/repo.git\n';
+		if (sub === 'rev-parse') return 'fake-git-preload/.git\n';
+		if (sub === 'log') return 'src/alpha.ts\nsrc/beta.py\nsrc/gamma.rs\n';
+		return 'fake-git-ok\n';
+	}
 
-/** Block the main thread forever without busy-waiting and without letting
- *  node proceed to load (and fail on) the fake main module. */
-function blockForever() {
-	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
-}
+	/** Block the main thread forever without busy-waiting and without letting
+	 *  node proceed to load (and fail on) the fake main module. */
+	function blockForever() {
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+	}
 
-switch (mode) {
-	case 'normal': {
-		process.stdout.write(outputForSub());
-		process.exit(0);
-	}
-	case 'nonzero': {
-		process.stderr.write('fake-git: simulated failure\n');
-		process.exit(3);
-	}
-	case 'hang': {
-		process.stdout.write('fake-git: starting (will hang)\n');
-		blockForever();
-		break;
-	}
-	case 'hang-trap': {
-		process.stdout.write('fake-git: starting (traps SIGTERM, will hang)\n');
-		process.on('SIGTERM', () => {});
-		blockForever();
-		break;
-	}
-	case 'eof': {
-		process.stdout.write(outputForSub());
-		process.stdout.destroy();
-		process.stdout.on('error', () => {});
-		blockForever();
-		break;
-	}
-	case 'overflow': {
-		// 8 MiB of output in 64 KiB chunks — above the 5 MiB bunSpawn default
-		// cap and far above any 64 KiB sync maxBuffer.
-		const chunk = 'F'.repeat(64 * 1024);
-		for (let i = 0; i < 128; i++) {
-			process.stdout.write(chunk);
+	switch (mode) {
+		case 'normal': {
+			process.stdout.write(outputForSub());
+			process.exit(0);
 		}
-		process.exit(0);
-	}
-	case 'fork': {
-		process.stdout.write('fake-git: forking a stdio-holding grandchild\n');
-		const { spawn } = require('node:child_process');
-		const childEnv = { ...process.env, FAKE_GIT_GRANDCHILD: '1' };
-		delete childEnv.FAKE_GIT_MODE;
-		const grandchild = spawn(process.execPath, ['grandchild-hold'], {
-			env: childEnv,
-			stdio: ['ignore', 'inherit', 'inherit'],
-		});
-		grandchild.on('error', () => {});
-		blockForever();
-		break;
-	}
-	default: {
-		process.stderr.write(`fake-git: unknown FAKE_GIT_MODE "${mode}"\n`);
-		process.exit(64);
+		case 'nonzero': {
+			process.stderr.write('fake-git: simulated failure\n');
+			process.exit(3);
+		}
+		case 'hang': {
+			process.stdout.write('fake-git: starting (will hang)\n');
+			blockForever();
+			break;
+		}
+		case 'hang-trap': {
+			process.stdout.write('fake-git: starting (traps SIGTERM, will hang)\n');
+			process.on('SIGTERM', () => {});
+			blockForever();
+			break;
+		}
+		case 'eof': {
+			process.stdout.write(outputForSub());
+			process.stdout.destroy();
+			process.stdout.on('error', () => {});
+			blockForever();
+			break;
+		}
+		case 'overflow': {
+			// 8 MiB of output in 64 KiB chunks — above the 5 MiB bunSpawn default
+			// cap and far above any 64 KiB sync maxBuffer.
+			const chunk = 'F'.repeat(64 * 1024);
+			for (let i = 0; i < 128; i++) {
+				process.stdout.write(chunk);
+			}
+			process.exit(0);
+		}
+		case 'fork': {
+			process.stdout.write('fake-git: forking a stdio-holding grandchild\n');
+			const { spawn } = require('node:child_process');
+			const childEnv = { ...process.env, FAKE_GIT_GRANDCHILD: '1' };
+			delete childEnv.FAKE_GIT_MODE;
+			const grandchild = spawn(process.execPath, ['grandchild-hold'], {
+				env: childEnv,
+				stdio: ['ignore', 'inherit', 'inherit'],
+			});
+			grandchild.on('error', () => {});
+			blockForever();
+			break;
+		}
+		default: {
+			process.stderr.write(`fake-git: unknown FAKE_GIT_MODE "${mode}"\n`);
+			process.exit(64);
+		}
 	}
 }
