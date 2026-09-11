@@ -447,7 +447,7 @@ jobs:
           # Cross-check the filesystem discovery against Git's tracked-file
           # inventory before partitioning. This independent inventory prevents
           # a truncated find result from becoming a self-consistent shard gate.
-          git ls-files -z -- '*.test.ts' | tr '\0' '\n' | awk '/^src\// || /^tests\/(unit|adversarial|architect|cli|tools|helpers)\// || /^tests\/[^/]+\.test\.ts$/' | sort -u > "$tmpdir/canonical-all-tests.txt"
+          git ls-files -z -- '*.test.ts' | tr '\0' '\n' | awk '/^src\// || /^tests\/(unit|adversarial|architect|cli|tools|helpers)\// || /^tests\/[^\/]+\.test\.ts$/' | sort -u > "$tmpdir/canonical-all-tests.txt"
           if ! cmp -s "$tmpdir/all-tests.txt" "$tmpdir/canonical-all-tests.txt"; then
             echo "::error::Filesystem unit discovery differs from the tracked canonical inventory"
             diff -u "$tmpdir/canonical-all-tests.txt" "$tmpdir/all-tests.txt" || true

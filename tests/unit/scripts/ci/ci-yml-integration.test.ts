@@ -131,6 +131,14 @@ describe('ci.yml integration — shared repository-validation authority', () => 
 		expect(collectStep).toContain('unit-shard-${SHARD}-expected-files.txt');
 	});
 
+	test('canonical test inventory uses a BSD/GNU-portable top-level test filter', () => {
+		// BSD awk treats the slash inside an unescaped character class as the
+		// end of the regexp literal. Keep the slash escaped without changing
+		// the top-level-only ([^/]+) filter semantics.
+		expect(collectStep).toContain('/^tests\\/[^\\/]+\\.test\\.ts$/');
+		expect(collectStep).not.toContain('/^tests\\/[^/]+\\.test\\.ts$/');
+	});
+
 	test('unit discovery creates the validation directory before copying manifests', () => {
 		const swarmPreflight =
 			'if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then';
