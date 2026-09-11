@@ -11,7 +11,10 @@ import { readSwarmFileAsync } from '../../../src/hooks/utils.js';
 // Import mocked modules
 import { loadPlanJsonOnly } from '../../../src/plan/manager.js';
 import { readEffectiveSpecSync } from '../../../src/sdd/effective-spec.js';
-import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
+import {
+	GIT_REPOSITORY_CHECK_TIMEOUT_MS,
+	getDiagnoseData,
+} from '../../../src/services/diagnose-service.js';
 import { __seedGitExecutableForTests } from '../../../src/utils/git-executable.js';
 
 // This file holds `checkGitRepository`-related coverage extracted from
@@ -204,7 +207,8 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 
 			// Verify git was invoked in array-argv form (never through a shell
 			// string), so the malicious swarm ID has no shell-metacharacter
-			// interpretation surface at all.
+			// interpretation surface at all. #2674: the probe is also bounded —
+			// ignored stdio (output is discarded) and an explicit timeout.
 			expect(mockExecSync).not.toHaveBeenCalled();
 			expect(mockExecFileSync).toHaveBeenCalledTimes(1);
 			expect(mockExecFileSync).toHaveBeenCalledWith(
@@ -212,7 +216,8 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 				['rev-parse', '--git-dir'],
 				{
 					cwd: testDirectory,
-					stdio: 'pipe',
+					stdio: 'ignore',
+					timeout: GIT_REPOSITORY_CHECK_TIMEOUT_MS,
 				},
 			);
 		});

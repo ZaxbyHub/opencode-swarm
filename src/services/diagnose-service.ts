@@ -53,7 +53,30 @@ const REQUIRED_CACHE_GRAMMAR_ASSETS = [
 export const _internals = {
 	detectSandboxCapability: () => sandboxCapabilityProbe.detect(),
 	getSandboxExecutor: getExecutor,
+	// #2674: subprocess seam for checkGitRepository. `Reflect.apply` reads the
+	// namespace binding at CALL time (not at module init) so
+	// `mock.module('node:child_process')` and direct seam replacement are both
+	// observed, with the receiver forwarded unchanged; the wrapper owns no
+	// options of its own — the real call site passes the bounded options.
+	// Restore in afterEach when replacing (AGENTS.md §7 convention).
+	execFileSync: (
+		...args: Parameters<typeof child_process.execFileSync>
+	): ReturnType<typeof child_process.execFileSync> =>
+		Reflect.apply(
+			child_process.execFileSync,
+			child_process,
+			args,
+		) as ReturnType<typeof child_process.execFileSync>,
 };
+
+/**
+ * Bounded git rev-parse probe budget (#2674) — the same budget class
+ * `src/tools/diff.ts` uses for its `fileExistsInRef` git probe. The probe's
+ * output is discarded, so all three stdio slots are ignored and the bound is
+ * purely a lifetime guarantee. Exported for the contract test that pins the
+ * exact budget.
+ */
+export const GIT_REPOSITORY_CHECK_TIMEOUT_MS = 3_000;
 
 /**
  * A single health check result.
@@ -458,9 +481,10 @@ async function checkGitRepository(directory: string): Promise<HealthCheck> {
 			};
 		}
 		const gitExecutable = await resolveGitExecutableAsync();
-		child_process.execFileSync(gitExecutable, ['rev-parse', '--git-dir'], {
+		_internals.execFileSync(gitExecutable, ['rev-parse', '--git-dir'], {
 			cwd: directory,
-			stdio: 'pipe',
+			stdio: 'ignore',
+			timeout: GIT_REPOSITORY_CHECK_TIMEOUT_MS,
 		});
 		return {
 			name: 'Git Repository',

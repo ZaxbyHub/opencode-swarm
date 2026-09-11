@@ -565,6 +565,16 @@ try {
 - `grep -n "bunSpawn\\|spawn(\\|spawnSync(" src/<changed>/*.ts` — every match has `timeout`, `stdin: 'ignore'` (unless intentionally interactive), `cwd` or `git -C <directory>`, and a `kill()` in the cleanup path.
 - A test mocks the spawn function (via the file-scoped `_internals` seam, not `mock.module`) to never resolve and asserts the call returns within bounded time.
 
+**Bounded caller contract for the #2674 probe sites:**
+
+| Caller (function) | timeout | stdin / stdio | cwd | output bound | cleanup (kill) |
+| --- | --- | --- | --- | --- | --- |
+| `getGitRemoteUrl` — `src/knowledge/identity.ts` (`execFileSync` via `_internals`) | `GIT_REMOTE_URL_TIMEOUT_MS` = 1 500 ms | `stdio: ['ignore', 'pipe', 'ignore']` — stdin ignored | explicit `cwd: directory` | execFileSync default buffer (1 MiB); the remote URL is tiny | OS kill at timeout (sync probe; the catch path falls back to "no remote") |
+| `checkGitRepository` — `src/services/diagnose-service.ts` (`execFileSync` via `_internals`) | `GIT_REPOSITORY_CHECK_TIMEOUT_MS` = 3 000 ms | `stdio: 'ignore'` — output is discarded, so stdout/stderr are ignored too | explicit `cwd: directory` | none retained (ignored) | OS kill at timeout (sync probe; the catch path yields the failing health row) |
+| `getGitChurn` — `src/tools/complexity-hotspots.ts` (`bunSpawn` via `_internals`) | `GIT_CHURN_TIMEOUT_MS` = 2 000 ms, passed to `bunSpawn` AND raced caller-side | `stdin: 'ignore'` | explicit `cwd: directory` | `maxBuffer` default 5 MiB (bunSpawn overflow controller kills the child past the bound) | `finally { clearTimeout; proc.kill(); }` on every exit path — mirrors `resolveCurrentGitHeadAsync` in `src/tools/pr-workflow-status.ts` |
+
+A slow-but-legitimate churn run now fails closed at the 2 s bound with an error naming the bound instead of hanging the tool; the two sync probes degrade to their existing fallback paths on timeout. `deriveProjectHash` (same file as `getGitRemoteUrl`) was already compliant and is deliberately untouched.
+
 ### 4. Working directory and `.swarm/` containment
 
 **Anti-pattern:**

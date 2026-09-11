@@ -156,6 +156,17 @@ export const _internals: {
 } = { bunSpawn, resolveGitExecutable };
 
 // ============ Git Churn Analysis ============
+
+/**
+ * Bounded churn-analysis budget (#2674). bunSpawn's own `timeout` option kills
+ * the child at this bound; the caller-side race below enforces the same bound
+ * even when the spawn implementation ignores the option, and the `finally`
+ * guarantees the owned child is killed on every exit path. Slow-but-legit
+ * churn runs now fail closed with an error naming this bound instead of
+ * hanging the tool.
+ */
+const GIT_CHURN_TIMEOUT_MS = 2_000;
+
 async function getGitChurn(
 	days: number,
 	directory: string,
@@ -173,65 +184,100 @@ async function getGitChurn(
 		{
 			stdout: 'pipe',
 			stderr: 'pipe',
+			stdin: 'ignore',
 			cwd: directory,
+			timeout: GIT_CHURN_TIMEOUT_MS,
 		},
 	);
 
-	// Read stdout concurrently with process exit to avoid pipe deadlock.
-	// git log output can be very large for repos with extensive history.
-	const [stdout] = await Promise.all([proc.stdout.text(), proc.exited]);
+	// Bounded await + kill-in-finally (#2674) — the finally-kill shape mirrors
+	// `resolveCurrentGitHeadAsync` in src/tools/pr-workflow-status.ts. Read
+	// stdout concurrently with process exit to avoid pipe deadlock (git log
+	// output can be very large for repos with extensive history), and race
+	// both against the caller-side bound so a hung child cannot defeat it.
+	let boundTimer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const boundedRead = new Promise<never>((_, reject) => {
+			boundTimer = setTimeout(
+				() =>
+					reject(
+						new Error(
+							`git churn analysis timed out after ${GIT_CHURN_TIMEOUT_MS}ms`,
+						),
+					),
+				GIT_CHURN_TIMEOUT_MS,
+			);
+		});
+		const [stdout] = await Promise.race([
+			Promise.all([proc.stdout.text(), proc.exited]),
+			boundedRead,
+		]);
 
-	// A spawn failure (process never started — e.g. missing git binary or a
-	// cwd that no longer exists) means the churn data is unproven, not empty.
-	// `analyzeHotspots` drives its entire file iteration off this map, so
-	// silently continuing here previously produced a false "ran fine, found
-	// nothing" success once the Bun spawn path stopped throwing on process-
-	// creation failure (#2236 Sweep A, FIX 1). Throwing preserves the loud
-	// `error: 'analysis failed: ...'` behavior the tool already surfaces via
-	// the try/catch in `execute`.
-	//
-	// Deliberately scoped to `spawnError` only, NOT a general non-zero-exit
-	// check: `git log` legitimately exits non-zero with empty (not erroring)
-	// output on a repo with no commits yet (exit 128, verified empirically),
-	// and treating every non-zero exit as a hard failure would turn that
-	// benign case into a false error. This mirrors FIX 2's scoping in
-	// `pkg-audit.ts`'s `runCargoAudit`.
-	if (proc.spawnError) {
-		throw new Error(`git churn analysis failed: ${proc.spawnError.message}`);
-	}
-
-	// Split on CRLF for cross-platform handling
-	const lines = stdout.split(/\r?\n/);
-
-	for (const line of lines) {
-		// Normalize path separators: \ to /
-		const normalizedPath = line.replace(/\\/g, '/');
-
-		// Skip empty lines
-		if (!normalizedPath || normalizedPath.trim() === '') {
-			continue;
+		// A spawn failure (process never started — e.g. missing git binary or a
+		// cwd that no longer exists) means the churn data is unproven, not empty.
+		// `analyzeHotspots` drives its entire file iteration off this map, so
+		// silently continuing here previously produced a false "ran fine, found
+		// nothing" success once the Bun spawn path stopped throwing on process-
+		// creation failure (#2236 Sweep A, FIX 1). Throwing preserves the loud
+		// `error: 'analysis failed: ...'` behavior the tool already surfaces via
+		// the try/catch in `execute`.
+		//
+		// Deliberately scoped to `spawnError` only, NOT a general non-zero-exit
+		// check: `git log` legitimately exits non-zero with empty (not erroring)
+		// output on a repo with no commits yet (exit 128, verified empirically),
+		// and treating every non-zero exit as a hard failure would turn that
+		// benign case into a false error. This mirrors FIX 2's scoping in
+		// `pkg-audit.ts`'s `runCargoAudit`.
+		if (proc.spawnError) {
+			throw new Error(`git churn analysis failed: ${proc.spawnError.message}`);
 		}
 
-		// Skip files in excluded directories
-		if (
-			normalizedPath.includes('node_modules') ||
-			normalizedPath.includes('/.git/') ||
-			normalizedPath.includes('/dist/') ||
-			normalizedPath.includes('/build/') ||
-			normalizedPath.includes('__tests__')
-		) {
-			continue;
-		}
+		// Split on CRLF for cross-platform handling
+		const lines = stdout.split(/\r?\n/);
 
-		// Skip test files
-		if (
-			normalizedPath.includes('.test.') ||
-			normalizedPath.includes('.spec.')
-		) {
-			continue;
-		}
+		for (const line of lines) {
+			// Normalize path separators: \ to /
+			const normalizedPath = line.replace(/\\/g, '/');
 
-		churnMap.set(normalizedPath, (churnMap.get(normalizedPath) || 0) + 1);
+			// Skip empty lines
+			if (!normalizedPath || normalizedPath.trim() === '') {
+				continue;
+			}
+
+			// Skip files in excluded directories
+			if (
+				normalizedPath.includes('node_modules') ||
+				normalizedPath.includes('/.git/') ||
+				normalizedPath.includes('/dist/') ||
+				normalizedPath.includes('/build/') ||
+				normalizedPath.includes('__tests__')
+			) {
+				continue;
+			}
+
+			// Skip test files
+			if (
+				normalizedPath.includes('.test.') ||
+				normalizedPath.includes('.spec.')
+			) {
+				continue;
+			}
+
+			churnMap.set(normalizedPath, (churnMap.get(normalizedPath) || 0) + 1);
+		}
+	} finally {
+		// Clear the race timer so a completed read leaves no dangling timer,
+		// then best-effort-kill the owned child on EVERY exit path. kill() is
+		// idempotent on an already-exited child (bun-compat contract), so the
+		// post-success call is harmless; the try/catch follows the invariant-3
+		// required pattern so a kill-unavailable subprocess object cannot turn
+		// cleanup into a new failure.
+		if (boundTimer !== undefined) clearTimeout(boundTimer);
+		try {
+			proc.kill();
+		} catch {
+			/* already exited or kill unavailable */
+		}
 	}
 
 	return churnMap;

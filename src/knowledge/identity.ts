@@ -125,17 +125,46 @@ async function getSwarmVersion(directory?: string): Promise<string> {
 }
 
 /**
+ * Test/inspection seam for the git subprocess this module runs (#2674).
+ *
+ * `Reflect.apply` reads the namespace binding at CALL time (not at module
+ * init), so both `mock.module('node:child_process', ...)` and direct
+ * `_internals.execFileSync` replacement are observed by production code, with
+ * the receiver forwarded unchanged. The wrapper owns no options of its own —
+ * every real call site in this file passes the bounded options object.
+ * Restore in `afterEach` when replacing this seam (AGENTS.md §7 convention).
+ */
+export const _internals = {
+	execFileSync: (
+		...args: Parameters<typeof child_process.execFileSync>
+	): ReturnType<typeof child_process.execFileSync> =>
+		Reflect.apply(
+			child_process.execFileSync,
+			child_process,
+			args,
+		) as ReturnType<typeof child_process.execFileSync>,
+};
+
+/**
+ * Bounded git-remote probe budget (#2674) — matches the compliant sibling
+ * `deriveProjectHash` so both probes in this file share one budget class.
+ */
+const GIT_REMOTE_URL_TIMEOUT_MS = 1_500;
+
+/**
  * Get git remote URL for a directory
  */
 function getGitRemoteUrl(directory: string): string | undefined {
 	try {
 		const gitExecutable = resolveGitExecutable();
-		const remoteUrl = child_process
+		const remoteUrl = _internals
 			.execFileSync(gitExecutable, ['remote', 'get-url', 'origin'], {
 				cwd: directory,
 				encoding: 'utf-8',
-				stdio: ['pipe', 'pipe', 'ignore'],
+				stdio: ['ignore', 'pipe', 'ignore'],
+				timeout: GIT_REMOTE_URL_TIMEOUT_MS,
 			})
+			.toString()
 			.trim();
 		return remoteUrl;
 	} catch {
