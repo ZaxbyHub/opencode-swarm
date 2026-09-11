@@ -67,10 +67,8 @@ describe('src/types/events.ts - ADVERSARIAL TESTS', () => {
 				'sounding_board_consultation',
 				'simplification',
 				'user_escalation',
-				// #2703: recorded only by forceRecordRetrySoundingBoardApproval.
-				'sounding_board_manual_approval',
+				'sounding_board_manual_approval', // #2703: manual-override recorder only.
 			];
-
 			expect(validActions).toHaveLength(4);
 		});
 
