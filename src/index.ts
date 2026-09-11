@@ -188,6 +188,7 @@ import { createPrAutoSubscribeHook } from './hooks/pr-auto-subscribe.js';
 import {
 	enforcePrWorkflowToolBefore,
 	recordPrFeedbackPushAttemptResult,
+	terminalizePrWorkflowGateForSession,
 } from './hooks/pr-workflow-gate.js';
 import { createPrWorkflowResponseGate } from './hooks/pr-workflow-response-gate.js';
 import { createPrWorkflowSessionResolver } from './hooks/pr-workflow-session-resolver.js';
@@ -294,6 +295,7 @@ import {
 	telemetry,
 } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
+import { reconcilePrWorkflowCheckoutReceipts } from './tools/prepare-pr-workflow-checkout.js';
 import { createTrainingCaptureObserver } from './training/capture.js';
 import { error, log, warn } from './utils';
 import { pushAdvisory } from './utils/advisory-queue';
@@ -3361,6 +3363,42 @@ async function initializeOpenCodeSwarm(
 							lifecycleEvent.type === 'session.deleted' ||
 							lifecycleEvent.type === 'session.removed'
 						) {
+							// Session deletion is an exact-owner terminal boundary. Keep gate
+							// terminalization and receipt cleanup independent and fail-open so a
+							// foreign active gate or unavailable stash inventory cannot undo the
+							// durable owner-state cleanup.
+							try {
+								await terminalizePrWorkflowGateForSession(
+									ctx.directory,
+									sessionID,
+								);
+							} catch {
+								warn(
+									'PR workflow gate terminalization on session deletion failed (non-fatal)',
+								);
+							}
+							try {
+								const reconciliation =
+									await reconcilePrWorkflowCheckoutReceipts(
+										ctx.directory,
+										sessionID,
+									);
+								log(
+									'PR workflow checkout receipts reconciled on session deletion',
+									{
+										inspected: reconciliation.inspectedReceiptCount,
+										collected: reconciliation.collectedStashOids.length,
+										retiredMissing:
+											reconciliation.retiredMissingStashOids.length,
+										preserved: reconciliation.preservedStashOids.length,
+										failures: reconciliation.failures.length,
+									},
+								);
+							} catch {
+								warn(
+									'PR workflow checkout receipt reconciliation on session deletion failed (non-fatal)',
+								);
+							}
 							deleteSnapshotSessionRows(ctx.directory, sessionID);
 							clearPendingTaskModelRoutesForSession(sessionID);
 							clearSessionActionCircuits(sessionID);
@@ -3772,7 +3810,7 @@ async function initializeOpenCodeSwarm(
 				'swarm-abort-pr-workflow': {
 					template: '/swarm abort-pr-workflow $ARGUMENTS',
 					description:
-						'Use /swarm abort-pr-workflow to clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop (human-only escape hatch)',
+						'Use /swarm abort-pr-workflow to clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop; cancel an armed PR_FEEDBACK without publication with PR_FEEDBACK --cancel-publication <reason...> (human-only escape hatch)',
 				},
 				'swarm-approve-plan-critic': {
 					template: '/swarm approve-plan-critic $ARGUMENTS',

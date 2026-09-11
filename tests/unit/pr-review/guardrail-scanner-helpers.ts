@@ -1,28 +1,11 @@
 /**
- * PR-review recurrence guardrails (issue #2385).
+ * Test-owned source scanners for the PR-review recurrence guardrails
+ * (issue #2385).
  *
- * Exported source scanners implementing the mechanical guardrails the issue
- * requires. Each scanner is a PURE function over `{ path, content }` source
- * maps; unit tests prove each scanner flags a synthetic violating snippet
- * (the guardrail "biting") and then apply it over the real `src/` tree.
- *
- * 1. `scanObserverTerminalization` — (a) the historical wait-deadline/no-client
- *    terminalizer may never reappear by name; (b) in
- *    `src/tools/dispatch-lanes.ts`, durable delegation-transition writes are
- *    allowed only inside the sanctioned settlement functions.
- * 2. `scanParallelCircuitRuleConstruction` — circuit-record construction may
- *    exist only under `src/pr-review/` (the inline-construction recurrence
- *    class G-1).
- *
- * Issue #2385 originally specified a third scanner for transcript-parsing
- * locality (the 13 conversion symbols restricted to the legacy adapter),
- * but its only test consumer was a synthetic-input bite demo with no
- * production caller. The boundary is already enforced structurally
- * (the legacy-transcript-adapter is the sole module that owns those symbols,
- * and the two retained scanners cover the real recurrence classes). A
- * scanner with no caller would create the appearance of a guardrail where
- * there is none — per the issue's "no unwired functionality" bar, it was
- * removed instead.
+ * These scanners are deliberately not production exports: they have no
+ * runtime caller and exist only to keep the synthetic bite demonstrations and
+ * source-tree census tests executable. Each scanner is a PURE function over
+ * `{ path, content }` source maps.
  */
 
 export interface GuardrailSource {
@@ -57,12 +40,7 @@ export const FORBIDDEN_OBSERVER_TERMINALIZER_SYMBOLS: readonly string[] = [
  * Enclosing functions in `src/tools/dispatch-lanes.ts` that are allowed to
  * write delegation transitions. Every entry is child-evidence-driven
  * settlement (typed terminal error, explicit caller cancellation, or the
- * age+liveness presumed-stale backstop) — never observer-deadline evidence:
- * - `startAsyncLanePrompt`: `running` transition after a successful launch.
- * - `appendAsyncLaneLaunchError`: typed `error` for a failed child launch.
- * - `collectOnce`: explicit caller `cancelled` transition.
- * - `settleCollectedLane`: `completed`/`error` settlement from child evidence.
- * - `sweepStaleAsyncLaneRecords`: the presumed-stale `stale` backstop.
+ * age+liveness presumed-stale backstop) — never observer-deadline evidence.
  * Additions must document their evidence source here.
  */
 export const DELEGATION_WRITE_ALLOWED_FUNCTIONS: ReadonlySet<string> = new Set([
@@ -99,31 +77,25 @@ function excerptOf(line: string): string {
 /**
  * Guardrail 2. (a) flags any forbidden historical-terminalizer symbol;
  * (b) for `src/tools/dispatch-lanes.ts`, flags delegation-transition writes
- * inside any enclosing function outside the sanctioned allowlist. This
- * module itself is exempt from rule (a): it DEFINES the forbidden names
- * (the definition site is not a recurrence, same reasoning as the adapter
- * allowlist in guardrail 1).
+ * inside any enclosing function outside the sanctioned allowlist. The helper
+ * itself is not scanned as production source.
  */
 export function scanObserverTerminalization(
 	sources: readonly GuardrailSource[],
 ): GuardrailHit[] {
 	const hits: GuardrailHit[] = [];
 	for (const source of sources) {
-		const normalized = normalizedSourcePath(source.path);
-		const isGuardrailDefinition = normalized === 'src/pr-review/guardrails.ts';
 		const lines = source.content.split(/\r?\n/);
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
-			if (!isGuardrailDefinition) {
-				for (const symbol of FORBIDDEN_OBSERVER_TERMINALIZER_SYMBOLS) {
-					if (new RegExp(`\\b${symbol}\\b`).test(line)) {
-						hits.push({
-							path: source.path,
-							line: i + 1,
-							rule: `observer-terminalizer-symbol:${symbol}`,
-							excerpt: excerptOf(line),
-						});
-					}
+			for (const symbol of FORBIDDEN_OBSERVER_TERMINALIZER_SYMBOLS) {
+				if (new RegExp(`\\b${symbol}\\b`).test(line)) {
+					hits.push({
+						path: source.path,
+						line: i + 1,
+						rule: `observer-terminalizer-symbol:${symbol}`,
+						excerpt: excerptOf(line),
+					});
 				}
 			}
 			if (
@@ -154,9 +126,9 @@ function normalizedSourcePath(path: string): string {
 	return path.replaceAll('\\', '/');
 }
 
-// Guardrail 1 (transcript-parsing locality) was removed — see module
-// docblock for rationale. The boundary is enforced structurally by the
-// legacy-transcript-adapter being the sole owner of the conversion cluster.
+// Guardrail 1 (transcript-parsing locality) was removed from production: its
+// only consumer was a synthetic bite test, and the adapter itself is the sole
+// owner of the conversion cluster.
 
 // ---------------------------------------------------------------------------
 // Guardrail 3 — no parallel circuit-rule construction outside src/pr-review/

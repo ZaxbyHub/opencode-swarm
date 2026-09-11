@@ -4,12 +4,10 @@
  *
  * This is the ONLY module allowed to convert raw transcript / artifact text
  * into canonical PR-review data (verdict rows, per-item verdicts, feedback
- * classifications). The locality contract is enforced mechanically by
- * `scanTranscriptParsingOutsideAdapter` in `src/pr-review/guardrails.ts`:
- * every identifier in `TRANSCRIPT_CONVERSION_SYMBOLS` may appear only in this
- * file across `src/`. The gate therefore consumes this boundary through the
- * `legacy*`-prefixed aliases and the test surface exported below — never
- * through the conversion identifiers themselves.
+ * classifications). This module is the sole owner of the transcript
+ * conversion identifiers across `src/`; the gate therefore consumes this
+ * boundary through the `legacy*`-prefixed aliases and the test surface
+ * exported below — never through the conversion identifiers themselves.
  *
  * Compat gating: the settlement path that accepts legacy (pre-structured-
  * receipt) transcript text is governed by the delegation record's
@@ -1094,10 +1092,9 @@ export function readSettledFeedbackClassifications(
 // ---------------------------------------------------------------------------
 
 /**
- * Issue #2385 guardrail aliases: the transcript-conversion identifiers may
- * appear only in this module (`scanTranscriptParsingOutsideAdapter` in
- * `src/pr-review/guardrails.ts`), so the owning gate imports these aliases
- * instead of the canonical names.
+ * Issue #2385 guardrail aliases: transcript-conversion identifiers are owned
+ * only by this module, so the owning gate imports these aliases instead of
+ * the canonical names.
  */
 export const analyzeLegacyVerdictRowContract =
 	analyzePrReviewVerdictRowContract;

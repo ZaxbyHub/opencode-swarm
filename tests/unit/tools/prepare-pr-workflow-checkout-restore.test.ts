@@ -156,8 +156,8 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 			success: true,
 			restored: true,
 			stash_oid: prepared.stash_oid,
-			retained_stash_oids: [prepared.stash_oid],
-			stash_retained: true,
+			retained_stash_oids: [],
+			stash_retained: false,
 			stash_retention_verified: true,
 		});
 		expect(await git(['branch', '--show-current'])).toBe('main');
@@ -167,7 +167,7 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 				'\n',
 			),
 		).toBe('{"dirty":true}\n');
-		expect(await git(['stash', 'list', '--format=%H'])).toContain(
+		expect(await git(['stash', 'list', '--format=%H'])).not.toContain(
 			prepared.stash_oid,
 		);
 		await expect(fs.stat(receiptPath)).rejects.toMatchObject({
@@ -308,42 +308,35 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 			receipt_cleanup_pending: true,
 		});
 		expect(await git(['branch', '--show-current'])).toBe('main');
-		expect(await git(['stash', 'list', '--format=%H'])).toContain(
+		expect(await git(['stash', 'list', '--format=%H'])).not.toContain(
 			prepared.stash_oid,
 		);
 		expect(
 			await listPendingPrWorkflowCheckoutRestores(directory, SESSION_ID),
-		).toEqual([{ stash_oid: prepared.stash_oid, stash_present: true }]);
-
-		// Simulate normal work after the successful restore. Applied-state receipt
-		// cleanup must not require the checkout identity to remain frozen.
-		await git(['add', 'config.json']);
-		await git(['commit', '-m', 'advance after restore']);
-		await git(['stash', 'drop', 'stash@{0}']);
-		expect(
-			await listPendingPrWorkflowCheckoutRestores(directory, SESSION_ID),
 		).toEqual([{ stash_oid: prepared.stash_oid, stash_present: false }]);
 
-		// Previous code left a phantom obligation forever after unlink contention.
+		// Simulate normal work after the successful restore. The next explicit
+		// preparation retires the missing verified receipt only after evidence and
+		// deletion succeed, then records the new durable obligation.
+		await git(['add', 'config.json']);
+		await git(['commit', '-m', 'advance after restore']);
 		_internals.removeCheckoutRestoreReceipt = originalRemoveReceipt;
+		await fs.writeFile(path.join(directory, 'config.json'), '{"after":true}\n');
+		await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
 		const cleaned = JSON.parse(
 			await executePreparePrWorkflowCheckout(
-				{ operation: 'restore' },
+				{ paths: ['config.json'] },
 				directory,
 				{ sessionID: SESSION_ID },
 			),
 		);
 		expect(cleaned).toMatchObject({
 			success: true,
-			restored: true,
-			receipt_cleanup_pending: false,
-			retained_stash_oids: [],
-			stash_retained: false,
-			stash_retention_verified: true,
 		});
-		expect(
-			await listPendingPrWorkflowCheckoutRestores(directory, SESSION_ID),
-		).toEqual([]);
+		expect(cleaned.stash_oid).not.toBe(prepared.stash_oid);
+		expect(await git(['stash', 'list', '--format=%H'])).toContain(
+			cleaned.stash_oid,
+		);
 	});
 
 	test('rejects receipts whose schemaVersion is not exactly supported', async () => {

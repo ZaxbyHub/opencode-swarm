@@ -27,7 +27,14 @@ const MAX_RECEIPT_PATH_LEN = 4_096;
 const MAX_RECEIPT_BYTES = 64 * 1024;
 const MAX_GIT_STDOUT_BYTES = 1024 * 1024;
 const MAX_ECHOED_PATH_LEN = 200;
+const MAX_CHECKOUT_STASH_REFS = 256;
+const MAX_PR_WORKFLOW_STASH_MARKER_TOKEN = 64;
 const RECEIPT_DIR = 'pr-workflow-checkouts';
+const PR_WORKFLOW_STASH_PREFIX = 'pr-workflow-checkout-';
+const PR_WORKFLOW_STASH_SUBJECT_RE = new RegExp(
+	`^(?:${PR_WORKFLOW_STASH_PREFIX}|(?:On|WIP on) [^:\\r\\n]{1,256}:\\s*${PR_WORKFLOW_STASH_PREFIX})([A-Za-z0-9][A-Za-z0-9._-]{0,${MAX_PR_WORKFLOW_STASH_MARKER_TOKEN - 1}})$`,
+	'i',
+);
 
 const PreparePrWorkflowCheckoutArgsSchema = z
 	.object({
@@ -201,10 +208,28 @@ class CheckoutRestoreError extends Error {
 	constructor(
 		readonly code: string,
 		message: string,
+		readonly details: { missingStashOids?: string[] } = {},
 	) {
 		super(message);
 		this.name = 'CheckoutRestoreError';
 	}
+}
+
+export interface PrWorkflowCheckoutReconciliationSummary {
+	/** The exact owner session whose receipt directory was inspected. */
+	sessionID: string;
+	/** Number of validated receipt files considered in this bounded pass. */
+	inspectedReceiptCount: number;
+	/** Verified receipt OIDs whose marked stash was collected and verified absent. */
+	collectedStashOids: string[];
+	/** Missing-stash receipt OIDs with bounded core-event evidence and receipt retirement. */
+	retiredMissingStashOids: string[];
+	/** Receipt/stash OIDs deliberately preserved (pending, unknown, or failed cleanup). */
+	preservedStashOids: string[];
+	/** Cleanup failures; no corresponding receipt is retired when this is non-empty. */
+	failures: string[];
+	/** True when all inspected inventory stayed within the hard bounds. */
+	bounded: boolean;
 }
 
 /**
@@ -312,7 +337,19 @@ export async function executePreparePrWorkflowCheckout(
 		return JSON.stringify({
 			success: false,
 			...(error instanceof CheckoutRestoreError
-				? { code: error.code, retryable: false }
+				? {
+						code: error.code,
+						retryable: false,
+						...(error.code === 'CHECKOUT_RESTORE_STASH_MISSING'
+							? {
+									status: 'incomplete',
+									recoverable: true,
+									missing_stash_oids: error.details.missingStashOids ?? [],
+									required_action:
+										'Inspect or recreate the missing preserved stash, then retry checkout restoration; the receipt remains visible for manual recovery.',
+								}
+							: {}),
+					}
 				: {}),
 			message: error instanceof Error ? error.message : String(error),
 		});
@@ -974,6 +1011,271 @@ async function resolveMarkedStashOid(
 	return stashOid;
 }
 
+interface CheckoutStashRef {
+	stashOid: string;
+	selector: string;
+	subject: string;
+}
+
+type VerifiedStashCollection = 'collected' | 'missing' | 'preserved' | 'failed';
+
+interface ReconcileOptions {
+	collectVerified: boolean;
+	retireMissing: boolean;
+}
+
+function isPrWorkflowStashSubject(subject: string): boolean {
+	return PR_WORKFLOW_STASH_SUBJECT_RE.test(subject);
+}
+
+async function readCheckoutStashRefs(
+	directory: string,
+): Promise<CheckoutStashRef[]> {
+	const list = await _internals.runGit(
+		directory,
+		['stash', 'list', '--format=%H%x00%gd%x00%gs'],
+		{ captureStdout: true },
+	);
+	if (list.spawnError || list.exitCode !== 0) {
+		throw new CheckoutRestoreError(
+			'CHECKOUT_RESTORE_STASH_INVENTORY_FAILED',
+			'BLOCKED: unable to inspect checkout-preparation stashes safely',
+		);
+	}
+	const lines = list.stdout.split(/\r?\n/).filter((line) => line.length > 0);
+	if (lines.length > MAX_CHECKOUT_STASH_REFS) {
+		throw new CheckoutRestoreError(
+			'CHECKOUT_RESTORE_STASH_LIMIT',
+			`BLOCKED: Git stash inventory exceeds the ${MAX_CHECKOUT_STASH_REFS}-entry bounded scan`,
+		);
+	}
+	const refs: CheckoutStashRef[] = [];
+	for (const line of lines) {
+		const parts = line.split('\0');
+		if (
+			parts.length !== 3 ||
+			!/^[0-9a-f]{40,64}$/i.test(parts[0]) ||
+			!/^(?:stash@\{\d+\})$/.test(parts[1]) ||
+			typeof parts[2] !== 'string'
+		) {
+			throw new CheckoutRestoreError(
+				'CHECKOUT_RESTORE_STASH_INVENTORY_FAILED',
+				'BLOCKED: Git returned an unsafe checkout-preparation stash inventory',
+			);
+		}
+		refs.push({
+			stashOid: parts[0].toLowerCase(),
+			selector: parts[1],
+			subject: parts[2],
+		});
+	}
+	return refs;
+}
+
+async function appendMissingStashEvidence(
+	directory: string,
+	sessionID: string,
+	receipt: CheckoutRestoreReceipt,
+): Promise<void> {
+	_internals.appendCoreEventSync(directory, {
+		type: 'pr_workflow_checkout_stash_missing',
+		timestamp: new Date().toISOString(),
+		sessionID,
+		stashOid: receipt.stashOid,
+		preparedAt: receipt.preparedAt,
+		status: 'incomplete',
+		recoverable: true,
+	});
+}
+
+async function retireMissingCheckoutReceipt(
+	directory: string,
+	sessionID: string,
+	entry: { stashOid: string; receiptPath: string },
+	receipt: CheckoutRestoreReceipt,
+): Promise<boolean> {
+	try {
+		await appendMissingStashEvidence(directory, sessionID, receipt);
+		await _internals.removeCheckoutRestoreReceipt(entry.receiptPath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function collectVerifiedCheckoutStash(
+	directory: string,
+	stashOid: string,
+	refs: CheckoutStashRef[],
+): Promise<{ result: VerifiedStashCollection; refs: CheckoutStashRef[] }> {
+	const target = stashOid.toLowerCase();
+	const ref = refs.find((candidate) => candidate.stashOid === target);
+	if (!ref) return { result: 'missing', refs };
+	if (!isPrWorkflowStashSubject(ref.subject)) {
+		return { result: 'preserved', refs };
+	}
+	const dropped = await _internals.runGit(directory, [
+		'stash',
+		'drop',
+		ref.selector,
+	]);
+	if (dropped.spawnError || dropped.exitCode !== 0) {
+		return { result: 'failed', refs };
+	}
+	// Recompute selectors after every drop: Git renumbers the remaining stash
+	// entries, so a cached stash@{N} may identify a different user's stash.
+	let refreshed: CheckoutStashRef[];
+	try {
+		refreshed = await readCheckoutStashRefs(directory);
+	} catch {
+		return { result: 'failed', refs };
+	}
+	return {
+		result: refreshed.some((candidate) => candidate.stashOid === target)
+			? 'failed'
+			: 'collected',
+		refs: refreshed,
+	};
+}
+
+async function reconcilePrWorkflowCheckoutReceiptsLocked(
+	directory: string,
+	sessionID: string,
+	options: ReconcileOptions,
+): Promise<PrWorkflowCheckoutReconciliationSummary> {
+	const entries = await listCheckoutReceiptPaths(directory, sessionID);
+	const summary: PrWorkflowCheckoutReconciliationSummary = {
+		sessionID,
+		inspectedReceiptCount: entries.length,
+		collectedStashOids: [],
+		retiredMissingStashOids: [],
+		preservedStashOids: [],
+		failures: [],
+		bounded: entries.length <= MAX_CHECKOUT_RECEIPTS,
+	};
+	if (entries.length === 0) return summary;
+
+	let refs: CheckoutStashRef[];
+	try {
+		refs = await readCheckoutStashRefs(directory);
+	} catch (error) {
+		summary.failures.push(
+			error instanceof CheckoutRestoreError
+				? error.code
+				: error instanceof Error
+					? error.message
+					: 'stash inventory unavailable',
+		);
+		summary.preservedStashOids.push(...entries.map((entry) => entry.stashOid));
+		return summary;
+	}
+
+	for (const entry of entries) {
+		let receipt: CheckoutRestoreReceipt;
+		try {
+			receipt = await readCheckoutRestoreReceipt(
+				directory,
+				entry.receiptPath,
+				sessionID,
+				entry.stashOid,
+			);
+		} catch (error) {
+			summary.failures.push(
+				error instanceof Error ? error.message : 'receipt unreadable',
+			);
+			summary.preservedStashOids.push(entry.stashOid);
+			continue;
+		}
+
+		const verified =
+			receipt.restoreState === 'applied' &&
+			typeof receipt.restoreVerifiedAt === 'string';
+		if (verified && options.collectVerified) {
+			const collection = await collectVerifiedCheckoutStash(
+				directory,
+				entry.stashOid,
+				refs,
+			);
+			refs = collection.refs;
+			if (collection.result === 'collected') {
+				try {
+					await _internals.removeCheckoutRestoreReceipt(entry.receiptPath);
+					summary.collectedStashOids.push(entry.stashOid);
+				} catch {
+					summary.failures.push(
+						`verified receipt ${entry.stashOid} could not be removed`,
+					);
+					summary.preservedStashOids.push(entry.stashOid);
+				}
+				continue;
+			}
+			if (collection.result === 'missing' && options.retireMissing) {
+				if (
+					await retireMissingCheckoutReceipt(
+						directory,
+						sessionID,
+						entry,
+						receipt,
+					)
+				) {
+					summary.retiredMissingStashOids.push(entry.stashOid);
+				} else {
+					summary.failures.push(
+						`missing verified receipt ${entry.stashOid} could not be evidenced and retired`,
+					);
+					summary.preservedStashOids.push(entry.stashOid);
+				}
+				continue;
+			}
+			if (collection.result === 'failed') {
+				summary.failures.push(
+					`verified stash ${entry.stashOid} could not be collected`,
+				);
+			}
+			summary.preservedStashOids.push(entry.stashOid);
+			continue;
+		}
+
+		if (!refs.some((candidate) => candidate.stashOid === entry.stashOid)) {
+			if (options.retireMissing) {
+				if (
+					await retireMissingCheckoutReceipt(
+						directory,
+						sessionID,
+						entry,
+						receipt,
+					)
+				) {
+					summary.retiredMissingStashOids.push(entry.stashOid);
+				} else {
+					summary.failures.push(
+						`missing receipt ${entry.stashOid} could not be evidenced and retired`,
+					);
+					summary.preservedStashOids.push(entry.stashOid);
+				}
+			} else {
+				summary.preservedStashOids.push(entry.stashOid);
+			}
+			continue;
+		}
+		summary.preservedStashOids.push(entry.stashOid);
+	}
+	return summary;
+}
+
+export async function reconcilePrWorkflowCheckoutReceipts(
+	directory: string,
+	rawSessionID: string,
+): Promise<PrWorkflowCheckoutReconciliationSummary> {
+	const sessionID = normalizeSessionID(rawSessionID);
+	return withInactivePrWorkflowCheckoutRestoreLock(directory, sessionID, () =>
+		reconcilePrWorkflowCheckoutReceiptsLocked(directory, sessionID, {
+			collectVerified: true,
+			retireMissing: true,
+		}),
+	);
+}
+
 /**
  * DISCOVERY-mode resolver: identify the marked stash by marker only.
  *
@@ -997,47 +1299,18 @@ async function countOutstandingReceipts(
 	directory: string,
 	sessionID: string,
 ): Promise<number> {
-	const receipts = await listCheckoutReceiptPaths(directory, sessionID);
-	if (receipts.length === 0) return 0;
-	// Preparation and restoration must agree on the exact durable obligation
-	// set. Validate every existing receipt through the authoritative restore
-	// reader before creating another stash; otherwise an ignored malformed or
-	// missing-stash receipt can permit a new receipt that restore immediately
-	// rejects, stranding the newly preserved changes.
-	const parsed = await Promise.all(
-		receipts.map(async (entry) => ({
-			...entry,
-			receipt: await readCheckoutRestoreReceipt(
-				directory,
-				entry.receiptPath,
-				sessionID,
-				entry.stashOid,
-			),
-		})),
+	const reconciliation = await reconcilePrWorkflowCheckoutReceiptsLocked(
+		directory,
+		sessionID,
+		{ collectVerified: true, retireMissing: true },
 	);
-	const pending = parsed.filter(
-		(entry) => entry.receipt.restoreState !== 'applied',
-	);
-	if (pending.length > 0) {
-		let activeStashOids: Set<string>;
-		try {
-			activeStashOids = await readCurrentStashOids(directory);
-		} catch {
-			throw new Error(
-				'BLOCKED: unable to inspect checkout-preparation receipts safely',
-			);
-		}
-		const missing = pending.filter(
-			(entry) => !activeStashOids.has(entry.stashOid),
+	if (reconciliation.failures.length > 0) {
+		throw new CheckoutRestoreError(
+			'CHECKOUT_RESTORE_RECONCILIATION_FAILED',
+			'BLOCKED: existing checkout receipts could not be reconciled safely; no new checkout stash was created',
 		);
-		if (missing.length > 0) {
-			throw new CheckoutRestoreError(
-				'CHECKOUT_RESTORE_STASH_MISSING',
-				`BLOCKED: ${missing.length} existing checkout receipt(s) reference missing preserved stashes; no new checkout stash was created`,
-			);
-		}
 	}
-	return parsed.length;
+	return (await listCheckoutReceiptPaths(directory, sessionID)).length;
 }
 
 async function readCurrentStashOids(directory: string): Promise<Set<string>> {
@@ -1538,24 +1811,29 @@ async function restorePrWorkflowCheckout(
 					// response reports retention as unverified instead of blocking cleanup.
 				}
 				let receiptCleanupPending = false;
-				for (const target of verifiedCleanup) {
-					try {
-						await _internals.removeCheckoutRestoreReceipt(target.receiptPath);
-					} catch {
-						receiptCleanupPending = true;
-					}
-				}
 				if (restoreTargets.length === 0) {
+					const cleanup = await reconcilePrWorkflowCheckoutReceiptsLocked(
+						directory,
+						sessionID,
+						{ collectVerified: true, retireMissing: false },
+					);
+					receiptCleanupPending = cleanup.failures.length > 0;
+					try {
+						observedStashes = await readCurrentStashOids(directory);
+					} catch {
+						// Keep the earlier inventory when post-cleanup verification is unavailable.
+					}
 					const first = verifiedCleanup[0].receipt;
+					const retainedStashes = observedStashes;
 					return {
 						kind: 'restored',
 						stashOids: targets.map((entry) => entry.stashOid),
-						retainedStashOids: observedStashes
+						retainedStashOids: retainedStashes
 							? targets
-									.filter((entry) => observedStashes.has(entry.stashOid))
+									.filter((entry) => retainedStashes.has(entry.stashOid))
 									.map((entry) => entry.stashOid)
 							: [],
-						stashRetentionVerified: observedStashes !== null,
+						stashRetentionVerified: retainedStashes !== null,
 						originalHead: first.originalHead,
 						originalBranch: first.originalBranch,
 						restoredHead: first.restoredHead!,
@@ -1593,6 +1871,11 @@ async function restorePrWorkflowCheckout(
 						throw new CheckoutRestoreError(
 							'CHECKOUT_RESTORE_STASH_MISSING',
 							`BLOCKED: ${missing.length} preserved checkout stash(es) are missing; no checkout mutation was attempted`,
+							{
+								missingStashOids: missing
+									.map((entry) => entry.stashOid)
+									.slice(0, MAX_CHECKOUT_RECEIPTS),
+							},
 						);
 					}
 				}
@@ -1711,12 +1994,13 @@ async function restorePrWorkflowCheckout(
 						}
 					}
 					await appendRestoreEvent(directory, sessionID, target.receipt);
-					try {
-						await _internals.removeCheckoutRestoreReceipt(target.receiptPath);
-					} catch {
-						receiptCleanupPending = true;
-					}
 				}
+				const cleanup = await reconcilePrWorkflowCheckoutReceiptsLocked(
+					directory,
+					sessionID,
+					{ collectVerified: true, retireMissing: false },
+				);
+				receiptCleanupPending = cleanup.failures.length > 0;
 				let finalStashes: Set<string> | null = null;
 				try {
 					finalStashes = await readCurrentStashOids(directory);
@@ -1839,11 +2123,13 @@ export const _internals: {
 	readBoundedGitStdout: typeof readBoundedGitStdout;
 	classifyGitState: typeof classifyPrWorkflowGitState;
 	removeCheckoutRestoreReceipt: typeof removeCheckoutRestoreReceipt;
+	appendCoreEventSync: typeof appendCoreEventSync;
 } = {
 	runGit,
 	readBoundedGitStdout,
 	classifyGitState: classifyPrWorkflowGitState,
 	removeCheckoutRestoreReceipt,
+	appendCoreEventSync,
 };
 
 /**
