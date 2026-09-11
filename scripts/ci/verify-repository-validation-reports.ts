@@ -131,12 +131,55 @@ function validTimestamp(value: unknown): value is string {
 	return typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value));
 }
 
-function readBoundedText(filePath: string, maxBytes: number, label: string): string {
-	const buffer = Buffer.alloc(maxBytes + 1);
-	let bytesRead = 0;
+function openRegularReadDescriptor(filePath: string, label: string): number {
+	let pathStats: fs.Stats;
+	try {
+		pathStats = fs.lstatSync(filePath);
+	} catch (error) {
+		fail(`unable to inspect ${label} ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (!pathStats.isFile()) fail(`${label} must be a regular file: ${filePath}`);
+
+	// lstat prevents an ordinary symlink from reaching open. The descriptor
+	// flags close the remaining POSIX race: a regular file can be replaced by a
+	// FIFO or link after lstat but before open. Windows does not expose these
+	// flags; descriptor identity below is the portable post-open check, and
+	// Windows has no filesystem FIFOs to block on in the supported CI path.
+	const constants = fs.constants as typeof fs.constants & {
+		O_NOFOLLOW?: number;
+		O_NONBLOCK?: number;
+	};
+	const noFollow = process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0);
+	const nonBlock = process.platform === 'win32' ? 0 : (constants.O_NONBLOCK ?? 0);
 	let fileDescriptor: number | undefined;
 	try {
-		fileDescriptor = fs.openSync(filePath, 'r');
+		fileDescriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow | nonBlock);
+		const openedStats = fs.fstatSync(fileDescriptor);
+		if (
+			!openedStats.isFile() ||
+			openedStats.dev !== pathStats.dev ||
+			openedStats.ino !== pathStats.ino
+		) {
+			fs.closeSync(fileDescriptor);
+			fileDescriptor = undefined;
+			fail(`${label} changed while opening: ${filePath}`);
+		}
+		return fileDescriptor;
+	} catch (error) {
+		if (fileDescriptor !== undefined) fs.closeSync(fileDescriptor);
+		fail(`unable to open ${label} ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+interface BoundedFileRead {
+	buffer: Buffer;
+	bytesRead: number;
+}
+
+function readBoundedBytes(filePath: string, maxBytes: number, label: string): BoundedFileRead {
+	const buffer = Buffer.alloc(maxBytes + 1);
+	let bytesRead = 0;
+	const fileDescriptor = openRegularReadDescriptor(filePath, label);
+	try {
 		while (bytesRead < buffer.byteLength) {
 			const read = fs.readSync(fileDescriptor, buffer, bytesRead, buffer.byteLength - bytesRead, bytesRead);
 			if (read === 0) break;
@@ -145,9 +188,14 @@ function readBoundedText(filePath: string, maxBytes: number, label: string): str
 	} catch (error) {
 		fail(`unable to read ${label} ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
 	} finally {
-		if (fileDescriptor !== undefined) fs.closeSync(fileDescriptor);
+		fs.closeSync(fileDescriptor);
 	}
 	if (bytesRead > maxBytes) fail(`${label} exceeds ${maxBytes} bytes: ${filePath}`);
+	return { buffer, bytesRead };
+}
+
+function readBoundedText(filePath: string, maxBytes: number, label: string): string {
+	const { buffer, bytesRead } = readBoundedBytes(filePath, maxBytes, label);
 	return buffer.toString('utf8', 0, bytesRead);
 }
 
@@ -155,22 +203,7 @@ function readBoundedReport(reportPath: string, budget: VerificationBudget): Json
 	if (budget.reportFiles >= MAX_REPORT_FILES) {
 		fail(`report file count exceeds ${MAX_REPORT_FILES}: ${reportPath}`);
 	}
-	const buffer = Buffer.alloc(MAX_REPORT_BYTES + 1);
-	let bytesRead = 0;
-	let fileDescriptor: number | undefined;
-	try {
-		fileDescriptor = fs.openSync(reportPath, 'r');
-		while (bytesRead < buffer.byteLength) {
-			const read = fs.readSync(fileDescriptor, buffer, bytesRead, buffer.byteLength - bytesRead, bytesRead);
-			if (read === 0) break;
-			bytesRead += read;
-		}
-	} catch (error) {
-		fail(`unable to read JSON report ${reportPath}: ${error instanceof Error ? error.message : String(error)}`);
-	} finally {
-		if (fileDescriptor !== undefined) fs.closeSync(fileDescriptor);
-	}
-	if (bytesRead > MAX_REPORT_BYTES) fail(`JSON report exceeds ${MAX_REPORT_BYTES} bytes: ${reportPath}`);
+	const { buffer, bytesRead } = readBoundedBytes(reportPath, MAX_REPORT_BYTES, 'JSON report');
 	budget.reportFiles += 1;
 	budget.reportBytes += bytesRead;
 	if (budget.reportBytes > MAX_TOTAL_REPORT_BYTES) {
@@ -491,5 +524,10 @@ export function main(argv = process.argv.slice(2)): number {
 		return 1;
 	}
 }
+
+export const _test_exports = {
+	readBoundedText,
+	readBoundedReport,
+};
 
 if (import.meta.main) process.exit(main());

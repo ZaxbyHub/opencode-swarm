@@ -264,6 +264,38 @@ describe('repository validation report lock — issue #2675', () => {
 		});
 	});
 
+	test('rejects a canonical report parent that changes before lock acquisition', async () => {
+		await withTempRoot(async (root, destination) => {
+			destination = path.join(
+				root,
+				'.swarm',
+				'nested',
+				path.basename(destination),
+			);
+			const parent = path.dirname(destination);
+			const outside = canonicalMkdtemp('repository-validation-parent-swap-');
+			const originalRealpath = _internals.reportPublicationRealpath;
+			let parentRealpathCalls = 0;
+			_internals.reportPublicationRealpath = async (candidate) => {
+				const resolved = await originalRealpath(candidate);
+				if (candidate === parent) {
+					parentRealpathCalls += 1;
+					if (parentRealpathCalls >= 2) return outside;
+				}
+				return resolved;
+			};
+			try {
+				await expect(
+					writeValidationReport(report(root), destination),
+				).rejects.toThrow(/directory identity changed/);
+				expect(await fsp.readdir(parent)).toEqual([]);
+			} finally {
+				_internals.reportPublicationRealpath = originalRealpath;
+				await fsp.rm(outside, { recursive: true, force: true });
+			}
+		});
+	});
+
 	test.skipIf(process.platform === 'win32')(
 		'does not open a FIFO while inspecting a lock',
 		async () => {

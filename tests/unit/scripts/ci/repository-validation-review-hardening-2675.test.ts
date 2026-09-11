@@ -84,9 +84,10 @@ describe('repository-validation review hardening — issue #2675', () => {
 		expect(SOURCE).toContain('assertPublicationActive(state)');
 		expect(SOURCE).toContain('lock ownership changed before commit');
 		expect(SOURCE).toContain('state.cancelled = true');
-		expect(SOURCE).toContain('const canonicalParent = await fsp.realpath');
+		expect(SOURCE).toContain('captureReportPublicationIdentity');
+		expect(SOURCE).toContain('reportPublicationRealpath');
 		expect(SOURCE).toContain(
-			'const safeDestination = path.join(canonicalParent, path.basename(destination))',
+			'const safeDestination = path.join(publicationIdentity.canonicalParent, path.basename(destination))',
 		);
 	});
 

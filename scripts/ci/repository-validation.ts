@@ -590,6 +590,8 @@ export const _internals: {
 	reportLockLstat: typeof fsp.lstat;
 	reportLockOpen: typeof fsp.open;
 	readReportLockOwner: typeof readReportLockOwner;
+	reportPublicationLstat: typeof fsp.lstat;
+	reportPublicationRealpath: typeof fsp.realpath;
 } = {
 	runtimeAvailable,
 	gitDiffPaths: defaultGitDiffPaths,
@@ -604,6 +606,8 @@ export const _internals: {
 	reportLockLstat: fsp.lstat,
 	reportLockOpen: fsp.open,
 	readReportLockOwner,
+	reportPublicationLstat: fsp.lstat,
+	reportPublicationRealpath: fsp.realpath,
 };
 
 function commandItem(
@@ -1353,6 +1357,75 @@ async function assertSafeReportPath(root: string, destination: string): Promise<
 	}
 }
 
+interface ReportPublicationIdentity {
+	canonicalSwarmRoot: string;
+	canonicalParent: string;
+	swarmRootStats: fs.Stats;
+	parentStats: fs.Stats;
+}
+
+function sameCanonicalPath(left: string, right: string): boolean {
+	const normalizedLeft = path.normalize(left);
+	const normalizedRight = path.normalize(right);
+	return process.platform === 'win32'
+		? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+		: normalizedLeft === normalizedRight;
+}
+
+function isChangedDirectory(expected: fs.Stats, current: fs.Stats): boolean {
+	return !current.isDirectory() || current.isSymbolicLink() || expected.dev !== current.dev || expected.ino !== current.ino;
+}
+
+async function captureReportPublicationIdentity(root: string, destination: string): Promise<ReportPublicationIdentity> {
+	const swarmRoot = path.resolve(root, '.swarm');
+	const parent = path.dirname(destination);
+	const [canonicalSwarmRoot, canonicalParent, swarmRootStats, parentStats] = await Promise.all([
+		_internals.reportPublicationRealpath(swarmRoot),
+		_internals.reportPublicationRealpath(parent),
+		_internals.reportPublicationLstat(swarmRoot),
+		_internals.reportPublicationLstat(parent),
+	]);
+	if (!swarmRootStats.isDirectory() || swarmRootStats.isSymbolicLink() || !parentStats.isDirectory() || parentStats.isSymbolicLink()) {
+		throw new Error('repository validation report publication parent is not a stable directory');
+	}
+	const canonicalRelative = path.relative(canonicalSwarmRoot, canonicalParent);
+	if (canonicalRelative === '..' || canonicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRelative)) {
+		throw new Error(`repository validation report path escapes ${swarmRoot}`);
+	}
+	return { canonicalSwarmRoot, canonicalParent, swarmRootStats, parentStats };
+}
+
+/**
+ * Revalidate both directory identities immediately before each publication
+ * operation. Node/Bun do not expose a portable openat/renameat primitive, so a
+ * final canonical-path and descriptor-identity check is the strongest
+ * cross-platform protection available against a directory swap between the
+ * initial guard and the write.
+ */
+async function assertStableReportPublicationParent(
+	root: string,
+	destination: string,
+	expected: ReportPublicationIdentity,
+): Promise<void> {
+	await assertSafeReportPath(root, destination);
+	const swarmRoot = path.resolve(root, '.swarm');
+	const parent = path.dirname(destination);
+	const [canonicalSwarmRoot, canonicalParent, swarmRootStats, parentStats] = await Promise.all([
+		_internals.reportPublicationRealpath(swarmRoot),
+		_internals.reportPublicationRealpath(parent),
+		_internals.reportPublicationLstat(swarmRoot),
+		_internals.reportPublicationLstat(parent),
+	]);
+	if (
+		!sameCanonicalPath(canonicalSwarmRoot, expected.canonicalSwarmRoot) ||
+		!sameCanonicalPath(canonicalParent, expected.canonicalParent) ||
+		isChangedDirectory(expected.swarmRootStats, swarmRootStats) ||
+		isChangedDirectory(expected.parentStats, parentStats)
+	) {
+		throw new Error('repository validation report publication directory identity changed');
+	}
+}
+
 interface ReportLockOwner {
 	pid: number;
 	token: string;
@@ -1638,24 +1711,21 @@ async function writeValidationReportUnbounded(
 	// Resolve the parent once after creation and use that canonical directory for
 	// every subsequent operation. This prevents a later symlink/junction swap of
 	// the user-facing path from redirecting lock, temp, or report I/O elsewhere.
-	const canonicalParent = await fsp.realpath(path.dirname(destination));
-	const canonicalSwarmRoot = await fsp.realpath(path.resolve(report.root, '.swarm'));
+	const publicationIdentity = await captureReportPublicationIdentity(report.root, destination);
 	assertPublicationActive(state);
-	const canonicalRelative = path.relative(canonicalSwarmRoot, canonicalParent);
-	if (canonicalRelative === '..' || canonicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRelative)) {
-		throw new Error(`repository validation report path escapes ${path.join(report.root, '.swarm')}`);
-	}
-	const safeDestination = path.join(canonicalParent, path.basename(destination));
+	const safeDestination = path.join(publicationIdentity.canonicalParent, path.basename(destination));
 	assertPublicationActive(state);
 	const lockPath = `${safeDestination}.lock`;
 	let lock: HeldReportLock | undefined;
 	let temporaryPath: string | undefined;
 	try {
+		await assertStableReportPublicationParent(report.root, destination, publicationIdentity);
 		lock = await acquireReportLock(lockPath);
 		assertPublicationActive(state);
 		temporaryPath = `${safeDestination}.${process.pid}.${randomUUID()}.tmp`;
 		assertPublicationActive(state);
 		const payload = `${JSON.stringify({ ...report, reportPath: safeDestination }, null, 2)}\n`;
+		await assertStableReportPublicationParent(report.root, destination, publicationIdentity);
 		await fsp.writeFile(temporaryPath, payload, { encoding: 'utf8', flag: 'wx' });
 		assertPublicationActive(state);
 		const ownership = await readReportLockOwner(lockPath);
@@ -1663,6 +1733,7 @@ async function writeValidationReportUnbounded(
 			throw new Error('repository validation report lock ownership changed before commit');
 		}
 		assertPublicationActive(state);
+		await assertStableReportPublicationParent(report.root, destination, publicationIdentity);
 		await fsp.rename(temporaryPath, safeDestination);
 		return safeDestination;
 	} finally {
