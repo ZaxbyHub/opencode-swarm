@@ -656,7 +656,15 @@ export function createPrmHook(
 				// key (same ladder+level, `:terminal` tag) so the handoff
 				// guidance is delivered exactly once instead of being suppressed
 				// by the level-3 key the first stop already consumed.
-				const prmDedupeKey = `prm:${resolveLadderKey(match)}:${escalationLevel}${hardStopTerminal ? ':terminal' : ''}`;
+				// Issue #2678 / swarm-pr-review PRR-104: the key is scoped to the
+				// tracker GENERATION, which advances at every episode transition
+				// (trigger, terminal, owner-verified clear). Without it, a fresh
+				// episode's first stop after a cooldown lapse reused the level-3
+				// key the previous episode's first stop had already injected and
+				// the re-told advisory was silently suppressed — the agent was
+				// re-stopped but never told why. Within one episode phase the
+				// generation is stable, so per-phase delivery-once still holds.
+				const prmDedupeKey = `prm:${resolveLadderKey(match)}:${escalationLevel}${hardStopTerminal ? ':terminal' : ''}:g${escalationTracker.getGeneration()}`;
 				// Defensive: the field is initialized by ensureAgentSession, but
 				// guard so a session object lacking it (e.g. a minimal test mock)
 				// does not throw and abort the unconditional match-processing.

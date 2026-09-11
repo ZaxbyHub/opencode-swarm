@@ -1064,6 +1064,9 @@ export const telemetry = {
 		level: number,
 		occurrenceCount: number,
 	): void {
+		// Literal (not the PRM_HARD_STOP_TERMINAL_EVENT const) because the
+		// event-contract gate greps this line for the kind; equality between
+		// the literal and the const is pinned by issue-2678-bounded-episode.test.ts.
 		_internals.emit('prm_hard_stop_terminal', {
 			sessionId,
 			pattern,

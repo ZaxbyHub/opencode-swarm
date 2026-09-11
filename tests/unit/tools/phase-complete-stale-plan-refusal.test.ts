@@ -112,6 +112,7 @@ vi.mock('../../../src/session/snapshot-writer', () => ({
 
 vi.mock('../../../src/telemetry', () => ({
 	telemetry: {
+   prmHardStopTerminal: () => {},
 		phaseChanged: vi.fn(),
 		sessionStarted: vi.fn(),
 		agentActivated: vi.fn(),

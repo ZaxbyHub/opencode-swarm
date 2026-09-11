@@ -4,6 +4,13 @@
  */
 
 /**
+ * Issue #2678 — telemetry event name for the TERMINAL/handoff transition of a
+ * PRM hard-stop episode. Lives here (not in `escalation.ts`) so the telemetry
+ * emitter can import it without a cycle; `escalation.ts` re-exports it.
+ */
+export const PRM_HARD_STOP_TERMINAL_EVENT = 'prm_hard_stop_terminal';
+
+/**
  * All detectable pattern types in the SWE-PRM system
  */
 export type PatternType =

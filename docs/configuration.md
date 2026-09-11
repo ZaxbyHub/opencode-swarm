@@ -1443,6 +1443,12 @@ callers (e.g. a corrected-work hook): no built-in hook invokes it yet, so the
 only clears that fire in production today are the whole-tracker `reset()` at
 delegation boundaries and `/swarm reset-session`.
 
+The episode bound (one repeated stop before the terminal handoff) and the
+15-minute cooldown are FIXED CONSTANTS in `src/prm/escalation.ts`
+(`PRM_HARD_STOP_TERMINAL_REPEATS`, `PRM_TERMINAL_COOLDOWN_MS`), deliberately
+not configurable in this first landing — they are safety bounds, not tuning
+surfaces; revisit only with a maintainer-reviewed motivation.
+
 **Operator controls stay reachable.** Because a terminal episode stops
 re-arming the deny token, every control path remains reachable after the
 bound: `read`/`grep`/`glob` tools, `/swarm diagnose`, scope rescope and

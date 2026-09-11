@@ -61,12 +61,15 @@ describe('EscalationTracker', () => {
 				escalationLevel: 2,
 				lastPatternDetected: createMockPatternMatch('repetition_loop'),
 				hardStopPending: false,
+				episodes: new Map(), // full schema (issue #2678)
+				generation: 0,
 			};
 			const tracker = new EscalationTracker('session-2', initialState);
 			const state = tracker.getState();
 			expect(state.patternCounts.get('repetition_loop')).toBe(2);
 			expect(state.escalationLevel).toBe(2);
 			expect(state.lastPatternDetected?.pattern).toBe('repetition_loop');
+			expect(state.episodes.size).toBe(0);
 		});
 	});
 

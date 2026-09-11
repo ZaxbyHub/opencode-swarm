@@ -247,4 +247,79 @@ describe('issue #2678 — bounded PRM hard-stop episode', () => {
 		expect(state.hardStopPending).toBe(false);
 		expect(state.patternCounts.size).toBe(0);
 	});
+
+	// --- swarm-pr-review feedback round (PRR-101/102/113 + bot payload note) ---
+
+	test('terminal event payload carries the session, pattern, level, and occurrence count', () => {
+		const tracker = new EscalationTracker('sess-2678-payload');
+		for (let i = 0; i < 4; i += 1) tracker.recordDetection(match());
+		expect(terminalEvent).toHaveBeenCalledWith(
+			'sess-2678-payload',
+			'repetition_loop',
+			3,
+			4,
+		);
+	});
+
+	test('a cooling terminal ladder survives an eviction flood (PRR-101)', () => {
+		const tracker = new EscalationTracker('sess-2678-evict');
+		for (let i = 0; i < 4; i += 1) tracker.recordDetection(match());
+		const key = resolveLadderKey(match());
+		expect(tracker.getState().episodes.get(key)?.terminal).toBe(true);
+
+		// Flood with >MAX_TRACKED_LADDERS fresh single-detection ladders —
+		// pre-fix, this evicted the cooling ladder's count AND episode,
+		// silently dropping the cooldown guard.
+		for (let i = 0; i < 300; i += 1) {
+			tracker.recordDetection(
+				match({ affectedTargets: [`src/flood-${i}.ts`] }),
+			);
+		}
+
+		// The cooling ladder survived with its count and terminal episode
+		// intact, and its next detection is still ABSORBED (not restarted).
+		const episode = tracker.getState().episodes.get(key);
+		expect(episode?.terminal).toBe(true);
+		expect(tracker.getState().patternCounts.get(key)).toBe(4);
+		const absorbed = tracker.recordDetection(match());
+		expect(absorbed.hardStop).toBe(false);
+		expect(absorbed.terminal).toBe(true);
+		expect(absorbed.level).toBe(3);
+	});
+
+	test('clearAction on a never-seen key fails closed: no flag retirement, no generation advance (PRR-102)', () => {
+		const tracker = new EscalationTracker('sess-2678-noop');
+		// Arm ladder A's first stop, then try to clear a key that never existed.
+		tracker.recordDetection(match());
+		tracker.recordDetection(match());
+		tracker.recordDetection(match());
+		expect(tracker.isHardStopPending()).toBe(true);
+		const before = tracker.getState();
+		const generation = tracker.getGeneration();
+
+		const cleared = tracker.clearAction('repetition_loop|never-seen.ts');
+		expect(cleared).toBe(false);
+		// The unrelated (or invented) clear must NOT disarm the stop armed by
+		// ladder A, and must not advance the generation.
+		expect(tracker.isHardStopPending()).toBe(true);
+		expect(tracker.getGeneration()).toBe(generation);
+		expect(tracker.getState().patternCounts).toEqual(before.patternCounts);
+		expect(tracker.getState().episodes.size).toBe(before.episodes.size);
+	});
+
+	test('string-key clearAction clears an existing ladder and retires the stop flag (PRR-113)', () => {
+		const tracker = new EscalationTracker('sess-2678-strkey');
+		for (let i = 0; i < 4; i += 1) tracker.recordDetection(match());
+		expect(tracker.isHardStopPending()).toBe(true);
+
+		const cleared = tracker.clearAction(resolveLadderKey(match()));
+		expect(cleared).toBe(true);
+		expect(tracker.isHardStopPending()).toBe(false);
+		expect(
+			tracker.getState().patternCounts.has(resolveLadderKey(match())),
+		).toBe(false);
+		// The cleared ladder restarts at level 1.
+		const r = tracker.recordDetection(match());
+		expect(r.level).toBe(1);
+	});
 });

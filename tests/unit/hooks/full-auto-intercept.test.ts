@@ -116,6 +116,7 @@ const telemetryCalls: Array<{
 // Mock telemetry - remains as mock.module (no _internals seam for direct import)
 mock.module('../../../src/telemetry.js', () => ({
 	telemetry: {
+   prmHardStopTerminal: () => {},
 		autoOversightEscalation: mock(
 			(
 				sessionId: string,

@@ -12,14 +12,14 @@ import type {
 	PrmEpisodeState,
 } from './types';
 
-/**
- * Issue #2678 — telemetry event name for the TERMINAL/handoff transition of a
- * PRM hard-stop episode. Distinct from `prm_hard_stop` (the TRIGGER, fired
- * once per false-to-true transition) and `prm_hard_stop_delivered` (the
- * DELIVERY, emitted by the guardrails deny consumer): the three counters are
- * noninterchangeable.
- */
-export const PRM_HARD_STOP_TERMINAL_EVENT = 'prm_hard_stop_terminal';
+// Issue #2678 — defined in `./types` (next to the state it describes) so the
+// telemetry emitter can import it without an import cycle; re-exported here
+// for the established public surface (tests and future callers import it from
+// this module). Distinct from `prm_hard_stop` (the TRIGGER, fired once per
+// false-to-true transition) and `prm_hard_stop_delivered` (the DELIVERY,
+// emitted by the guardrails deny consumer): the three counters are
+// noninterchangeable.
+export { PRM_HARD_STOP_TERMINAL_EVENT } from './types';
 
 /**
  * Issue #2678 — hard-stop detections after the first one (within one episode)
@@ -245,6 +245,17 @@ export class EscalationTracker {
 		const episode = this._state.episodes.get(ladderKey);
 		if (episode?.terminal) {
 			if (Date.now() < episode.cooldownUntil) {
+				// Refresh this ladder's eviction position (same count, moved to
+				// the back) — the cooldown early-return below the count advance
+				// would otherwise leave a cooling terminal ladder drifting to
+				// the eviction front, where >MAX_TRACKED_LADDERS newer ladders
+				// could evict BOTH its count and episode mid-cooldown and
+				// silently drop the cooldown guard (swarm-pr-review PRR-101).
+				const currentCount = this._state.patternCounts.get(ladderKey);
+				if (currentCount !== undefined) {
+					this._state.patternCounts.delete(ladderKey);
+					this._state.patternCounts.set(ladderKey, currentCount);
+				}
 				this._state.lastPatternDetected = match;
 				this._state.escalationLevel = 3;
 				return {
@@ -279,9 +290,29 @@ export class EscalationTracker {
 		// last thing evicted rather than the first.
 		this._state.patternCounts.delete(ladderKey);
 		this._state.patternCounts.set(ladderKey, newCount);
+		// Cooling terminal ladders are protected from eviction: dropping one
+		// mid-cooldown would silently remove the cooldown guard and let the
+		// ladder restart at count 1 (swarm-pr-review PRR-101). Skip them by
+		// refreshing to the back; the skip counter bounds the loop so a map
+		// saturated with cooling ladders still shrinks (bounded-ness wins).
+		let coolingSkipped = 0;
 		while (this._state.patternCounts.size > MAX_TRACKED_LADDERS) {
 			const oldest = this._state.patternCounts.keys().next().value;
 			if (oldest === undefined) break;
+			const oldestEpisode = this._state.episodes.get(oldest);
+			if (
+				oldestEpisode?.terminal &&
+				Date.now() < oldestEpisode.cooldownUntil &&
+				coolingSkipped < MAX_TRACKED_LADDERS
+			) {
+				coolingSkipped += 1;
+				const oldestCount = this._state.patternCounts.get(oldest);
+				if (oldestCount !== undefined) {
+					this._state.patternCounts.delete(oldest);
+					this._state.patternCounts.set(oldest, oldestCount);
+				}
+				continue;
+			}
 			this._state.patternCounts.delete(oldest);
 			// Issue #2678: the episode record shares the ladder keyspace — evict
 			// together so neither map outlives its counterpart's identity.
@@ -463,7 +494,14 @@ export class EscalationTracker {
 			typeof matchOrKey === 'string'
 				? matchOrKey
 				: resolveLadderKey(matchOrKey);
-		this._state.patternCounts.delete(ladderKey);
+		// A key that was never armed has nothing to clear: report failure
+		// WITHOUT retiring the stop token or advancing generation — retiring
+		// the tracker-wide flag for an unrelated (or never-seen) ladder would
+		// disarm a hard stop the cleared action did not own
+		// (swarm-pr-review PRR-102).
+		if (!this._state.patternCounts.delete(ladderKey)) {
+			return false;
+		}
 		this._state.episodes.delete(ladderKey);
 		// A successful clear retires the one-shot stop token: the corrected
 		// action's stop was its source, and the producer re-arms the token on
