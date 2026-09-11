@@ -208,10 +208,13 @@ async function getGitChurn(
 				GIT_CHURN_TIMEOUT_MS,
 			);
 		});
-		const [stdout] = await Promise.race([
-			Promise.all([proc.stdout.text(), proc.exited]),
-			boundedRead,
-		]);
+		const churnRead = Promise.all([proc.stdout.text(), proc.exited]);
+		const [stdout] = await Promise.race([churnRead, boundedRead]);
+		// When the bound wins the race, the loser keeps running: stdout.text()
+		// can still reject later (BunCompatOutputLimitError past maxBuffer).
+		// Swallow that here — the bounded path already reports the timeout —
+		// so the abandoned promise can never surface as an unhandled rejection.
+		churnRead.catch(() => {});
 
 		// A spawn failure (process never started — e.g. missing git binary or a
 		// cwd that no longer exists) means the churn data is unproven, not empty.

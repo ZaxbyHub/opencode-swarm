@@ -97,9 +97,9 @@ describe('scanSourceForBareSpawn — form 1 (shell-string callees: exec/execSync
 	 * `execSync`/`exec` take a SHELL COMMAND STRING, not an argv[0] — the
 	 * literal `'git'` string-equality check used for `spawnSync`-style
 	 * callees never matches `'git remote get-url origin'`. This is the exact
-	 * shape of the real sites this gate previously missed:
-	 * `src/knowledge/identity.ts:68`/`:131`,
-	 * `src/services/diagnose-service.ts:387` (issue #2236 follow-up).
+	 * shape of the real sites this gate previously missed (issue #2236
+	 * follow-up): `getGitRemoteUrl` in src/knowledge/identity.ts and
+	 * `checkGitRepository` in src/services/diagnose-service.ts.
 	 */
 	test('child_process.execSync("git remote get-url origin", opts) is flagged on the command string\'s first token', () => {
 		const v = scanSourceForBareSpawn(

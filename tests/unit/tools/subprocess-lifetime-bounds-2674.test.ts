@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import {
+	deriveProjectHash,
 	_internals as identityInternals,
 	writeProjectIdentity,
 } from '../../../src/knowledge/identity';
@@ -291,6 +292,40 @@ describe('subprocess lifetime bounds — regression: unbounded probes (#2674)', 
 			} finally {
 				hotspotsInternals.bunSpawn = original;
 			}
+		});
+	});
+
+	describe('deriveProjectHash (compliant sibling — regression guard, PRR-004)', () => {
+		it('falls back to the path hash when the directory has no git remote (timeout/failure contract preserved)', () => {
+			__seedGitExecutableForTests('git');
+			const dir = canonicalMkdtemp('swarm-2674-dph-');
+			tempDirs.push(dir);
+			// A bare temp dir has no origin remote, so the 1500ms-bounded git
+			// probe throws and the catch path hashes the absolute path.
+			const hash = deriveProjectHash(dir);
+			expect(hash).toMatch(/^[0-9a-f]{12}$/);
+		});
+
+		it('is deterministic per directory and distinct across directories', () => {
+			__seedGitExecutableForTests('git');
+			const dirA = canonicalMkdtemp('swarm-2674-dph-a-');
+			const dirB = canonicalMkdtemp('swarm-2674-dph-b-');
+			tempDirs.push(dirA, dirB);
+			expect(deriveProjectHash(dirA)).toBe(deriveProjectHash(dirA));
+			expect(deriveProjectHash(dirA)).not.toBe(deriveProjectHash(dirB));
+		});
+
+		it('still returns a bounded fallback hash for a nonexistent directory', () => {
+			__seedGitExecutableForTests('git');
+			const missing = path.join(
+				os.tmpdir(),
+				`swarm-2674-dph-missing-${process.pid}`,
+			);
+			// execFileSync with a nonexistent cwd throws immediately — the
+			// catch must fall back to hashing the resolved absolute path, not
+			// propagate the failure.
+			const hash = deriveProjectHash(missing);
+			expect(hash).toMatch(/^[0-9a-f]{12}$/);
 		});
 	});
 });
