@@ -61,14 +61,21 @@ export async function executeApproveRetrySoundingBoard(
 			generation: summary.generation,
 			retry_epoch: summary.retryEpoch,
 			recorded_at: summary.recordedAt,
+			audit_event_recorded: summary.auditEventRecorded,
 			method: 'manual_override',
 			user_confirmed: false,
-			message:
-				'Recorded a manual critic_sounding_board gate entry for the coder retry ' +
-				'circuit breaker. The next coder dispatch for this task passes the ' +
-				'TASK_RETRY_CRITIC_REQUIRED critic check (one bounded simplified retry). ' +
-				'An audit event (action sounding_board_manual_approval) was appended to ' +
-				'.swarm/events.jsonl.',
+			message: summary.auditEventRecorded
+				? 'Recorded a manual critic_sounding_board gate entry for the coder retry ' +
+					'circuit breaker. The next coder dispatch for this task passes the ' +
+					'TASK_RETRY_CRITIC_REQUIRED critic check (one bounded simplified retry). ' +
+					'An audit event (action sounding_board_manual_approval) was appended to ' +
+					'.swarm/events.jsonl.'
+				: 'Recorded a manual critic_sounding_board gate entry for the coder retry ' +
+					'circuit breaker. The next coder dispatch for this task passes the ' +
+					'TASK_RETRY_CRITIC_REQUIRED critic check (one bounded simplified retry). ' +
+					'WARNING: the audit event could NOT be appended to .swarm/events.jsonl ' +
+					'(see the plugin log); the gate evidence itself records the override via ' +
+					'the retry-sb-manual transition id.',
 		});
 	} catch (error) {
 		return JSON.stringify({

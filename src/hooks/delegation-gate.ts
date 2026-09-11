@@ -2056,6 +2056,7 @@ export async function forceRecordRetrySoundingBoardApproval(
 	generation: number;
 	retryEpoch: number;
 	recordedAt: string;
+	auditEventRecorded: boolean;
 }> {
 	// Defense-in-depth mirroring forceRecordPlanCriticApproval: the
 	// approve_retry_sounding_board tool is registered for the architect only,
@@ -2146,12 +2147,18 @@ export async function forceRecordRetrySoundingBoardApproval(
 			? options.reason.trim().slice(0, 500)
 			: undefined;
 	const recordedAt = new Date().toISOString();
+	// Epoch-scoped transitionId (review PRR-R2): a repeated invocation for the
+	// same (session, epoch) is a duplicate transition, not a fresh rewrite.
+	const transitionId = `retry-sb-manual:${sessionID}:epoch${workflow.retryEpoch}`;
 
 	// The durable gate artifact the mechanical toolAfter recorder would have
 	// written: same gate_recorded transition, same retention semantics
 	// (clearWorkflowGateProof clears it on accepted_mutation/repair_idle), so
 	// the manual entry cannot outlive its generation any more than a
-	// mechanical one can.
+	// mechanical one can. expectedGeneration (review PRR-C1) fails the write
+	// closed if a concurrent accepted_mutation/repair_idle rotated the
+	// generation between the read above and this write, instead of
+	// resurrecting the cleared gate on the new generation.
 	await recordGateEvidence(
 		directory,
 		taskId,
@@ -2159,7 +2166,8 @@ export async function forceRecordRetrySoundingBoardApproval(
 		sessionID,
 		false,
 		{
-			transitionId: `retry-sb-manual:${sessionID}:${recordedAt}`,
+			transitionId,
+			expectedGeneration: workflow.generation,
 		},
 	);
 
@@ -2167,6 +2175,7 @@ export async function forceRecordRetrySoundingBoardApproval(
 	// evidence write above is authoritative for the gate; this event is the
 	// human-readable trail distinguishing a manual override from a mechanical
 	// recording. Deduped per (taskId, retryEpoch, action).
+	let auditEventRecorded = true;
 	try {
 		appendCoreEventSync(
 			directory,
@@ -2185,6 +2194,7 @@ export async function forceRecordRetrySoundingBoardApproval(
 			{ dedupeOnAuthorityKey: true },
 		);
 	} catch (err) {
+		auditEventRecorded = false;
 		logger.warn(
 			`[delegation-gate] sounding_board_manual_approval audit event write failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
@@ -2195,6 +2205,7 @@ export async function forceRecordRetrySoundingBoardApproval(
 		generation: workflow.generation,
 		retryEpoch: workflow.retryEpoch,
 		recordedAt,
+		auditEventRecorded,
 	};
 }
 

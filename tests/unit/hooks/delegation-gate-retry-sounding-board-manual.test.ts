@@ -152,6 +152,7 @@ describe('forceRecordRetrySoundingBoardApproval (issue #2703)', () => {
 		);
 		expect(summary.taskId).toBe('1.1');
 		expect(summary.retryEpoch).toBe(epochBefore);
+		expect(summary.auditEventRecorded).toBe(true);
 
 		const evidence = await readTaskEvidence(directory, '1.1');
 		expect(evidence?.gates.critic_sounding_board?.sessionId).toBe(
@@ -195,6 +196,43 @@ describe('forceRecordRetrySoundingBoardApproval (issue #2703)', () => {
 				(event) => event.taskId === '1.1' && event.action === 'simplification',
 			),
 		).toBe(true);
+	});
+
+	test('is idempotent per (session, epoch): second call rewrites nothing and emits no second audit event', async () => {
+		await wedgeTask1_1();
+		ensureAgentSession('arch-approve', 'architect', directory);
+		const first = await forceRecordRetrySoundingBoardApproval(
+			directory,
+			'arch-approve',
+			{ taskId: '1.1', reason: 'recovery' },
+		);
+		const afterFirst = await readTaskEvidence(directory, '1.1');
+		const transitionId = getTaskWorkflowSnapshot(afterFirst).lastTransitionId;
+		expect(transitionId).toBe(
+			`retry-sb-manual:arch-approve:epoch${first.retryEpoch}`,
+		);
+
+		const second = await forceRecordRetrySoundingBoardApproval(
+			directory,
+			'arch-approve',
+			{ taskId: '1.1', reason: 'repeated invocation' },
+		);
+		expect(second.auditEventRecorded).toBe(true);
+		const afterSecond = await readTaskEvidence(directory, '1.1');
+		// Epoch-stable transitionId: the duplicate transition is a no-op, so
+		// lastTransitionId (and the gate entry) are unchanged.
+		expect(getTaskWorkflowSnapshot(afterSecond).lastTransitionId).toBe(
+			transitionId,
+		);
+		expect(afterSecond?.gates.critic_sounding_board?.sessionId).toBe(
+			'arch-approve',
+		);
+		const manualEvents = readRetryEvents(directory).filter(
+			(event) =>
+				event.taskId === '1.1' &&
+				event.action === 'sounding_board_manual_approval',
+		);
+		expect(manualEvents.length).toBe(1);
 	});
 
 	test('rejects a non-architect session and writes nothing', async () => {

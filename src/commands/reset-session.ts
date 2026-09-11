@@ -787,7 +787,7 @@ export async function handleResetSessionCommand(
 			'to commit settlement in the events audit log and .swarm/evidence/) ' +
 			'intentionally survive this reset. If a task is blocked with ' +
 			'TASK_RETRY_CRITIC_REQUIRED waiting for a critic_sounding_board ' +
-			'APPROVED verdict that was already obtained, record it with the ' +
-			'approve_retry_sounding_board tool.',
+			'APPROVED verdict that was already obtained, have the architect ' +
+			'record it with the approve_retry_sounding_board tool.',
 	].join('\n');
 }

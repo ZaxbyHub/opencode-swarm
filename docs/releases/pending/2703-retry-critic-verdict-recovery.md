@@ -76,9 +76,13 @@ the mechanical recorder lost.
 ## Migration steps
 
 None. Existing evidence files and events are read as-is; the new action
-value is ignored by pre-fix readers through the closed-set filters. Users
-with a currently-wedged task can call `approve_retry_sounding_board` with
-the task id and a reason once upgraded.
+value is ignored by pre-fix readers through the closed-set filters. Once
+upgraded, have the architect call `approve_retry_sounding_board` with the
+wedged task's id and a reason. The tool binds to the task's current
+durable retry epoch — the analog of the issue's suggested "exact task id
++ generation" binding, since the gate's own waiting condition is
+epoch-scoped (`enforceCoderRetryEscalation` reads escalations by
+task + retry epoch).
 
 ## Drawbacks
 

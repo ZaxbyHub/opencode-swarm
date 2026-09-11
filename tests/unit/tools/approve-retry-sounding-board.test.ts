@@ -42,6 +42,7 @@ interface ToolResult {
 	retry_epoch?: number;
 	method?: string;
 	user_confirmed?: boolean;
+	audit_event_recorded?: boolean;
 }
 
 describe('approve_retry_sounding_board tool (issue #2703)', () => {
@@ -176,6 +177,7 @@ describe('approve_retry_sounding_board tool (issue #2703)', () => {
 		expect(result.task_id).toBe('1.1');
 		expect(result.method).toBe('manual_override');
 		expect(result.user_confirmed).toBe(false);
+		expect(result.audit_event_recorded).toBe(true);
 		expect(typeof result.generation).toBe('number');
 		expect(typeof result.retry_epoch).toBe('number');
 	});

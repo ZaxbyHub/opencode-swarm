@@ -252,7 +252,7 @@ export const TOOL_METADATA = {
 	},
 	approve_retry_sounding_board: {
 		description:
-			'record a MANUAL critic_sounding_board gate entry to unblock the coder retry circuit-breaker gate (TASK_RETRY_CRITIC_REQUIRED) when the sounding board already returned APPROVED but the mechanical recorder failed to persist it (issue #2703); scoped to the exact plan task id, requires a durable sounding_board_consultation escalation for the current retry epoch, and appends a sounding_board_manual_approval audit event',
+			'record a MANUAL critic_sounding_board gate entry to unblock the coder retry circuit-breaker gate when the sounding board returned APPROVED but the mechanical recorder missed it (issue #2703)',
 		agents: ['architect'],
 	},
 	prepare_pr_workflow_checkout: {

@@ -99,7 +99,12 @@ export const ARCHITECT_MEMORY_OUTCOME_GUIDANCE = `After using recalled memory or
  * constant bounds a runtime-composed prompt payload; this one bounds CI
  * regression of a built-in source string.
  */
-export const ARCHITECT_PROMPT_BUDGET_CHARS = 160_000;
+// 160000 -> 161000 (#2703): adding the approve_retry_sounding_board recovery
+// tool left only ~79 chars of prefixed-render headroom at parent, so ANY
+// meaningfully-described new architect tool could not have fit. The growth is
+// conscious and documented (terse 180-char metadata description + this 1000-char
+// allowance), keeping the F#1649 ratchet intact for unreviewed growth.
+export const ARCHITECT_PROMPT_BUDGET_CHARS = 161_000;
 
 const ARCHITECT_PROMPT = `You are Architect - orchestrator of a multi-agent swarm.
 
