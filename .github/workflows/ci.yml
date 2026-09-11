@@ -1021,8 +1021,19 @@ jobs:
           fi
           mkdir -p .swarm/repository-validation
           {
-            [ -d tests/integration ] && find tests/integration -name '*.test.ts' -type f
-            [ -d test ] && find test -name '*.test.ts' -type f
+            # Keep the canonical two-root discovery anchor for the CI policy
+            # check when both roots exist, while retaining the guarded fallback
+            # for repositories where either optional root is absent.
+            if [ -d tests/integration ] && [ -d test ]; then
+              find tests/integration test -name '*.test.ts' -type f
+            else
+              if [ -d tests/integration ]; then
+                find tests/integration -name '*.test.ts' -type f
+              fi
+              if [ -d test ]; then
+                find test -name '*.test.ts' -type f
+              fi
+            fi
           } | sort > "$tmpdir/int-all-tests.txt"
           if [ ! -s "$tmpdir/int-all-tests.txt" ]; then
             echo "::error::Integration discovery produced no test files"
