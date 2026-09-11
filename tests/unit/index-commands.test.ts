@@ -159,7 +159,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-qa-gates',
 			'swarm-report',
 			'swarm-dark-matter',
-		'swarm-dashboard',
+			'swarm-dashboard',
 			'swarm-knowledge',
 			'swarm-memory',
 			'swarm-memory-status',
