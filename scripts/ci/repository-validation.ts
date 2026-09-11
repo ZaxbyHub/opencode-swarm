@@ -968,6 +968,13 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 	let rawExitCode: number | null = null;
 	try {
 		rawExitCode = await Promise.race([child.exited, timeout]);
+		// If the child-exit promise wins just after the explicit timer deadline
+		// (before the timer callback gets a turn), retain the wall-clock contract
+		// and let the single cleanup owner classify the row as timed out.
+		if (!timedOut && Date.now() - started >= options.perItemTimeoutMs) {
+			timedOut = true;
+			rawExitCode = 124;
+		}
 	} catch {
 		rawExitCode = timedOut ? 124 : null;
 	} finally {

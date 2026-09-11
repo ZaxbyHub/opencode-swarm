@@ -76,6 +76,9 @@ describe('repository-validation review hardening — issue #2675', () => {
 			'const cleanupSucceeded = await ensureTreeCleanup()',
 		);
 		expect(SOURCE).toContain('outputStop.abort();');
+		expect(SOURCE).toContain(
+			'Date.now() - started >= options.perItemTimeoutMs',
+		);
 	});
 
 	test('report publication and containment are bounded and canonicalized', () => {
