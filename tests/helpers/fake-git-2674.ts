@@ -28,6 +28,7 @@ import {
 	copyFileSync,
 	mkdirSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -82,8 +83,21 @@ export function setupFakeGit(
 		binDir,
 		process.platform === 'win32' ? 'git.exe' : 'git',
 	);
-	copyFileSync(resolveNodeExe(), gitPath);
-	chmodSync(gitPath, 0o755);
+	const nodeExe = resolveNodeExe();
+	if (process.platform === 'win32') {
+		copyFileSync(nodeExe, gitPath);
+		chmodSync(gitPath, 0o755);
+	} else {
+		// Symlink on POSIX: executing a COPIED signed binary can fail macOS
+		// code-signature validation, while a symlink resolves to the original
+		// (validly signed) inode. The copy+chmod path stays for Windows.
+		try {
+			symlinkSync(nodeExe, gitPath);
+		} catch {
+			copyFileSync(nodeExe, gitPath);
+			chmodSync(gitPath, 0o755);
+		}
+	}
 
 	const projectDir = canonicalMkdtemp('sw2674-project-');
 	// node resolves argv[1] as its main module before --require preloads run.

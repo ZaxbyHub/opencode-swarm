@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
@@ -241,6 +242,16 @@ async function getGitChurn(
 		if (proc.signalCode) {
 			throw new Error(
 				`git churn analysis failed: git log was killed by ${proc.signalCode} after exceeding the ${GIT_CHURN_TIMEOUT_MS} ms / ${GIT_CHURN_MAX_BUFFER_BYTES}-byte bound`,
+			);
+		}
+
+		// Third detector (#2674): on some runtime/OS combinations the overflow
+		// controller's rejection loses the race with a clean child exit and the
+		// captured text resolves instead — the retained prefix is capped at
+		// exactly the bound, so the size check is version-independent.
+		if (Buffer.byteLength(stdout) >= GIT_CHURN_MAX_BUFFER_BYTES) {
+			throw new Error(
+				`git churn analysis failed: git log output reached the ${GIT_CHURN_MAX_BUFFER_BYTES}-byte buffer limit`,
 			);
 		}
 

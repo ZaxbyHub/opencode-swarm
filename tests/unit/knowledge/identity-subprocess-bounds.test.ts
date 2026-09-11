@@ -8,7 +8,8 @@
  * actually run. Failure modes must degrade to `repoUrl: undefined` — bounded,
  * never fabricated, never hanging the runner (the pre-fix tree hangs here).
  */
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { rmSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { writeProjectIdentity } from '../../../src/knowledge/identity.js';
 import {
@@ -18,6 +19,7 @@ import {
 	setupFakeGit,
 	teardownFakeGit,
 } from '../../helpers/fake-git-2674.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // Generous wall-clock slack over the 5 s caller bound so CI load cannot flake
 // the termination assertion (repo convention: assert the bound, not ms
@@ -27,8 +29,39 @@ const TERMINATION_SLACK_MS = 15_000;
 
 describe('identity getGitRemoteUrl subprocess bounds (#2674)', () => {
 	let fixture: FakeGitFixture | null = null;
+	// Platform-config isolation (same pattern as tests/unit/knowledge/identity.test.ts,
+	// required by the prod-store tripwire preload): writeProjectIdentity writes
+	// identity.json under getPlatformConfigDir(), so point LOCALAPPDATA /
+	// XDG_CONFIG_HOME / HOME at a temp dir for the duration of each test.
+	// HOME must be SET (not deleted): getPlatformConfigDir falls back to
+	// os.homedir(), which Bun caches after its first call.
+	const originalLocalAppData = process.env.LOCALAPPDATA;
+	const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
+	const originalHome = process.env.HOME;
+	let isolatedConfigRoot = '';
+
+	beforeEach(() => {
+		isolatedConfigRoot = canonicalMkdtemp('sw2674-config-');
+		if (process.platform === 'win32') {
+			process.env.LOCALAPPDATA = isolatedConfigRoot;
+		} else {
+			process.env.XDG_CONFIG_HOME = isolatedConfigRoot;
+			process.env.HOME = isolatedConfigRoot;
+		}
+	});
 
 	afterEach(() => {
+		if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = originalLocalAppData;
+		if (originalXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+		if (originalHome === undefined) delete process.env.HOME;
+		else process.env.HOME = originalHome;
+		try {
+			rmSync(isolatedConfigRoot, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
 		teardownFakeGit(fixture);
 		fixture = null;
 	});
