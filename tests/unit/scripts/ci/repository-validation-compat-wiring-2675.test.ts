@@ -210,12 +210,18 @@ describe('issue #2675 report writer safety', () => {
 			};
 			const requested = path.join(root, '.swarm', 'report.json');
 			const written = await writeValidationReport(report, requested);
-			expect(path.resolve(written)).toBe(path.resolve(requested));
+			// The writer deliberately publishes through the realpath-resolved parent
+			// to close Windows 8.3 and macOS symlink aliases before doing I/O.
+			const canonicalRequested = path.join(
+				await fsp.realpath(path.dirname(requested)),
+				path.basename(requested),
+			);
+			expect(path.resolve(written)).toBe(path.resolve(canonicalRequested));
 			const parsed = JSON.parse(
 				await fsp.readFile(written, 'utf8'),
 			) as typeof report & { reportPath: string };
 			expect(parsed.schemaVersion).toBe(1);
-			expect(parsed.reportPath).toBe(path.resolve(requested));
+			expect(parsed.reportPath).toBe(path.resolve(canonicalRequested));
 			expect(await fsp.readdir(path.dirname(written))).toEqual(['report.json']);
 
 			const outside = path.join(
