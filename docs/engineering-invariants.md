@@ -158,6 +158,12 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Invariants established (THIS PR):** every awaited operation on the init path must be bounded by `withTimeout` (or equivalent) AND fail open. Every subprocess on the init path must have explicit `cwd`, `stdin: 'ignore'`, `timeout`, bounded stdout/stderr, and `proc.kill()` in `finally`. The same hardening applies to the secondary defect site `validateDiffScope` even though it is not on the init path. Tests use a file-scoped `_internals` DI seam — not `mock.module` — to avoid Bun's cross-file mock leakage.
 - **Maps to AGENTS.md:** invariants 1 (plugin init), 3 (subprocesses), 7 (test writing).
 
+### Issue #2674 — last unbounded git spawn sites on tool/service surfaces
+
+- **Symptom:** three audit-flagged callers still spawned git with no bound — `identity.ts` `getGitRemoteUrl` (`execFileSync`, no timeout, stdin piped), `diagnose-service.ts` `checkGitRepository` (`execFileSync`, no timeout, all-stdio piped, output never read), and `complexity-hotspots.ts` `getGitChurn` (`bunSpawn` with no timeout/bound/kill and an await that a kill would resolve into a fabricated empty success). A hung git (credential prompt, AV interception, signal-trapping wrapper, a forked descendant holding the pipe) froze the calling host indefinitely; `/swarm diagnose` could hang while diagnosing a wedge; the tool could hang an agent turn forever. Executable reproduction: `2674-matrix: FAIL 19/48` at base (every hung/trapping/EOF/fork case breached its wall-clock cap on the Node leg and the churn caller on both legs).
+- **Invariants established (THIS PR):** every spawn site expresses the full option set at the call — timeout (+POSIX `killSignal: 'SIGKILL'`), stdin ignore, bounded-or-ignored output, explicit env with `GIT_TERMINAL_PROMPT: '0'` (which also defeats the Bun env-snapshot: a Bun spawn without `env` inherits a process-start snapshot, so live `process.env` mutations never reach the child), and best-effort kill. A kill/timeout is never reported as success: diagnose renders `⬜ git state unknown` instead of a false `❌ Not a git repository`, and churn throws the tool's structured error via a caller-owned `Promise.race` deadline (the Windows `taskkill /T` tree-kill reaps children without a runtime-reported `signalCode`, so the signal check alone is insufficient — both detectors ship). See the per-caller contract table in invariant 3.
+- **Maps to AGENTS.md:** invariants 3 (subprocesses), 7 (test writing), 12 (release fragment).
+
 ### PR #1356 — `withTimeout`-bounded work is still on the critical path if you `await` it
 
 - **Context:** PR #1356 added an init-time step that materializes allowlisted bundled mode-skill directories into a fresh project so the architect does not hit missing `SKILL.md` files on turn one. The current form is the **correct** pattern — registered in the wrapper-owned post-resolution task queue, `withTimeout`-bounded, fail-open, content-aware with atomic replacement, byte/file-bounded, and confined to `.swarm/bundled-skills` (`src/index.ts`). It is cited here as an exemplar, not a regression.
@@ -564,6 +570,21 @@ try {
 
 - `grep -n "bunSpawn\\|spawn(\\|spawnSync(" src/<changed>/*.ts` — every match has `timeout`, `stdin: 'ignore'` (unless intentionally interactive), `cwd` or `git -C <directory>`, and a `kill()` in the cleanup path.
 - A test mocks the spawn function (via the file-scoped `_internals` seam, not `mock.module`) to never resolve and asserts the call returns within bounded time.
+
+**Per-caller contract table (issue #2674 — the last unbounded git spawn sites on tool/service surfaces):**
+
+| caller | timeout | output | stdin | cwd | cleanup |
+| --- | --- | --- | --- | --- | --- |
+| `identity.ts` `getGitRemoteUrl` (via `writeProjectIdentity`) | `GIT_REMOTE_URL_TIMEOUT_MS` = 5 000 ms, `killSignal: 'SIGKILL'` | pipe + `maxBuffer` 64 KiB (remote URLs are tiny) | `ignore` | explicit `cwd: directory` | sync `execFileSync` — the timeout IS the kill; any failure degrades to `repoUrl: undefined` |
+| `diagnose-service.ts` `checkGitRepository` (via `getDiagnoseData` / `/swarm diagnose`) | `GIT_REPOSITORY_CHECK_TIMEOUT_MS` = 5 000 ms, `killSignal: 'SIGKILL'` | ignored (`stdio: ['ignore','ignore','ignore']`) + `maxBuffer` 64 KiB defense-in-depth | `ignore` | explicit `cwd: directory` | sync `execFileSync`; timeout renders `⬜ git state unknown`, never the false `❌ Not a git repository` |
+| `complexity-hotspots.ts` `getGitChurn` (via the `complexity_hotspots` tool) | `GIT_CHURN_TIMEOUT_MS` = 10 000 ms — caller-owned `Promise.race` deadline **plus** the wrapper-owned tree-kill timer | pipe + `maxBuffer` 5 MiB (`BunCompatOutputLimitError` auto-kill on breach) | `ignore` | explicit `cwd: directory` | `killProcessTree: true` + best-effort `proc.kill()` in `finally`; any kill/timeout surfaces as the tool's structured `error` JSON, never an empty success |
+
+Platform notes for these three callers:
+
+- **`killSignal: 'SIGKILL'`** (sync callers) is load-bearing on POSIX only — a child that traps SIGTERM must not defeat the bound. On Windows, Node coerces SIGKILL identically to the default SIGTERM handling (an abrupt `TerminateProcess`), so the option is a no-op there.
+- **Explicit `env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }`** (sync callers) does double duty: it prevents the git credential-prompt hang class outright, and it restores live-env semantics under Bun — a Bun `spawn`/`spawnSync` with no `env` option inherits a **process-start env snapshot**, so runtime `process.env` mutations never reach the child (the oven-sh/bun#29237 class documented in `src/utils/git-executable.ts`).
+- **A tree-kill is not always a runtime-reported kill**: the `killProcessTree` Windows path reaps descendants via `taskkill /T /F`, after which the direct child's `signalCode` may be `null` — which is why the churn caller's bound is a caller-owned race deadline rather than a `signalCode` check alone (the signal check remains as a second detector for runtime-reported kills).
+- **Test-fixture guidance**: fake-git harnesses built on `NODE_OPTIONS --require` preloads must (a) plant no-op main-module stubs (`remote`, `rev-parse`, `log`) in the child cwd, because node ≥ 24 resolves the child's main-module path *before* running `--require` preloads, and (b) `chmodSync(clone, 0o755)` after copying the node binary — `copyFileSync` does not preserve the mode bit on POSIX.
 
 ### 4. Working directory and `.swarm/` containment
 
