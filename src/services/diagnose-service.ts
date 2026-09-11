@@ -53,6 +53,16 @@ const REQUIRED_CACHE_GRAMMAR_ASSETS = [
 export const _internals = {
 	detectSandboxCapability: () => sandboxCapabilityProbe.detect(),
 	getSandboxExecutor: getExecutor,
+	/**
+	 * #2674 test seam (repo convention — see src/sast/semgrep.ts): lets the
+	 * subprocess-bounds tests inject timeout-shaped throws into
+	 * `checkGitRepository` without `mock.module`. Deliberately call-time
+	 * resolving (`child_process.execFileSync` is read inside the wrapper, not
+	 * captured at module init) so existing `mock.module('node:child_process')`
+	 * tests keep observing their mock.
+	 */
+	execFileSync: (...args: Parameters<typeof child_process.execFileSync>) =>
+		child_process.execFileSync(...args),
 };
 
 /**
@@ -447,7 +457,28 @@ async function checkConfigBackups(directory: string): Promise<HealthCheck> {
 
 /**
  * Check 6: Git Repository - verifies git version control is present
+ *
+ * #2674 (AGENTS.md invariant 3): bounded, non-interactive, killable. The
+ * output of `git rev-parse --git-dir` is not consumed here, so all three
+ * stdio streams are ignored — output volume is bounded by discarding it. A
+ * timeout kill is distinguished from a genuine "not a repository" so the
+ * health check never reports a hung git as a missing repository.
  */
+const GIT_REPOSITORY_CHECK_TIMEOUT_MS = 5_000;
+const GIT_REPOSITORY_CHECK_MAX_BUFFER_BYTES = 64 * 1024;
+
+/** A spawn timeout/kill surfaces as any of these shapes on the sync APIs. */
+function isSpawnTimeoutLike(err: unknown): boolean {
+	if (typeof err !== 'object' || err === null) return false;
+	const e = err as { killed?: unknown; signal?: unknown; code?: unknown };
+	return (
+		e.killed === true ||
+		e.signal === 'SIGKILL' ||
+		e.signal === 'SIGTERM' ||
+		e.code === 'ETIMEDOUT'
+	);
+}
+
 async function checkGitRepository(directory: string): Promise<HealthCheck> {
 	try {
 		if (!existsSync(directory) || !statSync(directory).isDirectory()) {
@@ -458,16 +489,29 @@ async function checkGitRepository(directory: string): Promise<HealthCheck> {
 			};
 		}
 		const gitExecutable = await resolveGitExecutableAsync();
-		child_process.execFileSync(gitExecutable, ['rev-parse', '--git-dir'], {
+		_internals.execFileSync(gitExecutable, ['rev-parse', '--git-dir'], {
 			cwd: directory,
-			stdio: 'pipe',
+			stdio: ['ignore', 'ignore', 'ignore'],
+			timeout: GIT_REPOSITORY_CHECK_TIMEOUT_MS,
+			// POSIX: a SIGTERM-trapping child must not defeat the bound; on
+			// Windows identical to the default TerminateProcess coercion.
+			killSignal: 'SIGKILL',
+			maxBuffer: GIT_REPOSITORY_CHECK_MAX_BUFFER_BYTES,
+			env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
 		});
 		return {
 			name: 'Git Repository',
 			status: '✅',
 			detail: 'Git repository detected',
 		};
-	} catch {
+	} catch (err) {
+		if (isSpawnTimeoutLike(err)) {
+			return {
+				name: 'Git Repository',
+				status: '⬜',
+				detail: `git rev-parse did not answer within ${GIT_REPOSITORY_CHECK_TIMEOUT_MS} ms — git state unknown`,
+			};
+		}
 		return {
 			name: 'Git Repository',
 			status: '❌',
