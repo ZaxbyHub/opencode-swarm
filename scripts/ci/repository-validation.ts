@@ -59,6 +59,9 @@ const REPORT_LOCK_MAX_BYTES = 4_096;
 const REPORT_LOCK_INSPECTION_TIMEOUT_MS = 250;
 const REPORT_LOCK_MAX_PENDING_INSPECTIONS = 64;
 const REPORT_IO_TIMEOUT_MS = 5_000;
+const MAX_DISCOVERY_DEPTH = 64;
+const MAX_DISCOVERY_ENTRIES = 50_000;
+const MAX_DISCOVERED_TEST_FILES = 10_000;
 
 export interface RuntimeMetadata {
 	bunVersion: string;
@@ -404,8 +407,8 @@ export function discoverTestFiles(
 	let visitedEntries = 0;
 	const deadlineMs = options.deadlineMs ?? Number.POSITIVE_INFINITY;
 	const checkBudget = (depth: number): void => {
-		if (depth > 64) throw new Error('filesystem discovery exceeded maximum depth');
-		if (visitedEntries >= 50_000) {
+		if (depth > MAX_DISCOVERY_DEPTH) throw new Error('filesystem discovery exceeded maximum depth');
+		if (visitedEntries >= MAX_DISCOVERY_ENTRIES) {
 			throw new Error('filesystem discovery exceeded maximum entry count');
 		}
 		if (_internals.now() >= deadlineMs) {
@@ -433,7 +436,7 @@ export function discoverTestFiles(
 			const fullPath = path.join(directory, entry.name);
 			if (entry.isDirectory()) visit(fullPath, false, depth + 1);
 			else if (entry.isFile() && entry.name.endsWith('.test.ts')) {
-				if (discovered.length >= 10_000) {
+				if (discovered.length >= MAX_DISCOVERED_TEST_FILES) {
 					throw new Error('filesystem discovery exceeded maximum test-file count');
 				}
 				discovered.push(fullPath);
@@ -448,18 +451,43 @@ export function discoverTestFiles(
 	);
 }
 
-function discoverTopLevelTestFiles(root: string): string[] {
+function discoverTopLevelTestFiles(
+	root: string,
+	options: { deadlineMs?: number } = {},
+): string[] {
 	const directory = path.join(root, 'tests');
+	let visitedEntries = 0;
+	let discoveredTestFiles = 0;
+	const deadlineMs = options.deadlineMs ?? Number.POSITIVE_INFINITY;
+	const checkBudget = (): void => {
+		if (visitedEntries >= MAX_DISCOVERY_ENTRIES) {
+			throw new Error('filesystem discovery exceeded maximum entry count');
+		}
+		if (_internals.now() >= deadlineMs) {
+			throw new Error('filesystem discovery exceeded the suite deadline');
+		}
+	};
+	checkBudget();
+	let entries: fs.Dirent[];
 	try {
-		return fs.readdirSync(directory, { withFileTypes: true })
-			.filter((entry) => entry.isFile() && entry.name.endsWith('.test.ts'))
-			.map((entry) => normalizePathForIdentity(path.join(directory, entry.name)))
-			.sort((a, b) => a.localeCompare(b));
+		entries = fs.readdirSync(directory, { withFileTypes: true });
 	} catch (error) {
 		throw new Error(
 			`filesystem discovery failed for ${directory}: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
+	const discovered: string[] = [];
+	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+		visitedEntries += 1;
+		checkBudget();
+		if (!entry.isFile() || !entry.name.endsWith('.test.ts')) continue;
+		if (discoveredTestFiles >= MAX_DISCOVERED_TEST_FILES) {
+			throw new Error('filesystem discovery exceeded maximum test-file count');
+		}
+		discoveredTestFiles += 1;
+		discovered.push(normalizePathForIdentity(path.join(directory, entry.name)));
+	}
+	return discovered.sort((a, b) => a.localeCompare(b));
 }
 
 function itemForFile(
@@ -623,7 +651,11 @@ export function buildSurfaceItems(options: {
 			const files = options.testFiles && (surface === 'unit' || surface === 'integration')
 				? options.testFiles
 				: definition.testRoots.flatMap((testRoot) => {
-					if (testRoot === 'tests:top-level') return _internals.discoverTopLevelTestFiles(root);
+					if (testRoot === 'tests:top-level') {
+						return _internals.discoverTopLevelTestFiles(root, {
+							deadlineMs: options.discoveryDeadlineMs,
+						});
+					}
 					return _internals.discoverTestFiles(root, [testRoot], optionalRoots, {
 						deadlineMs: options.discoveryDeadlineMs,
 					});

@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { discoverTestFiles } from '../../../../scripts/ci/repository-validation';
+import {
+	_internals,
+	buildSurfaceItems,
+	discoverTestFiles,
+} from '../../../../scripts/ci/repository-validation';
 import { MAX_REPORT_FILES } from '../../../../scripts/ci/verify-repository-validation-reports';
 import { canonicalTmpDir } from '../../../helpers/tmpdir';
 
@@ -22,6 +26,35 @@ describe('repository-validation review hardening — issue #2675', () => {
 				},
 			),
 		).toThrow('filesystem discovery exceeded the suite deadline');
+	});
+
+	test('top-level discovery honors the suite deadline and build wiring', () => {
+		expect(() =>
+			_internals.discoverTopLevelTestFiles(
+				join(canonicalTmpDir(), 'unreachable-fixture'),
+				{ deadlineMs: 0 },
+			),
+		).toThrow('filesystem discovery exceeded the suite deadline');
+
+		const originalDiscovery = _internals.discoverTestFiles;
+		const originalTopLevelDiscovery = _internals.discoverTopLevelTestFiles;
+		let observedDeadline: number | undefined;
+		_internals.discoverTestFiles = () => [];
+		_internals.discoverTopLevelTestFiles = (_root, options) => {
+			observedDeadline = options?.deadlineMs;
+			return [];
+		};
+		try {
+			buildSurfaceItems({
+				root: join(canonicalTmpDir(), 'fixture'),
+				surfaces: ['unit'],
+				discoveryDeadlineMs: 123,
+			});
+			expect(observedDeadline).toBe(123);
+		} finally {
+			_internals.discoverTestFiles = originalDiscovery;
+			_internals.discoverTopLevelTestFiles = originalTopLevelDiscovery;
+		}
 	});
 
 	test('discovery has depth, entry, and test-file bounds', () => {
