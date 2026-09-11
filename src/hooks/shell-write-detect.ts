@@ -24,6 +24,16 @@ import parse from 'bash-parser';
 import { unsafePathTextReason } from '../scope/path-identity';
 
 /**
+ * Validate command text without treating shell line separators as path data.
+ * Newlines (and the carriage returns paired with them) are valid command
+ * syntax, notably in here-documents. Other control and bidi characters remain
+ * fail-closed through the shared path-text validator.
+ */
+function unsafeShellCommandTextReason(value: string): string | null {
+	return unsafePathTextReason(value.replace(/[\r\n]/g, ''));
+}
+
+/**
  * All write-operation categories detected by this module.
  */
 export type WriteCategory =
@@ -1862,7 +1872,7 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	if (!command || typeof command !== 'string') {
 		return { writes: [], hasWrites: false };
 	}
-	if (unsafePathTextReason(command)) {
+	if (unsafeShellCommandTextReason(command)) {
 		return {
 			writes: [
 				{
@@ -1956,7 +1966,7 @@ export function detectWindowsWrites(
 	if (!command || typeof command !== 'string') {
 		return { writes: [], hasWrites: false };
 	}
-	if (unsafePathTextReason(command)) {
+	if (unsafeShellCommandTextReason(command)) {
 		return {
 			writes: [
 				{
