@@ -8,18 +8,18 @@
  */
 
 import { afterAll, afterEach, describe, expect, it } from 'bun:test';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as http from 'node:http';
 import * as net from 'node:net';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import {
 	closeDashboardServerForRoot,
 	type DashboardHandle,
 	startDashboardServer,
 } from '../../../src/dashboard/index.js';
-import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { appendObservabilityEventDb } from '../../../src/db/observability-event-store.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { createObservation } from '../../../src/observability/index.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const SECRET = 'SECRETCRED123';
 
@@ -77,7 +77,7 @@ function request(
 }
 
 const handles: { dir: string; handle: DashboardHandle }[] = [];
-let tempDirs: string[] = [];
+const tempDirs: string[] = [];
 
 afterEach(() => {
 	for (const { dir, handle } of handles.splice(0)) {

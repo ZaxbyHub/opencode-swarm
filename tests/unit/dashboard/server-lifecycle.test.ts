@@ -6,19 +6,19 @@
  */
 
 import { afterAll, afterEach, describe, expect, it } from 'bun:test';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import * as http from 'node:http';
 import * as net from 'node:net';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import {
 	closeDashboardServerForRoot,
-	getDashboardHandle,
 	type DashboardHandle,
+	getDashboardHandle,
 	startDashboardServer,
 } from '../../../src/dashboard/index.js';
-import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { appendObservabilityEventDb } from '../../../src/db/observability-event-store.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { createObservation } from '../../../src/observability/index.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function freePort(): Promise<number> {
 	return new Promise((resolve) => {
@@ -73,7 +73,7 @@ function getBody(urlStr: string): Promise<{ status: number; body: string }> {
 	});
 }
 
-let tempDirs: string[] = [];
+const tempDirs: string[] = [];
 
 afterEach(() => {
 	try {

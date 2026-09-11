@@ -11,7 +11,6 @@ import { afterAll, afterEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import {
 	COMMAND_REGISTRY,
 	VALID_COMMANDS,
@@ -19,12 +18,13 @@ import {
 import { closeDashboardServerForRoot } from '../../../src/dashboard/index.js';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // Static import of the plugin would race other suites' module-state; load it
 // lazily inside each boot like the index-commands suite does.
 type IndexModule = typeof import('../../../src/index.js');
 
-let tempDirs: string[] = [];
+const tempDirs: string[] = [];
 let restoreEnv: (() => void) | null = null;
 
 afterEach(() => {

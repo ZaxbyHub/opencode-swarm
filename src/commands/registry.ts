@@ -41,6 +41,7 @@ import { handleCouncilCommand } from './council.js';
 import { handleCouplingCommand } from './coupling.js';
 import { handleCurateCommand } from './curate.js';
 import { handleDarkMatterCommand } from './dark-matter.js';
+import { handleDashboardCommand } from './dashboard.js';
 import {
 	handleDatasetConsentCommand,
 	handleDatasetExportCommand,
@@ -120,7 +121,6 @@ import { handlePromoteCommand } from './promote.js';
 import { handleQaGatesCommand } from './qa-gates.js';
 import { handleRecoverCommand } from './recover.js';
 import { handleReportCommand } from './report.js';
-import { handleDashboardCommand } from './dashboard.js';
 import { handleResetCommand } from './reset.js';
 import { handleResetSessionCommand } from './reset-session.js';
 import { handleRetrieveCommand } from './retrieve.js';

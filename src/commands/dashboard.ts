@@ -12,8 +12,8 @@
  * post-resolution init task in `src/index.ts`.
  */
 
-import { readSwarmFileAsync } from '../hooks/utils';
 import { getDashboardHandle } from '../dashboard/index.js';
+import { readSwarmFileAsync } from '../hooks/utils';
 import type { CommandResult } from './registry';
 
 interface DashboardStatusFileRecord {

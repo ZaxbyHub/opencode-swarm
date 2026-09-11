@@ -20,16 +20,16 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { readDelegations } from '../background/pending-delegations.js';
-import { sanitizeFailureEvidenceDisplay } from '../failures/invocation-failure.js';
 import {
 	getSwarmDbHealthSnapshot,
 	type SwarmDbHealthSnapshot,
 } from '../db/health.js';
-import { projectDbExists, withProjectDbReadOnly } from '../db/project-db.js';
 import {
 	queryObservabilityEvents,
 	readObservabilityCoverage,
 } from '../db/observability-event-store.js';
+import { projectDbExists, withProjectDbReadOnly } from '../db/project-db.js';
+import { sanitizeFailureEvidenceDisplay } from '../failures/invocation-failure.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 
 /** Bound: delegation rows rendered per response. */

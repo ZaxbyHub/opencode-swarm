@@ -74,10 +74,10 @@ import {
 } from './config/schema';
 import { createRoleFilterSystemHook } from './context/role-filter.js';
 import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
+import { closeDashboardServerForRoot } from './dashboard/index.js';
 import { closeGroupCommitWriter } from './db/group-commit-writer.js';
 import { registerObservabilityEventSink } from './db/observability-event-store.js';
 import { closeProjectDb } from './db/project-db.js';
-import { closeDashboardServerForRoot } from './dashboard/index.js';
 import {
 	armDispatchIdentity,
 	assertDispatchSpawnCircuitAdmits,

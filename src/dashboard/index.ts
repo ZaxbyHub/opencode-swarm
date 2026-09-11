@@ -137,7 +137,7 @@ export async function startDashboardServer(
 	}
 
 	const token = randomBytes(24).toString('base64url');
-	let bound;
+	let bound: Awaited<ReturnType<typeof listenDashboardServer>> | undefined;
 	try {
 		bound = await listenDashboardServer({
 			port: options.port,
