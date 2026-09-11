@@ -29,3 +29,6 @@ try {
 // asynchronous error is handled here; the helper's timeout bounds any failed
 // launch without making the fixture wait synchronously.
 signaler?.once('error', () => process.abort());
+signaler?.once('exit', (code, signal) => {
+	if (code !== 0 || signal !== null) process.abort();
+});
