@@ -170,7 +170,7 @@ describe('startup-contract optional task outcomes', () => {
 		expect(buildStartupContractReport().advisoryCount).toBe(1);
 	});
 
-	test('anonymous tasks are labeled, late task still gets an outcome row', async () => {
+	test('anonymous tasks are labeled', async () => {
 		resetBoot();
 		noteQueueScheduled();
 		const anon = wrapPostResolutionTask((async () => {
@@ -178,6 +178,33 @@ describe('startup-contract optional task outcomes', () => {
 		}) as () => Promise<void>);
 		await anon();
 		expect(firstObj('optional_task').task).toBe('anonymous');
+	});
+
+	test('a task appended after settle still gets an outcome row and no second settle', async () => {
+		resetBoot();
+		noteQueueScheduled();
+		async function firstTask(): Promise<void> {
+			fakeNow += 4;
+		}
+		const first = wrapPostResolutionTask(firstTask);
+		await first();
+		expect(emitted('queue_settled').length).toBe(1);
+		// A late task (appended after the queue already settled) still
+		// records its outcome row but does not re-open the window or emit a
+		// second queue_settled row (bounded late-task behavior).
+		async function lateAppendedTask(): Promise<void> {
+			fakeNow += 6;
+		}
+		const late = wrapPostResolutionTask(lateAppendedTask);
+		await late();
+		const outcomeRows = emitted('optional_task');
+		expect(outcomeRows.length).toBe(2);
+		expect(outcomeRows[1].obj?.task).toBe('lateAppendedTask');
+		expect(outcomeRows[1].obj?.outcome).toBe('completed');
+		expect(emitted('queue_settled').length).toBe(1);
+		const report = buildStartupContractReport();
+		expect(report.queueSettled).toBe(true);
+		expect(report.queueCompleted).toBe(2);
 	});
 });
 
