@@ -132,14 +132,37 @@ describe('ci.yml integration — shared repository-validation authority', () => 
 	});
 
 	test('unit discovery creates the validation directory before copying manifests', () => {
+		const swarmPreflight =
+			'if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then';
 		const mkdirIndex = collectStep.indexOf(
 			'mkdir -p .swarm/repository-validation',
 		);
+		const preflightIndex = collectStep.indexOf(swarmPreflight);
 		const inventoryCopyIndex = collectStep.indexOf(
 			'cp "$tmpdir/gated-tests.txt"',
 		);
+		expect(preflightIndex).toBeGreaterThanOrEqual(0);
+		expect(preflightIndex).toBeLessThan(mkdirIndex);
 		expect(mkdirIndex).toBeGreaterThanOrEqual(0);
 		expect(inventoryCopyIndex).toBeGreaterThan(mkdirIndex);
+	});
+
+	test('all workflow .swarm writers preflight symlink and non-directory paths', () => {
+		const swarmPreflight =
+			'if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then';
+		const writerCount = (
+			yml.match(/mkdir -p \.swarm\/repository-validation/g) ?? []
+		).length;
+		const preflightCount = (
+			yml.match(
+				new RegExp(swarmPreflight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
+			) ?? []
+		).length;
+		expect(writerCount).toBe(3);
+		expect(preflightCount).toBe(writerCount);
+		expect(yml).toContain(
+			'symlinks, junctions, and non-directories are rejected',
+		);
 	});
 
 	test('unit-passed verifies reports on a fresh checkout with pinned Bun', () => {

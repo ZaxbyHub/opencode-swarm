@@ -423,6 +423,13 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
+          # Never follow a checked-in .swarm symlink/junction when writing shard
+          # manifests. The TypeScript report guard runs later, so this preflight
+          # must protect the earlier mkdir/cp operations too.
+          if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then
+            echo "::error::.swarm must be a real directory; symlinks, junctions, and non-directories are rejected"
+            exit 1
+          fi
           mkdir -p .swarm/repository-validation
           # Run the previously-orphaned test trees too (issue #1778 H4): src/**,
           # tests/adversarial, and the other never-gated dirs. tests/integration,
@@ -482,6 +489,12 @@ jobs:
           failed=0
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
           trap 'rm -f "$tmpdir"/bun-out-$$-*' EXIT
+          # Recheck immediately before report writes in case an earlier command
+          # replaced .swarm with a symlink/junction.
+          if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then
+            echo "::error::.swarm must be a real directory; symlinks, junctions, and non-directories are rejected"
+            exit 1
+          fi
           mkdir -p .swarm/repository-validation
           # flake-annotations.txt captures retry-flake + hard-failure signals so
           # the downstream flake-detection workflow_run can suggest quarantines
@@ -914,6 +927,12 @@ jobs:
           failed=0
           tmpdir="${RUNNER_TEMP:-${TEMP:-/tmp}}"
           trap 'rm -f "$tmpdir"/bun-out-int-* "$tmpdir"/int-*.txt' EXIT
+          # Reject symlink/junction redirection before creating integration
+          # manifests; the TypeScript report guard runs only inside the loop.
+          if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then
+            echo "::error::.swarm must be a real directory; symlinks, junctions, and non-directories are rejected"
+            exit 1
+          fi
           mkdir -p .swarm/repository-validation
           {
             [ -d tests/integration ] && find tests/integration -name '*.test.ts' -type f

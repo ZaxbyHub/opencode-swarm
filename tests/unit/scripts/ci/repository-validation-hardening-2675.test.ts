@@ -6,6 +6,7 @@ import {
 	buildSurfaceItems,
 	DEFAULT_PER_ITEM_TIMEOUT_MS,
 	DEFAULT_TEST_TIMEOUT_MS,
+	discoverTestFiles,
 	exitCodeForValidationStatus,
 	parseValidationArgs,
 	validateRepository,
@@ -355,6 +356,9 @@ describe('repository validation hardening — issue #2675', () => {
 	test('deletion-only diff remains incomplete instead of a no-op (F3)', async () => {
 		// Before the deletion filter included D, a deleted test path disappeared
 		// from the diff selection and the run was incorrectly reported as no_op.
+		expect(_internals.diffCommandArgv(ROOT, 'origin/main')).toContain(
+			'--diff-filter=ACDMR',
+		);
 		const originalDiff = _internals.gitDiffPaths;
 		_internals.gitDiffPaths = async () => ['tests/unit/deleted.test.ts'];
 		try {
@@ -373,6 +377,18 @@ describe('repository validation hardening — issue #2675', () => {
 			expect(report.results[0]?.status).toBe('missing');
 		} finally {
 			_internals.gitDiffPaths = originalDiff;
+		}
+	});
+
+	test('missing optional test roots are treated as empty surfaces', () => {
+		expect(discoverTestFiles(ROOT, ['tests/cli'])).toEqual([]);
+	});
+
+	test('missing required test roots fail closed', () => {
+		for (const requiredRoot of ['src', 'tests/unit']) {
+			expect(() => discoverTestFiles(ROOT, [requiredRoot])).toThrow(
+				/filesystem discovery failed for/,
+			);
 		}
 	});
 

@@ -366,13 +366,22 @@ export function buildTestArgv(
 	];
 }
 
-export function discoverTestFiles(root: string, roots: string[] = ['tests/unit']): string[] {
+export function discoverTestFiles(
+	root: string,
+	roots: string[] = ['tests/unit'],
+	optionalRoots: readonly string[] = ['tests/cli'],
+): string[] {
 	const discovered: string[] = [];
-	const visit = (directory: string): void => {
+	const optionalRootSet = new Set(optionalRoots.map((relativeRoot) => path.normalize(relativeRoot)));
+	const visit = (directory: string, optionalRoot = false): void => {
 		let entries: fs.Dirent[];
 		try {
 			entries = fs.readdirSync(directory, { withFileTypes: true });
 		} catch (error) {
+			// Several CI test roots are optional across repository versions (for
+			// example, tests/cli).  A missing root is an empty surface, but a
+			// failure while traversing an existing root must remain fail-closed.
+			if (optionalRoot && isNotFoundError(error)) return;
 			throw new Error(
 				`filesystem discovery failed for ${directory}: ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -383,7 +392,9 @@ export function discoverTestFiles(root: string, roots: string[] = ['tests/unit']
 			else if (entry.isFile() && entry.name.endsWith('.test.ts')) discovered.push(fullPath);
 		}
 	};
-	for (const relativeRoot of roots) visit(path.join(root, relativeRoot));
+	for (const relativeRoot of roots) {
+		visit(path.join(root, relativeRoot), optionalRootSet.has(path.normalize(relativeRoot)));
+	}
 	return Array.from(new Set(discovered.map(normalizePathForIdentity))).sort((a, b) =>
 		a.localeCompare(b),
 	);

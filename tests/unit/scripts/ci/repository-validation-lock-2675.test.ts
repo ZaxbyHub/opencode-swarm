@@ -70,33 +70,27 @@ async function withTempRoot(
 }
 
 describe('repository validation report lock — issue #2675', () => {
-	test('rejects a .swarm symlink or junction before writing outside the root (F2)', async () => {
-		// Before this guard, lexical containment allowed mkdir/rename to follow a
-		// .swarm symlink and place the report outside the project root.
-		const root = canonicalMkdtemp('repository-validation-root-');
-		const outside = canonicalMkdtemp('repository-validation-outside-');
-		const swarmPath = path.join(root, '.swarm');
-		const destination = path.join(swarmPath, 'repository-validation.json');
-		try {
+	test.skipIf(process.platform === 'win32')(
+		'rejects a .swarm symlink before writing outside the root (F2; Windows junction creation requires elevated setup)',
+		async () => {
+			// Before this guard, lexical containment allowed mkdir/rename to follow a
+			// .swarm symlink and place the report outside the project root.
+			const root = canonicalMkdtemp('repository-validation-root-');
+			const outside = canonicalMkdtemp('repository-validation-outside-');
+			const swarmPath = path.join(root, '.swarm');
+			const destination = path.join(swarmPath, 'repository-validation.json');
 			try {
-				await fsp.symlink(
-					outside,
-					swarmPath,
-					process.platform === 'win32' ? 'junction' : 'dir',
-				);
-			} catch (error) {
-				if (process.platform === 'win32') return;
-				throw error;
+				await fsp.symlink(outside, swarmPath, 'dir');
+				await expect(
+					writeValidationReport(report(root), destination),
+				).rejects.toThrow(/symlink|junction/i);
+				expect(await fsp.readdir(outside)).toEqual([]);
+			} finally {
+				await fsp.rm(root, { recursive: true, force: true });
+				await fsp.rm(outside, { recursive: true, force: true });
 			}
-			await expect(
-				writeValidationReport(report(root), destination),
-			).rejects.toThrow(/symlink|junction/i);
-			expect(await fsp.readdir(outside)).toEqual([]);
-		} finally {
-			await fsp.rm(root, { recursive: true, force: true });
-			await fsp.rm(outside, { recursive: true, force: true });
-		}
-	});
+		},
+	);
 
 	test('recovers a lock whose owner process is dead', async () => {
 		await withTempRoot(async (root, destination) => {
