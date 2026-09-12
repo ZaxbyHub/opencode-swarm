@@ -3526,6 +3526,30 @@ export type DispatchProtectionConfig = z.infer<
 >;
 
 /**
+ * Local mission-control dashboard (issue #2509, Workstream G5). The port IS
+ * the opt-in: absent config or `port: 0` leaves the dashboard fully disabled
+ * with zero footprint (no listener, no post-resolution task, no `.swarm`
+ * artifact). When `port > 0`, a loopback-only, capability-token HTTP server
+ * starts from the post-resolution init queue and renders read-only views over
+ * the project's durable swarm state. Inline-asset architecture per ADR 0002
+ * (REIMPLEMENT — no upstream code ported).
+ */
+export const DashboardConfigSchema = z
+	.object({
+		port: z
+			.number()
+			.int()
+			.min(0)
+			.max(65_535)
+			.default(0)
+			.describe(
+				'Loopback port for the opt-in local dashboard (issue #2509). 0 or absent = disabled (default).',
+			),
+	})
+	.strict();
+export type DashboardConfig = z.infer<typeof DashboardConfigSchema>;
+
+/**
  * Issue #2384: deprecated transcript-row settlement for Profile A PR-review
  * base/micro discovery lanes is an explicit compatibility opt-in. Omitted
  * config resolves false in consumers; legacy transcript parsing remains a
@@ -4292,6 +4316,13 @@ export const PluginConfigSchema = z.object({
 	// Consulted only inside command handlers, never on the init path.
 	skill_opt: SkillOptConfigSchema.optional().describe(
 		'Governed skill optimizer (issue #1822). Disabled by default; /swarm skill-opt run requires enabled: true. All other subcommands are proposal-only/read-only by default.',
+	),
+
+	// Local mission-control dashboard (issue #2509). Disabled by default;
+	// `port > 0` is the opt-in. Read-only loopback HTTP surface over durable
+	// swarm state; started post-resolution (never on the init await path).
+	dashboard: DashboardConfigSchema.optional().describe(
+		'Opt-in local mission-control dashboard over durable swarm state (issue #2509). Disabled by default; set port > 0 to enable the loopback-only read-only view.',
 	),
 });
 
