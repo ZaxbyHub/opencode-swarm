@@ -3,6 +3,7 @@ import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
 	allocateSummaryId,
+	listSummaries,
 	loadFullOutput,
 	SummaryIdCollisionError,
 	storeSummary,
@@ -66,6 +67,15 @@ describe('summaries manager allocation + no-overwrite store', () => {
 		writeFileSync(join(summariesDir, 'notes.txt'), 'not a summary');
 		writeFileSync(join(summariesDir, 'Sx.json'), '{"foreign":true}');
 		expect(allocateSummaryId(tempDir)).toBe('S3');
+	});
+
+	test('a directory named like a summary neither occupies an ID slot nor is listed', async () => {
+		// PRR-005: non-file entries must be invisible to enumeration.
+		await storeSummary(tempDir, 'S2', 'two', 'two', 1048576);
+		const summariesDir = join(tempDir, '.swarm', 'summaries');
+		mkdirSync(join(summariesDir, 'S9.json'), { recursive: true });
+		expect(allocateSummaryId(tempDir)).toBe('S3');
+		expect(await listSummaries(tempDir)).toEqual(['S2']);
 	});
 
 	test('storeSummary refuses to replace an existing entry with a typed collision error', async () => {

@@ -172,11 +172,21 @@ export async function storeSummary(
 			}
 			throw error;
 		}
-		unlinkSync(tempPath);
+		// Best-effort temp cleanup (PRR-002): the entry is durably installed
+		// once linkSync succeeds, so a failed unlink (Windows AV/indexer locks
+		// on the freshly linked file are the realistic trigger) must not fail
+		// the store — that would orphan the installed entry behind a
+		// fail-open caller that never references it. A lingering temp is
+		// inert: it never matches the `S\d+.json` entry grammar.
+		try {
+			unlinkSync(tempPath);
+		} catch {}
 		invalidateCachedArtifact(summaryPath);
 	} catch (error) {
 		// Clean up temp file on failure (including collisions, where the
-		// failed link left the temp in place)
+		// failed link left the temp in place). Only pre-install failures
+		// (temp write, non-EEXIST link errors) and cache-invalidation
+		// failures reach this path.
 		try {
 			rmSync(tempPath, { force: true });
 		} catch {}
@@ -262,6 +272,18 @@ function enumerateSummaryIds(directory: string): string[] {
 	for (const entry of entries) {
 		// Only process .json files
 		if (!entry.endsWith('.json')) {
+			continue;
+		}
+
+		// Only regular files count as entries (PRR-005): a directory named
+		// like a summary must neither be listed nor occupy an allocated ID
+		// slot forever — cleanup cannot remove directories and would warn on
+		// every sweep. Unreadable entries are skipped like invalid names.
+		try {
+			if (!statSync(path.join(summariesBasePath, entry)).isFile()) {
+				continue;
+			}
+		} catch {
 			continue;
 		}
 

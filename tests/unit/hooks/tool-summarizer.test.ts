@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleRetrieveCommand } from '../../../src/commands/retrieve';
 import type { SummaryConfig } from '../../../src/config/schema';
 import { createToolSummarizerHook } from '../../../src/hooks/tool-summarizer';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function defaultConfig(overrides?: Partial<SummaryConfig>): SummaryConfig {
 	return {
@@ -21,10 +21,7 @@ describe('tool-summarizer', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = join(
-			tmpdir(),
-			`test-tool-summarizer-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-		);
+		tempDir = canonicalMkdtemp('tool-summarizer-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 	});
 
@@ -178,10 +175,7 @@ describe('tool-summarizer integration', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = join(
-			tmpdir(),
-			`test-summarizer-integration-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-		);
+		tempDir = canonicalMkdtemp('tool-summarizer-integration-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 	});
 

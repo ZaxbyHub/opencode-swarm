@@ -88,10 +88,16 @@ describe('tool-summarizer durable allocation + collision retry', () => {
 		await storeSummary(tempDir, 'S1', 'PRECIOUS', 'pre-existing', 10485760);
 
 		let calls = 0;
+		let storeAttempts = 0;
+		const realStore = _internals.storeSummary;
 		_internals.allocateSummaryId = (directory: string) => {
 			calls += 1;
 			if (calls === 1) return 'S1'; // lost the slot to the pre-seed
 			return realAllocate(directory); // rescan sees S1 -> S2
+		};
+		_internals.storeSummary = async (...args: Parameters<typeof realStore>) => {
+			storeAttempts += 1;
+			return realStore(...args);
 		};
 
 		const hook = createToolSummarizerHook(defaultConfig(), tempDir);
@@ -100,6 +106,11 @@ describe('tool-summarizer durable allocation + collision retry', () => {
 
 		expect(output.output).toContain('[SUMMARY S2]');
 		expect(calls).toBe(2);
+		// Both attempts actually reached the store: the colliding one and the
+		// winning one (a hook that skipped storeSummary would not produce a
+		// retrievable summary, but count it explicitly anyway).
+		expect(storeAttempts).toBe(2);
+		expect(await loadFullOutput(tempDir, 'S2')).toContain('WINNER');
 
 		// The pre-existing entry survived the collision untouched.
 		expect(await loadFullOutput(tempDir, 'S1')).toBe('PRECIOUS');
@@ -111,6 +122,12 @@ describe('tool-summarizer durable allocation + collision retry', () => {
 		// Every attempt "wins" the same occupied slot: the bounded retry must
 		// terminate and keep the original output inline.
 		_internals.allocateSummaryId = () => 'S1';
+		let storeAttempts = 0;
+		const realStore = _internals.storeSummary;
+		_internals.storeSummary = async (...args: Parameters<typeof realStore>) => {
+			storeAttempts += 1;
+			return realStore(...args);
+		};
 
 		const hook = createToolSummarizerHook(defaultConfig(), tempDir);
 		const output = makeOutput('UNSUMMARIZED');
@@ -118,7 +135,29 @@ describe('tool-summarizer durable allocation + collision retry', () => {
 		await hook({ tool: 'bash', sessionID: 's', callID: 'c1' }, output);
 
 		expect(output.output).toBe(original);
+		expect(storeAttempts).toBe(8);
 		expect(await loadFullOutput(tempDir, 'S1')).toBe('PRECIOUS');
+	});
+
+	test('allocation failures fail open with the original output preserved', async () => {
+		// PRR-001: a throwing allocation (e.g. an unreadable summaries
+		// directory) must hit the same fail-open path as a storage failure —
+		// never escape the hook.
+		_internals.allocateSummaryId = () => {
+			throw new Error('summaries dir unreadable');
+		};
+		let storeCalls = 0;
+		_internals.storeSummary = async () => {
+			storeCalls += 1;
+		};
+
+		const hook = createToolSummarizerHook(defaultConfig(), tempDir);
+		const output = makeOutput('UNSUMMARIZED');
+		const original = output.output;
+		await hook({ tool: 'bash', sessionID: 's', callID: 'c1' }, output);
+
+		expect(output.output).toBe(original);
+		expect(storeCalls).toBe(0);
 	});
 
 	test('non-collision storage failures fail open without retry', async () => {

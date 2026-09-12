@@ -85,19 +85,20 @@ export function createToolSummarizerHook(
 		// allocates the next free ID from the entries that exist on disk
 		// (restart-safe), embeds it in a freshly created summary text, and
 		// stores with exclusive-install semantics. A collision means another
-		// process won the slot — retry with a fresh allocation. Any other
-		// storage failure, or exhausted attempts, fails open below with the
+		// process won the slot — retry with a fresh allocation. ANY failure
+		// on an attempt — allocation, summary rendering, or storage — is
+		// caught below so the hook's fail-open contract holds end to end
+		// (PRR-001): exhausted attempts or non-collision errors keep the
 		// original output preserved.
 		for (let attempt = 1; attempt <= MAX_ALLOCATION_ATTEMPTS; attempt += 1) {
-			const summaryId = _internals.allocateSummaryId(directory);
-			const summaryText = createSummary(
-				output.output,
-				input.tool,
-				summaryId,
-				config.max_summary_chars,
-			);
-
 			try {
+				const summaryId = _internals.allocateSummaryId(directory);
+				const summaryText = createSummary(
+					output.output,
+					input.tool,
+					summaryId,
+					config.max_summary_chars,
+				);
 				await _internals.storeSummary(
 					directory,
 					summaryId,
@@ -117,7 +118,7 @@ export function createToolSummarizerHook(
 				}
 				// Graceful degradation: log warning and keep original output
 				warn(
-					`Tool output summarization failed for ${summaryId}: ${error instanceof Error ? error.message : String(error)}`,
+					`Tool output summarization failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
 				// Do NOT modify output.output — original is preserved
 				return;
