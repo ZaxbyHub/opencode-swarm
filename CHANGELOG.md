@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.177.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.177.0...v7.177.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **gates:** recover an unpersisted sounding-board APPROVED verdict (issue [#2703](https://github.com/ZaxbyHub/opencode-swarm/issues/2703)) ([e54b837](https://github.com/ZaxbyHub/opencode-swarm/commit/e54b8377f021073f60ca27a4de75113173eceeb5))
+
 ## [7.177.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.176.2...v7.177.0) (2026-09-11)
 
 
