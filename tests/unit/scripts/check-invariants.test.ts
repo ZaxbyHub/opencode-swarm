@@ -188,10 +188,6 @@ function setupFixtureDir(fixtureName: string): string {
 	// every fixture tree must carry the four lists (header-only = no active
 	// entries; the bash owner leg never reads them).
 	seedQuarantineListFiles(fixtureDir);
-	// Check 8 (issue #2577) skips non-blockingly when NEITHER family-migration
-	// engine is present (fixture trees have no family-migration surface), so
-	// no engine stubs are needed here; the single-engine-missing drift case is
-	// covered by tests/unit/scripts/check-migration-lock-admission.test.ts.
 
 	return fixtureDir;
 }
