@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.178.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.177.1...v7.178.0) (2026-09-12)
+
+
+### Features
+
+* **dashboard:** add opt-in local mission-control dashboard over durable swarm state (issue [#2509](https://github.com/ZaxbyHub/opencode-swarm/issues/2509)) ([43e4ee3](https://github.com/ZaxbyHub/opencode-swarm/commit/43e4ee3b06e571096e8afb0b115fe0ea9741b1fa))
+* **mcp:** add explicitly authorized knowledge writes ([1499a74](https://github.com/ZaxbyHub/opencode-swarm/commit/1499a74be1acbaafd48ef5982915600cd1d89dba))
+
+
+### Bug Fixes
+
+* **dashboard:** repoint delegation_cost producer citations after dispose-wiring insertion (PR [#2717](https://github.com/ZaxbyHub/opencode-swarm/issues/2717) CI round 5) ([e7ce82e](https://github.com/ZaxbyHub/opencode-swarm/commit/e7ce82e8abf565f6148a34f29cd0b174e3074b42))
+* **dashboard:** resolve round-2 review findings (byte-cap JSON validity, latest-N timeline, listener ownership) ([f6eaf64](https://github.com/ZaxbyHub/opencode-swarm/commit/f6eaf6490f76c8942c3c82b2508f2d01abf5dcec))
+* **summaries:** close PR-review findings PRR-001..003, 005, 010, 011 ([2e81446](https://github.com/ZaxbyHub/opencode-swarm/commit/2e81446adb00a1051cf4f1549328bba7b20e313c))
+* **summaries:** durable no-overwrite summary identity across restarts ([165f6cd](https://github.com/ZaxbyHub/opencode-swarm/commit/165f6cd65836a10866ab8be64db90252d2d2c632))
+
 ## [7.177.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.177.0...v7.177.1) (2026-09-12)
 
 
