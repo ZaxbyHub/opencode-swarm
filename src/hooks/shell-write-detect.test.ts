@@ -1524,8 +1524,9 @@ describe('resolveWriteTargets — edge cases', () => {
 		expect(result[0].resolved).toBe(true);
 	});
 
-	test('handles path with tilde (not expanded, treated as literal)', () => {
-		// ~ is not a dynamic var, but it's a shell special that should be passed through
+	test('handles path with tilde as an unresolved shell expansion', () => {
+		// Tilde expansion depends on the invoking shell's home directory and cannot
+		// be proven by the static resolver.
 		const writes = [
 			{ category: 'redirect', operator: '>', path: '~/file.txt' },
 		];
@@ -1534,9 +1535,8 @@ describe('resolveWriteTargets — edge cases', () => {
 			writes,
 			'/home/user',
 		);
-		// resolve treats ~/ as a literal relative path under cwd
-		expect(result[0].resolvedPath).toBe('/home/user/~/file.txt');
-		expect(result[0].resolved).toBe(true);
+		expect(result[0].resolvedPath).toBe(null);
+		expect(result[0].resolved).toBe(false);
 	});
 
 	test('builtin write (cp) resolves relative destination', () => {

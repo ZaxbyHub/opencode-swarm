@@ -85,6 +85,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm ci` — advisory headless CI: read-only gate/evidence evaluation with machine exit codes (0 = all gates pass; Markdown + [SWARM_CI_JSON] report; `bunx opencode-swarm ci` outside OpenCode)
 - `/swarm qa-gates` — view or modify QA gate profile for the current plan
 - `/swarm report` — query the SQLite observability sink (filters: --task/--session/--trace/--run/--since, --json)
+- `/swarm dashboard` — show the opt-in local mission-control dashboard URL and status (issue #2509; disabled unless `dashboard.port` > 0)
 - `/swarm acknowledge-spec-drift` — acknowledge spec drift and suppress further warnings
 
 **Knowledge / memory / curation**

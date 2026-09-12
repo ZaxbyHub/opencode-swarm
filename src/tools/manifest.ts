@@ -27,6 +27,7 @@ import { abort_pr_workflow } from './abort-pr-workflow';
 import { actionlint_scan } from './actionlint-scan';
 import { swarmApplyPatch } from './apply-patch';
 import { approve_plan_critic } from './approve-plan-critic';
+import { approve_retry_sounding_board } from './approve-retry-sounding-board';
 import { ast_grep } from './ast-grep';
 import { authorize_pr_review_reentry } from './authorize-pr-review-reentry';
 import { batch_symbols } from './batch-symbols';
@@ -78,6 +79,7 @@ import { knowledge_archive } from './knowledge-archive';
 import { knowledge_query } from './knowledge-query';
 import { knowledge_recall } from './knowledge-recall';
 import { knowledge_receipt } from './knowledge-receipt';
+import { knowledge_receipt_status } from './knowledge-receipt-status';
 import { knowledge_remove } from './knowledge-remove';
 import { lean_turbo_acquire_locks } from './lean-turbo-acquire-locks';
 import { lean_turbo_critic } from './lean-turbo-critic';
@@ -118,6 +120,7 @@ import { sast_scan } from './sast-scan';
 import { save_plan } from './save-plan';
 import { sbom_generate } from './sbom-generate';
 import { schema_drift } from './schema-drift';
+import { scope_validate } from './scope-validate';
 import { search } from './search';
 import { secretscan } from './secretscan';
 import { set_qa_gates } from './set-qa-gates';
@@ -194,6 +197,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	authorize_pr_review_reentry: () => authorize_pr_review_reentry,
 	submit_pr_review_result: () => submit_pr_review_result,
 	approve_plan_critic: () => approve_plan_critic,
+	approve_retry_sounding_board: () => approve_retry_sounding_board,
 	prepare_pr_workflow_checkout: () => prepare_pr_workflow_checkout,
 	record_implementation_review: () => record_implementation_review,
 	record_issue_publication: () => record_issue_publication,
@@ -236,6 +240,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	write_hallucination_evidence: () => write_hallucination_evidence,
 	write_mutation_evidence: () => write_mutation_evidence,
 	declare_scope: () => declare_scope,
+	scope_validate: () => scope_validate,
 	knowledge_query: () => knowledge_query,
 	doc_scan: () => doc_scan,
 	doc_extract: () => doc_extract,
@@ -273,6 +278,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	skill_improve: () => skill_improve,
 	spec_write: () => spec_write,
 	knowledge_receipt: () => knowledge_receipt,
+	knowledge_receipt_status: () => knowledge_receipt_status,
 	knowledge_archive: () => knowledge_archive,
 	swarm_memory_recall: () => swarm_memory_recall,
 	swarm_memory_propose: () => swarm_memory_propose,

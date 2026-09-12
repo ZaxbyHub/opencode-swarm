@@ -476,6 +476,137 @@ export function isCanonicalPathWithinRoot(
 	return false;
 }
 
+type ContainmentCacheEntry = {
+	inaccessible: boolean;
+	isSymbolicLink: boolean;
+	canonicalPath: string | null;
+};
+
+/**
+ * Build a canonical containment checker for a single root.
+ *
+ * Scope validation may check thousands of entries against one workspace root.
+ * Calling `isCanonicalPathWithinRoot` for every entry re-resolves the same root
+ * and the same existing ancestors, which turns an otherwise linear validation
+ * into a synchronous filesystem bottleneck. This checker keeps the root and
+ * observed ancestors local to one evaluation, and only canonicalizes entries
+ * that are actually links. A regular entry beneath a non-link ancestor is
+ * already lexically inside the validated root; canonicalizing it adds no
+ * security signal. Missing entries still walk to the nearest existing
+ * ancestor, so a symlinked directory cannot be used to escape the root.
+ *
+ * The cache is deliberately per-checker (never module-global) and bounded.
+ */
+export function createCanonicalPathWithinRootChecker(
+	rootPath: string,
+): (targetPath: string) => boolean {
+	const resolvedRoot = path.resolve(rootPath);
+	const canonicalRoot = canonicalExistingFilesystemPath(rootPath);
+	const rootPrefix = canonicalRoot
+		? canonicalRoot.endsWith('/')
+			? canonicalRoot
+			: `${canonicalRoot}/`
+		: null;
+	const entryCache = new Map<string, ContainmentCacheEntry>();
+	const maxCacheEntries = 32_768;
+
+	const isWithinCanonicalRoot = (candidate: string): boolean => {
+		return (
+			canonicalRoot !== null &&
+			(candidate === canonicalRoot || candidate.startsWith(rootPrefix ?? ''))
+		);
+	};
+
+	const readEntry = (entryPath: string): ContainmentCacheEntry => {
+		const cached = entryCache.get(entryPath);
+		if (cached) return cached;
+
+		let entry: ContainmentCacheEntry;
+		try {
+			const stat = fs.lstatSync(entryPath);
+			const isSymbolicLink = stat.isSymbolicLink();
+			entry = {
+				inaccessible: false,
+				isSymbolicLink,
+				canonicalPath: isSymbolicLink
+					? canonicalExistingFilesystemPath(entryPath)
+					: null,
+			};
+		} catch (error) {
+			const code =
+				error && typeof error === 'object' && 'code' in error
+					? String(error.code)
+					: undefined;
+			entry = {
+				inaccessible: code !== 'ENOENT' && code !== 'ENOTDIR',
+				isSymbolicLink: false,
+				canonicalPath: null,
+			};
+		}
+
+		if (entryCache.size >= maxCacheEntries) entryCache.clear();
+		entryCache.set(entryPath, entry);
+		return entry;
+	};
+
+	return (targetPath: string): boolean => {
+		if (canonicalRoot === null) return false;
+		const resolvedTarget = path.resolve(targetPath);
+		const relative = path.relative(resolvedRoot, resolvedTarget);
+		if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
+
+		let probe = resolvedTarget;
+		for (let depth = 0; depth < 4096; depth++) {
+			const entry = readEntry(probe);
+			if (entry.inaccessible) return false;
+			if (entry.isSymbolicLink) {
+				return (
+					entry.canonicalPath !== null &&
+					isWithinCanonicalRoot(entry.canonicalPath)
+				);
+			}
+			if (probe === resolvedRoot) return true;
+			const parent = path.dirname(probe);
+			if (parent === probe) return false;
+			probe = parent;
+		}
+		return false;
+	};
+}
+
+/**
+ * Build a relative-target validator that reuses one canonical root and its
+ * observed ancestor cache across a batch of paths.
+ */
+export function createTargetWithinRootValidator(
+	root: string,
+): (filePath: string) => string | null {
+	const isCanonicalWithinRoot = createCanonicalPathWithinRootChecker(root);
+	return (filePath: string): string | null => {
+		if (!filePath || filePath.trim() === '') {
+			return 'Empty path';
+		}
+		if (path.isAbsolute(filePath) || /^[A-Za-z]:[/\\]/.test(filePath)) {
+			return `Absolute path rejected: ${filePath}`;
+		}
+		if (containsPathTraversal(filePath)) {
+			return `Path traversal detected: ${filePath}`;
+		}
+		if (containsControlChars(filePath)) {
+			return `Control characters detected in path: ${filePath}`;
+		}
+		const resolved = path.resolve(root, filePath);
+		const relative = path.relative(root, resolved);
+		if (relative.startsWith('..') || path.isAbsolute(relative)) {
+			return `Path escapes root: ${filePath}`;
+		}
+		if (!isCanonicalWithinRoot(resolved)) {
+			return `Path escapes root via symlink/junction: ${filePath}`;
+		}
+		return null;
+	};
+}
+
 /**
  * Validate that a caller-supplied path stays within an allowed root directory.
  * Rejects empty paths, absolute paths (POSIX + Windows drive), traversal,

@@ -1952,6 +1952,10 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			emitObjectTypeMismatch('skill_opt', value, findings);
 			break;
 		}
+		case 'dashboard': {
+			emitObjectTypeMismatch('dashboard', value, findings);
+			break;
+		}
 
 		// ── DEFAULT CASE: Unknown config key detection + Levenshtein suggestion ──
 		default: {

@@ -67,9 +67,9 @@ describe('src/types/events.ts - ADVERSARIAL TESTS', () => {
 				'sounding_board_consultation',
 				'simplification',
 				'user_escalation',
+				'sounding_board_manual_approval', // #2703: manual-override recorder only.
 			];
-
-			expect(validActions).toHaveLength(3);
+			expect(validActions).toHaveLength(4);
 		});
 
 		test('PrecedentManipulationDetectedEvent rejects invalid pattern values', () => {

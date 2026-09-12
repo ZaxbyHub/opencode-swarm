@@ -10,10 +10,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SummaryConfig } from '../../../src/config/schema';
-import {
-	createToolSummarizerHook,
-	resetSummaryIdCounter,
-} from '../../../src/hooks/tool-summarizer';
+import { createToolSummarizerHook } from '../../../src/hooks/tool-summarizer';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 
 describe('createToolSummarizerHook - Adversarial Tests for exempt_tools', () => {
@@ -33,7 +30,6 @@ describe('createToolSummarizerHook - Adversarial Tests for exempt_tools', () => 
 		);
 		mkdirSync(tempDir, { recursive: true });
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
-		resetSummaryIdCounter();
 	});
 
 	afterEach(() => {

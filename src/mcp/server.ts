@@ -17,6 +17,7 @@ import {
 } from '../utils/path-security.js';
 import { applyResponsePipeline } from './pipeline.js';
 import { buildMcpToolRegistry } from './registry.js';
+import type { KnowledgeAddAdapterRuntime } from './write-receipts.js';
 
 const SERVER_NAME = 'opencode-swarm';
 
@@ -103,6 +104,10 @@ export function validatePathField(
 export interface RunMcpServerOptions {
 	root: string;
 	allowWrite?: boolean;
+	/** Exact reviewed write names authorized for this server instance. */
+	writeTools?: string[];
+	/** Test-only receipt fault and clock hooks. */
+	writeHooks?: KnowledgeAddAdapterRuntime['hooks'];
 	/** Test seam: inject transports instead of stdio (InMemoryTransport pair). */
 	transport?: { connect(server: unknown): Promise<void> } | undefined;
 	version?: string;
@@ -117,6 +122,7 @@ export function createMcpServer(options: RunMcpServerOptions): McpServer {
 	const registry = buildMcpToolRegistry({
 		root,
 		allowWrite: options.allowWrite,
+		writeTools: options.writeTools,
 	});
 	const server = new McpServer({
 		name: SERVER_NAME,
@@ -137,10 +143,20 @@ export function createMcpServer(options: RunMcpServerOptions): McpServer {
 					for (const field of tool.pathFields) {
 						validatePathField(field, args[field], root);
 					}
-					const raw = await tool.execute(args, root);
+					const raw =
+						tool.kind === 'write'
+							? await tool.execute(args, root, { hooks: options.writeHooks })
+							: await tool.execute(args, root);
 					const { text } = applyResponsePipeline(raw);
 					return {
 						content: [{ type: 'text' as const, text }],
+						// A reviewed write can settle with a structured failure (for
+						// example a durable idempotency conflict). Preserve the
+						// response body and receipt while still exposing MCP's error
+						// channel to clients.
+						...(tool.kind === 'write' && isStructuredWriteFailure(raw)
+							? { isError: true }
+							: {}),
 					};
 				} catch (error) {
 					// Error text takes the same redact+bound pipeline as success
@@ -157,6 +173,20 @@ export function createMcpServer(options: RunMcpServerOptions): McpServer {
 		);
 	}
 	return server;
+}
+
+/**
+ * `knowledge_add` returns structured JSON for validation, quarantine, and
+ * duplicate outcomes instead of throwing. Those outcomes are settled and
+ * replayable by the receipt layer, but a client must still see `isError` when
+ * the production response says the write did not succeed.
+ */
+function isStructuredWriteFailure(value: unknown): boolean {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	if (record.success === false) return true;
+	if (record.success !== true && typeof record.error === 'string') return true;
+	return false;
 }
 
 /** Serve the read-only verification surface over stdio until stdin closes. */

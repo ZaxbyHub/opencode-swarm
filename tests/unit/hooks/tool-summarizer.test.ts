@@ -1,13 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleRetrieveCommand } from '../../../src/commands/retrieve';
 import type { SummaryConfig } from '../../../src/config/schema';
-import {
-	createToolSummarizerHook,
-	resetSummaryIdCounter,
-} from '../../../src/hooks/tool-summarizer';
+import { createToolSummarizerHook } from '../../../src/hooks/tool-summarizer';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function defaultConfig(overrides?: Partial<SummaryConfig>): SummaryConfig {
 	return {
@@ -24,11 +21,7 @@ describe('tool-summarizer', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		resetSummaryIdCounter();
-		tempDir = join(
-			tmpdir(),
-			`test-tool-summarizer-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-		);
+		tempDir = canonicalMkdtemp('tool-summarizer-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 	});
 
@@ -145,41 +138,6 @@ describe('tool-summarizer', () => {
 		expect(output3.output).toContain('[SUMMARY S3]');
 	});
 
-	it('resetSummaryIdCounter() resets counter back to 1', async () => {
-		const config = defaultConfig({
-			enabled: true,
-			threshold_bytes: 1024,
-		});
-		const hook = createToolSummarizerHook(config, tempDir);
-
-		// First call produces S1
-		const output1 = {
-			title: 'Result 1',
-			output: 'x'.repeat(2000),
-			metadata: null,
-		};
-		await hook(
-			{ tool: 'Read', sessionID: 'test-session', callID: 'call-1' },
-			output1,
-		);
-		expect(output1.output).toContain('[SUMMARY S1]');
-
-		// Reset the counter
-		resetSummaryIdCounter();
-
-		// Next call should produce S1 again, not S2
-		const output2 = {
-			title: 'Result 2',
-			output: 'y'.repeat(2000),
-			metadata: null,
-		};
-		await hook(
-			{ tool: 'Read', sessionID: 'test-session', callID: 'call-2' },
-			output2,
-		);
-		expect(output2.output).toContain('[SUMMARY S1]');
-	});
-
 	it('storage error causes fail-open: output passes through unchanged', async () => {
 		const config = defaultConfig({
 			enabled: true,
@@ -217,11 +175,7 @@ describe('tool-summarizer integration', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		resetSummaryIdCounter();
-		tempDir = join(
-			tmpdir(),
-			`test-summarizer-integration-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-		);
+		tempDir = canonicalMkdtemp('tool-summarizer-integration-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 	});
 

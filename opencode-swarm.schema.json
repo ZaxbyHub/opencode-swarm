@@ -5400,6 +5400,20 @@
         }
       },
       "additionalProperties": false
+    },
+    "dashboard": {
+      "description": "Opt-in local mission-control dashboard over durable swarm state (issue #2509). Disabled by default; set port > 0 to enable the loopback-only read-only view.",
+      "type": "object",
+      "properties": {
+        "port": {
+          "default": 0,
+          "description": "Loopback port for the opt-in local dashboard (issue #2509). 0 or absent = disabled (default).",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

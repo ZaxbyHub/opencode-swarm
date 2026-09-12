@@ -136,7 +136,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/plan/manager.ts:2033',
 			'src/review/evidence.ts:175',
 			'src/turbo/lean/evidence.ts:182',
-			'src/summaries/manager.ts:123',
+			'src/summaries/manager.ts:163',
 			'src/evidence/manager.ts:288',
 			'src/evidence/manager.ts:456',
 			'src/tools/sast-baseline.ts:199',

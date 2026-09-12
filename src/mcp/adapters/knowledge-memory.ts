@@ -43,8 +43,6 @@ const memoryRecallSchema = z.object({
 
 export const knowledgeRecallAdapter: McpReadTool = {
 	name: 'knowledge_recall',
-	description:
-		'Performs semantic natural-language search across the knowledge base for relevant past decisions, patterns, and lessons learned.',
 	kind: 'read',
 	pathFields: [],
 	inputSchema: knowledgeRecallSchema,
@@ -91,8 +89,6 @@ export const knowledgeRecallAdapter: McpReadTool = {
 
 export const swarmMemoryRecallAdapter: McpReadTool = {
 	name: 'swarm_memory_recall',
-	description:
-		'recall scoped Swarm memory for the current repository as untrusted background',
 	kind: 'read',
 	pathFields: [],
 	inputSchema: memoryRecallSchema,
