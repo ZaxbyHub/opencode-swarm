@@ -199,8 +199,8 @@ The CI quality job also fails closed when either required dependency is not
 successful before running the expensive checks:
 
 ```bash
-if [[ "${{ needs.detect-release.result }}" != "success" || "${{ needs.release-owner-guard.result }}" != "success" ]]; then
-  echo "::error::required dependency failed: detect-release=${{ needs.detect-release.result }}, release-owner-guard=${{ needs.release-owner-guard.result }}"
+if [[ "$DETECT_RELEASE_RESULT" != "success" || "$RELEASE_OWNER_RESULT" != "success" ]]; then
+  echo "::error::required dependency failed: detect-release=$DETECT_RELEASE_RESULT, release-owner-guard=$RELEASE_OWNER_RESULT"
   exit 1
 fi
 ```

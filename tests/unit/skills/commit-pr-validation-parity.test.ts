@@ -29,8 +29,8 @@ const CI_WORKFLOW_PATH = join(
  * mapping in the same PR — that is the reconciliation mechanism.
  */
 const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
-	'if [[ "${{ needs.detect-release.result }}" != "success" || "${{ needs.release-owner-guard.result }}" != "success" ]]; then && echo "::error::required dependency failed: detect-release=${{ needs.detect-release.result }}, release-owner-guard=${{ needs.release-owner-guard.result }}" && exit 1 && fi':
-		'if [[ "${{ needs.detect-release.result }}" != "success" || "${{ needs.release-owner-guard.result }}" != "success" ]]; then',
+	'if [[ "$DETECT_RELEASE_RESULT" != "success" || "$RELEASE_OWNER_RESULT" != "success" ]]; then && echo "::error::required dependency failed: detect-release=$DETECT_RELEASE_RESULT, release-owner-guard=$RELEASE_OWNER_RESULT" && exit 1 && fi':
+		'if [[ "$DETECT_RELEASE_RESULT" != "success" || "$RELEASE_OWNER_RESULT" != "success" ]]; then',
 	'bun run typecheck': 'bun run typecheck',
 	'bunx biome ci .': 'bun run lint:ci',
 	'bun run scripts/check-tool-registration.ts':
