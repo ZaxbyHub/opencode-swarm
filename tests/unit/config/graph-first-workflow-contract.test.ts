@@ -68,19 +68,21 @@ describe('graph-first workflow contracts', () => {
 					'package_boundaries',
 					'key_files',
 					'context_pack',
+					'preflight_packet',
+					'ontology',
 				],
 			},
 			{
 				name: 'coder',
 				content: createCoderAgent('test-model').config.prompt ?? '',
-				actions: ['localization', 'impact_cone'],
+				actions: ['localization', 'impact_cone', 'callers'],
 			},
 			{
 				name: 'critic',
 				content:
 					createCriticAgent('test-model', undefined, undefined, 'plan_critic')
 						.config.prompt ?? '',
-				actions: ['graph_health', 'impact_cone'],
+				actions: ['graph_health', 'impact_cone', 'graph_explain'],
 			},
 			{
 				name: 'reviewer',
@@ -90,6 +92,8 @@ describe('graph-first workflow contracts', () => {
 					'diff_context',
 					'impact_cone',
 					'blast_radius',
+					'symbol_context',
+					'dead_exports',
 				],
 			},
 			{
@@ -126,6 +130,8 @@ describe('graph-first workflow contracts', () => {
 					'package_boundaries',
 					'key_files',
 					'context_pack',
+					'preflight_packet',
+					'ontology',
 				],
 			},
 			{
@@ -134,7 +140,7 @@ describe('graph-first workflow contracts', () => {
 			},
 			{
 				path: '.opencode/skills/deep-dive/SKILL.md',
-				actions: ['graph_health', 'context_pack'],
+				actions: ['graph_health', 'context_pack', 'retrieve'],
 			},
 			{
 				path: '.opencode/skills/codebase-review-swarm/SKILL.md',
@@ -176,11 +182,13 @@ describe('graph-first workflow contracts', () => {
 					'package_boundaries',
 					'key_files',
 					'context_pack',
+					'preflight_packet',
+					'ontology',
 				],
 			},
 			{
 				path: '.claude/skills/deep-dive/SKILL.md',
-				actions: ['graph_health', 'context_pack'],
+				actions: ['graph_health', 'context_pack', 'retrieve'],
 			},
 			{
 				path: '.claude/skills/engineering-conventions/SKILL.md',

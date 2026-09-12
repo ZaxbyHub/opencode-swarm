@@ -11,7 +11,7 @@ This protocol is loaded on demand by the architect runtime. The architect prompt
 
 ## Graph-first evidence contract
 
-Before planning, call `repo_map` with `graph_health`, then `package_boundaries` and `key_files`, followed by a targeted source-bearing `context_pack`. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before committing the plan.
+Before planning, call `repo_map` with `graph_health`, then `package_boundaries` and `key_files`, followed by a targeted source-bearing `context_pack`; a `preflight_packet` (bounded ontology of roles, routes, data, and security findings) frames planning risk, and per-file `ontology` facts sharpen it. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before committing the plan.
 
 ### MODE: PLAN
 

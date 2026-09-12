@@ -14,7 +14,7 @@ Read-only deep audit of a specified codebase scope using parallel explorer waves
 
 ## Graph-first evidence contract
 
-Use `repo_map` `graph_health` and boundary discovery before a targeted source-bearing `context_pack`; existing `ask`, `key_files`, and `localization` remain discovery inputs. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before reporting a finding.
+Use `repo_map` `graph_health` and boundary discovery before a targeted source-bearing `context_pack`; existing `ask`, `key_files`, and `localization` remain discovery inputs, and `repo_map action="retrieve"` adds one bounded mixed pass routing across ask, symbols, callers, impact, routes, data, preflight, tests, diffs, and explanations — it does not replace explicit `key_files` or `localization` discovery. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before reporting a finding.
 
 ### MODE: DEEP_DIVE
 

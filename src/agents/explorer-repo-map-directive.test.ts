@@ -22,6 +22,10 @@ describe('EXPLORER_PROMPT — repo_map graph-first directive (issue #1988 C1)', 
 		);
 	});
 
+	test('ACTIONS locates symbols via repo_map symbol_search before reading (issue #2540)', () => {
+		expect(actionsSection).toContain('repo_map action="symbol_search"');
+	});
+
 	test('directive frames graph output as orientation and requires reading located files', () => {
 		expect(actionsSection).toContain('orientation');
 		expect(actionsSection).toContain(
