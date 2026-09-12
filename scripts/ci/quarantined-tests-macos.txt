@@ -12,4 +12,12 @@
 # the gate; an EXPIRY more than 14 days in the past also fails (inside
 # the grace window it only warns).
 #
-# No active macOS-only quarantines. Issue #1908 requires exact-head macOS proof.
+# No active macOS-only quarantines besides the entry below.
+
+# OWNER: zaxbysauce — issue #2738 (deterministic macOS signal-child failure:
+#   the crash fixture survives the delivered POSIX signal and exits 0 on
+#   macos-latest runners; 9/9 failures across PRs #2735/#2736 on 2026-09-12,
+#   ubuntu shards green; test already win32-skipped in-source)
+# EXPIRY: 2026-09-26 — remove when the fixture/harness signal handling is
+#   fixed and the test passes on macos-latest.
+tests/unit/scripts/ci/repository-validation-real-process-2675.test.ts
