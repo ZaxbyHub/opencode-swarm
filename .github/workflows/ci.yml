@@ -68,22 +68,42 @@ jobs:
           #   2. A 10-commit window false-positives: a recent release MERGE
           #      lingers in the window of later, non-release PRs.
           if [[ "$EVENT" == "merge_group" && "$REPOSITORY" == "ZaxbyHub/opencode-swarm" ]]; then
-            SUBJECT="$(git -C "$GITHUB_WORKSPACE" show -s --format='%s' "$HEAD_SHA")"
-            AUTHOR="$(git -C "$GITHUB_WORKSPACE" show -s --format='%an' "$HEAD_SHA")"
-            AUTHOR_EMAIL="$(git -C "$GITHUB_WORKSPACE" show -s --format='%ae' "$HEAD_SHA")"
-            COMMITTER="$(git -C "$GITHUB_WORKSPACE" show -s --format='%cn' "$HEAD_SHA")"
-            COMMITTER_EMAIL="$(git -C "$GITHUB_WORKSPACE" show -s --format='%ce' "$HEAD_SHA")"
-            BOT_AUTHOR=$([[ "$AUTHOR" == "github-actions[bot]" && "$AUTHOR_EMAIL" == "41898282+github-actions[bot]@users.noreply.github.com" ]])
-            GITHUB_COMMITTER=$([[ "$COMMITTER" == "GitHub" && "$COMMITTER_EMAIL" == "noreply@github.com" ]])
+            RELEASE_LOOKUP_FILE="$RUNNER_TEMP/opencode-swarm-release-lookup"
+            git -C "$GITHUB_WORKSPACE" show -s --format='%s' "$HEAD_SHA" > "$RELEASE_LOOKUP_FILE"
+            IFS= read -r SUBJECT < "$RELEASE_LOOKUP_FILE"
+            git -C "$GITHUB_WORKSPACE" show -s --format='%an' "$HEAD_SHA" > "$RELEASE_LOOKUP_FILE"
+            IFS= read -r AUTHOR < "$RELEASE_LOOKUP_FILE"
+            git -C "$GITHUB_WORKSPACE" show -s --format='%ae' "$HEAD_SHA" > "$RELEASE_LOOKUP_FILE"
+            IFS= read -r AUTHOR_EMAIL < "$RELEASE_LOOKUP_FILE"
+            git -C "$GITHUB_WORKSPACE" show -s --format='%cn' "$HEAD_SHA" > "$RELEASE_LOOKUP_FILE"
+            IFS= read -r COMMITTER < "$RELEASE_LOOKUP_FILE"
+            git -C "$GITHUB_WORKSPACE" show -s --format='%ce' "$HEAD_SHA" > "$RELEASE_LOOKUP_FILE"
+            IFS= read -r COMMITTER_EMAIL < "$RELEASE_LOOKUP_FILE"
+            BOT_AUTHOR=
+            if [[ "$AUTHOR" == "github-actions[bot]" && "$AUTHOR_EMAIL" == "41898282+github-actions[bot]@users.noreply.github.com" ]]; then
+              BOT_AUTHOR=1
+            fi
+            GITHUB_COMMITTER=
+            if [[ "$COMMITTER" == "GitHub" && "$COMMITTER_EMAIL" == "noreply@github.com" ]]; then
+              GITHUB_COMMITTER=1
+            fi
             if [[ "$BOT_AUTHOR" && "$GITHUB_COMMITTER" && "$SUBJECT" =~ ^chore\(main\):\ release\  ]]; then
               echo "is-release=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             if [[ "$SUBJECT" =~ ^Merge\ pull\ request\ #[0-9]+\ from\ ZaxbyHub/release-please-- ]]; then
-              RELEASE_PARENT="$(git -C "$GITHUB_WORKSPACE" rev-parse "$HEAD_SHA^2" 2>/dev/null || true)"
-              RELEASE_AUTHOR="$(git -C "$GITHUB_WORKSPACE" show -s --format='%an' "$RELEASE_PARENT" 2>/dev/null || true)"
-              RELEASE_AUTHOR_EMAIL="$(git -C "$GITHUB_WORKSPACE" show -s --format='%ae' "$RELEASE_PARENT" 2>/dev/null || true)"
-              RELEASE_SUBJECT="$(git -C "$GITHUB_WORKSPACE" show -s --format='%s' "$RELEASE_PARENT" 2>/dev/null || true)"
+              RELEASE_PARENT=
+              git -C "$GITHUB_WORKSPACE" rev-parse "$HEAD_SHA^2" > "$RELEASE_LOOKUP_FILE" 2>/dev/null || true
+              IFS= read -r RELEASE_PARENT < "$RELEASE_LOOKUP_FILE" || true
+              RELEASE_AUTHOR=
+              git -C "$GITHUB_WORKSPACE" show -s --format='%an' "$RELEASE_PARENT" > "$RELEASE_LOOKUP_FILE" 2>/dev/null || true
+              IFS= read -r RELEASE_AUTHOR < "$RELEASE_LOOKUP_FILE" || true
+              RELEASE_AUTHOR_EMAIL=
+              git -C "$GITHUB_WORKSPACE" show -s --format='%ae' "$RELEASE_PARENT" > "$RELEASE_LOOKUP_FILE" 2>/dev/null || true
+              IFS= read -r RELEASE_AUTHOR_EMAIL < "$RELEASE_LOOKUP_FILE" || true
+              RELEASE_SUBJECT=
+              git -C "$GITHUB_WORKSPACE" show -s --format='%s' "$RELEASE_PARENT" > "$RELEASE_LOOKUP_FILE" 2>/dev/null || true
+              IFS= read -r RELEASE_SUBJECT < "$RELEASE_LOOKUP_FILE" || true
               if [[ "$RELEASE_AUTHOR" == "github-actions[bot]" && "$RELEASE_AUTHOR_EMAIL" == "41898282+github-actions[bot]@users.noreply.github.com" && "$RELEASE_SUBJECT" =~ ^chore\(main\):\ release\  ]]; then
                 echo "is-release=true" >> "$GITHUB_OUTPUT"
                 exit 0
@@ -131,9 +151,11 @@ jobs:
             # Bootstrap only: the checker was introduced by this PR, so no
             # protected copy exists yet. Permit the new checker when the exact
             # owner-file diff is empty; any owner edit fails closed.
-            OWNER_CHANGES="$(git -C "$GITHUB_WORKSPACE" diff --name-only "$TRUSTED_BASE_SHA" "$TRUSTED_HEAD_SHA" -- package.json CHANGELOG.md .release-please-manifest.json)"
-            if [[ -n "$OWNER_CHANGES" ]]; then
-              echo "::error::protected release-owner checker is unavailable and owner files changed: $OWNER_CHANGES"
+            OWNER_CHANGES_FILE="$RUNNER_TEMP/opencode-swarm-owner-changes"
+            git -C "$GITHUB_WORKSPACE" diff --name-only "$TRUSTED_BASE_SHA" "$TRUSTED_HEAD_SHA" -- package.json CHANGELOG.md .release-please-manifest.json > "$OWNER_CHANGES_FILE"
+            if [[ -s "$OWNER_CHANGES_FILE" ]]; then
+              echo "::error::protected release-owner checker is unavailable and owner files changed:"
+              cat "$OWNER_CHANGES_FILE"
               exit 1
             fi
             echo "protected release-owner checker is unavailable on the base; no owner files changed"
@@ -236,9 +258,12 @@ jobs:
       - name: Release-owner guard dependency check
         if: ${{ always() && !cancelled() }}
         shell: bash
+        env:
+          DETECT_RELEASE_RESULT: ${{ needs.detect-release.result }}
+          RELEASE_OWNER_RESULT: ${{ needs.release-owner-guard.result }}
         run: |
-          if [[ "${{ needs.detect-release.result }}" != "success" || "${{ needs.release-owner-guard.result }}" != "success" ]]; then
-            echo "::error::required dependency failed: detect-release=${{ needs.detect-release.result }}, release-owner-guard=${{ needs.release-owner-guard.result }}"
+          if [[ "$DETECT_RELEASE_RESULT" != "success" || "$RELEASE_OWNER_RESULT" != "success" ]]; then
+            echo "::error::required dependency failed: detect-release=$DETECT_RELEASE_RESULT, release-owner-guard=$RELEASE_OWNER_RESULT"
             exit 1
           fi
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1

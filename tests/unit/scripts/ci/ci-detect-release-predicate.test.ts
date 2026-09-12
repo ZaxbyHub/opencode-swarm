@@ -15,7 +15,8 @@ const CI_YML = fileURLToPath(
 	new URL('../../../../.github/workflows/ci.yml', import.meta.url),
 );
 
-const EXPECTED_HEAD_SUBJECT_LOOKUP = `SUBJECT="$(git -C "$GITHUB_WORKSPACE" show -s --format='%s' "$HEAD_SHA")"`;
+const EXPECTED_HEAD_SUBJECT_LOOKUP =
+	`git -C "$GITHUB_WORKSPACE" show -s --format='%s' "$HEAD_SHA" > "$RELEASE_LOOKUP_FILE"`;
 
 function readWorkflow(): string {
 	return readFileSync(CI_YML, 'utf8');
@@ -69,32 +70,39 @@ describe('ci.yml detect-release predicate (merge-group required-check gate)', ()
 		expect(envLine).toContain('github.event.merge_group.head_sha');
 
 		const parentLookupLine = findWorkflowLine(
-			'RELEASE_PARENT=',
-			'"$HEAD_SHA^2"',
+			'rev-parse "$HEAD_SHA^2"',
+			'RELEASE_LOOKUP_FILE',
 		);
 		expect(parentLookupLine).toContain('rev-parse');
 
 		const botAuthorLine = findWorkflowLine(
-			'BOT_AUTHOR=$([[',
+			'if [[ "$AUTHOR" ==',
 			'"$AUTHOR_EMAIL"',
 		);
 		expect(botAuthorLine).toContain('"$AUTHOR" == "github-actions[bot]"');
 		expect(botAuthorLine).toContain(
 			'"$AUTHOR_EMAIL" == "41898282+github-actions[bot]@users.noreply.github.com"',
 		);
+		expect(findWorkflowLine('BOT_AUTHOR=').trim()).toBe('BOT_AUTHOR=');
+		expect(findWorkflowLine('BOT_AUTHOR=1').trim()).toBe('BOT_AUTHOR=1');
 
 		const githubCommitterLine = findWorkflowLine(
-			'GITHUB_COMMITTER=$([[',
+			'if [[ "$COMMITTER" ==',
 			'"$COMMITTER_EMAIL"',
 		);
 		expect(githubCommitterLine).toContain('"$COMMITTER" == "GitHub"');
 		expect(githubCommitterLine).toContain(
 			'"$COMMITTER_EMAIL" == "noreply@github.com"',
 		);
+		expect(findWorkflowLine('GITHUB_COMMITTER=').trim()).toBe(
+			'GITHUB_COMMITTER=',
+		);
+		expect(findWorkflowLine('GITHUB_COMMITTER=1').trim()).toBe(
+			'GITHUB_COMMITTER=1',
+		);
 
 		const parentSubjectLine = findWorkflowLine(
-			'RELEASE_SUBJECT=',
-			'"$RELEASE_PARENT"',
+			'show -s --format=\'%s\' "$RELEASE_PARENT"',
 		);
 		expect(parentSubjectLine).toContain("--format='%s'");
 		const parentIdentityLine = findWorkflowLine(

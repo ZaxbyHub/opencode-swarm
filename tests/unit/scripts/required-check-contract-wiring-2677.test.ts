@@ -257,8 +257,16 @@ describe('issue #2677 required-check contract wiring', () => {
 			quality.indexOf('- name: Release-owner guard dependency check'),
 		).toBeLessThan(quality.indexOf('- uses: actions/checkout@'));
 		expect(quality).toContain(
-			'if [[ "${{ needs.detect-release.result }}" != "success" || "${{ needs.release-owner-guard.result }}" != "success" ]]; then',
+			'DETECT_RELEASE_RESULT: ${{ needs.detect-release.result }}',
 		);
+		expect(quality).toContain(
+			'RELEASE_OWNER_RESULT: ${{ needs.release-owner-guard.result }}',
+		);
+		expect(quality).toContain(
+			'if [[ "$DETECT_RELEASE_RESULT" != "success" || "$RELEASE_OWNER_RESULT" != "success" ]]; then',
+		);
+		expect(quality).not.toContain('needs.detect-release.result }}"');
+		expect(quality).not.toContain('needs.release-owner-guard.result }}"');
 	});
 
 	test('an intended-only external event gap stays visible without blocking local trigger coverage', () => {
