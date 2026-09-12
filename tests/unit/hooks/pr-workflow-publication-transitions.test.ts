@@ -129,7 +129,7 @@ describe('shadow-projection corruption does not weaken publication authority', (
 		expect(active?.state).toBe('armed');
 	});
 
-	test('publicationShapeUnreadable salvage treats a malformed record as armed', async () => {
+	test('valid SQLite authority wins over a malformed shadow and remains armed', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
 		const absolute = fixture.fixtureStatePath(SESSION_ID);
 		const raw = JSON.parse(await fs.readFile(absolute, 'utf-8')) as Record<
@@ -143,8 +143,11 @@ describe('shadow-projection corruption does not weaken publication authority', (
 			fixture.directory,
 			SESSION_ID,
 		);
-		expect(recovery?.salvaged ?? recovery?.armedShapeUnreadable).toBeTruthy();
-		expect(recovery?.armedShapeUnreadable).toBe(true);
+		expect(recovery).not.toBeNull();
+		expect(recovery?.salvaged).toBe(false);
+		expect(recovery?.armedShapeUnreadable).toBe(false);
+		expect(recovery?.state.prFeedbackReadyToPublish).toBeDefined();
+		expect(recovery?.state.prFeedbackPublication?.active?.state).toBe('armed');
 	});
 });
 

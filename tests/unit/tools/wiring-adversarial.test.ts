@@ -419,7 +419,7 @@ describe('Phase 3.1 wiring - TOOL OBJECT STRUCTURE', () => {
 		const { secretscan } = await import('../../../src/tools/index');
 
 		const result = await secretscan.execute(
-			{ directory: '.' } as any,
+			{ directory: '.', exclude: ['.swarm'] } as any,
 			{} as any,
 		);
 
