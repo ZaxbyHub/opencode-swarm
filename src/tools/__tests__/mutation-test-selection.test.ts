@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
 import { mutation_test } from '../../../src/tools/mutation-test.js';
+import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
 
 /**
  * mutation_test analyzer-derived selection (issue #2492 AC3/AC10): explicit
