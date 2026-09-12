@@ -47,13 +47,64 @@ function completedTask(
 	};
 }
 
-/** 3-phase plan whose cursor was authored once at plan creation and never advanced. */
+/**
+ * Cursor-lag plan (#2532-adjusted): receipts are stamped with the RESOLVED
+ * active phase (getCurrentPhase), so the mistag arm covers plans whose
+ * resolved cursor trails the phase being completed. Phase 1 stays
+ * non-terminal so the resolved cursor is 1 while phases 2–3 are already
+ * complete.
+ */
 function staleCursorPlan(): Plan {
 	return {
 		schema_version: '1.0.0',
 		title: 'Stale Cursor Participation Plan',
 		swarm: 'test',
 		current_phase: 1,
+		phases: [
+			{
+				id: 1,
+				name: 'Foundation',
+				status: 'pending',
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'pending',
+						size: 'small',
+						description: 'Pending task 1.1',
+						depends: [],
+						files_touched: [],
+					},
+				],
+			},
+			{
+				id: 2,
+				name: 'Hardening',
+				status: 'complete',
+				tasks: [completedTask('2.1', 2)],
+			},
+			{
+				id: 3,
+				name: 'Documentation',
+				status: 'complete',
+				required_agents: ['docs'],
+				tasks: [completedTask('3.1', 3)],
+			},
+		],
+	};
+}
+
+/**
+ * Same 3-phase plan but with a healthy cursor pointing at the completing
+ * phase: phases 1–2 complete, phase 3 in progress (non-terminal), stored
+ * cursor 3 — so the resolved active phase is the completing phase 3.
+ */
+function healthyCursorPlan(): Plan {
+	return {
+		schema_version: '1.0.0',
+		title: 'Stale Cursor Participation Plan',
+		swarm: 'test',
+		current_phase: 3,
 		phases: [
 			{
 				id: 1,
@@ -76,13 +127,6 @@ function staleCursorPlan(): Plan {
 			},
 		],
 	};
-}
-
-/** Same 3-phase plan but with a healthy cursor pointing at the completing phase. */
-function healthyCursorPlan(): Plan {
-	const plan = staleCursorPlan();
-	plan.current_phase = 3;
-	return plan;
 }
 
 function writePlan(directory: string, plan: Plan): void {

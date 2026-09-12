@@ -611,6 +611,59 @@ Scope and effective-authority denials use stable recovery codes:
 | `AUTHORITY_UNIVERSAL_DENY` / `AUTHORITY_PROTECTED_PATH` / `AUTHORITY_VERIFIER_CONFIG` | A hard protected policy denied the target. Assign the operation to the supported owner or change the task; scope cannot override it. |
 | `AUTHORITY_ROLE_READ_ONLY` / `AUTHORITY_UNKNOWN_AGENT` / `AUTHORITY_POLICY_DENY` | The acting role cannot perform the write under immutable capability or enabled role policy. Use the responsible writable role or revise policy/task intent. |
 
+
+## Phase cursor (`current_phase`) — one advancing writer (#2532)
+
+The stored phase cursor has exactly ONE durable advancing writer: the
+`normalizeCurrentPhaseInPlace` normalization applied inside `savePlan`
+(and `closePlanTerminalState`, which persists directly) BEFORE any plan hash,
+ledger event, or snapshot is derived. The rule, implemented by
+`resolveActivePhaseId` (src/config/plan-schema.ts):
+
+- the stored `current_phase` is kept when it points at a phase that is not
+  finished — this is what preserves the active phase across `save_plan`
+  revisions (a mid-phase revision no longer re-pins the cursor to phase 1);
+- otherwise the cursor advances to the first unfinished phase (a phase is
+  finished when its status is terminal OR every task is completed/closed —
+  the task-level check covers replayed projections, where
+  `task_status_changed` events are applied without re-deriving the phase
+  status);
+- a fully finished plan keeps its last phase id.
+
+Ledger replay applies the same normalization to its reconstructed plan, so the
+replayed projection and an equivalently saved plan.json always agree; legacy
+ledgers whose embedded plans carry a stuck cursor replay to the honest active
+phase. Checkpoint import persists through `savePlan`, so exports/imports
+round-trip the advanced cursor. Consumers that must agree on "the current
+phase" (plan.md header, summary extractor, preflight, phase monitor,
+delegation-gate active-phase selection, handoff summaries) all resolve through
+the same helper.
+
+Hash semantics: `current_phase` remains inside both plan hashes. A phase-boundary
+advancement therefore changes the approval-baseline hash exactly like any plan
+revision (bindings and approved snapshots declared against the pre-advance
+plan stop matching until re-declared/re-approved); ordinary task-status churn
+inside a phase is hash-excluded and does not touch the baseline.
+
+Known upgrade behavior: workspaces whose SQLite ledger shadow already
+existed before this change compare the normalized replay hash against the
+last event's pre-upgrade recorded `plan_hash_after` and may report
+`parityStatus: 'diverged'` once. This is diagnostic bookkeeping only
+(no user-facing surface reads it); it self-heals at the first post-upgrade
+plan save, which appends an event whose hash matches the normalized replay.
+Workspaces that never mutate their plan again simply stay in file-shadow
+mode, which is operationally equivalent.
+
+The v8 parallel verdict resolves task scopes from the same authoritative v2
+binding store `declare_scope` writes (`readDeclaredScopeFilesFromBindings`),
+matched against the exact plan identity (`planId` + structure hash), with one
+bounded binding-set scan per verdict. The legacy v1 `scope-<taskId>.json`
+projection is not consulted on the standard path: no production code writes
+it in a project root (its one writer targets lane worktrees), and a task
+without exactly one live exact-plan binding fails closed to `unknown` —
+serial — along with a serial-fallback advisory that names the exact reason
+(undeclared task ids, or the conflicting pair and shared path).
+
 ## Quick Reference
 
 | Operation | Command / Trigger |

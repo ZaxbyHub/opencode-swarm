@@ -756,12 +756,6 @@ describe('extractCurrentPhaseFromPlan', () => {
 		expect(result).toBe('Phase 1: Phase 1 [BLOCKED]');
 	});
 
-	it('Returns null when current_phase does not match any phase ID', () => {
-		const plan = createTestPlan({ current_phase: 99 });
-		const result = extractCurrentPhaseFromPlan(plan);
-		expect(result).toBeNull();
-	});
-
 	it('Returns correct phase when current_phase is 2', () => {
 		const plan = createTestPlan({
 			current_phase: 2,
@@ -877,12 +871,6 @@ describe('extractCurrentTaskFromPlan', () => {
 				},
 			],
 		});
-		const result = extractCurrentTaskFromPlan(plan);
-		expect(result).toBeNull();
-	});
-
-	it('Returns null when current_phase does not match any phase ID', () => {
-		const plan = createTestPlan({ current_phase: 99 });
 		const result = extractCurrentTaskFromPlan(plan);
 		expect(result).toBeNull();
 	});
@@ -1016,10 +1004,10 @@ describe('extractIncompleteTasksFromPlan', () => {
 		expect(result).toBeNull();
 	});
 
-	it('Returns null when current phase not found', () => {
+	it('#2532: honest active phase tasks when cursor matches no phase', () => {
 		const plan = createTestPlan({ current_phase: 99 });
 		const result = extractIncompleteTasksFromPlan(plan);
-		expect(result).toBeNull();
+		expect(result).toContain('1.2: Task two');
 	});
 
 	it('Respects maxChars truncation', () => {

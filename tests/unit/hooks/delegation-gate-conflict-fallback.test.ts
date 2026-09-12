@@ -7,6 +7,10 @@
  * and PERMIT parallel only when they ARE disjoint. This is acceptance
  * criterion 4 ("overlapping/unknown scopes → serial by default") — enforced by
  * the harness, not advisory.
+ *
+ * #2532: scopes are declared through the REGISTERED declare_scope tool (the
+ * authoritative v2 binding store); the fallback message carries the exact
+ * reason (which tasks lack a declaration, or which pair overlaps on what).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -19,7 +23,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
-import { writeDisjointScopes } from './_delegation-gate-helpers';
+import { executeDeclareScope } from '../../../src/tools/declare-scope';
 
 const { buildParallelExecutionGuidance } = _internals;
 
@@ -82,22 +86,17 @@ function writePlan(opts: {
 	);
 }
 
-function writeOverlappingScopes(ids: string[]): void {
-	// Give every task the SAME file so they all path-conflict.
-	const scopesDir = path.join(swarmDir, 'scopes');
-	fs.mkdirSync(scopesDir, { recursive: true });
-	for (const id of ids) {
-		fs.writeFileSync(
-			path.join(scopesDir, `scope-${id}.json`),
-			JSON.stringify({
-				version: 1,
-				taskId: id,
-				files: ['src/shared.ts'],
-				declaredAt: 1,
-				expiresAt: Number.MAX_SAFE_INTEGER,
-			}),
-			'utf-8',
+/** Declare scopes through the registered v2 authority (#2532). */
+async function declareScopes(
+	entries: Array<{ id: string; files: string[] }>,
+): Promise<void> {
+	for (const entry of entries) {
+		const result = await executeDeclareScope(
+			{ taskId: entry.id, files: entry.files, working_directory: tempDir },
+			tempDir,
+			{ sessionID: 'v8-fallback-architect', messageID: `m-${entry.id}` },
 		);
+		expect(result.success).toBe(true);
 	}
 }
 
@@ -108,10 +107,14 @@ function sessionId(): string {
 }
 
 describe('buildParallelExecutionGuidance — v8 automatic serial fallback', () => {
-	it('emits SERIAL-fallback message when pending tasks have overlapping scopes', async () => {
+	it('emits SERIAL-fallback with overlap evidence when declared scopes conflict', async () => {
 		const sid = sessionId();
 		writePlan({ tasks: [{ id: '1.1' }, { id: '1.2' }] });
-		writeOverlappingScopes(['1.1', '1.2']);
+		// Give every task the SAME file so they path-conflict.
+		await declareScopes([
+			{ id: '1.1', files: ['src/shared.ts'] },
+			{ id: '1.2', files: ['src/shared.ts'] },
+		]);
 
 		const result = await buildParallelExecutionGuidance(
 			tempDir,
@@ -120,15 +123,20 @@ describe('buildParallelExecutionGuidance — v8 automatic serial fallback', () =
 		);
 
 		expect(result).toContain('SERIAL fallback active');
+		// #2532 AC7: the exact reason names the conflicting pair and the path.
+		expect(result).toContain('exact reason: declared scopes overlap');
+		expect(result).toContain('1.1');
+		expect(result).toContain('1.2');
+		expect(result).toContain('src/shared.ts');
 		expect(result).toContain('plan_conflict_check');
 		expect(result).not.toContain('Eligible now');
 	});
 
-	it('emits SERIAL-fallback message when a pending task has no declared scope (unknown)', async () => {
+	it('emits SERIAL-fallback naming the undeclared task when a scope is missing (unknown)', async () => {
 		const sid = sessionId();
 		writePlan({ tasks: [{ id: '1.1' }, { id: '1.2' }] });
-		// Write a scope for 1.1 only — 1.2 is unknown.
-		writeDisjointScopes(tempDir, ['1.1']);
+		// Declare 1.1 only — 1.2 is unknown.
+		await declareScopes([{ id: '1.1', files: ['src/a.ts'] }]);
 
 		const result = await buildParallelExecutionGuidance(
 			tempDir,
@@ -137,12 +145,16 @@ describe('buildParallelExecutionGuidance — v8 automatic serial fallback', () =
 		);
 
 		expect(result).toContain('SERIAL fallback active');
+		// #2532 AC7: the exact reason distinguishes UNKNOWN from overlap.
+		expect(result).toContain('no live declared scope');
+		expect(result).toContain('1.2');
+		expect(result).not.toContain('declared scopes overlap');
 	});
 
-	it('emits SERIAL-fallback message when only one pending task exists (nothing to parallelize)', async () => {
+	it('emits SERIAL-fallback when only one pending task exists (nothing to parallelize)', async () => {
 		const sid = sessionId();
 		writePlan({ tasks: [{ id: '1.1' }] });
-		writeDisjointScopes(tempDir, ['1.1']);
+		await declareScopes([{ id: '1.1', files: ['src/a.ts'] }]);
 
 		const result = await buildParallelExecutionGuidance(
 			tempDir,
@@ -151,12 +163,16 @@ describe('buildParallelExecutionGuidance — v8 automatic serial fallback', () =
 		);
 
 		expect(result).toContain('SERIAL fallback active');
+		expect(result).toContain('nothing to parallelize');
 	});
 
 	it('emits parallel guidance when ≥2 pending tasks are disjoint', async () => {
 		const sid = sessionId();
 		writePlan({ tasks: [{ id: '1.1' }, { id: '1.2' }] });
-		writeDisjointScopes(tempDir, ['1.1', '1.2']);
+		await declareScopes([
+			{ id: '1.1', files: ['src/a.ts'] },
+			{ id: '1.2', files: ['src/b.ts'] },
+		]);
 
 		const result = await buildParallelExecutionGuidance(
 			tempDir,
@@ -175,7 +191,10 @@ describe('buildParallelExecutionGuidance — v8 automatic serial fallback', () =
 			parallelizationEnabled: false,
 			tasks: [{ id: '1.1' }, { id: '1.2' }],
 		});
-		writeDisjointScopes(tempDir, ['1.1', '1.2']);
+		await declareScopes([
+			{ id: '1.1', files: ['src/a.ts'] },
+			{ id: '1.2', files: ['src/b.ts'] },
+		]);
 
 		const result = await buildParallelExecutionGuidance(
 			tempDir,

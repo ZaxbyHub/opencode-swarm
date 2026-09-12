@@ -1,7 +1,7 @@
 /**
  * Plan-time parallel-execution verdict helper (#1656 / #1674 v8 flagship).
  *
- * Pure, synchronous, side-effect-free pairwise conflict analysis for N proposed
+ * Pure, side-effect-free pairwise conflict analysis for N proposed
  * parallel task groups. Used by BOTH:
  *   - the `plan_conflict_check` tool (architect-facing advisory — see
  *     `src/tools/plan-conflict-check.ts`), and
@@ -14,33 +14,42 @@
  * means.
  *
  * Design notes:
- *  - Sync by design: it reads only `.swarm/scopes/scope-<taskId>.json` via
- *    the hardened persisted-scope reader (sync + fail-closed). The gate runs in
- *    `toolBefore` on every tool call and must stay bounded; an async/gitten
- *    helper would violate the bounded-gate spirit.
+ *  - Sync by design: it reads only the authoritative v2 scope-binding store
+ *    (the same authority `declare_scope` writes) via the hardened
+ *    fail-closed readers. The gate runs in `toolBefore` on every tool call
+ *    and must stay bounded; an async helper would violate the bounded-gate
+ *    spirit. One binding-set scan is hoisted per verdict, never per task.
+ *  - #2532 (PARALLEL-4): scope resolution deliberately does NOT consult the
+ *    legacy v1 `.swarm/scopes/scope-<taskId>.json` projection — no production
+ *    code writes it in the project root (its one writer targets lane
+ *    worktrees), so v2-declared disjoint scopes used to be reported as
+ *    `unknown_scopes` and parallel-first could never engage.
  *  - The helper itself NEVER calls `getCoChangePairs` (async + `git log`).
  *    Co-change signal is opt-in and supplied by the caller (the tool) via
  *    `options.cochangePairs`. The gate never supplies it, keeping the
  *    enforcement path git-free and fast.
- *  - Fail-closed: a missing/malformed scope → `unknown_scope`, which conflicts
- *    with everything, so `verdict` can never be `all_disjoint` while any task
- *    lacks a declared scope. This is the v8 safety guarantee.
+ *  - Fail-closed: a task with no single live exact-plan v2 binding →
+ *    `unknown`, which conflicts with everything, so `verdict` can never be
+ *    `all_disjoint` while any task lacks a declared scope. This is the v8
+ *    safety guarantee.
  *  - Writes nothing. Honors issue #1656's "read-only (writes nothing)" tool
  *    acceptance criterion.
  */
 
-import { readScopeFromDisk } from '../scope/scope-persistence.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { type Plan, PlanSchema } from '../config/plan-schema.js';
+import type { ScopeBinding } from '../scope/scope-binding.js';
+import {
+	readAuthoritativeScopeBindingSet,
+	readDeclaredScopeFilesFromBindings,
+} from '../scope/scope-persistence.js';
 import type { CoChangeEntry } from '../tools/co-change-analyzer.js';
 import {
 	type CoChangeThreshold,
 	type EpicPairVerdict,
 	epicPairConflict,
 } from '../turbo/epic/cochange-conflict.js';
-import {
-	normalizePath,
-	pathsConflict,
-	readTaskScopes,
-} from '../turbo/lean/conflicts.js';
 
 /**
  * Per-pair conflict classification. Mirrors `EpicPairVerdict`'s signal
@@ -88,36 +97,70 @@ export interface ComputeParallelVerdictOptions {
 	cochangePairs?: CoChangeEntry[];
 	/** Override the co-change threshold. Defaults to `DEFAULT_PARALLEL_COCHANGE_THRESHOLD`. */
 	cochangeThreshold?: CoChangeThreshold;
+	/**
+	 * The plan the verdict is computed against (issue #2532). Bindings must
+	 * match its exact identity (`planId` + `planStructureHash`). When omitted,
+	 * the helper synchronously reads `<directory>/.swarm/plan.json`; a missing
+	 * or unparseable plan resolves every task to `unknown` (fail-closed).
+	 */
+	plan?: Plan;
+}
+
+/**
+ * Synchronously load the plan for verdict identity matching. Returns null on
+ * any read/parse failure so the caller fails closed to `unknown` scopes.
+ */
+function readPlanJsonForVerdict(directory: string): Plan | null {
+	try {
+		const planPath = path.join(directory, '.swarm', 'plan.json');
+		if (!fs.existsSync(planPath)) return null;
+		const raw = fs.readFileSync(planPath, 'utf-8');
+		const parsed = PlanSchema.safeParse(JSON.parse(raw));
+		return parsed.success ? parsed.data : null;
+	} catch {
+		return null;
+	}
 }
 
 /**
  * Resolve a task's declared scope, fail-closed.
  *
  * Returns `{ files, ok }` where `ok === false` means the scope is unusable
- * (missing/malformed/empty) and must force every pair involving this task to
- * `unknown`.
+ * (no single live exact-plan v2 binding, empty file list, or no readable
+ * plan) and must force every pair involving this task to `unknown`.
+ *
+ * #2532: resolved from the authoritative v2 binding store — the same source
+ * `declare_scope` writes — NEVER from the legacy v1 projection (which no
+ * production code writes in the project root).
  */
 function resolveScope(
 	directory: string,
 	taskId: string,
+	plan: Plan | null,
+	bindingSet: ScopeBinding[] | null,
 ): { files: string[]; ok: boolean } {
-	// F-004/F-007: do not authorize parallelism from the legacy raw reader,
-	// which does not validate containment, schema version, TTL, or task identity.
-	const raw = readScopeFromDisk(directory, taskId);
-	if (raw === null) return { files: [], ok: false };
+	if (plan === null) return { files: [], ok: false };
+	const files = readDeclaredScopeFilesFromBindings({
+		directory,
+		taskId,
+		plan,
+		bindingSet,
+	});
+	if (files === null) return { files: [], ok: false };
 	// Treat empty declared scope as unknown (mirrors `runPartitionPreflight`'s
 	// empty-declared → undeclared rule in src/turbo/lean/partition-common.ts).
-	if (raw.length === 0) return { files: [], ok: false };
-	return { files: raw, ok: true };
+	if (files.length === 0) return { files: [], ok: false };
+	return { files, ok: true };
 }
 
 /**
  * Compute a pairwise conflict verdict for the given task ids.
  *
- * Pure + synchronous. Reads only `.swarm/scopes/`. Writes nothing. Fail-closed
- * on any read/parse error (treats the task as `unknown`).
+ * Pure + synchronous. Reads only the authoritative v2 binding store (plus a
+ * bounded plan.json read when `options.plan` is omitted). Writes nothing.
+ * Fail-closed on any read/parse error (treats the task as `unknown`).
  *
- * @param directory  Project root (for `.swarm/scopes/` reads).
+ * @param directory  Project root (for the binding store and plan.json reads).
  * @param taskIds    Task ids to analyze. Caller is responsible for min-length
  *                   validation (the tool requires ≥2; the gate only calls this
  *                   with ≥2 pending tasks).
@@ -141,12 +184,21 @@ export function computeParallelVerdict(
 		options?.cochangeThreshold ?? DEFAULT_PARALLEL_COCHANGE_THRESHOLD;
 	const cochangePairs = useCochange ? options!.cochangePairs! : [];
 
+	// Resolve the plan identity ONCE per verdict (#2532): explicit when the
+	// caller holds it (the gate, the tool), else a bounded sync read. A missing
+	// or unparseable plan resolves every scope to `unknown`.
+	const plan = options?.plan ?? readPlanJsonForVerdict(directory);
+	// ONE authoritative binding-set scan per verdict, shared by every task
+	// (#2532 perf hoisting — never one store read per task).
+	const bindingSet =
+		plan === null ? null : readAuthoritativeScopeBindingSet(directory);
+
 	// Resolve every task's scope up front. `unknown` tasks short-circuit their
 	// pairs to `unknown` below.
 	const resolved = new Map<string, { files: string[]; ok: boolean }>();
 	const unknownScopeTasks: string[] = [];
 	for (const id of taskIds) {
-		const r = resolveScope(directory, id);
+		const r = resolveScope(directory, id, plan, bindingSet);
 		resolved.set(id, r);
 		if (!r.ok) unknownScopeTasks.push(id);
 	}
@@ -292,14 +344,11 @@ function topoSort(
 export function isProvablyDisjoint(
 	directory: string,
 	taskIds: string[],
+	options?: ComputeParallelVerdictOptions,
 ): boolean {
 	return (
 		taskIds.length >= 2 &&
-		computeParallelVerdict(directory, taskIds).verdict === 'all_disjoint'
+		computeParallelVerdict(directory, taskIds, options).verdict ===
+			'all_disjoint'
 	);
 }
-
-// Re-export the underlying predicates so the gate/tool can import everything
-// from one place without coupling to the turbo/lean or turbo/epic modules
-// directly. (The helper already imports them; this is a convenience surface.)
-export { normalizePath, pathsConflict, readTaskScopes };

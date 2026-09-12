@@ -205,6 +205,13 @@
 			"note": "Pre-existing debt, not approved drift: \"recordRecallUsage\" exists in src/memory/sqlite-provider.ts but not inside :1106 (memory-sqlite.writerCitations[0])."
 		},
 		{
+			"rowId": "phase-participation",
+			"file": "src/evidence/phase-participation.ts",
+			"identifier": "readPhaseParticipation",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readPhaseParticipation\" exists in src/evidence/phase-participation.ts but not inside src/evidence/phase-participation.ts:845 (phase-participation.readerCitations[0])."
+		},
+		{
 			"rowId": "plan-checkpoints-exports",
 			"file": "src/tools/checkpoint.ts",
 			"identifier": "appendRetentionEvent",
@@ -226,18 +233,67 @@
 			"note": "Pre-existing debt, not approved drift: \"writeCheckpointLog\" exists in src/tools/checkpoint.ts but not inside src/tools/checkpoint.ts:195 (plan-checkpoints-exports.writerCitations[1])."
 		},
 		{
+			"rowId": "plan-ledger",
+			"file": "src/plan/ledger.ts",
+			"identifier": "appendLedgerEvent",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendLedgerEvent\" exists in src/plan/ledger.ts but not inside :1321 (plan-ledger.writerCitations[0])."
+		},
+		{
+			"rowId": "plan-ledger",
+			"file": "src/plan/ledger.ts",
+			"identifier": "getLatestLedgerSeq",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"getLatestLedgerSeq\" exists in src/plan/ledger.ts but not inside src/plan/ledger.ts:984 (plan-ledger.readerCitations[1])."
+		},
+		{
+			"rowId": "plan-ledger",
+			"file": "src/plan/ledger.ts",
+			"identifier": "initLedger",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"initLedger\" exists in src/plan/ledger.ts but not inside src/plan/ledger.ts:1015 (plan-ledger.writerCitations[0])."
+		},
+		{
+			"rowId": "plan-ledger",
+			"file": "src/plan/ledger.ts",
+			"identifier": "readLedgerEvents",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readLedgerEvents\" exists in src/plan/ledger.ts but not inside src/plan/ledger.ts:998 (plan-ledger.readerCitations[0])."
+		},
+		{
+			"rowId": "plan-ledger",
+			"file": "src/plan/ledger.ts",
+			"identifier": "readLedgerEventsWithIntegrity",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readLedgerEventsWithIntegrity\" exists in src/plan/ledger.ts but not inside :2377 (plan-ledger.readerCitations[0])."
+		},
+		{
+			"rowId": "plan-ledger",
+			"file": "src/plan/ledger.ts",
+			"identifier": "replaceTruncatedLedgerWithRecoveryRoot",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"replaceTruncatedLedgerWithRecoveryRoot\" exists in src/plan/ledger.ts but not inside :1695 (plan-ledger.writerCitations[1])."
+		},
+		{
+			"rowId": "plan-ledger",
+			"file": "src/plan/ledger.ts",
+			"identifier": "takeSnapshotEvent",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"takeSnapshotEvent\" exists in src/plan/ledger.ts but not inside src/plan/ledger.ts:1633 (plan-ledger.writerCitations[1])."
+		},
+		{
 			"rowId": "plan-projections",
 			"file": "src/plan/manager.ts",
 			"identifier": "closePlanTerminalState",
 			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"closePlanTerminalState\" exists in src/plan/manager.ts but not inside :2074 (plan-projections.writerCitations[0])."
+			"note": "Pre-existing debt, not approved drift: \"closePlanTerminalState\" exists in src/plan/manager.ts but not inside :2090 (plan-projections.writerCitations[0])."
 		},
 		{
 			"rowId": "plan-projections",
 			"file": "src/plan/manager.ts",
 			"identifier": "loadPlan",
 			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadPlan\" exists in src/plan/manager.ts but not inside src/plan/manager.ts:656 (plan-projections.readerCitations[0])."
+			"note": "Pre-existing debt, not approved drift: \"loadPlan\" exists in src/plan/manager.ts but not inside src/plan/manager.ts:658 (plan-projections.readerCitations[0])."
 		},
 		{
 			"rowId": "plan-projections",
@@ -251,14 +307,14 @@
 			"file": "src/plan/manager.ts",
 			"identifier": "rebuildPlan",
 			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"rebuildPlan\" exists in src/plan/manager.ts but not inside :1931 (plan-projections.writerCitations[0])."
+			"note": "Pre-existing debt, not approved drift: \"rebuildPlan\" exists in src/plan/manager.ts but not inside :1901 (plan-projections.writerCitations[0])."
 		},
 		{
 			"rowId": "plan-projections",
 			"file": "src/plan/manager.ts",
 			"identifier": "savePlan",
 			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"savePlan\" exists in src/plan/manager.ts but not inside src/plan/manager.ts:1210 (plan-projections.writerCitations[0])."
+			"note": "Pre-existing debt, not approved drift: \"savePlan\" exists in src/plan/manager.ts but not inside src/plan/manager.ts:1721 (plan-projections.writerCitations[0])."
 		},
 		{
 			"rowId": "pr-review-run-artifacts",
@@ -287,6 +343,41 @@
 			"identifier": "recordEmittedRecommendations",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"recordEmittedRecommendations\" exists in src/services/recommendation-ledger.ts but not inside src/services/recommendation-ledger.ts:623 (recommendation-ledger.writerCitations[0])."
+		},
+		{
+			"rowId": "scopes-family",
+			"file": "src/scope/scope-persistence.ts",
+			"identifier": "claimScopeBindingForChildDurably",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"claimScopeBindingForChildDurably\" exists in src/scope/scope-persistence.ts but not inside :1833 (scopes-family.writerCitations[0])."
+		},
+		{
+			"rowId": "scopes-family",
+			"file": "src/scope/scope-persistence.ts",
+			"identifier": "readScopeFromDisk",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readScopeFromDisk\" exists in src/scope/scope-persistence.ts but not inside src/scope/scope-persistence.ts:2712 (scopes-family.readerCitations[0])."
+		},
+		{
+			"rowId": "scopes-family",
+			"file": "src/scope/scope-persistence.ts",
+			"identifier": "refreshScopeBindingLease",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"refreshScopeBindingLease\" exists in src/scope/scope-persistence.ts but not inside :1756 (scopes-family.writerCitations[0])."
+		},
+		{
+			"rowId": "scopes-family",
+			"file": "src/scope/scope-persistence.ts",
+			"identifier": "replaceExistingScopeDeclaration",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"replaceExistingScopeDeclaration\" exists in src/scope/scope-persistence.ts but not inside :2057 (scopes-family.writerCitations[0])."
+		},
+		{
+			"rowId": "scopes-family",
+			"file": "src/scope/scope-persistence.ts",
+			"identifier": "tombstoneScopeBinding",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"tombstoneScopeBinding\" exists in src/scope/scope-persistence.ts but not inside :1693 (scopes-family.writerCitations[0])."
 		},
 		{
 			"rowId": "session-state-snapshot",
