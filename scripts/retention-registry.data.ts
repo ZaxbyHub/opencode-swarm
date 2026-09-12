@@ -2251,20 +2251,20 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/summaries/manager.ts'],
 		writerCitations: [
-			'src/summaries/manager.ts:71 storeSummary — bunWrite+rename; cleanupSummaries (:284) age-based delete is now wired — the retention sweep is its first production caller (src/retention/sweep.ts:248)',
+			'src/summaries/manager.ts:100 storeSummary — bunWrite+exclusive link install (atomic, no-overwrite; issue #2576); cleanupSummaries (:433) age-based delete is now wired — the retention sweep is its first production caller (src/retention/sweep.ts:248)',
 		],
-		readerCitations: ['src/summaries/manager.ts:149 loadFullOutput — full-file; :253 listSummaries — directory list, newest-first capped at MAX_SUMMARIES_LISTED 500 (:191,:269)'],
+		readerCitations: ['src/summaries/manager.ts:201 loadFullOutput — full-file; :340 listSummaries — directory list, newest-first capped at MAX_SUMMARIES_LISTED 500 (:243,:356)'],
 		schemaVersion: 'summary schema',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
 		writeLimits: {
-			bound: 'summaries.retention_days (default 7) enforced by the retention sweep\'s summaries-retention pass via cleanupSummaries (src/retention/sweep.ts:243-249; src/summaries/manager.ts:284); listSummaries newest-first capped at MAX_SUMMARIES_LISTED 500 (src/summaries/manager.ts:191,269)',
+			bound: 'summaries.retention_days (default 7) enforced by the retention sweep\'s summaries-retention pass via cleanupSummaries (src/retention/sweep.ts:243-249; src/summaries/manager.ts:455); listSummaries newest-first capped at MAX_SUMMARIES_LISTED 500 (src/summaries/manager.ts:243,356)',
 			scope: 'global',
-			citation: 'src/summaries/manager.ts:284; src/retention/sweep.ts:248',
+			citation: 'src/summaries/manager.ts:455; src/retention/sweep.ts:248',
 		},
-		readBound: { pattern: 'indexed', bound: 'per-file reads; directory listing newest-first capped at MAX_SUMMARIES_LISTED 500', sync: false, citation: 'src/summaries/manager.ts:149,253' },
-		lockModel: 'atomic writes; no cross-process lock',
-		crashBehavior: 'temp+rename',
+		readBound: { pattern: 'indexed', bound: 'per-file reads; directory listing newest-first capped at MAX_SUMMARIES_LISTED 500', sync: false, citation: 'src/summaries/manager.ts:201,340' },
+		lockModel: 'atomic exclusive-install writes; no cross-process lock (allocation collision fails typed and reallocates)',
+		crashBehavior: 'temp+link atomic install, no-overwrite',
 		closePolicy: 'untouched — the sweep owns the retention_days horizon',
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
@@ -2273,7 +2273,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'not-a-defect',
 			proof:
-				'The #2483 retention sweep runs the summaries-retention pass on every sweep trigger, calling cleanupSummaries with summaries.retention_days (default 7 — src/retention/sweep.ts:243-249; src/summaries/manager.ts:284): the previously-dead setting is live and files no longer accumulate; reads are newest-first capped at MAX_SUMMARIES_LISTED 500 (src/summaries/manager.ts:191,269).',
+				'The #2483 retention sweep runs the summaries-retention pass on every sweep trigger, calling cleanupSummaries with summaries.retention_days (default 7 — src/retention/sweep.ts:243-249; src/summaries/manager.ts:455): the previously-dead setting is live and files no longer accumulate; reads are newest-first capped at MAX_SUMMARIES_LISTED 500 (src/summaries/manager.ts:243,356).',
 		},
 	},
 	{

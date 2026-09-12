@@ -71,10 +71,7 @@ export {
 	readReceiptsByScopeHash,
 } from './review-receipt';
 export { createSystemEnhancerHook } from './system-enhancer';
-export {
-	createToolSummarizerHook,
-	resetSummaryIdCounter,
-} from './tool-summarizer';
+export { createToolSummarizerHook } from './tool-summarizer';
 export {
 	composeBlockingHandlers,
 	composeHandlers,
