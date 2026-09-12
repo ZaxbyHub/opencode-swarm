@@ -3,12 +3,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { canRunWhileTaskAwaitsCompletion } from '../../../src/hooks/delegation-gate';
+import { executeDeclareScope } from '../../../src/tools/declare-scope';
 import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 describe('issue #2098 completion recovery capabilities', () => {
 	let directory: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		directory = fs.realpathSync(
 			fs.mkdtempSync(
 				path.join(canonicalTmpDir(), 'completion-capabilities-2098-'),
@@ -60,23 +61,19 @@ describe('issue #2098 completion recovery capabilities', () => {
 				],
 			}),
 		);
-		const scopes = path.join(directory, '.swarm', 'scopes');
-		fs.mkdirSync(scopes, { recursive: true });
+		// #2532: declare through the REGISTERED v2 authority — the verdict
+		// resolves the binding store and ignores the legacy v1 projection.
 		for (const [taskId, files] of [
 			['1.1', ['src/a.ts']],
 			['1.2', ['src/b.ts']],
 			['1.3', ['src/a.ts']],
 		] as const) {
-			fs.writeFileSync(
-				path.join(scopes, `scope-${taskId}.json`),
-				JSON.stringify({
-					version: 1,
-					taskId,
-					files,
-					declaredAt: 1,
-					expiresAt: Number.MAX_SAFE_INTEGER,
-				}),
+			const declared = await executeDeclareScope(
+				{ taskId, files: [...files], working_directory: directory },
+				directory,
+				{ sessionID: 'cap-2098-architect', messageID: `m-${taskId}` },
 			);
+			expect(declared.success).toBe(true);
 		}
 	});
 

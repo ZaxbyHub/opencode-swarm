@@ -10,10 +10,28 @@ import {
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import type { Plan } from '../config/plan-schema';
+
+function makePlan(phaseIds: number[], currentPhase?: number): Plan {
+	return {
+		schema_version: '1.0.0',
+		title: 'Preflight Phase Test',
+		swarm: 'test',
+		current_phase: currentPhase,
+		phases: phaseIds.map((id) => ({
+			id,
+			name: `Phase ${id}`,
+			status: 'pending',
+			tasks: [],
+		})),
+	} as Plan;
+}
 
 // Mock loadPlan. handlePreflightCommand imports `loadPlan` directly (there is no
 // _internals seam for it), so a module mock is the only way to control it.
-const mockLoadPlan = mock<() => Promise<{ current_phase?: number } | null>>();
+// #2532: preflight resolves the phase via getCurrentPhase(plan), which requires
+// a full Plan shape (phases included) — the mock must return realistic plans.
+const mockLoadPlan = mock<() => Promise<Plan | null>>();
 
 // Mock the plan manager module BEFORE importing preflight-service so the direct
 // `loadPlan` import inside handlePreflightCommand resolves to our mock.
@@ -76,7 +94,7 @@ describe('handlePreflightCommand phase derivation', () => {
 	});
 
 	test('runPreflight is called with phase 3 when loadPlan returns plan with current_phase = 3', async () => {
-		mockLoadPlan.mockResolvedValueOnce({ current_phase: 3 });
+		mockLoadPlan.mockResolvedValueOnce(makePlan([1, 2, 3], 3));
 		runPreflightSpy.mockResolvedValueOnce(makeReport(3));
 
 		await handlePreflightCommand(tempDir, []);
@@ -98,7 +116,7 @@ describe('handlePreflightCommand phase derivation', () => {
 	});
 
 	test('runPreflight is called with phase 1 when loadPlan returns plan with current_phase = undefined', async () => {
-		mockLoadPlan.mockResolvedValueOnce({});
+		mockLoadPlan.mockResolvedValueOnce(makePlan([1]));
 		runPreflightSpy.mockResolvedValueOnce(makeReport(1));
 
 		await handlePreflightCommand(tempDir, []);

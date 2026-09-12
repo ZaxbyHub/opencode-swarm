@@ -77,6 +77,7 @@ export {
 	type MemorySupersededChain,
 	shouldCompactMemory,
 } from './maintenance';
+export { MemoryMigrationLockError } from './memory-family-migration';
 // #1850 Linked Knowledge 5/5: cohort memory sharing.
 export {
 	invalidateMemoryStoreDirCache,

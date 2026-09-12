@@ -164,10 +164,81 @@ export function findFirstActivePhase(phases: Phase[]): number | undefined {
 }
 
 /**
+ * Whether a phase status is terminal for cursor purposes (issue #2532): the
+ * active-phase cursor must never point at a phase whose work is finished.
+ */
+function isPhaseStatusTerminal(status: PhaseStatus): boolean {
+	return status === 'complete' || status === 'completed' || status === 'closed';
+}
+
+/**
+ * Whether a phase is effectively finished for cursor purposes (#2532).
+ *
+ * Terminal by STATUS, or terminal by TASKS: every task completed/closed.
+ * The task-level check matters for REPLAYED plans — `applyEventToPlan`
+ * applies `task_status_changed` to tasks but does not re-derive the phase
+ * status, so a replayed projection can carry completed tasks inside a stale
+ * `pending` phase; the cursor must still advance off such a phase.
+ */
+function isPhaseEffectivelyTerminal(phase: Phase): boolean {
+	if (isPhaseStatusTerminal(phase.status)) return true;
+	// `tasks` can be absent on in-memory plan shapes that never passed through
+	// PlanSchema (schema defaults it to []); an unknown task list is honestly
+	// "not finished" — and must not throw inside the shared phase resolver.
+	const tasks = phase.tasks ?? [];
+	return (
+		tasks.length > 0 &&
+		tasks.every(
+			(task) => task.status === 'completed' || task.status === 'closed',
+		)
+	);
+}
+
+/**
+ * Resolve the plan's active phase id (issue #2532 / PLAN-4).
+ *
+ * Contract: the stored `current_phase` is authoritative when it points at a
+ * NON-terminal phase (this is what preserves the active phase across plan
+ * revisions); otherwise the cursor derives from phase statuses — the first
+ * non-terminal phase — so a completed (or removed) phase can never hold the
+ * cursor. A fully-terminal plan keeps its last phase id.
+ *
+ * This is the single canonical derivation shared by the persist-side writer
+ * (`normalizeCurrentPhaseInPlace`, applied in `savePlan` /
+ * `closePlanTerminalState`), ledger replay (`reconstructPlanFromEvents`), and
+ * every consumer that must agree on "the current phase" (plan.md header,
+ * summary extractor, preflight, delegation-gate active-phase selection).
+ */
+export function resolveActivePhaseId(plan: Plan): number {
+	const cursor = plan.current_phase;
+	if (cursor !== undefined) {
+		const cursorPhase = plan.phases.find((phase) => phase.id === cursor);
+		if (cursorPhase && !isPhaseEffectivelyTerminal(cursorPhase)) {
+			return cursorPhase.id;
+		}
+	}
+	const firstNonTerminal = plan.phases.find(
+		(phase) => !isPhaseEffectivelyTerminal(phase),
+	);
+	if (firstNonTerminal) return firstNonTerminal.id;
+	return plan.phases[plan.phases.length - 1]?.id ?? 1;
+}
+
+/**
+ * Normalize the stored phase cursor in place (issue #2532 / PLAN-4): the ONE
+ * durable advancing writer applied at every plan-persist funnel. Must run
+ * BEFORE any plan hash is computed so ledger/projection/snapshot surfaces
+ * record the normalized state.
+ */
+export function normalizeCurrentPhaseInPlace(plan: Plan): void {
+	plan.current_phase = resolveActivePhaseId(plan);
+}
+
+/**
  * Get the current phase from a plan, with fallback inference.
  * @param plan - The plan object
  * @returns The current phase number, or inferred value, or 1 as last resort
  */
 export function getCurrentPhase(plan: Plan): number {
-	return plan.current_phase ?? findFirstActivePhase(plan.phases) ?? 1;
+	return resolveActivePhaseId(plan);
 }

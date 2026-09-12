@@ -18,9 +18,17 @@
  * (`handleMemoryLinkCommand`), so a mid-migration failure leaves the worktree
  * in its prior link state and a retry is idempotent.
  *
- * Lock discipline: `proper-lockfile` on the destination cohort dir with a
- * bumped `stale` (30s) for the migration critical section — reused from the
- * knowledge family so there is one source of truth for the lock config.
+ * Lock discipline: `proper-lockfile` on the destination storage dir (cohort
+ * OR local — both directions) with a bumped `stale` (30s) for the migration
+ * critical section — reused from the knowledge family so there is one source
+ * of truth for the lock config. `realpath: false` keeps the lock identity on
+ * the literal path so it is the SAME lock the local JSONL provider takes on
+ * this directory (PRR-U1): symlinked roots (e.g. macOS /var → /private/var)
+ * must not split the exclusion into two identities.
+ * Admission is fail-closed (#2577): if the destination lock cannot be
+ * acquired (a legitimate concurrent writer holds it, or acquisition fails for
+ * a storage reason), the migration throws a typed
+ * {@link MemoryMigrationLockError} and never runs unlocked.
  *
  * No writes happen here on the plugin-init path (invariant 1). Called only
  * from the `/swarm memory link` / `/swarm memory unlink` command handlers.
@@ -29,7 +37,7 @@
 import { copyFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { mkdir, rename } from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
+import lockfileImport from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import {
 	MIGRATION_LOCK_RETRIES,
@@ -44,6 +52,67 @@ import {
 } from './outcome-events.js';
 import type { VettedMemoryRoot } from './storage-root.js';
 import { isCohortRoot, rootStoragePath } from './storage-root.js';
+
+/**
+ * Minimal typing for the async `proper-lockfile` API this engine uses,
+ * exposed through {@link _internals} so tests can classify acquisition
+ * failures deterministically (same DI pattern as `src/full-auto/state.ts`).
+ */
+type MigrationLockFile = {
+	lock: typeof import('proper-lockfile')['lock'];
+};
+const lockfile = lockfileImport as unknown as MigrationLockFile;
+
+/** Failure category for destination-lock admission (#2577, #2575 contract). */
+export type MemoryMigrationLockErrorCategory = 'contention' | 'storage';
+
+/**
+ * Typed failure for acquiring the destination migration lock. Thrown BEFORE
+ * the merge loop opens, so no destination or source write ever happens on a
+ * failed admission. Mirrors `FullAutoStateLockError` in
+ * `src/full-auto/state.ts` (#2575): stable category + code, cause preserved
+ * for diagnostics, and messages that never echo absolute host paths.
+ */
+export class MemoryMigrationLockError extends Error {
+	readonly category: MemoryMigrationLockErrorCategory;
+	readonly cause: unknown;
+	readonly code: `MEMORY_MIGRATION_LOCK_${Uppercase<MemoryMigrationLockErrorCategory>}`;
+
+	constructor(
+		category: MemoryMigrationLockErrorCategory,
+		message: string,
+		cause?: unknown,
+	) {
+		super(message);
+		this.name = 'MemoryMigrationLockError';
+		this.category = category;
+		this.code =
+			`MEMORY_MIGRATION_LOCK_${category.toUpperCase()}` as MemoryMigrationLockError['code'];
+		this.cause = cause;
+	}
+}
+
+function lockErrorCode(error: unknown): string | undefined {
+	return typeof error === 'object' && error !== null && 'code' in error
+		? String((error as { code?: unknown }).code)
+		: undefined;
+}
+
+function makeAdmissionError(cause: unknown): MemoryMigrationLockError {
+	if (lockErrorCode(cause) === 'ELOCKED') {
+		return new MemoryMigrationLockError(
+			'contention',
+			'memory-family-migration: destination lock contention after bounded retries; retry the link or unlink command',
+			cause,
+		);
+	}
+	const code = lockErrorCode(cause);
+	return new MemoryMigrationLockError(
+		'storage',
+		`memory-family-migration: destination lock acquisition failed${code ? ` (${code})` : ''}`,
+		cause,
+	);
+}
 
 /**
  * #1850 (H-008): max number of source-DB backups retained in
@@ -425,20 +494,28 @@ export async function migrateMemoryFamily(
 
 	// #1850 (reviewer critical fix): the destination may be EITHER a cohort
 	// root (link direction: local → cohort) OR a local root (unlink direction:
-	// cohort → local). Both are valid. We lock the destination directory when
-	// possible; local roots are single-writer by construction (no cross-process
-	// contender), so locking is best-effort for them. The source is always read
+	// cohort → local). Both are valid and both are lockable — the local JSONL
+	// provider locks the same storage directory during normal writes, so local
+	// roots have real cross-process contenders too. The source is always read
 	// under its own brief snapshot.
 	await mkdir(destStoragePath, { recursive: true });
 	let destRelease: (() => Promise<void>) | null = null;
 	try {
-		destRelease = await lockfile.lock(destStoragePath, {
+		destRelease = await _internals.lockfile.lock(destStoragePath, {
 			...MIGRATION_LOCK_RETRIES,
 			stale: MIGRATION_LOCK_STALE_MS,
+			// Same identity as the JSONL provider's lock on this directory
+			// (which passes realpath:false) so the exclusion holds even when
+			// the storage path contains symlink components (PRR-U1).
+			realpath: false,
 		});
-	} catch {
-		// Local roots or missing dirs may not be lockable; proceed unlocked.
-		// The destination write is still atomic (temp + rename per member).
+	} catch (error) {
+		// #2577 (FUNCTIONAL-6): admission is fail-closed. This throw stays
+		// syntactically INSIDE this catch - before the merge-loop try below
+		// opens and with destRelease still null - so a held live destination
+		// lock can never be bypassed and the destination/source are preserved
+		// on failed admission. Do not relocate it into the merge loop.
+		throw makeAdmissionError(error);
 	}
 
 	const perMember: Array<{
@@ -550,4 +627,5 @@ export const _internals = {
 	stageSqliteDb,
 	mergeStagedSqlite,
 	countRowsSafe,
+	lockfile,
 };

@@ -1,31 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { MAX_PARALLEL_VERDICT_TASKS } from '../../../src/plan/parallel-verdict.js';
+import { executeDeclareScope } from '../../../src/tools/declare-scope.js';
 import {
 	executePlanConflictCheck,
 	plan_conflict_check,
 	plan_conflict_check_args,
 } from '../../../src/tools/plan-conflict-check.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tempDir: string;
 let scopesDir: string;
 let swarmDir: string;
-
-function writeScope(taskId: string, files: string[]): void {
-	fs.writeFileSync(
-		path.join(scopesDir, `scope-${taskId}.json`),
-		JSON.stringify({
-			version: 1,
-			taskId,
-			files,
-			declaredAt: 1,
-			expiresAt: Number.MAX_SAFE_INTEGER,
-		}),
-		'utf-8',
-	);
-}
 
 function writePlan(taskIds: string[]): void {
 	// Minimal plan that passes PlanSchema.parse (schema_version '1.0.0', title,
@@ -54,8 +41,22 @@ function writePlan(taskIds: string[]): void {
 	);
 }
 
+/**
+ * #2532: declare through the REGISTERED v2 authority (declare_scope) against
+ * the plan fixture — the tool reads the same binding store, never the legacy
+ * v1 `scope-<taskId>.json` projection.
+ */
+async function declareScope(taskId: string, files: string[]): Promise<void> {
+	const result = await executeDeclareScope(
+		{ taskId, files, working_directory: tempDir },
+		tempDir,
+		{ sessionID: 'plan-conflict-check-test', messageID: `m-${taskId}` },
+	);
+	expect(result.success).toBe(true);
+}
+
 beforeEach(() => {
-	tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-conflict-check-test-'));
+	tempDir = canonicalMkdtemp('plan-conflict-check-test-');
 	swarmDir = path.join(tempDir, '.swarm');
 	scopesDir = path.join(swarmDir, 'scopes');
 	fs.mkdirSync(scopesDir, { recursive: true });
@@ -71,8 +72,9 @@ afterEach(() => {
 
 describe('executePlanConflictCheck — verdict delegation', () => {
 	test('two disjoint tasks → all_disjoint', async () => {
-		writeScope('1.1', ['src/a.ts']);
-		writeScope('1.2', ['src/b.ts']);
+		writePlan(['1.1', '1.2']);
+		await declareScope('1.1', ['src/a.ts']);
+		await declareScope('1.2', ['src/b.ts']);
 
 		const result = await executePlanConflictCheck(
 			{ task_ids: ['1.1', '1.2'] },
@@ -85,8 +87,9 @@ describe('executePlanConflictCheck — verdict delegation', () => {
 	});
 
 	test('two overlapping tasks → conflicts_present', async () => {
-		writeScope('2.1', ['src/shared.ts']);
-		writeScope('2.2', ['src/shared.ts']);
+		writePlan(['2.1', '2.2']);
+		await declareScope('2.1', ['src/shared.ts']);
+		await declareScope('2.2', ['src/shared.ts']);
 
 		const result = await executePlanConflictCheck(
 			{ task_ids: ['2.1', '2.2'] },
@@ -97,7 +100,8 @@ describe('executePlanConflictCheck — verdict delegation', () => {
 	});
 
 	test('unknown scope → unknown_scopes', async () => {
-		writeScope('3.1', ['src/a.ts']);
+		writePlan(['3.1', '3.2']);
+		await declareScope('3.1', ['src/a.ts']);
 		// 3.2 missing
 
 		const result = await executePlanConflictCheck(
@@ -110,9 +114,10 @@ describe('executePlanConflictCheck — verdict delegation', () => {
 	});
 
 	test('three mixed tasks → correct matrix', async () => {
-		writeScope('4.1', ['src/a.ts']);
-		writeScope('4.2', ['src/b.ts', 'src/shared.ts']);
-		writeScope('4.3', ['src/shared.ts']);
+		writePlan(['4.1', '4.2', '4.3']);
+		await declareScope('4.1', ['src/a.ts']);
+		await declareScope('4.2', ['src/b.ts', 'src/shared.ts']);
+		await declareScope('4.3', ['src/shared.ts']);
 
 		const result = await executePlanConflictCheck(
 			{ task_ids: ['4.1', '4.2', '4.3'] },
@@ -128,8 +133,8 @@ describe('executePlanConflictCheck — verdict delegation', () => {
 describe('executePlanConflictCheck — task-id validation against plan', () => {
 	test('surfaces unknown_to_plan when plan loaded and task id absent', async () => {
 		writePlan(['5.1', '5.2']);
-		writeScope('5.1', ['src/a.ts']);
-		writeScope('5.2', ['src/b.ts']);
+		await declareScope('5.1', ['src/a.ts']);
+		await declareScope('5.2', ['src/b.ts']);
 
 		const result = await executePlanConflictCheck(
 			{ task_ids: ['5.1', '5.9'] }, // 5.9 not in plan
@@ -140,24 +145,25 @@ describe('executePlanConflictCheck — task-id validation against plan', () => {
 		expect(result.unknown_to_plan).toEqual(['5.9']);
 	});
 
-	test('plan_loaded=false when plan.json absent (still runs on scope files)', async () => {
-		writeScope('6.1', ['src/a.ts']);
-		writeScope('6.2', ['src/b.ts']);
-
+	test('plan_loaded=false when plan.json absent → verdict fails closed (#2532)', async () => {
+		// No plan.json: identity matching is impossible, so every task must
+		// resolve unknown (fail-closed) — the tool no longer certifies
+		// disjointness from scope artifacts without a plan identity.
 		const result = await executePlanConflictCheck(
 			{ task_ids: ['6.1', '6.2'] },
 			tempDir,
 		);
 
 		expect(result.plan_loaded).toBe(false);
-		expect(result.verdict).toBe('all_disjoint');
+		expect(result.verdict).toBe('unknown_scopes');
 	});
 });
 
 describe('executePlanConflictCheck — read-only guarantee (#1656 acceptance)', () => {
 	test('writes nothing to the source tree or .swarm/', async () => {
-		writeScope('7.1', ['src/a.ts']);
-		writeScope('7.2', ['src/b.ts']);
+		writePlan(['7.1', '7.2']);
+		await declareScope('7.1', ['src/a.ts']);
+		await declareScope('7.2', ['src/b.ts']);
 
 		const before = walkTree(tempDir);
 		await executePlanConflictCheck({ task_ids: ['7.1', '7.2'] }, tempDir);
@@ -169,8 +175,9 @@ describe('executePlanConflictCheck — read-only guarantee (#1656 acceptance)', 
 
 describe('executePlanConflictCheck — co-change opt-in', () => {
 	test('use_cochange defaults to false (no git invocation, stays fast)', async () => {
-		writeScope('8.1', ['src/a.ts']);
-		writeScope('8.2', ['src/b.ts']);
+		writePlan(['8.1', '8.2']);
+		await declareScope('8.1', ['src/a.ts']);
+		await declareScope('8.2', ['src/b.ts']);
 
 		const result = await executePlanConflictCheck(
 			{ task_ids: ['8.1', '8.2'] },
@@ -183,10 +190,9 @@ describe('executePlanConflictCheck — co-change opt-in', () => {
 	});
 
 	test('use_cochange=true falls back to path-only when git unavailable (signal-absent)', async () => {
-		// tempDir is not a git repo → getCoChangePairs returns []. used_cochange
-		// reflects whether co-change data was obtained.
-		writeScope('9.1', ['src/a.ts']);
-		writeScope('9.2', ['src/b.ts']);
+		writePlan(['9.1', '9.2']);
+		await declareScope('9.1', ['src/a.ts']);
+		await declareScope('9.2', ['src/b.ts']);
 
 		const result = await executePlanConflictCheck(
 			{ task_ids: ['9.1', '9.2'], use_cochange: true },

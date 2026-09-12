@@ -36,6 +36,11 @@ const plan: Plan = {
 	schema_version: '1.0.0',
 	title: 'Worktree session root',
 	swarm: 'test',
+	// #2532: the binding identity (planStructureHash) includes current_phase,
+	// and savePlan normalizes the cursor when materializing the lane plan.
+	// Carrying the normalized cursor (phase 1 is non-terminal) keeps the
+	// minted binding's hash equal to the persisted lane projection's hash.
+	current_phase: 1,
 	phases: [
 		{
 			id: 1,

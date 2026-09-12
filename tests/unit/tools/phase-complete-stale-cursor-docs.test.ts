@@ -19,11 +19,13 @@ import { createSafeTestDir } from '../../helpers/safe-test-dir';
  * Tool-level acceptance check for the issue #2702 cursor-mistag fix
  * (fix contract points 1 and 3).
  *
- * The plan cursor (`current_phase: 1`) was authored once at plan creation and
- * never advanced, yet phase 3 is the phase being completed. The docs Task
- * dispatch stamps its durable receipt with the cursor value (1), so the
- * `required_agents` gate lookup for phase 3 misses it and phase_complete is
- * permanently blocked with REQUIRED_AGENTS_MISSING: docs.
+ * #2532-adjusted fixture: the receipt stamps the RESOLVED active phase, so the
+ * mistag shape needs the resolved cursor to LAG the completing phase — phase 1
+ * is still pending (resolved cursor 1) while phase 3 is the phase being
+ * completed out of order. The docs Task dispatch stamps its durable receipt
+ * with the cursor value (1); the `required_agents` gate for phase 3 accepts it
+ * through the cursor tolerance and phase_complete succeeds; the success path
+ * then re-stamps the receipt to the completed phase.
  *
  * Modeled on tests/unit/tools/phase-complete-docs-participation-recovery.test.ts.
  */
@@ -40,12 +42,12 @@ function writeFixture(directory: string): Plan {
 			{
 				id: 1,
 				name: 'Foundation',
-				status: 'complete',
+				status: 'pending',
 				tasks: [
 					{
 						id: '1.1',
 						phase: 1,
-						status: 'completed',
+						status: 'pending',
 						size: 'small',
 						description: 'Foundation work',
 						depends: [],
