@@ -96,12 +96,16 @@ export function buildInvariantsOracleExpected(): {
 		...SIX_CHECK_BLOCK,
 		'=== Check 7: quarantine entries carry OWNER + EXPIRY metadata (issue #2477) ===',
 		'All active quarantine entries carry OWNER + EXPIRY metadata.',
+		'=== Check 8: family-migration destination lock admission fails closed (issue #2577) ===',
+		'NOTE: src/memory/memory-family-migration.ts not found - Check 8 skipped for this path.',
+		'NOTE: src/knowledge/family-migration.ts not found - Check 8 skipped for this path.',
 		'',
 		'=== Summary ===',
 		'Checks run: 1 (subprocess timeout, advisory) | 2 (process.cwd ban) |',
 		'            3 (mock.module allowlist) | 4 (allowlist growth ratchet) |',
 		'            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet) |',
-		'            7 (quarantine OWNER/EXPIRY metadata)',
+		'            7 (quarantine OWNER/EXPIRY metadata) |',
+		'            8 (family-migration destination lock admission)',
 		'1 invariant violation(s) found.',
 	].join('\n');
 	const legacyExpected = [

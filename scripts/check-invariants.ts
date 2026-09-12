@@ -974,6 +974,113 @@ export function checkRawAdvisoryPush(repoRoot: string): CheckResult {
 	return { messages, violations: 0 };
 }
 
+
+/**
+ * Check 8 (issue #2577): the family-migration engines' DESTINATION lock
+ * acquisition must fail closed. A catch that swallows the acquisition failure
+ * (the FUNCTIONAL-6 defect: proceed unlocked) lets the migration's
+ * read/merge/write race a legitimate concurrent writer holding the live
+ * destination lock. The check locates each `destRelease = await ...lock(`
+ * acquire, finds its adjacent catch, and requires a `throw` inside the catch
+ * body - matching both engines' fail-closed shape (typed or wrapped rethrow).
+ */
+export function checkMigrationLockAdmission(repoRoot: string): CheckResult {
+	const messages = [
+		'=== Check 8: family-migration destination lock admission fails closed (issue #2577) ===',
+	];
+	let violations = 0;
+	const engines = [
+		'src/memory/memory-family-migration.ts',
+		'src/knowledge/family-migration.ts',
+	];
+	const missingEngines: string[] = [];
+	const contents = new Map<string, string>();
+	for (const rel of engines) {
+		const file = path.join(repoRoot, ...rel.split('/'));
+		try {
+			contents.set(rel, fs.readFileSync(file, 'utf8'));
+		} catch {
+			missingEngines.push(rel);
+		}
+	}
+	if (missingEngines.length === engines.length) {
+		// No family-migration surface at all (fixture trees, subsystem-free
+		// repos): nothing to scan. Exactly ONE missing engine, however, is
+		// drift - a rename or move must not silently silence its half.
+		for (const rel of missingEngines) {
+			messages.push(`NOTE: ${rel} not found - Check 8 skipped for this path.`);
+		}
+		return { messages, violations };
+	}
+	for (const rel of missingEngines) {
+		messages.push(
+			`ERROR: ${rel} not found - Check 8 cannot verify destination lock admission; re-anchor Check 8.`,
+		);
+		violations++;
+	}
+	for (const rel of engines) {
+		const content = contents.get(rel);
+		if (content === undefined) continue;
+		// Normalize CRLF so the strict catch-close match below cannot be defeated
+		// by a Windows autocrlf working copy (reviewer finding: a trailing CR made
+		// the scanner walk past a swallowing catch).
+		const lines = content.replace(/\r\n/g, '\n').split('\n');
+		let acquireMatches = 0;
+		for (let i = 0; i < lines.length; i++) {
+			if (!/destRelease\s*=\s*await\s/.test(lines[i])) continue;
+			if (!/\.lock\(/.test(lines[i]) && !/\.lock\(/.test(lines[i + 1] ?? '')) {
+				continue;
+			}
+			acquireMatches++;
+			let catchIdx = -1;
+			for (let j = i + 1; j < Math.min(i + 12, lines.length); j++) {
+				if (/^\s*}\s*catch/.test(lines[j])) {
+					catchIdx = j;
+					break;
+				}
+			}
+			if (catchIdx === -1) {
+				messages.push(
+					`ERROR: ${rel}:${i + 1} destination lock acquire has no adjacent catch - re-anchor Check 8.`,
+				);
+				violations++;
+				continue;
+			}
+			const catchIndent = lines[catchIdx].match(/^\s*/)?.[0] ?? '';
+			let sawThrow = false;
+			for (let j = catchIdx + 1; j < lines.length; j++) {
+				if (lines[j] === `${catchIndent}}`) break;
+				// Comment lines never satisfy the fail-closed requirement: the
+				// memory engine's own catch comment says "This throw stays", and
+				// counting that word would mask a swallow mutation.
+				const body = lines[j].trimStart();
+				if (body.startsWith('//') || body.startsWith('*')) continue;
+				if (/\bthrow\b/.test(lines[j])) {
+					sawThrow = true;
+					break;
+				}
+			}
+			if (!sawThrow) {
+				messages.push(
+					`ERROR: ${rel}:${catchIdx + 1} destination lock acquisition failure is swallowed - a held live destination lock must fail closed (issue #2577, FUNCTIONAL-6).`,
+				);
+				violations++;
+			} else {
+				messages.push(`OK: ${rel}:${i + 1} destination lock admission fails closed.`);
+			}
+		}
+		if (acquireMatches === 0) {
+			// Zero recognizable acquire sites in a PRESENT engine file means the
+			// scan anchor drifted (e.g. the release variable was renamed): the
+			// guardrail would be passing vacuously, so fail closed instead.
+			messages.push(
+				`ERROR: ${rel} contains no recognizable destination lock acquire (destRelease = await ...lock()) - re-anchor Check 8.`,
+			);
+			violations++;
+		}
+	}
+	return { messages, violations };
+}
 /**
  * Check 7 (issue #2477): every ACTIVE quarantine entry carries structured
  * OWNER and EXPIRY metadata in its comment block. Grammar:
@@ -1119,6 +1226,7 @@ export async function main(startDir: string = process.cwd()): Promise<number> {
 			violations: advisory.violations,
 		},
 		checkQuarantineMetadata(repoRoot),
+		checkMigrationLockAdmission(repoRoot),
 	];
 
 	for (const output of outputs) {
@@ -1140,7 +1248,12 @@ export async function main(startDir: string = process.cwd()): Promise<number> {
 	console.log(
 		'            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet) |',
 	);
-	console.log('            7 (quarantine OWNER/EXPIRY metadata)');
+	console.log(
+		'            7 (quarantine OWNER/EXPIRY metadata) |',
+	);
+	console.log(
+		'            8 (family-migration destination lock admission)',
+	);
 	if (violations > 0) {
 		console.log(`${violations} invariant violation(s) found.`);
 		return 1;

@@ -62,10 +62,12 @@ export interface AcknowledgedRemovals {
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import {
+	normalizeCurrentPhaseInPlace,
 	type Phase,
 	type Plan,
 	PlanSchema,
 	type RuntimePlan,
+	resolveActivePhaseId,
 	type Task,
 	type TaskStatus,
 } from '../config/plan-schema';
@@ -82,7 +84,6 @@ import { recordTaskAttempt } from '../services/run-memory.js';
 import { emit } from '../telemetry.js';
 import { isEpicModeActiveForProject } from '../turbo/epic/state.js';
 import { commitTaskCompletion } from '../turbo/epic/task-commit.js';
-import { readTaskScopes } from '../turbo/lean/conflicts.js';
 import type { SpecStaleDetectedEvent } from '../types/events';
 import { criticalWarn, warn } from '../utils';
 import { bunHash, bunWrite } from '../utils/bun-compat';
@@ -181,7 +182,6 @@ export const _internals: {
 	regeneratePlanMarkdown: typeof regeneratePlanMarkdown;
 	isGitRepo: typeof isGitRepo;
 	isEpicModeActiveForProject: typeof isEpicModeActiveForProject;
-	readTaskScopes: typeof readTaskScopes;
 	commitTaskCompletion: typeof commitTaskCompletion;
 	getWorktreeMergeFailure: typeof getWorktreeMergeFailure;
 	recordTaskAttempt: typeof recordTaskAttempt;
@@ -198,7 +198,8 @@ export const _internals: {
 	regeneratePlanMarkdown,
 	isGitRepo,
 	isEpicModeActiveForProject,
-	readTaskScopes,
+	// (#2532) readTaskScopes seam removed: the Rule 2 scope lookup now resolves
+	// from the authoritative v2 binding store (see readDeclaredScopeFilesFromBindings).
 	commitTaskCompletion,
 	getWorktreeMergeFailure,
 	recordTaskAttempt,
@@ -1633,6 +1634,14 @@ export async function savePlan(
 	// Ensures phase status is always consistent even when architect calls save_plan directly.
 	derivePhaseStatusesInPlace(validated);
 
+	// #2532 (PLAN-4): normalize the phase cursor at the single durable writer,
+	// BEFORE any hash/event/snapshot is derived from `validated`, so every
+	// surface (ledger events, plan_hash_after, plan.json, plan.md, snapshots)
+	// records the same advanced state. Preserves a cursor that already points
+	// at a non-terminal phase (mid-phase revisions); advances it off a
+	// completed/removed phase; keeps the last phase id for terminal plans.
+	normalizeCurrentPhaseInPlace(validated);
+
 	// LEDGER-FIRST: Append task_updated events before writing projections.
 	// The ledger is the source of truth; plan.json is a projection.
 	// If the process crashes between ledger append and plan.json write, the
@@ -2313,6 +2322,13 @@ export async function closePlanTerminalState(
 	// written for plans that will never be persisted to disk.
 	const validated = PlanSchema.parse(plan);
 
+	// Step 1b (#2532 / PLAN-4): this funnel persists plan.json DIRECTLY (not
+	// via savePlan), so the same single-writer cursor normalization must run
+	// here too — BEFORE the hash, the ledger events, and the terminal snapshot
+	// all derive from `validated` — or a closed plan's persisted cursor would
+	// diverge from what replay-side normalization derives.
+	normalizeCurrentPhaseInPlace(validated);
+
 	// Step 2: Compute hash from the validated plan — all subsequent ledger
 	// events carry this hash so that replay can verify state integrity.
 	const hashAfter = computePlanLedgerHash(validated);
@@ -2681,16 +2697,38 @@ export async function updateTaskStatus(
 							break;
 						}
 					}
-					// Scope source: `.swarm/scopes/scope-<id>.json`, written
-					// by `declare_scope` at task dispatch. We do NOT fall
-					// back to the plan-ledger's `files_touched` field — the
-					// ledger replay path in `loadPlan` overrides savePlan
-					// mutations, making that source unreliable. When no
-					// scope file exists, `commitTaskCompletion` produces a
-					// marker-only `--allow-empty` commit — preserving Rule 3
-					// evidence without sweeping in any sibling lane's
-					// working-tree changes.
-					const canonicalScope = _internals.readTaskScopes(directory, taskId);
+					// Scope source (#2532): the authoritative v2 binding store —
+					// the same source `declare_scope` writes — resolved through
+					// `readDeclaredScopeFilesFromBindings`. The legacy v1
+					// `.swarm/scopes/scope-<id>.json` projection is NOT consulted:
+					// no production code writes it in the project root (its one
+					// writer targets lane worktrees), so reading it here made
+					// every Rule 2 auto-commit marker-only. Identity note: the
+					// lookup uses the in-memory `updatedPlan`, whose structure
+					// hash is exactly the identity the completing task's binding
+					// was declared against (task-status completion is
+					// hash-excluded, and savePlan's cursor normalization happens
+					// on its own validated clone). We do NOT fall back to the
+					// plan-ledger's `files_touched` field — the ledger replay
+					// path in `loadPlan` overrides savePlan mutations, making
+					// that source unreliable. When no live binding matches,
+					// `commitTaskCompletion` produces a marker-only
+					// `--allow-empty` commit — preserving Rule 3 evidence
+					// without sweeping in any sibling lane's working-tree
+					// changes.
+					// Lazy dynamic import (deliberately NOT a static edge): a static
+					// import of scope-persistence pulls the db/index -> global-db ->
+					// knowledge-store chain into every plan/manager graph, which
+					// breaks test modules that mock knowledge-store with a
+					// non-spread explicit object (bun link-time SyntaxError).
+					const { readDeclaredScopeFilesFromBindings } = await import(
+						'../scope/scope-persistence.js'
+					);
+					const canonicalScope = readDeclaredScopeFilesFromBindings({
+						directory,
+						taskId,
+						plan: updatedPlan,
+					});
 					await _internals.commitTaskCompletion(
 						directory,
 						taskId,
@@ -2740,9 +2778,15 @@ export function derivePlanMarkdown(plan: Plan): string {
 	};
 
 	const now = new Date().toISOString();
-	const currentPhase = plan.current_phase ?? 1;
+	// #2532: canonical active-phase resolution (stored cursor when valid, else
+	// first non-terminal phase) — and a phase-ID lookup, not the legacy
+	// array-index assumption (phase ids are not guaranteed to be 1..N).
+	const currentPhase = resolveActivePhaseId(plan);
+	const currentPhaseObject = plan.phases.find(
+		(phase) => phase.id === currentPhase,
+	);
 	const phaseStatus =
-		statusMap[plan.phases[currentPhase - 1]?.status] || 'PENDING';
+		statusMap[currentPhaseObject?.status ?? 'pending'] || 'PENDING';
 
 	let markdown = `# ${plan.title}\nSwarm: ${plan.swarm}\nPhase: ${currentPhase} [${phaseStatus}] | Updated: ${now}\n`;
 
@@ -2810,7 +2854,7 @@ export function derivePlanMarkdown(plan: Plan): string {
 
 			// Mark as CURRENT if it's the first in_progress task in current phase
 			if (
-				phase.id === plan.current_phase &&
+				phase.id === currentPhase &&
 				task.status === 'in_progress' &&
 				!currentTaskMarked
 			) {
@@ -2850,7 +2894,7 @@ export function getCurrentTaskId(
 	plan: Plan | null | undefined,
 ): string | undefined {
 	if (!plan) return undefined;
-	const currentPhase = plan.current_phase ?? 1;
+	const currentPhase = resolveActivePhaseId(plan);
 	const phase = plan.phases.find((p) => p.id === currentPhase);
 	if (!phase) return undefined;
 	const sortedTasks = [...phase.tasks].sort((a, b) =>

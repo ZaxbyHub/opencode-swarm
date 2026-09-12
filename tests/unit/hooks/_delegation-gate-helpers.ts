@@ -200,22 +200,27 @@ export function getPrimaryText(messages: {
  *
  * Each task gets a single unique file (`src/<id-sanitized>.ts`) so any two tasks
  * are path-disjoint by construction.
+ *
+ * #2532: scopes are declared through the REGISTERED declare_scope tool — the
+ * gate's verdict resolves the authoritative v2 binding store and ignores the
+ * legacy v1 `scope-<taskId>.json` projection entirely.
  */
-export function writeDisjointScopes(dir: string, taskIds: string[]): void {
-	const scopesDir = path.join(dir, '.swarm', 'scopes');
-	fs.mkdirSync(scopesDir, { recursive: true });
+export async function writeDisjointScopes(
+	dir: string,
+	taskIds: string[],
+): Promise<void> {
+	const { executeDeclareScope } = await import(
+		'../../../src/tools/declare-scope.js'
+	);
 	for (const id of taskIds) {
 		const safe = id.replace(/[^a-zA-Z0-9._-]/g, '_');
-		fs.writeFileSync(
-			path.join(scopesDir, `scope-${id}.json`),
-			JSON.stringify({
-				version: 1,
-				taskId: id,
-				files: [`src/${safe}.ts`],
-				declaredAt: 1,
-				expiresAt: Number.MAX_SAFE_INTEGER,
-			}),
-			'utf-8',
+		const result = await executeDeclareScope(
+			{ taskId: id, files: [`src/${safe}.ts`], working_directory: dir },
+			dir,
+			{ sessionID: 'helper-architect', messageID: `m-${id}` },
 		);
+		if (!result.success) {
+			throw new Error(`declare_scope failed for ${id}: ${result.message}`);
+		}
 	}
 }

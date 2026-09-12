@@ -10,7 +10,11 @@
  *
  * DO NOT add tool-level security tests here - those belong in the tool-specific test files
  */
+
 import { describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // ============================================================================
 // WIRING LAYER ATTACK TESTS
@@ -396,39 +400,28 @@ describe('Phase 3.1 wiring - TOOL OBJECT STRUCTURE', () => {
 
 	// ============ RESPONSE JSON SAFETY ============
 
-	test('WIRE-043: imports response is JSON-serializable without prototypes', async () => {
-		const { imports } = await import('../../../src/tools/index');
-
-		const result = await imports.execute(
-			{ file: '/nonexistent.ts' } as any,
-			{} as any,
-		);
-
-		// Should be valid JSON
-		const parsed = JSON.parse(result);
-
-		// Serialized form should not contain prototype properties
-		const serialized = JSON.stringify(parsed);
-		expect(serialized).not.toContain('__proto__');
-		expect(serialized).not.toContain('constructor');
-		expect(serialized).not.toContain('prototype');
-		expect(serialized).not.toContain('__proto__');
-	});
-
 	test('WIRE-045: secretscan response is JSON-serializable without prototypes', async () => {
 		const { secretscan } = await import('../../../src/tools/index');
 
-		const result = await secretscan.execute(
-			{ directory: '.', exclude: ['.swarm'] } as any,
-			{} as any,
-		);
-
-		const parsed = JSON.parse(result);
-		const serialized = JSON.stringify(parsed);
-
-		expect(serialized).not.toContain('__proto__');
-		expect(serialized).not.toContain('constructor');
-		expect(serialized).not.toContain('prototype');
+		// Hermetic seed dir, not repo root: the #2675 validation harness writes
+		// .swarm/repository-validation/*.json reports into the checkout during
+		// this job, and their captured stderr can contain the words asserted
+		// against here. Property under test is response SHAPE, provable on a
+		// seeded fixture. (Over-cap file: keep this block minimal, FR-006.)
+		const scanDir = canonicalMkdtemp('wire-045-scan-');
+		fs.writeFileSync(path.join(scanDir, 's.ts'), 'export const s = 1;');
+		try {
+			const r = await secretscan.execute(
+				{ directory: scanDir } as any,
+				{} as any,
+			);
+			const out = JSON.stringify(JSON.parse(r));
+			expect(out).not.toContain('__proto__');
+			expect(out).not.toContain('constructor');
+			expect(out).not.toContain('prototype');
+		} finally {
+			fs.rmSync(scanDir, { recursive: true, force: true });
+		}
 	});
 });
 

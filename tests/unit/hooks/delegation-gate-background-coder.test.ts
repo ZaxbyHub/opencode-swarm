@@ -18,10 +18,10 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { executeDeclareScope } from '../../../src/tools/declare-scope';
 import { canonicalRootKey } from '../../../src/utils/canonical-root';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
-import { writeDisjointScopes } from './_delegation-gate-helpers';
 
 function git(directory: string, args: string[]): void {
 	const result = spawnSync('git', ['-C', directory, ...args], {
@@ -297,8 +297,6 @@ describe('background coder Stage A provenance', () => {
 				},
 			},
 		);
-		// #1674 v8: scope files required for the inline parallel verdict check
-		writeDisjointScopes(directory, ['1.1', '1.2', '1.3']);
 		const session = ensureAgentSession('parent', 'architect', directory);
 		const hook = createDelegationGateHook(config, directory);
 		const fileByTask = new Map([
@@ -306,6 +304,18 @@ describe('background coder Stage A provenance', () => {
 			['1.2', 'src/two.ts'],
 			['1.3', 'src/three.ts'],
 		]);
+		// #1674 v8 + #2532: v2 declared scopes required for the inline
+		// parallel verdict check — declared with the SAME files the plan's
+		// files_touched and the dispatch FILE directives use, so the coder's
+		// scope preflight sees one consistent authority per task.
+		for (const [taskId, file] of fileByTask) {
+			const declared = await executeDeclareScope(
+				{ taskId, files: [file], working_directory: directory },
+				directory,
+				{ sessionID: 'parent', messageID: `m-${taskId}` },
+			);
+			expect(declared.success).toBe(true);
+		}
 		const launch = async (taskId: string, ordinal: number): Promise<void> => {
 			const args = {
 				subagent_type: 'coder',

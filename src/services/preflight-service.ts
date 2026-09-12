@@ -15,6 +15,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { getCurrentPhase } from '../config/plan-schema';
 import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js';
 import {
 	checkRequirementCoverage,
@@ -1222,7 +1223,8 @@ export async function handlePreflightCommand(
 	_args: string[],
 ): Promise<string> {
 	const plan = await loadPlan(directory);
-	const phase = plan?.current_phase ?? 1;
+	// #2532: canonical active-phase resolution for the preflight consumer.
+	const phase = plan ? getCurrentPhase(plan) : 1;
 	const report = await _internals.runPreflight(directory, phase);
 	return _internals.formatPreflightMarkdown(report);
 }

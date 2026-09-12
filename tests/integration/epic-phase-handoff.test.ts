@@ -31,6 +31,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../../src/config/plan-schema';
 import { savePlan, updateTaskStatus } from '../../src/plan/manager';
+import { executeDeclareScope } from '../../src/tools/declare-scope';
 import { executeEpicPlanWaves } from '../../src/tools/epic-plan-waves';
 import { executeEpicDecidePhase } from '../../src/tools/epic-run-phase';
 import { enableEpicMode } from '../../src/turbo/epic/state';
@@ -115,6 +116,28 @@ function writeScopeFile(dir: string, taskId: string, files: string[]): void {
 	);
 }
 
+/**
+ * #2532 (PARALLEL-4): Rule 2's scope-bounded staging resolves the completing
+ * task's scope from the authoritative v2 binding store (what `declare_scope`
+ * writes), never from the legacy v1 `.swarm/scopes/scope-<id>.json`
+ * projection. Declare through the registered tool so the completion commit
+ * stages the declared files.
+ */
+async function declareScope(
+	dir: string,
+	taskId: string,
+	files: string[],
+): Promise<void> {
+	const declared = await executeDeclareScope(
+		{ taskId, files, working_directory: dir },
+		dir,
+		{ sessionID: 'epic-handoff-architect', messageID: `m-${taskId}` },
+	);
+	if (!declared.success) {
+		throw new Error(`declare_scope failed for ${taskId}: ${declared.message}`);
+	}
+}
+
 describe('Epic Mode end-to-end handoff — Rule 2 commit → Rule 3 predicate → planner', () => {
 	let dir: string;
 
@@ -148,7 +171,7 @@ describe('Epic Mode end-to-end handoff — Rule 2 commit → Rule 3 predicate �
 		const srcFile = path.join(dir, 'src', 'foo.ts');
 		fs.mkdirSync(path.dirname(srcFile), { recursive: true });
 		fs.writeFileSync(srcFile, 'export const FOO = 1;\n');
-		writeScopeFile(dir, '1.1', ['src/foo.ts']);
+		await declareScope(dir, '1.1', ['src/foo.ts']);
 
 		// Drive the centralized Rule 2 hook by completing the task
 		// through the same plan/manager entry the real
@@ -234,7 +257,9 @@ describe('Epic Mode end-to-end handoff — Rule 2 commit → Rule 3 predicate �
 	});
 
 	test('Phase 8 idempotency: re-completing 1.1 produces only ONE marker commit, not two', async () => {
-		writeScopeFile(dir, '1.1', []);
+		// No declaration: the completion is marker-only either way, which is
+		// exactly what the idempotency guard is exercised against (#2532: the
+		// legacy empty v1 scope file is no longer a scope source).
 		await updateTaskStatus(dir, '1.1', 'completed');
 		const after1 = parseInt(
 			git(['rev-list', '--count', 'HEAD'], dir).stdout.trim(),
@@ -275,7 +300,7 @@ describe('Epic Mode end-to-end handoff — Rule 2 commit → Rule 3 predicate �
 			path.join(dir, 'packages', 'foo', 'index.ts'),
 			'export const FOO = 1;\n',
 		);
-		writeScopeFile(dir, '1.1', ['packages/foo']);
+		await declareScope(dir, '1.1', ['packages/foo']);
 
 		await updateTaskStatus(dir, '1.1', 'completed');
 
@@ -353,7 +378,7 @@ describe('Epic Mode end-to-end handoff — Rule 2 commit → Rule 3 predicate �
 		const srcFile = path.join(dir, 'src', 'foo.ts');
 		fs.mkdirSync(path.dirname(srcFile), { recursive: true });
 		fs.writeFileSync(srcFile, 'export const FOO = 1;\n');
-		writeScopeFile(dir, '1.1', ['src/foo.ts']);
+		await declareScope(dir, '1.1', ['src/foo.ts']);
 
 		await updateTaskStatus(dir, '1.1', 'completed');
 
@@ -369,7 +394,8 @@ describe('Epic Mode end-to-end handoff — Rule 2 commit → Rule 3 predicate �
 	});
 
 	test('the swarm commit subject matches the SWARM_TASK_SUBJECT_RE regex exactly (contract round-trip)', async () => {
-		writeScopeFile(dir, '1.1', []);
+		// No declaration → marker-only commit; the subject format is what this
+		// round-trip pins (#2532: the empty v1 scope file is no longer a source).
 		await updateTaskStatus(dir, '1.1', 'completed');
 
 		const subjects = git(['log', '--pretty=%s'], dir)

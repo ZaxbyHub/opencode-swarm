@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
 import {
 	ExecutionProfileSchema,
+	normalizeCurrentPhaseInPlace,
 	type Plan,
 	PlanSchema,
 	TaskStatusSchema,
@@ -896,6 +897,20 @@ export function computePlanLedgerHash(plan: Plan): string {
  * `in_progress`/`completed`) must therefore NEVER trip a baseline comparison;
  * any structural change (description, acceptance, dependencies, files, added
  * or removed tasks/phases) always must.
+ *
+ * DELIBERATE exception, recorded with #2532 (PLAN-4): `current_phase` — the
+ * execution cursor — IS included in this hash (and in
+ * {@link computePlanLedgerHash}). Unlike task/phase statuses, a cursor
+ * advance therefore DOES change the baseline hash: bindings and approved
+ * snapshots declared against the pre-advance plan stop matching, exactly as
+ * they already do for any save_plan revision. This is intentional — the
+ * hash bytes are persisted on every live binding (`planStructureHash`,
+ * verified with strict equality) and every critic-approved snapshot
+ * (`payload_hash`), so changing the normalization would silently invalidate
+ * all pre-existing state at upgrade. The bounded safety property: only a
+ * phase-boundary advancement moves the cursor (task-status churn inside a
+ * phase is hash-excluded), so mid-phase parallel siblings keep their
+ * bindings across ordinary task completion.
  *
  * This mirrors {@link computePlanLedgerHash}'s normalization byte-for-byte
  * EXCEPT it omits the two status fields from the hashed payload. The two
@@ -2082,6 +2097,23 @@ export async function replayFromLedgerWithStatus(
 }
 
 /**
+ * Replay-side mirror of the persist-side cursor writer (#2532 / PLAN-4):
+ * whatever snapshot+events reconstruction produces, the phase cursor is
+ * normalized with the SAME single derivation the save paths use, so the
+ * replayed projection can never disagree with an equivalently-saved plan
+ * (and legacy ledgers whose embedded plans carry a stuck cursor replay to
+ * the honest active phase).
+ */
+function reconstructPlanFromEvents(
+	directory: string,
+	events: LedgerEvent[],
+): Plan | null {
+	const plan = reconstructPlanFromEventsUnnormalized(directory, events);
+	if (plan) normalizeCurrentPhaseInPlace(plan);
+	return plan;
+}
+
+/**
  * Reconstruct plan state from an ordered list of already-integrity-checked
  * ledger events. Prefers an in-ledger snapshot, then a `plan_created` embedded
  * plan (#444 self-sufficient ledger), then plan.json as the legacy base.
@@ -2094,7 +2126,8 @@ export async function replayFromLedgerWithStatus(
  * @param events - Integrity-checked events in ascending seq order
  * @returns Reconstructed Plan, or null when replay cannot proceed / plan reset
  */
-function reconstructPlanFromEvents(
+
+function reconstructPlanFromEventsUnnormalized(
 	directory: string,
 	events: LedgerEvent[],
 ): Plan | null {

@@ -95,6 +95,7 @@ Every PR that touches a relevant area must list which of these invariants it tou
   }));
   ```
 - **`mock.module` allowlist growth ratchet (issue #1666):** `scripts/mock-allowlist.txt` is closed against unapproved growth by `bun run check:invariants` Check 4. Adding a new `mock.module` target requires a matching standalone marker line `# APPROVED-NEW: <normalized-target>` in `scripts/mock-allowlist.txt` (preserved across regen by `scripts/generate-mock-allowlist.sh`). `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR. Prefer `_internals` DI for new code — the allowlist is a legacy-pattern debt surface, not a way to bypass the seam convention.
+- **Family-migration destination-lock admission (issue #2577):** `bun run check:invariants` Check 8 fail-closes the memory and knowledge family-migration engines — a destination-lock acquisition failure must `throw` (typed contention/storage), never proceed unlocked. The check errors on a swallowed admission, a missing engine file (single-engine drift), or a drifted scan anchor.
 - Use `os.tmpdir()` + `path.join(...)` for temp paths. No hardcoded `/tmp` or `C:\` strings.
 - `mkdtempSync` must be wrapped in `realpathSync` if the result is `chdir`'d on macOS.
 
