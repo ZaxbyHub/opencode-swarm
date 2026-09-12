@@ -8,7 +8,7 @@
   swallowed.
 - The failure is typed (`MemoryMigrationLockError` with a `contention` or
   `storage` category and a stable code), bounded, and retryable: the shared
-  acquisition retry budget (~4.3 s) is honored first, and the surfaced message
+  acquisition retry budget (~4.2 s) is honored first, and the surfaced message
   tells the user to retry the command.
 - Destination and source stores are preserved byte-for-byte on a failed
   admission — no partial merge, no `backups/` litter — and a held live lock is

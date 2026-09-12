@@ -127,7 +127,10 @@ describe('memory family migration destination-lock admission', () => {
 		);
 		const destBefore = snapshotTree(dest);
 		const sourceBefore = snapshotTree(source);
-		const release = await lockfile.lock(dest, { stale: 60_000 });
+		const release = await lockfile.lock(dest, {
+			stale: 60_000,
+			realpath: false,
+		});
 		try {
 			const startedAt = performance.now();
 			let rejection: unknown;
@@ -145,10 +148,16 @@ describe('memory family migration destination-lock admission', () => {
 			// Bounded, host-path-free failure text (the #2575 no-leak rule).
 			expect(error.message.length).toBeLessThanOrEqual(4096);
 			expect(error.message).not.toContain(tmpDir);
-			expect(typeof error.category).toBe('string');
-			expect(typeof error.code).toBe('string');
-			// The shared bounded retry budget must be honored before failing.
-			expect(elapsedMs).toBeGreaterThanOrEqual(500);
+			expect(error.category).toBe('contention');
+			expect(error.code).toBe('MEMORY_MIGRATION_LOCK_CONTENTION');
+			// The underlying ELOCKED-shaped cause is preserved for diagnostics.
+			expect((error as { cause?: { code?: string } }).cause).toMatchObject({
+				code: 'ELOCKED',
+			});
+			// The shared bounded retry budget must be honored before failing:
+			// the schedule sums to 4200 ms, so a short-circuited retry loop
+			// (well under half the budget) must not pass this floor.
+			expect(elapsedMs).toBeGreaterThanOrEqual(2000);
 			// Failed admission preserves destination and source exactly.
 			expect(snapshotTree(dest)).toEqual(destBefore);
 			expect(snapshotTree(source)).toEqual(sourceBefore);
@@ -171,8 +180,12 @@ describe('memory family migration destination-lock admission', () => {
 		seedJsonl(source, 'memories.jsonl', ['cohort-1']);
 		const destBefore = snapshotTree(dest);
 		const sourceBefore = snapshotTree(source);
-		const release = await lockfile.lock(dest, { stale: 60_000 });
+		const release = await lockfile.lock(dest, {
+			stale: 60_000,
+			realpath: false,
+		});
 		try {
+			const startedAt = performance.now();
 			const rejection = await migrateMemoryFamily(
 				localRoot(wtDir),
 				cohortRoot(cohortDir, wtDir),
@@ -180,15 +193,27 @@ describe('memory family migration destination-lock admission', () => {
 				() => undefined,
 				(err: unknown) => err,
 			);
+			const elapsedMs = performance.now() - startedAt;
 			expect(rejection).toBeDefined();
-			expect((rejection as Error).message.toLowerCase()).toContain(
-				'contention',
-			);
+			const error = rejection as Error & {
+				category?: string;
+				code?: string;
+			};
+			expect(error.message.toLowerCase()).toContain('contention');
+			expect(error.message.toLowerCase()).toContain('retry');
+			expect(error.message.length).toBeLessThanOrEqual(4096);
+			expect(error.message).not.toContain(tmpDir);
+			expect(error.category).toBe('contention');
+			expect(error.code).toBe('MEMORY_MIGRATION_LOCK_CONTENTION');
+			// Same bounded-retry evidence floor as the link direction.
+			expect(elapsedMs).toBeGreaterThanOrEqual(2000);
 			expect(snapshotTree(dest)).toEqual(destBefore);
 			expect(snapshotTree(source)).toEqual(sourceBefore);
 			// The unlocked unlink path used to mkdir backups/ before any
 			// memory.db check; failed admission must not litter.
 			expect(fs.existsSync(path.join(dest, 'backups'))).toBe(false);
+			// The holder's live lock was not stolen or deleted.
+			expect(fs.existsSync(`${dest}.lock`)).toBe(true);
 		} finally {
 			await release().catch(() => {});
 		}
@@ -286,7 +311,10 @@ describe('memory family migration destination-lock admission', () => {
 			['dest-1'],
 			['src-1'],
 		);
-		const release = await lockfile.lock(dest, { stale: 60_000 });
+		const release = await lockfile.lock(dest, {
+			stale: 60_000,
+			realpath: false,
+		});
 		const migration = migrateMemoryFamily(destRoot, srcRoot);
 		await new Promise<void>((resolve) => {
 			setTimeout(() => {

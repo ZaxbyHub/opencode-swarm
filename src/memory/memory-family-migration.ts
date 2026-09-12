@@ -18,9 +18,13 @@
  * (`handleMemoryLinkCommand`), so a mid-migration failure leaves the worktree
  * in its prior link state and a retry is idempotent.
  *
- * Lock discipline: `proper-lockfile` on the destination cohort dir with a
- * bumped `stale` (30s) for the migration critical section — reused from the
- * knowledge family so there is one source of truth for the lock config.
+ * Lock discipline: `proper-lockfile` on the destination storage dir (cohort
+ * OR local — both directions) with a bumped `stale` (30s) for the migration
+ * critical section — reused from the knowledge family so there is one source
+ * of truth for the lock config. `realpath: false` keeps the lock identity on
+ * the literal path so it is the SAME lock the local JSONL provider takes on
+ * this directory (PRR-U1): symlinked roots (e.g. macOS /var → /private/var)
+ * must not split the exclusion into two identities.
  * Admission is fail-closed (#2577): if the destination lock cannot be
  * acquired (a legitimate concurrent writer holds it, or acquisition fails for
  * a storage reason), the migration throws a typed
@@ -500,6 +504,10 @@ export async function migrateMemoryFamily(
 		destRelease = await _internals.lockfile.lock(destStoragePath, {
 			...MIGRATION_LOCK_RETRIES,
 			stale: MIGRATION_LOCK_STALE_MS,
+			// Same identity as the JSONL provider's lock on this directory
+			// (which passes realpath:false) so the exclusion holds even when
+			// the storage path contains symlink components (PRR-U1).
+			realpath: false,
 		});
 	} catch (error) {
 		// #2577 (FUNCTIONAL-6): admission is fail-closed. This throw stays

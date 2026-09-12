@@ -993,24 +993,45 @@ export function checkMigrationLockAdmission(repoRoot: string): CheckResult {
 		'src/memory/memory-family-migration.ts',
 		'src/knowledge/family-migration.ts',
 	];
+	const missingEngines: string[] = [];
+	const contents = new Map<string, string>();
 	for (const rel of engines) {
 		const file = path.join(repoRoot, ...rel.split('/'));
-		let content: string;
 		try {
-			content = fs.readFileSync(file, 'utf8');
+			contents.set(rel, fs.readFileSync(file, 'utf8'));
 		} catch {
-			messages.push(`NOTE: ${rel} not found - Check 8 skipped for this path.`);
-			continue;
+			missingEngines.push(rel);
 		}
+	}
+	if (missingEngines.length === engines.length) {
+		// No family-migration surface at all (fixture trees, subsystem-free
+		// repos): nothing to scan. Exactly ONE missing engine, however, is
+		// drift - a rename or move must not silently silence its half.
+		for (const rel of missingEngines) {
+			messages.push(`NOTE: ${rel} not found - Check 8 skipped for this path.`);
+		}
+		return { messages, violations };
+	}
+	for (const rel of missingEngines) {
+		messages.push(
+			`ERROR: ${rel} not found - Check 8 cannot verify destination lock admission; re-anchor Check 8.`,
+		);
+		violations++;
+	}
+	for (const rel of engines) {
+		const content = contents.get(rel);
+		if (content === undefined) continue;
 		// Normalize CRLF so the strict catch-close match below cannot be defeated
 		// by a Windows autocrlf working copy (reviewer finding: a trailing CR made
 		// the scanner walk past a swallowing catch).
 		const lines = content.replace(/\r\n/g, '\n').split('\n');
+		let acquireMatches = 0;
 		for (let i = 0; i < lines.length; i++) {
 			if (!/destRelease\s*=\s*await\s/.test(lines[i])) continue;
 			if (!/\.lock\(/.test(lines[i]) && !/\.lock\(/.test(lines[i + 1] ?? '')) {
 				continue;
 			}
+			acquireMatches++;
 			let catchIdx = -1;
 			for (let j = i + 1; j < Math.min(i + 12, lines.length); j++) {
 				if (/^\s*}\s*catch/.test(lines[j])) {
@@ -1047,6 +1068,15 @@ export function checkMigrationLockAdmission(repoRoot: string): CheckResult {
 			} else {
 				messages.push(`OK: ${rel}:${i + 1} destination lock admission fails closed.`);
 			}
+		}
+		if (acquireMatches === 0) {
+			// Zero recognizable acquire sites in a PRESENT engine file means the
+			// scan anchor drifted (e.g. the release variable was renamed): the
+			// guardrail would be passing vacuously, so fail closed instead.
+			messages.push(
+				`ERROR: ${rel} contains no recognizable destination lock acquire (destRelease = await ...lock()) - re-anchor Check 8.`,
+			);
+			violations++;
 		}
 	}
 	return { messages, violations };
