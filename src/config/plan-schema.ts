@@ -182,11 +182,13 @@ function isPhaseStatusTerminal(status: PhaseStatus): boolean {
  */
 function isPhaseEffectivelyTerminal(phase: Phase): boolean {
 	if (isPhaseStatusTerminal(phase.status)) return true;
+	// `tasks` can be absent on in-memory plan shapes that never passed through
+	// PlanSchema (schema defaults it to []); an unknown task list is honestly
+	// "not finished" — and must not throw inside the shared phase resolver.
+	const tasks = phase.tasks ?? [];
 	return (
-		phase.tasks.length > 0 &&
-		phase.tasks.every(
-			(task) => task.status === 'completed' || task.status === 'closed',
-		)
+		tasks.length > 0 &&
+		tasks.every((task) => task.status === 'completed' || task.status === 'closed')
 	);
 }
 

@@ -10,7 +10,10 @@
  *
  * DO NOT add tool-level security tests here - those belong in the tool-specific test files
  */
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // ============================================================================
 // WIRING LAYER ATTACK TESTS
@@ -418,17 +421,38 @@ describe('Phase 3.1 wiring - TOOL OBJECT STRUCTURE', () => {
 	test('WIRE-045: secretscan response is JSON-serializable without prototypes', async () => {
 		const { secretscan } = await import('../../../src/tools/index');
 
-		const result = await secretscan.execute(
-			{ directory: '.' } as any,
-			{} as any,
+		// Scan a HERMETIC seed directory, not the repo root: the repository-
+		// validation harness (#2675) writes .swarm/repository-validation/*.json
+		// report artifacts into the checkout during the same job, and those
+		// reports embed captured test output that can legitimately contain the
+		// words asserted against here. The property under test is response
+		// SHAPE (serializable, no prototype pollution), which a seeded fixture
+		// proves deterministically.
+		const scanDir = canonicalMkdtemp('wire-045-scan-');
+		fs.writeFileSync(
+			path.join(scanDir, 'sample.ts'),
+			'export const sample = 1;',
+			'utf-8',
 		);
+		try {
+			const result = await secretscan.execute(
+				{ directory: scanDir } as any,
+				{} as any,
+			);
 
-		const parsed = JSON.parse(result);
-		const serialized = JSON.stringify(parsed);
+			const parsed = JSON.parse(result);
+			const serialized = JSON.stringify(parsed);
 
-		expect(serialized).not.toContain('__proto__');
-		expect(serialized).not.toContain('constructor');
-		expect(serialized).not.toContain('prototype');
+			expect(serialized).not.toContain('__proto__');
+			expect(serialized).not.toContain('constructor');
+			expect(serialized).not.toContain('prototype');
+		} finally {
+			try {
+				fs.rmSync(scanDir, { recursive: true, force: true });
+			} catch {
+				// best-effort
+			}
+		}
 	});
 });
 
