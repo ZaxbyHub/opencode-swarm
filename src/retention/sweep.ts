@@ -23,15 +23,21 @@
  *  - authoritative streams (plan ledger, knowledge store, council, evidence,
  *    scopes, swarm.db, telemetry) are NOT in any family and are never
  *    touched (negative test).
+ *  - checkout-preparation receipts remain recovery material: the checkout
+ *    family only removes old, strictly validated applied+verified receipts
+ *    (and abandoned atomic-write temporary files), never a pending receipt or
+ *    its stash.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pruneDanglingReceiptIndexEntries } from '../hooks/review-receipt';
+import { prWorkflowSessionFileStem } from '../pr-review/persistence.js';
 import { isTerminal } from '../services/skill-optimizer/lifecycle';
 import type { SkillOptState } from '../services/skill-optimizer/store';
 import { cleanupSummaries, listStaleSummaryIds } from '../summaries/manager';
 import { log } from '../utils/logger';
+import { containsControlChars } from '../utils/path-security';
 import type { PruneEntryFilter } from './dir-prune';
 import {
 	pruneDirectory,
@@ -100,6 +106,13 @@ const PR_WORKFLOW_GATE_STATE_NAME = new RegExp(
 const PR_WORKFLOW_GATE_SIDECAR_NAME = new RegExp(
 	`^${PR_WORKFLOW_GATE_STATE_STEM}\\.json(?:\\.imported(?:\\.[0-9]+)?|\\.sqlite-projection)$`,
 );
+const PR_WORKFLOW_CHECKOUT_SESSION_NAME = /^[A-Za-z0-9_.-]+-[0-9a-f]{12}$/;
+const PR_WORKFLOW_CHECKOUT_TEMP_NAME =
+	/^[0-9a-f]{40,64}\.json\.tmp\.[0-9]+\.[0-9a-f-]{36}$/i;
+const PR_WORKFLOW_CHECKOUT_RECEIPT_NAME = /^[0-9a-f]{40,64}\.json$/i;
+const PR_WORKFLOW_CHECKOUT_SESSION_SCAN_CAP = 256;
+const PR_WORKFLOW_CHECKOUT_ENTRY_SCAN_CAP = 64;
+const PR_WORKFLOW_CHECKOUT_RECEIPT_BYTES = 64 * 1024;
 const isPrWorkflowGateStateProjection: PruneEntryFilter = (name, stat) =>
 	stat.isFile() && PR_WORKFLOW_GATE_STATE_NAME.test(name);
 const isPrWorkflowGateSidecar: PruneEntryFilter = (name, stat) =>
@@ -258,6 +271,28 @@ export async function runRetentionSweep(
 			result.errors[family.label] =
 				error instanceof Error ? error.message : String(error);
 		}
+	}
+
+	// 1c. Checkout-preparation receipts and atomic-write residue. Pending or
+	// otherwise incomplete receipts remain recovery material. An old receipt is
+	// eligible only after its durable state proves that restoration was applied
+	// and verified; the safety stash is never inspected or deleted by retention.
+	// A bounded directory read fails open when either the session or per-session
+	// entry cap is exceeded.
+	if (cancelled('pr-workflow-checkout-temps')) return result;
+	try {
+		const pruned = await prunePrWorkflowCheckoutArtifacts(
+			path.join(swarmRoot, 'pr-workflow-checkouts'),
+			now,
+			dryRun,
+		);
+		if (pruned.temps > 0)
+			result.pruned['pr-workflow-checkout-temps'] = pruned.temps;
+		if (pruned.receipts > 0)
+			result.pruned['pr-workflow-checkout-receipts'] = pruned.receipts;
+	} catch (error) {
+		result.errors['pr-workflow-checkout-temps'] =
+			error instanceof Error ? error.message : String(error);
 	}
 
 	// 1b. Review-receipts index coherence: receipt files pruned above (or by
@@ -533,6 +568,289 @@ async function walkEvolution(
 		}
 		await visit(entryPath, stat);
 	}
+}
+
+/** Read at most `cap` directory names; an over-cap or unreadable directory is unprunable. */
+async function readDirectoryNamesBounded(
+	directory: string,
+	cap: number,
+): Promise<string[] | null> {
+	let handle: fs.Dir;
+	try {
+		handle = await fs.promises.opendir(directory);
+	} catch {
+		return null;
+	}
+	const names: string[] = [];
+	try {
+		for (;;) {
+			const entry = await handle.read();
+			if (!entry) return names;
+			if (names.length >= cap) return null;
+			names.push(entry.name);
+		}
+	} catch {
+		return null;
+	} finally {
+		try {
+			await handle.close();
+		} catch {
+			// An unreadable/closed directory is fail-open for retention.
+		}
+	}
+}
+
+/**
+ * Remove only stale atomic-write temps below the checkout receipt root.
+ * Receipt JSON and all stash-bearing state are intentionally out of scope.
+ */
+async function prunePrWorkflowCheckoutTemps(
+	root: string,
+	now: number,
+	dryRun: boolean,
+): Promise<number> {
+	const sessionNames = await readDirectoryNamesBounded(
+		root,
+		PR_WORKFLOW_CHECKOUT_SESSION_SCAN_CAP,
+	);
+	if (!sessionNames) return 0;
+	const cutoff = now - DEFAULT_FAMILY_AGE_DAYS * DAY_MS;
+	let pruned = 0;
+	for (const sessionName of sessionNames) {
+		if (!PR_WORKFLOW_CHECKOUT_SESSION_NAME.test(sessionName)) continue;
+		const sessionPath = path.join(root, sessionName);
+		const sessionStat = await fs.promises.lstat(sessionPath).catch(() => null);
+		if (
+			!sessionStat ||
+			sessionStat.isSymbolicLink() ||
+			!sessionStat.isDirectory()
+		) {
+			continue;
+		}
+		const entryNames = await readDirectoryNamesBounded(
+			sessionPath,
+			PR_WORKFLOW_CHECKOUT_ENTRY_SCAN_CAP,
+		);
+		if (!entryNames) continue;
+		for (const entryName of entryNames) {
+			if (!PR_WORKFLOW_CHECKOUT_TEMP_NAME.test(entryName)) continue;
+			const entryPath = path.join(sessionPath, entryName);
+			const stat = await fs.promises.lstat(entryPath).catch(() => null);
+			if (!stat || stat.isSymbolicLink() || !stat.isFile()) continue;
+			if (stat.mtimeMs > now || stat.mtimeMs >= cutoff) continue;
+			if (dryRun) {
+				pruned += 1;
+				continue;
+			}
+			try {
+				await fs.promises.unlink(entryPath);
+				pruned += 1;
+			} catch {
+				// A concurrent writer or cleanup pass owns the race; fail open.
+			}
+		}
+	}
+	return pruned;
+}
+
+/** Read one checkout receipt with a hard byte bound; malformed receipts are retained. */
+async function readBoundedCheckoutReceipt(
+	receiptPath: string,
+): Promise<{ value: Record<string, unknown>; mtimeMs: number } | null> {
+	const stat = await fs.promises.lstat(receiptPath).catch(() => null);
+	if (!stat || stat.isSymbolicLink() || !stat.isFile()) return null;
+	let handle: fs.promises.FileHandle;
+	try {
+		handle = await fs.promises.open(receiptPath, 'r');
+	} catch {
+		return null;
+	}
+	try {
+		const buffer = new Uint8Array(PR_WORKFLOW_CHECKOUT_RECEIPT_BYTES + 1);
+		const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+		if (bytesRead > PR_WORKFLOW_CHECKOUT_RECEIPT_BYTES) return null;
+		let value: unknown;
+		try {
+			value = JSON.parse(
+				new TextDecoder().decode(buffer.subarray(0, bytesRead)),
+			);
+		} catch {
+			return null;
+		}
+		if (!value || typeof value !== 'object' || Array.isArray(value))
+			return null;
+		return { value: value as Record<string, unknown>, mtimeMs: stat.mtimeMs };
+	} finally {
+		try {
+			await handle.close();
+		} catch {
+			// Retention remains fail-open when a receipt handle cannot be closed.
+		}
+	}
+}
+
+function isStrictlyValidatedAppliedCheckoutReceipt(
+	value: Record<string, unknown>,
+	stashOid: string,
+	sessionStem: string,
+): boolean {
+	if (
+		value.schemaVersion !== 1 ||
+		typeof value.sessionID !== 'string' ||
+		value.sessionID.length === 0 ||
+		prWorkflowSessionFileStem(value.sessionID) !== sessionStem ||
+		typeof value.stashOid !== 'string' ||
+		value.stashOid.toLowerCase() !== stashOid.toLowerCase() ||
+		!Array.isArray(value.paths) ||
+		value.paths.length > 64 ||
+		value.paths.some(
+			(entry) =>
+				typeof entry !== 'string' || entry.length === 0 || entry.length > 4096,
+		) ||
+		typeof value.preparedAt !== 'string' ||
+		value.preparedAt.length === 0 ||
+		value.preparedAt.length > 64 ||
+		(value.mode !== 'PR_REVIEW' && value.mode !== 'PR_FEEDBACK') ||
+		!Number.isInteger(value.gateRevision) ||
+		(value.gateRevision as number) < 0 ||
+		typeof value.gateActivatedAt !== 'string' ||
+		value.gateActivatedAt.length === 0 ||
+		value.gateActivatedAt.length > 64 ||
+		typeof value.originalHead !== 'string' ||
+		!/^[0-9a-f]{40,64}$/i.test(value.originalHead) ||
+		(value.originalBranch !== null &&
+			(typeof value.originalBranch !== 'string' ||
+				value.originalBranch.length === 0 ||
+				value.originalBranch.length > 240 ||
+				value.originalBranch.startsWith('-') ||
+				value.originalBranch.startsWith('/') ||
+				value.originalBranch.endsWith('/') ||
+				value.originalBranch.endsWith('.') ||
+				value.originalBranch.endsWith('.lock') ||
+				value.originalBranch.includes('..') ||
+				value.originalBranch.includes('@{') ||
+				value.originalBranch.includes('//') ||
+				/[\s~^:?*[\]\\]/.test(value.originalBranch) ||
+				containsControlChars(value.originalBranch))) ||
+		value.restoreState !== 'applied' ||
+		typeof value.restoreAppliedAt !== 'string' ||
+		value.restoreAppliedAt.length === 0 ||
+		value.restoreAppliedAt.length > 64 ||
+		typeof value.restoreVerifiedAt !== 'string' ||
+		value.restoreVerifiedAt.length === 0 ||
+		value.restoreVerifiedAt.length > 64 ||
+		typeof value.restoredHead !== 'string' ||
+		!/^[0-9a-f]{40,64}$/i.test(value.restoredHead) ||
+		(value.restoredBranch !== null &&
+			(typeof value.restoredBranch !== 'string' ||
+				value.restoredBranch.length === 0 ||
+				value.restoredBranch.length > 240 ||
+				value.restoredBranch.startsWith('-') ||
+				value.restoredBranch.startsWith('/') ||
+				value.restoredBranch.endsWith('/') ||
+				value.restoredBranch.endsWith('.') ||
+				value.restoredBranch.endsWith('.lock') ||
+				value.restoredBranch.includes('..') ||
+				value.restoredBranch.includes('@{') ||
+				value.restoredBranch.includes('//') ||
+				/[\s~^:?*[\]\\]/.test(value.restoredBranch) ||
+				containsControlChars(value.restoredBranch)))
+	) {
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Age-prune only receipts that prove a completed, verified restoration. Pending,
+ * incomplete, malformed, oversized, future-dated, and concurrently changed
+ * receipts remain available for explicit recovery. Stashes are never touched.
+ */
+async function prunePrWorkflowCheckoutReceipts(
+	root: string,
+	now: number,
+	dryRun: boolean,
+): Promise<number> {
+	const sessionNames = await readDirectoryNamesBounded(
+		root,
+		PR_WORKFLOW_CHECKOUT_SESSION_SCAN_CAP,
+	);
+	if (!sessionNames) return 0;
+	const cutoff = now - DEFAULT_FAMILY_AGE_DAYS * DAY_MS;
+	let pruned = 0;
+	for (const sessionName of sessionNames) {
+		if (!PR_WORKFLOW_CHECKOUT_SESSION_NAME.test(sessionName)) continue;
+		const sessionPath = path.join(root, sessionName);
+		const sessionStat = await fs.promises.lstat(sessionPath).catch(() => null);
+		if (
+			!sessionStat ||
+			sessionStat.isSymbolicLink() ||
+			!sessionStat.isDirectory()
+		) {
+			continue;
+		}
+		const entryNames = await readDirectoryNamesBounded(
+			sessionPath,
+			PR_WORKFLOW_CHECKOUT_ENTRY_SCAN_CAP,
+		);
+		if (!entryNames) continue;
+		for (const entryName of entryNames) {
+			if (!PR_WORKFLOW_CHECKOUT_RECEIPT_NAME.test(entryName)) continue;
+			const receiptPath = path.join(sessionPath, entryName);
+			const receipt = await readBoundedCheckoutReceipt(receiptPath);
+			if (
+				!receipt ||
+				!isStrictlyValidatedAppliedCheckoutReceipt(
+					receipt.value,
+					entryName.slice(0, -'.json'.length),
+					sessionName,
+				)
+			) {
+				continue;
+			}
+			const verifiedAt = Date.parse(receipt.value.restoreVerifiedAt as string);
+			if (
+				!Number.isFinite(verifiedAt) ||
+				verifiedAt > now ||
+				verifiedAt >= cutoff
+			) {
+				continue;
+			}
+			if (dryRun) {
+				pruned += 1;
+				continue;
+			}
+			const beforeDelete = await fs.promises
+				.lstat(receiptPath)
+				.catch(() => null);
+			if (
+				!beforeDelete ||
+				beforeDelete.isSymbolicLink() ||
+				!beforeDelete.isFile() ||
+				beforeDelete.mtimeMs !== receipt.mtimeMs
+			) {
+				continue;
+			}
+			try {
+				await fs.promises.unlink(receiptPath);
+				pruned += 1;
+			} catch {
+				// A concurrent writer or recovery pass owns the race; fail open.
+			}
+		}
+	}
+	return pruned;
+}
+
+async function prunePrWorkflowCheckoutArtifacts(
+	root: string,
+	now: number,
+	dryRun: boolean,
+): Promise<{ temps: number; receipts: number }> {
+	return {
+		temps: await prunePrWorkflowCheckoutTemps(root, now, dryRun),
+		receipts: await prunePrWorkflowCheckoutReceipts(root, now, dryRun),
+	};
 }
 
 async function isRealDirectory(dir: string): Promise<boolean> {

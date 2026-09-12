@@ -35,10 +35,8 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
 
 /**
- * #2585 checks C13+C21 (AC8+AC14/R16): a real git repo with dirty tracked +
- * untracked user changes runs the registered workflow to completion; gate
- * clear alone is not restoration; registered restore returns branch/head and
- * the preserved changes with receipt cleanup + retained stash.
+ * #2585 checks C13+C21 (AC8+AC14/R16): registered workflow preserves dirty
+ * tracked + untracked user changes and restores branch/head with retained workflow stash.
  */
 const SESSION_ID = PR_ARTIFACT_SESSION_ID;
 const BASE_SHA = 'b'.repeat(40);
@@ -334,7 +332,7 @@ afterEach(async () => {
 	await removeTempDir();
 });
 describe('R16 user checkout preservation through the registered path (#2585 C13+C21/AC8+AC14)', () => {
-	test('discovery prepare stashes user changes; gate clear is not restoration; registered restore returns them', async () => {
+	test('discovery prepare stashes user changes; registered restore returns them and retains the workflow safety stash', async () => {
 		await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
 		const prepared = parsed(
 			String(
@@ -482,6 +480,7 @@ describe('R16 user checkout preservation through the registered path (#2585 C13+
 			receipt_cleanup_pending: false,
 		});
 		expect(restore.retained_stash_oids).toContain(stashOid);
+		expect(restore.stash_retained).toBe(true);
 		expect(restore.stash_retention_verified).toBe(true);
 		expect(await git(['branch', '--show-current'])).toBe(baseBranch);
 		expect(await git(['rev-parse', 'HEAD'])).toBe(baseHead);

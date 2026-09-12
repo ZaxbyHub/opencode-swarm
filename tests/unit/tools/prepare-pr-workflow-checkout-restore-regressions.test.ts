@@ -246,9 +246,7 @@ describe('prepare_pr_workflow_checkout restore review regressions', () => {
 			restored: true,
 			restored_head: advancedHead,
 		});
-		expect(secondRestore.stash_oids).toEqual(
-			expect.arrayContaining([first.stash_oid, second.stash_oid]),
-		);
+		expect(secondRestore.stash_oids).toEqual([second.stash_oid]);
 		expect(await readText('a.txt')).toBe('a1\n');
 		expect(await readText('b.txt')).toBe('b1\n');
 		expect(
@@ -274,7 +272,7 @@ describe('prepare_pr_workflow_checkout restore review regressions', () => {
 		expect(await git(['branch', '--show-current'])).toBe(beforeBranch);
 	});
 
-	test('applies by immutable OID and retains every stash across reflog renumbering (CS-2164-003)', async () => {
+	test('applies by immutable OID and preserves unrelated stash across reflog renumbering (CS-2164-003)', async () => {
 		await fs.writeFile(path.join(directory, 'a.txt'), 'target\n');
 		const prepared = await prepare('PR_REVIEW');
 		await abort('PR_REVIEW');

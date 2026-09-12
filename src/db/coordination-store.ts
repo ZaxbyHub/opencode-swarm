@@ -143,6 +143,40 @@ function readState(
 	return rowToState(row);
 }
 
+/**
+ * Read one coordination row without validating its payload.
+ *
+ * Normal coordination reads deliberately remain strict (`getCoordinationState`
+ * calls `readState`).  Recovery code uses this narrow escape hatch only after a
+ * successful database read so it can inspect the row revision/generation and
+ * perform an exact CAS cleanup without trusting corrupt payload bytes. Database
+ * open/query failures are intentionally allowed to propagate unchanged.
+ */
+export function getCoordinationStateRaw(
+	directory: string,
+	namespace: string,
+	entityKey: string,
+): CoordinationState | null {
+	if (!projectDbExists(directory)) return null;
+	const row =
+		getProjectDb(directory)
+			.query<CoordinationStateRow, [string, string]>(
+				`SELECT namespace, entity_key, revision, generation, status, payload, updated_at
+			 FROM coordination_state WHERE namespace = ? AND entity_key = ?`,
+			)
+			.get(namespace, entityKey) ?? null;
+	if (!row) return null;
+	return {
+		namespace: row.namespace,
+		entityKey: row.entity_key,
+		revision: row.revision,
+		generation: row.generation,
+		status: row.status,
+		payload: row.payload,
+		updatedAt: row.updated_at,
+	};
+}
+
 function transactionHooks() {
 	return {
 		beforeBegin: (db: Database) =>

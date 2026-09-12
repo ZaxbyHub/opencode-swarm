@@ -216,8 +216,9 @@ describe('sweep cancellation token (review FB-10 round-2 regression)', () => {
 		const root = makeRoot('cancel-post-family');
 		// familiesFor() currently yields 13 directory families, so polls
 		// 1..13 are the family-loop polls; poll 14 is the first post-family
-		// pass (review-receipts index). The token allows exactly the family
-		// polls and expires there — pinning the round-2 six-pass coverage.
+		// pass (checkout-preparation artifacts). The token allows exactly the
+		// family polls and expires there — pinning the round-2 cancellation
+		// boundary before later post-family passes.
 		const staleSummary = path.join(root, '.swarm', 'summaries', 'S1.json');
 		mkdirSync(path.dirname(staleSummary), { recursive: true });
 		writeFileSync(staleSummary, '{}');
@@ -233,7 +234,9 @@ describe('sweep cancellation token (review FB-10 round-2 regression)', () => {
 			shouldContinue: () => ++polls <= 13,
 		});
 
-		expect(result.errors.sweep_cancelled).toContain('review-receipts-index');
+		expect(result.errors.sweep_cancelled).toContain(
+			'pr-workflow-checkout-temps',
+		);
 		// The summaries pass was never reached.
 		expect(existsSync(staleSummary)).toBe(true);
 		expect(result.pruned['summaries-retention']).toBeUndefined();

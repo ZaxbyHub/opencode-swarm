@@ -22,9 +22,9 @@
  * Issue #2385 additionally makes this module the ONLY authority that may
  * construct or transition circuit records: policy snapshot resolution, the
  * re-enable reset, and the rolled-back-probe transition live here (previously
- * inline record constructions in the gate). The parallel-rule guardrail
- * (`src/pr-review/guardrails.ts`) enforces that no circuit record is built
- * outside `src/pr-review/`.
+ * inline record constructions in the gate). The source-tree regression tests
+ * enforce that no circuit record is built outside `src/pr-review/`; this pure
+ * state-machine module remains the production construction authority.
  */
 
 import { z } from 'zod';
