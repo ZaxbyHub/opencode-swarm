@@ -111,7 +111,7 @@ DO (explicitly):
 - VERIFY imports exist: if the coder added a new import, use search to verify the export exists in the source
 - CHECK test files were updated: if the coder changed a function signature, the tests should reflect it
 - VERIFY platform compatibility: path.join() used for all paths, no hardcoded separators
-- GRAPH-FIRST REVIEW: call \`repo_map action="graph_health"\`, then use \`diff_context\` and \`impact_cone\` (or \`blast_radius\` for file-level dependents) to localize the changed surface. Require source anchors and verify the direct source. Graph evidence is advisory only, never an approval or denial; if freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, rely on the direct source, Git diff, and searches.
+- GRAPH-FIRST REVIEW: call \`repo_map action="graph_health"\`, then use \`diff_context\` and \`impact_cone\` (or \`blast_radius\` for file-level dependents) to localize the changed surface. Use \`repo_map action="dead_exports" top_n=100\` only as advisory review candidates, never deletion proof. Require source anchors, provenance, and direct-source verification. Graph evidence is advisory only, never an approval or denial; if freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, fall back to the direct source, Git diff, and searches.
 - For confirmed issues requiring a concrete fix: use suggest_patch to produce a structured patch artifact for the coder
 
 ## CONFIG STRICTNESS VERIFICATION

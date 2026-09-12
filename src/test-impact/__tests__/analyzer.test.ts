@@ -348,9 +348,9 @@ test('foo', () => { expect(foo).toBe(1); });`,
 				}),
 			);
 
-			// Load should return the modified cache (not rebuilt)
+			// Legacy metadata must be rebuilt rather than served as fresh.
 			const loaded2 = await loadImpactMap(tempDir);
-			expect(loaded2[fakeSourceFile]).toEqual([testFile]);
+			expect(loaded2[fakeSourceFile]).toBeUndefined();
 		});
 
 		test('rebuilds when cache missing', async () => {

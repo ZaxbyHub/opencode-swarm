@@ -182,7 +182,7 @@ describe('Task 6.3: Adversarial testing checklist behavior', () => {
  * - regression-sweep appears in TASK COMPLETION GATE checklist
  * - regression-sweep appears in PRE-COMMIT RULE
  * - Step text includes scope:"graph" and files: parameters
- * - Step text preserves exact per-file skip/error reasons
+ * - Step text preserves exact per-call skip/error reasons
  */
 describe('Task 5.1: Regression sweep prompt content', () => {
 	describe('regression-sweep step appears in prompt after test_engineer-verification', () => {
@@ -203,7 +203,7 @@ describe('Task 5.1: Regression sweep prompt content', () => {
 			const agent = createArchitectAgent('test-model');
 			const prompt = agent.config.prompt!;
 
-			expect(prompt).toContain('scope: "graph"');
+			expect(prompt).toContain('scope:"graph"');
 		});
 
 		it('regression-sweep step text includes files: parameter', () => {
@@ -219,9 +219,7 @@ describe('Task 5.1: Regression sweep prompt content', () => {
 			const prompt = agent.config.prompt!;
 
 			expect(prompt).toContain('SKIPPED — [actual tool reason]');
-			expect(prompt).toContain(
-				'SKIPPED — N per-file sweeps with exact reasons',
-			);
+			expect(prompt).toContain('SKIPPED — N graph calls with exact reasons');
 		});
 	});
 
@@ -268,7 +266,7 @@ describe('Task 5.1: Regression sweep prompt content', () => {
 			expect(precommitSection).toContain('regression-sweep');
 		});
 
-		it('PRE-COMMIT RULE requires evidence or exact per-file skip/error reasons', () => {
+		it('PRE-COMMIT RULE requires bounded evidence or exact per-call skip/error reasons', () => {
 			const agent = createArchitectAgent('test-model');
 			const prompt = agent.config.prompt!;
 
@@ -278,11 +276,11 @@ describe('Task 5.1: Regression sweep prompt content', () => {
 				precommitStart + 800,
 			);
 
-			// Should contain the full question about regression-sweep
+			// Should contain the full question about bounded regression-sweep evidence
 			expect(precommitSection).toContain(
-				'Did regression-sweep record per-file regression-sweep evidence',
+				'Did regression-sweep record bounded graph-call evidence',
 			);
-			expect(precommitSection).toContain('exact per-file skip/error reasons');
+			expect(precommitSection).toContain('exact per-call skip/error reasons');
 		});
 	});
 
@@ -299,29 +297,27 @@ describe('Task 5.1: Regression sweep prompt content', () => {
 			const prompt = agent.config.prompt!;
 
 			// Should mention the graph scope for regression testing
-			expect(prompt).toContain('scope: "graph"');
-			// Should require one graph sweep for every changed source file.
-			expect(prompt).toContain(
-				'one `test_runner` call per changed source file',
-			);
+			expect(prompt).toContain('scope:"graph"');
+			// Should allow bounded graph batches while retaining source attribution.
+			expect(prompt).toContain('batch of up to 50 normalized source files');
 		});
 
-		it('step includes pass, regression, and honest per-file skip outcomes', () => {
+		it('step includes pass, regression, and honest graph-call skip outcomes', () => {
 			const agent = createArchitectAgent('test-model');
 			const prompt = agent.config.prompt!;
 
 			// Find the regression sweep step section
 			const sweepStart = prompt.indexOf('REGRESSION SWEEP');
-			const sweepSection = prompt.slice(sweepStart, sweepStart + 1800);
+			const sweepSection = prompt.slice(sweepStart, sweepStart + 3200);
 
-			// Aggregate outcomes and the per-source skip evidence format are explicit.
+			// Aggregate outcomes and the per-call skip evidence format are explicit.
 			expect(sweepSection).toContain(
-				'[source]: SKIPPED — [actual tool reason]',
+				'[sources]: SKIPPED — [actual tool reason]',
 			);
 			expect(sweepSection).toContain('PASS');
 			expect(sweepSection).toContain('REGRESSION DETECTED');
 			expect(sweepSection).toContain(
-				'SKIPPED — N per-file sweeps with exact reasons',
+				'SKIPPED — N graph calls with exact reasons',
 			);
 		});
 	});

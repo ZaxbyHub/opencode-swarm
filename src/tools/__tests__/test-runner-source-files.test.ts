@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { _internals, test_runner } from '../test-runner.js';
+import {
+	_internals,
+	MAX_SAFE_TEST_FILES,
+	test_runner,
+} from '../test-runner.js';
 
 // ============ Mocks ============
 
@@ -202,15 +206,27 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 	});
 
 	/**
-	 * Test 2: Impact scope enforces the single-source-file cap.
-	 *
-	 * scope "impact" fans out from source files to their covering tests; to bound
-	 * that fan-out it accepts at most MAX_SAFE_SOURCE_FILES (1) source file
-	 * (AGENTS.md invariant 6 / writing-tests skill). Multiple source files are
-	 * rejected with outcome "scope_exceeded" BEFORE any analysis or history write,
-	 * so the correct single-source recording behavior is covered by tests 1/4/5.
+	 * Test 2: Multiple source files are admitted and the resolved test set remains
+	 * bounded by MAX_SAFE_TEST_FILES.
 	 */
-	test('2. impact scope rejects multiple source files with scope_exceeded', async () => {
+	test('2. impact scope analyzes multiple source files within the resolved cap', async () => {
+		mockAnalyzeImpact.mockResolvedValueOnce({
+			impactedTests: [
+				path.join(tempDir, 'src', '__tests__', 'foo.ts'),
+				path.join(tempDir, 'src', '__tests__', 'bar.ts'),
+			],
+			unrelatedTests: [],
+			untestedFiles: [],
+			impactMap: {
+				[path.join(tempDir, 'src', 'foo.ts')]: [
+					path.join(tempDir, 'src', '__tests__', 'foo.ts'),
+				],
+				[path.join(tempDir, 'src', 'bar.ts')]: [
+					path.join(tempDir, 'src', '__tests__', 'bar.ts'),
+				],
+			},
+		});
+
 		const args = {
 			scope: 'impact' as const,
 			files: ['src/foo.ts', 'src/bar.ts'],
@@ -219,14 +235,26 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 		const result = await execute(args, tempDir);
 		const parsed = parseResult(result);
 
-		expect(parsed.success).toBe(false);
-		expect(parsed.outcome).toBe('scope_exceeded');
-		expect(parsed.error).toContain('at most');
+		expect(parsed.success).toBe(true);
+		expect(parsed.outcome).toBe('pass');
+		expect(parsed.resolution).toMatchObject({
+			requestedScope: 'impact',
+			effectiveScope: 'impact',
+			cap: MAX_SAFE_TEST_FILES,
+			decision: 'execute',
+			evaluable: true,
+		});
+		expect(parsed.resolution.resolvedFiles).toHaveLength(2);
 
-		// Rejected before the run — no history is recorded and the impact
-		// analyzer is never invoked.
-		expect(mockBatchAppendTestRuns).not.toHaveBeenCalled();
-		expect(mockAnalyzeImpact).not.toHaveBeenCalled();
+		expect(mockAnalyzeImpact).toHaveBeenCalledTimes(1);
+		const [sourceFilesArg, , maxFilesArg] = mockAnalyzeImpact.mock.calls[0] as [
+			string[],
+			string,
+			number,
+		];
+		expect(sourceFilesArg).toEqual(['src/foo.ts', 'src/bar.ts']);
+		expect(maxFilesArg).toBe(MAX_SAFE_TEST_FILES + 1);
+		expect(mockBatchAppendTestRuns).toHaveBeenCalled();
 	});
 
 	/**

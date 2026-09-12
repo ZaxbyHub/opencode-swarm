@@ -140,17 +140,18 @@ Treating pre_check_batch as a substitute for the active swarm's reviewer agent i
     5l. the active swarm's test_engineer agent - Verification tests. FAIL → coder retry from 5g.
     → REQUIRED: Print "testengineer-verification: [PASS N/N | FAIL — details]"
     5l-bis. REGRESSION SWEEP (automatic after test_engineer-verification PASS):
-    Iterate the changed source files preemptively and run one `test_runner` call per changed source file with { scope: "graph", files: [<one changed source file>] }.
-    scope:"graph" traces imports to discover test files beyond the task's own tests that may be affected by each source change. Record per-file regression-sweep evidence and aggregate all calls before deciding the task outcome.
+    Run bounded `test_runner` graph calls over the changed source files. Each call may use one source file for attribution or a batch of up to 50 normalized source files when that is more efficient; never submit more than 50 normalized source files to one call.
+    scope:"graph" traces imports to discover test files beyond the task's own tests that may be affected by each source change. Record the source selection for every regression-sweep call and aggregate all calls before deciding the task outcome.
 
     Outcomes (based on test_runner result.outcome field):
     - any outcome: "regression" → Print "regression-sweep: FAIL — REGRESSION DETECTED in [source → failing tests]. The failing tests are CORRECT — fix the source code, not the tests." Return to coder with retry from 5g.
-    - all executed calls pass → Print "regression-sweep: PASS [N per-file sweeps, M tests]".
-    - outcome: "skip" → Record "[source]: SKIPPED — [actual tool reason]". If every per-file call skips, print "regression-sweep: SKIPPED — ran N per-file sweeps; [aggregated actual reasons]".
-    - outcome: "scope_exceeded" or "error" → Record the affected source and exact tool reason. Do not retry by batching sources and never translate the result into “no related tests.” Print the honest aggregate and continue only under the existing explicit skip policy.
+    - all executed calls pass → Print "regression-sweep: PASS [N graph calls, M tests]".
+    - outcome: "skip" → Record "[sources]: SKIPPED — [actual tool reason]". If every graph call skips, print "regression-sweep: SKIPPED — ran N graph calls; [aggregated actual reasons]".
+    - outcome: "scope_exceeded" → Record the affected sources and exact tool reason, then narrow or split the source batch and retry bounded graph calls as appropriate. Never widen to scope "all" or translate the result into “no related tests.”
+    - outcome: "error" → Record the affected sources and exact tool reason. Print the honest aggregate and continue only under the existing explicit skip policy; do not widen to scope "all".
 
     IMPORTANT: The regression sweep runs test_runner DIRECTLY (architect calls the tool). Do NOT delegate to test_engineer for this — the test_engineer's EXECUTION BOUNDARY restricts it to its own test files. The architect has unrestricted test_runner access.
-    → REQUIRED: Print "regression-sweep: [PASS — N per-file sweeps | FAIL — REGRESSION DETECTED | SKIPPED — N per-file sweeps with exact reasons]"
+    → REQUIRED: Print "regression-sweep: [PASS — N graph calls | FAIL — REGRESSION DETECTED | SKIPPED — N graph calls with exact reasons]"
 
     5l-ter. TEST DRIFT CHECK (conditional): Run this step if the change involves any drift-prone area:
     - Command/CLI behavior changed (shell command wrappers, CLI interfaces)
@@ -181,7 +182,7 @@ PRE-COMMIT RULE — Before ANY commit or push:
   [ ] Did pre_check_batch run with gates_passed true?
   [ ] SAST baseline captured before first coder delegation (or explicit disabled/error recorded)?
   [ ] Did the diff step run?
-  [ ] Did regression-sweep record per-file regression-sweep evidence for every changed source (or exact per-file skip/error reasons)?
+  [ ] Did regression-sweep record bounded graph-call evidence for every changed source (or exact per-call skip/error reasons)?
   [ ] Did test-drift check run (or NOT TRIGGERED)?
 
   If ANY box is unchecked: DO NOT COMMIT. Return to step 5b.
@@ -207,7 +208,7 @@ This step supplements (not replaces) the existing regression-sweep and test-drif
   [GATE] reuse_re_verification: VERIFIED / SKIPPED / DUPLICATION_DETECTED — value: ___
   [GATE] security-reviewer: APPROVED / SKIPPED — value: ___
   [GATE] test_engineer-verification: PASS — value: ___
-  [GATE] regression-sweep: PASS / SKIPPED — per-file regression-sweep evidence: ___
+  [GATE] regression-sweep: PASS / SKIPPED — bounded graph-call evidence: ___
   [GATE] test-drift: TRIGGERED / NOT TRIGGERED — value: ___
   [GATE] test_engineer-adversarial: use the rendered checklist entry from the MODE: EXECUTE architect stub
   [GATE] coverage: ≥70% / soft-skip — value: ___

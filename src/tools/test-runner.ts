@@ -6,7 +6,13 @@ import { resolveLocalNodeTool } from '../build/command-resolution';
 import { isCommandAvailable } from '../build/discovery';
 import type { NativeTestTarget, TestScope } from '../lang/backend';
 import { buildNativeTargetCommand } from '../lang/default-backend';
-import { analyzeImpact, loadImpactMap } from '../test-impact/analyzer.js';
+import {
+	analyzeImpact,
+	getImpactCacheStatus,
+	type ImpactCacheStatus,
+	loadImpactMap,
+} from '../test-impact/analyzer.js';
+import { MAX_SAFE_TEST_FILES as SHARED_MAX_SAFE_TEST_FILES } from '../test-impact/constants';
 import { classifyAndCluster } from '../test-impact/failure-classifier.js';
 import {
 	detectFlakyTests,
@@ -30,8 +36,9 @@ export const MAX_OUTPUT_BYTES = 512_000; // 512KB max output
 export const MAX_COMMAND_LENGTH = 500;
 export const DEFAULT_TIMEOUT_MS = 60_000; // 60 seconds default
 export const MAX_TIMEOUT_MS = 300_000; // 5 minutes max
-export const MAX_SAFE_TEST_FILES = 50; // Maximum resolved test files allowed in interactive session
-export const MAX_SAFE_SOURCE_FILES = 1; // Maximum source files allowed for graph/impact scopes (>1 fans out to too many test files)
+export const MAX_SAFE_TEST_FILES = SHARED_MAX_SAFE_TEST_FILES; // Maximum resolved test files allowed in interactive session
+// Legacy export retained for consumers; graph/impact now bind the resolved test set.
+export const MAX_SAFE_SOURCE_FILES = 1;
 
 /**
  * Estimate the fan-out (number of unique test files) for given source files
@@ -44,7 +51,10 @@ export const MAX_SAFE_SOURCE_FILES = 1; // Maximum source files allowed for grap
 export async function estimateFanOut(
 	sourceFiles: string[],
 	cwd: string,
-): Promise<{ estimatedCount: number }> {
+): Promise<{
+	estimatedCount: number;
+	status: 'advisory' | 'unavailable';
+}> {
 	try {
 		const impactMap = await _internals.loadImpactMap(cwd, {
 			skipRebuild: true,
@@ -59,15 +69,20 @@ export async function estimateFanOut(
 			const testFiles = impactMap[normalizedPath];
 			if (testFiles) {
 				for (const testFile of testFiles) {
-					uniqueTestFiles.add(testFile);
+					const normalized = testFile.replace(/\\/g, '/');
+					uniqueTestFiles.add(
+						process.platform === 'win32'
+							? normalized.toLowerCase()
+							: normalized,
+					);
 				}
 			}
 		}
 
-		return { estimatedCount: uniqueTestFiles.size };
+		return { estimatedCount: uniqueTestFiles.size, status: 'advisory' };
 	} catch {
 		// Impact map unavailable or corrupted — fail gracefully
-		return { estimatedCount: 0 };
+		return { estimatedCount: 0, status: 'unavailable' };
 	}
 }
 
@@ -147,6 +162,7 @@ export interface TestSuccessResult {
 	testCases?: ParsedTestCaseResult[];
 	message?: string;
 	outcome?: RegressionOutcome;
+	resolution?: TestResolution;
 }
 
 export interface TestErrorResult {
@@ -164,9 +180,128 @@ export interface TestErrorResult {
 	message?: string;
 	outcome?: RegressionOutcome;
 	attempted_scope?: 'graph';
+	resolution?: TestResolution;
 }
 
 export type TestResult = TestSuccessResult | TestErrorResult;
+
+export interface TestResolution {
+	requestedScope: TestScope;
+	effectiveScope: TestScope;
+	sourceFiles: string[];
+	/**
+	 * Normalized test files. Execute decisions are always capped at `cap`;
+	 * scope-exceeded decisions may retain one `cap + 1` sentinel for evidence.
+	 */
+	resolvedFiles: string[];
+	cap: number;
+	decision: 'execute' | 'scope_exceeded' | 'skip';
+	/** Structured fan-out estimate; the scalar fields below are compatibility aliases. */
+	estimate: { count: number; status: 'advisory' | 'unavailable' | 'not_run' };
+	/** Backward-compatible aliases for consumers that predate the structured estimate. */
+	estimateCount: number;
+	estimateStatus: 'advisory' | 'unavailable' | 'not_run';
+	cacheStatus?: ImpactCacheStatus;
+	fallbackReason: string | null;
+	evaluable: boolean;
+}
+
+function normalizeSelectionFiles(
+	files: string[],
+	workingDir: string,
+): string[] {
+	const seen = new Set<string>();
+	const normalized: string[] = [];
+	for (const file of files) {
+		const absolute = path.resolve(workingDir, file);
+		const relative = path.relative(workingDir, absolute);
+		const output = (path.isAbsolute(relative) ? absolute : relative).replace(
+			/\\/g,
+			'/',
+		);
+		const key = process.platform === 'win32' ? output.toLowerCase() : output;
+		if (!seen.has(key)) {
+			seen.add(key);
+			normalized.push(output);
+		}
+	}
+	return normalized;
+}
+
+function makeResolution(
+	requestedScope: TestScope,
+	effectiveScope: TestScope,
+	sourceFiles: string[],
+	resolvedFiles: string[],
+	decision: TestResolution['decision'],
+	workingDir: string,
+	options?: {
+		estimate?: {
+			estimatedCount: number;
+			status: 'advisory' | 'unavailable' | 'not_run';
+		};
+		cacheStatus?: ImpactCacheStatus;
+		fallbackReason?: string | null;
+	},
+): TestResolution {
+	const estimateCount = options?.estimate?.estimatedCount ?? 0;
+	const estimateStatus = options?.estimate?.status ?? 'not_run';
+	const fallbackReason =
+		options?.fallbackReason ??
+		(options?.cacheStatus?.startsWith('rebuilt_')
+			? `impact cache rebuild completed (${options.cacheStatus}) before resolution`
+			: null);
+	return {
+		requestedScope,
+		effectiveScope,
+		sourceFiles: normalizeSelectionFiles(sourceFiles, workingDir).slice(
+			0,
+			MAX_SAFE_TEST_FILES + 1,
+		),
+		// Keep one overflow sentinel for bounded diagnostics; execute decisions are
+		// guaranteed to have at most `cap` files by the pre-run guard.
+		resolvedFiles: normalizeSelectionFiles(resolvedFiles, workingDir).slice(
+			0,
+			MAX_SAFE_TEST_FILES + 1,
+		),
+		cap: MAX_SAFE_TEST_FILES,
+		decision,
+		estimate: { count: estimateCount, status: estimateStatus },
+		// Preserve the original scalar fields for older callers while exposing the
+		// structured estimate to newer consumers.
+		estimateCount: estimateCount,
+		estimateStatus,
+		...(options?.cacheStatus && { cacheStatus: options.cacheStatus }),
+		fallbackReason,
+		evaluable: decision === 'execute',
+	};
+}
+
+function cacheStatusAfterRebuild(
+	before: ImpactCacheStatus,
+	after: ImpactCacheStatus,
+): ImpactCacheStatus {
+	if (after === 'fresh') {
+		if (before === 'missing') return 'rebuilt_missing';
+		if (before === 'corrupt') return 'rebuilt_corrupt';
+		if (before === 'legacy') return 'rebuilt_legacy';
+		if (before === 'stale') return 'rebuilt_stale';
+	}
+	return after;
+}
+
+/**
+ * Normalize raw cache statuses defensively for advisory evidence. The
+ * production `verify: false` path emits unverified statuses, while DI and
+ * legacy seams may still provide raw statuses that need the same treatment.
+ */
+function cacheStatusForAdvisory(status: ImpactCacheStatus): ImpactCacheStatus {
+	if (status === 'missing') return 'missing_unverified';
+	if (status === 'corrupt') return 'corrupt_unverified';
+	if (status === 'legacy') return 'legacy_unverified';
+	if (status === 'stale') return 'stale_unverified';
+	return status;
+}
 
 // ============ Validation ============
 
@@ -1141,6 +1276,7 @@ export function getTestFilesFromConvention(
 async function getTestFilesFromGraph(
 	sourceFiles: string[],
 	workingDir: string,
+	maxFiles = MAX_SAFE_TEST_FILES + 1,
 ): Promise<string[]> {
 	const testFiles: string[] = [];
 	const absoluteSourceFiles = sourceFiles.map((sourceFile) =>
@@ -1167,7 +1303,7 @@ async function getTestFilesFromGraph(
 
 			// Look for import statements that reference source files
 			// Match patterns like: import ... from "./sourceFile" or import ... from '../sourceFile'
-			const importRegex = /import\s+.*?\s+from\s+['"]([^'"]+)['"]/g;
+			const importRegex = /import\s+(?:.*?\s+from\s+)?['"]([^'"]+)['"]/g;
 			let match: RegExpExecArray | null;
 
 			match = importRegex.exec(content);
@@ -1230,6 +1366,7 @@ async function getTestFilesFromGraph(
 						(importBasename === sourceBasename && isRelatedDir)
 					) {
 						dedupePush(testFiles, testFile);
+						if (testFiles.length >= maxFiles) return testFiles;
 						break;
 					}
 				}
@@ -1287,6 +1424,7 @@ async function getTestFilesFromGraph(
 							(importBasename === sourceBasename && isRelatedDir)
 						) {
 							dedupePush(testFiles, testFile);
+							if (testFiles.length >= maxFiles) return testFiles;
 							break;
 						}
 					}
@@ -2929,9 +3067,9 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					framework: 'none',
 					scope: 'all',
 					error:
-						'scope "all" is blocked for agent use. Use scope "convention" with specific test files, or scope "graph" with exactly one source file.',
+						'scope "all" is blocked for agent use. Use scope "convention" with specific test files, or scope "graph" with up to 50 normalized source files.',
 					message:
-						'The full test suite is blocked in agent context. Use scope "convention" with specific test files, or scope "graph" with exactly one source file. Example: { scope: "convention", files: ["src/tools/test-runner.ts"] }',
+						'The full test suite is blocked in agent context. Use scope "convention" with specific test files, or scope "graph" with up to 50 normalized source files. Example: { scope: "graph", files: ["src/tools/test-runner.ts"] }',
 					outcome: 'error',
 				};
 				return JSON.stringify(errorResult, null, 2);
@@ -2954,6 +3092,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				message:
 					'When using scope "convention" or "graph", you must provide a non-empty "files" or "targets" array. Use scope "all" for full project test suite without specifying files.',
 				outcome: 'error',
+				resolution: makeResolution(scope, scope, [], [], 'skip', workingDir),
 			};
 			return JSON.stringify(errorResult, null, 2);
 		}
@@ -3015,6 +3154,18 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					total: 0,
 				},
 				outcome: 'error',
+				...(scope === 'graph' || scope === 'impact'
+					? {
+							resolution: makeResolution(
+								scope,
+								scope,
+								[],
+								[],
+								'skip',
+								workingDir,
+							),
+						}
+					: {}),
 			};
 			return JSON.stringify(result, null, 2);
 		}
@@ -3024,6 +3175,11 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 		let testFiles: string[] = [];
 		let graphFallbackReason: string | undefined;
 		let effectiveScope: TestScope = scope;
+		let selectionEstimate:
+			| Awaited<ReturnType<typeof estimateFanOut>>
+			| undefined;
+		let selectionCacheStatus: ImpactCacheStatus | undefined;
+		let selectionSourceFiles: string[] = [];
 
 		// scope "all" — skip file discovery, let the test framework run its full suite
 		if (scope === 'target') {
@@ -3072,6 +3228,8 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				return JSON.stringify(errorResult, null, 2);
 			}
 
+			selectionSourceFiles = normalizeSelectionFiles(args.files!, workingDir);
+
 			// Guard: Reject when too many source files would cause fan-out to many test files.
 			// Direct test files are exempt — they are explicitly named and don't fan out.
 			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
@@ -3082,6 +3240,14 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					error: `scope "convention" accepts at most ${MAX_SAFE_SOURCE_FILES} source file for discovery (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
 					message: `Too many source files for scope "convention" discovery (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or pass direct test file paths instead of source files.`,
 					outcome: 'scope_exceeded',
+					resolution: makeResolution(
+						scope,
+						scope,
+						selectionSourceFiles,
+						[],
+						'scope_exceeded',
+						workingDir,
+					),
 				};
 				return JSON.stringify(errorResult, null, 2);
 			}
@@ -3093,13 +3259,17 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 		} else if (scope === 'graph') {
 			// Try to find related tests via import analysis
 			// args.files is guaranteed non-empty by the guard above
-			const sourceFiles = args.files!.filter((f) => {
-				if (isConventionTestFilePath(f)) {
-					return false;
-				}
-				const ext = path.extname(f).toLowerCase();
-				return SOURCE_EXTENSIONS.has(ext);
-			});
+			const sourceFiles = normalizeSelectionFiles(
+				args.files!.filter((f) => {
+					if (isConventionTestFilePath(f)) {
+						return false;
+					}
+					const ext = path.extname(f).toLowerCase();
+					return SOURCE_EXTENSIONS.has(ext);
+				}),
+				workingDir,
+			);
+			selectionSourceFiles = sourceFiles;
 
 			// Guard: If args.files was provided but all entries are non-source files, reject
 			if (sourceFiles.length === 0) {
@@ -3112,45 +3282,43 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					message:
 						'The files array for scope "graph" must contain at least one source file with a recognized extension (.ts, .tsx, .js, .jsx, .py, .rs, .ps1, etc.). Direct test files belong in scope "convention".',
 					outcome: 'error',
+					resolution: makeResolution(scope, scope, [], [], 'skip', workingDir),
 				};
 				return JSON.stringify(errorResult, null, 2);
 			}
 
-			// Layer 1: Reject before any I/O when too many source files are provided.
-			// graph discovery fans out: each source file can match many test files, easily
-			// exceeding MAX_SAFE_TEST_FILES and triggering a scope_exceeded cascade that
-			// causes LLMs to retry with scope "all", freezing the OpenCode SSE session.
-			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+			// Bound only the normalized source-input traversal. The final decision is
+			// made after resolving and deduplicating test files.
+			if (sourceFiles.length > MAX_SAFE_TEST_FILES) {
 				const errorResult: TestErrorResult = {
 					success: false,
 					framework,
 					scope,
-					error: `scope "graph" accepts at most ${MAX_SAFE_SOURCE_FILES} source file (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
-					message: `Too many source files for scope "graph" (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or use scope "convention" with direct test file paths.`,
+					error: `scope "graph" accepts at most ${MAX_SAFE_TEST_FILES} normalized source files (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+					message: `Too many source files for scope "graph" (${sourceFiles.length} provided, limit is ${MAX_SAFE_TEST_FILES}).`,
 					outcome: 'scope_exceeded',
+					resolution: makeResolution(
+						scope,
+						scope,
+						sourceFiles,
+						[],
+						'scope_exceeded',
+						workingDir,
+					),
 				};
 				return JSON.stringify(errorResult, null, 2);
 			}
 
-			// Layer 2: Even with a single source file, estimate fan-out before import-graph traversal.
-			// estimateFanOut reads the cached impact map in ~100ms without spawning a subprocess.
-			const estimate = await estimateFanOut(sourceFiles, workingDir);
-			if (estimate.estimatedCount > MAX_SAFE_TEST_FILES) {
-				const errorResult: TestErrorResult = {
-					success: false,
-					framework,
-					scope,
-					error: 'Estimated test file count exceeds safe maximum',
-					message: `Scope "graph" resolution would produce approximately ${estimate.estimatedCount} test files, which exceeds the safe limit of ${MAX_SAFE_TEST_FILES}. Break the source files into smaller batches and retry.`,
-					outcome: 'scope_exceeded',
-				};
-				return JSON.stringify(errorResult, null, 2);
-			}
+			selectionEstimate = await estimateFanOut(sourceFiles, workingDir);
+			selectionCacheStatus = cacheStatusForAdvisory(
+				getImpactCacheStatus(workingDir, { verify: false }).status,
+			);
 
 			// Try graph-based discovery via imports (best effort)
 			const graphTestFiles = await getTestFilesFromGraph(
 				sourceFiles,
 				workingDir,
+				MAX_SAFE_TEST_FILES + 1,
 			);
 			if (graphTestFiles.length > 0) {
 				testFiles = graphTestFiles;
@@ -3159,18 +3327,25 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				graphFallbackReason =
 					'imports resolution returned no results, falling back to convention';
 				effectiveScope = 'convention';
-				testFiles = getTestFilesFromConvention(sourceFiles, workingDir);
+				testFiles = getTestFilesFromConvention(sourceFiles, workingDir).slice(
+					0,
+					MAX_SAFE_TEST_FILES + 1,
+				);
 			}
 		} else if (scope === 'impact') {
 			// Impact scope: use test-impact analyzer to find tests covering changed files
 			// args.files is guaranteed non-empty by the guard above
-			const sourceFiles = args.files!.filter((f) => {
-				if (isConventionTestFilePath(f)) {
-					return false;
-				}
-				const ext = path.extname(f).toLowerCase();
-				return SOURCE_EXTENSIONS.has(ext);
-			});
+			const sourceFiles = normalizeSelectionFiles(
+				args.files!.filter((f) => {
+					if (isConventionTestFilePath(f)) {
+						return false;
+					}
+					const ext = path.extname(f).toLowerCase();
+					return SOURCE_EXTENSIONS.has(ext);
+				}),
+				workingDir,
+			);
+			selectionSourceFiles = sourceFiles;
 
 			if (sourceFiles.length === 0) {
 				const errorResult: TestErrorResult = {
@@ -3182,46 +3357,47 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					message:
 						'The files array for scope "impact" must contain at least one source file with a recognized extension (.ts, .tsx, .js, .jsx, .py, .rs, .ps1, etc.). Direct test files belong in scope "convention".',
 					outcome: 'error',
+					resolution: makeResolution(scope, scope, [], [], 'skip', workingDir),
 				};
 				return JSON.stringify(errorResult, null, 2);
 			}
 
-			// Layer 1: Reject before any I/O when too many source files are provided.
-			// impact analysis fans out through the import graph, then may fall back to graph
-			// discovery; either path can exceed MAX_SAFE_TEST_FILES and cause LLMs to cascade
-			// to scope "all", freezing the OpenCode SSE session.
-			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
+			// Bound only the normalized source-input traversal. The final decision is
+			// made after resolving and deduplicating test files.
+			if (sourceFiles.length > MAX_SAFE_TEST_FILES) {
 				const errorResult: TestErrorResult = {
 					success: false,
 					framework,
 					scope,
-					error: `scope "impact" accepts at most ${MAX_SAFE_SOURCE_FILES} source file (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
-					message: `Too many source files for scope "impact" (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or use scope "convention" with direct test file paths.`,
+					error: `scope "impact" accepts at most ${MAX_SAFE_TEST_FILES} normalized source files (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
+					message: `Too many source files for scope "impact" (${sourceFiles.length} provided, limit is ${MAX_SAFE_TEST_FILES}).`,
 					outcome: 'scope_exceeded',
+					resolution: makeResolution(
+						scope,
+						scope,
+						sourceFiles,
+						[],
+						'scope_exceeded',
+						workingDir,
+					),
 				};
 				return JSON.stringify(errorResult, null, 2);
 			}
 
-			// Layer 2: Even with a single source file, estimate fan-out before impact analysis.
-			// estimateFanOut reads the cached impact map in ~100ms without spawning a subprocess.
-			const estimate = await estimateFanOut(sourceFiles, workingDir);
-			if (estimate.estimatedCount > MAX_SAFE_TEST_FILES) {
-				const errorResult: TestErrorResult = {
-					success: false,
-					framework,
-					scope,
-					error: 'Estimated test file count exceeds safe maximum',
-					message: `Scope "impact" resolution would produce approximately ${estimate.estimatedCount} test files, which exceeds the safe limit of ${MAX_SAFE_TEST_FILES}. Break the source files into smaller batches and retry.`,
-					outcome: 'scope_exceeded',
-				};
-				return JSON.stringify(errorResult, null, 2);
-			}
+			selectionEstimate = await estimateFanOut(sourceFiles, workingDir);
+			const cacheBefore = getImpactCacheStatus(workingDir).status;
 
 			try {
+				const impactMap = await _internals.loadImpactMap(workingDir);
+				selectionCacheStatus = cacheStatusAfterRebuild(
+					cacheBefore,
+					getImpactCacheStatus(workingDir).status,
+				);
 				const impactResult = await _internals.analyzeImpact(
 					sourceFiles,
 					workingDir,
-					MAX_SAFE_TEST_FILES,
+					MAX_SAFE_TEST_FILES + 1,
+					impactMap,
 				);
 				if (impactResult.budgetExceeded) {
 					const errorResult: TestErrorResult = {
@@ -3231,14 +3407,27 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 						error: 'Budget exceeded during impact analysis',
 						message: `Impact analysis exceeded safe budget of ${MAX_SAFE_TEST_FILES} test files.`,
 						outcome: 'scope_exceeded',
+						resolution: makeResolution(
+							scope,
+							scope,
+							sourceFiles,
+							impactResult.impactedTests,
+							'scope_exceeded',
+							workingDir,
+							{
+								estimate: selectionEstimate,
+								cacheStatus: selectionCacheStatus,
+							},
+						),
 					};
 					return JSON.stringify(errorResult, null, 2);
 				}
 				if (impactResult.impactedTests.length > 0) {
 					// Convert absolute paths from impact map to relative paths for test framework
-					testFiles = impactResult.impactedTests.map((absPath) => {
-						const relativePath = path.relative(workingDir, absPath);
-						return path.isAbsolute(relativePath) ? absPath : relativePath;
+					testFiles = impactResult.impactedTests.map((testPath) => {
+						if (!path.isAbsolute(testPath)) return testPath;
+						const relativePath = path.relative(workingDir, testPath);
+						return path.isAbsolute(relativePath) ? testPath : relativePath;
 					});
 				} else {
 					// Cold start: no impact map or no matches — fall back to graph scope
@@ -3248,6 +3437,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					const graphTestFiles = await getTestFilesFromGraph(
 						sourceFiles,
 						workingDir,
+						MAX_SAFE_TEST_FILES + 1,
 					);
 					if (graphTestFiles.length > 0) {
 						testFiles = graphTestFiles;
@@ -3255,7 +3445,10 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 						graphFallbackReason =
 							'imports resolution returned no results, falling back to convention';
 						effectiveScope = 'convention';
-						testFiles = getTestFilesFromConvention(sourceFiles, workingDir);
+						testFiles = getTestFilesFromConvention(
+							sourceFiles,
+							workingDir,
+						).slice(0, MAX_SAFE_TEST_FILES + 1);
 					}
 				}
 			} catch {
@@ -3265,6 +3458,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				const graphTestFiles = await getTestFilesFromGraph(
 					sourceFiles,
 					workingDir,
+					MAX_SAFE_TEST_FILES + 1,
 				);
 				if (graphTestFiles.length > 0) {
 					testFiles = graphTestFiles;
@@ -3272,9 +3466,16 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					graphFallbackReason =
 						'imports resolution returned no results, falling back to convention';
 					effectiveScope = 'convention';
-					testFiles = getTestFilesFromConvention(sourceFiles, workingDir);
+					testFiles = getTestFilesFromConvention(sourceFiles, workingDir).slice(
+						0,
+						MAX_SAFE_TEST_FILES + 1,
+					);
 				}
 			}
+		}
+
+		if (scope === 'convention' || scope === 'graph' || scope === 'impact') {
+			testFiles = normalizeSelectionFiles(testFiles, workingDir);
 		}
 
 		// Guard: Reject when source files resolve to zero test files (prevents accidental full-suite run)
@@ -3299,6 +3500,23 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				outcome: 'skip',
 				...(scope === 'graph' && { attempted_scope: 'graph' }),
 				...(scope === 'impact' && { attempted_scope: 'graph' }),
+				...(scope === 'graph' || scope === 'impact'
+					? {
+							resolution: makeResolution(
+								scope,
+								effectiveScope,
+								selectionSourceFiles,
+								[],
+								'skip',
+								workingDir,
+								{
+									estimate: selectionEstimate,
+									cacheStatus: selectionCacheStatus,
+									fallbackReason: graphFallbackReason,
+								},
+							),
+						}
+					: {}),
 			};
 			return JSON.stringify(errorResult, null, 2);
 		}
@@ -3319,6 +3537,19 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				error: `Resolved test file count (${testFiles.length}) exceeds safe maximum (${MAX_SAFE_TEST_FILES})`,
 				message: `Too many test files resolved (${testFiles.length}). Maximum allowed is ${MAX_SAFE_TEST_FILES}. Treat this as SKIP without retry. Provide more specific source files to narrow down test scope. First few resolved: ${sampleFiles.join(', ')}`,
 				outcome: 'scope_exceeded',
+				resolution: makeResolution(
+					scope,
+					effectiveScope,
+					selectionSourceFiles,
+					testFiles,
+					'scope_exceeded',
+					workingDir,
+					{
+						estimate: selectionEstimate,
+						cacheStatus: selectionCacheStatus,
+						fallbackReason: graphFallbackReason,
+					},
+				),
 			};
 			return JSON.stringify(errorResult, null, 2);
 		}
@@ -3335,6 +3566,21 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			args.targets,
 			nativeTarget,
 		);
+		if (scope === 'convention' || scope === 'graph' || scope === 'impact') {
+			result.resolution = makeResolution(
+				scope,
+				effectiveScope,
+				selectionSourceFiles,
+				testFiles,
+				'execute',
+				workingDir,
+				{
+					estimate: selectionEstimate,
+					cacheStatus: selectionCacheStatus,
+					fallbackReason: graphFallbackReason,
+				},
+			);
+		}
 
 		// Record results to history and analyze failures
 		const historyTestFiles = nativeTarget
@@ -3383,6 +3629,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 export const _internals: {
 	analyzeImpact: typeof analyzeImpact;
 	loadImpactMap: typeof loadImpactMap;
+	getImpactCacheStatus: typeof getImpactCacheStatus;
 	isCommandAvailable: typeof isCommandAvailable;
 	existsSync: typeof fs.existsSync;
 	readdirSync: typeof fs.readdirSync;
@@ -3396,6 +3643,7 @@ export const _internals: {
 } = {
 	analyzeImpact,
 	loadImpactMap,
+	getImpactCacheStatus,
 	isCommandAvailable,
 	existsSync: fs.existsSync,
 	readdirSync: fs.readdirSync,

@@ -3,6 +3,7 @@ import {
 	freezeClock,
 	type Restore,
 } from '../../../tests/helpers/test-clock.js';
+import { canonicalTmpDir } from '../../../tests/helpers/tmpdir.js';
 import type {
 	MutationOutcome,
 	MutationPatch,
@@ -317,8 +318,8 @@ describe('computeReport adversarial tests', () => {
 			const report = await executeMutationSuite(
 				patches,
 				['node', '-e', 'process.exit(1)'],
-				[],
-				'/tmp',
+				['tests/target.test.ts'],
+				canonicalTmpDir(),
 				0,
 				() => {
 					restoreClock();
@@ -357,7 +358,7 @@ describe('computeReport adversarial tests', () => {
 			patches,
 			['true'],
 			[],
-			'/tmp',
+			canonicalTmpDir(),
 			Infinity,
 		);
 		// If budgetMs = Infinity, budgetExceeded should always be false
@@ -368,7 +369,12 @@ describe('computeReport adversarial tests', () => {
 	// 10. Empty patches array returns valid empty report
 	test('empty patches array returns valid report with all zeros', async () => {
 		const patches: MutationPatch[] = [];
-		const report = await executeMutationSuite(patches, ['true'], [], '/tmp');
+		const report = await executeMutationSuite(
+			patches,
+			['true'],
+			[],
+			canonicalTmpDir(),
+		);
 		expect(report.totalMutants).toBe(0);
 		expect(report.killed).toBe(0);
 		expect(report.survived).toBe(0);

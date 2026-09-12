@@ -101,7 +101,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 			const result = await executeMutation(
 				mockPatch,
 				['echo', 'test'],
-				[],
+				['source.test.ts'],
 				tempDir,
 			);
 
@@ -141,7 +141,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 			const result = await executeMutation(
 				mockPatch,
 				['echo', 'test'],
-				[],
+				['source.test.ts'],
 				tempDir,
 			);
 
@@ -186,7 +186,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		const result = await executeMutation(
 			mockPatch,
 			['echo', 'test'],
-			[],
+			['source.test.ts'],
 			tempDir,
 		);
 
@@ -243,7 +243,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		const result = await executeMutation(
 			mockPatch,
 			['echo', 'test'],
-			[],
+			['source.test.ts'],
 			tempDir,
 		);
 
@@ -285,7 +285,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		const result = await executeMutation(
 			mockPatch,
 			['echo', 'test'],
-			[],
+			['source.test.ts'],
 			tempDir,
 		);
 
@@ -328,7 +328,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		const result = await executeMutation(
 			mockPatch,
 			['echo', 'test'],
-			[],
+			['source.test.ts'],
 			tempDir,
 		);
 
@@ -364,7 +364,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		const result = await executeMutation(
 			mockPatch,
 			['echo', 'test'],
-			[],
+			['source.test.ts'],
 			tempDir,
 		);
 
@@ -406,7 +406,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		const result = await executeMutation(
 			mockPatch,
 			['echo', 'test'],
-			[],
+			['source.test.ts'],
 			tempDir,
 		);
 
@@ -460,7 +460,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		const result = await executeMutation(
 			mockPatch,
 			['echo', 'test'],
-			[],
+			['source.test.ts'],
 			tempDir,
 		);
 
@@ -497,7 +497,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		const result = await executeMutation(
 			mockPatch,
 			['echo', 'test'],
-			[],
+			['source.test.ts'],
 			tempDir,
 		);
 
@@ -549,7 +549,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		const result = await executeMutation(
 			mockPatch,
 			['echo', 'test'],
-			[],
+			['source.test.ts'],
 			tempDir,
 		);
 
@@ -585,7 +585,7 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		const result = await executeMutation(
 			mockPatch,
 			['echo', 'test'],
-			[],
+			['source.test.ts'],
 			tempDir,
 		);
 

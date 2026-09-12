@@ -68,11 +68,16 @@ describe('.opencode/skills/execute/SKILL.md protocol content', () => {
 			expect(skillContent).toContain('Any blank "value: ___" field');
 		});
 
-		it('runs graph regression sweeps once per changed source file with honest outcomes', () => {
+		it('runs bounded graph regression sweeps with honest outcomes', () => {
 			expect(skillContent).toContain(
+				'batch of up to 50 normalized source files',
+			);
+			expect(skillContent).toContain('one source file for attribution');
+			expect(skillContent).toContain('bounded graph-call evidence');
+			expect(skillContent).toContain('narrow or split the source batch');
+			expect(skillContent).not.toContain(
 				'one `test_runner` call per changed source file',
 			);
-			expect(skillContent).toContain('per-file regression-sweep evidence');
 			expect(skillContent).not.toContain(
 				'files:[<all source files changed by coder>]',
 			);

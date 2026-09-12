@@ -204,6 +204,12 @@
 		"justification": "Round-3 plan decision: running-tests/SKILL.md:60 is repo-development (a worked test_runner scope example for opencode-swarm contributors)."
 	},
 	{
+		"file": ".opencode/skills/running-tests/SKILL.md",
+		"match": "src/tools/test-runner.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference used in the running-tests skill's worked multi-source test_runner example; this skill documents opencode-swarm contributors' own test_runner contract."
+	},
+	{
 		"file": ".opencode/skills/engineering-conventions/SKILL.md",
 		"match": "src/index.ts",
 		"category": "repo-development",

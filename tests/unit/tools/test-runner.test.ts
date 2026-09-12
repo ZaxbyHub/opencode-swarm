@@ -1480,14 +1480,14 @@ describe('test-runner.ts — targeted framework safeguards', () => {
 });
 
 /**
- * MAX_SAFE_SOURCE_FILES guard tests (issue #864)
+ * Scope-specific source-resolution bounds (issues #864/#2492)
  *
- * scope "graph" and scope "impact" must reject before discovery fan-out when the
- * caller provides more than MAX_SAFE_SOURCE_FILES source files.  Without this guard,
- * discovery fans out to many test files, triggers scope_exceeded, and LLMs
- * cascade to scope "all" (env-gated) — freezing the OpenCode session.
+ * MAX_SAFE_SOURCE_FILES = 1 is convention-only; graph and impact admit up to
+ * MAX_SAFE_TEST_FILES normalized source inputs and bind the resolved test set
+ * to the same cap. These fixtures have no matching tests, so they exercise the
+ * bounded zero-test fallback with typed skip resolution evidence.
  */
-describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
+describe('test-runner.ts - scope-specific source resolution bounds', () => {
 	test('MAX_SAFE_SOURCE_FILES is exported and equals 1', () => {
 		expect(MAX_SAFE_SOURCE_FILES).toBe(1);
 	});
@@ -1524,7 +1524,7 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		})();
 	}, 15000);
 
-	test('scope "graph" with 2 source files returns scope_exceeded before discovery fan-out', async () => {
+	test('scope "graph" with 2 source files reaches bounded zero-test fallback', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-graph-2src-')),
 		);
@@ -1549,11 +1549,11 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		const parsed = JSON.parse(result);
 
 		expect(parsed.success).toBe(false);
-		expect(parsed.scope).toBe('graph');
-		expect(parsed.outcome).toBe('scope_exceeded');
-		expect(parsed.error).toContain('accepts at most');
-		expect(parsed.error).toContain('Treat this as SKIP without retry');
-		expect(parsed.message).toContain('Call test_runner once per source file');
+		expect(parsed.scope).toBe('convention');
+		expect(parsed.outcome).toBe('skip');
+		expect(parsed.attempted_scope).toBe('graph');
+		expect(parsed.resolution.cap).toBe(MAX_SAFE_TEST_FILES);
+		expect(parsed.resolution.evaluable).toBe(false);
 
 		process.chdir(originalCwd);
 		(() => {
@@ -1565,7 +1565,7 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		})();
 	}, 15000);
 
-	test('scope "graph" with many source files returns scope_exceeded before discovery fan-out', async () => {
+	test('scope "graph" with many source files remains admitted with bounded zero-test fallback', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-graph-manysrc-')),
 		);
@@ -1593,9 +1593,9 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		const parsed = JSON.parse(result);
 
 		expect(parsed.success).toBe(false);
-		expect(parsed.scope).toBe('graph');
-		expect(parsed.outcome).toBe('scope_exceeded');
-		expect(parsed.error).toContain('got 20');
+		expect(parsed.scope).toBe('convention');
+		expect(parsed.outcome).toBe('skip');
+		expect(parsed.resolution.sourceFiles).toHaveLength(manyFiles.length);
 
 		process.chdir(originalCwd);
 		(() => {
@@ -1606,14 +1606,12 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 			}
 		})();
 	}, 15000);
-
-	test('scope "impact" with 2 source files returns scope_exceeded before discovery fan-out', async () => {
+	test('scope "impact" with 2 source files reaches bounded zero-test fallback', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-impact-2src-')),
 		);
 		const originalCwd = process.cwd();
 		process.chdir(tempDir);
-
 		fs.writeFileSync(
 			'package.json',
 			JSON.stringify({
@@ -1624,20 +1622,17 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		fs.mkdirSync('src', { recursive: true });
 		fs.writeFileSync('src/a.ts', 'export const a = 1;');
 		fs.writeFileSync('src/b.ts', 'export const b = 2;');
-
 		const result = await test_runner.execute(
 			{ scope: 'impact', files: ['src/a.ts', 'src/b.ts'] },
 			{} as any,
 		);
 		const parsed = JSON.parse(result);
-
 		expect(parsed.success).toBe(false);
-		expect(parsed.scope).toBe('impact');
-		expect(parsed.outcome).toBe('scope_exceeded');
-		expect(parsed.error).toContain('accepts at most');
-		expect(parsed.error).toContain('Treat this as SKIP without retry');
-		expect(parsed.message).toContain('Call test_runner once per source file');
-
+		expect(parsed.scope).toBe('convention');
+		expect(parsed.outcome).toBe('skip');
+		expect(parsed.attempted_scope).toBe('graph');
+		expect(parsed.resolution.cap).toBe(MAX_SAFE_TEST_FILES);
+		expect(parsed.resolution.evaluable).toBe(false);
 		process.chdir(originalCwd);
 		(() => {
 			try {
@@ -1647,14 +1642,12 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 			}
 		})();
 	}, 15000);
-
 	test('scope "convention" with 2 source files returns scope_exceeded before discovery', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-conv-2src-')),
 		);
 		const originalCwd = process.cwd();
 		process.chdir(tempDir);
-
 		fs.writeFileSync(
 			'package.json',
 			JSON.stringify({
@@ -1665,7 +1658,6 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		fs.mkdirSync('src', { recursive: true });
 		fs.writeFileSync('src/a.ts', 'export const a = 1;');
 		fs.writeFileSync('src/b.ts', 'export const b = 2;');
-
 		const result = await test_runner.execute(
 			{ scope: 'convention', files: ['src/a.ts', 'src/b.ts'] },
 			{} as any,
@@ -1678,7 +1670,19 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		expect(parsed.error).toContain('accepts at most');
 		expect(parsed.error).toContain('Treat this as SKIP without retry');
 		expect(parsed.message).toContain('Call test_runner once per source file');
-
+		expect(parsed.resolution).toMatchObject({
+			requestedScope: 'convention',
+			effectiveScope: 'convention',
+			sourceFiles: ['src/a.ts', 'src/b.ts'],
+			resolvedFiles: [],
+			cap: MAX_SAFE_TEST_FILES,
+			decision: 'scope_exceeded',
+			estimate: { count: 0, status: 'not_run' },
+			estimateCount: 0,
+			estimateStatus: 'not_run',
+			fallbackReason: null,
+			evaluable: false,
+		});
 		process.chdir(originalCwd);
 		(() => {
 			try {
@@ -1688,7 +1692,6 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 			}
 		})();
 	}, 15000);
-
 	test('scope "convention" with 1 source file + 1 direct test file does NOT trigger source-file guard', async () => {
 		// Direct test files are exempt from the MAX_SAFE_SOURCE_FILES limit.
 		// Only source-file discovery fans out; direct test file paths are explicitly named.
@@ -1697,14 +1700,12 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		);
 		const originalCwd = process.cwd();
 		process.chdir(tempDir);
-
 		fs.mkdirSync('src', { recursive: true });
 		fs.writeFileSync('src/utils.ts', 'export const x = 1;');
 		fs.writeFileSync(
 			'src/utils.test.ts',
 			'import { x } from "./utils"; export const v = x;',
 		);
-
 		const resolved = getTestFilesFromConvention([
 			'src/utils.ts',
 			'src/utils.test.ts',
@@ -1721,16 +1722,15 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		})();
 	}, 5000);
 
-	test('scope "all" blocked error does not recommend "graph" with multiple files', async () => {
+	test('scope "all" blocked error gives bounded "graph" guidance', async () => {
 		const result = await test_runner.execute({ scope: 'all' }, {} as any);
 		const parsed = JSON.parse(result);
-
 		expect(parsed.success).toBe(false);
 		expect(parsed.outcome).toBe('error');
 		// Must not name the env bypass (LLMs follow such hints literally)
 		expect(parsed.error).not.toContain('SWARM_ALLOW_FULL_SUITE');
 		expect(parsed.message).not.toContain('SWARM_ALLOW_FULL_SUITE');
-		expect(parsed.error).toContain('scope "convention"');
-		expect(parsed.message).toContain('exactly one source file');
+		expect(parsed.error).toContain('up to 50 normalized source files');
+		expect(parsed.message).toContain('up to 50 normalized source files');
 	});
 });

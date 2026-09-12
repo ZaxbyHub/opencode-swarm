@@ -58,6 +58,8 @@ function makeGitApplyFailed(status: number): ReturnType<typeof spawnSync> {
 	};
 }
 
+const BENIGN_TEST_FILES = ['source.test.ts'];
+
 describe('executeMutation — ENOENT error handling', () => {
 	let mockWorkingDir: string;
 	let savedSpawnSync: typeof _internals.spawnSync;
@@ -97,7 +99,7 @@ describe('executeMutation — ENOENT error handling', () => {
 			const result = await executeMutation(
 				mockPatch,
 				['npm', 'test'],
-				[],
+				BENIGN_TEST_FILES,
 				mockWorkingDir,
 			);
 
@@ -126,7 +128,7 @@ describe('executeMutation — ENOENT error handling', () => {
 			const result = await executeMutation(
 				mockPatch,
 				['npm', 'test'],
-				[],
+				BENIGN_TEST_FILES,
 				mockWorkingDir,
 			);
 
@@ -159,7 +161,7 @@ describe('executeMutation — ENOENT error handling', () => {
 			const result = await executeMutation(
 				mockPatch,
 				['npm', 'test'],
-				[],
+				BENIGN_TEST_FILES,
 				mockWorkingDir,
 			);
 
@@ -190,7 +192,7 @@ describe('executeMutation — ENOENT error handling', () => {
 			const result = await executeMutation(
 				mockPatch,
 				['npm', 'test'],
-				[],
+				BENIGN_TEST_FILES,
 				mockWorkingDir,
 			);
 
@@ -224,7 +226,7 @@ describe('executeMutation — ENOENT error handling', () => {
 			const result = await executeMutation(
 				mockPatch,
 				['npm', 'test'],
-				[],
+				BENIGN_TEST_FILES,
 				mockWorkingDir,
 			);
 

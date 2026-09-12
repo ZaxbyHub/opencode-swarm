@@ -44,7 +44,7 @@ import {
 // Saved real spawnSync so it can be restored after each test, keeping the
 // seam injection isolated from other test files.
 let originalSpawnSync: typeof engineInternals.spawnSync;
-
+const t = ['source.test.ts'];
 describe('executeMutation - shell injection mitigation', () => {
 	const workingDir = '/fake/workdir';
 	const testCommand = ['npm', 'test'];
@@ -100,7 +100,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				patch: 'diff content',
 			};
 
-			await executeMutation(patch, testCommand, [], workingDir);
+			await executeMutation(patch, testCommand, t, workingDir);
 
 			// Verify writeFileSync was called with a sanitized path
 			const writeCall = mockWriteFileSync.mock.calls[0];
@@ -124,7 +124,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				patch: 'diff content',
 			};
 
-			await executeMutation(patch, testCommand, [], workingDir);
+			await executeMutation(patch, testCommand, t, workingDir);
 
 			const writeCall = mockWriteFileSync.mock.calls[0];
 			const patchFilePath = writeCall[0];
@@ -149,7 +149,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				patch: 'diff content',
 			};
 
-			await executeMutation(patch, testCommand, [], workingDir);
+			await executeMutation(patch, testCommand, t, workingDir);
 
 			const writeCall = mockWriteFileSync.mock.calls[0];
 			const patchFilePath = writeCall[0];
@@ -168,7 +168,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				patch: 'diff content',
 			};
 
-			await executeMutation(patch, testCommand, [], workingDir);
+			await executeMutation(patch, testCommand, t, workingDir);
 
 			const writeCall = mockWriteFileSync.mock.calls[0];
 			const patchFilePath = writeCall[0];
@@ -187,7 +187,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				patch: 'diff content',
 			};
 
-			await executeMutation(patch, testCommand, [], workingDir);
+			await executeMutation(patch, testCommand, t, workingDir);
 
 			const writeCall = mockWriteFileSync.mock.calls[0];
 			const patchFilePath = writeCall[0];
@@ -206,7 +206,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				patch: 'diff content',
 			};
 
-			await executeMutation(patch, testCommand, [], workingDir);
+			await executeMutation(patch, testCommand, t, workingDir);
 
 			const writeCall = mockWriteFileSync.mock.calls[0];
 			const patchFilePath = writeCall[0];
@@ -226,7 +226,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				patch: 'diff content',
 			};
 
-			await executeMutation(patch, testCommand, [], workingDir);
+			await executeMutation(patch, testCommand, t, workingDir);
 
 			// Find the git apply call
 			const gitApplyCalls = mockSpawnSync.mock.calls.filter(
@@ -258,7 +258,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				patch: 'diff content',
 			};
 
-			await executeMutation(patch, testCommand, [], workingDir);
+			await executeMutation(patch, testCommand, t, workingDir);
 
 			// Verify NO calls use template literals or string concatenation for args
 			const allCalls = mockSpawnSync.mock.calls;
@@ -281,7 +281,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				patch: 'diff content',
 			};
 
-			await executeMutation(patch, testCommand, [], workingDir);
+			await executeMutation(patch, testCommand, t, workingDir);
 
 			// Find the git apply -R call
 			const gitRevertCalls = mockSpawnSync.mock.calls.filter(
@@ -354,7 +354,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				},
 			);
 
-			const result = await executeMutation(patch, testCommand, [], workingDir);
+			const result = await executeMutation(patch, testCommand, t, workingDir);
 
 			expect(result.outcome).toBe('error');
 			expect(result.error).toContain('Git apply failed');
@@ -397,7 +397,7 @@ describe('executeMutation - shell injection mitigation', () => {
 			);
 
 			// The function should NOT throw - revertError is captured in result
-			const result = await executeMutation(patch, testCommand, [], workingDir);
+			const result = await executeMutation(patch, testCommand, t, workingDir);
 
 			expect(result.outcome).toBe('error');
 			expect(result.error).toContain('Failed to revert mutation');
@@ -437,7 +437,7 @@ describe('executeMutation - shell injection mitigation', () => {
 				},
 			);
 
-			const result = await executeMutation(patch, testCommand, [], workingDir);
+			const result = await executeMutation(patch, testCommand, t, workingDir);
 
 			expect(result.outcome).toBe('error');
 			expect(result.error).toContain('my_special_patch_id');
@@ -513,7 +513,7 @@ describe('executeMutation - shell injection mitigation', () => {
 			const report = await executeMutationSuite(
 				patches,
 				testCommand,
-				[],
+				t,
 				workingDir,
 			);
 

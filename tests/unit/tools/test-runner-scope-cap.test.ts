@@ -1,442 +1,421 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
-	estimateFanOut,
+	_internals,
 	MAX_SAFE_TEST_FILES,
 	test_runner,
-} from '../../../src/tools/test-runner.js';
+} from '../../../src/tools/test-runner';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
-// Note: mock.module is called only inside test 17 (Layer 3) within a test-scoped
-// callback. Bun's test runner auto-cleans test-scoped mock.module calls after each
-// test. No file-level afterEach(() => mock.restore()) is needed, as it would
-// incorrectly clear module mocks that other tests (10-16) depend on via getExecute().
+let tempDir: string;
+const originalLoadImpactMap = _internals.loadImpactMap;
+const originalAvailable = _internals.isCommandAvailable;
+const originalSpawn = _internals.bunSpawn;
 
-function getExecute() {
-	return test_runner.execute as unknown as (
-		args: Record<string, unknown>,
-		directory: string,
-	) => Promise<string>;
+function stream(text: string): ReadableStream<Uint8Array> {
+	const bytes = new TextEncoder().encode(text);
+	return new ReadableStream({
+		start(controller) {
+			if (bytes.length > 0) controller.enqueue(bytes);
+			controller.close();
+		},
+	});
 }
 
-function parseResult(result: string) {
-	return JSON.parse(result);
+function installRunner(calls: string[][]): void {
+	_internals.isCommandAvailable = (() =>
+		true) as typeof _internals.isCommandAvailable;
+	_internals.bunSpawn = ((command: string[]) => {
+		calls.push(command);
+		return {
+			stdout: stream('1 pass'),
+			stderr: stream(''),
+			exited: Promise.resolve(0),
+			exitCode: 0,
+			kill: () => {},
+			killTree: async () => {},
+		};
+	}) as typeof _internals.bunSpawn;
 }
 
-function normalizeForImpactMap(p: string): string {
-	return p.replace(/\\/g, '/');
+function execute(
+	args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+	return test_runner
+		.execute(args, { directory: tempDir } as never)
+		.then((raw) => JSON.parse(raw as string) as Record<string, unknown>);
 }
 
-function createPackageJson(cwd: string) {
-	fs.writeFileSync(
-		path.join(cwd, 'package.json'),
-		JSON.stringify({
-			name: 'test-project',
-			scripts: { test: 'bun test' },
-			devDependencies: { bun: '^1.0.0' },
-		}),
-	);
-}
+type ResolutionExpectation = {
+	requestedScope: string;
+	effectiveScope: string;
+	sourceFiles: string[];
+	resolvedFiles: string[];
+	decision: string;
+	evaluable: boolean;
+	estimateCount?: number;
+	estimateStatus?: string;
+	fallbackReason?: string | null;
+	cacheStatus?: string;
+};
 
-function createSourceFiles(cwd: string, count: number) {
-	const srcDir = path.join(cwd, 'src');
-	fs.mkdirSync(srcDir, { recursive: true });
-	for (let i = 0; i < count; i++) {
-		fs.writeFileSync(
-			path.join(srcDir, `file${i}.ts`),
-			`export const val${i} = ${i};\n`,
-		);
-	}
-}
-
-function createImpactMapCache(
-	cwd: string,
-	sourceFileCount: number,
-	testsPerSource: number = 1,
-) {
-	const cacheDir = path.join(cwd, '.swarm', 'cache');
-	fs.mkdirSync(cacheDir, { recursive: true });
-	const impactMap: Record<string, string[]> = {};
-	for (let i = 0; i < sourceFileCount; i++) {
-		const rawPath = path.join(cwd, 'src', `file${i}.ts`);
-		const normalized = normalizeForImpactMap(rawPath);
-		const tests: string[] = [];
-		for (let j = 0; j < testsPerSource; j++) {
-			tests.push(`tests/file${i}_${j}.test.ts`);
-		}
-		impactMap[normalized] = tests;
-	}
-	const data = {
-		// Use a date far in the future so the cache is never considered stale
-		// (isCacheStale checks if source file mtime > generatedAt; with 2099, current files are always older)
-		generatedAt: new Date('2099-01-01T00:00:00.000Z').toISOString(),
-		fileCount: Object.keys(impactMap).length,
-		map: impactMap,
+function expectResolutionEnvelope(
+	result: Record<string, unknown>,
+	expected: ResolutionExpectation,
+): void {
+	const resolution = result.resolution as Record<string, unknown>;
+	const estimateCount = expected.estimateCount ?? 0;
+	const estimateStatus = expected.estimateStatus ?? 'not_run';
+	expect(resolution).toMatchObject({
+		requestedScope: expected.requestedScope,
+		effectiveScope: expected.effectiveScope,
+		sourceFiles: expected.sourceFiles,
+		resolvedFiles: expected.resolvedFiles,
+		cap: MAX_SAFE_TEST_FILES,
+		decision: expected.decision,
+		estimate: { count: estimateCount, status: estimateStatus },
+		estimateCount,
+		estimateStatus,
+		fallbackReason: expected.fallbackReason ?? null,
+		evaluable: expected.evaluable,
+	});
+	const estimate = resolution.estimate as {
+		count: number;
+		status: string;
 	};
-	fs.writeFileSync(
-		path.join(cacheDir, 'impact-map.json'),
-		JSON.stringify(data, null, 2),
-	);
+	expect(estimate.count).toBe(resolution.estimateCount);
+	expect(estimate.status).toBe(resolution.estimateStatus);
+	if (expected.cacheStatus !== undefined) {
+		expect(resolution.cacheStatus).toBe(expected.cacheStatus);
+	}
 }
 
-describe('two-layer pre-resolution guard', () => {
-	let tempDir: string;
-	let originalCwd: string;
-	let execute: ReturnType<typeof getExecute>;
+function writeProject(): void {
+	fs.writeFileSync(
+		path.join(tempDir, 'package.json'),
+		JSON.stringify({ name: 'scope-cap-2492', scripts: { test: 'bun test' } }),
+	);
+	fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+}
 
-	beforeEach(async () => {
-		// Wrap mkdtempSync in realpathSync so the canonical path matches what
-		// production code compares against. On macOS, os.tmpdir() returns
-		// /var/folders/... (symlinked to /private/var/folders/...); without
-		// realpath, the result (which is process.chdir'd below) would mismatch
-		// the .swarm containment guards. Issue #1729 macOS quarantine.
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-cap-')),
-		);
-		originalCwd = process.cwd();
-		process.chdir(tempDir);
-		execute = getExecute();
-		createPackageJson(tempDir);
-	});
+beforeEach(() => {
+	tempDir = canonicalMkdtemp('scope-cap-2492-');
+	writeProject();
+	process.env.SWARM_LANG_BACKEND = 'legacy';
+});
 
-	afterEach(() => {
-		process.chdir(originalCwd);
-		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
-		} catch {
-			// Ignore cleanup errors
-		}
-	});
+afterEach(() => {
+	_internals.loadImpactMap = originalLoadImpactMap;
+	_internals.isCommandAvailable = originalAvailable;
+	_internals.bunSpawn = originalSpawn;
+	delete process.env.SWARM_LANG_BACKEND;
+	fs.rmSync(tempDir, { recursive: true, force: true });
+});
 
-	describe('Layer 1: MAX_SAFE_SOURCE_FILES guard (>1 source file → Layer 1 fires)', () => {
-		test('1. graph scope with 60 source files → Layer 1 fires first, error mentions "accepts at most 1 source file"', async () => {
-			const sourceFileCount = 60;
-			createSourceFiles(tempDir, sourceFileCount);
-			createImpactMapCache(tempDir, sourceFileCount, 1);
-
-			const sourceFiles = Array.from(
-				{ length: sourceFileCount },
-				(_, i) => `src/file${i}.ts`,
-			);
-
-			const result = await execute(
-				{ scope: 'graph', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
-			// Layer 1 fires before estimateFanOut is called
-			expect(parsed.error).toContain('accepts at most 1 source file');
-		});
-
-		test('2. impact scope with 60 source files → Layer 1 fires first, error mentions "accepts at most 1 source file"', async () => {
-			const sourceFileCount = 60;
-			createSourceFiles(tempDir, sourceFileCount);
-			createImpactMapCache(tempDir, sourceFileCount, 1);
-
-			const sourceFiles = Array.from(
-				{ length: sourceFileCount },
-				(_, i) => `src/file${i}.ts`,
-			);
-
-			const result = await execute(
-				{ scope: 'impact', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
-			expect(parsed.error).toContain('accepts at most 1 source file');
-			expect(parsed.message).toContain('impact');
-		});
-
-		test('3. graph scope with MAX_SAFE_SOURCE_FILES+1 (51) source files → Layer 1 fires before estimateFanOut', async () => {
-			const sourceFileCount = MAX_SAFE_TEST_FILES + 1; // 51
-			createSourceFiles(tempDir, sourceFileCount);
-			createImpactMapCache(tempDir, sourceFileCount, 1);
-
-			const sourceFiles = Array.from(
-				{ length: sourceFileCount },
-				(_, i) => `src/file${i}.ts`,
-			);
-
-			const result = await execute(
-				{ scope: 'graph', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
-			// Layer 1 fires — never reaches Layer 2 estimateFanOut
-			expect(parsed.error).toContain('accepts at most 1 source file');
-		});
-
-		test('4. multiple tests per source file (10 files × 6 tests = 60) → Layer 1 fires before estimateFanOut', async () => {
-			const sourceFileCount = 10;
-			createSourceFiles(tempDir, sourceFileCount);
-			// 10 source files × 6 tests each = 60 total, exceeds MAX_SAFE_TEST_FILES (50)
-			createImpactMapCache(tempDir, sourceFileCount, 6);
-
-			const sourceFiles = Array.from(
-				{ length: sourceFileCount },
-				(_, i) => `src/file${i}.ts`,
-			);
-
-			const result = await execute(
-				{ scope: 'graph', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
-			// Layer 1 fires for 10 source files — never reaches Layer 2
-			expect(parsed.error).toContain('accepts at most 1 source file');
-		});
-	});
-
-	describe('Layer 2: estimateFanOut guard (1 source file with high fan-out)', () => {
-		test('5. graph scope with 1 source file mapping to 60 tests → Layer 2 estimateFanOut fires', async () => {
-			// 1 source file → 60 test files (exceeds MAX_SAFE_TEST_FILES of 50)
-			createSourceFiles(tempDir, 1);
-			createImpactMapCache(tempDir, 1, 60);
-
-			const sourceFiles = ['src/file0.ts'];
-
-			// Verify fan-out estimate
-			const estimate = await estimateFanOut(sourceFiles, tempDir);
-			expect(estimate.estimatedCount).toBe(60);
-
-			const result = await execute(
-				{ scope: 'graph', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
-			// Layer 2 fires (Layer 1 bypassed since sourceFiles.length === 1)
-			expect(parsed.error).toContain('exceeds safe maximum');
-		});
-
-		test('6. impact scope with 1 source file mapping to 60 tests → Layer 2 estimateFanOut fires', async () => {
-			// 1 source file → 60 test files (exceeds MAX_SAFE_TEST_FILES of 50)
-			createSourceFiles(tempDir, 1);
-			createImpactMapCache(tempDir, 1, 60);
-
-			const sourceFiles = ['src/file0.ts'];
-
-			// Verify fan-out estimate
-			const estimate = await estimateFanOut(sourceFiles, tempDir);
-			expect(estimate.estimatedCount).toBe(60);
-
-			const result = await execute(
-				{ scope: 'impact', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
-			// Layer 2 fires (Layer 1 bypassed since sourceFiles.length === 1)
-			expect(parsed.error).toContain('exceeds safe maximum');
-		});
-
-		test('7. graph scope with 1 source file mapping to exactly MAX_SAFE_TEST_FILES (50) → Layer 2 NOT triggered, proceeds', async () => {
-			// 1 source file → 50 test files (exactly at MAX_SAFE_TEST_FILES, should proceed)
-			createSourceFiles(tempDir, 1);
-			createImpactMapCache(tempDir, 1, MAX_SAFE_TEST_FILES);
-
-			const sourceFiles = ['src/file0.ts'];
-
-			const estimate = await estimateFanOut(sourceFiles, tempDir);
-			expect(estimate.estimatedCount).toBe(50);
-
-			const result = await execute(
-				{ scope: 'graph', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			// Fan-out exactly at limit → should proceed (not scope_exceeded)
-			expect(parsed.outcome).not.toBe('scope_exceeded');
-		});
-
-		test('8. impact scope with 1 source file mapping to exactly MAX_SAFE_TEST_FILES (50) → Layer 2 NOT triggered, proceeds', async () => {
-			// 1 source file → 50 test files (exactly at MAX_SAFE_TEST_FILES, should proceed)
-			createSourceFiles(tempDir, 1);
-			createImpactMapCache(tempDir, 1, MAX_SAFE_TEST_FILES);
-
-			const sourceFiles = ['src/file0.ts'];
-
-			const estimate = await estimateFanOut(sourceFiles, tempDir);
-			expect(estimate.estimatedCount).toBe(50);
-
-			const result = await execute(
-				{ scope: 'impact', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			// Fan-out exactly at limit → should proceed (not scope_exceeded)
-			expect(parsed.outcome).not.toBe('scope_exceeded');
-		});
-	});
-
-	describe('Layer ordering: Layer 1 fires before Layer 2', () => {
-		test('9. 60 source files → Layer 1 fires, estimateFanOut is never called', async () => {
-			const sourceFileCount = 60;
-			createSourceFiles(tempDir, sourceFileCount);
-			createImpactMapCache(tempDir, sourceFileCount, 1);
-
-			const sourceFiles = Array.from(
-				{ length: sourceFileCount },
-				(_, i) => `src/file${i}.ts`,
-			);
-
-			// estimateFanOut would return 60 if called, but it should NOT be called
-			const result = await execute(
-				{ scope: 'graph', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
-			// Error should be from Layer 1, not Layer 2
-			expect(parsed.error).toContain('accepts at most 1 source file');
-			expect(parsed.error).not.toContain('exceeds safe maximum');
-		});
-	});
-
-	describe('graph/impact with small fan-out (Layer 2 bypassed)', () => {
-		test('10. graph scope with 5 source files (fan-out = 5) → Layer 1 bypassed, Layer 2 bypassed, proceeds', async () => {
-			const sourceFileCount = 5;
-			createSourceFiles(tempDir, sourceFileCount);
-			createImpactMapCache(tempDir, sourceFileCount, 1);
-
-			const sourceFiles = Array.from(
-				{ length: sourceFileCount },
-				(_, i) => `src/file${i}.ts`,
-			);
-
-			const result = await execute(
-				{ scope: 'graph', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			// Fan-out (5) <= MAX_SAFE_TEST_FILES (50), source files (5) > 1
-			// → Layer 1 fires for source file count, but with current implementation
-			// sourceFiles.length > MAX_SAFE_SOURCE_FILES (1) so it still errors
-			// Note: This test documents current behavior where multiple source files
-			// always hit Layer 1 regardless of fan-out
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
-		});
-
-		test('11. impact scope with 5 source files (fan-out = 5) → proceeds', async () => {
-			const sourceFileCount = 5;
-			createSourceFiles(tempDir, sourceFileCount);
-			createImpactMapCache(tempDir, sourceFileCount, 1);
-
-			const sourceFiles = Array.from(
-				{ length: sourceFileCount },
-				(_, i) => `src/file${i}.ts`,
-			);
-
-			const result = await execute(
-				{ scope: 'impact', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-
-			// Same as test 10 — Layer 1 fires for multiple source files
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
-		});
-	});
-
-	describe('scope "all" bypasses pre-resolution guard', () => {
-		test('12. scope "all" bypasses pre-resolution cap (reaches own env guard)', async () => {
-			// scope "all" is env-gated (SWARM_ALLOW_FULL_SUITE); without the env opt-in
-			// it returns its own guard error, proving it bypassed the pre-resolution cap.
-			const result = await execute({ scope: 'all', files: [] }, tempDir);
-			const parsed = parseResult(result);
-			expect(parsed.outcome).not.toBe('scope_exceeded');
-		});
-
-		test('13. scope "all" without SWARM_ALLOW_FULL_SUITE returns error (own guard)', async () => {
-			const result = await execute({ scope: 'all', files: [] }, tempDir);
-			const parsed = parseResult(result);
-			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('scope "all"');
-		});
-	});
-
-	describe('scope "convention" bypasses pre-resolution guard', () => {
-		test('14. scope "convention" with 1 source file does NOT trigger pre-resolution guard', async () => {
-			// Convention scope bypasses guards when sourceFiles.length === 1
-			// Layer 1 fires for sourceFiles.length > 1, Layer 2 fires for fan-out > 50
-			createSourceFiles(tempDir, 1);
-
-			const testDir = path.join(tempDir, 'src', '__tests__');
-			fs.mkdirSync(testDir, { recursive: true });
+describe('test-runner safe resolution cap', () => {
+	test('exactly MAX_SAFE_TEST_FILES normalized source inputs remain eligible', async () => {
+		const sources = Array.from({ length: MAX_SAFE_TEST_FILES }, (_, index) => {
+			const file = `src/source-${index}.ts`;
 			fs.writeFileSync(
-				path.join(testDir, 'file0.test.ts'),
-				`import { val0 } from "../file0"; test("file0", () => expect(val0).toBe(0));`,
+				path.join(tempDir, file),
+				`export const value${index} = ${index};\n`,
 			);
+			return file;
+		});
+		fs.writeFileSync(
+			path.join(tempDir, 'src/source-0.test.ts'),
+			sources
+				.map((file) => `import './${path.basename(file, '.ts')}';`)
+				.join('\n'),
+		);
+		const calls: string[][] = [];
+		installRunner(calls);
 
-			const sourceFiles = ['src/file0.ts'];
-			const result = await execute(
-				{ scope: 'convention', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-			// Convention scope with 1 source file should not trigger Layer 1 or Layer 2
-			expect(
-				parsed.success !== false || !parsed.error?.includes('accepts at most'),
-			).toBe(true);
-			expect(parsed.error || '').not.toContain('accepts at most');
-			expect(parsed.error || '').not.toContain('exceeds safe maximum');
+		const result = await execute({ scope: 'graph', files: sources });
+
+		expect(result.success).toBe(true);
+		expect(calls).toHaveLength(1);
+		expectResolutionEnvelope(result, {
+			requestedScope: 'graph',
+			effectiveScope: 'graph',
+			sourceFiles: sources,
+			resolvedFiles: ['src/source-0.test.ts'],
+			decision: 'execute',
+			evaluable: true,
+			estimateStatus: 'advisory',
+			cacheStatus: 'missing_unverified',
 		});
 	});
 
-	describe('edge cases', () => {
-		test('15. estimate exactly at MAX_SAFE_TEST_FILES (50) with 1 source file should proceed', async () => {
-			createSourceFiles(tempDir, 1);
-			createImpactMapCache(tempDir, 1, MAX_SAFE_TEST_FILES);
+	test('more than MAX_SAFE_TEST_FILES inputs fail before discovery or spawn', async () => {
+		const sources = Array.from(
+			{ length: MAX_SAFE_TEST_FILES + 1 },
+			(_, index) => `src/source-${index}.ts`,
+		);
+		for (const source of sources) {
+			fs.writeFileSync(path.join(tempDir, source), 'export const value = 1;\n');
+		}
+		const calls: string[][] = [];
+		installRunner(calls);
 
-			const sourceFiles = ['src/file0.ts'];
+		const result = await execute({ scope: 'impact', files: sources });
 
-			const result = await execute(
-				{ scope: 'graph', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-			// Fan-out exactly at limit → Layer 2 allows it through
-			expect(parsed.outcome).not.toBe('scope_exceeded');
+		expect(result.success).toBe(false);
+		expect(result.outcome).toBe('scope_exceeded');
+		expectResolutionEnvelope(result, {
+			requestedScope: 'impact',
+			effectiveScope: 'impact',
+			sourceFiles: sources,
+			resolvedFiles: [],
+			decision: 'scope_exceeded',
+			evaluable: false,
+		});
+		expect(calls).toHaveLength(0);
+	});
+
+	test.each([
+		'graph',
+		'impact',
+	] as const)('%s source overflow keeps a bounded 51-entry diagnostic envelope', async (scope) => {
+		const sources = Array.from(
+			{ length: MAX_SAFE_TEST_FILES + 10 },
+			(_, index) => `src/overflow-${index}.ts`,
+		);
+		for (const source of sources) {
+			fs.writeFileSync(path.join(tempDir, source), 'export const value = 1;\n');
+		}
+		const calls: string[][] = [];
+		installRunner(calls);
+
+		const result = await execute({ scope, files: sources });
+
+		expect(result.success).toBe(false);
+		expect(result.outcome).toBe('scope_exceeded');
+		expectResolutionEnvelope(result, {
+			requestedScope: scope,
+			effectiveScope: scope,
+			sourceFiles: sources.slice(0, MAX_SAFE_TEST_FILES + 1),
+			resolvedFiles: [],
+			decision: 'scope_exceeded',
+			evaluable: false,
+		});
+		expect(
+			(result.resolution as { sourceFiles: string[] }).sourceFiles,
+		).toHaveLength(MAX_SAFE_TEST_FILES + 1);
+		expect(calls).toHaveLength(0);
+	});
+
+	test('convention source overflow includes bounded resolution evidence', async () => {
+		const sources = ['src/source-a.ts', 'src/source-b.ts'];
+		for (const source of sources) {
+			fs.writeFileSync(path.join(tempDir, source), 'export const value = 1;\n');
+		}
+		const calls: string[][] = [];
+		installRunner(calls);
+
+		const result = await execute({ scope: 'convention', files: sources });
+
+		expect(result.success).toBe(false);
+		expect(result.scope).toBe('convention');
+		expect(result.outcome).toBe('scope_exceeded');
+		expectResolutionEnvelope(result, {
+			requestedScope: 'convention',
+			effectiveScope: 'convention',
+			sourceFiles: sources,
+			resolvedFiles: [],
+			decision: 'scope_exceeded',
+			evaluable: false,
+		});
+		expect(calls).toHaveLength(0);
+	});
+
+	test('convention direct-file overflow is capped before spawn', async () => {
+		const directFiles = Array.from(
+			{ length: MAX_SAFE_TEST_FILES + 1 },
+			(_, index) => `tests/direct-${index}.test.ts`,
+		);
+		const calls: string[][] = [];
+		installRunner(calls);
+
+		const result = await execute({
+			scope: 'convention',
+			files: directFiles,
 		});
 
-		test('16. estimate exactly at MAX_SAFE_TEST_FILES + 1 (51) with 1 source file triggers Layer 2', async () => {
-			createSourceFiles(tempDir, 1);
-			createImpactMapCache(tempDir, 1, MAX_SAFE_TEST_FILES + 1);
-
-			const sourceFiles = ['src/file0.ts'];
-
-			const result = await execute(
-				{ scope: 'graph', files: sourceFiles },
-				tempDir,
-			);
-			const parsed = parseResult(result);
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
-			expect(parsed.error).toContain('exceeds safe maximum');
+		expect(result.success).toBe(false);
+		expect(result.outcome).toBe('scope_exceeded');
+		expectResolutionEnvelope(result, {
+			requestedScope: 'convention',
+			effectiveScope: 'convention',
+			sourceFiles: directFiles,
+			resolvedFiles: directFiles,
+			decision: 'scope_exceeded',
+			evaluable: false,
 		});
+		expect(calls).toHaveLength(0);
+	});
+
+	test('convention execution attaches the full resolution envelope', async () => {
+		const source = 'src/source.ts';
+		const testFile = 'src/source.test.ts';
+		fs.writeFileSync(path.join(tempDir, source), 'export const value = 1;\n');
+		fs.writeFileSync(path.join(tempDir, testFile), "import './source';\n");
+		const calls: string[][] = [];
+		installRunner(calls);
+
+		const result = await execute({ scope: 'convention', files: [source] });
+
+		expect(result.success).toBe(true);
+		expectResolutionEnvelope(result, {
+			requestedScope: 'convention',
+			effectiveScope: 'convention',
+			sourceFiles: [source],
+			resolvedFiles: [testFile],
+			decision: 'execute',
+			evaluable: true,
+		});
+		expect(calls).toHaveLength(1);
+	});
+
+	test('graph resolved overflow preserves cap+1 sentinel evidence', async () => {
+		const sources = Array.from({ length: MAX_SAFE_TEST_FILES }, (_, index) => {
+			const source = `src/source-${index}.ts`;
+			fs.writeFileSync(
+				path.join(tempDir, source),
+				`export const value${index} = ${index};\n`,
+			);
+			for (const suffix of ['spec', 'test']) {
+				fs.writeFileSync(
+					path.join(tempDir, `src/source-${index}.${suffix}.ts`),
+					`import './source-${index}';\n`,
+				);
+			}
+			return source;
+		});
+		const expectedFiles = Array.from(
+			{ length: MAX_SAFE_TEST_FILES + 1 },
+			(_, index) =>
+				`src/source-${Math.floor(index / 2)}.${index % 2 === 0 ? 'spec' : 'test'}.ts`,
+		);
+		const calls: string[][] = [];
+		installRunner(calls);
+
+		const result = await execute({ scope: 'graph', files: sources });
+
+		expect(result.success).toBe(false);
+		expect(result.outcome).toBe('scope_exceeded');
+		expectResolutionEnvelope(result, {
+			requestedScope: 'graph',
+			effectiveScope: 'graph',
+			sourceFiles: sources,
+			resolvedFiles: expectedFiles,
+			decision: 'scope_exceeded',
+			evaluable: false,
+			estimateStatus: 'advisory',
+			cacheStatus: 'missing_unverified',
+		});
+		expect(calls).toHaveLength(0);
+	});
+
+	test('a stale-high advisory estimate does not reject a safe graph resolution', async () => {
+		const source = 'src/source.ts';
+		fs.writeFileSync(path.join(tempDir, source), 'export const value = 1;\n');
+		fs.writeFileSync(
+			path.join(tempDir, 'src/source.test.ts'),
+			"import './source';\n",
+		);
+		const highEstimate = {
+			[path.join(tempDir, source).replace(/\\/g, '/')]: Array.from(
+				{ length: MAX_SAFE_TEST_FILES + 10 },
+				(_, index) => `tests/test-${index}.test.ts`,
+			),
+		};
+		_internals.loadImpactMap = async () => highEstimate;
+		const calls: string[][] = [];
+		installRunner(calls);
+
+		const result = await execute({ scope: 'graph', files: [source] });
+
+		expect(result.success).toBe(true);
+		expectResolutionEnvelope(result, {
+			requestedScope: 'graph',
+			effectiveScope: 'graph',
+			sourceFiles: [source],
+			resolvedFiles: ['src/source.test.ts'],
+			decision: 'execute',
+			evaluable: true,
+			estimateCount: MAX_SAFE_TEST_FILES + 10,
+			estimateStatus: 'advisory',
+		});
+		expect(calls).toHaveLength(1);
+	});
+
+	test('resolved overflow is typed with a bounded cap+1 sentinel', async () => {
+		const source = 'src/source.ts';
+		const sourcePath = path.join(tempDir, source).replace(/\\/g, '/');
+		fs.writeFileSync(path.join(tempDir, source), 'export const value = 1;\n');
+		const impactMap = {
+			[sourcePath]: Array.from(
+				{ length: MAX_SAFE_TEST_FILES + 1 },
+				(_, index) => `tests/test-${index}.test.ts`,
+			),
+		};
+		_internals.loadImpactMap = async () => impactMap;
+		const calls: string[][] = [];
+		installRunner(calls);
+
+		const result = await execute({ scope: 'impact', files: [source] });
+
+		expect(result.outcome).toBe('scope_exceeded');
+		expectResolutionEnvelope(result, {
+			requestedScope: 'impact',
+			effectiveScope: 'impact',
+			sourceFiles: [source],
+			resolvedFiles: Array.from(
+				{ length: MAX_SAFE_TEST_FILES + 1 },
+				(_, index) => `tests/test-${index}.test.ts`,
+			),
+			decision: 'scope_exceeded',
+			evaluable: false,
+			estimateCount: MAX_SAFE_TEST_FILES + 1,
+			estimateStatus: 'advisory',
+			cacheStatus: 'missing',
+		});
+		expect(
+			(result.resolution as { resolvedFiles: string[] }).resolvedFiles[
+				MAX_SAFE_TEST_FILES
+			],
+		).toBe(`tests/test-${MAX_SAFE_TEST_FILES}.test.ts`);
+		expect(calls).toHaveLength(0);
+	});
+
+	test('stale v2 cache is rebuilt and surfaced in impact resolution evidence', async () => {
+		const source = 'src/source.ts';
+		fs.writeFileSync(path.join(tempDir, source), 'export const value = 1;\n');
+		const testFile = path.join(tempDir, 'src/source.test.ts');
+		fs.writeFileSync(testFile, "import './source';\n");
+		await originalLoadImpactMap(tempDir);
+		fs.writeFileSync(testFile, "import './source';\n// changed\n");
+		const calls: string[][] = [];
+		installRunner(calls);
+
+		const result = await execute({ scope: 'impact', files: [source] });
+
+		expect(result.success).toBe(true);
+		expectResolutionEnvelope(result, {
+			requestedScope: 'impact',
+			effectiveScope: 'impact',
+			sourceFiles: [source],
+			resolvedFiles: ['src/source.test.ts'],
+			decision: 'execute',
+			evaluable: true,
+			estimateCount: 1,
+			estimateStatus: 'advisory',
+			cacheStatus: 'rebuilt_stale',
+			fallbackReason:
+				'impact cache rebuild completed (rebuilt_stale) before resolution',
+		});
+		expect(calls).toHaveLength(1);
 	});
 });

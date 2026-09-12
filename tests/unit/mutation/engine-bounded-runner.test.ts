@@ -40,6 +40,8 @@ function patch(): MutationPatch {
 	};
 }
 
+const BENIGN_TEST_FILES = ['source.test.ts'];
+
 afterEach(() => {
 	_internals.spawnSync = realLegacySpawn;
 	_internals.runExternalTool = realRunExternalTool;
@@ -103,10 +105,16 @@ describe('bounded mutation command runner', () => {
 			};
 		});
 
-		const result = await executeMutation(patch(), ['bun', 'test'], [], root(), {
-			runner,
-			abortSignal: controller.signal,
-		});
+		const result = await executeMutation(
+			patch(),
+			['bun', 'test'],
+			BENIGN_TEST_FILES,
+			root(),
+			{
+				runner,
+				abortSignal: controller.signal,
+			},
+		);
 
 		expect(result.outcome).toBe('cancelled');
 		expect(result.error).toContain('cancelled');
@@ -126,9 +134,13 @@ describe('bounded mutation command runner', () => {
 					}
 				: { status: 'completed', exitCode: 0, stdout: '', stderr: '' };
 		});
-		const result = await executeMutation(patch(), ['bun', 'test'], [], root(), {
-			runner,
-		});
+		const result = await executeMutation(
+			patch(),
+			['bun', 'test'],
+			BENIGN_TEST_FILES,
+			root(),
+			{ runner },
+		);
 		expect(result.outcome).toBe('cancelled');
 		expect(call).toBe(2);
 	});
@@ -145,9 +157,13 @@ describe('bounded mutation command runner', () => {
 			}
 			return { status: 'completed', exitCode: 0, stdout: '', stderr: '' };
 		});
-		const result = await executeMutation(patch(), ['bun', 'test'], [], root(), {
-			runner,
-		});
+		const result = await executeMutation(
+			patch(),
+			['bun', 'test'],
+			BENIGN_TEST_FILES,
+			root(),
+			{ runner },
+		);
 		expect(result.outcome).toBe('error');
 		expect(result.error).toContain('git revert failed');
 	});
@@ -196,7 +212,12 @@ describe('bounded mutation command runner', () => {
 			};
 		});
 
-		const result = await executeMutation(patch(), ['bun', 'test'], [], root());
+		const result = await executeMutation(
+			patch(),
+			['bun', 'test'],
+			BENIGN_TEST_FILES,
+			root(),
+		);
 
 		expect(result.outcome).toBe('survived');
 		expect(calls).toHaveLength(3);
@@ -259,7 +280,7 @@ describe('bounded mutation command runner', () => {
 		const report = await executeMutationSuite(
 			[patch(), { ...patch(), id: 'second' }],
 			['bun', 'test'],
-			[],
+			BENIGN_TEST_FILES,
 			root(),
 			undefined,
 			undefined,

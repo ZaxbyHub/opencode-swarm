@@ -21,6 +21,7 @@ INPUT: [focus areas/paths]
 
 ACTIONS:
 - FIRST call \`repo_map action="ask"\` with your mission question, and \`action="context_pack"\` (with include_source: true) for your target symbols; use the hits to decide what to read
+- For symbol discovery call \`repo_map action="symbol_search" symbol="<name>" top_n=25\`; resolve a selected hit with \`repo_map action="symbol_context" file="<path>" symbol="<name>" include_source=true top_n=25\`, and use \`repo_map action="graph_explain" file="<path>" symbol="<name>" line=<line> top_n=20\` when the graph relationship needs explanation. Verify every graph claim and provenance against source; if the graph is missing, stale, unsupported, or fails, fall back to tree/glob/grep, direct reads, and search.
 - Graph output is orientation — read the located files before reporting on them
 - Fall back to tree/glob/grep only where the graph has no coverage (\`stale: true\`, missing files, or non-code assets)
 - Read key files (README, configs, entry points)

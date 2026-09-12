@@ -16,6 +16,8 @@ const mockSpawnSync = mock(() => ({
 const realSpawnSync = _internals.spawnSync;
 const realResolveGitExecutable = _internals.resolveGitExecutable;
 
+const BENIGN_TEST_FILES = ['source.test.ts'];
+
 describe('executeMutation — shell injection adversarial tests', () => {
 	let tempDir: string;
 
@@ -62,7 +64,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		// Find the spawnSync calls for git apply
 		const applyCall = mockSpawnSync.mock.calls.find(
@@ -100,7 +102,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		const applyCall = mockSpawnSync.mock.calls.find(
 			(call) =>
@@ -135,7 +137,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		const applyCall = mockSpawnSync.mock.calls.find(
 			(call) =>
@@ -172,7 +174,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		const applyCall = mockSpawnSync.mock.calls.find(
 			(call) =>
@@ -202,7 +204,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		const applyCall = mockSpawnSync.mock.calls.find(
 			(call) =>
@@ -238,7 +240,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 		};
 
 		// Should not throw — sanitization handles it
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		// Verify spawnSync was called (git apply)
 		expect(mockSpawnSync.mock.calls.length).toBeGreaterThan(0);
@@ -275,7 +277,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		const applyCall = mockSpawnSync.mock.calls.find(
 			(call) =>
@@ -308,7 +310,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		// Verify ALL spawnSync calls use array form
 		for (const call of mockSpawnSync.mock.calls) {
@@ -345,7 +347,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		// Find the revert (git apply -R) call
 		const revertCall = mockSpawnSync.mock.calls.find(
@@ -377,7 +379,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		const applyCall = mockSpawnSync.mock.calls.find(
 			(call) =>
@@ -412,7 +414,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		const applyCall = mockSpawnSync.mock.calls.find(
 			(call) =>
@@ -447,7 +449,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 			patch: 'dummy patch content',
 		};
 
-		await executeMutation(patch, ['echo', 'test'], [], tempDir);
+		await executeMutation(patch, ['echo', 'test'], BENIGN_TEST_FILES, tempDir);
 
 		const applyCall = mockSpawnSync.mock.calls.find(
 			(call) =>

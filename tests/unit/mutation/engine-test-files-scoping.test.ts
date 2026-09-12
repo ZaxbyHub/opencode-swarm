@@ -21,6 +21,7 @@ import {
 	type MutationPatch,
 	validateTestCommand,
 } from '../../../src/mutation/engine.js';
+import { MAX_SAFE_TEST_FILES } from '../../../src/test-impact/constants.js';
 
 const mockSpawnSync = mock((_cmd: string, _args: string[]) => ({
 	status: 0,
@@ -79,13 +80,17 @@ describe('executeMutation — testFiles scoping (bug fix)', () => {
 		}
 	});
 
-	test('empty testFiles → only testCommand.slice(1) passed to spawnSync', async () => {
-		await executeMutation(makePatch(), ['bun', 'test'], [], tempDir);
+	test('empty testFiles → refuses to widen into the full suite', async () => {
+		const result = await executeMutation(
+			makePatch(),
+			['bun', 'test'],
+			[],
+			tempDir,
+		);
 
-		const testCall = mockSpawnSync.mock.calls.find(([cmd]) => cmd !== 'git');
-		expect(testCall).toBeDefined();
-		const [, args] = testCall!;
-		expect(args).toEqual(['test']);
+		expect(result.outcome).toBe('skipped');
+		expect(result.error).toContain('refusing to run the full test suite');
+		expect(mockSpawnSync).not.toHaveBeenCalled();
 	});
 
 	test('single testFile → appended after testCommand.slice(1)', async () => {
@@ -202,20 +207,40 @@ describe('executeMutationSuite — testFiles scoping integration', () => {
 		expect(testCallArgs).toContain('src/foo.test.ts');
 	});
 
-	test('empty testFiles in executeMutationSuite → runs full suite', async () => {
-		await executeMutationSuite(
+	test('empty testFiles in executeMutationSuite → skips without widening scope', async () => {
+		const report = await executeMutationSuite(
 			[makePatch()],
 			['bun', 'test'],
-			[], // empty — full suite
+			[],
 			tempDir,
 		);
 
-		const testCalls = mockSpawnSync.mock.calls.filter(([cmd]) => cmd !== 'git');
-		expect(testCalls.length).toBeGreaterThan(0);
+		expect(report.skipped).toBe(1);
+		expect(report.results[0]?.error).toContain(
+			'refusing to run the full test suite',
+		);
+		expect(mockSpawnSync).not.toHaveBeenCalled();
+	});
 
-		const testCallArgs = testCalls[0][1] as string[];
-		// Should NOT include any test file
-		expect(testCallArgs).toEqual(['test']);
+	test('over-cap testFiles skip every patch before any subprocess', async () => {
+		const files = Array.from(
+			{ length: MAX_SAFE_TEST_FILES + 10 },
+			(_, index) => `tests/overflow-${index}.test.ts`,
+		);
+		const report = await executeMutationSuite(
+			[makePatch('mut-a'), makePatch('mut-b')],
+			['bun', 'test'],
+			files,
+			tempDir,
+		);
+
+		expect(report.results).toHaveLength(2);
+		expect(report.skipped).toBe(2);
+		expect(report.results.every((result) => result.outcome === 'skipped')).toBe(
+			true,
+		);
+		expect(report.results[0]?.error).toContain('safe maximum');
+		expect(mockSpawnSync).not.toHaveBeenCalled();
 	});
 });
 
