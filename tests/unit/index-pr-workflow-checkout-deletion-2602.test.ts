@@ -94,14 +94,12 @@ async function writeMissingReceipt(sessionID = FOREIGN_SESSION): Promise<void> {
 
 async function waitForPendingCheckoutRestoresToClear(
 	sessionID: string,
-	deadlineMs = 2_000,
 ): Promise<Awaited<ReturnType<typeof listPendingPrWorkflowCheckoutRestores>>> {
-	const deadline = Date.now() + deadlineMs;
 	let pending = await listPendingPrWorkflowCheckoutRestores(
 		directory,
 		sessionID,
 	);
-	while (pending.length > 0 && Date.now() < deadline) {
+	for (let attempt = 0; pending.length > 0 && attempt < 40; attempt += 1) {
 		await Bun.sleep(50);
 		pending = await listPendingPrWorkflowCheckoutRestores(directory, sessionID);
 	}
