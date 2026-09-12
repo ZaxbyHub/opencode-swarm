@@ -251,12 +251,17 @@ export const mutation_test: ReturnType<typeof createSwarmTool> =
 									'impact analysis found no impacted tests for the given source files; pass explicit files to override',
 							};
 						} else if (
+							// The analyzer truncates at the budget and reports
+							// budgetExceeded — the length alone can read exactly 50
+							// on a 55-test fan-out, so BOTH signals must refuse.
+							// A silent 50-of-55 partial run would under-report kills.
+							impactResult.budgetExceeded ||
 							impactResult.impactedTests.length > MAX_SAFE_TEST_FILES
 						) {
 							selection = {
 								source: 'fallback',
 								resolved_test_files: [],
-								fallback_reason: `derived test set (${impactResult.impactedTests.length}) exceeds the safe cap of ${MAX_SAFE_TEST_FILES}; narrow the source files or pass explicit files to override`,
+								fallback_reason: `derived test set meets or exceeds the safe cap of ${MAX_SAFE_TEST_FILES} (budget${impactResult.budgetExceeded ? ' exceeded' : ' at cap'}); narrow the source files or pass explicit files to override`,
 							};
 						} else {
 							selection = {

@@ -140,6 +140,42 @@ describe('mutation_test selection + evaluability + cache refresh (issue #2492)',
 		expect(parsed.evaluability?.evaluable).toBe(false);
 	}, 30_000);
 
+	test('derive-mode cap overflow is refused via the typed fallback, never a truncated partial run', async () => {
+		const fixture = makeFixture('overflow');
+		write(
+			'src/math.ts',
+			'export function addO(a: number, b: number): number {\n  return a + b;\n}\n',
+			fixture,
+		);
+		// 55 distinct tests all importing the source: the analyzer truncates at
+		// its budget with budgetExceeded=true — the refusal must fire on that
+		// signal (the truncated length reads exactly 50, never > 50).
+		for (let i = 0; i < 55; i++) {
+			write(
+				`tests/o${String(i).padStart(2, '0')}.test.ts`,
+				`import { test, expect } from 'bun:test';\nimport { addO } from '../src/math';\n\ntest('o${i}', () => { expect(addO(1, 2)).toBe(3); });\n`,
+				fixture,
+			);
+		}
+		const parsed = parse(
+			await execute(
+				{
+					patches: [KILLABLE_PATCH('src/math.ts', 'addO')],
+					source_files: ['src/math.ts'],
+					test_command: ['bun', 'test'],
+					working_directory: fixture,
+				},
+				undefined,
+			),
+		);
+		// Typed bounded refusal — NOT impact_analysis with a silent 50-of-55 set.
+		expect(parsed.test_selection?.source).toBe('fallback');
+		expect(parsed.test_selection?.fallback_reason).toContain('safe cap');
+		expect(parsed.test_selection?.resolved_test_files).toEqual([]);
+		expect(parsed.evaluability?.evaluable).toBe(false);
+		expect(parsed.success).toBe(false);
+	}, 60_000);
+
 	test('neither files nor source_files is rejected', async () => {
 		const parsed = parse(
 			await execute(
