@@ -80,7 +80,6 @@ import { isGitRepo } from '../git/branch';
 import { getWorktreeMergeFailure } from '../hooks/delegation-gate/worktree-merge-status';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { tryAcquireLock } from '../parallel/file-locks.js';
-import { readDeclaredScopeFilesFromBindings } from '../scope/scope-persistence.js';
 import { recordTaskAttempt } from '../services/run-memory.js';
 import { emit } from '../telemetry.js';
 import { isEpicModeActiveForProject } from '../turbo/epic/state.js';
@@ -2717,6 +2716,14 @@ export async function updateTaskStatus(
 					// `--allow-empty` commit — preserving Rule 3 evidence
 					// without sweeping in any sibling lane's working-tree
 					// changes.
+					// Lazy dynamic import (deliberately NOT a static edge): a static
+					// import of scope-persistence pulls the db/index -> global-db ->
+					// knowledge-store chain into every plan/manager graph, which
+					// breaks test modules that mock knowledge-store with a
+					// non-spread explicit object (bun link-time SyntaxError).
+					const { readDeclaredScopeFilesFromBindings } = await import(
+						'../scope/scope-persistence.js'
+					);
 					const canonicalScope = readDeclaredScopeFilesFromBindings({
 						directory,
 						taskId,
