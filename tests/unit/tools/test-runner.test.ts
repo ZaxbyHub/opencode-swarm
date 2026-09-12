@@ -1528,6 +1528,10 @@ describe('test-runner.ts - bounded multi-source discovery (issue #2492)', () => 
 		expect(parsed.message).not.toContain(
 			'Call test_runner once per source file',
 		);
+		// Anti-leak (restored): typed guidance must never name the scope:'all'
+		// env bypass — LLMs follow such hints literally.
+		expect(parsed.error).not.toContain('SWARM_ALLOW_FULL_SUITE');
+		expect(parsed.message).not.toContain('SWARM_ALLOW_FULL_SUITE');
 		expect(parsed.cap_decision?.decision).toBe('within_cap');
 		expect(parsed.resolved_test_files).toEqual([]);
 
