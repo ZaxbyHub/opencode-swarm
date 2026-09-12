@@ -1129,9 +1129,15 @@ export async function executeSavePlan(
 		migration_status: reconcileLedgerProjection
 			? existingPlan?.migration_status
 			: 'native',
+		// #2532 (PLAN-4): a revision of an EXISTING plan carries the prior
+		// cursor forward instead of re-pinning it to phases[0] — the manager's
+		// single-writer normalization (`normalizeCurrentPhaseInPlace` in
+		// savePlan) then advances it off any completed phase. New plans still
+		// start at the first phase. The reconcile-ledger-projection recovery
+		// mode keeps copying the existing cursor verbatim.
 		current_phase: reconcileLedgerProjection
 			? existingPlan?.current_phase
-			: args.phases[0]?.id,
+			: (existingPlan?.current_phase ?? args.phases[0]?.id),
 		specMtime,
 		specHash,
 		...(resolvedProfile !== undefined

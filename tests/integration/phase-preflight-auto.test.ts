@@ -38,10 +38,9 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 	 * Helper: Create a plan with specific phase configuration
 	 * Sets previous phase to complete status so task counts are accurate
 	 */
-	async function createTestPlanWithPreviousPhaseComplete(
-		currentPhase: number,
-		phaseCount: number = 2,
-	): Promise<Plan> {
+	// Helper: build (no save) plans for on-disk shapes savePlan cannot produce
+	// (#2532: cursor normalization is forward-only; backward transitions Bun.write).
+	function buildTestPlan(currentPhase: number, phaseCount: number = 2): Plan {
 		const phases = Array.from({ length: phaseCount }, (_, i) => {
 			const isPreviousPhase = i + 1 === currentPhase - 1;
 			const isCurrentPhase = i + 1 === currentPhase;
@@ -72,18 +71,13 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			};
 		});
 
-		const plan: Plan = {
+		return PlanSchema.parse({
 			schema_version: '1.0.0',
 			title: 'Test Plan',
 			swarm: 'test-swarm',
 			current_phase: currentPhase,
 			phases,
-		};
-
-		// Validate and save
-		const validated = PlanSchema.parse(plan);
-		await savePlan(tempDir, validated);
-		return validated;
+		});
 	}
 
 	/**
@@ -93,7 +87,9 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 		currentPhase: number,
 		phaseCount: number = 2,
 	): Promise<Plan> {
-		return createTestPlanWithPreviousPhaseComplete(currentPhase, phaseCount);
+		const validated = buildTestPlan(currentPhase, phaseCount);
+		await savePlan(tempDir, validated);
+		return validated;
 	}
 
 	/**
@@ -159,64 +155,41 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 		});
 
 		it('should pass correct completed/total task counts to preflight', async () => {
-			// Create plan at phase 1 with multiple completed tasks
+			// #2532: phase 1 must start NON-terminal (one task pending) — a
+			// fully complete phase 1 cannot hold the cursor at 1, so savePlan
+			// would normalize straight to phase 2 and the init would not be at 1.
+			const mkTask = (id: string, status: 'completed' | 'pending') => ({
+				id,
+				phase: Number(id[0]),
+				status,
+				size: 'small' as const,
+				description: `Task ${id}`,
+				depends: [],
+				files_touched: [],
+			});
 			const phases = [
 				{
 					id: 1,
 					name: 'Phase 1',
-					status: 'complete' as const,
+					status: 'in_progress' as const,
 					tasks: [
-						{
-							id: '1.1',
-							phase: 1,
-							status: 'completed' as const,
-							size: 'small' as const,
-							description: 'Task 1',
-							depends: [],
-							files_touched: [],
-						},
-						{
-							id: '1.2',
-							phase: 1,
-							status: 'completed' as const,
-							size: 'small' as const,
-							description: 'Task 2',
-							depends: [],
-							files_touched: [],
-						},
-						{
-							id: '1.3',
-							phase: 1,
-							status: 'completed' as const,
-							size: 'small' as const,
-							description: 'Task 3',
-							depends: [],
-							files_touched: [],
-						},
+						mkTask('1.1', 'completed'),
+						mkTask('1.2', 'completed'),
+						mkTask('1.3', 'pending'),
 					],
 				},
 				{
 					id: 2,
 					name: 'Phase 2',
 					status: 'pending' as const,
-					tasks: [
-						{
-							id: '2.1',
-							phase: 2,
-							status: 'pending' as const,
-							size: 'small' as const,
-							description: 'Task 4',
-							depends: [],
-							files_touched: [],
-						},
-					],
+					tasks: [mkTask('2.1', 'pending')],
 				},
 			];
 
 			const mockManager = createMockPreflightManager();
 			const checkAndTriggerSpy = vi.spyOn(mockManager, 'checkAndTrigger');
 
-			// First, save and initialize at phase 1
+			// First, save and initialize at phase 1 (non-terminal)
 			const planAtPhase1: Plan = {
 				schema_version: '1.0.0',
 				title: 'Test Plan',
@@ -229,10 +202,23 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 			await hook({}, {}); // Initialize at phase 1
 
-			// Now save plan at phase 2 and call hook to trigger
+			// Now complete phase 1 and save at phase 2 — normalization advances
+			// the cursor off the now-terminal phase 1.
 			const planAtPhase2: Plan = {
 				...planAtPhase1,
 				current_phase: 2,
+				phases: planAtPhase1.phases.map((phase) =>
+					phase.id === 1
+						? {
+								...phase,
+								status: 'complete' as const,
+								tasks: phase.tasks.map((task) => ({
+									...task,
+									status: 'completed' as const,
+								})),
+							}
+						: phase,
+				),
 			};
 			await savePlan(tempDir, PlanSchema.parse(planAtPhase2));
 			await hook({}, {});
@@ -281,17 +267,23 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const plan = await loadPlan(tempDir);
 			expect(plan).not.toBeNull();
 
-			// Update a task status but keep same phase
+			// Update a task status but keep same phase. #2532: completing the
+			// ONLY task of phase 1 would advance the cursor to phase 2 (a real
+			// transition), so the rewrite moves it to in_progress instead.
 			const updatedPlan: Plan = {
 				...plan!,
-				phases: plan!.phases.map((phase) => ({
-					...phase,
-					tasks: phase.tasks.map((task) =>
-						task.id === '1.1'
-							? { ...task, status: 'completed' as const }
-							: task,
-					),
-				})),
+				phases: plan!.phases.map((phase) =>
+					phase.id === 1
+						? {
+								...phase,
+								tasks: phase.tasks.map((task) =>
+									task.id === '1.1'
+										? { ...task, status: 'in_progress' as const }
+										: task,
+								),
+							}
+						: phase,
+				),
 			};
 			await savePlan(tempDir, PlanSchema.parse(updatedPlan));
 
@@ -509,11 +501,13 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			await hook({}, {});
 			expect(checkAndTriggerSpy).toHaveBeenCalledTimes(1);
 
-			// Step 3: Multiple updates within phase 2 - should NOT retrigger
+			// Step 3: Multiple updates within phase 2 - should NOT retrigger.
+			// #2532: completing phase 2's ONLY task would advance the cursor
+			// to phase 3 (covered by Step 4), so this update stays in-phase.
 			const plan = await loadPlan(tempDir);
 			expect(plan).not.toBeNull();
 
-			// Update some tasks
+			// Update the task without completing the phase
 			const updatedPlan: Plan = {
 				...plan!,
 				phases: plan!.phases.map((phase) => {
@@ -522,7 +516,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 							...phase,
 							tasks: phase.tasks.map((task) => ({
 								...task,
-								status: 'completed' as const,
+								status: 'in_progress' as const,
 							})),
 						};
 					}
@@ -1230,8 +1224,13 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			await hook({}, {}); // Initialize at phase 2
 
-			// Transition backwards
-			await createTestPlan(1, 3);
+			// Transition backwards. #2532: savePlan can no longer persist a
+			// backward cursor, so the projection is written directly (like the
+			// phase-0 case above).
+			await Bun.write(
+				path.join(swarmDir, 'plan.json'),
+				JSON.stringify(buildTestPlan(1, 3)),
+			);
 
 			let threw = false;
 			try {

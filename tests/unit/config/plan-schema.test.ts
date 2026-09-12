@@ -495,11 +495,6 @@ describe('PhaseStatusSchema with completed alias', () => {
 });
 
 describe('getCurrentPhase with inference', () => {
-	it('returns explicit current_phase when set', () => {
-		const plan = createTestPlan({ current_phase: 3 });
-		expect(getCurrentPhase(plan)).toBe(3);
-	});
-
 	it('infers from in_progress phase when current_phase not set', () => {
 		const plan = createTestPlan({
 			current_phase: undefined,

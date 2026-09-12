@@ -38,6 +38,14 @@ function completedTask(
 	};
 }
 
+/**
+ * Cursor-lag plan (#2532-adjusted): receipts are stamped with the RESOLVED
+ * active phase (getCurrentPhase), so the mistag arm covers plans whose
+ * resolved cursor trails the phase being completed (out-of-order completion
+ * or receipts written by pre-#2532 plugin versions). Phase 1 stays
+ * non-terminal so the resolved cursor is 1 while phases 2–3 are already
+ * complete.
+ */
 function staleCursorPlan(): Plan {
 	return {
 		schema_version: '1.0.0',
@@ -48,8 +56,18 @@ function staleCursorPlan(): Plan {
 			{
 				id: 1,
 				name: 'Foundation',
-				status: 'complete',
-				tasks: [completedTask('1.1', 1)],
+				status: 'pending',
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'pending',
+						size: 'small',
+						description: 'Pending task 1.1',
+						depends: [],
+						files_touched: [],
+					},
+				],
 			},
 			{
 				id: 2,
@@ -60,9 +78,9 @@ function staleCursorPlan(): Plan {
 			{
 				id: 3,
 				name: 'Documentation',
-				status: 'in_progress',
+				status: 'complete',
 				required_agents: ['docs'],
-				tasks: [],
+				tasks: [completedTask('3.1', 3)],
 			},
 		],
 	};
@@ -133,7 +151,8 @@ describe('rebindCursorTaggedReceipts normalization (issue #2702)', () => {
 		const plan = staleCursorPlan();
 		writePlan(directory, plan);
 		await driveDocsReceipt(directory, 'docs-call');
-		// The recorder stamped the never-advanced cursor value (1).
+		// The recorder stamps the resolved active-phase cursor value (1): the
+		// cursor lags the out-of-order completion of phase 3.
 		expect(readDocsReceiptPhases(directory)).toEqual([1]);
 
 		const result = await rebindCursorTaggedReceipts(directory, plan, 3, 'docs');

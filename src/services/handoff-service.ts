@@ -6,6 +6,7 @@
  */
 
 import type { ExecutionProfile } from '../config/plan-schema';
+import { resolveActivePhaseId } from '../config/plan-schema';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { readSnapshotRows } from '../session/snapshot-store.js';
@@ -151,21 +152,15 @@ function extractCurrentPhaseFromPlan(
 		return { currentPhase: null, currentTask: null, incompleteTasks: [] };
 	}
 
-	// Find current phase
+	// Find current phase — #2532: through the canonical active-phase resolver
+	// (stored cursor when it points at a non-terminal phase, else first
+	// non-terminal phase), replacing this service's private cursor semantics
+	// so handoff summaries agree with the plan header and gate selection.
 	let currentPhase: string | null = null;
-	const currentPhaseNum = plan.current_phase;
-
-	if (currentPhaseNum) {
-		const phase = plan.phases.find((p) => p.id === currentPhaseNum);
-		currentPhase = phase ? `Phase ${phase.id}: ${phase.name}` : null;
-	} else {
-		// Fallback: find in_progress phase
-		const inProgressPhase = plan.phases.find((p) => p.status === 'in_progress');
-		if (inProgressPhase) {
-			currentPhase = `Phase ${inProgressPhase.id}: ${inProgressPhase.name}`;
-		} else if (plan.phases.length > 0) {
-			currentPhase = `Phase ${plan.phases[0].id}: ${plan.phases[0].name}`;
-		}
+	const activePhaseId = resolveActivePhaseId(plan);
+	const activePhase = plan.phases.find((p) => p.id === activePhaseId);
+	if (activePhase) {
+		currentPhase = `Phase ${activePhase.id}: ${activePhase.name}`;
 	}
 
 	// Find current task (in_progress or first incomplete)

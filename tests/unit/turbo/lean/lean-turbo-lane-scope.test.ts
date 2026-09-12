@@ -31,6 +31,13 @@ const plan: Plan = {
 	schema_version: '1.0.0',
 	title: 'Lean turbo lane scope',
 	swarm: 'test',
+	// #2532: savePlan normalizes the phase cursor on persist, and the binding
+	// identity (planStructureHash) includes current_phase. A fixture plan
+	// without a cursor would mint a binding whose hash no longer matches the
+	// lane's persisted plan projection. Production plans always carry a
+	// normalized cursor (every savePlan pass writes one); phase 1 is
+	// non-terminal here so the cursor is stable across the save.
+	current_phase: 1,
 	phases: [
 		{
 			id: 1,

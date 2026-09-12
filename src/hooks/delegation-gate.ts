@@ -27,7 +27,12 @@ import {
 } from '../config/agent-model.js';
 import { ALL_AGENT_NAMES } from '../config/agent-names.js';
 import { DEFAULT_MODELS } from '../config/constants';
-import type { Phase, Plan, Task } from '../config/plan-schema';
+import {
+	type Phase,
+	type Plan,
+	resolveActivePhaseId,
+	type Task,
+} from '../config/plan-schema';
 import { isKnownCanonicalRole, stripKnownSwarmPrefix } from '../config/schema';
 import {
 	DEFAULT_QA_GATES,
@@ -2777,10 +2782,12 @@ async function buildParallelExecutionGuidance(
 		return '[NEXT] Lean Turbo is active; use lean_turbo_run_phase and Lean Turbo lane guidance instead of standard execution-profile slot filling.';
 	}
 
-	const currentPhase =
-		plan.current_phase !== undefined
-			? plan.phases.find((phase) => phase.id === plan.current_phase)
-			: plan.phases.find((phase) => !isParallelGuidancePhaseComplete(phase));
+	// #2532: canonical active-phase resolution — stored cursor when it points
+	// at a non-terminal phase, else first non-terminal phase. Legacy plans whose
+	// persisted cursor is stuck on a completed phase now advertise the honest
+	// active phase instead of returning null (which silently killed guidance).
+	const currentPhaseId = resolveActivePhaseId(plan);
+	const currentPhase = plan.phases.find((phase) => phase.id === currentPhaseId);
 	if (!currentPhase) return null;
 
 	const tasks = currentPhase.tasks;
@@ -2791,8 +2798,43 @@ async function buildParallelExecutionGuidance(
 	// forces serial. Tell the architect exactly what happened and how to
 	// inspect the conflict matrix, so it is never left guessing why parallel
 	// dispatch was blocked.
-	if (!scopeVerdictAllowsParallel(directory, plan)) {
-		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; the active phase's pending tasks are NOT provably file-disjoint (overlapping or unknown declared scopes) — SERIAL fallback active (v8 automatic safety). Run plan_conflict_check on the pending tasks to inspect the conflict matrix and a suggested serialization order, or proceed serially (one coder at a time).`;
+	// #2532 (AC7): the fallback now carries the EXACT reason — which tasks lack
+	// a live declaration, or which pair conflicts on which path — instead of
+	// the old ambiguous "overlapping or unknown" either/or. The verdict is
+	// computed ONCE here (bounded: ≤3 evidence lines in the message).
+	const pendingTaskIds = collectPendingTaskIdsForActivePhase(plan);
+	let fallbackReason: string | null = null;
+	if (pendingTaskIds.length < 2) {
+		fallbackReason =
+			'fewer than two pending tasks in the active phase — nothing to parallelize';
+	} else {
+		try {
+			const verdict = computeParallelVerdict(directory, pendingTaskIds, {
+				plan,
+			});
+			if (verdict.verdict === 'all_disjoint') {
+				// parallel continues below
+			} else if (verdict.verdict === 'unknown_scopes') {
+				const shown = verdict.unknownScopeTasks.slice(0, 6).join(', ');
+				const more =
+					verdict.unknownScopeTasks.length > 6
+						? ` (and ${verdict.unknownScopeTasks.length - 6} more)`
+						: '';
+				fallbackReason = `no live declared scope for task${verdict.unknownScopeTasks.length === 1 ? '' : 's'}: ${shown}${more} — call declare_scope for each pending task, then retry`;
+			} else {
+				const conflictPair = verdict.pairs.find(
+					(pair) => pair.verdict === 'conflict',
+				);
+				const evidence = (conflictPair?.evidence ?? []).slice(0, 3).join('; ');
+				fallbackReason = `declared scopes overlap: tasks ${conflictPair?.a ?? '?'} and ${conflictPair?.b ?? '?'} conflict (${evidence || 'shared paths'})`;
+			}
+		} catch {
+			fallbackReason =
+				'verdict computation failed (fail-safe serial per v8 contract)';
+		}
+	}
+	if (fallbackReason !== null) {
+		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; SERIAL fallback active (v8 automatic safety) — exact reason: ${fallbackReason}. Run plan_conflict_check on the pending tasks to inspect the conflict matrix and a suggested serialization order, or proceed serially (one coder at a time).`;
 	}
 
 	const completed = new Set<string>();
@@ -2839,14 +2881,6 @@ async function buildParallelExecutionGuidance(
 	return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; ${occupied.size} slot(s) occupied. Eligible now: ${eligible.join(', ')}. [NEXT] dispatch up to ${availableSlots} eligible coder task(s) before waiting; preserve ONE task per coder call and call declare_scope for each task.${failureWarning}`;
 }
 
-function isParallelGuidancePhaseComplete(phase: Phase): boolean {
-	return (
-		phase.status === 'complete' ||
-		phase.status === 'completed' ||
-		phase.status === 'closed'
-	);
-}
-
 /**
  * #1674 v8: collect the pending-task ids of the active phase, mirroring
  * `buildParallelExecutionGuidance`'s `currentPhase` selection EXACTLY
@@ -2857,10 +2891,11 @@ function isParallelGuidancePhaseComplete(phase: Phase): boolean {
  * Returns `[]` when there is no active phase or no pending tasks in it.
  */
 function collectPendingTaskIdsForActivePhase(plan: Plan): string[] {
-	const currentPhase =
-		plan.current_phase !== undefined
-			? plan.phases.find((phase) => phase.id === plan.current_phase)
-			: plan.phases.find((phase) => !isParallelGuidancePhaseComplete(phase));
+	// #2532: mirrors buildParallelExecutionGuidance's selection via the shared
+	// canonical resolver so the enforcement set and the advisory can never
+	// disagree (including for legacy stuck-cursor plans).
+	const currentPhaseId = resolveActivePhaseId(plan);
+	const currentPhase = plan.phases.find((phase) => phase.id === currentPhaseId);
 	if (!currentPhase) return [];
 	return currentPhase.tasks
 		.filter((t) => t.status === 'pending')
@@ -2878,8 +2913,10 @@ function scopeVerdictAllowsParallel(directory: string, plan: Plan): boolean {
 	try {
 		const pendingTaskIds = collectPendingTaskIdsForActivePhase(plan);
 		if (pendingTaskIds.length < 2) return false; // nothing to parallelize
+		// #2532: pass the plan so the verdict resolves scopes from the v2
+		// binding authority against this exact plan identity (no self-load).
 		return (
-			computeParallelVerdict(directory, pendingTaskIds).verdict ===
+			computeParallelVerdict(directory, pendingTaskIds, { plan }).verdict ===
 			'all_disjoint'
 		);
 	} catch {

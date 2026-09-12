@@ -7,10 +7,10 @@
  *
  * READ-ONLY CONTRACT (issue #1656 acceptance): this tool writes NOTHING — not
  * to `.swarm/`, not to the source tree. It calls no other tools. The only I/O
- * is reading `.swarm/plan.json` (via `loadPlanJsonOnly`) and
- * `.swarm/scopes/scope-<taskId>.json` (via `readTaskScopes` inside
- * `computeParallelVerdict`), plus an optional `git log` (only when the caller
- * opts in via `use_cochange: true`).
+ * is reading `.swarm/plan.json` (via `loadPlanJsonOnly`) and the
+ * authoritative v2 scope-binding store (via `readDeclaredScopeFilesFromBindings`
+ * inside `computeParallelVerdict`, #2532), plus an optional `git log` (only
+ * when the caller opts in via `use_cochange: true`).
  *
  * Why this tool exists alongside the gate: the gate (`delegation-gate.ts`)
  * independently recomputes the verdict INLINE at coder-dispatch time via the
@@ -98,21 +98,24 @@ export async function executePlanConflictCheck(
 ): Promise<PlanConflictCheckResult> {
 	const useCochange = args.use_cochange === true;
 
-	// Load plan to validate task ids exist (advisory — the helper works on
-	// scope files regardless, but surfacing unknown task ids is useful).
+	// Load plan to validate task ids exist (advisory) AND to pin the verdict's
+	// binding-identity match (#2532: scopes resolve from the v2 binding store
+	// against this exact plan identity).
 	let planLoaded = false;
+	let loadedPlan: Awaited<ReturnType<typeof loadPlanJsonOnly>> = null;
 	const knownTaskIds = new Set<string>();
 	try {
-		const plan = await loadPlanJsonOnly(directory);
-		if (plan) {
+		loadedPlan = await loadPlanJsonOnly(directory);
+		if (loadedPlan) {
 			planLoaded = true;
-			for (const phase of plan.phases) {
+			for (const phase of loadedPlan.phases) {
 				for (const task of phase.tasks) knownTaskIds.add(task.id);
 			}
 		}
 	} catch {
-		// Fail-open on plan read: the helper only needs scope files. Mark plan
-		// as not loaded so the caller knows task-id validation was skipped.
+		// Fail-open on plan read: the helper fails closed to unknown scopes for
+		// every task without a plan identity. Mark plan as not loaded so the
+		// caller knows task-id validation was skipped.
 		planLoaded = false;
 	}
 
@@ -139,6 +142,7 @@ export async function executePlanConflictCheck(
 	const verdict = computeParallelVerdict(directory, requestedIds, {
 		useCochange,
 		cochangePairs,
+		plan: loadedPlan ?? undefined,
 	});
 
 	return {

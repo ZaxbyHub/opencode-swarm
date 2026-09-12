@@ -17,11 +17,8 @@ import {
 	ensureAgentSession,
 	resetSwarmState,
 } from '../../../src/state';
-import {
-	makeConfig,
-	makeMessages,
-	writeDisjointScopes,
-} from './_delegation-gate-helpers';
+import { executeDeclareScope } from '../../../src/tools/declare-scope';
+import { makeConfig, makeMessages } from './_delegation-gate-helpers';
 
 /**
  * Joined text of all guidance carriers' text parts (issue #2526: model-only
@@ -40,7 +37,38 @@ function makeTempProject(prefix: string): string {
 	return real;
 }
 
-function writePlanJson(
+/**
+ * #2532 (PARALLEL-4): declare disjoint scopes through the REGISTERED v2
+ * authority (declare_scope) — the gate's inline verdict resolves task scopes
+ * from the authoritative binding store, never from the legacy v1 projection.
+ * plan.json must be written first (the declaration binds the plan identity).
+ * Each task gets a single unique file (`src/<id-sanitized>.ts`) so any two
+ * tasks are path-disjoint by construction.
+ */
+async function declareDisjointScopes(
+	dir: string,
+	taskIds: string[],
+): Promise<void> {
+	for (const id of taskIds) {
+		const declared = await executeDeclareScope(
+			{
+				taskId: id,
+				files: [`src/${id.replace(/[^a-zA-Z0-9._-]/g, '_')}.ts`],
+				working_directory: dir,
+			},
+			dir,
+			{
+				sessionID: 'task-1-5-parallel-suite',
+				messageID: `m-${id}`,
+			},
+		);
+		if (!declared.success) {
+			throw new Error(`declare_scope failed for ${id}: ${declared.message}`);
+		}
+	}
+}
+
+async function writePlanJson(
 	dir: string,
 	options: {
 		executionProfile?: Record<string, unknown>;
@@ -52,14 +80,15 @@ function writePlanJson(
 		}>;
 		currentPhase?: number;
 		/**
-		 * #1674 v8: when true (default), write disjoint declared scope files
-		 * for every task so the parallel-execution gate's inline verdict
-		 * computes `all_disjoint` and permits parallel dispatch. Set false for
-		 * tests that intentionally exercise overlapping/unknown scopes.
+		 * #1674 v8 / #2532: when true (default), declare disjoint scopes through
+		 * the registered declare_scope authority for every task so the
+		 * parallel-execution gate's inline verdict computes `all_disjoint` and
+		 * permits parallel dispatch. Set false for tests that intentionally
+		 * exercise overlapping/unknown scopes.
 		 */
 		writeDisjointScopes?: boolean;
 	},
-): void {
+): Promise<void> {
 	const phase = options.currentPhase ?? 1;
 	const tasks = options.tasks ?? [
 		{ id: '1.1', status: 'pending' },
@@ -98,7 +127,7 @@ function writePlanJson(
 	// inline disjointness verdict permits parallel dispatch for these fixtures.
 	// Tests that want overlapping/unknown scopes pass `writeDisjointScopes: false`.
 	if (options.writeDisjointScopes !== false) {
-		writeDisjointScopes(
+		await declareDisjointScopes(
 			dir,
 			tasks.map((t) => t.id),
 		);
@@ -123,7 +152,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 	});
 
 	it('should list eligible pending tasks up to available parallel slots', async () => {
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			executionProfile: {
 				parallelization_enabled: true,
 				max_concurrent_tasks: 4,
@@ -151,7 +180,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 	});
 
 	it('should keep serial guidance when profile is disabled or serial', async () => {
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			executionProfile: {
 				parallelization_enabled: false,
 				max_concurrent_tasks: 4,
@@ -171,7 +200,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 	});
 
 	it('should count in-progress tasks as occupied and exclude blocked/dependent tasks', async () => {
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			executionProfile: {
 				parallelization_enabled: true,
 				max_concurrent_tasks: 3,
@@ -199,7 +228,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 	});
 
 	it('should count active in-memory workflow states as occupied slots', async () => {
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			executionProfile: {
 				parallelization_enabled: true,
 				max_concurrent_tasks: 4,
@@ -234,7 +263,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 	});
 
 	it('should count reviewer_run bridge state as an occupied slot', async () => {
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			executionProfile: {
 				parallelization_enabled: true,
 				max_concurrent_tasks: 2,
@@ -326,7 +355,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 		);
 		// v8: give phase-2 pending tasks disjoint scopes so the gate permits
 		// parallel dispatch for this cross-phase-occupancy fixture.
-		writeDisjointScopes(tempDir, ['2.1', '2.2']);
+		await declareDisjointScopes(tempDir, ['2.1', '2.2']);
 
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const messages = makeMessages('TASK: Continue work', 'architect');
@@ -402,7 +431,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 		);
 		// v8: give phase-2 pending tasks disjoint scopes so the gate permits
 		// parallel dispatch for this completed-dependency-eligibility fixture.
-		writeDisjointScopes(tempDir, ['2.1', '2.2']);
+		await declareDisjointScopes(tempDir, ['2.1', '2.2']);
 
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const messages = makeMessages('TASK: Continue work', 'architect');
@@ -442,7 +471,7 @@ describe('delegation-gate task 1.5: parallel execution profile [NEXT] guidance',
 	});
 
 	it('should suppress standard slot-filling guidance when Lean Turbo is active', async () => {
-		writePlanJson(tempDir, {
+		await writePlanJson(tempDir, {
 			executionProfile: {
 				parallelization_enabled: true,
 				max_concurrent_tasks: 4,

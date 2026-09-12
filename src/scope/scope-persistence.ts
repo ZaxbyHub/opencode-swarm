@@ -1527,6 +1527,80 @@ export function readScopeBindingFromDisk(input: {
 	return resolved.status === 'found' ? resolved.binding : null;
 }
 
+/**
+ * Resolve the currently-declared scope FILES for a task from the authoritative
+ * v2 binding store (issue #2532 / PARALLEL-4).
+ *
+ * Scheduling/conflict consumers (the v8 parallel verdict, Rule-2 auto-commit)
+ * must resolve task scopes from the same authority `declare_scope` writes —
+ * never from the legacy v1 `scope-<taskId>.json` projection, which no
+ * production code writes in the project root. This is a scheduling read, NOT
+ * write authorization: it deliberately does not require owner-session or
+ * dispatch correlation, but it DOES require an exact `planStructureHash`
+ * match so a declaration made against an older plan revision cannot certify
+ * disjointness for the current one.
+ *
+ * Fail-closed: zero live candidates (undeclared or store failure), live
+ * candidates that DISAGREE on the file set, or an empty file list all return
+ * `null`, which callers treat as "unknown scope" → serial. Multiple live
+ * candidates that AGREE on the exact same file set are NOT ambiguous: the
+ * delegation gate mints a dispatch-correlated binding (activation 'active',
+ * child owner) alongside the architect's declaration binding for the same
+ * task with the same files, and the scheduling question — "what is this
+ * task's currently-declared scope?" — has one answer whenever they agree.
+ *
+ * `bindingSet` lets a multi-task caller hoist ONE
+ * `readAllAuthoritativeScopeBindings` scan for the whole verdict (pass the
+ * result of {@link readAuthoritativeScopeBindingSet}); omit it for a
+ * single-task read.
+ */
+export function readDeclaredScopeFilesFromBindings(input: {
+	directory: string;
+	taskId: string;
+	plan: Plan;
+	bindingSet?: ScopeBinding[] | null;
+}): string[] | null {
+	if (!isSafeTaskId(input.taskId)) return null;
+	const set: ScopeBinding[] | null =
+		input.bindingSet !== undefined
+			? input.bindingSet
+			: readAuthoritativeScopeBindingSet(input.directory);
+	if (set === null) return null;
+	const planId = derivePlanId(input.plan);
+	const structureHash = computePlanStructureHash(input.plan);
+	const now = Date.now();
+	const candidates = set.filter(
+		(binding) =>
+			binding.taskId === input.taskId &&
+			binding.planId === planId &&
+			binding.planStructureHash === structureHash &&
+			binding.lifecycleState === 'live' &&
+			binding.expiresAt > now,
+	);
+	if (candidates.length < 1) return null;
+	const first = [...candidates[0].files].sort().join('\n');
+	const agreeing = candidates.every(
+		(candidate) => [...candidate.files].sort().join('\n') === first,
+	);
+	if (!agreeing) return null;
+	const files = candidates[0].files;
+	return Array.isArray(files) && files.length > 0 ? files : null;
+}
+
+/**
+ * Hoisted single read of the authoritative v2 binding set for multi-task
+ * scheduling consumers (issue #2532): one bounded scan shared by every
+ * per-task {@link readDeclaredScopeFilesFromBindings} call in a verdict.
+ * Returns `null` when the store is unreadable/overloaded so callers fail
+ * closed to "unknown scope" per task.
+ */
+export function readAuthoritativeScopeBindingSet(
+	directory: string,
+): ScopeBinding[] | null {
+	const set = readAllAuthoritativeScopeBindings(directory);
+	return set.ok ? set.value : null;
+}
+
 export function resolveScopeBindingFromDisk(input: {
 	directory: string;
 	taskId: string;
