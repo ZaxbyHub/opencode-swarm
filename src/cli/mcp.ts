@@ -14,18 +14,30 @@
 
 import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
+import type { RunMcpServerOptions } from '../mcp/server.js';
 import { validateProjectDirectory } from '../utils/path-security.js';
 
 export interface McpServeArgs {
 	root: string;
 	allowWrite: boolean;
+	/** Explicitly requested, reviewed write tools. Omitted for read-only startup. */
+	writeTools?: string[];
 }
+
+/**
+ * MCP writes are a closed set at the CLI boundary. Keep this list deliberately
+ * local to the CLI entry so parsing the CLI does not pull the MCP registry and
+ * the SDK into the CLI's main chunk; the registry repeats the same allowlist at
+ * the dynamic-server boundary.
+ */
+const REVIEWED_WRITE_TOOLS = new Set(['knowledge_add']);
 
 export function parseMcpServeArgs(
 	argv: string[],
 ): McpServeArgs | { error: string } {
 	let root = '';
 	let allowWrite = false;
+	let writeTools: string[] | undefined;
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === '--dir') {
@@ -34,9 +46,38 @@ export function parseMcpServeArgs(
 		} else if (arg.startsWith('--dir=')) {
 			root = arg.slice('--dir='.length);
 		} else if (arg === '--allow-write') {
-			// Recognized forward-compat seam (#2500): never errors, adds no
-			// write tools in Phase 1 (the registry denylist stays fail-closed).
 			allowWrite = true;
+		} else if (arg === '--write-tool') {
+			const requested = argv[i + 1];
+			if (
+				requested === undefined ||
+				requested === '' ||
+				requested.startsWith('--')
+			) {
+				return { error: '--write-tool requires a reviewed tool name' };
+			}
+			i += 1;
+			if (!REVIEWED_WRITE_TOOLS.has(requested)) {
+				return { error: `unknown or unauthorized write tool: ${requested}` };
+			}
+			if (writeTools?.includes(requested)) {
+				return { error: `duplicate --write-tool: ${requested}` };
+			}
+			if (!writeTools) writeTools = [];
+			writeTools.push(requested);
+		} else if (arg.startsWith('--write-tool=')) {
+			const requested = arg.slice('--write-tool='.length);
+			if (!requested) {
+				return { error: '--write-tool requires a reviewed tool name' };
+			}
+			if (!REVIEWED_WRITE_TOOLS.has(requested)) {
+				return { error: `unknown or unauthorized write tool: ${requested}` };
+			}
+			if (writeTools?.includes(requested)) {
+				return { error: `duplicate --write-tool: ${requested}` };
+			}
+			if (!writeTools) writeTools = [];
+			writeTools.push(requested);
 		} else {
 			return { error: `unknown argument: ${arg}` };
 		}
@@ -44,7 +85,10 @@ export function parseMcpServeArgs(
 	if (!root) {
 		return { error: 'mcp serve requires --dir <project-root>' };
 	}
-	return { root, allowWrite };
+	if (writeTools && !allowWrite) {
+		return { error: '--write-tool requires --allow-write' };
+	}
+	return writeTools ? { root, allowWrite, writeTools } : { root, allowWrite };
 }
 
 /** Resolve + fail-closed validate the configured project root. */
@@ -67,10 +111,21 @@ export function resolveMcpRoot(
 	return { root: resolved };
 }
 
+type McpServerRunner = (options: RunMcpServerOptions) => Promise<number>;
+
+/** Internal transport seam for CLI-to-server wiring tests. */
+export const _internals: { runMcpServer: McpServerRunner } = {
+	runMcpServer: async (options) => {
+		// Dynamic import keeps the SDK out of the CLI entry chunk.
+		const { runMcpServer } = await import('../mcp/server.js');
+		return runMcpServer(options);
+	},
+};
+
 export async function handleMcpCommand(argv: string[]): Promise<number> {
 	if (argv[0] !== 'serve') {
 		console.error(
-			'Usage: opencode-swarm mcp serve --dir <project-root> [--allow-write]',
+			'Usage: opencode-swarm mcp serve --dir <project-root> [--allow-write] [--write-tool knowledge_add]',
 		);
 		return 1;
 	}
@@ -85,11 +140,10 @@ export async function handleMcpCommand(argv: string[]): Promise<number> {
 		return 1;
 	}
 	try {
-		// Dynamic import: keeps the SDK out of the CLI entry chunk.
-		const { runMcpServer } = await import('../mcp/server.js');
-		return await runMcpServer({
+		return await _internals.runMcpServer({
 			root: rootResult.root,
 			allowWrite: parsed.allowWrite,
+			...(parsed.writeTools ? { writeTools: parsed.writeTools } : {}),
 		});
 	} catch (error) {
 		console.error(

@@ -87,6 +87,14 @@ export const ARCHITECT_MEMORY_OUTCOME_GUIDANCE = `After using recalled memory or
  * headroom above the heaviest configuration: raising it requires justifying
  * the growth in the PR that needs it and updating the baseline above.
  *
+ * Issue #2500 adds the architect-owned receipt-status tool to the generated
+ * tool list. The representative prefixed feature-heavy renders covered by
+ * the regression suite are ≈160.0K chars, so the 161K ceiling is the smallest
+ * round adjustment that preserves this built-in regression guard while
+ * accommodating that required registration. User-configured swarm IDs can
+ * add arbitrary prefix text; this test-time constant is not a runtime bound
+ * for those user-supplied values.
+ *
  * This bound applies ONLY to the built-in prompt. User-supplied
  * `customPrompt`/`customAppendPrompt` values are exempt (they are validated
  * for placeholders, not size — a user may legitimately paste a large prompt).

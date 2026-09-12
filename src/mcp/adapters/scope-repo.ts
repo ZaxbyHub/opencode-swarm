@@ -58,8 +58,6 @@ const symbolsSchema = z.object({
 
 export const planConflictCheckAdapter: McpReadTool = {
 	name: 'plan_conflict_check',
-	description:
-		'read-only advisory check (#1656): compute a pairwise file-conflict matrix for N proposed parallel task groups using declared scopes and optional git co-change; returns a verdict (all_disjoint / conflicts_present / unknown_scopes), per-pair evidence, and a suggested serialization order. Writes nothing — the execution gate independently recomputes the verdict inline at dispatch time via the same helper. Call BEFORE attempting parallel dispatch to confirm disjointness.',
 	kind: 'read',
 	pathFields: [],
 	inputSchema: planConflictCheckSchema,
@@ -69,8 +67,6 @@ export const planConflictCheckAdapter: McpReadTool = {
 
 export const diffAdapter: McpReadTool = {
 	name: 'diff',
-	description:
-		'Analyze git diff for changed files, exports, interfaces, and function signatures. Returns structured output with contract change detection.',
 	kind: 'read',
 	pathFields: ['paths'],
 	inputSchema: diffSchema,
@@ -99,8 +95,6 @@ export const diffAdapter: McpReadTool = {
 
 export const symbolsAdapter: McpReadTool = {
 	name: 'symbols',
-	description:
-		'Extract and search code symbols (functions, classes, methods, interfaces) across the repository using tree-sitter. Use for understanding code structure and finding definitions.',
 	kind: 'read',
 	pathFields: ['file', 'workspace'],
 	inputSchema: symbolsSchema,

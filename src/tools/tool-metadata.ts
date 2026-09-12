@@ -541,6 +541,10 @@ export const TOOL_METADATA = {
 		description: 'declare file scope for next coder delegation',
 		agents: ['architect'],
 	},
+	scope_validate: {
+		description: 'validate shell writes against an inline file scope',
+		agents: ['architect'],
+	},
 	knowledge_query: {
 		description: 'query swarm or hive knowledge with optional filters',
 		agents: ['architect', 'skill_improver', 'spec_writer'],
@@ -851,6 +855,10 @@ export const TOOL_METADATA = {
 			'coder',
 			'test_engineer',
 		],
+	},
+	knowledge_receipt_status: {
+		description: 'receipt status',
+		agents: ['architect'],
 	},
 	knowledge_archive: {
 		description:
