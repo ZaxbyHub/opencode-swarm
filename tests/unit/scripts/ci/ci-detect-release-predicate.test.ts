@@ -15,8 +15,7 @@ const CI_YML = fileURLToPath(
 	new URL('../../../../.github/workflows/ci.yml', import.meta.url),
 );
 
-const EXPECTED_HEAD_SUBJECT_LOOKUP =
-	`git -C "$GITHUB_WORKSPACE" show -s --format='%s' "$HEAD_SHA" > "$RELEASE_LOOKUP_FILE"`;
+const EXPECTED_HEAD_SUBJECT_LOOKUP = `git -C "$GITHUB_WORKSPACE" show -s --format='%s' "$HEAD_SHA" > "$RELEASE_LOOKUP_FILE"`;
 
 function readWorkflow(): string {
 	return readFileSync(CI_YML, 'utf8');
