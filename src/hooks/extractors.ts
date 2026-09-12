@@ -1,4 +1,4 @@
-import type { Plan } from '../config/plan-schema';
+import { type Plan, resolveActivePhaseId } from '../config/plan-schema';
 import { extractContextDecisions } from '../utils/context-decisions';
 import { estimateCharsForTokens } from './utils';
 
@@ -207,9 +207,14 @@ export function extractPatterns(
 
 /**
  * Extracts current phase info from a Plan object.
+ *
+ * #2532: resolves the phase through the canonical active-phase resolver so a
+ * stale stored cursor (legacy plans whose current_phase never advanced) can
+ * never suppress the summary — the honest active phase is reported instead.
  */
 export function extractCurrentPhaseFromPlan(plan: Plan): string | null {
-	const phase = plan.phases.find((p) => p.id === plan.current_phase);
+	const phaseId = resolveActivePhaseId(plan);
+	const phase = plan.phases.find((p) => p.id === phaseId);
 	if (!phase) return null;
 
 	const statusMap: Record<string, string> = {
@@ -226,7 +231,7 @@ export function extractCurrentPhaseFromPlan(plan: Plan): string | null {
  * Extracts the first incomplete task from the current phase of a Plan object.
  */
 export function extractCurrentTaskFromPlan(plan: Plan): string | null {
-	const phase = plan.phases.find((p) => p.id === plan.current_phase);
+	const phase = plan.phases.find((p) => p.id === resolveActivePhaseId(plan));
 	if (!phase) return null;
 
 	// Find first in_progress task, or first pending task
@@ -258,7 +263,7 @@ export function extractIncompleteTasksFromPlan(
 	plan: Plan,
 	maxChars: number = 500,
 ): string | null {
-	const phase = plan.phases.find((p) => p.id === plan.current_phase);
+	const phase = plan.phases.find((p) => p.id === resolveActivePhaseId(plan));
 	if (!phase) return null;
 
 	const incomplete = phase.tasks.filter(

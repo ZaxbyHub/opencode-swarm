@@ -48,7 +48,14 @@ function completedTask(
 	};
 }
 
-/** 3-phase plan whose cursor was authored once at plan creation and never advanced. */
+/**
+ * Cursor-lag plan (#2532-adjusted): receipts are stamped with the RESOLVED
+ * active phase (getCurrentPhase), so the mistag tolerance arm covers plans
+ * whose resolved cursor trails the phase being completed. Phase 1 stays
+ * non-terminal so the resolved cursor is 1 while phases 2–3 are already
+ * complete — keeping "phase 2 matches neither the gate phase 3 (exact) nor
+ * the plan cursor 1 (tolerance)" a live rejection case.
+ */
 function staleCursorPlan(): Plan {
 	return {
 		schema_version: '1.0.0',
@@ -59,8 +66,18 @@ function staleCursorPlan(): Plan {
 			{
 				id: 1,
 				name: 'Foundation',
-				status: 'complete',
-				tasks: [completedTask('1.1', 1)],
+				status: 'pending',
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'pending',
+						size: 'small',
+						description: 'Pending task 1.1',
+						depends: [],
+						files_touched: [],
+					},
+				],
 			},
 			{
 				id: 2,
@@ -71,9 +88,9 @@ function staleCursorPlan(): Plan {
 			{
 				id: 3,
 				name: 'Documentation',
-				status: 'in_progress',
+				status: 'complete',
 				required_agents: ['docs'],
-				tasks: [],
+				tasks: [completedTask('3.1', 3)],
 			},
 		],
 	};
@@ -162,8 +179,9 @@ describe('phase participation foreign-phase rejection (issue #2702)', () => {
 		// receiptId/resultDigest stay the 64-hex strings the drive produced.
 		const foreign: StoredReceipt = { ...recorded, phase: 2 };
 		// Replace rather than append: the cursor-tagged phase-1 receipt must not
-		// remain in the store, or the post-fix cursor tolerance would satisfy
-		// the phase-3 lookup through it and flip this preserving check red.
+		// remain in the store, or the cursor tolerance (resolved cursor 1 < 3)
+		// would satisfy the phase-3 lookup through it and flip this preserving
+		// check red.
 		writeParticipationStore(directory, {
 			schemaVersion: 1,
 			pending: store.pending,

@@ -465,13 +465,20 @@ export async function executeSavePlan(
 	// Step 0: Validate phase IDs and task ID formats
 	const validationErrors: string[] = [];
 
-	// Validate phase IDs (must be positive integers)
+	// Validate phase IDs (must be positive integers; must be unique — a
+	// duplicated id would make find-first cursor/phase resolution ambiguous)
+	const seenPhaseIds = new Set<number>();
 	for (const phase of args.phases) {
 		if (!Number.isInteger(phase.id) || phase.id <= 0) {
 			validationErrors.push(
 				`Phase ${phase.id} has invalid id: must be a positive integer`,
 			);
+		} else if (seenPhaseIds.has(phase.id)) {
+			validationErrors.push(
+				`Phase ${phase.id} is duplicated: phase ids must be unique`,
+			);
 		}
+		seenPhaseIds.add(phase.id);
 
 		// Validate task ID formats (must match /^\d+\.\d+(\.\d+)*$/)
 		const taskIdPattern = /^\d+\.\d+(\.\d+)*$/;
@@ -1129,9 +1136,15 @@ export async function executeSavePlan(
 		migration_status: reconcileLedgerProjection
 			? existingPlan?.migration_status
 			: 'native',
+		// #2532 (PLAN-4): a revision of an EXISTING plan carries the prior
+		// cursor forward instead of re-pinning it to phases[0] — the manager's
+		// single-writer normalization (`normalizeCurrentPhaseInPlace` in
+		// savePlan) then advances it off any completed phase. New plans still
+		// start at the first phase. The reconcile-ledger-projection recovery
+		// mode keeps copying the existing cursor verbatim.
 		current_phase: reconcileLedgerProjection
 			? existingPlan?.current_phase
-			: args.phases[0]?.id,
+			: (existingPlan?.current_phase ?? args.phases[0]?.id),
 		specMtime,
 		specHash,
 		...(resolvedProfile !== undefined

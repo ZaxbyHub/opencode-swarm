@@ -8,6 +8,7 @@
 
 import * as path from 'node:path';
 import type { PreflightTriggerManager } from '../background/trigger';
+import { getCurrentPhase } from '../config/plan-schema';
 import { CuratorConfigSchema } from '../config/schema';
 import { loadPlan } from '../plan/manager';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
@@ -62,7 +63,10 @@ export function createPhaseMonitorHook(
 		const plan = await loadPlan(directory);
 		if (!plan) return;
 
-		const currentPhase = plan.current_phase ?? 1;
+		// #2532: canonical active-phase resolution — phase transitions now
+		// actually occur as the cursor advances off completed phases, so this
+		// monitor's preflight trigger fires once per real transition.
+		const currentPhase = getCurrentPhase(plan);
 
 		// First call: initialize without triggering
 		if (lastKnownPhase === null) {

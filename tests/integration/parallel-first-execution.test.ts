@@ -33,6 +33,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../src/state';
+import { executeDeclareScope } from '../../src/tools/declare-scope';
 import { writeApprovedPlan } from '../helpers/approved-plan';
 import { withFrozenClock } from '../helpers/test-clock.js';
 
@@ -85,43 +86,51 @@ async function writeParallelApprovedPlan(
 	});
 }
 
-/** Write disjoint declared scope files for the given task ids. */
-function writeDisjointScopes(directory: string, taskIds: string[]): void {
-	const scopesDir = path.join(directory, '.swarm', 'scopes');
-	fs.mkdirSync(scopesDir, { recursive: true });
-	for (const id of taskIds) {
-		const safe = id.replace(/[^a-zA-Z0-9._-]/g, '_');
-		fs.writeFileSync(
-			path.join(scopesDir, `scope-${id}.json`),
-			JSON.stringify({
-				version: 1,
-				taskId: id,
-				files: [`src/${safe}.ts`],
-				declaredAt: 1,
-				expiresAt: Number.MAX_SAFE_INTEGER,
-			}),
-			'utf-8',
+/**
+ * #2532: declare scopes through the REGISTERED v2 authority (declare_scope) —
+ * the gate's verdict reads the binding store, never the legacy v1 projection.
+ */
+async function declareScopes(
+	directory: string,
+	entries: Array<{ id: string; files: string[] }>,
+): Promise<void> {
+	for (const entry of entries) {
+		const result = await executeDeclareScope(
+			{ taskId: entry.id, files: entry.files, working_directory: directory },
+			directory,
+			{ sessionID: 'v8-parallel-int-architect', messageID: `m-${entry.id}` },
 		);
+		if (!result.success) {
+			throw new Error(
+				`declare_scope failed for ${entry.id}: ${result.message}`,
+			);
+		}
 	}
 }
 
-/** Write OVERLAPPING declared scope files (all tasks touch the same file). */
-function writeOverlappingScopes(directory: string, taskIds: string[]): void {
-	const scopesDir = path.join(directory, '.swarm', 'scopes');
-	fs.mkdirSync(scopesDir, { recursive: true });
-	for (const id of taskIds) {
-		fs.writeFileSync(
-			path.join(scopesDir, `scope-${id}.json`),
-			JSON.stringify({
-				version: 1,
-				taskId: id,
-				files: ['src/shared.ts'],
-				declaredAt: 1,
-				expiresAt: Number.MAX_SAFE_INTEGER,
-			}),
-			'utf-8',
-		);
-	}
+/** Declare DISJOINT v2 scopes for the given task ids. */
+async function writeDisjointScopes(
+	directory: string,
+	taskIds: string[],
+): Promise<void> {
+	await declareScopes(
+		directory,
+		taskIds.map((id) => ({
+			id,
+			files: [`src/${id.replace(/[^a-zA-Z0-9._-]/g, '_')}.ts`],
+		})),
+	);
+}
+
+/** Declare OVERLAPPING v2 scopes (all tasks touch the same file). */
+async function writeOverlappingScopes(
+	directory: string,
+	taskIds: string[],
+): Promise<void> {
+	await declareScopes(
+		directory,
+		taskIds.map((id) => ({ id, files: ['src/shared.ts'] })),
+	);
 }
 
 function makeCoderInput(sessionId: string, taskId: string) {
@@ -166,7 +175,7 @@ describe('v8 parallel-first execution — gate enforcement through toolBefore (#
 			{ id: '1.1', files: ['src/a.ts'] },
 			{ id: '1.2', files: ['src/b.ts'] },
 		]);
-		writeDisjointScopes(testDir, ['1.1', '1.2']);
+		await writeDisjointScopes(testDir, ['1.1', '1.2']);
 
 		const config = makeConfig();
 		const hooks = createDelegationGateHook(config, testDir);
@@ -194,7 +203,7 @@ describe('v8 parallel-first execution — gate enforcement through toolBefore (#
 			{ id: '1.1', files: ['src/shared.ts'] },
 			{ id: '1.2', files: ['src/shared.ts'] },
 		]);
-		writeOverlappingScopes(testDir, ['1.1', '1.2']);
+		await writeOverlappingScopes(testDir, ['1.1', '1.2']);
 
 		const config = makeConfig();
 		const hooks = createDelegationGateHook(config, testDir);
@@ -248,7 +257,7 @@ describe('v8 parallel-first execution — gate enforcement through toolBefore (#
 		]);
 		// writeApprovedPlan does NOT set execution_profile → schema default
 		// parallelization_enabled: false → parallelModeActive === false.
-		writeDisjointScopes(testDir, ['1.1', '1.2']);
+		await writeDisjointScopes(testDir, ['1.1', '1.2']);
 
 		const config = makeConfig();
 		const hooks = createDelegationGateHook(config, testDir);
