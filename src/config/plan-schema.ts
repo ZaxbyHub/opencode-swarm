@@ -188,7 +188,9 @@ function isPhaseEffectivelyTerminal(phase: Phase): boolean {
 	const tasks = phase.tasks ?? [];
 	return (
 		tasks.length > 0 &&
-		tasks.every((task) => task.status === 'completed' || task.status === 'closed')
+		tasks.every(
+			(task) => task.status === 'completed' || task.status === 'closed',
+		)
 	);
 }
 

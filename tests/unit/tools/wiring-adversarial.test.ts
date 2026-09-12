@@ -10,9 +10,10 @@
  *
  * DO NOT add tool-level security tests here - those belong in the tool-specific test files
  */
+
+import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { describe, expect, test } from 'bun:test';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // ============================================================================
