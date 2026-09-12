@@ -6,6 +6,7 @@ import {
 	MAX_SAFE_TEST_FILES,
 	test_runner,
 } from '../../../src/tools/test-runner.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
  * Bounded multi-source discovery (issue #2492 AC1/AC2/AC9/AC12): multi-source
@@ -22,9 +23,7 @@ const execute = test_runner.execute as unknown as (
 ) => Promise<string>;
 
 function makeFixture(): string {
-	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'tr-multi-')),
-	);
+	const dir = canonicalMkdtemp('tr-multi-');
 	fs.writeFileSync(
 		path.join(dir, 'package.json'),
 		JSON.stringify(

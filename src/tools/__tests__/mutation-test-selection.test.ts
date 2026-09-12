@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../../../tests/helpers/tmpdir.js';
 import { mutation_test } from '../../../src/tools/mutation-test.js';
 
 /**
@@ -20,9 +21,7 @@ const execute = mutation_test.execute as unknown as (
 const norm = (p: string): string => p.replace(/\\/g, '/');
 
 function makeFixture(): string {
-	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'mut-sel-')),
-	);
+	const dir = canonicalMkdtemp('mut-sel-');
 	fs.writeFileSync(
 		path.join(dir, 'package.json'),
 		JSON.stringify(

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../../../tests/helpers/tmpdir.js';
 import { _internals as analyzerInternals } from '../analyzer.js';
 
 /**
@@ -17,9 +18,7 @@ const { loadImpactMap } = analyzerInternals as unknown as {
 };
 
 function makeFixture(): string {
-	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'impact-stale-')),
-	);
+	const dir = canonicalMkdtemp('impact-stale-');
 	fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
 	fs.mkdirSync(path.join(dir, 'tests'), { recursive: true });
 	fs.writeFileSync(path.join(dir, 'src/a.ts'), 'export const a = 1;\n');

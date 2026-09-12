@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../../../tests/helpers/tmpdir.js';
 import { executeMutationSuite } from '../../../src/mutation/engine.js';
 import {
 	commentFamilyForLanguage,
@@ -77,9 +78,7 @@ describe('isStaticallyEquivalent language dispatch (issue #2492 AC4)', () => {
 
 describe('engine-level comment-only mutant classification (issue #2492 AC4)', () => {
 	test('comment-only python mutant is equivalent and the runner is never invoked', async () => {
-		const tmp = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'eq-lang-')),
-		);
+		const tmp = canonicalMkdtemp('eq-lang-');
 		fs.writeFileSync(
 			path.join(tmp, 'calc.py'),
 			'def add(a, b):\n    # compute\n    return a + b\n',
