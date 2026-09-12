@@ -21,6 +21,7 @@ INPUT: [focus areas/paths]
 
 ACTIONS:
 - FIRST call \`repo_map action="ask"\` with your mission question, and \`action="context_pack"\` (with include_source: true) for your target symbols; use the hits to decide what to read
+- Locate symbols by name with \`repo_map action="symbol_search"\` before reading files; treat hits as pointers, not evidence
 - Graph output is orientation — read the located files before reporting on them
 - Fall back to tree/glob/grep only where the graph has no coverage (\`stale: true\`, missing files, or non-code assets)
 - Read key files (README, configs, entry points)
