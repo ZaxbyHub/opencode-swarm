@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.178.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.178.0...v7.178.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **atomic-write:** re-point WRITER_CLASSIFICATION producer citations after [#2532](https://github.com/ZaxbyHub/opencode-swarm/issues/2532) line shifts ([d7d9a13](https://github.com/ZaxbyHub/opencode-swarm/commit/d7d9a13df9e8979a79c0d711c22100117a4f3328))
+* **memory:** harden cohort migration locking per review ([34d57bb](https://github.com/ZaxbyHub/opencode-swarm/commit/34d57bb3e6f680a00509c14e9bbaa8c24a86bc20))
+* **memory:** serialize cohort destination migration under its live lock ([90f7f2e](https://github.com/ZaxbyHub/opencode-swarm/commit/90f7f2e2fe704f83db89a1ecff070e7fd66faeba))
+* **memory:** serialize cohort destination migration under its live lock ([593596a](https://github.com/ZaxbyHub/opencode-swarm/commit/593596ab544c204653b8b2b2a70da5ec0f22592a))
+* **plan-schema:** tolerate task-less in-memory phases in the phase resolver; hermetic WIRE-045 ([4dd5b39](https://github.com/ZaxbyHub/opencode-swarm/commit/4dd5b397d9f28698c61e530bebd65ca8dd2fdd77))
+* **plan:** keep docs receipts verifiable across the live cursor advance ([#2532](https://github.com/ZaxbyHub/opencode-swarm/issues/2532) review) ([7f94dc5](https://github.com/ZaxbyHub/opencode-swarm/commit/7f94dc5ba403cea868f2392c16ab326a795cb5b4))
+* **plan:** lazy-import scope-persistence at the Rule-2 site ([cbf6449](https://github.com/ZaxbyHub/opencode-swarm/commit/cbf6449ca6c5158712c7113df900d9574d30ed94))
+* **plan:** parallel-first scheduling and phase progression use current bindings ([#2532](https://github.com/ZaxbyHub/opencode-swarm/issues/2532)) ([7a62535](https://github.com/ZaxbyHub/opencode-swarm/commit/7a62535d3d9a6d49c5a4460ed63114ff74889464))
+
 ## [7.178.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.177.1...v7.178.0) (2026-09-12)
 
 
