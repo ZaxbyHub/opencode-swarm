@@ -10,14 +10,14 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SummaryConfig } from '../../../src/config/schema';
-import { createToolSummarizerHook, resetSummaryIdCounter } from '../../../src/hooks/tool-summarizer';
+import { createToolSummarizerHook } from '../../../src/hooks/tool-summarizer';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 
 describe('createToolSummarizerHook - Adversarial Tests for exempt_tools', () => {
 	let tempDir: string;
 	const largeOutput = 'x'.repeat(2000);
 
-	beforeEach(() => { resetSummaryIdCounter();
+	beforeEach(() => {
 		// This Date.now() is a unique-directory suffix, not a time-sensitive
 		// assertion, so it is wrapped per the repo's test-clock convention
 		// (issue #1782). The elapsed-time measurements below (startTime/duration

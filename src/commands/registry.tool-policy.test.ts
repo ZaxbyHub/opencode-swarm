@@ -49,6 +49,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory evaluate',
 		'memory consolidation-log',
 		'memory audit-verify', // #1466: read-only audit-chain verification
+		'dashboard', // #2509: read-only dashboard status command
 		'sdd',
 		'sdd status',
 		'sdd validate',
@@ -61,8 +62,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'pr status',
 		'learning',
 		'post-mortem',
-		// agent-callable PR subscription lifecycle (idempotent + capped;
-		// moved from human-only for swarm-pr-subscribe parity)
+		// agent-callable PR subscription lifecycle (idempotent, capped; ex-human-only)
 		'pr subscribe',
 		'pr unsubscribe',
 		// guardrail diagnostics: pre-existing 'agent' commands not previously

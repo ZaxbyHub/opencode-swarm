@@ -21,6 +21,17 @@ import type {
 	BashWord,
 } from 'bash-parser';
 import parse from 'bash-parser';
+import { unsafePathTextReason } from '../scope/path-identity';
+
+/**
+ * Validate command text without treating shell line separators as path data.
+ * Newlines (and the carriage returns paired with them) are valid command
+ * syntax, notably in here-documents. Other control and bidi characters remain
+ * fail-closed through the shared path-text validator.
+ */
+function unsafeShellCommandTextReason(value: string): string | null {
+	return unsafePathTextReason(value.replace(/[\r\n]/g, ''));
+}
 
 /**
  * All write-operation categories detected by this module.
@@ -101,10 +112,14 @@ const REDIRECT_WRITE_TOKENS = new Set([
 /** Tokens that represent here-document / here-string redirections. */
 const REDIRECT_HERE_TOKENS = new Set(['DLESS', 'DLESSDASH']);
 
+/** `>&word` redirects an output descriptor; a numeric word copies a descriptor. */
+const REDIRECT_GREATAND_TOKENS = new Set(['GREATAND']);
+
 /** All write-effect redirections. */
 const REDIRECT_ALL_WRITE_TOKENS = new Set([
 	...REDIRECT_WRITE_TOKENS,
 	...REDIRECT_HERE_TOKENS,
+	...REDIRECT_GREATAND_TOKENS,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -118,6 +133,8 @@ const BUILTIN_WRITE_COMMANDS = new Set([
 	'install',
 	'ln',
 	'truncate',
+	'unlink',
+	'rmdir',
 ]);
 
 /** Builtins with in-place editing semantics (modify file argument in place). */
@@ -133,6 +150,12 @@ const INTERPRETER_EVAL_COMMANDS = new Set([
 	'ruby',
 	'perl',
 	'php',
+	'bash',
+	'sh',
+	'dash',
+	'zsh',
+	'ksh',
+	'eval',
 ]);
 
 /** Network downloaders. */
@@ -220,6 +243,14 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget | null {
 	if (tokens.length === 0) return null;
 
 	const name = tokens[0].toLowerCase();
+	// `rmdir /s [/q] <path>` is the Windows spelling of recursive directory
+	// deletion.  The destructive-command guard owns its safety decision for
+	// that form (including allowing trusted `node_modules`/`dist` targets), so
+	// do not also classify the command as an ordinary POSIX write.  Plain
+	// `rmdir <path>` remains a POSIX write and is handled below.
+	if (name === 'rmdir' && tokens.some((token) => /^\/(?:s|q)$/i.test(token))) {
+		return null;
+	}
 	if (BUILTIN_WRITE_COMMANDS.has(name)) {
 		// Last non-flag argument is the destination
 		for (let i = tokens.length - 1; i >= 1; i--) {
@@ -454,6 +485,11 @@ function isNumeric(s: string): boolean {
 	return /^\d+$/.test(s);
 }
 
+/** `>&1` copies an output descriptor and `>&-` closes one; neither names a file. */
+function isNonFileGreatAndTarget(path: string | null): boolean {
+	return path !== null && (isNumeric(path) || path === '-');
+}
+
 // ---------------------------------------------------------------------------
 // Detection functions per category
 // ---------------------------------------------------------------------------
@@ -488,7 +524,10 @@ function detectRedirects(cmd: unknown): WriteTarget[] {
 		const path = extractRedirectPath(fileNode);
 		const opLabel = operatorLabel(opNode);
 
-		if (REDIRECT_WRITE_TOKENS.has(opType)) {
+		if (
+			REDIRECT_WRITE_TOKENS.has(opType) ||
+			(REDIRECT_GREATAND_TOKENS.has(opType) && !isNonFileGreatAndTarget(path))
+		) {
 			results.push({ category: 'redirect', operator: opLabel, path });
 		} else if (REDIRECT_HERE_TOKENS.has(opType)) {
 			results.push({ category: 'here_doc', operator: opLabel, path });
@@ -581,6 +620,16 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	if (!BUILTIN_WRITE_COMMANDS.has(lowerName)) return results;
 
 	const suffixWords = getSuffixWords(cmd);
+	// `rmdir /s [/q] <path>` is a cmd.exe destructive form.  Let the
+	// destructive-command guard evaluate its target containment instead of
+	// feeding it through the POSIX write-authority gate used by `bash` calls.
+	// A normal POSIX `rmdir <path>` is still reported as a write.
+	if (
+		lowerName === 'rmdir' &&
+		suffixWords.some((word) => /^\/(?:s|q)$/i.test(word))
+	) {
+		return results;
+	}
 
 	if (lowerName === 'truncate') {
 		// find first word that doesn't start with - and isn't a pure numeric size
@@ -704,7 +753,20 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		ruby: ['-e'],
 		perl: ['-e', '-E'],
 		php: ['-r', '-R', '-F'],
+		bash: ['-c'],
+		sh: ['-c'],
+		dash: ['-c'],
+		zsh: ['-c'],
+		ksh: ['-c'],
 	};
+	if (lowerName === 'eval') {
+		results.push({
+			category: 'interpreter_eval',
+			operator: 'eval',
+			path: null,
+		});
+		return results;
+	}
 
 	const relevantFlags = evalFlags[lowerName] ?? [];
 	// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
@@ -981,7 +1043,10 @@ function detectGitDestructive(cmd: unknown): WriteTarget[] {
  * Split a Windows command string into individual commands by pipe (|) and
  * logical separators (&&, ||). Does not split on && inside quoted strings.
  */
-function splitWindowsCommands(command: string): string[] {
+function splitWindowsCommands(
+	command: string,
+	shell: 'powershell' | 'cmd',
+): string[] {
 	const commands: string[] = [];
 	let current = '';
 	let inSingleQuote = false;
@@ -990,7 +1055,7 @@ function splitWindowsCommands(command: string): string[] {
 
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
-		if (ch === "'" && !inDoubleQuote) {
+		if (shell === 'powershell' && ch === "'" && !inDoubleQuote) {
 			inSingleQuote = !inSingleQuote;
 		} else if (ch === '"' && !inSingleQuote) {
 			inDoubleQuote = !inDoubleQuote;
@@ -998,6 +1063,23 @@ function splitWindowsCommands(command: string): string[] {
 			parenDepth++;
 		} else if (ch === ')' && !inSingleQuote && !inDoubleQuote) {
 			parenDepth--;
+		}
+
+		// PowerShell script blocks and statement separators are command
+		// boundaries. Splitting braces themselves is intentional: leaving the
+		// opening brace attached makes the anchored cmdlet matcher miss writes in
+		// `{ Set-Content outside.txt }`. Expressions containing braces are handled
+		// conservatively as smaller command fragments.
+		if (
+			shell === 'powershell' &&
+			(ch === ';' || ch === '{' || ch === '}') &&
+			!inSingleQuote &&
+			!inDoubleQuote &&
+			parenDepth === 0
+		) {
+			if (current.trim()) commands.push(current.trim());
+			current = '';
+			continue;
 		}
 
 		// Split on | (pipe) when not in quotes or parens
@@ -1025,6 +1107,14 @@ function splitWindowsCommands(command: string): string[] {
 
 		// Split on single & when not in quotes or parens and not part of &&
 		if (ch === '&' && !inSingleQuote && !inDoubleQuote && parenDepth === 0) {
+			// In cmd.exe, `n>&m` duplicates a file descriptor.  The ampersand is
+			// part of the redirection grammar, not a command separator.  Keep it
+			// attached so the redirection scanner can distinguish `2>&1` from a
+			// write such as `2>output.txt`.
+			if (command[i - 1] === '>') {
+				current += ch;
+				continue;
+			}
 			// Check this is NOT the first char of && (already handled above)
 			if (!(i + 1 < command.length && command[i + 1] === '&')) {
 				if (current.trim()) commands.push(current.trim());
@@ -1057,8 +1147,125 @@ const _PS_WRITE_CMDLETS = new Set([
 	'Start-Process',
 ]);
 
-/** PowerShell aliases that map to write operations. */
-const _PS_WRITE_ALIASES = new Set(['echo', 'write']);
+/**
+ * Scan PowerShell redirections without requiring whitespace around the
+ * operator.  PowerShell accepts `Get-Process>out.txt` and stream-specific
+ * forms such as `tool 2>err.txt`; the old whitespace-dependent regex treated
+ * those commands as read-only.  Numeric `n>&m` is stream duplication, not a
+ * file write. Missing or unterminated targets are represented as unresolved;
+ * dynamic tokens are retained for the shared resolver to reject fail-closed.
+ */
+function detectPowerShellRedirects(command: string): WriteTarget[] {
+	const results: WriteTarget[] = [];
+	let inSingleQuote = false;
+	let inDoubleQuote = false;
+
+	const isBoundary = (character: string | undefined): boolean =>
+		character === undefined || /[\s;|&()]/.test(character);
+
+	for (let index = 0; index < command.length; index++) {
+		const character = command[index];
+
+		if (inSingleQuote) {
+			if (character === "'") {
+				// PowerShell escapes an apostrophe in a single-quoted string as `''`.
+				if (command[index + 1] === "'") {
+					index++;
+				} else {
+					inSingleQuote = false;
+				}
+			}
+			continue;
+		}
+		if (inDoubleQuote) {
+			// PowerShell uses backtick, rather than backslash, for string escapes.
+			if (character === '`' && index + 1 < command.length) {
+				index++;
+				continue;
+			}
+			if (character === '"') inDoubleQuote = false;
+			continue;
+		}
+		if (character === "'") {
+			inSingleQuote = true;
+			continue;
+		}
+		if (character === '"') {
+			inDoubleQuote = true;
+			continue;
+		}
+		if (character !== '>') continue;
+
+		const operator = command[index + 1] === '>' ? '>>' : '>';
+		let cursor = index + operator.length;
+		while (/\s/.test(command[cursor] ?? '')) cursor++;
+
+		// `2>&1` is stream duplication.  Unlike CMD, PowerShell's stream
+		// descriptors are an intentional part of normal error handling.
+		if (command[cursor] === '&') {
+			cursor++;
+			while (/\s/.test(command[cursor] ?? '')) cursor++;
+			const descriptorStart = cursor;
+			while (/\d/.test(command[cursor] ?? '')) cursor++;
+			const descriptor = command.slice(descriptorStart, cursor);
+			if (descriptor && isBoundary(command[cursor])) {
+				index = Math.max(index, cursor - 1);
+				continue;
+			}
+			results.push({ category: 'redirect', operator, path: null });
+			index = Math.max(index, cursor - 1);
+			continue;
+		}
+
+		let pathValue: string | null = null;
+		if (cursor < command.length) {
+			const quote = command[cursor];
+			if (quote === '"' || quote === "'") {
+				cursor++;
+				const pathStart = cursor;
+				let closed = false;
+				while (cursor < command.length) {
+					if (quote === '"' && command[cursor] === '`') {
+						cursor += 2;
+						continue;
+					}
+					if (command[cursor] === quote) {
+						if (quote === "'" && command[cursor + 1] === "'") {
+							cursor += 2;
+							continue;
+						}
+						pathValue = command.slice(pathStart, cursor);
+						cursor++;
+						closed = true;
+						break;
+					}
+					cursor++;
+				}
+				if (!closed) pathValue = null;
+			} else {
+				const pathStart = cursor;
+				while (
+					cursor < command.length &&
+					!/\s|[;|&()<>]/.test(command[cursor] ?? '')
+				) {
+					cursor++;
+				}
+				if (cursor > pathStart) pathValue = command.slice(pathStart, cursor);
+			}
+		}
+
+		results.push({ category: 'redirect', operator, path: pathValue });
+		index = Math.max(index, cursor - 1);
+	}
+
+	// A malformed quoted command is not safe to classify as read-only.  It may
+	// also have concealed a redirection, so surface an unresolved target.
+	if (inSingleQuote || inDoubleQuote) {
+		results.push({ category: 'redirect', operator: '>', path: null });
+	}
+
+	return results;
+}
 
 /**
  * Detect write operations in a single PowerShell command string using regex.
@@ -1069,11 +1276,28 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 	const trimmed = command.trim();
 	if (!trimmed) return results;
 
+	// Encoded PowerShell payloads cannot be inspected without executing or
+	// decoding an untrusted script. Treat the invocation as an unresolved write
+	// effect so scope validation fails closed. Cover the documented switch and
+	// the common unique-prefix aliases accepted by PowerShell (`-e`, `-ec`,
+	// `-enc`).
+	if (
+		/^(?:powershell|pwsh)(?:\.exe)?\s+/i.test(trimmed) &&
+		/(?:^|\s)-(?:e|ec|enc|encodedcommand)(?=\s|=|$)/i.test(trimmed)
+	) {
+		results.push({
+			category: 'interpreter_eval',
+			operator: 'PowerShell -EncodedCommand',
+			path: null,
+		});
+		return results;
+	}
+
 	// Strip -Command wrapper to get inner PowerShell command
 	// Handle: powershell -Command "...", powershell -C "..."
 	let innerCommand = trimmed;
 	const cmdMatch = trimmed.match(
-		/^(?:powershell|pwsh)\s+(?:-Command|-C)\s+(.*)$/i,
+		/^(?:powershell|pwsh)(?:\.exe)?\s+(?:-Command|-C)\s+(.*)$/i,
 	);
 	if (cmdMatch) {
 		innerCommand = cmdMatch[1].trim();
@@ -1086,29 +1310,56 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		}
 	}
 
-	// Detect redirections: > and >> (PowerShell uses same operators)
-	// Match > or >> that is NOT preceded by a digit (not fd redirect like 2>)
-	const redirectMatch = innerCommand.match(/^(.*?)\s+((?:>){1,2})\s*(\S+)$/);
-	if (redirectMatch) {
-		// Check if this looks like an fd redirect pattern (cmd 2>&1)
-		const beforeRedirect = redirectMatch[1];
-		const op = redirectMatch[2];
-		const path = redirectMatch[3];
-		const fdRedirectPattern = /\d>\s*$|\s\d>&$/;
-		if (!fdRedirectPattern.test(`${beforeRedirect} ${op}`)) {
-			results.push({ category: 'redirect', operator: op, path });
-		}
-	}
-
-	// Also detect leading redirect (e.g., " > out.txt" at start — unusual but possible)
-	const leadingRedirect = innerCommand.match(/^((?:>){1,2})\s+(\S+)$/);
-	if (leadingRedirect) {
+	// Changing the working directory makes relative paths in the same compound
+	// command impossible to resolve without executing PowerShell. Report an
+	// unresolved write effect so callers fail closed instead of resolving a
+	// later path against the original workspace root.
+	if (
+		/(?:^|[;{}|&])\s*(?:Set-Location|Push-Location|Pop-Location|cd|chdir|sl)\b/i.test(
+			innerCommand,
+		)
+	) {
 		results.push({
-			category: 'redirect',
-			operator: leadingRedirect[1],
-			path: leadingRedirect[2],
+			category: 'builtin_write',
+			operator: 'working-directory mutation',
+			path: null,
 		});
 	}
+
+	// Executable/parenthesized script blocks can keep their braces inside a
+	// larger expression (for example `& ({ Set-Content ../outside.txt ... })`),
+	// so splitWindowsCommands cannot expose the cmdlet as a fragment anchored at
+	// the start. Treat any write cmdlet nested behind a grouping delimiter as an
+	// unresolved write effect; static resolution cannot safely determine the
+	// invocation context or working directory.
+	if (
+		/[({]\s*(?:Out-File|Set-Content|Add-Content|Clear-Content|Copy-Item|Move-Item|Remove-Item)\b/i.test(
+			innerCommand,
+		)
+	) {
+		results.push({
+			category: 'interpreter_eval',
+			operator: 'nested PowerShell script block',
+			path: null,
+		});
+	}
+
+	// The call operator and Invoke-Expression can execute a command held in a
+	// string or variable. Its eventual write targets are not statically
+	// recoverable, so report an unresolved effect instead of treating a dynamic
+	// invocation such as `& 'Set-Content' outside.txt x` as read-only.
+	if (
+		/(?:^|[;|])\s*&\s*(?:['"$({]|\S+\s*\()/i.test(innerCommand) ||
+		/(?:^|[;|])\s*(?:Invoke-Expression|IEX)\b/i.test(innerCommand)
+	) {
+		results.push({
+			category: 'interpreter_eval',
+			operator: 'dynamic PowerShell invocation',
+			path: null,
+		});
+	}
+
+	results.push(...detectPowerShellRedirects(innerCommand));
 
 	// Start-Process is handled by detectInteractiveSession — do not double-detect here
 
@@ -1128,11 +1379,11 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 	}
 
 	// Detect file-writing cmdlets: Out-File, Set-Content, Add-Content, Clear-Content
-	function detectPsContentCmdlet(cmd: string): WriteTarget | null {
+	function detectPsContentCmdlet(cmd: string): WriteTarget[] {
 		const cmdletMatch = cmd.match(
 			/^(Out-File|Set-Content|Add-Content|Clear-Content)\b/i,
 		);
-		if (!cmdletMatch) return null;
+		if (!cmdletMatch) return [];
 		const cmdletName = cmdletMatch[1];
 		const rest = cmd.slice(cmdletMatch[0].length).trim();
 
@@ -1144,12 +1395,20 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		// Match -Path <value>, -FilePath <value>, -LiteralPath <value> (value may be quoted)
 		// Quoted strings must be matched BEFORE \S+ to handle paths with spaces correctly
 		const pathFlagMatch = rest.match(
-			/(?:-Path|-FilePath|-LiteralPath)\s+("([^"]+)"|'([^']+)'|(\S+))/i,
+			/(?:-Path|-FilePath|-LiteralPath)\s+((?:"[^"]*"|'[^']*'|[^,\s]+)(?:\s*,\s*(?:"[^"]*"|'[^']*'|[^,\s]+))*)/i,
 		);
 		if (pathFlagMatch) {
-			const path =
-				pathFlagMatch[2] ?? pathFlagMatch[3] ?? pathFlagMatch[4] ?? '';
-			return { category: 'redirect', operator: cmdletName, path };
+			const paths = pathFlagMatch[1]
+				.split(/\s*,\s*/)
+				.map((value) => value.replace(/^(["'])|(["'])$/g, ''));
+			return paths.map((path) => ({
+				category: 'redirect',
+				operator: cmdletName,
+				path: path || null,
+			}));
+		}
+		if (/(?:-Path|-FilePath|-LiteralPath)(?:\s|$)/i.test(rest)) {
+			return [{ category: 'redirect', operator: cmdletName, path: null }];
 		}
 
 		// No explicit path flag — fall back to first non-flag positional argument
@@ -1160,16 +1419,13 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 			if (token.startsWith('-')) continue;
 			// This is a positional argument — treat it as the path
 			const path = token.replace(/^["']|["']$/g, '');
-			return { category: 'redirect', operator: cmdletName, path };
+			return [{ category: 'redirect', operator: cmdletName, path }];
 		}
 
-		return null;
+		return [];
 	}
 
-	const contentResult = detectPsContentCmdlet(innerCommand);
-	if (contentResult) {
-		results.push(contentResult);
-	}
+	results.push(...detectPsContentCmdlet(innerCommand));
 
 	// Also detect content cmdlets that appear AFTER a pipe
 	// e.g., "echo hello | Out-File path" or "echo data | Set-Content file.txt"
@@ -1300,37 +1556,6 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		}
 	}
 
-	// Detect echo/write aliases — if followed by redirection, flag as write
-	// e.g., "echo hello > file.txt" or "write output >> log.txt"
-	const aliasRedirectMatch = trimmed.match(
-		/^(echo|write)\s+(\S+.*?)\s*(?:>|\s{2,})/i,
-	);
-	if (aliasRedirectMatch) {
-		// Look for a redirect in the command
-		const _aliasPart = aliasRedirectMatch[0];
-		const _afterAlias = trimmed.slice(aliasRedirectMatch[0].length);
-		const fullRedirectMatch = trimmed.match(/((?:>){1,2})\s*(\S+)$/);
-		if (fullRedirectMatch) {
-			results.push({
-				category: 'redirect',
-				operator: fullRedirectMatch[1],
-				path: fullRedirectMatch[2],
-			});
-		}
-	}
-
-	// Detect bare echo/write with redirect (e.g., 'echo foo > bar')
-	const bareAliasMatch = trimmed.match(
-		/^(echo|write)\s+.*?\s+((?:>){1,2})\s*(\S+)$/i,
-	);
-	if (bareAliasMatch) {
-		results.push({
-			category: 'redirect',
-			operator: bareAliasMatch[2],
-			path: bareAliasMatch[3],
-		});
-	}
-
 	return results;
 }
 
@@ -1348,6 +1573,139 @@ const _CMD_WRITE_BUILTINS = new Set([
 	'md',
 	'ren',
 ]);
+
+/** cmd.exe switches that may appear in a copy/move command. */
+const _CMD_COPY_MOVE_SWITCHES = new Set([
+	'/a',
+	'/b',
+	'/d',
+	'/f',
+	'/n',
+	'/v',
+	'/y',
+	'/-y',
+	'/z',
+]);
+
+/** Tokenize cmd.exe arguments while retaining spaces inside quoted paths. */
+function tokenizeCmdArguments(command: string): string[] {
+	const tokens: string[] = [];
+	let current = '';
+	let inDoubleQuote = false;
+	for (let index = 0; index < command.length; index++) {
+		const character = command[index];
+		if (character === '^' && !inDoubleQuote) {
+			if (index + 1 < command.length) current += command[++index];
+			continue;
+		}
+		if (character === '"') {
+			inDoubleQuote = !inDoubleQuote;
+			continue;
+		}
+		if (/\s/.test(character) && !inDoubleQuote) {
+			if (current) {
+				tokens.push(current);
+				current = '';
+			}
+			continue;
+		}
+		current += character;
+	}
+	if (current) tokens.push(current);
+	return tokens;
+}
+
+/**
+ * Scan cmd.exe redirections without requiring whitespace around the operator.
+ *
+ * cmd.exe accepts all of these forms:
+ *   echo x>file.txt
+ *   echo x>>file.txt
+ *   echo x 2>file.txt
+ *   echo x 2>>file.txt
+ *
+ * `n>&m` is descriptor duplication when `m` is numeric and does not write a
+ * file.  A non-numeric or missing destination after `>&` is deliberately
+ * represented as an unresolved write so callers fail closed.
+ */
+function detectCmdRedirects(command: string): WriteTarget[] {
+	const results: WriteTarget[] = [];
+	let inDoubleQuote = false;
+
+	const isTokenBoundary = (character: string | undefined): boolean =>
+		character === undefined || /[\s&|()]/.test(character);
+
+	for (let index = 0; index < command.length; index++) {
+		const character = command[index];
+
+		// Caret escapes the following character in cmd.exe.  Do not interpret an
+		// escaped `>` as a redirection operator.
+		if (character === '^' && !inDoubleQuote) {
+			index++;
+			continue;
+		}
+		if (character === '"') {
+			inDoubleQuote = !inDoubleQuote;
+			continue;
+		}
+		if (inDoubleQuote || character !== '>') continue;
+
+		const operator = command[index + 1] === '>' ? '>>' : '>';
+		const targetStart = index + operator.length;
+		let cursor = targetStart;
+		while (/\s/.test(command[cursor] ?? '')) cursor++;
+
+		// `>&1` / `2>&1` merges descriptors and is not a file write.  For
+		// `>&name`, however, the destination is not statically verifiable.
+		if (command[cursor] === '&') {
+			cursor++;
+			while (/\s/.test(command[cursor] ?? '')) cursor++;
+			const descriptorStart = cursor;
+			while (/\d/.test(command[cursor] ?? '')) cursor++;
+			const descriptor = command.slice(descriptorStart, cursor);
+			if (descriptor && isTokenBoundary(command[cursor])) {
+				index = Math.max(index, cursor - 1);
+				continue;
+			}
+			results.push({ category: 'redirect', operator, path: null });
+			index = Math.max(index, cursor - 1);
+			continue;
+		}
+
+		let pathValue: string | null = null;
+		if (cursor < command.length) {
+			const quote = command[cursor];
+			if (quote === '"') {
+				const closingQuote = command.indexOf(quote, cursor + 1);
+				if (closingQuote !== -1) {
+					pathValue = command.slice(cursor + 1, closingQuote);
+					cursor = closingQuote + 1;
+				}
+			} else {
+				const pathStart = cursor;
+				while (
+					cursor < command.length &&
+					!/[\s&|()<>]/.test(command[cursor] ?? '')
+				) {
+					cursor++;
+				}
+				if (cursor > pathStart) pathValue = command.slice(pathStart, cursor);
+			}
+		}
+
+		results.push({ category: 'redirect', operator, path: pathValue });
+		index = Math.max(index, cursor - 1);
+	}
+
+	// An unmatched quote makes the command grammar unresolved.  Surface a
+	// null-path write so scope validation rejects it instead of treating the
+	// malformed command as read-only.
+	if (inDoubleQuote) {
+		results.push({ category: 'redirect', operator: '>', path: null });
+	}
+
+	return results;
+}
 
 /**
  * Detect write operations in a single cmd.exe command string using regex.
@@ -1373,47 +1731,28 @@ function detectCmdWrites(command: string): WriteTarget[] {
 		}
 	}
 
-	// Detect redirections: > and >>
-	// Match > or >> at the end of the command (with possible preceding content)
-	// Avoid matching things like "2>&1" (fd redirect)
-	const redirectMatch = innerCommand.match(/^(.*?)\s+((?:>){1,2})\s*(\S+)$/);
-	if (redirectMatch) {
-		const beforeRedirect = redirectMatch[1];
-		const op = redirectMatch[2];
-		const path = redirectMatch[3];
-		// Skip fd redirects like "2>&1" or "cmd 2>&1"
-		const fdRedirectPattern = /\d>&?$/;
-		if (!fdRedirectPattern.test(beforeRedirect)) {
-			results.push({ category: 'redirect', operator: op, path });
-		}
+	// CMD can launch PowerShell as a nested interpreter. Reuse the PowerShell
+	// detector for a command-position wrapper so encoded payloads and nested
+	// writes are not silently classified as read-only by the CMD detector.
+	if (/^(?:powershell|pwsh)(?:\.exe)?\s+/i.test(innerCommand)) {
+		results.push(...detectPowerShellWrites(innerCommand));
 	}
 
-	// Also check for leading redirect
-	const leadingRedirect = innerCommand.match(/^((?:>){1,2})\s+(\S+)$/);
-	if (leadingRedirect) {
-		results.push({
-			category: 'redirect',
-			operator: leadingRedirect[1],
-			path: leadingRedirect[2],
-		});
-	}
+	// Scan all redirections, including adjacent operators and descriptor forms.
+	// The scanner emits `path: null` for an unresolved destination so callers
+	// cannot accidentally treat an ambiguous redirection as read-only.
+	results.push(...detectCmdRedirects(innerCommand));
 
 	// Detect copy builtin: copy source dest (handles if exist pattern)
 	function detectCmdCopy(cmd: string): WriteTarget | null {
-		// Direct: copy src dest
-		const directMatch = cmd.match(
-			/^copy\s+(\S+|"[^"]+"|'[^']+')\s+(\S+|"[^"]+"|'[^']+')/i,
-		);
-		if (directMatch) {
-			const dest = directMatch[2].replace(/^["']|["']$/g, '');
-			return { category: 'builtin_write', operator: 'copy', path: dest };
-		}
-		// if exist pattern: if exist <file> copy src dest
-		const ifExistMatch = cmd.match(
-			/if\s+exist\s+\S+.*?copy\s+(\S+|"[^"]+"|'[^']+')\s+(\S+|"[^"]+"|'[^']+')/i,
-		);
-		if (ifExistMatch) {
-			const dest = ifExistMatch[2].replace(/^["']|["']$/g, '');
+		const commandMatch = cmd.match(/(?:^|\s)copy(?=\s|$)/i);
+		if (commandMatch) {
+			const start = (commandMatch.index ?? 0) + commandMatch[0].length;
+			const positional = tokenizeCmdArguments(cmd.slice(start)).filter(
+				(token) => !_CMD_COPY_MOVE_SWITCHES.has(token.toLowerCase()),
+			);
+			if (positional.length < 2) return null;
+			const dest = positional[positional.length - 1];
 			return { category: 'builtin_write', operator: 'copy', path: dest };
 		}
 		return null;
@@ -1421,19 +1760,14 @@ function detectCmdWrites(command: string): WriteTarget[] {
 
 	// Detect move builtin: move source dest
 	function detectCmdMove(cmd: string): WriteTarget | null {
-		const directMatch = cmd.match(
-			/^move\s+(\S+|"[^"]+"|'[^']+')\s+(\S+|"[^"]+"|'[^']+')/i,
-		);
-		if (directMatch) {
-			const dest = directMatch[2].replace(/^["']|["']$/g, '');
-			return { category: 'builtin_write', operator: 'move', path: dest };
-		}
-		// if exist pattern
-		const ifExistMatch = cmd.match(
-			/if\s+exist\s+\S+.*?move\s+(\S+|"[^"]+"|'[^']+')\s+(\S+|"[^"]+"|'[^']+')/i,
-		);
-		if (ifExistMatch) {
-			const dest = ifExistMatch[2].replace(/^["']|["']$/g, '');
+		const commandMatch = cmd.match(/(?:^|\s)move(?=\s|$)/i);
+		if (commandMatch) {
+			const start = (commandMatch.index ?? 0) + commandMatch[0].length;
+			const positional = tokenizeCmdArguments(cmd.slice(start)).filter(
+				(token) => !_CMD_COPY_MOVE_SWITCHES.has(token.toLowerCase()),
+			);
+			if (positional.length < 2) return null;
+			const dest = positional[positional.length - 1];
 			return { category: 'builtin_write', operator: 'move', path: dest };
 		}
 		return null;
@@ -1496,38 +1830,6 @@ function detectCmdWrites(command: string): WriteTarget[] {
 		if (!path.startsWith('/')) {
 			results.push({ category: 'builtin_write', operator: 'md', path });
 		}
-	}
-
-	// Detect echo with redirect: echo text > file or echo text >> file
-	const echoMatch = trimmed.match(/^echo\s+(\S+.*?)\s+((?:>){1,2})\s*(\S+)$/i);
-	if (echoMatch) {
-		results.push({
-			category: 'redirect',
-			operator: echoMatch[2],
-			path: echoMatch[3],
-		});
-	}
-
-	// Detect echo. > file (echo. is a cmd builtin for blank line)
-	const echoDotMatch = trimmed.match(/^echo\.\s+((?:>){1,2})\s*(\S+)$/i);
-	if (echoDotMatch) {
-		results.push({
-			category: 'redirect',
-			operator: echoDotMatch[1],
-			path: echoDotMatch[2],
-		});
-	}
-
-	// Detect set with redirect: set VAR=value > file
-	const setMatch = trimmed.match(
-		/^set\s+\S+\s*=\s*\S*\s*((?:>){1,2})\s*(\S+)$/i,
-	);
-	if (setMatch) {
-		results.push({
-			category: 'redirect',
-			operator: setMatch[1],
-			path: setMatch[2],
-		});
 	}
 
 	return results;
@@ -1594,6 +1896,19 @@ export function detectInteractiveSession(
 export function detectPosixWrites(command: string): WriteAnalysis {
 	if (!command || typeof command !== 'string') {
 		return { writes: [], hasWrites: false };
+	}
+	if (unsafeShellCommandTextReason(command)) {
+		return {
+			writes: [
+				{
+					category: 'interpreter_eval',
+					operator: 'unsafe command text',
+					path: null,
+				},
+			],
+			hasWrites: true,
+			parseError: true,
+		};
 	}
 
 	let ast: unknown;
@@ -1676,10 +1991,23 @@ export function detectWindowsWrites(
 	if (!command || typeof command !== 'string') {
 		return { writes: [], hasWrites: false };
 	}
+	if (unsafeShellCommandTextReason(command)) {
+		return {
+			writes: [
+				{
+					category: 'interpreter_eval',
+					operator: 'unsafe command text',
+					path: null,
+				},
+			],
+			hasWrites: true,
+			parseError: true,
+		};
+	}
 
 	try {
 		// Split compound commands (pipelines, &&, ||)
-		const subCommands = splitWindowsCommands(command);
+		const subCommands = splitWindowsCommands(command, shell);
 		const allWrites: WriteTarget[] = [];
 
 		for (const subCmd of subCommands) {
@@ -1719,10 +2047,17 @@ function isDynamicPath(pathText: string | null): boolean {
 	// $VAR or ${VAR}
 	if (/\$[A-Za-z_][A-Za-z0-9_]*/.test(pathText)) return true;
 	if (/\$\{[^}]+\}/.test(pathText)) return true;
+	// %VAR% is cmd.exe environment-variable expansion.
+	if (/%[A-Za-z_][A-Za-z0-9_]*%/.test(pathText)) return true;
 	// $(cmd)
 	if (/\$\([^)]+\)/.test(pathText)) return true;
 	// `cmd` (backtick command substitution)
 	if (/`[^`]+`/.test(pathText)) return true;
+	// Tilde expansion is resolved by the shell, not by the static resolver.
+	if (/^~(?:[^/\\\s]*)?(?:[/\\]|$)/.test(pathText)) return true;
+	// cmd.exe batch parameters and modifiers (for example %~dp0, %1, %*).
+	if (/%~[A-Za-z]*(?:\d+|\*)/.test(pathText)) return true;
+	if (/%(?:\d+|\*)/.test(pathText)) return true;
 	return false;
 }
 
@@ -1981,7 +2316,10 @@ function getWritesFromRedirectNode(
 	const path = extractRedirectPath(fileNode);
 	const opLabel = operatorLabel(opNode);
 
-	if (REDIRECT_WRITE_TOKENS.has(opType)) {
+	if (
+		REDIRECT_WRITE_TOKENS.has(opType) ||
+		(REDIRECT_GREATAND_TOKENS.has(opType) && !isNonFileGreatAndTarget(path))
+	) {
 		return [{ category: 'redirect', operator: opLabel, path }];
 	} else if (REDIRECT_HERE_TOKENS.has(opType)) {
 		return [{ category: 'here_doc', operator: opLabel, path }];

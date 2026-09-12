@@ -61,7 +61,7 @@ describe('Swarm subcommand registration', () => {
 		// approval shortcut (issue #1824), and the action-local
 		// guardrail-reset command. Issue #1825 adds five blueprint commands and
 		// three harness-candidate commands.
-		expect(commandKeys.length).toBe(99);
+		expect(commandKeys.length).toBe(100);
 
 		expect(commands.swarm).toBeDefined();
 	});
@@ -159,6 +159,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-qa-gates',
 			'swarm-report',
 			'swarm-dark-matter',
+			'swarm-dashboard',
 			'swarm-knowledge',
 			'swarm-memory',
 			'swarm-memory-status',

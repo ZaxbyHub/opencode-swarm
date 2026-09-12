@@ -211,7 +211,8 @@ describe('architect prompt budget — regression: unbounded growth (F#1649)', ()
 	it('multi-swarm prefix render stays under the ceiling', () => {
 		// PRR-008: with two non-default swarms, both prefixed architects are
 		// generated. A regression that, say, doubled prefix tokens would only
-		// show up in the multi-swarm path.
+		// show up in the multi-swarm path. These representative IDs exercise the
+		// built-in prompt budget guard; user-configured IDs are outside its scope.
 		const configs = getAgentConfigs({
 			swarms: {
 				cloud: { name: 'Cloud Swarm', agents: {} },

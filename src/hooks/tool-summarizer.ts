@@ -8,19 +8,30 @@
 
 import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import type { SummaryConfig } from '../config/schema';
-import { storeSummary } from '../summaries/manager';
+import {
+	allocateSummaryId,
+	SummaryIdCollisionError,
+	storeSummary,
+} from '../summaries/manager';
 import { createSummary, shouldSummarize } from '../summaries/summarizer';
 import { warn } from '../utils';
 
-/** Session-scoped counter for summary IDs. Resets on plugin reload. */
-let nextSummaryId = 1;
+/**
+ * Bounded allocation attempts (issue #2576): every collision forces a fresh
+ * directory rescan before the next attempt, so surviving N attempts requires
+ * N distinct foreign winners of the same slot. The bound limits wasted work;
+ * exhaustion fails open with the original output preserved.
+ */
+const MAX_ALLOCATION_ATTEMPTS = 8;
 
 /**
- * Reset the summary ID counter. Used for testing.
+ * Dependency seam for tests (repo `_internals` DI convention) so the
+ * collision-retry path is unit-testable without `mock.module`.
  */
-export function resetSummaryIdCounter(): void {
-	nextSummaryId = 1;
-}
+export const _internals = {
+	allocateSummaryId,
+	storeSummary,
+};
 
 /**
  * Creates a tool.execute.after hook that summarizes oversized tool outputs.
@@ -70,34 +81,48 @@ export function createToolSummarizerHook(
 			return;
 		}
 
-		// Generate summary ID
-		const summaryId = `S${nextSummaryId++}`;
-
-		// Create summary text
-		const summaryText = createSummary(
-			output.output,
-			input.tool,
-			summaryId,
-			config.max_summary_chars,
-		);
-
-		// Try to store and replace — fail-open on any error
-		try {
-			await storeSummary(
-				directory,
-				summaryId,
-				output.output,
-				summaryText,
-				config.max_stored_bytes,
-			);
-			// Only replace output after successful storage
-			output.output = summaryText;
-		} catch (error) {
-			// Graceful degradation: log warning and keep original output
-			warn(
-				`Tool output summarization failed for ${summaryId}: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			// Do NOT modify output.output — original is preserved
+		// Durable identity + no-overwrite storage (issue #2576): each attempt
+		// allocates the next free ID from the entries that exist on disk
+		// (restart-safe), embeds it in a freshly created summary text, and
+		// stores with exclusive-install semantics. A collision means another
+		// process won the slot — retry with a fresh allocation. ANY failure
+		// on an attempt — allocation, summary rendering, or storage — is
+		// caught below so the hook's fail-open contract holds end to end
+		// (PRR-001): exhausted attempts or non-collision errors keep the
+		// original output preserved.
+		for (let attempt = 1; attempt <= MAX_ALLOCATION_ATTEMPTS; attempt += 1) {
+			try {
+				const summaryId = _internals.allocateSummaryId(directory);
+				const summaryText = createSummary(
+					output.output,
+					input.tool,
+					summaryId,
+					config.max_summary_chars,
+				);
+				await _internals.storeSummary(
+					directory,
+					summaryId,
+					output.output,
+					summaryText,
+					config.max_stored_bytes,
+				);
+				// Only replace output after successful storage
+				output.output = summaryText;
+				return;
+			} catch (error) {
+				if (
+					error instanceof SummaryIdCollisionError &&
+					attempt < MAX_ALLOCATION_ATTEMPTS
+				) {
+					continue;
+				}
+				// Graceful degradation: log warning and keep original output
+				warn(
+					`Tool output summarization failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				// Do NOT modify output.output — original is preserved
+				return;
+			}
 		}
 	};
 }

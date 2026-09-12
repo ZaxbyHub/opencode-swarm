@@ -1,7 +1,9 @@
 export {
+	allocateSummaryId,
 	cleanupSummaries,
 	listSummaries,
 	loadFullOutput,
+	SummaryIdCollisionError,
 	storeSummary,
 } from './manager';
 

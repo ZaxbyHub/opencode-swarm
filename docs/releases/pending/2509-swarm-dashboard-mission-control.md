@@ -1,0 +1,8 @@
+## What
+
+- New opt-in **local mission-control dashboard** (issue #2509, Workstream G5): a read-only, loopback-only web view over the project's durable swarm state — QA gates & PR-review circuit state, pending-delegation age bands, lane liveness, the task board, and the activity timeline. It complements `/swarm report` and `/swarm status`; it replaces neither.
+- **Disabled by default with zero footprint**: the port is the opt-in. `dashboard.port` absent or `0` schedules no startup task, binds no listener, and writes no `.swarm` artifact. Set `dashboard.port` (1–65535) in `opencode-swarm.json` to enable.
+- **Security boundary** (reimplemented per ADR 0002 — no upstream code ported): binds `127.0.0.1` only; per-boot capability token in the URL (constant-time compare, never written to disk); Host/Origin loopback allowlist (DNS-rebinding defense); `GET`/`HEAD` only — `405` for every other method, which is the CSRF policy since no state-changing verb exists; every response byte-capped, `no-store`, `nosniff`; all rendered text passes the `sanitizeFailureEvidenceDisplay` no-secrets posture plus a URL-userinfo credential scrub.
+- **Lifecycle safety**: the listener starts from the post-resolution init queue (never the awaited `server()` path), unrefs itself, and is closed on plugin dispose and process exit — it cannot keep the host alive. A port conflict disables the dashboard with a notice (bounded advisory + `.swarm/dashboard-status.json`) instead of failing startup.
+- New `/swarm dashboard` command prints the live tokened URL and status, or the enable instructions when off.
+- Inline HTML/JS served from TS string modules — no frontend build step, no framework dependency, no new runtime dependencies.

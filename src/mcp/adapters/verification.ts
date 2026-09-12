@@ -85,8 +85,6 @@ const evidenceCheckSchema = z.object({
 
 export const syntaxCheckAdapter: McpReadTool = {
 	name: 'syntax_check',
-	description:
-		'Check syntax of source files using tree-sitter parsers. Supports JS/TS, Python, Go, Rust, Java, C/C++, C#, PHP, Ruby. Returns JSON with syntax errors found per file.',
 	kind: 'read',
 	pathFields: ['changed_files'],
 	inputSchema: syntaxCheckSchema,
@@ -96,8 +94,6 @@ export const syntaxCheckAdapter: McpReadTool = {
 
 export const placeholderScanAdapter: McpReadTool = {
 	name: 'placeholder_scan',
-	description:
-		'Scan changed files for placeholder content: TODO/FIXME comments, stub implementations, and placeholder markers that indicate unfinished work.',
 	kind: 'read',
 	pathFields: ['changed_files'],
 	inputSchema: placeholderScanSchema,
@@ -110,7 +106,6 @@ export const placeholderScanAdapter: McpReadTool = {
 
 export const sastScanAdapter: McpReadTool = {
 	name: 'sast_scan',
-	description: 'static analysis security scan',
 	kind: 'read',
 	pathFields: ['changed_files'],
 	inputSchema: sastScanSchema,
@@ -131,8 +126,6 @@ export const sastScanAdapter: McpReadTool = {
 
 export const qualityBudgetAdapter: McpReadTool = {
 	name: 'quality_budget',
-	description:
-		'check quality budgets (complexity, API surface, duplication, test ratio) for changed files',
 	kind: 'read',
 	pathFields: ['changed_files'],
 	inputSchema: qualityBudgetSchema,
@@ -145,8 +138,6 @@ export const qualityBudgetAdapter: McpReadTool = {
 
 export const evidenceCheckAdapter: McpReadTool = {
 	name: 'evidence_check',
-	description:
-		'Verify completed tasks in the plan have required evidence. Reads .swarm/plan.md for completed tasks and .swarm/evidence/ for evidence files. Returns JSON with completeness ratio and gaps for tasks missing required evidence types.',
 	kind: 'read',
 	pathFields: [],
 	inputSchema: evidenceCheckSchema,
