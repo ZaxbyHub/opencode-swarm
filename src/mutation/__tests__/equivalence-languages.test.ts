@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../../tests/helpers/tmpdir.js';
+import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
 import { executeMutationSuite } from '../../../src/mutation/engine.js';
 import {
 	commentFamilyForLanguage,
