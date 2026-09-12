@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -62,8 +69,10 @@ describe('issue #2677 required-check contract evidence', () => {
 			{ contentsEndpoint: string; blobSha: string }
 		>;
 		captured['.github/workflows/ci.yml'].blobSha = '0'.repeat(40);
-		const tempRoot = mkdtempSync(
-			join(tmpdir(), 'required-check-contract-2677-'),
+		const tempRoot = realpathSync(
+			mkdtempSync(
+				join(realpathSync(tmpdir()), 'required-check-contract-2677-'),
+			),
 		);
 		try {
 			const evidencePath = join(tempRoot, 'evidence.json');
@@ -130,7 +139,7 @@ describe('issue #2677 required-check contract evidence', () => {
 		);
 	});
 
-	test('strict merge-group receipts require successful runs at the captured head', () => {
+	test('strict merge-group receipts reject a wrong captured head', () => {
 		const contract = JSON.parse(
 			readFileSync(
 				resolve(repoRoot, 'scripts/required-check-contract.json'),
@@ -141,6 +150,26 @@ describe('issue #2677 required-check contract evidence', () => {
 		const observedRuns = (evidence.mergeGroup as Record<string, unknown>)
 			.observedRuns as Array<Record<string, unknown>>;
 		observedRuns[0].headSha = '0'.repeat(40);
+		const result = evaluateRequiredCheckContract(
+			{ ...contract, evidence },
+			{ strict: true, now: new Date('2026-09-11T22:00:00Z') },
+		);
+		expect(result.status).toBe('unknown');
+		expect(result.findings.map((finding) => finding.code)).toContain(
+			'EVIDENCE_MERGE_GROUP_UNKNOWN',
+		);
+	});
+
+	test('strict merge-group receipts reject a failed conclusion', () => {
+		const contract = JSON.parse(
+			readFileSync(
+				resolve(repoRoot, 'scripts/required-check-contract.json'),
+				'utf8',
+			),
+		) as Record<string, unknown>;
+		const evidence = readEvidence();
+		const observedRuns = (evidence.mergeGroup as Record<string, unknown>)
+			.observedRuns as Array<Record<string, unknown>>;
 		observedRuns[0].conclusion = 'failure';
 		const result = evaluateRequiredCheckContract(
 			{ ...contract, evidence },
@@ -239,8 +268,10 @@ describe('issue #2677 required-check contract evidence', () => {
 	});
 
 	test('the collector forces strict evidence validation even without metadata hints', () => {
-		const tempRoot = mkdtempSync(
-			join(tmpdir(), 'required-check-contract-2677-'),
+		const tempRoot = realpathSync(
+			mkdtempSync(
+				join(realpathSync(tmpdir()), 'required-check-contract-2677-'),
+			),
 		);
 		try {
 			const contractPath = join(tempRoot, 'contract.json');
@@ -272,6 +303,61 @@ describe('issue #2677 required-check contract evidence', () => {
 			expect(result.status).toBe('unknown');
 			expect(result.findings.map((finding) => finding.code)).toContain(
 				'EVIDENCE_MALFORMED',
+			);
+		} finally {
+			rmSync(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('collector rejects a changed merge-group type in the workflow surface', () => {
+		const tempRoot = realpathSync(
+			mkdtempSync(
+				join(realpathSync(tmpdir()), 'required-check-contract-2677-'),
+			),
+		);
+		try {
+			const workflowDir = join(tempRoot, '.github', 'workflows');
+			mkdirSync(workflowDir, { recursive: true });
+			const source = readFileSync(
+				resolve(repoRoot, '.github/workflows/ci.yml'),
+				'utf8',
+			);
+			const mutated = source.replace(
+				'types: [checks_requested]',
+				'types: [completed]',
+			);
+			expect(mutated).not.toBe(source);
+			writeFileSync(join(workflowDir, 'ci.yml'), mutated);
+			const contractPath = join(tempRoot, 'contract.json');
+			const evidencePath = join(tempRoot, 'evidence.json');
+			writeFileSync(
+				contractPath,
+				JSON.stringify({
+					schemaVersion: 1,
+					requiredContexts: ['quality'],
+					workflows: [
+						{
+							file: '.github/workflows/ci.yml',
+							events: ['merge_group'],
+							mergeGroupTypes: ['checks_requested'],
+						},
+					],
+				}),
+			);
+			writeFileSync(evidencePath, '{}');
+			const result = collectRequiredCheckContract(tempRoot, {
+				contractPath,
+				evidencePath,
+			});
+			expect(result.findings).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						code: 'PROMISED_CONTEXT_EVENT_SKIPPED',
+						message: expect.stringContaining(
+							'merge\\_group type checks\\_requested',
+						),
+					}),
+				]),
 			);
 		} finally {
 			rmSync(tempRoot, { recursive: true, force: true });

@@ -32,7 +32,8 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         if: github.event_name == 'merge_group'
         with:
-          fetch-depth: 10
+          fetch-depth: 0
+          persist-credentials: false
       - name: Detect release-please
         id: check
         shell: bash
@@ -66,22 +67,42 @@ jobs:
           #      the release subject silently missed it and ran the full suite.
           #   2. A 10-commit window false-positives: a recent release MERGE
           #      lingers in the window of later, non-release PRs.
-          if [[ "$EVENT" == "merge_group" ]] && git log -1 --format='%s' | grep -qE '^Merge pull request #[0-9]+ from ZaxbyHub/release-please--|^chore\(main\): release '; then
-            echo "is-release=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [[ "$EVENT" == "merge_group" && "$REPOSITORY" == "ZaxbyHub/opencode-swarm" ]]; then
+            SUBJECT="$(git -C "$GITHUB_WORKSPACE" show -s --format='%s' "$HEAD_SHA")"
+            AUTHOR="$(git -C "$GITHUB_WORKSPACE" show -s --format='%an' "$HEAD_SHA")"
+            AUTHOR_EMAIL="$(git -C "$GITHUB_WORKSPACE" show -s --format='%ae' "$HEAD_SHA")"
+            COMMITTER="$(git -C "$GITHUB_WORKSPACE" show -s --format='%cn' "$HEAD_SHA")"
+            COMMITTER_EMAIL="$(git -C "$GITHUB_WORKSPACE" show -s --format='%ce' "$HEAD_SHA")"
+            BOT_AUTHOR=$([[ "$AUTHOR" == "github-actions[bot]" && "$AUTHOR_EMAIL" == "41898282+github-actions[bot]@users.noreply.github.com" ]])
+            GITHUB_COMMITTER=$([[ "$COMMITTER" == "GitHub" && "$COMMITTER_EMAIL" == "noreply@github.com" ]])
+            if [[ "$BOT_AUTHOR" && "$GITHUB_COMMITTER" && "$SUBJECT" =~ ^chore\(main\):\ release\  ]]; then
+              echo "is-release=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ "$SUBJECT" =~ ^Merge\ pull\ request\ #[0-9]+\ from\ ZaxbyHub/release-please-- ]]; then
+              RELEASE_PARENT="$(git -C "$GITHUB_WORKSPACE" rev-parse "$HEAD_SHA^2" 2>/dev/null || true)"
+              RELEASE_AUTHOR="$(git -C "$GITHUB_WORKSPACE" show -s --format='%an' "$RELEASE_PARENT" 2>/dev/null || true)"
+              RELEASE_AUTHOR_EMAIL="$(git -C "$GITHUB_WORKSPACE" show -s --format='%ae' "$RELEASE_PARENT" 2>/dev/null || true)"
+              RELEASE_SUBJECT="$(git -C "$GITHUB_WORKSPACE" show -s --format='%s' "$RELEASE_PARENT" 2>/dev/null || true)"
+              if [[ "$RELEASE_AUTHOR" == "github-actions[bot]" && "$RELEASE_AUTHOR_EMAIL" == "41898282+github-actions[bot]@users.noreply.github.com" && "$RELEASE_SUBJECT" =~ ^chore\(main\):\ release\  ]]; then
+                echo "is-release=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
           fi
           echo "is-release=false" >> "$GITHUB_OUTPUT"
         env:
           BRANCH: ${{ github.head_ref }}
           EVENT: ${{ github.event_name }}
           ACTOR: ${{ github.actor }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.sha }}
 
   # Issue #2677: release-please is the sole owner of the version, changelog,
   # and manifest files. This job intentionally runs for ordinary PRs,
   # release PRs, and merge groups; it is not hidden by the release fast path.
-  # The workflow composes actor trust with the established release predicate
-  # for pull requests. Merge groups use only the anchored head-commit result
-  # because their actor is the user who queued the group.
+  # The guard is executed from the protected base revision below. Candidate
+  # workflow/script edits cannot manufacture an owner-file authorization signal.
   release-owner-guard:
     needs: [detect-release]
     runs-on: ubuntu-latest
@@ -89,18 +110,34 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.13"
       - name: Enforce release-owned file boundary
         env:
-          RELEASE_GUARD_EVENT: ${{ github.event_name }}
-          RELEASE_GUARD_ACTOR: ${{ github.actor }}
-          RELEASE_GUARD_BRANCH: ${{ github.head_ref }}
-          RELEASE_GUARD_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          RELEASE_GUARD_HEAD_SHA: ${{ github.sha }}
-          RELEASE_GUARD_AUTOMATION: ${{ (github.event_name == 'merge_group' && needs.detect-release.outputs.is-release == 'true') || (github.event_name == 'pull_request' && github.actor == 'github-actions[bot]' && needs.detect-release.outputs.is-release == 'true') }}
-        run: bun run scripts/check-required-check-contract.ts --release-owner
+          TRUSTED_BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          TRUSTED_HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_GUARD_ROOT: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHECKER="scripts/check-required-check-contract.ts"
+          if git -C "$GITHUB_WORKSPACE" cat-file -e "$TRUSTED_BASE_SHA:$CHECKER" 2>/dev/null; then
+            git -C "$GITHUB_WORKSPACE" show "$TRUSTED_BASE_SHA:$CHECKER" > "$RUNNER_TEMP/check-required-check-contract.ts"
+            bun "$RUNNER_TEMP/check-required-check-contract.ts" --release-owner
+          else
+            # Bootstrap only: the checker was introduced by this PR, so no
+            # protected copy exists yet. Permit the new checker when the exact
+            # owner-file diff is empty; any owner edit fails closed.
+            OWNER_CHANGES="$(git -C "$GITHUB_WORKSPACE" diff --name-only "$TRUSTED_BASE_SHA" "$TRUSTED_HEAD_SHA" -- package.json CHANGELOG.md .release-please-manifest.json)"
+            if [[ -n "$OWNER_CHANGES" ]]; then
+              echo "::error::protected release-owner checker is unavailable and owner files changed: $OWNER_CHANGES"
+              exit 1
+            fi
+            echo "protected release-owner checker is unavailable on the base; no owner files changed"
+          fi
 
   # Issue #1737 FR-013: closes the root cause of the #1729 debt-accumulation
   # episode — pull_request CI ran ubuntu-only, so macOS/Windows-only failures
@@ -197,7 +234,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Release-owner guard dependency check
-        if: always()
+        if: ${{ always() && !cancelled() }}
         shell: bash
         run: |
           if [[ "${{ needs.detect-release.result }}" != "success" || "${{ needs.release-owner-guard.result }}" != "success" ]]; then
@@ -434,6 +471,8 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         if: needs.detect-release.outputs.is-release != 'true'
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         if: needs.detect-release.outputs.is-release != 'true'
         with:

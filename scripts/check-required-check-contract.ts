@@ -32,7 +32,36 @@ export const EVIDENCE_PATH = path.join(
 export const MAX_EVIDENCE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const MAX_WORKFLOW_BYTES = 512 * 1024;
 export const MAX_JSON_BYTES = 512 * 1024;
+export const MAX_GIT_OUTPUT_BYTES = 512 * 1024;
+export const MAX_FINDINGS = 256;
+export const MAX_REPORT_BYTES = 64 * 1024;
+const SUPPORTED_SCHEMA_VERSION = 1;
 const GIT_TIMEOUT_MS = 30_000;
+
+// Bootstrap baseline for the first checked-in contract.  The release-owner
+// workflow executes this checker from the protected base revision, so a PR
+// cannot shrink this set and update the baseline in the same candidate tree.
+// Intentional future removals must update this protected source and the
+// contract together, which fails closed until the protected change lands.
+export const BASELINE_REQUIRED_CONTEXTS = [
+	'quality',
+	'unit (ubuntu-latest, 1)',
+	'unit (ubuntu-latest, 2)',
+	'unit (ubuntu-latest, 3)',
+	'unit (ubuntu-latest, 4)',
+	'unit-passed',
+	'security',
+	'package-check',
+	'integration',
+	'smoke (ubuntu-latest)',
+	'smoke (macos-latest)',
+	'smoke (windows-latest)',
+	'php-validation',
+	'rust-sandbox-runner',
+	'check-title',
+	'pr-standards',
+	'coverage',
+] as const;
 
 export type ContractBucket = 'required' | 'intended-required';
 export type ContractStatus = 'pass' | 'fail' | 'unknown';
@@ -54,6 +83,7 @@ export interface RequiredCheckContract {
 	rulesetRequiredContexts?: string[];
 	intendedRequiredContexts?: string[];
 	previousRequiredContexts?: string[];
+	baselineRequiredContexts?: string[];
 	contract?: {
 		requiredContexts?: string[];
 	intendedRequiredContexts?: string[];
@@ -139,6 +169,11 @@ function stringArray(value: unknown): string[] | null {
 	return [...new Set(value.map((v) => v.trim()).filter(Boolean))];
 }
 
+function nonEmptyStringArray(value: unknown): string[] | null {
+	const values = stringArray(value);
+	return values && values.length > 0 ? values : null;
+}
+
 function hasDuplicateStrings(value: unknown): boolean {
 	return Array.isArray(value) && value.every((entry) => typeof entry === 'string') && new Set(value).size !== value.length;
 }
@@ -177,7 +212,10 @@ function namesFromContract(contract: RequiredCheckContract): {
 	return {
 		required: unique(required),
 		intended: unique(intended),
-		previous: stringArray(contract.previousRequiredContexts) ?? [],
+		previous:
+			stringArray(contract.previousRequiredContexts) ??
+			stringArray(contract.baselineRequiredContexts) ??
+			[],
 	};
 }
 
@@ -228,7 +266,55 @@ function addFinding(
 	message: string,
 	fields: Partial<ContractFinding> = {},
 ): void {
-	findings.push({ code, severity, message, ...fields });
+	if (findings.length >= MAX_FINDINGS) {
+		if (!findings.some((finding) => finding.code === 'FINDINGS_TRUNCATED')) {
+			findings.push({
+				code: 'FINDINGS_TRUNCATED',
+				severity: 'error',
+				message: `finding output exceeded the ${MAX_FINDINGS}-finding bound`,
+			});
+		}
+		return;
+	}
+	findings.push({
+		code,
+		severity,
+		message: sanitizeReportText(message),
+		...Object.fromEntries(
+			Object.entries(fields).map(([key, value]) => [
+				key,
+				typeof value === 'string' ? sanitizeReportText(value) : value,
+			]),
+		),
+	});
+}
+
+const MAX_REPORT_TEXT_CHARS = 1_024;
+
+/** Keep untrusted contract/evidence text safe for both annotations and Markdown. */
+function sanitizeReportText(value: string): string {
+	return value
+		.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+		.replace(/\\/g, '\\\\')
+		.replace(/[\`*_[\]<>#!|]/g, '\\$&')
+		.replace(/\r/g, '\\r')
+		.replace(/\n/g, '\\n')
+		.slice(0, MAX_REPORT_TEXT_CHARS);
+}
+
+function isSafeEvidenceUrl(value: unknown): value is string {
+	if (typeof value !== 'string' || value.length > MAX_REPORT_TEXT_CHARS) return false;
+	try {
+		const parsed = new URL(value);
+		if (parsed.protocol !== 'https:' || parsed.hostname !== 'api.github.com') return false;
+		if (parsed.username || parsed.password || parsed.hash) return false;
+		for (const key of parsed.searchParams.keys()) {
+			if (/^(?:access[_-]?token|api[_-]?key|auth(?:orization)?|code|key|password|secret|sig(?:nature)?|token)$/i.test(key)) return false;
+		}
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 function strictEvidence(evidence: RequiredCheckEvidence): boolean {
@@ -284,6 +370,7 @@ export function evaluateRequiredCheckContract(
 		['rulesetRequiredContexts', contract.rulesetRequiredContexts],
 		['intendedRequiredContexts', contract.intendedRequiredContexts],
 		['previousRequiredContexts', contract.previousRequiredContexts],
+		['baselineRequiredContexts', contract.baselineRequiredContexts],
 		['contract.requiredContexts', contract.contract?.requiredContexts],
 		['contract.intendedRequiredContexts', contract.contract?.intendedRequiredContexts],
 		['requiredContextBuckets.required', contract.requiredContextBuckets?.required],
@@ -304,15 +391,15 @@ export function evaluateRequiredCheckContract(
 		['contexts.intendedRequired', contract.contexts?.intendedRequired],
 	] as const) {
 		if (value !== undefined && (!Array.isArray(value) || value.some((record) =>
-			!isRecord(record) || typeof record.name !== 'string' || typeof record.workflow !== 'string' || typeof record.job !== 'string' || (record.events !== undefined && stringArray(record.events) === null))))
+			!isRecord(record) || typeof record.name !== 'string' || typeof record.workflow !== 'string' || typeof record.job !== 'string' || (record.events !== undefined && (nonEmptyStringArray(record.events) === null || hasDuplicateStrings(record.events))))))
 		{
 			unknown.push('contract');
 			addFinding(findings, 'CONTRACT_MALFORMED', 'error', `${label} must contain name, workflow, and job records`);
 		}
 	}
 	if (contract.workflows !== undefined && (!Array.isArray(contract.workflows) || contract.workflows.some((workflow) =>
-		!isRecord(workflow) || typeof workflow.file !== 'string' || (workflow.events !== undefined && stringArray(workflow.events) === null) ||
-		(workflow.mergeGroupTypes !== undefined && stringArray(workflow.mergeGroupTypes) === null) ||
+		!isRecord(workflow) || typeof workflow.file !== 'string' || (workflow.events !== undefined && (nonEmptyStringArray(workflow.events) === null || hasDuplicateStrings(workflow.events))) ||
+		(workflow.mergeGroupTypes !== undefined && (nonEmptyStringArray(workflow.mergeGroupTypes) === null || hasDuplicateStrings(workflow.mergeGroupTypes))) ||
 		(workflow.contexts !== undefined && stringArray(workflow.contexts) === null) ||
 		(workflow.jobs !== undefined && stringArray(workflow.jobs) === null)))) {
 		unknown.push('contract');
@@ -326,17 +413,6 @@ export function evaluateRequiredCheckContract(
 	if (new Set([...names.required, ...names.intended]).size !== names.required.length + names.intended.length) {
 		addFinding(findings, 'CONTRACT_BUCKET_DEMOTION', 'error', 'a context appears in both required buckets');
 	}
-	for (const previous of names.previous) {
-		if (!names.required.includes(previous)) {
-			addFinding(
-				findings,
-				'CONTRACT_BUCKET_DEMOTION',
-				'error',
-				`previously required context "${previous}" was demoted out of the required bucket`,
-				{ context: previous },
-			);
-		}
-	}
 	if (!evidence) {
 		for (const section of ['ruleset', 'branch', 'merge_group', 'workflow_events']) unknown.push(section);
 		addFinding(findings, 'EXTERNAL_EVIDENCE_UNKNOWN', 'error', 'required-check evidence is missing');
@@ -346,6 +422,26 @@ export function evaluateRequiredCheckContract(
 	const strict = options.strict ?? strictEvidence(evidence);
 	if (strict) {
 		const now = options.now ?? new Date();
+		const baseline = names.previous.length > 0 ? names.previous : [...BASELINE_REQUIRED_CONTEXTS];
+		for (const previous of baseline) {
+			if (!names.required.includes(previous)) {
+				addFinding(
+					findings,
+					'CONTRACT_BUCKET_DEMOTION',
+					'error',
+					`previously required context "${previous}" was demoted out of the required bucket`,
+					{ context: previous },
+				);
+			}
+		}
+		if (contract.schemaVersion !== SUPPORTED_SCHEMA_VERSION || !Number.isInteger(contract.schemaVersion)) {
+			unknown.push('contract');
+			addFinding(findings, 'CONTRACT_MALFORMED', 'error', `contract schemaVersion must be supported version ${SUPPORTED_SCHEMA_VERSION}`);
+		}
+		if (evidence.schemaVersion !== SUPPORTED_SCHEMA_VERSION || !Number.isInteger(evidence.schemaVersion)) {
+			unknown.push('evidence');
+			addFinding(findings, 'EVIDENCE_MALFORMED', 'error', `evidence schemaVersion must be supported version ${SUPPORTED_SCHEMA_VERSION}`);
+		}
 		if (!contract.repository || !contract.branch || !contract.rulesetId) {
 			unknown.push('contract');
 			addFinding(findings, 'CONTRACT_MALFORMED', 'error', 'strict contract evidence requires repository, branch, and rulesetId identity');
@@ -403,11 +499,15 @@ export function evaluateRequiredCheckContract(
 			unknown.push('merge_group');
 			addFinding(findings, 'EVIDENCE_MERGE_GROUP_UNKNOWN', 'error', 'evidence does not establish merge-group behavior');
 		}
-		if (!evidence.workflowEvents || Object.values(evidence.workflowEvents).some((events) => !Array.isArray(events) || events.some((event) => typeof event !== 'string'))) {
-			unknown.push('workflow_events');
-			addFinding(findings, 'EVIDENCE_MALFORMED', 'error', 'workflow-event evidence is missing or malformed');
+		if (!evidence.mergeGroup?.contexts || nonEmptyStringArray(evidence.mergeGroup.contexts) === null) {
+			unknown.push('merge_group');
+			addFinding(findings, 'EVIDENCE_MALFORMED', 'error', 'merge-group evidence must include a non-empty context list');
 		}
-		if (!Array.isArray(evidence.sources) || evidence.sources.length === 0 || evidence.sources.some((source) => !isRecord(source) || typeof source.endpoint !== 'string' || !/^https:\/\//.test(source.endpoint))) {
+		if (!evidence.workflowEvents || Object.values(evidence.workflowEvents).some((events) => nonEmptyStringArray(events) === null || hasDuplicateStrings(events))) {
+			unknown.push('workflow_events');
+			addFinding(findings, 'EVIDENCE_MALFORMED', 'error', 'workflow-event evidence must contain non-empty event lists');
+		}
+		if (!Array.isArray(evidence.sources) || evidence.sources.length === 0 || evidence.sources.some((source) => !isRecord(source) || !isSafeEvidenceUrl(source.endpoint))) {
 			unknown.push('sources');
 			addFinding(findings, 'EVIDENCE_MALFORMED', 'error', 'evidence must include HTTPS source endpoints');
 		} else if (contract.repository && contract.branch && contract.rulesetId) {
@@ -438,7 +538,7 @@ export function evaluateRequiredCheckContract(
 			addFinding(findings, 'EVIDENCE_MALFORMED', 'error', 'local workflow hash map must exactly cover contract-owned workflows');
 		}
 		if (!isRecord(evidence.capturedWorkflowFiles) || Object.values(evidence.capturedWorkflowFiles).some((capture) =>
-			!isRecord(capture) || typeof capture.contentsEndpoint !== 'string' || !/^https:\/\//.test(capture.contentsEndpoint) ||
+			!isRecord(capture) || !isSafeEvidenceUrl(capture.contentsEndpoint) ||
 			typeof capture.blobSha !== 'string' || !/^[0-9a-f]{40}$/i.test(capture.blobSha))) {
 			unknown.push('workflow_capture');
 			addFinding(findings, 'EVIDENCE_MALFORMED', 'error', 'evidence must include pinned HTTPS Contents endpoints and Git blob SHAs for each captured workflow');
@@ -732,12 +832,14 @@ export function deriveReleaseAutomation(input: {
 	releaseBranch?: string;
 	headCommitSubject?: string;
 	releasePredicate?: boolean;
+	trustedProvenance?: boolean;
 }): boolean {
 	if (input.event === 'pull_request') {
 		const predicate = input.releasePredicate ?? (input.releaseBranch ?? '').startsWith('release-please--');
-		return input.actor === 'github-actions[bot]' && predicate;
+		return input.actor === 'github-actions[bot]' && predicate && input.trustedProvenance !== false;
 	}
 	if (input.event === 'merge_group') {
+		if (input.trustedProvenance === false) return false;
 		if (input.releasePredicate !== undefined) return input.releasePredicate;
 		const subject = input.headCommitSubject ?? '';
 		return /^(?:Merge pull request #[0-9]+ from ZaxbyHub\/release-please--|chore\(main\): release )/.test(subject);
@@ -779,6 +881,17 @@ export interface WorkflowSurface {
 	events: string[];
 	mergeGroupTypes: string[];
 	jobs: string[];
+	disabledJobs: string[];
+	disabledStepsByJob: Record<string, string[]>;
+}
+
+function isAlwaysFalseCondition(value: string): boolean {
+	const normalized = value
+		.replace(/^\$\{\{\s*/, '')
+		.replace(/\s*\}\}$/, '')
+		.trim()
+		.toLowerCase();
+	return /^(?:false|0|null|''|"")$/.test(normalized) || /&&\s*(?:false|0|null)$/.test(normalized);
 }
 
 /** Parse only bounded top-level `on` events and `jobs` IDs from a workflow. */
@@ -790,10 +903,15 @@ export function parseWorkflowSurface(source: string, file = 'workflow.yml'): Wor
 	const events: string[] = [];
 	const mergeGroupTypes: string[] = [];
 	const jobs: string[] = [];
+	const disabledJobs: string[] = [];
+	const disabledStepsByJob: Record<string, string[]> = {};
 	let section: 'on' | 'jobs' | null = null;
 	let onIndent = -1;
 	let jobsIndent = -1;
 	let mergeGroupIndent = -1;
+	let currentJob = '';
+	let currentStep = '';
+	let currentStepIndent = -1;
 	for (const line of lines) {
 		if (/^\s*#/.test(line) || line.trim() === '') continue;
 		const indent = line.match(/^\s*/)?.[0].length ?? 0;
@@ -837,20 +955,60 @@ export function parseWorkflowSurface(source: string, file = 'workflow.yml'): Wor
 		}
 		if (section === 'jobs' && indent > jobsIndent) {
 			const job = line.match(/^\s{2}([^\s:#][^:#]*):\s*(?:#.*)?$/)?.[1]?.trim();
-			if (job) jobs.push(job);
+			if (job) {
+				jobs.push(job);
+				currentJob = job;
+				currentStep = '';
+				currentStepIndent = -1;
+				continue;
+			}
+			if (!currentJob) continue;
+			const step = line.match(/^\s{6}-\s*(?:(?:name|uses|run)\s*:\s*)?(.*?)\s*$/)?.[1]?.trim();
+			if (step !== undefined && indent === 6) {
+				currentStep = step || `step-${Object.keys(disabledStepsByJob[currentJob] ?? {}).length + 1}`;
+				currentStepIndent = indent;
+				continue;
+			}
+			const condition = trimmed.match(/^if\s*:\s*(.*?)\s*$/)?.[1];
+			if (condition !== undefined && isAlwaysFalseCondition(condition)) {
+				if (indent === 4) {
+					disabledJobs.push(currentJob);
+				} else if (currentStep && indent > currentStepIndent) {
+					(disabledStepsByJob[currentJob] ??= []).push(currentStep);
+				}
+			}
 		}
 	}
-	return { file, events: unique(events), mergeGroupTypes: unique(mergeGroupTypes), jobs: unique(jobs) };
+	return {
+		file,
+		events: unique(events),
+		mergeGroupTypes: unique(mergeGroupTypes),
+		jobs: unique(jobs),
+		disabledJobs: unique(disabledJobs),
+		disabledStepsByJob: Object.fromEntries(
+		Object.entries(disabledStepsByJob).map(([job, steps]) => [job, unique(steps)]),
+		),
+	};
 }
 
 function readBoundedJson(file: string): unknown {
-	const stat = fs.statSync(file);
-	if (stat.size > MAX_JSON_BYTES) throw new Error(`${file} exceeds the ${MAX_JSON_BYTES}-byte JSON bound`);
-	return JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+	const text = readBoundedText(file, MAX_JSON_BYTES);
+	return JSON.parse(text) as unknown;
 }
 
 function sha256(file: string): string {
-	return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+	return crypto.createHash('sha256').update(readBoundedText(file, MAX_WORKFLOW_BYTES)).digest('hex');
+}
+
+function readBoundedText(file: string, maxBytes: number): string {
+	const stat = fs.statSync(file);
+	if (!stat.isFile()) throw new Error(`${file} is not a regular file`);
+	if (stat.size > maxBytes) throw new Error(`${file} exceeds the ${maxBytes}-byte read bound`);
+	const text = fs.readFileSync(file, 'utf8');
+	if (Buffer.byteLength(text, 'utf8') > maxBytes) {
+		throw new Error(`${file} exceeds the ${maxBytes}-byte read bound`);
+	}
+	return text;
 }
 
 function runGit(args: string[], cwd: string): { exitCode: number; stdout: string } {
@@ -862,8 +1020,15 @@ function runGit(args: string[], cwd: string): { exitCode: number; stdout: string
 			stdout: 'pipe',
 			stderr: 'ignore',
 			timeout: GIT_TIMEOUT_MS,
+			killSignal: 'SIGKILL',
+			maxBuffer: MAX_GIT_OUTPUT_BYTES,
+			env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
 		});
-		return { exitCode: proc.exitCode ?? 1, stdout: proc.stdout.toString() };
+		const stdout = proc.stdout.toString();
+		if (Buffer.byteLength(stdout, 'utf8') > MAX_GIT_OUTPUT_BYTES) {
+			return { exitCode: 1, stdout: '' };
+		}
+		return { exitCode: proc.exitCode ?? 1, stdout };
 	} catch {
 		return { exitCode: 1, stdout: '' };
 	}
@@ -885,7 +1050,7 @@ export function changedFilesFromGitResult(result: { exitCode: number; stdout: st
 /** Collect and evaluate the real checked-in contract without network access. */
 export function collectRequiredCheckContract(
 	root: string = REPO_ROOT,
-	options: { now?: Date; contractPath?: string; evidencePath?: string; currentSha?: string } = {},
+	options: { now?: Date; contractPath?: string; evidencePath?: string; currentSha?: string; protectedSha?: string } = {},
 ): ContractEvaluation {
 	const findings: ContractFinding[] = [];
 	const contractFile = options.contractPath ?? path.join(root, 'scripts', 'required-check-contract.json');
@@ -925,13 +1090,30 @@ export function collectRequiredCheckContract(
 	const result = evaluateRequiredCheckContract(input, { now: options.now, strict: true });
 	findings.push(...result.findings);
 	const collectorUnknown = [...result.unknown];
+	const protectedSha = options.protectedSha ?? process.env.REQUIRED_CHECK_CAPTURE_SHA;
 	if (options.currentSha && evidence.captureSha && options.currentSha !== evidence.captureSha) {
 		addFinding(findings, 'CAPTURE_SHA_MISMATCH', 'error', `evidence capture SHA ${evidence.captureSha} does not match requested current SHA ${options.currentSha}`);
+	}
+	if (protectedSha !== undefined && (!/^[0-9a-f]{40}$/i.test(protectedSha) || evidence.captureSha !== protectedSha)) {
+		collectorUnknown.push('protected_capture');
+		addFinding(findings, 'CAPTURE_SHA_MISMATCH', 'error', 'evidence capture SHA is not the trusted protected capture revision');
+	}
+	if (/^[0-9a-f]{40}$/i.test(evidence.captureSha ?? '')) {
+		const commit = runGit(['rev-parse', '--verify', `${evidence.captureSha}^{commit}`], root);
+		if (commit.exitCode !== 0 || commit.stdout.trim() !== evidence.captureSha) {
+			collectorUnknown.push('protected_capture');
+			addFinding(findings, 'CAPTURE_SHA_MISMATCH', 'error', 'evidence capture SHA does not resolve to an immutable local commit');
+		}
 	}
 	if (!Array.isArray(contract.workflows)) {
 		addFinding(findings, 'CONTRACT_MALFORMED', 'error', 'contract workflows must be an array');
 	}
 	const contractWorkflows = Array.isArray(contract.workflows) ? contract.workflows : [];
+	const requiredWorkflowFiles = new Set(
+		(Array.isArray(contract.contexts?.required) ? contract.contexts.required : [])
+			.filter((context): context is { workflow: string } => isRecord(context) && typeof context.workflow === 'string')
+			.map((context) => posix(context.workflow)),
+	);
 	for (const workflow of contractWorkflows) {
 		if (!isRecord(workflow) || typeof workflow.file !== 'string') {
 			addFinding(findings, 'CONTRACT_MALFORMED', 'error', 'contract workflow entry must be an object');
@@ -969,7 +1151,28 @@ export function collectRequiredCheckContract(
 					);
 				}
 			}
-			const surface = parseWorkflowSurface(fs.readFileSync(absolute, 'utf8'), workflowPath);
+			const surface = parseWorkflowSurface(readBoundedText(absolute, MAX_WORKFLOW_BYTES), workflowPath);
+			const capturedSource = /^[0-9a-f]{40}$/i.test(evidence.captureSha ?? '')
+				? runGit(['show', `${evidence.captureSha}:${workflowPath}`], root)
+				: { exitCode: 1, stdout: '' };
+			if (capturedSource.exitCode !== 0) {
+				collectorUnknown.push('workflow_capture');
+				addFinding(findings, 'CAPTURE_BLOB_MISMATCH', 'error', `protected capture does not contain workflow ${workflowPath}`, { file: workflowPath });
+			} else {
+				const capturedSurface = parseWorkflowSurface(capturedSource.stdout, workflowPath);
+				const observedEvents = workflowEvidenceKeys(workflowPath)
+					.map((key) => evidence.workflowEvents?.[key])
+					.find((events): events is string[] => Array.isArray(events));
+				if (requiredWorkflowFiles.has(workflowPath) && observedEvents && observedEvents.some((event) => !capturedSurface.events.includes(event))) {
+					collectorUnknown.push('workflow_capture');
+					addFinding(findings, 'CAPTURE_EVENT_MISMATCH', 'error', `workflow-event evidence for ${workflowPath} is not present in its protected captured workflow`, { file: workflowPath });
+				}
+				for (const job of stringArray(workflow.jobs) ?? []) {
+					if (capturedSurface.disabledJobs.includes(job)) {
+						addFinding(findings, 'PROMISED_CONTEXT_DISABLED', 'error', `contract workflow ${workflowPath} disables required job ${job} in its protected capture`, { file: workflowPath, job });
+					}
+				}
+			}
 			const expectedEvents = new Set(stringArray(workflow.events) ?? []);
 			for (const expected of expectedEvents) {
 				if (!surface.events.includes(expected)) {
@@ -991,6 +1194,12 @@ export function collectRequiredCheckContract(
 				if (!surface.jobs.includes(job)) {
 					addFinding(findings, 'PROMISED_CONTEXT_MISSING', 'error', `contract workflow ${workflowPath} no longer declares job ${job}`, { file: workflowPath, job });
 				}
+				if (surface.disabledJobs.includes(job)) {
+					addFinding(findings, 'PROMISED_CONTEXT_DISABLED', 'error', `contract workflow ${workflowPath} disables required job ${job}`, { file: workflowPath, job });
+				}
+				for (const step of surface.disabledStepsByJob[job] ?? []) {
+					addFinding(findings, 'PROMISED_CONTEXT_DISABLED', 'error', `contract workflow ${workflowPath} disables required job ${job} step ${step}`, { file: workflowPath, job });
+				}
 			}
 		} catch (error) {
 			addFinding(findings, 'EVIDENCE_MALFORMED', 'error', `cannot parse contract workflow ${workflowPath}: ${error instanceof Error ? error.message : String(error)}`, { file: workflowPath });
@@ -1000,18 +1209,93 @@ export function collectRequiredCheckContract(
 	return final;
 }
 
-function changedFilesForGuard(root: string): string[] {
-	const explicit = process.env.RELEASE_GUARD_CHANGED_FILES;
-	if (explicit !== undefined) return explicit.split(/\r?\n/).map(posix).filter(Boolean);
-	const head = process.env.RELEASE_GUARD_HEAD_SHA || process.env.GITHUB_SHA || 'HEAD';
-	const base = process.env.RELEASE_GUARD_BASE_SHA || (process.env.GITHUB_EVENT_NAME === 'merge_group' ? `${head}^` : 'origin/main');
-	return changedFilesFromGitResult(runGit(releaseOwnerDiffArgs(base, head), root));
+interface TrustedGitHubContext {
+	event: string;
+	actor: string;
+	repository: string;
+	releaseBranch?: string;
+	headRepository?: string;
+	headUser?: string;
+	baseSha: string;
+	headSha: string;
 }
 
-function headSubject(root: string): string {
-	const head = process.env.RELEASE_GUARD_HEAD_SHA || process.env.GITHUB_SHA || 'HEAD';
+function isCommitSha(value: unknown): value is string {
+	return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value);
+}
+
+function readGitHubEventPayload(): Record<string, unknown> | null {
+	const eventPath = process.env.GITHUB_EVENT_PATH;
+	if (!eventPath) return null;
+	try {
+		const value = JSON.parse(readBoundedText(eventPath, MAX_JSON_BYTES)) as unknown;
+		return isRecord(value) ? value : null;
+	} catch {
+		return null;
+	}
+}
+
+function trustedGitHubContext(root: string): TrustedGitHubContext {
+	const event = process.env.GITHUB_EVENT_NAME ?? '';
+	const actor = process.env.GITHUB_ACTOR ?? '';
+	const repository = process.env.GITHUB_REPOSITORY ?? '';
+	const payload = readGitHubEventPayload();
+	const pullRequest = isRecord(payload?.pull_request) ? payload.pull_request : null;
+	const mergeGroup = isRecord(payload?.merge_group) ? payload.merge_group : null;
+	const baseSha = event === 'pull_request'
+		? (isRecord(pullRequest?.base) ? pullRequest.base.sha : undefined)
+		: event === 'merge_group' ? mergeGroup?.base_sha : undefined;
+	const headSha = event === 'pull_request'
+		? (isRecord(pullRequest?.head) ? pullRequest.head.sha : undefined)
+		: event === 'merge_group' ? mergeGroup?.head_sha : process.env.GITHUB_SHA;
+	const headRepository = isRecord(pullRequest?.head) && isRecord(pullRequest.head.repo)
+		? pullRequest.head.repo.full_name
+		: undefined;
+	const headUser = isRecord(pullRequest?.user) ? pullRequest.user.login : undefined;
+	if (event === 'merge_group' && (!isCommitSha(baseSha) || !isCommitSha(headSha))) {
+		throw new Error('merge_group event is missing its immutable base_sha/head_sha range');
+	}
+	if (event === 'pull_request' && (!isCommitSha(baseSha) || !isCommitSha(headSha))) {
+		throw new Error('pull_request event is missing its immutable base/head SHA range');
+	}
+	return {
+		event,
+		actor,
+		repository,
+		releaseBranch: isRecord(pullRequest?.head) && typeof pullRequest.head.ref === 'string' ? pullRequest.head.ref : undefined,
+		headRepository: typeof headRepository === 'string' ? headRepository : undefined,
+		headUser: typeof headUser === 'string' ? headUser : undefined,
+		baseSha: isCommitSha(baseSha) ? baseSha : 'origin/main',
+		headSha: isCommitSha(headSha) ? headSha : (process.env.GITHUB_SHA || 'HEAD'),
+	};
+}
+
+function changedFilesForGuard(root: string, context: TrustedGitHubContext): string[] {
+	if (context.event === 'merge_group' && context.baseSha === 'origin/main') {
+		throw new Error('merge_group owner inspection requires the declared base_sha');
+	}
+	return changedFilesFromGitResult(runGit(releaseOwnerDiffArgs(context.baseSha, context.headSha), root));
+}
+
+function headSubject(root: string, head = process.env.GITHUB_SHA || 'HEAD'): string {
 	const result = runGit(['log', '-1', '--format=%s', head], root);
 	return result.exitCode === 0 ? result.stdout.trim() : '';
+}
+
+function mergeGroupReleaseProvenance(root: string, context: TrustedGitHubContext): boolean {
+	if (context.event !== 'merge_group' || context.repository !== 'ZaxbyHub/opencode-swarm') return false;
+	const metadata = runGit(['show', '-s', '--format=%P%x00%an%x00%ae%x00%cn%x00%ce%x00%s', context.headSha], root).stdout.trim();
+	const fields = metadata.split('\0');
+	const [parents, author, authorEmail, committer, committerEmail, subject] = fields;
+	if (!subject || !author || !authorEmail || !committer || !committerEmail) return false;
+	const botAuthor = author === 'github-actions[bot]' && authorEmail === '41898282+github-actions[bot]@users.noreply.github.com';
+	const githubCommitter = committer === 'GitHub' && committerEmail === 'noreply@github.com';
+	if (/^chore\(main\): release /.test(subject)) return botAuthor && githubCommitter;
+	if (!/^Merge pull request #[0-9]+ from ZaxbyHub\/release-please--/.test(subject)) return false;
+	const releaseParent = parents.split(' ').filter(Boolean)[1];
+	if (!isCommitSha(releaseParent)) return false;
+	const parentMeta = runGit(['show', '-s', '--format=%an%x00%ae%x00%s', releaseParent], root).stdout.trim().split('\0');
+	return parentMeta[0] === 'github-actions[bot]' && parentMeta[1] === '41898282+github-actions[bot]@users.noreply.github.com' && /^chore\(main\): release /.test(parentMeta[2] ?? '');
 }
 
 function printFindings(findings: ContractFinding[]): void {
@@ -1024,21 +1308,24 @@ function printFindings(findings: ContractFinding[]): void {
 
 export function main(argv: string[] = process.argv.slice(2), root = REPO_ROOT): number {
 	if (argv.includes('--release-owner')) {
-		const event = process.env.RELEASE_GUARD_EVENT || process.env.GITHUB_EVENT_NAME || '';
-		const suppliedAutomation = process.env.RELEASE_GUARD_AUTOMATION;
-		const automation = suppliedAutomation === undefined
-			? deriveReleaseAutomation({
-				event,
-				actor: process.env.RELEASE_GUARD_ACTOR || process.env.GITHUB_ACTOR,
-				releaseBranch: process.env.RELEASE_GUARD_BRANCH || process.env.GITHUB_HEAD_REF,
-				headCommitSubject: process.env.RELEASE_GUARD_HEAD_SUBJECT || headSubject(root),
-			})
-			: ['1', 'true', 'yes', 'on'].includes(suppliedAutomation.trim().toLowerCase());
 		try {
+			const context = trustedGitHubContext(root);
+			const automation = deriveReleaseAutomation({
+				event: context.event,
+				actor: context.actor,
+				releaseBranch: context.releaseBranch,
+				headCommitSubject: headSubject(root, context.headSha),
+				trustedProvenance:
+					context.event === 'pull_request'
+						? context.headRepository === context.repository && context.headUser === 'github-actions[bot]'
+						: context.event === 'merge_group'
+							? mergeGroupReleaseProvenance(root, context)
+							: false,
+			});
 			const result = evaluateReleaseOwnership({
-				changedFiles: changedFilesForGuard(root),
-				event,
-				actor: process.env.RELEASE_GUARD_ACTOR || process.env.GITHUB_ACTOR,
+				changedFiles: changedFilesForGuard(root, context),
+				event: context.event,
+				actor: context.actor,
 				releaseAutomation: automation,
 			});
 			console.log(`[required-check-contract] ${result.message}`);
@@ -1048,10 +1335,17 @@ export function main(argv: string[] = process.argv.slice(2), root = REPO_ROOT): 
 			return 1;
 		}
 	}
-	const result = collectRequiredCheckContract(root);
+	const result = collectRequiredCheckContract(root, {
+		protectedSha: process.env.REQUIRED_CHECK_CAPTURE_SHA,
+	});
 	printFindings(result.findings);
 	console.log(`[required-check-contract] ${result.status} (${result.findings.length} finding(s))`);
 	return result.status === 'fail' || result.status === 'unknown' ? 1 : 0;
 }
 
-if (import.meta.main) process.exitCode = main();
+if (import.meta.main) {
+	process.exitCode = main(
+		process.argv.slice(2),
+		process.env.RELEASE_GUARD_ROOT || REPO_ROOT,
+	);
+}

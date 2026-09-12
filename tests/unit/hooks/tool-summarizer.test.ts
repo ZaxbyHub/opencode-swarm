@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleRetrieveCommand } from '../../../src/commands/retrieve';
 import type { SummaryConfig } from '../../../src/config/schema';
@@ -8,6 +7,7 @@ import {
 	createToolSummarizerHook,
 	resetSummaryIdCounter,
 } from '../../../src/hooks/tool-summarizer';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function defaultConfig(overrides?: Partial<SummaryConfig>): SummaryConfig {
 	return {
@@ -25,10 +25,7 @@ describe('tool-summarizer', () => {
 
 	beforeEach(() => {
 		resetSummaryIdCounter();
-		tempDir = join(
-			tmpdir(),
-			`test-tool-summarizer-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-		);
+		tempDir = canonicalMkdtemp('test-tool-summarizer-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 	});
 
@@ -218,10 +215,7 @@ describe('tool-summarizer integration', () => {
 
 	beforeEach(() => {
 		resetSummaryIdCounter();
-		tempDir = join(
-			tmpdir(),
-			`test-summarizer-integration-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-		);
+		tempDir = canonicalMkdtemp('test-summarizer-integration-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 	});
 

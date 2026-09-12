@@ -1578,6 +1578,7 @@ export function annotation(finding: DriftFinding): string {
 }
 
 export function buildReport(findings: DriftFinding[]): string {
+	const MAX_REPORT_BYTES = 64 * 1024;
 	const lines: string[] = ['# Drift check report', ''];
 	if (findings.length === 0) {
 		lines.push(
@@ -1610,7 +1611,15 @@ export function buildReport(findings: DriftFinding[]): string {
 		}
 		lines.push('');
 	}
-	return lines.join('\n');
+	const report = lines.join('\n');
+	if (Buffer.byteLength(report, 'utf8') <= MAX_REPORT_BYTES) return report;
+	const marker = '\n\n… report truncated at 65536 bytes …\n';
+	const budget = MAX_REPORT_BYTES - Buffer.byteLength(marker, 'utf8');
+	let truncated = report.slice(0, budget);
+	while (Buffer.byteLength(truncated + marker, 'utf8') > MAX_REPORT_BYTES) {
+		truncated = truncated.slice(0, Math.max(0, truncated.length - 256));
+	}
+	return truncated + marker;
 }
 
 export function isEnforce(explicit = false): boolean {

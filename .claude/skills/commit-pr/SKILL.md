@@ -195,6 +195,16 @@ bun run check:token-formula
 bun run package:smoke
 ```
 
+The CI quality job also fails closed when either required dependency is not
+successful before running the expensive checks:
+
+```bash
+if [[ "${{ needs.detect-release.result }}" != "success" || "${{ needs.release-owner-guard.result }}" != "success" ]]; then
+  echo "::error::required dependency failed: detect-release=${{ needs.detect-release.result }}, release-owner-guard=${{ needs.release-owner-guard.result }}"
+  exit 1
+fi
+```
+
 This list is the FULL blocking CI quality contract (issue #2131 finding 4c):
 every quality-job step in `.github/workflows/ci.yml` plus the `package:smoke`
 pack check. `tests/unit/skills/commit-pr-validation-parity.test.ts` derives the

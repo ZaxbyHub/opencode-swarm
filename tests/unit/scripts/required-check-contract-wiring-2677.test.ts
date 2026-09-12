@@ -1,12 +1,21 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
 	changedFilesFromGitResult,
 	collectRequiredCheckContract,
 	deriveReleaseAutomation,
 	evaluateReleaseOwnership,
 	evaluateRequiredCheckContract,
+	main,
 	parseWorkflowSurface,
 	releaseOwnerDiffArgs,
 } from '../../../scripts/check-required-check-contract';
@@ -28,6 +37,83 @@ function readEvidence(): Record<string, unknown> {
 			'utf8',
 		),
 	) as Record<string, unknown>;
+}
+
+function git(cwd: string, ...args: string[]): string {
+	const proc = Bun.spawnSync({
+		cmd: ['git', ...args],
+		cwd,
+		stdin: 'ignore',
+		stdout: 'pipe',
+		stderr: 'pipe',
+		timeout: 30_000,
+	});
+	if (proc.exitCode !== 0) {
+		throw new Error(`git ${args.join(' ')} failed: ${proc.stderr.toString()}`);
+	}
+	return proc.stdout.toString().trim();
+}
+
+function releaseOwnerFixture(): { root: string; base: string; head: string } {
+	const root = realpathSync(
+		mkdtempSync(join(realpathSync(tmpdir()), 'required-check-owner-')),
+	);
+	git(root, 'init', '-q', '-b', 'main');
+	git(root, 'config', 'user.email', 'test@example.com');
+	git(root, 'config', 'user.name', 'Test');
+	writeFileSync(join(root, 'README.md'), 'base\n');
+	git(root, 'add', '.');
+	git(root, 'commit', '-q', '-m', 'base');
+	const base = git(root, 'rev-parse', 'HEAD');
+	writeFileSync(join(root, 'package.json'), '{}\n');
+	git(root, 'add', '.');
+	git(root, 'commit', '-q', '-m', 'release owner edit');
+	return { root, base, head: git(root, 'rev-parse', 'HEAD') };
+}
+
+function runReleaseOwnerMain(
+	fixture: { root: string; base: string; head: string },
+	actor: string,
+	user: string,
+): number {
+	const eventPath = join(fixture.root, 'event.json');
+	writeFileSync(
+		eventPath,
+		JSON.stringify({
+			pull_request: {
+				base: { sha: fixture.base },
+				head: {
+					sha: fixture.head,
+					ref: 'release-please--main',
+					repo: { full_name: 'ZaxbyHub/opencode-swarm' },
+				},
+				user: { login: user },
+			},
+		}),
+	);
+	const updates = {
+		GITHUB_EVENT_NAME: 'pull_request',
+		GITHUB_ACTOR: actor,
+		GITHUB_REPOSITORY: 'ZaxbyHub/opencode-swarm',
+		GITHUB_EVENT_PATH: eventPath,
+		RELEASE_GUARD_EVENT: 'pull_request',
+		RELEASE_GUARD_ACTOR: 'github-actions[bot]',
+		RELEASE_GUARD_BRANCH: 'release-please--main',
+		RELEASE_GUARD_AUTOMATION: 'true',
+	};
+	const previous = Object.fromEntries(
+		Object.keys(updates).map((key) => [key, process.env[key]]),
+	);
+	Object.assign(process.env, updates);
+	try {
+		return main(['--release-owner'], fixture.root);
+	} finally {
+		for (const key of Object.keys(updates)) {
+			const value = previous[key];
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
 }
 
 describe('issue #2677 required-check contract wiring', () => {
@@ -165,12 +251,14 @@ describe('issue #2677 required-check contract wiring', () => {
 			quality.indexOf('- name: Release-owner guard dependency check'),
 		).toBeGreaterThan(-1);
 		expect(quality).toMatch(
-			/- name: Release-owner guard dependency check[\s\S]*?if: always\(\)[\s\S]*?exit 1/,
+			/- name: Release-owner guard dependency check[\s\S]*?if: \$\{\{ always\(\) && !cancelled\(\) \}\}[\s\S]*?exit 1/,
 		);
 		expect(
 			quality.indexOf('- name: Release-owner guard dependency check'),
 		).toBeLessThan(quality.indexOf('- uses: actions/checkout@'));
-		expect(quality).toContain('needs.release-owner-guard.result');
+		expect(quality).toContain(
+			'if [[ "${{ needs.detect-release.result }}" != "success" || "${{ needs.release-owner-guard.result }}" != "success" ]]; then',
+		);
 	});
 
 	test('an intended-only external event gap stays visible without blocking local trigger coverage', () => {
@@ -305,6 +393,24 @@ describe('issue #2677 required-check contract wiring', () => {
 		});
 		expect(authorized.code).toBe('RELEASE_AUTOMATION_EXCEPTION');
 	});
+
+	test('release-owner main composes GitHub env and ignores legacy override', () => {
+		const fixture = releaseOwnerFixture();
+		try {
+			expect(runReleaseOwnerMain(fixture, 'contributor', 'contributor')).toBe(
+				1,
+			);
+			expect(
+				runReleaseOwnerMain(
+					fixture,
+					'github-actions[bot]',
+					'github-actions[bot]',
+				),
+			).toBe(0);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	}, 20_000);
 
 	test('release-owner inspection fails closed when Git cannot resolve the diff', () => {
 		expect(() =>
