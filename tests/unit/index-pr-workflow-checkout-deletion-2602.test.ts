@@ -92,6 +92,22 @@ async function writeMissingReceipt(sessionID = FOREIGN_SESSION): Promise<void> {
 	await writeReceipt(sessionID, MISSING_STASH_OID);
 }
 
+async function waitForPendingCheckoutRestoresToClear(
+	sessionID: string,
+	deadlineMs = 2_000,
+): Promise<Awaited<ReturnType<typeof listPendingPrWorkflowCheckoutRestores>>> {
+	const deadline = Date.now() + deadlineMs;
+	let pending = await listPendingPrWorkflowCheckoutRestores(
+		directory,
+		sessionID,
+	);
+	while (pending.length > 0 && Date.now() < deadline) {
+		await Bun.sleep(50);
+		pending = await listPendingPrWorkflowCheckoutRestores(directory, sessionID);
+	}
+	return pending;
+}
+
 beforeEach(async () => {
 	plugin = undefined;
 	resetSwarmState();
@@ -118,7 +134,7 @@ afterEach(async () => {
 });
 
 describe('PR workflow checkout deletion lifecycle (issue #2602)', () => {
-	test('session.deleted collects only the owner verified stash and preserves other stashes', async () => {
+	test('session.deleted preserves the owner safety stash and other stashes', async () => {
 		plugin = await bootKnowledgeHost(directory);
 		await git(['add', '.']);
 		await git(['commit', '-m', 'plugin fixture']);
@@ -153,14 +169,16 @@ describe('PR workflow checkout deletion lifecycle (issue #2602)', () => {
 		});
 
 		expect(await readPrWorkflowGateState(directory, OWNER_SESSION)).toBeNull();
-		expect(
-			await listPendingPrWorkflowCheckoutRestores(directory, OWNER_SESSION),
-		).toEqual([]);
+		expect(await waitForPendingCheckoutRestoresToClear(OWNER_SESSION)).toEqual(
+			[],
+		);
 		expect(
 			await listPendingPrWorkflowCheckoutRestores(directory, FOREIGN_SESSION),
 		).toEqual([{ stash_oid: foreignStashOid, stash_present: true }]);
 		const stashes = await git(['stash', 'list', '--format=%H']);
-		expect(stashes).not.toContain(ownerStashOid);
+		// Verified safety stashes are intentionally retained because Git has no
+		// atomic identity-bound deletion for a non-top stash entry.
+		expect(stashes).toContain(ownerStashOid);
 		expect(stashes).toContain(foreignStashOid);
 		expect(stashes).toContain(ordinaryStashOid);
 
