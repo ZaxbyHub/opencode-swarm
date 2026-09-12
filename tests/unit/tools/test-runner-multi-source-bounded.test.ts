@@ -160,7 +160,9 @@ describe('bounded multi-source graph/impact batches (issue #2492)', () => {
 		fs.writeFileSync(
 			path.join(cacheDir, 'impact-map.json'),
 			JSON.stringify({
-				generatedAt: new Date().toISOString(),
+				// Far-future generatedAt keeps the seeded cache fresh regardless of
+				// fixture file mtimes (derived form; deterministic).
+				generatedAt: new Date('2099-01-01T00:00:00.000Z').toISOString(),
 				fileCount: sources,
 				map,
 			}),

@@ -591,7 +591,10 @@ interface DiffHunk {
 function parseUnifiedHunks(patchText: string): DiffHunk[] | null {
 	const hunks: DiffHunk[] = [];
 	let current: DiffHunk | null = null;
-	for (const line of patchText.split('\n')) {
+	// A trailing newline produces a phantom final '' element that would be
+	// misread as an empty context line; drop it before parsing.
+	const body = patchText.endsWith('\n') ? patchText.slice(0, -1) : patchText;
+	for (const line of body.split('\n')) {
 		const header = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/.exec(line);
 		if (header) {
 			current = {

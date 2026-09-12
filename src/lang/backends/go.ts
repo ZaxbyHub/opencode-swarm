@@ -81,7 +81,7 @@ function extractImports(_sourceFile: string, source: string): string[] {
 			out.add(inner[1]);
 			inner = IMPORT_REGEX_GROUP_LINE.exec(block);
 		}
-		m = IMPORT_REGEX_GROUP.exec(source);
+		m = IMPORT_REGEX_GROUP.exec(cleaned);
 	}
 
 	return [...out];

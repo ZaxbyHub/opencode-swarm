@@ -58,8 +58,9 @@ Do you need to run tests?
 ├─ Single test file, targeted validation
 │   └─ Either works. Prefer shell: bun --smol test <file> --timeout 30000
 │
-├─ Multiple files in the same directory (e.g. all agents tests)
-│   └─ Shell only — per-file loop. Never test_runner with multiple files.
+├─ Multiple TEST FILES to execute directly (e.g. all agents tests)
+│   └─ Shell only — per-file loop (direct test-path execution stays a shell
+│      job; the bounded multi-source contract below is for SOURCE files).
 │
 ├─ Find tests related to ONE changed source file
 │   └─ test_runner is fine: { scope: 'graph', files: ['src/agents/coder.ts'] }
