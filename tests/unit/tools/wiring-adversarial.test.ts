@@ -411,7 +411,10 @@ describe('Phase 3.1 wiring - TOOL OBJECT STRUCTURE', () => {
 		const scanDir = canonicalMkdtemp('wire-045-scan-');
 		fs.writeFileSync(path.join(scanDir, 's.ts'), 'export const s = 1;');
 		try {
-			const r = await secretscan.execute({ directory: scanDir } as any, {} as any);
+			const r = await secretscan.execute(
+				{ directory: scanDir } as any,
+				{} as any,
+			);
 			const out = JSON.stringify(JSON.parse(r));
 			expect(out).not.toContain('__proto__');
 			expect(out).not.toContain('constructor');
