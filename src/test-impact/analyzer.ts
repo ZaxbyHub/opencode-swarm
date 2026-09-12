@@ -50,14 +50,30 @@ function isCacheStale(
 	impactMap: Record<string, string[]>,
 	generatedAtMs: number,
 ): boolean {
-	for (const sourcePath of Object.keys(impactMap)) {
+	const statFor = (filePath: string): 'fresh' | 'stale' | 'missing' => {
 		try {
-			const stat = fs.statSync(sourcePath);
-			if (stat.mtimeMs > generatedAtMs) {
-				return true; // Source file is newer than cache
-			}
+			const stat = fs.statSync(filePath);
+			return stat.mtimeMs > generatedAtMs ? 'stale' : 'fresh';
 		} catch {
-			// Source file deleted — cache is stale
+			return 'missing';
+		}
+	};
+	for (const sourcePath of Object.keys(impactMap)) {
+		if (statFor(sourcePath) !== 'fresh') {
+			// Source file newer than cache, or deleted — cache is stale.
+			return true;
+		}
+	}
+	// Test-side identity: the map is a source-to-tests mapping, so a changed
+	// test file (edited imports or content) must refresh the affected
+	// source/test mapping. A mapped test file newer than the cache, or
+	// deleted, marks the cache stale — mirroring the source-side handling.
+	const mappedTests = new Set<string>();
+	for (const tests of Object.values(impactMap)) {
+		for (const testPath of tests) mappedTests.add(testPath);
+	}
+	for (const testPath of mappedTests) {
+		if (statFor(testPath) !== 'fresh') {
 			return true;
 		}
 	}

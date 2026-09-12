@@ -599,9 +599,13 @@ export async function executeMutationSuite(
 						!line.startsWith('@') &&
 						!line.startsWith('diff ') &&
 						!line.startsWith('index ') &&
-						!line.startsWith('---')
+						!line.startsWith('---') &&
+						!line.startsWith('\\')
 					) {
-						mutatedLines.push(line);
+						// Context lines carry a single leading diff-marker space;
+						// strip it so the reconstructed code matches the file's
+						// real indentation (otherwise equivalence never matches).
+						mutatedLines.push(line.startsWith(' ') ? line.substring(1) : line);
 					}
 				}
 				const mutatedCode = mutatedLines.join('\n');

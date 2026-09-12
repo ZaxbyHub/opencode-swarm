@@ -27,14 +27,30 @@ const PROFILE_ID = 'go';
  *   `import . "foo"`                     → "foo"  (dot-import; rare)
  *   `import (\n "foo"\n alias "bar"\n)`  → "foo", "bar"
  *
- * The single-line and grouped forms are extracted separately. Comments
- * inside import groups (`// blah`) are not stripped — they don't match
- * the quoted-path pattern so they're naturally excluded.
+ * The single-line and grouped forms are extracted separately. Comment text
+ * is stripped from grouped blocks before quoted-path matching: a // or
+ * block comment inside an import group can itself contain a quoted string
+ * ("legacy/db/pkg"), which must NOT become a phantom import edge.
  */
 const IMPORT_REGEX_SINGLE =
 	/^\s*import\s+(?:[a-zA-Z_.][a-zA-Z0-9_]*\s+)?"([^"]+)"/gm;
 const IMPORT_REGEX_GROUP = /^\s*import\s*\(([\s\S]*?)\)/gm;
 const IMPORT_REGEX_GROUP_LINE = /(?:[a-zA-Z_.][a-zA-Z0-9_]*\s+)?"([^"]+)"/g;
+
+/**
+ * Remove line (//) and block comments from a Go import-group body. A quoted
+ * string inside a comment ("legacy/db/pkg") must not become a phantom edge.
+ */
+function stripGoComments(block: string): string {
+	const withoutBlockComments = block.replace(/\/\*[\s\S]*?\*\//g, ' ');
+	return withoutBlockComments
+		.split('\n')
+		.map((line) => {
+			const idx = line.indexOf('//');
+			return idx === -1 ? line : line.slice(0, idx);
+		})
+		.join('\n');
+}
 
 function extractImports(_sourceFile: string, source: string): string[] {
 	const out = new Set<string>();
@@ -47,12 +63,13 @@ function extractImports(_sourceFile: string, source: string): string[] {
 		m = IMPORT_REGEX_SINGLE.exec(source);
 	}
 
-	// Grouped imports — match the parenthesized block, then iterate
-	// quoted entries inside.
+	// Grouped imports — match the parenthesized block, strip comments
+	// (a quoted string inside a comment must not become an edge), then
+	// iterate quoted entries inside.
 	IMPORT_REGEX_GROUP.lastIndex = 0;
 	m = IMPORT_REGEX_GROUP.exec(source);
 	while (m !== null) {
-		const block = m[1];
+		const block = stripGoComments(m[1]);
 		IMPORT_REGEX_GROUP_LINE.lastIndex = 0;
 		let inner: RegExpExecArray | null = IMPORT_REGEX_GROUP_LINE.exec(block);
 		while (inner !== null) {

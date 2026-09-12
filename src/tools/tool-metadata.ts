@@ -389,7 +389,7 @@ export const TOOL_METADATA = {
 	},
 	mutation_test: {
 		description:
-			'executes pre-generated mutation patches against tests, evaluates kill rate against quality gate thresholds',
+			'executes pre-generated mutation patches against tests, evaluates kill rate against quality gate thresholds; test selection comes from explicit files (override) or source_files derived via the impact analyzer with a typed bounded fallback',
 		agents: ['architect', 'test_engineer'],
 	},
 	generate_mutants: {
