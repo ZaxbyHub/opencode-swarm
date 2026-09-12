@@ -2,12 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
 import { executeMutationSuite } from '../../../src/mutation/engine.js';
 import {
 	commentFamilyForLanguage,
 	isStaticallyEquivalent,
 } from '../../../src/mutation/equivalence.js';
+import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
 
 /**
  * Language-aware equivalence/comment filtering (issue #2492 AC4): the static
@@ -118,5 +118,106 @@ describe('engine-level comment-only mutant classification (issue #2492 AC4)', ()
 		expect(report.results[0]?.outcome).toBe('equivalent');
 		expect(runnerCalls).toBe(0);
 		expect(report.equivalent).toBe(1);
+	});
+
+	test('comment-only mutant in a PARTIAL hunk (multi-line file) is equivalent — full-file reconstruction', async () => {
+		// The discriminating shape for diff reconstruction: an 11-line file
+		// with a realistic 4-line hunk in the middle. The mutated FULL FILE is
+		// reconstructed by applying the hunk to the original; comparing
+		// hunk-only text against the whole file made equivalence inert here.
+		const tmp = canonicalMkdtemp('eq-partial-');
+		const originalLines = [
+			'export function calc(a, b) {',
+			'  const sum = a + b;',
+			'  // note',
+			'  return sum;',
+			'}',
+			'',
+			'export function neg(a) {',
+			'  return -a;',
+			'}',
+			'',
+			'export const K = 1;',
+		];
+		fs.writeFileSync(
+			path.join(tmp, 'calc.ts'),
+			`${originalLines.join('\n')}\n`,
+		);
+		let runnerCalls = 0;
+		const report = await executeMutationSuite(
+			[
+				{
+					id: 'm1',
+					filePath: 'calc.ts',
+					functionName: 'calc',
+					mutationType: 'comment_only',
+					patch:
+						'--- a/calc.ts\n+++ b/calc.ts\n@@ -1,5 +1,5 @@\n export function calc(a, b) {\n   const sum = a + b;\n-  // note\n+  // updated note\n   return sum;\n }\n',
+				},
+			],
+			['bun', 'test'],
+			['tests/calc.test.ts'],
+			tmp,
+			undefined,
+			undefined,
+			new Map([['calc.ts', `${originalLines.join('\n')}\n`]]),
+			{
+				runner: async () => {
+					runnerCalls++;
+					return {
+						status: 'completed' as const,
+						exitCode: 1,
+						stdout: '',
+						stderr: '',
+					};
+				},
+			},
+		);
+		expect(report.results[0]?.outcome).toBe('equivalent');
+		expect(runnerCalls).toBe(0);
+		fs.rmSync(tmp, { recursive: true, force: true });
+	});
+
+	test('non-applying patch falls back to hunk-only text (equivalence does not fire)', async () => {
+		// A patch whose context does not match the original cannot be applied;
+		// reconstruction returns null and the engine falls back to hunk-only
+		// text, so equivalence stays silent (no mis-fire) for garbage patches.
+		const tmp = canonicalMkdtemp('eq-nonapp-');
+		let runnerCalls = 0;
+		const report = await executeMutationSuite(
+			[
+				{
+					id: 'm1',
+					filePath: 'calc.ts',
+					functionName: 'calc',
+					mutationType: 'comment_only',
+					patch:
+						'--- a/calc.ts\n+++ b/calc.ts\n@@ -1,2 +1,2 @@\n-TOTALLY-DIFFERENT-CONTEXT\n+whatever\n',
+				},
+			],
+			['bun', 'test'],
+			['tests/x.test.ts'],
+			tmp,
+			undefined,
+			undefined,
+			new Map([['calc.ts', 'export const a = 1;\n']]),
+			{
+				runner: async () => {
+					runnerCalls++;
+					return {
+						status: 'completed' as const,
+						exitCode: 1,
+						stdout: '',
+						stderr: '',
+					};
+				},
+			},
+		);
+		// Hunk-only fallback does not equal the original → the mutant runs
+		// (the runner handles both the patch-apply and the test invocation,
+		// hence 2 calls for one patch).
+		expect(report.results[0]?.outcome).not.toBe('equivalent');
+		expect(runnerCalls).toBeGreaterThanOrEqual(1);
+		fs.rmSync(tmp, { recursive: true, force: true });
 	});
 });

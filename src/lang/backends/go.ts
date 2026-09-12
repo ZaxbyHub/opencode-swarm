@@ -55,21 +55,26 @@ function stripGoComments(block: string): string {
 function extractImports(_sourceFile: string, source: string): string[] {
 	const out = new Set<string>();
 
+	// Comment-stripped source: a block-commented import line must not become
+	// a phantom single-line edge, and grouped blocks must not yield quoted
+	// comment text as edges. String literals in non-import code may be
+	// truncated by the // strip — harmless for import scanning only.
+	const cleaned = stripGoComments(source);
+
 	// Single-line imports.
 	IMPORT_REGEX_SINGLE.lastIndex = 0;
-	let m: RegExpExecArray | null = IMPORT_REGEX_SINGLE.exec(source);
+	let m: RegExpExecArray | null = IMPORT_REGEX_SINGLE.exec(cleaned);
 	while (m !== null) {
 		out.add(m[1]);
-		m = IMPORT_REGEX_SINGLE.exec(source);
+		m = IMPORT_REGEX_SINGLE.exec(cleaned);
 	}
 
-	// Grouped imports — match the parenthesized block, strip comments
-	// (a quoted string inside a comment must not become an edge), then
-	// iterate quoted entries inside.
+	// Grouped imports — iterate quoted entries inside each parenthesized
+	// block of the comment-stripped source.
 	IMPORT_REGEX_GROUP.lastIndex = 0;
-	m = IMPORT_REGEX_GROUP.exec(source);
+	m = IMPORT_REGEX_GROUP.exec(cleaned);
 	while (m !== null) {
-		const block = stripGoComments(m[1]);
+		const block = m[1];
 		IMPORT_REGEX_GROUP_LINE.lastIndex = 0;
 		let inner: RegExpExecArray | null = IMPORT_REGEX_GROUP_LINE.exec(block);
 		while (inner !== null) {

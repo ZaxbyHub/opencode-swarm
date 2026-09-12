@@ -135,6 +135,23 @@ export const mutation_test: ReturnType<typeof createSwarmTool> =
 						2,
 					);
 				}
+				if (typedArgs.files && typedArgs.files.length > MAX_SAFE_TEST_FILES) {
+					// Same binding guard as analyzer-derived selection: the
+					// explicit override must not run an unbounded suite once
+					// per mutant patch.
+					return JSON.stringify(
+						{
+							success: false,
+							error: `explicit files override resolves ${typedArgs.files.length} test files, exceeding the safe cap of ${MAX_SAFE_TEST_FILES}; narrow the list`,
+							evaluability: {
+								evaluable: false,
+								reason: `explicit files override exceeds the safe cap of ${MAX_SAFE_TEST_FILES}`,
+							},
+						},
+						null,
+						2,
+					);
+				}
 
 				if (
 					!typedArgs.test_command ||

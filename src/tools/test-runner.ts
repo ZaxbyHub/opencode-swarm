@@ -2771,7 +2771,7 @@ function analyzeFailures(workingDir: string): TestHistoryReport {
 // ============ Tool Definition ============
 export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 	description:
-		'Run project tests with automatic framework detection for bun, vitest, jest, mocha, pytest, cargo, pester, go test, maven, gradle, dotnet test, ctest, swift test, dart test, rspec, minitest, pest, phpunit, or php-artisan. Returns JSON with success, framework, scope, command, timeout_ms, duration_ms, totals, outcome, and optional coveragePercent, rawOutput, testCases, and message fields. Scope "target" runs one exact Go test/subtest or CTest name via native_target using a workspace-relative package/build directory, with no broad fallback, coverage, or bail. The "targets" array passes framework-native test name patterns to cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test.',
+		'Run project tests with automatic framework detection for bun, vitest, jest, mocha, pytest, cargo, pester, go test, maven, gradle, dotnet test, ctest, swift test, dart test, rspec, minitest, pest, phpunit, or php-artisan. Multi-source graph/impact/convention batches are permitted and deduplicated; the resolved test-file union is hard-capped at 50 (typed scope_exceeded with cap_decision on overflow). Returns JSON with success, framework, scope, command, timeout_ms, duration_ms, totals, outcome, and optional coveragePercent, rawOutput, testCases, resolved_test_files, cap_decision, fallback_reason, and message fields. A discovery scope that legitimately resolves zero tests returns outcome no_impacted_tests. Scope "target" runs one exact Go test/subtest or CTest name via native_target using a workspace-relative package/build directory, with no broad fallback, coverage, or bail. The "targets" array passes framework-native test name patterns to cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test.',
 	args: {
 		scope: z
 			.enum(['all', 'convention', 'graph', 'impact', 'target'])
@@ -3212,7 +3212,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 						outcome: 'scope_exceeded',
 						cap_decision: {
 							decision: 'cap_exceeded',
-							resolved_test_count: MAX_SAFE_TEST_FILES,
+							resolved_test_count: impactResult.impactedTests.length,
 							limit: MAX_SAFE_TEST_FILES,
 						},
 					};

@@ -212,6 +212,25 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 	 * sources, so the union is deduplicated to one entry.
 	 */
 	test('2. impact scope permits bounded multi-source batches with dedup', async () => {
+		// Configure the mock so BOTH sources map to the SAME impacted test.
+		// Like the real analyzer (which dedups via its Set), the mock returns
+		// the union already deduplicated: one entry for two source files.
+		const sharedTest = path.join(tempDir, 'src', '__tests__', 'shared.test.ts');
+		fs.mkdirSync(path.dirname(sharedTest), { recursive: true });
+		fs.writeFileSync(
+			sharedTest,
+			"test('shared', () => { expect(1).toBe(1); });\n",
+		);
+		mockAnalyzeImpact.mockResolvedValueOnce({
+			impactedTests: [sharedTest],
+			unrelatedTests: [],
+			untestedFiles: [],
+			impactMap: {
+				[path.join(tempDir, 'src', 'foo.ts')]: [sharedTest],
+				[path.join(tempDir, 'src', 'bar.ts')]: [sharedTest],
+			},
+		});
+
 		const args = {
 			scope: 'impact' as const,
 			files: ['src/foo.ts', 'src/bar.ts'],
@@ -220,9 +239,18 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 		const result = await execute(args, tempDir);
 		const parsed = parseResult(result);
 
-		// Both sources analyzed; the union resolves (mock) and stays under cap.
-		expect(mockAnalyzeImpact).toHaveBeenCalled();
-		expect(parsed.outcome).not.toBe('scope_exceeded');
+		// The analyzer ran once for the whole multi-source batch.
+		expect(mockAnalyzeImpact).toHaveBeenCalledTimes(1);
+		const analyzeArgs = mockAnalyzeImpact.mock.calls[0];
+		expect(analyzeArgs[0]).toEqual(['src/foo.ts', 'src/bar.ts']);
+		expect(parsed.success).toBe(true);
+		// The shared test resolves exactly once for the two-source batch.
+		expect(parsed.resolved_test_files).toHaveLength(1);
+		expect(parsed.cap_decision).toEqual({
+			decision: 'within_cap',
+			resolved_test_count: 1,
+			limit: 50,
+		});
 	});
 
 	/**

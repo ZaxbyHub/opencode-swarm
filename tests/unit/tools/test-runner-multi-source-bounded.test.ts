@@ -122,6 +122,66 @@ describe('bounded multi-source graph/impact batches (issue #2492)', () => {
 		);
 	}, 60_000);
 
+	test('high occurrence count with small dedup union runs (budget bounds the union, not occurrences)', async () => {
+		// The discriminating shape for the analyzer budget: 6 sources whose
+		// impact-map rows all list the SAME 10 tests = 60 occurrences but a
+		// deduplicated union of 10 (well under the cap). The budget must bound
+		// the union — counting occurrences would spuriously return
+		// scope_exceeded here.
+		const fixture = makeFixture();
+		const sources = 6;
+		const uniqueTests = 10;
+		for (let s = 0; s < sources; s++) {
+			write(`src/mod${s}.ts`, `export const v${s} = ${s};\n`, fixture);
+		}
+		for (let t = 0; t < uniqueTests; t++) {
+			write(
+				`tests/u${String(t).padStart(2, '0')}.test.ts`,
+				`import { test, expect } from 'bun:test';\n${Array.from(
+					{ length: sources },
+					(_, s) => `import { v${s} } from '../src/mod${s}';`,
+				).join('\n')}\n\ntest('u${t}', () => { expect(true).toBe(true); });\n`,
+				fixture,
+			);
+		}
+		// Seed the impact map: every source maps to ALL 10 unique tests.
+		const cacheDir = path.join(fixture, '.swarm', 'cache');
+		fs.mkdirSync(cacheDir, { recursive: true });
+		const map: Record<string, string[]> = {};
+		for (let s = 0; s < sources; s++) {
+			map[norm(path.join(fixture, `src/mod${s}.ts`))] = Array.from(
+				{ length: uniqueTests },
+				(_, t) =>
+					norm(
+						path.join(fixture, `tests/u${String(t).padStart(2, '0')}.test.ts`),
+					),
+			);
+		}
+		fs.writeFileSync(
+			path.join(cacheDir, 'impact-map.json'),
+			JSON.stringify({
+				generatedAt: new Date().toISOString(),
+				fileCount: sources,
+				map,
+			}),
+		);
+
+		const parsed = parse(
+			await execute(
+				{
+					scope: 'impact',
+					files: Array.from({ length: sources }, (_, s) => `src/mod${s}.ts`),
+					working_directory: fixture,
+				},
+				undefined,
+			),
+		);
+		expect(parsed.success).toBe(true);
+		expect(parsed.outcome).toBe('pass');
+		expect(parsed.cap_decision?.decision).toBe('within_cap');
+		expect(parsed.cap_decision?.resolved_test_count).toBe(uniqueTests);
+	}, 60_000);
+
 	test('zero impacted tests is the typed no_impacted_tests outcome, distinct from error', async () => {
 		const fixture = makeFixture();
 		write('src/lonely.ts', 'export const lonely = 1;\n', fixture);

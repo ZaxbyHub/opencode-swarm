@@ -669,8 +669,16 @@ export async function analyzeImpact(
 						budgetExceeded = true;
 						break;
 					}
+					// The budget bounds the DEDUPLICATED union (MAX_SAFE_TEST_FILES
+					// is a resolved-set cap): only a test newly added to the set
+					// consumes budget. Counting repeat occurrences would let a
+					// source reachable from many already-collected tests spuriously
+					// exhaust the budget while the union stays well under the cap.
+					const sizeBefore = impactedTestsSet.size;
 					impactedTestsSet.add(test);
-					visitedCount++;
+					if (impactedTestsSet.size > sizeBefore) {
+						visitedCount++;
+					}
 				}
 				if (budgetExceeded) break;
 			}

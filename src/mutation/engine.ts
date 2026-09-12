@@ -547,6 +547,128 @@ export function computeReport(
 	};
 }
 
+/**
+ * Fallback: hunk-only mutated text (the historical behavior). Used when a
+ * patch text cannot be parsed or applied cleanly, so static equivalence
+ * simply does not fire rather than mis-firing.
+ */
+function hunkOnlyText(patchText: string): string {
+	const mutatedLines: string[] = [];
+	for (const line of patchText.split('\n')) {
+		if (line.startsWith('+++')) continue;
+		if (line.startsWith('+')) {
+			mutatedLines.push(line.substring(1));
+		} else if (
+			!line.startsWith('-') &&
+			!line.startsWith('@') &&
+			!line.startsWith('diff ') &&
+			!line.startsWith('index ') &&
+			!line.startsWith('---') &&
+			!line.startsWith('\\')
+		) {
+			mutatedLines.push(line.startsWith(' ') ? line.substring(1) : line);
+		}
+	}
+	return mutatedLines.join('\n');
+}
+
+interface DiffHunk {
+	/** 1-based start line in the original file (per the -header). */
+	oldStart: number;
+	/** Line count in the original covered by the hunk (0 for pure insertions). */
+	oldCount: number;
+	/** Expected original lines (context + deletions, in file order). */
+	originalLines: string[];
+	/** Resulting lines (context + additions, in file order). */
+	resultLines: string[];
+}
+
+/**
+ * Parse the hunks of a unified diff. Returns null when no hunk header is
+ * present (the text is not a usable unified diff) or a body line is not a
+ * recognized marker.
+ */
+function parseUnifiedHunks(patchText: string): DiffHunk[] | null {
+	const hunks: DiffHunk[] = [];
+	let current: DiffHunk | null = null;
+	for (const line of patchText.split('\n')) {
+		const header = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/.exec(line);
+		if (header) {
+			current = {
+				oldStart: Number.parseInt(header[1], 10),
+				oldCount: header[2] === undefined ? 1 : Number.parseInt(header[2], 10),
+				originalLines: [],
+				resultLines: [],
+			};
+			hunks.push(current);
+			continue;
+		}
+		if (!current) continue;
+		if (
+			line.startsWith('diff ') ||
+			line.startsWith('index ') ||
+			line.startsWith('---') ||
+			line.startsWith('+++')
+		) {
+			continue;
+		}
+		if (line.startsWith('\\')) continue; // "\ No newline at end of file"
+		if (line.startsWith('-')) {
+			current.originalLines.push(line.substring(1));
+		} else if (line.startsWith('+')) {
+			current.resultLines.push(line.substring(1));
+		} else if (line.startsWith(' ')) {
+			const ctx = line.substring(1);
+			current.originalLines.push(ctx);
+			current.resultLines.push(ctx);
+		} else if (line === '') {
+			// Empty context line (common when the last diff line has no
+			// trailing newline marker).
+			current.originalLines.push('');
+			current.resultLines.push('');
+		} else {
+			return null;
+		}
+	}
+	return hunks.length > 0 ? hunks : null;
+}
+
+/**
+ * Apply a unified diff's hunks to the original file text, producing the full
+ * mutated file. Returns null when the diff does not parse or does not apply
+ * cleanly to the original (context mismatch), so callers can fall back.
+ */
+export function applyUnifiedDiff(
+	originalCode: string,
+	patchText: string,
+): string | null {
+	const hunks = parseUnifiedHunks(patchText);
+	if (!hunks) return null;
+	let lines = originalCode.split('\n');
+	// Apply bottom-up so earlier offsets stay valid.
+	for (const hunk of [...hunks].sort((a, b) => b.oldStart - a.oldStart)) {
+		// Diff convention: a 0-count hunk positions at the line BEFORE the
+		// insertion, so its start is used as-is; otherwise it is 1-based.
+		const startIdx = hunk.oldCount === 0 ? hunk.oldStart : hunk.oldStart - 1;
+		if (startIdx < 0 || startIdx > lines.length) return null;
+		if (hunk.originalLines.length > 0) {
+			const actual = lines.slice(
+				startIdx,
+				startIdx + hunk.originalLines.length,
+			);
+			for (let i = 0; i < hunk.originalLines.length; i++) {
+				if (actual[i] !== hunk.originalLines[i]) return null;
+			}
+		}
+		lines = [
+			...lines.slice(0, startIdx),
+			...hunk.resultLines,
+			...lines.slice(startIdx + hunk.originalLines.length),
+		];
+	}
+	return lines.join('\n');
+}
+
 export async function executeMutationSuite(
 	patches: MutationPatch[],
 	testCommand: string[],
@@ -588,27 +710,17 @@ export async function executeMutationSuite(
 		for (const patch of patches) {
 			const originalCode = sourceFiles.get(patch.filePath);
 			if (originalCode) {
-				// Extract mutated code from unified diff: take + lines, excluding +++ header
-				const mutatedLines: string[] = [];
-				for (const line of patch.patch.split('\n')) {
-					if (line.startsWith('+++')) continue;
-					if (line.startsWith('+')) {
-						mutatedLines.push(line.substring(1));
-					} else if (
-						!line.startsWith('-') &&
-						!line.startsWith('@') &&
-						!line.startsWith('diff ') &&
-						!line.startsWith('index ') &&
-						!line.startsWith('---') &&
-						!line.startsWith('\\')
-					) {
-						// Context lines carry a single leading diff-marker space;
-						// strip it so the reconstructed code matches the file's
-						// real indentation (otherwise equivalence never matches).
-						mutatedLines.push(line.startsWith(' ') ? line.substring(1) : line);
-					}
-				}
-				const mutatedCode = mutatedLines.join('\n');
+				// Reconstruct the mutated FULL FILE by applying the unified
+				// diff's hunks to the original source. Comparing the whole
+				// original file against hunk-only text only coincidentally
+				// matches when a hunk spans the entire file, which made the
+				// static equivalence stage inert for realistic partial-hunk
+				// patches. applyUnifiedDiff returns null for unparseable or
+				// non-applying patches; those fall back to hunk-only text
+				// (equivalence then simply does not fire, as before).
+				const mutatedCode =
+					applyUnifiedDiff(originalCode, patch.patch) ??
+					hunkOnlyText(patch.patch);
 				eqInput.push({ patch, originalCode, mutatedCode });
 			}
 		}
