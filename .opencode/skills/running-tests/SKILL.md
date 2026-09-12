@@ -21,31 +21,32 @@ Use `repo_map` `test_pack` only to discover focused candidate tests; Bun/shell o
 
 ## ⛔ The One Rule That Prevents Session Kills
 
-**Never use `test_runner` with more than one source file for any discovery scope.**
+**Multi-source batches are permitted, but the resolved test-file union is hard-capped
+at `MAX_SAFE_TEST_FILES = 50` — the binding guard is the post-resolution count.**
 
-`graph` and `impact` each fan out per file through the import tree; `convention` maps
-each source file to a test file by name convention. The union quickly exceeds
-`MAX_SAFE_TEST_FILES = 50`, triggering `scope_exceeded`, which causes LLMs to
-cascade to `scope: 'all'` and kill the session. All three scopes now reject with
-`scope_exceeded` before fan-out when `sourceFiles.length > MAX_SAFE_SOURCE_FILES = 1`.
+Multi-source `graph`/`impact` batches are deduplicated into one union and run when it
+stays under the cap. The moment the resolved union would exceed 50, the call returns
+the typed `scope_exceeded` outcome (with a `cap_decision` object) — never a silently
+truncated partial set, and never a hang. Treat `scope_exceeded` as SKIP; do not retry
+with `scope: 'all'` (env-gated) and do not split mechanically — first check whether a
+narrower file list or direct test paths keep you under the cap.
 
 ---
 
 ## Three-Layer Defense Against Session Blocking
 
-test_runner has three pre-resolution guards that prevent unbounded fan-out from blocking the session:
+test_runner layers its guards so the fail-open estimator can never be the safety decision:
 
-### Layer 1 — Source-file count guard (synchronous, fires before any I/O)
-`sourceFiles.length > MAX_SAFE_SOURCE_FILES (1)` → returns `scope_exceeded` immediately. Catches the common case of multi-file calls before any filesystem access.
+### Layer 1 — Advisory fan-out estimate (fast, ~100ms, fail-open)
+`estimateFanOut(sourceFiles, workingDir)` reads the cached impact map and estimates the unique test-file count without spawning subprocesses. If the estimate exceeds `MAX_SAFE_TEST_FILES = 50`, the call returns `scope_exceeded` early. On a cold or corrupt cache it returns 0 and is silently skipped — it is an optimization, never the binding decision.
 
-### Layer 2 — Pre-resolution fan-out estimate (fast, ~100ms)
-`estimateFanOut(sourceFiles, workingDir)` reads the cached impact map and counts unique test files without spawning subprocesses. If the estimate exceeds `MAX_SAFE_TEST_FILES = 50`, the call returns `scope_exceeded` immediately — before any graph traversal begins. Only fires when `sourceFiles.length === 1` (Layer 1 has already passed).
+### Layer 2 — Budget-limited traversal (deduplicated union)
+`analyzeImpact` accepts a `budget` parameter (`MAX_SAFE_TEST_FILES = 50`) that bounds the deduplicated union of impacted tests (not per-source occurrences). The traversal stops once the union reaches 50 and sets `budgetExceeded: true`; the call site checks this flag and returns `scope_exceeded` with a `cap_decision` object before running anything.
 
-### Layer 3 — Budget-limited traversal + post-resolution length check
-`analyzeImpact` accepts a `budget` parameter (`MAX_SAFE_TEST_FILES = 50`). The traversal stops as soon as it has visited 50 test files and sets `budgetExceeded: true`. The call site checks this flag and returns `scope_exceeded` before processing results.
-After graph resolution, the final `testFiles.length` is additionally compared to `MAX_SAFE_TEST_FILES`. If exceeded, `scope_exceeded` is returned.
+### Layer 3 — Post-resolution count check (the binding guard)
+After discovery, the final deduplicated `testFiles.length` is compared to `MAX_SAFE_TEST_FILES`. If exceeded, `scope_exceeded` is returned with the resolved set and `cap_decision: { decision: 'cap_exceeded', resolved_test_count, limit }`.
 
-**Result:** When fan-out exceeds the safe threshold, the session gets `outcome: 'scope_exceeded'` instead of hanging.
+**Result:** Bounded multi-source batches run; anything over the cap gets `outcome: 'scope_exceeded'` with the resolved count instead of a hang or a silent partial run.
 
 ---
 
@@ -57,17 +58,19 @@ Do you need to run tests?
 ├─ Single test file, targeted validation
 │   └─ Either works. Prefer shell: bun --smol test <file> --timeout 30000
 │
-├─ Multiple files in the same directory (e.g. all agents tests)
-│   └─ Shell only — per-file loop. Never test_runner with multiple files.
+├─ Multiple TEST FILES to execute directly (e.g. all agents tests)
+│   └─ Shell only — per-file loop (direct test-path execution stays a shell
+│      job; the bounded multi-source contract below is for SOURCE files).
 │
 ├─ Find tests related to ONE changed source file
 │   └─ test_runner is fine: { scope: 'graph', files: ['src/agents/coder.ts'] }
 │      (single file → bounded fan-out)
 │
 ├─ Find tests related to MULTIPLE changed source files
-│   └─ Shell only — per-file loop over the changed files, or run the whole directory.
-│      test_runner with any discovery scope + multiple source files = scope_exceeded
-│      (guard fires before fan-out for convention, graph, and impact scopes).
+│   └─ test_runner works: pass all the source files to one `graph`/`impact` call —
+│      they are deduplicated into one union and run while it stays under the cap
+│      (`scope_exceeded` with `cap_decision` otherwise). A shell per-file loop or a
+│      direct test-path `convention` call remain fine alternatives.
 │
 └─ Validate the entire repo (pre-push)
     └─ Shell only — 5-tier suite from commit-pr skill. Never test_runner scope:'all'.
@@ -79,12 +82,15 @@ Do you need to run tests?
 
 | Scope | With `files: [one]` | With `files: [many]` | Notes |
 |-------|--------------------|--------------------|-------|
-| `'convention'` | ✅ Safe | ❌ Rejected (`scope_exceeded`) | Guard fires before fan-out; direct test file paths exempt |
-| `'graph'` | ✅ Safe (capped at 50 via budget) | ❌ Rejected (`scope_exceeded`) | Two-layer guard: source-file count + fan-out estimate |
-| `'impact'` | ✅ Safe (capped at 50 via budget) | ❌ Rejected (`scope_exceeded`) | Two-layer guard: source-file count + fan-out estimate |
+| `'convention'` | ✅ Safe | ✅ Safe while the resolved union stays under 50 | Direct test file paths exempt from discovery |
+| `'graph'` | ✅ Safe | ✅ Bounded multi-source; `scope_exceeded` (with `cap_decision`) once the union exceeds 50 | Deduplicated union is the binding count; the fan-out estimate is advisory |
+| `'impact'` | ✅ Safe | ✅ Bounded multi-source; `scope_exceeded` (with `cap_decision`) once the union exceeds 50 | Same deduplicated-union guard |
 | `'all'` | ❌ Never | ❌ Never | Env-gated (`SWARM_ALLOW_FULL_SUITE=1`); CI mirror only |
 
-**Rule of thumb:** Pass exactly one source file to `test_runner`. For multiple files, use a shell loop.
+**Rule of thumb:** One `test_runner` call per logical batch of changed sources; the
+resolved union must stay under 50. Responses carry `resolved_test_files`,
+`cap_decision`, and (on fallback) `fallback_reason`; a discovery scope that
+legitimately finds nothing returns the typed `no_impacted_tests` outcome.
 
 For one named Go or CTest test, bypass file discovery with an exact native selector:
 

@@ -110,7 +110,7 @@ describe('two-layer pre-resolution guard', () => {
 	});
 
 	describe('Layer 1: MAX_SAFE_SOURCE_FILES guard (>1 source file → Layer 1 fires)', () => {
-		test('1. graph scope with 60 source files → Layer 1 fires first, error mentions "accepts at most 1 source file"', async () => {
+		test('1. graph scope with 60 source files (union 60 > 50) → typed scope_exceeded from the advisory estimator', async () => {
 			const sourceFileCount = 60;
 			createSourceFiles(tempDir, sourceFileCount);
 			createImpactMapCache(tempDir, sourceFileCount, 1);
@@ -129,10 +129,10 @@ describe('two-layer pre-resolution guard', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.outcome).toBe('scope_exceeded');
 			// Layer 1 fires before estimateFanOut is called
-			expect(parsed.error).toContain('accepts at most 1 source file');
+			expect(parsed.error).toContain('Estimated test file count');
 		});
 
-		test('2. impact scope with 60 source files → Layer 1 fires first, error mentions "accepts at most 1 source file"', async () => {
+		test('2. impact scope with 60 source files (union 60 > 50) → typed scope_exceeded from the advisory estimator', async () => {
 			const sourceFileCount = 60;
 			createSourceFiles(tempDir, sourceFileCount);
 			createImpactMapCache(tempDir, sourceFileCount, 1);
@@ -150,11 +150,11 @@ describe('two-layer pre-resolution guard', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.outcome).toBe('scope_exceeded');
-			expect(parsed.error).toContain('accepts at most 1 source file');
+			expect(parsed.error).toContain('Estimated test file count');
 			expect(parsed.message).toContain('impact');
 		});
 
-		test('3. graph scope with MAX_SAFE_SOURCE_FILES+1 (51) source files → Layer 1 fires before estimateFanOut', async () => {
+		test('3. graph scope with 51 source files (union 51 > 50) → advisory estimator fires before traversal', async () => {
 			const sourceFileCount = MAX_SAFE_TEST_FILES + 1; // 51
 			createSourceFiles(tempDir, sourceFileCount);
 			createImpactMapCache(tempDir, sourceFileCount, 1);
@@ -173,10 +173,10 @@ describe('two-layer pre-resolution guard', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.outcome).toBe('scope_exceeded');
 			// Layer 1 fires — never reaches Layer 2 estimateFanOut
-			expect(parsed.error).toContain('accepts at most 1 source file');
+			expect(parsed.error).toContain('Estimated test file count');
 		});
 
-		test('4. multiple tests per source file (10 files × 6 tests = 60) → Layer 1 fires before estimateFanOut', async () => {
+		test('4. multiple tests per source file (10 files × 6 tests = 60 union) → advisory estimator fires', async () => {
 			const sourceFileCount = 10;
 			createSourceFiles(tempDir, sourceFileCount);
 			// 10 source files × 6 tests each = 60 total, exceeds MAX_SAFE_TEST_FILES (50)
@@ -196,7 +196,7 @@ describe('two-layer pre-resolution guard', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.outcome).toBe('scope_exceeded');
 			// Layer 1 fires for 10 source files — never reaches Layer 2
-			expect(parsed.error).toContain('accepts at most 1 source file');
+			expect(parsed.error).toContain('Estimated test file count');
 		});
 	});
 
@@ -289,7 +289,7 @@ describe('two-layer pre-resolution guard', () => {
 	});
 
 	describe('Layer ordering: Layer 1 fires before Layer 2', () => {
-		test('9. 60 source files → Layer 1 fires, estimateFanOut is never called', async () => {
+		test('9. 60 source files → advisory estimator fires (multi-source permitted; binding guard is post-resolution)', async () => {
 			const sourceFileCount = 60;
 			createSourceFiles(tempDir, sourceFileCount);
 			createImpactMapCache(tempDir, sourceFileCount, 1);
@@ -308,14 +308,14 @@ describe('two-layer pre-resolution guard', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.outcome).toBe('scope_exceeded');
-			// Error should be from Layer 1, not Layer 2
-			expect(parsed.error).toContain('accepts at most 1 source file');
-			expect(parsed.error).not.toContain('exceeds safe maximum');
+			// The advisory estimator is the early-out; the post-resolution guard
+			// is the binding one (exercised by the frozen acceptance checks).
+			expect(parsed.error).toContain('Estimated test file count');
 		});
 	});
 
 	describe('graph/impact with small fan-out (Layer 2 bypassed)', () => {
-		test('10. graph scope with 5 source files (fan-out = 5) → Layer 1 bypassed, Layer 2 bypassed, proceeds', async () => {
+		test('10. graph scope with 5 source files (fan-out = 5, under cap) → multi-source permitted, proceeds to typed outcome', async () => {
 			const sourceFileCount = 5;
 			createSourceFiles(tempDir, sourceFileCount);
 			createImpactMapCache(tempDir, sourceFileCount, 1);
@@ -331,16 +331,15 @@ describe('two-layer pre-resolution guard', () => {
 			);
 			const parsed = parseResult(result);
 
-			// Fan-out (5) <= MAX_SAFE_TEST_FILES (50), source files (5) > 1
-			// → Layer 1 fires for source file count, but with current implementation
-			// sourceFiles.length > MAX_SAFE_SOURCE_FILES (1) so it still errors
-			// Note: This test documents current behavior where multiple source files
-			// always hit Layer 1 regardless of fan-out
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
+			// Bounded multi-source contract (issue #2492): 5 sources whose union
+			// stays under the cap run; with no test files on disk the discovery
+			// legitimately resolves zero tests — the typed no_impacted_tests
+			// outcome, distinct from a failure.
+			expect(parsed.outcome).toBe('no_impacted_tests');
+			expect(parsed.cap_decision?.decision).toBe('within_cap');
 		});
 
-		test('11. impact scope with 5 source files (fan-out = 5) → proceeds', async () => {
+		test('11. impact scope with 5 source files (fan-out = 5, under cap) → multi-source permitted, proceeds', async () => {
 			const sourceFileCount = 5;
 			createSourceFiles(tempDir, sourceFileCount);
 			createImpactMapCache(tempDir, sourceFileCount, 1);
@@ -356,9 +355,8 @@ describe('two-layer pre-resolution guard', () => {
 			);
 			const parsed = parseResult(result);
 
-			// Same as test 10 — Layer 1 fires for multiple source files
-			expect(parsed.success).toBe(false);
-			expect(parsed.outcome).toBe('scope_exceeded');
+			// Same bounded multi-source contract as test 10 via the impact path.
+			expect(parsed.outcome).toBe('no_impacted_tests');
 		});
 	});
 

@@ -31,7 +31,6 @@ export const MAX_COMMAND_LENGTH = 500;
 export const DEFAULT_TIMEOUT_MS = 60_000; // 60 seconds default
 export const MAX_TIMEOUT_MS = 300_000; // 5 minutes max
 export const MAX_SAFE_TEST_FILES = 50; // Maximum resolved test files allowed in interactive session
-export const MAX_SAFE_SOURCE_FILES = 1; // Maximum source files allowed for graph/impact scopes (>1 fans out to too many test files)
 
 /**
  * Estimate the fan-out (number of unique test files) for given source files
@@ -111,9 +110,18 @@ export interface TestRunnerArgs {
 export type RegressionOutcome =
 	| 'pass' // tests ran and all passed
 	| 'skip' // no test files resolved — nothing to run
+	| 'no_impacted_tests' // discovery resolved zero tests for the requested sources — a legitimate empty answer, distinct from skip/failure
 	| 'regression' // tests ran and one or more failed
 	| 'scope_exceeded' // resolved file count exceeded MAX_SAFE_TEST_FILES
 	| 'error'; // unrecoverable tool error
+
+/** Binding cap decision reported on every discovery-scope test_runner response. */
+export interface CapDecision {
+	decision: 'within_cap' | 'cap_exceeded';
+	resolved_test_count: number;
+	limit: number;
+	source_file_count?: number;
+}
 
 export interface TestTotals {
 	passed: number;
@@ -147,6 +155,12 @@ export interface TestSuccessResult {
 	testCases?: ParsedTestCaseResult[];
 	message?: string;
 	outcome?: RegressionOutcome;
+	/** Post-resolution deduplicated test-file set (discovery scopes only). */
+	resolved_test_files?: string[];
+	/** Binding cap decision — the post-resolution count, never an estimate. */
+	cap_decision?: CapDecision;
+	/** Non-empty exactly when resolution fell back to a narrower discovery scope. */
+	fallback_reason?: string;
 }
 
 export interface TestErrorResult {
@@ -164,6 +178,9 @@ export interface TestErrorResult {
 	message?: string;
 	outcome?: RegressionOutcome;
 	attempted_scope?: 'graph';
+	resolved_test_files?: string[];
+	cap_decision?: CapDecision;
+	fallback_reason?: string;
 }
 
 export type TestResult = TestSuccessResult | TestErrorResult;
@@ -1200,7 +1217,9 @@ async function getTestFilesFromGraph(
 						}
 					}
 				} else {
-					// External module, skip
+					// External module — skip, but MUST advance the regex or this
+					// loop spins forever on the same match (the import-loop hang).
+					match = importRegex.exec(content);
 					continue;
 				}
 
@@ -2752,7 +2771,7 @@ function analyzeFailures(workingDir: string): TestHistoryReport {
 // ============ Tool Definition ============
 export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 	description:
-		'Run project tests with automatic framework detection for bun, vitest, jest, mocha, pytest, cargo, pester, go test, maven, gradle, dotnet test, ctest, swift test, dart test, rspec, minitest, pest, phpunit, or php-artisan. Returns JSON with success, framework, scope, command, timeout_ms, duration_ms, totals, outcome, and optional coveragePercent, rawOutput, testCases, and message fields. Scope "target" runs one exact Go test/subtest or CTest name via native_target using a workspace-relative package/build directory, with no broad fallback, coverage, or bail. The "targets" array passes framework-native test name patterns to cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test.',
+		'Run project tests with automatic framework detection for bun, vitest, jest, mocha, pytest, cargo, pester, go test, maven, gradle, dotnet test, ctest, swift test, dart test, rspec, minitest, pest, phpunit, or php-artisan. Multi-source graph/impact/convention batches are permitted and deduplicated; the resolved test-file union is hard-capped at 50 (typed scope_exceeded with cap_decision on overflow). Returns JSON with success, framework, scope, command, timeout_ms, duration_ms, totals, outcome, and optional coveragePercent, rawOutput, testCases, resolved_test_files, cap_decision, fallback_reason, and message fields. A discovery scope that legitimately resolves zero tests returns outcome no_impacted_tests. Scope "target" runs one exact Go test/subtest or CTest name via native_target using a workspace-relative package/build directory, with no broad fallback, coverage, or bail. The "targets" array passes framework-native test name patterns to cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test.',
 	args: {
 		scope: z
 			.enum(['all', 'convention', 'graph', 'impact', 'target'])
@@ -2929,9 +2948,9 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					framework: 'none',
 					scope: 'all',
 					error:
-						'scope "all" is blocked for agent use. Use scope "convention" with specific test files, or scope "graph" with exactly one source file.',
+						'scope "all" is blocked for agent use. Use scope "convention" with specific test files, or a bounded multi-source batch via scope "graph"/"impact" (the resolved test set must stay under the safe cap).',
 					message:
-						'The full test suite is blocked in agent context. Use scope "convention" with specific test files, or scope "graph" with exactly one source file. Example: { scope: "convention", files: ["src/tools/test-runner.ts"] }',
+						'The full test suite is blocked in agent context. Use scope "convention" with specific test files, or a bounded multi-source batch via scope "graph"/"impact" (the resolved test set must stay under the safe cap). Example: { scope: "convention", files: ["src/tools/test-runner.ts"] }',
 					outcome: 'error',
 				};
 				return JSON.stringify(errorResult, null, 2);
@@ -3072,20 +3091,6 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				return JSON.stringify(errorResult, null, 2);
 			}
 
-			// Guard: Reject when too many source files would cause fan-out to many test files.
-			// Direct test files are exempt — they are explicitly named and don't fan out.
-			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
-				const errorResult: TestErrorResult = {
-					success: false,
-					framework,
-					scope,
-					error: `scope "convention" accepts at most ${MAX_SAFE_SOURCE_FILES} source file for discovery (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
-					message: `Too many source files for scope "convention" discovery (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or pass direct test file paths instead of source files.`,
-					outcome: 'scope_exceeded',
-				};
-				return JSON.stringify(errorResult, null, 2);
-			}
-
 			testFiles = [
 				...directTestFiles,
 				...getTestFilesFromConvention(sourceFiles, workingDir),
@@ -3116,23 +3121,11 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				return JSON.stringify(errorResult, null, 2);
 			}
 
-			// Layer 1: Reject before any I/O when too many source files are provided.
-			// graph discovery fans out: each source file can match many test files, easily
-			// exceeding MAX_SAFE_TEST_FILES and triggering a scope_exceeded cascade that
-			// causes LLMs to retry with scope "all", freezing the OpenCode SSE session.
-			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
-				const errorResult: TestErrorResult = {
-					success: false,
-					framework,
-					scope,
-					error: `scope "graph" accepts at most ${MAX_SAFE_SOURCE_FILES} source file (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
-					message: `Too many source files for scope "graph" (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or use scope "convention" with direct test file paths.`,
-					outcome: 'scope_exceeded',
-				};
-				return JSON.stringify(errorResult, null, 2);
-			}
-
-			// Layer 2: Even with a single source file, estimate fan-out before import-graph traversal.
+			// Layer 2 (advisory early-out only): estimate fan-out before import-graph
+			// traversal. Multi-source batches ARE permitted; the binding guard is the
+			// post-resolution resolved-test-file count, never this estimate — the
+			// estimator is fail-open on cold/corrupt caches and cannot be the safety
+			// decision (issue #2492).
 			// estimateFanOut reads the cached impact map in ~100ms without spawning a subprocess.
 			const estimate = await estimateFanOut(sourceFiles, workingDir);
 			if (estimate.estimatedCount > MAX_SAFE_TEST_FILES) {
@@ -3186,23 +3179,9 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				return JSON.stringify(errorResult, null, 2);
 			}
 
-			// Layer 1: Reject before any I/O when too many source files are provided.
-			// impact analysis fans out through the import graph, then may fall back to graph
-			// discovery; either path can exceed MAX_SAFE_TEST_FILES and cause LLMs to cascade
-			// to scope "all", freezing the OpenCode SSE session.
-			if (sourceFiles.length > MAX_SAFE_SOURCE_FILES) {
-				const errorResult: TestErrorResult = {
-					success: false,
-					framework,
-					scope,
-					error: `scope "impact" accepts at most ${MAX_SAFE_SOURCE_FILES} source file (got ${sourceFiles.length}). Treat this as SKIP without retry.`,
-					message: `Too many source files for scope "impact" (${sourceFiles.length} provided, limit is ${MAX_SAFE_SOURCE_FILES}). Call test_runner once per source file, or use scope "convention" with direct test file paths.`,
-					outcome: 'scope_exceeded',
-				};
-				return JSON.stringify(errorResult, null, 2);
-			}
-
-			// Layer 2: Even with a single source file, estimate fan-out before impact analysis.
+			// Layer 2 (advisory early-out only): estimate fan-out before impact analysis.
+			// Multi-source batches ARE permitted; the binding guard is the post-resolution
+			// resolved-test-file count (issue #2492), never this fail-open estimate.
 			// estimateFanOut reads the cached impact map in ~100ms without spawning a subprocess.
 			const estimate = await estimateFanOut(sourceFiles, workingDir);
 			if (estimate.estimatedCount > MAX_SAFE_TEST_FILES) {
@@ -3231,6 +3210,11 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 						error: 'Budget exceeded during impact analysis',
 						message: `Impact analysis exceeded safe budget of ${MAX_SAFE_TEST_FILES} test files.`,
 						outcome: 'scope_exceeded',
+						cap_decision: {
+							decision: 'cap_exceeded',
+							resolved_test_count: impactResult.impactedTests.length,
+							limit: MAX_SAFE_TEST_FILES,
+						},
 					};
 					return JSON.stringify(errorResult, null, 2);
 				}
@@ -3288,6 +3272,11 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 		) {
 			const baseMessage =
 				'No matching test files found for the provided source files. Check that test files exist with matching naming conventions (.spec.*, .test.*, .Tests.ps1, __tests__/, tests/, test/, spec/).';
+			// Discovery scopes resolving to zero tests are a legitimate empty
+			// answer — a typed non-failure distinct from tool failure and from a
+			// generic skip (issue #2492 AC9).
+			const discoveryEmptyOutcome: RegressionOutcome =
+				scope === 'impact' || scope === 'graph' ? 'no_impacted_tests' : 'skip';
 			const errorResult: TestErrorResult = {
 				success: false,
 				framework,
@@ -3296,7 +3285,14 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				message: graphFallbackReason
 					? `${baseMessage} (${graphFallbackReason})`
 					: baseMessage,
-				outcome: 'skip',
+				outcome: discoveryEmptyOutcome,
+				resolved_test_files: [],
+				cap_decision: {
+					decision: 'within_cap',
+					resolved_test_count: 0,
+					limit: MAX_SAFE_TEST_FILES,
+				},
+				...(graphFallbackReason && { fallback_reason: graphFallbackReason }),
 				...(scope === 'graph' && { attempted_scope: 'graph' }),
 				...(scope === 'impact' && { attempted_scope: 'graph' }),
 			};
@@ -3319,6 +3315,13 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				error: `Resolved test file count (${testFiles.length}) exceeds safe maximum (${MAX_SAFE_TEST_FILES})`,
 				message: `Too many test files resolved (${testFiles.length}). Maximum allowed is ${MAX_SAFE_TEST_FILES}. Treat this as SKIP without retry. Provide more specific source files to narrow down test scope. First few resolved: ${sampleFiles.join(', ')}`,
 				outcome: 'scope_exceeded',
+				resolved_test_files: testFiles,
+				cap_decision: {
+					decision: 'cap_exceeded',
+					resolved_test_count: testFiles.length,
+					limit: MAX_SAFE_TEST_FILES,
+				},
+				...(graphFallbackReason && { fallback_reason: graphFallbackReason }),
 			};
 			return JSON.stringify(errorResult, null, 2);
 		}
@@ -3363,6 +3366,21 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 					.map((c) => `${c.classification}: ${c.rootCause.substring(0, 80)}`)
 					.join('; ');
 				result.message = `${result.message || ''} | FAILURE ANALYSIS: ${clusterSummary}`;
+			}
+		}
+
+		// Reporting surface for discovery scopes (issue #2492 AC7): the resolved
+		// deduplicated set, the binding cap decision, and the fallback reason.
+		// 'all' deliberately has no resolved list; 'target' filters natively.
+		if (scope === 'graph' || scope === 'impact' || scope === 'convention') {
+			result.resolved_test_files = testFiles;
+			result.cap_decision = {
+				decision: 'within_cap',
+				resolved_test_count: testFiles.length,
+				limit: MAX_SAFE_TEST_FILES,
+			};
+			if (graphFallbackReason) {
+				result.fallback_reason = graphFallbackReason;
 			}
 		}
 

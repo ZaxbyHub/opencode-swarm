@@ -170,7 +170,9 @@ describe('mutation_test tool', () => {
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('files must be a non-empty array');
+			expect(parsed.error).toContain(
+				'provide either files (explicit test file paths) or source_files',
+			);
 		});
 
 		test('9. missing test_command returns error', async () => {

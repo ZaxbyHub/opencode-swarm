@@ -11,13 +11,15 @@ import {
 	evaluateMutationGate,
 	type MutationGateResult,
 } from '../mutation/gate.js';
+import { analyzeImpact } from '../test-impact/analyzer.js';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
+import { MAX_SAFE_TEST_FILES } from './test-runner.js';
 
 export const mutation_test: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Execute mutation testing with pre-generated patches — applies each mutant patch, runs tests, and evaluates kill rate against quality gate thresholds. Returns verdict (pass/warn/fail) with per-function kill rates and survived mutant details.',
+			'Execute mutation testing with pre-generated patches — applies each mutant patch, runs tests, and evaluates kill rate against quality gate thresholds. Test selection: pass files (explicit override) or source_files (impacted tests derived via the impact analyzer, bounded by the safe test-file cap; analyzer failure or empty derivation returns a typed bounded fallback instead of running a broad suite). Returns verdict (pass/warn/fail) with per-function kill rates, survived mutant details, test_selection, and evaluability reporting.',
 		args: {
 			patches: z
 				.array(
@@ -42,7 +44,16 @@ export const mutation_test: ReturnType<typeof createSwarmTool> =
 				),
 			files: z
 				.array(z.string())
-				.describe('Array of test file paths to run against mutants'),
+				.optional()
+				.describe(
+					'Array of test file paths to run against mutants. Explicit override: when provided, this set wins over analyzer derivation.',
+				),
+			source_files: z
+				.array(z.string())
+				.optional()
+				.describe(
+					'Source files whose impacted tests are derived via the impact analyzer when files is omitted (bounded by the safe test-file cap).',
+				),
 			test_command: z
 				.array(z.string())
 				.describe(
@@ -77,7 +88,8 @@ export const mutation_test: ReturnType<typeof createSwarmTool> =
 					patch: string;
 					lineNumber?: number;
 				}>;
-				files: string[];
+				files?: string[];
+				source_files?: string[];
 				test_command: string[];
 				pass_threshold?: number;
 				warn_threshold?: number;
@@ -85,15 +97,56 @@ export const mutation_test: ReturnType<typeof createSwarmTool> =
 			};
 
 			try {
+				if (!typedArgs.files && !typedArgs.source_files) {
+					return JSON.stringify(
+						{
+							error:
+								'provide either files (explicit test file paths) or source_files (derive impacted tests via the impact analyzer)',
+							success: false,
+						},
+						null,
+						2,
+					);
+				}
 				if (
-					!typedArgs.files ||
-					!Array.isArray(typedArgs.files) ||
-					typedArgs.files.length === 0
+					typedArgs.files &&
+					(!Array.isArray(typedArgs.files) || typedArgs.files.length === 0)
 				) {
 					return JSON.stringify(
 						{
 							error: 'files must be a non-empty array of file paths',
 							success: false,
+						},
+						null,
+						2,
+					);
+				}
+				if (
+					typedArgs.source_files &&
+					(!Array.isArray(typedArgs.source_files) ||
+						typedArgs.source_files.length === 0)
+				) {
+					return JSON.stringify(
+						{
+							error: 'source_files must be a non-empty array of file paths',
+							success: false,
+						},
+						null,
+						2,
+					);
+				}
+				if (typedArgs.files && typedArgs.files.length > MAX_SAFE_TEST_FILES) {
+					// Same binding guard as analyzer-derived selection: the
+					// explicit override must not run an unbounded suite once
+					// per mutant patch.
+					return JSON.stringify(
+						{
+							success: false,
+							error: `explicit files override resolves ${typedArgs.files.length} test files, exceeding the safe cap of ${MAX_SAFE_TEST_FILES}; narrow the list`,
+							evaluability: {
+								evaluable: false,
+								reason: `explicit files override exceeds the safe cap of ${MAX_SAFE_TEST_FILES}`,
+							},
 						},
 						null,
 						2,
@@ -183,10 +236,94 @@ export const mutation_test: ReturnType<typeof createSwarmTool> =
 					}
 				}
 
+				// Test selection (issue #2492): explicit files override; otherwise derive
+				// impacted tests from the impact analyzer (bounded by the safe test-file
+				// cap); analyzer failure, empty derivation, or cap overflow takes a typed
+				// bounded fallback — never a silent broad run.
+				type TestSelection = {
+					source: 'impact_analysis' | 'explicit_override' | 'fallback';
+					resolved_test_files: string[];
+					fallback_reason?: string;
+				};
+				let selection: TestSelection;
+				if (typedArgs.files && typedArgs.files.length > 0) {
+					selection = {
+						source: 'explicit_override',
+						resolved_test_files: typedArgs.files,
+					};
+				} else {
+					const sourceFilesForImpact = typedArgs.source_files ?? [];
+					try {
+						const impactResult =
+							await _internals.mutationInternals.analyzeImpact(
+								sourceFilesForImpact,
+								cwd,
+								MAX_SAFE_TEST_FILES,
+							);
+						if (impactResult.impactedTests.length === 0) {
+							selection = {
+								source: 'fallback',
+								resolved_test_files: [],
+								fallback_reason:
+									'impact analysis found no impacted tests for the given source files; pass explicit files to override',
+							};
+						} else if (
+							// The analyzer truncates at the budget and reports
+							// budgetExceeded — the length alone can read exactly 50
+							// on a 55-test fan-out, so BOTH signals must refuse.
+							// A silent 50-of-55 partial run would under-report kills.
+							impactResult.budgetExceeded ||
+							impactResult.impactedTests.length > MAX_SAFE_TEST_FILES
+						) {
+							selection = {
+								source: 'fallback',
+								resolved_test_files: [],
+								fallback_reason: `derived test set meets or exceeds the safe cap of ${MAX_SAFE_TEST_FILES} (budget${impactResult.budgetExceeded ? ' exceeded' : ' at cap'}); narrow the source files or pass explicit files to override`,
+							};
+						} else {
+							selection = {
+								source: 'impact_analysis',
+								resolved_test_files: impactResult.impactedTests.map(
+									(absPath) => {
+										const relativePath = path.relative(cwd, absPath);
+										return path.isAbsolute(relativePath)
+											? absPath
+											: relativePath;
+									},
+								),
+							};
+						}
+					} catch (err) {
+						selection = {
+							source: 'fallback',
+							resolved_test_files: [],
+							fallback_reason: `impact analysis failed (${err instanceof Error ? err.message : String(err)}); pass explicit files to override`,
+						};
+					}
+				}
+
+				if (selection.source === 'fallback') {
+					// Bounded typed refusal: nothing runs, everything is reported.
+					return JSON.stringify(
+						{
+							success: false,
+							error:
+								'mutation_test could not resolve a bounded test set for the requested sources',
+							test_selection: selection,
+							evaluability: {
+								evaluable: false,
+								reason: selection.fallback_reason ?? 'no test selection',
+							},
+						},
+						null,
+						2,
+					);
+				}
+
 				const report: MutationReport = await executeMutationSuite(
 					typedArgs.patches,
 					typedArgs.test_command,
-					typedArgs.files,
+					selection.resolved_test_files,
 					cwd,
 					undefined, // budgetMs
 					undefined, // onProgress
@@ -199,7 +336,59 @@ export const mutation_test: ReturnType<typeof createSwarmTool> =
 					warnThreshold,
 				);
 
-				return JSON.stringify(result, null, 2);
+				// Evaluability (issue #2492): report whether the batch could be evaluated
+				// at all, plus the per-outcome counts behind the verdict.
+				// A completed batch against a resolved test set is evaluable: a
+				// verdict was computed. Killability proportions ride the reason and
+				// mutation_outcome_counts; the fallback refusal is the not-evaluable
+				// case (reported before any run).
+				const killableCount =
+					report.totalMutants - report.equivalent - report.skipped;
+				const evaluability = {
+					evaluable: true,
+					reason: `${killableCount} of ${report.totalMutants} mutants were killable (${report.equivalent} equivalent, ${report.skipped} skipped)`,
+				};
+
+				// Cache refresh (issue #2492): every completed gate verdict
+				// invalidates the cached impact-map selection so the next load
+				// rebuilds from current test imports. Invalidation is O(1) — no
+				// whole-tree rescan on the response path; a failure here never
+				// fails the batch.
+				let cache_refreshed = false;
+				try {
+					const cachePath = path.join(
+						cwd,
+						'.swarm',
+						'cache',
+						'impact-map.json',
+					);
+					await fs.promises.unlink(cachePath);
+					cache_refreshed = true;
+				} catch (err) {
+					// ENOENT: no cache existed — nothing stale to invalidate; the
+					// next load rebuilds from disk either way.
+					cache_refreshed =
+						err instanceof Error &&
+						(err as NodeJS.ErrnoException).code === 'ENOENT';
+				}
+
+				return JSON.stringify(
+					{
+						...result,
+						test_selection: selection,
+						evaluability,
+						mutation_outcome_counts: {
+							killed: report.killed,
+							survived: report.survived,
+							equivalent: report.equivalent,
+							skipped: report.skipped,
+							total: report.totalMutants,
+						},
+						cache_refreshed,
+					},
+					null,
+					2,
+				);
 			} catch (e) {
 				return JSON.stringify(
 					{
@@ -215,3 +404,11 @@ export const mutation_test: ReturnType<typeof createSwarmTool> =
 			}
 		},
 	});
+
+export const _internals: {
+	mutationInternals: {
+		analyzeImpact: typeof analyzeImpact;
+	};
+} = {
+	mutationInternals: { analyzeImpact },
+};
