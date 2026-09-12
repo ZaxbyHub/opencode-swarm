@@ -21,9 +21,9 @@ const execute = test_runner.execute as unknown as (
 	directory: string | undefined,
 ) => Promise<string>;
 
-function makeFixture(tag: string): string {
+function makeFixture(): string {
 	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), `tr-multi-${tag}-`)),
+		fs.mkdtempSync(path.join(os.tmpdir(), 'tr-multi-')),
 	);
 	fs.writeFileSync(
 		path.join(dir, 'package.json'),
@@ -50,7 +50,7 @@ const norm = (p: string): string => p.replace(/\\/g, '/');
 
 describe('bounded multi-source graph/impact batches (issue #2492)', () => {
 	test('under-cap multi-source graph batch runs both sources with dedup and cap reporting', async () => {
-		const fixture = makeFixture('graph');
+		const fixture = makeFixture();
 		write('src/alpha.ts', 'export const alpha = 1;\n', fixture);
 		write('src/beta.ts', 'export const beta = 2;\n', fixture);
 		// alpha.test.ts imports BOTH sources (shared); beta.test.ts imports beta.
@@ -94,7 +94,7 @@ describe('bounded multi-source graph/impact batches (issue #2492)', () => {
 	}, 30_000);
 
 	test('union overflow returns typed scope_exceeded with binding cap_decision, never a partial run', async () => {
-		const fixture = makeFixture('overflow');
+		const fixture = makeFixture();
 		write('src/alpha.ts', 'export const alpha = 1;\n', fixture);
 		write('src/beta.ts', 'export const beta = 2;\n', fixture);
 		for (let i = 0; i < MAX_SAFE_TEST_FILES + 5; i++) {
@@ -124,7 +124,7 @@ describe('bounded multi-source graph/impact batches (issue #2492)', () => {
 	}, 60_000);
 
 	test('zero impacted tests is the typed no_impacted_tests outcome, distinct from error', async () => {
-		const fixture = makeFixture('empty');
+		const fixture = makeFixture();
 		write('src/lonely.ts', 'export const lonely = 1;\n', fixture);
 		const parsed = parse(
 			await execute(
@@ -144,7 +144,7 @@ describe('bounded multi-source graph/impact batches (issue #2492)', () => {
 	}, 30_000);
 
 	test('graph discovery completes on external ESM imports instead of hanging', async () => {
-		const fixture = makeFixture('external');
+		const fixture = makeFixture();
 		write('src/alpha.ts', 'export const alpha = 1;\n', fixture);
 		// External package import: the historical non-advancing regex loop hung
 		// here forever. Bun's test-level timeout bounds this if it regresses.
@@ -169,7 +169,7 @@ describe('bounded multi-source graph/impact batches (issue #2492)', () => {
 	}, 30_000);
 
 	test('multi-source regression path is reported, not swallowed (preserving case)', async () => {
-		const fixture = makeFixture('regression');
+		const fixture = makeFixture();
 		write('src/alpha.ts', 'export const alpha = 1;\n', fixture);
 		write('src/beta.ts', 'export const beta = 2;\n', fixture);
 		write(

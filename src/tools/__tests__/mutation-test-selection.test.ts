@@ -19,9 +19,9 @@ const execute = mutation_test.execute as unknown as (
 
 const norm = (p: string): string => p.replace(/\\/g, '/');
 
-function makeFixture(tag: string): string {
+function makeFixture(): string {
 	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), `mut-sel-${tag}-`)),
+		fs.mkdtempSync(path.join(os.tmpdir(), 'mut-sel-')),
 	);
 	fs.writeFileSync(
 		path.join(dir, 'package.json'),
@@ -54,7 +54,7 @@ const KILLABLE_PATCH = (file: string, fn: string) => ({
 
 describe('mutation_test selection + evaluability + cache refresh (issue #2492)', () => {
 	test('source_files derive impacted tests via the impact analyzer', async () => {
-		const fixture = makeFixture('derive');
+		const fixture = makeFixture();
 		write(
 			'src/math.ts',
 			'export function addM(a: number, b: number): number {\n  return a + b;\n}\n',
@@ -89,7 +89,7 @@ describe('mutation_test selection + evaluability + cache refresh (issue #2492)',
 	}, 60_000);
 
 	test('explicit files win over derivation (override)', async () => {
-		const fixture = makeFixture('override');
+		const fixture = makeFixture();
 		write(
 			'src/calc.ts',
 			'export function addC(a: number, b: number): number {\n  return a + b;\n}\n',
@@ -119,7 +119,7 @@ describe('mutation_test selection + evaluability + cache refresh (issue #2492)',
 	}, 60_000);
 
 	test('derivation yielding nothing returns a typed bounded fallback (no run)', async () => {
-		const fixture = makeFixture('fallback');
+		const fixture = makeFixture();
 		write('src/orphan.ts', 'export const orphan = 1;\n', fixture);
 		const parsed = parse(
 			await execute(
@@ -141,7 +141,7 @@ describe('mutation_test selection + evaluability + cache refresh (issue #2492)',
 	}, 30_000);
 
 	test('derive-mode cap overflow is refused via the typed fallback, never a truncated partial run', async () => {
-		const fixture = makeFixture('overflow');
+		const fixture = makeFixture();
 		write(
 			'src/math.ts',
 			'export function addO(a: number, b: number): number {\n  return a + b;\n}\n',
@@ -182,7 +182,7 @@ describe('mutation_test selection + evaluability + cache refresh (issue #2492)',
 				{
 					patches: [KILLABLE_PATCH('src/x.ts', 'f')],
 					test_command: ['bun', 'test'],
-					working_directory: makeFixture('neither'),
+					working_directory: makeFixture(),
 				},
 				undefined,
 			),
@@ -192,7 +192,7 @@ describe('mutation_test selection + evaluability + cache refresh (issue #2492)',
 	}, 10_000);
 
 	test('a completed batch invalidates the cached impact-map selection', async () => {
-		const fixture = makeFixture('cache');
+		const fixture = makeFixture();
 		write(
 			'src/math.ts',
 			'export function addK(a: number, b: number): number {\n  return a + b;\n}\n',

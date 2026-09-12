@@ -16,9 +16,9 @@ const { loadImpactMap } = analyzerInternals as unknown as {
 	loadImpactMap: (dir: string) => Promise<Record<string, string[]>>;
 };
 
-function makeFixture(tag: string): string {
+function makeFixture(): string {
 	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), `impact-stale-${tag}-`)),
+		fs.mkdtempSync(path.join(os.tmpdir(), 'impact-stale-')),
 	);
 	fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
 	fs.mkdirSync(path.join(dir, 'tests'), { recursive: true });
@@ -35,7 +35,7 @@ const norm = (p: string): string => p.replace(/\\/g, '/');
 
 describe('impact-cache test-side staleness (issue #2492 AC5)', () => {
 	test('a test-file-only import change refreshes the source/test mapping', async () => {
-		const dir = makeFixture('repoint');
+		const dir = makeFixture();
 		// Build the map: a.ts -> tests/a.test.ts
 		const map1 = await loadImpactMap(dir);
 		expect(map1[norm(path.join(dir, 'src/a.ts'))]).toBeDefined();
@@ -54,7 +54,7 @@ describe('impact-cache test-side staleness (issue #2492 AC5)', () => {
 	}, 30_000);
 
 	test('deleting a mapped test file marks the cache stale (rebuild drops it)', async () => {
-		const dir = makeFixture('delete');
+		const dir = makeFixture();
 		const map1 = await loadImpactDir(dir);
 		expect(map1[norm(path.join(dir, 'src/a.ts'))]).toBeDefined();
 		fs.rmSync(path.join(dir, 'tests/a.test.ts'));
@@ -63,7 +63,7 @@ describe('impact-cache test-side staleness (issue #2492 AC5)', () => {
 	}, 30_000);
 
 	test('missing cache takes the bounded rebuild path (preserving)', async () => {
-		const dir = makeFixture('missing');
+		const dir = makeFixture();
 		const map = await loadImpactDir(dir);
 		expect(Object.keys(map).length).toBeGreaterThan(0);
 	}, 30_000);
