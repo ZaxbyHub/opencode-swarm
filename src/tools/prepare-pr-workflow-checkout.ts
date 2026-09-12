@@ -27,7 +27,6 @@ const MAX_RECEIPT_PATH_LEN = 4_096;
 const MAX_RECEIPT_BYTES = 64 * 1024;
 const MAX_GIT_STDOUT_BYTES = 1024 * 1024;
 const MAX_ECHOED_PATH_LEN = 200;
-const MAX_CHECKOUT_STASH_REFS = 256;
 const MAX_PR_WORKFLOW_STASH_MARKER_TOKEN = 64;
 const RECEIPT_DIR = 'pr-workflow-checkouts';
 const PR_WORKFLOW_STASH_PREFIX = 'pr-workflow-checkout-';
@@ -1043,12 +1042,6 @@ async function readCheckoutStashRefs(
 		);
 	}
 	const lines = list.stdout.split(/\r?\n/).filter((line) => line.length > 0);
-	if (lines.length > MAX_CHECKOUT_STASH_REFS) {
-		throw new CheckoutRestoreError(
-			'CHECKOUT_RESTORE_STASH_LIMIT',
-			`BLOCKED: Git stash inventory exceeds the ${MAX_CHECKOUT_STASH_REFS}-entry bounded scan`,
-		);
-	}
 	const refs: CheckoutStashRef[] = [];
 	for (const line of lines) {
 		const parts = line.split('\0');
@@ -1104,7 +1097,7 @@ async function retireMissingCheckoutReceipt(
 }
 
 async function collectVerifiedCheckoutStash(
-	directory: string,
+	_directory: string,
 	stashOid: string,
 	refs: CheckoutStashRef[],
 ): Promise<{ result: VerifiedStashCollection; refs: CheckoutStashRef[] }> {
@@ -1114,28 +1107,11 @@ async function collectVerifiedCheckoutStash(
 	if (!isPrWorkflowStashSubject(ref.subject)) {
 		return { result: 'preserved', refs };
 	}
-	const dropped = await _internals.runGit(directory, [
-		'stash',
-		'drop',
-		ref.selector,
-	]);
-	if (dropped.spawnError || dropped.exitCode !== 0) {
-		return { result: 'failed', refs };
-	}
-	// Recompute selectors after every drop: Git renumbers the remaining stash
-	// entries, so a cached stash@{N} may identify a different user's stash.
-	let refreshed: CheckoutStashRef[];
-	try {
-		refreshed = await readCheckoutStashRefs(directory);
-	} catch {
-		return { result: 'failed', refs };
-	}
-	return {
-		result: refreshed.some((candidate) => candidate.stashOid === target)
-			? 'failed'
-			: 'collected',
-		refs: refreshed,
-	};
+	// Git exposes stash deletion through a mutable reflog selector only. Even
+	// after an inventory read, another stash can be inserted before `drop` and
+	// make that selector refer to unrelated user data. Keep the stash as the
+	// documented safety backup and collect only the durable receipt.
+	return { result: 'collected', refs };
 }
 
 async function reconcilePrWorkflowCheckoutReceiptsLocked(
@@ -1209,22 +1185,15 @@ async function reconcilePrWorkflowCheckoutReceiptsLocked(
 				}
 				continue;
 			}
-			if (collection.result === 'missing' && options.retireMissing) {
-				if (
-					await retireMissingCheckoutReceipt(
-						directory,
-						sessionID,
-						entry,
-						receipt,
-					)
-				) {
-					summary.retiredMissingStashOids.push(entry.stashOid);
-				} else {
-					summary.failures.push(
-						`missing verified receipt ${entry.stashOid} could not be evidenced and retired`,
-					);
-					summary.preservedStashOids.push(entry.stashOid);
-				}
+			if (collection.result === 'missing') {
+				// A verified receipt proves the working tree was restored, but its
+				// safety backup is still part of the recovery contract. Do not retire
+				// the receipt when that backup has disappeared: surface the state as
+				// incomplete and keep the durable evidence pending manual recovery.
+				summary.failures.push(
+					`verified receipt ${entry.stashOid} is incomplete: its safety stash is missing`,
+				);
+				summary.preservedStashOids.push(entry.stashOid);
 				continue;
 			}
 			if (collection.result === 'failed') {
@@ -1809,6 +1778,22 @@ async function restorePrWorkflowCheckout(
 				} catch {
 					// A fully applied restoration does not depend on stash presence. Its
 					// response reports retention as unverified instead of blocking cleanup.
+				}
+				if (observedStashes) {
+					const missingVerified = verifiedCleanup.filter(
+						(entry) => !observedStashes!.has(entry.stashOid),
+					);
+					if (missingVerified.length > 0) {
+						throw new CheckoutRestoreError(
+							'CHECKOUT_RESTORE_STASH_MISSING',
+							`BLOCKED: ${missingVerified.length} verified checkout safety stash(es) are missing; restoration is incomplete and its receipt remains pending for manual recovery`,
+							{
+								missingStashOids: missingVerified
+									.map((entry) => entry.stashOid)
+									.slice(0, MAX_CHECKOUT_RECEIPTS),
+							},
+						);
+					}
 				}
 				let receiptCleanupPending = false;
 				if (restoreTargets.length === 0) {

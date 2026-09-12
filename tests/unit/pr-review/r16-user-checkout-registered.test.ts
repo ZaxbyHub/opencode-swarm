@@ -36,7 +36,7 @@ import { initializeGitRepository } from '../helpers/git-repository.js';
 
 /**
  * #2585 checks C13+C21 (AC8+AC14/R16): registered workflow preserves dirty
- * tracked + untracked user changes and restores branch/head with collected workflow stash.
+ * tracked + untracked user changes and restores branch/head with retained workflow stash.
  */
 const SESSION_ID = PR_ARTIFACT_SESSION_ID;
 const BASE_SHA = 'b'.repeat(40);
@@ -332,7 +332,7 @@ afterEach(async () => {
 	await removeTempDir();
 });
 describe('R16 user checkout preservation through the registered path (#2585 C13+C21/AC8+AC14)', () => {
-	test('discovery prepare stashes user changes; registered restore returns them and collects the workflow stash', async () => {
+	test('discovery prepare stashes user changes; registered restore returns them and retains the workflow safety stash', async () => {
 		await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
 		const prepared = parsed(
 			String(
@@ -479,8 +479,8 @@ describe('R16 user checkout preservation through the registered path (#2585 C13+
 			restored_head: baseHead,
 			receipt_cleanup_pending: false,
 		});
-		expect(restore.retained_stash_oids).toEqual([]);
-		expect(restore.stash_retained).toBe(false);
+		expect(restore.retained_stash_oids).toContain(stashOid);
+		expect(restore.stash_retained).toBe(true);
 		expect(restore.stash_retention_verified).toBe(true);
 		expect(await git(['branch', '--show-current'])).toBe(baseBranch);
 		expect(await git(['rev-parse', 'HEAD'])).toBe(baseHead);
@@ -494,6 +494,6 @@ describe('R16 user checkout preservation through the registered path (#2585 C13+
 			`${stashOid}.json`,
 		);
 		await expect(fs.stat(receiptPath)).rejects.toThrow(/ENOENT/);
-		expect(await git(['stash', 'list', '--format=%H'])).not.toContain(stashOid);
+		expect(await git(['stash', 'list', '--format=%H'])).toContain(stashOid);
 	}, 60_000);
 });

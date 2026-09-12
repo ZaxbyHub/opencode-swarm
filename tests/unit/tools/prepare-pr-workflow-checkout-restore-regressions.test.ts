@@ -170,8 +170,8 @@ describe('prepare_pr_workflow_checkout restore review regressions', () => {
 		expect(await readText('a.txt')).toBe('a1\n');
 		expect(await readText('b.txt')).toBe('b1\n');
 		const retained = await git(['stash', 'list', '--format=%H']);
-		expect(retained).not.toContain(first.stash_oid);
-		expect(retained).not.toContain(second.stash_oid);
+		expect(retained).toContain(first.stash_oid);
+		expect(retained).toContain(second.stash_oid);
 		expect(
 			await listPendingPrWorkflowCheckoutRestores(directory, SESSION_ID),
 		).toEqual([]);
@@ -293,7 +293,7 @@ describe('prepare_pr_workflow_checkout restore review regressions', () => {
 			['stash', 'apply', '--index', prepared.stash_oid],
 		]);
 		const remaining = await git(['stash', 'list', '--format=%H']);
-		expect(remaining).not.toContain(prepared.stash_oid);
+		expect(remaining).toContain(prepared.stash_oid);
 		expect(remaining).toContain(raceOid);
 		expect(await readText('a.txt')).toBe('target\n');
 	});

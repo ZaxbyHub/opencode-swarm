@@ -331,6 +331,11 @@ const _heartbeatTimers = new Map<string, number>();
 // Upper bound on distinct session keys tracked for heartbeat throttling. Values are
 // timestamps (not timer handles), so eviction needs no clearInterval/clearTimeout.
 const MAX_TRACKED_HEARTBEAT_SESSIONS = 500;
+// Session-deletion is a user-visible host event. Receipt reconciliation keeps
+// its own checkout lock and may outlive this budget; the short event-level
+// deadline prevents slow Git/stash inventory from delaying host delivery while
+// preserving the lock owner's late-settlement cleanup contract.
+const SESSION_DELETION_RECEIPT_RECONCILIATION_EVENT_DEADLINE_MS = 250;
 
 /**
  * FIFO-cap a session-keyed Map to at most `max` entries, evicting oldest first.
@@ -3456,25 +3461,30 @@ async function initializeOpenCodeSwarm(
 								);
 							}
 							try {
-								const reconciliation =
-									await reconcilePrWorkflowCheckoutReceipts(
-										ctx.directory,
-										sessionID,
-									);
+								const reconciliation = reconcilePrWorkflowCheckoutReceipts(
+									ctx.directory,
+									sessionID,
+								);
+								const summary = await withTimeout(
+									reconciliation,
+									SESSION_DELETION_RECEIPT_RECONCILIATION_EVENT_DEADLINE_MS,
+									new Error(
+										'PR workflow checkout receipt reconciliation exceeded the session-deletion event budget',
+									),
+								);
 								log(
 									'PR workflow checkout receipts reconciled on session deletion',
 									{
-										inspected: reconciliation.inspectedReceiptCount,
-										collected: reconciliation.collectedStashOids.length,
-										retiredMissing:
-											reconciliation.retiredMissingStashOids.length,
-										preserved: reconciliation.preservedStashOids.length,
-										failures: reconciliation.failures.length,
+										inspected: summary.inspectedReceiptCount,
+										collected: summary.collectedStashOids.length,
+										retiredMissing: summary.retiredMissingStashOids.length,
+										preserved: summary.preservedStashOids.length,
+										failures: summary.failures.length,
 									},
 								);
 							} catch {
 								warn(
-									'PR workflow checkout receipt reconciliation on session deletion failed (non-fatal)',
+									'PR workflow checkout receipt reconciliation on session deletion failed or exceeded its event budget (non-fatal)',
 								);
 							}
 							deleteSnapshotSessionRows(ctx.directory, sessionID);

@@ -7,12 +7,17 @@ test('issue #2602: dead guardrail scanners are removed instead of kept as test-o
 		import.meta.dir,
 		'../../../src/pr-review/guardrails.ts',
 	);
-	const source = existsSync(guardrailsPath)
-		? readFileSync(guardrailsPath, 'utf8')
-		: '';
 
 	// These scanners have no production caller. Keeping their implementation
-	// and public exports makes a test-only guardrail look runtime-wired.
-	expect(source).not.toContain('scanObserverTerminalization');
-	expect(source).not.toContain('scanParallelCircuitRuleConstruction');
+	// and public exports makes a test-only guardrail look runtime-wired. Assert
+	// the module's absence directly so a missing file cannot turn this into a
+	// vacuous empty-string scan; reintroducing the production module fails here.
+	expect(existsSync(guardrailsPath)).toBe(false);
+
+	// The scanners remain test-owned, where their synthetic bite tests can keep
+	// the recurrence checks executable without shipping dead runtime exports.
+	const helperPath = resolve(import.meta.dir, 'guardrail-scanner-helpers.ts');
+	const helperSource = readFileSync(helperPath, 'utf8');
+	expect(helperSource).toContain('scanObserverTerminalization');
+	expect(helperSource).toContain('scanParallelCircuitRuleConstruction');
 });

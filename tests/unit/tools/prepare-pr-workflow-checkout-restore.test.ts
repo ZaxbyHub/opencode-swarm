@@ -156,8 +156,8 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 			success: true,
 			restored: true,
 			stash_oid: prepared.stash_oid,
-			retained_stash_oids: [],
-			stash_retained: false,
+			retained_stash_oids: [prepared.stash_oid],
+			stash_retained: true,
 			stash_retention_verified: true,
 		});
 		expect(await git(['branch', '--show-current'])).toBe('main');
@@ -167,7 +167,7 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 				'\n',
 			),
 		).toBe('{"dirty":true}\n');
-		expect(await git(['stash', 'list', '--format=%H'])).not.toContain(
+		expect(await git(['stash', 'list', '--format=%H'])).toContain(
 			prepared.stash_oid,
 		);
 		await expect(fs.stat(receiptPath)).rejects.toMatchObject({
@@ -308,16 +308,16 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 			receipt_cleanup_pending: true,
 		});
 		expect(await git(['branch', '--show-current'])).toBe('main');
-		expect(await git(['stash', 'list', '--format=%H'])).not.toContain(
+		expect(await git(['stash', 'list', '--format=%H'])).toContain(
 			prepared.stash_oid,
 		);
 		expect(
 			await listPendingPrWorkflowCheckoutRestores(directory, SESSION_ID),
-		).toEqual([{ stash_oid: prepared.stash_oid, stash_present: false }]);
+		).toEqual([{ stash_oid: prepared.stash_oid, stash_present: true }]);
 
 		// Simulate normal work after the successful restore. The next explicit
-		// preparation retires the missing verified receipt only after evidence and
-		// deletion succeed, then records the new durable obligation.
+		// preparation may retire the verified receipt, but the safety stash remains
+		// available for manual recovery.
 		await git(['add', 'config.json']);
 		await git(['commit', '-m', 'advance after restore']);
 		_internals.removeCheckoutRestoreReceipt = originalRemoveReceipt;

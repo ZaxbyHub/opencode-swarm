@@ -71,6 +71,39 @@ async function clearGate(): Promise<void> {
 	expect(response).toMatchObject({ success: true, gate_cleared: true });
 }
 
+async function writeMissingVerifiedReceipt(): Promise<string> {
+	const originalHead = await git(['rev-parse', 'HEAD']);
+	const stashOid = 'f'.repeat(40);
+	const receiptDirectory = path.join(
+		directory,
+		'.swarm',
+		'pr-workflow-checkouts',
+		prWorkflowSessionFileStem(SESSION_ID),
+	);
+	await fs.mkdir(receiptDirectory, { recursive: true });
+	await fs.writeFile(
+		path.join(receiptDirectory, `${stashOid}.json`),
+		JSON.stringify({
+			schemaVersion: 1,
+			sessionID: SESSION_ID,
+			stashOid,
+			originalHead,
+			originalBranch: 'main',
+			paths: ['.opencode/opencode-swarm.json'],
+			preparedAt: '2026-08-14T00:00:00.000Z',
+			mode: 'PR_REVIEW',
+			gateRevision: 1,
+			gateActivatedAt: '2026-08-14T00:00:00.000Z',
+			restoreState: 'applied',
+			restoreAppliedAt: '2026-08-14T00:01:00.000Z',
+			restoreVerifiedAt: '2026-08-14T00:02:00.000Z',
+			restoredHead: originalHead,
+			restoredBranch: 'main',
+		}),
+	);
+	return stashOid;
+}
+
 beforeEach(async () => {
 	directory = canonicalMkdtemp('pr-workflow-checkout-missing-2602-');
 	await git(['init', '-b', 'main']);
@@ -139,5 +172,28 @@ describe('prepare_pr_workflow_checkout missing stash recovery (issue #2602)', ()
 			),
 		);
 		expect(prepared).toMatchObject({ success: true });
+	});
+
+	test('reports a missing verified safety stash as incomplete and keeps its receipt pending', async () => {
+		const stashOid = await writeMissingVerifiedReceipt();
+		await clearGate();
+
+		const restored = JSON.parse(
+			await executePreparePrWorkflowCheckout(
+				{ operation: 'restore' },
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(restored).toMatchObject({
+			success: false,
+			code: 'CHECKOUT_RESTORE_STASH_MISSING',
+			status: 'incomplete',
+			recoverable: true,
+			missing_stash_oids: [stashOid],
+		});
+		expect(
+			await listPendingPrWorkflowCheckoutRestores(directory, SESSION_ID),
+		).toEqual([{ stash_oid: stashOid, stash_present: false }]);
 	});
 });

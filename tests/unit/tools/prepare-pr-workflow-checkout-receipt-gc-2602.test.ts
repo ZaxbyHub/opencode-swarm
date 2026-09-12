@@ -17,6 +17,7 @@ const VERIFIED_SESSION = 'checkout-gc-verified-2602';
 const PENDING_SESSION = 'checkout-gc-pending-2602';
 let directory = '';
 const originalRunGit = checkoutInternals.runGit;
+const originalRemoveReceipt = checkoutInternals.removeCheckoutRestoreReceipt;
 
 async function git(args: string[]): Promise<string> {
 	const result = await originalRunGit(directory, args, { captureStdout: true });
@@ -131,6 +132,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	checkoutInternals.runGit = originalRunGit;
+	checkoutInternals.removeCheckoutRestoreReceipt = originalRemoveReceipt;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -164,8 +166,8 @@ describe('prepare_pr_workflow_checkout receipt GC (issue #2602)', () => {
 			success: true,
 			restored: true,
 			stash_oid: verifiedStashOid,
-			retained_stash_oids: [],
-			stash_retained: false,
+			retained_stash_oids: [verifiedStashOid],
+			stash_retained: true,
 			stash_retention_verified: true,
 		});
 		expect(
@@ -175,18 +177,15 @@ describe('prepare_pr_workflow_checkout receipt GC (issue #2602)', () => {
 			await listPendingPrWorkflowCheckoutRestores(directory, PENDING_SESSION),
 		).toEqual([{ stash_oid: pendingStashOid, stash_present: true }]);
 		const stashes = await git(['stash', 'list', '--format=%H']);
-		expect(stashes).not.toContain(verifiedStashOid);
+		expect(stashes).toContain(verifiedStashOid);
 		expect(stashes).toContain(pendingStashOid);
 		expect(stashes).toContain(ordinaryUserStashOid);
 	});
 
-	test('keeps the verified receipt when exact stash collection fails', async () => {
+	test('keeps the verified receipt when receipt cleanup fails', async () => {
 		const verifiedStashOid = await createVerifiedReceipt();
-		checkoutInternals.runGit = async (cwd, args, options) => {
-			if (args[0] === 'stash' && args[1] === 'drop') {
-				return { exitCode: 1, stdout: '' };
-			}
-			return originalRunGit(cwd, args, options);
+		checkoutInternals.removeCheckoutRestoreReceipt = async () => {
+			throw new Error('simulated receipt cleanup failure');
 		};
 
 		const restored = JSON.parse(
@@ -196,15 +195,15 @@ describe('prepare_pr_workflow_checkout receipt GC (issue #2602)', () => {
 				{ sessionID: VERIFIED_SESSION },
 			),
 		);
-		// A failed exact drop must not retire the only receipt that identifies the
-		// retained safety stash. Whether cleanup is surfaced as a recoverable error
-		// or a successful restore with pending cleanup, the evidence stays durable.
-		if (restored.success === true) {
-			expect(restored).toMatchObject({
-				stash_retained: true,
-				retained_stash_oids: expect.arrayContaining([verifiedStashOid]),
-			});
-		}
+		// Receipt cleanup is best-effort after a successful restore; the stash remains
+		// the durable safety backup and the receipt remains available for retry.
+		expect(restored).toMatchObject({
+			success: true,
+			restored: true,
+			receipt_cleanup_pending: true,
+			stash_retained: true,
+			retained_stash_oids: [verifiedStashOid],
+		});
 		expect(
 			await listPendingPrWorkflowCheckoutRestores(directory, VERIFIED_SESSION),
 		).toEqual([{ stash_oid: verifiedStashOid, stash_present: true }]);
