@@ -2,22 +2,33 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+	isContextualReferenceLine,
+	listSweepFiles,
+	parseValidActions,
+	referencedActions,
+} from '../../helpers/repo-map-ratchet.js';
 
 /**
  * VALID_ACTIONS <-> consumer ratchet (issue #2540, AC2).
  *
  * Every action the repo_map tool advertises must have at least one
  * repo_map-contextual consumer reference in the workflow-surface trees
- * (src/agents, .opencode/skills, src/commands). A registered tool action no
- * prompt, skill, or command can reach is unwired advertised surface
- * (CLAUDE.md directive 2 / audit finding REPOGRAPH-11).
+ * (src/agents, .opencode/skills, .claude/skills, src/commands). A registered
+ * tool action no prompt, skill, or command can reach is unwired advertised
+ * surface (CLAUDE.md directive 2 / audit finding REPOGRAPH-11).
  *
  * The matcher is contextual by design: bare English words do not count —
  * several action names (ask, build, callers, dependencies) collide with
  * ordinary prose — so a line only counts when it either uses the invocation
- * shape (action="X" / action: 'X') or backtick-quotes the action on a line
- * that also mentions repo_map. Mirrors the frozen acceptance check
- * .agents/issue-traces/2540-repo-map-actions/repro/c2-consumer-ratchet.ts.
+ * shape (action="X" / action: 'X' / action `X`) or backtick-quotes the action
+ * on a line that also mentions repo_map. Matcher semantics live in
+ * tests/helpers/repo-map-ratchet.ts (shared with the disposition-registry
+ * test so no *.test.ts cross-import inflates single-file pass counts).
+ *
+ * Note: .claude/skills is included additively (a superset of the frozen
+ * acceptance check's three-tree sweep) — extra trees can only widen the
+ * referenced set, never silently green an orphan.
  */
 
 const ROOT = path.resolve(
@@ -26,75 +37,12 @@ const ROOT = path.resolve(
 	'..',
 	'..',
 );
-const SWEEP_TREES = ['src/agents', '.opencode/skills', 'src/commands'] as const;
-
-/**
- * Parse the advertised action set from the tool source (VALID_ACTIONS is a
- * module-private const in src/tools/repo-map.ts — deliberately not exported,
- * so the ratchet reads the same declaration the tool registers, exactly like
- * the frozen acceptance check does).
- */
-export function parseValidActions(source: string): string[] {
-	const m = source.match(/const VALID_ACTIONS = \[([\s\S]*?)\] as const;/);
-	if (!m) return [];
-	return m[1]
-		.split(',')
-		.map((s) => s.trim().replace(/^['"`]|['"`]$/g, ''))
-		.filter((s) => s.length > 0);
-}
-
-export function isContextualReferenceLine(
-	line: string,
-	action: string,
-): boolean {
-	const invocation = new RegExp(`action\\s*[=:]?\\s*["'\`]${action}["'\`]`);
-	if (invocation.test(line)) return true;
-	if (!line.includes('repo_map')) return false;
-	return line.includes(`\`${action}\``);
-}
-
-function listSweepFiles(): string[] {
-	const out: string[] = [];
-	for (const tree of SWEEP_TREES) {
-		const root = path.join(ROOT, tree);
-		if (!fs.existsSync(root)) continue;
-		const walk = (dir: string): void => {
-			for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-				const p = path.join(dir, e.name);
-				if (e.isDirectory()) {
-					if (
-						e.name === 'node_modules' ||
-						e.name === '.git' ||
-						e.name === '__tests__'
-					) {
-						continue;
-					}
-					walk(p);
-				} else if (/\.(ts|md)$/.test(e.name) && !/\.test\.ts$/.test(e.name)) {
-					out.push(p);
-				}
-			}
-		};
-		walk(root);
-	}
-	return out;
-}
-
-function referencedActions(
-	files: string[],
-	actions: readonly string[],
-): Set<string> {
-	const referenced = new Set<string>();
-	for (const f of files) {
-		const lines = fs.readFileSync(f, 'utf-8').split(/\r?\n/);
-		for (const line of lines) {
-			for (const action of actions) {
-				if (isContextualReferenceLine(line, action)) referenced.add(action);
-			}
-		}
-	}
-	return referenced;
-}
+const SWEEP_TREES = [
+	'src/agents',
+	'.opencode/skills',
+	'.claude/skills',
+	'src/commands',
+] as const;
 
 describe('repo_map VALID_ACTIONS <-> consumer ratchet (issue #2540)', () => {
 	const VALID_ACTIONS = parseValidActions(
@@ -105,7 +53,7 @@ describe('repo_map VALID_ACTIONS <-> consumer ratchet (issue #2540)', () => {
 		expect(VALID_ACTIONS).toContain('route_trace');
 		expect(VALID_ACTIONS).toContain('symbol_search');
 	});
-	const files = listSweepFiles();
+	const files = listSweepFiles(ROOT, SWEEP_TREES);
 	const referenced = referencedActions(files, VALID_ACTIONS);
 	const unreferenced = VALID_ACTIONS.filter((a) => !referenced.has(a));
 
@@ -119,14 +67,14 @@ describe('repo_map VALID_ACTIONS <-> consumer ratchet (issue #2540)', () => {
 	});
 
 	test('ratchet detects a synthetic unreferenced action (mutation-style self-proof)', () => {
+		// The real-scan probe below is the load-bearing match-everything guard:
+		// a corrupted matcher that matched everything WOULD reference the
+		// synthetic action during the actual sweep and fail this assertion
+		// (match-nothing corruption fails the core test above by listing every
+		// action as unreferenced).
 		const synthetic = 'zzz_synthetic_unreferenced_2540';
 		const hit = referencedActions(files, [synthetic]);
 		expect(hit.has(synthetic)).toBe(false);
-		// The failure mode is exactly the unreferenced-list mechanism above:
-		// a synthetic entry must land in it.
-		expect(
-			[synthetic, ...VALID_ACTIONS].filter((a) => !referenced.has(a)),
-		).toContain(synthetic);
 	});
 
 	test('prose occurrences of collision-prone action names do not count as references', () => {

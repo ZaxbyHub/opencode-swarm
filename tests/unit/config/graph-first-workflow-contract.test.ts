@@ -188,7 +188,7 @@ describe('graph-first workflow contracts', () => {
 			},
 			{
 				path: '.claude/skills/deep-dive/SKILL.md',
-				actions: ['graph_health', 'context_pack'],
+				actions: ['graph_health', 'context_pack', 'retrieve'],
 			},
 			{
 				path: '.claude/skills/engineering-conventions/SKILL.md',

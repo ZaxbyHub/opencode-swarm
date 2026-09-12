@@ -1,13 +1,13 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { repo_map } from '../../../src/tools/repo-map.js';
 import {
 	REPO_MAP_ACTION_DISPOSITIONS,
 	type RepoMapActionDisposition,
 } from '../../../src/tools/repo-map-action-dispositions.js';
-import { isContextualReferenceLine } from '../config/repo-map-action-consumer-ratchet.test.js';
+import { isContextualReferenceLine } from '../../helpers/repo-map-ratchet.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
  * Disposition-registry contract for the six audit actions of issue #2540
@@ -34,6 +34,8 @@ interface ExecutableTool {
 
 const tool = repo_map as unknown as ExecutableTool;
 
+const tempDirs: string[] = [];
+
 function parse(raw: string): Record<string, unknown> {
 	try {
 		return JSON.parse(raw) as Record<string, unknown>;
@@ -43,10 +45,9 @@ function parse(raw: string): Record<string, unknown> {
 }
 
 /** Mirrors the frozen c3/c5 makeWorkspace fixture (issue #2540 check contract). */
-function makeWorkspace(tag: string): string {
-	const tmp = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), `repo-map-disp-${tag}-`)),
-	);
+function makeWorkspace(): string {
+	const tmp = canonicalMkdtemp('repo-map-disp-');
+	tempDirs.push(tmp);
 	fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
 	fs.writeFileSync(
 		path.join(tmp, 'src/util.ts'),
@@ -64,6 +65,60 @@ function makeWorkspace(tag: string): string {
 	);
 	return tmp;
 }
+
+function makeEmptyDir(): string {
+	const tmp = canonicalMkdtemp('repo-map-disp-empty-');
+	tempDirs.push(tmp);
+	return tmp;
+}
+
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) {
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch {
+			// Best-effort cleanup on Windows file-lock contention.
+		}
+	}
+});
+
+/** Minimal per-action payload shape the name promises (F-N04/F-004). */
+const PAYLOAD_PROBES: Record<
+	string,
+	(result: Record<string, unknown>) => void
+> = {
+	symbol_search: (r) => {
+		expect(Array.isArray(r.hits), 'symbol_search hits').toBe(true);
+		expect(
+			(r.hits as unknown[]).length,
+			'symbol_search hit count',
+		).toBeGreaterThan(0);
+	},
+	symbol_context: (r) => {
+		expect(
+			r.found ?? r.identity ?? r.symbol,
+			'symbol_context payload',
+		).toBeTruthy();
+	},
+	graph_explain: (r) => {
+		expect(
+			Array.isArray(r.reasons) || Array.isArray(r.entries) || r.explanation,
+			'graph_explain payload',
+		).toBeTruthy();
+	},
+	preflight_packet: (r) => {
+		expect(
+			r.packet ?? r.targets ?? r.summary,
+			'preflight_packet payload',
+		).toBeTruthy();
+	},
+	dead_exports: (r) => {
+		expect(Array.isArray(r.candidates), 'dead_exports candidates').toBe(true);
+	},
+	ontology: (r) => {
+		expect(r.target ?? r.ontology, 'ontology payload').toBeTruthy();
+	},
+};
 
 describe('REPO_MAP_ACTION_DISPOSITIONS registry (issue #2540)', () => {
 	test('subject set is exactly the six audit actions, all retained', () => {
@@ -105,7 +160,7 @@ describe('REPO_MAP_ACTION_DISPOSITIONS registry (issue #2540)', () => {
 	});
 
 	test('each retained action returns a useful bounded result on a built graph', async () => {
-		const dir = makeWorkspace('graph');
+		const dir = makeWorkspace();
 		const built = parse(
 			await tool.execute({ action: 'build' }, { directory: dir }),
 		);
@@ -132,13 +187,12 @@ describe('REPO_MAP_ACTION_DISPOSITIONS registry (issue #2540)', () => {
 				`${action} failed on built graph: ${raw.slice(0, 200)}`,
 			).toBe(true);
 			expect(result.action, action).toBe(action);
+			PAYLOAD_PROBES[action]?.(result);
 		}
 	}, 120_000);
 
 	test('each retained action returns a typed actionable fallback when the graph is absent', async () => {
-		const dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'repo-map-disp-empty-')),
-		);
+		const dir = makeEmptyDir();
 		const requests: Record<string, Record<string, unknown>> = {
 			symbol_search: { action: 'symbol_search', symbol: 'add' },
 			symbol_context: {
