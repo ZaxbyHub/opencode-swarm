@@ -135,12 +135,19 @@ const PUBLICATION_TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
 export type CoderRetryEscalationAction =
 	| 'sounding_board_consultation'
 	| 'simplification'
-	| 'user_escalation';
+	| 'user_escalation'
+	// Issue #2703: recorded ONLY by forceRecordRetrySoundingBoardApproval
+	// (the architect-facing manual recovery path). It is inert to
+	// enforceCoderRetryEscalation, which checks membership of the three
+	// protocol actions above; membership in RETRY_ACTIONS still gives the
+	// audit event an authority key so it is indexed and deduped per epoch.
+	| 'sounding_board_manual_approval';
 
 const RETRY_ACTIONS: ReadonlySet<string> = new Set([
 	'sounding_board_consultation',
 	'simplification',
 	'user_escalation',
+	'sounding_board_manual_approval',
 ]);
 
 /** The authority key for an event, or null when the event is not in the

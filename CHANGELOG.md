@@ -1,5 +1,40 @@
 # Changelog
 
+## [7.177.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.177.0...v7.177.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **gates:** recover an unpersisted sounding-board APPROVED verdict (issue [#2703](https://github.com/ZaxbyHub/opencode-swarm/issues/2703)) ([e54b837](https://github.com/ZaxbyHub/opencode-swarm/commit/e54b8377f021073f60ca27a4de75113173eceeb5))
+
+## [7.177.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.176.2...v7.177.0) (2026-09-11)
+
+
+### Features
+
+* **prm:** bound repeated hard stops with an episode state machine ([#2678](https://github.com/ZaxbyHub/opencode-swarm/issues/2678)) ([551c977](https://github.com/ZaxbyHub/opencode-swarm/commit/551c9779a6b7a184a2d29756b7f79953badf2af1))
+
+
+### Bug Fixes
+
+* **ci:** make repository validation reproducible ([2a5ca35](https://github.com/ZaxbyHub/opencode-swarm/commit/2a5ca3576f09c3d1748f599f9a41d1c46f0a2d73))
+* **durable-state:** harden retention and full-auto locking ([66c785d](https://github.com/ZaxbyHub/opencode-swarm/commit/66c785dbfebf8584e2ea53e22d4e09f8ba707fae))
+
+## [7.176.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.176.1...v7.176.2) (2026-09-11)
+
+
+### Bug Fixes
+
+* **phase-complete:** accept cursor-stamped docs receipts for the completing phase (issue [#2702](https://github.com/ZaxbyHub/opencode-swarm/issues/2702)) ([21630a0](https://github.com/ZaxbyHub/opencode-swarm/commit/21630a068bf49ca099cefec3c15062831595eb79))
+
+## [7.176.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.176.0...v7.176.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **subprocess:** close the last unbounded git spawn sites ([#2674](https://github.com/ZaxbyHub/opencode-swarm/issues/2674)) ([9729845](https://github.com/ZaxbyHub/opencode-swarm/commit/9729845f5b16de08e604e3db5f153d6ee61da9e9))
+* **subprocess:** PR-review feedback round — test hygiene + env parity ([ac23a13](https://github.com/ZaxbyHub/opencode-swarm/commit/ac23a13fe78e209be1538c79b4b8ab1e34db7f9c))
+
 ## [7.176.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.175.0...v7.176.0) (2026-09-11)
 
 

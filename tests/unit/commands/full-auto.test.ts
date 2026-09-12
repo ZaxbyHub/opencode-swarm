@@ -17,6 +17,7 @@ import {
 	registerFullAutoRecoveryBlockerEvaluator,
 } from '../../../src/full-auto/recovery';
 import {
+	_internals as fullAutoStateInternals,
 	isFullAutoRunActive,
 	loadFullAutoRunState,
 } from '../../../src/full-auto/state';
@@ -30,6 +31,7 @@ import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 let tmpDir: string;
 let originalXdgConfigHome: string | undefined;
 let origClient: typeof stateInternals.swarmState.opencodeClient;
+const originalLockfile = fullAutoStateInternals.lockfile;
 const SESSION_ID = 'sess-full-auto-cmd';
 
 beforeEach(() => {
@@ -53,6 +55,7 @@ afterEach(() => {
 		process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
 	}
 	stateInternals.swarmState.opencodeClient = origClient;
+	fullAutoStateInternals.lockfile = originalLockfile;
 	recoveryInternals.resetRecoveryBlockerEvaluator();
 	registerFullAutoRecoveryBlockerEvaluator(() => []);
 	try {
@@ -98,6 +101,22 @@ describe('handleFullAutoCommand — durable-first / fail-closed', () => {
 
 		const session = swarmState.agentSessions.get(SESSION_ID);
 		expect(session?.fullAutoMode).toBe(false);
+	});
+
+	test('durable lock failure on disable does not claim success or clear the legacy flag', async () => {
+		await handleFullAutoCommand(tmpDir, ['on'], SESSION_ID);
+		fullAutoStateInternals.lockfile = {
+			lockSync: () => {
+				throw Object.assign(new Error('another process owns the lock'), {
+					code: 'ELOCKED',
+				});
+			},
+		};
+
+		const out = await handleFullAutoCommand(tmpDir, ['off'], SESSION_ID);
+		expect(out).toContain('could NOT be disabled');
+		expect(swarmState.agentSessions.get(SESSION_ID)?.fullAutoMode).toBe(true);
+		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.status).toBe('running');
 	});
 
 	test('first-class toggle: enables even when full_auto.enabled config is not set', async () => {

@@ -204,16 +204,22 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 
 			// Verify git was invoked in array-argv form (never through a shell
 			// string), so the malicious swarm ID has no shell-metacharacter
-			// interpretation surface at all.
+			// interpretation surface at all. Options pinned to the #2674
+			// bounded contract: ignored stdio, timeout, SIGKILL escalation,
+			// and the explicit env carrying GIT_TERMINAL_PROMPT=0.
 			expect(mockExecSync).not.toHaveBeenCalled();
 			expect(mockExecFileSync).toHaveBeenCalledTimes(1);
 			expect(mockExecFileSync).toHaveBeenCalledWith(
 				'git',
 				['rev-parse', '--git-dir'],
-				{
+				expect.objectContaining({
 					cwd: testDirectory,
-					stdio: 'pipe',
-				},
+					stdio: ['ignore', 'ignore', 'ignore'],
+					timeout: 5000,
+					killSignal: 'SIGKILL',
+					maxBuffer: 64 * 1024,
+					env: expect.objectContaining({ GIT_TERMINAL_PROMPT: '0' }),
+				}),
 			);
 		});
 	});

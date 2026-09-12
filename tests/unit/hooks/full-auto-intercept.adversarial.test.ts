@@ -27,7 +27,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config/schema';
-
 // =============================================================================
 // STATE MODULE - Converted to _internals DI seam
 // =============================================================================
@@ -119,6 +118,7 @@ const mockSwarmState = {
 // Mock telemetry - remains as mock.module (no _internals seam for direct import)
 mock.module('../../../src/telemetry.js', () => ({
 	telemetry: {
+		prmHardStopTerminal: () => {},
 		autoOversightEscalation: mock(
 			(
 				sessionId: string,

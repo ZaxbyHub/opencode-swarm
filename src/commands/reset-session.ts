@@ -775,6 +775,19 @@ export async function handleResetSessionCommand(
 		'',
 		'Session state cleared. Plan, evidence, and knowledge preserved.',
 		'',
-		'**All circuit breakers and revision limits have been cleared.** You can continue in this session — fresh state will be initialized automatically on the next tool call.',
+		// Issue #2703: in-memory circuit breakers really are cleared above, but
+		// the coder retry circuit breaker's satisfaction state is durable by
+		// design (commit-settlement-bound, in .swarm/events.jsonl escalation
+		// audits and .swarm/evidence/<taskId>.json gate entries) and therefore
+		// survives this reset. The former unconditional "All circuit breakers
+		// and revision limits have been cleared" claim was false for exactly
+		// that gate and sent users into a dead end.
+		'In-memory circuit breakers and revision limits have been cleared. ' +
+			'Durable per-task retry gates (the coder retry circuit breaker, bound ' +
+			'to commit settlement in the events audit log and .swarm/evidence/) ' +
+			'intentionally survive this reset. If a task is blocked with ' +
+			'TASK_RETRY_CRITIC_REQUIRED waiting for a critic_sounding_board ' +
+			'APPROVED verdict that was already obtained, have the architect ' +
+			'record it with the approve_retry_sounding_board tool.',
 	].join('\n');
 }

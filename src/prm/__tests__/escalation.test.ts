@@ -11,6 +11,7 @@ vi.mock('../../telemetry', () => ({
 	telemetry: {
 		prmEscalationTriggered: vi.fn(),
 		prmHardStop: vi.fn(),
+		prmHardStopTerminal: vi.fn(),
 	},
 }));
 
@@ -60,12 +61,15 @@ describe('EscalationTracker', () => {
 				escalationLevel: 2,
 				lastPatternDetected: createMockPatternMatch('repetition_loop'),
 				hardStopPending: false,
+				episodes: new Map(), // full schema (issue #2678)
+				generation: 0,
 			};
 			const tracker = new EscalationTracker('session-2', initialState);
 			const state = tracker.getState();
 			expect(state.patternCounts.get('repetition_loop')).toBe(2);
 			expect(state.escalationLevel).toBe(2);
 			expect(state.lastPatternDetected?.pattern).toBe('repetition_loop');
+			expect(state.episodes.size).toBe(0);
 		});
 	});
 
@@ -130,17 +134,28 @@ describe('EscalationTracker', () => {
 			expect(telemetry.prmEscalationTriggered).toHaveBeenCalledTimes(1); // Only from 2nd
 		});
 
-		test('fourth+ detection continues to return level 3 and hard stop', () => {
+		test('fourth+ detection: the repeated stop escalates the episode to TERMINAL (issue #2678)', () => {
 			const tracker = new EscalationTracker('session-1');
 			const match = createMockPatternMatch('repetition_loop');
 
-			tracker.recordDetection(match); // 1
-			tracker.recordDetection(match); // 2
-			tracker.recordDetection(match); // 3
+			tracker.recordDetection(match); // 1 — level 1
+			tracker.recordDetection(match); // 2 — level 2
+			tracker.recordDetection(match); // 3 — first hard stop
+			// 4 — the FIRST repeated stop is the terminal transition: the
+			// episode escalates to its bounded TERMINAL/handoff state and the
+			// stop tokens are NOT re-armed from here on. Pre-#2674-style
+			// unbounded re-firing (hardStop true on every count>=3) is the
+			// defect this replaces.
 			const result = tracker.recordDetection(match); // 4
 
 			expect(result.level).toBe(3);
-			expect(result.hardStop).toBe(true);
+			expect(result.hardStop).toBe(false);
+			expect(result.terminal).toBe(true);
+
+			// Further same-episode detections stay terminal and stable.
+			const result5 = tracker.recordDetection(match); // 5
+			expect(result5.hardStop).toBe(false);
+			expect(result5.terminal).toBe(true);
 		});
 
 		test('each pattern type tracks counts independently', () => {
@@ -189,7 +204,7 @@ describe('EscalationTracker', () => {
 			expect(tracker.getState().escalationLevel).toBe(3);
 		});
 
-		test('hardStopPending flag is set on third strike', () => {
+		test('hardStopPending flag is set on third strike; the episode observable appears with it (issue #2678)', () => {
 			const tracker = new EscalationTracker('session-1');
 			const match = createMockPatternMatch('repetition_loop');
 
@@ -203,6 +218,13 @@ describe('EscalationTracker', () => {
 
 			tracker.recordDetection(match);
 			expect(tracker.isHardStopPending()).toBe(true);
+			// Issue #2678: the episode record and generation identity are
+			// observable on the state from the first hard stop onward.
+			const state = tracker.getState();
+			expect(state.generation).toBeGreaterThanOrEqual(1);
+			const episode = state.episodes.get('repetition_loop|src/foo.ts');
+			expect(episode?.hardStopTriggered).toBe(true);
+			expect(episode?.terminal).toBe(false);
 		});
 	});
 

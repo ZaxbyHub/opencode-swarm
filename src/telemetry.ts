@@ -95,6 +95,14 @@ export type TelemetryEvent =
 	| 'prm_escalation_triggered'
 	| 'prm_hard_stop'
 	/**
+	 * Issue #2678 — a PRM hard-stop EPISODE reached its bounded TERMINAL/handoff
+	 * state, fired exactly once per terminal transition by
+	 * `src/prm/escalation.ts`. The third of the three noninterchangeable PRM
+	 * stop counters: TRIGGER (`prm_hard_stop`), DELIVERY
+	 * (`prm_hard_stop_delivered`), TERMINAL (this member).
+	 */
+	| 'prm_hard_stop_terminal'
+	/**
 	 * Issue #2063 C2 — DELIVERY of a PRM hard stop, as distinct from the
 	 * `prm_hard_stop` TRIGGER emitted by `src/prm/escalation.ts`. A trigger with
 	 * no matching delivery means the containment never reached the agent.
@@ -1035,6 +1043,31 @@ export const telemetry = {
 		occurrenceCount: number,
 	): void {
 		_internals.emit('prm_hard_stop', {
+			sessionId,
+			pattern,
+			level,
+			occurrenceCount,
+		});
+	},
+
+	/**
+	 * Issue #2678 — a PRM hard-stop EPISODE reached its bounded TERMINAL/handoff
+	 * state. Fired exactly once per terminal transition by the escalation
+	 * tracker. Distinct from `prm_hard_stop` (the TRIGGER, once per
+	 * false-to-true transition) and `prm_hard_stop_delivered` (the DELIVERY,
+	 * emitted by the guardrails deny consumer): the three counters are
+	 * noninterchangeable.
+	 */
+	prmHardStopTerminal(
+		sessionId: string,
+		pattern: string,
+		level: number,
+		occurrenceCount: number,
+	): void {
+		// Literal (not the PRM_HARD_STOP_TERMINAL_EVENT const) because the
+		// event-contract gate greps this line for the kind; equality between
+		// the literal and the const is pinned by issue-2678-bounded-episode.test.ts.
+		_internals.emit('prm_hard_stop_terminal', {
 			sessionId,
 			pattern,
 			level,

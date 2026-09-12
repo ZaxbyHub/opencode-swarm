@@ -39,8 +39,10 @@ import {
 } from '../full-auto/severe-result';
 import {
 	incrementFullAutoCounter,
+	isFullAutoStateLockError,
 	loadFullAutoRunState,
-	saveFullAutoRunState,
+	markFullAutoStateLockFailure,
+	recordFullAutoSubagentOutcome,
 } from '../full-auto/state';
 import { swarmState } from '../state';
 import * as logger from '../utils/logger';
@@ -443,19 +445,23 @@ export function createFullAutoDelegationHook(
 				severe,
 			});
 
-			runState.counters.consecutiveNoProgressTurns = severe
-				? runState.counters.consecutiveNoProgressTurns + 1
-				: runState.counters.consecutiveNoProgressTurns;
-			saveFullAutoRunState(directory, runState);
-
-			if (severe) {
-				// Pause the run so the next risky action surfaces a re-enable prompt.
-				const updated = loadFullAutoRunState(directory, sessionID);
-				if (updated && updated.status === 'running') {
-					updated.status = 'paused';
-					updated.pauseReason = `severe subagent return envelope: ${envelope?.category ?? 'unknown'}`;
-					saveFullAutoRunState(directory, updated);
-				}
+			try {
+				recordFullAutoSubagentOutcome(directory, sessionID, {
+					severe,
+					pauseReason: severe
+						? `severe subagent return envelope: ${envelope?.category ?? 'unknown'}`
+						: undefined,
+				});
+			} catch (error) {
+				if (!isFullAutoStateLockError(error)) throw error;
+				// toolAfter is an observer and is intentionally wrapped by safeHook;
+				// publish a short-lived in-process paused override so the next
+				// permission check still fails closed even when durable pause could
+				// not acquire the lock.
+				markFullAutoStateLockFailure(directory, sessionID);
+				logger.warn(
+					'[full-auto/delegation] durable state lock unavailable; pausing in-process',
+				);
 			}
 			if (input.callID) clearFullAutoSevereCorrelation(sessionID, input.callID);
 		},

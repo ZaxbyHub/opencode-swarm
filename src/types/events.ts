@@ -57,7 +57,15 @@ export interface CoderRetryCircuitBreakerEvent {
 	rejectionCount: number;
 	rejectionHistory: string[];
 	phase: number;
-	action: 'sounding_board_consultation' | 'simplification' | 'user_escalation';
+	action:
+		| 'sounding_board_consultation'
+		| 'simplification'
+		| 'user_escalation'
+		| 'sounding_board_manual_approval';
+	/** Present only on sounding_board_manual_approval (issue #2703): the
+	 * architect-stated justification for the manual override, bounded to 500
+	 * chars by the recorder. */
+	reason?: string;
 }
 
 export interface AgentConflictDetectedEvent {
@@ -215,6 +223,21 @@ export interface PrmHardStopDeliveredEvent {
 	occurrenceCount: number;
 }
 
+/**
+ * Issue #2678 — a PRM hard-stop EPISODE reached its bounded TERMINAL/handoff
+ * state (fired exactly once per terminal transition). The third of the three
+ * noninterchangeable counters: TRIGGER (`prm_hard_stop`), DELIVERY
+ * (`prm_hard_stop_delivered`), TERMINAL (this event).
+ */
+export interface PrmHardStopTerminalEvent {
+	type: 'prm_hard_stop_terminal';
+	timestamp: string;
+	sessionId: string;
+	pattern: string;
+	level: number;
+	occurrenceCount: number;
+}
+
 // Union type for all v6.19 events
 export type V619Event =
 	| SoundingBoardConsultedEvent
@@ -233,4 +256,5 @@ export type V619Event =
 	| PrmCourseCorrectionInjectedEvent
 	| PrmEscalationTriggeredEvent
 	| PrmHardStopEvent
+	| PrmHardStopTerminalEvent
 	| PrmHardStopDeliveredEvent;

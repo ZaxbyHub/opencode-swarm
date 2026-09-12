@@ -187,6 +187,12 @@ export const FIXTURES: Record<string, Record<string, unknown>> = {
 		level: 4,
 		occurrenceCount: 7,
 	},
+	prm_hard_stop_terminal: {
+		sessionId: 'sess-1',
+		pattern: 'thrash',
+		level: 4,
+		occurrenceCount: 8,
+	},
 	evidence_lock_acquired: {
 		directory: '/proj',
 		evidencePath: '/proj/.swarm/evidence/1.1.json',

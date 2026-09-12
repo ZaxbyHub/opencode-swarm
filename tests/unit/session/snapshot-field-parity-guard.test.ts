@@ -176,6 +176,9 @@ function buildFullSessionState(): AgentSessionState {
 		prmHardStopInjectPending: false,
 		prmStruckEpisodes: new Map(),
 		prmLadderCounts: new Map(),
+		// Issue #2678: episode state + generation mirror the ladder counts.
+		prmEpisodes: new Map(),
+		prmEpisodeGeneration: 0,
 		prmDelegationCallId: 'call-9',
 		// Own key with an undefined value keeps the field enumerable in
 		// Object.keys below; the tracker is a process-local class instance.

@@ -250,6 +250,11 @@ export const TOOL_METADATA = {
 			'record a MANUAL plan_critic_gate approval snapshot to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the mechanical recorder failed to persist it (issue #2012), or as the sanctioned recovery for a bookkeeping-grade hashed-field repair under the critic-gate PLAN FREEZE rule (the reason must state which case applies)',
 		agents: ['architect'],
 	},
+	approve_retry_sounding_board: {
+		description:
+			'record a MANUAL critic_sounding_board gate entry to unblock the coder retry circuit-breaker gate when the sounding board returned APPROVED but the mechanical recorder missed it (issue #2703)',
+		agents: ['architect'],
+	},
 	prepare_pr_workflow_checkout: {
 		description:
 			'prepare an auditable PR workflow checkout or restore its exact original branch/HEAD and preserved stash after terminal cleanup',

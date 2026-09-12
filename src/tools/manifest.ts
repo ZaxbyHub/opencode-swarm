@@ -27,6 +27,7 @@ import { abort_pr_workflow } from './abort-pr-workflow';
 import { actionlint_scan } from './actionlint-scan';
 import { swarmApplyPatch } from './apply-patch';
 import { approve_plan_critic } from './approve-plan-critic';
+import { approve_retry_sounding_board } from './approve-retry-sounding-board';
 import { ast_grep } from './ast-grep';
 import { authorize_pr_review_reentry } from './authorize-pr-review-reentry';
 import { batch_symbols } from './batch-symbols';
@@ -196,6 +197,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	authorize_pr_review_reentry: () => authorize_pr_review_reentry,
 	submit_pr_review_result: () => submit_pr_review_result,
 	approve_plan_critic: () => approve_plan_critic,
+	approve_retry_sounding_board: () => approve_retry_sounding_board,
 	prepare_pr_workflow_checkout: () => prepare_pr_workflow_checkout,
 	record_implementation_review: () => record_implementation_review,
 	record_issue_publication: () => record_issue_publication,

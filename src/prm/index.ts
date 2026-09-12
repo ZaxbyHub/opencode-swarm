@@ -166,6 +166,10 @@ interface ResettablePrmSessionState {
 	prmStruckEpisodes?: Map<string, number>;
 	/** Issue #2134 follow-up — ladder counts; reset with the ledger. */
 	prmLadderCounts?: Map<string, number>;
+	/** Issue #2678 — hard-stop episodes; reset with the ladder counts. */
+	prmEpisodes?: Map<string, import('./types.js').PrmEpisodeState>;
+	/** Issue #2678 — tracker generation; reset with the episodes. */
+	prmEpisodeGeneration?: number;
 	replayArtifactPath?: string | null;
 }
 
@@ -194,6 +198,11 @@ export function resetPrmSessionState(
 	// unwedge a session would instead disable its containment.
 	session.prmStruckEpisodes = new Map<string, number>();
 	session.prmLadderCounts = new Map<string, number>();
+	// Issue #2678: episode state and generation reset with the ladder counts
+	// they are keyed alongside — a reset delegation must not inherit a previous
+	// delegation's terminal episodes or generation identity.
+	session.prmEpisodes = new Map();
+	session.prmEpisodeGeneration = 0;
 	session.replayArtifactPath = null;
 
 	if (sessionId) {
@@ -561,6 +570,12 @@ export function createPrmHook(
 							escalationLevel: session.prmEscalationLevel,
 							lastPatternDetected: session.prmLastPatternDetected,
 							hardStopPending: session.prmHardStopPending,
+							// Issue #2678: restore the episode keyspace and
+							// generation too — without these, a tracker rebuilt
+							// mid-session would lose the terminal state and
+							// re-fire the trigger from a stale baseline.
+							episodes: new Map(session.prmEpisodes ?? []),
+							generation: session.prmEpisodeGeneration ?? 0,
 						}
 					: undefined;
 
@@ -602,10 +617,12 @@ export function createPrmHook(
 				// Record detection for escalation tracking
 				let escalationLevel = 0;
 				let hardStopPending = false;
+				let hardStopTerminal = false;
 				if (config.escalation_enabled !== false) {
 					const escalationResult = escalationTracker.recordDetection(match);
 					escalationLevel = escalationResult.level;
 					hardStopPending = escalationResult.hardStop;
+					hardStopTerminal = escalationResult.terminal;
 				}
 
 				// Add to session pending advisory messages for injection.
@@ -635,7 +652,19 @@ export function createPrmHook(
 				// told. Measured: 40 distinct repeating files produced 1 advisory.
 				// Scoping by ladder means each distinct behaviour is reported once per
 				// level, which is the invariant this dedupe was always meant to have.
-				const prmDedupeKey = `prm:${resolveLadderKey(match)}:${escalationLevel}`;
+				// Issue #2678: the TERMINAL/handoff advisory gets its own dedupe
+				// key (same ladder+level, `:terminal` tag) so the handoff
+				// guidance is delivered exactly once instead of being suppressed
+				// by the level-3 key the first stop already consumed.
+				// Issue #2678 / swarm-pr-review PRR-104: the key is scoped to the
+				// tracker GENERATION, which advances at every episode transition
+				// (trigger, terminal, owner-verified clear). Without it, a fresh
+				// episode's first stop after a cooldown lapse reused the level-3
+				// key the previous episode's first stop had already injected and
+				// the re-told advisory was silently suppressed — the agent was
+				// re-stopped but never told why. Within one episode phase the
+				// generation is stable, so per-phase delivery-once still holds.
+				const prmDedupeKey = `prm:${resolveLadderKey(match)}:${escalationLevel}${hardStopTerminal ? ':terminal' : ''}:g${escalationTracker.getGeneration()}`;
 				// Defensive: the field is initialized by ensureAgentSession, but
 				// guard so a session object lacking it (e.g. a minimal test mock)
 				// does not throw and abort the unconditional match-processing.
@@ -659,6 +688,10 @@ export function createPrmHook(
 				// session so a tracker rebuilt later in this session restores the same
 				// keyspace it counts in. `getState()` already returns a defensive copy.
 				session.prmLadderCounts = escalationTracker.getLadderCounts();
+				// Issue #2678: mirror the episode keyspace and generation the same
+				// way (bounded by the tracker's MAX_TRACKED_LADDERS eviction).
+				session.prmEpisodes = escalationTracker.getEpisodes();
+				session.prmEpisodeGeneration = escalationTracker.getGeneration();
 				session.prmEscalationLevel = escalationLevel;
 				session.prmLastPatternDetected = match;
 				tickHardStop = tickHardStop || hardStopPending;

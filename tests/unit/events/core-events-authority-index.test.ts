@@ -94,7 +94,11 @@ function repairEvent(
 function retryEvent(
 	taskId: string,
 	retryEpoch: number,
-	action: 'sounding_board_consultation' | 'simplification' | 'user_escalation',
+	action:
+		| 'sounding_board_consultation'
+		| 'simplification'
+		| 'user_escalation'
+		| 'sounding_board_manual_approval',
 ): Record<string, unknown> {
 	return {
 		type: 'coder_retry_circuit_breaker',

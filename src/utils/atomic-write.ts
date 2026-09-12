@@ -145,7 +145,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/review-receipt.ts:609',
 			'src/hooks/review-receipt.ts:675',
 			'src/hooks/review-receipt.ts:894',
-			'src/knowledge/identity.ts:209',
+			'src/knowledge/identity.ts:230',
 			'src/evidence/phase-participation.ts (pre-#2035; migrated-to=src/evidence/phase-participation.ts:atomicWriteBytes)',
 			'src/turbo/lean/integration.ts:428',
 			'src/turbo/lean/reviewer.ts:403',
@@ -317,7 +317,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		parsesTarget: false,
 		producers: [
 			'src/tools/checkpoint.ts:195',
-			'src/full-auto/state.ts:460',
+			'src/full-auto/state.ts:636',
 			'src/context-map/persistence.ts:119',
 			'src/context-map/capsule-persistence.ts:111',
 			'src/test-impact/history-store.ts:297',
@@ -432,9 +432,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	// src/pr-review/ boundary); UUID-scoped `.${basename}.${uuid}.tmp`
 	'src/pr-review/authorization.ts': 'registered-bespoke',
 	// bespoke atomic single-file rewrite (write tmp + rename) for the PR-review
-	// gate-state and salvage reads (issue #2385; the only durable stream is
-	// `.swarm/pr-workflow-gates/*.json`, currently UNREGISTERED in the retention
-	// data set — F-PRR-013 follow-up); UUID-scoped `.tmp.<pid>.<uuid>`
+	// gate-state and salvage reads (issues #2385/#2510); the logical stream is
+	// registered in the retention data set: swarm.db coordination_state is the
+	// authority and `.swarm/pr-workflow-gates/*.json` is the bounded projection;
+	// UUID-scoped `.tmp.<pid>.<uuid>`
 	'src/pr-review/persistence.ts': 'registered-bespoke',
 	'src/hooks/promotion-evidence-store.ts': 'registered-bespoke',
 	'src/hooks/review-receipt.ts': 'registered-bespoke',

@@ -195,6 +195,10 @@ export {
 	approve_plan_critic,
 	executeApprovePlanCritic,
 } from './approve-plan-critic';
+export {
+	approve_retry_sounding_board,
+	executeApproveRetrySoundingBoard,
+} from './approve-retry-sounding-board';
 export { authorize_pr_review_reentry } from './authorize-pr-review-reentry';
 export {
 	complete_pr_workflow,

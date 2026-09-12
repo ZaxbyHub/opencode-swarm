@@ -30,6 +30,50 @@ bun --smol test tests/unit/hooks --timeout 120000
 bun --smol test tests/unit/cli --timeout 120000
 ```
 
+### Reproducible repository validation
+
+Issue #2675's canonical validation command runs the complete, ordered surface
+inventory and writes the bounded JSON report under `.swarm/`:
+
+```bash
+# Full validation (all surfaces)
+bun run validate:repo -- --mode full --diff-base origin/main
+
+# Pull-request diff validation (no changed work is a distinct no-op result)
+bun run validate:repo -- --mode diff --diff-base origin/main
+```
+
+In diff mode, the selected changes are the committed branch changes in
+`<diff-base>...HEAD`; unstaged and untracked work is excluded. The ten surfaces are
+`quality`, `unit`, `integration`, `security`, `coverage`,
+`memory-recall-regression`, `package-check`, `smoke`, `php-validation`, and
+`rust-sandbox-runner`. The report is schema-versioned (`schemaVersion: 1`) and
+records the runtime (`bunVersion`, `platform`, `arch`), exact array-form argv
+and cwd for every item, the `origin/main` diff base, per-surface results, and
+summary counts. A process must end in one of `passed`, `failed`, `crashed`,
+`timed_out`, `missing`, or `skipped`; a crash, timeout, missing item, or skipped
+item cannot be reported as a complete pass. The run-level status is
+`passed`, `failed`, `incomplete`, or `no_op`; `no_op` is reserved for a diff
+run with no discovered work and is not equivalent to `passed`.
+
+Use `--surface <name>` (repeatable) or comma-separated `--surfaces <name,...>`
+to validate a deliberate subset; omitting both selects the full ten-surface
+matrix. If a selected item requires an unavailable runtime, it is recorded as
+`skipped` with a reason and the run is `incomplete` (nonzero exit), so a full
+matrix run never claims a pass while a required runtime is missing.
+
+The default safety bounds are a 120000 ms test timeout, 180000 ms per-item
+wall timeout, 900000 ms whole-run timeout, and 65536 output bytes per channel
+(after redaction). The runner preloads
+`scripts/ci/bun-32056-keepalive.ts` and preserves each test-file path as a
+separate argv element, including spaces and quotes.
+
+The historical `659/3,389` count is an unconfirmed historical count because
+its raw source/provenance was not retained; it must not be presented as a
+reproducible current validation result. New reports retain the raw per-item
+terminal statuses, timing, signal, bounded redacted output, and cleanup
+outcome needed to audit a run.
+
 **Do not run `bun --smol test tests/unit/tools` or `tests/unit/hooks` as a single batch.** Mock modules leak across files in Bun's `--smol` mode, causing false failures. The CI uses per-file isolation loops for the 15 mock.module hook files (step 1a) and steps 4-6 (tools, services, state/agents), while other hook tests remain in batch groups (step 1b).
 
 **Bun v1.3.13+:** The `--isolate` flag is available for local development to run each test file in a fresh global environment. However, CI currently uses `--smol` with per-file isolation loops, which achieves the same mock isolation goal. You may use `--isolate` locally, but the CI pipeline will continue using `--smol` with per-file loops for consistency.
