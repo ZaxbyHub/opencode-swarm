@@ -40,11 +40,14 @@ describe('impact-cache test-side staleness (issue #2492 AC5)', () => {
 		expect(map1[norm(path.join(dir, 'src/a.ts'))]).toBeDefined();
 
 		// Repoint the test's import from src/a.ts to src/b.ts — ONLY the test
-		// file changes; every source mtime stays older than the cache.
-		fs.writeFileSync(
-			path.join(dir, 'tests/a.test.ts'),
-			"const { b } = require('../src/b');\n",
-		);
+		// file changes; every source mtime stays older than the cache. The
+		// mtime is bumped deterministically past generatedAt (filesystem
+		// mtime granularity can otherwise equal the cache timestamp, making
+		// the staleness comparison racy). Fixed far-future epoch (year 2065).
+		const testFile = path.join(dir, 'tests/a.test.ts');
+		fs.writeFileSync(testFile, "const { b } = require('../src/b');\n");
+		const bumped = new Date(3_000_000_000_000);
+		fs.utimesSync(testFile, bumped, bumped);
 
 		const map2 = await loadImpactMap(dir);
 		// The stale map must NOT be served: after the refresh, b.ts carries the
