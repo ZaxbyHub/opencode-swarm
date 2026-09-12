@@ -2702,13 +2702,22 @@ export function canRunWhileTaskAwaitsCompletion(input: {
 	if (
 		input.directory &&
 		input.requestedTaskId &&
-		input.requestedTaskId !== input.awaitingTaskId &&
-		isProvablyDisjoint(input.directory, [
-			input.awaitingTaskId,
-			input.requestedTaskId,
-		])
+		input.requestedTaskId !== input.awaitingTaskId
 	) {
-		return true;
+		// Fail-closed: a verdict failure must never escape the completion gate
+		// as an unexpected toolBefore error (mirrors scopeVerdictAllowsParallel).
+		try {
+			if (
+				isProvablyDisjoint(input.directory, [
+					input.awaitingTaskId,
+					input.requestedTaskId,
+				])
+			) {
+				return true;
+			}
+		} catch {
+			return false;
+		}
 	}
 
 	return false;

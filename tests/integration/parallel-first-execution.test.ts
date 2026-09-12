@@ -26,7 +26,6 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../../src/config';
 import { transitionTaskWorkflowEvidence } from '../../src/gate-evidence';
 import { createDelegationGateHook } from '../../src/hooks/delegation-gate';
-import { executeDeclareScope } from '../../src/tools/declare-scope';
 import type { DelegationEntry } from '../../src/state';
 import {
 	advanceTaskState,
@@ -34,6 +33,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../src/state';
+import { executeDeclareScope } from '../../src/tools/declare-scope';
 import { writeApprovedPlan } from '../helpers/approved-plan';
 import { withFrozenClock } from '../helpers/test-clock.js';
 

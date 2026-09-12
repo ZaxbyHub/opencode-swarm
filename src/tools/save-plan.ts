@@ -465,13 +465,20 @@ export async function executeSavePlan(
 	// Step 0: Validate phase IDs and task ID formats
 	const validationErrors: string[] = [];
 
-	// Validate phase IDs (must be positive integers)
+	// Validate phase IDs (must be positive integers; must be unique — a
+	// duplicated id would make find-first cursor/phase resolution ambiguous)
+	const seenPhaseIds = new Set<number>();
 	for (const phase of args.phases) {
 		if (!Number.isInteger(phase.id) || phase.id <= 0) {
 			validationErrors.push(
 				`Phase ${phase.id} has invalid id: must be a positive integer`,
 			);
+		} else if (seenPhaseIds.has(phase.id)) {
+			validationErrors.push(
+				`Phase ${phase.id} is duplicated: phase ids must be unique`,
+			);
 		}
+		seenPhaseIds.add(phase.id);
 
 		// Validate task ID formats (must match /^\d+\.\d+(\.\d+)*$/)
 		const taskIdPattern = /^\d+\.\d+(\.\d+)*$/;

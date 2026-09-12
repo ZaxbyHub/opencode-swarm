@@ -85,8 +85,9 @@ export interface PlanConflictCheckResult {
 /**
  * Pure executor (no createSwarmTool wrapper) so it is directly unit-testable.
  *
- * Reads `.swarm/plan.json` (to confirm the task ids exist) and
- * `.swarm/scopes/scope-*.json` (via `computeParallelVerdict`). Writes nothing.
+ * Reads `.swarm/plan.json` (to confirm the task ids exist) and the
+ * authoritative v2 scope-binding store (via `computeParallelVerdict`,
+ * #2532). Writes nothing.
  */
 export async function executePlanConflictCheck(
 	args: {
@@ -170,7 +171,8 @@ export const plan_conflict_check: ReturnType<typeof tool> = createSwarmTool({
 	allowWorkingDirectoryOverride: true,
 	description:
 		'Read-only advisory check (#1656): compute a pairwise file-conflict matrix for N proposed parallel task groups ' +
-		'using declared scopes (`.swarm/scopes/scope-<taskId>.json`) and optional git co-change signal. Returns a ' +
+		'using the currently declared v2 scope bindings (the same authority declare_scope writes, #2532) and optional ' +
+		'git co-change signal. Returns a ' +
 		'verdict (all_disjoint / conflicts_present / unknown_scopes), per-pair evidence, and a suggested serialization ' +
 		'order. Writes nothing — the execution gate independently recomputes the verdict inline at dispatch time via ' +
 		'the same helper. Use this BEFORE attempting parallel dispatch to confirm disjointness.',

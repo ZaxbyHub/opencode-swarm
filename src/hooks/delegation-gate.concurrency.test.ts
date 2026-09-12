@@ -48,7 +48,6 @@ const { _internals: delegationGateInternals } = await import(
 );
 const { buildParallelExecutionGuidance } = delegationGateInternals;
 
-
 // Helper to create a minimal plan with execution_profile
 function makePlan(
 	overrides?: Partial<Plan['execution_profile']> & { current_phase?: number },
@@ -174,8 +173,6 @@ describe('buildParallelExecutionGuidance', () => {
 		mock.restore();
 	});
 
-
-
 	// ── Test 3: Lean Turbo bypass ───────────────────────────────────────────────
 	it('Lean Turbo bypass returns Lean Turbo message instead of override guidance', async () => {
 		const plan = makePlan({ max_concurrent_tasks: 2 });
@@ -239,7 +236,6 @@ describe('buildParallelExecutionGuidance', () => {
 		expect(result).toBeNull();
 	});
 
-
 	// ── Additional edge case: undefined directory ─────────────────────────────────
 	it('Returns null when directory is undefined', async () => {
 		const sessionId = 'test-undefined-dir';
@@ -302,7 +298,6 @@ describe('buildParallelExecutionGuidance', () => {
 		expect(result).toBeNull();
 	});
 
-
 	// ── Additional: Override value of 1 via setConcurrencyOverride ───────────────
 	it('Override of 1 disables parallel execution guidance', async () => {
 		const plan = makePlan({ max_concurrent_tasks: 4 });
@@ -361,7 +356,6 @@ describe('buildParallelExecutionGuidance', () => {
 		// so result should be null because !enabled returns null (not because of max_concurrent_tasks)
 		expect(result).toBeNull();
 	});
-
 
 	it('Adaptive backoff: does not reduce when failure rate is below threshold', async () => {
 		const planWithMinorFailures: Plan = {

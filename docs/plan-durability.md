@@ -645,6 +645,15 @@ revision (bindings and approved snapshots declared against the pre-advance
 plan stop matching until re-declared/re-approved); ordinary task-status churn
 inside a phase is hash-excluded and does not touch the baseline.
 
+Known upgrade behavior: workspaces whose SQLite ledger shadow already
+existed before this change compare the normalized replay hash against the
+last event's pre-upgrade recorded `plan_hash_after` and may report
+`parityStatus: 'diverged'` once. This is diagnostic bookkeeping only
+(no user-facing surface reads it); it self-heals at the first post-upgrade
+plan save, which appends an event whose hash matches the normalized replay.
+Workspaces that never mutate their plan again simply stay in file-shadow
+mode, which is operationally equivalent.
+
 The v8 parallel verdict resolves task scopes from the same authoritative v2
 binding store `declare_scope` writes (`readDeclaredScopeFilesFromBindings`),
 matched against the exact plan identity (`planId` + structure hash), with one

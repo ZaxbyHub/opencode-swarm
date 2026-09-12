@@ -17,5 +17,9 @@ Two blockers made the advertised v8 parallel-first route unreachable (issue #253
 
 ## Notes
 
+- Docs-participation receipts (require_docs) are now stamped with a cursor-independent plan-identity hash: a docs receipt recorded mid-phase stays valid when the cursor advances at that phase's last task completion, so `phase_complete` no longer deadlocks on non-final phases under the default require_docs/enforce config. Structural plan edits still force docs re-dispatch. Docs receipts recorded by pre-upgrade plugin versions fail closed (fresh docs dispatch required).
+- `save_plan` now rejects duplicated phase ids (ambiguous find-first cursor resolution).
+
+
 - Plans with disjoint declared scopes now genuinely take the parallel route in any enabled phase (not just phase 1); explicit LOCKED serial intent remains serial.
 - After a phase advances, scope bindings declared against the pre-advance plan stop matching until re-declared — the same lifecycle as any plan revision (declare-at-dispatch keeps this to the boundary; binding TTL is 1h).

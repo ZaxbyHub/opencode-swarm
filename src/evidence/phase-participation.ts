@@ -200,7 +200,7 @@ async function buildBinding(input: {
 		prefixedRole: input.role,
 		planId: derivePlanId(input.plan),
 		planIdentityHash: derivePlanIdentityHash(input.plan),
-		planStructureHash: computePlanStructureHash(input.plan),
+		planStructureHash: receiptStructureHash(input.plan),
 		phase: input.phase,
 		taskId: input.taskId,
 		parentSessionId: input.parentSessionId,
@@ -517,6 +517,24 @@ async function writeStore(directory: string, store: Store): Promise<void> {
 	await atomicWriteFile(storePath(directory), serialized);
 }
 
+/**
+ * Receipt-identity structure hash (issue #2532 follow-up): the plan structure
+ * hash with the `current_phase` cursor pinned out.
+ *
+ * Since #2532, `current_phase` is a LIVE advancing cursor (one durable writer
+ * in `savePlan`), and it is part of `computePlanStructureHash`. A docs receipt
+ * stamped mid-phase N must stay verifiable after the cursor advances to N+1
+ * at phase N's last task completion — an advance is execution progress, not a
+ * plan edit — so the receipt identity hashes the structure WITHOUT the
+ * cursor. Structural edits (descriptions, tasks, files, dependencies) still
+ * rotate the identity and force docs re-dispatch. `computePlanStructureHash`
+ * bytes are untouched (they are load-bearing for scope bindings and approved
+ * snapshots); only this consumer hashes the cursor-pinned view.
+ */
+function receiptStructureHash(plan: Plan): string {
+	return computePlanStructureHash({ ...plan, current_phase: undefined });
+}
+
 function samePlanIdentity(
 	binding: Pick<Binding, 'planId' | 'planIdentityHash' | 'planStructureHash'>,
 	plan: Plan,
@@ -524,7 +542,7 @@ function samePlanIdentity(
 	return (
 		binding.planId === derivePlanId(plan) &&
 		binding.planIdentityHash === derivePlanIdentityHash(plan) &&
-		binding.planStructureHash === computePlanStructureHash(plan)
+		binding.planStructureHash === receiptStructureHash(plan)
 	);
 }
 
@@ -669,12 +687,16 @@ export async function reserveApprovedPhaseParticipation(input: {
 	}
 	const plan = await loadPlan(input.directory);
 	if (!plan) return;
-	// Issue #2702 contract: `current_phase` is a static authoring field no code
-	// path advances, so this stamp is the plan's authored cursor, not the phase
-	// being worked. Never consume it as an exact gate key:
-	// readPhaseParticipation matches cursor-tagged receipts through its cursor
-	// tolerance, and rebindCursorTaggedReceipts normalizes them to the
-	// completed phase on the phase_complete success path.
+	// Issue #2532: `current_phase` is a LIVE advancing cursor (one durable
+	// writer in savePlan advances it when a phase's last task completes), so
+	// this stamp is the cursor at dispatch time — typically the phase being
+	// worked, but it can lag or lead across async docs runs. Never consume it
+	// as an exact gate key: readPhaseParticipation matches cursor-tagged
+	// receipts through its cursor tolerance, and rebindCursorTaggedReceipts
+	// normalizes them to the completed phase on the phase_complete success
+	// path. The binding's structure hash is cursor-independent
+	// (receiptStructureHash), so the advance itself never invalidates the
+	// receipt — only a real plan edit does.
 	const binding = await buildBinding({
 		plan,
 		phase: getCurrentPhase(plan),
@@ -854,15 +876,16 @@ export async function readPhaseParticipation(
 	}
 	const canonicalRole = stripKnownSwarmPrefix(role);
 	const currentWorkspace = await captureParticipationWorkspace(directory);
-	// Issue #2702: the recorder stamps the receipt's phase from the plan's
-	// static `current_phase` cursor (see reserveApprovedPhaseParticipation),
-	// a field authored once at plan creation that no code path advances. A
-	// receipt tagged with that cursor value therefore proves the same
-	// participation as an exact-phase match for the phase being completed.
-	// The cursor-mistag arm only ever accepts a tag BEHIND the completing
-	// phase; if the cursor ever becomes a live advancing field, this keeps a
-	// receipt tagged with a later phase from satisfying an earlier one. Any
-	// other phase stays rejected.
+	// The recorder stamps the receipt's phase from the plan's `current_phase`
+	// cursor at dispatch time (see reserveApprovedPhaseParticipation). Since
+	// #2532 that cursor advances when a phase's last task completes, so a
+	// receipt may be tagged behind (dispatched before the previous phase
+	// closed) or exactly at the completing phase; the receipt identity hash is
+	// cursor-independent (receiptStructureHash), so cursor movement alone
+	// never invalidates it. The cursor-mistag arm only ever accepts a tag
+	// BEHIND the completing phase — a receipt tagged with a LATER phase never
+	// satisfies an earlier one, and an exact-phase match covers the ordinary
+	// sequential flow. Any other phase stays rejected.
 	const cursorPhase = getCurrentPhase(plan);
 	return {
 		status: 'valid',
@@ -878,8 +901,9 @@ export async function readPhaseParticipation(
 }
 
 /**
- * Re-stamp receipts that were tagged with the plan's static `current_phase`
- * cursor (issue #2702) to the phase whose completion is being recorded. Called
+ * Re-stamp receipts that were tagged with the plan's `current_phase` cursor
+ * at dispatch time (issue #2702 origin; the cursor is live since #2532) to
+ * the phase whose completion is being recorded. Called
  * from the phase_complete success path so a cursor-mistagged receipt, once it
  * has satisfied the completing phase's gate, cannot also satisfy a later
  * phase — per-phase docs participation stays enforced. Idempotent: a second

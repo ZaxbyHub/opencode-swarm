@@ -18,10 +18,10 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { executeDeclareScope } from '../../../src/tools/declare-scope';
 import { canonicalRootKey } from '../../../src/utils/canonical-root';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
-import { executeDeclareScope } from '../../../src/tools/declare-scope';
 
 function git(directory: string, args: string[]): void {
 	const result = spawnSync('git', ['-C', directory, ...args], {
