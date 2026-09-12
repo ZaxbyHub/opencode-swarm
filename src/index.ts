@@ -74,7 +74,10 @@ import {
 } from './config/schema';
 import { createRoleFilterSystemHook } from './context/role-filter.js';
 import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
-import { closeDashboardServerForRoot } from './dashboard/index.js';
+import {
+	closeDashboardServerForRootIfOwner,
+	type DashboardHandle,
+} from './dashboard/index.js';
 import { closeGroupCommitWriter } from './db/group-commit-writer.js';
 import { registerObservabilityEventSink } from './db/observability-event-store.js';
 import { closeProjectDb } from './db/project-db.js';
@@ -2791,11 +2794,17 @@ async function initializeOpenCodeSwarm(
 		automationManager?.stop();
 		prMonitorWorker?.stop();
 		planSyncWorker?.stop();
-		// Issue #2509: stop the opt-in dashboard listener. Best-effort: the
-		// server is unref'd, and this closes the listener plus live sockets
-		// on dispose and the process-exit path.
+		// Issue #2509: stop the opt-in dashboard listener — owner-guarded so a
+		// stale dispose from a replaced instance cannot close a newer
+		// instance's live listener on the same root (PRR-011 pattern); a null
+		// ref (dispose before the deferred start registered) matches nothing,
+		// and the in-flight start sees the disposed flag and closes itself.
+		dashboardDisposed = true;
 		try {
-			closeDashboardServerForRoot(ctx.directory);
+			closeDashboardServerForRootIfOwner(
+				ctx.directory,
+				dashboardHandleRef.current,
+			);
 		} catch {
 			// best-effort by contract
 		}
@@ -2930,7 +2939,18 @@ async function initializeOpenCodeSwarm(
 	// host alive. The task body carries its own bounded try/catch (#2669
 	// belt-and-braces posture): a missing or broken dashboard module degrades
 	// to one bounded log line and can never reject the queue.
+	//
+	// Review round 2 (F-A/D1): the cleanup closes only THIS instance's handle
+	// (owner-guarded close — a stale dispose from a replaced instance must
+	// never tear down a newer instance's live listener on the same root),
+	// and a dispose that lands before the deferred start registers flips the
+	// disposed flag so the in-flight start closes itself instead of leaking
+	// an unowned listener.
 	const dashboardPort = config.dashboard?.port ?? 0;
+	const dashboardHandleRef: { current: DashboardHandle | null } = {
+		current: null,
+	};
+	let dashboardDisposed = false;
 	if (dashboardPort > 0) {
 		postResolutionTasks.push(
 			async function dashboardServerPostResolutionTask() {
@@ -2948,11 +2968,19 @@ async function initializeOpenCodeSwarm(
 						advisoryWarn(
 							`Swarm dashboard disabled: port ${dashboardPort} is unavailable (in use or bind failed). Free the port or change dashboard.port in opencode-swarm.json.`,
 						);
-					} else {
-						log('swarm dashboard listening (loopback, token-protected)', {
-							port: handle.port,
-						});
+						return;
 					}
+					if (dashboardDisposed) {
+						// Dispose already ran while this start was in flight —
+						// close immediately instead of leaking an unowned
+						// listener (unref'd, so it never held the host).
+						void handle.close();
+						return;
+					}
+					dashboardHandleRef.current = handle;
+					log('swarm dashboard listening (loopback, token-protected)', {
+						port: handle.port,
+					});
 				} catch (err) {
 					log('dashboard startup failed (non-fatal)', {
 						error: err instanceof Error ? err.message : String(err),

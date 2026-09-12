@@ -67,7 +67,15 @@ function evictRegistryIfFull(): void {
 		if (oldest === undefined) break;
 		const entry = registry.get(oldest);
 		registry.delete(oldest);
-		if (entry) void entry.closeServer();
+		if (entry) {
+			// Review round 2 (C16): an eviction stops a live listener — it must
+			// be observable, not silent (every other disable path logs).
+			log('swarm dashboard evicted oldest listener (registry full)', {
+				root: oldest,
+				port: entry.handle.port ?? null,
+			});
+			void entry.closeServer();
+		}
 	}
 }
 
@@ -158,6 +166,17 @@ export async function startDashboardServer(
 		return disabledHandle(status);
 	}
 
+	// Review round 2 (F-E): another start for the same root can have won the
+	// registry while this bind was in flight (the await above is the race
+	// window). Re-purge AFTER the bind so the winner is closed before this
+	// handle takes over — last-writer-wins without leaking the loser's
+	// listener.
+	const incumbent = registry.get(rootKey);
+	if (incumbent) {
+		registry.delete(rootKey);
+		void incumbent.closeServer();
+	}
+
 	const url = `http://127.0.0.1:${bound.port}/t/${token}/`;
 	let closed = false;
 	const closeServer = async (): Promise<void> => {
@@ -204,8 +223,30 @@ export function getDashboardHandle(directory: string): DashboardHandle | null {
  * (cannot await there). Safe when nothing is running.
  */
 export function closeDashboardServerForRoot(directory: string): void {
-	const entry = registry.get(canonicalProjectKey(directory));
+	const key = canonicalProjectKey(directory);
+	const entry = registry.get(key);
 	if (!entry) return;
-	registry.delete(canonicalProjectKey(directory));
+	registry.delete(key);
 	void entry.closeServer();
+}
+
+/**
+ * Owner-guarded close for multi-instance hosts (review round 2, finding F-A —
+ * the PRR-011 pattern from src/background/pr-subscriptions.ts): closes the
+ * root's listener ONLY when the registered handle is the caller's own. A
+ * stale dispose from instance A (whose start was overwritten by instance B's
+ * later start on the same root) becomes a no-op instead of tearing down B's
+ * live listener. Returns true when this call performed the close.
+ */
+export function closeDashboardServerForRootIfOwner(
+	directory: string,
+	expectedHandle: DashboardHandle | null,
+): boolean {
+	const key = canonicalProjectKey(directory);
+	const entry = registry.get(key);
+	if (!entry) return false;
+	if (entry.handle !== expectedHandle) return false;
+	registry.delete(key);
+	void entry.closeServer();
+	return true;
 }

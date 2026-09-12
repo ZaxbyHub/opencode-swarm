@@ -11,8 +11,11 @@
  *   can only ever re-read what its origin checks already block).
  * - Host allowlist (DNS-rebinding defense): the Host header hostname must be
  *   a loopback name (127.0.0.1 / localhost / ::1); the server itself only
- *   ever binds 127.0.0.1. This is the loopback inverse of the house
- *   `url-security` private-host blocklist posture.
+ *   ever binds 127.0.0.1. House standard: src/commands/_shared/url-security.ts
+ *   (named by issue #2509) governs the outbound-URL posture this surface
+ *   composes with — `isPrivateHost` there is the loopback BLOCKLIST for
+ *   outbound links; this listener needs the INVERSE (an inbound loopback
+ *   ALLOWLIST), so the posture is reused rather than the helpers imported.
  * - Origin allowlist: a present Origin header must parse to a loopback host.
  * - Capability token: every route requires the per-boot token via query
  *   (`token`/`t`/`cap`/`capability`) or path (`/{token}/…`, `/t/{token}/…`);
@@ -122,24 +125,90 @@ function htmlResponse(html: string): DashboardRequestOutcome {
 }
 
 function jsonResponse(body: JsonBody): DashboardRequestOutcome {
+	let payload = JSON.stringify(body);
+	if (Buffer.byteLength(payload, 'utf8') > MAX_RESPONSE_BYTES) {
+		payload = shrinkJsonToBudget(body);
+	}
 	return {
 		status: 200,
-		body: JSON.stringify(body),
+		body: payload,
 		contentType: 'application/json; charset=utf-8',
 	};
 }
 
+/** Depth bound for array collection — all view payloads nest arrays ≤ 3 deep. */
+const ARRAY_COLLECT_MAX_DEPTH = 4;
+
+/**
+ * Collect every array reachable from `value` (bounded depth) so the shrink
+ * loop can drop elements from the largest one.
+ */
+function collectArrays(value: unknown, into: unknown[][], depth: number): void {
+	if (depth >= ARRAY_COLLECT_MAX_DEPTH) return;
+	if (Array.isArray(value)) {
+		into.push(value);
+		for (const item of value) collectArrays(item, into, depth + 1);
+		return;
+	}
+	if (typeof value === 'object' && value !== null) {
+		for (const item of Object.values(value as Record<string, unknown>)) {
+			collectArrays(item, into, depth + 1);
+		}
+	}
+}
+
+/**
+ * Bring an over-budget JSON payload back under MAX_RESPONSE_BYTES while
+ * keeping it VALID JSON: drop elements from the tail of the largest array
+ * (the volume driver in every view) and re-serialize, instead of splicing the
+ * serialized text (a splice lands mid-element and yields unparseable JSON —
+ * issue #2509 review round 2, finding F-B). Terminates: every iteration
+ * removes at least one array element. Marks the payload so clients can tell.
+ */
+export function shrinkJsonToBudget(root: JsonBody): string {
+	const working = JSON.parse(JSON.stringify(root)) as JsonBody;
+	const arrays: unknown[][] = [];
+	collectArrays(working, arrays, 0);
+	working.responseTruncated = true;
+	let out = JSON.stringify(working);
+	while (Buffer.byteLength(out, 'utf8') > MAX_RESPONSE_BYTES) {
+		let largest: unknown[] | null = null;
+		let largestLength = 0;
+		for (const arr of arrays) {
+			if (arr.length > largestLength) {
+				largest = arr;
+				largestLength = arr.length;
+			}
+		}
+		if (largest === null) break;
+		// Drop a quarter of the largest array per pass (≥1 element) so large
+		// arrays converge in logarithmic passes.
+		largest.length =
+			largest.length - Math.max(1, Math.floor(largest.length / 4));
+		out = JSON.stringify(working);
+	}
+	if (Buffer.byteLength(out, 'utf8') > MAX_RESPONSE_BYTES) {
+		// Scalar content alone exceeded the cap (not reachable through the
+		// bounded view layer): hard-trim rather than exceed the contract. The
+		// responseTruncated marker above still tells clients the payload was
+		// shaped, and the trim happens on UTF-8 block boundaries via subarray.
+		const trimmed = Buffer.from(out, 'utf8').subarray(0, MAX_RESPONSE_BYTES);
+		out = trimmed.toString('utf8');
+	}
+	return out;
+}
+
+/**
+ * Final transport guard for non-JSON bodies (the HTML shell). JSON responses
+ * are already shaped by shrinkJsonToBudget before they reach send(); a body
+ * that still exceeds the cap here is hard-trimmed on a UTF-8 boundary — no
+ * brace-splicing, which cannot close nested structures.
+ */
 function byteCap(body: string): string {
 	const bytes = Buffer.byteLength(body, 'utf8');
 	if (bytes <= MAX_RESPONSE_BYTES) return body;
-	// Trim from the end on a UTF-8 boundary and close the JSON object so the
-	// payload stays parseable while never exceeding the hard cap.
-	const trimmed = Buffer.from(body, 'utf8').subarray(0, MAX_RESPONSE_BYTES - 1);
-	let text = trimmed.toString('utf8');
-	const lastBrace = text.lastIndexOf('}');
-	if (lastBrace > 0) text = `${text.slice(0, lastBrace)}}`;
-	else text = text.replace(/[,\s]*$/, '');
-	return text;
+	const trimmed = Buffer.from(body, 'utf8').subarray(0, MAX_RESPONSE_BYTES);
+	return trimmed.toString('utf8');
 }
 
 /**

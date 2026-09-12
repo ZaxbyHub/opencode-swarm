@@ -2,8 +2,12 @@
  * Read-only dashboard data layer (issue #2509).
  *
  * Every view composes the repo's existing bounded read APIs — this module
- * performs no durable writes and holds no authoritative state. Design rules
- * (AGENTS invariants 4/5, issue #2509 AC4/AC6/AC7):
+ * holds no authoritative state and performs no durable writes of its own;
+ * the one exception is shared plumbing: on a legacy-telemetry-only project,
+ * the observability coverage read (same call `/swarm report` makes) may
+ * materialize `.swarm/swarm.db` via its rebuildable-import path
+ * (observability-event-store, issue #2482). Design rules (AGENTS invariants
+ * 4/5, issue #2509 AC4/AC6/AC7):
  *
  * - DB reads go through the sanctioned read-only surface
  *   (`withProjectDbReadOnly`) or store readers that already fail closed on an
@@ -11,8 +15,11 @@
  *   by `projectDbExists` so a read-only view can never materialize a
  *   `.swarm/` tree that does not exist yet.
  * - Every string rendered into a payload passes through
- *   `sanitizeFailureEvidenceDisplay` (the no-secrets posture AC3 names) —
- *   no field class is exempt; plain identifiers simply survive it.
+ *   `sanitizeFailureEvidenceDisplay` (the house no-secrets posture —
+ *   src/failures/invocation-failure.ts, kin to the src/commands/_shared/
+ *   url-security.ts standard named by the issue) plus the URL-credential and
+ *   filesystem-path prescrubs below — no field class is exempt; plain
+ *   identifiers simply survive it.
  * - Row counts and per-field lengths are capped so responses stay bounded
  *   against very large stores (AC7).
  */
@@ -24,10 +31,7 @@ import {
 	getSwarmDbHealthSnapshot,
 	type SwarmDbHealthSnapshot,
 } from '../db/health.js';
-import {
-	queryObservabilityEvents,
-	readObservabilityCoverage,
-} from '../db/observability-event-store.js';
+import { readObservabilityCoverage } from '../db/observability-event-store.js';
 import { projectDbExists, withProjectDbReadOnly } from '../db/project-db.js';
 import { sanitizeFailureEvidenceDisplay } from '../failures/invocation-failure.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
@@ -52,6 +56,15 @@ const LANE_STALE_HORIZON_MS = 30 * 60_000;
 const URL_USERINFO_CREDENTIAL =
 	/([a-zA-Z][a-zA-Z0-9+.-]*):\/\/[^\s/@:]+:[^\s/@]+@/g;
 
+/**
+ * Absolute filesystem paths (POSIX and Windows). Sensitive-class observability
+ * events carry free-text error messages embedding project paths; the house
+ * sanitizer redacts credentials and web URLs but not paths (review round 2,
+ * finding C11 — probe-verified). Two-plus segments keeps route-like strings
+ * ("/api/overview") and plain identifiers untouched.
+ */
+const FILESYSTEM_PATH = /(?:[A-Za-z]:\\|\/)[^\s"'<>:|*?]*[\\/][^\s"'<>:|*?]*/g;
+
 /** One sanitized string — the single rendering rule for every text field. */
 function clean(value: unknown): string {
 	const raw =
@@ -61,7 +74,9 @@ function clean(value: unknown): string {
 				? ''
 				: String(value);
 	return sanitizeFailureEvidenceDisplay(
-		raw.replace(URL_USERINFO_CREDENTIAL, '$1://<redacted>@'),
+		raw
+			.replace(URL_USERINFO_CREDENTIAL, '$1://<redacted>@')
+			.replace(FILESYSTEM_PATH, '<path>'),
 	);
 }
 
@@ -173,16 +188,23 @@ function ageBandOf(ageMs: number): string {
 	return 'ancient (>2h)';
 }
 
-/** Never throws: a busy/locked store degrades to an unavailable view. */
-function guard<T>(view: () => T, label: string): T {
+/** Never throws: a busy/locked store degrades to an unavailable view. Views
+ * whose shape has no top-level `available` supply a `fallback` returning a
+ * shape-correct unavailable value (also sanitized — errors carry paths). */
+function guard<T>(
+	view: () => T,
+	label: string,
+	fallback?: (err: unknown) => T,
+): T {
 	try {
 		return view();
 	} catch (err) {
+		if (fallback) return fallback(err);
 		return {
 			available: false,
-			unavailableReason: `${label}: ${
-				err instanceof Error ? err.message : String(err)
-			}`.slice(0, 200),
+			unavailableReason: clean(
+				`${label}: ${err instanceof Error ? err.message : String(err)}`,
+			).slice(0, 200),
 		} as T;
 	}
 }
@@ -236,17 +258,29 @@ export function renderGatesView(directory: string): GatesView {
 	}, 'gates');
 }
 
-/** Circuit state lives inside PR-workflow gate-state files; render latest K. */
+/** Circuit state lives inside PR-workflow gate-state files; render latest K.
+ * Bounded, symlink-safe scan (review round 2, C9/C10): withFileTypes skips
+ * non-regular entries (symlinks are never followed), the name list is capped
+ * before any statSync, and only the newest MAX_GATE_STATE_FILES by mtime are
+ * parsed. Newest-K-by-mtime is approximated within the bounded name window —
+ * an active project's gate files accumulate monotonically, so name order
+ * (session-stamped) tracks recency closely enough for a view. */
 function readCircuitSummaries(directory: string): CircuitSummaryRow[] {
 	const gatesDir = path.join(directory, '.swarm', 'pr-workflow-gates');
+	/** Stat budget before the mtime sort — bounds syscalls on huge dirs. */
+	const MAX_SCAN_ENTRIES = MAX_GATE_STATE_FILES * 4;
 	let entries: { name: string; mtimeMs: number }[] = [];
 	try {
-		entries = readdirSync(gatesDir)
-			.filter((name) => name.endsWith('.json'))
-			.map((name) => {
-				const full = path.join(gatesDir, name);
-				return { name, mtimeMs: statSync(full).mtimeMs };
-			});
+		const dirents = readdirSync(gatesDir, { withFileTypes: true });
+		const names = dirents
+			.filter((dirent) => dirent.isFile() && dirent.name.endsWith('.json'))
+			.map((dirent) => dirent.name)
+			.sort()
+			.slice(0, MAX_SCAN_ENTRIES);
+		entries = names.map((name) => {
+			const full = path.join(gatesDir, name);
+			return { name, mtimeMs: statSync(full).mtimeMs };
+		});
 	} catch {
 		return [];
 	}
@@ -415,8 +449,39 @@ export function renderTimelineView(directory: string): TimelineView {
 				events: [],
 			};
 		}
-		const result = queryObservabilityEvents(directory, {});
-		const window = result.rows.slice(-MAX_TIMELINE_ROWS).reverse();
+		// Latest-N read (review round 2, finding F-D): the shared
+		// queryObservabilityEvents window is ORDER BY occurred_at ASC LIMIT
+		// 5000 for the report path; slicing the tail of that window shows
+		// years-old events once a project passes 5,000 stored. The dashboard
+		// needs the NEWEST rows, so it runs its own bounded DESC read through
+		// the same sanctioned read-only surface — no new writer, no new table.
+		const timelineRows = withProjectDbReadOnly(directory, (db) => {
+			const total = db
+				.query<{ count: number }, []>(
+					'SELECT COUNT(*) as count FROM observability_event WHERE quarantined = 0',
+				)
+				.get()?.count;
+			const rows = db
+				.query<
+					{
+						occurred_at: string;
+						kind: string;
+						severity: string | null;
+						task_id: string | null;
+						host_session_id: string | null;
+						payload_json: string | null;
+					},
+					string[]
+				>(
+					`SELECT occurred_at, kind, severity, task_id, host_session_id, payload_json
+						FROM observability_event WHERE quarantined = 0
+						ORDER BY occurred_at DESC, rowid DESC LIMIT ?`,
+				)
+				.all(String(MAX_TIMELINE_ROWS));
+			return { total: total ?? 0, rows };
+		}) ?? { total: 0, rows: [] };
+		// rows arrive newest-first; render oldest-first within the window.
+		const window = [...timelineRows.rows].reverse();
 		const events = window.map((row) => ({
 			occurredAt: clean(row.occurred_at),
 			kind: clean(row.kind),
@@ -427,8 +492,8 @@ export function renderTimelineView(directory: string): TimelineView {
 		}));
 		return {
 			available: true,
-			totalMatching: result.totalMatching,
-			truncated: result.truncated || result.rows.length > MAX_TIMELINE_ROWS,
+			totalMatching: timelineRows.total,
+			truncated: timelineRows.total > timelineRows.rows.length,
 			events,
 		};
 	}, 'timeline');
@@ -470,26 +535,57 @@ export interface DashboardStatusView {
 	};
 }
 
+/**
+ * Sanitize a health snapshot before rendering (review round 2, finding F-C):
+ * the error variant carries err.message — ProjectDbError 'open_failed' embeds
+ * the canonical absolute project path — and the snapshot previously flowed
+ * into 200 responses verbatim, bypassing the module's clean() rule.
+ */
+function sanitizeDbHealth(
+	health: SwarmDbHealthSnapshot,
+): SwarmDbHealthSnapshot {
+	if (health.kind === 'error') {
+		return { ...health, message: clean(health.message) };
+	}
+	return health;
+}
+
 export function renderStatusView(directory: string): DashboardStatusView {
-	const coverage = readObservabilityCoverage(directory);
-	return {
-		dbHealth: getSwarmDbHealthSnapshot(directory),
-		observabilityCoverage: coverage
-			? {
-					available: true,
-					totalRows: coverage.totalRows,
-					earliestOccurredAt: clean(coverage.earliestOccurredAt ?? ''),
-					latestOccurredAt: clean(coverage.latestOccurredAt ?? ''),
-				}
-			: { available: false },
-	};
+	return guard(
+		(): DashboardStatusView => {
+			const coverage = readObservabilityCoverage(directory);
+			return {
+				dbHealth: sanitizeDbHealth(getSwarmDbHealthSnapshot(directory)),
+				observabilityCoverage: coverage
+					? {
+							available: true,
+							totalRows: coverage.totalRows,
+							earliestOccurredAt: clean(coverage.earliestOccurredAt ?? ''),
+							latestOccurredAt: clean(coverage.latestOccurredAt ?? ''),
+						}
+					: { available: false },
+			};
+		},
+		'status',
+		(err: unknown) => ({
+			dbHealth: {
+				kind: 'error' as const,
+				category: 'view_failed',
+				message: clean(err instanceof Error ? err.message : String(err)).slice(
+					0,
+					200,
+				),
+			},
+			observabilityCoverage: { available: false },
+		}),
+	);
 }
 
 export async function renderOverviewView(
 	directory: string,
 ): Promise<OverviewView> {
 	return {
-		dbHealth: getSwarmDbHealthSnapshot(directory),
+		dbHealth: sanitizeDbHealth(getSwarmDbHealthSnapshot(directory)),
 		gates: renderGatesView(directory),
 		delegations: renderDelegationsView(directory),
 		lanes: renderLanesView(directory),

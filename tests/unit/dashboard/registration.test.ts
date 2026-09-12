@@ -183,16 +183,12 @@ describe('dashboard registration and zero footprint', () => {
 		const dir = makeProject(false);
 		const { manifest, tasks } = await bootAndCapture(dir);
 		expect(manifest).toBeDefined();
+		// Zero footprint is proven structurally: NO dashboard-named task is
+		// scheduled at all (review round 2, C19 — running every unrelated
+		// task behind an absorbing try/catch both masked regressions and
+		// tested nothing this assertion needs).
 		const dashTask = tasks.find((t) => /dashboard|mission/i.test(t.name));
 		expect(dashTask).toBeUndefined();
-		// Run every captured task to prove none writes a dashboard artifact.
-		for (const task of tasks) {
-			try {
-				await task.run();
-			} catch {
-				// other tasks may fail in this hermetic env; irrelevant here
-			}
-		}
 		expect(listSwarmFiles(dir).some((f) => /dashboard|mission/i.test(f))).toBe(
 			false,
 		);

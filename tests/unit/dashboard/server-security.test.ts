@@ -145,11 +145,22 @@ async function startOnEphemeralPort(dir: string): Promise<{
 	handle: DashboardHandle;
 	base: string;
 }> {
-	const handle = await startDashboardServer({
-		port: await freePort(),
-		host: '127.0.0.1',
-		directory: dir,
-	});
+	// Bounded retry over fresh ephemeral ports (review round 2, C20): the
+	// freePort() probe has a TOCTOU window before we listen.
+	let handle: DashboardHandle | null = null;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const candidate = await startDashboardServer({
+			port: await freePort(),
+			host: '127.0.0.1',
+			directory: dir,
+		});
+		if (candidate.listening) {
+			handle = candidate;
+			break;
+		}
+		await candidate.close();
+	}
+	if (!handle) throw new Error('no bindable ephemeral port after 3 attempts');
 	handles.push({ dir, handle });
 	expect(handle.listening).toBe(true);
 	expect(typeof handle.port).toBe('number');

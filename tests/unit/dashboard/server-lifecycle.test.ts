@@ -11,6 +11,7 @@ import * as http from 'node:http';
 import * as net from 'node:net';
 import {
 	closeDashboardServerForRoot,
+	closeDashboardServerForRootIfOwner,
 	type DashboardHandle,
 	getDashboardHandle,
 	startDashboardServer,
@@ -28,6 +29,29 @@ function freePort(): Promise<number> {
 			s.close(() => resolve(p));
 		});
 	});
+}
+
+/**
+ * Bind with bounded retry over fresh ephemeral ports (review round 2, C20):
+ * the close-then-rebind freePort() probe has a TOCTOU window — another
+ * process can claim the port before we listen. Three attempts make an
+ * EADDRINUSE here a real bug instead of a flake.
+ */
+async function startOnFreePort(dir: string): Promise<DashboardHandle> {
+	let lastStatus = 'untried';
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const handle = await startDashboardServer({
+			port: await freePort(),
+			host: '127.0.0.1',
+			directory: dir,
+		});
+		if (handle.listening) return handle;
+		lastStatus = handle.status;
+		await handle.close();
+	}
+	throw new Error(
+		`no bindable ephemeral port after 3 attempts (${lastStatus})`,
+	);
 }
 
 function reachable(port: number): Promise<boolean> {
@@ -102,11 +126,7 @@ describe('dashboard lifecycle', () => {
 	it('starts, writes the status file, and closes with connection-refused', async () => {
 		const dir = canonicalMkdtemp('dash-life-start');
 		tempDirs.push(dir);
-		const handle = await startDashboardServer({
-			port: await freePort(),
-			host: '127.0.0.1',
-			directory: dir,
-		});
+		const handle = await startOnFreePort(dir);
 		expect(handle.listening).toBe(true);
 		expect(handle.enabled).toBe(true);
 		expect(handle.status).toBe('listening');
@@ -194,11 +214,7 @@ describe('dashboard lifecycle', () => {
 		tempDirs.push(dir);
 		// No .swarm at all — the dashboard must not materialize one just to
 		// answer (the status file write at start is the sanctioned exception).
-		const handle = await startDashboardServer({
-			port: await freePort(),
-			host: '127.0.0.1',
-			directory: dir,
-		});
+		const handle = await startOnFreePort(dir);
 		try {
 			const base = `http://127.0.0.1:${handle.port}/t/${handle.token}`;
 			for (const p of [
@@ -221,7 +237,45 @@ describe('dashboard lifecycle', () => {
 		}
 	});
 
-	it('bounds large stores: row caps and byte caps on the timeline', async () => {
+	it('serves the NEWEST events past the row window (latest-N, F-D)', async () => {
+		const dir = canonicalMkdtemp('dash-life-newest');
+		tempDirs.push(dir);
+		// Small payloads so the response never hits the byte cap — this
+		// isolates the latest-N semantics from the shrink path.
+		for (let i = 0; i < 320; i++) {
+			const ev = createObservation('gate_passed', {
+				sessionId: `new-sess-${i % 8}`,
+				taskId: `new-task-${i}`,
+				gate: `DASHNEW-${i}`,
+			});
+			appendObservabilityEventDb(dir, ev);
+		}
+		const handle = await startOnFreePort(dir);
+		try {
+			const base = `http://127.0.0.1:${handle.port}/t/${handle.token}`;
+			const res = await getBody(`${base}/api/timeline`);
+			expect(res.status).toBe(200);
+			const timeline = JSON.parse(res.body) as {
+				events: Array<{ payload: string }>;
+				totalMatching: number;
+				truncated: boolean;
+			};
+			expect(timeline.totalMatching).toBe(320);
+			expect(timeline.events.length).toBe(100);
+			expect(timeline.truncated).toBe(true);
+			const markers = new Set(
+				timeline.events.flatMap((e) => e.payload.match(/DASHNEW-\d+/g) ?? []),
+			);
+			// The window must be the NEWEST 100 (rowids 220..319), not the
+			// oldest — the pre-fix ASC-5000 window showed stale events here.
+			expect(markers.has('DASHNEW-319')).toBe(true);
+			expect(markers.has('DASHNEW-0')).toBe(false);
+		} finally {
+			await handle.close();
+		}
+	});
+
+	it('bounds large stores: row caps, byte caps, and VALID JSON under the cap', async () => {
 		const dir = canonicalMkdtemp('dash-life-big');
 		tempDirs.push(dir);
 		// Seed 320 events with marker-bearing payloads (mirrors frozen C7(c)).
@@ -233,33 +287,46 @@ describe('dashboard lifecycle', () => {
 			});
 			appendObservabilityEventDb(dir, ev);
 		}
-		const handle = await startDashboardServer({
-			port: await freePort(),
-			host: '127.0.0.1',
-			directory: dir,
-		});
+		const handle = await startOnFreePort(dir);
 		try {
 			const base = `http://127.0.0.1:${handle.port}/t/${handle.token}`;
 			const timelineRes = await getBody(`${base}/api/timeline`);
 			expect(timelineRes.status).toBe(200);
+			// The structural shrink keeps every response UNDER the real cap and
+			// PARSEABLE (review round 2, F-B/C8: the old assertions were 2x
+			// loose and never parsed the body, so a splice that produced invalid
+			// JSON was invisible).
 			expect(Buffer.byteLength(timelineRes.body, 'utf8')).toBeLessThan(
-				512 * 1024,
+				256 * 1024,
 			);
 			const timeline = JSON.parse(timelineRes.body) as {
 				events: Array<{ payload: string }>;
 				totalMatching: number;
+				truncated: boolean;
+				responseTruncated?: boolean;
 			};
 			expect(timeline.events.length).toBeLessThanOrEqual(100);
 			expect(timeline.totalMatching).toBe(320);
+			// The structural shrink drops array tails to fit the cap — assert
+			// the surviving set respects the row bound (the F-D newest-window
+			// semantics are covered by the small-payload test above, which
+			// does not fire the shrink).
 			const markers = new Set(
-				(timeline.body ?? timelineRes.body).match(/DASHBIG-\d+/g) ?? [],
+				timeline.events.flatMap((e) => e.payload.match(/DASHBIG-\d+/g) ?? []),
 			);
 			expect(markers.size).toBeLessThanOrEqual(100);
+			expect(timeline.truncated).toBe(true);
 
 			const overviewRes = await getBody(`${base}/api/overview`);
 			expect(Buffer.byteLength(overviewRes.body, 'utf8')).toBeLessThan(
-				512 * 1024,
+				256 * 1024,
 			);
+			// The overview must parse even when the shrink loop fired.
+			const overview = JSON.parse(overviewRes.body) as {
+				timeline: { events: unknown[] };
+				responseTruncated?: boolean;
+			};
+			expect(Array.isArray(overview.timeline.events)).toBe(true);
 		} finally {
 			await handle.close();
 		}
@@ -268,11 +335,7 @@ describe('dashboard lifecycle', () => {
 	it('closeDashboardServerForRoot is the sync cleanup path (dispose/exit)', async () => {
 		const dir = canonicalMkdtemp('dash-life-rootclose');
 		tempDirs.push(dir);
-		const handle = await startDashboardServer({
-			port: await freePort(),
-			host: '127.0.0.1',
-			directory: dir,
-		});
+		const handle = await startOnFreePort(dir);
 		expect(handle.listening).toBe(true);
 		closeDashboardServerForRoot(dir);
 		expect(getDashboardHandle(dir)).toBeNull();
@@ -287,6 +350,70 @@ describe('dashboard lifecycle', () => {
 		expect(alive).toBe(false);
 		// Closing an unknown root is a no-op.
 		expect(() => closeDashboardServerForRoot(dir)).not.toThrow();
+	});
+
+	it('closeDashboardServerForRootIfOwner skips a newer instance (F-A)', async () => {
+		const dir = canonicalMkdtemp('dash-life-owner');
+		tempDirs.push(dir);
+		// Instance A starts; instance B later restarts the same root (B wins
+		// the registry). A's stale dispose must NOT tear down B's listener.
+		const handleA = await startDashboardServer({
+			port: await freePort(),
+			host: '127.0.0.1',
+			directory: dir,
+		});
+		const handleB = await startDashboardServer({
+			port: await freePort(),
+			host: '127.0.0.1',
+			directory: dir,
+		});
+		expect(handleA.listening).toBe(true);
+		expect(handleB.listening).toBe(true);
+		expect(getDashboardHandle(dir)?.port).toBe(handleB.port);
+		// A's stale close: owner mismatch → skip.
+		expect(closeDashboardServerForRootIfOwner(dir, handleA)).toBe(false);
+		expect(getDashboardHandle(dir)?.port).toBe(handleB.port);
+		expect(await reachable(handleB.port as number)).toBe(true);
+		// B's own close: owner match → closes.
+		expect(closeDashboardServerForRootIfOwner(dir, handleB)).toBe(true);
+		expect(getDashboardHandle(dir)).toBeNull();
+		expect(await reachable(handleB.port as number)).toBe(false);
+		// A's handle is now dead too (the restart purged it before binding B).
+		await handleA.close();
+		await handleB.close();
+	});
+
+	it('evicts the oldest root at the registry cap WITH a live close (C16)', async () => {
+		const roots: { dir: string; handle: DashboardHandle }[] = [];
+		try {
+			// MAX_REGISTRY_ENTRIES is 8: the 9th start must evict (and close)
+			// the oldest.
+			for (let i = 0; i < 9; i++) {
+				const dir = canonicalMkdtemp(`dash-life-evict-${i}`);
+				tempDirs.push(dir);
+				const handle = await startOnFreePort(dir);
+				expect(handle.listening).toBe(true);
+				roots.push({ dir, handle });
+			}
+			// The oldest root was evicted: no registry entry, listener closed.
+			expect(getDashboardHandle(roots[0].dir)).toBeNull();
+			let oldestAlive = true;
+			for (let i = 0; i < 12; i++) {
+				await new Promise((r) => setTimeout(r, 250));
+				if (!(await reachable(roots[0].handle.port as number))) {
+					oldestAlive = false;
+					break;
+				}
+			}
+			expect(oldestAlive).toBe(false);
+			// The newest root is untouched.
+			expect(getDashboardHandle(roots[8].dir)?.listening).toBe(true);
+		} finally {
+			for (const { dir, handle } of roots) {
+				void handle.close();
+				closeDashboardServerForRoot(dir);
+			}
+		}
 	});
 
 	it('rejects invalid start options without binding', async () => {

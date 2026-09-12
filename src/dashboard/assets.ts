@@ -41,22 +41,22 @@ footer { margin-top: 2.5rem; opacity: 0.65; font-size: 0.8rem; }
 </head>
 <body>
 <h1>opencode-swarm · mission control</h1>
-<p class="muted" id="dbline">loading…</p>
+<p class="muted" id="dbline" role="status" aria-live="polite">loading…</p>
 
 <h2>Gates &amp; circuits</h2>
-<div id="gates">loading…</div>
+<div id="gates" role="status" aria-live="polite">loading…</div>
 
 <h2>Pending delegations (age bands)</h2>
-<div id="delegations">loading…</div>
+<div id="delegations" role="status" aria-live="polite">loading…</div>
 
 <h2>Lane liveness</h2>
-<div id="lanes">loading…</div>
+<div id="lanes" role="status" aria-live="polite">loading…</div>
 
 <h2>Task board</h2>
-<div id="tasks">loading…</div>
+<div id="tasks" role="status" aria-live="polite">loading…</div>
 
 <h2>Activity timeline</h2>
-<div id="timeline">loading…</div>
+<div id="timeline" role="status" aria-live="polite">loading…</div>
 
 <footer>Read-only view. Abort/recover actions live in the swarm commands and
 tools (<code>/swarm status</code>, <code>/swarm report</code>,
@@ -81,7 +81,16 @@ tools (<code>/swarm status</code>, <code>/swarm report</code>,
       return '<th>' + esc(h) + '</th>';
     }).join('') + '</tr></thead><tbody>' + rows.join('') + '</tbody></table>';
   };
-  fetch(api('overview')).then(function (r) { return r.json(); }).then(function (d) {
+  // Bounded client-side timeout (review round 2, C5): if the host wedges
+  // after serving this shell, fail visibly instead of hanging on "loading…".
+  var fetchWithTimeout = function (url, ms) {
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, ms);
+    return fetch(url, { signal: controller.signal }).finally(function () {
+      clearTimeout(timer);
+    });
+  };
+  fetchWithTimeout(api('overview'), 15000).then(function (r) { return r.json(); }).then(function (d) {
     var db = document.getElementById('dbline');
     if (db) { db.textContent = 'swarm.db: ' + esc(String(JSON.stringify(d.dbHealth))); }
     var gates = d.gates || {};
@@ -134,12 +143,23 @@ tools (<code>/swarm status</code>, <code>/swarm report</code>,
         cell(e.taskId || '') + cell(e.payload) + '</tr>';
     });
     var ti = document.getElementById('timeline');
-    if (ti) { ti.innerHTML = tlRows.length
-      ? table(['occurred', 'kind', 'severity', 'task', 'payload'], tlRows)
-      : '<p class="muted">no observability events recorded</p>'; }
+    if (ti) {
+      var tlNote = (tl.totalMatching > (tl.events || []).length)
+        ? '<p class="muted">showing the newest ' + tlRows.length + ' of ' +
+          esc(tl.totalMatching) + ' events</p>'
+        : '';
+      ti.innerHTML = tlNote + (tlRows.length
+        ? table(['occurred', 'kind', 'severity', 'task', 'payload'], tlRows)
+        : '<p class="muted">no observability events recorded</p>');
+    }
   }).catch(function (err) {
-    var db = document.getElementById('dbline');
-    if (db) { db.textContent = 'overview unavailable: ' + err; }
+    // Per-panel error states (review round 2, C12): never leave a panel
+    // stuck on "loading…" — every region announces the failure.
+    var PANEL_IDS = ['dbline', 'gates', 'delegations', 'lanes', 'tasks', 'timeline'];
+    for (var i = 0; i < PANEL_IDS.length; i++) {
+      var el = document.getElementById(PANEL_IDS[i]);
+      if (el) { el.textContent = 'unavailable: ' + err; }
+    }
   });
 })();
 </script>
