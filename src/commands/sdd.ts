@@ -25,12 +25,13 @@ const SWARM_SPEC_REL = path.join('.swarm', 'spec.md');
 const USAGE = `Usage:
   /swarm sdd status [--json] [--source <provider>]
   /swarm sdd validate [--json] [--change <id>] [--source <provider>] [--feature <id>]
-  /swarm sdd project [--dry-run] [--overwrite] [--json] [--change <id>] [--source <provider>] [--feature <id>]
+  /swarm sdd project [--dry-run] [--overwrite] [--json] [--change <id>] [--source <provider>] [--feature <id>|--feature all]
 
 Source options (required when both openspec and speckit are detected):
   --source <swarm|openspec|speckit>  select the SDD provider explicitly
-  --feature <id>                     Spec-Kit feature directory name to project
-                                     (required when multiple Spec-Kit features exist)
+  --feature <id>                     Spec-Kit feature directory name to project (one feature)
+  --feature all                      project ALL detected Spec-Kit features (project only;
+                                     the no-flag default with multiple features does the same)
 
 OpenSpec-compatible SDD support:
   - reads checked-in openspec/specs and openspec/changes artifacts
@@ -39,7 +40,10 @@ OpenSpec-compatible SDD support:
 
 Spec-Kit SDD support:
   - detects .specify/ marker + specs/NNN-feature-name/spec.md layout
-  - projects a single Spec-Kit feature into .swarm/spec.md via /swarm sdd project
+  - projects ALL features into one .swarm/spec.md with feature-scoped ids (<featureId>/FR-###)
+    when multiple features exist; --feature <id> selects one (bare FR-### ids, v1 form)
+  - optional tasks.md check-off write-back on task completion: enable speckit_checkoff.enabled
+    in the plugin config (off by default; see docs/planning.md)
   - use --source speckit or --source openspec to disambiguate when both are present`;
 
 interface ParsedSddArgs {
@@ -162,11 +166,6 @@ function formatSpeckitError(resolution: SpeckitResolution): string {
 	switch (resolution.kind) {
 		case 'empty':
 			return 'Spec-Kit layout detected (.specify/ marker present) but no feature directories found under specs/.';
-		case 'ambiguous':
-			return [
-				`Multiple Spec-Kit features detected: ${resolution.features.join(', ')}.`,
-				'Use --feature <id> to select one.',
-			].join('\n');
 		case 'unknown_feature':
 			return [
 				`Unknown Spec-Kit feature '${resolution.feature}'.`,
@@ -569,19 +568,27 @@ export async function handleSddProjectCommand(
 	// parsed.source === 'openspec' → useSpeckit = false (OpenSpec path, default behavior).
 
 	if (useSpeckit) {
-		// Spec-Kit projection path (FR-002, FR-008, FR-013).
+		// Spec-Kit projection path (FR-002, FR-008, FR-013; #2501 multi-feature).
+		// `--feature all` selects the multi-feature projection (identical to
+		// omitting the flag); an explicit feature id keeps v1 single-feature
+		// semantics. 'all' is intercepted HERE, in the project path only —
+		// status/validate keep per-feature semantics and reject it through the
+		// unknown_feature error, which lists the available feature ids.
+		const featureSelector =
+			parsed.feature === 'all' ? undefined : parsed.feature;
 		const resolution = resolveSpeckitProjection(directory, {
-			feature: parsed.feature,
+			feature: featureSelector,
 		});
 		if (resolution.kind !== 'ok') {
 			return `Error: ${formatSpeckitError(resolution)}\n\n${USAGE}`;
 		}
 
 		// Reuse the atomic-write + archive logic in writeProjectedSpecSync (task 2.2).
-		// Pass resolution.feature so the auto-selected feature id is always explicit.
+		// featureSelector keeps single-feature selection explicit; undefined means
+		// the multi-feature default (or single-feature auto-select).
 		const result = _internals.writeProjectedSpecSync(directory, {
 			source: 'speckit',
-			feature: resolution.feature,
+			feature: featureSelector,
 			dryRun: parsed.dryRun,
 			overwrite: parsed.overwrite,
 		});

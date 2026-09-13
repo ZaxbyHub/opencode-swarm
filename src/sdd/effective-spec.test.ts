@@ -421,12 +421,16 @@ describe('buildSpeckitProjectionSync', () => {
 		expect(a?.content).toBe(b?.content);
 	});
 
-	test('multi-feature with no feature option returns null (clean seam for task 1.4)', () => {
+	test('multi-feature with no feature option projects ALL features (#2501)', () => {
 		writeSpeckitFixture(tempDir, { variant: 'multi-feature' });
 
 		const spec = buildSpeckitProjectionSync(tempDir);
 
-		expect(spec).toBeNull();
+		// #2501: no-option multi-feature now yields the combined projection (was
+		// null on the v1 ambiguous path); ids are feature-scoped.
+		expect(spec).not.toBeNull();
+		expect(spec?.content).toContain('001-alpha/FR-001');
+		expect(spec?.content).toContain('002-beta/FR-001');
 	});
 
 	test('multi-feature with explicit feature option projects only that feature', () => {
@@ -568,16 +572,23 @@ describe('resolveSpeckitProjection — discriminated resolution (task 1.4)', () 
 		expect(resolution).toEqual({ kind: 'empty' });
 	});
 
-	test('ambiguous: multi-feature, no feature option — features listed sorted (FR-008)', () => {
+	test('multi-feature, no feature option: projects ALL features with feature-scoped ids (#2501)', () => {
 		writeSpeckitFixture(tempDir, { variant: 'multi-feature' });
 
 		const resolution = resolveSpeckitProjection(tempDir);
 
-		// Full object equality asserts both kind AND the sorted features list.
-		expect(resolution).toEqual({
-			kind: 'ambiguous',
-			features: ['001-alpha', '002-beta'],
-		});
+		// #2501: the ambiguous error is gone — the no-option default projects every
+		// feature; ids are feature-scoped and the resolution lists the feature set.
+		expect(resolution.kind).toBe('ok');
+		if (resolution.kind !== 'ok') return;
+		expect(resolution.features).toEqual(['001-alpha', '002-beta']);
+		expect(resolution.namespaced).toBe(true);
+		expect(resolution.spec.sourcePaths).toEqual([
+			'specs/001-alpha/spec.md',
+			'specs/002-beta/spec.md',
+		]);
+		expect(resolution.spec.content).toContain('001-alpha/FR-001');
+		expect(resolution.spec.content).toContain('002-beta/FR-001');
 	});
 
 	test('unknown_feature: multi-feature, non-existent feature id given', () => {
@@ -614,7 +625,8 @@ describe('resolveSpeckitProjection — discriminated resolution (task 1.4)', () 
 		if (resolution.kind !== 'ok') {
 			throw new Error(`Expected kind 'ok', got '${resolution.kind}'`);
 		}
-		expect(resolution.feature).toBe('001-auth-service');
+		expect(resolution.features).toEqual(['001-auth-service']);
+		expect(resolution.namespaced).toBe(false);
 		expect(resolution.spec.source).toBe('speckit_projection');
 		// FR-003: original ids preserved.
 		expect(resolution.spec.content).toContain('**FR-001**');
@@ -635,7 +647,8 @@ describe('resolveSpeckitProjection — discriminated resolution (task 1.4)', () 
 		if (resolution.kind !== 'ok') {
 			throw new Error(`Expected kind 'ok', got '${resolution.kind}'`);
 		}
-		expect(resolution.feature).toBe('002-beta');
+		expect(resolution.features).toEqual(['002-beta']);
+		expect(resolution.namespaced).toBe(false);
 		expect(resolution.spec.source).toBe('speckit_projection');
 		expect(resolution.spec.sourcePaths).toEqual(['specs/002-beta/spec.md']);
 		expect(resolution.spec.content).toContain('beta capability');

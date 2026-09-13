@@ -3861,6 +3861,21 @@ export const PluginConfigSchema = z.object({
 		'Structured design-doc generation (issue #1080, docs_design agent) — opt-in.',
 	),
 
+	// Spec-Kit tasks.md check-off write-back (issue #2501 Part B — opt-in, OFF by default)
+	speckit_checkoff: z
+		.object({
+			enabled: z
+				.boolean()
+				.default(false)
+				.describe(
+					'Check off mapped Spec-Kit tasks in the source tasks.md when Swarm completes a plan task (issue #2501). Off by default — write-back to user-owned files is opt-in.',
+				),
+		})
+		.optional()
+		.describe(
+			'Spec-Kit tasks.md check-off round trip (issue #2501) — opt-in, never on by default.',
+		),
+
 	// Git executable resolution override (issue #2236 hardening)
 	git: GitConfigSchema.optional().describe(
 		'Git executable resolution override (issue #2236 hardening).',

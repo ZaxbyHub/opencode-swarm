@@ -465,16 +465,62 @@ describe('/swarm sdd command handlers — Spec-Kit', () => {
 		expect(out).toContain('--source');
 	});
 
-	// SC-009 / FR-008: multi-feature-no-feature → error naming features + --feature.
-	test('project with multi-feature Spec-Kit and no --feature errors naming features (FR-008)', async () => {
+	// SC-009 / #2501: multi-feature with no --feature now projects ALL features with
+	// feature-scoped ids (the v1 ambiguous hard error is gone).
+	test('project with multi-feature Spec-Kit and no --feature projects all features with namespaced ids (#2501)', async () => {
 		writeSpeckitFixture(skDir, { variant: 'multi-feature' });
 
 		const out = await handleSddProjectCommand(skDir, []);
+		const spec = fs.readFileSync(
+			path.join(skDir, '.swarm', 'spec.md'),
+			'utf-8',
+		);
+
+		expect(out).toContain('SDD projection written');
+		// Both features' ids present, feature-scoped and distinct (both restart at FR-001).
+		expect(spec).toContain('001-alpha/FR-001');
+		expect(spec).toContain('002-beta/FR-001');
+		expect(spec).toContain('specs/001-alpha/spec.md');
+		expect(spec).toContain('specs/002-beta/spec.md');
+	});
+
+	// #2501: --feature all is an explicit alias for the multi-feature default.
+	test('project --feature all produces the multi-feature projection byte-identically (#2501)', async () => {
+		writeSpeckitFixture(skDir, { variant: 'multi-feature' });
+
+		const allOut = await handleSddProjectCommand(skDir, ['--feature', 'all']);
+		const allSpec = fs.readFileSync(
+			path.join(skDir, '.swarm', 'spec.md'),
+			'utf-8',
+		);
+		fs.rmSync(path.join(skDir, '.swarm'), { recursive: true, force: true });
+		await handleSddProjectCommand(skDir, []);
+		const noFlagSpec = fs.readFileSync(
+			path.join(skDir, '.swarm', 'spec.md'),
+			'utf-8',
+		);
+
+		expect(allOut).toContain('SDD projection written');
+		expect(allSpec).toBe(noFlagSpec);
+	});
+
+	// #2501: 'all' is a project-path-only sentinel — status/validate keep
+	// per-feature semantics and reject it through unknown_feature, listing the
+	// real feature ids (the plan's refusal pin).
+	test('validate --feature all is rejected naming the real features (#2501)', async () => {
+		writeSpeckitFixture(skDir, { variant: 'multi-feature' });
+
+		const out = await handleSddValidateCommand(skDir, [
+			'--source',
+			'speckit',
+			'--feature',
+			'all',
+		]);
 
 		expect(out).toContain('Error:');
+		expect(out).toContain("'all'");
 		expect(out).toContain('001-alpha');
-		expect(out).toContain('002-beta');
-		expect(out).toContain('--feature');
+		expect(out).toContain('Available features');
 	});
 
 	// --source speckit selects speckit when openspec is also present (SC-005).

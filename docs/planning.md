@@ -274,18 +274,40 @@ A repository that has a `specs/` directory but no `.specify/` marker is **not** 
 
 #### Projection
 
-`/swarm sdd project` projects a single Spec-Kit feature into `.swarm/spec.md`:
+`/swarm sdd project` projects Spec-Kit features into `.swarm/spec.md`:
 
 ```
-/swarm sdd project                                              # auto-detect; single feature only
-/swarm sdd project --feature 001-my-feature                  # required when multiple features exist
+/swarm sdd project                                              # auto-detect; ALL features when several exist
+/swarm sdd project --feature 001-my-feature                  # ONE feature (v1 single-feature form)
+/swarm sdd project --feature all                             # explicit alias for the multi-feature default
 /swarm sdd project --source speckit --feature 001-my-feature  # explicit when both layouts are present
 /swarm sdd project --overwrite                                # overwrite existing .swarm/spec.md
 ```
 
-`--feature <id>` takes the full feature directory name (e.g. `001-my-feature`). It is required when more than one `specs/<dir>` exists and produces an error when used with `--source openspec` or `--source swarm`.
+`--feature <id>` takes the full feature directory name (e.g. `001-my-feature`) and selects
+exactly ONE feature (an error with `--source openspec` or `--source swarm`). `--feature all`
+is accepted by `project` only. A feature whose `spec.md` yields no parsable requirements
+refuses the whole projection (named) rather than silently dropping it.
 
-Original `FR-###` identifiers in the feature's `spec.md` are preserved unchanged. When a requirement carries no explicit identifier, a stable one is synthesized — re-running the same source produces an identical projection. The resulting `.swarm/spec.md` is treated identically to an OpenSpec projection by all downstream tools: drift verification, lint, and requirement coverage apply with no source-specific handling. The projected spec also includes a scaffold `## Success Criteria` section with placeholder `SC-###` identifiers and `[NEEDS CLARIFICATION]` markers — fill these in with concrete success criteria before planning.
+**Id-identity model (feature-scoped).** When ONE feature is selected (explicitly or by
+single-feature auto-detect), original bare `FR-###` identifiers are preserved unchanged —
+byte-identical to the v1 projection. When MULTIPLE features project together, requirement
+ids are FEATURE-SCOPED: `<featureId>/FR-###` (e.g. `001-login/FR-001`). Spec-Kit restarts
+`FR-001` in every feature, so this is the only form that keeps two features' `FR-001`
+distinct through drift scoring and coverage — a flat renumbering (`002-x/FR-001` →
+`FR-047`) was rejected because drift reports would cite ids the user's source does not
+contain (a traceability disconnect: the report could not be walked back to the spec line).
+The trade-off: plan and digest text should cite either the full namespaced id or the bare
+`FR-###`; drift scoring treats a bare plan reference as covering every feature's
+same-numbered requirement (never a false MAJOR_DRIFT), while a namespaced reference stays
+feature-precise. When a requirement carries no explicit identifier, a stable one is
+synthesized per feature — re-running the same source produces an identical projection. The
+resulting `.swarm/spec.md` is treated identically to an OpenSpec projection by all
+downstream tools: drift verification, lint, and requirement coverage apply with no
+source-specific handling. The projected spec also includes a scaffold `## Success Criteria`
+section (one per feature in multi-feature mode) with placeholder `SC-###` identifiers and
+`[NEEDS CLARIFICATION]` markers — fill these in with concrete success criteria before
+planning.
 
 #### Source precedence
 
@@ -310,10 +332,23 @@ When resolving which source feeds planning and drift enforcement:
 
 `--source speckit` and `--feature <id>` apply to `validate` by the same rules as `project`.
 
-#### v1 boundaries
+#### tasks.md check-off round trip (opt-in)
 
-- **Single-feature only.** When multiple `specs/<dir>` directories exist, exactly one must be selected with `--feature`; omitting it produces a hard error naming the detected features.
-- **Multi-feature aggregation** (projecting all features into one effective spec) and **round-trip `tasks.md` check-off** (writing completed tasks back to the source file) are deferred to issue [#1577](https://github.com/ZaxbyHub/opencode-swarm/issues/1577).
+Swarm can check off Spec-Kit tasks in the SOURCE `tasks.md` (`- [ ]` → `- [x]`) when a plan
+task completes — **opt-in, OFF by default** (enable `speckit_checkoff.enabled` in the plugin
+config; it is a no-op for native and OpenSpec sources). Projection captures a check-off
+ledger at `.swarm/speckit-checkoff-ledger.json` mapping each `T###` to its requirement refs:
+explicit `FR-###` references on the task line, plus the story-index mapping (`[US n]` maps
+to the feature's n-th requirement in projection order). Safety semantics: only the matched
+task line's checkbox bytes change (line endings and every other byte are preserved —
+byte parity); a user edit between read and write is reconciled, never clobbered; a task the
+user reopened (`[x]` → `[ ]`) is reported and never re-checked; a regenerated/renumbered
+`tasks.md` (ledger digest mismatch) refuses all writes for that feature until the next
+`/swarm sdd project` rebuilds the ledger; writes are atomic under a cross-process lock; a
+completion matching tasks in several features checks each and reports per-feature rows; a
+completion matching nothing reports unmatched. Writing `specs/<feature>/tasks.md` (outside
+`.swarm/`) is a deliberate, issue-mandated exception to runtime-state containment — it is
+the user's own artifact being round-tripped, and the gate + safety semantics above bound it.
 
 ### Spec Format
 

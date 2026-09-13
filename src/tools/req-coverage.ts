@@ -44,6 +44,18 @@ interface RequirementMatch {
 	text: string;
 }
 
+/**
+ * Normalize an extracted requirement id (#2501): bare ids uppercase (v1 behavior);
+ * feature-scoped ids uppercase ONLY the FR part — the namespace is a feature
+ * DIRECTORY name and must keep its case to match the projected spec verbatim.
+ */
+function normalizeFrId(raw: string): string {
+	const idx = raw.lastIndexOf('/');
+	return idx === -1
+		? raw.toUpperCase()
+		: `${raw.slice(0, idx + 1)}${raw.slice(idx + 1).toUpperCase()}`;
+}
+
 // ============ Parsing ============
 /**
  * Extract all FR-### requirements from spec content.
@@ -55,18 +67,22 @@ export function extractRequirements(specContent: string): RequirementMatch[] {
 	// Split content into lines for analysis
 	const lines = specContent.split('\n');
 
-	// Match FR-XXX at start of line or after bullet markers
-	const frLineRegex = /^\s*[-*]?\s*(FR-\d{3})\s*[:.\-)]\s*(.+)/gi;
-	// Also match inline FR references: "FR-001 ... MUST ..."
+	// Match FR-### at start of line or after bullet markers. Issue #2501: an
+	// optional feature-scoped namespace prefix (`<featureId>/FR-###`) is captured
+	// so multi-feature projections keep per-feature ids distinct.
+	const frLineRegex =
+		/^\s*[-*]?\s*((?:[A-Za-z0-9][A-Za-z0-9._-]*\/)?FR-\d{3})\s*[:.\-)]\s*(.+)/gi;
+	// Also match inline FR references: "FR-001 ... MUST ..." — the namespace
+	// prefix, when present, is part of the id (never stripped; #2501).
 	const frInlineRegex =
-		/\b(FR-\d{3})\b[^.!?]*?(MUST|SHOULD|SHALL)[^.!?]*[.!?]?/gi;
+		/\b((?:[A-Za-z0-9][A-Za-z0-9._-]*\/)?FR-\d{3})\b[^.!?]*?(MUST|SHOULD|SHALL)[^.!?]*[.!?]?/gi;
 
 	for (const line of lines) {
 		// Check for FR requirement at start of line
 		const lineMatchResults = [...line.matchAll(frLineRegex)];
 		if (lineMatchResults.length > 0) {
 			const lineMatch = lineMatchResults[0];
-			const id = lineMatch[1].toUpperCase();
+			const id = normalizeFrId(lineMatch[1]!);
 			const restOfLine = lineMatch[2];
 
 			// Extract obligation and text
@@ -79,7 +95,7 @@ export function extractRequirements(specContent: string): RequirementMatch[] {
 
 		// Check for inline FR references
 		for (const inlineMatch of line.matchAll(frInlineRegex)) {
-			const id = inlineMatch[1].toUpperCase();
+			const id = normalizeFrId(inlineMatch[1]!);
 			const matchedText = inlineMatch[0];
 
 			// Check if we already have this requirement

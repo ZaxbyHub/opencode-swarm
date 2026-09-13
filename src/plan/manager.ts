@@ -2643,6 +2643,37 @@ export async function updateTaskStatus(
 					);
 				}
 			}
+
+			// Spec-Kit tasks.md check-off round trip (issue #2501 Part B). Same
+			// centralization argument as run-memory above: BOTH completion writers
+			// route through here. Deliberately AFTER the run-memory block so the
+			// funnel order stays stable, and completion-only (blocked tasks never
+			// check anything off). Non-fatal contract mirrors run-memory — the
+			// callee is fail-open too, but do not depend on it. The import is
+			// deliberately LAZY: plan/manager is a hub module and speckit-checkoff
+			// pulls the config loader + lock machinery; keeping it off the static
+			// graph avoids widening every suite that mocks that chain.
+			if (status === 'completed') {
+				try {
+					const completedTask = updatedPlan.phases
+						.flatMap((phase) => phase.tasks)
+						.find((candidate) => candidate.id === taskId);
+					const { maybePropagateSpeckitCheckoff } = await import(
+						'../sdd/speckit-checkoff.js'
+					);
+					await maybePropagateSpeckitCheckoff(directory, {
+						taskId,
+						frRefs: completedTask?.fr_refs ?? [],
+						text: completedTask?.description ?? '',
+					});
+				} catch (err) {
+					warn(
+						`[plan/manager] speckit check-off for ${taskId} failed (non-fatal): ${
+							err instanceof Error ? err.message : String(err)
+						}`,
+					);
+				}
+			}
 			// Rule 2 of the greenfield-smart redesign: auto-commit on task
 			// completion. Centralized here (rather than in the
 			// `update_task_status` tool) because BOTH callers route through
