@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.178.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.178.1...v7.178.2) (2026-09-13)
+
+
+### Bug Fixes
+
+* **repo-map:** connect the six remaining audit actions + VALID_ACTIONS consumer ratchet ([#2540](https://github.com/ZaxbyHub/opencode-swarm/issues/2540)) ([a424a7d](https://github.com/ZaxbyHub/opencode-swarm/commit/a424a7dfc0097ec8baecd8a1cfde27a5874da18d))
+
 ## [7.178.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.178.0...v7.178.1) (2026-09-12)
 
 
