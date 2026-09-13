@@ -27,7 +27,6 @@ const {
 	DEFAULT_TIMEOUT_MS,
 	MAX_TIMEOUT_MS,
 	MAX_SAFE_TEST_FILES,
-	MAX_SAFE_SOURCE_FILES,
 	SUPPORTED_FRAMEWORKS,
 	test_runner,
 	detectTestFramework,
@@ -861,7 +860,7 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 		expect(parsed.scope).toBe('convention');
 		expect(parsed.error).toContain('resolved to zero test files');
 		expect(parsed.message).toContain('No matching test files found');
-		expect(parsed.outcome).toBe('skip');
+		expect(parsed.outcome).toBe('no_impacted_tests');
 
 		process.chdir(originalCwd);
 		(() => {
@@ -1487,44 +1486,20 @@ describe('test-runner.ts — targeted framework safeguards', () => {
  * discovery fans out to many test files, triggers scope_exceeded, and LLMs
  * cascade to scope "all" (env-gated) — freezing the OpenCode session.
  */
-describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
-	test('MAX_SAFE_SOURCE_FILES is exported and equals 1', () => {
-		expect(MAX_SAFE_SOURCE_FILES).toBe(1);
+describe('test-runner.ts - bounded multi-source discovery (issue #2492)', () => {
+	// The single-source pre-resolution cap (MAX_SAFE_SOURCE_FILES=1, issue #864)
+	// was superseded by the bounded multi-source contract: multi-source
+	// graph/impact/convention batches run whenever the resolved test-file union
+	// stays under MAX_SAFE_TEST_FILES, deduplicated across sources. The advisory
+	// estimateFanOut early-out remains, but the binding guard is the
+	// post-resolution count (frozen acceptance checks and
+	// tests/unit/tools/test-runner-scope-cap.test.ts assert the typed overflow).
+
+	test('MAX_SAFE_TEST_FILES is exported and equals 50', () => {
+		expect(MAX_SAFE_TEST_FILES).toBe(50);
 	});
 
-	test('scope "graph" with 1 source file does NOT trigger source-file guard', async () => {
-		// A single source file is the allowed case — guard must not fire.
-		// The call will fail later (no test framework in CWD), but not at the source-file guard.
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-graph-1src-')),
-		);
-		const originalCwd = process.cwd();
-		process.chdir(tempDir);
-
-		fs.writeFileSync('package.json', JSON.stringify({ name: 'no-runner' }));
-		fs.mkdirSync('src', { recursive: true });
-		fs.writeFileSync('src/utils.ts', 'export const x = 1;');
-
-		const result = await test_runner.execute(
-			{ scope: 'graph', files: ['src/utils.ts'] },
-			{} as any,
-		);
-		const parsed = JSON.parse(result);
-
-		// Must NOT be the source-file guard error
-		expect(parsed.error).not.toContain('accepts at most');
-
-		process.chdir(originalCwd);
-		(() => {
-			try {
-				fs.rmSync(tempDir, { recursive: true, force: true });
-			} catch {
-				/* ignore */
-			}
-		})();
-	}, 15000);
-
-	test('scope "graph" with 2 source files returns scope_exceeded before discovery fan-out', async () => {
+	test('scope "graph" with 2 source files and no tests resolves typed no_impacted_tests (no pre-resolution rejection)', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-graph-2src-')),
 		);
@@ -1548,12 +1523,17 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		);
 		const parsed = JSON.parse(result);
 
-		expect(parsed.success).toBe(false);
-		expect(parsed.scope).toBe('graph');
-		expect(parsed.outcome).toBe('scope_exceeded');
-		expect(parsed.error).toContain('accepts at most');
-		expect(parsed.error).toContain('Treat this as SKIP without retry');
-		expect(parsed.message).toContain('Call test_runner once per source file');
+		expect(parsed.outcome).toBe('no_impacted_tests');
+		expect(parsed.error).not.toContain('accepts at most');
+		expect(parsed.message).not.toContain(
+			'Call test_runner once per source file',
+		);
+		// Anti-leak (restored): typed guidance must never name the scope:'all'
+		// env bypass — LLMs follow such hints literally.
+		expect(parsed.error).not.toContain('SWARM_ALLOW_FULL_SUITE');
+		expect(parsed.message).not.toContain('SWARM_ALLOW_FULL_SUITE');
+		expect(parsed.cap_decision?.decision).toBe('within_cap');
+		expect(parsed.resolved_test_files).toEqual([]);
 
 		process.chdir(originalCwd);
 		(() => {
@@ -1565,49 +1545,7 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		})();
 	}, 15000);
 
-	test('scope "graph" with many source files returns scope_exceeded before discovery fan-out', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-graph-manysrc-')),
-		);
-		const originalCwd = process.cwd();
-		process.chdir(tempDir);
-
-		fs.writeFileSync(
-			'package.json',
-			JSON.stringify({
-				scripts: { test: 'vitest run' },
-				devDependencies: { vitest: '^1.0.0' },
-			}),
-		);
-		fs.mkdirSync('src', { recursive: true });
-		const manyFiles = Array.from({ length: 20 }, (_, i) => {
-			const name = `src/file${i}.ts`;
-			fs.writeFileSync(name, `export const val${i} = ${i};`);
-			return name;
-		});
-
-		const result = await test_runner.execute(
-			{ scope: 'graph', files: manyFiles },
-			{} as any,
-		);
-		const parsed = JSON.parse(result);
-
-		expect(parsed.success).toBe(false);
-		expect(parsed.scope).toBe('graph');
-		expect(parsed.outcome).toBe('scope_exceeded');
-		expect(parsed.error).toContain('got 20');
-
-		process.chdir(originalCwd);
-		(() => {
-			try {
-				fs.rmSync(tempDir, { recursive: true, force: true });
-			} catch {
-				/* ignore */
-			}
-		})();
-	}, 15000);
-
-	test('scope "impact" with 2 source files returns scope_exceeded before discovery fan-out', async () => {
+	test('scope "impact" with 2 source files resolves typed no_impacted_tests (no pre-resolution rejection)', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-impact-2src-')),
 		);
@@ -1631,12 +1569,8 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		);
 		const parsed = JSON.parse(result);
 
-		expect(parsed.success).toBe(false);
-		expect(parsed.scope).toBe('impact');
-		expect(parsed.outcome).toBe('scope_exceeded');
-		expect(parsed.error).toContain('accepts at most');
-		expect(parsed.error).toContain('Treat this as SKIP without retry');
-		expect(parsed.message).toContain('Call test_runner once per source file');
+		expect(parsed.outcome).toBe('no_impacted_tests');
+		expect(parsed.error).not.toContain('accepts at most');
 
 		process.chdir(originalCwd);
 		(() => {
@@ -1648,7 +1582,7 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		})();
 	}, 15000);
 
-	test('scope "convention" with 2 source files returns scope_exceeded before discovery', async () => {
+	test('scope "convention" with 2 source files and no tests resolves typed skip (no pre-resolution rejection)', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-conv-2src-')),
 		);
@@ -1672,12 +1606,9 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 		);
 		const parsed = JSON.parse(result);
 
-		expect(parsed.success).toBe(false);
-		expect(parsed.scope).toBe('convention');
-		expect(parsed.outcome).toBe('scope_exceeded');
-		expect(parsed.error).toContain('accepts at most');
-		expect(parsed.error).toContain('Treat this as SKIP without retry');
-		expect(parsed.message).toContain('Call test_runner once per source file');
+		// Convention is not a graph/impact discovery scope: zero tests stay skip.
+		expect(parsed.outcome).toBe('skip');
+		expect(parsed.error).not.toContain('accepts at most');
 
 		process.chdir(originalCwd);
 		(() => {
@@ -1688,49 +1619,4 @@ describe('test-runner.ts - MAX_SAFE_SOURCE_FILES pre-discovery guard', () => {
 			}
 		})();
 	}, 15000);
-
-	test('scope "convention" with 1 source file + 1 direct test file does NOT trigger source-file guard', async () => {
-		// Direct test files are exempt from the MAX_SAFE_SOURCE_FILES limit.
-		// Only source-file discovery fans out; direct test file paths are explicitly named.
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-conv-1src1tst-')),
-		);
-		const originalCwd = process.cwd();
-		process.chdir(tempDir);
-
-		fs.mkdirSync('src', { recursive: true });
-		fs.writeFileSync('src/utils.ts', 'export const x = 1;');
-		fs.writeFileSync(
-			'src/utils.test.ts',
-			'import { x } from "./utils"; export const v = x;',
-		);
-
-		const resolved = getTestFilesFromConvention([
-			'src/utils.ts',
-			'src/utils.test.ts',
-		]).map((p) => p.replace(/\\/g, '/'));
-		expect(resolved).toEqual(['src/utils.test.ts']);
-
-		process.chdir(originalCwd);
-		(() => {
-			try {
-				fs.rmSync(tempDir, { recursive: true, force: true });
-			} catch {
-				/* ignore */
-			}
-		})();
-	}, 5000);
-
-	test('scope "all" blocked error does not recommend "graph" with multiple files', async () => {
-		const result = await test_runner.execute({ scope: 'all' }, {} as any);
-		const parsed = JSON.parse(result);
-
-		expect(parsed.success).toBe(false);
-		expect(parsed.outcome).toBe('error');
-		// Must not name the env bypass (LLMs follow such hints literally)
-		expect(parsed.error).not.toContain('SWARM_ALLOW_FULL_SUITE');
-		expect(parsed.message).not.toContain('SWARM_ALLOW_FULL_SUITE');
-		expect(parsed.error).toContain('scope "convention"');
-		expect(parsed.message).toContain('exactly one source file');
-	});
 });

@@ -21,15 +21,67 @@ export type LLMJudgeCallback = (
  * Strips comments (single-line // and multi-line /* *\/), console.log/debugger statements,
  * trailing whitespace, and blank lines. Returns true if the stripped versions are identical.
  */
+/**
+ * Comment syntax family for a language hint (a file path or language id).
+ * The default family preserves the historical 2-argument behavior exactly:
+ * // line comments plus slash-star block comments (TS/JS/Go/PHP/Java/Kotlin/C/C++/Rust).
+ */
+interface CommentSyntaxFamily {
+	lineTokens: string[];
+	blockComments: boolean;
+}
+
+const DEFAULT_COMMENT_FAMILY: CommentSyntaxFamily = {
+	lineTokens: ['//'],
+	blockComments: true,
+};
+
+export function commentFamilyForLanguage(
+	languageHint?: string,
+): CommentSyntaxFamily {
+	if (!languageHint) return DEFAULT_COMMENT_FAMILY;
+	const hint = languageHint.toLowerCase();
+	const ext = hint.includes('.') ? hint.slice(hint.lastIndexOf('.') + 1) : hint;
+	switch (ext) {
+		case 'py':
+		case 'pyi':
+		case 'python':
+		case 'rb':
+		case 'ruby':
+		case 'sh':
+		case 'bash':
+		case 'zsh':
+		case 'yaml':
+		case 'yml':
+		case 'toml':
+		case 'r':
+		case 'makefile':
+			return { lineTokens: ['#'], blockComments: false };
+		case 'php':
+			// PHP accepts both // and # line comments plus block comments.
+			return { lineTokens: ['//', '#'], blockComments: true };
+		case 'sql':
+		case 'lua':
+			return { lineTokens: ['--'], blockComments: false };
+		case 'pl':
+		case 'perl':
+			return { lineTokens: ['#'], blockComments: true };
+		default:
+			return DEFAULT_COMMENT_FAMILY;
+	}
+}
+
 export function isStaticallyEquivalent(
 	originalCode: string,
 	mutatedCode: string,
+	languageHint?: string,
 ): boolean {
+	const family = commentFamilyForLanguage(languageHint);
 	const stripCode = (code: string): string => {
-		// Step 1: Remove multi-line comments /* ... */
+		// Step 1: Remove multi-line block comments (families that support them)
 		let inMultiLineComment = false;
 		const afterMultiLine: string[] = [];
-		for (const line of code.split('\n')) {
+		for (const line of family.blockComments ? code.split('\n') : []) {
 			if (!inMultiLineComment) {
 				const openIndex = line.indexOf('/*');
 				if (openIndex !== -1) {
@@ -55,9 +107,12 @@ export function isStaticallyEquivalent(
 			}
 		}
 
-		// Step 2: Remove single-line comments // (with string state tracking)
+		// Step 2: Remove single-line comments (family line tokens, with string state tracking)
 		const afterSingleLine: string[] = [];
-		for (const line of afterMultiLine) {
+		const linesForSingle = family.blockComments
+			? afterMultiLine
+			: code.split('\n');
+		for (const line of linesForSingle) {
 			let inString: "'" | '"' | '`' | null = null;
 			let commentStart = -1;
 			for (let i = 0; i < line.length; i++) {
@@ -73,9 +128,14 @@ export function isStaticallyEquivalent(
 				} else {
 					if (ch === "'" || ch === '"' || ch === '`') {
 						inString = ch;
-					} else if (ch === '/' && i + 1 < line.length && line[i + 1] === '/') {
-						commentStart = i;
-						break;
+					} else {
+						for (const token of family.lineTokens) {
+							if (line.startsWith(token, i)) {
+								commentStart = i;
+								break;
+							}
+						}
+						if (commentStart >= 0) break;
 					}
 				}
 			}
@@ -123,8 +183,8 @@ export async function checkEquivalence(
 	mutatedCode: string,
 	llmJudge?: LLMJudgeCallback,
 ): Promise<EquivalenceResult> {
-	// Stage 1: Static analysis
-	if (isStaticallyEquivalent(originalCode, mutatedCode)) {
+	// Stage 1: Static analysis (language-aware via the patch's file path)
+	if (isStaticallyEquivalent(originalCode, mutatedCode, patch.filePath)) {
 		return {
 			patchId: patch.id,
 			isEquivalent: true,
