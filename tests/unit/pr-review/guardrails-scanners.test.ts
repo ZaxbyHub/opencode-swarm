@@ -5,7 +5,7 @@ import {
 	type GuardrailSource,
 	scanObserverTerminalization,
 	scanParallelCircuitRuleConstruction,
-} from '../../../src/pr-review/guardrails.js';
+} from './guardrail-scanner-helpers.js';
 
 const ROOT = process.cwd();
 

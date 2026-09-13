@@ -29,9 +29,11 @@ import type { ZodError } from 'zod';
 import {
 	deleteCoordinationState,
 	getCoordinationState,
+	getCoordinationStateRaw,
 	importCoordinationOnce,
 	transitionCoordinationState,
 } from '../db/coordination-store.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import type { PrWorkflowGateState } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
@@ -137,6 +139,11 @@ const STATE_MUTATION_LOCK_RETRY_DELAY_MS = 10;
 const STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS = 30_000;
 export const CHECKOUT_MUTATION_ACTION_TIMEOUT_MS = 5 * 60_000;
 
+// Keep this bound aligned with coordination-store's MAX_PAYLOAD_CHARS. Raw
+// recovery reads intentionally bypass that store's normal payload validator,
+// so they must enforce the same cap before attempting JSON.parse themselves.
+const MAX_COORDINATION_PAYLOAD_CHARS = 1_048_576;
+
 export const trackedStatesByProjectSession = new Map<
 	string,
 	PrWorkflowPersistedStateBase
@@ -224,6 +231,10 @@ export interface PrReviewPersistenceHooks {
 	) => Promise<void>;
 	beforeAtomicTempWrite?: () => Promise<void>;
 	beforeAtomicRename?: () => Promise<void>;
+	/** Test-only interleave point immediately before terminal CAS deletion. */
+	beforeTerminalizationDelete?: () => Promise<void>;
+	/** Test-only unlink seam for partial-shadow cleanup recovery tests. */
+	removeShadowProjection?: (filePath: string) => Promise<void>;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -581,6 +592,81 @@ export async function readPrWorkflowGateStateFromCoordination<
 	return decoded?.state ?? null;
 }
 
+export type PrWorkflowGateCoordinationRecovery<
+	S extends PrWorkflowPersistedStateBase,
+> =
+	| { kind: 'absent' }
+	| { kind: 'valid'; rowRevision: number; generation: number; state: S }
+	| { kind: 'corrupt'; rowRevision: number; generation: number; reason: string }
+	| { kind: 'invalid'; reason: string };
+
+/**
+ * Inspect one workflow coordination row for recovery without trusting payload
+ * bytes. Only payload JSON/codec/generation failures are recoverable with a
+ * matching shadow projection. Database open/query errors intentionally escape.
+ */
+export function readPrWorkflowGateStateCoordinationForRecovery<
+	S extends PrWorkflowPersistedStateBase,
+>(directory: string, sessionID: string): PrWorkflowGateCoordinationRecovery<S> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	const row = getCoordinationStateRaw(
+		directory,
+		workflowGateStateCoordinationNamespace(normalizedSessionID),
+		WORKFLOW_STATE_ENTITY_KEY,
+	);
+	if (!row) return { kind: 'absent' };
+	if (row.payload.length > MAX_COORDINATION_PAYLOAD_CHARS) {
+		return {
+			kind: 'corrupt',
+			rowRevision: row.revision,
+			generation: row.generation,
+			reason: 'coordination payload exceeds the maximum size',
+		};
+	}
+	let parsedJson: unknown;
+	try {
+		parsedJson = JSON.parse(row.payload);
+	} catch {
+		return {
+			kind: 'corrupt',
+			rowRevision: row.revision,
+			generation: row.generation,
+			reason: 'coordination payload is not valid JSON',
+		};
+	}
+	const bound = requireCodec() as PrReviewStateCodec<S>;
+	const parsed = bound.safeParse(parsedJson);
+	if (!parsed.success) {
+		return {
+			kind: 'corrupt',
+			rowRevision: row.revision,
+			generation: row.generation,
+			reason: 'coordination payload failed the workflow state schema',
+		};
+	}
+	if (parsed.data.sessionID !== normalizedSessionID) {
+		return {
+			kind: 'invalid',
+			reason:
+				'coordination payload session identity does not match the requested session',
+		};
+	}
+	if (parsed.data.revision !== row.generation) {
+		return {
+			kind: 'corrupt',
+			rowRevision: row.revision,
+			generation: row.generation,
+			reason: 'coordination payload revision does not match its generation',
+		};
+	}
+	return {
+		kind: 'valid',
+		rowRevision: row.revision,
+		generation: row.generation,
+		state: parsed.data,
+	};
+}
+
 function readPrWorkflowGateStateCoordinationRow<
 	S extends PrWorkflowPersistedStateBase,
 >(
@@ -603,7 +689,11 @@ function readPrWorkflowGateStateCoordinationRow<
 	}
 	const bound = requireCodec() as PrReviewStateCodec<S>;
 	const parsed = bound.safeParse(parsedJson);
-	if (!parsed.success || parsed.data.revision !== row.generation) {
+	if (
+		!parsed.success ||
+		parsed.data.sessionID !== normalizeSessionID(sessionID) ||
+		parsed.data.revision !== row.generation
+	) {
 		throw new Error(
 			`BLOCKED: PR workflow gate state for session "${sessionID}" is invalid`,
 		);
@@ -733,6 +823,44 @@ async function repairImportedWorkflowGateShadow(
 	await syncWorkflowGateShadowProjection(directory, sessionID, state, {
 		archiveLegacy: true,
 	});
+}
+
+async function removeWorkflowGateShadowProjection(
+	directory: string,
+	sessionID: string,
+): Promise<void> {
+	for (const filePath of [
+		workflowGateStatePath(directory, sessionID),
+		workflowGateStateProjectionMarkerPath(directory, sessionID),
+	]) {
+		try {
+			await (
+				hooks.removeShadowProjection ??
+				((target) => fsp.rm(target, { force: true }))
+			)(filePath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+		}
+	}
+}
+
+/** Append a bounded, identity-only lifecycle audit record. */
+function appendSessionTerminalizationEvent(
+	directory: string,
+	sessionID: string,
+	rowRevision: number,
+): void {
+	try {
+		appendCoreEventSync(directory, {
+			type: 'pr_workflow_session_terminalized',
+			timestamp: isoNow(),
+			sessionID,
+			// The row revision is an opaque coordination fact, not state content.
+			rowRevision,
+		});
+	} catch {
+		// Lifecycle cleanup must remain fail-open if the optional audit store fails.
+	}
 }
 
 async function importLegacyPrWorkflowGateStateIfNeeded<
@@ -882,10 +1010,36 @@ export async function deleteStateWhileLocked(
 	} = {},
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
-	let currentAuthoritative = readPrWorkflowGateStateCoordinationRow(
-		directory,
-		normalizedSessionID,
-	);
+	let currentAuthoritative: {
+		rowRevision: number;
+		state: PrWorkflowGateState;
+	} | null = null;
+	let corruptCoordinationRowRevision: number | undefined;
+	if (options.allowSalvagedRead) {
+		const coordination =
+			readPrWorkflowGateStateCoordinationForRecovery<PrWorkflowGateState>(
+				directory,
+				normalizedSessionID,
+			);
+		if (coordination.kind === 'invalid') {
+			throw new Error(
+				`BLOCKED: PR workflow gate state for session "${normalizedSessionID}" is invalid (${coordination.reason})`,
+			);
+		}
+		if (coordination.kind === 'valid') {
+			currentAuthoritative = {
+				rowRevision: coordination.rowRevision,
+				state: coordination.state,
+			};
+		} else if (coordination.kind === 'corrupt') {
+			corruptCoordinationRowRevision = coordination.rowRevision;
+		}
+	} else {
+		currentAuthoritative = readPrWorkflowGateStateCoordinationRow(
+			directory,
+			normalizedSessionID,
+		);
+	}
 	let recoveryState: PrWorkflowGateState | null = null;
 	if (!currentAuthoritative) {
 		if (options.allowSalvagedRead) {
@@ -920,12 +1074,15 @@ export async function deleteStateWhileLocked(
 			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
 		);
 	}
-	if (currentAuthoritative) {
+	const authoritativeRowRevision =
+		currentAuthoritative?.rowRevision ??
+		(recoveryState ? corruptCoordinationRowRevision : undefined);
+	if (authoritativeRowRevision !== undefined) {
 		const deleted = deleteCoordinationState(
 			directory,
 			workflowGateStateCoordinationNamespace(normalizedSessionID),
 			WORKFLOW_STATE_ENTITY_KEY,
-			currentAuthoritative.rowRevision,
+			authoritativeRowRevision,
 		);
 		if (!deleted) {
 			throw new Error(
@@ -933,16 +1090,56 @@ export async function deleteStateWhileLocked(
 			);
 		}
 	}
-	try {
-		await fsp.rm(workflowGateStatePath(directory, normalizedSessionID), {
-			force: true,
-		});
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-			throw error;
-		}
-	}
+	await removeWorkflowGateShadowProjection(directory, normalizedSessionID);
 	forgetTrackedPrWorkflowState(directory, normalizedSessionID);
+}
+
+/**
+ * Terminalize one session's gate on exact owner lifecycle deletion.
+ *
+ * This is deliberately independent of abort policy: it serializes the exact
+ * normalized session, removes that session's shadow projection before its
+ * CAS-delete, then forgets the cache entry. A missing row/projection is an
+ * idempotent successful terminal; retaining the row across partial cleanup
+ * prevents a legacy shadow from being imported as resurrected state.
+ */
+export async function terminalizePrWorkflowGateForSession(
+	directory: string,
+	sessionID: string,
+): Promise<void> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	await withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const row = getCoordinationStateRaw(
+			directory,
+			workflowGateStateCoordinationNamespace(normalizedSessionID),
+			WORKFLOW_STATE_ENTITY_KEY,
+		);
+		// Shadow-first ordering is load-bearing. If the process dies after the
+		// live projection is removed but before its marker is unlinked, the
+		// authoritative row still prevents the legacy-import path from reviving
+		// the deleted session. A later read repairs the missing projection.
+		await removeWorkflowGateShadowProjection(directory, normalizedSessionID);
+		await hooks.beforeTerminalizationDelete?.();
+		if (row) {
+			const deleted = deleteCoordinationState(
+				directory,
+				workflowGateStateCoordinationNamespace(normalizedSessionID),
+				WORKFLOW_STATE_ENTITY_KEY,
+				row.revision,
+			);
+			if (!deleted) {
+				throw new Error(
+					'BLOCKED: PR workflow gate state changed concurrently; retry session terminalization',
+				);
+			}
+			appendSessionTerminalizationEvent(
+				directory,
+				normalizedSessionID,
+				row.revision,
+			);
+		}
+		forgetTrackedPrWorkflowState(directory, normalizedSessionID);
+	});
 }
 
 // ---------------------------------------------------------------------------

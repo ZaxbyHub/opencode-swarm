@@ -149,11 +149,9 @@ import {
 	readReviewOutcome,
 } from '../pr-review/finding-policy.js';
 // Issue #2385: the legacy transcript adapter boundary. Raw transcript /
-// artifact-text -> canonical conversion exists only in
-// src/pr-review/legacy-transcript-adapter.ts; the guardrail scanner
-// (src/pr-review/guardrails.ts) allows the conversion identifiers only there,
-// so this gate consumes the adapter through the `legacy*` aliases, the test
-// surface, and the shared composition types below.
+// artifact-text -> canonical conversion exists only in the adapter module;
+// this gate consumes it through the `legacy*` aliases, the test surface, and
+// the shared composition types below.
 import {
 	analyzeLegacyVerdictRowContract,
 	bindPrReviewTranscriptAdapterHelpers,
@@ -183,11 +181,13 @@ import {
 	MAX_TRACKED_SESSIONS,
 	normalizeComparableFsPath,
 	normalizeSessionID,
+	readPrWorkflowGateStateCoordinationForRecovery,
 	readPrWorkflowGateStateFileFromDisk,
 	readPrWorkflowGateStateFromDisk as readPrWorkflowStateFromDiskBound,
 	rememberState,
 	resetPrReviewPersistenceCaches,
 	sameBigIntFileIdentity,
+	terminalizePrWorkflowGateForSession as terminalizePrWorkflowGateForSessionPersistence,
 	WORKFLOW_GATE_DIR,
 	withPrWorkflowCheckoutMutationLock,
 	withSessionStateMutation,
@@ -1052,6 +1052,7 @@ const MAX_RETIRED_FEEDBACK_ITEM_OWNERS = 4096;
  */
 export const MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS = 128;
 const MAX_PR_WORKFLOW_GATE_DIRECTORY_ENTRIES = MAX_TRACKED_SESSIONS * 2 + 1;
+const MAX_PR_WORKFLOW_GATE_ENTRY_NAME_CHARS = 240;
 const MAX_CANDIDATE_ISSUES_PER_ARTIFACT = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTICS = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS = 1_000;
@@ -2212,8 +2213,12 @@ async function assertNoActivePrWorkflowGateForCheckoutRestore(
 					'BLOCKED: PR workflow gate inventory contains an ambiguous state filename; checkout restoration cannot prove project inactivity',
 				);
 			}
+			const boundedEntryName =
+				entry.name.length <= MAX_PR_WORKFLOW_GATE_ENTRY_NAME_CHARS
+					? entry.name
+					: `${entry.name.slice(0, MAX_PR_WORKFLOW_GATE_ENTRY_NAME_CHARS - 1)}…`;
 			throw new Error(
-				`BLOCKED: checkout restoration cannot mutate this project while session "${state.sessionID}" has an active ${state.mode} workflow`,
+				`BLOCKED: checkout restoration cannot mutate this project while session "${state.sessionID}" has an active ${state.mode} workflow (state entry "${boundedEntryName}"). For the owning session, run \`/swarm abort-pr-workflow ${state.mode} <reason...>\` to recover the stuck gate.`,
 			);
 		}
 	} catch (error) {
@@ -2270,6 +2275,18 @@ export async function clearPrWorkflowGateState(
 			allowSalvagedRead: options.allowSalvagedRead,
 		});
 	});
+}
+
+/**
+ * Exact-owner lifecycle terminalization for session.deleted/removed wiring.
+ * This bypasses abort authorization and removes only the requested session's
+ * coordination row, shadow projection, and in-process cache entry.
+ */
+export async function terminalizePrWorkflowGateForSession(
+	directory: string,
+	sessionID: string,
+): Promise<void> {
+	return terminalizePrWorkflowGateForSessionPersistence(directory, sessionID);
 }
 
 /**
@@ -13205,11 +13222,10 @@ export const _test_exports = {
 // overflow recovery, the digest-stability view the critic-claim binding hashes,
 // and the exact verdict-row analysis / item composition parsers used by the
 // assignment-boundary regression) now lives in
-// src/pr-review/legacy-transcript-adapter.ts. The guardrail scanner
-// (src/pr-review/guardrails.ts) allows those identifiers only in that module,
-// so the historical `_test_exports` properties are re-exposed here by spreading
-// the adapter's surface — same property names, same bindings, no gate-side
-// conversion identifiers.
+// src/pr-review/legacy-transcript-adapter.ts. Those conversion identifiers are
+// owned only by that module, so the historical `_test_exports` properties are
+// re-exposed here by spreading the adapter's surface — same property names,
+// same bindings, no gate-side conversion identifiers.
 Object.assign(_test_exports, legacyTranscriptAdapterTestSurface);
 
 // Issue #2385: bind the persistence boundary to this gate's seams and full
@@ -17409,6 +17425,33 @@ function boundSalvagedSchemaError(message: string): string {
 		: `${message.slice(0, MAX_SALVAGED_SCHEMA_ERROR_CHARS - 1)}…`;
 }
 
+function boundSalvageDisclosure(
+	sessionID: string,
+	schemaErrors: string[],
+	coordinationNotice?: string,
+	revisionSalvageable = true,
+	armedShapeUnreadable = false,
+	publicationShapeUnreadable = false,
+): string {
+	const disclosure =
+		`DEGRADED: PR workflow gate state for session "${sessionID}" ` +
+		(coordinationNotice
+			? `${coordinationNotice} and was SALVAGED for recovery only (abort/status; write and completion paths still refuse it). `
+			: 'failed schema validation and was SALVAGED for recovery only (abort/status; write and completion paths still refuse it). ') +
+		`Schema errors: ${schemaErrors.join('; ')}.` +
+		(revisionSalvageable ? '' : ' state revision unsalvageable.') +
+		(armedShapeUnreadable
+			? ' prFeedbackReadyToPublish is present but unreadable; treated as ARMED (fail-closed).'
+			: '') +
+		(publicationShapeUnreadable
+			? ' prFeedbackPublication is present but unreadable; treated as ARMED (fail-closed).'
+			: '');
+	const maxDisclosureChars = MAX_SALVAGED_SCHEMA_ERROR_CHARS * 12;
+	return disclosure.length <= maxDisclosureChars
+		? disclosure
+		: `${disclosure.slice(0, maxDisclosureChars - 1)}…`;
+}
+
 /** Result of one recovery-only gate-state read. */
 export interface PrWorkflowGateRecoveryRead {
 	/** Schema-valid state, or the salvaged projection when `salvaged`. */
@@ -17440,12 +17483,15 @@ export interface PrWorkflowGateRecoveryRead {
  *
  * Policy, mirroring the file-wide "unavailability degrades with disclosure;
  * contradiction fails closed" invariant:
- *   - **Unparseable bytes fail everywhere**, recovery included. There is nothing
- *     to salvage and guessing would be fabrication.
- *   - **Schema-validation failure on parseable JSON** salvages the fields abort
- *     actually reads — `{sessionID, mode, prHeadSha}` plus `revision`,
- *     `prFeedbackReadyToPublish` and `checkoutRecovery` when each is
- *     individually well-formed — with a loud disclosure naming the schema
+ *   - **Unparseable shadow bytes fail everywhere**, recovery included. There
+ *     is nothing to salvage from that projection and guessing would be
+ *     fabrication. A coordination payload that is unparseable or otherwise
+ *     corrupt is recoverable only when this exact shadow has the same revision
+ *     as the row generation, and the disclosure names that degraded source.
+ *   - **Schema-validation failure on parseable shadow JSON** salvages the
+ *     fields abort actually reads — `{sessionID, mode, prHeadSha}` plus
+ *     `revision`, `prFeedbackReadyToPublish` and `checkoutRecovery` when each
+ *     is individually well-formed — with a loud disclosure naming the schema
  *     errors. Everything else is dropped rather than guessed.
  *   - **Identity is not salvageable ⇒ nothing is.** Without a readable
  *     `sessionID` and `mode` there is no provable subject to act on, so the
@@ -17458,6 +17504,32 @@ export async function readPrWorkflowGateStateForRecovery(
 	sessionID: string,
 ): Promise<PrWorkflowGateRecoveryRead | null> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
+	const coordination =
+		readPrWorkflowGateStateCoordinationForRecovery<PrWorkflowGateState>(
+			directory,
+			normalizedSessionID,
+		);
+	if (coordination.kind === 'invalid') {
+		throw new Error(
+			`BLOCKED: PR workflow gate state for session "${normalizedSessionID}" is invalid (${coordination.reason})`,
+		);
+	}
+	if (coordination.kind === 'valid') {
+		return {
+			state: coordination.state,
+			salvaged: false,
+			schemaErrors: [],
+			revisionSalvageable: true,
+			armedShapeUnreadable: false,
+		};
+	}
+	const coordinationCorrupt = coordination.kind === 'corrupt';
+	const coordinationGeneration = coordinationCorrupt
+		? coordination.generation
+		: undefined;
+	const coordinationReason = coordinationCorrupt
+		? coordination.reason
+		: undefined;
 	const filePath = workflowGateStatePath(directory, normalizedSessionID);
 	let raw: string;
 	try {
@@ -17476,10 +17548,36 @@ export async function readPrWorkflowGateStateForRecovery(
 	}
 	const parsed = PrWorkflowGateStateSchema.safeParse(parsedJson);
 	if (parsed.success) {
+		if (
+			parsed.data.sessionID !== normalizedSessionID ||
+			(coordinationGeneration !== undefined &&
+				parsed.data.revision !== coordinationGeneration)
+		) {
+			throw new Error(
+				`BLOCKED: PR workflow gate state for session "${normalizedSessionID}" is invalid`,
+			);
+		}
+		if (!coordinationCorrupt) {
+			return {
+				state: parsed.data,
+				salvaged: false,
+				schemaErrors: [],
+				revisionSalvageable: true,
+				armedShapeUnreadable: false,
+			};
+		}
+		const coordinationSchemaError = boundSalvagedSchemaError(
+			`coordination_state.payload: ${coordinationReason}`,
+		);
 		return {
 			state: parsed.data,
-			salvaged: false,
-			schemaErrors: [],
+			salvaged: true,
+			schemaErrors: [coordinationSchemaError],
+			disclosure: boundSalvageDisclosure(
+				normalizedSessionID,
+				[coordinationSchemaError],
+				'coordination authority was corrupt and the valid shadow projection was used',
+			),
 			revisionSalvageable: true,
 			armedShapeUnreadable: false,
 		};
@@ -17499,7 +17597,13 @@ export async function readPrWorkflowGateStateForRecovery(
 	const salvagedMode = z
 		.enum(['PR_REVIEW', 'PR_FEEDBACK'])
 		.safeParse(rawRecord.mode);
-	if (!salvagedSessionID.success || !salvagedMode.success) throw invalidError;
+	if (
+		!salvagedSessionID.success ||
+		!salvagedMode.success ||
+		salvagedSessionID.data !== normalizedSessionID
+	) {
+		throw invalidError;
+	}
 	const salvagedRevision = z
 		.number()
 		.int()
@@ -17511,6 +17615,13 @@ export async function readPrWorkflowGateStateForRecovery(
 		.min(1)
 		.safeParse(rawRecord.activatedAt);
 	const salvagedUpdatedAt = z.string().min(1).safeParse(rawRecord.updatedAt);
+	if (
+		coordinationGeneration !== undefined &&
+		(!salvagedRevision.success ||
+			salvagedRevision.data !== coordinationGeneration)
+	) {
+		throw invalidError;
+	}
 	// `undefined` is the only unarmed shape: the schema is `.optional()`, never
 	// `.nullable()`, so a `null` here can only come from corruption — treating
 	// it as absent would let the single most likely nested-record corruption
@@ -17535,24 +17646,33 @@ export async function readPrWorkflowGateStateForRecovery(
 		);
 	const armedShapeUnreadable =
 		(armedKeyPresent && !salvagedArmed.success) || publicationShapeUnreadable;
-	const schemaErrors = parsed.error.issues
+	const shadowSchemaErrors = parsed.error.issues
 		.slice(0, MAX_SALVAGED_SCHEMA_ERRORS)
 		.map((issue) =>
 			boundSalvagedSchemaError(
 				`${issue.path.join('.') || '(root)'}: ${issue.message}`,
 			),
 		);
-	const disclosure =
-		`DEGRADED: PR workflow gate state for session "${normalizedSessionID}" failed schema validation ` +
-		`and was SALVAGED for recovery only (abort/status; write and completion paths still refuse it). ` +
-		`Schema errors: ${schemaErrors.join('; ')}.` +
-		(salvagedRevision.success ? '' : ' state revision unsalvageable.') +
-		(armedShapeUnreadable
-			? ' prFeedbackReadyToPublish is present but unreadable; treated as ARMED (fail-closed).'
-			: '') +
-		(publicationShapeUnreadable
-			? ' prFeedbackPublication is present but unreadable; treated as ARMED (fail-closed).'
-			: '');
+	const schemaErrors = [
+		...(coordinationCorrupt
+			? [
+					boundSalvagedSchemaError(
+						`coordination_state.payload: ${coordinationReason}`,
+					),
+				]
+			: []),
+		...shadowSchemaErrors,
+	].slice(0, MAX_SALVAGED_SCHEMA_ERRORS);
+	const disclosure = boundSalvageDisclosure(
+		normalizedSessionID,
+		schemaErrors,
+		coordinationCorrupt
+			? `coordination authority was corrupt (${coordinationReason}) and the shadow projection was used`
+			: undefined,
+		salvagedRevision.success,
+		armedShapeUnreadable,
+		publicationShapeUnreadable,
+	);
 	return {
 		state: {
 			schemaVersion: GATE_SCHEMA_VERSION,

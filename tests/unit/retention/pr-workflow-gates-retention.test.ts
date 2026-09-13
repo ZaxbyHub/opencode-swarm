@@ -7,6 +7,7 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { prWorkflowSessionFileStem } from '../../../src/pr-review/persistence.js';
 import { pruneDirectory } from '../../../src/retention/dir-prune.js';
 import { runRetentionSweep } from '../../../src/retention/sweep.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
@@ -139,5 +140,126 @@ describe('pr-workflow-gates retention', () => {
 		]) {
 			expect(existsSync(survivor)).toBe(true);
 		}
+	});
+
+	it('checkout retention removes only stale atomic temps and preserves receipts', async () => {
+		const root = makeRoot('checkout-temps');
+		const receiptDirectory = path.join(
+			root,
+			'.swarm',
+			'pr-workflow-checkouts',
+			'checkout-session-abcdef123456',
+		);
+		mkdirSync(receiptDirectory, { recursive: true });
+		const staleTemp = path.join(
+			receiptDirectory,
+			`${'a'.repeat(40)}.json.tmp.123.123e4567-e89b-12d3-a456-426614174000`,
+		);
+		const freshTemp = path.join(
+			receiptDirectory,
+			`${'b'.repeat(40)}.json.tmp.123.123e4567-e89b-12d3-a456-426614174001`,
+		);
+		const pendingReceipt = path.join(
+			receiptDirectory,
+			`${'a'.repeat(40)}.json`,
+		);
+		writeFileSync(staleTemp, '{"partial":true}');
+		writeFileSync(freshTemp, '{"partial":true}');
+		writeFileSync(pendingReceipt, '{"restoreState":"pending"}');
+		utimesSync(staleTemp, new Date(OLD), new Date(OLD));
+
+		const result = await runRetentionSweep(root, { now: NOW });
+
+		expect(result.pruned['pr-workflow-checkout-temps']).toBe(1);
+		expect(existsSync(staleTemp)).toBe(false);
+		expect(existsSync(freshTemp)).toBe(true);
+		expect(existsSync(pendingReceipt)).toBe(true);
+	});
+
+	it('checkout retention prunes only stale applied and verified receipts', async () => {
+		const root = makeRoot('checkout-receipts');
+		const receiptSessionID = 'checkout-session-retention';
+		const receiptDirectory = path.join(
+			root,
+			'.swarm',
+			'pr-workflow-checkouts',
+			prWorkflowSessionFileStem(receiptSessionID),
+		);
+		mkdirSync(receiptDirectory, { recursive: true });
+		const staleApplied = path.join(receiptDirectory, `${'d'.repeat(40)}.json`);
+		const pending = path.join(receiptDirectory, `${'e'.repeat(40)}.json`);
+		const malformed = path.join(receiptDirectory, `${'f'.repeat(40)}.json`);
+		const underspecified = path.join(
+			receiptDirectory,
+			`${'a'.repeat(40)}.json`,
+		);
+		writeFileSync(
+			staleApplied,
+			JSON.stringify({
+				schemaVersion: 1,
+				sessionID: receiptSessionID,
+				stashOid: 'd'.repeat(40),
+				originalHead: '1'.repeat(40),
+				originalBranch: 'main',
+				paths: ['tracked.txt'],
+				preparedAt: new Date(OLD).toISOString(),
+				mode: 'PR_REVIEW',
+				gateRevision: 1,
+				gateActivatedAt: new Date(OLD).toISOString(),
+				restoreState: 'applied',
+				restoreAppliedAt: new Date(OLD).toISOString(),
+				restoreVerifiedAt: new Date(OLD).toISOString(),
+				restoredHead: '1'.repeat(40),
+				restoredBranch: 'main',
+			}),
+		);
+		writeFileSync(
+			pending,
+			JSON.stringify({
+				restoreState: 'pending',
+				restoreVerifiedAt: new Date(OLD).toISOString(),
+			}),
+		);
+		writeFileSync(malformed, '{not-json');
+		writeFileSync(
+			underspecified,
+			JSON.stringify({
+				restoreState: 'applied',
+				restoreVerifiedAt: new Date(OLD).toISOString(),
+			}),
+		);
+
+		const result = await runRetentionSweep(root, { now: NOW });
+
+		expect(result.pruned['pr-workflow-checkout-receipts']).toBe(1);
+		expect(existsSync(staleApplied)).toBe(false);
+		expect(existsSync(pending)).toBe(true);
+		expect(existsSync(malformed)).toBe(true);
+		expect(existsSync(underspecified)).toBe(true);
+	});
+
+	it('checkout retention fails open when a session exceeds its bounded entry scan', async () => {
+		const root = makeRoot('checkout-entry-cap');
+		const receiptDirectory = path.join(
+			root,
+			'.swarm',
+			'pr-workflow-checkouts',
+			'checkout-session-abcdef123456',
+		);
+		mkdirSync(receiptDirectory, { recursive: true });
+		const staleTemp = path.join(
+			receiptDirectory,
+			`${'c'.repeat(40)}.json.tmp.123.123e4567-e89b-12d3-a456-426614174000`,
+		);
+		writeFileSync(staleTemp, '{"partial":true}');
+		utimesSync(staleTemp, new Date(OLD), new Date(OLD));
+		for (let index = 0; index < 64; index += 1) {
+			writeFileSync(path.join(receiptDirectory, `receipt-${index}.json`), '{}');
+		}
+
+		const result = await runRetentionSweep(root, { now: NOW });
+
+		expect(result.pruned['pr-workflow-checkout-temps']).toBeUndefined();
+		expect(existsSync(staleTemp)).toBe(true);
 	});
 });

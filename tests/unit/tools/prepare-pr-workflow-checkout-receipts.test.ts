@@ -236,13 +236,16 @@ test('PRR-BOOTSTRAP-EDGE-001: rejects malformed historical receipts before creat
 			{ sessionID: SESSION_ID },
 		),
 	);
-	expect(result).toMatchObject({ success: false });
-	expect(result.message).toMatch(/receipt failed identity validation/i);
+	expect(result).toMatchObject({
+		success: false,
+		code: 'CHECKOUT_RESTORE_RECONCILIATION_FAILED',
+	});
+	expect(result.message).toMatch(/receipts could not be reconciled safely/i);
 	expect(await gitOutput(['stash', 'list'])).toBe('');
 	expect((await fs.readdir(receiptDirectory)).length).toBe(8);
 });
 
-test('rejects a valid pending receipt whose preserved stash is missing before mutation', async () => {
+test('retires a missing pending receipt before creating the next obligation', async () => {
 	await fs.writeFile(
 		path.join(directory, '.opencode', 'opencode-swarm.json'),
 		'{"enabled":false}\n',
@@ -265,13 +268,18 @@ test('rejects a valid pending receipt whose preserved stash is missing before mu
 			{ sessionID: SESSION_ID },
 		),
 	);
-	expect(result).toMatchObject({ success: false });
-	expect(result.message).toMatch(/reference missing preserved stashes/i);
-	expect(await gitOutput(['stash', 'list'])).toBe('');
+	expect(result).toMatchObject({ success: true });
+	expect(result.stash_oid).not.toBe(missingOid);
+	expect(await gitOutput(['stash', 'list', '--format=%H'])).toContain(
+		result.stash_oid,
+	);
 	expect((await fs.readdir(receiptDirectory)).length).toBe(1);
+	await expect(
+		fs.stat(path.join(receiptDirectory, `${missingOid}.json`)),
+	).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
-test('counts applied-state cleanup receipts even after their safety stashes are gone', async () => {
+test('retires applied-state cleanup receipts after their safety stashes are gone', async () => {
 	await fs.writeFile(
 		path.join(directory, '.opencode', 'opencode-swarm.json'),
 		'{"enabled":false}\n',
@@ -303,9 +311,12 @@ test('counts applied-state cleanup receipts even after their safety stashes are 
 			{ sessionID: SESSION_ID },
 		),
 	);
-	expect(result).toMatchObject({ success: false });
-	expect(result.message).toMatch(/preparation limit reached/i);
-	expect(await gitOutput(['stash', 'list'])).toBe('');
+	expect(result).toMatchObject({ success: true });
+	expect(result.stash_oid).not.toBe('8'.repeat(40));
+	expect(await gitOutput(['stash', 'list', '--format=%H'])).toContain(
+		result.stash_oid,
+	);
+	expect((await fs.readdir(receiptDirectory)).length).toBe(1);
 });
 
 test('PRR-BOOTSTRAP-EDGE-002: preserves a tracked Unicode filename with spaces', async () => {
@@ -452,7 +463,7 @@ test('a stash-inventory read failure while receipts exist is reported, not silen
 		if (
 			args[0] === 'stash' &&
 			args[1] === 'list' &&
-			args[2] === '--format=%H'
+			(args[2] === '--format=%H' || args[2] === '--format=%H%x00%gd%x00%gs')
 		) {
 			return { exitCode: 1, stdout: '' };
 		}
@@ -466,10 +477,11 @@ test('a stash-inventory read failure while receipts exist is reported, not silen
 			{ sessionID: SESSION_ID },
 		),
 	);
-	expect(result.success).toBe(false);
-	expect(result.message).toBe(
-		'BLOCKED: unable to inspect checkout-preparation receipts safely',
-	);
+	expect(result).toMatchObject({
+		success: false,
+		code: 'CHECKOUT_RESTORE_RECONCILIATION_FAILED',
+	});
+	expect(result.message).toMatch(/receipts could not be reconciled safely/i);
 	checkoutInternals.runGit = originalRunGit;
 	// The failure happens during the pre-stash receipt-inventory check, before
 	// any stash push is ever attempted.
