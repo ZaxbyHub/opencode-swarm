@@ -15,6 +15,10 @@ on:
     branches: ["**"]
   push:
     branches: [main]
+  # Issue #2677: drift is observable for merge-queue candidates before an
+  # operator promotes it into the active required-context ruleset.
+  merge_group:
+    types: [checks_requested]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
@@ -24,10 +28,11 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   drift:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -35,6 +40,7 @@ jobs:
           # Full history so future history-aware detectors (e.g. blame-based
           # mirror provenance) can be added without re-plumbing checkout.
           fetch-depth: 0
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.13"
@@ -60,12 +66,36 @@ jobs:
         run: bun run scripts/drift-check.ts --enforce --report drift-report.md
       - name: Enforce release-fragment retention
         run: node scripts/release-notes-fragments.mjs verify-retention
+      - name: Preserve drift report for PR comment job
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: drift-check-report
+          path: drift-report.md
+          if-no-files-found: warn
+          retention-days: 1
+
+  # Keep the write-capable token away from candidate checkout/install/code. The
+  # computation above is the authoritative required check; this job only reads
+  # its bounded report and updates a PR comment when the event is a PR.
+  post-drift-report:
+    needs: [drift]
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download drift report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          name: drift-check-report
+          path: .
       - name: Post drift report comment
-        # Only comment on pull requests, and even if the drift step failed under
-        # enforce mode (so the report is always visible). continue-on-error so
-        # fork PRs (which lose pull-requests:write permission) do not add a
-        # second failure after the authoritative drift step has reported.
-        if: ${{ always() && github.event_name == 'pull_request' }}
+        # Continue-on-error keeps fork PRs (which lose pull-requests:write
+        # permission) from adding a second failure after the authoritative
+        # drift step has reported.
         continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:

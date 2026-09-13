@@ -22,6 +22,30 @@ The retained policy is:
 - `build_concurrency=5`; and
 - `ALLGREEN` / only-non-failing merge eligibility.
 
+The exact required-context contract is maintained in
+`scripts/required-check-contract.json` and reconciled with the captured
+GitHub evidence in `docs/ci/required-check-evidence.json`. The capture is
+freshness-bound and the `required-check-contract` detector fails closed for
+missing, stale, mismatched, renamed, or event-skipped required contexts. The
+`drift` workflow now has a `merge_group: [checks_requested]` trigger, but
+`drift` remains an intended-required notice until an authorized operator has
+observed its merge-group runs and promotes it in active ruleset `17809658`.
+The current capture deliberately separates facts: `captureSha` pins the
+external workflow/event observation to base `b21cdce17b8731143ed5fab7fdf32dd8ad5f7a7f`,
+where the pinned Contents blob for `drift-check.yml` has no `merge_group`, while
+the proposed local workflow has the trigger and is checked by its separate
+local hash. The capture includes concrete CI and PR Standards merge-group run
+receipts `34639685905` and `34639685670`. Therefore the missing external drift
+event is a visible nonblocking promotion divergence; missing events for any
+already-required context remain blocking, and the local proposed workflow must
+still carry the new trigger.
+
+The merge-group release-please ride-along is intentional: the guard uses the
+anchored head commit's release predicate, not the user who queued the group.
+Pull-request owner-file edits additionally require the exact trusted actor
+`github-actions[bot]`. The guard does not derive versioned release-note paths;
+normal `docs/releases/pending/*.md` fragments remain valid.
+
 The Stage-A retain-six decision is landed by this record for the current
 evidence window. No Windows-ten implementation is landed; only a future
 Windows-ten experiment remains unlanded and gated by the reopening criteria.

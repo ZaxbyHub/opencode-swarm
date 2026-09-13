@@ -122,17 +122,31 @@ release-please manages these automatically:
 
 Never replace the release PR body, create tags/releases manually, or edit these files.
 
-## 7. CI Checks (all must be green)
+## 7. CI Checks
 
-| Check | Validates |
+The protected `main` ruleset requires the exact contexts in the
+[`required-check-contract.json`](../../scripts/required-check-contract.json)
+and its [fresh external evidence](../../docs/ci/required-check-evidence.json).
+This is the live required set, not a claim that every listed job or matrix cell
+runs on every pull request.
+
+| Live required context(s) | Validates |
 |-------|-----------|
 | `quality` | TypeScript compiles, Biome lint + format clean |
-| `unit` (Ubuntu, macOS, Windows) | Unit tests pass cross-platform |
-| `integration` (Ubuntu) | Integration tests pass |
-| `security` (Ubuntu) | Security & adversarial tests pass |
-| `smoke` (Ubuntu, macOS, Windows) | Package builds & smoke tests pass |
-| `pr-standards` | PR title is valid conventional commit |
-| `check-duplicates` | PR title not duplicate of open PR |
+| `security` | Security & adversarial tests pass |
+| `unit (ubuntu-latest, 1)` through `unit (ubuntu-latest, 4)` and `unit-passed` | Required Ubuntu shards and their aggregate; extra platform cells are event- or path-scoped |
+| `package-check` and `integration` | Package and integration checks pass |
+| `smoke (ubuntu-latest)`, `smoke (macos-latest)`, `smoke (windows-latest)` | Required platform package builds and smoke tests pass |
+| `php-validation` and `rust-sandbox-runner` | Language/build validation passes |
+| `check-title` and `pr-standards` | PR title and standards checks pass |
+| `coverage` | Merge-group-only union coverage gate |
+
+`release-owner-guard` is a dependency helper for the required `quality` context,
+not a standalone required context. `check-duplicates` is a non-required helper.
+The local `drift` workflow includes `pull_request`, `push` to `main`, and
+`merge_group: checks_requested`, but `drift` remains intended-only until ruleset
+promotion; its pre-promotion divergence is a visible nonblocking notice. See
+[`docs/ci-required-check-contract.md`](../../docs/ci-required-check-contract.md).
 
 ## 8. GitHub Actions SHA Pinning
 
