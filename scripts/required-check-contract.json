@@ -1,0 +1,70 @@
+{
+	"schemaVersion": 1,
+	"repository": "ZaxbyHub/opencode-swarm",
+	"branch": "main",
+	"rulesetId": "17809658",
+	"requiredContexts": [
+		"quality",
+		"unit (ubuntu-latest, 1)",
+		"unit (ubuntu-latest, 2)",
+		"unit (ubuntu-latest, 3)",
+		"unit (ubuntu-latest, 4)",
+		"unit-passed",
+		"security",
+		"package-check",
+		"integration",
+		"smoke (ubuntu-latest)",
+		"smoke (macos-latest)",
+		"smoke (windows-latest)",
+		"php-validation",
+		"rust-sandbox-runner",
+		"check-title",
+		"pr-standards",
+		"coverage"
+	],
+	"intendedRequiredContexts": ["drift"],
+	"contexts": {
+		"required": [
+			{ "name": "quality", "workflow": ".github/workflows/ci.yml", "job": "quality", "events": ["pull_request", "merge_group"] },
+			{ "name": "unit (ubuntu-latest, 1)", "workflow": ".github/workflows/ci.yml", "job": "unit", "events": ["pull_request", "merge_group"] },
+			{ "name": "unit (ubuntu-latest, 2)", "workflow": ".github/workflows/ci.yml", "job": "unit", "events": ["pull_request", "merge_group"] },
+			{ "name": "unit (ubuntu-latest, 3)", "workflow": ".github/workflows/ci.yml", "job": "unit", "events": ["pull_request", "merge_group"] },
+			{ "name": "unit (ubuntu-latest, 4)", "workflow": ".github/workflows/ci.yml", "job": "unit", "events": ["pull_request", "merge_group"] },
+			{ "name": "unit-passed", "workflow": ".github/workflows/ci.yml", "job": "unit-passed", "events": ["pull_request", "merge_group"] },
+			{ "name": "security", "workflow": ".github/workflows/ci.yml", "job": "security", "events": ["pull_request", "merge_group"] },
+			{ "name": "package-check", "workflow": ".github/workflows/ci.yml", "job": "package-check", "events": ["pull_request", "merge_group"] },
+			{ "name": "integration", "workflow": ".github/workflows/ci.yml", "job": "integration", "events": ["pull_request", "merge_group"] },
+			{ "name": "smoke (ubuntu-latest)", "workflow": ".github/workflows/ci.yml", "job": "smoke", "events": ["pull_request", "merge_group"] },
+			{ "name": "smoke (macos-latest)", "workflow": ".github/workflows/ci.yml", "job": "smoke", "events": ["pull_request", "merge_group"] },
+			{ "name": "smoke (windows-latest)", "workflow": ".github/workflows/ci.yml", "job": "smoke", "events": ["pull_request", "merge_group"] },
+			{ "name": "php-validation", "workflow": ".github/workflows/ci.yml", "job": "php-validation", "events": ["pull_request", "merge_group"] },
+			{ "name": "rust-sandbox-runner", "workflow": ".github/workflows/ci.yml", "job": "rust-sandbox-runner", "events": ["pull_request", "merge_group"] },
+			{ "name": "check-title", "workflow": ".github/workflows/pr-standards.yml", "job": "check-title", "events": ["pull_request", "merge_group"] },
+			{ "name": "pr-standards", "workflow": ".github/workflows/pr-standards.yml", "job": "pr-standards", "events": ["pull_request", "merge_group"] },
+			{ "name": "coverage", "workflow": ".github/workflows/ci.yml", "job": "coverage", "events": ["pull_request", "merge_group"] }
+		],
+		"intendedRequired": [
+			{ "name": "drift", "workflow": ".github/workflows/drift-check.yml", "job": "drift", "events": ["pull_request", "push", "merge_group"] }
+		]
+	},
+	"workflows": [
+		{
+			"file": ".github/workflows/ci.yml",
+			"events": ["pull_request", "merge_group"],
+			"mergeGroupTypes": ["checks_requested"],
+			"jobs": ["quality", "unit", "unit-passed", "security", "package-check", "integration", "coverage", "php-validation", "rust-sandbox-runner", "smoke"]
+		},
+		{
+			"file": ".github/workflows/pr-standards.yml",
+			"events": ["pull_request", "merge_group"],
+			"mergeGroupTypes": ["checks_requested"],
+			"jobs": ["check-title", "pr-standards"]
+		},
+		{
+			"file": ".github/workflows/drift-check.yml",
+			"events": ["pull_request", "push", "merge_group"],
+			"mergeGroupTypes": ["checks_requested"],
+			"jobs": ["drift"]
+		}
+	]
+}

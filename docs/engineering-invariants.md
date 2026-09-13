@@ -854,6 +854,7 @@ The repo maintains several "canonical source + mirror" and "source + registry" s
 - **Bundled skills:** `BUNDLED_PROJECT_SKILLS` (`src/config/bundled-skills.ts`), `package.json#files`, and the `package-smoke` allowlist must all match each other **and** the actual `.opencode/skills/` directory.
 - **Docs claims:** public numeric QA-gate claims must match `QA_GATE_PIPELINE_STEPS` (`src/config/qa-gate-pipeline.ts`) and the runtime execute protocol; hand-copied prose citations of the dispatch lane batch cap must match `MAX_LANES` (`src/tools/dispatch-lanes.ts`, issue #1645) — including spelled-out forms ("eight lanes") and every pending release fragment under `docs/releases/pending/`.
 - **Tools / commands / agents:** implementation, registries, and per-agent maps (invariant 11).
+- **Required checks:** exact ruleset-required contexts and their workflow/job/event owners must match the freshness-bound GitHub capture in `docs/ci/required-check-evidence.json`; intended-required `drift` remains a visible, non-blocking promotion notice until the live ruleset is updated (issue #2677).
 
 Two failures motivated the automated check:
 
@@ -873,9 +874,11 @@ Two failures motivated the automated check:
 | `command` | `COMMAND_NAME_SET` parity; `subcommandOf` parents exist | `src/commands/registry.ts` |
 | `agent` | `ALL_AGENT_NAMES` ↔ `AGENT_TOOL_MAP`; opt-in maps only reference real agents | `src/config/agent-names.ts`, `src/config/constants.ts` |
 | `docs-claim` | public numeric QA-gate claims match the docs-visible pipeline registry; hand-copied dispatch lane-cap prose (digits plus the in-tree spelled form ("eight")) matches the exported `MAX_LANES`; pending release fragments are scanned for lane-cap citations | `src/config/qa-gate-pipeline.ts`, `src/tools/dispatch-lanes.ts` |
+| `required-check-contract` | exact required contexts, workflow/job ownership, top-level event coverage, and freshness-bound external evidence; pre-promotion intended checks are notices | `scripts/required-check-contract.json`, `docs/ci/required-check-evidence.json`, `.github/workflows/*.yml` |
 
 ### Rules
 
 - CI invokes drift-check with `--enforce`, so blocking findings fail the job; GitHub annotations and a sticky PR comment still publish the full report. Local `bun run drift:check` remains soft-warn unless invoked with `--enforce` (or `DRIFT_CHECK_ENFORCE=1`).
+- The required-check detector treats missing, malformed, stale, mismatched, or semantically unknown external evidence as blocking. It reads only bounded top-level workflow events and job IDs; matrix-expanded check names remain explicit contract records. The external capture SHA and pinned Contents blobs describe the observed base; separate local workflow hashes detect edits to the checked-in proposal. The pre-promotion `RULESET_DIVERGENCE` notice for `drift` is visible but does not fail enforcement until an authorized operator promotes it in the live ruleset.
 - When you add a new skill that exists in **both** `.opencode/skills/` and `.claude/skills/`, classify it in `src/config/skill-mirrors.ts` (`identical` / `divergent` / `adapter` / `opencode-only`), or the check warns until you do.
 - Drift compute is sub-second, so CI caches only dependency install (the real cost), not per-file SHA-256 results.

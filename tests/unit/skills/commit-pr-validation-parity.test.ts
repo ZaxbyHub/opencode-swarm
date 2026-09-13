@@ -29,6 +29,8 @@ const CI_WORKFLOW_PATH = join(
  * mapping in the same PR — that is the reconciliation mechanism.
  */
 const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
+	'if [[ "$DETECT_RELEASE_RESULT" != "success" || "$RELEASE_OWNER_RESULT" != "success" ]]; then && echo "::error::required dependency failed: detect-release=$DETECT_RELEASE_RESULT, release-owner-guard=$RELEASE_OWNER_RESULT" && exit 1 && fi':
+		'if [[ "$DETECT_RELEASE_RESULT" != "success" || "$RELEASE_OWNER_RESULT" != "success" ]]; then',
 	'bun run typecheck': 'bun run typecheck',
 	'bunx biome ci .': 'bun run lint:ci',
 	'bun run scripts/check-tool-registration.ts':
@@ -60,9 +62,13 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 /** Environment-setup commands in the quality job that are not quality gates. */
 const NON_QUALITY_SETUP_COMMANDS = new Set(['bun install --frozen-lockfile']);
 
+/** YAML block-scalar indicators are syntax, not shell commands. */
+const YAML_BLOCK_SCALAR_MARKER = /^[|>][+-]?$/;
+
 /** Extract the `run:` commands of the CI `quality` job. */
-function qualityJobCommands(): string[] {
-	const workflow = readFileSync(CI_WORKFLOW_PATH, 'utf-8');
+function qualityJobCommands(
+	workflow = readFileSync(CI_WORKFLOW_PATH, 'utf-8'),
+): string[] {
 	const qualityStart = workflow.indexOf('  quality:');
 	if (qualityStart === -1) {
 		throw new Error('CI workflow no longer defines a quality job');
@@ -76,14 +82,29 @@ function qualityJobCommands(): string[] {
 		nextJobMatch ? qualityStart + 10 + nextJobMatch.index : undefined,
 	);
 	const commands: string[] = [];
-	for (const line of jobBlock.split(/\r?\n/)) {
-		const match = line.match(/^\s+run:\s*(.+)$/);
+	const lines = jobBlock.split(/\r?\n/);
+	for (let index = 0; index < lines.length; index += 1) {
+		const match = lines[index].match(/^(\s+)run:\s*(.+)$/);
 		if (!match) continue;
-		let command = match[1].trim();
+		let command = match[2].trim();
+		if (YAML_BLOCK_SCALAR_MARKER.test(command)) {
+			const runIndent = match[1].length;
+			const body: string[] = [];
+			while (index + 1 < lines.length) {
+				const next = lines[index + 1];
+				if (next.trim() !== '' && next.match(/^\s*/)?.[0].length <= runIndent) {
+					break;
+				}
+				index += 1;
+				if (next.trim() !== '') body.push(next.trim());
+			}
+			command = body.join(' && ');
+		}
 		command = command.replace(/^["']|["']$/g, '');
 		// Normalize the `chmod +x X && bash X` wrapper to the bare script call.
 		command = command.replace(/^chmod \+x \S+ && /, '');
 		if (NON_QUALITY_SETUP_COMMANDS.has(command)) continue;
+		if (YAML_BLOCK_SCALAR_MARKER.test(command)) continue;
 		commands.push(command);
 	}
 	return commands;
@@ -110,6 +131,18 @@ describe('commit-pr validation suite parity (issue #2131 4c)', () => {
 	test('the skill also teaches the package smoke check (package-check CI job)', () => {
 		const skill = readFileSync(COMMIT_PR_SKILL_PATH, 'utf-8');
 		expect(skill).toContain('bun run package:smoke');
+	});
+
+	test('indented YAML block-scalar run bodies remain in the parity surface', () => {
+		const source = readFileSync(CI_WORKFLOW_PATH, 'utf-8');
+		const blockScalar = source.replace(
+			'run: cd scripts/swarm-model && node --test',
+			'run: |\n          cd scripts/swarm-model\n          node --test',
+		);
+		expect(blockScalar).not.toBe(source);
+		expect(qualityJobCommands(blockScalar)).toContain(
+			'cd scripts/swarm-model && node --test',
+		);
 	});
 
 	test('the skill never broad-deletes evidence JSON (issue #2131 4a)', () => {
