@@ -255,20 +255,29 @@ describe('3: FR-010 ambiguity diagnostic — warn count is exactly 1 per call (s
 // 4. Multi-feature end-to-end via command (SC-009, FR-008)
 // ---------------------------------------------------------------------------
 describe('4: Multi-feature end-to-end via handleSddProjectCommand (SC-009, FR-008)', () => {
-	test('no --feature: error names both features + --feature remedy; NO .swarm/spec.md written', async () => {
+	test('no --feature: projects ALL features with feature-scoped ids (#2501); .swarm/spec.md written', async () => {
 		writeSpeckitFixture(tempDir, { variant: 'multi-feature' });
 
 		const out = await handleSddProjectCommand(tempDir, []);
 
-		expect(out).toContain('Error:');
-		expect(out).toContain('001-alpha');
-		expect(out).toContain('002-beta');
-		expect(out).toContain('--feature');
-
-		// Critical gate: on the error path, .swarm/spec.md must NOT exist.
-		// Regression caught: an implementation that projects the first feature BEFORE
-		// detecting ambiguity would write a stale spec silently and this check would fail.
-		expect(fs.existsSync(path.join(tempDir, '.swarm', 'spec.md'))).toBe(false);
+		// #2501 contract: the v1 ambiguous hard error is gone — the no-flag default
+		// projects every detected feature into one effective spec with
+		// feature-scoped ids (both features restart at FR-001 and stay distinct).
+		expect(out).toContain('SDD projection written');
+		expect(fs.existsSync(path.join(tempDir, '.swarm', 'spec.md'))).toBe(true);
+		const specContent = fs.readFileSync(
+			path.join(tempDir, '.swarm', 'spec.md'),
+			'utf-8',
+		);
+		expect(specContent).toContain('001-alpha/FR-001');
+		expect(specContent).toContain('002-beta/FR-001');
+		expect(specContent).toContain('alpha capability');
+		expect(specContent).toContain('beta capability');
+		// Single Functional Requirements section; per-feature subsections allowed.
+		const sectionCount = (
+			specContent.match(/^##\s+Functional Requirements\s*$/gm) ?? []
+		).length;
+		expect(sectionCount).toBe(1);
 	});
 
 	test('--feature 002-beta: sourcePaths exact; written file is 002-beta only; readEffectiveSpecSync round-trip (FR-009)', async () => {

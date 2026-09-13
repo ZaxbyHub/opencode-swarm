@@ -10,8 +10,8 @@ export const SpecRequirementSchema = z.object({
 	id: z
 		.string()
 		.regex(
-			/^FR-(?!000)\d{3}$/,
-			'Requirement ID must match FR-### pattern (e.g., FR-001)',
+			/^(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)?FR-(?!000)\d{3}$/,
+			'Requirement ID must match FR-### (e.g., FR-001) or a feature-scoped <featureId>/FR-### form (e.g., 001-login/FR-001)',
 		),
 	obligation: ObligationSchema,
 	text: z.string().min(1),

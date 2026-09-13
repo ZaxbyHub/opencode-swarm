@@ -101,10 +101,35 @@ export const _internals = {
 	buildDriftInjectionText,
 };
 
-/** Extract FR-### requirement IDs from text (e.g., FR-001, FR-012). */
+/**
+ * Extract FR-### requirement IDs from text (e.g., FR-001, FR-012).
+ *
+ * Issue #2501: also captures FEATURE-SCOPED ids of the form `<featureId>/FR-###`
+ * (e.g., `001-login/FR-001`), preserving the namespace so two features that both
+ * define FR-001 stay distinct. Digit width is exactly three, reconciled with
+ * `SpecRequirementSchema` and the Spec-Kit/OpenSpec parsers.
+ */
 function extractRequirementIds(text: string): string[] {
-	const matches = text.match(/FR-\d{3,}/g);
+	const matches = text.match(/(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)?FR-\d{3}/g);
 	return matches ? [...new Set(matches)] : [];
+}
+
+/**
+ * Namespace-tolerant coverage test (issue #2501).
+ *
+ * A plan/digest reference covers a spec requirement when it names the exact id
+ * (bare↔bare, namespaced↔namespaced) OR when the reference is a BARE `FR-###`
+ * and the spec id is the namespaced `<featureId>/FR-###` form of it. The
+ * tolerance is deliberately asymmetric: a bare plan reference is the natural way
+ * a plan author cites a requirement and must never produce a false MAJOR_DRIFT
+ * (empty intersection) on a multi-feature projection — it counts as covering
+ * every feature's same-numbered requirement. A namespaced reference, however,
+ * never covers a different feature's id.
+ */
+function bareSuffixCovers(specId: string, refId: string): boolean {
+	return (
+		refId === specId || (!refId.includes('/') && specId.endsWith(`/${refId}`))
+	);
 }
 
 /**
@@ -157,12 +182,14 @@ export async function runDeterministicDriftCheck(
 			alignment = 'MINOR_DRIFT';
 			driftScore = 0.3;
 		} else if (specRequirements.length > 0) {
-			// Spec-based drift: check how many spec requirements are covered
+			// Spec-based drift: check how many spec requirements are covered.
+			// Namespace-tolerant intersection (#2501): a bare plan/digest reference
+			// covers every namespaced spec id it can be the bare form of.
 			const coveredInPlan = specRequirements.filter((fr) =>
-				planRequirements.includes(fr),
+				planRequirements.some((ref) => bareSuffixCovers(fr, ref)),
 			);
 			const coveredInDigest = specRequirements.filter((fr) =>
-				digestRequirements.includes(fr),
+				digestRequirements.some((ref) => bareSuffixCovers(fr, ref)),
 			);
 			const specCoverageRatio = coveredInPlan.length / specRequirements.length;
 			const implementationRatio =
@@ -212,7 +239,7 @@ export async function runDeterministicDriftCheck(
 
 		const coverageNote =
 			specRequirements.length > 0
-				? ` [${digestRequirements.filter((fr) => specRequirements.includes(fr)).length}/${specRequirements.length} FRs covered]`
+				? ` [${digestRequirements.filter((ref) => specRequirements.some((fr) => bareSuffixCovers(fr, ref))).length}/${specRequirements.length} FRs covered]`
 				: '';
 		const injectionSummaryRaw = `Phase ${phase}: ${alignment} (${driftScore.toFixed(2)})${coverageNote} — ${
 			firstDeviation ? firstDeviation.description : 'all requirements on track'

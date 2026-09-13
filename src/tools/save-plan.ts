@@ -46,6 +46,7 @@ import {
 	hasExplicitProjectBoundary,
 	isStrictPathDescendant,
 } from '../utils/project-boundary';
+import { escapeRegex } from '../utils/regex';
 import { createSwarmTool } from './create-tool';
 import { extractRequirements } from './req-coverage';
 
@@ -327,7 +328,16 @@ function evaluateRequirementCoverage(
 
 	for (const requirement of requirements) {
 		const mappedTaskIds: string[] = [];
-		const idPattern = new RegExp(`\\b${requirement.id}\\b`, 'i');
+		// Issue #2501: a requirement may carry a feature-scoped id
+		// (`<featureId>/FR-###`). Task text (or fr_refs) may cite either the full
+		// namespaced id or the natural bare `FR-###` form — both count as mapping.
+		const bareSuffix = requirement.id.includes('/')
+			? requirement.id.slice(requirement.id.lastIndexOf('/') + 1)
+			: null;
+		const idPattern = new RegExp(
+			`\\b(?:${[requirement.id, ...(bareSuffix ? [bareSuffix] : [])].map(escapeRegex).join('|')})\\b`,
+			'i',
+		);
 		for (const phase of args.phases) {
 			for (const task of phase.tasks) {
 				const taskText = `${task.description}\n${task.acceptance ?? ''}`;
@@ -336,8 +346,14 @@ function evaluateRequirementCoverage(
 				// task explicitly maps to it via fr_refs, in addition to the
 				// existing free-text fallback. fr_refs is `undefined` for any
 				// task that doesn't set it (schema uses `.optional()`, not
-				// `.default([])`), so it must be null-guarded.
-				const matchesFrRefs = task.fr_refs?.includes(requirement.id) ?? false;
+				// `.default([])`), so it must be null-guarded. #2501: a bare
+				// fr_ref entry covers the namespaced requirement it suffixes.
+				const matchesFrRefs =
+					task.fr_refs?.some(
+						(ref) =>
+							ref === requirement.id ||
+							(bareSuffix !== null && ref === bareSuffix),
+					) ?? false;
 				if (matchesFreeText || matchesFrRefs) {
 					mappedTaskIds.push(task.id);
 				}
