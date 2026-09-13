@@ -83,7 +83,10 @@ export function extractLeadingStanceDeclarations(
 			// markdown is OK), repeated for nested cases.
 			.replace(/^(?:>\s*|#{1,6}\s+|[-*+]\s+|\d{1,3}[.)]\s+)*/, '')
 			// Emphasis opening markers directly before the keyword.
-			.replace(/^[_*~]+/, '');
+			.replace(/^[_*~]+/, '')
+			// Quotation marks and backticks directly before the keyword
+			// (a member quoting or code-fencing the stance keyword).
+			.replace(/^["'`]+/, '');
 		if (paragraph === '') continue;
 		const boundary = paragraph.search(/[\s:,.;!?—–*_`>#-]/);
 		const firstWord =
@@ -189,9 +192,35 @@ function buildConsensusClusters(
 	);
 	for (const disagreement of disagreements) {
 		for (const position of disagreement.positions) {
-			if (!typedSupportMembers.has(position.memberId)) {
-				membersWithContraryClaims.add(position.memberId);
+			if (typedSupportMembers.has(position.memberId)) {
+				// A typed support claim rescues a flagged member from
+				// exclusion only when it pertains to the disagreement it is
+				// flagged on. An unrelated-subject support claim must not
+				// rescue a marker-phrase dissenter: their contrary sentence
+				// would otherwise be eligible for consensus clustering.
+				// When the subject relation cannot be established the member
+				// is excluded — under-reporting consensus is the safe
+				// direction (never reporting a contrary position as
+				// consensus).
+				const member = responses.find((m) => m.memberId === position.memberId);
+				const pertains = (
+					Array.isArray(member?.claims) ? member.claims : []
+				).some((claim) => {
+					if (!isWellFormedClaim(claim) || claim.stance !== 'support')
+						return false;
+					const subject =
+						typeof claim.subject === 'string'
+							? claim.subject.toLowerCase()
+							: '';
+					const topic = disagreement.topic.toLowerCase();
+					return (
+						subject !== '' &&
+						(topic.includes(subject) || subject.includes(topic))
+					);
+				});
+				if (pertains) continue;
 			}
+			membersWithContraryClaims.add(position.memberId);
 		}
 	}
 
@@ -257,6 +286,14 @@ function clamp01(n: number): number {
  * "I do not concede", missing declarations) leaves the disagreement
  * persisting: explicit disagreement is preserved unless a valid concession is
  * actually declared.
+ *
+ * Known binding scope (review PRR-001): resolution binds at the TOPIC-LIST
+ * level, exactly as the issue contract specifies ("a CONCEDE from a disputant
+ * whose response lists the topic"). A member who declares CONCEDE on one
+ * listed topic while declaring MAINTAIN on another listed topic resolves both;
+ * per-declaration topic binding is a deliberate contract boundary, not an
+ * oversight. Tightening it is a detection-improvement follow-up, same bucket
+ * as the missed-dissenter residual below.
  */
 function computePersistingDisagreements(
 	disagreements: GeneralCouncilDisagreement[],

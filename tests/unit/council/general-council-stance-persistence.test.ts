@@ -395,6 +395,90 @@ describe('general council stance persistence — feedback round (review F-3 / F-
 		}
 	});
 
+	test('PRR-002 - a marker-phrase dissenter with an unrelated-subject support claim is still excluded from consensus', () => {
+		// The exclusion escape (typedSupportMembers) must not rescue a
+		// member flagged in a detected disagreement whose only support
+		// claim is about an unrelated subject: their contrary sentence
+		// would otherwise be eligible for consensus clustering (PRR-002).
+		const unrelatedSubject = 'firmware licensing obligations';
+		const round1: GeneralCouncilMemberResponse[] = [
+			memberResponse('m1', 'generalist', SUPPORTER_SENTENCE, 0.9, [
+				claim(
+					SUBJECT,
+					'Blue-green deployment is the right approach because it removes downtime windows.',
+					'support',
+					0.9,
+				),
+			]),
+			memberResponse('m2', 'releases', SUPPORTER_SENTENCE, 0.85, [
+				claim(
+					SUBJECT,
+					'Blue-green deployment is the right approach because it removes downtime windows.',
+					'support',
+					0.85,
+				),
+			]),
+			memberResponse('m3', 'skeptic', OPPOSING_SENTENCE, 0.85, [
+				claim(
+					unrelatedSubject,
+					'Firmware redistribution requires attribution clauses per the license text.',
+					'support',
+					0.9,
+				),
+			]),
+		];
+		// m3's marker-phrase contrary sentence must trigger detection; then
+		// the unrelated-subject support claim must NOT rescue m3 from the
+		// consensus exclusion.
+		const m3Response = `${OPPOSING_SENTENCE} I disagree with the majority position here.`;
+		round1[2] = memberResponse('m3', 'skeptic', m3Response, 0.85, [
+			claim(
+				unrelatedSubject,
+				'Firmware redistribution requires attribution clauses per the license text.',
+				'support',
+				0.9,
+			),
+		]);
+		const result = synthesizeGeneralCouncil(QUESTION, 'general', round1, []);
+		expect(
+			result.disagreements.length,
+			'the marker phrase must be detected as a disagreement',
+		).toBeGreaterThanOrEqual(1);
+		for (const point of result.consensusPoints) {
+			expect(point).not.toContain(CONTRARY_FRAGMENT);
+		}
+	});
+
+	test('F2- quotation marks and backticks directly before the keyword do not hide a declaration', () => {
+		const round1 = opposingRound1();
+		const topics = detectDisagreementTopics(round1);
+		expect(topics.length).toBeGreaterThanOrEqual(1);
+		const quoted = synthesizeGeneralCouncil(QUESTION, 'general', round1, [
+			round2Response(
+				'm2',
+				'skeptic',
+				'"CONCEDE — the opposing position is correct.',
+				topics,
+			),
+		]);
+		expect(
+			quoted.persistingDisagreements,
+			'a quote-prefixed CONCEDE must parse',
+		).not.toContain(topics[0]);
+		const fenced = synthesizeGeneralCouncil(QUESTION, 'general', round1, [
+			round2Response(
+				'm2',
+				'skeptic',
+				'`CONCEDE — the opposing position is correct.',
+				topics,
+			),
+		]);
+		expect(
+			fenced.persistingDisagreements,
+			'a backtick-prefixed CONCEDE must parse',
+		).not.toContain(topics[0]);
+	});
+
 	test('F1- zero-width characters before the keyword do not hide a declaration', () => {
 		const round1 = opposingRound1();
 		const topics = detectDisagreementTopics(round1);

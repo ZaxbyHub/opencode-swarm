@@ -45,6 +45,10 @@ ROUND 2 — Targeted Deliberation (ONLY when this round is invoked for you)
     MAINTAIN  — your Round 1 position holds; cite the evidence supporting it
     CONCEDE   — the opposing position is correct; state specifically what you got wrong
     NUANCE    — both positions are partially right; state the boundary condition that distinguishes them
+  The keyword must be literally MAINTAIN, CONCEDE, or NUANCE (uppercase, exact spelling). If the
+  paragraph opens with markdown (blockquote >, heading #, list -/*+/digit, bold/italic/code marks),
+  the parser ignores those decorator characters before reading the first word — the keyword itself
+  must still be the first real word.
 - Never CONCEDE without evidence. Sycophantic capitulation degrades the council below an individual member's baseline (NSED arXiv:2601.16863).
 - Never MAINTAIN without engaging the opposing argument on its merits.`;
 
@@ -59,7 +63,7 @@ Reply with a single fenced JSON block. No prose outside the block.
   "memberId": "<your hardcoded memberId>",
   "role": "<your hardcoded role>",
   "round": 1,
-  "response": "Your full answer (Round 1) or stance + reasoning (Round 2). Markdown OK inside the string; the Round 2 stance keyword (MAINTAIN/CONCEDE/NUANCE) must remain the bare first word of its paragraph.",
+  "response": "Your full answer (Round 1) or stance + reasoning (Round 2). Markdown OK inside the string; the Round 2 stance keyword (MAINTAIN/CONCEDE/NUANCE) must remain the bare first word of its paragraph (markdown decorator characters before the keyword are ignored, but the keyword itself must be the literal uppercase word).",
   "searchQueries": [],
   "sources": [
     { "title": "...", "url": "...", "snippet": "...", "query": "..." }

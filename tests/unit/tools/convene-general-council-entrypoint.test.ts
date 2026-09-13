@@ -41,6 +41,8 @@ const QUESTION = 'Which deployment strategy should the migration use?';
 const SUBJECT = 'deployment strategy for the migration';
 const SUPPORTER_SENTENCE =
 	'The zero-downtime migration strategy should use blue-green deployment because it eliminates downtime windows during rollout.';
+/** Distinctive fragment unique to the supporter sentence. */
+const POSITIVE_FRAGMENT = 'eliminates downtime windows';
 const OPPOSING_SENTENCE =
 	'The zero-downtime migration strategy should use rolling deployment because blue-green doubles the required infrastructure cost.';
 const CONTRARY_FRAGMENT = 'doubles the required infrastructure cost';
@@ -403,5 +405,55 @@ describe('convene_general_council registered entrypoint — issue #2578 acceptan
 		);
 		expect(multi.length).toBe(2);
 		expect(multi.map((d) => d.stance)).toEqual(['MAINTAIN', 'NUANCE']);
+	});
+
+	test('AC6- standalone positive-only consensus through the registered entrypoint', async () => {
+		// Two agreeing supporters, no disagreement: the registered entrypoint
+		// must emit a consensus point containing the shared position
+		// (review PRR-016 — positive-only flow was previously covered only
+		// at the synthesis level).
+		const enabledProject = makeProject(
+			'{"council":{"general":{"enabled":true}}}',
+		);
+		const result = await callTool(
+			{
+				question: QUESTION,
+				mode: 'general',
+				round1Responses: [
+					{
+						memberId: 'p1',
+						model: 'test-model',
+						role: 'generalist',
+						response: SUPPORTER_SENTENCE,
+						sources: [],
+						searchQueries: [],
+						confidence: 0.9,
+						areasOfUncertainty: [],
+						durationMs: 10,
+					},
+					{
+						memberId: 'p2',
+						model: 'test-model',
+						role: 'domain_expert',
+						response: SUPPORTER_SENTENCE,
+						sources: [],
+						searchQueries: [],
+						confidence: 0.9,
+						areasOfUncertainty: [],
+						durationMs: 10,
+					},
+				],
+				working_directory: enabledProject,
+			},
+			enabledProject,
+		);
+		expect(result.success, JSON.stringify(result)).toBe(true);
+		const ok = result as ToolOkShape;
+		expect(
+			ok.consensusPoints.some((p) => p.includes(POSITIVE_FRAGMENT)),
+			`the shared supporter position must reach consensusPoints through the entrypoint, got: ${JSON.stringify(ok.consensusPoints)}`,
+		).toBe(true);
+		expect(ok.disagreementsCount).toBe(0);
+		expect(ok.persistingDisagreements).toEqual([]);
 	});
 });

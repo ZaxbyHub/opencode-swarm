@@ -448,7 +448,10 @@ dispatch:
    opposing position and the same RESEARCH CONTEXT block. Each declares
    their stance: **MAINTAIN** (with evidence), **CONCEDE** (state what was
    wrong), or **NUANCE** (boundary condition that distinguishes the
-   positions). Sycophantic capitulation without evidence is forbidden.
+   positions). The keyword must be the bare first word of its paragraph
+   (uppercase, exact spelling); markdown decorator characters before it are
+   ignored by the synthesis parser. Sycophantic capitulation without
+   evidence is forbidden.
 6. **Output.** The architect synthesizes the final answer directly from the
    `synthesis` returned by `convene_general_council`, applying inline output
    rules: LEAD WITH CONSENSUS (confidence-weighted, evidence breaks ties),

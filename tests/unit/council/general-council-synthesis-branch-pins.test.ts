@@ -162,8 +162,9 @@ describe('general council synthesis supplemental branch pins (#2578 review)', ()
 	});
 
 	test('weighted-agreement threshold is inclusive at exactly 0.6', () => {
-		// (0.9 + 0.9 + 0.0-clamped?) — deterministic construction: three
-		// members at confidences summing to exactly 1.8 across 3 members.
+		// Deterministic construction: m1 and m2 agree at 0.9 each and form
+		// the single cluster; m3 is unrelated and does not join it, so the
+		// weighted agreement is (0.9 + 0.9) / 3 members = exactly 0.6.
 		const round1: GeneralCouncilMemberResponse[] = [
 			member('m1', SUPPORT_SENTENCE, 0.9),
 			member('m2', SUPPORT_SENTENCE, 0.9),
