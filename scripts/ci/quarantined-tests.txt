@@ -11,4 +11,35 @@
 # the gate; an EXPIRY more than 14 days in the past also fails (inside
 # the grace window it only warns).
 #
-# No active global test quarantines. Issue #1908 retired the tracked backlog.
+# No active global test quarantines. Issue #1908 retired the tracked backlog;
+# (post-#1908 entries live below).
+
+# tests/unit/telemetry/init-rehome.test.ts (issue #2730)
+# ---------------------------------------------------------------------------
+# Tests the telemetry re-home on directory change path (issue #2472 W9): init
+# A then init B produces two telemetry.jsonl files and B receives subsequent
+# events; same-directory re-init stays an idempotent no-op; events emitted
+# before any init are dropped without creating a file; failed new-stream
+# creation retains the previous project's stream (fail-open ownership
+# retention); windows case-variant spelling of the same root keeps the
+# stream destination (canonical same-directory check). Flaky on
+# ubuntu-latest merge-group coverage-shard 3 only: CI run 34670762927
+# (merge_group, head 1499a74b, 2026-09-12T04:04:09Z) had Attempt 1 fail and
+# Passed on retry 1 (passed-on-retry flake); sibling coverage-shards
+# 1/2/4/5/6 were green on this file in the same run. The coverage job
+# runs ubuntu-only and honors ONLY the general ledger
+# (scripts/ci/run-coverage-gate.sh:85,111 never branches per-OS — its
+# own header comment at :98-104 says coverage is ubuntu-only and must
+# never partition by RUNNER_OS), so this is the only correct ledger
+# target. The ci.yml retry loop discards attempt-1 output when a retry
+# passes, so no assertion text exists to drive a root-cause fix; the file
+# passes locally on this checkout in ~149ms (5/5 cases). Pre-existing,
+# unrelated to any specific PR.
+# Quarantined per issue #2730; tracked under #1782 (test-stability sprint).
+# OWNER: zaxbysauce — issue #2730 (ubuntu-only merge-group coverage-shard
+#   flake; general-ledger target because run-coverage-gate.sh never
+#   branches per-OS)
+# EXPIRY: 2026-10-14 — root-fix the coverage/isolate retry-flake or renew
+#   with an updated criterion. Inside the 14-day grace window Check 7 only
+#   warns.
+tests/unit/telemetry/init-rehome.test.ts
