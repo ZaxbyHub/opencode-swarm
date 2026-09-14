@@ -78,6 +78,44 @@ describe('architect budget advisory dedup (#2671 review)', () => {
 		).toHaveLength(1);
 	});
 
+	// Review PRR-B07: whitespace-variant formatting of the same bounded
+	// error must dedup to one advisory (signature collapses whitespace).
+	test('whitespace-variant duplicates emit exactly one advisory', () => {
+		clearDeferredWarnings();
+		warnArchitectPromptBudgetExceededOnce(
+			'ARCHITECT_PROMPT_BUDGET_EXCEEDED: cell-w is  162000 chars',
+		);
+		warnArchitectPromptBudgetExceededOnce(
+			'ARCHITECT_PROMPT_BUDGET_EXCEEDED:  cell-w  is 162000  chars',
+		);
+		const cellW = getDeferredWarnings().filter((w) => w.includes('cell-w'));
+		expect(
+			cellW.length,
+			'whitespace drift must not produce repeat advisories',
+		).toBeLessThanOrEqual(1);
+	});
+
+	// Review PRR-A03: the factory-exit check emits the bare 'architect'
+	// label while the post-substitution check emits the prefixed
+	// 'cloud_architect' label — the same overflowing architect must dedup to
+	// ONE advisory across the two composition points.
+	test('bare and prefixed labels for the same architect dedup to one advisory', () => {
+		clearDeferredWarnings();
+		warnArchitectPromptBudgetExceededOnce(
+			"ARCHITECT_PROMPT_BUDGET_EXCEEDED: composed architect prompt for 'architect' is 162000 chars (> 161000 ceiling, ~40500 model-token estimate).",
+		);
+		warnArchitectPromptBudgetExceededOnce(
+			"ARCHITECT_PROMPT_BUDGET_EXCEEDED: composed architect prompt for 'cloud_architect' is 162003 chars (> 161000 ceiling, ~40501 model-token estimate).",
+		);
+		const advisories = getDeferredWarnings().filter((w) =>
+			w.includes('ARCHITECT_PROMPT_BUDGET_EXCEEDED'),
+		);
+		expect(
+			advisories.length,
+			`the bare and prefixed labels must dedup to one advisory, got: ${JSON.stringify(advisories)}`,
+		).toBe(1);
+	});
+
 	// Review ROW-3: the signature set is FIFO-bounded — the oldest signature
 	// is evicted past MAX_ARCHITECT_BUDGET_SIGNATURES and may warn again,
 	// while recent signatures stay suppressed. RED under an unbounded set.
@@ -105,6 +143,54 @@ describe('architect budget advisory dedup (#2671 review)', () => {
 		expect(
 			getDeferredWarnings(),
 			'the evicted oldest signature must be eligible to warn again',
+		).toHaveLength(1);
+		clearDeferredWarnings();
+		warnArchitectPromptBudgetExceededOnce(distinct[100]);
+		expect(
+			getDeferredWarnings(),
+			'the most recent signature must remain suppressed',
+		).toHaveLength(0);
+	});
+
+	// Review PRR-B06: FIFO eviction is symmetric — a MIDDLE entry must also
+	// be evicted (and re-warn) once enough newer signatures push it past the
+	// bound, not just the oldest.
+	test('signature set evicts middle entries once pushed past the bound', () => {
+		clearDeferredWarnings();
+		const distinct: string[] = [];
+		for (let i = 0; i < 101; i++) {
+			let label = 'agent-';
+			let n = i;
+			do {
+				label += String.fromCharCode(97 + (n % 26));
+				n = Math.floor(n / 26);
+			} while (n > 0);
+			distinct.push(
+				`ARCHITECT_PROMPT_BUDGET_EXCEEDED: ${label} is 162000 chars`,
+			);
+		}
+		for (const error of distinct) {
+			warnArchitectPromptBudgetExceededOnce(error);
+		}
+		// Push 25 more distinct signatures: entries #0..#25 are evicted FIFO,
+		// so middle entry #25 must now warn again while a still-recent
+		// signature (#100) stays suppressed.
+		for (let i = 0; i < 25; i++) {
+			let label = 'push-';
+			let n = i;
+			do {
+				label += String.fromCharCode(97 + (n % 26));
+				n = Math.floor(n / 26);
+			} while (n > 0);
+			warnArchitectPromptBudgetExceededOnce(
+				`ARCHITECT_PROMPT_BUDGET_EXCEEDED: ${label} is 162000 chars`,
+			);
+		}
+		clearDeferredWarnings();
+		warnArchitectPromptBudgetExceededOnce(distinct[25]);
+		expect(
+			getDeferredWarnings(),
+			'the pushed-out middle signature must be eligible to warn again',
 		).toHaveLength(1);
 		clearDeferredWarnings();
 		warnArchitectPromptBudgetExceededOnce(distinct[100]);

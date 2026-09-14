@@ -176,7 +176,19 @@ const emittedBudgetAdvisories = new Set<string>();
 const MAX_ARCHITECT_BUDGET_SIGNATURES = 100;
 
 function budgetAdvisorySignature(error: string): string {
-	return error.replace(/\d+/g, 'N');
+	// Normalize everything that varies between composition points for the
+	// same overflowing architect (review PRR-A03): volatile digit runs
+	// (char/token counts), whitespace drift, and the agent label — the
+	// factory-exit check emits the bare 'architect' label while the
+	// post-substitution check emits the prefixed form (e.g.
+	// 'cloud_architect'), and both must dedup to one advisory.
+	return error
+		.replace(/\d+/g, 'N')
+		.replace(
+			/composed architect prompt for '[^']*'/,
+			"composed architect prompt for '<LABEL>'",
+		)
+		.replace(/\s+/g, ' ');
 }
 
 export function warnArchitectPromptBudgetExceededOnce(error: string): void {

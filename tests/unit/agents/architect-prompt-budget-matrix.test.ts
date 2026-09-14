@@ -114,6 +114,14 @@ export const FEATURE_MATRIX: ArchitectBudgetMatrixCell[] = [
 		config: { ui_review: { enabled: true } } as unknown as PluginConfig,
 		agentKey: 'architect',
 	},
+	{
+		name: 'memory + ui_review combined',
+		config: {
+			memory: { enabled: true },
+			ui_review: { enabled: true },
+		} as unknown as PluginConfig,
+		agentKey: 'architect',
+	},
 ];
 
 /**
