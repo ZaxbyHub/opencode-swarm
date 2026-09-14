@@ -13,8 +13,10 @@
     `scripts/ci/quarantined-tests-macos.txt`
   - `tests/unit/commands/promote-registration.test.ts` → macOS ledger,
     `scripts/ci/quarantined-tests-macos.txt`
-- No source, test, or hook code changed. The two ledger files are the only
-  repository files modified, plus this pending release fragment.
+- No source or hook code changed. The two ledger files are the only
+  repository files modified, plus a consumer-side regression test
+  (`tests/unit/scripts/ci/ci-yml-quarantine-2740.test.ts`) that pins the three
+  new ledger entries, and this pending release fragment.
 
 ## Why
 
