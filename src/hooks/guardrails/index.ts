@@ -183,13 +183,18 @@ export function emitDurableAttributionAdvisory(
 }
 
 /**
- * Stage A workflow-transition write errors that indicate an attribution or
- * correlation miss — the post-reset wedge signature. These escalate beyond a
- * log line because every silent one is exactly how tasks wedge at
- * coder_delegated with no diagnostic. Duplicate transitions never throw
- * (isDuplicateTransition returns the existing evidence), so any throw here is
- * abnormal; TASK_WORKFLOW_TERMINAL and fencing codes stay warn-only because a
- * late gate result after close/settlement is expected churn, not a wedge.
+ * Stage A workflow-transition write errors are split by the remediation they
+ * require. Coder-mutation-required is a reducer precondition: the architect
+ * must dispatch a coder for a real change before another Stage A result can
+ * be recorded. Stage-A-required is the attribution-recovery category. It is
+ * defensive at these two Stage A catches (the wrapped stage_a_passed and
+ * stage_a_failed writes currently cannot throw it), but remains live in the
+ * Stage B/delegation recovery surfaces.
+ *
+ * Duplicate transitions never throw (isDuplicateTransition returns the
+ * existing evidence), so any throw here is abnormal; TASK_WORKFLOW_TERMINAL
+ * and fencing codes stay warn-only because a late gate result after
+ * close/settlement is expected churn, not a wedge.
  *
  * `TASK_WORKFLOW_GENERATION_MISMATCH` is deliberately EXCLUDED: it is a CAS
  * fencing code that fires during ordinary concurrent/parallel-lane operation
@@ -198,8 +203,11 @@ export function emitDurableAttributionAdvisory(
  * turn a routine race into a false "run /swarm recover" advisory during
  * normal, non-reset operation.
  */
-export const STAGE_A_ATTRIBUTION_MISS_CODES = new Set([
+export const STAGE_A_CODER_MUTATION_REQUIRED_CODES = new Set([
 	'TASK_WORKFLOW_CODER_MUTATION_REQUIRED',
+]);
+
+export const STAGE_A_ATTRIBUTION_MISS_CODES = new Set([
 	'TASK_WORKFLOW_STAGE_A_REQUIRED',
 ]);
 
@@ -1254,7 +1262,15 @@ export function createGuardrailsHooks(
 									emitStageARoute('pre_check_failed', taskId);
 								} catch (err) {
 									const code = stageAWriteErrorCode(err);
-									if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
+									if (code && STAGE_A_CODER_MUTATION_REQUIRED_CODES.has(code)) {
+										logger.criticalWarn(
+											`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. An accepted coder mutation is required before Stage A can be recorded again. Dispatch a coder for a real code change, or mark the task blocked if no valid change exists.`,
+										);
+										pushAdvisory(
+											session,
+											`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch failed but an accepted coder mutation is required before Stage A can be recorded again. Dispatch a coder for a real code change, or mark the task blocked if no valid change exists.`,
+										);
+									} else if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
 										logger.criticalWarn(
 											`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. Run /swarm recover ${taskId}.`,
 										);
@@ -1307,10 +1323,11 @@ export function createGuardrailsHooks(
 									emitStageARoute('valid_pass', taskId);
 								} catch (err) {
 									// Duplicate transitions return existing evidence without
-									// throwing, so any error here is abnormal. Attribution-miss
+									// throwing, so any error here is abnormal. These category-specific
 									// codes are exactly how tasks silently wedge at
-									// coder_delegated post-reset — escalate them to a visible
-									// advisory instead of swallowing (TASK_WORKFLOW_TERMINAL and
+									// coder_delegated post-reset — escalate both category-specific
+									// routing codes to a visible advisory instead of swallowing
+									// (TASK_WORKFLOW_TERMINAL and
 									// WAL-fencing codes stay log-only: late gate results after
 									// close/settlement are expected churn, not a wedge).
 									const code = stageAWriteErrorCode(err);
@@ -1319,7 +1336,15 @@ export function createGuardrailsHooks(
 										// a late result that must not advance the task.
 										emitStageARoute('late_result', taskId);
 									}
-									if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
+									if (code && STAGE_A_CODER_MUTATION_REQUIRED_CODES.has(code)) {
+										logger.criticalWarn(
+											`[guardrails] Stage A write failed for task ${taskId}: ${code} — an accepted coder mutation is required before Stage A can be recorded again. Dispatch a coder for a real code change, or mark the task blocked if no valid change exists.`,
+										);
+										pushAdvisory(
+											session,
+											`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch passed but an accepted coder mutation is required before Stage A can be recorded again. Dispatch a coder for a real code change, or mark the task blocked if no valid change exists.`,
+										);
+									} else if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
 										logger.criticalWarn(
 											`[guardrails] Stage A write failed for task ${taskId}: ${code} — pre_check_batch result was NOT attributed. Run /swarm recover ${taskId}.`,
 										);

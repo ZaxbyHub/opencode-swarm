@@ -3,16 +3,18 @@
  * (TASK_WORKFLOW_STAGE_A_REQUIRED post-reset wedge).
  *
  * The escalation path in guardrails/index.ts classifies reducer throw codes:
- * attribution-miss codes escalate to a visible advisory, everything else stays
- * log-only. This test mechanically pins that classification to the actual
- * reducer: every TASK_WORKFLOW_* error literal emitted by src/gate-evidence.ts
- * must be either explicitly classified or explicitly allowlisted. A new
- * reducer error code added without touching the classification fails here, so
- * the class cannot silently return as an unclassified swallow.
+ * attribution-miss and coder-mutation-required codes have distinct visible
+ * guidance, while everything else stays log-only. This test mechanically pins
+ * that classification to the actual reducer: every TASK_WORKFLOW_* error
+ * literal emitted by src/gate-evidence.ts must be either explicitly classified
+ * or explicitly allowlisted. A new reducer error code added without touching
+ * the classification fails here, so the class cannot silently return as an
+ * unclassified swallow.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as guardrails from '../../../src/hooks/guardrails/index';
 import {
 	STAGE_A_ATTRIBUTION_MISS_CODES,
 	stageAWriteErrorCode,
@@ -47,6 +49,13 @@ const REDUCER_ALLOWLIST = new Set([
 	'TASK_WORKFLOW_GENERATION_MISMATCH',
 ]);
 
+function getCoderMutationCodes(): Set<string> {
+	const exported = (guardrails as unknown as Record<string, unknown>)[
+		'STAGE_A_CODER_MUTATION_REQUIRED_CODES'
+	];
+	return exported instanceof Set ? new Set(exported as Set<string>) : new Set();
+}
+
 function extractReducerErrorCodes(): string[] {
 	const source = fs.readFileSync(
 		path.resolve(import.meta.dir, '../../../src/gate-evidence.ts'),
@@ -61,7 +70,9 @@ function extractReducerErrorCodes(): string[] {
 
 describe('Stage A error classification guardrail', () => {
 	test('every reducer workflow error code is classified or allowlisted', () => {
+		const coderMutationCodes = getCoderMutationCodes();
 		const classified = new Set([
+			...coderMutationCodes,
 			...STAGE_A_ATTRIBUTION_MISS_CODES,
 			...REDUCER_ALLOWLIST,
 		]);
@@ -71,11 +82,34 @@ describe('Stage A error classification guardrail', () => {
 		expect(unclassified).toEqual([]);
 	});
 
+	test('coder-mutation and attribution classifications are explicit and disjoint', () => {
+		const coderMutationCodes = getCoderMutationCodes();
+		expect(coderMutationCodes).toEqual(
+			new Set(['TASK_WORKFLOW_CODER_MUTATION_REQUIRED']),
+		);
+		expect(STAGE_A_ATTRIBUTION_MISS_CODES).toEqual(
+			new Set(['TASK_WORKFLOW_STAGE_A_REQUIRED']),
+		);
+		for (const code of coderMutationCodes) {
+			expect(STAGE_A_ATTRIBUTION_MISS_CODES.has(code)).toBe(false);
+		}
+	});
+
+	test('Stage A required remains the attribution-recovery classification', () => {
+		const code = stageAWriteErrorCode(
+			new Error('TASK_WORKFLOW_STAGE_A_REQUIRED: attribution is missing'),
+		);
+		expect(code).toBe('TASK_WORKFLOW_STAGE_A_REQUIRED');
+		expect(STAGE_A_ATTRIBUTION_MISS_CODES.has(code as string)).toBe(true);
+		expect(getCoderMutationCodes().has(code as string)).toBe(false);
+	});
+
 	test('classification set only contains codes the reducer can actually throw', () => {
 		const reducerCodes = new Set(extractReducerErrorCodes());
-		const stale = [...STAGE_A_ATTRIBUTION_MISS_CODES].filter(
-			(code) => !reducerCodes.has(code),
-		);
+		const stale = [
+			...STAGE_A_ATTRIBUTION_MISS_CODES,
+			...getCoderMutationCodes(),
+		].filter((code) => !reducerCodes.has(code));
 		expect(stale).toEqual([]);
 	});
 
