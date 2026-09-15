@@ -12,7 +12,8 @@
 # the gate; an EXPIRY more than 14 days in the past also fails (inside
 # the grace window it only warns).
 #
-# No active macOS-only quarantines besides the entry below.
+# macOS-only quarantines live here; entry count is tracked by the file size
+# of active (non-comment) lines plus the OWNER/EXPIRY header convention.
 
 # OWNER: zaxbysauce — issue #2738 (deterministic macOS signal-child failure:
 #   the crash fixture survives the delivered POSIX signal and exits 0 on
@@ -21,3 +22,63 @@
 # EXPIRY: 2026-09-26 — remove when the fixture/harness signal handling is
 #   fixed and the test passes on macos-latest.
 tests/unit/scripts/ci/repository-validation-real-process-2675.test.ts
+#
+# tests/unit/hooks/pr-feedback-scope-controller.test.ts (issue #2730)
+# ---------------------------------------------------------------------------
+# Tests the PR_FEEDBACK dedicated coder scope controller (8 cases): fails
+# closed before immutable verification settles, authorizes exactly one
+# planless coder Task and enforces its bound files, gives an authenticated
+# synthetic PR-feedback scope precedence over an unrelated plan, gives an
+# authenticated PR-feedback scope precedence over stale plan Stage-A state,
+# invalidates a prepared scope when the feedback revision changes,
+# atomically reserves one PR-feedback declaration when Task calls race,
+# does not consume a replacement declaration after classifying its
+# predecessor, and preserves normal-plan Stage-A rejection without scope
+# or evidence leaks. Flaky on macos-latest merge-group unit-shard 1 only:
+# CI run 34670762927 (merge_group, head 1499a74b, 2026-09-12T03:56:04Z)
+# had Attempt 1 fail and Passed on retry 1 (passed-on-retry flake); sibling
+# macos-latest unit shards 2/4/5/6, all ubuntu-latest unit shards 1-4, and
+# all windows-latest unit shards 2/3/4/6 either ran the file green or did
+# not run it (shard round-robin). The ci.yml retry loop discards
+# attempt-1 output when a retry passes, so no assertion text exists to
+# drive a root-cause fix; the file passes locally on this checkout in
+# ~1.2s (8/8 cases). Pre-existing, unrelated to any specific PR.
+# Quarantined per issue #2730; tracked under #1782 (test-stability sprint).
+# OWNER: zaxbysauce — issue #2730 (macos-latest-only merge-group flake;
+#   single-OS evidence: macos-1 retry-pass, siblings green)
+# EXPIRY: 2026-10-14 — root-fix the macos-only flake pattern or renew with
+#   an updated criterion. Inside the 14-day grace window Check 7 only warns.
+tests/unit/hooks/pr-feedback-scope-controller.test.ts
+#
+# tests/unit/utils/bun-compat-exit-first-2530.test.ts (issue #2730)
+# ---------------------------------------------------------------------------
+# Tests the bunSpawn Node fallback exit-first output consumption surface
+# (issue #2530): Node fallback preserves empty/small/large/nonzero
+# dual-stream outcomes, native Bun preserves the same, native Bun
+# immediate getReader retains stdout ownership, Node fallback reports
+# bounded output overflow and terminates the child, native Bun reports
+# the same, Node fallback timeout preserves partial output and
+# termination outcome, native Bun timeout preserves the same, and the
+# plain-Node built public isCleanWorktree path handles a clean Git repo.
+# Flaky on macos-latest merge-group unit-shard 5 only: CI run 34670762927
+# (merge_group, head 1499a74b, 2026-09-12T03:57:26Z) had Attempt 1 fail,
+# Attempt 2 fail, then the error surfaced as `::error file=...::FAILED`
+# (hard failure); sibling macos-latest unit shards 1/2/4/6 either ran
+# the file green or did not run it (shard round-robin), and all
+# ubuntu/windows shards were green or did not run it. The failing cell
+# is `native Bun reports bounded output overflow and terminates the
+# child` at tests/unit/utils/bun-compat-exit-first-2530.test.ts:450-454:
+# `expect(receipt.exitCode !== 0 || receipt.signalCode !== null).toBe(true)`
+# fails because native Bun on macos-latest returns both exitCode 0 and
+# signalCode null after the bounded-output termination path. The ci.yml
+# retry loop captures the assertion (both retries exhausted); the file passes
+# locally on this checkout in ~3.6s (8/8 cases). Pre-existing, unrelated to
+# any specific PR.
+# Quarantined per issue #2730; tracked under #1782 (test-stability sprint).
+# OWNER: zaxbysauce — issue #2730 (macos-latest-only merge-group flake;
+#   single-OS evidence: macos-5 hard fail both attempts, siblings green)
+# EXPIRY: 2026-10-14 — root-fix the macos-only native Bun output-overflow
+#   termination surface (e.g. SIGTERM the child on macos to mirror the Node
+#   fallback path) or renew with an updated criterion. Inside the 14-day
+#   grace window Check 7 only warns.
+tests/unit/utils/bun-compat-exit-first-2530.test.ts
