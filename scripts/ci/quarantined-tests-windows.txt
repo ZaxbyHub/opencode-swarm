@@ -12,9 +12,10 @@
 # gate; an EXPIRY more than 14 days in the past also fails (inside the grace
 # window it only warns).
 #
-# STATUS: 2 active entries (pr-monitor-status.test.ts per issue #1982 and
-# win32-wrapper-runtime.test.ts per issue #2185 — the issue #1729 debt itself
-# remains paid down; see the entries below).
+# STATUS: 3 active entries (pr-monitor-status.test.ts per issue #1982,
+# win32-wrapper-runtime.test.ts per issue #2185, and
+# completion-observer-coder.test.ts per issue #2692 — the issue #1729 debt
+# itself remains paid down; see the entries below).
 #
 # History: this list previously held 9 Windows-only failures. They were fixed
 # in issue #1729 by a combination of:
@@ -94,3 +95,30 @@ tests/unit/commands/pr-monitor-status.test.ts
 # EXPIRY: 2026-10-01 — root-fix the PowerShell cold-spawn flake or renew with
 # an updated diagnosis under #1737/#2477
 tests/unit/sandbox/win32-wrapper-runtime.test.ts
+#
+# completion-observer-coder.test.ts (issue #2692)
+# ---------------------------------------------------------------------------
+# Integration tests for the background-coder completion ingestion path
+# (trusted fresh completion wires exact parent state/files/evidence/advisory,
+# HEAD-drift staleness fencing, terminal-claim idempotency, review-state
+# overwrite protection, shared-root attribution, replay fencing-token
+# rotation, fenced-commit failure). Every case builds a real git repository
+# via spawnSync git init/config/add/commit with a 5s timeout
+# (tests/unit/background/completion-observer-coder.test.ts:26-39) and drives
+# async completion-observer events, so slow windows-latest runners or
+# filesystem contention can push the git spawns/past-HEAD checks over the
+# line. Flaky on windows-latest merge-group unit-shard 1 only: CI run
+# 34410703321 (merge_group pr-2644, head 740b66aa4, 2026-09-09T22:08:51Z) had
+# Attempt 1 fail and Passed on retry 1 (passed-on-retry flake) at
+# 2026-09-09T22:14:39Z, while sibling ubuntu-latest shard 1 (1.182s) and
+# macos-latest shard 1 (2.414s) ran the same file green in the same run.
+# The ci.yml retry loop discards attempt-1 output when a retry passes, so no
+# assertion text exists to drive a root-cause fix. Pre-existing, unrelated
+# to any specific PR. Quarantined per issue #2692; tracked under #1782
+# (test-stability sprint).
+# OWNER: zaxbysauce — issue #2692 (windows-latest-only merge-group flake;
+#   single-OS evidence: windows-1 retry-pass, ubuntu-1/macos-1 green)
+# EXPIRY: 2026-10-31 — root-fix the windows git-spawn/observer-timing flake
+#   or renew with an updated criterion. Inside the 14-day grace window
+#   Check 7 only warns.
+tests/unit/background/completion-observer-coder.test.ts
