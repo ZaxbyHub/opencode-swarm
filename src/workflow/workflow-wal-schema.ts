@@ -74,6 +74,8 @@ export interface TaskTerminalWalV1 {
 	newWorkflowState: 'blocked' | 'complete';
 	generation: number;
 	qaExempt: boolean;
+	/** Completion used the trusted generation-0 empty-scope settlement path. */
+	readOnlyNoMutation?: boolean;
 	recordedAt: string;
 }
 
@@ -272,11 +274,13 @@ export function parseCoderSettlementWal(
 					(candidatePath) =>
 						typeof candidatePath !== 'string' ||
 						candidatePath.length > 4096 ||
-						!isPathWithinDeclaredScope(
-							candidatePath,
-							context.declaredFiles ?? [],
-							baseline.directory,
-						),
+						(Array.isArray(context.declaredFiles) &&
+							context.declaredFiles.length > 0 &&
+							!isPathWithinDeclaredScope(
+								candidatePath,
+								context.declaredFiles,
+								baseline.directory,
+							)),
 				))) ||
 		(worktree !== undefined &&
 			(typeof worktree.callID !== 'string' ||
@@ -416,6 +420,7 @@ export function parseTaskTerminalWal(
 		newWorkflowState: TerminalWorkflowState;
 		generation: number;
 		qaExempt: boolean;
+		readOnlyNoMutation?: boolean;
 		recordedAt: string;
 		planIdentityHash: string;
 		planEpoch: string;
@@ -447,6 +452,8 @@ export function parseTaskTerminalWal(
 		!Number.isInteger(parsed.generation) ||
 		(parsed.generation ?? -1) < 0 ||
 		typeof parsed.qaExempt !== 'boolean' ||
+		(parsed.readOnlyNoMutation !== undefined &&
+			typeof parsed.readOnlyNoMutation !== 'boolean') ||
 		typeof parsed.recordedAt !== 'string' ||
 		!Number.isFinite(Date.parse(parsed.recordedAt))
 	) {
@@ -480,6 +487,17 @@ export function parseTaskTerminalWal(
 			filePath,
 			'claims a closed transition in a legacy v1 terminal WAL',
 			'Preserve this file and reconcile the task terminal transition before moving it aside.',
+		);
+	}
+	if (
+		parsed.readOnlyNoMutation === true &&
+		(parsed.newPlanStatus !== 'completed' ||
+			parsed.newWorkflowState !== 'complete' ||
+			parsed.generation !== 0 ||
+			parsed.qaExempt !== false)
+	) {
+		throw new Error(
+			`TASK_TERMINAL_WAL_STATE_MISMATCH: ${filePath} claims read-only no-mutation completion outside generation 0`,
 		);
 	}
 	if (

@@ -363,7 +363,7 @@ describe('checkReviewerGate Turbo Mode edge cases', () => {
 		expect(result.blocked).toBe(true);
 	});
 
-	it('handles empty files_touched array (allows bypass)', () => {
+	it('does not bypass an explicitly empty files_touched array', () => {
 		const planJson = JSON.stringify({
 			schema_version: '1.0.0',
 			title: 'Test',
@@ -394,10 +394,10 @@ describe('checkReviewerGate Turbo Mode edge cases', () => {
 		const session = swarmState.agentSessions.get('session-1');
 		session!.turboMode = true;
 
-		// Empty files_touched → no Tier 3 match → bypass
+		// An explicit empty scope is not evidence that Stage B can be skipped.
 		const result = checkReviewerGate('3.2', tmpDir);
-		expect(result.blocked).toBe(false);
-		expect(result.reason).toBe('Turbo Mode bypass');
+		expect(result.blocked).toBe(true);
+		expect(result.reason).not.toBe('Turbo Mode bypass');
 	});
 
 	it('falls back to normal gate check when plan.json is missing', () => {

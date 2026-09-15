@@ -165,6 +165,23 @@ function baselineAttributionDoomed(baseline: {
 	);
 }
 
+/**
+ * An empty declared scope cannot distinguish a coder mutation from an
+ * out-of-scope workspace change. Such a change must not be reduced to the
+ * empty scoped observation that powers the generation-0 read-only exception.
+ */
+export function hasUnattributedEmptyScopeMutation(
+	declaredFiles: readonly string[] | null | undefined,
+	rawObservedFiles: readonly string[] | null | undefined,
+): boolean {
+	return (
+		Array.isArray(declaredFiles) &&
+		declaredFiles.length === 0 &&
+		Array.isArray(rawObservedFiles) &&
+		rawObservedFiles.length > 0
+	);
+}
+
 function doomedReason(baseline: {
 	gitHead: string | null;
 	changedFiles?: string[] | null;
@@ -196,6 +213,12 @@ async function scopedObservedFiles(
 	const baseline = { ...context.baseline, directory };
 	const observed = await changedFilesSinceSnapshotAsync(directory, baseline);
 	if (!observed || !context.declaredFiles) return null;
+	if (hasUnattributedEmptyScopeMutation(context.declaredFiles, observed)) {
+		// Preserve the raw observation so recovery can record a failed rework
+		// settlement rather than silently reducing an empty-scope mutation to a
+		// no-op proof (issue #2763).
+		return observed;
+	}
 	return observed.filter((filePath) =>
 		isPathWithinDeclaredScope(filePath, context.declaredFiles ?? [], directory),
 	);
@@ -218,6 +241,10 @@ function settlementTransitionEvent(
 		: {
 				type: 'dispatch_no_mutation',
 				agentType: 'coder',
+				context: {
+					declaredFiles: wal.context.declaredFiles,
+					settlementTransitionId: wal.transitionId,
+				},
 				expectedGeneration: wal.expectedGeneration,
 				transitionId: wal.transitionId,
 			};
@@ -267,9 +294,13 @@ async function commitPrepared(
 								? 'accepted_mutation_failed'
 								: 'accepted_mutation') &&
 						snapshot.lastTransitionId === lockedWal.transitionId
-					: snapshot.generation === lockedWal.expectedGeneration &&
-						snapshot.lastOutcome === 'dispatch_no_mutation' &&
-						snapshot.lastTransitionId === lockedWal.transitionId;
+					: snapshot.authoritative &&
+						snapshot.generation === lockedWal.expectedGeneration &&
+						(lockedWal.context.declaredFiles?.length === 0
+							? snapshot.noMutationSettlement?.transitionId ===
+								lockedWal.transitionId
+							: snapshot.lastOutcome === 'dispatch_no_mutation' &&
+								snapshot.lastTransitionId === lockedWal.transitionId);
 			if (evidenceAlreadySettled) {
 				const evidence = transaction.read() as TaskEvidence;
 				if (lockedWal.accepted === true) {
@@ -301,7 +332,14 @@ async function commitPrepared(
 					alreadyApplied: true,
 				};
 			}
-			if (lockedWal.state !== 'PREPARED') {
+			if (
+				lockedWal.state !== 'PREPARED' &&
+				!(
+					lockedWal.state === 'COMMITTED' &&
+					lockedWal.accepted !== true &&
+					snapshot.state === 'idle'
+				)
+			) {
 				throw new Error('CODER_SETTLEMENT_NOT_PREPARED');
 			}
 			const evidence = await transaction.transition(transitionEvent);
@@ -466,6 +504,8 @@ export async function settleCoderDispatch(options: {
 	accepted: boolean;
 	testEngineerExempt: boolean;
 	settlementFailed?: boolean;
+	/** Raw workspace changes used to prevent empty-scope no-mutation proofs. */
+	observedFiles?: readonly string[] | null;
 	/** #2508: landed via squash-unstaged — retain the lane branch at cleanup. */
 	landedUnstaged?: boolean;
 }): Promise<CoderSettlementResult> {
@@ -481,11 +521,18 @@ export async function settleCoderDispatch(options: {
 			if (wal.transitionId !== options.transitionId) {
 				throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
 			}
+			const unattributedEmptyScopeMutation = hasUnattributedEmptyScopeMutation(
+				wal.context.declaredFiles,
+				options.observedFiles,
+			);
+			const accepted = options.accepted || unattributedEmptyScopeMutation;
+			const settlementFailed =
+				options.settlementFailed === true || unattributedEmptyScopeMutation;
 			if (wal.state === 'COMMITTED') {
 				if (
-					wal.accepted !== options.accepted ||
+					wal.accepted !== accepted ||
 					wal.testEngineerExempt !== options.testEngineerExempt ||
-					wal.settlementFailed !== (options.settlementFailed === true)
+					wal.settlementFailed !== settlementFailed
 				) {
 					throw new Error('CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT');
 				}
@@ -498,18 +545,18 @@ export async function settleCoderDispatch(options: {
 			}
 			if (
 				wal.state === 'PREPARED' &&
-				(wal.accepted !== options.accepted ||
+				(wal.accepted !== accepted ||
 					wal.testEngineerExempt !== options.testEngineerExempt ||
-					wal.settlementFailed !== (options.settlementFailed === true))
+					wal.settlementFailed !== settlementFailed)
 			) {
 				throw new Error('CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT');
 			}
 			const prepared: CoderSettlementWal = {
 				...wal,
 				state: 'PREPARED',
-				accepted: options.accepted,
+				accepted,
 				testEngineerExempt: options.testEngineerExempt,
-				settlementFailed: options.settlementFailed === true,
+				settlementFailed,
 			};
 			if (wal.state !== 'PREPARED') await writeWal(filePath, prepared);
 			liveDispatches.delete(
@@ -989,6 +1036,14 @@ export async function recoverCoderSettlement(
 						`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: transition ${wal.transitionId} for isolated task ${taskId} could not attribute worktree changes to the declared scope (${filePath}, state ${wal.state}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 					);
 				}
+				const unattributedEmptyScopeMutation =
+					hasUnattributedEmptyScopeMutation(
+						wal.context.declaredFiles,
+						observed,
+					);
+				const accepted = observed.length > 0 || unattributedEmptyScopeMutation;
+				const settlementFailed =
+					wal.settlementFailed === true || unattributedEmptyScopeMutation;
 				if (wal.mergeProvenance) {
 					const landed = await reconcileLandedMerge(
 						directory,
@@ -1004,7 +1059,8 @@ export async function recoverCoderSettlement(
 							...wal,
 							state: 'PREPARED',
 							observedFiles: observed,
-							accepted: observed.length > 0,
+							accepted,
+							settlementFailed,
 							testEngineerExempt: isMarkdownOnlyTaskChange(
 								wal.context.declaredFiles,
 								observed,
@@ -1098,7 +1154,8 @@ export async function recoverCoderSettlement(
 							wal = {
 								...wal,
 								state: 'PREPARED',
-								accepted: observed.length > 0,
+								accepted,
+								settlementFailed,
 								testEngineerExempt: isMarkdownOnlyTaskChange(
 									wal.context.declaredFiles,
 									observed,
@@ -1167,6 +1224,10 @@ export async function recoverCoderSettlement(
 				directory,
 				wal.context.baseline,
 			);
+			const unattributedEmptyScopeMutation = hasUnattributedEmptyScopeMutation(
+				wal.context.declaredFiles,
+				rawObserved,
+			);
 			let observed: string[] | null;
 			if (rawObserved === null) {
 				if (baselineAttributionDoomed(wal.context.baseline)) {
@@ -1195,13 +1256,15 @@ export async function recoverCoderSettlement(
 			} else if (wal.context.declaredFiles === null) {
 				observed = [];
 			} else {
-				observed = rawObserved.filter((filePath) =>
-					isPathWithinDeclaredScope(
-						filePath,
-						wal.context.declaredFiles ?? [],
-						directory,
-					),
-				);
+				observed = unattributedEmptyScopeMutation
+					? rawObserved
+					: rawObserved.filter((filePath) =>
+							isPathWithinDeclaredScope(
+								filePath,
+								wal.context.declaredFiles ?? [],
+								directory,
+							),
+						);
 			}
 			if (observed === null) {
 				throw new Error(
@@ -1212,6 +1275,8 @@ export async function recoverCoderSettlement(
 				...wal,
 				state: 'PREPARED',
 				accepted: observed.length > 0,
+				settlementFailed:
+					wal.settlementFailed === true || unattributedEmptyScopeMutation,
 				testEngineerExempt: isMarkdownOnlyTaskChange(
 					wal.context.declaredFiles,
 					observed,

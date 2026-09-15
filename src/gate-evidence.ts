@@ -17,7 +17,7 @@
  * that requires a protected trust root outside the project workspace.
  */
 
-import { mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import {
@@ -113,6 +113,16 @@ export interface TaskWorkflowMetadata {
 	 * `repair_idle` (which opens a new generation for genuinely new work).
 	 */
 	supervisedRecovery?: boolean;
+	/**
+	 * Exact proof that the generation-0 coder settlement declared no files and
+	 * observed no mutation. This is deliberately separate from retry history and
+	 * lastOutcome so it cannot be overwritten by a later advisory transition.
+	 */
+	noMutationSettlement?: {
+		generation: 0;
+		transitionId: string;
+		declaredFiles: string[];
+	};
 }
 
 export interface TaskWorkflowSnapshot extends TaskWorkflowMetadata {
@@ -135,6 +145,66 @@ export interface TaskEvidence {
 		source_generation: number | null;
 		requirements_receipt_hash: string | null;
 	};
+}
+
+export interface ApplicableGateSet {
+	requiredGates: string[];
+	satisfiedGates: string[];
+	missingGates: string[];
+	readOnlyNoMutation: boolean;
+}
+
+const MAX_PLAN_SCOPE_INSPECTION_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Read the current task scope for a completion-time guard. A generation-0
+ * no-mutation settlement is meaningful only while the current task still has
+ * an empty scope. If the plan cannot be read, parsed, or identifies the task
+ * ambiguously, return null so callers fail closed rather than trusting stale
+ * proof.
+ */
+export function readCurrentTaskDeclaredFiles(
+	directory: string,
+	taskId: string,
+): string[] | null {
+	try {
+		const planPath = validateSwarmPath(directory, 'plan.json');
+		const stat = statSync(planPath);
+		if (!stat.isFile() || stat.size > MAX_PLAN_SCOPE_INSPECTION_BYTES) {
+			return null;
+		}
+		const parsed = JSON.parse(readFileSync(planPath, 'utf8')) as {
+			phases?: unknown;
+		};
+		if (!Array.isArray(parsed.phases)) return null;
+		let declaredFiles: string[] | null = null;
+		for (const phase of parsed.phases) {
+			if (!phase || typeof phase !== 'object') return null;
+			const tasks = (phase as { tasks?: unknown }).tasks;
+			if (!Array.isArray(tasks)) return null;
+			for (const task of tasks) {
+				if (!task || typeof task !== 'object') return null;
+				const record = task as {
+					id?: unknown;
+					files_touched?: unknown;
+				};
+				if (record.id !== taskId) continue;
+				if (
+					!Array.isArray(record.files_touched) ||
+					!record.files_touched.every(
+						(file): file is string => typeof file === 'string',
+					)
+				) {
+					return null;
+				}
+				if (declaredFiles !== null) return null;
+				declaredFiles = [...record.files_touched];
+			}
+		}
+		return declaredFiles;
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -306,6 +376,8 @@ export type TaskWorkflowTransitionEvent =
 			type: 'task_completed';
 			/** Locked plan phase explicitly declares that reviewer QA is not required. */
 			qaExempt?: boolean;
+			/** Durable, non-forced completion of a trusted empty-scope settlement. */
+			readOnlyNoMutation?: boolean;
 			expectedGeneration: number;
 			transitionId?: string;
 	  }
@@ -351,6 +423,13 @@ const TaskWorkflowMetadataSchema = z.object({
 	updatedAt: z.string(),
 	forcedCompletion: z.boolean().optional(),
 	supervisedRecovery: z.boolean().optional(),
+	noMutationSettlement: z
+		.object({
+			generation: z.literal(0),
+			transitionId: z.string().min(1).max(512),
+			declaredFiles: z.array(z.string()).length(0),
+		})
+		.optional(),
 });
 
 const TaskEvidenceSchema = z.object({
@@ -396,6 +475,10 @@ export interface GateDerivationContext {
 	testEngineerExempt?: boolean;
 	/** The shared-root coder changed files but returned a failed/cancelled result. */
 	settlementFailed?: boolean;
+	/** Trusted coder-settlement declared scope. Null/missing is not proof. */
+	declaredFiles?: readonly string[] | null;
+	/** Internal binding set only by the coder-settlement WAL transition adapter. */
+	settlementTransitionId?: string;
 }
 
 const DEFAULT_WORKFLOW_STATE: TaskWorkflowState = 'idle';
@@ -570,6 +653,16 @@ function isDuplicateTransition(
 	snapshot: TaskWorkflowSnapshot,
 	event: TaskWorkflowTransitionEvent,
 ): boolean {
+	if (
+		event.type === 'dispatch_no_mutation' &&
+		event.context?.declaredFiles?.length === 0 &&
+		event.context.settlementTransitionId === event.transitionId &&
+		!snapshot.noMutationSettlement
+	) {
+		// A pre-fix duplicate no-mutation transition did not persist the trusted
+		// settlement proof. Replay it once so the new durable marker is materialized.
+		return false;
+	}
 	return (
 		snapshot.authoritative &&
 		typeof event.transitionId === 'string' &&
@@ -577,6 +670,75 @@ function isDuplicateTransition(
 		snapshot.lastTransitionId === event.transitionId &&
 		snapshot.lastOutcome === getEventOutcome(event)
 	);
+}
+
+function isNoMutationSettlementMetadata(
+	workflow: TaskWorkflowSnapshot,
+): boolean {
+	const settlement = workflow.noMutationSettlement;
+	if (
+		!workflow.authoritative ||
+		workflow.generation !== 0 ||
+		settlement?.generation !== 0 ||
+		typeof settlement.transitionId !== 'string' ||
+		settlement.transitionId.length === 0 ||
+		!Array.isArray(settlement.declaredFiles) ||
+		settlement.declaredFiles.length !== 0
+	)
+		return false;
+	// The marker itself is the durable transition-bound proof. Do not consult
+	// lastOutcome/lastTransitionId here: advisory gate_recorded transitions are
+	// intentionally state-preserving but may overwrite both fields.
+	return workflow.state === 'idle' || workflow.state === 'complete';
+}
+
+/**
+ * Derive the single evidence-backed gate set used by both completion and the
+ * read-only status tool. Empty required gates are meaningful only when the
+ * exact generation-0 no-mutation settlement proof is present; otherwise
+ * Stage A remains applicable and is reported as missing.
+ */
+export function deriveApplicableGateSet(
+	evidence: TaskEvidence | null | undefined,
+	options?: { currentDeclaredFiles?: readonly string[] | null },
+): ApplicableGateSet {
+	if (!evidence) {
+		return {
+			requiredGates: ['pre_check'],
+			satisfiedGates: [],
+			missingGates: ['pre_check'],
+			readOnlyNoMutation: false,
+		};
+	}
+	const workflow = getTaskWorkflowSnapshot(evidence);
+	const readOnlyNoMutation =
+		isNoMutationSettlementMetadata(workflow) &&
+		(options?.currentDeclaredFiles === undefined
+			? true
+			: options.currentDeclaredFiles !== null &&
+				options.currentDeclaredFiles.length === 0);
+	const requiredGates = [...new Set(evidence.required_gates ?? [])];
+	if (!readOnlyNoMutation && !requiredGates.includes('pre_check')) {
+		requiredGates.unshift('pre_check');
+	}
+	const satisfiedGates = requiredGates.filter(
+		(gate) => evidence.gates?.[gate] != null,
+	);
+	return {
+		requiredGates,
+		satisfiedGates,
+		missingGates: requiredGates.filter(
+			(gate) => evidence.gates?.[gate] == null,
+		),
+		readOnlyNoMutation,
+	};
+}
+
+export function isReadOnlyNoMutationEligible(
+	evidence: TaskEvidence | null | undefined,
+	options?: { currentDeclaredFiles?: readonly string[] | null },
+): boolean {
+	return deriveApplicableGateSet(evidence, options).readOnlyNoMutation;
 }
 
 export function reduceTaskWorkflowSnapshot(
@@ -624,18 +786,43 @@ export function reduceTaskWorkflowSnapshot(
 		...(current.supervisedRecovery === true
 			? { supervisedRecovery: true }
 			: {}),
+		...(current.noMutationSettlement
+			? { noMutationSettlement: current.noMutationSettlement }
+			: {}),
 	};
 
 	switch (event.type) {
-		case 'dispatch_attempted':
-			return base;
-		case 'dispatch_no_mutation':
+		case 'dispatch_attempted': {
+			// A new coder dispatch opens a fresh attribution window. A prior
+			// generation-0 no-mutation proof must not survive it, even when the
+			// later dispatch is aborted before it can publish its own settlement.
+			const { noMutationSettlement: _clearedSettlement, ...withoutSettlement } =
+				base;
+			return withoutSettlement;
+		}
+		case 'dispatch_no_mutation': {
+			const { noMutationSettlement: _clearedSettlement, ...withoutSettlement } =
+				base;
 			return {
-				...base,
+				...withoutSettlement,
 				retryCount: Math.min(current.retryCount + 1, 3),
 				retryHistory: [...current.retryHistory, outcome].slice(-3),
 				retryEpoch: current.retryEpoch || current.generation + 1,
+				...(current.generation === 0 &&
+				event.transitionId &&
+				Array.isArray(event.context?.declaredFiles) &&
+				event.context.declaredFiles.length === 0 &&
+				event.context.settlementTransitionId === event.transitionId
+					? {
+							noMutationSettlement: {
+								generation: 0 as const,
+								transitionId: event.transitionId,
+								declaredFiles: [] as [],
+							},
+						}
+					: {}),
 			};
+		}
 		case 'stage_b_failed':
 			if (
 				current.state !== 'pre_check_passed' &&
@@ -654,10 +841,12 @@ export function reduceTaskWorkflowSnapshot(
 				retryHistory: [...current.retryHistory, outcome].slice(-3),
 				retryEpoch: current.retryEpoch || current.generation + 1,
 			};
-		case 'accepted_mutation':
+		case 'accepted_mutation': {
+			const { noMutationSettlement: _clearedSettlement, ...withoutSettlement } =
+				base;
 			if (event.context?.settlementFailed === true) {
 				return {
-					...base,
+					...withoutSettlement,
 					generation: current.generation + 1,
 					state: 'rework_required',
 					retryCount: Math.min(current.retryCount + 1, 3),
@@ -668,13 +857,14 @@ export function reduceTaskWorkflowSnapshot(
 				};
 			}
 			return {
-				...base,
+				...withoutSettlement,
 				generation: current.generation + 1,
 				state: 'coder_delegated',
 				// A mutation is a repair attempt, not proof that prior rejections were
 				// resolved. Preserve the task-level circuit history across generations.
 				supervisedRecovery: undefined,
 			};
+		}
 		case 'stage_a_passed':
 			if (
 				current.state !== 'coder_delegated' &&
@@ -749,12 +939,21 @@ export function reduceTaskWorkflowSnapshot(
 				// Advisory/non-Stage-B gates never advance the code QA lifecycle.
 				state: current.state,
 			};
-		case 'task_completed':
+		case 'task_completed': {
+			const readOnlyNoMutation =
+				event.readOnlyNoMutation === true &&
+				current.state === 'idle' &&
+				current.generation === 0 &&
+				isNoMutationSettlementMetadata(current) &&
+				context.requiredGates.every((gate) => context.gates[gate] != null);
 			if (
 				event.qaExempt !== true &&
 				current.state !== 'tests_run' &&
 				current.state !== 'complete' &&
-				!(current.state === 'pre_check_passed' && context.gates.council != null)
+				!(
+					current.state === 'pre_check_passed' && context.gates.council != null
+				) &&
+				!readOnlyNoMutation
 			) {
 				throw new Error(
 					`TASK_WORKFLOW_QA_REQUIRED: cannot complete from ${current.state}`,
@@ -768,6 +967,7 @@ export function reduceTaskWorkflowSnapshot(
 				// on the exempt path; a genuine completion leaves the field absent.
 				...(event.qaExempt === true ? { forcedCompletion: true } : {}),
 			};
+		}
 		case 'task_blocked':
 			return {
 				...base,
@@ -785,6 +985,7 @@ export function reduceTaskWorkflowSnapshot(
 			const {
 				forcedCompletion: _cleared,
 				supervisedRecovery: _clearedMarker,
+				noMutationSettlement: _clearedSettlement,
 				...withoutForced
 			} = base;
 			return {
@@ -832,6 +1033,57 @@ function getEvidenceDir(directory: string): string {
 function getEvidencePath(directory: string, taskId: string): string {
 	assertValidTaskId(taskId);
 	return taskEvidencePath(directory, taskId);
+}
+
+/**
+ * Bind the no-mutation proof to the coder-settlement WAL at the evidence write
+ * boundary. The context field is an internal adapter hint, not authorization:
+ * direct transition callers can supply it, but it is stripped unless the
+ * durable WAL is the matching committed/prepared accepted=false transition
+ * with an exact empty declared scope.
+ */
+function bindTrustedNoMutationSettlement(
+	directory: string,
+	taskId: string,
+	event: TaskWorkflowTransitionEvent,
+): TaskWorkflowTransitionEvent {
+	if (event.type !== 'dispatch_no_mutation') return event;
+	const context = event.context;
+	if (!context || event.transitionId === undefined) {
+		return { ...event, context: undefined };
+	}
+	try {
+		const wal = readWorkflowWalFileSync(
+			'coder-settlement',
+			validateSwarmPath(directory, `coder-settlements/${taskId}.json`),
+			taskId,
+		);
+		const declaredFiles = wal?.context?.declaredFiles;
+		const trusted =
+			wal !== null &&
+			(wal.state === 'PREPARED' || wal.state === 'COMMITTED') &&
+			wal.accepted === false &&
+			wal.transitionId === event.transitionId &&
+			Array.isArray(declaredFiles) &&
+			declaredFiles.length === 0 &&
+			Array.isArray(context.declaredFiles) &&
+			context.declaredFiles.length === 0;
+		return {
+			...event,
+			context: trusted
+				? {
+						...context,
+						declaredFiles,
+						settlementTransitionId: wal.transitionId,
+					}
+				: { ...context, settlementTransitionId: undefined },
+		};
+	} catch {
+		return {
+			...event,
+			context: { ...context, settlementTransitionId: undefined },
+		};
+	}
 }
 
 function readExisting(
@@ -1053,10 +1305,15 @@ export async function withTaskEvidenceTransaction<T>(
 			taskId,
 			read: () => current,
 			transition: async (event) => {
-				assertTaskEvidenceWriteAllowed(directory, taskId, event);
-				const nextEvidence = updateEvidenceForTransition(current, event);
+				const boundEvent = bindTrustedNoMutationSettlement(
+					directory,
+					taskId,
+					event,
+				);
+				assertTaskEvidenceWriteAllowed(directory, taskId, boundEvent);
+				const nextEvidence = updateEvidenceForTransition(current, boundEvent);
 				nextEvidence.taskId = taskId;
-				return persist(nextEvidence, event);
+				return persist(nextEvidence, boundEvent);
 			},
 		});
 	});
@@ -1298,15 +1555,17 @@ export function readTaskEvidenceRaw(
 export async function hasPassedAllGates(
 	directory: string,
 	taskId: string,
+	currentDeclaredFiles?: readonly string[] | null,
 ): Promise<boolean> {
 	const evidence = await readTaskEvidence(directory, taskId);
 	if (!evidence) return false;
-	if (
-		!Array.isArray(evidence.required_gates) ||
-		evidence.required_gates.length === 0
-	)
-		return false;
-	return evidence.required_gates.every((gate) => evidence.gates[gate] != null);
+	if (!Array.isArray(evidence.required_gates)) return false;
+	return (
+		deriveApplicableGateSet(evidence, {
+			// Missing caller scope is unknown, not proof of a still-empty plan.
+			currentDeclaredFiles: currentDeclaredFiles ?? null,
+		}).missingGates.length === 0
+	);
 }
 
 export function compareTaskWorkflowStateRank(

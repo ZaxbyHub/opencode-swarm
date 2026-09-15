@@ -1,8 +1,11 @@
 import type { Evidence } from '../config/evidence-schema';
 import {
+	deriveApplicableGateSet,
 	isValidTaskId,
+	readCurrentTaskDeclaredFiles,
 	readTaskEvidence,
 	readTaskEvidenceRaw,
+	TASK_WORKFLOW_SCHEMA_MARKER,
 	type TaskEvidence,
 } from '../gate-evidence.js';
 
@@ -49,10 +52,7 @@ export function getDurableGateEvidenceStatus(
 		};
 	}
 
-	if (
-		!Array.isArray(evidence.required_gates) ||
-		evidence.required_gates.length === 0
-	) {
+	if (!Array.isArray(evidence.required_gates)) {
 		return {
 			isComplete: false,
 			missingGates: ['required_gates'],
@@ -61,12 +61,10 @@ export function getDurableGateEvidenceStatus(
 		};
 	}
 
-	const missingGates = evidence.required_gates.filter(
-		(gate) => evidence.gates[gate] == null,
-	);
+	const derivedGates = deriveApplicableGateSet(evidence);
 	return {
-		isComplete: missingGates.length === 0,
-		missingGates,
+		isComplete: derivedGates.missingGates.length === 0,
+		missingGates: derivedGates.missingGates,
 		evidenceExists: true,
 		invalid: false,
 	};
@@ -86,7 +84,11 @@ export async function getDurableGateEvidenceStatusForTask(
 	}
 
 	try {
-		return getDurableGateEvidenceStatus(readTaskEvidenceRaw(directory, taskId));
+		return getDurableGateEvidenceStatusWithCurrentScope(
+			readTaskEvidenceRaw(directory, taskId),
+			directory,
+			taskId,
+		);
 	} catch {
 		return {
 			isComplete: false,
@@ -95,6 +97,53 @@ export async function getDurableGateEvidenceStatusForTask(
 			invalid: true,
 		};
 	}
+}
+
+function getDurableGateEvidenceStatusWithCurrentScope(
+	evidence: TaskEvidence | null,
+	directory: string,
+	taskId: string,
+): DurableGateEvidenceStatus {
+	if (!evidence?.gates || typeof evidence.gates !== 'object') {
+		return getDurableGateEvidenceStatus(evidence);
+	}
+	if (!Array.isArray(evidence.required_gates)) {
+		return getDurableGateEvidenceStatus(evidence);
+	}
+	if (
+		!evidence.workflow ||
+		evidence.workflow.schema !== TASK_WORKFLOW_SCHEMA_MARKER
+	) {
+		// Task-specific legacy callers historically evaluated the persisted list
+		// directly. Keep that behavior separate from the public pure helper above,
+		// whose derived set intentionally reports the modern pre_check obligation.
+		if (evidence.required_gates.length === 0) {
+			return {
+				isComplete: false,
+				missingGates: ['required_gates'],
+				evidenceExists: true,
+				invalid: false,
+			};
+		}
+		const missingGates = evidence.required_gates.filter(
+			(gate) => evidence.gates[gate] == null,
+		);
+		return {
+			isComplete: missingGates.length === 0,
+			missingGates,
+			evidenceExists: true,
+			invalid: false,
+		};
+	}
+	const derivedGates = deriveApplicableGateSet(evidence, {
+		currentDeclaredFiles: readCurrentTaskDeclaredFiles(directory, taskId),
+	});
+	return {
+		isComplete: derivedGates.missingGates.length === 0,
+		missingGates: derivedGates.missingGates,
+		evidenceExists: true,
+		invalid: false,
+	};
 }
 
 export async function hasCompleteDurableGateEvidenceForTask(

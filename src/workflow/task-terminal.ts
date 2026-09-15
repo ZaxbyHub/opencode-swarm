@@ -1,4 +1,4 @@
-import type { Plan } from '../config/plan-schema.js';
+import { type Plan, TaskStatusSchema } from '../config/plan-schema.js';
 import {
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
@@ -7,6 +7,7 @@ import {
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import {
+	peekPlanFromLedger,
 	readPlanEpochIdentity,
 	replayFromLedgerWithStatus,
 } from '../plan/ledger.js';
@@ -54,6 +55,7 @@ async function applyTerminalEvidence(
 			? {
 					type: 'task_completed',
 					qaExempt: wal.qaExempt,
+					readOnlyNoMutation: wal.readOnlyNoMutation,
 					expectedGeneration: wal.generation,
 					transitionId: wal.transitionId,
 				}
@@ -135,7 +137,7 @@ async function recoverPreparedTaskTerminalWithPlanLock(
 					);
 				}
 			}
-			const task = plan.phases
+			let task = plan.phases
 				.flatMap((phase) => phase.tasks)
 				.find((candidate) => candidate.id === taskId);
 			if (!task) throw new Error(`TASK_TERMINAL_TASK_MISSING: ${taskId}`);
@@ -150,6 +152,94 @@ async function recoverPreparedTaskTerminalWithPlanLock(
 			) {
 				await writeWal(walPath, { ...wal, state: 'ABORTED' });
 				return null;
+			}
+			if (wal.readOnlyNoMutation === true && !evidenceAlreadyTerminal) {
+				let replayed: Awaited<ReturnType<typeof peekPlanFromLedger>>;
+				try {
+					replayed = await peekPlanFromLedger(directory);
+				} catch (error) {
+					throw new Error(
+						`TASK_TERMINAL_READ_ONLY_SCOPE_UNKNOWN: could not inspect the authoritative plan ledger: ${error instanceof Error ? error.message : String(error)}`,
+						{ cause: error },
+					);
+				}
+				if (replayed.truncated || replayed.badSuffix !== null) {
+					throw new Error('TASK_TERMINAL_LEDGER_TRUNCATED');
+				}
+				if (!replayed.plan) {
+					throw new Error(
+						'TASK_TERMINAL_READ_ONLY_SCOPE_UNKNOWN: authoritative plan ledger has no replayable plan',
+					);
+				}
+				const authoritativeTask = replayed.plan.phases
+					.flatMap((phase) => phase.tasks)
+					.find((candidate) => candidate.id === taskId);
+				if (!authoritativeTask) {
+					throw new Error(`TASK_TERMINAL_TASK_MISSING: ${taskId}`);
+				}
+				if (wal.version === 2) {
+					const identity = await readPlanEpochIdentity(
+						directory,
+						replayed.plan,
+					);
+					if (
+						!identity ||
+						identity.planIdentityHash !== wal.planIdentityHash ||
+						identity.planEpoch !== wal.planEpoch
+					) {
+						throw new Error(
+							`TASK_TERMINAL_PLAN_IDENTITY_MISMATCH: ${walPath} belongs to a different plan epoch`,
+						);
+					}
+				}
+				plan = replayed.plan;
+				task = authoritativeTask;
+				const currentFiles = authoritativeTask.files_touched;
+				const currentScopeIsKnownEmpty =
+					Array.isArray(currentFiles) && currentFiles.length === 0;
+				if (!currentScopeIsKnownEmpty) {
+					if (
+						authoritativeTask.status !== wal.oldPlanStatus &&
+						authoritativeTask.status !== wal.newPlanStatus
+					) {
+						throw new Error(
+							`TASK_TERMINAL_PLAN_CAS_MISMATCH: expected ${wal.oldPlanStatus} or ${wal.newPlanStatus}, found ${authoritativeTask.status}`,
+						);
+					}
+					if (
+						authoritativeTask.status === wal.newPlanStatus &&
+						authoritativeTask.status !== wal.oldPlanStatus
+					) {
+						const oldStatus = TaskStatusSchema.safeParse(wal.oldPlanStatus);
+						if (!oldStatus.success) {
+							throw new Error(
+								`TASK_TERMINAL_OLD_STATUS_INVALID: ${wal.oldPlanStatus}`,
+							);
+						}
+						const rolledBackPlan = await updateTaskStatus(
+							directory,
+							taskId,
+							oldStatus.data,
+							{
+								planLockAlreadyHeld: true,
+								terminalReconciliation: true,
+							},
+						);
+						const rolledBackTask = rolledBackPlan.phases
+							.flatMap((phase) => phase.tasks)
+							.find((candidate) => candidate.id === taskId);
+						if (rolledBackTask?.status !== oldStatus.data) {
+							throw new Error(
+								`TASK_TERMINAL_READ_ONLY_SCOPE_ROLLBACK_FAILED: expected ${oldStatus.data}, found ${rolledBackTask?.status ?? 'missing task'}`,
+							);
+						}
+						plan = rolledBackPlan;
+					}
+					await writeWal(walPath, { ...wal, state: 'ABORTED' });
+					throw new Error(
+						`TASK_TERMINAL_READ_ONLY_SCOPE_CHANGED: task ${taskId} no longer has a known empty declared scope; terminal evidence was not applied`,
+					);
+				}
 			}
 			if (task.status === wal.oldPlanStatus && evidenceAlreadyTerminal) {
 				plan = await updateTaskStatus(directory, taskId, wal.newPlanStatus, {
@@ -256,6 +346,7 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 		targetStatus: TerminalPlanStatus;
 		qaExempt: boolean;
 		preserveEvidence?: boolean;
+		readOnlyNoMutation?: boolean;
 	};
 	planIdentityHash?: string;
 	planEpoch?: string;
@@ -309,6 +400,8 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 				existingWal?.state === 'COMMITTED' &&
 				existingWal.transitionId === options.transitionId &&
 				existingWal.newPlanStatus === terminal.targetStatus &&
+				(existingWal.readOnlyNoMutation === true) ===
+					(terminal.readOnlyNoMutation === true) &&
 				evidenceMatchesTerminal(evidence, existingWal)
 			) {
 				return {
@@ -380,6 +473,9 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 				newWorkflowState,
 				generation: workflow.generation,
 				qaExempt: terminal.qaExempt,
+				...(terminal.readOnlyNoMutation === true
+					? { readOnlyNoMutation: true }
+					: {}),
 				recordedAt: new Date().toISOString(),
 			};
 			const wal: TaskTerminalWal =

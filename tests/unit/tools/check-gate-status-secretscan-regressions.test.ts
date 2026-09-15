@@ -32,12 +32,14 @@ describe('check_gate_status secretscan feature', () => {
 			string,
 			{ sessionId?: string; timestamp?: string; agent?: string }
 		>,
+		workflow?: Record<string, unknown>,
 	) {
 		fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
 		const evidence = {
 			taskId,
 			required_gates: requiredGates,
 			gates,
+			...(workflow ? { workflow } : {}),
 		};
 		fs.writeFileSync(
 			path.join(EVIDENCE_DIR, `${taskId}.json`),
@@ -169,8 +171,25 @@ describe('check_gate_status secretscan feature', () => {
 
 	describe('loadEvidence error handling', () => {
 		it('should silently skip when loadEvidence throws an error', async () => {
-			// Setup: gate-evidence shows all gates passed
-			createGateEvidence('3.1', ['test', 'review'], { test: {}, review: {} });
+			// Setup: a genuinely completed ordinary workflow. The supplementary
+			// EvidenceBundle below is the only surface under test; shared gate
+			// derivation must not mistake this fixture for an empty or legacy task.
+			createGateEvidence(
+				'3.1',
+				['pre_check', 'test', 'review'],
+				{ pre_check: {}, test: {}, review: {} },
+				{
+					schema: 'exact-task-v1',
+					generation: 0,
+					state: 'complete',
+					retryCount: 0,
+					retryHistory: [],
+					retryEpoch: 0,
+					lastOutcome: 'task_completed',
+					lastTransitionId: 'test-terminal:3.1',
+					updatedAt: new Date().toISOString(),
+				},
+			);
 
 			// Setup: EvidenceBundle that will cause loadEvidence to throw
 			// (path traversal in taskId would cause issue, but here we use valid path)
@@ -276,6 +295,66 @@ describe('check_gate_status secretscan feature', () => {
 			expect(result.secretscan_verdict).toBe('fail');
 			expect(result.status).toBe('incomplete');
 			expect(result.message).toContain('BLOCKED');
+		});
+
+		it('uses the latest secretscan entry when multiple scans exist', async () => {
+			// The prior implementation selected an arbitrary/older entry instead of
+			// the latest scan, so a clean rerun could remain incorrectly blocked.
+			createGateEvidence(
+				'1.9',
+				['pre_check', 'test', 'review'],
+				{ pre_check: {}, test: {}, review: {} },
+				{ state: 'tests_run', generation: 1 },
+			);
+
+			const earlier = new Date('2024-01-01T00:00:00Z').toISOString();
+			const later = new Date('2024-01-02T00:00:00Z').toISOString();
+			const latest = new Date('2024-01-03T00:00:00Z').toISOString();
+
+			createEvidenceBundle('1.9', [
+				{
+					task_id: '1.9',
+					type: 'secretscan',
+					timestamp: earlier,
+					agent: 'pre_check_batch',
+					verdict: 'fail',
+					summary: 'Earlier scan with secrets',
+					findings_count: 5,
+					scan_directory: 'src',
+					files_scanned: 5,
+					skipped_files: 0,
+				},
+				{
+					task_id: '1.9',
+					type: 'secretscan',
+					timestamp: later,
+					agent: 'pre_check_batch',
+					verdict: 'pass',
+					summary: 'Later scan clean',
+					findings_count: 0,
+					scan_directory: 'src',
+					files_scanned: 5,
+					skipped_files: 0,
+				},
+				{
+					task_id: '1.9',
+					type: 'secretscan',
+					timestamp: latest,
+					agent: 'pre_check_batch',
+					verdict: 'pass',
+					summary: 'Latest scan clean',
+					findings_count: 0,
+					scan_directory: 'src',
+					files_scanned: 5,
+					skipped_files: 0,
+				},
+			]);
+
+			const result = await runTool('1.9');
+
+			expect(result.secretscan_verdict).toBe('pass');
+			expect(result.status).toBe('all_passed');
+			expect(result.message).not.toContain('BLOCKED');
 		});
 	});
 });

@@ -63,6 +63,7 @@ interface Fixture {
 function createFixture(
 	label: string,
 	canonicalDirectoryScope = false,
+	declaredFiles?: string[] | null,
 ): Fixture {
 	const root = fs.realpathSync(
 		fs.mkdtempSync(path.join(canonicalTmpDir(), `coder-wt-recovery-${label}-`)),
@@ -86,7 +87,7 @@ function createFixture(
 	const branch = `swarm-lane/session-${label}/lane-1`;
 	git(repo, ['worktree', 'add', '-b', branch, worktree]);
 	const context: BackgroundTaskChangeContext = {
-		declaredFiles: [
+		declaredFiles: declaredFiles ?? [
 			canonicalDirectoryScope ? path.join(worktree, 'src') : 'src',
 		],
 		baseline: captureWorkspaceSnapshot(worktree),
@@ -117,7 +118,7 @@ function createFixture(
 	};
 }
 
-function commitAndLand(fixture: Fixture): MergeOperationProvenance {
+function commitWorktree(fixture: Fixture): MergeOperationProvenance {
 	fs.writeFileSync(
 		path.join(fixture.worktree, 'src', 'nested', 'feature.ts'),
 		'export const feature = 2;\n',
@@ -131,6 +132,11 @@ function commitAndLand(fixture: Fixture): MergeOperationProvenance {
 		branchName: fixture.branch,
 		strategy: 'merge',
 	};
+	return provenance;
+}
+
+function commitAndLand(fixture: Fixture): MergeOperationProvenance {
+	const provenance = commitWorktree(fixture);
 	git(fixture.repo, ['merge', '--no-edit', fixture.branch]);
 	return provenance;
 }
@@ -335,7 +341,46 @@ describe('issue #2098 coder settlement isolated-worktree recovery', () => {
 			]);
 		}
 	});
+	for (const [label, landed] of [
+		['landed', true],
+		['unlanded', false],
+	] as const) {
+		test(`${label} empty-scope mutation recovers as failed rework`, async () => {
+			const fixture = createFixture(`empty-scope-${label}`, false, []);
+			await begin(fixture);
+			const provenance = landed
+				? commitAndLand(fixture)
+				: commitWorktree(fixture);
+			await recordCoderMergeProvenance({
+				directory: fixture.repo,
+				taskId: TASK_ID,
+				transitionId: fixture.transitionId,
+				provenance,
+				observedFiles: ['src/nested/feature.ts'],
+			});
+			_internals.liveDispatches.clear();
 
+			const recovered = await recoverCoderSettlement(fixture.repo, TASK_ID);
+			expect(recovered?.accepted).toBe(true);
+			expect(readWal(fixture)).toMatchObject({
+				state: 'COMMITTED',
+				settlementFailed: true,
+			});
+			expect(
+				getTaskWorkflowSnapshot(await readTaskEvidence(fixture.repo, TASK_ID)),
+			).toMatchObject({ state: 'rework_required', generation: 1 });
+			if (landed) {
+				expectCleanup(fixture);
+			} else {
+				expect(fs.existsSync(fixture.worktree)).toBe(false);
+				expect(branchExists(fixture)).toBe(true);
+				const ownerScan = scanWorktreeProvisioningOwnersForRecovery(
+					fixture.repo,
+				);
+				expect(ownerScan).toMatchObject({ status: 'ok', owners: [] });
+			}
+		});
+	}
 	test('canonical directory scope accepts an observed descendant during landed recovery', async () => {
 		const fixture = createFixture('canonical-scope', true);
 		await begin(fixture);

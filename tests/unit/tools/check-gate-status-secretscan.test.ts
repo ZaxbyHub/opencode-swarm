@@ -39,8 +39,16 @@ describe('check_gate_status secretscan feature', () => {
 		fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
 		const evidence = {
 			taskId,
-			required_gates: requiredGates,
-			gates,
+			required_gates: ['pre_check', ...requiredGates],
+			gates: {
+				pre_check: {
+					sessionId: 'pre-check-session',
+					timestamp: '2026-09-14T00:00:00.000Z',
+					agent: 'pre_check_batch',
+				},
+				...gates,
+			},
+			workflow: { state: 'tests_run', generation: 1 },
 		};
 		fs.writeFileSync(
 			path.join(EVIDENCE_DIR, `${taskId}.json`),
@@ -456,62 +464,6 @@ describe('check_gate_status secretscan feature', () => {
 				expect(result.message).toContain('scanned zero files');
 			});
 		}
-
-		it('9. Most recent secretscan entry is used (when multiple entries exist)', async () => {
-			// Setup: gate-evidence shows all gates passed
-			createGateEvidence('1.9', ['test', 'review'], { test: {}, review: {} });
-
-			// Setup: EvidenceBundle with multiple secretscan entries
-			const earlier = new Date('2024-01-01T00:00:00Z').toISOString();
-			const later = new Date('2024-01-02T00:00:00Z').toISOString();
-			const latest = new Date('2024-01-03T00:00:00Z').toISOString();
-
-			createEvidenceBundle('1.9', [
-				{
-					task_id: '1.9',
-					type: 'secretscan',
-					timestamp: earlier,
-					agent: 'pre_check_batch',
-					verdict: 'fail',
-					summary: 'Earlier scan with secrets',
-					findings_count: 5,
-					scan_directory: 'src',
-					files_scanned: 5,
-					skipped_files: 0,
-				},
-				{
-					task_id: '1.9',
-					type: 'secretscan',
-					timestamp: later,
-					agent: 'pre_check_batch',
-					verdict: 'pass',
-					summary: 'Later scan clean',
-					findings_count: 0,
-					scan_directory: 'src',
-					files_scanned: 5,
-					skipped_files: 0,
-				},
-				{
-					task_id: '1.9',
-					type: 'secretscan',
-					timestamp: latest,
-					agent: 'pre_check_batch',
-					verdict: 'pass',
-					summary: 'Latest scan clean',
-					findings_count: 0,
-					scan_directory: 'src',
-					files_scanned: 5,
-					skipped_files: 0,
-				},
-			]);
-
-			const result = await runTool('1.9');
-
-			// Should use the most recent entry (verdict=pass)
-			expect(result.secretscan_verdict).toBe('pass');
-			expect(result.status).toBe('all_passed');
-			expect(result.message).not.toContain('BLOCKED');
-		});
 
 		it('10. secretscan_verdict=not_run when EvidenceBundle exists but has no secretscan entries and no other evidence', async () => {
 			// Setup: gate-evidence shows all gates passed

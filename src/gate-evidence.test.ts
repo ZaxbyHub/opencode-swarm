@@ -26,7 +26,7 @@ let tmpDir: string;
 
 beforeEach(() => {
 	tmpDir = mkdtempSync(path.join(os.tmpdir(), 'gate-evidence-test-'));
-	mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
+	mkdirSync(path.join(tmpDir, '.swarm', 'evidence'), { recursive: true });
 });
 
 afterEach(() => {
@@ -235,8 +235,26 @@ describe('hasPassedAllGates', () => {
 		expect(await hasPassedAllGates(tmpDir, '1.4')).toBe(false);
 	});
 
-	it('15. returns true for docs task with docs evidence', async () => {
-		await recordGateEvidence(tmpDir, '1.5', 'docs', 'sess-1');
+	it('15. returns true when every derived nonempty gate has evidence', async () => {
+		writeFileSync(
+			path.join(tmpDir, '.swarm', 'evidence', '1.5.json'),
+			JSON.stringify({
+				taskId: '1.5',
+				required_gates: ['pre_check', 'docs'],
+				gates: {
+					pre_check: {
+						sessionId: 'sess-1',
+						timestamp: '2026-09-14T00:00:00.000Z',
+						agent: 'pre_check',
+					},
+					docs: {
+						sessionId: 'sess-1',
+						timestamp: '2026-09-14T00:00:00.000Z',
+						agent: 'docs',
+					},
+				},
+			}),
+		);
 		expect(await hasPassedAllGates(tmpDir, '1.5')).toBe(true);
 	});
 

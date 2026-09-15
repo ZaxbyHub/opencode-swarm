@@ -366,6 +366,20 @@ describe('Lean Turbo integration — checkReviewerGate', () => {
 			expect(result.blocked).toBe(false);
 			expect(result.reason).toBe('Turbo Mode bypass');
 		});
+
+		it('does not bypass an explicitly empty file scope', () => {
+			const taskId = '4.2';
+
+			writeFileSync(
+				path.join(tmpDir, '.swarm', 'plan.json'),
+				makePlanJson([{ id: taskId, files_touched: [] }]),
+			);
+			createStandardTurboSession('session-std-empty');
+
+			const result = checkReviewerGate(taskId, tmpDir);
+			expect(result.blocked).toBe(true);
+			expect(result.reason).not.toBe('Turbo Mode bypass');
+		});
 	});
 
 	// -------------------------------------------------------------------------

@@ -142,6 +142,7 @@ import {
 	abortCoderSettlementIfDoomed,
 	beginCoderSettlement,
 	completeCoderSettlementCleanup,
+	hasUnattributedEmptyScopeMutation,
 	recordCoderMergeProvenance,
 	recoverCoderSettlement,
 	releaseCoderDispatchOwnership,
@@ -458,10 +459,9 @@ async function prepareCoderScope(
 	}
 	const explicitBinding =
 		explicitResolution.status === 'found' ? explicitResolution.binding : null;
-	const declaredFiles = declaredFilesForTask;
 	const resolved = resolveCoderScopeSources({
 		explicitFiles: explicitBinding?.files,
-		planFiles: declaredFiles,
+		planFiles: declaredFilesForTask,
 		fileDirectiveFiles: directives.files,
 	});
 	if (!resolved.ok) {
@@ -483,7 +483,17 @@ async function prepareCoderScope(
 			'SCOPE_NOT_DECLARED: coder scope could not be bound to this Task invocation.',
 		);
 	}
-	return { kind: 'plan', plan, taskId, declaredFiles, binding };
+	return {
+		kind: 'plan',
+		plan,
+		taskId,
+		// Use the same authoritative scope that was bound for this call. When
+		// an empty plan scope is supplemented by a FILE directive, retaining the
+		// empty plan array here would incorrectly mint a read-only settlement
+		// proof for a non-empty coder scope.
+		declaredFiles: resolved.files,
+		binding,
+	};
 }
 
 /**
@@ -2237,6 +2247,136 @@ function getPlanTaskDeclaredFiles(
 		if (task) return [...task.files_touched];
 	}
 	return null;
+}
+
+const MAX_RAW_PLAN_SCOPE_INSPECTION_BYTES = 4 * 1024 * 1024;
+
+/**
+ * PlanSchema defaults an omitted files_touched field to [], so the parsed plan
+ * cannot distinguish an explicit empty declaration from an older task that
+ * omitted the field. The distinction is needed only on the rejected empty
+ * scope preflight path; keep the raw read bounded and fail closed on any read
+ * or parse ambiguity.
+ */
+async function hasExplicitEmptyPlanScope(
+	directory: string,
+	taskId: string,
+): Promise<boolean> {
+	const planPath = path.join(directory, '.swarm', 'plan.json');
+	let handle: fs.promises.FileHandle | undefined;
+	try {
+		handle = await fs.promises.open(planPath, 'r');
+		const stat = await handle.stat();
+		if (!stat.isFile() || stat.size > MAX_RAW_PLAN_SCOPE_INSPECTION_BYTES) {
+			return false;
+		}
+		const bytes = Buffer.alloc(stat.size);
+		let offset = 0;
+		while (offset < bytes.length) {
+			const result = await handle.read(
+				bytes,
+				offset,
+				bytes.length - offset,
+				offset,
+			);
+			if (result.bytesRead === 0) return false;
+			offset += result.bytesRead;
+		}
+		const parsed = JSON.parse(bytes.toString('utf8')) as {
+			phases?: unknown;
+		};
+		if (!Array.isArray(parsed.phases)) return false;
+		for (const phase of parsed.phases) {
+			if (!phase || typeof phase !== 'object') continue;
+			const tasks = (phase as { tasks?: unknown }).tasks;
+			if (!Array.isArray(tasks)) continue;
+			for (const task of tasks) {
+				if (!task || typeof task !== 'object') continue;
+				const record = task as {
+					id?: unknown;
+					files_touched?: unknown;
+				};
+				if (
+					record.id === taskId &&
+					Object.hasOwn(record, 'files_touched') &&
+					Array.isArray(record.files_touched) &&
+					record.files_touched.length === 0
+				) {
+					return true;
+				}
+			}
+		}
+	} catch {
+		return false;
+	} finally {
+		await handle?.close().catch(() => undefined);
+	}
+	return false;
+}
+
+async function settleRejectedEmptyPlanScope(
+	directory: string,
+	input: { callID: string; sessionID: string },
+	taskId: string,
+	expectedGeneration: number,
+): Promise<Awaited<ReturnType<typeof settleCoderDispatch>> | null> {
+	const baseline = await captureWorkspaceSnapshotAsync(directory);
+	if (
+		baseline.gitHead === null ||
+		!Array.isArray(baseline.changedFiles) ||
+		baseline.changedFiles.length !== 0
+	) {
+		return null;
+	}
+	const transitionId = `coder-preflight:${input.callID}`;
+	try {
+		await beginCoderSettlement({
+			directory,
+			taskId,
+			transitionId,
+			actor: input.sessionID,
+			expectedGeneration,
+			context: {
+				baseline,
+				declaredFiles: [],
+				workflowGeneration: expectedGeneration,
+			},
+		});
+		const observedFiles = await changedFilesSinceSnapshotAsync(
+			directory,
+			baseline,
+		);
+		if (observedFiles === null) {
+			throw new Error(
+				'CODER_SETTLEMENT_BASELINE_UNAVAILABLE: empty-scope preflight could not prove a clean post-baseline workspace.',
+			);
+		}
+		return await settleCoderDispatch({
+			directory,
+			taskId,
+			transitionId,
+			accepted: false,
+			testEngineerExempt: false,
+			// Preserve the raw post-baseline observation. Any concurrent mutation
+			// is converted to accepted_mutation_failed by settlement rather than
+			// being filtered into a read-only proof.
+			observedFiles,
+		});
+	} catch (error) {
+		try {
+			await abortCoderSettlement({
+				directory,
+				taskId,
+				transitionId,
+				reason: `empty-scope preflight settlement failed: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		} catch (abortError) {
+			logger.criticalWarn(
+				`[delegation-gate] failed to abort empty-scope preflight settlement for ${taskId}: ${abortError instanceof Error ? abortError.message : String(abortError)}`,
+			);
+		}
+		throw error;
+	}
 }
 
 /**
@@ -4690,17 +4830,41 @@ export function createDelegationGateHook(
 			preparedScope = await prepareCoderScope(directory, input, args);
 		} catch (error) {
 			if (preflightTaskId) {
-				const failed = await transitionTaskWorkflowEvidence(
-					directory,
-					preflightTaskId,
-					{
-						type: 'dispatch_no_mutation',
-						agentType: 'coder',
-						expectedGeneration: preflightWorkflow.generation,
-						transitionId: `coder-preflight:${input.callID}`,
-					},
+				const transitionId = `coder-preflight:${input.callID}`;
+				const emptyScopePreflightFailure =
+					error instanceof Error &&
+					error.message.includes(
+						'coder delegation has no complete, valid, non-empty scope.',
+					);
+				const explicitEmptyPlanScope =
+					emptyScopePreflightFailure &&
+					!extractTaskFileDirectives(args).present &&
+					(await hasExplicitEmptyPlanScope(directory, preflightTaskId));
+				let settled: Awaited<ReturnType<typeof settleCoderDispatch>> | null =
+					null;
+				if (explicitEmptyPlanScope && preflightWorkflow.generation === 0) {
+					try {
+						settled = await settleRejectedEmptyPlanScope(
+							directory,
+							input,
+							preflightTaskId,
+							preflightWorkflow.generation,
+						);
+					} catch (settlementError) {
+						logger.criticalWarn(
+							`[delegation-gate] empty-scope preflight settlement failed for ${preflightTaskId}: ${settlementError instanceof Error ? settlementError.message : String(settlementError)}`,
+						);
+					}
+				}
+				const failedWorkflow = getTaskWorkflowSnapshot(
+					settled?.evidence ??
+						(await transitionTaskWorkflowEvidence(directory, preflightTaskId, {
+							type: 'dispatch_no_mutation',
+							agentType: 'coder',
+							expectedGeneration: preflightWorkflow.generation,
+							transitionId,
+						})),
 				);
-				const failedWorkflow = getTaskWorkflowSnapshot(failed);
 				if (failedWorkflow.retryCount >= 3) {
 					await emitCoderRetryEscalation(directory, {
 						taskId: preflightTaskId,
@@ -5814,12 +5978,20 @@ export function createDelegationGateHook(
 									observedFiles: observedForMerge,
 								}),
 							onMerged: async (merged) => {
+								const unattributedEmptyScopeMutation =
+									hasUnattributedEmptyScopeMutation(
+										coderTaskChangeContextByCallID.get(input.callID)
+											?.declaredFiles,
+										observedForMerge,
+									);
 								const result = await settleCoderDispatch({
 									directory,
 									taskId:
 										standardDispatch.planTaskId ?? standardDispatch.taskId,
 									transitionId: `coder:${input.callID}`,
-									accepted: observedForMerge.length > 0,
+									accepted:
+										observedForMerge.length > 0 ||
+										unattributedEmptyScopeMutation,
 									testEngineerExempt: isMarkdownOnlyTaskChange(
 										coderTaskChangeContextByCallID.get(input.callID)
 											?.declaredFiles,
@@ -5829,6 +6001,8 @@ export function createDelegationGateHook(
 									// later completeCoderSettlementCleanup pass retains
 									// the lane branch instead of deleting it as residue.
 									landedUnstaged: merged.strategy === 'squash-unstaged',
+									observedFiles: observedForMerge,
+									settlementFailed: unattributedEmptyScopeMutation,
 								});
 								coderSettlementEvidence = result.evidence;
 								coderSettlementCommitted = true;
@@ -6421,6 +6595,11 @@ export function createDelegationGateHook(
 												),
 											)
 										: [];
+								const unattributedEmptyScopeMutation =
+									hasUnattributedEmptyScopeMutation(
+										taskChangeContext?.declaredFiles,
+										rawObservedFiles,
+									);
 								const context = {
 									testEngineerExempt:
 										targetAgentForEvidence === 'coder' &&
@@ -6434,7 +6613,8 @@ export function createDelegationGateHook(
 										(!standardDispatch || !isTerminalFailure) &&
 										standardWorktreeSettled &&
 										Array.isArray(observedFiles) &&
-										observedFiles.length > 0;
+										(observedFiles.length > 0 ||
+											unattributedEmptyScopeMutation);
 									let updated: Awaited<
 										ReturnType<typeof settleCoderDispatch>
 									>['evidence'];
@@ -6452,7 +6632,10 @@ export function createDelegationGateHook(
 											transitionId: `coder:${input.callID}`,
 											accepted,
 											testEngineerExempt: context.testEngineerExempt === true,
-											settlementFailed: !standardDispatch && isTerminalFailure,
+											settlementFailed:
+												(!standardDispatch && isTerminalFailure) ||
+												unattributedEmptyScopeMutation,
+											observedFiles: rawObservedFiles,
 										});
 										updated = settlement.evidence;
 										coderSettlementCommitted = true;

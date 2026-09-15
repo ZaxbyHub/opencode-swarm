@@ -208,7 +208,7 @@ describe('check_gate_status evidence file processing', () => {
 		const parsed = JSON.parse(result);
 
 		expect(parsed.status).toBe('incomplete');
-		expect(parsed.required_gates).toEqual(['lint', 'test']);
+		expect(parsed.required_gates).toEqual(['pre_check', 'lint', 'test']);
 		expect(parsed.passed_gates).toContain('lint');
 		expect(parsed.missing_gates).toContain('test');
 	});
@@ -219,8 +219,13 @@ describe('check_gate_status evidence file processing', () => {
 
 		const evidenceData = {
 			taskId: '2.1',
-			required_gates: ['lint', 'test', 'review'],
+			required_gates: ['pre_check', 'lint', 'test', 'review'],
 			gates: {
+				pre_check: {
+					sessionId: 's0',
+					timestamp: '2024-01-01',
+					agent: 'pre_check_batch',
+				},
 				lint: { sessionId: 's1', timestamp: '2024-01-01', agent: 'reviewer' },
 				test: {
 					sessionId: 's2',
@@ -229,6 +234,7 @@ describe('check_gate_status evidence file processing', () => {
 				},
 				review: { sessionId: 's3', timestamp: '2024-01-01', agent: 'reviewer' },
 			},
+			workflow: { state: 'tests_run', generation: 1 },
 		};
 
 		writeFileSync(
@@ -242,7 +248,7 @@ describe('check_gate_status evidence file processing', () => {
 		const parsed = JSON.parse(result);
 
 		expect(parsed.status).toBe('all_passed');
-		expect(parsed.passed_gates).toHaveLength(3);
+		expect(parsed.passed_gates).toHaveLength(4);
 		expect(parsed.missing_gates).toHaveLength(0);
 	});
 

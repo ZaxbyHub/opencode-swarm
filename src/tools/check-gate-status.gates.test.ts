@@ -171,7 +171,7 @@ describe('check_gate_status', () => {
 
 		// This demonstrates the security issue: the tool reads from arbitrary directories
 		// Note: This is currently the behavior - the path validation doesn't prevent this
-		expect(parsed.status).toBe('all_passed');
+		expect(parsed.status).toBe('incomplete');
 		expect(parsed.gates.reviewer.sessionId).toBe('stolen-session');
 
 		// Cleanup
@@ -228,7 +228,7 @@ describe('check_gate_status', () => {
 
 	// ── Gate Status Calculation Tests ─────────────────────────────────────────
 
-	it('returns all_passed when all required gates have evidence', async () => {
+	it('requires pre_check when legacy gates all have evidence', async () => {
 		const evidence = {
 			taskId: '1.1',
 			required_gates: ['reviewer', 'test_engineer'],
@@ -252,12 +252,13 @@ describe('check_gate_status', () => {
 
 		const result = await executeTool({ task_id: '1.1' }, tmpDir);
 		const parsed = JSON.parse(result);
+		const expectedRequiredGates = ['pre_check', ...evidence.required_gates];
 
-		expect(parsed.status).toBe('all_passed');
-		expect(parsed.required_gates).toEqual(['reviewer', 'test_engineer']);
+		expect(parsed.status).toBe('incomplete');
+		expect(parsed.required_gates).toEqual(expectedRequiredGates);
 		expect(parsed.passed_gates).toEqual(['reviewer', 'test_engineer']);
-		expect(parsed.missing_gates).toEqual([]);
-		expect(parsed.message).toContain('All required gates have passed');
+		expect(parsed.missing_gates).toEqual(['pre_check']);
+		expect(parsed.message).toContain('Missing gates: pre_check');
 	});
 
 	it('returns incomplete when some gates are missing', async () => {
@@ -280,15 +281,13 @@ describe('check_gate_status', () => {
 
 		const result = await executeTool({ task_id: '2.1' }, tmpDir);
 		const parsed = JSON.parse(result);
+		const expectedRequiredGates = ['pre_check', ...evidence.required_gates];
+		const expectedMissingGates = ['pre_check', 'test_engineer', 'docs'];
 
 		expect(parsed.status).toBe('incomplete');
-		expect(parsed.required_gates).toEqual([
-			'reviewer',
-			'test_engineer',
-			'docs',
-		]);
+		expect(parsed.required_gates).toEqual(expectedRequiredGates);
 		expect(parsed.passed_gates).toEqual(['reviewer']);
-		expect(parsed.missing_gates).toEqual(['test_engineer', 'docs']);
+		expect(parsed.missing_gates).toEqual(expectedMissingGates);
 		expect(parsed.message).toContain('incomplete');
 		expect(parsed.message).toContain('test_engineer');
 		expect(parsed.message).toContain('docs');
@@ -310,7 +309,7 @@ describe('check_gate_status', () => {
 
 		expect(parsed.status).toBe('incomplete');
 		expect(parsed.passed_gates).toEqual([]);
-		expect(parsed.missing_gates).toEqual(['reviewer']);
+		expect(parsed.missing_gates).toEqual(['pre_check', 'reviewer']);
 	});
 
 	it('handles task with single required gate', async () => {
@@ -333,9 +332,9 @@ describe('check_gate_status', () => {
 		const result = await executeTool({ task_id: '4.1' }, tmpDir);
 		const parsed = JSON.parse(result);
 
-		expect(parsed.status).toBe('all_passed');
+		expect(parsed.status).toBe('incomplete');
 		expect(parsed.passed_gates).toEqual(['docs']);
-		expect(parsed.missing_gates).toEqual([]);
+		expect(parsed.missing_gates).toEqual(['pre_check']);
 	});
 
 	// ── Output Format Tests ───────────────────────────────────────────────────
@@ -420,11 +419,11 @@ describe('check_gate_status', () => {
 		const result = await executeTool({ task_id: '7.1' }, tmpDir);
 		const parsed = JSON.parse(result);
 
-		// An empty requirement set is not proof that the task passed.
+		// Empty requirements are not proof; receiptless evidence retains pre_check.
 		expect(parsed.status).toBe('incomplete');
-		expect(parsed.required_gates).toEqual([]);
+		expect(parsed.required_gates).toEqual(['pre_check']);
 		expect(parsed.passed_gates).toEqual([]);
-		expect(parsed.missing_gates).toEqual([]);
+		expect(parsed.missing_gates).toEqual(['pre_check']);
 	});
 
 	it('handles extra gates in evidence that are not required', async () => {
@@ -454,9 +453,9 @@ describe('check_gate_status', () => {
 		const parsed = JSON.parse(result);
 
 		// Only required gates should be in passed_gates
-		expect(parsed.status).toBe('all_passed');
+		expect(parsed.status).toBe('incomplete');
 		expect(parsed.passed_gates).toEqual(['reviewer']);
-		expect(parsed.missing_gates).toEqual([]);
+		expect(parsed.missing_gates).toEqual(['pre_check']);
 		// But gates object should contain all gates
 		expect(parsed.gates).toHaveProperty('reviewer');
 		expect(parsed.gates).toHaveProperty('extra_gate');
@@ -486,7 +485,7 @@ describe('check_gate_status', () => {
 		const result = await executeTool({ task_id: '9.1' }, customDir);
 		const parsed = JSON.parse(result);
 
-		expect(parsed.status).toBe('all_passed');
+		expect(parsed.status).toBe('incomplete');
 
 		// Cleanup custom dir
 		rmSync(customDir, { recursive: true, force: true });

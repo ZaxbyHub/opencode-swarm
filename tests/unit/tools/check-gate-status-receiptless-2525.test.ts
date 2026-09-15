@@ -19,8 +19,8 @@ describe('check_gate_status — receiptless recovery (FB-001)', () => {
 	});
 
 	test('reports incomplete when receiptless repair leaves no required gates', async () => {
-		// Before FB-001, an empty required_gates array made the read-side diagnostic
-		// claim all gates passed even though no gate proof existed.
+		// An empty required_gates array without trusted no-mutation settlement proof
+		// still has the ordinary Stage-A pre_check obligation.
 		const evidenceDir = path.join(directory, '.swarm', 'evidence');
 		fs.mkdirSync(evidenceDir, { recursive: true });
 		fs.writeFileSync(
@@ -39,11 +39,11 @@ describe('check_gate_status — receiptless recovery (FB-001)', () => {
 		};
 
 		expect(parsed.status).toBe('incomplete');
-		expect(parsed.required_gates).toEqual([]);
+		expect(parsed.required_gates).toEqual(['pre_check']);
 		expect(parsed.passed_gates).toEqual([]);
-		expect(parsed.missing_gates).toEqual([]);
+		expect(parsed.missing_gates).toEqual(['pre_check']);
 		expect(parsed.message).toBe(
-			'Task "1.1" is incomplete. No required gates are configured for this task generation.',
+			'Task "1.1" is incomplete. Missing gates: pre_check.',
 		);
 	});
 });

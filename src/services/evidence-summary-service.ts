@@ -17,7 +17,7 @@ import type {
 	TaskStatus,
 } from '../config/plan-schema';
 import {
-	getDurableGateEvidenceStatus,
+	getDurableGateEvidenceStatusForTask,
 	mergeDurableGateEntriesFromEvidence,
 	readDurableGateEvidence,
 } from '../evidence/gate-bridge.js';
@@ -245,7 +245,12 @@ async function buildTaskSummary(
 	);
 	let evidenceCheck = _internals.evidenceCompleteFromEntries(entries);
 	if (gateEvidence) {
-		const gateStatus = getDurableGateEvidenceStatus(gateEvidence);
+		// Task-specific status preserves legacy evidence semantics while applying
+		// current-scope derivation to authoritative exact-task workflow records.
+		const gateStatus = await getDurableGateEvidenceStatusForTask(
+			directory,
+			taskId,
+		);
 		evidenceCheck = gateStatus.isComplete
 			? { isComplete: true, missingEvidence: [] }
 			: {

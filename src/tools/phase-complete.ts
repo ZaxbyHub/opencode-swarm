@@ -280,11 +280,18 @@ function canInferMissingAgentsFromTaskGates(agentsMissing: string[]): boolean {
 
 async function allCompletedTasksHavePassedGateEvidence(
 	directory: string,
-	tasks: Array<{ id: string; status: string }>,
+	tasks: Array<{
+		id: string;
+		status: string;
+		files_touched?: string[];
+	}>,
 ): Promise<boolean> {
 	for (const task of tasks) {
 		if (task.status !== 'completed') return false;
-		if (!(await hasPassedAllGates(directory, task.id))) return false;
+		if (
+			!(await hasPassedAllGates(directory, task.id, task.files_touched ?? null))
+		)
+			return false;
 	}
 	return tasks.length > 0;
 }
@@ -994,17 +1001,12 @@ export async function executePhaseComplete(
 			let inferredFromTaskGates: string[] = [];
 			if (missing.length > 0) {
 				try {
-					const planRaw = fs.readFileSync(
-						validateSwarmPath(dir, 'plan.json'),
-						'utf8',
+					// Use loadPlan's ledger-replayed authority. Reading plan.json here
+					// directly could validate the empty-scope proof against a stale
+					// projection after the authoritative task scope expanded.
+					const target = participationPlan?.phases.find(
+						(item) => item.id === phase,
 					);
-					const plan = JSON.parse(planRaw) as {
-						phases: Array<{
-							id: number;
-							tasks: Array<{ id: string; status: string }>;
-						}>;
-					};
-					const target = plan.phases.find((item) => item.id === phase);
 					if (
 						target &&
 						target.tasks.length > 0 &&

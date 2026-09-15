@@ -43,8 +43,13 @@ describe('working_directory override — check_gate_status', () => {
 			path.join(evidenceDir, '1.6.json'),
 			JSON.stringify({
 				taskId: '1.6',
-				required_gates: ['reviewer', 'test_engineer'],
+				required_gates: ['pre_check', 'reviewer', 'test_engineer'],
 				gates: {
+					pre_check: {
+						sessionId: 'pre-check-session',
+						timestamp: '2026-09-14T00:00:00.000Z',
+						agent: 'pre_check_batch',
+					},
 					reviewer: {
 						sessionId: 'test-session',
 						timestamp: new Date().toISOString(),
@@ -56,6 +61,7 @@ describe('working_directory override — check_gate_status', () => {
 						agent: 'test_engineer',
 					},
 				},
+				workflow: { state: 'tests_run', generation: 1 },
 			}),
 			'utf-8',
 		);

@@ -82,4 +82,56 @@ describe('phase_complete doc-only durable fallback', () => {
 			]),
 		).toBe(false);
 	});
+
+	test('revokes empty-scope settlement when the completed task scope expands', async () => {
+		const evidenceDirectory = path.join(directory, '.swarm', 'evidence');
+		fs.mkdirSync(evidenceDirectory, { recursive: true });
+		fs.writeFileSync(
+			path.join(evidenceDirectory, '1.3.json'),
+			JSON.stringify({
+				taskId: '1.3',
+				required_gates: [],
+				gates: {},
+				workflow: {
+					schema: 'exact-task-v1',
+					generation: 0,
+					state: 'idle',
+					retryCount: 1,
+					retryHistory: ['dispatch_no_mutation'],
+					retryEpoch: 1,
+					lastOutcome: 'dispatch_no_mutation',
+					lastTransitionId: 'settlement-1.3',
+					updatedAt: '2026-09-14T00:00:00.000Z',
+					noMutationSettlement: {
+						generation: 0,
+						transitionId: 'settlement-1.3',
+						declaredFiles: [],
+					},
+				},
+			}),
+		);
+
+		const completedTask = {
+			id: '1.3',
+			status: 'completed',
+			files_touched: [] as string[],
+		};
+		expect(
+			await _test_exports.allCompletedTasksHavePassedGateEvidence(directory, [
+				completedTask,
+			]),
+		).toBe(true);
+		expect(
+			await _test_exports.allCompletedTasksHavePassedGateEvidence(directory, [
+				{ id: '1.3', status: 'completed' },
+			]),
+		).toBe(false);
+
+		completedTask.files_touched = ['src/expanded.ts'];
+		expect(
+			await _test_exports.allCompletedTasksHavePassedGateEvidence(directory, [
+				completedTask,
+			]),
+		).toBe(false);
+	});
 });

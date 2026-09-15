@@ -18,7 +18,10 @@ import {
 } from '../evidence/task-gate-requirements.js';
 import type { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
 import {
+	deriveApplicableGateSet,
 	getTaskWorkflowSnapshot,
+	isReadOnlyNoMutationEligible,
+	readCurrentTaskDeclaredFiles,
 	readTaskEvidenceRaw,
 	TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
 } from '../gate-evidence.js';
@@ -438,6 +441,7 @@ export function checkReviewerGate(
 	stageBParallelEnabled = false,
 	sessionID?: string,
 	fallbackDir?: string,
+	currentDeclaredFiles?: readonly string[] | null,
 ): ReviewerGateResult {
 	try {
 		// === Lean Turbo bypass check ===
@@ -502,7 +506,11 @@ export function checkReviewerGate(
 				// Find the task and check its files_touched
 				for (const planPhase of plan.phases ?? []) {
 					for (const task of planPhase.tasks ?? []) {
-						if (task.id === taskId && task.files_touched) {
+						if (
+							task.id === taskId &&
+							Array.isArray(task.files_touched) &&
+							task.files_touched.length > 0
+						) {
 							// If no Tier 3 patterns matched, bypass Stage B
 							if (!matchesTier3(task.files_touched)) {
 								return reviewerGateDecision(
@@ -572,15 +580,16 @@ export function checkReviewerGate(
 					);
 				}
 				if (!evidence.workflow) {
+					const derivedGates = deriveApplicableGateSet(evidence);
 					return reviewerGateDecision(
 						taskId,
 						sessionID,
 						{
 							blocked: true,
 							reason: `Task ${taskId} has legacy QA evidence without an authoritative workflow generation. Run a fresh exact-task workflow transition before completion.`,
-							requiredGates: [...evidence.required_gates],
-							satisfiedGates: Object.keys(evidence.gates),
-							missingGates: [...evidence.required_gates],
+							requiredGates: derivedGates.requiredGates,
+							satisfiedGates: derivedGates.satisfiedGates,
+							missingGates: derivedGates.missingGates,
 							source: 'durable_exact_task',
 							generation: 0,
 							nextAction:
@@ -591,14 +600,15 @@ export function checkReviewerGate(
 					);
 				}
 				const workflow = getTaskWorkflowSnapshot(evidence);
-				const requiredGates = [...evidence.required_gates];
-				const satisfiedGates = requiredGates.filter(
-					(gate) => evidence.gates[gate] != null,
-				);
-				const missingGates = requiredGates.filter(
-					(gate) => evidence.gates[gate] == null,
-				);
-				if (evidence.gates.pre_check == null) missingGates.unshift('pre_check');
+				const derivedGates = deriveApplicableGateSet(evidence, {
+					currentDeclaredFiles:
+						currentDeclaredFiles === undefined
+							? readCurrentTaskDeclaredFiles(authoritativeDir, taskId)
+							: currentDeclaredFiles,
+				});
+				const requiredGates = derivedGates.requiredGates;
+				const satisfiedGates = derivedGates.satisfiedGates;
+				const missingGates = derivedGates.missingGates;
 				if (
 					requiredGates.includes(TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL)
 				) {
@@ -645,12 +655,14 @@ export function checkReviewerGate(
 				const workflowComplete =
 					workflow.state === 'tests_run' || workflow.state === 'complete';
 				if (
-					requiredGates.length > 0 &&
 					missingGates.length === 0 &&
 					contradictorySignals.length === 0 &&
-					workflowComplete
+					(workflowComplete || derivedGates.readOnlyNoMutation)
 				) {
-					if (!routeGateAllowsTask(authoritativeDir, taskId, sessionID)) {
+					if (
+						!derivedGates.readOnlyNoMutation &&
+						!routeGateAllowsTask(authoritativeDir, taskId, sessionID)
+					) {
 						return reviewerGateDecision(
 							taskId,
 							sessionID,
@@ -2094,6 +2106,15 @@ export async function executeUpdateTaskStatus(
 				currentPlanStatus: lockedTask.status,
 				targetStatus: 'completed',
 				qaExempt: !lockedPhaseRequiresReviewer,
+				resolveTerminal: (evidence) => ({
+					targetStatus: 'completed',
+					qaExempt: !lockedPhaseRequiresReviewer,
+					readOnlyNoMutation: !lockedPhaseRequiresReviewer
+						? false
+						: isReadOnlyNoMutationEligible(evidence, {
+								currentDeclaredFiles: lockedTask.files_touched,
+							}),
+				}),
 				currentPlan: authoritativePlan,
 				validateEvidence: async () => {
 					const lockedGate = checkReviewerGate(
@@ -2102,6 +2123,7 @@ export async function executeUpdateTaskStatus(
 						false,
 						ctx?.sessionID,
 						fallbackDir ?? directory,
+						lockedTask.files_touched ?? null,
 					);
 					const lockedCouncil = checkCouncilGate(directory, args.task_id);
 					if (
