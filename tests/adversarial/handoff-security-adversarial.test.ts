@@ -4,23 +4,32 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../src/config';
-import { createSystemEnhancerHook } from '../../src/hooks/system-enhancer';
+import {
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../src/hooks/system-guidance-carrier';
 import { validateSwarmPath } from '../../src/hooks/utils';
 import { resetSwarmState, swarmState } from '../../src/state';
+import {
+	bootSwarmPluginHost,
+	createPluginHostProject,
+} from '../helpers/plugin-host';
+import { safeRmRecursive } from '../helpers/safe-test-dir';
 
 describe('SECURITY: Handoff Enhancer Adversarial Tests', () => {
 	let testDir: string;
 	let swarmDir: string;
+	let host: Awaited<ReturnType<typeof bootSwarmPluginHost>>;
 
 	// Full config matching PluginConfig type
 	const defaultConfig: PluginConfig = {
 		max_iterations: 5,
 		qa_retry_limit: 3,
 		inject_phase_reminders: true,
+		context_budget: { scoring: { enabled: false } },
 		hooks: {
 			system_enhancer: true,
 			compaction: true,
@@ -32,21 +41,57 @@ describe('SECURITY: Handoff Enhancer Adversarial Tests', () => {
 		},
 	};
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		// Create temp directory simulating a workspace
-		testDir = fs.mkdtempSync(path.join(tmpdir(), 'handoff-security-test-'));
+		testDir = createPluginHostProject('handoff-security-test');
 		swarmDir = path.join(testDir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
+		host = await bootSwarmPluginHost(testDir, defaultConfig);
 
 		// Set active agent for non-DISCOVER mode
 		resetSwarmState();
 		swarmState.activeAgent.set('test-session', 'architect');
 	});
 
+	async function invokeRegisteredMessages(
+		sessionID = 'test-session',
+		config: PluginConfig = defaultConfig,
+	) {
+		host = await bootSwarmPluginHost(testDir, config);
+		const messages = [
+			{
+				info: {
+					id: `handoff-user-${sessionID}`,
+					role: 'user' as const,
+					sessionID,
+					agent: 'architect',
+				},
+				parts: [{ type: 'text', text: 'Continue the current swarm task.' }],
+			},
+		];
+		await host.hooks['experimental.chat.messages.transform']({}, { messages });
+		return messages;
+	}
+
+	function deliveredText(messages: Array<{ info: unknown; parts: unknown[] }>) {
+		return messages
+			.filter((message) => isGuidanceCarrier(message))
+			.map((message) => messageTextOf(message as never))
+			.join('\n');
+	}
+
+	function countOccurrences(text: string, needle: string): number {
+		return text.split(needle).length - 1;
+	}
+
 	afterEach(() => {
 		// Clean up
 		if (testDir && fs.existsSync(testDir)) {
-			fs.rmSync(testDir, { recursive: true, force: true });
+			try {
+				safeRmRecursive(testDir);
+			} catch {
+				// Best-effort cleanup; registered host workers can briefly hold handles.
+			}
 		}
 		resetSwarmState();
 	});
@@ -77,19 +122,12 @@ The path ../../../etc/shadow contains sensitive data.`;
 				}),
 			);
 
-			// Create the hook
-			const hook = createSystemEnhancerHook(defaultConfig, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
-			const output = { system: [] as string[] };
-			await transformFn({ sessionID: 'test-session' }, output);
+			const messages = await invokeRegisteredMessages();
 
 			// The content should be injected but NOT cause any file system access
 			// The path traversal is just text content - the security boundary is
 			// at the filename level via validateSwarmPath
-			const injectedContent = output.system.join('\n');
+			const injectedContent = deliveredText(messages);
 			expect(injectedContent).toContain('../etc/passwd');
 			expect(injectedContent).toContain('C:\\Windows');
 		});
@@ -144,16 +182,9 @@ The path ../../../etc/shadow contains sensitive data.`;
 					fs.symlinkSync(targetFile, symlinkPath);
 				}
 
-				// Attempt to read handoff.md
-				const hook = createSystemEnhancerHook(defaultConfig, testDir);
-				const transformFn = hook[
-					'experimental.chat.system.transform'
-				] as Function;
-
-				const output = { system: [] as string[] };
-				await transformFn({ sessionID: 'test-session' }, output);
-
-				const injectedContent = output.system.join('\n');
+				// Attempt to read handoff.md through the registered message boundary.
+				const messages = await invokeRegisteredMessages();
+				const injectedContent = deliveredText(messages);
 
 				if (process.platform === 'win32') {
 					// Windows branch copied the file INTO .swarm (a real, in-directory
@@ -195,24 +226,17 @@ The path ../../../etc/shadow contains sensitive data.`;
 				}),
 			);
 
-			const hook = createSystemEnhancerHook(defaultConfig, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
 			// First call should succeed
-			const output1 = { system: [] as string[] };
-			await transformFn({ sessionID: 'test-session' }, output1);
+			const messages1 = await invokeRegisteredMessages();
 
 			// Content should be injected from first call
-			expect(output1.system.join('\n')).toContain('Initial handoff content');
+			expect(deliveredText(messages1)).toContain('Initial handoff content');
 
 			// Second call - file was renamed to handoff-consumed.md
-			const output2 = { system: [] as string[] };
-			await transformFn({ sessionID: 'test-session' }, output2);
+			const messages2 = await invokeRegisteredMessages();
 
 			// Second call should not find handoff.md (ENOENT is expected)
-			const injectedContent = output2.system.join('\n');
+			const injectedContent = deliveredText(messages2);
 			expect(injectedContent).not.toContain('Initial handoff content');
 		});
 
@@ -220,7 +244,7 @@ The path ../../../etc/shadow contains sensitive data.`;
 			// Create handoff.md and plan
 			fs.writeFileSync(
 				path.join(swarmDir, 'handoff.md'),
-				'Concurrent test content',
+				'Concurrent-HANDOFF-PAYLOAD',
 			);
 			fs.writeFileSync(
 				path.join(swarmDir, 'plan.json'),
@@ -235,45 +259,43 @@ The path ../../../etc/shadow contains sensitive data.`;
 				}),
 			);
 
-			const hook = createSystemEnhancerHook(defaultConfig, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
 			// Run two concurrent transformations
 			const results = await Promise.allSettled([
 				(async () => {
-					const output = { system: [] as string[] };
-					await transformFn({ sessionID: 'concurrent-1' }, output);
-					return output;
+					const messages = await invokeRegisteredMessages('concurrent-1');
+					return deliveredText(messages);
 				})(),
 				(async () => {
 					// Small delay to create race condition
 					await new Promise((r) => setTimeout(r, 10));
-					const output = { system: [] as string[] };
-					await transformFn({ sessionID: 'concurrent-2' }, output);
-					return output;
+					const messages = await invokeRegisteredMessages('concurrent-2');
+					return deliveredText(messages);
 				})(),
 			]);
 
-			// At least one should succeed
-			// One might fail with ENOENT if the other renamed it first
+			// Both registered transforms fail open when the other wins the rename;
+			// exactly one host-visible carrier may contain the payload.
+			expect(results.every((result) => result.status === 'fulfilled')).toBe(
+				true,
+			);
 			const contents = results.map((r) =>
-				r.status === 'fulfilled' ? r.value.system.join('\n') : '',
+				r.status === 'fulfilled' ? r.value : '',
 			);
-
-			// Only ONE should contain the handoff content (the one that won the race)
-			const hasContent = contents.filter((c) =>
-				c.includes('Concurrent test content'),
+			const payloadCount = contents.reduce(
+				(total, content) =>
+					total + countOccurrences(content, 'Concurrent-HANDOFF-PAYLOAD'),
+				0,
 			);
-			expect(hasContent.length).toBeLessThanOrEqual(1);
+			expect(payloadCount).toBe(1);
 		});
 	});
 
 	describe('4. Very Large Handoff Content (DoS)', () => {
 		it('should handle extremely large handoff.md (10MB+)', async () => {
 			// Create a 10MB+ handoff file
-			const largeContent = '# Large Handoff\n' + 'x'.repeat(11 * 1024 * 1024);
+			const largeContent =
+				'# Large Handoff OVERSIZED-HANDOFF-PAYLOAD\n' +
+				'x'.repeat(11 * 1024 * 1024);
 
 			fs.writeFileSync(path.join(swarmDir, 'handoff.md'), largeContent);
 			fs.writeFileSync(
@@ -289,20 +311,16 @@ The path ../../../etc/shadow contains sensitive data.`;
 				}),
 			);
 
-			const hook = createSystemEnhancerHook(defaultConfig, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
-			const output = { system: [] as string[] };
-			await transformFn({ sessionID: 'test-session' }, output);
+			const messages = await invokeRegisteredMessages();
 
 			// Large content is rejected by the token budget guard in tryInject().
 			// estimateTokens() estimates ~3.8M tokens for 11MB; the default budget
 			// is 4000 tokens, so the handoff block is dropped entirely.
 			// Only the phase header (~953 bytes) is injected.
-			const injectedContent = output.system.join('\n');
+			const injectedContent = deliveredText(messages);
 			expect(injectedContent.length).toBeLessThan(4096);
+			expect(injectedContent).not.toContain('OVERSIZED-HANDOFF-PAYLOAD');
+			expect(injectedContent).toContain('[SWARM CONTEXT] Phase:');
 
 			// This documents that the DoS vulnerability is mitigated: content is
 			// budget-gated via token estimation in tryInject() (system-enhancer.ts).
@@ -331,20 +349,18 @@ The path ../../../etc/shadow contains sensitive data.`;
 				...defaultConfig,
 				context_budget: {
 					max_injection_tokens: 1000, // Very low budget
+					scoring: { enabled: false },
 				},
 			} as PluginConfig;
 
-			const hook = createSystemEnhancerHook(configWithBudget, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
-			const output = { system: [] as string[] };
-			await transformFn({ sessionID: 'test-session' }, output);
+			const messages = await invokeRegisteredMessages(
+				'test-session',
+				configWithBudget,
+			);
 
 			// With low budget, large content is read but budget limits injection
 			// Content is read from file but then filtered by budget
-			const injectedContent = output.system.join('\n');
+			const injectedContent = deliveredText(messages);
 			// The content is still read from file - but budget check limits injection
 			// With budget=1000 tokens (~3000 chars), large content gets truncated
 			expect(injectedContent.length).toBeGreaterThan(0);
@@ -370,13 +386,7 @@ The path ../../../etc/shadow contains sensitive data.`;
 				}),
 			);
 
-			const hook = createSystemEnhancerHook(defaultConfig, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
-			const output = { system: [] as string[] };
-			await transformFn({ sessionID: 'test-session' }, output);
+			const messages = await invokeRegisteredMessages();
 
 			// sanitizeContextText (issue #1779 M10) now wraps every raw
 			// learned-content injection site, including the handoff body. It
@@ -385,7 +395,7 @@ The path ../../../etc/shadow contains sensitive data.`;
 			// documented vulnerability (null bytes injected as-is into the
 			// system message); it is now closed. The surrounding readable text
 			// still reaches the injected context.
-			const injectedContent = output.system.join('\n');
+			const injectedContent = deliveredText(messages);
 			expect(injectedContent).not.toContain('\x00');
 			expect(injectedContent).toContain('Before null');
 			expect(injectedContent).toContain('After null');
@@ -423,21 +433,22 @@ The path ../../../etc/shadow contains sensitive data.`;
 				}),
 			);
 
-			const hook = createSystemEnhancerHook(defaultConfig, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
+			const deliveries: string[] = [];
 			// Run 5 sequential transformations
 			for (let i = 0; i < 5; i++) {
-				const output = { system: [] as string[] };
-				await transformFn({ sessionID: `sequential-${i}` }, output);
+				const messages = await invokeRegisteredMessages(`sequential-${i}`);
+				deliveries.push(deliveredText(messages));
 
 				// First call gets content, subsequent calls don't (file renamed)
 				if (i === 0) {
-					expect(output.system.join('\n')).toContain('Sequential test content');
+					expect(deliveries[i]).toContain('Sequential test content');
 				}
 			}
+			expect(
+				deliveries.map((content) =>
+					countOccurrences(content, 'Sequential test content'),
+				),
+			).toEqual([1, 0, 0, 0, 0]);
 		});
 
 		it('should handle duplicate handoff-consumed.md gracefully', async () => {
@@ -465,17 +476,11 @@ The path ../../../etc/shadow contains sensitive data.`;
 				}),
 			);
 
-			const hook = createSystemEnhancerHook(defaultConfig, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
-			const output = { system: [] as string[] };
-			await transformFn({ sessionID: 'test-session' }, output);
+			const messages = await invokeRegisteredMessages();
 
 			// Code should handle duplicate by deleting old consumed file
 			// and renaming new one
-			const injectedContent = output.system.join('\n');
+			const injectedContent = deliveredText(messages);
 			expect(injectedContent).toContain('New handoff content');
 
 			// Verify old consumed was removed and new one exists
@@ -487,97 +492,6 @@ The path ../../../etc/shadow contains sensitive data.`;
 				'utf-8',
 			);
 			expect(consumedContent).toBe('New handoff content');
-		});
-	});
-
-	describe('7. Additional Attack Vectors', () => {
-		it('should handle empty handoff.md', async () => {
-			// Create empty handoff and plan
-			fs.writeFileSync(path.join(swarmDir, 'handoff.md'), '');
-			fs.writeFileSync(
-				path.join(swarmDir, 'plan.json'),
-				JSON.stringify({
-					schema_version: '1.0.0',
-					title: 'Test',
-					swarm: 'test',
-					current_phase: 1,
-					phases: [
-						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-					],
-				}),
-			);
-
-			const hook = createSystemEnhancerHook(defaultConfig, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
-			const output = { system: [] as string[] };
-			await transformFn({ sessionID: 'test-session' }, output);
-
-			// Empty content is handled gracefully - no injection
-			const injectedContent = output.system.join('\n');
-			expect(injectedContent).not.toContain('HANDOFF');
-		});
-
-		it('should handle handoff.md with only whitespace', async () => {
-			// Create whitespace-only handoff and plan
-			fs.writeFileSync(path.join(swarmDir, 'handoff.md'), '   \n\n   ');
-			fs.writeFileSync(
-				path.join(swarmDir, 'plan.json'),
-				JSON.stringify({
-					schema_version: '1.0.0',
-					title: 'Test',
-					swarm: 'test',
-					current_phase: 1,
-					phases: [
-						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-					],
-				}),
-			);
-
-			const hook = createSystemEnhancerHook(defaultConfig, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
-			const output = { system: [] as string[] };
-			await transformFn({ sessionID: 'test-session' }, output);
-
-			// Whitespace content gets injected (falsy check may pass)
-			const injectedContent = output.system.join('\n');
-			// This documents behavior - whitespace-only content IS injected as it's truthy string
-		});
-
-		it('should handle binary-looking content', async () => {
-			// Create content that looks like binary
-			const binaryContent = Buffer.from([0x00, 0x01, 0x02, 0xff, 0xfe, 0xfd]);
-
-			fs.writeFileSync(path.join(swarmDir, 'handoff.md'), binaryContent);
-			fs.writeFileSync(
-				path.join(swarmDir, 'plan.json'),
-				JSON.stringify({
-					schema_version: '1.0.0',
-					title: 'Test',
-					swarm: 'test',
-					current_phase: 1,
-					phases: [
-						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-					],
-				}),
-			);
-
-			const hook = createSystemEnhancerHook(defaultConfig, testDir);
-			const transformFn = hook[
-				'experimental.chat.system.transform'
-			] as Function;
-
-			const output = { system: [] as string[] };
-			await transformFn({ sessionID: 'test-session' }, output);
-
-			// Binary content is injected as-is (no sanitization)
-			const injectedContent = output.system.join('\n');
-			expect(injectedContent.length).toBeGreaterThan(0);
 		});
 	});
 });

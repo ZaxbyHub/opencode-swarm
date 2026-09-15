@@ -2,8 +2,9 @@
  * Final context accounting (#2107 §3).
  *
  * ONE final accounting step, run after every injector has contributed and after
- * `materializeSystemGuidanceInPlace` (issue #2526) — the last structure-mutating handler in
- * the `experimental.chat.messages.transform` chain. It measures the actual
+ * `materializeSystemGuidanceInPlace` and the terminal carrier partition (issue
+ * #2526/#2759) — the last structure-mutating handlers in the
+ * `experimental.chat.messages.transform` chain. It measures the actual
  * final model-visible surface exactly once:
  *
  * - `output.messages` (post-consolidation; carries every messages-chain
@@ -60,6 +61,7 @@ import {
 	extractSessionId,
 	resolveModelLimit,
 } from './model-limits.js';
+import { isGuidanceCarrier } from './system-guidance-carrier.js';
 import { estimateTokens } from './utils.js';
 
 interface FinalAccountingOptions {
@@ -120,6 +122,7 @@ export function createFinalContextAccountingStep(
 			let agentName: string | undefined;
 			for (let i = messages.length - 1; i >= 0; i--) {
 				const info = messages[i]?.info;
+				if (isGuidanceCarrier(messages[i])) continue;
 				if (info?.role === 'user' && info.agent) {
 					agentName = info.agent;
 					break;
@@ -211,6 +214,7 @@ export function createFinalContextAccountingStep(
 				// In-place prepend to the last user message's first text part.
 				// NEVER reassign output.messages (AGENTS.md invariant 10).
 				for (let i = messages.length - 1; i >= 0; i--) {
+					if (isGuidanceCarrier(messages[i])) continue;
 					if (messages[i]?.info?.role !== 'user') continue;
 					const parts = messages[i]?.parts;
 					if (!parts) break;

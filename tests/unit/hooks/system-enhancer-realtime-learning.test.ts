@@ -10,8 +10,11 @@ import {
 	getTrackedRealtimeLearningNudgeSessionCount,
 	recordRealtimeLearningToolCall,
 	resetRealtimeLearningNudgeState,
+	shouldInjectRealtimeLearningNudge,
 } from '../../../src/hooks/realtime-learning-nudge';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
+import { guidanceCarrierEnvelopeTokens } from '../../../src/hooks/system-guidance-carrier';
+import { getTurnLedgerSummary } from '../../../src/services/injection-budget';
 import { endAgentSession, resetSwarmState } from '../../../src/state';
 
 describe('System Enhancer real-time learning nudge', () => {
@@ -87,9 +90,17 @@ describe('System Enhancer real-time learning nudge', () => {
 	async function invokeHook(
 		config: PluginConfig,
 		sessionID = 'learning-session',
+		surface: 'system' | 'messages' = 'system',
+		options: {
+			deferRealtimeLearningNudgeState?: boolean;
+			reservedEnvelopeTokens?: number;
+		} = {},
 	): Promise<string[]> {
 		invokedTransform = true;
-		const hooks = createSystemEnhancerHook(config, tempDir);
+		const hooks = createSystemEnhancerHook(config, tempDir, {
+			surface,
+			...options,
+		});
 		const transform = hooks['experimental.chat.system.transform'] as (
 			input: { sessionID?: string },
 			output: { system: string[] },
@@ -294,5 +305,76 @@ describe('System Enhancer real-time learning nudge', () => {
 			output.some((entry) => entry.includes('[SWARM LEARNING NUDGE]')),
 		).toBe(true);
 		expect(output.some((entry) => entry.includes('knowledge_add'))).toBe(true);
+	});
+
+	it('records messages-surface enhancer emissions without system attribution', async () => {
+		const config = {
+			...defaultConfig,
+			knowledge: {
+				enabled: true,
+				realtime_learning_nudge: {
+					enabled: true,
+					first_after_tool_calls: 10,
+					repeat_after_tool_calls: 25,
+				},
+			} as PluginConfig['knowledge'],
+		};
+		await recordCompletedToolCalls('learning-session', 10);
+		const output = await invokeHook(config, 'learning-session', 'messages');
+		expect(
+			output.some((entry) => entry.includes('[SWARM LEARNING NUDGE]')),
+		).toBe(true);
+		const producer = getTurnLedgerSummary('learning-session')?.producers.find(
+			(entry) => entry.producer === 'system-enhancer',
+		);
+		expect(producer?.surface).toBe('messages');
+	});
+
+	it('defers nudge state until the staged carrier is delivered', async () => {
+		const sessionID = 'deferred-learning-session';
+		const config = {
+			...defaultConfig,
+			knowledge: {
+				enabled: true,
+				realtime_learning_nudge: {
+					enabled: true,
+					first_after_tool_calls: 10,
+					repeat_after_tool_calls: 25,
+				},
+			} as PluginConfig['knowledge'],
+		};
+		await recordCompletedToolCalls(sessionID, 10);
+		await invokeHook(config, sessionID, 'messages', {
+			deferRealtimeLearningNudgeState: true,
+		});
+		expect(
+			shouldInjectRealtimeLearningNudge({
+				sessionID,
+				config: config.knowledge?.realtime_learning_nudge,
+			}),
+		).toBe(true);
+	});
+
+	it('reserves the carrier envelope before messages-surface content', async () => {
+		const sessionID = 'reserved-envelope-session';
+		const envelopeTokens = guidanceCarrierEnvelopeTokens('architect-session');
+		const config = {
+			...defaultConfig,
+			context_budget: {
+				max_injection_tokens: 20_000,
+				unified_injection_tokens: 100,
+			},
+		};
+		await invokeHook(config, sessionID, 'messages', {
+			deferRealtimeLearningNudgeState: true,
+			reservedEnvelopeTokens: envelopeTokens,
+		});
+		const reservation = getTurnLedgerSummary(sessionID)?.producers.find(
+			(entry) => entry.producer === 'guidance-carrier-fence',
+		);
+		expect(reservation?.requested).toBe(envelopeTokens);
+		expect(reservation?.granted).toBe(envelopeTokens);
+		expect(reservation?.emitted).toBe(0);
+		expect(reservation?.surface).toBe('messages');
 	});
 });

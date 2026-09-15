@@ -5,6 +5,7 @@ import {
 	createFinalContextAccountingStep,
 } from '../../../src/hooks/final-context-accounting';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
+import { buildGuidanceCarrier } from '../../../src/hooks/system-guidance-carrier';
 import { estimateTokens } from '../../../src/hooks/utils';
 import {
 	beginTurnLedger,
@@ -196,6 +197,27 @@ describe('final context accounting (#2107 §3)', () => {
 		expect(text).toContain('CRITICAL (estimated)');
 		expect(text).toContain('this message removed no content');
 		expect(text).toContain('Consider compacting');
+	});
+
+	test('pressure warnings skip trailing guidance carriers (#2759)', async () => {
+		const step = createFinalContextAccountingStep({ config: makeConfig() });
+		const realUser = messageOf('user', 'y'.repeat(240_000));
+		const carrier = buildGuidanceCarrier(
+			'architect-session',
+			'changing guidance',
+		)!;
+		const messages = [realUser, carrier as unknown as MessageWithParts];
+
+		await step({}, { messages });
+
+		const realText = String(
+			(realUser.parts[0] as { text?: string })?.text ?? '',
+		);
+		const carrierText = String(
+			(carrier.parts[0] as { text?: string })?.text ?? '',
+		);
+		expect(realText).toContain('[CONTEXT PRESSURE (estimated):');
+		expect(carrierText).not.toContain('[CONTEXT PRESSURE (estimated):');
 	});
 
 	test('distinguishes provider-reported usage from estimation', async () => {

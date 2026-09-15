@@ -91,6 +91,30 @@ export interface MessageArrayLike {
 }
 
 /**
+ * True only for a session-bound architect request.
+ *
+ * The host invokes `messages.transform` before `system.transform`, so this
+ * predicate is shared by both surfaces to ensure the architect enhancer and
+ * command banner have exactly one delivery owner. Sessionless system calls
+ * (for example native agent generation) deliberately return false and retain
+ * their existing system-surface behavior.
+ */
+export function isSessionBoundArchitect(
+	sessionID: string | undefined,
+	agent?: string,
+): boolean {
+	if (typeof sessionID !== 'string' || sessionID.length === 0) return false;
+	const resolvedAgent =
+		agent ??
+		swarmState.activeAgent.get(sessionID) ??
+		swarmState.agentSessions.get(sessionID)?.agentName;
+	return (
+		typeof resolvedAgent === 'string' &&
+		stripKnownSwarmPrefix(resolvedAgent).toLowerCase() === ORCHESTRATOR_NAME
+	);
+}
+
+/**
  * Resolve the active agent for a sessionID.
  *
  * PRIMARY: `swarmState.activeAgent.get(sessionID)` — set reliably by the

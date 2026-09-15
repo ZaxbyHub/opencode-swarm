@@ -27,6 +27,8 @@
  * never persist, accumulate, or pollute the stored conversation.
  */
 
+import { estimateTokens } from './utils.js';
+
 /**
  * Structural message shape the carrier helpers operate on. Every consumer's
  * local message type (knowledge `MessageWithParts`, the guardrails transform's
@@ -80,6 +82,19 @@ function neutralizeFenceMarkup(text: string): string {
 export function fenceGuidanceText(kind: string, text: string): string | null {
 	if (!nonEmptyText(text)) return null;
 	return `${fenceOpen(kind)}\n${neutralizeFenceMarkup(text)}\n${FENCE_CLOSE}`;
+}
+
+/**
+ * Conservative fixed token reservation for the provenance envelope around a
+ * non-empty carrier body. The messages-surface architect adapter reserves this
+ * before enhancer candidate admission; the actual emitted envelope is booked
+ * separately after host-render validation.
+ */
+export function guidanceCarrierEnvelopeTokens(kind: string): number {
+	const sample = 'x';
+	const fenced = fenceGuidanceText(kind, sample);
+	if (fenced === null) return 0;
+	return Math.max(0, estimateTokens(fenced) - estimateTokens(sample));
 }
 
 /**
@@ -244,6 +259,30 @@ export function appendGuidanceCarrier(
 	if (carrier === null) return null;
 	messages.push(carrier);
 	return carrier;
+}
+
+/**
+ * Move every guidance carrier to the end of `messages` in place.
+ *
+ * The producer chain intentionally keeps `ensureGuidanceCarrier`'s historical
+ * front insertion semantics: several downstream consumers inspect the last
+ * real user message and must not see a carrier while they are still running.
+ * This terminal partition is therefore the one request-boundary relocation,
+ * after all those consumers have finished. Both partitions retain their input
+ * order and every entry keeps its original object identity.
+ */
+export function moveGuidanceCarriersToEnd(messages: GuidanceMessage[]): void {
+	const carriers: GuidanceMessage[] = [];
+	const realMessages: GuidanceMessage[] = [];
+	for (const message of messages) {
+		if (isGuidanceCarrier(message)) carriers.push(message);
+		else realMessages.push(message);
+	}
+	if (carriers.length === 0) return;
+
+	messages.length = 0;
+	for (const message of realMessages) messages.push(message);
+	for (const carrier of carriers) messages.push(carrier);
 }
 
 /**

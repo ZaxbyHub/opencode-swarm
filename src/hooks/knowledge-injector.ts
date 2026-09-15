@@ -68,6 +68,7 @@ import { searchKnowledge } from './search-knowledge.js';
 import {
 	deliveredGuidanceDelta,
 	insertGuidanceCarrier,
+	isGuidanceCarrier,
 } from './system-guidance-carrier.js';
 import {
 	estimateCharsForTokens,
@@ -867,6 +868,7 @@ async function injectForDelegateIntoMessages(
 	let taskTitle: string | undefined;
 	for (let i = output.messages.length - 1; i >= 0; i--) {
 		const m = output.messages[i];
+		if (isGuidanceCarrier(m)) continue;
 		if (m.info?.role === 'user') {
 			const t = m.parts
 				?.map((p) => p.text ?? '')
@@ -970,6 +972,7 @@ function injectReviewerComplianceMessage(
 	// inserting at the same index places this AFTER the delegate block.
 	let insertIdx = output.messages.length - 1;
 	for (let i = output.messages.length - 1; i >= 0; i--) {
+		if (isGuidanceCarrier(output.messages[i])) continue;
 		if (output.messages[i].info?.role === 'user') {
 			insertIdx = i;
 			break;
@@ -1112,6 +1115,7 @@ function injectKnowledgeMessage(
 	// Avoids the "lost in the middle" attention dead zone that mid-array injection creates.
 	let insertIdx = output.messages.length - 1; // fallback: append before last message
 	for (let i = output.messages.length - 1; i >= 0; i--) {
+		if (isGuidanceCarrier(output.messages[i])) continue;
 		if (output.messages[i].info?.role === 'user') {
 			insertIdx = i;
 			break;
@@ -1396,6 +1400,7 @@ export function createKnowledgeInjectorHook(
 			let lastUserMessage: string | undefined;
 			for (let i = output.messages.length - 1; i >= 0; i--) {
 				const m = output.messages[i];
+				if (isGuidanceCarrier(m)) continue;
 				if (m.info?.role === 'user') {
 					const t = m.parts
 						?.map((p) => p.text ?? '')

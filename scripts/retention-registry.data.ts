@@ -3063,7 +3063,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/memory/run-log.ts', 'src/memory/injector.ts'],
 		writerCitations: [
 			'src/memory/run-log.ts:53 appendMemoryRunLog — appendCappedJsonl with MAX_RUN_LOG_ENTRIES 2000 FIFO per run file (:70-72)',
-			'src/memory/injector.ts:519 maybeWriteUnitIdProbe — env-gated diagnostic (OPENCODE_SWARM_MEMORY_UNITID_PROBE=1); MAX_UNITID_PROBE_ENTRIES 2000 FIFO (:517,:545-547)',
+			'src/memory/injector.ts:520 maybeWriteUnitIdProbe — env-gated diagnostic (OPENCODE_SWARM_MEMORY_UNITID_PROBE=1); MAX_UNITID_PROBE_ENTRIES 2000 FIFO (:518,:546-548)',
 		],
 		readerCitations: ['consumers read JSONL directly (injector/reflection paths); each file ≤2000 entries by the write-side cap'],
 		schemaVersion: 'run-log event shapes',

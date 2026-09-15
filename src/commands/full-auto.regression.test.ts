@@ -8,11 +8,24 @@
  * 4. Counter reset side-effects are visible after disable
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createSystemEnhancerHook } from '../hooks/system-enhancer';
+import type { HostPartsMessage } from '../../tests/helpers/host-contract-v1_18_3';
+import {
+	bootSwarmPluginHost,
+	createPluginHostProject,
+} from '../../tests/helpers/plugin-host';
+import { isGuidanceCarrier } from '../hooks/system-guidance-carrier';
 import { getAgentSession, hasActiveFullAuto, swarmState } from '../state';
 import { handleFullAutoCommand } from './full-auto';
 
@@ -20,6 +33,27 @@ describe('Full-Auto Mode Regression Tests', () => {
 	let testSessionId: string;
 	let tmpDir: string;
 	let originalXdg: string | undefined;
+	let registeredHostDirectory: string;
+	let registeredHost: Awaited<ReturnType<typeof bootSwarmPluginHost>>;
+
+	beforeAll(async () => {
+		registeredHostDirectory = createPluginHostProject(
+			'full-auto-regression-host',
+		);
+		registeredHost = await bootSwarmPluginHost(registeredHostDirectory, {
+			knowledge: { enabled: false, hive_enabled: false },
+			memory: { enabled: false },
+			hooks: { delegation_gate: false },
+		});
+	});
+
+	afterAll(() => {
+		try {
+			fs.rmSync(registeredHostDirectory, { recursive: true, force: true });
+		} catch {
+			// SQLite handles may remain open briefly on Windows; best effort only.
+		}
+	});
 
 	beforeEach(() => {
 		testSessionId = `full-auto-regression-${Date.now()}`;
@@ -87,6 +121,44 @@ describe('Full-Auto Mode Regression Tests', () => {
 			// Ignore cleanup errors
 		}
 	});
+
+	async function registeredGuidanceMessages(
+		sessionID: string | undefined = testSessionId,
+	): Promise<HostPartsMessage[]> {
+		const messages: HostPartsMessage[] = [
+			{
+				info: {
+					id: `full-auto-request-${sessionID ?? 'anonymous'}`,
+					role: 'user',
+					agent: 'architect',
+					...(sessionID ? { sessionID } : {}),
+				},
+				parts: [{ type: 'text', text: 'continue' }],
+			},
+		];
+		if (sessionID) {
+			await registeredHost.hooks['chat.message'](
+				{ sessionID, agent: 'architect' },
+				{},
+			);
+		}
+		await registeredHost.hooks['experimental.chat.messages.transform'](
+			{},
+			{ messages },
+		);
+		return messages;
+	}
+
+	function guidanceText(messages: HostPartsMessage[]): string {
+		return messages
+			.filter((message) => isGuidanceCarrier(message))
+			.flatMap((message) =>
+				message.parts
+					.filter((part) => part.type === 'text')
+					.map((part) => part.text ?? ''),
+			)
+			.join('\n');
+	}
 
 	// ============================================
 	// 1. /swarm full-auto command toggle behavior
@@ -238,14 +310,9 @@ describe('Full-Auto Mode Regression Tests', () => {
 			const session = getAgentSession(testSessionId);
 			session!.fullAutoMode = true;
 
-			const hook = createSystemEnhancerHook({} as any, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform'](
-				{ sessionID: testSessionId },
-				output,
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(testSessionId),
 			);
-			const systemPrompt = output.system.join('\n');
 
 			expect(systemPrompt).toContain('## ⚡ FULL-AUTO MODE ACTIVE');
 			expect(systemPrompt).toContain('without a human in the loop');
@@ -255,14 +322,9 @@ describe('Full-Auto Mode Regression Tests', () => {
 			const session = getAgentSession(testSessionId);
 			session!.fullAutoMode = false;
 
-			const hook = createSystemEnhancerHook({} as any, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform'](
-				{ sessionID: testSessionId },
-				output,
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(testSessionId),
 			);
-			const systemPrompt = output.system.join('\n');
 
 			expect(systemPrompt).not.toContain('## ⚡ FULL-AUTO MODE ACTIVE');
 			expect(systemPrompt).not.toContain('without a human in the loop');
@@ -272,20 +334,15 @@ describe('Full-Auto Mode Regression Tests', () => {
 			const session = getAgentSession(testSessionId);
 			session!.fullAutoMode = true;
 
-			const hook = createSystemEnhancerHook({} as any, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform'](
-				{ sessionID: testSessionId },
-				output,
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(testSessionId),
 			);
-			const systemPrompt = output.system.join('\n');
 
 			expect(systemPrompt).toContain('Autonomous Oversight Critic');
 			expect(systemPrompt).toContain('ESCALATE_TO_HUMAN');
 		});
 
-		it('3.4 injects banner when ANY session has fullAutoMode: true (global fallback)', async () => {
+		it('3.4 delivers the banner for an explicitly identified full-auto session', async () => {
 			const secondId = `full-auto-regression-global-${Date.now()}`;
 			swarmState.agentSessions.set(secondId, {
 				agentName: 'architect',
@@ -334,12 +391,9 @@ describe('Full-Auto Mode Regression Tests', () => {
 				prmHardStopPending: false,
 			});
 
-			// First session has fullAutoMode: false; call hook without sessionID
-			const hook = createSystemEnhancerHook({} as any, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform']({}, output);
-			const systemPrompt = output.system.join('\n');
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(secondId),
+			);
 
 			expect(systemPrompt).toContain('## ⚡ FULL-AUTO MODE ACTIVE');
 
@@ -349,11 +403,9 @@ describe('Full-Auto Mode Regression Tests', () => {
 		it('3.5 does NOT inject banner when no sessions exist', async () => {
 			swarmState.agentSessions.clear();
 
-			const hook = createSystemEnhancerHook({} as any, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform']({}, output);
-			const systemPrompt = output.system.join('\n');
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(undefined),
+			);
 
 			expect(systemPrompt).not.toContain('## ⚡ FULL-AUTO MODE ACTIVE');
 
@@ -411,14 +463,9 @@ describe('Full-Auto Mode Regression Tests', () => {
 			session!.fullAutoMode = true;
 			session!.turboMode = false; // only full-auto active
 
-			const hook = createSystemEnhancerHook({} as any, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform'](
-				{ sessionID: testSessionId },
-				output,
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(testSessionId),
 			);
-			const systemPrompt = output.system.join('\n');
 
 			expect(systemPrompt).toContain('## ⚡ FULL-AUTO MODE ACTIVE');
 			expect(systemPrompt).not.toContain('## 🚀 TURBO MODE ACTIVE');

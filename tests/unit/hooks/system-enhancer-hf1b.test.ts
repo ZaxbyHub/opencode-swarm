@@ -4,24 +4,47 @@
  * - HF-1b: Prevent architect/null from running full test suite
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
+import {
+	isGuidanceCarrier,
+	isRenderableGuidance,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import {
+	type HostPartsMessage,
+	hostToModelMessages,
+	renderedText,
+} from '../../helpers/host-contract-v1_18_3';
+import {
+	bootSwarmPluginHost,
+	createPluginHostProject,
+} from '../../helpers/plugin-host';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
+
+const BASE_SYSTEM = 'Stable architect system prefix';
+const HOST_CONFIG = {
+	version_check: false,
+	context_budget: { scoring: { enabled: false } },
+	knowledge: { enabled: false, hive_enabled: false },
+	memory: { enabled: false },
+	hooks: { delegation_gate: false, system_enhancer: true },
+};
 
 describe('v6.13.1-hotfix HF-1b Agent Execution Guardrails', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = await mkdtemp(join(tmpdir(), 'swarm-hf1b-test-'));
+		tempDir = createPluginHostProject('swarm-hf1b-test-');
 		resetSwarmState();
 	});
 
 	afterEach(async () => {
 		try {
-			await rm(tempDir, { recursive: true, force: true });
+			safeRmRecursive(tempDir);
 		} catch (error) {
 			// Ignore cleanup errors
 		}
@@ -63,6 +86,57 @@ describe('v6.13.1-hotfix HF-1b Agent Execution Guardrails', () => {
 		await transform(input, output);
 
 		return output.system;
+	}
+
+	async function invokeRegisteredArchitect(
+		agent = 'architect',
+		activeAgent: string | undefined = agent,
+	): Promise<{
+		messages: HostPartsMessage[];
+		rendered: ReturnType<typeof hostToModelMessages>;
+		system: string[];
+	}> {
+		await createSwarmFiles();
+		if (activeAgent === undefined) {
+			swarmState.activeAgent.delete('test-session');
+		} else {
+			swarmState.activeAgent.set('test-session', activeAgent);
+		}
+		const host = await bootSwarmPluginHost(tempDir, HOST_CONFIG);
+		const messages: HostPartsMessage[] = [
+			{
+				info: {
+					id: 'hf1b-user',
+					role: 'user',
+					agent,
+					sessionID: 'test-session',
+				},
+				parts: [{ type: 'text', text: 'Continue the active plan.' }],
+			},
+		];
+		await host.hooks['experimental.chat.messages.transform']({}, { messages });
+		const system = [BASE_SYSTEM];
+		await host.hooks['experimental.chat.system.transform'](
+			{ sessionID: 'test-session' },
+			{ system },
+		);
+		return { messages, rendered: hostToModelMessages(messages), system };
+	}
+
+	function expectArchitectGuardCarrier(
+		result: Awaited<ReturnType<typeof invokeRegisteredArchitect>>,
+	): void {
+		const needle = '[SWARM CONFIG] You must NEVER run the full test suite';
+		const carrier = result.messages.find(
+			(message) =>
+				isGuidanceCarrier(message) && messageTextOf(message).includes(needle),
+		);
+		expect(result.system).toEqual([BASE_SYSTEM]);
+		expect(result.system.join('\n')).not.toContain(needle);
+		expect(carrier).toBeDefined();
+		expect(isRenderableGuidance(carrier)).toBe(true);
+		expect(carrier?.info.role).toBe('user');
+		expect(renderedText(result.rendered)).toContain(needle);
 	}
 
 	/**
@@ -118,33 +192,16 @@ describe('v6.13.1-hotfix HF-1b Agent Execution Guardrails', () => {
 	});
 
 	describe('HF-1b: Architect and null receive full test suite guard', () => {
-		it('activeAgent = "architect" → receives HF-1b injection, does NOT receive HF-1 injection', async () => {
-			await createSwarmFiles();
+		it('activeAgent = "architect" → registered host delivers renderable HF-1b guidance', async () => {
+			const result = await invokeRegisteredArchitect();
 
-			// Set active agent to architect
-			swarmState.activeAgent.set('test-session', 'architect');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should NOT contain HF-1 injection
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-
-			// Should contain HF-1b injection
-			expect(hasHF1bInjection(systemOutput)).toBe(true);
+			expectArchitectGuardCarrier(result);
 		});
 
-		it('activeAgent = null/undefined (no active agent) → receives HF-1b injection, does NOT receive HF-1 injection', async () => {
-			await createSwarmFiles();
+		it('activeAgent = null/undefined → registered host uses the architect fallback', async () => {
+			const result = await invokeRegisteredArchitect('architect', undefined);
 
-			// Don't set any active agent - it will be null/undefined
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should NOT contain HF-1 injection
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-
-			// Should contain HF-1b injection
-			expect(hasHF1bInjection(systemOutput)).toBe(true);
+			expectArchitectGuardCarrier(result);
 		});
 	});
 
@@ -196,19 +253,10 @@ describe('v6.13.1-hotfix HF-1b Agent Execution Guardrails', () => {
 			expect(hasHF1bInjection(systemOutput)).toBe(false);
 		});
 
-		it('activeAgent = "mega_architect" (prefixed) → prefix stripped → same as architect → HF-1b injection', async () => {
-			await createSwarmFiles();
+		it('activeAgent = "mega_architect" (prefixed) → registered host preserves the architect boundary', async () => {
+			const result = await invokeRegisteredArchitect('mega_architect');
 
-			// Set active agent with prefix
-			swarmState.activeAgent.set('test-session', 'mega_architect');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should NOT contain HF-1 injection
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-
-			// Should contain HF-1b injection (prefix stripped to 'architect')
-			expect(hasHF1bInjection(systemOutput)).toBe(true);
+			expectArchitectGuardCarrier(result);
 		});
 
 		it('activeAgent = "mega_test_engineer" (prefixed) → prefix stripped → same as test_engineer → HF-1 injection', async () => {
@@ -254,27 +302,27 @@ describe('v6.13.1-hotfix HF-1b Agent Execution Guardrails', () => {
 			);
 		});
 
-		it('HF-1b injection contains the correct text about NEVER running full test suite', async () => {
-			await createSwarmFiles();
-
-			swarmState.activeAgent.set('test-session', 'architect');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Find the HF-1b injection
-			const hf1bLine = systemOutput.find((s) =>
-				s.includes('[SWARM CONFIG] You must NEVER run the full test suite'),
+		it('HF-1b carrier contains the correct full-test-suite guard text', async () => {
+			const result = await invokeRegisteredArchitect();
+			const carrierText = messageTextOf(
+				result.messages.find(
+					(message) =>
+						isGuidanceCarrier(message) &&
+						messageTextOf(message).includes(
+							'[SWARM CONFIG] You must NEVER run the full test suite',
+						),
+				) as HostPartsMessage,
 			);
 
-			expect(hf1bLine).toBeDefined();
-			expect(hf1bLine).toContain(
+			expectArchitectGuardCarrier(result);
+			expect(carrierText).toContain(
 				'You must NEVER run the full test suite or batch test files',
 			);
-			expect(hf1bLine).toContain(
+			expect(carrierText).toContain(
 				'run ONLY the specific test files for code YOU modified',
 			);
-			expect(hf1bLine).toContain('one file at a time, strictly serial');
-			expect(hf1bLine).toContain(
+			expect(carrierText).toContain('one file at a time, strictly serial');
+			expect(carrierText).toContain(
 				'delegate test execution to the test_engineer agent',
 			);
 		});

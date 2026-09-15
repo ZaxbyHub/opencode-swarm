@@ -153,6 +153,7 @@ export type InjectionProducer =
 	| 'memory-recall'
 	| 'advisory-queue'
 	| 'swarm-command-banner'
+	| 'guidance-carrier-fence'
 	| 'linked-cohort-advisory'
 	| 'spec-drift-advisory'
 	| 'final-accounting-warning';

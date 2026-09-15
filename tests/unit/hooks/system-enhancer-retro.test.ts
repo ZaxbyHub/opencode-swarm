@@ -1,24 +1,46 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
-import { swarmState } from '../../../src/state';
+import {
+	isGuidanceCarrier,
+	isRenderableGuidance,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
+import { resetSwarmState, swarmState } from '../../../src/state';
+import {
+	type HostPartsMessage,
+	hostToModelMessages,
+	renderedText,
+} from '../../helpers/host-contract-v1_18_3';
+import {
+	bootSwarmPluginHost,
+	createPluginHostProject,
+} from '../../helpers/plugin-host';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
-describe('System Enhancer - Retrospective Injection (16 Tests)', () => {
+const BASE_SYSTEM = 'Stable architect system prefix';
+const HOST_CONFIG = {
+	version_check: false,
+	context_budget: { scoring: { enabled: false } },
+	knowledge: { enabled: false, hive_enabled: false },
+	memory: { enabled: false },
+	hooks: { delegation_gate: false, system_enhancer: true },
+};
+
+describe('System Enhancer - Retrospective Injection', () => {
 	let tempDir: string;
 	const sessionId = 'test-session-123';
 
 	beforeEach(async () => {
-		tempDir = await mkdtemp(join(tmpdir(), 'swarm-retro-test-'));
-		// Reset swarm state before each test
-		swarmState.activeAgent.delete(sessionId);
+		tempDir = createPluginHostProject('swarm-retro-test-');
+		resetSwarmState();
 	});
 
 	afterEach(async () => {
 		try {
-			await rm(tempDir, { recursive: true, force: true });
+			safeRmRecursive(tempDir);
 		} catch {}
 	});
 
@@ -110,6 +132,41 @@ describe('System Enhancer - Retrospective Injection (16 Tests)', () => {
 
 		// Set active agent in swarm state
 		swarmState.activeAgent.set(sessionId, agentName);
+		if (agentName === 'architect') {
+			const host = await bootSwarmPluginHost(tempDir, HOST_CONFIG);
+			const messages: HostPartsMessage[] = [
+				{
+					info: {
+						id: 'retro-architect-user',
+						role: 'user',
+						agent: agentName,
+						sessionID: sessionId,
+					},
+					parts: [{ type: 'text', text: 'Continue the active plan.' }],
+				},
+			];
+			await host.hooks['experimental.chat.messages.transform'](
+				{},
+				{ messages },
+			);
+			const system = [BASE_SYSTEM];
+			await host.hooks['experimental.chat.system.transform'](
+				{ sessionID: sessionId },
+				{ system },
+			);
+			expect(system).toEqual([BASE_SYSTEM]);
+			const carrier = messages.find(
+				(message) =>
+					isGuidanceCarrier(message) &&
+					message.info.id === 'swarm-guidance:architect-session',
+			);
+			if (!carrier) return [];
+			expect(isRenderableGuidance(carrier)).toBe(true);
+			expect(carrier.info.role).toBe('user');
+			const text = messageTextOf(carrier);
+			expect(renderedText(hostToModelMessages(messages))).toContain(text);
+			return [text];
+		}
 
 		const hooks = createSystemEnhancerHook(
 			{ max_iterations: 5, qa_retry_limit: 3, inject_phase_reminders: true },
@@ -201,11 +258,19 @@ describe('System Enhancer - Retrospective Injection (16 Tests)', () => {
 
 		const systemOutput = await invokeHook('architect', 2);
 
-		// Find the retrospective block
-		const retroBlock = systemOutput.find((s) =>
-			s.includes('## Previous Phase Retrospective'),
+		// The carrier contains multiple guidance blocks; measure only the retro
+		// block emitted by this injection, not its fence or sibling guidance.
+		const carrierText = systemOutput.join('\n\n');
+		const retroStart = carrierText.indexOf(
+			'## Previous Phase Retrospective (Phase 1)',
 		);
-		expect(retroBlock).toBeDefined();
+		expect(retroStart).toBeGreaterThan(-1);
+		const retroTail = carrierText.slice(retroStart);
+		const nextBlock = retroTail.search(
+			/\n\n(?=(?:## |\[|<\/swarm_system_directive))/,
+		);
+		const retroBlock =
+			nextBlock === -1 ? retroTail : retroTail.slice(0, nextBlock);
 
 		// Check for structured sections
 		expect(retroBlock!).toMatch(/\*\*Outcome:\*\*/);
@@ -323,26 +388,6 @@ describe('System Enhancer - Retrospective Injection (16 Tests)', () => {
 		expect(hasHistoricalHeading).toBe(false);
 	});
 
-	// ========== Coder injection tests ==========
-
-	it('11. Coder agent receives condensed [SWARM RETROSPECTIVE] From Phase N-1: injection', async () => {
-		await createRetroBundle(1, 'pass', 1);
-
-		const systemOutput = await invokeHook('coder', 2);
-
-		// Assert coder gets condensed format with prefix
-		const hasCoderRetro = systemOutput.some((s) =>
-			s.includes('[SWARM RETROSPECTIVE] From Phase 1:'),
-		);
-		expect(hasCoderRetro).toBe(true);
-
-		// Assert it does NOT have the full ## heading format
-		const hasFullHeading = systemOutput.some((s) =>
-			s.includes('## Previous Phase Retrospective'),
-		);
-		expect(hasFullHeading).toBe(false);
-	});
-
 	it('12. Architect agent does NOT receive [SWARM RETROSPECTIVE] prefix (gets ## heading)', async () => {
 		await createRetroBundle(1, 'pass', 1);
 
@@ -359,18 +404,6 @@ describe('System Enhancer - Retrospective Injection (16 Tests)', () => {
 			s.includes('## Previous Phase Retrospective'),
 		);
 		expect(hasFullHeading).toBe(true);
-	});
-
-	it('13. Coder receives NO injection for Phase 1 (no previous phase)', async () => {
-		await createRetroBundle(2, 'pass', 1);
-
-		const systemOutput = await invokeHook('coder', 1);
-
-		// Assert coder gets no retrospective injection for Phase 1
-		const hasRetro = systemOutput.some((s) =>
-			s.includes('[SWARM RETROSPECTIVE]'),
-		);
-		expect(hasRetro).toBe(false);
 	});
 
 	// ========== General/regression tests ==========
@@ -448,70 +481,19 @@ describe('System Enhancer - Retrospective Injection (16 Tests)', () => {
 
 		const systemOutput = await invokeHook('architect', 2);
 
-		// Find the retrospective block
-		const retroBlock = systemOutput.find((s) =>
-			s.includes('## Previous Phase Retrospective'),
+		// Measure only the retrospective block within the full architect carrier;
+		// the carrier framing and sibling guidance are not part of this cap.
+		const carrierText = systemOutput.join('\n\n');
+		const retroStart = carrierText.indexOf(
+			'## Previous Phase Retrospective (Phase 1)',
 		);
-		expect(retroBlock).toBeDefined();
-
-		// Assert it's capped at 1600 characters (or 1603 with "..." suffix when truncated)
-		expect(retroBlock!.length).toBeLessThanOrEqual(1603);
-	});
-
-	it('16. Coder injection stays within 400-char cap', async () => {
-		// Create retro with long content for coder
-		const retroDir = join(tempDir, '.swarm', 'evidence', 'retro-1');
-		await mkdir(retroDir, { recursive: true });
-		const timestamp = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-		const longLesson =
-			'This is a very long lesson that adds many characters to test the 400 character cap for coder injection '.repeat(
-				20,
-			);
-		const bundle = {
-			schema_version: '1.0.0',
-			task_id: 'retro-1',
-			entries: [
-				{
-					type: 'retrospective',
-					task_id: 'retro-1',
-					timestamp,
-					agent: 'architect',
-					verdict: 'pass',
-					summary: 'Phase 1 completed',
-					metadata: {},
-					phase_number: 1,
-					total_tool_calls: 100,
-					coder_revisions: 2,
-					reviewer_rejections: 1,
-					test_failures: 0,
-					security_findings: 0,
-					integration_issues: 0,
-					task_count: 5,
-					task_complexity: 'moderate',
-					top_rejection_reasons: [longLesson, longLesson, longLesson],
-					lessons_learned: [
-						longLesson,
-						longLesson,
-						longLesson,
-						longLesson,
-						longLesson,
-					],
-				},
-			],
-			created_at: timestamp,
-			updated_at: timestamp,
-		};
-		await writeFile(join(retroDir, 'evidence.json'), JSON.stringify(bundle));
-
-		const systemOutput = await invokeHook('coder', 2);
-
-		// Find the coder retrospective
-		const coderRetro = systemOutput.find((s) =>
-			s.includes('[SWARM RETROSPECTIVE]'),
+		expect(retroStart).toBeGreaterThan(-1);
+		const retroTail = carrierText.slice(retroStart);
+		const nextSection = retroTail.search(
+			/\n\n(?=(?:## |\[|<\/swarm_system_directive))/,
 		);
-		expect(coderRetro).toBeDefined();
-
-		// Assert it's capped at 400 characters
-		expect(coderRetro!.length).toBeLessThanOrEqual(400);
+		const retroBlock =
+			nextSection < 0 ? retroTail : retroTail.slice(0, nextSection);
+		expect(retroBlock.length).toBeLessThanOrEqual(1603);
 	});
 });

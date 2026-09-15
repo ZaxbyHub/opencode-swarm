@@ -987,38 +987,6 @@ describe('Task 2.4: Coder Retrospective Injection', () => {
 			expect(coderRetro).toBeUndefined();
 		});
 
-		it('Phase 2, agent=mega_architect → system message contains "## Previous Phase Retrospective" (full block), NOT "[SWARM RETROSPECTIVE]"', async () => {
-			await createSwarmFiles(tempDir, 2);
-			await createRetroBundle(
-				tempDir,
-				1,
-				'pass',
-				['lesson A', 'lesson B'],
-				['reason X'],
-				'Phase 1 completed successfully.',
-			);
-
-			const systemOutput = await invokeHook(
-				DEFAULT_PLUGIN_CONFIG,
-				tempDir,
-				'test-session',
-				'mega_architect',
-			);
-
-			const fullRetro = systemOutput.find((s) =>
-				s.includes('## Previous Phase Retrospective'),
-			);
-			expect(fullRetro).toBeDefined();
-			expect(fullRetro).toContain('Outcome:');
-			expect(fullRetro).toContain('Rejection reasons:');
-			expect(fullRetro).toContain('Lessons learned:');
-
-			const coderRetro = systemOutput.find((s) =>
-				s.includes('[SWARM RETROSPECTIVE]'),
-			);
-			expect(coderRetro).toBeUndefined();
-		});
-
 		it('Phase 2, agent=mega_coder, long lessons_learned → coder injection is capped at ≤ 400 chars', async () => {
 			await createSwarmFiles(tempDir, 2);
 

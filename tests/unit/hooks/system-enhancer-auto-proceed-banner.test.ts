@@ -1,33 +1,55 @@
 /**
- * Runtime tests for AUTO_PROCEED_BANNER injection in the system-enhancer hook.
+ * Runtime tests for AUTO_PROCEED_BANNER delivery through the registered host.
  *
  * These tests exercise the actual code path in src/hooks/system-enhancer.ts
  * (around lines 1209-1230) that calls getResolvedAutoProceed, formats the
- * banner with the resolved value, source label, and nudge flag, and pushes
- * it into output.system via tryInject.
+ * banner with the resolved value, source label, and nudge flag. Architect
+ * guidance is asserted in the late user-role carrier, never output.system.
  *
  * Companion to tests/unit/phase-wrap/auto-proceed-behavior.test.ts which
  * verifies prompt text content. This file verifies runtime injection.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { AUTO_PROCEED_BANNER } from '../../../src/config/constants';
-import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
+import {
+	isGuidanceCarrier,
+	isRenderableGuidance,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import {
 	_internals,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import {
+	type HostPartsMessage,
+	hostToModelMessages,
+	renderedText,
+} from '../../helpers/host-contract-v1_18_3';
+import {
+	bootSwarmPluginHost,
+	createPluginHostProject,
+} from '../../helpers/plugin-host';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
+
+const BASE_SYSTEM = 'Stable architect system prefix';
+const HOST_CONFIG = {
+	version_check: false,
+	context_budget: { scoring: { enabled: false } },
+	knowledge: { enabled: false, hive_enabled: false },
+	memory: { enabled: false },
+	hooks: { delegation_gate: false, system_enhancer: true },
+};
 
 describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 	let tempDir: string;
 	const SESSION_ID = 'sess-auto-proceed-banner-runtime-test';
 
 	beforeEach(async () => {
-		tempDir = await mkdtemp(join(tmpdir(), 'swarm-auto-proceed-runtime-'));
+		tempDir = createPluginHostProject('swarm-auto-proceed-runtime-');
 		resetSwarmState();
 		startAgentSession(SESSION_ID, 'architect');
 	});
@@ -35,7 +57,7 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 	afterEach(async () => {
 		swarmState.agentSessions.delete(SESSION_ID);
 		try {
-			await rm(tempDir, { recursive: true, force: true });
+			safeRmRecursive(tempDir);
 		} catch {
 			// best-effort
 		}
@@ -55,29 +77,57 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 	}
 
 	async function invokeHook(): Promise<string[]> {
-		const config = {
-			max_iterations: 5,
-			qa_retry_limit: 3,
-			inject_phase_reminders: true,
-		};
-		const hooks = createSystemEnhancerHook(config, tempDir);
-		const transform = hooks['experimental.chat.system.transform'] as (
-			input: { sessionID?: string },
-			output: { system: string[] },
-		) => Promise<void>;
+		const host = await bootSwarmPluginHost(tempDir, HOST_CONFIG);
+		const agent = swarmState.agentSessions.get(SESSION_ID)?.agentName;
+		const system = [BASE_SYSTEM];
+		if (agent === 'architect') {
+			const messages: HostPartsMessage[] = [
+				{
+					info: {
+						id: 'auto-proceed-user',
+						role: 'user',
+						agent,
+						sessionID: SESSION_ID,
+					},
+					parts: [{ type: 'text', text: 'Continue the active plan.' }],
+				},
+			];
+			await host.hooks['experimental.chat.messages.transform'](
+				{},
+				{ messages },
+			);
+			await host.hooks['experimental.chat.system.transform'](
+				{ sessionID: SESSION_ID },
+				{ system },
+			);
+			expect(system).toEqual([BASE_SYSTEM]);
+			const carrier = messages.find(
+				(message) =>
+					isGuidanceCarrier(message) &&
+					message.info.id === 'swarm-guidance:architect-session',
+			);
+			expect(carrier).toBeDefined();
+			if (!carrier) return [];
+			expect(isRenderableGuidance(carrier)).toBe(true);
+			expect(carrier.info.role).toBe('user');
+			const text = messageTextOf(carrier);
+			expect(renderedText(hostToModelMessages(messages))).toContain(text);
+			return [text];
+		}
 
-		const input = { sessionID: SESSION_ID };
-		const output = { system: ['Initial system prompt'] };
-		await transform(input, output);
-		return output.system;
+		await host.hooks['experimental.chat.system.transform'](
+			{ sessionID: SESSION_ID },
+			{ system },
+		);
+		return system;
 	}
 
-	it('injects AUTO_PROCEED_BANNER into output.system for the architect', async () => {
+	it('delivers AUTO_PROCEED_BANNER in the architect user-role carrier', async () => {
 		await createSwarmFiles();
 		const systemOutput = await invokeHook();
 
-		const bannerLine = systemOutput.find((s) =>
-			s.startsWith(AUTO_PROCEED_BANNER),
+		const bannerLine = systemOutput.find((text) =>
+			text.includes(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeDefined();
 		expect(bannerLine).toContain('AUTO_PROCEED STATUS:');
@@ -95,8 +145,8 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		session.autoProceedNudgeDone = true;
 
 		const systemOutput = await invokeHook();
-		const bannerLine = systemOutput.find((s) =>
-			s.startsWith(AUTO_PROCEED_BANNER),
+		const bannerLine = systemOutput.find((text) =>
+			text.includes(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeDefined();
 		expect(bannerLine).toMatch(/- auto-proceed: (on|off)/);
@@ -111,8 +161,8 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		// and the plan has no execution_profile.auto_proceed.
 
 		const systemOutput = await invokeHook();
-		const bannerLine = systemOutput.find((s) =>
-			s.startsWith(AUTO_PROCEED_BANNER),
+		const bannerLine = systemOutput.find((text) =>
+			text.includes(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeDefined();
 		expect(bannerLine).toContain('- auto-proceed: off');
@@ -127,8 +177,8 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		session.autoProceedNudgeDone = true;
 
 		const systemOutput = await invokeHook();
-		const bannerLine = systemOutput.find((s) =>
-			s.startsWith(AUTO_PROCEED_BANNER),
+		const bannerLine = systemOutput.find((text) =>
+			text.includes(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeDefined();
 		expect(bannerLine).toContain('- auto-proceed: on');
@@ -143,8 +193,8 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		session.autoProceedNudgeDone = true;
 
 		const systemOutput = await invokeHook();
-		const bannerLine = systemOutput.find((s) =>
-			s.startsWith(AUTO_PROCEED_BANNER),
+		const bannerLine = systemOutput.find((text) =>
+			text.includes(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeDefined();
 		expect(bannerLine).toContain('- auto-proceed: off');
@@ -162,8 +212,8 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		session.autoProceedNudgeDone = false;
 
 		const systemOutput = await invokeHook();
-		const bannerLine = systemOutput.find((s) =>
-			s.startsWith(AUTO_PROCEED_BANNER),
+		const bannerLine = systemOutput.find((text) =>
+			text.includes(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeDefined();
 		expect(bannerLine).toContain('- auto-proceed: on');
@@ -178,8 +228,8 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		startAgentSession(SESSION_ID, 'reviewer');
 
 		const systemOutput = await invokeHook();
-		const bannerLine = systemOutput.find((s) =>
-			s.startsWith(AUTO_PROCEED_BANNER),
+		const bannerLine = systemOutput.find((text) =>
+			text.includes(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeUndefined();
 	});
@@ -199,8 +249,8 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		session.autoProceedNudgeDone = true;
 
 		const systemOutput = await invokeHook();
-		const bannerLine = systemOutput.find((s) =>
-			s.startsWith(AUTO_PROCEED_BANNER),
+		const bannerLine = systemOutput.find((text) =>
+			text.includes(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeUndefined();
 	});
@@ -224,8 +274,8 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		session.autoProceedNudgeDone = false;
 
 		const systemOutput = await invokeHook();
-		const bannerLine = systemOutput.find((s) =>
-			s.startsWith(AUTO_PROCEED_BANNER),
+		const bannerLine = systemOutput.find((text) =>
+			text.includes(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeUndefined();
 	});
@@ -235,8 +285,8 @@ describe('System Enhancer — Auto-Proceed Banner Injection (Runtime)', () => {
 		swarmState.agentSessions.delete(SESSION_ID);
 
 		const systemOutput = await invokeHook();
-		const bannerLine = systemOutput.find((s) =>
-			s.startsWith(AUTO_PROCEED_BANNER),
+		const bannerLine = systemOutput.find((text) =>
+			text.includes(AUTO_PROCEED_BANNER),
 		);
 		expect(bannerLine).toBeUndefined();
 	});

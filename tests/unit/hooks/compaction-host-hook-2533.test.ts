@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import {
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import OpenCodeSwarmPlugin from '../../../src/index';
 import {
 	beginTurnLedger,
 	clearTurnLedger,
 	getTurnLedgerSummary,
 } from '../../../src/services/injection-budget';
+import { ensureAgentSession, swarmState } from '../../../src/state';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 /**
@@ -30,6 +35,7 @@ const SESSION_IDS = [
 	'2533-absent-',
 	'2533-ledger-disabled-',
 	'2533-ledger-enabled-',
+	'2533-bridge-',
 ] as const;
 
 const createdDirs: string[] = [];
@@ -40,6 +46,10 @@ afterEach(async () => {
 	for (const sessionID of SESSION_IDS) {
 		clearTurnLedger(`${sessionID}session`);
 	}
+	swarmState.activeAgent.delete('2533-bridge-session');
+	swarmState.agentSessions.delete('2533-bridge-session');
+	swarmState.activeAgent.delete('2533-bridge-deleted-session');
+	swarmState.agentSessions.delete('2533-bridge-deleted-session');
 	// Remove the temp project dirs this file created (repo convention).
 	// Bounded retry: a freshly-booted plugin can hold open handles in the
 	// project dir on Windows (EBUSY). Hygiene never fails the test, but a dir
@@ -153,5 +163,121 @@ describe('registered experimental.session.compacting host hook (#2533)', () => {
 			);
 			expect(getTurnLedgerSummary(sessionID)).toBeNull();
 		}
+	});
+
+	it('suppresses only the architect bridge on the immediate post-compaction transform', async () => {
+		const sessionID = '2533-bridge-session';
+		const hooks = await bootRegisteredHooks({
+			knowledge: { enabled: false, hive_enabled: false },
+			memory: { enabled: false },
+			hooks: { delegation_gate: false },
+		});
+		ensureAgentSession(sessionID, 'architect');
+		swarmState.activeAgent.set(sessionID, 'architect');
+		ensureAgentSession(sessionID, 'architect').pendingAdvisoryMessages = [
+			'[PRE-COMPACTION GUIDANCE]',
+		];
+		const preCompactionMessages = [
+			{
+				info: { id: 'pre-compaction-user', role: 'user', sessionID },
+				parts: [{ type: 'text', text: 'Before compaction' }],
+			},
+		];
+		await hooks['experimental.chat.messages.transform'](
+			{},
+			{ messages: preCompactionMessages },
+		);
+		expect(
+			preCompactionMessages
+				.filter((message) => isGuidanceCarrier(message))
+				.map((message) => messageTextOf(message as never))
+				.join('\n'),
+		).toContain('[PRE-COMPACTION GUIDANCE]');
+
+		await hooks['experimental.session.compacting'](
+			{ sessionID },
+			{ context: [] },
+		);
+		const compactedMessages = [
+			{
+				info: { id: 'summary-user', role: 'user', sessionID },
+				parts: [{ type: 'text', text: 'Compacted summary' }],
+			},
+		];
+		await hooks['experimental.chat.messages.transform'](
+			{},
+			{ messages: compactedMessages },
+		);
+		const compactedGuidance = compactedMessages
+			.filter((message) => isGuidanceCarrier(message))
+			.map((message) => messageTextOf(message as never))
+			.join('\n');
+		expect(
+			compactedMessages.some(
+				(message) =>
+					isGuidanceCarrier(message) &&
+					message.info.id === 'swarm-guidance:architect-session',
+			),
+		).toBe(false);
+		expect(compactedGuidance).not.toContain('[PRE-COMPACTION GUIDANCE]');
+
+		ensureAgentSession(sessionID, 'architect').pendingAdvisoryMessages = [
+			'[POST-COMPACTION GUIDANCE]',
+		];
+		const ordinaryMessages = [
+			{
+				info: { id: 'ordinary-user', role: 'user', sessionID },
+				parts: [{ type: 'text', text: 'Ordinary next turn' }],
+			},
+		];
+		await hooks['experimental.chat.messages.transform'](
+			{},
+			{ messages: ordinaryMessages },
+		);
+		const ordinaryGuidance = ordinaryMessages
+			.filter((message) => isGuidanceCarrier(message))
+			.map((message) => messageTextOf(message as never))
+			.join('\n');
+		const architectCarriers = ordinaryMessages.filter(
+			(message) =>
+				isGuidanceCarrier(message) &&
+				message.info.id === 'swarm-guidance:architect-session',
+		);
+		expect(architectCarriers).toHaveLength(1);
+		expect(ordinaryGuidance).toContain('[POST-COMPACTION GUIDANCE]');
+		expect(ordinaryGuidance).not.toContain('[PRE-COMPACTION GUIDANCE]');
+	});
+
+	it('cleans the exact session bridge marker on session deletion', async () => {
+		const sessionID = '2533-bridge-deleted-session';
+		const hooks = await bootRegisteredHooks({
+			knowledge: { enabled: false, hive_enabled: false },
+			memory: { enabled: false },
+			hooks: { delegation_gate: false },
+		});
+		ensureAgentSession(sessionID, 'architect');
+		swarmState.activeAgent.set(sessionID, 'architect');
+		await hooks['experimental.session.compacting'](
+			{ sessionID },
+			{ context: [] },
+		);
+		await hooks.event({
+			event: { type: 'session.deleted', properties: { sessionID } },
+		});
+
+		const messages = [
+			{
+				info: { id: 'deleted-user', role: 'user', sessionID },
+				parts: [{ type: 'text', text: 'New ordinary turn' }],
+			},
+		];
+		await hooks['experimental.chat.messages.transform']({}, { messages });
+		expect(
+			messages.some(
+				(message) =>
+					isGuidanceCarrier(message) &&
+					message.info.id === 'swarm-guidance:architect-session',
+			),
+		).toBe(true);
 	});
 });

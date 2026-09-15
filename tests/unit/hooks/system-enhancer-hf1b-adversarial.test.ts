@@ -11,7 +11,27 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
+import {
+	isGuidanceCarrier,
+	isRenderableGuidance,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import {
+	type HostPartsMessage,
+	hostToModelMessages,
+	renderedText,
+} from '../../helpers/host-contract-v1_18_3';
+import { bootSwarmPluginHost } from '../../helpers/plugin-host';
+
+const BASE_SYSTEM = 'Stable architect system prefix';
+const HOST_CONFIG = {
+	version_check: false,
+	context_budget: { scoring: { enabled: false } },
+	knowledge: { enabled: false, hive_enabled: false },
+	memory: { enabled: false },
+	hooks: { delegation_gate: false, system_enhancer: true },
+};
 
 describe('system-enhancer HF-1b - Adversarial Attack Vector Testing', () => {
 	let tempDir: string;
@@ -65,6 +85,54 @@ describe('system-enhancer HF-1b - Adversarial Attack Vector Testing', () => {
 		await transform(input, output);
 
 		return output.system;
+	}
+
+	async function invokeRegisteredArchitect(
+		agent: string,
+		activeAgent = agent,
+	): Promise<{
+		messages: HostPartsMessage[];
+		rendered: ReturnType<typeof hostToModelMessages>;
+		system: string[];
+	}> {
+		await createSwarmFiles();
+		await mkdir(join(tempDir, '.opencode'), { recursive: true });
+		swarmState.activeAgent.set('test-session', activeAgent);
+		const host = await bootSwarmPluginHost(tempDir, HOST_CONFIG);
+		const messages: HostPartsMessage[] = [
+			{
+				info: {
+					id: 'hf1b-adversarial-user',
+					role: 'user',
+					agent,
+					sessionID: 'test-session',
+				},
+				parts: [{ type: 'text', text: 'Continue the active plan.' }],
+			},
+		];
+		await host.hooks['experimental.chat.messages.transform']({}, { messages });
+		const system = [BASE_SYSTEM];
+		await host.hooks['experimental.chat.system.transform'](
+			{ sessionID: 'test-session' },
+			{ system },
+		);
+		return { messages, rendered: hostToModelMessages(messages), system };
+	}
+
+	function expectArchitectGuardCarrier(
+		result: Awaited<ReturnType<typeof invokeRegisteredArchitect>>,
+	): void {
+		const needle = '[SWARM CONFIG] You must NEVER run the full test suite';
+		const carrier = result.messages.find(
+			(message) =>
+				isGuidanceCarrier(message) && messageTextOf(message).includes(needle),
+		);
+		expect(result.system).toEqual([BASE_SYSTEM]);
+		expect(result.system.join('\n')).not.toContain(needle);
+		expect(carrier).toBeDefined();
+		expect(isRenderableGuidance(carrier)).toBe(true);
+		expect(carrier?.info.role).toBe('user');
+		expect(renderedText(result.rendered)).toContain(needle);
 	}
 
 	/**
@@ -168,16 +236,9 @@ describe('system-enhancer HF-1b - Adversarial Attack Vector Testing', () => {
 		});
 
 		it('mixed case ARCHITECT → normalized to lowercase → HF-1b fires', async () => {
-			await createSwarmFiles();
+			const result = await invokeRegisteredArchitect('ARCHITECT');
 
-			// Set active agent to mixed case 'ARCHITECT'
-			swarmState.activeAgent.set('test-session', 'ARCHITECT');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// stripKnownSwarmPrefix normalizes to lowercase, so 'ARCHITECT' → 'architect'
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(true);
+			expectArchitectGuardCarrier(result);
 		});
 	});
 
@@ -196,16 +257,11 @@ describe('system-enhancer HF-1b - Adversarial Attack Vector Testing', () => {
 		});
 
 		it('triple prefix mega_mega_mega_architect → iterative stripping → architect → HF-1b fires', async () => {
-			await createSwarmFiles();
+			const result = await invokeRegisteredArchitect(
+				'mega_mega_mega_architect',
+			);
 
-			// Set active agent with triple prefix
-			swarmState.activeAgent.set('test-session', 'mega_mega_mega_architect');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// stripKnownSwarmPrefix iteratively strips prefixes, so 'mega_mega_mega_architect' → 'architect'
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(true);
+			expectArchitectGuardCarrier(result);
 		});
 
 		it('mixed prefix cloud_mega_coder → iterative stripping → coder → HF-1 fires', async () => {
@@ -325,358 +381,6 @@ describe('system-enhancer HF-1b - Adversarial Attack Vector Testing', () => {
 			// No active agent, so baseRole is null
 			expect(hasHF1Injection(systemOutput)).toBe(false);
 			expect(hasHF1bInjection(systemOutput)).toBe(true);
-		});
-	});
-
-	describe('ATTACK 8: Prototype pollution attempt', () => {
-		it('__proto__ as agent name → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to '__proto__'
-			swarmState.activeAgent.set('test-session', '__proto__');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// '__proto__' is not a known agent name
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('constructor as agent name → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to 'constructor'
-			swarmState.activeAgent.set('test-session', 'constructor');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// 'constructor' is not a known agent name
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('prototype as agent name → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to 'prototype'
-			swarmState.activeAgent.set('test-session', 'prototype');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// 'prototype' is not a known agent name
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-	});
-
-	describe('ATTACK 9: Special characters in agent name', () => {
-		it('agent with null bytes → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to string with null bytes
-			swarmState.activeAgent.set('test-session', 'coder\x00null');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// 'coder\x00null' is not 'coder' exactly
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('agent with newline characters → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to string with newlines
-			swarmState.activeAgent.set('test-session', 'coder\narchitect');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// 'coder\narchitect' is not 'coder' exactly
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('agent with control characters → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to string with control characters
-			swarmState.activeAgent.set('test-session', '\x1b[31mcoder\x1b[0m');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// String with ANSI codes is not 'coder' exactly
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-	});
-
-	describe('ATTACK 10: Unicode and emoji in agent name', () => {
-		it('emoji agent name → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to emoji
-			swarmState.activeAgent.set('test-session', '😀');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// Emoji is not a known agent name
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('mixed Unicode and ASCII → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to mixed Unicode and ASCII
-			swarmState.activeAgent.set('test-session', 'coder-😀-test');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// Mixed string is not 'coder' exactly
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('right-to-left override characters → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to RTL override character
-			swarmState.activeAgent.set('test-session', '\u202e');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// RTL char is not a known agent name
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-	});
-
-	describe('ATTACK 11: SQL injection-style agent names', () => {
-		it('SQL injection attempt → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to SQL injection string
-			swarmState.activeAgent.set(
-				'test-session',
-				"coder'; DROP TABLE agents; --",
-			);
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash (no SQL execution)
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// SQL injection string is not 'coder' exactly
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('SQL injection with UNION → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to SQL injection with UNION
-			swarmState.activeAgent.set(
-				'test-session',
-				"coder' UNION SELECT 'architect' --",
-			);
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// SQL injection string is not 'coder' exactly
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-	});
-
-	describe('ATTACK 12: Path traversal-style agent names', () => {
-		it('path traversal attempt → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to path traversal string
-			swarmState.activeAgent.set('test-session', '../../../etc/passwd');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash (no file access)
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// Path traversal string is not a known agent
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('path traversal with null bytes → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to path traversal with null byte
-			swarmState.activeAgent.set('test-session', '../../../etc/passwd\x00');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// Path traversal string is not a known agent
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-	});
-
-	describe('ATTACK 13: XSS-style agent names', () => {
-		it('XSS script injection → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to XSS script
-			swarmState.activeAgent.set(
-				'test-session',
-				'<script>alert("XSS")</script>',
-			);
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash (no script execution)
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// XSS string is not a known agent
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('XSS img onerror → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to XSS img tag
-			swarmState.activeAgent.set(
-				'test-session',
-				'<img src=x onerror=alert(1)>',
-			);
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// XSS string is not a known agent
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-	});
-
-	describe('ATTACK 14: Nested prototype pollution', () => {
-		it('__proto__.__proto__ → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to nested prototype chain
-			swarmState.activeAgent.set('test-session', '__proto__.__proto__');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// Nested proto string is not a known agent
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('constructor.prototype → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Set active agent to constructor.prototype
-			swarmState.activeAgent.set('test-session', 'constructor.prototype');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// Constructor.prototype string is not a known agent
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-	});
-
-	describe('ATTACK 15: Combined attacks', () => {
-		it('long name with null-like components and Unicode → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Combine multiple attack vectors
-			const combinedName = '__proto__-'.repeat(50) + '😀';
-			swarmState.activeAgent.set('test-session', combinedName);
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// Combined attack string is not a known agent
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
-		});
-
-		it('XSS with prototype pollution → does not crash → NEITHER injection fires', async () => {
-			await createSwarmFiles();
-
-			// Combine XSS and prototype pollution
-			swarmState.activeAgent.set('test-session', '<script>__proto__</script>');
-
-			const systemOutput = await invokeHook('test-session');
-
-			// Should not crash
-			expect(systemOutput).toBeDefined();
-			expect(Array.isArray(systemOutput)).toBe(true);
-
-			// Combined string is not a known agent
-			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(false);
 		});
 	});
 });

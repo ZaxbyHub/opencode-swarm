@@ -61,23 +61,6 @@ const ALLOWLIST: ReadonlyArray<{
 }> = [
 	{
 		file: 'src/index.ts',
-		snippet: 'output.system = system;',
-		count: 2,
-		reason:
-			'createSwarmCommandSystemRuleHook (`src/index.ts`), which does ' +
-			'`const system = Array.isArray(output.system) ? output.system : []`. ' +
-			'The HOST always supplies an array, so in production `system` IS ' +
-			'`output.system`, the rule reaches the model through the in-place ' +
-			'`system.push(...)`, and both assignments are self-assignments the host ' +
-			'never observes. DO NOT delete them: when `output.system` is absent or ' +
-			'not an array (non-host callers, and tests), `system` is a fresh local ' +
-			'and the assignment is the ONLY thing that attaches it to `output`. ' +
-			'The sentinel scan above them is a separate decision, kept because ' +
-			'double plugin registration across plugin instances cannot be excluded ' +
-			'from the host binary (issue #1619 fix plan, revision 2, B5).',
-	},
-	{
-		file: 'src/index.ts',
 		snippet: 'output.messages = messagesBefore;',
 		count: 1,
 		reason:

@@ -429,8 +429,34 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Root cause:** the pinned host's `LLMRequestPrep.prepare` (v1.18.3, `session/llm/request.ts`) pre-joins the base prompt into `system[0]`, triggers `experimental.chat.system.transform` with `{sessionID, model}` and the shared array, coalesces only when `system.length > 2 && system[0] === header`, then materializes one `{role:'system'}` message per surviving entry. The plugin's guidance producers append entries, so every non-OAuth provider receives exactly 2 system messages — model-independent. The plugin chain read `input.model` only for context-window bookkeeping; no capability resolution existed anywhere in `src/`.
 - **Fix:** `src/hooks/system-render-boundary.ts`, registered LAST in the system chain (after the role filter — pinned in `tests/unit/hooks/hook-composition-order.test.ts`). `resolveSystemRenderCapability` is a fail-open ladder evaluated in order: (1) `providerID` matching a known cache-capable prefix (`anthropic*`) → `multi-system` — the veto runs FIRST so a strict-family model id behind a cache-capable gateway is never collapsed; (2) `model.id` matching a documented strict family (`qwen*`, `gemma*`, segment-anchored) → `strict-single-system`; (3) anything else/unreadable → `multi-system`, byte-identical pre-fix behavior. Strict models with >1 entry get the array collapsed IN PLACE to exactly one blank-line-joined entry (empty strings dropped, base header first, no fabrication); multi-system arrays are never touched — the host's prompt-cache breakpoints on the first two system messages stay put. The companion failure interpretation: `classifyProviderFailure` now recognizes deterministic request-shape rejections (`REQUEST_SHAPE_REJECTION_PATTERN`, `src/utils/provider-error-classification.ts`) as `provider.request_shape` / `do_not_retry` — never the transient/generic-retry path (invariant 9: "deterministic provider payload failures are not generic retries").
 - **Known limitation:** host request paths that bypass `output.system` — OpenAI OAuth and workflow models consume the system surface via `options.instructions` — cannot be shaped by any plugin hook and are out of scope.
-- **Durable guards:** `tests/unit/hooks/system-render-boundary.test.ts` (ladder symmetry + gateway-relabel locks + in-place identity + separator pin + falsifiability via the pure seam); `tests/integration/system-render-boundary-registered.test.ts` (registered-host journeys: strict architect/build/auxiliary render exactly one system message with guidance retained; guidance-free turns byte-identical; cache-capable keeps the stable-header-first two-entry shape); `tests/unit/failures/invocation-failure-request-shape.test.ts` (exact category + transient negative controls + shell-text fallthrough unchanged).
+- **Durable guards:** `tests/unit/hooks/system-render-boundary.test.ts` (ladder symmetry + gateway-relabel locks + in-place identity + separator pin + falsifiability via the pure seam); `tests/integration/system-render-boundary-registered.test.ts` (registered-host journeys: strict architect/build/auxiliary render exactly one system message while architect guidance remains on the trailing carrier; guidance-free turns byte-identical; cache-capable keeps the stable system prefix while guidance remains on the trailing carrier); `tests/unit/failures/invocation-failure-request-shape.test.ts` (exact category + transient negative controls + shell-text fallthrough unchanged).
 - **Maps to AGENTS.md:** invariants 10 (chat/system-message hook contracts — in-place mutation) and 9 (guardrails/retry — deterministic non-retry).
+
+### Issue #2759 — architect prompt-cache prefix stability
+
+- **Symptom:** stateful architect guidance from `system-enhancer` changed the
+  host's cache-sensitive system tail on every turn, invalidating prompt-cache
+  reuse even when the persisted conversation history was unchanged.
+- **Fix:** OpenCode v1.18.3 invokes `experimental.chat.messages.transform`
+  before `experimental.chat.system.transform`. Session-bound architect enhancer
+  output is staged in a request-local `WeakMap` at the start of the messages
+  chain, role-filtered and combined with the conditional command banner near
+  the end, then appended as one fenced user-role carrier. The system hook still
+  captures authoritative model/context metadata, but skips the architect
+  enhancer and command banner for that same request; non-architect and
+  sessionless agent-generation calls retain the system path.
+- **Ordering contract:** after legacy system materialization, guidance carriers
+  are stably partitioned to the message-array tail in place, preserving relative
+  order and object identity. Final context accounting runs after that partition
+  and skips carriers when selecting the latest real user message. A bounded
+  one-shot compaction marker suppresses only the immediately following architect
+  bridge so compaction summaries do not gain live-turn guidance.
+- **Durable guards:** the shared `isSessionBoundArchitect` predicate is used by
+  both surfaces; bounded live model identity is seeded at `chat.message`; the
+  request-local staging map cannot persist conversation text or cross sessions;
+  strict Qwen/Gemma system rendering remains on the system boundary.
+- **Maps to AGENTS.md:** invariants 8 (bounded session state) and 10
+  (host-order, in-place chat/system message contracts).
 
 
 ## Invariants — anti-pattern, required pattern, verification

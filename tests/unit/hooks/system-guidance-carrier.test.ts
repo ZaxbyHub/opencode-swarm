@@ -24,6 +24,7 @@ import {
 	isGuidanceCarrier,
 	isRenderableGuidance,
 	messageTextOf,
+	moveGuidanceCarriersToEnd,
 	prependGuidanceText,
 } from '../../../src/hooks/system-guidance-carrier';
 import {
@@ -227,6 +228,36 @@ describe('kind-specific find-or-create (PRR KIND-BLIND)', () => {
 		expect(messages).toHaveLength(2);
 		// …and re-ensuring the same kind reuses its OWN carrier.
 		expect(ensureGuidanceCarrier(messages, 'guardrails')).toBe(guardrails);
+	});
+});
+
+describe('terminal guidance-carrier partition (#2759)', () => {
+	test('moves carriers to the tail in place and preserves both relative orders', () => {
+		const first = userMessage('first');
+		const second = userMessage('second');
+		const carrierA = buildGuidanceCarrier('guardrails', 'a')!;
+		const carrierB = buildGuidanceCarrier('knowledge', 'b')!;
+		const messages = [carrierA, first, carrierB, second];
+
+		moveGuidanceCarriersToEnd(messages);
+
+		expect(messages).toEqual([first, second, carrierA, carrierB]);
+		expect(messages[0]).toBe(first);
+		expect(messages[1]).toBe(second);
+		expect(messages[2]).toBe(carrierA);
+		expect(messages[3]).toBe(carrierB);
+	});
+
+	test('leaves the original array and no-carrier arrays untouched', () => {
+		const first = userMessage('first');
+		const second = userMessage('second');
+		const messages = [first, second];
+		const original = messages;
+
+		moveGuidanceCarriersToEnd(messages);
+
+		expect(messages).toBe(original);
+		expect(messages).toEqual([first, second]);
 	});
 });
 

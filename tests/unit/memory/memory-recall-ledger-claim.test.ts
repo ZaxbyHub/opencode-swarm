@@ -7,8 +7,14 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
-import { isGuidanceCarrier } from '../../../src/hooks/system-guidance-carrier';
-import { createMemoryLifecycleHooks } from '../../../src/memory/injector';
+import {
+	buildGuidanceCarrier,
+	isGuidanceCarrier,
+} from '../../../src/hooks/system-guidance-carrier';
+import {
+	createMemoryLifecycleHooks,
+	_test_exports as injectorTestExports,
+} from '../../../src/memory/injector';
 import type { RecallBundle } from '../../../src/memory/types';
 import {
 	beginTurnLedger,
@@ -170,5 +176,22 @@ describe('memory recall — shared-ledger claims (#1617, #2107 §2)', () => {
 		expect(producer?.surface).toBe('messages');
 		expect(producer?.emitted).toBe(captured.bundle.tokenEstimate);
 		expect(producer?.granted).toBe(1000);
+	});
+
+	test('recency lookup skips a trailing guidance carrier', () => {
+		const carrier = buildGuidanceCarrier(
+			'architect-session',
+			'<swarm_system_directive>dynamic guidance</swarm_system_directive>',
+		);
+		expect(carrier).not.toBeNull();
+		expect(
+			injectorTestExports.recallMessageInsertIndex([
+				{
+					info: { role: 'user', sessionID: 'session-a' },
+					parts: [{ type: 'text', text: 'real task' }],
+				},
+				carrier as NonNullable<typeof carrier>,
+			]),
+		).toBe(0);
 	});
 });

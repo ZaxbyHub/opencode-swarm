@@ -1,14 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
-import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
+import {
+	isGuidanceCarrier,
+	isRenderableGuidance,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import {
 	ensureAgentSession,
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import {
+	type HostPartsMessage,
+	hostToModelMessages,
+	renderedText,
+} from '../../helpers/host-contract-v1_18_3';
+import {
+	bootSwarmPluginHost,
+	createPluginHostProject,
+} from '../../helpers/plugin-host';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 // Helper to create tool aggregate (only uses fields that exist in ToolAggregate)
 function createToolAggregate(count: number) {
@@ -23,15 +36,19 @@ function createToolAggregate(count: number) {
 
 describe('v6.2 System Enhancer Compaction Advisory', () => {
 	let tempDir: string;
+	const sessionID = 'test-session';
+	const compactionMarker = '[SWARM HINT] Session has';
+	const BASE_SYSTEM = 'Stable architect system prefix';
 
-	beforeEach(async () => {
-		tempDir = await mkdtemp(join(tmpdir(), 'swarm-compaction-test-'));
+	beforeEach(() => {
+		tempDir = createPluginHostProject('swarm-compaction-test-');
 		resetSwarmState();
+		swarmState.activeAgent.set(sessionID, 'architect');
 	});
 
-	afterEach(async () => {
+	afterEach(() => {
 		try {
-			await rm(tempDir, { recursive: true, force: true });
+			safeRmRecursive(tempDir);
 		} catch {}
 	});
 
@@ -42,16 +59,66 @@ describe('v6.2 System Enhancer Compaction Advisory', () => {
 		await writeFile(join(swarmDir, 'context.md'), '# Context\n');
 	}
 
-	async function invokeHook(config: PluginConfig): Promise<string[]> {
-		const hooks = createSystemEnhancerHook(config, tempDir);
-		const transform = hooks['experimental.chat.system.transform'] as (
-			input: { sessionID?: string },
-			output: { system: string[] },
-		) => Promise<void>;
-		const input = { sessionID: 'test-session' };
-		const output = { system: ['Initial system prompt'] };
-		await transform(input, output);
-		return output.system;
+	async function invokeRegisteredArchitect(
+		configOverrides: Partial<PluginConfig> = {},
+	): Promise<{
+		messages: HostPartsMessage[];
+		rendered: ReturnType<typeof hostToModelMessages>;
+		system: string[];
+	}> {
+		const host = await bootSwarmPluginHost(tempDir, {
+			version_check: false,
+			knowledge: { enabled: false, hive_enabled: false },
+			memory: { enabled: false },
+			hooks: { delegation_gate: false, system_enhancer: true },
+			...defaultConfig,
+			...configOverrides,
+		});
+		const messages: HostPartsMessage[] = [
+			{
+				info: {
+					id: 'compaction-user-message',
+					role: 'user',
+					agent: 'architect',
+					sessionID,
+				},
+				parts: [{ type: 'text', text: 'Continue the active plan.' }],
+			},
+		];
+		await host.hooks['experimental.chat.messages.transform']({}, { messages });
+		const system = [BASE_SYSTEM];
+		await host.hooks['experimental.chat.system.transform'](
+			{ sessionID },
+			{ system },
+		);
+		return { messages, rendered: hostToModelMessages(messages), system };
+	}
+
+	function findCompactionGuidance(
+		messages: HostPartsMessage[],
+		rendered: ReturnType<typeof hostToModelMessages>,
+	): string {
+		const carrier = messages.find(
+			(message) =>
+				isGuidanceCarrier(message) &&
+				messageTextOf(message).includes(compactionMarker),
+		);
+		expect(carrier).toBeDefined();
+		expect(isRenderableGuidance(carrier)).toBe(true);
+		expect(carrier?.info.role).toBe('user');
+		const carrierIndex = messages.indexOf(carrier as HostPartsMessage);
+		const triggeringUserIndex = messages.findIndex(
+			(message) => message.info.id === 'compaction-user-message',
+		);
+		expect(carrierIndex).toBeGreaterThan(triggeringUserIndex);
+		expect(messages.slice(carrierIndex).every(isGuidanceCarrier)).toBe(true);
+		const text = messageTextOf(carrier);
+		expect(renderedText(rendered)).toContain(compactionMarker);
+		return text;
+	}
+
+	function expectStableArchitectSystem(system: string[]): void {
+		expect(system).toEqual([BASE_SYSTEM]);
 	}
 
 	const defaultConfig: PluginConfig = {
@@ -64,8 +131,8 @@ describe('v6.2 System Enhancer Compaction Advisory', () => {
 		// 1. createSwarmFiles()
 		await createSwarmFiles();
 
-		// 2. ensureAgentSession('test-session', 'architect')
-		ensureAgentSession('test-session', 'architect');
+		// 2. ensureAgentSession(sessionID, 'architect')
+		ensureAgentSession(sessionID, 'architect');
 
 		// 3. Set session.lastCompactionHint = 0
 		const session = swarmState.agentSessions.get('test-session')!;
@@ -75,21 +142,21 @@ describe('v6.2 System Enhancer Compaction Advisory', () => {
 		swarmState.toolAggregates.set('bash', createToolAggregate(52));
 
 		// 5. invokeHook(defaultConfig) — no compaction_advisory config (defaults apply)
-		const systemOutput = await invokeHook(defaultConfig);
+		const result = await invokeRegisteredArchitect();
 
-		// 6. Assert: systemOutput.some(s => s.includes('compact')) === true (compaction hint)
-		expect(systemOutput.some((s) => s.includes('compact'))).toBe(true);
+		const guidance = findCompactionGuidance(result.messages, result.rendered);
+		expectStableArchitectSystem(result.system);
 
-		// 7. Assert: systemOutput.some(s => s.includes('52')) === true (actual count in message)
-		expect(systemOutput.some((s) => s.includes('52'))).toBe(true);
+		// The rendered advisory reports the actual aggregate count.
+		expect(guidance).toContain('52 tool calls');
 	});
 
 	it('does not re-inject at same threshold (lastCompactionHint = 50, total = 52)', async () => {
 		// 1. createSwarmFiles()
 		await createSwarmFiles();
 
-		// 2. ensureAgentSession('test-session', 'architect')
-		ensureAgentSession('test-session', 'architect');
+		// 2. ensureAgentSession(sessionID, 'architect')
+		ensureAgentSession(sessionID, 'architect');
 
 		// 3. Set session.lastCompactionHint = 50
 		const session = swarmState.agentSessions.get('test-session')!;
@@ -99,19 +166,24 @@ describe('v6.2 System Enhancer Compaction Advisory', () => {
 		swarmState.toolAggregates.set('bash', createToolAggregate(52));
 
 		// 5. invokeHook(defaultConfig)
-		const systemOutput = await invokeHook(defaultConfig);
+		const result = await invokeRegisteredArchitect();
 
-		// 6. Assert: systemOutput.some(s => s.includes('[SWARM HINT]')) === false
-		// Note: The default hint about summarization is still present, so we check for "compact" to exclude it
-		expect(systemOutput.some((s) => s.includes('compact'))).toBe(false);
+		// The session has already crossed this threshold, so the one-shot
+		// advisory is absent from the registered host transform.
+		expect(
+			result.messages.some((message) =>
+				messageTextOf(message).includes(compactionMarker),
+			),
+		).toBe(false);
+		expectStableArchitectSystem(result.system);
 	});
 
 	it('injects at next threshold when last hint was at prior threshold', async () => {
 		// 1. createSwarmFiles()
 		await createSwarmFiles();
 
-		// 2. ensureAgentSession('test-session', 'architect')
-		ensureAgentSession('test-session', 'architect');
+		// 2. ensureAgentSession(sessionID, 'architect')
+		ensureAgentSession(sessionID, 'architect');
 
 		// 3. Set session.lastCompactionHint = 50
 		const session = swarmState.agentSessions.get('test-session')!;
@@ -121,10 +193,11 @@ describe('v6.2 System Enhancer Compaction Advisory', () => {
 		swarmState.toolAggregates.set('bash', createToolAggregate(77));
 
 		// 5. invokeHook(defaultConfig)
-		const systemOutput = await invokeHook(defaultConfig);
+		const result = await invokeRegisteredArchitect();
 
-		// 6. Assert: systemOutput.some(s => s.includes('compact')) === true (75 threshold triggered)
-		expect(systemOutput.some((s) => s.includes('compact'))).toBe(true);
+		const guidance = findCompactionGuidance(result.messages, result.rendered);
+		expectStableArchitectSystem(result.system);
+		expect(guidance).toContain('77 tool calls');
 
 		// 7. Check session.lastCompactionHint is now 75
 		expect(session.lastCompactionHint).toBe(75);
@@ -134,8 +207,8 @@ describe('v6.2 System Enhancer Compaction Advisory', () => {
 		// 1. createSwarmFiles()
 		await createSwarmFiles();
 
-		// 2. ensureAgentSession('test-session', 'architect')
-		ensureAgentSession('test-session', 'architect');
+		// 2. ensureAgentSession(sessionID, 'architect')
+		ensureAgentSession(sessionID, 'architect');
 
 		// 3. Set session.lastCompactionHint = 0
 		const session = swarmState.agentSessions.get('test-session')!;
@@ -153,18 +226,24 @@ describe('v6.2 System Enhancer Compaction Advisory', () => {
 		};
 
 		// 6. invokeHook(config)
-		const systemOutput = await invokeHook(config);
+		const result = await invokeRegisteredArchitect(config);
 
-		// 7. Assert: systemOutput.some(s => s.includes('compact')) === false (compaction disabled)
-		expect(systemOutput.some((s) => s.includes('compact'))).toBe(false);
+		// An explicit disable remains authoritative and produces no compaction
+		// carrier, while the stable architect system surface is preserved.
+		expect(
+			result.messages.some((message) =>
+				messageTextOf(message).includes(compactionMarker),
+			),
+		).toBe(false);
+		expectStableArchitectSystem(result.system);
 	});
 
 	it('lastCompactionHint initializes to 0 (new session)', async () => {
 		// 1. ensureAgentSession('test-session', 'architect')
 		ensureAgentSession('test-session', 'architect');
 
-		// 2. const session = swarmState.agentSessions.get('test-session')!
-		const session = swarmState.agentSessions.get('test-session')!;
+		// 2. const session = swarmState.agentSessions.get(sessionID)!
+		const session = swarmState.agentSessions.get(sessionID)!;
 
 		// 3. Assert: session.lastCompactionHint === 0
 		expect(session.lastCompactionHint).toBe(0);
@@ -174,8 +253,8 @@ describe('v6.2 System Enhancer Compaction Advisory', () => {
 		// 1. createSwarmFiles()
 		await createSwarmFiles();
 
-		// 2. ensureAgentSession('test-session', 'architect')
-		ensureAgentSession('test-session', 'architect');
+		// 2. ensureAgentSession(sessionID, 'architect')
+		ensureAgentSession(sessionID, 'architect');
 
 		// 3. Set session.lastCompactionHint = 0
 		const session = swarmState.agentSessions.get('test-session')!;
@@ -194,9 +273,10 @@ describe('v6.2 System Enhancer Compaction Advisory', () => {
 		};
 
 		// 6. invokeHook(config)
-		const systemOutput = await invokeHook(config);
+		const result = await invokeRegisteredArchitect(config);
 
-		// 7. Assert: systemOutput.some(s => s.includes('compact')) === true (crosses 20 custom threshold)
-		expect(systemOutput.some((s) => s.includes('compact'))).toBe(true);
+		const guidance = findCompactionGuidance(result.messages, result.rendered);
+		expectStableArchitectSystem(result.system);
+		expect(guidance).toContain('25 tool calls');
 	});
 });

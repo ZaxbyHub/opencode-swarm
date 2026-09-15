@@ -1,22 +1,46 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
+import {
+	isGuidanceCarrier,
+	isRenderableGuidance,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import {
+	type HostPartsMessage,
+	hostToModelMessages,
+	renderedText,
+} from '../../helpers/host-contract-v1_18_3';
+import {
+	bootSwarmPluginHost,
+	createPluginHostProject,
+} from '../../helpers/plugin-host';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
+
+const SESSION_ID = 'drift-test-session';
+const BASE_SYSTEM = 'Stable architect system prefix';
+const HOST_CONFIG = {
+	version_check: false,
+	knowledge: { enabled: false, hive_enabled: false },
+	memory: { enabled: false },
+	hooks: { delegation_gate: false, system_enhancer: true },
+};
 
 describe('v6.7 System Enhancer Decision Drift Detection', () => {
 	let tempDir: string;
 
-	beforeEach(async () => {
-		tempDir = await mkdtemp(join(tmpdir(), 'swarm-drift-test-'));
+	beforeEach(() => {
+		tempDir = createPluginHostProject('swarm-drift-test-');
 		resetSwarmState();
 	});
 
-	afterEach(async () => {
+	afterEach(() => {
+		resetSwarmState();
 		try {
-			await rm(tempDir, { recursive: true, force: true });
+			safeRmRecursive(tempDir);
 		} catch {}
 	});
 
@@ -43,6 +67,52 @@ describe('v6.7 System Enhancer Decision Drift Detection', () => {
 		const output = { system: ['Initial system prompt'] };
 		await transform(input, output);
 		return output.system;
+	}
+
+	async function invokeRegisteredArchitect(config: PluginConfig): Promise<{
+		messages: HostPartsMessage[];
+		rendered: ReturnType<typeof hostToModelMessages>;
+		system: string[];
+	}> {
+		const host = await bootSwarmPluginHost(tempDir, {
+			...HOST_CONFIG,
+			automation: config.automation,
+		});
+		const messages: HostPartsMessage[] = [
+			{
+				info: {
+					id: 'drift-test-user',
+					role: 'user',
+					agent: 'architect',
+					sessionID: SESSION_ID,
+				},
+				parts: [{ type: 'text', text: 'Continue the active plan.' }],
+			},
+		];
+		await host.hooks['experimental.chat.messages.transform']({}, { messages });
+		const system = [BASE_SYSTEM];
+		await host.hooks['experimental.chat.system.transform'](
+			{ sessionID: SESSION_ID },
+			{ system },
+		);
+		return { messages, rendered: hostToModelMessages(messages), system };
+	}
+
+	function findRenderedDrift(messages: HostPartsMessage[]): string {
+		const carrier = messages.find(
+			(message) =>
+				isGuidanceCarrier(message) &&
+				messageTextOf(message).includes('DECISION DRIFT'),
+		);
+		expect(carrier).toBeDefined();
+		expect(isRenderableGuidance(carrier)).toBe(true);
+		expect(carrier?.info.role).toBe('user');
+		return messageTextOf(carrier);
+	}
+
+	function expectStableArchitectSystem(system: string[]): void {
+		expect(system).toEqual([BASE_SYSTEM]);
+		expect(system.join('\n')).not.toContain('DECISION DRIFT');
 	}
 
 	const defaultConfig: PluginConfig = {
@@ -117,14 +187,14 @@ describe('v6.7 System Enhancer Decision Drift Detection', () => {
 		};
 
 		// Set active agent to architect
-		swarmState.activeAgent.set('test-session', 'swarm_architect');
+		swarmState.activeAgent.set(SESSION_ID, 'swarm_architect');
 
-		const systemOutput = await invokeHook(config, 'test-session');
-		const driftContent = systemOutput.filter((s) =>
-			s.includes('DECISION DRIFT'),
-		);
-		expect(driftContent.length).toBeGreaterThan(0);
-		expect(driftContent[0]).toContain('stale');
+		const result = await invokeRegisteredArchitect(config);
+		const driftText = findRenderedDrift(result.messages);
+
+		expectStableArchitectSystem(result.system);
+		expect(driftText).toContain('stale');
+		expect(renderedText(result.rendered)).toContain('DECISION DRIFT');
 	});
 
 	it('injects drift detection when no active agent (architect default)', async () => {

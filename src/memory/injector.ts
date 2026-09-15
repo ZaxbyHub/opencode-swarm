@@ -9,6 +9,7 @@ import { isTaskToolId } from '../hooks/normalize-tool-name';
 import {
 	deliveredGuidanceDelta,
 	insertGuidanceCarrier,
+	isGuidanceCarrier,
 } from '../hooks/system-guidance-carrier';
 import { validateSwarmPath } from '../hooks/utils';
 import { resolveRetentionCap } from '../retention/caps';
@@ -642,6 +643,7 @@ function resolveMessageAgent(
 
 function latestTextForRole(messages: unknown[], role: string): string | null {
 	for (let i = messages.length - 1; i >= 0; i--) {
+		if (isGuidanceCarrier(messages[i])) continue;
 		const message = messages[i] as {
 			info?: { role?: unknown };
 			parts?: unknown;
@@ -717,6 +719,7 @@ function extractTaskToolPrompt(messages: unknown[]): string | null {
 
 function recallMessageInsertIndex(messages: unknown[]): number {
 	for (let i = messages.length - 1; i >= 0; i--) {
+		if (isGuidanceCarrier(messages[i])) continue;
 		const role = (messages[i] as { info?: { role?: unknown } })?.info?.role;
 		if (role === 'user') return i;
 	}

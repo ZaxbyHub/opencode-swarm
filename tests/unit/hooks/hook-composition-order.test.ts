@@ -13,8 +13,9 @@ import * as path from 'node:path';
  * per-turn producer ledger depends on:
  *
  * messages.transform:
- *   advisory drain  <  memory recall  <  knowledge injector  <
- *   system-entry materialization (final structure mutation, issue #2526)  <  final context accounting
+ *   architect staging < advisory drain < memory recall < knowledge injector <
+ *   architect delivery < system-entry materialization < carrier tail partition <
+ *   final context accounting
  * system.transform:
  *   system-enhancer (begins the turn ledger)  <  context capsule (claims)
  *
@@ -104,20 +105,40 @@ describe('messages.transform composition order (#2107 §2)', () => {
 		);
 	});
 
-	test('materializer runs before final context accounting', () => {
-		expect(orderOf(messagesChain, MATERIALIZER_STEP)).toBeLessThan(
-			orderOf(messagesChain, 'finalContextAccountingStep'),
+	test('architect staging runs before the downstream message consumers', () => {
+		expect(
+			orderOf(messagesChain, 'messagesTransformArchitectEnhancerStage'),
+		).toBeLessThan(
+			orderOf(messagesChain, 'durableBackgroundAdvisoryMessagesTransform'),
 		);
 	});
 
-	test('the materializer is the last STRUCTURE-mutating handler (accounting is read-mostly)', () => {
-		const materializer = orderOf(messagesChain, MATERIALIZER_STEP);
+	test('architect delivery runs before materialization', () => {
+		expect(
+			orderOf(messagesChain, 'messagesTransformArchitectEnhancerDeliveryStep'),
+		).toBeLessThan(orderOf(messagesChain, MATERIALIZER_STEP));
+	});
+
+	test('materializer runs before terminal carrier ordering and accounting', () => {
+		expect(orderOf(messagesChain, MATERIALIZER_STEP)).toBeLessThan(
+			orderOf(messagesChain, 'messagesTransformGuidanceCarrierOrderStep'),
+		);
+		expect(
+			orderOf(messagesChain, 'messagesTransformGuidanceCarrierOrderStep'),
+		).toBeLessThan(orderOf(messagesChain, 'finalContextAccountingStep'));
+	});
+
+	test('carrier ordering is the last STRUCTURE-mutating handler (accounting is read-mostly)', () => {
+		const carrierOrdering = orderOf(
+			messagesChain,
+			'messagesTransformGuidanceCarrierOrderStep',
+		);
 		const after = messagesChain
-			.slice(materializer + 1)
+			.slice(carrierOrdering + 1)
 			.slice(
 				0,
 				orderOf(
-					messagesChain.slice(materializer + 1),
+					messagesChain.slice(carrierOrdering + 1),
 					'finalContextAccountingStep',
 				),
 			);

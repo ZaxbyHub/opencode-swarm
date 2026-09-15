@@ -1,347 +1,298 @@
-import { afterEach, beforeEach, describe, expect, it, jest } from 'bun:test';
-import { existsSync, renameSync, unlinkSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { PluginConfig } from '../../../src/config';
-import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
+import {
+	isGuidanceCarrier,
+	isRenderableGuidance,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import {
+	type HostPartsMessage,
+	hostToModelMessages,
+	renderedText,
+} from '../../helpers/host-contract-v1_18_3';
+import {
+	bootSwarmPluginHost,
+	createPluginHostProject,
+} from '../../helpers/plugin-host';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
-describe('System Enhancer Hook - Handoff Detection', () => {
+const BASE_SYSTEM = 'Stable architect system prefix';
+const HOST_CONFIG = {
+	version_check: false,
+	knowledge: { enabled: false, hive_enabled: false },
+	memory: { enabled: false },
+	hooks: { delegation_gate: false, system_enhancer: true },
+};
+
+describe('System Enhancer Hook - Handoff Detection (#2759)', () => {
 	let tempDir: string;
 
-	beforeEach(async () => {
-		tempDir = await mkdtemp(join(tmpdir(), 'handoff-test-'));
+	beforeEach(() => {
+		tempDir = createPluginHostProject('handoff-test-');
 		resetSwarmState();
-		// Set up active agent for non-DISCOVER mode
+		// Architect system output is deliberately stable. Dynamic handoff
+		// guidance is delivered through the registered messages surface.
 		swarmState.activeAgent.set('test-session', 'architect');
 	});
 
-	afterEach(async () => {
+	afterEach(() => {
+		resetSwarmState();
 		try {
-			await rm(tempDir, { recursive: true, force: true });
+			safeRmRecursive(tempDir);
 		} catch {
-			// Ignore cleanup errors
+			// Best-effort cleanup; registered host workers can briefly hold handles.
 		}
 	});
 
-	const defaultConfig: PluginConfig = {
-		max_iterations: 5,
-		qa_retry_limit: 3,
-		inject_phase_reminders: true,
-		hooks: {
-			system_enhancer: true,
-			compaction: true,
-			agent_activity: true,
-			delegation_tracker: false,
-			agent_awareness_max_chars: 300,
-			delegation_gate: false,
-			delegation_max_chars: 1000,
-		},
-	};
-
-	// Helper to create .swarm directory and files
-	async function createSwarmDir() {
+	async function createSwarmDir(): Promise<string> {
 		const swarmDir = join(tempDir, '.swarm');
 		await mkdir(swarmDir, { recursive: true });
 		return swarmDir;
 	}
 
-	// Helper to create a plan with in_progress task to trigger handoff detection
-	async function createPlanWithActiveTask() {
+	async function createPlanWithActiveTask(): Promise<string> {
 		const swarmDir = await createSwarmDir();
-		const planFile = join(swarmDir, 'plan.json');
-		const planContent = JSON.stringify({
-			schema_version: '1.0.0',
-			title: 'Test Plan',
-			swarm: 'test-swarm',
-			current_phase: 1,
-			phases: [
-				{
-					id: 1,
-					name: 'Phase 1',
-					status: 'in_progress',
-					tasks: [
-						{
-							id: '1.1',
-							phase: 1,
-							description: 'Test task',
-							status: 'in_progress',
-						},
-					],
-				},
-			],
-		});
-		await writeFile(planFile, planContent);
+		await writeFile(
+			join(swarmDir, 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Test Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [
+					{
+						id: 1,
+						name: 'Phase 1',
+						status: 'in_progress',
+						tasks: [
+							{
+								id: '1.1',
+								phase: 1,
+								description: 'Test task',
+								status: 'in_progress',
+							},
+						],
+					},
+				],
+			}),
+		);
 		return swarmDir;
 	}
 
-	describe('Handoff file detection and injection', () => {
-		it('should detect handoff.md exists → inject content and rename to handoff-consumed.md', async () => {
-			// Arrange
+	function architectMessage(sessionID = 'test-session'): HostPartsMessage {
+		return {
+			info: {
+				id: `user-${sessionID}`,
+				role: 'user',
+				agent: 'architect',
+				sessionID,
+			},
+			parts: [{ type: 'text', text: 'Continue the active plan.' }],
+		};
+	}
+
+	async function runRegisteredTurn(
+		overrides: Record<string, unknown> = {},
+	): Promise<{
+		handoffMessages: HostPartsMessage[];
+		renderedMessages: ReturnType<typeof hostToModelMessages>;
+		system: string[];
+	}> {
+		const host = await bootSwarmPluginHost(tempDir, {
+			...HOST_CONFIG,
+			...overrides,
+		});
+		const handoffMessages = [architectMessage()];
+		await host.hooks['experimental.chat.messages.transform'](
+			{},
+			{ messages: handoffMessages },
+		);
+		const system = [BASE_SYSTEM];
+		await host.hooks['experimental.chat.system.transform'](
+			{ sessionID: 'test-session' },
+			{ system },
+		);
+		return {
+			handoffMessages,
+			renderedMessages: hostToModelMessages(handoffMessages),
+			system,
+		};
+	}
+
+	function expectArchitectSystemSurfaceIsStable(system: string[]): void {
+		expect(system).toEqual([BASE_SYSTEM]);
+		expect(system.join('\n')).not.toContain('[HANDOFF BRIEF]');
+	}
+
+	describe('handoff detection and delivery', () => {
+		it('consumes handoff.md and delivers its body through a host-renderable carrier', async () => {
 			const swarmDir = await createPlanWithActiveTask();
 			const handoffPath = join(swarmDir, 'handoff.md');
 			const handoffContent =
 				'Previous session ended. Here is context from model switch.';
 			await writeFile(handoffPath, handoffContent);
 
-			const config = { ...defaultConfig };
-			const hook = createSystemEnhancerHook(config, tempDir);
-			const transformHook = hook['experimental.chat.system.transform'] as any;
+			const result = await runRegisteredTurn();
+			const handoffCarrier = result.handoffMessages.find(
+				(message) =>
+					isGuidanceCarrier(message) &&
+					messageTextOf(message).includes('[HANDOFF BRIEF]'),
+			);
 
-			const input = { sessionID: 'test-session' };
-			const output = { system: ['Initial system prompt'] };
-
-			// Act
-			await transformHook(input, output);
-
-			// Assert - handoff.md should be renamed to handoff-consumed.md
+			expectArchitectSystemSurfaceIsStable(result.system);
 			expect(existsSync(handoffPath)).toBe(false);
 			expect(existsSync(join(swarmDir, 'handoff-consumed.md'))).toBe(true);
-
-			// Assert - content should be injected
-			const handoffInjection = output.system.find((s) =>
-				s.includes('[HANDOFF BRIEF]'),
-			);
-			expect(handoffInjection).toBeDefined();
-			expect(handoffInjection).toContain(handoffContent);
+			expect(handoffCarrier).toBeDefined();
+			expect(isRenderableGuidance(handoffCarrier)).toBe(true);
+			expect(handoffCarrier?.info.role).toBe('user');
+			expect(renderedText(result.renderedMessages)).toContain(handoffContent);
 		});
 
-		it('should rename BEFORE injection - if rename fails, no injection occurs', async () => {
-			// Arrange
+		it('renames before delivery, so the consumed file is the delivery authority', async () => {
 			const swarmDir = await createPlanWithActiveTask();
 			const handoffPath = join(swarmDir, 'handoff.md');
-			const handoffContent = 'Test content';
-			await writeFile(handoffPath, handoffContent);
+			await writeFile(handoffPath, 'Test content');
 
-			const config = { ...defaultConfig };
-			const hook = createSystemEnhancerHook(config, tempDir);
-			const transformHook = hook['experimental.chat.system.transform'] as any;
+			const result = await runRegisteredTurn();
 
-			const input = { sessionID: 'test-session' };
-			const output = { system: ['Initial system prompt'] };
-
-			// Act - let it run normally - the test is about verifying the rename-inject order works
-			await transformHook(input, output);
-
-			// Assert - when rename succeeds, handoff should be injected
-			const handoffInjection = output.system.find((s) =>
-				s.includes('[HANDOFF BRIEF]'),
-			);
-			expect(handoffInjection).toBeDefined();
-
-			// And file should be renamed
+			expectArchitectSystemSurfaceIsStable(result.system);
 			expect(existsSync(handoffPath)).toBe(false);
 			expect(existsSync(join(swarmDir, 'handoff-consumed.md'))).toBe(true);
+			expect(renderedText(result.renderedMessages)).toContain('Test content');
 		});
 
-		it('should handle missing handoff.md gracefully (ENOENT)', async () => {
-			// Arrange - no handoff.md file, but create a valid plan to be in EXECUTE mode
+		it('handles missing handoff.md without injecting on either architect surface', async () => {
 			await createPlanWithActiveTask();
 
-			const config = { ...defaultConfig };
-			const hook = createSystemEnhancerHook(config, tempDir);
-			const transformHook = hook['experimental.chat.system.transform'] as any;
+			const result = await runRegisteredTurn();
 
-			const input = { sessionID: 'test-session' };
-			const output = { system: ['Initial system prompt'] };
-
-			// Act - should not throw
-			let threw = false;
-			let error: any;
-			try {
-				await transformHook(input, output);
-			} catch (e) {
-				threw = true;
-				error = e;
-			}
-
-			// Assert - should not throw
-			expect(threw).toBe(false);
-
-			// No handoff injection should be present
-			const handoffInjection = output.system.find((s) =>
-				s.includes('[HANDOFF BRIEF]'),
+			expectArchitectSystemSurfaceIsStable(result.system);
+			expect(
+				result.handoffMessages.some(
+					(message) =>
+						isGuidanceCarrier(message) &&
+						messageTextOf(message).includes('[HANDOFF BRIEF]'),
+				),
+			).toBe(false);
+			expect(renderedText(result.renderedMessages)).not.toContain(
+				'[HANDOFF BRIEF]',
 			);
-			expect(handoffInjection).toBeUndefined();
 		});
 
-		it('should detect duplicate handoff-consumed.md and delete before rename', async () => {
-			// Arrange
+		it('replaces duplicate handoff-consumed.md before delivering the new handoff', async () => {
 			const swarmDir = await createPlanWithActiveTask();
 			const handoffPath = join(swarmDir, 'handoff.md');
 			const consumedPath = join(swarmDir, 'handoff-consumed.md');
-
-			// Create both files - simulating duplicate scenario
 			await writeFile(handoffPath, 'New handoff content');
 			await writeFile(consumedPath, 'Old consumed content');
 
-			const config = { ...defaultConfig };
-			const hook = createSystemEnhancerHook(config, tempDir);
-			const transformHook = hook['experimental.chat.system.transform'] as any;
+			const result = await runRegisteredTurn();
 
-			const input = { sessionID: 'test-session' };
-			const output = { system: ['Initial system prompt'] };
-
-			// Act
-			await transformHook(input, output);
-
-			// Assert - handoff-consumed.md should be replaced with new content
+			expectArchitectSystemSurfaceIsStable(result.system);
 			expect(existsSync(handoffPath)).toBe(false);
-			expect(existsSync(consumedPath)).toBe(true);
-
-			// The new content should be in the consumed file
-			const { readFileSync } = require('node:fs');
-			const consumedContent = readFileSync(consumedPath, 'utf-8');
-			expect(consumedContent).toBe('New handoff content');
-
-			// Handoff should still be injected
-			const handoffInjection = output.system.find((s) =>
-				s.includes('[HANDOFF BRIEF]'),
+			expect(readFileSync(consumedPath, 'utf-8')).toBe('New handoff content');
+			expect(renderedText(result.renderedMessages)).toContain(
+				'New handoff content',
 			);
-			expect(handoffInjection).toBeDefined();
 		});
 
-		it('should perform atomic rename - target deleted first on Windows-like behavior', async () => {
-			// Arrange
+		it('performs the Windows-safe atomic rename and delivers the handoff body', async () => {
 			const swarmDir = await createPlanWithActiveTask();
 			const handoffPath = join(swarmDir, 'handoff.md');
 			const consumedPath = join(swarmDir, 'handoff-consumed.md');
-
-			// Create handoff.md
 			await writeFile(handoffPath, 'Atomic rename test content');
 
-			// Pre-delete the target (simulating atomic rename pattern)
-			if (existsSync(consumedPath)) {
-				unlinkSync(consumedPath);
-			}
+			const result = await runRegisteredTurn();
 
-			const config = { ...defaultConfig };
-			const hook = createSystemEnhancerHook(config, tempDir);
-			const transformHook = hook['experimental.chat.system.transform'] as any;
-
-			const input = { sessionID: 'test-session' };
-			const output = { system: ['Initial system prompt'] };
-
-			// Act
-			await transformHook(input, output);
-
-			// Assert - handoff.md renamed to handoff-consumed.md
+			expectArchitectSystemSurfaceIsStable(result.system);
 			expect(existsSync(handoffPath)).toBe(false);
 			expect(existsSync(consumedPath)).toBe(true);
-
-			// Content should be injected
-			const handoffInjection = output.system.find((s) =>
-				s.includes('[HANDOFF BRIEF]'),
+			expect(renderedText(result.renderedMessages)).toContain(
+				'Atomic rename test content',
 			);
-			expect(handoffInjection).toBeDefined();
 		});
 	});
 
-	describe('Handoff detection in DISCOVER mode', () => {
-		it('should NOT inject handoff when mode is DISCOVER', async () => {
-			// Arrange - set mode to DISCOVER by not having an active agent
+	describe('handoff detection in DISCOVER mode', () => {
+		it('does not deliver a handoff when the registered message pass is sessionless', async () => {
 			resetSwarmState();
-			// No active agent set - this should result in DISCOVER mode
-
 			const swarmDir = await createSwarmDir();
 			const handoffPath = join(swarmDir, 'handoff.md');
 			await writeFile(handoffPath, 'Handoff content');
+			const host = await bootSwarmPluginHost(tempDir, HOST_CONFIG);
+			const messages: HostPartsMessage[] = [
+				{
+					info: { id: 'discover-user', role: 'user' },
+					parts: [{ type: 'text', text: 'Discover the project.' }],
+				},
+			];
 
-			const config = { ...defaultConfig };
-			const hook = createSystemEnhancerHook(config, tempDir);
-			const transformHook = hook['experimental.chat.system.transform'] as any;
-
-			const input = { sessionID: undefined };
-			const output = { system: ['Initial system prompt'] };
-
-			// Act
-			await transformHook(input, output);
-
-			// Assert - handoff should NOT be injected in DISCOVER mode
-			const handoffInjection = output.system.find((s) =>
-				s.includes('[HANDOFF BRIEF]'),
+			await host.hooks['experimental.chat.messages.transform'](
+				{},
+				{ messages },
 			);
-			expect(handoffInjection).toBeUndefined();
+
+			expect(existsSync(handoffPath)).toBe(true);
+			expect(messages.some((message) => isGuidanceCarrier(message))).toBe(
+				false,
+			);
+			expect(renderedText(hostToModelMessages(messages))).not.toContain(
+				'Handoff content',
+			);
 		});
 	});
 
-	describe('Handoff with scoring enabled', () => {
-		it('should inject handoff when scoring is enabled', async () => {
-			// Arrange
+	describe('handoff with scoring enabled', () => {
+		it('delivers a scored handoff through the registered host path', async () => {
 			const swarmDir = await createPlanWithActiveTask();
 			const handoffPath = join(swarmDir, 'handoff.md');
 			const handoffContent = 'Scoring path handoff content';
 			await writeFile(handoffPath, handoffContent);
 
-			const config: any = {
-				...defaultConfig,
+			const result = await runRegisteredTurn({
 				context_budget: {
-					scoring: {
-						enabled: true,
-						max_candidates: 100,
-					},
+					scoring: { enabled: true, max_candidates: 100 },
 					max_injection_tokens: 10000,
 				},
-			};
-
-			const hook = createSystemEnhancerHook(config, tempDir);
-			const transformHook = hook['experimental.chat.system.transform'] as any;
-
-			const input = { sessionID: 'test-session' };
-			const output = { system: ['Initial system prompt'] };
-
-			// Act
-			await transformHook(input, output);
-
-			// Assert - handoff should be injected
-			const handoffInjection = output.system.find((s) =>
-				s.includes('[HANDOFF BRIEF]'),
+			});
+			const handoffCarrier = result.handoffMessages.find(
+				(message) =>
+					isGuidanceCarrier(message) &&
+					messageTextOf(message).includes(handoffContent),
 			);
-			expect(handoffInjection).toBeDefined();
-			expect(handoffInjection).toContain(handoffContent);
 
-			// File should be renamed
+			expectArchitectSystemSurfaceIsStable(result.system);
+			expect(handoffCarrier).toBeDefined();
+			expect(isRenderableGuidance(handoffCarrier)).toBe(true);
+			expect(renderedText(result.renderedMessages)).toContain(handoffContent);
 			expect(existsSync(handoffPath)).toBe(false);
 			expect(existsSync(join(swarmDir, 'handoff-consumed.md'))).toBe(true);
 		});
 
-		it('should handle missing handoff.md with scoring enabled gracefully', async () => {
-			// Arrange - no handoff.md file, but create valid plan
+		it('handles a missing scored handoff without fabricating guidance', async () => {
 			await createPlanWithActiveTask();
 
-			const config: any = {
-				...defaultConfig,
+			const result = await runRegisteredTurn({
 				context_budget: {
-					scoring: {
-						enabled: true,
-						max_candidates: 100,
-					},
+					scoring: { enabled: true, max_candidates: 100 },
 					max_injection_tokens: 10000,
 				},
-			};
+			});
 
-			const hook = createSystemEnhancerHook(config, tempDir);
-			const transformHook = hook['experimental.chat.system.transform'] as any;
-
-			const input = { sessionID: 'test-session' };
-			const output = { system: ['Initial system prompt'] };
-
-			// Act - should not throw
-			let threw = false;
-			try {
-				await transformHook(input, output);
-			} catch (e) {
-				threw = true;
-			}
-
-			// Assert
-			expect(threw).toBe(false);
-
-			const handoffInjection = output.system.find((s) =>
-				s.includes('[HANDOFF BRIEF]'),
+			expectArchitectSystemSurfaceIsStable(result.system);
+			expect(
+				result.handoffMessages.some(
+					(message) =>
+						isGuidanceCarrier(message) &&
+						messageTextOf(message).includes('[HANDOFF BRIEF]'),
+				),
+			).toBe(false);
+			expect(renderedText(result.renderedMessages)).not.toContain(
+				'[HANDOFF BRIEF]',
 			);
-			expect(handoffInjection).toBeUndefined();
 		});
 	});
 });

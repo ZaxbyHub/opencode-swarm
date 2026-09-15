@@ -8,19 +8,23 @@
 	"renderedMessages": [
 		{
 			"role": "user",
-			"text": "<swarm_system_directive source=\"opencode-swarm\" kind=\"guardrails\">\n[MODEL_ONLY_GUIDANCE]\n⚠️ PARTIAL GATE VIOLATION: Task may be marked complete but missing gates: [diff, syntax_check, placeholder_scan, lint, pre_check_batch, reviewer/test_engineer (no delegations this phase)].\nThe QA gate is ALL steps or NONE. Revert any ✓ marks and run the missing gates.\nDo not acknowledge or reference this guidance in your response.\n[/MODEL_ONLY_GUIDANCE]\n\n[ADVISORIES]\nDEGRADED: orbit-flanger-capture context-limit error detected. No fallback models available.\n[/ADVISORIES]\n\n</swarm_system_directive>"
-		},
-		{
-			"role": "user",
-			"text": "<swarm_system_directive source=\"opencode-swarm\" kind=\"delegation\">\n[NEXT] Begin the first plan task and run gates sequentially.\n</swarm_system_directive>"
-		},
-		{
-			"role": "user",
 			"text": "Please handle the orbit-flanger-capture release checklist."
 		},
 		{
 			"role": "assistant",
 			"text": "Working on it."
+		},
+		{
+			"role": "user",
+			"text": "<swarm_reminder>\n⚠️ ARCHITECT WORKFLOW REMINDER (Phase 1):\n1. ANALYZE → Identify domains, create initial spec\n2. SME_CONSULTATION → Delegate to @sme (one domain per call, max 3 calls)\n3. COLLATE → Synthesize SME outputs into unified spec\n4. CODE → Delegate to @coder\n5. QA_REVIEW → Delegate to @reviewer (specify CHECK dimensions)\n6. TRIAGE → Review feedback: APPROVED | REVISION_NEEDED | BLOCKED\n7. TEST → If approved, delegate to @test_engineer\n\nDELEGATION RULES:\n- SME: ONE domain per call (serial), max 3 per phase\n- Reviewer: Specify CHECK dimensions relevant to the change\n- Always wait for response before next delegation\n\nCOMPLIANCE CHECK (Phase 1):\n- Reviewer delegation is MANDATORY for every coder task.\n- pre_check_batch is NOT a substitute for reviewer.\n- Stage A (automated tools) + Stage B/Council (agent review) = BOTH required.\n\n</swarm_reminder>\n\n---\n\nContinue the orbit-flanger-capture release checklist."
+		},
+		{
+			"role": "user",
+			"text": "<swarm_system_directive source=\"opencode-swarm\" kind=\"guardrails\">\n[MODEL_ONLY_GUIDANCE]\n⚠️ PARTIAL GATE VIOLATION: Task may be marked complete but missing gates: [diff, syntax_check, placeholder_scan, lint, pre_check_batch, reviewer/test_engineer (no delegations this phase)].\nThe QA gate is ALL steps or NONE. Revert any ✓ marks and run the missing gates.\nDo not acknowledge or reference this guidance in your response.\n[/MODEL_ONLY_GUIDANCE]\n\n[ADVISORIES]\nDEGRADED: orbit-flanger-capture context-limit error detected. No fallback models available.\n[/ADVISORIES]\n\n</swarm_system_directive>"
+		},
+		{
+			"role": "user",
+			"text": "<swarm_system_directive source=\"opencode-swarm\" kind=\"delegation\">\n[NEXT] Begin the first plan task and run gates sequentially.\n</swarm_system_directive>"
 		},
 		{
 			"role": "user",
@@ -32,7 +36,7 @@
 		},
 		{
 			"role": "user",
-			"text": "<swarm_reminder>\n⚠️ ARCHITECT WORKFLOW REMINDER (Phase 1):\n1. ANALYZE → Identify domains, create initial spec\n2. SME_CONSULTATION → Delegate to @sme (one domain per call, max 3 calls)\n3. COLLATE → Synthesize SME outputs into unified spec\n4. CODE → Delegate to @coder\n5. QA_REVIEW → Delegate to @reviewer (specify CHECK dimensions)\n6. TRIAGE → Review feedback: APPROVED | REVISION_NEEDED | BLOCKED\n7. TEST → If approved, delegate to @test_engineer\n\nDELEGATION RULES:\n- SME: ONE domain per call (serial), max 3 per phase\n- Reviewer: Specify CHECK dimensions relevant to the change\n- Always wait for response before next delegation\n\nCOMPLIANCE CHECK (Phase 1):\n- Reviewer delegation is MANDATORY for every coder task.\n- pre_check_batch is NOT a substitute for reviewer.\n- Stage A (automated tools) + Stage B/Council (agent review) = BOTH required.\n\n</swarm_reminder>\n\n---\n\nContinue the orbit-flanger-capture release checklist."
+			"text": "<swarm_system_directive source=\"opencode-swarm\" kind=\"architect-session\">\n[PLANNING PROFILE — CURRENT RUNTIME AUTHORITY] effective=balanced source=repository_default\nThis runtime resolution supersedes any planning-profile default in the base prompt.\nBALANCED ceremony: use durable QA and execution defaults without pausing for the full questionnaire. Do not require a spec solely as ceremony. Ask the user only about unresolved material ambiguity, destructive or high-risk authorization, or another decision only they can make. save_plan exact-binds the default QA profile; persist planning_profile: \"balanced\" in the execution profile. Follow persisted QA gates after save.\n\n[SWARM CONTEXT] Phase: Phase 1: Phase 1 [PENDING]\n\n[SWARM PLAN CURSOR]\n\n## Phase 1 [PENDING]\n- Phase 1\n[/SWARM PLAN CURSOR]\n\n[SWARM HINT] Large tool outputs may be auto-summarized. Use /swarm retrieve <id> to get the full content if needed.\n\n[SWARM CONFIG] You must NEVER run the full test suite or batch test files. If you need to verify changes, run ONLY the specific test files for code YOU modified in this session — one file at a time, strictly serial. Do not run tests from directories or files unrelated to your changes. Do not run bun test without an explicit file path. When possible, delegate test execution to the test_engineer agent instead of running tests yourself.\n\n[SWARM HINT] Parallel pre-check enabled: call pre_check_batch(files, directory) after lint --fix and build_check to run lint:check + secretscan + sast_scan + quality_budget concurrently (max 4 parallel). Check gates_passed before calling reviewer.\n\n## ⏭️ AUTO-PROCEED STATUS\n\nAuto-proceed controls whether the architect advances to the next phase automatically (skipping the \"Ready for Phase N+1?\" confirmation).\n\nBehavioral rules:\n- Session override (set via /swarm auto-proceed on|off) wins over the plan default.\n- If neither is set, auto-proceed defaults to OFF and the architect asks before advancing.\n- Full-auto mode (critic oversight) is independent — while active it suppresses the \"Ready for Phase N+1?\" confirmation itself (it never delegates tasks or runs phases for you); the auto_proceed setting adds nothing on top.\n- autoProceedNudgeDone prevents the FR-004 first-boundary nudge from re-firing in this session.\n\nTo toggle at runtime: call swarm_command({ command: \"auto-proceed\", args: [\"on\"|\"off\"] }) from the architect.\n\n## ⏭️ AUTO_PROCEED STATUS:\n- auto-proceed: off\n- source: plan-or-default\n- nudge: false\n\n[PRE-FLIGHT ADVISORY] The following Class 3 tool binaries were not found on PATH at session start.\nThese tools will soft-skip at invocation. Plan tasks accordingly.\n- MISSING BINARY: <machine-dependent tool list>\n\n[opencode-swarm:swarm-command-rule]\nWhen a user asks for a supported /swarm command and the message instructs you to call the `swarm_command` tool, call that tool exactly once with the provided JSON arguments. After the tool returns, show the tool output verbatim and do not add extra swarm state, summaries, or invented command output.\n</swarm_system_directive>"
 		}
 	]
 }

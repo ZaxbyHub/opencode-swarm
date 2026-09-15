@@ -242,7 +242,7 @@ export function createRoleFilterSystemHook(
 	getActiveAgentName: (sessionID: string) => string | undefined,
 ): {
 	'experimental.chat.system.transform': (
-		input: { sessionID?: string },
+		input: { sessionID?: string; agent?: string },
 		output: { system?: string[] },
 	) => Promise<void>;
 } {
@@ -250,7 +250,9 @@ export function createRoleFilterSystemHook(
 		'experimental.chat.system.transform': async (input, output) => {
 			if (!input.sessionID || !Array.isArray(output.system)) return;
 
-			const targetRole = getActiveAgentName(input.sessionID);
+			const targetRole =
+				(input as { agent?: string }).agent ??
+				getActiveAgentName(input.sessionID);
 			if (!targetRole) return;
 
 			const entries: ContextEntry[] = output.system.map((content) => ({

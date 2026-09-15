@@ -1,13 +1,20 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { PluginConfig } from '../../../src/config';
 import type { ExecutionProfile, Plan } from '../../../src/config/plan-schema';
-import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
+import {
+	isGuidanceCarrier,
+	isRenderableGuidance,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { resetSwarmState, swarmState } from '../../../src/state';
-import { canonicalTmpDir } from '../../helpers/tmpdir.js';
+import type { HostPartsMessage } from '../../helpers/host-contract-v1_18_3';
+import {
+	bootSwarmPluginHost,
+	createPluginHostProject,
+} from '../../helpers/plugin-host';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 function executionProfile(
 	planningProfile?: 'balanced' | 'strict',
@@ -52,41 +59,25 @@ function planWithProfile(profile: ExecutionProfile): Plan {
 	};
 }
 
-function config(
-	executionMode: 'balanced' | 'strict',
-	scoring: boolean,
-): PluginConfig {
-	return {
-		execution_mode: executionMode,
-		hooks: {
-			system_enhancer: true,
-			agent_activity: false,
-			compaction: false,
-			delegation_tracker: false,
-		},
-		context_budget: {
-			scoring: { enabled: scoring },
-		},
-	} as PluginConfig;
-}
-
 describe('system-enhancer planning-profile runtime injection', () => {
 	let directory: string;
 
 	beforeEach(async () => {
-		directory = await mkdtemp(
-			join(canonicalTmpDir(), 'planning-profile-prompt-'),
-		);
+		directory = createPluginHostProject('planning-profile-prompt-');
 		resetSwarmState();
 		resetStartupLedgerCheck();
 		await mkdir(join(directory, '.swarm'), { recursive: true });
 		await writeFile(join(directory, '.swarm', 'context.md'), '# Context\n');
 	});
 
-	afterEach(async () => {
+	afterEach(() => {
 		resetSwarmState();
 		resetStartupLedgerCheck();
-		await rm(directory, { recursive: true, force: true });
+		try {
+			safeRmRecursive(directory);
+		} catch {
+			// Best-effort cleanup; registered host workers can briefly hold handles.
+		}
 	});
 
 	async function invoke(
@@ -108,17 +99,59 @@ describe('system-enhancer planning-profile runtime injection', () => {
 		);
 		swarmState.activeAgent.set('profile-session', agent);
 
-		const hook = createSystemEnhancerHook(
-			config(executionMode, scoring),
-			directory,
+		const host = await bootSwarmPluginHost(directory, {
+			execution_mode: executionMode,
+			hooks: {
+				system_enhancer: true,
+				agent_activity: false,
+				compaction: false,
+				delegation_tracker: false,
+			},
+			context_budget: {
+				scoring: { enabled: scoring },
+			},
+		});
+		const messages: HostPartsMessage[] = [
+			{
+				info: {
+					id: 'planning-profile-user',
+					role: 'user',
+					agent,
+					sessionID: 'profile-session',
+				},
+				parts: [{ type: 'text', text: 'Continue the active plan.' }],
+			},
+		];
+		await host.hooks['experimental.chat.messages.transform']({}, { messages });
+		const carrier = messages.find(
+			(message) =>
+				isGuidanceCarrier(message) &&
+				isRenderableGuidance(message) &&
+				messageTextOf(message).includes(
+					'[PLANNING PROFILE — CURRENT RUNTIME AUTHORITY]',
+				),
 		);
-		const transform = hook['experimental.chat.system.transform'] as (
-			input: { sessionID: string },
-			output: { system: string[] },
-		) => Promise<void>;
-		const output = { system: ['base'] };
-		await transform({ sessionID: 'profile-session' }, output);
-		return output.system.join('\n');
+		if (agent === 'architect') {
+			expect(carrier).toBeDefined();
+			expect(carrier?.info.role).toBe('user');
+		} else {
+			expect(carrier).toBeUndefined();
+		}
+
+		const system = ['base'];
+		await host.hooks['experimental.chat.system.transform'](
+			{ sessionID: 'profile-session' },
+			{ system },
+		);
+		if (agent === 'architect') {
+			expect(system[0]).toBe('base');
+			expect(system.join('\n')).not.toContain(
+				'[PLANNING PROFILE — CURRENT RUNTIME AUTHORITY]',
+			);
+		} else {
+			expect(system[0]).toBe('base');
+		}
+		return carrier ? messageTextOf(carrier) : '';
 	}
 
 	for (const scoring of [false, true]) {

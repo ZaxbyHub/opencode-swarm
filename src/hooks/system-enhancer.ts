@@ -189,6 +189,7 @@ function maybeAppendSpecDriftAdvisory(
 	directory: string,
 	plan: RuntimePlan | null,
 	sessionId?: string,
+	surface: SystemEnhancerSurface = 'system',
 ): void {
 	if (!plan?._specStale) return;
 	const snap = readSpecStalenessSnapshot(directory);
@@ -214,7 +215,7 @@ function maybeAppendSpecDriftAdvisory(
 			midLoadRemovals: plan._midLoadRemovals,
 		}),
 	);
-	// #2107 §2: direct system-surface push — record under its own
+	// #2107 §2: direct surface push — record under its own
 	// producer (never also into system-enhancer's injectedTokens: that would
 	// double-count the surface in final accounting).
 	if (sessionId) {
@@ -223,7 +224,7 @@ function maybeAppendSpecDriftAdvisory(
 			'spec-drift-advisory',
 			estimateTokens(output.system[output.system.length - 1] ?? ''),
 			0,
-			'system',
+			surface,
 		);
 	}
 }
@@ -239,6 +240,7 @@ import {
 import {
 	allocateInjectionBudget,
 	beginTurnLedger,
+	claimTurnBudget,
 	recordProducerEmission,
 	recordProducerGrant,
 } from '../services/injection-budget.js';
@@ -265,6 +267,7 @@ import {
 	extractDecisions,
 	extractPlanCursor,
 } from './extractors';
+import { isSessionBoundArchitect } from './host-boundary';
 import { isLinked, readLinkPointer } from './knowledge-link';
 import { _internals as knowledgeStoreInternals } from './knowledge-store';
 import type { SwarmKnowledgeEntry } from './knowledge-types.js';
@@ -291,6 +294,14 @@ import {
 	safeHook,
 	validateSwarmPath,
 } from './utils';
+
+export type SystemEnhancerSurface = 'system' | 'messages';
+
+interface SystemEnhancerTransformOutput {
+	system: string[];
+	/** Session ids whose nudge state may be committed after carrier delivery. */
+	deferredRealtimeLearningNudges?: string[];
+}
 
 /**
  * Extract the swarm prefix from a full agent name.
@@ -1020,6 +1031,11 @@ export function cancelDeferredMaintenanceScans(directory: string): void {
 export function createSystemEnhancerHook(
 	config: PluginConfig,
 	directory: string,
+	options: {
+		surface?: SystemEnhancerSurface;
+		deferRealtimeLearningNudgeState?: boolean;
+		reservedEnvelopeTokens?: number;
+	} = {},
 ): Record<string, unknown> {
 	// PR #2588 bot finding 7: creating a NEW instance for this project root
 	// un-serves any earlier cancellation (dispose → re-init is the
@@ -1028,6 +1044,9 @@ export function createSystemEnhancerHook(
 	cancelledDeferredScanDirs.delete(path.resolve(directory));
 
 	const enabled = config.hooks?.system_enhancer !== false;
+	const surface = options.surface ?? 'system';
+	const deferRealtimeLearningNudgeState =
+		options.deferRealtimeLearningNudgeState === true;
 
 	if (!enabled) {
 		return {};
@@ -1062,8 +1081,19 @@ export function createSystemEnhancerHook(
 		'experimental.chat.system.transform': safeHook(
 			async (
 				_input: { sessionID?: string; model?: unknown },
-				output: { system: string[] },
+				output: SystemEnhancerTransformOutput,
 			): Promise<void> => {
+				const commitRealtimeLearningNudge = (sessionID: string): void => {
+					if (!deferRealtimeLearningNudgeState) {
+						recordRealtimeLearningNudge(sessionID);
+						return;
+					}
+					if (!output.deferredRealtimeLearningNudges) {
+						output.deferredRealtimeLearningNudges = [];
+					}
+					const pending = output.deferredRealtimeLearningNudges;
+					if (!pending.includes(sessionID)) pending.push(sessionID);
+				};
 				// FR-004: hoisted above the try/catch so the finally block below
 				// can always write the actual injected demand to the turn
 				// ledger, even if an exception is thrown after injection
@@ -1080,6 +1110,7 @@ export function createSystemEnhancerHook(
 				// amount from THIS counter.
 				let injectedTokens = 0;
 				let unifiedBudget: number | undefined;
+				let reservedEnvelopeTokens = 0;
 				// The live context window for THIS turn's model. This hook is the
 				// only one the host hands a `Model` to, so it is also the only
 				// place the authoritative `limit.context` can be captured. Recorded
@@ -1113,18 +1144,26 @@ export function createSystemEnhancerHook(
 					// have no use for phase/task/knowledge injection and must not trigger
 					// scanDocIndex or the dark-matter scan unnecessarily.
 					//
-					// Limitation: activeAgent is populated lazily by the chat.message
-					// hook, which fires after system.transform. On the very first prompt
-					// of any new session the guard cannot fire because activeAgent has no
-					// entry yet. The hang risk is still mitigated by the async pruning
-					// walk in scanDocIndex (see doc-scan.ts), which makes the worst-case
-					// cost proportional to the number of matching doc files, not the
-					// total number of files in the repo.
+					// The host runs chat.message before messages.transform and
+					// system.transform, so the active-agent identity is normally warm
+					// here. The fallback remains fail-open for restored sessions whose
+					// first callback arrives without an identity.
 					if (_input.sessionID) {
 						const sessionAgent = swarmState.activeAgent.get(_input.sessionID);
 						if (
 							sessionAgent &&
 							OPENCODE_NATIVE_AGENTS.has(sessionAgent.toLowerCase() as never)
+						) {
+							return;
+						}
+
+						// Session-bound architect guidance is staged and delivered by
+						// the messages surface. The system hook still captured the
+						// authoritative model above, but must not begin a second ledger
+						// or recreate the dynamic system tail.
+						if (
+							surface === 'system' &&
+							isSessionBoundArchitect(_input.sessionID, sessionAgent)
 						) {
 							return;
 						}
@@ -1144,6 +1183,23 @@ export function createSystemEnhancerHook(
 									4000,
 								config.context_budget?.unified_injection_tokens !== undefined,
 							);
+							if (
+								surface === 'messages' &&
+								(options.reservedEnvelopeTokens ?? 0) > 0
+							) {
+								const envelopeClaim = claimTurnBudget(
+									_input.sessionID,
+									'guidance-carrier-fence',
+									options.reservedEnvelopeTokens ?? 0,
+									{
+										localMaxTokens: options.reservedEnvelopeTokens,
+										surface: 'messages',
+									},
+								);
+								if (envelopeClaim.ceilingActive) {
+									reservedEnvelopeTokens = envelopeClaim.granted;
+								}
+							}
 						}
 
 						// (#1849 G) Linked-cohort identity line for the architect. The line
@@ -1172,7 +1228,7 @@ export function createSystemEnhancerHook(
 										output.system.push(
 											`[linked-knowledge] cohort=${cohortId} ${health}. A shared knowledge store exists across this cohort's worktrees; retrieval and receipts flow through it.`,
 										);
-										// #2107 §2: this direct system-surface push bypasses
+										// #2107 §2: this direct surface push bypasses
 										// tryInject; record its emission under its own producer so the
 										// final accounting attributes it (do NOT also count it in
 										// injectedTokens — that would double-count the surface).
@@ -1183,7 +1239,7 @@ export function createSystemEnhancerHook(
 												`[linked-knowledge] cohort=${cohortId} ${health}. A shared knowledge store exists across this cohort's worktrees; retrieval and receipts flow through it.`,
 											),
 											0,
-											'system',
+											surface,
 										);
 									} else {
 										// (#BOT-HIGH-1) Cohort line skipped: cache miss on turn 1
@@ -1240,7 +1296,10 @@ export function createSystemEnhancerHook(
 						const allocation = allocateInjectionBudget(maxInjectionTokens, 0, {
 							totalBudgetTokens: unifiedBudget,
 						});
-						seAllocation = allocation.systemEnhancerTokens;
+						seAllocation = Math.max(
+							0,
+							allocation.systemEnhancerTokens - reservedEnvelopeTokens,
+						);
 					} else {
 						seAllocation = maxInjectionTokens;
 					}
@@ -1335,6 +1394,7 @@ export function createSystemEnhancerHook(
 							directory,
 							plan,
 							_input.sessionID,
+							surface,
 						);
 						const mode = await detectArchitectMode(directory, planReadCache);
 						let planContent: string | null = null;
@@ -1938,7 +1998,7 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 										toolCallCount: sessionToolCalls,
 									});
 									if (tryInject(learningNudge)) {
-										recordRealtimeLearningNudge(sessionId_retro);
+										commitRealtimeLearningNudge(sessionId_retro);
 									}
 								}
 							}
@@ -2227,6 +2287,7 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 						directory,
 						plan,
 						_input.sessionID,
+						surface,
 					);
 					let currentPhase: string | null = null;
 					let currentTask: string | null = null;
@@ -2958,7 +3019,7 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 							candidate.id.startsWith(REALTIME_LEARNING_NUDGE_ID_PREFIX) &&
 							_input.sessionID
 						) {
-							recordRealtimeLearningNudge(_input.sessionID);
+							commitRealtimeLearningNudge(_input.sessionID);
 						}
 					}
 
@@ -3068,14 +3129,14 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 							'system-enhancer',
 							actualDemand,
 							injectedTokens,
-							'system',
+							surface,
 						);
 						recordProducerEmission(
 							_input.sessionID,
 							'system-enhancer',
 							injectedTokens,
 							Math.max(0, actualDemand - injectedTokens),
-							'system',
+							surface,
 						);
 					}
 

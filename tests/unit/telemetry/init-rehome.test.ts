@@ -137,7 +137,7 @@ describe('telemetry re-home on directory change (#2472 W9)', () => {
 		expect(() => initTelemetry(dirB)).not.toThrow();
 		emit('session_started', { sessionId: 'same-dir-2' });
 
-		const content = await readIfExists(telemetryPath(dirB));
+		const content = await waitForContent(telemetryPath(dirB), 'same-dir-2');
 		expect(content).toContain('same-dir-1');
 		expect(content).toContain('same-dir-2');
 		// No second project ever initialized — dirA was never touched.

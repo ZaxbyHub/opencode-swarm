@@ -20,6 +20,9 @@
  *    the memory record's createdAt/updatedAt, the recall bundle id
  *    (`bundle_<timestamp>_<hash>`), and the recency-scored `age=` field are
  *    identical on every derivation;
+ *  - the project config explicitly pins `execution_mode: "balanced"`, so a
+ *    user-level/global config cannot change the meaningful planning-profile
+ *    directive in the architect-session carrier;
  *  - TWO per-run random tokens are normalized to placeholders in BOTH the
  *    derived capture and the fixture text:
  *      1. `trace_id: <uuid>` — the knowledge retrieval trace id is a fresh
@@ -30,6 +33,10 @@
  *         the temp project's directory basename, which differs on every run
  *         (no absolute temp path may appear in the fixture, so the id cannot
  *         be pinned — its normalized shape is asserted instead).
+ *    3. the environment-dependent `[PRE-FLIGHT ADVISORY]` missing-binary list
+ *       is normalized to one explicit placeholder; its fixed header,
+ *       placeholder, and following command-rule marker remain ordered and
+ *       asserted below;
  *    Everything else (all directive bodies, fences, ordering, budgets) is
  *    compared byte-for-byte;
  *  - the fixture serializes ONLY the rendered structure — one `{ role, text }`
@@ -91,11 +98,23 @@ const CLOCK_OPTIONS = { fixedNow: FIXED_NOW, isoNow: FIXED_ISO } as const;
 const TRACE_ID_PATTERN =
 	/(trace_id: )[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 const MEMORY_ID_PATTERN = /(mem_)[0-9a-f]{16}/g;
+const PREFLIGHT_ADVISORY_HEADER =
+	'[PRE-FLIGHT ADVISORY] The following Class 3 tool binaries were not found on PATH at session start.\n' +
+	'These tools will soft-skip at invocation. Plan tasks accordingly.';
+const PREFLIGHT_ADVISORY_PLACEHOLDER =
+	'- MISSING BINARY: <machine-dependent tool list>';
+const PREFLIGHT_ADVISORY_RULE_MARKER = '[opencode-swarm:swarm-command-rule]';
+const PREFLIGHT_ADVISORY_LIST_PATTERN =
+	/(\[PRE-FLIGHT ADVISORY\] The following Class 3 tool binaries were not found on PATH at session start\.\nThese tools will soft-skip at invocation\. Plan tasks accordingly\.\n)(?:- MISSING BINARY: [^\n]+\n)+/g;
 
 function normalizeRenderedText(text: string): string {
 	return text
 		.replace(TRACE_ID_PATTERN, '$1<trace-id>')
-		.replace(MEMORY_ID_PATTERN, '$1<record-id>');
+		.replace(MEMORY_ID_PATTERN, '$1<record-id>')
+		.replace(
+			PREFLIGHT_ADVISORY_LIST_PATTERN,
+			`$1${PREFLIGHT_ADVISORY_PLACEHOLDER}\n`,
+		);
 }
 
 function userMessage(text: string, id: string): HostPartsMessage {
@@ -211,6 +230,8 @@ export async function deriveCapturedRequest(): Promise<CapturedRequest> {
 		await seedMemoryRecordAsync(directory, SESSION_ID);
 
 		const plugin = await bootKnowledgeHost(directory, {
+			execution_mode: 'balanced',
+			context_budget: { scoring: { enabled: false } },
 			memory: { enabled: true },
 			guardrails: { enabled: true },
 		});
@@ -278,6 +299,9 @@ describe('captured provider request parity (issue #2526 AC2)', () => {
 		const fixture = JSON.parse(fixtureRaw) as CapturedRequest;
 
 		const derived = await deriveCapturedRequest();
+		// Issue #2759 keeps the established transcript prefix intact and stages
+		// changing guidance as trailing user-role carriers; deep equality below
+		// remains the non-vacuous ordering and content guard.
 
 		expect(derived.pinnedHostVersion).toBe('1.18.3');
 		expect(fixture.pinnedHostVersion).toBe('1.18.3');
@@ -289,6 +313,37 @@ describe('captured provider request parity (issue #2526 AC2)', () => {
 		for (const keyword of fixture.assertionKeywords) {
 			expect(joined).toContain(keyword);
 		}
+		const architectSession = derived.renderedMessages.find((message) =>
+			message.text.includes('kind="architect-session"'),
+		);
+		expect(architectSession?.role).toBe('user');
+		expect(architectSession?.text).toContain(PREFLIGHT_ADVISORY_HEADER);
+		expect(architectSession?.text).toContain(PREFLIGHT_ADVISORY_PLACEHOLDER);
+		expect(architectSession?.text).toContain(PREFLIGHT_ADVISORY_RULE_MARKER);
+		const advisoryStart = architectSession?.text.indexOf(
+			PREFLIGHT_ADVISORY_HEADER,
+		);
+		const placeholderStart = architectSession?.text.indexOf(
+			PREFLIGHT_ADVISORY_PLACEHOLDER,
+		);
+		const ruleMarkerStart = architectSession?.text.indexOf(
+			PREFLIGHT_ADVISORY_RULE_MARKER,
+		);
+		expect(advisoryStart).toBeGreaterThanOrEqual(0);
+		expect(
+			architectSession?.text.slice(
+				advisoryStart! + PREFLIGHT_ADVISORY_HEADER.length,
+				placeholderStart,
+			),
+		).toBe('\n');
+		expect(placeholderStart).toBeGreaterThan(advisoryStart!);
+		expect(ruleMarkerStart).toBeGreaterThan(placeholderStart!);
+		expect(
+			architectSession?.text.slice(
+				placeholderStart! + PREFLIGHT_ADVISORY_PLACEHOLDER.length,
+				ruleMarkerStart,
+			),
+		).toBe('\n\n');
 		expect(fixture.assertionKeywords).toEqual([
 			'DEGRADED:',
 			KEYWORD,

@@ -19,6 +19,7 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../src/hooks/knowledge-types.js';
+import { buildGuidanceCarrier } from '../../src/hooks/system-guidance-carrier.js';
 // (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
 // last user message's info.agent (fallback) — never from a role:'system'
 // message. Fixtures set swarmState.activeAgent and stamp a consistent
@@ -230,6 +231,23 @@ describe('Knowledge injector budget regression', () => {
 		expect(after.info.role).toBe('user');
 		// And it must be the last element
 		expect(injectedIdx + 1).toBe(output.messages.length - 1);
+	});
+
+	it('derives recency from the real user message when a guidance carrier trails it', async () => {
+		const hook = createKnowledgeInjectorHook(tempDir, CONFIG);
+		const messages = makeMessages(2_000);
+		const carrier = buildGuidanceCarrier(
+			'architect-session',
+			'[PER-STEP GUIDANCE THAT IS NOT USER SPEECH]',
+		);
+		expect(carrier).not.toBeNull();
+		messages.push(carrier as MessageWithParts);
+
+		await hook({} as Record<string, never>, { messages });
+
+		const inserted = findInjectedMessage(messages);
+		expect(inserted).toBeDefined();
+		expect(messages.indexOf(inserted as MessageWithParts)).toBe(1);
 	});
 
 	// -----------------------------------------------------------------------

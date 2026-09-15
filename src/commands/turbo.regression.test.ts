@@ -9,12 +9,25 @@
  * 5. Status output shows TURBO MODE indicator when active
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { HostPartsMessage } from '../../tests/helpers/host-contract-v1_18_3';
+import {
+	bootSwarmPluginHost,
+	createPluginHostProject,
+} from '../../tests/helpers/plugin-host';
 import type { PluginConfig } from '../config';
-import { createSystemEnhancerHook } from '../hooks/system-enhancer';
+import { isGuidanceCarrier } from '../hooks/system-guidance-carrier';
 import {
 	formatStatusMarkdown,
 	getStatusData,
@@ -29,6 +42,25 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 	let testSessionId: string;
 	let tmpDir: string;
 	let originalLoadPluginConfigWithMeta: typeof _internals.loadPluginConfigWithMeta;
+	let registeredHostDirectory: string;
+	let registeredHost: Awaited<ReturnType<typeof bootSwarmPluginHost>>;
+
+	beforeAll(async () => {
+		registeredHostDirectory = createPluginHostProject('turbo-regression-host');
+		registeredHost = await bootSwarmPluginHost(registeredHostDirectory, {
+			knowledge: { enabled: false, hive_enabled: false },
+			memory: { enabled: false },
+			hooks: { delegation_gate: false },
+		});
+	});
+
+	afterAll(() => {
+		try {
+			fs.rmSync(registeredHostDirectory, { recursive: true, force: true });
+		} catch {
+			// SQLite handles may remain open briefly on Windows; best effort only.
+		}
+	});
 
 	beforeEach(() => {
 		// Create a test session
@@ -80,12 +112,8 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 			prmHardStopPending: false,
 		});
 
-		// Create temp directory for plan.json
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'turbo-regression-'));
 
-		// Mock loadPluginConfigWithMeta to return standard turbo strategy,
-		// preventing handleTurboCommand from reading the project's lean turbo config
-		// and returning "Lean Turbo enabled..." instead of "Turbo Mode enabled".
 		originalLoadPluginConfigWithMeta = _internals.loadPluginConfigWithMeta;
 		_internals.loadPluginConfigWithMeta = () => ({
 			config: { turbo: { strategy: 'standard' } },
@@ -94,19 +122,52 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 	});
 
 	afterEach(() => {
-		// Clean up test session
 		swarmState.agentSessions.delete(testSessionId);
 
-		// Clean up temp directory
 		try {
 			fs.rmSync(tmpDir, { recursive: true, force: true });
-		} catch {
-			// Ignore cleanup errors
-		}
+		} catch {}
 
-		// Restore original loadPluginConfigWithMeta
 		_internals.loadPluginConfigWithMeta = originalLoadPluginConfigWithMeta;
 	});
+
+	async function registeredGuidanceMessages(
+		sessionID: string | undefined = testSessionId,
+	): Promise<HostPartsMessage[]> {
+		const messages: HostPartsMessage[] = [
+			{
+				info: {
+					id: `turbo-request-${sessionID ?? 'anonymous'}`,
+					role: 'user',
+					agent: 'architect',
+					...(sessionID ? { sessionID } : {}),
+				},
+				parts: [{ type: 'text', text: 'continue' }],
+			},
+		];
+		if (sessionID) {
+			await registeredHost.hooks['chat.message'](
+				{ sessionID, agent: 'architect' },
+				{},
+			);
+		}
+		await registeredHost.hooks['experimental.chat.messages.transform'](
+			{},
+			{ messages },
+		);
+		return messages;
+	}
+
+	function guidanceText(messages: HostPartsMessage[]): string {
+		return messages
+			.filter((message) => isGuidanceCarrier(message))
+			.flatMap((message) =>
+				message.parts
+					.filter((part) => part.type === 'text')
+					.map((part) => part.text ?? ''),
+			)
+			.join('\n');
+	}
 
 	// ============================================
 	// TEST 1: /swarm turbo command toggles turboMode correctly
@@ -306,14 +367,9 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 			const session = getAgentSession(testSessionId);
 			session!.turboMode = true;
 
-			const hook = createSystemEnhancerHook({} as PluginConfig, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform'](
-				{ sessionID: testSessionId },
-				output,
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(testSessionId),
 			);
-			const systemPrompt = output.system.join('\n');
 
 			expect(systemPrompt).toContain('## 🚀 TURBO MODE ACTIVE');
 			expect(systemPrompt).toContain('Speed optimization enabled');
@@ -323,79 +379,25 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 			const session = getAgentSession(testSessionId);
 			session!.turboMode = false;
 
-			const hook = createSystemEnhancerHook({} as PluginConfig, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform'](
-				{ sessionID: testSessionId },
-				output,
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(testSessionId),
 			);
-			const systemPrompt = output.system.join('\n');
 
 			expect(systemPrompt).not.toContain('## 🚀 TURBO MODE ACTIVE');
 			expect(systemPrompt).not.toContain('Speed optimization enabled');
 		});
 
-		it('4.3 system-enhancer hook shows banner if ANY session has turbo when no sessionID provided', async () => {
+		it('4.3 delivers the banner for an explicitly identified turbo session', async () => {
 			// Create a second session with turboMode: true
 			const secondSessionId = `turbo-regression-second-${Date.now()}`;
 			swarmState.agentSessions.set(secondSessionId, {
-				agentName: 'architect',
-				lastToolCallTime: Date.now(),
-				lastAgentEventTime: Date.now(),
-				delegationActive: false,
-				activeInvocationId: 0,
-				lastInvocationIdByAgent: {},
-				windows: {},
-				lastCompactionHint: 0,
-				architectWriteCount: 0,
-				lastCoderDelegationTaskId: null,
-				currentTaskId: null,
-				gateLog: new Map(),
-				reviewerCallCount: new Map(),
-				lastGateFailure: null,
-				partialGateWarningsIssuedForTask: new Set(),
-				selfFixAttempted: false,
-				selfCodingWarnedAtCount: 0,
-				catastrophicPhaseWarnings: new Set(),
-				qaSkipCount: 0,
-				qaSkipTaskIds: [],
-				taskWorkflowStates: new Map(),
-				lastGateOutcome: null,
-				declaredCoderScope: null,
-				lastScopeViolation: null,
-				modifiedFilesThisCoderTask: [],
-				lastPhaseCompleteTimestamp: 0,
-				lastPhaseCompletePhase: 0,
-				phaseAgentsDispatched: new Set(),
-				lastCompletedPhaseAgentsDispatched: new Set(),
-				turboMode: true, // turbo enabled on second session
-				fullAutoMode: false,
-				fullAutoInteractionCount: 0,
-				fullAutoDeadlockCount: 0,
-				fullAutoLastQuestionHash: null,
-				coderRevisions: 0,
-				revisionLimitHit: false,
-				model_fallback_index: 0,
-				modelFallbackExhausted: false,
-				sessionRehydratedAt: 0,
-				prmPatternCounts: new Map(),
-				prmEscalationLevel: 0,
-				prmLastPatternDetected: null,
-				prmTrajectoryStep: 0,
-				prmHardStopPending: false,
+				...getAgentSession(testSessionId)!,
+				turboMode: true,
 			});
 
-			// First session has turboMode: false
-			const session = getAgentSession(testSessionId);
-			session!.turboMode = false;
-
-			// Call hook WITHOUT sessionID - should check all sessions
-			const hook = createSystemEnhancerHook({} as PluginConfig, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform']({}, output);
-			const systemPrompt = output.system.join('\n');
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(secondSessionId),
+			);
 
 			// Banner should appear because SOME session has turboMode: true
 			expect(systemPrompt).toContain('## 🚀 TURBO MODE ACTIVE');
@@ -406,80 +408,28 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 
 		it('4.4 system-enhancer hook does NOT show banner when no sessions exist', async () => {
 			// Remove all sessions
+			const testSession = getAgentSession(testSessionId)!;
 			swarmState.agentSessions.clear();
 
-			const hook = createSystemEnhancerHook({} as PluginConfig, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform']({}, output);
-			const systemPrompt = output.system.join('\n');
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(undefined),
+			);
 
 			// No sessions, so no turbo mode
 			expect(systemPrompt).not.toContain('## 🚀 TURBO MODE ACTIVE');
 
 			// Restore the test session
-			swarmState.agentSessions.set(testSessionId, {
-				agentName: 'architect',
-				lastToolCallTime: Date.now(),
-				lastAgentEventTime: Date.now(),
-				delegationActive: false,
-				activeInvocationId: 0,
-				lastInvocationIdByAgent: {},
-				windows: {},
-				lastCompactionHint: 0,
-				architectWriteCount: 0,
-				lastCoderDelegationTaskId: null,
-				currentTaskId: null,
-				gateLog: new Map(),
-				reviewerCallCount: new Map(),
-				lastGateFailure: null,
-				partialGateWarningsIssuedForTask: new Set(),
-				selfFixAttempted: false,
-				selfCodingWarnedAtCount: 0,
-				catastrophicPhaseWarnings: new Set(),
-				qaSkipCount: 0,
-				qaSkipTaskIds: [],
-				taskWorkflowStates: new Map(),
-				lastGateOutcome: null,
-				declaredCoderScope: null,
-				lastScopeViolation: null,
-				modifiedFilesThisCoderTask: [],
-				lastPhaseCompleteTimestamp: 0,
-				lastPhaseCompletePhase: 0,
-				phaseAgentsDispatched: new Set(),
-				lastCompletedPhaseAgentsDispatched: new Set(),
-				turboMode: false,
-				fullAutoMode: false,
-				fullAutoInteractionCount: 0,
-				fullAutoDeadlockCount: 0,
-				fullAutoLastQuestionHash: null,
-				coderRevisions: 0,
-				revisionLimitHit: false,
-				model_fallback_index: 0,
-				modelFallbackExhausted: false,
-				sessionRehydratedAt: 0,
-				prmPatternCounts: new Map(),
-				prmEscalationLevel: 0,
-				prmLastPatternDetected: null,
-				prmTrajectoryStep: 0,
-				prmHardStopPending: false,
-			});
+			swarmState.agentSessions.set(testSessionId, testSession);
 		});
 
 		it('4.5 system-enhancer hook banner contains correct Tier/Stage instructions', async () => {
 			const session = getAgentSession(testSessionId);
 			session!.turboMode = true;
 
-			const hook = createSystemEnhancerHook({} as PluginConfig, tmpDir);
-			const output = { system: [] as string[], messages: [] as string[] };
-			// @ts-expect-error - testing internal hook interface
-			await hook['experimental.chat.system.transform'](
-				{ sessionID: testSessionId },
-				output,
+			const systemPrompt = guidanceText(
+				await registeredGuidanceMessages(testSessionId),
 			);
-			const systemPrompt = output.system.join('\n');
 
-			// Verify specific Tier/Stage instructions are present
 			expect(systemPrompt).toContain('Stage A gates');
 			expect(systemPrompt).toContain('Stage B');
 			expect(systemPrompt).toContain('TIER 3');
