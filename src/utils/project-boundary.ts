@@ -87,6 +87,77 @@ type ProjectRootProbeDependencies = Pick<
 	'realpathSync' | 'statSync'
 >;
 
+export type { ProjectRootProbeDependencies };
+
+/**
+ * Outcome of the shared boundary walk used by both `assertProjectRoot` and
+ * `resolveProjectRootDecision`, so the two consumers cannot drift.
+ */
+type BoundaryWalkResult =
+	| { outcome: 'marker-root' }
+	| { outcome: 'claimed'; ancestor: string }
+	| { outcome: 'unclaimed' }
+	| {
+			outcome: 'fail-closed';
+			reason: 'depth' | 'ancestor-swarm' | 'ancestor-indicators';
+			path?: string;
+	  };
+
+function walkProjectBoundary(
+	resolved: string,
+	dependencies: ProjectRootProbeDependencies,
+): BoundaryWalkResult {
+	if (hasExplicitProjectBoundary(resolved)) return { outcome: 'marker-root' };
+
+	let current = resolved;
+	let depth = 0;
+	while (true) {
+		if (depth >= MAX_PROJECT_ROOT_DEPTH) {
+			return { outcome: 'fail-closed', reason: 'depth' };
+		}
+		depth++;
+		const parent = path.dirname(current);
+		if (parent === current) return { outcome: 'unclaimed' };
+		if (path.dirname(parent) === parent) {
+			current = parent;
+			continue;
+		}
+
+		const parentSwarm = path.join(parent, '.swarm');
+		let parentSwarmStat: fs.Stats;
+		try {
+			parentSwarmStat = dependencies.statSync(parentSwarm);
+		} catch (error) {
+			if (isMissingPathError(error)) {
+				current = parent;
+				continue;
+			}
+			return {
+				outcome: 'fail-closed',
+				reason: 'ancestor-swarm',
+				path: parentSwarm,
+			};
+		}
+
+		if (parentSwarmStat.isDirectory()) {
+			const indicatorState = projectIndicatorState(parent, dependencies, {
+				allowConfigOnly: !isWeakConfigContainerRoot(parent, dependencies),
+			});
+			if (indicatorState === 'inaccessible') {
+				return {
+					outcome: 'fail-closed',
+					reason: 'ancestor-indicators',
+					path: parent,
+				};
+			}
+			if (indicatorState === 'present') {
+				return { outcome: 'claimed', ancestor: parent };
+			}
+		}
+		current = parent;
+	}
+}
+
 function isMissingPathError(error: unknown): boolean {
 	const code = (error as NodeJS.ErrnoException | undefined)?.code;
 	return code === 'ENOENT' || code === 'ENOTDIR';
@@ -157,67 +228,95 @@ export function assertProjectRoot(
 			`Cannot verify project root for "${directory}" — directory may not exist or is inaccessible`,
 		);
 	}
-	if (hasExplicitProjectBoundary(resolved)) return;
-
-	let current = resolved;
-	let depth = 0;
-	while (true) {
-		if (depth >= MAX_PROJECT_ROOT_DEPTH) {
-			warn(
-				`[project-boundary] Ancestor search exceeded ${MAX_PROJECT_ROOT_DEPTH} levels for "${resolved}" — failing closed`,
-			);
-			throw new Error(
-				`Cannot verify project root for "${resolved}" — ancestor search exceeded ${MAX_PROJECT_ROOT_DEPTH} levels`,
-			);
-		}
-		depth++;
-		const parent = path.dirname(current);
-		if (parent === current) break;
-		if (path.dirname(parent) === parent) {
-			current = parent;
-			continue;
-		}
-
-		const parentSwarm = path.join(parent, '.swarm');
-		let parentSwarmStat: fs.Stats;
-		try {
-			parentSwarmStat = dependencies.statSync(parentSwarm);
-		} catch (error) {
-			if (isMissingPathError(error)) {
-				current = parent;
-				continue;
-			}
-			warn(
-				`[project-boundary] Cannot inspect ancestor state "${parentSwarm}" — failing closed`,
-			);
-			throw new Error(
-				`Cannot verify project root for "${resolved}" — ancestor state "${parentSwarm}" is inaccessible`,
-			);
-		}
-
-		if (parentSwarmStat.isDirectory()) {
-			const indicatorState = projectIndicatorState(parent, dependencies, {
-				allowConfigOnly: !isWeakConfigContainerRoot(parent, dependencies),
-			});
-			if (indicatorState === 'inaccessible') {
-				warn(
-					`[project-boundary] Cannot inspect project indicators in ancestor "${parent}" — failing closed`,
-				);
-				throw new Error(
-					`Cannot verify project root for "${resolved}" — project indicators in ancestor "${parent}" are inaccessible`,
-				);
-			}
-			if (indicatorState === 'present') {
-				warn(
-					`[project-boundary] Rejecting write to subdirectory "${resolved}" — parent "${parent}" already contains .swarm/`,
-				);
-				throw new Error(
-					`Cannot write ${artifactLabel} in "${resolved}" — parent directory "${parent}" already contains a .swarm/ folder. Runtime state must be written to the project root.`,
-				);
-			}
-		}
-		current = parent;
+	const walk = walkProjectBoundary(resolved, dependencies);
+	if (walk.outcome === 'marker-root' || walk.outcome === 'unclaimed') return;
+	if (walk.outcome === 'claimed') {
+		warn(
+			`[project-boundary] Rejecting write to subdirectory "${resolved}" — parent "${walk.ancestor}" already contains .swarm/`,
+		);
+		throw new Error(
+			`Cannot write ${artifactLabel} in "${resolved}" — parent directory "${walk.ancestor}" already contains a .swarm/ folder. Runtime state must be written to the project root.`,
+		);
 	}
+	if (walk.reason === 'depth') {
+		warn(
+			`[project-boundary] Ancestor search exceeded ${MAX_PROJECT_ROOT_DEPTH} levels for "${resolved}" — failing closed`,
+		);
+		throw new Error(
+			`Cannot verify project root for "${resolved}" — ancestor search exceeded ${MAX_PROJECT_ROOT_DEPTH} levels`,
+		);
+	}
+	if (walk.reason === 'ancestor-swarm') {
+		warn(
+			`[project-boundary] Cannot inspect ancestor state "${walk.path}" — failing closed`,
+		);
+		throw new Error(
+			`Cannot verify project root for "${resolved}" — ancestor state "${walk.path}" is inaccessible`,
+		);
+	}
+	warn(
+		`[project-boundary] Cannot inspect project indicators in ancestor "${walk.path}" — failing closed`,
+	);
+	throw new Error(
+		`Cannot verify project root for "${resolved}" — project indicators in ancestor "${walk.path}" are inaccessible`,
+	);
+}
+
+/**
+ * Decision form of the same boundary policy (#2679): non-throwing, for the
+ * bootstrap path where the outcome must (a) name the owning project root for an
+ * ordinary child so every init/first-write consumer can target it, and
+ * (b) fail closed (no runtime-state writes) when ownership cannot be
+ * determined, while the plugin manifest stays fail-open.
+ *
+ * - `root`: the directory is a standalone root or declares its own boundary
+ *   (`.git` file/dir, `.opencode` dir) — use it verbatim (canonicalized).
+ * - `redirect`: an ancestor owns `.swarm/` plus a project indicator — use
+ *   `owningRoot` for all project-surface reads/writes and surface an
+ *   actionable hint naming it.
+ * - `fail-closed`: ownership is indeterminable (inaccessible ancestor probes
+ *   or depth exhaustion) — write no runtime state anywhere.
+ *
+ * Silent by design: messaging is the caller's job (`assertProjectRoot` keeps
+ * its warn/throw contract; bootstrap emits one bounded operational hint).
+ */
+export type ProjectRootDecision =
+	| { kind: 'root'; directory: string }
+	| { kind: 'redirect'; directory: string; owningRoot: string }
+	| { kind: 'fail-closed'; directory: string; reason: string };
+
+export function resolveProjectRootDecision(
+	directory: string,
+	dependencies: ProjectRootProbeDependencies = fs,
+): ProjectRootDecision {
+	let resolved: string;
+	try {
+		resolved = dependencies.realpathSync(directory);
+	} catch {
+		return {
+			kind: 'fail-closed',
+			directory,
+			reason: `cannot canonicalize directory "${directory}" — it may not exist or is inaccessible`,
+		};
+	}
+	const walk = walkProjectBoundary(resolved, dependencies);
+	if (walk.outcome === 'marker-root' || walk.outcome === 'unclaimed') {
+		return { kind: 'root', directory: resolved };
+	}
+	if (walk.outcome === 'claimed') {
+		return {
+			kind: 'redirect',
+			directory: resolved,
+			owningRoot: walk.ancestor,
+		};
+	}
+	const reason =
+		walk.reason === 'depth'
+			? `ancestor search exceeded ${MAX_PROJECT_ROOT_DEPTH} levels`
+			: walk.reason === 'ancestor-swarm'
+				? `ancestor state "${walk.path}" is inaccessible`
+				: `project indicators in ancestor "${walk.path}" are inaccessible`;
+	return { kind: 'fail-closed', directory: resolved, reason };
 }
 
 /** Narrow filesystem seam for deterministic marker error tests. */
