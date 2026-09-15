@@ -92,3 +92,73 @@ describe('Persistence-free compute cores (#2499 R1)', () => {
 		expect(fs.existsSync(path.join(root, '.swarm'))).toBe(false);
 	});
 });
+
+describe('MCP project-root ownership (#2679)', () => {
+	test('an ordinary child of a parent owning .git + .swarm redirects to the parent root', () => {
+		const base = canonicalMkdtemp('mcp-root-2679-redirect-');
+		const parent = path.join(base, 'outer');
+		const child = path.join(parent, 'child');
+		fs.mkdirSync(path.join(parent, '.git'), { recursive: true });
+		fs.mkdirSync(path.join(parent, '.swarm'), { recursive: true });
+		fs.mkdirSync(child, { recursive: true });
+
+		const logged: string[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => {
+			logged.push(
+				args.map((a) => (typeof a === 'string' ? a : String(a))).join(' '),
+			);
+		};
+		let resolved: { root: string; redirectedFrom?: string } | { error: string };
+		try {
+			resolved = resolveMcpRoot(child);
+		} finally {
+			console.log = originalLog;
+		}
+
+		expect('error' in resolved).toBe(false);
+		if ('error' in resolved) return;
+		// The resolver canonicalizes the served root; compare via realpath on both sides.
+		expect(fs.realpathSync(resolved.root)).toBe(fs.realpathSync(parent));
+		expect(resolved.redirectedFrom).toBe(child);
+		// Startup line naming the served root (operator sees the redirect).
+		expect(
+			logged.some(
+				(line) =>
+					line.includes('serving the owning project root') &&
+					line.includes(parent),
+			),
+		).toBe(true);
+	});
+
+	test('fails closed when the claiming ancestor is deeper than the walk budget', () => {
+		const base = canonicalMkdtemp('mcp-root-2679-depth-');
+		const parent = path.join(base, 'outer');
+		fs.mkdirSync(path.join(parent, '.git'), { recursive: true });
+		fs.mkdirSync(path.join(parent, '.swarm'), { recursive: true });
+		// The walk counts upward until it finds the nearest claiming ancestor,
+		// so a chain deeper than MAX_PROJECT_ROOT_DEPTH (20) levels under the
+		// claiming parent fails closed with the 'exceeded' reason.
+		let deepest = parent;
+		for (let i = 0; i < 25; i += 1) {
+			deepest = path.join(deepest, `level-${i}`);
+		}
+		fs.mkdirSync(deepest, { recursive: true });
+
+		const resolved = resolveMcpRoot(deepest);
+		expect('error' in resolved).toBe(true);
+		if (!('error' in resolved)) return;
+		expect(resolved.error).toContain('exceeded');
+	});
+
+	test('a plain root with .git passes through unchanged', () => {
+		const root = canonicalMkdtemp('mcp-root-2679-git-');
+		fs.mkdirSync(path.join(root, '.git'), { recursive: true });
+
+		const resolved = resolveMcpRoot(root);
+		expect('root' in resolved).toBe(true);
+		if (!('root' in resolved)) return;
+		expect(resolved.root).toBe(root);
+		expect('redirectedFrom' in resolved).toBe(false);
+	});
+});

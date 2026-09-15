@@ -16,6 +16,7 @@ import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import type { RunMcpServerOptions } from '../mcp/server.js';
 import { validateProjectDirectory } from '../utils/path-security.js';
+import { resolveProjectRootDecision } from '../utils/project-boundary.js';
 
 export interface McpServeArgs {
 	root: string;
@@ -94,7 +95,7 @@ export function parseMcpServeArgs(
 /** Resolve + fail-closed validate the configured project root. */
 export function resolveMcpRoot(
 	input: string,
-): { root: string } | { error: string } {
+): { root: string; redirectedFrom?: string } | { error: string } {
 	const resolved = path.isAbsolute(input)
 		? path.normalize(input)
 		: path.resolve(process.cwd(), input);
@@ -107,6 +108,24 @@ export function resolveMcpRoot(
 	}
 	if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
 		return { error: `invalid --dir: not an existing directory: ${resolved}` };
+	}
+	// Project-root ownership (#2679): apply the same boundary policy as plugin
+	// bootstrap. An ordinary child of a project root that owns `.swarm/` state
+	// resolves to the parent (with a startup line naming the served root);
+	// indeterminable ownership fails closed instead of writing state somewhere
+	// unverifiable.
+	const decision = resolveProjectRootDecision(resolved);
+	if (decision.kind === 'fail-closed') {
+		return {
+			error: `invalid --dir: cannot verify project root for "${resolved}" — ${decision.reason}`,
+		};
+	}
+	if (decision.kind === 'redirect') {
+		// biome-ignore lint/suspicious/noConsole: operator must see which project root the MCP server actually serves after the #2679 redirect
+		console.log(
+			`[opencode-swarm] mcp serve: --dir "${resolved}" is an ordinary subdirectory — serving the owning project root "${decision.owningRoot}" (state and config live there).`,
+		);
+		return { root: decision.owningRoot, redirectedFrom: resolved };
 	}
 	return { root: resolved };
 }
