@@ -4555,6 +4555,7 @@ export const EXEMPT_WRITER_MODULES: Readonly<Record<string, string>> = Object.fr
 	'src/memory/jsonl-migration.ts': 'legacy JSONL→SQLite migration executor — memory-sqlite row owns the destination',
 	'src/retention/jsonl-cap.ts': 'shared retention plumbing (appendCappedJsonl/readTailJsonl, issue #2483 §1) — callers own the streams; their rows carry the cap citations',
 	'src/evaluation/retrieval-quality.ts': 'temporary bounded evaluation artifacts under os.tmpdir — always removed in finally and never durable project state',
+	'src/index.ts': 'bootstrap-root redirect advisory record (#2679): one bounded best-effort .swarm/advisories/bootstrap-root-redirect.json per redirected boot, mirrored to console + /swarm diagnose — no durable stream, no reader, never enumerated',
 });
 
 /** Sequence window for fix-in-issue dispositions (issue #2036 amendment clause). */
