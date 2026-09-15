@@ -15,6 +15,13 @@
 
 `AGENTS.md` and `docs/engineering-invariants.md` together are the single source of truth for repository invariants. When `CLAUDE.md`, `contributing.md`, `TESTING.md`, or any skill conflicts with this file, **this file wins**; that skill or doc is out of date and must be reconciled.
 
+## Repository-history cache reuse
+
+- Before creating or rebuilding any repository-derived cache or index, agents must first search the current worktree and known sibling/source repository locations for an existing compatible artifact.
+- Before initializing, rebuilding, or performing a full sync of a ZaxbyGraph issue/PR database, search the current worktree and known sibling/source repository locations for an existing cache first.
+- Validate any discovered cache against the requested repository and inspect its sync metadata before reuse. When it is compatible, reuse it in place if writable or copy it into the current worktree and run only an incremental sync.
+- Build a new cache from scratch only when no compatible, usable cache exists. Record that discovery result before starting the rebuild so agents do not repeat avoidable GitHub API work or consume rate limits unnecessarily.
+
 ## Prime directive
 
 Preserve the runtime contracts that keep the plugin **loadable, portable, bounded, recoverable, and safe** across Windows, macOS, Linux, GUI, TUI, Bun, and Node-hosted plugin contexts.

@@ -1,7 +1,7 @@
 /**
  * Phase 1 PR Event Subscribers tests.
  *
- * Tests: registerPrEventSubscribers, handlePrEvent, formatAdvisory.
+ * Tests: handlePrEvent delivery and subscription matching.
  * Uses _internals DI seam for full mock isolation â€” no cross-file pollution.
  *
  * The _internals seam is added to pr-event-subscribers.ts specifically for
@@ -10,19 +10,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-	_internals,
-	type PrEventSubscriberOptions,
-	registerPrEventSubscribers,
-} from '../../../src/background/pr-event-subscribers';
+import { _internals } from '../../../src/background/pr-event-subscribers';
 import type { PrSubscriptionRecord } from '../../../src/background/pr-subscriptions';
 import { acquirePrFeedbackBackgroundLease } from '../../../tests/helpers/pr-feedback-background-lease';
+import { canonicalTmpDir as canonicalTempRoot } from '../../../tests/helpers/tmpdir';
 
 // â”€â”€ Test Fixtures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-const TEST_DIR = path.join(os.tmpdir(), 'pr-event-subscribers-test');
+const TEST_DIR = path.join(canonicalTempRoot(), 'pr-event-subscribers-test');
 
 function makeConfig(
 	overrides: Record<string, unknown> = {},
@@ -147,18 +143,7 @@ function makeMockSession(sessionId: string): {
 
 // â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('PrEventSubscriberOptions â€” construction', () => {
-	test('has expected shape', () => {
-		const opts: PrEventSubscriberOptions = {
-			directory: TEST_DIR,
-			config: makeConfig() as PrEventSubscriberOptions['config'],
-		};
-		expect(opts.directory).toBe(TEST_DIR);
-		expect(opts.config).toBeDefined();
-	});
-});
-
-describe('registerPrEventSubscribers', () => {
+describe('handlePrEvent', () => {
 	beforeEach(async () => {
 		releaseBackground = await acquirePrFeedbackBackgroundLease();
 		setupMocks();
@@ -173,224 +158,7 @@ describe('registerPrEventSubscribers', () => {
 		}
 	});
 
-	test('registers subscribers for all enabled event types', () => {
-		const cleanup = registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig() as PrEventSubscriberOptions['config'],
-		});
-
-		// The legacy 3 flags gate 4 event types: notify_merge_conflict also
-		// gates pr.merge.conflict_resolved. The other flags (review/merged/
-		// closed/ci_success) are unset in makeConfig â†’ skipped.
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(4);
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
-			'pr.ci.failed',
-			expect.any(Function),
-		);
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
-			'pr.new.comment',
-			expect.any(Function),
-		);
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
-			'pr.merge.conflict',
-			expect.any(Function),
-		);
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
-			'pr.merge.conflict_resolved',
-			expect.any(Function),
-		);
-
-		cleanup();
-	});
-
-	test('skips subscriber when notify_ci_failure config flag is false', () => {
-		registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig({
-				notify_ci_failure: false,
-			}) as PrEventSubscriberOptions['config'],
-		});
-
-		// 3 event types subscribed (new_comment + merge_conflict + conflict_resolved)
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(3);
-
-		const subscribedTypes = mockState.busInstance.subscribe.mock.calls.map(
-			(c: unknown[]) => c[0],
-		);
-		expect(subscribedTypes).not.toContain('pr.ci.failed');
-		expect(subscribedTypes).toContain('pr.new.comment');
-		expect(subscribedTypes).toContain('pr.merge.conflict');
-		expect(subscribedTypes).toContain('pr.merge.conflict_resolved');
-	});
-
-	test('skips subscriber when notify_new_comments config flag is false', () => {
-		registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig({
-				notify_new_comments: false,
-			}) as PrEventSubscriberOptions['config'],
-		});
-
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(3);
-		const subscribedTypes = mockState.busInstance.subscribe.mock.calls.map(
-			(c: unknown[]) => c[0],
-		);
-		expect(subscribedTypes).toContain('pr.ci.failed');
-		expect(subscribedTypes).not.toContain('pr.new.comment');
-		expect(subscribedTypes).toContain('pr.merge.conflict');
-		expect(subscribedTypes).toContain('pr.merge.conflict_resolved');
-	});
-
-	test('skips subscriber when notify_merge_conflict config flag is false', () => {
-		registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig({
-				notify_merge_conflict: false,
-			}) as PrEventSubscriberOptions['config'],
-		});
-
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(2);
-		const subscribedTypes = mockState.busInstance.subscribe.mock.calls.map(
-			(c: unknown[]) => c[0],
-		);
-		expect(subscribedTypes).toContain('pr.ci.failed');
-		expect(subscribedTypes).toContain('pr.new.comment');
-		expect(subscribedTypes).not.toContain('pr.merge.conflict');
-		expect(subscribedTypes).not.toContain('pr.merge.conflict_resolved');
-	});
-
-	test('skips all subscribers when all config flags are false', () => {
-		registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig({
-				notify_ci_failure: false,
-				notify_new_comments: false,
-				notify_merge_conflict: false,
-			}) as PrEventSubscriberOptions['config'],
-		});
-
-		expect(mockState.busInstance.subscribe).not.toHaveBeenCalled();
-	});
-
-	test('cleanup function unsubscribes all listeners', () => {
-		const mockUnsubscribe1 = mock(() => {});
-		const mockUnsubscribe2 = mock(() => {});
-		const mockUnsubscribe3 = mock(() => {});
-
-		mockState.busInstance.subscribe
-			.mockReturnValueOnce(mockUnsubscribe1)
-			.mockReturnValueOnce(mockUnsubscribe2)
-			.mockReturnValueOnce(mockUnsubscribe3);
-
-		const cleanup = registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig() as PrEventSubscriberOptions['config'],
-		});
-
-		cleanup();
-
-		expect(mockUnsubscribe1).toHaveBeenCalledTimes(1);
-		expect(mockUnsubscribe2).toHaveBeenCalledTimes(1);
-		expect(mockUnsubscribe3).toHaveBeenCalledTimes(1);
-	});
-});
-
-describe('formatAdvisory', () => {
-	beforeEach(async () => {
-		releaseBackground = await acquirePrFeedbackBackgroundLease();
-		setupMocks();
-	});
-
-	afterEach(() => {
-		try {
-			restoreInternals();
-		} finally {
-			releaseBackground?.();
-			releaseBackground = null;
-		}
-	});
-
-	const ciFailedPayload = {
-		prNumber: 42,
-		repoFullName: 'owner/repo',
-		prUrl: 'https://github.com/owner/repo/pull/42',
-		checkName: 'ci/build',
-		checkState: 'failure',
-		errorMessage: 'Build failed',
-	};
-
-	const newCommentPayload = {
-		prNumber: 42,
-		repoFullName: 'owner/repo',
-		prUrl: 'https://github.com/owner/repo/pull/42',
-		author: 'reviewer',
-		body: 'Looks good!',
-	};
-
-	const mergeConflictPayload = {
-		prNumber: 42,
-		repoFullName: 'owner/repo',
-		prUrl: 'https://github.com/owner/repo/pull/42',
-	};
-
-	test('pr.ci.failed advisory contains dedup token', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1' }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		await _internals.handlePrEvent(
-			{ type: 'pr.ci.failed', payload: ciFailedPayload },
-			TEST_DIR,
-			makeConfig(),
-		);
-
-		expect(session.pendingAdvisoryMessages[0]).toContain(
-			'[pr-monitor:pr.ci.failed:owner/repo#42]',
-		);
-	});
-
-	test('pr.new.comment advisory contains dedup token', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1' }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		await _internals.handlePrEvent(
-			{ type: 'pr.new.comment', payload: newCommentPayload },
-			TEST_DIR,
-			makeConfig(),
-		);
-
-		// B8 (issue #1976): content events (comments/reviews) carry a per-event
-		// identity suffix (@author:hash) before the closing bracket, so assert
-		// the stable token PREFIX rather than the exact per-PR token.
-		expect(session.pendingAdvisoryMessages[0]).toContain(
-			'[pr-monitor:pr.new.comment:owner/repo#42',
-		);
-	});
-
-	test('pr.merge.conflict advisory contains dedup token', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1' }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		await _internals.handlePrEvent(
-			{ type: 'pr.merge.conflict', payload: mergeConflictPayload },
-			TEST_DIR,
-			makeConfig(),
-		);
-
-		expect(session.pendingAdvisoryMessages[0]).toContain(
-			'[pr-monitor:pr.merge.conflict:owner/repo#42]',
-		);
-	});
-
-	test('unknown event type returns null and does not deliver', async () => {
+	test('delivers pr.ci.failed advisory to subscribed session', async () => {
 		const session = makeMockSession('sess1');
 		mockState.listActive.mockResolvedValueOnce([
 			makeSubscription({ sessionID: 'sess1' }),
@@ -399,13 +167,215 @@ describe('formatAdvisory', () => {
 
 		await _internals.handlePrEvent(
 			{
-				type: 'pr.unknown.event',
-				payload: { prNumber: 42, repoFullName: 'owner/repo' },
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					prUrl: 'https://github.com/owner/repo/pull/42',
+					checkName: 'ci/build',
+					checkState: 'failure',
+					errorMessage: 'test error',
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
+		expect(session.pendingAdvisoryMessages[0]).toContain('pr.ci.failed');
+		expect(session.pendingAdvisoryMessages[0]).toContain('ci/build');
+		expect(session.pendingAdvisoryMessages[0]).toContain('failed');
+		expect(session.pendingAdvisoryMessages[0]).toContain(
+			'[pr-monitor:pr.ci.failed:owner/repo#42]',
+		);
+	});
+
+	test('delivers pr.new.comment advisory to subscribed session', async () => {
+		const session = makeMockSession('sess2');
+		mockState.listActive.mockResolvedValueOnce([
+			makeSubscription({
+				sessionID: 'sess2',
+				prNumber: 99,
+				repoFullName: 'org/repo',
+				correlationId: 'sess2::org/repo::99',
+			}),
+		]);
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.new.comment',
+				payload: {
+					prNumber: 99,
+					repoFullName: 'org/repo',
+					prUrl: 'https://github.com/org/repo/pull/99',
+					author: 'reviewer',
+					body: 'LGTM!',
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
+		expect(session.pendingAdvisoryMessages[0]).toContain('pr.new.comment');
+		expect(session.pendingAdvisoryMessages[0]).toContain('@reviewer');
+		expect(session.pendingAdvisoryMessages[0]).toContain('LGTM!');
+		// B8 (issue #1976): content events carry a per-event identity suffix.
+		expect(session.pendingAdvisoryMessages[0]).toContain(
+			'[pr-monitor:pr.new.comment:org/repo#99',
+		);
+	});
+
+	test('issue #1976 B8: N distinct comments on one PR produce N advisories (not 1)', async () => {
+		// The legacy per-PR dedup token collapsed all comments on a PR to a single
+		// advisory (N comments â†’ 1 advisory, Nâˆ’1 silently dropped). The per-event
+		// identity suffix (@author:content-hash) lets distinct comments survive.
+		const session = makeMockSession('sess-b8');
+		mockState.listActive.mockResolvedValue([
+			makeSubscription({ sessionID: 'sess-b8' }),
+		]);
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		const comments = [
+			{ author: 'alice', body: 'looks good' },
+			{ author: 'bob', body: 'please fix the typo' },
+			{ author: 'alice', body: 'fixed, rebased' },
+		];
+		for (const c of comments) {
+			await _internals.handlePrEvent(
+				{
+					type: 'pr.new.comment',
+					payload: {
+						prNumber: 42,
+						repoFullName: 'owner/repo',
+						prUrl: 'https://github.com/owner/repo/pull/42',
+						author: c.author,
+						body: c.body,
+					},
+				},
+				TEST_DIR,
+				makeConfig(),
+			);
+		}
+
+		// Three distinct comments â†’ three distinct per-event tokens â†’ three advisories.
+		expect(session.pendingAdvisoryMessages).toHaveLength(3);
+	});
+
+	test('issue #1976 B8: an identical re-delivered comment is deduped', async () => {
+		// Per-event identity still suppresses a byte-identical re-delivery of the
+		// SAME comment (same author + same body â†’ same token).
+		const session = makeMockSession('sess-b8b');
+		mockState.listActive.mockResolvedValue([
+			makeSubscription({ sessionID: 'sess-b8b' }),
+		]);
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		const payload = {
+			prNumber: 42,
+			repoFullName: 'owner/repo',
+			prUrl: 'https://github.com/owner/repo/pull/42',
+			author: 'alice',
+			body: 'same comment twice',
+		};
+		await _internals.handlePrEvent(
+			{ type: 'pr.new.comment', payload },
+			TEST_DIR,
+			makeConfig(),
+		);
+		await _internals.handlePrEvent(
+			{ type: 'pr.new.comment', payload },
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
+	});
+
+	test('delivers pr.merge.conflict advisory to subscribed session', async () => {
+		const session = makeMockSession('sess3');
+		mockState.listActive.mockResolvedValueOnce([
+			makeSubscription({
+				sessionID: 'sess3',
+				prNumber: 10,
+				repoFullName: 'myorg/myrepo',
+				correlationId: 'sess3::myorg/myrepo::10',
+			}),
+		]);
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.merge.conflict',
+				payload: {
+					prNumber: 10,
+					repoFullName: 'myorg/myrepo',
+					prUrl: 'https://github.com/myorg/myrepo/pull/10',
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
+		expect(session.pendingAdvisoryMessages[0]).toContain('pr.merge.conflict');
+		expect(session.pendingAdvisoryMessages[0]).toContain(
+			'Merge conflict detected',
+		);
+		expect(session.pendingAdvisoryMessages[0]).toContain('CONFLICTING');
+		expect(session.pendingAdvisoryMessages[0]).toContain(
+			'[pr-monitor:pr.merge.conflict:myorg/myrepo#10]',
+		);
+	});
+
+	test('does not deliver when no matching subscription exists', async () => {
+		mockState.listActive.mockResolvedValueOnce([
+			makeSubscription({
+				prNumber: 999, // Different PR number
+				repoFullName: 'other/repo',
+			}),
+		]);
+
+		const session = makeMockSession('sess1');
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+				},
 			},
 			TEST_DIR,
 			makeConfig(),
 		);
 
 		expect(session.pendingAdvisoryMessages).toHaveLength(0);
+	});
+
+	test('does not deliver when session not found', async () => {
+		mockState.listActive.mockResolvedValueOnce([
+			makeSubscription({ sessionID: 'sess1' }),
+		]);
+		mockState.getAgentSession.mockReturnValue(undefined);
+
+		// Should not throw, should not add any messages
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		expect(mockState.log).toHaveBeenCalledWith(
+			expect.stringContaining('Session sess1 not found'),
+		);
 	});
 });

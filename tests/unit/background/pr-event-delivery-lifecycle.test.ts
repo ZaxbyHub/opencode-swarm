@@ -1,8 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import {
 	_internals,
 	noteSessionIdle,
@@ -12,6 +9,8 @@ import {
 import type { PrFeedbackMonitorEvent } from '../../../src/background/pr-feedback-event-queue.js';
 import type { PrMonitorConfig } from '../../../src/config/schema.js';
 import type { PrWorkflowGateState } from '../../../src/hooks/pr-workflow-gate.js';
+import { acquirePrFeedbackBackgroundLease } from '../../../tests/helpers/pr-feedback-background-lease';
+import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir';
 
 const SESSION_ID = 'monitor-lifecycle-session';
 const PR_URL = 'https://github.com/owner/repo/pull/42';
@@ -24,10 +23,13 @@ const EVENT: PrFeedbackMonitorEvent = {
 	dedupToken: '[pr-monitor:pr.ci.failed:owner/repo#42]',
 	authorized: true,
 	queuedAt: '2026-08-01T00:00:00.000Z',
+	headRefOid: 'head-42',
 };
 
 let directory = '';
 let savedInternals: typeof _internals;
+let notify: ReturnType<typeof mock>;
+let releaseBackground: (() => void) | null = null;
 
 function feedbackState(): PrWorkflowGateState {
 	return {
@@ -50,20 +52,21 @@ function queueRecord(event: PrFeedbackMonitorEvent = EVENT) {
 	};
 }
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-	for (let attempt = 0; attempt < 50; attempt++) {
-		if (predicate()) return;
-		await new Promise((resolve) => setTimeout(resolve, 2));
-	}
-	throw new Error('timed out waiting for idle delivery');
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => {
+		resolve = done;
+	});
+	return { promise, resolve };
 }
 
-beforeEach(() => {
-	directory = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'pr-delivery-life-')),
-	);
+beforeEach(async () => {
+	releaseBackground = await acquirePrFeedbackBackgroundLease();
+	directory = canonicalMkdtemp('pr-delivery-life-');
 	savedInternals = { ..._internals };
 	_internals.log = mock(() => {}) as typeof _internals.log;
+	notify = mock(() => {});
+	_internals.notifyPrFeedbackLoop = notify;
 	unregisterPrEventDelivery();
 	registerPrEventDelivery({
 		client: { session: {} } as never,
@@ -77,26 +80,31 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-	Object.assign(_internals, savedInternals);
-	unregisterPrEventDelivery();
-	await fs.rm(directory, { recursive: true, force: true });
+	try {
+		Object.assign(_internals, savedInternals);
+		unregisterPrEventDelivery();
+		await fs.rm(directory, { recursive: true, force: true });
+	} finally {
+		releaseBackground?.();
+		releaseBackground = null;
+	}
 });
 
 describe('PR event delivery lifecycle intake', () => {
-	test('activates a guarded feedback workflow before delivering an authorized queued event', async () => {
-		let gateReads = 0;
-		const readGate = mock(async () =>
-			gateReads++ === 0 ? null : feedbackState(),
-		);
+	test('delivers queued activity as a later wake without activating or claiming', async () => {
+		const readGate = mock(async () => feedbackState());
 		const activate = mock(async () => feedbackState());
-		const send = mock(async () => true);
-		const claim = mock(async () => [
-			{
-				...EVENT,
-				claimedWorkflowInstanceId: 'feedback-workflow',
-				claimedAt: '2026-08-01T00:01:00.000Z',
-			},
-		]);
+		const wake = deferred();
+		const notified = deferred();
+		notify = mock(() => {
+			notified.resolve();
+		});
+		_internals.notifyPrFeedbackLoop = notify;
+		const send = mock(async () => {
+			wake.resolve();
+			return true;
+		});
+		const claim = mock(async () => []);
 		_internals.readPrFeedbackMonitorQueue = mock(async () => queueRecord());
 		_internals.readPrWorkflowGateState = readGate;
 		_internals.activatePrWorkflow = activate;
@@ -104,47 +112,55 @@ describe('PR event delivery lifecycle intake', () => {
 		_internals.claimPrFeedbackMonitorEvents = claim;
 
 		noteSessionIdle(SESSION_ID);
-		await waitFor(() => claim.mock.calls.length === 1);
+		await Promise.all([wake.promise, notified.promise]);
 
-		expect(activate).toHaveBeenCalledWith(
-			directory,
-			SESSION_ID,
-			'PR_FEEDBACK',
-			{ requireCheckoutPreflight: true, prUrl: PR_URL },
-		);
+		expect(activate).not.toHaveBeenCalled();
+		expect(claim).not.toHaveBeenCalled();
 		expect(send.mock.calls[0]?.[1]).toEqual([
-			expect.objectContaining({ dedupToken: EVENT.dedupToken, prUrl: PR_URL }),
+			expect.objectContaining({
+				dedupToken: EVENT.dedupToken,
+				prUrl: PR_URL,
+				disposition: 'queued-for-later',
+			}),
 		]);
-		expect(claim).toHaveBeenCalledWith(
-			directory,
-			SESSION_ID,
-			'feedback-workflow',
-			PR_URL,
-			[EVENT.dedupToken],
-		);
+		expect(notify).toHaveBeenCalledWith(directory, SESSION_ID);
 	});
 
-	test('does not activate an unauthorized queued event without explicit feedback state', async () => {
+	test('delivers an unauthorized queued event only as a later wake notice', async () => {
 		const activate = mock(async () => feedbackState());
-		const send = mock(async () => true);
+		const wake = deferred();
+		const send = mock(async () => {
+			wake.resolve();
+			return true;
+		});
 		_internals.readPrFeedbackMonitorQueue = mock(async () =>
 			queueRecord({ ...EVENT, authorized: false }),
 		);
-		_internals.readPrWorkflowGateState = mock(async () => null);
+		_internals.readPrWorkflowGateState = mock(async () => feedbackState());
 		_internals.activatePrWorkflow = activate;
 		_internals.sendWakePrompt = send;
 		_internals.claimPrFeedbackMonitorEvents = mock(async () => []);
 
 		noteSessionIdle(SESSION_ID);
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		await wake.promise;
 
 		expect(activate).not.toHaveBeenCalled();
-		expect(send).not.toHaveBeenCalled();
+		expect(send.mock.calls[0]?.[1]).toEqual([
+			expect.objectContaining({
+				dedupToken: EVENT.dedupToken,
+				disposition: 'queued-for-later',
+			}),
+		]);
+		expect(_internals.claimPrFeedbackMonitorEvents).not.toHaveBeenCalled();
 	});
 
-	test('leaves queued events untouched while PR_REVIEW owns the session', async () => {
+	test('wakes PR_REVIEW with a later notice without settling its workflow', async () => {
 		const activate = mock(async () => feedbackState());
-		const send = mock(async () => true);
+		const wake = deferred();
+		const send = mock(async () => {
+			wake.resolve();
+			return true;
+		});
 		const claim = mock(async () => []);
 		_internals.readPrFeedbackMonitorQueue = mock(async () => queueRecord());
 		_internals.readPrWorkflowGateState = mock(async () => ({
@@ -156,21 +172,32 @@ describe('PR event delivery lifecycle intake', () => {
 		_internals.claimPrFeedbackMonitorEvents = claim;
 
 		noteSessionIdle(SESSION_ID);
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		await wake.promise;
 
 		expect(activate).not.toHaveBeenCalled();
-		expect(send).not.toHaveBeenCalled();
+		expect(send.mock.calls[0]?.[1]).toEqual([
+			expect.objectContaining({
+				dedupToken: EVENT.dedupToken,
+				disposition: 'queued-for-later',
+			}),
+		]);
+		expect(notify).not.toHaveBeenCalled();
 		expect(claim).not.toHaveBeenCalled();
 	});
 
 	test('preserves the durable queue when the workflow gate read fails (FB-002)', async () => {
-		// The previously uncovered read-error branch must not activate, claim, or
-		// deliver an event whose lifecycle owner could not be determined.
+		// A gate read failure must not authorize settlement. The queued event can
+		// still be shown as a later wake notice, but no loop notification or claim
+		// may follow the failed read.
 		const readGate = mock(async () => {
 			throw new Error('disk error');
 		});
 		const activate = mock(async () => feedbackState());
-		const send = mock(async () => true);
+		const wake = deferred();
+		const send = mock(async () => {
+			wake.resolve();
+			return true;
+		});
 		const claim = mock(async () => []);
 		_internals.readPrFeedbackMonitorQueue = mock(async () => queueRecord());
 		_internals.readPrWorkflowGateState = readGate;
@@ -179,28 +206,35 @@ describe('PR event delivery lifecycle intake', () => {
 		_internals.claimPrFeedbackMonitorEvents = claim;
 
 		noteSessionIdle(SESSION_ID);
-		await waitFor(() => readGate.mock.calls.length === 1);
+		await wake.promise;
 
 		expect(activate).not.toHaveBeenCalled();
-		expect(send).not.toHaveBeenCalled();
+		expect(send.mock.calls[0]?.[1]).toEqual([
+			expect.objectContaining({ disposition: 'queued-for-later' }),
+		]);
+		expect(notify).not.toHaveBeenCalled();
 		expect(claim).not.toHaveBeenCalled();
 	});
 
-	test('does not claim or deliver when guarded activation fails', async () => {
-		const send = mock(async () => true);
+	test('does not settle or claim when the later wake transport fails', async () => {
+		const wake = deferred();
+		const send = mock(async () => {
+			wake.resolve();
+			return false;
+		});
 		const claim = mock(async () => []);
 		_internals.readPrFeedbackMonitorQueue = mock(async () => queueRecord());
-		_internals.readPrWorkflowGateState = mock(async () => null);
-		_internals.activatePrWorkflow = mock(async () => {
-			throw new Error('manual Git recovery required');
-		});
+		_internals.readPrWorkflowGateState = mock(async () => feedbackState());
+		_internals.activatePrWorkflow = mock(async () => feedbackState());
 		_internals.sendWakePrompt = send;
 		_internals.claimPrFeedbackMonitorEvents = claim;
 
 		noteSessionIdle(SESSION_ID);
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		await wake.promise;
 
-		expect(send).not.toHaveBeenCalled();
+		expect(send).toHaveBeenCalledTimes(1);
 		expect(claim).not.toHaveBeenCalled();
+		expect(_internals.activatePrWorkflow).not.toHaveBeenCalled();
+		expect(notify).not.toHaveBeenCalled();
 	});
 });

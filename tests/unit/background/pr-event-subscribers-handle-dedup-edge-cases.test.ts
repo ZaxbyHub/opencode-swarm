@@ -1,7 +1,7 @@
 /**
  * Phase 1 PR Event Subscribers tests.
  *
- * Tests: registerPrEventSubscribers, handlePrEvent, formatAdvisory.
+ * Tests: handlePrEvent deduplication and edge cases.
  * Uses _internals DI seam for full mock isolation â€” no cross-file pollution.
  *
  * The _internals seam is added to pr-event-subscribers.ts specifically for
@@ -10,19 +10,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-	_internals,
-	type PrEventSubscriberOptions,
-	registerPrEventSubscribers,
-} from '../../../src/background/pr-event-subscribers';
+import { _internals } from '../../../src/background/pr-event-subscribers';
 import type { PrSubscriptionRecord } from '../../../src/background/pr-subscriptions';
 import { acquirePrFeedbackBackgroundLease } from '../../../tests/helpers/pr-feedback-background-lease';
+import { canonicalTmpDir as canonicalTempRoot } from '../../../tests/helpers/tmpdir';
 
 // â”€â”€ Test Fixtures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-const TEST_DIR = path.join(os.tmpdir(), 'pr-event-subscribers-test');
+const TEST_DIR = path.join(canonicalTempRoot(), 'pr-event-subscribers-test');
 
 function makeConfig(
 	overrides: Record<string, unknown> = {},
@@ -147,18 +143,7 @@ function makeMockSession(sessionId: string): {
 
 // â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('PrEventSubscriberOptions â€” construction', () => {
-	test('has expected shape', () => {
-		const opts: PrEventSubscriberOptions = {
-			directory: TEST_DIR,
-			config: makeConfig() as PrEventSubscriberOptions['config'],
-		};
-		expect(opts.directory).toBe(TEST_DIR);
-		expect(opts.config).toBeDefined();
-	});
-});
-
-describe('registerPrEventSubscribers', () => {
+describe('handlePrEvent', () => {
 	beforeEach(async () => {
 		releaseBackground = await acquirePrFeedbackBackgroundLease();
 		setupMocks();
@@ -172,240 +157,307 @@ describe('registerPrEventSubscribers', () => {
 			releaseBackground = null;
 		}
 	});
-
-	test('registers subscribers for all enabled event types', () => {
-		const cleanup = registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig() as PrEventSubscriberOptions['config'],
-		});
-
-		// The legacy 3 flags gate 4 event types: notify_merge_conflict also
-		// gates pr.merge.conflict_resolved. The other flags (review/merged/
-		// closed/ci_success) are unset in makeConfig â†’ skipped.
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(4);
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
-			'pr.ci.failed',
-			expect.any(Function),
-		);
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
-			'pr.new.comment',
-			expect.any(Function),
-		);
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
-			'pr.merge.conflict',
-			expect.any(Function),
-		);
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
-			'pr.merge.conflict_resolved',
-			expect.any(Function),
-		);
-
-		cleanup();
-	});
-
-	test('skips subscriber when notify_ci_failure config flag is false', () => {
-		registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig({
-				notify_ci_failure: false,
-			}) as PrEventSubscriberOptions['config'],
-		});
-
-		// 3 event types subscribed (new_comment + merge_conflict + conflict_resolved)
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(3);
-
-		const subscribedTypes = mockState.busInstance.subscribe.mock.calls.map(
-			(c: unknown[]) => c[0],
-		);
-		expect(subscribedTypes).not.toContain('pr.ci.failed');
-		expect(subscribedTypes).toContain('pr.new.comment');
-		expect(subscribedTypes).toContain('pr.merge.conflict');
-		expect(subscribedTypes).toContain('pr.merge.conflict_resolved');
-	});
-
-	test('skips subscriber when notify_new_comments config flag is false', () => {
-		registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig({
-				notify_new_comments: false,
-			}) as PrEventSubscriberOptions['config'],
-		});
-
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(3);
-		const subscribedTypes = mockState.busInstance.subscribe.mock.calls.map(
-			(c: unknown[]) => c[0],
-		);
-		expect(subscribedTypes).toContain('pr.ci.failed');
-		expect(subscribedTypes).not.toContain('pr.new.comment');
-		expect(subscribedTypes).toContain('pr.merge.conflict');
-		expect(subscribedTypes).toContain('pr.merge.conflict_resolved');
-	});
-
-	test('skips subscriber when notify_merge_conflict config flag is false', () => {
-		registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig({
-				notify_merge_conflict: false,
-			}) as PrEventSubscriberOptions['config'],
-		});
-
-		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(2);
-		const subscribedTypes = mockState.busInstance.subscribe.mock.calls.map(
-			(c: unknown[]) => c[0],
-		);
-		expect(subscribedTypes).toContain('pr.ci.failed');
-		expect(subscribedTypes).toContain('pr.new.comment');
-		expect(subscribedTypes).not.toContain('pr.merge.conflict');
-		expect(subscribedTypes).not.toContain('pr.merge.conflict_resolved');
-	});
-
-	test('skips all subscribers when all config flags are false', () => {
-		registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig({
-				notify_ci_failure: false,
-				notify_new_comments: false,
-				notify_merge_conflict: false,
-			}) as PrEventSubscriberOptions['config'],
-		});
-
-		expect(mockState.busInstance.subscribe).not.toHaveBeenCalled();
-	});
-
-	test('cleanup function unsubscribes all listeners', () => {
-		const mockUnsubscribe1 = mock(() => {});
-		const mockUnsubscribe2 = mock(() => {});
-		const mockUnsubscribe3 = mock(() => {});
-
-		mockState.busInstance.subscribe
-			.mockReturnValueOnce(mockUnsubscribe1)
-			.mockReturnValueOnce(mockUnsubscribe2)
-			.mockReturnValueOnce(mockUnsubscribe3);
-
-		const cleanup = registerPrEventSubscribers({
-			directory: TEST_DIR,
-			config: makeConfig() as PrEventSubscriberOptions['config'],
-		});
-
-		cleanup();
-
-		expect(mockUnsubscribe1).toHaveBeenCalledTimes(1);
-		expect(mockUnsubscribe2).toHaveBeenCalledTimes(1);
-		expect(mockUnsubscribe3).toHaveBeenCalledTimes(1);
-	});
-});
-
-describe('formatAdvisory', () => {
-	beforeEach(async () => {
-		releaseBackground = await acquirePrFeedbackBackgroundLease();
-		setupMocks();
-	});
-
-	afterEach(() => {
-		try {
-			restoreInternals();
-		} finally {
-			releaseBackground?.();
-			releaseBackground = null;
-		}
-	});
-
-	const ciFailedPayload = {
-		prNumber: 42,
-		repoFullName: 'owner/repo',
-		prUrl: 'https://github.com/owner/repo/pull/42',
-		checkName: 'ci/build',
-		checkState: 'failure',
-		errorMessage: 'Build failed',
-	};
-
-	const newCommentPayload = {
-		prNumber: 42,
-		repoFullName: 'owner/repo',
-		prUrl: 'https://github.com/owner/repo/pull/42',
-		author: 'reviewer',
-		body: 'Looks good!',
-	};
-
-	const mergeConflictPayload = {
-		prNumber: 42,
-		repoFullName: 'owner/repo',
-		prUrl: 'https://github.com/owner/repo/pull/42',
-	};
-
-	test('pr.ci.failed advisory contains dedup token', async () => {
+	test('deduplicates repeated events for same PR+type', async () => {
 		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
+		mockState.listActive.mockReturnValue([
 			makeSubscription({ sessionID: 'sess1' }),
 		]);
 		mockState.getAgentSession.mockReturnValue(session as any);
 
+		// First event
 		await _internals.handlePrEvent(
-			{ type: 'pr.ci.failed', payload: ciFailedPayload },
+			{
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					checkName: 'ci/build',
+					checkState: 'failure',
+				},
+			},
 			TEST_DIR,
 			makeConfig(),
 		);
 
-		expect(session.pendingAdvisoryMessages[0]).toContain(
-			'[pr-monitor:pr.ci.failed:owner/repo#42]',
-		);
-	});
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
 
-	test('pr.new.comment advisory contains dedup token', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1' }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
+		// Same event again â€” should be deduplicated
 		await _internals.handlePrEvent(
-			{ type: 'pr.new.comment', payload: newCommentPayload },
+			{
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					checkName: 'ci/build',
+					checkState: 'failure',
+				},
+			},
 			TEST_DIR,
 			makeConfig(),
 		);
 
-		// B8 (issue #1976): content events (comments/reviews) carry a per-event
-		// identity suffix (@author:hash) before the closing bracket, so assert
-		// the stable token PREFIX rather than the exact per-PR token.
-		expect(session.pendingAdvisoryMessages[0]).toContain(
-			'[pr-monitor:pr.new.comment:owner/repo#42',
-		);
+		// Still only 1 message (second was deduped)
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
 	});
 
-	test('pr.merge.conflict advisory contains dedup token', async () => {
+	test('dedup works correctly with interleaved different event types', async () => {
 		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
+		mockState.listActive.mockReturnValue([
 			makeSubscription({ sessionID: 'sess1' }),
 		]);
 		mockState.getAgentSession.mockReturnValue(session as any);
 
+		// 1. Deliver pr.ci.failed â†’ expect advisory delivered
 		await _internals.handlePrEvent(
-			{ type: 'pr.merge.conflict', payload: mergeConflictPayload },
+			{
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					checkName: 'ci/build',
+					checkState: 'failure',
+				},
+			},
 			TEST_DIR,
 			makeConfig(),
 		);
 
-		expect(session.pendingAdvisoryMessages[0]).toContain(
-			'[pr-monitor:pr.merge.conflict:owner/repo#42]',
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
+		expect(session.pendingAdvisoryMessages[0]).toContain('pr.ci.failed');
+
+		// 2. Deliver pr.new.comment â†’ expect advisory delivered (different type)
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.new.comment',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					prUrl: 'https://github.com/owner/repo/pull/42',
+					author: 'reviewer',
+					body: 'LGTM',
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
 		);
+
+		// Both messages should be present (different event types)
+		expect(session.pendingAdvisoryMessages).toHaveLength(2);
+		expect(session.pendingAdvisoryMessages[1]).toContain('pr.new.comment');
+
+		// 3. Deliver pr.ci.failed again â†’ expect DEDUPED (same type+PR, scanned from all messages)
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					checkName: 'ci/build',
+					checkState: 'failure',
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		// Still only 2 messages â€” the second ci.failed was deduped
+		expect(session.pendingAdvisoryMessages).toHaveLength(2);
 	});
 
-	test('unknown event type returns null and does not deliver', async () => {
-		const session = makeMockSession('sess1');
+	test('delivers to multiple sessions subscribed to same PR', async () => {
+		const session1 = makeMockSession('sess1');
+		const session2 = makeMockSession('sess2');
+		const session3 = makeMockSession('sess3');
+
 		mockState.listActive.mockResolvedValueOnce([
 			makeSubscription({ sessionID: 'sess1' }),
+			makeSubscription({
+				sessionID: 'sess2',
+				correlationId: 'sess2::owner/repo::42',
+			}),
+			makeSubscription({
+				sessionID: 'sess3',
+				correlationId: 'sess3::owner/repo::42',
+			}),
 		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
+
+		mockState.getAgentSession
+			.mockReturnValueOnce(session1 as any)
+			.mockReturnValueOnce(session2 as any)
+			.mockReturnValueOnce(session3 as any);
 
 		await _internals.handlePrEvent(
 			{
-				type: 'pr.unknown.event',
-				payload: { prNumber: 42, repoFullName: 'owner/repo' },
+				type: 'pr.merge.conflict',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					prUrl: 'https://github.com/owner/repo/pull/42',
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		expect(session1.pendingAdvisoryMessages).toHaveLength(1);
+		expect(session2.pendingAdvisoryMessages).toHaveLength(1);
+		expect(session3.pendingAdvisoryMessages).toHaveLength(1);
+	});
+
+	test('handles event payload with missing fields gracefully', async () => {
+		mockState.listActive.mockResolvedValueOnce([
+			makeSubscription({ sessionID: 'sess1' }),
+		]);
+		const session = makeMockSession('sess1');
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		// Payload with only partial fields (prUrl missing, checkName missing)
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					// prUrl, checkName, errorMessage all missing
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		// Should still deliver a message with 'unknown' defaults
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
+		expect(session.pendingAdvisoryMessages[0]).toContain('unknown');
+		expect(session.pendingAdvisoryMessages[0]).toContain('owner/repo');
+	});
+
+	test('handles event payload with missing prNumber', async () => {
+		mockState.listActive.mockResolvedValueOnce([
+			makeSubscription({ sessionID: 'sess1' }),
+		]);
+		const session = makeMockSession('sess1');
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		// prNumber missing
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.ci.failed',
+				payload: {
+					repoFullName: 'owner/repo',
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		// Should return early without delivering
+		expect(session.pendingAdvisoryMessages).toHaveLength(0);
+	});
+
+	test('handles event payload with missing repoFullName', async () => {
+		mockState.listActive.mockResolvedValueOnce([
+			makeSubscription({ sessionID: 'sess1' }),
+		]);
+		const session = makeMockSession('sess1');
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		// repoFullName missing
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: 42,
+				},
 			},
 			TEST_DIR,
 			makeConfig(),
 		);
 
 		expect(session.pendingAdvisoryMessages).toHaveLength(0);
+	});
+
+	test('does not dedupe different event types for same PR', async () => {
+		const session = makeMockSession('sess1');
+		// Use mockReturnValue (not mockResolvedValueOnce) because handlePrEvent
+		// is called twice in this test and listActive must return subscriptions both times
+		mockState.listActive.mockReturnValue([
+			makeSubscription({ sessionID: 'sess1' }),
+		]);
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		// First event: ci.failed
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.ci.failed',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					checkName: 'ci/build',
+					checkState: 'failure',
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
+
+		// Different event type: merge.conflict for same PR â€” should NOT be deduped
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.merge.conflict',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					prUrl: 'https://github.com/owner/repo/pull/42',
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		// Both messages should be present
+		expect(session.pendingAdvisoryMessages).toHaveLength(2);
+		const types = session.pendingAdvisoryMessages.map((m: string) =>
+			m.includes('pr.ci.failed')
+				? 'pr.ci.failed'
+				: m.includes('pr.merge.conflict')
+					? 'pr.merge.conflict'
+					: 'other',
+		);
+		expect(types).toContain('pr.ci.failed');
+		expect(types).toContain('pr.merge.conflict');
+	});
+
+	test('comment body is truncated to 200 characters', async () => {
+		const session = makeMockSession('sess1');
+		mockState.listActive.mockResolvedValueOnce([
+			makeSubscription({ sessionID: 'sess1' }),
+		]);
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		const longComment = 'A'.repeat(500);
+
+		await _internals.handlePrEvent(
+			{
+				type: 'pr.new.comment',
+				payload: {
+					prNumber: 42,
+					repoFullName: 'owner/repo',
+					prUrl: 'https://github.com/owner/repo/pull/42',
+					author: 'reviewer',
+					body: longComment,
+				},
+			},
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
+		// The message should contain only the first 200 chars of the comment
+		const commentPart =
+			session.pendingAdvisoryMessages[0].split('Comment: ')[1];
+		expect(commentPart.length).toBe(200);
+		expect(commentPart).toBe('A'.repeat(200));
 	});
 });

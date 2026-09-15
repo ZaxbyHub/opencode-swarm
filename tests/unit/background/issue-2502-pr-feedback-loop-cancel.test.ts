@@ -6,7 +6,7 @@
  * correlations marked cancelled, idempotent re-cancel), the
  * clearPrFeedbackMonitorEvents unit surface, the notifyPrFeedbackLoop
  * fire-and-forget wiring (settles when enabled, performs nothing when
- * disabled), and tickPrFeedbackLoop's disabled no-op.
+ * disabled).
  *
  * Isolation notes (mirrors issue-2502-pr-feedback-loop.test.ts):
  * - NO mock.module: the loop's `_internals` seam injects head evaluation,
@@ -48,7 +48,6 @@ import {
 	_internals as loopInternals,
 	notifyPrFeedbackLoop,
 	PR_FEEDBACK_LOOP_STATE_REL,
-	tickPrFeedbackLoop,
 } from '../../../src/background/pr-feedback-loop.js';
 import {
 	buildCorrelationId,
@@ -57,6 +56,9 @@ import {
 } from '../../../src/background/pr-subscriptions.js';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { _test_exports as gateInternals } from '../../../src/hooks/pr-workflow-gate.js';
+import { acquireLoopInternals } from '../../../tests/helpers/loop-internals-lease';
+import { acquirePrFeedbackQueueLease } from '../../../tests/helpers/pr-feedback-queue-lease';
+import { acquireProcessEnvLease } from '../../../tests/helpers/process-env-lease';
 import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir';
 
 const SESSION = 'sess-loop';
@@ -77,6 +79,9 @@ const loopInternalsOriginals = { ...loopInternals };
 const savedXdg = process.env.XDG_CONFIG_HOME;
 let xdgIsolationDir = '';
 const createdDirs: string[] = [];
+let releaseLoopInternals: (() => void) | null = null;
+let releaseQueue: (() => void) | null = null;
+let releaseProcessEnv: (() => void) | null = null;
 
 interface LoopStateFile {
 	correlations?: Record<
@@ -92,31 +97,46 @@ interface CancelReceipt {
 	clearedEvents?: string[];
 }
 
-beforeAll(() => {
+beforeAll(async () => {
+	releaseProcessEnv = await acquireProcessEnvLease();
 	xdgIsolationDir = canonicalMkdtemp('issue-2502-cancel-xdg-');
 	process.env.XDG_CONFIG_HOME = xdgIsolationDir;
 });
 
 afterAll(() => {
-	if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
-	else process.env.XDG_CONFIG_HOME = savedXdg;
-	if (xdgIsolationDir) {
-		fs.rmSync(xdgIsolationDir, { recursive: true, force: true });
+	try {
+		if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = savedXdg;
+		if (xdgIsolationDir) {
+			fs.rmSync(xdgIsolationDir, { recursive: true, force: true });
+		}
+	} finally {
+		releaseProcessEnv?.();
+		releaseProcessEnv = null;
 	}
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+	releaseLoopInternals = await acquireLoopInternals();
+	releaseQueue = await acquirePrFeedbackQueueLease();
 	queueInternals.resetQueueCache();
 	gateInternals.resetTrackedStateCache();
 });
 
 afterEach(() => {
-	Object.assign(loopInternals, loopInternalsOriginals);
-	queueInternals.resetQueueCache();
-	gateInternals.resetTrackedStateCache();
-	closeAllProjectDbs();
-	for (const dir of createdDirs.splice(0)) {
-		fs.rmSync(dir, { recursive: true, force: true });
+	try {
+		Object.assign(loopInternals, loopInternalsOriginals);
+		queueInternals.resetQueueCache();
+		gateInternals.resetTrackedStateCache();
+		closeAllProjectDbs();
+		for (const dir of createdDirs.splice(0)) {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	} finally {
+		releaseQueue?.();
+		releaseQueue = null;
+		releaseLoopInternals?.();
+		releaseLoopInternals = null;
 	}
 });
 
@@ -155,6 +175,7 @@ async function enqueueEvent(
 		repoFullName: REPO,
 		prNumber: PR,
 		prUrl: PR_URL,
+		headRefOid: HEAD,
 		message: 'ci check failed',
 		dedupToken: 'tok-1',
 		authorized: true,
@@ -176,6 +197,29 @@ function installLoopSeams(): ReturnType<typeof mock> {
 	loopInternals.performAuthorizedAction =
 		performer as unknown as typeof loopInternals.performAuthorizedAction;
 	return performer;
+}
+
+/**
+ * Resolve when the notify path durably records the targeted terminal state.
+ * The test timeout remains the bounded failure path; successful synchronization
+ * uses this write-state seam instead of wall-clock polling.
+ */
+function installSettlementSignal(directory: string): Promise<boolean> {
+	let resolveSettlement!: (settled: boolean) => void;
+	const settlementObserved = new Promise<boolean>((resolve) => {
+		resolveSettlement = resolve;
+	});
+	loopInternals.writeState = async (writeDirectory, state) => {
+		await loopInternalsOriginals.writeState(writeDirectory, state);
+		if (
+			writeDirectory === directory &&
+			(state as LoopStateFile).correlations?.[CORRELATION]?.terminal?.state ===
+				'completed'
+		) {
+			resolveSettlement(true);
+		}
+	};
+	return settlementObserved;
 }
 
 function readLoopStateFile(dir: string): LoopStateFile {
@@ -231,19 +275,6 @@ function readCancelReceipts(dir: string): CancelReceipt[] {
 					fs.readFileSync(path.join(cleanupDir, name), 'utf-8'),
 				) as CancelReceipt,
 		);
-}
-
-/** Bounded poll for the fire-and-forget notify path (macrotask waits only). */
-async function waitFor(
-	ready: () => boolean,
-	attempts = 40,
-	delayMs = 25,
-): Promise<boolean> {
-	for (let attempt = 0; attempt < attempts; attempt++) {
-		if (ready()) return true;
-		await new Promise((resolve) => setTimeout(resolve, delayMs));
-	}
-	return ready();
 }
 
 describe('issue #2502 cancelPrFeedbackLoop', () => {
@@ -345,29 +376,23 @@ describe('issue #2502 clearPrFeedbackMonitorEvents', () => {
 	});
 });
 
-describe('issue #2502 notify + tick wiring', () => {
-	test('notifyPrFeedbackLoop settles a queued event when the loop is enabled', async () => {
-		const dir = makeProject();
-		await primeSubscription(dir);
-		installLoopSeams();
-		await enqueueEvent(dir);
+describe('issue #2502 notify wiring', () => {
+	test(
+		'notifyPrFeedbackLoop settles a queued event when the loop is enabled',
+		{ timeout: 10_000 },
+		async () => {
+			const dir = makeProject();
+			await primeSubscription(dir);
+			installLoopSeams();
+			await enqueueEvent(dir);
+			const settlementObserved = installSettlementSignal(dir);
 
-		// Fire-and-forget: the call returns immediately, so wait (bounded
-		// macrotask poll) for the settle to land in the durable state file.
-		notifyPrFeedbackLoop(dir, SESSION);
-		const settled = await waitFor(() => {
-			try {
-				return (
-					readLoopStateFile(dir).correlations?.[CORRELATION]?.terminal
-						?.state === 'completed'
-				);
-			} catch {
-				return false;
-			}
-		});
-
-		expect(settled).toBe(true);
-	});
+			// Fire-and-forget: the call returns immediately. The write-state seam
+			// signals the targeted durable completion without polling.
+			notifyPrFeedbackLoop(dir, SESSION);
+			expect(await settlementObserved).toBe(true);
+		},
+	);
 
 	test('notifyPrFeedbackLoop performs nothing when the loop is disabled', async () => {
 		const dir = makeProject(null);
@@ -375,8 +400,7 @@ describe('issue #2502 notify + tick wiring', () => {
 		const performer = installLoopSeams();
 		await enqueueEvent(dir);
 
-		notifyPrFeedbackLoop(dir, SESSION);
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		await notifyPrFeedbackLoop(dir, SESSION);
 
 		expect(fs.existsSync(path.join(dir, PR_FEEDBACK_LOOP_STATE_REL))).toBe(
 			false,
@@ -385,20 +409,5 @@ describe('issue #2502 notify + tick wiring', () => {
 		const queue = await readPrFeedbackMonitorQueue(dir, SESSION);
 		expect(queue?.events[0]?.dedupToken).toBe('tok-1');
 		expect(queue?.events[0]?.claimedWorkflowInstanceId).toBeUndefined();
-	});
-
-	test('tickPrFeedbackLoop returns 0 and performs nothing when disabled', async () => {
-		const dir = makeProject(null);
-		await primeSubscription(dir);
-		const performer = installLoopSeams();
-		await enqueueEvent(dir);
-
-		const settled = await tickPrFeedbackLoop(dir);
-
-		expect(settled).toBe(0);
-		expect(performer).not.toHaveBeenCalled();
-		expect(fs.existsSync(path.join(dir, PR_FEEDBACK_LOOP_STATE_REL))).toBe(
-			false,
-		);
 	});
 });

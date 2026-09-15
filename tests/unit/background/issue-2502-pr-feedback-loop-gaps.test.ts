@@ -29,6 +29,9 @@ import {
 } from '../../../src/background/pr-subscriptions.js';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { _test_exports as gateInternals } from '../../../src/hooks/pr-workflow-gate.js';
+import { acquireLoopInternals } from '../../../tests/helpers/loop-internals-lease';
+import { acquirePrFeedbackQueueLease } from '../../../tests/helpers/pr-feedback-queue-lease';
+import { acquireProcessEnvLease } from '../../../tests/helpers/process-env-lease';
 import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir';
 
 const SESSION = 'sess-loop';
@@ -45,32 +48,50 @@ const loopInternalsOriginals = { ...loopInternals };
 const savedXdg = process.env.XDG_CONFIG_HOME;
 let xdgIsolationDir = '';
 const createdDirs: string[] = [];
+let releaseLoopInternals: (() => void) | null = null;
+let releaseQueue: (() => void) | null = null;
+let releaseProcessEnv: (() => void) | null = null;
 
-beforeAll(() => {
+beforeAll(async () => {
+	releaseProcessEnv = await acquireProcessEnvLease();
 	xdgIsolationDir = canonicalMkdtemp('issue-2502-gaps-xdg-');
 	process.env.XDG_CONFIG_HOME = xdgIsolationDir;
 });
 
 afterAll(() => {
-	if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
-	else process.env.XDG_CONFIG_HOME = savedXdg;
-	if (xdgIsolationDir) {
-		fs.rmSync(xdgIsolationDir, { recursive: true, force: true });
+	try {
+		if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = savedXdg;
+		if (xdgIsolationDir) {
+			fs.rmSync(xdgIsolationDir, { recursive: true, force: true });
+		}
+	} finally {
+		releaseProcessEnv?.();
+		releaseProcessEnv = null;
 	}
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+	releaseLoopInternals = await acquireLoopInternals();
+	releaseQueue = await acquirePrFeedbackQueueLease();
 	queueInternals.resetQueueCache();
 	gateInternals.resetTrackedStateCache();
 });
 
 afterEach(() => {
-	Object.assign(loopInternals, loopInternalsOriginals);
-	queueInternals.resetQueueCache();
-	gateInternals.resetTrackedStateCache();
-	closeAllProjectDbs();
-	for (const dir of createdDirs.splice(0)) {
-		fs.rmSync(dir, { recursive: true, force: true });
+	try {
+		Object.assign(loopInternals, loopInternalsOriginals);
+		queueInternals.resetQueueCache();
+		gateInternals.resetTrackedStateCache();
+		closeAllProjectDbs();
+		for (const dir of createdDirs.splice(0)) {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	} finally {
+		releaseQueue?.();
+		releaseQueue = null;
+		releaseLoopInternals?.();
+		releaseLoopInternals = null;
 	}
 });
 
@@ -115,6 +136,7 @@ async function enqueueEvent(
 		repoFullName: REPO,
 		prNumber: 42,
 		prUrl: PR_URL,
+		headRefOid: HEAD,
 		message: 'ci check failed',
 		dedupToken: 'tok-1',
 		authorized: true,

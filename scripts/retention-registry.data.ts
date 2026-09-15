@@ -682,11 +682,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 	{
 		id: 'pr-feedback-event-queues',
 		category: 2,
-		pathGrammar: '.swarm/pr-feedback-events/{session-stem}.json (+ .lock)',
+		pathGrammar: '.swarm/pr-feedback-events/{session-stem}.json (+ .meta.json, .lock)',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pr-feedback-event-queue.ts'],
-		writerCitations: ['src/background/pr-feedback-event-queue.ts:281 writeQueueRecord — atomic temp+fsync+Windows-retry rename (enqueue/claim)'],
-		readerCitations: ['src/background/pr-feedback-event-queue.ts:480 readPrFeedbackMonitorQueueFromDisk — bounded ≤512 KiB with identity verification, async'],
+		writerCitations: ['src/background/pr-feedback-event-queue.ts:432 writeQueueRecord — atomic temp+fsync+Windows-retry rename (enqueue/claim)'],
+		readerCitations: ['src/background/pr-feedback-event-queue.ts:677 readPrFeedbackMonitorQueueFromDisk — bounded ≤512 KiB with identity verification, async'],
 		schemaVersion: 'schemaVersion 1 (:35)',
 		stateClass: 'operational',
 		privacyClass: 'metadata',
@@ -702,7 +702,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		crashBehavior: 'crash between temp and rename leaves no destination; next write retries cleanly',
 		closePolicy: 'untouched — the 30 d retention sweep owns the queue-file reap',
 		resetPolicy: 'not reset',
-		legacyCompatibility: 'QueueRecordSchema rejects non-matching shapes',
+		legacyCompatibility: 'The primary v1 queue record remains readable by older binaries; newer head/provenance and owner-PID fencing fields are revision-bound in a paired .meta.json sidecar. Pre-sidecar extended records are projected back to the legacy primary shape on the next mutation; ownerless legacy claims remain fail-closed.',
 		healthSignal: 'lock reclamation counters',
 		owner: '#2483',
 		disposition: {
@@ -2242,7 +2242,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 	{
 		id: 'pr-feedback-loop-state',
 		category: 5,
-		pathGrammar: '.swarm/pr-feedback-loop-state.json + .swarm/pr-feedback-evidence/{seq}.json + .swarm/pr-feedback-loop-cleanups/',
+		pathGrammar: '.swarm/pr-feedback-loop-state.json + .swarm/pr-feedback-evidence/{seq}-{uuid}.json + .swarm/pr-feedback-loop-cleanups/',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pr-feedback-loop.ts'],
 		writerCitations: [

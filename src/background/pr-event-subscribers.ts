@@ -26,7 +26,6 @@
 
 import type { PrMonitorConfig } from '../config/schema';
 import {
-	activatePrWorkflow,
 	type PrWorkflowGateState,
 	readPrWorkflowGateState,
 } from '../hooks/pr-workflow-gate';
@@ -40,8 +39,11 @@ import {
 	type FormattedPrEvent,
 	isPrEventDeliveryRegistered,
 } from './pr-event-delivery';
-import { enqueuePrFeedbackMonitorEvent } from './pr-feedback-event-queue.js';
-import { notifyPrFeedbackLoop } from './pr-feedback-loop.js';
+import {
+	enqueuePrFeedbackMonitorEventIfNotCancelled,
+	notifyPrFeedbackLoop,
+	readPrFeedbackLoopCancellation,
+} from './pr-feedback-loop.js';
 import { listActive, updateSnapshot } from './pr-subscriptions';
 
 export interface PrEventSubscriberOptions {
@@ -79,8 +81,8 @@ export const _internals: {
 	updateSnapshot: typeof updateSnapshot;
 	getAgentSession: typeof getAgentSession;
 	readPrWorkflowGateState: typeof readPrWorkflowGateState;
-	activatePrWorkflow: typeof activatePrWorkflow;
-	enqueuePrFeedbackMonitorEvent: typeof enqueuePrFeedbackMonitorEvent;
+	readPrFeedbackLoopCancellation: typeof readPrFeedbackLoopCancellation;
+	enqueuePrFeedbackMonitorEvent: typeof enqueuePrFeedbackMonitorEventIfNotCancelled;
 	notifyPrFeedbackLoop: typeof notifyPrFeedbackLoop;
 	deliverPrActivity: typeof deliverPrActivity;
 	isPrEventDeliveryRegistered: typeof isPrEventDeliveryRegistered;
@@ -95,8 +97,8 @@ export const _internals: {
 	updateSnapshot,
 	getAgentSession,
 	readPrWorkflowGateState,
-	activatePrWorkflow,
-	enqueuePrFeedbackMonitorEvent,
+	readPrFeedbackLoopCancellation,
+	enqueuePrFeedbackMonitorEvent: enqueuePrFeedbackMonitorEventIfNotCancelled,
 	notifyPrFeedbackLoop,
 	deliverPrActivity,
 	isPrEventDeliveryRegistered,
@@ -142,6 +144,8 @@ interface PrEventPayload {
 	reviewDecision?: string;
 	/** pr.merge.conflict_resolved */
 	mergeableState?: string;
+	/** Authenticated head observed by the monitor when it emitted the event. */
+	headRefOid?: string;
 }
 
 /**
@@ -206,7 +210,11 @@ async function handlePrEvent(
 	const matching = subscriptions.filter(
 		(sub) =>
 			sub.prNumber === payload.prNumber &&
-			sub.repoFullName === payload.repoFullName,
+			sub.repoFullName === payload.repoFullName &&
+			// Older event producers may omit prUrl; the subscription's canonical
+			// repo+PR identity is the safe fallback. When a payload URL is present,
+			// it must resolve to that same canonical PR or the event is foreign.
+			(!payload.prUrl || sameGitHubPr(sub.prUrl, payload.prUrl)),
 	);
 
 	if (matching.length === 0) return;
@@ -222,14 +230,15 @@ async function handlePrEvent(
 		AUTO_PR_FEEDBACK_EVENTS.has(event.type) &&
 		payload.prUrl
 			? (() => {
-					const safePrUrl = String(payload.prUrl).replace(/["\]]/g, '');
+					const safePrUrl = String(payload.prUrl).replace(/["<>\r\n[\]]/g, '');
 					return `[MODE: PR_FEEDBACK pr="${safePrUrl}"]`;
 				})()
 			: null;
+	const deliveredMessage = modeSignal ? `${message}\n${modeSignal}` : message;
 
 	const usePromptDelivery =
 		config.event_delivery === 'prompt' &&
-		_internals.isPrEventDeliveryRegistered();
+		_internals.isPrEventDeliveryRegistered(directory);
 
 	// Deliver to each subscribed session
 	for (const sub of matching) {
@@ -252,17 +261,44 @@ async function handlePrEvent(
 		const feedbackTarget =
 			activeGate?.prFeedbackTargetUrl ??
 			activeGate?.prFeedbackReviewHandoff?.prUrl;
-		let queueForLater =
+		const queueForLater =
 			gateReadFailed ||
 			activeGate?.mode === 'PR_REVIEW' ||
 			(activeGate?.mode === 'PR_FEEDBACK' &&
 				(Boolean(activeGate.prFeedbackInventory) ||
 					!feedbackTarget ||
 					!sameGitHubPr(feedbackTarget, prUrl)));
-		let queuedForLater = false;
+		let queueAccepted = false;
+		let cancellationBlocked = false;
 		if (queueForLater || autoFeedbackEventAuthorized) {
+			let cancellationStatus: Awaited<
+				ReturnType<typeof readPrFeedbackLoopCancellation>
+			> | null = null;
 			try {
-				await _internals.enqueuePrFeedbackMonitorEvent(
+				cancellationStatus = await _internals.readPrFeedbackLoopCancellation(
+					directory,
+					sub.sessionID,
+				);
+			} catch {
+				// A replacement/test seam can fail independently of the production
+				// reader. Treat that as unavailable and do not admit queue work.
+				cancellationStatus = { cancelled: false, unavailable: true };
+			}
+			cancellationBlocked = Boolean(
+				cancellationStatus?.cancelled || cancellationStatus?.unavailable,
+			);
+			if (cancellationBlocked) {
+				_internals.log(
+					`[pr-monitor] Refusing to queue PR_FEEDBACK monitor event for session ${sub.sessionID} because cancellation is ${cancellationStatus?.cancelled ? 'active' : 'unavailable'}`,
+				);
+			}
+		}
+		if (
+			!cancellationBlocked &&
+			(queueForLater || autoFeedbackEventAuthorized)
+		) {
+			try {
+				const admitted = await _internals.enqueuePrFeedbackMonitorEvent(
 					directory,
 					sub.sessionID,
 					{
@@ -270,13 +306,15 @@ async function handlePrEvent(
 						repoFullName: payload.repoFullName,
 						prNumber: payload.prNumber,
 						prUrl,
-						message,
+						message: queueForLater ? message : deliveredMessage,
 						dedupToken,
 						authorized: autoFeedbackEventAuthorized,
+						...(payload.headRefOid ? { headRefOid: payload.headRefOid } : {}),
 						queuedAt: new Date().toISOString(),
 					},
 				);
-				queuedForLater = true;
+				queueAccepted = admitted !== false;
+				if (!queueAccepted) cancellationBlocked = true;
 			} catch (error) {
 				_internals.log(
 					`[pr-monitor] Failed to queue PR_FEEDBACK monitor event for session ${sub.sessionID}`,
@@ -285,64 +323,29 @@ async function handlePrEvent(
 					},
 				);
 			}
-			// #2502: notify the settling loop (fire-and-forget, fail-open — the
-			// loop no-ops unless the triple opt-in gates are all enabled).
-			_internals.notifyPrFeedbackLoop(directory, sub.sessionID);
 		}
-		if (!gateReadFailed && !activeGate && autoFeedbackEventAuthorized) {
-			try {
-				activeGate = await _internals.activatePrWorkflow(
-					directory,
-					sub.sessionID,
-					'PR_FEEDBACK',
-					{ requireCheckoutPreflight: true, prUrl },
-				);
-			} catch (error) {
-				_internals.log(
-					`[pr-monitor] Auto PR_FEEDBACK activation failed for session ${sub.sessionID}`,
-					{
-						error: error instanceof Error ? error.message : String(error),
-					},
-				);
-				queueForLater = true;
-			}
-		}
-		if (queueForLater && !queuedForLater) {
-			try {
-				await _internals.enqueuePrFeedbackMonitorEvent(
-					directory,
-					sub.sessionID,
-					{
-						type: event.type,
-						repoFullName: payload.repoFullName,
-						prNumber: payload.prNumber,
-						prUrl,
-						message,
-						dedupToken,
-						authorized: autoFeedbackEventAuthorized,
-						queuedAt: new Date().toISOString(),
-					},
-				);
-			} catch (error) {
-				_internals.log(
-					`[pr-monitor] Failed to queue PR_FEEDBACK monitor event for session ${sub.sessionID}`,
-					{ error: error instanceof Error ? error.message : String(error) },
-				);
-			}
-		}
+		const effectiveDeliveredMessage =
+			cancellationBlocked || queueForLater ? message : deliveredMessage;
 		if (usePromptDelivery) {
 			const formatted: FormattedPrEvent = {
 				type: event.type,
 				repoFullName: payload.repoFullName,
 				prNumber: payload.prNumber,
 				prUrl,
-				message,
+				message: effectiveDeliveredMessage,
 				dedupToken,
+				...(modeSignal && !queueForLater && !cancellationBlocked
+					? { modeSignal }
+					: {}),
 				...(queueForLater ? { disposition: 'queued-for-later' as const } : {}),
 			};
 			let wakeOk = false;
 			try {
-				wakeOk = await _internals.deliverPrActivity(sub.sessionID, [formatted]);
+				wakeOk = await _internals.deliverPrActivity(
+					sub.sessionID,
+					[formatted],
+					directory,
+				);
 			} catch {
 				wakeOk = false;
 			}
@@ -353,6 +356,11 @@ async function handlePrEvent(
 				// delays the day-scale TTL sweep; the worker refreshes the flag
 				// on every poll that emits events.
 				_internals.scheduleClearUnaddressed(directory, sub.correlationId);
+				if (queueAccepted && !queueForLater) {
+					// Notify only after the configured delivery channel accepted the
+					// event. This prevents a failed/missing session from settling it.
+					_internals.notifyPrFeedbackLoop(directory, sub.sessionID);
+				}
 				_internals.log(
 					`[pr-monitor] Delivered ${event.type} wake event to session ${sub.sessionID}`,
 				);
@@ -376,11 +384,23 @@ async function handlePrEvent(
 		// key-presence identity. Content events (comments/reviews) already carry
 		// per-event identity (@author:content-hash); state events keep the
 		// per-PR token (issue #1976 B8).
-		const delivered = pushAdvisory(session, message, { dedupeKey: dedupToken });
-		if (!delivered) {
+		session.pendingAdvisoryMessages ??= [];
+		const alreadyQueued = session.pendingAdvisoryMessages.some((pending) =>
+			pending.includes(dedupToken),
+		);
+		const delivered = pushAdvisory(session, effectiveDeliveredMessage, {
+			dedupeKey: dedupToken,
+		});
+		const advisoryAccepted = delivered || alreadyQueued;
+		if (!advisoryAccepted) {
 			continue;
 		}
 		_internals.scheduleClearUnaddressed(directory, sub.correlationId);
+		if (queueAccepted && !queueForLater) {
+			// Advisory dedupe is an accepted delivery; a missing session or a
+			// rejected push above intentionally leaves the queue unsettled.
+			_internals.notifyPrFeedbackLoop(directory, sub.sessionID);
+		}
 		_internals.log(
 			`[pr-monitor] Delivered ${event.type} advisory to session ${sub.sessionID}`,
 		);

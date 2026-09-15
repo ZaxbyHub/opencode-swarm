@@ -20,9 +20,12 @@ import {
 import {
 	type BackgroundAutomationManager,
 	createAutomationManager,
+	isPrFeedbackLoopEnabled,
 	PlanSyncWorker,
 	type PreflightTriggerManager,
+	type PrFeedbackLoopRuntimeRegistration,
 	PrMonitorWorker,
+	registerPrFeedbackLoopRuntime,
 } from './background';
 import { createBackgroundCompletionObserver } from './background/completion-observer.js';
 import {
@@ -2732,13 +2735,36 @@ async function initializeOpenCodeSwarm(
 
 	// Register PR event subscribers for event delivery to active sessions
 	let prEventCleanup: (() => void) | null = null;
+	let prFeedbackLoopRuntimeCleanup: PrFeedbackLoopRuntimeRegistration | null =
+		null;
+	if (isPrFeedbackLoopEnabled(config)) {
+		try {
+			// Pure in-memory registration only. Head polling, agent dispatch, and
+			// all other external work remain event-driven and off the init path.
+			const registration = registerPrFeedbackLoopRuntime({
+				client: ctx.client,
+				directory: ctx.directory,
+				config,
+				agentNames: instanceGeneratedAgentNames,
+				resolveSessionAgent: (sessionID) =>
+					swarmState.activeAgent.get(sessionID) ??
+					getAgentSession(sessionID)?.agentName,
+			});
+			prFeedbackLoopRuntimeCleanup = registration;
+			postResolutionTasks.push(() => registration.promote());
+		} catch (err) {
+			log('[pr-feedback-loop] Runtime registration failed (non-fatal)', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
 	// Wake-delivery module handle (prompt mode). Populated only when
 	// pr_monitor is enabled with event_delivery === 'prompt' — same
 	// enabled-gated dynamic-import pattern as the subscribers (invariant 1:
 	// zero added init work when the feature is disabled).
 	let prEventDelivery: {
-		noteSessionIdle: (sessionID: string) => void;
-		unregisterPrEventDelivery: () => void;
+		noteSessionIdle: (sessionID: string, directory: string) => void;
+		unregister: () => void;
 	} | null = null;
 	if (prMonitorConfig.enabled) {
 		try {
@@ -2757,14 +2783,16 @@ async function initializeOpenCodeSwarm(
 		if (prMonitorConfig.event_delivery === 'prompt') {
 			try {
 				const deliveryModule = await import('./background/pr-event-delivery');
-				deliveryModule.registerPrEventDelivery({
+				const registration = deliveryModule.registerPrEventDelivery({
 					client: ctx.client,
 					directory: ctx.directory,
 					config: prMonitorConfig,
 				});
+				postResolutionTasks.push(() => registration.promote());
 				prEventDelivery = {
-					noteSessionIdle: deliveryModule.noteSessionIdle,
-					unregisterPrEventDelivery: deliveryModule.unregisterPrEventDelivery,
+					noteSessionIdle: (sessionID, directory) =>
+						deliveryModule.noteSessionIdle(sessionID, directory),
+					unregister: registration,
 				};
 			} catch (err) {
 				log('[pr-monitor] Failed to register wake delivery (non-fatal)', {
@@ -2834,7 +2862,8 @@ async function initializeOpenCodeSwarm(
 		// instance's registration (final-critic follow-up, this round).
 		removePrMonitorWorkerHandler(ctx.directory, ensurePrMonitorWorkerRunning);
 		prEventCleanup?.();
-		prEventDelivery?.unregisterPrEventDelivery();
+		prEventDelivery?.unregister();
+		prFeedbackLoopRuntimeCleanup?.();
 		markSnapshotCoordinationClosing(ctx.directory);
 		// #2480: durable-state close: flush queued group-commit writes, then
 		// closeProjectDb (its own best-effort TRUNCATE→PASSIVE checkpoint is
@@ -3550,7 +3579,7 @@ async function initializeOpenCodeSwarm(
 						evt?.type === 'session.idle' &&
 						typeof idleSessionID === 'string'
 					) {
-						prEventDelivery.noteSessionIdle(idleSessionID);
+						prEventDelivery.noteSessionIdle(idleSessionID, ctx.directory);
 					}
 				}
 				await backgroundCompletionObserver.event(input);

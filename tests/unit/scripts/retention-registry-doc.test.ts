@@ -55,4 +55,30 @@ describe('retention registry document coherence', () => {
 		expect(doc.includes('Appendix B')).toBe(true);
 		expect(doc.includes('Appendix C')).toBe(true);
 	});
+
+	test('P3: pr-feedback evidence grammar matches the writer filename contract', () => {
+		const row = RETENTION_REGISTRY.find(
+			(candidate) => candidate.id === 'pr-feedback-loop-state',
+		);
+		expect(row).toBeDefined();
+		if (!row) return;
+
+		// The writer emits one durable evidence file as `{seq}-{uuid}.json`.
+		// Keep the registry from silently drifting to a sequence-only grammar.
+		const representative =
+			'.swarm/pr-feedback-evidence/17-550e8400-e29b-41d4-a716-446655440000.json';
+		const uuid =
+			'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+		expect(row.pathGrammar).toContain(
+			'.swarm/pr-feedback-evidence/{seq}-{uuid}.json',
+		);
+		expect(row.writerModules).toContain('src/background/pr-feedback-loop.ts');
+		expect(row.writerCitations.join('\n')).toContain('oversight evidence');
+		expect(
+			new RegExp(
+				`^\\.swarm/pr-feedback-evidence/\\d+-${uuid}\\.json$`,
+				'i',
+			).test(representative),
+		).toBe(true);
+	});
 });
