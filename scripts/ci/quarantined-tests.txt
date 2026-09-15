@@ -12,3 +12,27 @@
 # the grace window it only warns).
 #
 # No active global test quarantines. Issue #1908 retired the tracked backlog.
+#
+# tests/unit/services/evidence-summary-adversarial.test.ts (issue #2740)
+# ---------------------------------------------------------------------------
+# Adversarial security tests for the Evidence Summary Pipeline (Task 5.8):
+# malformed evidence payloads, blocker spoofing, artifact path abuse, and
+# event spam — exercised through buildEvidenceSummary /
+# createEvidenceSummaryIntegration with mocked loadEvidence / loadPlanJsonOnly.
+# Core timing hazard: the "should not block on slow event handlers" case
+# registers a real 100ms setTimeout handler and asserts
+# expect(duration).toBeLessThan(500) at
+# tests/unit/services/evidence-summary-adversarial.test.ts:882 — under
+# merge-group runner CPU contention (6 unit shards co-scheduled with coverage
+# and smoke jobs) the publish can exceed the 500ms budget and fail attempt 1,
+# then pass on retry when the runner has settled. The temp dir per test is
+# also mkdtempSync/rmSync'd. Pre-existing, unrelated to any specific PR.
+# Quarantined per issue #2740; tracked under #1782 (test-stability sprint).
+# OWNER: zaxbysauce — issue #2740 (ubuntu-latest merge-group retry-flake,
+#   run 34726206593 `unit (ubuntu-latest, 2)`; attempts 1+2 failed, passed on
+#   retry 2; no per-OS ledger exists for ubuntu so this uses the general one,
+#   matching the #2368 dispatch-lanes precedent)
+# EXPIRY: 2026-10-14 — root-fix the 500ms wall-clock budget (e.g. freeze the
+#   clock or widen the margin) or renew with an updated criterion. Inside the
+#   14-day grace window Check 7 only warns.
+tests/unit/services/evidence-summary-adversarial.test.ts

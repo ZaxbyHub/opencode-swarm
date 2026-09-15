@@ -21,3 +21,44 @@
 # EXPIRY: 2026-09-26 — remove when the fixture/harness signal handling is
 #   fixed and the test passes on macos-latest.
 tests/unit/scripts/ci/repository-validation-real-process-2675.test.ts
+#
+# tests/unit/utils/bun-compat-exit-first-2530.test.ts (issue #2740)
+# ---------------------------------------------------------------------------
+# Regression coverage for #2530: verifies the bunSpawn Node fallback consumes
+# stdout/stderr exit-first (empty/small/large/nonzero dual-stream matrix,
+# bounded-output overflow, timeout termination) across both native Bun and the
+# plain-Node fallback, plus the public isCleanWorktree path under node
+# --input-type=module. Every non-matrix test shell outs to real processes:
+# `bun build` of src/utils/bun-compat.ts and a `node` probe, both under hard
+# 5s timeouts (PROBE_TIMEOUT_MS at tests/unit/utils/bun-compat-exit-first-2530.test.ts:9).
+# A macos-latest merge-group runner stalled by >5s on cold build/install or
+# CPU contention trips the probe timeout, which surfaces as attempt-1 failure
+# with no product defect involved. Pre-existing, unrelated to any specific PR.
+# Quarantined per issue #2740; tracked under #1782 (test-stability sprint).
+# OWNER: zaxbysauce — issue #2740 (macos-latest merge-group retry-flake,
+#   run 34726206593 `unit (macos-latest, 4)`; siblings green)
+# EXPIRY: 2026-10-14 — root-fix the probe timeout sensitivity (e.g. raise
+#   PROBE_TIMEOUT_MS or pre-warm the build) or renew with an updated
+#   criterion. Inside the 14-day grace window Check 7 only warns.
+tests/unit/utils/bun-compat-exit-first-2530.test.ts
+#
+# tests/unit/commands/promote-registration.test.ts (issue #2740)
+# ---------------------------------------------------------------------------
+# Unit tests for the `/swarm promote` command registration and behavior
+# (command import/export, switch-case registration, help text, direct-text
+# mode, --category/--from-swarm/--force/--reason parsing, and the #1821 A3
+# actionability-floor gate). beforeEach mutates process.env.HOME /
+# LOCALAPPDATA / XDG_DATA_HOME to redirect the hive knowledge path into a
+# fresh mkdtempSync temp dir, and afterEach restores it and rmSync's the dir —
+# the classic env-mutation + temp-dir teardown surface (#1782 class) plus a
+# real filesystem write to the hive path per test. Attempt-1 failure on
+# macos-latest merge-group runner with immediate retry pass is consistent
+# with cold-file / env-read sensitivity, not a product regression.
+# Pre-existing, unrelated to any specific PR.
+# Quarantined per issue #2740; tracked under #1782 (test-stability sprint).
+# OWNER: zaxbysauce — issue #2740 (macos-latest merge-group retry-flake,
+#   run 34726206593 `unit (macos-latest, 6)`; siblings green)
+# EXPIRY: 2026-10-14 — root-fix the per-test env mutation / temp-dir teardown
+#   or renew with an updated criterion. Inside the 14-day grace window
+#   Check 7 only warns.
+tests/unit/commands/promote-registration.test.ts
