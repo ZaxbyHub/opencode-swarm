@@ -12,3 +12,32 @@
 # the grace window it only warns).
 #
 # No active global test quarantines. Issue #1908 retired the tracked backlog.
+
+# tests/unit/telemetry/init-rehome.test.ts (issue #2660)
+# ---------------------------------------------------------------------------
+# Tests the telemetry re-home on directory change path (issue #2472 W9):
+# init A then init B produces two telemetry.jsonl files and B receives
+# subsequent events; same-directory re-init stays an idempotent no-op;
+# events emitted before any init are dropped without creating a file;
+# failed new-stream creation retains the previous project's stream (fail-open
+# ownership retention); windows case-variant spelling of the same root keeps
+# the stream destination (canonical same-directory check). Flaky on
+# ubuntu-latest merge-group coverage-shard 1 only: CI run 34309871068
+# (merge_group, head 701e628206badece23c92fefd941a778973b2c84,
+# 2026-09-09T04:41:50Z) had Attempt 1 fail and Passed on retry 1
+# (passed-on-retry flake); sibling coverage-shards 2/3/4/5/6 were green on
+# this file in the same run, and all six ubuntu/macos/windows unit shards
+# were green or did not run the file. The coverage job runs ubuntu-only
+# and honors ONLY the general ledger (scripts/ci/run-coverage-gate.sh
+# never branches per-OS), so this is the only correct ledger target. The
+# ci.yml retry loop discards attempt-1 output when a retry passes, so no
+# assertion text exists to drive a root-cause fix. Pre-existing, unrelated
+# to any specific PR.
+# Quarantined per issue #2660; tracked under #1782 (test-stability sprint).
+# OWNER: zaxbysauce — issue #2660 (ubuntu-only merge-group coverage-shard
+#   flake; general-ledger target because run-coverage-gate.sh never
+#   branches per-OS)
+# EXPIRY: 2026-10-15 — root-fix the coverage/isolate retry-flake or renew
+#   with an updated criterion. Inside the 14-day grace window Check 7 only
+#   warns.
+tests/unit/telemetry/init-rehome.test.ts
