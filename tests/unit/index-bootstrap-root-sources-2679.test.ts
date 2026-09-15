@@ -82,6 +82,8 @@ const PROJECT_SURFACE_SYMBOLS = [
 	'loadPlan',
 	'ensureAgentSession',
 	'cacheCohortIdAtMessage',
+	'beginApprovedReviewerScopeLifecycle',
+	'completeReviewerScopeLifecycle',
 ] as const;
 
 /**
@@ -93,8 +95,6 @@ const WORKSPACE_SURFACE_SYMBOLS = [
 	'hasManifestAncestor',
 	'buildProjectContext',
 	'applyLanePermissions',
-	'beginApprovedReviewerScopeLifecycle',
-	'completeReviewerScopeLifecycle',
 ] as const;
 
 describe('src/index.ts bootstrap-root sources (#2679)', () => {
