@@ -2004,7 +2004,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/commands/rollback.ts — lifecycle-locked checkpoint projection publication with prior-byte compensation after authoritative re-root',
 			'src/commands/reset.ts — lifecycle-locked critical projection deletion with prior-byte compensation when authority cleanup aborts',
 		],
-		readerCitations: ['src/plan/manager.ts:658 loadPlan — full-file with auto-heal + ledger-replay fallback, async; :366 loadPlanJsonOnly'],
+		readerCitations: ['src/plan/manager.ts:715 loadPlan — full-file with auto-heal + ledger-replay fallback, async; :398 loadPlanJsonOnly'],
 		schemaVersion: 'plan schema (projections of the ledger)',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'content',
@@ -3487,7 +3487,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/session/snapshot-writer.ts', 'src/session/snapshot-store.ts', 'src/session/session-start-store.ts', 'src/services/context-budget-service.ts'],
 		writerCitations: [
-			'src/session/snapshot-writer.ts:519 writeSnapshot — per-key SQLite snapshot authority via snapshot-store with serialized post-commit projection',
+			'src/session/snapshot-writer.ts:534 writeSnapshot — per-key SQLite snapshot authority via snapshot-store with serialized post-commit projection',
 			'src/session/snapshot-store.ts writeSnapshotRows — FULL transaction with per-session tombstones and cross-process-safe disjoint updates',
 			'src/session/session-start-store.ts:6 recordSessionStart — append flag a, fail-open',
 			'src/services/context-budget-service.ts:196 writeBudgetState — bunWrite + cache invalidation',

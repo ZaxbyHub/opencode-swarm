@@ -14,20 +14,24 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getProjectDb } from '../../../src/db/project-db.js';
 import {
+	_internals,
 	clearAllSessionOverrides,
 	clearOverrideForSession,
 	getOverrideForSession,
 	setOverrideForSession,
+	sweepOrphanOverrides,
 } from '../../../src/db/qa-gate-session-override.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let tempDir: string;
+const originalDeleteOrphanOverrideBatch = _internals.deleteOrphanOverrideBatch;
 
 beforeEach(() => {
 	tempDir = canonicalMkdtemp('qa-gate-session-override-test-');
 });
 
 afterEach(() => {
+	_internals.deleteOrphanOverrideBatch = originalDeleteOrphanOverrideBatch;
 	try {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	} catch {
@@ -137,5 +141,49 @@ describe('clearAllSessionOverrides', () => {
 
 	test('no-op when the project DB does not exist', () => {
 		expect(clearAllSessionOverrides(tempDir)).toBe(0);
+	});
+});
+
+describe('sweepOrphanOverrides — bounded batches (PR2767-COPILOT-002)', () => {
+	test('deletes all orphans in at most 500-ID batches and preserves live rows', () => {
+		// Before batching, cleanup issued one DELETE per orphan, scaling statement
+		// count linearly with stale sessions during the rehydrate transaction.
+		const orphanCount = 1_001;
+		setOverrideForSession(tempDir, 'live-session', { mutation_test: true });
+		const db = getProjectDb(tempDir);
+		const seedOrphans = db.transaction(() => {
+			for (let index = 0; index < orphanCount; index += 1) {
+				db.run(
+					"INSERT INTO qa_gate_session_override (session_id, gates, updated_at) VALUES (?, ?, datetime('now'))",
+					[`orphan-${index}`, '{}'],
+				);
+			}
+		});
+		seedOrphans();
+
+		const batchSizes: number[] = [];
+		_internals.deleteOrphanOverrideBatch = (batchDb, sessionIds) => {
+			batchSizes.push(sessionIds.length);
+			return originalDeleteOrphanOverrideBatch(batchDb, sessionIds);
+		};
+
+		const removed = sweepOrphanOverrides(tempDir, new Set(['live-session']));
+
+		expect(removed).toBe(orphanCount);
+		expect(batchSizes.length).toBeGreaterThan(0);
+		expect(
+			batchSizes.every((batchSize) => batchSize > 0 && batchSize <= 500),
+		).toBe(true);
+		expect(batchSizes.reduce((total, batchSize) => total + batchSize, 0)).toBe(
+			orphanCount,
+		);
+		expect(batchSizes.length).toBeLessThan(orphanCount);
+		expect(
+			db
+				.query<{ session_id: string }, []>(
+					'SELECT session_id FROM qa_gate_session_override ORDER BY session_id',
+				)
+				.all(),
+		).toEqual([{ session_id: 'live-session' }]);
 	});
 });

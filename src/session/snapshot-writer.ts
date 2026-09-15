@@ -7,12 +7,12 @@
 import {
 	closeSync,
 	existsSync,
+	renameSync as fsRename,
 	fsyncSync,
 	mkdirSync,
 	openSync,
 	unlinkSync,
 } from 'node:fs';
-import { rename as fsRename } from 'node:fs/promises';
 import * as path from 'node:path';
 import { TASK_WORKFLOW_SCHEMA_MARKER } from '../gate-evidence.js';
 import { validateSwarmPath } from '../hooks/utils';
@@ -61,34 +61,47 @@ const SNAPSHOT_RENAME_RETRY_DELAY_MS = 50;
  * on. Any non-transient code fails immediately — retrying an EACCES or
  * ENOENT would only delay the log.
  *
+ * Production uses synchronous rename so the authority check and the atomic OS
+ * operation happen in one event-loop turn. The DI seam accepts an async
+ * adapter for deterministic race tests; a resolved adapter only counts as a
+ * commit when its unique temp source is gone and the target exists. This also
+ * handles Windows reporting a transient error after the OS completed the
+ * rename, before a later authority check can suppress cache invalidation.
+ *
  * Throws the last rename error when the budget is exhausted; the caller owns
  * temp-file cleanup and error swallowing.
  */
 async function renameWithTransientRetry(
 	tempPath: string,
 	targetPath: string,
-): Promise<void> {
+	shouldCommit?: () => boolean,
+): Promise<boolean> {
 	let lastError: unknown;
+	const renameCommitted = () => !existsSync(tempPath) && existsSync(targetPath);
 	for (let attempt = 0; attempt < SNAPSHOT_RENAME_MAX_ATTEMPTS; attempt++) {
+		if (shouldCommit && !shouldCommit()) return false;
 		try {
-			await _internals.rename(tempPath, targetPath);
-			return;
+			await _internals.rename(tempPath, targetPath, shouldCommit);
+			// An async adapter may finish after its authority predicate has gone
+			// false and decline the swap with a void return. Do not mistake that
+			// for a commit or invalidate a cache for a file that stayed unchanged.
+			return renameCommitted();
 		} catch (error) {
 			lastError = error;
 			const code = (error as NodeJS.ErrnoException).code;
 			// Windows can report a sharing violation for a rename that actually
-			// committed, so a retry then finds the source already gone. Treating
-			// that as a failure would skip the caller's cache invalidation for a
-			// file that really did change — the precise stale-read the #1729
-			// invalidation exists to prevent. Only a retry can observe this, so
-			// the check is scoped to attempt > 0.
+			// committed. Check immediately, before the next iteration's authority
+			// check can return false and skip cache invalidation. ENOENT is treated
+			// as this case only on a retry: on the first attempt it can also mean
+			// the temp source disappeared before rename was attempted.
 			if (
-				code === 'ENOENT' &&
-				attempt > 0 &&
-				!existsSync(tempPath) &&
-				existsSync(targetPath)
+				(code === 'EEXIST' ||
+					code === 'EBUSY' ||
+					code === 'EPERM' ||
+					(code === 'ENOENT' && attempt > 0)) &&
+				renameCommitted()
 			) {
-				return;
+				return true;
 			}
 			if (code !== 'EEXIST' && code !== 'EBUSY' && code !== 'EPERM') {
 				break;
@@ -253,7 +266,9 @@ export const SESSION_TRANSIENT_FIELDS: Readonly<
 	owningProjectKey:
 		'Trust boundary (issue #2667): ownership is defined by the HYDRATING/creating directory, never by snapshot bytes — never serialized.',
 	hydrationStamp:
-		'Generation recency token (issue #2667); meaningful only within this process against the per-project generation counter.',
+		'Process-local generation recency token (issue #2667); paired with hydrationAuthorityEpoch and never serialized.',
+	hydrationAuthorityEpoch:
+		'Process-local project-authority epoch paired with hydrationStamp (issue #2668); never serialized.',
 	lastScopeViolation:
 		'One-shot diagnostic for the current turn; a fresh process has observed no violations.',
 	modifiedFilesThisCoderTask:
@@ -565,6 +580,7 @@ export async function writeSnapshot(
 export async function writeSnapshotProjection(
 	directory: string,
 	snapshot: SnapshotData,
+	shouldCommit?: () => boolean,
 ): Promise<void> {
 	const content = JSON.stringify(snapshot, null, 2);
 
@@ -577,22 +593,34 @@ export async function writeSnapshotProjection(
 
 	// Atomic write: write to temp file then rename
 	const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-	await bunWrite(tempPath, content);
-	// FR-004: fsync the temp file so the rename below cannot leave us with
-	// an empty or partial canonical file on power-loss / kill -9.
 	try {
-		const fd = openSync(tempPath, 'r+');
+		await bunWrite(tempPath, content);
+		// FR-004: fsync the temp file so the rename below cannot leave us with
+		// an empty or partial canonical file on power-loss / kill -9.
 		try {
-			fsyncSync(fd);
-		} finally {
-			closeSync(fd);
+			const fd = openSync(tempPath, 'r+');
+			try {
+				fsyncSync(fd);
+			} finally {
+				closeSync(fd);
+			}
+		} catch {
+			// fsync is best-effort; OSes / filesystems that don't support it
+			// (e.g. tmpfs, ramdisk) shouldn't block the main path.
 		}
-	} catch {
-		// fsync is best-effort; OSes / filesystems that don't support it
-		// (e.g. tmpfs, ramdisk) shouldn't block the main path.
-	}
-	try {
-		await renameWithTransientRetry(tempPath, resolvedPath);
+		const renamed = await renameWithTransientRetry(
+			tempPath,
+			resolvedPath,
+			shouldCommit,
+		);
+		if (!renamed) return;
+		// Only after a SUCCESSFUL rename. The projection may be read through the
+		// cached artifact reader, and this writer runs on every
+		// tool.execute.after — a snapshot whose only delta is a counter or a
+		// timestamp field of identical width is the SAME SIZE as its predecessor,
+		// which the cache's stat stamp (mtime+ctime+size) cannot distinguish from
+		// "unchanged" inside one filesystem timestamp tick (issue #1729).
+		invalidateCachedArtifact(resolvedPath);
 	} finally {
 		// No-op after a successful swap (the temp path no longer exists);
 		// drops the orphan when every retry failed, so a persistently locked
@@ -606,13 +634,6 @@ export async function writeSnapshotProjection(
 			/* already renamed or never created */
 		}
 	}
-	// Only after a SUCCESSFUL rename. The projection may be read through the
-	// cached artifact reader, and this writer runs on every
-	// tool.execute.after — a snapshot whose only delta is a counter or a
-	// timestamp field of identical width is the SAME SIZE as its predecessor,
-	// which the cache's stat stamp (mtime+ctime+size) cannot distinguish from
-	// "unchanged" inside one filesystem timestamp tick (issue #1729).
-	invalidateCachedArtifact(resolvedPath);
 }
 
 /**
@@ -656,7 +677,11 @@ export const _internals: {
 	writeSnapshot: typeof writeSnapshot;
 	createSnapshotWriterHook: typeof createSnapshotWriterHook;
 	flushPendingSnapshot: typeof flushPendingSnapshot;
-	rename: typeof fsRename;
+	rename: (
+		from: string,
+		to: string,
+		shouldCommit?: () => boolean,
+	) => void | Promise<void>;
 } = {
 	writeSnapshot,
 	createSnapshotWriterHook,

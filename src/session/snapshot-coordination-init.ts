@@ -4,12 +4,18 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { canonicalProjectKey } from '../db/canonical-project.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import { loadPlan, PlanRecoverySupersededError } from '../plan/manager.js';
 import { advisoryWarn } from '../services/warning-buffer.js';
-import { applyRehydrationCache, swarmState } from '../state.js';
+import {
+	applyRehydrationCache,
+	buildRehydrationCache,
+	swarmState,
+} from '../state.js';
 import { withTimeout } from '../utils/timeout.js';
 import {
 	beginHydrationScope,
 	type HydrationScope,
+	isHydrationScopeCurrent,
 } from './hydration-ownership.js';
 import { readSnapshotFileStrict, rehydrateState } from './snapshot-reader.js';
 import { importSnapshotRowsOnce, readSnapshotRows } from './snapshot-store.js';
@@ -27,9 +33,13 @@ const ARCHIVE_RETRY_DELAY_MS = 25;
 type ReadinessState =
 	| 'running'
 	| 'succeeded'
+	| 'superseded'
 	| 'failed'
 	| 'timed_out'
 	| 'closing';
+export type SnapshotCoordinationInitializationOutcome =
+	| 'succeeded'
+	| 'superseded';
 interface ReadinessEntry {
 	attemptId: number;
 	generation: number;
@@ -37,6 +47,10 @@ interface ReadinessEntry {
 	settled: boolean;
 	underlying: Promise<void>;
 	error?: string;
+}
+
+function isReadinessEntryClosing(entry: ReadinessEntry | undefined): boolean {
+	return entry?.state === 'closing';
 }
 
 export interface SnapshotCoordinationStatus {
@@ -66,11 +80,15 @@ function isRetryableArchiveError(error: unknown): boolean {
 	return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
 }
 
+type LegacyArchiveOutcome = 'archived' | 'not_archived' | 'superseded';
+
 async function archiveLegacySnapshotIfPresent(
 	legacyPath: string,
 	expectedSnapshot?: SnapshotData,
-): Promise<void> {
-	if (!existsSync(legacyPath)) return;
+	shouldCommit: () => boolean = () => true,
+): Promise<LegacyArchiveOutcome> {
+	if (!shouldCommit()) return 'superseded';
+	if (!existsSync(legacyPath)) return 'not_archived';
 	if (expectedSnapshot) {
 		try {
 			const current = JSON.stringify(
@@ -80,11 +98,11 @@ async function archiveLegacySnapshotIfPresent(
 				advisoryWarn(
 					'[opencode-swarm] Legacy snapshot changed after SQLite coordination; preserving it for explicit recovery.',
 				);
-				return;
+				return 'not_archived';
 			}
 		} catch {
 			// Do not archive an unreadable source when a peer may have replaced it.
-			return;
+			return 'not_archived';
 		}
 	}
 	const canonicalArchive = `${legacyPath}.imported`;
@@ -93,12 +111,15 @@ async function archiveLegacySnapshotIfPresent(
 		: canonicalArchive;
 	let lastError: unknown;
 	for (let attempt = 1; attempt <= ARCHIVE_RETRY_ATTEMPTS; attempt += 1) {
+		// The rename is the archive's publication boundary.  Check immediately
+		// before it so a superseded initializer cannot move a newer legacy file.
+		if (!shouldCommit()) return 'superseded';
 		try {
 			_snapshotCoordinationInternals.renameLegacySnapshot(
 				legacyPath,
 				archivePath,
 			);
-			return;
+			return 'archived';
 		} catch (error) {
 			lastError = error;
 			if (!isRetryableArchiveError(error) || attempt === ARCHIVE_RETRY_ATTEMPTS)
@@ -113,6 +134,7 @@ async function archiveLegacySnapshotIfPresent(
 			lastError instanceof Error ? lastError.message : String(lastError)
 		}`,
 	);
+	return 'not_archived';
 }
 
 function evictSettledEntries(): boolean {
@@ -127,10 +149,15 @@ function evictSettledEntries(): boolean {
 async function initializeSnapshotCoordination(
 	directory: string,
 	scope?: HydrationScope,
-): Promise<void> {
+): Promise<SnapshotCoordinationInitializationOutcome> {
+	const isCurrent = () => scope === undefined || isHydrationScopeCurrent(scope);
+	// Source selection and the first authority read are also publication
+	// boundaries: a stale initializer must not even start a compatibility import.
+	if (!isCurrent()) return 'superseded';
 	let legacyArchiveAttempted = false;
 	let snapshot = readSnapshotRows(directory);
 	if (!snapshot) {
+		if (!isCurrent()) return 'superseded';
 		const legacyPath = validateSwarmPath(directory, 'session/state.json');
 		const projectionPath = validateSwarmPath(
 			directory,
@@ -147,11 +174,20 @@ async function initializeSnapshotCoordination(
 				? 'session/state.json'
 				: null;
 		if (source) {
+			if (!isCurrent()) return 'superseded';
 			// Unlike the compatibility reader, import never treats corruption or an
 			// unsupported version as absence. Authority stays fail-closed.
-			const candidate = await readSnapshotFileStrict(directory, source);
+			const candidate =
+				await _snapshotCoordinationInternals.readSnapshotFileStrict(
+					directory,
+					source,
+				);
+			// Strict reading is asynchronous.  Re-check immediately before the
+			// synchronous SQLite import so stale compatibility bytes cannot become
+			// authoritative after a newer hydration starts.
+			if (!isCurrent()) return 'superseded';
 			const serialized = JSON.stringify(candidate);
-			const outcome = importSnapshotRowsOnce(
+			const outcome = _snapshotCoordinationInternals.importSnapshotRowsOnce(
 				directory,
 				candidate,
 				createHash('sha256').update(serialized).digest('hex'),
@@ -160,28 +196,85 @@ async function initializeSnapshotCoordination(
 			snapshot = readSnapshotRows(directory);
 			if (outcome === 'imported' && source === 'session/state.json') {
 				legacyArchiveAttempted = true;
-				await archiveLegacySnapshotIfPresent(legacyPath, candidate);
+				const archiveOutcome = await archiveLegacySnapshotIfPresent(
+					legacyPath,
+					candidate,
+					isCurrent,
+				);
+				if (archiveOutcome === 'superseded') return 'superseded';
 			}
 		}
 	}
-	if (!snapshot) return;
-	// A prior attempt may have committed SQLite and crashed before archival.
-	// Repair that post-commit side effect on every authoritative restart without
-	// ever overwriting an earlier cold archive.
-	if (!legacyArchiveAttempted) {
-		await archiveLegacySnapshotIfPresent(
-			validateSwarmPath(directory, 'session/state.json'),
-			snapshot,
+	if (!isCurrent()) return 'superseded';
+
+	if (snapshot) {
+		// A prior attempt may have committed SQLite and crashed before archival.
+		// Repair that post-commit side effect on every authoritative restart without
+		// ever overwriting an earlier cold archive.
+		if (!legacyArchiveAttempted) {
+			const archiveOutcome = await archiveLegacySnapshotIfPresent(
+				validateSwarmPath(directory, 'session/state.json'),
+				snapshot,
+				isCurrent,
+			);
+			if (archiveOutcome === 'superseded') return 'superseded';
+		}
+		// Issues #2667/#2668: the apply is authority-fenced by the scope captured in
+		// startSnapshotCoordinationInitialization — a timed-out initializer that
+		// settles late cannot publish over the state of any newer hydration.
+		const outcome = await rehydrateState(snapshot, directory, scope);
+		if (!outcome.applied || !isCurrent()) return 'superseded';
+	}
+
+	// The early init reader intentionally uses only cheap projection data.  Once
+	// post-resolution coordination is running, resolve the authoritative plan
+	// through the ledger-aware manager before publishing the rehydration cache.
+	let authoritativePlan: Awaited<ReturnType<typeof loadPlan>> | undefined;
+	try {
+		authoritativePlan = await _snapshotCoordinationInternals.loadPlan(
+			directory,
+			undefined,
+			{
+				preCommitCheck: () => {
+					if (!isCurrent()) {
+						throw new PlanRecoverySupersededError(
+							'Snapshot coordination initialization superseded during plan recovery',
+						);
+					}
+				},
+			},
+		);
+	} catch (error) {
+		// A superseded recovery no longer owns the plan authority. Preserve the
+		// typed signal so the coordinator can mark readiness superseded and stop
+		// before applying the pre-resolution cache or publishing its projection.
+		if (error instanceof PlanRecoverySupersededError) throw error;
+		advisoryWarn(
+			`[opencode-swarm] Authoritative plan recovery failed; retaining pre-resolution cache: ${
+				error instanceof Error ? error.message : String(error)
+			}`.slice(0, 512),
 		);
 	}
-	// Issue #2667: the apply is generation-fenced by the scope captured in
-	// startSnapshotCoordinationInitialization — a timed-out initializer that
-	// settles late cannot publish over the state of any newer hydration.
-	await rehydrateState(snapshot, directory, scope);
-	for (const session of swarmState.agentSessions.values())
+	if (!isCurrent()) return 'superseded';
+	if (authoritativePlan !== undefined) {
+		const cacheResult = await buildRehydrationCache(directory, {
+			planOverride: authoritativePlan,
+			shouldCommit: isCurrent,
+		});
+		if (!cacheResult.committed || !isCurrent()) return 'superseded';
+	}
+	for (const session of swarmState.agentSessions.values()) {
+		if (!isCurrent()) return 'superseded';
 		applyRehydrationCache(session);
+	}
+	if (!snapshot || !isCurrent())
+		return isCurrent() ? 'succeeded' : 'superseded';
 	try {
-		await _snapshotCoordinationInternals.writeProjection(directory, snapshot);
+		await _snapshotCoordinationInternals.writeProjection(
+			directory,
+			snapshot,
+			isCurrent,
+		);
 	} catch (error) {
 		// The projection is a derived compatibility shadow.  SQLite is already
 		// authoritative and rehydrated above, so a shadow write failure must not
@@ -192,6 +285,7 @@ async function initializeSnapshotCoordination(
 			}`,
 		);
 	}
+	return isCurrent() ? 'succeeded' : 'superseded';
 }
 
 export function startSnapshotCoordinationInitialization(
@@ -215,10 +309,10 @@ export function startSnapshotCoordinationInitialization(
 	}
 	const attemptId = nextAttemptId++;
 	const generation = (existing?.generation ?? 0) + 1;
-	// Issue #2667: fence token captured at INITIATION (each fresh initializer
-	// bumps the shared per-project counter, which never decreases even when
-	// this entry is later deleted by retrySnapshotCoordinationInitialization).
-	const scope = beginHydrationScope(directory);
+	// Issues #2667/#2668: fence token captured at INITIATION. Each fresh
+	// initializer mints a process-unique authority that cannot be reused after
+	// bounded-record eviction or reset.
+	const scope = beginHydrationScope(root);
 	const entry: ReadinessEntry = {
 		attemptId,
 		generation,
@@ -228,13 +322,26 @@ export function startSnapshotCoordinationInitialization(
 	};
 	const underlying = _snapshotCoordinationInternals
 		.initialize(root, scope)
-		.then(() => {
-			if (entries.get(root) === entry && entry.state !== 'closing')
-				entry.state = 'succeeded';
+		.then((outcome) => {
+			if (entries.get(root) !== entry || entry.state === 'closing') return;
+			if (outcome === 'superseded') {
+				entry.state = 'superseded';
+				entry.error =
+					'coordination initialization superseded by a newer hydration generation';
+				return;
+			}
+			entry.state = 'succeeded';
 		})
 		.catch((error: unknown) => {
-			entry.state = 'failed';
-			entry.error = error instanceof Error ? error.message : String(error);
+			if (error instanceof PlanRecoverySupersededError) {
+				if (entry.state !== 'closing' && entries.get(root) === entry) {
+					entry.state = 'superseded';
+					entry.error = error.message;
+				}
+			} else {
+				entry.state = 'failed';
+				entry.error = error instanceof Error ? error.message : String(error);
+			}
 			throw error;
 		})
 		.finally(() => {
@@ -263,18 +370,37 @@ export async function ensureSnapshotCoordinationReady(
 ): Promise<void> {
 	const root = canonicalProjectKey(directory);
 	const entry = entries.get(root);
-	if (!entry) return startSnapshotCoordinationInitialization(root);
-	if (entry.state === 'closing') {
+	if (entry?.state === 'closing') {
 		throw new Error('coordination initialization is closing for reset-session');
 	}
-	if (entry.state === 'timed_out' && !entry.settled) {
+	if (entry?.state === 'timed_out' && !entry.settled) {
 		throw new Error(
 			'coordination initialization remains unsettled after timeout',
 		);
 	}
+	if (!entry || (entry.state === 'superseded' && entry.settled)) {
+		// Supersession is retryable only on a later readiness request. Starting
+		// exactly one attempt here coalesces concurrent callers and avoids an
+		// unbounded retry loop when hydration keeps superseding initialization.
+		await startSnapshotCoordinationInitialization(root);
+		const retried = entries.get(root);
+		if (retried?.state === 'closing') {
+			throw new Error(
+				'coordination initialization is closing for reset-session',
+			);
+		}
+		if (retried?.state !== 'succeeded') {
+			throw new Error(retried?.error ?? 'coordination initialization failed');
+		}
+		return;
+	}
 	await entry.underlying;
-	if (entry.state !== 'succeeded')
+	if (isReadinessEntryClosing(entry)) {
+		throw new Error('coordination initialization is closing for reset-session');
+	}
+	if (entry.state !== 'succeeded') {
 		throw new Error(entry.error ?? 'coordination initialization failed');
+	}
 }
 
 export function retrySnapshotCoordinationInitialization(
@@ -391,13 +517,22 @@ export function markSnapshotCoordinationClosing(directory: string): void {
 
 export const _snapshotCoordinationInternals: {
 	entries: Map<string, ReadinessEntry>;
-	initialize: (directory: string, scope?: HydrationScope) => Promise<void>;
+	initialize: (
+		directory: string,
+		scope?: HydrationScope,
+	) => Promise<SnapshotCoordinationInitializationOutcome>;
+	loadPlan: typeof loadPlan;
+	readSnapshotFileStrict: typeof readSnapshotFileStrict;
+	importSnapshotRowsOnce: typeof importSnapshotRowsOnce;
 	renameLegacySnapshot: (from: string, to: string) => void;
-	writeProjection: (directory: string, snapshot: SnapshotData) => Promise<void>;
+	writeProjection: typeof writeSnapshotProjection;
 	timeoutMs: number;
 } = {
 	entries,
 	initialize: initializeSnapshotCoordination,
+	loadPlan,
+	readSnapshotFileStrict,
+	importSnapshotRowsOnce,
 	renameLegacySnapshot: renameSync,
 	writeProjection: writeSnapshotProjection,
 	timeoutMs: READY_TIMEOUT_MS,

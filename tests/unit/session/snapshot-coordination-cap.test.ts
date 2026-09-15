@@ -27,7 +27,10 @@ describe('snapshot coordination readiness bounds', () => {
 		const blocked = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		_snapshotCoordinationInternals.initialize = async () => blocked;
+		_snapshotCoordinationInternals.initialize = async () => {
+			await blocked;
+			return 'succeeded';
+		};
 		_snapshotCoordinationInternals.timeoutMs = 1;
 
 		const attempts = Array.from({ length: 32 }, (_, index) =>

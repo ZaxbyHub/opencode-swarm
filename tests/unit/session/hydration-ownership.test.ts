@@ -473,7 +473,7 @@ describe('coordination-init generation fence (issue #2667 fault 3, deterministic
 			// newer generation's state stands.
 			expect(swarmState.agentSessions.has('sess-coord-old')).toBe(false);
 			expect(swarmState.agentSessions.has('sess-late')).toBe(true);
-			expect(getSnapshotCoordinationStatus(dir).state).toBe('succeeded');
+			expect(getSnapshotCoordinationStatus(dir).state).toBe('superseded');
 
 			// Recovery: retry (entry deletion + fresh generation) still
 			// applies fresh state through the shared never-reset counter.

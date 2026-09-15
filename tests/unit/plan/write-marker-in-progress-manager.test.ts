@@ -8,6 +8,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import {
 	_internals,
 	closePlanTerminalState,
+	PlanRecoverySupersededError,
 	rebuildPlan,
 	savePlan,
 } from '../../../src/plan/manager';
@@ -199,6 +200,111 @@ describe('savePlan write-marker in_progress', () => {
 		expect(lastMarker.source).toBe('plan_manager');
 		expect(lastMarker.phases_count).toBe(2);
 		expect(lastMarker.tasks_count).toBe(3);
+	});
+
+	test('authority loss after in-progress marker preparation prevents its rename', async () => {
+		const writes: Array<{ path: string; content: string }> = [];
+		const renames: Array<{ from: string; to: string }> = [];
+		_internals.verifyWrittenPlanJson = async () => {};
+
+		mock.module('../../../src/utils/bun-compat', () => ({
+			bunWrite: mock(async (path: string, content: string) => {
+				writes.push({ path, content });
+			}),
+			bunHash: mock(() => 0n),
+		}));
+		mock.module('node:fs', () => ({
+			...realFs,
+			renameSync: mock((from: string, to: string) => {
+				renames.push({ from, to });
+			}),
+			readdirSync: () => [],
+		}));
+		mock.module('../../../src/plan/ledger', () => ({
+			ledgerExists: mock(async () => false),
+			initLedger: mock(async () => {}),
+			appendLedgerEvent: mock(async () => ({})),
+			computePlanLedgerHash: mock(() => 'hash'),
+			computeCurrentPlanHash: mock(() => 'hash'),
+			readLedgerEvents: mock(async () => []),
+			getLatestLedgerSeq: mock(async () => 0),
+			takeSnapshotEvent: mock(async () => {}),
+		}));
+
+		const preCommitCheck = () => {
+			if (
+				writes.some((call) =>
+					call.path.includes('.plan-write-marker.plan-write-marker.'),
+				)
+			) {
+				throw new PlanRecoverySupersededError('new authority');
+			}
+		};
+		await expect(
+			savePlan(tempDir, createTestPlan(), { preCommitCheck }),
+		).rejects.toBeInstanceOf(PlanRecoverySupersededError);
+		expect(
+			writes.some((call) =>
+				call.path.includes('.plan-write-marker.plan-write-marker.'),
+			),
+		).toBe(true);
+		expect(
+			renames.some((rename) =>
+				rename.from.includes('.plan-write-marker.plan-write-marker.'),
+			),
+		).toBe(false);
+	});
+
+	test('authority loss after final marker preparation preserves the in-progress publication', async () => {
+		const writes: Array<{ path: string; content: string }> = [];
+		const renames: Array<{ from: string; to: string }> = [];
+		_internals.verifyWrittenPlanJson = async () => {};
+
+		mock.module('../../../src/utils/bun-compat', () => ({
+			bunWrite: mock(async (path: string, content: string) => {
+				writes.push({ path, content });
+			}),
+			bunHash: mock(() => 0n),
+		}));
+		mock.module('node:fs', () => ({
+			...realFs,
+			renameSync: mock((from: string, to: string) => {
+				renames.push({ from, to });
+			}),
+			readdirSync: () => [],
+		}));
+		mock.module('../../../src/plan/ledger', () => ({
+			ledgerExists: mock(async () => false),
+			initLedger: mock(async () => {}),
+			appendLedgerEvent: mock(async () => ({})),
+			computePlanLedgerHash: mock(() => 'hash'),
+			computeCurrentPlanHash: mock(() => 'hash'),
+			readLedgerEvents: mock(async () => []),
+			getLatestLedgerSeq: mock(async () => 0),
+			takeSnapshotEvent: mock(async () => {}),
+		}));
+
+		let markerFenceCount = 0;
+		const preCommitCheck = () => {
+			const markerWrites = writes.filter((call) =>
+				call.path.includes('.plan-write-marker.plan-write-marker.'),
+			);
+			if (markerWrites.length > markerFenceCount) {
+				markerFenceCount = markerWrites.length;
+				if (markerFenceCount === 2) {
+					throw new PlanRecoverySupersededError('new authority');
+				}
+			}
+		};
+		await expect(
+			savePlan(tempDir, createTestPlan(), { preCommitCheck }),
+		).rejects.toBeInstanceOf(PlanRecoverySupersededError);
+		expect(markerFenceCount).toBe(2);
+		expect(
+			renames.filter((rename) =>
+				rename.from.includes('.plan-write-marker.plan-write-marker.'),
+			),
+		).toHaveLength(1);
 	});
 });
 

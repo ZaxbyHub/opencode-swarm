@@ -1,4 +1,4 @@
-# Hydration is project-owned and generation-fenced
+# Hydration is project-owned and authority-fenced
 
 ## What
 
@@ -14,12 +14,13 @@ no longer publish over newer state:
   its own snapshot state. Calling it without a directory keeps the legacy
   clear-all (direct-test path only).
 - Each hydration initiation (`loadSnapshot` entry, SQLite snapshot
-  coordination initialization and retries) captures a generation scope from a
-  monotonic per-project counter (`src/session/hydration-ownership.ts`). An
-  apply whose generation has been superseded is refused with zero mutation —
-  a timed-out initializer that settles late can no longer wipe state written
-  by a newer generation. Live sessions created while a hydration is in flight
-  carry a stamp above it and survive that hydration's own apply.
+  coordination initialization and retries) captures an exact authority scope
+  from `src/session/hydration-ownership.ts`: a per-project generation plus a
+  process-monotonic epoch that cannot be reused after bounded-registry eviction
+  or reset. An apply whose authority has been superseded is refused with zero
+  mutation — a timed-out initializer that settles late can no longer wipe
+  state written by a newer generation. Live sessions created while a hydration
+  is in flight carry a stamp above it and survive that hydration's own apply.
 - The plan/evidence rehydration cache is per-project instead of a
   process-global singleton: whichever project built the cache last no longer
   feeds foreign workflow states to another project's new sessions.
@@ -45,8 +46,10 @@ another project's sessions (issue #2667).
 - New session fields `owningProjectKey` and `hydrationStamp` are never
   serialized; the snapshot field-parity guard covers them.
 - The new per-project registries are bounded (FIFO, 32 projects) with an
-  explicit `resetSwarmState` reset path; canonical project keys resolve
-  through a bounded memo (one realpath per directory spelling per process —
-  no new init-path filesystem cost).
+  explicit `resetSwarmState` reset path. The small authority-epoch scalar is
+  deliberately process-monotonic across resets so an old token can never
+  become current again. Canonical project keys resolve through a bounded memo
+  (one realpath per directory spelling per process — no new init-path
+  filesystem cost).
 - Ownership and generation rules are documented in
   `docs/plan-durability.md` § Live-State Ownership and Hydration Fencing.

@@ -417,6 +417,7 @@ describe('snapshot coordination post-resolution initialization', () => {
 		_snapshotCoordinationInternals.initialize = async () => {
 			calls += 1;
 			if (calls === 1) await blocked;
+			return 'succeeded';
 		};
 		const underlying = startSnapshotCoordinationInitialization(tempDir);
 		await new Promise((resolve) => setTimeout(resolve, 20));
@@ -448,7 +449,8 @@ describe('snapshot coordination post-resolution initialization', () => {
 			release = resolve;
 		});
 		_snapshotCoordinationInternals.timeoutMs = 5;
-		_snapshotCoordinationInternals.initialize = () => blocked;
+		_snapshotCoordinationInternals.initialize = () =>
+			blocked.then(() => 'succeeded');
 		const initialization = startSnapshotCoordinationInitialization(tempDir);
 
 		const startedAt = performance.now();

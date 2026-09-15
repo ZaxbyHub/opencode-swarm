@@ -10,6 +10,7 @@ import {
 	type LedgerEventInput,
 	takeSnapshotEvent,
 } from '../../../src/plan/ledger';
+import { getPlanLedgerState } from '../../../src/plan/ledger-sqlite';
 import {
 	derivePlanMarkdown,
 	loadPlan,
@@ -205,6 +206,69 @@ describe('loadPlan recovery ladder (#2531)', () => {
 		const loaded = await loadPlan(directory);
 
 		expect(loaded).toBeNull();
+	});
+
+	describe('syntactically malformed plan.json recovery coverage (F-005)', () => {
+		test('recovers from a malformed projection using a complete embedded ledger', async () => {
+			directory = await freshDir('malformed-json-complete-ledger');
+			const authoritative = makeRichPlan('Complete ledger authority');
+			await initLedger(
+				directory,
+				derivePlanId(authoritative),
+				computePlanLedgerHash(authoritative),
+				authoritative,
+			);
+			await writeFile(
+				join(directory, '.swarm', 'plan.json'),
+				'{not valid JSON',
+			);
+
+			const loaded = await loadPlan(directory);
+
+			expect(loaded?.title).toBe('Complete ledger authority');
+			assertRichMetadata(loaded);
+		});
+
+		test('does not replay a verified prefix from a truncated ledger when projection identity is malformed', async () => {
+			directory = await freshDir('malformed-json-truncated-ledger');
+			const prefixPlan = makeRichPlan('Truncated ledger prefix');
+			await initLedger(
+				directory,
+				derivePlanId(prefixPlan),
+				computePlanLedgerHash(prefixPlan),
+				prefixPlan,
+			);
+			const ledgerPath = join(directory, '.swarm', 'plan-ledger.jsonl');
+			const rootLine = readFileSync(ledgerPath, 'utf8');
+			await writeFile(
+				ledgerPath,
+				`${rootLine}{ poison: unverified ledger suffix\n`,
+			);
+			await writeFile(
+				join(directory, '.swarm', 'plan.json'),
+				'{not valid JSON',
+			);
+			const markdownFallback = makeRichPlan('Markdown fallback authority');
+			await writeFile(
+				join(directory, '.swarm', 'plan.md'),
+				derivePlanMarkdown(markdownFallback),
+			);
+			expect(getPlanLedgerState(directory)?.authorityMode).toBe('file_shadow');
+
+			const loaded = await loadPlan(directory);
+
+			// Without parseable projection identity, the truncated ledger cannot
+			// authorize replay of its verified prefix; recovery stays on the legacy
+			// markdown rung instead of silently choosing the prefix plan.
+			expect(loaded?.title).toBe('Markdown fallback authority');
+			expect(loaded?.title).not.toBe('Truncated ledger prefix');
+			expect(getPlanLedgerState(directory)?.authorityMode).toBe('file_shadow');
+			const rewrittenProjection = JSON.parse(
+				readFileSync(join(directory, '.swarm', 'plan.json'), 'utf8'),
+			) as Plan;
+			expect(rewrittenProjection.title).toBe('Markdown fallback authority');
+			expect(rewrittenProjection.title).not.toBe('Truncated ledger prefix');
+		});
 	});
 
 	test('degraded latest snapshot falls back to recoverable older history', async () => {

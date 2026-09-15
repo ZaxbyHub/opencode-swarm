@@ -137,6 +137,7 @@ describe('/swarm recover --coordination (#2481)', () => {
 		let calls = 0;
 		_snapshotCoordinationInternals.initialize = async () => {
 			calls += 1;
+			return 'succeeded';
 		};
 
 		const output = await handleRecoverCommand(directory, ['--coordination']);

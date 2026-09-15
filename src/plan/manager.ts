@@ -21,6 +21,19 @@ export class PlanConcurrentModificationError extends Error {
 }
 
 /**
+ * Internal control-flow error used to stop every recovery rung when the
+ * coordinator's captured hydration generation is no longer authoritative.
+ * Broad availability catches must rethrow this instead of trying a fallback
+ * that could publish stale durable state.
+ */
+export class PlanRecoverySupersededError extends Error {
+	constructor(message = 'plan recovery superseded by a newer generation') {
+		super(message);
+		this.name = 'PlanRecoverySupersededError';
+	}
+}
+
+/**
  * Thrown when savePlan detects that the incoming plan would silently drop one
  * or more tasks from the prior plan without the caller acknowledging the
  * removal (issue #853).
@@ -175,6 +188,7 @@ export const _internals: {
 	readPlanJsonUtf8: typeof readPlanJsonUtf8;
 	readPlanFileUtf8: typeof readPlanFileUtf8;
 	verifyWrittenPlanJson: typeof verifyWrittenPlanJson;
+	writeRebuildPlanMarkdown: typeof writeRebuildPlanMarkdown;
 	ledgerExists: typeof ledgerExists;
 	replayFromLedger: typeof replayFromLedger;
 	loadLastApprovedPlan: typeof loadLastApprovedPlan;
@@ -191,6 +205,7 @@ export const _internals: {
 	readPlanJsonUtf8,
 	readPlanFileUtf8,
 	verifyWrittenPlanJson,
+	writeRebuildPlanMarkdown,
 	ledgerExists,
 	replayFromLedger,
 	loadLastApprovedPlan,
@@ -331,6 +346,7 @@ export async function retryCasWithBackoff(
 		planHashAfter?: string;
 		verifyValid?: () => Promise<boolean> | boolean;
 		maxRetries?: number;
+		preCommitCheck?: () => void;
 	},
 ): Promise<LedgerEvent | null> {
 	const maxRetries = options.maxRetries ?? CAS_MAX_RETRIES;
@@ -342,6 +358,7 @@ export async function retryCasWithBackoff(
 			return await appendLedgerEvent(directory, eventInput, {
 				expectedHash: currentExpected,
 				planHashAfter: options.planHashAfter,
+				preCommitCheck: options.preCommitCheck,
 			});
 		} catch (error) {
 			if (!(error instanceof LedgerStaleWriterError) || attempt >= maxRetries) {
@@ -453,6 +470,7 @@ async function getLatestLedgerHash(directory: string): Promise<string> {
 async function surfaceLedgerStaleIfPersisted(
 	directory: string,
 	plan: RuntimePlan,
+	options?: { preCommitCheck?: () => void },
 ): Promise<RuntimePlan> {
 	const resolvedWorkspace = canonicalRootKeyFresh(directory);
 	if (!ledgerStaleWorkspaces.has(resolvedWorkspace)) {
@@ -464,10 +482,12 @@ async function surfaceLedgerStaleIfPersisted(
 		const ledgerHash = await getLatestLedgerHash(directory);
 		if (ledgerHash !== '' && planHash === ledgerHash) {
 			// Reconverged → the workspace recovered. Auto-clear and return clean.
+			options?.preCommitCheck?.();
 			ledgerStaleWorkspaces.delete(resolvedWorkspace);
 			return plan;
 		}
-	} catch {
+	} catch (error) {
+		if (error instanceof PlanRecoverySupersededError) throw error;
 		// If the recheck itself fails (e.g. transient ledger read error), fall
 		// through and surface staleness conservatively. Better a visible refusal
 		// the architect can clear than a silent stale-read of plan.json.
@@ -649,6 +669,7 @@ export async function isPlanMdInSync(
 export async function regeneratePlanMarkdown(
 	directory: string,
 	plan: Plan,
+	options?: { preCommitCheck?: () => void },
 ): Promise<void> {
 	assertProjectRoot(directory);
 	const swarmDir = path.resolve(directory, '.swarm');
@@ -663,6 +684,10 @@ export async function regeneratePlanMarkdown(
 	);
 	try {
 		await bunWrite(mdTempPath, markdownWithHash);
+		// The rename is the publication boundary.  Keep the guard immediately
+		// adjacent to the atomic operation so a caller that lost authority while
+		// the temp file was being written cannot publish stale derived state.
+		options?.preCommitCheck?.();
 		renameSync(mdTempPath, mdPath);
 	} finally {
 		try {
@@ -690,11 +715,19 @@ export async function regeneratePlanMarkdown(
 export async function loadPlan(
 	directory: string,
 	cache?: Map<string, Promise<string | null>>,
+	options?: { preCommitCheck?: () => void },
 ): Promise<RuntimePlan | null> {
+	// A startup coordinator may be superseded while one of the recovery reads
+	// below is pending.  Fail before any plan recovery/persistence boundary.
+	options?.preCommitCheck?.();
 	// Step 1: Try to load and validate plan.json. Decode bytes strictly so a
 	// malformed UTF-8 sequence cannot be silently converted to U+FFFD. A literal
 	// U+FFFD encoded in valid UTF-8 remains ordinary plan data.
 	let planJsonContent: string | null = null;
+	// When this invocation wins the one-shot startup ledger check, release that
+	// claim if its authority predicate later rejects a commit. Otherwise a stale
+	// coordinator could suppress the current generation's required recovery.
+	let claimedStartupWorkspace: string | null = null;
 	try {
 		planJsonContent = await _internals.readPlanJsonUtf8(directory);
 	} catch (error) {
@@ -717,8 +750,12 @@ export async function loadPlan(
 					const inSync = await isPlanMdInSync(directory, validated, cache);
 					if (!inSync) {
 						try {
-							await _internals.regeneratePlanMarkdown(directory, validated);
+							await _internals.regeneratePlanMarkdown(directory, validated, {
+								preCommitCheck: options?.preCommitCheck,
+							});
 						} catch (regenError) {
+							if (regenError instanceof PlanRecoverySupersededError)
+								throw regenError;
 							// Log warning but don't fail - plan.json is valid
 							warn(
 								`Failed to regenerate plan.md: ${regenError instanceof Error ? regenError.message : String(regenError)}. Proceeding with plan.json only.`,
@@ -737,7 +774,9 @@ export async function loadPlan(
 						const ledgerHash = await getLatestLedgerHash(directory);
 						const resolvedWorkspace = canonicalRootKeyFresh(directory);
 						if (!startupLedgerCheckedWorkspaces.has(resolvedWorkspace)) {
+							options?.preCommitCheck?.();
 							startupLedgerCheckedWorkspaces.add(resolvedWorkspace);
+							claimedStartupWorkspace = resolvedWorkspace;
 							if (ledgerHash !== '' && planHash !== ledgerHash) {
 								const currentPlanId = derivePlanId(validated);
 								const ledgerEvents = await readLedgerEvents(directory);
@@ -757,7 +796,9 @@ export async function loadPlan(
 									);
 									try {
 										const { plan: rebuilt, truncated } =
-											await replayFromLedgerWithStatus(directory);
+											await replayFromLedgerWithStatus(directory, {
+												preCommitCheck: options?.preCommitCheck,
+											});
 										if (truncated) {
 											// M1 silent-rollback fix: the ledger contained a poison
 											// line, so integrity-checked replay could only reconstruct
@@ -782,6 +823,7 @@ export async function loadPlan(
 											// Persist the verdict so it re-surfaces on every later
 											// loadPlan (the startup replay runs at most once per
 											// workspace per process) via the return chokepoint below.
+											options?.preCommitCheck?.();
 											ledgerStaleWorkspaces.add(resolvedWorkspace);
 											criticalWarn(
 												'[loadPlan] Ledger truncated (poison line detected) — preserving plan.json instead of rolling back to the prefix-only ledger projection. Durable post-poison events remain in plan.json. Corrupted suffix quarantined to .swarm/plan-ledger.quarantine.*. Run /swarm reset-session after verifying state if this persists.',
@@ -791,6 +833,7 @@ export async function loadPlan(
 										if (rebuilt) {
 											await rebuildPlan(directory, rebuilt, {
 												reason: 'ledger_hash_mismatch_recovery',
+												preCommitCheck: options?.preCommitCheck,
 											});
 											warn(
 												'[loadPlan] Rebuilt plan from ledger. Checkpoint available at .swarm/plan-export/SWARM_PLAN.md if it exists.',
@@ -798,6 +841,8 @@ export async function loadPlan(
 											return rebuilt;
 										}
 									} catch (replayError) {
+										if (replayError instanceof PlanRecoverySupersededError)
+											throw replayError;
 										// Ledger replay failed — try the critic-approved immutable
 										// snapshot as a last-resort fallback before returning stale state.
 										//
@@ -812,6 +857,7 @@ export async function loadPlan(
 											if (approved) {
 												await rebuildPlan(directory, approved.plan, {
 													reason: 'approved_snapshot_fallback',
+													preCommitCheck: options?.preCommitCheck,
 												});
 												// Heal the ledger tail so subsequent loadPlan calls don't
 												// loop back into this recovery path. The recovered plan is
@@ -823,8 +869,11 @@ export async function loadPlan(
 													await takeSnapshotEvent(directory, approved.plan, {
 														source: 'recovery_from_approved_snapshot',
 														approvalMetadata: approved.approval,
+														preCommitCheck: options?.preCommitCheck,
 													});
 												} catch (healError) {
+													if (healError instanceof PlanRecoverySupersededError)
+														throw healError;
 													warn(
 														`[loadPlan] Recovery-heal snapshot append failed: ${healError instanceof Error ? healError.message : String(healError)}. Next loadPlan may re-enter recovery path.`,
 													);
@@ -840,7 +889,9 @@ export async function loadPlan(
 												);
 												return approved.plan;
 											}
-										} catch {
+										} catch (recoveryError) {
+											if (recoveryError instanceof PlanRecoverySupersededError)
+												throw recoveryError;
 											// Fall through to the stale-plan warning below
 										}
 										// #1269 finding 2: we are about to return the STALE
@@ -863,6 +914,7 @@ export async function loadPlan(
 											// replay above runs at most once per workspace per process).
 											// The chokepoint near `return validated` re-attaches the
 											// flag and self-heals when plan↔ledger reconverge.
+											options?.preCommitCheck?.();
 											ledgerStaleWorkspaces.add(resolvedWorkspace);
 										}
 										warn(
@@ -923,7 +975,7 @@ export async function loadPlan(
 										'.swarm',
 										'spec-staleness.json',
 									);
-									await fsPromises.writeFile(
+									await commitAsyncPreparedFile(
 										specStalenessPath,
 										JSON.stringify(
 											{
@@ -940,11 +992,13 @@ export async function loadPlan(
 											null,
 											2,
 										),
-										'utf-8',
+										options?.preCommitCheck,
+										'spec-staleness',
 									);
 									// #1619 F1 — see the rationale above the enclosing try.
 									invalidateCachedArtifact(specStalenessPath);
-								} catch {
+								} catch (error) {
+									if (error instanceof PlanRecoverySupersededError) throw error;
 									// Non-fatal: spec-staleness.json write failure does not block plan loading
 								}
 
@@ -960,8 +1014,10 @@ export async function loadPlan(
 										reason: staleResult.reason ?? 'unknown',
 										planTitle: validated.title,
 									};
+									options?.preCommitCheck?.();
 									appendCoreEventSync(directory, { ...event });
-								} catch {
+								} catch (error) {
+									if (error instanceof PlanRecoverySupersededError) throw error;
 									// Non-fatal: event write failure does not block plan loading
 								}
 							}
@@ -975,9 +1031,16 @@ export async function loadPlan(
 					return await surfaceLedgerStaleIfPersisted(
 						directory,
 						validated as RuntimePlan,
+						options,
 					);
 				}
 			} catch (error) {
+				if (error instanceof PlanRecoverySupersededError) {
+					if (claimedStartupWorkspace !== null) {
+						startupLedgerCheckedWorkspaces.delete(claimedStartupWorkspace);
+					}
+					throw error;
+				}
 				// Step 2: Validation failed, log warning and fall through to legacy
 				warn(
 					`[loadPlan] plan.json validation failed: ${error instanceof Error ? error.message : String(error)}. Attempting rebuild from ledger. If rebuild fails, check .swarm/plan-export/SWARM_PLAN.md for a checkpoint.`,
@@ -988,6 +1051,7 @@ export async function loadPlan(
 				// skip the replay to prevent a post-migration ledger from overwriting the
 				// (schema-invalid) migrated plan.json.
 				let rawPlanId: string | null = null;
+				let rawPlanJsonParseFailed = false;
 				try {
 					const rawParsed = JSON.parse(planJsonContent);
 					if (
@@ -999,7 +1063,10 @@ export async function loadPlan(
 						);
 					}
 				} catch {
-					// JSON itself is malformed — rawPlanId stays null (conservative: skip ledger)
+					// A syntactically malformed projection has no identity to compare.
+					// A verified, complete ledger still supplies the authority; remember
+					// this distinct case so parseable foreign projections remain fenced.
+					rawPlanJsonParseFailed = true;
 				}
 				// Try replay from ledger before legacy migration. The
 				// recovery rungs route through _internals (#2531) so a
@@ -1025,22 +1092,30 @@ export async function loadPlan(
 					const catchFirstEvent =
 						ledgerEventsForCatch.length > 0 ? ledgerEventsForCatch[0] : null;
 					const identityMatch =
-						rawPlanId === null || // Can't determine identity — skip rebuild (conservative)
+						rawPlanId === null || // No comparable identity; replay eligibility is gated below
 						catchFirstEvent === null || // Empty verified prefix — no identity to compare
 						catchFirstEvent.plan_id === rawPlanId; // Same identity — safe to rebuild
 					if (!identityMatch) {
 						warn(
 							`[loadPlan] Ledger identity mismatch in validation-failure path (ledger: ${catchFirstEvent?.plan_id}, plan: ${rawPlanId}) — skipping ledger rebuild (migration detected).`,
 						);
-					} else if (catchFirstEvent !== null && rawPlanId !== null) {
+					} else if (
+						catchFirstEvent !== null &&
+						(rawPlanId !== null ||
+							(rawPlanJsonParseFailed && !catchIntegrity.truncated))
+					) {
 						// Identities match — attempt ledger rebuild. A replay error
 						// must not escape loadPlan (#2531): it falls through to the
 						// approved-snapshot rung below, mirroring the
 						// missing-projection path's ladder.
 						let rebuilt: Plan | null = null;
 						try {
-							rebuilt = await _internals.replayFromLedger(directory);
+							rebuilt = await _internals.replayFromLedger(directory, {
+								preCommitCheck: options?.preCommitCheck,
+							});
 						} catch (replayError) {
+							if (replayError instanceof PlanRecoverySupersededError)
+								throw replayError;
 							warn(
 								`[loadPlan] Ledger replay threw in validation-failure path: ${replayError instanceof Error ? replayError.message : String(replayError)}. Falling back to critic-approved snapshot before legacy migration.`,
 							);
@@ -1048,6 +1123,7 @@ export async function loadPlan(
 						if (rebuilt) {
 							await rebuildPlan(directory, rebuilt, {
 								reason: 'validation_failure_recovery',
+								preCommitCheck: options?.preCommitCheck,
 							});
 							warn(
 								'[loadPlan] Rebuilt plan from ledger after validation failure. Projection was stale.',
@@ -1071,6 +1147,7 @@ export async function loadPlan(
 										approved.plan,
 										'load_plan_recovery_from_approved_snapshot',
 										'restore from critic-approved snapshot',
+										{ preCommitCheck: options?.preCommitCheck },
 									);
 								if (removedCount > 0) {
 									(approved.plan as RuntimePlan)._midLoadRemovals = {
@@ -1085,8 +1162,11 @@ export async function loadPlan(
 									await takeSnapshotEvent(directory, approved.plan, {
 										source: 'recovery_from_approved_snapshot',
 										approvalMetadata: approved.approval,
+										preCommitCheck: options?.preCommitCheck,
 									});
 								} catch (healError) {
+									if (healError instanceof PlanRecoverySupersededError)
+										throw healError;
 									warn(
 										`[loadPlan] Recovery-heal snapshot append failed: ${healError instanceof Error ? healError.message : String(healError)}. Next loadPlan may re-enter recovery path.`,
 									);
@@ -1097,6 +1177,8 @@ export async function loadPlan(
 								return approved.plan;
 							}
 						} catch (approvedError) {
+							if (approvedError instanceof PlanRecoverySupersededError)
+								throw approvedError;
 							warn(
 								`[loadPlan] Approved-snapshot recovery failed in validation-failure path: ${approvedError instanceof Error ? approvedError.message : String(approvedError)}`,
 							);
@@ -1119,6 +1201,7 @@ export async function loadPlan(
 						migrated,
 						'load_plan_migration_from_md',
 						'migrate legacy plan.md to plan.json',
+						{ preCommitCheck: options?.preCommitCheck },
 					);
 					if (removedCount > 0) {
 						(migrated as RuntimePlan)._midLoadRemovals = {
@@ -1128,7 +1211,11 @@ export async function loadPlan(
 					}
 					// #2531 (AC4): durable provenance — the ledger must record
 					// that this plan came from a lossy markdown migration.
-					await appendMigrationProvenanceEvent(directory, migrated);
+					await appendMigrationProvenanceEvent(
+						directory,
+						migrated,
+						options?.preCommitCheck,
+					);
 					return migrated;
 				}
 				// If plan.md doesn't exist either, fall through to step 3
@@ -1162,8 +1249,12 @@ export async function loadPlan(
 			// the critic-approved-snapshot rung below, then markdown.
 			let rebuilt: Plan | null = null;
 			try {
-				rebuilt = await _internals.replayFromLedger(directory);
+				rebuilt = await _internals.replayFromLedger(directory, {
+					preCommitCheck: options?.preCommitCheck,
+				});
 			} catch (replayError) {
+				if (replayError instanceof PlanRecoverySupersededError)
+					throw replayError;
 				warn(
 					`[loadPlan] Ledger replay threw in missing-projection path: ${replayError instanceof Error ? replayError.message : String(replayError)}. Falling back to critic-approved snapshot before legacy migration.`,
 				);
@@ -1174,6 +1265,7 @@ export async function loadPlan(
 					rebuilt,
 					'load_plan_rebuild_from_ledger',
 					'rebuild plan from ledger replay',
+					{ preCommitCheck: options?.preCommitCheck },
 				);
 				if (removedCount > 0) {
 					(rebuilt as RuntimePlan)._midLoadRemovals = {
@@ -1241,6 +1333,7 @@ export async function loadPlan(
 							approved.plan,
 							'load_plan_recovery_from_approved_snapshot',
 							'restore from critic-approved snapshot',
+							{ preCommitCheck: options?.preCommitCheck },
 						);
 					if (snapshotRemovedCount > 0) {
 						(approved.plan as RuntimePlan)._midLoadRemovals = {
@@ -1257,8 +1350,11 @@ export async function loadPlan(
 						await takeSnapshotEvent(directory, approved.plan, {
 							source: 'recovery_from_approved_snapshot',
 							approvalMetadata: approved.approval,
+							preCommitCheck: options?.preCommitCheck,
 						});
 					} catch (healError) {
+						if (healError instanceof PlanRecoverySupersededError)
+							throw healError;
 						warn(
 							`[loadPlan] Recovery-heal snapshot append failed: ${healError instanceof Error ? healError.message : String(healError)}. Next loadPlan may re-enter recovery path.`,
 						);
@@ -1266,6 +1362,8 @@ export async function loadPlan(
 					return approved.plan;
 				}
 			} catch (recoveryError) {
+				if (recoveryError instanceof PlanRecoverySupersededError)
+					throw recoveryError;
 				warn(
 					`[loadPlan] Approved-snapshot recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
 				);
@@ -1289,6 +1387,7 @@ export async function loadPlan(
 			migrated,
 			'load_plan_migration_from_md',
 			'migrate legacy plan.md to plan.json',
+			{ preCommitCheck: options?.preCommitCheck },
 		);
 		if (removedCount > 0) {
 			(migrated as RuntimePlan)._midLoadRemovals = {
@@ -1296,7 +1395,11 @@ export async function loadPlan(
 				source: 'load_plan_migration_from_md',
 			};
 		}
-		await appendMigrationProvenanceEvent(directory, migrated);
+		await appendMigrationProvenanceEvent(
+			directory,
+			migrated,
+			options?.preCommitCheck,
+		);
 		return migrated;
 	}
 
@@ -1325,6 +1428,7 @@ export async function savePlanWithAutoAcknowledgedRemovals(
 	options?: {
 		preserveCompletedStatuses?: boolean;
 		planLockAlreadyHeld?: boolean;
+		preCommitCheck?: () => void;
 	},
 ): Promise<{ removedCount: number }> {
 	const existing = await _internals.loadPlanJsonOnly(directory);
@@ -1502,22 +1606,29 @@ async function verifyWrittenPlanJson(
 async function appendMigrationProvenanceEvent(
 	directory: string,
 	plan: Plan,
+	preCommitCheck?: () => void,
 ): Promise<void> {
 	try {
-		await appendLedgerEvent(directory, {
-			event_type: 'plan_rebuilt',
-			source: 'load_plan_migration_from_md',
-			plan_id: derivePlanId(plan),
-			payload: {
-				reason: 'load_plan_migration_from_md',
-				phases_count: plan.phases.length,
-				tasks_count: plan.phases.reduce(
-					(sum, phase) => sum + phase.tasks.length,
-					0,
-				),
+		preCommitCheck?.();
+		await appendLedgerEvent(
+			directory,
+			{
+				event_type: 'plan_rebuilt',
+				source: 'load_plan_migration_from_md',
+				plan_id: derivePlanId(plan),
+				payload: {
+					reason: 'load_plan_migration_from_md',
+					phases_count: plan.phases.length,
+					tasks_count: plan.phases.reduce(
+						(sum, phase) => sum + phase.tasks.length,
+						0,
+					),
+				},
 			},
-		});
+			{ preCommitCheck },
+		);
 	} catch (error) {
+		if (error instanceof PlanRecoverySupersededError) throw error;
 		warn(
 			`[loadPlan] Markdown-migration provenance event append failed (plan remains migrated): ${error instanceof Error ? error.message : String(error)}`,
 		);
@@ -1665,7 +1776,9 @@ export async function savePlan(
 	if (!(await ledgerExists(directory))) {
 		try {
 			options?.preCommitCheck?.();
-			await initLedger(directory, planId, planHashForInit, validated);
+			await initLedger(directory, planId, planHashForInit, validated, {
+				preCommitCheck: options?.preCommitCheck,
+			});
 		} catch (initErr) {
 			// Concurrent savePlan race: three parallel callers can pass the
 			// ledgerExists() check before any of them writes. On Linux/macOS
@@ -1690,6 +1803,7 @@ export async function savePlan(
 				directory,
 				validated,
 				'savePlan_identity_migration',
+				{ preCommitCheck: options?.preCommitCheck },
 			);
 			warn(
 				`[savePlan] Ledger identity mismatch (was "${existingEvents[0].plan_id}", now "${planId}") — archived the prior exact history and committed a new root.`,
@@ -1846,6 +1960,7 @@ export async function savePlan(
 					await retryCasWithBackoff(directory, eventInput, {
 						expectedHash: currentHash,
 						planHashAfter: hashAfter,
+						preCommitCheck: options?.preCommitCheck,
 						verifyValid: async () => {
 							const onDisk = await _internals.loadPlanJsonOnly(directory);
 							if (!onDisk) return true;
@@ -1895,6 +2010,7 @@ export async function savePlan(
 						await retryCasWithBackoff(directory, eventInput, {
 							expectedHash: currentHash,
 							planHashAfter: hashAfter,
+							preCommitCheck: options?.preCommitCheck,
 							verifyValid: async () => {
 								// If another writer already persisted the transition, skip.
 								const onDisk = await _internals.loadPlanJsonOnly(directory);
@@ -1927,7 +2043,12 @@ export async function savePlan(
 	const ledgerStatusTaskIds = collectLedgerStatusTaskIds(
 		await readLedgerEvents(directory),
 	);
-	const replayedBeforeProjection = await _internals.replayFromLedger(directory);
+	const replayedBeforeProjection = await _internals.replayFromLedger(
+		directory,
+		{
+			preCommitCheck: options?.preCommitCheck,
+		},
+	);
 	const projectionCandidate = replayedBeforeProjection
 		? mergeStatusesTakingPrecedence(
 				validated,
@@ -1944,6 +2065,7 @@ export async function savePlan(
 		await takeSnapshotEvent(directory, projectionCandidate, {
 			planHashAfter: computePlanLedgerHash(projectionCandidate),
 			source: 'savePlan_structural_projection',
+			preCommitCheck: options?.preCommitCheck,
 		});
 	}
 
@@ -2022,8 +2144,14 @@ export async function savePlan(
 			),
 			in_progress: true,
 		});
-		await bunWrite(markerPath, inProgressMarker);
-	} catch {
+		await commitAsyncPreparedFile(
+			markerPath,
+			inProgressMarker,
+			options?.preCommitCheck,
+			'plan-write-marker',
+		);
+	} catch (error) {
+		if (error instanceof PlanRecoverySupersededError) throw error;
 		/* Advisory only */
 	}
 
@@ -2043,6 +2171,7 @@ export async function savePlan(
 		);
 		try {
 			await bunWrite(mdTempPath, markdownWithHash);
+			options?.preCommitCheck?.();
 			renameSync(mdTempPath, mdPath);
 		} finally {
 			try {
@@ -2053,6 +2182,7 @@ export async function savePlan(
 		}
 		invalidateCachedArtifact(mdPath);
 	} catch (mdError) {
+		if (mdError instanceof PlanRecoverySupersededError) throw mdError;
 		const message =
 			mdError instanceof Error ? mdError.message : String(mdError);
 		mdWriteError = message;
@@ -2086,8 +2216,14 @@ export async function savePlan(
 			tasks_count: tasksCount,
 			in_progress: false,
 		});
-		await bunWrite(markerPath, marker);
-	} catch {
+		await commitAsyncPreparedFile(
+			markerPath,
+			marker,
+			options?.preCommitCheck,
+			'plan-write-marker',
+		);
+	} catch (error) {
+		if (error instanceof PlanRecoverySupersededError) throw error;
 		/* Advisory only - marker write failure does not affect plan save */
 	}
 
@@ -2115,6 +2251,7 @@ export async function savePlan(
 				for (const [taskId, oldStatus] of oldStatuses) {
 					const newStatus = newStatuses.get(taskId);
 					if (oldStatus === 'completed' && newStatus !== 'completed') {
+						options?.preCommitCheck?.();
 						advanceTaskCheckpointReceiptGeneration(
 							directory,
 							oldIdentityHash,
@@ -2127,6 +2264,7 @@ export async function savePlan(
 						newStatus === 'completed' &&
 						oldStatuses.get(taskId) !== 'completed'
 					) {
+						options?.preCommitCheck?.();
 						repairTaskCheckpointReceiptForCompletion(
 							directory,
 							newIdentityHash,
@@ -2136,6 +2274,8 @@ export async function savePlan(
 				}
 			}
 		} catch (receiptError) {
+			if (receiptError instanceof PlanRecoverySupersededError)
+				throw receiptError;
 			warn(
 				`[savePlan] task checkpoint receipt lifecycle sync failed (plan remains authoritative): ${receiptError instanceof Error ? receiptError.message : String(receiptError)}`,
 			);
@@ -2154,6 +2294,36 @@ export async function savePlan(
 	return { durability: 'complete', degraded_surfaces: [] };
 }
 
+async function commitAsyncPreparedFile(
+	targetPath: string,
+	content: string,
+	preCommitCheck?: () => void,
+	tempLabel = 'atomic',
+): Promise<void> {
+	const tempPath = `${targetPath}.${tempLabel}.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
+	try {
+		await bunWrite(tempPath, content);
+		// Preparation writes only an unreferenced temp file. Check authority after
+		// that await, immediately before the synchronous canonical rename.
+		preCommitCheck?.();
+		renameSync(tempPath, targetPath);
+	} catch (error) {
+		try {
+			unlinkSync(tempPath);
+		} catch {
+			/* Best-effort temp cleanup; preserve the original error. */
+		}
+		throw error;
+	}
+}
+
+async function writeRebuildPlanMarkdown(
+	tempPath: string,
+	content: string,
+): Promise<void> {
+	await bunWrite(tempPath, content);
+}
+
 /**
  * Rebuild plan from ledger events.
  * Replays the ledger to reconstruct plan state, then writes the result.
@@ -2165,11 +2335,16 @@ export async function savePlan(
 export async function rebuildPlan(
 	directory: string,
 	plan?: Plan,
-	options?: { reason?: string },
+	options?: { reason?: string; preCommitCheck?: () => void },
 ): Promise<Plan | null> {
 	assertProjectRoot(directory);
-	const targetPlan = plan ?? (await replayFromLedger(directory));
+	const targetPlan =
+		plan ??
+		(await replayFromLedger(directory, {
+			preCommitCheck: options?.preCommitCheck,
+		}));
 	if (!targetPlan) return null;
+	options?.preCommitCheck?.();
 
 	// Write directly without going through savePlan (avoid circular ledger append)
 	const swarmDir = path.join(directory, '.swarm');
@@ -2193,17 +2368,29 @@ export async function rebuildPlan(
 		swarmDir,
 		`plan.json.rebuild.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 	);
-	{
-		const fd = openSync(tempPlanPath, 'w');
+	try {
+		{
+			const fd = openSync(tempPlanPath, 'w');
+			try {
+				writeFileSync(fd, JSON.stringify(targetPlan, null, 2), 'utf8');
+				fsyncSync(fd);
+			} finally {
+				closeSync(fd);
+			}
+		}
+		// Keep this synchronous guard adjacent to the atomic rename. Unlike an
+		// async post-check, it prevents a superseded coordinator from swapping the
+		// canonical projection after recovery work has completed.
+		options?.preCommitCheck?.();
+		renameSync(tempPlanPath, planPath);
+		invalidateCachedArtifact(planPath);
+	} finally {
 		try {
-			writeFileSync(fd, JSON.stringify(targetPlan, null, 2), 'utf8');
-			fsyncSync(fd);
-		} finally {
-			closeSync(fd);
+			unlinkSync(tempPlanPath);
+		} catch {
+			/* already renamed or never created */
 		}
 	}
-	renameSync(tempPlanPath, planPath);
-	invalidateCachedArtifact(planPath);
 
 	// Write in-progress marker right after plan.json rename.
 	try {
@@ -2218,14 +2405,23 @@ export async function rebuildPlan(
 			),
 			in_progress: true,
 		});
-		await bunWrite(markerPath, inProgressMarker);
-	} catch {
+		await commitAsyncPreparedFile(
+			markerPath,
+			inProgressMarker,
+			options?.preCommitCheck,
+			'rebuild',
+		);
+	} catch (error) {
+		if (error instanceof PlanRecoverySupersededError) throw error;
 		/* Advisory only */
 	}
 
 	// Also regenerate plan.md with content hash (matches the format written by savePlan/
 	// regeneratePlanMarkdown so that isPlanMdInSync() can detect the hash and avoid
 	// unnecessary re-generation on the next loadPlan() call).
+	let markdownWriteFailed = false;
+	let markdownWriteError: unknown;
+	let markerSupersededError: PlanRecoverySupersededError | undefined;
 	try {
 		const contentHash = computePlanContentHash(targetPlan);
 		const markdown = derivePlanMarkdown(targetPlan);
@@ -2234,12 +2430,26 @@ export async function rebuildPlan(
 			swarmDir,
 			`plan.md.rebuild.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 		);
-		await bunWrite(tempMdPath, markdownWithHash);
-		renameSync(tempMdPath, mdPath);
-		invalidateCachedArtifact(mdPath);
+		try {
+			await _internals.writeRebuildPlanMarkdown(tempMdPath, markdownWithHash);
+			options?.preCommitCheck?.();
+			renameSync(tempMdPath, mdPath);
+			invalidateCachedArtifact(mdPath);
+		} finally {
+			try {
+				unlinkSync(tempMdPath);
+			} catch {
+				/* already renamed or never created */
+			}
+		}
+	} catch (error) {
+		markdownWriteFailed = true;
+		markdownWriteError = error;
 	} finally {
-		// Always reset the marker to in_progress: false, even if plan.md write failed,
-		// so PlanSyncWorker's unauthorized-write checks are not permanently disabled.
+		// Reset the marker to in_progress: false after the markdown attempt so
+		// PlanSyncWorker's unauthorized-write checks are not permanently disabled.
+		// A superseded recovery skips this advisory cleanup to preserve a newer
+		// writer's marker.
 		try {
 			const markerPath = path.join(swarmDir, '.plan-write-marker');
 			const tasksCount = targetPlan.phases.reduce(
@@ -2253,10 +2463,36 @@ export async function rebuildPlan(
 				tasks_count: tasksCount,
 				in_progress: false,
 			});
-			await bunWrite(markerPath, marker);
-		} catch {
+			// Do not let a superseded recovery clear a marker published by a
+			// newer writer. This check is deliberately adjacent to the marker
+			// commit and preserves typed supersession through the cleanup path.
+			await commitAsyncPreparedFile(
+				markerPath,
+				marker,
+				options?.preCommitCheck,
+				'rebuild',
+			);
+		} catch (error) {
+			if (error instanceof PlanRecoverySupersededError) {
+				markerSupersededError = error;
+			}
 			/* Advisory only */
 		}
+	}
+	if (markerSupersededError) throw markerSupersededError;
+	if (markdownWriteFailed) {
+		if (markdownWriteError instanceof PlanRecoverySupersededError)
+			throw markdownWriteError;
+		const message =
+			markdownWriteError instanceof Error
+				? markdownWriteError.message
+				: String(markdownWriteError);
+		warn(
+			`[rebuildPlan] plan.md projection write failed (non-fatal; plan.json is authoritative): ${message}`.slice(
+				0,
+				512,
+			),
+		);
 	}
 
 	// Append plan_rebuilt ledger event for audit trail (FR-003).
@@ -2264,6 +2500,7 @@ export async function rebuildPlan(
 	// appending a metadata event that records "rebuild occurred" does not create a loop
 	// because applyEventToPlan treats plan_rebuilt as an idempotent no-op.
 	try {
+		options?.preCommitCheck?.();
 		const planId = derivePlanId(targetPlan);
 		const planHashAfter = computePlanLedgerHash(targetPlan);
 		await appendLedgerEvent(
@@ -2281,9 +2518,10 @@ export async function rebuildPlan(
 					),
 				},
 			},
-			{ planHashAfter },
+			{ planHashAfter, preCommitCheck: options?.preCommitCheck },
 		);
-	} catch {
+	} catch (error) {
+		if (error instanceof PlanRecoverySupersededError) throw error;
 		// Non-fatal — audit trail gap is acceptable if ledger is unavailable
 	}
 

@@ -31,6 +31,7 @@ import {
 	SNAPSHOT_RENAME_MAX_ATTEMPTS,
 	type SnapshotData,
 	writeSnapshot,
+	writeSnapshotProjection,
 } from '../../../src/session/snapshot-writer';
 import {
 	_internals as artifactCacheInternals,
@@ -131,12 +132,13 @@ describe('writeSnapshot — regression: transient rename failure must not drop t
 		).toEqual([]);
 	});
 
-	it('treats ENOENT on a retry as the spurious-failure success it is, so the cache is still invalidated', async () => {
-		// Windows can report a sharing violation for a rename that actually
-		// committed; the retry then finds the temp already gone. Reporting that
-		// as a failure would skip invalidateCachedArtifact for a file that
-		// really did change — the exact stale cached read issue #1729 guards
-		// against.
+	it('treats ENOENT after a retry commits as success, so the cache is still invalidated', async () => {
+		// Windows can report a transient failure before the swap, then report
+		// ENOENT for the retry that actually commits. Reporting that second
+		// result as a failure would skip invalidateCachedArtifact for a file
+		// that really did change — the exact stale cached read issue #1729 guards
+		// against. A commit followed by EPERM on the first attempt is covered
+		// separately below.
 		//
 		// The assertion has to be the cache entry, not the file: on this path
 		// the snapshot lands on disk either way, so asserting file contents
@@ -171,11 +173,10 @@ describe('writeSnapshot — regression: transient rename failure must not drop t
 		_internals.rename = mock(async (oldPath: string, newPath: string) => {
 			calls++;
 			if (calls === 1) {
-				// The move lands despite the reported sharing violation.
-				await originalRename(oldPath, newPath);
 				throw transientError('EPERM');
 			}
-			// The real filesystem now fails this way: the source is gone.
+			// The move lands despite the reported missing source on retry.
+			await originalRename(oldPath, newPath);
 			throw transientError('ENOENT');
 		});
 
@@ -197,6 +198,149 @@ describe('writeSnapshot — regression: transient rename failure must not drop t
 
 		expect(calls).toBe(1);
 		expect(existsSync(statePath())).toBe(false);
+		expect(
+			readdirSync(sessionDir()).filter((f) => f.includes('.tmp.')),
+		).toEqual([]);
+	});
+
+	it('re-checks authority inside a delayed async rename adapter before the atomic swap', async () => {
+		mkdirSync(sessionDir(), { recursive: true });
+		const oldSnapshot: SnapshotData = {
+			version: 3,
+			writtenAt: 1_700_000_000_000,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		};
+		const oldSnapshotText = JSON.stringify(oldSnapshot);
+		writeFileSync(statePath(), oldSnapshotText, 'utf8');
+		const primed = await readCachedTextFile(statePath(), async () =>
+			readFileSync(statePath(), 'utf8'),
+		);
+		expect(primed).toBe(oldSnapshotText);
+		const frozenStat = await fsp.stat(statePath());
+		artifactCacheInternals.stat = (async () =>
+			frozenStat) as typeof artifactCacheInternals.stat;
+
+		let allowCommit = true;
+		let renameCalls = 0;
+		let releaseRename!: () => void;
+		const renameEntered = new Promise<void>((resolve) => {
+			releaseRename = resolve;
+		});
+		let renameStarted!: () => void;
+		const renameStartedPromise = new Promise<void>((resolve) => {
+			renameStarted = resolve;
+		});
+		_internals.rename = mock(
+			async (
+				oldPath: string,
+				newPath: string,
+				shouldCommit?: () => boolean,
+			) => {
+				renameCalls++;
+				renameStarted();
+				await renameEntered;
+				if (shouldCommit && !shouldCommit()) return;
+				return originalRename(oldPath, newPath);
+			},
+		);
+
+		const nextSnapshot: SnapshotData = {
+			...oldSnapshot,
+			writtenAt: 1_700_000_001_000,
+		};
+		const writing = writeSnapshotProjection(
+			testDir,
+			nextSnapshot,
+			() => allowCommit,
+		);
+		await renameStartedPromise;
+		allowCommit = false;
+		releaseRename();
+		await writing;
+
+		expect(renameCalls).toBe(1);
+		expect(readFileSync(statePath(), 'utf8')).toBe(oldSnapshotText);
+		let directReads = 0;
+		const observed = await readCachedTextFile(statePath(), async () => {
+			directReads++;
+			return readFileSync(statePath(), 'utf8');
+		});
+		expect(observed).toBe(oldSnapshotText);
+		// A declined write leaves the warmed cache intact; invalidating it would
+		// turn this into an unnecessary direct read even though the file is old.
+		expect(directReads).toBe(0);
+		expect(
+			readdirSync(sessionDir()).filter((f) => f.includes('.tmp.')),
+		).toEqual([]);
+	});
+
+	it('invalidates cache when Windows reports a transient error after the rename commits, even if authority changes before retry', async () => {
+		mkdirSync(sessionDir(), { recursive: true });
+		const oldSnapshot: SnapshotData = {
+			version: 3,
+			writtenAt: 1_700_000_000_000,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		};
+		const oldSnapshotText = JSON.stringify(oldSnapshot);
+		writeFileSync(statePath(), oldSnapshotText, 'utf8');
+		const primed = await readCachedTextFile(statePath(), async () =>
+			readFileSync(statePath(), 'utf8'),
+		);
+		expect(primed).toBe(oldSnapshotText);
+		const frozenStat = await fsp.stat(statePath());
+		artifactCacheInternals.stat = (async () =>
+			frozenStat) as typeof artifactCacheInternals.stat;
+
+		let allowCommit = true;
+		let renameCalls = 0;
+		let reportFailure!: () => void;
+		const failureReleased = new Promise<void>((resolve) => {
+			reportFailure = resolve;
+		});
+		let signalCommitted!: () => void;
+		const committed = new Promise<void>((resolve) => {
+			signalCommitted = resolve;
+		});
+		_internals.rename = mock(async (oldPath: string, newPath: string) => {
+			renameCalls++;
+			await originalRename(oldPath, newPath);
+			signalCommitted();
+			await failureReleased;
+			throw transientError('EPERM');
+		});
+
+		const nextSnapshot: SnapshotData = {
+			...oldSnapshot,
+			writtenAt: 1_700_000_001_000,
+		};
+		const writing = writeSnapshotProjection(
+			testDir,
+			nextSnapshot,
+			() => allowCommit,
+		);
+		await committed;
+		// Model a newer writer superseding this operation after Windows has
+		// moved the file but before the adapter reports its transient error.
+		allowCommit = false;
+		reportFailure();
+		await writing;
+
+		expect(renameCalls).toBe(1);
+		let directReads = 0;
+		const observed = await readCachedTextFile(statePath(), async () => {
+			directReads++;
+			return readFileSync(statePath(), 'utf8');
+		});
+		expect(directReads).toBe(1);
+		expect((JSON.parse(observed ?? 'null') as SnapshotData).writtenAt).toBe(
+			nextSnapshot.writtenAt,
+		);
 		expect(
 			readdirSync(sessionDir()).filter((f) => f.includes('.tmp.')),
 		).toEqual([]);

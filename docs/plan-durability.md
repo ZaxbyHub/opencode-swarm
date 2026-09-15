@@ -434,16 +434,82 @@ task's PREPARED record. If the crash happens after close ledger events append
 but before plan file writes complete, the next `loadPlan()` call detects the
 hash mismatch and rebuilds plan files from the authoritative ledger.
 
+### Restart reconciliation and authority boundaries (issue #2668)
+
+Restart reconciliation must keep durable workflow policy separate from
+process-local execution authority. The following distinction is intentional:
+
+| Durable across restart | Process-local and never resurrected as authority |
+| --- | --- |
+| `.swarm/plan-ledger.jsonl` and its replayed plan identity | The session `/swarm auto-proceed` override |
+| The plan execution profile and persisted QA-gate profile for that plan identity | In-memory session context, child handles, timers, and retry/circuit state |
+| Ratchet-tighter session QA-gate overrides stored in `.swarm/swarm.db` | |
+| Evidence/WAL records, reservation/lease records, and their owner-visible recovery classifications | Live ownership/lease authority from a prior process; it must be re-proven after restart |
+
+The plan ledger remains authoritative. `plan.json` and `plan.md` are derived
+projections, while ratchet-tighter session QA-gate overrides are durable policy
+stored in the project database and restored on restart. The session
+`/swarm auto-proceed` override remains process-local. Neither a restored QA
+override nor a durable lease record grants execution authority: ownership and
+live authority must be re-proven, and old child handles are never revived.
+
+The restart sequence is deliberately ordered:
+
+1. Snapshot coordination rehydrates the session with a generation/scope fence.
+   Transient authority is reset; a late result from an older generation cannot
+   clear or settle newer work.
+2. After the plugin manifest is available, the post-resolution coordinator
+   calls authoritative `loadPlan()` before building the rehydration cache or
+   exposing a projection-dependent status. This keeps repair and replay off the
+   bounded plugin-manifest path.
+3. The coordinator exposes readiness (`running`, `succeeded`, `superseded`,
+   `failed`, or `timed_out`) through the status/inspect surfaces. A superseded
+   attempt is settled but not successful: a fresh current-generation attempt
+   must perform recovery instead of reusing it. A failed or timed-out attempt
+   is retried only after the previous attempt has settled; an unsettled attempt
+   remains unknown rather than being guessed healthy.
+4. Durable evidence, WAL settlement, and reservation records are classified
+   for the owner. Recovery may release an expired reservation only with
+   corroborated owner absence; expiration by itself is not proof.
+
+#### Missing or corrupt projections
+
+Never repair `plan.json` or `plan.md` by hand. A missing, stale, or malformed
+projection is a derived-state problem:
+
+- `loadPlan()` replays `.swarm/plan-ledger.jsonl`, compares the projection
+  identity/hash, and rewrites the derived projection when the ledger is valid.
+- A corrupt ledger suffix is quarantined and replay resumes from the last
+  valid event. Restart-owned replay rechecks its exact hydration authority
+  after the integrity-read await and immediately before publishing the unique
+  quarantine side file; a superseded restart leaves no stale quarantine
+  artifact. If the remaining history is not sufficient to prove the plan
+  identity, the plan stays unknown and operator recovery is required.
+- The persisted QA profile is read by exact plan identity. A missing or
+  mismatched profile is not silently replaced by a session override.
+- Inspect with `/swarm status`, `/swarm diagnose`, `get_approved_plan`, and
+  `get_qa_gate_profile`; use `/swarm recover --coordination` for coordination
+  readiness and `/swarm recover <task_id>` for an owner-visible recovery
+  classification. See the [recovery runbook](troubleshooting/recovery-runbook.md)
+  for the decision table.
+
+Replay and accepted recovery are idempotent: repeating the same restart or
+recovery observation must not mint a new identity, append a duplicate ledger
+decision, revive a prior process's authority, or erase an uncertain external
+effect. Unknown, ambiguous, and corrupt states remain visible until evidence
+supports a bounded transition.
+
 ## Corruption Handling
 
 If a ledger entry fails validation:
 
-1. The bad suffix is **quarantined** to `.swarm/plan-ledger.quarantine`
+1. The bad suffix is **quarantined** to a unique
+   `.swarm/plan-ledger.quarantine.<timestamp>.<content-hash>` side file
 2. Replay continues from the last valid event
 
 ```
 .swarm/plan-ledger.jsonl      ← continues with clean events
-.swarm/plan-ledger.quarantine ← bad entries isolated (never replayed)
+.swarm/plan-ledger.quarantine.* ← bad entries isolated (never replayed)
 ```
 
 ## Migration from v6.41.x
@@ -678,16 +744,23 @@ Three layers, with distinct authority:
 - **Process-local** — the four live maps themselves and `pendingRehydrations`
   (bounded by their pre-existing lifecycle mechanisms: the 2-hour idle-TTL
   sweep for sessions, `resetSwarmState` for the rest), plus the per-project
-  registries in `src/session/hydration-ownership.ts` (hydration generation
-  counters, per-project rehydration caches, per-project hydrated-aggregate
-  key sets — FIFO-capped at 32 entries each, with the directory→key memo
-  FIFO-capped at 64). All are cleared by `resetSwarmState`.
+  registries in `src/session/hydration-ownership.ts` (hydration authority
+  records, per-project rehydration caches, per-project hydrated-aggregate key
+  sets — FIFO-capped at 32 entries each, with the directory→key memo
+  FIFO-capped at 64). `resetSwarmState` clears the bounded registries, but not
+  the process-monotonic authority epoch: reusing an epoch after reset could
+  revive a stale pre-reset token.
 - **Project-local** — ownership stamps on each session:
   `owningProjectKey` (the canonical project root that created or restored the
   session; never serialized — the hydrating directory defines it, snapshot
-  bytes never do) and `hydrationStamp` (the per-project hydration generation
-  the session was created/restored at). Sessions created without a directory
-  are unowned and survive every hydration (fail-open toward preservation).
+  bytes never do), `hydrationStamp` (the per-project hydration generation), and
+  its paired `hydrationAuthorityEpoch` (the process-local authority
+  incarnation). The generation and epoch together identify the authority that
+  created/restored the session; an older epoch is stale even when its numeric
+  generation is larger after bounded-record eviction or reset. All three
+  fields are process-local and never serialized. Sessions created without a
+  directory are unowned and survive every hydration (fail-open toward
+  preservation).
 - **Authoritative** — the durable ledger and SQLite snapshot store. Hydration
   only READS them and never writes them (invariant 5); a re-hydration replaces
   the project's own snapshot-derived sessions from the durable read, nothing
@@ -696,16 +769,21 @@ Three layers, with distinct authority:
 Rules a hydration for project K follows (`rehydrateState`,
 `src/session/snapshot-reader.ts`):
 
-1. **Fence (generation):** each initiation (`loadSnapshot` entry,
+1. **Fence (authority):** each initiation (`loadSnapshot` entry,
    `startSnapshotCoordinationInitialization`, retry) captures a scope
-   `{projectKey, generation}` from a monotonic per-project counter. An apply
-   whose generation is older than the project's current counter is refused
-   with zero mutation — a timed-out initializer settling late cannot publish
-   over the state of any newer hydration.
-2. **Stamp (recency):** an accepted apply at generation `g` evicts only
-   sessions with `owningProjectKey === K` AND `hydrationStamp <= g`. A live
-   session created after `g` began carries stamp `g+1` and survives its own
-   project's in-flight hydration.
+   `{projectKey, generation, authorityEpoch}`. The per-project generation
+   orders retained records; the process-monotonic epoch makes the scope
+   non-reusable after FIFO eviction, reset, and reinsertion. An apply whose
+   exact authority is no longer current is refused with zero mutation — a
+   timed-out initializer settling late cannot publish over the state of any
+   newer hydration, even when its numeric generation is reused.
+2. **Stamp (recency):** an accepted apply at authority
+   `{ generation: g, authorityEpoch: e }` evicts sessions with
+   `owningProjectKey === K` when their epoch is not `e`, or when their paired
+   `hydrationStamp <= g`. A live session created after `g` began carries the
+   current epoch and stamp `g+1`, so it survives its own project's in-flight
+   hydration. Comparing the epoch before the numeric stamp closes the ABA
+   window where FIFO eviction or reset reintroduces K at generation 1.
 3. **Scope of mutation:** another project's sessions, unowned sessions, and
    `toolAggregates` keys the project never published are untouched.
    `toolAggregates` replacement is limited to the keys K's previous hydration

@@ -132,6 +132,7 @@ function buildFullSessionState(): AgentSessionState {
 		// on live state so their omission from the snapshot is asserted below.
 		owningProjectKey: 'canonical-project-key-fixture',
 		hydrationStamp: 1,
+		hydrationAuthorityEpoch: 1,
 		lastScopeViolation: null,
 		scopeViolationDetected: true,
 		modifiedFilesByTask: new Map([['task-1', ['src/a.ts', 'src/b.ts']]]),

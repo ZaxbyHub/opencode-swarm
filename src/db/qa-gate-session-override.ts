@@ -24,24 +24,6 @@ import {
 import { getProjectDb, projectDbExists } from './project-db.js';
 import { DEFAULT_QA_GATES, type QaGates } from './qa-gate-profile.js';
 
-/**
- * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
- * for the rationale (`mock.module` from `bun:test` leaks across files in
- * Bun's shared test-runner process). Mutating this local object is
- * file-scoped and trivially restorable via `afterEach`.
- */
-export const _internals: {
-	getOverrideForSession: typeof getOverrideForSession;
-	setOverrideForSession: typeof setOverrideForSession;
-	clearOverrideForSession: typeof clearOverrideForSession;
-	clearAllSessionOverrides: typeof clearAllSessionOverrides;
-} = {
-	getOverrideForSession,
-	setOverrideForSession,
-	clearOverrideForSession,
-	clearAllSessionOverrides,
-};
-
 interface QaGateSessionOverrideRow {
 	session_id: string;
 	gates: string;
@@ -194,6 +176,31 @@ export function clearAllSessionOverrides(directory: string): number {
 	);
 }
 
+/** Conservative SQLite bind budget for orphan-row deletion statements. */
+const ORPHAN_DELETE_BATCH_SIZE = 500;
+
+function deleteOrphanOverrideBatch(
+	db: ReturnType<typeof getProjectDb>,
+	sessionIds: string[],
+): number {
+	if (sessionIds.length === 0) return 0;
+	const placeholders = sessionIds.map(() => '?').join(', ');
+	return db.run(
+		`DELETE FROM qa_gate_session_override WHERE session_id IN (${placeholders})`,
+		sessionIds,
+	).changes;
+}
+
+/**
+ * Dependency-injection seam used by sweepOrphanOverrides and its bounded-batch
+ * regression test. The test mutates and restores this seam in afterEach rather
+ * than using mock.module, which can leak across Bun test files; see
+ * gitignore-warning.ts:_internals for the pattern and rationale.
+ */
+export const _internals: {
+	deleteOrphanOverrideBatch: typeof deleteOrphanOverrideBatch;
+} = { deleteOrphanOverrideBatch };
+
 /**
  * Delete override rows whose session is no longer live in this project
  * (#2668 orphan-row reaper). `sweepStaleSessions` can evict a stale session
@@ -224,12 +231,15 @@ export function sweepOrphanOverrides(
 				.map((row) => row.session_id)
 				.filter((sessionId) => !keepSessionIds.has(sessionId));
 			let removed = 0;
-			for (const sessionId of orphans) {
-				const result = db.run(
-					'DELETE FROM qa_gate_session_override WHERE session_id = ?',
-					[sessionId],
+			for (
+				let offset = 0;
+				offset < orphans.length;
+				offset += ORPHAN_DELETE_BATCH_SIZE
+			) {
+				removed += _internals.deleteOrphanOverrideBatch(
+					db,
+					orphans.slice(offset, offset + ORPHAN_DELETE_BATCH_SIZE),
 				);
-				removed += result.changes;
 			}
 			return removed;
 		},

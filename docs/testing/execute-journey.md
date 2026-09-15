@@ -49,11 +49,57 @@ A plan whose identity (swarm/title) was mutated after approval is refused by
 - Deterministic transport: a constructor-injected `ScriptedHostClient`
   (real SDK response shapes) records every host call; native-task child
   outputs are scripted at the hook boundary. No live model, no network.
-- Tests: `tests/unit/execute-journey/j01…j07` (per-file CI on all three
-  OSes). j04's restart uses `resetSwarmStatePreservingSingletons()` between
-  in-process boots — a real second OS process would run the same hydration
-  path; this in-process limitation is the disclosed boundary of the restart
-  claim.
+- Tests: `tests/unit/execute-journey/j01…j08` (per-file CI on all three
+  OSes). j04's restart and j08's policy-reconciliation restart use
+  `resetSwarmStatePreservingSingletons()` between in-process boots — a real
+  second OS process would run the same hydration path; this in-process
+  limitation is the disclosed boundary of the restart claim.
+
+## Restart policy reconciliation journey (#2668)
+
+The registered host fixture
+`tests/unit/execute-journey/j08-restart-policy-reconciliation.test.ts`
+qualifies the boundary between durable policy and ephemeral execution
+authority. It uses the same `execute-journey-driver.ts`, real
+`OpenCodeSwarmPlugin.server()`/`bootSwarmPluginHost`, disposable git project,
+XDG-hermetic environment, and constructor-injected `ScriptedHostClient` as the
+other journey fixtures. It does not use a live model or network.
+
+The deterministic sequence is:
+
+1. Boot the plugin, create and approve a plan, persist its execution profile,
+   and persist the QA-gate profile for the exact plan identity.
+2. Set a session-only QA or auto-proceed override, then start a scoped coder
+   dispatch and leave its durable evidence as the restart input.
+3. Restart the host. The post-resolution coordinator must replay the
+   authoritative plan ledger before projection/cache inspection, while the
+   snapshot path applies its generation fence and clears ephemeral authority.
+4. Inspect `get_approved_plan`, `get_qa_gate_profile`, and the registered task
+   inspection path. The durable execution/QA policy and plan identity must
+   remain; the prior session override, ownership, live lease authority, child
+   handle, and timer must not be treated as permission to execute. Any durable
+   lease record is recovery evidence only.
+5. Exercise the settlement classifier directly with deterministic owner states:
+   provably dead work is `stale`, a live or foreign owner is `ambiguous`, and
+   unreadable evidence is `corrupt`. The registered journey separately proves
+   that an old-generation late result is refused without clearing newer work.
+   Expired leases are released only when owner absence is corroborated.
+
+Separate frozen acceptance cases remove or corrupt a derived projection and
+run post-resolution coordination again. A valid ledger must rebuild the
+projection without a new plan identity or duplicate recovery decision;
+insufficient or corrupt authoritative history remains visibly unknown.
+
+Run the registered fixture in isolation with:
+
+```sh
+bun test tests/unit/execute-journey/j08-restart-policy-reconciliation.test.ts
+```
+
+The report must retain evidence for both boots, the exact plan binding, the
+persisted QA profile, registered task-inspection output, and the direct typed
+interrupted/cancelled/uncertain classifier cases. A passing fixture does not
+convert an uncertain provider or worktree effect into a local success claim.
 
 ## Executed host/runtime cells
 

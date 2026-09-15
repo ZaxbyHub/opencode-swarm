@@ -46,6 +46,7 @@ mock.module('../../../src/plan/manager.js', () => ({
 	// imports getCurrentTaskId; the binding must exist while manager is mocked.
 	getCurrentTaskId: () => null,
 	loadPlanJsonOnly: mockLoadPlanJsonOnly,
+	PlanRecoverySupersededError: class PlanRecoverySupersededError extends Error {},
 	isTaskSettled: mock(() => false),
 	derivePlanMarkdown: mock((plan: any) => '# Derived Plan\n'),
 	savePlan: mock(),

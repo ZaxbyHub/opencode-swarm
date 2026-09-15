@@ -68,9 +68,12 @@ import { clearScopeBindings } from './scope/scope-binding.js';
 import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
 import { clearAllTurnLedgers } from './services/injection-budget';
 import {
+	captureCurrentHydrationAuthority,
 	clearHydrationOwnershipState,
 	getRehydrationCache,
+	type HydrationAuthorityToken,
 	hydrationProjectKey,
+	isHydrationAuthorityCurrent,
 	nextSessionHydrationStamp,
 	setRehydrationCache,
 } from './session/hydration-ownership.js';
@@ -88,6 +91,8 @@ import { AgentRunContext } from './state/agent-run-context.js';
 import { telemetry } from './telemetry.js';
 import * as logger from './utils/logger';
 
+// Kept as a read-only diagnostic seam for restart/cache reconciliation tests.
+export { getRehydrationCache };
 export { AgentRunContext } from './state/agent-run-context.js';
 
 /**
@@ -108,6 +113,24 @@ interface RehydrationCache {
 		plan: Plan | null;
 		councilConfig: import('./council/types').CouncilConfig | undefined;
 	};
+}
+
+/** Optional controls for rebuilding the project-owned rehydration cache. */
+export interface RehydrationCacheBuildOptions {
+	/**
+	 * Explicitly recovered plan state.  Presence of this property, including a
+	 * null value, means the caller already resolved the authoritative plan and
+	 * the builder must not fall back to the derived plan.json projection.
+	 */
+	planOverride?: Plan | null;
+	/** Return false when the captured hydration scope was superseded mid-read. */
+	shouldCommit?: () => boolean;
+}
+
+/** Result of a cache rebuild, including whether its publication committed. */
+export interface RehydrationCacheBuildResult {
+	committed: boolean;
+	reason?: 'superseded';
 }
 
 /**
@@ -699,11 +722,21 @@ export interface AgentSessionState {
 	 * Hydration generation this session was created/restored AT.
 	 * `startAgentSession` stamps `currentGeneration + 1` (newer than any
 	 * in-flight hydration); `rehydrateState` stamps its applying generation.
-	 * A hydration at generation `g` evicts only owned sessions with
-	 * `hydrationStamp <= g`, so live sessions created after `g` began always
-	 * survive. Also never snapshotted.
+	 * A hydration at authority `{ generation: g, epoch: e }` evicts owned
+	 * sessions from another epoch and same-epoch sessions with
+	 * `hydrationStamp <= g`, so sessions created after `g` began survive only
+	 * within the same authority incarnation.
+	 * `hydrationAuthorityEpoch` disambiguates a numerically reused generation
+	 * after bounded project-authority eviction or reset. Also never snapshotted.
 	 */
 	hydrationStamp?: number;
+	/**
+	 * Process-local authority epoch paired with `hydrationStamp`. A session from
+	 * an older project-authority incarnation is stale even when its numeric
+	 * generation is larger than the current generation (issue #2668 ABA guard).
+	 * Deliberately omitted from snapshots with the other ownership fields.
+	 */
+	hydrationAuthorityEpoch?: number;
 
 	// PRM (Process Remediation Manager) - Phase 1
 	/** Pattern type to detection count mapping */
@@ -2155,9 +2188,16 @@ export function startAgentSession(
 	const owningProjectKey = directory
 		? hydrationProjectKey(directory)
 		: undefined;
+	// Direct session rehydration does not initiate a hydration, so capture the
+	// exact current authority before any await. This also ensures a bounded
+	// project record exists after FIFO eviction without bumping generation.
+	const hydrationAuthority = owningProjectKey
+		? captureCurrentHydrationAuthority(owningProjectKey)
+		: undefined;
 	const hydrationStamp = owningProjectKey
 		? nextSessionHydrationStamp(owningProjectKey)
 		: undefined;
+	const hydrationAuthorityEpoch = hydrationAuthority?.authorityEpoch;
 
 	// Evict stale sessions based on last activity, not start time.
 	// Default: 2 hours — should exceed typical agent durations (evicts inactive
@@ -2244,6 +2284,7 @@ export function startAgentSession(
 		sessionRehydratedAt: 0,
 		owningProjectKey,
 		hydrationStamp,
+		hydrationAuthorityEpoch,
 		// PRM (Process Remediation Manager) - Phase 1
 		prmPatternCounts: new Map(),
 		prmEscalationLevel: 0,
@@ -2303,16 +2344,28 @@ export function startAgentSession(
 	// before clearing agentSessions, preventing a race that would silently discard
 	// in-flight workflow state.
 	if (directory) {
+		const liveSession = sessionState;
+		const shouldCommitRehydration = () =>
+			hydrationAuthority !== undefined &&
+			isHydrationAuthorityCurrent(hydrationAuthority) &&
+			swarmState.agentSessions.get(sessionId) === liveSession;
 		let rehydrationPromise: Promise<void>;
 		rehydrationPromise = _internals
-			.rehydrateSessionFromDisk(directory, sessionState)
+			.rehydrateSessionFromDisk(
+				directory,
+				sessionState,
+				shouldCommitRehydration,
+			)
 			.then(async () => {
+				if (!shouldCommitRehydration()) return;
 				// Rehydrate PR subscriptions for this session (fail-open).
 				try {
-					sessionState.prSubscriptions = await rehydratePrSubscriptions(
+					const subscriptions = await _internals.rehydratePrSubscriptions(
 						sessionId,
 						directory,
 					);
+					if (!shouldCommitRehydration()) return;
+					sessionState.prSubscriptions = subscriptions;
 				} catch (err) {
 					logger.warn(
 						'[state] PR subscription rehydration failed, starting with empty subscriptions:',
@@ -3708,10 +3761,23 @@ async function readGateEvidenceFromDisk(
  * refreshed after compaction by the compaction hook (src/hooks/compaction-customizer.ts).
  * Non-fatal: missing/malformed files leave an empty cache.
  */
-export async function buildRehydrationCache(directory: string): Promise<void> {
+export async function buildRehydrationCache(
+	directory: string,
+	options?: RehydrationCacheBuildOptions,
+): Promise<RehydrationCacheBuildResult> {
+	const projectKey = hydrationProjectKey(directory);
+	// Capture the authority before any filesystem/config await.  Publication
+	// must use this exact incarnation; setter-time capture would let a delayed
+	// pre-eviction build be mislabeled current after FIFO reintroduction (ABA).
+	const buildAuthority: HydrationAuthorityToken =
+		captureCurrentHydrationAuthority(projectKey);
 	const planTaskStates = new Map<string, TaskWorkflowState>();
 
-	const plan = await readPlanFromDisk(directory);
+	const plan =
+		options && Object.hasOwn(options, 'planOverride')
+			? options.planOverride
+			: await readPlanFromDisk(directory);
+	const cachePlan = plan ?? null;
 	if (plan) {
 		for (const phase of plan.phases ?? []) {
 			for (const task of phase.tasks ?? []) {
@@ -3731,11 +3797,24 @@ export async function buildRehydrationCache(directory: string): Promise<void> {
 	} catch {
 		councilConfig = undefined;
 	}
-	setRehydrationCache(hydrationProjectKey(directory), {
-		planTaskStates,
-		evidenceMap,
-		taskIdentityContext: { plan, councilConfig },
-	} satisfies RehydrationCache);
+	if (
+		(options?.shouldCommit && !options.shouldCommit()) ||
+		!isHydrationAuthorityCurrent(buildAuthority)
+	) {
+		return { committed: false, reason: 'superseded' };
+	}
+	const committed = setRehydrationCache(
+		projectKey,
+		{
+			planTaskStates,
+			evidenceMap,
+			taskIdentityContext: { plan: cachePlan, councilConfig },
+		} satisfies RehydrationCache,
+		buildAuthority,
+	);
+	return committed
+		? { committed: true }
+		: { committed: false, reason: 'superseded' };
 }
 
 /**
@@ -3912,8 +3991,15 @@ export function applyRehydrationCache(
 export async function rehydrateSessionFromDisk(
 	directory: string,
 	session: AgentSessionState,
+	shouldCommit?: () => boolean,
 ): Promise<void> {
-	await _internals.buildRehydrationCache(directory);
+	const cacheBuild = shouldCommit
+		? await _internals.buildRehydrationCache(directory, { shouldCommit })
+		: await _internals.buildRehydrationCache(directory);
+	// Keep compatibility with existing DI stubs that predate the result object,
+	// while refusing to apply a superseded production rebuild.
+	if (cacheBuild && !cacheBuild.committed) return;
+	if (shouldCommit && !shouldCommit()) return;
 	_internals.applyRehydrationCache(session, hydrationProjectKey(directory));
 }
 
@@ -4515,6 +4601,7 @@ export const _internals: {
 	buildRehydrationCache: typeof buildRehydrationCache;
 	applyRehydrationCache: typeof applyRehydrationCache;
 	rehydrateSessionFromDisk: typeof rehydrateSessionFromDisk;
+	rehydratePrSubscriptions: typeof rehydratePrSubscriptions;
 	isCouncilGateActive: typeof isCouncilGateActive;
 	defaultRunContext: typeof defaultRunContext;
 } = {
@@ -4534,6 +4621,7 @@ export const _internals: {
 	buildRehydrationCache,
 	applyRehydrationCache,
 	rehydrateSessionFromDisk,
+	rehydratePrSubscriptions,
 	isCouncilGateActive,
 	defaultRunContext,
 };

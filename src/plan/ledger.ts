@@ -1032,6 +1032,7 @@ export async function initLedger(
 	planId: string,
 	initialPlanHash?: string,
 	initialPlan?: Plan,
+	options?: { preCommitCheck?: () => void },
 ): Promise<void> {
 	assertProjectRoot(directory);
 	const ledgerPath = getLedgerPath(directory);
@@ -1099,6 +1100,7 @@ export async function initLedger(
 	const tempPath = `${ledgerPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
 	const line = `${JSON.stringify(event)}\n`;
 
+	options?.preCommitCheck?.();
 	writeFileFsyncedThenRename(tempPath, ledgerPath, line);
 
 	// New projects also spend the carrying release in file-shadow mode. Keeping
@@ -1108,6 +1110,9 @@ export async function initLedger(
 	if (hasSqliteLedger(directory)) {
 		const priorMode =
 			getPlanLedgerState(directory)?.authorityMode ?? 'file_shadow';
+		// The predicate belongs outside the optional SQLite-shadow catch so a
+		// superseded recovery cannot be downgraded to an availability warning.
+		options?.preCommitCheck?.();
 		try {
 			replaceSqliteLedger(directory, {
 				canonicalEvents: initialized.lines,
@@ -1347,6 +1352,8 @@ export async function appendLedgerEvent(
 		 */
 		expectedLedgerHash?: string;
 		planHashAfter?: string;
+		/** Synchronous authority fence inside the evidence lock. */
+		preCommitCheck?: () => void;
 	},
 ): Promise<LedgerEvent> {
 	assertProjectRoot(directory);
@@ -1432,6 +1439,7 @@ export async function appendLedgerEvent(
 			const authorityMode = state?.authorityMode ?? 'file_shadow';
 
 			if (authorityMode === 'sqlite') {
+				options?.preCommitCheck?.();
 				try {
 					const existing = sqliteEventsAsLedger(directory);
 					appendSqliteLedger(directory, {
@@ -1465,6 +1473,7 @@ export async function appendLedgerEvent(
 					throw new Error('Ledger not initialized. Call initLedger() first.');
 				}
 				const existingContent = fs.readFileSync(ledgerPath);
+				options?.preCommitCheck?.();
 				writeFileFsyncedThenRename(
 					tempPath,
 					ledgerPath,
@@ -1540,6 +1549,7 @@ export async function appendLedgerEventWithRetry(
 		maxRetries?: number;
 		backoffMs?: number;
 		verifyValid?: () => Promise<boolean> | boolean;
+		preCommitCheck?: () => void;
 	},
 ): Promise<LedgerEvent | null> {
 	const maxRetries = options.maxRetries ?? 3;
@@ -1552,6 +1562,7 @@ export async function appendLedgerEventWithRetry(
 			return await appendLedgerEvent(directory, eventInput, {
 				expectedHash: currentExpected,
 				planHashAfter: options.planHashAfter,
+				preCommitCheck: options.preCommitCheck,
 			});
 		} catch (error) {
 			if (!(error instanceof LedgerStaleWriterError) || attempt >= maxRetries) {
@@ -1657,6 +1668,8 @@ export async function takeSnapshotEvent(
 		expectedSeq?: number;
 		/** Previous durable hash used to preserve the ledger hash chain. */
 		expectedLedgerHash?: string;
+		/** Synchronous authority fence immediately before ledger append. */
+		preCommitCheck?: () => void;
 	},
 ): Promise<LedgerEvent> {
 	const payloadHash =
@@ -1674,6 +1687,7 @@ export async function takeSnapshotEvent(
 		snapshotPayload.approval = options.approvalMetadata;
 	}
 	const planId = derivePlanId(plan);
+	options?.preCommitCheck?.();
 	return appendLedgerEvent(
 		directory,
 		{
@@ -1686,6 +1700,7 @@ export async function takeSnapshotEvent(
 			planHashAfter: options?.planHashAfter,
 			expectedSeq: options?.expectedSeq,
 			expectedLedgerHash: options?.expectedLedgerHash,
+			preCommitCheck: options?.preCommitCheck,
 		},
 	);
 }
@@ -1883,6 +1898,7 @@ export async function replacePlanLedgerWithRoot(
 	directory: string,
 	plan: Plan,
 	source: string,
+	options?: { preCommitCheck?: () => void },
 ): Promise<void> {
 	assertProjectRoot(directory);
 	const validated = PlanSchema.parse(plan);
@@ -1894,6 +1910,7 @@ export async function replacePlanLedgerWithRoot(
 		async () => {
 			const ledgerPath = getLedgerPath(directory);
 			if (fs.existsSync(ledgerPath)) {
+				options?.preCommitCheck?.();
 				archiveLegacyLedger(directory, fs.readFileSync(ledgerPath));
 			}
 			const planHash = computePlanLedgerHash(validated);
@@ -1916,7 +1933,12 @@ export async function replacePlanLedgerWithRoot(
 			const priorMode =
 				getPlanLedgerState(directory)?.authorityMode ?? 'file_shadow';
 			if (priorMode === 'file_shadow') {
+				options?.preCommitCheck?.();
 				writePortableLedger(directory, [line]);
+				// SQLite shadow publication is optional in file-shadow mode, but an
+				// authority predicate must still propagate rather than be swallowed by
+				// the availability catch below.
+				options?.preCommitCheck?.();
 				try {
 					replaceSqliteLedger(directory, {
 						canonicalEvents: [line],
@@ -1935,6 +1957,7 @@ export async function replacePlanLedgerWithRoot(
 				}
 				return;
 			}
+			options?.preCommitCheck?.();
 			replaceSqliteLedger(directory, {
 				canonicalEvents: [line],
 				state: stateForEvents(directory, [root], priorMode),
@@ -1942,6 +1965,7 @@ export async function replacePlanLedgerWithRoot(
 				mode: priorMode,
 				version: packageJson.version,
 			});
+			options?.preCommitCheck?.();
 			try {
 				writePortableLedger(directory, [line]);
 			} catch (error) {
@@ -1959,6 +1983,8 @@ export async function replacePlanLedgerWithRoot(
 interface ReplayOptions {
 	/** If true, use the latest snapshot to speed up replay */
 	useSnapshot?: boolean;
+	/** Optional authority fence for recovery-side durable publications. */
+	preCommitCheck?: () => void;
 }
 
 /**
@@ -2069,15 +2095,19 @@ export async function peekPlanFromLedger(
  *    `replayWithIntegrity`'s bug — it hid genuine replay failures).
  *
  * @param directory - The working directory
- * @param _options - Optional replay options (reserved)
+ * @param _options - Optional replay options, including an authority fence for
+ *   recovery-side quarantine publications
  * @returns {@link ReplayStatusResult} with plan, truncated flag, and bad suffix
  */
 export async function replayFromLedgerWithStatus(
 	directory: string,
 	_options?: ReplayOptions,
 ): Promise<ReplayStatusResult> {
-	const { events, truncated, badSuffix } =
-		await readLedgerEventsWithIntegrity(directory);
+	const integrity = await readLedgerEventsWithIntegrity(directory);
+	// Integrity reading is asynchronous from the caller's perspective. Recheck
+	// authority before quarantining any suffix discovered by that read.
+	_options?.preCommitCheck?.();
+	const { events, truncated, badSuffix } = integrity;
 
 	// If no events, nothing to replay
 	if (events.length === 0) {
@@ -2089,7 +2119,9 @@ export async function replayFromLedgerWithStatus(
 	// `truncated` flag is threaded back so the caller can refuse to overwrite
 	// plan.json with the prefix-only projection.
 	if (truncated && badSuffix !== null) {
-		await quarantineLedgerSuffix(directory, badSuffix);
+		await quarantineLedgerSuffix(directory, badSuffix, {
+			preCommitCheck: _options?.preCommitCheck,
+		});
 	}
 
 	const plan = reconstructPlanFromEvents(directory, events);
@@ -2479,12 +2511,15 @@ export interface QuarantineResult {
  *
  * @param directory - The working directory
  * @param badSuffix - The corrupted content to quarantine
+ * @param options - Optional authority fence checked immediately before writing
+ *   the quarantine side file
  * @returns {@link QuarantineResult} with the written path (or null) and the
  *   number of parseable lines salvaged from the suffix
  */
 export async function quarantineLedgerSuffix(
 	directory: string,
 	badSuffix: string,
+	options?: { preCommitCheck?: () => void },
 ): Promise<QuarantineResult> {
 	// Salvage: count individually-parseable lines in the suffix so the size of
 	// the sacrificed tail is observable rather than silently discarded.
@@ -2499,6 +2534,7 @@ export async function quarantineLedgerSuffix(
 		}
 	}
 
+	let quarantinePath: string;
 	try {
 		assertProjectRoot(directory);
 		// Unique, non-overwriting side path: timestamp for ordering + content hash
@@ -2537,10 +2573,20 @@ export async function quarantineLedgerSuffix(
 			// attempt a fresh write below.
 		}
 
-		const quarantinePath = path.join(
+		quarantinePath = path.join(
 			swarmDir,
 			`plan-ledger.quarantine.${Date.now()}.${hash}`,
 		);
+	} catch {
+		// Silently fail if the quarantine path cannot be prepared.
+		return { path: null, salvagedCount };
+	}
+
+	// Keep the authority fence outside the broad preparation/write catch. A
+	// caller's typed supersession error must propagate rather than being
+	// misreported as an ordinary quarantine I/O failure.
+	options?.preCommitCheck?.();
+	try {
 		fs.writeFileSync(quarantinePath, badSuffix, 'utf8');
 		log(
 			`[ledger] Corrupted suffix quarantined to ${path.relative(directory, quarantinePath)} (salvageable events: ${salvagedCount})`,

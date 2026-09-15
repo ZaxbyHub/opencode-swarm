@@ -291,20 +291,6 @@
 		{
 			"rowId": "plan-projections",
 			"file": "src/plan/manager.ts",
-			"identifier": "loadPlan",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadPlan\" exists in src/plan/manager.ts but not inside src/plan/manager.ts:658 (plan-projections.readerCitations[0])."
-		},
-		{
-			"rowId": "plan-projections",
-			"file": "src/plan/manager.ts",
-			"identifier": "loadPlanJsonOnly",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadPlanJsonOnly\" exists in src/plan/manager.ts but not inside :366 (plan-projections.readerCitations[0])."
-		},
-		{
-			"rowId": "plan-projections",
-			"file": "src/plan/manager.ts",
 			"identifier": "rebuildPlan",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"rebuildPlan\" exists in src/plan/manager.ts but not inside :1901 (plan-projections.writerCitations[0])."
