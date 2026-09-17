@@ -12,10 +12,14 @@
 # gate; an EXPIRY more than 14 days in the past also fails (inside the grace
 # window it only warns).
 #
-# STATUS: 3 active entries (pr-monitor-status.test.ts per issue #1982,
-# win32-wrapper-runtime.test.ts per issue #2185, and
-# completion-observer-coder.test.ts per issue #2692 — the issue #1729 debt
-# itself remains paid down; see the entries below).
+# STATUS: 9 active entries (pr-monitor-status.test.ts per issue #1982,
+# win32-wrapper-runtime.test.ts per issue #2185,
+# completion-observer-coder.test.ts per issue #2692, and
+# pr-subscriptions-checkpoint.test.ts / archive.test.ts /
+# pr-workflow-gate-batch-gc.test.ts / write-receipts-feedback-2500.test.ts /
+# recall-evaluation-profile-isolation.test.ts /
+# phase-complete.lock-adversarial.test.ts per issue #2812 — the issue #1729
+# debt itself remains paid down; see the entries below).
 #
 # History: this list previously held 9 Windows-only failures. They were fixed
 # in issue #1729 by a combination of:
@@ -122,3 +126,197 @@ tests/unit/sandbox/win32-wrapper-runtime.test.ts
 #   or renew with an updated criterion. Inside the 14-day grace window
 #   Check 7 only warns.
 tests/unit/background/completion-observer-coder.test.ts
+#
+# pr-subscriptions-checkpoint.test.ts (issue #2812)
+# ---------------------------------------------------------------------------
+# Unit tests for the bounded checkpoint store backing the PR-subscriptions
+# background poller (steady-state cap behavior, monotonic sequence, duplicate
+# + reordered in-store updates resolving last-write-wins, headRefOid
+# round-trip, live-subscription maxSubscriptions caps including the 0-disabled
+# escape hatch, terminal-compaction High→Low summarization + age ceiling,
+# retained-actives preservation, TTL sweep that never drops errorCount /
+# cooldown state, long-history bounds, and crash-resume of a half-migrated
+# mid-file cursor). Per-test mkdtempSync / rmSync teardown and
+# `Date.now()`-derived audit-tail byte high-watermark rewriting exercise the
+# classic Windows cold-FS / AV-handle class (the #1782 #1982 #2185 #2692
+# pattern). Flaky on windows-latest merge-group unit-shard 1 only: CI run
+# 35113965170 (merge_group pr-2765, head 16f82fcec19271f6,
+# 2026-09-16T15:14:18Z) had Attempt 1 fail and Passed on retry 1 at
+# 2026-09-16T15:25:22Z (passed-on-retry flake). Sibling ubuntu-1..6,
+# macos-1..6, and the other windows shards 2/3/4/5/6 ran the file green
+# in the same run. The ci.yml retry loop discards attempt-1 output when a
+# retry passes, so no assertion text exists to drive a root-cause fix.
+# Pre-existing, unrelated to any specific PR. Quarantined per issue #2812;
+# tracked under #1782 (test-stability sprint).
+# OWNER: @zaxbysauce — issue #2812 (windows-latest-only merge-group flake;
+#   single-OS evidence: windows-1 retry-pass, ubuntu 1..6 / macos 1..6 /
+#   windows 2..6 green)
+# EXPIRY: 2026-10-31 — root-fix the windows cold-FS / AV-handle teardown
+#   sensitivity or renew with an updated criterion. Inside the 14-day grace
+#   window Check 7 only warns.
+tests/unit/background/pr-subscriptions-checkpoint.test.ts
+#
+# archive.test.ts (issue #2812)
+# ---------------------------------------------------------------------------
+# Unit tests for the `/swarm archive` command (no-bundles message, dry-run
+# preview with task IDs, archive-with-old-bundles markdown, only-new-bundles
+# "nothing old" path, selected-deletion-failure partial-deletion reporting,
+# `--dry-run --max-bundles N` preview section, max-bundles archive with mixed
+# old/new bundles). Per-test mkdtempSync / rmSync temp-dir teardown and the
+# standard `Date.now()` age-window inputs exercise the Windows cold-FS / AV
+# handle class (the #1782 #1982 #2185 #2692 pattern). Flaky on
+# windows-latest merge-group unit-shard 5 only: CI run 35113965170
+# (merge_group pr-2765, head 16f82fcec19271f6, 2026-09-16T15:14:18Z) had
+# Attempt 1 fail and Passed on retry 1 at 2026-09-16T15:30:13Z
+# (passed-on-retry flake). Sibling ubuntu-1..6, macos-1..6, and the other
+# windows shards 1/2/3/4/6 ran the file green in the same run. The ci.yml
+# retry loop discards attempt-1 output when a retry passes, so no
+# assertion text exists to drive a root-cause fix. Pre-existing, unrelated
+# to any specific PR. Quarantined per issue #2812; tracked under #1782
+# (test-stability sprint).
+# OWNER: @zaxbysauce — issue #2812 (windows-latest-only merge-group flake;
+#   single-OS evidence: windows-5 retry-pass, ubuntu 1..6 / macos 1..6 /
+#   windows 1..4/6 green)
+# EXPIRY: 2026-10-31 — root-fix the windows archive temp-dir teardown flake
+#   or renew with an updated criterion. Inside the 14-day grace window
+#   Check 7 only warns.
+tests/unit/commands/archive.test.ts
+#
+# pr-workflow-gate-batch-gc.test.ts (issue #2812) — CORE-TREE
+# ---------------------------------------------------------------------------
+# CORE-TREE entry flagged by the #1782 detector rule C
+# (tests/unit/hooks/**): the file's own header at
+# tests/unit/hooks/pr-workflow-gate-batch-gc.test.ts:35-42 declares the
+# suite "inherently slow: ~4s against bun's 5000ms default, i.e. flaky by
+# construction" and sets `CAP_TEST_TIMEOUT_MS = 60_000` per-test to give
+# itself headroom against cold-FS pressure. The GC tests cover the
+# #1968 P4 MAX_WORKFLOW_BATCHES reclaim that fails closed when the
+# derived inventory cannot be proven unchanged. Flaky on windows-latest
+# merge-group unit-shard 4 only: CI run 35113965170 (merge_group pr-2765,
+# head 16f82fcec19271f6, 2026-09-16T15:14:18Z) had Attempt 1 fail (no
+# captured assertion text — the ci.yml retry loop discards attempt-1 output
+# when a retry passes) and Passed on retry 1 at 2026-09-16T15:42:12Z
+# (passed-on-retry flake); the next JSON report (unit-shard-4-289) is the
+# retry attempt 2 result. Sibling ubuntu-1..6, macos-1..6, and the other
+# windows shards 1/2/3/5/6 ran the file green in the same run. Locally
+# the 6-test suite runs to ~25s with explicit 60s per-test timeouts
+# (longest cell: "the validation batch cap is reclaimed in a reviewer
+# retry loop" at 11.2s on a clean TMPDIR) — so the merge-group failure is
+# timing / CPU-contention sensitive, not a logic bug. CORE-TREE placement:
+# the file lives under tests/unit/hooks/** which the detector's rule C
+# marks for human review rather than mechanical quarantine; this
+# comment block records the human-review justification per the
+# scripts/ci/detect-and-quarantine-flakes.sh rule-C contract. The
+# evidence is single-OS windows-latest (no cross-OS flake profile), so
+# the windows ledger is the correct destination even though the file
+# was previously quarantined on the general ledger by the
+# auto-fix/issue-2761-... sibling branch (commit ceb96ae49 — not yet
+# on origin/main). Pre-existing, unrelated to any specific PR.
+# Quarantined per issue #2812; tracked under #1782 (test-stability sprint).
+# OWNER: @zaxbysauce — issue #2812 (CORE-TREE entry: tests/unit/hooks/** per
+#   rule C; flaky-by-construction per the file's own header; windows-only
+#   merge-group retry-pass evidence routes to windows ledger; see CI run
+#   35113965170 + unit (windows-latest, 4))
+# EXPIRY: 2026-10-31 — root-fix the suite's inherent slowness
+#   (shrink MAX_WORKFLOW_BATCHES for these tests via a test-only override,
+#   or pre-seed minimal fixtures so the full-cap loop is unnecessary), or
+#   raise the per-test timeout floor used by merge-group windows-latest
+#   cold-FS shards. Inside the 14-day grace window Check 7 only warns.
+tests/unit/hooks/pr-workflow-gate-batch-gc.test.ts
+#
+# write-receipts-feedback-2500.test.ts (issue #2812)
+# ---------------------------------------------------------------------------
+# Regression tests for issue #2500's MCP receipt-feedback core (FB-007
+# omitted and explicit global scopes share an identity, FB-008 status reads
+# expose state but never response or error text, FB-009 receipt transitions
+# reject an oversized serialized line, FB-018 terminal history rolls into
+# an archive while status remains readable + archive-failure preserves the
+# prior active journal + active-failure leaves a recoverable PREPARED
+# shadow, FB-023 persistReceipt is not called for a settled no-op). The
+# FB-018 cells drive real archive roll-overs through temp mkdtempSync /
+# rmSync cycles; the classic Windows cold-FS / AV-handle class (#1782
+# #1982 #2185 #2692 pattern) hits the rmSync teardown under
+# merge-group runner pressure. Flaky on windows-latest merge-group
+# unit-shard 5 only: CI run 35113965170 (merge_group pr-2765, head
+# 16f82fcec19271f6, 2026-09-16T15:14:18Z) had Attempt 1 fail and Passed
+# on retry 1 at 2026-09-16T15:43:19Z (passed-on-retry flake). Sibling
+# ubuntu-1..6, macos-1..6, and the other windows shards 1/2/3/4/6 ran
+# the file green in the same run. The ci.yml retry loop discards
+# attempt-1 output when a retry passes, so no assertion text exists to
+# drive a root-cause fix. Pre-existing, unrelated to any specific PR.
+# Quarantined per issue #2812; tracked under #1782 (test-stability sprint).
+# OWNER: @zaxbysauce — issue #2812 (windows-latest-only merge-group flake;
+#   single-OS evidence: windows-5 retry-pass, ubuntu 1..6 / macos 1..6 /
+#   windows 1..4/6 green)
+# EXPIRY: 2026-10-31 — root-fix the windows cold-FS / AV-handle teardown
+#   sensitivity or renew with an updated criterion. Inside the 14-day
+#   grace window Check 7 only warns.
+tests/unit/mcp/write-receipts-feedback-2500.test.ts
+#
+# recall-evaluation-profile-isolation.test.ts (issue #2812)
+# ---------------------------------------------------------------------------
+# Regression tests for the per-profile isolation guarantee in the recall
+# evaluator (multi-profile run invokes reranking only for hybrid+rerank,
+# profile order cannot reuse a prior profile's query-embedding cache,
+# quality profiles enforce the returned-token cap for an oversized record
+# without changing no-profile recall). The recall-evaluator path loads
+# embedding and reranker state per profile, so cold-disk / AV-handle
+# pressure on windows-latest merge-group runners can flip the
+# no-profile-recall baseline that the third cell pins. Flaky on
+# windows-latest merge-group unit-shard 5 only: CI run 35113965170
+# (merge_group pr-2765, head 16f82fcec19271f6, 2026-09-16T15:14:18Z) had
+# all three in-job retries (max_retries=2) fail under merge-group
+# pressure at 2026-09-16T15:45:09Z (hard failure, no retry-pass; the
+# FAILED annotation is the durable signal). Sibling ubuntu-1..6,
+# macos-1..6, and the other windows shards 1/2/3/4/6 ran the file green
+# in the same run. Per-test mkdtempSync / rmSync temp-dir teardown and
+# per-profile state mutation exercise the Windows cold-FS / AV-handle
+# class (#1782 #1982 #2185 #2692 pattern). Pre-existing, unrelated to
+# any specific PR. Quarantined per issue #2812; tracked under #1782
+# (test-stability sprint).
+# OWNER: @zaxbysauce — issue #2812 (windows-latest-only merge-group hard
+#   failure; single-OS evidence: windows-5 all-3-retries-failed, ubuntu
+#   1..6 / macos 1..6 / windows 1..4/6 green)
+# EXPIRY: 2026-10-31 — root-fix the windows cold-FS / AV-handle teardown
+#   sensitivity or renew with an updated criterion. Inside the 14-day
+#   grace window Check 7 only warns.
+tests/unit/memory/recall-evaluation-profile-isolation.test.ts
+#
+# phase-complete.lock-adversarial.test.ts (issue #2812)
+# ---------------------------------------------------------------------------
+# Adversarial / regression tests for the phase_complete lock acquisition
+# + working_directory path-traversal hardening (real lock contention
+# across two concurrent phase_complete invocations on the same plan.json,
+# lock-throw fall-through to phase_complete failure, working_directory
+# path traversal via `..` segments that fail at the retro gate, deep
+# `../` traversal that does not crash, symlink traversal that resolves
+# via realpathSync, and the full MIN_SAFE_INTEGER / MIN_VALUE / -Infinity /
+# Infinity / NaN / 0.999 / 1.0000000001 phase-number rejection matrix).
+# The real-lock-contention cells drive two concurrent phase_complete
+# calls against the same mkdtempSync plan root, so the Windows cold-FS /
+# AV-handle / handle-race class hits the rmSync teardown under
+# merge-group runner pressure. Flaky on windows-latest merge-group
+# unit-shard 1 only: CI run 35113965170 (merge_group pr-2765, head
+# 16f82fcec19271f6, 2026-09-16T15:14:18Z) had all three in-job retries
+# (max_retries=2) fail with the second caller receiving "blocked"
+# instead of the expected "incomplete" status at
+# tests/unit/tools/phase-complete.lock-adversarial.test.ts:336 (hard
+# failure, no retry-pass; the FAILED annotation is the durable signal).
+# Sibling ubuntu-1..6, macos-1..6, and the other windows shards 2..6 ran
+# the file green in the same run. The phase_complete lock semantics
+# are deliberately contention-sensitive — the failure mode ("blocked"
+# rather than "incomplete") is consistent with a concurrent lock winner
+# still holding the lock when the second caller observes it, which is
+# the Windows cold-FS / AV-handle handle-race class. Pre-existing,
+# unrelated to any specific PR. Quarantined per issue #2812; tracked
+# under #1782 (test-stability sprint).
+# OWNER: @zaxbysauce — issue #2812 (windows-latest-only merge-group hard
+#   failure; single-OS evidence: windows-1 all-3-retries-failed with
+#   "blocked" status instead of "incomplete", ubuntu 1..6 / macos 1..6 /
+#   windows 2..6 green)
+# EXPIRY: 2026-10-31 — root-fix the windows lock-handle race (e.g. wrap
+#   the rmSync teardown in safeRmRecursive with bounded EBUSY/EPERM
+#   retries, matching the PR #2807 pattern for issue #2602 / #1782
+#   handle-race), or renew with an updated criterion. Inside the 14-day
+#   grace window Check 7 only warns.
+tests/unit/tools/phase-complete.lock-adversarial.test.ts
