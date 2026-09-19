@@ -12,12 +12,13 @@
 # gate; an EXPIRY more than 14 days in the past also fails (inside the grace
 # window it only warns).
 #
-# STATUS: 6 active entries (pr-monitor-status.test.ts per issue #1982,
+# STATUS: 7 active entries (pr-monitor-status.test.ts per issue #1982,
 # win32-wrapper-runtime.test.ts per issue #2185,
 # completion-observer-coder.test.ts per issue #2692,
-# index-pr-workflow-session-lifecycle-2602.test.ts per issue #2761, and
+# index-pr-workflow-session-lifecycle-2602.test.ts per issue #2761,
 # pr-subscriptions-checkpoint.test.ts +
-# recall-evaluation-profile-isolation.test.ts per issue #2812 — the
+# recall-evaluation-profile-isolation.test.ts per issue #2812, and
+# close-active-state-unlink-retry.test.ts per issue #2846 — the
 # issue #1729 debt itself remains paid down; see the entries below).
 #
 # History: this list previously held 9 Windows-only failures. They were fixed
@@ -194,3 +195,40 @@ tests/unit/background/pr-subscriptions-checkpoint.test.ts
 #   sensitivity or renew with an updated criterion. After EXPIRY, Check 7
 #   warns for 14 days, then hard-fails on day 15.
 tests/unit/memory/recall-evaluation-profile-isolation.test.ts
+
+#
+# tests/unit/commands/close-active-state-unlink-retry.test.ts (issue #2846)
+# ---------------------------------------------------------------------------
+# Tests active-state SQLite unlink retry in src/commands/close.ts: retries
+# EBUSY/EPERM Windows locks with a bounded backoff ([25, 50, 100, 200]), rejects
+# non-transient failures (EACCES) without retry, and releases Bun query-cache
+# handles before deleting a closed project database. The 5th case
+# (`releases Bun query-cache handles before deleting a closed project
+# database`) fails 3/3 attempts with EBUSY from rmSync in the `finally`
+# teardown on windows-latest unit shards under loaded runners while passing
+# locally on Windows when unloaded and on ubuntu/macos at the same SHA
+# (hit on merge-group run 35422590582 / pr-2837 head bdeba4456f2cdf,
+# 2026-09-19T06:14Z, `unit (windows-latest, 2)` shard — job 105851906292,
+# unit-shard-2-117.json — three rounds EBUSY on
+# C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\close-query-cache-{LJAU9T,FjJVqP,Hj4dmS}).
+# The sibling ubuntu/macos shard-2 cells did not even include this file
+# in their expected-files list (different sort order on ext4/APFS puts
+# the close-* files into different shards per OS), so the failure is
+# single-OS. Consistent with the windows-latest cold-FS / AV-handle class
+# (same root cause as pr-monitor-status.test.ts per issue #1982 /
+# win32-wrapper-runtime.test.ts per issue #2185 — fix landed in PR #2190
+# via safeRmRecursive + bounded EBUSY/EPERM retries; this test still
+# exercises the old rmSync pattern and would benefit from the same
+# helper). Pre-existing, unrelated to any specific PR. Quarantined per
+# issue #2846; tracked under #1737 (test quarantine debt) pending a
+# dedicated test-stability sprint (#1782).
+# OWNER: zaxbysauce — issue #2846 (windows-only retry-flake on
+#   `unit (windows-latest, 2)`; see merge-group run 35422590582,
+#   unit-shard-2-117.json for the attempt/retry trace)
+# EXPIRY: 2026-10-17 — root-fix the rmSync Windows cleanup race in the
+#   test finally block (candidate: use tests/helpers/safe-test-dir.ts
+#   safeRmRecursive with a closed project-db handle + bounded EBUSY/EPERM
+#   retries, the same pattern already root-fixed for
+#   pr-monitor-status.test.ts via PR #2190) or renew with an updated
+#   diagnosis under #1737/#2477
+tests/unit/commands/close-active-state-unlink-retry.test.ts
