@@ -24,7 +24,10 @@ Skips Stage B (reviewer + test_engineer) for low-risk tasks. The task still goes
 - `architect*.ts`, `delegation*.ts`, `guardrails*.ts`, `adversarial*.ts`, `sanitiz*.ts`
 - `auth*`, `permission*`, `crypto*`, `secret*`, `security*.ts`
 
-This list is enforced at `src/tools/update-task-status.ts:98-109`. You cannot turn it off.
+This list is enforced by the tier3 policy module at `src/parallel/tier3-policy.ts`.
+Projects that accept the risk may narrow the enforcement set through the
+`turbo.tier3_override` config key (a per-project list of patterns to exempt
+from full review).
 
 **When to use:** rapid iteration on non-critical code — UI tweaks, documentation, internal refactors.
 
