@@ -7,8 +7,14 @@
   - `tests/unit/commands/close-active-state-unlink-retry.test.ts`
     (windows-latest unit-shard 2, hard-failure EBUSY on `rmSync` teardown)
 - Updated the ledger's `# STATUS: N active entries` header from 6 to 7.
+- Added a consumer-side pinning regression test,
+  `tests/unit/scripts/ci/ci-yml-quarantine-2844.test.ts`, which re-asserts
+  the entry lives in the Windows ledger only, is absent from the general /
+  macOS ledgers, carries OWNER + EXPIRY metadata (issue #2477 Check 7),
+  exists on disk at exactly the ledger path, and that the STATUS header
+  count matches the actual active-entry count.
 - No source, hook, or workflow code changed. The change is confined to the
-  Windows ledger file and this pending release fragment.
+  Windows ledger file, the pinning test, and this pending release fragment.
 
 ## Why
 
