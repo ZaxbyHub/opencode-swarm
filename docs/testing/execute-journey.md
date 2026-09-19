@@ -103,6 +103,10 @@ convert an uncertain provider or worktree effect into a local success claim.
 
 ## Executed host/runtime cells
 
+Depth-tier floors for the PR-review lanes are enforced at
+`src/hooks/pr-workflow-gate.ts:469-473` and remain identical on every runtime
+cell listed below.
+
 Executed and verified locally: **Bun × Windows** (per-file runs; counts in
 the release fragment). **Bun × {macOS, Linux}** runs in the same per-file
 unit CI matrix on every push and merge-group run; this document claims those
