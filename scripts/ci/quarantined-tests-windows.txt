@@ -12,12 +12,13 @@
 # gate; an EXPIRY more than 14 days in the past also fails (inside the grace
 # window it only warns).
 #
-# STATUS: 6 active entries (pr-monitor-status.test.ts per issue #1982,
+# STATUS: 7 active entries (pr-monitor-status.test.ts per issue #1982,
 # win32-wrapper-runtime.test.ts per issue #2185,
 # completion-observer-coder.test.ts per issue #2692,
-# index-pr-workflow-session-lifecycle-2602.test.ts per issue #2761, and
+# index-pr-workflow-session-lifecycle-2602.test.ts per issue #2761,
 # pr-subscriptions-checkpoint.test.ts +
-# recall-evaluation-profile-isolation.test.ts per issue #2812 — the
+# recall-evaluation-profile-isolation.test.ts per issue #2812, and
+# j02-failure-rejection-distinct.test.ts per issue #2826 — the
 # issue #1729 debt itself remains paid down; see the entries below).
 #
 # History: this list previously held 9 Windows-only failures. They were fixed
@@ -194,3 +195,35 @@ tests/unit/background/pr-subscriptions-checkpoint.test.ts
 #   sensitivity or renew with an updated criterion. After EXPIRY, Check 7
 #   warns for 14 days, then hard-fails on day 15.
 tests/unit/memory/recall-evaluation-profile-isolation.test.ts
+#
+# tests/unit/execute-journey/j02-failure-rejection-distinct.test.ts (issue #2826)
+# ---------------------------------------------------------------------------
+# Failure/rejection distinctness controls (AC2, issue #2666): a failed
+# provider call must NOT become a finished task; reviewer/QA rejections are
+# stage-b review failures (rework), structurally distinct from the
+# transport/settlement failure channel. Each of the four cases boots a full
+# journey host plus a fresh isolated temp project and drives configure →
+# discover → specify → approve → EXECUTE through the registered host
+# surfaces with 120s budgets, so windows-latest merge-group CPU/filesystem
+# contention is the likely failure class (see
+# docs/testing/test-stability.md). Flaky on windows-latest merge-group unit
+# shards only: run 35239240597 (merge_group, head 27d819644, 2026-09-17) had
+# `unit (windows-latest, 3)` (job 105298347794) Attempt 1 fail at 16:24:12Z,
+# Attempt 2 fail at 16:24:51Z, and Passed on retry 2 at 16:25:07Z
+# (passed-on-retry flake); run 35103146629 (merge_group, head 07ae4bb0b,
+# 2026-09-16) had `unit (windows-latest, 5)` (job 104825105987) Attempt 1
+# fail at 14:06:29Z and Passed on retry 1 at 14:06:44Z. Both detections are
+# windows-latest-only — sibling ubuntu/macos unit shards ran the file green
+# or round-robin-skipped it, so the per-OS windows ledger is the correct
+# scoping. The ci.yml retry loop discards attempt-1 output when a retry
+# passes, so no failing assertion text exists to drive a root-cause fix; the
+# file passes locally (4/4 cases, 5.95s). Pre-existing, unrelated to any
+# specific PR. Quarantined per issues #2826/#2810; tracked under #1737
+# (test quarantine debt) pending a dedicated test-stability sprint (#1782).
+# OWNER: zaxbysauce — issue #2826 (windows-latest-only merge-group flake;
+#   single-OS evidence: windows-3/5 retry-passes, siblings green)
+# EXPIRY: 2026-10-17 — root-fix the journey-host boot/120s-budget wall-clock
+#   sensitivity (e.g. trim per-case boot cost or freeze the clock) or renew
+#   with an updated criterion. After EXPIRY, Check 7 warns for 14 days, then
+#   hard-fails on day 15.
+tests/unit/execute-journey/j02-failure-rejection-distinct.test.ts
