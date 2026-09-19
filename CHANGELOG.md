@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.184.12](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.184.11...v7.184.12) (2026-09-19)
+
+
+### Bug Fixes
+
+* **delegation:** close the eventless-terminal window on every settle path (issue [#2700](https://github.com/ZaxbyHub/opencode-swarm/issues/2700)) ([589a458](https://github.com/ZaxbyHub/opencode-swarm/commit/589a4582bfc551b96f8b5b5eadba6a154198b810))
+
 ## [7.184.11](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.184.10...v7.184.11) (2026-09-19)
 
 
