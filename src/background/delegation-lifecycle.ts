@@ -363,11 +363,9 @@ function emitDelegationCostObservation(
 		// exact-call identity and an unknown-honest cost block. Token axes are
 		// carried ONLY when the provider's own payload attested usage
 		// (cost_source 'reported' — the pinned SDK shapes carry cost and usage
-		// together; since #2789 the synthesized missing-cost evidence item
-		// carries all-null usage, and the typeof guards below omit any axis
-		// the producer did not hold, so neither can leak in as a known zero).
-		// An estimate-only chain carries its estimated dollar value but leaves
-		// token axes unknown.
+		// together; the synthesized missing-cost evidence item zero-fills usage
+		// and must not leak in as a known zero). An estimate-only chain carries
+		// its estimated dollar value but leaves token axes unknown.
 		const usageAttested = costFields.cost_source === 'reported';
 		recordExecutionAttempt({
 			sessionId: record.parentSessionId,
@@ -382,25 +380,12 @@ function emitDelegationCostObservation(
 					: {}),
 				...(usageAttested
 					? {
-							// #2789: the legacy cost fields are now number | null; an
-							// axis the producer did not hold is OMITTED so the
-							// execution-attempt surface records it as unavailable
-							// (via knownCostValue) instead of a fabricated 0. The
-							// TaskAttemptCostInput axes stay plain `number | null`-
-							// free — this surface's unknown-honesty comes from its
-							// unavailable list, which stays a #2676 non-goal here.
-							...(typeof costFields.tokens_input === 'number'
-								? { inputTokens: costFields.tokens_input }
-								: {}),
-							...(typeof costFields.tokens_output === 'number'
-								? { outputTokens: costFields.tokens_output }
-								: {}),
+							inputTokens: costFields.tokens_input,
+							outputTokens: costFields.tokens_output,
 							// Combined cache read+write total (upstream axis
 							// collapse, documented in
 							// docs/execution-attempt-tracing.md).
-							...(typeof costFields.tokens_cache === 'number'
-								? { cacheReadTokens: costFields.tokens_cache }
-								: {}),
+							cacheReadTokens: costFields.tokens_cache,
 						}
 					: {}),
 				...(costFields.cost_source === 'reported' &&

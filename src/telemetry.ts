@@ -480,9 +480,8 @@ export function emit(
 		// `toLegacyTelemetryLine` takes `timestamp` from `canonical.observedAt`
 		// (stamped with the same `new Date().toISOString()`) and spreads the
 		// caller's original `data` object last. Proven by
-		// `tests/unit/telemetry/emit-line-parity.test.ts` against a corpus
-		// deliberately regenerated at `0aa722596` (issue #2789; originally
-		// captured from the unmodified tree at e50386b9).
+		// `tests/unit/telemetry/emit-line-parity.test.ts` against a corpus captured
+		// from the unmodified tree at e50386b9.
 		//
 		// `JSON.stringify` still throws here for circular/BigInt payloads, before
 		// the listener fan-out below — preserving the ordering asserted by
@@ -693,13 +692,10 @@ export const telemetry = {
 			agentName,
 			taskId,
 			result,
-			// #2789: null-preserving unknown semantics — an axis the producer did
-			// not hold is emitted as null (like cost_usd below), never fabricated
-			// as 0. An explicit 0 remains a legal KNOWN value.
-			tokens_input: costFields?.tokens_input ?? null,
-			tokens_output: costFields?.tokens_output ?? null,
-			tokens_reasoning: costFields?.tokens_reasoning ?? null,
-			tokens_cache: costFields?.tokens_cache ?? null,
+			tokens_input: costFields?.tokens_input ?? 0,
+			tokens_output: costFields?.tokens_output ?? 0,
+			tokens_reasoning: costFields?.tokens_reasoning ?? 0,
+			tokens_cache: costFields?.tokens_cache ?? 0,
 			cost_usd: costFields?.cost_usd ?? null,
 			...costFields,
 			cost_source: costFields?.cost_source ?? 'unavailable',

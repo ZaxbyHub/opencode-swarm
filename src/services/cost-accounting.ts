@@ -76,15 +76,10 @@ export type PricingConfig = {
 };
 
 export type TokenUsage = {
-	/**
-	 * #2789: each axis is `number | null`. `null` means the producer did not
-	 * hold the value (unknown); a numeric value — including an explicit 0 —
-	 * is a KNOWN measurement. Zero is never fabricated for an absent axis.
-	 */
-	tokens_input: number | null;
-	tokens_output: number | null;
-	tokens_reasoning: number | null;
-	tokens_cache: number | null;
+	tokens_input: number;
+	tokens_output: number;
+	tokens_reasoning: number;
+	tokens_cache: number;
 };
 
 export type DelegationCostFields = TokenUsage & {
@@ -119,15 +114,12 @@ export type CostSummary = {
 	total_cost_usd: number;
 	total_reported_usd: number;
 	total_estimated_usd: number;
-	/** #2789: null when no delegation contributed a known value for the axis. */
-	total_input_tokens: number | null;
-	total_output_tokens: number | null;
-	total_reasoning_tokens: number | null;
-	total_cache_tokens: number | null;
+	total_input_tokens: number;
+	total_output_tokens: number;
+	total_reasoning_tokens: number;
+	total_cache_tokens: number;
 	delegations: number;
 	unavailable_delegations: number;
-	/** #2789: delegations whose token axes were all unknown (no known axis). */
-	unknown_usage_delegations: number;
 	by_agent: CostSummaryRow[];
 	by_task: CostSummaryRow[];
 	by_gate: CostSummaryRow[];
@@ -149,48 +141,19 @@ export type CostSummaryRow = {
 	name: string;
 	delegations: number;
 	cost_usd: number;
-	/** #2789: null when no delegation in this row held a known value. */
-	input_tokens: number | null;
-	output_tokens: number | null;
-	reasoning_tokens: number | null;
-	cache_tokens: number | null;
+	input_tokens: number;
+	output_tokens: number;
+	reasoning_tokens: number;
+	cache_tokens: number;
 	unavailable_delegations: number;
 };
 
-const UNKNOWN_USAGE: TokenUsage = {
-	tokens_input: null,
-	tokens_output: null,
-	tokens_reasoning: null,
-	tokens_cache: null,
+const ZERO_USAGE: TokenUsage = {
+	tokens_input: 0,
+	tokens_output: 0,
+	tokens_reasoning: 0,
+	tokens_cache: 0,
 };
-
-/**
- * Per-axis fold policy for #2789: null (unknown) loses to a known value;
- * two known values take the maximum; unknown + unknown stays unknown.
- */
-function maxKnownAxis(a: number | null, b: number | null): number | null {
-	if (a === null) return b;
-	if (b === null) return a;
-	return Math.max(a, b);
-}
-
-/** Per-axis additive policy: known values sum; unknown never fabricates 0. */
-function sumKnownAxis(
-	total: number | null,
-	value: number | null,
-): number | null {
-	if (value === null) return total;
-	return total === null ? value : total + value;
-}
-
-function isUnknownUsage(usage: TokenUsage): boolean {
-	return (
-		usage.tokens_input === null &&
-		usage.tokens_output === null &&
-		usage.tokens_reasoning === null &&
-		usage.tokens_cache === null
-	);
-}
 
 const MAX_EVIDENCE_ITEMS = 8;
 const MAX_COST_STRING_LENGTH = 128;
@@ -210,7 +173,7 @@ export function buildDelegationCostFields(
 ): DelegationCostFields {
 	const evidence = extractCostEvidence(input.raw, input);
 	const projection = projectCostEvidence(evidence);
-	const usage = evidence.reduce(mergeUsage, { ...UNKNOWN_USAGE });
+	const usage = evidence.reduce(mergeUsage, { ...ZERO_USAGE });
 	const model = evidence.find((item) => item.model)?.model ?? input.model;
 	return {
 		...usage,
@@ -258,7 +221,7 @@ export function extractCostEvidence(
 	}
 
 	const usage = mergeUsage(
-		candidates.reduce(mergeUsage, { ...UNKNOWN_USAGE }),
+		candidates.reduce(mergeUsage, { ...ZERO_USAGE }),
 		readLegacyUsage(raw),
 	);
 	const model =
@@ -624,7 +587,7 @@ function readEventEvidence(event: Record<string, unknown>): CostEvidence[] {
 		const amount = readBoundedReportedCost(item.amount_usd);
 		const usage = isRecord(item.usage)
 			? readPinnedTokens(item.usage)
-			: { ...UNKNOWN_USAGE };
+			: { ...ZERO_USAGE };
 		if (!kind || !sourcePath) return [];
 		return [
 			{
@@ -661,10 +624,10 @@ function legacyEventEvidence(event: Record<string, unknown>): CostEvidence[] {
 			source_path: 'legacy.cost',
 			reason: amount === null ? 'legacy' : 'authoritative',
 			usage: {
-				tokens_input: readFiniteNonNegative(event.tokens_input),
-				tokens_output: readFiniteNonNegative(event.tokens_output),
-				tokens_reasoning: readFiniteNonNegative(event.tokens_reasoning),
-				tokens_cache: readFiniteNonNegative(event.tokens_cache),
+				tokens_input: readFiniteNonNegative(event.tokens_input) ?? 0,
+				tokens_output: readFiniteNonNegative(event.tokens_output) ?? 0,
+				tokens_reasoning: readFiniteNonNegative(event.tokens_reasoning) ?? 0,
+				tokens_cache: readFiniteNonNegative(event.tokens_cache) ?? 0,
 			},
 		},
 	];
@@ -701,11 +664,6 @@ function costSnapshotDigest(event: Record<string, unknown>): string {
 	// This is intentionally a stable, bounded digest rather than persisted raw
 	// provider data. A cryptographic hash is supplied when available by the
 	// runtime; this deterministic fallback remains safe for fold-only readers.
-	// #2789: the token folds below intentionally canonicalize unknown (null)
-	// to 0. This digest is compared against `event.digest` captured on prior
-	// correction attempts (:446/:516), so keeping the legacy numeric mapping
-	// keeps every legacy-line digest byte-stable across the null-preserving
-	// migration — this is digest canonicalization, NOT data fabrication.
 	const canonical = JSON.stringify({
 		cost_usd: event.cost_usd ?? null,
 		cost_source: parseCostSource(event.cost_source),
@@ -746,17 +704,12 @@ export function isCostUpgrade(
 	if (nextAuthority > currentAuthority) return true;
 	if (nextAuthority < currentAuthority) return false;
 	if (currentProjection.cost_usd !== nextProjection.cost_usd) return true;
-	const currentUsage = current.reduce(mergeUsage, { ...UNKNOWN_USAGE });
-	const nextUsage = next.reduce(mergeUsage, { ...UNKNOWN_USAGE });
-	// #2789 null policy: unknown (null) is treated as -Infinity, so a
-	// correction that makes an axis KNOWN is an upgrade, and one that loses a
-	// known value to unknown is not. Numeric lines behave exactly as before.
-	const knownValue = (value: number | null): number =>
-		value === null ? Number.NEGATIVE_INFINITY : value;
+	const currentUsage = current.reduce(mergeUsage, { ...ZERO_USAGE });
+	const nextUsage = next.reduce(mergeUsage, { ...ZERO_USAGE });
 	return Object.keys(currentUsage).some(
 		(key) =>
-			knownValue(nextUsage[key as keyof TokenUsage]) >
-			knownValue(currentUsage[key as keyof TokenUsage]),
+			nextUsage[key as keyof TokenUsage] >
+			currentUsage[key as keyof TokenUsage],
 	);
 }
 
@@ -939,26 +892,14 @@ export function estimateCostUsd(
 	const table = { ...BUNDLED_MODEL_PRICING, ...(pricing?.models ?? {}) };
 	const entry = table[model] ?? table[model.toLowerCase()];
 	if (!entry) return null;
-	// #2789: estimate over KNOWN axes only. Null contributes a zero TERM to
-	// the arithmetic (identical numeric result to before) — the honesty lives
-	// in `hasUsage`, which must not treat an all-unknown usage as "held
-	// exactly zero tokens".
-	const perMillion = (value: number | null, rate: number): number =>
-		((value ?? 0) / 1_000_000) * rate;
 	const cost =
-		perMillion(usage.tokens_input, entry.input_per_million) +
-		perMillion(usage.tokens_output, entry.output_per_million) +
-		perMillion(
-			usage.tokens_reasoning,
-			entry.reasoning_per_million ?? entry.output_per_million,
-		) +
-		perMillion(
-			usage.tokens_cache,
-			entry.cache_per_million ?? entry.input_per_million,
-		);
-	const hasUsage = Object.values(usage).some(
-		(value) => value !== null && value > 0,
-	);
+		(usage.tokens_input / 1_000_000) * entry.input_per_million +
+		(usage.tokens_output / 1_000_000) * entry.output_per_million +
+		(usage.tokens_reasoning / 1_000_000) *
+			(entry.reasoning_per_million ?? entry.output_per_million) +
+		(usage.tokens_cache / 1_000_000) *
+			(entry.cache_per_million ?? entry.input_per_million);
+	const hasUsage = Object.values(usage).some((value) => value > 0);
 	return hasUsage && Number.isFinite(cost) && cost >= 0 ? cost : null;
 }
 
@@ -1070,27 +1011,27 @@ function readPinnedTokens(record: Record<string, unknown>): TokenUsage {
 					tokens.input ??
 					tokens.input_tokens ??
 					tokens.prompt_tokens,
-			) ?? null,
+			) ?? 0,
 		tokens_output:
 			readFiniteNonNegative(
 				tokens.tokens_output ??
 					tokens.output ??
 					tokens.output_tokens ??
 					tokens.completion_tokens,
-			) ?? null,
+			) ?? 0,
 		tokens_reasoning:
 			readFiniteNonNegative(
 				tokens.tokens_reasoning ?? tokens.reasoning ?? tokens.reasoning_tokens,
-			) ?? null,
+			) ?? 0,
 		tokens_cache:
 			readFiniteNonNegative(tokens.tokens_cache) ??
 			readCacheTokens(tokens) ??
-			null,
+			0,
 	};
 }
 
 function readLegacyUsage(raw: unknown): TokenUsage {
-	if (!isRecord(raw)) return { ...UNKNOWN_USAGE };
+	if (!isRecord(raw)) return { ...ZERO_USAGE };
 	const output = isRecord(raw.output) ? raw.output : raw;
 	const usage = isRecord(output.usage) ? output.usage : output;
 	return readPinnedTokens(usage);
@@ -1102,16 +1043,11 @@ function mergeUsage(
 ): TokenUsage {
 	const usage =
 		'usage' in next && next.usage ? next.usage : (next as TokenUsage);
-	// #2789: maxKnown policy — a known value beats unknown; unknown + unknown
-	// stays unknown; Math.max raw would coerce null to 0 and re-fabricate zero.
 	return {
-		tokens_input: maxKnownAxis(total.tokens_input, usage.tokens_input),
-		tokens_output: maxKnownAxis(total.tokens_output, usage.tokens_output),
-		tokens_reasoning: maxKnownAxis(
-			total.tokens_reasoning,
-			usage.tokens_reasoning,
-		),
-		tokens_cache: maxKnownAxis(total.tokens_cache, usage.tokens_cache),
+		tokens_input: Math.max(total.tokens_input, usage.tokens_input),
+		tokens_output: Math.max(total.tokens_output, usage.tokens_output),
+		tokens_reasoning: Math.max(total.tokens_reasoning, usage.tokens_reasoning),
+		tokens_cache: Math.max(total.tokens_cache, usage.tokens_cache),
 	};
 }
 
@@ -1184,7 +1120,7 @@ function _extractUsageAndCost(raw: unknown): {
 	model?: string;
 } {
 	const candidates = collectCandidateRecords(raw);
-	const usage: TokenUsage = { ...UNKNOWN_USAGE };
+	const usage: TokenUsage = { ...ZERO_USAGE };
 	let cost_usd: number | null = null;
 	let model: string | undefined;
 
@@ -1224,16 +1160,10 @@ function _extractUsageAndCost(raw: unknown): {
 		]);
 		const nestedCache = readCacheTokens(candidate);
 
-		usage.tokens_input = maxKnownAxis(usage.tokens_input, directInput);
-		usage.tokens_output = maxKnownAxis(usage.tokens_output, directOutput);
-		usage.tokens_reasoning = maxKnownAxis(
-			usage.tokens_reasoning,
-			directReasoning,
-		);
-		usage.tokens_cache = maxKnownAxis(
-			usage.tokens_cache,
-			directCache ?? nestedCache,
-		);
+		usage.tokens_input ||= directInput ?? 0;
+		usage.tokens_output ||= directOutput ?? 0;
+		usage.tokens_reasoning ||= directReasoning ?? 0;
+		usage.tokens_cache ||= directCache ?? nestedCache ?? 0;
 	}
 
 	return { usage, cost_usd, model };
@@ -1329,15 +1259,12 @@ function createEmptySummary(): CostSummary {
 		total_cost_usd: 0,
 		total_reported_usd: 0,
 		total_estimated_usd: 0,
-		// #2789: token totals start unknown; finalizeSummary restores the
-		// vacuous numeric 0 for an empty directory (no delegation events).
-		total_input_tokens: null,
-		total_output_tokens: null,
-		total_reasoning_tokens: null,
-		total_cache_tokens: null,
+		total_input_tokens: 0,
+		total_output_tokens: 0,
+		total_reasoning_tokens: 0,
+		total_cache_tokens: 0,
 		delegations: 0,
 		unavailable_delegations: 0,
-		unknown_usage_delegations: 0,
 		by_agent: [],
 		by_task: [],
 		by_gate: [],
@@ -1385,48 +1312,34 @@ function addDelegationEvent(
 		)
 			summary.currencies.push(item.currency);
 	}
-	const legacyUsage: TokenUsage = {
-		tokens_input: readNumber(event, ['tokens_input']),
-		tokens_output: readNumber(event, ['tokens_output']),
-		tokens_reasoning: readNumber(event, ['tokens_reasoning']),
-		tokens_cache: readNumber(event, ['tokens_cache']),
+	const legacyUsage = {
+		tokens_input: readNumber(event, ['tokens_input']) ?? 0,
+		tokens_output: readNumber(event, ['tokens_output']) ?? 0,
+		tokens_reasoning: readNumber(event, ['tokens_reasoning']) ?? 0,
+		tokens_cache: readNumber(event, ['tokens_cache']) ?? 0,
 	};
 	// Report and estimate evidence commonly carry the same usage snapshot, so
 	// take the per-component maximum rather than summing duplicate copies.
-	// #2789: maxKnown policy — unknown never masquerades as a numeric max.
 	const evidenceUsage = evidence.reduce<TokenUsage>(
 		(acc, item) => ({
-			tokens_input: maxKnownAxis(acc.tokens_input, item.usage.tokens_input),
-			tokens_output: maxKnownAxis(acc.tokens_output, item.usage.tokens_output),
-			tokens_reasoning: maxKnownAxis(
+			tokens_input: Math.max(acc.tokens_input, item.usage.tokens_input),
+			tokens_output: Math.max(acc.tokens_output, item.usage.tokens_output),
+			tokens_reasoning: Math.max(
 				acc.tokens_reasoning,
 				item.usage.tokens_reasoning,
 			),
-			tokens_cache: maxKnownAxis(acc.tokens_cache, item.usage.tokens_cache),
+			tokens_cache: Math.max(acc.tokens_cache, item.usage.tokens_cache),
 		}),
-		{ ...UNKNOWN_USAGE },
+		{ ...ZERO_USAGE },
 	);
 	const usage = hasRecord ? evidenceUsage : legacyUsage;
 
 	summary.delegations++;
 	summary.total_cost_usd += cost;
-	if (isUnknownUsage(usage)) summary.unknown_usage_delegations++;
-	summary.total_input_tokens = sumKnownAxis(
-		summary.total_input_tokens,
-		usage.tokens_input,
-	);
-	summary.total_output_tokens = sumKnownAxis(
-		summary.total_output_tokens,
-		usage.tokens_output,
-	);
-	summary.total_reasoning_tokens = sumKnownAxis(
-		summary.total_reasoning_tokens,
-		usage.tokens_reasoning,
-	);
-	summary.total_cache_tokens = sumKnownAxis(
-		summary.total_cache_tokens,
-		usage.tokens_cache,
-	);
+	summary.total_input_tokens += usage.tokens_input;
+	summary.total_output_tokens += usage.tokens_output;
+	summary.total_reasoning_tokens += usage.tokens_reasoning;
+	summary.total_cache_tokens += usage.tokens_cache;
 	summary.by_source[costSource].delegations++;
 	summary.by_source[costSource].cost_usd += cost;
 	if (costSource === 'reported') summary.total_reported_usd += cost;
@@ -1474,28 +1387,20 @@ function addRow(
 			name,
 			delegations: 0,
 			cost_usd: 0,
-			// #2789: a row starts with unknown token axes until a delegation
-			// contributes a known value; zero is never fabricated.
-			input_tokens: null,
-			output_tokens: null,
-			reasoning_tokens: null,
-			cache_tokens: null,
+			input_tokens: 0,
+			output_tokens: 0,
+			reasoning_tokens: 0,
+			cache_tokens: 0,
 			unavailable_delegations: 0,
 		};
 		rows.push(row);
 	}
 	row.delegations++;
 	row.cost_usd += input.cost;
-	row.input_tokens = sumKnownAxis(row.input_tokens, input.usage.tokens_input);
-	row.output_tokens = sumKnownAxis(
-		row.output_tokens,
-		input.usage.tokens_output,
-	);
-	row.reasoning_tokens = sumKnownAxis(
-		row.reasoning_tokens,
-		input.usage.tokens_reasoning,
-	);
-	row.cache_tokens = sumKnownAxis(row.cache_tokens, input.usage.tokens_cache);
+	row.input_tokens += input.usage.tokens_input;
+	row.output_tokens += input.usage.tokens_output;
+	row.reasoning_tokens += input.usage.tokens_reasoning;
+	row.cache_tokens += input.usage.tokens_cache;
 	if (input.costSource === 'unavailable') row.unavailable_delegations++;
 }
 
@@ -1504,15 +1409,6 @@ function finalizeSummary(summary: CostSummary): CostSummary {
 	summary.total_reported_usd = roundUsd(summary.total_reported_usd);
 	summary.total_estimated_usd = roundUsd(summary.total_estimated_usd);
 	summary.total_legacy_usd = roundUsd(summary.total_legacy_usd);
-	// #2789: an empty directory has no measurement at all; keep the historical
-	// vacuous numeric-0 shape for that case only. With >=1 delegation a null
-	// token total honestly means "no delegation held a known value".
-	if (summary.delegations === 0) {
-		summary.total_input_tokens ??= 0;
-		summary.total_output_tokens ??= 0;
-		summary.total_reasoning_tokens ??= 0;
-		summary.total_cache_tokens ??= 0;
-	}
 	for (const source of Object.values(summary.by_source)) {
 		source.cost_usd = roundUsd(source.cost_usd);
 	}

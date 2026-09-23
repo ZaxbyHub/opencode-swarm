@@ -639,12 +639,6 @@ async function dispatchReviewerWithFallback(
 	return { result: attempts[0], attempts };
 }
 
-/** #2789: additive accumulation over KNOWN values only; unknown stays unknown. */
-function sumKnown(total: number | null, value: number | null): number | null {
-	if (value === null) return total;
-	return total === null ? value : total + value;
-}
-
 function addCost(
 	evidence: AutoReviewEvidence,
 	dispatches: ReviewDispatchResult[],
@@ -665,24 +659,10 @@ function addCost(
 			evidence.cost.evidence_status = 'inconclusive';
 			evidence.cost.evidence_reason = fields?.evidence_reason ?? 'missing_cost';
 		}
-		// #2789: accumulate KNOWN token contributions only; an all-unknown
-		// dispatch set leaves the axes null (unknown), never a fabricated 0.
-		evidence.cost.tokens_input = sumKnown(
-			evidence.cost.tokens_input,
-			fields?.tokens_input ?? null,
-		);
-		evidence.cost.tokens_output = sumKnown(
-			evidence.cost.tokens_output,
-			fields?.tokens_output ?? null,
-		);
-		evidence.cost.tokens_reasoning = sumKnown(
-			evidence.cost.tokens_reasoning,
-			fields?.tokens_reasoning ?? null,
-		);
-		evidence.cost.tokens_cache = sumKnown(
-			evidence.cost.tokens_cache,
-			fields?.tokens_cache ?? null,
-		);
+		evidence.cost.tokens_input += fields?.tokens_input ?? 0;
+		evidence.cost.tokens_output += fields?.tokens_output ?? 0;
+		evidence.cost.tokens_reasoning += fields?.tokens_reasoning ?? 0;
+		evidence.cost.tokens_cache += fields?.tokens_cache ?? 0;
 		if (typeof fields?.cost_usd === 'number') {
 			evidence.cost.cost_usd = (evidence.cost.cost_usd ?? 0) + fields.cost_usd;
 			evidence.cost.cost_source =
@@ -732,11 +712,10 @@ function baseEvidence(
 			model_calls: 0,
 			diff_bytes: diff.reviewTextBytes,
 			prompt_bytes: 0,
-			// #2789: unknown until a dispatch contributes a known value.
-			tokens_input: null,
-			tokens_output: null,
-			tokens_reasoning: null,
-			tokens_cache: null,
+			tokens_input: 0,
+			tokens_output: 0,
+			tokens_reasoning: 0,
+			tokens_cache: 0,
 			cost_usd: null,
 			cost_source: 'unavailable',
 			cost_evidence: [],

@@ -353,13 +353,10 @@ describe('telemetry', () => {
 			// Verify data for some methods
 			expect(receivedEvents[0].data.sessionId).toBe('s1');
 			expect(receivedEvents[0].data.agentName).toBe('coder');
-			// #2789: delegationEnd with no costFields emits null (unknown) token
-			// axes — unknown is never fabricated as 0 (deliberate contract flip
-			// from the pre-#2789 zero-default; see issue #2789).
-			expect(receivedEvents[4].data.tokens_input).toBeNull();
-			expect(receivedEvents[4].data.tokens_output).toBeNull();
-			expect(receivedEvents[4].data.tokens_reasoning).toBeNull();
-			expect(receivedEvents[4].data.tokens_cache).toBeNull();
+			expect(receivedEvents[4].data.tokens_input).toBe(0);
+			expect(receivedEvents[4].data.tokens_output).toBe(0);
+			expect(receivedEvents[4].data.tokens_reasoning).toBe(0);
+			expect(receivedEvents[4].data.tokens_cache).toBe(0);
 			expect(receivedEvents[4].data.cost_usd).toBeNull();
 			expect(receivedEvents[4].data.cost_source).toBe('unavailable');
 			expect(receivedEvents[10].data.trigger).toBe('critical_threshold');

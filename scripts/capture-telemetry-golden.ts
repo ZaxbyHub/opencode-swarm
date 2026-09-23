@@ -44,17 +44,13 @@
  *   `no_op_strong_warning`, `gate_denial_loop`, `execution_stall_warning`,
  *   `execution_stall_denied`, `swarm_internals_read_denied`,
  *   `prm_hard_stop_delivered`
- * They were added by #2063/#2065 — after the corpus was originally captured at
- * `capturedFromSha` e50386b9 (frozen on purpose back then: regenerating would
- * have captured the POST-wiring tree and made the parity test tautological).
- * Issue #2789 later performed a DELIBERATE, reviewed regeneration at
- * `0aa722596` because the delegation_end contract itself changed — its 2-line
- * fixture diff was the reviewed artifact, which is what keeps the regen
- * non-tautological. The six kinds above still have no golden line (regenerating
- * only for them would still be tautological for them); that remains a named
- * coverage gap. Do NOT restate this as "all 39 kinds", and do NOT regenerate
- * incidentally — a regen must always move the capture-telemetry-golden-guard
- * pin deliberately.
+ * They were added by #2063/#2065 — AFTER the corpus was captured. The fixture is
+ * frozen at `capturedFromSha` e50386b9 on purpose (see CAPTURE ORDERING above):
+ * regenerating it now would capture the POST-change tree and make
+ * `tests/unit/telemetry/emit-line-parity.test.ts` tautological, which is a worse
+ * outcome than a known, named coverage gap. Closing the gap needs a corpus
+ * captured from a base that predates the observability wiring but postdates those
+ * six kinds; that is not this PR's work. Do NOT restate this as "all 39 kinds".
  */
 
 import { spawnSync } from 'node:child_process';

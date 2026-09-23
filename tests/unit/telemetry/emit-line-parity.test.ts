@@ -9,14 +9,8 @@
  * This test drives the REAL `emit()`/`telemetry.*` helpers — mirroring
  * `scripts/capture-telemetry-golden.ts`'s `emitAllHelpers()` and
  * `emitAllDirectCallSites()` call sequences EXACTLY (same args, same order) —
- * and asserts the bytes written match the golden corpus. The corpus was
- * originally captured from the UNMODIFIED tree at `e50386b9` (before the
- * observability wiring landed) and was deliberately regenerated at `0aa722596`
- * for issue #2789, where the delegation_end contract itself changed; that
- * regen is non-tautological because its 2-line diff (df3ffeba7) was the
- * reviewed artifact — parity for the changed delegation_end line anchors the
- * post-#2789 contract, and the corpus moves only with a deliberate,
- * reviewed regeneration (pinned by capture-telemetry-golden-guard.test.ts).
+ * and asserts the bytes written match the golden corpus captured from the
+ * UNMODIFIED tree at `e50386b9` (before the observability wiring landed).
  *
  * ## CRITICAL — DO NOT STUB THE WIRING SEAMS
  *

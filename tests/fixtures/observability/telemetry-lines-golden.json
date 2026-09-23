@@ -1,6 +1,6 @@
 {
 	"$comment": "GOLDEN CORPUS — captured from the UNMODIFIED tree by scripts/capture-telemetry-golden.ts. Do NOT hand-edit and do NOT regenerate after the observability wiring lands: that would make tests/unit/telemetry/emit-line-parity.test.ts tautological (issue #2029, BL-5).",
-	"capturedFromSha": "0aa72259650e31c6e4e6c057084a200be1e35fb4",
+	"capturedFromSha": "e50386b94ee55792220c3b1c167ab8d51da9718d",
 	"fixedIso": "2026-01-15T12:00:00.000Z",
 	"callerIso": "2020-01-02T03:04:05.678Z",
 	"lineCount": 34,
@@ -10,7 +10,7 @@
 		"{\"timestamp\":\"2026-01-15T12:00:00.000Z\",\"event\":\"agent_activated\",\"sessionId\":\"sess-1\",\"agentName\":\"coder\",\"oldName\":\"architect\"}",
 		"{\"timestamp\":\"2026-01-15T12:00:00.000Z\",\"event\":\"delegation_begin\",\"sessionId\":\"sess-1\",\"agentName\":\"coder\",\"taskId\":\"1.1\"}",
 		"{\"timestamp\":\"2026-01-15T12:00:00.000Z\",\"event\":\"delegation_end\",\"sessionId\":\"sess-1\",\"agentName\":\"coder\",\"taskId\":\"1.1\",\"result\":\"success\",\"tokens_input\":100,\"tokens_output\":200,\"tokens_reasoning\":5,\"tokens_cache\":7,\"cost_usd\":0.0125,\"cost_source\":\"reported\",\"model\":\"anthropic/claude-opus-5\",\"gate\":\"qa_gate\",\"retry_index\":1}",
-		"{\"timestamp\":\"2026-01-15T12:00:00.000Z\",\"event\":\"delegation_end\",\"sessionId\":\"sess-1\",\"agentName\":\"reviewer\",\"taskId\":\"1.2\",\"result\":\"failure\",\"tokens_input\":null,\"tokens_output\":null,\"tokens_reasoning\":null,\"tokens_cache\":null,\"cost_usd\":null,\"cost_source\":\"unavailable\"}",
+		"{\"timestamp\":\"2026-01-15T12:00:00.000Z\",\"event\":\"delegation_end\",\"sessionId\":\"sess-1\",\"agentName\":\"reviewer\",\"taskId\":\"1.2\",\"result\":\"failure\",\"tokens_input\":0,\"tokens_output\":0,\"tokens_reasoning\":0,\"tokens_cache\":0,\"cost_usd\":null,\"cost_source\":\"unavailable\"}",
 		"{\"timestamp\":\"2026-01-15T12:00:00.000Z\",\"event\":\"task_state_changed\",\"sessionId\":\"sess-1\",\"taskId\":\"1.1\",\"newState\":\"in_progress\",\"oldState\":\"pending\"}",
 		"{\"timestamp\":\"2026-01-15T12:00:00.000Z\",\"event\":\"gate_passed\",\"sessionId\":\"sess-1\",\"gate\":\"qa_gate\",\"taskId\":\"1.1\"}",
 		"{\"timestamp\":\"2026-01-15T12:00:00.000Z\",\"event\":\"gate_parse_error\",\"taskId\":\"1.1\",\"errorName\":\"Error\",\"errorMessage\":\"unparseable verdict\"}",

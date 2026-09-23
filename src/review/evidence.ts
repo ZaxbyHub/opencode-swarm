@@ -94,14 +94,10 @@ export interface AutoReviewEvidence {
 		model_calls: number;
 		diff_bytes: number;
 		prompt_bytes: number;
-		/**
-		 * #2789: null when no dispatch held a known value for the axis —
-		 * unknown is never folded to zero.
-		 */
-		tokens_input: number | null;
-		tokens_output: number | null;
-		tokens_reasoning: number | null;
-		tokens_cache: number | null;
+		tokens_input: number;
+		tokens_output: number;
+		tokens_reasoning: number;
+		tokens_cache: number;
 		cost_usd: number | null;
 		cost_source: 'reported' | 'estimated' | 'unavailable';
 		/** Bounded per-dispatch provenance; scalar totals remain compatibility projections. */

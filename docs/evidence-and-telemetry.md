@@ -212,10 +212,10 @@ Every `delegation_end` event includes token and cost fields:
 
 | Field | Description |
 |---|---|
-| `tokens_input` | Input tokens attributed to the delegation, or `null` when the producer held no value (unknown — never fabricated as 0; issue #2789) |
-| `tokens_output` | Output tokens attributed to the delegation, or `null` when unknown |
-| `tokens_reasoning` | Reasoning tokens attributed to the delegation, or `null` when unknown |
-| `tokens_cache` | Cache-read/input tokens attributed to the delegation, or `null` when unknown |
+| `tokens_input` | Input tokens attributed to the delegation, or `0` when unavailable |
+| `tokens_output` | Output tokens attributed to the delegation, or `0` when unavailable |
+| `tokens_reasoning` | Reasoning tokens attributed to the delegation, or `0` when unavailable |
+| `tokens_cache` | Cache-read/input tokens attributed to the delegation, or `0` when unavailable |
 | `cost_usd` | Reported or estimated USD cost, or `null` when unavailable |
 | `cost_source` | `reported`, `estimated`, or `unavailable` |
 | `model` | Model id used for attribution when known |

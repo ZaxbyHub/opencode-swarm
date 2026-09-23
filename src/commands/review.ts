@@ -209,10 +209,7 @@ function costLine(evidence: AutoReviewEvidence | null): string {
 		cost.cost_usd === null
 			? `unavailable (${cost.cost_source})`
 			: `$${cost.cost_usd.toFixed(6)} (${cost.cost_source})`;
-	// #2789: an unknown token axis renders as `unknown`, never as 0/null.
-	const axis = (value: number | null): string =>
-		value === null ? 'unknown' : String(value);
-	return `Cost: ${dollars}; tokens ${axis(cost.tokens_input)} input / ${axis(cost.tokens_output)} output / ${axis(cost.tokens_reasoning)} reasoning / ${axis(cost.tokens_cache)} cache; prompt ${cost.prompt_bytes} bytes`;
+	return `Cost: ${dollars}; tokens ${cost.tokens_input} input / ${cost.tokens_output} output / ${cost.tokens_reasoning} reasoning / ${cost.tokens_cache} cache; prompt ${cost.prompt_bytes} bytes`;
 }
 
 function renderHuman(

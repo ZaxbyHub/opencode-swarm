@@ -25,8 +25,7 @@ export function renderCostSummary(summary: CostSummary): string {
 		'',
 		`Total tracked cost: ${formatUsd(summary.total_cost_usd)}`,
 		`Delegations: ${summary.delegations}`,
-		`Tokens: input ${formatTokens(summary.total_input_tokens)}, output ${formatTokens(summary.total_output_tokens)}, reasoning ${formatTokens(summary.total_reasoning_tokens)}, cache ${formatTokens(summary.total_cache_tokens)}`,
-		`Unknown usage: ${summary.unknown_usage_delegations}`,
+		`Tokens: input ${summary.total_input_tokens.toLocaleString()}, output ${summary.total_output_tokens.toLocaleString()}, reasoning ${summary.total_reasoning_tokens.toLocaleString()}, cache ${summary.total_cache_tokens.toLocaleString()}`,
 		`Cost source: reported ${formatUsd(summary.total_reported_usd)}, estimated ${formatUsd(summary.total_estimated_usd)}, unavailable ${summary.unavailable_delegations}`,
 		`Evidence: ${summary.evidence_status}; joins missed ${summary.join_miss_count}; telemetry errors ${summary.telemetry_error_count}; corrections accepted ${summary.accepted_corrections}, rejected ${summary.rejected_corrections}, duplicate ${summary.duplicate_corrections}`,
 		'',
@@ -83,18 +82,9 @@ function appendCostRows(
 	);
 	for (const row of rows) {
 		lines.push(
-			`| ${row.name} | ${row.delegations} | ${formatUsd(row.cost_usd)} | ${formatTokens(row.input_tokens)} | ${formatTokens(row.output_tokens)} | ${formatTokens(row.reasoning_tokens)} | ${formatTokens(row.cache_tokens)} | ${row.unavailable_delegations} |`,
+			`| ${row.name} | ${row.delegations} | ${formatUsd(row.cost_usd)} | ${row.input_tokens.toLocaleString()} | ${row.output_tokens.toLocaleString()} | ${row.reasoning_tokens.toLocaleString()} | ${row.cache_tokens.toLocaleString()} | ${row.unavailable_delegations} |`,
 		);
 	}
-}
-
-/**
- * #2789: an unknown (null) token axis renders as the literal word `unknown`,
- * never as a fabricated 0; known values — including an explicit 0 — keep
- * their numeric rendering.
- */
-function formatTokens(value: number | null): string {
-	return value === null ? 'unknown' : value.toLocaleString();
 }
 
 export function formatUsd(value: number): string {

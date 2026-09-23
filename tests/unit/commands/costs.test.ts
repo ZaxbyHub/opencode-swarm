@@ -52,19 +52,8 @@ describe('handleCostsCommand', () => {
 		expect(result).toContain('## Swarm Costs');
 		expect(result).toContain('Total tracked cost: $0.004200');
 		expect(result).toContain('Delegations: 2');
-		// #2789: the coder row held known input/output usage, so those axes
-		// keep their numeric rendering; its reasoning/cache axes were never
-		// held and render as unknown instead of fabricated zeros.
 		expect(result).toContain('| coder | 1 | $0.004200 | 1,000 | 250 |');
-		expect(result).toContain(
-			'Tokens: input 1,000, output 250, reasoning unknown, cache unknown',
-		);
-		expect(result).toContain('Unknown usage: 1');
-		// #2789: the reviewer delegation held no token axes at all — every
-		// axis renders as unknown, never as a fabricated 0.
-		expect(result).toContain(
-			'| reviewer | 1 | $0.000000 | unknown | unknown | unknown | unknown | 1 |',
-		);
+		expect(result).toContain('| reviewer | 1 | $0.000000 | 0 | 0 |');
 		expect(result).toContain('| 2.1 | 2 | $0.004200 | 1,000 | 250 |');
 		expect(result).toContain('### By Gate');
 		expect(result).toContain('| qa_review | 1 | $0.004200 | 1,000 | 250 |');
@@ -88,10 +77,8 @@ describe('handleCostsCommand', () => {
 		expect(result).toContain(
 			'Cost source: reported $0.000000, estimated $0.000000, unavailable 1',
 		);
-		// #2789: a legacy delegation with no token fields renders unknown
-		// axes — the historical zero-filled row was the defect being fixed.
 		expect(result).toContain(
-			'| legacy_coder | 1 | $0.000000 | unknown | unknown | unknown | unknown | 1 |',
+			'| legacy_coder | 1 | $0.000000 | 0 | 0 | 0 | 0 | 1 |',
 		);
 	});
 
