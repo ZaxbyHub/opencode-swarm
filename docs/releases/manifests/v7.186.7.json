@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.186.7",
+  "tagCommit": "5df6db2aa6f97bb536766e48b7c4591d5d7ee322",
+  "targetCommitish": "5df6db2aa6f97bb536766e48b7c4591d5d7ee322",
+  "releaseBodySha256": "cb4db03174ecf83f74b15d41b3d9960db4d2ed9c0c0fc6cfc644b9dbcbba9e1f",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2926-attribution-session-mismatch.md",
+      "sha256": "158817305482ad9534bf5cf09057989020208829c281f8a3874e0954e925985f"
+    }
+  ]
+}
