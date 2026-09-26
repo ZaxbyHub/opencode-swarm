@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.186.8",
+  "tagCommit": "db6a1fd99615bf2a02d07d6d6ff8232733162bb9",
+  "targetCommitish": "db6a1fd99615bf2a02d07d6d6ff8232733162bb9",
+  "releaseBodySha256": "7ec4d61557be8ee6cd38f4d07633a59127db00b373ba28afe17fbf16439bf482",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2666-execute-journey-registered-host.md",
+      "sha256": "5948585d76f1a4bca33836a83b048151ec87228e23923d2ac50d056959e96fa9"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2900-renew-quarantine-expiry-walls.md",
+      "sha256": "93b5281d8ba0f44cda8a2a3c956ccf016d98286a2a603e65db6952bbccc1d9e6"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/2971-lane-cancellation-contract.md",
+      "sha256": "28f86d6c23d0eef048e0b37314d7b359bd8a5fc17fb10836d9fcdb1cd136d0d8"
+    }
+  ]
+}
