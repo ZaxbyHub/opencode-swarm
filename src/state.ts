@@ -17,7 +17,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import { ORCHESTRATOR_NAME } from './config/constants';
-import { loadPluginConfig } from './config/loader';
+import { loadPluginConfig, loadPluginConfigWithMeta } from './config/loader';
 import { type Plan, PlanSchema, type TaskStatus } from './config/plan-schema';
 import { stripKnownSwarmPrefix } from './config/schema';
 import { computeCouncilReviewIdentity } from './council/council-review-identity';
@@ -2173,6 +2173,29 @@ export function maybeSweepStaleSessions(
  * @param staleDurationMs - Age threshold for stale session eviction (default: 120 min)
  * @param directory - Optional project directory for rehydrating workflow state from disk
  */
+/**
+ * Config-seeded initial value for `AgentSessionState.turboMode` (issue #2901):
+ * `turbo_mode: true` in the project config starts new sessions with turbo
+ * mode on. Resolved once per NEW session (ensureAgentSession early-returns
+ * for live ones), scoped to the session's own directory; directory-less
+ * constructions (e.g. the recovery session) and any config-read failure
+ * default to false. `/swarm turbo` remains the per-session authority after
+ * construction.
+ */
+export function resolveInitialTurboMode(directory?: string): boolean {
+	if (!directory) return false;
+	try {
+		return (
+			_internals.loadPluginConfigWithMeta(directory).config.turbo_mode === true
+		);
+	} catch {
+		// Session construction must never fail because a config read
+		// hiccupped; the loader itself is fail-open for malformed configs,
+		// so this guards only unexpected boundary failures.
+		return false;
+	}
+}
+
 export function startAgentSession(
 	sessionId: string,
 	agentName: string,
@@ -2204,6 +2227,12 @@ export function startAgentSession(
 	// sessions). Reuses the shared eviction loop (also used by the opportunistic
 	// idle sweep) so the logic stays single-sourced.
 	sweepStaleSessions(staleDurationMs, now, directory);
+
+	// Config-seeded turbo default (issue #2901): resolve BEFORE the literal so
+	// the ownership → stamps → sweep → literal sequence above stays untouched
+	// and the config read stays visible outside the literal. One bounded read
+	// per NEW session only (ensureAgentSession early-returns for live ones).
+	const initialTurboMode = resolveInitialTurboMode(directory);
 
 	// Create new session state
 	const sessionState: AgentSessionState = {
@@ -2257,8 +2286,8 @@ export function startAgentSession(
 		reviewerScopeIncarnation: randomUUID(),
 		reviewerScopeLatestGenerationByTask: new Map(),
 		reviewerScopeOwnershipHistory: new Map(),
-		// Turbo Mode (v6.26)
-		turboMode: false,
+		// Turbo Mode (v6.26); seeded from config at construction (issue #2901)
+		turboMode: initialTurboMode,
 		// Lean Turbo Mode (Phase 2)
 		turboStrategy: undefined,
 		leanTurboActive: false,
@@ -2643,7 +2672,9 @@ export function ensureAgentSession(
 		if (session.scopeViolationDetected === undefined) {
 			session.scopeViolationDetected = false;
 		}
-		// Turbo Mode migration safety (v6.26)
+		// Turbo Mode migration safety (v6.26). Deliberately conservative: the
+		// config seed applies only at session construction (issue #2901), so a
+		// legacy session missing this field never flips turbo on mid-life.
 		if (session.turboMode === undefined) {
 			session.turboMode = false;
 		}
@@ -4604,6 +4635,8 @@ export const _internals: {
 	resetSwarmState: typeof resetSwarmState;
 	ensureAgentSession: typeof ensureAgentSession;
 	startAgentSession: typeof startAgentSession;
+	loadPluginConfigWithMeta: typeof loadPluginConfigWithMeta;
+	resolveInitialTurboMode: typeof resolveInitialTurboMode;
 	getAgentSession: typeof getAgentSession;
 	beginInvocation: typeof beginInvocation;
 	getActiveWindow: typeof getActiveWindow;
@@ -4624,6 +4657,8 @@ export const _internals: {
 	resetSwarmState,
 	ensureAgentSession,
 	startAgentSession,
+	loadPluginConfigWithMeta,
+	resolveInitialTurboMode,
 	getAgentSession,
 	beginInvocation,
 	getActiveWindow,

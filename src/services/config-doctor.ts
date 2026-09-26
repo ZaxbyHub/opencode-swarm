@@ -18,6 +18,7 @@ import {
 	PluginConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
+import { loadPlanJsonOnly } from '../plan/manager';
 import { TOOL_NAME_SET } from '../tools/tool-metadata';
 import { log } from '../utils';
 import { sameExistingFilesystemPath } from '../utils/filesystem-identity';
@@ -645,18 +646,52 @@ function collectRawAutoReviewCompatibilityFindings(
 	return findings;
 }
 
+/**
+ * Test-only dependency-injection seam per invariant 7 (mock.module leaks
+ * across files in Bun's shared test runner; `loadPlanJsonOnly` is a frequent
+ * mock target in sibling suites).
+ */
+export const _internals: {
+	loadPlanJsonOnly: typeof loadPlanJsonOnly;
+} = {
+	loadPlanJsonOnly,
+};
+
+/**
+ * Resolve the plan execution profile's parallelization flag for the
+ * worktree-isolation advisory (issue #2901): `true`/`false` when an active
+ * plan with an execution profile exists, `null` when no plan is available.
+ * The plan execution profile — not the dark `parallelization` config block —
+ * is the setting that actually drives parallel dispatch
+ * (src/hooks/delegation-gate.ts reads it via the same loader).
+ */
+export async function resolvePlanParallelizationFlag(
+	directory: string,
+): Promise<boolean | null> {
+	let plan: Awaited<ReturnType<typeof loadPlanJsonOnly>> = null;
+	try {
+		plan = await _internals.loadPlanJsonOnly(directory);
+	} catch {
+		// Advisory-only read: a plan-read failure means "unavailable", not an
+		// error worth surfacing through the doctor.
+		return null;
+	}
+	if (!plan?.execution_profile) return null;
+	return plan.execution_profile.parallelization_enabled === true;
+}
+
 function emitWorktreeIsolationLayeringAdvisory(
 	config: PluginConfig,
 	findings: ConfigFinding[],
+	planParallelizationEnabled: boolean | null,
 ): void {
-	const parallelization = config.parallelization;
 	const worktreePolicy = config.worktree?.policy ?? 'auto';
 
-	if (
-		parallelization?.enabled === true &&
-		(parallelization.maxConcurrentTasks ?? 1) > 1 &&
-		worktreePolicy !== 'disabled'
-	) {
+	// Keyed on the settings that actually drive parallel isolation (issue
+	// #2901): the plan execution profile enables parallel dispatch and the
+	// top-level worktree policy governs lane isolation. The dark
+	// `parallelization` config block is deliberately NOT consulted.
+	if (planParallelizationEnabled === true && worktreePolicy !== 'disabled') {
 		findings.push({
 			id: 'worktree-isolation-baseline-active',
 			title:
@@ -2170,6 +2205,7 @@ function walkConfigAndValidate(
 export function runConfigDoctor(
 	config: PluginConfig,
 	directory: string,
+	planParallelizationEnabled: boolean | null = null,
 ): ConfigDoctorResult {
 	const findings: ConfigFinding[] = [];
 
@@ -2181,7 +2217,11 @@ export function runConfigDoctor(
 	findings.push(...collectRawValueConstraintFindings(directory));
 	findings.push(...collectRawAutoReviewCompatibilityFindings(directory));
 	findings.push(...collectLeanTurboGateSatisfiabilityFindings(config));
-	emitWorktreeIsolationLayeringAdvisory(config, findings);
+	emitWorktreeIsolationLayeringAdvisory(
+		config,
+		findings,
+		planParallelizationEnabled,
+	);
 
 	// Count by severity
 	const summary = {
@@ -2738,8 +2778,14 @@ export async function runConfigDoctorWithFixes(
 	updatedConfigPath: string | null;
 	artifactPath: string | null;
 }> {
+	// Resolve the plan execution-profile flag once for both doctor passes
+	// (issue #2901); the advisory is keyed on it, not on the dark
+	// parallelization config block.
+	const planParallelizationEnabled =
+		await resolvePlanParallelizationFlag(directory);
+
 	// Run the doctor
-	const result = runConfigDoctor(config, directory);
+	const result = runConfigDoctor(config, directory, planParallelizationEnabled);
 
 	// Write artifact
 	const artifactPath = writeDoctorArtifact(directory, result);
@@ -2839,6 +2885,7 @@ export async function runConfigDoctorWithFixes(
 			const newResult = runConfigDoctor(
 				freshConfig.config as unknown as PluginConfig,
 				directory,
+				planParallelizationEnabled,
 			);
 			writeDoctorArtifact(directory, newResult);
 		}

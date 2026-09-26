@@ -2992,11 +2992,21 @@ export const ParallelizationConfigSchema = z.object({
 	enabled: z.boolean().default(false),
 	/** Maximum concurrent tasks. 1 = serial (current behavior). */
 	maxConcurrentTasks: z.number().int().min(1).max(64).default(1),
-	/** Timeout in ms for evidence file locks before throwing EvidenceLockTimeoutError. */
+	/**
+	 * [dark foundation] Declared for the parallel dispatcher's evidence locks;
+	 * not consumed by any runtime path yet — dispatch-lanes hardcodes
+	 * evidenceLockTimeoutMs: 0 (#2901).
+	 */
 	evidenceLockTimeoutMs: z.number().int().min(1000).max(300000).default(60000),
-	/** Maximum concurrent coder dispatches. Controls agent-type concurrency limit. */
+	/**
+	 * [dark foundation] Reserved for future agent-type concurrency control;
+	 * not consumed by any runtime path yet (#2901).
+	 */
 	max_coders: z.number().int().min(1).max(16).default(3),
-	/** Maximum concurrent reviewer dispatches. Controls agent-type concurrency limit. */
+	/**
+	 * [dark foundation] Reserved for future agent-type concurrency control;
+	 * not consumed by any runtime path yet (#2901).
+	 */
 	max_reviewers: z.number().int().min(1).max(16).default(2),
 });
 
@@ -4192,12 +4202,15 @@ export const PluginConfigSchema = z.object({
 		'Turbo execution strategy block (Phase 1). Absent means current behavior unchanged.',
 	),
 
-	// Turbo mode — bypasses reviewer/test gates for rapid iteration (v6.40)
+	// Turbo mode — bypasses reviewer/test gates for rapid iteration (v6.40);
+	// wired as the config-seeded session default for new sessions (#2901).
 	turbo_mode: z
 		.boolean()
 		.default(false)
 		.optional()
-		.describe('Bypass reviewer/test gates for rapid iteration (v6.40).'),
+		.describe(
+			'Bypass reviewer/test gates for rapid iteration (v6.40). When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session.',
+		),
 
 	// Quiet mode — suppress non-critical startup warnings. Defaults to true so
 	// console output does not bleed into the OpenCode TUI as overlay notifications.

@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { ParallelizationConfigSchema } from '../../../src/config/schema';
 
 /**
@@ -9,6 +11,30 @@ import { ParallelizationConfigSchema } from '../../../src/config/schema';
  * - max_reviewers: z.number().int().min(1).max(16).default(2)
  */
 describe('ParallelizationConfigSchema — max_coders and max_reviewers fields', () => {
+	describe('documentation truthfulness (issue #2901)', () => {
+		// Guardrail for the dead-config defect class: the sub-key doc text in
+		// the schema source must keep its [dark foundation] marker and must
+		// not regain the false "Controls agent-type concurrency limit"
+		// promise while no runtime consumer exists. Source-text ratchet
+		// because the sub-keys carry no zod .describe(); when they gain real
+		// consumers (I7 / #2904), update the text AND this test together.
+		test('sub-key doc comments stay dark-foundation and drop the control promise', () => {
+			const schemaSource = fs.readFileSync(
+				path.join(import.meta.dir, '../../../src/config/schema.ts'),
+				'utf8',
+			);
+			const blockStart = schemaSource.indexOf(
+				'export const ParallelizationConfigSchema',
+			);
+			expect(blockStart).toBeGreaterThan(-1);
+			const block = schemaSource.slice(blockStart, blockStart + 1200);
+			expect(block).not.toContain('Controls agent-type concurrency limit');
+			expect(
+				block.match(/\[dark foundation\]/g)?.length ?? 0,
+			).toBeGreaterThanOrEqual(3);
+		});
+	});
+
 	describe('defaults', () => {
 		test('max_coders defaults to 3', () => {
 			const result = ParallelizationConfigSchema.parse({});

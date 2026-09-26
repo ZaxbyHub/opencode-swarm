@@ -4840,7 +4840,7 @@
       ]
     },
     "turbo_mode": {
-      "description": "Bypass reviewer/test gates for rapid iteration (v6.40).",
+      "description": "Bypass reviewer/test gates for rapid iteration (v6.40). When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session.",
       "default": false,
       "type": "boolean"
     },

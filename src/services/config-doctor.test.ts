@@ -1842,7 +1842,7 @@ describe('Schema introspection: every top-level key has validation', () => {
 			// Empty array matches Zod default → suppressed
 			expect(deprecatedFindings).toHaveLength(0);
 		});
-		it('warns that baseline worktree isolation is already active for standard parallel coders (#1552)', () => {
+		it('warns that baseline worktree isolation is already active for standard parallel coders (#1552, re-keyed #2901)', () => {
 			const config = createTestConfigObj({
 				parallelization: {
 					enabled: true,
@@ -1858,7 +1858,7 @@ describe('Schema introspection: every top-level key has validation', () => {
 				},
 			});
 
-			const result = runConfigDoctor(config, tempDir);
+			const result = runConfigDoctor(config, tempDir, true);
 
 			const finding = result.findings.find(
 				(f) => f.id === 'worktree-isolation-baseline-active',
@@ -1871,7 +1871,7 @@ describe('Schema introspection: every top-level key has validation', () => {
 			expect(finding!.description).toContain('not requirements');
 		});
 
-		it('does not warn when baseline worktree isolation is disabled (#1552)', () => {
+		it('does not warn when baseline worktree isolation is disabled (#1552, re-keyed #2901)', () => {
 			const config = createTestConfigObj({
 				parallelization: {
 					enabled: true,
@@ -1887,7 +1887,7 @@ describe('Schema introspection: every top-level key has validation', () => {
 				},
 			});
 
-			const result = runConfigDoctor(config, tempDir);
+			const result = runConfigDoctor(config, tempDir, true);
 
 			expect(
 				result.findings.some(
