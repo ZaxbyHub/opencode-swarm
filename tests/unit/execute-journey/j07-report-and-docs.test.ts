@@ -4,10 +4,11 @@
  * fixture class, per-stage start AND end status, executed cells and labeled
  * unexecuted cells; docs/testing/execute-journey.md documents the journey
  * state machine, fixture setup, executed cells, completion evidence, and
- * the PR-review breadth boundary; the release fragment exists.
+ * the PR-review breadth boundary; the release fragment exists (as pending,
+ * or archived by the release that consumed it).
  */
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
 	JOURNEY_REPORT_SCHEMA_VERSION,
@@ -17,13 +18,10 @@ import {
 
 const REPO_ROOT = path.resolve(import.meta.dir, '..', '..', '..');
 const DOCS = path.join(REPO_ROOT, 'docs', 'testing', 'execute-journey.md');
-const FRAGMENT = path.join(
-	REPO_ROOT,
-	'docs',
-	'releases',
-	'pending',
-	'2666-execute-journey-registered-host.md',
-);
+const FRAGMENT_RELATIVE =
+	'docs/releases/pending/2666-execute-journey-registered-host.md';
+const FRAGMENT = path.join(REPO_ROOT, ...FRAGMENT_RELATIVE.split('/'));
+const RELEASES_DIR = path.join(REPO_ROOT, 'docs', 'releases');
 
 /** A structurally complete driver-produced report (the shape writeReport emits). */
 function completeReport(): JourneyReport {
@@ -162,10 +160,38 @@ describe('docs/testing/execute-journey.md contract (#2666)', () => {
 });
 
 describe('release fragment contract (#2666)', () => {
-	test('docs/releases/pending/2666-execute-journey-registered-host.md exists with content', () => {
-		const fragment = readFileSync(FRAGMENT, 'utf8');
-		expect(fragment).toContain('#2666');
-		expect(fragment.length).toBeGreaterThan(400);
+	test('the #2666 fragment is present as pending or archived by its release', () => {
+		// The fragment ships as pending until the release that consumed it
+		// archives it (v7.186.8 materialization moves the bytes into
+		// docs/releases/v7.186.8.md + a manifests/ provenance entry), so the
+		// contract pins the deliverable in whichever form the tree holds.
+		if (existsSync(FRAGMENT)) {
+			const fragment = readFileSync(FRAGMENT, 'utf8');
+			expect(fragment).toContain('#2666');
+			expect(fragment.length).toBeGreaterThan(400);
+			return;
+		}
+		const manifestsDir = path.join(RELEASES_DIR, 'manifests');
+		const archiving = readdirSync(manifestsDir)
+			.filter((name) => name.endsWith('.json'))
+			.map(
+				(name) =>
+					JSON.parse(readFileSync(path.join(manifestsDir, name), 'utf8')) as {
+						tag: string;
+						fragments: { path: string }[];
+					},
+			)
+			.filter((manifest) =>
+				manifest.fragments.some((f) => f.path === FRAGMENT_RELATIVE),
+			);
+		expect(archiving.length).toBeGreaterThan(0);
+		for (const manifest of archiving) {
+			const releaseDoc = readFileSync(
+				path.join(RELEASES_DIR, `${manifest.tag}.md`),
+				'utf8',
+			);
+			expect(releaseDoc).toContain('#2666');
+		}
 	});
 });
 
