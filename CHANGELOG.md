@@ -1,5 +1,53 @@
 # Changelog
 
+## [7.187.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.186.8...v7.187.0) (2026-09-26)
+
+
+### Features
+
+* **lang:** absorb Java symbol grammar into shared module ([4e02b02](https://github.com/ZaxbyHub/opencode-swarm/commit/4e02b02e97110f439a2b625420fd8dca9cb6f92c))
+* **lang:** add first-class Java backend, symbols routing, and tests ([a3f70ca](https://github.com/ZaxbyHub/opencode-swarm/commit/a3f70caf9866f7a57ef7f0e6e958be1f3fcbd2ad))
+* **lang:** add first-class Java language backend ([37aaf1b](https://github.com/ZaxbyHub/opencode-swarm/commit/37aaf1ba9654f0cbbe44c27e534d77f927b19eaf))
+* **lang:** add shared Java import parser module ([2c21de8](https://github.com/ZaxbyHub/opencode-swarm/commit/2c21de8f4db275f5ed0b4f05c0c8da8aacd0fe5d))
+* **lang:** register Java backend in backend registry ([d71376e](https://github.com/ZaxbyHub/opencode-swarm/commit/d71376e05163b46591cfa88cd0c77bf2980cc8b6))
+* **tools:** add Java routing to symbols tool (WIP) ([54ac10f](https://github.com/ZaxbyHub/opencode-swarm/commit/54ac10f6d92febcfcda46d3f9919d4ec1194ff03))
+* **tools:** list Java in symbols tool metadata description ([2749d02](https://github.com/ZaxbyHub/opencode-swarm/commit/2749d026b9883fab65a2e7981736c4ad0ab8b5b5))
+
+
+### Bug Fixes
+
+* **commands:** address review findings - NUL-terminated status parse, hyphenated tool resolution, flag-conflict guard ([#2946](https://github.com/ZaxbyHub/opencode-swarm/issues/2946)) ([062ffb7](https://github.com/ZaxbyHub/opencode-swarm/commit/062ffb7f3dc9b2ae5278e9a082dfdaccfff62396))
+* **commands:** close review findings - untracked-file gate coverage, backup refusal + warnings, timestamp prune, rename parse ([#2946](https://github.com/ZaxbyHub/opencode-swarm/issues/2946)) ([e48a84e](https://github.com/ZaxbyHub/opencode-swarm/commit/e48a84e4dd030fc1fdfe07de7ff00adafa0d30d9))
+* **commands:** gate /swarm rollback and checkpoint restores behind preview + confirm token + auto-backup ([#2946](https://github.com/ZaxbyHub/opencode-swarm/issues/2946)) ([ee1141d](https://github.com/ZaxbyHub/opencode-swarm/commit/ee1141d0983a879053d79a08854ba846c88c049d))
+* **commands:** gate rollback and checkpoint restores behind preview + confirm token + auto-backup ([#2946](https://github.com/ZaxbyHub/opencode-swarm/issues/2946)) ([2030ee1](https://github.com/ZaxbyHub/opencode-swarm/commit/2030ee1f36cb99af8953c794beda6594e62f9e46))
+* **commands:** registry details fit the 500-char doc ratchet and avoid attribute-injection-pattern text ([#2946](https://github.com/ZaxbyHub/opencode-swarm/issues/2946)) ([df926a2](https://github.com/ZaxbyHub/opencode-swarm/commit/df926a2396fd7f153df1bd5603cc0762b81aed1b))
+* **lang,tools:** resolve swarm-pr-review re-verification findings (F-2, F-3, F-7) ([71b293d](https://github.com/ZaxbyHub/opencode-swarm/commit/71b293da851b643bee68af733f1825ed209ada56))
+* **lang:** bound Java init-path main-class scan with size caps ([4db784f](https://github.com/ZaxbyHub/opencode-swarm/commit/4db784f2d4e19eba2502333cf653f07c8364188d))
+* **lang:** defer Java entry-point scan past the current tick ([5228aa5](https://github.com/ZaxbyHub/opencode-swarm/commit/5228aa5b1ea3e5e4dcc910c5d05b02b73b4bef67))
+* **lang:** make Gradle wrapper resolution Windows-aware (gradlew.bat) ([fe4d289](https://github.com/ZaxbyHub/opencode-swarm/commit/fe4d289089a974850ba2a0ab1dde6caa84a77725))
+* **lang:** mask comments before string literals in Java import parsing ([37a1646](https://github.com/ZaxbyHub/opencode-swarm/commit/37a16468186a36be1e8d74f4b8c73afa62f78b9c))
+* **lang:** mask single-line string/char literals in Java import parsing ([2d69fb2](https://github.com/ZaxbyHub/opencode-swarm/commit/2d69fb207a29bfb43fd23ae9459de5bd6f276352))
+* **lang:** prefer repo-local Maven/Gradle wrappers over PATH detection ([8217b8f](https://github.com/ZaxbyHub/opencode-swarm/commit/8217b8fc31da44089472c1fe8c3cb56766b74388))
+* **preflight:** a real overall failure must not be masked by detectedOnly ([959e7d7](https://github.com/ZaxbyHub/opencode-swarm/commit/959e7d75393096ee593624884996773ed56eafb7))
+* **preflight:** reach language-backend framework detection in tests-check ([6546e8d](https://github.com/ZaxbyHub/opencode-swarm/commit/6546e8d84720c81228758d791ea5e471a47be93a))
+* **preflight:** surface detectedOnly flag in formatPreflightMarkdown ([f4180d9](https://github.com/ZaxbyHub/opencode-swarm/commit/f4180d9fbde128bb295141267cbd5e3819456c86))
+* **preflight:** surface detectedOnly in automation-status artifact ([dfa3c85](https://github.com/ZaxbyHub/opencode-swarm/commit/dfa3c8521166942135e8e72caaaae028c43b1a6a))
+* **scripts:** Check 9 skips fixture trees without the command surface, mirroring the Check 5 contract ([#2946](https://github.com/ZaxbyHub/opencode-swarm/issues/2946)) ([80f6419](https://github.com/ZaxbyHub/opencode-swarm/commit/80f641976d41898fc04deb617cf08ab42a89be8c))
+* **scripts:** oracle expects Check 9 fixture-skip; raise architect prompt ceiling 161500-&gt;163000 for [#2946](https://github.com/ZaxbyHub/opencode-swarm/issues/2946) safety docs ([11c8736](https://github.com/ZaxbyHub/opencode-swarm/commit/11c87369393a98a2032005bbfc627850a32e469b))
+* **symbols:** bound Java method-declaration modifier group to prevent ReDoS ([73c7ab0](https://github.com/ZaxbyHub/opencode-swarm/commit/73c7ab087ef6e6a32586455b02efeddafb9eaf1e))
+* **symbols:** derive Java exported flag from matched modifier text ([136581e](https://github.com/ZaxbyHub/opencode-swarm/commit/136581efc951c8ce32898fd18d71069dd37c1cfc))
+* **tools:** compute Java local-type export locality from true declDepth ([efcc968](https://github.com/ZaxbyHub/opencode-swarm/commit/efcc9688cfcb2160ad6025703144ffd60592b75c))
+* **tools:** correct Java symbol extraction and routing ([31d7ec4](https://github.com/ZaxbyHub/opencode-swarm/commit/31d7ec497c17fb30e89491b657263bc19c870144))
+* **tools:** exclude statement-shaped lines and preserve constructors in N-7 guard ([57db176](https://github.com/ZaxbyHub/opencode-swarm/commit/57db176a3b10f534f38e0cd659c447b083a2609f))
+* **tools:** extractJavaSymbols must not report bare call statements as methods ([f91a91b](https://github.com/ZaxbyHub/opencode-swarm/commit/f91a91b2062e289f005deaca98e33150bc433e81))
+* **tools:** fix constructor-detection regression from FB-003, strengthen tests ([060847a](https://github.com/ZaxbyHub/opencode-swarm/commit/060847addefde80e843cfc6510db4a6d163b5fb4))
+* **tools:** match Java type declarations on keyword alone, not prefix shape ([d885a7a](https://github.com/ZaxbyHub/opencode-swarm/commit/d885a7af4a4d213701034f5b9c7dd2beaaba496f))
+* **tools:** never mark a local Java class or its members as exported ([f09785f](https://github.com/ZaxbyHub/opencode-swarm/commit/f09785fbef9d5633a575d97b4831d95903a05e4d))
+* **tools:** recognize a record whose component list wraps to the next line ([ad81fb1](https://github.com/ZaxbyHub/opencode-swarm/commit/ad81fb1be99f647add73e8bda955d192c3ec3cbe))
+* **tools:** recognize strictfp/nested-annotation nested types; test isMainClass masking ([a483f35](https://github.com/ZaxbyHub/opencode-swarm/commit/a483f35b71bfec89066f5f6bcaa1c7f8840259a4))
+* **tools:** scope Java symbol extraction to brace depth, cover missing declaration shapes ([1701383](https://github.com/ZaxbyHub/opencode-swarm/commit/1701383e3f5e5d03ef4e64bcdff96de8aee84e11))
+* **tools:** use lastIndexOf for modifier-slice in extractJavaSymbols ([f8caeb1](https://github.com/ZaxbyHub/opencode-swarm/commit/f8caeb139d140b488b13bf8901a4a07352ef7ac4))
+
 ## [7.186.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.186.7...v7.186.8) (2026-09-26)
 
 
