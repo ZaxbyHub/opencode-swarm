@@ -15,6 +15,13 @@ describe('turbo schema — backward compatibility', () => {
 		}
 	});
 
+	test('turbo_mode describe text documents the session-default wiring (#2901)', () => {
+		const described = PluginConfigSchema.shape.turbo_mode?.description ?? '';
+		expect(described.toLowerCase()).toContain('session');
+		expect(described.toLowerCase()).toContain('default');
+		expect(described).toContain('/swarm turbo');
+	});
+
 	test('turbo.strategy "standard" parses explicitly', () => {
 		const r = PluginConfigSchema.safeParse({
 			turbo: {
