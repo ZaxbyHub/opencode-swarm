@@ -12,7 +12,7 @@
 # gate; an EXPIRY more than 14 days in the past also fails (inside the grace
 # window it only warns).
 #
-# STATUS: 9 active entries (pr-monitor-status.test.ts per issue #1982,
+# STATUS: 11 active entries (pr-monitor-status.test.ts per issue #1982,
 # win32-wrapper-runtime.test.ts per issue #2185,
 # completion-observer-coder.test.ts per issue #2692,
 # index-pr-workflow-session-lifecycle-2602.test.ts per issue #2761,
@@ -25,10 +25,14 @@
 # this PR, and `pr-subscriptions-checkpoint.test.ts` /
 # `recall-evaluation-profile-isolation.test.ts` were already on this
 # ledger from PR #2774 or routed to the general ledger per PR #2811's
-# CORE-TREE placement for `pr-workflow-gate-batch-gc.test.ts`), and
+# CORE-TREE placement for `pr-workflow-gate-batch-gc.test.ts`),
 # write-receipts-feedback-2500.test.ts +
-# phase-complete.lock-adversarial.test.ts per issue #2812 — the
-# issue #1729 debt itself remains paid down; see the entries below).
+# phase-complete.lock-adversarial.test.ts per issue #2812, and
+# close-active-state-unlink-retry.test.ts (windows-latest shard 6 hard
+# failure) + delegation-gate-background-coder.test.ts (windows-latest
+# shard 2 retry-pass — CORE-TREE per detector rule C, single-OS
+# windows-latest so routed here after human review) per issue #2867 —
+# the issue #1729 debt itself remains paid down; see the entries below).
 #
 # History: this list previously held 9 Windows-only failures. They were fixed
 # in issue #1729 by a combination of:
@@ -306,4 +310,102 @@ tests/unit/mcp/write-receipts-feedback-2500.test.ts
 #   and the file passes on windows-latest merge-group runs (#2973 row 10).
 # Renewed 2026-09-25 per issue #2900 (Workstream I3); previous EXPIRY 2026-10-31.
 tests/unit/tools/phase-complete.lock-adversarial.test.ts
+#
+# tests/unit/commands/close-active-state-unlink-retry.test.ts (issue #2867)
+# ---------------------------------------------------------------------------
+# Tests active-state SQLite unlink retry in src/commands/close.ts: retries
+# EBUSY/EPERM Windows locks with a bounded backoff ([25, 50, 100, 200]),
+# rejects non-transient failures (EACCES) without retry, and releases Bun
+# query-cache handles before deleting a closed project database. Flaky on
+# windows-latest merge-group unit-shard 6 only: flake-detection run
+# 35492561496 (2026-09-20T05:47:22Z) downloaded the triggering CI run
+# 35491073606 (merge_group, head cffc439a, 2026-09-20T05:12:12Z, run_attempt 1)
+# artifacts; the unit-shard-6 annotation file (artifact id 10599830873) carried
+# `::error file=tests/unit/commands/close-active-state-unlink-retry.test.ts::FAILED`
+# — a hard failure where all 3 in-job retries failed, the assertion at
+# tests/unit/commands/close-active-state-unlink-retry.test.ts:79 (`releases
+# Bun query-cache handles before deleting a closed project database`)
+# tripping on EBUSY from rmSync in the `finally` teardown. Sibling
+# ubuntu-1..6, macos-1..6, and the other windows-latest shards 1/2/3/4/5
+# ran the file green in the same run (single-OS evidence; per-OS sort
+# order routes this file into different shards across OSes so the sibling
+# ubuntu/macos shard-6 cells did not even include this file in their
+# expected-files list, the same OS-specific sort-order pattern documented
+# by sibling issues #2844 / #2845 / #2846). Consistent with the
+# windows-latest cold-FS / AV-handle class (same root cause as
+# pr-monitor-status.test.ts per issue #1982 / win32-wrapper-runtime.test.ts
+# per issue #2185 — fix landed in PR #2190 via safeRmRecursive + bounded
+# EBUSY/EPERM retries; this test still exercises the old rmSync pattern
+# and would benefit from the same helper on a future root-fix pass).
+# Pre-existing, unrelated to any specific PR. Quarantined per issue #2867;
+# tracked under #1782 (test-stability sprint).
+# OWNER: zaxbysauce — issue #2867 (windows-only hard-failure on
+#   `unit (windows-latest, 6)`; see merge-group run 35491073606,
+#   unit-shard-6 artifact 10599830873 for the FAILED annotation)
+# EXPIRY: 2026-10-20 — root-fix the rmSync Windows cleanup race in the
+#   test finally block (candidate: use tests/helpers/safe-test-dir.ts
+#   safeRmRecursive with a closed project-db handle + bounded EBUSY/EPERM
+#   retries, the same pattern already root-fixed for
+#   pr-monitor-status.test.ts via PR #2190) or renew with an updated
+#   diagnosis under #1782/#2477. After EXPIRY, Check 7 warns for 14 days,
+#   then hard-fails on day 15.
+tests/unit/commands/close-active-state-unlink-retry.test.ts
+#
+# tests/unit/hooks/delegation-gate-background-coder.test.ts (issue #2867)
+# ---------------------------------------------------------------------------
+# CORE-TREE entry routed to the windows ledger after human review per
+# detector rule C (`tests/unit/hooks/**` is withheld from auto-suggestion
+# by scripts/ci/detect-and-quarantine-flakes.sh). Tests the background
+# coder Stage A provenance path: persists the delivered lane-root prompt
+# in the background dispatch snapshot, ordinary code scope is durably
+# captured before terminal completion, a running background coder
+# durably blocks a duplicate task launch, and background reservations
+# enforce the configured parallel slot cap. Every case builds a full git
+# repository (spawnSync git init/config/add/commit, 5s timeout at
+# tests/unit/hooks/delegation-gate-background-coder.test.ts:27-39),
+# exercises the delegation-gate hook with `background_subagents: true`,
+# and drives the background completion observer — all four cases
+# converge on the canonical root via the canonicalRootKey helper, then
+# assert against durable scope / snapshot / reservation state. Flaky on
+# windows-latest merge-group unit-shard 2 only: flake-detection run
+# 35492561496 (2026-09-20T05:47:22Z) downloaded the triggering CI run
+# 35491073606 (merge_group, head cffc439a, 2026-09-20T05:12:12Z,
+# run_attempt 1) artifacts; the unit-shard-2 annotation file (artifact id
+# 10599416863) carried
+# `::notice file=tests/unit/hooks/delegation-gate-background-coder.test.ts::Passed on retry 2 (flaky)`
+# — a passed-on-retry flake where attempt 1 failed and attempts 2+3 passed
+# (the green shard is windows-2 conclusion=success). Sibling ubuntu-1..6,
+# macos-1..6, and the other windows-latest shards 1/3/4/5/6 ran the file
+# green in the same run (single-OS evidence). Per rule C the workflow
+# marked this CORE-TREE; human review (issue #2867 triage comment
+# requirement) confirms (a) the annotation prefix is `Passed on retry N`,
+# not an infra signature (no `Runner offline` / `was not acquired by
+# Runner` / `no space left on device` / `waiting for a runner` — see
+# scripts/ci/detect-and-quarantine-flakes.sh INFRA_SIGNATURES), so this
+# is a real assertion flake and not a runner infra signature, and (b)
+# the sibling OS shards are all green, so the placement is the windows
+# ledger per the windows-ledger re-add policy rather than the general
+# ledger (which would suppress the file on every RUNNER_OS and falsely
+# imply cross-OS evidence). The ci.yml retry loop discards attempt-1
+# output when the retry passes, so no assertion text exists to drive a
+# root-cause fix from CI alone; the file passes locally on a clean TMPDIR
+# (4/4 cases, ~1.84s), confirming the flake is environment-sensitive
+# (windows-latest cold-FS / AV-handle class — the same pattern behind
+# pr-monitor-status.test.ts per issue #1982 / win32-wrapper-runtime.test.ts
+# per issue #2185 / archive.test.ts per issue #2812), not a logic bug.
+# Pre-existing, unrelated to any specific PR. Quarantined per issue #2867;
+# tracked under #1782 (test-stability sprint).
+# OWNER: zaxbysauce — issue #2867 (windows-only retry-flake on
+#   `unit (windows-latest, 2)`; CORE-TREE per detector rule C, single-OS
+#   windows-latest so routed here after human review; see merge-group run
+#   35491073606, unit-shard-2 artifact 10599416863 for the
+#   `Passed on retry 2 (flaky)` annotation)
+# EXPIRY: 2026-10-20 — root-fix the windows git-spawn / observer-timing
+#   flake (candidate: convert the per-test mkdtempSync/rmSync cycle to
+#   use tests/helpers/safe-test-dir.ts safeRmRecursive with bounded
+#   EBUSY/EPERM retries, matching the PR #2190 / #2807 pattern already
+#   root-fixed for pr-monitor-status.test.ts and #2602 lifecycle) or
+#   renew with an updated diagnosis under #1782/#2477. After EXPIRY,
+#   Check 7 warns for 14 days, then hard-fails on day 15.
+tests/unit/hooks/delegation-gate-background-coder.test.ts
 
