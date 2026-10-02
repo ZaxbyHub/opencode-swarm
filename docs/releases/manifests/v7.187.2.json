@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.187.2",
+  "tagCommit": "9be0fe16c64f08c2c9566dce451236e435195f71",
+  "targetCommitish": "9be0fe16c64f08c2c9566dce451236e435195f71",
+  "releaseBodySha256": "42800d7730c750e7e27c07a314203057f088d4b4a63c626c82635ee4aec7227b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2925-write-site-attribution-path-canonicalization.md",
+      "sha256": "42824e27625952df178acd1a6ba5840c071c7abae2b0fe39b886c3eaca4d0964"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2973-retire-quarantine-renewal-cohort.md",
+      "sha256": "615442b003ef6de1f3998f1bd8c550ef786fab7c12f62cb20f4ec9b99d3ffbd2"
+    }
+  ]
+}
