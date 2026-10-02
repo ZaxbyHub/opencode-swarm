@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.2",
+  "tagCommit": "7da78668b641dcc9fb2744d8f6502019c871c075",
+  "targetCommitish": "7da78668b641dcc9fb2744d8f6502019c871c075",
+  "releaseBodySha256": "c6f60e7de9093eb4eb8874a69203522c0813ca0ac8f668d7573f045af4c527e7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/j5-test-clock-scans-src.md",
+      "sha256": "1b488849799504023f000b5d79a73cfc7d3f3b713e0f2106afd94c18e548f190"
+    }
+  ]
+}
