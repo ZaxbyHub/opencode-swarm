@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.187.1",
+  "tagCommit": "d604690be7a83929be17a20c60714b9e0ed92924",
+  "targetCommitish": "d604690be7a83929be17a20c60714b9e0ed92924",
+  "releaseBodySha256": "5818a5af1511c7d1f23056216fbb11d6b37e9c96b7e5eb3942f516bb8a2bd43d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/j3-phase-id-receipt-key.md",
+      "sha256": "3d83bb2f5cea8e9a231646ab0539e1f499f32bc70f3ab494f2c04d20061c44ee"
+    }
+  ]
+}
