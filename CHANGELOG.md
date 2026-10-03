@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.188.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.188.8...v7.188.9) (2026-10-03)
+
+
+### Bug Fixes
+
+* **test-runner:** spawn-error outcome, win32 gradle launcher, targets-only guard ([#3039](https://github.com/ZaxbyHub/opencode-swarm/issues/3039), [#3040](https://github.com/ZaxbyHub/opencode-swarm/issues/3040), [#3041](https://github.com/ZaxbyHub/opencode-swarm/issues/3041)) ([1061828](https://github.com/ZaxbyHub/opencode-swarm/commit/1061828a55f3adcbaedfa827958b9196809caecd))
+* **workflow:** writer-side session-view refresh for blocked-start Stage A recovery ([#3043](https://github.com/ZaxbyHub/opencode-swarm/issues/3043)) ([24f611f](https://github.com/ZaxbyHub/opencode-swarm/commit/24f611f098df528799e93bded8b370b5ec90c70c))
+
 ## [7.188.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.188.7...v7.188.8) (2026-10-03)
 
 
