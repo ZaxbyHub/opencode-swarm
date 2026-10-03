@@ -1429,6 +1429,15 @@ dimension is reported `real` by the capability probe.
 | `network_allowlist` | `[]` | Bounded network allowlist used for capability identity. |
 | `writable_roots` | `[]` | Additional bounded writable roots used for capability identity. |
 
+On Linux the Bubblewrap sandbox mounts the session workspace (canonical path)
+read-only before the declared scope paths, so a command can read the whole
+project it is working in (for example a test loading the module it exercises)
+while only the scope paths, `writable_roots`, and the private `/tmp` and `/dev`
+tmpfs mounts are writable. A workspace that itself lives under `/tmp` is hidden by that tmpfs.
+When a bash call is about to be wrapped by Bubblewrap and the command itself
+starts with `bwrap`, it is refused before it runs: a nested bwrap fails with
+"No permissions to create new namespace". Re-issue the plain command.
+
 The status surface reports filesystem, network, process, and effective
 strength separately as `real`, `weak`, or `none`. Linux reports missing
 seccomp explicitly; macOS does not claim network/process containment; Windows

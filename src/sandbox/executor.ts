@@ -129,7 +129,23 @@ export interface SandboxPolicyOptions {
 	network_mode?: 'off' | 'on';
 	network_allowlist?: readonly string[];
 	writable_roots?: readonly string[];
+	/**
+	 * Absolute roots the sandboxed command may READ but not write, mounted
+	 * before the writable scope paths so a scope path inside one of them
+	 * stays writable. The guardrails hook passes the session workspace here:
+	 * without it a Linux coder sandbox contained only its declared scope, so
+	 * `node tests/x.test.js` could not even load `../src/x.js`. Executors
+	 * whose containment is write-only (macOS sandbox-exec) ignore it.
+	 */
+	readonly_roots?: readonly string[];
 }
+
+/**
+ * The policy fields that come from configuration and take part in the
+ * enforcement assessment and its cache key. `readonly_roots` is derived per
+ * call from the session workspace and is deliberately not part of it.
+ */
+export type SandboxConfigPolicy = Omit<SandboxPolicyOptions, 'readonly_roots'>;
 
 // Cached executor promise — set once at first getExecutor() call.
 // This ensures the capability probe runs only once even if getExecutor()
@@ -155,7 +171,7 @@ export const _internals: {
 export interface SandboxEnforcementAssessment {
 	capability: SandboxCapabilityV1;
 	requirements: Required<SandboxRequirements>;
-	policy: Required<SandboxPolicyOptions>;
+	policy: Required<SandboxConfigPolicy>;
 	satisfied: boolean;
 	missing: string[];
 	supported: boolean;
@@ -179,7 +195,7 @@ function normalizeSandboxRequirements(
 
 function normalizeSandboxPolicy(
 	requirements: Required<SandboxRequirements>,
-): Required<SandboxPolicyOptions> {
+): Required<SandboxConfigPolicy> {
 	return {
 		network_mode: requirements.network_mode,
 		network_allowlist: [...requirements.network_allowlist],
@@ -198,7 +214,7 @@ function hashList(values: readonly string[]): string {
 function buildSandboxAssessmentCacheKey(
 	capability: SandboxCapabilityV1,
 	requirements: Required<SandboxRequirements>,
-	policy: Required<SandboxPolicyOptions>,
+	policy: Required<SandboxConfigPolicy>,
 ): string {
 	return [
 		capability.identity,
@@ -214,7 +230,7 @@ function buildSandboxAssessmentCacheKey(
 
 function evaluatePolicySupport(
 	capability: SandboxCapabilityV1,
-	policy: Required<SandboxPolicyOptions>,
+	policy: Required<SandboxConfigPolicy>,
 ): { supported: boolean; unsupported: string[] } {
 	const unsupported: string[] = [];
 	if (policy.network_allowlist.length > 0) {

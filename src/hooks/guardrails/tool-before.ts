@@ -9,6 +9,7 @@
  * target checks, and circuit breaker limits.
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { HUMAN_ONLY_SWARM_COMMANDS } from '../../commands/tool-policy.js';
 import {
@@ -1288,6 +1289,16 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	/**
 	 * OS-native sandbox wrapper for bash/shell commands.
 	 */
+	/**
+	 * True when the raw command is itself a bubblewrap invocation (bare name or
+	 * absolute path, optionally behind `env`/`exec`), so wrapping it would nest
+	 * two sandboxes.
+	 */
+	function isSandboxWrapperInvocation(raw: string): boolean {
+		const head = raw.replace(/^(?:(?:exec|env)\s+)*/, '');
+		return /^(?:\/(?:usr\/(?:local\/)?)?bin\/)?bwrap(?:\s|$)/.test(head);
+	}
+
 	async function applySandboxExecution(
 		sessionID: string,
 		callID: string,
@@ -1488,6 +1499,41 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			...new Set([...resolved.paths, ...configuredWritableRoots.paths]),
 		];
 
+		// A command that already invokes bwrap would be wrapped in a second
+		// bwrap, and the inner one fails with "No permissions to create new
+		// namespace" (a user namespace cannot be created inside the outer
+		// sandbox). Agents do this because the wrapped command is what the host
+		// stores as their own tool input, so they copy it. Refuse it with the
+		// remedy instead of running a command that can only fail. Placed after
+		// every early return above, so it fires only when this call really is
+		// about to be wrapped, and only for the Bubblewrap executor.
+		if (
+			normalizeSandboxMechanism(executor.mechanism) === 'bubblewrap' &&
+			isSandboxWrapperInvocation(rawCommand)
+		) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: 'command already invokes the sandbox wrapper',
+			});
+			clearRecordedOutcome();
+			throw new Error(
+				`[sandbox] BLOCKED: the command already invokes bwrap. Every bash call is sandboxed by the harness (${executor.mechanism}); a nested wrapper fails with "No permissions to create new namespace". Re-issue the plain command without the bwrap prefix.`,
+			);
+		}
+		// The read-only root is canonicalized like the scope paths
+		// (scope-resolver realpaths them), so a symlinked checkout mounts the
+		// workspace at the same real path as its writable scope binds.
+		const workspaceRoot = sessionWorkspaceDirectory(sessionID);
+		let readonlyWorkspaceRoot = workspaceRoot;
+		try {
+			readonlyWorkspaceRoot = fs.realpathSync(workspaceRoot);
+		} catch {
+			// Unresolvable: keep the logical path; bwrap fails closed on a
+			// missing source.
+		}
+
 		try {
 			// Issues #2236 F6b / #2259 / #2475 / #2590: bake every PLUGIN-OWNED
 			// executor's declared env hardening into the wrapped command via
@@ -1521,6 +1567,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					network_mode: sandboxConfig?.network_mode ?? 'off',
 					network_allowlist: sandboxConfig?.network_allowlist ?? [],
 					writable_roots: configuredWritableRoots.paths,
+					// The whole session workspace is readable inside the sandbox;
+					// only the scope paths above are writable. Without this a
+					// coder could not load the modules its tests exercise.
+					readonly_roots: [readonlyWorkspaceRoot],
 				},
 			);
 			if (wrappedCommand.trim() === rawCommand) {

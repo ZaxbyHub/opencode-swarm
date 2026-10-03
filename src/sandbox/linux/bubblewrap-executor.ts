@@ -10,7 +10,12 @@
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { warn } from '../../utils/logger';
-import { isValidEnvKey, SandboxError, type SandboxExecutor } from '../executor';
+import {
+	isValidEnvKey,
+	SandboxError,
+	type SandboxExecutor,
+	type SandboxPolicyOptions,
+} from '../executor';
 
 /** Magic exit code bwrap returns when --version is passed */
 const BWRAP_VERSION_EXIT = 0;
@@ -124,7 +129,12 @@ function shellEscape(s: string): string {
  *
  * Instantiated with scope paths and an optional temp directory override.
  * wrapCommand() returns a bwrap-wrapped command string that:
- *   - bind-mounts each scope path read-write
+ *   - bind-mounts each policy.readonly_roots path read-only (the session
+ *     workspace), FIRST, so the command can read the project it is working in
+ *   - bind-mounts each scope path read-write, after the read-only roots so a
+ *     scope path inside the workspace is writable (bwrap mounts in argument
+ *     order and a later bind sits on top of an earlier one; the reverse order
+ *     would leave the scope path read-only)
  *   - mounts a tmpfs at /tmp (writable temporary storage)
  *   - bind-mounts essential system paths read-only
  *   - spawns the raw command via `bash -c '<command>'`
@@ -208,7 +218,7 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 		scopePaths: string[],
 		tempDir?: string,
 		envOverrides?: Record<string, string | null>,
-		policy?: { network_mode?: 'off' | 'on' },
+		policy?: Pick<SandboxPolicyOptions, 'network_mode' | 'readonly_roots'>,
 	): string {
 		// Re-check availability before each wrap — bwrap may become unavailable mid-session
 		if (!this._available) {
@@ -217,6 +227,25 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 
 		const temp = tempDir ?? this._tempDir ?? '/tmp';
 		const allScopes = [...this._scopePaths, ...scopePaths];
+
+		// Read-only roots (the session workspace) go BEFORE the writable scope
+		// binds: bwrap mounts in argument order, so the scope paths are mounted
+		// on top and stay writable while everything else in the root is
+		// readable but not writable. Only absolute paths are accepted; a
+		// relative or empty entry is dropped rather than mounted somewhere
+		// unintended.
+		const readonlyRoots = [
+			...new Set(
+				(policy?.readonly_roots ?? []).filter(
+					(p) => typeof p === 'string' && p.startsWith('/') && p !== '/',
+				),
+			),
+		];
+		const roBindArgs = readonlyRoots.flatMap((p) => [
+			'--ro-bind',
+			`'${shellEscape(p)}'`,
+			`'${shellEscape(p)}'`,
+		]);
 
 		// Build --bind arguments for each scope path (SRC DEST pair for bwrap)
 		// Shell-escape and single-quote wrap each path to handle spaces and special chars
@@ -266,6 +295,7 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 			'--new-session',
 			'--cap-drop',
 			'ALL',
+			...roBindArgs,
 			...bindArgs,
 			'--dev',
 			'/dev',
