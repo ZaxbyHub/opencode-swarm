@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.6",
+  "tagCommit": "0b27488f33a91097ecd706a2e22890b066295725",
+  "targetCommitish": "0b27488f33a91097ecd706a2e22890b066295725",
+  "releaseBodySha256": "90151dba962b0b23f4fcb47e951432144b9894dfad33fa07063edeb547f4797e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2997-release-owner-guard-merge-base.md",
+      "sha256": "c0283fec9a0ffb6896dc49009f0672e39c9a3276b2108303adacc69f0e0be275"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3022-default-swarm-models-unavailable.md",
+      "sha256": "048c6b9da09657a398f0a1d85aafe2346152d23e8184e976330b46dfa9c4566a"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/3029-review-followup-v2-model-apply.md",
+      "sha256": "71c41769e6e9066d4dfdeef2958285b2de712ba940442381e503b54efa680733"
+    }
+  ]
+}
