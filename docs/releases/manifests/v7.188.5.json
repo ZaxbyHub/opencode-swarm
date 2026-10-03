@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.5",
+  "tagCommit": "9b7f7759fd1c0670b7cdda5167844869e67b2550",
+  "targetCommitish": "9b7f7759fd1c0670b7cdda5167844869e67b2550",
+  "releaseBodySha256": "bc819001a207f82def250f9a8d8978713c473d9e9eb1885f6e6895129139b1f4",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3011-full-auto-v2-oversight-sequence.md",
+      "sha256": "ede91867b4573da253fe121b6d1cd09ff80613ea4dc5440962ba015326b6827a"
+    }
+  ]
+}
