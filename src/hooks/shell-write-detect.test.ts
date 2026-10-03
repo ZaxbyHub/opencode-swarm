@@ -720,13 +720,12 @@ describe('graceful failure', () => {
 // ---------------------------------------------------------------------------
 
 describe('deduplication', () => {
-	test('same target not reported twice from multiple categories', () => {
-		// A command like: cp src dst > dst
-		// Both builtin and redirect target dst
+	test('same target from two categories: one entry per category, none empty', () => {
+		// cp src dst > dst: the redirect and the cp destination both name dst.
+		// Dedupe is keyed on category|operator|path, so each is reported once.
 		const result = detectPosixWrites('cp src dst > dst');
-		// Should deduplicate: only one entry for 'dst'
-		const paths = result.writes.filter((w) => w.path === 'dst');
-		expect(paths.length).toBe(1);
+		expect(result.writes.filter((w) => w.path === 'dst')).toHaveLength(2);
+		expect(result.writes.filter((w) => w.path === '')).toHaveLength(0);
 	});
 
 	test('multiple same redirects deduplicated', () => {

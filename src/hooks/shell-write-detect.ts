@@ -372,13 +372,27 @@ function getCommandName(cmd: unknown): string | null {
 	return wordText(c.name);
 }
 
-/** Get the suffix (arguments after command name) from a command node. Returns array of word texts. */
+/**
+ * Get the suffix (arguments after command name) from a command node. Returns
+ * array of word texts.
+ *
+ * Only Word nodes are arguments. A Redirect node in the suffix (`cp a b
+ * 2>/dev/null`) is not an argument and is skipped; it used to be mapped to
+ * an empty string, which made every "last argument is the destination"
+ * picker (cp, mv, install, ln) report an empty path that resolved to the
+ * workspace root instead of the real destination.
+ */
 function getSuffixWords(cmd: unknown): string[] {
 	if (!cmd || typeof cmd !== 'object') return [];
 	const c = cmd as BashCommand;
 	const suffix = c.suffix;
 	if (!Array.isArray(suffix)) return [];
-	return suffix.map((s) => wordText(s) ?? '');
+	const words: string[] = [];
+	for (const s of suffix) {
+		const text = wordText(s);
+		if (text !== null) words.push(text);
+	}
+	return words;
 }
 
 /** Get the prefix from a command node. */
@@ -473,7 +487,15 @@ function extractRedirectPath(fileNode: unknown): string | null {
 	return text;
 }
 
-/** Check if a path is a null/sink device (not a real write target). */
+/**
+ * Check if a path is a null/sink device (not a real write target).
+ *
+ * Matched on the literal word before any resolution, so only the exact
+ * absolute device path is exempt: a relative `dev/null`, a `$VAR/dev/null`,
+ * or a traversal through it (`/dev/null/../x`) is still a write target. The
+ * same helper covers `tee`, `dd of=`, and every redirect site below, so a
+ * `2>/dev/null` is treated exactly like `tee /dev/null`.
+ */
 function isNullDevice(path: string): boolean {
 	return (
 		path === '/dev/null' || path === '/dev/zero' || path === '/dev/urandom'
@@ -528,6 +550,11 @@ function detectRedirects(cmd: unknown): WriteTarget[] {
 			REDIRECT_WRITE_TOKENS.has(opType) ||
 			(REDIRECT_GREATAND_TOKENS.has(opType) && !isNonFileGreatAndTarget(path))
 		) {
+			// A redirect into a sink device discards its data; it is not a write
+			// target, exactly as `tee /dev/null` is not. Without this, `2>/dev/null`
+			// reached the authority layer as a write to /dev/null and was rejected
+			// as a workspace root escape.
+			if (path !== null && isNullDevice(path)) continue;
 			results.push({ category: 'redirect', operator: opLabel, path });
 		} else if (REDIRECT_HERE_TOKENS.has(opType)) {
 			results.push({ category: 'here_doc', operator: opLabel, path });
@@ -676,39 +703,125 @@ function detectInplaceEdit(cmd: unknown): WriteTarget[] {
 
 	if (!hasInplaceFlag) return [];
 
-	// Find the file argument — take the LAST non-flag, non-script word
-	// This handles: cmd -i file.txt (file is last)
-	// And: cmd -i -pe "script" file.txt (file is last after skipping flags and script)
+	// Find the file argument: the first word that is neither a flag, a flag's
+	// argument, nor the script.
 	const scriptPattern = /^[ssy]\/.*\/[gim]*$/;
-	const quotedScriptPattern = /^["'].*["']$/; // strings like "s/foo/bar/" or 'foo'
-	// Flags that consume the next word as an argument
-	const flagArgs = new Set(['-e', '-E', '-f', '-i']);
-	const combinedFlagArgs = /^-[paaneA]+[eEf]/; // e.g., -pe, -ne, -ae, -aE, -if
-	// sed -i[suffix] where suffix is backup extension (e.g., -ibak) — also consumes next word
-	const sedInplaceSuffix = /^-i[a-z]+/i; // e.g., -ibak, -i.bak
+	const quotedScriptPattern = /^["'].*["']$/; // a word that kept its quotes
+	// Flags that consume the next word as their argument, per command. sed's
+	// `-E` is a bare switch (extended regex); perl's `-E` is a script like `-e`.
+	const flagArgs =
+		lowerName === 'sed'
+			? new Set(['-e', '-f', '--expression', '--file'])
+			: lowerName === 'perl'
+				? new Set(['-e', '-E'])
+				: new Set(['-f', '-v', '-F']);
+	const combinedFlagArgs = /^-[paaneA]+[eEf]/; // perl: -pe, -ne, -ae, -aE, -if
+	// GNU sed lets bare switches bundle with `-e`: `-ne`, `-Ee`, `-se`.
+	const sedScriptBundle = /^-[nrEszu]*e$/;
+	const consumesNext = (w: string): boolean =>
+		flagArgs.has(w) ||
+		(lowerName === 'sed' && sedScriptBundle.test(w)) ||
+		(lowerName === 'perl' && combinedFlagArgs.test(w));
+	// Whether the script is supplied by a flag. If so, the word after a bare
+	// `-i` is never the script; if not, it is (GNU sed, perl) or it is a BSD
+	// detached backup suffix with the script right after it.
+	const hasExplicitScript = suffixWords.some(
+		(w) =>
+			(lowerName === 'awk' ? w === '-f' : consumesNext(w)) ||
+			(lowerName === 'sed' && /^--(?:expression|file)=/.test(w)),
+	);
 	const skipIndices = new Set<number>();
+	const isDetachedSuffix = (w: string | undefined): w is string =>
+		w !== undefined && (w === '' || w.startsWith('.'));
+	// Index of the first word at or after `from` that is not a switch and not
+	// `--`; that word is where an implicit script (or a BSD suffix) sits.
+	// `sed -i -n 1d f`, `sed -i -- 1d f`: the switches between are skipped
+	// as flags by the main loop; none of them consumes a word, or
+	// hasExplicitScript would be true.
+	const firstPositionalFrom = (from: number): number => {
+		let j = from;
+		while (j < suffixWords.length && suffixWords[j].startsWith('-')) j++;
+		return j;
+	};
+	// Consume the implicit script starting at `from`: a BSD detached suffix
+	// there means the script is the next positional after it.
+	const consumeImplicitScript = (from: number): void => {
+		const j = firstPositionalFrom(from);
+		if (j >= suffixWords.length) return;
+		skipIndices.add(j);
+		if (isDetachedSuffix(suffixWords[j])) {
+			const k = firstPositionalFrom(j + 1);
+			if (k < suffixWords.length) skipIndices.add(k);
+		}
+	};
+	// GNU `sed -e X -i .env`: `.env` is the file, but BSD `sed -e X -i .bak f`
+	// reads the same word as a backup suffix. The word is consumed as a suffix
+	// and reported as the file only when nothing else is left.
+	let dotWordAfterBareInplace: string | null = null;
+	let pastDoubleDash = false;
+	let awkProgramSeen = false;
 	for (let i = 0; i < suffixWords.length; i++) {
 		const word = suffixWords[i];
-		if (word.startsWith('-')) {
-			// Check if this flag consumes the next word as argument
-			if (
-				flagArgs.has(word) ||
-				combinedFlagArgs.test(word) ||
-				sedInplaceSuffix.test(word)
-			) {
-				skipIndices.add(i);
-				if (i + 1 < suffixWords.length) skipIndices.add(i + 1);
+		if (!pastDoubleDash && word === '--') {
+			skipIndices.add(i);
+			pastDoubleDash = true;
+			continue;
+		}
+		if (!pastDoubleDash && word.startsWith('-')) {
+			// A flag is never the file.
+			skipIndices.add(i);
+			const next = suffixWords[i + 1];
+			if (word === '-i') {
+				if (next === undefined) continue;
+				if (lowerName === 'awk') {
+					// gawk `-i <library>`
+					skipIndices.add(i + 1);
+				} else if (!hasExplicitScript) {
+					consumeImplicitScript(i + 1);
+				} else if (next === '') {
+					skipIndices.add(i + 1);
+				} else if (next.startsWith('.')) {
+					skipIndices.add(i + 1);
+					dotWordAfterBareInplace = next;
+				}
+				continue;
 			}
-		} else if (scriptPattern.test(word) || quotedScriptPattern.test(word)) {
-			// This looks like a script, skip it
+			if (/^-i.+/.test(word)) {
+				// Attached backup suffix (`-i.bak`, `-ibak`) or gawk `-iinplace`:
+				// the flag is complete. For sed/perl without a script flag the
+				// next positional word is the script; for awk the program is
+				// found by the positional rule below.
+				if (lowerName !== 'awk' && !hasExplicitScript) {
+					consumeImplicitScript(i + 1);
+				}
+				continue;
+			}
+			if (consumesNext(word)) {
+				if (next !== undefined) skipIndices.add(i + 1);
+			}
+			continue;
+		}
+		if (skipIndices.has(i)) continue;
+		if (lowerName === 'awk') {
+			// The first positional word is the program unless `-f` supplied it.
+			if (!hasExplicitScript && !awkProgramSeen) {
+				awkProgramSeen = true;
+				skipIndices.add(i);
+			}
+			continue;
+		}
+		if (scriptPattern.test(word) || quotedScriptPattern.test(word)) {
 			skipIndices.add(i);
 		}
 	}
 
-	// Find the first word that is NOT in skipIndices (the first file argument)
+	// The first word that is NOT skipped is the file argument.
 	const candidates = suffixWords
 		.map((word, i) => ({ word, i }))
-		.filter(({ i }) => !skipIndices.has(i));
+		.filter(({ word, i }) => word !== '' && !skipIndices.has(i));
+	if (candidates.length === 0 && dotWordAfterBareInplace !== null) {
+		candidates.push({ word: dotWordAfterBareInplace, i: -1 });
+	}
 
 	if (candidates.length > 0) {
 		const file = candidates[0].word;
@@ -2320,6 +2433,9 @@ function getWritesFromRedirectNode(
 		REDIRECT_WRITE_TOKENS.has(opType) ||
 		(REDIRECT_GREATAND_TOKENS.has(opType) && !isNonFileGreatAndTarget(path))
 	) {
+		// Keep in lockstep with detectRedirects: a sink-device redirect is not
+		// a write target on the resolver side either.
+		if (path !== null && isNullDevice(path)) return [];
 		return [{ category: 'redirect', operator: opLabel, path }];
 	} else if (REDIRECT_HERE_TOKENS.has(opType)) {
 		return [{ category: 'here_doc', operator: opLabel, path }];
