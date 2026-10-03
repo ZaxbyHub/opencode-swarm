@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.4",
+  "tagCommit": "6e82795f93665fd4685dda20bdcc72d407d7d414",
+  "targetCommitish": "6e82795f93665fd4685dda20bdcc72d407d7d414",
+  "releaseBodySha256": "9b261addc122e8bd24c519f9bb4534d836278a480f79eb84807c4d425002e70a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2720-context-map-decision-id-restarts.md",
+      "sha256": "7f0a9be27a58556f303c473be5304ead0ba3ed067c01bf2b0a13721bfe8e17f8"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3013-syntax-check-tsx-grammar.md",
+      "sha256": "26afb7a96adca6e873eefd148da49e519cbc2ad6ce3f204b2aacced7102fb29a"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/3016-context-map-decisions-wiring.md",
+      "sha256": "faf34ed9d71e75ff3a84ca0d0e421ac7320c20f113d4624954739b97fcfa5377"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/context-map-capsules.md",
+      "sha256": "49dde903befde46384549ee2c7ff0c6569cbf770c55739ef1df895ff1c0d2962"
+    }
+  ]
+}
