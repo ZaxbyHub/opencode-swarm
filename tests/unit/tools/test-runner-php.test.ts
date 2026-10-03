@@ -51,14 +51,18 @@ describe('PHP test_runner support', () => {
 			false,
 		);
 
-		expect(cmd).toEqual([
-			path.join(
-				'vendor',
-				'bin',
-				process.platform === 'win32' ? 'phpunit.bat' : 'phpunit',
-			),
-			'tests/Feature/HealthTest.php',
-		]);
+		// #3050: on win32 the Composer `.bat` shim is never a raw spawn target —
+		// it routes through the contained cmd.exe launcher, or falls back to the
+		// PHP interpreter on the extensionless proxy. This fixture creates no
+		// `vendor/bin/phpunit.bat` at all, so the launcher declines and the win32
+		// output is the deterministic interpreter fallback. POSIX is unchanged.
+		// See php-vendor-bin-launcher-3050.test.ts for the launcher-branch cases.
+		const proxy = path.join('vendor', 'bin', 'phpunit');
+		const expected =
+			process.platform === 'win32'
+				? ['php', proxy, 'tests/Feature/HealthTest.php']
+				: [proxy, 'tests/Feature/HealthTest.php'];
+		expect(cmd).toEqual(expected);
 	});
 
 	test('detects Laravel (php-artisan) through legacy and dispatch paths', async () => {

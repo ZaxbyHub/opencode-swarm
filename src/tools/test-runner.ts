@@ -12,6 +12,7 @@ import {
 import {
 	buildGradleTestCommand,
 	buildNativeTargetCommand,
+	buildPhpVendorCommand,
 } from '../lang/default-backend';
 import {
 	analyzeImpact,
@@ -1929,14 +1930,18 @@ function buildTestCommand(
 				'Dir.glob("test/**/*_test.rb").sort.each { |f| require_relative f }',
 			];
 		case 'pest': {
-			const args: string[] = [phpVendorBin('pest')];
-			if (scope !== 'all' && files.length > 0) args.push(...files);
-			return args;
+			return buildPhpVendorCommand(
+				baseDir,
+				'pest',
+				scope !== 'all' && files.length > 0 ? files : [],
+			);
 		}
 		case 'phpunit': {
-			const args: string[] = [phpVendorBin('phpunit')];
-			if (scope !== 'all' && files.length > 0) args.push(...files);
-			return args;
+			return buildPhpVendorCommand(
+				baseDir,
+				'phpunit',
+				scope !== 'all' && files.length > 0 ? files : [],
+			);
 		}
 		case 'php-artisan': {
 			const args: string[] = ['php', 'artisan', 'test'];
@@ -1946,14 +1951,6 @@ function buildTestCommand(
 		default:
 			return null;
 	}
-}
-
-function phpVendorBin(name: string): string {
-	return path.join(
-		'vendor',
-		'bin',
-		process.platform === 'win32' ? `${name}.bat` : name,
-	);
 }
 
 function mapFrameworkStatusToResult(

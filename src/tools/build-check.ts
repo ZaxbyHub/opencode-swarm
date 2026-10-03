@@ -62,6 +62,19 @@ export interface BuildRun {
 	duration_ms: number;
 	stdout_tail: string;
 	stderr_tail: string;
+	/**
+	 * Set only when the process could not be created at all — the `bunSpawn`
+	 * `spawnError` value contract (`src/utils/bun-compat.ts`), which is how
+	 * process-creation failures surface on every runtime.
+	 *
+	 * Without it a launch failure is indistinguishable from a build that ran and
+	 * exited non-zero: `spawnError` and `exitCode` are mutually exclusive, so a
+	 * failed spawn resolves `exited` to the sentinel 1 and this record would read
+	 * "exit 1" either way (issue #3050). Absent — not null — when the process did
+	 * start, so "no launch failure" stays distinguishable from "field present but
+	 * empty".
+	 */
+	spawn_error?: string;
 }
 
 export interface BuildCheckResult {
@@ -218,6 +231,14 @@ async function executeCommand(command: BuildCommand): Promise<BuildRun> {
 			proc.stderr.text(),
 		]);
 		const duration_ms = Date.now() - startTime;
+		// A process-creation failure (`proc.spawnError`, the bunSpawn value
+		// contract — the process never started) resolves `exited` to the sentinel
+		// 1, so `exit_code` alone cannot distinguish "could not launch" from
+		// "ran and failed". Record the reason separately so the verdict's
+		// `failed_count` still fires while the evidence stays diagnosable
+		// (issue #3050). Guarded on the message so a truthy Error carrying an
+		// empty string cannot emit a present-but-blank field.
+		const spawnErrorMessage = proc.spawnError?.message;
 
 		return {
 			kind,
@@ -227,6 +248,7 @@ async function executeCommand(command: BuildCommand): Promise<BuildRun> {
 			duration_ms,
 			stdout_tail: truncateOutput(stdout),
 			stderr_tail: truncateOutput(stderr),
+			...(spawnErrorMessage ? { spawn_error: spawnErrorMessage } : {}),
 		};
 	} finally {
 		try {

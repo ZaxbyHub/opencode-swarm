@@ -20,7 +20,7 @@ import type {
 	LanguageBackend,
 	TestFrameworkSelection,
 } from '../backend';
-import { defaultBackendFor } from '../default-backend';
+import { buildPhpVendorCommand, defaultBackendFor } from '../default-backend';
 import { detectLaravelProject } from '../framework-detector';
 import { LANGUAGE_REGISTRY } from '../profiles';
 
@@ -57,7 +57,7 @@ async function selectTestFramework(
 	if (fs.existsSync(path.join(dir, 'Pest.php'))) {
 		return {
 			name: 'pest',
-			cmd: [phpVendorBin('pest')],
+			cmd: buildPhpVendorCommand(dir, 'pest'),
 			cwd: dir,
 			detectedVia: 'Pest.php',
 		};
@@ -65,7 +65,7 @@ async function selectTestFramework(
 	if (fs.existsSync(path.join(dir, 'phpunit.xml'))) {
 		return {
 			name: 'phpunit',
-			cmd: [phpVendorBin('phpunit')],
+			cmd: buildPhpVendorCommand(dir, 'phpunit'),
 			cwd: dir,
 			detectedVia: 'phpunit.xml',
 		};
@@ -73,20 +73,12 @@ async function selectTestFramework(
 	if (fs.existsSync(path.join(dir, 'phpunit.xml.dist'))) {
 		return {
 			name: 'phpunit',
-			cmd: [phpVendorBin('phpunit')],
+			cmd: buildPhpVendorCommand(dir, 'phpunit'),
 			cwd: dir,
 			detectedVia: 'phpunit.xml.dist',
 		};
 	}
 	return null;
-}
-
-function phpVendorBin(name: string): string {
-	return path.join(
-		'vendor',
-		'bin',
-		process.platform === 'win32' ? `${name}.bat` : name,
-	);
 }
 
 /**

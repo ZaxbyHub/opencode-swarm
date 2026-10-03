@@ -38,6 +38,13 @@ export interface TestFrameworkSelection {
 	 * cannot avoid a shell-mediated invocation (e.g. PowerShell `-EncodedCommand`)
 	 * still produce an array; the array's first element is the binary and the
 	 * rest are individual arguments.
+	 *
+	 * On win32 an array whose `argv[0]` is a `cmd.exe` contained-launcher tuple
+	 * (from `resolveContainedWindowsBatchCommand`) additionally requires the
+	 * spawner to pass `windowsVerbatimArguments: true`, so the pre-quoted tail
+	 * reaches cmd.exe unmodified. A caller spawning a Windows wrapper this way
+	 * must gate on `isWindowsCommandInterpreterLaunch(cmd)`;
+	 * `src/tools/test-runner.ts` is the reference implementation.
 	 */
 	cmd: string[];
 	/** Explicit cwd for the spawn (invariant 3). */

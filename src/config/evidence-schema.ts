@@ -291,6 +291,12 @@ export const BuildEvidenceSchema = BaseEvidenceSchema.extend({
 				duration_ms: z.number().int(),
 				stdout_tail: z.string(),
 				stderr_tail: z.string(),
+				// Present only when the process could not be created at all
+				// (issue #3050). Declared here so a bundle re-read through
+				// EvidenceBundleSchema keeps the distinction; the runs element is
+				// a plain (strip-mode) z.object, so an undeclared key would be
+				// silently dropped on that read path.
+				spawn_error: z.string().optional(),
 			}),
 		)
 		.default([]),
