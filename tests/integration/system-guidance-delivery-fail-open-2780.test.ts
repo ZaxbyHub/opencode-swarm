@@ -28,6 +28,7 @@ import {
 	hostToModelMessages,
 	renderedText,
 } from '../helpers/host-contract-v1_18_3';
+import { createIsolatedTestEnv } from '../helpers/isolated-test-env';
 import {
 	bootSwarmPluginHost,
 	createPluginHostProject,
@@ -88,8 +89,15 @@ function nudgeIsEligible(): boolean {
 describe('registered architect carrier delivery — fail-open regression (FB-003)', () => {
 	let tempDir: string;
 	let invokedEnhancer = false;
+	// The link.json below makes the plugin materialize
+	// <data dir>/links/receipt-test-cohort. Without platform-root isolation that
+	// landed in the real knowledge store: the prod-store drift check failed the
+	// first attempt, and the retry passed only because the directory now
+	// existed (CI marked this file flaky).
+	let cleanupIsolatedEnv: () => void = () => {};
 
 	beforeEach(async () => {
+		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
 		tempDir = createPluginHostProject('swarm-2780-delivery-failure-');
 		invokedEnhancer = false;
 		resetSwarmState();
@@ -165,6 +173,7 @@ describe('registered architect carrier delivery — fail-open regression (FB-003
 			cancelDeferredMaintenanceScans(tempDir);
 			resetSwarmState();
 			safeRmRecursive(tempDir);
+			cleanupIsolatedEnv();
 		}
 	});
 
