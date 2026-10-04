@@ -402,7 +402,9 @@ graph TB
 
 ## How It Compares
 
-| Feature | Swarm | oh-my-opencode | get-shit-done |
+Both projects compared here have since been renamed: oh-my-opencode is now [OmO](https://github.com/code-yeongyu/oh-my-openagent) and get-shit-done is now [GSD Core](https://github.com/open-gsd/gsd-core). The table reflects them as they were when it was written (April 2026, v6.81.0) and has not been re-checked against their current releases.
+
+| Feature | Swarm | oh-my-opencode (now OmO) | get-shit-done (now GSD Core) |
 |---|:-:|:-:|:-:|
 | Multiple specialized agents | ✅ Core + optional + conditional roster (`/swarm agents`) | ❌ | ❌ |
 | Plan reviewed before coding | ✅ | ❌ | ❌ |
