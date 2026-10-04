@@ -89,11 +89,57 @@ export type EphemeralAgentDispatchResult = {
 	modelId?: string;
 	text: string;
 	error?: string;
+	/**
+	 * The provider error OpenCode recorded on the assistant message
+	 * (`info.error`), when there was one. `status` is then `'error'`.
+	 */
+	providerError?: EphemeralProviderError;
 	durationMs: number;
 	promptBytes: number;
 	responseBytes: number;
 	costFields?: DelegationCostFields;
 };
+
+export type EphemeralProviderError = {
+	name: string;
+	statusCode?: number;
+	message: string;
+};
+
+/**
+ * Read the provider error OpenCode records on an assistant message.
+ *
+ * `session.prompt` answers HTTP 200 even when the provider refused the
+ * request (e.g. a Zen free-tier HTTP 403 for a `bash:false` tool config): the
+ * refusal is `info.error` and the message has no text, so reading only the
+ * parts reports an empty "completed" dispatch.
+ */
+function readProviderError(info: unknown): EphemeralProviderError | null {
+	if (!info || typeof info !== 'object') return null;
+	const error = (info as { error?: unknown }).error;
+	if (!error || typeof error !== 'object') return null;
+	const { name, data } = error as { name?: unknown; data?: unknown };
+	const details = (data && typeof data === 'object' ? data : {}) as {
+		message?: unknown;
+		statusCode?: unknown;
+	};
+	return {
+		name: typeof name === 'string' && name.length > 0 ? name : 'UnknownError',
+		...(typeof details.statusCode === 'number'
+			? { statusCode: details.statusCode }
+			: {}),
+		message:
+			typeof details.message === 'string' && details.message.length > 0
+				? details.message
+				: 'no message',
+	};
+}
+
+function formatProviderError(error: EphemeralProviderError): string {
+	const status =
+		error.statusCode === undefined ? '' : ` (HTTP ${error.statusCode})`;
+	return `Ephemeral agent provider error: ${error.name}${status}: ${error.message}`;
+}
 
 function formatSdkError(prefix: string, error: unknown): string {
 	let detail: string;
@@ -297,6 +343,7 @@ export async function dispatchEphemeralAgent(
 	let sessionId: string | undefined;
 	let timedOut = false;
 	let cancelled = false;
+	let providerError: EphemeralProviderError | null = null;
 	const controller = new AbortController();
 	const onCallerAbort = () => {
 		cancelled = true;
@@ -359,6 +406,11 @@ export async function dispatchEphemeralAgent(
 			);
 		}
 
+		providerError = readProviderError(response.data.info);
+		if (providerError) {
+			throw new Error(formatProviderError(providerError));
+		}
+
 		const responseByteLimit =
 			request.responseByteLimit ?? DEFAULT_EPHEMERAL_RESPONSE_BYTE_LIMIT;
 		const textParts: string[] = [];
@@ -401,6 +453,7 @@ export async function dispatchEphemeralAgent(
 			status: cancelled ? 'cancelled' : timedOut ? 'timeout' : 'error',
 			durationMs: Date.now() - startedAt,
 			error: error instanceof Error ? error.message : String(error),
+			...(providerError ? { providerError } : {}),
 		};
 	} finally {
 		clearTimeout(timeoutHandle);
