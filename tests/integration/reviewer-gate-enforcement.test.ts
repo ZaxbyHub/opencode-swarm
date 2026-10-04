@@ -44,7 +44,8 @@ describe('runtime reviewer gate', () => {
 		);
 		await writeApprovedPlan(testDir, [
 			{ id: '1.1', files: ['src/index.ts'] },
-			{ id: '3.1', files: ['src/index.ts'] },
+			// Tier 3 is decided by files (src/parallel/tier3-classifier.ts), not by id.
+			{ id: '3.1', files: ['src/auth/session.ts'] },
 		]);
 	});
 
@@ -185,7 +186,7 @@ describe('runtime reviewer gate', () => {
 		const sessionId = 'session-reviewer-gate-5';
 
 		const session = ensureAgentSession(sessionId, 'architect', testDir);
-		// Task 3.1 is a Tier 3 task
+		// Task 3.1 touches a Tier 3 (security-sensitive) file
 		await seedAcceptedMutation(testDir, '3.1');
 		// Simulate that the coder delegation happened in this session
 
