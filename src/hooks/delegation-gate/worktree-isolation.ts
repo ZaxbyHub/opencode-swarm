@@ -619,6 +619,38 @@ function handleStandardWorktreeFailure(
 	serializeStandardWorktreeDispatches(parentSessionID, message);
 }
 
+/**
+ * Acquire the worktree lifecycle lock, retrying within `waitMs`.
+ *
+ * The lock is held across the collision check (a git spawn) and the owner
+ * write, by every lane being provisioned and by init orphan recovery.
+ * `tryAcquireLock` alone gives up after about 310ms (5 retries, 10ms→500ms
+ * backoff, no jitter), so parallel coder dispatches that provision lanes at
+ * the same moment hard-stopped each other. Retry with jitter until the lock
+ * is free or the bounded wait is spent.
+ */
+async function acquireWorktreeLifecycleLockWithin(
+	directory: string,
+	taskId: string,
+	waitMs: number,
+): ReturnType<typeof tryAcquireLock> {
+	const deadline = _internals.now() + Math.max(0, waitMs);
+	for (;;) {
+		const attempt = await _internals.tryAcquireWorktreeLifecycleLock(
+			directory,
+			WORKTREE_LIFECYCLE_LOCK_FILE,
+			'worktree-provisioning',
+			taskId,
+		);
+		if (attempt.acquired) return attempt;
+		const remaining = deadline - _internals.now();
+		if (remaining <= 0) return attempt;
+		await _internals.sleep(
+			Math.min(remaining, 50 + Math.floor(Math.random() * 200)),
+		);
+	}
+}
+
 function hardStopStandardWorktreeLifecycle(
 	parentSessionID: string,
 	message: string,
@@ -1290,16 +1322,15 @@ export async function precreateStandardWorktreeSession(args: {
 	// provisional-owner publication with init orphan recovery. The lock must be
 	// held before scanning so ownership cannot change between classification
 	// and cleanup/provisioning.
-	const lifecycleLock = await _internals.tryAcquireWorktreeLifecycleLock(
+	const lifecycleLock = await acquireWorktreeLifecycleLockWithin(
 		args.directory,
-		WORKTREE_LIFECYCLE_LOCK_FILE,
-		'worktree-provisioning',
 		args.taskId,
+		_internals.worktreeLifecycleLockWaitMs,
 	);
 	if (!lifecycleLock.acquired) {
 		hardStopStandardWorktreeLifecycle(
 			args.parentSessionID,
-			'STANDARD_WORKTREE_LIFECYCLE_BUSY: init orphan recovery is active; retry this coder dispatch after recovery completes.',
+			`STANDARD_WORKTREE_LIFECYCLE_BUSY: the worktree lifecycle lock stayed busy for ${Math.round(_internals.worktreeLifecycleLockWaitMs / 1000)}s (another lane is provisioning or init orphan recovery is running); retry this coder dispatch.`,
 		);
 	}
 	try {
@@ -3699,6 +3730,12 @@ export const _internals = {
 	/** Background launch durability fallback: tag ownership without racing the child. */
 	preserveBackgroundWorktreeOwnershipForCallId,
 	tryAcquireWorktreeLifecycleLock: tryAcquireLock,
+	acquireWorktreeLifecycleLockWithin,
+	/** Bounded wait for the lifecycle lock before a dispatch hard-stops. */
+	worktreeLifecycleLockWaitMs: 10_000,
+	now: () => Date.now(),
+	sleep: (ms: number) =>
+		new Promise<void>((resolve) => setTimeout(resolve, ms)),
 	recordWorktreeProvisioningOwner,
 	removeWorktreeProvisioningOwner,
 	lookupWorktreeRecoveryAuthoritiesByTask,
