@@ -80,6 +80,10 @@ import {
 	recordNonTransientFailure,
 	takeToolExecution,
 } from './nontransient-circuit';
+import {
+	type ParallelGateAttribution,
+	resolveParallelGateTaskAttribution,
+} from './parallel-gate-attribution';
 import { decodePreCheckResult } from './pre-check-result';
 import { recordStageAGateRoute, type StageAGateRoute } from './stage-a-route';
 import { getStoredInputArgs } from './stored-input-args';
@@ -91,6 +95,7 @@ const MAX_PENDING_GATE_ROUTES_PER_SESSION = 256;
 const MAX_PENDING_GATE_ROUTE_SESSIONS = 500;
 
 export const _internals = {
+	resolveParallelGateTaskAttribution,
 	extractSwarmIdFromAgentName,
 	getSwarmAgents,
 	getMostRecentAssistantText,
@@ -1002,12 +1007,34 @@ export function createGuardrailsHooks(
 						? undefined
 						: swarmState.agentSessions.get(input.sessionID)?.currentTaskId;
 			let unattributableRoute: StageAGateRoute = 'no_task_correlation';
+			// Parallel coders outside Epic: currentTaskId is the coder that
+			// returned LAST, so credit the run by its files instead
+			// (parallel-gate-attribution.ts). Epic attribution, when it applies,
+			// has already decided above and takes precedence.
+			const parallel: ParallelGateAttribution =
+				epicAttribution.kind === 'none'
+					? await _internals.resolveParallelGateTaskAttribution(
+							effectiveDirectory,
+							input.sessionID,
+							extractGateCallFiles(output.args),
+						)
+					: { kind: 'none' };
 			if (epicAttribution.kind === 'unattributable') {
 				unattributableRoute = 'attribution_ambiguous';
 				emitDurableAttributionAdvisory(
 					input.sessionID,
 					`${effectiveDirectory}\u0000epic\u0000${epicAttribution.message}`,
 					epicAttribution.message,
+				);
+			} else if (parallel.kind === 'task') {
+				taskId = parallel.taskId;
+			} else if (parallel.kind === 'unattributable') {
+				taskId = undefined;
+				unattributableRoute = 'attribution_ambiguous';
+				emitDurableAttributionAdvisory(
+					input.sessionID,
+					`${effectiveDirectory}\u0000parallel\u0000${parallel.message}`,
+					parallel.message,
 				);
 			} else if (!taskId) {
 				// Post-reset durable attribution fallback: reset-session wiped the
