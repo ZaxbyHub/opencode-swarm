@@ -153,10 +153,14 @@ describe('SandboxCapabilityProbe', () => {
 			});
 			linuxExecutorInternals.resolveBwrapBinary = () =>
 				callCount === 0 ? '/usr/bin/bwrap-a' : '/usr/bin/bwrap-b';
-			_internals.withProbeTimeout = mock(async () => {
-				callCount += 1;
-				return 'bubblewrap 1.0';
-			});
+			// Count probe RUNS (one `--version` per detect); each run also issues
+			// the namespace smoke test, which must not shift the count.
+			_internals.withProbeTimeout = mock(
+				async (_cmd: string, args: string[]) => {
+					if (args[0] === '--version') callCount += 1;
+					return 'bubblewrap 1.0';
+				},
+			);
 
 			try {
 				const first = await new SandboxCapabilityProbe().detect();

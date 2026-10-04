@@ -16,7 +16,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { warn } from '../utils/logger';
-import { _internals as bwrapInternals } from './linux/bubblewrap-executor';
+import {
+	BWRAP_NAMESPACE_SMOKE_ARGS,
+	_internals as bwrapInternals,
+} from './linux/bubblewrap-executor';
 import { _internals as macosExecutorInternals } from './macos/sandbox-exec-executor';
 
 /** Possible sandbox status values. */
@@ -589,6 +592,25 @@ async function probeLinux(): Promise<SandboxCapability> {
 			2000,
 		);
 		if (output.length > 0) {
+			// `--version` alone does not prove a sandbox can be created (e.g.
+			// Ubuntu 24.04+ restricts unprivileged user namespaces): run the
+			// smallest real one before reporting a strong sandbox.
+			try {
+				await _internals.withProbeTimeout(
+					binary,
+					[...BWRAP_NAMESPACE_SMOKE_ARGS],
+					2000,
+				);
+			} catch (smokeError) {
+				const detail =
+					smokeError instanceof Error ? smokeError.message : String(smokeError);
+				return {
+					status: 'disabled',
+					mechanism: 'Bubblewrap',
+					platform: 'linux',
+					error: `bwrap cannot create a sandbox on this host (unprivileged user namespaces may be restricted): ${detail}`,
+				};
+			}
 			return {
 				status: 'enabled',
 				strength: 'strong',

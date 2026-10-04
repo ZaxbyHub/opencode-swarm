@@ -58,6 +58,45 @@ function resolveBwrapBinary(): string {
 const TMPFS_SIZE_BYTES = 524288000; // 500 * 1024 * 1024
 
 /**
+ * Arguments for the namespace smoke test: the smallest real sandbox (a
+ * read-only bind of `/`, then `true`). `bwrap --version` succeeds even where
+ * bwrap cannot create a namespace at all — Ubuntu 24.04+ restricts
+ * unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns
+ * = 1`) and every real invocation fails with "setting up uid map: Permission
+ * denied" — so availability must be proven by running one.
+ */
+export const BWRAP_NAMESPACE_SMOKE_ARGS: readonly string[] = [
+	'--ro-bind',
+	'/',
+	'/',
+	'true',
+];
+
+/** Run the namespace smoke test; never throws. */
+function probeBwrapNamespace(
+	binary: string,
+): { ok: true } | { ok: false; reason: string } {
+	try {
+		const result = spawnSync(binary, [...BWRAP_NAMESPACE_SMOKE_ARGS], {
+			windowsHide: true,
+			encoding: 'utf-8',
+			timeout: 5000,
+			stdio: ['ignore', 'ignore', 'pipe'],
+		} satisfies SpawnSyncOptions);
+		if (!result.error && result.status === 0) return { ok: true };
+		const reason =
+			result.error?.message ??
+			(result.stderr?.trim().split('\n')[0] || `exit ${result.status}`);
+		return { ok: false, reason };
+	} catch (err: unknown) {
+		return {
+			ok: false,
+			reason: err instanceof Error ? err.message : String(err),
+		};
+	}
+}
+
+/**
  * Check whether the bwrap binary is present on PATH.
  * Uses spawnSync to probe synchronously without throwing.
  * Logs specific error codes when bwrap is found but unusable.
@@ -90,9 +129,23 @@ function probeBwrap(): boolean {
 			return false;
 		}
 
-		return (
-			result.status === BWRAP_VERSION_EXIT && result.stdout.trim().length > 0
-		);
+		if (
+			result.status !== BWRAP_VERSION_EXIT ||
+			result.stdout.trim().length === 0
+		) {
+			return false;
+		}
+
+		const smoke = _internals.probeBwrapNamespace(binary);
+		if (!smoke.ok) {
+			warn(
+				`Sandbox disabled: bwrap cannot create a sandbox on this host (${smoke.reason}). ` +
+					'Unprivileged user namespaces may be restricted (Ubuntu 24.04+: ' +
+					'kernel.apparmor_restrict_unprivileged_userns=1). Falling through to tool-layer enforcement.',
+			);
+			return false;
+		}
+		return true;
 	} catch (err: unknown) {
 		// Unexpected exception — treat as unavailable
 		const message = err instanceof Error ? err.message : String(err);
@@ -110,9 +163,11 @@ function probeBwrap(): boolean {
  */
 export const _internals: {
 	probeBwrap: typeof probeBwrap;
+	probeBwrapNamespace: typeof probeBwrapNamespace;
 	resolveBwrapBinary: typeof resolveBwrapBinary;
 } = {
 	probeBwrap,
+	probeBwrapNamespace,
 	resolveBwrapBinary,
 } as const;
 
