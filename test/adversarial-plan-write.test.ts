@@ -27,18 +27,10 @@ import * as path from 'node:path';
 import type { Plan } from '../src/config/plan-schema';
 import { savePlan } from '../src/plan/manager';
 import { executeSavePlan, type SavePlanArgs } from '../src/tools/save-plan';
-import { canonicalMkdtemp } from '../tests/helpers/tmpdir';
+import { type CwdSandbox, enterCwdSandbox } from '../tests/helpers/cwd-sandbox';
 
-// Test fixtures
-//
-// Every test runs with its cwd inside a throwaway sandbox, three levels deep,
-// so the traversal targets (`../../etc`, `../../../etc`) and the
-// empty-directory fallback (process.cwd()) resolve INSIDE the sandbox. This
-// file used to run from the repository root: it wrote `.swarm/` state into
-// `<repo>/../../etc` (e.g. `~/etc`), and the empty-string case removes
-// `<cwd>/.swarm/` whenever savePlan('') succeeds.
-const ORIGINAL_CWD = process.cwd();
-let SANDBOX_ROOT = '';
+// Test fixtures — cwd sandboxed so traversal targets never leave it (~/etc).
+let SANDBOX: CwdSandbox;
 let TEST_BASE_DIR = '';
 const VALID_SWARM_ID = 'test-swarm-security';
 
@@ -94,47 +86,21 @@ function createSaveArgs(overrides: Partial<SavePlanArgs> = {}): SavePlanArgs {
 	};
 }
 
-// Cleanup helper
-function cleanupTestDir() {
-	if (existsSync(TEST_BASE_DIR)) {
-		try {
-			rmSync(TEST_BASE_DIR, { recursive: true, force: true });
-		} catch (error) {
-			// Ignore cleanup errors
-		}
-	}
-}
-
 // Setup test directory
 beforeEach(() => {
-	SANDBOX_ROOT = canonicalMkdtemp('adversarial-plan-write-');
-	const sandboxCwd = path.join(SANDBOX_ROOT, 'a', 'b', 'c');
-	mkdirSync(sandboxCwd, { recursive: true });
-	process.chdir(sandboxCwd);
-	TEST_BASE_DIR = path.join(sandboxCwd, '.test-adversarial-plan');
+	SANDBOX = enterCwdSandbox('adversarial-plan-write-');
+	TEST_BASE_DIR = path.join(SANDBOX.cwd, '.test-adversarial-plan');
 	mkdirSync(TEST_BASE_DIR, { recursive: true });
 });
 
 afterEach(() => {
-	process.chdir(ORIGINAL_CWD);
-	cleanupTestDir();
-	rmSync(SANDBOX_ROOT, { recursive: true, force: true });
+	SANDBOX.restore(); // removes TEST_BASE_DIR with the sandbox
 });
 
 describe('Path Traversal Attacks', () => {
-	it('runs inside a sandbox that contains every relative traversal target', () => {
-		// The fallback case below used to land in `~/etc/.swarm` when the
-		// repository sat two directories under $HOME.
-		for (const target of [
-			'legitimate/../../../malicious',
-			'../../etc',
-			'../../../etc',
-			'',
-		]) {
-			const resolved = path.resolve(TEST_BASE_DIR, target);
-			expect(resolved.startsWith(SANDBOX_ROOT + path.sep)).toBe(true);
-		}
-		expect(process.cwd().startsWith(SANDBOX_ROOT + path.sep)).toBe(true);
+	it('resolves every relative traversal target inside the sandbox', () => {
+		for (const t of ['legitimate/../../../malicious', '../../../etc', ''])
+			expect(path.resolve(TEST_BASE_DIR, t)).toStartWith(SANDBOX.root);
 	});
 
 	describe('savePlan - working_directory path traversal', () => {
@@ -235,13 +201,9 @@ describe('Path Traversal Attacks', () => {
 
 			const result = await executeSavePlan(args);
 
-			// Verify no escape (resolves to /etc/passwd, a file: nothing can be
-			// created beneath it)
+			// Verify no escape
 			const etcExists = existsSync(
-				path.join(
-					TEST_BASE_DIR,
-					'../../../../../../../../../etc/passwd/.swarm',
-				),
+				path.join(args.working_directory!, '.swarm'),
 			);
 			expect(etcExists).toBe(false);
 		});

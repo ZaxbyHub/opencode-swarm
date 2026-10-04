@@ -42,12 +42,12 @@ afterEach(() => {
 
 import * as realFs from 'node:fs';
 import * as os from 'node:os';
-import * as path from 'node:path';
 import {
 	clearToolchainCache,
 	_internals as discoveryInternals,
 } from '../../../src/build/discovery';
 import * as realUtils from '../../../src/utils';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // Capture the seam's original before any hook can mutate it (AGENTS.md §7).
 const originalDiscoverySpawnSync = discoveryInternals.spawnSyncImpl;
@@ -134,9 +134,7 @@ describe('Batch tool migration: createSwarmTool integration verification', () =>
 	const originalCwd = process.cwd();
 	let sandboxCwd = '';
 	beforeAll(() => {
-		sandboxCwd = realFs.realpathSync(
-			realFs.mkdtempSync(path.join(os.tmpdir(), 'batch-tool-migrations-')),
-		);
+		sandboxCwd = canonicalMkdtemp('batch-tool-migrations-');
 		process.chdir(sandboxCwd);
 	});
 	afterAll(() => {

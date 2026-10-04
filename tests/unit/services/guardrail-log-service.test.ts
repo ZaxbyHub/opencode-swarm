@@ -17,6 +17,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleGuardrailLog } from '../../../src/services/guardrail-log-service';
+import { SYNTHETIC_HOME } from '../../helpers/synthetic-home';
 
 // ---------------------------------------------------------------------------
 // Test setup
@@ -491,17 +492,6 @@ describe('Redaction: command with secret → output does NOT contain raw secret'
 // ---------------------------------------------------------------------------
 // Test: Redaction — path under home dir → output redacted via redactPath
 // ---------------------------------------------------------------------------
-
-// A user home in the shape redactPath recognizes. Deriving it from homedir()
-// broke whenever HOME is not /home/<user> (an isolated test HOME, /root, ...):
-// the redactor strips /home/<name> only, so the last segment of such a HOME
-// survived and the "no username" assertions failed.
-const SYNTHETIC_HOME =
-	process.platform === 'win32'
-		? 'C:\\Users\\swarm-test-user'
-		: process.platform === 'darwin'
-			? '/Users/swarm-test-user'
-			: '/home/swarm-test-user';
 
 describe('Redaction: path under home dir → output redacted via redactPath (no raw /home/<user> or C:\\Users\\<user>)', () => {
 	test('POSIX /home/<user>/ path is redacted to ~ in file_write entry', async () => {

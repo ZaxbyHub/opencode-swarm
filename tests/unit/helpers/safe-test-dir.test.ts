@@ -112,7 +112,7 @@ describe('safeRmRecursive', () => {
 		);
 	});
 
-	it('never removes the working directory or its ancestors, even inside os.tmpdir()', () => {
+	it('never removes the working directory or its ancestors, even inside the temp root', () => {
 		// Regression: with the checkout under $TMPDIR the old guard accepted
 		// safeRmRecursive('.') and deleted the whole checkout.
 		const { dir, cleanup } = createSafeTestDir('safe-rm-cwd-');
@@ -123,9 +123,7 @@ describe('safeRmRecursive', () => {
 		try {
 			process.chdir(work);
 			expect(() => safeRmRecursive('.')).toThrow('current working directory');
-			expect(() => safeRmRecursive(work)).toThrow(
-				'current working directory',
-			);
+			expect(() => safeRmRecursive(work)).toThrow('current working directory');
 			expect(() => safeRmRecursive(dir)).toThrow('current working directory');
 			expect(fs.existsSync(path.join(work, 'src', 'keep.ts'))).toBe(true);
 			// A sibling of the working directory is still removable.
@@ -147,7 +145,7 @@ describe('safeRmRecursive', () => {
 	it('rejects symlinks or junctions inside the system temp directory that resolve outside it', () => {
 		const { dir, cleanup } = createSafeTestDir('safe-rm-symlink-');
 		const linkPath = path.join(dir, 'outside-link');
-		// The filesystem root is outside os.tmpdir() on every host; cwd is not
+		// The filesystem root is outside the temp root on every host; cwd is not
 		// (a checkout may itself live under $TMPDIR).
 		const outsideTarget = path.parse(canonicalTmpDir()).root;
 		fs.symlinkSync(

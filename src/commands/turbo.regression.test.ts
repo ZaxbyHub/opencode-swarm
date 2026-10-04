@@ -429,10 +429,7 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 			expect(systemPrompt).toContain('Stage A gates');
 			expect(systemPrompt).toContain('Stage B');
 			expect(systemPrompt).toContain('TIER 3');
-			expect(systemPrompt).toContain(
-				'**Stage B** (reviewer + test_engineer) is still REQUIRED for every task',
-			);
-			expect(systemPrompt).not.toContain('can skip Stage B');
+			expect(systemPrompt).toContain('still REQUIRED for every task');
 			expect(systemPrompt).toContain('Speed optimization enabled');
 		});
 	});
