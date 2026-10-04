@@ -14,6 +14,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { PluginConfig, WorktreeIsolationConfig } from '../../config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
+import { stripKnownSwarmPrefix } from '../../config/schema';
 import { closeProjectDb } from '../../db/project-db';
 import { epicCommitLandingFor } from '../../epic/task-landing.js';
 import { tryAcquireLock } from '../../parallel/file-locks';
@@ -299,6 +300,55 @@ export const standardWorktreeByCallID = new Map<
 	StandardWorktreeDispatch
 >();
 export const standardWorktreeSerializationSessions = new Set<string>();
+
+/**
+ * Child sessions this plugin created for isolated coder lanes, by agent.
+ *
+ * The plugin rewrites the coder's Task `task_id` to the lane's child session
+ * id, so the Task result returns `<task id="ses_…">`. A model that reuses
+ * that id on its next dispatch (observed: the Stage B test_engineer) makes
+ * OpenCode resume the coder's session as a different agent — the new agent
+ * inherits the coder's lane, history and scope. The delegation gate refuses
+ * such a dispatch (assertTaskIdNotForeignLaneSession). Bounded FIFO.
+ */
+const LANE_CHILD_SESSION_LIMIT = 512;
+export const laneChildSessionAgents = new Map<string, string>();
+
+export function recordLaneChildSession(sessionId: string, agent: string): void {
+	laneChildSessionAgents.delete(sessionId);
+	laneChildSessionAgents.set(sessionId, agent);
+	while (laneChildSessionAgents.size > LANE_CHILD_SESSION_LIMIT) {
+		const oldest = laneChildSessionAgents.keys().next().value;
+		if (oldest === undefined) break;
+		laneChildSessionAgents.delete(oldest);
+	}
+}
+
+/**
+ * Refuse a Task dispatch whose `task_id` resumes a lane child session the
+ * plugin created for a DIFFERENT agent. Resuming the same agent's session
+ * stays allowed; ids the plugin did not create are not judged here.
+ */
+export function assertTaskIdNotForeignLaneSession(
+	args: Record<string, unknown> | undefined,
+): void {
+	if (!args) return;
+	const taskId = typeof args.task_id === 'string' ? args.task_id.trim() : '';
+	if (!taskId) return;
+	const owner = laneChildSessionAgents.get(taskId);
+	if (owner === undefined) return;
+	const requested =
+		typeof args.subagent_type === 'string'
+			? stripKnownSwarmPrefix(args.subagent_type).toLowerCase()
+			: '';
+	if (requested === owner) return;
+	throw new Error(
+		`TASK_SESSION_RESUME_MISMATCH: task_id "${taskId}" is the session this plugin created for an isolated ${owner} lane; ` +
+			`passing it would resume that ${owner} session as ${requested || 'another agent'} (its lane, history and scope). ` +
+			`task_id is a session-resume handle, not the plan task id: omit it to start a fresh ${requested || 'agent'} session, ` +
+			'and name the plan task in the prompt (e.g. "TASK: 1.1").',
+	);
+}
 let standardWorktreeMergeQueue: Promise<unknown> = Promise.resolve();
 
 /**
@@ -627,6 +677,7 @@ export function getStandardWorktreeDegradationReason(
 export function resetStandardWorktreeIsolationState(): void {
 	standardWorktreeByCallID.clear();
 	standardWorktreeSerializationSessions.clear();
+	laneChildSessionAgents.clear();
 	serializationStateBySessionID.clear();
 	standardWorktreeDegradationReasonBySession.clear();
 	awaitingMergeByCallID.clear();
@@ -1905,6 +1956,7 @@ export async function precreateStandardWorktreeSession(args: {
 	}
 
 	args.outputArgs.task_id = childSessionId;
+	recordLaneChildSession(childSessionId, 'coder');
 	// Issue #2002: the child session executes in the lane, not in the project
 	// root. Record that root so the write gates (scope-guard, guardrails
 	// tool-before) resolve this session's scope binding and path containment

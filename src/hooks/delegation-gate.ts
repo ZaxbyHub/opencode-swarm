@@ -168,6 +168,7 @@ import { recoverPreparedTaskRepair } from '../workflow/task-repair.js';
 import { recoverPreparedTaskTerminal } from '../workflow/task-terminal.js';
 import { recordDeadLaneReclaim } from './delegation-gate/dead-lane-reclaim';
 import {
+	assertTaskIdNotForeignLaneSession,
 	awaitingMergeByCallID,
 	checkStandardWorktreeSerializationRelease,
 	cleanupStandardWorktreeForCallId,
@@ -4283,6 +4284,9 @@ export function createDelegationGateHook(
 			preflightArgs &&
 			typeof preflightArgs.subagent_type === 'string'
 		) {
+			// A task_id naming a lane child session this plugin created for
+			// another agent would resume that session as the new agent.
+			assertTaskIdNotForeignLaneSession(preflightArgs);
 			const exactPreflightAgent = preflightArgs.subagent_type;
 			const preflightAgent = stripKnownSwarmPrefix(exactPreflightAgent);
 			const registeredMode = registeredAgents
