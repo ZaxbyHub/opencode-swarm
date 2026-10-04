@@ -70,7 +70,7 @@ import {
 	shouldParallelizeReview,
 } from '../parallel/review-router.js';
 import {
-	type ApprovedSnapshotInfo,
+	approvedSnapshotCoversPlan,
 	computePlanStructureHash,
 	loadLastPlanCriticApprovedSnapshot,
 	takeSnapshotEvent,
@@ -1772,37 +1772,6 @@ const PLAN_CRITIC_TASK_SIGNALS = [
 ] as const;
 
 /**
- * Whether a plan-critic approval snapshot still covers `plan`.
- *
- * The baseline is the structural hash (task/phase statuses excluded, F-A1).
- * That hash includes the `current_phase` cursor (#2532, deliberate — its bytes
- * are persisted on bindings and snapshots), so completing a phase's last task
- * rotated it and the first coder dispatch of the next phase was refused,
- * although the plan was never edited. The snapshot carries the approved plan,
- * so an approval also covers a plan that differs from it ONLY in the cursor:
- * the snapshot must be self-consistent (its stored hash is the hash of its
- * own plan) and re-hashing that plan at the current cursor must give the
- * current plan's hash. Any structural edit still invalidates the approval.
- */
-function planCriticSnapshotCoversPlan(
-	approved: ApprovedSnapshotInfo,
-	plan: Plan,
-): boolean {
-	const current = computePlanStructureHash(plan);
-	if (approved.payloadHash === current) return true;
-	if (approved.plan.current_phase === plan.current_phase) return false;
-	if (computePlanStructureHash(approved.plan) !== approved.payloadHash) {
-		return false;
-	}
-	return (
-		computePlanStructureHash({
-			...approved.plan,
-			current_phase: plan.current_phase,
-		}) === current
-	);
-}
-
-/**
  * Returns whether the plan in the given directory has a valid plan-critic
  * approval. Does not throw — returns `false` for any failure (fail-closed).
  */
@@ -1824,7 +1793,7 @@ export async function isPlanCriticApproved(
 			approved.approval?.source !== 'plan_critic_gate'
 		)
 			return false;
-		return planCriticSnapshotCoversPlan(approved, plan);
+		return approvedSnapshotCoversPlan(approved, plan);
 	} catch {
 		return false;
 	}
@@ -1876,8 +1845,8 @@ async function assertPlanCriticApprovedForExecution(
 	// coder dispatch of every run (bug F-A1). An actual structural change
 	// (description, files, dependencies, ...) still trips this staleness check;
 	// a phase-boundary cursor advance alone does not (see
-	// planCriticSnapshotCoversPlan).
-	if (!planCriticSnapshotCoversPlan(approved, plan)) {
+	// approvedSnapshotCoversPlan).
+	if (!approvedSnapshotCoversPlan(approved, plan)) {
 		throw new Error(
 			'PLAN_CRITIC_GATE_VIOLATION: Current plan differs from the last critic-approved snapshot. ' +
 				'Re-run MODE: CRITIC-GATE after plan changes before delegating to coder. ' +

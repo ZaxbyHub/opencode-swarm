@@ -2651,6 +2651,38 @@ export async function loadLastApprovedPlan(
 }
 
 /**
+ * Whether a critic-approved snapshot still covers `plan`.
+ *
+ * The baseline is the structural hash (task/phase statuses excluded, F-A1).
+ * That hash includes the `current_phase` cursor (#2532, deliberate — its bytes
+ * are persisted on bindings and snapshots), so completing a phase's last task
+ * rotated it: the first coder dispatch of the next phase was refused and
+ * get_approved_plan reported drift, although the plan was never edited. The
+ * snapshot carries the approved plan, so an approval also covers a plan that
+ * differs from it ONLY in the cursor:
+ * the snapshot must be self-consistent (its stored hash is the hash of its
+ * own plan) and re-hashing that plan at the current cursor must give the
+ * current plan's hash. Any structural edit still invalidates the approval.
+ */
+export function approvedSnapshotCoversPlan(
+	approved: ApprovedSnapshotInfo,
+	plan: Plan,
+): boolean {
+	const current = computePlanStructureHash(plan);
+	if (approved.payloadHash === current) return true;
+	if (approved.plan.current_phase === plan.current_phase) return false;
+	if (computePlanStructureHash(approved.plan) !== approved.payloadHash) {
+		return false;
+	}
+	return (
+		computePlanStructureHash({
+			...approved.plan,
+			current_phase: plan.current_phase,
+		}) === current
+	);
+}
+
+/**
  * Find the most recent PLAN-CRITIC-approved snapshot in the ledger.
  *
  * Like {@link loadLastApprovedPlan}, but additionally requires the snapshot's

@@ -9,9 +9,10 @@ a phase's last task advances the cursor, so the first coder dispatch of the next
 phase was refused with `PLAN_CRITIC_GATE_VIOLATION`, even though nobody had
 edited the plan.
 
-The approval snapshot stores the approved plan. The gate (and
-`isPlanCriticApproved`) now also accepts a current plan that differs from the
-approved plan **only** in the cursor. The snapshot must be self-consistent,
+The approval snapshot stores the approved plan. The gate, `isPlanCriticApproved`
+and `get_approved_plan`'s `drift_detected` now all use one check
+(`approvedSnapshotCoversPlan` in `src/plan/ledger.ts`), which also accepts a
+current plan that differs from the approved plan **only** in the cursor. The snapshot must be self-consistent,
 and re-hashing its plan at the current cursor must give the current plan's
 hash.
 

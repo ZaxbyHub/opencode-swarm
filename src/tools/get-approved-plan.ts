@@ -24,6 +24,7 @@ import {
 } from '../db/qa-gate-profile.js';
 import {
 	type ApprovedSnapshotInfo,
+	approvedSnapshotCoversPlan,
 	computePlanStructureHash,
 	loadLastApprovedPlan,
 } from '../plan/ledger';
@@ -234,8 +235,10 @@ export async function executeGetApprovedPlan(
 	// `computePlanStructureHash` (status-excluded), so the comparison must also
 	// be status-excluded. Task/phase status changes are execution progress, not
 	// plan edits, and must never report drift; any structural change must.
+	// A cursor-only advance (#2532) is not drift either: see
+	// approvedSnapshotCoversPlan, the same check the critic gate applies.
 	const currentHash = computePlanStructureHash(currentPlan);
-	const driftDetected = currentHash !== approved.payloadHash;
+	const driftDetected = !approvedSnapshotCoversPlan(approved, currentPlan);
 
 	const currentPayload: CurrentPlanPayload = {
 		plan: summaryOnly ? summarizePlan(currentPlan) : currentPlan,
