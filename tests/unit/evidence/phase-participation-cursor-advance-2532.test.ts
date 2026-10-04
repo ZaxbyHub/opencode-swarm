@@ -5,6 +5,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import {
 	observePhaseParticipationToolResult,
 	readPhaseParticipation,
+	rebindCursorTaggedReceipts,
 	reserveApprovedPhaseParticipation,
 	resetPhaseParticipationForTests,
 } from '../../../src/evidence/phase-participation';
@@ -186,6 +187,64 @@ describe('docs receipts survive the live cursor advance (#2532 / PRR-001)', () =
 		);
 		expect(nextPhaseRead.status).toBe('valid');
 		expect(nextPhaseRead.found).toBe(false);
+	});
+
+	// PHASE-WRAP order (the phase-wrap skill): the phase's last task is
+	// completed FIRST — the cursor advances to 3 — and only then is the docs
+	// agent dispatched, so its receipt is stamped 3. phase_complete(2) used to
+	// reject that receipt (a tag ahead of the completing phase), and a
+	// re-dispatch stamps 3 again: the phase could never complete.
+	test('docs dispatched at PHASE-WRAP, after the last task, satisfies phase 2', async () => {
+		await updateTaskStatus(directory, '2.2', 'completed');
+		expect(readPlan(directory).current_phase).toBe(3);
+		await dispatchDocs('docs-call-wrap');
+
+		const plan = readPlan(directory);
+		const gateRead = await readPhaseParticipation(directory, plan, 2, 'docs');
+		expect(gateRead.status).toBe('valid');
+		expect(gateRead.found).toBe(true);
+
+		// phase_complete(2)'s success path rebinds it to phase 2, so it can no
+		// longer satisfy phase 3 (per-phase enforcement).
+		expect(
+			await rebindCursorTaggedReceipts(directory, plan, 2, 'docs'),
+		).toEqual({ rebound: 1 });
+		expect(
+			(await readPhaseParticipation(directory, plan, 3, 'docs')).found,
+		).toBe(false);
+		expect(
+			(await readPhaseParticipation(directory, plan, 2, 'docs')).found,
+		).toBe(true);
+	});
+
+	test('a wrap-window receipt needs every task of the completing phase done', async () => {
+		// Cursor pushed to 3 while 2.2 is still in progress: a docs run then
+		// has not seen phase 2's finished work and must not satisfy it.
+		const plan = readPlan(directory);
+		plan.current_phase = 3;
+		writePlan(directory, plan);
+		await dispatchDocs('docs-call-early');
+
+		const gateRead = await readPhaseParticipation(
+			directory,
+			readPlan(directory),
+			2,
+			'docs',
+		);
+		expect(gateRead.found).toBe(false);
+	});
+
+	test('a receipt two phases ahead never satisfies an earlier phase', async () => {
+		await updateTaskStatus(directory, '2.2', 'completed');
+		await dispatchDocs('docs-call-wrap');
+		// Phase 1 completed long ago; a phase-3-tagged receipt is not its docs.
+		const gateRead = await readPhaseParticipation(
+			directory,
+			readPlan(directory),
+			1,
+			'docs',
+		);
+		expect(gateRead.found).toBe(false);
 	});
 
 	test('a structural plan edit still invalidates the receipt (anti-gaming)', async () => {
