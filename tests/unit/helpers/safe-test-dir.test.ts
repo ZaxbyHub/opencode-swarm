@@ -125,6 +125,14 @@ describe('safeRmRecursive', () => {
 			expect(() => safeRmRecursive('.')).toThrow('current working directory');
 			expect(() => safeRmRecursive(work)).toThrow('current working directory');
 			expect(() => safeRmRecursive(dir)).toThrow('current working directory');
+			// …also when the target reaches it through a symlinked parent.
+			if (process.platform !== 'win32') {
+				fs.symlinkSync(dir, path.join(dir, 'alias'), 'dir');
+				const viaLink = path.join(dir, 'alias', 'checkout');
+				expect(() => safeRmRecursive(viaLink)).toThrow(
+					'current working directory',
+				);
+			}
 			expect(fs.existsSync(path.join(work, 'src', 'keep.ts'))).toBe(true);
 			// A sibling of the working directory is still removable.
 			const sibling = path.join(dir, 'scratch');
