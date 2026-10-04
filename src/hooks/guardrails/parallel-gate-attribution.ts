@@ -47,7 +47,29 @@ export async function resolveParallelGateTaskAttribution(
 	sessionID: string,
 	files: readonly string[] | null,
 ): Promise<ParallelGateAttribution> {
-	const inFlight = inFlightTasks(sessionID);
+	const candidates = inFlightTasks(sessionID);
+	if (candidates.length < 2) return { kind: 'none' };
+
+	// Only tasks of the current plan count: an entry for a task that is no
+	// longer planned (a replaced plan in a long-lived session) awaits nothing.
+	let scopes: Map<string, readonly string[]>;
+	try {
+		const plan = await loadPlanJsonOnly(directory);
+		scopes = new Map();
+		for (const phase of plan?.phases ?? []) {
+			for (const task of phase.tasks ?? []) {
+				if (candidates.includes(task.id)) {
+					scopes.set(task.id, task.files_touched ?? []);
+				}
+			}
+		}
+	} catch (error) {
+		return {
+			kind: 'unattributable',
+			message: `STAGE A ATTRIBUTION: ${candidates.length} tasks are awaiting Stage A (${candidates.join(', ')}), but the plan could not be read (${error instanceof Error ? error.message : String(error)}). Nothing was credited.`,
+		};
+	}
+	const inFlight = candidates.filter((taskId) => scopes.has(taskId));
 	if (inFlight.length < 2) return { kind: 'none' };
 
 	const prefix = `STAGE A ATTRIBUTION: ${inFlight.length} tasks are awaiting Stage A in parallel (${inFlight.join(', ')}), so this gate run is credited by the files it checked`;
@@ -58,24 +80,6 @@ export async function resolveParallelGateTaskAttribution(
 		return {
 			kind: 'unattributable',
 			message: `${prefix}, but it names no files. Re-run it with \`files\` set to ONE task's files.`,
-		};
-	}
-
-	let scopes: Map<string, readonly string[]>;
-	try {
-		const plan = await loadPlanJsonOnly(directory);
-		scopes = new Map();
-		for (const phase of plan?.phases ?? []) {
-			for (const task of phase.tasks ?? []) {
-				if (inFlight.includes(task.id)) {
-					scopes.set(task.id, task.files_touched ?? []);
-				}
-			}
-		}
-	} catch (error) {
-		return {
-			kind: 'unattributable',
-			message: `${prefix}, but the plan could not be read (${error instanceof Error ? error.message : String(error)}). Nothing was credited.`,
 		};
 	}
 

@@ -158,6 +158,13 @@ describe('resolveParallelGateTaskAttribution', () => {
 		).toEqual({ kind: 'none' });
 	});
 
+	test('in-flight entries for tasks no longer in the plan do not count', async () => {
+		inFlight('2.1', '9.9');
+		expect(
+			await resolveParallelGateTaskAttribution(directory, 'architect', []),
+		).toEqual({ kind: 'none' });
+	});
+
 	test('credits the one in-flight task whose planned files contain every checked file', async () => {
 		inFlight('2.1', '2.2', '2.4');
 		expect(
