@@ -96,7 +96,7 @@ describe('turbo _internals DI seam', () => {
 		// disclosure (issue #1690, task 2.1). The disclosure is the user-facing
 		// contract that says which gates ARE bypassed.
 		expect(result).toContain('Turbo Mode enabled');
-		expect(result).toContain('Bypassed: Stage B');
+		expect(result).toContain('Bypassed: phase_complete Gates 1-5');
 	});
 
 	test('swapping _internals.loadPluginConfigWithMeta with a mock works — lean turbo on path (line 196)', async () => {

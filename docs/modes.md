@@ -17,7 +17,7 @@ All QA gates run normally. Every task passes through reviewer + test_engineer be
 
 ### Turbo
 
-Skips Stage B (reviewer + test_engineer) for low-risk tasks. The task still goes through automated gates (syntax, placeholder, SAST), just not human-level review.
+Skips phase_complete Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) and lets a non-Tier-3 task be re-dispatched to the coder before Stage A passes. Stage A and Stage B (reviewer + test_engineer) are still required for every task: `update_task_status(completed)` checks them whether or not Turbo is active.
 
 **Turbo does NOT skip Tier 3 files.** Security-sensitive paths always run full review, even when Turbo is on:
 
@@ -40,7 +40,7 @@ Session-scoped. Resets when you start a new session.
 
 ### Full-Auto
 
-Full-Auto is opencode-swarm's autonomy control plane. It reduces approval friction by deterministically allowing safe operations and routing ambiguous or high-risk operations through the read-only `critic_oversight` agent before they execute. Unlike Turbo (which bypasses Stage B for non-Tier-3 files), Full-Auto adds a *new* decision layer on top of every existing guardrail.
+Full-Auto is opencode-swarm's autonomy control plane. It reduces approval friction by deterministically allowing safe operations and routing ambiguous or high-risk operations through the read-only `critic_oversight` agent before they execute. Unlike Turbo (which skips phase_complete Gates 1–5), Full-Auto adds a *new* decision layer on top of every existing guardrail.
 
 **First-class toggle.** Full-Auto is enabled and disabled at will from the session — no config-level enablement is required:
 
@@ -213,7 +213,7 @@ Opt-in (`epic.mode.enabled: true`). Binds to the current plan: `/swarm epic star
 
 **Lean Turbo** composes with all session modes except an open epic — it is a lane planning layer, not a mode toggle. It partitions tasks into parallel lanes when `turbo.lean` is configured in config, regardless of whether Turbo or Full-Auto is active.
 
-**Turbo + Full-Auto** are independent. Both can be on simultaneously — Turbo bypasses Stage B gates for qualifying tasks, Full-Auto keeps the architect moving between tasks without prompting you.
+**Turbo + Full-Auto** are independent. Both can be on simultaneously — Turbo skips phase_complete Gates 1–5, Full-Auto keeps the architect moving between tasks without prompting you.
 
 **Epic + Turbo / Lean Turbo** do not combine. `/swarm epic start` refuses while Turbo is on (config `turbo_mode`, or any session in this process) or a Lean run is running, and while an epic is open `/swarm turbo` refuses every enabling form (`on`, `lean on`, `standard on`). Epic plans its own waves and never dispatches through the Lean runner. See [Mode comparison](#mode-comparison).
 
@@ -252,7 +252,7 @@ Skips the compaction service. Use when you're hitting context pressure on short 
 | Mode | Scope | Persistent | Skips | When |
 |------|-------|:---:|------|------|
 | Balanced (session) | Session | No | Nothing | Default |
-| Turbo | Session | No | Stage B for non-Tier-3 | Rapid iteration |
+| Turbo | Session | No | phase_complete Gates 1–5 | Rapid iteration |
 | Lean Turbo | Session | Config | Parallel lanes for non-conflicting tasks | Multi-task phases |
 | Full-Auto | Session | No | User confirmation between interactions | Unattended runs |
 | [Epic Mode](#epic-mode-preview) | Plan (one open epic per project) | Yes, until `/swarm epic close` | Nothing — per-task QA always runs; ready tasks with disjoint scopes run as parallel waves | Large plans with many independent tasks |
@@ -330,13 +330,13 @@ Key characteristics:
 - **Parallel coder execution** — multiple coders dispatched simultaneously, each working in their own declared-scope lane
 - **File-conflict partitioning** — tasks assigned to lanes based on declared scopes and file conflict analysis
 - **Config-driven** — enabled via `turbo.strategy: "lean"` in config; `/swarm turbo lean on` activates it for the session
-- **Stage B model** — lane tasks skip per-task Stage B (reviewer + test_engineer); quality is enforced at phase-end via phase reviewer and critic gates. Degraded and serialized tasks retain full Stage B.
+- **Stage B model** — every task, in a lane or not, still needs per-task Stage B (reviewer + test_engineer) before `update_task_status(completed)`; the phase reviewer and critic add a holistic gate at phase end.
 
 ### Comparison with Standard Turbo
 
 | Aspect | Standard Turbo | Lean Turbo |
 |--------|---------------|------------|
-| Stage B | Skipped for non-Tier-3 files | Skipped for lane tasks; phase-end reviewer/critic as quality gate. Degraded/serialized tasks retain full Stage B |
+| Stage B | Required for every task | Required for every task; phase-end reviewer/critic add a holistic gate |
 | Coder execution | Single coder | Multiple coders in parallel lanes |
 | Activation | `/swarm turbo on` (session toggle) | `turbo.strategy: "lean"` in config + `/swarm turbo lean on` |
 | Scope handling | No scope analysis | Partitioned by file-conflict analysis |
@@ -471,7 +471,7 @@ Phase-level evidence is written to `.swarm/evidence/{phase}/lean-turbo-phase.jso
 - **Phase reviewer** — dispatched with combined phase diff; read-only verification that all lane tasks are complete and consistent
 - **Phase critic** — dispatched with boundary review; read-only verification of lane phase boundaries and cross-lane dependencies
 - Both are **required** at `phase_complete` when configured — absence blocks the phase gate
-- These serve as the holistic quality gate for lane tasks (which skip per-task Stage B). Degraded and serialized tasks still get individual Stage B.
+- These add a holistic quality gate over all lane work; each task still gets its own Stage B.
 
 ### Recovery from Paused/Blocked
 
@@ -488,7 +488,7 @@ Inspect the file to see:
 
 **Degraded tasks** — when Lean Turbo cannot place a task in a parallel lane, it falls back to standard serial flow:
 - Degradation reasons: global file conflict, protected path, unknown scope, invalid scope
-- Degraded tasks do **NOT** get Lean Turbo lane bypass — they run full Stage B gates (reviewer + test_engineer)
+- Degraded tasks do **NOT** run in a parallel lane — they run one at a time, with Stage B (reviewer + test_engineer) like every task
 - `degradation_summary` shown in status when all tasks degraded
 
 **Full-Auto blocking** — Full-Auto state can block the Lean Turbo runner:

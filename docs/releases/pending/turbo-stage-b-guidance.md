@@ -1,0 +1,28 @@
+# Docs: Turbo and Lean Turbo guidance now says Stage B is required
+
+## What
+
+The Turbo banner, the Lean Turbo banner, the `/swarm turbo` enable message,
+`docs/commands.md`, `docs/modes.md` and the README all said that Turbo (for
+non-Tier-3 tasks) and Lean Turbo (for lane tasks) skip per-task Stage B
+(reviewer + test_engineer). The runtime does not skip it. The final, locked
+check in `update_task_status(completed)` always passes a fallback directory, so
+the Turbo and Lean bypass branches in `checkReviewerGate` are never reached
+from the real tool. They have been unreachable since the transactional
+task-transition change. Only tests that call `checkReviewerGate` directly
+still exercise them.
+
+An architect that followed the old guidance completed tasks without Stage B
+and was refused. The guidance now matches the runtime:
+- Stage A and Stage B are required for every task;
+- Turbo skips phase_complete Gates 1–5;
+- Turbo lets a non-Tier-3 task be re-dispatched to the coder before Stage A;
+- Lean's phase reviewer and critic are an extra gate, not a replacement for
+  Stage B.
+
+The stale `phase-complete.ts:774–827` reference in the banner is replaced by a
+reference to the gate table.
+
+No behaviour changes. If the Turbo/Lean Stage B bypass is meant to work, the
+fix belongs in `update_task_status`, and this text should be reverted together
+with that change.

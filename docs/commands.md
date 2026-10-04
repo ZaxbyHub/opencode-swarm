@@ -762,8 +762,8 @@ Toggle Turbo Mode strategy for the active session [on|off|lean|standard|status]
 
 Toggles Turbo Mode for the current session. Supports two strategies:
 
-**Standard turbo** — Bypassed: Stage B (reviewer + test_engineer) for Tier 0-2 tasks; phase_complete Gates 1-5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council). Still enforced: Stage A (lint, imports, pre_check_batch); Tier 3 Stage B; Gate 5b (architecture-supervisor); Gate 6 (final-council); Gate 7 (full-auto).
-**Lean turbo** — parallel lane execution with per-lane reviewer gates and file-lock conflict detection. Bypassed: Stage B (reviewer + test_engineer) for Tier 0-2 tasks; phase_complete Gates 1-5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council). Still enforced: Stage A (lint, imports, pre_check_batch); Tier 3 Stage B; Gate 5b (architecture-supervisor); Gate 6 (final-council); Gate 7 (full-auto).
+**Standard turbo** — Bypassed: phase_complete Gates 1-5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council). Still enforced: Stage A (lint, imports, pre_check_batch); Stage B (reviewer + test_engineer) for every task; Gate 5b (architecture-supervisor); Gate 6 (final-council); Gate 7 (full-auto).
+**Lean turbo** — parallel lane execution with per-lane reviewer gates and file-lock conflict detection. Bypassed: phase_complete Gates 1-5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council). Still enforced: Stage A (lint, imports, pre_check_batch); Stage B (reviewer + test_engineer) for every task; Gate 5b (architecture-supervisor); Gate 6 (final-council); Gate 7 (full-auto).
 
 Subcommands:
   turbo on           — enable turbo (uses lean when config turbo.strategy is "lean", otherwise standard)

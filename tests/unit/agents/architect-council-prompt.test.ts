@@ -454,16 +454,15 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 				expect(prompt).not.toMatch(/skip.*Stage B|Stage B.*skip/i);
 			});
 
-			// NOTE: "Bypassed: Stage B" language is INTENTIONAL after FR-002 (turbo
-			// disclosure, issue #1690). The slash-commands section must enumerate
-			// which gates ARE bypassed; this is the user-facing transparency
-			// contract. Do not regress this to opaque "Turbo Mode enabled".
-			it('documents Stage B bypass for Tier 0-2 in the slash-commands section', () => {
-				// The slash-commands description for /swarm turbo must explicitly call out
-				// the bypass scope (issue #1690 / FR-002 acceptance). Specifically the
-				// "Bypassed: Stage B (reviewer + test_engineer) for Tier 0-2" string must be
-				// present verbatim so the model advertises its bypass scope to the user.
-				expect(prompt).toMatch(/Bypassed:\s*Stage B[^]*for Tier 0-2/i);
+			// The slash-commands section must enumerate which gates ARE bypassed
+			// and which are still enforced (FR-002 turbo disclosure, issue #1690);
+			// do not regress this to an opaque "Turbo Mode enabled". Turbo does not
+			// bypass Stage B: update_task_status enforces it for every task.
+			it('documents the Turbo bypass scope in the slash-commands section', () => {
+				expect(prompt).toMatch(/Bypassed:\s*phase_complete Gates 1-5/i);
+				expect(prompt).toMatch(
+					/Still enforced:[^]*Stage B \(reviewer \+ test_engineer\) for every task/i,
+				);
 			});
 		});
 

@@ -128,8 +128,11 @@ describe('System Enhancer — Lean Turbo Banner Delivery (#2759)', () => {
 			);
 		});
 
-		it('states lane tasks skip per-task Stage B', () => {
-			expect(LEAN_TURBO_BANNER).toContain('Lane tasks skip per-task Stage B');
+		it('states lane tasks still need per-task Stage B', () => {
+			expect(LEAN_TURBO_BANNER).toContain(
+				'Lane tasks still need per-task Stage B',
+			);
+			expect(LEAN_TURBO_BANNER).not.toContain('skip per-task Stage B');
 		});
 	});
 

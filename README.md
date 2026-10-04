@@ -142,7 +142,7 @@ Swarm has two independent mode systems:
 | Mode | Safety | Speed | When to Use |
 |------|--------|-------|------------|
 | **Balanced** (default) | High | Medium | Everyday development |
-| **Turbo** | Medium | Fast | Rapid iteration; skips Stage B gates for non-Tier-3 files |
+| **Turbo** | Medium | Fast | Rapid iteration; skips phase_complete Gates 1–5 (Stage A and Stage B still run for every task) |
 | **Lean Turbo** | High | Fast | Parallel lanes for non-conflicting tasks (up to `max_parallel_coders` coders) |
 | **Full-Auto** | Deterministic policy + critic oversight | Fast | Unattended multi-interaction runs |
 | **Epic** (opt-in) | High — per-task QA always runs; Turbo stays off | Fast on plans with many independent tasks | Large plans: one plan = one epic, run phase by phase as parallel waves of tasks with disjoint scopes |
