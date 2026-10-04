@@ -217,6 +217,26 @@ describe('docs receipts survive the live cursor advance (#2532 / PRR-001)', () =
 		).toBe(true);
 	});
 
+	test('the wrap window follows plan order, not id + 1', async () => {
+		// Non-contiguous ids (2 → 5): the cursor lands on the next phase in
+		// plan order, and a docs run dispatched there still covers 2.
+		const plan = planAtPhase2Active();
+		plan.phases[2].id = 5;
+		plan.phases[2].tasks[0].id = '5.1';
+		plan.phases[2].tasks[0].phase = 5;
+		writePlan(directory, plan);
+		await updateTaskStatus(directory, '2.2', 'completed');
+		expect(readPlan(directory).current_phase).toBe(5);
+		await dispatchDocs('docs-call-gap');
+		const read = await readPhaseParticipation(
+			directory,
+			readPlan(directory),
+			2,
+			'docs',
+		);
+		expect(read.found).toBe(true);
+	});
+
 	test('a wrap-window receipt needs every task of the completing phase done', async () => {
 		// Cursor pushed to 3 while 2.2 is still in progress: a docs run then
 		// has not seen phase 2's finished work and must not satisfy it.
