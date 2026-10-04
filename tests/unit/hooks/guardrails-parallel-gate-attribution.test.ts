@@ -232,6 +232,36 @@ describe('guardrails credit the checked task, not the last-returned coder', () =
 		);
 	});
 
+	test('gate tools other than pre_check_batch keep currentTaskId', async () => {
+		// diff takes `paths` and lint no file argument at all: re-attributing
+		// them by files would drop them from the gate log (false
+		// partial-gate warnings) and tell the architect to pass `files`.
+		const hooks = createGuardrailsHooks(directory, CONFIG);
+		for (const [tool, args] of [
+			['diff', { paths: ['src/slugify.ts'] }],
+			['lint', { mode: 'check' }],
+		] as const) {
+			await hooks.toolBefore(
+				{ tool, sessionID: 'architect', callID: `c-${tool}` },
+				{ args },
+			);
+			await hooks.toolAfter(
+				{ tool, sessionID: 'architect', callID: `c-${tool}` },
+				{ title: '', output: '{}', metadata: null },
+			);
+		}
+		const session = swarmState.agentSessions.get('architect');
+		expect([...(session?.gateLog.get('2.4') ?? [])].sort()).toEqual([
+			'diff',
+			'lint',
+		]);
+		expect(
+			(session?.pendingAdvisoryMessages ?? []).some((m) =>
+				m.includes('STAGE A ATTRIBUTION'),
+			),
+		).toBe(false);
+	});
+
 	test('with one task in flight currentTaskId attribution is unchanged', async () => {
 		swarmState.agentSessions.get('architect')?.taskWorkflowStates.delete('2.1');
 		await runPreCheck(['src/slugify.ts'], 'p3');

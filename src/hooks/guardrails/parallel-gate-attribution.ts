@@ -1,16 +1,19 @@
 /**
- * Stage A gate attribution while several coders are in flight.
+ * Stage A attribution of `pre_check_batch` while several coders are in flight.
  *
- * A gate tool run (`pre_check_batch`, …) is credited to the calling session's
- * single `currentTaskId`. With parallel coders (v8 parallelization) that is
+ * A gate tool run is credited to the calling session's single
+ * `currentTaskId`. With several tasks awaiting Stage A — parallel coders (v8
+ * parallelization), or Turbo's coder re-dispatch before Stage A — that is
  * whichever coder returned LAST, not the task whose files the gate checked:
- * the run is credited to the wrong task, and the task that was actually
- * checked never reaches Stage B.
+ * a `pre_check_batch` verdict lands on the wrong task, and the task that was
+ * actually checked never reaches Stage B.
  *
- * While the session has two or more tasks at `coder_delegated`, the run is
- * credited by its `files` to the one in-flight task whose planned scope
- * (`files_touched`) contains every checked file — or to none, with an
- * advisory. With zero or one task in flight the caller keeps its existing
+ * While the session has two or more tasks at `coder_delegated`, a
+ * `pre_check_batch` run is credited by its `files` to the one in-flight task
+ * whose planned scope (`files_touched`) contains every checked file — or to
+ * none, with an advisory. The caller applies this to `pre_check_batch` only:
+ * the other gate tools carry no Stage A verdict and some take no file
+ * argument. With zero or one task in flight the caller keeps its existing
  * attribution (`currentTaskId`, then the durable post-reset fallback).
  */
 import * as path from 'node:path';

@@ -1008,11 +1008,15 @@ export function createGuardrailsHooks(
 						: swarmState.agentSessions.get(input.sessionID)?.currentTaskId;
 			let unattributableRoute: StageAGateRoute = 'no_task_correlation';
 			// Parallel coders outside Epic: currentTaskId is the coder that
-			// returned LAST, so credit the run by its files instead
-			// (parallel-gate-attribution.ts). Epic attribution, when it applies,
-			// has already decided above and takes precedence.
+			// returned LAST, so credit a pre_check_batch run (the gate whose
+			// verdict moves a task through Stage A) by its files instead
+			// (parallel-gate-attribution.ts). Other gate tools (diff, lint,
+			// imports, …) keep currentTaskId: they carry no Stage A verdict and
+			// some take no file argument at all. Epic attribution, when it
+			// applies, has already decided above and takes precedence.
 			const parallel: ParallelGateAttribution =
-				epicAttribution.kind === 'none'
+				epicAttribution.kind === 'none' &&
+				normalizeToolName(input.tool) === 'pre_check_batch'
 					? await _internals.resolveParallelGateTaskAttribution(
 							effectiveDirectory,
 							input.sessionID,
