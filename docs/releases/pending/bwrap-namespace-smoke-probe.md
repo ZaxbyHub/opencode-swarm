@@ -13,8 +13,9 @@ Ubuntu 24.04 and later do this by default
 (`kernel.apparmor_restrict_unprivileged_userns=1`). The plugin reported a
 strong sandbox there, and every sandboxed command failed.
 
-Both probes now also run the smallest real sandbox
-(`bwrap --ro-bind / / true`):
+Both probes now also run the smallest real sandbox, using the same kernel
+features as a real wrap (user, IPC and PID namespaces, dropped capabilities,
+`/proc` and `/dev` mounts, then `true`):
 - if it fails, the executor reports bwrap as unavailable and falls back to
   tool-layer enforcement, with a warning naming the cause;
 - the capability probe reports `disabled` with the error.

@@ -58,17 +58,32 @@ function resolveBwrapBinary(): string {
 const TMPFS_SIZE_BYTES = 524288000; // 500 * 1024 * 1024
 
 /**
- * Arguments for the namespace smoke test: the smallest real sandbox (a
- * read-only bind of `/`, then `true`). `bwrap --version` succeeds even where
- * bwrap cannot create a namespace at all — Ubuntu 24.04+ restricts
- * unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns
- * = 1`) and every real invocation fails with "setting up uid map: Permission
- * denied" — so availability must be proven by running one.
+ * Arguments for the namespace smoke test: the smallest sandbox that needs the
+ * same kernel features as a real wrap (user, IPC and PID namespaces, a new
+ * session, dropped capabilities, `/proc` and `/dev` mounts), then `true`.
+ * `--unshare-net` is left out because the real wrap adds it only when the
+ * policy's network mode is off. `bwrap --version` succeeds even where bwrap
+ * cannot create a namespace at all — Ubuntu 24.04+ restricts unprivileged
+ * user namespaces (`kernel.apparmor_restrict_unprivileged_userns = 1`) and
+ * every real invocation fails with "setting up uid map: Permission denied";
+ * unprivileged containers can allow the user namespace but refuse `--proc`.
+ * Availability must therefore be proven by running one.
  */
 export const BWRAP_NAMESPACE_SMOKE_ARGS: readonly string[] = [
+	'--unshare-user',
+	'--unshare-ipc',
+	'--unshare-pid',
+	'--die-with-parent',
+	'--new-session',
+	'--cap-drop',
+	'ALL',
 	'--ro-bind',
 	'/',
 	'/',
+	'--dev',
+	'/dev',
+	'--proc',
+	'/proc',
 	'true',
 ];
 
