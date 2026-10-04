@@ -24,7 +24,16 @@
  * 3. Tools execute successfully with provided contexts
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+} from 'bun:test';
 
 afterEach(() => {
 	restoreDiscoverySeam();
@@ -33,6 +42,7 @@ afterEach(() => {
 
 import * as realFs from 'node:fs';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import {
 	clearToolchainCache,
 	_internals as discoveryInternals,
@@ -116,6 +126,24 @@ import { test_runner } from '../../../src/tools/test-runner';
 import { todo_extract } from '../../../src/tools/todo-extract';
 
 describe('Batch tool migration: createSwarmTool integration verification', () => {
+	// The "without context (uses cwd)" cases really run in process.cwd(): from
+	// the repository root they saved a "Test Plan" into the checkout's own
+	// .swarm/ and extracted output_*.js files next to package.json, which then
+	// broke later suites (delegation-gate-background-task) in the same tree.
+	// Run the whole file from a throwaway directory instead.
+	const originalCwd = process.cwd();
+	let sandboxCwd = '';
+	beforeAll(() => {
+		sandboxCwd = realFs.realpathSync(
+			realFs.mkdtempSync(path.join(os.tmpdir(), 'batch-tool-migrations-')),
+		);
+		process.chdir(sandboxCwd);
+	});
+	afterAll(() => {
+		process.chdir(originalCwd);
+		realFs.rmSync(sandboxCwd, { recursive: true, force: true });
+	});
+
 	beforeEach(() => {
 		mock.restore();
 		mock.clearAllMocks();
