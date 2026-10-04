@@ -189,6 +189,7 @@ import {
 } from './pr-workflow-gate.js';
 export { resetStandardWorktreeIsolationState };
 
+import { matchesTier3 } from '../parallel/tier3-classifier.js';
 import { pushAdvisory } from '../utils/advisory-queue';
 import { _internals as _wtiInternals } from './delegation-gate/worktree-isolation';
 import {
@@ -340,6 +341,39 @@ type PreparedCoderScope =
 			declaredFiles: string[] | null;
 			binding: ScopeBinding;
 	  };
+
+/**
+ * Whether Turbo may skip the Stage A re-delegation block for `taskId`.
+ *
+ * Tier 3 is defined by the files a task touches (security-sensitive paths,
+ * src/parallel/tier3-classifier.ts), the rule update_task_status already
+ * applies to Turbo's Stage B bypass. The gate used to guess it from the task
+ * id (`startsWith('3.')`): every phase-3 task was treated as Tier 3 and a
+ * security-sensitive task in any other phase was bypassed. Only a task whose
+ * planned `files_touched` are known and contain no Tier 3 path is bypassable;
+ * an unknown task, an empty file list or an unreadable plan is not.
+ */
+async function turboMayBypassTask(
+	directory: string,
+	taskId: string,
+): Promise<boolean> {
+	try {
+		const plan = await loadPlanJsonOnly(directory);
+		for (const phase of plan?.phases ?? []) {
+			for (const task of phase.tasks ?? []) {
+				if (task.id !== taskId) continue;
+				return (
+					Array.isArray(task.files_touched) &&
+					task.files_touched.length > 0 &&
+					!matchesTier3(task.files_touched)
+				);
+			}
+		}
+	} catch {
+		// Unreadable plan: fail closed (no bypass).
+	}
+	return false;
+}
 
 async function prepareCoderScope(
 	directory: string,
@@ -3463,6 +3497,7 @@ export const _internals = {
 	buildParallelExecutionGuidance,
 	extractTaskFileDirectives,
 	loadPlanJsonOnly,
+	turboMayBypassTask,
 	recordPendingDelegationForBackground,
 	writeDelegationFallbackForBackground,
 	reserveBackgroundCoderSlotForDispatch,
@@ -5158,7 +5193,7 @@ export function createDelegationGateHook(
 			if (preflightWorkflow.state === 'coder_delegated') {
 				const turboBypass =
 					hasActiveTurboMode(input.sessionID) &&
-					!preflightTaskId.startsWith('3.');
+					(await turboMayBypassTask(directory, preflightTaskId));
 				if (!turboBypass) {
 					throw new Error(
 						`STAGE_A_REQUIRED: Task ${preflightTaskId} has an accepted coder mutation that has not passed pre_check_batch. ` +
@@ -5491,12 +5526,11 @@ export function createDelegationGateHook(
 			}
 
 			// Turbo mode bypasses the block — but Tier 3 tasks are never bypassed
-			const turbo = hasActiveTurboMode(input.sessionID);
-			if (turbo) {
-				// Tier 3 tasks always require reviewer, even in turbo mode
-				// Tier 3 pattern: task IDs like 3.x or tasks in phase 3
-				const isTier3 = taskId.startsWith('3.');
-				if (!isTier3) continue; // Allow bypass for non-Tier-3 in turbo
+			if (
+				hasActiveTurboMode(input.sessionID) &&
+				(await turboMayBypassTask(directory, taskId))
+			) {
+				continue;
 			}
 
 			// Parallel-mode exemption: a coder for a DIFFERENT task does not block.
