@@ -92,6 +92,16 @@ export function safeRmRecursive(targetPath: string): void {
 	}
 
 	const lexicalTarget = path.resolve(targetPath);
+	// Never remove the working directory or any of its ancestors. A checkout
+	// can itself live under os.tmpdir() (a clone in /tmp, a worktree in a temp
+	// dir), and then the tmpdir checks below accept '.' — which deleted the
+	// whole checkout.
+	const cwd = path.resolve(process.cwd());
+	if (isWithinHostFilesystemPath(cwd, lexicalTarget)) {
+		throw new Error(
+			`safeRmRecursive: refusing to remove ${lexicalTarget}; it is the current working directory or contains it`,
+		);
+	}
 	const tmpBase = os.tmpdir();
 	const canonicalTmpBase = canonicalRealpath(tmpBase);
 	const lexicalTmpBase = path.resolve(tmpBase);
