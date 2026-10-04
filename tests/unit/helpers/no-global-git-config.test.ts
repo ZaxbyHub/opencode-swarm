@@ -17,6 +17,9 @@ import * as path from 'node:path';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '../../..');
 const TEST_TREES = ['tests', 'test'];
+/** Tests colocated with the code under src/ (`*.test.ts`). */
+const SRC_TREE = 'src';
+const COLOCATED_TEST = /\.test\.(ts|js|mjs|cjs)$/;
 const SELF = path.relative(REPO_ROOT, import.meta.path);
 
 // The argv form spans lines when formatted (`'config',\n'--global',`), so
@@ -65,12 +68,16 @@ function findInSource(rel: string, text: string): string[] {
 
 function findGlobalGitConfigWrites(root: string): string[] {
 	const hits: string[] = [];
-	for (const tree of TEST_TREES) {
-		for (const file of sourceFiles(path.join(root, tree))) {
-			const rel = path.relative(root, file);
-			if (rel === SELF) continue;
-			hits.push(...findInSource(rel, fs.readFileSync(file, 'utf8')));
-		}
+	const files = [
+		...TEST_TREES.flatMap((tree) => [...sourceFiles(path.join(root, tree))]),
+		...[...sourceFiles(path.join(root, SRC_TREE))].filter((file) =>
+			COLOCATED_TEST.test(file),
+		),
+	];
+	for (const file of files) {
+		const rel = path.relative(root, file);
+		if (rel === SELF) continue;
+		hits.push(...findInSource(rel, fs.readFileSync(file, 'utf8')));
 	}
 	return hits;
 }
@@ -97,7 +104,7 @@ describe('no test writes the global git config', () => {
 		).toEqual([]);
 	});
 
-	test('no test tree file runs `git config --global`', () => {
+	test('no test file (tests/, test/, src/**/*.test.*) runs `git config --global`', () => {
 		expect(findGlobalGitConfigWrites(REPO_ROOT)).toEqual([]);
 	});
 });
