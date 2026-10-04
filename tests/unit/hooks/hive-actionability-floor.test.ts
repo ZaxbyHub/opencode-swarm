@@ -30,6 +30,7 @@ import {
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store.js';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types.js';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
+import { redirectHiveHome } from '../../helpers/hive-home';
 import { ACTIONABLE_FIELDS, makeConfig, readRawHive } from './hive-fixtures.js';
 
 const FIXED_COHORT = {
@@ -101,15 +102,11 @@ async function readHiveEvents(): Promise<Record<string, unknown>[]> {
 describe('actionability floor on promotion (#1821 A3)', () => {
 	let tempHome: string;
 	let swarmDir: string;
-	let realHome: string | undefined;
+	let restoreHiveHome: () => void = () => {};
 
 	beforeEach(() => {
 		tempHome = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'hive-a3-')));
-		realHome = process.env.HOME;
-		process.env.HOME = tempHome;
-		if (process.platform === 'win32') {
-			process.env.LOCALAPPDATA = path.join(tempHome, 'AppData', 'Local');
-		}
+		restoreHiveHome = redirectHiveHome(tempHome);
 		swarmDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'swarm-a3-')));
 		_internals.resolveCohortId = mock(async () => FIXED_COHORT);
 		_internals.validateLesson = mock(() => ({
@@ -124,9 +121,7 @@ describe('actionability floor on promotion (#1821 A3)', () => {
 	});
 
 	afterEach(() => {
-		if (realHome === undefined) delete process.env.HOME;
-		else process.env.HOME = realHome;
-		delete process.env.LOCALAPPDATA;
+		restoreHiveHome();
 		rmSync(tempHome, { recursive: true, force: true });
 		rmSync(swarmDir, { recursive: true, force: true });
 		mock.restore();

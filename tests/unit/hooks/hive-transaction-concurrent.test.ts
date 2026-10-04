@@ -24,6 +24,7 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
+import { redirectHiveHome } from '../../helpers/hive-home';
 import { ACTIONABLE_FIELDS } from './hive-fixtures.js';
 
 async function readHiveCount(): Promise<number> {
@@ -59,25 +60,19 @@ function spawnPromoter(scriptPath: string): Promise<number> {
 
 describe('hive transaction storage gate (#1847)', () => {
 	let tempHome: string;
-	let realHome: string | undefined;
+	let restoreHiveHome: () => void = () => {};
 	let scriptDir: string;
 
 	beforeEach(() => {
 		tempHome = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'hive-conc-')));
-		realHome = process.env.HOME;
-		process.env.HOME = tempHome;
-		if (process.platform === 'win32') {
-			process.env.LOCALAPPDATA = path.join(tempHome, 'AppData', 'Local');
-		}
+		restoreHiveHome = redirectHiveHome(tempHome);
 		scriptDir = realpathSync(
 			mkdtempSync(path.join(os.tmpdir(), 'hive-scripts-')),
 		);
 	});
 
 	afterEach(() => {
-		if (realHome === undefined) delete process.env.HOME;
-		else process.env.HOME = realHome;
-		delete process.env.LOCALAPPDATA;
+		restoreHiveHome();
 		rmSync(tempHome, { recursive: true, force: true });
 		rmSync(scriptDir, { recursive: true, force: true });
 	});

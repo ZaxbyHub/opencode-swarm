@@ -29,6 +29,7 @@ import type {
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
+import { redirectHiveHome } from '../../helpers/hive-home';
 import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { ACTIONABLE_FIELDS, makeConfig, readRawHive } from './hive-fixtures.js';
 
@@ -111,15 +112,11 @@ function makeSwarmEntry(
 describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 	let tempHome: string;
 	let swarmDir: string;
-	let realHome: string | undefined;
+	let restoreHiveHome: () => void = () => {};
 
 	beforeEach(() => {
 		tempHome = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'hive-adv-')));
-		realHome = process.env.HOME;
-		process.env.HOME = tempHome;
-		if (process.platform === 'win32') {
-			process.env.LOCALAPPDATA = path.join(tempHome, 'AppData', 'Local');
-		}
+		restoreHiveHome = redirectHiveHome(tempHome);
 		swarmDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'swarm-adv-')));
 		_internals.resolveCohortId = mock(async () => FIXED_COHORT);
 		// Permissive validator by default; specific tests override severity.
@@ -135,9 +132,7 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 	});
 
 	afterEach(() => {
-		if (realHome === undefined) delete process.env.HOME;
-		else process.env.HOME = realHome;
-		delete process.env.LOCALAPPDATA;
+		restoreHiveHome();
 		rmSync(tempHome, { recursive: true, force: true });
 		rmSync(swarmDir, { recursive: true, force: true });
 		mock.restore();
