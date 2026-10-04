@@ -12,7 +12,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { resetSwarmState } from '../state';
@@ -434,19 +440,36 @@ describe('ADVERSARIAL: fallbackDir Windows-specific attacks', () => {
 		// Windows reserved names
 		const reservedNames = ['NUL', 'CON', 'AUX', 'COM1', 'LPT1'];
 
-		for (const name of reservedNames) {
-			const reservedPath = path.join(name, '..', '..', '..', 'etc');
+		// `<name>/../../../etc` resolves to `../../etc` from the cwd. Run from a
+		// sandbox three levels deep: from the repository root that target is
+		// outside the checkout (e.g. ~/etc), and any plan another run left there
+		// decided this test's outcome.
+		const originalCwd = process.cwd();
+		const sandbox = realpathSync(
+			mkdtempSync(path.join(os.tmpdir(), 'uts-reserved-')),
+		);
+		const sandboxCwd = path.join(sandbox, 'a', 'b', 'c');
+		mkdirSync(sandboxCwd, { recursive: true });
+		process.chdir(sandboxCwd);
+		try {
+			for (const name of reservedNames) {
+				const reservedPath = path.join(name, '..', '..', '..', 'etc');
+				expect(path.resolve(reservedPath).startsWith(sandbox)).toBe(true);
 
-			const result = await executeUpdateTaskStatus(
-				{
-					task_id: '1.1',
-					status: 'pending',
-				},
-				reservedPath,
-			);
+				const result = await executeUpdateTaskStatus(
+					{
+						task_id: '1.1',
+						status: 'pending',
+					},
+					reservedPath,
+				);
 
-			// Reserved names can cause issues on Windows
-			expect(result.success).toBe(false);
+				// Reserved names can cause issues on Windows
+				expect(result.success).toBe(false);
+			}
+		} finally {
+			process.chdir(originalCwd);
+			rmSync(sandbox, { recursive: true, force: true });
 		}
 	});
 });
