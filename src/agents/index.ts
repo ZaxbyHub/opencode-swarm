@@ -12,6 +12,8 @@ import {
 	ALL_AGENT_NAMES,
 	COUNCIL_AGENT_TOOL_MAP,
 	DEFAULT_MODELS,
+	EPIC_AGENT_TOOL_MAP,
+	EPIC_TOOL_NAMES,
 	EXTERNAL_SKILL_AGENT_TOOL_MAP,
 	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
@@ -20,6 +22,7 @@ import {
 	TURBO_AGENT_TOOL_MAP,
 } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { isEpicModeConfigEnabled } from '../epic/config.js';
 import { resolvePlanningProfile } from '../plan/planning-profile';
 import {
 	addDeferredWarning,
@@ -507,6 +510,7 @@ function createSwarmAgents(
 					execution_mode: pluginConfig?.execution_mode ?? 'balanced',
 				},
 			}),
+			isEpicModeConfigEnabled(pluginConfig),
 		);
 		architect.name = prefixName('architect');
 
@@ -1436,6 +1440,27 @@ export function getAgentConfigs(
 				if (turboTools.length > 0) {
 					allowedTools = Array.from(
 						new Set([...(allowedTools ?? []), ...turboTools]),
+					);
+				}
+			}
+
+			// Feature-gate: Epic Mode tools — only for the roles in
+			// EPIC_AGENT_TOOL_MAP (the architect) and only when epic.mode.enabled
+			// is explicitly true (top-level `epic`, or the legacy `turbo.epic`).
+			// Strip first, then add (the skill-gate precedent below), so a
+			// tool_filter override cannot grant an Epic tool the gate withholds.
+			{
+				if (allowedTools) {
+					const epicToolSet = new Set<string>(EPIC_TOOL_NAMES);
+					allowedTools = allowedTools.filter((t) => !epicToolSet.has(t));
+				}
+				const epicTools =
+					EPIC_AGENT_TOOL_MAP[
+						baseAgentName as keyof typeof EPIC_AGENT_TOOL_MAP
+					] ?? [];
+				if (isEpicModeConfigEnabled(config) && epicTools.length > 0) {
+					allowedTools = Array.from(
+						new Set([...(allowedTools ?? []), ...epicTools]),
 					);
 				}
 			}

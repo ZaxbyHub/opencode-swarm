@@ -14,6 +14,12 @@ const REPO_ROOT = path.resolve(__dirname, '../../../');
 const SCRIPT_PATH = path.join(REPO_ROOT, 'scripts', 'check-invariants.sh');
 const SCRIPT_TS_PATH = path.join(REPO_ROOT, 'scripts', 'check-invariants.ts');
 const GATE_UTILS_PATH = path.join(REPO_ROOT, 'scripts', 'gate-utils.ts');
+const CENSUS_TS_PATH = path.join(
+	REPO_ROOT,
+	'scripts',
+	'ci',
+	'quarantine-census.ts',
+);
 const LIB_PATH = path.join(
 	REPO_ROOT,
 	'scripts',
@@ -75,6 +81,11 @@ function setupFixtureDir(fixtureName: string): string {
 	fs.copyFileSync(
 		GATE_UTILS_PATH,
 		path.join(fixtureDir, 'scripts', 'gate-utils.ts'),
+	);
+	fs.mkdirSync(path.join(fixtureDir, 'scripts', 'ci'), { recursive: true });
+	fs.copyFileSync(
+		CENSUS_TS_PATH,
+		path.join(fixtureDir, 'scripts', 'ci', 'quarantine-census.ts'),
 	);
 	fs.copyFileSync(
 		LIB_PATH,

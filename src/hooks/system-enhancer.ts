@@ -30,6 +30,7 @@ import {
 	RepoGraphConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
+import { isEpicOpenForProject } from '../epic/lifecycle';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
 import { loadPlan } from '../plan/manager';
@@ -40,7 +41,6 @@ import {
 import {
 	getAgentSession,
 	getResolvedAutoProceed,
-	hasActiveEpicMode,
 	hasActiveFullAuto,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
@@ -1968,11 +1968,14 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 						if (isArchitect) {
 							// v6.x: Turbo/Full-Auto/Lean-Turbo banner injection for architect
 							const sessionIdBanner = _input.sessionID;
+							// Epic v2: the banner follows the project's open epic
+							// (sentinel-first probe — one existsSync when off).
+							const epicOpenBanner = isEpicOpenForProject(directory);
 							if (
 								hasActiveTurboMode(sessionIdBanner) ||
 								hasActiveFullAuto(sessionIdBanner) ||
 								hasActiveLeanTurbo(sessionIdBanner) ||
-								hasActiveEpicMode(sessionIdBanner)
+								epicOpenBanner
 							) {
 								if (hasActiveTurboMode(sessionIdBanner)) {
 									tryInject(TURBO_MODE_BANNER);
@@ -1986,13 +1989,10 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 								// both banners gives the architect contradictory
 								// instructions. The Epic banner restates what's
 								// relevant about Lean Turbo at dispatch time.
-								if (
-									hasActiveLeanTurbo(sessionIdBanner) &&
-									!hasActiveEpicMode(sessionIdBanner)
-								) {
+								if (hasActiveLeanTurbo(sessionIdBanner) && !epicOpenBanner) {
 									tryInject(LEAN_TURBO_BANNER);
 								}
-								if (hasActiveEpicMode(sessionIdBanner)) {
+								if (epicOpenBanner) {
 									tryInject(EPIC_MODE_BANNER);
 								}
 							}
@@ -2737,11 +2737,13 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 					if (isArchitect_b) {
 						// v6.x: Turbo/Full-Auto/Lean-Turbo banner injection for architect (Path B)
 						const sessionIdBanner_b = _input.sessionID;
+						// Epic v2: project-scoped open-epic probe (see Path A).
+						const epicOpenBanner_b = isEpicOpenForProject(directory);
 						if (
 							hasActiveTurboMode(sessionIdBanner_b) ||
 							hasActiveFullAuto(sessionIdBanner_b) ||
 							hasActiveLeanTurbo(sessionIdBanner_b) ||
-							hasActiveEpicMode(sessionIdBanner_b)
+							epicOpenBanner_b
 						) {
 							if (hasActiveTurboMode(sessionIdBanner_b)) {
 								candidates.push({
@@ -2765,10 +2767,7 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 							}
 							// Suppress the Lean Turbo banner when Epic Mode is
 							// active (see same rationale at Path A above).
-							if (
-								hasActiveLeanTurbo(sessionIdBanner_b) &&
-								!hasActiveEpicMode(sessionIdBanner_b)
-							) {
+							if (hasActiveLeanTurbo(sessionIdBanner_b) && !epicOpenBanner_b) {
 								candidates.push({
 									id: `candidate-${idCounter++}`,
 									kind: 'agent_context' as ContextCandidate['kind'],
@@ -2778,7 +2777,7 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 									metadata: { contentType: 'prose' as ContentType },
 								});
 							}
-							if (hasActiveEpicMode(sessionIdBanner_b)) {
+							if (epicOpenBanner_b) {
 								candidates.push({
 									id: `candidate-${idCounter++}`,
 									kind: 'agent_context' as ContextCandidate['kind'],

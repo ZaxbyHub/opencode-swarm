@@ -10,7 +10,7 @@ Most frameworks throw agents at a problem and hope coherence emerges. It doesn't
 
 Swarm enforces discipline:
 - One Architect owns all decisions
-- One task executes at a time
+- One task per coder delegation; coders run concurrently only for provably non-conflicting scopes (v8 parallel execution, Epic Mode waves), each in an isolated worktree
 - Every task gets QA'd before the next starts
 - Project state persists in files, not memory
 
@@ -303,7 +303,7 @@ All directive language (must, should, needs, verdict, review needed, dead) was r
 - Read-only (cannot write code)
 
 ### Pipeline Agents: The Hands
-- Coder: Implements one task at a time by default; for plans with provably file-disjoint task groups, multiple coders execute concurrently in isolated git worktrees (v8 parallel-first execution, #1674). Serial execution is the automatic, gate-enforced fallback whenever the active phase's pending tasks have overlapping or unknown declared scopes.
+- Coder: Implements one task at a time by default; for plans with provably file-disjoint task groups, multiple coders execute concurrently in isolated git worktrees (v8 parallel-first execution, #1674). Serial execution is the automatic, gate-enforced fallback whenever the active phase's pending tasks have overlapping or unknown declared scopes. Under Epic Mode, coders run as waves issued by `epic_next_wave`, always in isolated worktrees (see [modes.md — Epic Mode](modes.md#epic-mode-preview)).
 - Reviewer: Dual-pass review — general correctness first, then automatic security-only pass for security-sensitive files (OWASP Top 10 categories)
 - Test Engineer: Generates verification tests + adversarial tests (attack vectors, boundary violations, injection attempts)
 - Gates: Automated `diff`, `imports`, `lint`, and `secretscan` tools verify contracts, dependencies, style, and security before/during review.
@@ -413,6 +413,7 @@ For each task in current phase:
     │   └── If blocked → Skip, mark [BLOCKED]
     │
     ├── 5a. @coder implements (ONE task only)
+    │       (Epic Mode: epic_next_wave issues a wave; one coder Task per task id, dispatched together, and steps 5b onward run per task)
     │       └── → REQUIRED: Print task start confirmation
     │
     ├── 5b. diff + imports tools analyze changes + semantic diff injection
@@ -527,9 +528,10 @@ All tasks in phase done
 │         - .swarm/evidence/{phase}/architecture-supervisor.json (if architectural_supervision enabled; written by write_architecture_supervisor_evidence)
 │         - .swarm/evidence/{phase}/auto-review.json (written by run_phase_review when auto_review phase/plan review is enabled)
 │         - .swarm/evidence/final-council.json (if final_council enabled; written by write_final_council_evidence, last phase only)
+│         - .swarm/evidence/{phase}/epic-phase-review.json (only while an epic is open; written by epic_phase_review)
 │         If either missing: run the missing gate first
 │         Note: Gates 1–5 bypassed in turbo mode; architecture-supervisor, explicit auto-review gate mode, and final-council are never bypassed
-├── 6. Call phase_complete (enforces up to eight gates automatically)
+├── 6. Call phase_complete (enforces up to nine gates automatically; the ninth, Epic phase readiness, only while an epic is open)
 │         - Gate 1: completion-verify — deterministic identifier check in source files
 │         - Gate 2: drift verifier evidence — reads drift-verifier.json for approved verdict
 │         - Gate 3: hallucination guard — reads hallucination-guard.json for approved verdict (if enabled)
@@ -538,13 +540,14 @@ All tasks in phase done
 │         - Gate 5b: architecture supervisor — reads architecture-supervisor.json (if enabled, never turbo-bypassed)
 │         - Final review: verifies complete content-addressed auto-review evidence (gate mode only, never turbo-bypassed)
 │         - Gate 6: final council — reads final-council.json for approved verdict (if final_council enabled, last phase only, never turbo-bypassed)
+│         - Epic phase readiness — reads epic-phase-review.json for APPROVED reviewer + critic (only while an epic is open; Epic keeps Turbo off)
 │         - Gates 1–5 bypassed when turbo mode is active; Gate 5b, final-review gate mode, and Gate 6 are never bypassed
 └── 7. Ask user: "Ready for Phase [N+1]?"
 ```
 
 ### Phase Completion Gates
 
-The `phase_complete` tool enforces up to eight gates before marking a phase complete. Gates 1–5 and phase council are turbo-bypassed; architecture supervisor, explicit auto-review gate mode, and final council are never turbo-bypassed.
+The `phase_complete` tool enforces up to nine gates before marking a phase complete (the ninth, `epic_phase_readiness`, applies only while an epic is open). Gates 1–5 and phase council are turbo-bypassed; architecture supervisor, explicit auto-review gate mode, final council and Epic phase readiness are never turbo-bypassed (Epic keeps Turbo off).
 
 Every invocation first returns a versioned structured gate report containing every applicable pass, block, error, and not-applicable result in deterministic order. Gate checks are read-only and individually bounded. A phase transition is committed only after the complete report passes, the evidence/config/plan snapshot remains byte-identical under the plan lock, and the same preflight report is reproduced. A blocker never dispatches a model or performs a partial phase transition. Recovery actions are typed and name registered tools such as `run_phase_review`, `repair_gate_evidence`, and `repair_knowledge_receipt_ledger`.
 
@@ -558,6 +561,7 @@ Every invocation first returns a versioned structured gate report containing eve
 | `architecture-supervisor` (5b) | Evidence-based check that `critic_architecture_supervisor` approved cross-task coherence | `ARCHITECTURE_SUPERVISION_BLOCKED` | **No** |
 | `final-review` | Evidence-only check that the phase body persisted complete, current structured review and independent validation evidence | `FINAL_REVIEW_*` — missing/stale/incomplete evidence or confirmed anchored HIGH/CRITICAL findings | **No in gate mode** |
 | `final-council` (Gate 6) | Evidence-based check that `write_final_council_evidence` approved project completion | `FINAL_COUNCIL_REQUIRED` — no approved final-council evidence | **No** |
+| `epic_phase_readiness` | Epic Mode only (present while an epic is open): `epic_phase_review` recorded an APPROVED phase reviewer, then an APPROVED phase critic, bound to the current plan and phase evidence | `EPIC_PHASE_REVIEW_MISSING`, `EPIC_PHASE_REVIEWER_NOT_APPROVED`, `EPIC_PHASE_CRITIC_NOT_APPROVED`, `EPIC_PHASE_REVIEW_STALE`, … | **No** (Epic keeps Turbo off) |
 
 **Gate 1: Completion Verify**
 - Parses plan task descriptions for identifiers (backtick, camelCase, PascalCase, config keys)
@@ -867,6 +871,8 @@ project/
 │   ├── evidence/          # Per-task execution evidence
 │   │   ├── 1.1/           # Evidence for task 1.1
 │   │   └── 2.3/           # Evidence for task 2.3
+│   ├── epic/              # Epic Mode (only while used): open epic, waves, close reports — removed by /swarm close
+│   ├── epic-prior/        # Epic learning prior + past epic reports — survives /swarm close
 │   └── history/
 │       ├── phase-1.md     # Archived phase summaries
 │       └── phase-2.md
@@ -876,6 +882,7 @@ project/
 │   ├── state.ts           # Shared swarm state singleton (zero imports)
 │   ├── agents/            # Agent definitions and factory
 │   ├── config/            # Schema, constants, loader
+│   ├── epic/              # Epic Mode — one plan = one epic in parallel waves (maintainer guide: src/epic/README.md)
 │   ├── commands/          # Slash command handlers (12 commands)
 │   │   ├── index.ts       # Factory + dispatcher (createSwarmCommandHandler)
 │   │   ├── status.ts      # /swarm status
@@ -1004,12 +1011,14 @@ Some tools are restricted to the architect and cannot be called by other agents:
 | `update_task_status` | Mark plan tasks as `pending \| in_progress \| completed \| blocked` |
 | `write_retro` | Write retrospective evidence bundles before `phase_complete` |
 | `declare_scope` | Pre-declare which files the coder may modify for a given task |
+| `epic_next_wave` | Epic Mode only (granted when `epic.mode.enabled: true`): closes the active wave and issues the next wave of tasks with non-conflicting declared scopes; the delegation gate admits coders only for the active wave |
+| `epic_phase_review` | Epic Mode only: dispatches the read-only phase reviewer, then the phase critic, and writes `.swarm/evidence/{phase}/epic-phase-review.json`, which the `epic_phase_readiness` gate in `phase_complete` requires while an epic is open |
 
 ---
 
 ## File Locking for Concurrent Write Safety
 
-Swarm uses file locking to prevent concurrent writes from corrupting shared state files. Even though tasks execute serially, agents may still race on `plan.json` and `events.jsonl` during phase transitions or when multiple sessions interact with the same project.
+Swarm uses file locking to prevent concurrent writes from corrupting shared state files. Even when tasks execute serially (the default fallback; v8 parallel-first execution and Epic Mode waves can run coders concurrently in isolated worktrees), agents may still race on `plan.json` and `events.jsonl` during phase transitions or when multiple sessions interact with the same project.
 
 ### Implementation
 
@@ -1046,7 +1055,7 @@ The architect should retry after a short delay. Sequential calls (no contention)
 
 ### Why Not Just Serial Execution?
 
-Tasks execute serially, but the architect may dispatch multiple concurrent agent sessions or tool calls that race on plan/event file writes. Locking provides a second layer of protection against corruption from:
+Tasks execute serially by default (concurrent coders run only for provably disjoint v8 task groups or an Epic Mode wave, each in its own worktree), but the architect may dispatch multiple concurrent agent sessions or tool calls that race on plan/event file writes. Locking provides a second layer of protection against corruption from:
 
 1. Concurrent `update_task_status` calls from different sessions
 2. `phase_complete` concurrent appends to `events.jsonl`
@@ -1206,6 +1215,8 @@ Serial execution provides:
 - Easy debugging
 
 **Correctness > Speed**
+
+Two governed exceptions exist, both earned by proof rather than assumed: v8 parallel-first execution for provably file-disjoint task groups, and opt-in Epic Mode (`epic.mode.enabled`), where `epic_next_wave` issues waves whose declared scopes don't conflict, every coder runs in an isolated worktree, and per-task QA still runs for every task. See [modes.md](modes.md#epic-mode-preview).
 
 ---
 

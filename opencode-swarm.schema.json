@@ -4547,6 +4547,8 @@
               }
             },
             "epic": {
+              "deprecated": true,
+              "description": "Deprecated (still accepted): move this block to top-level `epic` — Epic Mode no longer needs a `turbo` block. Within a file, top-level `epic` wins per key when both are set.",
               "type": "object",
               "properties": {
                 "cochange": {
@@ -4585,44 +4587,96 @@
                       "maximum": 1
                     },
                     "min_commits_for_signal": {
-                      "default": 20,
-                      "type": "integer",
-                      "minimum": 1,
-                      "maximum": 9007199254740991
+                      "deprecated": true,
+                      "description": "Retired (Epic v2): accepted and ignored with a warning. Remove it.",
+                      "type": "number"
                     }
                   },
                   "additionalProperties": false
                 },
                 "calibration": {
+                  "deprecated": true,
+                  "description": "Retired (Epic v2): accepted and ignored with a warning — Epic learning replaced it (epic.learning). Remove it.",
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                "learning": {
                   "type": "object",
                   "properties": {
                     "enabled": {
                       "default": true,
                       "type": "boolean"
                     },
-                    "floor_threshold": {
-                      "default": 0.05,
+                    "decay_per_epic": {
+                      "default": 0.7,
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1
                     },
-                    "tighten_step": {
-                      "default": 0.02,
+                    "half_life_days": {
+                      "default": 60,
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "hot_excess": {
+                      "default": 0.25,
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1
-                    },
-                    "loosen_step": {
-                      "default": 0.01,
-                      "type": "number",
-                      "minimum": 0,
-                      "maximum": 1
-                    },
-                    "loosen_window": {
-                      "default": 10,
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "sizing": {
+                  "type": "object",
+                  "properties": {
+                    "min_tasks": {
+                      "default": 6,
                       "type": "integer",
                       "minimum": 1,
                       "maximum": 9007199254740991
+                    },
+                    "min_scope_coverage": {
+                      "default": 0.8,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "min_effective_speedup": {
+                      "default": 1.25,
+                      "type": "number",
+                      "minimum": 1
+                    },
+                    "coder_fraction": {
+                      "default": 0.6,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "commit_policy": {
+                  "type": "string",
+                  "enum": [
+                    "epic-branch",
+                    "current-branch"
+                  ]
+                },
+                "retain_refs": {
+                  "type": "boolean"
+                },
+                "phase_review": {
+                  "type": "object",
+                  "properties": {
+                    "timeout_ms": {
+                      "default": 300000,
+                      "type": "integer",
+                      "minimum": 10000,
+                      "maximum": 1800000
                     }
                   },
                   "additionalProperties": false
@@ -4748,6 +4802,8 @@
               }
             },
             "epic": {
+              "deprecated": true,
+              "description": "Deprecated (still accepted): move this block to top-level `epic` — Epic Mode no longer needs a `turbo` block. Within a file, top-level `epic` wins per key when both are set.",
               "type": "object",
               "properties": {
                 "cochange": {
@@ -4786,44 +4842,96 @@
                       "maximum": 1
                     },
                     "min_commits_for_signal": {
-                      "default": 20,
-                      "type": "integer",
-                      "minimum": 1,
-                      "maximum": 9007199254740991
+                      "deprecated": true,
+                      "description": "Retired (Epic v2): accepted and ignored with a warning. Remove it.",
+                      "type": "number"
                     }
                   },
                   "additionalProperties": false
                 },
                 "calibration": {
+                  "deprecated": true,
+                  "description": "Retired (Epic v2): accepted and ignored with a warning — Epic learning replaced it (epic.learning). Remove it.",
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                "learning": {
                   "type": "object",
                   "properties": {
                     "enabled": {
                       "default": true,
                       "type": "boolean"
                     },
-                    "floor_threshold": {
-                      "default": 0.05,
+                    "decay_per_epic": {
+                      "default": 0.7,
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1
                     },
-                    "tighten_step": {
-                      "default": 0.02,
+                    "half_life_days": {
+                      "default": 60,
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "hot_excess": {
+                      "default": 0.25,
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1
-                    },
-                    "loosen_step": {
-                      "default": 0.01,
-                      "type": "number",
-                      "minimum": 0,
-                      "maximum": 1
-                    },
-                    "loosen_window": {
-                      "default": 10,
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "sizing": {
+                  "type": "object",
+                  "properties": {
+                    "min_tasks": {
+                      "default": 6,
                       "type": "integer",
                       "minimum": 1,
                       "maximum": 9007199254740991
+                    },
+                    "min_scope_coverage": {
+                      "default": 0.8,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "min_effective_speedup": {
+                      "default": 1.25,
+                      "type": "number",
+                      "minimum": 1
+                    },
+                    "coder_fraction": {
+                      "default": 0.6,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "commit_policy": {
+                  "type": "string",
+                  "enum": [
+                    "epic-branch",
+                    "current-branch"
+                  ]
+                },
+                "retain_refs": {
+                  "type": "boolean"
+                },
+                "phase_review": {
+                  "type": "object",
+                  "properties": {
+                    "timeout_ms": {
+                      "default": 300000,
+                      "type": "integer",
+                      "minimum": 10000,
+                      "maximum": 1800000
                     }
                   },
                   "additionalProperties": false
@@ -4838,6 +4946,143 @@
           ]
         }
       ]
+    },
+    "epic": {
+      "description": "Epic Mode block: one plan = one epic delivered in conflict-free parallel waves. Opt in with `mode.enabled: true`, then `/swarm epic start`. Needs no `turbo` block (legacy `turbo.epic` is still accepted and migrated here).",
+      "type": "object",
+      "properties": {
+        "cochange": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "threshold": {
+              "default": 0.6,
+              "type": "number",
+              "minimum": -1,
+              "maximum": 1
+            },
+            "min_co_changes": {
+              "default": 5,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        },
+        "mode": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "activation_threshold": {
+              "default": 0.3,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "min_commits_for_signal": {
+              "deprecated": true,
+              "description": "Retired (Epic v2): accepted and ignored with a warning. Remove it.",
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "calibration": {
+          "deprecated": true,
+          "description": "Retired (Epic v2): accepted and ignored with a warning — Epic learning replaced it (epic.learning). Remove it.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "learning": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            },
+            "decay_per_epic": {
+              "default": 0.7,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "half_life_days": {
+              "default": 60,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "hot_excess": {
+              "default": 0.25,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "sizing": {
+          "type": "object",
+          "properties": {
+            "min_tasks": {
+              "default": 6,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "min_scope_coverage": {
+              "default": 0.8,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "min_effective_speedup": {
+              "default": 1.25,
+              "type": "number",
+              "minimum": 1
+            },
+            "coder_fraction": {
+              "default": 0.6,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "commit_policy": {
+          "type": "string",
+          "enum": [
+            "epic-branch",
+            "current-branch"
+          ]
+        },
+        "retain_refs": {
+          "type": "boolean"
+        },
+        "phase_review": {
+          "type": "object",
+          "properties": {
+            "timeout_ms": {
+              "default": 300000,
+              "type": "integer",
+              "minimum": 10000,
+              "maximum": 1800000
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
     "turbo_mode": {
       "description": "Bypass reviewer/test gates for rapid iteration (v6.40). When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off.",

@@ -13,6 +13,7 @@ import { bundledProjectSkillFileReference } from '../config/bundled-skills.js';
 import {
 	AGENT_TOOL_MAP,
 	COUNCIL_AGENT_TOOL_MAP,
+	EPIC_AGENT_TOOL_MAP,
 	EXTERNAL_SKILL_AGENT_TOOL_MAP,
 	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
@@ -1632,6 +1633,7 @@ function buildYourToolsList(
 	externalSkillsEnabled = false,
 	turboEnabled = false,
 	skillsEnabled = false,
+	epicEnabled = false,
 ): string {
 	const qaCouncilEnabled = council?.enabled === true;
 	const generalCouncilEnabled = council?.general?.enabled === true;
@@ -1647,6 +1649,7 @@ function buildYourToolsList(
 			: []),
 		...(turboEnabled ? (TURBO_AGENT_TOOL_MAP.architect ?? []) : []),
 		...(skillsEnabled ? (SKILL_AGENT_TOOL_MAP.architect ?? []) : []),
+		...(epicEnabled ? (EPIC_AGENT_TOOL_MAP.architect ?? []) : []),
 	];
 	const sorted = [...tools].sort();
 	return `Task (delegation), ${sorted.join(', ')}.`;
@@ -1791,6 +1794,7 @@ function buildAvailableToolsList(
 	externalSkillsEnabled = false,
 	turboEnabled = false,
 	skillsEnabled = false,
+	epicEnabled = false,
 ): string {
 	const qaCouncilEnabled = council?.enabled === true;
 	const generalCouncilEnabled = council?.general?.enabled === true;
@@ -1806,6 +1810,7 @@ function buildAvailableToolsList(
 			: []),
 		...(turboEnabled ? (TURBO_AGENT_TOOL_MAP.architect ?? []) : []),
 		...(skillsEnabled ? (SKILL_AGENT_TOOL_MAP.architect ?? []) : []),
+		...(epicEnabled ? (EPIC_AGENT_TOOL_MAP.architect ?? []) : []),
 	];
 	const sorted = [...tools].sort();
 	return sorted
@@ -2011,6 +2016,7 @@ export function createArchitectAgent(
 		directory: '',
 		config: { execution_mode: 'strict' },
 	}),
+	epicEnabled = false,
 ): AgentDefinition {
 	let prompt = ARCHITECT_PROMPT;
 
@@ -2045,6 +2051,7 @@ export function createArchitectAgent(
 				externalSkillsEnabled,
 				turboEnabled,
 				skillsEnabled,
+				epicEnabled,
 			),
 		)
 		?.replace(
@@ -2055,6 +2062,7 @@ export function createArchitectAgent(
 				externalSkillsEnabled,
 				turboEnabled,
 				skillsEnabled,
+				epicEnabled,
 			),
 		)
 		?.replace('{{SLASH_COMMANDS}}', buildSlashCommandsList());

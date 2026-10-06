@@ -410,7 +410,7 @@ src/
 └─ summaries/           # Phase retrospective summaries
 ```
 
-The `.swarm/` directory is Swarm's persistent state. Commit it to version control if you want teammates to resume from the same point.
+The `.swarm/` directory is Swarm's persistent runtime state. Keep it out of Git (the plugin adds a `.git/info/exclude` entry for it): it can hold evidence, shell audit data, and local memory, and tracked `.swarm/` files create noisy diffs. Epic Mode also relies on `.swarm/` being git-ignored when it lands an epic branch. To share state on purpose, use `/swarm export`, `/swarm handoff`, or `/swarm evidence`.
 
 ---
 

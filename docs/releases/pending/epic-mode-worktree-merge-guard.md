@@ -1,44 +1,34 @@
-# Epic Mode: worktree merge-back guard for Rule 2 auto-commit
+# Epic Mode: durable worktree merge-back status guards the epic's waves
 
 ## What changed
 
-- Epic Mode's Rule 2 auto-commit (in `plan/manager.updateTaskStatus`) now
-  refuses to write a `swarm(task <id>):` completion marker when the task's
-  coder ran in an isolated git worktree whose **merge-back failed or only
-  partially landed**. Without this guard, the task's changes would be
-  stranded in the preserved worktree while Rule 3's git-log scan treated
-  the task as satisfied — silently advancing the plan past work that never
-  reached the main tree.
 - New leaf module `src/hooks/delegation-gate/worktree-merge-status.ts`: a
-  **durable** registry that bridges worktree isolation (writer) and Epic
-  Mode Rule 2 (reader) without creating an import cycle. It records a
-  `partial`/`failed` outcome keyed by plan task id, and clears it when a
-  later re-dispatch of the same task merges cleanly. State is stored both
-  in-memory (fast path) AND persisted atomically to
+  **durable** registry of worktree merge-back outcomes. Worktree isolation
+  (the writer) records a `partial` / `failed` outcome keyed by plan task id
+  and clears it when a later re-dispatch of the same task merges cleanly.
+  State is kept in memory (fast path) **and** persisted atomically to
   `.swarm/worktree-merge-status.json`, so a plugin restart after a failed
-  merge-back does not lose the failure record and cannot cause a false
-  Rule 2 completion marker to be committed.
+  merge-back does not lose the record.
 - `finishStandardWorktreeDispatch` (and the hard-throw path in
-  `delegation-gate.ts`) record the merge-back outcome into the registry;
-  `updateTaskStatus` consults it before firing Rule 2. The merge-back is
-  awaited inside the coder's `tool.execute.after` hook, which completes
-  before the architect's turn that calls `update_task_status`, so the
-  status is always settled by the time the guard reads it.
-- When the marker is skipped, the plan status update **still persists**
-  (the ledger is authoritative) and a `criticalWarn` surfaces the stranded
-  worktree so the operator can resolve it and re-run the task.
+  `delegation-gate.ts`) record every merge-back outcome into the registry.
+- Epic Mode reads it (see `epic-mode-v2.md`): while a completed task of the
+  active wave has a failure recorded since the wave was issued,
+  `epic_next_wave` does not close the wave (`blocked: merge-failed`), and
+  completing an epic task whose merge-back failed skips the #2582
+  auto-checkpoint with a critical warning (its HEAD would not contain the
+  task's work). The plan status update still persists (the ledger is
+  authoritative). A clean re-dispatch clears the record;
+  `/swarm epic clear-merge-failure <taskId> --confirm` clears one that no
+  longer reflects reality.
 
 ## Why
 
-Epic Mode was designed against a single shared working tree; main has since
-added per-coder worktree isolation. The two compose, but a failed merge-back
-is the one interaction where Epic's commit-based completion evidence could
-diverge from what actually landed. This closes that gap.
+A coder isolated in a git worktree whose merge-back fails leaves its work
+stranded in the preserved worktree. Without a durable record, an epic could
+advance past work that never reached the epic branch.
 
 ## Compatibility
 
-- No behavior change unless Epic Mode is active **and** worktree isolation
-  produces a failed/partial merge-back. Default-off Epic Mode is unaffected.
-- The `gitExec` non-interactive hardening (`GIT_TERMINAL_PROMPT=0`, scoped
-  `commit.gpgsign=false`/`tag.gpgsign=false`) ensures Rule 2 commits never
-  hang on a GPG/credential prompt on hosts with global commit signing.
+- No behavior change unless an epic is open **and** a worktree merge-back
+  fails or only partially lands. Projects without an open epic only gain the
+  durable status file.

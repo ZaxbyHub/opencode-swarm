@@ -260,10 +260,10 @@ export const ACTIVE_STATE_DIRS_TO_CLEAN = [
 	'task-repairs',
 	'task-terminals',
 	// #2483 (R5): close ends epic-mode runtime state — per-run memory logs and
-	// the rebuildable epic diagnostics (calibration/divergence) are archived
-	// into the session bundle, then the live copies are reset. Between closes
-	// the writer caps and the retention sweep bound them. recovery/ stays out
-	// (the sweep owns it).
+	// epic/ (sentinel, reports, learning posterior, Epic v1 leftovers) are
+	// archived into the session bundle, then the live copies are reset. Caps
+	// and the retention sweep bound them between closes. recovery/ stays out
+	// (the sweep owns it); epic-prior/ (reports + learning prior) survives.
 	'runs',
 	'epic',
 ];

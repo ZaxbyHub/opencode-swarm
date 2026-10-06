@@ -1,0 +1,82 @@
+{
+	"name": "learned-cowrites",
+	"description": "3 phases iterating on the same 4 modules; in every phase the tasks on part-1 and part-2 also write src/registry.ts without declaring it (no co-change history to warn). Their first concurrent run conflicts; the learned co-writes (part-1 -> registry, part-2 -> registry) keep them apart in the following phases of the same epic and in every later epic.",
+	"seed": 53,
+	"maxParallel": 4,
+	"epochs": 3,
+	"learningMatters": true,
+	"tasks": [
+		{
+			"id": "1.1",
+			"phase": 1,
+			"declared": ["src/part-1.ts"],
+			"actual": ["src/part-1.ts", "src/registry.ts"]
+		},
+		{
+			"id": "1.2",
+			"phase": 1,
+			"declared": ["src/part-2.ts"],
+			"actual": ["src/part-2.ts", "src/registry.ts"]
+		},
+		{
+			"id": "1.3",
+			"phase": 1,
+			"declared": ["src/part-3.ts"],
+			"actual": ["src/part-3.ts"]
+		},
+		{
+			"id": "1.4",
+			"phase": 1,
+			"declared": ["src/part-4.ts"],
+			"actual": ["src/part-4.ts"]
+		},
+		{
+			"id": "2.1",
+			"phase": 2,
+			"declared": ["src/part-1.ts"],
+			"actual": ["src/part-1.ts", "src/registry.ts"]
+		},
+		{
+			"id": "2.2",
+			"phase": 2,
+			"declared": ["src/part-2.ts"],
+			"actual": ["src/part-2.ts", "src/registry.ts"]
+		},
+		{
+			"id": "2.3",
+			"phase": 2,
+			"declared": ["src/part-3.ts"],
+			"actual": ["src/part-3.ts"]
+		},
+		{
+			"id": "2.4",
+			"phase": 2,
+			"declared": ["src/part-4.ts"],
+			"actual": ["src/part-4.ts"]
+		},
+		{
+			"id": "3.1",
+			"phase": 3,
+			"declared": ["src/part-1.ts"],
+			"actual": ["src/part-1.ts", "src/registry.ts"]
+		},
+		{
+			"id": "3.2",
+			"phase": 3,
+			"declared": ["src/part-2.ts"],
+			"actual": ["src/part-2.ts", "src/registry.ts"]
+		},
+		{
+			"id": "3.3",
+			"phase": 3,
+			"declared": ["src/part-3.ts"],
+			"actual": ["src/part-3.ts"]
+		},
+		{
+			"id": "3.4",
+			"phase": 3,
+			"declared": ["src/part-4.ts"],
+			"actual": ["src/part-4.ts"]
+		}
+	]
+}

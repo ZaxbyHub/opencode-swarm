@@ -8,6 +8,7 @@ import {
 	getOverrideForSession,
 	sweepOrphanOverrides,
 } from '../db/qa-gate-session-override.js';
+import { isEpicOpenForProject } from '../epic/lifecycle.js';
 import { loadFullAutoRunState } from '../full-auto/state';
 import { validateSwarmPath } from '../hooks/utils';
 import type { AgentSessionState, TaskWorkflowState } from '../state';
@@ -44,6 +45,7 @@ import { SNAPSHOT_PROJECTION_FILE } from './snapshot-writer';
 
 export const _internals = {
 	recordInterruptedExecution,
+	isEpicOpenForProject,
 };
 
 /**
@@ -250,7 +252,6 @@ export function deserializeAgentSession(
 			typeof s.leanTurboCurrentPhase === 'number'
 				? s.leanTurboCurrentPhase
 				: undefined,
-		epicModeActive: s.epicModeActive ?? false,
 		gateLog,
 		reviewerCallCount,
 		lastGateFailure,
@@ -597,6 +598,7 @@ export async function rehydrateState(
 	// v6.33.1: Skip malformed sessions missing required fields instead of injecting bad state
 	// v6.33.3: Refresh timestamps to prevent immediate stale eviction after rehydration
 	const now = Date.now();
+	let epicOpenForRehydration: boolean | undefined;
 	if (snapshot.agentSessions) {
 		for (const [sessionId, serializedSession] of Object.entries(
 			snapshot.agentSessions,
@@ -750,6 +752,19 @@ export async function rehydrateState(
 				if (!runStillActive) {
 					session.fullAutoMode = false;
 				}
+			}
+
+			// ── Epic v2 seam ─────────────────────────────────────────────
+			// While an epic is open for the project, a restored session must
+			// not resume with Turbo on (Turbo waives per-task QA that Epic
+			// never waives). Probed lazily — only for a session that would
+			// restore Turbo — and once per rehydration: no Turbo session ⇒ no
+			// I/O; no epic ⇒ one existsSync.
+			if (session.turboMode === true) {
+				if (epicOpenForRehydration === undefined) {
+					epicOpenForRehydration = _internals.isEpicOpenForProject(directory);
+				}
+				if (epicOpenForRehydration) session.turboMode = false;
 			}
 
 			swarmState.agentSessions.set(sessionId, session);

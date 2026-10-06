@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.187.3",
+  "tagCommit": "435fbb058ddb47ccef510572bc162293f9cf3083",
+  "targetCommitish": "435fbb058ddb47ccef510572bc162293f9cf3083",
+  "releaseBodySha256": "52eb862b3b7dc6c10412da365c2e4df9c7fd43f23649716f8c3bb37c4e661b6f",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2989-copilot-quota-primary-session-fallback.md",
+      "sha256": "ff7f8ceb8efcd11fd0fae5f8504b4a8f11830558f89fc6d9fcbded9f6848b3e3"
+    }
+  ]
+}

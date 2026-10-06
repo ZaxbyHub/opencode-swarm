@@ -1,0 +1,94 @@
+{
+	"name": "magnet",
+	"description": "One file (src/catalog.ts) is declared by one task per phase and written undeclared by a DIFFERENT task each phase, so no single co-write edge explains it. Learning must make it hot (the writers keep coming from new declarers); with the hot set off, every phase repeats the hidden-write conflict.",
+	"seed": 5,
+	"maxParallel": 4,
+	"epochs": 2,
+	"learningMatters": true,
+	"tasks": [
+		{
+			"id": "1.1",
+			"phase": 1,
+			"declared": ["src/catalog.ts", "src/x1.ts"],
+			"actual": ["src/catalog.ts", "src/x1.ts"],
+			"duration": 5
+		},
+		{
+			"id": "1.2",
+			"phase": 1,
+			"declared": ["src/y1.ts"],
+			"actual": ["src/y1.ts", "src/catalog.ts"],
+			"duration": 4
+		},
+		{
+			"id": "1.3",
+			"phase": 1,
+			"declared": ["src/z1.ts"],
+			"actual": ["src/z1.ts"],
+			"duration": 3
+		},
+		{
+			"id": "2.1",
+			"phase": 2,
+			"declared": ["src/catalog.ts", "src/x2.ts"],
+			"actual": ["src/catalog.ts", "src/x2.ts"],
+			"duration": 5
+		},
+		{
+			"id": "2.2",
+			"phase": 2,
+			"declared": ["src/y2.ts"],
+			"actual": ["src/y2.ts", "src/catalog.ts"],
+			"duration": 4
+		},
+		{
+			"id": "2.3",
+			"phase": 2,
+			"declared": ["src/z2.ts"],
+			"actual": ["src/z2.ts"],
+			"duration": 3
+		},
+		{
+			"id": "3.1",
+			"phase": 3,
+			"declared": ["src/catalog.ts", "src/x3.ts"],
+			"actual": ["src/catalog.ts", "src/x3.ts"],
+			"duration": 5
+		},
+		{
+			"id": "3.2",
+			"phase": 3,
+			"declared": ["src/y3.ts"],
+			"actual": ["src/y3.ts", "src/catalog.ts"],
+			"duration": 4
+		},
+		{
+			"id": "3.3",
+			"phase": 3,
+			"declared": ["src/z3.ts"],
+			"actual": ["src/z3.ts"],
+			"duration": 3
+		},
+		{
+			"id": "4.1",
+			"phase": 4,
+			"declared": ["src/catalog.ts", "src/x4.ts"],
+			"actual": ["src/catalog.ts", "src/x4.ts"],
+			"duration": 5
+		},
+		{
+			"id": "4.2",
+			"phase": 4,
+			"declared": ["src/y4.ts"],
+			"actual": ["src/y4.ts", "src/catalog.ts"],
+			"duration": 4
+		},
+		{
+			"id": "4.3",
+			"phase": 4,
+			"declared": ["src/z4.ts"],
+			"actual": ["src/z4.ts"],
+			"duration": 3
+		}
+	]
+}

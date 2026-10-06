@@ -173,11 +173,54 @@ add it to a quarantine list so the merge-group CI stops blocking on it:
 - **Integration tests:** `scripts/ci/quarantined-integration-tests.txt`
 
 Format: one repo-relative test file path per line; blank lines and `#` lines
-ignored. **Always add a comment explaining why** (root cause, related issue,
-validation tier). CI reads these lists and subtracts them from the discovered
-test set (`comm -23`) at `.github/workflows/ci.yml`.
+ignored. **Every active entry must carry `# OWNER:` and `# EXPIRY:` metadata
+in the comment block directly above it** (issue #2477, enforced by
+`bun run check:invariants` Check 7):
+
+```
+# OWNER: <handle> — <issue ref / context>
+# EXPIRY: YYYY-MM-DD — <retirement criterion>
+```
+
+EXPIRY semantics: an entry inside the 14-day grace window past its EXPIRY only
+warns; from day 15 past EXPIRY the check hard-fails the required quality job
+(the first hard-fail "wall" date is `EXPIRY + 15` days). **Renewing an entry
+(an EXPIRY moved later than the committed baseline, diff-scoped vs
+`origin/main`) requires an `#<issue>` reference in its OWNER metadata** —
+otherwise Check 7 errors naming the entry (issue #2905). The offline gate can
+only verify that a reference exists (not that the target is open); the weekly
+aging run additionally reports the live open/closed state of anchor issues for
+entries expiring within 21 days. `QUARANTINE_RENEWAL_ENFORCE=0` downgrades
+renewal findings to non-blocking warnings. Always add a comment
+explaining the flake (root cause, related issue, validation tier). CI reads
+these lists and subtracts them from the discovered test set (`comm -23`) at
+`.github/workflows/ci.yml`.
 
 Do NOT un-quarantine without a merge-group validation run confirming the fix.
+
+### Quarantine census (issue #2905)
+
+Check 7 prints a census after its per-entry messages — per-ledger and total
+active entries, a histogram by EXPIRY date, the first hard-fail wall,
+days-to-that-wall, the owners rollup, entries whose OWNER line lacks an
+`#<issue>` reference, and the 30-day add/retire trend — and emits a
+`::warning::` annotation when the first wall is under 21 days out. The
+drift-check PR comment carries the same block on every PR, including clean
+ones. Standalone: `bun scripts/ci/quarantine-census.ts --root . --now <ISO>`.
+
+### Quarantine aging (weekly workflow)
+
+`.github/workflows/quarantine-aging.yml` (Monday 12:00 UTC + manual
+`workflow_dispatch`) runs `scripts/ci/quarantine-aging.ts`: it maintains
+exactly ONE deduplicated tracking issue titled `Quarantine aging: <n> entries
+expire within 21 days` — adopted only when bot-authored (matched via the
+author's `is_bot` flag or the known Actions bot logins; gh renders the Actions
+app actor as `app/github-actions`), a human-titled issue is never absorbed,
+duplicates are closed, and the issue is closed when the count reaches 0. A
+close is refused with a warning when a ledger file is missing, and opening
+warns when a same-titled issue exists that the bot filter could not adopt.
+Routing failures are `::warning::`-only and never fail the run. Local dry run
+(no GitHub calls): `bun scripts/ci/quarantine-aging.ts --dry-run --root .`.
 
 ## Auto-detection (the flake-detection workflow)
 
@@ -238,6 +281,10 @@ reason; a run that self-heals everywhere is invisible to it.
 - Lint: `bun run check:test-clock`
 - Detection: `scripts/ci/detect-and-quarantine-flakes.sh`,
   `.github/workflows/flake-detection.yml`
+- Census + aging: `scripts/ci/quarantine-census.ts`,
+  `scripts/ci/quarantine-aging.ts`, `.github/workflows/quarantine-aging.yml`
 - Coverage gate (per-file isolation): `scripts/ci/run-coverage-gate.sh`
 - Audit table (current flake inventory): `docs/audits/test-stability-audit.md`
-- Issue: #1782
+- Issues: #1782 (sprint), #1705 (ledger origin), #2477 (OWNER/EXPIRY
+  grammar), #2900 (I3 renewal, cohort), #2973 (retirement tracker), #2905
+  (census + renewal policy + aging workflow)

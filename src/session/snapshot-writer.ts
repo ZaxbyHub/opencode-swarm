@@ -136,7 +136,13 @@ export interface SerializedAgentSession {
 	turboStrategy?: 'standard' | 'lean';
 	leanTurboActive?: boolean;
 	leanTurboCurrentPhase?: number;
-	epicModeActive?: boolean;
+	/**
+	 * Frozen legacy field (Epic v1 per-session flag). Epic v2 is plan-scoped
+	 * and has no session field; the writer keeps emitting the constant
+	 * `false` so non-Epic snapshot JSON stays byte-identical, and the reader
+	 * ignores the value. See {@link LEGACY_SERIALIZED_ONLY_FIELDS}.
+	 */
+	epicModeActive?: false;
 	gateLog: Record<string, string[]>;
 	reviewerCallCount: Record<string, number>;
 	lastGateFailure: {
@@ -338,8 +344,17 @@ export const SESSION_TRANSIENT_FIELDS: Readonly<
  * state counterpart, the type degrades to the error tuple below and assigning
  * `true` fails `bun run typecheck` with that message.
  */
+/**
+ * Serialized fields kept only for byte-stable snapshot JSON, with no live
+ * session counterpart (written as a constant, ignored on read).
+ */
+export type LEGACY_SERIALIZED_ONLY_FIELDS = 'epicModeActive';
+
 export type SerializedFieldsAllExistOnState =
-	Exclude<keyof SerializedAgentSession, keyof AgentSessionState> extends never
+	Exclude<
+		keyof SerializedAgentSession,
+		keyof AgentSessionState | LEGACY_SERIALIZED_ONLY_FIELDS
+	> extends never
 		? true
 		: ['SerializedAgentSession field missing from AgentSessionState'];
 
@@ -472,7 +487,8 @@ export function serializeAgentSession(
 		...(s.leanTurboCurrentPhase !== undefined && {
 			leanTurboCurrentPhase: s.leanTurboCurrentPhase,
 		}),
-		epicModeActive: s.epicModeActive ?? false,
+		// Frozen legacy constant — see SerializedAgentSession.epicModeActive.
+		epicModeActive: false,
 		gateLog,
 		reviewerCallCount,
 		lastGateFailure: s.lastGateFailure ?? null,

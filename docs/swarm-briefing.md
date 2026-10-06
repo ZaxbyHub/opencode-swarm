@@ -250,6 +250,8 @@ The `FILE:` directive in a coder delegation has **runtime significance** beyond 
 
 The architect can also call the `declare_scope` tool explicitly to pre-declare scope before composing the delegation text. Scope entries may be individual file paths or directory paths (all files below a directory are considered in-scope).
 
+Under Epic Mode the declared scope is also frozen when `epic_next_wave` issues the task's wave; re-declaring outside it refuses the dispatch (`EPIC_WAVE_SCOPE_DRIFT` — a frozen scope never grows), and undeclared writes are learned as co-writes that keep later tasks apart. Declare complete scopes up front.
+
 ---
 
 ## Tier-Based Behavioral Prompt Trimming (v6.21)

@@ -299,6 +299,12 @@ Written atomically (tmp+rename) only when findings are present. Verdict values: 
 
 ---
 
+## Epic Phase Review
+
+While an epic is open (Epic Mode, opt-in `epic.mode.enabled`), `epic_phase_review` dispatches a read-only phase reviewer and then a phase critic itself, and writes `.swarm/evidence/{phase}/epic-phase-review.json` (`src/epic/phase-readiness.ts`). It records the phase, review time, the binding (plan id, plan structure hash, phase task ids and digests, task-evidence digest), and the reviewer and critic verdicts (critic `null` when the reviewer did not approve). Verdicts are parsed from the agents' own responses, never self-reported. The `phase_complete` gate `epic_phase_readiness` requires both to be APPROVED, bound to the current plan and task evidence, and at most 24 h old. Block codes: `EPIC_PHASE_REVIEW_MISSING`, `EPIC_PHASE_REVIEW_INVALID`, `EPIC_PHASE_REVIEWER_NOT_APPROVED`, `EPIC_PHASE_CRITIC_MISSING`, `EPIC_PHASE_CRITIC_NOT_APPROVED`, `EPIC_PHASE_REVIEW_STALE`, `EPIC_PHASE_PLAN_UNREADABLE`, `EPIC_PHASE_WAVES_OPEN`. Epic Mode emits no telemetry events of its own; use `/swarm epic status` and `/swarm epic report` instead.
+
+---
+
 ## Drift Reports
 
 Per-phase plan-vs-reality reports at `.swarm/drift-report-phase-<N>.json` (`src/hooks/curator-types.ts:57`):

@@ -146,7 +146,8 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `council` | object (strict) | — | Work Complete Council — parallel four-member verification gate, off by default. | src/agents/index.ts:createSwarmAgents (+3) |
 | `parallelization` | object | — | Parallelization (PR 1 dark foundation) — disabled by default; no production code path branches on enabled=true yet. | (inert) |
 | `worktree` | object | — | Worktree isolation policy for parallel coder dispatch lanes (general surface; Lean Turbo keeps its legacy per-mode fields). | src/background/completion-observer.ts:createBackgroundCompletionObserver (+3) |
-| `turbo` | object | — | Turbo execution strategy block (Phase 1). Absent means current behavior unchanged. | src/agents/index.ts:createSwarmAgents (+3) |
+| `turbo` | object | — | Turbo execution strategy block (Phase 1). Absent means current behavior unchanged. | src/agents/index.ts:createSwarmAgents (+4) |
+| `epic` | object (strict) | — | Epic Mode block: one plan = one epic delivered in conflict-free parallel waves. Opt in with `mode.enabled: true`, then `/swarm epic start`. Needs no `turbo` block (legacy `turbo.epic` is still accepted and migrated here). | src/epic/config.ts:resolveEpicConfig (+1) |
 | `turbo_mode` | boolean | false | Bypass reviewer/test gates for rapid iteration (v6.40). When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off. | src/state.ts:resolveInitialTurboMode (+1) |
 | `quiet` | boolean | true | Suppress non-critical startup warnings (default true keeps the TUI clean). Set false to restore verbose warnings for debugging. | src/agents/index.ts:createSwarmAgents (+3) |
 | `version_check` | boolean | true | Background staleness check against npm, throttled to once per 24h (issue #675). Set false to fully disable the network call. | src/index.ts:initializeOpenCodeSwarm (+1) |
@@ -161,6 +162,10 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 Sections marked `(strict)` reject unknown nested keys at config load time - a typo there makes the loader fall back to safe defaults with a startup warning. All other sections silently ignore unknown nested keys.
 
 <!-- opencode-swarm: end generated top-level-config-keys -->
+
+## Inert config-key advisory
+
+`/swarm config doctor` warns (`inert-config-key`, severity warn) when a config file you wrote sets a top-level key that no runtime consumer reads. The advisory is driven by the raw config files — it fires only for keys explicitly present in your user plugin config (`$XDG_CONFIG_HOME/opencode/opencode-swarm.json`, defaulting to `~/.config/opencode/opencode-swarm.json`) or the project's `.opencode/opencode-swarm.json`, never for schema defaults, and it names the key and the declared reason the key does nothing — a declaration folds a replacement path into that reason where one applies. Which keys are inert is declared in `src/config/consumers.ts` (`CONFIG_CONSUMERS`), the same declaration the config-consumption ratchet enforces (issue #2904). Today the one declared-inert key is `parallelization` (a dark foundation: no production path branches on it yet — for live parallel dispatch use the plan `execution_profile`, set per-plan by the architect; see `/swarm concurrency`). The `harness_opt` and `skill_opt` blocks are consumed since the harness-opt/skill-opt config wiring (issue #2949), so setting them in the plugin config takes effect and produces no advisory.
 
 ## Architect prompt budget (characters and model tokens)
 
@@ -2356,7 +2361,7 @@ When `curation_enabled: true`, the architect agent gains access to 7 tools:
 
 ## Turbo Configuration
 
-Lean Turbo is a lane-planning execution strategy that partitions phase tasks into parallel lanes based on file-scope conflicts, enabling multiple coders to work concurrently on non-conflicting tasks. It composes with all session modes (Turbo, Full-Auto, Balanced).
+Lean Turbo is a lane-planning execution strategy that partitions phase tasks into parallel lanes based on file-scope conflicts, enabling multiple coders to work concurrently on non-conflicting tasks. It composes with all session modes (Turbo, Full-Auto, Balanced) except an open epic: `/swarm epic start` refuses while a Lean run is running, and while an epic is open `/swarm turbo` refuses every enabling form. Epic plans its own waves and never dispatches through the Lean runner.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -2432,7 +2437,7 @@ Extended worktree isolation configuration. These settings apply to all worktree 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `policy` | `"auto" \| "required" \| "disabled"` | `"auto"` | Worktree isolation policy. `"auto"` uses isolated worktrees for eligible parallel coders and blocks additional parallel dispatches if isolation cannot be prepared. `"required"` always requires isolation and blocks if it cannot be prepared. `"disabled"` preserves shared-tree behavior (no worktree isolation). |
+| `policy` | `"auto" \| "required" \| "disabled"` | `"auto"` | Worktree isolation policy. `"auto"` uses isolated worktrees for eligible parallel coders and blocks additional parallel dispatches if isolation cannot be prepared. `"required"` always requires isolation and blocks if it cannot be prepared. `"disabled"` preserves shared-tree behavior (no worktree isolation). Under an open git epic every coder requires an isolated worktree regardless of this policy; with `"disabled"` epic coder dispatch is refused `EPIC_ISOLATION_DEGRADED`. |
 | `merge_strategy` | `"merge" \| "rebase" \| "cherry-pick"` | `"merge"` | Branch merge strategy after lane worktree completion. |
 | `worktree_dir` | string | _(none)_ | Optional user-specified worktree directory override. When set, worktrees are created under this path instead of the default `<project>/.swarm-worktrees/<sessionId>/<laneId>` (issue #2527: the default base lives INSIDE the project; a start-time migration moves owned lanes from the legacy parent-level base). |
 | `deps_strategy` | `"skip" \| "copy" \| "link"` | `"skip"` | How to handle `node_modules` when provisioning a lane worktree. `"skip"` (default) does not copy — the lane runs without host packages. `"copy"` uses `cpSync` to duplicate `node_modules`. `"link"` creates symlinks (POSIX) or junctions (Windows). |
@@ -2572,71 +2577,66 @@ The execution profile controls plan-scoped execution preferences. MODE: PLAN dra
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `parallelization_enabled` | boolean | `false` (schema) / `true` (new plans, v8) | Enable parallel task execution within phases (composes with Lean Turbo). **v8 (#1674):** new plans created via `save_plan` default to `true`; the execution gate enforces serial automatically when the active phase's pending tasks are not provably file-disjoint. Existing plans are unchanged on upgrade. Opt out per-plan with `parallelization_enabled: false`. |
-| `max_concurrent_tasks` | number | `10` | Maximum tasks that may run concurrently when `parallelization_enabled: true` (1–64) |
+| `parallelization_enabled` | boolean | `false` (schema) / `true` (new plans, v8) | Enable parallel task execution within phases (composes with Lean Turbo). **v8 (#1674):** new plans created via `save_plan` default to `true`; the execution gate enforces serial automatically when the active phase's pending tasks are not provably file-disjoint. Existing plans are unchanged on upgrade. Opt out per-plan with `parallelization_enabled: false`. While an epic is open the active `epic_next_wave` wave decides concurrency instead (this flag is not consulted). |
+| `max_concurrent_tasks` | number | `10` | Maximum tasks that may run concurrently when `parallelization_enabled: true` (1–64). Not used while an epic is open: the wave width is `turbo.lean.max_parallel_coders` (default 4; 1 in a non-git project) |
 | `council_parallel` | boolean | `true` | Allow council review phases to run council members in parallel |
 | `auto_proceed` | boolean | `false` | Skip the "Ready for Phase N+1?" prompt and advance automatically at phase boundaries |
 | `commit_after_each_completed_task` | boolean | `false` | Create an advisory, idempotent checkpoint after a task completes and all pre-commit gates pass |
 
 **Auto-proceed:** When `true`, the swarm advances from one phase to the next without asking for confirmation. The session override (`/swarm auto-proceed on|off`) always takes precedence over the plan default. The architect sees the effective value via an injected `AUTO PROCEED STATUS` banner. The first-boundary nudge offers to enable it once per session when the plan default is `false` and no session override is set.
 
-### `turbo.epic` — Epic Mode settings
+### `epic` — Epic Mode settings
 
-Epic Mode is an optional execution mode that augments Lean Turbo with autonomous, coupling-aware lane planning. With these keys at their defaults, no Epic-mode code runs and behavior is identical to Lean Turbo alone. See [Epic Mode](modes.md#epic-mode-preview) for the design.
+Epic Mode is an optional, coupling-aware execution mode: once an epic is opened for an epic-sized plan, `epic_next_wave` issues the plan's tasks as concurrent waves (non-conflicting declared scopes, one task per densely coupled component, phases in order) that the architect dispatches as visible coder `Task` calls. Epic is off by default (`mode.enabled: false`; every other key only matters once it is on); see [Epic Mode](modes.md#epic-mode-preview) for the design.
+
+**Two independent opt-in master gates:**
+
+- `epic.mode.enabled` gates Epic Mode itself. Without it, `/swarm epic start` and `epic_next_wave` refuse with reason `epic-disabled-by-config`, the architect is not granted the Epic tools (`epic_next_wave`, `epic_phase_review`), and the project-scoped Epic behaviours of an open epic (required worktree isolation and commit-at-landing for epic coders, residue commits for non-coder writers, the epic refs, the `epic_phase_readiness` gate in `phase_complete`, the Epic banner) never run. `/swarm epic close|status|report|learning|prior` keep working. Epic itself is opened per plan with `/swarm epic start` (the former `/swarm epic on|off` toggles were removed).
+- `epic.cochange.enabled` gates only the git co-change conflict signal. Without it, `epic_next_wave` keeps wave members apart on declared-path conflicts only (with it, co-changing tasks also go to different waves), and `/swarm coupling` records `cochangeSignal: 'disabled-by-config'`.
+
+**No `turbo` block needed.** `epic` is a top-level block; Epic Mode is its own mode, not a Turbo overlay. (Epic still reads `turbo.lean.max_parallel_coders` for a git epic's wave width when a Lean block is configured — default 4.)
+
+**Legacy path `turbo.epic` (still accepted, no removal planned).** Before Epic v2 C9 this block lived under `turbo.epic`, inside a `turbo` block that had to declare a valid `strategy`. The loader now moves a `turbo.epic` block to top-level `epic` before validation, so it works with or without `turbo.strategy`. The move happens in each config file before the user and project files are merged. Within a file, top-level `epic` wins for each key it sets (a per-key deep merge), and the legacy block fills in the rest. Across files the usual precedence applies (project over user), whichever path each file used. A `turbo` block that held only `epic` is dropped after the move, and any other `turbo` keys are left as they are. The loader logs one warning (`turbo.epic is deprecated — move it to top-level epic`) whenever any file has `turbo.epic`. `/swarm config doctor` reports `legacy-epic-config-path` for each such file (report-only, with no automatic fix) and validates the file as the loader does, so a strategy-less legacy block raises no `turbo.strategy` error, and a problem inside it is reported at its `turbo.epic.*` path.
+
+**Editor validation.** The JSON schema marks `turbo.epic` as `deprecated`, but it still describes `turbo` as requiring `strategy`. An editor therefore flags a strategy-less legacy `turbo` block that the plugin itself accepts. Move the block to top-level `epic` to clear it.
+
+**Invalid values.** An invalid `epic` value (wrong type, unknown key) goes through the loader's standard validation recovery, like any other known key: the offending key or section is dropped with a warning, and the rest of the config is kept. Keys recovered from a legacy block are labelled `(from turbo.epic)` in the warning and in the recovery metadata.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `cochange.enabled` | boolean | `false` | Master gate for the co-change conflict signal. With this off, the module is dormant and no Epic-mode code runs in any flow. |
+| `mode.enabled` | boolean | `false` | Master gate for Epic Mode (see above). |
+| `mode.activation_threshold` | number | `0.3` | **Intra-component density threshold** (Epic v2 C5 — new meaning). `epic_next_wave` splits a phase's pending tasks into conflict components (path ∪ co-change); a component whose density (conflicting pairs / all pairs inside it) exceeds this value is `serial-component` and contributes one task per wave, otherwise its non-conflicting tasks share waves. Range 0–1: lower serializes more clusters; `1` keeps tasks apart only where they conflict. See [Wave composition](modes.md#the-epic_next_wave-flow). |
+| `mode.min_commits_for_signal` | — | — | **Retired** (Epic v2 C5). Accepted and ignored — stripped before validation, read by nothing — with a precise "retired" warning from the loader (once, `/swarm diagnose`) and a `retired-config-key` finding from `/swarm config doctor`, instead of an unrecognized-key `stripped_keys` recovery. Marked `deprecated` in the JSON schema. Remove it. |
+| `cochange.enabled` | boolean | `false` | Master gate for the co-change conflict signal (see above). |
 | `cochange.threshold` | number | `0.6` | NPMI floor (range `[-1, 1]`) for a file pair to be treated as historically co-changing. Stricter than `co_change_analyzer`'s discovery default (`0.5`). |
 | `cochange.min_co_changes` | number | `5` | Minimum raw co-change count required before NPMI is considered, to suppress small-sample noise. Stricter than the analyzer's discovery default (`3`). |
+| `learning.enabled` | boolean | `true` | Master gate for Epic learning (Epic v2 C6): learned co-writes (a task that declared D but also wrote f makes later tasks declaring D conflict with tasks on f — planner analysis only, never write authorization) and the decaying hot set (files with excess incidents — undeclared writes, merge conflicts, Stage B failures, rework, reopens — over clean exposures, minus the writes its strongest learned co-writer already explains; a task declaring one runs alone). Learned per epic (posterior, updated at each wave close) and merged at close into the project prior `.swarm/epic-prior/learning.json`, which survives `/swarm close`. Off ⇒ nothing is learned, read, or written. Inert unless `mode.enabled` is true. See [Learning across waves and epics](modes.md#learning-across-waves-and-epics). |
+| `learning.decay_per_epic` | number | `0.7` | Multiplier (0–1) applied to the project prior at every epic close that learned something (an epic with no learning signal leaves the prior untouched). |
+| `learning.half_life_days` | number | `60` | Half-life (days, > 0) of learned evidence, counted in whole half-lives when it is read: full weight until a half-life has passed, then halved per half-life. |
+| `learning.hot_excess` | number | `0.25` | A file is hot when its incident rate exceeds the prior mean 0.1 by more than this (0–1), with at least one full incident. |
+| `calibration` | — | — | **Retired** (Epic v2 C6): the whole Epic v1 block (`enabled`, `floor_threshold`, `tighten_step`, `loosen_step`, `loosen_window`) is accepted and ignored with a "retired" loader warning naming `epic.learning` and a `retired-config-key` finding from `/swarm config doctor`; marked `deprecated` in the JSON schema. `calibration.enabled: false` does not disable learning — set `learning.enabled: false`. Remove it. |
+| `sizing.min_tasks` | integer | `6` | `/swarm epic start` refuses (`not-epic-sized`, reason `too-few-tasks`) a plan with fewer pending tasks. |
+| `sizing.min_scope_coverage` | number | `0.8` | Minimum share (0–1) of pending tasks with a live declared scope or `files_touched` (`insufficient-scope-coverage`). |
+| `sizing.min_effective_speedup` | number | `1.25` | Minimum Amdahl speedup S_eff = 1 / ((1 − coder_fraction) + coder_fraction / S), with S = pending tasks / serial steps of a dry run of the Epic component planner — the one `epic_next_wave` uses, with the same learned hot files and co-writes (from the project prior), co-change signal and density threshold (`insufficient-parallelism`). Must be ≥ 1. |
+| `sizing.coder_fraction` | number | `0.6` | Share (0–1) of a task's time that parallel coders overlap; QA and architect turns stay serial. |
+| `commit_policy` | `"epic-branch"` \| `"current-branch"` | `"epic-branch"` | Git projects. `epic-branch`: `/swarm epic start` checks out `swarm/epic/<epicKey>` (refusing a detached HEAD or a leftover branch of the same name), every Epic commit goes there, `epic_next_wave` blocks with `EPIC_BRANCH_MISMATCH` while HEAD is elsewhere, and `/swarm epic close` lands it onto the original branch (`--land squash` default — staged, uncommitted; `merge`; `none`). `current-branch`: commits stay on the branch current at start; close lands nothing. See [Epic branch and landing](modes.md#epic-branch-and-landing). |
+| `retain_refs` | boolean | `false` | Git projects. Keep the epic's refs `refs/swarm/epics/<epicKey>/{base,waves/<seq>,tasks/<id>}` after `/swarm epic close` (and `/swarm close` finalization). Off: close deletes them after the close report recorded their values. The refs are never pushed or cloned by default (`--mirror` copies them). See [Commits: landing, residue, refs](modes.md#commits-landing-residue-refs). |
+| `phase_review.timeout_ms` | integer | `300000` | Per-role dispatch budget for `epic_phase_review` (the phase reviewer, then the critic), 10 000 – 1 800 000 ms — the same bounds and default as `auto_review.timeout_ms`. An empty-response retry shares the budget. A timed-out role is recorded fail-closed as REJECTED and the review is re-run; raise it for slow models. |
 
-`turbo.epic` is independent of `turbo.strategy` — the keys are accepted under both `"standard"` and `"lean"` strategies. The block is purely additive; omitting it leaves Lean Turbo, Turbo, and Full-Auto behavior unchanged.
+`/swarm epic start --force` opens an epic for a plan that is not epic-sized and records it as forced (in the epic record and its [scorecard](modes.md#scorecard-and-report)). The `sizing` block is `.strict()` like the rest of `epic`: an unknown key fails validation (retired keys, listed above, are the only keys accepted and ignored).
 
-**Example** — Enable the co-change signal with conservative defaults:
+**Example** — Enable Epic Mode with the co-change signal:
 
 ```json
 {
-  "turbo": {
-    "strategy": "lean",
-    "lean": { "max_parallel_coders": 4 },
-    "epic": {
-      "cochange": {
-        "enabled": true,
-        "threshold": 0.6,
-        "min_co_changes": 5
-      }
-    }
+  "epic": {
+    "mode": { "enabled": true, "activation_threshold": 0.3 },
+    "cochange": { "enabled": true, "threshold": 0.6, "min_co_changes": 5 }
   }
 }
 ```
 
-### `turbo.epic.mode` — Epic Mode activation gate (Capability C, preview)
-
-Epic Mode auto-decides per plan whether to invoke Lean Turbo's parallel planner or fall back to serial, based on the coupling coefficient `p`. See [Epic Mode (preview)](modes.md#capability-c--activation-gate-and-the-epic-mode-itself) for the design.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `mode.enabled` | boolean | `false` | Master gate for Epic Mode activation. When off, no Epic-mode runtime code runs. |
-| `mode.activation_threshold` | number | `0.3` | Plan-wide `p` ceiling. Plans with `p ≤ activation_threshold` are eligible for parallel promotion; plans above are forced serial. |
-| `mode.min_commits_for_signal` | number | `20` | Greenfield rule. A co-change history with fewer than this many commits is treated as too sparse — promotion is blocked regardless of `p`. |
-
-**Example** — Enable Epic Mode with a strict threshold and dense-history requirement:
-
-```json
-{
-  "turbo": {
-    "strategy": "lean",
-    "epic": {
-      "mode": {
-        "enabled": true,
-        "activation_threshold": 0.2,
-        "min_commits_for_signal": 50
-      },
-      "cochange": { "enabled": true }
-    }
-  }
-}
-```
+Then run `/swarm epic start`. For the maintainer view (module map, invariants, seams), see [`src/epic/README.md`](../src/epic/README.md).
 
 ## QA gates reference
 

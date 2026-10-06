@@ -70,7 +70,7 @@ beforeEach(() => {
 	resetSwarmState();
 	// Keep Rule 2 auto-commit inert: no git side effects in these tests.
 	_internals.isGitRepo = () => false;
-	_internals.isEpicModeActiveForProject = () => false;
+	_internals.isEpicOpenForProject = () => false;
 });
 
 afterEach(async () => {

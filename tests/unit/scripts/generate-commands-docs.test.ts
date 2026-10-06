@@ -141,14 +141,15 @@ describe('generate-commands-docs — registry coverage', () => {
 });
 
 describe('generate-commands-docs — turbo argument drift (#1648)', () => {
-	test('turbo entry documents all six argument keywords (on/off/lean/standard/epic/status)', () => {
+	test('turbo entry documents all five argument keywords (on/off/lean/standard/status)', () => {
 		const doc = buildCommandsDoc();
 		const section = entrySection(doc, 'turbo');
 		// Exact rendered Args line — the live drift #1648 caught was the docs
-		// claiming only [on|off] while the registry declares all six keywords.
-		expect(section).toContain(
-			'**Args:** `on, off, lean, standard, epic, status`',
-		);
-		expect(section).toContain('[on|off|lean|standard|epic|status]');
+		// claiming only [on|off] while the registry declares every keyword.
+		// `epic` is no longer a Turbo strategy (it is a redirect to
+		// `/swarm epic start`), so it is not advertised as an argument.
+		expect(section).toContain('**Args:** `on, off, lean, standard, status`');
+		expect(section).toContain('[on|off|lean|standard|status]');
+		expect(section).toContain('/swarm epic start');
 	});
 });

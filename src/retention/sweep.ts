@@ -192,6 +192,13 @@ function familiesFor(swarmRoot: string, now: number): Family[] {
 			maxAgeDays: 30,
 		}),
 		f('recovery', 'recovery', { maxAgeDays: 30 }),
+		// Epic v2: close reports kept across /swarm close (the close path
+		// itself keeps the newest 50; this is the age/count backstop). The
+		// directory only exists in projects that closed an epic.
+		f('epic-prior-reports', path.join('epic-prior', 'reports'), {
+			maxAgeDays: 365,
+			maxEntries: 50,
+		}),
 		f('pr-feedback-evidence', 'pr-feedback-evidence', { maxAgeDays: 30 }),
 	];
 }
@@ -310,9 +317,9 @@ export async function runRetentionSweep(
 			error instanceof Error ? error.message : String(error);
 	}
 
-	// 2. Whole-file age deletion for the rebuildable epic diagnostics
-	// (divergence re-accumulates on new observations; calibration re-learns;
-	// writer-side caps bound them between sweeps).
+	// 2. Whole-file age deletion for the Epic v1 diagnostics (nothing writes
+	// them since Epic v2 C6: `/swarm epic start` imports them once into the
+	// learning prior, then they are inert leftovers until /swarm close).
 	if (cancelled('epic-diagnostics')) return result;
 	for (const [label, rel] of [
 		['epic-divergence', path.join('epic', 'divergence.jsonl')],

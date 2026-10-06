@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.3",
+  "tagCommit": "433f05504cb110f5e1d85c97e463786f6044d8f8",
+  "targetCommitish": "433f05504cb110f5e1d85c97e463786f6044d8f8",
+  "releaseBodySha256": "263fbaf8ec57d154be4207fcf7f42a5e163325129a6ec3bfd276802e6ad98ca1",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2720-context-map-decision-id-restarts.md",
+      "sha256": "ad26e7572bd2fb26882ba391968436ed7bac96117e941419f609bae3cd685c56"
+    }
+  ]
+}

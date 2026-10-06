@@ -228,7 +228,6 @@ mock.module('../../../src/state.js', () => {
 		hasActiveFullAuto: () => false,
 		getActiveFullAutoSessionID: () => undefined,
 		hasActiveLeanTurbo: () => false,
-		hasActiveEpicMode: () => false,
 		updateTaskWorkflowCache: () => {},
 	};
 });

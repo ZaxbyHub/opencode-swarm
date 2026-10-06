@@ -155,7 +155,6 @@ function buildFullSessionState(): AgentSessionState {
 		leanTurboActive: true,
 		leanTurboCurrentPhase: 2,
 		maxConcurrencyOverride: 4,
-		epicModeActive: true,
 		autoProceedOverride: true,
 		autoProceedNudgeDone: true,
 		qaGateSessionOverrides: { requireSecurityGate: true },
@@ -244,7 +243,10 @@ describe('snapshot field parity guard (issue #2472 W6 / AC-7)', () => {
 		const transientSet = new Set(transientMapKeys);
 		const overlapping = serializedKeys.filter((key) => transientSet.has(key));
 		expect(overlapping).toEqual([]);
-		const notOnState = serializedKeys.filter((key) => !fixtureKeys.has(key));
+		// Frozen legacy write-only field (LEGACY_SERIALIZED_ONLY_FIELDS).
+		const notOnState = serializedKeys.filter(
+			(key) => key !== 'epicModeActive' && !fixtureKeys.has(key),
+		);
 		expect(notOnState).toEqual([]);
 	});
 
@@ -260,7 +262,12 @@ describe('snapshot field parity guard (issue #2472 W6 / AC-7)', () => {
 		expect(Object.keys(fromDisk).sort()).toEqual(serializedKeys);
 
 		const deserialized = deserializeAgentSession(fromDisk);
-		const missing = serializedKeys.filter((key) => !(key in deserialized));
+		// Frozen legacy fields (LEGACY_SERIALIZED_ONLY_FIELDS) are written for
+		// byte-stable snapshot JSON and intentionally ignored on read.
+		const legacyOnly = new Set(['epicModeActive']);
+		const missing = serializedKeys.filter(
+			(key) => !legacyOnly.has(key) && !(key in deserialized),
+		);
 		expect(missing).toEqual([]);
 
 		// Value-level spot checks across representative conversion shapes:

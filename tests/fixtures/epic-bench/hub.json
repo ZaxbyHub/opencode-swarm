@@ -1,0 +1,58 @@
+{
+	"name": "hub",
+	"description": "6 tasks all declare one hub file (plus their own), 2 are independent: the hub tasks must run one at a time in every strategy; only the independent ones overlap.",
+	"seed": 23,
+	"maxParallel": 4,
+	"epochs": 2,
+	"learningMatters": false,
+	"tasks": [
+		{
+			"id": "1.1",
+			"phase": 1,
+			"declared": ["src/catalog.ts", "src/feature-1.ts"],
+			"actual": ["src/catalog.ts", "src/feature-1.ts"]
+		},
+		{
+			"id": "1.2",
+			"phase": 1,
+			"declared": ["src/catalog.ts", "src/feature-2.ts"],
+			"actual": ["src/catalog.ts", "src/feature-2.ts"]
+		},
+		{
+			"id": "1.3",
+			"phase": 1,
+			"declared": ["src/catalog.ts", "src/feature-3.ts"],
+			"actual": ["src/catalog.ts", "src/feature-3.ts"]
+		},
+		{
+			"id": "1.4",
+			"phase": 1,
+			"declared": ["src/catalog.ts", "src/feature-4.ts"],
+			"actual": ["src/catalog.ts", "src/feature-4.ts"]
+		},
+		{
+			"id": "1.5",
+			"phase": 1,
+			"declared": ["src/catalog.ts", "src/feature-5.ts"],
+			"actual": ["src/catalog.ts", "src/feature-5.ts"]
+		},
+		{
+			"id": "1.6",
+			"phase": 1,
+			"declared": ["src/catalog.ts", "src/feature-6.ts"],
+			"actual": ["src/catalog.ts", "src/feature-6.ts"]
+		},
+		{
+			"id": "1.7",
+			"phase": 1,
+			"declared": ["src/solo-a.ts"],
+			"actual": ["src/solo-a.ts"]
+		},
+		{
+			"id": "1.8",
+			"phase": 1,
+			"declared": ["src/solo-b.ts"],
+			"actual": ["src/solo-b.ts"]
+		}
+	]
+}

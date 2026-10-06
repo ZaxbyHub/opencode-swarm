@@ -60,7 +60,9 @@ runs; see that issue for scope.
   and durable merge-back recovery shipped in the same release.
 - **Kill switch (one line):** `execution_profile.parallelization_enabled:
   false` on the plan (per-plan), or `"preset": "conservative"` to make NEW
-  plans serial again.
+  plans serial again. While an epic is open (Epic Mode), the epic's wave, not
+  `parallelization_enabled`, decides coder concurrency; close or abandon the
+  epic (`/swarm epic close`) to return to profile-governed dispatch.
 - **Rollback:** as above; conservative preset coverage tested in
   `tests/unit/config/conservative-preset.test.ts`.
 
@@ -123,6 +125,8 @@ evidence."
   promote (#1677 allows these flips "only if their burn-in evidence is
   published").
 - `architectural_supervision.enabled`: no published evidence.
+- `epic.mode.enabled` (Epic Mode, preview) and `epic.cochange.enabled`: both
+  stay `false` (opt-in); the conservative preset does not touch them.
 
 ## Conservative preset
 

@@ -283,8 +283,9 @@ Swarm has session-scoped modes you toggle at any time:
 | **Balanced** (default) | Medium | High | Everyday development |
 | **Turbo** | Fast | Medium | Rapid iteration, skip non-critical checks (Tier-3 files still reviewed) |
 | **Full-Auto** | Fast | Depends on critic | Unattended multi-interaction runs |
+| **Epic** (opt-in) | Fast on plans with many independent tasks | High (per-task QA always runs) | Large plans run phase by phase as parallel waves of tasks with disjoint scopes |
 
-Project-level `execution_mode` (`strict` / `balanced` / `fast`) is persistent and configured in `.opencode/opencode-swarm.json`. Switch session modes with `/swarm turbo` or `/swarm full-auto`. See [`docs/modes.md`](modes.md).
+Project-level `execution_mode` (`strict` / `balanced` / `fast`) is persistent and configured in `.opencode/opencode-swarm.json`. Switch session modes with `/swarm turbo` or `/swarm full-auto`; open and close an epic with `/swarm epic start` / `/swarm epic close` (needs `"epic": {"mode": {"enabled": true}}` in config). See [`docs/modes.md`](modes.md).
 
 ### Build a Full Web App (End-to-End Example)
 

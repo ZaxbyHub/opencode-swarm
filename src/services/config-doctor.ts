@@ -10,15 +10,26 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { ALL_AGENT_NAMES } from '../config/constants';
-import { CONFIG_CONSUMERS, type TopLevelConfigKey } from '../config/consumers';
+import {
+	CONFIG_CONSUMERS,
+	type ConfigConsumerDeclaration,
+} from '../config/consumers';
 import type { PluginConfig } from '../config/schema';
 import {
 	FALLBACK_MODELS_MAX,
+	findRetiredEpicConfigKeys,
 	GATE_CONFIG_KNOWN_SECTION_KEYS,
 	GateConfigSchema,
 	PluginConfigSchema,
+	retiredEpicKeyReplacement,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
+import {
+	hasLegacyEpicConfig,
+	legacyEpicIssuePath,
+	migrateLegacyEpicConfig,
+	resolveEpicConfig,
+} from '../epic/config.js';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { TOOL_NAME_SET } from '../tools/tool-metadata';
 import { log } from '../utils';
@@ -202,8 +213,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * produce noise (same contract as the #2102 raw collectors above). The inert set
  * comes from CONFIG_CONSUMERS (`src/config/consumers.ts`), the single
  * declaration of consumer truth enforced by `bun run scripts/check-config-consumption.ts`.
+ *
+ * The `consumers` parameter is a default-parameter DI seam (issue #2957): tests
+ * inject declaration states so both arms of `ConfigConsumerDeclaration`
+ * (inert / consumed) are provable on any tree, without `mock.module` — the same
+ * pattern as `collectLeanTurboGateSatisfiabilityFindings`'s
+ * `registeredToolNames` seam below.
  */
-function collectRawInertKeyFindings(directory: string): ConfigFinding[] {
+export function collectRawInertKeyFindings(
+	directory: string,
+	consumers: Readonly<
+		Record<string, ConfigConsumerDeclaration>
+	> = CONFIG_CONSUMERS,
+): ConfigFinding[] {
 	const findings: ConfigFinding[] = [];
 	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
 	// One dedupe set across both files so an inert key present in user AND
@@ -221,7 +243,12 @@ function collectRawInertKeyFindings(directory: string): ConfigFinding[] {
 
 			for (const key of Object.keys(raw)) {
 				if (seen.has(key)) continue;
-				const declaration = CONFIG_CONSUMERS[key as TopLevelConfigKey];
+				// Own-property read: raw config keys are attacker-controlled
+				// strings, so a prototype-named key must never resolve through
+				// the declaration map's prototype chain.
+				const declaration = Object.hasOwn(consumers, key)
+					? consumers[key]
+					: undefined;
 				if (!declaration || !('inert' in declaration)) continue;
 				seen.add(key);
 				findings.push({
@@ -482,7 +509,10 @@ function collectRawStrictSectionFindings(directory: string): ConfigFinding[] {
 			const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as unknown;
 			if (!isPlainObject(raw)) continue;
 
-			const parsed = PluginConfigSchema.safeParse(raw);
+			// Validate the file as the loader does (legacy `turbo.epic` moved to
+			// top-level `epic`; a no-op without it) and report at the path the
+			// user wrote (Epic C9).
+			const parsed = PluginConfigSchema.safeParse(migrateLegacyEpicConfig(raw));
 			if (parsed.success) continue;
 
 			const seen = new Set<string>();
@@ -490,8 +520,9 @@ function collectRawStrictSectionFindings(directory: string): ConfigFinding[] {
 				if (issue.code !== 'unrecognized_keys') continue;
 				if (issue.path[0] === 'gates') continue; // covered elsewhere
 				const keys = (issue as unknown as { keys?: string[] }).keys ?? [];
+				const issuePath = legacyEpicIssuePath(raw, issue.path);
 				for (const key of keys) {
-					const dotted = [...issue.path.map(String), key].join('.');
+					const dotted = [...issuePath.map(String), key].join('.');
 					if (seen.has(dotted)) continue;
 					seen.add(dotted);
 					findings.push({
@@ -510,6 +541,104 @@ function collectRawStrictSectionFindings(directory: string): ConfigFinding[] {
 		}
 	}
 
+	return findings;
+}
+
+/**
+ * Read and JSON-parse the raw user + project config files for an Epic
+ * collector (BOM-tolerant like the loader; size-capped; unreadable or
+ * malformed files are skipped — best-effort, non-blocking).
+ */
+function readRawEpicConfigFiles(
+	directory: string,
+): Array<{ configPath: string; raw: unknown }> {
+	const out: Array<{ configPath: string; raw: unknown }> = [];
+	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
+	for (const configPath of [userConfigPath, projectConfigPath]) {
+		if (!fs.existsSync(configPath)) continue;
+		try {
+			const stats = fs.statSync(configPath);
+			if (stats.size > CONFIG_DOCTOR_MAX_CONFIG_FILE_BYTES) continue;
+			const content = fs.readFileSync(configPath, 'utf-8');
+			// Strip a UTF-8 BOM like the config loader does (JSON.parse throws).
+			out.push({
+				configPath,
+				raw: JSON.parse(
+					content.charCodeAt(0) === 0xfeff ? content.slice(1) : content,
+				) as unknown,
+			});
+		} catch {
+			// Best-effort, non-blocking (see collectRawGatesConfigFindings).
+		}
+	}
+	return out;
+}
+
+/**
+ * Retired Epic config keys (Epic v2). The schema accepts and strips them
+ * (with a precise "retired" loader warning instead of an unrecognized-key
+ * recovery), so the parsed config the doctor walks no longer has them; read
+ * the raw user + project files instead. Only when the parsed config has an
+ * Epic block (top-level `epic`, or the legacy `turbo.epic` — every retired key
+ * lives in one): a non-Epic doctor run reads no extra file. Report-only:
+ * nothing reads the key, and removing it is the user's edit (no auto-fix
+ * writes the config for a no-op key).
+ */
+export function collectRawRetiredEpicKeyFindings(
+	config: PluginConfig,
+	directory: string,
+): ConfigFinding[] {
+	const findings: ConfigFinding[] = [];
+	if (resolveEpicConfig(config) === undefined) return findings;
+	const seen = new Set<string>();
+	for (const { configPath, raw } of readRawEpicConfigFiles(directory)) {
+		for (const dotted of findRetiredEpicConfigKeys(raw)) {
+			if (seen.has(`${configPath}\u0000${dotted}`)) continue;
+			seen.add(`${configPath}\u0000${dotted}`);
+			const hint = retiredEpicKeyReplacement(dotted);
+			findings.push({
+				id: 'retired-config-key',
+				title: 'Retired config key',
+				description: `"${dotted}" in ${configPath} was retired by Epic Mode v2 and is ignored.${hint ? ` ${hint}` : ''} Remove it.`,
+				severity: 'warn',
+				path: dotted,
+				currentValue: undefined,
+				autoFixable: false,
+			});
+		}
+	}
+	return findings;
+}
+
+/**
+ * Legacy Epic config path (Epic C9): a config file that still sets
+ * `turbo.epic`. The loader migrates it to that file's top-level `epic`
+ * (per-key merge, the file's top-level `epic` wins) before the files are
+ * merged, and keeps honoring it permanently; this finding tells the user
+ * where to move it. Report-only, like `retired-config-key`: the doctor's fix
+ * model (`remove` / `update` / `add` of one value, on the one preferred
+ * config file) has no move-and-merge, and it would only ever touch one of
+ * the two files. Only when the parsed config has an Epic block: a non-Epic
+ * doctor run reads no extra file.
+ */
+export function collectRawLegacyEpicConfigFindings(
+	config: PluginConfig,
+	directory: string,
+): ConfigFinding[] {
+	const findings: ConfigFinding[] = [];
+	if (resolveEpicConfig(config) === undefined) return findings;
+	for (const { configPath, raw } of readRawEpicConfigFiles(directory)) {
+		if (!hasLegacyEpicConfig(raw)) continue;
+		findings.push({
+			id: 'legacy-epic-config-path',
+			title: 'Deprecated Epic config path',
+			description: `"turbo.epic" in ${configPath} is deprecated: move the block to top-level "epic" (Epic Mode no longer needs a "turbo" block). It still works — the loader migrates it; within this file a top-level "epic" wins every key both set, and across files the project config wins over the user config as usual.`,
+			severity: 'warn',
+			path: 'turbo.epic',
+			currentValue: undefined,
+			autoFixable: false,
+		});
+	}
 	return findings;
 }
 
@@ -581,7 +710,10 @@ function collectRawValueConstraintFindings(directory: string): ConfigFinding[] {
 			const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as unknown;
 			if (!isPlainObject(raw)) continue;
 
-			const parsed = PluginConfigSchema.safeParse(raw);
+			// Validate the file as the loader does (legacy `turbo.epic` moved to
+			// top-level `epic`; a no-op without it) and report at the path the
+			// user wrote (Epic C9).
+			const parsed = PluginConfigSchema.safeParse(migrateLegacyEpicConfig(raw));
 			if (parsed.success) continue;
 
 			for (const issue of parsed.error.issues) {
@@ -589,12 +721,13 @@ function collectRawValueConstraintFindings(directory: string): ConfigFinding[] {
 				if (issue.code === 'unrecognized_keys') continue;
 				if (issue.path[0] === 'gates') continue;
 
-				const dotted = issue.path.map(String).join('.');
+				const issuePath = legacyEpicIssuePath(raw, issue.path);
+				const dotted = issuePath.map(String).join('.');
 				const dedupeKey = `${dotted}|${issue.code}`;
 				if (seen.has(dedupeKey)) continue;
 				seen.add(dedupeKey);
 
-				const current = getRawValueAtPath(raw, issue.path);
+				const current = getRawValueAtPath(raw, issuePath);
 
 				// Opt-in lossy auto-fix: an over-length fallback_models array can be
 				// mechanically trimmed to the schema max — the one value constraint we
@@ -1975,6 +2108,11 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'epic': {
+			emitObjectTypeMismatch('epic', value, findings);
+			break;
+		}
+
 		case 'turbo_mode': {
 			if (value !== undefined && typeof value !== 'boolean') {
 				findings.push({
@@ -2261,6 +2399,8 @@ export function runConfigDoctor(
 	findings.push(...collectRawGatesConfigFindings(directory));
 	findings.push(...collectRawCouncilPolicyFindings(directory));
 	findings.push(...collectRawStrictSectionFindings(directory));
+	findings.push(...collectRawRetiredEpicKeyFindings(config, directory));
+	findings.push(...collectRawLegacyEpicConfigFindings(config, directory));
 	findings.push(...collectRawValueConstraintFindings(directory));
 	findings.push(...collectRawAutoReviewCompatibilityFindings(directory));
 	findings.push(...collectRawInertKeyFindings(directory));

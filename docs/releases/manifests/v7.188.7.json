@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.7",
+  "tagCommit": "fba4d2e2fcf9c130dcf4b110213a3822374ecd85",
+  "targetCommitish": "fba4d2e2fcf9c130dcf4b110213a3822374ecd85",
+  "releaseBodySha256": "2ce01fedb83ef7b9deb1ca722aecb0092de4f174351e95a5806986b8c1c3a354",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2904-config-consumption-ratchet.md",
+      "sha256": "3a707b7888188dd86ac2111b61654e99635bfbe1e8248c61f19fbb2e09ca8cf2"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3032-reset-session-stage-b-settlement-resync.md",
+      "sha256": "44aa17a19f35ec1fd6ca1a79f4ba1911a8fe9907c128a85354fd968f40454586"
+    }
+  ]
+}

@@ -519,9 +519,20 @@ export const CONFIG_CONSUMERS: Record<
 	turbo: {
 		consumers: [
 			'src/agents/index.ts:createSwarmAgents',
-			'src/commands/epic.ts:renderCalibration',
 			'src/commands/turbo.ts:handleTurboCommand',
 			'src/config/worktree-isolation-config.ts:resolveWorktreeIsolationConfig',
+			// Epic: the legacy `turbo.epic` fallback + the Lean wave width
+			'src/epic/config.ts:resolveEpicConfig',
+			'src/epic/shaping-sizing.ts:epicWaveWidth',
+		],
+	},
+	// Epic Mode (top-level `epic`): every reader resolves it through
+	// resolveEpicConfig; migrateLegacyEpicConfig folds the legacy `turbo.epic`
+	// path into it in the loader (src/epic/README.md, "Config").
+	epic: {
+		consumers: [
+			'src/epic/config.ts:resolveEpicConfig',
+			'src/epic/config.ts:migrateLegacyEpicConfig',
 		],
 	},
 	turbo_mode: {
@@ -594,3 +605,8 @@ export const CONFIG_CONSUMERS: Record<
 		],
 	},
 };
+
+// The map is repo-authored, ratchet-enforced truth; freezing it keeps
+// test files (which read it directly for production-map pins) from ever
+// silently mutating the production declarations.
+Object.freeze(CONFIG_CONSUMERS);

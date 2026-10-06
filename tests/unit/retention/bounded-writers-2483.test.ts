@@ -26,6 +26,7 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import * as learningStore from '../../../src/epic/learning-store';
 import * as delegateAckCollector from '../../../src/hooks/delegate-ack-collector';
 import * as receiptLedger from '../../../src/hooks/knowledge-receipt-ledger';
 import * as knowledgeStore from '../../../src/hooks/knowledge-store';
@@ -40,8 +41,7 @@ import * as compactionServiceMod from '../../../src/services/compaction-service'
 import * as skillChangelog from '../../../src/services/skill-changelog';
 import * as state from '../../../src/state';
 import * as historyStore from '../../../src/test-impact/history-store';
-import * as calibration from '../../../src/turbo/epic/calibration';
-import * as divergenceRecorder from '../../../src/turbo/epic/divergence-recorder';
+import { stubEpicRecord } from '../../helpers/epic-lifecycle';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // Fixed data-field timestamp (check-test-clock-safe; values are never asserted against wall clock).
@@ -98,8 +98,8 @@ beforeEach(() => {
 		MAX_CURATION_PROPOSALS: OVERRIDE_COUNT_CAP,
 		MAX_CONSOLIDATION_LOG_ENTRIES: OVERRIDE_COUNT_CAP,
 		MAX_CONTEXT_SNAPSHOT_BYTES: OVERRIDE_BYTES_CAP,
-		MAX_CALIBRATION_MODULES: OVERRIDE_COUNT_CAP,
-		MAX_DIVERGENCE_BYTES: OVERRIDE_BYTES_CAP,
+		MAX_EPIC_LEARNING_FILES: OVERRIDE_COUNT_CAP,
+		MAX_EPIC_LEARNING_EDGES: OVERRIDE_COUNT_CAP,
 		MAX_TEST_HISTORY_ENTRIES: OVERRIDE_COUNT_CAP,
 		MAX_TEST_HISTORY_KEYS: OVERRIDE_COUNT_CAP,
 		MAX_SKILL_CHANGELOG_GLOBAL_ENTRIES: OVERRIDE_COUNT_CAP,
@@ -277,46 +277,44 @@ describe('bounded writers clamp at the overridden cap (issue #2483)', () => {
 		assertNoTmpResidue(path.dirname(filePath));
 	});
 
-	it('calibration hotModuleAdditions: persisted list truncated to the cap on save+load', () => {
-		const root = makeRoot('calibration');
-		const persist = {
-			...calibration.emptyCalibrationState(),
-			hotModuleAdditions: Array.from(
-				{ length: WRITE_ENTRIES },
-				(_, i) => `src/mod-${i}.ts`,
-			).sort(),
-		};
-		calibration.saveCalibrationState(root, persist);
-		const reloaded = calibration.loadCalibrationState(root);
-		expect(reloaded).not.toBeNull();
-		const hot = reloaded?.hotModuleAdditions;
-		expect(Array.isArray(hot)).toBe(true);
-		expect(hot.length).toBeLessThanOrEqual(OVERRIDE_COUNT_CAP);
-		// The eviction rule keeps the lexicographically SMALLEST prefix.
-		const expected = persist.hotModuleAdditions.slice(0, OVERRIDE_COUNT_CAP);
-		expect(hot).toEqual(expected);
-		assertNoTmpResidue(path.join(root, '.swarm', 'epic'));
-	});
-
-	it('divergence-recorder: byte cap clamps with a whole-record floor', () => {
-		const root = makeRoot('divergence');
+	it('epic learning prior: file statistics and co-write edges clamp to the caps on write+load', () => {
+		const root = makeRoot('epic-learning');
+		const tasks: Record<string, never> = {};
 		for (let i = 0; i < WRITE_ENTRIES; i++) {
-			const res = divergenceRecorder.recordTaskDivergence({
-				directory: root,
-				sessionID: 'bounded-div-session',
-				taskId: `T1.${i}`,
-				declaredScope: ['src/declared-a.ts'],
-				actualFiles: [`src/undeclared-${i}.ts`, 'src/undeclared-other.ts'],
-			});
-			expect(res).not.toBeNull();
+			tasks[`1.${i}`] = {
+				taskId: `1.${i}`,
+				phase: 1,
+				waveSeq: 1,
+				resolution: 'completed',
+				resolvedAt: ISO_NOW,
+				generation: 1,
+				stageAFailures: 0,
+				stageBFailures: 0,
+				mergeFailure: null,
+				declared: [`src/mod-${i}.ts`],
+				undeclared: [`src/co-${i}.ts`],
+				attribution: 'session',
+				reopened: 0,
+				marker: null,
+			} as never;
 		}
-		const filePath = path.join(root, '.swarm', 'epic', 'divergence.jsonl');
-		expect(existsSync(filePath)).toBe(true);
-		const bytes = statSync(filePath).size;
-		expect(bytes).toBeLessThanOrEqual(OVERRIDE_BYTES_CAP);
-		// Floor: at least the newest single whole record always survives.
-		expect(assertValidJsonl(filePath)).toBeGreaterThan(0);
-		assertNoTmpResidue(path.dirname(filePath));
+		const merged = learningStore.mergeEpicPosteriorIntoPrior(
+			root,
+			stubEpicRecord({ tasks }),
+			'epic-report-key',
+			{ enabled: true, decayPerEpic: 0.7, halfLifeDays: 60, hotExcess: 0.25 },
+			Date.parse(ISO_NOW),
+		);
+		expect(merged.status).toBe('merged');
+		const read = learningStore.readEpicPrior(root);
+		expect(read.status).toBe('ok');
+		if (read.status !== 'ok') return;
+		expect(read.prior.stats.files.size).toBe(OVERRIDE_COUNT_CAP);
+		let edges = 0;
+		for (const targets of read.prior.stats.edges.values())
+			edges += targets.size;
+		expect(edges).toBe(OVERRIDE_COUNT_CAP);
+		assertNoTmpResidue(path.join(root, '.swarm', 'epic-prior'));
 	});
 
 	it('test-impact history-store: GLOBAL entry count clamps on every append', () => {

@@ -39,7 +39,7 @@ import type { KnowledgeAddAdapterRuntime } from './write-receipts.js';
 
 /** Write-capable tool-name shapes. Mirrors the frozen C6 denylist. */
 export const WRITE_TOOL_NAME_PATTERN =
-	/write_|record_|submit_|repair_|prepare_|rebind_|invalidate_|authorize_|external_skill_(promote|reject|delete|revoke)|swarm_apply_patch|save_plan|update_task_status|declare_scope|set_qa_gates|knowledge_add|knowledge_remove|knowledge_archive|checkpoint|phase_complete|complete_pr_workflow|abort_pr_workflow|approve_plan_critic|swarm_memory_propose|swarm_memory_outcome|spec_write|lint_spec|skill_generate|skill_regenerate|skill_retire|skill_improve|skill_apply|run_stale_reconciliation|epic_record_divergence|lean_turbo_acquire_locks|lean_turbo_plan_lanes|lean_turbo_critic|lean_turbo_review|lean_turbo_run_phase|convene_general_council|swarm_command/;
+	/write_|record_|submit_|repair_|prepare_|rebind_|invalidate_|authorize_|external_skill_(promote|reject|delete|revoke)|swarm_apply_patch|save_plan|update_task_status|declare_scope|set_qa_gates|knowledge_add|knowledge_remove|knowledge_archive|checkpoint|phase_complete|complete_pr_workflow|abort_pr_workflow|approve_plan_critic|swarm_memory_propose|swarm_memory_outcome|spec_write|lint_spec|skill_generate|skill_regenerate|skill_retire|skill_improve|skill_apply|run_stale_reconciliation|^epic_|lean_turbo_acquire_locks|lean_turbo_plan_lanes|lean_turbo_critic|lean_turbo_review|lean_turbo_run_phase|convene_general_council|swarm_command/;
 
 export interface McpReadTool {
 	/** Registered plugin tool name (a TOOL_METADATA key). */

@@ -8,6 +8,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { epicSentinelExists } from '../epic/lifecycle.js';
+import { commitEpicResidueAfterDelegation } from '../epic/residue-commit.js';
 import { completeBackgroundPhaseParticipation } from '../evidence/phase-participation.js';
 import { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
 import {
@@ -120,6 +122,10 @@ const RETRYABLE_LEGACY_SETTLEMENT_TRANSFER_ERROR_CODES = new Set([
 ]);
 
 const observerInternals = {
+	/** Epic v2 C3: sentinel probe gating the residue seam (one existsSync). */
+	epicSentinelExists,
+	/** Epic v2 C3 (X1): commit a background non-coder writer's residue. */
+	commitEpicResidueAfterDelegation,
 	transferCoderSettlementToBackground,
 	markLegacyCoderSettlementTransferPending,
 	sleep: (milliseconds: number) =>
@@ -587,6 +593,27 @@ export function createBackgroundCompletionObserver(opts: {
 						`[background] docs completion ${record.correlationId} could not persist phase participation: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
+			}
+
+			// Epic v2 C3 (X1) seam: a background non-coder writer that served
+			// a task of the open epic has its attributed main-tree writes
+			// committed on the epic branch (the foreground twin lives in the
+			// delegation gate's Task after-hook). Gated synchronously: with no
+			// open epic it is one existsSync and no extra await. Never throws.
+			if (
+				record.normalizedAgent !== 'coder' &&
+				observerInternals.epicSentinelExists(directory)
+			) {
+				await observerInternals.commitEpicResidueAfterDelegation({
+					directory,
+					agent: record.normalizedAgent,
+					sessionID: record.parentSessionId,
+					resolveTaskIds: async () => {
+						const taskId = record.planTaskId ?? record.evidenceTaskId;
+						return taskId ? [taskId] : [];
+					},
+					childSessionIds: async () => [record.subagentSessionId],
+				});
 			}
 
 			// After successful ingestion, discard the reviewer scope claim
