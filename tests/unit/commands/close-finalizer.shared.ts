@@ -286,7 +286,6 @@ export async function initializeCloseFinalizerHarness(): Promise<{
 		hasActiveFullAuto: () => false,
 		getActiveFullAutoSessionID: () => undefined,
 		hasActiveLeanTurbo: () => false,
-		hasActiveEpicMode: () => false,
 		updateTaskWorkflowCache: () => {},
 	}));
 

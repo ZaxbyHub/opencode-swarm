@@ -9,12 +9,8 @@ import {
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
- * Test suite for scripts/check-invariants.sh
- *
- * Tests both real-repo behavior and controlled fixture scenarios for:
- * 1. Subprocess timeout required (advisory)
- * 2. process.cwd() ban in tools/hooks
- * 3. mock.module allowlist
+ * Test suite for scripts/check-invariants.sh — real-repo behavior plus fixture
+ * scenarios: subprocess timeout, process.cwd() ban, mock.module allowlist.
  */
 
 const isWindows = process.platform === 'win32';
@@ -184,9 +180,7 @@ function setupFixtureDir(fixtureName: string): string {
 		ADVISORY_PUSH_SCRIPT_PATH,
 		path.join(fixtureDir, 'scripts', 'check-no-raw-advisory-push.sh'),
 	);
-	// Check 7 (issue #2477) fail-closes on missing quarantine list files, so
-	// every fixture tree must carry the four lists (header-only = no active
-	// entries; the bash owner leg never reads them).
+	// Check 7 (#2477) fail-closes on missing lists; header-only = no entries.
 	seedQuarantineListFiles(fixtureDir);
 
 	return fixtureDir;

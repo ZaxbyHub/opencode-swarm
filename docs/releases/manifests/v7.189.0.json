@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.189.0",
+  "tagCommit": "6b863276eb4f62e44d2ab12d00e7360dd8b89f00",
+  "targetCommitish": "6b863276eb4f62e44d2ab12d00e7360dd8b89f00",
+  "releaseBodySha256": "92b03a3604c8cf7eede4a64d8483839e5ba0c014ba266ed81c57123e328a744e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/quarantine-census-renewal-aging-2905.md",
+      "sha256": "c8ca089aac56eb093f5059cdfdd684760ef4302f6dd264a2fe2ce4babd3b250e"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.9",
+  "tagCommit": "6711625573c4922eaf0810c5c2b09733f1574c97",
+  "targetCommitish": "6711625573c4922eaf0810c5c2b09733f1574c97",
+  "releaseBodySha256": "0f0033ffe9b797ee20779a53ea51215b73543558330773270c5eda38de2d04f0",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3032-reset-session-stage-b-settlement-resync.md",
+      "sha256": "df15cc145d27c80019c43583be896ac37b30c435c9641fe58cf45cc8a1975540"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3043-blocked-start-stage-b-settlement-view-refresh.md",
+      "sha256": "0d2a65514aedd107ae6cd2220b54a0e4c3ab0042af334aa4ef4f2e9bb0555f81"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/test-runner-nested-maven-detection.md",
+      "sha256": "9e4d5f51b74629055cb8d3298dd81f10aba1b37334cfd30ba6576436ea7ff1d7"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/test-runner-omitted-files-crash-fix.md",
+      "sha256": "847bffe4ab93529633552ddf7bb8a344035d416ec1166b8f20f5def18fe1de67"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/test-runner-spawn-classification-and-targets-3039-3041.md",
+      "sha256": "1b701eca9b942253900a87390b78b478626b55435ad57c0d6e3e6a776acf1dd8"
+    }
+  ]
+}

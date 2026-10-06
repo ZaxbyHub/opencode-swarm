@@ -4,6 +4,7 @@ import {
 	DEFAULT_READ_ONLY_TOOLS,
 	dispatchEphemeralAgent,
 	type EphemeralAgentDispatchResult,
+	type ReadOnlyToolDenials,
 } from '../evaluation/ephemeral-agent-dispatcher.js';
 import type { PricingConfig } from '../services/cost-accounting.js';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
@@ -22,6 +23,13 @@ export type ReviewDispatchRequest = {
 	promptByteLimit?: number;
 	responseByteLimit?: number;
 	abortSignal?: AbortSignal;
+	/**
+	 * Tool-denial map for the isolated session. Omitted ⇒
+	 * `DEFAULT_READ_ONLY_TOOLS` (every caller except Epic's phase review,
+	 * whose provider-refusal retry keeps `bash` — see
+	 * `src/epic/phase-readiness.ts`).
+	 */
+	tools?: ReadOnlyToolDenials;
 };
 
 export type ReviewDispatchResult = EphemeralAgentDispatchResult;
@@ -50,7 +58,7 @@ export function createReviewModelDispatcher(
 				model: request.model,
 				system: request.system,
 				prompt: request.prompt,
-				readOnlyTools: DEFAULT_READ_ONLY_TOOLS,
+				readOnlyTools: request.tools ?? DEFAULT_READ_ONLY_TOOLS,
 				title: request.title,
 				timeoutMs:
 					request.timeoutMs && request.timeoutMs > 0

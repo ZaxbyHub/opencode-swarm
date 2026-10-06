@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.1",
+  "tagCommit": "675e9ab03afb7f0b4d2f482f4d1bfedd9a1ebefd",
+  "targetCommitish": "675e9ab03afb7f0b4d2f482f4d1bfedd9a1ebefd",
+  "releaseBodySha256": "cd9dcc01c48fa7c0bb9af141e231759805ccd8767ecb7ecff04d2f34c0a59337",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2903-vacuous-assertion-ratchet.md",
+      "sha256": "b2a06ebea232289078f09113f4e819fee4bb23bea4bab41d19c0e98a6d1326df"
+    }
+  ]
+}

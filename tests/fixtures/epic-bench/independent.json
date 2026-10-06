@@ -1,0 +1,58 @@
+{
+	"name": "independent",
+	"description": "8 tasks on disjoint files, true writes = declared scopes: Epic fans them out up to its wave width (4); Lean's planner packs them all into one lane (one coder, serial). Nothing conflicts in any strategy.",
+	"seed": 11,
+	"maxParallel": 4,
+	"epochs": 1,
+	"learningMatters": false,
+	"tasks": [
+		{
+			"id": "1.1",
+			"phase": 1,
+			"declared": ["src/module-1.ts"],
+			"actual": ["src/module-1.ts"]
+		},
+		{
+			"id": "1.2",
+			"phase": 1,
+			"declared": ["src/module-2.ts"],
+			"actual": ["src/module-2.ts"]
+		},
+		{
+			"id": "1.3",
+			"phase": 1,
+			"declared": ["src/module-3.ts"],
+			"actual": ["src/module-3.ts"]
+		},
+		{
+			"id": "1.4",
+			"phase": 1,
+			"declared": ["src/module-4.ts"],
+			"actual": ["src/module-4.ts"]
+		},
+		{
+			"id": "1.5",
+			"phase": 1,
+			"declared": ["src/module-5.ts"],
+			"actual": ["src/module-5.ts"]
+		},
+		{
+			"id": "1.6",
+			"phase": 1,
+			"declared": ["src/module-6.ts"],
+			"actual": ["src/module-6.ts"]
+		},
+		{
+			"id": "1.7",
+			"phase": 1,
+			"declared": ["src/module-7.ts"],
+			"actual": ["src/module-7.ts"]
+		},
+		{
+			"id": "1.8",
+			"phase": 1,
+			"declared": ["src/module-8.ts"],
+			"actual": ["src/module-8.ts"]
+		}
+	]
+}

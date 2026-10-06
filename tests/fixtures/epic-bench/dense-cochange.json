@@ -1,0 +1,88 @@
+{
+	"name": "dense-cochange",
+	"description": "4 model/view pairs that historically change together (high-NPMI co-change): each model task really also edits its view, which another task owns. Epic's co-change rule keeps each pair out of the same wave from the first epoch (no conflicts); with the co-change signal off the pairs share a wave and conflict until learning separates them in the next epoch. Lean runs one coder at a time (no conflicts, serial makespan).",
+	"seed": 41,
+	"maxParallel": 4,
+	"epochs": 2,
+	"learningMatters": true,
+	"cochange": {
+		"npmi": 0.6,
+		"minCoChanges": 5,
+		"pairs": [
+			{
+				"fileA": "src/model-a.ts",
+				"fileB": "src/view-a.ts",
+				"npmi": 0.9,
+				"coChangeCount": 12
+			},
+			{
+				"fileA": "src/model-b.ts",
+				"fileB": "src/view-b.ts",
+				"npmi": 0.9,
+				"coChangeCount": 12
+			},
+			{
+				"fileA": "src/model-c.ts",
+				"fileB": "src/view-c.ts",
+				"npmi": 0.9,
+				"coChangeCount": 12
+			},
+			{
+				"fileA": "src/model-d.ts",
+				"fileB": "src/view-d.ts",
+				"npmi": 0.9,
+				"coChangeCount": 12
+			}
+		]
+	},
+	"tasks": [
+		{
+			"id": "1.1",
+			"phase": 1,
+			"declared": ["src/model-a.ts"],
+			"actual": ["src/model-a.ts", "src/view-a.ts"]
+		},
+		{
+			"id": "1.2",
+			"phase": 1,
+			"declared": ["src/view-a.ts"],
+			"actual": ["src/view-a.ts"]
+		},
+		{
+			"id": "1.3",
+			"phase": 1,
+			"declared": ["src/model-b.ts"],
+			"actual": ["src/model-b.ts", "src/view-b.ts"]
+		},
+		{
+			"id": "1.4",
+			"phase": 1,
+			"declared": ["src/view-b.ts"],
+			"actual": ["src/view-b.ts"]
+		},
+		{
+			"id": "1.5",
+			"phase": 1,
+			"declared": ["src/model-c.ts"],
+			"actual": ["src/model-c.ts", "src/view-c.ts"]
+		},
+		{
+			"id": "1.6",
+			"phase": 1,
+			"declared": ["src/view-c.ts"],
+			"actual": ["src/view-c.ts"]
+		},
+		{
+			"id": "1.7",
+			"phase": 1,
+			"declared": ["src/model-d.ts"],
+			"actual": ["src/model-d.ts", "src/view-d.ts"]
+		},
+		{
+			"id": "1.8",
+			"phase": 1,
+			"declared": ["src/view-d.ts"],
+			"actual": ["src/view-d.ts"]
+		}
+	]
+}

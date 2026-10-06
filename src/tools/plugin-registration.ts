@@ -15,6 +15,7 @@ import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.j
 import { withStartupFirstToolTracking } from '../observability/startup-contract.js';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
 import type { ReviewAgentModelRegistry } from '../review/runtime.js';
+import { createEpicPhaseReviewTool } from './epic-phase-review.js';
 import { createLeanTurboCriticTool } from './lean-turbo-critic.js';
 import { createLeanTurboReviewTool } from './lean-turbo-review.js';
 import { createLeanTurboRunPhaseTool } from './lean-turbo-run-phase.js';
@@ -95,6 +96,12 @@ export function buildPluginToolObject(
 		getActiveAgentName,
 	);
 	tools.lean_turbo_run_phase = createLeanTurboRunPhaseTool(reviewAgentNames);
+	tools.epic_phase_review = createEpicPhaseReviewTool(
+		reviewModelDispatcher,
+		reviewAgentNames,
+		reviewAgentModelRegistry,
+		getActiveAgentName,
+	);
 	// Startup latency contract (#2670): observe the FIRST tool execute per
 	// process with the tool name in scope. The wrap BUILDS A COPY of each
 	// definition ({ ...def, execute }) — the shared module-level tool

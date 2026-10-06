@@ -3174,124 +3174,300 @@ export const LeanTurboConfigSchema = z.object({
 export type LeanTurboConfig = z.infer<typeof LeanTurboConfigSchema>;
 
 /**
- * Epic mode — co-change-aware conflict detection settings.
- *
- * Epic mode is an additive layer that composes Lean Turbo (it never modifies it).
- * Capability A surfaces git co-change history as an extra conflict signal so
- * pairs of files that historically change together can be treated as conflicting
- * even when path-based rules would not catch the coupling.
- *
- * With `cochange.enabled: false` (the default), no Epic-mode code runs in any
- * existing flow — behavior is identical to upstream Lean Turbo.
+ * Epic config keys retired by Epic v2: `epic.mode` keys (C5:
+ * `min_commits_for_signal`, read by nothing since the activation gate was
+ * removed) and whole `epic` blocks (C6: `calibration` — the Epic v1
+ * self-calibration knobs, replaced by `epic.learning`). A retired key is
+ * accepted and stripped before the strict object validates, and never read —
+ * under the top-level `epic` block and under the legacy `turbo.epic` path
+ * alike. (Without this, the loader's unknown-key recovery would also drop
+ * it, but as an "unrecognized key" with a `stripped_keys` recovery.)
+ * Instead the loader warns once per distinct set with a precise "retired"
+ * message, `/swarm config doctor` reports each one (`retired-config-key`),
+ * and the JSON schema keeps it as `deprecated` so editors do not reject it.
  */
-export const EpicConfigSchema = z
-	.object({
-		cochange: z
-			.object({
-				/** Master gate for the co-change conflict signal. Default off; opt-in. */
-				enabled: z.boolean().default(false),
-				/**
-				 * NPMI floor for considering a file pair "historically co-changing".
-				 * Range matches co_change_analyzer's npmi range [-1, 1]. The analyzer's
-				 * discovery default is 0.5; the Epic default is set higher (0.6) so the
-				 * signal only escalates clearly-coupled pairs, not borderline ones.
-				 */
-				threshold: z.number().min(-1).max(1).default(0.6),
-				/**
-				 * Minimum raw co-change count required before NPMI is even considered.
-				 * Filters out small-sample-size pairs whose NPMI is statistically noisy.
-				 * The analyzer's discovery default is 3; Epic uses 5 for conservatism.
-				 */
-				min_co_changes: z.number().int().min(1).default(5),
-			})
-			.strict()
-			.optional(),
-		/**
-		 * Epic mode activation settings (Capability C). When `enabled`, the
-		 * `/swarm epic` command and the architect-facing flow
-		 * (`epic_decide_phase` → `epic_plan_waves` → `Task` per wave) become
-		 * usable; they compute `p` over the plan, gate on the activation
-		 * threshold + hot modules + greenfield rule, and either dispatch via
-		 * the wave planner (when promoted) or fall back to the standard
-		 * serial path (when demoted). Default off — opt-in.
-		 */
-		mode: z
-			.object({
-				/** Master gate for Epic Mode activation. Default off; opt-in. */
-				enabled: z.boolean().default(false),
-				/**
-				 * Activation threshold for `p` (the coupling coefficient computed
-				 * over the plan). Plans with `p <= activation_threshold` are
-				 * eligible for parallel promotion; plans above this threshold are
-				 * forced serial. Conservative default — most plans below this are
-				 * genuinely parallelizable.
-				 */
-				activation_threshold: z.number().min(0).max(1).default(0.3),
-				/**
-				 * Greenfield rule (brief §4.2). Co-change history with fewer than
-				 * this many commits is treated as too sparse to trust; the plan is
-				 * forced serial regardless of `p`. Matches `co_change_analyzer`'s
-				 * own minimum-commits floor.
-				 */
-				min_commits_for_signal: z.number().int().min(1).default(20),
-			})
-			.strict()
-			.optional(),
-		/**
-		 * Epic Mode calibration (Capability D). Outcome-based self-tuning.
-		 * After every task completion `epic_record_divergence` appends a
-		 * record to `.swarm/epic/divergence.jsonl` comparing declared scope
-		 * to actual files modified. On every `epic_decide_phase` the
-		 * calibration engine consumes any new records and adjusts two knobs:
-		 *
-		 *   - `activationThresholdOverride` — tightens (toward zero) on
-		 *     divergence; loosens (toward `mode.activation_threshold`) only
-		 *     after `loosen_window` consecutive clean tasks. Capped by the
-		 *     static config value — calibration can never relax past static.
-		 *
-		 *   - `hotModuleAdditions` — monotonically grows. Files written
-		 *     without being declared are added permanently (a one-way
-		 *     ratchet — auto-loosening here would defeat the safety guarantee).
-		 *
-		 * State persists at `.swarm/epic/calibration.json`. Default `enabled`
-		 * matches the rest of Epic Mode — on when the parent config is
-		 * present, defaults are conservative.
-		 */
-		calibration: z
-			.object({
-				/** Master gate. When false, the calibration engine never runs and the static knobs are always used. */
-				enabled: z.boolean().default(true),
-				/**
-				 * Floor for the activation threshold. Calibration never tightens
-				 * below this — even after many divergent tasks. Below ~0.05 the
-				 * gate becomes too strict for Epic Mode to ever promote.
-				 */
-				floor_threshold: z.number().min(0).max(1).default(0.05),
-				/** Per-divergent-task tightening step (subtracted from current threshold). */
-				tighten_step: z.number().min(0).max(1).default(0.02),
-				/** Per-loosening-event step (added toward the static config value). */
-				loosen_step: z.number().min(0).max(1).default(0.01),
-				/**
-				 * Consecutive clean tasks required before the engine loosens the
-				 * threshold by `loosen_step`. After loosening the counter resets,
-				 * so a full window must elapse again before the next loosening.
-				 */
-				loosen_window: z.number().int().min(1).default(10),
-			})
-			.strict()
-			.optional(),
-	})
-	.strict();
+export const RETIRED_EPIC_MODE_KEYS: readonly string[] = [
+	'min_commits_for_signal',
+];
+export const RETIRED_EPIC_KEYS: readonly string[] = ['calibration'];
+
+/**
+ * What replaced a retired Epic key, for the warning / doctor finding. Keyed by
+ * the key's path relative to the Epic block (`calibration`, `mode.<key>`), so
+ * the same hint serves `epic.*` and the legacy `turbo.epic.*` path.
+ */
+export const RETIRED_EPIC_KEY_REPLACEMENTS: Readonly<Record<string, string>> = {
+	calibration:
+		'Epic learning replaced it — see epic.learning.* (enabled, decay_per_epic, half_life_days, hot_excess).',
+};
+
+/** The replacement hint for a dotted retired-key path from {@link findRetiredEpicConfigKeys}. */
+export function retiredEpicKeyReplacement(dotted: string): string | undefined {
+	const relative = dotted.replace(/^(?:turbo\.)?epic\./, '');
+	return Object.hasOwn(RETIRED_EPIC_KEY_REPLACEMENTS, relative)
+		? RETIRED_EPIC_KEY_REPLACEMENTS[relative]
+		: undefined;
+}
+
+function stripKeys(keys: readonly string[]): (value: unknown) => unknown {
+	return (value) => {
+		if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+			return value;
+		}
+		const record = value as Record<string, unknown>;
+		if (!keys.some((key) => Object.hasOwn(record, key))) return value;
+		const stripped: Record<string, unknown> = { ...record };
+		for (const key of keys) delete stripped[key];
+		return stripped;
+	};
+}
+
+const stripRetiredEpicModeKeys = stripKeys(RETIRED_EPIC_MODE_KEYS);
+const stripRetiredEpicKeys = stripKeys(RETIRED_EPIC_KEYS);
+
+/**
+ * Dotted paths of retired Epic keys present in a raw (pre-parse) config
+ * object, under the top-level `epic` block and the legacy `turbo.epic` path,
+ * as the user wrote them — e.g. `epic.mode.min_commits_for_signal`,
+ * `epic.calibration`.
+ */
+export function findRetiredEpicConfigKeys(raw: unknown): string[] {
+	const at = (node: unknown, key: string): unknown =>
+		node !== null &&
+		typeof node === 'object' &&
+		!Array.isArray(node) &&
+		Object.hasOwn(node, key)
+			? (node as Record<string, unknown>)[key]
+			: undefined;
+	const found: string[] = [];
+	for (const [prefix, epic] of [
+		['epic', at(raw, 'epic')],
+		['turbo.epic', at(at(raw, 'turbo'), 'epic')],
+	] as const) {
+		const mode = at(epic, 'mode');
+		found.push(
+			...RETIRED_EPIC_MODE_KEYS.filter(
+				(key) => at(mode, key) !== undefined,
+			).map((key) => `${prefix}.mode.${key}`),
+			...RETIRED_EPIC_KEYS.filter((key) => at(epic, key) !== undefined).map(
+				(key) => `${prefix}.${key}`,
+			),
+		);
+	}
+	return found;
+}
+
+/**
+ * Epic Mode settings — the top-level `epic` block (legacy path: `turbo.epic`,
+ * accepted permanently and migrated by the loader; see `src/epic/config.ts`).
+ * Every Epic reader resolves them through `resolveEpicConfig`
+ * (`src/epic/config.ts`); Epic needs no `turbo` block.
+ *
+ * Epic Mode reuses Lean Turbo's conflict predicates (it never modifies Lean
+ * Turbo) and dispatches promoted waves itself via visible `Task` calls.
+ *
+ * Two independent opt-in master gates, both default `false` and both read
+ * through `src/epic/config-gate.ts`:
+ *   - `mode.enabled` gates Epic Mode itself: `/swarm epic start`, the Epic
+ *     tools (`epic_next_wave`, `epic_phase_review`), and the
+ *     project-scoped open-epic probe (required worktree isolation and
+ *     commit-at-landing for epic coders, residue commits, the epic refs,
+ *     the Epic phase-readiness gate in `phase_complete`). With it off, none of those
+ *     run (an already-open epic is inert until re-enabled or closed).
+ *   - `cochange.enabled` gates only Capability A's git co-change conflict
+ *     signal. With it off, `epic_next_wave` keeps a wave's tasks apart on
+ *     declared-path conflicts only, and `/swarm coupling` records
+ *     `cochangeSignal: 'disabled-by-config'`.
+ */
+export const EpicConfigSchema = z.preprocess(
+	stripRetiredEpicKeys,
+	z
+		.object({
+			cochange: z
+				.object({
+					/**
+					 * Master gate for the co-change conflict signal (Capability A).
+					 * Default off; opt-in. Off ⇒ path-only conflicts.
+					 */
+					enabled: z.boolean().default(false),
+					/**
+					 * NPMI floor for considering a file pair "historically co-changing".
+					 * Range matches co_change_analyzer's npmi range [-1, 1]. The analyzer's
+					 * discovery default is 0.5; the Epic default is set higher (0.6) so the
+					 * signal only escalates clearly-coupled pairs, not borderline ones.
+					 */
+					threshold: z.number().min(-1).max(1).default(0.6),
+					/**
+					 * Minimum raw co-change count required before NPMI is even considered.
+					 * Filters out small-sample-size pairs whose NPMI is statistically noisy.
+					 * The analyzer's discovery default is 3; Epic uses 5 for conservatism.
+					 */
+					min_co_changes: z.number().int().min(1).default(5),
+				})
+				.strict()
+				.optional(),
+			/**
+			 * Epic mode settings. When `enabled`, `/swarm epic start` can open an
+			 * epic for the current plan and the architect-facing flow
+			 * (`epic_next_wave` → `Task` per wave task → per-task QA →
+			 * `epic_phase_review` → `phase_complete`) becomes usable. Default
+			 * off — opt-in; with it off those entry points refuse with
+			 * `epic-disabled-by-config`.
+			 */
+			mode: z
+				.preprocess(
+					stripRetiredEpicModeKeys,
+					z
+						.object({
+							/** Master gate for Epic Mode activation. Default off; opt-in. */
+							enabled: z.boolean().default(false),
+							/**
+							 * Intra-component density threshold (Epic v2 C5). `epic_next_wave`
+							 * splits a phase's pending tasks into conflict components; a
+							 * component whose density |E_C| / (|C| choose 2) exceeds this value
+							 * is `serial-component` (one of its tasks per wave), otherwise its
+							 * unconflicting tasks share waves. Until C5 it bounded the removed
+							 * plan-wide `p` activation gate.
+							 */
+							activation_threshold: z.number().min(0).max(1).default(0.3),
+							/**
+							 * Retired (Epic v2 C5) — see `RETIRED_EPIC_MODE_KEYS`. Declared
+							 * only so the JSON schema marks it `deprecated`; the preprocess
+							 * strips it before validation, so the parsed config never has it.
+							 */
+							min_commits_for_signal: z.number().optional().meta({
+								deprecated: true,
+								description:
+									'Retired (Epic v2): accepted and ignored with a warning. Remove it.',
+							}),
+						})
+						.strict(),
+				)
+				.optional(),
+			/**
+			 * Retired (Epic v2 C6) — see `RETIRED_EPIC_KEYS`. The Epic v1
+			 * self-calibration block; `epic.learning` replaced it. Declared
+			 * only so the JSON schema marks it `deprecated`; the preprocess strips
+			 * it before validation, so the parsed config never has it.
+			 */
+			calibration: z.record(z.string(), z.unknown()).optional().meta({
+				deprecated: true,
+				description:
+					'Retired (Epic v2): accepted and ignored with a warning — Epic learning replaced it (epic.learning). Remove it.',
+			}),
+			/**
+			 * Epic learning (Epic v2 C6, `src/epic/learning.ts`). Every wave
+			 * close teaches the epic's posterior from its task outcomes: learned
+			 * co-writes (a task that declared D but also wrote f makes later tasks
+			 * declaring D conflict with tasks on f — planner analysis only, never
+			 * write authorization) and a decaying hot set (files with EXCESS
+			 * incidents — undeclared writes, merge conflicts, Stage B failures,
+			 * rework, reopens — over clean exposures; a task declaring one runs
+			 * alone). At epic close the posterior is merged into the project prior
+			 * `.swarm/epic-prior/learning.json`, which survives `/swarm close`.
+			 * Inert unless `mode.enabled` is also true.
+			 */
+			learning: z
+				.object({
+					/** Master gate. False ⇒ nothing is learned, read, or written. */
+					enabled: z.boolean().default(true),
+					/** Multiplier applied to the project prior at every epic close that learned something. */
+					decay_per_epic: z.number().min(0).max(1).default(0.7),
+					/** Half-life (days) of learned evidence, counted in whole half-lives when it is read. */
+					half_life_days: z.number().positive().default(60),
+					/**
+					 * A file is hot when its incident rate exceeds the prior mean
+					 * (0.1) by more than this, with at least one full incident.
+					 */
+					hot_excess: z.number().min(0).max(1).default(0.25),
+				})
+				.strict()
+				.optional(),
+			/**
+			 * Epic sizing (Epic v2). `/swarm epic start` refuses a plan that is not
+			 * epic-sized (`--force` overrides and is recorded). With T pending
+			 * tasks, L serial steps in a dry-run of the Epic component planner,
+			 * S = T / L and
+			 * S_eff = 1 / ((1 − coder_fraction) + coder_fraction / S), a plan is
+			 * epic-sized when T ≥ `min_tasks`, the share of pending tasks with a
+			 * scope ≥ `min_scope_coverage`, and S_eff ≥ `min_effective_speedup`.
+			 */
+			sizing: z
+				.object({
+					/** Minimum pending tasks across the plan. */
+					min_tasks: z.number().int().min(1).default(6),
+					/** Minimum share of pending tasks with a declared scope / files_touched. */
+					min_scope_coverage: z.number().min(0).max(1).default(0.8),
+					/** Minimum Amdahl-adjusted speedup S_eff. */
+					min_effective_speedup: z.number().min(1).default(1.25),
+					/** Share of a task's wall-clock that parallel coders overlap. */
+					coder_fraction: z.number().min(0).max(1).default(0.6),
+				})
+				.strict()
+				.optional(),
+			/**
+			 * Where an epic's commits go (git projects). `epic-branch` (default):
+			 * `/swarm epic start` checks out `swarm/epic/<epicKey>` and
+			 * `/swarm epic close` lands it back onto the original branch
+			 * (`--land squash|merge|none`, default squash — staged, uncommitted).
+			 * `current-branch`: commits stay on the branch that was current at
+			 * start and close does not land anything. Absent ⇒ `epic-branch`.
+			 */
+			commit_policy: z.enum(['epic-branch', 'current-branch']).optional(),
+			/**
+			 * Keep the epic's git refs (`refs/swarm/epics/<epicKey>/{base,
+			 * waves/<seq>,tasks/<id>}`) after `/swarm epic close`. Absent/false ⇒
+			 * close deletes them once the close report has captured their values.
+			 * The refs are never pushed or cloned by default (`--mirror` copies
+			 * them).
+			 */
+			retain_refs: z.boolean().optional(),
+			/**
+			 * `epic_phase_review` (the `epic_phase_readiness` gate's producer).
+			 * `timeout_ms` bounds each role's dispatch (reviewer, then critic);
+			 * an empty-response retry shares the same budget. Same bounds and
+			 * default as `auto_review.timeout_ms`. A timed-out role is recorded
+			 * fail-closed as REJECTED and the review is re-run.
+			 */
+			phase_review: z
+				.object({
+					timeout_ms: z
+						.number()
+						.int()
+						.min(10_000)
+						.max(1_800_000)
+						.default(300_000),
+				})
+				.strict()
+				.optional(),
+		})
+		.strict(),
+);
 
 export type EpicConfig = z.infer<typeof EpicConfigSchema>;
+
+/**
+ * `turbo.epic` — the legacy Epic Mode path, accepted PERMANENTLY. The loader
+ * moves it to the file's top-level `epic` before the files are merged and
+ * parsed (per-key merge, the file's top-level `epic` wins; project over user
+ * across files; one advisory warning, a `legacy-epic-config-path` doctor
+ * finding), so a
+ * loaded config never carries it; it stays in the schema so a config parsed
+ * directly keeps validating and the JSON schema marks it `deprecated`.
+ */
+export const LegacyTurboEpicConfigSchema = EpicConfigSchema.optional().meta({
+	deprecated: true,
+	description:
+		'Deprecated (still accepted): move this block to top-level `epic` — Epic Mode no longer needs a `turbo` block. Within a file, top-level `epic` wins per key when both are set.',
+});
 
 export const StandardTurboConfigSchema = z.object({
 	/** Turbo execution strategy. standard = current behavior, lean = constrained parallel. */
 	strategy: z.literal('standard'),
 	/** Lean-mode configuration. Only used when strategy is 'lean'. */
 	lean: LeanTurboConfigSchema.optional(),
-	/** Epic-mode configuration. Additive overlay — composes Lean Turbo without modifying it. */
-	epic: EpicConfigSchema.optional(),
+	/** Legacy Epic Mode path — use top-level `epic` (see `LegacyTurboEpicConfigSchema`). */
+	epic: LegacyTurboEpicConfigSchema,
 });
 
 export const LeanTurboStrategyConfigSchema = z.object({
@@ -3299,8 +3475,8 @@ export const LeanTurboStrategyConfigSchema = z.object({
 	strategy: z.literal('lean'),
 	/** Lean-mode configuration. Only used when strategy is 'lean'. */
 	lean: LeanTurboConfigSchema,
-	/** Epic-mode configuration. Additive overlay — composes Lean Turbo without modifying it. */
-	epic: EpicConfigSchema.optional(),
+	/** Legacy Epic Mode path — use top-level `epic` (see `LegacyTurboEpicConfigSchema`). */
+	epic: LegacyTurboEpicConfigSchema,
 });
 
 export const TurboConfigSchema = z.discriminatedUnion('strategy', [
@@ -4200,6 +4376,14 @@ export const PluginConfigSchema = z.object({
 	// Backward compatible: no turbo key means current behavior unchanged.
 	turbo: TurboConfigSchema.optional().describe(
 		'Turbo execution strategy block (Phase 1). Absent means current behavior unchanged.',
+	),
+
+	// Epic Mode — one plan = one epic, delivered in conflict-free parallel
+	// waves (src/epic/README.md). Opt-in via `epic.mode.enabled`; needs no
+	// `turbo` block. The legacy `turbo.epic` path is migrated into it by the
+	// loader (src/epic/config.ts).
+	epic: EpicConfigSchema.optional().describe(
+		'Epic Mode block: one plan = one epic delivered in conflict-free parallel waves. Opt in with `mode.enabled: true`, then `/swarm epic start`. Needs no `turbo` block (legacy `turbo.epic` is still accepted and migrated here).',
 	),
 
 	// Turbo mode — bypasses reviewer/test gates for rapid iteration (v6.40);

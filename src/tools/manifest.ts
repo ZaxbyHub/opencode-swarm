@@ -55,9 +55,8 @@ import {
 } from './dispatch-lanes';
 import { doc_extract, doc_scan } from './doc-scan';
 import { detect_domains } from './domain-detector';
-import { epic_plan_waves } from './epic-plan-waves';
-import { epic_record_divergence } from './epic-record-divergence';
-import { epic_decide_phase } from './epic-run-phase';
+import { epic_next_wave } from './epic-next-wave';
+import { epic_phase_review } from './epic-phase-review';
 import { evidence_check } from './evidence-check';
 import { external_skill_delete } from './external-skill-delete';
 import { external_skill_discover } from './external-skill-discover';
@@ -317,7 +316,6 @@ export const TOOL_MANIFEST = defineHandlers({
 	external_skill_reject: () => external_skill_reject,
 	external_skill_delete: () => external_skill_delete,
 	external_skill_revoke: () => external_skill_revoke,
-	epic_decide_phase: () => epic_decide_phase,
-	epic_plan_waves: () => epic_plan_waves,
-	epic_record_divergence: () => epic_record_divergence,
+	epic_next_wave: () => epic_next_wave,
+	epic_phase_review: () => epic_phase_review,
 });

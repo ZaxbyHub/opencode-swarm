@@ -8,7 +8,12 @@ import {
 } from '../helpers/test-isolation.js';
 
 const ROOT = path.resolve(import.meta.dir, '../../');
-const MAIN_BUNDLE_MAX_BYTES = 9.5 * 1024 * 1024;
+// Bumped 9.5 -> 10.5 MiB for Epic Mode v2 (#1583 precedent: cap bump, not
+// revert): measured upstream 9,895,994 B vs 10,022,955 B with Epic v2's own
+// lifecycle / wave / landing / refs code (all of the +126,961 B), with no
+// cheap reduction available; #1582 (identifier minification) remains the
+// structural fix.
+const MAIN_BUNDLE_MAX_BYTES = 10.5 * 1024 * 1024;
 
 /**
  * Issue #2010 isolation for the one test below that BOOTS the shipped bundle.
@@ -128,7 +133,7 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 9.5MiB)', () => {
+	test('dist/index.js file size is reasonable (< 10.5MiB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
 		// The main bundle is built with identifier-preserving minification
 		// (`--minify-whitespace --minify-syntax`, no `--minify-identifiers`).

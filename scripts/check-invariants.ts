@@ -4,6 +4,18 @@ import * as path from 'node:path';
 import * as ts from 'typescript';
 import { fileURLToPath } from 'node:url';
 import { runGit as runGitBase } from './gate-utils';
+import {
+	DEFAULT_QUARANTINE_LEDGERS,
+	QUARANTINE_EXPIRY_GRACE_DAYS,
+	type QuarantineLedgerContent,
+	type QuarantineRenewalResult,
+	type QuarantineTrend,
+	buildQuarantineCensus,
+	checkQuarantineRenewal,
+	collectAddRetireTrend,
+	formatQuarantineCensus,
+	resolveRenewalEnforce,
+} from './ci/quarantine-census';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -34,20 +46,20 @@ const KNOWLEDGE_DEDUP_SCOPE = [
 	'src/consensus/*.ts',
 ] as const;
 
-/** Quarantine list files that require OWNER/EXPIRY metadata on active entries (#2477). */
-export const QUARANTINE_LIST_FILES = [
-	'scripts/ci/quarantined-tests.txt',
-	'scripts/ci/quarantined-tests-windows.txt',
-	'scripts/ci/quarantined-tests-macos.txt',
-	'scripts/ci/quarantined-integration-tests.txt',
-] as const;
+/**
+ * Quarantine list files that require OWNER/EXPIRY metadata on active entries
+ * (#2477). Owned by scripts/ci/quarantine-census.ts (#2905); re-exported here
+ * under its historical name so existing importers are unchanged.
+ */
+export const QUARANTINE_LIST_FILES: readonly string[] =
+	DEFAULT_QUARANTINE_LEDGERS;
 
 /**
  * How far past EXPIRY an entry may sit before the check hard-fails. Inside the
  * grace window the entry only warns, so a legitimate "still waiting on the
  * retirement criterion" entry needs one small renewal PR, not an emergency.
+ * Owned by scripts/ci/quarantine-census.ts (#2905) and imported above.
  */
-const QUARANTINE_EXPIRY_GRACE_DAYS = 14;
 
 const BASE_BRANCH_CANDIDATES = [
 	'origin/main',
@@ -1376,9 +1388,22 @@ export function checkMigrationLockAdmission(repoRoot: string): CheckResult {
  * Missing OWNER/EXPIRY is a violation. An EXPIRY in the past warns inside the
  * 14-day grace window and fails beyond it (dates compared in UTC).
  */
+export interface QuarantineCheckExtras {
+	/** Pre-computed renewal policy result (baseline vs head ledgers). */
+	renewal?: QuarantineRenewalResult;
+	/** Pre-computed 30-day add/retire trend; absent => deterministic n/a line. */
+	trend?: QuarantineTrend | null;
+}
+
+/** Escape only the characters GitHub annotations reserve (drift-check precedent). */
+function escapeCensusAnnotationText(text: string): string {
+	return text.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+}
+
 export function checkQuarantineMetadata(
 	repoRoot: string,
 	now: Date = new Date(),
+	extras: QuarantineCheckExtras = {},
 ): CheckResult {
 	const messages = [
 		'=== Check 7: quarantine entries carry OWNER + EXPIRY metadata (issue #2477) ===',
@@ -1387,6 +1412,7 @@ export function checkQuarantineMetadata(
 	const ownerPattern = /^#\s*OWNER:\s*(\S.*)$/;
 	const expiryPattern = /^#\s*EXPIRY:\s*(\d{4})-(\d{2})-(\d{2})\b/;
 	const expiryLoosePattern = /^#\s*EXPIRY:\s*(\S.*)$/;
+	const ledgerContents: QuarantineLedgerContent[] = [];
 
 	for (const listRel of QUARANTINE_LIST_FILES) {
 		const listFile = path.join(repoRoot, listRel);
@@ -1395,9 +1421,12 @@ export function checkQuarantineMetadata(
 				`ERROR: ${listRel} not found — the quarantine list file is required.`,
 			);
 			violations += 1;
+			ledgerContents.push({ ledger: listRel, content: '' });
 			continue;
 		}
-		const lines = readText(listFile).split(/\r?\n/);
+		const content = readText(listFile);
+		ledgerContents.push({ ledger: listRel, content });
+		const lines = content.split(/\r?\n/);
 		for (let index = 0; index < lines.length; index += 1) {
 			const line = lines[index];
 			if (line.trim() === '' || line.trimStart().startsWith('#')) {
@@ -1489,13 +1518,122 @@ export function checkQuarantineMetadata(
 	if (violations === 0) {
 		messages.push('All active quarantine entries carry OWNER + EXPIRY metadata.');
 	}
+	// Quarantine census (issue #2905, Workstream I8): the aggregate view after
+	// the per-entry messages — counts, EXPIRY histogram, first hard-fail wall,
+	// owners, unlinked-OWNER entries, and the deterministic trend line.
+	const census = buildQuarantineCensus(ledgerContents, now);
+	messages.push(...formatQuarantineCensus(census, extras.trend ?? null));
+	if (
+		census.firstHardFailDate !== null &&
+		census.daysToFirstWall !== null &&
+		census.daysToFirstWall >= 0 &&
+		census.daysToFirstWall < 21
+	) {
+		const earliestDate = census.histogram[0]?.date ?? census.firstHardFailDate;
+		const wallEntries = census.entries
+			.filter((entry) => entry.expiry === earliestDate)
+			.map((entry) => entry.path);
+		messages.push(
+			`::warning::[quarantine-census] first hard-fail wall ${census.firstHardFailDate} in ${census.daysToFirstWall} day(s) (< 21); entries: ${escapeCensusAnnotationText(wallEntries.join(', '))} — renew with an OWNER issue link or retire before the wall (issue #2905).`,
+		);
+	}
+	if (extras.renewal) {
+		messages.push(...extras.renewal.messages);
+		violations += extras.renewal.violations;
+	}
 	return { messages, violations };
+}
+
+/** Count active (non-comment, non-blank) entry lines in a ledger. */
+function parseLedgerEntries(content: string): string[] {
+	return content
+		.split(/\r?\n/)
+		.filter(
+			(line) => line.trim() !== '' && !line.trimStart().startsWith('#'),
+		);
+}
+
+/**
+ * Compute the renewal-requires-issue policy against the committed baseline
+ * (issue #2905 AC3). Fails open: trees without a resolvable base ref (local
+ * fixtures, fresh checkouts) get no renewal leg at all rather than a false
+ * violation. QUARANTINE_RENEWAL_ENFORCE=0 downgrades findings to WARNING
+ * lines that do not count (resolveEnforce semantics).
+ */
+export async function computeQuarantineRenewalFromBaseline(
+	repoRoot: string,
+): Promise<QuarantineRenewalResult | undefined> {
+	// A renewal requires an active entry in both trees; with no active head
+	// entries anywhere there is nothing to compare — return before any git
+	// spawn (keeps empty-fixture gate runs fast).
+	if (
+		QUARANTINE_LIST_FILES.every((listRel) => {
+			const headFile = path.join(repoRoot, listRel);
+			return (
+				!fs.existsSync(headFile) ||
+				parseLedgerEntries(readText(headFile)).length === 0
+			);
+		})
+	) {
+		return undefined;
+	}
+	const baseRef = await resolveBaseBranch(repoRoot);
+	if (baseRef === null) return undefined;
+	const headLedgerContents: QuarantineLedgerContent[] = [];
+	const baseLedgerContents: QuarantineLedgerContent[] = [];
+	let anyBaseline = false;
+	for (const listRel of QUARANTINE_LIST_FILES) {
+		const headFile = path.join(repoRoot, listRel);
+		const headContent = fs.existsSync(headFile) ? readText(headFile) : '';
+		headLedgerContents.push({ ledger: listRel, content: headContent });
+		// The baseline is read for EVERY ledger, including ones that are empty
+		// at head: a path moved out of ledger A (emptying it) into ledger B is
+		// still a renewal, and its baseline lives in A — skipping A's read
+		// silently dropped exactly that case (PR #3067 review finding PRR-007).
+		const show = await runGit(['show', `${baseRef}:${listRel}`], repoRoot);
+		if (show.exitCode === 0) {
+			anyBaseline = true;
+			baseLedgerContents.push({ ledger: listRel, content: show.stdout });
+		} else {
+			baseLedgerContents.push({ ledger: listRel, content: '' });
+		}
+	}
+	if (!anyBaseline) return undefined;
+	return checkQuarantineRenewal({
+		headLedgerContents,
+		baseLedgerContents,
+		enforce: resolveRenewalEnforce(process.env.QUARANTINE_RENEWAL_ENFORCE),
+	});
 }
 
 export async function main(startDir: string = process.cwd()): Promise<number> {
 	const repoRoot = await resolveRepoRoot(startDir);
 	let violations = 0;
 	const advisory = checkRawAdvisoryPush(repoRoot);
+	// Quarantine census inputs (issue #2905): the renewal policy vs the
+	// committed baseline and the 30-day add/retire trend. Both fail open so a
+	// tree without a base ref or git history just prints the census block.
+	// With no active entries anywhere, both legs are skipped outright — a
+	// renewal needs an entry in both trees, and skipping the async spawn
+	// keeps fixture-path gate runs spawn-free (host-latency protection).
+	const hasActiveQuarantineEntries = QUARANTINE_LIST_FILES.some((listRel) => {
+		const headFile = path.join(repoRoot, listRel);
+		return (
+			fs.existsSync(headFile) &&
+			parseLedgerEntries(readText(headFile)).length > 0
+		);
+	});
+	const [quarantineRenewal, quarantineTrend] = await Promise.all([
+		hasActiveQuarantineEntries
+			? computeQuarantineRenewalFromBaseline(repoRoot)
+			: Promise.resolve(undefined),
+		hasActiveQuarantineEntries
+			? collectAddRetireTrend(repoRoot)
+			: Promise.resolve({
+					available: false,
+					reason: 'no active entries',
+				} satisfies QuarantineTrend),
+	]);
 	const outputs: CheckResult[] = [
 		checkSubprocessTimeout(repoRoot),
 		checkProcessCwdBan(repoRoot),
@@ -1509,7 +1647,10 @@ export async function main(startDir: string = process.cwd()): Promise<number> {
 			],
 			violations: advisory.violations,
 		},
-		checkQuarantineMetadata(repoRoot),
+		checkQuarantineMetadata(repoRoot, new Date(), {
+			renewal: quarantineRenewal,
+			trend: quarantineTrend,
+		}),
 		checkMigrationLockAdmission(repoRoot),
 		checkDestructiveCommandRegistry(repoRoot),
 	];

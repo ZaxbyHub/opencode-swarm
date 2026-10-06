@@ -67,6 +67,26 @@ describe('MCP tool registry (#2499)', () => {
 		}
 	});
 
+	test('write-boundary denylist covers every Epic Mode tool via the epic_ prefix', () => {
+		// Epic Mode tools mutate Epic lifecycle/evidence state or dispatch
+		// agents, so the whole `epic_` family is denied by one prefix rule
+		// rather than an explicit list that drifts as tools are added/removed.
+		const epicTools = Object.keys(TOOL_METADATA).filter((name) =>
+			name.startsWith('epic_'),
+		);
+		expect(epicTools.length).toBeGreaterThan(0);
+		for (const name of [...epicTools, 'epic_some_future_tool']) {
+			expect(WRITE_TOOL_NAME_PATTERN.test(name)).toBe(true);
+		}
+		// The rule is a PREFIX: a name merely containing `epic_` elsewhere is
+		// not swept in, and read-only neighbours stay off the denylist.
+		expect(WRITE_TOOL_NAME_PATTERN.test('lean_turbo_status')).toBe(false);
+		expect(WRITE_TOOL_NAME_PATTERN.test('repo_epic_summary')).toBe(false);
+		// No currently registered MCP tool is Epic-family.
+		const registry = buildMcpToolRegistry({ root, allowWrite: true });
+		expect(registry.tools.some((t) => t.name.startsWith('epic_'))).toBe(false);
+	});
+
 	test('a missing root fails closed', () => {
 		expect(() =>
 			buildMcpToolRegistry({ root: '' } as { root: string }),

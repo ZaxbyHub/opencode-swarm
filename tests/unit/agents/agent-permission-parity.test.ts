@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test';
 import { getAgentConfigs } from '../../../src/agents/index';
 import {
 	COUNCIL_AGENT_TOOL_MAP,
+	EPIC_AGENT_TOOL_MAP,
 	EXTERNAL_SKILL_AGENT_TOOL_MAP,
 	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
@@ -38,6 +39,15 @@ describe('full-auto policy parity (anti-drift)', () => {
 		[{ council: { enabled: true } }, 'council on'],
 		[{ council: { general: { enabled: true } } }, 'general council on'],
 		[{ turbo: { strategy: 'standard' as const } }, 'turbo on'],
+		[
+			{
+				turbo: {
+					strategy: 'standard' as const,
+					epic: { mode: { enabled: true } },
+				},
+			},
+			'epic tools on',
+		],
 		[
 			{ tool_filter: { overrides: { reviewer: ['diff', 'lint'] } } },
 			'overrides set',
@@ -96,6 +106,8 @@ describe('prompt/map consistency — nothing the architect is told it has is den
 		if (config.council?.general?.enabled === true)
 			add(GENERAL_COUNCIL_AGENT_TOOL_MAP.architect);
 		if (config.turbo !== undefined) add(TURBO_AGENT_TOOL_MAP.architect);
+		if (config.turbo?.epic?.mode?.enabled === true)
+			add(EPIC_AGENT_TOOL_MAP.architect);
 		if (config.skills?.enabled === true) add(SKILL_AGENT_TOOL_MAP.architect);
 		return tools;
 	}
@@ -106,6 +118,14 @@ describe('prompt/map consistency — nothing the architect is told it has is den
 		[{ external_skills: { curation_enabled: true } }],
 		[{ council: { enabled: true, general: { enabled: true } } }],
 		[{ turbo: { strategy: 'standard' as const } }],
+		[
+			{
+				turbo: {
+					strategy: 'standard' as const,
+					epic: { mode: { enabled: true } },
+				},
+			},
+		],
 		[{ skills: { enabled: true } }],
 	])('advertised ⊆ allowed under %j', (raw) => {
 		const denied = deniedPluginTools(

@@ -32,6 +32,7 @@ import {
 	detectEnvironmentProfile,
 	type EnvironmentProfile,
 } from './environment/profile.js';
+import { epicSentinelExists, isEpicOpenForProject } from './epic/lifecycle.js';
 import {
 	clearAllActionCircuits,
 	clearInvocationActionCircuits,
@@ -652,11 +653,6 @@ export interface AgentSessionState {
 	 *  When set, overrides the plan's execution_profile.max_concurrent_tasks
 	 *  for delegation-gate guidance. Cleared on session reset. */
 	maxConcurrencyOverride?: number;
-	/** Whether Epic Mode (additive overlay above Lean Turbo) is active for
-	 *  this session. Durable mirror lives in `.swarm/epic-state.json`; this
-	 *  in-memory flag matches what `src/turbo/epic/state.ts` persists and is
-	 *  what `hasActiveEpicMode(sessionID)` reads on the hot path. */
-	epicModeActive?: boolean;
 
 	// Auto-proceed session overrides (Phase 1)
 	/** Session-scoped override for execution_profile.auto_proceed.
@@ -2368,12 +2364,25 @@ export function maybeSweepStaleSessions(
  * constructions (e.g. the recovery session) and any config-read failure
  * default to false. `/swarm turbo` remains the per-session authority after
  * construction.
+ *
+ * Epic seam: while an epic is open for the project's current plan
+ * (`isEpicOpenForProject` — config-gated and identity-checked) config
+ * cannot seed Turbo on, because Turbo waives per-task QA that Epic never
+ * waives. The sentinel is probed only when config would otherwise seed
+ * `true`, so the common path does no extra I/O and a project without an
+ * open epic gets the identical result.
  */
 export function resolveInitialTurboMode(directory?: string): boolean {
 	if (!directory) return false;
 	try {
 		return (
-			_internals.loadPluginConfigWithMeta(directory).config.turbo_mode === true
+			_internals.loadPluginConfigWithMeta(directory).config.turbo_mode ===
+				true &&
+			// Sentinel fast path first (no I/O beyond one existsSync when no
+			// epic was ever opened); only then the full config-gated,
+			// identity-checked probe, so a leftover sentinel (config off, or
+			// an orphaned epic) does not suppress seeding.
+			!(epicSentinelExists(directory) && isEpicOpenForProject(directory))
 		);
 	} catch {
 		// Session construction must never fail because a config read
@@ -2480,8 +2489,6 @@ export function startAgentSession(
 		leanTurboActive: false,
 		leanTurboCurrentPhase: undefined,
 		maxConcurrencyOverride: undefined,
-		// Epic Mode (additive overlay above Lean Turbo)
-		epicModeActive: false,
 		// QA Gate Profile session overrides
 		qaGateSessionOverrides: {},
 		// Full Auto Mode (Phase 2)
@@ -2877,10 +2884,6 @@ export function ensureAgentSession(
 		}
 		if (session.leanTurboCurrentPhase === undefined) {
 			session.leanTurboCurrentPhase = undefined;
-		}
-		// Epic Mode migration safety
-		if (session.epicModeActive === undefined) {
-			session.epicModeActive = false;
 		}
 		// QA Gate Profile session overrides migration safety
 		if (session.qaGateSessionOverrides === undefined) {
@@ -3407,14 +3410,19 @@ export function resetModifiedFilesForTask(
 /**
  * Apply task-completion retention rules.
  *
- * Non-Epic sessions release attribution at the workflow-complete boundary.
- * Epic sessions retain it until `epic_record_divergence` consumes the entry.
+ * Attribution is released at the workflow-complete boundary, except while an
+ * epic is open for the session's project: then it is retained until its
+ * wave closes (`epic_next_wave` → `wave-close.ts` reads it for divergence
+ * and releases it). The project comes from the session's owning project key
+ * (a canonical root path); an unowned session is treated as non-Epic. With
+ * no epic the probe costs one `existsSync`.
  */
 export function completeModifiedFilesForTask(
 	session: AgentSessionState,
 	taskId: string,
 ): void {
-	if (!session.epicModeActive) {
+	const projectRoot = session.owningProjectKey;
+	if (projectRoot === undefined || !isEpicOpenForProject(projectRoot)) {
 		resetModifiedFilesForTask(session, taskId, { remove: true });
 	}
 }
@@ -4381,28 +4389,6 @@ export function hasActiveLeanTurbo(sessionID?: string): boolean {
 }
 
 /**
- * Check if Epic Mode is active for a specific session or ANY session.
- * Mirrors `hasActiveLeanTurbo` but reads `session.epicModeActive`. The flag
- * is set by `enableEpicMode` (and by `/swarm turbo epic on`) and cleared by
- * `disableEpicMode` (and `/swarm turbo epic off`). The durable mirror is
- * `.swarm/epic-state.json` — see `src/turbo/epic/state.ts`. Epic Mode does
- * NOT require `turboStrategy === 'lean'`; it composes Lean Turbo internally
- * inside `epic_run_phase`.
- */
-export function hasActiveEpicMode(sessionID?: string): boolean {
-	if (sessionID) {
-		const session = swarmState.agentSessions.get(sessionID);
-		return session?.epicModeActive === true;
-	}
-	for (const [_sessionId, session] of swarmState.agentSessions) {
-		if (session.epicModeActive === true) {
-			return true;
-		}
-	}
-	return false;
-}
-
-/**
  * Resolves the effective auto_proceed value for a session.
  * Session override (autoProceedOverride) takes precedence over the plan default.
  * Accepts `boolean | undefined` for the plan default so callers can pass
@@ -4885,7 +4871,6 @@ export const _internals: {
 	hasActiveFullAuto: typeof hasActiveFullAuto;
 	hasActiveTurboMode: typeof hasActiveTurboMode;
 	hasActiveLeanTurbo: typeof hasActiveLeanTurbo;
-	hasActiveEpicMode: typeof hasActiveEpicMode;
 	buildRehydrationCache: typeof buildRehydrationCache;
 	applyRehydrationCache: typeof applyRehydrationCache;
 	rehydrateSessionFromDisk: typeof rehydrateSessionFromDisk;
@@ -4907,7 +4892,6 @@ export const _internals: {
 	hasActiveFullAuto,
 	hasActiveTurboMode,
 	hasActiveLeanTurbo,
-	hasActiveEpicMode,
 	buildRehydrationCache,
 	applyRehydrationCache,
 	rehydrateSessionFromDisk,

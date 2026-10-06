@@ -1,0 +1,138 @@
+{
+	"chain": {
+		"balanced": {
+			"makespan": 59,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"lean": {
+			"makespan": 59,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"epic": {
+			"makespan": 29,
+			"conflicts": 0,
+			"reworkTime": 0
+		}
+	},
+	"dense-cochange": {
+		"balanced": {
+			"makespan": 96,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"lean": {
+			"makespan": 96,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"epic": {
+			"makespan": 26,
+			"conflicts": 0,
+			"reworkTime": 0
+		}
+	},
+	"dense-ring": {
+		"balanced": {
+			"makespan": 25,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"lean": {
+			"makespan": 25,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"epic": {
+			"makespan": 16,
+			"conflicts": 0,
+			"reworkTime": 0
+		}
+	},
+	"hub": {
+		"balanced": {
+			"makespan": 68,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"lean": {
+			"makespan": 68,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"epic": {
+			"makespan": 54,
+			"conflicts": 0,
+			"reworkTime": 0
+		}
+	},
+	"independent": {
+		"balanced": {
+			"makespan": 41,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"lean": {
+			"makespan": 41,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"epic": {
+			"makespan": 13,
+			"conflicts": 0,
+			"reworkTime": 0
+		}
+	},
+	"learned-cowrites": {
+		"balanced": {
+			"makespan": 186,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"lean": {
+			"makespan": 186,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"epic": {
+			"makespan": 129,
+			"conflicts": 1,
+			"reworkTime": 7
+		}
+	},
+	"magnet": {
+		"balanced": {
+			"makespan": 96,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"lean": {
+			"makespan": 96,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"epic": {
+			"makespan": 74,
+			"conflicts": 2,
+			"reworkTime": 10
+		}
+	},
+	"onewrite-mixed": {
+		"balanced": {
+			"makespan": 56,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"lean": {
+			"makespan": 56,
+			"conflicts": 0,
+			"reworkTime": 0
+		},
+		"epic": {
+			"makespan": 16,
+			"conflicts": 0,
+			"reworkTime": 0
+		}
+	}
+}

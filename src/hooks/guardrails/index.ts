@@ -21,6 +21,7 @@ import {
 	type GuardrailsConfig,
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
+import { resolveEpicGateTaskAttribution } from '../../epic/gate-policy';
 import {
 	getTaskWorkflowSnapshot,
 	readTaskEvidence,
@@ -100,6 +101,12 @@ export const _internals = {
 	extractErrorSignal,
 	getSandboxExecutor: getExecutor,
 	assessSandboxEnforcement,
+	/**
+	 * Epic seam (sentinel-first: one existsSync when Epic is off): while an
+	 * epic runs a multi-task wave, the wave task whose frozen scope owns the
+	 * gate run's files. See `resolveEpicGateTaskAttribution`.
+	 */
+	resolveEpicGateTaskAttribution,
 	/** Test-only compatibility for legacy direct-after hook tests. */
 	allowUncorrelatedGateReceipts: false,
 	MAX_PENDING_GATE_RECEIPTS_PER_SESSION,
@@ -980,9 +987,29 @@ export function createGuardrailsHooks(
 		output,
 	) => {
 		if (isGateTool(input.tool)) {
-			let taskId = swarmState.agentSessions.get(input.sessionID)?.currentTaskId;
+			// Epic: in a multi-task wave the session's single currentTaskId is
+			// whichever coder returned last, so the gate run is credited by its
+			// files to the one wave task that owns them — or to none (fail
+			// closed, with an advisory; no durable-fallback guess either).
+			const epicAttribution = _internals.resolveEpicGateTaskAttribution(
+				effectiveDirectory,
+				extractGateCallFiles(output.args),
+			);
+			let taskId =
+				epicAttribution.kind === 'task'
+					? epicAttribution.taskId
+					: epicAttribution.kind === 'unattributable'
+						? undefined
+						: swarmState.agentSessions.get(input.sessionID)?.currentTaskId;
 			let unattributableRoute: StageAGateRoute = 'no_task_correlation';
-			if (!taskId) {
+			if (epicAttribution.kind === 'unattributable') {
+				unattributableRoute = 'attribution_ambiguous';
+				emitDurableAttributionAdvisory(
+					input.sessionID,
+					`${effectiveDirectory}\u0000epic\u0000${epicAttribution.message}`,
+					epicAttribution.message,
+				);
+			} else if (!taskId) {
 				// Post-reset durable attribution fallback: reset-session wiped the
 				// in-memory chain (currentTaskId/lastCoderDelegationTaskId), so
 				// resolve the task from committed settlement WALs before giving up

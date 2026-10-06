@@ -9,6 +9,8 @@
  *  - Phase scoping (default = whole plan; --phase N = single phase).
  *  - Format switching (markdown / json).
  *  - --persist writes structured JSON under .swarm/epic/.
+ *  - Co-change signal honors `epic.cochange.enabled` (default off).
+ *  - Declared scopes resolve from real `declare_scope` v2 bindings.
  *  - Uses _internals DI seam (no mock.module).
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -19,6 +21,10 @@ import {
 	_internals,
 	handleCouplingCommand,
 } from '../../../src/commands/coupling';
+import {
+	declareScopesForTest,
+	resetDeclaredScopesForTest,
+} from '../../helpers/declared-scope-bindings';
 
 const realInternals = { ..._internals };
 
@@ -82,11 +88,15 @@ beforeEach(() => {
 	tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'coupling-')));
 	_internals.loadPlanJsonOnly = realInternals.loadPlanJsonOnly;
 	_internals.getCoChangePairs = realInternals.getCoChangePairs;
+	// Deterministic config: co-change gate off unless a test opts in.
+	_internals.loadPluginConfigWithMeta = (() => ({ config: {} })) as never;
 });
 
-afterEach(() => {
+afterEach(async () => {
 	_internals.loadPlanJsonOnly = realInternals.loadPlanJsonOnly;
 	_internals.getCoChangePairs = realInternals.getCoChangePairs;
+	_internals.loadPluginConfigWithMeta = realInternals.loadPluginConfigWithMeta;
+	await resetDeclaredScopesForTest();
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {
@@ -342,51 +352,132 @@ describe('handleCouplingCommand — --persist', () => {
 	});
 });
 
-describe('handleCouplingCommand — cochange signal independent of config gate', () => {
-	test('co-change pairs are consulted even though we never read turbo.epic.cochange.enabled', async () => {
-		// The handler does NOT load EpicConfigSchema; the signal is queried
-		// directly via getCoChangePairs. This is the design decision from M2
-		// scope: /swarm coupling runs as a diagnostic, independent of the
-		// runtime config gate that M3's planner integration will respect.
-		_internals.loadPlanJsonOnly = (async () => ({
+describe('handleCouplingCommand — co-change signal honors epic.cochange.enabled', () => {
+	const twoTaskPlan = () => ({
+		phases: [
+			{
+				id: 1,
+				name: 'P',
+				tasks: [
+					{
+						id: '1.1',
+						description: 'a',
+						status: 'pending',
+						files_touched: ['src/a.ts'],
+					},
+					{
+						id: '1.2',
+						description: 'b',
+						status: 'pending',
+						files_touched: ['src/b.ts'],
+					},
+				],
+			},
+		],
+	});
+	// Strong co-change signal connecting src/a.ts and src/b.ts.
+	const strongPair = {
+		fileA: 'src/a.ts',
+		fileB: 'src/b.ts',
+		coChangeCount: 20,
+		npmi: 0.9,
+		lift: 1,
+		hasStaticEdge: false,
+		totalCommits: 100,
+		commitsA: 20,
+		commitsB: 20,
+	};
+
+	test('disabled by default: git history is NOT scanned and the report says so', async () => {
+		let fetched = 0;
+		_internals.loadPlanJsonOnly = (async () => twoTaskPlan()) as never;
+		_internals.getCoChangePairs = (async () => {
+			fetched += 1;
+			return [strongPair];
+		}) as never;
+		const report = JSON.parse(
+			await handleCouplingCommand(tmpDir, ['--format', 'json']),
+		);
+		expect(fetched).toBe(0);
+		expect(report.cochangeSignal).toBe('disabled-by-config');
+		expect(report.conflictingPairCount).toBe(0);
+		const md = await handleCouplingCommand(tmpDir, []);
+		expect(md).toContain('Co-change signal: disabled by config');
+	});
+
+	test('enabled via config: co-change pairs feed the report', async () => {
+		_internals.loadPluginConfigWithMeta = (() => ({
+			config: { turbo: { epic: { cochange: { enabled: true } } } },
+		})) as never;
+		_internals.loadPlanJsonOnly = (async () => twoTaskPlan()) as never;
+		_internals.getCoChangePairs = (async () => [strongPair]) as never;
+		const report = JSON.parse(
+			await handleCouplingCommand(tmpDir, ['--format', 'json']),
+		);
+		expect(report.cochangeSignal).toBe('enabled');
+		expect(report.conflictingPairCount).toBe(1);
+		expect(report.conflictingPairs[0].reason).toBe('cochange');
+	});
+
+	test('config load failure fails closed (signal off)', async () => {
+		_internals.loadPluginConfigWithMeta = (() => {
+			throw new Error('bad config');
+		}) as never;
+		_internals.loadPlanJsonOnly = (async () => twoTaskPlan()) as never;
+		_internals.getCoChangePairs = (async () => [strongPair]) as never;
+		const report = JSON.parse(
+			await handleCouplingCommand(tmpDir, ['--format', 'json']),
+		);
+		expect(report.cochangeSignal).toBe('disabled-by-config');
+	});
+});
+
+describe('handleCouplingCommand — declared scopes from real declare_scope', () => {
+	test('a live v2 declaration overrides files_touched; a stale v1 file does not', async () => {
+		fs.mkdirSync(path.join(tmpDir, '.swarm', 'scopes'), { recursive: true });
+		const task = (id: string, files: string[]) => ({
+			id,
+			phase: 1,
+			status: 'pending',
+			size: 'small',
+			description: `Task ${id}`,
+			depends: [],
+			files_touched: files,
+			acceptance: 'Done',
+		});
+		const plan = {
+			schema_version: '1.0.0',
+			title: 'Coupling v2',
+			swarm: 'test-swarm',
+			current_phase: 1,
 			phases: [
 				{
 					id: 1,
 					name: 'P',
-					tasks: [
-						{
-							id: '1.1',
-							description: 'a',
-							status: 'pending',
-							files_touched: ['src/a.ts'],
-						},
-						{
-							id: '1.2',
-							description: 'b',
-							status: 'pending',
-							files_touched: ['src/b.ts'],
-						},
-					],
+					status: 'in_progress',
+					tasks: [task('1.1', ['src/a.ts']), task('1.2', ['src/b.ts'])],
 				},
 			],
-		})) as never;
-		// Provide a strong co-change signal connecting src/a.ts and src/b.ts.
-		_internals.getCoChangePairs = (async () => [
-			{
-				fileA: 'src/a.ts',
-				fileB: 'src/b.ts',
-				coChangeCount: 20,
-				npmi: 0.9,
-				lift: 1,
-				hasStaticEdge: false,
-				totalCommits: 100,
-				commitsA: 20,
-				commitsB: 20,
-			},
-		]) as never;
-		const out = await handleCouplingCommand(tmpDir, ['--format', 'json']);
-		const report = JSON.parse(out);
-		expect(report.conflictingPairCount).toBe(1);
-		expect(report.conflictingPairs[0].reason).toBe('cochange');
+		};
+		fs.writeFileSync(
+			path.join(tmpDir, '.swarm', 'plan.json'),
+			JSON.stringify(plan),
+		);
+		// Stale v1 file claims 1.2 touches src/a.ts — must be ignored.
+		fs.writeFileSync(
+			path.join(tmpDir, '.swarm', 'scopes', 'scope-1.2.json'),
+			JSON.stringify({ taskId: '1.2', files: ['src/a.ts'] }),
+		);
+		const noV2 = JSON.parse(
+			await handleCouplingCommand(tmpDir, ['--format', 'json']),
+		);
+		expect(noV2.conflictingPairCount).toBe(0);
+
+		// Real declaration: 1.2 now declares src/a.ts → path conflict.
+		await declareScopesForTest(tmpDir, { '1.2': ['src/a.ts'] });
+		const withV2 = JSON.parse(
+			await handleCouplingCommand(tmpDir, ['--format', 'json']),
+		);
+		expect(withV2.conflictingPairCount).toBe(1);
 	});
 });

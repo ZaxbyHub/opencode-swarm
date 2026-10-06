@@ -1,14 +1,15 @@
 /**
- * End-to-end integration test for the Epic Mode wave planner.
+ * End-to-end integration test for Epic Mode wave planning through
+ * `epic_next_wave` (Epic v2 C2).
  *
- * The unit tests pin down the wave algorithm and the tool wrapper in
- * isolation. This file is the round-trip backstop for the actual flow the
- * architect runs in a no-git project (exactly the `fair-clinical-bench-v2`
- * Phase 2 shape that motivated this patch):
+ * The unit tests pin down the wave algorithm and the tool in isolation.
+ * This file is the round-trip backstop for the actual flow the architect
+ * runs in a no-git project (exactly the `fair-clinical-bench-v2` Phase 2
+ * shape that motivated the wave planner):
  *
- *   declare_scope (×6)  →  epic_decide_phase  →  epic_plan_waves  →  waves
+ *   declare_scope (×6) → epic_next_wave → wave → complete → epic_next_wave …
  *
- * The structural fix lives in `epic_plan_waves`: where `lean_turbo_plan_lanes`
+ * The structural property: where `lean_turbo_plan_lanes`
  * collapses the branching DAG `A → B → {C, D, E, F}` into a single lane (every
  * sibling sharing deps fails the cross-lane-dep test and serializes), the
  * wave planner emits `wave 1: [A]` `wave 2: [B]` `wave 3: [C, D, E, F]`.
@@ -25,10 +26,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../../src/config/plan-schema';
-import { savePlan } from '../../src/plan/manager';
-import { executeEpicPlanWaves } from '../../src/tools/epic-plan-waves';
-import { executeEpicDecidePhase } from '../../src/tools/epic-run-phase';
-import { enableEpicMode } from '../../src/turbo/epic/state';
+import { runEpicNextWave } from '../../src/epic/next-wave';
+import { savePlan, updateTaskStatus } from '../../src/plan/manager';
+import {
+	declareScopesForTest,
+	resetDeclaredScopesForTest,
+} from '../helpers/declared-scope-bindings';
+import { openEpicForTest } from '../helpers/epic-lifecycle';
 
 function makePhase2Plan(): Plan {
 	return {
@@ -119,16 +123,20 @@ function makePhase2Plan(): Plan {
 	};
 }
 
-function writeScopeFile(dir: string, taskId: string, files: string[]): void {
-	const scopesDir = path.join(dir, '.swarm', 'scopes');
-	fs.mkdirSync(scopesDir, { recursive: true });
-	fs.writeFileSync(
-		path.join(scopesDir, `scope-${taskId}.json`),
-		JSON.stringify({
-			taskId,
-			files,
-			declaredAt: '2026-06-04T00:00:00.000Z',
-		}),
+/**
+ * Declare through the real `declare_scope` path. It persists only v2 scope
+ * bindings (pinned to the plan identity) — the planners never read the
+ * legacy v1 `.swarm/scopes/scope-<id>.json` projection.
+ */
+async function writeScopeFile(
+	dir: string,
+	taskId: string,
+	files: string[],
+): Promise<void> {
+	await declareScopesForTest(
+		dir,
+		{ [taskId]: files },
+		{ sessionID: 'wave-integration-session' },
 	);
 }
 
@@ -141,12 +149,33 @@ describe('Epic Mode wave planning — Phase-2-shape integration on no-git projec
 		// the protected-path classifier — would degrade tasks for unrelated reasons.
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'epic-wave-'));
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		// Epic Mode is opt-in: `epic.mode.enabled` must be true.
+		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({
+				epic: { mode: { enabled: true } },
+			}),
+		);
 		await savePlan(dir, makePhase2Plan());
-		// No git init — this is the no-git Rule-1 scenario.
-		enableEpicMode(dir, 'wave-integration-session');
+		// No git init — the no-git scenario (no marker evidence needed). The
+		// epic record keeps a 4-wide wave cap (the non-git width-1 cap that
+		// `/swarm epic start` records is covered by the start tests) so this
+		// suite exercises the planner's partition. Phase 1 finished before
+		// the epic started.
+		openEpicForTest(dir, {
+			git: {
+				isRepo: false,
+				baseCommit: null,
+				originalBranch: null,
+				epicBranch: null,
+			},
+			phases: { '1': { status: 'complete', reviewRuns: 0, verdicts: [] } },
+		});
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await resetDeclaredScopesForTest();
 		try {
 			fs.rmSync(dir, { recursive: true, force: true });
 		} catch {
@@ -154,130 +183,73 @@ describe('Epic Mode wave planning — Phase-2-shape integration on no-git projec
 		}
 	});
 
-	test('clean disjoint scopes: decide promotes, plan_waves produces 3 waves with the right partition', async () => {
-		writeScopeFile(dir, '2.1', ['src/registry.py', 'src/protocol.py']);
-		writeScopeFile(dir, '2.2', ['src/column_types.py']);
-		writeScopeFile(dir, '2.3', ['src/models/logistic.py']);
-		writeScopeFile(dir, '2.4', ['src/models/random_forest.py']);
-		writeScopeFile(dir, '2.5', ['src/models/xgboost.py']);
-		writeScopeFile(dir, '2.6', ['src/models/mlp.py']);
+	/** Drive epic_next_wave to the end of phase 2, completing each wave. */
+	async function runPhase2(): Promise<string[][]> {
+		const waves: string[][] = [];
+		for (let step = 0; step < 10; step += 1) {
+			const next = await runEpicNextWave(dir, 'wave-integration-session');
+			if (next.status === 'phase-ready-for-review') return waves;
+			expect(next.status).toBe('dispatch');
+			if (next.status !== 'dispatch') return waves;
+			waves.push(next.wave.taskIds);
+			for (const id of next.wave.taskIds) {
+				await updateTaskStatus(dir, id, 'completed');
+			}
+		}
+		throw new Error('phase 2 did not finish within 10 waves');
+	}
 
-		// Step 2 of the banner: epic_decide_phase
-		const decideResult = await executeEpicDecidePhase({
-			directory: dir,
+	test('clean disjoint scopes: three waves with the right partition (four concurrent coders last)', async () => {
+		await writeScopeFile(dir, '2.1', ['src/registry.py', 'src/protocol.py']);
+		await writeScopeFile(dir, '2.2', ['src/column_types.py']);
+		await writeScopeFile(dir, '2.3', ['src/models/logistic.py']);
+		await writeScopeFile(dir, '2.4', ['src/models/random_forest.py']);
+		await writeScopeFile(dir, '2.5', ['src/models/xgboost.py']);
+		await writeScopeFile(dir, '2.6', ['src/models/mlp.py']);
+		expect(await runPhase2()).toEqual([
+			['2.1'],
+			['2.2'],
+			['2.3', '2.4', '2.5', '2.6'],
+		]);
+	});
+
+	test('kitchen-sink scope (every sibling claims the shared __init__.py): more waves, no task lost', async () => {
+		await writeScopeFile(dir, '2.1', ['src/registry.py']);
+		await writeScopeFile(dir, '2.2', ['src/column_types.py']);
+		for (const [id, file] of [
+			['2.3', 'logistic'],
+			['2.4', 'random_forest'],
+			['2.5', 'xgboost'],
+			['2.6', 'mlp'],
+		]) {
+			await writeScopeFile(dir, id, [
+				`src/models/${file}.py`,
+				'src/models/__init__.py',
+			]);
+		}
+		expect(await runPhase2()).toEqual([
+			['2.1'],
+			['2.2'],
+			['2.3'],
+			['2.4'],
+			['2.5'],
+			['2.6'],
+		]);
+	});
+
+	test('declare-scopes → declare → re-call → dispatch (the architect recovery loop)', async () => {
+		const first = await runEpicNextWave(dir, 'wave-integration-session');
+		expect(first).toMatchObject({
+			status: 'declare-scopes',
 			phase: 2,
-			sessionID: 'wave-integration-session',
+			tasks: [{ taskId: '2.1', suggestedFiles: [] }],
 		});
-		expect(decideResult.success).toBe(true);
-		expect(decideResult.reason).toBe('decided');
-		expect(decideResult.verdict?.decision).toBe('promote');
-		// Rule 1: no-git bypass should fire.
+		await writeScopeFile(dir, '2.1', ['src/registry.py']);
 		expect(
-			decideResult.verdict?.rationale?.greenfieldCheck?.bypassedNoGit,
-		).toBe(true);
-
-		// Step 4 of the banner: epic_plan_waves
-		const planResult = await executeEpicPlanWaves({ directory: dir, phase: 2 });
-		expect(planResult.success).toBe(true);
-		expect(planResult.waves?.length).toBe(3);
-		expect(planResult.waves?.[0].taskIds).toEqual(['2.1']);
-		expect(planResult.waves?.[1].taskIds).toEqual(['2.2']);
-		expect(planResult.waves?.[2].taskIds).toEqual(['2.3', '2.4', '2.5', '2.6']);
-		expect(planResult.serializedTasks).toEqual([]);
-		expect(planResult.degradedTasks).toEqual([]);
-		expect(planResult.plan?.totalConcurrentTasks).toBe(6);
-
-		// Step 5 of the banner (architect side, not exercised here): for each
-		// wave dispatch one Task per taskId, ALL in one message. We assert the
-		// shape the architect needs to drive that loop.
-		expect(planResult.waves?.[2].taskIds.length).toBe(4); // four concurrent coders
-	});
-
-	test('kitchen-sink scope (architect claims shared __init__.py on every sibling): wave planner splits into more waves rather than degrading', async () => {
-		writeScopeFile(dir, '2.1', ['src/registry.py']);
-		writeScopeFile(dir, '2.2', ['src/column_types.py']);
-		// The pathological recovery: every sibling claims the shared __init__.py.
-		writeScopeFile(dir, '2.3', [
-			'src/models/logistic.py',
-			'src/models/__init__.py',
-		]);
-		writeScopeFile(dir, '2.4', [
-			'src/models/random_forest.py',
-			'src/models/__init__.py',
-		]);
-		writeScopeFile(dir, '2.5', [
-			'src/models/xgboost.py',
-			'src/models/__init__.py',
-		]);
-		writeScopeFile(dir, '2.6', ['src/models/mlp.py', 'src/models/__init__.py']);
-
-		const planResult = await executeEpicPlanWaves({ directory: dir, phase: 2 });
-		expect(planResult.success).toBe(true);
-		// 2.1 alone, 2.2 alone, then 2.3 alone, 2.4 alone, 2.5 alone, 2.6 alone.
-		// The architect SHOULD avoid this scope shape — but if they don't, the
-		// planner doesn't lose any task; it just emits more waves.
-		expect(planResult.waves?.length).toBe(6);
-		expect(planResult.serializedTasks).toEqual([]);
-		expect(planResult.degradedTasks).toEqual([]);
-	});
-
-	test('scopes-missing → declare → re-call → success (the architect recovery loop)', async () => {
-		// First call: no scopes declared at all.
-		const firstAttempt = await executeEpicPlanWaves({
-			directory: dir,
-			phase: 2,
+			await runEpicNextWave(dir, 'wave-integration-session'),
+		).toMatchObject({
+			status: 'dispatch',
+			wave: { taskIds: ['2.1'], files: { '2.1': ['src/registry.py'] } },
 		});
-		expect(firstAttempt.success).toBe(false);
-		expect(firstAttempt.reason).toBe('scopes-missing');
-		expect(firstAttempt.missingScopes?.sort()).toEqual([
-			'2.1',
-			'2.2',
-			'2.3',
-			'2.4',
-			'2.5',
-			'2.6',
-		]);
-
-		// Architect calls declare_scope for each missing id (simulated by
-		// writing scope files directly — same effect on the planner).
-		writeScopeFile(dir, '2.1', ['src/registry.py']);
-		writeScopeFile(dir, '2.2', ['src/column_types.py']);
-		writeScopeFile(dir, '2.3', ['src/models/logistic.py']);
-		writeScopeFile(dir, '2.4', ['src/models/random_forest.py']);
-		writeScopeFile(dir, '2.5', ['src/models/xgboost.py']);
-		writeScopeFile(dir, '2.6', ['src/models/mlp.py']);
-
-		// Re-invoke: success path.
-		const secondAttempt = await executeEpicPlanWaves({
-			directory: dir,
-			phase: 2,
-		});
-		expect(secondAttempt.success).toBe(true);
-		expect(secondAttempt.waves?.length).toBe(3);
-	});
-
-	test('Phase-2-shape verdict matches what the lane planner produces on the same inputs (decide is independent of planner choice)', async () => {
-		// The wave planner replaces the lane planner downstream of decide,
-		// but the verdict itself comes from the same activation gate. Same
-		// inputs → same decide result regardless of which planner we use.
-		writeScopeFile(dir, '2.1', ['src/registry.py']);
-		writeScopeFile(dir, '2.2', ['src/column_types.py']);
-		writeScopeFile(dir, '2.3', ['src/models/logistic.py']);
-		writeScopeFile(dir, '2.4', ['src/models/random_forest.py']);
-		writeScopeFile(dir, '2.5', ['src/models/xgboost.py']);
-		writeScopeFile(dir, '2.6', ['src/models/mlp.py']);
-
-		const decideA = await executeEpicDecidePhase({
-			directory: dir,
-			phase: 2,
-			sessionID: 'wave-integration-session',
-		});
-		const decideB = await executeEpicDecidePhase({
-			directory: dir,
-			phase: 2,
-			sessionID: 'wave-integration-session',
-		});
-		expect(decideA.verdict?.decision).toBe(decideB.verdict?.decision);
-		expect(decideA.verdict?.p).toBe(decideB.verdict?.p);
 	});
 });

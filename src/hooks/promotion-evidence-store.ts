@@ -10,8 +10,8 @@
  *
  * Per-worktree by design: promotion evidence records THIS worktree's observed
  * applications. It is intentionally NOT a member of `KNOWLEDGE_FAMILY` (the
- * linked-cohort shared-artifact manifest), matching the precedent set by
- * `src/turbo/epic/promotion-evidence.ts`. It lives under the project-root
+ * linked-cohort shared-artifact manifest), matching the precedent set by the
+ * former Epic promotion-evidence log. It lives under the project-root
  * `.swarm/` (via {@link validateSwarmPath}), NOT the link-aware shared store
  * dir, so it stays per-worktree.
  */

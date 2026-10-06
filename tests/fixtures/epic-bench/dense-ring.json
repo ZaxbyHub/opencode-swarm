@@ -1,0 +1,79 @@
+{
+	"name": "dense-ring",
+	"description": "Four tasks form a ring of declared conflicts (1.1-1.2-1.3-1.4-1.1: 4 of 6 pairs, density 0.67), and the non-adjacent pairs secretly write the same files (1.1/1.3 hidden-a, 1.2/1.4 hidden-b). The serial-component demotion runs the dense cluster one task per wave, so the hidden writes never meet; with demotion off the non-adjacent pairs share waves and conflict. Three independent tasks keep the waves busy.",
+	"seed": 61,
+	"maxParallel": 4,
+	"epochs": 1,
+	"learningMatters": false,
+	"tasks": [
+		{
+			"id": "1.1",
+			"phase": 1,
+			"declared": ["src/ring-1.ts", "src/edge-w.ts", "src/edge-x.ts"],
+			"actual": [
+				"src/ring-1.ts",
+				"src/edge-w.ts",
+				"src/edge-x.ts",
+				"src/hidden-a.ts"
+			],
+			"duration": 4
+		},
+		{
+			"id": "1.2",
+			"phase": 1,
+			"declared": ["src/ring-2.ts", "src/edge-x.ts", "src/edge-y.ts"],
+			"actual": [
+				"src/ring-2.ts",
+				"src/edge-x.ts",
+				"src/edge-y.ts",
+				"src/hidden-b.ts"
+			],
+			"duration": 4
+		},
+		{
+			"id": "1.3",
+			"phase": 1,
+			"declared": ["src/ring-3.ts", "src/edge-y.ts", "src/edge-z.ts"],
+			"actual": [
+				"src/ring-3.ts",
+				"src/edge-y.ts",
+				"src/edge-z.ts",
+				"src/hidden-a.ts"
+			],
+			"duration": 4
+		},
+		{
+			"id": "1.4",
+			"phase": 1,
+			"declared": ["src/ring-4.ts", "src/edge-z.ts", "src/edge-w.ts"],
+			"actual": [
+				"src/ring-4.ts",
+				"src/edge-z.ts",
+				"src/edge-w.ts",
+				"src/hidden-b.ts"
+			],
+			"duration": 4
+		},
+		{
+			"id": "1.5",
+			"phase": 1,
+			"declared": ["src/free-5.ts"],
+			"actual": ["src/free-5.ts"],
+			"duration": 3
+		},
+		{
+			"id": "1.6",
+			"phase": 1,
+			"declared": ["src/free-6.ts"],
+			"actual": ["src/free-6.ts"],
+			"duration": 3
+		},
+		{
+			"id": "1.7",
+			"phase": 1,
+			"declared": ["src/free-7.ts"],
+			"actual": ["src/free-7.ts"],
+			"duration": 3
+		}
+	]
+}

@@ -1,0 +1,80 @@
+{
+	"name": "chain",
+	"description": "A 4-task dependency chain beside 4 independent tasks, and a second phase depending on the chain's tail: the chain bounds the makespan; independent work fills the waves.",
+	"seed": 37,
+	"maxParallel": 4,
+	"epochs": 1,
+	"learningMatters": false,
+	"tasks": [
+		{
+			"id": "1.1",
+			"phase": 1,
+			"declared": ["src/step-1.ts"],
+			"actual": ["src/step-1.ts"]
+		},
+		{
+			"id": "1.2",
+			"phase": 1,
+			"depends": ["1.1"],
+			"declared": ["src/step-2.ts"],
+			"actual": ["src/step-2.ts"]
+		},
+		{
+			"id": "1.3",
+			"phase": 1,
+			"depends": ["1.2"],
+			"declared": ["src/step-3.ts"],
+			"actual": ["src/step-3.ts"]
+		},
+		{
+			"id": "1.4",
+			"phase": 1,
+			"depends": ["1.3"],
+			"declared": ["src/step-4.ts"],
+			"actual": ["src/step-4.ts"]
+		},
+		{
+			"id": "1.5",
+			"phase": 1,
+			"declared": ["src/side-5.ts"],
+			"actual": ["src/side-5.ts"]
+		},
+		{
+			"id": "1.6",
+			"phase": 1,
+			"declared": ["src/side-6.ts"],
+			"actual": ["src/side-6.ts"]
+		},
+		{
+			"id": "1.7",
+			"phase": 1,
+			"declared": ["src/side-7.ts"],
+			"actual": ["src/side-7.ts"]
+		},
+		{
+			"id": "1.8",
+			"phase": 1,
+			"declared": ["src/side-8.ts"],
+			"actual": ["src/side-8.ts"]
+		},
+		{
+			"id": "2.1",
+			"phase": 2,
+			"depends": ["1.4"],
+			"declared": ["src/final.ts"],
+			"actual": ["src/final.ts"]
+		},
+		{
+			"id": "2.2",
+			"phase": 2,
+			"declared": ["src/extra-a.ts"],
+			"actual": ["src/extra-a.ts"]
+		},
+		{
+			"id": "2.3",
+			"phase": 2,
+			"declared": ["src/extra-b.ts"],
+			"actual": ["src/extra-b.ts"]
+		}
+	]
+}

@@ -78,7 +78,10 @@ area is covered by `knowledge_recall`; it becomes available in-session.)
 | `symbols` | tree-sitter symbol extraction/search |
 
 When both write gates are present, `knowledge_add` is added to this list. No
-other write-capable in-session tool is exposed through MCP.
+other write-capable in-session tool is exposed through MCP. The server's
+write-tool denylist (`WRITE_TOOL_NAME_PATTERN`, `src/mcp/registry.ts`) matches
+every Epic Mode tool by its `epic_` prefix and the Lean Turbo execution tools,
+so neither family is ever exposed, with or without the write gates.
 
 Tool names and descriptions come from the plugin's registered tool metadata,
 so what an MCP client sees matches the in-session tools exactly.

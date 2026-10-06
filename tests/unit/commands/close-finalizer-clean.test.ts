@@ -7,8 +7,13 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { listCoordinationStates } from '../../../src/db/coordination-store.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
+import { EPIC_LIFECYCLE_NAMESPACE } from '../../../src/epic/lifecycle.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
+import { openEpicForTest } from '../../helpers/epic-lifecycle';
+import { freezeClock } from '../../helpers/test-clock';
 import { initializeCloseFinalizerHarness } from './close-finalizer.shared.ts';
 
 const h = await initializeCloseFinalizerHarness();
@@ -143,6 +148,114 @@ describe('handleCloseCommand — clean stage', () => {
 		} finally {
 			h.closeInternals.closeSnapshotCoordinationInitialization = originalClose;
 		}
+	});
+});
+
+function writeEpicConfig(dir: string): void {
+	mkdirSync(path.join(dir, '.opencode'), { recursive: true });
+	writeFileSync(
+		path.join(dir, '.opencode', 'opencode-swarm.json'),
+		JSON.stringify({
+			epic: { mode: { enabled: true } },
+		}),
+	);
+}
+
+describe('handleCloseCommand — open epic finalization (Epic v2)', () => {
+	it('an open epic is closed as abandoned-by-swarm-close before archiving (report kept in epic-prior)', async () => {
+		await h.writePlan(testDir);
+		writeEpicConfig(testDir);
+		const epic = openEpicForTest(testDir);
+		const originalClose =
+			h.closeInternals.closeSnapshotCoordinationInitialization;
+		// Keep swarm.db so the lifecycle row deletion is observable.
+		h.closeInternals.closeSnapshotCoordinationInitialization = async () => {
+			throw new Error('coordination still running');
+		};
+		try {
+			const output = await h.handleCloseCommand(testDir, []);
+			expect(output).toContain(
+				`Open epic ${epic.epicKey} was closed as abandoned-by-swarm-close`,
+			);
+			expect(existsSync(path.join(h.swarmDir(testDir), 'swarm.db'))).toBe(true);
+			expect(
+				listCoordinationStates(testDir, EPIC_LIFECYCLE_NAMESPACE),
+			).toHaveLength(0);
+			const priorDir = path.join(h.swarmDir(testDir), 'epic-prior', 'reports');
+			const reports = readdirSync(priorDir);
+			expect(reports).toHaveLength(1);
+			const report = JSON.parse(
+				readFileSync(path.join(priorDir, reports[0]), 'utf-8'),
+			);
+			expect(report.outcome).toBe('abandoned-by-swarm-close');
+			expect(report.epicKey).toBe(epic.epicKey);
+			expect(
+				existsSync(path.join(h.swarmDir(testDir), 'epic', 'epic.json')),
+			).toBe(false);
+		} finally {
+			h.closeInternals.closeSnapshotCoordinationInitialization = originalClose;
+			closeAllProjectDbs();
+		}
+	});
+
+	it('the learning prior survives /swarm close: merged once, kept, posterior archived away', async () => {
+		await h.writePlan(testDir);
+		writeEpicConfig(testDir);
+		const epic = openEpicForTest(testDir);
+		const priorPath = path.join(
+			h.swarmDir(testDir),
+			'epic-prior',
+			'learning.json',
+		);
+		mkdirSync(path.dirname(priorPath), { recursive: true });
+		writeFileSync(
+			priorPath,
+			JSON.stringify({
+				schema: 'epic-learning-v1',
+				updatedAt: '2026-01-01T00:00:00.000Z',
+				importedFrom: null,
+				mergedEpics: [],
+				files: [{ path: 'src/hot.ts', alpha: 10, beta: 0 }],
+				edges: [],
+			}),
+		);
+		writeFileSync(
+			path.join(h.swarmDir(testDir), 'epic', 'posterior.json'),
+			'{}',
+		);
+		// Frozen clock: the age decay applied at the merge is deterministic.
+		const restoreClock = freezeClock({
+			isoNow: '2026-01-02T00:00:00.000Z',
+			fixedNow: Date.parse('2026-01-02T00:00:00.000Z'),
+		});
+		try {
+			const output = await h.handleCloseCommand(testDir, []);
+			expect(output).toContain('Project prior kept');
+			const prior = JSON.parse(readFileSync(priorPath, 'utf-8'));
+			expect(prior.mergedEpics).toHaveLength(1);
+			expect(prior.mergedEpics[0]).toStartWith(epic.epicKey);
+			expect(prior.files[0].path).toBe('src/hot.ts');
+			// The abandoned epic learned nothing: no per-epic decay (and the
+			// prior keeps its own write time for the age decay).
+			expect(prior.files[0].alpha).toBe(10);
+			expect(prior.updatedAt).toBe('2026-01-01T00:00:00.000Z');
+			expect(
+				existsSync(path.join(h.swarmDir(testDir), 'epic', 'posterior.json')),
+			).toBe(false);
+		} finally {
+			restoreClock();
+			closeAllProjectDbs();
+		}
+	});
+
+	it('non-Epic project: no Epic text in the close output and no epic-prior directory', async () => {
+		await h.writePlan(testDir);
+		writeEpicConfig(testDir);
+		const output = await h.handleCloseCommand(testDir, []);
+		expect(output.toLowerCase()).not.toContain('epic');
+		expect(existsSync(path.join(h.swarmDir(testDir), 'epic-prior'))).toBe(
+			false,
+		);
 	});
 });
 

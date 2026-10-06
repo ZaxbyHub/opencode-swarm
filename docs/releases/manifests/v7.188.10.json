@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.10",
+  "tagCommit": "32f689f4a9c95865f86692c6a0db383a09e8b450",
+  "targetCommitish": "32f689f4a9c95865f86692c6a0db383a09e8b450",
+  "releaseBodySha256": "1587b519763b25ad98e418496fecc90c837ccecb05299f802b9a8e9864c055fb",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/php-vendor-bin-and-build-check-spawn-3050.md",
+      "sha256": "c46a7f695bbc825a5e27771bc333e9667852ebdfa7a95b3463435b03806478d4"
+    }
+  ]
+}

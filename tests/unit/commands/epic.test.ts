@@ -4,58 +4,59 @@
  *
  * Covers:
  *  - Missing session context → friendly error.
- *  - on / off / toggle round-trip via the durable state seam.
- *  - status renders the last decision when one exists.
- *  - decide computes a fresh verdict from the plan without writing evidence.
- *  - Unknown subcommand → usage.
+ *  - Removed v1 `on` / `off` toggles fall to the usage text; bare form is
+ *    status and never mutates the epic.
+ *  - status renders the lifecycle record (waves, phases, divergence,
+ *    orphan, config).
+ *  - the removed `decide` / `last` subcommands answer with a pointer to
+ *    status and mutate nothing; the renamed `calibration` points at
+ *    `learning` / `prior` (their rendering: epic-learning.test.ts).
+ * Lifecycle collaborators are replaced through `_internals` (AGENTS.md #7).
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { _internals, handleEpicCommand } from '../../../src/commands/epic';
+import type { EpicInspection } from '../../../src/epic/lifecycle';
+import { stubEpicRecord } from '../../helpers/epic-lifecycle';
 
 const realInternals = { ..._internals };
 
-let active = false;
-let sessionStateStored: ReturnType<typeof realInternals.loadEpicSessionState> =
-	null;
-let decideCalls = 0;
-let enableCalls = 0;
-let disableCalls = 0;
-let sessionFlag: { epicModeActive?: boolean; id: string; turboMode: boolean };
+let startCalls = 0;
+let closeCalls = 0;
+let inspection: EpicInspection;
+
+function emptyInspection(): EpicInspection {
+	return {
+		sentinelPresent: false,
+		sentinel: null,
+		record: null,
+		rowKeys: [],
+		unreadable: null,
+		orphanReason: null,
+		configEnabled: true,
+	};
+}
 
 beforeEach(() => {
-	active = false;
-	sessionStateStored = null;
-	decideCalls = 0;
-	enableCalls = 0;
-	disableCalls = 0;
-	sessionFlag = { id: 'sess-1', turboMode: false, epicModeActive: false };
-
-	// `/swarm epic` bootstraps the agent session via `ensureAgentSession`,
-	// so the stub always returns the session flag regardless of id.
-	_internals.ensureAgentSession = (() => sessionFlag as never) as never;
-	_internals.isEpicModeActive = (() => active) as never;
-	_internals.isStateUnreadable = (() => false) as never;
-	_internals.loadEpicSessionState = (() => sessionStateStored) as never;
-	_internals.readTaskScopes = (() => null) as never;
-	_internals.enableEpicMode = (() => {
-		active = true;
-		enableCalls += 1;
-		sessionStateStored = {
-			sessionID: 'sess-1',
-			active: true,
-			enabledAt: '2025-01-01T00:00:00Z',
-		} as never;
+	startCalls = 0;
+	closeCalls = 0;
+	inspection = emptyInspection();
+	_internals.inspectEpic = (() => inspection) as never;
+	_internals.repairEpicSentinel = (() => 'none') as never;
+	_internals.retireLegacyEpicSessionState = (() => ({
+		rowsRemoved: 0,
+		activeSessions: 0,
+		fileArchivedTo: null,
+		errors: [],
+	})) as never;
+	_internals.describeMergeFailuresForStatus = (() => []) as never;
+	_internals.startEpic = (async () => {
+		startCalls += 1;
+		throw new Error('unexpected start');
 	}) as never;
-	_internals.disableEpicMode = (() => {
-		active = false;
-		disableCalls += 1;
-		sessionStateStored = {
-			sessionID: 'sess-1',
-			active: false,
-			disabledAt: '2025-01-02T00:00:00Z',
-		} as never;
+	_internals.closeEpic = (async () => {
+		closeCalls += 1;
+		throw new Error('unexpected close');
 	}) as never;
-
 	_internals.loadPluginConfigWithMeta = (() => ({
 		config: { turbo: { epic: { mode: { enabled: true } } } },
 		isUsingDefaults: false,
@@ -76,23 +77,10 @@ beforeEach(() => {
 			},
 		],
 	})) as never;
-	_internals.getCoChangeData = (async () => ({
-		pairs: [],
-		commitsObserved: 50,
+	_internals.resolvePlanMarkerScope = (async () => ({
+		planKey: 'aaaaaaaaaaaaaaaa',
+		rootTimestampMs: null,
 	})) as never;
-	_internals.decideEpicActivation = (() => {
-		decideCalls += 1;
-		return {
-			decision: 'promote',
-			p: 0,
-			rationale: {
-				pCheck: { passed: true, p: 0, threshold: 0.3 },
-				hotModuleCheck: { passed: true, touchedHotModules: [] },
-				greenfieldCheck: { passed: true, commitsObserved: 50, minCommits: 20 },
-			},
-			blockingReasons: [],
-		};
-	}) as never;
 });
 
 afterEach(() => {
@@ -108,567 +96,214 @@ describe('handleEpicCommand — session validation', () => {
 		const out = await handleEpicCommand('/fake', [], '');
 		expect(out).toContain('No active session context');
 	});
-
-	test('bootstraps the agent session when no architect has spoken yet', async () => {
-		// Previously rejected with "No active session" when the architect
-		// hadn't initialized a session yet — that error was a chicken-and-egg
-		// UX bug since `/swarm epic` is a session-state command. The new
-		// behavior creates the session lazily via `ensureAgentSession` and
-		// proceeds with the toggle. Bare `/swarm epic` (no arg) renders the
-		// status string, not an error.
-		const out = await handleEpicCommand('/fake', [], 'fresh-session');
-		expect(out).not.toContain('No active session');
-	});
 });
 
-describe('handleEpicCommand — on / off / toggle', () => {
-	test('`on` enables the mode and acks', async () => {
-		const out = await handleEpicCommand('/fake', ['on'], 'sess-1');
-		expect(out).toContain('Epic Mode enabled');
-		expect(enableCalls).toBe(1);
-		expect(active).toBe(true);
-		// In-memory session flag is also mirrored so hasActiveEpicMode picks it up.
-		expect(sessionFlag.epicModeActive).toBe(true);
+describe('handleEpicCommand — subcommand routing', () => {
+	test.each([
+		['on'],
+		['off'],
+	])('removed v1 toggle `%s` gets a migration hint and mutates nothing', async (arg) => {
+		const out = await handleEpicCommand('/fake', [arg], 'sess-1');
+		expect(out).toContain(`\`/swarm epic ${arg}\` was removed in Epic v2`);
+		expect(out).toContain('Use `/swarm epic start`');
+		expect(out).toContain(
+			'/swarm epic start [--force] | close [--abandon] [--land squash|merge|none] | status [--repair-refs] | report [<key>|last] [--format json] | learning | prior [show|reset [--confirm=<token>]] | clear-merge-failure <taskId> [--confirm]',
+		);
+		expect(out).not.toMatch(/\bon \| off\b/);
+		expect(startCalls).toBe(0);
+		expect(closeCalls).toBe(0);
 	});
 
-	test('`off` disables the mode and acks', async () => {
-		active = true;
-		sessionFlag.epicModeActive = true;
-		const out = await handleEpicCommand('/fake', ['off'], 'sess-1');
-		expect(out).toContain('Epic Mode disabled');
-		expect(disableCalls).toBe(1);
-		expect(active).toBe(false);
-		expect(sessionFlag.epicModeActive).toBe(false);
-	});
-
-	test('bare `/swarm epic` shows status and does NOT toggle (anti-loop)', async () => {
-		// Toggle-by-default created an architect-loop with weaker models:
-		// the model called `swarm_command [command=epic]` without args to
-		// "check state", which flipped the flag, then it tried again →
-		// flip back → loop. Status-by-default is idempotent and safe.
-		const beforeEnable = enableCalls;
-		const beforeDisable = disableCalls;
+	test('bare `/swarm epic` shows status and never starts or closes (anti-loop)', async () => {
 		const out = await handleEpicCommand('/fake', [], 'sess-1');
 		expect(out).toContain('Epic Mode — Status');
-		expect(enableCalls).toBe(beforeEnable);
-		expect(disableCalls).toBe(beforeDisable);
-
-		// Calling it again is also idempotent — same observation.
 		await handleEpicCommand('/fake', [], 'sess-1');
-		expect(enableCalls).toBe(beforeEnable);
-		expect(disableCalls).toBe(beforeDisable);
+		expect(startCalls).toBe(0);
+		expect(closeCalls).toBe(0);
 	});
 
-	test('unknown subcommand returns usage', async () => {
-		const out = await handleEpicCommand('/fake', ['nope'], 'sess-1');
-		expect(out).toContain("Unknown subcommand 'nope'");
-		expect(out).toContain('Usage:');
+	test.each([
+		['decide'],
+		['last'],
+	])('removed `%s` points at status and the architect flow', async (arg) => {
+		const out = await handleEpicCommand('/fake', [arg], 'sess-1');
+		expect(out).toContain(`\`/swarm epic ${arg}\` was removed in Epic v2`);
+		expect(out).toContain('`epic_next_wave` plans every wave');
+		expect(out).toContain('`/swarm epic status`');
+		expect(startCalls).toBe(0);
+		expect(closeCalls).toBe(0);
 	});
 
-	test('empty-string subcommand is treated as unknown (not toggle)', async () => {
-		// `['']` is different from `[]`: arg0 is '' not undefined.
+	test('empty-string subcommand is treated as unknown', async () => {
 		const out = await handleEpicCommand('/fake', [''], 'sess-1');
 		expect(out).toContain("Unknown subcommand ''");
-		// And NO toggle happened.
-		expect(enableCalls).toBe(0);
-		expect(disableCalls).toBe(0);
+		expect(startCalls).toBe(0);
 	});
 });
 
 describe('handleEpicCommand — status', () => {
-	test('renders "not toggled" when no session state exists', async () => {
-		sessionStateStored = null;
+	test('no epic → says so and points at `/swarm epic start`', async () => {
 		const out = await handleEpicCommand('/fake', ['status'], 'sess-1');
-		expect(out).toContain('Epic Mode — Status');
-		expect(out).toContain('has not been toggled');
+		expect(out).toContain('No epic is open. Run `/swarm epic start`');
 	});
 
-	test('distinguishes "state unreadable" from "not toggled"', async () => {
-		_internals.isStateUnreadable = (() => true) as never;
+	test('unreadable lifecycle state is reported with the --abandon repair', async () => {
+		inspection.unreadable = 'Epic lifecycle row is not valid JSON';
 		const out = await handleEpicCommand('/fake', ['status'], 'sess-1');
-		expect(out).toContain('Epic Mode — Status');
-		expect(out).toContain('unreadable');
-		expect(out).toContain('fail-closed');
-		// And it does NOT mislead with "not toggled".
-		expect(out).not.toContain('has not been toggled');
+		expect(out).toContain('**Epic lifecycle state is unreadable**');
+		expect(out).toContain('`/swarm epic close --abandon`');
+		expect(out).not.toContain('No epic is open');
 	});
 
-	test('renders the last decision when state has one', async () => {
-		sessionStateStored = {
-			sessionID: 'sess-1',
-			active: true,
-			enabledAt: '2025-01-01T00:00:00Z',
-			lastDecision: {
-				decidedAt: '2025-01-02T00:00:00Z',
-				phase: 2,
-				decision: 'demote',
-				p: 0.75,
-				blockingReasons: ['p exceeds threshold'],
-			},
-		} as never;
-		const out = await handleEpicCommand('/fake', ['status'], 'sess-1');
-		expect(out).toContain('Last activation decision');
-		expect(out).toContain('demote');
-		expect(out).toContain('0.750');
-		expect(out).toContain('p exceeds threshold');
-	});
-});
-
-describe('handleEpicCommand — decide (read-only what-if)', () => {
-	test('returns a verdict rendering without dispatching execution', async () => {
-		const out = await handleEpicCommand('/fake', ['decide'], 'sess-1');
-		expect(out).toContain('Epic Mode — Activation Decision');
-		expect(out).toContain('promote');
-		expect(decideCalls).toBe(1);
-	});
-
-	test('does not write evidence (read-only)', async () => {
-		// The evidence writer isn't bound to a seam in `decide`, but we can
-		// at least verify the no-plan path produces a friendly message
-		// instead of attempting a write.
-		_internals.loadPlanJsonOnly = (async () => null) as never;
-		const out = await handleEpicCommand('/fake', ['decide'], 'sess-1');
-		expect(out).toContain('No plan found');
-	});
-
-	test('Phase 15 (B38): decide-path renders phantom-only failure with the typo, not empty "missing upstreams:"', async () => {
-		_internals.decideEpicActivation = (() => ({
-			decision: 'demote' as const,
-			p: 0.05,
-			rationale: {
-				pCheck: { passed: true, p: 0.05, threshold: 0.3 },
-				hotModuleCheck: { passed: true, touchedHotModules: [] },
-				greenfieldCheck: {
-					passed: false,
-					commitsObserved: 4,
-					minCommits: 20,
-					crossPhaseUpstreams: [],
-					missingUpstreams: [],
-					phantomDeps: ['1.7', '2.99'],
+	test('renders the open epic with its waves, phases and divergence', async () => {
+		inspection.record = stubEpicRecord({
+			activeWaveSeq: 2,
+			waves: [
+				{
+					seq: 1,
+					phase: 1,
+					kind: 'parallel',
+					taskIds: ['1.1', '1.2'],
+					files: { '1.1': ['src/a.ts'], '1.2': ['src/b.ts'] },
+					cochange: null,
+					baseHead: null,
+					issuedAt: '2026-01-01T00:00:00.000Z',
+					closedAt: '2026-01-01T01:00:00.000Z',
+					closeHead: null,
+					status: 'closed',
+					undeclared: ['src/stray.ts'],
 				},
-			},
-			blockingReasons: [
-				'phantom dep id(s) declared but not present in plan (probable typo, fix the dep id) — 1.7, 2.99',
+				{
+					seq: 2,
+					phase: 1,
+					kind: 'exclusive',
+					taskIds: ['1.3'],
+					files: { '1.3': ['package.json'] },
+					cochange: null,
+					components: {
+						byTask: { '1.3': '1.3', '1.4': '1.4', '1.5': '1.4', '1.6': '1.6' },
+						modes: {
+							'1.3': 'exclusive',
+							'1.4': 'serial-component',
+							'1.6': 'parallel',
+						},
+						density: { '1.3': 0, '1.4': 1, '1.6': 0 },
+						exclusive: { '1.3': 'global-file' },
+						threshold: 0.3,
+						truncated: false,
+					},
+					baseHead: null,
+					issuedAt: '2026-01-01T02:00:00.000Z',
+					status: 'issued',
+				},
 			],
-		})) as never;
-
-		const out = await handleEpicCommand('/fake', ['decide'], 'sess-1');
-		// The phantom typo IDs appear on the greenfield gate line itself.
-		expect(out).toContain('phantom dep ids');
-		expect(out).toContain('1.7');
-		expect(out).toContain('2.99');
-		// And there is no misleading empty "missing upstreams: " segment.
-		expect(out).not.toMatch(/missing upstreams: ?\n/);
-	});
-
-	test('Phase 15 (B38): decide-path renders mixed phantom+missing failure with both segments', async () => {
-		_internals.decideEpicActivation = (() => ({
-			decision: 'demote' as const,
-			p: 0.05,
-			rationale: {
-				pCheck: { passed: true, p: 0.05, threshold: 0.3 },
-				hotModuleCheck: { passed: true, touchedHotModules: [] },
-				greenfieldCheck: {
-					passed: false,
-					commitsObserved: 10,
-					minCommits: 20,
-					crossPhaseUpstreams: ['1.1'],
-					missingUpstreams: ['1.1'],
-					phantomDeps: ['2.99'],
+			tasks: {
+				'1.1': {
+					taskId: '1.1',
+					phase: 1,
+					waveSeq: 1,
+					resolution: 'completed',
+					resolvedAt: '2026-01-01T00:30:00.000Z',
+					generation: 1,
+					stageAFailures: 0,
+					stageBFailures: 0,
+					mergeFailure: null,
+					declared: ['src/a.ts'],
+					undeclared: ['src/c.ts'],
+					attribution: 'session',
+					reopened: 0,
+					marker: null,
 				},
 			},
-			blockingReasons: [],
-		})) as never;
-
-		const out = await handleEpicCommand('/fake', ['decide'], 'sess-1');
-		expect(out).toContain('phantom dep ids');
-		expect(out).toContain('2.99');
-		expect(out).toContain('missing upstreams');
-		expect(out).toContain('1.1');
-	});
-
-	test('Phase 15 (B38): decide-path renders vacuous-pass when no cross-phase upstreams', async () => {
-		_internals.decideEpicActivation = (() => ({
-			decision: 'promote' as const,
-			p: 0.05,
-			rationale: {
-				pCheck: { passed: true, p: 0.05, threshold: 0.3 },
-				hotModuleCheck: { passed: true, touchedHotModules: [] },
-				greenfieldCheck: {
-					passed: true,
-					commitsObserved: 0,
-					minCommits: 20,
-					crossPhaseUpstreams: [],
-					missingUpstreams: [],
+			phases: {
+				'1': {
+					status: 'active',
+					reviewRuns: 1,
+					verdicts: ['reviewer:NEEDS_REVISION critic:not-run'],
 				},
 			},
-			blockingReasons: [],
-		})) as never;
-
-		const out = await handleEpicCommand('/fake', ['decide'], 'sess-1');
-		expect(out).toContain('vacuous');
+		});
+		const out = await handleEpicCommand('/fake', ['status'], 'sess-1');
+		expect(out).toContain(`Epic: \`${inspection.record.epicKey}\` — **open**`);
+		expect(out).toContain('- 2 issued: 1 closed.');
+		expect(out).toContain(
+			'**Active:** wave 2 (phase 1, exclusive) — 1.3 — issued 2026-01-01T02:00:00.000Z',
+		);
+		expect(out).toContain(
+			'Phase 1: active; 1 phase review run(s) (last: reviewer:NEEDS_REVISION critic:not-run)',
+		);
+		expect(out).toContain(
+			'- Components when wave 2 was issued (density threshold 0.3;',
+		);
+		expect(out).toContain('  - `1.3` exclusive (global file): 1.3');
+		expect(out).toContain(
+			'  - `1.4` serial-component (2 task(s), density 1.00): 1.4, 1.5',
+		);
+		expect(out).toContain('  - `1.6` parallel (1 task(s), density 0.00): 1.6');
+		expect(out).toContain('- 1.1 (wave 1): src/c.ts');
+		expect(out).toContain('- wave 1 (unattributed): src/stray.ts');
+		expect(out).not.toContain('activation decision');
 	});
 
-	test('Phase 15 (B38): decide-path tolerates legacy rationale without crashing', async () => {
-		// A pre-Phase-10 verdict shape (no crossPhaseUpstreams /
-		// missingUpstreams / phantomDeps on greenfieldCheck). The
-		// renderer must default these to [] and not throw.
-		_internals.decideEpicActivation = (() => ({
-			decision: 'demote' as const,
-			p: 0.5,
-			rationale: {
-				pCheck: { passed: false, p: 0.5, threshold: 0.3 },
-				hotModuleCheck: { passed: true, touchedHotModules: [] },
-				greenfieldCheck: {
-					passed: false,
-					commitsObserved: 0,
-					minCommits: 20,
-				},
-			},
-			blockingReasons: ['p too high'],
-		})) as never;
+	test('an epic without waves says the architect issues the first one', async () => {
+		inspection.record = stubEpicRecord();
+		const out = await handleEpicCommand('/fake', ['status'], 'sess-1');
+		expect(out).toContain('None issued yet');
+		expect(out).not.toContain('Divergence');
+	});
 
-		const out = await handleEpicCommand('/fake', ['decide'], 'sess-1');
-		expect(out).toContain('legacy record');
+	test('orphaned epic and closed config gate are both explained', async () => {
+		inspection.record = stubEpicRecord();
+		inspection.orphanReason = 'plan-renamed-or-replaced';
+		inspection.configEnabled = false;
+		const out = await handleEpicCommand('/fake', ['status'], 'sess-1');
+		expect(out).toContain('— **orphaned**');
+		expect(out).toContain('the plan was renamed or replaced');
+		expect(out).toContain('`/swarm epic close --abandon`');
+		expect(out).toContain('`epic.mode.enabled` is not true');
+	});
+
+	test('reports a sentinel repair and the legacy v1 retirement', async () => {
+		_internals.repairEpicSentinel = (() => 'removed-stale-sentinel') as never;
+		_internals.retireLegacyEpicSessionState = (() => ({
+			rowsRemoved: 2,
+			activeSessions: 1,
+			fileArchivedTo: '.swarm/epic-state.json.imported',
+			errors: [],
+		})) as never;
+		const out = await handleEpicCommand('/fake', ['status'], 'sess-1');
+		expect(out).toContain('Repaired: removed a stale sentinel');
+		expect(out).toContain('Retired Epic v1 per-session state (2 row(s)');
+		expect(out).toContain('1 session(s) had Epic v1 switched on');
+		expect(out).toContain('run `/swarm epic start`');
 	});
 });
 
-describe('handleEpicCommand — last (most recent decision from evidence)', () => {
-	test('returns a "no decisions yet" message when the evidence file is empty', async () => {
-		_internals.readPromotionEvidence = (() => []) as never;
-		const out = await handleEpicCommand('/fake', ['last'], 'sess-1');
-		expect(out).toContain('Epic Mode — Last Decision');
-		expect(out).toContain('No decisions recorded yet');
-		expect(out).toContain('run `/swarm epic decide`');
-	});
-
-	test('renders the most recent record with verdict, p, and gate-by-gate', async () => {
-		_internals.readPromotionEvidence = (() => [
-			{
-				timestamp: '2026-05-27T11:00:00Z',
-				sessionID: 'sess-prior',
-				phase: 1,
-				verdict: {
-					decision: 'promote' as const,
-					p: 0.12,
-					rationale: {
-						pCheck: { passed: true, p: 0.12, threshold: 0.3 },
-						hotModuleCheck: { passed: true, touchedHotModules: [] },
-						greenfieldCheck: {
-							passed: true,
-							commitsObserved: 80,
-							minCommits: 20,
-						},
-					},
-					blockingReasons: [],
-				},
-			},
-			{
-				timestamp: '2026-05-28T09:30:00Z',
-				sessionID: 'sess-current',
-				phase: 2,
-				verdict: {
-					decision: 'demote' as const,
-					p: 0.55,
-					rationale: {
-						pCheck: { passed: false, p: 0.55, threshold: 0.3 },
-						hotModuleCheck: {
-							passed: false,
-							touchedHotModules: ['src/global.ts'],
-						},
-						greenfieldCheck: {
-							passed: true,
-							commitsObserved: 50,
-							minCommits: 20,
-						},
-					},
-					blockingReasons: [
-						'p (0.550) exceeds activation threshold (0.300)',
-						'plan touches Lean Turbo hot module(s): src/global.ts',
-					],
-				},
-			},
-		]) as never;
-
-		const out = await handleEpicCommand('/fake', ['last'], 'sess-1');
-		// Must show the LAST (second) record, not the first.
-		expect(out).toContain('Decided at: 2026-05-28T09:30:00Z');
-		expect(out).toContain('Session: sess-current');
-		expect(out).toContain('Phase: 2');
-		expect(out).toContain('Decision: **demote**');
-		expect(out).toContain('p: 0.550');
-		expect(out).toContain('p (0.550) exceeds activation threshold (0.300)');
-		expect(out).toContain('plan touches Lean Turbo hot module(s)');
-		// Gate-by-gate section
-		expect(out).toContain('p-threshold');
-		expect(out).toContain('hot-module');
-		expect(out).toContain('greenfield');
-		expect(out).toContain('src/global.ts');
-		// History footer when records.length > 1
-		expect(out).toContain('2 decisions total');
-	});
-
-	test('surfaces read errors as a friendly message rather than throwing', async () => {
-		_internals.readPromotionEvidence = (() => {
-			throw new Error('disk fell off');
-		}) as never;
-		const out = await handleEpicCommand('/fake', ['last'], 'sess-1');
-		expect(out).toContain('Error reading epic-promotions.jsonl');
-		expect(out).toContain('disk fell off');
-	});
-});
-
-describe('handleEpicCommand — calibration (Capability D state)', () => {
-	test('returns "no state yet" + static threshold when state is null (clean repo)', async () => {
-		_internals.loadCalibrationState = (() => null) as never;
-		_internals.isCalibrationStateUnreadable = (() => false) as never;
-		_internals.readDivergenceHistory = (() => []) as never;
+describe('handleEpicCommand — learning / prior routing (Epic v2 C6)', () => {
+	test('`calibration` was renamed: it points at learning / prior and renders nothing', async () => {
 		const out = await handleEpicCommand('/fake', ['calibration'], 'sess-1');
-		expect(out).toContain('Epic Mode — Calibration');
-		expect(out).toContain('No calibration state yet');
-		// Static threshold from default config (0.3) must be surfaced.
-		expect(out).toContain('0.300');
+		expect(out).toContain('`/swarm epic calibration` was renamed in Epic v2');
+		expect(out).toContain('`/swarm epic learning`');
+		expect(out).toContain('`/swarm epic prior`');
+		expect(out).not.toContain('Epic Mode — Learning');
 	});
 
-	test('returns fail-closed message when calibration state is unreadable', async () => {
-		_internals.isCalibrationStateUnreadable = (() => true) as never;
-		const out = await handleEpicCommand('/fake', ['calibration'], 'sess-1');
-		expect(out).toContain('unreadable (fail-closed)');
-		expect(out).toContain('static config defaults');
+	test('`learning` renders the learning view; it takes no options', async () => {
+		const out = await handleEpicCommand('/fake', ['learning'], 'sess-1');
+		expect(out).toContain('## Epic Mode — Learning');
+		expect(
+			await handleEpicCommand('/fake', ['learning', '--x'], 'sess-1'),
+		).toContain('`/swarm epic learning` takes no options.');
 	});
 
-	test('renders effective threshold + tightening delta when override is set', async () => {
-		_internals.isCalibrationStateUnreadable = (() => false) as never;
-		_internals.loadCalibrationState = (() => ({
-			version: 1 as const,
-			updatedAt: '2026-05-28T10:00:00Z',
-			activationThresholdOverride: 0.22,
-			hotModuleAdditions: ['src/global.ts', 'src/init.ts'],
-			consecutiveCleanCount: 3,
-			lastCalibrationAt: '2026-05-28T09:45:00Z',
-			processedRecords: 17,
-		})) as never;
-		_internals.readDivergenceHistory = (() => [
-			{
-				timestamp: '2026-05-28T09:00:00Z',
-				sessionID: 's',
-				taskId: 'T-2.4',
-				declaredScope: ['src/foo.ts'],
-				actualFiles: ['src/foo.ts', 'src/global.ts'],
-				undeclared: ['src/global.ts'],
-				unused: [],
-				divergenceRatio: 0.5,
-				isClean: false,
-			},
-		]) as never;
-		const out = await handleEpicCommand('/fake', ['calibration'], 'sess-1');
-		// Static and effective both shown with delta.
-		expect(out).toContain('Static threshold (config): 0.300');
-		expect(out).toContain('Effective threshold (learned)**: 0.220');
-		expect(out).toContain('tightened by 0.080');
-		// Counter + window from defaults.
-		expect(out).toContain('Consecutive clean tasks: 3 / 10');
-		// Hot module entries listed.
-		expect(out).toContain('src/global.ts');
-		expect(out).toContain('src/init.ts');
-		// Recent divergent rendered with undeclared sample.
-		expect(out).toContain('T-2.4');
-		expect(out).toContain('ratio=0.50');
-	});
-
-	test('says "using static" when no override is set', async () => {
-		_internals.isCalibrationStateUnreadable = (() => false) as never;
-		_internals.loadCalibrationState = (() => ({
-			version: 1 as const,
-			updatedAt: '2026-05-28T10:00:00Z',
-			hotModuleAdditions: [],
-			consecutiveCleanCount: 0,
-			processedRecords: 0,
-		})) as never;
-		_internals.readDivergenceHistory = (() => []) as never;
-		const out = await handleEpicCommand('/fake', ['calibration'], 'sess-1');
-		expect(out).toContain('using static — no calibration override');
-		expect(out).toContain("hasn't promoted any modules");
-		expect(out).toContain('None recent');
-	});
-
-	test('truncates long hot-module list at 10 entries with summary line', async () => {
-		_internals.isCalibrationStateUnreadable = (() => false) as never;
-		const lotsOfModules = Array.from({ length: 14 }, (_, i) => `src/m${i}.ts`);
-		_internals.loadCalibrationState = (() => ({
-			version: 1 as const,
-			updatedAt: '2026-05-28T10:00:00Z',
-			hotModuleAdditions: lotsOfModules,
-			consecutiveCleanCount: 0,
-			processedRecords: 20,
-		})) as never;
-		_internals.readDivergenceHistory = (() => []) as never;
-		const out = await handleEpicCommand('/fake', ['calibration'], 'sess-1');
-		expect(out).toContain('src/m0.ts');
-		expect(out).toContain('src/m9.ts');
-		expect(out).toContain('+4 more');
-		// m10..m13 should not appear individually.
-		expect(out).not.toContain('src/m12.ts');
-	});
-});
-
-describe('Phase 14 (B26) — renderer surfaces phantomDeps on the greenfield line', () => {
-	test('failing gate with phantom deps only ⇒ renderer names the typo, not "missing upstreams:" with empty list', async () => {
-		_internals.readPromotionEvidence = (() => [
-			{
-				timestamp: '2026-06-03T12:00:00Z',
-				sessionID: 'sess-1',
-				phase: 2,
-				verdict: {
-					decision: 'demote' as const,
-					p: 0.05,
-					rationale: {
-						pCheck: { passed: true, p: 0.05, threshold: 0.3 },
-						hotModuleCheck: { passed: true, touchedHotModules: [] },
-						greenfieldCheck: {
-							passed: false,
-							commitsObserved: 4,
-							minCommits: 20,
-							crossPhaseUpstreams: [],
-							missingUpstreams: [],
-							phantomDeps: ['1.7', '2.99'],
-						},
-					},
-					blockingReasons: [
-						'phantom dep id(s) declared but not present in plan (probable typo, fix the dep id) — 1.7, 2.99',
-					],
-				},
-			},
-		]) as never;
-
-		const out = await handleEpicCommand('/fake', ['last'], 'sess-1');
-		// The phantom typo IDs MUST appear on the greenfield line itself.
-		expect(out).toContain('phantom dep ids');
-		expect(out).toContain('1.7');
-		expect(out).toContain('2.99');
-		// And the renderer must NOT emit a misleading empty
-		// "missing upstreams: " segment.
-		expect(out).not.toMatch(/missing upstreams: ?\n/);
-	});
-
-	test('failing gate with BOTH phantom deps and missing upstreams ⇒ both segments surface', async () => {
-		_internals.readPromotionEvidence = (() => [
-			{
-				timestamp: '2026-06-03T13:00:00Z',
-				sessionID: 'sess-1',
-				phase: 3,
-				verdict: {
-					decision: 'demote' as const,
-					p: 0.05,
-					rationale: {
-						pCheck: { passed: true, p: 0.05, threshold: 0.3 },
-						hotModuleCheck: { passed: true, touchedHotModules: [] },
-						greenfieldCheck: {
-							passed: false,
-							commitsObserved: 10,
-							minCommits: 20,
-							crossPhaseUpstreams: ['1.1'],
-							missingUpstreams: ['1.1'],
-							phantomDeps: ['2.99'],
-						},
-					},
-					blockingReasons: [],
-				},
-			},
-		]) as never;
-
-		const out = await handleEpicCommand('/fake', ['last'], 'sess-1');
-		expect(out).toContain('phantom dep ids');
-		expect(out).toContain('2.99');
-		expect(out).toContain('missing upstreams');
-		expect(out).toContain('1.1');
-	});
-
-	test('passing gate with cross-phase upstreams in git ⇒ renderer names them', async () => {
-		_internals.readPromotionEvidence = (() => [
-			{
-				timestamp: '2026-06-03T14:00:00Z',
-				sessionID: 'sess-1',
-				phase: 2,
-				verdict: {
-					decision: 'promote' as const,
-					p: 0.05,
-					rationale: {
-						pCheck: { passed: true, p: 0.05, threshold: 0.3 },
-						hotModuleCheck: { passed: true, touchedHotModules: [] },
-						greenfieldCheck: {
-							passed: true,
-							commitsObserved: 3,
-							minCommits: 20,
-							crossPhaseUpstreams: ['1.1', '1.2'],
-							missingUpstreams: [],
-						},
-					},
-					blockingReasons: [],
-				},
-			},
-		]) as never;
-
-		const out = await handleEpicCommand('/fake', ['last'], 'sess-1');
-		expect(out).toContain('cross-phase upstreams in git: 1.1, 1.2');
-	});
-
-	test('passing gate with no cross-phase upstreams ⇒ renders "vacuous" (Phase 1 / single-phase plans)', async () => {
-		_internals.readPromotionEvidence = (() => [
-			{
-				timestamp: '2026-06-03T15:00:00Z',
-				sessionID: 'sess-1',
-				phase: 1,
-				verdict: {
-					decision: 'promote' as const,
-					p: 0.05,
-					rationale: {
-						pCheck: { passed: true, p: 0.05, threshold: 0.3 },
-						hotModuleCheck: { passed: true, touchedHotModules: [] },
-						greenfieldCheck: {
-							passed: true,
-							commitsObserved: 0,
-							minCommits: 20,
-							crossPhaseUpstreams: [],
-							missingUpstreams: [],
-						},
-					},
-					blockingReasons: [],
-				},
-			},
-		]) as never;
-
-		const out = await handleEpicCommand('/fake', ['last'], 'sess-1');
-		expect(out).toContain('vacuous');
-	});
-
-	test('legacy record with no diagnostic fields ⇒ renderer prints honest "(legacy record?)" hint', async () => {
-		_internals.readPromotionEvidence = (() => [
-			{
-				timestamp: '2026-05-01T10:00:00Z',
-				sessionID: 'sess-pre10',
-				phase: 1,
-				verdict: {
-					decision: 'demote' as const,
-					p: 0.5,
-					rationale: {
-						pCheck: { passed: false, p: 0.5, threshold: 0.3 },
-						hotModuleCheck: { passed: true, touchedHotModules: [] },
-						greenfieldCheck: {
-							passed: false,
-							commitsObserved: 0,
-							minCommits: 20,
-							// no crossPhaseUpstreams / missingUpstreams /
-							// phantomDeps — legacy pre-Phase-10 record
-						},
-					},
-					blockingReasons: ['pre-Phase-10 reason'],
-				},
-			},
-		]) as never;
-
-		const out = await handleEpicCommand('/fake', ['last'], 'sess-1');
-		// Renderer doesn't crash. Doesn't print misleading empty list.
-		expect(out).toContain('legacy record');
+	test('`prior` routes to the prior view; an unknown prior subcommand gets its usage', async () => {
+		expect(await handleEpicCommand('/fake', ['prior'], 'sess-1')).toContain(
+			'## Epic Mode — Project prior',
+		);
+		expect(
+			await handleEpicCommand('/fake', ['prior', 'wipe'], 'sess-1'),
+		).toContain(
+			'Usage: /swarm epic prior [show] | /swarm epic prior reset [--confirm=<token>]',
+		);
 	});
 });

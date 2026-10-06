@@ -60,7 +60,7 @@ describe('check-config-consumption — CLI surface (issue #2904 F-003)', () => {
 		expect(res.status).toBe(0);
 		// Deliberate tripwire: this pin breaks on any future schema-key addition,
 		// forcing the count here and in src/config/consumers.ts to move together.
-		expect(res.out).toContain('83 keys verified');
+		expect(res.out).toContain('84 keys verified');
 	});
 
 	it('exits 0 on a clean --root fixture', () => {

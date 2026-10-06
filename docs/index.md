@@ -28,7 +28,7 @@ OpenCode Swarm is an architect-centric agentic swarm plugin for OpenCode. It coo
 |----------|--------|
 | [Configuration Reference](configuration.md) | Config file locations, minimal example, all configuration keys |
 | [Commands Reference](commands.md) | `/swarm` subcommands, flags, deprecated aliases, and examples |
-| [Modes: Swarm vs Turbo vs Full-Auto](modes.md) | Execution modes, safety gates, when to use each |
+| [Modes: Swarm vs Turbo vs Full-Auto vs Epic](modes.md) | Execution modes, safety gates, when to use each |
 | [Pre-Swarm Planning Guide](planning.md) | How to plan tasks before running, task field reference, multi-model planning, spec pipeline |
 | [Swarm Briefing for LLMs](swarm-briefing.md) | Pipeline steps, task format, state machine — written for LLM plan authors |
 | [PHP and Laravel Practical Guide](php-laravel.md) | Framework detection, Laravel command override, Pest/PHPUnit coexistence, SAST coverage |
@@ -58,6 +58,7 @@ OpenCode Swarm is an architect-centric agentic swarm plugin for OpenCode. It coo
 | [Architecture Deep Dive](architecture.md) | Control model, agent roles, full execution pipeline, tools, evidence schema, modes, guardrails |
 | [PR-review transition authority](pr-review-transition-authority.md) | Registered PR_REVIEW reducer events, durable authorities, retired historical events, and the wire-or-retire census |
 | [Adding a Language](adding-a-language.md) | Extending the language registry with a new profile and (optionally) a custom backend; backend invariants and tests |
+| [Epic Mode maintainer guide](../src/epic/README.md) | Internals of the opt-in Epic Mode for contributors changing `src/epic/`, an Epic seam in a shared file, or the `epic` config block: lifecycle, module map, invariants, shared-file seams, `.swarm/epic/` and `.swarm/epic-prior/` state, tests, recipes (user-facing contract: [Modes → Epic Mode](modes.md#epic-mode-preview)) |
 | [Design Rationale](design-rationale.md) | Core design decisions: serial execution, phased planning, persistent memory, gated QA |
 | [Plan Durability](plan-durability.md) | How `.swarm/plan-ledger.jsonl` provides crash-safe plan persistence |
 

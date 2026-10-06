@@ -3,18 +3,26 @@ import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { z } from 'zod';
+import {
+	annotateLegacyEpicKeys,
+	hasLegacyEpicConfig,
+	LEGACY_EPIC_CONFIG_WARNING,
+	migrateLegacyEpicConfig,
+} from '../epic/config.js';
 import { advisoryWarn } from '../services/warning-buffer.js';
 import { GIT_BINARY_ENV_VAR } from '../utils/git-executable.js';
 import { sanitizeMalformedValues } from './sanitize-malformed-values';
 import {
 	CONSERVATIVE_PRESET_BASE,
 	ExternalSkillsConfigSchema,
+	findRetiredEpicConfigKeys,
 	GATE_CONFIG_KNOWN_SECTION_KEYS,
 	type GateConfigOverrides,
 	GateConfigSchema,
 	type PluginConfig,
 	PluginConfigSchema,
 	resolveExternalSkillsConfig,
+	retiredEpicKeyReplacement,
 } from './schema';
 
 const CONFIG_FILENAME = 'opencode-swarm.json';
@@ -31,6 +39,18 @@ export const MAX_CONFIG_FILE_BYTES = 102_400;
  * diagnostic dedup, not session data. Reset via `_internals` in tests.
  */
 let lastUnknownTopLevelSig: string | null = null;
+
+/**
+ * Dedup signature for the step-4c retired-Epic-key warning (Epic v2): same
+ * one-slot, once-per-distinct-set contract as `lastUnknownTopLevelSig`.
+ */
+let lastRetiredEpicKeysSig: string | null = null;
+
+/**
+ * Dedup flag for the step-0 legacy `turbo.epic` advisory (Epic C9): warned
+ * once until the config-advisory dedup is reset (session start, tests).
+ */
+let legacyEpicConfigWarned = false;
 
 /**
  * Dedup set for gates-section sanitize advisories (issue #2524): gate tools
@@ -54,6 +74,12 @@ function gatesAdvisoryWarn(message: string, data?: unknown): void {
 export const _internals = {
 	resetUnknownTopLevelKeyWarning(): void {
 		lastUnknownTopLevelSig = null;
+	},
+	resetRetiredEpicKeyWarning(): void {
+		lastRetiredEpicKeysSig = null;
+	},
+	resetLegacyEpicConfigWarning(): void {
+		legacyEpicConfigWarned = false;
 	},
 	resetGatesAdvisoryDedup(): void {
 		gatesAdvisorySignatures.clear();
@@ -643,6 +669,31 @@ function buildConfigWithMeta(
 	loadedFromFile: boolean,
 	configHadErrors: boolean,
 ): ConfigBuildResult {
+	// 0. Legacy Epic config path (Epic C9, `src/epic/config.ts`): move each
+	//    file's `turbo.epic` to its top-level `epic` (per-key merge, that
+	//    file's top-level `epic` wins) BEFORE the files are merged, so the
+	//    normal precedence (project over user) holds across files whichever
+	//    path each used, and Epic never depends on `turbo.strategy`. A file
+	//    without `turbo.epic` is used unchanged (same object). Retired Epic
+	//    keys are collected first so step 4c names the paths the user wrote;
+	//    `annotateEpicKeys` labels recovered keys that came from `turbo.epic`.
+	const rawEpicFiles = [rawUserConfig, rawProjectConfig];
+	const retiredEpicKeys = [
+		...new Set(rawEpicFiles.flatMap((raw) => findRetiredEpicConfigKeys(raw))),
+	];
+	const annotateEpicKeys = (keys: string[]): string[] =>
+		annotateLegacyEpicKeys(keys, rawEpicFiles);
+	if (rawEpicFiles.some(hasLegacyEpicConfig)) {
+		if (rawUserConfig) rawUserConfig = migrateLegacyEpicConfig(rawUserConfig);
+		if (rawProjectConfig) {
+			rawProjectConfig = migrateLegacyEpicConfig(rawProjectConfig);
+		}
+		if (!legacyEpicConfigWarned) {
+			legacyEpicConfigWarned = true;
+			advisoryWarn(LEGACY_EPIC_CONFIG_WARNING);
+		}
+	}
+
 	// 1. Deep-merge raw objects before Zod parsing so Zod defaults never
 	//    override explicit user values.
 	let mergedRaw: Record<string, unknown> = rawUserConfig ?? {};
@@ -750,6 +801,24 @@ function buildConfigWithMeta(
 		}
 	}
 
+	// 4c. Retired Epic keys (Epic v2, collected in step 0): the schema accepts and
+	//     strips them so the strict `epic.mode` object never drops the whole
+	//     Epic block; nothing reads them. Warn once per distinct key set (4b's
+	//     dedup contract); `/swarm config doctor` reports them as well.
+	if (retiredEpicKeys.length > 0) {
+		const signature = retiredEpicKeys.join('\u0000');
+		if (signature !== lastRetiredEpicKeysSig) {
+			lastRetiredEpicKeysSig = signature;
+			advisoryWarn(
+				`[opencode-swarm] Ignored ${retiredEpicKeys.length} retired Epic config key(s): ${retiredEpicKeys.join(', ')}. They have no effect (the rest of the Epic block is kept) — remove them; see docs/configuration.md (Epic Mode).${retiredEpicKeys
+					.map((key) => retiredEpicKeyReplacement(key))
+					.filter((hint): hint is string => hint !== undefined)
+					.map((hint) => ` ${hint}`)
+					.join('')}`,
+			);
+		}
+	}
+
 	// Fail-secure closure: when a config file existed but could not be loaded,
 	// force guardrails ENABLED on any recovered config (issue #1778 H6 F2).
 	const secure = (cfg: PluginConfig): PluginConfig =>
@@ -787,10 +856,11 @@ function buildConfigWithMeta(
 
 	// 6. Targeted recovery: drop only Zod-confirmed unrecognized keys and
 	//    re-parse so a single typo does not discard the user's entire config.
-	const { cleaned, removed } = stripUnrecognizedKeys(
+	const { cleaned, removed: strictRemoved } = stripUnrecognizedKeys(
 		mergedRaw,
 		firstResult.error,
 	);
+	const removed = annotateEpicKeys(strictRemoved);
 	if (removed.length > 0) {
 		const recovered = PluginConfigSchema.safeParse(cleaned);
 		if (recovered.success) {
@@ -820,6 +890,7 @@ function buildConfigWithMeta(
 		// normal path — without this, the schema preprocess would fill a
 		// partial auto_review section with the release-gated (v8) default
 		// before any preset-aware consumer could see the user's intent.
+		// (rawUserConfig already carries step 0's legacy `turbo.epic` move.)
 		const userPresetMigrated = migratePresetsConfig(userSanitized);
 		const userPresetReady =
 			userPresetMigrated.preset === 'conservative'
@@ -851,17 +922,14 @@ function buildConfigWithMeta(
 		if (userStripped.removed.length > 0) {
 			const userRecovered = PluginConfigSchema.safeParse(userStripped.cleaned);
 			if (userRecovered.success) {
+				const userRemoved = annotateEpicKeys(userStripped.removed);
 				advisoryWarn(
-					`[opencode-swarm] Project config ignored; also ignored ${userStripped.removed.length} unrecognized user-config key(s): ${userStripped.removed.join(', ')}.`,
+					`[opencode-swarm] Project config ignored; also ignored ${userRemoved.length} unrecognized user-config key(s): ${userRemoved.join(', ')}.`,
 				);
 				return {
 					config: secure(userRecovered.data),
 					recovery: 'user_only',
-					removedKeys: [
-						...gatesStripped,
-						...userGatesStripped,
-						...userStripped.removed,
-					],
+					removedKeys: [...gatesStripped, ...userGatesStripped, ...userRemoved],
 					warnings: [
 						'Project config ignored due to validation errors; using user config.',
 					],
@@ -898,7 +966,9 @@ function buildConfigWithMeta(
 			if (recoveredParse.success) {
 				const removedKeys = [
 					...gatesStripped,
-					...valueRecovery.recoveryWarnings.map((w) => w.section),
+					...annotateEpicKeys(
+						valueRecovery.recoveryWarnings.map((w) => w.section),
+					),
 				];
 				// Force guardrails enabled on recovery — the user's config had
 				// invalid values, so we apply the same fail-secure default as
@@ -937,7 +1007,9 @@ function buildConfigWithMeta(
 	} // end if (!rawGuardrailsDisabled)
 
 	// 8. Guardrails defaults: nothing was recoverable.
-	const offending = stripUnrecognizedKeys(mergedRaw, firstResult.error).removed;
+	const offending = annotateEpicKeys(
+		stripUnrecognizedKeys(mergedRaw, firstResult.error).removed,
+	);
 	if (offending.length > 0) {
 		advisoryWarn(
 			`[opencode-swarm] Merged config validation failed. Unrecognized key(s): ${offending.join(', ')}.`,
@@ -1065,6 +1137,8 @@ export function loadGateOverrides(
 export function resetConfigAdvisoryDedup(): void {
 	gatesAdvisorySignatures.clear();
 	lastUnknownTopLevelSig = null;
+	lastRetiredEpicKeysSig = null;
+	legacyEpicConfigWarned = false;
 }
 
 /**
