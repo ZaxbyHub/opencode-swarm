@@ -5,7 +5,7 @@
 - New `/swarm coupling` slash command (category: `diagnostics`) that computes
   the coupling coefficient `p` for the current plan and produces a ranked
   decoupling roadmap. Read-only: changes no execution behavior.
-- New module `src/turbo/epic/coupling-report.ts` exposing:
+- New module `src/epic/coupling-report.ts` exposing:
   - `computeCouplingReport(tasks, cochangePairs, threshold, options?)` — a
     pure function that returns `{ p, taskCount, totalPairs,
     conflictingPairCount, conflictingPairs, perModule, roadmap }`.
@@ -29,7 +29,7 @@ conflict) adds an empirical coupling signal — but the team has no way to
 the runtime integration.
 
 `/swarm coupling` closes that gap. It is read-only, runs independent of
-`turbo.epic.cochange.enabled`, and answers the natural questions: "how
+`epic.cochange.enabled`, and answers the natural questions: "how
 parallelizable is my plan?", "which modules cause the most coupling?", and
 "what's the highest-leverage decoupling refactor?". The answers are
 explicitly framed as estimates (per design rule §4.2), not measured

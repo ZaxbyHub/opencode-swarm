@@ -912,6 +912,11 @@ function relativeEscapesRoot(relative: string): boolean {
 	);
 }
 
+/** Marker files that identify a Maven module directory. */
+const MAVEN_BUILD_FILES: string[] = ['pom.xml'];
+/** Marker files that identify a Gradle module directory (Groovy + Kotlin DSL). */
+const GRADLE_BUILD_FILES: string[] = ['build.gradle', 'build.gradle.kts'];
+
 /**
  * Resolve the nearest Maven module directory under `root`.
  *
@@ -943,6 +948,22 @@ export function resolveMavenModuleDir(
 	root: string,
 	files?: string[],
 ): string | null {
+	return resolveModuleDirByMarkers(root, files, MAVEN_BUILD_FILES);
+}
+
+/**
+ * Shared walk-up / one-level-probe resolver behind the Maven and Gradle
+ * module resolvers (issue #3072): identical containment, fail-closed, and
+ * bounded-probe rules — only the marker files differ. See
+ * {@link resolveMavenModuleDir} for the full contract.
+ */
+function resolveModuleDirByMarkers(
+	root: string,
+	files: string[] | undefined,
+	markerNames: string[],
+): string | null {
+	const hasMarker = (dir: string): boolean =>
+		markerNames.some((marker) => _internals.existsSync(path.join(dir, marker)));
 	const resolvedRoot = path.resolve(root);
 
 	// Canonical root, computed once on first use; null = root not resolvable.
@@ -975,10 +996,7 @@ export function resolveMavenModuleDir(
 
 			let current = path.dirname(resolvedFile);
 			while (true) {
-				if (
-					_internals.existsSync(path.join(current, 'pom.xml')) &&
-					isContainedModuleDir(current)
-				) {
+				if (hasMarker(current) && isContainedModuleDir(current)) {
 					return current;
 				}
 				if (current === resolvedRoot) break;
@@ -1005,15 +1023,12 @@ export function resolveMavenModuleDir(
 	let inspected = 0;
 	for (const entry of entries) {
 		// Hidden entries (.git, .idea, .github, ...) and node_modules are never
-		// Maven modules; skip them BEFORE the cap so they cannot exhaust it.
+		// build modules; skip them BEFORE the cap so they cannot exhaust it.
 		if (entry.startsWith('.') || entry === 'node_modules') continue;
 		if (inspected >= MAX_MAVEN_MODULE_PROBE_ENTRIES) break;
 		inspected++;
 		const candidate = path.join(resolvedRoot, entry);
-		if (
-			_internals.existsSync(path.join(candidate, 'pom.xml')) &&
-			isContainedModuleDir(candidate)
-		) {
+		if (hasMarker(candidate) && isContainedModuleDir(candidate)) {
 			return candidate;
 		}
 	}
@@ -1021,18 +1036,47 @@ export function resolveMavenModuleDir(
 }
 
 /**
- * Nested Maven module directory for `root`, or null when `root` itself holds a
- * `pom.xml`. A root-level pom (single module or aggregator reactor) keeps
- * precedence: detection and execution both stay at the project root, so the
- * nested fallback must never apply there. Shared by `detectTestFramework`'s
- * nested fallback and the test_runner cwd override so the two cannot diverge.
+ * Nested module directory for `root`, or null when `root` itself holds any of
+ * `markerNames`. A root-level build manifest keeps precedence: detection and
+ * execution both stay at the project root, so the nested fallback must never
+ * apply there.
+ */
+function resolveNestedModuleDir(
+	root: string,
+	files: string[] | undefined,
+	markerNames: string[],
+): string | null {
+	if (
+		markerNames.some((marker) => _internals.existsSync(path.join(root, marker)))
+	) {
+		return null;
+	}
+	return resolveModuleDirByMarkers(root, files, markerNames);
+}
+
+/**
+ * Nested Maven module directory for `root` ({@link MAVEN_BUILD_FILES}).
+ * Shared by `detectTestFramework`'s nested Maven fallback and the
+ * test_runner cwd override so the two cannot diverge.
  */
 function resolveNestedMavenModuleDir(
 	root: string,
 	files?: string[],
 ): string | null {
-	if (_internals.existsSync(path.join(root, 'pom.xml'))) return null;
-	return resolveMavenModuleDir(root, files);
+	return resolveNestedModuleDir(root, files, MAVEN_BUILD_FILES);
+}
+
+/**
+ * Nested Gradle module directory for `root` ({@link GRADLE_BUILD_FILES}) —
+ * the Gradle dual of resolveNestedMavenModuleDir (issue #3072). Shared by
+ * detectTestFramework's nested Gradle fallback and the test_runner cwd
+ * override so the two cannot diverge.
+ */
+function resolveNestedGradleModuleDir(
+	root: string,
+	files?: string[],
+): string | null {
+	return resolveNestedModuleDir(root, files, GRADLE_BUILD_FILES);
 }
 
 export async function detectTestFramework(
@@ -1171,6 +1215,23 @@ export async function detectTestFramework(
 		return 'maven';
 	}
 
+	// Last-resort nested Gradle fallback (#3072): same shape as the Maven
+	// fallback above — only after every root-level detector has failed and
+	// never when the root itself has a Gradle build file (root keeps
+	// precedence). Accepts a nested module (e.g. backend/build.gradle) when a
+	// launcher exists there: `gradle` on PATH or a gradlew/gradlew.bat file,
+	// the same predicate detectGradle uses at the root and the same one
+	// buildGradleTestCommand launches from the module cwd.
+	const gradleModuleDir = resolveNestedGradleModuleDir(baseDir, files);
+	if (
+		gradleModuleDir &&
+		(_internals.isCommandAvailable('gradle') ||
+			_internals.existsSync(path.join(gradleModuleDir, 'gradlew')) ||
+			_internals.existsSync(path.join(gradleModuleDir, 'gradlew.bat')))
+	) {
+		return 'gradle';
+	}
+
 	return 'none';
 }
 
@@ -1290,6 +1351,22 @@ function buildLanguageSpecificTestNames(
 	}
 }
 
+/**
+ * Index of `segment` in `normalizedPath` when it starts at index 0 or right
+ * after a `/` (a whole-path-segment match), else -1. Substring hits inside a
+ * segment (e.g. `xsrc/main/java`) do not match.
+ */
+function findPathSegmentIndex(normalizedPath: string, segment: string): number {
+	for (
+		let index = normalizedPath.indexOf(segment);
+		index !== -1;
+		index = normalizedPath.indexOf(segment, index + 1)
+	) {
+		if (index === 0 || normalizedPath[index - 1] === '/') return index;
+	}
+	return -1;
+}
+
 function getRepoLevelCandidateDirectories(
 	workingDir: string,
 	relativePath: string,
@@ -1305,26 +1382,46 @@ function getRepoLevelCandidateDirectories(
 	});
 
 	const normalizedRelativePath = relativePath.replace(/\\/g, '/');
-	if (ext === '.java' && normalizedRelativePath.startsWith('src/main/java/')) {
-		directories.push(
-			path.join(
-				workingDir,
-				'src/test/java',
-				path.dirname(normalizedRelativePath.slice('src/main/java/'.length)),
-			),
+	// Issue #3072 R2: match the `src/main/{java,kotlin}/` segment anywhere on
+	// a path boundary, not only at the repo root, so a nested-module source
+	// (`backend/src/main/java/...`) maps to its module's sibling test tree
+	// (`backend/src/test/java/...`). A root-relative path matches at index 0
+	// and behaves exactly as before.
+	if (ext === '.java') {
+		const index = findPathSegmentIndex(
+			normalizedRelativePath,
+			'src/main/java/',
 		);
+		if (index !== -1) {
+			directories.push(
+				path.join(
+					workingDir,
+					normalizedRelativePath.slice(0, index),
+					'src/test/java',
+					path.dirname(
+						normalizedRelativePath.slice(index + 'src/main/java/'.length),
+					),
+				),
+			);
+		}
 	}
-	if (
-		(ext === '.kt' || ext === '.java') &&
-		normalizedRelativePath.startsWith('src/main/kotlin/')
-	) {
-		directories.push(
-			path.join(
-				workingDir,
-				'src/test/kotlin',
-				path.dirname(normalizedRelativePath.slice('src/main/kotlin/'.length)),
-			),
+	if (ext === '.kt' || ext === '.java') {
+		const index = findPathSegmentIndex(
+			normalizedRelativePath,
+			'src/main/kotlin/',
 		);
+		if (index !== -1) {
+			directories.push(
+				path.join(
+					workingDir,
+					normalizedRelativePath.slice(0, index),
+					'src/test/kotlin',
+					path.dirname(
+						normalizedRelativePath.slice(index + 'src/main/kotlin/'.length),
+					),
+				),
+			);
+		}
 	}
 
 	return [...new Set(directories)];
@@ -1702,6 +1799,32 @@ function getTargetedExecutionUnsupportedReason(
 		default:
 			return null;
 	}
+}
+
+/** File extensions whose basename is a runnable JVM test class name for
+ * class-based maven/gradle selection (#3072). */
+const CLASS_BASED_TEST_EXTENSIONS = new Set(['.java', '.kt', '.groovy']);
+
+/**
+ * Derive framework-native class selectors from a resolved test-file
+ * selection (#3072 R1): each file maps to its basename minus extension
+ * (`com/x/FooTest.java` → `FooTest`), input order preserved, duplicates
+ * dropped. Returns [] when any file is not a JVM test source or yields an
+ * empty class name, so callers fail closed to the pre-existing structured
+ * error instead of spawning a selection that silently drops files.
+ */
+function deriveClassBasedTargets(files: string[]): string[] {
+	const derived: string[] = [];
+	const seen = new Set<string>();
+	for (const file of files) {
+		const ext = path.extname(file);
+		if (!CLASS_BASED_TEST_EXTENSIONS.has(ext.toLowerCase())) return [];
+		const className = path.basename(file, ext);
+		if (!className || seen.has(className)) continue;
+		seen.add(className);
+		derived.push(className);
+	}
+	return derived;
 }
 
 function buildTestCommand(
@@ -2548,11 +2671,30 @@ export async function runTests(
 		resolvedNativeTarget = resolvedTarget.target;
 		executionCwd = resolvedTarget.executionDirectory;
 	}
+	// Issue #3072 R1: class-based frameworks cannot take file paths, but a
+	// resolved JVM test-file selection maps 1:1 to test class names. When the
+	// caller passed no explicit `targets`, derive them here so the dispatch
+	// and legacy command builders both receive the same argv. Explicit
+	// `targets` keep precedence; a selection containing a non-class file
+	// derives nothing and keeps the structured error below (fail closed).
+	let effectiveTargets = targets;
 	if (
 		scope !== 'all' &&
 		scope !== 'target' &&
 		files.length > 0 &&
-		!(targets && targets.length > 0)
+		!(targets && targets.length > 0) &&
+		(framework === 'maven' || framework === 'gradle')
+	) {
+		const derivedTargets = deriveClassBasedTargets(files);
+		if (derivedTargets.length > 0) {
+			effectiveTargets = derivedTargets;
+		}
+	}
+	if (
+		scope !== 'all' &&
+		scope !== 'target' &&
+		files.length > 0 &&
+		!(effectiveTargets && effectiveTargets.length > 0)
 	) {
 		const unsupportedReason = getTargetedExecutionUnsupportedReason(framework);
 		if (unsupportedReason) {
@@ -2581,7 +2723,7 @@ export async function runTests(
 				coverage,
 				executionCwd,
 				bail,
-				targets,
+				effectiveTargets,
 				resolvedNativeTarget,
 			)) ??
 			buildTestCommand(
@@ -2591,7 +2733,7 @@ export async function runTests(
 				coverage,
 				executionCwd,
 				bail,
-				targets,
+				effectiveTargets,
 				resolvedNativeTarget,
 			))
 		: buildTestCommand(
@@ -2601,7 +2743,7 @@ export async function runTests(
 				coverage,
 				executionCwd,
 				bail,
-				targets,
+				effectiveTargets,
 				resolvedNativeTarget,
 			);
 
@@ -3422,26 +3564,32 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			return JSON.stringify(result, null, 2);
 		}
 
-		// For Maven projects with a nested module layout, run the command from the
-		// module directory that owns the pom.xml. This applies only when the project
-		// root itself has no pom.xml (resolveNestedMavenModuleDir — the same gate
-		// detectTestFramework's nested fallback uses) and the scope is not
-		// 'target': scope:'target' native execution remains rooted at the project
-		// root because runTests resolves native targets against the cwd argument.
-		// When the root already contains a pom.xml (aggregator reactor), execution
-		// stays at the root.
-		// Convention-scope note: when Java test files are resolved but no targets are
-		// provided, the pre-existing class-based structured error
-		// ('maven does not support targeted test-file execution') is intentionally
-		// retained unchanged — deriving -Dtest class names from file paths is out of
-		// scope. A file-less run needs scope:'all' (convention/graph/impact
-		// without files are rejected by the guard above — targets cannot
-		// substitute); scope:'all' with no files uses the one-level nested
-		// module probe to pick the module dir.
+		// For projects with a nested module layout, run the command from the
+		// module directory that owns the build manifest. This applies only when
+		// the project root itself has no manifest (resolveNested{Maven,Gradle}
+		// ModuleDir — the same gates detectTestFramework's nested fallbacks use)
+		// and the scope is not 'target': scope:'target' native execution remains
+		// rooted at the project root because runTests resolves native targets
+		// against the cwd argument. When the root already contains a pom.xml
+		// (aggregator reactor) or a Gradle build file, execution stays at the
+		// root.
+		// Convention-scope note: when Java test files are resolved but no
+		// targets are provided, runTests derives -Dtest/<Class> selectors from
+		// the resolved test files (#3072 R1) — explicit targets keep precedence,
+		// and a selection containing non-class files still returns the
+		// class-based structured error. A file-less run needs scope:'all'
+		// (convention/graph/impact without files are rejected by the guard
+		// above — targets cannot substitute); scope:'all' with no files uses the
+		// one-level nested module probe to pick the module dir.
 		if (scope !== 'target' && framework === 'maven') {
 			const mavenModuleDir = resolveNestedMavenModuleDir(workingDir, _files);
 			if (mavenModuleDir) {
 				nativeExecutionDirectory = mavenModuleDir;
+			}
+		} else if (scope !== 'target' && framework === 'gradle') {
+			const gradleModuleDir = resolveNestedGradleModuleDir(workingDir, _files);
+			if (gradleModuleDir) {
+				nativeExecutionDirectory = gradleModuleDir;
 			}
 		}
 

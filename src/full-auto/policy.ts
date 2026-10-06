@@ -23,6 +23,7 @@ import * as path from 'node:path';
 import {
 	AGENT_TOOL_MAP,
 	COUNCIL_AGENT_TOOL_MAP,
+	EPIC_AGENT_TOOL_MAP,
 	EXTERNAL_SKILL_AGENT_TOOL_MAP,
 	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
@@ -36,6 +37,7 @@ import {
 	isKnownCanonicalRole,
 	resolveGeneratedAgentRole,
 } from '../config/schema';
+import { isEpicModeConfigEnabled } from '../epic/config.js';
 import {
 	isTaskToolId,
 	normalizeToolNameLowerCase,
@@ -102,7 +104,8 @@ export interface FullAutoClassifierInput {
 		memory?: { enabled?: boolean };
 		external_skills?: { curation_enabled?: boolean };
 		council?: { enabled?: boolean; general?: { enabled?: boolean } };
-		turbo?: unknown;
+		turbo?: { epic?: { mode?: { enabled?: boolean } } };
+		epic?: { mode?: { enabled?: boolean } };
 		skills?: { enabled?: boolean };
 		tool_filter?: { overrides?: Record<string, string[]> };
 	};
@@ -595,6 +598,15 @@ function resolveAgentCapabilityTools(
 				...(TURBO_AGENT_TOOL_MAP[
 					roleName as keyof typeof TURBO_AGENT_TOOL_MAP
 				] ?? []),
+			]),
+		);
+	}
+	if (isEpicModeConfigEnabled(pluginConfig)) {
+		tools = Array.from(
+			new Set([
+				...tools,
+				...(EPIC_AGENT_TOOL_MAP[roleName as keyof typeof EPIC_AGENT_TOOL_MAP] ??
+					[]),
 			]),
 		);
 	}

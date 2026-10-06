@@ -3,6 +3,7 @@ import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { KnowledgeConfigSchema } from '../../config/schema';
+import { finalizeOpenEpicOnSwarmClose } from '../../epic/close.js';
 import { isFullAutoRunActive } from '../../full-auto/state.js';
 import { validateSwarmPath } from '../../hooks/utils';
 import { tryAcquireLock } from '../../parallel/file-locks.js';
@@ -449,6 +450,15 @@ export async function handleCloseCommand(
 			memoryConfig: loadedConfig.memory,
 		});
 
+		// Epic v2 (MINOR 1): an open epic is closed as abandoned-by-swarm-close
+		// BEFORE the archive stage, so its report is archived with .swarm/epic/
+		// and kept in .swarm/epic-prior/. Epic config off ⇒ no I/O and no
+		// output change.
+		const epicFinalization = await finalizeOpenEpicOnSwarmClose(
+			directory,
+			loadedConfig,
+		);
+		if (epicFinalization !== null) ctx.warnings.push(epicFinalization);
 		await runArchiveStage(ctx);
 		// #2483: one bounded retention sweep between the archive and clean
 		// stages prunes the residual keyspace families close does not own.

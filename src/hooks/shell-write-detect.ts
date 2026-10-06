@@ -140,6 +140,39 @@ const BUILTIN_WRITE_COMMANDS = new Set([
 /** Builtins with in-place editing semantics (modify file argument in place). */
 const INPLACE_EDIT_COMMANDS = new Set(['sed', 'perl', 'awk']);
 
+/**
+ * GNU sed 4.9 long options that take no argument, spelled in full. An
+ * abbreviation (`--quie`, `--expr=`) is not listed on purpose: the in-place
+ * picker reports any option word it does not recognise (detectInplaceEdit).
+ */
+const SED_LONG_SWITCHES = new Set([
+	'--quiet',
+	'--silent',
+	'--debug',
+	'--follow-symlinks',
+	'--binary',
+	'--posix',
+	'--regexp-extended',
+	'--separate',
+	'--sandbox',
+	'--unbuffered',
+	'--null-data',
+	'--zero-terminated',
+	'--help',
+	'--version',
+]);
+
+/** gawk long options that take no argument, spelled in full (see above). */
+const AWK_LONG_SWITCHES = new Set([
+	'--posix',
+	'--traditional',
+	'--lint',
+	'--re-interval',
+	'--sandbox',
+	'--version',
+	'--help',
+]);
+
 /** Interpreters that accept inline code via -c / -e / -p / -r flags (NOT -m, which runs an installed module — see detectInterpreterEval). */
 const INTERPRETER_EVAL_COMMANDS = new Set([
 	'python',
@@ -282,6 +315,192 @@ function isBashWord(node: unknown): node is BashWord {
 }
 
 /**
+ * The source text of each Word node, quotes and backslashes included, keyed
+ * by node. bash-parser strips quotes from a word without an expansion
+ * (`'*'`, `"*"`, `a\*` and `*` all read `*`), so only the source slice can
+ * tell a quoted glob character from one the shell expands. Filled by
+ * annotateRawWordText from the parser's insertLOC offsets.
+ */
+const RAW_WORD_TEXT = new WeakMap<object, string>();
+
+function annotateRawWordText(node: unknown, source: string): void {
+	// bash-parser's loc offsets count code points, not UTF-16 units, so a
+	// character outside the BMP (an emoji) shifts every later JS index by one.
+	// Map code-point offsets to string indices before slicing.
+	let unitIndex: number[] | null = null;
+	if (/[\uD800-\uDFFF]/.test(source)) {
+		unitIndex = [];
+		let u = 0;
+		for (const cp of source) {
+			unitIndex.push(u);
+			u += cp.length;
+		}
+		unitIndex.push(u);
+	}
+	const toUnit = (cp: number): number | undefined =>
+		unitIndex === null ? cp : unitIndex[cp];
+	const stack: unknown[] = [node];
+	const seen = new Set<object>();
+	while (stack.length > 0) {
+		const n = stack.pop();
+		if (!n || typeof n !== 'object' || seen.has(n)) continue;
+		seen.add(n);
+		if (isBashWord(n)) {
+			const loc = (
+				n as { loc?: { start?: { char?: unknown }; end?: { char?: unknown } } }
+			).loc;
+			const start = loc?.start?.char;
+			const end = loc?.end?.char;
+			if (
+				typeof start === 'number' &&
+				typeof end === 'number' &&
+				end >= start
+			) {
+				const from = toUnit(start);
+				const to = toUnit(end + 1);
+				if (from !== undefined && to !== undefined) {
+					RAW_WORD_TEXT.set(n, source.slice(from, to));
+				}
+			}
+		}
+		for (const value of Object.values(n)) {
+			if (value && typeof value === 'object') stack.push(value);
+		}
+	}
+}
+
+/**
+ * Whether the word's source holds a glob character (`*`, `?`, `[`) outside
+ * single quotes, double quotes and backslash escapes, which the shell
+ * expands into several words when it matches. Without source text the word
+ * counts as holding one (fail-safe).
+ */
+function hasUnquotedGlob(word: unknown): boolean {
+	const projection = unquotedProjection(word);
+	return projection === null || /[*?[]/.test(projection);
+}
+
+/**
+ * Whether the word holds a brace expansion (`{a,b}`, `{1..3}`) that the
+ * shell expands, i.e. one written outside quotes and backslash escapes
+ * (`'{print $1,$2}'` is one word). Without trusted source text the parsed
+ * text decides (fail-safe: the parser drops quotes).
+ */
+function hasUnquotedBraceExpansion(word: unknown, text: string): boolean {
+	const projection = unquotedProjection(word);
+	return BRACE_EXPANSION.test(projection === null ? text : projection);
+}
+
+const BRACE_EXPANSION = /\{[^{}]*(?:,|\.\.)[^{}]*\}/;
+
+/**
+ * The word's source text with every quoted or backslash-escaped character
+ * replaced by NUL and the quote characters removed, so a test on it sees
+ * only what the shell reads unquoted. Null when the source text is missing
+ * or does not read back as the parsed word (not trusted).
+ */
+function unquotedProjection(word: unknown): string | null {
+	if (!word || typeof word !== 'object') return null;
+	const raw = RAW_WORD_TEXT.get(word);
+	if (raw === undefined) return null;
+	const { projection, dequoted } = scanQuoting(raw);
+	// A slice that does not read back as the parsed word (an offset the
+	// parser did not anchor to this source) is not trusted. bash-parser
+	// decodes C escapes inside quotes (`'s/\t/ /'` parses to a real TAB), so
+	// the slice also reads back when decoding those escapes explains the
+	// difference.
+	const hasExpansion =
+		Array.isArray((word as { expansion?: unknown }).expansion) &&
+		((word as { expansion: unknown[] }).expansion.length ?? 0) > 0;
+	const text = (word as { text?: unknown }).text;
+	if (
+		!hasExpansion &&
+		dequoted !== text &&
+		decodeParserEscapes(dequoted) !== text
+	) {
+		return null;
+	}
+	return projection;
+}
+
+/**
+ * What bash's quote removal makes of a word's source text (`dequoted`, no
+ * C-escape decoding: `'\x41'` stays the four characters `\x41`), and the
+ * same text with every quoted or escaped character replaced by NUL
+ * (`projection`).
+ */
+function scanQuoting(raw: string): { projection: string; dequoted: string } {
+	let state: 'none' | 'single' | 'double' = 'none';
+	let projection = '';
+	let dequoted = '';
+	for (let c = 0; c < raw.length; c++) {
+		const ch = raw[c];
+		if (state === 'single') {
+			if (ch === "'") state = 'none';
+			else {
+				dequoted += ch;
+				projection += '\0';
+			}
+		} else if (ch === '\\') {
+			const next = raw[c + 1] ?? '';
+			// Inside double quotes a backslash escapes only $ ` " \ newline;
+			// before any other character it is kept and that character is read
+			// normally (`"\[ab]"` is the four characters \[ab]).
+			if (state === 'double' && !/[$`"\\\n]/.test(next)) {
+				dequoted += ch;
+				projection += '\0';
+				continue;
+			}
+			if (next !== '\n') {
+				dequoted += next;
+				projection += '\0';
+			}
+			c++;
+		} else if (ch === '"') {
+			state = state === 'double' ? 'none' : 'double';
+		} else if (state === 'none' && ch === "'") {
+			state = 'single';
+		} else {
+			dequoted += ch;
+			projection += state === 'none' ? ch : '\0';
+		}
+	}
+	return { projection, dequoted };
+}
+
+const PARSER_CHAR_ESCAPES: Record<string, string> = {
+	t: '\t',
+	n: '\n',
+	r: '\r',
+	b: '\b',
+	f: '\f',
+	v: '\v',
+};
+
+/**
+ * The C escapes bash-parser 0.5.0 decodes inside a quoted word, as measured
+ * against the parser: `\xHH`, `\uHHHH`, `\UHHHHHHHH`, octal `\N` to `\NNN`,
+ * and `\\`, `\t`, `\n`, `\r`, `\b`, `\f`, `\v`, `\"`, `\'`. Other sequences
+ * (`\e`, `\a`, `\cX`, a one-digit `\x4`) are kept as written.
+ */
+function decodeParserEscapes(s: string): string {
+	return s.replace(
+		/\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|([0-7]{1,3})|([\\tnrbfv"']))/g,
+		(m, x, u, big, octal, c) => {
+			const hex = x ?? u ?? big;
+			if (hex !== undefined) {
+				const cp = Number.parseInt(hex, 16);
+				return cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+			}
+			if (octal !== undefined) {
+				return String.fromCodePoint(Number.parseInt(octal, 8));
+			}
+			return PARSER_CHAR_ESCAPES[c] ?? c;
+		},
+	);
+}
+
+/**
  * Recursively walk an AST node and collect all commands at the leaf level.
  * Handles: Script, Pipeline, CompoundList, LogicalExpression, Subshell, and Command nodes.
  *
@@ -372,13 +591,116 @@ function getCommandName(cmd: unknown): string | null {
 	return wordText(c.name);
 }
 
-/** Get the suffix (arguments after command name) from a command node. Returns array of word texts. */
+/**
+ * Get the suffix (arguments after command name) from a command node. Returns
+ * array of word texts.
+ *
+ * Only Word nodes are arguments. A Redirect node in the suffix (`cp a b
+ * 2>/dev/null`) is not an argument and is skipped; it used to be mapped to
+ * an empty string, which made every "last argument is the destination"
+ * picker (cp, mv, install, ln) report an empty path that resolved to the
+ * workspace root instead of the real destination.
+ */
 function getSuffixWords(cmd: unknown): string[] {
 	if (!cmd || typeof cmd !== 'object') return [];
 	const c = cmd as BashCommand;
 	const suffix = c.suffix;
 	if (!Array.isArray(suffix)) return [];
-	return suffix.map((s) => wordText(s) ?? '');
+	const words: string[] = [];
+	for (const s of suffix) {
+		const text = wordText(s);
+		if (text !== null) words.push(text);
+	}
+	return words;
+}
+
+/**
+ * For each word getSuffixWords returns (same order and filter), whether the
+ * parser attached an expansion to it: a parameter (`$D`, `${D}`), command
+ * (`$(...)`, backticks) or arithmetic expansion. Such a word's text is not
+ * the word the command receives. A single-quoted word carries none.
+ */
+function getSuffixWordExpansionFlags(cmd: unknown): boolean[] {
+	if (!cmd || typeof cmd !== 'object') return [];
+	const suffix = (cmd as BashCommand).suffix;
+	if (!Array.isArray(suffix)) return [];
+	const flags: boolean[] = [];
+	for (const s of suffix) {
+		if (!isBashWord(s)) continue;
+		const expansion = (s as { expansion?: unknown }).expansion;
+		flags.push(Array.isArray(expansion) && expansion.length > 0);
+	}
+	return flags;
+}
+
+/**
+ * For each word getSuffixWords returns, whether its expansions may split it
+ * into several words (fail-safe: when in doubt, it may). Only a plain
+ * double-quoted parameter expansion (`"$X"`, `"${X}"`, `"${X:-a b}"`,
+ * `"s/$a/$b/"`) is treated as staying one word. A word that has an
+ * expansion is treated as splitting when ANY of these holds:
+ * - its raw text contains a command or arithmetic substitution (`$(`,
+ *   `$((`, a backtick) anywhere: quote characters inside a substitution
+ *   (`"$(: "'")"$X`) would mislead a flat quote scan, so such a word is
+ *   never trusted to stay one word, even when the substitution is quoted;
+ * - its raw text contains a positional or array expansion that splits even
+ *   inside double quotes (`$@`, `$*`, `${@...}`, `${A[@]}`, `${A[*]}`);
+ * - an expansion starts outside double quotes, by a flat quote scan of the
+ *   raw text (the parser keeps the raw text of a word with an expansion and
+ *   gives each expansion's start offset). An unknown offset counts as
+ *   splitting.
+ * Single-quoted words carry no expansion and never split.
+ */
+function getSuffixWordUnquotedExpansionFlags(cmd: unknown): boolean[] {
+	if (!cmd || typeof cmd !== 'object') return [];
+	const suffix = (cmd as BashCommand).suffix;
+	if (!Array.isArray(suffix)) return [];
+	const flags: boolean[] = [];
+	for (const s of suffix) {
+		if (!isBashWord(s)) continue;
+		const expansion = (s as { expansion?: unknown }).expansion;
+		if (!Array.isArray(expansion) || expansion.length === 0) {
+			flags.push(false);
+			continue;
+		}
+		// isBashWord guarantees a string text.
+		const text = s.text;
+		// A command or arithmetic substitution anywhere in the word.
+		const hasSubstitution = /\$\(|`/.test(text);
+		// `$@`, `$*`, `${@...}`, `${*...}`, `${A[@]}`, `${A[*]}`, `${!P@}`,
+		// `${!A[@]}`, `${#A[@]}`, or any `[@]`/`[*]` (over-matching is safe).
+		const hasListExpansion =
+			/\$\{?[!#]?[A-Za-z0-9_]*(?:\[[@*]\]|@|\*)/.test(text) ||
+			/\$\{?[!#]?[@*]|\[[@*]\]/.test(text);
+		if (hasSubstitution || hasListExpansion) {
+			flags.push(true);
+			continue;
+		}
+		// Quoting state before each character of the raw word text.
+		const quotedAt: boolean[] = [];
+		let state: 'none' | 'single' | 'double' = 'none';
+		for (let c = 0; c < text.length; c++) {
+			const ch = text[c];
+			quotedAt[c] = state !== 'none';
+			if (state === 'single') {
+				if (ch === "'") state = 'none';
+			} else if (ch === '\\') {
+				quotedAt[c + 1] = true;
+				c++;
+			} else if (ch === '"') {
+				state = state === 'double' ? 'none' : 'double';
+			} else if (ch === "'" && state === 'none') {
+				state = 'single';
+			}
+		}
+		flags.push(
+			expansion.some((e) => {
+				const start = (e as { loc?: { start?: unknown } }).loc?.start;
+				return typeof start !== 'number' || quotedAt[start] !== true;
+			}),
+		);
+	}
+	return flags;
 }
 
 /** Get the prefix from a command node. */
@@ -473,11 +795,39 @@ function extractRedirectPath(fileNode: unknown): string | null {
 	return text;
 }
 
-/** Check if a path is a null/sink device (not a real write target). */
+/**
+ * Check if a path is a null/sink device (not a real write target).
+ *
+ * Matched on the literal word before any resolution, so only the exact
+ * absolute device path is exempt: a relative `dev/null`, a `$VAR/dev/null`,
+ * or a traversal through it (`/dev/null/../x`) is still a write target. The
+ * same helper covers `tee`, `dd of=`, and every redirect site below, so a
+ * `2>/dev/null` is treated exactly like `tee /dev/null`.
+ */
 function isNullDevice(path: string): boolean {
 	return (
 		path === '/dev/null' || path === '/dev/zero' || path === '/dev/urandom'
 	);
+}
+
+/**
+ * Whether a redirect target word is a sink device as bash reads it. The
+ * parser decodes C escapes inside quotes, so `>'/dev/nul\154'` parses to
+ * `/dev/null` while bash writes the literal file `/dev/nul\154`. The word is
+ * exempt only when its source text, after bash quote removal and WITHOUT
+ * escape decoding, is the device path (`"/dev/null"`, `'/dev/null'` and
+ * `/dev/nul''l` are). Without source text the word is not exempt (fail-safe).
+ */
+function isNullDeviceWord(word: unknown, path: string): boolean {
+	if (!isNullDevice(path) || !word || typeof word !== 'object') return false;
+	const raw = RAW_WORD_TEXT.get(word);
+	// Defensive guard: through the public API every redirect word gets a
+	// source slice (annotateRawWordText runs on the whole AST before any
+	// detector, and bash-parser gives every Word an insertLOC range), so
+	// `raw === undefined` is not reachable today. It must stay fail-safe (not
+	// exempt): a parser change that drops or mis-anchors loc data would
+	// otherwise let the decoded text alone exempt `>'/dev/nul\154'`.
+	return raw !== undefined && isNullDevice(scanQuoting(raw).dequoted);
 }
 
 /** Check if a string is purely numeric (used to filter truncate size args). */
@@ -528,6 +878,11 @@ function detectRedirects(cmd: unknown): WriteTarget[] {
 			REDIRECT_WRITE_TOKENS.has(opType) ||
 			(REDIRECT_GREATAND_TOKENS.has(opType) && !isNonFileGreatAndTarget(path))
 		) {
+			// A redirect into a sink device discards its data; it is not a write
+			// target, exactly as `tee /dev/null` is not. Without this, `2>/dev/null`
+			// reached the authority layer as a write to /dev/null and was rejected
+			// as a workspace root escape.
+			if (path !== null && isNullDeviceWord(fileNode, path)) continue;
 			results.push({ category: 'redirect', operator: opLabel, path });
 		} else if (REDIRECT_HERE_TOKENS.has(opType)) {
 			results.push({ category: 'here_doc', operator: opLabel, path });
@@ -657,6 +1012,68 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	return results;
 }
 
+/**
+ * Whether a word is shaped like a sed script rather than a path: a single
+ * command with an address or a negation (`1d`, `$d`, `1,3p`, `$!d`, `!d`,
+ * `3q`), a word with no `/`, `\` or `:`, not starting with `.`, that holds
+ * a command separator or block (`N;P;D`, `1d;$d`), or an `s` / `y` command with any
+ * delimiter (`s/a/b/g`, `s|a|b|`, `y/ab/xy/`). A bare letter (`p`, `d`,
+ * `P`, `f`) is ambiguous with a file name and counts as a path, the
+ * fail-safe direction. A word with `;`, `{` or `}` that also has a `/` or a
+ * leading `.` (`/opt/a;b`, `../{a}`, `.env;x`) is a path, and so is one
+ * that has a `\` or a `:` (win32 separators and drive prefixes). A word
+ * with a `..` path component (components split on `/` and on `\`, which is
+ * a separator on win32) or a drive-absolute prefix (`C:\`, `C:/`) is
+ * always a path, whatever its shape: GNU sed reads `s-x-/../../victim` or
+ * `s-x-\..\..\victim` after `-i ''` as a file, and it can name a file
+ * outside the root, so `sed -i '' 's-x-/../../victim' f` reports both
+ * words (the fail-safe direction). A backslash that is not next to a `..`
+ * component (`s/\t/ /`, `s/a\/b/c/`, `s/\(a\)/\1/`) keeps an `s` / `y`
+ * word a script. The only use is choosing the BSD
+ * reading of a detached `-i` suffix, and the caller applies it only to a
+ * pure literal word (no parameter, command or arithmetic expansion, no
+ * brace expansion, no glob character); any other word is always reported.
+ * The residual is a literal file named like a sed script with no `..`
+ * component: an addressed command (`1d`, `$d`, `3q`, `$!d`), a word with
+ * `;`, `{` or `}` and no `/`, `\` or `:`, or an `s` / `y` command (`s-a-b-g`,
+ * `y,ab,xy,`). It can be taken for that script; a literal relative name
+ * without a `..` component stays under the shell's current directory.
+ */
+function looksLikeSedScript(w: string): boolean {
+	// The drive-absolute test decides only `s` / `y` words (`s:/a:/b:`,
+	// `y:/:_:` name drive S: or Y: on win32); a `;`/`{`/`}` word with a drive
+	// prefix (`C:\Temp\x;y`) is already refused by the `\`/`:` test below.
+	// A `:`-delimited script whose pattern starts with `/`
+	// (`s:/usr/local:/opt:g`) is therefore reported: a fail-safe over-report.
+	if (hasParentComponent(w) || /^[A-Za-z]:[\\/]/.test(w)) return false;
+	return (
+		/^(?:(?:[0-9]+|\$)(?:,(?:[0-9]+|\$))?!?|!)[a-zA-Z=]$/.test(w) ||
+		// On win32 `\` is a path separator and `C:` a drive prefix, so a word
+		// with `;`, `{` or `}` that holds a `\` or a `:` (`x;\a\b`,
+		// `\\srv\share\x;y`, `C:\Temp\x;y`, `D:x;y`) is a path, like one that
+		// holds a `/`. A label script (`:a;N;ba`) in this slot is reported too.
+		(/[;{}]/.test(w) && !/[\\/:]/.test(w) && !w.startsWith('.')) ||
+		/^s([^A-Za-z0-9\s\\])(?:\\.|(?!\1)[^\\])*\1(?:\\.|(?!\1)[^\\])*\1[gpiImMe0-9]*$/.test(
+			w,
+		) ||
+		/^y([^A-Za-z0-9\s\\])(?:\\.|(?!\1)[^\\])*\1(?:\\.|(?!\1)[^\\])*\1$/.test(w)
+	);
+}
+
+/**
+ * Whether a word has a `..` path component. Components are split on `/`
+ * and on `\`: on win32 (Git Bash, MSYS) a backslash is a path separator, so
+ * `s-x-\..\..\v` names a file two levels up there. The `\` split applies on
+ * every platform (the detector does not know the host shell), so a BSD-slot
+ * script with unescaped dots before an escaped slash (`'s/..\/lib/x/'`,
+ * `'s/..\/..\/utils/@utils/g'`) is read as a path and reported: a
+ * fail-closed over-block (follow-up: make the backslash rule platform-aware).
+ * The GNU, `-e` and `.bak` slots are not affected.
+ */
+function hasParentComponent(w: string): boolean {
+	return w.split(/[\\/]/).includes('..');
+}
+
 /** Detect in-place editing: sed -i, perl -i, awk -i. */
 function detectInplaceEdit(cmd: unknown): WriteTarget[] {
 	const results: WriteTarget[] = [];
@@ -669,54 +1086,513 @@ function detectInplaceEdit(cmd: unknown): WriteTarget[] {
 	const suffixWords = getSuffixWords(cmd);
 
 	// Look for -i flag
+	// sed also takes the long form `--in-place[=SUFFIX]` and any unambiguous
+	// abbreviation of it (`--in`, `--in-pl=.bak`); an abbreviation is not a
+	// modelled option, so it is reported and every positional with it.
 	const hasInplaceFlag = suffixWords.some((word) => {
-		if (lowerName === 'sed') return word.startsWith('-i') && word.length > 1;
+		if (lowerName === 'sed') {
+			return (
+				(word.startsWith('-i') && word.length > 1) ||
+				/^--i(?:n(?:-(?:p(?:l(?:a(?:c(?:e)?)?)?)?)?)?)?(?:=|$)/.test(word)
+			);
+		}
 		return word === '-i' || word.startsWith('-i');
 	});
 
 	if (!hasInplaceFlag) return [];
 
-	// Find the file argument — take the LAST non-flag, non-script word
-	// This handles: cmd -i file.txt (file is last)
-	// And: cmd -i -pe "script" file.txt (file is last after skipping flags and script)
+	// Find the file argument: the first word that is neither a flag, a flag's
+	// argument, nor the script.
 	const scriptPattern = /^[ssy]\/.*\/[gim]*$/;
-	const quotedScriptPattern = /^["'].*["']$/; // strings like "s/foo/bar/" or 'foo'
-	// Flags that consume the next word as an argument
-	const flagArgs = new Set(['-e', '-E', '-f', '-i']);
-	const combinedFlagArgs = /^-[paaneA]+[eEf]/; // e.g., -pe, -ne, -ae, -aE, -if
-	// sed -i[suffix] where suffix is backup extension (e.g., -ibak) — also consumes next word
-	const sedInplaceSuffix = /^-i[a-z]+/i; // e.g., -ibak, -i.bak
-	const skipIndices = new Set<number>();
+	const quotedScriptPattern = /^["'].*["']$/; // a word that kept its quotes
+	// A word shaped like an `s///` or `y///` script with no `..` path
+	// component, split on `/` and `\` (a word with one, `s/../../etc/g` or
+	// `s/..\..\x/g`, is a path: D-001).
+	const isScriptShaped = (w: string): boolean =>
+		scriptPattern.test(w) && !hasParentComponent(w);
+	// Whether a positional word is dropped as a script rather than reported
+	// as a file. A word that kept its quotes has an expansion (the parser
+	// drops the quotes of a word without one); it is dropped only when the
+	// text inside the quotes is itself script-shaped and the word stays one
+	// word (`"s/$a/$b/"`). A quoted dynamic word that is not script-shaped
+	// (`"$FILE"`, `"${D}"`, `"$D/x"`) is a file and is reported, and so is
+	// one that can become several words (`"$@"`, `"$(cmd)"`).
+	const isScriptWord = (i: number): boolean => {
+		const w = suffixWords[i];
+		if (quotedScriptPattern.test(w)) {
+			return (
+				unquotedExpansionFlags[i] !== true && isScriptShaped(w.slice(1, -1))
+			);
+		}
+		return isScriptShaped(w);
+	};
+	// Flags that consume the next word as their argument, per command. sed's
+	// `-E` is a bare switch (extended regex); perl's `-E` is a script like `-e`.
+	const flagArgs =
+		lowerName === 'sed'
+			? new Set(['-e', '-f', '--expression', '--file'])
+			: lowerName === 'perl'
+				? new Set(['-e', '-E'])
+				: new Set(['-f', '-e', '-v', '-F']);
+	// perl bundles a run of argument-less switches before a script flag:
+	// `-pe`, `-lne`, `-wpe`, `-0777ne`. `i` is never part of the run, because
+	// it takes the rest of the word as a backup suffix (`-pie` is `-p -i`
+	// with suffix `e`). Both patterns share the same switch class.
+	const combinedFlagArgs = /^-[0-9AacSlnpstTuUwWX]+[eE]$/;
+	const perlAttachedScript = /^-[0-9AacSlnpstTuUwWX]*[eE]./;
+	// GNU sed lets bare switches bundle with `-e`/`-f`: `-ne`, `-Ee`, `-nf`,
+	// `-be`. Like perl, `i` stays out: GNU sed reads `-ie` as `-i` with
+	// suffix `e`. The switch class is sed's argument-less short options.
+	const sedScriptBundle = /^-[nrEszub]*[ef]$/;
+	const sedAttachedScript = /^-[nrEszub]*[ef]./;
+	const consumesNext = (w: string): boolean =>
+		flagArgs.has(w) ||
+		(lowerName === 'sed' && sedScriptBundle.test(w)) ||
+		(lowerName === 'perl' && combinedFlagArgs.test(w));
+	// Whether `w` supplies the script, detached (`-e X`) or attached
+	// (`-e1d`, `-e's/a/b/'`, `-fs.sed`, `--file=p.awk`, `-pe1`). gawk takes
+	// program files with `-f` and program text with `-e`/`--source`.
+	const suppliesScript = (w: string): boolean => {
+		if (lowerName === 'awk') {
+			return (
+				w === '-f' ||
+				w === '-e' ||
+				/^-[fe]./.test(w) ||
+				w.startsWith('--file=') ||
+				w.startsWith('--source=')
+			);
+		}
+		if (lowerName === 'sed') {
+			return (
+				consumesNext(w) ||
+				sedAttachedScript.test(w) ||
+				/^--(?:expression|file)=/.test(w)
+			);
+		}
+		return consumesNext(w) || perlAttachedScript.test(w);
+	};
+	// Whether the script is supplied by a flag. If so, the word after a bare
+	// `-i` is never the script; if not, it is (GNU sed, perl) or it is a BSD
+	// detached backup suffix with the script right after it. Only options
+	// count: after `--` a word like `-e/../x` is an operand, and a word an
+	// option consumes (`awk -v`, `-F`, `-i`) is that option's argument.
+	const expansionFlags = getSuffixWordExpansionFlags(cmd);
+	const unquotedExpansionFlags = getSuffixWordUnquotedExpansionFlags(cmd);
+	// The GNU script slot (the first positional with no script flag) holds
+	// one script only if the word stays one word. A parameter, command or
+	// arithmetic expansion can field-split (`S='1d ../../x'; sed -i $S f`)
+	// and a brace expansion multiplies (`sed -i {1d,../../v} f`): the first
+	// resulting word is the script and the rest are files. Such a word is
+	// never consumed as the script; it is reported (blocked as a dynamic
+	// target or resolved as a path). Glob characters are left out on purpose:
+	// regex scripts (`'/^\s*$/d'`) carry them and the parser drops quotes.
+	// Only a plain double-quoted parameter expansion (`"$S"`, `"${S}"`,
+	// `"${S:-a b}"`, `"s/$a/$b/"`) is taken to stay one word. Any word with an
+	// unquoted expansion, a command or arithmetic substitution (`$(`, `$((`,
+	// a backtick, quoted or not) or a list expansion (`$@`, `$*`, `${A[@]}`,
+	// `${A[*]}`, quoted or not) is treated as splitting
+	// (getSuffixWordUnquotedExpansionFlags). A brace expansion counts only
+	// when its braces and separator are outside quotes and backslash escapes
+	// (`'{gsub(/\t/," ")}1'` and `'{print $1,$2}'` are one word each); a word
+	// whose source text is not trusted is judged on its parsed text.
+	const suffixNodes = (
+		Array.isArray((cmd as BashCommand).suffix)
+			? ((cmd as BashCommand).suffix as unknown[])
+			: []
+	).filter((s) => wordText(s) !== null);
+	const mayExpandToSeveralWords = (i: number): boolean =>
+		unquotedExpansionFlags[i] === true ||
+		hasUnquotedBraceExpansion(suffixNodes[i], suffixWords[i]);
+	// The same holds for an option word: `-e$X`, `-n$X`, `-i$X`, `-f$X`,
+	// `--expression=$X` or `-e{1d,x}` can split into several options,
+	// scripts and files at run time. Such a flag word never supplies or
+	// consumes a script, never consumes an option argument, and is reported
+	// as a (dynamic) candidate; with one present, no word at all is taken
+	// for the implicit script, so every positional is reported (isOpaqueFlag).
+	// Option words the picker models, per command. Every other option word
+	// (a GNU long-option abbreviation such as `--expr=`, `--e=`, `--sourc=`; a
+	// bundle with a letter not listed here such as perl `-fpe...`, `-pde...`
+	// or awk `-be...`; an option such as awk `-W`, `-E`, `-b`, `-M`) may take
+	// an argument, supply the script, or both. Treating it as an
+	// argument-less switch would let the picker take the real file for the
+	// implicit script and report nothing. It is handled like an expanding
+	// flag word instead: reported as a candidate, never supplying or
+	// consuming a script, and no later word is taken for the implicit script
+	// or the awk program (see isOpaqueFlag).
+	const isKnownOption = (w: string): boolean => {
+		if (w === '-' || w === '--') return true;
+		if (lowerName === 'sed') {
+			return (
+				// argument-less switches, alone or bundled: -n -r -E -s -z -u -b
+				/^-[nrEszub]+$/.test(w) ||
+				// -e/-f with the script detached or attached, after switches
+				/^-[nrEszub]*[ef]/.test(w) ||
+				// -l N or -lN, after switches
+				/^-[nrEszub]*l/.test(w) ||
+				// -i and -i<suffix>
+				/^-i/.test(w) ||
+				SED_LONG_SWITCHES.has(w) ||
+				/^--(?:expression|file|line-length|in-place)(?:=|$)/.test(w)
+			);
+		}
+		if (lowerName === 'perl') {
+			return (
+				// argument-less switches, optionally ending in -e/-E and its script
+				/^-[0-9AacSlnpstTuUwWX]*(?:[eE].*)?$/.test(w) ||
+				/^-i/.test(w) ||
+				/^-I./.test(w)
+			);
+		}
+		return (
+			// -f -e -v -F -i -l, argument detached or attached
+			/^-[fevFil]/.test(w) ||
+			/^-[PcrSVh]$/.test(w) ||
+			AWK_LONG_SWITCHES.has(w) ||
+			/^--(?:file|source|lint)=/.test(w)
+		);
+	};
+	// A flag word whose meaning the picker cannot pin down: one that may
+	// expand to several words, or an option it does not model. Only options
+	// count, so only words before `--` are checked by the callers.
+	const isOpaqueFlag = (i: number): boolean =>
+		suffixWords[i].startsWith('-') &&
+		(mayExpandToSeveralWords(i) || !isKnownOption(suffixWords[i]));
+	// GNU sed options that take a detached argument but never the script:
+	// `-l N` (also bundled, `-nl N`) and `--line-length N`. The argument is
+	// neither the script nor a file.
+	const sedOptionArg = (w: string): boolean =>
+		lowerName === 'sed' && (/^-[nrEszub]*l$/.test(w) || w === '--line-length');
+	// The detached argument of an option (`-e X`, `-f X`, `-l N`,
+	// `--expression X`, awk `-v`/`-F`/`-i X`, perl `-e X`) is normally
+	// skipped as that option's argument. If it may expand to several words
+	// (`X='1d ../../v'; sed -e $X -i f` runs `sed -e 1d ../../v -i f`), the
+	// extra words are files: such an argument is reported as a (dynamic)
+	// candidate, the option does not count as supplying the script, and no
+	// word is taken for the implicit script.
+	const takesDetachedArg = (w: string): boolean =>
+		consumesNext(w) || sedOptionArg(w) || (lowerName === 'awk' && w === '-i');
+	// Every detached option argument, found in one left-to-right scan the way
+	// getopt reads the words: an option that takes an argument consumes the
+	// next word whatever it looks like (`awk -F -f '{...}' f` sets FS to
+	// `-f`; the program is `{...}`). A consumed argument is never parsed again
+	// as an option, a flag, the script or the awk program, in any scan below.
+	//
+	// A detached argument also splits when it holds a glob that the shell
+	// expands (`sed -i --file ../[ab].sed src/a.ts` runs sed with the script
+	// file ../a.sed and the files ../b.sed and src/a.ts). The argument of a
+	// file-taking option (sed `-f`/`--file`, awk `-f`/`-i`) splits on any `*`,
+	// `?` or `[`; any other argument (a script, `-l N`, awk `-v`/`-F`) only on
+	// one outside quotes and backslash escapes, so `sed -i -e 's/a*/b/' f` is
+	// unaffected. The GNU and BSD script slots keep their own rule (a glob
+	// there is not treated as splitting).
+	//
+	// GNU sed permutes its arguments, so options are read across the whole
+	// command until `--`. perl and gawk stop reading options at the first
+	// operand (the script or program, or the first file once `-e`/`-f`
+	// supplied it): every later word, including one that starts with `-`,
+	// is an operand and is reported as a file (`awk -i inplace '{print}' f
+	// -v ../v` edits f, a file named -v and ../v).
+	const fileArgOption = (w: string): boolean =>
+		(lowerName === 'sed' && (/^-[nrEszub]*f$/.test(w) || w === '--file')) ||
+		(lowerName === 'awk' && (w === '-f' || w === '-i'));
+	const detachedArgMaySplit = (option: string, i: number): boolean =>
+		mayExpandToSeveralWords(i) ||
+		(fileArgOption(option)
+			? /[*?[]/.test(suffixWords[i])
+			: hasUnquotedGlob(suffixNodes[i]));
+	const permutes = lowerName === 'sed';
+	let operandsFrom = suffixWords.length;
+	const optionArgs = new Set<number>();
+	const expandingOptionArgs = new Set<number>();
 	for (let i = 0; i < suffixWords.length; i++) {
-		const word = suffixWords[i];
-		if (word.startsWith('-')) {
-			// Check if this flag consumes the next word as argument
-			if (
-				flagArgs.has(word) ||
-				combinedFlagArgs.test(word) ||
-				sedInplaceSuffix.test(word)
-			) {
-				skipIndices.add(i);
-				if (i + 1 < suffixWords.length) skipIndices.add(i + 1);
+		const w = suffixWords[i];
+		if (w === '--') {
+			if (!permutes) operandsFrom = i + 1;
+			break;
+		}
+		if (!w.startsWith('-')) {
+			if (!permutes) {
+				operandsFrom = i;
+				break;
 			}
-		} else if (scriptPattern.test(word) || quotedScriptPattern.test(word)) {
-			// This looks like a script, skip it
-			skipIndices.add(i);
+			continue;
+		}
+		// perl and awk: an opaque flag word (an option the picker does not
+		// model, or one that may expand) may take the next words or end the
+		// options (gawk `-E file`), so option parsing stops after it and every
+		// later word is reported as an operand.
+		if (isOpaqueFlag(i)) {
+			if (!permutes) {
+				operandsFrom = i + 1;
+				break;
+			}
+			continue;
+		}
+		if (!takesDetachedArg(w)) continue;
+		if (i + 1 < suffixWords.length) {
+			optionArgs.add(i + 1);
+			if (detachedArgMaySplit(w, i + 1)) {
+				expandingOptionArgs.add(i + 1);
+				// perl and awk: the extra words of a split argument are operands,
+				// so every later word is one too (`awk -f ../[ab].awk -v f`).
+				if (!permutes) {
+					operandsFrom = i + 2;
+					break;
+				}
+			}
+		}
+		i++;
+	}
+	// Whether word i sits where an option can (perl and awk: before the
+	// first operand; sed: anywhere before `--`, checked by the callers).
+	const inOptionArea = (i: number): boolean => i < operandsFrom;
+	let hasExplicitScript = false;
+	for (let i = 0; i < suffixWords.length && inOptionArea(i); i++) {
+		if (optionArgs.has(i)) continue;
+		const w = suffixWords[i];
+		if (w === '--') break;
+		if (!w.startsWith('-') || isOpaqueFlag(i)) continue;
+		if (expandingOptionArgs.has(i + 1)) {
+			i++;
+			continue;
+		}
+		if (suppliesScript(w)) {
+			hasExplicitScript = true;
+			break;
+		}
+		if (consumesNext(w) || (lowerName === 'awk' && w === '-i')) i++;
+	}
+	const skipIndices = new Set<number>();
+	// Only BSD sed takes a detached backup suffix (`sed -i '' X f`,
+	// `sed -i .bak X f`). perl never does: `perl -i ./s.pl f` runs ./s.pl on f.
+	const isDetachedSuffix = (w: string | undefined): w is string =>
+		lowerName === 'sed' && w !== undefined && (w === '' || w.startsWith('.'));
+	// Index of the first word at or after `from` that is not a switch and not
+	// `--`; that word is where an implicit script (or a BSD suffix) sits.
+	// `sed -i -n 1d f`, `sed -i -- 1d f`: the switches between are skipped
+	// as flags by the main loop; none of them consumes a word, or
+	// hasExplicitScript would be true.
+	// A word after the BSD script slot that is a plausible file: not empty,
+	// not filtered as a script below, and not shaped like a sed script.
+	// The BSD reading applies only to a pure literal script word. A word with
+	// a parameter, command or arithmetic expansion (`$D`, `${D}`, `$(pwd)`),
+	// a brace expansion (`{..,a}`, `{1..3}`) or a glob character (`*`, `?`,
+	// `[`) becomes something else before sed sees it, possibly an absolute
+	// path or a path with `..`, so it is never taken for the script. The
+	// parser drops quotes, so brace and glob characters count even when they
+	// were quoted (the fail-safe direction).
+	const isLiteralWord = (i: number): boolean =>
+		expansionFlags[i] !== true &&
+		!/[*?[]/.test(suffixWords[i]) &&
+		!/\{[^{}]*(?:,|\.\.)[^{}]*\}/.test(suffixWords[i]);
+	const isLiteralSedScript = (i: number): boolean =>
+		isLiteralWord(i) && looksLikeSedScript(suffixWords[i]);
+	const isReportableWord = (i: number): boolean =>
+		suffixWords[i] !== '' && !isScriptWord(i) && !isLiteralSedScript(i);
+	const firstPositionalFrom = (from: number): number => {
+		let j = from;
+		while (
+			j < suffixWords.length &&
+			((inOptionArea(j) && suffixWords[j].startsWith('-')) || optionArgs.has(j))
+		)
+			j++;
+		return j;
+	};
+	// Consume the implicit script starting at `from`. Only the first in-place
+	// flag places the script; a repeated `-i` (`sed -i 1d -i f`) neither moves
+	// it nor rescans the switch run, which made a long run of `-i` flags
+	// quadratic.
+	//
+	// After a bare `-i`, BSD sed reads `'' SCRIPT FILE` (`.bak SCRIPT FILE`)
+	// as suffix, script, file, while GNU sed reads the same words as script
+	// and files: `sed -n -i '' f` runs the empty script and truncates f, and
+	// `sed -i '' /etc/passwd x -n` edits /etc/passwd. The BSD reading (the
+	// word after the suffix is skipped as the script) is taken only when that
+	// word is shaped like a sed script and a reportable file still follows
+	// it; otherwise the suffix word is the GNU script and every later
+	// positional is reported as a file. A word with a `..` path component is
+	// never taken for the script, and neither is a word with an expansion, a
+	// brace expansion or a glob character (`$D`, `${D}`, `$(pwd)`, `{..,a}`,
+	// `.?`): the BSD reading applies only to pure literal words. The residual
+	// is a literal file named like a sed script with no `..` component (`1d`,
+	// `$d` single-quoted, `N;P;D`, `s-a-b-g`) in that one slot: it is taken
+	// for the BSD script and not reported. A bare-letter BSD script
+	// (`sed -i '' d f`) is over-reported (`d` and `f`). An attached suffix
+	// (`-i.bak`) leaves no room for a detached one.
+	// The end of the options: the first `--` that is not an option's argument.
+	const dashDash = suffixWords.findIndex(
+		(w, i) => w === '--' && !optionArgs.has(i) && inOptionArea(i),
+	);
+	// An opaque flag word (one that may expand, or an option the picker does
+	// not model) can supply the script itself, so with one present no word
+	// is taken for the implicit script (sed, perl) or the program (awk), so
+	// every positional is a reported candidate.
+	const hasOpaqueFlag = suffixWords.some(
+		(_w, i) =>
+			(dashDash < 0 || i < dashDash) &&
+			inOptionArea(i) &&
+			!optionArgs.has(i) &&
+			isOpaqueFlag(i),
+	);
+	let implicitScriptPlaced = hasOpaqueFlag || expandingOptionArgs.size > 0;
+	// GNU sed permutes its arguments, so with no script flag the script is
+	// the first positional word even when it comes before the in-place flag:
+	// `sed 1d -i f` and `sed s/a/b/ -i ../x` edit f and ../x. That word is
+	// the script, no later word is, and every other positional is a file.
+	// A word that can become several words (mayExpandToSeveralWords) is not
+	// consumed as the script in this slot either; it is reported. Scanning
+	// stops at the first in-place flag (whose own script slot is handled by
+	// consumeImplicitScript) or at `--`.
+	if (lowerName === 'sed' && !hasExplicitScript && !implicitScriptPlaced) {
+		for (let i = 0; i < suffixWords.length; i++) {
+			if (optionArgs.has(i)) continue;
+			const w = suffixWords[i];
+			if (w === '--' || w.startsWith('-i') || w.startsWith('--in-place')) break;
+			if (w.startsWith('-')) continue;
+			if (!mayExpandToSeveralWords(i)) skipIndices.add(i);
+			implicitScriptPlaced = true;
+			break;
 		}
 	}
+	const consumeImplicitScript = (from: number, bareInplace: boolean): void => {
+		if (implicitScriptPlaced) return;
+		implicitScriptPlaced = true;
+		const j = firstPositionalFrom(from);
+		if (j >= suffixWords.length || mayExpandToSeveralWords(j)) return;
+		skipIndices.add(j);
+		if (!bareInplace || !isDetachedSuffix(suffixWords[j])) return;
+		const k = firstPositionalFrom(j + 1);
+		if (k >= suffixWords.length || !isLiteralSedScript(k)) {
+			return;
+		}
+		for (let m = firstPositionalFrom(k + 1); m < suffixWords.length; ) {
+			if (isReportableWord(m)) {
+				skipIndices.add(k);
+				return;
+			}
+			m = firstPositionalFrom(m + 1);
+		}
+	};
+	// With a script flag, GNU sed reads the word after a bare `-i` as a file
+	// (`sed -e X -i ../x f` edits ../x and f) while BSD sed reads it as a
+	// backup suffix (`sed -i .bak -e X f`). Only a conventional backup suffix
+	// (`.bak`, `.orig`, `.old`, `.save`, `.backup`, `.swp`, `.~`, or a temp-file
+	// suffix) is
+	// taken as the BSD suffix; it is reported as the file only when nothing
+	// else is left. Any other dot-word (`.env`, `./x`, `../x`, `.a/b`) is a
+	// file. Without a script flag a dot-word in that slot is GNU's script,
+	// which sed rejects (`.` is not a command), so nothing is written there.
+	const isConventionalBackupSuffix = (w: string | undefined): w is string =>
+		isDetachedSuffix(w) &&
+		!w.includes('/') &&
+		/^\.(?:bak|orig|old|save|backup|tmp|swp|~)$/i.test(w);
+	let dotWordAfterBareInplace: string | null = null;
+	let pastDoubleDash = false;
+	let awkProgramSeen = false;
+	for (let i = 0; i < suffixWords.length; i++) {
+		const word = suffixWords[i];
+		// A detached option argument is that option's argument and nothing
+		// else; one that may expand is reported (see expandingOptionArgs).
+		if (optionArgs.has(i)) {
+			if (!expandingOptionArgs.has(i)) skipIndices.add(i);
+			continue;
+		}
+		if (!pastDoubleDash && word === '--' && inOptionArea(i)) {
+			skipIndices.add(i);
+			pastDoubleDash = true;
+			continue;
+		}
+		if (!pastDoubleDash && inOptionArea(i) && word.startsWith('-')) {
+			// An opaque flag word is reported (see isOpaqueFlag).
+			if (isOpaqueFlag(i)) continue;
+			// A flag is never the file.
+			skipIndices.add(i);
+			const next = suffixWords[i + 1];
+			if (
+				lowerName === 'sed' &&
+				(word === '--in-place' || word.startsWith('--in-place='))
+			) {
+				// GNU sed's long in-place flag. It takes no detached suffix (BSD
+				// sed has no long form), so the next positional word is the script
+				// unless a script flag supplied it: `sed --in-place 1d f`.
+				if (!hasExplicitScript) consumeImplicitScript(i + 1, false);
+				continue;
+			}
+			if (word === '-i') {
+				if (next === undefined) continue;
+				if (lowerName === 'awk') {
+					// gawk `-i <library>`
+					if (!expandingOptionArgs.has(i + 1)) skipIndices.add(i + 1);
+				} else if (!hasExplicitScript) {
+					consumeImplicitScript(i + 1, true);
+				} else if (isConventionalBackupSuffix(next)) {
+					// An empty BSD suffix (`-i ''`) needs no handling here: the
+					// candidate filter below never reports an empty word.
+					skipIndices.add(i + 1);
+					dotWordAfterBareInplace = next;
+				}
+				continue;
+			}
+			if (/^-i.+/.test(word)) {
+				// Attached backup suffix (`-i.bak`, `-ibak`) or gawk `-iinplace`:
+				// the flag is complete. For sed/perl without a script flag the
+				// next positional word is the script; for awk the program is
+				// found by the positional rule below.
+				if (lowerName !== 'awk' && !hasExplicitScript) {
+					consumeImplicitScript(i + 1, false);
+				}
+				continue;
+			}
+			if (consumesNext(word) || sedOptionArg(word)) {
+				if (next !== undefined && !expandingOptionArgs.has(i + 1)) {
+					skipIndices.add(i + 1);
+				}
+			}
+			continue;
+		}
+		if (skipIndices.has(i)) continue;
+		// (An option argument never reaches this point: the optionArgs branch
+		// at the top of the loop skips or reports it.)
+		if (lowerName === 'awk') {
+			// The first positional word is the program unless `-f`/`-e`
+			// supplied it, or an opaque flag word or an option argument that may
+			// split (`-f ../[ab].awk`, `-v $X`) may have supplied it or shifted
+			// it.
+			if (
+				!hasExplicitScript &&
+				!hasOpaqueFlag &&
+				expandingOptionArgs.size === 0 &&
+				!awkProgramSeen
+			) {
+				awkProgramSeen = true;
+				skipIndices.add(i);
+			}
+			continue;
+		}
+		if (isScriptWord(i)) skipIndices.add(i);
+	}
 
-	// Find the first word that is NOT in skipIndices (the first file argument)
+	// The first word that is NOT skipped is the file argument.
 	const candidates = suffixWords
 		.map((word, i) => ({ word, i }))
-		.filter(({ i }) => !skipIndices.has(i));
+		.filter(({ word, i }) => word !== '' && !skipIndices.has(i));
+	if (candidates.length === 0 && dotWordAfterBareInplace !== null) {
+		candidates.push({ word: dotWordAfterBareInplace, i: -1 });
+	}
 
 	if (candidates.length > 0) {
-		const file = candidates[0].word;
-		results.push({
-			category: 'inplace_edit',
-			operator: `${name} -i`,
-			path: file,
-		});
+		// GNU sed, perl -i and gawk -i inplace edit every remaining word as a
+		// file, so each one is reported in word order; reporting a single chosen
+		// one would let any other edited file (`sed -i -e 1d '../{a}' src/a.ts`,
+		// `perl -i -pe X src/a.ts /etc/passwd`) escape the check. A non-file awk
+		// operand (`var=val`) is reported too (fail-safe over-report).
+		for (const { word } of candidates) {
+			results.push({
+				category: 'inplace_edit',
+				operator: `${name} -i`,
+				path: word,
+			});
+		}
 	}
 
 	return results;
@@ -1914,7 +2790,8 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	let ast: unknown;
 	let parseFailed = false;
 	try {
-		ast = parse(command, { mode: 'posix' });
+		ast = parse(command, { mode: 'posix', insertLOC: true });
+		annotateRawWordText(ast, command);
 	} catch {
 		// Parser failed — treat as parse error (fail-closed)
 		parseFailed = true;
@@ -2320,6 +3197,13 @@ function getWritesFromRedirectNode(
 		REDIRECT_WRITE_TOKENS.has(opType) ||
 		(REDIRECT_GREATAND_TOKENS.has(opType) && !isNonFileGreatAndTarget(path))
 	) {
+		// detectPosixWrites never reports a sink-device redirect, but the
+		// Windows detectors do (`2>/dev/null` from detectWindowsWrites) and
+		// their callers resolve those writes here too. Collecting one would
+		// resolve it against the POSIX cd tracker's context, which for a
+		// Windows cwd is a mangled path that can sit on another drive; left
+		// out, it falls back to the caller's cwd like any unmatched write.
+		if (path !== null && isNullDevice(path)) return [];
 		return [{ category: 'redirect', operator: opLabel, path }];
 	} else if (REDIRECT_HERE_TOKENS.has(opType)) {
 		return [{ category: 'here_doc', operator: opLabel, path }];
@@ -2391,7 +3275,8 @@ export function resolveWriteTargets(
 
 	let ast: unknown;
 	try {
-		ast = parse(command, { mode: 'posix' });
+		ast = parse(command, { mode: 'posix', insertLOC: true });
+		annotateRawWordText(ast, command);
 	} catch {
 		ast = null;
 	}

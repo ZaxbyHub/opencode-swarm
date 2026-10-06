@@ -28,7 +28,7 @@ bunx opencode-swarm install
 
 ### Why Swarm?
 
-Most AI coding tools let one model write code and ask that same model whether the code is good. That misses too much. Swarm separates planning, implementation, review, testing, and documentation into specialized internal roles — and enforces gated execution so agents never mutate the codebase in parallel.
+Most AI coding tools let one model write code and ask that same model whether the code is good. That misses too much. Swarm separates planning, implementation, review, testing, and documentation into specialized internal roles — and enforces gated execution so agents never mutate the codebase in parallel unless their scopes are proven disjoint (v8 parallel lanes, Epic waves), and then each in its own isolated worktree.
 
 ### Key Features
 
@@ -43,6 +43,7 @@ Most AI coding tools let one model write code and ask that same model whether th
 - 🔍 **DEEP_DIVE Protocol** — High-rigor, on-demand read-only codebase audit via specialized skills
 - 🔬 **External Skill Curation Pipeline** — Opt-in discovery, quarantine, evaluation, and promotion of external skill candidates from configured sources (disabled by default; enable via `external_skills.curation_enabled: true` in config). Includes 7 tools: `external_skill_discover`, `external_skill_list`, `external_skill_inspect`, `external_skill_promote`, `external_skill_reject`, `external_skill_delete`, `external_skill_revoke`. Candidates pass through a 3-gate validation pipeline before evaluation: **prompt injection scan** (12 regex patterns), **unsafe instruction scan** (25 patterns), and **provenance integrity check** (SHA-256, timestamp, URL, publisher, and hash verification).
 - 🎯 **Governed Skill Optimizer** — Manually-activated, single-skill optimizer (`/swarm skill-opt plan|run|status|diff|approve|reject|rollback|history`) that drives one allowlisted `SKILL.md` candidate at a time through deterministic draft → smoke → evaluation-substrate validation → manual approval → atomic activation/rollback. Bounded, restartable, reversible, and unable to mutate source/harness/security surfaces. Disabled by default (`skill_opt.enabled: false`); see [docs/skill-optimizer.md](docs/skill-optimizer.md).
+- 🌊 **Epic Mode (opt-in preview)** — one plan = one epic, run phase by phase as parallel waves of tasks whose declared scopes don't conflict. The delegation gate enforces the active wave; in git projects each coder works in an isolated worktree on an epic branch that `/swarm epic close` squash-lands as staged changes. Per-task QA always runs, and a phase reviewer + critic gate (`epic_phase_review`) runs before `phase_complete`. Epic learns per-file write risk across epics, suggests plan restructurings with a predicted speedup, and reports a scorecard (`/swarm epic report`). Enable with `epic.mode.enabled: true`; see [docs/modes.md](docs/modes.md#epic-mode-preview).
 - 🔄 **Phase completion gates** — completion-verify and drift verifier gates enforced before phase completion
 - 🔁 **Resumable sessions** — all state saved to `.swarm/`; pick up any project any day
 - 🔀 **GitLab as a first-class forge** (#2733) — MR and issue URLs (`https://<gitlab-host>/owner/repo/-/merge_requests/N`, `/-/issues/N`) are accepted by `/swarm pr-review`, `pr-feedback`, `pr subscribe/unsubscribe`, `ci-monitor`, publication recording, and issue ingestion, with self-hosted instance hosts derived from the remote or `forge.base_url` (config `forge: { provider, base_url }`, default `auto`; ambiguous remotes fail closed). Every URL-security control (HTTPS-only, private/localhost rejection, IDN protection, credential stripping) applies identically to GitLab. The `glab` binary resolves through the same hardened resolver contract as `gh` (`OPENCODE_SWARM_GLAB_BINARY` env override). Honest capability reporting: GitLab does not synthesize GitHub's `statusCheckRollup`/`reviewDecision`/`mergeStateStatus` — those surface an explicit unavailable result instead of a fabricated value, and glab-backed live MR polling is tracked as follow-up issue [#2882](https://github.com/ZaxbyHub/opencode-swarm/issues/2882).
@@ -124,6 +125,8 @@ Swarm then:
 * architect runs regression sweep
 * failures loop back with structured feedback
 
+   With Epic Mode on, `epic_next_wave` issues each phase as waves of conflict-free tasks (the same per-task pipeline runs inside every wave), and `epic_phase_review` runs a reviewer + critic over the whole phase before `phase_complete`.
+
 7. After each phase, docs and retrospectives are updated.
 
 All project state lives in `.swarm/` — plans, evidence, context, knowledge, and telemetry. Resumable by design. If `.swarm/` already exists, the architect goes straight into **RESUME** → **EXECUTE** instead of repeating discovery.
@@ -142,10 +145,13 @@ Swarm has two independent mode systems:
 | **Turbo** | Medium | Fast | Rapid iteration; skips Stage B gates for non-Tier-3 files |
 | **Lean Turbo** | High | Fast | Parallel lanes for non-conflicting tasks (up to `max_parallel_coders` coders) |
 | **Full-Auto** | Deterministic policy + critic oversight | Fast | Unattended multi-interaction runs |
+| **Epic** (opt-in) | High — per-task QA always runs; Turbo stays off | Fast on plans with many independent tasks | Large plans: one plan = one epic, run phase by phase as parallel waves of tasks with disjoint scopes |
 
 **Auto-proceed** — a session toggle (`/swarm auto-proceed [on|off]`) that skips the "Ready for Phase N+1?" prompt at phase boundaries. Defaults to `false`; set as a plan default via `execution_profile.auto_proceed` during QA GATE SELECTION. Session override always wins. Independent of Full-Auto.
 
 Full-Auto reduces approval friction by deterministically allowing safe operations (read-only tools, in-scope writes, safe shell) and routing every ambiguous or high-risk action (writes to plugin/build/guardrail paths, network, dependency changes, plan/phase mutations, subagent delegation) through the read-only `critic_oversight` agent before it executes. Denials are returned to the agent as structured signals so it can choose a safer path; repeated denials pause the run; phase completion requires an APPROVED oversight record. See [docs/modes.md](docs/modes.md#full-auto) for `mode`, `permission_policy`, `denials`, and `oversight` config keys, fail-closed semantics, and recovery from a paused run.
+
+Epic binds to the current plan and needs an OpenCode 1.x host for now (on OpenCode 2 the plugin has no SDK client yet, so `/swarm epic start` refuses with `host-unsupported`). `/swarm epic start` also refuses plans too small to benefit and suggests Balanced. The `epic_next_wave` tool then dispatches each phase as waves of tasks whose declared scopes don't conflict; in a git project each coder works in an isolated worktree on an epic branch, and `/swarm epic close` squash-lands the work as staged changes for you to review. Every task in a wave still runs the full per-task QA pipeline (Stage A and Stage B). Epic learns which files tasks tend to write together and uses it to plan later waves and epics. See [docs/modes.md](docs/modes.md#epic-mode-preview); maintainers start with [src/epic/README.md](src/epic/README.md).
 
 **Project mode** — persistent via `execution_mode` config key:
 
@@ -155,7 +161,7 @@ Full-Auto reduces approval friction by deterministically allowing safe operation
 | `balanced` (default) | Standard hooks |
 | `fast` | Skips compaction service — for short sessions under context pressure |
 
-Switch session modes with `/swarm turbo [on|off]` or `/swarm full-auto [on|off]`. Control phase-boundary auto-proceed with `/swarm auto-proceed [on|off]`. Set project mode in config. Lean Turbo is configured in `turbo.lean.*` in config and composes with all session modes. See [docs/modes.md](docs/modes.md).
+Switch session modes with `/swarm turbo [on|off]`, `/swarm full-auto [on|off]`, or `/swarm epic start|close` (Epic needs `"epic": {"mode": {"enabled": true}}` in config). Control phase-boundary auto-proceed with `/swarm auto-proceed [on|off]`. Set project mode in config. Lean Turbo is configured in `turbo.lean.*` in config and composes with all session modes. See [docs/modes.md](docs/modes.md).
 
 ---
 
@@ -278,6 +284,7 @@ Common subcommands at a glance:
 /swarm agents              # Registered agents and models
 /swarm diagnose            # Health check
 /swarm evidence [task]     # Test and review results
+/swarm epic status         # Open epic, current wave, landing state (Epic Mode)
 /swarm reset --confirm     # Clear swarm state
 ```
 
@@ -318,9 +325,9 @@ Swarm registers a roster of specialized core, optional, and conditional agents. 
 | **architect** | Orchestrates workflow, writes plans, enforces gates | Core |
 | **explorer** | Scans codebase, gathers context, maps facts | Core |
 | **coder** | Implements one task at a time (or concurrently in isolated worktrees for provably file-disjoint task groups — v8, #1674) | Core |
-| **reviewer** | Checks correctness and security | Core |
+| **reviewer** | Checks correctness and security (also reviews a whole phase under Epic Mode via `epic_phase_review`) | Core |
 | **test_engineer** | Writes and runs tests, adversarial testing | Core |
-| **critic** | Reviews plans before implementation begins | Core |
+| **critic** | Reviews plans before implementation begins (also challenges a whole phase under Epic Mode via `epic_phase_review`) | Core |
 | **critic_finding_validator** | Independently confirms, disproves, or leaves reviewer findings unverified | Core |
 | **critic_oversight** | Sole quality gate in full-auto autonomous mode | Core |
 | **sme** | Provides domain expertise guidance | Core |
@@ -407,6 +414,11 @@ graph TB
 | Resumable sessions | ✅ | ❌ | ❌ |
 | Built-in security scanning | ✅ | ❌ | ❌ |
 | Learns from mistakes | ✅ | ❌ | ❌ |
+| Parallel tasks refused at dispatch unless their scopes are conflict-free (Epic Mode) | ✅ | ❌ | ⚠️ overlap check only falls back to sequential |
+| Conflict prediction from git co-change history (Epic Mode) | ✅ | ❌ | ❌ |
+| Learns per-file risk of undeclared writes across runs (Epic Mode) | ✅ | ❌ | ❌ |
+| Plan-restructuring suggestions with predicted speedup (Epic Mode) | ✅ | ❌ | ❌ |
+| Per-epic scorecard: conflicts, rework, gate first-pass rates (Epic Mode) | ✅ | ❌ | ❌ |
 
 ---
 
@@ -537,6 +549,10 @@ Configure via:
 
 **`.swarm/curator-summary.json`** — phase-level intelligence and drift reports
 
+**`.swarm/epic/`** — Epic Mode: the open epic, its waves, and close reports with scorecards
+
+**`.swarm/epic-prior/`** — Epic Mode: the learned project prior and past epic reports (survives `/swarm close`)
+
 ### Guardrails & Circuit Breakers
 
 Every agent runs inside a circuit breaker that prevents runaway behavior:
@@ -573,6 +589,7 @@ Built-in tools verify every task before it ships:
 - **sast_scan** — 68 security rules across 8 languages (offline)
 - **sbom_generate** — Dependency tracking (CycloneDX)
 - **quality_budget** — Complexity, duplication, test ratio limits
+- **epic_phase_review** — Epic Mode only: an APPROVED phase reviewer, then an APPROVED phase critic, before `phase_complete`
 
 These quality gates run locally. No Docker is required. Config-gated features such as General Council web search can make external API calls only when you enable them and provide a Tavily or Brave Search key.
 
@@ -770,6 +787,14 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 | `skill_opt.deadband` | number | `0` | Promotion policy deadband forwarded to the evaluation substrate. |
 | `skill_opt.max_rounds` | number | `5` | Hard cap on draft/smoke retries before a validation (held-out test set is single-use). |
 | `skill_opt.max_transient_retries` | number | `5` | Max transient-infra retries before an infra failure becomes inconclusive. |
+| `epic.mode.enabled` | boolean | `false` | Master opt-in for Epic Mode (`/swarm epic`, `epic_next_wave`, `epic_phase_review`). The legacy `turbo.epic.*` path is still accepted and migrated with a warning. See [docs/modes.md](docs/modes.md#epic-mode-preview) |
+| `epic.mode.activation_threshold` | number | `0.3` | Intra-component density above which a conflict component runs one task per wave |
+| `epic.cochange.enabled` | boolean | `false` | Adds the git co-change conflict signal to Epic planning and `/swarm coupling` (otherwise declared-path conflicts only) |
+| `epic.cochange.threshold` / `min_co_changes` | number | `0.6` / `5` | NPMI floor and minimum co-change count for a file pair to count as coupled |
+| `epic.sizing.*` | object | `min_tasks: 6`, `min_scope_coverage: 0.8`, `min_effective_speedup: 1.25`, `coder_fraction: 0.6` | `/swarm epic start` refuses plans below these (`--force` overrides and is recorded) |
+| `epic.learning.*` | object | `enabled: true`, `decay_per_epic: 0.7`, `half_life_days: 60`, `hot_excess: 0.25` | Per-file risk and co-write learning across waves and epics |
+| `epic.commit_policy` | string | `epic-branch` | `epic-branch` (work on `swarm/epic/<key>`, landed at close) or `current-branch` |
+| `epic.retain_refs` | boolean | `false` | Keep `refs/swarm/epics/<key>/*` after close |
 | `context_budget.scoring.enabled` | boolean | `false` | Enable context scoring/ranking |
 | `context_budget.scoring.max_candidates` | number | `100` | Maximum items to score (10-500) |
 | `context_budget.scoring.weights` | object | `{ phase: 1.0, current_task: 2.0, blocked_task: 1.5, recent_failure: 2.5, recent_success: 0.5, evidence_presence: 1.0, decision_recency: 1.5, dependency_proximity: 1.0 }` | Per-signal priority weights (each 0-5). Only these eight keys are read |
@@ -879,6 +904,8 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 | write_pr_review_trigger_eval | Architect-only: validates the exact mandatory PR-review micro-lane ID set, requires completed provenance for all 11 repository-agnostic lanes, verifies the claimed merge base against an exact live base ref, rejects every `NO-MATCH` waiver, and atomically persists `.swarm/pr-review/<run_id>/trigger-eval.json` |
 | complete_pr_workflow | Architect-only: validates terminal PR-review or PR-feedback coverage; feedback uses a two-call arm/publish protocol and clears only after the approved content is observed on both the bound remote-tracking ref and the actual remote branch |
 | run_pr_feedback_stage_a | Architect-only: executes targeted reproduction/regression and exact `git diff --check` plus every mechanically applicable workspace/category/source build, typecheck, and lint obligation, then persists content-bound Stage A receipts before ordered feedback review gates |
+| epic_next_wave | Architect-only, Epic Mode: closes the current wave (recording outcomes and declared-vs-actual writes) and issues the next wave of conflict-free tasks; the delegation gate only admits the active wave's tasks |
+| epic_phase_review | Architect-only, Epic Mode: dispatches a read-only phase reviewer and then a phase critic, and records the evidence `phase_complete` requires while an epic is open |
 | git_blame | Per-line git blame metadata (sha, author, date, summary) via `git blame --porcelain`; supports optional line range filtering |
 | diff | Structured git diff with contract change detection; supports `summaryOnly` mode returning file list with additions/deletions counts |
 | suggest_patch | Reviewer-safe structured patch suggestion; supports `format` parameter ('json' or 'unified') where unified outputs valid unified diff with `diff --git` headers, hunks, and context |
@@ -1034,6 +1061,10 @@ Tip: add `"$schema": "https://unpkg.com/opencode-swarm/opencode-swarm.schema.jso
     "low_utility_threshold": 0.3,
     "min_retrievals_for_utility": 3,
     "schema_version": 1
+  },
+  "epic": {
+    "mode": { "enabled": false },
+    "cochange": { "enabled": false }
   }
 }
 ```
@@ -1216,6 +1247,8 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm pr status` | List active PR subscriptions for current session with relative timestamps (the `bunx opencode-swarm run pr status` CLI has no session context, so it lists subscriptions across all sessions) |
 | `/swarm deep-dive <scope> [--profile <name>] [--max-explorers <n>]` | Read-only codebase audit with parallel explorers, dual reviewers, and critic challenge |
 | `/swarm design-docs <description> [--out <dir>] [--lang <name>] [--update]` | Generate or sync language-agnostic design docs (requires `design_docs.enabled`) |
+| `/swarm epic start [--force] \| close [--abandon] [--land squash\|merge\|none] \| status [--repair-refs] \| report [<key>\|last] [--format json] \| learning \| prior [show\|reset [--confirm=<token>]] \| clear-merge-failure <taskId> [--confirm]` | Open, inspect, and close a plan-scoped epic (Epic Mode preview; requires `epic.mode.enabled`) |
+| `/swarm coupling [--phase <n>] [--threshold <-1..1>] [--min-co-changes <n>] [--format markdown\|json] [--persist] [--suggest]` | Measure plan coupling and rank modules driving conflicts; `--suggest` adds Epic plan-shaping suggestions |
 | `/swarm dark-matter` | Detect hidden file couplings from co-change history |
 | `/swarm finalize [--prune-branches] [--skill-review]` | Idempotent session close-out: retrospectives, lesson curation, evidence archive, git reset --hard + clean to align with remote branch (discards uncommitted changes), optional branch pruning, optional skill-improver proposal |
 | `/swarm close [--prune-branches] [--skill-review]` | Deprecated alias for `/swarm finalize [--prune-branches] [--skill-review]` |
@@ -1267,12 +1300,14 @@ All binaries optional. Missing tools produce soft warnings, never hard-fail.
 bun test
 ```
 
+Epic Mode's planner regression harness: `bun scripts/epic-bench.ts`.
+
 ---
 
 ## Design Principles
 
 1. **Plan before code.** Critic approves the plan before a single line is written.
-2. **One task at a time.** Coder gets one task and full context. Nothing else.
+2. **One task at a time.** Coder gets one task and full context. Nothing else. Tasks run in parallel (v8 lanes, Epic waves) only when their scopes are disjoint, each in an isolated worktree.
 3. **Review everything immediately.** Correctness, security, tests, adversarial tests. Every task.
 4. **Different models catch different bugs.** Blind spots of the coder are the reviewer's strength.
 5. **Save everything to disk.** Resume any project any day from `.swarm/` state.
@@ -1288,9 +1323,10 @@ bun test
 - [Architecture Deep Dive](docs/architecture.md) — control model, pipeline, tools
 - [Design Rationale](docs/design-rationale.md) — why every major decision
 - [Commands Reference](docs/commands.md) — `/swarm` subcommands grouped by function
-- [Modes Guide](docs/modes.md) — session modes (Turbo, Full-Auto) and project modes (strict/balanced/fast)
+- [Modes Guide](docs/modes.md) — session modes (Turbo, Full-Auto, Epic) and project modes (strict/balanced/fast)
 - [Configuration](docs/configuration.md) — all config keys and examples
 - [Planning Guide](docs/planning.md) — task format, phase structure, sizing
+- [Epic Mode maintainer guide](src/epic/README.md) — module map, invariants, shared-file seams
 
 ---
 

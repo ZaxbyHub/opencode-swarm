@@ -113,4 +113,4 @@ Deterministic repair — dead-owner settlement recovery and the wedged Stage A r
 
 Repair receipts are linked to their predecessors: a successful settlement recovery emits a `recovered` event carrying `previousTransitionId`/`previousState`/`expectedGeneration` (the wedged dispatch it superseded), and a Stage A repair emits a `repaired` event carrying `predecessorTransitionId` (the transition that wedged the task) — both land in `.swarm/events.jsonl`.
 
-Related: the general recovery guide (`docs/troubleshooting/recovery-guide.md`) covers `/swarm reset-session` and worktree reclamation; command reference lives in `docs/commands.md`.
+Related: the general recovery guide (`docs/troubleshooting/recovery-guide.md`) covers `/swarm reset-session`, worktree reclamation, and Epic Mode recovery (`/swarm epic status`, `/swarm epic close --abandon`, `/swarm epic clear-merge-failure`); command reference lives in `docs/commands.md`.

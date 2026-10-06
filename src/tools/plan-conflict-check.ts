@@ -22,12 +22,12 @@
 
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
+import { getCoChangePairs } from '../epic/cochange-source.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import {
 	computeParallelVerdict,
 	MAX_PARALLEL_VERDICT_TASKS,
 } from '../plan/parallel-verdict.js';
-import { getCoChangePairs } from '../turbo/epic/cochange-source.js';
 import type { CoChangeEntry } from './co-change-analyzer.js';
 import { createSwarmTool } from './create-tool.js';
 

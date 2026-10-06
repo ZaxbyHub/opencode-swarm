@@ -386,6 +386,8 @@ Swarm creates a `.swarm/` directory in your project:
 ├── context.md         # Project context and selected workflow notes
 ├── memory/            # Optional memory database and migration artifacts
 ├── evidence/          # Per-task execution evidence bundles
+├── epic/              # Epic Mode (opt-in): open epic, waves, close reports
+├── epic-prior/        # Epic Mode: learned project prior (survives /swarm close)
 └── session/           # Session-scoped runtime state
 ```
 

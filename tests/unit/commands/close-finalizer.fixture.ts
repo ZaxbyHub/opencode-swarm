@@ -192,7 +192,6 @@ export async function createCloseFinalizerHarness() {
 			hasActiveFullAuto: () => false,
 			getActiveFullAutoSessionID: () => undefined,
 			hasActiveLeanTurbo: () => false,
-			hasActiveEpicMode: () => false,
 			updateTaskWorkflowCache: () => {},
 		};
 	});

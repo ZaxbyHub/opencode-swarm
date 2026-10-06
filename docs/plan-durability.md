@@ -213,7 +213,11 @@ Three independent layers surface `.swarm/spec-staleness.json` proactively:
   structurally blocks the `SPEC_DRIFT_BLOCKED_TOOLS` set (`save_plan`,
   `update_task_status`, `phase_complete`, `lean_turbo_run_phase`,
   `lean_turbo_acquire_locks`) while the staleness file exists. No cache
-  — `/swarm acknowledge-spec-drift` is reflected immediately.
+  — `/swarm acknowledge-spec-drift` is reflected immediately. Epic Mode's
+  `epic_next_wave` and `epic_phase_review` are not in this set: under drift
+  they can still close and issue waves and run the phase review, but no epic
+  task can complete (`update_task_status`) and no epic phase can close
+  (`phase_complete`) until the drift is resolved.
 - **Layer C** (`src/services/status-service.ts`): `/swarm status` renders
   a `**Spec drift detected**` line with stored/current hashes and the
   resolution commands.
@@ -445,6 +449,7 @@ process-local execution authority. The following distinction is intentional:
 | The plan execution profile and persisted QA-gate profile for that plan identity | In-memory session context, child handles, timers, and retry/circuit state |
 | Ratchet-tighter session QA-gate overrides stored in `.swarm/swarm.db` | |
 | Evidence/WAL records, reservation/lease records, and their owner-visible recovery classifications | Live ownership/lease authority from a prior process; it must be re-proven after restart |
+| The open epic's lifecycle row (Epic Mode; coordination namespace `turbo.epic.lifecycle` in `.swarm/swarm.db` — `.swarm/epic/epic.json` is only its sentinel projection), including the active wave's frozen scopes | |
 
 The plan ledger remains authoritative. `plan.json` and `plan.md` are derived
 projections, while ratchet-tighter session QA-gate overrides are durable policy
@@ -556,7 +561,7 @@ once pre-check succeeds.
 ### Invariants
 
 - **Locked profile is immutable except for one safety ratchet**: `planning_profile` may move from `balanced` to `strict`; `strict` to `balanced` and every other locked-profile change are rejected. Locked legacy profiles without `planning_profile` resolve conservatively to effective `strict`.
-- **Fail-closed enforcement**: the delegation gate enforces a locked profile — `parallelization_enabled: false` blocks Stage B parallel dispatch regardless of global plugin config.
+- **Fail-closed enforcement**: the delegation gate enforces a locked profile — `parallelization_enabled: false` blocks Stage B parallel dispatch regardless of global plugin config. **Exception — Epic Mode:** while an epic is open for the plan (opt-in `epic.mode.enabled: true`, `/swarm epic start`), the epic's active wave is the dispatch authority instead of the execution profile: a coder is admitted only for a task of that wave, parallelism comes from the wave's own disjointness verdict over its frozen scopes, and the slot cap is the epic wave width (`turbo.lean.max_parallel_coders`, default 4; 1 in a non-git project), not `max_concurrent_tasks`. Every coder of a git epic runs in an isolated worktree, or is refused with `EPIC_ISOLATION_DEGRADED`. See [modes.md → Epic Mode](modes.md#epic-mode-preview).
 - **Ledger authority**: profile changes are recorded as `execution_profile_set` / `execution_profile_locked` events. Replay rebuilds the profile deterministically from these events.
 - **Hash coverage**: `execution_profile` is included in ledger, structure, and Markdown content hashes, so profile-only changes update the ledger chain and invalidate stale projections. An explicit `planning_profile: strict` remains distinct from an omitted legacy field (and from explicit `balanced`) in every hash and projection. Backward compatibility for a locked legacy omission is applied only by the planning-profile resolver; it never erases a real `balanced` → `strict` change from durable identity.
 - **All surfaces carry the profile**: snapshot events, checkpoint export (`.swarm/plan-export/SWARM_PLAN.json`), handoff data, export data, and `get_approved_plan` output all include `execution_profile`.
@@ -620,7 +625,7 @@ Unlike `execution_profile` (which IS included in `computePlanLedgerHash`), `fr_r
 
 ## Scope Materialization at Worktree Paths (FR-102)
 
-When Lean Turbo provisions a lane worktree, the task's declared scope is materialized at:
+When Lean Turbo provisions a lane worktree, or the delegation gate provisions an isolated worktree for a coder (standard worktree isolation — always the case for every coder of an open git epic in Epic Mode), the task's declared scope is materialized at:
 
 ```
 <worktreePath>/.swarm/scopes/binding-{taskId}-{bindingId}-{generationId}.json
@@ -730,6 +735,14 @@ without exactly one live exact-plan binding fails closed to `unknown` —
 serial — along with a serial-fallback advisory that names the exact reason
 (undeclared task ids, or the conflicting pair and shared path).
 
+Epic Mode's planner (`epic_next_wave`, the `/swarm epic start` sizing preview,
+`/swarm coupling`) resolves declared scopes through the same readers
+(`resolveEpicDeclaredScopes`, `src/epic/declared-scopes.ts`): one binding-set
+scan per call, pinned to the exact plan identity, live and unexpired bindings
+only. It never reads the v1 projection; a task without a live binding is passed
+to the shared partition preflight as explicitly undeclared. These are
+scheduling reads only, never write authority.
+
 ## Live-State Ownership and Hydration Fencing (issue #2667)
 
 The in-memory session maps (`agentSessions`, `activeAgent`, `delegationChains`
@@ -819,6 +832,7 @@ chat.message path is a pure Map hit.
 | Set execution profile | `save_plan` with `execution_profile` field |
 | Lock execution profile | `save_plan` with `execution_profile.locked: true` |
 | View worktree lanes | `/swarm lanes [--json]` |
+| Inspect / repair an open epic (Epic Mode) | `/swarm epic status [--repair-refs]` |
 | Recover orphaned worktrees | Automatic on session start (see [Recovery Runbook](troubleshooting/recovery-guide.md)) |
 
 ## See also

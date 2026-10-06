@@ -26,11 +26,14 @@ Swarm adds the discipline that LLMs lack.
 - Conflict resolution hell
 - Non-reproducible results
 
-**Swarm's approach**: serial by default — with one governed exception. Since
+**Swarm's approach**: serial by default — with two governed exceptions. Since
 v7.132.0 (#1674, PR #1966) new plans default to parallel-first execution for
 PROVABLY file-disjoint task groups only; the delegation gate enforces the
-serial fallback automatically whenever scopes overlap or are unknown. The
-conservative preset (`preset: "conservative"`, #2504) restores fully serial
+serial fallback automatically whenever scopes overlap or are unknown. Opt-in
+Epic Mode (`epic.mode.enabled`, `/swarm epic start`) runs one plan as waves of
+tasks whose declared scopes don't conflict, each coder in an isolated git
+worktree, with full per-task QA and a phase reviewer + critic before
+`phase_complete`. The conservative preset (`preset: "conservative"`, #2504) restores fully serial
 new plans. Concurrency is earned by proof, not assumed.
 
 ```
@@ -39,7 +42,7 @@ WRONG:  Agent1 ──┐
         Agent3 ──┘
 
 RIGHT:  Agent1 → Agent2 → Agent3 → Consistent result
-        (or: provably file-disjoint agents in parallel, gate-enforced)
+        (or: provably file-disjoint agents in parallel, gate-enforced — v8 parallel or an Epic wave)
 ```
 
 Slower? Yes. Working code? Also yes.

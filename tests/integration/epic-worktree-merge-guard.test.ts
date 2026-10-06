@@ -1,31 +1,54 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../../src/config/plan-schema';
+import { closeAllProjectDbs } from '../../src/db/project-db';
+import { epicMergeFailureSkipsCheckpoint } from '../../src/epic/merge-epoch';
 import type { StandardWorktreeDispatch } from '../../src/hooks/delegation-gate/worktree-isolation';
 import {
 	finishStandardWorktreeDispatch,
 	_internals as wtiInternals,
 } from '../../src/hooks/delegation-gate/worktree-isolation';
-import { _internals as mergeStatus } from '../../src/hooks/delegation-gate/worktree-merge-status';
 import {
-	_internals as managerInternals,
-	savePlan,
-	updateTaskStatus,
-} from '../../src/plan/manager';
+	initDurableStatusPath,
+	_internals as mergeStatus,
+} from '../../src/hooks/delegation-gate/worktree-merge-status';
+import { savePlan } from '../../src/plan/manager';
+import type { DirtyMergeOptions } from '../../src/worktree/merge';
+import { openEpicForTest } from '../helpers/epic-lifecycle';
 
 /**
- * End-to-end coverage for the Epic Mode × worktree-isolation interaction —
- * the combination that had no test coverage before the Epic port. It joins
- * the two halves of the guard:
+ * End-to-end coverage for the Epic Mode × worktree-isolation interaction
+ * (Epic v2 C3). It joins both halves of the landing contract:
  *
- *   WRITER: `finishStandardWorktreeDispatch` records the merge-back outcome
- *           into the leaf status registry (failed/partial → record;
- *           merged → clear).
- *   READER: Epic Rule 2 in `updateTaskStatus` consults that registry and
- *           skips the completion marker when the task's work never landed.
+ *   SEAM:   `finishStandardWorktreeDispatch` asks the Epic module how an
+ *           epic task's lane lands — a committed merge with the Epic task
+ *           message — and leaves every other dispatch's options untouched.
+ *   GUARD:  the merge-back outcome it records (failed/partial → record;
+ *           merged → clear) is what Epic reads to skip the #2582
+ *           auto-checkpoint (and to hold the epic wave) for work that never
+ *           landed.
  */
+function git(args: string[]): string {
+	const r = spawnSync('git', args, {
+		cwd: tempDir,
+		encoding: 'utf-8',
+		timeout: 30_000,
+		stdio: ['ignore', 'pipe', 'pipe'],
+		windowsHide: true,
+		env: {
+			...process.env,
+			GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+		},
+	});
+	if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+	return r.stdout;
+}
+
+let tempDir: string;
+
 function makePlan(): Plan {
 	return {
 		schema_version: '1.0.0',
@@ -71,123 +94,182 @@ function makeDispatch(planTaskId: string): StandardWorktreeDispatch {
 	};
 }
 
-describe('Epic Mode × worktree isolation — merge-back guard (e2e)', () => {
-	let tempDir: string;
+describe('Epic Mode × worktree isolation — landing seam and merge-back guard (e2e)', () => {
 	const origWti = {
 		attemptMergeBackFromDirty: wtiInternals.attemptMergeBackFromDirty,
 		removeWorktree: wtiInternals.removeWorktree,
 		postMergeCleanup: wtiInternals.postMergeCleanup,
+		epicCommitLandingFor: wtiInternals.epicCommitLandingFor,
 	};
-	const origMgr = {
-		isGitRepo: managerInternals.isGitRepo,
-		isEpicModeActiveForProject: managerInternals.isEpicModeActiveForProject,
-		readTaskScopes: managerInternals.readTaskScopes,
-		commitTaskCompletion: managerInternals.commitTaskCompletion,
-	};
-	let commitCalls: string[];
+	let seenOptions: DirtyMergeOptions[];
+	let outcome: Awaited<
+		ReturnType<typeof wtiInternals.attemptMergeBackFromDirty>
+	>;
 
 	beforeEach(async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epic-wt-guard-'));
+		fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({
+				epic: { mode: { enabled: true } },
+			}),
+		);
+		// A real repository: the epic landing seam reads the primary index.
+		for (const args of [
+			['init', '-q'],
+			['config', 'user.email', 't@example.com'],
+			['config', 'user.name', 'T'],
+			['config', 'commit.gpgsign', 'false'],
+		]) {
+			git(args);
+		}
+		fs.writeFileSync(path.join(tempDir, '.gitignore'), '.swarm/\n');
+		git(['add', '.']);
+		git(['commit', '-q', '-m', 'seed']);
 		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 		await savePlan(tempDir, makePlan());
-
-		commitCalls = [];
+		initDurableStatusPath(tempDir);
+		seenOptions = [];
+		outcome = {
+			merged: true as const,
+			strategy: 'merge',
+			autoCommitted: true,
+			cleaned: true,
+		};
 		// No real git/worktree side effects.
 		wtiInternals.removeWorktree = async () => {};
 		wtiInternals.postMergeCleanup = async () => {};
-		managerInternals.isGitRepo = () => true;
-		managerInternals.isEpicModeActiveForProject = () => true;
-		managerInternals.readTaskScopes = () => undefined;
-		managerInternals.commitTaskCompletion = async (_dir, taskId) => {
-			commitCalls.push(taskId);
+		wtiInternals.attemptMergeBackFromDirty = async (
+			_wt,
+			_branch,
+			_dir,
+			_strategy,
+			options,
+		) => {
+			seenOptions.push(options ?? {});
+			return outcome;
 		};
 		mergeStatus.failuresByTask.clear();
 	});
 
 	afterEach(() => {
-		wtiInternals.attemptMergeBackFromDirty = origWti.attemptMergeBackFromDirty;
-		wtiInternals.removeWorktree = origWti.removeWorktree;
-		wtiInternals.postMergeCleanup = origWti.postMergeCleanup;
-		managerInternals.isGitRepo = origMgr.isGitRepo;
-		managerInternals.isEpicModeActiveForProject =
-			origMgr.isEpicModeActiveForProject;
-		managerInternals.readTaskScopes = origMgr.readTaskScopes;
-		managerInternals.commitTaskCompletion = origMgr.commitTaskCompletion;
+		Object.assign(wtiInternals, origWti);
 		mergeStatus.failuresByTask.clear();
+		closeAllProjectDbs();
 		if (fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it('clean merge-back → Rule 2 fires the completion marker', async () => {
-		wtiInternals.attemptMergeBackFromDirty = async () => ({
-			merged: true as const,
-			strategy: 'merge',
-			autoCommitted: true,
-			cleaned: true,
-		});
-
+	it('no open epic ⇒ the merge-back options are exactly the caller’s (Epic seam inert)', async () => {
 		await finishStandardWorktreeDispatch(tempDir, makeDispatch('1.1'));
-		expect(mergeStatus.failuresByTask.has('1.1')).toBe(false);
-
-		await updateTaskStatus(tempDir, '1.1', 'completed');
-		expect(commitCalls).toEqual(['1.1']); // marker written
+		expect(seenOptions).toHaveLength(1);
+		expect(Object.keys(seenOptions[0])).toEqual([
+			'operationId',
+			'resume',
+			'onBeforeMerge',
+			'commitLanding',
+		]);
+		expect(Object.values(seenOptions[0])).toEqual([
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+		]);
 	});
 
-	it('FAILED merge-back → Rule 2 skips the marker (no false Rule 3 evidence)', async () => {
-		wtiInternals.attemptMergeBackFromDirty = async () => ({
+	it('open epic ⇒ the task lands as a commit carrying the Epic task message', async () => {
+		const epic = openEpicForTest(tempDir);
+		await finishStandardWorktreeDispatch(tempDir, makeDispatch('1.1'));
+		expect(seenOptions[0]).toMatchObject({
+			commitLanding: true,
+			landingCommitMessage: `swarm(task 1.1): Worktree-isolated task\n\nSwarm-Plan: ${epic.planKey}`,
+		});
+		// A dispatch for a task outside the epic's plan keeps the default.
+		await finishStandardWorktreeDispatch(tempDir, makeDispatch('9.9'));
+		expect(seenOptions[1].commitLanding).toBeUndefined();
+		expect('landingCommitMessage' in seenOptions[1]).toBe(false);
+	});
+
+	it('staged entries in the primary index ⇒ not landed: EPIC_LANDING_INDEX_DIRTY recorded, lane preserved', async () => {
+		openEpicForTest(tempDir);
+		fs.writeFileSync(path.join(tempDir, 'README.md'), 'user staged\n');
+		git(['add', 'README.md']);
+		const settled = await finishStandardWorktreeDispatch(
+			tempDir,
+			makeDispatch('1.1'),
+		);
+		expect(settled).toMatchObject({
+			outcome: 'failed',
+			stage: 'epic-landing-index',
+		});
+		expect(seenOptions).toEqual([]);
+		const failure = mergeStatus.failuresByTask.get('1.1');
+		expect(failure?.stage).toBe('epic-landing-index');
+		expect(failure?.message).toContain('git restore --staged -- README.md');
+		// The user's staged entry is untouched.
+		expect(git(['diff', '--cached', '--name-only']).trim()).toBe('README.md');
+	});
+
+	it('a caller-chosen landing is never overridden (the seam is not consulted)', async () => {
+		openEpicForTest(tempDir);
+		let consulted = 0;
+		wtiInternals.epicCommitLandingFor = (...args) => {
+			consulted += 1;
+			return origWti.epicCommitLandingFor(...args);
+		};
+		await finishStandardWorktreeDispatch(
+			tempDir,
+			makeDispatch('1.1'),
+			undefined,
+			undefined,
+			{ commitLanding: false },
+		);
+		expect(consulted).toBe(0);
+		expect(seenOptions[0].commitLanding).toBe(false);
+		expect('landingCommitMessage' in seenOptions[0]).toBe(false);
+	});
+
+	it('FAILED / PARTIAL merge-back of an epic task ⇒ the auto-checkpoint is skipped; a clean re-dispatch clears it', async () => {
+		openEpicForTest(tempDir);
+		outcome = {
 			failed: true as const,
 			stage: 'merge',
 			message: 'merge conflict in src/a.ts',
-		});
-
+		};
 		await finishStandardWorktreeDispatch(tempDir, makeDispatch('1.1'));
-		// Writer recorded the failure...
 		expect(mergeStatus.failuresByTask.get('1.1')?.outcome).toBe('failed');
+		expect(epicMergeFailureSkipsCheckpoint(tempDir, '1.1')).toBe(true);
 
-		// ...and the reader honors it: no marker, but status still advances.
-		const updated = await updateTaskStatus(tempDir, '1.1', 'completed');
-		expect(commitCalls).toEqual([]);
-		expect(updated.phases[0].tasks[0].status).toBe('completed');
-	});
-
-	it('PARTIAL merge-back → Rule 2 also skips the marker', async () => {
-		wtiInternals.attemptMergeBackFromDirty = async () => ({
+		outcome = {
 			partial: true as const,
 			stage: 'rebase',
 			autoCommitted: true,
 			cleaned: false,
 			message: 'some hunks did not apply',
-		});
-
+		};
 		await finishStandardWorktreeDispatch(tempDir, makeDispatch('1.1'));
 		expect(mergeStatus.failuresByTask.get('1.1')?.outcome).toBe('partial');
+		expect(epicMergeFailureSkipsCheckpoint(tempDir, '1.1')).toBe(true);
+		// Another task's failure never blocks this one.
+		expect(epicMergeFailureSkipsCheckpoint(tempDir, '1.2')).toBe(false);
 
-		await updateTaskStatus(tempDir, '1.1', 'completed');
-		expect(commitCalls).toEqual([]);
-	});
-
-	it('a successful re-dispatch after a failure clears the block and re-enables the marker', async () => {
-		// First dispatch fails.
-		wtiInternals.attemptMergeBackFromDirty = async () => ({
-			failed: true as const,
-			stage: 'merge',
-			message: 'conflict',
-		});
-		await finishStandardWorktreeDispatch(tempDir, makeDispatch('1.1'));
-		expect(mergeStatus.failuresByTask.has('1.1')).toBe(true);
-
-		// Re-dispatch merges cleanly → failure cleared.
-		wtiInternals.attemptMergeBackFromDirty = async () => ({
+		outcome = {
 			merged: true as const,
 			strategy: 'merge',
 			autoCommitted: true,
 			cleaned: true,
-		});
+		};
 		await finishStandardWorktreeDispatch(tempDir, makeDispatch('1.1'));
 		expect(mergeStatus.failuresByTask.has('1.1')).toBe(false);
+		expect(epicMergeFailureSkipsCheckpoint(tempDir, '1.1')).toBe(false);
+	});
 
-		await updateTaskStatus(tempDir, '1.1', 'completed');
-		expect(commitCalls).toEqual(['1.1']);
+	it('without an open epic a recorded failure never skips the checkpoint', async () => {
+		outcome = { failed: true as const, stage: 'merge', message: 'conflict' };
+		await finishStandardWorktreeDispatch(tempDir, makeDispatch('1.1'));
+		expect(mergeStatus.failuresByTask.has('1.1')).toBe(true);
+		expect(epicMergeFailureSkipsCheckpoint(tempDir, '1.1')).toBe(false);
 	});
 });

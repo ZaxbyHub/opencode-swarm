@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.11",
+  "tagCommit": "0e415c34d54f59c3ac9571dd749024e8e5235686",
+  "targetCommitish": "0e415c34d54f59c3ac9571dd749024e8e5235686",
+  "releaseBodySha256": "84a5b83e1b961d395b7f2913c62cdfae9bffbd707a76f5b3c79262fb2f8d5dac",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/lean-integrated-diff-single-default.md",
+      "sha256": "f64f0486e6e5554202d8bdf3b06d855f452b91bcdc27712362053fe335509592"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/lean-turbo-architecture-fixes.md",
+      "sha256": "13106179fc1a256423984374ed346783c6aca9834741eadb9aa9b395f7067042"
+    }
+  ]
+}

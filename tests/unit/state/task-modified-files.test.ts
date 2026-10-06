@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { deserializeAgentSession } from '../../../src/session/snapshot-reader';
 import { serializeAgentSession } from '../../../src/session/snapshot-writer';
 import {
@@ -13,6 +16,8 @@ import {
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
+import { openEpicForTest } from '../../helpers/epic-lifecycle';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function session() {
 	const value = getAgentSession('task-files-session');
@@ -20,9 +25,41 @@ function session() {
 	return value;
 }
 
+const epicDirs: string[] = [];
+
+/**
+ * Bind the session to a temp project with an OPEN epic (real lifecycle row +
+ * sentinel). Attribution retention follows the project's open epic.
+ */
+function enterOpenEpic(value: ReturnType<typeof session>): void {
+	const dir = canonicalMkdtemp('task-files-epic-');
+	epicDirs.push(dir);
+	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+	fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
+	fs.writeFileSync(
+		path.join(dir, '.opencode', 'opencode-swarm.json'),
+		JSON.stringify({
+			epic: { mode: { enabled: true } },
+		}),
+	);
+	fs.writeFileSync(
+		path.join(dir, '.swarm', 'plan.json'),
+		JSON.stringify({ swarm: 'test-swarm', title: 'Task files', phases: [] }),
+	);
+	openEpicForTest(dir);
+	value.owningProjectKey = dir;
+}
+
 beforeEach(() => {
 	resetSwarmState();
 	startAgentSession('task-files-session', 'architect');
+});
+
+afterEach(() => {
+	closeAllProjectDbs();
+	for (const dir of epicDirs.splice(0)) {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 describe('task-keyed modified-file attribution', () => {
@@ -78,7 +115,7 @@ describe('task-keyed modified-file attribution', () => {
 
 	test('reclaims only workflow-complete entries across a lifecycle beyond capacity', () => {
 		const value = session();
-		value.epicModeActive = true;
+		enterOpenEpic(value);
 
 		for (
 			let index = 0;
@@ -114,7 +151,7 @@ describe('task-keyed modified-file attribution', () => {
 		expect(getModifiedFilesForTask(value, '2.1')).toEqual([]);
 		expect(value.modifiedFilesThisCoderTask).toEqual([]);
 
-		value.epicModeActive = true;
+		enterOpenEpic(value);
 		value.currentTaskId = '2.2';
 		recordModifiedFileForTask(value, '2.2', 'src/epic.ts');
 		value.taskWorkflowStates.set('2.2', 'complete');
@@ -135,7 +172,7 @@ describe('task-keyed modified-file attribution', () => {
 		advanceTaskState(value, '2.3', 'complete', { emitTelemetry: false });
 		expect(getModifiedFilesForTask(value, '2.3')).toEqual([]);
 
-		value.epicModeActive = true;
+		enterOpenEpic(value);
 		value.currentTaskId = '2.4';
 		value.taskWorkflowStates.set('2.4', 'tests_run');
 		recordModifiedFileForTask(value, '2.4', 'src/workflow-epic.ts');

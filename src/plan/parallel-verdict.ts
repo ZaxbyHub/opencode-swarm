@@ -39,17 +39,17 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { type Plan, PlanSchema } from '../config/plan-schema.js';
+import {
+	type CoChangeThreshold,
+	type EpicPairVerdict,
+	epicPairConflict,
+} from '../epic/cochange-conflict.js';
 import type { ScopeBinding } from '../scope/scope-binding.js';
 import {
 	readAuthoritativeScopeBindingSet,
 	readDeclaredScopeFilesFromBindings,
 } from '../scope/scope-persistence.js';
 import type { CoChangeEntry } from '../tools/co-change-analyzer.js';
-import {
-	type CoChangeThreshold,
-	type EpicPairVerdict,
-	epicPairConflict,
-} from '../turbo/epic/cochange-conflict.js';
 
 /**
  * Per-pair conflict classification. Mirrors `EpicPairVerdict`'s signal
@@ -104,6 +104,16 @@ export interface ComputeParallelVerdictOptions {
 	 * or unparseable plan resolves every task to `unknown` (fail-closed).
 	 */
 	plan?: Plan;
+	/**
+	 * Explicit per-task scopes (Epic v2 C4: an epic wave's FROZEN declared
+	 * scopes). When present, every task's scope is resolved ONLY from this
+	 * map — the binding store is never read (no
+	 * `readAuthoritativeScopeBindingSet` scan) and `plan` is neither needed
+	 * nor read (it may be omitted). A task missing from the map, or mapped to an
+	 * empty list, is `unknown` (fail-closed). When absent, behaviour is
+	 * unchanged: scopes come from the live v2 bindings.
+	 */
+	scopes?: Record<string, string[]>;
 }
 
 /**
@@ -154,10 +164,26 @@ function resolveScope(
 }
 
 /**
+ * Resolve a task's scope from an explicit `scopes` map (Epic v2 C4), with the
+ * same fail-closed rule as {@link resolveScope}: missing or empty ⇒ unknown.
+ */
+function resolveExplicitScope(
+	scopes: Record<string, string[]>,
+	taskId: string,
+): { files: string[]; ok: boolean } {
+	const files = Object.hasOwn(scopes, taskId) ? scopes[taskId] : undefined;
+	if (!Array.isArray(files) || files.length === 0) {
+		return { files: [], ok: false };
+	}
+	return { files: [...files], ok: true };
+}
+
+/**
  * Compute a pairwise conflict verdict for the given task ids.
  *
  * Pure + synchronous. Reads only the authoritative v2 binding store (plus a
- * bounded plan.json read when `options.plan` is omitted). Writes nothing.
+ * bounded plan.json read when `options.plan` is omitted) — or nothing at all
+ * when `options.scopes` supplies the scopes explicitly. Writes nothing.
  * Fail-closed on any read/parse error (treats the task as `unknown`).
  *
  * @param directory  Project root (for the binding store and plan.json reads).
@@ -184,23 +210,33 @@ export function computeParallelVerdict(
 		options?.cochangeThreshold ?? DEFAULT_PARALLEL_COCHANGE_THRESHOLD;
 	const cochangePairs = useCochange ? options!.cochangePairs! : [];
 
-	// Resolve the plan identity ONCE per verdict (#2532): explicit when the
-	// caller holds it (the gate, the tool), else a bounded sync read. A missing
-	// or unparseable plan resolves every scope to `unknown`.
-	const plan = options?.plan ?? readPlanJsonForVerdict(directory);
-	// ONE authoritative binding-set scan per verdict, shared by every task
-	// (#2532 perf hoisting — never one store read per task).
-	const bindingSet =
-		plan === null ? null : readAuthoritativeScopeBindingSet(directory);
-
 	// Resolve every task's scope up front. `unknown` tasks short-circuit their
 	// pairs to `unknown` below.
 	const resolved = new Map<string, { files: string[]; ok: boolean }>();
 	const unknownScopeTasks: string[] = [];
-	for (const id of taskIds) {
-		const r = resolveScope(directory, id, plan, bindingSet);
-		resolved.set(id, r);
-		if (!r.ok) unknownScopeTasks.push(id);
+	const explicitScopes = options?.scopes;
+	if (explicitScopes !== undefined) {
+		// Epic v2 C4: explicit (frozen) scopes are the ONLY source — no plan
+		// read, no binding-store scan, never a fallback to bindings.
+		for (const id of taskIds) {
+			const r = resolveExplicitScope(explicitScopes, id);
+			resolved.set(id, r);
+			if (!r.ok) unknownScopeTasks.push(id);
+		}
+	} else {
+		// Resolve the plan identity ONCE per verdict (#2532): explicit when the
+		// caller holds it (the gate, the tool), else a bounded sync read. A
+		// missing or unparseable plan resolves every scope to `unknown`.
+		const plan = options?.plan ?? readPlanJsonForVerdict(directory);
+		// ONE authoritative binding-set scan per verdict, shared by every task
+		// (#2532 perf hoisting — never one store read per task).
+		const bindingSet =
+			plan === null ? null : readAuthoritativeScopeBindingSet(directory);
+		for (const id of taskIds) {
+			const r = resolveScope(directory, id, plan, bindingSet);
+			resolved.set(id, r);
+			if (!r.ok) unknownScopeTasks.push(id);
+		}
 	}
 
 	const pairs: ParallelVerdictPair[] = [];

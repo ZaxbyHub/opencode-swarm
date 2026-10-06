@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.0",
+  "tagCommit": "a41dce76e19b07728225615b84e0c944840a0df2",
+  "targetCommitish": "a41dce76e19b07728225615b84e0c944840a0df2",
+  "releaseBodySha256": "cd5a26b3a15bf27cc388d245461299aa432e93f41e0e2fc299b0ce2d9d636f9f",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/2794-bounded-supersession-counts.md",
+      "sha256": "52cc23be5f0cffb550e275d091dc2e305d9043b27c18140959b59d85766df5d8"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/close-align-recheck-2953.md",
+      "sha256": "551fa682c9cd003ddc041b5994d6364c6c0fc83fbddc0b56fd3c9dc7fdc1c4d1"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/host-contract-drift-check-2902.md",
+      "sha256": "c655cd8b6580e2abbb410af6f028c7aa1d377792be799a7c8f3628d28c1b1417"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/j4-quarantine-denial-truthful-result.md",
+      "sha256": "5fb2e438680ba60bb9a6bff339b838765307ff268280ee45a8129b0efa88cb0e"
+    }
+  ]
+}

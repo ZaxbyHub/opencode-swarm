@@ -1,12 +1,18 @@
 /**
- * Issue #2483 review finding FB-19: the calibration, test-history, and
+ * Issue #2483 review finding FB-19: the epic learning prior, test-history, and
  * skill-changelog writers are capped at the seam override, but the
  * bounded-writers suite asserts through each writer's own READER. These tests
  * read the DURABLE FILES RAW off disk (readFileSync + line/JSON counts), so a
  * reader-side truncation or filtering bug can never mask an uncapped writer.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import {
 	clearRetentionCapOverrides,
@@ -14,8 +20,8 @@ import {
 } from '../../../src/retention/caps.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
-const { saveCalibrationState } = await import(
-	'../../../src/turbo/epic/calibration.js'
+const { importLegacyEpicCalibrationOnce } = await import(
+	'../../../src/epic/learning-store.js'
 );
 const { appendTestRun } = await import(
 	'../../../src/test-impact/history-store.js'
@@ -46,7 +52,7 @@ function wholeJsonlLines(content: string): string[] {
 
 beforeEach(() => {
 	clearRetentionCapOverrides();
-	setRetentionCapOverrides({ MAX_CALIBRATION_MODULES: CAP });
+	setRetentionCapOverrides({ MAX_EPIC_LEARNING_FILES: CAP });
 	setRetentionCapOverrides({ MAX_TEST_HISTORY_ENTRIES: CAP });
 	setRetentionCapOverrides({ MAX_SKILL_CHANGELOG_GLOBAL_ENTRIES: CAP });
 });
@@ -64,25 +70,31 @@ afterEach(() => {
 });
 
 describe('raw durable-file caps (review FB-19)', () => {
-	it('calibration.json on disk holds at most CAP hotModuleAdditions after save', () => {
-		const root = makeRoot('calibration-raw');
-		const persist = {
-			version: 1,
-			hotModuleAdditions: Array.from(
-				{ length: ENTRIES },
-				(_, i) => `src/mod-${i}.ts`,
-			).sort(),
-		};
-		saveCalibrationState(root, persist as never);
+	it('.swarm/epic-prior/learning.json on disk holds at most CAP file statistics after a large Epic v1 import', () => {
+		const root = makeRoot('learning-raw');
+		mkdirSync(path.join(root, '.swarm', 'epic'), { recursive: true });
+		writeFileSync(
+			path.join(root, '.swarm', 'epic', 'calibration.json'),
+			JSON.stringify({
+				version: 1,
+				hotModuleAdditions: Array.from(
+					{ length: ENTRIES },
+					(_, i) => `src/mod-${i}.ts`,
+				),
+			}),
+		);
+		expect(
+			importLegacyEpicCalibrationOnce(root, Date.parse(ISO_NOW)).status,
+		).toBe('imported');
 
 		const raw = JSON.parse(
 			readFileSync(
-				path.join(root, '.swarm', 'epic', 'calibration.json'),
+				path.join(root, '.swarm', 'epic-prior', 'learning.json'),
 				'utf-8',
 			),
-		) as { hotModuleAdditions?: string[] };
-		expect(Array.isArray(raw.hotModuleAdditions)).toBe(true);
-		expect(raw.hotModuleAdditions!.length).toBeLessThanOrEqual(CAP);
+		) as { files?: unknown[] };
+		expect(Array.isArray(raw.files)).toBe(true);
+		expect(raw.files!.length).toBe(CAP);
 	});
 
 	it('.swarm/cache/test-history.jsonl holds at most CAP whole JSON lines after cap+5 appends', () => {

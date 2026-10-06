@@ -2,24 +2,24 @@
 
 ## What changed
 
-- New additive module `src/turbo/epic/` adds the first capability of an
+- New additive module `src/epic/` adds the first capability of an
   upcoming optional execution mode (`epic`) that augments Lean Turbo's lane
   planning with a git co-change signal.
-- `src/turbo/epic/cochange-conflict.ts` exposes `epicPairConflict(...)` — a
+- `src/epic/cochange-conflict.ts` exposes `epicPairConflict(...)` — a
   pure function that combines Lean Turbo's existing path-based pair-conflict
   primitive with a co-change-history signal, conservatively (the co-change
   signal can only escalate a verdict, never downgrade one).
-- `src/turbo/epic/cochange-source.ts` composes the existing
+- `src/epic/cochange-source.ts` composes the existing
   `co_change_analyzer` primitives (`parseGitLog`, `buildCoChangeMatrix`) and
   caches the result per project, keyed on `git HEAD`, with FIFO eviction at
   10 directories.
-- `src/config/schema.ts` adds an additive `EpicConfigSchema` and a
-  `turbo.epic` field on both `StandardTurboConfigSchema` and
-  `LeanTurboStrategyConfigSchema`. The new keys are
-  `turbo.epic.cochange.enabled` (default `false`),
-  `turbo.epic.cochange.threshold` (NPMI floor, default `0.6`), and
-  `turbo.epic.cochange.min_co_changes` (default `5`).
-- New tests at `tests/unit/turbo/epic/` cover the signal combinations,
+- `src/config/schema.ts` adds an additive `EpicConfigSchema`, configured
+  as the top-level `epic` block (the older `turbo.epic` path is still
+  accepted and migrated — see `epic-mode-v2.md`). The new keys are
+  `epic.cochange.enabled` (default `false`),
+  `epic.cochange.threshold` (NPMI floor, default `0.6`), and
+  `epic.cochange.min_co_changes` (default `5`).
+- New tests at `tests/unit/epic/` cover the signal combinations,
   threshold gating, greenfield / signal-absent behavior, and a dedicated
   "feature disabled ⇒ identical to before" passthrough fixture.
 
@@ -41,10 +41,10 @@ been re-verified end-to-end.
 
 ## Migration steps
 
-None. With `turbo.epic.cochange.enabled` left at its default (`false`), no
+None. With `epic.cochange.enabled` left at its default (`false`), no
 Epic-mode code runs in any existing flow and Lean Turbo, Turbo, Full-Auto,
 and all other modes behave exactly as before. The
-`tests/unit/turbo/epic/disabled-passthrough.test.ts` fixture confirms this
+`tests/unit/epic/disabled-passthrough.test.ts` fixture confirms this
 explicitly.
 
 ## Breaking changes

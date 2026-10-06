@@ -6,6 +6,7 @@ import {
 	CLAUDE_CODE_NATIVE_COMMANDS,
 	COUNCIL_AGENT_TOOL_MAP,
 	DEFAULT_MODELS,
+	EPIC_AGENT_TOOL_MAP,
 	EXTERNAL_SKILL_AGENT_TOOL_MAP,
 	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	isQAAgent,
@@ -210,6 +211,9 @@ describe('constants.ts', () => {
 				for (const tool of tools) assignedTools.add(tool);
 			}
 			for (const tools of Object.values(TURBO_AGENT_TOOL_MAP)) {
+				for (const tool of tools) assignedTools.add(tool);
+			}
+			for (const tools of Object.values(EPIC_AGENT_TOOL_MAP)) {
 				for (const tool of tools) assignedTools.add(tool);
 			}
 			for (const tools of Object.values(SKILL_AGENT_TOOL_MAP)) {

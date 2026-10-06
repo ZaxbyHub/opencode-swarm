@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import type { PluginConfig, WorktreeIsolationConfig } from '../../config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
 import { closeProjectDb } from '../../db/project-db';
+import { epicCommitLandingFor } from '../../epic/task-landing.js';
 import { tryAcquireLock } from '../../parallel/file-locks';
 import { recordLiveLaneOwner } from '../../parallel/lane-owners';
 import { isUntrustedEnvKey, isValidEnvKey } from '../../sandbox/executor';
@@ -1162,8 +1163,19 @@ export async function precreateStandardWorktreeSession(args: {
 	outputArgs: Record<string, unknown>;
 	/** Scope to materialize into the lane for durability across restart (FR-102). */
 	scope?: { taskId: string; files: string[] };
+	/**
+	 * Epic v2 C3 (M-b): the coder belongs to the open epic, so an `auto`
+	 * policy is treated as `required` — an isolation failure throws instead
+	 * of degrading (serializing) the session to the main tree. Absent ⇒ the
+	 * configured policy, unchanged.
+	 */
+	isolationRequired?: boolean;
 }): Promise<void> {
-	const worktreeConfig = resolveWorktreeIsolationConfig(args.config);
+	const configuredWorktree = resolveWorktreeIsolationConfig(args.config);
+	const worktreeConfig: WorktreeIsolationConfig =
+		args.isolationRequired && configuredWorktree.policy === 'auto'
+			? { ...configuredWorktree, policy: 'required' }
+			: configuredWorktree;
 	if (worktreeConfig.policy === 'disabled') return;
 
 	// FR-104 SC-112: cheap TTL check on every precreate access — release a serialized
@@ -2981,6 +2993,19 @@ export async function abortStandardWorktreeDispatch(
 	);
 }
 
+/**
+ * Epic v2 C3: run `task` on the standard merge-back queue, so it never
+ * writes to the primary checkout's index concurrently with a worktree
+ * merge-back (Epic residue commits). Only Epic calls it.
+ */
+export function runSerializedWithMergeBacks<T>(
+	task: () => T | Promise<T>,
+): Promise<T> {
+	const queued = standardWorktreeMergeQueue.then(task, task);
+	standardWorktreeMergeQueue = queued;
+	return queued;
+}
+
 export async function finishStandardWorktreeDispatch(
 	directory: string,
 	dispatch: StandardWorktreeDispatch,
@@ -3110,6 +3135,24 @@ export async function finishStandardWorktreeDispatch(
 		}
 		const mergeResult = await (async () => {
 			if (!dispatch.recoveryClaim) {
+				// Epic v2 C3 seam: an epic task's lane lands as a commit on the
+				// epic branch. Consulted only when the caller set no landing of
+				// its own; with no open epic it costs one existsSync and returns
+				// undefined, leaving the options exactly as before.
+				const epicLanding =
+					settlement.commitLanding === undefined
+						? _internals.epicCommitLandingFor(directory, dispatch.planTaskId)
+						: undefined;
+				if (epicLanding && 'refused' in epicLanding) {
+					// Not attempted (EPIC_LANDING_INDEX_DIRTY): recorded below as a
+					// merge-back failure, so the lane is preserved and the epic
+					// wave is held until the index is clean and the task re-lands.
+					return {
+						failed: true as const,
+						stage: epicLanding.stage,
+						message: epicLanding.message,
+					};
+				}
 				return _internals.attemptMergeBackFromDirty(
 					dispatch.handle.worktreePath,
 					dispatch.handle.branchName,
@@ -3119,7 +3162,11 @@ export async function finishStandardWorktreeDispatch(
 						operationId: settlement.operationId,
 						resume: settlement.resume,
 						onBeforeMerge: settlement.onBeforeMerge,
-						commitLanding: settlement.commitLanding,
+						commitLanding:
+							settlement.commitLanding ?? epicLanding?.commitLanding,
+						...(epicLanding
+							? { landingCommitMessage: epicLanding.landingCommitMessage }
+							: {}),
 					},
 				);
 			}
@@ -3571,6 +3618,8 @@ export async function readLaneEnvFileFromDisk(
  * here via getters/setters) to mock worktree provisioning, merge-back, etc.
  */
 export const _internals = {
+	/** Epic v2 C3: committed landing for a task of the open epic. */
+	epicCommitLandingFor,
 	provisionWorktree,
 	removeWorktree,
 	attemptMergeBackFromDirty,

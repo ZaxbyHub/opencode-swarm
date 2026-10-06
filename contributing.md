@@ -351,7 +351,7 @@ If your code change alters the behavior of an existing function (new error messa
 
 ### Opt-in tool maps
 
-Some tools are gated behind feature flags and use **opt-in tool maps** (e.g., `MEMORY_AGENT_TOOL_MAP` when `memory.enabled === true`, `EXTERNAL_SKILL_AGENT_TOOL_MAP` when `external_skills.curation_enabled === true`). These tools must still be fully registered (export, `TOOL_NAMES`, `tool-metadata`, manifest entry), but are merged into agent configs conditionally at build time. See AGENTS.md invariant #11 (Tool registration + agent-map coherence) for the complete checklist.
+Some tools are gated behind feature flags and use **opt-in tool maps** (e.g., `MEMORY_AGENT_TOOL_MAP` when `memory.enabled === true`, `EXTERNAL_SKILL_AGENT_TOOL_MAP` when `external_skills.curation_enabled === true`, `EPIC_AGENT_TOOL_MAP` — architect-only `epic_next_wave` / `epic_phase_review` — when `epic.mode.enabled === true`). These tools must still be fully registered (export, `TOOL_NAMES`, `tool-metadata`, manifest entry), but are merged into agent configs conditionally at build time. See AGENTS.md invariant #11 (Tool registration + agent-map coherence) for the complete checklist.
 
 ### Adding adversarial tests
 

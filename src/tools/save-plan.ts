@@ -18,11 +18,17 @@ import {
 	type Task,
 	type TaskStatus,
 } from '../config/plan-schema';
+import type { PluginConfig } from '../config/schema';
 // QA gate check — first save-plan integration with profile store
 import {
 	getOrCreateProfileForIdentity,
 	getProfileLookupForIdentity,
 } from '../db/qa-gate-profile.js';
+import { isEpicModeConfigEnabled } from '../epic/config-gate.js';
+import {
+	computeSavePlanEpicShaping,
+	type EpicSavePlanShaping,
+} from '../epic/plan-shaping-seam.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { writeCheckpoint } from '../plan/checkpoint';
 import {
@@ -50,11 +56,13 @@ import { derivePlanId } from '../plan/utils.js';
  */
 export const _internals = {
 	loadPluginConfigWithMeta,
+	computeSavePlanEpicShaping,
 };
 
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import { normalizeScopeFiles } from '../scope/scope-binding.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import * as logger from '../utils/logger';
 import {
 	assertProjectRoot,
 	hasExplicitProjectBoundary,
@@ -163,6 +171,11 @@ export interface SavePlanResult {
 	requirement_coverage?: RequirementCoverageResult;
 	/** The resolved execution_profile that was persisted, if any. */
 	execution_profile?: ExecutionProfile;
+	/**
+	 * Epic v2 C7 plan-shaping advisory — present only when
+	 * `epic.mode.enabled` is true and no epic is open.
+	 */
+	epic_shaping?: EpicSavePlanShaping;
 }
 
 interface RequirementCoverageEntry {
@@ -950,10 +963,14 @@ export async function executeSavePlan(
 	// conservative config is authoritative. Read via the `_internals` DI seam so
 	// tests substitute hermetically.
 	let conservativePresetActive = false;
+	// Epic v2 C7: the plan-shaping seam after the save reuses this config —
+	// it is the only config read save_plan makes.
+	let loadedConfig: PluginConfig | undefined;
 	if (targetWorkspace) {
 		try {
 			const { config: presetConfig } =
 				_internals.loadPluginConfigWithMeta(targetWorkspace);
+			loadedConfig = presetConfig;
 			conservativePresetActive = presetConfig.preset === 'conservative';
 		} catch {
 			conservativePresetActive = false;
@@ -1244,6 +1261,7 @@ export async function executeSavePlan(
 	// Step 4: Save the plan using validated target workspace
 	const lockTaskId = `save-plan-${Date.now()}`;
 	const planFilePath = 'plan.json';
+	let saved: SavePlanResult;
 	try {
 		// Acquire file lock to prevent concurrent plan writes
 		const lockResult = await tryAcquireLock(
@@ -1431,7 +1449,7 @@ export async function executeSavePlan(
 				);
 			}
 
-			return {
+			saved = {
 				success: true,
 				message: 'Plan saved successfully',
 				plan_path: path.join(dir, '.swarm', 'plan.json'),
@@ -1476,6 +1494,25 @@ export async function executeSavePlan(
 				'Use save_plan with corrected inputs to create or restructure plans. Never write .swarm/plan.json or .swarm/plan.md directly.',
 		};
 	}
+	// Epic v2 C7 plan-shaping seam — Epic config only (the config loaded
+	// above; Epic off ⇒ this is the whole cost: no read, no I/O, no await).
+	// Runs after the plan lock is released, fails open: a throw leaves the
+	// successful save as it is, without `epic_shaping`.
+	if (loadedConfig && isEpicModeConfigEnabled(loadedConfig)) {
+		try {
+			const shaping = await _internals.computeSavePlanEpicShaping(
+				dir,
+				plan,
+				loadedConfig,
+			);
+			if (shaping) saved.epic_shaping = shaping;
+		} catch (error) {
+			logger.warn(
+				`[save_plan] Epic plan shaping failed (the plan was saved; no epic_shaping): ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	return saved;
 }
 
 /**

@@ -1,5 +1,46 @@
 # Changelog
 
+## [7.190.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.190.0...v7.190.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **commands:** /swarm full-auto resume runs the same authorization preflight as on ([e562e56](https://github.com/ZaxbyHub/opencode-swarm/commit/e562e565a17f1aefda3ce0e5356440340b42306f))
+* **review:** canonical tmpdir fixture, probe-preservation assertions, docs order + fragment accuracy ([60b7b7d](https://github.com/ZaxbyHub/opencode-swarm/commit/60b7b7d303c9e544c89a50581dd5106f71a4e7ba))
+* **test-runner:** derive maven and gradle targets from resolved test files ([9db4a7d](https://github.com/ZaxbyHub/opencode-swarm/commit/9db4a7dc24588a1db24bb764d71022de409b37f9))
+* **test-runner:** derive maven and gradle targets from resolved test files ([616994e](https://github.com/ZaxbyHub/opencode-swarm/commit/616994e7255275965cf9edfc102edcfcff37aae0))
+
+## [7.190.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.189.0...v7.190.0) (2026-10-05)
+
+
+### Features
+
+* **doctor:** pin both inert-config-key arms via a collector DI seam ([#2957](https://github.com/ZaxbyHub/opencode-swarm/issues/2957)) ([16ca396](https://github.com/ZaxbyHub/opencode-swarm/commit/16ca39626d97c545f96de341fa5d91f73384c818))
+* **epic:** epic mode v2 with plan-bound epics, gate-enforced waves, learning and plan shaping ([214c5cd](https://github.com/ZaxbyHub/opencode-swarm/commit/214c5cd304d301cead0892361f2783a70df37ea8))
+
+
+### Bug Fixes
+
+* **epic:** bind the phase review to the epic instance ([7b16040](https://github.com/ZaxbyHub/opencode-swarm/commit/7b16040e37354325964e8f8c8f1eb360822a66a5))
+* **epic:** close the remaining teardown, dispatch, and gating gaps ([8f6b5ec](https://github.com/ZaxbyHub/opencode-swarm/commit/8f6b5ecd79dcebdbde10773a2188d3802cbbf30e))
+* **epic:** refuse --abandon while a coder settlement is still live ([8d8875d](https://github.com/ZaxbyHub/opencode-swarm/commit/8d8875d2ccdda19e97706010ac4c2b342767ed53))
+* **epic:** refuse a PR-feedback coder that overlaps a running wave ([6a7c4fc](https://github.com/ZaxbyHub/opencode-swarm/commit/6a7c4fc6f705ee152e2581ed6777679292bee339))
+* **epic:** strip Epic tools before the gate grants them ([48ec42f](https://github.com/ZaxbyHub/opencode-swarm/commit/48ec42f9156d85f1d63524899c7fccb4769d1905))
+* **guardrails:** a redirect into /dev/null is not a shell write target ([4e58888](https://github.com/ZaxbyHub/opencode-swarm/commit/4e588888d9126e677976b1ce1734db3c1293beea))
+* **guardrails:** keep a temp-suffix mention out of the atomic-write ratchet's text scan ([c5caa88](https://github.com/ZaxbyHub/opencode-swarm/commit/c5caa88b995ffec2b92329074b9179347613c51e))
+
+## [7.189.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.188.12...v7.189.0) (2026-10-05)
+
+
+### Features
+
+* **ci:** expiry-aware quarantine census, renewal-requires-issue policy, and weekly aging workflow ([#2905](https://github.com/ZaxbyHub/opencode-swarm/issues/2905)) ([377fcdc](https://github.com/ZaxbyHub/opencode-swarm/commit/377fcdcf13d44220d211ce4bb456ada70d8967d5))
+
+
+### Bug Fixes
+
+* **ci:** resolve swarm-pr-review findings on [#3067](https://github.com/ZaxbyHub/opencode-swarm/issues/3067) ([76da8b6](https://github.com/ZaxbyHub/opencode-swarm/commit/76da8b66104ad5e2f6147b491c411bcb418d311f))
+
 ## [7.188.12](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.188.11...v7.188.12) (2026-10-04)
 
 

@@ -510,6 +510,17 @@ export interface DirtyMergeOptions {
 	 */
 	commitLanding?: boolean;
 	/**
+	 * Epic v2 C3: message of the committed landing (only with
+	 * `commitLanding` on a `'merge'` dispatch). When set, the lane lands as
+	 * an explicit merge commit carrying this message (`git -c
+	 * commit.gpgsign=false merge --no-ff --no-edit --no-verify -m <message>`)
+	 * so the landing is identifiable in history. It is a protocol commit on
+	 * the epic branch: repository commit hooks and signing apply when the
+	 * user commits the epic's squash at close. Absent ⇒ the plain
+	 * `git merge --no-edit` landing.
+	 */
+	landingCommitMessage?: string;
+	/**
 	 * Awaited after auto-commit and HEAD capture, but before the Git merge.
 	 * A rejection fails closed without invoking the merge.
 	 */
@@ -1001,12 +1012,29 @@ export async function mergeLaneBranch(
 	primaryDir: string,
 	branchName: string,
 	strategy: MergeStrategy,
+	/** Epic v2 C3: explicit merge-commit message (see `DirtyMergeOptions`). */
+	commitMessage?: string,
 ): Promise<MergeSuccess | MergeConflict | MergeFailure> {
 	let result: GitResult;
 
 	switch (strategy) {
 		case 'merge':
-			result = await runGit(['merge', '--no-edit', branchName], primaryDir);
+			result = await runGit(
+				commitMessage === undefined
+					? ['merge', '--no-edit', branchName]
+					: [
+							'-c',
+							'commit.gpgsign=false',
+							'merge',
+							'--no-ff',
+							'--no-edit',
+							'--no-verify',
+							'-m',
+							commitMessage,
+							branchName,
+						],
+				primaryDir,
+			);
 			break;
 		case 'squash-unstaged': {
 			// #2508 squash-merge-unstaged landing: apply the lane's changes to
@@ -2060,6 +2088,9 @@ export async function attemptMergeBackFromDirty(
 		primaryDir,
 		branchName,
 		landingStrategy,
+		landingStrategy === 'merge' && options.commitLanding
+			? options.landingCommitMessage
+			: undefined,
 	);
 
 	if ('merged' in mergeResult && mergeResult.merged) {

@@ -20,6 +20,55 @@ import { getAgentSession } from '../state';
 import * as logger from '../utils/logger';
 
 /**
+ * Result of the shared activation authorization preflight. On refusal the
+ * config is still returned so non-activating callers (`off`, `status`) keep
+ * today's defaulted-config behavior.
+ */
+type FullAutoAuthorization =
+	| {
+			authorized: true;
+			config: ReturnType<typeof loadPluginConfigWithMeta>['config'];
+			configHadErrors: boolean;
+	  }
+	| {
+			authorized: false;
+			message: string;
+			config: ReturnType<typeof loadPluginConfigWithMeta>['config'];
+			configHadErrors: boolean;
+	  };
+
+/**
+ * The single authorization preflight every Full-Auto ACTIVATION path must
+ * consult before re-arming a run: fail closed when a config file exists but
+ * cannot be loaded (an unreadable lock is "unknown", not "unlocked"), then
+ * honor the administrative hard-off. Both `on` (and the bare toggle that
+ * resolves to on) and `resume` route through here, so the lock cannot be
+ * defeated by re-arming a paused run. Disarm/read paths never consult it.
+ */
+function authorizeFullAuto(directory: string): FullAutoAuthorization {
+	const { config, configHadErrors } = loadPluginConfigWithMeta(directory);
+	if (configHadErrors) {
+		return {
+			authorized: false,
+			message:
+				'Error: Full-Auto Mode cannot be enabled — a swarm plugin config file exists but could not be loaded, so full_auto.locked cannot be verified. Fix the config file (see warnings above) and retry.',
+			config,
+			configHadErrors,
+		};
+	}
+	if (config.full_auto?.locked === true) {
+		return {
+			authorized: false,
+			message:
+				'Error: Full-Auto Mode is locked for this project (full_auto.locked is true in the swarm plugin config). Runtime activation is disabled by configuration; remove the lock to use /swarm full-auto on.',
+			config,
+			configHadErrors,
+		};
+	}
+	return { authorized: true, config, configHadErrors };
+}
+
+/**
  * Handles the /swarm full-auto command.
  * First-class session toggle for Full-Auto Mode: on / off / status / bare toggle.
  *
@@ -108,6 +157,14 @@ export async function handleFullAutoCommand(
 			: `Full-Auto oversight recovery probe failed: ${probe.reason}`;
 	}
 	if (parsedCommand.kind === 'resume') {
+		// Authorization preflight FIRST, before any resume-eligibility
+		// evaluation: resume is activation for lock purposes, so a locked or
+		// unverifiable project must be refused identically to `on` — the
+		// fail-closed message must not be maskable by a stale/invalid probe.
+		const auth = authorizeFullAuto(directory);
+		if (!auth.authorized) {
+			return auth.message;
+		}
 		const runState = loadFullAutoRunState(directory, sessionID);
 		if (!canResumeFromProbe(runState)) {
 			return 'Error: resume requires a paused infrastructure/deadline run with a recent successful matching retry-oversight probe. Policy, containment, sandbox, or severe-evidence pauses cannot be resumed by probe.';
@@ -149,22 +206,15 @@ export async function handleFullAutoCommand(
 	let durableError: string | undefined;
 	let criticModelAdvisory = '';
 	try {
-		const { config, configHadErrors } = loadPluginConfigWithMeta(directory);
+		const auth = authorizeFullAuto(directory);
+		const config = auth.config;
 		const fullAutoConfig = config.full_auto;
 
-		// Fail-closed activation guard: if a config file existed but could
-		// not be loaded (corrupt JSON, oversized, permission error), `locked`
-		// may have silently defaulted to false. Refuse activation rather than
-		// bypassing an unreadable lock.
-		if (newFullAutoMode && configHadErrors) {
-			return 'Error: Full-Auto Mode cannot be enabled — a swarm plugin config file exists but could not be loaded, so full_auto.locked cannot be verified. Fix the config file (see warnings above) and retry.';
-		}
-
-		// Administrative hard-off: `locked: true` refuses runtime activation.
-		// `off` and `status` always work so a locked project can still be
-		// cleanly deactivated.
-		if (newFullAutoMode && fullAutoConfig?.locked === true) {
-			return 'Error: Full-Auto Mode is locked for this project (full_auto.locked is true in the swarm plugin config). Runtime activation is disabled by configuration; remove the lock to use /swarm full-auto on.';
+		// Both activation refusals (configHadErrors fail-closed, then the
+		// `locked` administrative hard-off) come from the shared preflight;
+		// `off`/`status` never consult them, exactly as before.
+		if (newFullAutoMode && !auth.authorized) {
+			return auth.message;
 		}
 		const effectiveMode = modeOverride ?? fullAutoConfig?.mode ?? 'supervised';
 		modeLabel = effectiveMode;

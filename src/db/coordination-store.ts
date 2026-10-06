@@ -249,6 +249,29 @@ export function listCoordinationStates(
 	return states;
 }
 
+/**
+ * Entity keys of one namespace WITHOUT reading or validating payloads
+ * (bounded). Recovery code uses it to address rows whose payload is corrupt
+ * (a validated listing would throw on them). Returns [] without a database.
+ */
+export function listCoordinationStateKeys(
+	directory: string,
+	namespace: string,
+	limit: number,
+): string[] {
+	if (!projectDbExists(directory)) return [];
+	const boundedLimit = Number.isFinite(limit)
+		? Math.max(0, Math.min(MAX_COORDINATION_STATE_LIST_ROWS, Math.trunc(limit)))
+		: 0;
+	if (boundedLimit === 0) return [];
+	return getProjectDb(directory)
+		.query<{ entity_key: string }, [string, number]>(
+			'SELECT entity_key FROM coordination_state WHERE namespace = ? ORDER BY entity_key LIMIT ?',
+		)
+		.all(namespace, boundedLimit)
+		.map((row) => row.entity_key);
+}
+
 /** Return the exact number of authoritative rows in one coordination namespace. */
 export function countCoordinationStates(
 	directory: string,

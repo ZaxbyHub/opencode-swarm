@@ -91,7 +91,7 @@ describe('config/loader — strict-section typo recovery (#1778 H6)', () => {
 		fs.rmSync(projectDir, { recursive: true, force: true });
 	});
 
-	it('preserves the rest of the config when turbo.epic has a nested typo', () => {
+	it('preserves the rest of the config when epic has a nested typo (legacy turbo.epic path)', () => {
 		const projectDir = writeProjectConfig({
 			max_iterations: 6,
 			turbo: {
@@ -101,10 +101,12 @@ describe('config/loader — strict-section typo recovery (#1778 H6)', () => {
 		});
 		const result = loadPluginConfig(projectDir);
 
+		// The loader moves legacy `turbo.epic` to top-level `epic` (Epic C9).
 		expect(result.max_iterations).toBe(6);
-		expect(result.turbo?.epic?.mode?.enabled).toBe(true);
+		expect(result.turbo?.strategy).toBe('standard');
+		expect(result.epic?.mode?.enabled).toBe(true);
 		expect(
-			(result.turbo?.epic?.mode as Record<string, unknown>).misspelledEpicKey,
+			(result.epic?.mode as Record<string, unknown>).misspelledEpicKey,
 		).toBeUndefined();
 
 		fs.rmSync(projectDir, { recursive: true, force: true });

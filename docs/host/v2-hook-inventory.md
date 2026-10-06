@@ -44,6 +44,7 @@ Text parts map 1:1. Non-text v2 content kinds (`media`, `tool-call`, `tool-resul
 | PR-workflow response gate (`src/hooks/pr-workflow-response-gate.ts:625-712`) | `client?:` + `options.client?.session` | Client-absent path (gate additionally inert — row 8) |
 | parent-session lookup for Task routing (`src/index.ts:2055-2065`) | client-absent branch | Client-absent path |
 | evaluation/review model dispatchers (`src/review/contracts.ts:39-45`, `src/evaluation/model-dispatcher.ts:158`) | typed non-optional; **not invoked on v2** at the adapter seam | Fail-closed: dispatch surfaces are only reached through plugin-owned dispatch identities, none of which the v2 path constructs without a client |
+| Epic Mode (`src/epic/start.ts:startEpic`; consumers: standard worktree isolation, `epic_phase_review`) | `_internals.hostProvidesClient` (`swarmState.opencodeClient !== undefined`) | `/swarm epic start` refuses `host-unsupported`; no epic can open on v2 until a client is wired |
 | pr-feedback-loop runtime (`src/index.ts:2978`) | registration receives client; not invoked when client undefined | Fail-closed with bounded log |
 | pr-event delivery (`src/index.ts:3008`) | as above | Fail-closed with bounded log |
 

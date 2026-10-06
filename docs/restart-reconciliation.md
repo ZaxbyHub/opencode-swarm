@@ -15,6 +15,7 @@ instead of being silent.** Absence of a result is never treated as success.
 | QA gate profile (`qa_gate_profile` table) | durable | Plan-scoped gates + lock state survive unchanged; ratchet-only, locked after critic approval |
 | Session QA overrides (`qaGateSessionOverrides`, `qa_gate_session_override` table) | durable (policy) | A session's ratchet-tighter overrides are persisted by `/swarm qa-gates override` (durable-first) and restored by `rehydrateState`; effective gates stay tightened across restart. Deleted in lockstep with the session (end / stale eviction / `/swarm reset-session`). Never serialized into snapshot bytes — the DB row is the authority |
 | Full-auto run state (`.swarm/full-auto-state.json`) | durable (authority) | `fullAutoMode` is reconciled against the durable run state; cleared unless the run is still `running` |
+| Epic Mode lifecycle (coordination row `turbo.epic.lifecycle` + `.swarm/epic/epic.json` sentinel) | durable (authority) | Survives restart unchanged; the active wave stays the coder dispatch authority. A restored session is forced to `turboMode: false` while an epic is open for the project. An interrupted `/swarm epic close` leaves the epic `closing` (`epic_next_wave` refuses and asks for `/swarm epic close` to be rerun). A sentinel without a row means no open epic; `/swarm epic status` repairs sentinel/row drift |
 | `delegationActive`, reviewer scope generations, PRM state, invocation windows | ephemeral (authority) | Intentionally expire at rehydrate (`TRANSIENT_SESSION_FIELDS` / `SESSION_TRANSIENT_FIELDS`). A restarted host must never inherit stale execution authority |
 | Leases / child handles / in-flight timers / pending promises | ephemeral (authority) | Process-resident; expire with the process. Coder reservation leases are generation-fenced (#2104); a late old-generation release is refused |
 
@@ -62,6 +63,10 @@ Related states owned by other surfaces (composed, not duplicated):
    duplicates records or clears newer work. Late old-generation results are
    refused (`superseded`, #2667); late Stage A/B receipts are rejected with
    `TASK_WORKFLOW_GENERATION_MISMATCH` and never advance the task (#2666).
+5. **Inspect an open epic after a restart** (Epic Mode): `/swarm epic status`
+   shows the epic, its waves, phases and recorded merge failures, and repairs
+   sentinel/row drift; `--repair-refs` re-adopts task refs a rebase or amend
+   made unreachable.
 
 ## When a human must resolve an external effect
 

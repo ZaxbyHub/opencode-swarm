@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.8",
+  "tagCommit": "ee10e86ac3138ea2a1678347268b985732d44545",
+  "targetCommitish": "ee10e86ac3138ea2a1678347268b985732d44545",
+  "releaseBodySha256": "08932a97649ef3bef0a2475f846884043c6f7f096f0951703ddfae65ac43840d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3036-knowledge-receipt-wrong-session-redispatch.md",
+      "sha256": "b578687164fd855144829216f7adf363ae548e8eaf97a2495e335b44466087bf"
+    }
+  ]
+}

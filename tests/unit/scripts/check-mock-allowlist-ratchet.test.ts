@@ -25,6 +25,7 @@ const REPO_ROOT = path.resolve(__dirname, '../../../');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'check-invariants.sh');
 const SCRIPT_TS = path.join(REPO_ROOT, 'scripts', 'check-invariants.ts');
 const GATE_UTILS = path.join(REPO_ROOT, 'scripts', 'gate-utils.ts');
+const CENSUS_TS = path.join(REPO_ROOT, 'scripts', 'ci', 'quarantine-census.ts');
 const LIB = path.join(REPO_ROOT, 'scripts', 'lib', 'normalize-mock-target.sh');
 // Check 6 (issue #1976) delegates to this sibling script. Every fixture copies
 // check-invariants.sh; without this file Check 6's `bash <missing>` fails and
@@ -117,6 +118,11 @@ function copyScripts(repoDir: string): void {
 	fs.mkdirSync(path.join(scriptsDir, 'lib'), { recursive: true });
 	fs.copyFileSync(SCRIPT, path.join(scriptsDir, 'check-invariants.sh'));
 	fs.copyFileSync(SCRIPT_TS, path.join(scriptsDir, 'check-invariants.ts'));
+	fs.mkdirSync(path.join(scriptsDir, 'ci'), { recursive: true });
+	fs.copyFileSync(
+		CENSUS_TS,
+		path.join(scriptsDir, 'ci', 'quarantine-census.ts'),
+	);
 	fs.copyFileSync(GATE_UTILS, path.join(scriptsDir, 'gate-utils.ts'));
 	fs.copyFileSync(
 		LIB,

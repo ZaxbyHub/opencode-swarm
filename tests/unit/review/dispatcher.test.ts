@@ -369,6 +369,23 @@ describe('review model dispatcher adapter', () => {
 		});
 	});
 
+	test('forwards an explicit tool-denial map instead of the default (Epic provider-refusal retry)', async () => {
+		const fake = fakeClient();
+		const dispatcher = createReviewModelDispatcher(fake.client);
+		const tools = Object.freeze({ write: false, edit: false }) as Readonly<
+			Record<string, false>
+		>;
+		await dispatcher.dispatch({
+			directory,
+			agentName: 'reviewer',
+			system: 'review system',
+			prompt: 'review',
+			timeoutMs: 1_000,
+			tools,
+		});
+		expect(fake.promptRequest().body.tools).toBe(tools);
+	});
+
 	test('keeps separately bound client instances isolated during concurrent dispatch', async () => {
 		const first = fakeClient({
 			prompt: async () => ({

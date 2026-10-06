@@ -46,6 +46,17 @@ export function seedInvariantGateDependencies(fixtureDir: string): void {
 		}
 		fs.symlinkSync(repoNodeModules, fixtureNodeModules, 'junction');
 	}
+	// Check 7's census block (issue #2905) imports the census module, so every
+	// fixture tree that runs the gate also needs the sibling script present.
+	const censusSrc = path.resolve(
+		import.meta.dir,
+		'../../scripts/ci/quarantine-census.ts',
+	);
+	if (fs.existsSync(censusSrc)) {
+		const censusDir = path.join(fixtureDir, 'scripts', 'ci');
+		fs.mkdirSync(censusDir, { recursive: true });
+		fs.copyFileSync(censusSrc, path.join(censusDir, 'quarantine-census.ts'));
+	}
 }
 
 export function seedQuarantineListFiles(fixtureDir: string): void {
@@ -96,6 +107,19 @@ export function buildInvariantsOracleExpected(): {
 		...SIX_CHECK_BLOCK,
 		'=== Check 7: quarantine entries carry OWNER + EXPIRY metadata (issue #2477) ===',
 		'All active quarantine entries carry OWNER + EXPIRY metadata.',
+		// Quarantine census block (issue #2905): header-only fixture lists mean
+		// zero active entries, so the gate skips the renewal/trend git legs and
+		// prints the deterministic no-active-entries trend reason.
+		'Quarantine census',
+		'ledger scripts/ci/quarantined-tests.txt: 0 active',
+		'ledger scripts/ci/quarantined-tests-windows.txt: 0 active',
+		'ledger scripts/ci/quarantined-tests-macos.txt: 0 active',
+		'ledger scripts/ci/quarantined-integration-tests.txt: 0 active',
+		'total active: 0',
+		'first hard-fail date: none',
+		'days-to-first-wall: n/a',
+		'owners: none',
+		'trend: unavailable (no active entries)',
 		'=== Check 8: family-migration destination lock admission fails closed (issue #2577) ===',
 		'NOTE: src/memory/memory-family-migration.ts not found - Check 8 skipped for this path.',
 		'NOTE: src/knowledge/family-migration.ts not found - Check 8 skipped for this path.',

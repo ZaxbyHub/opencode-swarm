@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.188.12",
+  "tagCommit": "e889432396afb846e1373bfce327c3a803fdbf35",
+  "targetCommitish": "e889432396afb846e1373bfce327c3a803fdbf35",
+  "releaseBodySha256": "43151ec47496c6c85769fb8559d02f46544a86e0a443af8c4aa762e91d6bd169",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/harness-opt-skill-opt-config-wiring.md",
+      "sha256": "dc879667b26e9c132cf385de75d36d4741eab244a822b56b4bce40b6891b4f09"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/skillopt-3-governed-optimizer.md",
+      "sha256": "02d5ebf605171b1cac324304188db9928d9cb0f27ebdf1aefc224ec470020ebd"
+    }
+  ]
+}
