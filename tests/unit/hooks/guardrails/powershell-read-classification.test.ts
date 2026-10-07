@@ -203,14 +203,52 @@ describe('#3099 AC1/AC4/AC7 — PowerShell classification in the shell-write gua
 	}
 
 	// ------------------------------------------------------------------
-	// AC7 DISCRIMINATING: an unknown cmdlet is NOT a read. Fail-closed means
-	// "not positively classified read-only" is a rejection, not an admission.
+	// AC7 DISCRIMINATING: a write cmdlet hidden inside a script block.
+	// The pipeline's segment HEADS are both read-only, so a predicate keyed
+	// only on segment heads would call this a read; and the brace-nested
+	// regex in shell-write-detect requires the cmdlet to sit directly after
+	// '{', so the `$x = ` prefix defeats it too. It must still be a write.
 	// ------------------------------------------------------------------
+	const SCRIPT_BLOCK_WRITES: Array<[string, string]> = [
+		[
+			'write cmdlet assigned inside a script block',
+			'Get-Content a.md | ForEach-Object { $x = Set-Content OUTSIDE.md $_ }',
+		],
+		[
+			'write cmdlet invoked inside a script block',
+			'Get-Content a.md | Where-Object { Remove-Item OUTSIDE.md }',
+		],
+		[
+			'write cmdlet inside a parenthesised group',
+			'Get-Content a.md | ForEach-Object { (Copy-Item a.md OUTSIDE.md) }',
+		],
+	];
+
 	for (const tool of TOOLS) {
-		it(`[${tool}] blocks a pipeline whose cmdlet is not on the read-only allowlist`, async () => {
-			expect(
-				await run(tool, 'Get-Content a.md | Some-UnknownCustomThing'),
-			).not.toBeNull();
+		for (const [label, command] of SCRIPT_BLOCK_WRITES) {
+			it(`[${tool}] blocks a script-block write: ${label}`, async () => {
+				expect(await run(tool, command)).not.toBeNull();
+			});
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// AC7 DISCRIMINATING: routing to the Windows detector must not COST us
+	// POSIX write detection. detectShellType classifies anything containing
+	// 'set ' / 'echo ' / 'if ' / 'exist ' as cmd, and detectCmdWrites knows no
+	// POSIX write verbs, so a switch-based routing fix would silently admit
+	// these. The fix must union the detectors rather than switch between them.
+	// ------------------------------------------------------------------
+	const POSIX_SHAPES_THAT_MISROUTE: Array<[string, string]> = [
+		['set -e && cp', 'set -e && cp a.md OUTSIDE.md'],
+		['echo && sed -i', 'echo ok && sed -i "s/a/b/" OUTSIDE.md'],
+		['if-then cp', 'if [ -f a.md ]; then cp a.md OUTSIDE.md; fi'],
+		['export && tee', 'export X=1 && tee OUTSIDE.md < a.md'],
+	];
+
+	for (const [label, command] of POSIX_SHAPES_THAT_MISROUTE) {
+		it(`keeps blocking a POSIX write that misroutes to the Windows detector: ${label}`, async () => {
+			expect(await run('bash', command)).not.toBeNull();
 		});
 	}
 

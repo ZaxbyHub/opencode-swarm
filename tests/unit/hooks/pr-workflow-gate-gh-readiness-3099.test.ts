@@ -47,8 +47,18 @@ function setGhBinary(resolver: () => string | null): void {
 	internals.resolveGhBinary = resolver;
 }
 
-function advisories(): readonly string[] {
-	return readPrWorkflowGateState(directory)?.skillContractAdvisories ?? [];
+/**
+ * `readPrWorkflowGateState` is async AND requires a session id; reading it
+ * without both rejects the promise, so a non-awaited helper here would silently
+ * observe an empty array and make every assertion below vacuous.
+ */
+async function advisories(sessionID: string): Promise<readonly string[]> {
+	const state = await readPrWorkflowGateState(directory, sessionID);
+	if (!state)
+		throw new Error(
+			'gate state was not readable — assertions would be vacuous',
+		);
+	return state.skillContractAdvisories ?? [];
 }
 
 describe('#3099 AC5 — gh readiness advisory at PR-workflow activation', () => {
@@ -66,23 +76,33 @@ describe('#3099 AC5 — gh readiness advisory at PR-workflow activation', () => 
 	// AC5 DISCRIMINATING: gh absent ⇒ a workflow-scoped advisory is published.
 	for (const mode of ['PR_REVIEW', 'PR_FEEDBACK'] as const) {
 		test(`publishes a gh readiness advisory at activation for ${mode}`, async () => {
-			await activatePrWorkflow(directory, 'session-gh-absent', mode);
-			const found = advisories().some((entry) => /gh/i.test(entry));
-			expect(found).toBe(true);
+			const sessionID = `session-gh-absent-${mode}`;
+			await activatePrWorkflow(directory, sessionID, mode);
+			const entries = await advisories(sessionID);
+			expect(entries.some((entry) => /gh/i.test(entry))).toBe(true);
 		});
 	}
 
 	test('names the gh CLI as the missing prerequisite', async () => {
-		await activatePrWorkflow(directory, 'session-gh-names', 'PR_REVIEW');
-		expect(advisories().join('\n')).toMatch(/GitHub CLI \(gh\)|gh not found/i);
+		const sessionID = 'session-gh-names';
+		await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
+		const entries = await advisories(sessionID);
+		expect(entries.join('\n')).toMatch(/GitHub CLI \(gh\)|gh not found/i);
 	});
 
-	// AC4 PRESERVING: gh present ⇒ no advisory. A readiness warning that fires
-	// unconditionally is worse than none.
-	test('stays silent when gh resolves', async () => {
+	// AC4 PRESERVING: gh present ⇒ no gh advisory. A readiness warning that
+	// fires unconditionally is worse than none. Asserting the whole array is
+	// empty would be wrong — it legitimately carries skill-contract
+	// advisories — so this asserts about the gh channel specifically, using
+	// the same marker the positive rows key on.
+	test('stays silent about gh when gh resolves', async () => {
 		setGhBinary(() => '/usr/local/bin/gh');
-		await activatePrWorkflow(directory, 'session-gh-present', 'PR_REVIEW');
-		expect(advisories()).toEqual([]);
+		const sessionID = 'session-gh-present';
+		await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
+		const entries = await advisories(sessionID);
+		expect(
+			entries.filter((entry) => /GitHub CLI \(gh\)|gh not found/i.test(entry)),
+		).toEqual([]);
 	});
 
 	// AC4 PRESERVING: activation still succeeds in every case above — the
