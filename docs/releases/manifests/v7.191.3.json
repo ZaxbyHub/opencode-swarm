@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.191.3",
+  "tagCommit": "024c8058f98fa93dbe3f60226b1e9d046f0a1574",
+  "targetCommitish": "024c8058f98fa93dbe3f60226b1e9d046f0a1574",
+  "releaseBodySha256": "f1d4ec15ad8219b83aa779d5b280cbb284ce5075f44550671abd95e23f76c10a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-2867-two-windows-merge-group-flaky-quarantine.md",
+      "sha256": "43d7c393bfe7c534979ab04ffa151a5344b0b47a964338bf2fd80c2907ea3696"
+    }
+  ]
+}
