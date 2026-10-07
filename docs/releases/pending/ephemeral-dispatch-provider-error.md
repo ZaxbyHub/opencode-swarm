@@ -11,7 +11,10 @@ This affected every review, validation and evaluation dispatch built on it.
 It now returns `status: 'error'` in that case:
 - the error message gives the provider error's name, HTTP status and message
   (e.g. `APIError (HTTP 403): …`);
-- a structured `providerError` field lets callers recognise the refusal.
+- a structured `providerError` field lets callers recognise the refusal. It
+  carries the failure category from the shared provider classifier (e.g.
+  `provider.rate_limit`), and its message is the classifier's bounded,
+  redacted display text, never the provider's raw text.
 
 Because the message now says what happened, the evaluation dispatcher's
 transient-vs-permanent classifier can retry rate limits and similar errors.

@@ -1,4 +1,5 @@
 import type { OpencodeClient } from '@opencode-ai/sdk';
+import { classifyProviderFailure } from '../failures/invocation-failure.js';
 import type { DelegationCostFields } from '../services/cost-accounting.js';
 import {
 	buildDelegationCostFields,
@@ -103,7 +104,10 @@ export type EphemeralAgentDispatchResult = {
 export type EphemeralProviderError = {
 	name: string;
 	statusCode?: number;
+	/** Bounded display text from {@link classifyProviderFailure}. */
 	message: string;
+	/** Provider failure category, e.g. `provider.rate_limit`. */
+	category: string;
 };
 
 /**
@@ -123,15 +127,31 @@ function readProviderError(info: unknown): EphemeralProviderError | null {
 		message?: unknown;
 		statusCode?: unknown;
 	};
+	const statusCode =
+		typeof details.statusCode === 'number' &&
+		Number.isFinite(details.statusCode)
+			? details.statusCode
+			: undefined;
+	const rawMessage =
+		typeof details.message === 'string' && details.message.trim().length > 0
+			? details.message
+			: 'no message';
+	// AGENTS.md invariant 9: classify through the canonical provider classifier
+	// (as dispatch-lanes does for the same `info.error`) so the category is
+	// structured and the message is bounded display evidence, never raw text.
+	const classified = classifyProviderFailure(
+		statusCode === undefined
+			? rawMessage
+			: { message: rawMessage, status: statusCode },
+	);
 	return {
-		name: typeof name === 'string' && name.length > 0 ? name : 'UnknownError',
-		...(typeof details.statusCode === 'number'
-			? { statusCode: details.statusCode }
-			: {}),
-		message:
-			typeof details.message === 'string' && details.message.length > 0
-				? details.message
-				: 'no message',
+		name:
+			typeof name === 'string' && name.length > 0
+				? name.slice(0, 64)
+				: 'UnknownError',
+		...(statusCode === undefined ? {} : { statusCode }),
+		message: classified.evidence.display || rawMessage.slice(0, 200),
+		category: classified.category,
 	};
 }
 

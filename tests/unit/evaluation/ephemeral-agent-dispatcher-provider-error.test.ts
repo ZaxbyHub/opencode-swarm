@@ -84,7 +84,9 @@ describe('dispatchEphemeralAgent — provider error on the assistant message', (
 		expect(result.providerError).toEqual({
 			name: 'APIError',
 			statusCode: 403,
-			message: 'Forbidden: tool configuration not allowed',
+			// The classifier's bounded display text (it appends the status).
+			message: 'Forbidden: tool configuration not allowed 403',
+			category: 'provider.authentication_configuration',
 		});
 	});
 
@@ -107,6 +109,7 @@ describe('dispatchEphemeralAgent — provider error on the assistant message', (
 		expect(result.providerError).toEqual({
 			name: 'ProviderAuthError',
 			message: 'invalid api key',
+			category: 'provider.authentication_configuration',
 		});
 	});
 
@@ -120,5 +123,27 @@ describe('dispatchEphemeralAgent — provider error on the assistant message', (
 		expect(result.status).toBe('completed');
 		expect(result.text).toBe('VERDICT: APPROVED');
 		expect(result.providerError).toBeUndefined();
+	});
+
+	test('the provider message is classified and bounded, never raw', async () => {
+		_internals.log = mock(() => {});
+		const huge = `rate limited ${'x'.repeat(20_000)}`;
+		const result = await dispatch(
+			clientReturning(
+				{
+					error: {
+						name: 'APIError',
+						data: { message: huge, statusCode: 429 },
+					},
+				},
+				[],
+			),
+		);
+		expect(result.status).toBe('error');
+		expect(result.providerError?.category).toBe('provider.rate_limit');
+		expect(result.providerError?.statusCode).toBe(429);
+		const display = result.providerError?.message ?? '';
+		expect(Buffer.byteLength(display, 'utf8')).toBeLessThanOrEqual(512);
+		expect((result.error ?? '').length).toBeLessThan(1_000);
 	});
 });
