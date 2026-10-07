@@ -62,6 +62,9 @@ import {
 	detectInteractiveSession,
 	detectPosixWrites,
 	detectWindowsWrites,
+	isPowerShellReadOnlyPipeline,
+	isPowerShellShaped,
+	mergeWriteAnalyses,
 	resolveWriteTargets,
 	type WriteAnalysis,
 } from '../shell-write-detect';
@@ -1016,38 +1019,66 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		const normalizedTool = tool;
 
-		let shellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash' = 'posix';
+		// Issue #3099: the shell type is a property of the COMMAND, not of the
+		// tool that carries it. The bash tool is a transport; the old code
+		// conflated the two and forced `posix`, which made every PowerShell
+		// command unparseable-and-therefore-rejected, and every PowerShell
+		// WRITE cmdlet report zero writes and slip past the scope check.
+		const detectedShellType = detectShellType(command) as
+			| 'posix'
+			| 'powershell'
+			| 'cmd'
+			| 'unix'
+			| 'bash';
+		const shaped = isPowerShellShaped(command);
+		const shellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash' =
+			normalizedTool === 'bash' ? detectedShellType : detectedShellType;
 
-		if (normalizedTool === 'bash') {
-			shellType = 'posix';
-		} else {
-			shellType = detectShellType(command) as
-				| 'posix'
-				| 'powershell'
-				| 'cmd'
-				| 'unix'
-				| 'bash';
-		}
-
-		const interactiveShellType =
-			shellType === 'unix' || shellType === 'bash' ? 'posix' : shellType;
-		if (enforce && detectInteractiveSession(command, interactiveShellType)) {
+		// R1d: the interactive verdict is OR-ed across shell types. Routing by
+		// detected shell type alone would send `watch echo hi` to 'cmd' (the
+		// `\b(set|echo|if|exist)\s+` rule), and detectInteractiveSession has no
+		// 'cmd' case — an interactive session would be newly admitted.
+		const interactiveCandidates: Array<'posix' | 'powershell' | 'cmd'> =
+			shellType === 'powershell' || shellType === 'cmd'
+				? [shellType, 'posix']
+				: ['posix'];
+		if (
+			enforce &&
+			interactiveCandidates.some((candidate) =>
+				detectInteractiveSession(command, candidate),
+			)
+		) {
 			throw new Error(
 				`BLOCKED: interactive/session tool detected — rejecting for safety`,
 			);
 		}
 
-		const detect = (c: string): WriteAnalysis =>
-			normalizedTool === 'bash'
-				? detectPosixWrites(c)
-				: shellType === 'powershell' || shellType === 'cmd'
-					? detectWindowsWrites(c, shellType)
-					: detectPosixWrites(c);
+		// Issue #3099 R1b: UNION, never a switch. The POSIX detector always runs,
+		// so no command can lose the write detection it has today. The Windows
+		// detector runs ADDITIONALLY when the command is Windows-shaped, and
+		// when it does it unions BOTH of its sub-detectors — routing by `w`
+		// would lose cmd-alias writes (`copy a b | Get-Content x`), which the
+		// cmd detector catches and the PowerShell detector does not.
+		const windowsShell: 'powershell' | 'cmd' | null = shaped
+			? 'powershell'
+			: detectedShellType === 'powershell' || detectedShellType === 'cmd'
+				? detectedShellType
+				: null;
+
+		const detect = (c: string): WriteAnalysis => {
+			const posix = detectPosixWrites(c);
+			if (windowsShell === null) return posix;
+			return mergeWriteAnalyses(posix, detectWindowsWrites(c, windowsShell));
+		};
 
 		// Fail-closed parse gate runs on the ORIGINAL command so a genuinely
 		// malformed command (e.g. an unclosed quote) is still rejected for safety.
+		// The one narrowing: a command positively classified as a read-only
+		// PowerShell pipeline is a read, not a parse failure (issue #3099).
+		const suppressParseError = (c: string) =>
+			enforce && isPowerShellReadOnlyPipeline(c);
 		const primaryAnalysis = detect(command);
-		if (enforce && primaryAnalysis.parseError) {
+		if (enforce && primaryAnalysis.parseError && !suppressParseError(command)) {
 			throw new Error(
 				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
 			);
@@ -1070,7 +1101,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		// A wrapped command whose unwrapped inner form fails to parse is also
 		// rejected for safety.
-		if (enforce && analysis.parseError) {
+		if (
+			enforce &&
+			analysis.parseError &&
+			!suppressParseError(detectionCommand)
+		) {
 			throw new Error(
 				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
 			);

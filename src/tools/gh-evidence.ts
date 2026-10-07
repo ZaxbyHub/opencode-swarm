@@ -304,7 +304,7 @@ function sanitizeParsedJson(value: unknown): unknown {
  * object under the same contract and mislead readers. Instead we hand the caller
  * the exact REST URL and the gate-allowed degraded read path.
  */
-function ghNotFoundGuidance(
+export function ghNotFoundGuidance(
 	target: 'pr' | 'issue' | 'run',
 	number: number,
 	repo: string | undefined,

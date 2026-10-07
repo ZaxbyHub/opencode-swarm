@@ -89,7 +89,63 @@ export interface ResolvedWriteTarget {
 	resolved: boolean;
 }
 
-function buildDedupeKey(
+/**
+ * Issue #3099 R1b: union two analyses into one.
+ *
+ * The POSIX detector always runs and the Windows detector runs additionally when
+ * the command is Windows-shaped, so the merged result can only ever contain
+ * MORE writes than either detector alone. That monotonicity is the whole point:
+ * a switch between detectors silently loses a family (cmd-alias writes are in
+ * `detectCmdWrites` only, PowerShell write cmdlets in `detectPowerShellWrites`
+ * only).
+ *
+ * `parseError` is carried from `primary` unchanged. It is deliberately NOT
+ * recomputed as "parseFailed && mergedWrites.length === 0": that would let a
+ * malformed command that also writes escape the fail-closed parse backstop.
+ */
+export function mergeWriteAnalyses(
+	primary: WriteAnalysis,
+	additional: WriteAnalysis,
+): WriteAnalysis {
+	if (additional.writes.length === 0 && !additional.hasWrites) {
+		return primary;
+	}
+	// Windows-path precedence. POSIX treats `\` as an escape character, so a
+	// Windows path re-parsed by the POSIX detector comes back MANGLED —
+	// `src\out.txt` reads as `srcout.txt` — and that phantom path is not inside
+	// a `src/` scope, so the union would block a legitimate in-scope write.
+	//
+	// When both detectors report the same syntactic construct (same category and
+	// operator), the Windows reading wins: it is the grammar that understands
+	// the path syntax. A POSIX-only construct (`cp`, `sed -i`, `tee`) has a
+	// different category or operator and survives, which is exactly the case
+	// this union exists for — a hybrid command like `set -e && cp a.md OUT.md`
+	// that only the POSIX half detects.
+	const windowsConstructs = new Set(
+		additional.writes.map((write) => `${write.category}|${write.operator}`),
+	);
+	const seen = new Set<string>();
+	const writes: WriteTarget[] = [];
+	for (const write of [...primary.writes, ...additional.writes]) {
+		if (
+			primary.writes.includes(write) &&
+			windowsConstructs.has(`${write.category}|${write.operator}`)
+		) {
+			continue;
+		}
+		const key = buildDedupeKey(write.category, write.operator, write.path);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		writes.push(write);
+	}
+	return {
+		writes,
+		hasWrites: writes.length > 0 || primary.hasWrites,
+		parseError: primary.parseError,
+	};
+}
+
+export function buildDedupeKey(
 	category: string,
 	operator: string,
 	path: string | null | undefined,
@@ -208,6 +264,269 @@ const ARCHIVE_EXTRACT_COMMANDS = new Set([
 
 /** Git commands (subcommand determines if destructive). */
 const GIT_COMMAND = 'git';
+
+// ---------------------------------------------------------------------------
+// Issue #3099 — PowerShell shape and read-only classification
+// ---------------------------------------------------------------------------
+
+/**
+ * Cmdlets whose NAME alone proves the command is PowerShell-shaped.
+ *
+ * Read verbs and write verbs are listed separately because they are consumed
+ * by two different decisions: the shape predicate below (which opens the
+ * Windows detector) and the read-only allowlist (which suppresses a
+ * parse-failure throw). A cmdlet may appear in the write set while having no
+ * matcher in detectPowerShellWrites — that combination is a bypass, because the
+ * shape gate would open a detector that then reported the command write-free.
+ * `Rename-Item` is deliberately NOT listed for exactly that reason; see the
+ * Phase 4.2 recurrence sweep for its disposition.
+ */
+const POWERSHELL_WRITE_CMDLETS = new Set([
+	'Set-Content',
+	'Add-Content',
+	'Out-File',
+	'Clear-Content',
+	'Copy-Item',
+	'Move-Item',
+	'Remove-Item',
+	'New-Item',
+	// Aliases that are unambiguously PowerShell — they are not POSIX or cmd
+	// builtins, so naming them here cannot over-trigger the shape gate.
+	'ni',
+	'ac',
+	'sc',
+	'epcsv',
+]);
+
+/**
+ * Write tokens that are AMBIGUOUS across shells — a PowerShell alias for one
+ * cmdlet and a POSIX/cmd builtin for another.
+ *
+ * These are deliberately NOT in the shape vocabulary: `cp a.md b.md` is a POSIX
+ * command that the POSIX detector already catches, and adding it to the shape
+ * set would open the Windows detector on ordinary POSIX input for no gain. They
+ * ARE in the read-only predicate's scan set, where the opposite is true — there,
+ * missing `cp` would switch off the parse-failure protection that keeps a `cp`
+ * hidden inside a PowerShell script block blocked.
+ */
+const AMBIGUOUS_WRITE_ALIASES = new Set([
+	'cp',
+	'cpi',
+	'mv',
+	'rm',
+	'del',
+	'ren',
+	'rd',
+	'md',
+	'type',
+]);
+
+/** Cmdlets that only observe. Their presence never implies a write. */
+const POWERSHELL_READ_ONLY_COMMANDS = new Set([
+	'Get-Content',
+	'gc',
+	'Get-Item',
+	'gi',
+	'Get-ChildItem',
+	'gci',
+	'Get-Location',
+	'pwd',
+	'Get-Command',
+	'Get-Member',
+	'Get-Date',
+	'Get-Help',
+	'Get-ItemProperty',
+	'Select-String',
+	'Select-Object',
+	'Where-Object',
+	'ForEach-Object',
+	'Sort-Object',
+	'Group-Object',
+	'Measure-Object',
+	'Compare-Object',
+	'Resolve-Path',
+	'Test-Path',
+	'Format-Table',
+	'Out-String',
+	'Write-Output',
+	'Write-Host',
+	'Write-Verbose',
+	'Write-Warning',
+]);
+
+/**
+ * POSIX write builtins and in-place editors. Used by the read-only predicate's
+ * whole-command scan: suppressing the parse-failure throw on a command that
+ * actually writes is a bypass, and bash-parser cannot parse a PowerShell script
+ * block, so the braces alone are what kept `cp` inside `{ ... }` blocked at
+ * base. If the scan missed `cp`, that protection would be switched off.
+ */
+const POSIX_WRITE_TOKENS = new Set([
+	'cp',
+	'mv',
+	'rm',
+	'rmdir',
+	'tee',
+	'dd',
+	'ln',
+	'touch',
+	'truncate',
+	'unlink',
+	'install',
+]);
+
+/**
+ * Split a command into unquoted word tokens. Quoted regions never yield a
+ * token, so a read whose ARGUMENT merely mentions a write verb
+ * (`Where-Object { $_.Name -like '*Remove-Item*' }`) is not misread.
+ */
+function unquotedWordTokens(command: string): string[] {
+	const tokens: string[] = [];
+	let current = '';
+	let quote: '"' | "'" | null = null;
+	const flush = () => {
+		if (current.length > 0) tokens.push(current);
+		current = '';
+	};
+	for (let i = 0; i < command.length; i += 1) {
+		const ch = command[i];
+		if (quote) {
+			if (ch === quote) quote = null;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			flush();
+			quote = ch;
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			flush();
+			continue;
+		}
+		current += ch;
+	}
+	flush();
+	// Strip the punctuation that groups a cmdlet inside a script block or
+	// sub-expression, so `(Copy-Item` and `{ Remove-Item` are recognised as
+	// `Copy-Item` and `Remove-Item`.
+	return tokens.map((token) =>
+		token.replace(/^[({]+/, '').replace(/[)}]+$/, ''),
+	);
+}
+
+/** True when any unquoted word token is a known PowerShell cmdlet. */
+export function isPowerShellShaped(command: string): boolean {
+	if (!command) return false;
+	return unquotedWordTokens(command).some((token) => {
+		const lower = token.toLowerCase();
+		return (
+			POWERSHELL_WRITE_CMDLETS.has(token) ||
+			POWERSHELL_WRITE_CMDLETS.has(lower) ||
+			POWERSHELL_READ_ONLY_COMMANDS.has(token) ||
+			POWERSHELL_READ_ONLY_COMMANDS.has(lower)
+		);
+	});
+}
+
+/**
+ * True only when the command is positively a read-only PowerShell pipeline.
+ *
+ * Every condition must hold. The default is therefore fail-closed: anything not
+ * positively recognised stays subject to the parse-failure rejection.
+ *
+ *  1. no redirect, redirection, `;`, `&&`, `||`, `$(` or backtick;
+ *  2. quoting and braces are balanced — an unclosed quote or brace means the
+ *     command is malformed, and a malformed command is never "read-only";
+ *  3. splitting on `|` respects quotes, so `Select-String -Pattern 'a|b'` is one
+ *     segment rather than two;
+ *  4. no write-shaped token of ANY family appears as an unquoted word
+ *     anywhere — not merely at a segment head, because a script block can hide
+ *     a write behind read-only-looking heads;
+ *  5. every segment head is a known read-only cmdlet.
+ */
+export function isPowerShellReadOnlyPipeline(command: string): boolean {
+	if (!command) return false;
+	if (/[>;&`]/.test(command) || /\$\(/.test(command)) return false;
+
+	// Condition 2 — balanced quoting and braces.
+	let quote: '"' | "'" | null = null;
+	let braceDepth = 0;
+	for (const ch of command) {
+		if (quote) {
+			if (ch === quote) quote = null;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			continue;
+		}
+		if (ch === '{') braceDepth += 1;
+		if (ch === '}') braceDepth -= 1;
+		if (braceDepth < 0) return false;
+	}
+	if (quote !== null || braceDepth !== 0) return false;
+
+	// Condition 4 — no write token of any family, anywhere, unquoted.
+	for (const token of unquotedWordTokens(command)) {
+		const lower = token.toLowerCase();
+		if (
+			POWERSHELL_WRITE_CMDLETS.has(token) ||
+			POWERSHELL_WRITE_CMDLETS.has(lower) ||
+			AMBIGUOUS_WRITE_ALIASES.has(token) ||
+			AMBIGUOUS_WRITE_ALIASES.has(lower) ||
+			POSIX_WRITE_TOKENS.has(token) ||
+			POSIX_WRITE_TOKENS.has(lower)
+		) {
+			return false;
+		}
+		// In-place editors only write when given an edit flag.
+		if (
+			(token === 'sed' || token === 'perl' || token === 'awk') &&
+			/(^|[\s'"])--?[a-zA-Z-]*(?:\bi|\bin-place|\bpi)\b/.test(command)
+		) {
+			return false;
+		}
+	}
+
+	// Condition 3 — quote-aware split on the pipeline separator.
+	const segments: string[] = [];
+	let current = '';
+	quote = null;
+	for (let i = 0; i < command.length; i += 1) {
+		const ch = command[i];
+		if (quote) {
+			if (ch === quote) quote = null;
+			current += ch;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			current += ch;
+			continue;
+		}
+		if (ch === '|') {
+			segments.push(current);
+			current = '';
+			continue;
+		}
+		current += ch;
+	}
+	segments.push(current);
+
+	// Condition 5 — every segment head is read-only.
+	for (const segment of segments) {
+		const tokens = unquotedWordTokens(segment.trim());
+		if (tokens.length === 0) return false;
+		const head = tokens[0];
+		if (
+			!POWERSHELL_READ_ONLY_COMMANDS.has(head) &&
+			!POWERSHELL_READ_ONLY_COMMANDS.has(head.toLowerCase())
+		) {
+			return false;
+		}
+	}
+	return segments.length > 0;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -576,6 +895,48 @@ function collectLeafCommands(node: BashNode, out: BashNode[]): void {
 					// LESS operator (<) is read-only — skip entirely
 				}
 			}
+			break;
+
+		// Issue #3099 (R1e): control-flow bodies were never recursed. A `cp`
+		// inside an `if`/`while`/`until`/`for`/`case` body reached `default:`
+		// as the un-descended compound node, so it reported no write at all.
+		// Push the compound node FIRST — the same reason CompoundList and
+		// Subshell are pushed — so its own `redirections` stay visible to
+		// detectRedirects (`if a; then echo x; fi > OUT` must keep reporting
+		// the redirect), then recurse into the parts that actually execute.
+		case 'If':
+			out.push(node);
+			if (node.clause) collectLeafCommands(node.clause, out);
+			if (node.then) collectLeafCommands(node.then, out);
+			if (node.else) collectLeafCommands(node.else, out);
+			break;
+
+		case 'While':
+		case 'Until':
+			out.push(node);
+			if (node.clause) collectLeafCommands(node.clause, out);
+			if (node.do) collectLeafCommands(node.do, out);
+			break;
+
+		case 'For':
+			out.push(node);
+			if (node.do) collectLeafCommands(node.do, out);
+			break;
+
+		case 'Case':
+			out.push(node);
+			// `clause` on a Case is a bare Word (the case subject), never a
+			// command — recursing into it would push a non-command node.
+			if (Array.isArray(node.cases)) {
+				for (const entry of node.cases) {
+					if (entry?.body) collectLeafCommands(entry.body, out);
+				}
+			}
+			break;
+
+		case 'Function':
+			out.push(node);
+			if (node.body) collectLeafCommands(node.body, out);
 			break;
 		default:
 			out.push(node);
@@ -2395,7 +2756,81 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		return null;
 	}
 
-	const fileOp = detectPsFileOp(innerCommand);
+	// Detect New-Item (issue #3099 R3).
+	//
+	// New-Item gets a dedicated matcher rather than being folded into the
+	// Copy-Item/Move-Item/Remove-Item branch: that branch resolves the LAST
+	// positional argument and has fragile unknown-flag handling, which is wrong
+	// for New-Item and would let `New-Item -Path ../OUTSIDE.md -Value
+	// src/decoy` resolve the in-scope decoy and be admitted.
+	//
+	// Target resolution, in order:
+	//   1. `-Path`/`-LiteralPath` AND `-Name` both present → their COMPOSITION,
+	//      because PowerShell composes them (`-Path src -Name ../OUT.md`
+	//      creates `src/../OUT.md`). Any fixed single-flag precedence admits
+	//      one variant of exactly that decoy.
+	//   2. exactly one of them present → its value.
+	//   3. otherwise the first remaining non-flag positional
+	//      (`New-Item -ItemType Directory OUTSIDE_DIR`).
+	//   4. no resolvable target → a null-path write, which fails closed.
+	// `-ItemType` and `-Value` are value-taking NON-path flags: they consume
+	// their value but never consume the positional.
+	function detectPsNewItem(cmd: string): WriteTarget | null {
+		const opMatch = cmd.match(/^(?:New-Item|ni)\b/i);
+		if (!opMatch) return null;
+
+		const rest = cmd.slice(opMatch[0].length).trim();
+		const pathFlag =
+			rest.match(/-(?:Literal)?Path\s+("[^"]*"|'[^']*'|\S+)/i)?.[1] ?? null;
+		const nameFlag = rest.match(/-Name\s+("[^"]*"|'[^']*'|\S+)/i)?.[1] ?? null;
+		const unquote = (value: string) => value.replace(/^["']|["']$/g, '');
+
+		if (pathFlag && nameFlag) {
+			const base = unquote(pathFlag);
+			const leaf = unquote(nameFlag);
+			const composed = base ? `${base.replace(/\/+$/, '')}/${leaf}` : leaf;
+			return {
+				category: 'builtin_write',
+				operator: 'New-Item',
+				path: composed,
+			};
+		}
+		if (pathFlag) {
+			return {
+				category: 'builtin_write',
+				operator: 'New-Item',
+				path: unquote(pathFlag),
+			};
+		}
+
+		// Flags that take a value but are NOT paths. They must consume their
+		// value so it is never mistaken for the positional target.
+		const valueFlags = new Set([
+			'-ItemType',
+			'-Value',
+			'-Description',
+			'-Force',
+		]);
+		let positional: string | null = null;
+		const tokens = rest.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+		for (let i = 0; i < tokens.length; i += 1) {
+			const token = tokens[i];
+			if (valueFlags.has(token)) {
+				i += 1; // skip the flag's value
+				continue;
+			}
+			if (token.startsWith('-')) continue;
+			positional = unquote(token);
+			break;
+		}
+		return {
+			category: 'builtin_write',
+			operator: 'New-Item',
+			path: positional,
+		};
+	}
+
+	const fileOp = detectPsFileOp(innerCommand) ?? detectPsNewItem(innerCommand);
 	if (fileOp) {
 		results.push(fileOp);
 	}
