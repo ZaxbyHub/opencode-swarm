@@ -3322,12 +3322,18 @@ export function detectWindowsWrites(
 		const subCommands = splitWindowsCommands(command, shell);
 		const allWrites: WriteTarget[] = [];
 
+		// Issue #3099: BOTH sub-detectors run on EVERY fragment — never one or
+		// the other. Switching on `shell` lost a family: `copy`, `move`, `ren`,
+		// `del`, `rd` and `md` are cmd builtins whose rules live only in
+		// detectCmdWrites, yet `copy a b | Get-Content x` is PowerShell-shaped
+		// (Get-Content) and so was routed to the PowerShell detector alone.
+		// Running both per fragment also PRESERVES the fragment split, which a
+		// whole-string union would lose: the file-op matchers are start-anchored,
+		// so `Get-ChildItem .; Remove-Item OUTSIDE.md` only reports its write
+		// because splitting isolates `Remove-Item OUTSIDE.md`.
 		for (const subCmd of subCommands) {
-			const writes =
-				shell === 'powershell'
-					? detectPowerShellWrites(subCmd)
-					: detectCmdWrites(subCmd);
-			allWrites.push(...writes);
+			allWrites.push(...detectPowerShellWrites(subCmd));
+			allWrites.push(...detectCmdWrites(subCmd));
 		}
 
 		// Deduplicate by (category, operator, path)
