@@ -997,7 +997,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// Carries a free-text filesystem error message.
 			privacyClass: 'sensitive',
-			producer: 'src/plan/ledger.ts:1620',
+			producer: 'src/plan/ledger.ts:1623',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,

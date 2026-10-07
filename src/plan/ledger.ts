@@ -901,9 +901,12 @@ export function computePlanLedgerHash(plan: Plan): string {
  * DELIBERATE exception, recorded with #2532 (PLAN-4): `current_phase` — the
  * execution cursor — IS included in this hash (and in
  * {@link computePlanLedgerHash}). Unlike task/phase statuses, a cursor
- * advance therefore DOES change the baseline hash: bindings and approved
- * snapshots declared against the pre-advance plan stop matching, exactly as
- * they already do for any save_plan revision. This is intentional — the
+ * advance therefore DOES change the baseline hash: bindings declared against
+ * the pre-advance plan stop matching, exactly as they already do for any
+ * save_plan revision. Critic approval is the exception: it is checked with
+ * {@link approvedSnapshotCoversPlan}, which accepts a plan that differs from
+ * the approved snapshot only in the cursor. Keeping the cursor in the hash is
+ * intentional — the
  * hash bytes are persisted on every live binding (`planStructureHash`,
  * verified with strict equality) and every critic-approved snapshot
  * (`payload_hash`), so changing the normalization would silently invalidate
