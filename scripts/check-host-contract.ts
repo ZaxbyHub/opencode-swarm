@@ -69,7 +69,12 @@ const HOST_REPO = 'ZaxbyHub/opencode-swarm'; // routing target (this repo)
 const HOST_SOURCE_REPO = 'anomalyco/opencode'; // the OpenCode host
 const HOST_SOURCE_FILE = 'packages/opencode/src/session/message-v2.ts';
 const EXPECTED_PATH = path.join(REPO_ROOT, 'tests/fixtures/host/expected-structure.json');
-const NPM_REGISTRY_URL = 'https://registry.npmjs.org/@opencode-ai/plugin';
+// The dist-tags endpoint is a few KiB. The full packument it replaced grew
+// past 27 MB with snapshot/dev tags, overran the bounded read, and made every
+// run resolve no tag (SOURCE_NOT_FOUND) with nothing wrong on the host side.
+export const NPM_DIST_TAGS_URL =
+	'https://registry.npmjs.org/-/package/@opencode-ai/plugin/dist-tags';
+const NPM_DIST_TAGS_MAX_BYTES = 64 * 1024;
 const RAW_SOURCE = (tag: string) =>
 	`https://raw.githubusercontent.com/${HOST_SOURCE_REPO}/${tag}/${HOST_SOURCE_FILE}`;
 const TRACKING_TITLE_PREFIX = 'Host contract drift: message-v2.ts';
@@ -135,17 +140,19 @@ export async function readBounded(res: Response, capBytes: number): Promise<stri
 	}
 }
 
-async function defaultResolveLatestTag(): Promise<string> {
+/** Resolve npm `latest` for @opencode-ai/plugin; '' on any failure. */
+export async function resolveNpmLatestTag(
+	fetchImpl: typeof fetch = fetch,
+): Promise<string> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 	try {
-		const res = await fetch(NPM_REGISTRY_URL, { signal: controller.signal });
+		const res = await fetchImpl(NPM_DIST_TAGS_URL, { signal: controller.signal });
 		if (!res.ok) return '';
-		const body = await readBounded(res, 1_000_000);
+		const body = await readBounded(res, NPM_DIST_TAGS_MAX_BYTES);
 		if (body === null) return '';
-		const meta = JSON.parse(body) as { 'dist-tags'?: { latest?: string } };
-		const latest = meta['dist-tags']?.latest;
-		return typeof latest === 'string' ? latest : '';
+		const tags = JSON.parse(body) as { latest?: unknown };
+		return typeof tags.latest === 'string' ? tags.latest : '';
 	} catch {
 		return '';
 	} finally {
@@ -182,7 +189,7 @@ function defaultRunGh(args: string[]): GhResult {
 
 /** DI seam per AGENTS.md invariant 7 (preferred over `mock.module`). */
 export const _internals = {
-	resolveLatestTag: defaultResolveLatestTag,
+	resolveLatestTag: (): Promise<string> => resolveNpmLatestTag(),
 	fetchHostSource: defaultFetchHostSource,
 	runGh: defaultRunGh,
 	/** Corpus location, injectable so tests never touch the committed file. */
