@@ -140,6 +140,28 @@ function emitTrajectoryHealth(
  */
 function getTrajectoryPath(sessionId: string, directory: string): string {
 	const relativePath = path.join('trajectories', `${sessionId}.jsonl`);
+	return trajectorySwarmPath(directory, relativePath);
+}
+
+/**
+ * Resolves a path under `<directory>/.swarm/`, refusing a blank or relative
+ * workspace root. `path.resolve('', '.swarm')` silently lands on
+ * `process.cwd()`, so an empty/whitespace/relative `directory` would write
+ * trajectories into whatever directory the process happens to run in (the
+ * plugin checkout under `bun test`) instead of the project root (AGENTS.md
+ * invariant 4). Every production caller passes the absolute hook/ctx
+ * directory; anything else is a caller bug and fails closed here.
+ */
+function trajectorySwarmPath(directory: string, relativePath: string): string {
+	if (
+		typeof directory !== 'string' ||
+		directory.trim() === '' ||
+		!path.isAbsolute(directory)
+	) {
+		throw new Error(
+			`[trajectory-store] workspace directory must be a non-blank absolute path (got ${JSON.stringify(directory)})`,
+		);
+	}
 	return validateSwarmPath(directory, relativePath);
 }
 
@@ -945,7 +967,7 @@ export async function cleanupOldTrajectoryFiles(
 	for (const subdir of ['trajectories', 'replays']) {
 		if (removed >= TRAJECTORY_LIMITS.maxDeletionsPerRun) break;
 		try {
-			const dirPath = validateSwarmPath(directory, subdir);
+			const dirPath = trajectorySwarmPath(directory, subdir);
 			const entries = await fs.readdir(dirPath, { withFileTypes: true });
 
 			const candidates: CleanupCandidate[] = [];
