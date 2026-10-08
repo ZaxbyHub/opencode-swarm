@@ -261,9 +261,11 @@ export function resolveWindowsWriteAuthority(
 	// (`echo powershell -foo > src\out.txt` granted Windows authority to a
 	// plain echo), and a `;` boundary bled one segment's wrapper authority
 	// backward onto POSIX segments (review round 3, Critical).
-	const cmdWrapper = /(?:^|\|)\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(command);
+	const cmdWrapper = /(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(
+		command,
+	);
 	const psWrapper =
-		/(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
+		/(?:^|[;|&\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
 			command,
 		) || /(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(command);
 	// Step 3 is TOOL-AWARE: content detection inherits only to the `shell`
@@ -1126,16 +1128,36 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			shaped,
 		);
 
+		// Windows readings win shared constructs only when the executor
+		// context DECLARES Windows (explicit wrapper, or shaped body on the
+		// shell tool). On the BASH tool a shaped body only OPENS the Windows
+		// detector as a supplement: the real executor is a POSIX shell whose
+		// redirect semantics govern (bash writes srcOUT.txt for '> src\OUT.txt'
+		// — #3099 round-4 Critical 2), so POSIX stays authoritative while the
+		// Windows cmdlet writes POSIX never claims still land.
+		// An explicit wrapper declares the executor outright: windows readings
+		// win shared constructs even when posix parses the (unwrapped) text
+		// cleanly — keeps the C4 frozen cmd /c in-scope case admitting.
+		// Grammar-guess authority (shaped/inherited) yields to a clean POSIX
+		// parse, because that is what a POSIX executor actually ran. The
+		// wrapper regexes mirror resolveWindowsWriteAuthority (local there, so
+		// recomputed here).
+		const wrapperDeclaredHere =
+			/(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(command) ||
+			/(?:^|[;|&\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
+				command,
+			) ||
+			/(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(command);
+		const windowsAuthoritative =
+			wrapperDeclaredHere || normalizedTool !== 'bash';
 		const detect = (c: string): WriteAnalysis => {
 			const posix = detectPosixWrites(c);
 			if (windowsShell === null) return posix;
-			// POSIX remains the parse-error owner (fail-closed backstop); the
-			// Windows analysis is authoritative for writes when the executor
-			// context declares it.
 			return mergeWriteAnalyses(
 				posix,
 				detectWindowsWrites(c, windowsShell),
-				true,
+				windowsAuthoritative,
+				wrapperDeclaredHere,
 			);
 		};
 

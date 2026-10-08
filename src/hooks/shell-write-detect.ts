@@ -113,12 +113,21 @@ export function mergeWriteAnalyses(
 	primary: WriteAnalysis,
 	additional: WriteAnalysis,
 	additionalIsAuthoritative = true,
+	wrapperDeclared = false,
 ): WriteAnalysis {
 	if (additional.writes.length === 0 && !additional.hasWrites) {
 		return primary;
 	}
-	const authority = additionalIsAuthoritative ? additional : primary;
-	const supplementary = additionalIsAuthoritative ? primary : additional;
+	// #3099 round-4 Critical 2: when BOTH grammars claim the same construct
+	// and the POSIX parse SUCCEEDED (no parse error), the POSIX reading is the
+	// one the bash/git-bash executor actually performs (`> src\OUT.txt` writes
+	// srcOUT.txt). The authority reading wins shared constructs only when the
+	// primary grammar could not read the command (wrapper-quoted cmd/pwsh).
+	const posixAuthoritative = wrapperDeclared
+		? false
+		: !additionalIsAuthoritative || !primary.parseError;
+	const authority = posixAuthoritative ? primary : additional;
+	const supplementary = posixAuthoritative ? additional : primary;
 	const authorityConstructs = new Set(
 		authority.writes.map((write) => `${write.category}|${write.operator}`),
 	);
@@ -2433,6 +2442,16 @@ function splitWindowsCommands(
 			parenDepth--;
 		}
 
+		// The unwrap path (#1778/#3099) rejoins de-wrapped segments with
+		// newlines; without this branch the head-anchored cmd matchers cannot
+		// see a `cmd /c copy ...` fragment hidden after the first segment
+		// (#3099 round-4 Critical 1).
+		if (ch === '\n' && !inSingleQuote && !inDoubleQuote && parenDepth === 0) {
+			if (current.trim()) commands.push(current.trim());
+			current = '';
+			continue;
+		}
+
 		// PowerShell script blocks and statement separators are command
 		// boundaries. Splitting braces themselves is intentional: leaving the
 		// opening brace attached makes the anchored cmdlet matcher miss writes in
@@ -3481,7 +3500,18 @@ export function detectWindowsWrites(
 		// so `Get-ChildItem .; Remove-Item OUTSIDE.md` only reports its write
 		// because splitting isolates `Remove-Item OUTSIDE.md`.
 		for (const subCmd of subCommands) {
-			allWrites.push(...detectPowerShellWrites(subCmd));
+			const psWrites = detectPowerShellWrites(subCmd);
+			// The working-directory-mutation sentinel is PowerShell-semantics
+			// fail-closed; under cmd authority it fires on ordinary cmd chains
+			// base admitted (`cd src && echo hi`) with a null path the gate
+			// words as a false substitution diagnostic. Emit it only when
+			// PowerShell is the declared executor (#3099 round-4 Important 1);
+			// real writes still union on both routes.
+			const psFiltered =
+				shell === 'powershell'
+					? psWrites
+					: psWrites.filter((w) => w.operator !== 'working-directory mutation');
+			allWrites.push(...psFiltered);
 			allWrites.push(...detectCmdWrites(subCmd));
 		}
 
@@ -3650,12 +3680,16 @@ function collectWritesWithNodes(
 					// Check for cd command to update context
 					const cdTarget = getCdTarget(cmd);
 					if (cdTarget) {
-						// Resolve relative cd target against current effective cwd
+						// Resolve relative cd target against current effective cwd.
+						// Apply the mutation ONCE here and do NOT recurse into the
+						// cd command: the Command case applies cd again, so
+						// recursing double-applies it and resolves later sibling
+						// writes against a path the shell never writes (#3099
+						// round-4 Critical 3). cd itself produces no writes.
 						currentStack[0] = path.posix.resolve(
 							currentStack[0] ?? '/',
 							cdTarget,
 						);
-						collectWritesWithNodes(cmd, out, currentStack);
 					} else {
 						// Use the current (possibly mutated) stack so cd changes propagate
 						collectWritesWithNodes(cmd, out, currentStack);
