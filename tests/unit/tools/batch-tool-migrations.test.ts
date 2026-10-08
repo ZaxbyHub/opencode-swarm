@@ -46,7 +46,9 @@ import {
 	clearToolchainCache,
 	_internals as discoveryInternals,
 } from '../../../src/build/discovery';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import * as realUtils from '../../../src/utils';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // Capture the seam's original before any hook can mutate it (AGENTS.md §7).
@@ -139,7 +141,11 @@ describe('Batch tool migration: createSwarmTool integration verification', () =>
 	});
 	afterAll(() => {
 		process.chdir(originalCwd);
-		realFs.rmSync(sandboxCwd, { recursive: true, force: true });
+		// save-plan opens the sandbox's .swarm/swarm.db; on Windows a held
+		// handle makes the removal fail EBUSY. Close the cached handles, then
+		// remove with the shared helper's bounded Windows retry (#2480).
+		closeAllProjectDbs();
+		safeRmRecursive(sandboxCwd);
 	});
 
 	beforeEach(() => {
