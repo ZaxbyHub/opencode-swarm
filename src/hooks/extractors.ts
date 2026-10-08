@@ -259,7 +259,14 @@ export function extractPatterns(
  * never suppress the summary — the honest active phase is reported instead.
  */
 export function extractCurrentPhaseFromPlan(plan: Plan): string | null {
-	const phaseId = resolveActivePhaseId(plan);
+	return extractPhaseLabelFromPlan(plan, resolveActivePhaseId(plan));
+}
+
+/** The composed `Phase N: name [STATUS]` label for one phase of the plan. */
+export function extractPhaseLabelFromPlan(
+	plan: Plan,
+	phaseId: number,
+): string | null {
 	const phase = plan.phases.find((p) => p.id === phaseId);
 	if (!phase) return null;
 

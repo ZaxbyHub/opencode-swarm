@@ -18,7 +18,11 @@ import {
 	type TaskEnvelope,
 } from '../background/task-envelope.js';
 import { captureWorkspaceSnapshotAsync } from '../background/workspace-snapshot.js';
-import { getCurrentPhase, type Plan } from '../config/plan-schema.js';
+import {
+	getCurrentPhase,
+	isPhaseInWrapWindow,
+	type Plan,
+} from '../config/plan-schema.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
 	collectPlanTaskIdContextFromPhases,
@@ -554,17 +558,6 @@ function bindingMatchesPlan(
 	return samePlanIdentity(binding, plan) && binding.phase === phase;
 }
 
-/** Every task of the phase is completed or closed (and it has tasks). */
-function phaseTasksDone(plan: Plan, phaseId: number): boolean {
-	const tasks = plan.phases.find((p) => p.id === phaseId)?.tasks ?? [];
-	return (
-		tasks.length > 0 &&
-		tasks.every(
-			(task) => task.status === 'completed' || task.status === 'closed',
-		)
-	);
-}
-
 /**
  * Whether a receipt stamped with the dispatch-time cursor `receiptPhase` may
  * stand in for `phase`'s docs participation (the cursor-tolerance arms of
@@ -573,11 +566,11 @@ function phaseTasksDone(plan: Plan, phaseId: number): boolean {
  * - Behind: the receipt carries the live cursor and that cursor is behind
  *   the completing phase (issue #2702, a lagging cursor).
  * - Wrap window: the phase-wrap skill completes phase N's last task FIRST
- *   (the cursor moves to the next phase) and dispatches docs after, so the
- *   receipt carries that next phase. It covers N only while the cursor is
- *   still the phase immediately after N in plan order (ids need not be
- *   contiguous) and every task of N is done, so that docs run has seen all
- *   of N's work. Without this arm phase_complete(N) rejected it, and a
+ *   (the cursor moves on) and dispatches docs after, so the receipt carries
+ *   the later cursor phase. It covers N only while N is in its wrap window
+ *   (`isPhaseInWrapWindow`: N's work is done and every phase between N and
+ *   the cursor is already finished), so that docs run has seen all of N's
+ *   work. Without this arm phase_complete(N) rejected it, and a
  *   re-dispatch stamps the next phase again — the phase could never
  *   complete. Work already done in the cursor phase does not matter: the
  *   receipt is re-stamped to N, so that phase still needs its own docs run.
@@ -591,10 +584,7 @@ function receiptCursorCoversPhase(
 	const cursorPhase = getCurrentPhase(plan);
 	if (receiptPhase !== cursorPhase || cursorPhase === phase) return false;
 	if (cursorPhase < phase) return true;
-	const order = plan.phases.map((p) => p.id);
-	const from = order.indexOf(phase);
-	if (from < 0 || order[from + 1] !== cursorPhase) return false;
-	return phaseTasksDone(plan, phase);
+	return isPhaseInWrapWindow(plan, phase);
 }
 
 function workspaceIdentityIsFresh(

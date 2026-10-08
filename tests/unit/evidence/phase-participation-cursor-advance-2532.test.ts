@@ -237,6 +237,33 @@ describe('docs receipts survive the live cursor advance (#2532 / PRR-001)', () =
 		expect(read.found).toBe(true);
 	});
 
+	test('the wrap window spans a skipped phase the cursor jumped over', async () => {
+		// Phase 3 was closed out without work, so completing 2.2 moves the
+		// cursor straight to 4; a docs run dispatched there still covers 2.
+		const plan = planAtPhase2Active();
+		plan.phases[2].tasks[0].status = 'closed';
+		plan.phases.push({
+			...plan.phases[2],
+			id: 4,
+			name: 'Release',
+			status: 'pending',
+			tasks: [
+				{ ...plan.phases[2].tasks[0], id: '4.1', phase: 4, status: 'pending' },
+			],
+		});
+		writePlan(directory, plan);
+		await updateTaskStatus(directory, '2.2', 'completed');
+		expect(readPlan(directory).current_phase).toBe(4);
+		await dispatchDocs('docs-call-skip');
+		const read = await readPhaseParticipation(
+			directory,
+			readPlan(directory),
+			2,
+			'docs',
+		);
+		expect(read.found).toBe(true);
+	});
+
 	test('a wrap-window receipt needs every task of the completing phase done', async () => {
 		// Cursor pushed to 3 while 2.2 is still in progress: a docs run then
 		// has not seen phase 2's finished work and must not satisfy it.

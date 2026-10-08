@@ -242,3 +242,34 @@ export function normalizeCurrentPhaseInPlace(plan: Plan): void {
 export function getCurrentPhase(plan: Plan): number {
 	return resolveActivePhaseId(plan);
 }
+
+/**
+ * Whether `phaseId` is in its PHASE-WRAP window: the phase's work is done and
+ * the cursor has already moved past it, but nothing after it has started.
+ *
+ * Completing a phase's last task advances the cursor (#2532) BEFORE the
+ * phase-wrap steps run (docs dispatch, directive override, phase_complete),
+ * so those steps act on phase N while the cursor names a later phase. This
+ * is the window in which they still belong to N: N is effectively terminal,
+ * the cursor is later in plan order (ids need not be contiguous), and every
+ * phase between them was skipped: every task closed without work (a phase
+ * with no tasks counts when its status is terminal). A phase between them
+ * with completed work has a wrap of its own, so it ends N's window: one wrap
+ * step never stands in for an older phase. Phase status alone cannot tell
+ * the two apart, because savePlan derives `complete` from completed tasks.
+ */
+export function isPhaseInWrapWindow(plan: Plan, phaseId: number): boolean {
+	const order = plan.phases.map((phase) => phase.id);
+	const from = order.indexOf(phaseId);
+	const to = order.indexOf(getCurrentPhase(plan));
+	if (from < 0 || to <= from) return false;
+	if (!isPhaseEffectivelyTerminal(plan.phases[from])) return false;
+	return plan.phases.slice(from + 1, to).every(isPhaseSkipped);
+}
+
+/** Closed out without work of its own (see {@link isPhaseInWrapWindow}). */
+function isPhaseSkipped(phase: Phase): boolean {
+	const tasks = phase.tasks ?? [];
+	if (tasks.length === 0) return isPhaseStatusTerminal(phase.status);
+	return tasks.every((task) => task.status === 'closed');
+}

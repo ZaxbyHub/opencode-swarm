@@ -23,3 +23,13 @@ still rejected. A structural plan edit still invalidates every receipt.
 
 Found in a live run: the architect followed the phase-wrap skill and was
 blocked three times at `phase_complete`, with no way forward.
+
+The same cursor advance blocked `record_directive_override`, the recovery
+`phase_complete` hands out when the critical-directive gate blocks phase N:
+it required phase N to be the current phase, which it no longer is at
+PHASE-WRAP, so the override was always refused. It now also accepts the phase
+being wrapped and records the override under that phase's own label. Both
+checks share one rule (`isPhaseInWrapWindow`): phase N's work is done, the
+cursor is later in plan order, and every phase in between was closed without
+work. A phase with completed work in between has its own wrap, so a docs run
+or override never stands in for an older phase.
