@@ -1,15 +1,25 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { rmSync } from 'node:fs';
 import {
 	_internals,
 	executeDispatchLanes,
 	MAX_PROMPT_CHARS,
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const originalInternals = { ..._internals };
+// A throwaway project root: dispatch writes .swarm/ state under the directory
+// it is given, and process.cwd() is the plugin checkout under `bun test`.
+let projectDir: string;
+
+beforeEach(() => {
+	projectDir = canonicalMkdtemp('dispatch-overflow-');
+});
 
 afterEach(() => {
 	Object.assign(_internals, originalInternals);
+	rmSync(projectDir, { recursive: true, force: true });
 });
 
 describe('blocking PR-workflow explorer prompt overflow', () => {
@@ -40,7 +50,7 @@ describe('blocking PR-workflow explorer prompt overflow', () => {
 						},
 					],
 				},
-				process.cwd(),
+				projectDir,
 			);
 
 			expect(result.success).toBe(false);
@@ -70,7 +80,7 @@ describe('blocking PR-workflow explorer prompt overflow', () => {
 			{
 				lanes: [{ id: 'generic', agent: 'swarm_explorer', prompt: longPrompt }],
 			},
-			process.cwd(),
+			projectDir,
 		);
 
 		expect(result.success).toBe(true);
