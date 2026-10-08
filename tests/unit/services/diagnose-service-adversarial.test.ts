@@ -22,6 +22,7 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 describe('diagnose-service adversarial tests', () => {
 	let testDir: string;
 	let sandboxDir: string;
+	const originalCwd = process.cwd();
 
 	beforeAll(async () => {
 		sandboxDir = canonicalMkdtemp('opencode-adversarial-');
@@ -29,19 +30,18 @@ describe('diagnose-service adversarial tests', () => {
 		fs.mkdirSync(path.join(sandboxDir, '.opencode'), { recursive: true });
 
 		// Traversal base 11 levels inside the sandbox, so `../` x10 stays in it.
+		// It is also the cwd, so '' / whitespace directories resolve inside it.
 		testDir = path.join(sandboxDir, 'traversal', ...'abcdefghij');
 		fs.mkdirSync(testDir, { recursive: true });
+		process.chdir(testDir);
 	});
 
 	afterAll(() => {
-		// Cleanup sandbox
-		if (fs.existsSync(sandboxDir)) {
-			fs.rmSync(sandboxDir, { recursive: true, force: true });
-		}
+		process.chdir(originalCwd);
+		fs.rmSync(sandboxDir, { recursive: true, force: true });
 	});
 
 	beforeEach(() => {
-		// Clean .swarm directory before each test
 		const swarmDir = path.join(sandboxDir, '.swarm');
 		if (fs.existsSync(swarmDir)) {
 			const files = fs.readdirSync(swarmDir);
