@@ -619,6 +619,45 @@ function handleStandardWorktreeFailure(
 	serializeStandardWorktreeDispatches(parentSessionID, message);
 }
 
+/** Headroom over the holder's session-create budget (stale-lane cleanup, owner write). */
+const WORKTREE_LIFECYCLE_LOCK_WAIT_MARGIN_MS = 5_000;
+/** Shortest wait, even when a large session-create budget leaves no room. */
+const WORKTREE_LIFECYCLE_LOCK_WAIT_MIN_MS = 10_000;
+/**
+ * The OpenCode 2 host bounds `tool.execute.before` at 60 s
+ * (`V2_HOOK_TIMEOUT_MS` in src/host/v2/hooks.ts; alignment pinned by
+ * tests/unit/hooks/worktree-lifecycle-lock-wait.test.ts). A dispatch spends
+ * the lock wait AND its own lane session.create inside that one hook call.
+ */
+const WORKTREE_DISPATCH_HOOK_BUDGET_MS = 60_000;
+
+/**
+ * How long a lane dispatch waits for the worktree lifecycle lock.
+ *
+ * A holder can keep the lock across a recovery-lane session.create, bounded by
+ * `worktree.session_create_timeout_ms` (plus the settle grace), and the
+ * stale-lane cleanup after it. The wait therefore follows that budget plus a
+ * margin. It is capped so that the wait, this dispatch's own session.create
+ * and its settle grace still fit in the host hook budget: a dispatch that
+ * overruns the hook is abandoned mid-provisioning, while a dispatch that stops
+ * here fails cleanly with STANDARD_WORKTREE_LIFECYCLE_BUSY.
+ */
+function resolveWorktreeLifecycleLockWaitMs(
+	sessionCreateTimeoutMs: number,
+): number {
+	const createMs = Math.max(0, sessionCreateTimeoutMs);
+	const coverHolder = createMs + WORKTREE_LIFECYCLE_LOCK_WAIT_MARGIN_MS;
+	const roomInHook =
+		WORKTREE_DISPATCH_HOOK_BUDGET_MS -
+		createMs -
+		WORKTREE_SESSION_CREATE_SETTLE_GRACE_MS -
+		WORKTREE_LIFECYCLE_LOCK_WAIT_MARGIN_MS;
+	return Math.max(
+		WORKTREE_LIFECYCLE_LOCK_WAIT_MIN_MS,
+		Math.min(coverHolder, roomInHook),
+	);
+}
+
 /**
  * Acquire the worktree lifecycle lock, retrying within `waitMs`.
  *
@@ -1322,15 +1361,19 @@ export async function precreateStandardWorktreeSession(args: {
 	// provisional-owner publication with init orphan recovery. The lock must be
 	// held before scanning so ownership cannot change between classification
 	// and cleanup/provisioning.
+	const lifecycleLockWaitMs = resolveWorktreeLifecycleLockWaitMs(
+		resolveSessionCreateTimeoutMs(args),
+	);
 	const lifecycleLock = await acquireWorktreeLifecycleLockWithin(
 		args.directory,
 		args.taskId,
-		_internals.worktreeLifecycleLockWaitMs,
+		lifecycleLockWaitMs,
 	);
 	if (!lifecycleLock.acquired) {
 		hardStopStandardWorktreeLifecycle(
 			args.parentSessionID,
-			`STANDARD_WORKTREE_LIFECYCLE_BUSY: the worktree lifecycle lock stayed busy for ${Math.round(_internals.worktreeLifecycleLockWaitMs / 1000)}s (another lane is provisioning or init orphan recovery is running); retry this coder dispatch.`,
+			`STANDARD_WORKTREE_LIFECYCLE_BUSY: the worktree lifecycle lock stayed busy for ${Math.round(lifecycleLockWaitMs / 1000)}s (another lane is provisioning or init orphan recovery is running); retry this coder dispatch. ` +
+				'The wait follows worktree.session_create_timeout_ms: that budget plus 5s, at least 10s, and short enough that this dispatch still fits the 60s host hook budget.',
 		);
 	}
 	try {
@@ -3731,8 +3774,8 @@ export const _internals = {
 	preserveBackgroundWorktreeOwnershipForCallId,
 	tryAcquireWorktreeLifecycleLock: tryAcquireLock,
 	acquireWorktreeLifecycleLockWithin,
-	/** Bounded wait for the lifecycle lock before a dispatch hard-stops. */
-	worktreeLifecycleLockWaitMs: 10_000,
+	/** Bounded wait for the lifecycle lock, derived from the session-create budget. */
+	resolveWorktreeLifecycleLockWaitMs,
 	now: () => Date.now(),
 	sleep: (ms: number) =>
 		new Promise<void>((resolve) => setTimeout(resolve, ms)),

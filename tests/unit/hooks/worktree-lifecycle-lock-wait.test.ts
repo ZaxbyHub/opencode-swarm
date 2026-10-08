@@ -8,6 +8,8 @@
  * other with "init orphan recovery is active" — although no recovery ran.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
 	_internals,
 	precreateStandardWorktreeSession,
@@ -17,7 +19,6 @@ import { setupRecoveryIsolationHarness } from '../../helpers/worktree-isolation-
 
 const real = {
 	tryAcquireWorktreeLifecycleLock: _internals.tryAcquireWorktreeLifecycleLock,
-	worktreeLifecycleLockWaitMs: _internals.worktreeLifecycleLockWaitMs,
 	now: _internals.now,
 	sleep: _internals.sleep,
 };
@@ -90,33 +91,92 @@ describe('acquireWorktreeLifecycleLockWithin', () => {
 	});
 });
 
+/**
+ * A holder keeps the lock across a recovery-lane session.create bounded by
+ * `worktree.session_create_timeout_ms`, so the wait follows that budget. The
+ * waiting dispatch then runs its own session.create in the same host hook
+ * call, so the wait also leaves room for that within the OpenCode 2 hook
+ * budget.
+ */
+describe('resolveWorktreeLifecycleLockWaitMs', () => {
+	const HOOK_BUDGET_MS = 60_000;
+	const SETTLE_GRACE_MS = 5_000;
+
+	test('the hook budget it assumes matches the OpenCode 2 adapter', () => {
+		const source = readFileSync(
+			join(import.meta.dir, '../../../src/host/v2/hooks.ts'),
+			'utf8',
+		);
+		expect(source).toMatch(/const V2_HOOK_TIMEOUT_MS = 60_000;/);
+	});
+
+	test.each([
+		// [session_create_timeout_ms, expected wait]
+		[1_000, 10_000], // floor
+		[10_000, 15_000], // budget + 5s margin
+		[20_000, 25_000], // budget + 5s margin
+		[30_000, 20_000], // default: limited by room left in the hook
+		[120_000, 10_000], // schema max: floor
+	])('session_create_timeout_ms %d waits %d ms', (createMs, expected) => {
+		expect(_internals.resolveWorktreeLifecycleLockWaitMs(createMs)).toBe(
+			expected,
+		);
+	});
+
+	test('wait + own create + settle grace stays inside the hook budget', () => {
+		for (let createMs = 1_000; createMs <= 40_000; createMs += 1_000) {
+			const waitMs = _internals.resolveWorktreeLifecycleLockWaitMs(createMs);
+			if (waitMs === 10_000) continue; // floor; a 45s+ create overruns alone
+			expect(waitMs + createMs + SETTLE_GRACE_MS).toBeLessThan(HOOK_BUDGET_MS);
+		}
+	});
+});
+
 describe('precreateStandardWorktreeSession with a busy lifecycle lock', () => {
 	const harness = setupRecoveryIsolationHarness();
 
-	test('hard-stops after the wait with a message naming both holders', async () => {
+	async function dispatchBusy(sessionCreateTimeoutMs: number) {
 		swarmState.opencodeClient = {
 			session: { create: mock(async () => ({ data: { id: 'child' } })) },
 		} as never;
-		_internals.worktreeLifecycleLockWaitMs = 500;
 		_internals.tryAcquireWorktreeLifecycleLock = mock(async () => ({
 			acquired: false,
 		})) as never;
 		const collisionCheck = mock(async () => ({ collision: false }));
 		_internals.preProvisionCollisionCheck = collisionCheck as never;
-
-		await expect(
-			precreateStandardWorktreeSession({
-				config: { worktree: { policy: 'auto' } } as never,
-				directory: harness.directory,
-				parentSessionID: 'parent-1',
-				callID: 'call-busy',
-				taskId: 'task-busy',
-				planTaskId: '2.1',
-				outputArgs: { prompt: 'TASK: 2.1' },
-			}),
-		).rejects.toThrow(
-			/STANDARD_WORKTREE_LIFECYCLE_BUSY: .*another lane is provisioning or init orphan recovery/,
-		);
+		let message = '';
+		await precreateStandardWorktreeSession({
+			config: {
+				worktree: {
+					policy: 'auto',
+					session_create_timeout_ms: sessionCreateTimeoutMs,
+				},
+			} as never,
+			directory: harness.directory,
+			parentSessionID: 'parent-1',
+			callID: 'call-busy',
+			taskId: 'task-busy',
+			planTaskId: '2.1',
+			outputArgs: { prompt: 'TASK: 2.1' },
+		}).catch((error: Error) => {
+			message = error.message;
+		});
 		expect(collisionCheck).not.toHaveBeenCalled();
+		return message;
+	}
+
+	test('hard-stops after the wait with a message naming both holders and the knob', async () => {
+		const message = await dispatchBusy(20_000);
+		expect(message).toMatch(
+			/STANDARD_WORKTREE_LIFECYCLE_BUSY: .*busy for 25s .*another lane is provisioning or init orphan recovery/,
+		);
+		expect(message).toContain('worktree.session_create_timeout_ms');
+		// The fake clock advanced by the derived wait, not a fixed 10s.
+		expect(clock - 1_000).toBeGreaterThanOrEqual(25_000);
+		expect(clock - 1_000).toBeLessThan(25_250);
+	});
+
+	test('the default budget waits 20s', async () => {
+		expect(await dispatchBusy(30_000)).toContain('busy for 20s');
 	});
 });

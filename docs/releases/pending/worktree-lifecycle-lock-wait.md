@@ -10,5 +10,12 @@ about 310 ms (5 retries without jitter) and hard-stopped with
 coders provisioning at the same moment therefore stopped each other, and the
 message blamed a recovery that was not running.
 
-Provisioning now keeps retrying with jitter for up to 10 seconds. If the lock
-is still busy after that, the message says so and names both possible holders.
+Provisioning now keeps retrying with jitter. The wait follows
+`worktree.session_create_timeout_ms`, because a lane can hold the lock across
+a recovery-lane `session.create` bounded by that setting: the wait is that
+budget plus 5 seconds, at least 10 seconds, and short enough that the waiting
+dispatch can still run its own `session.create` inside the 60-second
+OpenCode 2 hook budget. With the default 30-second budget the wait is 20
+seconds; with 20 seconds it is 25 seconds. If the lock is still busy after the
+wait, the message says so, names both possible holders and names
+`worktree.session_create_timeout_ms`.
