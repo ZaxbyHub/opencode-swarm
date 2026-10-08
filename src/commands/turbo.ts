@@ -37,9 +37,10 @@ export const TURBO_EPIC_REDIRECT_MESSAGE =
 
 /**
  * Reply to any Turbo-enabling invocation while an Epic is open for the
- * project: Turbo/Lean would waive per-task QA (Stage B) that Epic never
- * waives, so enabling is refused until the Epic is closed. Disabling Turbo
- * stays available.
+ * project: Turbo/Lean relax gates that Epic keeps (phase_complete Gates 1–5,
+ * the coder re-dispatch block before Stage A; per-task Stage B is required in
+ * every mode), so enabling is refused until the Epic is closed. Disabling
+ * Turbo stays available.
  */
 export const TURBO_EPIC_OPEN_REFUSAL =
 	'Turbo Mode NOT enabled — epic-open: close the epic first (/swarm epic close). Turbo state is unchanged.';
@@ -86,8 +87,8 @@ export async function handleTurboCommand(
 	const isLeanActive = session.leanTurboActive === true;
 
 	// Enable guard: while an Epic is open for this project, every
-	// Turbo-enabling path is refused before any state changes (Epic never
-	// waives per-task QA; Turbo/Lean would). The probe is sentinel-first, so
+	// Turbo-enabling path is refused before any state changes (Turbo/Lean
+	// relax gates that Epic keeps). The probe is sentinel-first, so
 	// a project without an Epic pays one existsSync and nothing else.
 	const epicOpenRefusal = (): string | undefined =>
 		_internals.isEpicOpenForProject(directory)

@@ -1276,7 +1276,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm memory link status` | Show whether memory is cohort-linked (distinct from knowledge link) |
 | `/swarm memory unlink` | Stop sharing memory; copies cohort family back to local |
 | `/swarm concurrency <set|status|reset>` | Manage session-scoped runtime concurrency override |
-| `/swarm turbo` | Enable turbo mode for the current session (bypasses QA gates) |
+| `/swarm turbo` | Enable turbo mode for the current session (skips phase_complete Gates 1–5; per-task Stage A and Stage B still run) |
 | `/swarm full-auto` | Toggle Full-Auto Mode for the current session [on|off] |
 | `/swarm checkpoint` | Save a git checkpoint for the current state |
 

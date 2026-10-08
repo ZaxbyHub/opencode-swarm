@@ -17,14 +17,14 @@ All QA gates run normally. Every task passes through reviewer + test_engineer be
 
 ### Turbo
 
-Skips phase_complete Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) and lets a non-Tier-3 task be re-dispatched to the coder before Stage A passes. Stage A and Stage B (reviewer + test_engineer) are still required for every task: `update_task_status(completed)` checks them whether or not Turbo is active.
+Skips phase_complete Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) and lets a non-Tier-3 task whose planned `files_touched` are known be re-dispatched to the coder before Stage A passes (a task with unknown or empty `files_touched` keeps the block). Stage A and Stage B (reviewer + test_engineer) are still required for every task: `update_task_status(completed)` checks them whether or not Turbo is active.
 
-**Turbo does NOT skip Tier 3 files.** Security-sensitive paths always run full review, even when Turbo is on:
+**Turbo does NOT relax Tier 3 files.** Security-sensitive paths keep the coder re-dispatch block until Stage A passes, even when Turbo is on (the only per-task gate Turbo relaxes; Stage B runs for every task regardless):
 
 - `architect*.ts`, `delegation*.ts`, `guardrails*.ts`, `adversarial*.ts`, `sanitiz*.ts`
 - `auth*`, `permission*`, `crypto*`, `secret*`, `security*.ts`
 
-This list is enforced at `src/tools/update-task-status.ts:98-109`. You cannot turn it off.
+This list is defined in `src/parallel/tier3-classifier.ts` and applied to the task's planned `files_touched`. You cannot turn it off.
 
 **When to use:** rapid iteration on non-critical code — UI tweaks, documentation, internal refactors.
 
@@ -1040,7 +1040,7 @@ No. Full-Auto v2 *increases* critic involvement: every escalate-class action get
 The lane planner (`src/turbo/lean/planner.ts`) uses five conflict rules: exact-file match, parent/child directory containment, global file classification (package.json, barrels, lockfiles), protected path detection (auth, crypto, .env), and cross-lane dependency tracking. Tasks that can't be placed in a parallel lane are either serialized or degraded to balanced mode based on config. See the [Lean Turbo section](#lean-turbo-lane-planning-engine) for the full algorithm.
 
 **How is Epic Mode different from Lean Turbo?**  
-Lean Turbo skips per-task Stage B for lane tasks and dispatches through its own runner; Epic never skips per-task QA, has the architect dispatch each wave as visible `Task` calls, lets the delegation gate admit only the active wave, and adds a phase reviewer + critic gate, an epic branch with squash landing, and learning across epics. See [Mode comparison](#mode-comparison).
+Lean Turbo dispatches lane tasks through its own runner (per-task Stage B is still required); Epic never skips per-task QA, has the architect dispatch each wave as visible `Task` calls, lets the delegation gate admit only the active wave, and adds a phase reviewer + critic gate, an epic branch with squash landing, and learning across epics. See [Mode comparison](#mode-comparison).
 
 **How do I tell what mode is active?**  
 `/swarm status` shows session modes. `/swarm epic status` shows whether an epic is open, its current wave and its landing state. `/swarm config` shows the resolved `execution_mode`.

@@ -23,6 +23,16 @@ and was refused. The guidance now matches the runtime:
 The stale `phase-complete.ts:774–827` reference in the banner is replaced by a
 reference to the gate table.
 
+The same correction now covers the remaining places that still said Turbo
+bypasses QA: the `turbo_mode` description in `opencode-swarm.schema.json` and
+`docs/configuration.md`, the `/swarm turbo` row in the README command table,
+the Turbo row in `docs/getting-started.md`, and the Lean Turbo vs Epic answer in
+`docs/modes.md`. `docs/modes.md` now cites `src/parallel/tier3-classifier.ts`
+for the Tier 3 list instead of a stale `update-task-status.ts` line range. The
+Turbo banner and `docs/modes.md` also say that only a task whose planned
+`files_touched` are known can be re-dispatched to the coder before Stage A; a
+task with unknown or empty `files_touched` keeps the block.
+
 No behaviour changes. If the Turbo/Lean Stage B bypass is meant to work, the
 fix belongs in `update_task_status`, and this text should be reverted together
 with that change.

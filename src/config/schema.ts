@@ -4386,14 +4386,15 @@ export const PluginConfigSchema = z.object({
 		'Epic Mode block: one plan = one epic delivered in conflict-free parallel waves. Opt in with `mode.enabled: true`, then `/swarm epic start`. Needs no `turbo` block (legacy `turbo.epic` is still accepted and migrated here).',
 	),
 
-	// Turbo mode — bypasses reviewer/test gates for rapid iteration (v6.40);
+	// Turbo mode — relaxes phase-level gates for rapid iteration (v6.40); per-task
+	// Stage A and Stage B stay required (#2098);
 	// wired as the config-seeded session default for new sessions (#2901).
 	turbo_mode: z
 		.boolean()
 		.default(false)
 		.optional()
 		.describe(
-			'Bypass reviewer/test gates for rapid iteration (v6.40). When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off.',
+			'Turbo mode for rapid iteration (v6.40): skips phase_complete Gates 1–5 and lets a non-Tier-3 task be re-dispatched to the coder before Stage A passes; per-task Stage A and Stage B (reviewer + test_engineer) are still required. When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off.',
 		),
 
 	// Quiet mode — suppress non-critical startup warnings. Defaults to true so
