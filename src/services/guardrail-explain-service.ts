@@ -21,6 +21,7 @@ import { resolveWindowsWriteAuthority } from '../hooks/guardrails/tool-before.js
 import {
 	detectPosixWrites,
 	detectWindowsWrites,
+	isPowerShellReadOnlyPipeline,
 	isPowerShellShaped,
 	mergeWriteAnalyses,
 	resolveWriteTargets,
@@ -670,7 +671,7 @@ export async function handleGuardrailExplain(
 						true,
 					);
 
-		if (analysis.parseError) {
+		if (analysis.parseError && !isPowerShellReadOnlyPipeline(shellCommand)) {
 			decision = 'block';
 			firingRule =
 				'parse_error: write detection failed to parse command — rejecting for safety';

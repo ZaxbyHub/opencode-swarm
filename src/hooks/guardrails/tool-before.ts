@@ -255,11 +255,17 @@ export function resolveWindowsWriteAuthority(
 	detectedShellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash',
 	shaped: boolean,
 ): 'powershell' | 'cmd' | null {
-	const cmdWrapper = /(?:^|[;&|\s])cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(command);
+	// A wrapper is an executor DECLARATION only at an invocation position: the
+	// very start of the command, or the receiving side of a pipe. A bare
+	// whitespace boundary matched the PHRASE ' powershell -' inside arguments
+	// (`echo powershell -foo > src\out.txt` granted Windows authority to a
+	// plain echo), and a `;` boundary bled one segment's wrapper authority
+	// backward onto POSIX segments (review round 3, Critical).
+	const cmdWrapper = /(?:^|\|)\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(command);
 	const psWrapper =
-		/(?:^|[;&|\s])(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
+		/(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
 			command,
-		) || /(?:^|[;&|\s])(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(command);
+		) || /(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(command);
 	// Step 3 is TOOL-AWARE: content detection inherits only to the `shell`
 	// tool (base behavior). The `bash` tool without a wrapper or a shaped
 	// body runs a POSIX shell — routing it to cmd detection on an `echo `
@@ -1075,7 +1081,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			| 'bash';
 		const shaped = isPowerShellShaped(command);
 		const shellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash' =
-			normalizedTool === 'bash' ? detectedShellType : detectedShellType;
+			detectedShellType;
 
 		// R1d: the interactive verdict is OR-ed across shell types. Routing by
 		// detected shell type alone would send `watch echo hi` to 'cmd' (the

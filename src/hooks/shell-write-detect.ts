@@ -2938,8 +2938,9 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 			if (positional === null) positional = unquote(token);
 		}
 
-		if (pathValue && nameValue) {
-			const base = pathValue.replace(/\/+$/, '');
+		const basePath = (pathValue ?? positional)?.replace(/\/+$/, '') ?? null;
+		if (basePath !== null && nameValue) {
+			const base = basePath;
 			return {
 				category: 'builtin_write',
 				operator: 'New-Item',
@@ -2953,6 +2954,13 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 				path: pathValue,
 			};
 		}
+		if (positional) {
+			return {
+				category: 'builtin_write',
+				operator: 'New-Item',
+				path: positional,
+			};
+		}
 		if (nameValue) {
 			return {
 				category: 'builtin_write',
@@ -2963,7 +2971,7 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		return {
 			category: 'builtin_write',
 			operator: 'New-Item',
-			path: positional,
+			path: null,
 		};
 	}
 
@@ -3194,7 +3202,7 @@ function detectCmdWrites(command: string): WriteTarget[] {
 	// Detect copy builtin: copy source dest (handles if exist pattern)
 	function detectCmdCopy(cmd: string): WriteTarget | null {
 		const commandMatch = cmd.match(
-			/^(?:(?:cmd(?:\.exe)?\s+\/c|if\s+(?:not\s+)?exist\s+\S+)\s+)*copy(?=\s|$)/i,
+			/^(?:(?:if\s+(?:not\s+)?exist\s+(?:"[^"]*"|\S+)\s+|cmd(?:\.exe)?\s+\/c\s+|(?:call|start)\s+))*copy(?=\s|$)/i,
 		);
 		if (commandMatch) {
 			const start = (commandMatch.index ?? 0) + commandMatch[0].length;
@@ -3211,7 +3219,7 @@ function detectCmdWrites(command: string): WriteTarget[] {
 	// Detect move builtin: move source dest
 	function detectCmdMove(cmd: string): WriteTarget | null {
 		const commandMatch = cmd.match(
-			/^(?:(?:cmd(?:\.exe)?\s+\/c|if\s+(?:not\s+)?exist\s+\S+)\s+)*move(?=\s|$)/i,
+			/^(?:(?:if\s+(?:not\s+)?exist\s+(?:"[^"]*"|\S+)\s+|cmd(?:\.exe)?\s+\/c\s+|(?:call|start)\s+))*move(?=\s|$)/i,
 		);
 		if (commandMatch) {
 			const start = (commandMatch.index ?? 0) + commandMatch[0].length;
@@ -3717,9 +3725,12 @@ function collectWritesWithNodes(
 					}
 				}
 			}
-			if (node.clause) collectWritesWithNodes(node.clause, out, cwdStack);
-			if (node.then) collectWritesWithNodes(node.then, out, cwdStack);
-			if (node.else) collectWritesWithNodes(node.else, out, cwdStack);
+			// Bodies MAY never run; base never visited them, so their cd never
+			// moved a later write. Copy per body: detection added, propagation
+			// kept at base semantics (review round 3).
+			for (const body of [node.clause, node.then, node.else]) {
+				if (body) collectWritesWithNodes(body, out, [...cwdStack]);
+			}
 			break;
 		}
 
@@ -3733,8 +3744,8 @@ function collectWritesWithNodes(
 					}
 				}
 			}
-			if (node.clause) collectWritesWithNodes(node.clause, out, cwdStack);
-			if (node.do) collectWritesWithNodes(node.do, out, cwdStack);
+			if (node.clause) collectWritesWithNodes(node.clause, out, [...cwdStack]);
+			if (node.do) collectWritesWithNodes(node.do, out, [...cwdStack]);
 			break;
 		}
 
@@ -3747,7 +3758,7 @@ function collectWritesWithNodes(
 					}
 				}
 			}
-			if (node.do) collectWritesWithNodes(node.do, out, cwdStack);
+			if (node.do) collectWritesWithNodes(node.do, out, [...cwdStack]);
 			break;
 		}
 
@@ -3762,7 +3773,8 @@ function collectWritesWithNodes(
 			}
 			if (Array.isArray(node.cases)) {
 				for (const entry of node.cases) {
-					if (entry?.body) collectWritesWithNodes(entry.body, out, cwdStack);
+					if (entry?.body)
+						collectWritesWithNodes(entry.body, out, [...cwdStack]);
 				}
 			}
 			break;
@@ -3777,7 +3789,7 @@ function collectWritesWithNodes(
 					}
 				}
 			}
-			if (node.body) collectWritesWithNodes(node.body, out, cwdStack);
+			if (node.body) collectWritesWithNodes(node.body, out, [...cwdStack]);
 			break;
 		}
 
