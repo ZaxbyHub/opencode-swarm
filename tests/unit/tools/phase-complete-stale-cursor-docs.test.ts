@@ -269,9 +269,62 @@ describe('phase_complete stale-cursor docs gate (issue #2702)', () => {
 					(warning) =>
 						typeof warning === 'string' &&
 						warning.includes('receipt normalization failed') &&
-						warning.includes('simulated normalization outage'),
+						warning.includes('simulated normalization outage') &&
+						warning.includes('Dispatch docs again for the next phase'),
 				),
 			).toBe(true);
+		} finally {
+			phaseCompleteReceiptInternals.rebindCursorTaggedReceipts = originalRebind;
+		}
+	});
+
+	test('a transient normalization failure is retried once', async () => {
+		await reserveApprovedPhaseParticipation({
+			directory,
+			tool: 'Task',
+			parentSessionId: 'old-parent',
+			callId: 'docs-call',
+			args: { subagent_type: 'docs' },
+			policy: { require_docs: true },
+		});
+		await observePhaseParticipationToolResult({
+			directory,
+			tool: 'Task',
+			parentSessionId: 'old-parent',
+			callId: 'docs-call',
+			output: {
+				output: 'Documentation was checked and updated.',
+				metadata: { status: 'completed', sessionId: 'docs-child' },
+			},
+		});
+		resetSwarmState();
+		resetPhaseParticipationForTests();
+		const originalRebind =
+			phaseCompleteReceiptInternals.rebindCursorTaggedReceipts;
+		let calls = 0;
+		phaseCompleteReceiptInternals.rebindCursorTaggedReceipts = async (
+			...args
+		) => {
+			calls += 1;
+			if (calls === 1) throw new Error('transient outage');
+			return originalRebind(...args);
+		};
+		try {
+			const result = JSON.parse(
+				await executePhaseComplete(
+					{ phase: 3, sessionID: 'fresh-parent' },
+					directory,
+					directory,
+				),
+			) as { warnings: unknown[] };
+			expect(calls).toBe(2);
+			expect(
+				result.warnings.some(
+					(warning) =>
+						typeof warning === 'string' &&
+						warning.includes('receipt normalization failed'),
+				),
+			).toBe(false);
 		} finally {
 			phaseCompleteReceiptInternals.rebindCursorTaggedReceipts = originalRebind;
 		}
