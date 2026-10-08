@@ -23,3 +23,9 @@ one that refuses a network namespace):
 - if it fails, the executor reports bwrap as unavailable and falls back to
   tool-layer enforcement, with a warning naming the cause;
 - the capability probe reports `disabled` with the error.
+
+Known limit: the probe checks the host once, with the default policy, so it
+always includes the network namespace (`network_mode: off`, the default). On a
+host that allows user namespaces but refuses network namespaces (typically a
+nested container), bwrap is reported unavailable even for a configuration with
+`network_mode: on`, whose real wraps would not need one.
