@@ -40,10 +40,16 @@ const internals = workflowInternals as unknown as GhAwareInternals;
 const hadOwnResolve = Object.hasOwn(workflowInternals, 'resolveGhBinary');
 
 let directory: string;
-let originalResolve: (() => string | null) | undefined;
+/**
+ * Captured ONCE at module scope. Re-capturing inside setGhBinary made a test
+ * that calls it twice (the 'gh resolves' and 'resolver throws' rows do) restore
+ * the FIRST stub instead of the pre-test resolver, leaking the stub into
+ * later tests in a shared process (#3099 SolCritic finding N2).
+ */
+const originalResolve: (() => string | null) | undefined =
+	internals.resolveGhBinary;
 
 function setGhBinary(resolver: () => string | null): void {
-	originalResolve = internals.resolveGhBinary;
 	internals.resolveGhBinary = resolver;
 }
 
