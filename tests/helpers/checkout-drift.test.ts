@@ -16,7 +16,7 @@ import { canonicalMkdtemp } from './tmpdir';
 let root: string;
 
 function bumpMtime(p: string): void {
-	const later = new Date(Date.now() + 60_000);
+	const later = new Date(fs.statSync(p).mtimeMs + 60_000);
 	fs.utimesSync(p, later, later);
 }
 

@@ -19,7 +19,8 @@ import { type CwdSandbox, enterCwdSandbox } from '../../helpers/cwd-sandbox';
 
 // This suite builds cwd-relative workspaces (the code under test resolves
 // paths against process.cwd()), so every test runs with its cwd in a
-// throwaway sandbox, never in the plugin checkout.
+// throwaway sandbox, never in the plugin checkout; restoring the sandbox
+// removes every directory a test created, so no per-describe cleanup.
 let cwdSandbox: CwdSandbox | undefined;
 beforeEach(() => {
 	cwdSandbox = enterCwdSandbox('repo-graph-codex-adv-');
@@ -31,7 +32,6 @@ afterEach(() => {
 
 describe('validateWorkspace adversarial security tests', () => {
 	let tempDir: string;
-	let cleanupDirs: string[] = [];
 
 	beforeEach(async () => {
 		tempDir = path.join(
@@ -42,18 +42,6 @@ describe('validateWorkspace adversarial security tests', () => {
 				Math.floor(Math.random() * 1e6),
 		);
 		await fsPromises.mkdir(tempDir, { recursive: true });
-		cleanupDirs.push(tempDir);
-	});
-
-	afterEach(async () => {
-		for (const dir of cleanupDirs) {
-			try {
-				await fsPromises.rm(dir, { recursive: true, force: true });
-			} catch {
-				// Ignore cleanup errors
-			}
-		}
-		cleanupDirs = [];
 	});
 
 	// ===== ABSOLUTE PATH WITH TRAVERSAL =====
@@ -193,7 +181,6 @@ describe('resolveModuleSpecifier adversarial security tests', () => {
 	let tempDir: string;
 	let workspaceRoot: string;
 	let srcDir: string;
-	let cleanupDirs: string[] = [];
 
 	beforeEach(async () => {
 		tempDir = path.join(
@@ -216,19 +203,6 @@ describe('resolveModuleSpecifier adversarial security tests', () => {
 			`import { foo } from './utils';\nexport const bar = 'test';\n`,
 			'utf-8',
 		);
-
-		cleanupDirs.push(tempDir);
-	});
-
-	afterEach(async () => {
-		for (const dir of cleanupDirs) {
-			try {
-				await fsPromises.rm(dir, { recursive: true, force: true });
-			} catch {
-				// Ignore cleanup errors
-			}
-		}
-		cleanupDirs = [];
 	});
 
 	// ===== EXTENSIONLESS IMPORT WITH PATH TRAVERSAL =====
@@ -330,7 +304,6 @@ describe('resolveModuleSpecifier adversarial security tests', () => {
 			'outside-workspace-' + Date.now() + Math.floor(Math.random() * 1e6),
 		);
 		await fsPromises.mkdir(outsideDir, { recursive: true });
-		cleanupDirs.push(outsideDir);
 
 		// Create a file in the outside directory
 		await fsPromises.writeFile(
@@ -371,7 +344,6 @@ describe('resolveModuleSpecifier adversarial security tests', () => {
 				Math.floor(Math.random() * 1e6),
 		);
 		await fsPromises.mkdir(outsideDir, { recursive: true });
-		cleanupDirs.push(outsideDir);
 
 		// Create a file in the outside directory
 		await fsPromises.writeFile(
@@ -589,7 +561,6 @@ describe('resolveModuleSpecifier adversarial security tests', () => {
 			'outside-file-' + Date.now() + Math.floor(Math.random() * 1e6),
 		);
 		await fsPromises.mkdir(outsideDir, { recursive: true });
-		cleanupDirs.push(outsideDir);
 
 		// Create target file outside workspace
 		await fsPromises.writeFile(
