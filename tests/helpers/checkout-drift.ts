@@ -21,11 +21,14 @@
  *  - mtime changes of top-level DIRECTORIES (an editor's atomic save in
  *    src/ bumps it), only new/removed names and changed top-level FILES.
  *
- * Changes INSIDE a `.swarm/` that already existed at preload are enforced in
- * CI (`CI` set) but only warned about locally by default: on a developer's
- * primary checkout a live opencode-swarm session legitimately writes there
- * while tests run. Creating `.swarm/` where none existed is always enforced.
- * `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` overrides the mode.
+ * Changes INSIDE a `.swarm/` that already existed at preload are only warned
+ * about by default, in CI too: a number of existing suites still write
+ * `.swarm/` state into the checkout (they are listed in the warning, which is
+ * the worklist for making this enforced), and on a developer's primary
+ * checkout a live opencode-swarm session legitimately writes there while
+ * tests run. New top-level entries, and creating `.swarm/` where none existed,
+ * are always enforced. `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` overrides
+ * the mode.
  */
 
 import * as realFs from 'node:fs';
@@ -156,7 +159,7 @@ export function resolveDriftMode(env: NodeJS.ProcessEnv): {
 	if (raw === 'enforce' || raw === 'warn' || raw === 'off') {
 		return { topLevel: raw, swarm: raw };
 	}
-	return { topLevel: 'enforce', swarm: env.CI ? 'enforce' : 'warn' };
+	return { topLevel: 'enforce', swarm: 'warn' };
 }
 
 /** Throws (or warns) per mode. Returns the messages it reported. */

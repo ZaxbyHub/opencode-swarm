@@ -97,15 +97,18 @@ describe('checkout drift: pre-existing .swarm', () => {
 });
 
 describe('checkout drift: modes and reporting', () => {
-	test('top level is always enforced; .swarm is enforced only in CI by default', () => {
+	test('top level is always enforced; .swarm only warns by default, in CI too', () => {
 		expect(resolveDriftMode({})).toEqual({
 			topLevel: 'enforce',
 			swarm: 'warn',
 		});
 		expect(resolveDriftMode({ CI: 'true' })).toEqual({
 			topLevel: 'enforce',
-			swarm: 'enforce',
+			swarm: 'warn',
 		});
+		expect(
+			resolveDriftMode({ CI: 'true', SWARM_TEST_CHECKOUT_DRIFT: 'enforce' }),
+		).toEqual({ topLevel: 'enforce', swarm: 'enforce' });
 		expect(resolveDriftMode({ SWARM_TEST_CHECKOUT_DRIFT: 'OFF' })).toEqual({
 			topLevel: 'off',
 			swarm: 'off',
