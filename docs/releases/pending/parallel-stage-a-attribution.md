@@ -22,6 +22,10 @@ when no current task is set), and for the other gate tools (`diff`, `lint`,
 `imports`, …, which carry no Stage A verdict), attribution is unchanged
 (`currentTaskId`, then the durable post-reset fallback).
 
+When only that one task awaits Stage A, a run that names no files, or only
+files of the session's current task, is treated as the serial case and still
+credits the current task, as before.
+
 The architect prompt and the execute protocol (step 5i) now say to pass
 `pre_check_batch` `files` = exactly the checked task's `files_touched`, never
 the union of the parallel tasks' files.

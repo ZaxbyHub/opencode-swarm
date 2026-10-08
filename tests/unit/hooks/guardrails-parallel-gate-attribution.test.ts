@@ -332,15 +332,19 @@ describe('the remaining task after the last-returned coder passed Stage A', () =
 		expect(await stateOf('2.4')).toBe('pre_check_passed');
 	});
 
-	test('the lone awaiting task still needs its own files', async () => {
-		const attribution = await resolveParallelGateTaskAttribution(
-			directory,
-			'architect',
-			['src/lib/case.ts'],
-		);
-		expect(attribution.kind).toBe('unattributable');
-		if (attribution.kind === 'unattributable')
-			expect(attribution.message).toContain(
+	test('the lone awaiting task: own files credit it, the current task keeps a serial re-check', async () => {
+		const resolve = (files: string[] | null) =>
+			resolveParallelGateTaskAttribution(directory, 'architect', files);
+		// Re-checking the current task's own files (or naming none) is the
+		// serial case and keeps currentTaskId.
+		expect(await resolve(['src/lib/case.ts'])).toEqual({ kind: 'none' });
+		expect(await resolve([])).toEqual({ kind: 'none' });
+		expect(await resolve(null)).toEqual({ kind: 'none' });
+		// Files of neither task credit nothing.
+		const foreign = await resolve(['src/unrelated.ts']);
+		expect(foreign.kind).toBe('unattributable');
+		if (foreign.kind === 'unattributable')
+			expect(foreign.message).toContain(
 				"task 2.1 is awaiting Stage A but the session's current task is 2.4",
 			);
 	});

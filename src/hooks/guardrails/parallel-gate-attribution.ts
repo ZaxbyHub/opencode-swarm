@@ -75,6 +75,7 @@ export async function resolveParallelGateTaskAttribution(
 	// Only tasks of the current plan count: an entry for a task that is no
 	// longer planned (a replaced plan in a long-lived session) awaits nothing.
 	let scopes: Map<string, readonly string[]>;
+	let currentScope: readonly string[] | null = null;
 	try {
 		const plan = await loadPlanJsonOnly(directory);
 		scopes = new Map();
@@ -83,6 +84,7 @@ export async function resolveParallelGateTaskAttribution(
 				if (candidates.includes(task.id)) {
 					scopes.set(task.id, task.files_touched ?? []);
 				}
+				if (task.id === currentTaskId) currentScope = task.files_touched ?? [];
 			}
 		}
 	} catch (error) {
@@ -101,6 +103,22 @@ export async function resolveParallelGateTaskAttribution(
 	const checked = (files ?? [])
 		.map((file) => toProjectRelative(directory, file))
 		.filter((file) => file.length > 0);
+	// One task awaits Stage A and it is not the session's current task (e.g. a
+	// stale coder_delegated entry while the current task is re-checked). A run
+	// that names no files, or only files of the current task's planned scope,
+	// is the serial case and keeps currentTaskId, as before parallel coders.
+	if (
+		inFlight.length === 1 &&
+		(checked.length === 0 ||
+			(currentScope !== null &&
+				currentScope.length > 0 &&
+				checked.every((file) => scopeContains(currentScope ?? [], file)) &&
+				!checked.every((file) =>
+					scopeContains(scopes.get(inFlight[0]) ?? [], file),
+				)))
+	) {
+		return { kind: 'none' };
+	}
 	if (checked.length === 0) {
 		return {
 			kind: 'unattributable',
