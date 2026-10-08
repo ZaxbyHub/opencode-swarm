@@ -661,6 +661,16 @@ export async function handleGuardrailExplain(
 			detected,
 			isPowerShellShaped(shellCommand),
 		);
+		// Mirrors the gate's wrapper-priority flag (round-5 blocker: omitting it
+		// made explain keep the POSIX reading for explicit cmd/powershell -Command
+		// wrappers while the gate kept the Windows one — explain answered allow
+		// for commands the gate blocked).
+		const wrapperDeclaredHere =
+			/(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(shellCommand) ||
+			/(?:^|[;|&\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
+				shellCommand,
+			) ||
+			/(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(shellCommand);
 		const posix = detectPosixWrites(shellCommand);
 		const analysis =
 			authority === null
@@ -669,6 +679,7 @@ export async function handleGuardrailExplain(
 						posix,
 						detectWindowsWrites(shellCommand, authority),
 						true,
+						wrapperDeclaredHere,
 					);
 
 		if (analysis.parseError && !isPowerShellReadOnlyPipeline(shellCommand)) {
@@ -718,6 +729,14 @@ export async function handleGuardrailExplain(
 			detected,
 			isPowerShellShaped(shellCommand),
 		);
+		// Same wrapper-priority flag as the allow branch; recomputed because
+		// the gate's detect() closure recomputes it on its blocked path too.
+		const wrapperDeclaredElse =
+			/(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(shellCommand) ||
+			/(?:^|[;|&\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
+				shellCommand,
+			) ||
+			/(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(shellCommand);
 		const posix = detectPosixWrites(shellCommand);
 		const analysis =
 			authority === null
@@ -726,6 +745,7 @@ export async function handleGuardrailExplain(
 						posix,
 						detectWindowsWrites(shellCommand, authority),
 						true,
+						wrapperDeclaredElse,
 					);
 
 		if (!analysis.parseError && analysis.hasWrites) {
