@@ -15,6 +15,13 @@
  */
 
 import { afterAll, afterEach } from 'bun:test';
+import * as path from 'node:path';
+import {
+	diffCheckout,
+	reportCheckoutDrift,
+	resolveDriftMode,
+	snapshotCheckout,
+} from '../helpers/checkout-drift.js';
 import {
 	ensureTripwireGuardsArmed,
 	installProdStoreTripwire,
@@ -22,6 +29,11 @@ import {
 } from '../helpers/prod-store-tripwire.js';
 
 installProdStoreTripwire();
+
+// Checkout-drift bookend: snapshot the repo root + its .swarm/ before any test
+// file loads (see tests/helpers/checkout-drift.ts for scope and modes).
+const repoRoot = path.resolve(import.meta.dir, '..', '..');
+const checkoutBaseline = snapshotCheckout(repoRoot);
 
 afterEach(async () => {
 	await ensureTripwireGuardsArmed();
@@ -34,4 +46,14 @@ afterEach(async () => {
 // mock.module/mock.restore replaced node:fs.
 afterAll(() => {
 	verifyRealStoresUnchanged();
+});
+
+// Global bookend: no suite may leave new or modified entries in the checkout
+// root or its .swarm/ (gitignored, so `git status` never reveals them).
+afterAll(() => {
+	reportCheckoutDrift(
+		diffCheckout(checkoutBaseline, snapshotCheckout(repoRoot)),
+		resolveDriftMode(process.env),
+		repoRoot,
+	);
 });

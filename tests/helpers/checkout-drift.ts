@@ -1,0 +1,184 @@
+/**
+ * Checkout-drift bookend for the test suite.
+ *
+ * Tests have repeatedly written into the plugin checkout itself: `.swarm/`
+ * state from tools handed `process.cwd()` (or a ToolContext-less string), a
+ * whitespace-named directory from a blank session root, `undefined/` and
+ * `.test-*` scratch dirs (see the historical entries in .gitignore). Those
+ * writes are invisible because `.swarm/` and the scratch names are
+ * gitignored, so `git status` never shows them.
+ *
+ * The preload (tests/preload/prod-store-tripwire.ts) snapshots the repo root's
+ * top-level entries and `<repoRoot>/.swarm` (recursive names + size/mtime)
+ * when the process starts and diffs them in a global afterAll. Bun runs a
+ * preload's afterAll once per process, so CI (one `bun test <file>` process
+ * per file, scripts/ci/repository-validation.ts) gets per-file attribution
+ * and a local multi-file run gets one end-of-run check.
+ *
+ * Deliberately NOT flagged:
+ *  - build/tool outputs a test may legitimately produce (IGNORED_TOP_LEVEL);
+ *  - CI's own validation reports under `.swarm/repository-validation/`;
+ *  - mtime changes of top-level DIRECTORIES (an editor's atomic save in
+ *    src/ bumps it), only new/removed names and changed top-level FILES.
+ *
+ * Changes INSIDE a `.swarm/` that already existed at preload are enforced in
+ * CI (`CI` set) but only warned about locally by default: on a developer's
+ * primary checkout a live opencode-swarm session legitimately writes there
+ * while tests run. Creating `.swarm/` where none existed is always enforced.
+ * `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` overrides the mode.
+ */
+
+import * as realFs from 'node:fs';
+import * as path from 'node:path';
+
+// Captured before any suite can mock.module('node:fs').
+const { lstatSync, readdirSync } = realFs;
+
+export const IGNORED_TOP_LEVEL: ReadonlySet<string> = new Set([
+	'node_modules',
+	'dist',
+	'coverage',
+	'graphify-out',
+]);
+
+/** `.swarm/` subtrees owned by tooling, not by tests. */
+export const IGNORED_SWARM_PREFIXES: readonly string[] = [
+	'repository-validation',
+];
+
+/** Bound on the recursive `.swarm/` walk (a developer's live dir can be big). */
+export const MAX_SWARM_ENTRIES = 20_000;
+
+export interface CheckoutSnapshot {
+	topLevel: Map<string, string>;
+	swarmExisted: boolean;
+	swarm: Map<string, string> | null;
+}
+
+function fingerprint(absPath: string, includeDirMtime: boolean): string {
+	try {
+		const st = lstatSync(absPath);
+		if (st.isDirectory()) return includeDirMtime ? `d:${st.mtimeMs}` : 'd';
+		return `${st.isSymbolicLink() ? 'l' : 'f'}:${st.size}:${st.mtimeMs}`;
+	} catch {
+		return 'missing';
+	}
+}
+
+function walkSwarm(swarmDir: string): Map<string, string> | null {
+	const out = new Map<string, string>();
+	const stack = [''];
+	while (stack.length > 0) {
+		const rel = stack.pop() as string;
+		let names: string[];
+		try {
+			names = readdirSync(path.join(swarmDir, rel));
+		} catch {
+			continue;
+		}
+		for (const name of names) {
+			const childRel = rel ? `${rel}/${name}` : name;
+			if (IGNORED_SWARM_PREFIXES.some((p) => childRel === p)) continue;
+			const abs = path.join(swarmDir, childRel);
+			const fp = fingerprint(abs, false);
+			out.set(childRel, fp);
+			if (out.size > MAX_SWARM_ENTRIES) return null;
+			if (fp === 'd') stack.push(childRel);
+		}
+	}
+	return out;
+}
+
+export function snapshotCheckout(repoRoot: string): CheckoutSnapshot {
+	const topLevel = new Map<string, string>();
+	let names: string[] = [];
+	try {
+		names = readdirSync(repoRoot);
+	} catch {
+		/* unreadable root: compare empty to empty */
+	}
+	for (const name of names) {
+		if (IGNORED_TOP_LEVEL.has(name)) continue;
+		topLevel.set(name, fingerprint(path.join(repoRoot, name), false));
+	}
+	const swarmDir = path.join(repoRoot, '.swarm');
+	const swarmExisted = topLevel.get('.swarm') === 'd';
+	return {
+		topLevel,
+		swarmExisted,
+		swarm: swarmExisted ? walkSwarm(swarmDir) : null,
+	};
+}
+
+function diffMaps(
+	before: Map<string, string>,
+	after: Map<string, string>,
+	label: string,
+): string[] {
+	const problems: string[] = [];
+	for (const [name, fp] of after) {
+		const prev = before.get(name);
+		if (prev === undefined) problems.push(`${label}${name}: created`);
+		else if (prev !== fp) problems.push(`${label}${name}: modified`);
+	}
+	for (const name of before.keys()) {
+		if (!after.has(name)) problems.push(`${label}${name}: removed`);
+	}
+	return problems;
+}
+
+export interface CheckoutDrift {
+	/** Always-enforced drift: new/removed top-level entries, changed root files. */
+	topLevel: string[];
+	/** Drift inside a pre-existing `.swarm/`. */
+	swarm: string[];
+}
+
+export function diffCheckout(
+	before: CheckoutSnapshot,
+	after: CheckoutSnapshot,
+): CheckoutDrift {
+	const topLevel = diffMaps(before.topLevel, after.topLevel, '');
+	let swarm: string[] = [];
+	if (before.swarmExisted && before.swarm && after.swarm) {
+		swarm = diffMaps(before.swarm, after.swarm, '.swarm/');
+	}
+	return { topLevel, swarm };
+}
+
+export type DriftMode = 'enforce' | 'warn' | 'off';
+
+export function resolveDriftMode(env: NodeJS.ProcessEnv): {
+	topLevel: DriftMode;
+	swarm: DriftMode;
+} {
+	const raw = env.SWARM_TEST_CHECKOUT_DRIFT?.toLowerCase();
+	if (raw === 'enforce' || raw === 'warn' || raw === 'off') {
+		return { topLevel: raw, swarm: raw };
+	}
+	return { topLevel: 'enforce', swarm: env.CI ? 'enforce' : 'warn' };
+}
+
+/** Throws (or warns) per mode. Returns the messages it reported. */
+export function reportCheckoutDrift(
+	drift: CheckoutDrift,
+	mode: { topLevel: DriftMode; swarm: DriftMode },
+	repoRoot: string,
+	warn: (message: string) => void = (m) => console.warn(m),
+): string[] {
+	const enforced: string[] = [];
+	const warned: string[] = [];
+	for (const [problems, m] of [
+		[drift.topLevel, mode.topLevel],
+		[drift.swarm, mode.swarm],
+	] as const) {
+		if (m === 'enforce') enforced.push(...problems);
+		else if (m === 'warn') warned.push(...problems);
+	}
+	const header = `CHECKOUT DRIFT: tests wrote into the plugin checkout (${repoRoot}). Use canonicalMkdtemp / a ToolContext with an explicit directory instead.`;
+	if (warned.length > 0) warn(`${header}\n${warned.join('\n')}`);
+	if (enforced.length > 0) {
+		throw new Error(`${header}\n${enforced.join('\n')}`);
+	}
+	return [...enforced, ...warned];
+}
