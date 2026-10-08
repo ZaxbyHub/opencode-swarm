@@ -208,16 +208,17 @@ describe('Guardrail explain redaction — firingRule does not leak home director
 });
 
 describe('Guardrail explain wrapper parity with the tool-before gate (#3099 round 5)', () => {
-	// These rows pin the round-5 blocker: both explain merge branches must pass
-	// the wrapperDeclared flag (4th mergeWriteAnalyses argument) mirroring the
-	// gate's resolveWindowsWriteAuthority regexes. With the flag omitted, the
-	// POSIX reading wins the shared-construct tie-break and explain answers
-	// allow for commands the gate blocks. Every block row below flips to allow
-	// if either branch's flag is removed. They also pin the reachable-input
-	// contract: explain receives whitespace-collapsed tokens (the swarm command
-	// dispatcher splits on \s+, destroying newlines), so newline-separated
-	// commands are explained via their `;`/`&&`/`|` equivalents — boundary
-	// forms that survive tokenization and drive the same wrapper match.
+	// These rows pin the round-5/round-6 explain-vs-gate machinery. Mutation
+	// semantics (verified by an independent reviewer's probes, round 7):
+	// - The wrapperDeclared 4th mergeWriteAnalyses argument is pinned by the
+	//   IN-SCOPE cmd /c row: without the flag the merge tie-break takes the
+	//   POSIX reading of `src\out.txt` (= srcout.txt, out of scope) and flips
+	//   allow -> block. The out-of-scope block rows do NOT flip when the flag
+	//   is removed — the unwrap mirror already exposes their writes.
+	// - The unwrap mirror (detectionCommand) is pinned by the `;` boundary
+	//   row: without it, `echo done; cmd /c copy ...` answers allow.
+	// - The raw-command parse gate is pinned by the unclosed-quote rows: a
+	//   wrapper must not launder a malformed payload the gate rejects.
 	test('cmd /c wrapper write out of scope → block (allow-branch flag)', async () => {
 		const result = await handleGuardrailExplain(tempDir, [
 			'--scope',
@@ -279,6 +280,18 @@ describe('Guardrail explain wrapper parity with the tool-before gate (#3099 roun
 			'powershell -Command "Set-Content src/in.txt x"',
 		]);
 		expect(extractDecision(result)).toBe('allow');
+	});
+
+	test('cmd /c with unclosed quote → block (raw parse gate; wrapper cannot launder malformed payload)', async () => {
+		const result = await handleGuardrailExplain(tempDir, ['cmd /c "echo hi']);
+		expect(extractDecision(result)).toBe('block');
+	});
+
+	test('powershell -Command with unclosed quote → block (raw parse gate)', async () => {
+		const result = await handleGuardrailExplain(tempDir, [
+			'powershell -Command "Set-Content OUTSIDE.md x',
+		]);
+		expect(extractDecision(result)).toBe('block');
 	});
 });
 

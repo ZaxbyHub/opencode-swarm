@@ -708,7 +708,29 @@ export async function handleGuardrailExplain(
 						wrapperDeclaredHere,
 					);
 
-		if (
+		// The gate runs its fail-closed parse gate on the ORIGINAL command as
+		// well as the unwrapped form (tool-before.ts): a wrapper must not
+		// launder a malformed payload — `cmd /c "echo hi` (unclosed quote)
+		// must block even though the unwrapped `echo hi` parses cleanly.
+		// Mirror both parse gates, raw first (round-7 review finding).
+		const rawPosix = detectPosixWrites(shellCommand);
+		const rawAnalysis =
+			authority === null
+				? rawPosix
+				: mergeWriteAnalyses(
+						rawPosix,
+						detectWindowsWrites(shellCommand, authority),
+						true,
+						wrapperDeclaredHere,
+					);
+		const rawParseFailure =
+			rawAnalysis.parseError && !isPowerShellReadOnlyPipeline(shellCommand);
+
+		if (rawParseFailure) {
+			decision = 'block';
+			firingRule =
+				'parse_error: write detection failed to parse command — rejecting for safety';
+		} else if (
 			analysis.parseError &&
 			!isPowerShellReadOnlyPipeline(detectionCommand)
 		) {
