@@ -1059,16 +1059,50 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// when it does it unions BOTH of its sub-detectors — routing by `w`
 		// would lose cmd-alias writes (`copy a b | Get-Content x`), which the
 		// cmd detector catches and the PowerShell detector does not.
-		const windowsShell: 'powershell' | 'cmd' | null = shaped
-			? 'powershell'
-			: detectedShellType === 'powershell' || detectedShellType === 'cmd'
-				? detectedShellType
-				: null;
+		// Issue #3099 R2 (executor context): which grammar OWNS shared
+		// constructs. Evidence: the Windows sandbox wraps commands in PowerShell
+		// (src/sandbox/win32), while the recovery runbook documents Git Bash AND
+		// PowerShell as both-real host shells — so content alone cannot pick a
+		// grammar. The authority ladder is:
+		//   1. an explicit wrapper DECLARES the executor (cmd /c, powershell
+		//      -Command) — that grammar is authoritative;
+		//   2. a PowerShell-shaped body cannot execute under POSIX at all, so
+		//      Windows is authoritative;
+		//   3. otherwise the tool's own executor: `bash` runs a POSIX shell, and
+		//      the `shell` tool keeps base content detection.
+		const cmdWrapper = /(?:^|[;&|\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(
+			command,
+		);
+		const psWrapper =
+			/(?:^|[;&|\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
+				command,
+			) || /(?:^|[;&|\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(command);
+		// Step 3 is TOOL-AWARE: content detection inherits only to the `shell`
+		// tool (base behavior). The `bash` tool without a wrapper or a shaped
+		// body runs a POSIX shell — routing it to cmd detection on an `echo `
+		// prefix would re-interpret `src\out` under the wrong grammar and both
+		// re-admit a base-blocked escape AND phantom-block in-scope writes.
+		const inheritedWindows =
+			detectedShellType === 'powershell' || detectedShellType === 'cmd';
+		const windowsShell: 'powershell' | 'cmd' | null = cmdWrapper
+			? 'cmd'
+			: psWrapper || shaped
+				? 'powershell'
+				: inheritedWindows && normalizedTool !== 'bash'
+					? (detectedShellType as 'powershell' | 'cmd')
+					: null;
 
 		const detect = (c: string): WriteAnalysis => {
 			const posix = detectPosixWrites(c);
 			if (windowsShell === null) return posix;
-			return mergeWriteAnalyses(posix, detectWindowsWrites(c, windowsShell));
+			// POSIX remains the parse-error owner (fail-closed backstop); the
+			// Windows analysis is authoritative for writes when the executor
+			// context declares it.
+			return mergeWriteAnalyses(
+				posix,
+				detectWindowsWrites(c, windowsShell),
+				true,
+			);
 		};
 
 		// Fail-closed parse gate runs on the ORIGINAL command so a genuinely
