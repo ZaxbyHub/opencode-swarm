@@ -158,6 +158,46 @@ describe('check-test-tmpdir — pure decision coverage', () => {
 	});
 });
 
+describe('check-test-tmpdir — checkout and home targets', () => {
+	// Split literals keep this file from tripping the gate on its own diff.
+	const CWD = ['process', '.cwd()'].join('');
+	const HOME = ['os.home', 'dir()'].join('');
+	const line = (content: string) => ({ file: 'x.test.ts', line: 1, content });
+
+	test('flags fixture roots assigned from the process cwd', () => {
+		for (const name of [
+			'testDir',
+			'tempDir',
+			'tmpDir',
+			'directory',
+			'projectRoot',
+		]) {
+			const result = evaluateTmpdirAddedLines([line(`\t${name} = ${CWD};`)]);
+			expect(result.violations).toBe(1);
+			expect(result.messages[0]).toContain('roots a test fixture at');
+		}
+		// Reading the cwd (e.g. to restore it) is fine.
+		expect(
+			evaluateTmpdirAddedLines([line(`const originalCwd = ${CWD};`)])
+				.violations,
+		).toBe(0);
+	});
+
+	test('flags fs writes under the real home directory', () => {
+		for (const call of [
+			`fs.writeFileSync(path.join(${HOME}, '.x'), 'y');`,
+			`mkdirSync(join(${HOME}, '.config', 'opencode'), { recursive: true });`,
+		]) {
+			const result = evaluateTmpdirAddedLines([line(call)]);
+			expect(result.violations).toBe(1);
+			expect(result.messages[0]).toContain('writes under');
+		}
+		expect(
+			evaluateTmpdirAddedLines([line(`const home = ${HOME};`)]).violations,
+		).toBe(0);
+	});
+});
+
 describe('check-test-tmpdir — end to end', () => {
 	test(`new raw ${RAW_TMPDIR_CALL} usage is blocking`, () => {
 		const repo = makeRepo();

@@ -23,9 +23,22 @@ const COLOCATED_TEST = /\.test\.(ts|js|mjs|cjs)$/;
 const SELF = path.relative(REPO_ROOT, import.meta.path);
 
 // The argv form spans lines when formatted (`'config',\n'--global',`), so
-// both patterns run over the whole file text.
-const SHELL_FORM = /\bgit\s+config\s+--global\b/g;
-const ARGV_FORM = /['"`]config['"`]\s*,\s*['"`]--global['"`]/g;
+// every pattern runs over the whole file text. `--system` writes the
+// machine-wide config; `--file`/`-f` aimed at the user's own config file
+// (`~/.gitconfig`, `$HOME/.gitconfig`, `os.homedir()`, `~/.config/git/config`)
+// is `--global` by another name.
+const SHELL_FORM = /\bgit\s+config\s+--(?:global|system)\b/g;
+const ARGV_FORM = /['"`]config['"`]\s*,\s*['"`]--(?:global|system)['"`]/g;
+const HOME_TARGET = String.raw`(?:~|\$\{?HOME\}?|\$\{?USERPROFILE\}?|homedir\(\))`;
+const SHELL_FILE_FORM = new RegExp(
+	String.raw`\bgit\s+config\s+(?:--file|-f)(?:\s+|=)['"]?${HOME_TARGET}`,
+	'g',
+);
+const ARGV_FILE_FORM = new RegExp(
+	String.raw`['"\`]config['"\`]\s*,\s*['"\`](?:--file|-f)['"\`]\s*,\s*[^,\]\n]*${HOME_TARGET}`,
+	'g',
+);
+const PATTERNS = [SHELL_FORM, ARGV_FORM, SHELL_FILE_FORM, ARGV_FILE_FORM];
 
 function* sourceFiles(dir: string): Generator<string> {
 	let entries: fs.Dirent[];
@@ -55,7 +68,7 @@ function isCommentLine(line: string): boolean {
 function findInSource(rel: string, text: string): string[] {
 	const lines = text.split('\n');
 	const hits: string[] = [];
-	for (const pattern of [SHELL_FORM, ARGV_FORM]) {
+	for (const pattern of PATTERNS) {
 		for (const match of text.matchAll(pattern)) {
 			const lineIndex = text.slice(0, match.index).split('\n').length - 1;
 			const line = lines[lineIndex] ?? '';
@@ -104,7 +117,27 @@ describe('no test writes the global git config', () => {
 		).toEqual([]);
 	});
 
-	test('no test file (tests/, test/, src/**/*.test.*) runs `git config --global`', () => {
+	test('the scan detects --system and --file/-f aimed at the user config', () => {
+		for (const hit of [
+			"execSync('git config --system core.x y')",
+			"run(['config', '--system', 'core.x', 'y'])",
+			'execSync("git config --file ~/.gitconfig user.name x")',
+			'execSync(`git config -f=$HOME/.gitconfig user.name x`)',
+			"run(['config', '--file', path.join(os.homedir(), '.gitconfig'), 'k', 'v'])",
+			"run(['config',\n\t'-f',\n\t`${os.homedir()}/.config/git/config`])",
+		]) {
+			expect(findInSource('a.ts', hit)).toHaveLength(1);
+		}
+		// A repo-local --file target is fine.
+		expect(
+			findInSource(
+				'a.ts',
+				"run(['config', '--file', join(repo, '.git/config')])",
+			),
+		).toEqual([]);
+	});
+
+	test('no test file (tests/, test/, src/**/*.test.*) writes a global/system git config', () => {
 		expect(findGlobalGitConfigWrites(REPO_ROOT)).toEqual([]);
 	});
 });
