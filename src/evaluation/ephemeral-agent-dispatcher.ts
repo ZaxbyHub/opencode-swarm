@@ -1,5 +1,9 @@
 import type { OpencodeClient } from '@opencode-ai/sdk';
-import { classifyProviderFailure } from '../failures/invocation-failure.js';
+import {
+	formatProviderMessageError,
+	type ProviderMessageError,
+	readProviderMessageError,
+} from '../failures/provider-message-error.js';
 import type { DelegationCostFields } from '../services/cost-accounting.js';
 import {
 	buildDelegationCostFields,
@@ -101,65 +105,11 @@ export type EphemeralAgentDispatchResult = {
 	costFields?: DelegationCostFields;
 };
 
-export type EphemeralProviderError = {
-	name: string;
-	statusCode?: number;
-	/** Bounded display text from {@link classifyProviderFailure}. */
-	message: string;
-	/** Provider failure category, e.g. `provider.rate_limit`. */
-	category: string;
-};
-
 /**
- * Read the provider error OpenCode records on an assistant message.
- *
- * `session.prompt` answers HTTP 200 even when the provider refused the
- * request (e.g. a Zen free-tier HTTP 403 for a `bash:false` tool config): the
- * refusal is `info.error` and the message has no text, so reading only the
- * parts reports an empty "completed" dispatch.
+ * The provider error OpenCode recorded on the assistant message, read by the
+ * shared {@link readProviderMessageError}.
  */
-function readProviderError(info: unknown): EphemeralProviderError | null {
-	if (!info || typeof info !== 'object') return null;
-	const error = (info as { error?: unknown }).error;
-	if (!error || typeof error !== 'object') return null;
-	const { name, data } = error as { name?: unknown; data?: unknown };
-	const details = (data && typeof data === 'object' ? data : {}) as {
-		message?: unknown;
-		statusCode?: unknown;
-	};
-	const statusCode =
-		typeof details.statusCode === 'number' &&
-		Number.isFinite(details.statusCode)
-			? details.statusCode
-			: undefined;
-	const rawMessage =
-		typeof details.message === 'string' && details.message.trim().length > 0
-			? details.message
-			: 'no message';
-	// AGENTS.md invariant 9: classify through the canonical provider classifier
-	// (as dispatch-lanes does for the same `info.error`) so the category is
-	// structured and the message is bounded display evidence, never raw text.
-	const classified = classifyProviderFailure(
-		statusCode === undefined
-			? rawMessage
-			: { message: rawMessage, status: statusCode },
-	);
-	return {
-		name:
-			typeof name === 'string' && name.length > 0
-				? name.slice(0, 64)
-				: 'UnknownError',
-		...(statusCode === undefined ? {} : { statusCode }),
-		message: classified.evidence.display || rawMessage.slice(0, 200),
-		category: classified.category,
-	};
-}
-
-function formatProviderError(error: EphemeralProviderError): string {
-	const status =
-		error.statusCode === undefined ? '' : ` (HTTP ${error.statusCode})`;
-	return `Ephemeral agent provider error: ${error.name}${status}: ${error.message}`;
-}
+export type EphemeralProviderError = ProviderMessageError;
 
 function formatSdkError(prefix: string, error: unknown): string {
 	let detail: string;
@@ -426,9 +376,14 @@ export async function dispatchEphemeralAgent(
 			);
 		}
 
-		providerError = readProviderError(response.data.info);
+		providerError = readProviderMessageError(response.data.info);
 		if (providerError) {
-			throw new Error(formatProviderError(providerError));
+			throw new Error(
+				formatProviderMessageError(
+					'Ephemeral agent provider error',
+					providerError,
+				),
+			);
 		}
 
 		const responseByteLimit =

@@ -22,6 +22,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
 import { stripKnownSwarmPrefix } from '../../config/schema';
+import { throwIfProviderMessageError } from '../../failures/provider-message-error';
 import type { ReviewModelDispatcher } from '../../review/contracts';
 import {
 	type ReviewAgentModelRegistry,
@@ -617,6 +618,14 @@ Be specific and evidence-based. When safety concerns are present, err on the sid
 				`Critic session returned no data: ${JSON.stringify(response.error)}`,
 			);
 		}
+
+		// A provider refusal/failure arrives as HTTP 200 with `info.error` and
+		// no text: throw it so the caller's failover classifies it instead of
+		// parsing an empty response.
+		throwIfProviderMessageError(
+			'Critic session provider error',
+			response.data.info,
+		);
 
 		// Extract text from response parts
 		const textParts = response.data.parts

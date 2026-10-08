@@ -240,3 +240,30 @@ describe('createSkillImproverLLMDelegate — model failover (#1927)', () => {
 		expect(promptCalls[1]).toBe('prov/s1-fb1');
 	});
 });
+
+describe('createSkillImproverLLMDelegate — provider error on the assistant message', () => {
+	test('a 429 recorded as info.error fails over instead of returning empty text', async () => {
+		seedSkillImproverFallback();
+		const promptCalls: Array<string | undefined> = [];
+		swarmState.opencodeClient = fakeClient(async (model) => {
+			if (model?.modelID === 'primary-skill') {
+				return {
+					data: {
+						info: {
+							error: {
+								name: 'APIError',
+								data: { statusCode: 429, message: 'Rate limit exceeded' },
+							},
+						},
+						parts: [],
+					},
+				};
+			}
+			return OK_ENVELOPE;
+		}, promptCalls);
+
+		const delegate = createSkillImproverLLMDelegate('/tmp/proj', 'sess-1');
+		expect(await delegate!('sys', 'input')).toBe(RESULT_TEXT);
+		expect(promptCalls).toEqual(['prov/primary-skill', 'prov/fb1']);
+	});
+});

@@ -31,6 +31,10 @@ import {
 	classifyProviderFailure,
 	isRetryableProviderFailure,
 } from '../failures/invocation-failure';
+import {
+	providerMessageErrorToError,
+	readProviderMessageError,
+} from '../failures/provider-message-error';
 import { validateSwarmPath } from '../hooks/utils';
 import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
@@ -553,9 +557,20 @@ export async function dispatchFullAutoOversight(
 					'oversight session.prompt',
 				);
 
+				const providerError = promptResult.data
+					? readProviderMessageError(promptResult.data.info)
+					: null;
 				if (!promptResult.data) {
 					lastError = new Error(
 						`Critic prompt failed: ${JSON.stringify(promptResult.error)}`,
+					);
+				} else if (providerError) {
+					// The provider refused or failed the request (HTTP 200 with
+					// `info.error` and no text): a dispatch failure for the retry /
+					// fallback loop, not an empty "NEEDS_REVISION" verdict.
+					lastError = providerMessageErrorToError(
+						'Critic prompt provider error',
+						providerError,
 					);
 				} else {
 					const textParts = promptResult.data.parts.filter(

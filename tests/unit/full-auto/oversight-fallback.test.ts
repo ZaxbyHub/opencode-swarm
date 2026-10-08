@@ -313,3 +313,64 @@ describe('dispatchFullAutoOversight — model failover (#1896)', () => {
 		expect(out.event.critic_model).toBe('prov/inherited-fb');
 	});
 });
+
+describe('dispatchFullAutoOversight — provider error on the assistant message', () => {
+	test('a 429 recorded as info.error fails over instead of becoming an empty NEEDS_REVISION', async () => {
+		// session.prompt answers HTTP 200 with the provider failure on
+		// info.error and no text parts.
+		startFullAutoRun(tmpDir, 'sess-info-error', { enabled: true });
+		seedOversightFallback(['prov/fb1']);
+		const promptModels: Array<string | undefined> = [];
+		stateInternals.swarmState.opencodeClient = {
+			session: {
+				create: async () => ({ data: { id: 'critic-session' }, error: null }),
+				prompt: async (params: { body: PromptBody }) => {
+					const override = params.body?.model;
+					promptModels.push(
+						override ? `${override.providerID}/${override.modelID}` : undefined,
+					);
+					if (!override) {
+						return {
+							data: {
+								info: {
+									error: {
+										name: 'APIError',
+										data: { statusCode: 429, message: 'Rate limit exceeded' },
+									},
+								},
+								parts: [],
+							},
+						};
+					}
+					return {
+						data: {
+							parts: [
+								{
+									type: 'text',
+									text: 'VERDICT: APPROVED\nREASONING: ok\nEVIDENCE_CHECKED: none\nANTI_PATTERNS_DETECTED: none\nESCALATION_NEEDED: NO',
+								},
+							],
+						},
+					};
+				},
+				delete: async () => ({}),
+			},
+		} as any;
+
+		const out = await dispatchFullAutoOversight({
+			directory: tmpDir,
+			sessionID: 'sess-info-error',
+			trigger: 'test',
+			triggerSource: 'tool_action',
+			criticModel: 'prov/primary-critic',
+			oversightAgentName: 'critic_oversight',
+			fullAutoConfig: {
+				max_dispatch_retries: 2,
+				max_consecutive_dispatch_failures: 3,
+			},
+		});
+
+		expect(out.verdict).toBe('APPROVED');
+		expect(promptModels).toEqual([undefined, 'prov/fb1']);
+	});
+});

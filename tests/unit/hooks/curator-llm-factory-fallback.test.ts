@@ -274,3 +274,30 @@ describe('createCuratorLLMDelegate — model failover (#1927)', () => {
 		expect(promptCalls[1]).toBe('prov/s1-fb1');
 	});
 });
+
+describe('createCuratorLLMDelegate — provider error on the assistant message', () => {
+	test('a 429 recorded as info.error fails over instead of returning empty text', async () => {
+		seedCuratorFallback();
+		const promptCalls: Array<string | undefined> = [];
+		swarmState.opencodeClient = fakeClient(async (model) => {
+			if (model?.modelID === 'primary-curator') {
+				return {
+					data: {
+						info: {
+							error: {
+								name: 'APIError',
+								data: { statusCode: 429, message: 'Rate limit exceeded' },
+							},
+						},
+						parts: [],
+					},
+				};
+			}
+			return OK_ENVELOPE;
+		}, promptCalls);
+
+		const delegate = createCuratorLLMDelegate('/tmp/proj', 'phase', 'sess-1');
+		expect(await delegate!('sys', 'input')).toBe(RESULT_TEXT);
+		expect(promptCalls).toEqual(['prov/primary-curator', 'prov/fb1']);
+	});
+});

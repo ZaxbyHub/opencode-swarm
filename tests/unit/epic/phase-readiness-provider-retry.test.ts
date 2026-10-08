@@ -272,11 +272,12 @@ describe('runEpicPhaseReview provider-refusal retry', () => {
 							name: 'APIError',
 							statusCode: 403,
 							message: 'free tier',
+							category: 'provider.authentication_configuration',
 						},
 						durationMs: 5,
 						promptBytes: request.prompt.length,
 						responseBytes: 0,
-					} as never;
+					};
 				}
 				return scripted.dispatch(request);
 			},
@@ -292,6 +293,38 @@ describe('runEpicPhaseReview provider-refusal retry', () => {
 		expect(stored().reviewer).toMatchObject({
 			verdict: 'APPROVED',
 			tool_profile: 'read-only-with-bash',
+		});
+	});
+
+	test('a rate-limit providerError is not retried with bash', async () => {
+		// Re-enabling bash cannot cure a 429: the model-fallback chain owns it.
+		const calls: ReviewDispatchRequest[] = [];
+		const dispatcher: ReviewModelDispatcher = {
+			dispatch: async (request) => {
+				calls.push(request);
+				return {
+					agentName: request.agentName,
+					status: 'error',
+					text: '',
+					error:
+						'Ephemeral agent provider error: APIError (HTTP 429): slow down',
+					providerError: {
+						name: 'APIError',
+						statusCode: 429,
+						message: 'slow down',
+						category: 'provider.rate_limit',
+					},
+					durationMs: 5,
+					promptBytes: request.prompt.length,
+					responseBytes: 0,
+				};
+			},
+		};
+		await runEpicPhaseReview(dir, 1, 'arch', { dispatcher });
+		expect(calls.every((c) => c.tools === undefined)).toBe(true);
+		expect(stored().reviewer).toMatchObject({
+			dispatch: 'failed',
+			tool_profile: 'read-only',
 		});
 	});
 

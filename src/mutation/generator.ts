@@ -6,6 +6,7 @@
  */
 
 import type { ToolContext } from '@opencode-ai/plugin';
+import { throwIfProviderMessageError } from '../failures/provider-message-error';
 import { swarmState } from '../state.js';
 import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
 import * as logger from '../utils/logger.js';
@@ -148,8 +149,8 @@ Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Sta
 
 		const startedAt = Date.now();
 		const dispatched = await dispatchWithModelFallback({
-			dispatch: async (_model, context) =>
-				await withTimeoutSignal(
+			dispatch: async (_model, context) => {
+				const result = await withTimeoutSignal(
 					(signal) =>
 						client.session.prompt({
 							path: { id: ephemeralSessionId! },
@@ -165,7 +166,16 @@ Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Sta
 					new Error(
 						`generateMutants prompt timed out after ${context.remainingMs ?? MUTATION_GENERATOR_TOTAL_TIMEOUT_MS}ms`,
 					),
-				),
+				);
+				// A provider refusal/failure is HTTP 200 with `info.error` and no
+				// text: throw so the transient retry sees it (a permanent one ends
+				// in the outer catch's empty patch set, with the cause logged).
+				throwIfProviderMessageError(
+					'generateMutants prompt provider error',
+					result.data?.info,
+				);
+				return result;
+			},
 			classify: (error) =>
 				isTransientProviderError(
 					error instanceof Error ? error.message : String(error),

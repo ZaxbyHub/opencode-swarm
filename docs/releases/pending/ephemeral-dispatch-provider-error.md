@@ -19,6 +19,19 @@ It now returns `status: 'error'` in that case:
 Because the message now says what happened, the evaluation dispatcher's
 transient-vs-permanent classifier can retry rate limits and similar errors.
 
+The other callers of `session.prompt` that read only the text parts now read
+`info.error` through the same shared reader and treat it as a failed dispatch,
+so their existing retry and model-fallback paths handle a 429 or quota error:
+- the full-auto oversight critic and the reactive full-auto critic, which
+  used to turn the empty response into a synthetic `NEEDS_REVISION` verdict;
+- the Lean Turbo phase critic, the curator and skill-improver delegates, and
+  the mutation-test generator, which used to treat it as an empty answer.
+
+The Epic phase review now retries with `bash` re-enabled only for an
+authentication/configuration refusal (the HTTP 403 class that re-enabling
+`bash` can cure). A rate limit, quota or outage error goes straight to the
+model-fallback chain.
+
 ## Why
 
 Found in a live run on the OpenCode Zen free tier: every `bash:false` review

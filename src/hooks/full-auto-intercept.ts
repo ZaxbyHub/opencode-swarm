@@ -20,6 +20,10 @@ import {
 	isRetryableProviderFailure,
 } from '../failures/invocation-failure.js';
 import {
+	providerMessageErrorToError,
+	readProviderMessageError,
+} from '../failures/provider-message-error.js';
+import {
 	type ParsedCriticResponse,
 	parseCriticResponseFields,
 } from '../full-auto/critic-response-parser';
@@ -665,9 +669,20 @@ export async function dispatchCriticAndWriteEvent(
 					'critic prompt',
 				);
 
+				const providerError = promptResult.data
+					? readProviderMessageError(promptResult.data.info)
+					: null;
 				if (!promptResult.data) {
 					lastError = new Error(
 						`Critic LLM prompt failed: ${JSON.stringify(promptResult.error)}`,
+					);
+				} else if (providerError) {
+					// The provider refused or failed the request (HTTP 200 with
+					// `info.error` and no text): a dispatch failure for the retry /
+					// fallback loop, not an empty "NEEDS_REVISION" verdict.
+					lastError = providerMessageErrorToError(
+						'Critic LLM prompt provider error',
+						providerError,
 					);
 				} else {
 					// 3. Extract text parts from response
