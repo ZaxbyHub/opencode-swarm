@@ -1,17 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import {
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadPluginConfig } from '../../../src/config/loader';
 import { PlanSchema } from '../../../src/config/plan-schema';
 import { computeCouncilReviewIdentity } from '../../../src/council/council-review-identity';
-import { closeProjectDb } from '../../../src/db/project-db';
 import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import {
 	ensureAgentSession,
@@ -19,8 +11,10 @@ import {
 	resetSwarmState,
 } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 
 let tempDir: string;
+let cleanupEnv: () => void;
 
 const PLAN_SWARM = 'test-swarm';
 const PLAN_TITLE = 'test-plan';
@@ -201,13 +195,15 @@ async function phaseComplete() {
 
 beforeEach(() => {
 	resetSwarmState();
-	tempDir = mkdtempSync(join(tmpdir(), 'pc-adv-'));
+	// One temp dir serves as the project root AND the XDG/HOME roots, so the
+	// config loader never reads the developer's ~/.config/opencode and the hive
+	// path never lands in the real ~/.local/share (cleanup closes the DB).
+	({ configDir: tempDir, cleanup: cleanupEnv } = createIsolatedTestEnv());
 });
 
 afterEach(() => {
 	resetSwarmState();
-	closeProjectDb(tempDir);
-	rmSync(tempDir, { recursive: true, force: true });
+	cleanupEnv();
 });
 
 // =============================================================================
