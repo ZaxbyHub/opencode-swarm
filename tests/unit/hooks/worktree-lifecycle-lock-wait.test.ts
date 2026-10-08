@@ -114,8 +114,8 @@ describe('resolveWorktreeLifecycleLockWaitMs', () => {
 		// [session_create_timeout_ms, expected wait]
 		[1_000, 10_000], // floor
 		[10_000, 15_000], // budget + 5s margin
-		[20_000, 25_000], // budget + 5s margin
-		[30_000, 20_000], // default: limited by room left in the hook
+		[20_000, 20_000], // limited by room left in the hook
+		[30_000, 10_000], // default: limited by room left in the hook
 		[120_000, 10_000], // schema max: floor
 	])('session_create_timeout_ms %d waits %d ms', (createMs, expected) => {
 		expect(_internals.resolveWorktreeLifecycleLockWaitMs(createMs)).toBe(
@@ -123,11 +123,14 @@ describe('resolveWorktreeLifecycleLockWaitMs', () => {
 		);
 	});
 
-	test('wait + own create + settle grace stays inside the hook budget', () => {
+	test('wait + own create + settle grace + provisioning fits the hook budget', () => {
+		const PROVISION_ALLOWANCE_MS = 15_000;
 		for (let createMs = 1_000; createMs <= 40_000; createMs += 1_000) {
 			const waitMs = _internals.resolveWorktreeLifecycleLockWaitMs(createMs);
-			if (waitMs === 10_000) continue; // floor; a 45s+ create overruns alone
-			expect(waitMs + createMs + SETTLE_GRACE_MS).toBeLessThan(HOOK_BUDGET_MS);
+			if (waitMs === 10_000) continue; // floor; a 30s+ create leaves no room
+			expect(
+				waitMs + createMs + SETTLE_GRACE_MS + PROVISION_ALLOWANCE_MS,
+			).toBeLessThanOrEqual(HOOK_BUDGET_MS);
 		}
 	});
 });
@@ -168,15 +171,15 @@ describe('precreateStandardWorktreeSession with a busy lifecycle lock', () => {
 	test('hard-stops after the wait with a message naming both holders and the knob', async () => {
 		const message = await dispatchBusy(20_000);
 		expect(message).toMatch(
-			/STANDARD_WORKTREE_LIFECYCLE_BUSY: .*busy for 25s .*another lane is provisioning or init orphan recovery/,
+			/STANDARD_WORKTREE_LIFECYCLE_BUSY: .*busy for 20s .*another lane is provisioning or init orphan recovery/,
 		);
 		expect(message).toContain('worktree.session_create_timeout_ms');
 		// The fake clock advanced by the derived wait, not a fixed 10s.
-		expect(clock - 1_000).toBeGreaterThanOrEqual(25_000);
-		expect(clock - 1_000).toBeLessThan(25_250);
+		expect(clock - 1_000).toBeGreaterThanOrEqual(20_000);
+		expect(clock - 1_000).toBeLessThan(20_250);
 	});
 
-	test('the default budget waits 20s', async () => {
-		expect(await dispatchBusy(30_000)).toContain('busy for 20s');
+	test('the default budget waits 10s', async () => {
+		expect(await dispatchBusy(30_000)).toContain('busy for 10s');
 	});
 });

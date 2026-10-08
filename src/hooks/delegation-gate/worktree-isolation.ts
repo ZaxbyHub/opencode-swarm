@@ -630,6 +630,13 @@ const WORKTREE_LIFECYCLE_LOCK_WAIT_MIN_MS = 10_000;
  * the lock wait AND its own lane session.create inside that one hook call.
  */
 const WORKTREE_DISPATCH_HOOK_BUDGET_MS = 60_000;
+/**
+ * Time kept free in that hook call for the work after the lock is acquired
+ * and besides session.create: the collision scan, stale-lane cleanup and
+ * `git worktree add`, which can take several seconds on large repos or on
+ * Windows/macOS.
+ */
+const WORKTREE_PROVISION_ALLOWANCE_MS = 15_000;
 
 /**
  * How long a lane dispatch waits for the worktree lifecycle lock.
@@ -637,8 +644,9 @@ const WORKTREE_DISPATCH_HOOK_BUDGET_MS = 60_000;
  * A holder can keep the lock across a recovery-lane session.create, bounded by
  * `worktree.session_create_timeout_ms` (plus the settle grace), and the
  * stale-lane cleanup after it. The wait therefore follows that budget plus a
- * margin. It is capped so that the wait, this dispatch's own session.create
- * and its settle grace still fit in the host hook budget: a dispatch that
+ * margin. It is capped so that the wait, this dispatch's own session.create,
+ * its settle grace and the provisioning work still fit in the host hook
+ * budget (10s at the default 30s session.create budget): a dispatch that
  * overruns the hook is abandoned mid-provisioning, while a dispatch that stops
  * here fails cleanly with STANDARD_WORKTREE_LIFECYCLE_BUSY.
  */
@@ -651,7 +659,7 @@ function resolveWorktreeLifecycleLockWaitMs(
 		WORKTREE_DISPATCH_HOOK_BUDGET_MS -
 		createMs -
 		WORKTREE_SESSION_CREATE_SETTLE_GRACE_MS -
-		WORKTREE_LIFECYCLE_LOCK_WAIT_MARGIN_MS;
+		WORKTREE_PROVISION_ALLOWANCE_MS;
 	return Math.max(
 		WORKTREE_LIFECYCLE_LOCK_WAIT_MIN_MS,
 		Math.min(coverHolder, roomInHook),
@@ -1373,7 +1381,7 @@ export async function precreateStandardWorktreeSession(args: {
 		hardStopStandardWorktreeLifecycle(
 			args.parentSessionID,
 			`STANDARD_WORKTREE_LIFECYCLE_BUSY: the worktree lifecycle lock stayed busy for ${Math.round(lifecycleLockWaitMs / 1000)}s (another lane is provisioning or init orphan recovery is running); retry this coder dispatch. ` +
-				'The wait follows worktree.session_create_timeout_ms: that budget plus 5s, at least 10s, and short enough that this dispatch still fits the 60s host hook budget.',
+				'The wait follows worktree.session_create_timeout_ms: that budget plus 5s, at least 10s, and short enough that this dispatch (its own session create and worktree provisioning included) still fits the 60s host hook budget.',
 		);
 	}
 	try {
