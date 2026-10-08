@@ -1863,7 +1863,10 @@ export async function activatePrWorkflow(
 				directory,
 				mode,
 			);
-			// Issue #3099 R2-14: gh readiness, checked once at activation. Written
+			// Issue #3099 R2-14: gh readiness, checked once at activation. Safe against
+			// the .max(8) schema cap because the fresh detector emits at most one
+			// entry and the skill-contract source at most three (review-3 nit).
+			// Written
 			// FIRST so it reserves one of the shared advisory slots; the append
 			// helper never evicts an existing entry, so a first-written entry
 			// survives. Fail-open — detection never gates activation.

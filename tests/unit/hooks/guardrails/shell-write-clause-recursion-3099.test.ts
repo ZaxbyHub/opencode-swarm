@@ -15,6 +15,7 @@ import {
 	detectWindowsWrites,
 	isPowerShellReadOnlyPipeline,
 	isPowerShellShaped,
+	resolveWriteTargets,
 } from '../../../../src/hooks/shell-write-detect';
 
 const writes = (command: string) => detectPosixWrites(command).writes;
@@ -198,6 +199,49 @@ describe('#3099 — shell-write clause recursion and shape classification', () =
 				),
 			).toBe(true);
 		});
+	});
+
+	// ------------------------------------------------------------------
+	// #3099 round 3: cwd semantics of clause bodies. Bodies get a COPIED
+	// stack, so an unreachable cd (untaken branch, function definition)
+	// must NOT move a later top-level write into scope — matching base,
+	// which never visited bodies at all. These rows pin the resolution
+	// behavior through resolveWriteTargets with cwd '/w'.
+	// ------------------------------------------------------------------
+	describe('#3099 round 3 — unreachable-cd does not poison resolution', () => {
+		const cases: Array<[string, string, string]> = [
+			[
+				'untaken if-branch cd',
+				'if false; then cd src; fi; echo hi > OUT.txt',
+				'/w/OUT.txt',
+			],
+			[
+				'function-definition cd',
+				'f() { cd src; }; echo hi > OUT.txt',
+				'/w/OUT.txt',
+			],
+			[
+				'untaken while-body cd',
+				'while false; do cd src; done; echo hi > OUT.txt',
+				'/w/OUT.txt',
+			],
+			[
+				'taken top-level cd still propagates',
+				'cd src; echo hi > OUT.txt',
+				'/w/src/OUT.txt',
+			],
+		];
+		for (const [label, command, wantPath] of cases) {
+			it(`resolves ${label} against the reachable cwd`, () => {
+				const det = detectPosixWrites(command);
+				const resolved = resolveWriteTargets(command, det.writes, '/w');
+				expect(
+					resolved.some(
+						(r) => (r.resolvedPath ?? '').replace(/\+/g, '/') === wantPath,
+					),
+				).toBe(true);
+			});
+		}
 	});
 
 	it('isPowerShellReadOnlyPipeline admits a genuine read-only pipeline', () => {

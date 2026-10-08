@@ -10,6 +10,7 @@ import {
 	canonicalForgePrUrl,
 	type ForgeContext,
 } from '../providers/forge-provider.js';
+import { GH_READINESS_ADVISORY_PREFIX } from '../services/pr-workflow-gh-readiness.js';
 import {
 	ensurePrWorkflowSkillContractsFresh,
 	SKILL_CONTRACT_WAKE_BUDGET_MS,
@@ -1434,7 +1435,7 @@ export function createPrWorkflowResponseGate(options: {
 			// gh advisory rendered under the skill-contract label misattributes a
 			// readiness warning.
 			const advisoryLabel = (advisory: string) =>
-				advisory.startsWith('gh-readiness:')
+				advisory.startsWith(GH_READINESS_ADVISORY_PREFIX)
 					? '[gh-readiness advisory] '
 					: '[skill-contract advisory] ';
 			const skillContractAdvisoryText =

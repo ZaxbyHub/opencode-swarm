@@ -704,12 +704,29 @@ export async function handleGuardrailExplain(
 			}
 		}
 	} else {
-		// Already blocked; still collect write categories for reporting.
-		const shellType = resolveShellType(shellCommand);
+		// Already blocked; still collect write categories for reporting. Same
+		// #3099 authority routing as the allow branch — no stale second path.
+		const detected = resolveShellType(shellCommand) as
+			| 'posix'
+			| 'powershell'
+			| 'cmd'
+			| 'unix'
+			| 'bash';
+		const authority = resolveWindowsWriteAuthority(
+			'shell',
+			shellCommand,
+			detected,
+			isPowerShellShaped(shellCommand),
+		);
+		const posix = detectPosixWrites(shellCommand);
 		const analysis =
-			shellType === 'powershell' || shellType === 'cmd'
-				? detectWindowsWrites(shellCommand, shellType)
-				: detectPosixWrites(shellCommand);
+			authority === null
+				? posix
+				: mergeWriteAnalyses(
+						posix,
+						detectWindowsWrites(shellCommand, authority),
+						true,
+					);
 
 		if (!analysis.parseError && analysis.hasWrites) {
 			for (const write of analysis.writes) {
