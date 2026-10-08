@@ -648,6 +648,23 @@ export async function handleGuardrailExplain(
 	// answer "allow" for a command the gate blocks. Explain has no tool
 	// context, so it evaluates the command as the `shell` tool — the surface
 	// this preview has always modeled.
+	// Mirror the gate's unwrap preprocessing (tool-before.ts write-detection
+	// path): segment the command, unwrap wrapper segments, rejoin with '\n'
+	// when any segment changed, and run write detection on that normalized
+	// form. A `;`-joined wrapper write (`echo done; cmd /c copy a.md
+	// OUTSIDE.md`) is invisible to the whole-string detectors — the gate sees
+	// it only through this normalization — so explain must share it or answer
+	// allow where the gate blocks (round-6 review finding). Authority and the
+	// wrapper flag below stay computed from the raw command, exactly like the
+	// gate; detection and target resolution use the same normalized string,
+	// because resolveWriteTargets re-parses it for cwd tracking.
+	const commandSegments = dcSplitSegments(shellCommand);
+	const unwrappedSegments = commandSegments.map((s) => dcUnwrapWrappers(s));
+	const didUnwrap = commandSegments.some((s, i) => unwrappedSegments[i] !== s);
+	const detectionCommand = didUnwrap
+		? unwrappedSegments.join('\n')
+		: shellCommand;
+
 	if (decision === 'allow') {
 		const detected = resolveShellType(shellCommand) as
 			| 'posix'
@@ -664,31 +681,43 @@ export async function handleGuardrailExplain(
 		// Mirrors the gate's wrapper-priority flag (round-5 blocker: omitting it
 		// made explain keep the POSIX reading for explicit cmd/powershell -Command
 		// wrappers while the gate kept the Windows one — explain answered allow
-		// for commands the gate blocked).
+		// for commands the gate blocked). Input contract (round 6): every
+		// production path into this service tokenizes arguments with
+		// `argumentText.trim().split(/\s+/)` (src/commands/command-dispatch.ts),
+		// which destroys literal newlines before the command string is joined,
+		// so the gate's newline command boundary cannot fire here — callers
+		// re-express multi-line commands with `;`/`&&`/`|` separators, which
+		// drive the same wrapper match and the same verdict. The regexes stay
+		// byte-identical to resolveWindowsWriteAuthority so any future
+		// raw-string caller gets gate parity for free; pinned by the wrapper
+		// parity rows in guardrail-explain-service-accuracy.test.ts.
 		const wrapperDeclaredHere =
 			/(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(shellCommand) ||
 			/(?:^|[;|&\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
 				shellCommand,
 			) ||
 			/(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(shellCommand);
-		const posix = detectPosixWrites(shellCommand);
+		const posix = detectPosixWrites(detectionCommand);
 		const analysis =
 			authority === null
 				? posix
 				: mergeWriteAnalyses(
 						posix,
-						detectWindowsWrites(shellCommand, authority),
+						detectWindowsWrites(detectionCommand, authority),
 						true,
 						wrapperDeclaredHere,
 					);
 
-		if (analysis.parseError && !isPowerShellReadOnlyPipeline(shellCommand)) {
+		if (
+			analysis.parseError &&
+			!isPowerShellReadOnlyPipeline(detectionCommand)
+		) {
 			decision = 'block';
 			firingRule =
 				'parse_error: write detection failed to parse command — rejecting for safety';
 		} else if (analysis.hasWrites) {
 			const resolvedWrites = resolveWriteTargets(
-				shellCommand,
+				detectionCommand,
 				analysis.writes,
 				directory,
 			);
@@ -737,13 +766,13 @@ export async function handleGuardrailExplain(
 				shellCommand,
 			) ||
 			/(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(shellCommand);
-		const posix = detectPosixWrites(shellCommand);
+		const posix = detectPosixWrites(detectionCommand);
 		const analysis =
 			authority === null
 				? posix
 				: mergeWriteAnalyses(
 						posix,
-						detectWindowsWrites(shellCommand, authority),
+						detectWindowsWrites(detectionCommand, authority),
 						true,
 						wrapperDeclaredElse,
 					);
