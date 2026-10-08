@@ -26,16 +26,14 @@ vi.mock('../../test-impact/failure-classifier.js', () => ({
 	classifyAndCluster: mockClassifyAndCluster,
 }));
 
+import { executeInDirectory } from '../../../tests/helpers/tool-directory';
 // Import after mocks are set up
 import { test_runner } from '../test-runner.js';
 
 // ============ Test Helpers ============
 
 function getExecute() {
-	return test_runner.execute as unknown as (
-		args: Record<string, unknown>,
-		directory: string,
-	) => Promise<string>;
+	return executeInDirectory(test_runner);
 }
 
 function parseResult(result: string) {
