@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getDiagnoseData } from '../../../src/services/diagnose-service';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 /**
  * ADVERSARIAL TEST SUITE for diagnose-service.ts
@@ -23,14 +24,13 @@ describe('diagnose-service adversarial tests', () => {
 	let sandboxDir: string;
 
 	beforeAll(async () => {
-		// Create sandbox directory for adversarial file creation
-		sandboxDir = path.join(os.tmpdir(), `opencode-adversarial-${Date.now()}`);
-		fs.mkdirSync(sandboxDir, { recursive: true });
+		sandboxDir = canonicalMkdtemp('opencode-adversarial-');
 		fs.mkdirSync(path.join(sandboxDir, '.swarm'), { recursive: true });
 		fs.mkdirSync(path.join(sandboxDir, '.opencode'), { recursive: true });
 
-		// Create test directory pointing to current workspace
-		testDir = process.cwd();
+		// Traversal base 11 levels inside the sandbox, so `../` x10 stays in it.
+		testDir = path.join(sandboxDir, 'traversal', ...'abcdefghij');
+		fs.mkdirSync(testDir, { recursive: true });
 	});
 
 	afterAll(() => {
