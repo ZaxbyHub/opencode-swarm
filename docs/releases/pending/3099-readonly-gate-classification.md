@@ -24,10 +24,14 @@ That produced two defects from one line of code:
 
 The fix **unions** the detectors rather than switching between them: the POSIX
 detector always runs, and the Windows detector runs additionally when the
-command is Windows-shaped. Nothing can lose a detection it has today. When both
-report the same construct, the Windows reading wins — POSIX treats `\` as an
-escape character, so re-reading `src\out.txt` as POSIX yields the mangled
-`srcout.txt`, which would otherwise block a legitimate in-scope cmd.exe write.
+executor context declares Windows. Nothing can lose a detection it has today.
+When both grammars report the same construct, the reading of the grammar
+matching the DECLARED executor context wins — an explicit `cmd /c` or
+`powershell -Command` wrapper declares the executor outright; a
+PowerShell-shaped body cannot execute under POSIX at all; otherwise the tool's
+own executor decides (the `bash` tool runs a POSIX shell, so POSIX re-reads of
+`src\out.txt` as `srcout.txt` stay authoritative there, while `cmd /c` keeps
+its Windows reading). Lexical resemblance alone never discards a reading.
 
 ## Also fixed
 
@@ -39,9 +43,14 @@ escape character, so re-reading `src\out.txt` as POSIX yields the mangled
   has a dedicated one that composes `-Path` and `-Name` rather than resolving an
   in-scope decoy.
 - **A read-only allowlist** so a positively-classified read-only PowerShell
-  pipeline is a read rather than a parse failure. Fail-closed is unchanged: the
-  scan covers PowerShell verbs, their aliases and POSIX write builtins anywhere
-  in the command, and requires balanced quoting and braces.
+  pipeline is a read rather than a parse failure. Fail-closed is unchanged and
+  now deny-by-default: a script-block body is admitted only when every token is
+  positively a `$_`/`$this` property chain, a comparison operator, a literal or
+  a comma — any unrecognized identifier, method call, type literal, assignment
+  or sub-expression fails the body and the command stays blocked. Write
+  mechanisms the detectors cannot see (`[System.IO.File]::WriteAllText`,
+  `mkdir`, `tar`, `chmod`, `$_.Delete()`…) therefore keep failing closed.
+  PowerShell names match case-insensitively.
 - **Enumerated read-only tool methods.** The PR-review gate required a `method`
   argument to be literally `GET` or `HEAD`, so a tool that takes enumerated
   *operation* names — `get_check_runs`, `get_reviews`, `get_review_comments`,
