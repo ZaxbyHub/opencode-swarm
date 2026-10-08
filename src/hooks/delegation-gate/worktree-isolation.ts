@@ -345,8 +345,8 @@ export function assertTaskIdNotForeignLaneSession(
 	throw new Error(
 		`TASK_SESSION_RESUME_MISMATCH: task_id "${taskId}" is the session this plugin created for an isolated ${owner} lane; ` +
 			`passing it would resume that ${owner} session as ${requested || 'another agent'} (its lane, history and scope). ` +
-			`task_id is a session-resume handle, not the plan task id: omit it to start a fresh ${requested || 'agent'} session, ` +
-			'and name the plan task in the prompt (e.g. "TASK: 1.1").',
+			'Set task_id to the plan task id (e.g. "1.1") or omit it; never pass a `ses_…` id returned in a Task result ' +
+			`for a different agent. Omitting it starts a fresh ${requested || 'agent'} session.`,
 	);
 }
 let standardWorktreeMergeQueue: Promise<unknown> = Promise.resolve();

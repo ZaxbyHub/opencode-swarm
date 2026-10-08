@@ -15,6 +15,11 @@ describe('Architect prompt — task attribution guidance', () => {
 			'task_id` to the same numeric value as a tool argument',
 		);
 		expect(prompt).toContain('Plan-level critics');
+		// Lane child session ids returned in a Task result must never be
+		// reused as another agent's task_id (TASK_SESSION_RESUME_MISMATCH).
+		expect(prompt).toContain(
+			"`task_id` holds the plan task id only; never copy a `ses_…` id returned in a Task\nresult into another agent's dispatch.",
+		);
 
 		const shippedExample = /for example, `(TASK: \d+\.\d+(?:\.\d+)*)`/.exec(
 			prompt,

@@ -11,13 +11,19 @@ history and scope.
 
 The plugin now records the lane child sessions it creates. The delegation gate
 refuses a Task dispatch whose `task_id` names one of them for a different agent
-(`TASK_SESSION_RESUME_MISMATCH`). The error explains that `task_id` resumes a
-session and is not the plan task id.
+(`TASK_SESSION_RESUME_MISMATCH`). The error tells the architect to set
+`task_id` to the plan task id (for example `"1.1"`) or omit it, and never to
+pass a `ses_…` id returned in a Task result for a different agent. The
+architect prompt's TASK ATTRIBUTION section now says the same.
 
 Unchanged:
 - resuming the same agent's session;
 - plan task ids;
 - session ids the plugin did not create.
+
+Known limit: the plugin keeps the record of lane sessions in memory. After
+OpenCode restarts, the guard does not know the lane sessions created before
+the restart.
 
 ## Why
 

@@ -749,6 +749,8 @@ alone on a standalone \`TASK:\` line (for example, \`TASK: 1.1\`) and put the ob
 on the following line. When the Task arguments support an explicit field, set
 \`task_id\` to the same numeric value as a tool argument (not as prompt prose). Keep
 the numeric ID consistent across the TASK line, \`task_id\`, and any acceptance text.
+\`task_id\` holds the plan task id only; never copy a \`ses_…\` id returned in a Task
+result into another agent's dispatch.
 Plan-level critics and other project-wide reviews must omit task attribution rather
 than guessing from ambient prose or session state.
 

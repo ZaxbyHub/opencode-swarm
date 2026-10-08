@@ -65,6 +65,21 @@ describe('lane child session resume guard', () => {
 				task_id: ` ${LANE_SESSION} `,
 			}),
 		).toThrow(/resume that coder session as reviewer/);
+		// The remedy matches the architect's TASK ATTRIBUTION contract:
+		// task_id carries the plan task id, never another agent's session id.
+		let message = '';
+		try {
+			assertTaskIdNotForeignLaneSession({
+				subagent_type: 'reviewer',
+				task_id: LANE_SESSION,
+			});
+		} catch (error) {
+			message = (error as Error).message;
+		}
+		expect(message).toMatch(
+			/Set task_id to the plan task id \(e\.g\. "1\.1"\) or omit it; never pass a `ses_…` id returned in a Task result for a different agent/,
+		);
+		expect(message).not.toContain('not the plan task id');
 		expect(() =>
 			assertTaskIdNotForeignLaneSession({
 				subagent_type: 'mega_coder',
