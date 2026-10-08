@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.191.4",
+  "tagCommit": "6e556a20a9c95cf8d12c0c5f778d590a7de75839",
+  "targetCommitish": "6e556a20a9c95cf8d12c0c5f778d590a7de75839",
+  "releaseBodySha256": "2123cacdcfff5c0e754d5bde0e8daec5a17520dd67d2952ef133f551b796de24",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3092-secretscan-diff-scoped-gating.md",
+      "sha256": "9e6ba3a0b0a6c6b1557f3063787de994df6f569899eca1a6b4eab53b8a30e9b2"
+    }
+  ]
+}
