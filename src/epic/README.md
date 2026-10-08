@@ -246,9 +246,6 @@ This section records why things are the way they are. Do not undo a decision lis
 
 **Non-Epic upstream issues observed while building Epic** (Epic works around them and does not change them):
 - Lean `planLeanTurboLanes` produces one lane in practice (`src/turbo/lean/planner.ts`), and its scope read uses the v1 projection.
-- `/swarm turbo` and Lean texts (`TURBO_MODE_BANNER`, `LEAN_TURBO_BANNER`, `TURBO_BYPASS_DISCLOSURE`) still describe old Stage B bypass behaviour.
 - Stale comments name deleted Epic v1 modules: `src/utils/logger.ts` (epic-promotions), `src/turbo/lean/partition-common.ts` (`planEpicWaves`), `src/turbo/lean/planner.ts`.
-- The delegation gate's tier-3 `startsWith('3.')` heuristic.
-- The worktree lifecycle lock retries for about 310 ms.
 - Foreground coder write attribution lands on the child session (#2926).
 - Some upstream tests fail or leak on a pristine upstream checkout independently of Epic. Examples are `tests/unit/tools/phase-complete-phase-council.adversarial.test.ts` and `system-guidance-delivery-fail-open-2780`, which writes into the real data directory. Before blaming Epic for a failure, compare against a clean upstream checkout.
