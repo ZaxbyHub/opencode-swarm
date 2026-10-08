@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
+import { rmSync } from 'node:fs';
+import { closeProjectDb } from '../../../src/db/project-db';
 import { setPendingCoderScope } from '../../../src/hooks/delegation-gate';
 import {
 	_internals,
@@ -10,8 +12,11 @@ import {
 	swarmState,
 } from '../../../src/state';
 import { installScopeGuardBindingSeam } from '../../helpers/scope-guard-binding-seam';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
-const directory = process.cwd();
+// The hook persists pending scope in <directory>/.swarm/swarm.db: root it in
+// a temp project, never the plugin checkout (process.cwd()).
+const directory = canonicalMkdtemp('scope-guard-write-targets-');
 let restoreBindingSeam = () => {};
 
 function startCoder(sessionID: string, scope: string[] | null): void {
@@ -28,6 +33,11 @@ afterEach(() => {
 	restoreBindingSeam();
 	restoreBindingSeam = () => {};
 	resetSwarmState();
+});
+
+afterAll(() => {
+	closeProjectDb(directory);
+	rmSync(directory, { recursive: true, force: true });
 });
 
 describe('scope guard shared write-target resolution — issue #1875', () => {
