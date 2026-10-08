@@ -15,6 +15,19 @@ import {
 	resolveModuleSpecifier,
 	validateWorkspace,
 } from '../../../src/tools/repo-graph';
+import { type CwdSandbox, enterCwdSandbox } from '../../helpers/cwd-sandbox';
+
+// This suite builds cwd-relative workspaces (the code under test resolves
+// paths against process.cwd()), so every test runs with its cwd in a
+// throwaway sandbox, never in the plugin checkout.
+let cwdSandbox: CwdSandbox | undefined;
+beforeEach(() => {
+	cwdSandbox = enterCwdSandbox('repo-graph-codex-adv-');
+});
+afterEach(() => {
+	cwdSandbox?.restore();
+	cwdSandbox = undefined;
+});
 
 describe('validateWorkspace adversarial security tests', () => {
 	let tempDir: string;
