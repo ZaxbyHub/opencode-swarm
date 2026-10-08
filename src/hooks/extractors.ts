@@ -259,17 +259,29 @@ export function extractPatterns(
  * never suppress the summary — the honest active phase is reported instead.
  */
 export function extractCurrentPhaseFromPlan(plan: Plan): string | null {
-	return extractPhaseLabelFromPlan(plan, resolveActivePhaseId(plan));
+	const label = composePhaseLabel(plan, resolveActivePhaseId(plan));
+	if (label === null) return null;
+	// #2841: phase.name is architect-authored from untrusted input and this
+	// one-liner feeds the `[SWARM CONTEXT] Phase:` injection — the composed
+	// string must pass the shared sanitizer before it is returned.
+	return sanitizeContextText(label);
 }
 
-/** The composed `Phase N: name [STATUS]` label for one phase of the plan. */
+/** The sanitized `Phase N: name [STATUS]` label for one phase of the plan. */
 export function extractPhaseLabelFromPlan(
 	plan: Plan,
 	phaseId: number,
 ): string | null {
+	const label = composePhaseLabel(plan, phaseId);
+	if (label === null) return null;
+	// #2841: same untrusted phase.name as extractCurrentPhaseFromPlan.
+	return sanitizeContextText(label);
+}
+
+/** Unsanitized label; every exported caller sanitizes it (#2841). */
+function composePhaseLabel(plan: Plan, phaseId: number): string | null {
 	const phase = plan.phases.find((p) => p.id === phaseId);
 	if (!phase) return null;
-
 	const statusMap: Record<string, string> = {
 		pending: 'PENDING',
 		in_progress: 'IN PROGRESS',
@@ -277,12 +289,7 @@ export function extractPhaseLabelFromPlan(
 		blocked: 'BLOCKED',
 	};
 	const statusText = statusMap[phase.status] || 'PENDING';
-	// #2841: phase.name is architect-authored from untrusted input and this
-	// one-liner feeds the `[SWARM CONTEXT] Phase:` injection — the composed
-	// string must pass the shared sanitizer before it is returned.
-	return sanitizeContextText(
-		`Phase ${phase.id}: ${phase.name} [${statusText}]`,
-	);
+	return `Phase ${phase.id}: ${phase.name} [${statusText}]`;
 }
 
 /**
