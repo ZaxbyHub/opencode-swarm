@@ -120,6 +120,86 @@ describe('#3099 — shell-write clause recursion and shape classification', () =
 		expect(isPowerShellReadOnlyPipeline(command as string)).toBe(false);
 	});
 
+	// ------------------------------------------------------------------
+	// #3099 repair: every shape the two implementation reviews executed as a
+	// counterexample, pinned so the regression cannot reappear silently.
+	// ------------------------------------------------------------------
+	describe('#3099 repair — reviewer counterexamples (predicate fail-open class)', () => {
+		const MUST_REJECT: Array<[string, string]> = [
+			[
+				'static .NET write',
+				"Get-Content a.md | ForEach-Object { [System.IO.File]::WriteAllText('OUTSIDE.md','x') }",
+			],
+			[
+				'mkdir in block',
+				'Get-Content a.md | ForEach-Object { mkdir OUTSIDE_DIR }',
+			],
+			[
+				'tar in block',
+				'Get-Content a.md | ForEach-Object { tar -xf evil.tgz }',
+			],
+			[
+				'chmod in block',
+				'Get-Content a.md | ForEach-Object { chmod 777 OUTSIDE.md }',
+			],
+			[
+				'ri alias in block',
+				'Get-Content a.md | ForEach-Object { ri OUTSIDE.md }',
+			],
+			[
+				'Rename-Item in block',
+				'Get-Content a.md | ForEach-Object { Rename-Item OUTSIDE.md decoy.md }',
+			],
+			[
+				'method call on pipeline object',
+				'Get-Content a.md | ForEach-Object { $_.Delete() }',
+			],
+			[
+				'Tee-Object in block',
+				'Get-Content a.md | ForEach-Object { Tee-Object -FilePath OUTSIDE.txt }',
+			],
+			[
+				'Start-Transcript in block',
+				'Get-Content a.md | ForEach-Object { Start-Transcript -Path OUTSIDE.txt }',
+			],
+			[
+				'Export-Csv in block',
+				'Get-Content a.md | ForEach-Object { Export-Csv -Path OUTSIDE.csv -NoTypeInformation }',
+			],
+			[
+				'Set-ItemProperty in block',
+				'Get-Content a.md | Where-Object { Set-ItemProperty OUTSIDE.md k v }',
+			],
+			[
+				'New-Object StreamWriter',
+				"Get-Content a.md | ForEach-Object { New-Object System.IO.StreamWriter 'OUTSIDE.md' }",
+			],
+		];
+		for (const [label, command] of MUST_REJECT) {
+			it(`rejects ${label}`, () => {
+				expect(isPowerShellReadOnlyPipeline(command)).toBe(false);
+			});
+		}
+	});
+
+	describe('#3099 repair — reads that must admit (case-insensitivity)', () => {
+		it('admits an all-lowercase read pipeline', () => {
+			expect(
+				isPowerShellReadOnlyPipeline(
+					'get-content a.md | where-object { $_.length -gt 5 }',
+				),
+			).toBe(true);
+		});
+
+		it('admits a read whose quoted argument names a write verb', () => {
+			expect(
+				isPowerShellReadOnlyPipeline(
+					"Get-ChildItem | Where-Object { $_.Name -like '*Remove-Item*' }",
+				),
+			).toBe(true);
+		});
+	});
+
 	it('isPowerShellReadOnlyPipeline admits a genuine read-only pipeline', () => {
 		expect(
 			isPowerShellReadOnlyPipeline(

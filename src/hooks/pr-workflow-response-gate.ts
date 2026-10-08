@@ -1429,13 +1429,23 @@ export function createPrWorkflowResponseGate(options: {
 					skillContractAdvisories,
 				);
 			}
+			// Label derives from the entry itself (#3099 R6): the shared array now
+			// carries gh-readiness entries alongside skill-contract ones, and a
+			// gh advisory rendered under the skill-contract label misattributes a
+			// readiness warning.
+			const advisoryLabel = (advisory: string) =>
+				advisory.startsWith('gh-readiness:')
+					? '[gh-readiness advisory] '
+					: '[skill-contract advisory] ';
 			const skillContractAdvisoryText =
 				skillContractAdvisories.length === 0
 					? ''
-					: `\n[skill-contract advisory] ${skillContractAdvisories
+					: `\n${skillContractAdvisories
 							.slice(0, 4)
-							.map((advisory) => advisory.slice(0, 500))
-							.join('\n[skill-contract advisory] ')}`;
+							.map(
+								(advisory) => advisoryLabel(advisory) + advisory.slice(0, 500),
+							)
+							.join('\n')}`;
 			const promptStartTime = now();
 			finalBoundary.lastObservedAt = promptStartTime;
 			if (shouldDeferBoundaryWake(finalBoundary, promptStartTime)) {

@@ -231,6 +231,49 @@ function throwDestructiveBlock(
  * @param ctx Shared configuration and closures from createGuardrailsHooks
  * @returns The toolBefore handler function
  */
+/**
+ * Issue #3099 R2 (executor context): which grammar OWNS shared constructs.
+ *
+ * Content alone cannot pick the grammar — the Windows sandbox wraps commands
+ * in PowerShell (src/sandbox/win32) while the recovery runbook documents Git
+ * Bash AND PowerShell as both-real host shells. The authority ladder:
+ *   1. an explicit wrapper DECLARES the executor (cmd /c, powershell
+ *      -Command) — that grammar is authoritative;
+ *   2. a PowerShell-shaped body cannot execute under POSIX at all, so
+ *      Windows is authoritative;
+ *   3. otherwise the tool's own executor: `bash` runs a POSIX shell; the
+ *      `shell` tool inherits base content detection.
+ *
+ * Exported so `/swarm guardrail explain` routes through the SAME decision
+ * instead of a stale copy — its comment promises a mirror of
+ * checkShellWriteScope, and a mirror that diverges answers "allow" for
+ * commands the gate blocks (#3099 review finding).
+ */
+export function resolveWindowsWriteAuthority(
+	tool: string,
+	command: string,
+	detectedShellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash',
+	shaped: boolean,
+): 'powershell' | 'cmd' | null {
+	const cmdWrapper = /(?:^|[;&|\s])cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(command);
+	const psWrapper =
+		/(?:^|[;&|\s])(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
+			command,
+		) || /(?:^|[;&|\s])(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(command);
+	// Step 3 is TOOL-AWARE: content detection inherits only to the `shell`
+	// tool (base behavior). The `bash` tool without a wrapper or a shaped
+	// body runs a POSIX shell — routing it to cmd detection on an `echo `
+	// prefix would re-interpret `src\out` under the wrong grammar.
+	const inheritedWindows =
+		detectedShellType === 'powershell' || detectedShellType === 'cmd';
+	if (cmdWrapper) return 'cmd';
+	if (psWrapper || shaped) return 'powershell';
+	if (inheritedWindows && tool !== 'bash') {
+		return detectedShellType as 'powershell' | 'cmd';
+	}
+	return null;
+}
+
 export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	const {
 		effectiveDirectory,
@@ -1070,27 +1113,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		//      Windows is authoritative;
 		//   3. otherwise the tool's own executor: `bash` runs a POSIX shell, and
 		//      the `shell` tool keeps base content detection.
-		const cmdWrapper = /(?:^|[;&|\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(
+		const windowsShell = resolveWindowsWriteAuthority(
+			normalizedTool,
 			command,
+			detectedShellType,
+			shaped,
 		);
-		const psWrapper =
-			/(?:^|[;&|\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
-				command,
-			) || /(?:^|[;&|\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(command);
-		// Step 3 is TOOL-AWARE: content detection inherits only to the `shell`
-		// tool (base behavior). The `bash` tool without a wrapper or a shaped
-		// body runs a POSIX shell — routing it to cmd detection on an `echo `
-		// prefix would re-interpret `src\out` under the wrong grammar and both
-		// re-admit a base-blocked escape AND phantom-block in-scope writes.
-		const inheritedWindows =
-			detectedShellType === 'powershell' || detectedShellType === 'cmd';
-		const windowsShell: 'powershell' | 'cmd' | null = cmdWrapper
-			? 'cmd'
-			: psWrapper || shaped
-				? 'powershell'
-				: inheritedWindows && normalizedTool !== 'bash'
-					? (detectedShellType as 'powershell' | 'cmd')
-					: null;
 
 		const detect = (c: string): WriteAnalysis => {
 			const posix = detectPosixWrites(c);

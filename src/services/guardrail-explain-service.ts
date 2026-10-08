@@ -17,9 +17,12 @@ import {
 	isInDeclaredScope,
 	redactShellCommand,
 } from '../hooks/guardrails/helpers.js';
+import { resolveWindowsWriteAuthority } from '../hooks/guardrails/tool-before.js';
 import {
 	detectPosixWrites,
 	detectWindowsWrites,
+	isPowerShellShaped,
+	mergeWriteAnalyses,
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect.js';
 import {
@@ -639,12 +642,33 @@ export async function handleGuardrailExplain(
 	}
 
 	// --- Shell-write-scope check (mirrors checkShellWriteScope decision) ---
+	// #3099: routed through the SAME authority ladder + union the gate uses
+	// (resolveWindowsWriteAuthority + mergeWriteAnalyses), so explain cannot
+	// answer "allow" for a command the gate blocks. Explain has no tool
+	// context, so it evaluates the command as the `shell` tool — the surface
+	// this preview has always modeled.
 	if (decision === 'allow') {
-		const shellType = resolveShellType(shellCommand);
+		const detected = resolveShellType(shellCommand) as
+			| 'posix'
+			| 'powershell'
+			| 'cmd'
+			| 'unix'
+			| 'bash';
+		const authority = resolveWindowsWriteAuthority(
+			'shell',
+			shellCommand,
+			detected,
+			isPowerShellShaped(shellCommand),
+		);
+		const posix = detectPosixWrites(shellCommand);
 		const analysis =
-			shellType === 'powershell' || shellType === 'cmd'
-				? detectWindowsWrites(shellCommand, shellType)
-				: detectPosixWrites(shellCommand);
+			authority === null
+				? posix
+				: mergeWriteAnalyses(
+						posix,
+						detectWindowsWrites(shellCommand, authority),
+						true,
+					);
 
 		if (analysis.parseError) {
 			decision = 'block';

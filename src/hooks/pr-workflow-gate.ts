@@ -14721,8 +14721,19 @@ function resolveGitGrepRegexPatternOperand(
 			index += 1;
 			continue;
 		}
-		if (value === '-C' || value.startsWith('-C=')) {
+		if (value === '-C') {
+			index += 2; // `-C <dir>` is two tokens
+			continue;
+		}
+		if (
+			value.startsWith('-C=') ||
+			(value.startsWith('-C') && value.length > 2)
+		) {
 			index += 1;
+			continue;
+		}
+		if (value === '-c') {
+			index += 2; // `-c <key>=<value>` is two tokens
 			continue;
 		}
 		if (value.startsWith('-C') && value.length > 2) {
@@ -14780,7 +14791,7 @@ function describeShellSyntaxViolation(command: string): string | null {
 		case 'command-substitution':
 			return 'Reason: command-substitution syntax ($() or @()) is not allowed in this read-only gate.';
 		case 'gh-api-jq-pipe':
-			return 'Reason: literal `|` is only allowed inside a double-quoted `gh api --jq` value; single quotes do not protect pipes under cmd.exe, and every other shape is treated as compound shell syntax.';
+			return 'Reason: literal `|` is only allowed inside a double-quoted `gh api --jq` value or a double-quoted `git grep -E` pattern operand; single quotes do not protect pipes under cmd.exe, and every other shape is treated as compound shell syntax.';
 		default:
 			return 'Reason: compound-syntax (;, &&, |, <, >, backtick, or $()/@()). Run ONE command per call; a single leading `cd <dir> &&` and a trailing `2>&1` are tolerated for reads only.';
 	}
