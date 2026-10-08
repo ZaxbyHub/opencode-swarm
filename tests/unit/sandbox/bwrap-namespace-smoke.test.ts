@@ -15,7 +15,11 @@ import {
 	_internals as probeInternals,
 	SandboxCapabilityProbe,
 } from '../../../src/sandbox/capability-probe';
-import { _internals as bwrapInternals } from '../../../src/sandbox/linux/bubblewrap-executor';
+import {
+	BubblewrapSandboxExecutor,
+	BWRAP_NAMESPACE_SMOKE_ARGS,
+	_internals as bwrapInternals,
+} from '../../../src/sandbox/linux/bubblewrap-executor';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const realBwrapInternals = { ...bwrapInternals };
@@ -105,3 +109,41 @@ describe.skipIf(process.platform === 'win32')(
 		});
 	},
 );
+
+describe('bwrap namespace smoke args match a real default-policy wrap', () => {
+	// The smoke test must need every kernel feature and mount a real wrap
+	// needs: with fewer (no --unshare-net, `--ro-bind / /` instead of the
+	// /etc /usr /lib /lib64 binds, no sized tmpfs) it passes on hosts where
+	// every real wrap then fails.
+	function realDefaultWrapArgs(): string[] {
+		bwrapInternals.probeBwrap = () => true;
+		bwrapInternals.resolveBwrapBinary = () => 'bwrap';
+		const wrapped = new BubblewrapSandboxExecutor([], '/tmp').wrapCommand(
+			'true',
+			[],
+		);
+		// Every interpolated value is a single-quoted token without spaces
+		// here, so a whitespace split recovers the argv.
+		return wrapped
+			.split(' ')
+			.slice(1)
+			.map((arg) => arg.replace(/^'(.*)'$/, '$1'));
+	}
+
+	test('the smoke argv equals the real default-policy wrap argv', () => {
+		expect([...BWRAP_NAMESPACE_SMOKE_ARGS]).toEqual(realDefaultWrapArgs());
+	});
+
+	test('every flag the real wrap emits appears in the smoke args', () => {
+		const smoke = new Set(BWRAP_NAMESPACE_SMOKE_ARGS);
+		for (const flag of realDefaultWrapArgs().filter((a) => a.startsWith('--')))
+			expect(smoke.has(flag)).toBe(true);
+		for (const required of ['--unshare-net', '--size', '--tmpfs', '/lib64'])
+			expect(smoke.has(required)).toBe(true);
+		// No whole-root bind standing in for the real system binds.
+		const roBinds = BWRAP_NAMESPACE_SMOKE_ARGS.flatMap((arg, i) =>
+			arg === '--ro-bind' ? [BWRAP_NAMESPACE_SMOKE_ARGS[i + 1]] : [],
+		);
+		expect(roBinds).toEqual(['/etc', '/usr', '/lib', '/lib64']);
+	});
+});
