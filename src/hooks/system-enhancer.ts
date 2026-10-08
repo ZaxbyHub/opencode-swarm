@@ -311,6 +311,7 @@ import {
 	validateLesson,
 } from './knowledge-validator.js';
 import { lookupStaticModelLimit } from './model-limits';
+import { readPrWorkflowGateState } from './pr-workflow-gate';
 import {
 	buildRealtimeLearningNudge,
 	getRealtimeLearningToolCallCount,
@@ -1417,6 +1418,25 @@ export function createSystemEnhancerHook(
 					// of the `finally` below) so it cannot fire during one of
 					// this body's own internal awaits.
 
+					// Issue #3093: an active PR_REVIEW gate is read-only and
+					// fail-closed for its duration, so plan-execution
+					// directives (cursor + parallel pre-check guidance) are
+					// non-operative protocol in that window; suppress them
+					// for the gate's session. The read is durable-authoritative
+					// every composed turn (no caching) so suppression is never
+					// sticky across a gate clear.
+					const prReviewGateActive = await readPrWorkflowGateState(
+						directory,
+						_input.sessionID ?? '',
+					)
+						.then((prWorkflowGate) => prWorkflowGate?.mode === 'PR_REVIEW')
+						.catch(() => {
+							// Fail-open: composition must never break on a
+							// gate-state read failure; the no-gate default is
+							// byte-identical emission.
+							return false;
+						});
+
 					// Check if scoring is enabled
 					const scoringEnabled =
 						config.context_budget?.scoring?.enabled === true;
@@ -1498,7 +1518,8 @@ export function createSystemEnhancerHook(
 						if (
 							planCursorControls.enabled &&
 							mode !== 'DISCOVER' &&
-							planContent
+							planContent &&
+							!prReviewGateActive
 						) {
 							const planCursor = extractPlanCursor(planContent, {
 								maxTokens: planCursorControls.maxTokens,
@@ -1710,7 +1731,7 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 						}
 
 						// v6.10: Parallel pre-check batch hint — architect-only
-						if (mode !== 'DISCOVER') {
+						if (mode !== 'DISCOVER' && !prReviewGateActive) {
 							const sessionId_preflight = _input.sessionID;
 							const activeAgent_preflight = swarmState.activeAgent.get(
 								sessionId_preflight ?? '',
@@ -2447,7 +2468,8 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 					if (
 						planCursorControls_b.enabled &&
 						mode_b !== 'DISCOVER' &&
-						planContentForCursor
+						planContentForCursor &&
+						!prReviewGateActive
 					) {
 						const planCursor = extractPlanCursor(planContentForCursor, {
 							maxTokens: planCursorControls_b.maxTokens,
@@ -2707,7 +2729,7 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 						!activeAgent_preflight_b ||
 						stripKnownSwarmPrefix(activeAgent_preflight_b) === 'architect';
 
-					if (isArchitectForPreflight_b) {
+					if (isArchitectForPreflight_b && !prReviewGateActive) {
 						const preflightPrefix_b = extractAgentPrefix(
 							activeAgent_preflight_b,
 						);
