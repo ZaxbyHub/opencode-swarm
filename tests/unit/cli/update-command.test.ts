@@ -26,23 +26,16 @@ import {
 	isSafePromptsDir,
 } from '../../../src/cli/index.js';
 import { safeRealpathSync } from '../../../src/tools/repo-graph/safe-realpath.js';
+import { cliChildEnv } from '../../helpers/cli-child-env';
 
-const CLI_PATH = join(
-	import.meta.dir,
-	'..',
-	'..',
-	'..',
-	'src',
-	'cli',
-	'index.ts',
-);
+const CLI_PATH = join(import.meta.dir, '../../../src/cli/index.ts');
 
 async function runCLI(
 	args: string[],
 	env: Record<string, string> = {},
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 	const proc = Bun.spawn([process.execPath, 'run', CLI_PATH, ...args], {
-		env: { ...process.env, ...env },
+		env: cliChildEnv(env),
 		stdout: 'pipe',
 		stderr: 'pipe',
 	});

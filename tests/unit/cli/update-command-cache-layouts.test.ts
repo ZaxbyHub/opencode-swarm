@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isSafeCachePath } from '../../../src/cli/index.js';
+import { cliChildEnv } from '../../helpers/cli-child-env';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..');
@@ -15,7 +16,7 @@ async function runCLI(
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 	const proc = Bun.spawn([process.execPath, 'run', CLI_PATH, ...args], {
 		cwd: REPO_ROOT,
-		env: { ...process.env, ...env },
+		env: cliChildEnv(env),
 		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',

@@ -57,7 +57,7 @@ const OPENCODE_PLUGIN_LOCK_FILE_PATHS = getPluginLockFilePaths();
 // Safety floor: refuse to recursively delete a path that could catastrophically
 // damage the user's filesystem if XDG_CACHE_HOME or XDG_CONFIG_HOME are
 // pathologically set (e.g., XDG_CACHE_HOME='/'). Defense in depth, four checks:
-//   1. Refuse root, home, or shorter-than-home paths.
+//   1. Refuse the filesystem root, home, or any ancestor of home.
 //   2. Require ≥ 4 path components from root (the canonical cache layout has
 //      AT LEAST: <root>/opencode/{packages|node_modules}/<leaf> = 3 segments,
 //      so any LEGITIMATE cache lives at least one segment deeper. This rejects
@@ -98,6 +98,29 @@ function segmentDepthBelowRoot(resolved: string): number {
 function normalizePathForComparison(value: string): string {
 	const normalized = path.normalize(path.resolve(value));
 	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * Catastrophic-path floor shared by every cleanup guard: the filesystem root,
+ * the home directory, and any ANCESTOR of home (`/home`, `C:\\Users`) are
+ * never deletion targets.
+ *
+ * This replaced a `resolved.length <= home.length` heuristic that also refused
+ * legitimate targets which merely have a shorter path than home — e.g. a cache
+ * under `XDG_CACHE_HOME=/var/cache` for a user whose home path is longer than
+ * `/var/cache/opencode/packages/opencode-swarm@latest`, which then silently
+ * could never be evicted. Every guard still applies its depth, basename, and
+ * parent-shape layers after this floor.
+ */
+function isFilesystemRootOrHomeAncestor(resolved: string): boolean {
+	const target = normalizePathForComparison(resolved);
+	if (target === normalizePathForComparison(path.parse(target).root)) {
+		return true;
+	}
+	const home = normalizePathForComparison(os.homedir());
+	if (target === home) return true;
+	const prefix = target.endsWith(path.sep) ? target : `${target}${path.sep}`;
+	return home.startsWith(prefix);
 }
 
 /**
@@ -143,9 +166,8 @@ function hasSafeConfigArtifactParent(
 // after critic's cross-platform CI regression finding).
 export function isSafeCachePath(p: string): boolean {
 	const resolved = path.resolve(p);
-	const home = path.resolve(os.homedir());
 	// 1. Catastrophic-path floor.
-	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
+	if (isFilesystemRootOrHomeAncestor(resolved)) {
 		return false;
 	}
 	// 2. Require ≥ 4 path components below the filesystem root. This rejects
@@ -201,8 +223,7 @@ export function isSafeCachePath(p: string): boolean {
  */
 export function isSafeLockFilePath(p: string): boolean {
 	const resolved = path.resolve(p);
-	const home = path.resolve(os.homedir());
-	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
+	if (isFilesystemRootOrHomeAncestor(resolved)) {
 		return false;
 	}
 	if (segmentDepthBelowRoot(resolved) < 4) {
@@ -242,7 +263,7 @@ export function isSafeLockFilePath(p: string): boolean {
  * Defense in depth:
  *   1. Canonicalize via safeRealpathSync (realpathSync with ENOENT→fallback)
  *      so the path a symlinked leaf actually resolves to is what we validate.
- *   2. Refuse root, home, or shorter-than-home paths.
+ *   2. Refuse the filesystem root, home, or any ancestor of home.
  *   3. Require ≥ 3 non-empty segments (rejects pathological
  *      XDG_CONFIG_HOME='/' which yields '/opencode/opencode-swarm', 2 segments).
  *   4. Require basename === 'opencode-swarm'. With no explicit configured
@@ -257,8 +278,7 @@ export function isSafePromptsDir(p: string, configuredDir?: string): boolean {
 		return false;
 	}
 	const resolved = path.resolve(canonical);
-	const home = path.resolve(os.homedir());
-	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
+	if (isFilesystemRootOrHomeAncestor(resolved)) {
 		return false;
 	}
 	if (segmentDepthBelowRoot(resolved) < 3) {
@@ -282,7 +302,7 @@ export function isSafePromptsDir(p: string, configuredDir?: string): boolean {
  * `opencode-swarm` directory — hence a dedicated guard.
  *
  * Defense in depth: canonicalize via safeRealpathSync; refuse root/home/
- * shorter-than-home; require basename === 'opencode-swarm.json'. With no
+ * home ancestors; require basename === 'opencode-swarm.json'. With no
  * explicit configured root, the parent directory's basename must equal the
  * config dir's basename. Cleanup callers otherwise bind the canonical parent
  * to their exact configured root.
@@ -296,8 +316,7 @@ export function isSafePluginConfigPath(
 		return false;
 	}
 	const resolved = path.resolve(canonical);
-	const home = path.resolve(os.homedir());
-	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
+	if (isFilesystemRootOrHomeAncestor(resolved)) {
 		return false;
 	}
 	// Depth floor (parity with isSafePromptsDir): reject a pathological
@@ -329,8 +348,7 @@ export function isSafeInstallBackupPath(
 		return false;
 	}
 	const resolved = path.resolve(canonical);
-	const home = path.resolve(os.homedir());
-	if (resolved === '/' || resolved === home || resolved.length <= home.length) {
+	if (isFilesystemRootOrHomeAncestor(resolved)) {
 		return false;
 	}
 	if (segmentDepthBelowRoot(resolved) < 3) {
