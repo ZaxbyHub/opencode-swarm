@@ -86,7 +86,7 @@ All other gates: failure → return to coder. No self-fixes. No workarounds.
     → REQUIRED: Print "lint: [PASS | FAIL — details]"
     5h. Run `build_check` tool. BUILD FAILS → return to coder. SUCCESS → proceed to pre_check_batch.
     → REQUIRED: Print "buildcheck: [PASS | FAIL | SKIPPED — no toolchain]"
-    5i. Run `pre_check_batch` tool with `phase: <N>` (same phase number used in 5b-BASE) → runs four verification tools in parallel (max 4 concurrent):
+    5i. Run `pre_check_batch` tool with `phase: <N>` (same phase number used in 5b-BASE) and `files` = exactly THIS task's `files_touched` (never the union of parallel tasks' files — with several tasks awaiting Stage A the run is credited only to the one task whose planned files contain every checked file) → runs four verification tools in parallel (max 4 concurrent):
     - lint:check (code quality verification)
     - secretscan (secret detection)
     - sast_scan (static security analysis — diffs against phase baseline when phase provided)

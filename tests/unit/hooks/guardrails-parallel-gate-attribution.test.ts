@@ -119,7 +119,11 @@ async function stateOf(taskId: string): Promise<string> {
 		.state;
 }
 
-async function runPreCheck(files: string[], callID: string): Promise<void> {
+async function runPreCheck(
+	files: string[],
+	callID: string,
+	output = PASS,
+): Promise<void> {
 	const hooks = createGuardrailsHooks(directory, CONFIG);
 	await hooks.toolBefore(
 		{ tool: 'pre_check_batch', sessionID: 'architect', callID },
@@ -127,7 +131,7 @@ async function runPreCheck(files: string[], callID: string): Promise<void> {
 	);
 	await hooks.toolAfter(
 		{ tool: 'pre_check_batch', sessionID: 'architect', callID },
-		{ title: '', output: PASS, metadata: null },
+		{ title: '', output, metadata: null },
 	);
 }
 
@@ -144,18 +148,37 @@ afterEach(() => {
 });
 
 describe('resolveParallelGateTaskAttribution', () => {
-	test('zero or one task in flight keeps the existing attribution', async () => {
+	test('zero in flight, or one that is currentTaskId (or none set), keeps the existing attribution', async () => {
 		expect(
 			await resolveParallelGateTaskAttribution(directory, 'architect', [
 				'src/stats.ts',
 			]),
 		).toEqual({ kind: 'none' });
 		inFlight('2.1');
+		// No currentTaskId (post-reset): the durable fallback owns it.
 		expect(
 			await resolveParallelGateTaskAttribution(directory, 'architect', [
 				'src/stats.ts',
 			]),
 		).toEqual({ kind: 'none' });
+		const session = swarmState.agentSessions.get('architect');
+		if (session) session.currentTaskId = '2.1';
+		expect(
+			await resolveParallelGateTaskAttribution(directory, 'architect', [
+				'src/stats.ts',
+			]),
+		).toEqual({ kind: 'none' });
+	});
+
+	test('one in flight that is not currentTaskId is credited by its files', async () => {
+		inFlight('2.1');
+		const session = swarmState.agentSessions.get('architect');
+		if (session) session.currentTaskId = '2.4';
+		expect(
+			await resolveParallelGateTaskAttribution(directory, 'architect', [
+				'src/slugify.ts',
+			]),
+		).toEqual({ kind: 'task', taskId: '2.1' });
 	});
 
 	test('in-flight entries for tasks no longer in the plan do not count', async () => {
@@ -274,5 +297,51 @@ describe('guardrails credit the checked task, not the last-returned coder', () =
 		await runPreCheck(['src/slugify.ts'], 'p3');
 		expect(await stateOf('2.4')).toBe('pre_check_passed');
 		expect(await stateOf('2.1')).toBe('coder_delegated');
+	});
+});
+
+describe('the remaining task after the last-returned coder passed Stage A', () => {
+	// Live run: 2.4 returned last (currentTaskId = 2.4) and passed Stage A, so
+	// only 2.1 awaited Stage A — but with one task in flight attribution fell
+	// back to currentTaskId and 2.1's run was credited to 2.4 again.
+	const FAIL = JSON.stringify({
+		...JSON.parse(PASS),
+		gates_passed: false,
+		lint: { ran: true, duration_ms: 1, error: 'lint failed' },
+	});
+
+	beforeEach(async () => {
+		await settle('2.1');
+		await settle('2.4');
+		inFlight('2.1', '2.4');
+		const session = swarmState.agentSessions.get('architect');
+		if (session) session.currentTaskId = '2.4';
+		await runPreCheck(['src/lib/case.ts', 'tests/case.test.ts'], 'r1');
+		expect(await stateOf('2.4')).toBe('pre_check_passed');
+	});
+
+	test('pass then pass: the second run is credited to 2.1', async () => {
+		await runPreCheck(['src/slugify.ts'], 'r2');
+		expect(await stateOf('2.1')).toBe('pre_check_passed');
+		expect(await stateOf('2.4')).toBe('pre_check_passed');
+	});
+
+	test('pass then fail: the failing run reworks 2.1, not 2.4', async () => {
+		await runPreCheck(['src/slugify.ts'], 'r3', FAIL);
+		expect(await stateOf('2.1')).toBe('rework_required');
+		expect(await stateOf('2.4')).toBe('pre_check_passed');
+	});
+
+	test('the lone awaiting task still needs its own files', async () => {
+		const attribution = await resolveParallelGateTaskAttribution(
+			directory,
+			'architect',
+			['src/lib/case.ts'],
+		);
+		expect(attribution.kind).toBe('unattributable');
+		if (attribution.kind === 'unattributable')
+			expect(attribution.message).toContain(
+				"task 2.1 is awaiting Stage A but the session's current task is 2.4",
+			);
 	});
 });

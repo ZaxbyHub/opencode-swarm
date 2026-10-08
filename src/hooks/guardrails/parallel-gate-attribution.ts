@@ -8,13 +8,16 @@
  * a `pre_check_batch` verdict lands on the wrong task, and the task that was
  * actually checked never reaches Stage B.
  *
- * While the session has two or more tasks at `coder_delegated`, a
- * `pre_check_batch` run is credited by its `files` to the one in-flight task
- * whose planned scope (`files_touched`) contains every checked file — or to
- * none, with an advisory. The caller applies this to `pre_check_batch` only:
- * the other gate tools carry no Stage A verdict and some take no file
- * argument. With zero or one task in flight the caller keeps its existing
- * attribution (`currentTaskId`, then the durable post-reset fallback).
+ * While the session has two or more tasks at `coder_delegated` — or exactly
+ * one that is NOT its `currentTaskId` (the last-returned coder already passed
+ * Stage A, so `currentTaskId` still names it while the remaining task awaits)
+ * — a `pre_check_batch` run is credited by its `files` to the one in-flight
+ * task whose planned scope (`files_touched`) contains every checked file — or
+ * to none, with an advisory. The caller applies this to `pre_check_batch`
+ * only: the other gate tools carry no Stage A verdict and some take no file
+ * argument. With no task in flight, or exactly one that IS `currentTaskId`,
+ * the caller keeps its existing attribution (`currentTaskId`, then the
+ * durable post-reset fallback).
  */
 import * as path from 'node:path';
 import { loadPlanJsonOnly } from '../../plan/manager';
@@ -42,13 +45,32 @@ function inFlightTasks(sessionID: string): string[] {
 		.sort();
 }
 
+/**
+ * File-based attribution applies whenever a task awaits Stage A that
+ * `currentTaskId` might not name: two or more awaiting, or exactly one that
+ * differs from a set `currentTaskId` (e.g. the last-returned coder's task
+ * already passed Stage A and the remaining parallel task is checked next).
+ */
+function needsFileAttribution(
+	awaiting: readonly string[],
+	currentTaskId: string | null | undefined,
+): boolean {
+	if (awaiting.length === 0) return false;
+	// With no currentTaskId at all (e.g. after reset-session) nothing would
+	// misattribute: the caller's durable post-reset fallback handles it.
+	if (awaiting.length === 1)
+		return !!currentTaskId && awaiting[0] !== currentTaskId;
+	return true;
+}
+
 export async function resolveParallelGateTaskAttribution(
 	directory: string,
 	sessionID: string,
 	files: readonly string[] | null,
 ): Promise<ParallelGateAttribution> {
 	const candidates = inFlightTasks(sessionID);
-	if (candidates.length < 2) return { kind: 'none' };
+	const currentTaskId = swarmState.agentSessions.get(sessionID)?.currentTaskId;
+	if (!needsFileAttribution(candidates, currentTaskId)) return { kind: 'none' };
 
 	// Only tasks of the current plan count: an entry for a task that is no
 	// longer planned (a replaced plan in a long-lived session) awaits nothing.
@@ -70,9 +92,12 @@ export async function resolveParallelGateTaskAttribution(
 		};
 	}
 	const inFlight = candidates.filter((taskId) => scopes.has(taskId));
-	if (inFlight.length < 2) return { kind: 'none' };
+	if (!needsFileAttribution(inFlight, currentTaskId)) return { kind: 'none' };
 
-	const prefix = `STAGE A ATTRIBUTION: ${inFlight.length} tasks are awaiting Stage A in parallel (${inFlight.join(', ')}), so this gate run is credited by the files it checked`;
+	const prefix =
+		inFlight.length === 1
+			? `STAGE A ATTRIBUTION: task ${inFlight[0]} is awaiting Stage A but the session's current task is ${currentTaskId}, so this gate run is credited by the files it checked`
+			: `STAGE A ATTRIBUTION: ${inFlight.length} tasks are awaiting Stage A in parallel (${inFlight.join(', ')}), so this gate run is credited by the files it checked`;
 	const checked = (files ?? [])
 		.map((file) => toProjectRelative(directory, file))
 		.filter((file) => file.length > 0);
