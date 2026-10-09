@@ -102,6 +102,21 @@ describe('LeanTurboRunner.dispatchLane provider error on the assistant message',
 		expect(ops.delete).not.toHaveBeenCalled();
 	});
 
+	test('a reply the host ended early (finish length / content-filter) keeps the lane behavior it had before', async () => {
+		for (const finish of ['length', 'content-filter']) {
+			const { runner, ops } = makeRunner({
+				info: { finish },
+				parts: [{ type: 'text', text: 'partial' }],
+			});
+
+			const result = await runner.dispatchLane(LANE, 'coder');
+
+			expect(result).toEqual({ ok: true, sessionId: 'lane-sess' });
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(ops.delete).not.toHaveBeenCalled();
+		}
+	});
+
 	test('a message without info.error still completes the lane', async () => {
 		const { runner, ops } = makeRunner({
 			info: {},

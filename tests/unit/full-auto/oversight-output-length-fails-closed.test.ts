@@ -23,6 +23,12 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 const APPROVED =
 	'VERDICT: APPROVED\nREASONING: looks fine\nEVIDENCE_CHECKED: none\nANTI_PATTERNS_DETECTED: none\nESCALATION_NEEDED: NO';
 const TRUNCATED = { error: { name: 'MessageOutputLengthError', data: {} } };
+// The host also records an early end as `finish` alone, with no `info.error`.
+const SHAPES: Array<[string, Record<string, unknown>]> = [
+	['info.error', TRUNCATED],
+	['finish length', { finish: 'length' }],
+	['finish content-filter', { finish: 'content-filter' }],
+];
 
 let tmpDir: string;
 let originalClient: unknown;
@@ -57,32 +63,34 @@ describe('MessageOutputLengthError stays a provider error in the shared reader',
 });
 
 describe('oversight does not approve a truncated critic reply', () => {
-	test('a truncated VERDICT: APPROVED is not approval', async () => {
-		startFullAutoRun(tmpDir, 'sess-output-length', { enabled: true });
-		stateInternals.swarmState.opencodeClient = {
-			session: {
-				create: mock(async () => ({ data: { id: 'critic-1' }, error: null })),
-				prompt: mock(async () => ({
-					data: { info: TRUNCATED, parts: [{ type: 'text', text: APPROVED }] },
-				})),
-				delete: mock(async () => ({})),
-			},
-		} as unknown as typeof stateInternals.swarmState.opencodeClient;
+	for (const [label, info] of SHAPES) {
+		test(`a truncated VERDICT: APPROVED is not approval (${label})`, async () => {
+			startFullAutoRun(tmpDir, 'sess-output-length', { enabled: true });
+			stateInternals.swarmState.opencodeClient = {
+				session: {
+					create: mock(async () => ({ data: { id: 'critic-1' }, error: null })),
+					prompt: mock(async () => ({
+						data: { info, parts: [{ type: 'text', text: APPROVED }] },
+					})),
+					delete: mock(async () => ({})),
+				},
+			} as unknown as typeof stateInternals.swarmState.opencodeClient;
 
-		const result = await dispatchFullAutoOversight({
-			directory: tmpDir,
-			sessionID: 'sess-output-length',
-			trigger: 'test',
-			triggerSource: 'tool_action',
-			criticModel: 'test-model',
-			oversightAgentName: 'critic_oversight',
-			fullAutoConfig: {
-				max_dispatch_retries: 2,
-				max_consecutive_dispatch_failures: 3,
-			},
-		} as unknown as Parameters<typeof dispatchFullAutoOversight>[0]);
+			const result = await dispatchFullAutoOversight({
+				directory: tmpDir,
+				sessionID: 'sess-output-length',
+				trigger: 'test',
+				triggerSource: 'tool_action',
+				criticModel: 'test-model',
+				oversightAgentName: 'critic_oversight',
+				fullAutoConfig: {
+					max_dispatch_retries: 2,
+					max_consecutive_dispatch_failures: 3,
+				},
+			} as unknown as Parameters<typeof dispatchFullAutoOversight>[0]);
 
-		expect(result.verdict).not.toBe('APPROVED');
-		expect(result.decision).not.toBe('allow');
-	});
+			expect(result.verdict).not.toBe('APPROVED');
+			expect(result.decision).not.toBe('allow');
+		});
+	}
 });
