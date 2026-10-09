@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.192.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.192.3...v7.192.4) (2026-10-09)
+
+
+### Bug Fixes
+
+* **guardrails:** classify shell commands by executor context, not by tool ([87f6b73](https://github.com/ZaxbyHub/opencode-swarm/commit/87f6b7346d5262039363536e7a87a2b7ba5924d9))
+* treat a reply the host ended early (finish length / content-filter) as a provider error ([944699a](https://github.com/ZaxbyHub/opencode-swarm/commit/944699a25898147f1af8029b2cd9bb2c94e5f879))
+* treat a reply the host ended early (finish length / content-filter) as a provider error ([10a6316](https://github.com/ZaxbyHub/opencode-swarm/commit/10a6316058a3bb3f7e36a0047ac3d18e66f07f0e))
+
 ## [7.192.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.192.2...v7.192.3) (2026-10-09)
 
 
