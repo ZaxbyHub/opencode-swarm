@@ -123,6 +123,7 @@ export const phaseCompleteReceiptInternals = {
 	rebindCursorTaggedReceipts: (
 		...args: Parameters<typeof rebindCursorTaggedReceipts>
 	) => rebindCursorTaggedReceipts(...args),
+	loadPlan: (...args: Parameters<typeof loadPlan>) => loadPlan(...args),
 };
 
 /** Narrow seam for guarded-plan commit tests. */
@@ -1483,9 +1484,20 @@ export async function executePhaseComplete(
 	// docs participation. Runs after the plan lock is released (the evidence
 	// lock serializes all participation-store writes) and best-effort: a
 	// normalization failure must not fail an already-committed completion.
-	try {
-		const normalizedPlan = await loadPlan(dir).catch(() => null);
-		if (normalizedPlan) {
+	// A receipt left un-rebound matters more since the PHASE-WRAP window: a
+	// docs run dispatched at wrap carries the NEXT phase's tag and would also
+	// satisfy that phase by exact match. So the rebind is retried once, and a
+	// failure (including an unreadable plan) is reported, never skipped.
+	let rebindError: string | null = null;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			const normalizedPlan = await phaseCompleteReceiptInternals
+				.loadPlan(dir)
+				.catch(() => null);
+			if (!normalizedPlan) {
+				rebindError = 'the plan could not be read after the transition';
+				continue;
+			}
 			const { rebound } =
 				await phaseCompleteReceiptInternals.rebindCursorTaggedReceipts(
 					dir,
@@ -1498,10 +1510,15 @@ export async function executePhaseComplete(
 					`Re-stamped ${rebound} docs participation receipt(s) from the plan's stale current_phase cursor to phase ${phase}.`,
 				);
 			}
+			rebindError = null;
+			break;
+		} catch (error) {
+			rebindError = error instanceof Error ? error.message : String(error);
 		}
-	} catch (error) {
+	}
+	if (rebindError !== null) {
 		warnings.push(
-			`Docs participation receipt normalization failed: ${error instanceof Error ? error.message : String(error)}.`,
+			`Docs participation receipt normalization failed (${rebindError}): a docs receipt dispatched for phase ${phase} may still carry the next phase's tag. Dispatch docs again for the next phase rather than relying on that receipt.`,
 		);
 	}
 	if (knowledgeEnabled) {

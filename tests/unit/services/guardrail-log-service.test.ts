@@ -14,9 +14,10 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleGuardrailLog } from '../../../src/services/guardrail-log-service';
+import { SYNTHETIC_HOME } from '../../helpers/synthetic-home';
 
 // ---------------------------------------------------------------------------
 // Test setup
@@ -494,9 +495,7 @@ describe('Redaction: command with secret → output does NOT contain raw secret'
 
 describe('Redaction: path under home dir → output redacted via redactPath (no raw /home/<user> or C:\\Users\\<user>)', () => {
 	test('POSIX /home/<user>/ path is redacted to ~ in file_write entry', async () => {
-		// Use a path inside the actual home directory so redactPath can match it
-		// On POSIX: /home/<user>/... On Windows: C:\Users\<user>\...
-		const homeDir = homedir();
+		const homeDir = SYNTHETIC_HOME;
 		const secretPath = join(homeDir, 'documents', 'secret.txt');
 		const resolvedScope = join(homeDir, 'documents');
 
@@ -516,7 +515,7 @@ describe('Redaction: path under home dir → output redacted via redactPath (no 
 
 		const result = await handleGuardrailLog(tempDir, []);
 
-		// The actual homedir path must NOT appear raw
+		// The home path must NOT appear raw
 		expect(result).not.toContain(join(homeDir, 'documents'));
 		// The username segment must NOT appear raw
 		const homeBasename = homeDir.split(/[/\\]/).pop() ?? '';
@@ -533,7 +532,7 @@ describe('Redaction: path under home dir → output redacted via redactPath (no 
 	});
 
 	test('scope_violation entry with home-dir path is redacted', async () => {
-		const homeDir = homedir();
+		const homeDir = SYNTHETIC_HOME;
 		const sshPath = join(homeDir, '.ssh', 'id_rsa');
 
 		const entries = [
@@ -567,7 +566,7 @@ describe('Redaction: path under home dir → output redacted via redactPath (no 
 	});
 
 	test('destructive_block command does not expose home directory names', async () => {
-		const homeDir = homedir();
+		const homeDir = SYNTHETIC_HOME;
 		const deletedPath = join(homeDir, 'deleted');
 
 		const entries = [
@@ -618,7 +617,7 @@ describe('Redaction: path under home dir → output redacted via redactPath (no 
 		// At minimum the filename should be present
 		expect(result).toContain('test-output.txt');
 		// The result should not mention any home directory
-		const homeBasename = homedir().split(/[/\\]/).pop() ?? '';
+		const homeBasename = SYNTHETIC_HOME.split(/[/\\]/).pop() ?? '';
 		expect(result).not.toContain(homeBasename);
 	});
 });

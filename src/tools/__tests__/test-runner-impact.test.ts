@@ -2,16 +2,14 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { executeInDirectory } from '../../../tests/helpers/tool-directory';
 import { _internals, test_runner } from '../test-runner.js';
 
 // ============ Test Helpers ============
 
 /** Extract execute function from the test_runner tool */
 function getExecute() {
-	return test_runner.execute as unknown as (
-		args: Record<string, unknown>,
-		directory: string,
-	) => Promise<string>;
+	return executeInDirectory(test_runner);
 }
 
 /** Parse JSON result safely */
@@ -165,6 +163,14 @@ describe('impact scope execution', () => {
 				c.includes('src/__tests__/foo.test.ts'),
 			),
 		).toBe(true);
+		// Run history lands in the tool's project root, recorded relative to it.
+		const history = fs.readFileSync(
+			path.join(tempDir, '.swarm', 'cache', 'test-history.jsonl'),
+			'utf-8',
+		);
+		expect(JSON.parse(history.trim().split('\n')[0]).testFile).toBe(
+			'src/__tests__/foo.test.ts',
+		);
 	});
 
 	test('2. Impact scope with valid files but no impacted tests (cold start) → falls back to graph', async () => {

@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getDiagnoseData } from '../../../src/services/diagnose-service';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 /**
  * ADVERSARIAL TEST SUITE for diagnose-service.ts
@@ -21,27 +22,26 @@ import { getDiagnoseData } from '../../../src/services/diagnose-service';
 describe('diagnose-service adversarial tests', () => {
 	let testDir: string;
 	let sandboxDir: string;
+	const originalCwd = process.cwd();
 
 	beforeAll(async () => {
-		// Create sandbox directory for adversarial file creation
-		sandboxDir = path.join(os.tmpdir(), `opencode-adversarial-${Date.now()}`);
-		fs.mkdirSync(sandboxDir, { recursive: true });
+		sandboxDir = canonicalMkdtemp('opencode-adversarial-');
 		fs.mkdirSync(path.join(sandboxDir, '.swarm'), { recursive: true });
 		fs.mkdirSync(path.join(sandboxDir, '.opencode'), { recursive: true });
 
-		// Create test directory pointing to current workspace
-		testDir = process.cwd();
+		// Traversal base 11 levels inside the sandbox, so `../` x10 stays in it.
+		// It is also the cwd, so '' / whitespace directories resolve inside it.
+		testDir = path.join(sandboxDir, 'traversal', ...'abcdefghij');
+		fs.mkdirSync(testDir, { recursive: true });
+		process.chdir(testDir);
 	});
 
 	afterAll(() => {
-		// Cleanup sandbox
-		if (fs.existsSync(sandboxDir)) {
-			fs.rmSync(sandboxDir, { recursive: true, force: true });
-		}
+		process.chdir(originalCwd);
+		fs.rmSync(sandboxDir, { recursive: true, force: true });
 	});
 
 	beforeEach(() => {
-		// Clean .swarm directory before each test
 		const swarmDir = path.join(sandboxDir, '.swarm');
 		if (fs.existsSync(swarmDir)) {
 			const files = fs.readdirSync(swarmDir);

@@ -218,22 +218,17 @@ describe('macOS sandbox-exec activation tests (issue #2590 follow-ups)', () => {
 					broadScope,
 					`ac010-broad-scope-${process.pid}.txt`,
 				);
-				const result = spawnWrapped(
-					executor,
-					`echo "ac010 legitimate" > "${testFile}"`,
-					[broadScope],
-				);
-
-				expect(result.success).toBe(true);
-
-				// Cleanup
+				// The probe file lands in the developer's real home: remove it in
+				// a finally so a failed assertion cannot leave it behind.
 				try {
-					spawnSync(`rm -f "${testFile}"`, {
-						shell: true,
-						encoding: 'utf-8',
-					});
-				} catch {
-					// ignore cleanup errors
+					const result = spawnWrapped(
+						executor,
+						`echo "ac010 legitimate" > "${testFile}"`,
+						[broadScope],
+					);
+					expect(result.success).toBe(true);
+				} finally {
+					rmSync(testFile, { force: true });
 				}
 			},
 		);

@@ -142,7 +142,7 @@ Swarm has two independent mode systems:
 | Mode | Safety | Speed | When to Use |
 |------|--------|-------|------------|
 | **Balanced** (default) | High | Medium | Everyday development |
-| **Turbo** | Medium | Fast | Rapid iteration; skips Stage B gates for non-Tier-3 files |
+| **Turbo** | Medium | Fast | Rapid iteration; skips phase_complete Gates 1–5 (Stage A and Stage B still run for every task) |
 | **Lean Turbo** | High | Fast | Parallel lanes for non-conflicting tasks (up to `max_parallel_coders` coders) |
 | **Full-Auto** | Deterministic policy + critic oversight | Fast | Unattended multi-interaction runs |
 | **Epic** (opt-in) | High — per-task QA always runs; Turbo stays off | Fast on plans with many independent tasks | Large plans: one plan = one epic, run phase by phase as parallel waves of tasks with disjoint scopes |
@@ -402,7 +402,9 @@ graph TB
 
 ## How It Compares
 
-| Feature | Swarm | oh-my-opencode | get-shit-done |
+Both projects compared here have since been renamed: oh-my-opencode is now [OmO](https://github.com/code-yeongyu/oh-my-openagent) and get-shit-done is now [GSD Core](https://github.com/open-gsd/gsd-core). The table reflects them as they were when it was written (April 2026, v6.81.0) and has not been re-checked against their current releases.
+
+| Feature | Swarm | oh-my-opencode (now OmO) | get-shit-done (now GSD Core) |
 |---|:-:|:-:|:-:|
 | Multiple specialized agents | ✅ Core + optional + conditional roster (`/swarm agents`) | ❌ | ❌ |
 | Plan reviewed before coding | ✅ | ❌ | ❌ |
@@ -1274,7 +1276,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm memory link status` | Show whether memory is cohort-linked (distinct from knowledge link) |
 | `/swarm memory unlink` | Stop sharing memory; copies cohort family back to local |
 | `/swarm concurrency <set|status|reset>` | Manage session-scoped runtime concurrency override |
-| `/swarm turbo` | Enable turbo mode for the current session (bypasses QA gates) |
+| `/swarm turbo` | Enable turbo mode for the current session (skips phase_complete Gates 1–5; per-task Stage A and Stage B still run) |
 | `/swarm full-auto` | Toggle Full-Auto Mode for the current session [on|off] |
 | `/swarm checkpoint` | Save a git checkpoint for the current state |
 

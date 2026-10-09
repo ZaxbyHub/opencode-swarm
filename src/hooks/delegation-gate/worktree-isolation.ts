@@ -14,6 +14,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { PluginConfig, WorktreeIsolationConfig } from '../../config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
+import { stripKnownSwarmPrefix } from '../../config/schema';
 import { closeProjectDb } from '../../db/project-db';
 import { epicCommitLandingFor } from '../../epic/task-landing.js';
 import { tryAcquireLock } from '../../parallel/file-locks';
@@ -299,6 +300,55 @@ export const standardWorktreeByCallID = new Map<
 	StandardWorktreeDispatch
 >();
 export const standardWorktreeSerializationSessions = new Set<string>();
+
+/**
+ * Child sessions this plugin created for isolated coder lanes, by agent.
+ *
+ * The plugin rewrites the coder's Task `task_id` to the lane's child session
+ * id, so the Task result returns `<task id="ses_…">`. A model that reuses
+ * that id on its next dispatch (observed: the Stage B test_engineer) makes
+ * OpenCode resume the coder's session as a different agent — the new agent
+ * inherits the coder's lane, history and scope. The delegation gate refuses
+ * such a dispatch (assertTaskIdNotForeignLaneSession). Bounded FIFO.
+ */
+const LANE_CHILD_SESSION_LIMIT = 512;
+export const laneChildSessionAgents = new Map<string, string>();
+
+export function recordLaneChildSession(sessionId: string, agent: string): void {
+	laneChildSessionAgents.delete(sessionId);
+	laneChildSessionAgents.set(sessionId, agent);
+	while (laneChildSessionAgents.size > LANE_CHILD_SESSION_LIMIT) {
+		const oldest = laneChildSessionAgents.keys().next().value;
+		if (oldest === undefined) break;
+		laneChildSessionAgents.delete(oldest);
+	}
+}
+
+/**
+ * Refuse a Task dispatch whose `task_id` resumes a lane child session the
+ * plugin created for a DIFFERENT agent. Resuming the same agent's session
+ * stays allowed; ids the plugin did not create are not judged here.
+ */
+export function assertTaskIdNotForeignLaneSession(
+	args: Record<string, unknown> | undefined,
+): void {
+	if (!args) return;
+	const taskId = typeof args.task_id === 'string' ? args.task_id.trim() : '';
+	if (!taskId) return;
+	const owner = laneChildSessionAgents.get(taskId);
+	if (owner === undefined) return;
+	const requested =
+		typeof args.subagent_type === 'string'
+			? stripKnownSwarmPrefix(args.subagent_type).toLowerCase()
+			: '';
+	if (requested === owner) return;
+	throw new Error(
+		`TASK_SESSION_RESUME_MISMATCH: task_id "${taskId}" is the session this plugin created for an isolated ${owner} lane; ` +
+			`passing it would resume that ${owner} session as ${requested || 'another agent'} (its lane, history and scope). ` +
+			'Set task_id to the plan task id (e.g. "1.1") or omit it; never pass a `ses_…` id returned in a Task result ' +
+			`for a different agent. Omitting it starts a fresh ${requested || 'agent'} session.`,
+	);
+}
 let standardWorktreeMergeQueue: Promise<unknown> = Promise.resolve();
 
 /**
@@ -569,6 +619,88 @@ function handleStandardWorktreeFailure(
 	serializeStandardWorktreeDispatches(parentSessionID, message);
 }
 
+/** Headroom over the holder's session-create budget (stale-lane cleanup, owner write). */
+const WORKTREE_LIFECYCLE_LOCK_WAIT_MARGIN_MS = 5_000;
+/** Shortest wait, even when a large session-create budget leaves no room. */
+const WORKTREE_LIFECYCLE_LOCK_WAIT_MIN_MS = 10_000;
+/**
+ * The OpenCode 2 host bounds `tool.execute.before` at 60 s
+ * (`V2_HOOK_TIMEOUT_MS` in src/host/v2/hooks.ts; alignment pinned by
+ * tests/unit/hooks/worktree-lifecycle-lock-wait.test.ts). A dispatch spends
+ * the lock wait AND its own lane session.create inside that one hook call.
+ */
+const WORKTREE_DISPATCH_HOOK_BUDGET_MS = 60_000;
+/**
+ * Time kept free in that hook call for the work after the lock is acquired
+ * and besides session.create: the collision scan, stale-lane cleanup and
+ * `git worktree add`, which can take several seconds on large repos or on
+ * Windows/macOS.
+ */
+const WORKTREE_PROVISION_ALLOWANCE_MS = 15_000;
+
+/**
+ * How long a lane dispatch waits for the worktree lifecycle lock.
+ *
+ * A holder can keep the lock across a recovery-lane session.create, bounded by
+ * `worktree.session_create_timeout_ms` (plus the settle grace), and the
+ * stale-lane cleanup after it. The wait therefore follows that budget plus a
+ * margin. Up to a 30s session.create budget (the default) it is capped so
+ * that the wait, this dispatch's own session.create, its settle grace and the
+ * provisioning work still fit in the host hook budget (10s at the default):
+ * a dispatch that overruns the hook is abandoned mid-provisioning, while a
+ * dispatch that stops here fails cleanly with STANDARD_WORKTREE_LIFECYCLE_BUSY.
+ * Above 30s there is no room left and the wait stays at its 10s floor, so the
+ * worst case exceeds the hook budget (61s at a 31s budget, 90s at 60s): a
+ * session.create budget that long is itself what overruns the hook.
+ */
+function resolveWorktreeLifecycleLockWaitMs(
+	sessionCreateTimeoutMs: number,
+): number {
+	const createMs = Math.max(0, sessionCreateTimeoutMs);
+	const coverHolder = createMs + WORKTREE_LIFECYCLE_LOCK_WAIT_MARGIN_MS;
+	const roomInHook =
+		WORKTREE_DISPATCH_HOOK_BUDGET_MS -
+		createMs -
+		WORKTREE_SESSION_CREATE_SETTLE_GRACE_MS -
+		WORKTREE_PROVISION_ALLOWANCE_MS;
+	return Math.max(
+		WORKTREE_LIFECYCLE_LOCK_WAIT_MIN_MS,
+		Math.min(coverHolder, roomInHook),
+	);
+}
+
+/**
+ * Acquire the worktree lifecycle lock, retrying within `waitMs`.
+ *
+ * The lock is held across the collision check (a git spawn) and the owner
+ * write, by every lane being provisioned and by init orphan recovery.
+ * `tryAcquireLock` alone gives up after about 310ms (5 retries, 10ms→500ms
+ * backoff, no jitter), so parallel coder dispatches that provision lanes at
+ * the same moment hard-stopped each other. Retry with jitter until the lock
+ * is free or the bounded wait is spent.
+ */
+async function acquireWorktreeLifecycleLockWithin(
+	directory: string,
+	taskId: string,
+	waitMs: number,
+): ReturnType<typeof tryAcquireLock> {
+	const deadline = _internals.now() + Math.max(0, waitMs);
+	for (;;) {
+		const attempt = await _internals.tryAcquireWorktreeLifecycleLock(
+			directory,
+			WORKTREE_LIFECYCLE_LOCK_FILE,
+			'worktree-provisioning',
+			taskId,
+		);
+		if (attempt.acquired) return attempt;
+		const remaining = deadline - _internals.now();
+		if (remaining <= 0) return attempt;
+		await _internals.sleep(
+			Math.min(remaining, 50 + Math.floor(Math.random() * 200)),
+		);
+	}
+}
+
 function hardStopStandardWorktreeLifecycle(
 	parentSessionID: string,
 	message: string,
@@ -627,6 +759,7 @@ export function getStandardWorktreeDegradationReason(
 export function resetStandardWorktreeIsolationState(): void {
 	standardWorktreeByCallID.clear();
 	standardWorktreeSerializationSessions.clear();
+	laneChildSessionAgents.clear();
 	serializationStateBySessionID.clear();
 	standardWorktreeDegradationReasonBySession.clear();
 	awaitingMergeByCallID.clear();
@@ -1239,16 +1372,19 @@ export async function precreateStandardWorktreeSession(args: {
 	// provisional-owner publication with init orphan recovery. The lock must be
 	// held before scanning so ownership cannot change between classification
 	// and cleanup/provisioning.
-	const lifecycleLock = await _internals.tryAcquireWorktreeLifecycleLock(
+	const lifecycleLockWaitMs = resolveWorktreeLifecycleLockWaitMs(
+		resolveSessionCreateTimeoutMs(args),
+	);
+	const lifecycleLock = await acquireWorktreeLifecycleLockWithin(
 		args.directory,
-		WORKTREE_LIFECYCLE_LOCK_FILE,
-		'worktree-provisioning',
 		args.taskId,
+		lifecycleLockWaitMs,
 	);
 	if (!lifecycleLock.acquired) {
 		hardStopStandardWorktreeLifecycle(
 			args.parentSessionID,
-			'STANDARD_WORKTREE_LIFECYCLE_BUSY: init orphan recovery is active; retry this coder dispatch after recovery completes.',
+			`STANDARD_WORKTREE_LIFECYCLE_BUSY: the worktree lifecycle lock stayed busy for ${Math.round(lifecycleLockWaitMs / 1000)}s (another lane is provisioning or init orphan recovery is running); retry this coder dispatch. ` +
+				'The wait follows worktree.session_create_timeout_ms: that budget plus 5s, at least 10s, and — up to the default 30s budget — short enough that this dispatch (its own session create and worktree provisioning included) still fits the 60s host hook budget.',
 		);
 	}
 	try {
@@ -1905,6 +2041,7 @@ export async function precreateStandardWorktreeSession(args: {
 	}
 
 	args.outputArgs.task_id = childSessionId;
+	recordLaneChildSession(childSessionId, 'coder');
 	// Issue #2002: the child session executes in the lane, not in the project
 	// root. Record that root so the write gates (scope-guard, guardrails
 	// tool-before) resolve this session's scope binding and path containment
@@ -3647,6 +3784,12 @@ export const _internals = {
 	/** Background launch durability fallback: tag ownership without racing the child. */
 	preserveBackgroundWorktreeOwnershipForCallId,
 	tryAcquireWorktreeLifecycleLock: tryAcquireLock,
+	acquireWorktreeLifecycleLockWithin,
+	/** Bounded wait for the lifecycle lock, derived from the session-create budget. */
+	resolveWorktreeLifecycleLockWaitMs,
+	now: () => Date.now(),
+	sleep: (ms: number) =>
+		new Promise<void>((resolve) => setTimeout(resolve, ms)),
 	recordWorktreeProvisioningOwner,
 	removeWorktreeProvisioningOwner,
 	lookupWorktreeRecoveryAuthoritiesByTask,

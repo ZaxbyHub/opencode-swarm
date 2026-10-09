@@ -311,7 +311,7 @@ Before reviewing the plan, check whether it was silently mutated since last crit
 1. Call the \`get_approved_plan\` tool (no arguments required — it derives identity internally).
 2. Examine the response:
    - If \`success: false\` with \`reason: "no_approved_snapshot"\`: this is the first plan or no prior approval exists. Note this and proceed with plan review.
-   - If \`drift_detected: false\`: baseline integrity confirmed — the plan has not been mutated since the last critic approval. Proceed with plan review.
+   - If \`drift_detected: false\`: baseline integrity confirmed — the plan has not been mutated since the last critic approval. A different \`current_phase\` (the phase cursor), task/phase statuses, or a \`current_hash\` that differs from the approved hash are execution progress here, not drift. Proceed with plan review.
    - If \`drift_detected: true\` AND \`approved_plan\` is defined: CRITICAL finding — plan mutated after approval. Compare \`approved_plan\` vs \`current_plan\` to identify what changed (phases added/removed, tasks modified, scope changes). Report findings in a \`## BASELINE DRIFT\` section before the rubric assessment.
    - If \`drift_detected: true\` AND \`approved_plan\` is undefined but \`current_plan_error\` is present: CRITICAL finding — plan identity was mutated (tampering detected). Report \`current_plan_error\` as primary evidence; state that direct comparison is unavailable due to identity mutation. Report findings in a \`## BASELINE DRIFT\` section before the rubric assessment.
    - If \`drift_detected: "unknown"\`: flag as warning and proceed with caution.
@@ -542,7 +542,7 @@ Before reviewing individual tasks, check whether the plan itself was silently mu
 1. Call the \`get_approved_plan\` tool (no arguments required — it derives identity internally).
 2. Examine the response:
    - If \`success: false\` with \`reason: "no_approved_snapshot"\`: this is likely the first phase or no prior approval exists. Note this and proceed to per-task review.
-   - If \`drift_detected: false\`: baseline integrity confirmed — the plan has not been mutated since the last critic approval. Proceed to per-task review.
+   - If \`drift_detected: false\`: baseline integrity confirmed — the plan has not been mutated since the last critic approval. A different \`current_phase\` (the phase cursor), task/phase statuses, or a \`current_hash\` that differs from the approved hash are execution progress here, not drift. Proceed to per-task review.
    - If \`drift_detected: true\` AND \`approved_plan\` is defined: CRITICAL finding — plan mutated after approval. Compare \`approved_plan\` vs \`current_plan\` to identify what changed (phases added/removed, tasks modified, scope changes). Report findings in a \`## BASELINE DRIFT\` section before the per-task rubric.
    - If \`drift_detected: true\` AND \`approved_plan\` is undefined but \`current_plan_error\` is present: CRITICAL finding — plan identity was mutated (tampering detected). Report \`current_plan_error\` as primary evidence; state that direct comparison is unavailable due to identity mutation. Report findings in a \`## BASELINE DRIFT\` section before the per-task rubric.
    - If \`drift_detected: "unknown"\`: current plan.json is unavailable. Flag this as a warning and proceed.

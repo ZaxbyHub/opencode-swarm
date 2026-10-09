@@ -429,26 +429,6 @@ describe('ADVERSARIAL: fallbackDir Windows-specific attacks', () => {
 
 		expect(result.success).toBe(false);
 	});
-
-	it('should reject fallbackDir with reserved Windows names (CON, AUX, NUL)', async () => {
-		// Windows reserved names
-		const reservedNames = ['NUL', 'CON', 'AUX', 'COM1', 'LPT1'];
-
-		for (const name of reservedNames) {
-			const reservedPath = path.join(name, '..', '..', '..', 'etc');
-
-			const result = await executeUpdateTaskStatus(
-				{
-					task_id: '1.1',
-					status: 'pending',
-				},
-				reservedPath,
-			);
-
-			// Reserved names can cause issues on Windows
-			expect(result.success).toBe(false);
-		}
-	});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -33,6 +33,40 @@ describe('retention registry document coherence', () => {
 		}
 	});
 
+	test('each category heading states its row count and lists its own rows', () => {
+		// The gate only checks that every id appears somewhere: the headings
+		// had drifted (Category 2 said 17 rows over a 20-row table) and two
+		// rows sat under the wrong category.
+		const doc = fs.readFileSync(DOC_PATH, 'utf-8');
+		const tables = new Map<number, { says: number; ids: string[] }>();
+		let current: number | null = null;
+		for (const line of doc.split('\n')) {
+			const heading = line.match(/^### Category (\d+) .*\((\d+) rows\)/);
+			if (heading) {
+				current = Number(heading[1]);
+				tables.set(current, { says: Number(heading[2]), ids: [] });
+				continue;
+			}
+			if (line.startsWith('## ')) current = null;
+			const row = line.match(/^\| `([^`]+)`/);
+			if (current !== null && row) tables.get(current)?.ids.push(row[1]);
+		}
+		for (const [category, table] of tables) {
+			const expected = RETENTION_REGISTRY.filter((r) => r.category === category)
+				.map((r) => r.id)
+				.sort();
+			expect({ category, ids: [...table.ids].sort() }).toEqual({
+				category,
+				ids: expected,
+			});
+			expect({ category, says: table.says }).toEqual({
+				category,
+				says: expected.length,
+			});
+		}
+		expect(tables.size).toBe(9);
+	});
+
 	test('document link-definition anchors map back to registry rows', () => {
 		const doc = fs.readFileSync(DOC_PATH, 'utf-8');
 		const ids = new Set(RETENTION_REGISTRY.map((r) => r.id));

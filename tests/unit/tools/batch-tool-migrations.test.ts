@@ -24,7 +24,16 @@
  * 3. Tools execute successfully with provided contexts
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+} from 'bun:test';
 
 afterEach(() => {
 	restoreDiscoverySeam();
@@ -37,7 +46,10 @@ import {
 	clearToolchainCache,
 	_internals as discoveryInternals,
 } from '../../../src/build/discovery';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import * as realUtils from '../../../src/utils';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // Capture the seam's original before any hook can mutate it (AGENTS.md §7).
 const originalDiscoverySpawnSync = discoveryInternals.spawnSyncImpl;
@@ -116,6 +128,26 @@ import { test_runner } from '../../../src/tools/test-runner';
 import { todo_extract } from '../../../src/tools/todo-extract';
 
 describe('Batch tool migration: createSwarmTool integration verification', () => {
+	// The "without context (uses cwd)" cases really run in process.cwd(): from
+	// the repository root they saved a "Test Plan" into the checkout's own
+	// .swarm/ and extracted output_*.js files next to package.json, which then
+	// broke later suites (delegation-gate-background-task) in the same tree.
+	// Run the whole file from a throwaway directory instead.
+	const originalCwd = process.cwd();
+	let sandboxCwd = '';
+	beforeAll(() => {
+		sandboxCwd = canonicalMkdtemp('batch-tool-migrations-');
+		process.chdir(sandboxCwd);
+	});
+	afterAll(() => {
+		process.chdir(originalCwd);
+		// save-plan opens the sandbox's .swarm/swarm.db; on Windows a held
+		// handle makes the removal fail EBUSY. Close the cached handles, then
+		// remove with the shared helper's bounded Windows retry (#2480).
+		closeAllProjectDbs();
+		safeRmRecursive(sandboxCwd);
+	});
+
 	beforeEach(() => {
 		mock.restore();
 		mock.clearAllMocks();

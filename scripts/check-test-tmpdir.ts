@@ -23,6 +23,21 @@ export const REALPATH_PATTERN = /realpathSync/;
 export const PROJECT_RELATIVE_TEMP_PATTERN =
 	/(baseDir|tempDir|tmpDir)[ \t]*=[ \t]*['"]tmp['"]|(mkdtemp|mkdtempSync|mkdir|mkdirSync)\([^)]*['"]tmp['"]/;
 
+/**
+ * A test fixture root aimed at the process cwd — the plugin checkout under
+ * `bun test`. Tools then write `.swarm/` state (and traversal probes resolve)
+ * inside the developer's repository.
+ */
+export const CWD_TEST_ROOT_PATTERN =
+	/\b(testDir|tempDir|tmpDir|directory|projectRoot)[ \t]*=[ \t]*process\.cwd\(\)/;
+/**
+ * A test fs write aimed at the developer's real home directory. Bun's
+ * os.homedir() ignores HOME/USERPROFILE overrides, so these land in the real
+ * home even under an "isolated" env (tests/helpers/isolated-test-env.ts).
+ */
+export const HOMEDIR_WRITE_PATTERN =
+	/\b(writeFileSync|mkdirSync|appendFileSync|writeFile|mkdir)\([^;]*homedir\(\)/;
+
 export interface AddedLine {
 	file: string;
 	line: number;
@@ -132,6 +147,30 @@ export function evaluateTmpdirAddedLines(
 			);
 			messages.push(
 				'       remain outside the repository and are realpath-canonicalized.',
+			);
+			violations += 1;
+		}
+		if (CWD_TEST_ROOT_PATTERN.test(line.content)) {
+			messages.push(
+				`ERROR: ${line.file}:${line.line} roots a test fixture at process.cwd() (the checkout).`,
+			);
+			messages.push(
+				'       Use canonicalMkdtemp(prefix) from tests/helpers/tmpdir.ts (or',
+			);
+			messages.push(
+				'       enterCwdSandbox from tests/helpers/cwd-sandbox.ts for cwd-relative probes).',
+			);
+			violations += 1;
+		}
+		if (HOMEDIR_WRITE_PATTERN.test(line.content)) {
+			messages.push(
+				`ERROR: ${line.file}:${line.line} writes under os.homedir() (the developer's real home).`,
+			);
+			messages.push(
+				'       Bun ignores HOME overrides for os.homedir(); write under a temp root',
+			);
+			messages.push(
+				'       (createIsolatedTestEnv / canonicalMkdtemp) instead.',
 			);
 			violations += 1;
 		}

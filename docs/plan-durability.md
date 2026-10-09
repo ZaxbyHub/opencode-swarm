@@ -712,9 +712,15 @@ the same helper.
 
 Hash semantics: `current_phase` remains inside both plan hashes. A phase-boundary
 advancement therefore changes the approval-baseline hash exactly like any plan
-revision (bindings and approved snapshots declared against the pre-advance
-plan stop matching until re-declared/re-approved); ordinary task-status churn
-inside a phase is hash-excluded and does not touch the baseline.
+revision: bindings declared against the pre-advance plan stop matching until
+re-declared. Critic approval survives a cursor-only advance: the plan-critic
+gate and `get_approved_plan` use `approvedSnapshotCoversPlan`
+(`src/plan/ledger.ts`), which accepts a current plan that differs from the
+approved snapshot only in `current_phase` (the snapshot must hash to its own
+stored hash, and re-hashing it at the current cursor must give the current
+hash). Any structural edit still invalidates the approval. Ordinary
+task-status churn inside a phase is hash-excluded and does not touch the
+baseline.
 
 Known upgrade behavior: workspaces whose SQLite ledger shadow already
 existed before this change compare the normalized replay hash against the

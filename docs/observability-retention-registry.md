@@ -296,7 +296,7 @@ per row.
 | `skill-usage-pending` | .swarm/skill-usage-pending.json | authoritative | queueMaxRecords=5,000/queueMaxBytes=512KiB/maxAgeMs=90d/maxAttempts=5 (global) | indexed: single JSON doc bounded at readMaxBytes=1,677,722 B; oversized reads quarantined | untouched — persists across sessions | retain by design — #2038 (implemented); direct-file exemption (#2038) |
 | `observability-cohorts` | .swarm/observability/cohorts/<epoch-ms>-<12-hex>.json | derived-rebuildable | FIFO 20 files (COHORT_MANIFEST_RETENTION, src/services/task-cohort.ts:209); one bounded JSON per snapshot (global) | indexed: single-file reads by exact content-addressed name (sync) | untouched — provenance evidence outlives the session; FIFO is the only removal path | retain by design — #2676 (frozen cohort manifests; report renders from the in-memory snapshot) |
 
-### Category 2 — Background delegation, PR monitor/feedback, lane sidecars (17 rows)
+### Category 2 — Background delegation, PR monitor/feedback, lane sidecars (20 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -321,7 +321,7 @@ per row.
 | `dashboard-status` | .swarm/dashboard-status.json | operational | single rewritten 4-field snapshot (status/port/url/startedAt; capability token never persisted) (global) | indexed: single small JSON | rewritten to status=stopped on listener close; never deleted | not a defect — #2509 |
 | `locks-dir` | .swarm/locks/{sha256|.base64}.lock + .meta sidecars | operational | LOCK_TIMEOUT_MS 5 min stale expiry; cleanupExpiredLocks sweep (:250-297) (global) | directory-scan: live locks only (expired filtered) | untouched — deliberately excluded from close (`src/commands/close/constants.ts:253-268` omits `locks`) | not a defect — #2035 (merged) |
 
-### Category 3 — Evidence trajectories, PRM, insight, observability sink, postmortems, consensus, epic/turbo, #2486 training vault (17 rows)
+### Category 3 — Evidence trajectories, PRM, insight, observability sink, postmortems, consensus, epic/turbo, #2486 training vault (18 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -342,8 +342,9 @@ per row.
 | `doc-drift-signals` | swarm.db table phase_report kind=design_doc_drift (#2480; legacy .swarm/doc-drift-phase-{N}.json cold-archived .json.imported) | operational | one row per phase, PK(kind,phase); legacy .imported cold archives swept at 30 d (global) | indexed: per-phase rows via PK | untouched — accumulates in swarm.db | not a defect — #2483 |
 | `training-vault` | .swarm/training/v1/ consent + vault + tombstones (governed content) | content | consent-clamped: 1 GiB / 250k records / 30 days ceilings; stop-not-evict; disk floor max(2 GiB, 10%) (global) | indexed: consent-gated; corrupt items quarantined | withdrawal empties records, tombstone durable, exports revoked | **implemented #2486** — #2486 |
 | `training-exports` | .swarm/training/v1/exports/<id>/ deterministic bundles + manifests | content | max 20 exports / 1 GiB total / 30 days; identical re-export idempotent (global) | indexed: deterministic byte-identical bundles | REVOKED.json revocation manifests on withdrawal | **implemented #2486** — #2486 |
+| `otlp-export-spool` | .swarm/otlp-export/ (spool.jsonl + state.json; opt-in, absent unless enabled) | operational | spoolMaxBytes (default 1 MiB) drop-oldest + spoolMaxAgeMs (default 24h) age sweep with terminal drop reasons; MAX_SPOOL_LINES_PER_FLUSH 2048; MAX_FLUSH_ITERATIONS 100 (global) | line-bounded: flush reads at most 2048 lines + health stat, sync | untouched — opt-in export state survives close | retain by design — #2485 |
 
-### Category 4 — Guardrail audit, attestations, scope evidence (9 rows)
+### Category 4 — Guardrail audit, attestations, scope evidence (10 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -359,7 +360,7 @@ per row.
 | `review-receipts` | .swarm/review-receipts/{YYYY-MM-DD}-{id}.json + index.json | governed-content | one small file per review receipt; retention sweep review-receipts 30 d + keep-newest-1000; index read capped MAX_RECEIPTS_READ 1000 (global) | indexed: manifest lookup + per-file reads; index read ≤1000 newest | untouched by close — the 30 d / newest-1000 sweep owns the reap | not a defect — #2483 |
 
 
-### Category 5 — Plan durability, evidence bundles, council (13 rows)
+### Category 5 — Plan durability, evidence bundles, council (15 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -396,7 +397,7 @@ per row.
 | `recommendation-ledger` | <knowledgeStore>/learning/recommendation-ledger.jsonl | operational | MAX_RECOMMENDATION_LEDGER_ENTRIES 500 FIFO; MAX_ENTRY_BYTES 4096; ceiling ≈2 MiB (:131,14… (global) | full-file: ≤500 entries × 4 KiB | untouched (bounded) | not a defect — this-gate |
 | `link-pointers` | .swarm/link.json + .swarm/memory-link.json | authoritative | single pointer files (global) | indexed: single JSON | untouched (cross-session link state) | not a defect — this-gate; direct-file exemption (#2036) |
 
-### Category 7 — SQLite, memory stores, caches, repo graph (14 rows)
+### Category 7 — SQLite, memory stores, caches, repo graph (15 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -414,8 +415,9 @@ per row.
 | `repo-graph-fingerprint` | .swarm/repo-graph.fingerprint.json | derived-rebuildable | bounded read (24 MiB); archived+cleaned at close with its sibling repo-graph.json (#2483) (session-scoped) | indexed: ≤24 MiB / ≤100,256 entries | archived+cleaned with repo-graph.json (`src/commands/close/constants.ts:40-42,164-166`) | not a defect — #2483 |
 | `test-history` | .swarm/cache/test-history.jsonl | operational | MAX_HISTORY_PER_TEST 20 FIFO per key PLUS GLOBAL MAX_TEST_HISTORY_ENTRIES 5000 + MAX_TEST_HISTORY_KEYS 1000 on every append (per-key; keyspace finite by the global key cap) | full-file: bounded transitively by the global 5000-entry cap | untouched (cache/) | not a defect — #2483 |
 | `impact-map` | .swarm/cache/impact-map.json | derived-rebuildable | rebuildable via buildImpactMap (:449-455); size bounded by repository file population (session-scoped) | full-file: rebuildable cache; stale entries rejected by mtime che… | untouched (cache/) | not a defect — this-gate |
+| `instruction-pairing-report` | .swarm/memory/instruction-pairing-report.json | derived-rebuildable | single file overwritten whole per command invocation — bounded by the paired task corpus (per-trigger) | write-only: n/a (operator-facing output; re-generated on demand) | untouched (disposable derived output) | not a defect — this-gate |
 
-### Category 8 — Close/reset, worktree, doctor, session, warnings/automation, skills (26 rows)
+### Category 8 — Close/reset, worktree, doctor, session, warnings/automation, skills (27 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -437,7 +439,6 @@ per row.
 | `curator-summary` | .swarm/curator-summary.json | operational | single rewritten summary; embedded recommendations deduped/capped (global) | indexed: single JSON | untouched | not a defect — this-gate |
 | `close-session-outputs` | .swarm/{close-summary.md, context.md, session-reflection.md, handoff.… | governed-content | single rewritten session documents (close-summary/handoff atomic; context.md sectioned) (session-scoped) | full-file: single documents | archived+cleaned (close-summary.md deliberately writte… | not a defect — this-gate |
 | `command-reports` | .swarm/simulate-report.{json,md} + .swarm/handoff-continuation.json | governed-content | single rewritten report files (global) | indexed: single files | untouched (operator artifacts / continuation pointers) | not a defect — this-gate |
-| `instruction-pairing-report` | .swarm/memory/instruction-pairing-report.json | derived-rebuildable | single file overwritten whole per command invocation — bounded by the paired task corpus (per-trigger) | write-only: n/a (operator-facing output; re-generated on demand) | untouched (disposable derived output) | not a defect — this-gate |
 | `project-init-configs` | .opencode/opencode-swarm.json + .swarm/config.example.json (+ CLI-man… | governed-content | wx-once init artifacts + operator-edited config (global) | indexed: single config files | unaffected (outside close scope by design) | not a defect — this-gate |
 | `bundled-skills` | .swarm/bundled-skills/{slug}/SKILL.md | governed-content | fixed slug set from BUNDLED_PROJECT_SKILLS (:6-50) — no growth dimension (global) | indexed: fixed set of small files | untouched (plugin-owned runtime root) | not a defect — this-gate |
 | `skills-proposals` | .swarm/skills/proposals/{slug}.md + .swarm/skills/evals/{slug}/auto-s… | governed-content | evals bounded (MAX_EVAL_FILES 50 / 64 KiB / 100 cases, skill-evaluator.ts:26-31); pending proposals 14 d sweep (per-key; keyspace finite by the 14 d reaper) | directory-scan: eval loads capped; proposal listing bounded by the 14 d sweep horizon | untouched by close — the 14 d sweep owns pending-review expiry | not a defect — #2483 |
@@ -448,13 +449,12 @@ per row.
 | `outside-swarm-tool-outputs` | .mutation_patch_{id}.diff (workdir) + extract_code_blocks outputs (us… | governed-content | batch-scoped or user-directed outputs outside swarm state; apply-patch temps always clean… (per-trigger) | write-only: n/a | outside .swarm — out of swarm retention scope by defin… | not a defect — this-gate |
 | `residue-quarantine` | .swarm/quarantine/{batch}/ (+ per-batch manifest with sha256/original… | governed-content | bounded by verified stale-residue discovery (old, unlocked, untracked, exact-grammar matc… (per-trigger) | indexed: manifest-driven reads | untouched — recoverable quarantine is preserved across… | retain by design — #2035 (merged) |
 
-### Category 9 — Planned streams (PRs 19-23) (4 rows)
+### Category 9 — Planned streams (PRs 19-23) (3 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
 | `planned-observability-sink` | swarm.db table observability_event (#2482 — the planned .swarm/observability/v1/ segment surface was superseded by the merged SQLite sink, owned by `observability-events-sqlite`) | operational | superseded by #2482: MAX_OBSERVABILITY_EVENT_ROWS 50000 global DELETE-oldest + 16 KiB per-payload cap (global) | indexed: deterministic SELECTs with report LIMIT 5000 | superseded by #2482: rows live in swarm.db (project-db row lifecycle) | not a defect — superseded by #2482 |
 | `planned-rebuildable-index` | swarm.db table observability_event idx_obs_event_* indexes (#2482 — the planned separate derived index was superseded by in-table indexes + /swarm report, owned by `observability-events-sqlite`) | derived-rebuildable | superseded by #2482: indexed columns on a 50000-row-retention table (global) | indexed: indexed-column lookups with report LIMIT 5000 | superseded by #2482: never authoritative (project-db row lifecycle) | not a defect — superseded by #2482 |
-| `otlp-export-spool` | .swarm/otlp-export/ (spool.jsonl + state.json; opt-in, absent unless enabled) | operational | spoolMaxBytes (default 1 MiB) drop-oldest + spoolMaxAgeMs (default 24h) age sweep with terminal drop reasons; MAX_SPOOL_LINES_PER_FLUSH 2048; MAX_FLUSH_ITERATIONS 100 (global) | line-bounded: flush reads at most 2048 lines + health stat, sync | untouched — opt-in export state survives close | retain by design — #2485 |
 | `planned-legacy-retirement` | issue #2487 compatibility program metadata and parity harness | derived-rebuildable | no runtime state; version-controlled metadata plus bounded parity fixtures (global) | indexed: bounded SQLite/file-shadow parity queries | not applicable — source rows retain their own lifecycle | not a defect — this-gate |
 
 ---
@@ -494,7 +494,7 @@ The enumerator's pattern set (write APIs + atomic-write helper calls + SQLite
 open/acquire seams +, since issue #2480, the swarm.db **store-op seam** —
 every durable store mutation is a named, enumerated function) and the complete
 writer-module-to-row mapping live in `scripts/retention-registry.data.ts`
-(`writerModules` per row plus `EXEMPT_WRITER_MODULES`, 7 plumbing entries).
+(`writerModules` per row plus the plumbing entries in `EXEMPT_WRITER_MODULES`).
 **DB-mediated boundary (#2480 redesign):** raw `Database`-handle references
 outside `src/db/**` are confined to `RAW_DB_HANDLE_MODULES` (each member owned
 by a registry row), and `src/db` foundation writers are reverse-staleness

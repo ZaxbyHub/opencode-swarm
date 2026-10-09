@@ -2400,6 +2400,11 @@ export function startAgentSession(
 ): void {
 	const now = Date.now();
 	claimSnapshotSessionOwnership(sessionId, true);
+	// A blank/whitespace directory names no project: treat it as absent so no
+	// disk-touching branch below resolves it against process.cwd().
+	if (typeof directory === 'string' && directory.trim() === '') {
+		directory = undefined;
+	}
 
 	// Issue #2667: ownership/stamp must be computed BEFORE the sessionState
 	// literal below, so they are assigned before agentSessions.set() and

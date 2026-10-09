@@ -21,6 +21,15 @@ function canonicalRealpath(targetPath: fs.PathLike): string {
 	}
 }
 
+/** Symlink-resolved path, or the path itself when it does not exist. */
+function realpathOrSelf(targetPath: string): string {
+	try {
+		return canonicalRealpath(targetPath);
+	} catch {
+		return targetPath;
+	}
+}
+
 /**
  * Test fixtures often spy on `process.platform` to exercise a target platform.
  * Use the host `node:path` separator rather than that mutable runtime property
@@ -92,6 +101,24 @@ export function safeRmRecursive(targetPath: string): void {
 	}
 
 	const lexicalTarget = path.resolve(targetPath);
+	// Never remove the working directory or any of its ancestors. A checkout
+	// can itself live under os.tmpdir() (a clone in /tmp, a worktree in a temp
+	// dir), and then the tmpdir checks below accept '.' — which deleted the
+	// whole checkout.
+	// Compare both the literal and the symlink-resolved forms (macOS: /var is
+	// /private/var, so one side may be resolved and the other not).
+	const cwd = path.resolve(process.cwd());
+	if (
+		isWithinHostFilesystemPath(cwd, lexicalTarget) ||
+		isWithinHostFilesystemPath(
+			realpathOrSelf(cwd),
+			realpathOrSelf(lexicalTarget),
+		)
+	) {
+		throw new Error(
+			`safeRmRecursive: refusing to remove ${lexicalTarget}; it is the current working directory or contains it`,
+		);
+	}
 	const tmpBase = os.tmpdir();
 	const canonicalTmpBase = canonicalRealpath(tmpBase);
 	const lexicalTmpBase = path.resolve(tmpBase);

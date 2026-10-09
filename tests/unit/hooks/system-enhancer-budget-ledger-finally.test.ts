@@ -41,6 +41,7 @@ import {
 	getTurnLedgerSummary,
 } from '../../../src/services/injection-budget.js';
 import { resetSwarmState } from '../../../src/state.js';
+import { type CwdSandbox, enterCwdSandbox } from '../../helpers/cwd-sandbox';
 
 const FORCE_THROW_MARKER = '__FR004_FORCE_LEDGER_THROW__';
 
@@ -99,6 +100,18 @@ const PLAN_JSON = JSON.stringify({
 	title: 'Ledger Finally Test',
 	current_phase: 1,
 	phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+});
+
+// This suite builds cwd-relative workspaces (the code under test resolves
+// paths against process.cwd()), so every test runs with its cwd in a
+// throwaway sandbox, never in the plugin checkout.
+let cwdSandbox: CwdSandbox | undefined;
+beforeEach(() => {
+	cwdSandbox = enterCwdSandbox('se-ledger-finally-');
+});
+afterEach(() => {
+	cwdSandbox?.restore();
+	cwdSandbox = undefined;
 });
 
 describe('system-enhancer budget ledger — unconditional write on mid-turn throw (FR-004)', () => {

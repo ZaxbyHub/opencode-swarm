@@ -46,6 +46,7 @@ import type {
 } from '../../../src/hooks/knowledge-types.js';
 import { KNOWLEDGE_SCHEMA_VERSION } from '../../../src/hooks/knowledge-types.js';
 import { resolveHiveKnowledgePath } from '../../../src/knowledge/hive-paths.js';
+import { redirectHiveHome } from '../../helpers/hive-home';
 import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { ACTIONABLE_FIELDS, makeConfig, readRawHive } from './hive-fixtures.js';
 
@@ -159,16 +160,12 @@ function makeSwarmEntry(
 describe('hive-promoter (transactional, #1847)', () => {
 	let tempHome: string;
 	let swarmDir: string;
-	let realHome: string | undefined;
+	let restoreHiveHome: () => void = () => {};
 
 	beforeEach(() => {
 		// Isolate the hive store via per-test HOME (resolver reads it live).
 		tempHome = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'hive-test-')));
-		realHome = process.env.HOME;
-		process.env.HOME = tempHome;
-		if (process.platform === 'win32') {
-			process.env.LOCALAPPDATA = path.join(tempHome, 'AppData', 'Local');
-		}
+		restoreHiveHome = redirectHiveHome(tempHome);
 
 		swarmDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'swarm-')));
 
@@ -188,12 +185,7 @@ describe('hive-promoter (transactional, #1847)', () => {
 
 	afterEach(() => {
 		// Restore HOME + DI seams.
-		if (realHome === undefined) {
-			delete process.env.HOME;
-		} else {
-			process.env.HOME = realHome;
-		}
-		delete process.env.LOCALAPPDATA;
+		restoreHiveHome();
 		_internals.readSwarmEntries = realReadKnowledge;
 		rmSync(tempHome, { recursive: true, force: true });
 		rmSync(swarmDir, { recursive: true, force: true });

@@ -18,7 +18,11 @@ import {
 	type TaskEnvelope,
 } from '../background/task-envelope.js';
 import { captureWorkspaceSnapshotAsync } from '../background/workspace-snapshot.js';
-import { getCurrentPhase, type Plan } from '../config/plan-schema.js';
+import {
+	getCurrentPhase,
+	isPhaseInWrapWindow,
+	type Plan,
+} from '../config/plan-schema.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
 	collectPlanTaskIdContextFromPhases,
@@ -554,6 +558,35 @@ function bindingMatchesPlan(
 	return samePlanIdentity(binding, plan) && binding.phase === phase;
 }
 
+/**
+ * Whether a receipt stamped with the dispatch-time cursor `receiptPhase` may
+ * stand in for `phase`'s docs participation (the cursor-tolerance arms of
+ * readPhaseParticipation; rebindCursorTaggedReceipts then re-stamps it).
+ *
+ * - Behind: the receipt carries the live cursor and that cursor is behind
+ *   the completing phase (issue #2702, a lagging cursor).
+ * - Wrap window: the phase-wrap skill completes phase N's last task FIRST
+ *   (the cursor moves on) and dispatches docs after, so the receipt carries
+ *   the later cursor phase. It covers N only while N is in its wrap window
+ *   (`isPhaseInWrapWindow`: N's work is done and every phase between N and
+ *   the cursor is already finished), so that docs run has seen all of N's
+ *   work. Without this arm phase_complete(N) rejected it, and a
+ *   re-dispatch stamps the next phase again — the phase could never
+ *   complete. Work already done in the cursor phase does not matter: the
+ *   receipt is re-stamped to N, so that phase still needs its own docs run.
+ *   A receipt from a cursor further ahead never satisfies an earlier phase.
+ */
+function receiptCursorCoversPhase(
+	receiptPhase: number,
+	phase: number,
+	plan: Plan,
+): boolean {
+	const cursorPhase = getCurrentPhase(plan);
+	if (receiptPhase !== cursorPhase || cursorPhase === phase) return false;
+	if (cursorPhase < phase) return true;
+	return isPhaseInWrapWindow(plan, phase);
+}
+
 function workspaceIdentityIsFresh(
 	expected: ParticipationWorkspace,
 	current: ParticipationWorkspace,
@@ -880,13 +913,11 @@ export async function readPhaseParticipation(
 	// cursor at dispatch time (see reserveApprovedPhaseParticipation). Since
 	// #2532 that cursor advances when a phase's last task completes, so a
 	// receipt may be tagged behind (dispatched before the previous phase
-	// closed) or exactly at the completing phase; the receipt identity hash is
-	// cursor-independent (receiptStructureHash), so cursor movement alone
-	// never invalidates it. The cursor-mistag arm only ever accepts a tag
-	// BEHIND the completing phase — a receipt tagged with a LATER phase never
-	// satisfies an earlier one, and an exact-phase match covers the ordinary
-	// sequential flow. Any other phase stays rejected.
-	const cursorPhase = getCurrentPhase(plan);
+	// closed), exactly at the completing phase, or one ahead (dispatched at
+	// PHASE-WRAP, after the last task advanced the cursor); the receipt
+	// identity hash is cursor-independent (receiptStructureHash), so cursor
+	// movement alone never invalidates it. The tolerance arms are in
+	// receiptCursorCoversPhase; any other phase stays rejected.
 	return {
 		status: 'valid',
 		found: read.store.receipts.some(
@@ -895,7 +926,7 @@ export async function readPhaseParticipation(
 				samePlanIdentity(receipt, plan) &&
 				workspaceIdentityIsFresh(receipt.workspace, currentWorkspace) &&
 				(receipt.phase === phase ||
-					(receipt.phase === cursorPhase && cursorPhase < phase)),
+					receiptCursorCoversPhase(receipt.phase, phase, plan)),
 		),
 	};
 }
@@ -922,16 +953,25 @@ export async function rebindCursorTaggedReceipts(
 	role: string,
 ): Promise<{ rebound: number }> {
 	const canonicalRole = stripKnownSwarmPrefix(role);
-	const cursorPhase = getCurrentPhase(plan);
 	const peek = readRawStore(directory);
+	// A store that cannot be read now may be readable to the next phase's
+	// gate, with a wrap-tagged receipt still in it: report, never skip. A
+	// missing store has no receipts, and a corrupt one is unusable to every
+	// reader (the gate included), so neither can leave a receipt behind.
+	if (peek.status === 'unreadable' || peek.status === 'oversized') {
+		throw new Error(
+			peek.status === 'oversized'
+				? `the participation store is oversized (${peek.bytes} bytes)`
+				: `the participation store could not be read (${peek.error instanceof Error ? peek.error.message : String(peek.error)})`,
+		);
+	}
 	const hasCandidate =
 		peek.status === 'valid' &&
 		peek.store.receipts.some(
 			(receipt) =>
 				receipt.role === canonicalRole &&
 				samePlanIdentity(receipt, plan) &&
-				receipt.phase === cursorPhase &&
-				cursorPhase < phase,
+				receiptCursorCoversPhase(receipt.phase, phase, plan),
 		);
 	if (!hasCandidate) return { rebound: 0 };
 	return withEvidenceLock(
@@ -946,8 +986,7 @@ export async function rebindCursorTaggedReceipts(
 				if (
 					receipt.role === canonicalRole &&
 					samePlanIdentity(receipt, plan) &&
-					receipt.phase === cursorPhase &&
-					cursorPhase < phase
+					receiptCursorCoversPhase(receipt.phase, phase, plan)
 				) {
 					receipt.phase = phase;
 					receipt.receiptId = computeReceiptId(receipt);

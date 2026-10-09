@@ -1,4 +1,9 @@
 import type { OpencodeClient } from '@opencode-ai/sdk';
+import {
+	formatProviderMessageError,
+	type ProviderMessageError,
+	readProviderMessageError,
+} from '../failures/provider-message-error.js';
 import type { DelegationCostFields } from '../services/cost-accounting.js';
 import {
 	buildDelegationCostFields,
@@ -89,11 +94,22 @@ export type EphemeralAgentDispatchResult = {
 	modelId?: string;
 	text: string;
 	error?: string;
+	/**
+	 * The provider error OpenCode recorded on the assistant message
+	 * (`info.error`), when there was one. `status` is then `'error'`.
+	 */
+	providerError?: EphemeralProviderError;
 	durationMs: number;
 	promptBytes: number;
 	responseBytes: number;
 	costFields?: DelegationCostFields;
 };
+
+/**
+ * The provider error OpenCode recorded on the assistant message, read by the
+ * shared {@link readProviderMessageError}.
+ */
+export type EphemeralProviderError = ProviderMessageError;
 
 function formatSdkError(prefix: string, error: unknown): string {
 	let detail: string;
@@ -297,6 +313,7 @@ export async function dispatchEphemeralAgent(
 	let sessionId: string | undefined;
 	let timedOut = false;
 	let cancelled = false;
+	let providerError: EphemeralProviderError | null = null;
 	const controller = new AbortController();
 	const onCallerAbort = () => {
 		cancelled = true;
@@ -359,6 +376,16 @@ export async function dispatchEphemeralAgent(
 			);
 		}
 
+		providerError = readProviderMessageError(response.data.info);
+		if (providerError) {
+			throw new Error(
+				formatProviderMessageError(
+					'Ephemeral agent provider error',
+					providerError,
+				),
+			);
+		}
+
 		const responseByteLimit =
 			request.responseByteLimit ?? DEFAULT_EPHEMERAL_RESPONSE_BYTE_LIMIT;
 		const textParts: string[] = [];
@@ -401,6 +428,7 @@ export async function dispatchEphemeralAgent(
 			status: cancelled ? 'cancelled' : timedOut ? 'timeout' : 'error',
 			durationMs: Date.now() - startedAt,
 			error: error instanceof Error ? error.message : String(error),
+			...(providerError ? { providerError } : {}),
 		};
 	} finally {
 		clearTimeout(timeoutHandle);

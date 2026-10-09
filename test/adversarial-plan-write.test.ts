@@ -27,9 +27,11 @@ import * as path from 'node:path';
 import type { Plan } from '../src/config/plan-schema';
 import { savePlan } from '../src/plan/manager';
 import { executeSavePlan, type SavePlanArgs } from '../src/tools/save-plan';
+import { type CwdSandbox, enterCwdSandbox } from '../tests/helpers/cwd-sandbox';
 
-// Test fixtures
-const TEST_BASE_DIR = path.join(process.cwd(), '.test-adversarial-plan');
+// Test fixtures — cwd sandboxed so traversal targets never leave it (~/etc).
+let SANDBOX: CwdSandbox;
+let TEST_BASE_DIR = '';
 const VALID_SWARM_ID = 'test-swarm-security';
 
 // Helper to create minimal valid plan
@@ -84,28 +86,23 @@ function createSaveArgs(overrides: Partial<SavePlanArgs> = {}): SavePlanArgs {
 	};
 }
 
-// Cleanup helper
-function cleanupTestDir() {
-	if (existsSync(TEST_BASE_DIR)) {
-		try {
-			rmSync(TEST_BASE_DIR, { recursive: true, force: true });
-		} catch (error) {
-			// Ignore cleanup errors
-		}
-	}
-}
-
 // Setup test directory
 beforeEach(() => {
-	cleanupTestDir();
+	SANDBOX = enterCwdSandbox('adversarial-plan-write-');
+	TEST_BASE_DIR = path.join(SANDBOX.cwd, '.test-adversarial-plan');
 	mkdirSync(TEST_BASE_DIR, { recursive: true });
 });
 
 afterEach(() => {
-	cleanupTestDir();
+	SANDBOX.restore(); // removes TEST_BASE_DIR with the sandbox
 });
 
 describe('Path Traversal Attacks', () => {
+	it('resolves every relative traversal target inside the sandbox', () => {
+		for (const t of ['legitimate/../../../malicious', '../../../etc', ''])
+			expect(path.resolve(TEST_BASE_DIR, t)).toStartWith(SANDBOX.root);
+	});
+
 	describe('savePlan - working_directory path traversal', () => {
 		it('should reject path traversal attempt with ../ sequence', async () => {
 			const maliciousDir = path.join(
@@ -121,7 +118,7 @@ describe('Path Traversal Attacks', () => {
 				await savePlan(maliciousDir, plan);
 				// Check that no files were created outside TEST_BASE_DIR
 				const maliciousExists = existsSync(
-					path.join(process.cwd(), 'malicious', '.swarm'),
+					path.join(path.resolve(maliciousDir), '.swarm'),
 				);
 				expect(maliciousExists).toBe(false);
 			} catch (error) {
@@ -166,13 +163,12 @@ describe('Path Traversal Attacks', () => {
 
 	describe('executeSavePlan - working_directory path traversal', () => {
 		it('should reject path traversal in working_directory arg', async () => {
-			const args = createSaveArgs({
-				working_directory: path.join(TEST_BASE_DIR, '../../etc'),
-			});
+			const traversalDir = path.join(TEST_BASE_DIR, '../../etc');
+			const args = createSaveArgs({ working_directory: traversalDir });
 
 			const result = await executeSavePlan(args);
 			// Should either fail or not write outside test scope
-			const etcExists = existsSync(path.join(process.cwd(), 'etc', '.swarm'));
+			const etcExists = existsSync(path.join(traversalDir, '.swarm'));
 			expect(etcExists).toBe(false);
 
 			// If success claimed, verify it stayed in bounds
@@ -191,7 +187,7 @@ describe('Path Traversal Attacks', () => {
 			const result = await executeSavePlan(args, fallbackDir);
 
 			// Should not write to etc directory
-			const etcExists = existsSync(path.join(process.cwd(), 'etc', '.swarm'));
+			const etcExists = existsSync(path.join(fallbackDir, '.swarm'));
 			expect(etcExists).toBe(false);
 		});
 
@@ -206,7 +202,9 @@ describe('Path Traversal Attacks', () => {
 			const result = await executeSavePlan(args);
 
 			// Verify no escape
-			const etcExists = existsSync(path.join(process.cwd(), 'etc', '.swarm'));
+			const etcExists = existsSync(
+				path.join(args.working_directory!, '.swarm'),
+			);
 			expect(etcExists).toBe(false);
 		});
 	});

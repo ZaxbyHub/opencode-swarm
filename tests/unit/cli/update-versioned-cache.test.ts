@@ -17,6 +17,7 @@ import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isSafeCachePath } from '../../../src/cli/index.js';
 import { safeRealpathSync } from '../../../src/tools/repo-graph/safe-realpath.js';
+import { cliChildEnv } from '../../helpers/cli-child-env';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const CLI_PATH = join(
@@ -34,7 +35,7 @@ async function runCLI(
 	env: Record<string, string> = {},
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 	const proc = Bun.spawn([process.execPath, 'run', CLI_PATH, ...args], {
-		env: { ...process.env, ...env },
+		env: cliChildEnv(env),
 		stdout: 'pipe',
 		stderr: 'pipe',
 	});

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { executeInDirectory } from '../../../tests/helpers/tool-directory';
 import {
 	_internals,
 	MAX_SAFE_TEST_FILES,
@@ -57,10 +58,7 @@ vi.mock('bun', () => ({
 // ============ Test Helpers ============
 
 function getExecute() {
-	return test_runner.execute as unknown as (
-		args: Record<string, unknown>,
-		directory: string,
-	) => Promise<string>;
+	return executeInDirectory(test_runner);
 }
 
 function parseResult(result: string) {
@@ -100,12 +98,12 @@ function createSourceAndTestFiles(cwd: string) {
 	const testDir = path.join(srcDir, '__tests__');
 	fs.mkdirSync(testDir, { recursive: true });
 	fs.writeFileSync(
-		path.join(testDir, 'foo.ts'),
+		path.join(testDir, 'foo.test.ts'),
 		'import { foo } from "../foo"; test("foo", () => expect(foo()).toBe(1));\n',
 		'utf-8',
 	);
 	fs.writeFileSync(
-		path.join(testDir, 'bar.ts'),
+		path.join(testDir, 'bar.test.ts'),
 		'import { bar } from "../bar"; test("bar", () => expect(bar()).toBe(2));\n',
 		'utf-8',
 	);
@@ -116,13 +114,10 @@ function createSourceAndTestFiles(cwd: string) {
 /**
  * These tests verify the recordAndAnalyzeResults sourceFiles parameter behavior.
  *
- * IMPORTANT: The test-runner tool's convention/graph scopes have a pre-existing bug
- * on Windows where getTestFilesFromConvention() uses fs.existsSync() with paths
- * relative to process.cwd() instead of the workingDir parameter. This causes
- * test file discovery to fail when running from a different directory.
- *
- * To work around this, we test via the 'impact' scope which uses the mocked
- * analyzeImpact function instead of getTestFilesFromConvention.
+ * These run via the 'impact' scope, which uses the mocked analyzeImpact
+ * function instead of convention discovery. (Discovery that once looked
+ * cwd-relative was this file passing a directory string where execute expects
+ * a ToolContext, so the tool silently ran against process.cwd().)
  *
  * The impact scope correctly passes sourceFiles to recordAndAnalyzeResults,
  * so these tests verify the core behavior we care about.
@@ -166,12 +161,12 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 	test('1. impact scope with sourceFiles → changedFiles contains source paths, not test paths', async () => {
 		// Configure the mock to return impacted test files
 		mockAnalyzeImpact.mockResolvedValueOnce({
-			impactedTests: [path.join(tempDir, 'src', '__tests__', 'foo.ts')],
+			impactedTests: [path.join(tempDir, 'src', '__tests__', 'foo.test.ts')],
 			unrelatedTests: [],
 			untestedFiles: [],
 			impactMap: {
 				[path.join(tempDir, 'src', 'foo.ts')]: [
-					path.join(tempDir, 'src', '__tests__', 'foo.ts'),
+					path.join(tempDir, 'src', '__tests__', 'foo.test.ts'),
 				],
 			},
 		});
@@ -199,10 +194,10 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 
 		// changedFiles should contain the SOURCE file path (from args.files), not the test file path
 		// Source file: src/foo.ts
-		// Test file: src/__tests__/foo.ts
+		// Test file: src/__tests__/foo.test.ts
 		expect(recordedChangedFiles).toContain('src/foo.ts');
 		// The changedFiles should NOT be the test file path
-		expect(recordedChangedFiles).not.toContain('src/__tests__/foo.ts');
+		expect(recordedChangedFiles).not.toContain('src/__tests__/foo.test.ts');
 	});
 
 	/**
@@ -212,17 +207,17 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 	test('2. impact scope analyzes multiple source files within the resolved cap', async () => {
 		mockAnalyzeImpact.mockResolvedValueOnce({
 			impactedTests: [
-				path.join(tempDir, 'src', '__tests__', 'foo.ts'),
-				path.join(tempDir, 'src', '__tests__', 'bar.ts'),
+				path.join(tempDir, 'src', '__tests__', 'foo.test.ts'),
+				path.join(tempDir, 'src', '__tests__', 'bar.test.ts'),
 			],
 			unrelatedTests: [],
 			untestedFiles: [],
 			impactMap: {
 				[path.join(tempDir, 'src', 'foo.ts')]: [
-					path.join(tempDir, 'src', '__tests__', 'foo.ts'),
+					path.join(tempDir, 'src', '__tests__', 'foo.test.ts'),
 				],
 				[path.join(tempDir, 'src', 'bar.ts')]: [
-					path.join(tempDir, 'src', '__tests__', 'bar.ts'),
+					path.join(tempDir, 'src', '__tests__', 'bar.test.ts'),
 				],
 			},
 		});
@@ -285,12 +280,12 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 	 */
 	test('4. Windows paths in sourceFiles are normalized to forward slashes', async () => {
 		mockAnalyzeImpact.mockResolvedValueOnce({
-			impactedTests: [path.join(tempDir, 'src', '__tests__', 'foo.ts')],
+			impactedTests: [path.join(tempDir, 'src', '__tests__', 'foo.test.ts')],
 			unrelatedTests: [],
 			untestedFiles: [],
 			impactMap: {
 				[path.join(tempDir, 'src', 'foo.ts')]: [
-					path.join(tempDir, 'src', '__tests__', 'foo.ts'),
+					path.join(tempDir, 'src', '__tests__', 'foo.test.ts'),
 				],
 			},
 		});
@@ -322,12 +317,12 @@ describe('recordAndAnalyzeResults sourceFiles parameter behavior', () => {
 	 */
 	test('5. impact scope single source → changedFiles contains only source path', async () => {
 		mockAnalyzeImpact.mockResolvedValueOnce({
-			impactedTests: [path.join(tempDir, 'src', '__tests__', 'foo.ts')],
+			impactedTests: [path.join(tempDir, 'src', '__tests__', 'foo.test.ts')],
 			unrelatedTests: [],
 			untestedFiles: [],
 			impactMap: {
 				[path.join(tempDir, 'src', 'foo.ts')]: [
-					path.join(tempDir, 'src', '__tests__', 'foo.ts'),
+					path.join(tempDir, 'src', '__tests__', 'foo.test.ts'),
 				],
 			},
 		});
@@ -401,12 +396,12 @@ describe('recordAndAnalyzeResults backward compatibility', () => {
 	 */
 	test('7. impact scope → analyzeImpact is called with sourceFiles', async () => {
 		mockAnalyzeImpact.mockResolvedValueOnce({
-			impactedTests: [path.join(tempDir, 'src', '__tests__', 'foo.ts')],
+			impactedTests: [path.join(tempDir, 'src', '__tests__', 'foo.test.ts')],
 			unrelatedTests: [],
 			untestedFiles: [],
 			impactMap: {
 				[path.join(tempDir, 'src', 'foo.ts')]: [
-					path.join(tempDir, 'src', '__tests__', 'foo.ts'),
+					path.join(tempDir, 'src', '__tests__', 'foo.test.ts'),
 				],
 			},
 		});

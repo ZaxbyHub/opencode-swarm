@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { cliChildEnv } from '../../helpers/cli-child-env';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const CLI_PATH = join(import.meta.dir, '../../../src/cli/index.ts');
@@ -11,7 +12,7 @@ async function runCLI(
 	env: Record<string, string> = {},
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 	const proc = Bun.spawn(['bun', 'run', CLI_PATH, ...args], {
-		env: { ...process.env, ...env },
+		env: cliChildEnv(env),
 		stdout: 'pipe',
 		stderr: 'pipe',
 	});

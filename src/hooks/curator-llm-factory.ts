@@ -1,4 +1,5 @@
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { throwIfProviderMessageError } from '../failures/provider-message-error';
 import { swarmState } from '../state.js';
 import { telemetry } from '../telemetry.js';
 import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
@@ -281,6 +282,12 @@ export function createCuratorLLMDelegate(
 							`Curator LLM prompt failed: ${JSON.stringify(promptResult.error)}`,
 						);
 					}
+					// A provider refusal/failure is HTTP 200 with `info.error` and
+					// no text: throw so the fallback classifier sees it.
+					throwIfProviderMessageError(
+						'Curator LLM prompt provider error',
+						promptResult.data.info,
+					);
 					return promptResult.data;
 				},
 				scope: sessionId

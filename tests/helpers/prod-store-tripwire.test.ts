@@ -86,6 +86,29 @@ describe('prod-store tripwire (issue #2033)', () => {
 		expect((threwSync as Error).message).toContain('PROD-STORE TRIPWIRE');
 	});
 
+	test('the `promises` object on node:fs is guarded too', async () => {
+		// `import { promises as fsPromises } from 'node:fs'` (the hive tests'
+		// fixture writer) reached the real promise module: with XDG_DATA_HOME
+		// set, `fsPromises.writeFile` landed in the real hive store while
+		// every guarded surface threw.
+		const realHivePath = resolveHiveKnowledgePath();
+		const { promises } = await import('node:fs');
+		for (const write of [
+			() => promises.writeFile(realHivePath, '{"id":"promises-probe"}\n'),
+			() => promises.appendFile(realHivePath, '{"id":"promises-probe"}\n'),
+			() => promises.readFile(realHivePath, 'utf-8'),
+		]) {
+			let threw: unknown;
+			try {
+				await write();
+			} catch (err) {
+				threw = err;
+			}
+			expect(threw).toBeInstanceOf(Error);
+			expect((threw as Error).message).toContain('PROD-STORE TRIPWIRE');
+		}
+	});
+
 	test('link-store writes against the real link base dir throw', () => {
 		const realLinkDir = path.join(resolveLinkBaseDir(), 'regression-probe');
 		expect(isRealStoreTarget(realLinkDir)).toBe(true);

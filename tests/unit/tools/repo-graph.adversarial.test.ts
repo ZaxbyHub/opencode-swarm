@@ -14,6 +14,7 @@ import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { updateGraphForFiles } from '../../../src/tools/repo-graph';
+import { type CwdSandbox, enterCwdSandbox } from '../../helpers/cwd-sandbox';
 
 // Helper to check if graph is valid (all edges reference nodes)
 function isGraphValid(graph: any): { valid: boolean; issues: string[] } {
@@ -35,13 +36,18 @@ function isGraphValid(graph: any): { valid: boolean; issues: string[] } {
 }
 
 describe('updateGraphForFiles adversarial path handling', () => {
-	const projectRoot = process.cwd();
+	// updateGraphForFiles takes a cwd-relative workspace path, so the "project"
+	// is a throwaway cwd sandbox — never the plugin checkout.
+	let sandbox: CwdSandbox;
+	let projectRoot: string;
 	let workspaceRelPath: string;
 	let workspaceAbsPath: string;
 	let cleanupDirs: string[] = [];
 
 	beforeEach(async () => {
-		// Create temp workspace inside project directory
+		sandbox = enterCwdSandbox('repo-graph-adv-');
+		projectRoot = sandbox.cwd;
+		// Create temp workspace inside the sandboxed project directory
 		const localTempDir = path.join(
 			projectRoot,
 			'.test-temp',
@@ -79,6 +85,7 @@ describe('updateGraphForFiles adversarial path handling', () => {
 			}
 		}
 		cleanupDirs = [];
+		sandbox.restore();
 	});
 
 	/**

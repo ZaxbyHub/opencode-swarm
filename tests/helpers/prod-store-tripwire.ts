@@ -306,6 +306,62 @@ export async function ensureTripwireGuardsArmed(): Promise<void> {
 	installFsGuards();
 }
 
+/**
+ * The guarded promise surface, shared by `node:fs/promises` and the `promises`
+ * property of `node:fs` (`import { promises } from 'node:fs'` — the spread of
+ * the real node:fs would otherwise hand out the unguarded real module).
+ */
+function buildGuardedFsPromises(): Record<string, unknown> {
+	const wrapped: Record<string, unknown> = { ...realFsp };
+	wrapped.appendFile = guardPromise(
+		fspAppendFile,
+		'fs/promises.appendFile',
+		'mutation',
+		(a) => pathArg(a[0]),
+	);
+	wrapped.writeFile = guardPromise(
+		fspWriteFile,
+		'fs/promises.writeFile',
+		'mutation',
+		(a) => pathArg(a[0]),
+	);
+	wrapped.rename = guardPromise(
+		fspRename,
+		'fs/promises.rename',
+		'mutation',
+		(a) => pathArg(a[1]),
+	);
+	wrapped.rm = guardPromise(fspRm, 'fs/promises.rm', 'mutation', (a) =>
+		pathArg(a[0]),
+	);
+	wrapped.unlink = guardPromise(
+		fspUnlink,
+		'fs/promises.unlink',
+		'mutation',
+		(a) => pathArg(a[0]),
+	);
+	wrapped.truncate = guardPromise(
+		fspTruncate,
+		'fs/promises.truncate',
+		'mutation',
+		(a) => pathArg(a[0]),
+	);
+	wrapped.copyFile = guardPromise(
+		fspCopyFile,
+		'fs/promises.copyFile',
+		'mutation',
+		(a) => pathArg(a[1]),
+	);
+	wrapped.readFile = guardPromise(
+		fspReadFile,
+		'fs/promises.readFile',
+		'read',
+		(a) => pathArg(a[0]),
+	);
+	wrapped.open = guardOpen(fspOpen, 'fs/promises.open', (a) => pathArg(a[0]));
+	return wrapped;
+}
+
 function installFsGuards(): void {
 	const state = globalThis[globalKey];
 	if (!state || state.guardInstalled) return;
@@ -401,60 +457,12 @@ function installFsGuards(): void {
 		wrapped.readFile = guardSync(realFs.readFile, 'fs.readFile', 'read', (a) =>
 			pathArg(a[0]),
 		);
+		wrapped.promises = buildGuardedFsPromises();
 		return wrapped;
 	});
 
 	// node:fs/promises — promise surface.
-	mock.module('node:fs/promises', () => {
-		const wrapped: Record<string, unknown> = { ...realFsp };
-		wrapped.appendFile = guardPromise(
-			fspAppendFile,
-			'fs/promises.appendFile',
-			'mutation',
-			(a) => pathArg(a[0]),
-		);
-		wrapped.writeFile = guardPromise(
-			fspWriteFile,
-			'fs/promises.writeFile',
-			'mutation',
-			(a) => pathArg(a[0]),
-		);
-		wrapped.rename = guardPromise(
-			fspRename,
-			'fs/promises.rename',
-			'mutation',
-			(a) => pathArg(a[1]),
-		);
-		wrapped.rm = guardPromise(fspRm, 'fs/promises.rm', 'mutation', (a) =>
-			pathArg(a[0]),
-		);
-		wrapped.unlink = guardPromise(
-			fspUnlink,
-			'fs/promises.unlink',
-			'mutation',
-			(a) => pathArg(a[0]),
-		);
-		wrapped.truncate = guardPromise(
-			fspTruncate,
-			'fs/promises.truncate',
-			'mutation',
-			(a) => pathArg(a[0]),
-		);
-		wrapped.copyFile = guardPromise(
-			fspCopyFile,
-			'fs/promises.copyFile',
-			'mutation',
-			(a) => pathArg(a[1]),
-		);
-		wrapped.readFile = guardPromise(
-			fspReadFile,
-			'fs/promises.readFile',
-			'read',
-			(a) => pathArg(a[0]),
-		);
-		wrapped.open = guardOpen(fspOpen, 'fs/promises.open', (a) => pathArg(a[0]));
-		return wrapped;
-	});
+	mock.module('node:fs/promises', () => buildGuardedFsPromises());
 
 	// Bun.write bypasses node:fs under Bun (src/utils/bun-compat.ts bunWrite). Wrap it so
 	// even the temp-file creation step of an atomic write to the real dir cannot land.

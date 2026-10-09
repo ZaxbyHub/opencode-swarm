@@ -427,9 +427,9 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 			);
 
 			expect(systemPrompt).toContain('Stage A gates');
-			expect(systemPrompt).toContain('Stage B');
+			expect(systemPrompt).not.toContain('can skip Stage B');
 			expect(systemPrompt).toContain('TIER 3');
-			expect(systemPrompt).toContain('Tier 0-2');
+			expect(systemPrompt).toContain('is NOT bypassed by Turbo');
 			expect(systemPrompt).toContain('Speed optimization enabled');
 		});
 	});

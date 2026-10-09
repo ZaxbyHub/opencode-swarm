@@ -737,17 +737,17 @@ export const TURBO_MODE_BANNER = `## 🚀 TURBO MODE ACTIVE
 
 While Turbo Mode is active:
 - **Stage A gates** (lint, imports, pre_check_batch) are still REQUIRED for ALL tasks
-- **Tier 3 tasks** (security-sensitive files matching: architect*.ts, delegation*.ts, guardrails*.ts, adversarial*.ts, sanitiz*.ts, security*.ts; exact basenames: auth, authenticate, authentication, authorization, permission(s), crypto, secret(s), secretscan; keyword prefixes: auth-*, permission-*, crypto-*, secret-*, security-*; or files under auth/, security/, crypto/, permission/, secret/ directories) still require FULL review (Stage B)
-- **Tier 0-2 tasks** can skip Stage B (reviewer, test_engineer) to speed up execution
-- **Phase completion gates** (Gates 1–5: completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) are automatically bypassed via the orchestrator short-circuit at \`src/tools/phase-complete.ts:774–827\` when turbo is active; Gate 5b (architecture-supervisor), Gate 6 (final-council), and Gate 7 (full-auto) remain enforced. Note: turbo bypass is session-scoped; one session's turbo does not affect other sessions.
+- **Stage B** (reviewer + test_engineer) is NOT bypassed by Turbo: \`update_task_status(completed)\` applies the same Stage B rule whether or not Turbo is active, so a task needs Stage B exactly when it would without Turbo
+- **Tier 3 tasks** (security-sensitive files matching: architect*.ts, delegation*.ts, guardrails*.ts, adversarial*.ts, sanitiz*.ts, security*.ts; exact basenames: auth, authenticate, authentication, authorization, permission(s), crypto, secret(s), secretscan; keyword prefixes: auth-*, permission-*, crypto-*, secret-*, security-*; or files under auth/, security/, crypto/, permission/, secret/ directories) also keep the coder re-dispatch block until Stage A passes; other tasks whose planned files_touched are known may be re-dispatched to the coder before Stage A (a task with unknown or empty files_touched keeps the block)
+- **Phase completion gates** (Gates 1–5: completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) are automatically bypassed by phase_complete's gate table (\`src/tools/phase-complete.ts\`) when turbo is active; Gate 5b (architecture-supervisor), Gate 6 (final-council), and Gate 7 (full-auto) remain enforced. Note: turbo bypass is session-scoped; one session's turbo does not affect other sessions.
 
 Classification still determines the pipeline:
 - TIER 0 (metadata): lint + diff only — no change
 - TIER 1 (docs): Stage A + reviewer — no change
-- TIER 2 (standard code): Stage A + reviewer + test_engineer — CAN SKIP Stage B with turboMode
-- TIER 3 (critical): Stage A + 2x reviewer + 2x test_engineer — Stage B REQUIRED (no turbo bypass)
+- TIER 2 (standard code): Stage A + reviewer + test_engineer — no change
+- TIER 3 (critical): Stage A + 2x reviewer + 2x test_engineer — no change
 
-Do NOT skip Stage A gates. Do NOT skip Stage B for TIER 3.
+Do NOT skip Stage A or Stage B gates.
 `;
 
 export const FULL_AUTO_BANNER = `## ⚡ FULL-AUTO MODE ACTIVE
@@ -851,13 +851,13 @@ Lane-based parallel execution is enabled for this phase.
 Behavioral changes:
 - Tasks are partitioned into parallel lanes based on file-scope conflicts. Tasks in the same lane run sequentially; tasks in different lanes run concurrently (up to max_parallel_coders).
 - **Lane dispatch overrides the one-agent-per-message rule**: for lean lane dispatch only, you may send multiple Task tool calls concurrently (one per lane).
-- **Lane tasks skip per-task Stage B** (reviewer + test_engineer). Quality is enforced at phase-end via phase reviewer and critic gates instead.
+- **Lane tasks still need per-task Stage B** (reviewer + test_engineer) before \`update_task_status(completed)\`; the phase reviewer and critic add a holistic gate at phase end.
 - **Degraded tasks** (global files, protected paths, high-risk patterns) and **serialized tasks** (lock-conflicted) run through standard serial workflow with full Stage B gates.
 - **Phase reviewer and critic are REQUIRED** before phase_complete when lean turbo is active — they serve as the holistic quality gate for all lane work.
 - **Full-Auto composition**: if Full-Auto is also active, lane dispatch is subject to Full-Auto delegation policy and phase approval.
 - Use the lean_turbo_run_phase tool to execute a phase with parallel lanes
 
-Do NOT skip phase reviewer/critic when configured. Degraded and serialized tasks MUST still go through full Stage B.
+Do NOT skip phase reviewer/critic when configured. Every task, in a lane or not, MUST still go through full Stage B.
 `;
 
 export const EPIC_MODE_BANNER = `## 🧭 EPIC MODE ACTIVE — an epic is open for this plan

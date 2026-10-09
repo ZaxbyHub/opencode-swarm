@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
 	_internals,
 	abortStandardWorktreeDispatch,
+	laneChildSessionAgents,
 	precreateStandardWorktreeSession,
 	standardWorktreeByCallID,
 } from '../../../src/hooks/delegation-gate/worktree-isolation';
@@ -138,6 +139,9 @@ describe('issue #2105 worktree isolation recovery routing lifecycle', () => {
 		});
 		expect(claim).toHaveBeenCalledTimes(1);
 		expect(outputArgs.task_id).toBe('child-recovered');
+		// The rewritten id is recorded as a coder lane session, so a later
+		// dispatch of another agent cannot resume it (TASK_SESSION_RESUME_MISMATCH).
+		expect(laneChildSessionAgents.get('child-recovered')).toBe('coder');
 		expect(String(outputArgs.prompt)).toContain(
 			`authoritative_lane_root: ${JSON.stringify(worktreePath)}`,
 		);

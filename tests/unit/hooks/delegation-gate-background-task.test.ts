@@ -27,6 +27,7 @@ import {
 	getTaskState,
 	resetSwarmState,
 } from '../../../src/state';
+import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 function makeConfig(): PluginConfig {
 	return {
@@ -65,12 +66,23 @@ async function callToolBefore(
 }
 
 describe('issue #1151 — background Task fail-closed guard', () => {
-	beforeEach(() => resetSwarmState());
-	afterEach(() => resetSwarmState());
+	// A throwaway project dir: process.cwd() is the developer's checkout, so the
+	// gate read (and wrote .swarm/session/ into) the repository's own state, and
+	// a stray plan left there by another suite changed these results.
+	let directory: string;
+	let cleanup: () => void;
+	beforeEach(() => {
+		resetSwarmState();
+		({ dir: directory, cleanup } = createSafeTestDir('delegation-gate-bg-'));
+	});
+	afterEach(() => {
+		resetSwarmState();
+		cleanup();
+	});
 
 	// ── toolBefore: pre-dispatch block ───────────────────────────────────────
 	it('blocks background:true for reviewer (gate agent)', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const { threw, message } = await callToolBefore(hook, {
 			subagent_type: 'reviewer',
 			background: true,
@@ -81,7 +93,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 	});
 
 	it('blocks background:true for test_engineer (gate agent)', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'test_engineer',
 			background: true,
@@ -90,7 +102,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 	});
 
 	it('blocks background:true for a prefixed swarm name (mega_reviewer)', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'mega_reviewer',
 			background: true,
@@ -100,7 +112,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 
 	// F1: block covers ALL canonical swarm roles, not just gate agents.
 	it('blocks background:true for a non-gate swarm role (explorer)', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'explorer',
 			background: true,
@@ -109,7 +121,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 	});
 
 	it('blocks background:true for coder', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'coder',
 			background: true,
@@ -119,7 +131,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 
 	// Fail-closed: stringified flag cannot bypass the guard.
 	it('blocks background:"true" (string form) for reviewer', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'reviewer',
 			background: 'true',
@@ -129,7 +141,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 
 	// ── toolBefore: must NOT over-block ──────────────────────────────────────
 	it('does NOT block foreground reviewer (background absent)', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'reviewer',
 			description: 'review\nACCEPTANCE: task complete and covered by tests',
@@ -138,7 +150,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 	});
 
 	it('does NOT block background:false reviewer', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'reviewer',
 			background: false,
@@ -148,7 +160,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 	});
 
 	it('does NOT block background:true for non-swarm subagent_type (general)', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'general',
 			background: true,
@@ -158,7 +170,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 
 	// F2: pin suffix-separator semantics — 'reviewerx' (no separator) is not a swarm role.
 	it('does NOT block background:true for reviewerx (no separator, not a swarm role)', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const { threw } = await callToolBefore(hook, {
 			subagent_type: 'reviewerx',
 			background: true,
@@ -168,7 +180,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 
 	// ── toolAfter: defensive early-return ────────────────────────────────────
 	it('defensive: background reviewer (args) does NOT advance Stage B and cleans storedArgs', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const sessionID = 'bg-after-args';
 		const session = ensureAgentSession(sessionID);
 		session.taskWorkflowStates.set('1.1', 'coder_delegated');
@@ -192,7 +204,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 
 	// F3: output-shape path — background flag ABSENT from args, present only in the result.
 	it('defensive: background detected from output shape (state:running) does NOT advance Stage B', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const sessionID = 'bg-after-output';
 		const session = ensureAgentSession(sessionID);
 		session.taskWorkflowStates.set('2.1', 'coder_delegated');
@@ -213,7 +225,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 
 	// An after-hook without its matching pre-dispatch generation is untrusted.
 	it('regression: unbound foreground reviewer cannot advance coder_delegated', async () => {
-		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		const hook = createDelegationGateHook(makeConfig(), directory);
 		const sessionID = 'fg-after';
 		const session = ensureAgentSession(sessionID);
 		session.taskWorkflowStates.set('3.1', 'coder_delegated');

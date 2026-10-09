@@ -63,6 +63,7 @@ import {
 import { collectCoreEventsUsageErrors } from './check-core-events-usage';
 import { collectShellAuditUsageErrors } from './check-shell-audit-usage';
 import { collectTrajectoryStoreUsageErrors } from './check-trajectory-store-usage';
+import { readBounded } from './check-host-contract';
 import { detectDocsClaimDrift } from './drift-check-docs-claims';
 import { detectGatesConfigDrift } from './drift-check-gates-docs';
 import { collectRequiredCheckContract } from './check-required-check-contract';
@@ -1246,31 +1247,49 @@ function defaultReadInstalledVersion(
 	};
 }
 
-async function defaultFetchLatestVersion(pkg: string): Promise<string | null> {
+/**
+ * The dist-tags endpoint answers a few hundred bytes. The abbreviated
+ * packument used before carries every version's metadata (2.3-2.5 MB for
+ * `@opencode-ai/sdk` and growing), read uncapped.
+ */
+const DEP_FRESHNESS_DIST_TAGS_MAX_BYTES = 64 * 1024;
+
+/** npm dist-tags URL for a package; a scoped name is URL-encoded. */
+export function npmDistTagsUrl(pkg: string): string {
+	return `https://registry.npmjs.org/-/package/${encodeURIComponent(pkg)}/dist-tags`;
+}
+
+/**
+ * Resolve npm `latest` for `pkg` from its dist-tags with a bounded read;
+ * null on any failure (non-OK status, oversized or unparseable body, timeout).
+ */
+export async function fetchNpmLatestVersion(
+	pkg: string,
+	fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
 	const controller = new AbortController();
 	const timer = setTimeout(
 		() => controller.abort(),
 		DEP_FRESHNESS_FETCH_TIMEOUT_MS,
 	);
 	try {
-		// Abbreviated packument (Accept header) carries `dist-tags` without the
-		// full version history. Scoped name is URL-encoded (`@scope%2Fname`).
-		const res = await fetch(
-			`https://registry.npmjs.org/${encodeURIComponent(pkg)}`,
-			{
-				headers: { accept: 'application/vnd.npm.install-v1+json' },
-				signal: controller.signal,
-			},
-		);
+		const res = await fetchImpl(npmDistTagsUrl(pkg), {
+			signal: controller.signal,
+		});
 		if (!res.ok) return null;
-		const body = (await res.json()) as { 'dist-tags'?: { latest?: unknown } };
-		const latest = body['dist-tags']?.latest;
-		return typeof latest === 'string' ? latest : null;
+		const body = await readBounded(res, DEP_FRESHNESS_DIST_TAGS_MAX_BYTES);
+		if (body === null) return null;
+		const tags = JSON.parse(body) as { latest?: unknown };
+		return typeof tags.latest === 'string' ? tags.latest : null;
 	} catch {
 		return null;
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+async function defaultFetchLatestVersion(pkg: string): Promise<string | null> {
+	return fetchNpmLatestVersion(pkg);
 }
 
 /**

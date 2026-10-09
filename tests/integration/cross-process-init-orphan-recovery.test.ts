@@ -55,7 +55,13 @@ async function runGit(
 	const proc = spawn('git', args, {
 		cwd,
 		stdio: ['ignore', 'pipe', 'pipe'],
-		env: { ...process.env, LC_ALL: 'C' },
+		// Never read or write the developer's global/system git config.
+		env: {
+			...process.env,
+			LC_ALL: 'C',
+			GIT_CONFIG_GLOBAL: os.devNull,
+			GIT_CONFIG_NOSYSTEM: '1',
+		},
 	});
 	let stdout = '';
 	let stderr = '';
@@ -76,20 +82,30 @@ async function runGit(
  */
 async function initGitRepo(repoDir: string): Promise<void> {
 	mkdirSync(repoDir, { recursive: true });
-	await runGit(repoDir, [
-		'config',
-		'--global',
-		'user.email',
-		'test@test.local',
-	]);
-	await runGit(repoDir, ['config', '--global', 'user.name', 'Test User']);
 	const result2 = await runGit(repoDir, ['init']);
 	if (result2.exitCode !== 0) {
 		throw new Error('git init failed: ' + result2.stderr);
 	}
+	// Repo-local identity: `git config --global` here used to overwrite the
+	// developer's ~/.gitconfig (every later commit authored as "Test User").
+	for (const args of [
+		['config', 'user.email', 'test@test.local'],
+		['config', 'user.name', 'Test User'],
+		['config', 'commit.gpgsign', 'false'],
+	]) {
+		const configured = await runGit(repoDir, args);
+		if (configured.exitCode !== 0) {
+			throw new Error(`git ${args.join(' ')} failed: ${configured.stderr}`);
+		}
+	}
 	writeFileSync(path.join(repoDir, 'README.md'), '# test\n');
-	await runGit(repoDir, ['add', '.']);
-	await runGit(repoDir, ['commit', '-m', 'initial commit']);
+	const added = await runGit(repoDir, ['add', '.']);
+	const committed = await runGit(repoDir, ['commit', '-m', 'initial commit']);
+	if (added.exitCode !== 0 || committed.exitCode !== 0) {
+		throw new Error(
+			`git add/commit failed: ${added.stderr}${committed.stderr}`,
+		);
+	}
 }
 
 function makeTempDir(prefix: string): string {

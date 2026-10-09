@@ -391,3 +391,59 @@ describe('dispatchCriticAndWriteEvent — model failover (#1905)', () => {
 		expect(mirrorEvent.critic_model).not.toBe('prov/primary-critic');
 	});
 });
+
+describe('dispatchCriticAndWriteEvent — provider error on the assistant message', () => {
+	test('a 429 recorded as info.error fails over instead of becoming an empty NEEDS_REVISION', async () => {
+		seedOversightFallback(['prov/fb1']);
+		const promptModels: Array<string | undefined> = [];
+		stateInternals.swarmState.opencodeClient = {
+			session: {
+				create: async () => ({ data: { id: 'critic-session' }, error: null }),
+				prompt: async (params: { body: PromptBody }) => {
+					const override = params.body?.model;
+					promptModels.push(
+						override ? `${override.providerID}/${override.modelID}` : undefined,
+					);
+					if (!override) {
+						return {
+							data: {
+								info: {
+									error: {
+										name: 'APIError',
+										data: { statusCode: 429, message: 'Rate limit exceeded' },
+									},
+								},
+								parts: [],
+							},
+						};
+					}
+					return {
+						data: {
+							parts: [
+								{ type: 'text', text: 'VERDICT: APPROVED\nREASONING: ok' },
+							],
+						},
+					};
+				},
+				delete: async () => ({}),
+			},
+		} as any;
+
+		const result = await dispatchCriticAndWriteEvent(
+			tmpDir,
+			'architect output',
+			'critic context',
+			'prov/primary-critic',
+			'question',
+			1,
+			0,
+			'critic_oversight',
+			'sess-info-error',
+			2,
+			3,
+		);
+
+		expect(result.verdict).toBe('APPROVED');
+		expect(promptModels).toEqual([undefined, 'prov/fb1']);
+	});
+});

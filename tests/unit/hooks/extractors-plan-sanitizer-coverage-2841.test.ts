@@ -135,6 +135,7 @@ describe('plan extractor sanitizer coverage (#2841) — source ratchet', () => {
 		'extractCurrentTask',
 		'extractIncompleteTasks',
 		'extractCurrentPhaseFromPlan',
+		'extractPhaseLabelFromPlan',
 		'extractCurrentTaskFromPlan',
 		'extractIncompleteTasksFromPlan',
 	] as const;

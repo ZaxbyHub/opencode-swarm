@@ -168,6 +168,28 @@ export async function createCorrelation(dir: string): Promise<void> {
 	expect(result.terminal?.state).toBe('completed');
 }
 
+/**
+ * A PID with no live process or thread behind it, found at runtime. The
+ * stale/legacy probe markers name a DEAD owner so the loop may reclaim them
+ * through the real liveness check (`process.kill(pid, 0)`). A fixed number is
+ * not dead everywhere: on Linux `kill` also accepts thread ids, and 4242 was a
+ * live thread on a developer machine, so the probe was never reclaimed.
+ */
+function findDeadPid(): number {
+	for (let pid = 4_190_000; pid > 4_000_000; pid -= 9_973) {
+		try {
+			process.kill(pid, 0);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+		}
+	}
+	throw new Error(
+		'issue-2745 fixtures: no dead pid found to stand for a dead probe owner',
+	);
+}
+
+export const DEAD_PROBE_OWNER_PID = findDeadPid();
+
 export function setExpiredProbe(
 	dir: string,
 	marker: 'fresh' | 'stale' | 'legacy' | 'none',
@@ -183,11 +205,11 @@ export function setExpiredProbe(
 	} else if (marker === 'stale') {
 		circuit.halfOpenProbeStartedAt = NOW - 121_000;
 		circuit.halfOpenProbeOwnerToken = 'dead-probe-owner';
-		circuit.halfOpenProbeOwnerPid = 4_242;
+		circuit.halfOpenProbeOwnerPid = DEAD_PROBE_OWNER_PID;
 	} else if (marker === 'legacy') {
 		delete circuit.halfOpenProbeStartedAt;
 		circuit.halfOpenProbeOwnerToken = 'legacy-dead-probe-owner';
-		circuit.halfOpenProbeOwnerPid = 4_242;
+		circuit.halfOpenProbeOwnerPid = DEAD_PROBE_OWNER_PID;
 	} else {
 		delete circuit.halfOpenProbeStartedAt;
 		delete circuit.halfOpenProbeOwnerToken;

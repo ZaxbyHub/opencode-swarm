@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { DEFAULT_MODELS } from '../../../src/config/constants';
 import { resetSwarmState } from '../../../src/state';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 import {
 	bootKnowledgeHost,
 	createKnowledgeProject,
@@ -95,14 +96,19 @@ const contextBudget = {
 
 describe('context-budget production agent-model wiring (#2122)', () => {
 	let directory = '';
+	// The booted plugin loads the user-level opencode-swarm.json; isolate the
+	// XDG/HOME roots so it never reads the developer's real config.
+	let cleanupEnv: () => void = () => {};
 
 	beforeEach(() => {
 		resetSwarmState();
+		cleanupEnv = createIsolatedTestEnv().cleanup;
 		directory = createKnowledgeProject();
 	});
 
 	afterEach(() => {
 		resetSwarmState();
+		cleanupEnv();
 		try {
 			safeRmRecursive(directory);
 		} catch {

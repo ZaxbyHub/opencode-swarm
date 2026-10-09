@@ -142,10 +142,10 @@ describe('trajectory-store', () => {
 				appendTrajectoryEntry(sessionId, createEntry(1), '/invalid\0path'),
 			).resolves.toBeUndefined(); // Should not throw
 
-			// Should not crash even with invalid directory
-			await expect(
-				appendTrajectoryEntry(sessionId, createEntry(1), ''),
-			).resolves.toBeUndefined();
+			// Should not crash when mkdir fails (.swarm is a regular file)
+			fs.writeFileSync(path.join(tempDir, '.swarm'), 'not a directory');
+			const write = appendTrajectoryEntry(sessionId, createEntry(1), tempDir);
+			await expect(write).resolves.toBeUndefined();
 		});
 
 		test('does not update cache when disk append fails', async () => {
