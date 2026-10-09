@@ -644,11 +644,14 @@ const WORKTREE_PROVISION_ALLOWANCE_MS = 15_000;
  * A holder can keep the lock across a recovery-lane session.create, bounded by
  * `worktree.session_create_timeout_ms` (plus the settle grace), and the
  * stale-lane cleanup after it. The wait therefore follows that budget plus a
- * margin. It is capped so that the wait, this dispatch's own session.create,
- * its settle grace and the provisioning work still fit in the host hook
- * budget (10s at the default 30s session.create budget): a dispatch that
- * overruns the hook is abandoned mid-provisioning, while a dispatch that stops
- * here fails cleanly with STANDARD_WORKTREE_LIFECYCLE_BUSY.
+ * margin. Up to a 30s session.create budget (the default) it is capped so
+ * that the wait, this dispatch's own session.create, its settle grace and the
+ * provisioning work still fit in the host hook budget (10s at the default):
+ * a dispatch that overruns the hook is abandoned mid-provisioning, while a
+ * dispatch that stops here fails cleanly with STANDARD_WORKTREE_LIFECYCLE_BUSY.
+ * Above 30s there is no room left and the wait stays at its 10s floor, so the
+ * worst case exceeds the hook budget (61s at a 31s budget, 90s at 60s): a
+ * session.create budget that long is itself what overruns the hook.
  */
 function resolveWorktreeLifecycleLockWaitMs(
 	sessionCreateTimeoutMs: number,
@@ -1381,7 +1384,7 @@ export async function precreateStandardWorktreeSession(args: {
 		hardStopStandardWorktreeLifecycle(
 			args.parentSessionID,
 			`STANDARD_WORKTREE_LIFECYCLE_BUSY: the worktree lifecycle lock stayed busy for ${Math.round(lifecycleLockWaitMs / 1000)}s (another lane is provisioning or init orphan recovery is running); retry this coder dispatch. ` +
-				'The wait follows worktree.session_create_timeout_ms: that budget plus 5s, at least 10s, and short enough that this dispatch (its own session create and worktree provisioning included) still fits the 60s host hook budget.',
+				'The wait follows worktree.session_create_timeout_ms: that budget plus 5s, at least 10s, and — up to the default 30s budget — short enough that this dispatch (its own session create and worktree provisioning included) still fits the 60s host hook budget.',
 		);
 	}
 	try {

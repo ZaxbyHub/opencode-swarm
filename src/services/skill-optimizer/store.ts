@@ -389,7 +389,7 @@ function parseEventsFromText(text: string): SkillOptEvent[] {
 
 /**
  * Replay a candidate's lifecycle ledger. Mirrors `readLedgerEventsWithIntegrity`
- * in `src/plan/ledger.ts:1108`: stops at the first unparseable line, marks the
+ * in `src/plan/ledger.ts:2444`: stops at the first unparseable line, marks the
  * replay `truncated`, and surfaces the bad suffix for quarantine. The canonical
  * ledger is NEVER rewritten or truncated by this read.
  */
@@ -456,7 +456,7 @@ export function replayCandidate(
  * Quarantine a corrupt ledger suffix. Writes the bad suffix to a unique side
  * file under `.swarm/evolution/skills/`. NEVER rewrites or truncates the
  * canonical `lifecycle.jsonl`. Mirrors `quarantineLedgerSuffix` in
- * `src/plan/ledger.ts:1852`.
+ * `src/plan/ledger.ts:2521`.
  */
 export function quarantineSuffix(
 	directory: string,

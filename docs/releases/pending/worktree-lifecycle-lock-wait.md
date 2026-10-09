@@ -17,6 +17,10 @@ budget plus 5 seconds, at least 10 seconds, and short enough that the waiting
 dispatch can still run its own `session.create` and provision its worktree
 (15 seconds are kept for that) inside the 60-second OpenCode 2 hook budget.
 With the default 30-second budget the wait is 10 seconds; with 20 seconds it
-is 20 seconds, and with 10 seconds it is 15 seconds. If the lock is still busy after the
+is 20 seconds, and with 10 seconds it is 15 seconds. Above a 30-second
+budget no room is left and the wait stays at 10 seconds, so a waiting
+dispatch can then exceed the hook budget (61 seconds at a 31-second budget,
+90 seconds at 60): keep `worktree.session_create_timeout_ms` at 30 seconds or
+less on OpenCode 2. If the lock is still busy after the
 wait, the message says so, names both possible holders and names
 `worktree.session_create_timeout_ms`.

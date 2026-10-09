@@ -123,14 +123,21 @@ describe('resolveWorktreeLifecycleLockWaitMs', () => {
 		);
 	});
 
-	test('wait + own create + settle grace + provisioning fits the hook budget', () => {
+	test('up to the default 30s create budget, wait + own create + settle grace + provisioning fits the hook budget', () => {
 		const PROVISION_ALLOWANCE_MS = 15_000;
-		for (let createMs = 1_000; createMs <= 40_000; createMs += 1_000) {
+		for (let createMs = 1_000; createMs <= 30_000; createMs += 1_000) {
 			const waitMs = _internals.resolveWorktreeLifecycleLockWaitMs(createMs);
-			if (waitMs === 10_000) continue; // floor; a 30s+ create leaves no room
 			expect(
 				waitMs + createMs + SETTLE_GRACE_MS + PROVISION_ALLOWANCE_MS,
 			).toBeLessThanOrEqual(HOOK_BUDGET_MS);
+		}
+	});
+
+	test('above a 30s create budget the wait stays at its 10s floor (documented hook overrun)', () => {
+		for (let createMs = 31_000; createMs <= 120_000; createMs += 1_000) {
+			expect(_internals.resolveWorktreeLifecycleLockWaitMs(createMs)).toBe(
+				10_000,
+			);
 		}
 	});
 });
