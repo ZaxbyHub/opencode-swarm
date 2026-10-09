@@ -112,8 +112,8 @@ export const EPIC_PHASE_REVIEW_TOOL = 'epic_phase_review';
  * `completed` response with no text (or, where it reads the assistant
  * message's `info.error`, as an `error` with a `providerError`) — so the
  * retry fires on every empty completion and every structured
- * authentication/configuration refusal (HTTP 403 class), not only the Zen
- * 403; a rate limit, quota or outage `providerError` is not retried with
+ * authentication/configuration refusal (HTTP 403 class, or the host's
+ * statusless `ProviderAuthError`), not only the Zen 403; a rate limit, quota or outage `providerError` is not retried with
  * `bash` (the model-fallback chain owns it); a second refusal stays a fail-closed
  * REJECTED. Every other tool stays denied, so this profile is
  * still narrower than the standard per-task reviewer/critic agents (whose
@@ -774,13 +774,16 @@ async function dispatchRole(
 				const remainingMs = timeoutMs - response.durationMs;
 				// Only an authentication/configuration refusal (the Zen 403 class)
 				// can be cured by re-enabling `bash`; a rate limit, quota or
-				// outage is left to the model-fallback chain below.
+				// outage is left to the model-fallback chain below. The host's
+				// `ProviderAuthError` carries no status code, so its name counts
+				// as that class too.
 				const providerRefused =
 					(response.status === 'completed' && response.text.trim() === '') ||
 					(response.status === 'error' &&
 						(response.providerError?.category ===
 							'provider.authentication_configuration' ||
-							response.providerError?.statusCode === 403));
+							response.providerError?.statusCode === 403 ||
+							response.providerError?.name === 'ProviderAuthError'));
 				if (providerRefused && remainingMs > 0) {
 					toolProfile = 'read-only-with-bash';
 					const firstMs = response.durationMs;
