@@ -14,9 +14,6 @@
  * wake-prompt senders (`pr-workflow-response-gate.ts`, `pr-event-delivery.ts`)
  * do not read the reply, and `dispatch-lanes.ts` reads `info.error` with its
  * own lane-error mapping.
- *
- * `MessageOutputLengthError` is not a refusal: the output was truncated but
- * the message carries usable text, so it reads as no error.
  */
 import { classifyProviderFailure } from './invocation-failure';
 
@@ -40,7 +37,6 @@ export function readProviderMessageError(
 	const error = (info as { error?: unknown }).error;
 	if (!error || typeof error !== 'object') return null;
 	const { name, data } = error as { name?: unknown; data?: unknown };
-	if (name === 'MessageOutputLengthError') return null;
 	const details = (data && typeof data === 'object' ? data : {}) as {
 		message?: unknown;
 		statusCode?: unknown;

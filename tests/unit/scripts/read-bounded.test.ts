@@ -72,6 +72,13 @@ describe('readBounded (streaming, shared by check-host-contract and drift-check)
 		expect(state.pulled).toBe(0);
 	});
 
+	test('a declared Content-Length equal to the cap is accepted', async () => {
+		const res = new Response('a'.repeat(10), {
+			headers: { 'content-length': '10' },
+		});
+		expect(await readBounded(res, 10)).toBe('a'.repeat(10));
+	});
+
 	test('a body exactly at the cap is accepted; one byte over is not', async () => {
 		expect(await readBounded(new Response('a'.repeat(10)), 10)).toBe(
 			'a'.repeat(10),

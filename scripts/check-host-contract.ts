@@ -682,6 +682,10 @@ export async function main(argv: string[]): Promise<number> {
 	}
 	if (emitPath) {
 		if (tag || source || routeOnDrift || dryRun) return usage();
+		// The tag is only recorded as provenance in the emitted corpus, but it is
+		// still validated like every other tag so the corpus cannot carry
+		// path-shaped or multi-line text.
+		if (asTag && !isSafeNpmTag(asTag)) return usage();
 		return emitExpected(emitPath, { asTag: asTag || undefined, asCommit: asCommit || undefined });
 	}
 	if (asTag || asCommit) return usage();

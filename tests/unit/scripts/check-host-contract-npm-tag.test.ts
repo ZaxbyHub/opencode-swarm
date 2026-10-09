@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import {
 	_internals,
 	isSafeNpmTag,
+	main,
 	NPM_DIST_TAGS_URL,
 	resolveNpmLatestTag,
 	runCheck,
@@ -65,6 +66,25 @@ describe('host-contract check: npm latest-tag resolution', () => {
 			throw new Error('network down');
 		}) as unknown as typeof fetch;
 		expect(await resolveNpmLatestTag(throwing)).toBe('');
+	});
+
+	test('an empty `latest` and an unreadable body each log their own reason', async () => {
+		const empty = await resolveWithReasons(fakeFetch('{"latest":""}'));
+		expect(empty.tag).toBe('');
+		expect(empty.reasons).toHaveLength(1);
+		expect(empty.reasons[0]).toContain('no string `latest`');
+		const erroring = (async () =>
+			new Response(
+				new ReadableStream<Uint8Array>({
+					pull() {
+						throw new Error('socket reset');
+					},
+				}),
+			)) as unknown as typeof fetch;
+		const unreadable = await resolveWithReasons(erroring);
+		expect(unreadable.tag).toBe('');
+		expect(unreadable.reasons).toHaveLength(1);
+		expect(unreadable.reasons[0]).toContain('response unreadable');
 	});
 
 	test('each failure class logs a distinct one-line stderr reason and still returns an empty tag', async () => {
@@ -131,7 +151,10 @@ describe('host-contract check: npm tag is validated before URL interpolation', (
 		for (const bad of [
 			'../../x',
 			'a/b',
-			'a\b',
+			'a\\b',
+			'1..2',
+			'a..b',
+			'a'.repeat(129),
 			'..',
 			'1.2.3?x=1',
 			'1.2.3#frag',
@@ -146,6 +169,26 @@ describe('host-contract check: npm tag is validated before URL interpolation', (
 			expect(isSafeNpmTag(bad)).toBe(false);
 	});
 
+	test('--emit-expected refuses an unsafe --as-tag before writing anything', async () => {
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (line: unknown) => {
+			errors.push(String(line));
+		};
+		try {
+			const code = await main([
+				'--emit-expected',
+				'does-not-exist.ts',
+				'--as-tag',
+				'../../x',
+			]);
+			expect(code).toBe(2);
+			expect(errors.join('\n')).toContain('usage:');
+		} finally {
+			console.error = original;
+		}
+	});
+
 	test('resolveNpmLatestTag treats an unsafe `latest` as unresolved', async () => {
 		for (const latest of ['../../x', 'a/b', '', 7]) {
 			const body = JSON.stringify({ latest });
@@ -157,6 +200,25 @@ describe('host-contract check: npm tag is validated before URL interpolation', (
 				() => {},
 			),
 		).toBe('1.2.3-beta.1');
+	});
+
+	test('runCheck names an unsafe tag on stderr, and stays quiet when nothing resolved', async () => {
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (line: unknown) => {
+			errors.push(String(line));
+		};
+		try {
+			_internals.fetchHostSource = async () => null;
+			await runCheck({ tag: '../../x' });
+			expect(errors.join('\n')).toContain('refusing unsafe tag');
+			errors.length = 0;
+			_internals.resolveLatestTag = async () => '';
+			await runCheck({});
+			expect(errors).toEqual([]);
+		} finally {
+			console.error = original;
+		}
 	});
 
 	test('runCheck never builds a source URL from an unsafe resolved or explicit tag', async () => {

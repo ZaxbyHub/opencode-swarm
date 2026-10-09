@@ -233,12 +233,64 @@ describe('check-test-tmpdir — evasion forms and negative controls', () => {
 		}
 	});
 
+	test('comment lines never count as home writes or home-variable assignments', () => {
+		for (const content of [
+			`// writeFileSync(join(${HOME}, 'x'), 'y');`,
+			`/* writeFileSync(join(${HOME}, 'x'), 'y'); */`,
+			` * writeFileSync(join(${HOME}, 'x'), 'y');`,
+		]) {
+			expect(eval1(content)).toBe(0);
+		}
+		const at = (...contents: string[]) =>
+			evaluateTmpdirAddedLines(
+				contents.map((content, i) => ({
+					file: 'a.test.ts',
+					line: i + 1,
+					content,
+				})),
+			).violations;
+		// A commented-out assignment must not register a home variable...
+		expect(
+			at(
+				`// const realHome = ${HOME};`,
+				"writeFileSync(path.join(realHome, '.x'), 'y');",
+			),
+		).toBe(0);
+		// ...and a commented-out write through a tracked variable is not a write.
+		expect(
+			at(
+				`const realHome = ${HOME};`,
+				"// writeFileSync(path.join(realHome, '.x'), 'y');",
+				' * cpSync(src, realHome);',
+				'/* cpSync(src, realHome); */',
+			),
+		).toBe(0);
+	});
+
+	test('a home variable whose name contains $ is tracked literally', () => {
+		for (const name of ['$home', 'home$x']) {
+			const violations = evaluateTmpdirAddedLines([
+				{ file: 'a.test.ts', line: 1, content: `const ${name} = ${HOME};` },
+				{
+					file: 'a.test.ts',
+					line: 2,
+					content: `writeFileSync(path.join(${name}, '.x'), 'y');`,
+				},
+			]).violations;
+			expect(violations).toBe(1);
+		}
+	});
+
 	test('flags more home writers: copyFileSync, cpSync, renameSync, mkdtempSync', () => {
 		for (const call of [
 			`copyFileSync(src, path.join(${HOME}, '.x'));`,
 			`fs.cpSync(src, join(${HOME}, '.cfg'), { recursive: true });`,
 			`await fsp.copyFile(src, \`\${${HOME}}/.x\`);`,
 			`renameSync(a, join(${HOME}, 'b'));`,
+			`mkdtempSync(join(${HOME}, 'scratch-'));`,
+			`await fsp.mkdtemp(path.join(${HOME}, 'scratch-'));`,
+			`symlinkSync(src, join(${HOME}, '.link'));`,
+			`appendFileSync(join(${HOME}, '.log'), 'x');`,
 		]) {
 			expect(eval1(call)).toBe(1);
 		}

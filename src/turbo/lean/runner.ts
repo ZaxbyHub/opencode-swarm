@@ -932,9 +932,15 @@ export class LeanTurboRunner {
 			// `session.prompt` answers HTTP 200 even when the provider refused the
 			// request; the refusal is the assistant message's `info.error` and the
 			// message has no text. Without this read the lane would complete.
-			const providerError = promptResult.data
+			const readError = promptResult.data
 				? readProviderMessageError(promptResult.data.info)
 				: null;
+			// A truncated reply (`MessageOutputLengthError`) is not a refusal: the
+			// lane keeps the behavior it had before the runner read `info.error`.
+			// The shared reader still reports it, because its other consumers fail
+			// closed on it.
+			const providerError =
+				readError?.name === 'MessageOutputLengthError' ? null : readError;
 			if (!promptResult.data || providerError) {
 				abortController?.abort();
 				void teardownEphemeralSession(session, sessionId);
