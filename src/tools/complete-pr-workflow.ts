@@ -196,7 +196,7 @@ export async function executeCompletePrWorkflow(
 							}
 						: {}),
 					report_verdict: parsed.data.report_verdict,
-					verdict_settlement: await verdictSettlementSummaryForReport(
+					verdict_settlement: await verdictSettlementSummaryForReportSafe(
 						directory,
 						context.sessionID,
 					),
@@ -310,4 +310,18 @@ async function verdictSettlementSummaryForReport(
 		'../hooks/pr-workflow-gate.js'
 	);
 	return readPrReviewVerdictSettlementReceiptItems(directory, sessionID);
+}
+
+/** Observation-only echo: a read failure degrades to an absent echo (the
+ * sibling observation-only reads above follow the same guard pattern) rather
+ * than failing the completion report itself. */
+async function verdictSettlementSummaryForReportSafe(
+	directory: string,
+	sessionID: string,
+) {
+	try {
+		return await verdictSettlementSummaryForReport(directory, sessionID);
+	} catch {
+		return undefined;
+	}
 }
