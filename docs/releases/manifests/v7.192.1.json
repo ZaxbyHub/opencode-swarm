@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.192.1",
+  "tagCommit": "eee45347fcfe471d0722fb73d9638285275fa16e",
+  "targetCommitish": "eee45347fcfe471d0722fb73d9638285275fa16e",
+  "releaseBodySha256": "eba3de98abf00427d363d5039ae1c69d36fb6f08ec21d9838867b9df3b81d0d3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3094-receipt-coverage-degradations.md",
+      "sha256": "872d6f3fa82ee3ff4f79eb5e89c3389e365f5ea134dbc775db6b5ee78937ccc4"
+    }
+  ]
+}
