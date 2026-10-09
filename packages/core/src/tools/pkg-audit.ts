@@ -567,14 +567,14 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 	const command = ['cargo', 'audit', '--json'];
 
 	try {
-		const proc = bunSpawn(command, {
+		const proc = _internals.spawnAuditProc(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
 		});
 
 		const timeoutPromise = new Promise<'timeout'>((resolve) =>
-			setTimeout(() => resolve('timeout'), AUDIT_TIMEOUT_MS),
+			setTimeout(() => resolve('timeout'), _internals.auditTimeoutMs),
 		);
 		const result = await Promise.race([
 			Promise.all([proc.stdout.text(), proc.stderr.text()]).then(
@@ -593,7 +593,7 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 				highCount: 0,
 				totalCount: 0,
 				clean: false,
-				note: `cargo audit timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
+				note: `cargo audit timed out after ${_internals.auditTimeoutMs / 1000}s`,
 			};
 		}
 
@@ -1491,6 +1491,44 @@ export type {
 /**
  * Run the package audit tool
  */
+/**
+ * Test seam (7.x `_internals` DI convention — never mock.module): lets
+ * covered-tree tests inject a fake spawn result and a short timeout into
+ * runCargoAudit. Only the cargo runner reads this seam (the arm the PR
+ * #3163 feedback review pinned); the other runners keep the module
+ * constants until a test needs injection.
+ */
+export const _internals = {
+	spawnAuditProc: bunSpawn,
+	auditTimeoutMs: AUDIT_TIMEOUT_MS,
+};
+
+/**
+ * Exported for covered-tree tests (packages/core/tests/utils): asserts the
+ * fail-closed contract of the cargo runner — a spawn failure (tool missing)
+ * or a timeout must never report clean:true (issues #3150/#3163 feedback).
+ */
+export async function runCargoAuditForTest(
+	directory: string,
+): Promise<AuditResult> {
+	return runCargoAudit(directory);
+}
+
+/**
+ * Exported for covered-tree tests (packages/core/tests/utils): the shared
+ * runner failure classifier. Pins the fail-closed contract added with
+ * issues #3150/#3163 — overflow and unknown failures are clean:false;
+ * only the genuinely-missing-tooling arm is clean:true.
+ */
+export function auditFailureForTest(
+	ecosystem: string,
+	toolLabel: string,
+	command: string[],
+	error: unknown,
+): AuditResult {
+	return auditFailure(ecosystem, toolLabel, command, error);
+}
+
 export async function runPkgAudit(
 	ecosystem: Ecosystem,
 	directory: string,
