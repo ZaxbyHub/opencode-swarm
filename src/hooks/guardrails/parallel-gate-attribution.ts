@@ -80,7 +80,7 @@ export async function resolveParallelGateTaskAttribution(
 	if (!plan) {
 		return {
 			kind: 'unattributable',
-			message: `STAGE A ATTRIBUTION: ${candidates.length === 1 ? `task ${candidates[0]} is` : `${candidates.length} tasks are`} awaiting Stage A (${candidates.join(', ')}), but .swarm/plan.json is missing or could not be read, so this gate run cannot be credited by its files. Nothing was credited; restore the plan and re-run pre_check_batch.`,
+			message: `STAGE A ATTRIBUTION: ${candidates.length === 1 ? `task ${candidates[0]} is awaiting Stage A` : `${candidates.length} tasks are awaiting Stage A (${candidates.join(', ')})`}, but .swarm/plan.json is missing or could not be read, so this gate run cannot be credited by its files. Nothing was credited; restore the plan and re-run pre_check_batch.`,
 		};
 	}
 	// Only tasks of the current plan count: an entry for a task that is no

@@ -29,8 +29,10 @@
  * tests run. New top-level entries, and creating `.swarm/` where none existed,
  * are always enforced. `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` overrides
  * the mode. A part of the checkout that cannot be checked (an unreadable root,
- * a `.swarm/` over MAX_SWARM_ENTRIES) is reported as a warning, never skipped
- * silently.
+ * a `.swarm/` directory that cannot be read, a `.swarm/` over
+ * MAX_SWARM_ENTRIES) is reported as a warning, never skipped silently. Writes
+ * INSIDE an existing top-level directory (`src/`, `tests/`) are out of scope:
+ * only the directory's existence is compared there.
  */
 
 import * as realFs from 'node:fs';
@@ -72,7 +74,10 @@ function fingerprint(absPath: string, includeDirMtime: boolean): string {
 	}
 }
 
-function walkSwarm(swarmDir: string): Map<string, string> | null {
+function walkSwarm(
+	swarmDir: string,
+	unchecked: string[],
+): Map<string, string> | null {
 	const out = new Map<string, string>();
 	const stack = [''];
 	while (stack.length > 0) {
@@ -80,7 +85,10 @@ function walkSwarm(swarmDir: string): Map<string, string> | null {
 		let names: string[];
 		try {
 			names = readdirSync(path.join(swarmDir, rel));
-		} catch {
+		} catch (error) {
+			unchecked.push(
+				`.swarm/${rel} could not be read (${error instanceof Error ? error.message : String(error)})`,
+			);
 			continue;
 		}
 		for (const name of names) {
@@ -113,7 +121,7 @@ export function snapshotCheckout(repoRoot: string): CheckoutSnapshot {
 	}
 	const swarmDir = path.join(repoRoot, '.swarm');
 	const swarmExisted = topLevel.get('.swarm') === 'd';
-	const swarm = swarmExisted ? walkSwarm(swarmDir) : null;
+	const swarm = swarmExisted ? walkSwarm(swarmDir, unchecked) : null;
 	if (swarmExisted && swarm === null) {
 		unchecked.push(
 			`.swarm/ has more than ${MAX_SWARM_ENTRIES} entries, so changes inside it were not checked`,

@@ -269,7 +269,7 @@ describe('TURBO_BYPASS_DISCLOSURE content', () => {
 	it('names the gates still enforced', () => {
 		expect(TURBO_BYPASS_DISCLOSURE).toContain('Stage A');
 		expect(TURBO_BYPASS_DISCLOSURE).toContain(
-			'Stage B (reviewer + test_engineer) wherever its tier requires it',
+			'Stage B (reviewer + test_engineer), exactly as without Turbo',
 		);
 		expect(TURBO_BYPASS_DISCLOSURE).not.toMatch(/Bypassed:[^.]*Stage B/);
 		expect(TURBO_BYPASS_DISCLOSURE).toContain('Gate 5b');

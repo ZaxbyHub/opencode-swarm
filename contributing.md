@@ -347,7 +347,8 @@ Every `bun test` process loads `tests/preload/prod-store-tripwire.ts`, which sna
 - a new, removed or changed top-level entry (including creating `.swarm/`) fails the run;
 - a change inside an existing `.swarm/` only prints a `CHECKOUT DRIFT` warning, because some suites still write there (tracked in #3153);
 - `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` sets both checks to one mode, e.g. `enforce` to make `.swarm/` writes fail locally while fixing them;
-- a part that cannot be checked (an unreadable root, a `.swarm/` with more than 20,000 entries) is reported as a warning.
+- a part that cannot be checked (an unreadable root or `.swarm/` directory, a `.swarm/` with more than 20,000 entries) is reported as a warning;
+- writes inside an existing top-level directory such as `src/` or `tests/` are not detected: only top-level names, top-level files and `.swarm/` are compared.
 
 The helper is `tests/helpers/checkout-drift.ts`; its wiring is pinned by `tests/helpers/checkout-drift-wiring.test.ts`.
 

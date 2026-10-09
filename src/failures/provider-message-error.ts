@@ -11,7 +11,10 @@
  * dispatcher, the mutation generator and the Lean integration) read
  * `info.error` through it and turn it into an error on their existing error
  * path. Not every `session.prompt` consumer does yet: the Lean lane runner
- * (`src/turbo/lean/runner.ts`) still checks only `promptResult.data`.
+ * (`src/turbo/lean/runner.ts`, #3162) still checks only `promptResult.data`,
+ * the PR wake-prompt senders (`pr-workflow-response-gate.ts`,
+ * `pr-event-delivery.ts`) do not read the reply, and `dispatch-lanes.ts`
+ * reads `info.error` with its own lane-error mapping.
  */
 import { classifyProviderFailure } from './invocation-failure';
 

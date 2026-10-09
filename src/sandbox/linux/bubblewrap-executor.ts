@@ -203,6 +203,7 @@ function probeBwrap(): boolean {
 	try {
 		const binary = _internals.resolveBwrapBinary();
 		const result = spawnSync(binary, ['--version'], {
+			cwd: tmpdir(),
 			windowsHide: true,
 			encoding: 'utf-8',
 			timeout: 5000,

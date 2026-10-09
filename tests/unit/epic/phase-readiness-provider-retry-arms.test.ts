@@ -177,7 +177,13 @@ describe('epic phase review bash retry: each refusal arm alone', () => {
 			message: 'upstream exploded',
 			category: 'provider.unknown',
 		});
-		expect(calls[1]?.tools).toBeUndefined();
+		// Exactly one dispatch: no bash retry, and a failed reviewer ends the review.
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.agentName).toBe('reviewer');
 		expect(calls.every((c) => c.tools === undefined)).toBe(true);
+		expect(storedReviewer()).toMatchObject({
+			dispatch: 'failed',
+			tool_profile: 'read-only',
+		});
 	});
 });

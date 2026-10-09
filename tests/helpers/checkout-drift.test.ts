@@ -173,4 +173,20 @@ describe('checkout drift: modes and reporting', () => {
 			resolveDriftRoot({ SWARM_TEST_CHECKOUT_DRIFT_ROOT: root }, '/repo'),
 		).toBe(root);
 	});
+
+	test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+		'an unreadable .swarm/ directory is reported as unchecked',
+		() => {
+			const locked = path.join(root, '.swarm', 'locked');
+			fs.mkdirSync(locked, { recursive: true });
+			fs.chmodSync(locked, 0o000);
+			try {
+				const unchecked = snapshotCheckout(root).unchecked;
+				expect(unchecked).toHaveLength(1);
+				expect(unchecked[0]).toContain('.swarm/locked could not be read');
+			} finally {
+				fs.chmodSync(locked, 0o755);
+			}
+		},
+	);
 });

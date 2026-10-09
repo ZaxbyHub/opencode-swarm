@@ -39,6 +39,11 @@ const repoRoot = resolveDriftRoot(
 	process.env,
 	path.resolve(import.meta.dir, '..', '..'),
 );
+if (process.env.SWARM_TEST_CHECKOUT_DRIFT_ROOT?.trim()) {
+	console.warn(
+		`CHECKOUT DRIFT: SWARM_TEST_CHECKOUT_DRIFT_ROOT is set; guarding ${repoRoot} instead of the repository.`,
+	);
+}
 const checkoutBaseline = snapshotCheckout(repoRoot);
 
 afterEach(async () => {

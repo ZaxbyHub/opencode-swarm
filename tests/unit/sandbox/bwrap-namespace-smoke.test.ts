@@ -97,7 +97,7 @@ describe.skipIf(process.platform === 'win32')(
 			// A NUL byte makes spawnSync throw synchronously (the catch arm).
 			const invalid = bwrapInternals.probeBwrapNamespace('bwrap\0');
 			expect(invalid.ok).toBe(false);
-			if (!invalid.ok) expect(invalid.reason.length).toBeGreaterThan(0);
+			if (!invalid.ok) expect(invalid.reason).toMatch(/null bytes/i);
 		});
 
 		test('executor: a smoke run that hangs times out as unavailable', () => {
