@@ -183,6 +183,25 @@ describe('host-contract check: npm tag is validated before URL interpolation', (
 		).toBe('1.2.3-beta.1');
 	});
 
+	test('runCheck names an unsafe tag on stderr, and stays quiet when nothing resolved', async () => {
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (line: unknown) => {
+			errors.push(String(line));
+		};
+		try {
+			_internals.fetchHostSource = async () => null;
+			await runCheck({ tag: '../../x' });
+			expect(errors.join('\n')).toContain('refusing unsafe tag');
+			errors.length = 0;
+			_internals.resolveLatestTag = async () => '';
+			await runCheck({});
+			expect(errors).toEqual([]);
+		} finally {
+			console.error = original;
+		}
+	});
+
 	test('runCheck never builds a source URL from an unsafe resolved or explicit tag', async () => {
 		const fetched: string[] = [];
 		_internals.fetchHostSource = async (tag: string) => {

@@ -54,7 +54,7 @@ export const HOMEDIR_WRITE_PATTERN = new RegExp(
 );
 /** `<name> = (os.)homedir()` — captures the variable holding the real home. */
 export const HOMEDIR_ASSIGN_PATTERN =
-	/\b([A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:\w+\.)?homedir\(\)/;
+	/(?<![\w$])([A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:\w+\.)?homedir\(\)/;
 
 function isCommentLine(content: string): boolean {
 	const trimmed = content.trim();
