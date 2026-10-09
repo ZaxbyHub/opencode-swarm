@@ -457,11 +457,12 @@ describe('Architect prompt — Work Complete Council workflow block', () => {
 			// The slash-commands section must enumerate which gates ARE bypassed
 			// and which are still enforced (FR-002 turbo disclosure, issue #1690);
 			// do not regress this to an opaque "Turbo Mode enabled". Turbo does not
-			// bypass Stage B: update_task_status enforces it for every task.
+			// bypass Stage B: update_task_status applies the same Stage B rule
+			// whether or not Turbo is active.
 			it('documents the Turbo bypass scope in the slash-commands section', () => {
 				expect(prompt).toMatch(/Bypassed:\s*phase_complete Gates 1-5/i);
 				expect(prompt).toMatch(
-					/Still enforced:[^]*Stage B \(reviewer \+ test_engineer\) for every task/i,
+					/Still enforced:[^]*Stage B \(reviewer \+ test_engineer\), exactly as without Turbo/i,
 				);
 			});
 		});
