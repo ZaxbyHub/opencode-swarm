@@ -68,6 +68,25 @@ describe('host-contract check: npm latest-tag resolution', () => {
 		expect(await resolveNpmLatestTag(throwing)).toBe('');
 	});
 
+	test('an empty `latest` and an unreadable body each log their own reason', async () => {
+		const empty = await resolveWithReasons(fakeFetch('{"latest":""}'));
+		expect(empty.tag).toBe('');
+		expect(empty.reasons).toHaveLength(1);
+		expect(empty.reasons[0]).toContain('no string `latest`');
+		const erroring = (async () =>
+			new Response(
+				new ReadableStream<Uint8Array>({
+					pull() {
+						throw new Error('socket reset');
+					},
+				}),
+			)) as unknown as typeof fetch;
+		const unreadable = await resolveWithReasons(erroring);
+		expect(unreadable.tag).toBe('');
+		expect(unreadable.reasons).toHaveLength(1);
+		expect(unreadable.reasons[0]).toContain('response unreadable');
+	});
+
 	test('each failure class logs a distinct one-line stderr reason and still returns an empty tag', async () => {
 		const huge = `{"latest":"1.0.0","pad":"${'x'.repeat(70 * 1024)}"}`;
 		const throwing = (async () => {
