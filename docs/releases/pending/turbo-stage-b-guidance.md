@@ -14,9 +14,9 @@ still exercise them.
 
 An architect that followed the old guidance completed tasks without Stage B
 and was refused. The guidance now matches the runtime:
-- Turbo and Lean bypass neither Stage A nor Stage B: each applies exactly
-  where it would without them (tasks in a QA-exempt phase and tasks that
-  changed no files skip Stage B either way);
+- Turbo and Lean bypass neither Stage A nor Stage B: `update_task_status`
+  applies the same rules with or without them, so a task needs each gate
+  exactly when it would without Turbo;
 - Turbo skips phase_complete Gates 1–5;
 - Turbo lets a non-Tier-3 task be re-dispatched to the coder before Stage A;
 - Lean's phase reviewer and critic are an extra gate, not a replacement for

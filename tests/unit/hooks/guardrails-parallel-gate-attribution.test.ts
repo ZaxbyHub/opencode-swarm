@@ -256,12 +256,33 @@ describe('an unreadable plan credits no task', () => {
 				['src/slugify.ts'],
 			);
 			expect(result.kind).toBe('unattributable');
-			if (result.kind === 'unattributable')
+			if (result.kind === 'unattributable') {
+				expect(result.message).toContain(
+					'2 tasks are awaiting Stage A (2.1, 2.4)',
+				);
 				expect(result.message).toContain(
 					'plan.json is missing or could not be read',
 				);
+			}
 		});
 	}
+
+	test('one awaiting task that is not current: named once, nothing credited', async () => {
+		fs.rmSync(path.join(directory, '.swarm', 'plan.json'));
+		inFlight('2.1');
+		const session = swarmState.agentSessions.get('architect');
+		if (session) session.currentTaskId = '2.4';
+		const result = await resolveParallelGateTaskAttribution(
+			directory,
+			'architect',
+			['src/slugify.ts'],
+		);
+		expect(result.kind).toBe('unattributable');
+		if (result.kind === 'unattributable') {
+			expect(result.message).toContain('task 2.1 is awaiting Stage A, but');
+			expect(result.message).not.toContain('(2.1)');
+		}
+	});
 });
 
 describe('Epic attribution takes precedence over parallel attribution', () => {

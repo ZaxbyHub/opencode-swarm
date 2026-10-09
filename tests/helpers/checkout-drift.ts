@@ -86,6 +86,10 @@ function walkSwarm(
 		try {
 			names = readdirSync(path.join(swarmDir, rel));
 		} catch (error) {
+			// Removed or replaced since its lstat (a live session in the
+			// checkout): the diff already reports that path, nothing unchecked.
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === 'ENOENT' || code === 'ENOTDIR') continue;
 			unchecked.push(
 				`.swarm/${rel} could not be read (${error instanceof Error ? error.message : String(error)})`,
 			);
