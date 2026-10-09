@@ -63,6 +63,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
+import { readBounded, readBoundedResult } from './lib/read-bounded';
+
+// Re-exported for existing importers (tests); the implementation is shared with
+// scripts/drift-check.ts.
+export { readBounded };
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HOST_REPO = 'ZaxbyHub/opencode-swarm'; // routing target (this repo)
@@ -123,38 +128,58 @@ type GhResult = { ok: boolean; stdout: string; error?: string };
 const MAX_SOURCE_BYTES = 10_000_000;
 
 /**
- * Read a fetch Response with a hard byte cap: AbortController bounds TIME,
- * not memory, so a hostile or runaway upstream must not be buffered whole.
- * Returns null when the body is missing, over the cap (Content-Length or
- * actual read), or the read throws.
+ * A tag is interpolated into a raw.githubusercontent.com URL path, so it must be
+ * a single conservative path segment: alphanumeric start, then letters, digits
+ * and `. + _ -`. Rejects `..`, `/`, `\`, `?`, `#`, whitespace and empty input.
  */
-export async function readBounded(res: Response, capBytes: number): Promise<string | null> {
-	try {
-		const declared = Number(res.headers.get('content-length') ?? '0');
-		if (Number.isFinite(declared) && declared > capBytes) return null;
-		const buf = await res.arrayBuffer();
-		if (buf.byteLength > capBytes) return null;
-		return new TextDecoder().decode(buf);
-	} catch {
-		return null;
-	}
+const SAFE_TAG = /^[0-9A-Za-z][0-9A-Za-z.+_-]*$/;
+export function isSafeNpmTag(tag: unknown): tag is string {
+	return typeof tag === 'string' && tag.length <= 128 && SAFE_TAG.test(tag) && !tag.includes('..');
 }
 
-/** Resolve npm `latest` for @opencode-ai/plugin; '' on any failure. */
+/**
+ * Resolve npm `latest` for @opencode-ai/plugin; '' on any failure. The exit
+ * contract is unchanged (an empty tag becomes `result=SOURCE_NOT_FOUND`); a
+ * one-line reason goes to stderr so a failed run is diagnosable.
+ */
 export async function resolveNpmLatestTag(
 	fetchImpl: typeof fetch = fetch,
+	warn: (line: string) => void = (line) => console.error(line),
 ): Promise<string> {
+	const fail = (reason: string): string => {
+		warn(`host-contract: npm latest-tag unresolved: ${reason}`);
+		return '';
+	};
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 	try {
 		const res = await fetchImpl(NPM_DIST_TAGS_URL, { signal: controller.signal });
-		if (!res.ok) return '';
-		const body = await readBounded(res, NPM_DIST_TAGS_MAX_BYTES);
-		if (body === null) return '';
-		const tags = JSON.parse(body) as { latest?: unknown };
-		return typeof tags.latest === 'string' ? tags.latest : '';
-	} catch {
-		return '';
+		if (!res.ok) return fail(`HTTP ${res.status}`);
+		const body = await readBoundedResult(res, NPM_DIST_TAGS_MAX_BYTES);
+		if (!body.ok) {
+			return fail(
+				body.reason === 'oversize'
+					? `response over ${NPM_DIST_TAGS_MAX_BYTES} bytes`
+					: 'response unreadable',
+			);
+		}
+		let tags: { latest?: unknown };
+		try {
+			tags = JSON.parse(body.text) as { latest?: unknown };
+		} catch {
+			return fail('response is not valid JSON');
+		}
+		if (typeof tags?.latest !== 'string' || tags.latest === '') {
+			return fail('no string `latest` dist-tag');
+		}
+		if (!isSafeNpmTag(tags.latest)) return fail('`latest` is not a safe version tag');
+		return tags.latest;
+	} catch (error) {
+		return fail(
+			controller.signal.aborted
+				? `timed out after ${FETCH_TIMEOUT_MS}ms`
+				: `request failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	} finally {
 		clearTimeout(timer);
 	}
@@ -495,7 +520,8 @@ export async function runCheck(options: CheckOptions): Promise<CheckOutcome> {
 		}
 	} else {
 		tag = options.tag && options.tag.trim() !== '' ? options.tag.trim() : await _internals.resolveLatestTag();
-		if (!tag) {
+		if (!isSafeNpmTag(tag)) {
+			if (tag) console.error('host-contract: refusing unsafe tag for source URL');
 			lines.push('host-contract: could not resolve npm-latest tag for @opencode-ai/plugin');
 			lines.push('result=SOURCE_NOT_FOUND');
 			return { exitCode: 1, lines, tag: null, sourcePath: null, structuralDigest: null, routed };

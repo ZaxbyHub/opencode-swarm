@@ -108,4 +108,25 @@ describe('lane child session resume guard', () => {
 		resetStandardWorktreeIsolationState();
 		expect(laneChildSessionAgents.size).toBe(0);
 	});
+
+	test('re-recording an existing id refreshes its recency (FIFO, not insertion-only)', () => {
+		resetStandardWorktreeIsolationState();
+		recordLaneChildSession('ses_0', 'coder');
+		for (let i = 1; i < 511; i++) recordLaneChildSession(`ses_${i}`, 'coder');
+		expect(laneChildSessionAgents.size).toBe(511);
+		// ses_0 is the oldest; re-recording makes ses_1 the oldest instead.
+		recordLaneChildSession('ses_0', 'coder');
+		recordLaneChildSession('ses_511', 'coder');
+		recordLaneChildSession('ses_512', 'coder');
+		expect(laneChildSessionAgents.size).toBe(512);
+		expect(laneChildSessionAgents.has('ses_0')).toBe(true);
+		expect(laneChildSessionAgents.has('ses_1')).toBe(false);
+		expect(laneChildSessionAgents.has('ses_2')).toBe(true);
+		expect(() =>
+			assertTaskIdNotForeignLaneSession({
+				subagent_type: 'test_engineer',
+				task_id: 'ses_0',
+			}),
+		).toThrow('TASK_SESSION_RESUME_MISMATCH');
+	});
 });

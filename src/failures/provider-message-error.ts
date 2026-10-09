@@ -8,13 +8,15 @@
  * apparently successful — response, and its retry / model-fallback path
  * never runs. The consumers that import this module (full-auto oversight and
  * intercept, the curator / skill-improver LLM factories, the ephemeral agent
- * dispatcher, the mutation generator and the Lean integration) read
- * `info.error` through it and turn it into an error on their existing error
- * path. Not every `session.prompt` consumer does yet: the Lean lane runner
- * (`src/turbo/lean/runner.ts`, #3162) still checks only `promptResult.data`,
- * the PR wake-prompt senders (`pr-workflow-response-gate.ts`,
- * `pr-event-delivery.ts`) do not read the reply, and `dispatch-lanes.ts`
- * reads `info.error` with its own lane-error mapping.
+ * dispatcher, the mutation generator, the Lean integration and the Lean lane
+ * runner) read `info.error` through it and turn it into an error on their
+ * existing error path. Not every `session.prompt` consumer does: the PR
+ * wake-prompt senders (`pr-workflow-response-gate.ts`, `pr-event-delivery.ts`)
+ * do not read the reply, and `dispatch-lanes.ts` reads `info.error` with its
+ * own lane-error mapping.
+ *
+ * `MessageOutputLengthError` is not a refusal: the output was truncated but
+ * the message carries usable text, so it reads as no error.
  */
 import { classifyProviderFailure } from './invocation-failure';
 
@@ -38,6 +40,7 @@ export function readProviderMessageError(
 	const error = (info as { error?: unknown }).error;
 	if (!error || typeof error !== 'object') return null;
 	const { name, data } = error as { name?: unknown; data?: unknown };
+	if (name === 'MessageOutputLengthError') return null;
 	const details = (data && typeof data === 'object' ? data : {}) as {
 		message?: unknown;
 		statusCode?: unknown;

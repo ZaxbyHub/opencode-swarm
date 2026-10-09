@@ -23,7 +23,18 @@ function getChildHome(): string {
 		const dir = canonicalMkdtemp('cli-home-');
 		childHome = dir;
 		process.on('exit', () => {
-			rmSync(dir, { recursive: true, force: true });
+			// Best effort: a cleanup failure (Windows EBUSY/EPERM) must never throw
+			// out of an exit handler and mask the test run's exit code.
+			try {
+				rmSync(dir, {
+					recursive: true,
+					force: true,
+					maxRetries: 5,
+					retryDelay: 100,
+				});
+			} catch {
+				/* leave the throwaway home for the OS temp reaper */
+			}
 		});
 	}
 	return childHome;

@@ -28,7 +28,13 @@ export function enterCwdSandbox(prefix: string): CwdSandbox {
 		cwd,
 		restore: () => {
 			process.chdir(originalCwd);
-			rmSync(root, { recursive: true, force: true });
+			// maxRetries/retryDelay ride out transient Windows EBUSY/EPERM handle locks.
+			rmSync(root, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 100,
+			});
 		},
 	};
 }

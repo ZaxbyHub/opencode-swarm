@@ -27,18 +27,36 @@ const SELF = path.relative(REPO_ROOT, import.meta.path);
 // machine-wide config; `--file`/`-f` aimed at the user's own config file
 // (`~/.gitconfig`, `$HOME/.gitconfig`, `os.homedir()`, `~/.config/git/config`)
 // is `--global` by another name.
-const SHELL_FORM = /\bgit\s+config\s+--(?:global|system)\b/g;
-const ARGV_FORM = /['"`]config['"`]\s*,\s*['"`]--(?:global|system)['"`]/g;
+// `git` plus any number of `-C <dir>` / `-c k=v` prefix options.
+const GIT = String.raw`\bgit(?:\s+-[cC]\s+(?:"[^"]*"|'[^']*'|\S+))*`;
+// Any option/operand tokens may sit between `config` and the scope flag
+// (`--add --global`, `-l --global`, `--replace-all --global`, `k v --global`);
+// the lazy same-line span stops at statement separators.
+const SHELL_FORM = new RegExp(
+	String.raw`${GIT}\s+config\b[^\n\r;|&]*?\s--(?:global|system)\b`,
+	'g',
+);
+// argv form: `'config'` then up to eight more quoted tokens, then the flag.
+const ARGV_FORM =
+	/['"`]config['"`]\s*,(?:\s*['"`][^'"`\n]*['"`]\s*,){0,8}\s*['"`]--(?:global|system)['"`]/g;
+// The scope flag held in a variable/property (`const scope = '--global'`).
+const FLAG_HELD_FORM = /[=:]\s*['"`]--(?:global|system)['"`]/g;
 const HOME_TARGET = String.raw`(?:~|\$\{?HOME\}?|\$\{?USERPROFILE\}?|homedir\(\))`;
 const SHELL_FILE_FORM = new RegExp(
-	String.raw`\bgit\s+config\s+(?:--file|-f)(?:\s+|=)['"]?${HOME_TARGET}`,
+	String.raw`${GIT}\s+config\s+(?:--file|-f)(?:\s+|=)['"]?${HOME_TARGET}`,
 	'g',
 );
 const ARGV_FILE_FORM = new RegExp(
 	String.raw`['"\`]config['"\`]\s*,\s*['"\`](?:--file|-f)['"\`]\s*,\s*[^,\]\n]*${HOME_TARGET}`,
 	'g',
 );
-const PATTERNS = [SHELL_FORM, ARGV_FORM, SHELL_FILE_FORM, ARGV_FILE_FORM];
+const PATTERNS = [
+	SHELL_FORM,
+	ARGV_FORM,
+	FLAG_HELD_FORM,
+	SHELL_FILE_FORM,
+	ARGV_FILE_FORM,
+];
 
 function* sourceFiles(dir: string): Generator<string> {
 	let entries: fs.Dirent[];
@@ -135,6 +153,48 @@ describe('no test writes the global git config', () => {
 				"run(['config', '--file', join(repo, '.git/config')])",
 			),
 		).toEqual([]);
+	});
+
+	test('the scan detects option tokens between config and the scope flag', () => {
+		for (const hit of [
+			"execSync('git config --add --global user.name x')",
+			"execSync('git config -l --global')",
+			"execSync('git config --replace-all --global user.name x')",
+			"execSync('git config user.name x --global')",
+			'execSync(`git -C ${repo} config --global user.name x`)',
+			'execSync(\'git -C "/some dir" config --system core.x y\')',
+			"execSync('git -c core.x=y config --global user.name x')",
+			"run(['config', '--add', '--global', 'user.name', 'x'])",
+			"run(['config', 'user.name', 'x', '--global'])",
+			"run(dir, [\n\t'config',\n\t'--replace-all',\n\t'--system',\n\t'k',\n])",
+		]) {
+			expect(findInSource('a.ts', hit)).toHaveLength(1);
+		}
+	});
+
+	test('the scan detects the scope flag held in a variable or property', () => {
+		for (const hit of [
+			"const scope = '--global';",
+			'let flag = "--system"',
+			"const opts = { scope: '--global' };",
+		]) {
+			expect(findInSource('a.ts', hit)).toHaveLength(1);
+		}
+	});
+
+	test('the scan ignores repo-local config, other tools, and statement boundaries', () => {
+		for (const ok of [
+			"execSync('git config --local user.name x')",
+			"execSync('git -C repo config user.name x')",
+			"run(['config', 'user.name', 'x'])",
+			"run(['config', '--local', 'user.name', 'x'])",
+			"execSync('npm install --global left-pad')",
+			"run(['install', '--global', 'pkg'])",
+			"execSync('git config user.name x'); run(['--global'])",
+			"execSync('git status'); execSync('npm ls --global')",
+		]) {
+			expect(findInSource('a.ts', ok)).toEqual([]);
+		}
 	});
 
 	test('no test file (tests/, test/, src/**/*.test.*) writes a global/system git config', () => {

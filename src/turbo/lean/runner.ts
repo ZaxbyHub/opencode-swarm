@@ -21,6 +21,10 @@ import { DEFAULT_LEAN_TURBO_CONFIG } from '../../config/constants';
 import type { Plan } from '../../config/plan-schema';
 import type { LeanTurboConfig } from '../../config/schema';
 import { stripKnownSwarmPrefix } from '../../config/schema';
+import {
+	formatProviderMessageError,
+	readProviderMessageError,
+} from '../../failures/provider-message-error';
 import { loadFullAutoRunState } from '../../full-auto/state';
 import { acquireLaneLocks, releaseLaneLocks } from '../../parallel/file-locks';
 import { recordLiveLaneOwner } from '../../parallel/lane-owners';
@@ -90,7 +94,11 @@ interface SessionClient {
 		};
 		signal?: AbortSignal;
 	}): Promise<{
-		data: { parts: Array<{ type: string; text?: string }> } | null;
+		data: {
+			/** Assistant message; carries a provider refusal as `info.error`. */
+			info?: unknown;
+			parts: Array<{ type: string; text?: string }>;
+		} | null;
 		error: unknown;
 	}>;
 	delete(options: { path: { id: string } }): Promise<void>;
@@ -921,7 +929,13 @@ export class LeanTurboRunner {
 				signal: abortController?.signal,
 			});
 
-			if (!promptResult.data) {
+			// `session.prompt` answers HTTP 200 even when the provider refused the
+			// request; the refusal is the assistant message's `info.error` and the
+			// message has no text. Without this read the lane would complete.
+			const providerError = promptResult.data
+				? readProviderMessageError(promptResult.data.info)
+				: null;
+			if (!promptResult.data || providerError) {
 				abortController?.abort();
 				void teardownEphemeralSession(session, sessionId);
 				// Issue #2002 (Lean Turbo half): `_publishLaneScope` may have already
@@ -939,7 +953,12 @@ export class LeanTurboRunner {
 				endAgentSession(sessionId, effectiveDirectory);
 				return {
 					ok: false,
-					error: `session.prompt failed: ${typeof promptResult.error === 'string' ? promptResult.error : JSON.stringify(promptResult.error)}`,
+					error: providerError
+						? formatProviderMessageError(
+								'session.prompt provider error',
+								providerError,
+							)
+						: `session.prompt failed: ${typeof promptResult.error === 'string' ? promptResult.error : JSON.stringify(promptResult.error)}`,
 				};
 			}
 
