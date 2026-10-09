@@ -22,6 +22,11 @@ import type {
 } from 'bash-parser';
 import parse from 'bash-parser';
 import { unsafePathTextReason } from '../scope/path-identity';
+import {
+	CMD_BUILTIN_PREFIX,
+	CMD_STRIP_PREFIX,
+	PS_STRIP_PREFIX,
+} from './shell-executor-context';
 
 /**
  * Validate command text without treating shell line separators as path data.
@@ -128,18 +133,60 @@ export function mergeWriteAnalyses(
 		: !additionalIsAuthoritative || !primary.parseError;
 	const authority = posixAuthoritative ? primary : additional;
 	const supplementary = posixAuthoritative ? additional : primary;
+	// #3145 PRR-003: when NO wrapper declares the executor, the two grammars
+	// can report the same construct (a redirect) with DIFFERENT resolved
+	// paths — `echo y > src/..\..\OUT2.md` reads in-scope under POSIX
+	// backslash-unescaping but out-of-scope under the Windows grammar the
+	// shell executor actually runs. Dropping by construct silently discarded
+	// the out-of-scope reading and admitted the escape, so the supplementary
+	// drop is per DEDUPE KEY: true duplicates collapse, path-disagreements
+	// keep BOTH readings and the scope check fails closed on whichever
+	// resolves outside. With a DECLARED wrapper the executor is known, so
+	// the authority reading alone governs shared constructs — the POSIX leg
+	// of an unwrapped cmd/powershell payload is an unescape artifact
+	// (`src\out.txt` reads as `srcout.txt`) that must not out-vote it (this
+	// is what keeps the frozen C4 in-scope case admitting).
+	// Quote-artifact refinement (#3145 CI round): one grammar's
+	// single-quote handling can emit the SAME target twice — the clean path
+	// plus a literal-quoted variant (`Get-Process>'a.md'` → `a.md` and
+	// `'a.md'`). A quoted variant that strips back to an authority path is
+	// an artifact of that grammar's quoting, not a genuine disagreement, so
+	// it collapses; genuinely different targets never match after stripping
+	// and both survive.
 	const authorityConstructs = new Set(
 		authority.writes.map((write) => `${write.category}|${write.operator}`),
 	);
+	const authorityKeys = new Set(
+		authority.writes.map((write) =>
+			buildDedupeKey(write.category, write.operator, write.path),
+		),
+	);
+	const stripQuotes = (p: string | null | undefined) =>
+		p === null || p === undefined
+			? p
+			: p.replace(/^['"]+/, '').replace(/['"]+$/, '');
+	const isQuoteArtifact = (write: WriteTarget): boolean => {
+		const stripped = stripQuotes(write.path);
+		if (stripped === write.path) return false;
+		return authority.writes.some(
+			(other) =>
+				other.category === write.category &&
+				other.operator === write.operator &&
+				stripQuotes(other.path) === stripped,
+		);
+	};
 	const seen = new Set<string>();
 	const writes: WriteTarget[] = [];
 	for (const write of [...authority.writes, ...supplementary.writes]) {
-		const construct = `${write.category}|${write.operator}`;
-		if (
-			supplementary.writes.includes(write) &&
-			authorityConstructs.has(construct)
-		) {
-			continue;
+		if (supplementary.writes.includes(write)) {
+			if (wrapperDeclared) {
+				const construct = `${write.category}|${write.operator}`;
+				if (authorityConstructs.has(construct)) continue;
+			} else {
+				const key = buildDedupeKey(write.category, write.operator, write.path);
+				if (authorityKeys.has(key)) continue;
+				if (isQuoteArtifact(write)) continue;
+			}
 		}
 		const key = buildDedupeKey(write.category, write.operator, write.path);
 		if (seen.has(key)) continue;
@@ -571,7 +618,12 @@ function extractScriptBlockBodies(command: string): string[] | null {
  */
 export function isPowerShellReadOnlyPipeline(command: string): boolean {
 	if (!command) return false;
-	if (/[>;&`]/.test(command) || /\$\(/.test(command)) return false;
+	// LF and CR are statement separators in PowerShell and POSIX shells alike
+	// (#3145 PRR-001): a second statement after a newline inside a brace
+	// pipeline stayed in the last segment, the brace broke the POSIX parse,
+	// and this predicate's suppression let the trailing write through. A
+	// read-only classification must be single-statement.
+	if (/[>;&`\r\n]/.test(command) || /\$\(/.test(command)) return false;
 
 	// Condition 2 — balanced quoting and braces.
 	let quote: '"' | "'" | null = null;
@@ -2581,6 +2633,12 @@ function detectPowerShellRedirects(command: string): WriteTarget[] {
 			inDoubleQuote = true;
 			continue;
 		}
+		// A caret-escaped `>` (`^>`) is a literal in cmd (caret escapes the
+		// next character) and not a valid redirection operator in PowerShell
+		// (`^>` is not in the operator grammar), so neither grammar writes a
+		// file there. This scanner runs on cmd-shaped fragments too (the
+		// #3099 dual-detector union), so it must honor the cmd escape.
+		if (character === '>' && command[index - 1] === '^') continue;
 		if (character !== '>') continue;
 
 		const operator = command[index + 1] === '>' ? '>>' : '>';
@@ -2681,10 +2739,13 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 	}
 
 	// Strip -Command wrapper to get inner PowerShell command
-	// Handle: powershell -Command "...", powershell -C "..."
+	// Handle: powershell -Command "...", powershell -C "...", and any
+	// preceding switches (`powershell -NoProfile -Command "…"` — PRR-009:
+	// the authority ladder declares Windows for the switch form, so the
+	// strip must unwrap it too or the payload is invisible).
 	let innerCommand = trimmed;
 	const cmdMatch = trimmed.match(
-		/^(?:powershell|pwsh)(?:\.exe)?\s+(?:-Command|-C)\s+(.*)$/i,
+		new RegExp(PS_STRIP_PREFIX.source + '(.*)$', 'i'),
 	);
 	if (cmdMatch) {
 		innerCommand = cmdMatch[1].trim();
@@ -3194,7 +3255,11 @@ function detectCmdWrites(command: string): WriteTarget[] {
 	// Strip cmd.exe wrapper to get inner command
 	// Handle: cmd /c "...", cmd /k "...", cmd /c "copy src dst", cmd.exe /c "..."
 	let innerCommand = trimmed;
-	const cmdWrapperMatch = trimmed.match(/^cmd(?:\.exe)?\s+\/[ck]\s+(.*)$/i);
+	// Switch-tolerant strip (#3145 PRR-002): `cmd /d /s /c "…"` must unwrap
+	// like bare `cmd /c "…"` or the copy/move matchers never see the verb.
+	const cmdWrapperMatch = trimmed.match(
+		new RegExp(CMD_STRIP_PREFIX.source + '(.*)$', 'i'),
+	);
 	if (cmdWrapperMatch) {
 		innerCommand = cmdWrapperMatch[1].trim();
 		// Strip outer quotes if present (handles cmd /c "copy file.txt dest.txt")
@@ -3221,7 +3286,7 @@ function detectCmdWrites(command: string): WriteTarget[] {
 	// Detect copy builtin: copy source dest (handles if exist pattern)
 	function detectCmdCopy(cmd: string): WriteTarget | null {
 		const commandMatch = cmd.match(
-			/^(?:(?:if\s+(?:not\s+)?exist\s+(?:"[^"]*"|\S+)\s+|cmd(?:\.exe)?\s+\/c\s+|(?:call|start)\s+))*copy(?=\s|$)/i,
+			new RegExp(`^${CMD_BUILTIN_PREFIX.source}copy(?=\\s|$)`, 'i'),
 		);
 		if (commandMatch) {
 			const start = (commandMatch.index ?? 0) + commandMatch[0].length;
@@ -3238,7 +3303,7 @@ function detectCmdWrites(command: string): WriteTarget[] {
 	// Detect move builtin: move source dest
 	function detectCmdMove(cmd: string): WriteTarget | null {
 		const commandMatch = cmd.match(
-			/^(?:(?:if\s+(?:not\s+)?exist\s+(?:"[^"]*"|\S+)\s+|cmd(?:\.exe)?\s+\/c\s+|(?:call|start)\s+))*move(?=\s|$)/i,
+			new RegExp(`^${CMD_BUILTIN_PREFIX.source}move(?=\\s|$)`, 'i'),
 		);
 		if (commandMatch) {
 			const start = (commandMatch.index ?? 0) + commandMatch[0].length;
@@ -3512,15 +3577,60 @@ export function detectWindowsWrites(
 					? psWrites
 					: psWrites.filter((w) => w.operator !== 'working-directory mutation');
 			allWrites.push(...psFiltered);
-			allWrites.push(...detectCmdWrites(subCmd));
+			const cmdWrites = detectCmdWrites(subCmd);
+			// Single quotes delimit strings in PowerShell but are literal
+			// characters in cmd, so the cmd redirect scanner phantoms a write
+			// for any PowerShell string literal containing `>`
+			// (`Write-Output 'a > b'` → `b'`). Under PowerShell authority the
+			// PowerShell scanner is the redirect authority (correct PS quoting,
+			// incl. `''` escapes and unclosed-literal fail-closed); keep the cmd
+			// side's file-op families — the reason the #3099 union exists — and
+			// drop only its redirect rows. Under cmd authority single quotes are
+			// genuinely literal, so nothing is filtered there.
+			const cmdFiltered =
+				shell === 'powershell'
+					? cmdWrites.filter((w) => w.category !== 'redirect')
+					: cmdWrites;
+			allWrites.push(...cmdFiltered);
 		}
 
-		// Deduplicate by (category, operator, path)
+		// Deduplicate by (category, operator, path), collapsing QUOTE
+		// VARIANTS (#3145 CI round): the cmd-redirect scanner's single-quote
+		// blind spot can emit the same target twice — `Get-Process>'a.md'`
+		// yields `a.md` (PowerShell detector) plus `'a.md'` (literal quotes,
+		// cmd scanner). A quoted variant that strips back to an
+		// already-seen clean path is an artifact of the other grammar's
+		// quoting, not a distinct target; genuinely different paths never
+		// match after stripping and both survive.
+		const stripQuotes = (p: string | null | undefined) =>
+			p === null || p === undefined
+				? p
+				: p.replace(/^['"]+/, '').replace(/['"]+$/, '');
 		const seen = new Set<string>();
+		const seenStripped: Array<{
+			category: string;
+			operator: string;
+			path: string | null;
+		}> = [];
 		const writes = allWrites.filter((wt) => {
 			const key = buildDedupeKey(wt.category, wt.operator, wt.path);
 			if (seen.has(key)) return false;
+			const stripped = stripQuotes(wt.path);
+			if (stripped !== wt.path) {
+				const artifact = seenStripped.some(
+					(other) =>
+						other.category === wt.category &&
+						other.operator === wt.operator &&
+						stripQuotes(other.path) === stripped,
+				);
+				if (artifact) return false;
+			}
 			seen.add(key);
+			seenStripped.push({
+				category: wt.category,
+				operator: wt.operator,
+				path: wt.path,
+			});
 			return true;
 		});
 

@@ -24,14 +24,23 @@ That produced two defects from one line of code:
 
 The fix **unions** the detectors rather than switching between them: the POSIX
 detector always runs, and the Windows detector runs additionally when the
-executor context declares Windows. Nothing can lose a detection it has today.
-When both grammars report the same construct, the reading of the grammar
-matching the DECLARED executor context wins — an explicit `cmd /c` or
-`powershell -Command` wrapper declares the executor outright; a
-PowerShell-shaped body cannot execute under POSIX at all; otherwise the tool's
-own executor decides (the `bash` tool runs a POSIX shell, so POSIX re-reads of
-`src\out.txt` as `srcout.txt` stay authoritative there, while `cmd /c` keeps
-its Windows reading). Lexical resemblance alone never discards a reading.
+executor context declares Windows. When both grammars report the same
+construct, the reading of the grammar matching the DECLARED executor context
+wins — an explicit `cmd /c` (with any cmd.exe switches) or `powershell
+-Command` wrapper declares the executor outright; otherwise a clean POSIX
+parse keeps the POSIX reading on both tools (the `bash` tool always runs a
+POSIX shell, and the `shell` tool keeps the POSIX reading of a cleanly parsed
+command too), while the other grammar still contributes every construct the
+winning reading does not report. When no wrapper declares the executor and
+the two grammars resolve the same construct to DIFFERENT paths, both readings
+are kept and the scope check fails closed on whichever resolves outside the
+declared scope. Lexical resemblance alone never discards a reading.
+
+These semantics were re-derived under an adversarial post-publication review
+(`#3145`): three bypass families the first cut left open — newline/CR
+statement separators after a read-only pipeline, cmd.exe switch forms before
+`/c`, and mixed-separator path traversal on the `shell` tool — are closed, and
+the closure is pinned by regression rows.
 
 ## Also fixed
 
@@ -47,10 +56,18 @@ its Windows reading). Lexical resemblance alone never discards a reading.
   now deny-by-default: a script-block body is admitted only when every token is
   positively a `$_`/`$this` property chain, a comparison operator, a literal or
   a comma — any unrecognized identifier, method call, type literal, assignment
-  or sub-expression fails the body and the command stays blocked. Write
-  mechanisms the detectors cannot see (`[System.IO.File]::WriteAllText`,
-  `mkdir`, `tar`, `chmod`, `$_.Delete()`…) therefore keep failing closed.
-  PowerShell names match case-insensitively.
+  or sub-expression fails the body and the command stays blocked, as does any
+  command containing a second statement after a newline or carriage return
+  (statement separators that a brace pipeline previously hid from the parse
+  backstop). Write mechanisms the detectors cannot see
+  (`[System.IO.File]::WriteAllText`, `mkdir`, `tar`, `chmod`, `$_.Delete()`…)
+  therefore keep failing closed. PowerShell names match case-insensitively.
+- **Switch-tolerant cmd.exe wrapper recognition.** `cmd /d /s /c copy a b`,
+  `cmd /q /c …`, `cmd /v:on /c …` declare the cmd executor and reach the
+  copy/move matchers exactly like bare `cmd /c copy a b`; the wrapper strips
+  (`dcUnwrapWrappers`, the cmd/PowerShell detectors, the destructive-command
+  walker) unwrap the switch forms too, and `powershell -NoProfile -Command
+  "…"` unwraps like bare `powershell -Command "…"`.
 - **Enumerated read-only tool methods.** The PR-review gate required a `method`
   argument to be literally `GET` or `HEAD`, so a tool that takes enumerated
   *operation* names — `get_check_runs`, `get_reviews`, `get_review_comments`,
@@ -69,8 +86,11 @@ its Windows reading). Lexical resemblance alone never discards a reading.
 ## Rider not implemented
 
 The issue's second rider (point the PR-review skill at the paged lane-output
-retrieval) does not reproduce: the skill already names `retrieve_lane_output`,
-the real inline preview cap is 20 000 characters rather than 2 000, and the
-skill sits at exactly its progressive-disclosure ratchet baseline, so the
-requested one-line addition would break that ratchet in order to restate an
-instruction the skill already carries. No change was made for it.
+retrieval) does not reproduce as a defect: the skill already names
+`retrieve_lane_output` where lanes are dispatched, and the real inline preview
+cap is 20 000 characters rather than 2 000, so the requested one-line addition
+would only restate an instruction the skill already carries. A skill-text edit
+would additionally require a swarm-contract digest re-stamp and mirror
+reconciliation, which does not belong in a guardrail PR; the pointer remains a
+one-line follow-up for the skill's own maintenance path. No change was made
+for it.

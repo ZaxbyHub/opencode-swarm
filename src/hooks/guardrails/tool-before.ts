@@ -59,6 +59,10 @@ import { isPathUnderSwarmWorktreeBase } from '../../worktree/core.js';
 import { detectLoop } from '../loop-detector';
 import { isTaskToolId, normalizeToolName } from '../normalize-tool-name';
 import {
+	CMD_WRAPPER_DECLARATION,
+	declaresWindowsWrapperLoose,
+} from '../shell-executor-context';
+import {
 	detectInteractiveSession,
 	detectPosixWrites,
 	detectWindowsWrites,
@@ -260,14 +264,12 @@ export function resolveWindowsWriteAuthority(
 	// whitespace boundary matched the PHRASE ' powershell -' inside arguments
 	// (`echo powershell -foo > src\out.txt` granted Windows authority to a
 	// plain echo), and a `;` boundary bled one segment's wrapper authority
-	// backward onto POSIX segments (review round 3, Critical).
-	const cmdWrapper = /(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(
-		command,
-	);
-	const psWrapper =
-		/(?:^|[;|&\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
-			command,
-		) || /(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(command);
+	// backward onto POSIX segments (review round 3, Critical). The regexes
+	// live in shell-executor-context.ts (single shared definition — four
+	// byte-identical copies drifted once already, #3145 rounds 5-7) and are
+	// switch-tolerant: `cmd /d /s /c …` declares cmd like bare `cmd /c`.
+	const cmdWrapper = CMD_WRAPPER_DECLARATION.test(command);
+	const psWrapper = declaresWindowsWrapperLoose(command);
 	// Step 3 is TOOL-AWARE: content detection inherits only to the `shell`
 	// tool (base behavior). The `bash` tool without a wrapper or a shaped
 	// body runs a POSIX shell — routing it to cmd detection on an `echo `
@@ -1128,26 +1130,22 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			shaped,
 		);
 
-		// Windows readings win shared constructs only when the executor
-		// context DECLARES Windows (explicit wrapper, or shaped body on the
-		// shell tool). On the BASH tool a shaped body only OPENS the Windows
-		// detector as a supplement: the real executor is a POSIX shell whose
-		// redirect semantics govern (bash writes srcOUT.txt for '> src\OUT.txt'
-		// — #3099 round-4 Critical 2), so POSIX stays authoritative while the
-		// Windows cmdlet writes POSIX never claims still land.
+		// Shared constructs resolve to the POSIX reading whenever the POSIX
+		// parse succeeded AND no explicit wrapper declared the executor. On
+		// the BASH tool that is unconditional for shaped bodies: the real
+		// executor is a POSIX shell whose redirect semantics govern (bash
+		// writes srcOUT.txt for '> src\OUT.txt' — #3099 round-4 Critical 2),
+		// so POSIX stays authoritative while the Windows cmdlet writes POSIX
+		// never claims still land. On the SHELL tool the same clean-POSIX-parse
+		// rule applies to grammar guesses (shaped/inherited).
 		// An explicit wrapper declares the executor outright: windows readings
 		// win shared constructs even when posix parses the (unwrapped) text
 		// cleanly — keeps the C4 frozen cmd /c in-scope case admitting.
 		// Grammar-guess authority (shaped/inherited) yields to a clean POSIX
 		// parse, because that is what a POSIX executor actually ran. The
-		// wrapper regexes mirror resolveWindowsWriteAuthority (local there, so
-		// recomputed here).
-		const wrapperDeclaredHere =
-			/(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(command) ||
-			/(?:^|[;|&\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
-				command,
-			) ||
-			/(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(command);
+		// declaration predicate is the shared one from
+		// shell-executor-context.ts (single definition; switch-tolerant).
+		const wrapperDeclaredHere = declaresWindowsWrapperLoose(command);
 		const windowsAuthoritative =
 			wrapperDeclaredHere || normalizedTool !== 'bash';
 		const detect = (c: string): WriteAnalysis => {

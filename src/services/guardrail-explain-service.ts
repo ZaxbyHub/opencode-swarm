@@ -18,6 +18,7 @@ import {
 	redactShellCommand,
 } from '../hooks/guardrails/helpers.js';
 import { resolveWindowsWriteAuthority } from '../hooks/guardrails/tool-before.js';
+import { declaresWindowsWrapperLoose } from '../hooks/shell-executor-context';
 import {
 	detectPosixWrites,
 	detectWindowsWrites,
@@ -687,16 +688,12 @@ export async function handleGuardrailExplain(
 		// which destroys literal newlines before the command string is joined,
 		// so the gate's newline command boundary cannot fire here — callers
 		// re-express multi-line commands with `;`/`&&`/`|` separators, which
-		// drive the same wrapper match and the same verdict. The regexes stay
-		// byte-identical to resolveWindowsWriteAuthority so any future
-		// raw-string caller gets gate parity for free; pinned by the wrapper
-		// parity rows in guardrail-explain-service-accuracy.test.ts.
-		const wrapperDeclaredHere =
-			/(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(shellCommand) ||
-			/(?:^|[;|&\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
-				shellCommand,
-			) ||
-			/(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(shellCommand);
+		// drive the same wrapper match and the same verdict. The declaration
+		// predicate is the shared one from shell-executor-context.ts — the
+		// same object the gate uses, so parity is structural rather than
+		// conventional; pinned by the wrapper parity rows in
+		// guardrail-explain-service-accuracy.test.ts.
+		const wrapperDeclaredHere = declaresWindowsWrapperLoose(shellCommand);
 		const posix = detectPosixWrites(detectionCommand);
 		const analysis =
 			authority === null
@@ -782,12 +779,7 @@ export async function handleGuardrailExplain(
 		);
 		// Same wrapper-priority flag as the allow branch; recomputed because
 		// the gate's detect() closure recomputes it on its blocked path too.
-		const wrapperDeclaredElse =
-			/(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+\/c(?:\s|$)/i.test(shellCommand) ||
-			/(?:^|[;|&\n])\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-command(?:\s|$)/i.test(
-				shellCommand,
-			) ||
-			/(?:^|\|)\s*(?:powershell|pwsh)(?:\.exe)?\s+-/i.test(shellCommand);
+		const wrapperDeclaredElse = declaresWindowsWrapperLoose(shellCommand);
 		const posix = detectPosixWrites(detectionCommand);
 		const analysis =
 			authority === null

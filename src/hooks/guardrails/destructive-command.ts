@@ -16,6 +16,7 @@
 
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
+import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 
 // ============================================================================
 // Destructive-command constants
@@ -153,15 +154,24 @@ export function dcNormalizeCommand(cmd: string): string {
 export function dcStripOneWrapper(cmd: string): string | null {
 	const t = cmd.trim();
 
-	// cmd.exe wrappers: cmd /c "inner" or cmd /k "inner" — case-insensitive (CMD, cmd, Cmd)
-	const cmdExeMatch = /^cmd(?:\.exe)?\s+\/[ckCK]\s+"?(.*?)"?\s*$/is.exec(t);
+	// cmd.exe wrappers: cmd /c "inner" or cmd /k "inner" — case-insensitive
+	// (CMD, cmd, Cmd). Switch-tolerant (#3145 PRR-002): `cmd /d /s /c "…"`
+	// must unwrap like bare `cmd /c "…"` or switch-form writes slip past
+	// every destructive matcher.
+	const cmdExeMatch = new RegExp(
+		CMD_STRIP_PREFIX.source + '"?(.*?)"?\\s*$',
+		'is',
+	).exec(t);
 	if (cmdExeMatch) return cmdExeMatch[1].trim();
 
-	// PowerShell -Command / -c variants — case-insensitive (POWERSHELL, powershell, pwsh, PWSH)
-	const psCommandMatch =
-		/^(?:powershell|pwsh)(?:\.exe)?\s+(?:-(?:Command|command|c)\s+)(.+)$/is.exec(
-			t,
-		);
+	// PowerShell -Command / -c variants — case-insensitive (POWERSHELL,
+	// powershell, pwsh, PWSH). Switch-tolerant (#3145): `powershell
+	// -NoProfile -Command "…"` must unwrap like the bare form or the
+	// destructive matchers never see the payload.
+	const psCommandMatch = new RegExp(
+		PS_STRIP_PREFIX.source + '(.+)$',
+		'is',
+	).exec(t);
 	if (psCommandMatch)
 		return psCommandMatch[1].replace(/^["']|["']$/g, '').trim();
 
