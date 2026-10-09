@@ -88,6 +88,7 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 		}
 		expect([...actual].sort()).toEqual(
 			[
+				'epic',
 				'dataset consent',
 				'dataset export',
 				'dataset withdraw',
