@@ -192,6 +192,9 @@ describe('no test writes the global git config', () => {
 			"run(['install', '--global', 'pkg'])",
 			"execSync('git config user.name x'); run(['--global'])",
 			"execSync('git status'); execSync('npm ls --global')",
+			"execSync('git config user.name x; npm i --global left-pad')",
+			"execSync('git config user.name x && npm i --global left-pad')",
+			"execSync('git config user.name x | npm i --global left-pad')",
 		]) {
 			expect(findInSource('a.ts', ok)).toEqual([]);
 		}

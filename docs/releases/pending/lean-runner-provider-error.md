@@ -12,12 +12,16 @@ treated such a lane as a successful coder answer and never tried the lane's
 model-fallback chain. It now reads `info.error` through the shared provider
 error reader and, on a provider error, takes its existing failure path: the
 lane's session is aborted and torn down and the lane reports a failure whose
-message names the provider error (for example `APIError (HTTP 403): …`), so the
-fallback chain sees it.
+message names the provider error (for example `APIError (HTTP 403): …`).
 
-The shared reader does not report `MessageOutputLengthError` as a
-refusal. That error means the output was truncated but the message still
-carries usable text, so it reads as no error and the caller keeps the text.
+What happens next depends on the error, through the lane's existing
+transient-vs-permanent classification: a rate limit (429), quota (402) or
+server error (5xx) is transient and fails over to the lane's next fallback
+model, while an authentication or configuration refusal (403,
+`ProviderAuthError`) is permanent and fails the lane without failing over.
+
+A truncated reply (`MessageOutputLengthError`) is not treated as a refusal by
+the runner; it keeps the behavior it had before.
 
 ## Why
 

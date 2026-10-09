@@ -105,7 +105,6 @@ describe('cleanup guard home floor: win32 case-insensitive comparison', () => {
 	}
 
 	const upper = (p: string) => p.toUpperCase();
-	const hostIsWindows = path.sep !== '/';
 
 	// Upper-casing the WHOLE path would also break the leaf/parent shape
 	// layers, so the floor's lowercasing would never be what refuses it. Build

@@ -239,6 +239,10 @@ describe('check-test-tmpdir — evasion forms and negative controls', () => {
 			`fs.cpSync(src, join(${HOME}, '.cfg'), { recursive: true });`,
 			`await fsp.copyFile(src, \`\${${HOME}}/.x\`);`,
 			`renameSync(a, join(${HOME}, 'b'));`,
+			`mkdtempSync(join(${HOME}, 'scratch-'));`,
+			`await fsp.mkdtemp(path.join(${HOME}, 'scratch-'));`,
+			`symlinkSync(src, join(${HOME}, '.link'));`,
+			`appendFileSync(join(${HOME}, '.log'), 'x');`,
 		]) {
 			expect(eval1(call)).toBe(1);
 		}

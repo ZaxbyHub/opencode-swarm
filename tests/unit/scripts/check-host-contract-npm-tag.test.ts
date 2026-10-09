@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import {
 	_internals,
 	isSafeNpmTag,
+	main,
 	NPM_DIST_TAGS_URL,
 	resolveNpmLatestTag,
 	runCheck,
@@ -131,7 +132,10 @@ describe('host-contract check: npm tag is validated before URL interpolation', (
 		for (const bad of [
 			'../../x',
 			'a/b',
-			'a\b',
+			'a\\b',
+			'1..2',
+			'a..b',
+			'a'.repeat(129),
 			'..',
 			'1.2.3?x=1',
 			'1.2.3#frag',
@@ -144,6 +148,26 @@ describe('host-contract check: npm tag is validated before URL interpolation', (
 			{},
 		])
 			expect(isSafeNpmTag(bad)).toBe(false);
+	});
+
+	test('--emit-expected refuses an unsafe --as-tag before writing anything', async () => {
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (line: unknown) => {
+			errors.push(String(line));
+		};
+		try {
+			const code = await main([
+				'--emit-expected',
+				'does-not-exist.ts',
+				'--as-tag',
+				'../../x',
+			]);
+			expect(code).toBe(2);
+			expect(errors.join('\n')).toContain('usage:');
+		} finally {
+			console.error = original;
+		}
 	});
 
 	test('resolveNpmLatestTag treats an unsafe `latest` as unresolved', async () => {
