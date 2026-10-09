@@ -209,6 +209,10 @@ async function onV2Prompt(
 		sessionID: event.sessionID,
 	};
 	const parts = [{ type: 'text', text }];
+	// Delta D8 (FB-014): the v2 prompt event carries no agent field, so the v1
+	// delegation tracker's per-prompt agent input cannot be forwarded from v2
+	// (tracker resets to architect per prompt; session identity still seeds via
+	// tool hooks). Registration of the agent surface is tracked in #3160.
 	const input = {
 		sessionID: event.sessionID,
 		message: { ...message },

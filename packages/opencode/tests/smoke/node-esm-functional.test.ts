@@ -104,6 +104,23 @@ const text = await m.bunFile(target).text();
 if (text !== 'compat-roundtrip') { console.log('COMPAT_FAIL readback ' + text); process.exit(1); }
 const { rmSync } = await import('node:fs');
 rmSync(target, { force: true });
+	if (typeof m.bunHash !== 'function') { console.log('HASH_FAIL missing'); process.exit(1); }
+	// Node branch value pin: djb2-derived 64-bit output for this exact input.
+	if (m.bunHash('compat-node-branch-pin').toString(36) !== '391d01itakiz') {
+		console.log('HASH_FAIL divergence ' + m.bunHash('compat-node-branch-pin').toString(36));
+		process.exit(1);
+	}
+	const timeoutProc = m.bunSpawnSync(['node', '-e', 'setTimeout(() => {}, 60000)'], {
+		timeout: 2000,
+		stdout: 'pipe',
+		stderr: 'pipe',
+	});
+	// A timed-out sync child must not read as success (BunCompatSyncResult:
+	// exitCode is the kill status, success false).
+	if (timeoutProc.success !== false || (timeoutProc.exitCode === 0)) {
+		console.log('TIMEOUT_FAIL success=' + timeoutProc.success + ' exit=' + timeoutProc.exitCode);
+		process.exit(1);
+	}
 console.log('COMPAT_OK');
 `);
 		expect(res.stderr).toBe('');
