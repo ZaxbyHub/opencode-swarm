@@ -17,15 +17,23 @@
  * real temp workspaces (system-enhancer-plan-cursor-config-2580 precedent).
  * No raw clock reads: the gate fixture carries fixed activation timestamps.
  */
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { clearPrWorkflowGateState } from '../../../src/hooks/pr-workflow-gate';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
 import { resetSwarmState } from '../../../src/state';
 import { writeRawPrWorkflowGateState } from '../../helpers/pr-workflow-lane-fixtures';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
+// Release the process-cached SQLite project-DB handles the gate fixtures open
+// (PRR-009): verdicts are unaffected, but leaking them for the shard lifetime
+// diverges from the sibling-suite convention (21 hooks suites close them).
+afterAll(() => {
+	closeAllProjectDbs();
+});
 
 const PLAN_MD = `# PC3093 Gate suppression regression fixture plan
 
@@ -49,6 +57,8 @@ const PLAN_MD = `# PC3093 Gate suppression regression fixture plan
 const CURSOR_OPEN = '[SWARM PLAN CURSOR]';
 const CURSOR_CLOSE = '[/SWARM PLAN CURSOR]';
 const PARALLEL_HINT_MARKER = '[SWARM HINT] Parallel pre-check enabled';
+const PARALLEL_HINT_DISABLED_MARKER =
+	'[SWARM HINT] Parallel pre-check disabled';
 
 function pathAConfig(): PluginConfig {
 	return {
@@ -210,5 +220,87 @@ describe('plan-cursor gate suppression (#3093) — mode discriminant and default
 				expect(hasParallelHint(system)).toBe(true);
 			},
 		);
+	});
+});
+
+describe('plan-cursor gate suppression (#3093) — disabled pre-check variant, Path B positive controls, session scoping', () => {
+	function pathAWithPrecheckDisabled(): PluginConfig {
+		return {
+			...pathAConfig(),
+			pipeline: { parallel_precheck: false },
+		} as PluginConfig;
+	}
+
+	function pathBWithPrecheckDisabled(): PluginConfig {
+		return {
+			...pathBConfig(),
+			pipeline: { parallel_precheck: false },
+		} as PluginConfig;
+	}
+
+	it('Path A + PR_REVIEW + parallel_precheck:false suppresses BOTH hint variants (PRR-006)', async () => {
+		await withGateScenario(
+			pathAWithPrecheckDisabled(),
+			's6-patha-disabled-precheck',
+			'pr_review',
+			async (system) => {
+				const joined = system.join('\n');
+				expect(cursorBlock(system)).toBeNull();
+				expect(joined.includes(PARALLEL_HINT_MARKER)).toBe(false);
+				expect(joined.includes(PARALLEL_HINT_DISABLED_MARKER)).toBe(false);
+				expect(joined).toContain('[SWARM CONTEXT] Phase:');
+			},
+		);
+	});
+
+	it('Path B + PR_REVIEW + parallel_precheck:false suppresses BOTH hint variants (PRR-006)', async () => {
+		await withGateScenario(
+			pathBWithPrecheckDisabled(),
+			's7-pathb-disabled-precheck',
+			'pr_review',
+			async (system) => {
+				const joined = system.join('\n');
+				expect(cursorBlock(system)).toBeNull();
+				expect(joined.includes(PARALLEL_HINT_MARKER)).toBe(false);
+				expect(joined.includes(PARALLEL_HINT_DISABLED_MARKER)).toBe(false);
+				expect(joined).toContain('[SWARM CONTEXT] Current phase:');
+			},
+		);
+	});
+
+	it('Path B positive control: no gate emits the cursor AND the enabled hint (PRR-006)', async () => {
+		await withGateScenario(
+			pathBConfig(),
+			's8-pathb-nogate-positive',
+			'none',
+			async (system) => {
+				expect(cursorBlock(system)).toContain(CURSOR_OPEN);
+				expect(hasParallelHint(system)).toBe(true);
+			},
+		);
+	});
+
+	it('Path B positive control: PR_FEEDBACK emits the cursor AND the enabled hint (PRR-006)', async () => {
+		await withGateScenario(
+			pathBConfig(),
+			's9-pathb-prfeedback-positive',
+			'pr_feedback',
+			async (system) => {
+				expect(cursorBlock(system)).toContain(CURSOR_OPEN);
+				expect(hasParallelHint(system)).toBe(true);
+			},
+		);
+	});
+
+	it('session scoping: a gate owned by a DIFFERENT session does not suppress (PRR-007)', async () => {
+		const dir = await makeWorkspace();
+		try {
+			await writeRawPrWorkflowGateState(dir, 's10-gate-owner', {});
+			const system = await runTransform(pathAConfig(), dir, 's10-composer');
+			expect(cursorBlock(system)).toContain(CURSOR_OPEN);
+			expect(hasParallelHint(system)).toBe(true);
+		} finally {
+			await rm(dir, { recursive: true, force: true }).catch(() => {});
+		}
 	});
 });

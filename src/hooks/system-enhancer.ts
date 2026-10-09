@@ -1425,17 +1425,23 @@ export function createSystemEnhancerHook(
 					// for the gate's session. The read is durable-authoritative
 					// every composed turn (no caching) so suppression is never
 					// sticky across a gate clear.
-					const prReviewGateActive = await readPrWorkflowGateState(
-						directory,
-						_input.sessionID ?? '',
-					)
-						.then((prWorkflowGate) => prWorkflowGate?.mode === 'PR_REVIEW')
-						.catch(() => {
-							// Fail-open: composition must never break on a
-							// gate-state read failure; the no-gate default is
-							// byte-identical emission.
-							return false;
-						});
+					const prReviewGateActive = _input.sessionID
+						? await readPrWorkflowGateState(directory, _input.sessionID)
+								.then((prWorkflowGate) => prWorkflowGate?.mode === 'PR_REVIEW')
+								.catch((error: unknown) => {
+									// Fail-open: composition must never break on a
+									// gate-state read failure; the no-gate default is
+									// byte-identical emission. Surfaced so a corrupt
+									// row is distinguishable from "no gate" instead
+									// of silently disabling suppression (PR feedback
+									// round, PRR-002).
+									warn(
+										'PR workflow gate state read failed; suppressing nothing this turn (#3093):',
+										error,
+									);
+									return false;
+								})
+						: false;
 
 					// Check if scoring is enabled
 					const scoringEnabled =

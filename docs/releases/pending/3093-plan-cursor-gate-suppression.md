@@ -2,7 +2,7 @@
 issue: 3093
 ---
 
-### Plan-cursor and parallel pre-check injection now suppressed during active PR_REVIEW gates
+# Plan-cursor and parallel pre-check injection now suppressed during active PR_REVIEW gates
 
 Sessions with an active `PR_REVIEW` workflow gate no longer receive `[SWARM PLAN CURSOR]`
 blocks or the adjacent `[SWARM HINT] Parallel pre-check …` guidance from unrelated plans.
