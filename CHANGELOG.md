@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.192.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.192.1...v7.192.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* address the adversarial re-review of the [#3146](https://github.com/ZaxbyHub/opencode-swarm/issues/3146) round-1 fixes ([94ff6a5](https://github.com/ZaxbyHub/opencode-swarm/commit/94ff6a543df4d6f989886d0234d646db5b192baf))
+* **epic:** retry the phase review with bash for a statusless ProviderAuthError ([c58afc1](https://github.com/ZaxbyHub/opencode-swarm/commit/c58afc17bce7321bcdbefe165c7bf1926036f9d1))
+* **failures:** never fall back to raw provider text in readProviderMessageError ([ed459e0](https://github.com/ZaxbyHub/opencode-swarm/commit/ed459e034a2d7b4dd2cd03d2cee45b4d582d42e9))
+* **guardrails:** credit no task when the plan cannot be read during parallel Stage A attribution ([a2378d8](https://github.com/ZaxbyHub/opencode-swarm/commit/a2378d86b2ecc0f4b8d44c7b1439f0166073224a))
+* **hooks:** suppress plan-cursor and parallel pre-check injection under active PR_REVIEW gates ([#3093](https://github.com/ZaxbyHub/opencode-swarm/issues/3093)) ([567e232](https://github.com/ZaxbyHub/opencode-swarm/commit/567e2325bb4a8e008454712e510bd7fa78403428))
+* **hooks:** suppress plan-cursor and parallel pre-check injection under active PR_REVIEW gates ([#3093](https://github.com/ZaxbyHub/opencode-swarm/issues/3093)) ([733836f](https://github.com/ZaxbyHub/opencode-swarm/commit/733836fecaeddc97f2f3e54cefbd4123527b757a))
+* **phase-complete:** report an unreadable participation store instead of skipping the receipt rebind ([e72950c](https://github.com/ZaxbyHub/opencode-swarm/commit/e72950ccaba9ca2d38f4da1b6e62c8142ae186ca))
+* **runtime:** close plugin bugs found in live runs and tests that damage the developer machine ([6750081](https://github.com/ZaxbyHub/opencode-swarm/commit/6750081d4110c6cfa32ed0917968d5be16e1bbba))
+* **sandbox:** run the bwrap namespace smoke probe in the temp directory ([264065b](https://github.com/ZaxbyHub/opencode-swarm/commit/264065b6f8fee95e1e728fa5024954e2c9c112b5))
+* stop enumerating Stage B exceptions in the Turbo guidance ([a9c571b](https://github.com/ZaxbyHub/opencode-swarm/commit/a9c571b3595597f3bc0f99eff74a5b85b5dc4067))
+
 ## [7.192.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.192.0...v7.192.1) (2026-10-08)
 
 
