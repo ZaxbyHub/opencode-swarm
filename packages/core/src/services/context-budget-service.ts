@@ -7,6 +7,7 @@
  */
 
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { bunWrite } from '../utils/bun-compat';
 
 /**
  * Validate directory parameter to prevent path traversal attacks
@@ -158,7 +159,7 @@ async function writeBudgetState(
 		'session/budget-state.json',
 	);
 	const content = JSON.stringify(state, null, 2);
-	await Bun.write(resolvedPath, content);
+	await bunWrite(resolvedPath, content);
 }
 
 /**

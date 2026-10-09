@@ -12,6 +12,7 @@ import type {
 	ToolAggregate,
 } from '../state';
 import { swarmState } from '../state';
+import { bunWrite } from '../utils/bun-compat';
 
 /**
  * Serialized form of AgentSessionState with Map/Set fields converted to plain arrays/objects
@@ -203,7 +204,7 @@ export async function writeSnapshot(
 
 		// Atomic write: write to temp file then rename
 		const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-		await Bun.write(tempPath, content);
+		await bunWrite(tempPath, content);
 		renameSync(tempPath, resolvedPath);
 	} catch {
 		// Silently swallow errors - non-fatal operation

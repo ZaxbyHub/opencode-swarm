@@ -47,6 +47,12 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Sync internal dependency pins (normalize workspace specs)
+        run: node scripts/normalize-workspace-deps.mjs
+
+      - name: Verify publishable manifests (fail closed on workspace specs or stale pins)
+        run: node scripts/check-publish-manifests.mjs
+
       - name: Build all packages
         run: bun run build
 

@@ -13,6 +13,7 @@
 
 import { mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import * as path from 'node:path';
+import { bunWrite } from './utils/bun-compat';
 
 export interface GateEvidence {
 	sessionId: string;
@@ -121,7 +122,7 @@ function readExisting(evidencePath: string): TaskEvidence | null {
 async function atomicWrite(targetPath: string, content: string): Promise<void> {
 	const tempPath = `${targetPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
 	try {
-		await Bun.write(tempPath, content);
+		await bunWrite(tempPath, content);
 		renameSync(tempPath, targetPath);
 	} finally {
 		try {

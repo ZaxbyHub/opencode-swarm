@@ -7,6 +7,7 @@
 import { type BuildCommand, discoverBuildCommands } from '../build/discovery';
 import type { BuildEvidence, EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
+import { bunSpawn } from '../utils/bun-compat';
 
 // ============ Constants ============
 
@@ -150,8 +151,7 @@ async function executeCommand(command: BuildCommand): Promise<BuildRun> {
 		args = ['-c', command.command];
 	}
 
-	const result = await Bun.spawn({
-		cmd: [...cmd, ...args],
+	const result = bunSpawn([...cmd, ...args], {
 		cwd: command.cwd,
 		stdout: 'pipe',
 		stderr: 'pipe',
@@ -161,8 +161,8 @@ async function executeCommand(command: BuildCommand): Promise<BuildRun> {
 	const duration_ms = Date.now() - startTime;
 
 	// Convert output to string
-	const stdout = await new Response(result.stdout).text();
-	const stderr = await new Response(result.stderr).text();
+	const stdout = await result.stdout.text();
+	const stderr = await result.stderr.text();
 
 	return {
 		kind,

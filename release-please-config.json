@@ -2,6 +2,7 @@
   "release-type": "node",
   "include-component-in-tag": false,
   "changelog-notes-type": "github",
+  "plugins": ["node-workspace"],
   "packages": {
     "packages/opencode": {
       "release-type": "node",

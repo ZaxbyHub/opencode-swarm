@@ -27,7 +27,7 @@
 		"test": "bun test"
 	},
 	"dependencies": {
-		"@opencode-swarm/core": "workspace:*"
+		"@opencode-swarm/core": "8.0.0-beta.0"
 	},
 	"devDependencies": {
 		"bun-types": "latest",

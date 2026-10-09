@@ -8,6 +8,7 @@ import path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import type { AgentSessionState, TaskWorkflowState } from '../state';
 import { advanceTaskState, getTaskState, swarmState } from '../state';
+import { bunFile } from '../utils/bun-compat';
 import type { SerializedAgentSession, SnapshotData } from './snapshot-writer';
 
 const VALID_TASK_WORKFLOW_STATES: TaskWorkflowState[] = [
@@ -125,7 +126,7 @@ export async function readSnapshot(
 ): Promise<SnapshotData | null> {
 	try {
 		const resolvedPath = validateSwarmPath(directory, 'session/state.json');
-		const file = Bun.file(resolvedPath);
+		const file = bunFile(resolvedPath);
 		const content = await file.text();
 
 		// Check if file is empty or just whitespace
@@ -208,7 +209,7 @@ export async function reconcileTaskStatesFromPlan(
 ): Promise<void> {
 	let raw: string;
 	try {
-		raw = await Bun.file(path.join(directory, '.swarm/plan.json')).text();
+		raw = await bunFile(path.join(directory, '.swarm/plan.json')).text();
 	} catch {
 		// plan.json doesn't exist or is unreadable — best-effort, return silently
 		return;

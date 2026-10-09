@@ -54,8 +54,11 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Rewrite workspace:* deps to real versions
-        run: node -e "const fs=require('fs');['packages/opencode','packages/core','packages/claude-code','packages/telemetry'].forEach(p=>{const f=p+'/package.json';const j=JSON.parse(fs.readFileSync(f));if(j.dependencies)Object.keys(j.dependencies).forEach(k=>{if(j.dependencies[k]==='workspace:*'){const dep=k.replace('@opencode-swarm/','');const dv=JSON.parse(fs.readFileSync('packages/'+dep+'/package.json')).version;j.dependencies[k]=dv;}});fs.writeFileSync(f,JSON.stringify(j,null,'\t')+'\n');})"
+      - name: Sync internal dependency pins (normalize workspace specs)
+        run: node scripts/normalize-workspace-deps.mjs
+
+      - name: Verify publishable manifests (fail closed on workspace specs or stale pins)
+        run: node scripts/check-publish-manifests.mjs
 
       - name: Build all packages
         run: bun run build

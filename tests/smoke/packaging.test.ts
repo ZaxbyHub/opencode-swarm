@@ -1,3 +1,4 @@
+// The dual-shape default export {id, server, setup} landed with the #3151 fix.
 import { describe, test, expect } from 'bun:test';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -18,15 +19,18 @@ describe('packaging smoke tests', () => {
         expect(existsSync(path.join(PKG, 'cli/index.js'))).toBe(true);
     });
 
-    test('dist/index.js is importable and exports a default function', async () => {
+    test('dist/index.js is importable and exports the dual-shape default object', async () => {
         const mod = await import(path.join(PKG, 'index.js'));
-        expect(typeof mod.default).toBe('function');
+        expect(typeof mod.default).toBe('object');
+        expect(mod.default.id).toBe('opencode-swarm');
+        expect(typeof mod.default.server).toBe('function');
+        expect(typeof mod.default.setup).toBe('function');
     });
 
     test('plugin factory returns object with name property', async () => {
         const mod = await import(path.join(PKG, 'index.js'));
         // Call the plugin factory with a minimal context
-        const plugin = await mod.default({ directory: ROOT });
+        const plugin = await mod.default.server({ directory: ROOT });
         expect(plugin).toBeDefined();
         expect(typeof plugin.name).toBe('string');
         expect(plugin.name).toBe('opencode-swarm');
@@ -34,7 +38,7 @@ describe('packaging smoke tests', () => {
 
     test('plugin factory returns object with hooks', async () => {
         const mod = await import(path.join(PKG, 'index.js'));
-        const plugin = await mod.default({ directory: ROOT });
+        const plugin = await mod.default.server({ directory: ROOT });
         // Plugin should have config and agent properties
         expect(plugin.config).toBeDefined();
         expect(typeof plugin.config).toBe('function');

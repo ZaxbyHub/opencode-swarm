@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { bunSpawn, bunSpawnSync } from '../utils/bun-compat';
 
 // Simple command availability check - no external dependencies
 const toolchainCache = new Map<string, boolean>();
@@ -18,11 +19,12 @@ function isCommandAvailable(command: string): boolean {
 	const cmd = isWindows ? `${command}.exe` : command;
 
 	try {
-		const result = Bun.spawnSync({
-			cmd: isWindows ? ['where', cmd] : ['which', cmd],
-			stdout: 'pipe',
-			stderr: 'pipe',
-		});
+		const result = bunSpawnSync(
+			{
+				cmd: isWindows ? ['where', cmd] : ['which', cmd],
+			},
+			{ stdout: 'pipe', stderr: 'pipe' },
+		);
 
 		const available = result.success;
 		toolchainCache.set(command, available);
@@ -39,6 +41,13 @@ export const MAX_COMMAND_LENGTH = 500;
 export const DEFAULT_TIMEOUT_MS = 60_000; // 60 seconds default
 export const MAX_TIMEOUT_MS = 300_000; // 5 minutes max
 export const MAX_SAFE_TEST_FILES = 50; // Maximum resolved test files allowed in interactive session
+/**
+ * M-9 (PR #3163 feedback): sentinel for the runner's own timeout race. Must
+ * NOT collide with a real child exit code — bun-compat's Node branch reports
+ * a signal-terminated child as -1 (`code ?? -1`), which previously made every
+ * signal kill read as "timed out".
+ */
+const TEST_RUN_TIMEOUT_SENTINEL = -99;
 
 // Supported test frameworks
 export const SUPPORTED_FRAMEWORKS = [
@@ -1096,10 +1105,22 @@ export async function runTests(
 	const startTime = Date.now();
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
+			// #2705 (7.x parity): a never-closed stdin pipe can block child
+			// exit under Bun on Windows.
+			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: cwd || process.cwd(),
+			// FB-007b: bound the compat layer's buffered capture to the same
+			// 512KB budget the truncation below enforces, so runaway test
+			// output surfaces as a catchable BunCompatOutputLimitError instead
+			// of an unbounded buffer.
+			maxBuffer: MAX_OUTPUT_BYTES,
+			// zaxbysauce #9: test frameworks fork worker processes; after the
+			// post-timeout kill, grandchildren holding the stdout/stderr pipe
+			// would keep the drain below alive. Kill the whole tree.
+			killProcessTree: true,
 		});
 
 		// Race with timeout
@@ -1107,7 +1128,11 @@ export async function runTests(
 		const timeoutPromise = new Promise<number>((resolve) =>
 			setTimeout(() => {
 				proc.kill();
-				resolve(-1); // Timeout indicator
+				// M-9: -99, NOT -1. bun-compat's Node branch resolves a
+				// signal-killed child as `code ?? -1`, so a real -1 exit (a
+				// child terminated by a signal under Node) must not be
+				// misreported as this runner's timeout sentinel.
+				resolve(TEST_RUN_TIMEOUT_SENTINEL); // Timeout indicator
 			}, timeout_ms),
 		);
 
@@ -1116,8 +1141,8 @@ export async function runTests(
 		const duration_ms = Date.now() - startTime;
 
 		const [stdout, stderr] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
+			proc.stdout.text(),
+			proc.stderr.text(),
 		]);
 
 		// Combine stdout and stderr
@@ -1145,7 +1170,9 @@ export async function runTests(
 		const { totals, coveragePercent } = parseTestOutput(framework, output);
 
 		// Determine success based on exit code and failures
-		const isTimeout = exitCode === -1;
+		// M-9: the timeout sentinel is -99 — a real -1 (signal kill under the
+		// Node compat branch) is a genuine failure exit, not a timeout.
+		const isTimeout = exitCode === TEST_RUN_TIMEOUT_SENTINEL;
 		const testPassed = exitCode === 0 && totals.failed === 0;
 
 		if (testPassed) {

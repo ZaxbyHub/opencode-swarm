@@ -15,6 +15,7 @@ import {
 } from '../config/evidence-schema';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
+import { bunWrite } from '../utils/bun-compat';
 
 /**
  * Discriminated union returned by loadEvidence.
@@ -248,7 +249,7 @@ export async function saveEvidence(
 		`evidence.json.tmp.${Date.now()}.${process.pid}`,
 	);
 	try {
-		await Bun.write(tempPath, bundleJson);
+		await bunWrite(tempPath, bundleJson);
 		renameSync(tempPath, evidencePath);
 	} catch (error) {
 		// Clean up temp file on failure
@@ -368,7 +369,7 @@ export async function loadEvidence(
 				`evidence.json.tmp.${Date.now()}.${process.pid}`,
 			);
 			try {
-				await Bun.write(tempPath, bundleJson);
+				await bunWrite(tempPath, bundleJson);
 				renameSync(tempPath, evidencePath);
 			} catch (writeError) {
 				// Clean up temp file on failure

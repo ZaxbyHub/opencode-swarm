@@ -3,6 +3,7 @@
  * Generates a handoff brief, writes to .swarm/handoff.md, triggers snapshot, and returns markdown.
  */
 import { renameSync } from 'node:fs';
+import { bunWrite } from '@opencode-swarm/core';
 import { validateSwarmPath } from '../hooks/utils';
 import {
 	formatHandoffMarkdown,
@@ -24,7 +25,7 @@ export async function handleHandoffCommand(
 	// Write to .swarm/handoff.md using atomic write (temp file + rename)
 	const resolvedPath = validateSwarmPath(directory, 'handoff.md');
 	const tempPath = `${resolvedPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-	await Bun.write(tempPath, markdown);
+	await bunWrite(tempPath, markdown);
 	renameSync(tempPath, resolvedPath);
 
 	// Trigger snapshot write

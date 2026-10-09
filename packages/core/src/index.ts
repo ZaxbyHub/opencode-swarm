@@ -267,4 +267,8 @@ export * from './types/delegation';
 export * from './types/events';
 // Re-export utils module
 export * from './utils';
+// Runtime-portability shim for Bun.* primitives (issue #3151) — every direct
+// Bun.write/file/spawn/spawnSync/hash call routes through this module so the
+// plugin functions under Node hosts.
+export * from './utils/bun-compat';
 export { truncateToolOutput } from './utils/tool-output';

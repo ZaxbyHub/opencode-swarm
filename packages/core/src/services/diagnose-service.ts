@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadPluginConfig } from '../config/loader';
 import type { Plan } from '../config/plan-schema';
 import { listEvidenceTaskIds } from '../evidence/manager';
@@ -468,12 +469,16 @@ async function checkGrammarWasmFiles(): Promise<HealthCheck> {
 
 	// Determine dev vs production path
 	// Check for src/services in the path (more specific than just 'src')
+	// Node-compatible module-dir derivation (issue #3151): import.meta.dir is a
+	// Bun-only extension — fileURLToPath(new URL('.', import.meta.url)) yields
+	// the same directory (with a trailing separator, immaterial to both the
+	// includes checks and path.join) under Node and Bun alike.
+	const moduleDir = fileURLToPath(new URL('.', import.meta.url));
 	const isDev =
-		import.meta.dir.includes('src/services') ||
-		import.meta.dir.includes('src\\services');
+		moduleDir.includes('src/services') || moduleDir.includes('src\\services');
 	const grammarDir = isDev
-		? path.join(import.meta.dir, '../../dist/lang/grammars/')
-		: path.join(import.meta.dir, '../lang/grammars/');
+		? path.join(moduleDir, '../../dist/lang/grammars/')
+		: path.join(moduleDir, '../lang/grammars/');
 
 	const missing: string[] = [];
 	for (const file of grammarFiles) {

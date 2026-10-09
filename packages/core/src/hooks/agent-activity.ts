@@ -9,6 +9,7 @@ import { renameSync, unlinkSync } from 'node:fs';
 import type { PluginConfig } from '../config/schema';
 import { swarmState } from '../state';
 import { warn } from '../utils';
+import { bunWrite } from '../utils/bun-compat';
 import { readSwarmFileAsync } from './utils';
 
 /**
@@ -154,7 +155,7 @@ async function doFlush(directory: string): Promise<void> {
 		const path = `${directory}/.swarm/context.md`;
 		const tempPath = `${path}.tmp`;
 		try {
-			await Bun.write(tempPath, updated);
+			await bunWrite(tempPath, updated);
 			renameSync(tempPath, path);
 		} catch (writeError) {
 			try {

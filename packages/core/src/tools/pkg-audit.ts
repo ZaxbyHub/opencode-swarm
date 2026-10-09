@@ -2,6 +2,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isCommandAvailable } from '../build/discovery';
 import { warn } from '../utils';
+import {
+	BunCompatOutputLimitError,
+	bunSpawn,
+	classifySpawnFailure,
+} from '../utils/bun-compat';
 
 // ============ Constants ============
 const MAX_OUTPUT_BYTES = 52_428_800; // 50MB max output
@@ -57,15 +62,6 @@ function isValidEcosystem(value: unknown): value is Ecosystem {
 			value,
 		)
 	);
-}
-
-function validateArgs(args: unknown): args is { ecosystem?: Ecosystem } {
-	if (typeof args !== 'object' || args === null) return true; // ecosystem is optional
-	const obj = args as Record<string, unknown>;
-	if (obj.ecosystem !== undefined && !isValidEcosystem(obj.ecosystem)) {
-		return false;
-	}
-	return true;
 }
 
 // ============ File Detection ============
@@ -140,24 +136,97 @@ interface NpmAuditResponse {
 	vulnerabilities?: Record<string, NpmVulnInfo>;
 }
 
+/**
+ * FB-007b (PR #3163 feedback): the one place that turns "this npm scan did
+ * not produce a result" into an `AuditResult`. Ports 7.x's single-classifier
+ * contract (both failure channels — `proc.spawnError` and a caught throw —
+ * route through here so the same real-world fault always reads the same),
+ * with the 8.x fail-closed rule: `clean: true` is reserved EXCLUSIVELY for
+ * genuinely-missing tooling; every other failure — including a
+ * `BunCompatOutputLimitError` overflow — reports `clean: false` so an
+ * unusable audit result can never read as "no vulnerabilities found".
+ */
+function auditFailure(
+	ecosystem: string,
+	toolLabel: string,
+	command: string[],
+	error: unknown,
+): AuditResult {
+	const base = {
+		ecosystem,
+		command,
+		findings: [] as VulnerabilityFinding[],
+		criticalCount: 0,
+		highCount: 0,
+		totalCount: 0,
+	};
+	// Output-budget overflow: the audit payload was never fully captured, so
+	// the result is unusable — never clean.
+	if (error instanceof BunCompatOutputLimitError) {
+		return {
+			...base,
+			clean: false,
+			note: `${toolLabel} output exceeded the ${error.limit}-byte capture budget; audit result unusable`,
+		};
+	}
+	const message = error instanceof Error ? error.message : 'Unknown error';
+	// Typed cwd failure is checked FIRST and deliberately never collapses into
+	// the tool-missing note (7.x #2236 contract): "the working directory is
+	// gone" must not be reported as "npm is missing".
+	if (classifySpawnFailure(error) === 'cwd-missing') {
+		return {
+			...base,
+			clean: false,
+			note: `Error running ${toolLabel}: ${message}`,
+		};
+	}
+	// The designed not-installed arm: the scanner's own error text says so,
+	// or the spawn-failure classifier positively identified the BINARY as
+	// missing (ENOENT with a usable cwd). This is the ONLY clean:true arm.
+	if (
+		message.includes(toolLabel) ||
+		message.includes('command not found') ||
+		message.includes('is not recognized') ||
+		classifySpawnFailure(error) === 'binary-missing'
+	) {
+		return {
+			...base,
+			clean: true,
+			note: `${toolLabel} not available - the tool may not be installed`,
+		};
+	}
+	return {
+		...base,
+		clean: false,
+		note: `Error running ${toolLabel}: ${message}`,
+	};
+}
+
 async function runNpmAudit(directory: string): Promise<AuditResult> {
 	const command = ['npm', 'audit', '--json'];
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
+			// #2705 (7.x parity): a never-closed stdin pipe can block child
+			// exit under Bun on Windows (v7.3.3 class).
+			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
+			// FB-007b: bound the compat layer's buffered capture to the same
+			// budget this scanner already truncates against, so an oversized
+			// audit payload surfaces as a catchable BunCompatOutputLimitError
+			// (→ clean:false) instead of an unbounded buffer.
+			maxBuffer: MAX_OUTPUT_BYTES,
 		});
 
 		const timeoutPromise = new Promise<'timeout'>((resolve) =>
 			setTimeout(() => resolve('timeout'), AUDIT_TIMEOUT_MS),
 		);
 		const result = await Promise.race([
-			Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]).then(([stdout, stderr]) => ({ stdout, stderr })),
+			Promise.all([proc.stdout.text(), proc.stderr.text()]).then(
+				([stdout, stderr]) => ({ stdout, stderr }),
+			),
 			timeoutPromise,
 		]);
 
@@ -170,7 +239,7 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 				criticalCount: 0,
 				highCount: 0,
 				totalCount: 0,
-				clean: true,
+				clean: false,
 				note: `npm audit timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -181,6 +250,16 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// FB-007b (7.x parity): a spawn failure (missing npm, or a cwd that no
+		// longer exists) resolves `exited` non-zero with empty output. Check the
+		// `spawnError` channel explicitly — through the SAME classifier the
+		// catch below uses — instead of relying on `JSON.parse('')` throwing
+		// incidentally, so a missing npm lands in the designed not-installed
+		// arm no matter which channel surfaced the fault.
+		if (proc.spawnError) {
+			return auditFailure('npm', 'npm audit', command, proc.spawnError);
+		}
 
 		// If exit code is 0, there are no vulnerabilities
 		if (exitCode === 0) {
@@ -245,35 +324,7 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 			clean: findings.length === 0,
 		};
 	} catch (error) {
-		const errorMessage =
-			error instanceof Error ? error.message : 'Unknown error';
-		// Check if npm audit is not installed
-		if (
-			errorMessage.includes('audit') ||
-			errorMessage.includes('command not found') ||
-			errorMessage.includes("'npm' is not recognized")
-		) {
-			return {
-				ecosystem: 'npm',
-				command,
-				findings: [],
-				criticalCount: 0,
-				highCount: 0,
-				totalCount: 0,
-				clean: true,
-				note: 'npm audit not available - npm may not be installed',
-			};
-		}
-		return {
-			ecosystem: 'npm',
-			command,
-			findings: [],
-			criticalCount: 0,
-			highCount: 0,
-			totalCount: 0,
-			clean: true,
-			note: `Error running npm audit: ${errorMessage}`,
-		};
+		return auditFailure('npm', 'npm audit', command, error);
 	}
 }
 
@@ -309,7 +360,7 @@ async function runPipAudit(directory: string): Promise<AuditResult> {
 	const command = ['pip-audit', '--format=json'];
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
@@ -319,10 +370,9 @@ async function runPipAudit(directory: string): Promise<AuditResult> {
 			setTimeout(() => resolve('timeout'), AUDIT_TIMEOUT_MS),
 		);
 		const result = await Promise.race([
-			Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]).then(([stdout, stderr]) => ({ stdout, stderr })),
+			Promise.all([proc.stdout.text(), proc.stderr.text()]).then(
+				([stdout, stderr]) => ({ stdout, stderr }),
+			),
 			timeoutPromise,
 		]);
 
@@ -335,7 +385,7 @@ async function runPipAudit(directory: string): Promise<AuditResult> {
 				criticalCount: 0,
 				highCount: 0,
 				totalCount: 0,
-				clean: true,
+				clean: false,
 				note: `pip-audit timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -346,6 +396,12 @@ async function runPipAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// Fail-closed parity with npm (FB-007b): a spawn failure (tool missing,
+		// EINVAL/ENOENT) must never flow into "empty findings = clean" below.
+		if (proc.spawnError !== null && proc.spawnError !== undefined) {
+			return auditFailure('pip', 'pip-audit', command, proc.spawnError);
+		}
 
 		// If exit code is 0 and no output, no vulnerabilities
 		if (exitCode === 0 && !stdout.trim()) {
@@ -469,7 +525,7 @@ async function runPipAudit(directory: string): Promise<AuditResult> {
 			criticalCount: 0,
 			highCount: 0,
 			totalCount: 0,
-			clean: true,
+			clean: false,
 			note: `Error running pip-audit: ${errorMessage}`,
 		};
 	}
@@ -511,20 +567,19 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 	const command = ['cargo', 'audit', '--json'];
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = _internals.spawnAuditProc(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
 		});
 
 		const timeoutPromise = new Promise<'timeout'>((resolve) =>
-			setTimeout(() => resolve('timeout'), AUDIT_TIMEOUT_MS),
+			setTimeout(() => resolve('timeout'), _internals.auditTimeoutMs),
 		);
 		const result = await Promise.race([
-			Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]).then(([stdout, stderr]) => ({ stdout, stderr })),
+			Promise.all([proc.stdout.text(), proc.stderr.text()]).then(
+				([stdout, stderr]) => ({ stdout, stderr }),
+			),
 			timeoutPromise,
 		]);
 
@@ -537,8 +592,8 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 				criticalCount: 0,
 				highCount: 0,
 				totalCount: 0,
-				clean: true,
-				note: `cargo audit timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
+				clean: false,
+				note: `cargo audit timed out after ${_internals.auditTimeoutMs / 1000}s`,
 			};
 		}
 
@@ -548,6 +603,12 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// Fail-closed parity with npm (FB-007b): a spawn failure (tool missing,
+		// EINVAL/ENOENT) must never flow into "empty findings = clean" below.
+		if (proc.spawnError !== null && proc.spawnError !== undefined) {
+			return auditFailure('cargo', 'cargo audit', command, proc.spawnError);
+		}
 
 		// If exit code is 0, no vulnerabilities
 		if (exitCode === 0) {
@@ -638,7 +699,7 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 			criticalCount: 0,
 			highCount: 0,
 			totalCount: 0,
-			clean: true,
+			clean: false,
 			note: `Error running cargo audit: ${errorMessage}`,
 		};
 	}
@@ -690,7 +751,7 @@ async function runGoAudit(directory: string): Promise<AuditResult> {
 	}
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
@@ -700,10 +761,9 @@ async function runGoAudit(directory: string): Promise<AuditResult> {
 			setTimeout(() => resolve('timeout'), AUDIT_TIMEOUT_MS),
 		);
 		const result = await Promise.race([
-			Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]).then(([stdout, stderr]) => ({ stdout, stderr })),
+			Promise.all([proc.stdout.text(), proc.stderr.text()]).then(
+				([stdout, stderr]) => ({ stdout, stderr }),
+			),
 			timeoutPromise,
 		]);
 
@@ -716,7 +776,7 @@ async function runGoAudit(directory: string): Promise<AuditResult> {
 				criticalCount: 0,
 				highCount: 0,
 				totalCount: 0,
-				clean: true,
+				clean: false,
 				note: `govulncheck timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -727,6 +787,12 @@ async function runGoAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// Fail-closed parity with npm (FB-007b): a spawn failure (tool missing,
+		// EINVAL/ENOENT) must never flow into "empty findings = clean" below.
+		if (proc.spawnError !== null && proc.spawnError !== undefined) {
+			return auditFailure('go', 'govulncheck', command, proc.spawnError);
+		}
 
 		// govulncheck exits 0 = clean, 3 = vulnerabilities found, other = error
 		if (exitCode !== 0 && exitCode !== 3) {
@@ -822,7 +888,7 @@ async function runGoAudit(directory: string): Promise<AuditResult> {
 			criticalCount: 0,
 			highCount: 0,
 			totalCount: 0,
-			clean: true,
+			clean: false,
 			note: `Error running govulncheck: ${errorMessage}`,
 		};
 	}
@@ -853,7 +919,7 @@ async function runDotnetAudit(directory: string): Promise<AuditResult> {
 	}
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
@@ -863,10 +929,9 @@ async function runDotnetAudit(directory: string): Promise<AuditResult> {
 			setTimeout(() => resolve('timeout'), AUDIT_TIMEOUT_MS),
 		);
 		const result = await Promise.race([
-			Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]).then(([stdout, stderr]) => ({ stdout, stderr })),
+			Promise.all([proc.stdout.text(), proc.stderr.text()]).then(
+				([stdout, stderr]) => ({ stdout, stderr }),
+			),
 			timeoutPromise,
 		]);
 
@@ -879,7 +944,7 @@ async function runDotnetAudit(directory: string): Promise<AuditResult> {
 				criticalCount: 0,
 				highCount: 0,
 				totalCount: 0,
-				clean: true,
+				clean: false,
 				note: `dotnet list package timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -890,6 +955,17 @@ async function runDotnetAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// Fail-closed parity with npm (FB-007b): a spawn failure (tool missing,
+		// EINVAL/ENOENT) must never flow into "empty findings = clean" below.
+		if (proc.spawnError !== null && proc.spawnError !== undefined) {
+			return auditFailure(
+				'dotnet',
+				'dotnet list package',
+				command,
+				proc.spawnError,
+			);
+		}
 
 		// Exit code 0 and no vulnerable packages header = clean
 		if (
@@ -956,7 +1032,7 @@ async function runDotnetAudit(directory: string): Promise<AuditResult> {
 			criticalCount: 0,
 			highCount: 0,
 			totalCount: 0,
-			clean: true,
+			clean: false,
 			note: `Error running dotnet list package: ${errorMessage}`,
 		};
 	}
@@ -1023,7 +1099,7 @@ async function runBundleAudit(directory: string): Promise<AuditResult> {
 		: ['bundle-audit', 'check', '--format', 'json'];
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
@@ -1033,10 +1109,9 @@ async function runBundleAudit(directory: string): Promise<AuditResult> {
 			setTimeout(() => resolve('timeout'), AUDIT_TIMEOUT_MS),
 		);
 		const result = await Promise.race([
-			Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]).then(([stdout, stderr]) => ({ stdout, stderr })),
+			Promise.all([proc.stdout.text(), proc.stderr.text()]).then(
+				([stdout, stderr]) => ({ stdout, stderr }),
+			),
 			timeoutPromise,
 		]);
 
@@ -1049,7 +1124,7 @@ async function runBundleAudit(directory: string): Promise<AuditResult> {
 				criticalCount: 0,
 				highCount: 0,
 				totalCount: 0,
-				clean: true,
+				clean: false,
 				note: `bundle-audit timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -1060,6 +1135,12 @@ async function runBundleAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// Fail-closed parity with npm (FB-007b): a spawn failure (tool missing,
+		// EINVAL/ENOENT) must never flow into "empty findings = clean" below.
+		if (proc.spawnError !== null && proc.spawnError !== undefined) {
+			return auditFailure('bundle', 'bundle audit', command, proc.spawnError);
+		}
 
 		// bundle-audit exits 0 = clean, 1 = vulnerabilities found, other = error
 		if (exitCode !== 0 && exitCode !== 1) {
@@ -1142,7 +1223,7 @@ async function runBundleAudit(directory: string): Promise<AuditResult> {
 			criticalCount: 0,
 			highCount: 0,
 			totalCount: 0,
-			clean: true,
+			clean: false,
 			note: `Error running bundle-audit: ${errorMessage}`,
 		};
 	}
@@ -1210,7 +1291,7 @@ async function runDartAudit(directory: string): Promise<AuditResult> {
 	const command = [dartBin, 'pub', 'outdated', '--json'];
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
@@ -1220,10 +1301,9 @@ async function runDartAudit(directory: string): Promise<AuditResult> {
 			setTimeout(() => resolve('timeout'), AUDIT_TIMEOUT_MS),
 		);
 		const result = await Promise.race([
-			Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]).then(([stdout, stderr]) => ({ stdout, stderr })),
+			Promise.all([proc.stdout.text(), proc.stderr.text()]).then(
+				([stdout, stderr]) => ({ stdout, stderr }),
+			),
 			timeoutPromise,
 		]);
 
@@ -1236,7 +1316,7 @@ async function runDartAudit(directory: string): Promise<AuditResult> {
 				criticalCount: 0,
 				highCount: 0,
 				totalCount: 0,
-				clean: true,
+				clean: false,
 				note: `dart pub outdated timed out after ${AUDIT_TIMEOUT_MS / 1000}s`,
 			};
 		}
@@ -1247,6 +1327,17 @@ async function runDartAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// Fail-closed parity with npm (FB-007b): a spawn failure (tool missing,
+		// EINVAL/ENOENT) must never flow into "empty findings = clean" below.
+		if (proc.spawnError !== null && proc.spawnError !== undefined) {
+			return auditFailure(
+				'dart',
+				'dart pub outdated',
+				command,
+				proc.spawnError,
+			);
+		}
 
 		if (exitCode !== 0) {
 			return {
@@ -1318,7 +1409,7 @@ async function runDartAudit(directory: string): Promise<AuditResult> {
 			criticalCount: 0,
 			highCount: 0,
 			totalCount: 0,
-			clean: true,
+			clean: false,
 			note: `Error running dart pub outdated: ${errorMessage}`,
 		};
 	}
@@ -1400,6 +1491,44 @@ export type {
 /**
  * Run the package audit tool
  */
+/**
+ * Test seam (7.x `_internals` DI convention — never mock.module): lets
+ * covered-tree tests inject a fake spawn result and a short timeout into
+ * runCargoAudit. Only the cargo runner reads this seam (the arm the PR
+ * #3163 feedback review pinned); the other runners keep the module
+ * constants until a test needs injection.
+ */
+export const _internals = {
+	spawnAuditProc: bunSpawn,
+	auditTimeoutMs: AUDIT_TIMEOUT_MS,
+};
+
+/**
+ * Exported for covered-tree tests (packages/core/tests/utils): asserts the
+ * fail-closed contract of the cargo runner — a spawn failure (tool missing)
+ * or a timeout must never report clean:true (issues #3150/#3163 feedback).
+ */
+export async function runCargoAuditForTest(
+	directory: string,
+): Promise<AuditResult> {
+	return runCargoAudit(directory);
+}
+
+/**
+ * Exported for covered-tree tests (packages/core/tests/utils): the shared
+ * runner failure classifier. Pins the fail-closed contract added with
+ * issues #3150/#3163 — overflow and unknown failures are clean:false;
+ * only the genuinely-missing-tooling arm is clean:true.
+ */
+export function auditFailureForTest(
+	ecosystem: string,
+	toolLabel: string,
+	command: string[],
+	error: unknown,
+): AuditResult {
+	return auditFailure(ecosystem, toolLabel, command, error);
+}
+
 export async function runPkgAudit(
 	ecosystem: Ecosystem,
 	directory: string,

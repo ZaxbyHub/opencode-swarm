@@ -20,9 +20,9 @@
     },
     "packages/claude-code": {
       "name": "@opencode-swarm/claude-code",
-      "version": "7.0.0",
+      "version": "8.0.1-beta.0",
       "dependencies": {
-        "@opencode-swarm/core": "workspace:*",
+        "@opencode-swarm/core": "8.0.0-beta.0",
       },
       "devDependencies": {
         "bun-types": "latest",
@@ -31,9 +31,9 @@
     },
     "packages/core": {
       "name": "@opencode-swarm/core",
-      "version": "7.0.0",
+      "version": "8.0.0-beta.0",
       "dependencies": {
-        "@opencode-swarm/telemetry": "workspace:*",
+        "@opencode-swarm/telemetry": "8.0.0-beta.0",
         "@vscode/tree-sitter-wasm": "^0.3.0",
         "p-limit": "^7.3.0",
         "proper-lockfile": "^4.1.2",
@@ -47,14 +47,15 @@
     },
     "packages/opencode": {
       "name": "opencode-swarm",
-      "version": "7.0.0",
+      "version": "8.0.1-beta.0",
       "bin": {
         "opencode-swarm": "./dist/cli/index.js",
       },
       "dependencies": {
         "@opencode-ai/plugin": "^1.1.53",
         "@opencode-ai/sdk": "^1.1.53",
-        "@opencode-swarm/core": "workspace:*",
+        "@opencode-swarm/core": "8.0.0-beta.0",
+        "web-tree-sitter": "^0.25.0",
         "zod": "^4.1.8",
       },
       "devDependencies": {
@@ -64,7 +65,7 @@
     },
     "packages/telemetry": {
       "name": "@opencode-swarm/telemetry",
-      "version": "7.0.0",
+      "version": "8.0.0-beta.0",
       "dependencies": {
         "zod": "^4.1.8",
       },
@@ -139,10 +140,10 @@
 
     "@opencode-swarm/claude-code/bun-types": ["bun-types@1.3.10", "", { "dependencies": { "@types/node": "*" } }, "sha512-tcpfCCl6XWo6nCVnpcVrxQ+9AYN1iqMIzgrSKYMB/fjLtV2eyAVEg7AxQJuCq/26R6HpKWykQXuSOq/21RYcbg=="],
 
-    "@opencode-swarm/core/bun-types": ["bun-types@1.3.10", "", { "dependencies": { "@types/node": "*" } }, "sha512-tcpfCCl6XWo6nCVnpcVrxQ+9AYN1iqMIzgrSKYMB/fjLtV2eyAVEg7AxQJuCq/26R6HpKWykQXuSOq/21RYcbg=="],
+    "@opencode-swarm/core/bun-types": ["bun-types@1.4.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-bxV1FgK7yBIzjRe5zBozIM4Bem11ZJcCXSrjWRG3YWLt8yFDePu4cLjpebO8OvPeIE9trbyPF4fuj3Cia4Fj3w=="],
 
-    "@opencode-swarm/telemetry/bun-types": ["bun-types@1.3.10", "", { "dependencies": { "@types/node": "*" } }, "sha512-tcpfCCl6XWo6nCVnpcVrxQ+9AYN1iqMIzgrSKYMB/fjLtV2eyAVEg7AxQJuCq/26R6HpKWykQXuSOq/21RYcbg=="],
+    "@opencode-swarm/telemetry/bun-types": ["bun-types@1.4.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-bxV1FgK7yBIzjRe5zBozIM4Bem11ZJcCXSrjWRG3YWLt8yFDePu4cLjpebO8OvPeIE9trbyPF4fuj3Cia4Fj3w=="],
 
-    "opencode-swarm/bun-types": ["bun-types@1.3.10", "", { "dependencies": { "@types/node": "*" } }, "sha512-tcpfCCl6XWo6nCVnpcVrxQ+9AYN1iqMIzgrSKYMB/fjLtV2eyAVEg7AxQJuCq/26R6HpKWykQXuSOq/21RYcbg=="],
+    "opencode-swarm/bun-types": ["bun-types@1.4.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-bxV1FgK7yBIzjRe5zBozIM4Bem11ZJcCXSrjWRG3YWLt8yFDePu4cLjpebO8OvPeIE9trbyPF4fuj3Cia4Fj3w=="],
   }
 }
