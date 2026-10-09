@@ -8,6 +8,7 @@
  */
 
 import { log } from '../utils';
+import { bunFile } from '../utils/bun-compat';
 import { safeHook, validateSwarmPath } from './utils';
 
 /**
@@ -55,7 +56,7 @@ export async function readCoChangeJson(
 ): Promise<CoChangeJson | null> {
 	try {
 		const filePath = validateSwarmPath(directory, 'co-change.json');
-		const content = await Bun.file(filePath).text();
+		const content = await bunFile(filePath).text();
 		const data = JSON.parse(content) as CoChangeJson;
 
 		// Validate basic structure

@@ -23,6 +23,7 @@ import {
 	swarmState,
 } from '../state';
 import { warn } from '../utils';
+import { bunHash } from '../utils/bun-compat';
 import { extractCurrentPhaseFromPlan } from './extractors';
 import { extractModelInfo } from './model-limits';
 
@@ -1337,7 +1338,7 @@ export function hashArgs(args: unknown): number {
 			return 0;
 		}
 		const sortedKeys = Object.keys(args as Record<string, unknown>).sort();
-		return Number(Bun.hash(JSON.stringify(args, sortedKeys)));
+		return Number(bunHash(JSON.stringify(args, sortedKeys)));
 	} catch {
 		return 0;
 	}

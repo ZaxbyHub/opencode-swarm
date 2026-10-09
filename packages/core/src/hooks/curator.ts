@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getGlobalEventBus } from '../background/event-bus.js';
+import { bunWrite } from '../utils/bun-compat';
 import type {
 	ComplianceObservation,
 	CuratorConfig,
@@ -74,7 +75,7 @@ export async function writeCuratorSummary(
 	fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
 
 	// Write JSON file
-	await Bun.write(resolvedPath, JSON.stringify(summary, null, 2));
+	await bunWrite(resolvedPath, JSON.stringify(summary, null, 2));
 }
 
 /**

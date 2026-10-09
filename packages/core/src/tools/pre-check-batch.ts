@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import pLimit from 'p-limit';
 import type { PluginConfig } from '../config';
 import { warn } from '../utils';
+import { bunSpawn } from '../utils/bun-compat';
 import type { LintResult, LintSuccessResult, SupportedLinter } from './lint';
 import { detectAvailableLinter, runLint } from './lint';
 import type { QualityBudgetResult } from './quality-budget';
@@ -290,15 +291,15 @@ async function runLintOnFiles(
 	}
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: workspaceDir,
 		});
 
 		const [stdout, stderr] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
+			proc.stdout.text(),
+			proc.stderr.text(),
 		]);
 
 		const exitCode = await proc.exited;

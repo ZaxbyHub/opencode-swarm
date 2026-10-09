@@ -30,6 +30,8 @@ jobs:
             ${{ runner.os }}-bun-
       - name: Install dependencies
         run: bun install --frozen-lockfile
+      - name: Verify publishable manifests (fail closed on workspace specs or stale pins)
+        run: node scripts/check-publish-manifests.mjs
       - name: Type check
         run: bun run typecheck
       - name: Lint

@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { bunSpawn, bunSpawnSync } from '../utils/bun-compat';
 
 // Simple command availability check - no external dependencies
 const toolchainCache = new Map<string, boolean>();
@@ -18,11 +19,12 @@ function isCommandAvailable(command: string): boolean {
 	const cmd = isWindows ? `${command}.exe` : command;
 
 	try {
-		const result = Bun.spawnSync({
-			cmd: isWindows ? ['where', cmd] : ['which', cmd],
-			stdout: 'pipe',
-			stderr: 'pipe',
-		});
+		const result = bunSpawnSync(
+			{
+				cmd: isWindows ? ['where', cmd] : ['which', cmd],
+			},
+			{ stdout: 'pipe', stderr: 'pipe' },
+		);
 
 		const available = result.success;
 		toolchainCache.set(command, available);
@@ -1096,7 +1098,7 @@ export async function runTests(
 	const startTime = Date.now();
 
 	try {
-		const proc = Bun.spawn(command, {
+		const proc = bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: cwd || process.cwd(),
@@ -1116,8 +1118,8 @@ export async function runTests(
 		const duration_ms = Date.now() - startTime;
 
 		const [stdout, stderr] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
+			proc.stdout.text(),
+			proc.stderr.text(),
 		]);
 
 		// Combine stdout and stderr

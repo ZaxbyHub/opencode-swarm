@@ -8,6 +8,7 @@
 
 import * as path from 'node:path';
 import { SwarmError, warn } from '../utils';
+import { bunFile } from '../utils/bun-compat';
 
 export function safeHook<I, O>(
 	fn: (input: I, output: O) => Promise<void>,
@@ -102,7 +103,7 @@ export async function readSwarmFileAsync(
 ): Promise<string | null> {
 	try {
 		const resolvedPath = validateSwarmPath(directory, filename);
-		const file = Bun.file(resolvedPath);
+		const file = bunFile(resolvedPath);
 		const content = await file.text();
 		return content;
 	} catch {

@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { bunSpawn } from '../utils/bun-compat';
 
 // ============ Constants ============
 const MAX_FILE_SIZE_BYTES = 256 * 1024; // 256KB per file
@@ -144,7 +145,7 @@ async function getGitChurn(
 ): Promise<Map<string, number>> {
 	const churnMap = new Map<string, number>();
 
-	const proc = Bun.spawn(
+	const proc = bunSpawn(
 		[
 			'git',
 			'log',
@@ -159,7 +160,7 @@ async function getGitChurn(
 		},
 	);
 
-	const stdout = await new Response(proc.stdout).text();
+	const stdout = await proc.stdout.text();
 	await proc.exited;
 
 	// Split on CRLF for cross-platform handling

@@ -7,6 +7,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { bunSpawnSync } from '../utils/bun-compat';
 
 // ============ Toolchain Cache ============
 
@@ -78,11 +79,12 @@ export function isCommandAvailable(command: string): boolean {
 	const cmd = isWindows ? `${command}.exe` : command;
 
 	try {
-		const result = Bun.spawnSync({
-			cmd: isWindows ? ['where', cmd] : ['which', cmd],
-			stdout: 'pipe',
-			stderr: 'pipe',
-		});
+		const result = bunSpawnSync(
+			{
+				cmd: isWindows ? ['where', cmd] : ['which', cmd],
+			},
+			{ stdout: 'pipe', stderr: 'pipe' },
+		);
 
 		const available = result.success;
 		toolchainCache.set(command, available);

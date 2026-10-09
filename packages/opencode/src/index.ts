@@ -43,6 +43,9 @@ import {
 import { createAgents, getAgentConfigs } from './agents';
 import { createSwarmCommandHandler } from './commands';
 import { loadPluginConfigWithMeta } from './config';
+import type { V2SetupDependencies } from './host/v2/setup';
+import { openCodeSwarmV2Setup } from './host/v2/setup';
+import type { V2PluginContext } from './host/v2/types';
 import {
 	check_gate_status,
 	checkpoint,
@@ -69,9 +72,6 @@ import {
 	update_task_status,
 	write_retro,
 } from './tools/register';
-
-// Module-level banner to confirm module loaded
-console.log('[opencode-swarm] Module loaded — dist/index.js executing');
 
 /**
  * OpenCode Swarm Plugin
@@ -736,7 +736,62 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 	};
 };
 
-export default OpenCodeSwarm;
+/**
+ * Shared server-initialization wrapper (issue #3151, adapted from the 7.x
+ * #3004 / ADR-0003 seam): counts invocations (warns on dual host load —
+ * module-level swarm state is shared between invocations) and surfaces init
+ * failures to stderr before re-throwing, so both the v1 `server()` entry and
+ * the v2 `setup()` entry share the identical FATAL surface. OpenCode's plugin
+ * loader silently drops a plugin whose entry rejects, leaving the user with no
+ * commands/agents and no visible error (issue #675) — raw stderr here is the
+ * one place it is justified.
+ */
+let serverInitInvocations = 0;
+
+const runServerInit = async (ctx: Parameters<Plugin>[0]) => {
+	serverInitInvocations += 1;
+	if (serverInitInvocations > 1) {
+		log(
+			'[opencode-swarm] WARNING: plugin initialization invoked more than once in this process; module-level swarm state is shared between invocations (dual host load?)',
+		);
+	}
+	try {
+		return await OpenCodeSwarm(ctx);
+	} catch (err) {
+		const stack =
+			err instanceof Error ? (err.stack ?? err.message) : String(err);
+		console.error(
+			'[opencode-swarm] FATAL: plugin initialization failed. Plugin will not be available.',
+		);
+		console.error(stack);
+		throw err;
+	}
+};
+
+// Dual-shape default export (issue #3151, mirroring the 7.x #3004 export):
+// v1 hosts (OpenCode 1, @opencode-ai/plugin 1.x) call `server()`; OpenCode 2
+// hosts (@opencode/plugin 2.x) decode the default export against
+// `{ id, setup | effect }` (excess keys ignored) and call `setup(ctx)` — the
+// v2 registration surface lives in src/host/v2/. `server` routes through
+// runServerInit so both entries share the dual-invocation warning + FATAL
+// surface. `satisfies` keeps the wrapper type-checked against the inferred
+// shape without loosening the OpenCodeSwarm function's `Plugin` type. The id
+// literal must match the package name in package.json.
+export default {
+	id: 'opencode-swarm' as const,
+	server: async (ctx) => runServerInit(ctx),
+	setup: (ctx: unknown) =>
+		openCodeSwarmV2Setup(ctx as V2PluginContext, {
+			// Dependency-injected so src/host/v2 never imports this module (no
+			// index ↔ host cycle); the cast bridges the structural subset the
+			// adapter declares to the full inferred hooks type.
+			runInit: runServerInit as unknown as V2SetupDependencies['runInit'],
+		}),
+} satisfies {
+	id: string;
+	server: Plugin;
+	setup: (ctx: never) => Promise<() => Promise<void>>;
+};
 
 export type { AgentDefinition } from './agents';
 // Re-export backward-compat layer for README-named exports

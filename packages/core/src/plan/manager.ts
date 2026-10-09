@@ -9,6 +9,7 @@ import {
 } from '../config/plan-schema';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { warn } from '../utils';
+import { bunHash, bunWrite } from '../utils/bun-compat';
 
 /**
  * Load plan.json ONLY without auto-migration from plan.md.
@@ -97,7 +98,7 @@ function computePlanContentHash(plan: Plan): string {
 	};
 	const jsonString = JSON.stringify(content);
 	// Use Bun's hash for a compact hash string
-	return Bun.hash(jsonString).toString(36);
+	return bunHash(jsonString).toString(36);
 }
 
 /**
@@ -167,7 +168,7 @@ async function regeneratePlanMarkdown(
 		`plan.md.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 	);
 	try {
-		await Bun.write(mdTempPath, markdownWithHash);
+		await bunWrite(mdTempPath, markdownWithHash);
 		renameSync(mdTempPath, mdPath);
 	} finally {
 		try {
@@ -319,7 +320,7 @@ export async function savePlan(directory: string, plan: Plan): Promise<void> {
 
 	// Write to temp and atomically rename
 	try {
-		await Bun.write(tempPath, JSON.stringify(validated, null, 2));
+		await bunWrite(tempPath, JSON.stringify(validated, null, 2));
 		renameSync(tempPath, planPath);
 	} finally {
 		try {
@@ -339,7 +340,7 @@ export async function savePlan(directory: string, plan: Plan): Promise<void> {
 		`plan.md.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
 	);
 	try {
-		await Bun.write(mdTempPath, markdownWithHash);
+		await bunWrite(mdTempPath, markdownWithHash);
 		renameSync(mdTempPath, mdPath);
 	} finally {
 		try {
@@ -362,7 +363,7 @@ export async function savePlan(directory: string, plan: Plan): Promise<void> {
 			phases_count: validated.phases.length,
 			tasks_count: tasksCount,
 		});
-		await Bun.write(markerPath, marker);
+		await bunWrite(markerPath, marker);
 	} catch {
 		/* Advisory only - marker write failure does not affect plan save */
 	}

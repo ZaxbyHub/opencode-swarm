@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { type ToolContext, tool } from '@opencode-ai/plugin';
+import { bunSpawnSync } from '@opencode-swarm/core';
 import { detectProjectLanguages } from '../lang/detector';
 import { LANGUAGE_REGISTRY } from '../lang/profiles';
 import { simpleGlobToRegex, warn } from '../utils';
@@ -161,11 +162,12 @@ export function isCommandAvailable(command: string): boolean {
 	const cmd = isWindows ? `${command}.exe` : command;
 
 	try {
-		const result = Bun.spawnSync({
-			cmd: isWindows ? ['where', cmd] : ['which', cmd],
-			stdout: 'pipe',
-			stderr: 'pipe',
-		});
+		const result = bunSpawnSync(
+			{
+				cmd: isWindows ? ['where', cmd] : ['which', cmd],
+			},
+			{ stdout: 'pipe', stderr: 'pipe' },
+		);
 
 		const available = result.success;
 		toolchainCache.set(command, available);
