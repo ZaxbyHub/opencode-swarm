@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.192.3",
+  "tagCommit": "e6082caf9c4cee36dbe42562fbb1b036e0576c7c",
+  "targetCommitish": "e6082caf9c4cee36dbe42562fbb1b036e0576c7c",
+  "releaseBodySha256": "07cb3d496b8b6347dd7ed72670d417b52eec6caad035f4cbefa287c3134741da",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/lane-session-resume-guard.md",
+      "sha256": "bc49d92be7867e953e15c43577c47b10650a6a517a9ca324027bf3fea3864ad1"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/lean-runner-provider-error.md",
+      "sha256": "88382e89fcad1b8f5713e716c411301b1e775fe0489668c0b86a736306ec6f04"
+    }
+  ]
+}
