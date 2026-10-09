@@ -528,19 +528,6 @@ describe('wrapper unwrapping and normalization — adversarial', () => {
 			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 		});
 
-		test('powershell -EncodedCommand <Remove-Item> allowed when block_destructive_commands is false', async () => {
-			const config = defaultConfig({ block_destructive_commands: false });
-			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-			const encoded = Buffer.from(
-				'Remove-Item -Recurse C:\\target',
-				'utf16le',
-			).toString('base64');
-			const command = `powershell -EncodedCommand ${encoded}`;
-			const input = makeBashInput('test-session');
-			const output = makeBashOutput(command);
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-		});
-
 		test('K2.6 incident string allowed when block_destructive_commands is false', async () => {
 			const config = defaultConfig({ block_destructive_commands: false });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);

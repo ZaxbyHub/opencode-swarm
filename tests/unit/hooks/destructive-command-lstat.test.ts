@@ -674,21 +674,19 @@ describe('block_destructive_commands: false bypasses all guards', () => {
 		).resolves.toBeUndefined();
 	});
 
-	test('Remove-Item -Recurse $env:APPDATA allowed when flag is false', async () => {
+	test('Remove-Item -Recurse $env:APPDATA still scope-blocked when flag is false', async () => {
 		const hooks = createGuardrailsHooks(
 			TEST_DIR,
 			undefined,
 			defaultConfig({ block_destructive_commands: false }),
 		);
-		const output = {
-			args: { command: 'Remove-Item -Recurse $env:APPDATA' },
-		};
+		// #3145: flag off no longer bypasses the shell-write gate (AC7).
 		await expect(
 			hooks.toolBefore(
 				{ tool: 'bash', sessionID: 'test-session', callID: 'bypass5' },
-				output,
+				{ args: { command: 'Remove-Item -Recurse $env:APPDATA' } },
 			),
-		).resolves.toBeUndefined();
+		).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED/);
 	});
 
 	test('rm --recursive --force /important allowed when flag is false', async () => {

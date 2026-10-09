@@ -293,7 +293,7 @@ describe('controller-appended shell rules paragraph (#2276)', () => {
 		'no pipes, no &&/||/; composition, no redirects, no command substitution, no backslash- or caret-escaped double quotes',
 		'a single command optionally preceded by up to three leading cd <dir> && prefixes',
 		'a trailing 2>&1 (reads only)',
-		'a literal | inside a double-quoted gh api --jq value',
+		'a literal | inside a double-quoted gh api --jq value or a double-quoted git grep -E pattern operand',
 		'Prefer the Read, Glob, and Grep tools for file inspection',
 	];
 

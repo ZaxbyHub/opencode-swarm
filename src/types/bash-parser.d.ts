@@ -340,6 +340,7 @@ declare module 'bash-parser' {
 		then: BashNode;
 		else?: BashNode;
 		loc?: unknown;
+		redirections?: BashRedirect[];
 	}
 
 	export interface BashFor {
@@ -348,6 +349,7 @@ declare module 'bash-parser' {
 		wordlist?: BashWord[];
 		do: BashNode;
 		loc?: unknown;
+		redirections?: BashRedirect[];
 	}
 
 	export interface BashCase {
@@ -355,6 +357,7 @@ declare module 'bash-parser' {
 		clause: BashWord;
 		cases?: BashCaseItem[];
 		loc?: unknown;
+		redirections?: BashRedirect[];
 	}
 
 	export interface BashCaseItem {
@@ -369,6 +372,7 @@ declare module 'bash-parser' {
 		clause: BashNode;
 		do: BashNode;
 		loc?: unknown;
+		redirections?: BashRedirect[];
 	}
 
 	export interface BashUntil {
@@ -376,6 +380,7 @@ declare module 'bash-parser' {
 		clause: BashNode;
 		do: BashNode;
 		loc?: unknown;
+		redirections?: BashRedirect[];
 	}
 
 	export interface BashFunction {

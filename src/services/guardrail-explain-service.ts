@@ -17,9 +17,14 @@ import {
 	isInDeclaredScope,
 	redactShellCommand,
 } from '../hooks/guardrails/helpers.js';
+import { resolveWindowsWriteAuthority } from '../hooks/guardrails/tool-before.js';
+import { declaresWindowsWrapperLoose } from '../hooks/shell-executor-context';
 import {
 	detectPosixWrites,
 	detectWindowsWrites,
+	isPowerShellReadOnlyPipeline,
+	isPowerShellShaped,
+	mergeWriteAnalyses,
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect.js';
 import {
@@ -639,20 +644,99 @@ export async function handleGuardrailExplain(
 	}
 
 	// --- Shell-write-scope check (mirrors checkShellWriteScope decision) ---
-	if (decision === 'allow') {
-		const shellType = resolveShellType(shellCommand);
-		const analysis =
-			shellType === 'powershell' || shellType === 'cmd'
-				? detectWindowsWrites(shellCommand, shellType)
-				: detectPosixWrites(shellCommand);
+	// #3099: routed through the SAME authority ladder + union the gate uses
+	// (resolveWindowsWriteAuthority + mergeWriteAnalyses), so explain cannot
+	// answer "allow" for a command the gate blocks. Explain has no tool
+	// context, so it evaluates the command as the `shell` tool — the surface
+	// this preview has always modeled.
+	// Mirror the gate's unwrap preprocessing (tool-before.ts write-detection
+	// path): segment the command, unwrap wrapper segments, rejoin with '\n'
+	// when any segment changed, and run write detection on that normalized
+	// form. A `;`-joined wrapper write (`echo done; cmd /c copy a.md
+	// OUTSIDE.md`) is invisible to the whole-string detectors — the gate sees
+	// it only through this normalization — so explain must share it or answer
+	// allow where the gate blocks (round-6 review finding). Authority and the
+	// wrapper flag below stay computed from the raw command, exactly like the
+	// gate; detection and target resolution use the same normalized string,
+	// because resolveWriteTargets re-parses it for cwd tracking.
+	const commandSegments = dcSplitSegments(shellCommand);
+	const unwrappedSegments = commandSegments.map((s) => dcUnwrapWrappers(s));
+	const didUnwrap = commandSegments.some((s, i) => unwrappedSegments[i] !== s);
+	const detectionCommand = didUnwrap
+		? unwrappedSegments.join('\n')
+		: shellCommand;
 
-		if (analysis.parseError) {
+	if (decision === 'allow') {
+		const detected = resolveShellType(shellCommand) as
+			| 'posix'
+			| 'powershell'
+			| 'cmd'
+			| 'unix'
+			| 'bash';
+		const authority = resolveWindowsWriteAuthority(
+			'shell',
+			shellCommand,
+			detected,
+			isPowerShellShaped(shellCommand),
+		);
+		// Mirrors the gate's wrapper-priority flag (round-5 blocker: omitting it
+		// made explain keep the POSIX reading for explicit cmd/powershell -Command
+		// wrappers while the gate kept the Windows one — explain answered allow
+		// for commands the gate blocked). Input contract (round 6): every
+		// production path into this service tokenizes arguments with
+		// `argumentText.trim().split(/\s+/)` (src/commands/command-dispatch.ts),
+		// which destroys literal newlines before the command string is joined,
+		// so the gate's newline command boundary cannot fire here — callers
+		// re-express multi-line commands with `;`/`&&`/`|` separators, which
+		// drive the same wrapper match and the same verdict. The declaration
+		// predicate is the shared one from shell-executor-context.ts — the
+		// same object the gate uses, so parity is structural rather than
+		// conventional; pinned by the wrapper parity rows in
+		// guardrail-explain-service-accuracy.test.ts.
+		const wrapperDeclaredHere = declaresWindowsWrapperLoose(shellCommand);
+		const posix = detectPosixWrites(detectionCommand);
+		const analysis =
+			authority === null
+				? posix
+				: mergeWriteAnalyses(
+						posix,
+						detectWindowsWrites(detectionCommand, authority),
+						true,
+						wrapperDeclaredHere,
+					);
+
+		// The gate runs its fail-closed parse gate on the ORIGINAL command as
+		// well as the unwrapped form (tool-before.ts): a wrapper must not
+		// launder a malformed payload — `cmd /c "echo hi` (unclosed quote)
+		// must block even though the unwrapped `echo hi` parses cleanly.
+		// Mirror both parse gates, raw first (round-7 review finding).
+		const rawPosix = detectPosixWrites(shellCommand);
+		const rawAnalysis =
+			authority === null
+				? rawPosix
+				: mergeWriteAnalyses(
+						rawPosix,
+						detectWindowsWrites(shellCommand, authority),
+						true,
+						wrapperDeclaredHere,
+					);
+		const rawParseFailure =
+			rawAnalysis.parseError && !isPowerShellReadOnlyPipeline(shellCommand);
+
+		if (rawParseFailure) {
+			decision = 'block';
+			firingRule =
+				'parse_error: write detection failed to parse command — rejecting for safety';
+		} else if (
+			analysis.parseError &&
+			!isPowerShellReadOnlyPipeline(detectionCommand)
+		) {
 			decision = 'block';
 			firingRule =
 				'parse_error: write detection failed to parse command — rejecting for safety';
 		} else if (analysis.hasWrites) {
 			const resolvedWrites = resolveWriteTargets(
-				shellCommand,
+				detectionCommand,
 				analysis.writes,
 				directory,
 			);
@@ -679,12 +763,33 @@ export async function handleGuardrailExplain(
 			}
 		}
 	} else {
-		// Already blocked; still collect write categories for reporting.
-		const shellType = resolveShellType(shellCommand);
+		// Already blocked; still collect write categories for reporting. Same
+		// #3099 authority routing as the allow branch — no stale second path.
+		const detected = resolveShellType(shellCommand) as
+			| 'posix'
+			| 'powershell'
+			| 'cmd'
+			| 'unix'
+			| 'bash';
+		const authority = resolveWindowsWriteAuthority(
+			'shell',
+			shellCommand,
+			detected,
+			isPowerShellShaped(shellCommand),
+		);
+		// Same wrapper-priority flag as the allow branch; recomputed because
+		// the gate's detect() closure recomputes it on its blocked path too.
+		const wrapperDeclaredElse = declaresWindowsWrapperLoose(shellCommand);
+		const posix = detectPosixWrites(detectionCommand);
 		const analysis =
-			shellType === 'powershell' || shellType === 'cmd'
-				? detectWindowsWrites(shellCommand, shellType)
-				: detectPosixWrites(shellCommand);
+			authority === null
+				? posix
+				: mergeWriteAnalyses(
+						posix,
+						detectWindowsWrites(detectionCommand, authority),
+						true,
+						wrapperDeclaredElse,
+					);
 
 		if (!analysis.parseError && analysis.hasWrites) {
 			for (const write of analysis.writes) {

@@ -59,9 +59,16 @@ import { isPathUnderSwarmWorktreeBase } from '../../worktree/core.js';
 import { detectLoop } from '../loop-detector';
 import { isTaskToolId, normalizeToolName } from '../normalize-tool-name';
 import {
+	CMD_WRAPPER_DECLARATION,
+	declaresWindowsWrapperLoose,
+} from '../shell-executor-context';
+import {
 	detectInteractiveSession,
 	detectPosixWrites,
 	detectWindowsWrites,
+	isPowerShellReadOnlyPipeline,
+	isPowerShellShaped,
+	mergeWriteAnalyses,
 	resolveWriteTargets,
 	type WriteAnalysis,
 } from '../shell-write-detect';
@@ -228,6 +235,55 @@ function throwDestructiveBlock(
  * @param ctx Shared configuration and closures from createGuardrailsHooks
  * @returns The toolBefore handler function
  */
+/**
+ * Issue #3099 R2 (executor context): which grammar OWNS shared constructs.
+ *
+ * Content alone cannot pick the grammar — the Windows sandbox wraps commands
+ * in PowerShell (src/sandbox/win32) while the recovery runbook documents Git
+ * Bash AND PowerShell as both-real host shells. The authority ladder:
+ *   1. an explicit wrapper DECLARES the executor (cmd /c, powershell
+ *      -Command) — that grammar is authoritative;
+ *   2. a PowerShell-shaped body cannot execute under POSIX at all, so
+ *      Windows is authoritative;
+ *   3. otherwise the tool's own executor: `bash` runs a POSIX shell; the
+ *      `shell` tool inherits base content detection.
+ *
+ * Exported so `/swarm guardrail explain` routes through the SAME decision
+ * instead of a stale copy — its comment promises a mirror of
+ * checkShellWriteScope, and a mirror that diverges answers "allow" for
+ * commands the gate blocks (#3099 review finding).
+ */
+export function resolveWindowsWriteAuthority(
+	tool: string,
+	command: string,
+	detectedShellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash',
+	shaped: boolean,
+): 'powershell' | 'cmd' | null {
+	// A wrapper is an executor DECLARATION only at an invocation position: the
+	// very start of the command, or the receiving side of a pipe. A bare
+	// whitespace boundary matched the PHRASE ' powershell -' inside arguments
+	// (`echo powershell -foo > src\out.txt` granted Windows authority to a
+	// plain echo), and a `;` boundary bled one segment's wrapper authority
+	// backward onto POSIX segments (review round 3, Critical). The regexes
+	// live in shell-executor-context.ts (single shared definition — four
+	// byte-identical copies drifted once already, #3145 rounds 5-7) and are
+	// switch-tolerant: `cmd /d /s /c …` declares cmd like bare `cmd /c`.
+	const cmdWrapper = CMD_WRAPPER_DECLARATION.test(command);
+	const psWrapper = declaresWindowsWrapperLoose(command);
+	// Step 3 is TOOL-AWARE: content detection inherits only to the `shell`
+	// tool (base behavior). The `bash` tool without a wrapper or a shaped
+	// body runs a POSIX shell — routing it to cmd detection on an `echo `
+	// prefix would re-interpret `src\out` under the wrong grammar.
+	const inheritedWindows =
+		detectedShellType === 'powershell' || detectedShellType === 'cmd';
+	if (cmdWrapper) return 'cmd';
+	if (psWrapper || shaped) return 'powershell';
+	if (inheritedWindows && tool !== 'bash') {
+		return detectedShellType as 'powershell' | 'cmd';
+	}
+	return null;
+}
+
 export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	const {
 		effectiveDirectory,
@@ -1016,38 +1072,101 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		const normalizedTool = tool;
 
-		let shellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash' = 'posix';
+		// Issue #3099: the shell type is a property of the COMMAND, not of the
+		// tool that carries it. The bash tool is a transport; the old code
+		// conflated the two and forced `posix`, which made every PowerShell
+		// command unparseable-and-therefore-rejected, and every PowerShell
+		// WRITE cmdlet report zero writes and slip past the scope check.
+		const detectedShellType = detectShellType(command) as
+			| 'posix'
+			| 'powershell'
+			| 'cmd'
+			| 'unix'
+			| 'bash';
+		const shaped = isPowerShellShaped(command);
+		const shellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash' =
+			detectedShellType;
 
-		if (normalizedTool === 'bash') {
-			shellType = 'posix';
-		} else {
-			shellType = detectShellType(command) as
-				| 'posix'
-				| 'powershell'
-				| 'cmd'
-				| 'unix'
-				| 'bash';
-		}
-
-		const interactiveShellType =
-			shellType === 'unix' || shellType === 'bash' ? 'posix' : shellType;
-		if (enforce && detectInteractiveSession(command, interactiveShellType)) {
+		// R1d: the interactive verdict is OR-ed across shell types. Routing by
+		// detected shell type alone would send `watch echo hi` to 'cmd' (the
+		// `\b(set|echo|if|exist)\s+` rule), and detectInteractiveSession has no
+		// 'cmd' case — an interactive session would be newly admitted.
+		const interactiveCandidates: Array<'posix' | 'powershell' | 'cmd'> =
+			shellType === 'powershell' || shellType === 'cmd'
+				? [shellType, 'posix']
+				: ['posix'];
+		if (
+			enforce &&
+			interactiveCandidates.some((candidate) =>
+				detectInteractiveSession(command, candidate),
+			)
+		) {
 			throw new Error(
 				`BLOCKED: interactive/session tool detected — rejecting for safety`,
 			);
 		}
 
-		const detect = (c: string): WriteAnalysis =>
-			normalizedTool === 'bash'
-				? detectPosixWrites(c)
-				: shellType === 'powershell' || shellType === 'cmd'
-					? detectWindowsWrites(c, shellType)
-					: detectPosixWrites(c);
+		// Issue #3099 R1b: UNION, never a switch. The POSIX detector always runs,
+		// so no command can lose the write detection it has today. The Windows
+		// detector runs ADDITIONALLY when the command is Windows-shaped, and
+		// when it does it unions BOTH of its sub-detectors — routing by `w`
+		// would lose cmd-alias writes (`copy a b | Get-Content x`), which the
+		// cmd detector catches and the PowerShell detector does not.
+		// Issue #3099 R2 (executor context): which grammar OWNS shared
+		// constructs. Evidence: the Windows sandbox wraps commands in PowerShell
+		// (src/sandbox/win32), while the recovery runbook documents Git Bash AND
+		// PowerShell as both-real host shells — so content alone cannot pick a
+		// grammar. The authority ladder is:
+		//   1. an explicit wrapper DECLARES the executor (cmd /c, powershell
+		//      -Command) — that grammar is authoritative;
+		//   2. a PowerShell-shaped body cannot execute under POSIX at all, so
+		//      Windows is authoritative;
+		//   3. otherwise the tool's own executor: `bash` runs a POSIX shell, and
+		//      the `shell` tool keeps base content detection.
+		const windowsShell = resolveWindowsWriteAuthority(
+			normalizedTool,
+			command,
+			detectedShellType,
+			shaped,
+		);
+
+		// Shared constructs resolve to the POSIX reading whenever the POSIX
+		// parse succeeded AND no explicit wrapper declared the executor. On
+		// the BASH tool that is unconditional for shaped bodies: the real
+		// executor is a POSIX shell whose redirect semantics govern (bash
+		// writes srcOUT.txt for '> src\OUT.txt' — #3099 round-4 Critical 2),
+		// so POSIX stays authoritative while the Windows cmdlet writes POSIX
+		// never claims still land. On the SHELL tool the same clean-POSIX-parse
+		// rule applies to grammar guesses (shaped/inherited).
+		// An explicit wrapper declares the executor outright: windows readings
+		// win shared constructs even when posix parses the (unwrapped) text
+		// cleanly — keeps the C4 frozen cmd /c in-scope case admitting.
+		// Grammar-guess authority (shaped/inherited) yields to a clean POSIX
+		// parse, because that is what a POSIX executor actually ran. The
+		// declaration predicate is the shared one from
+		// shell-executor-context.ts (single definition; switch-tolerant).
+		const wrapperDeclaredHere = declaresWindowsWrapperLoose(command);
+		const windowsAuthoritative =
+			wrapperDeclaredHere || normalizedTool !== 'bash';
+		const detect = (c: string): WriteAnalysis => {
+			const posix = detectPosixWrites(c);
+			if (windowsShell === null) return posix;
+			return mergeWriteAnalyses(
+				posix,
+				detectWindowsWrites(c, windowsShell),
+				windowsAuthoritative,
+				wrapperDeclaredHere,
+			);
+		};
 
 		// Fail-closed parse gate runs on the ORIGINAL command so a genuinely
 		// malformed command (e.g. an unclosed quote) is still rejected for safety.
+		// The one narrowing: a command positively classified as a read-only
+		// PowerShell pipeline is a read, not a parse failure (issue #3099).
+		const suppressParseError = (c: string) =>
+			enforce && isPowerShellReadOnlyPipeline(c);
 		const primaryAnalysis = detect(command);
-		if (enforce && primaryAnalysis.parseError) {
+		if (enforce && primaryAnalysis.parseError && !suppressParseError(command)) {
 			throw new Error(
 				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
 			);
@@ -1070,7 +1189,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		// A wrapped command whose unwrapped inner form fails to parse is also
 		// rejected for safety.
-		if (enforce && analysis.parseError) {
+		if (
+			enforce &&
+			analysis.parseError &&
+			!suppressParseError(detectionCommand)
+		) {
 			throw new Error(
 				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
 			);

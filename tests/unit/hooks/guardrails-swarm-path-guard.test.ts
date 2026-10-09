@@ -62,7 +62,6 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 				/mv.*targeting .swarm.*detected/,
 			);
 		});
-
 		test('mv /tmp/file.json .swarm/evidence/ → BLOCKED (destination)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -75,7 +74,6 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 				/mv.*targeting .swarm.*detected/,
 			);
 		});
-
 		test('mv .swarm/evidence/4.1.json .swarm/backup/ → BLOCKED', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -90,7 +88,6 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 				/mv.*targeting .swarm.*detected/,
 			);
 		});
-
 		test('mv "quoted/.swarm/file.json" /tmp/ → BLOCKED (quoted path)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -103,7 +100,6 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 				/mv.*targeting .swarm.*detected/,
 			);
 		});
-
 		test('mv src/file.ts src/renamed.ts → ALLOWED (non-.swarm path)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -302,18 +298,22 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			);
 		});
 
-		test('Move-Item C:\\data\\file.txt C:\\data\\renamed.txt → ALLOWED (no .swarm)', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-			const input = makeBashInput(
-				'test-session',
-				'Move-Item C:\\data\\file.txt C:\\data\\renamed.txt',
-			);
-			const output = makeBashOutput(
-				'Move-Item C:\\data\\file.txt C:\\data\\renamed.txt',
-			);
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-		});
+		// Drive-absolute `C:\` root-escape semantics are Windows-only.
+		test.skipIf(process.platform !== 'win32')(
+			'Move-Item C:\\data\\file.txt C:\\data\\renamed.txt → BLOCKED (root escape)',
+			async () => {
+				const config = defaultConfig();
+				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+				const move = 'Move-Item C:\\data\\file.txt C:\\data\\renamed.txt';
+				// #3145 PRR-002: the Windows reading reaches the bash-tool authority check.
+				await expect(
+					hooks.toolBefore(
+						makeBashInput('test-session', move),
+						makeBashOutput(move),
+					),
+				).rejects.toThrow(/SCOPE_NOT_DECLARED|not authorised/i);
+			},
+		);
 	});
 
 	// ============================================================

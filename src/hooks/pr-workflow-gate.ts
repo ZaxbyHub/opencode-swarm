@@ -212,11 +212,13 @@ import {
 	type ForgeContext,
 } from '../providers/forge-provider.js';
 import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
+import { collectPrWorkflowGhReadinessAdvisory } from '../services/pr-workflow-gh-readiness.js';
 import {
 	ensurePrWorkflowSkillContractsFresh,
 	MAX_SKILL_CONTRACT_ADVISORIES,
 } from '../services/pr-workflow-skill-contract.js';
 import { swarmState } from '../state.js';
+import { resolveGhBinary } from '../tools/gh-evidence.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
 import { sameProjectRoot } from '../utils/canonical-root.js';
 import { log, warn } from '../utils/logger.js';
@@ -1861,6 +1863,19 @@ export async function activatePrWorkflow(
 				directory,
 				mode,
 			);
+			// Issue #3099 R2-14: gh readiness, checked once at activation. Safe against
+			// the .max(8) schema cap because the fresh detector emits at most one
+			// entry and the skill-contract source at most three (review-3 nit).
+			// Written
+			// FIRST so it reserves one of the shared advisory slots; the append
+			// helper never evicts an existing entry, so a first-written entry
+			// survives. Fail-open — detection never gates activation.
+			const ghReadinessAdvisory = collectPrWorkflowGhReadinessAdvisory(
+				_test_exports.resolveGhBinary,
+			);
+			const activationAdvisories = ghReadinessAdvisory
+				? [ghReadinessAdvisory, ...skillContractAdvisories]
+				: skillContractAdvisories;
 			const timestamp = isoNow();
 			const feedbackTargetUrl =
 				mode === 'PR_FEEDBACK' && options.prUrl
@@ -1881,8 +1896,8 @@ export async function activatePrWorkflow(
 				mode,
 				activatedAt: timestamp,
 				updatedAt: timestamp,
-				...(skillContractAdvisories.length > 0
-					? { skillContractAdvisories }
+				...(activationAdvisories.length > 0
+					? { skillContractAdvisories: activationAdvisories }
 					: {}),
 				...(initialHead ? { prHeadSha: initialHead } : {}),
 				...(feedbackTargetUrl
@@ -13464,6 +13479,13 @@ export async function completePrWorkflow(
 }
 
 export const _test_exports = {
+	/**
+	 * Issue #3099 R6: `gh` availability seam. Read at ACTIVATION call time and
+	 * handed to the readiness service, so a test can pin presence or absence.
+	 * Seeded to the real resolver, so removing the property falls back to live
+	 * behavioural detection rather than to a null stub.
+	 */
+	resolveGhBinary,
 	// Issue #2601 (PRR-009): direct codec access so tests can pin the
 	// skillContractAdvisories schema cap independently of the append guard.
 	parseGateState: (data: unknown) => PrWorkflowGateStateSchema.safeParse(data),
@@ -14138,6 +14160,47 @@ function readOnlyArgumentPath(parent: string, key: string): string {
 	return parent ? `${parent}.${key}` : key;
 }
 
+/**
+ * Issue #3099 R4: enumerated read-only method vocabularies.
+ *
+ * `classifyReadOnlyToolArguments` used to apply ONE global vocabulary — literal
+ * GET/HEAD — to every read-only-gated tool, assuming a tool's `method` is always
+ * an HTTP verb. For a tool whose `method` is an enumerated OPERATION name that
+ * assumption is false and every value is rejected, so a tool the gate admits by
+ * name (`PR_REVIEW_READ_ONLY_TOOL_NAMES`) is made unusable. The repo even ships
+ * a skill — .opencode/skills/ci-fix-monitor/SKILL.md — instructing agents to
+ * call `mcp__github__pull_request_read` with `method: "get_check_runs"`, which
+ * the gate then hard-blocked whenever a PR_REVIEW gate was armed.
+ *
+ * Keyed by tool NAME because the GitHub MCP surface is runtime-injected: grep
+ * over src/ finds no occurrence of `github_pull_request_read` or
+ * `get_check_runs`, so there is no schema to read at build time.
+ *
+ * A tool with no entry here keeps the GET/HEAD-only default, so the fail-closed
+ * posture for every undeclared tool is unchanged.
+ */
+const PR_REVIEW_ENUMERATED_READ_METHODS = new Set([
+	'get',
+	'get_diff',
+	'get_status',
+	'get_files',
+	'get_commits',
+	'get_review_comments',
+	'get_reviews',
+	'get_comments',
+	'get_check_runs',
+]);
+
+const PR_REVIEW_TOOLS_WITH_ENUMERATED_READ_METHODS = new Set([
+	'github_pull_request_read',
+	'mcp__github__pull_request_read',
+]);
+
+function isDeclaredReadOnlyMethod(toolName: string, value: string): boolean {
+	if (!PR_REVIEW_TOOLS_WITH_ENUMERATED_READ_METHODS.has(toolName)) return false;
+	return PR_REVIEW_ENUMERATED_READ_METHODS.has(value.trim().toLowerCase());
+}
+
 function classifyReadOnlyToolArguments(
 	toolName: string,
 	value: unknown,
@@ -14170,13 +14233,24 @@ function classifyReadOnlyToolArguments(
 		);
 	}
 	if (keyTokens.some((token) => /^(?:method|verb)$/i.test(token))) {
-		return typeof value === 'string' && /^(?:GET|HEAD)$/i.test(value.trim())
-			? { safe: true }
-			: unsafeReadOnlyArgument(
-					path,
-					'HTTP method/verb must be GET or HEAD for a read-only tool',
-					value,
-				);
+		if (typeof value !== 'string') {
+			return unsafeReadOnlyArgument(
+				path,
+				'HTTP method/verb must be GET or HEAD for a read-only tool',
+				value,
+			);
+		}
+		// GET/HEAD for a tool whose method really is an HTTP verb, OR a value the
+		// tool itself declares as one of its read-only operations. The
+		// mutation-bearing ARGUMENT-NAME check above still runs first, so a read
+		// method alongside a `body` argument is still rejected.
+		if (/^(?:GET|HEAD)$/i.test(value.trim())) return { safe: true };
+		if (isDeclaredReadOnlyMethod(toolName, value)) return { safe: true };
+		return unsafeReadOnlyArgument(
+			path,
+			'HTTP method/verb must be GET or HEAD for a read-only tool',
+			value,
+		);
 	}
 	if (
 		keyTokens.length === 1 &&
@@ -14590,6 +14664,37 @@ function classifyPrWorkflowShellSyntax(
 		return { unsafe: true, reason: 'gh-api-jq-pipe' };
 	}
 	const quotedPipeToken = pipeTokens[0];
+	// Issue #3099 R5: a second, equally narrow operand class. `git grep -E`
+	// takes a regex PATTERN argument whose alternation is a literal `|`, exactly
+	// like a jq expression — and `git grep` is on this gate's own allowed read
+	// list, so rejecting it forced a workaround turn for a legitimate read.
+	//
+	// Narrowness, stated so it cannot be widened by accident:
+	//  - the subcommand must be literally `grep` under `git`, after any number
+	//    of `-C <dir>` forms and global git flags. `git commit -m "a|b"` fails
+	//    this walk and falls through to the jq arm below;
+	//  - `-E`/`--extended-regexp` must appear among the flag tokens, including
+	//    COMBINED short forms (`-nE`, `-inE`) — a bare `^-E$` test would reject
+	//    `git grep -nE "a|b"`;
+	//  - the admitted token must be the PATTERN OPERAND, the first non-flag
+	//    token after the flag prefix (POSIX getopt), NOT the token adjacent to
+	//    the flag. `git grep --extended-regexp -n "a|b"` puts the operand two
+	//    tokens later;
+	//  - the double-quote requirement carries over unchanged, with its original
+	//    rationale: apostrophes do not quote under cmd.exe, so requiring double
+	//    quotes keeps the accepted command safe for every executor behind
+	//    OpenCode's cross-platform shell tool.
+	// It runs AFTER the generic `pipeTokens` checks above, so a real unquoted
+	// outer pipe still fails earlier at the tokenizer's `|` rejection, and it
+	// widens nothing about `;`, `<`, `>`, `$(`, backticks or escaped quotes.
+	const gitGrepPattern = resolveGitGrepRegexPatternOperand(tokens);
+	if (
+		gitGrepPattern !== null &&
+		gitGrepPattern === quotedPipeToken &&
+		quotedPipeToken.pipeIsDoubleQuoted
+	) {
+		return { unsafe: false, reason: null };
+	}
 	if (!/^gh\s+api(?:\s|$)/i.test(compact)) {
 		return { unsafe: true, reason: 'gh-api-jq-pipe' };
 	}
@@ -14600,6 +14705,78 @@ function classifyPrWorkflowShellSyntax(
 		}
 	}
 	return { unsafe: true, reason: 'gh-api-jq-pipe' };
+}
+
+/**
+ * Resolve the extended-regex pattern operand of a `git grep -E` command.
+ * Returns null when the command is not `git … grep` with an extended-regex
+ * flag, or when no pattern operand follows the flag prefix.
+ */
+function resolveGitGrepRegexPatternOperand(
+	tokens: PrWorkflowShellToken[],
+): PrWorkflowShellToken | null {
+	if (tokens.length === 0 || tokens[0].value !== 'git') return null;
+	let index = 1;
+	// `-C <dir>`, `-C<dir>`, `-C=<dir>`, then global git flags.
+	while (index < tokens.length) {
+		const value = tokens[index].value;
+		if (/^--[\w-]+=/.test(value)) {
+			index += 1;
+			continue;
+		}
+		if (value === '-C') {
+			index += 2; // `-C <dir>` is two tokens
+			continue;
+		}
+		if (
+			value.startsWith('-C=') ||
+			(value.startsWith('-C') && value.length > 2)
+		) {
+			index += 1;
+			continue;
+		}
+		if (value === '-c') {
+			index += 2; // `-c <key>=<value>` is two tokens
+			continue;
+		}
+		if (value.startsWith('-C') && value.length > 2) {
+			index += 1;
+			continue;
+		}
+		if (value === '--') {
+			index += 1;
+			break;
+		}
+		if (value.startsWith('-')) {
+			index += 1;
+			continue;
+		}
+		break;
+	}
+	if (tokens[index]?.value !== 'grep') return null;
+	index += 1;
+
+	let extendedRegexp = false;
+	let operand: PrWorkflowShellToken | null = null;
+	for (; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		const value = token.value;
+		if (value === '--extended-regexp') {
+			extendedRegexp = true;
+			continue;
+		}
+		if (value.startsWith('--')) continue;
+		// Combined short flags: `-nE`, `-inE`. An `E` anywhere in a short-flag
+		// cluster selects extended regexp.
+		if (value.startsWith('-') && /^-\w+$/.test(value)) {
+			if (/[Ee]/.test(value.slice(1))) extendedRegexp = true;
+			continue;
+		}
+		operand = token;
+		break;
+	}
+	if (!extendedRegexp) return null;
+	return operand;
 }
 
 function hasUnsafeShellControlSyntax(command: string): boolean {
@@ -14617,7 +14794,7 @@ function describeShellSyntaxViolation(command: string): string | null {
 		case 'command-substitution':
 			return 'Reason: command-substitution syntax ($() or @()) is not allowed in this read-only gate.';
 		case 'gh-api-jq-pipe':
-			return 'Reason: literal `|` is only allowed inside a double-quoted `gh api --jq` value; single quotes do not protect pipes under cmd.exe, and every other shape is treated as compound shell syntax.';
+			return 'Reason: literal `|` is only allowed inside a double-quoted `gh api --jq` value or a double-quoted `git grep -E` pattern operand; single quotes do not protect pipes under cmd.exe, and every other shape is treated as compound shell syntax.';
 		default:
 			return 'Reason: compound-syntax (;, &&, |, <, >, backtick, or $()/@()). Run ONE command per call; a single leading `cd <dir> &&` and a trailing `2>&1` are tolerated for reads only.';
 	}

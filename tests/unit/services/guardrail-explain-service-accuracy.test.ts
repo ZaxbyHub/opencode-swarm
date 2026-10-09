@@ -207,6 +207,94 @@ describe('Guardrail explain redaction — firingRule does not leak home director
 	});
 });
 
+describe('Guardrail explain wrapper parity with the tool-before gate (#3099 round 5)', () => {
+	// These rows pin the round-5/round-6 explain-vs-gate machinery. Mutation
+	// semantics (verified by an independent reviewer's probes, round 7):
+	// - The wrapperDeclared 4th mergeWriteAnalyses argument is pinned by the
+	//   IN-SCOPE cmd /c row: without the flag the merge tie-break takes the
+	//   POSIX reading of `src\out.txt` (= srcout.txt, out of scope) and flips
+	//   allow -> block. The out-of-scope block rows do NOT flip when the flag
+	//   is removed — the unwrap mirror already exposes their writes.
+	// - The unwrap mirror (detectionCommand) is pinned by the `;` boundary
+	//   row: without it, `echo done; cmd /c copy ...` answers allow.
+	// - The raw-command parse gate is pinned by the unclosed-quote rows: a
+	//   wrapper must not launder a malformed payload the gate rejects.
+	test('cmd /c wrapper write out of scope → block (allow-branch flag)', async () => {
+		const result = await handleGuardrailExplain(tempDir, [
+			'--scope',
+			'src',
+			'cmd /c "echo hello > OUTSIDE.md"',
+		]);
+		expect(extractDecision(result)).toBe('block');
+	});
+
+	test('powershell -Command wrapper write out of scope → block (allow-branch flag)', async () => {
+		const result = await handleGuardrailExplain(tempDir, [
+			'--scope',
+			'src',
+			'powershell -Command "Set-Content OUTSIDE.md x"',
+		]);
+		expect(extractDecision(result)).toBe('block');
+	});
+
+	test('cmd /c after semicolon boundary → block', async () => {
+		const result = await handleGuardrailExplain(tempDir, [
+			'--scope',
+			'src',
+			'echo done; cmd /c copy a.md OUTSIDE.md',
+		]);
+		expect(extractDecision(result)).toBe('block');
+	});
+
+	test('powershell -Command after && boundary → block', async () => {
+		const result = await handleGuardrailExplain(tempDir, [
+			'--scope',
+			'src',
+			'echo pre && powershell -Command "Set-Content OUTSIDE.md x"',
+		]);
+		expect(extractDecision(result)).toBe('block');
+	});
+
+	test('powershell -Command after pipe boundary → block', async () => {
+		const result = await handleGuardrailExplain(tempDir, [
+			'--scope',
+			'src',
+			'type a.md | powershell -Command "Set-Content OUTSIDE.md x"',
+		]);
+		expect(extractDecision(result)).toBe('block');
+	});
+
+	test('cmd /c wrapper write in scope → allow (flag does not over-block)', async () => {
+		const result = await handleGuardrailExplain(tempDir, [
+			'--scope',
+			'src',
+			'cmd /c "echo hello > src\\out.txt"',
+		]);
+		expect(extractDecision(result)).toBe('allow');
+	});
+
+	test('powershell -Command wrapper write in scope → allow', async () => {
+		const result = await handleGuardrailExplain(tempDir, [
+			'--scope',
+			'src',
+			'powershell -Command "Set-Content src/in.txt x"',
+		]);
+		expect(extractDecision(result)).toBe('allow');
+	});
+
+	test('cmd /c with unclosed quote → block (raw parse gate; wrapper cannot launder malformed payload)', async () => {
+		const result = await handleGuardrailExplain(tempDir, ['cmd /c "echo hi']);
+		expect(extractDecision(result)).toBe('block');
+	});
+
+	test('powershell -Command with unclosed quote → block (raw parse gate)', async () => {
+		const result = await handleGuardrailExplain(tempDir, [
+			'powershell -Command "Set-Content OUTSIDE.md x',
+		]);
+		expect(extractDecision(result)).toBe('block');
+	});
+});
+
 describe('Argument parsing', () => {
 	test('empty args returns usage message', async () => {
 		const result = await handleGuardrailExplain(tempDir, []);

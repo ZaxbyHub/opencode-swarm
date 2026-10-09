@@ -73,7 +73,6 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 				const output = makeBashOutput('m.v .swarm/file');
 				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 			});
-
 			test('m##v .swarm/file → ALLOWED (broken command)', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -81,7 +80,6 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 				const output = makeBashOutput('m##v .swarm/file');
 				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 			});
-
 			test('m v .swarm/file → ALLOWED (two separate tokens)', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -112,7 +110,6 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 					/BLOCKED/,
 				);
 			});
-
 			test('Mv .swarm/file /tmp/ → BLOCKED (mixed-case Mv)', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -122,7 +119,6 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 					/BLOCKED/,
 				);
 			});
-
 			test('Rm .swarm/file → BLOCKED (mixed-case Rm)', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -132,7 +128,6 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 					/BLOCKED/,
 				);
 			});
-
 			test('MOVE .swarm\\file .swarm\\renamed → BLOCKED (uppercase MOVE)', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -145,7 +140,6 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 					/BLOCKED/,
 				);
 			});
-
 			test('Rm -rf .swarm/ → BLOCKED (uppercase recursive rm)', async () => {
 				// NOTE: This currently PASSES because the recursive rm check uses case-SENSITIVE regex /^rm\s+/
 				// But uppercase 'Rm' bypasses this check. This is a BYPASS.
@@ -490,7 +484,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 		});
 
-		test('Remove-Item .swarm\\file -Recurse → ALLOWED when block_destructive_commands=false', async () => {
+		test('Remove-Item .swarm\\file -Recurse → scope-blocked when block_destructive_commands=false', async () => {
 			const config = defaultConfig({ block_destructive_commands: false });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -498,7 +492,10 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 				'Remove-Item .swarm\\file -Recurse',
 			);
 			const output = makeBashOutput('Remove-Item .swarm\\file -Recurse');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			// #3145: the PS deletion is a detected write now, so the flag-off
+			// bypass covers the destructive verdict only — the scope gate
+			// still fails closed.
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test('cp .swarm/file /tmp/ && rm .swarm/file → ALLOWED when block_destructive_commands=false', async () => {
@@ -742,7 +739,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(/BLOCKED/);
 		});
 
-		test('Move-Item C:\\data\\file.txt C:\\data\\renamed.txt → ALLOWED (no .swarm)', async () => {
+		test('Move-Item C:\\data\\file.txt C:\\data\\renamed.txt → scope-blocked (write detected, #3145)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -752,7 +749,10 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const output = makeBashOutput(
 				'Move-Item C:\\data\\file.txt C:\\data\\renamed.txt',
 			);
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			// #3145 PRR-002/#3099: Move-Item outside .swarm is now a DETECTED
+			// write (the pre-PR blind spot), so with no scope declared the
+			// gate fails closed on every platform.
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 	});
 

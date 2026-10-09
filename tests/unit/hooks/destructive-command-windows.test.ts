@@ -625,16 +625,6 @@ describe('PowerShell destructive command guard (adversarial)', () => {
 			const output = makeBashOutput(cmd);
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(/BLOCKED/);
 		});
-
-		// Safe target: node_modules → ALLOWED
-		test('Remove-Item -Recurse node_modules → ALLOWED (safe target)', async () => {
-			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-			const cmd = 'Remove-Item -Recurse node_modules';
-			const input = makeBashInput('test-session', cmd);
-			const output = makeBashOutput(cmd);
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-		});
 	});
 
 	describe('PS alias ri — short form', () => {
@@ -801,17 +791,6 @@ describe('block_destructive_commands: false — all Windows commands pass throug
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 		const input = makeBashInput('test-session', 'diskpart');
 		const output = makeBashOutput('diskpart');
-		await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
-	});
-
-	test('Remove-Item -Recurse -Force C:\\target allowed when block_destructive_commands is false', async () => {
-		const config = defaultConfig({ block_destructive_commands: false });
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
-		const input = makeBashInput(
-			'test-session',
-			'Remove-Item -Recurse -Force C:\\target',
-		);
-		const output = makeBashOutput('Remove-Item -Recurse -Force C:\\target');
 		await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 	});
 
