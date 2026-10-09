@@ -28,7 +28,9 @@
  * checkout a live opencode-swarm session legitimately writes there while
  * tests run. New top-level entries, and creating `.swarm/` where none existed,
  * are always enforced. `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` overrides
- * the mode.
+ * the mode. A part of the checkout that cannot be checked (an unreadable root,
+ * a `.swarm/` over MAX_SWARM_ENTRIES) is reported as a warning, never skipped
+ * silently.
  */
 
 import * as realFs from 'node:fs';
@@ -56,6 +58,8 @@ export interface CheckoutSnapshot {
 	topLevel: Map<string, string>;
 	swarmExisted: boolean;
 	swarm: Map<string, string> | null;
+	/** Parts of the checkout this snapshot could not cover, and why. */
+	unchecked: string[];
 }
 
 function fingerprint(absPath: string, includeDirMtime: boolean): string {
@@ -94,11 +98,14 @@ function walkSwarm(swarmDir: string): Map<string, string> | null {
 
 export function snapshotCheckout(repoRoot: string): CheckoutSnapshot {
 	const topLevel = new Map<string, string>();
+	const unchecked: string[] = [];
 	let names: string[] = [];
 	try {
 		names = readdirSync(repoRoot);
-	} catch {
-		/* unreadable root: compare empty to empty */
+	} catch (error) {
+		unchecked.push(
+			`the checkout root could not be read (${error instanceof Error ? error.message : String(error)})`,
+		);
 	}
 	for (const name of names) {
 		if (IGNORED_TOP_LEVEL.has(name)) continue;
@@ -106,11 +113,13 @@ export function snapshotCheckout(repoRoot: string): CheckoutSnapshot {
 	}
 	const swarmDir = path.join(repoRoot, '.swarm');
 	const swarmExisted = topLevel.get('.swarm') === 'd';
-	return {
-		topLevel,
-		swarmExisted,
-		swarm: swarmExisted ? walkSwarm(swarmDir) : null,
-	};
+	const swarm = swarmExisted ? walkSwarm(swarmDir) : null;
+	if (swarmExisted && swarm === null) {
+		unchecked.push(
+			`.swarm/ has more than ${MAX_SWARM_ENTRIES} entries, so changes inside it were not checked`,
+		);
+	}
+	return { topLevel, swarmExisted, swarm, unchecked };
 }
 
 function diffMaps(
@@ -135,6 +144,8 @@ export interface CheckoutDrift {
 	topLevel: string[];
 	/** Drift inside a pre-existing `.swarm/`. */
 	swarm: string[];
+	/** Parts that could not be compared (from either snapshot). */
+	unchecked: string[];
 }
 
 export function diffCheckout(
@@ -146,10 +157,25 @@ export function diffCheckout(
 	if (before.swarmExisted && before.swarm && after.swarm) {
 		swarm = diffMaps(before.swarm, after.swarm, '.swarm/');
 	}
-	return { topLevel, swarm };
+	const unchecked = [...new Set([...before.unchecked, ...after.unchecked])];
+	return { topLevel, swarm, unchecked };
 }
 
 export type DriftMode = 'enforce' | 'warn' | 'off';
+
+/**
+ * The checkout the bookend guards: `preloadRepoRoot`, unless
+ * `SWARM_TEST_CHECKOUT_DRIFT_ROOT` names another directory. That override
+ * exists for the guard's own wiring test (checkout-drift-wiring.test.ts),
+ * which runs the preload against a scratch "checkout" instead of the repo.
+ */
+export function resolveDriftRoot(
+	env: NodeJS.ProcessEnv,
+	preloadRepoRoot: string,
+): string {
+	const override = env.SWARM_TEST_CHECKOUT_DRIFT_ROOT?.trim();
+	return override && path.isAbsolute(override) ? override : preloadRepoRoot;
+}
 
 export function resolveDriftMode(env: NodeJS.ProcessEnv): {
 	topLevel: DriftMode;
@@ -179,6 +205,14 @@ export function reportCheckoutDrift(
 		else if (m === 'warn') warned.push(...problems);
 	}
 	const header = `CHECKOUT DRIFT: tests wrote into the plugin checkout (${repoRoot}). Use canonicalMkdtemp / a ToolContext with an explicit directory instead.`;
+	if (
+		drift.unchecked.length > 0 &&
+		(mode.topLevel !== 'off' || mode.swarm !== 'off')
+	) {
+		warn(
+			`CHECKOUT DRIFT: not fully checked (${repoRoot}):\n${drift.unchecked.join('\n')}`,
+		);
+	}
 	if (warned.length > 0) warn(`${header}\n${warned.join('\n')}`);
 	if (enforced.length > 0) {
 		throw new Error(`${header}\n${enforced.join('\n')}`);

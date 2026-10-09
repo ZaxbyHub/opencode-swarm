@@ -340,6 +340,17 @@ All tests use `bun:test`. Do not use Jest, Vitest, or any other framework. See `
 - SME tests (FR-008) use parameterization to keep files lean while maximizing coverage
 - FR-010/011/012 hook tests (Phase 4) use shared fixture files (e.g., `curator-test-fixtures.ts`) to consolidate common setup and avoid duplication across focused test files
 
+### Checkout-drift guard
+
+Every `bun test` process loads `tests/preload/prod-store-tripwire.ts`, which snapshots the repository root and its `.swarm/` before any test file loads and compares them once all tests have finished. Tests must write only into temp directories (`canonicalMkdtemp`, `createSafeTestDir`) or a `ToolContext` with an explicit directory, never into the checkout:
+
+- a new, removed or changed top-level entry (including creating `.swarm/`) fails the run;
+- a change inside an existing `.swarm/` only prints a `CHECKOUT DRIFT` warning, because some suites still write there (tracked in #3153);
+- `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` sets both checks to one mode, e.g. `enforce` to make `.swarm/` writes fail locally while fixing them;
+- a part that cannot be checked (an unreadable root, a `.swarm/` with more than 20,000 entries) is reported as a warning.
+
+The helper is `tests/helpers/checkout-drift.ts`; its wiring is pinned by `tests/helpers/checkout-drift-wiring.test.ts`.
+
 ### When you change behavior, update the tests
 
 If your code change alters the behavior of an existing function (new error messages, stricter validation, changed defaults), **find and update every test that asserts the old behavior.** Do not leave tests failing for a follow-up PR. Common examples:

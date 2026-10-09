@@ -9,6 +9,7 @@ import {
 	diffCheckout,
 	reportCheckoutDrift,
 	resolveDriftMode,
+	resolveDriftRoot,
 	snapshotCheckout,
 } from './checkout-drift';
 import { canonicalMkdtemp } from './tmpdir';
@@ -36,6 +37,7 @@ describe('checkout drift: top level', () => {
 		expect(diffCheckout(before, snapshotCheckout(root))).toEqual({
 			topLevel: [],
 			swarm: [],
+			unchecked: [],
 		});
 	});
 
@@ -116,7 +118,11 @@ describe('checkout drift: modes and reporting', () => {
 	});
 
 	test('enforced drift throws; warned drift only warns', () => {
-		const drift = { topLevel: ['x: created'], swarm: ['.swarm/y: created'] };
+		const drift = {
+			topLevel: ['x: created'],
+			swarm: ['.swarm/y: created'],
+			unchecked: [],
+		};
 		const warnings: string[] = [];
 		expect(() =>
 			reportCheckoutDrift(
@@ -132,5 +138,39 @@ describe('checkout drift: modes and reporting', () => {
 		expect(
 			reportCheckoutDrift(drift, { topLevel: 'off', swarm: 'off' }, root),
 		).toEqual([]);
+	});
+
+	test('a part that could not be checked is warned about, never silently skipped', () => {
+		const missingRoot = path.join(root, 'no-such-checkout');
+		const drift = diffCheckout(
+			snapshotCheckout(missingRoot),
+			snapshotCheckout(missingRoot),
+		);
+		expect(drift.unchecked).toHaveLength(1);
+		expect(drift.unchecked[0]).toContain('checkout root could not be read');
+		const warnings: string[] = [];
+		reportCheckoutDrift(
+			drift,
+			{ topLevel: 'enforce', swarm: 'warn' },
+			missingRoot,
+			(m) => warnings.push(m),
+		);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain('not fully checked');
+		const silent: string[] = [];
+		reportCheckoutDrift(drift, { topLevel: 'off', swarm: 'off' }, root, (m) =>
+			silent.push(m),
+		);
+		expect(silent).toEqual([]);
+	});
+
+	test('the guarded root is the repo unless an absolute override is set', () => {
+		expect(resolveDriftRoot({}, '/repo')).toBe('/repo');
+		expect(
+			resolveDriftRoot({ SWARM_TEST_CHECKOUT_DRIFT_ROOT: 'rel' }, '/repo'),
+		).toBe('/repo');
+		expect(
+			resolveDriftRoot({ SWARM_TEST_CHECKOUT_DRIFT_ROOT: root }, '/repo'),
+		).toBe(root);
 	});
 });
