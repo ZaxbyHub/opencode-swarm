@@ -80,6 +80,38 @@ describe('readProviderMessageError field handling', () => {
 	});
 });
 
+describe('readProviderMessageError early finish', () => {
+	test('finish "length" and "content-filter" are provider errors when info.error is absent', () => {
+		expect(readProviderMessageError({ finish: 'length' })).toMatchObject({
+			name: 'MessageOutputLengthError',
+			category: 'provider.output_length',
+		});
+		expect(readProviderMessageError({ finish: 'LENGTH' })?.name).toBe(
+			'MessageOutputLengthError',
+		);
+		expect(
+			readProviderMessageError({ finish: 'content-filter' }),
+		).toMatchObject({
+			name: 'MessageContentFilterError',
+			category: 'provider.content_filter',
+		});
+		expect(() =>
+			throwIfProviderMessageError('p', { finish: 'length' }),
+		).toThrow('MessageOutputLengthError');
+	});
+
+	test('a normal finish is not an error, and info.error wins over finish', () => {
+		for (const finish of ['stop', 'tool-calls', '', 7, undefined])
+			expect(readProviderMessageError({ finish })).toBeNull();
+		expect(
+			readProviderMessageError({
+				finish: 'length',
+				error: { name: 'APIError', data: { statusCode: 429, message: 'slow' } },
+			})?.name,
+		).toBe('APIError');
+	});
+});
+
 describe('providerMessageErrorToError', () => {
 	test('keeps the category recoverable by classifyProviderFailure', () => {
 		const read = readProviderMessageError(

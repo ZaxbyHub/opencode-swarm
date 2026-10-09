@@ -935,12 +935,16 @@ export class LeanTurboRunner {
 			const readError = promptResult.data
 				? readProviderMessageError(promptResult.data.info)
 				: null;
-			// A truncated reply (`MessageOutputLengthError`) is not a refusal: the
-			// lane keeps the behavior it had before the runner read `info.error`.
-			// The shared reader still reports it, because its other consumers fail
-			// closed on it.
+			// A reply the host ended early (`MessageOutputLengthError` from the output
+			// limit, `MessageContentFilterError` from the content filter) is not a
+			// refusal: the lane keeps the behavior it had before the runner read
+			// `info.error`. The shared reader still reports both, because its other
+			// consumers fail closed on them.
 			const providerError =
-				readError?.name === 'MessageOutputLengthError' ? null : readError;
+				readError?.name === 'MessageOutputLengthError' ||
+				readError?.name === 'MessageContentFilterError'
+					? null
+					: readError;
 			if (!promptResult.data || providerError) {
 				abortController?.abort();
 				void teardownEphemeralSession(session, sessionId);
