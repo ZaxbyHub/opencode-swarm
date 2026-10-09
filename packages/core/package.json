@@ -1,6 +1,6 @@
 {
 	"name": "@opencode-swarm/core",
-	"version": "8.0.0-beta.0",
+	"version": "9.0.0-beta.0",
 	"description": "Platform-agnostic core logic for opencode-swarm — hooks, tools, agents, services",
 	"type": "module",
 	"main": "dist/index.js",
@@ -47,7 +47,7 @@
 		"test": "bun test"
 	},
 	"dependencies": {
-		"@opencode-swarm/telemetry": "8.0.0-beta.0",
+		"@opencode-swarm/telemetry": "9.0.0-beta.0",
 		"@vscode/tree-sitter-wasm": "^0.3.0",
 		"p-limit": "^7.3.0",
 		"proper-lockfile": "^4.1.2",
