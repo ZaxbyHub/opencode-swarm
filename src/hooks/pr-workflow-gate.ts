@@ -10523,6 +10523,7 @@ export async function assertPrReviewArtifactBoundary(
 			state,
 			'reviewer',
 			reviewerComposedForCover.unclaimed,
+			ctx.revisionDigest,
 		)
 			? effectiveVerdictSettlementItems(
 					settlementCoveringAllUnclaimed(
@@ -10530,6 +10531,7 @@ export async function assertPrReviewArtifactBoundary(
 						state,
 						'reviewer',
 						reviewerComposedForCover.unclaimed,
+						ctx.revisionDigest,
 					)!,
 					reviewerComposedForCover.unclaimed,
 				).map((item) => item.itemId)
@@ -10538,13 +10540,12 @@ export async function assertPrReviewArtifactBoundary(
 	const coverableExpected = expectedFindingIds.filter(
 		(id) => !reviewerDeadForCover.has(id),
 	);
-	const normalizedFindingIds = [...new Set(findingIds)]
-		.filter((id) => !reviewerDeadForCover.has(id))
-		.sort();
+	const nonDeadFindingIds = findingIds.filter(
+		(id) => !reviewerDeadForCover.has(id),
+	);
+	const normalizedFindingIds = [...new Set(nonDeadFindingIds)].sort();
 	if (
-		normalizedFindingIds.length !==
-			[...new Set(findingIds.filter((id) => !reviewerDeadForCover.has(id)))]
-				.length ||
+		normalizedFindingIds.length !== nonDeadFindingIds.length ||
 		JSON.stringify(normalizedFindingIds) !==
 			JSON.stringify([...coverableExpected].sort())
 	) {
@@ -10747,6 +10748,7 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 				state,
 				'reviewer',
 				reviewerComposedForMatch.unclaimed,
+				ctx.revisionDigest,
 			)
 				? effectiveVerdictSettlementItems(
 						settlementCoveringAllUnclaimed(
@@ -10754,6 +10756,7 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 							state,
 							'reviewer',
 							reviewerComposedForMatch.unclaimed,
+							ctx.revisionDigest,
 						)!,
 						reviewerComposedForMatch.unclaimed,
 					).map((item) => item.itemId)
@@ -11893,6 +11896,7 @@ async function assertPrReviewTerminalReady(
 				state,
 				'critic',
 				criticComposedForNarrowing.unclaimed,
+				ctx.revisionDigest,
 			)
 				? effectiveVerdictSettlementItems(
 						settlementCoveringAllUnclaimed(
@@ -11900,6 +11904,7 @@ async function assertPrReviewTerminalReady(
 							state,
 							'critic',
 							criticComposedForNarrowing.unclaimed,
+							ctx.revisionDigest,
 						)!,
 						criticComposedForNarrowing.unclaimed,
 					).map((item) => item.itemId)
@@ -16180,12 +16185,16 @@ function admittedVerdictSettlementReceipt(
 	directory: string,
 	state: PrWorkflowGateState,
 	phase: PrReviewVerdictSettlementPhase,
+	expectedRevisionDigest: string,
 ): PrReviewVerdictSettlementReceipt | undefined {
 	const runId = state.prReviewArtifactRunId ?? state.prReviewReservedRunId;
 	if (!runId) return undefined;
 	const read = readVerdictSettlementReceipt(directory, runId, phase);
 	if (read.status !== 'ok') return undefined;
 	if (read.receipt.prHeadSha !== state.prHeadSha) return undefined;
+	if (read.receipt.revisionDigest !== expectedRevisionDigest) {
+		return undefined;
+	}
 	return read.receipt;
 }
 
@@ -16200,9 +16209,15 @@ function settlementCoveringAllUnclaimed(
 	state: PrWorkflowGateState,
 	phase: PrReviewVerdictSettlementPhase,
 	unclaimed: readonly string[],
+	expectedRevisionDigest: string,
 ): PrReviewVerdictSettlementReceipt | undefined {
 	if (unclaimed.length === 0) return undefined;
-	const receipt = admittedVerdictSettlementReceipt(directory, state, phase);
+	const receipt = admittedVerdictSettlementReceipt(
+		directory,
+		state,
+		phase,
+		expectedRevisionDigest,
+	);
 	if (!receipt) return undefined;
 	return effectiveVerdictSettlementItems(receipt, unclaimed).length ===
 		unclaimed.length
@@ -16226,6 +16241,7 @@ async function verdictSettlementDegradesReport(
 		directory,
 		runId: state.prReviewArtifactRunId ?? state.prReviewReservedRunId,
 		prHeadSha: state.prHeadSha,
+		revisionDigest: gateCtx.revisionDigest,
 		reviewerUnclaimed: composePrReviewPhaseVerdicts(
 			directory,
 			state,
@@ -16264,6 +16280,7 @@ function authoritativeReviewerClaims(
 		state,
 		'reviewer',
 		composed.unclaimed,
+		ctx.revisionDigest,
 	)
 		? composed.claims
 		: new Map();
@@ -16367,6 +16384,7 @@ function deriveLatestPrReviewCriticVerdicts(
 			state,
 			'critic',
 			composed.unclaimed,
+			ctx.revisionDigest,
 		)
 	) {
 		return new Map();
@@ -16407,6 +16425,7 @@ function deriveAuthoritativeCriticSettlements(
 		state,
 		'critic',
 		criticComposed.unclaimed,
+		ctx.revisionDigest,
 	);
 	const unavailableIds = new Set(
 		criticSettlement
@@ -16484,6 +16503,7 @@ export async function readPrReviewVerdictSettlementReceiptItems(
 			state,
 			phase,
 			composed.unclaimed,
+			ctx.revisionDigest,
 		);
 		if (!receipt) continue;
 		for (const item of effectiveVerdictSettlementItems(
@@ -16515,6 +16535,7 @@ export async function readPrReviewVerdictSettlementEffectiveIds(
 		state,
 		phase,
 		composed.unclaimed,
+		ctx.revisionDigest,
 	);
 	if (!receipt) return new Set<string>();
 	return new Set(
@@ -16726,6 +16747,7 @@ function derivePrReviewCriticInventoryForCoverageGate(
 				state,
 				'reviewer',
 				reviewer.unclaimed,
+				ctx.revisionDigest,
 			)
 		) {
 			const named = reviewer.unclaimed.slice(0, MAX_UNCLAIMED_ITEMS_IN_MESSAGE);

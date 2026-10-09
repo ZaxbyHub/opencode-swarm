@@ -1677,6 +1677,7 @@ export async function readPrReviewTerminalCoverageForReport(
 					directory,
 					runId: state.prReviewArtifactRunId ?? state.prReviewReservedRunId,
 					prHeadSha: state.prHeadSha,
+					revisionDigest: ctx.revisionDigest,
 					reviewerUnclaimed: composePrReviewPhaseVerdicts(
 						directory,
 						state,

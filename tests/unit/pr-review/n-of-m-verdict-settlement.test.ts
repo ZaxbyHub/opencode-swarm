@@ -268,6 +268,100 @@ describe('issue #3101 N-of-M verdict settlement', () => {
 			).rejects.toThrow(/items lack an authenticated verdict/);
 		});
 
+		test('N-of-M exit requires budget exhaustion: fewer than 1+budget attempts still blocks', async () => {
+			const ids = await establishFullInventory();
+			const live = ids.slice(0, Math.max(1, Math.floor(ids.length / 2)));
+			const dead = ids.slice(live.length);
+			// Batch 1 + ONE retry only (2 attempts < 1 + budget = 3): the
+			// liveness evidence is present, but the budget arm must refuse.
+			await recordPrReviewValidationBatch(
+				tempDir,
+				SESSION_ID,
+				'reviewer',
+				[
+					{
+						laneId: LIVE_LANE,
+						workflowLane: LIVE_LANE,
+						reviewItemIds: live,
+					},
+					{
+						laneId: DEAD_LANE,
+						workflowLane: DEAD_LANE,
+						reviewItemIds: dead,
+					},
+				],
+				{ batchId: 'budget-batch-1', prHeadSha: HEAD_SHA },
+			);
+			await persistBatch(
+				'budget-batch-1',
+				'swarm-pr-review:reviewer',
+				[{ laneId: LIVE_LANE, workflowLane: LIVE_LANE }],
+				{ textOverride: reviewedRows(live) },
+			);
+			await seedLivenessDeadLane({
+				batchId: 'budget-batch-1',
+				laneId: DEAD_LANE,
+				phase: 'reviewer',
+			});
+			await recordPrReviewValidationBatch(
+				tempDir,
+				SESSION_ID,
+				'reviewer',
+				[
+					{
+						laneId: DEAD_LANE,
+						workflowLane: DEAD_LANE,
+						reviewItemIds: dead,
+					},
+				],
+				{ batchId: 'budget-batch-2', prHeadSha: HEAD_SHA },
+			);
+			await seedLivenessDeadLane({
+				batchId: 'budget-batch-2',
+				laneId: DEAD_LANE,
+				phase: 'reviewer',
+			});
+			await expect(
+				assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
+			).rejects.toThrow(/verdict retry budget not exhausted/);
+		});
+
+		test('N-of-M exit drops an item claimed after the receipt was written (effective set shrinks)', async () => {
+			const { liveItems, deadItems } = await establishDeadReviewerWorld();
+			await assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer');
+			// A post-receipt batch claims one formerly-dead item with a
+			// successful live lane artifact.
+			const reclaimed = deadItems[0]!;
+			const stillDead = deadItems.slice(1);
+			await recordPrReviewValidationBatch(
+				tempDir,
+				SESSION_ID,
+				'reviewer',
+				[
+					{
+						laneId: 'reclaim-lane',
+						workflowLane: 'reclaim-lane',
+						reviewItemIds: [reclaimed],
+					},
+				],
+				{ batchId: 'reclaim-batch', prHeadSha: HEAD_SHA },
+			);
+			await persistBatch(
+				'reclaim-batch',
+				'swarm-pr-review:reviewer',
+				[{ laneId: 'reclaim-lane', workflowLane: 'reclaim-lane' }],
+				{ textOverride: reviewedRows([reclaimed]) },
+			);
+			const effective = await readPrReviewVerdictSettlementEffectiveIds(
+				tempDir,
+				SESSION_ID,
+				'reviewer',
+			);
+			expect([...effective].sort()).toEqual([...stillDead].sort());
+			expect([...effective]).not.toContain(reclaimed);
+			void liveItems;
+		});
+
 		test('N-of-M exit fails closed for an unclaimed item with an empty owner set', async () => {
 			const ids = await establishFullInventory();
 			const live = ids.slice(0, Math.max(1, Math.floor(ids.length / 3)));

@@ -323,11 +323,12 @@ export function verdictSettlementDegradationActive(args: {
 	directory: string;
 	runId: string | undefined;
 	prHeadSha: string | undefined;
+	revisionDigest: string | undefined;
 	reviewerUnclaimed: readonly string[];
 	criticUnclaimed: readonly string[];
 }): boolean {
-	const { directory, runId, prHeadSha } = args;
-	if (!runId || !prHeadSha) return false;
+	const { directory, runId, prHeadSha, revisionDigest } = args;
+	if (!runId || !prHeadSha || !revisionDigest) return false;
 	const phases = [
 		{ phase: 'reviewer' as const, unclaimed: args.reviewerUnclaimed },
 		{ phase: 'critic' as const, unclaimed: args.criticUnclaimed },
@@ -335,7 +336,11 @@ export function verdictSettlementDegradationActive(args: {
 	for (const { phase, unclaimed } of phases) {
 		if (unclaimed.length === 0) continue;
 		const read = readVerdictSettlementReceipt(directory, runId, phase);
-		if (read.status !== 'ok' || read.receipt.prHeadSha !== prHeadSha) {
+		if (
+			read.status !== 'ok' ||
+			read.receipt.prHeadSha !== prHeadSha ||
+			read.receipt.revisionDigest !== revisionDigest
+		) {
 			continue;
 		}
 		if (effectiveVerdictSettlementItems(read.receipt, unclaimed).length > 0) {
@@ -344,8 +349,3 @@ export function verdictSettlementDegradationActive(args: {
 	}
 	return false;
 }
-
-export const _internals = {
-	findByBatchIdDetailed,
-	isLivenessTerminalLaneRecord,
-};
