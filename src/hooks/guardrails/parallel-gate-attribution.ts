@@ -72,26 +72,28 @@ export async function resolveParallelGateTaskAttribution(
 	const currentTaskId = swarmState.agentSessions.get(sessionID)?.currentTaskId;
 	if (!needsFileAttribution(candidates, currentTaskId)) return { kind: 'none' };
 
-	// Only tasks of the current plan count: an entry for a task that is no
-	// longer planned (a replaced plan in a long-lived session) awaits nothing.
-	let scopes: Map<string, readonly string[]>;
-	let currentScope: readonly string[] | null = null;
-	try {
-		const plan = await loadPlanJsonOnly(directory);
-		scopes = new Map();
-		for (const phase of plan?.phases ?? []) {
-			for (const task of phase.tasks ?? []) {
-				if (candidates.includes(task.id)) {
-					scopes.set(task.id, task.files_touched ?? []);
-				}
-				if (task.id === currentTaskId) currentScope = task.files_touched ?? [];
-			}
-		}
-	} catch (error) {
+	// loadPlanJsonOnly never throws: a missing or unreadable plan is null.
+	// With a task awaiting Stage A that currentTaskId may not name, falling
+	// back to currentTaskId is exactly the misattribution this resolver
+	// prevents, so an unreadable plan credits no task.
+	const plan = await loadPlanJsonOnly(directory);
+	if (!plan) {
 		return {
 			kind: 'unattributable',
-			message: `STAGE A ATTRIBUTION: ${candidates.length} tasks are awaiting Stage A (${candidates.join(', ')}), but the plan could not be read (${error instanceof Error ? error.message : String(error)}). Nothing was credited.`,
+			message: `STAGE A ATTRIBUTION: ${candidates.length === 1 ? `task ${candidates[0]} is` : `${candidates.length} tasks are`} awaiting Stage A (${candidates.join(', ')}), but .swarm/plan.json is missing or could not be read, so this gate run cannot be credited by its files. Nothing was credited; restore the plan and re-run pre_check_batch.`,
 		};
+	}
+	// Only tasks of the current plan count: an entry for a task that is no
+	// longer planned (a replaced plan in a long-lived session) awaits nothing.
+	const scopes = new Map<string, readonly string[]>();
+	let currentScope: readonly string[] | null = null;
+	for (const phase of plan.phases ?? []) {
+		for (const task of phase.tasks ?? []) {
+			if (candidates.includes(task.id)) {
+				scopes.set(task.id, task.files_touched ?? []);
+			}
+			if (task.id === currentTaskId) currentScope = task.files_touched ?? [];
+		}
 	}
 	const inFlight = candidates.filter((taskId) => scopes.has(taskId));
 	if (!needsFileAttribution(inFlight, currentTaskId)) return { kind: 'none' };

@@ -236,6 +236,81 @@ describe('resolveParallelGateTaskAttribution', () => {
 	});
 });
 
+describe('an unreadable plan credits no task', () => {
+	for (const [label, damage] of [
+		['missing', () => fs.rmSync(path.join(directory, '.swarm', 'plan.json'))],
+		[
+			'invalid',
+			() =>
+				fs.writeFileSync(path.join(directory, '.swarm', 'plan.json'), '{nope'),
+		],
+	] as const) {
+		test(`${label} plan.json: unattributable, never currentTaskId`, async () => {
+			damage();
+			inFlight('2.1', '2.4');
+			const session = swarmState.agentSessions.get('architect');
+			if (session) session.currentTaskId = '2.4';
+			const result = await resolveParallelGateTaskAttribution(
+				directory,
+				'architect',
+				['src/slugify.ts'],
+			);
+			expect(result.kind).toBe('unattributable');
+			if (result.kind === 'unattributable')
+				expect(result.message).toContain(
+					'plan.json is missing or could not be read',
+				);
+		});
+	}
+});
+
+describe('Epic attribution takes precedence over parallel attribution', () => {
+	// The plan's files_touched credits 2.1's files to 2.1; Epic's frozen wave
+	// scope says otherwise. Epic must win in both directions.
+	beforeEach(async () => {
+		await settle('2.1');
+		await settle('2.4');
+		inFlight('2.1', '2.4');
+		const session = swarmState.agentSessions.get('architect');
+		if (session) session.currentTaskId = '2.4';
+	});
+
+	test('an Epic task verdict is kept even when plan scopes credit another task', async () => {
+		_internals.resolveEpicGateTaskAttribution = () => ({
+			kind: 'task',
+			taskId: '2.4',
+		});
+		await runPreCheck(['src/slugify.ts', 'tests/slugify.test.ts'], 'e1');
+		expect(await stateOf('2.4')).toBe('pre_check_passed');
+		expect(await stateOf('2.1')).toBe('coder_delegated');
+	});
+
+	test('an Epic task verdict is kept when plan scopes cannot attribute the run', async () => {
+		_internals.resolveEpicGateTaskAttribution = () => ({
+			kind: 'task',
+			taskId: '2.1',
+		});
+		await runPreCheck(['src/slugify.ts', 'src/lib/case.ts'], 'e2');
+		expect(await stateOf('2.1')).toBe('pre_check_passed');
+		expect(await stateOf('2.4')).toBe('coder_delegated');
+		expect(
+			(
+				swarmState.agentSessions.get('architect')?.pendingAdvisoryMessages ?? []
+			).some((m) => m.startsWith('STAGE A ATTRIBUTION')),
+		).toBe(false);
+	});
+
+	test('an Epic unattributable verdict credits nothing even when plan scopes would', async () => {
+		_internals.resolveEpicGateTaskAttribution = () => ({
+			kind: 'unattributable',
+			message: 'EPIC STAGE A ATTRIBUTION: test message',
+		});
+		await runPreCheck(['src/slugify.ts', 'tests/slugify.test.ts'], 'e3');
+		expect(await stateOf('2.1')).toBe('coder_delegated');
+		expect(await stateOf('2.4')).toBe('coder_delegated');
+	});
+});
+
 describe('guardrails credit the checked task, not the last-returned coder', () => {
 	beforeEach(async () => {
 		await settle('2.1');
