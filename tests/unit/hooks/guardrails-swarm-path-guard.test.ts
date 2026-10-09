@@ -302,7 +302,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			);
 		});
 
-		test('Move-Item C:\\data\\file.txt C:\\data\\renamed.txt → ALLOWED (no .swarm)', async () => {
+		test('Move-Item C:\\data\\file.txt C:\\data\\renamed.txt → BLOCKED (root escape)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -312,7 +312,13 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			const output = makeBashOutput(
 				'Move-Item C:\\data\\file.txt C:\\data\\renamed.txt',
 			);
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			// #3145 PRR-002: the Windows reading of the cmdlet now reaches the
+			// authority check on the bash tool too, so an absolute-path move
+			// outside the workspace fails closed exactly like the shell tool
+			// always did.
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/not authorised/i,
+			);
 		});
 	});
 
