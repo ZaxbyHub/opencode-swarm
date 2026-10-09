@@ -123,6 +123,7 @@ export const phaseCompleteReceiptInternals = {
 	rebindCursorTaggedReceipts: (
 		...args: Parameters<typeof rebindCursorTaggedReceipts>
 	) => rebindCursorTaggedReceipts(...args),
+	loadPlan: (...args: Parameters<typeof loadPlan>) => loadPlan(...args),
 };
 
 /** Narrow seam for guarded-plan commit tests. */
@@ -1490,7 +1491,9 @@ export async function executePhaseComplete(
 	let rebindError: string | null = null;
 	for (let attempt = 0; attempt < 2; attempt++) {
 		try {
-			const normalizedPlan = await loadPlan(dir).catch(() => null);
+			const normalizedPlan = await phaseCompleteReceiptInternals
+				.loadPlan(dir)
+				.catch(() => null);
 			if (!normalizedPlan) {
 				rebindError = 'the plan could not be read after the transition';
 				continue;

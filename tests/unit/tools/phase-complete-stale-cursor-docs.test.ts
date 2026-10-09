@@ -329,4 +329,52 @@ describe('phase_complete stale-cursor docs gate (issue #2702)', () => {
 			phaseCompleteReceiptInternals.rebindCursorTaggedReceipts = originalRebind;
 		}
 	});
+	test('a plan unreadable after the transition is retried once, then reported', async () => {
+		await reserveApprovedPhaseParticipation({
+			directory,
+			tool: 'Task',
+			parentSessionId: 'old-parent',
+			callId: 'docs-call',
+			args: { subagent_type: 'docs' },
+			policy: { require_docs: true },
+		});
+		await observePhaseParticipationToolResult({
+			directory,
+			tool: 'Task',
+			parentSessionId: 'old-parent',
+			callId: 'docs-call',
+			output: {
+				output: 'Documentation was checked and updated.',
+				metadata: { status: 'completed', sessionId: 'docs-child' },
+			},
+		});
+		resetSwarmState();
+		resetPhaseParticipationForTests();
+		const originalLoadPlan = phaseCompleteReceiptInternals.loadPlan;
+		let loads = 0;
+		phaseCompleteReceiptInternals.loadPlan = async () => {
+			loads += 1;
+			return null;
+		};
+		try {
+			const result = JSON.parse(
+				await executePhaseComplete(
+					{ phase: 3, sessionID: 'fresh-parent' },
+					directory,
+					directory,
+				),
+			) as { warnings: unknown[] };
+			expect(loads).toBe(2);
+			expect(
+				result.warnings.some(
+					(warning) =>
+						typeof warning === 'string' &&
+						warning.includes('receipt normalization failed') &&
+						warning.includes('the plan could not be read after the transition'),
+				),
+			).toBe(true);
+		} finally {
+			phaseCompleteReceiptInternals.loadPlan = originalLoadPlan;
+		}
+	});
 });

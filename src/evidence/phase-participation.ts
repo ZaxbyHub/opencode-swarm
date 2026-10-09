@@ -954,6 +954,17 @@ export async function rebindCursorTaggedReceipts(
 ): Promise<{ rebound: number }> {
 	const canonicalRole = stripKnownSwarmPrefix(role);
 	const peek = readRawStore(directory);
+	// A store that cannot be read now may be readable to the next phase's
+	// gate, with a wrap-tagged receipt still in it: report, never skip. A
+	// missing store has no receipts, and a corrupt one is unusable to every
+	// reader (the gate included), so neither can leave a receipt behind.
+	if (peek.status === 'unreadable' || peek.status === 'oversized') {
+		throw new Error(
+			peek.status === 'oversized'
+				? `the participation store is oversized (${peek.bytes} bytes)`
+				: `the participation store could not be read (${peek.error instanceof Error ? peek.error.message : String(peek.error)})`,
+		);
+	}
 	const hasCandidate =
 		peek.status === 'valid' &&
 		peek.store.receipts.some(

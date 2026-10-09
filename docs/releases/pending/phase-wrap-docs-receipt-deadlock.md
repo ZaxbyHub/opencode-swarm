@@ -10,14 +10,22 @@ receipt tagged with N or with a cursor *behind* N. It rejected this one with
 `REQUIRED_AGENTS_MISSING`, and every re-dispatch stamped N+1 again, so with the
 default `require_docs: true` / `enforce` policy the phase could not complete.
 
-A receipt tagged N+1 now satisfies phase N only in that wrap window:
-- the plan cursor is still exactly N+1;
-- every task of phase N is completed or closed.
+A receipt tagged with the plan's current cursor now satisfies phase N only in
+that wrap window:
+- every task of phase N is completed or closed;
+- the cursor is later than N in plan order — usually N+1, or further ahead
+  when every phase in between was closed without work (see
+  `isPhaseInWrapWindow` below).
 
 The `phase_complete` success path re-stamps the receipt to N, as it already did
-for a lagging cursor, so phase N+1 still needs its own docs run. A receipt two
-or more phases ahead, or one recorded before phase N's work was finished, is
-still rejected. A structural plan edit still invalidates every receipt.
+for a lagging cursor, so phase N+1 still needs its own docs run. A receipt
+ahead of N is still rejected when it is not tagged with the current cursor,
+when a phase with completed work lies between N and the cursor, or while
+phase N still has open tasks. A structural plan edit still invalidates every
+receipt. If the re-stamp cannot run (the plan or the participation store
+cannot be read after the transition), it is retried once and then reported
+as a `phase_complete` warning telling the architect to dispatch docs again
+for the next phase.
 
 ## Why
 

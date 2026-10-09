@@ -172,4 +172,35 @@ describe('rebindCursorTaggedReceipts normalization (issue #2702)', () => {
 		expect(freshRead.status).toBe('valid');
 		expect(freshRead.found).toBe(true);
 	});
+	test('an unreadable store is reported, never skipped', async () => {
+		const plan = staleCursorPlan();
+		writePlan(directory, plan);
+		const storeFile = path.join(
+			directory,
+			'.swarm',
+			...PHASE_PARTICIPATION_FILE.split('/'),
+		);
+		fs.mkdirSync(storeFile, { recursive: true });
+		await expect(
+			rebindCursorTaggedReceipts(directory, plan, 3, 'docs'),
+		).rejects.toThrow('participation store could not be read');
+	});
+
+	test('a missing or corrupt store has nothing to rebind', async () => {
+		const plan = staleCursorPlan();
+		writePlan(directory, plan);
+		expect(
+			await rebindCursorTaggedReceipts(directory, plan, 3, 'docs'),
+		).toEqual({ rebound: 0 });
+		const storeFile = path.join(
+			directory,
+			'.swarm',
+			...PHASE_PARTICIPATION_FILE.split('/'),
+		);
+		fs.mkdirSync(path.dirname(storeFile), { recursive: true });
+		fs.writeFileSync(storeFile, '{not json');
+		expect(
+			await rebindCursorTaggedReceipts(directory, plan, 3, 'docs'),
+		).toEqual({ rebound: 0 });
+	});
 });
