@@ -386,8 +386,7 @@ describe('injection policy consumer (#3100) — context-budget report', () => {
 		// bind + 2 budget-report call sites. The budget sites must not use the
 		// #3093 boolean identifier (that would break the frozen
 		// 5-occurrence ratchet in plan-cursor-gate-ratchet-3093.test.ts).
-		const uses =
-			source.match(/shouldInjectChannel\(\s*'plan-cursor'/g) ?? [];
+		const uses = source.match(/shouldInjectChannel\(\s*'plan-cursor'/g) ?? [];
 		expect(uses.length).toBe(3);
 	});
 });
