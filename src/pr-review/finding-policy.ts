@@ -48,7 +48,8 @@ export type CriticOutcome =
 	| 'UPHELD'
 	| 'DOWNGRADED'
 	| 'DISPROVED'
-	| 'NEEDS_MORE_EVIDENCE';
+	| 'NEEDS_MORE_EVIDENCE'
+	| 'CRITIC_UNAVAILABLE';
 
 const CONFIDENCE_SCORE: Record<ConfidenceLabel, number> = {
 	LOW: 0.35,
@@ -607,6 +608,18 @@ export function settleCriticFinding(
 	if (input.outcome === 'NEEDS_MORE_EVIDENCE') {
 		return {
 			terminal: false,
+			status: input.outcome,
+			finalFinding: { ...input.finding },
+			handoffFindingIds: [],
+		};
+	}
+	if (input.outcome === 'CRITIC_UNAVAILABLE') {
+		// Issue #3101: a receipt-backed N-of-M critic settlement. Terminal and
+		// disclosed, but never a synthesized critic outcome — the finding keeps
+		// its reviewer verdict untouched and the report is downgrade-only via
+		// the DEGRADED_DISCLOSED channel.
+		return {
+			terminal: true,
 			status: input.outcome,
 			finalFinding: { ...input.finding },
 			handoffFindingIds: [],

@@ -294,6 +294,7 @@ describe('PR-review finding policy writer/reader integration', () => {
 				records,
 				prior,
 				new Map([['finding-nf3', { status: 'DOWNGRADED', severity: 'LOW' }]]),
+				new Set<string>(),
 			),
 		).toThrow('requires an explicit severity matching the authenticated');
 	});

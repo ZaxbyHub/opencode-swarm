@@ -155,6 +155,20 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 		expect(nonConsecutiveDuplicateMessage).toContain(
 			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: C-5; extra: (none); duplicates: C-0',
 		);
+		// Issue #3101 control: a PURE duplicate (full coverage + one dup, no
+		// missing id) must still be rejected — the dead-item exemption must
+		// never disarm duplicate detection for live items.
+		const pureDuplicateMessage = await rejectionMessage(
+			writePrReviewFindings(directory, 'coverage-run', 'post_explorer', [
+				...candidateIds.map((id) =>
+					artifactRecord(id, 'PENDING', 'route_to_reviewer'),
+				),
+				artifactRecord('C-0', 'PENDING', 'route_to_reviewer'),
+			]),
+		);
+		expect(pureDuplicateMessage).toContain(
+			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: (none); extra: (none); duplicates: C-0',
+		);
 		const extraIdMessage = await rejectionMessage(
 			writePrReviewFindings(
 				directory,

@@ -236,8 +236,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: true,
 		parsesTarget: true,
 		producers: [
-			'src/tools/write-pr-review-artifact.ts:154',
-			'src/tools/write-pr-review-artifact.ts:174',
+			'src/tools/write-pr-review-artifact.ts:155',
+			'src/tools/write-pr-review-artifact.ts:175',
 			// Symbol form: shift-proof against import-order drift in the writer
 			// (issue #3094 re-pin; the old line-form anchor pointed at :105).
 			'src/tools/write-pr-review-trigger-eval.ts:createTriggerReceipt',

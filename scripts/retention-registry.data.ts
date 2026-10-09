@@ -1036,7 +1036,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/tools/write-pr-review-trigger-eval.ts createTriggerReceipt — trigger-eval receipt atomic write (temp+link; refuses overwrite on EEXIST)',
 			'src/tools/pr-review-submission.ts executePrReviewSubmission writeFileSync — a run-scoped submission-payload.json provenance copy, overwritten per attempt (validateSwarmPath-contained, run_id-charset-bounded path; direct write, not temp+rename)',
 			'src/tools/export-pr-review-partial-results.ts executeExportPrReviewPartialResults — a run-scoped post-abort-export.json partial-salvage artifact (issue #3097) written through the canonical atomicWriteSwarmFile (fsync + bounded rename retry + cache invalidation), byte-capped (findings cap + 24 MiB margin; typed artifact-too-large refusal beyond), idempotent re-export; the gate re-check runs immediately before the write',
-			'src/hooks/pr-workflow-gate.ts:11162 tryCreatePrReviewRunReservation — create-only (wx) run-reservation.json owned by the reserving session',
+			'src/hooks/pr-workflow-gate.ts:11289 tryCreatePrReviewRunReservation — create-only (wx) run-reservation.json owned by the reserving session',
 			'src/pr-review/completion.ts:1439 — coverage-disclosure.json atomic write via coverageDisclosureRelativePath (:1095), ≤4 KiB',
 			'src/background/pr-feedback-event-queue.ts:455 writeQueueRecord — feedback-handoff lock/content writes',
 			'src/review/routing-enforcement.ts:481 persistReviewRouteReceipt — schema-validated route-receipt replacement, atomic, ≤64 KiB',

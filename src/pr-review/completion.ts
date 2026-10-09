@@ -65,6 +65,7 @@ import {
 	evaluateFinalFindingPolicy,
 	type FinalPolicyFinding,
 } from './finding-policy.js';
+import { composePrReviewPhaseVerdicts } from './legacy-transcript-adapter.js';
 import {
 	isoNow,
 	normalizeSessionID,
@@ -72,6 +73,7 @@ import {
 	writeAtomicJson,
 	writeStateWhileLocked,
 } from './persistence.js';
+import { verdictSettlementDegradationActive } from './verdict-settlement.js';
 
 // ---------------------------------------------------------------------------
 // Structural state slice + gate-helper binding seam
@@ -1666,10 +1668,29 @@ export async function readPrReviewTerminalCoverageForReport(
 		// degradations downgrade the verdict matrix the same way the
 		// completion gates enforce (DEGRADED_DISCLOSED never approves).
 		allowedVerdicts: allowedPrReviewReportVerdicts(settlement.kind, [], {
-			disclosedCoverageDegradation: prReviewReceiptHasCoverageDegradations(
-				directory,
-				state.prReviewTriggerEvalPath,
-			),
+			disclosedCoverageDegradation:
+				prReviewReceiptHasCoverageDegradations(
+					directory,
+					state.prReviewTriggerEvalPath,
+				) ||
+				verdictSettlementDegradationActive({
+					directory,
+					runId: state.prReviewArtifactRunId ?? state.prReviewReservedRunId,
+					prHeadSha: state.prHeadSha,
+					revisionDigest: ctx.revisionDigest,
+					reviewerUnclaimed: composePrReviewPhaseVerdicts(
+						directory,
+						state,
+						'reviewer',
+						ctx,
+					).unclaimed,
+					criticUnclaimed: composePrReviewPhaseVerdicts(
+						directory,
+						state,
+						'critic',
+						ctx,
+					).unclaimed,
+				}),
 		}),
 	};
 }
