@@ -36,6 +36,50 @@ describe('readProviderMessageError', () => {
 	});
 });
 
+describe('readProviderMessageError field handling', () => {
+	test('a message that sanitizes to nothing never falls back to raw text', () => {
+		const read = readProviderMessageError(
+			info({ name: 'APIError', data: { message: '\u001b\u001b\u0007' } }),
+		);
+		expect(read?.message).toBe('no message');
+	});
+
+	test('blank or non-string messages read as "no message"', () => {
+		for (const message of ['   ', 42, undefined])
+			expect(
+				readProviderMessageError(info({ name: 'APIError', data: { message } }))
+					?.message,
+			).toBe('no message');
+	});
+
+	test('a non-finite or non-numeric statusCode is dropped', () => {
+		for (const statusCode of [Number.NaN, Number.POSITIVE_INFINITY, '403'])
+			expect(
+				readProviderMessageError(
+					info({ name: 'APIError', data: { statusCode, message: 'x' } }),
+				),
+			).not.toHaveProperty('statusCode');
+	});
+
+	test('the error name is bounded and an empty or non-string name is UnknownError', () => {
+		expect(
+			readProviderMessageError(info({ name: 'N'.repeat(100), data: {} }))?.name,
+		).toHaveLength(64);
+		for (const name of ['', 7])
+			expect(readProviderMessageError(info({ name }))?.name).toBe(
+				'UnknownError',
+			);
+	});
+
+	test('format omits the HTTP part without a status', () => {
+		const read = readProviderMessageError(
+			info({ name: 'APIError', data: { message: 'boom' } }),
+		);
+		if (!read) throw new Error('expected a provider error');
+		expect(formatProviderMessageError('p', read)).toBe('p: APIError: boom');
+	});
+});
+
 describe('providerMessageErrorToError', () => {
 	test('keeps the category recoverable by classifyProviderFailure', () => {
 		const read = readProviderMessageError(

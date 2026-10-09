@@ -6,8 +6,12 @@
  * the failure is the assistant message's `info.error` and the message has no
  * text. A consumer that reads only the text parts therefore sees an empty —
  * apparently successful — response, and its retry / model-fallback path
- * never runs. Every `session.prompt` consumer reads `info.error` through this
- * module and turns it into an error on its existing error path.
+ * never runs. The consumers that import this module (full-auto oversight and
+ * intercept, the curator / skill-improver LLM factories, the ephemeral agent
+ * dispatcher, the mutation generator and the Lean integration) read
+ * `info.error` through it and turn it into an error on their existing error
+ * path. Not every `session.prompt` consumer does yet: the Lean lane runner
+ * (`src/turbo/lean/runner.ts`) still checks only `promptResult.data`.
  */
 import { classifyProviderFailure } from './invocation-failure';
 
@@ -58,7 +62,9 @@ export function readProviderMessageError(
 				? name.slice(0, 64)
 				: 'UnknownError',
 		...(statusCode === undefined ? {} : { statusCode }),
-		message: classified.evidence.display || rawMessage.slice(0, 200),
+		// The sanitized display can be empty (e.g. a message of only control
+		// characters); fall back to a constant, never to the raw text.
+		message: classified.evidence.display || 'no message',
 		category: classified.category,
 	};
 }
