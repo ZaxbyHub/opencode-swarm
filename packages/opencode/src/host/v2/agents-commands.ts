@@ -16,9 +16,16 @@
  *   - Entries the v1 hook marks `disable: true` are REMOVED on the v2 agent
  *     editor.
  *   - v1 command entries `{template, description}` → v2 CommandDefinition
- *     whose `execute` submits the expanded template through
- *     `ctx.session.prompt` (TUI-side $ARGUMENTS expansion is replaced by
- *     direct substitution).
+ *     whose `execute` FIRST runs the v1 `command.execute.before` chain
+ *     (deterministic /swarm subcommands — the handler acts only on
+ *     `command === 'swarm'`, exactly as on v1; alias keys like swarm-status
+ *     keep their v1 LLM routing). Non-empty `output.parts` are delivered
+ *     through `ctx.session.synthetic` with `resume: false` — the v2 carrier
+ *     for deterministic output, since V2CommandDefinition.execute returns
+ *     `Promise<void>` and cannot return parts. Empty parts (or a missing
+ *     synthetic surface) fall back to submitting the expanded template
+ *     through `ctx.session.prompt` (TUI-side $ARGUMENTS expansion is
+ *     replaced by direct substitution).
  */
 
 import { log } from '@opencode-swarm/core';
@@ -33,6 +40,9 @@ import type {
 } from './types';
 
 const V2_REGISTRATION_TIMEOUT_MS = 60_000;
+
+/** Bound for one v2 command execution leg (deterministic handler or delivery). */
+const V2_COMMAND_EXECUTE_TIMEOUT_MS = 60_000;
 
 interface V1AgentConfigLike {
 	mode?: unknown;
@@ -101,7 +111,28 @@ export function expandV1Template(
 	template: string,
 	argumentsText: string,
 ): string {
-	return template.replaceAll('$ARGUMENTS', argumentsText).trim();
+	// Replacer FUNCTION: a plain-string replacement would interpret $& / $` /
+	// $' / $$ sequences inside user arguments as match patterns (UR-09).
+	return template.replaceAll('$ARGUMENTS', () => argumentsText).trim();
+}
+
+/** Join a deterministic command handler's text parts; undefined when none. */
+function collectDeterministicText(
+	parts: ReadonlyArray<unknown>,
+): string | undefined {
+	const texts: string[] = [];
+	for (const part of parts) {
+		if (
+			part &&
+			typeof part === 'object' &&
+			(part as { type?: unknown }).type === 'text' &&
+			typeof (part as { text?: unknown }).text === 'string'
+		) {
+			texts.push((part as { text: string }).text);
+		}
+	}
+	if (texts.length === 0) return undefined;
+	return texts.join('\n');
 }
 
 /** Register agents + commands via the synthetic config-hook run. */
@@ -130,8 +161,8 @@ export async function registerV2AgentsAndCommands(
 		{ template?: unknown; description?: unknown }
 	>;
 
-	const agentRegistration = await withTimeout(
-		ctx.agent.transform((editor: V2AgentEditor) => {
+	const agentTransform: Promise<V2Registration> = ctx.agent.transform(
+		(editor: V2AgentEditor) => {
 			for (const [name, config] of Object.entries(agentTable)) {
 				if (!config || typeof config !== 'object') continue;
 				if (config.disable === true) {
@@ -145,55 +176,142 @@ export async function registerV2AgentsAndCommands(
 					Object.assign(agent, mapped);
 				});
 			}
-		}),
+		},
+	);
+	// Track the moment each registration resolves (M-7): a late resolve after
+	// a timeout win must still reach the cleanup list. Rejection pushes nothing.
+	agentTransform
+		.then((reg) => {
+			registrations.push(reg);
+		})
+		.catch(() => {
+			// withTimeout surfaces the rejection below; nothing to track.
+		});
+	await withTimeout(
+		agentTransform,
 		V2_REGISTRATION_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: agent transform exceeded budget'),
 	);
-	registrations.push(agentRegistration);
 
-	const commandRegistration = await withTimeout(
-		ctx.command.transform(
-			(editor: { add(definition: V2CommandDefinition): void }) => {
-				for (const [key, entry] of Object.entries(commandTable)) {
-					if (!entry || typeof entry !== 'object') continue;
-					const template =
-						typeof entry.template === 'string' ? entry.template : undefined;
-					if (template === undefined) continue;
-					const definition: V2CommandDefinition = {
-						name: key,
-						description:
-							typeof entry.description === 'string'
-								? entry.description
-								: undefined,
-						execute: async (invocation) => {
-							const text = expandV1Template(
-								template,
-								invocation?.prompt?.text ?? '',
-							);
-							const prompt = ctx.session?.prompt;
-							if (typeof prompt !== 'function') {
-								log('v2 command executed without a session prompt surface', {
-									name: key,
-								});
-								return;
+	const commandTransform: Promise<V2Registration> = ctx.command.transform(
+		(editor: { add(definition: V2CommandDefinition): void }) => {
+			for (const [key, entry] of Object.entries(commandTable)) {
+				if (!entry || typeof entry !== 'object') continue;
+				const template =
+					typeof entry.template === 'string' ? entry.template : undefined;
+				if (template === undefined) continue;
+				const definition: V2CommandDefinition = {
+					name: key,
+					description:
+						typeof entry.description === 'string'
+							? entry.description
+							: undefined,
+					execute: async (invocation) => {
+						const argumentsText = invocation?.prompt?.text ?? '';
+						const text = expandV1Template(template, argumentsText);
+						// FB-006: deterministic path FIRST. The v1 factory exposes
+						// hooks['command.execute.before'] = safeHook(commandHandler)
+						// (src/index.ts), and the handler's contract (src/commands/
+						// index.ts) is (input:{command, sessionID, arguments},
+						// output:{parts}) — it acts only on command === 'swarm' and
+						// reads the EXPANDED $ARGUMENTS from input.arguments, which
+						// v2 supplies as invocation.prompt.text (the same expansion
+						// input the template substitution above uses).
+						const commandBefore = hooks['command.execute.before'];
+						if (typeof commandBefore === 'function') {
+							const v1Input = {
+								command: key,
+								sessionID: invocation.sessionID,
+								arguments: argumentsText,
+							};
+							const v1Output: { parts: unknown[] } = { parts: [] };
+							try {
+								await withTimeout(
+									Promise.resolve(commandBefore(v1Input, v1Output)),
+									V2_COMMAND_EXECUTE_TIMEOUT_MS,
+									new Error(
+										`[opencode-swarm] v2: command ${key} deterministic handler exceeded budget`,
+									),
+								);
+							} catch (err) {
+								const message =
+									err instanceof Error ? err.message : String(err);
+								// Ungated (FB-014/M-16): deterministic-handler loss must
+								// be visible without OPENCODE_SWARM_DEBUG. One line.
+								console.warn(
+									`[opencode-swarm] v2 command ${key} deterministic handler failed (non-fatal):`,
+									message,
+								);
+								log(
+									'v2 deterministic command handler failed (non-fatal); falling back to prompt',
+									{ name: key, error: message },
+								);
 							}
-							await withTimeout(
-								Promise.resolve(prompt(invocation.sessionID, { text })),
-								V2_REGISTRATION_TIMEOUT_MS,
-								new Error(
-									`[opencode-swarm] v2: command ${key} prompt exceeded budget`,
-								),
+							const deterministicText = collectDeterministicText(
+								v1Output.parts,
 							);
-						},
-					};
-					editor.add(definition);
-				}
-			},
-		),
+							if (deterministicText !== undefined) {
+								// V2CommandDefinition.execute returns Promise<void> (no
+								// parts-return surface — vendored type + @opencode/plugin
+								// 2.0.20 dist/promise/command.d.ts), so the v1
+								// output.parts analog is delivered through
+								// session.synthetic with resume:false — text admitted
+								// to the session WITHOUT waking the model.
+								const synthetic = ctx.session?.synthetic;
+								if (typeof synthetic === 'function') {
+									await withTimeout(
+										Promise.resolve(
+											synthetic({
+												sessionID: invocation.sessionID,
+												text: deterministicText,
+												resume: false,
+											}),
+										),
+										V2_COMMAND_EXECUTE_TIMEOUT_MS,
+										new Error(
+											`[opencode-swarm] v2: command ${key} deterministic delivery exceeded budget`,
+										),
+									);
+									return;
+								}
+								log(
+									'v2 deterministic command output has no synthetic surface; falling back to prompt',
+									{ name: key },
+								);
+							}
+						}
+						const prompt = ctx.session?.prompt;
+						if (typeof prompt !== 'function') {
+							log('v2 command executed without a session prompt surface', {
+								name: key,
+							});
+							return;
+						}
+						await withTimeout(
+							Promise.resolve(prompt(invocation.sessionID, { text })),
+							V2_REGISTRATION_TIMEOUT_MS,
+							new Error(
+								`[opencode-swarm] v2: command ${key} prompt exceeded budget`,
+							),
+						);
+					},
+				};
+				editor.add(definition);
+			}
+		},
+	);
+	commandTransform
+		.then((reg) => {
+			registrations.push(reg);
+		})
+		.catch(() => {
+			// withTimeout surfaces the rejection below; nothing to track.
+		});
+	await withTimeout(
+		commandTransform,
 		V2_REGISTRATION_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: command transform exceeded budget'),
 	);
-	registrations.push(commandRegistration);
 
 	log('v2 agents + commands registered', {
 		directory,

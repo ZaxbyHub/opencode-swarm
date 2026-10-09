@@ -30,6 +30,11 @@
  *   - D4: no deferred event pump — 8.x v1 exposes no `event` hook, so
  *     startDeferredEventPump / state.pumpStop are not ported (events.ts was
  *     deliberately not staged).
+ *   - D5 (FB-009): no runtime agent-model apply surface — the 7.x module
+ *     that owned it was deleted outright; its only 7.x caller was the v1
+ *     chat-boundary event hook, which the 8.x v1 factory does not have,
+ *     leaving the surface permanently unwired. Runtime model rewrites (if
+ *     ever needed) require a new plan.
  *
  * Init boundedness (AGENTS.md invariant 1): every `await` in src/host/** is
  * either on the same physical line as a `withTimeout(` call or inside a
@@ -45,10 +50,6 @@ import { z } from 'zod';
 import { registerV2AgentsAndCommands } from './agents-commands';
 import { registerV2ContextHook } from './guidance';
 import { registerV2SessionHooks, registerV2ToolHooks } from './hooks';
-import {
-	clearV2AgentTransformSurface,
-	registerV2AgentTransformSurface,
-} from './model-apply';
 import { withTimeout } from './timeout';
 import { registerV2Tools } from './tools';
 import type { V1HooksSubset, V2PluginContext, V2Registration } from './types';
@@ -65,6 +66,8 @@ export interface V2SetupDependencies {
 interface CollectedState {
 	readonly registrations: V2Registration[];
 	disposeV1?: () => Promise<void>;
+	/** Idempotency latch for the returned cleanup (per-setup, not module-global). */
+	cleanupStarted?: boolean;
 }
 
 /** Normalize a v2 agent reference (Agent.Info object or bare string) to a name. */
@@ -125,8 +128,15 @@ export async function openCodeSwarmV2Setup(
 			'[opencode-swarm] v2 setup: agent/command registration exceeded budget',
 		),
 	).catch((err: unknown) => {
+		const message = err instanceof Error ? err.message : String(err);
+		// Ungated (FB-014/M-16): surface loss must be visible without
+		// OPENCODE_SWARM_DEBUG. One line, no stack.
+		console.warn(
+			'[opencode-swarm] v2 agent/command registration failed (non-fatal):',
+			message,
+		);
 		log('v2 agent/command registration failed (non-fatal)', {
-			error: err instanceof Error ? err.message : String(err),
+			error: message,
 		});
 	});
 
@@ -136,9 +146,12 @@ export async function openCodeSwarmV2Setup(
 		V2_SETUP_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2 setup: tool registration exceeded budget'),
 	).catch((err: unknown) => {
-		log('v2 tool registration failed (non-fatal)', {
-			error: err instanceof Error ? err.message : String(err),
-		});
+		const message = err instanceof Error ? err.message : String(err);
+		console.warn(
+			'[opencode-swarm] v2 tool registration failed (non-fatal):',
+			message,
+		);
+		log('v2 tool registration failed (non-fatal)', { error: message });
 	});
 
 	// Guidance (context hook), tool hooks, compaction, prompt.
@@ -149,8 +162,13 @@ export async function openCodeSwarmV2Setup(
 			'[opencode-swarm] v2 setup: guidance registration exceeded budget',
 		),
 	).catch((err: unknown) => {
+		const message = err instanceof Error ? err.message : String(err);
+		console.warn(
+			'[opencode-swarm] v2 context-hook registration failed (non-fatal):',
+			message,
+		);
 		log('v2 context-hook registration failed (non-fatal)', {
-			error: err instanceof Error ? err.message : String(err),
+			error: message,
 		});
 	});
 	await withTimeout(
@@ -160,9 +178,12 @@ export async function openCodeSwarmV2Setup(
 			'[opencode-swarm] v2 setup: tool-hook registration exceeded budget',
 		),
 	).catch((err: unknown) => {
-		log('v2 tool-hook registration failed (non-fatal)', {
-			error: err instanceof Error ? err.message : String(err),
-		});
+		const message = err instanceof Error ? err.message : String(err);
+		console.warn(
+			'[opencode-swarm] v2 tool-hook registration failed (non-fatal):',
+			message,
+		);
+		log('v2 tool-hook registration failed (non-fatal)', { error: message });
 	});
 	await withTimeout(
 		registerV2SessionHooks(ctx, hooks, directory, state.registrations),
@@ -171,14 +192,13 @@ export async function openCodeSwarmV2Setup(
 			'[opencode-swarm] v2 setup: prompt-hook registration exceeded budget',
 		),
 	).catch((err: unknown) => {
-		log('v2 prompt-hook registration failed (non-fatal)', {
-			error: err instanceof Error ? err.message : String(err),
-		});
+		const message = err instanceof Error ? err.message : String(err);
+		console.warn(
+			'[opencode-swarm] v2 prompt-hook registration failed (non-fatal):',
+			message,
+		);
+		log('v2 prompt-hook registration failed (non-fatal)', { error: message });
 	});
-
-	// Remember the agent transform surface for runtime model rewrites (the
-	// v2-native equivalent of the v1 chat-boundary model override write).
-	registerV2AgentTransformSurface(ctx);
 
 	state.disposeV1 =
 		typeof hooks.dispose === 'function' ? hooks.dispose : undefined;
@@ -189,7 +209,12 @@ export async function openCodeSwarmV2Setup(
 	});
 
 	return async function cleanupV2Plugin(): Promise<void> {
-		clearV2AgentTransformSurface();
+		// Idempotent (M-7): a host may invoke the returned cleanup more than
+		// once; a second pass must not re-dispose registrations. The latch is
+		// per-setup state, so a second setup() in the same process still gets
+		// its own cleanup.
+		if (state.cleanupStarted) return;
+		state.cleanupStarted = true;
 		for (const registration of state.registrations) {
 			try {
 				await withTimeout(

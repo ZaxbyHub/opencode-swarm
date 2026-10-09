@@ -75,6 +75,8 @@ Swarm separates planning, implementation, review, testing, and documentation int
 npm install -g opencode-swarm
 ```
 
+> **Compatibility:** opencode-swarm requires an OpenCode host with the object-shaped plugin API — OpenCode **1.3.4 or newer on the v1 line**, or **any 2.x release**. Hosts older than 1.3.4 call every plugin export as a function and will silently drop the plugin (no Swarm agents appear, and no error is shown).
+
 ### 2. Open your project in OpenCode
 
 ```bash

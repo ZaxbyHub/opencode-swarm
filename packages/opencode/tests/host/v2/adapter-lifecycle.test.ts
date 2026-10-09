@@ -103,6 +103,51 @@ describe('setup fail-closed + cleanup ordering (PRR-011)', () => {
 		expect(order).toContain('dispose');
 		expect(order[order.length - 1]).toBe('v1-dispose');
 	});
+
+	test('cleanup is idempotent: a second invocation disposes nothing again (M-7)', async () => {
+		let disposes = 0;
+		let v1Disposes = 0;
+		const registration = {
+			dispose: async () => {
+				disposes += 1;
+			},
+		};
+		const directory = canonicalMkdtemp('swarm-v2-idem-');
+		const ctx = {
+			app: { name: 'opencode', version: 'test', channel: 'test' },
+			location: { directory, workspaceID: 'w' },
+			options: {},
+			tool: {
+				transform: async () => registration,
+				reload: async () => {},
+				list: async () => [],
+				hook: async () => registration,
+			},
+			agent: { transform: async () => registration, reload: async () => {} },
+			command: { transform: async () => registration, reload: async () => {} },
+			session: { hook: async () => registration },
+			event: {},
+			permission: {},
+		} as never;
+		const deps = {
+			runInit: async () =>
+				makeHooks({
+					dispose: async () => {
+						v1Disposes += 1;
+					},
+				}),
+		};
+		const cleanup = await openCodeSwarmV2Setup(ctx, deps as never);
+		await cleanup();
+		await cleanup();
+		await cleanup();
+		// Each of the 8 registrations (agent + command + tool transforms,
+		// context + tool.before/after + compaction + prompt hooks) disposed
+		// exactly once across the repeated calls; the latch is per-setup
+		// state, so nothing module-global was consumed.
+		expect(disposes).toBe(8);
+		expect(v1Disposes).toBe(1);
+	});
 });
 
 describe('command execute -> session.prompt bridge (PRR-011)', () => {
@@ -176,6 +221,42 @@ describe('command execute -> session.prompt bridge (PRR-011)', () => {
 		expect(prompts.length).toBe(1);
 		expect(prompts[0].sessionID).toBe('s-cmd');
 		expect(prompts[0].input).toEqual({ text: '/swarm status now show lanes' });
+	});
+});
+
+describe('late-registration tracking (M-7)', () => {
+	test('a rejecting transform pushes no registration and propagates', async () => {
+		const { registerV2Tools } = await import('../../../src/host/v2/tools');
+		const registrations: Array<{ dispose: () => Promise<void> }> = [];
+		const hooks = makeHooks({
+			tool: {
+				fake: {
+					description: 'd',
+					args: {},
+					execute: async () => 'ok',
+				},
+			},
+		});
+		await expect(
+			registerV2Tools(
+				{
+					tool: {
+						transform: async () => {
+							throw new Error('transform boom');
+						},
+						reload: async () => {},
+						hook: async () => ({ dispose: async () => {} }),
+					},
+					permission: {},
+				} as never,
+				hooks,
+				'.',
+				registrations,
+			),
+		).rejects.toThrow('transform boom');
+		// On rejection nothing is tracked — the caller sees the error and the
+		// cleanup list stays honest (no phantom dispose).
+		expect(registrations).toEqual([]);
 	});
 });
 

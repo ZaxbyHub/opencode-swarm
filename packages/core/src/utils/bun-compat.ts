@@ -451,6 +451,11 @@ export const _internals = {
 	 * without elevation, instead of skipping the case.
 	 */
 	statSync: (target: string): fsSync.Stats => fsSync.statSync(target),
+	/**
+	 * Win32 .cmd/.bat resolution for the Node spawn branches (FB-007a).
+	 * Exported so tests can drive the resolution table directly on any host.
+	 */
+	resolveWindowsCommand: resolveWindowsCommandDefault,
 };
 
 // ---------------------------------------------------------------------------
@@ -1055,6 +1060,132 @@ function spawnCreationFailure(error: Error): BunCompatSubprocess {
 	};
 }
 
+// ---------------------------------------------------------------------------
+// Windows .cmd/.bat spawn resolution (PR #3163 feedback, FB-007a)
+//
+// `node:child_process` does NOT run PATHEXT resolution: spawning the bare
+// name `npm` (whose real file is `npm.cmd`) fails ENOENT under Node, and
+// spawning a `.cmd`/`.bat` path directly throws EINVAL since Node's
+// CVE-2024-27980 hardening. Bun performs this resolution internally, which
+// is why the bug only bites the Node fallback branches below. Callers were
+// written against 7.x, where the audit tooling resolved this itself
+// (`resolveAuditCommand` in 7.x pkg-audit); routing the resolution through
+// the shim gives every Node-branch caller the same behavior.
+// ---------------------------------------------------------------------------
+
+/** How a command's leading token must be spawned after win32 resolution. */
+interface WindowsCommandPrefix {
+	/** Executable token to hand to `node:child_process`. */
+	file: string;
+	/** True when `file` is a batch script that must run via `cmd.exe /c`. */
+	cmdWrap: boolean;
+}
+
+/**
+ * Bounded memo of positive PATH-probe results. Only successes are cached:
+ * a negative cache entry would pin "not installed" for the process lifetime
+ * even after the tool is installed. FIFO eviction keeps the map finite
+ * (AGENTS.md invariant 8).
+ */
+const windowsCommandCache = new Map<string, WindowsCommandPrefix>();
+const MAX_WINDOWS_COMMAND_CACHE_ENTRIES = 64;
+
+function rememberWindowsCommand(
+	key: string,
+	resolved: WindowsCommandPrefix,
+): void {
+	if (windowsCommandCache.size >= MAX_WINDOWS_COMMAND_CACHE_ENTRIES) {
+		const oldest = windowsCommandCache.keys().next().value;
+		if (oldest !== undefined) windowsCommandCache.delete(oldest);
+	}
+	windowsCommandCache.set(key, resolved);
+}
+
+/** Searches the parent's PATH for `fileName`, returning the absolute hit. */
+function findOnWindowsPath(fileName: string): string | undefined {
+	const pathVar = process.env.PATH;
+	if (!pathVar) return undefined;
+	for (const dir of pathVar.split(path.delimiter)) {
+		if (!dir) continue;
+		const candidate = path.join(dir, fileName);
+		try {
+			if (_internals.statSync(candidate).isFile()) return candidate;
+		} catch {
+			// Not present in this directory — keep walking PATH.
+		}
+	}
+	return undefined;
+}
+
+function probeWindowsCommand(file: string): WindowsCommandPrefix | undefined {
+	const cached = windowsCommandCache.get(file);
+	if (cached) return cached;
+	// Executable images win over batch scripts, mirroring CreateProcess's
+	// PATHEXT precedence (.COM;.EXE before .BAT;.CMD for our probe set).
+	const image =
+		findOnWindowsPath(`${file}.com`) ?? findOnWindowsPath(`${file}.exe`);
+	if (image) {
+		const hit = { file: image, cmdWrap: false };
+		rememberWindowsCommand(file, hit);
+		return hit;
+	}
+	const script =
+		findOnWindowsPath(`${file}.cmd`) ?? findOnWindowsPath(`${file}.bat`);
+	if (script) {
+		const hit = { file: script, cmdWrap: true };
+		rememberWindowsCommand(file, hit);
+		return hit;
+	}
+	return undefined;
+}
+
+/**
+ * Win32-only command resolution for the Node fallback branches of
+ * `bunSpawn`/`bunSpawnSync`:
+ *  - `.exe` (case-insensitive) → used as-is;
+ *  - `.cmd`/`.bat` → routed through `cmd.exe /d /s /c call <file>` (array
+ *    argv, never a shell string — Node quotes each argument itself);
+ *  - otherwise a PATH probe for `.com`/`.exe` (absolute path) then
+ *    `.cmd`/`.bat` (cmd.exe wrap);
+ *  - unresolved → returned unchanged so the spawn error path reports the
+ *    caller's original command name.
+ *
+ * The `call` token is load-bearing, verified empirically on Windows (Node
+ * 24, npm in `C:\Program Files\nodejs`): without it, Node quotes the spaced
+ * script path and cmd.exe's `/s` rule strips the first and last quote of the
+ * line, yielding `'C:\Program' is not recognized`. With `call` as the token
+ * right after `/c`, the first character after `/c` is not a quote, so no
+ * stripping happens and `call` receives the still-quoted script path — the
+ * same insight 7.x's `resolveAuditCommand` documented. Bare names need no
+ * quoting but `call` is harmless for them.
+ *
+ * Non-win32 platforms and path-qualified names (PATH search semantics do not
+ * apply) pass through unchanged.
+ */
+function resolveWindowsCommandDefault(
+	file: string,
+	args: string[],
+): { file: string; args: string[] } {
+	if (_internals.platform() !== 'win32') return { file, args };
+	const lowered = file.toLowerCase();
+	if (lowered.endsWith('.exe')) return { file, args };
+	if (lowered.endsWith('.cmd') || lowered.endsWith('.bat')) {
+		// The original token rides after `call`; for a bare name cmd's own
+		// PATH search resolves it, and windowsHide is set by both callers.
+		return { file: 'cmd.exe', args: ['/d', '/s', '/c', 'call', file, ...args] };
+	}
+	if (file.includes('/') || file.includes('\\')) return { file, args };
+	const hit = probeWindowsCommand(file);
+	if (!hit) return { file, args };
+	if (hit.cmdWrap) {
+		return {
+			file: 'cmd.exe',
+			args: ['/d', '/s', '/c', 'call', hit.file, ...args],
+		};
+	}
+	return { file: hit.file, args };
+}
+
 export function bunSpawn(
 	cmd: string[],
 	options?: BunCompatSpawnOptions,
@@ -1168,7 +1299,23 @@ export function bunSpawn(
 			killTree: killBunProcess,
 		};
 	}
-	const [file, ...args] = cmd;
+	const [requestedFile, ...requestedArgs] = cmd;
+	// FB-007a: under Node on win32, resolve bare batch-shim names (`npm`,
+	// `npx`, …) and `.cmd`/`.bat` paths before handing them to
+	// `node:child_process`. Error attribution below keeps the caller's
+	// original command name — a resolution that produced `cmd.exe` must not
+	// rewrite ENOENT messages about the tool the caller asked for.
+	let file = requestedFile;
+	let args = requestedArgs;
+	if (
+		typeof file === 'string' &&
+		file.length > 0 &&
+		_internals.platform() === 'win32'
+	) {
+		const resolved = _internals.resolveWindowsCommand(file, args);
+		file = resolved.file;
+		args = resolved.args;
+	}
 	const detached = options?.killProcessTree === true;
 	const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
 	// `child_process.spawn` normally reports failures asynchronously, but it
@@ -1189,7 +1336,9 @@ export function bunSpawn(
 			],
 		});
 	} catch (error) {
-		return spawnCreationFailure(wrapSpawnFailure(error, options?.cwd, file));
+		return spawnCreationFailure(
+			wrapSpawnFailure(error, options?.cwd, requestedFile ?? ''),
+		);
 	}
 
 	const killChildTree = createProcessTreeKiller(
@@ -1217,8 +1366,13 @@ export function bunSpawn(
 		proc.on('error', (error) => {
 			// #2236: the Node path's own creation-failure channel gets the same
 			// retyping as the Bun path, so `spawnError` means the same thing on
-			// both runtimes.
-			observedSpawnError = wrapSpawnFailure(error, options?.cwd, file);
+			// both runtimes. The executable named in the typed error is the
+			// caller's original token, not the win32-resolved spawn target.
+			observedSpawnError = wrapSpawnFailure(
+				error,
+				options?.cwd,
+				requestedFile ?? '',
+			);
 			resolve(1);
 		});
 		if (options?.timeout && options.timeout > 0) {
@@ -1320,13 +1474,39 @@ export function bunSpawnSync(
 		  }
 		| undefined;
 	if (bun?.spawnSync) {
-		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
-		const spawnOpts: Record<string, unknown> = { ...options };
-		// `maxBuffer` is an async compatibility-layer option, not a Bun API.
-		delete spawnOpts.maxBuffer;
-		if (mergedEnv !== undefined) spawnOpts.env = mergedEnv;
+		// FB-007a/FIX 4 (PR #3163 feedback): for the ARRAY form Bun honors the
+		// second-argument options object, but for the OBJECT form it ignores
+		// the second argument entirely — every option must ride inside the
+		// object itself. Merge the second-arg options into a COPY of the
+		// caller's object (never mutate it; the options win per-field, i.e.
+		// `opts.x ?? cmd.x`) and call `bun.spawnSync` single-arg so the options
+		// are honored under Bun too.
+		const baseEnv = Array.isArray(cmd)
+			? options?.env
+			: (options?.env ?? cmd.env);
+		const mergedEnv = mergeEnvForChild(baseEnv, options?.envOverrides);
+		if (Array.isArray(cmd)) {
+			const spawnOpts: Record<string, unknown> = { ...options };
+			// `maxBuffer` is an async compatibility-layer option, not a Bun API.
+			delete spawnOpts.maxBuffer;
+			if (mergedEnv !== undefined) spawnOpts.env = mergedEnv;
+			try {
+				return bun.spawnSync(cmd, spawnOpts);
+			} catch (error) {
+				return syncSpawnCreationFailure(
+					wrapSpawnFailure(error, requestedCwd, executable),
+				);
+			}
+		}
+		const mergedCmd: Record<string, unknown> = { ...cmd };
+		if (options?.cwd !== undefined) mergedCmd.cwd = options.cwd;
+		if (options?.timeout !== undefined) mergedCmd.timeout = options.timeout;
+		if (options?.stdin !== undefined) mergedCmd.stdin = options.stdin;
+		if (options?.stdout !== undefined) mergedCmd.stdout = options.stdout;
+		if (options?.stderr !== undefined) mergedCmd.stderr = options.stderr;
+		if (mergedEnv !== undefined) mergedCmd.env = mergedEnv;
 		try {
-			return bun.spawnSync(cmd, spawnOpts);
+			return bun.spawnSync(mergedCmd);
 		} catch (error) {
 			return syncSpawnCreationFailure(
 				wrapSpawnFailure(error, requestedCwd, executable),
@@ -1351,7 +1531,19 @@ export function bunSpawnSync(
 			(mergedOptions as { stdin?: string | Uint8Array }).stdin = cmd.stdin;
 		}
 	}
-	const [file, ...args] = argv;
+	const [requestedFile, ...requestedArgs] = argv;
+	// FB-007a: same win32 resolution as the async path — see bunSpawn.
+	let file = requestedFile;
+	let args = requestedArgs;
+	if (
+		typeof file === 'string' &&
+		file.length > 0 &&
+		_internals.platform() === 'win32'
+	) {
+		const resolved = _internals.resolveWindowsCommand(file, args);
+		file = resolved.file;
+		args = resolved.args;
+	}
 	const mergedEnv = mergeEnvForChild(mergedOptions.env, options?.envOverrides);
 	let result: ReturnType<typeof nodeSpawnSync>;
 	try {
@@ -1372,16 +1564,20 @@ export function bunSpawnSync(
 		});
 	} catch (error) {
 		return syncSpawnCreationFailure(
-			wrapSpawnFailure(error, mergedOptions.cwd, file),
+			wrapSpawnFailure(error, mergedOptions.cwd, requestedFile ?? ''),
 		);
 	}
 	// #2236: a creation failure we can positively attribute to the `cwd` gets
 	// the typed shape, so `stderr` carries a reason instead of being empty.
 	// Every other `result.error` (notably ETIMEDOUT, which can carry partial
 	// output) keeps its existing shape — losing that output would be a
-	// regression.
+	// regression. The executable named is the caller's original token.
 	if (result.error) {
-		const wrapped = wrapSpawnFailure(result.error, mergedOptions.cwd, file);
+		const wrapped = wrapSpawnFailure(
+			result.error,
+			mergedOptions.cwd,
+			requestedFile ?? '',
+		);
 		if (wrapped instanceof SpawnCwdMissingError) {
 			return syncSpawnCreationFailure(wrapped);
 		}

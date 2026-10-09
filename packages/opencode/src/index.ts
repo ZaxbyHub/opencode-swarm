@@ -2,7 +2,6 @@ import * as path from 'node:path';
 import type { Plugin } from '@opencode-ai/plugin';
 import {
 	AutomationConfigSchema,
-	type AutomationStatusArtifact,
 	type BackgroundAutomationManager,
 	composeHandlers,
 	consolidateSystemMessages,
@@ -739,14 +738,27 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 /**
  * Shared server-initialization wrapper (issue #3151, adapted from the 7.x
  * #3004 / ADR-0003 seam): counts invocations (warns on dual host load —
- * module-level swarm state is shared between invocations) and surfaces init
- * failures to stderr before re-throwing, so both the v1 `server()` entry and
- * the v2 `setup()` entry share the identical FATAL surface. OpenCode's plugin
- * loader silently drops a plugin whose entry rejects, leaving the user with no
- * commands/agents and no visible error (issue #675) — raw stderr here is the
- * one place it is justified.
+ * module-level swarm state is shared between invocations), memoizes the init
+ * PER DIRECTORY so a same-directory re-invocation returns the SAME hooks
+ * instead of re-running the factory, and surfaces init failures to stderr
+ * before re-throwing, so both the v1 `server()` entry and the v2 `setup()`
+ * entry share the identical FATAL surface. OpenCode's plugin loader silently
+ * drops a plugin whose entry rejects, leaving the user with no commands/agents
+ * and no visible error (issue #675) — raw stderr here is the one place it is
+ * justified.
  */
 let serverInitInvocations = 0;
+
+/**
+ * Per-directory init memo (FB-010 / M-5): a same-directory re-invocation
+ * (e.g. a dual v1+v2 host load in one process) must NOT re-run the factory
+ * against the shared module-level swarm state — it returns the SAME hooks
+ * promise, whether that init is still in flight or already completed. A
+ * different directory proceeds as a fresh init (with the invocation warning
+ * above), matching 7.x semantics. A failed init evicts its entry so a retry
+ * can re-run the factory instead of replaying a cached rejection forever.
+ */
+const initByDirectory = new Map<string, Promise<Awaited<ReturnType<Plugin>>>>();
 
 const runServerInit = async (ctx: Parameters<Plugin>[0]) => {
 	serverInitInvocations += 1;
@@ -755,17 +767,36 @@ const runServerInit = async (ctx: Parameters<Plugin>[0]) => {
 			'[opencode-swarm] WARNING: plugin initialization invoked more than once in this process; module-level swarm state is shared between invocations (dual host load?)',
 		);
 	}
-	try {
-		return await OpenCodeSwarm(ctx);
-	} catch (err) {
-		const stack =
-			err instanceof Error ? (err.stack ?? err.message) : String(err);
-		console.error(
-			'[opencode-swarm] FATAL: plugin initialization failed. Plugin will not be available.',
-		);
-		console.error(stack);
-		throw err;
+	const cached = initByDirectory.get(ctx.directory);
+	if (cached) {
+		log('returning cached initialization for directory', {
+			directory: ctx.directory,
+		});
+		return cached;
 	}
+	// First init for this directory: keep the FATAL try/catch surface (raw
+	// stderr before re-throw) on this path only; cached returns above skip
+	// re-running the factory entirely.
+	const init = (async () => {
+		try {
+			return await OpenCodeSwarm(ctx);
+		} catch (err) {
+			const stack =
+				err instanceof Error ? (err.stack ?? err.message) : String(err);
+			console.error(
+				'[opencode-swarm] FATAL: plugin initialization failed. Plugin will not be available.',
+			);
+			console.error(stack);
+			throw err;
+		}
+	})();
+	// Side branch (never swallows — the rejection still propagates to every
+	// caller of the cached promise): evict a failed init so retries re-run.
+	init.catch(() => {
+		initByDirectory.delete(ctx.directory);
+	});
+	initByDirectory.set(ctx.directory, init);
+	return init;
 };
 
 // Dual-shape default export (issue #3151, mirroring the 7.x #3004 export):

@@ -37,6 +37,7 @@ import { seedV1SessionState } from '../../../src/host/v2/setup';
 import { registerV2Tools } from '../../../src/host/v2/tools';
 import type {
 	V1HooksSubset,
+	V2SessionCompactionEvent,
 	V2SessionContextEvent,
 	V2SessionPromptEvent,
 	V2ToolHookInput,
@@ -177,6 +178,39 @@ describe('v2 context hook wiring (translated event)', () => {
 		expect(event.messages[0].content.some((p) => p.type === 'media')).toBe(
 			true,
 		);
+	});
+
+	test('v2 message agent flows into the consumer-visible v1 view (FB-004)', async () => {
+		// context-budget (agent-switch detection) and pipeline-tracker
+		// (architect gating) read msg.info.agent on the last USER message —
+		// before FB-004 the translated view never carried it, so those
+		// consumers saw agent-less sessions on v2 hosts.
+		const seenAgents: Array<string | undefined> = [];
+		const hooks = makeHooks({
+			'experimental.chat.messages.transform': async (_input, output) => {
+				const messages = output.messages as Array<{
+					info: { id?: string; agent?: string };
+				}>;
+				for (const m of messages) seenAgents.push(m.info.agent);
+			},
+		});
+		const event = ctxEvent({
+			messages: [
+				{
+					id: 'u1',
+					role: 'user',
+					agent: 'local_coder',
+					content: [{ type: 'text', text: 'code please' }],
+				},
+				{
+					id: 'a1',
+					role: 'assistant',
+					content: [{ type: 'text', text: 'done' }],
+				},
+			],
+		});
+		await onV2ContextEvent(event, hooks, canonicalMkdtemp('swarm-v2-agent-'));
+		expect(seenAgents).toEqual(['local_coder', undefined]);
 	});
 });
 
@@ -340,6 +374,63 @@ describe('v2 prompt adapter (delta surface)', () => {
 	});
 });
 
+describe('v2 compaction adapter (FB-005)', () => {
+	function compactionEvent(): V2SessionCompactionEvent {
+		return {
+			sessionID: 's1',
+			agent: 'architect',
+			system: [],
+			messages: [],
+			options: {},
+			tools: {},
+		} as V2SessionCompactionEvent;
+	}
+
+	test('customizer pushes onto a real output.context without throwing; lines reach event.system', async () => {
+		const capture = sessionHookCapture(
+			makeHooks({
+				'experimental.session.compacting': async (_input, output) => {
+					// Exactly what packages/core compaction-customizer.ts does —
+					// a bare {} output made this push a TypeError (FB-005).
+					(output as { context: string[] }).context.push(
+						'[SWARM PLAN] Phase 2',
+					);
+					(output as { context: string[] }).context.push(
+						'[SWARM TASKS] t1 pending',
+					);
+				},
+			}),
+		);
+		const { calls, hooks } = capture;
+		await registerV2SessionHooks(capture as never, hooks, '.', []);
+		const compaction = calls.find((c) => c.name === 'compaction');
+		expect(compaction).toBeDefined();
+		const event = compactionEvent();
+		await compaction?.cb(event as never);
+		expect(event.system).toEqual([
+			{ type: 'text', text: '[SWARM PLAN] Phase 2' },
+			{ type: 'text', text: '[SWARM TASKS] t1 pending' },
+		]);
+	});
+
+	test('an event without a pre-set system array gets one (fail-open guard)', async () => {
+		const capture = sessionHookCapture(
+			makeHooks({
+				'experimental.session.compacting': async (_input, output) => {
+					(output as { context: string[] }).context.push('[SWARM PLAN] P1');
+				},
+			}),
+		);
+		const { calls, hooks } = capture;
+		await registerV2SessionHooks(capture as never, hooks, '.', []);
+		const compaction = calls.find((c) => c.name === 'compaction');
+		const event = compactionEvent();
+		delete (event as { system?: unknown }).system;
+		await compaction?.cb(event as never);
+		expect(event.system).toEqual([{ type: 'text', text: '[SWARM PLAN] P1' }]);
+	});
+});
+
 describe('agent + command mapping (edges)', () => {
 	test('mapV1AgentToV2 splits provider/model and coerces mode', () => {
 		const info = mapV1AgentToV2('worker', {
@@ -365,6 +456,16 @@ describe('agent + command mapping (edges)', () => {
 			'/swarm show-plan alpha beta',
 		);
 		expect(expandV1Template('/swarm archive', '')).toBe('/swarm archive');
+	});
+
+	test('expandV1Template does not interpret $-sequences in user arguments (UR-09)', () => {
+		// A plain-string replaceAll would expand $& (matched substring), $`
+		// (before-match), $$ etc. inside user arguments; the replacer FUNCTION
+		// keeps them verbatim.
+		const tricky = 'pay $5, match $&, before $`after, literal $$';
+		expect(expandV1Template('/swarm clarify $ARGUMENTS', tricky)).toBe(
+			`/swarm clarify ${tricky}`,
+		);
 	});
 });
 

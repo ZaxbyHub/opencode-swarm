@@ -436,9 +436,13 @@ export async function runLint(
 
 	try {
 		const proc = bunSpawn(command, {
+			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
+			// FB-007b: bound the compat layer's buffered capture to the same
+			// 512KB budget the truncation below enforces.
+			maxBuffer: LINT_MAX_OUTPUT_BYTES,
 		});
 
 		const [stdout, stderr] = await Promise.all([
@@ -516,9 +520,13 @@ export async function runAdditionalLint(
 
 	try {
 		const proc = bunSpawn(command, {
+			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd,
+			// FB-007b: bound the compat layer's buffered capture to the same
+			// 512KB budget the truncation below enforces.
+			maxBuffer: LINT_MAX_OUTPUT_BYTES,
 		});
 
 		const [stdout, stderr] = await Promise.all([

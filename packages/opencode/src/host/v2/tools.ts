@@ -74,9 +74,15 @@ function synthesizeV1ToolContext(
 					| ((update: Record<string, unknown>) => Promise<void>)
 					| undefined;
 				if (typeof progress === 'function') {
+					// .catch: the returned promise rejects asynchronously (FB-008) —
+					// try/catch only covers the synchronous throw. An unhandled
+					// rejection could kill the host process; progress stays
+					// best-effort.
 					void progress({
 						...(input.metadata ?? {}),
 						...(input.title !== undefined ? { title: input.title } : {}),
+					}).catch(() => {
+						// Progress is best-effort; never fail a tool on it.
 					});
 				}
 			} catch {
@@ -126,8 +132,8 @@ export async function registerV2Tools(
 ): Promise<void> {
 	const toolMap = hooks.tool ?? {};
 	const permissionBridge = buildPermissionBridge(ctx);
-	const registration = await withTimeout(
-		ctx.tool.transform((editor) => {
+	const toolTransform: Promise<V2Registration> = ctx.tool.transform(
+		(editor) => {
 			for (const [name, definition] of Object.entries(toolMap)) {
 				const v1Execute = definition.execute;
 				if (typeof v1Execute !== 'function') continue;
@@ -158,11 +164,22 @@ export async function registerV2Tools(
 				};
 				editor.add(info);
 			}
-		}),
+		},
+	);
+	// Track the moment the registration resolves (M-7): a late resolve after
+	// a timeout win must still reach the cleanup list. Rejection pushes nothing.
+	toolTransform
+		.then((reg) => {
+			registrations.push(reg);
+		})
+		.catch(() => {
+			// withTimeout surfaces the rejection below; nothing to track.
+		});
+	await withTimeout(
+		toolTransform,
 		V2_TOOL_EXECUTE_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: tool transform exceeded budget'),
 	);
-	registrations.push(registration);
 }
 
 /**

@@ -129,6 +129,14 @@ export interface V2SystemPart {
 export interface V2Message {
 	id?: string;
 	role: 'system' | 'user' | 'assistant' | 'tool';
+	/**
+	 * Producing agent id (v2 SDK UserMessage requires `agent: string` —
+	 * @opencode/ai messages schema). Optional here: only user-role messages
+	 * carry it, and the adapter fails open when absent. The v1 chain's
+	 * agent-gated consumers (context-budget, pipeline-tracker) read it through
+	 * the translated `info.agent` view field.
+	 */
+	agent?: string;
 	content: Array<{ type: string; text?: string; [key: string]: unknown }>;
 	[key: string]: unknown;
 }
@@ -162,7 +170,7 @@ export interface V2SessionPromptEvent {
 	readonly delivery?: string;
 }
 
-/** v2 `SessionDomain` (only hook used by this adapter). */
+/** v2 `SessionDomain` (only surfaces used by this adapter). */
 export interface V2SessionDomain {
 	readonly hook: (
 		name: 'context' | 'compaction' | 'prompt',
@@ -172,6 +180,19 @@ export interface V2SessionDomain {
 		sessionID: string,
 		input: { text: string } | { command: string; args?: string },
 	) => Promise<unknown>;
+	/**
+	 * v2 `session.synthetic` (@opencode/client SessionApi — part of the SDK
+	 * SessionDomain `Pick`; typed here only to the subset this adapter
+	 * passes). Admits text into the session without persisting it as user
+	 * input; `resume: false` declines to wake the model, making it the v2
+	 * carrier for deterministic command output (the v1 `output.parts`
+	 * analog). Optional: older 2.x hosts lack it; callers must degrade.
+	 */
+	readonly synthetic?: (input: {
+		sessionID: string;
+		text: string;
+		resume?: boolean;
+	}) => Promise<unknown>;
 }
 
 /** v2 `CommandDefinition` / `CommandEditor` (dist/promise/command.d.ts). */

@@ -19,7 +19,9 @@ import { pathToFileURL } from 'node:url';
  *     assert the v1 hook map returns — under Node this exercises the init
  *     path including the snapshot reader that silently degraded at base;
  *  3. run one real write+read cycle through the compat layer (bunWrite /
- *     bunFile re-exported from the bundle's core barrel surface).
+ *     bunFile re-exported from the bundle's core barrel surface);
+ *  4. run one real spawn through `bunSpawnSync` (FB-012) — executes the
+ *     shim's Node fallback branch, which is dead code when CI runs bun.
  *
  * The `dist` build must exist; these tests fail (not skip) when it is stale
  * or missing so CI cannot silently lose the Node gate.
@@ -108,8 +110,30 @@ console.log('COMPAT_OK');
 		expect(res.stdout).toContain('COMPAT_OK');
 		expect(res.status).toBe(0);
 	});
-});
 
-function pathToFileUrl(p: string): string {
-	return pathToFileURL(p).href;
+	// FB-012 (PR #3163 feedback): execute the shim's REAL spawn path under
+	// Node. CI runs bun, where the Node fallback branch of bunSpawnSync is
+	// dead code; a win32 .cmd/.bat or portability regression in that branch
+	// can only be caught by spawning node itself. `['node','--version']`
+	// resolves on all three CI OSes without depending on npm/git presence.
+	test('compat bunSpawnSync spawns a real child under node', () => {
+		const res = runNode(`
+const { pathToFileURL } = await import('node:url');
+const m = await import(${JSON.stringify(pathToFileURL(DIST_ENTRY).href)});
+if (typeof m.bunSpawnSync !== 'function') {
+	console.log('COMPAT_FAIL bunSpawnSync export missing: ' + typeof m.bunSpawnSync);
+	process.exit(1);
 }
+const r = m.bunSpawnSync(['node', '--version']);
+console.log('SPAWN_EXIT=' + r.exitCode + ' STDOUT=' + new TextDecoder().decode(r.stdout).trim());
+if (r.exitCode !== 0) { console.log('COMPAT_FAIL exit ' + r.exitCode); process.exit(1); }
+if (!new TextDecoder().decode(r.stdout).trim()) { console.log('COMPAT_FAIL empty stdout'); process.exit(1); }
+console.log('SPAWN_OK');
+`);
+		expect(res.stderr).toBe('');
+		expect(res.stdout).toContain('SPAWN_OK');
+		// The version output must actually contain a digit (e.g. v22.x.y).
+		expect(/STDOUT=v?\d/.test(res.stdout)).toBe(true);
+		expect(res.status).toBe(0);
+	});
+});

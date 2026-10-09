@@ -2,7 +2,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isCommandAvailable } from '../build/discovery';
 import { warn } from '../utils';
-import { bunSpawn } from '../utils/bun-compat';
+import {
+	BunCompatOutputLimitError,
+	bunSpawn,
+	classifySpawnFailure,
+} from '../utils/bun-compat';
 
 // ============ Constants ============
 const MAX_OUTPUT_BYTES = 52_428_800; // 50MB max output
@@ -58,15 +62,6 @@ function isValidEcosystem(value: unknown): value is Ecosystem {
 			value,
 		)
 	);
-}
-
-function validateArgs(args: unknown): args is { ecosystem?: Ecosystem } {
-	if (typeof args !== 'object' || args === null) return true; // ecosystem is optional
-	const obj = args as Record<string, unknown>;
-	if (obj.ecosystem !== undefined && !isValidEcosystem(obj.ecosystem)) {
-		return false;
-	}
-	return true;
 }
 
 // ============ File Detection ============
@@ -141,14 +136,83 @@ interface NpmAuditResponse {
 	vulnerabilities?: Record<string, NpmVulnInfo>;
 }
 
+/**
+ * FB-007b (PR #3163 feedback): the one place that turns "this npm scan did
+ * not produce a result" into an `AuditResult`. Ports 7.x's single-classifier
+ * contract (both failure channels — `proc.spawnError` and a caught throw —
+ * route through here so the same real-world fault always reads the same),
+ * with the 8.x fail-closed rule: `clean: true` is reserved EXCLUSIVELY for
+ * genuinely-missing tooling; every other failure — including a
+ * `BunCompatOutputLimitError` overflow — reports `clean: false` so an
+ * unusable audit result can never read as "no vulnerabilities found".
+ */
+function npmAuditFailure(command: string[], error: unknown): AuditResult {
+	const base = {
+		ecosystem: 'npm',
+		command,
+		findings: [] as VulnerabilityFinding[],
+		criticalCount: 0,
+		highCount: 0,
+		totalCount: 0,
+	};
+	// Output-budget overflow: the audit payload was never fully captured, so
+	// the result is unusable — never clean.
+	if (error instanceof BunCompatOutputLimitError) {
+		return {
+			...base,
+			clean: false,
+			note: `npm audit output exceeded the ${error.limit}-byte capture budget; audit result unusable`,
+		};
+	}
+	const message = error instanceof Error ? error.message : 'Unknown error';
+	// Typed cwd failure is checked FIRST and deliberately never collapses into
+	// the tool-missing note (7.x #2236 contract): "the working directory is
+	// gone" must not be reported as "npm is missing".
+	if (classifySpawnFailure(error) === 'cwd-missing') {
+		return {
+			...base,
+			clean: false,
+			note: `Error running npm audit: ${message}`,
+		};
+	}
+	// The designed not-installed arm: the scanner's own error text says so,
+	// or the spawn-failure classifier positively identified the BINARY as
+	// missing (ENOENT with a usable cwd). This is the ONLY clean:true arm.
+	if (
+		message.includes('audit') ||
+		message.includes('command not found') ||
+		message.includes("'npm' is not recognized") ||
+		classifySpawnFailure(error) === 'binary-missing'
+	) {
+		return {
+			...base,
+			clean: true,
+			note: 'npm audit not available - npm may not be installed',
+		};
+	}
+	return {
+		...base,
+		clean: false,
+		note: `Error running npm audit: ${message}`,
+	};
+}
+
 async function runNpmAudit(directory: string): Promise<AuditResult> {
 	const command = ['npm', 'audit', '--json'];
 
 	try {
 		const proc = bunSpawn(command, {
+			// #2705 (7.x parity): a never-closed stdin pipe can block child
+			// exit under Bun on Windows (v7.3.3 class).
+			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
+			// FB-007b: bound the compat layer's buffered capture to the same
+			// budget this scanner already truncates against, so an oversized
+			// audit payload surfaces as a catchable BunCompatOutputLimitError
+			// (→ clean:false) instead of an unbounded buffer.
+			maxBuffer: MAX_OUTPUT_BYTES,
 		});
 
 		const timeoutPromise = new Promise<'timeout'>((resolve) =>
@@ -181,6 +245,16 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// FB-007b (7.x parity): a spawn failure (missing npm, or a cwd that no
+		// longer exists) resolves `exited` non-zero with empty output. Check the
+		// `spawnError` channel explicitly — through the SAME classifier the
+		// catch below uses — instead of relying on `JSON.parse('')` throwing
+		// incidentally, so a missing npm lands in the designed not-installed
+		// arm no matter which channel surfaced the fault.
+		if (proc.spawnError) {
+			return npmAuditFailure(command, proc.spawnError);
+		}
 
 		// If exit code is 0, there are no vulnerabilities
 		if (exitCode === 0) {
@@ -245,35 +319,7 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 			clean: findings.length === 0,
 		};
 	} catch (error) {
-		const errorMessage =
-			error instanceof Error ? error.message : 'Unknown error';
-		// Check if npm audit is not installed
-		if (
-			errorMessage.includes('audit') ||
-			errorMessage.includes('command not found') ||
-			errorMessage.includes("'npm' is not recognized")
-		) {
-			return {
-				ecosystem: 'npm',
-				command,
-				findings: [],
-				criticalCount: 0,
-				highCount: 0,
-				totalCount: 0,
-				clean: true,
-				note: 'npm audit not available - npm may not be installed',
-			};
-		}
-		return {
-			ecosystem: 'npm',
-			command,
-			findings: [],
-			criticalCount: 0,
-			highCount: 0,
-			totalCount: 0,
-			clean: true,
-			note: `Error running npm audit: ${errorMessage}`,
-		};
+		return npmAuditFailure(command, error);
 	}
 }
 

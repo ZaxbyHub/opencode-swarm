@@ -45,7 +45,7 @@ const GUIDANCE_CARRIER_ID_PREFIX = 'swarm-guidance:';
 const V2_GUIDANCE_CHAIN_TIMEOUT_MS = 30_000;
 
 interface V1PartsMessageView {
-	info: { id?: string; role?: string; sessionID?: string };
+	info: { id?: string; role?: string; sessionID?: string; agent?: string };
 	parts: Array<{ type: string; text?: string }>;
 }
 
@@ -70,6 +70,11 @@ function toV1MessageView(
 			id: typeof message.id === 'string' ? message.id : undefined,
 			role: message.role,
 			sessionID,
+			// FB-004: the v2 SDK UserMessage carries the producing agent's id;
+			// surface it on the view so the v1 chain's agent-gated consumers
+			// (context-budget agent-switch detection, pipeline-tracker
+			// architect gating) see the same identity the v1 host provided.
+			agent: typeof message.agent === 'string' ? message.agent : undefined,
 		},
 		parts: textParts,
 	};
@@ -123,11 +128,16 @@ export async function onV2ContextEvent(
 			V2_GUIDANCE_CHAIN_TIMEOUT_MS,
 			new Error('[opencode-swarm] v2: messages transform exceeded budget'),
 		).catch((err: unknown) => {
+			const message = err instanceof Error ? err.message : String(err);
+			// Ungated (FB-014/M-16): silent guidance loss must be visible
+			// without OPENCODE_SWARM_DEBUG. One line, no stack.
+			console.warn(
+				'[opencode-swarm] v2 messages transform failed (non-fatal):',
+				message,
+			);
 			log(
 				'v2 messages transform failed (non-fatal; original messages retained)',
-				{
-					error: err instanceof Error ? err.message : String(err),
-				},
+				{ error: message },
 			);
 			// Restore the pre-transform views so a partial failure cannot corrupt content.
 			for (let i = 0; i < originalMessages.length; i += 1) {
@@ -213,9 +223,14 @@ export async function onV2ContextEvent(
 			V2_GUIDANCE_CHAIN_TIMEOUT_MS,
 			new Error('[opencode-swarm] v2: system transform exceeded budget'),
 		).catch((err: unknown) => {
-			log('v2 system transform failed (non-fatal)', {
-				error: err instanceof Error ? err.message : String(err),
-			});
+			const message = err instanceof Error ? err.message : String(err);
+			// Ungated (FB-014/M-16): system-prompt surface loss must be visible
+			// without OPENCODE_SWARM_DEBUG. One line, no stack.
+			console.warn(
+				'[opencode-swarm] v2 system transform failed (non-fatal):',
+				message,
+			);
+			log('v2 system transform failed (non-fatal)', { error: message });
 		});
 		for (const text of output.system) {
 			if (typeof text === 'string' && text.length > 0) {
@@ -232,12 +247,25 @@ export async function registerV2ContextHook(
 	directory: string,
 	registrations: V2Registration[],
 ): Promise<void> {
-	const registration = await withTimeout(
-		ctx.session.hook('context', (async (event: unknown) => {
+	const registration: Promise<V2Registration> = ctx.session.hook(
+		'context',
+		(async (event: unknown) => {
 			return onV2ContextEvent(event as V2SessionContextEvent, hooks, directory);
-		}) as never),
+		}) as never,
+	);
+	// Track the registration the moment it resolves (M-7): if the timeout
+	// below wins the race, a late-resolving registration must still reach the
+	// cleanup list instead of leaking. Rejection pushes nothing.
+	registration
+		.then((reg) => {
+			registrations.push(reg);
+		})
+		.catch(() => {
+			// withTimeout surfaces the rejection below; nothing to track.
+		});
+	await withTimeout(
+		registration,
 		V2_GUIDANCE_CHAIN_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: context hook registration exceeded budget'),
 	);
-	registrations.push(registration);
 }

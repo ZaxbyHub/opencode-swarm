@@ -12,8 +12,14 @@
  *     fed a best-effort translation of the v2 completed/error result.
  *     (v2 has no title surface; the translation targets the fields the v1
  *     toolAfter chain reads.)
- *   - `compaction`: translated session/model identity; the v1 customizer's
- *     directive output has no v1→v2 mapping yet — the customizer still runs.
+ *   - `compaction`: translated session/model identity. FB-005: the customizer
+ *     receives a REAL `{context: string[]}` output (a bare `{}` turned every
+ *     `output.context.push` into a TypeError once a project had plan/context
+ *     content), and the collected context lines are mapped onto `event.system`
+ *     — the compaction request's mutable system surface, the only
+ *     type-declared carrier V2SessionCompactionEvent has for them (the v2
+ *     `result?` field is a full skip-the-model short-circuit, not a context
+ *     additive, so it is deliberately NOT used).
  *   - `prompt`: the v1 `chat.message` chain (delegation ledger,
  *     cache-cohort seeding) runs against a translated envelope.
  *
@@ -90,9 +96,16 @@ async function onV2ToolAfter(
 		V2_HOOK_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: tool.execute.after exceeded budget'),
 	).catch((err: unknown) => {
+		const message = err instanceof Error ? err.message : String(err);
+		// Ungated (FB-014/M-16): post-tool chain loss must be visible without
+		// OPENCODE_SWARM_DEBUG. One line, no stack.
+		console.warn(
+			'[opencode-swarm] v2 tool.execute.after hook failed (non-fatal):',
+			message,
+		);
 		log('v2 tool.execute.after failed (non-fatal)', {
 			tool: event.tool,
-			error: err instanceof Error ? err.message : String(err),
+			error: message,
 		});
 	});
 }
@@ -138,7 +151,12 @@ async function onV2Compaction(
 	if (typeof handler !== 'function') return;
 	seedV1SessionState(event.sessionID, event.agent, directory);
 	const model = event.model as { id?: string; providerID?: string } | undefined;
-	const output: Record<string, unknown> = {};
+	// FB-005: real output shape. The v1 customizer pushes directive lines onto
+	// output.context (packages/core compaction-customizer.ts) — a bare `{}`
+	// output made each push a TypeError as soon as plan/context content
+	// existed, and the .catch below silently ate it. (The customizer never
+	// writes output.prompt; the field stays open on the object anyway.)
+	const output = { context: [] as string[] };
 	await withTimeout(
 		Promise.resolve(
 			handler(
@@ -156,11 +174,25 @@ async function onV2Compaction(
 		V2_HOOK_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: compaction hook exceeded budget'),
 	).catch((err: unknown) => {
-		log('v2 compaction hook failed (non-fatal)', {
-			error: err instanceof Error ? err.message : String(err),
-		});
+		const message = err instanceof Error ? err.message : String(err);
+		// Ungated (FB-014/M-16): compaction-context loss must be visible
+		// without OPENCODE_SWARM_DEBUG. One line, no stack.
+		console.warn(
+			'[opencode-swarm] v2 compaction hook failed (non-fatal):',
+			message,
+		);
+		log('v2 compaction hook failed (non-fatal)', { error: message });
 	});
-	// The v1 customizer's directive fields have no v2 mapping yet.
+	// Map the collected context lines onto event.system: V2SessionCompactionEvent
+	// carries no `context` field, and its `result?` is a skip-the-model
+	// short-circuit — system is the compaction request's mutable prompt surface
+	// and the faithful carrier for the customizer's preserve-directives.
+	event.system = event.system ?? [];
+	for (const line of output.context) {
+		if (typeof line === 'string' && line.length > 0) {
+			event.system.push({ type: 'text', text: line });
+		}
+	}
 }
 
 /** adapter for session prompt (v1 chat.message chain) */
@@ -188,8 +220,15 @@ async function onV2Prompt(
 		V2_HOOK_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: prompt hook exceeded budget'),
 	).catch((err: unknown) => {
+		const message = err instanceof Error ? err.message : String(err);
+		// Ungated (FB-014/M-16): prompt-chain loss must be visible without
+		// OPENCODE_SWARM_DEBUG. One line, no stack.
+		console.warn(
+			'[opencode-swarm] v2 prompt hook failed (non-fatal):',
+			message,
+		);
 		log('v2 prompt (chat.message) hook failed (non-fatal)', {
-			error: err instanceof Error ? err.message : String(err),
+			error: message,
 		});
 	});
 	// The v1 chain mutates output.message/output.parts in place; the v2
@@ -215,26 +254,48 @@ export async function registerV2ToolHooks(
 	directory: string,
 	registrations: V2Registration[],
 ): Promise<void> {
-	const before = await withTimeout(
-		ctx.tool.hook('execute.before', async (event: unknown) => {
+	const before: Promise<V2Registration> = ctx.tool.hook(
+		'execute.before',
+		async (event: unknown) => {
 			return onV2ToolBefore(event as V2ToolHookInput, hooks, directory);
-		}),
+		},
+	);
+	// Track the moment each registration resolves (M-7): a late resolve after
+	// a timeout win must still reach the cleanup list. Rejection pushes nothing.
+	before
+		.then((reg) => {
+			registrations.push(reg);
+		})
+		.catch(() => {
+			// withTimeout surfaces the rejection below; nothing to track.
+		});
+	await withTimeout(
+		before,
 		V2_HOOK_TIMEOUT_MS,
 		new Error(
 			'[opencode-swarm] v2: execute.before registration exceeded budget',
 		),
 	);
-	registrations.push(before);
-	const after = await withTimeout(
-		ctx.tool.hook('execute.after', async (event: unknown) => {
+	const after: Promise<V2Registration> = ctx.tool.hook(
+		'execute.after',
+		async (event: unknown) => {
 			return onV2ToolAfter(event as V2ToolHookInput, hooks, directory);
-		}),
+		},
+	);
+	after
+		.then((reg) => {
+			registrations.push(reg);
+		})
+		.catch(() => {
+			// withTimeout surfaces the rejection below; nothing to track.
+		});
+	await withTimeout(
+		after,
 		V2_HOOK_TIMEOUT_MS,
 		new Error(
 			'[opencode-swarm] v2: execute.after registration exceeded budget',
 		),
 	);
-	registrations.push(after);
 }
 
 /** Register the compaction + prompt session hooks. */
@@ -244,24 +305,43 @@ export async function registerV2SessionHooks(
 	directory: string,
 	registrations: V2Registration[],
 ): Promise<void> {
-	const compaction = await withTimeout(
-		ctx.session.hook('compaction', (async (event: unknown) => {
+	const compaction: Promise<V2Registration> = ctx.session.hook(
+		'compaction',
+		(async (event: unknown) => {
 			return onV2Compaction(
 				event as V2SessionCompactionEvent,
 				hooks,
 				directory,
 			);
-		}) as never),
+		}) as never,
+	);
+	compaction
+		.then((reg) => {
+			registrations.push(reg);
+		})
+		.catch(() => {
+			// withTimeout surfaces the rejection below; nothing to track.
+		});
+	await withTimeout(
+		compaction,
 		V2_HOOK_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: compaction registration exceeded budget'),
 	);
-	registrations.push(compaction);
-	const prompt = await withTimeout(
-		ctx.session.hook('prompt', (async (event: unknown) => {
-			return onV2Prompt(event as V2SessionPromptEvent, hooks);
-		}) as never),
+	const prompt: Promise<V2Registration> = ctx.session.hook('prompt', (async (
+		event: unknown,
+	) => {
+		return onV2Prompt(event as V2SessionPromptEvent, hooks);
+	}) as never);
+	prompt
+		.then((reg) => {
+			registrations.push(reg);
+		})
+		.catch(() => {
+			// withTimeout surfaces the rejection below; nothing to track.
+		});
+	await withTimeout(
+		prompt,
 		V2_HOOK_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: prompt registration exceeded budget'),
 	);
-	registrations.push(prompt);
 }

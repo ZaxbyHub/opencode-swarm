@@ -42,7 +42,7 @@
 	],
 	"scripts": {
 		"build": "bun run clean && bun run ../../scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm --external web-tree-sitter --minify-whitespace --minify-syntax && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm && bun run ../../scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly && bun run move-declarations",
-		"move-declarations": "node -e \"const fs=require('fs');const path=require('path');function m(d){if(!fs.existsSync(d))return;fs.readdirSync(d).forEach(f=>{const src=path.join(d,f),dst=path.join('dist',f);if(fs.statSync(src).isDirectory()){fs.mkdirSync(dst,{recursive:true});m(src)}else{fs.copyFileSync(src,dst)}})};m('dist/opencode/src');fs.rmSync('dist/opencode',{recursive:true});fs.rmSync('dist/core',{recursive:true})\"",
+		"move-declarations": "node -e \"const fs=require('fs');const path=require('path');const root=path.join('dist','opencode','src');function m(d){if(!fs.existsSync(d))return;fs.readdirSync(d).forEach(f=>{const src=path.join(d,f),dst=path.join('dist',f);if(fs.statSync(src).isDirectory()){fs.mkdirSync(dst,{recursive:true});m(src)}else{if(f==='index.d.ts'&&d!==root)return;fs.copyFileSync(src,dst)}})};m(root);fs.rmSync('dist/opencode',{recursive:true});fs.rmSync('dist/core',{recursive:true})\"",
 		"clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",

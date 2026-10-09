@@ -15,6 +15,7 @@ import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	_internals,
 	bunFile,
 	bunHash,
 	bunSpawn,
@@ -408,4 +409,95 @@ describe('bunSpawnSync explicit env: {} isolation', () => {
 			delete process.env.BUN_SPAWN_SYNC_NULL_OVERRIDE_TEST;
 		}
 	});
+});
+
+// ---------------------------------------------------------------------------
+// FB-007a (PR #3163 feedback): win32 .cmd/.bat resolution in the Node spawn
+// branches. Probed against REAL tooling on this host — npm on Windows is
+// npm.cmd, so `bunSpawnSync(['npm', '--version'])` only succeeds through the
+// shim's cmd.exe wrap (or absolute-path probe) under the Node fallback.
+// Skipped wholesale on non-win32 hosts: the resolver is a no-op there.
+// ---------------------------------------------------------------------------
+describe('bun-compat win32 .cmd/.bat resolution (FB-007a)', () => {
+	const isWin32 = process.platform === 'win32';
+
+	test.skipIf(!isWin32)(
+		'resolver maps .exe as-is, wraps .cmd/.bat through cmd.exe, leaves unknowns unresolved',
+		() => {
+			const asIs = _internals.resolveWindowsCommand('foo.exe', ['--x']);
+			expect(asIs.file).toBe('foo.exe');
+			expect(asIs.args).toEqual(['--x']);
+
+			const wrapped = _internals.resolveWindowsCommand('foo.cmd', ['--x', 'y']);
+			expect(wrapped.file).toBe('cmd.exe');
+			expect(wrapped.args).toEqual([
+				'/d',
+				'/s',
+				'/c',
+				'call',
+				'foo.cmd',
+				'--x',
+				'y',
+			]);
+
+			const bat = _internals.resolveWindowsCommand('Tool.BAT', []);
+			expect(bat.file).toBe('cmd.exe');
+			expect(bat.args.slice(0, 5)).toEqual([
+				'/d',
+				'/s',
+				'/c',
+				'call',
+				'Tool.BAT',
+			]);
+
+			// A name that exists on no PATH directory must stay unresolved so
+			// the spawn error path reports the caller's original command.
+			const ghost = `definitely-not-a-real-tool-${Date.now()}`;
+			const unresolved = _internals.resolveWindowsCommand(ghost, ['--x']);
+			expect(unresolved.file).toBe(ghost);
+			expect(unresolved.args).toEqual(['--x']);
+		},
+	);
+
+	test.skipIf(!isWin32)(
+		'resolver maps npx to a cmd.exe wrap or an absolute .exe path',
+		() => {
+			const resolved = _internals.resolveWindowsCommand('npx', ['--version']);
+			const isCmdWrap =
+				resolved.file === 'cmd.exe' &&
+				resolved.args[0] === '/d' &&
+				resolved.args[1] === '/s' &&
+				resolved.args[2] === '/c' &&
+				resolved.args[3] === 'call';
+			const isAbsoluteExe =
+				path.isAbsolute(resolved.file) &&
+				resolved.file.toLowerCase().endsWith('.exe');
+			// Either a probed absolute npx.exe (rare setups ship one) or — the
+			// overwhelmingly common case — the npm-installed npx.cmd wrapped
+			// through cmd.exe with the script path after `call`.
+			expect(isCmdWrap || isAbsoluteExe).toBe(true);
+			if (isCmdWrap) {
+				// The wrapped token must reference npx (absolute or bare name).
+				const wrappedToken = String(resolved.args[4]);
+				expect(wrappedToken.toLowerCase().includes('npx')).toBe(true);
+			}
+		},
+	);
+
+	test.skipIf(!isWin32)(
+		'bunSpawnSync resolves npm (a .cmd on this host) and prints a version',
+		() => {
+			// Probes real behavior: under the Node fallback this only succeeds
+			// when the shim resolves npm → npm.cmd → cmd.exe wrap (or an
+			// absolute image). The version output must contain a digit.
+			const res = bunSpawnSync(['npm', '--version'], {
+				stdout: 'pipe',
+				stderr: 'pipe',
+			});
+			expect(res.success).toBe(true);
+			expect(res.exitCode).toBe(0);
+			const out = new TextDecoder().decode(res.stdout).trim();
+			expect(/\d/.test(out)).toBe(true);
+		},
+	);
 });

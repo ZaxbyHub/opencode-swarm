@@ -454,17 +454,40 @@ class WorkflowSecurityTester {
   }
 }
 
-// Main execution
-if (require.main === module) {
+/**
+ * Callable entry point: runs the full suite against this repo's
+ * .github/workflows/ci.yml and RETURNS the verdict object. Never calls
+ * process.exit — safe to import from a bun:test file
+ * (tests/security/ci-workflow-security.runner.test.ts), which owns the
+ * pass/fail signal so the workflow checks stay enforced in CI.
+ */
+function runWorkflowSecurityChecks() {
   const workflowPath = path.join(__dirname, '..', '..', '.github', 'workflows', 'ci.yml');
   const tester = new WorkflowSecurityTester(workflowPath);
 
-  if (tester.runAllTests()) {
-    const results = tester.printResults();
-    process.exit(results.verdict === 'PASS' ? 0 : 1);
-  } else {
-    process.exit(1);
+  if (!tester.runAllTests()) {
+    return {
+      verdict: 'FAIL',
+      totalTests: 0,
+      passedTests: 0,
+      failedTests: 0,
+      failures: [{ test: 'load', message: `failed to load ${workflowPath}` }]
+    };
   }
+  return tester.printResults();
 }
 
-module.exports = WorkflowSecurityTester;
+// Standalone execution — gated on an explicit env var, NOT require.main ===
+// module. Under `bun test` (bun 1.4.x) require.main === module is true for
+// .cjs files, so the old gate made this file self-execute inside the shared
+// test run and process.exit(0)-terminate it, masking every other failure
+// (PR #3163 feedback FB-001). Loading this file under `bun test` now only
+// defines and exports the runner; the exit code below belongs to the
+// explicitly requested standalone invocation:
+//   RUN_CI_WORKFLOW_SECURITY=1 node tests/security/ci-workflow-security.test.cjs
+if (process.env.RUN_CI_WORKFLOW_SECURITY === '1') {
+  const results = runWorkflowSecurityChecks();
+  process.exit(results.verdict === 'PASS' ? 0 : 1);
+}
+
+module.exports = { WorkflowSecurityTester, runWorkflowSecurityChecks };
