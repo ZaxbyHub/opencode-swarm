@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.192.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.192.2...v7.192.3) (2026-10-09)
+
+
+### Bug Fixes
+
+* fail Lean lanes on provider errors; harden script and test-gate guards ([e8154cf](https://github.com/ZaxbyHub/opencode-swarm/commit/e8154cf0775a57301b9505f0aaa813197c4e441c))
+
 ## [7.192.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.192.1...v7.192.2) (2026-10-09)
 
 
