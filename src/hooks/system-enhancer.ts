@@ -303,6 +303,7 @@ import {
 	resolvePlanCursorControls,
 } from './extractors';
 import { isSessionBoundArchitect } from './host-boundary';
+import { shouldInjectChannel } from './injection-policy';
 import { isLinked, readLinkPointer } from './knowledge-link';
 import { _internals as knowledgeStoreInternals } from './knowledge-store';
 import type { SwarmKnowledgeEntry } from './knowledge-types.js';
@@ -1425,9 +1426,20 @@ export function createSystemEnhancerHook(
 					// for the gate's session. The read is durable-authoritative
 					// every composed turn (no caching) so suppression is never
 					// sticky across a gate clear.
-					const prReviewGateActive = _input.sessionID
+					//
+					// Issue #3100: the shared gate-aware injection policy
+					// (src/hooks/injection-policy.ts) now owns the gate-mode ×
+					// content-class matrix. The plan-execution decision below
+					// and the agent-activity guards on both context paths are
+					// policy consumers; the gate state itself is read here
+					// (durable, fail-open — a miss fails toward emission) and
+					// passed to the pure policy. Session-identity keying stays
+					// the raw composing sessionID (deliberate asymmetry vs
+					// enforcement's ancestor resolution, documented in the
+					// policy module).
+					const prWorkflowGateState = _input.sessionID
 						? await readPrWorkflowGateState(directory, _input.sessionID)
-								.then((prWorkflowGate) => prWorkflowGate?.mode === 'PR_REVIEW')
+								.then((prWorkflowGate) => prWorkflowGate ?? null)
 								.catch((error: unknown) => {
 									// Fail-open: composition must never break on a
 									// gate-state read failure; the no-gate default is
@@ -1439,9 +1451,17 @@ export function createSystemEnhancerHook(
 										'PR workflow gate state read failed; suppressing nothing this turn (#3093):',
 										error,
 									);
-									return false;
+									return null;
 								})
-						: false;
+						: null;
+					// The #3093 migration: this boolean is now derived through
+					// the shared policy (plan-cursor and parallel-precheck share
+					// the plan-execution content class, so one decision gates
+					// both channels exactly as before).
+					const prReviewGateActive = !shouldInjectChannel(
+						'plan-cursor',
+						prWorkflowGateState,
+					);
 
 					// Check if scoring is enabled
 					const scoringEnabled =
@@ -1615,7 +1635,16 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 										activeAgent,
 										config.hooks?.agent_awareness_max_chars ?? 300,
 									);
-									if (agentContext) {
+									// Issue #3100: the agent-activity table is a
+									// session-state directive channel under the shared
+									// injection policy — suppressed while a PR_REVIEW
+									// gate is active for the composing session (stale
+									// activity tables are non-operative noise in the
+									// read-only gate window).
+									if (
+										agentContext &&
+										shouldInjectChannel('agent-activity', prWorkflowGateState)
+									) {
 										// Sanitize for parity with the sibling `decisions`
 										// inject above (:1006): both read from context.md,
 										// whose `## Agent Activity` section is auto-populated
@@ -2228,6 +2257,9 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 									assembledSystemPrompt,
 									contextBudgetConfig,
 									config.plan_cursor,
+									// #3100/#3161 PRR-003: the report must not count a
+									// cursor the policy suppressed this turn.
+									!shouldInjectChannel('plan-cursor', prWorkflowGateState),
 								);
 								// Paired write, keyed by session. The pct and the denominator
 								// it was computed against must stay together, and a bare global
@@ -2583,7 +2615,16 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 									activeAgent,
 									config.hooks?.agent_awareness_max_chars ?? 300,
 								);
-								if (agentContext) {
+								// Issue #3100: agent-activity table channel under the
+								// shared injection policy — suppressed while a PR_REVIEW
+								// gate is active for the composing session. Targets this
+								// table candidate specifically; the adversarial-pair
+								// warning candidate below shares kind 'agent_context'
+								// but is a config-class advisory and stays ungated.
+								if (
+									agentContext &&
+									shouldInjectChannel('agent-activity', prWorkflowGateState)
+								) {
 									// Sanitize for parity with the sibling `decisions`
 									// candidate (:1850) — both derive from context.md.
 									const text = `[SWARM AGENT CONTEXT] ${sanitizeContextText(agentContext)}`;
@@ -3203,6 +3244,9 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 								assembledSystemPrompt_b,
 								contextBudgetConfig_b,
 								config.plan_cursor,
+								// #3100/#3161 PRR-003: same emission flag as the Path A
+								// report — no counting a policy-suppressed cursor.
+								!shouldInjectChannel('plan-cursor', prWorkflowGateState),
 							);
 							// Paired, session-keyed write — see the Path A note.
 							setSessionBudget(
