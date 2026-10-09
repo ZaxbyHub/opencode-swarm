@@ -9,6 +9,7 @@
 
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { warn } from '../../utils/logger';
 import {
 	isValidEnvKey,
@@ -173,6 +174,8 @@ function probeBwrapNamespace(
 ): { ok: true } | { ok: false; reason: string } {
 	try {
 		const result = spawnSync(binary, [...BWRAP_NAMESPACE_SMOKE_ARGS], {
+			// AGENTS.md invariant 3: an explicit cwd, never the process cwd.
+			cwd: tmpdir(),
 			windowsHide: true,
 			encoding: 'utf-8',
 			timeout: 5000,

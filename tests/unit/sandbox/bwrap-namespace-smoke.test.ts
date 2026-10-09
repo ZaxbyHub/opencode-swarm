@@ -9,6 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_resetCapabilityCache,
@@ -77,6 +78,36 @@ describe.skipIf(process.platform === 'win32')(
 			bwrapInternals.resolveBwrapBinary = () => binary;
 			expect(bwrapInternals.probeBwrap()).toBe(true);
 		});
+
+		test('executor: the smoke run uses the temp directory as its cwd, never the process cwd', () => {
+			const binary = path.join(dir, 'bwrap-pwd');
+			fs.writeFileSync(binary, '#!/bin/sh\npwd -P >&2\nexit 1\n');
+			fs.chmodSync(binary, 0o755);
+			const smoke = bwrapInternals.probeBwrapNamespace(binary);
+			expect(smoke.ok).toBe(false);
+			if (!smoke.ok) expect(smoke.reason).toBe(fs.realpathSync(os.tmpdir()));
+		});
+
+		test('executor: a missing binary or an invalid argument is unavailable, never a throw', () => {
+			const missing = bwrapInternals.probeBwrapNamespace(
+				path.join(dir, 'no-such-bwrap'),
+			);
+			expect(missing.ok).toBe(false);
+			if (!missing.ok) expect(missing.reason).toContain('ENOENT');
+			// A NUL byte makes spawnSync throw synchronously (the catch arm).
+			const invalid = bwrapInternals.probeBwrapNamespace('bwrap\0');
+			expect(invalid.ok).toBe(false);
+			if (!invalid.ok) expect(invalid.reason.length).toBeGreaterThan(0);
+		});
+
+		test('executor: a smoke run that hangs times out as unavailable', () => {
+			const binary = path.join(dir, 'bwrap-hang');
+			fs.writeFileSync(binary, '#!/bin/sh\nexec sleep 30\n');
+			fs.chmodSync(binary, 0o755);
+			const smoke = bwrapInternals.probeBwrapNamespace(binary);
+			expect(smoke.ok).toBe(false);
+			if (!smoke.ok) expect(smoke.reason).toContain('ETIMEDOUT');
+		}, 20_000);
 
 		test('capability probe: reports disabled with the cause, not a strong sandbox', async () => {
 			Object.defineProperty(process, 'platform', {

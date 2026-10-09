@@ -29,3 +29,11 @@ always includes the network namespace (`network_mode: off`, the default). On a
 host that allows user namespaces but refuses network namespaces (typically a
 nested container), bwrap is reported unavailable even for a configuration with
 `network_mode: on`, whose real wraps would not need one.
+
+Known limit: the result is cached for the life of the process, like the
+executor and capability results it feeds. A smoke run that fails once — for
+example by hitting its 5-second timeout on a briefly overloaded host — keeps
+bwrap reported unavailable until OpenCode restarts. With
+`guardrails.sandbox.mode: advisory` (the default) shell commands then run on
+tool-layer enforcement only, with one warning; with `required` they are
+blocked until the restart.
