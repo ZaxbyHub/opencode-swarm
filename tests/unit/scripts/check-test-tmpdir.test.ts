@@ -198,6 +198,83 @@ describe('check-test-tmpdir — checkout and home targets', () => {
 	});
 });
 
+describe('check-test-tmpdir — evasion forms and negative controls', () => {
+	const CWD = ['process', '.cwd()'].join('');
+	const HOME = ['os.home', 'dir()'].join('');
+	const eval1 = (content: string, file = 'x.test.ts') =>
+		evaluateTmpdirAddedLines([{ file, line: 1, content }]).violations;
+
+	test('flags cwd-rooted fixtures: other names, join/resolve, ToolContext literal', () => {
+		for (const content of [
+			`const workspaceRoot = ${CWD};`,
+			`let sandboxDir = ${CWD};`,
+			`const root = path.join(${CWD}, 'fixtures');`,
+			`const baseDir = resolve(${CWD}, '..');`,
+			`const ctx = { directory: ${CWD} };`,
+			`\tdirectory: ${CWD},`,
+			`const tool = makeTool({ projectRoot: path.resolve(${CWD}, 'x') });`,
+		]) {
+			expect(eval1(content)).toBe(1);
+		}
+	});
+
+	test('does not flag cwd reads, restores, comments, or unrelated keys', () => {
+		for (const content of [
+			`const originalCwd = ${CWD};`,
+			`const originalDir = ${CWD};`,
+			`const savedRoot = ${CWD};`,
+			`expect(result.directory).toBe(${CWD});`,
+			`expect(path.resolve(${CWD})).toBe(dir);`,
+			`spawnSync(cmd, { cwd: ${CWD} });`,
+			`// testDir = ${CWD}`,
+			` * directory: ${CWD}`,
+		]) {
+			expect(eval1(content)).toBe(0);
+		}
+	});
+
+	test('flags more home writers: copyFileSync, cpSync, renameSync, mkdtempSync', () => {
+		for (const call of [
+			`copyFileSync(src, path.join(${HOME}, '.x'));`,
+			`fs.cpSync(src, join(${HOME}, '.cfg'), { recursive: true });`,
+			`await fsp.copyFile(src, \`\${${HOME}}/.x\`);`,
+			`renameSync(a, join(${HOME}, 'b'));`,
+		]) {
+			expect(eval1(call)).toBe(1);
+		}
+	});
+
+	test('tracks a homedir held in a variable across added lines of one file', () => {
+		const lines = (file: string, ...contents: string[]) =>
+			contents.map((content, i) => ({ file, line: i + 1, content }));
+		const flagged = evaluateTmpdirAddedLines(
+			lines(
+				'a.test.ts',
+				`const realHome = ${HOME};`,
+				"writeFileSync(path.join(realHome, '.x'), 'y');",
+				'cpSync(src, realHome);',
+			),
+		);
+		expect(flagged.violations).toBe(2);
+		// A same-named variable in ANOTHER file, or a temp-rooted one, is fine.
+		const clean = evaluateTmpdirAddedLines([
+			...lines('a.test.ts', `const realHome = ${HOME};`),
+			...lines('b.test.ts', "writeFileSync(path.join(realHome, '.x'), 'y');"),
+			...lines(
+				'c.test.ts',
+				"const home = canonicalMkdtemp('home-');",
+				"mkdirSync(path.join(home, '.config'), { recursive: true });",
+			),
+			...lines(
+				'd.test.ts',
+				`const realHome = ${HOME};`,
+				'writeFileSync(path.join(otherrealHome, "x"), "y");',
+			),
+		]);
+		expect(clean.violations).toBe(0);
+	});
+});
+
 describe('check-test-tmpdir — end to end', () => {
 	test(`new raw ${RAW_TMPDIR_CALL} usage is blocking`, () => {
 		const repo = makeRepo();

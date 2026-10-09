@@ -29,3 +29,8 @@ the restart.
 
 Found in a live run with worktree isolation on: the test_engineer for a
 parallel task ran inside the coder's session and lane.
+
+Known limits of the lane-session record (behaviour unchanged): it is
+process-global, so it is lost on restart; it keeps at most 512 lane sessions
+and evicts the oldest first (recording an id again refreshes its recency); and
+`/swarm close` clears it with the rest of the worktree isolation state.

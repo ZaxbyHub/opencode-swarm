@@ -329,6 +329,24 @@ describe('fetchNpmLatestVersion (bounded dist-tags read)', () => {
 		).toBeNull();
 	});
 
+	test('a chunked oversized body with no Content-Length is rejected by the shared bounded reader', async () => {
+		let pulled = 0;
+		const stream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulled++;
+				controller.enqueue(new TextEncoder().encode('x'.repeat(16 * 1024)));
+			},
+		});
+		expect(
+			await fetchNpmLatestVersion(
+				'pkg',
+				fakeFetch(() => new Response(stream)),
+			),
+		).toBeNull();
+		// 64 KiB cap / 16 KiB chunks: the endless stream is cut off, not drained.
+		expect(pulled).toBeLessThan(20);
+	});
+
 	test('non-OK, unparseable, non-string latest and a throwing fetch yield null', async () => {
 		for (const respond of [
 			() => new Response('{}', { status: 404 }),

@@ -78,6 +78,12 @@ describe('readProviderMessageError field handling', () => {
 		if (!read) throw new Error('expected a provider error');
 		expect(formatProviderMessageError('p', read)).toBe('p: APIError: boom');
 	});
+
+	test('MessageOutputLengthError is truncated-but-usable output, not a refusal', () => {
+		const truncated = info({ name: 'MessageOutputLengthError', data: {} });
+		expect(readProviderMessageError(truncated)).toBeNull();
+		expect(() => throwIfProviderMessageError('p', truncated)).not.toThrow();
+	});
 });
 
 describe('providerMessageErrorToError', () => {

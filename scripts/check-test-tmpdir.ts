@@ -27,16 +27,54 @@ export const PROJECT_RELATIVE_TEMP_PATTERN =
  * A test fixture root aimed at the process cwd — the plugin checkout under
  * `bun test`. Tools then write `.swarm/` state (and traversal probes resolve)
  * inside the developer's repository.
+ *
+ * Matches `<name> = process.cwd()`, `<name>: process.cwd()` (object literals,
+ * including the ToolContext `{ directory: process.cwd() }`), and the same with
+ * `path.join(process.cwd(), ...)` / `resolve(process.cwd(), ...)`, where
+ * `<name>` looks like a directory holder (dir/root/tmp/temp/project/workspace/
+ * base/cwd-ish). Names that save the cwd for restoring it (originalCwd,
+ * savedDir, prevRoot, ...) and pure reads such as `expect(x).toBe(process.cwd())`
+ * are not flagged. Comment lines are skipped by the evaluator.
  */
 export const CWD_TEST_ROOT_PATTERN =
-	/\b(testDir|tempDir|tmpDir|directory|projectRoot)[ \t]*=[ \t]*process\.cwd\(\)/;
+	/\b(?!(?:orig|original|saved|prev|previous|old|before|initial)\w*[ \t]*[=:])\w*(?:[Dd]ir|[Dd]irectory|[Rr]oot|[Tt]emp|[Tt]mp|[Pp]roject|[Ww]orkspace|[Bb]ase|[Cc]heckout)\w*[ \t]*[=:][ \t]*(?:(?:path\.)?(?:join|resolve)\([ \t]*)?process\.cwd\(\)/;
+const FS_WRITE_FNS =
+	'(?:writeFileSync|mkdirSync|appendFileSync|writeFile|mkdir|copyFileSync|copyFile|cpSync|cp|renameSync|rename|symlinkSync|mkdtempSync|mkdtemp)';
 /**
  * A test fs write aimed at the developer's real home directory. Bun's
  * os.homedir() ignores HOME/USERPROFILE overrides, so these land in the real
  * home even under an "isolated" env (tests/helpers/isolated-test-env.ts).
+ *
+ * A homedir held in a variable (`const real = os.homedir();` then
+ * `writeFileSync(join(real, ...))`) is caught by tracking, per file, the names
+ * assigned from homedir() on ADDED lines (see evaluateTmpdirAddedLines).
  */
-export const HOMEDIR_WRITE_PATTERN =
-	/\b(writeFileSync|mkdirSync|appendFileSync|writeFile|mkdir)\([^;]*homedir\(\)/;
+export const HOMEDIR_WRITE_PATTERN = new RegExp(
+	String.raw`\b${FS_WRITE_FNS}\([^;]*homedir\(\)`,
+);
+/** `<name> = (os.)homedir()` — captures the variable holding the real home. */
+export const HOMEDIR_ASSIGN_PATTERN =
+	/\b([A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:\w+\.)?homedir\(\)/;
+
+function isCommentLine(content: string): boolean {
+	const trimmed = content.trim();
+	return (
+		trimmed.startsWith('//') ||
+		trimmed.startsWith('*') ||
+		trimmed.startsWith('/*')
+	);
+}
+
+function writesViaHomeVariable(content: string, names: Set<string>): boolean {
+	for (const name of names) {
+		const escaped = name.replace(/[$]/g, String.raw`\$`);
+		const pattern = new RegExp(
+			String.raw`\b${FS_WRITE_FNS}\([^;]*(?<![\w$.])${escaped}(?![\w$])`,
+		);
+		if (pattern.test(content)) return true;
+	}
+	return false;
+}
 
 export interface AddedLine {
 	file: string;
@@ -121,8 +159,10 @@ export function evaluateTmpdirAddedLines(
 ): TmpdirEvaluationResult {
 	const messages: string[] = [];
 	let violations = 0;
+	const homeVars = new Map<string, Set<string>>();
 
 	for (const line of addedLines) {
+		const isComment = isCommentLine(line.content);
 		if (RAW_TMPDIR_PATTERN.test(line.content) && !REALPATH_PATTERN.test(line.content)) {
 			messages.push(
 				`ERROR: ${line.file}:${line.line} adds a raw tmpdir() call not wrapped in realpathSync.`,
@@ -150,7 +190,7 @@ export function evaluateTmpdirAddedLines(
 			);
 			violations += 1;
 		}
-		if (CWD_TEST_ROOT_PATTERN.test(line.content)) {
+		if (!isComment && CWD_TEST_ROOT_PATTERN.test(line.content)) {
 			messages.push(
 				`ERROR: ${line.file}:${line.line} roots a test fixture at process.cwd() (the checkout).`,
 			);
@@ -162,7 +202,22 @@ export function evaluateTmpdirAddedLines(
 			);
 			violations += 1;
 		}
-		if (HOMEDIR_WRITE_PATTERN.test(line.content)) {
+		const assigned = isComment
+			? null
+			: HOMEDIR_ASSIGN_PATTERN.exec(line.content);
+		if (assigned) {
+			const names = homeVars.get(line.file) ?? new Set<string>();
+			names.add(assigned[1]);
+			homeVars.set(line.file, names);
+		}
+		if (
+			!isComment &&
+			(HOMEDIR_WRITE_PATTERN.test(line.content) ||
+				writesViaHomeVariable(
+					line.content,
+					homeVars.get(line.file) ?? new Set<string>(),
+				))
+		) {
 			messages.push(
 				`ERROR: ${line.file}:${line.line} writes under os.homedir() (the developer's real home).`,
 			);
