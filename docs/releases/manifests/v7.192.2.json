@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.192.2",
+  "tagCommit": "470ad5a89960ea5ceb28f85d7c1fb84ac49c164a",
+  "targetCommitish": "470ad5a89960ea5ceb28f85d7c1fb84ac49c164a",
+  "releaseBodySha256": "3e06ad460435f302f66f3a446028ba65cd3fdb2b78fd96e2180a79ca2bcfde1d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 12,
+      "path": "docs/releases/pending/3093-plan-cursor-gate-suppression.md",
+      "sha256": "7361c305dbd24f72633b210322bd879f7abddce7213f836028d9d04d380ba77e"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/blank-directory-store-refusals.md",
+      "sha256": "069f50aece7134d31ab4a2472d314e9d5c2640d587777c4e8ca0718396393207"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/bwrap-namespace-smoke-probe.md",
+      "sha256": "4c174b4c7d6c6d268d258fb25dfc9ab7aefd13a47f5cea6a5822cf4574eebbff"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/cli-cleanup-floor-home-ancestors.md",
+      "sha256": "456fa4831d06ef150e55661f6a804e599c21ec2067fed9418dc9b2b33ee5e710"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/ephemeral-dispatch-provider-error.md",
+      "sha256": "2cfcdeaa98127bfef9fe3f09d4f41f637c3254f74bc7a22a7cf42e6db50c689b"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/host-contract-npm-dist-tags.md",
+      "sha256": "9a4b05f27d3d7a07c2c5a603278632470a8f4b4cdd4008477698b9b25b5f473f"
+    },
+    {
+      "prNumber": null,
+      "order": 5,
+      "path": "docs/releases/pending/lane-session-resume-guard.md",
+      "sha256": "9c33766fc1877e3bfb8152291dcfb44ee65d4929a2ecf4ad046954344d05c4fc"
+    },
+    {
+      "prNumber": null,
+      "order": 6,
+      "path": "docs/releases/pending/parallel-stage-a-attribution.md",
+      "sha256": "010acc4cbfc1a765af6aa33a505fcbe44ba9c63ab1e94ee3e30a963b60569ec7"
+    },
+    {
+      "prNumber": null,
+      "order": 7,
+      "path": "docs/releases/pending/phase-wrap-docs-receipt-deadlock.md",
+      "sha256": "4242911d26552a1499f1d00a1f5dd94cb4e9972b7584af60c899d5e628a6b986"
+    },
+    {
+      "prNumber": null,
+      "order": 8,
+      "path": "docs/releases/pending/plan-critic-cursor-advance.md",
+      "sha256": "fe0afd83f8799b50de654ecb79a20b67704d2a5fb1223c32cc2077631c9c0f5c"
+    },
+    {
+      "prNumber": null,
+      "order": 9,
+      "path": "docs/releases/pending/turbo-stage-b-guidance.md",
+      "sha256": "436f2314795138d75b705de4f402b96f9295ac5d8bc6eaba1d557351c5387771"
+    },
+    {
+      "prNumber": null,
+      "order": 10,
+      "path": "docs/releases/pending/turbo-tier3-by-files.md",
+      "sha256": "6ac7bcc169506ed8b3a41f38680868e324bcbddd002d5e3e6e081332e399839e"
+    },
+    {
+      "prNumber": null,
+      "order": 11,
+      "path": "docs/releases/pending/worktree-lifecycle-lock-wait.md",
+      "sha256": "231a79ae7583a5a4a2a89537f39ad0472c080b0f7753ca3ee68dfcda84c091a1"
+    }
+  ]
+}
