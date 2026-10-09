@@ -399,7 +399,7 @@ export function reducePrReviewEvent(
 					return rejected(
 						state,
 						'degraded_disclosure_cannot_approve',
-						'a disclosed coverage degradation (dead family) can never emit APPROVE; report REQUEST_CHANGES with the disclosed degradation or INCOMPLETE',
+						'a disclosed coverage degradation (dead family or dead verdict lane) can never emit APPROVE; report REQUEST_CHANGES with the disclosed degradation or INCOMPLETE',
 					);
 				}
 			}

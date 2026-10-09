@@ -23,6 +23,7 @@ import {
 	normalizePrReviewPartialBaseCoverageRecord,
 	prWorkflowSessionFileStem,
 	readAuthoritativePrReviewCriticVerdicts,
+	readPrReviewVerdictSettlementEffectiveIds,
 	readPrWorkflowGateState,
 	resolvePrReviewWriterRunId,
 	rollbackPrReviewPartialBaseCoverageAdmission,
@@ -292,6 +293,7 @@ function assertCriticSettlements(
 		string,
 		{ status: string; severity: string }
 	>,
+	criticUnavailableIds: ReadonlySet<string>,
 ): CriticSettlementRecord[] {
 	const priorById = latestFindings(
 		existing.filter((record) => record.boundary === 'post_reviewer'),
@@ -300,6 +302,43 @@ function assertCriticSettlements(
 	for (const record of records) {
 		const prior = priorById.get(record.finding_id);
 		const authoritative = authoritativeCriticVerdicts.get(record.finding_id);
+		// Issue #3101: a receipt-covered critic-death item settles as a
+		// disclosed, writer-derived CRITIC_UNAVAILABLE — the model never
+		// authors this status, and a model-supplied critic_status on a
+		// disclosed-dead item is rejected outright.
+		if (criticUnavailableIds.has(record.finding_id)) {
+			if (record.critic_status !== undefined) {
+				throw new Error(
+					`critic settlement for ${record.finding_id} carries a model-supplied critic_status on a disclosed-dead critic item; disclosed-dead items carry no verdict-bearing critic attestation`,
+				);
+			}
+			const settledUnavailable = settleCriticFinding({
+				finding: {
+					id: record.finding_id,
+					status: record.status,
+					severity: record.severity ?? 'NONE',
+					action: record.next_action,
+				},
+				outcome: 'CRITIC_UNAVAILABLE',
+			});
+			if (
+				settledUnavailable.finalFinding.severity !==
+					(record.severity ?? 'NONE') ||
+				settledUnavailable.finalFinding.action !== record.next_action
+			) {
+				throw new Error(
+					`critic settlement for ${record.finding_id} does not match the final persisted severity/action`,
+				);
+			}
+			settlements.push({
+				findingId: record.finding_id,
+				terminal: settledUnavailable.terminal,
+				status: settledUnavailable.status,
+				finalFinding: settledUnavailable.finalFinding,
+				handoffFindingIds: settledUnavailable.handoffFindingIds,
+			});
+			continue;
+		}
 		const needsCriticAuthority =
 			prior?.next_action === 'route_to_critic' ||
 			record.critic_status !== undefined;
@@ -694,10 +733,17 @@ export async function executeWritePrReviewArtifact(
 				const authoritativeCriticVerdicts = criticRouted
 					? await readAuthoritativePrReviewCriticVerdicts(directory, sessionID)
 					: new Map<string, { status: string; severity: string }>();
+				const criticUnavailableIds =
+					await readPrReviewVerdictSettlementEffectiveIds(
+						directory,
+						sessionID,
+						'critic',
+					);
 				criticSettlements = assertCriticSettlements(
 					findingsInput.records,
 					existing,
 					authoritativeCriticVerdicts,
+					criticUnavailableIds,
 				);
 			} catch (error) {
 				return withPartialAdmissionRollback(
