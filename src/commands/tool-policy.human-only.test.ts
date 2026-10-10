@@ -35,8 +35,10 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 	// Moved from registry.tool-policy.test.ts (FR-006 ratchet: that file is
 	// over the 500-line cap and must not grow). #2268 added 'recover'; #2103
 	// makes Full-Auto direct-human-only so agents cannot stop it mid-run.
-	test("'human-only' registry bucket contains exactly the expected 15 commands", () => {
+	test("'human-only' registry bucket contains exactly the expected 19 commands", () => {
 		const expectedHumanOnly = new Set<string>([
+			// #3169: epic is human-only (ask-the-user refusal via swarm_command).
+			'epic',
 			'dataset consent',
 			'dataset export',
 			'dataset withdraw',
@@ -69,7 +71,7 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(18);
+		expect(actual.size).toBe(19);
 		for (const name of expectedHumanOnly) {
 			expect(actual.has(name)).toBe(true);
 		}

@@ -19,7 +19,7 @@ describe('toolPolicy none classification snapshot', () => {
 			'deep-dive',
 			'deep-research',
 			'design-docs',
-			'epic',
+			// #3169: epic moved to human-only (schema-visible refusal on v2).
 			'finalize',
 			'handoff',
 			'issue',

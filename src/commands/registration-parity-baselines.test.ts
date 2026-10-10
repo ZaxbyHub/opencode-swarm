@@ -157,6 +157,8 @@ describe('Command registration parity — classification baselines', () => {
 			// `approve-plan-critic` is a restricted human-only escape hatch for
 			// the ratchet-tighter critic_pre_plan execution gate (issue #2012).
 			humanOnly: new Set([
+				// #3169: epic — human-only (see toolCommands note).
+				'epic',
 				// #2486: governed training vault — consent/withdraw/export are human-only.
 				'dataset consent',
 				'dataset export',
@@ -194,6 +196,8 @@ describe('Command registration parity — classification baselines', () => {
 			]),
 			toolCommands: new Set([
 				'full-auto',
+				// #3169: epic is human-only (schema-visible; never agent-callable).
+				'epic',
 				'dataset consent',
 				'dataset export',
 				'dataset withdraw',

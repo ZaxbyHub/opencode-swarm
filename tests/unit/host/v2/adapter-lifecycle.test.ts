@@ -158,8 +158,9 @@ describe('command execute -> session.prompt bridge (PRR-011)', () => {
 				},
 				session: {
 					hook: async () => ({ dispose: async () => {} }),
-					prompt: async (sessionID: string, input: unknown) => {
-						prompts.push({ sessionID, input });
+					// 2.0.26 SessionApi shape: one object input (#3169).
+					prompt: async (input: unknown) => {
+						prompts.push(input);
 					},
 				},
 			} as never,
@@ -183,8 +184,11 @@ describe('command execute -> session.prompt bridge (PRR-011)', () => {
 			prompt: { text: 'now show lanes' },
 		});
 		expect(prompts.length).toBe(1);
-		expect(prompts[0].sessionID).toBe('s-cmd');
-		expect(prompts[0].input).toEqual({ text: '/swarm status now show lanes' });
+		// Object-input form (issue #3169): sessionID + text in ONE input.
+		expect(prompts[0]).toEqual({
+			sessionID: 's-cmd',
+			text: '/swarm status now show lanes',
+		});
 	});
 });
 

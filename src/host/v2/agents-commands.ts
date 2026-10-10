@@ -180,8 +180,13 @@ export async function registerV2AgentsAndCommands(
 								});
 								return;
 							}
+							// 2.0.26 SessionApi shape: one object input carrying
+							// sessionID + text (issue #3169; the published surface has
+							// been object-input since at least 2.0.20).
 							await withTimeout(
-								Promise.resolve(prompt(invocation.sessionID, { text })),
+								Promise.resolve(
+									prompt({ sessionID: invocation.sessionID, text }),
+								),
 								V2_REGISTRATION_TIMEOUT_MS,
 								new Error(
 									`[opencode-swarm] v2: command ${key} prompt exceeded budget`,
