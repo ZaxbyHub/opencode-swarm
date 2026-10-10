@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.192.0",
+  "tagCommit": "3412f1fb60cd9a5edc5c15208bd0c1ab970cbbd5",
+  "targetCommitish": "3412f1fb60cd9a5edc5c15208bd0c1ab970cbbd5",
+  "releaseBodySha256": "38390aca8e1a3609b0aef7f1c225672644c63f4ef1174929442711c714d3b1e2",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3097-post-abort-partial-results-export.md",
+      "sha256": "dc2afb1ae2e9d7df1ff6a5116522c99e16ee38768e413d3f41f1f6e389207cc3"
+    }
+  ]
+}
