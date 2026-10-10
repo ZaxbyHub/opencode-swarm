@@ -20,10 +20,12 @@
  * | command-contract    | command-banner                 | inject    | inject      | inject   |
  * | delegation-steering | delegation-steering            | inject    | inject      | inject   |
  *
- * *no gate / gate-read failure / a gate owned by a different session all
- * fail toward emission (the gate-state reader returns null in those
- * cases) — matching the #3093 fail-open composition convention: a miss
- * costs extra directives, never hidden ones.
+ * *no gate / a gate owned by a different session / a gate read that
+ * failed all arrive here as a null gate state and fail toward emission —
+ * matching the #3093 fail-open composition convention: a miss costs extra
+ * directives, never hidden ones. (The gate-state READER throws on invalid
+ * or unreadable state; the null is the composer's `.catch` result, not the
+ * reader's. This module is pure and has no failure path of its own.)
  *
  * Deliberate asymmetry (#3161 PRR-010): composition keys the gate read on
  * the RAW composing sessionID (the composer owns the read; see
@@ -45,11 +47,16 @@
  *
  * Budget-report consumer (#3161 PRR-003): the context-budget report
  * consumes the plan-cursor channel decision (as an explicit emission
- * flag) so it stops counting a policy-suppressed cursor. Known residual
- * divergences left open on #3161: DISCOVER-mode counting (the emission
- * conditions require a non-DISCOVER mode while the report is mode-blind)
- * and Path B ranked-drop counting (a candidate skipped by the scoring
- * injection loop is still counted).
+ * flag) so it stops counting a policy-suppressed cursor.
+ *
+ * Known residual budget-report divergences, NOT yet tracked by an issue
+ * (verify they still exist before filing):
+ *  - DISCOVER-mode counting — the emission conditions require a non-DISCOVER
+ *    mode while the report is mode-blind, so in DISCOVER it still counts a
+ *    cursor the prompt never contained.
+ *  - Path B ranked-drop counting — a cursor candidate skipped by the
+ *    scoring injection loop is still counted.
+ * #3161 tracks the budget twin itself (PRR-003), not these two.
  */
 import type { PrWorkflowMode } from './pr-workflow-gate';
 
@@ -107,12 +114,20 @@ export const SUPPRESSED_UNDER: Readonly<
  * function of the channel's content class and the gate mode. Unknown
  * channels and absent gate state (no gate, read failure, foreign session)
  * fail toward emission.
+ *
+ * The own-property check (not a truthiness check) is load-bearing: the
+ * registries are plain object literals, so a PROTOTYPE key such as
+ * 'constructor' or 'toString' resolves to a truthy inherited value that
+ * would otherwise pass a truthiness guard and then throw on
+ * `SUPPRESSED_UNDER[<Function>].includes` instead of failing open.
  */
 export function shouldInjectChannel(
 	channel: InjectionChannel,
 	gateState: InjectionGateState | null,
 ): boolean {
-	const contentClass = INJECTION_CHANNEL_CONTENT_CLASS[channel];
+	const contentClass = Object.hasOwn(INJECTION_CHANNEL_CONTENT_CLASS, channel)
+		? INJECTION_CHANNEL_CONTENT_CLASS[channel]
+		: undefined;
 	if (!contentClass) {
 		return true;
 	}

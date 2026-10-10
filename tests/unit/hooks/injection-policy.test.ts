@@ -15,8 +15,19 @@
  *    channels behave identically, and the kind-sharing adversarial
  *    advisory stays ungated (no over-suppression by candidate kind).
  * 3. Budget-report consumer — getContextBudgetReport counts zero cursor
- *    tokens when the policy suppressed the channel, plus the call-site
- *    wiring ratchet for both system-enhancer report calls.
+ *    tokens when the policy suppressed the channel, a BEHAVIORAL check
+ *    that the enhancer's two report call sites actually pass that
+ *    decision (gated vs ungated session-budget delta), and the
+ *    call-site wiring ratchet.
+ *
+ * Review follow-ups covered here (PR #3181 swarm-pr-review):
+ * PRR-002 fail-open catch — a corrupt gate fixture drives the throwing
+ *   read end-to-end and asserts composition still emits everything.
+ * PRR-003 wiring ratchet — behavioral budget assertion, so an
+ *   argument-level mutation at either call site fails a real assertion
+ *   and not just an occurrence count.
+ * PRR-010 prototype-key lookup — Object.prototype keys fail toward
+ *   emission instead of throwing.
  *
  * No mock.module: production modules are imported statically and driven
  * with real temp workspaces. No raw clock reads: gate fixtures carry
@@ -35,8 +46,14 @@ import {
 	shouldInjectChannel,
 } from '../../../src/hooks/injection-policy';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
+import { workflowGateStateRelativePath } from '../../../src/pr-review/persistence';
 import { getContextBudgetReport } from '../../../src/services/context-budget-service';
-import { resetSwarmState, swarmState } from '../../../src/state';
+import {
+	getSessionBudgetPct,
+	getSessionBudgetTokens,
+	resetSwarmState,
+	swarmState,
+} from '../../../src/state';
 import { writeRawPrWorkflowGateState } from '../../helpers/pr-workflow-lane-fixtures';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 

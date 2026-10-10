@@ -312,8 +312,9 @@ async function getPlanCursorContent(
  *   injection policy suppressed the plan-cursor channel this turn (e.g. an
  *   active PR_REVIEW gate for the composing session) — the report then
  *   counts zero cursor tokens instead of re-deriving content the prompt
- *   does not contain. Known residual divergences (mode-blind DISCOVER
- *   counting; Path B ranked-drop counting) stay open on #3161.
+ *   does not contain. Two known residual divergences are NOT yet tracked by
+ *   an issue (see the note in src/hooks/injection-policy.ts): mode-blind
+ *   DISCOVER counting, and Path B ranked-drop counting.
  * @returns Context budget report
  */
 export async function getContextBudgetReport(
