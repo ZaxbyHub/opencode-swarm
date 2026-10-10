@@ -21,13 +21,10 @@
  *    call-site wiring ratchet.
  *
  * Review follow-ups covered here (PR #3181 swarm-pr-review):
- * PRR-002 fail-open catch — a corrupt gate fixture drives the throwing
- *   read end-to-end and asserts composition still emits everything.
- * PRR-003 wiring ratchet — behavioral budget assertion, so an
- *   argument-level mutation at either call site fails a real assertion
- *   and not just an occurrence count.
- * PRR-010 prototype-key lookup — Object.prototype keys fail toward
- *   emission instead of throwing.
+ * The PR #3181 review follow-ups (PRR-002 fail-open catch, PRR-003
+ * budget wiring, PRR-010 prototype-key lookup) are covered by the
+ * sibling suite tests/unit/hooks/injection-policy-consumers.test.ts;
+ * this file keeps the policy matrix plus the textual wiring ratchet.
  *
  * No mock.module: production modules are imported statically and driven
  * with real temp workspaces. No raw clock reads: gate fixtures carry
@@ -46,14 +43,8 @@ import {
 	shouldInjectChannel,
 } from '../../../src/hooks/injection-policy';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
-import { workflowGateStateRelativePath } from '../../../src/pr-review/persistence';
 import { getContextBudgetReport } from '../../../src/services/context-budget-service';
-import {
-	getSessionBudgetPct,
-	getSessionBudgetTokens,
-	resetSwarmState,
-	swarmState,
-} from '../../../src/state';
+import { resetSwarmState, swarmState } from '../../../src/state';
 import { writeRawPrWorkflowGateState } from '../../helpers/pr-workflow-lane-fixtures';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 

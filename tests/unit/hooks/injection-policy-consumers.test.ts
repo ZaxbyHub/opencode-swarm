@@ -9,9 +9,16 @@
  * PRR-002 fail-open catch — a corrupt gate fixture drives the throwing
  *   gate-state read end-to-end and asserts composition still emits
  *   everything (the branch this PR mutated, `return false` -> `return null`).
- * PRR-003 behavioral budget wiring — the enhancer's two budget-report call
- *   sites are proven behaviorally, so an argument-level mutation fails a
- *   real assertion rather than only a textual occurrence count.
+ * PRR-003 budget wiring — drives the real enhancer under an active gate and
+ *   asserts the stored session budget DROPS (the report stops counting a
+ *   cursor the prompt no longer contains), plus a non-vacuity guard proving
+ *   the suppression flag is load-bearing on the same workspace.
+ *   SCOPE LIMIT, stated honestly: this proves the end-to-end EFFECT of the
+ *   wiring, not each call site's argument. Isolating an argument-level
+ *   mutation would require replicating getContextBudgetReport's internal
+ *   inputs (its knowledge / run-memory / handoff reads), so the
+ *   per-call-site argument pin remains the source-scan ratchet in
+ *   injection-policy.test.ts.
  *
  * Split from the main policy suite to stay under the repo's 500-line test
  * file cap (AGENTS.md invariant 7 / check:test-file-cap).
@@ -30,6 +37,10 @@ import {
 } from '../../../src/hooks/injection-policy';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
 import { workflowGateStateRelativePath } from '../../../src/pr-review/persistence';
+import {
+	DEFAULT_CONTEXT_BUDGET_CONFIG,
+	getContextBudgetReport,
+} from '../../../src/services/context-budget-service';
 import {
 	getSessionBudgetPct,
 	getSessionBudgetTokens,
@@ -279,11 +290,38 @@ describe('injection policy — enhancer budget wiring is behavioral, not textual
 			const { budgetPct: gatedPct, budgetTokens: denominator } = gated;
 
 			// The wiring's whole point: the report stops counting the
-			// suppressed cursor, so the budget percentage must drop and
-			// the recovered tokens must be a real, non-trivial amount.
+			// suppressed cursor, so the budget percentage must drop.
 			expect(gatedPct).toBeLessThan(ungatedPct);
-			const recoveredTokens = ((ungatedPct - gatedPct) * denominator) / 100;
-			expect(recoveredTokens).toBeGreaterThan(0);
+			expect((ungatedPct - gatedPct) * (denominator / 100)).toBeGreaterThan(0);
+
+			// Non-vacuity guard: on the SAME workspace the suppression flag
+			// must measurably change the reported figure. Without this, the
+			// comparison above could be satisfied by the assembled-prompt
+			// difference alone — the gated prompt genuinely lacks the cursor
+			// text regardless of the flag — and the test would not show that
+			// the flag reaches the report at all.
+			const reportConfig = {
+				...(DEFAULT_CONTEXT_BUDGET_CONFIG as Record<string, unknown>),
+				budgetTokens: denominator,
+			} as unknown as Parameters<typeof getContextBudgetReport>[2];
+			const prompt = gated.system.join('\n');
+			const asSuppressed = await getContextBudgetReport(
+				dir,
+				prompt,
+				reportConfig,
+				{ enabled: true },
+				true,
+			);
+			const asCounted = await getContextBudgetReport(
+				dir,
+				prompt,
+				reportConfig,
+				{ enabled: true },
+				false,
+			);
+			expect(asSuppressed.planCursorTokens).toBe(0);
+			expect(asCounted.planCursorTokens).toBeGreaterThan(0);
+			expect(asCounted.budgetPct).toBeGreaterThan(asSuppressed.budgetPct);
 		} finally {
 			await rm(dir, { recursive: true, force: true }).catch(() => {});
 		}
