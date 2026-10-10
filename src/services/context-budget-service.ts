@@ -308,6 +308,13 @@ async function getPlanCursorContent(
  * @param directory - The swarm workspace directory
  * @param assembledSystemPrompt - The fully assembled system prompt
  * @param config - Budget configuration
+ * @param planCursorSuppressed - #3100/#3161 PRR-003: true when the shared
+ *   injection policy suppressed the plan-cursor channel this turn (e.g. an
+ *   active PR_REVIEW gate for the composing session) — the report then
+ *   counts zero cursor tokens instead of re-deriving content the prompt
+ *   does not contain. Two known residual divergences are NOT yet tracked by
+ *   an issue (see the note in src/hooks/injection-policy.ts): mode-blind
+ *   DISCOVER counting, and Path B ranked-drop counting.
  * @returns Context budget report
  */
 export async function getContextBudgetReport(
@@ -315,6 +322,7 @@ export async function getContextBudgetReport(
 	assembledSystemPrompt: string,
 	config: ContextBudgetConfig,
 	planCursor?: PlanCursorConfigShape,
+	planCursorSuppressed = false,
 ): Promise<ContextBudgetReport> {
 	// `directory` is the plugin-injected project root (system-enhancer passes
 	// its `directory`), so it is TRUSTED and always ABSOLUTE. It must therefore
@@ -328,8 +336,12 @@ export async function getContextBudgetReport(
 	// Estimate tokens for each component
 	const systemPromptTokens = estimateTokens(assembledSystemPrompt);
 
-	// Read plan cursor
-	const planCursorContent = await getPlanCursorContent(directory, planCursor);
+	// Read plan cursor — skipped when the injection policy suppressed the
+	// channel this turn (#3100): the report must reflect the prompt, not
+	// re-derive content the composer did not emit.
+	const planCursorContent = planCursorSuppressed
+		? ''
+		: await getPlanCursorContent(directory, planCursor);
 	const planCursorTokens = estimateTokens(planCursorContent);
 
 	// Read knowledge content (link-aware: reflects the shared store when linked).
