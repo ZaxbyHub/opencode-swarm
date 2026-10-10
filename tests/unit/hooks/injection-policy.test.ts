@@ -15,16 +15,14 @@
  *    channels behave identically, and the kind-sharing adversarial
  *    advisory stays ungated (no over-suppression by candidate kind).
  * 3. Budget-report consumer — getContextBudgetReport counts zero cursor
- *    tokens when the policy suppressed the channel, a BEHAVIORAL check
- *    that the enhancer's two report call sites actually pass that
- *    decision (gated vs ungated session-budget delta), and the
- *    call-site wiring ratchet.
+ *    tokens when the policy suppressed the channel, plus the call-site
+ *    wiring ratchet.
  *
- * Review follow-ups covered here (PR #3181 swarm-pr-review):
- * The PR #3181 review follow-ups (PRR-002 fail-open catch, PRR-003
- * budget wiring, PRR-010 prototype-key lookup) are covered by the
- * sibling suite tests/unit/hooks/injection-policy-consumers.test.ts;
- * this file keeps the policy matrix plus the textual wiring ratchet.
+ * Review follow-ups (PR #3181 swarm-pr-review): PRR-002 fail-open catch,
+ * PRR-003 budget wiring and PRR-010 prototype-key lookup are covered by
+ * the sibling suite tests/unit/hooks/injection-policy-consumers.test.ts;
+ * this file keeps the policy matrix, the direct service check, and the
+ * textual wiring ratchet.
  *
  * No mock.module: production modules are imported statically and driven
  * with real temp workspaces. No raw clock reads: gate fixtures carry
