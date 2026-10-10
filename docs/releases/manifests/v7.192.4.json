@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.192.4",
+  "tagCommit": "b63a4bdba86a2b71c9956d407f4c25fb9496f71b",
+  "targetCommitish": "b63a4bdba86a2b71c9956d407f4c25fb9496f71b",
+  "releaseBodySha256": "8bb5e29c329d1ab8ecf8bbbd5dec365c163986d3054c7a873455cc809479fd8d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3099-readonly-gate-classification.md",
+      "sha256": "a6944ba2cd126405234db61f47b8564d359319b5672f5524786a56c190a3d013"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/truncated-reply-finish-fails-closed.md",
+      "sha256": "701abf5d0ebd1cab6ac3fe0a150f3d75c108d617d97985f037e34a2cc8ba2fad"
+    }
+  ]
+}
