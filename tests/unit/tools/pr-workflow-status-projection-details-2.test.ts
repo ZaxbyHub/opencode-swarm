@@ -46,6 +46,14 @@ import {
 const BASE_CANDIDATE_HEADER =
 	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
+/**
+ * A literal ISO timestamp for the inert `validatedAt` fixture field. The gate
+ * schema only requires it to be a string; no assertion reads it, so a literal
+ * is both deterministic and the sanctioned alternative to adopting freezeClock
+ * for a field that carries no timing meaning.
+ */
+const FIXTURE_VALIDATED_AT = '2026-01-01T00:00:00.000Z';
+
 const realReadGate = _internals.readPrWorkflowGateStateForRecovery;
 const realFindByBatchId = _internals.findByBatchIdDetailed;
 const realHead = _internals.resolveCurrentGitHeadAsync;
@@ -252,7 +260,7 @@ describe('lane markers and attribution', () => {
 						},
 						{ laneId: 'council-lane-b', workflowLane: 'correctness-contracts' },
 					],
-					validatedAt: new Date().toISOString(),
+					validatedAt: FIXTURE_VALIDATED_AT,
 				},
 			],
 		});
@@ -275,7 +283,7 @@ describe('lane markers and attribution', () => {
 					lanes: [
 						{ laneId: 'ghost-lane', workflowLane: 'intent-architecture' },
 					],
-					validatedAt: new Date().toISOString(),
+					validatedAt: FIXTURE_VALIDATED_AT,
 				},
 			],
 		});
@@ -451,7 +459,7 @@ describe('precedence and bounding', () => {
 						laneId: `many-lane-${i}`,
 						workflowLane: 'intent-architecture',
 					})),
-					validatedAt: new Date().toISOString(),
+					validatedAt: FIXTURE_VALIDATED_AT,
 				},
 			],
 		});
