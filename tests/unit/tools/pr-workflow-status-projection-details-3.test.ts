@@ -94,15 +94,15 @@ const statusExecute = (
 ).execute;
 
 async function runProjection(): Promise<Projection> {
-	const result = await statusExecute(
-		{},
-		{ directory: tempDir, sessionID: SESSION_ID } as unknown as ToolContext,
-	);
+	const result = await statusExecute({}, {
+		directory: tempDir,
+		sessionID: SESSION_ID,
+	} as unknown as ToolContext);
 	const text =
 		typeof result === 'string' ? result : (result as ToolResult).output;
 	const gate = (JSON.parse(text as string) as Record<string, unknown>)
 		.gate as Record<string, unknown>;
-	return (gate.reviewProjection as Record<string, unknown>) as Projection;
+	return gate.reviewProjection as Record<string, unknown> as Projection;
 }
 
 /** Corrupt every stored lane artifact so a promised outputRef cannot be read. */
@@ -134,9 +134,10 @@ describe('F1 — a promised but unreadable lane artifact is unknown, not absent'
 		await establishReviewPrerequisites();
 		const before = await runProjection();
 		// Control: with intact artifacts the base lane genuinely HAS a finding.
-		expect(before.lanes.lanes.find((r) => r.workflowLane === 'intent-architecture')?.marker).toBe(
-			'finding',
-		);
+		expect(
+			before.lanes.lanes.find((r) => r.workflowLane === 'intent-architecture')
+				?.marker,
+		).toBe('finding');
 
 		const corrupted = corruptEveryLaneArtifact();
 		expect(corrupted).toBeGreaterThan(0);
@@ -162,10 +163,10 @@ describe('F1 — a promised but unreadable lane artifact is unknown, not absent'
 	test('the tool still returns successfully on a corrupt artifact (never throws)', async () => {
 		await establishReviewPrerequisites();
 		corruptEveryLaneArtifact();
-		const result = await statusExecute(
-			{},
-			{ directory: tempDir, sessionID: SESSION_ID } as unknown as ToolContext,
-		);
+		const result = await statusExecute({}, {
+			directory: tempDir,
+			sessionID: SESSION_ID,
+		} as unknown as ToolContext);
 		const text =
 			typeof result === 'string' ? result : (result as ToolResult).output;
 		const parsed = JSON.parse(text as string) as Record<string, unknown>;
