@@ -502,6 +502,7 @@ function readStatusLaneEvidence(
 		let hasFinding = false;
 		let hasClean = false;
 		let artifactTruncated = false;
+		let readUncertain = false;
 		for (const record of outcome.value) {
 			if (record.laneId !== spec.laneId || record.mode !== spec.mode) continue;
 			if (
@@ -530,7 +531,18 @@ function readStatusLaneEvidence(
 			const ref = record.result?.outputRef?.trim();
 			if (!ref) continue;
 			const loaded = _internals.readLaneOutput(directory, ref);
-			if (!loaded) continue;
+			if (!loaded) {
+				// `readLaneOutput` returns null both when the artifact was never
+				// written and when it exists but is corrupt or unreadable — the
+				// store's reader folds parse/integrity failures into the same
+				// null. A lane that PROMISES evidence via outputRef therefore has
+				// UNKNOWN evidence, not absent evidence, so report typed
+				// uncertainty and let the marker refuse to claim absence. The
+				// gate's own derivation treats this identical input as invalid
+				// provenance (pr-workflow-gate.ts:15759).
+				readUncertain = true;
+				continue;
+			}
 			const parsed = parseStatusArtifactRows(loaded.artifact.text);
 			if (parsed.candidateRows.length > 0) {
 				hasFinding = true;
@@ -545,7 +557,10 @@ function readStatusLaneEvidence(
 		}
 		return {
 			...base,
-			readState: 'ok',
+			// A lane that promised an artifact we could not read is UNKNOWN, not
+			// clean and not empty: never let a failed read surface as an
+			// absence claim (see the readLaneOutput null handling below).
+			readState: readUncertain ? 'uncertain' : 'ok',
 			hasFinding,
 			hasClean,
 			findings,
