@@ -13858,6 +13858,72 @@ async function requireAnyActiveState(
 	return state;
 }
 
+/**
+ * Issue #3095: read-only candidate-inventory read for the pr_workflow_status
+ * observation surface. Discriminated union, never a throw:
+ *
+ * - Composes its OWN preconditions (`requireAnyActiveState` + mode + head
+ *   checks) instead of `requireBoundState`, deliberately OMITTING the
+ *   enforcement checkout assertions (`assertCurrentCheckoutHead` /
+ *   `assertPrReviewCleanCheckout`). A dirty tree is a first-class state this
+ *   status tool exists to report; coupling observation to the enforcement
+ *   preconditions would blank the inventory exactly when the operator is
+ *   stuck. The derivation itself (`derivePrReviewCandidateInventory`) is
+ *   reused unchanged — no logic duplicated.
+ * - Every throw on the path is converted to the `unavailable` arm by a
+ *   uniform catch (not a BLOCKED-prefix filter), so a corrupt or partial
+ *   review degrades the inventory, never the whole tool response.
+ * - Returns the FULL sorted inventory (including the 'CLEAN-REVIEW'
+ *   sentinel when discovery found nothing); truncation caps are owned by the
+ *   caller-side pure projection (src/pr-review/status-projection.ts), so this
+ *   module never imports it and no gate -> projection cycle can exist.
+ */
+export type PrReviewCandidateInventoryForStatus =
+	| { state: 'available'; inventory: string[] }
+	| { state: 'unavailable'; reason: string };
+
+const PR_REVIEW_STATUS_REASON_MAX_CHARS = 240;
+
+function boundPrReviewStatusReason(error: unknown): string {
+	const message =
+		error instanceof Error ? error.message : String(error ?? 'unknown error');
+	const cleaned = message
+		.replace(/[\p{Cc}]/gu, ' ')
+		.replace(/\s+/g, ' ')
+		.trim();
+	return cleaned.length > PR_REVIEW_STATUS_REASON_MAX_CHARS
+		? `${cleaned.slice(0, PR_REVIEW_STATUS_REASON_MAX_CHARS)}…`
+		: cleaned;
+}
+
+export async function readPrReviewCandidateInventoryForStatus(
+	directory: string,
+	sessionID: string,
+): Promise<PrReviewCandidateInventoryForStatus> {
+	try {
+		const state = await requireAnyActiveState(directory, sessionID);
+		if (state.mode !== 'PR_REVIEW') {
+			return {
+				state: 'unavailable',
+				reason: `active workflow is ${state.mode}, not PR_REVIEW`,
+			};
+		}
+		if (!state.prHeadSha) {
+			return {
+				state: 'unavailable',
+				reason: 'active PR_REVIEW workflow is not bound to a PR head',
+			};
+		}
+		const ctx = await createPrReviewGateContext(directory, state);
+		return {
+			state: 'available',
+			inventory: derivePrReviewCandidateInventory(directory, state, ctx),
+		};
+	} catch (error) {
+		return { state: 'unavailable', reason: boundPrReviewStatusReason(error) };
+	}
+}
+
 async function requireBoundState(
 	directory: string,
 	sessionID: string,

@@ -1,7 +1,12 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-import { readDelegationsDetailed } from '../background/pending-delegations';
+import { readLaneOutput } from '../background/lane-output-store';
+import {
+	findByBatchIdDetailed,
+	readDelegationsDetailed,
+} from '../background/pending-delegations';
+import { readPrReviewTriggerReceiptForGate } from '../background/pr-review-trigger-receipt-reader';
 import {
 	resolveCurrentGitHeadAsync,
 	resolveIsWorkingTreeCleanAsync,
@@ -17,10 +22,22 @@ import {
 	type PrWorkflowGateRecoveryRead,
 	type PrWorkflowGateState,
 	prWorkflowSessionFileStem,
+	readPrReviewCandidateInventoryForStatus,
 	readPrWorkflowGateStateForRecovery,
 } from '../hooks/pr-workflow-gate';
 import { resolvePrWorkflowControllerSession } from '../hooks/pr-workflow-session-resolver';
 import { validateSwarmPath } from '../hooks/utils';
+import {
+	MAX_STATUS_FINDINGS_PER_LANE,
+	type PrReviewStatusFindingSummary,
+	type PrReviewStatusLaneInput,
+	type PrReviewStatusLaneSource,
+	type PrReviewStatusReviewProjection,
+	parseStatusArtifactRows,
+	projectBoundariesForStatus,
+	projectCandidateInventoryForStatus,
+	projectLanesForStatus,
+} from '../pr-review/status-projection';
 import { bunSpawn } from '../utils/bun-compat';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { createSwarmTool } from './create-tool';
@@ -100,6 +117,16 @@ interface PrWorkflowStatusGateSummary {
 	 * its first declaration. Present only when at least one amendment exists.
 	 */
 	inventoryAmendments?: PrFeedbackInventoryAmendmentRecord[];
+	/**
+	 * Issue #3095: bounded read-only projection of the PR_REVIEW state the
+	 * controller derives and enforces (candidate inventory, per-boundary
+	 * settlement, per-lane coverage). Present ONLY for an active PR_REVIEW
+	 * workflow — PR_FEEDBACK, no-gate, and delegation-chain-uncertain
+	 * responses stay byte-identical to before. Every read inside degrades
+	 * to a typed unavailable/uncertain state; this tool never throws on bad
+	 * review state (issue #2242 R4 / plan F3+R3-1).
+	 */
+	reviewProjection?: PrReviewStatusReviewProjection;
 }
 
 interface PrWorkflowStatusResult {
@@ -389,6 +416,7 @@ function summarizeGate(
 	state: PrWorkflowGateState | null,
 	receiptFiles: number | null,
 	salvage?: { salvaged: boolean; disclosure?: string },
+	reviewProjection?: PrReviewStatusReviewProjection,
 ): PrWorkflowStatusGateSummary {
 	if (!state) {
 		return { active: false, reason: 'no-active-gate' };
@@ -422,6 +450,211 @@ function summarizeGate(
 		activatedAt: state.activatedAt,
 		updatedAt: state.updatedAt,
 		revision: state.revision,
+		...(reviewProjection ? { reviewProjection } : {}),
+	};
+}
+
+/**
+ * Issue #3095: one lane's evidence read for the reviewProjection lanes
+ * section. Every read is wrapped (degrade-never-throw, the `describeDelegationRead`
+ * house pattern): a typed-uncertain delegation-store read, or any unexpected
+ * throw, yields `readState: 'uncertain'` — projected as marker
+ * `'unknown-evidence'` — never an absence claim and never a tool failure.
+ * Identity matching mirrors the derivation's own record filters (laneId, mode,
+ * exact PR head on both workspace provenance fields).
+ */
+function readStatusLaneEvidence(
+	directory: string,
+	state: PrWorkflowGateState,
+	spec: {
+		batchId: string;
+		phase: string;
+		laneId: string;
+		workflowLane: string;
+		itemCount: number | null;
+		mode: string;
+	},
+): PrReviewStatusLaneInput {
+	const base = {
+		batchId: spec.batchId,
+		phase: spec.phase,
+		laneId: spec.laneId,
+		workflowLane: spec.workflowLane,
+		itemCount: spec.itemCount,
+	};
+	try {
+		const outcome = _internals.findByBatchIdDetailed(directory, spec.batchId, {
+			parentSessionId: state.sessionID,
+		});
+		if (outcome.status === 'uncertain') {
+			return {
+				...base,
+				readState: 'uncertain',
+				hasFinding: false,
+				hasClean: false,
+				findings: [],
+				findingsTruncated: false,
+				artifactTruncated: false,
+			};
+		}
+		const findings: PrReviewStatusFindingSummary[] = [];
+		let findingCountTotal = 0;
+		let hasFinding = false;
+		let hasClean = false;
+		let artifactTruncated = false;
+		for (const record of outcome.value) {
+			if (record.laneId !== spec.laneId || record.mode !== spec.mode) continue;
+			if (
+				!state.prHeadSha ||
+				record.workspace?.prHeadSha !== state.prHeadSha ||
+				record.workspace?.gitHead !== state.prHeadSha
+			)
+				continue;
+			const structured = record.result?.prReviewResultReceipt;
+			if (structured) {
+				if (structured.envelope.findings.length > 0) {
+					hasFinding = true;
+					findingCountTotal += structured.envelope.findings.length;
+					for (const finding of structured.envelope.findings) {
+						if (findings.length >= MAX_STATUS_FINDINGS_PER_LANE) break;
+						findings.push({
+							id: boundUntrusted(finding.id, 128),
+							severity: boundUntrusted(finding.severity, 32),
+							title: boundUntrusted(finding.title, MAX_FIELD_LEN),
+						});
+					}
+				}
+				if (structured.envelope.cleanAttestations.length > 0) hasClean = true;
+				continue;
+			}
+			const ref = record.result?.outputRef?.trim();
+			if (!ref) continue;
+			const loaded = _internals.readLaneOutput(directory, ref);
+			if (!loaded) continue;
+			const parsed = parseStatusArtifactRows(loaded.artifact.text);
+			if (parsed.candidateRows.length > 0) {
+				hasFinding = true;
+				findingCountTotal += parsed.candidateRows.length;
+				for (const row of parsed.candidateRows) {
+					if (findings.length >= MAX_STATUS_FINDINGS_PER_LANE) break;
+					findings.push(row);
+				}
+			}
+			if (parsed.cleanRowCount > 0) hasClean = true;
+			if (parsed.truncatedAtBound) artifactTruncated = true;
+		}
+		return {
+			...base,
+			readState: 'ok',
+			hasFinding,
+			hasClean,
+			findings,
+			findingsTruncated: findingCountTotal > findings.length,
+			artifactTruncated,
+		};
+	} catch {
+		// The readers are documented not to throw; if one ever does, the lane's
+		// evidence is UNKNOWN — typed uncertainty, never an absence claim.
+		return {
+			...base,
+			readState: 'uncertain',
+			hasFinding: false,
+			hasClean: false,
+			findings: [],
+			findingsTruncated: false,
+			artifactTruncated: false,
+		};
+	}
+}
+
+/**
+ * Issue #3095: build the read-only reviewProjection for an active PR_REVIEW
+ * gate. The executor owns every I/O read (accessor, delegation store, lane
+ * artifacts, trigger-eval receipt) and the pure projection module owns every
+ * cap. Each source degrades independently: a corrupt trigger receipt blanks
+ * only the micro rows (`sourceState.micro: 'unavailable'` + bounded note)
+ * while base and validation rows still project, and the tool still returns.
+ */
+async function buildReviewProjectionSection(
+	directory: string,
+	gateSessionID: string,
+	state: PrWorkflowGateState,
+): Promise<PrReviewStatusReviewProjection> {
+	const inventoryRead =
+		await _internals.readPrReviewCandidateInventoryForStatus(
+			directory,
+			gateSessionID,
+		);
+	const base: PrReviewStatusLaneSource = { state: 'ok', rows: [] };
+	for (const dispatch of state.prReviewBaseDispatches ?? []) {
+		for (const lane of dispatch.lanes) {
+			base.rows.push(
+				readStatusLaneEvidence(directory, state, {
+					batchId: dispatch.batchId,
+					phase: 'base',
+					laneId: lane.laneId,
+					workflowLane: lane.workflowLane,
+					itemCount: null,
+					mode: 'swarm-pr-review:base',
+				}),
+			);
+		}
+	}
+	const validation: PrReviewStatusLaneSource = { state: 'ok', rows: [] };
+	for (const batch of state.prReviewValidationBatches ?? []) {
+		for (const lane of batch.lanes) {
+			validation.rows.push(
+				readStatusLaneEvidence(directory, state, {
+					batchId: batch.batchId,
+					phase: batch.phase,
+					laneId: lane.laneId,
+					workflowLane: lane.workflowLane,
+					itemCount: lane.reviewItemIds?.length ?? null,
+					mode: `swarm-pr-review:${batch.phase}`,
+				}),
+			);
+		}
+	}
+	const micro: PrReviewStatusLaneSource = { state: 'ok', rows: [] };
+	if (state.prReviewTriggerEvalPath) {
+		try {
+			const receiptRead = _internals.readPrReviewTriggerReceiptForGate(
+				directory,
+				state.prReviewTriggerEvalPath,
+			);
+			if (!('noReceipt' in receiptRead)) {
+				for (const row of receiptRead.receipt.matchedRows) {
+					micro.rows.push(
+						readStatusLaneEvidence(directory, state, {
+							batchId: row.source_batch_id,
+							phase: 'micro',
+							laneId: row.source_lane_id,
+							workflowLane: row.trigger_id,
+							itemCount: null,
+							mode: 'swarm-pr-review:micro',
+						}),
+					);
+				}
+			}
+		} catch (error) {
+			micro.state = 'unavailable';
+			micro.reason = boundUntrusted(
+				`trigger receipt unreadable: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+				MAX_FIELD_LEN,
+			);
+		}
+	}
+	return {
+		candidateInventory: projectCandidateInventoryForStatus(inventoryRead),
+		boundaries: projectBoundariesForStatus({
+			settledBoundaries: state.prReviewArtifactBoundaries,
+			artifactRunId: state.prReviewArtifactRunId,
+			findingsPath: state.prReviewFindingsPath,
+		}),
+		// Key order is contract: candidateInventory FIRST, lanes LAST.
+		lanes: projectLanesForStatus({ base, validation, micro }),
 	};
 }
 
@@ -514,6 +747,7 @@ async function executePrWorkflowStatus(
 	// active gate", which would leak a sibling session's state.
 	let gate: PrWorkflowStatusGateSummary;
 	let activeState: PrWorkflowGateState | null = null;
+	let reviewProjection: PrReviewStatusReviewProjection | undefined;
 	if (!gateSessionID) {
 		gate = {
 			active: false,
@@ -530,12 +764,25 @@ async function executePrWorkflowStatus(
 		const receiptFiles = activeState
 			? await countCheckoutReceiptFiles(directory, gateSessionID)
 			: null;
+		// Issue #3095: the reviewProjection is built ONLY for an active
+		// PR_REVIEW workflow, so every other path stays byte-identical. It is
+		// keyed to the CHAIN-RESOLVED gate owner (gateSessionID), never the raw
+		// caller session, so a delegated child sees the owner's projection.
+		reviewProjection =
+			activeState && activeState.mode === 'PR_REVIEW'
+				? await buildReviewProjectionSection(
+						directory,
+						gateSessionID,
+						activeState,
+					)
+				: undefined;
 		gate = summarizeGate(
 			activeState,
 			receiptFiles,
 			recovery
 				? { salvaged: recovery.salvaged, disclosure: recovery.disclosure }
 				: undefined,
+			reviewProjection,
 		);
 	}
 	const recovery = activeState?.checkoutRecovery;
@@ -615,6 +862,11 @@ export const _internals: {
 	classifyGitState: typeof classifyPrWorkflowGitState;
 	truncateToByteBudget: typeof truncateToByteBudget;
 	resolveWorkflowGateSession: typeof resolveWorkflowGateSession;
+	/** Issue #3095: reviewProjection read seams (DI over `mock.module`). */
+	readPrReviewCandidateInventoryForStatus: typeof readPrReviewCandidateInventoryForStatus;
+	readPrReviewTriggerReceiptForGate: typeof readPrReviewTriggerReceiptForGate;
+	findByBatchIdDetailed: typeof findByBatchIdDetailed;
+	readLaneOutput: typeof readLaneOutput;
 } = {
 	readPrWorkflowGateStateForRecovery,
 	readDelegationsDetailed,
@@ -626,4 +878,8 @@ export const _internals: {
 	classifyGitState: classifyPrWorkflowGitState,
 	truncateToByteBudget,
 	resolveWorkflowGateSession,
+	readPrReviewCandidateInventoryForStatus,
+	readPrReviewTriggerReceiptForGate,
+	findByBatchIdDetailed,
+	readLaneOutput,
 };
