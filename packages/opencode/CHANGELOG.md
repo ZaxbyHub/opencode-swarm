@@ -1,5 +1,29 @@
 # Changelog
 
+## [8.0.2-beta.0](https://github.com/ZaxbyHub/opencode-swarm/compare/opencode-v8.0.1-beta.0...opencode-v8.0.2-beta.0) (2026-10-14)
+
+
+### Bug Fixes
+
+* add diagnostic startup logging to plugin for beta regression debugging ([906b50d](https://github.com/ZaxbyHub/opencode-swarm/commit/906b50d8df9d94fa9bcc360b4e4e04afcb9a1bb4))
+* handle no-coder QA chains in hotfix A ([97b52ae](https://github.com/ZaxbyHub/opencode-swarm/commit/97b52ae3ed81791f0b403f038ecb9cfda50b4934))
+* **packaging,plugin,ci:** close swarm-pr-review findings on [#3163](https://github.com/ZaxbyHub/opencode-swarm/issues/3163) ([e4823b3](https://github.com/ZaxbyHub/opencode-swarm/commit/e4823b31cacb3e749bcd8f9610701e3432d23d00))
+* **packaging,plugin:** publishable internal deps + dual-shape plugin export ([f72b4fd](https://github.com/ZaxbyHub/opencode-swarm/commit/f72b4fd1d458b50959febc3b081723cc0d613860))
+* **packaging,plugin:** publishable internal deps + dual-shape plugin export (8.x next line) ([38b9d18](https://github.com/ZaxbyHub/opencode-swarm/commit/38b9d18645c76995f3e15f42c36a64faf2b0ff75))
+* **pkg-audit,v2,ci:** close feedback-round gates (cargo fail-closed, Node legs, delta registrations) ([d55a364](https://github.com/ZaxbyHub/opencode-swarm/commit/d55a364c7ee260b81fd657c30f391602e79d471c))
+* PR [#196](https://github.com/ZaxbyHub/opencode-swarm/issues/196) v7.0 plan conformance patch ([376b127](https://github.com/ZaxbyHub/opencode-swarm/commit/376b127304dc38ae648ec55453fafc269557968c))
+* **release:** close swarm-pr-review findings on the release-enablement PR ([ed555e9](https://github.com/ZaxbyHub/opencode-swarm/commit/ed555e9d426ef4269cc4df90f190503eb5ac2a12))
+* **release:** enable the 8.x next-line healing release ([#3150](https://github.com/ZaxbyHub/opencode-swarm/issues/3150)) ([0a32845](https://github.com/ZaxbyHub/opencode-swarm/commit/0a32845a2e5ef630acd12e4a624d75ced975676e))
+* **release:** enable the 8.x next-line healing release (issue [#3150](https://github.com/ZaxbyHub/opencode-swarm/issues/3150)) ([62f58e5](https://github.com/ZaxbyHub/opencode-swarm/commit/62f58e5e292c13c857ffbd659f081a4c274bbe71))
+* update biome.json includes for monorepo + auto-fix lint issues ([6fdebce](https://github.com/ZaxbyHub/opencode-swarm/commit/6fdebce18933c9e36d991e5b7e516e0ba33a917d))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @opencode-swarm/core bumped from 8.0.0-beta.0 to 8.0.2-beta.0
+
 ## [8.0.1-beta.0](https://github.com/zaxbysauce/opencode-swarm/compare/v8.0.0-beta.0...v8.0.1-beta.0) (2026-03-16)
 
 
