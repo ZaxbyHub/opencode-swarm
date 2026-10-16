@@ -1300,7 +1300,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
-      - uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
         with:
           php-version: "8.2"
