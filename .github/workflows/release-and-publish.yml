@@ -88,7 +88,7 @@ jobs:
           '
 
       - name: Upload runner artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sandbox-runner-win32-${{ matrix.arch }}
           path: runners/swarm-sandbox-runner/target/${{ matrix.target }}/release/swarm-sandbox-runner.exe
@@ -199,7 +199,7 @@ jobs:
             --apply
 
       - name: Upload exact-tag fragment cleanup plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-fragment-cleanup-plan
           path: .release-fragment-cleanup/plan.json
