@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.198.0",
+  "tagCommit": "7f8ef645117673c895ef51801bcac927727ad855",
+  "targetCommitish": "7f8ef645117673c895ef51801bcac927727ad855",
+  "releaseBodySha256": "6cbbdf203fe6cd176b9bb87a129b9bf938f2a4481bad9adf7e53eb18ded65ed9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3290-fragment-gate-transport-bounds.md",
+      "sha256": "5604366193161e4551dfcd9c7f43c2a75b664aa97acf1ae06f75aa0127d397c7"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/3310-reviewer-critic-lane-quarantine.md",
+      "sha256": "9f926976d617373910584fde54166fc13b569884b25290488aa275a73e475d75"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/bubblewrap-probe-recursive-cleanup-and-ro-bind.md",
+      "sha256": "fd1e9a88436b09da3d823da59aaa9d99fd5776eb9559b4d26ef8a116e9318ff5"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/feat-sdd-declarative-source-selection.md",
+      "sha256": "fe492707f590761aa403da14bb394c3b020fe43b231019f6463c296d6515968d"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/workstream-j13-underscore-agent-fallback.md",
+      "sha256": "3f084c632cce295e1072683a55f272800b30200a65446c40bea6cf051fd8478f"
+    }
+  ]
+}
