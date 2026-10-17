@@ -9,6 +9,7 @@
  * compatibility.
  */
 
+import { execFileSync } from 'node:child_process';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -38,6 +39,7 @@ import {
 	boundedBunHash,
 	coarseObjectDiscriminator,
 } from '../../utils/arg-hash';
+import { resolveGitExecutable } from '../../utils/git-executable.js';
 import { stableCanonicalStringify } from '../../utils/stable-stringify';
 
 /**
@@ -187,12 +189,64 @@ const globMatcherCache = new QuickLRU<string, (path: string) => boolean>({
 });
 
 /**
+ * LRU cache for git worktree roots.
+ * Maps repository directory -> array of resolved worktree root paths.
+ */
+const gitWorktreeCache = new QuickLRU<string, string[]>({
+	maxSize: 50,
+});
+
+/**
+ * Returns a list of absolute, realpath-normalized worktree roots for the given working directory.
+ * Cached in gitWorktreeCache.
+ */
+export function getLinkedGitWorktrees(dir: string): string[] {
+	const cached = gitWorktreeCache.get(dir);
+	if (cached !== undefined) {
+		return cached;
+	}
+
+	const worktrees: string[] = [];
+	try {
+		const output = execFileSync(
+			resolveGitExecutable(),
+			['worktree', 'list', '--porcelain'],
+			{
+				cwd: dir,
+				encoding: 'utf8',
+				stdio: ['ignore', 'pipe', 'ignore'],
+				timeout: 1500,
+			},
+		);
+
+		for (const line of output.split('\n')) {
+			if (line.startsWith('worktree ')) {
+				const wtPath = line.slice('worktree '.length).trim();
+				if (wtPath) {
+					try {
+						worktrees.push(fsSync.realpathSync(wtPath));
+					} catch {
+						worktrees.push(path.resolve(wtPath));
+					}
+				}
+			}
+		}
+	} catch {
+		// Not a git repository or git command failed
+	}
+
+	gitWorktreeCache.set(dir, worktrees);
+	return worktrees;
+}
+
+/**
  * Clears all guardrails caches.
  * Use this for test isolation or when guardrails config reloads at runtime.
  */
 export function clearGuardrailsCaches(): void {
 	pathNormalizationCache.clear();
 	globMatcherCache.clear();
+	gitWorktreeCache.clear();
 }
 
 /**
@@ -832,21 +886,59 @@ export function checkFileAuthorityWithRules(
 	// below. Comparing filesystem roots catches this universally: POSIX
 	// systems only have root `/`, so roots only differ when the target is
 	// on a different Windows drive.
+	let effectiveDir = dir;
 	if (isOnDifferentFilesystemRoot(resolvedTarget, dir)) {
-		return denyAuthority(agentName, normalizedPath, {
-			code: 'AUTHORITY_ROOT_ESCAPE',
-			layer: 'containment',
-			rule: 'same-filesystem-root',
-			detail: 'target is on a different drive or filesystem root',
-		});
-	}
-	if (normalizedPath === '..' || normalizedPath.startsWith('../')) {
-		return denyAuthority(agentName, normalizedPath, {
-			code: 'AUTHORITY_ROOT_ESCAPE',
-			layer: 'containment',
-			rule: 'workspace-containment',
-			detail: 'target resolves outside the working directory',
-		});
+		// Even across roots, check if target resides in a linked Git worktree of dir
+		const worktrees = getLinkedGitWorktrees(dir);
+		let matchedWorktree: string | undefined;
+		for (const wt of worktrees) {
+			const relToWt = path.relative(wt, resolvedTarget).replace(/\\/g, '/');
+			if (
+				relToWt !== '..' &&
+				!relToWt.startsWith('../') &&
+				!isOnDifferentFilesystemRoot(resolvedTarget, wt)
+			) {
+				matchedWorktree = wt;
+				effectiveDir = wt;
+				normalizedPath = relToWt;
+				break;
+			}
+		}
+
+		if (!matchedWorktree) {
+			return denyAuthority(agentName, normalizedPath, {
+				code: 'AUTHORITY_ROOT_ESCAPE',
+				layer: 'containment',
+				rule: 'same-filesystem-root',
+				detail: 'target is on a different drive or filesystem root',
+			});
+		}
+	} else if (normalizedPath === '..' || normalizedPath.startsWith('../')) {
+		// Check whether target resides in a linked Git worktree of dir
+		const worktrees = getLinkedGitWorktrees(dir);
+		let matchedWorktree: string | undefined;
+		for (const wt of worktrees) {
+			const relToWt = path.relative(wt, resolvedTarget).replace(/\\/g, '/');
+			if (
+				relToWt !== '..' &&
+				!relToWt.startsWith('../') &&
+				!isOnDifferentFilesystemRoot(resolvedTarget, wt)
+			) {
+				matchedWorktree = wt;
+				effectiveDir = wt;
+				normalizedPath = relToWt;
+				break;
+			}
+		}
+
+		if (!matchedWorktree) {
+			return denyAuthority(agentName, normalizedPath, {
+				code: 'AUTHORITY_ROOT_ESCAPE',
+				layer: 'containment',
+				rule: 'workspace-containment',
+				detail: 'target resolves outside the working directory',
+			});
+		}
 	}
 
 	const rules =
@@ -862,15 +954,17 @@ export function checkFileAuthorityWithRules(
 	const flavor = getPathFlavor();
 	const matchesPathPrefix = (candidate: string, prefix: string): boolean =>
 		isPathIdentityWithin(
-			path.resolve(dir, candidate),
-			path.resolve(dir, prefix),
+			path.resolve(effectiveDir, candidate),
+			path.resolve(effectiveDir, prefix),
 			flavor,
 		);
 	const matchesGlob = (glob: string): boolean =>
 		getGlobMatcher(glob)(normalizedPath);
 
 	for (const prefix of options.universalDenyPrefixes ?? []) {
-		if (matchesAuthorityDenyPrefix(normalizedPath, prefix, dir, flavor)) {
+		if (
+			matchesAuthorityDenyPrefix(normalizedPath, prefix, effectiveDir, flavor)
+		) {
 			return denyAuthority(agentName, normalizedPath, {
 				code: 'AUTHORITY_UNIVERSAL_DENY',
 				layer: 'universal-deny',
@@ -946,7 +1040,12 @@ export function checkFileAuthorityWithRules(
 		isCoderAgent &&
 		options.declaredScope != null &&
 		options.declaredScope.length > 0 &&
-		isPathWithinDeclaredScope(normalizedPath, options.declaredScope, dir);
+		(isPathWithinDeclaredScope(
+			normalizedPath,
+			options.declaredScope,
+			effectiveDir,
+		) ||
+			isPathWithinDeclaredScope(filePath, options.declaredScope, dir));
 	if (pathIsInDeclaredScope) {
 		return {
 			allowed: true,
