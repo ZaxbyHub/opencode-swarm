@@ -1,5 +1,26 @@
 # Changelog
 
+## [7.199.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.198.2...v7.199.0) (2026-10-17)
+
+
+### Features
+
+* **delegation-gate:** add configurable acceptance criteria auto-injection ([471b487](https://github.com/ZaxbyHub/opencode-swarm/commit/471b487ff3f0aa50080be08056733680c0f70297))
+
+
+### Bug Fixes
+
+* **agents:** preserve native-agent session identity across the swarm plugin ([#3320](https://github.com/ZaxbyHub/opencode-swarm/issues/3320)) ([93a27eb](https://github.com/ZaxbyHub/opencode-swarm/commit/93a27ebe2d1c263492626f5bc5b7ae8c7d6dc4db))
+* **agents:** resolve swarm-pr-review findings on native-agent identity ([#3320](https://github.com/ZaxbyHub/opencode-swarm/issues/3320)) ([5bcb518](https://github.com/ZaxbyHub/opencode-swarm/commit/5bcb51874a59926a938ec0332e41e25e5892c7bc))
+* **delegation-gate:** harden acceptance auto-injection and wire its config key ([f979c6a](https://github.com/ZaxbyHub/opencode-swarm/commit/f979c6a0dc1d24ff6e5622f1b1d37c4f405535cf))
+* **guardrails:** keep control state protected for agents admitted by authority.enabled=false ([0770f87](https://github.com/ZaxbyHub/opencode-swarm/commit/0770f879c8f4419420c8e983d260025fe9a9b216))
+* **guardrails:** stop denying unclassified agents as unknown when authority is disabled ([b06dab0](https://github.com/ZaxbyHub/opencode-swarm/commit/b06dab0f94f1ceae58df7e3cfbacc33aff298d35))
+* **host/v2:** address review feedback on host-agent preservation ([d00c36c](https://github.com/ZaxbyHub/opencode-swarm/commit/d00c36c6fd2bf879707322d687a873a9c5d0313e))
+* **host/v2:** preserve host-provided agent across tool hooks and Task handoffs ([8795e0f](https://github.com/ZaxbyHub/opencode-swarm/commit/8795e0f6b44367f161919df6d49bbb3e72f52199))
+* **host/v2:** preserve host-provided agent across tool hooks and Task handoffs ([dd7c5d5](https://github.com/ZaxbyHub/opencode-swarm/commit/dd7c5d56444a857400d2438b9f0b47cb8d02175c))
+* **pr-review:** bounded quarantine ids, parser-derived prompt guard, documented replay semantics ([#3334](https://github.com/ZaxbyHub/opencode-swarm/issues/3334) [#3335](https://github.com/ZaxbyHub/opencode-swarm/issues/3335) [#3336](https://github.com/ZaxbyHub/opencode-swarm/issues/3336)) ([a2958fc](https://github.com/ZaxbyHub/opencode-swarm/commit/a2958fc33a2202ddfc0adb5f63693e2f1abe5f6c))
+* **pr-review:** resolve swarm-pr-review findings on PR [#3375](https://github.com/ZaxbyHub/opencode-swarm/issues/3375) ([3cb0a03](https://github.com/ZaxbyHub/opencode-swarm/commit/3cb0a0314a71cb72e1a506806bb4ee8f8e1304b9))
+
 ## [7.198.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.198.1...v7.198.2) (2026-10-17)
 
 
