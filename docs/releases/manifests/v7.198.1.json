@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.198.1",
+  "tagCommit": "6e73a8e219cc9a13d1d7870e66a65f210ffe5995",
+  "targetCommitish": "6e73a8e219cc9a13d1d7870e66a65f210ffe5995",
+  "releaseBodySha256": "7ae7a2c38126108da4b26c4e16ca26c12354aee813458cb2a48145f591eb62fc",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3323-shell-tool-grammar-and-semicolon-boundary.md",
+      "sha256": "86909f2024d2eb4e71f0c9d7b94caf98b94cffa4330b1abef0421c1e2b96f265"
+    }
+  ]
+}
