@@ -3035,6 +3035,16 @@ const NON_OWNABLE_AGENT_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * True for identities that may observe a session but can never own it
+ * (host housekeeping/helper agents). Shared by recordPrimaryOwner and by the
+ * host-provided-agent reader in the tool hooks so both agree on what is not a
+ * usable session identity.
+ */
+export function isNonOwnableAgentName(agentName: string): boolean {
+	return NON_OWNABLE_AGENT_NAMES.has(agentName.toLowerCase());
+}
+
+/**
  * Record a session's PRIMARY owner (#3320).
  *
  * PRIMARY identities: the swarm architect (plain or swarm-prefixed) and
@@ -3056,7 +3066,7 @@ const NON_OWNABLE_AGENT_NAMES: ReadonlySet<string> = new Set([
 export function recordPrimaryOwner(sessionId: string, agentName: string): void {
 	if (!sessionId || !agentName) return;
 	if (isRegisteredSwarmSubagent(agentName)) return;
-	if (NON_OWNABLE_AGENT_NAMES.has(agentName.toLowerCase())) return;
+	if (isNonOwnableAgentName(agentName)) return;
 	// Delete THIS key first so a size-neutral refresh of an already-tracked
 	// session never evicts an unrelated live session's owner (review finding
 	// PRR-009: the eviction loop used to run before the same-key delete).

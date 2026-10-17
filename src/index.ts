@@ -329,6 +329,7 @@ import {
 	getLiveContextWindow,
 	getPrimaryOwner,
 	getSessionBudgetPct,
+	isNonOwnableAgentName,
 	isRegisteredSwarmSubagent,
 	setLiveContextWindow,
 	swarmState,
@@ -6497,7 +6498,16 @@ async function initializeOpenCodeSwarm(
  */
 function readHostAgent(input: unknown): string | undefined {
 	const agent = (input as { agent?: unknown } | undefined)?.agent;
-	return typeof agent === 'string' ? agent.trim() || undefined : undefined;
+	if (typeof agent !== 'string') return undefined;
+	const name = agent.trim();
+	// The 'unknown' ensureAgentSession placeholder and host housekeeping
+	// identities (compaction/title/summary/explore) are not usable session
+	// identities: treat them as "no host agent" so the primary-owner / architect
+	// defaults (and the legacy stale revert) apply exactly as they do without a
+	// host agent.
+	if (!name || name.toLowerCase() === 'unknown' || isNonOwnableAgentName(name))
+		return undefined;
+	return name;
 }
 
 // Dual-shape plugin entrypoint (issue #3004 / ADR-0003):

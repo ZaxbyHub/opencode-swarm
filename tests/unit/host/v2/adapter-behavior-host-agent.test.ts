@@ -126,6 +126,37 @@ describe('tool.execute.before host-provided agent', () => {
 
 		expect(swarmState.activeAgent.get(sessionID)).toBe('architect');
 	});
+	test.each([
+		['unknown placeholder', 'unknown'],
+		['padded UNKNOWN placeholder', ' UNKNOWN '],
+		['housekeeping compaction', 'compaction'],
+		['housekeeping explore', 'explore'],
+	])('host agent %s is not an identity and seeds architect', async (_label, agent) => {
+		const { plugin } = await bootPlugin('swarm-v2-placeholder-before-');
+		const sessionID = `placeholder-before-${_label.replaceAll(' ', '-')}`;
+
+		const beforeHook = plugin['tool.execute.before'] as BeforeHook;
+		await beforeHook(readCall(sessionID, { agent }), READ_OUTPUT());
+
+		expect(swarmState.activeAgent.get(sessionID)).toBe('architect');
+	});
+	test.each([
+		['no host agent', undefined, 'architect'],
+		['host agent coder', 'coder', 'coder'],
+	])('an existing unknown placeholder entry is treated as unmapped (%s)', async (_label, agent, expected) => {
+		const { plugin, directory } = await bootPlugin('swarm-v2-unknown-entry-');
+		const sessionID = `unknown-entry-${_label.replaceAll(' ', '-')}`;
+		ensureAgentSession(sessionID, 'unknown', directory);
+		swarmState.activeAgent.set(sessionID, 'unknown');
+
+		const beforeHook = plugin['tool.execute.before'] as BeforeHook;
+		await beforeHook(
+			readCall(sessionID, agent === undefined ? {} : { agent }),
+			READ_OUTPUT(),
+		);
+
+		expect(swarmState.activeAgent.get(sessionID)).toBe(expected);
+	});
 });
 
 describe('normalizeV2AgentRef does not widen identity', () => {
@@ -202,6 +233,17 @@ describe('tool.execute.after Task handoff restore', () => {
 		expect(swarmState.activeAgent.get(sessionID)).toBe('conductor');
 		expect(swarmState.agentSessions.get(sessionID)?.agentName).toBe(
 			'conductor',
+		);
+	});
+
+	test.each([
+		['unknown', 'unknown'],
+		['compaction', 'compaction'],
+	])('host-sent %s agent never becomes the handoff owner', async (label, agent) => {
+		const sessionID = await runTaskAfter(agent, `placeholder-${label}`);
+		expect(swarmState.activeAgent.get(sessionID)).toBe('architect');
+		expect(swarmState.agentSessions.get(sessionID)?.agentName).toBe(
+			'architect',
 		);
 	});
 
