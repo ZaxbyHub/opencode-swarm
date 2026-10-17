@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HooksConfigSchema } from '../../../src/config/schema';
-import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import {
+	ensureAgentSession,
+	resetSwarmState,
+	swarmState,
+} from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
@@ -101,7 +105,7 @@ describe('delegation-gate acceptance auto-injection', () => {
 		});
 
 		test('reviewer dispatch with an empty ACCEPTANCE header gets the default under the header', async () => {
-			ensureAgentSession(SESSION_ID, 'architect', directory);
+			const session = ensureAgentSession(SESSION_ID, 'architect', directory);
 			const args = {
 				subagent_type: 'reviewer',
 				prompt: 'Review the changes\nACCEPTANCE:\n',
@@ -111,6 +115,12 @@ describe('delegation-gate acceptance auto-injection', () => {
 
 			expect(error).toBeUndefined();
 			expect(args.prompt).toContain(`ACCEPTANCE:\n${DEFAULT_REQUIREMENT}`);
+			// The advisory carries the validator reason that triggered the injection.
+			expect(
+				(session.pendingAdvisoryMessages ?? []).some((m) =>
+					m.includes('(acceptance_field_empty)'),
+				),
+			).toBe(true);
 		});
 
 		test('an explicit ACCEPTANCE block is left byte-identical', async () => {
@@ -296,6 +306,35 @@ describe('delegation-gate acceptance auto-injection', () => {
 
 			expect(error?.message).toContain('ACCEPTANCE_FIELD_REQUIRED');
 			expect(args).toEqual({ subagent_type: 'reviewer' });
+			// toEqual ignores keys whose value is undefined; a rollback that wrote
+			// one (for example args["null"]) must not slip through.
+			expect(Object.keys(args)).toEqual(['subagent_type']);
+			expect(
+				(session.pendingAdvisoryMessages ?? []).some((m) =>
+					m.includes('ACCEPTANCE AUTO-INJECTED'),
+				),
+			).toBe(false);
+		});
+
+		test('an empty header only the cross-field join can see is rejected and left untouched (issue 3381 AC3 will revisit)', async () => {
+			// The validator joins fields with a newline, so description "ACCEPTANCE:\r"
+			// plus the next field reads as a CRLF-terminated empty header, while the
+			// per-field injector sees no header line in any single field. The strict
+			// rejection stands and no field is changed, even though prompt exists.
+			const session = ensureAgentSession(SESSION_ID, 'architect', directory);
+			const args = {
+				subagent_type: 'reviewer',
+				prompt: 'Review',
+				description: 'ACCEPTANCE:\r',
+				task: 'TASK: x',
+			};
+
+			const error = await dispatch(makeHook(true), args);
+
+			expect(error?.message).toContain('ACCEPTANCE_FIELD_REQUIRED');
+			expect(args.prompt).toBe('Review');
+			expect(args.description).toBe('ACCEPTANCE:\r');
+			expect(args.task).toBe('TASK: x');
 			expect(
 				(session.pendingAdvisoryMessages ?? []).some((m) =>
 					m.includes('ACCEPTANCE AUTO-INJECTED'),
@@ -330,6 +369,14 @@ describe('delegation-gate acceptance auto-injection', () => {
 			expect(error).toBeUndefined();
 			expect(args.prompt).toContain(`ACCEPTANCE:\n${DEFAULT_REQUIREMENT}`);
 			expect(args.prompt).toContain('(auto-injected default:');
+			// toolBefore registers the session later in the same call; it must not
+			// have been handed an advisory for an injection made before that.
+			expect(
+				(
+					swarmState.agentSessions.get(SESSION_ID)?.pendingAdvisoryMessages ??
+					[]
+				).some((m) => m.includes('ACCEPTANCE AUTO-INJECTED')),
+			).toBe(false);
 		});
 
 		test('a successful injection queues a model-visible advisory on the dispatching session', async () => {
