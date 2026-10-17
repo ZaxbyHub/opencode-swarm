@@ -10,7 +10,7 @@
 
 - Refreshes `session.lastAgentEventTime` in `seedV1SessionState` (`src/host/v2/setup.ts`) whenever a valid v2 agent reference is seeded.
 - Guards the v1 `staleDelegation` fallback in `src/index.ts` `tool.execute.before` so it only runs when `input.agent` is not explicitly provided by the host.
-- Restores `readHostAgent(input) || ORCHESTRATOR_NAME` (the trimmed host agent, else `architect`) during `tool.execute.after` Task handoff in `src/index.ts`, and seeds `activeAgent` from the host agent in `tool.execute.before` when it is unset.
+- Restores `getPrimaryOwner(sessionId) ?? readHostAgent(input) ?? ORCHESTRATOR_NAME` (the session's recorded primary owner, else the trimmed host agent, else `architect`) during `tool.execute.after` Task handoff in `src/index.ts`, and seeds `activeAgent` from the host agent in `tool.execute.before` when it is unset.
 - The two call-site casts in `src/index.ts` are replaced by one typed helper (`readHostAgent`) that trims the host agent name, cannot throw on a non-string agent, and ignores the `'unknown'` session placeholder and host housekeeping identities (`compaction`/`title`/`summary`/`explore`) so they never become a session identity. `normalizeV2AgentRef` is intentionally unchanged (it returns the host name verbatim) so a padded name cannot resolve to an architect-capable identity on the architect-only tools path.
 - The fix applies only when the host sends the agent on tool hooks (OpenCode v2); hosts that do not (v1) keep the previous stale-delegation behaviour unchanged.
 - Adds regression tests in `tests/unit/host/v2/adapter-behavior.test.ts` and `tests/unit/host/v2/adapter-behavior-host-agent.test.ts`.
