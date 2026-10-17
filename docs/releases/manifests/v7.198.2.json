@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.198.2",
+  "tagCommit": "d3e1ca515841af78793b300f18edc7467604a67c",
+  "targetCommitish": "d3e1ca515841af78793b300f18edc7467604a67c",
+  "releaseBodySha256": "b3f55e64ffc0c0414b06dba42a0f0f6f8004b146515e45a7aa21534ddda4481d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/v2-parallel-registration-budget.md",
+      "sha256": "b9c510f5bf00718de5770d54ef34e528f23e04856a7baa676be5116fa75da138"
+    }
+  ]
+}
