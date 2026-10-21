@@ -240,6 +240,11 @@ function isolatedEnv(scratchRoot) {
   return {
     ...process.env,
     OPENCODE_SWARM_DEBUG: '1',
+    // Issue #3405: the version banner's raw-stderr leg is opt-in now. The
+    // spike greps the exact `[opencode-swarm] running v…` format from
+    // stdout+stderr as its positive plugin-load evidence; the debug-logger
+    // leg prepends a timestamp that breaks that regex, so opt the harness in.
+    OPENCODE_SWARM_VERSION_BANNER: '1',
     XDG_CONFIG_HOME: path.join(scratchRoot, 'cfg'),
   };
 }

@@ -35,6 +35,7 @@ import * as fs from 'node:fs';
 import path from 'node:path';
 import { closeAllProjectDbs } from '../../src/db/project-db';
 import OpenCodeSwarm from '../../src/index';
+import { getDeferredWarnings } from '../../src/services/warning-buffer';
 import { resetSwarmState } from '../../src/state';
 import { resetTelemetryForTesting } from '../../src/telemetry';
 import { safeRmRecursive } from '../helpers/safe-test-dir';
@@ -154,17 +155,15 @@ function norm(p: string): string {
 }
 
 /**
- * The redirect-hint contract: some console line mentions BOTH the
+ * The redirect-hint contract: some buffered advisory (the /swarm diagnose
+ * deferred-warning channel — the hint's only always-on delivery surface since
+ * the raw console.warn leg was removed in issue #3405) mentions BOTH the
  * 'project-root ownership' marker AND the owning parent root — after masking
  * occurrences of the CHILD path, so a child-path mention (which lexically
  * contains the parent) cannot fake a parent-root hint (c1 hygiene).
  */
-function hasParentRootHint(
-	captured: ConsoleCapture,
-	parent: string,
-	child: string,
-): boolean {
-	const lines = [...captured.warn, ...captured.log].map((line) => norm(line));
+function hasParentRootHint(parent: string, child: string): boolean {
+	const lines = getDeferredWarnings().map((line) => norm(line));
 	return lines.some(
 		(line) =>
 			line.includes('project-root ownership') &&
@@ -244,7 +243,7 @@ describe('bootstrap project-root ownership — ordinary child redirect (#2679, A
 	test('boot in an ordinary child lands state in the owning parent, never in the child', async () => {
 		const { parent, child } = makeClaimedFixture('c1');
 
-		const { manifest, captured } = await bootAndSettle(child);
+		const { manifest } = await bootAndSettle(child);
 
 		// Fail-open manifest: the boot still delivered the full tool surface.
 		const toolCount = Object.keys(
@@ -257,8 +256,8 @@ describe('bootstrap project-root ownership — ordinary child redirect (#2679, A
 		const parentEntries = dirEntryCount(path.join(parent, '.swarm'));
 		expect(parentEntries).toBeGreaterThanOrEqual(1);
 
-		// Operator hint: one console line names the parent root.
-		expect(hasParentRootHint(captured, parent, child)).toBe(true);
+		// Operator hint: one buffered advisory names the parent root.
+		expect(hasParentRootHint(parent, child)).toBe(true);
 
 		// Durable redirect record under the owning parent.
 		const advisoryPath = path.join(
@@ -402,9 +401,9 @@ describe('bootstrap project-root ownership — rehydration and attribution (#267
 			guardrails: { enabled: false },
 		});
 
-		const { captured } = await bootAndSettle(child);
+		await bootAndSettle(child);
 
-		expect(hasParentRootHint(captured, parent, child)).toBe(true);
+		expect(hasParentRootHint(parent, child)).toBe(true);
 	});
 
 	test('telemetry latches to the owning parent, never to the ordinary child', async () => {

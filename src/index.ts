@@ -1241,16 +1241,21 @@ async function initializeOpenCodeSwarm(
 	// staleness warning, never a plain startup line). `packageJson.version`
 	// is already imported at module scope, so this is zero extra I/O and does
 	// not touch AGENTS.md invariant 1.
-	// STDERR, not stdout. This is the only unconditional line the plugin runtime
-	// emits, and the host may use stdout for structured protocol traffic — a
-	// startup banner there risks corrupting it. Every other always-emitted
-	// operator signal in this repo goes to stderr (`criticalWarn`,
-	// src/utils/logger.ts); `console.warn` is used directly rather than
-	// `criticalWarn` because this is not a warning and should not carry that
-	// label. #2236 needs it because the reporter could not identify which
-	// plugin version was actually loaded.
-	// biome-ignore lint/suspicious/noConsole: Startup version line — user must be able to identify the running plugin version to diagnose stale-cache issues (issue #2236)
-	console.warn(`[opencode-swarm] running v${packageJson.version}`);
+	//
+	// Issue #3405: an UNCONDITIONAL raw-stderr banner corrupts the in-process
+	// OpenCode TUI — the host renders stderr writes as full-width overlay
+	// blocks pasted over the UI (issue #1249 class). The banner now rides the
+	// debug-gated logger (`log`, stdout only under OPENCODE_SWARM_DEBUG=1);
+	// the historical raw-stderr line survives only behind the opt-in
+	// OPENCODE_SWARM_VERSION_BANNER=1 for headless/CLI diagnosis and version
+	// probes that grep the exact `[opencode-swarm] running vX.Y.Z` format
+	// (spikes/v2-dual-shape/run-spike.mjs).
+	const runningVersionLine = `[opencode-swarm] running v${packageJson.version}`;
+	log(runningVersionLine);
+	if (process.env.OPENCODE_SWARM_VERSION_BANNER === '1') {
+		// biome-ignore lint/suspicious/noConsole: opt-in raw stderr banner for headless/CLI diagnosis (issues #2236, #3405)
+		console.warn(runningVersionLine);
+	}
 
 	// Clear deferred warnings at the very start of the session, BEFORE any
 	// init-path work that buffers advisories via advisoryWarn (config load,
@@ -1397,24 +1402,29 @@ async function initializeOpenCodeSwarm(
 	await Promise.all([configLoadP, snapshotP, gitExcludeP, projectContextP]);
 	const { config, loadedFromFile } = await configLoadP;
 	if (rootDecision.kind === 'redirect') {
-		// Actionable, bounded parent-root hint (AC1). `advisoryWarn` alone is
-		// buffered-only (warning-buffer), so the operator-visible leg is one
-		// console.warn line (quiet-gated, deferred fallback), matching the
-		// full-auto model-matching warning pattern.
+		// Actionable, bounded parent-root hint (AC1). Delivery is
+		// double-buffered per issue #3405: `advisoryWarn` routes the text to
+		// BOTH the `/swarm diagnose` deferred buffer and the debug-gated
+		// logger, and the direct `addDeferredWarning` call keeps a buffered
+		// leg even if the advisory channel changes. The historical raw
+		// `console.warn` leg is GONE — in the in-process TUI the host renders
+		// stderr writes as full-width overlays pasted over the session UI
+		// (issue #1249 class), and the buffered channels already surface the
+		// identical text via /swarm diagnose, so the stderr leg duplicated an
+		// operator-visible channel while corrupting the TUI.
 		const redirectHint = `[opencode-swarm] project-root ownership: "${ctx.directory}" is an ordinary subdirectory — runtime state, project config, and telemetry for this workspace are owned by the project root "${bootstrapRoot}". Open the project root (or add a .git/.opencode marker in "${ctx.directory}") to make this directory independent.`;
 		// UNCONDITIONAL (not quiet-gated): `quiet` defaults to true for routine
 		// startup noise, but a boot whose state silently lands under a different
 		// root is a containment signal the operator must see once per boot —
-		// same class as the unconditional startup version line.
-		// biome-ignore lint/suspicious/noConsole: containment redirect — operator must see which root owns .swarm state for this boot (issue #2679 AC1)
-		console.warn(redirectHint);
+		// surfaced through /swarm diagnose (deferred buffer + advisoryWarn)
+		// instead of raw stderr (issue #3405).
 		addDeferredWarning(redirectHint);
 		advisoryWarn(redirectHint);
 		writeBootstrapRootRedirectRecord(bootstrapRoot, ctx.directory);
 	} else if (rootDecision.kind === 'fail-closed') {
 		const failClosedHint = `[opencode-swarm] project-root ownership: cannot verify "${ctx.directory}" (${rootDecision.reason}) — runtime state is disabled for this session. Reopen the project from its verified root.`;
-		// biome-ignore lint/suspicious/noConsole: fail-closed ownership — operator must know state writes are disabled for this boot (issue #2679)
-		console.warn(failClosedHint);
+		// Same double-buffered delivery as the redirect hint: /swarm diagnose
+		// + debug log, no raw stderr leg (issues #2679, #3405).
 		addDeferredWarning(failClosedHint);
 		advisoryWarn(failClosedHint);
 	}
