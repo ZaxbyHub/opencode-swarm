@@ -87,3 +87,20 @@ tests/unit/hooks/pr-feedback-scope-controller.test.ts
 #   three consecutive merge-group macos-latest runs execute the file green.
 #   After EXPIRY, Check 7 warns for 14 days, then hard-fails on day 15.
 tests/unit/utils/bun-compat-exit-first-2530.test.ts
+
+# tests/unit/plan/manager-current-phase-2532.test.ts (issue #3264)
+# -----------------------------------------------------------------------
+# Tests the #2532 PLAN-4 single-advancing-writer phase-cursor semantics
+# (updateTaskStatus completion advancing the phase cursor, mid-phase
+# save_plan revision preserving it). Passed-on-retry (attempt-1 fail, no
+# assertion text captured) on macos-latest twice six days apart: run
+# 38599700574 shard 3 (2026-10-14) and run 39401121156 shard 5
+# (2026-10-20, after the 2026-10-18 worktree-storm fixes — so the
+# recurrence is not an artifact of that storm). No windows/ubuntu flake
+# annotations for this file across the 11-run 2026-10-14..20 merge-group
+# harvest. Pre-existing, unrelated to any specific PR.
+# OWNER: zaxbysauce — issue #3264 (merge-group flake cohort, Oct 2026)
+# EXPIRY: 2026-11-20 — retire when the file passes three consecutive
+#   merge-group macos-latest runs green, or the attempt-1 failure
+#   signature is root-fixed.
+tests/unit/plan/manager-current-phase-2532.test.ts

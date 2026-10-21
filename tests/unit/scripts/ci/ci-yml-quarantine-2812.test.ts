@@ -45,9 +45,13 @@ const INTEGRATION_LEDGER_PATH = join(
 // entries and the two previously-unpinned rows (pr-subscriptions-checkpoint,
 // recall-evaluation-profile-isolation — pinned by no test before this) are all
 // absence guards now: no silent re-add without fresh merge-group
-// windows-latest failure evidence.
-const ISSUE_2812_THIS_PR_QUARANTINED_PATHS: ReadonlyArray<{ path: string }> = [
-	{ path: 'tests/unit/commands/archive.test.ts' },
+// windows-latest failure evidence. tests/unit/commands/archive.test.ts met
+// that bar on 2026-10-18 (merge-group run 39138948653, windows-latest shard
+// 4, passed-on-retry) and was re-added per issue #3264 — it moved out of the
+// retired set below into its own re-add assertion, and its full ledger
+// pinning (presence, scoping, OWNER/EXPIRY, same-basename sibling) now lives
+// in ci-yml-quarantine-3264.test.ts.
+const ISSUE_2812_RETIRED_PATHS: ReadonlyArray<{ path: string }> = [
 	{ path: 'tests/unit/mcp/write-receipts-feedback-2500.test.ts' },
 	{ path: 'tests/unit/tools/phase-complete.lock-adversarial.test.ts' },
 	{ path: 'tests/unit/background/pr-subscriptions-checkpoint.test.ts' },
@@ -68,14 +72,29 @@ function activeEntries(ledgerPath: string): string[] {
 
 describe('ci.yml integration — windows quarantine ledger entries for issue #2812 (this PR)', () => {
 	test.each(
-		ISSUE_2812_THIS_PR_QUARANTINED_PATHS,
+		ISSUE_2812_RETIRED_PATHS,
 	)('$path is retired from the windows ledger (#2973)', ({ path }) => {
 		expect(existsSync(WINDOWS_LEDGER_PATH)).toBe(true);
 		expect(activeEntries(WINDOWS_LEDGER_PATH)).not.toContain(path);
 	});
 
+	test('tests/unit/commands/archive.test.ts is re-added to the windows ledger (issue #3264)', () => {
+		// The #2973 retirement explicitly permits re-adding a retired row
+		// once fresh merge-group windows-latest failure evidence exists —
+		// that evidence arrived on 2026-10-18 (run 39138948653, shard 4,
+		// passed-on-retry; caveat: inside the worktree-storm window, see
+		// the ledger block). The re-add is NOT silent: its OWNER/EXPIRY
+		// block cites the evidence, and ci-yml-quarantine-3264.test.ts
+		// pins its presence, scoping, and expiry. This assertion
+		// supersedes this file's original absence guard for this one
+		// path; the other four #2812 rows stay retired above.
+		expect(
+			activeEntries(WINDOWS_LEDGER_PATH),
+		).toContain('tests/unit/commands/archive.test.ts');
+	});
+
 	test.each(
-		ISSUE_2812_THIS_PR_QUARANTINED_PATHS,
+		ISSUE_2812_RETIRED_PATHS,
 	)('$path is scoped to the windows ledger only (no cross-ledger duplicate)', ({
 		path,
 	}) => {
@@ -95,7 +114,7 @@ describe('ci.yml integration — windows quarantine ledger entries for issue #28
 	});
 
 	test.each(
-		ISSUE_2812_THIS_PR_QUARANTINED_PATHS,
+		ISSUE_2812_RETIRED_PATHS,
 	)('$path exists on disk and is discovered by the ci.yml find chain', ({
 		path,
 	}) => {
@@ -113,10 +132,10 @@ describe('ci.yml integration — windows quarantine ledger entries for issue #28
 		// a "# STATUS: N active entr(y|ies)" header line. Drift between the
 		// declared count and the actual active-entry count (e.g. an entry
 		// removed without updating the header, or a count bumped without the
-		// matching entries) makes the header lie to triage. Post-#2973 the
-		// ledger is empty (0 active entries), the tests above are absence
-		// guards, and this test pins the header's declared 0 against the
-		// actual active-entry count.
+		// matching entries) makes the header lie to triage. The assertion is
+		// relative (declared == actual), so later cohorts re-growing the
+		// ledger (#2826, #2867, #3248, #3264) do not need to touch this
+		// file — only the header/entry drift this catches does.
 		const raw = readFileSync(WINDOWS_LEDGER_PATH, 'utf8').replace(
 			/\r\n/g,
 			'\n',
