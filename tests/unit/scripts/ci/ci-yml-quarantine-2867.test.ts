@@ -164,6 +164,10 @@ describe('ci.yml integration — windows quarantine ledger entries for issue #28
 		const windowAbove = lines.slice(Math.max(0, entryIndex - 60), entryIndex);
 		const joined = windowAbove.join('\n');
 		expect(joined).toMatch(/^# OWNER: .+#2867/m);
-		expect(joined).toMatch(/^# EXPIRY: 2026-10-20/m);
+		// Renewed 2026-10-21 per issue #3203 (quarantine-aging tracker):
+		// EXPIRY moved 2026-10-20 → 2026-11-18 under the open #2973
+		// cohort anchor (renewal-requires-issue policy, #2905); the OWNER
+		// line retains #2867 as the original flake evidence.
+		expect(joined).toMatch(/^# EXPIRY: 2026-11-18/m);
 	});
 });
