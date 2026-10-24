@@ -153,6 +153,7 @@ describe('issue #3336 AC1: deterministic replay of pre-upgrade artifacts (pins)'
 				laneId: 'critic-low',
 				workflowLane: 'critic-low',
 				reviewItemIds: ITEM_IDS,
+				agent: 'critic',
 			},
 		];
 		await recordPrReviewValidationBatch(

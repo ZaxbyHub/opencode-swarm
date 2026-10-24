@@ -62,7 +62,9 @@ const PHASES: Readonly<
 	},
 	'closeout-critic': {
 		mode: 'swarm-pr-feedback:closeout-critic',
-		role: 'critic_oversight',
+		// Issue #3340: closeout-critic requires exactly the `critic` role
+		// (aligned with the PR_REVIEW critic rule).
+		role: 'critic',
 		marker: '[CLOSEOUT-CRITIC]',
 		verdict: 'APPROVE',
 	},

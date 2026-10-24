@@ -324,11 +324,13 @@ describe('issue #3101 N-of-M verdict settlement', () => {
 				[
 					{
 						laneId: 'critic-live',
+						agent: 'critic',
 						workflowLane: 'critic-live',
 						reviewItemIds: criticLive,
 					},
 					{
 						laneId: 'critic-dead',
+						agent: 'critic',
 						workflowLane: 'critic-dead',
 						reviewItemIds: criticDead,
 					},
@@ -355,6 +357,7 @@ describe('issue #3101 N-of-M verdict settlement', () => {
 					[
 						{
 							laneId: 'critic-dead',
+							agent: 'critic',
 							workflowLane: 'critic-dead',
 							reviewItemIds: criticDead,
 						},

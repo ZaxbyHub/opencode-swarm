@@ -232,6 +232,7 @@ describe('collect_lane_results — regression: PR-review verdict transport recov
 			[
 				{
 					laneId: 'critic-lane',
+					agent: 'critic',
 					workflowLane: 'critic-lane',
 					reviewItemIds: ['C-0'],
 				},
@@ -339,6 +340,7 @@ describe('collect_lane_results — regression: PR-review verdict transport recov
 			[
 				{
 					laneId: 'critic-lane',
+					agent: 'critic',
 					workflowLane: 'critic-lane',
 					reviewItemIds: ['C-0'],
 				},
@@ -436,6 +438,7 @@ describe('collect_lane_results — regression: PR-review verdict transport recov
 			[
 				{
 					laneId: 'critic-lane',
+					agent: 'critic',
 					workflowLane: 'critic-lane',
 					reviewItemIds: ['C-0'],
 				},

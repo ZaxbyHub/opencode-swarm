@@ -155,6 +155,7 @@ async function establishFindingsAndDegradation(): Promise<void> {
 		[
 			{
 				laneId: `${RUN_ID}-cr`,
+				agent: 'critic',
 				workflowLane: `${RUN_ID}-cr`,
 				reviewItemIds: findingIds.slice(1),
 			},

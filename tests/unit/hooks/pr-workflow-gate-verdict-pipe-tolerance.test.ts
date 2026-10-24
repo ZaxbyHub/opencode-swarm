@@ -260,6 +260,7 @@ describe('verdict row pipe tolerance', () => {
 			[
 				{
 					laneId: 'critic-pipes',
+					agent: 'critic',
 					workflowLane: 'critic-pipes',
 					reviewItemIds: itemIds,
 				},

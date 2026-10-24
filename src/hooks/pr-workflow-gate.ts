@@ -100,6 +100,7 @@ import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import type { LaneLivenessWatchdogConfig } from '../config/schema.js';
 import {
 	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+	getCanonicalAgentRole,
 	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
 } from '../config/schema.js';
@@ -338,6 +339,7 @@ export type PrReviewLaneValidationPredicate =
 	| 'record.workflow_lane'
 	| 'record.owned_workflow_lanes'
 	| 'record.mode'
+	| 'record.normalized_agent'
 	| 'record.pr_head_sha'
 	| 'record.git_head'
 	| 'record.status'
@@ -577,6 +579,15 @@ export interface PrWorkflowLaneSpec {
 	laneId?: string;
 	workflowLane?: string;
 	reviewItemIds?: string[];
+	/**
+	 * The agent this lane declares it will run (threaded from the dispatch
+	 * lane's `agent`). The critic-phase recorder asserts its canonical role
+	 * (issue #3340 AC1): PR_REVIEW critic batches are refused unless every
+	 * lane declares an agent whose resolved role is exactly `critic`, so the
+	 * role rule holds at the persisting boundary instead of only at the
+	 * dispatch call site (#3310). Persisted on the batch record for audit.
+	 */
+	agent?: string;
 	/**
 	 * Complete dimension/family set this lane covers under a consolidated depth
 	 * tier. Must contain workflowLane. Absent means the singleton [workflowLane].
@@ -879,6 +890,8 @@ interface PrReviewValidationBatchRecord {
 		laneId: string;
 		workflowLane: string;
 		reviewItemIds?: string[];
+		/** Declared lane agent (issue #3340 audit trail; critic batches refuse non-critic roles at record time). */
+		agent?: string;
 	}>;
 	validatedAt: string;
 }
@@ -1578,6 +1591,9 @@ const PrReviewValidationBatchRecordSchema = z
 							.min(1)
 							.max(MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS)
 							.optional(),
+						// Issue #3340: declared lane agent, persisted for audit
+						// by the critic-phase admission assertion.
+						agent: z.string().min(1).optional(),
 					})
 					.strict(),
 			)
@@ -7867,6 +7883,48 @@ function derivePrReviewOrderUnstableItemsForState(
 		.sort();
 }
 
+/**
+ * Issue #3340 AC1: the resolved-role assertion applied by
+ * `recordPrReviewValidationBatch` to every lane of a critic-phase batch. Each
+ * lane must declare its `agent`, and that agent's canonical role must be
+ * exactly `critic` — the same rule the dispatch caller enforces (#3310).
+ */
+function assertCriticLaneAgents(
+	phase: PrReviewValidationPhase,
+	lanes: readonly PrWorkflowLaneSpec[],
+	generatedAgentNames: readonly string[] | undefined,
+): void {
+	if (phase !== 'critic') return;
+	for (const lane of lanes) {
+		const agent = lane.agent?.trim();
+		if (!agent) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW critic lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" must declare its agent — only the critic agent may run critic lanes, so an undeclared agent cannot be admitted`,
+			);
+		}
+		// Mirror the dispatch caller's resolution exactly when the caller
+		// supplies the generated-name registry; without one, fall back to
+		// canonical/suffix extraction so direct gate callers still fail
+		// closed on critic-family roles (they are canonical roles returned
+		// unchanged) and arbitrary non-critic names.
+		const role = resolveGeneratedAgentRoleStrict(agent, generatedAgentNames);
+		if (role !== 'critic') {
+			throw new Error(
+				`BLOCKED: PR_REVIEW critic lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" uses invalid role "${role}" (agent "${agent}") — PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)`,
+			);
+		}
+	}
+}
+
+function resolveGeneratedAgentRoleStrict(
+	agent: string,
+	generatedAgentNames: readonly string[] | undefined,
+): string {
+	return generatedAgentNames
+		? resolveGeneratedAgentRole(agent, generatedAgentNames)
+		: getCanonicalAgentRole(agent);
+}
+
 export async function recordPrReviewValidationBatch(
 	directory: string,
 	sessionID: string,
@@ -7882,8 +7940,21 @@ export async function recordPrReviewValidationBatch(
 		 * closed so the prompt can never misrepresent the stamped receipt.
 		 */
 		expectedPresentationOrder?: 'A' | 'B';
+		/**
+		 * Issue #3340 AC1: the generated-agent-name registry the dispatch
+		 * caller resolves lane roles against. When supplied, the critic-phase
+		 * admission below resolves declared agents through the identical
+		 * strict resolver, so the gate verdict matches the dispatch verdict
+		 * for prefixed generated names (e.g. `mega_critic`).
+		 */
+		generatedAgentNames?: readonly string[];
 	},
 ): Promise<PrWorkflowGateState> {
+	// Issue #3340 AC1: enforce the critic-role rule at the boundary that
+	// persists the verdict batch, not only at the dispatch call site (#3310).
+	// Pure input validation — reject before any state read or write so a
+	// refused batch leaves no trace and no partially-mutated window state.
+	assertCriticLaneAgents(phase, lanes, options.generatedAgentNames);
 	let state = await bindPrWorkflowHead(directory, sessionID, options.prHeadSha);
 	if (state.mode !== 'PR_REVIEW') throw wrongModeError(state, 'PR_REVIEW');
 	if (!state.prReviewTriggerEvalPath) {
@@ -9220,10 +9291,17 @@ function assertIndependentFeedbackGateSessions(
 		}
 		const record = matching[0];
 		const expectedRole = PR_FEEDBACK_PHASE_ROLE[batch.phase];
-		const roleMatches =
-			record.normalizedAgent === expectedRole ||
-			(expectedRole === 'critic' &&
-				record.normalizedAgent.startsWith('critic_'));
+		// Issue #3340 AC2 (recorded decision): PR_FEEDBACK closeout-critic
+		// requires the role to be EXACTLY `critic`, the same rule as the
+		// PR_REVIEW critic phase (#3310). The closeout gate settles only on
+		// one complete [CLOSEOUT-CRITIC] verdict row per inventory item — the
+		// same row-emission contract the other critic-family agents
+		// (critic_finding_validator, critic_sounding_board, ...) cannot
+		// fulfill under their own output contracts. The pre-#3340
+		// `startsWith('critic_')` leniency is intentionally removed; critic
+		// dispatches that used a critic-family agent must re-run with the
+		// `critic` agent.
+		const roleMatches = record.normalizedAgent === expectedRole;
 		if (!roleMatches) {
 			throw new Error(
 				`BLOCKED: PR_FEEDBACK ${batch.phase} requires role ${expectedRole}, received ${record.normalizedAgent || '(unknown)'}`,
@@ -15855,6 +15933,7 @@ function normalizeWorkflowLanes(lanes: readonly PrWorkflowLaneSpec[]): Array<{
 	const normalized = lanes.map((lane) => {
 		const workflowLane = lane.workflowLane?.trim();
 		const laneId = lane.laneId?.trim() || workflowLane;
+		const agent = lane.agent?.trim();
 		if (!workflowLane || !laneId) {
 			throw new Error(
 				'BLOCKED: PR workflow lane validation requires every lane to have non-empty laneId and workflow_lane values',
@@ -15900,6 +15979,7 @@ function normalizeWorkflowLanes(lanes: readonly PrWorkflowLaneSpec[]): Array<{
 			workflowLane,
 			...(reviewItemIds ? { reviewItemIds } : {}),
 			...(ownedWorkflowLanes ? { ownedWorkflowLanes } : {}),
+			...(agent ? { agent } : {}),
 		};
 	});
 	assertNoDuplicates(
@@ -19778,6 +19858,23 @@ function analyzeLaneArtifactIntegrity(args: {
 			'artifact.role',
 			record.normalizedAgent,
 			artifact.role,
+		);
+	}
+	// Issue #3340 (issue item 2): the artifact/record pair being
+	// self-consistent is not enough — a critic-mode lane whose child record
+	// ran a NON-critic role must fail settlement. `normalizedAgent` is the
+	// resolved canonical role at launch time (not the raw prefixed name), so
+	// the exact comparison admits prefixed critic agents (`mega_critic`
+	// records `normalizedAgent: 'critic'`) while rejecting every other
+	// critic-family role.
+	if (
+		expected.mode === 'swarm-pr-review:critic' &&
+		record.normalizedAgent !== 'critic'
+	) {
+		return failedLaneValidation(
+			'record.normalized_agent',
+			'critic',
+			record.normalizedAgent || '(missing)',
 		);
 	}
 	if (artifact.source !== 'collect_lane_results') {
