@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.199.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.199.5...v7.199.6) (2026-10-24)
+
+
+### Bug Fixes
+
+* **host/v2:** keep tool-call pairing when v2 context messages carry no id ([d30353f](https://github.com/ZaxbyHub/opencode-swarm/commit/d30353f65e564e40127055ae95847391d4b04268))
+
 ## [7.199.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.199.4...v7.199.5) (2026-10-24)
 
 
