@@ -334,7 +334,7 @@ const NAMED_ENTITIES: Record<string, string> = {
 function decodeEntities(text: string): string {
 	return text.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (whole, body: string) => {
 		const key = body.toLowerCase();
-		if (key in NAMED_ENTITIES) return NAMED_ENTITIES[key];
+		if (Object.hasOwn(NAMED_ENTITIES, key)) return NAMED_ENTITIES[key];
 		if (body.startsWith('#x') || body.startsWith('#X')) {
 			const code = Number.parseInt(body.slice(2), 16);
 			return Number.isFinite(code) ? safeFromCodePoint(code) : whole;
