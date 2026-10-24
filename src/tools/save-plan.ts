@@ -11,6 +11,7 @@ import { loadPluginConfigWithMeta } from '../config';
 import {
 	type ExecutionProfile,
 	ExecutionProfileSchema,
+	ExternalEvidenceAnchorSchema,
 	type Phase,
 	type Plan,
 	PlanSchema,
@@ -29,6 +30,8 @@ import {
 	computeSavePlanEpicShaping,
 	type EpicSavePlanShaping,
 } from '../epic/plan-shaping-seam.js';
+import { taskEvidencePath } from '../evidence/task-file.js';
+import { transitionTaskWorkflowEvidence } from '../gate-evidence';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { writeCheckpoint } from '../plan/checkpoint';
 import {
@@ -94,6 +97,22 @@ export interface SavePlanArgs {
 			files_touched?: string[];
 			/** Spec FR-###/SC-### IDs this task maps to (issue #1687, FR-000). */
 			fr_refs?: string[];
+			/**
+			 * External-evidence completion class (issue #3422) — declare
+			 * 'external_git' for deliverables proven outside coder mutations
+			 * (commit/push, gh ops). Omission on a revision preserves the
+			 * prior declaration; an explicit 'coder_mutation' clears it.
+			 */
+			evidence_class?: 'coder_mutation' | 'external_git';
+			/**
+			 * Pinned read-only git anchors attesting the external deliverable
+			 * (issue #3422). Require evidence_class === 'external_git'.
+			 */
+			evidence_anchors?: Array<{
+				command: string;
+				expect?: string;
+				expect_prefix?: string;
+			}>;
 		}>;
 	}>;
 	/**
@@ -291,9 +310,34 @@ function normalizePlanForReconcileComparison(
 				acceptance: task.acceptance,
 				files_touched: task.files_touched,
 				fr_refs: task.fr_refs,
+				// #3422: declaration edits are real semantic changes — a
+				// stale-projection reconcile that silently rewrote a
+				// declaration would bypass the revocation pass below.
+				evidence_class: task.evidence_class,
+				evidence_anchors: task.evidence_anchors,
 			})),
 		})),
 	};
+}
+
+/**
+ * Deterministic comparison key for an #3422 evidence declaration. Anchors are
+ * an ORDERED list, so order changes count as declaration changes; key order
+ * inside each anchor is normalized so prior-plan and constructed-plan objects
+ * compare equal regardless of JSON key order.
+ */
+function canonicalDeclarationKey(
+	evidenceClass: Task['evidence_class'],
+	evidenceAnchors: Task['evidence_anchors'],
+): string {
+	return JSON.stringify([
+		evidenceClass ?? null,
+		(evidenceAnchors ?? []).map((anchor) => [
+			anchor.command,
+			anchor.expect ?? null,
+			anchor.expect_prefix ?? null,
+		]),
+	]);
 }
 
 async function readLedgerTailCapture(
@@ -1196,6 +1240,32 @@ export async function executeSavePlan(
 		}
 	}
 
+	// #3422: ordinary-revision declaration lookup. The builder's
+	// `existingPhase`/`existingTask` lookups below only exist on the
+	// reconcile-ledger-projection path, so without this map every ordinary
+	// revision would silently DROP an external_git declaration (an omitted
+	// declaration field means "preserve the prior one", never "clear"). Scoped
+	// to evidence declarations only — making `existingPhase` unconditional
+	// would change type/required_agents/size/depends/acceptance preservation.
+	const priorDeclarationById = new Map<
+		string,
+		{
+			evidence_class?: Task['evidence_class'];
+			evidence_anchors?: Task['evidence_anchors'];
+		}
+	>();
+	for (const priorTask of existingPlan?.phases.flatMap((p) => p.tasks) ?? []) {
+		if (
+			priorTask.evidence_class !== undefined ||
+			priorTask.evidence_anchors !== undefined
+		) {
+			priorDeclarationById.set(priorTask.id, {
+				evidence_class: priorTask.evidence_class,
+				evidence_anchors: priorTask.evidence_anchors,
+			});
+		}
+	}
+
 	// Step 4: Build the Plan object from args
 	const plan: Plan = {
 		schema_version: '1.0.0',
@@ -1234,6 +1304,21 @@ export async function executeSavePlan(
 					const existingTask = existingPhase?.tasks.find(
 						(candidate) => candidate.id === task.id,
 					);
+					// #3422 declaration semantics: an omitted field preserves the
+					// prior declaration (the reconcile-path existingTask or the
+					// ordinary-revision lookup above); an explicit 'coder_mutation'
+					// clears it. A cleared/non-external declaration carries no
+					// anchors, so stale anchors can never reactivate one.
+					const resolvedEvidenceClass =
+						task.evidence_class ??
+						existingTask?.evidence_class ??
+						priorDeclarationById.get(task.id)?.evidence_class;
+					const resolvedEvidenceAnchors =
+						resolvedEvidenceClass === 'external_git'
+							? (task.evidence_anchors ??
+								existingTask?.evidence_anchors ??
+								priorDeclarationById.get(task.id)?.evidence_anchors)
+							: undefined;
 					return {
 						id: task.id,
 						phase: phase.id,
@@ -1246,6 +1331,8 @@ export async function executeSavePlan(
 						evidence_path: existingTask?.evidence_path,
 						blocked_reason: existingTask?.blocked_reason,
 						fr_refs: task.fr_refs ?? existingTask?.fr_refs,
+						evidence_class: resolvedEvidenceClass,
+						evidence_anchors: resolvedEvidenceAnchors,
 					};
 				}),
 			};
@@ -1257,6 +1344,72 @@ export async function executeSavePlan(
 		(acc, phase) => acc + phase.tasks.length,
 		0,
 	);
+
+	// #3422: validate the RESOLVED declarations (post preservation/clear
+	// semantics above) against the producer contract — anchors require class
+	// external_git, an external task pins 1..16 anchors, and every anchor
+	// carries `expect` and/or a NON-EMPTY `expect_prefix` (an empty prefix
+	// matches everything and attests nothing — 05-fix-plan.md §1/F6). Runs
+	// before any durable mutation so an invalid declaration is
+	// transactionally side-effect free.
+	const resolvedDeclarationById = new Map<
+		string,
+		{
+			evidence_class: Task['evidence_class'];
+			evidence_anchors: Task['evidence_anchors'];
+		}
+	>();
+	for (const constructedTask of plan.phases.flatMap((p) => p.tasks)) {
+		resolvedDeclarationById.set(constructedTask.id, {
+			evidence_class: constructedTask.evidence_class,
+			evidence_anchors: constructedTask.evidence_anchors,
+		});
+	}
+	const declarationErrors: string[] = [];
+	for (const phase of args.phases) {
+		for (const task of phase.tasks) {
+			const resolved = resolvedDeclarationById.get(task.id);
+			if (
+				task.evidence_anchors !== undefined &&
+				task.evidence_anchors.length > 0 &&
+				resolved?.evidence_class !== 'external_git'
+			) {
+				declarationErrors.push(
+					`Task "${task.id}": evidence_anchors require evidence_class external_git`,
+				);
+				continue;
+			}
+			if (resolved?.evidence_class !== 'external_git') continue;
+			const anchors = resolved.evidence_anchors ?? [];
+			if (anchors.length < 1 || anchors.length > 16) {
+				declarationErrors.push(
+					`Task "${task.id}" declares evidence_class external_git and must pin 1..16 evidence_anchors`,
+				);
+				continue;
+			}
+			for (const anchor of anchors) {
+				if (
+					anchor.expect === undefined &&
+					(anchor.expect_prefix === undefined ||
+						anchor.expect_prefix.length === 0)
+				) {
+					declarationErrors.push(
+						`Task "${task.id}" anchor ${JSON.stringify(anchor.command)} must set expect and/or a non-empty expect_prefix`,
+					);
+				}
+			}
+		}
+	}
+	if (declarationErrors.length > 0) {
+		return {
+			success: false,
+			message: 'Plan rejected: invalid external-evidence declarations',
+			errors: declarationErrors,
+			recovery_guidance:
+				'Declare evidence_class external_git with 1..16 pinned evidence_anchors (each carrying expect and/or a non-empty expect_prefix), ' +
+				'or clear the declaration with an explicit evidence_class coder_mutation and no anchors, then retry save_plan.',
+		};
+	}
 
 	// Step 4: Save the plan using validated target workspace
 	const lockTaskId = `save-plan-${Date.now()}`;
@@ -1345,6 +1498,100 @@ export async function executeSavePlan(
 							'Remove semantic edits and retry reconcile_ledger_projection with the exact stale plan content, or retry save_plan without reconcile_ledger_projection for a normal plan revision.',
 					};
 				}
+			}
+			// #3422 (05-fix-plan.md §1 R3F2/R4F1/R4F2): declaration-change
+			// evidence revocation. The declaration digest is deterministic, so
+			// external_git(A) → coder_mutation → external_git(A) would make the
+			// OLD bundle current again without a fresh attest unless the stale
+			// proof is revoked here. Every prior external_git task that is
+			// ABSENT from the incoming plan (removal/re-add cannot bypass
+			// revocation) or whose resolved (class, anchors) declaration
+			// changed gets an `external_evidence_revoked` transition that
+			// clears the externalEvidence metadata. Ordering is critical:
+			// AFTER the incoming plan + declarations validate and BEFORE the
+			// ledger/projection write below — the safe failure direction is a
+			// save that fails after revocation (old declaration without proof,
+			// merely forcing a fresh attest); the reverse order would
+			// re-create the stale-proof window. Inside the plan lock so the
+			// repository's plan→evidence lock ordering holds. Terminal
+			// evidence (complete/blocked/closed) is NEVER revoked — completed
+			// bundles are preserved as audit history, and a repair_idle
+			// reopen already forces a fresh attest on any reopened task.
+			const revocationErrors: string[] = [];
+			for (const priorTask of existingPlan?.phases.flatMap((p) => p.tasks) ??
+				[]) {
+				if (priorTask.evidence_class !== 'external_git') continue;
+				const resolved = resolvedDeclarationById.get(priorTask.id);
+				// Absent from the incoming plan (undefined) and any changed
+				// declaration both count as a declaration change.
+				if (
+					resolved !== undefined &&
+					canonicalDeclarationKey(
+						priorTask.evidence_class,
+						priorTask.evidence_anchors,
+					) ===
+						canonicalDeclarationKey(
+							resolved.evidence_class,
+							resolved.evidence_anchors,
+						)
+				) {
+					continue;
+				}
+				let workflowState: string | undefined;
+				let workflowGeneration = 0;
+				try {
+					const parsedEvidence = JSON.parse(
+						fs.readFileSync(taskEvidencePath(dir, priorTask.id), 'utf-8'),
+					) as { workflow?: { state?: unknown; generation?: unknown } };
+					if (typeof parsedEvidence.workflow?.state === 'string') {
+						workflowState = parsedEvidence.workflow.state;
+					}
+					if (typeof parsedEvidence.workflow?.generation === 'number') {
+						workflowGeneration = parsedEvidence.workflow.generation;
+					}
+				} catch {
+					// Missing or unparseable evidence — nothing durable to
+					// revoke; the declaration change alone already forces a
+					// fresh attest.
+					continue;
+				}
+				if (
+					workflowState === 'complete' ||
+					workflowState === 'blocked' ||
+					workflowState === 'closed'
+				) {
+					continue;
+				}
+				try {
+					await transitionTaskWorkflowEvidence(dir, priorTask.id, {
+						type: 'external_evidence_revoked',
+						reason: 'declaration_changed',
+						expectedGeneration: workflowGeneration,
+						transitionId: `save-plan-declaration-change:${priorTask.id}:${Date.now()}`,
+					});
+				} catch (error) {
+					// Fail the save: publishing a new declaration while a
+					// stale external proof stays live would re-open the exact
+					// window this pass exists to close.
+					const revocationMessage =
+						error instanceof Error ? error.message : String(error);
+					logger.warn(
+						`[save_plan] external-evidence revocation failed for task ${priorTask.id}: ${revocationMessage}`,
+					);
+					revocationErrors.push(
+						`Task "${priorTask.id}": could not revoke stale external evidence (${revocationMessage})`,
+					);
+				}
+			}
+			if (revocationErrors.length > 0) {
+				return {
+					success: false,
+					message:
+						'PLAN_EXTERNAL_EVIDENCE_REVOCATION_FAILED: save_plan could not revoke external evidence for changed declarations',
+					errors: revocationErrors,
+					recovery_guidance:
+						'Resolve the evidence failure for the listed tasks (e.g. a locked or corrupt .swarm/evidence/<taskId>.json), then retry save_plan. The plan was not saved.',
+				};
 			}
 			// When reset_statuses is requested, bypass the preserveCompletedStatuses
 			// guard in savePlan so that the caller's intent (all tasks → pending) is
@@ -1446,6 +1693,25 @@ export async function executeSavePlan(
 					.join(', ');
 				warnings.push(
 					`Requirement coverage override used. Missing required FR mappings: ${missingIds}`,
+				);
+			}
+			// #3422 (05-fix-plan.md §10): plan lint over the RESOLVED constructed
+			// tasks — a git-ops-shaped task (commit/push/gh ops/tagging) with no
+			// files in scope can never satisfy the coder-mutation completion gate.
+			// Declared external_git tasks never warn; an explicit coder_mutation
+			// still warns (it cannot complete either). The warning names both
+			// remedies: a declared external attest, or a thin coder dispatch so a
+			// settlement exists.
+			const gitOpsPattern =
+				/\b(commit|push|merge queue|gh pr|gh issue|gh release|tag)\b/i;
+			for (const lintTask of plan.phases.flatMap((p) => p.tasks)) {
+				if (lintTask.files_touched.length > 0) continue;
+				if (lintTask.evidence_class === 'external_git') continue;
+				if (!gitOpsPattern.test(lintTask.description)) continue;
+				warnings.push(
+					`plan-lint: task ${lintTask.id} looks like a git-ops task (commit/push) with no files in scope; it cannot satisfy the coder-mutation completion gate. ` +
+						`Either declare evidence_class external_git with pinned evidence_anchors and run /swarm attest, ` +
+						`or run it as a thin coder dispatch so a settlement exists.`,
 				);
 			}
 
@@ -1591,6 +1857,21 @@ export const save_plan: ToolDefinition = createSwarmTool({
 									.optional()
 									.describe(
 										'Spec FR-###/SC-### IDs this task maps to, e.g. ["FR-001", "SC-002"]',
+									),
+								evidence_class: z
+									.enum(['coder_mutation', 'external_git'])
+									.optional()
+									.describe(
+										'External-evidence completion class (issue #3422). Declare "external_git" for a deliverable proven outside coder mutations (commit/push, gh ops). ' +
+											'Omit on a revision to preserve the prior declaration; an explicit "coder_mutation" clears it.',
+									),
+								evidence_anchors: z
+									.array(ExternalEvidenceAnchorSchema)
+									.max(16)
+									.optional()
+									.describe(
+										'Pinned read-only git anchors attesting the external deliverable (issue #3422), e.g. [{"command": "git rev-list --count HEAD~1..HEAD", "expect": "1"}]. ' +
+											'Requires evidence_class "external_git"; each anchor needs expect and/or a non-empty expect_prefix.',
 									),
 							}),
 						)

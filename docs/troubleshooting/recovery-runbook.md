@@ -111,6 +111,34 @@ A task whose coder retry circuit exhausted its critic-guided simplified retry re
 - **When the neighboring tools do not help:** `approve_retry_sounding_board` only helps before the `simplification` rung. `recover_rework_task` exits the wedge only for the no-code-change case — it writes `stage_a_passed`, moving the task onto the Stage A→Stage B path where no coder dispatch (and therefore no escalation check) runs; the retry counters survive, so if Stage B then requires a code change the ladder still refuses the new coder dispatch and the audited repair above is the exit. `/swarm reset-session` intentionally preserves durable retry gates.
 - **Superseded workaround:** before #3389 an undocumented exit was a two-step round trip — set the plan status to `blocked`, then force-repair from `blocked`. It still works but is no longer needed; prefer the one-step audited repair above.
 
+## Never-dispatched wedge (git-external deliverables, issue #3422)
+
+A task whose deliverable is git-external (commit/push, gh ops) and that never
+received a coder dispatch has no settlement WAL, no exact-task workflow
+evidence, and no `coder_settlement` events. `/swarm recover <task_id>` reports
+this shape explicitly (`No coder dispatch or settlement evidence was found for
+task <id>`) instead of a bare dead end, and none of the settlement classes
+above apply — recovery is not the remedy because there is nothing to recover.
+(The neighboring `missing` diagnose category covers the same no-receipt shape;
+this section is its operator guidance.)
+
+Three exits, in order of preference:
+
+1. **`/swarm attest <task_id>`** — if the task declares `evidence_class:
+   external_git` with pinned `evidence_anchors` (or you can re-plan it to),
+   attest runs the pinned read-only git anchors and records the durable
+   external-evidence bundle that admits completion. A task whose PLAN status
+   was left `blocked` as a wedge record first reopens via the audited
+   `blocked → in_progress` transition, then attests, then completes.
+2. **manual close** — flip the task status in the TUI and record the wedge plus
+   the close reason in your execution trace.
+3. **Re-plan as a thin coder dispatch** — the coder executes the pinned-scope
+   git commands, a settlement exists, and the normal completion gate applies.
+
+Related: `save_plan` warns at plan time when a commit/push-shaped task has an
+empty scope and no external declaration, so this wedge is visible before it
+forms.
+
 ## Deterministic repair vs external side effects
 
 Deterministic repair — dead-owner settlement recovery and the wedged Stage A repair — only rewrites local durable state the receipts already justify. It never resolves an external side effect. These stay uncertain even when local state is repaired and need a human to reconcile against the other process or provider:

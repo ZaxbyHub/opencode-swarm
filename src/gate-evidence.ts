@@ -17,6 +17,7 @@
  * that requires a protected trust root outside the project workspace.
  */
 
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
@@ -72,6 +73,8 @@ const TASK_WORKFLOW_OUTCOMES = [
 	'task_blocked',
 	'task_closed',
 	'repair_idle',
+	'external_evidence_attested',
+	'external_evidence_revoked',
 ] as const;
 
 export type TaskWorkflowTransitionOutcome =
@@ -142,6 +145,17 @@ export interface TaskWorkflowMetadata {
 		transitionId: string;
 		declaredFiles: string[];
 	};
+	/**
+	 * Pinned external evidence bundle (issue #3422): the read-only git proof
+	 * for a task declared `evidence_class: 'external_git'`, attested while the
+	 * workflow is idle and preserved through the terminal task_completed write
+	 * so a duplicate completion can re-validate the same current proof. Cleared
+	 * by a new coder attribution window (dispatch_attempted /
+	 * dispatch_no_mutation / accepted_mutation), by repair_idle's fresh
+	 * generation, and by the declaration-change revoke; terminal states are
+	 * never revoked (06-critic-review.md R4F1).
+	 */
+	externalEvidence?: ExternalEvidenceBundle;
 }
 
 export interface TaskWorkflowSnapshot extends TaskWorkflowMetadata {
@@ -422,6 +436,13 @@ export type TaskWorkflowTransitionEvent =
 			qaExempt?: boolean;
 			/** Durable, non-forced completion of a trusted empty-scope settlement. */
 			readOnlyNoMutation?: boolean;
+			/**
+			 * Issue #3422: the caller proved the external bundle current via
+			 * externalProofCurrent / isExternalEvidenceInitialCompletionEligible
+			 * before forwarding the terminal event; the reducer still requires the
+			 * durable bundle to exist and fully match before admitting it.
+			 */
+			externalEvidence?: boolean;
 			expectedGeneration: number;
 			transitionId?: string;
 	  }
@@ -437,6 +458,29 @@ export type TaskWorkflowTransitionEvent =
 	  }
 	| {
 			type: 'repair_idle';
+			expectedGeneration: number;
+			transitionId?: string;
+	  }
+	| {
+			/**
+			 * Issue #3422: pin the attest producer's validated read-only git bundle
+			 * as durable workflow metadata. State-preserving (the gate_recorded
+			 * precedent) and admitted from idle only — an external task never
+			 * enters the coder QA lifecycle.
+			 */
+			type: 'external_evidence_attested';
+			bundle: ExternalEvidenceBundle;
+			expectedGeneration: number;
+			transitionId?: string;
+	  }
+	| {
+			/**
+			 * Issue #3422: the plan declaration changed under a nonterminal task, so
+			 * the pinned bundle no longer describes the declared work. Terminal
+			 * states are never revoked (06-critic-review.md R4F1).
+			 */
+			type: 'external_evidence_revoked';
+			reason: 'declaration_changed';
 			expectedGeneration: number;
 			transitionId?: string;
 	  };
@@ -474,6 +518,36 @@ const GateEvidenceSchema = z
 	})
 	.passthrough(); // preserve council-specific extras (verdict, vetoedBy, etc.)
 
+/**
+ * Durable external-evidence bundle (issue #3422): the pinned read-only git
+ * proof for a task whose deliverable is verified outside the coder QA
+ * lifecycle. The attest producer validates the bundle (digest recompute, all
+ * anchors matched, bounds) before publishing it through the
+ * `external_evidence_attested` transition; this schema is the persistence
+ * boundary that refuses anything malformed after the fact.
+ */
+export const ExternalEvidenceBundleSchema = z.object({
+	class: z.literal('external_git'),
+	transitionId: z.string().min(1).max(512),
+	declarationDigest: z.string().regex(/^[a-f0-9]{64}$/),
+	anchors: z
+		.array(
+			z.object({
+				command: z.string().min(1).max(400),
+				expect: z.string().max(4096).optional(),
+				expect_prefix: z.string().min(1).max(4096).optional(),
+				matched: z.boolean(),
+				exit_code: z.number().int(),
+				stdout: z.string().max(4096),
+			}),
+		)
+		.max(16),
+	attestedAt: z.string().min(1),
+});
+export type ExternalEvidenceBundle = z.infer<
+	typeof ExternalEvidenceBundleSchema
+>;
+
 const TaskWorkflowMetadataSchema = z.object({
 	schema: z.literal(TASK_WORKFLOW_SCHEMA_MARKER),
 	generation: z.number().int().min(0),
@@ -494,6 +568,7 @@ const TaskWorkflowMetadataSchema = z.object({
 			declaredFiles: z.array(z.string()).length(0),
 		})
 		.optional(),
+	externalEvidence: ExternalEvidenceBundleSchema.optional(),
 });
 
 const TaskEvidenceSchema = z.object({
@@ -623,6 +698,10 @@ function getEventOutcome(
 			return 'task_closed';
 		case 'repair_idle':
 			return 'repair_idle';
+		case 'external_evidence_attested':
+			return 'external_evidence_attested';
+		case 'external_evidence_revoked':
+			return 'external_evidence_revoked';
 	}
 }
 
@@ -813,6 +892,134 @@ export function isReadOnlyNoMutationEligible(
 	return deriveApplicableGateSet(evidence, options).readOnlyNoMutation;
 }
 
+/**
+ * Inputs to the external-evidence declaration digest (issue #3422,
+ * 05-fix-plan.md §3): the exact task declaration plus the plan identity and
+ * evidence generation the digest binds.
+ */
+export interface ExternalDeclarationInput {
+	taskId: string;
+	evidence_class: 'external_git';
+	evidence_anchors: ReadonlyArray<{
+		command: string;
+		expect?: string;
+		expect_prefix?: string;
+	}>;
+	plan_title: string;
+	plan_swarm: string;
+	generation: number;
+}
+
+/**
+ * Compute the declaration digest bound into an external evidence bundle:
+ * sha256 hex over the canonical JSON of `{taskId, evidence_class,
+ * evidence_anchors (ordered definitions only), plan_title, plan_swarm,
+ * generation}`.
+ *
+ * Deliberately CURSOR-FREE (issue #3422, 05-fix-plan.md §3): the whole-plan
+ * structure hash includes `current_phase`, which advances during the terminal
+ * plan write. Binding the digest to it would self-invalidate the proof in
+ * the crash window after plan.json advances and before the evidence
+ * transaction applies. Every revalidation recomputes this digest from the
+ * CURRENT plan task and CURRENT generation instead — no whole-plan hash is
+ * ever consulted.
+ */
+export function computeExternalDeclarationDigest(
+	input: ExternalDeclarationInput,
+): string {
+	const canonical = {
+		taskId: input.taskId,
+		evidence_class: input.evidence_class,
+		evidence_anchors: input.evidence_anchors.map((anchor) => ({
+			command: anchor.command,
+			expect: anchor.expect,
+			expect_prefix: anchor.expect_prefix,
+		})),
+		plan_title: input.plan_title,
+		plan_swarm: input.plan_swarm,
+		generation: input.generation,
+	};
+	return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+/** Plan identity inputs to the external declaration digest (issue #3422). */
+export interface ExternalPlanIdentity {
+	title: string;
+	swarm: string;
+}
+
+/**
+ * The subset of a plan task the external-evidence predicates consult: the
+ * declaration fields save_plan validated (issue #3422).
+ */
+export interface ExternalPlanTaskRef {
+	id: string;
+	evidence_class?: string;
+	evidence_anchors?:
+		| ReadonlyArray<{
+				command: string;
+				expect?: string;
+				expect_prefix?: string;
+		  }>
+		| undefined;
+}
+
+/**
+ * Proof-currency predicate (issue #3422, 05-fix-plan.md §4c / R3F1): true iff
+ * the task declares `external_git`, a bundle exists with at least one anchor,
+ * every anchor matched, and the bundle's declarationDigest equals the digest
+ * recomputed from the CURRENT plan declaration + CURRENT generation. There is
+ * NO workflow-state condition — this is the "proof is current" predicate
+ * usable in ANY state (mirroring isNoMutationSettlementMetadata's
+ * idle || complete acceptance), so duplicate completion, committed-WAL
+ * idempotent replay, terminal recovery, and check_gate_status on a completed
+ * task all re-validate the same way.
+ */
+export function externalProofCurrent(
+	plan: ExternalPlanIdentity,
+	planTask: ExternalPlanTaskRef,
+	evidence: TaskEvidence | null | undefined,
+): boolean {
+	if (planTask.evidence_class !== 'external_git') return false;
+	const workflow = evidence?.workflow;
+	if (!workflow) return false;
+	const bundle = workflow.externalEvidence;
+	if (!bundle || bundle.anchors.length === 0) return false;
+	if (!bundle.anchors.every((anchor) => anchor.matched)) return false;
+	return (
+		bundle.declarationDigest ===
+		computeExternalDeclarationDigest({
+			taskId: planTask.id,
+			evidence_class: 'external_git',
+			evidence_anchors: planTask.evidence_anchors ?? [],
+			plan_title: plan.title,
+			plan_swarm: plan.swarm,
+			generation: workflow.generation,
+		})
+	);
+}
+
+/**
+ * Initial-completion eligibility (issue #3422, 05-fix-plan.md §4c / R3F1):
+ * `externalProofCurrent` AND the authoritative workflow state is exactly
+ * `idle` (blocked removed — a blocked task reopens via the audited
+ * blocked → in_progress plan transition first). This is the R3F1 split's
+ * other half: the FIRST completion requires idle, while DUPLICATE
+ * completions and terminal recovery use `externalProofCurrent` and accept
+ * `complete`. Consults the authoritative snapshot (the
+ * isNoMutationSettlementMetadata pattern) so non-authoritative legacy
+ * metadata never admits an external completion.
+ */
+export function isExternalEvidenceInitialCompletionEligible(
+	plan: ExternalPlanIdentity,
+	planTask: ExternalPlanTaskRef,
+	evidence: TaskEvidence | null | undefined,
+): boolean {
+	if (!externalProofCurrent(plan, planTask, evidence)) return false;
+	const snapshot = getTaskWorkflowSnapshot(evidence);
+	return snapshot.authoritative && snapshot.state === 'idle';
+}
+
 export function reduceTaskWorkflowSnapshot(
 	current: TaskWorkflowSnapshot,
 	event: TaskWorkflowTransitionEvent,
@@ -876,20 +1083,39 @@ export function reduceTaskWorkflowSnapshot(
 		...(current.noMutationSettlement
 			? { noMutationSettlement: current.noMutationSettlement }
 			: {}),
+		// Issue #3422: same durability contract for the external bundle —
+		// preserved across same-generation transitions and through
+		// task_completed's terminal arm (so a duplicate completion re-validates
+		// the same current proof, R3F1), cleared by a new coder attribution
+		// window, repair_idle, and the declaration-change revoke below.
+		...(current.externalEvidence
+			? { externalEvidence: current.externalEvidence }
+			: {}),
 	};
 
 	switch (event.type) {
 		case 'dispatch_attempted': {
 			// A new coder dispatch opens a fresh attribution window. A prior
 			// generation-0 no-mutation proof must not survive it, even when the
-			// later dispatch is aborted before it can publish its own settlement.
-			const { noMutationSettlement: _clearedSettlement, ...withoutSettlement } =
-				base;
+			// later dispatch is aborted before it can publish its own settlement;
+			// the same window invalidates an external bundle, whose anchors
+			// attested a workspace this dispatch may mutate (issue #3422).
+			const {
+				noMutationSettlement: _clearedSettlement,
+				externalEvidence: _clearedExternalEvidence,
+				...withoutSettlement
+			} = base;
 			return withoutSettlement;
 		}
 		case 'dispatch_no_mutation': {
-			const { noMutationSettlement: _clearedSettlement, ...withoutSettlement } =
-				base;
+			// Same attribution-window rule as dispatch_attempted (issue #3422): a
+			// dispatch that settled no-mutation still supersedes external proof
+			// pinned before it.
+			const {
+				noMutationSettlement: _clearedSettlement,
+				externalEvidence: _clearedExternalEvidence,
+				...withoutSettlement
+			} = base;
 			return {
 				...withoutSettlement,
 				retryCount: Math.min(current.retryCount + 1, 3),
@@ -929,8 +1155,13 @@ export function reduceTaskWorkflowSnapshot(
 				retryEpoch: current.retryEpoch || current.generation + 1,
 			};
 		case 'accepted_mutation': {
-			const { noMutationSettlement: _clearedSettlement, ...withoutSettlement } =
-				base;
+			// An accepted mutation rotates the generation (issue #3422): external
+			// proof pinned for the old generation no longer describes this task.
+			const {
+				noMutationSettlement: _clearedSettlement,
+				externalEvidence: _clearedExternalEvidence,
+				...withoutSettlement
+			} = base;
 			if (event.context?.settlementFailed === true) {
 				return {
 					...withoutSettlement,
@@ -1038,6 +1269,42 @@ export function reduceTaskWorkflowSnapshot(
 				// Advisory/non-Stage-B gates never advance the code QA lifecycle.
 				state: current.state,
 			};
+		case 'external_evidence_attested': {
+			// Issue #3422: an external_git task never enters the coder QA
+			// lifecycle, so idle is the only state from which a bundle may be
+			// pinned — anything else means the task already dispatched or settled
+			// in-lane and must complete through (or reopen via) that path.
+			if (current.state !== 'idle') {
+				throw new Error(
+					`TASK_WORKFLOW_EXTERNAL_ATTEST_STATE: external evidence can only be attested from idle (task never entered the coder QA lifecycle), not ${current.state}`,
+				);
+			}
+			// Idempotent on the bundle's transitionId: a WAL recovery or producer
+			// retry replaying the same attest must not re-stamp attestedAt, even
+			// after a later advisory transition overwrote lastTransitionId.
+			if (
+				current.externalEvidence?.transitionId === event.bundle.transitionId
+			) {
+				return { ...base };
+			}
+			// State-preserving metadata write (the gate_recorded precedent): the
+			// bundle rides the metadata, not the lifecycle.
+			return { ...base, externalEvidence: event.bundle };
+		}
+		case 'external_evidence_revoked': {
+			// Issue #3422: the plan declaration changed under a nonterminal task,
+			// so the pinned bundle attests a declaration that no longer exists.
+			// State-preserving clear; the top terminal-state guard already rejects
+			// this event from complete/blocked/closed, so terminal evidence is
+			// deliberately never revoked (06-critic-review.md R4F1 — completed
+			// bundles are preserved as audit history, and a repair_idle reopen
+			// already forces a fresh attest on any reopened task).
+			const {
+				externalEvidence: _revokedExternalEvidence,
+				...withoutExternalEvidence
+			} = base;
+			return withoutExternalEvidence;
+		}
 		case 'task_completed': {
 			const readOnlyNoMutation =
 				event.readOnlyNoMutation === true &&
@@ -1045,6 +1312,19 @@ export function reduceTaskWorkflowSnapshot(
 				current.generation === 0 &&
 				isNoMutationSettlementMetadata(current) &&
 				context.requiredGates.every((gate) => context.gates[gate] != null);
+			// Issue #3422 proof-currency split (05-fix-plan.md §4c / R3F1): the
+			// event flag means the CALLER proved the declaration digest current;
+			// the reducer independently requires the durable bundle to exist and
+			// fully match. Initial completion is admitted from idle, and a
+			// duplicate completion from complete re-validates the same current
+			// proof. The external path never sets forcedCompletion — it is a
+			// verified completion, not a forced one.
+			const externalAdmitted =
+				event.externalEvidence === true &&
+				current.externalEvidence !== undefined &&
+				current.externalEvidence.anchors.length > 0 &&
+				current.externalEvidence.anchors.every((anchor) => anchor.matched) &&
+				(current.state === 'idle' || current.state === 'complete');
 			if (
 				event.qaExempt !== true &&
 				current.state !== 'tests_run' &&
@@ -1052,7 +1332,8 @@ export function reduceTaskWorkflowSnapshot(
 				!(
 					current.state === 'pre_check_passed' && context.gates.council != null
 				) &&
-				!readOnlyNoMutation
+				!readOnlyNoMutation &&
+				!externalAdmitted
 			) {
 				throw new Error(
 					`TASK_WORKFLOW_QA_REQUIRED: cannot complete from ${current.state}`,
@@ -1080,12 +1361,15 @@ export function reduceTaskWorkflowSnapshot(
 		case 'repair_idle': {
 			// A repair reopens the task for new work, so prior forced-completion and
 			// supervised-recovery markers no longer describe this generation. Drop
-			// them rather than carrying them forward.
+			// them rather than carrying them forward — including external proof,
+			// which the rotated generation invalidates: a reopened task must attest
+			// fresh (issue #3422).
 			const {
 				forcedCompletion: _cleared,
 				supervisedRecovery: _clearedMarker,
 				settlementRecovery: _clearedSettlementMarker,
 				noMutationSettlement: _clearedSettlement,
+				externalEvidence: _clearedExternalEvidence,
 				...withoutForced
 			} = base;
 			return {

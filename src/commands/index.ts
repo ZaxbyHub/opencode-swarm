@@ -34,6 +34,7 @@ export { handleAgentsCommand } from './agents';
 export { handleAnalyzeCommand } from './analyze';
 export { handleApproveWriteCommand } from './approve-write';
 export { handleArchiveCommand } from './archive';
+export { handleAttestCommand } from './attest';
 export { handleAutoProceedCommand } from './auto-proceed';
 export { handleBenchmarkCommand } from './benchmark';
 export { handleBrainstormCommand } from './brainstorm';

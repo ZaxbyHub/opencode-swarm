@@ -69,6 +69,26 @@ export const MigrationStatusSchema = z.enum([
 ]);
 export type MigrationStatus = z.infer<typeof MigrationStatusSchema>;
 
+/**
+ * External-evidence anchor (issue #3422): a pinned read-only git assertion a
+ * task declares so `/swarm attest` can verify a git-external deliverable
+ * (commit/push, gh ops) without a coder settlement.
+ *
+ * `expect` matches the trimmed stdout exactly; `expect_prefix` requires a
+ * NON-EMPTY prefix of it (an empty prefix would match everything and attest
+ * nothing). At least one of the two must be present per anchor; both bounds
+ * mirror the durable-evidence storage cap so an anchor is never accepted with
+ * output that cannot be persisted verbatim.
+ */
+export const ExternalEvidenceAnchorSchema = z.object({
+	command: z.string().min(1).max(400),
+	expect: z.string().max(4096).optional(),
+	expect_prefix: z.string().min(1).max(4096).optional(),
+});
+export type ExternalEvidenceAnchor = z.infer<
+	typeof ExternalEvidenceAnchorSchema
+>;
+
 // Task schema
 export const TaskSchema = z.object({
 	id: z.string(), // e.g. "1.1", "2.3"
@@ -87,6 +107,15 @@ export const TaskSchema = z.object({
 	// computePlanLedgerHash/computePlanStructureHash/computePlanContentHash stay
 	// byte-identical for every existing persisted plan predating this field.
 	fr_refs: z.array(z.string()).optional(),
+	// External-evidence completion class (issue #3422). Optional and
+	// omitted-when-unset like fr_refs, so legacy plans hash byte-identically;
+	// UNLIKE fr_refs these fields ARE included in the three hash normalizers
+	// (they gate completion admission, so declaration edits must be
+	// hash-visible — see docs/plan-durability.md). Omission on a save_plan
+	// revision preserves the prior declaration; an explicit
+	// 'coder_mutation' clears it.
+	evidence_class: z.enum(['coder_mutation', 'external_git']).optional(),
+	evidence_anchors: z.array(ExternalEvidenceAnchorSchema).max(16).optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 
