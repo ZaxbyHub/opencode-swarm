@@ -91,15 +91,19 @@ async function interruptedAfterOnBeforeMerge(label: string): Promise<Fixture> {
 	return fixture;
 }
 
-/** Removes the lane directory, its stale registration, and the lane branch. */
+/** Removes every recoverable source artifact, including unreachable objects. */
 function destroyWorktreeAndBranch(fixture: Fixture): void {
 	fs.rmSync(fixture.worktree, { recursive: true, force: true });
 	git(fixture.repo, ['worktree', 'prune']);
 	git(fixture.repo, ['branch', '-D', fixture.branch]);
+	// #3409: a surviving source object is recoverable even without this branch.
+	// These legacy self-heal cases specifically exercise definite object absence.
+	git(fixture.repo, ['reflog', 'expire', '--expire=now', '--all']);
+	git(fixture.repo, ['prune', '--expire=now']);
 }
 
 describe('#2236 self-heal only when nothing is recoverable', () => {
-	test('worktree gone AND branch gone: the WAL is healed to terminal and the task unblocks', async () => {
+	test('worktree, branch AND source object gone: the WAL is healed to terminal and the task unblocks', async () => {
 		const fixture = await interruptedAfterOnBeforeMerge('heal');
 		destroyWorktreeAndBranch(fixture);
 		expect(branchExists(fixture)).toBe(false);

@@ -5,7 +5,6 @@
  * The mock replaces the BunCompatSubprocess return value so each test can exercise
  * specific exit codes and stdout/stderr strings.
  */
-
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -30,7 +29,6 @@ import type { BunCompatSubprocess } from '../../../../src/utils/bun-compat';
 // ---------------------------------------------------------------------------
 // Mock helpers
 // ---------------------------------------------------------------------------
-
 /** Saves the real bunSpawn, platform, sleep, osTmpdir, getCoreLongPaths, and fs so tests can restore them in afterEach. */
 const realBunSpawn = _internals.bunSpawn;
 const realPlatform = _internals.platform;
@@ -38,7 +36,15 @@ const realSleep = _internals.sleep;
 const realOsTmpdir = _internals.osTmpdir;
 const realGetCoreLongPaths = _internals.getCoreLongPaths;
 const realFs = _internals.fs;
-
+const realArtifactLifecycle = _internals.withSettlementArtifactLifecycle;
+const realArtifactCheck = _internals.assertSettlementArtifactsRemovable;
+function stubArtifactAdmission(): void {
+	// These fake-root fixtures isolate Git removal behavior. Real WAL admission
+	// is covered by the settlement-artifact-lifecycle/cleanup-sinks #3409 tests.
+	_internals.withSettlementArtifactLifecycle = async (_directory, operation) =>
+		operation();
+	_internals.assertSettlementArtifactsRemovable = async () => {};
+}
 /**
  * Constructs a minimal BunCompatSubprocess mock.
  * exitCode, stdout, and stderr are configurable per test.
@@ -60,7 +66,6 @@ function mockProc(
 		kill: () => {},
 	} as BunCompatSubprocess;
 }
-
 /**
  * Installs a fake bunSpawn that returns a pre-configured mockProc.
  * Subsequent calls to _internals.bunSpawn return the same mock unless
@@ -69,7 +74,6 @@ function mockProc(
 function stubSpawn(exitCode: number, stdout = '', stderr = '') {
 	_internals.bunSpawn = () => mockProc(exitCode, stdout, stderr);
 }
-
 /** Restores the real bunSpawn, platform, sleep, osTmpdir, getCoreLongPaths, and fs after every test. */
 afterEach(() => {
 	_internals.bunSpawn = realBunSpawn;
@@ -78,38 +82,34 @@ afterEach(() => {
 	_internals.osTmpdir = realOsTmpdir;
 	_internals.getCoreLongPaths = realGetCoreLongPaths;
 	_internals.fs = realFs;
+	_internals.withSettlementArtifactLifecycle = realArtifactLifecycle;
+	_internals.assertSettlementArtifactsRemovable = realArtifactCheck;
 });
-
 // ---------------------------------------------------------------------------
 // provisionWorktree
 // ---------------------------------------------------------------------------
-
 describe('provisionWorktree', () => {
 	const fakeDir = 'C:\\project-root';
 	const fakeLaneId = 'lane-1';
 	const fakeSessionId = 'ses_abc';
 	const fakeConfig = {};
-
 	test('creates worktree with correct branch name and returns worktreePath + branchName', async () => {
 		// show-ref → exit 1 (branch doesn't exist), worktree add → exit 0 (success)
 		_internals.bunSpawn = (args: string[]) => {
 			if (args.includes('show-ref')) return mockProc(1, '', '');
 			return mockProc(0, '', '');
 		};
-
 		const result = await provisionWorktree(
 			fakeDir,
 			fakeLaneId,
 			fakeSessionId,
 			fakeConfig,
 		);
-
 		expect(result).toEqual({
 			worktreePath: expect.stringContaining('swarm-worktrees'),
 			branchName: 'swarm-lane/ses_abc/lane-1',
 		} as Record<string, string>);
 	});
-
 	test('uses config.worktree_dir when provided', async () => {
 		// show-ref → exit 1 (branch doesn't exist), worktree add → exit 0 (success)
 		_internals.bunSpawn = (args: string[]) => {
@@ -232,6 +232,7 @@ branch refs/heads/${branchName}
 // ---------------------------------------------------------------------------
 
 describe('removeWorktree', () => {
+	beforeEach(stubArtifactAdmission);
 	const fakeWorktreePath = 'C:\\worktrees\\ses_abc\\lane-1';
 	const fakeProjectRoot = 'C:\\project-root';
 
@@ -979,7 +980,6 @@ describe('_internals.bunSpawn', () => {
 // ---------------------------------------------------------------------------
 // deps_strategy (FR-101 SC-101..SC-103)
 // ---------------------------------------------------------------------------
-
 describe('provisionWorktree deps_strategy', () => {
 	const fakeDir = 'C:\\project-root';
 	const fakeLaneId = 'lane-deps';

@@ -8,6 +8,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { lstat } from 'node:fs/promises';
 import { epicSentinelExists } from '../epic/lifecycle.js';
 import { commitEpicResidueAfterDelegation } from '../epic/residue-commit.js';
 import { completeBackgroundPhaseParticipation } from '../evidence/phase-participation.js';
@@ -15,6 +16,7 @@ import { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
 import {
 	abortStandardWorktreeDispatch,
 	awaitingMergeByCallID,
+	cleanupStandardWorktreeForCallId,
 	finishStandardWorktreeDispatch,
 	type StandardWorktreeDispatch,
 	standardWorktreeByCallID,
@@ -28,17 +30,21 @@ import {
 import { pushAdvisory } from '../utils/advisory-queue';
 import { sameProjectRoot } from '../utils/canonical-root.js';
 import * as logger from '../utils/logger.js';
+import { withTimeout } from '../utils/timeout.js';
 import { transferCoderSettlementToBackground } from '../workflow/coder-settlement.js';
 import {
 	GIT_OBJECT_ID_PATTERN,
 	type MergeOperationProvenance,
 } from '../worktree/merge.js';
+import { validateSettlementLane } from '../worktree/settlement-source-recovery.js';
 import {
 	acknowledgeObservedBackgroundAdvisories,
 	appendDelegationTransition,
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
 	type BackgroundTerminalResult,
+	type BackgroundWorkspaceSnapshot,
+	type BackgroundWorktreeDescriptor,
 	bindBackgroundCoderReservation,
 	buildBackgroundCompletionEventId,
 	claimCoderSettlement,
@@ -71,6 +77,7 @@ import {
 	captureWorkspaceSnapshot,
 	changedFilesSinceSnapshot,
 	resolveCurrentGitHead,
+	resolveIsWorkingTreeCleanAsync,
 } from './workspace-snapshot.js';
 
 interface ObserverConfig {
@@ -128,6 +135,7 @@ const observerInternals = {
 	commitEpicResidueAfterDelegation,
 	transferCoderSettlementToBackground,
 	markLegacyCoderSettlementTransferPending,
+	updateCoderSettlement,
 	sleep: (milliseconds: number) =>
 		new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
 };
@@ -182,7 +190,9 @@ export function createBackgroundCompletionObserver(opts: {
 		pushAdvisory(session, replacement.advisory.message);
 	};
 
-	const event = async (input: ObserverEventInput): Promise<void> => {
+	const event = async (
+		input: ObserverEventInput,
+	): Promise<undefined | false> => {
 		if (!config.enabled) return;
 		try {
 			let pending: BackgroundDelegationRecord;
@@ -444,16 +454,18 @@ export function createBackgroundCompletionObserver(opts: {
 						terminal.eventId,
 						settled.outcome,
 					);
-					return;
+					return false;
 				}
-				const legacyTransfer = await transferLegacyCoderSettlement(
-					directory,
-					record,
-				);
-				if (legacyTransfer.disposition === 'retry_pending') {
-					legacyTransferPending = true;
-				} else if (legacyTransfer.disposition === 'manual_recovery') {
-					legacyTransferRequiresManualRecovery = true;
+				if (!settled.legacyTransferred) {
+					const legacyTransfer = await transferLegacyCoderSettlement(
+						directory,
+						record,
+					);
+					if (legacyTransfer.disposition === 'retry_pending') {
+						legacyTransferPending = true;
+					} else if (legacyTransfer.disposition === 'manual_recovery') {
+						legacyTransferRequiresManualRecovery = true;
+					}
 				}
 			} else if (!isDuplicate && isBackgroundGateBearingRecord(record)) {
 				// On a duplicate event the workspace was already validated
@@ -650,6 +662,7 @@ export function createBackgroundCompletionObserver(opts: {
 			logger.warn(
 				`[background] completion observer error: ${err instanceof Error ? err.message : String(err)}`,
 			);
+			return false;
 		}
 	};
 
@@ -661,7 +674,7 @@ export function createBackgroundCompletionObserver(opts: {
 		if (!terminal) return false;
 		replayInProgress = true;
 		try {
-			await event({
+			const completion = await event({
 				event: undefined,
 				trustedTerminal: {
 					record,
@@ -670,6 +683,7 @@ export function createBackgroundCompletionObserver(opts: {
 					skipMaintenance: true,
 				},
 			});
+			if (completion === false) return false;
 			const refreshed = await findDelegationForCompletion(
 				directory,
 				record.subagentSessionId,
@@ -707,7 +721,9 @@ export function createBackgroundCompletionObserver(opts: {
 	};
 
 	return {
-		event,
+		event: async (input) => {
+			await event(input);
+		},
 		reconcilePending,
 		notifyLegacyCoderSettlementAdvisoryReplaced,
 		prepareAdvisories,
@@ -771,6 +787,27 @@ async function transferLegacyCoderSettlement(
 				'legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)',
 		};
 	}
+	if (await persistLegacyTransferMarker(directory, record, transfer)) {
+		return {
+			disposition: 'retry_pending',
+			outcome:
+				'legacy coder settlement transfer is pending; retrying durable reconciliation',
+		};
+	}
+	return {
+		disposition: 'manual_recovery',
+		outcome:
+			'legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)',
+	};
+}
+
+async function persistLegacyTransferMarker(
+	directory: string,
+	record: BackgroundDelegationRecord,
+	transfer: LegacyCoderSettlementTransfer,
+	validate?: (pending: BackgroundDelegationRecord) => boolean,
+): Promise<boolean> {
+	if (!validate && hasExactPendingLegacyTransfer(record, transfer)) return true;
 	let pending: BackgroundDelegationRecord | null = null;
 	for (let markerAttempt = 0; markerAttempt < 3; markerAttempt += 1) {
 		try {
@@ -783,23 +820,21 @@ async function transferLegacyCoderSettlement(
 		} catch {
 			pending = null;
 		}
-		if (hasExactPendingLegacyTransfer(pending, transfer)) break;
+		if (
+			hasExactPendingLegacyTransfer(pending, transfer) &&
+			pending &&
+			(!validate || validate(pending))
+		)
+			break;
 		if (markerAttempt < 2) {
 			await observerInternals.sleep(50 * (markerAttempt + 1));
 		}
 	}
-	if (hasExactPendingLegacyTransfer(pending, transfer)) {
-		return {
-			disposition: 'retry_pending',
-			outcome:
-				'legacy coder settlement transfer is pending; retrying durable reconciliation',
-		};
-	}
-	return {
-		disposition: 'manual_recovery',
-		outcome:
-			'legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)',
-	};
+	return (
+		hasExactPendingLegacyTransfer(pending, transfer) &&
+		!!pending &&
+		(!validate || validate(pending))
+	);
 }
 
 async function releaseCoderReservation(
@@ -837,6 +872,361 @@ async function releaseCoderReservation(
 	}
 }
 
+function sameWorktreeDescriptor(
+	left: BackgroundWorktreeDescriptor,
+	right: BackgroundWorktreeDescriptor,
+): boolean {
+	return (
+		left.callID === right.callID &&
+		left.parentSessionId === right.parentSessionId &&
+		left.taskId === right.taskId &&
+		left.planTaskId === right.planTaskId &&
+		sameProjectRoot(left.worktreePath, right.worktreePath) &&
+		left.branchName === right.branchName &&
+		left.worktreeId === right.worktreeId &&
+		left.worktreeSessionId === right.worktreeSessionId &&
+		left.mergeStrategy === right.mergeStrategy &&
+		left.laneIndex === right.laneIndex &&
+		left.worktreeDir === right.worktreeDir &&
+		left.reservationId === right.reservationId &&
+		left.generation === right.generation &&
+		left.landedUnstaged === right.landedUnstaged &&
+		left.provisioningOwner?.reservationId ===
+			right.provisioningOwner?.reservationId &&
+		left.provisioningOwner?.generation ===
+			right.provisioningOwner?.generation &&
+		left.provisioningOwner?.branchName === right.provisioningOwner?.branchName
+	);
+}
+
+function hasExactWorktreeIdentity(
+	record: BackgroundDelegationRecord,
+	descriptor: BackgroundWorktreeDescriptor,
+): boolean {
+	const provenance = record.coderSettlement?.provenance;
+	return !!(
+		provenance &&
+		provenance.correlationId === record.correlationId &&
+		provenance.callID === record.callID &&
+		provenance.parentSessionId === record.parentSessionId &&
+		provenance.planTaskId === record.planTaskId &&
+		descriptor.callID === record.callID &&
+		descriptor.parentSessionId === record.parentSessionId &&
+		descriptor.planTaskId === record.planTaskId &&
+		provenance.worktree &&
+		sameWorktreeDescriptor(provenance.worktree, descriptor) &&
+		sameProjectRoot(provenance.baseline.directory, descriptor.worktreePath)
+	);
+}
+
+function worktreeTrackingMatches(
+	descriptor: BackgroundWorktreeDescriptor,
+): boolean {
+	const active = standardWorktreeByCallID.get(descriptor.callID);
+	const awaiting = awaitingMergeByCallID.get(descriptor.callID);
+	return (
+		(!active ||
+			(active.callID === descriptor.callID &&
+				active.parentSessionID === descriptor.parentSessionId &&
+				active.taskId === descriptor.taskId &&
+				(active.planTaskId ?? null) === descriptor.planTaskId &&
+				sameProjectRoot(active.handle.worktreePath, descriptor.worktreePath) &&
+				active.handle.branchName === descriptor.branchName &&
+				active.handle.id === descriptor.worktreeId &&
+				active.handle.sessionId === descriptor.worktreeSessionId &&
+				active.handle.purpose === 'lane' &&
+				active.mergeStrategy === descriptor.mergeStrategy &&
+				active.laneIndex === descriptor.laneIndex &&
+				(active.worktree_dir ?? null) === descriptor.worktreeDir &&
+				active.reservationId === descriptor.reservationId &&
+				active.generation === descriptor.generation)) &&
+		(!awaiting ||
+			(awaiting.callID === descriptor.callID &&
+				awaiting.parentSessionID === descriptor.parentSessionId &&
+				awaiting.taskId === descriptor.taskId &&
+				(awaiting.planTaskId ?? null) === descriptor.planTaskId &&
+				sameProjectRoot(awaiting.worktreePath, descriptor.worktreePath) &&
+				awaiting.branch === descriptor.branchName &&
+				awaiting.mergeStrategy === descriptor.mergeStrategy &&
+				awaiting.reservationId === descriptor.reservationId &&
+				awaiting.generation === descriptor.generation))
+	);
+}
+
+function trackAwaitingWorktree(descriptor: BackgroundWorktreeDescriptor): void {
+	standardWorktreeByCallID.delete(descriptor.callID);
+	awaitingMergeByCallID.set(descriptor.callID, {
+		callID: descriptor.callID,
+		parentSessionID: descriptor.parentSessionId,
+		taskId: descriptor.taskId,
+		...(descriptor.planTaskId ? { planTaskId: descriptor.planTaskId } : {}),
+		...(descriptor.reservationId
+			? { reservationId: descriptor.reservationId }
+			: {}),
+		...(descriptor.generation !== undefined
+			? { generation: descriptor.generation }
+			: {}),
+		branch: descriptor.branchName,
+		worktreePath: descriptor.worktreePath,
+		mergeStrategy: descriptor.mergeStrategy,
+		queuedAt: Date.now(),
+	});
+}
+
+async function settlementLaneState(
+	path: string,
+): Promise<'absent' | 'directory'> {
+	try {
+		const stat = await withTimeout(
+			lstat(path),
+			5_000,
+			new Error('worktree identity inspection timed out'),
+		);
+		if (stat.isSymbolicLink() || !stat.isDirectory())
+			throw new Error('worktree path is not a direct directory');
+		return 'directory';
+	} catch (error) {
+		if (errorCode(error) === 'ENOENT') return 'absent';
+		throw error;
+	}
+}
+
+async function handoffWorktreeSettlement(
+	directory: string,
+	record: BackgroundDelegationRecord,
+): ReturnType<typeof transferLegacyCoderSettlement> {
+	if (record.planTaskId && record.status !== 'consumed') {
+		const settlement = record.coderSettlement;
+		if (
+			!settlement ||
+			(settlement.state !== 'settling' && settlement.state !== 'settled')
+		)
+			return {
+				disposition: 'manual_recovery',
+				outcome:
+					'worktree handoff has no exact settlement; manual recovery required',
+			};
+		const marked = await persistLegacyTransferMarker(
+			directory,
+			record,
+			{
+				taskId: record.planTaskId,
+				transitionId: `coder:${record.callID}`,
+			},
+			(pending) =>
+				isExactWorktreeSettlementUpdate(pending, record, {
+					operationId: settlement.operationId ?? '',
+					state: settlement.state === 'settled' ? 'settled' : 'settling',
+					sourceHeadAfterCommit: settlement.sourceHeadAfterCommit,
+					targetHeadBeforeMerge: settlement.targetHeadBeforeMerge,
+					observedFiles: settlement.observedFiles,
+					outcome: settlement.outcome,
+				}),
+		);
+		if (!marked)
+			return {
+				disposition: 'manual_recovery',
+				outcome:
+					'worktree handoff retry marker could not be persisted; manual recovery required',
+			};
+	}
+	const transferred = await transferLegacyCoderSettlement(directory, record);
+	return record.status === 'consumed' && transferred.disposition !== 'ok'
+		? {
+				disposition: 'manual_recovery',
+				outcome: 'historical worktree handoff requires manual recovery',
+			}
+		: transferred;
+}
+
+async function finishPublishedCoderWorktree(
+	directory: string,
+	record: BackgroundDelegationRecord,
+	operationId: string,
+): Promise<{
+	ok: boolean;
+	record: BackgroundDelegationRecord;
+	outcome: string;
+	legacyTransferred?: boolean;
+}> {
+	const settlement = record.coderSettlement;
+	const descriptor = record.worktree;
+	let replayScheduled = false;
+	const failure = (reason: string) => ({
+		ok: false,
+		record,
+		outcome: replayScheduled
+			? `worktree cleanup debt remains; durable reconciliation will retry: ${reason}`
+			: `worktree cleanup requires manual recovery: ${reason}`,
+	});
+	if (
+		!descriptor ||
+		!hasExactWorktreeIdentity(record, descriptor) ||
+		(settlement?.state !== 'settled' && settlement?.state !== 'settling') ||
+		settlement.operationId !== operationId ||
+		settlement.observedFiles === null ||
+		settlement.outcome?.kind !== 'standard-worktree' ||
+		!['merged', 'unchanged'].includes(settlement.outcome.result) ||
+		!settlement.sourceHeadAfterCommit ||
+		!GIT_OBJECT_ID_PATTERN.test(settlement.sourceHeadAfterCommit) ||
+		settlement.outcome.sourceHeadAfterCommit !==
+			settlement.sourceHeadAfterCommit ||
+		!settlement.targetHeadBeforeMerge ||
+		!GIT_OBJECT_ID_PATTERN.test(settlement.targetHeadBeforeMerge) ||
+		settlement.outcome.targetHeadBeforeMerge !==
+			settlement.targetHeadBeforeMerge ||
+		!worktreeTrackingMatches(descriptor)
+	)
+		return failure('durable or tracked identity mismatch');
+	try {
+		if ((await settlementLaneState(descriptor.worktreePath)) === 'directory') {
+			await validateSettlementLane(
+				descriptor.worktreePath,
+				descriptor.branchName,
+				settlement.sourceHeadAfterCommit,
+			);
+			if (
+				(await resolveIsWorkingTreeCleanAsync(descriptor.worktreePath)) !== true
+			)
+				return failure('lane is dirty or could not be inspected');
+		}
+		const handoff = await handoffWorktreeSettlement(directory, record);
+		if (handoff.disposition !== 'ok')
+			return { ok: false, record, outcome: handoff.outcome };
+		replayScheduled = record.status !== 'consumed' && !!record.planTaskId;
+		// Validate both maps again after asynchronous handoff before installing ownership.
+		if (!worktreeTrackingMatches(descriptor))
+			return failure('tracked identity changed');
+		if (settlement.state === 'settling') {
+			const input = {
+				operationId,
+				state: 'settled' as const,
+				observedFiles: settlement.observedFiles,
+				sourceHeadAfterCommit: settlement.sourceHeadAfterCommit,
+				targetHeadBeforeMerge: settlement.targetHeadBeforeMerge,
+				outcome: settlement.outcome,
+			};
+			const persisted = await observerInternals.updateCoderSettlement(
+				directory,
+				record.correlationId,
+				input,
+			);
+			if (!isExactWorktreeSettlementUpdate(persisted, record, input))
+				return failure('exact settled publication failed');
+			record = persisted;
+		}
+		if ((await settlementLaneState(descriptor.worktreePath)) === 'directory') {
+			await validateSettlementLane(
+				descriptor.worktreePath,
+				descriptor.branchName,
+				settlement.sourceHeadAfterCommit,
+			);
+			if (
+				(await resolveIsWorkingTreeCleanAsync(descriptor.worktreePath)) !== true
+			)
+				return failure('lane changed during handoff');
+		}
+		// No await may separate the final ownership check from map installation.
+		if (!worktreeTrackingMatches(descriptor))
+			return failure('tracked identity changed during validation');
+		trackAwaitingWorktree(descriptor);
+		const cleanup = await cleanupStandardWorktreeForCallId(
+			record.callID,
+			'success',
+			directory,
+			descriptor.worktreeDir ?? undefined,
+			{ retainBranch: true },
+		);
+		if ((await settlementLaneState(descriptor.worktreePath)) !== 'absent')
+			return failure(
+				cleanup.removedWorktree
+					? 'lane still exists after cleanup'
+					: 'lane removal failed',
+			);
+		return {
+			ok: true,
+			record,
+			outcome: 'completed and settled',
+			legacyTransferred: true,
+		};
+	} catch (error) {
+		return failure(
+			error instanceof Error
+				? error.message
+				: 'lane inspection or cleanup failed',
+		);
+	}
+}
+
+function sameSettlementBaseline(
+	left: BackgroundWorkspaceSnapshot,
+	right: BackgroundWorkspaceSnapshot,
+): boolean {
+	return (
+		sameProjectRoot(left.directory, right.directory) &&
+		left.gitHead === right.gitHead &&
+		left.dirtyHash === right.dirtyHash &&
+		left.prHeadSha === right.prHeadSha &&
+		left.scope === right.scope &&
+		(left.changedFiles === right.changedFiles ||
+			(!!left.changedFiles &&
+				!!right.changedFiles &&
+				left.changedFiles.length === right.changedFiles.length &&
+				left.changedFiles.every(
+					(file, index) => file === right.changedFiles?.[index],
+				)))
+	);
+}
+
+function isExactWorktreeSettlementUpdate(
+	persisted: BackgroundDelegationRecord | null,
+	record: BackgroundDelegationRecord,
+	input: Parameters<typeof updateCoderSettlement>[2],
+): persisted is BackgroundDelegationRecord {
+	const settlement = persisted?.coderSettlement;
+	const originalProvenance = record.coderSettlement?.provenance;
+	const descriptor = record.worktree;
+	const expectedOutcome = input.outcome;
+	const actualOutcome = settlement?.outcome;
+	return !!(
+		persisted &&
+		descriptor &&
+		persisted.worktree &&
+		persisted.correlationId === record.correlationId &&
+		sameWorktreeDescriptor(persisted.worktree, descriptor) &&
+		hasExactWorktreeIdentity(persisted, descriptor) &&
+		originalProvenance &&
+		settlement &&
+		sameSettlementBaseline(
+			settlement.provenance.baseline,
+			originalProvenance.baseline,
+		) &&
+		settlement?.state === input.state &&
+		settlement.operationId === input.operationId &&
+		(input.sourceHeadAfterCommit === undefined ||
+			settlement.sourceHeadAfterCommit === input.sourceHeadAfterCommit) &&
+		(input.targetHeadBeforeMerge === undefined ||
+			settlement.targetHeadBeforeMerge === input.targetHeadBeforeMerge) &&
+		input.observedFiles &&
+		settlement.observedFiles &&
+		input.observedFiles.length === settlement.observedFiles.length &&
+		input.observedFiles.every((file) =>
+			settlement.observedFiles?.includes(file),
+		) &&
+		(!expectedOutcome ||
+			(actualOutcome &&
+				actualOutcome.kind === expectedOutcome.kind &&
+				actualOutcome.result === expectedOutcome.result &&
+				actualOutcome.reason === expectedOutcome.reason &&
+				actualOutcome.sourceHeadAfterCommit ===
+					expectedOutcome.sourceHeadAfterCommit &&
+				actualOutcome.targetHeadBeforeMerge ===
+					expectedOutcome.targetHeadBeforeMerge &&
+				actualOutcome.targetHeadAfterMerge ===
+					expectedOutcome.targetHeadAfterMerge))
+	);
+}
+
 async function settleCoder(
 	directory: string,
 	record: BackgroundDelegationRecord,
@@ -845,7 +1235,13 @@ async function settleCoder(
 	ok: boolean;
 	record: BackgroundDelegationRecord;
 	outcome: string;
+	legacyTransferred?: boolean;
 }> {
+	// Closed summaries deliberately omit taskChangeContext. Their immutable
+	// settlement provenance is sufficient for cleanup-only replay, never a merge.
+	if (record.coderSettlement?.state === 'settled' && record.worktree) {
+		return finishPublishedCoderWorktree(directory, record, operationId);
+	}
 	const context = record.taskChangeContext;
 	if (!context) {
 		return { ok: false, record, outcome: 'stale: no coder baseline' };
@@ -859,12 +1255,19 @@ async function settleCoder(
 		return { ok: false, record, outcome: 'settlement claim failed' };
 	}
 	if (claim.disposition === 'settled') {
-		return { ok: true, record: claim.record, outcome: 'completed and settled' };
+		return claim.record.worktree
+			? finishPublishedCoderWorktree(directory, claim.record, operationId)
+			: { ok: true, record: claim.record, outcome: 'completed and settled' };
 	}
 	if (claim.disposition === 'preserved') {
 		return { ok: false, record: claim.record, outcome: 'settlement preserved' };
 	}
 	record = claim.record;
+	if (record.worktree && record.coderSettlement?.outcome) {
+		// A durable successful post-Git receipt authorizes only handoff,
+		// terminal publication and cleanup; never invoke the merge adapter again.
+		return finishPublishedCoderWorktree(directory, record, operationId);
+	}
 
 	if (!record.worktree) {
 		const baseline = context.baseline;
@@ -892,7 +1295,7 @@ async function settleCoder(
 						? 'shared-root coder files could not be attributed to a non-empty declared scope'
 						: null;
 		if (staleReason || observedFiles === null) {
-			const preserved = await updateCoderSettlement(
+			const preserved = await observerInternals.updateCoderSettlement(
 				directory,
 				record.correlationId,
 				{
@@ -919,7 +1322,7 @@ async function settleCoder(
 				outcome: `stale: ${staleReason ?? 'coder attribution failed'}`,
 			};
 		}
-		const settled = await updateCoderSettlement(
+		const settled = await observerInternals.updateCoderSettlement(
 			directory,
 			record.correlationId,
 			{
@@ -936,12 +1339,11 @@ async function settleCoder(
 
 	const descriptor = record.worktree;
 	if (
-		descriptor.callID !== record.callID ||
-		descriptor.parentSessionId !== record.parentSessionId ||
-		descriptor.planTaskId !== record.planTaskId ||
-		!sameProjectRoot(context.baseline.directory, descriptor.worktreePath)
+		!hasExactWorktreeIdentity(record, descriptor) ||
+		!sameProjectRoot(context.baseline.directory, descriptor.worktreePath) ||
+		!worktreeTrackingMatches(descriptor)
 	) {
-		const preserved = await updateCoderSettlement(
+		const preserved = await observerInternals.updateCoderSettlement(
 			directory,
 			record.correlationId,
 			{
@@ -961,12 +1363,14 @@ async function settleCoder(
 			outcome: 'worktree settlement preserved: identity mismatch',
 		};
 	}
-	const observedFiles = changedFilesSinceSnapshot(
-		descriptor.worktreePath,
-		context.baseline,
-	);
+	const resume = settlementResume(record);
+	// Once the source was committed, the pre-merge list is authoritative. Reading
+	// the lane after Git succeeds would lose its mutation attribution on replay.
+	const observedFiles = resume
+		? (record.coderSettlement?.observedFiles ?? null)
+		: changedFilesSinceSnapshot(descriptor.worktreePath, context.baseline);
 	if (observedFiles === null) {
-		const preserved = await updateCoderSettlement(
+		const preserved = await observerInternals.updateCoderSettlement(
 			directory,
 			record.correlationId,
 			{
@@ -1006,19 +1410,14 @@ async function settleCoder(
 		laneIndex: descriptor.laneIndex,
 		...(descriptor.worktreeDir ? { worktree_dir: descriptor.worktreeDir } : {}),
 	};
-	standardWorktreeByCallID.delete(record.callID);
-	awaitingMergeByCallID.set(record.callID, {
-		callID: record.callID,
-		parentSessionID: descriptor.parentSessionId,
-		taskId: descriptor.taskId,
-		...(descriptor.planTaskId ? { planTaskId: descriptor.planTaskId } : {}),
-		branch: descriptor.branchName,
-		worktreePath: descriptor.worktreePath,
-		mergeStrategy: descriptor.mergeStrategy,
-		queuedAt: Date.now(),
-	});
-
-	const resume = settlementResume(record);
+	if (!worktreeTrackingMatches(descriptor))
+		return {
+			ok: false,
+			record,
+			outcome: 'worktree settlement preserved: tracked identity changed',
+		};
+	trackAwaitingWorktree(descriptor);
+	let handoffFailure: string | undefined;
 	const mergeResult = await finishStandardWorktreeDispatch(
 		directory,
 		dispatch,
@@ -1028,59 +1427,109 @@ async function settleCoder(
 			operationId,
 			...(resume ? { resume } : {}),
 			onBeforeMerge: async (provenance) => {
-				const persisted = await updateCoderSettlement(
+				const input = {
+					operationId,
+					state: 'settling' as const,
+					sourceHeadAfterCommit: provenance.sourceHead,
+					targetHeadBeforeMerge: provenance.targetHeadBefore,
+					observedFiles,
+				};
+				const persisted = await observerInternals.updateCoderSettlement(
 					directory,
 					record.correlationId,
-					{
-						operationId,
-						state: 'settling',
-						sourceHeadAfterCommit: provenance.sourceHead,
-						targetHeadBeforeMerge: provenance.targetHeadBefore,
-						observedFiles,
-					},
+					input,
 				);
-				if (!persisted)
+				if (!isExactWorktreeSettlementUpdate(persisted, record, input))
 					throw new Error('could not persist pre-merge provenance');
 				record = persisted;
 			},
 			onMerged: async (merged) => {
 				const provenance = merged.provenance ?? resume;
-				const persisted = await updateCoderSettlement(
+				const priorOutcome = record.coderSettlement?.outcome;
+				if (
+					priorOutcome &&
+					(priorOutcome.kind !== 'standard-worktree' ||
+						!['merged', 'unchanged'].includes(priorOutcome.result) ||
+						priorOutcome.sourceHeadAfterCommit !== provenance?.sourceHead ||
+						priorOutcome.targetHeadBeforeMerge !== provenance?.targetHeadBefore)
+				)
+					throw new Error(
+						'persisted merge outcome does not match immutable operation',
+					);
+				// Preserve the first post-Git receipt when a later invocation resumes
+				// after handoff or terminal publication failed.
+				const input = {
+					operationId,
+					state: 'settling' as const,
+					observedFiles,
+					...(provenance
+						? {
+								sourceHeadAfterCommit: provenance.sourceHead,
+								targetHeadBeforeMerge: provenance.targetHeadBefore,
+							}
+						: {}),
+					outcome: priorOutcome ?? {
+						kind: 'standard-worktree' as const,
+						result:
+							provenance &&
+							provenance.sourceHead !== provenance.targetHeadBefore
+								? ('merged' as const)
+								: ('unchanged' as const),
+						sourceHeadAfterCommit: provenance?.sourceHead ?? null,
+						targetHeadBeforeMerge: provenance?.targetHeadBefore ?? null,
+						targetHeadAfterMerge: resolveCurrentGitHead(directory),
+					},
+				};
+				const attributed = await observerInternals.updateCoderSettlement(
 					directory,
 					record.correlationId,
-					{
-						operationId,
-						state: 'settled',
-						observedFiles,
-						...(provenance
-							? {
-									sourceHeadAfterCommit: provenance.sourceHead,
-									targetHeadBeforeMerge: provenance.targetHeadBefore,
-								}
-							: {}),
-						outcome: {
-							kind: 'standard-worktree',
-							result:
-								provenance &&
-								provenance.sourceHead !== provenance.targetHeadBefore
-									? 'merged'
-									: 'unchanged',
-							sourceHeadAfterCommit: provenance?.sourceHead ?? null,
-							targetHeadBeforeMerge: provenance?.targetHeadBefore ?? null,
-							targetHeadAfterMerge: resolveCurrentGitHead(directory),
-						},
-					},
+					input,
 				);
-				if (!persisted) throw new Error('could not persist merged settlement');
+				if (!isExactWorktreeSettlementUpdate(attributed, record, input))
+					throw new Error('could not persist exact merged attribution');
+				record = attributed;
+				const handoff = await handoffWorktreeSettlement(directory, record);
+				if (handoff.disposition !== 'ok') {
+					handoffFailure = handoff.outcome;
+					throw new Error(handoff.outcome);
+				}
+				const terminalInput = { ...input, state: 'settled' as const };
+				const persisted = await observerInternals.updateCoderSettlement(
+					directory,
+					record.correlationId,
+					terminalInput,
+				);
+				if (!isExactWorktreeSettlementUpdate(persisted, record, terminalInput))
+					throw new Error('could not persist exact merged settlement');
 				record = persisted;
+				if (!worktreeTrackingMatches(descriptor))
+					throw new Error('tracked identity changed before cleanup');
 			},
 		},
 	);
 	if (mergeResult.outcome === 'merged') {
+		const cleanupDebt = record.planTaskId
+			? 'worktree cleanup debt remains; durable reconciliation will retry'
+			: 'worktree cleanup requires manual recovery';
+		try {
+			if ((await settlementLaneState(descriptor.worktreePath)) !== 'absent')
+				return { ok: false, record, outcome: cleanupDebt };
+		} catch {
+			return {
+				ok: false,
+				record,
+				outcome: `${cleanupDebt}; removal could not be verified`,
+			};
+		}
 		const latest =
 			(await findDelegationForCompletion(directory, record.correlationId))
 				?.record ?? record;
-		return { ok: true, record: latest, outcome: 'completed and merged' };
+		return {
+			ok: true,
+			record: latest,
+			outcome: 'completed and merged',
+			legacyTransferred: true,
+		};
 	}
 	if (
 		mergeResult.outcome === 'failed' &&
@@ -1089,10 +1538,11 @@ async function settleCoder(
 		return {
 			ok: false,
 			record,
-			outcome: 'worktree settlement persistence pending retry',
+			outcome:
+				handoffFailure ?? 'worktree settlement persistence pending retry',
 		};
 	}
-	const preserved = await updateCoderSettlement(
+	const preserved = await observerInternals.updateCoderSettlement(
 		directory,
 		record.correlationId,
 		{

@@ -289,11 +289,11 @@ describe('workflow state-conflict error diagnostics — #2202 recovery errors', 
 	test('CODER_SETTLEMENT_RECOVERY_UNCERTAIN (landed-merge reconcile failure) names task, transition, WAL path, state and recovery command', async () => {
 		const head = initCleanRepo();
 		// Pre-set observedFiles: attribution had already succeeded before the
-		// crash, so recovery proceeds straight to merge reconciliation. The
-		// provenance names well-formed but nonexistent object ids, so
-		// reconcileLandedMerge's real `git merge-base --is-ancestor` exits 128
-		// and the landed.error branch (not a synthetic stub) produces the
-		// recovery-uncertain error.
+		// crash, so recovery proceeds straight to merge reconciliation.
+		// The source commit is still present, but the recorded target is absent.
+		// Cherry-pick reconciliation reaches its real `git log <target>..HEAD`
+		// probe, which fails on that target OID and produces the recovery-uncertain
+		// error through the landed.error branch (not a synthetic stub).
 		const walPath = writeWal('coder-settlements', '4.7', {
 			version: 1,
 			state: 'DISPATCHED',
@@ -307,10 +307,10 @@ describe('workflow state-conflict error diagnostics — #2202 recovery errors', 
 			observedFiles: ['src/feature.ts'],
 			mergeProvenance: {
 				operationId: 'coder:4.7:2',
-				sourceHead: '1234567890abcdef1234567890abcdef12345678',
-				targetHeadBefore: 'fedcba0987654321fedcba0987654321fedcba09',
+				sourceHead: head,
+				targetHeadBefore: '1234567890abcdef1234567890abcdef12345678',
 				branchName: 'swarm/lane-4.7',
-				strategy: 'merge',
+				strategy: 'cherry-pick',
 			},
 			context: {
 				declaredFiles: ['src/feature.ts'],
@@ -332,7 +332,7 @@ describe('workflow state-conflict error diagnostics — #2202 recovery errors', 
 				branchName: 'swarm/lane-4.7',
 				worktreeId: 'wt-4.7',
 				worktreeSessionId: 'sess-wt-4.7',
-				mergeStrategy: 'merge',
+				mergeStrategy: 'cherry-pick',
 				laneIndex: 0,
 				worktreeDir: null,
 			},

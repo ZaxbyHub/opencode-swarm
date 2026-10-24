@@ -25,6 +25,16 @@ import {
 } from '../utils/git-binary-missing-error';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import { autoCommitDirty, cleanUntrackedFiles } from './core';
+import {
+	assertSettlementArtifactsRemovable,
+	withSettlementArtifactLifecycle,
+} from './settlement-artifact-lifecycle';
+import {
+	preserveSettlementSource,
+	probeSettlementSource,
+	releaseSettlementSource,
+	restoreSettlementBranch,
+} from './settlement-source-recovery';
 import type { MergeStrategy } from './types';
 
 // ---------------------------------------------------------------------------
@@ -40,6 +50,8 @@ import type { MergeStrategy } from './types';
  * local object is file-scoped and trivially restorable via `afterEach`.
  */
 export const _internals: {
+	withSettlementArtifactLifecycle: typeof withSettlementArtifactLifecycle;
+	assertSettlementArtifactsRemovable: typeof assertSettlementArtifactsRemovable;
 	bunSpawn: typeof bunSpawn;
 	/** Test seam for process.platform — allows non-Windows CIs to exercise Windows paths. */
 	platform: string;
@@ -60,6 +72,8 @@ export const _internals: {
 	 */
 	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
+	withSettlementArtifactLifecycle,
+	assertSettlementArtifactsRemovable,
 	bunSpawn,
 	platform: process.platform,
 	sleep: (ms: number) =>
@@ -1235,10 +1249,13 @@ async function readOrderedCommitRange(
  * operate on mutable branch refs, verifies that the captured lane ancestry is
  * coherent, and fails closed if the current primary checkout no longer
  * descends from the captured target head.
+ * Explicit landing messages retain the ordinary committed-merge policy;
+ * callers that omit options keep the existing plain Git merge behavior.
  */
 export async function recoverMergeBackFromImmutableCoordinates(
 	primaryDir: string,
 	coordinates: ImmutableMergeRecoveryCoordinates,
+	options?: Pick<DirtyMergeOptions, 'landingCommitMessage'>,
 ): Promise<ImmutableMergeRecoveryResult> {
 	if (
 		!GIT_OBJECT_ID_PATTERN.test(coordinates.sourceBaseOid) ||
@@ -1316,14 +1333,11 @@ export async function recoverMergeBackFromImmutableCoordinates(
 	}
 
 	if (coordinates.strategy === 'merge') {
-		return finalizeMergeStrategyResult(
+		return mergeLaneBranch(
 			primaryDir,
+			coordinates.sourceHeadOid,
 			'merge',
-			await runGit(
-				['merge', '--no-edit', coordinates.sourceHeadOid],
-				primaryDir,
-			),
-			{},
+			options?.landingCommitMessage,
 		);
 	}
 
@@ -1510,38 +1524,53 @@ export async function postMergeCleanup(
 	directory: string,
 	branchName: string,
 ): Promise<CleanupSuccess | CleanupFailure> {
-	// Prune stale worktree metadata FIRST (DD-9, #2236 BR-2).
-	//
-	// Order is load-bearing, not cosmetic: git refuses `branch -d/-D` for a
-	// branch that a *registered* worktree still claims — including a worktree
-	// whose directory has already been deleted — with
-	// `error: cannot delete branch 'X' used by worktree at ...`. Pruning after
-	// the delete leaves the branch alive, which then trips
-	// CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED and reproduces the #2236
-	// deadlock under a different message. Verified empirically on git 2.54.
-	const pruneResult = await runGit(['worktree', 'prune'], directory);
-	const pruneOk = pruneResult.exitCode === 0;
+	try {
+		return await _internals.withSettlementArtifactLifecycle(
+			directory,
+			async () => {
+				await _internals.assertSettlementArtifactsRemovable(directory, {
+					branch: branchName,
+				});
+				// Prune stale worktree metadata FIRST (DD-9, #2236 BR-2).
+				//
+				// Order is load-bearing, not cosmetic: git refuses `branch -d/-D` for a
+				// branch that a *registered* worktree still claims — including a worktree
+				// whose directory has already been deleted — with
+				// `error: cannot delete branch 'X' used by worktree at ...`. Pruning after
+				// the delete leaves the branch alive, which then trips
+				// CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED and reproduces the #2236
+				// deadlock under a different message. Verified empirically on git 2.54.
+				const pruneResult = await runGit(['worktree', 'prune'], directory);
+				const pruneOk = pruneResult.exitCode === 0;
 
-	// Delete the lane branch (DD-9)
-	const deleteResult = await runGit(['branch', '-D', branchName], directory);
-	const deleteOk = deleteResult.exitCode === 0;
+				// Delete the lane branch (DD-9)
+				const deleteResult = await runGit(
+					['branch', '-D', branchName],
+					directory,
+				);
+				const deleteOk = deleteResult.exitCode === 0;
 
-	if (deleteOk && pruneOk) {
-		return { cleaned: true };
+				if (deleteOk && pruneOk) {
+					return { cleaned: true };
+				}
+
+				if (!deleteOk && pruneOk) {
+					return {
+						error: `Branch delete failed: ${deleteResult.stderr.trim() || deleteResult.stdout.trim()}`,
+						partial: true,
+					};
+				}
+
+				return {
+					error: deleteOk
+						? `Worktree prune failed: ${pruneResult.stderr.trim() || pruneResult.stdout.trim()}`
+						: `Branch delete failed: ${deleteResult.stderr.trim() || deleteResult.stdout.trim()}; worktree prune failed: ${pruneResult.stderr.trim() || pruneResult.stdout.trim()}`,
+				};
+			},
+		);
+	} catch (error) {
+		return { error: String(error) };
 	}
-
-	if (!deleteOk && pruneOk) {
-		return {
-			error: `Branch delete failed: ${deleteResult.stderr.trim() || deleteResult.stdout.trim()}`,
-			partial: true,
-		};
-	}
-
-	return {
-		error: deleteOk
-			? `Worktree prune failed: ${pruneResult.stderr.trim() || pruneResult.stdout.trim()}`
-			: `Branch delete failed: ${deleteResult.stderr.trim() || deleteResult.stdout.trim()}; worktree prune failed: ${pruneResult.stderr.trim() || pruneResult.stdout.trim()}`,
-	};
 }
 
 /**
@@ -1861,6 +1890,37 @@ export async function attemptMergeBackFromDirty(
 			};
 		}
 
+		let orphanRestored = false;
+		try {
+			if (
+				(await probeSettlementSource(primaryDir, provenance.sourceHead)) ===
+				'absent'
+			) {
+				return {
+					failed: true,
+					stage: SOURCE_WORKTREE_GONE_STAGE,
+					message: 'Recorded source commit is absent',
+					provenance,
+				};
+			}
+		} catch (error) {
+			return {
+				failed: true,
+				stage: 'reconciliation',
+				message: String(error),
+				provenance,
+			};
+		}
+		try {
+			await preserveSettlementSource(primaryDir, provenance.sourceHead);
+		} catch (error) {
+			return {
+				failed: true,
+				stage: 'reconciliation',
+				message: String(error),
+				provenance,
+			};
+		}
 		const reconciliation = await reconcileLandedMerge(primaryDir, provenance);
 		if ('error' in reconciliation && reconciliation.error) {
 			return {
@@ -1871,6 +1931,18 @@ export async function attemptMergeBackFromDirty(
 			};
 		}
 		if (reconciliation.landed) {
+			if (reconciliation.method !== 'worktree-match') {
+				try {
+					await releaseSettlementSource(primaryDir, provenance.sourceHead);
+				} catch (error) {
+					return {
+						failed: true,
+						stage: 'reconciliation',
+						message: String(error),
+						provenance,
+					};
+				}
+			}
 			return {
 				merged: true,
 				// #2508: a worktree-match reconciliation means the earlier
@@ -1888,6 +1960,20 @@ export async function attemptMergeBackFromDirty(
 			};
 		}
 
+		try {
+			orphanRestored = await restoreSettlementBranch(
+				primaryDir,
+				branchName,
+				provenance.sourceHead,
+			);
+		} catch (error) {
+			return {
+				failed: true,
+				stage: 'reconciliation',
+				message: String(error),
+				provenance,
+			};
+		}
 		// #2236 BR-1: the guard below is RELOCATED, not skipped, when the lane
 		// worktree is gone — its `sourceHead`/`targetHead` comparison is the
 		// only thing stopping a stale-provenance merge, and this is the only
@@ -1914,8 +2000,7 @@ export async function attemptMergeBackFromDirty(
 		if (
 			sourceHead.exitCode !== 0 ||
 			targetHead.exitCode !== 0 ||
-			sourceHead.stdout.trim() !== provenance.sourceHead ||
-			targetHead.stdout.trim() !== provenance.targetHeadBefore
+			sourceHead.stdout.trim() !== provenance.sourceHead
 		) {
 			return {
 				failed: true,
@@ -1925,6 +2010,86 @@ export async function attemptMergeBackFromDirty(
 				provenance,
 			};
 		}
+
+		if (
+			strategy === 'merge' &&
+			(orphanRestored ||
+				targetHead.stdout.trim() !== provenance.targetHeadBefore)
+		) {
+			const relation = await runGit(
+				[
+					'merge-base',
+					'--is-ancestor',
+					provenance.targetHeadBefore,
+					targetHead.stdout.trim(),
+				],
+				primaryDir,
+			);
+			if (relation.exitCode !== 0)
+				return {
+					failed: true,
+					stage: 'reconciliation',
+					message:
+						'Current primary HEAD no longer descends from recorded target',
+					provenance,
+				};
+			const base = await runGit(
+				['merge-base', targetHead.stdout.trim(), provenance.sourceHead],
+				primaryDir,
+			);
+			if (base.exitCode !== 0)
+				return {
+					failed: true,
+					stage: 'reconciliation',
+					message: 'Unable to derive current immutable merge base',
+					provenance,
+				};
+			const result = await recoverMergeBackFromImmutableCoordinates(
+				primaryDir,
+				{
+					sourceBaseOid: base.stdout.trim(),
+					sourceHeadOid: provenance.sourceHead,
+					targetHeadOid: targetHead.stdout.trim(),
+					strategy,
+				},
+				options.commitLanding
+					? { landingCommitMessage: options.landingCommitMessage }
+					: undefined,
+			);
+			if ('merged' in result) {
+				try {
+					await releaseSettlementSource(primaryDir, provenance.sourceHead);
+				} catch (error) {
+					return {
+						failed: true,
+						stage: 'reconciliation',
+						message: String(error),
+						provenance,
+					};
+				}
+				return {
+					merged: true,
+					strategy,
+					autoCommitted: false,
+					cleaned: false,
+					reconciled: false,
+					provenance,
+				};
+			}
+			return {
+				failed: true,
+				stage: 'merge',
+				message: 'error' in result ? result.error : result.message,
+				provenance,
+			};
+		}
+		if (targetHead.stdout.trim() !== provenance.targetHeadBefore)
+			return {
+				failed: true,
+				stage: 'reconciliation',
+				message: 'Stored merge operation target HEAD has changed',
+				provenance,
+			};
 	}
 
 	// Step 1: Auto-commit dirty state.
@@ -2094,6 +2259,21 @@ export async function attemptMergeBackFromDirty(
 	);
 
 	if ('merged' in mergeResult && mergeResult.merged) {
+		if (provenance && landingStrategy !== 'squash-unstaged') {
+			const landed = await reconcileLandedMerge(primaryDir, provenance);
+			if (landed.landed && landed.method !== 'worktree-match') {
+				try {
+					await releaseSettlementSource(primaryDir, provenance.sourceHead);
+				} catch (error) {
+					return {
+						failed: true,
+						stage: 'reconciliation',
+						message: String(error),
+						provenance,
+					};
+				}
+			}
+		}
 		return {
 			merged: true,
 			strategy: landingStrategy,
@@ -2265,10 +2445,25 @@ export async function cleanupOrphanedBranches(
 		// Startup recovery is unattended: use non-forced deletion so Git preserves
 		// a branch with commits not reachable from HEAD. Explicit reset flows keep
 		// the historical force-delete behavior unless they opt into preservation.
-		const deleteResult = await runGit(
-			['branch', options.preserveUnmerged ? '-d' : '-D', branch],
-			directory,
-		);
+		let deleteResult: GitResult;
+		try {
+			deleteResult = await _internals.withSettlementArtifactLifecycle(
+				directory,
+				async () => {
+					await _internals.assertSettlementArtifactsRemovable(directory, {
+						branch,
+					});
+					return runGit(
+						['branch', options.preserveUnmerged ? '-d' : '-D', branch],
+						directory,
+					);
+				},
+			);
+		} catch (error) {
+			skipped.push(branch);
+			errors.push({ branch, error: String(error) });
+			continue;
+		}
 
 		if (deleteResult.exitCode === 0) {
 			removed.push(branch);

@@ -2473,10 +2473,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/workflow/coder-settlement.ts', 'src/workflow/task-repair.ts'],
 		writerCitations: [
-			'src/workflow/coder-settlement.ts:102 writeWal — per-task lock (withSettlementLock), atomic, state machine DISPATCHED→PREPARED→COMMITTED/ABORTED; MAX_LIVE_DISPATCHES 512 in-process (:54)',
+			'src/workflow/coder-settlement.ts:109 writeWal — per-task lock (withSettlementLock), atomic, state machine DISPATCHED→PREPARED→COMMITTED/ABORTED; MAX_LIVE_DISPATCHES 512 in-process (:65)',
 			'src/workflow/task-repair.ts:168 writeWal — plan-lock-scoped recovery, verified audit append (:196-238)',
 		],
-		readerCitations: ['coder-settlement.ts:72 readWal / task-repair.ts:155 readWal — single-file per task'],
+		readerCitations: ['coder-settlement.ts:79 readWal / task-repair.ts:155 readWal — single-file per task'],
 		schemaVersion: 'WAL state machines',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
@@ -3557,13 +3557,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '<worktree>/.swarm/lanes/{laneIndex}.env',
 		canonicalRoot: 'worktree',
 		writerModules: ['src/worktree/core.ts'],
-		writerCitations: ['src/worktree/core.ts:181 writeLaneProfileToDiskReal (fs.promises.writeFile :210); :226 removeLaneProfileFromDiskReal'],
+		writerCitations: ['src/worktree/core.ts:189 writeLaneProfileToDiskReal (fs.promises.writeFile :218); :234 removeLaneProfileFromDiskReal'],
 		readerCitations: ['consumed by child processes (no plugin reader)'],
 		schemaVersion: 'env key=value',
 		stateClass: 'operational',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'one bounded env file per lane per worktree; removed at lane teardown (:219)',
+			bound: 'one bounded env file per lane per worktree; removed at lane teardown (:234)',
 			scope: 'per-key',
 			keyspaceBound:
 				'FINITE BY CONCURRENCY PLUS TEARDOWN — but NOT by the constant one would reach for: MAX_LANES=8 (src/tools/dispatch-lanes.ts:92) governs the unrelated dispatch_lanes fan-out tool and is not on this path (its only uses are src/tools/dispatch-lanes.ts:471,491,1045,1678). allocateStandardLaneIndex is monotonic per session with no clamp and no recycling (src/hooks/delegation-gate/worktree-isolation.ts:189), so the set of index VALUES ever issued grows with dispatch count — that is not the bound. The bound is that each {laneIndex}.env lives INSIDE its own worktree (src/worktree/core.ts:202-203, provisioned per session/task at :674-678): concurrently live worktrees sit under MAX_TRACKED_STANDARD_WORKTREE_CALLS=256 above a max_concurrent_tasks ceiling clamped to <=64 (src/hooks/delegation-gate/worktree-isolation.ts:166-173), each file is unlinked at lane teardown (src/worktree/core.ts:219-238), and re-dispatching the same taskId removes the prior worktree wholesale before recreating it (src/worktree/core.ts:863-892). Crash-orphaned worktrees are swept by a global reaper, runInitOrphanRecovery (src/hooks/init-orphan-recovery.ts:200-224, wired at src/index.ts:914). CAVEAT (verified, do not soften): that sweep runs only at plugin init, is timeout-wrapped and non-fatal (src/hooks/init-orphan-recovery.ts:54; src/index.ts:914-918), and enumerates only the default .swarm-worktrees base (src/hooks/init-orphan-recovery.ts:206-209) — worktrees provisioned under a custom worktree_dir (src/worktree/core.ts:581-582) fall outside its scan root entirely and are reclaimed only by their own teardown path.',

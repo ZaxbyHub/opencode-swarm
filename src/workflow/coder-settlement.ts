@@ -32,6 +32,13 @@ import {
 	reconcileLandedMerge,
 	SOURCE_WORKTREE_GONE_STAGE,
 } from '../worktree/merge.js';
+import { withSettlementArtifactLifecycle } from '../worktree/settlement-artifact-lifecycle.js';
+import {
+	preserveSettlementSource,
+	probeSettlementSource,
+	releaseSettlementSource,
+	validateSettlementLane,
+} from '../worktree/settlement-source-recovery.js';
 import {
 	readWorkflowWalFile,
 	writeWorkflowWalFile,
@@ -453,31 +460,55 @@ export async function beginCoderSettlement(options: {
 							return;
 						}
 					}
-					await transaction.transition({
-						type: 'dispatch_attempted',
-						agentType: 'coder',
-						expectedGeneration: options.expectedGeneration,
-						transitionId: options.transitionId,
-					});
-					await writeWal(filePath, {
-						version: 1,
-						state: 'DISPATCHED',
-						taskId: options.taskId,
-						transitionId: options.transitionId,
-						actor: options.actor,
-						processId: process.pid,
-						runtimeId,
-						expectedGeneration: options.expectedGeneration,
-						context: options.context,
-						...(options.worktree ? { worktree: options.worktree } : {}),
-						recordedAt: new Date().toISOString(),
-					});
-					ownsActiveDispatch = true;
-					await appendSettlementEvent(options.directory, 'dispatched', {
-						taskId: options.taskId,
-						transitionId: options.transitionId,
-						actor: options.actor,
-					});
+					const publish = async () => {
+						if (options.worktree) {
+							if (
+								canonicalRootKeyFresh(options.context.baseline.directory) !==
+									canonicalRootKeyFresh(options.worktree.worktreePath) ||
+								options.context.baseline.gitHead === null
+							) {
+								throw new Error('CODER_SETTLEMENT_DISPATCH_ARTIFACT_CHANGED');
+							}
+							await _internals.validateSettlementLane(
+								options.worktree.worktreePath,
+								options.worktree.branchName,
+								options.context.baseline.gitHead,
+							);
+						}
+						await transaction.transition({
+							type: 'dispatch_attempted',
+							agentType: 'coder',
+							expectedGeneration: options.expectedGeneration,
+							transitionId: options.transitionId,
+						});
+						await writeWal(filePath, {
+							version: 1,
+							state: 'DISPATCHED',
+							taskId: options.taskId,
+							transitionId: options.transitionId,
+							actor: options.actor,
+							processId: process.pid,
+							runtimeId,
+							expectedGeneration: options.expectedGeneration,
+							context: options.context,
+							...(options.worktree ? { worktree: options.worktree } : {}),
+							recordedAt: new Date().toISOString(),
+						});
+						ownsActiveDispatch = true;
+						await appendSettlementEvent(options.directory, 'dispatched', {
+							taskId: options.taskId,
+							transitionId: options.transitionId,
+							actor: options.actor,
+						});
+					};
+					if (options.worktree) {
+						await _internals.withSettlementArtifactLifecycle(
+							options.directory,
+							publish,
+						);
+					} else {
+						await publish();
+					}
 				},
 			),
 	);
@@ -912,6 +943,33 @@ async function cleanupRecoveredWorktree(
 	}
 }
 
+async function preserveHistoricalSelfHealedSource(
+	directory: string,
+	wal: CoderSettlementWal,
+): Promise<void> {
+	if (
+		wal.state !== 'ABORTED' ||
+		!wal.abortReason?.startsWith(
+			'CODER_SETTLEMENT_SELF_HEALED_MISSING_WORKTREE',
+		) ||
+		!wal.mergeProvenance ||
+		(await probeSettlementSource(directory, wal.mergeProvenance.sourceHead)) !==
+			'present'
+	)
+		return;
+	const source = wal.mergeProvenance.sourceHead;
+	const backup = await preserveSettlementSource(directory, source);
+	const landed = await reconcileLandedMerge(directory, wal.mergeProvenance);
+	if (landed.landed && landed.method !== 'worktree-match') {
+		await releaseSettlementSource(directory, source);
+		return;
+	}
+	const message = `RECOVERABLE_ORPHAN_COMMIT: historical aborted task ${wal.taskId} source ${source} is retained at ${backup}; apply it explicitly after reviewing the current task generation. The settlement remains ABORTED.`;
+	logger.criticalWarn(message);
+	advisoryWarn(message);
+	throw new Error(message);
+}
+
 export async function completeCoderSettlementCleanup(
 	directory: string,
 	taskId: string,
@@ -927,6 +985,7 @@ export async function completeCoderSettlementCleanup(
 		if (wal.state !== 'COMMITTED' && wal.state !== 'ABORTED') {
 			throw new Error('CODER_SETTLEMENT_NOT_COMMITTED');
 		}
+		await preserveHistoricalSelfHealedSource(directory, wal);
 		if (!wal.worktree || wal.cleanupComplete === true) return;
 		await cleanupRecoveredWorktree(directory, wal.worktree);
 		await writeWal(filePath, { ...wal, cleanupComplete: true });
@@ -962,6 +1021,16 @@ async function selfHealMissingLaneWorktree(
 	// Throws CODER_SETTLEMENT_CLEANUP_UNCERTAIN (or the raw spawn error) when
 	// git cannot answer — intentionally NOT caught.
 	if (_internals.branchExists(directory, descriptor.branchName)) return false;
+	const currentWal = await readWal(filePath, taskId);
+	if (currentWal?.mergeProvenance) {
+		const source = currentWal.mergeProvenance.sourceHead;
+		if ((await probeSettlementSource(directory, source)) === 'present') {
+			const backup = await preserveSettlementSource(directory, source);
+			throw new Error(
+				`RECOVERABLE_ORPHAN_COMMIT: task ${taskId} source ${source} is retained at ${backup}; settlement remains pending.`,
+			);
+		}
+	}
 
 	const reason = `CODER_SETTLEMENT_SELF_HEALED_MISSING_WORKTREE: ${detail}`;
 	const aborted = await abortDispatchedWalUnderLock(
@@ -1008,7 +1077,13 @@ export async function recoverCoderSettlement(
 		const existingWal = await readWal(filePath, taskId);
 		if (existingWal === null) return null;
 		let wal: CoderSettlementWal = existingWal;
-		if (wal.state === 'ABORTED') return null;
+		if (wal.state === 'ABORTED') {
+			// Earlier releases could declare a missing lane unrecoverable while its
+			// persisted source object survived. Preserve that historical work without
+			// reviving a stale task generation or automatically applying its changes.
+			await preserveHistoricalSelfHealedSource(directory, wal);
+			return null;
+		}
 		if (wal.state === 'COMMITTED') {
 			if (wal.worktree && wal.cleanupComplete !== true) {
 				await cleanupRecoveredWorktree(directory, wal.worktree);
@@ -1028,6 +1103,24 @@ export async function recoverCoderSettlement(
 		if (wal.state === 'DISPATCHED') {
 			if (wal.worktree) {
 				const worktree = wal.worktree;
+				const sourceState = wal.mergeProvenance
+					? await probeSettlementSource(
+							directory,
+							wal.mergeProvenance.sourceHead,
+						)
+					: undefined;
+				if (
+					sourceState === 'absent' &&
+					(await selfHealMissingLaneWorktree(
+						directory,
+						filePath,
+						taskId,
+						wal.transitionId,
+						worktree,
+						'the recorded source object, lane branch and checkout are absent',
+					))
+				)
+					return null;
 				const observed =
 					wal.observedFiles ??
 					(await scopedObservedFiles(worktree.worktreePath, wal.context));
@@ -1044,7 +1137,7 @@ export async function recoverCoderSettlement(
 				const accepted = observed.length > 0 || unattributedEmptyScopeMutation;
 				const settlementFailed =
 					wal.settlementFailed === true || unattributedEmptyScopeMutation;
-				if (wal.mergeProvenance) {
+				if (wal.mergeProvenance && sourceState !== 'absent') {
 					const landed = await reconcileLandedMerge(
 						directory,
 						wal.mergeProvenance,
@@ -1055,6 +1148,17 @@ export async function recoverCoderSettlement(
 						// stamp and branch retention must reflect that landing shape,
 						// not the legacy committed-merge cleanup.
 						const landedUnstaged = landed.method === 'worktree-match';
+						if (landedUnstaged) {
+							await preserveSettlementSource(
+								directory,
+								wal.mergeProvenance.sourceHead,
+							);
+						} else {
+							await releaseSettlementSource(
+								directory,
+								wal.mergeProvenance.sourceHead,
+							);
+						}
 						wal = {
 							...wal,
 							state: 'PREPARED',
@@ -1087,6 +1191,10 @@ export async function recoverCoderSettlement(
 						});
 						return committed;
 					}
+					await preserveSettlementSource(
+						directory,
+						wal.mergeProvenance.sourceHead,
+					);
 					if (landed.error) {
 						throw new Error(
 							`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: transition ${wal.transitionId} for task ${taskId} could not reconcile the landed merge (${filePath}, state ${wal.state}): ${landed.error}. Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
@@ -1614,6 +1722,8 @@ export async function recoverStaleCoderSettlements(
 
 export const _internals = {
 	liveDispatches,
+	withSettlementArtifactLifecycle,
+	validateSettlementLane,
 	// Test seam: owner cleanup is a mutation boundary whose failure must leave
 	// the settlement recoverable rather than being reported as successful.
 	removeWorktreeProvisioningOwner,
