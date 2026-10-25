@@ -3503,12 +3503,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/delegation-gate/worktree-recovery-authority.ts',
 		],
 		writerCitations: [
-			'src/hooks/delegation-gate/worktree-merge-status.ts:259 recordWorktreeMergeFailure / :273 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-125)',
+			'src/hooks/delegation-gate/worktree-merge-status.ts:278 recordWorktreeMergeFailure / :292 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-151; vanished-root guard skips the write rather than recreating the lane root, #3448)',
 			'src/hooks/delegation-gate/worktree-provisioning-owner.ts recordWorktreeProvisioningOwner/removeWorktreeProvisioningOwner — atomic per-owner files plus bounded lifecycle journal',
 			'src/hooks/delegation-gate/worktree-recovery-authority.ts publish/claim/renew/release/finalize/replay — atomic authority, journal, and credential writes under one cross-process lock',
 		],
 		readerCitations: [
-			'worktree-merge-status.ts:166 scanWorktreeMergeFailuresForRecovery — bounded 2 MiB / 512 entries (:59-60)',
+			'worktree-merge-status.ts:185 scanWorktreeMergeFailuresForRecovery — bounded 2 MiB / 512 entries (:59-60)',
 			'worktree-provisioning-owner.ts scanWorktreeProvisioningOwnersForRecovery/scanWorktreeProvisioningLifecycleJournalForRecovery — ≤512 files / 16 KiB per file plus ≤256 KiB / 512-entry journal, fail-closed uncertain',
 			'worktree-recovery-authority.ts bounded store/journal/credential readers and recovery scans — ≤2 MiB / 512 authority or journal entries and ≤16 KiB per credential',
 		],

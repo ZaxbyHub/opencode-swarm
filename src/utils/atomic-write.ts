@@ -168,7 +168,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		producers: [
 			'src/turbo/lean/state.ts:129',
 			'src/turbo/lean/recovery.ts:175',
-			'src/hooks/delegation-gate/worktree-merge-status.ts:110',
+			'src/hooks/delegation-gate/worktree-merge-status.ts:129',
 			'src/plan/ledger.ts:606',
 		],
 	},
