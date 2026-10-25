@@ -3503,7 +3503,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/delegation-gate/worktree-recovery-authority.ts',
 		],
 		writerCitations: [
-			'src/hooks/delegation-gate/worktree-merge-status.ts:278 recordWorktreeMergeFailure / :292 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-151; vanished-root guard skips the write rather than recreating the lane root, #3448)',
+			'src/hooks/delegation-gate/worktree-merge-status.ts:278 recordWorktreeMergeFailure / :292 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-144; vanished-root guard skips the write rather than recreating the lane root, #3448)',
 			'src/hooks/delegation-gate/worktree-provisioning-owner.ts recordWorktreeProvisioningOwner/removeWorktreeProvisioningOwner — atomic per-owner files plus bounded lifecycle journal',
 			'src/hooks/delegation-gate/worktree-recovery-authority.ts publish/claim/renew/release/finalize/replay — atomic authority, journal, and credential writes under one cross-process lock',
 		],
