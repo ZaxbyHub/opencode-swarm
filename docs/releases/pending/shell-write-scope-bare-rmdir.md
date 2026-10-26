@@ -12,8 +12,7 @@ is inside the workspace.
   under a POSIX shell (the `bash` tool, or the `shell` tool on a non-Windows
   host). The target must not exist yet or must be a real directory.
 - The exemption applies only to a plain command line, judged on the
-  command text after the gate's existing one-layer `eval` / `sh -c`
-  unwrapping (so the quotes of such a wrapper itself do not matter). That
+  command text after the gate's existing `eval` / `sh -c` unwrapping. That
   text may hold only letters, digits, spaces, newlines and the characters
   `_ . / - = & | ; < >`, and every command in it must be one of `rmdir`,
   `mkdir`, `echo`, `true`, `false` or `test`. None of these commands can
