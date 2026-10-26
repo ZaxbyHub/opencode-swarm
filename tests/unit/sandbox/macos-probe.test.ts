@@ -199,9 +199,9 @@ describe('buildProbeProfile — F6a item 2 shape parity with production', () => 
 		const allowIdx = profile.indexOf('(allow file-write* (subpath');
 		expect(denyIdx).toBeGreaterThanOrEqual(0);
 		expect(allowIdx).toBeGreaterThan(denyIdx);
-		expect(profile).toContain(
-			'(allow file-write* (subpath "/tmp/swarm-probe"))',
-		);
+		// Embedded in resolved form (macOS /tmp -> /private/tmp).
+		const resolved = _internals.realpathOrSelf('/tmp/swarm-probe');
+		expect(profile).toContain(`(allow file-write* (subpath "${resolved}"))`);
 	});
 
 	test('contains NO setenv/unsetenv — they are not SBPL ops and broke the probe (issue #2590)', () => {

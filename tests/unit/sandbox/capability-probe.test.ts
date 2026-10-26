@@ -371,7 +371,9 @@ describe('SandboxCapabilityProbe', () => {
 			expect(result.strength).toBe('strong');
 			expect(result.mechanism).toBe('sandbox-exec');
 			expect(result.platform).toBe('darwin');
-			expect(result.filesystem).toBe('weak');
+			// filesystem comes from the real behavioural probe, which depends on the
+			// host: 'real' on macOS, 'weak' where sandbox-exec is absent (#3462).
+			expect(['real', 'weak']).toContain(result.filesystem);
 			expect(result.network).toBe('none');
 			expect(result.process).toBe('none');
 			expect(result.effective).toBe('none');

@@ -13,7 +13,7 @@
  */
 
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { warn } from '../../utils/logger';
@@ -69,6 +69,47 @@ function resolveProbeTargetBinary(): string {
 	return resolveBinary(TRUE_ABSOLUTE, 'true');
 }
 
+/** The one filesystem call realpathOrSelf needs; injectable for tests. */
+interface ResolveFs {
+	realpath(p: string): string;
+}
+
+const REAL_FS: ResolveFs = { realpath: realpathSync };
+
+/** The macOS system links: /tmp, /var and /etc are links into /private. */
+const SYSTEM_LINK_PREFIX = /^\/(tmp|var|etc)(?=\/|$)/;
+
+/**
+ * Return the kernel-resolved form of a path under one of the macOS system
+ * links (`/tmp`, `/var`, `/etc` -> `/private/...`) for embedding in an SBPL
+ * profile. Seatbelt matches `subpath` predicates against the kernel-resolved
+ * path, so the unresolved form never matches and every in-scope write under
+ * those prefixes is denied.
+ *
+ * Fail closed by construction: the result is the INPUT STRING with the leading
+ * system prefix swapped (`/var/x` -> `/private/var/x`); the filesystem is
+ * consulted only to confirm that this host's `/var` really is the link to
+ * `/private/var`. No other symlink is ever followed, so a link created inside
+ * a project can neither change the result nor widen the profile to its
+ * target, and there is no check-then-resolve window to race. Anything else
+ * (another prefix, a host where the link is absent, an error) is returned
+ * unchanged, which Seatbelt never matches, exactly as before.
+ */
+function realpathOrSelf(p: string, fsx: ResolveFs = REAL_FS): string {
+	// Seatbelt exists only on macOS; on win32 (unit tests only) a POSIX-style
+	// fixture path must stay as written, not gain a drive letter.
+	if (process.platform === 'win32') return p;
+	const match = SYSTEM_LINK_PREFIX.exec(p);
+	if (!match) return p;
+	const target = `/private/${match[1]}`;
+	try {
+		if (fsx.realpath(`/${match[1]}`) !== target) return p;
+	} catch {
+		return p;
+	}
+	return `/private${p}`;
+}
+
 /**
  * Build the SBPL profile used ONLY for availability probing.
  *
@@ -91,7 +132,7 @@ function buildProbeProfile(tempDir: string): string {
 	return `(version 1)
 (allow default)
 (deny file-write*)
-(allow file-write* (subpath "${sbplEscapePath(tempDir)}"))`;
+(allow file-write* (subpath "${sbplEscapePath(realpathOrSelf(tempDir))}"))`;
 }
 
 /**
@@ -200,6 +241,7 @@ export const _internals: {
 	resetProbeMemo: typeof resetProbeMemo;
 	buildSandboxProfile: typeof buildSandboxProfile;
 	buildProbeProfile: typeof buildProbeProfile;
+	realpathOrSelf: typeof realpathOrSelf;
 	buildEnvOverridePrefix: typeof buildEnvOverridePrefix;
 	resolveSandboxExecBinary: typeof resolveSandboxExecBinary;
 	resolveProbeTargetBinary: typeof resolveProbeTargetBinary;
@@ -211,6 +253,7 @@ export const _internals: {
 	resetProbeMemo,
 	buildSandboxProfile,
 	buildProbeProfile,
+	realpathOrSelf,
 	buildEnvOverridePrefix,
 	resolveSandboxExecBinary,
 	resolveProbeTargetBinary,
@@ -308,10 +351,11 @@ function sbplEscapePath(path: string): string {
  * (see buildEnvOverridePrefix / wrapCommand).
  */
 function buildSandboxProfile(scopePaths: string[], tempDir: string): string {
-	// Collect unique paths to allow read-write
-	const rwPaths = [...scopePaths];
+	// Collect unique paths to allow read-write. Embedded in resolved form: see
+	// realpathOrSelf (Seatbelt matches the kernel-resolved path).
+	const rwPaths = scopePaths.map((p) => realpathOrSelf(p));
 	if (tempDir) {
-		rwPaths.push(tempDir);
+		rwPaths.push(realpathOrSelf(tempDir));
 	}
 
 	// Build (allow file-write* (subpath "...")) lines for each rw path
