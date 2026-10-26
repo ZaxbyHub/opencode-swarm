@@ -6,6 +6,7 @@ import {
 	stripKnownSwarmPrefix,
 } from '../config/schema.js';
 import { observeReceiptTransition } from '../health/learning-health';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import { extractPhaseIdFromLabel } from './extractors.js';
 import {
 	appendFsynced,
@@ -328,22 +329,36 @@ const keyOf = (traceId: string, entryId: string): string =>
 	`${traceId.length}:${traceId}${entryId}`;
 const emptyKeyOf = (traceId: string, sessionId: string): string =>
 	`${traceId.length}:${traceId}${sessionId}`;
-// #2965: bounded, sanitized rendering for empty-trace conflict details. Task
-// and phase ids are short bounded strings in practice, but the detail must
-// stay bounded even for adversarial callers, and undefined must render
-// distinctly from an empty string.
+// #2965: bounded, sanitized rendering for empty-trace conflict details.
+// Every dynamic component passes through the canonical single-line sanitizer
+// (the same helper the wrong_session detail uses) plus code-point-safe
+// truncation, so control/bidi characters are neutralized, a truncation
+// boundary can never split a surrogate pair, and a truncated value is
+// visibly partial ('…'). Every rendered component is length-bounded, so the
+// detail stays bounded for arbitrary inputs, and the axis sentence is always
+// emitted in full (no tail slice exists to elide it).
+const MAX_CONFLICT_ID_CHARS = 40;
 const MAX_CONFLICT_FIELD_CHARS = 64;
-const MAX_CONFLICT_DETAIL_CHARS = 300;
-const sanitizeConflictValue = (value: string): string => {
-	let out = '';
-	for (let i = 0; i < value.length && i < MAX_CONFLICT_FIELD_CHARS; i += 1) {
-		const code = value.charCodeAt(i);
-		out += code < 0x20 || code === 0x7f ? ' ' : value[i];
-	}
-	return out;
+const truncateCodePoints = (value: string, max: number): string => {
+	const codePoints = Array.from(value);
+	return codePoints.length > max
+		? `${codePoints.slice(0, max).join('')}…`
+		: value;
 };
+// Quote doubling via split/join — never a quote-bearing regex literal, which
+// desyncs the naive string/comment lexers used by the repo's source scanners.
+const doubleSingleQuotes = (value: string): string =>
+	value.split("'").join("''");
 const renderConflictValue = (value: string | undefined): string =>
-	value === undefined ? 'omitted' : `'${sanitizeConflictValue(value)}'`;
+	value === undefined
+		? 'omitted'
+		: `'${doubleSingleQuotes(
+				sanitizeDiagnosticText(
+					truncateCodePoints(value, MAX_CONFLICT_FIELD_CHARS),
+				),
+			)}'`;
+const renderConflictId = (value: string): string =>
+	sanitizeDiagnosticText(truncateCodePoints(value, MAX_CONFLICT_ID_CHARS));
 const phaseLifecycleKey = (
 	phase: string,
 	sessionId: string,
@@ -2989,11 +3004,9 @@ export async function commitEmptyRetrieval(
 				return {
 					conflict: {
 						code: axis.code,
-						detail:
-							`conflicting immutable empty retrieval for ${input.trace_id}/${input.session_id}: ${axis.detail}`.slice(
-								0,
-								MAX_CONFLICT_DETAIL_CHARS,
-							),
+						// Every component is length-bounded and no tail slice
+						// exists, so the axis naming can never be elided.
+						detail: `conflicting immutable empty retrieval for ${renderConflictId(input.trace_id)}/${renderConflictId(input.session_id)}: ${axis.detail}`,
 					},
 				};
 			}

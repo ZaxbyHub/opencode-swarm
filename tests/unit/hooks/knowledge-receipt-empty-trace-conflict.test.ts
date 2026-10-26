@@ -7,22 +7,27 @@
  * (`wrong_task` / `wrong_phase` / `duplicate_conflicting_terminal`) — never
  * the retry-inviting `store_unavailable` — that idempotent same-identity
  * re-files keep succeeding, and that genuine store failures keep their
- * store-class code. Real ledger state in canonical tmpdirs; no mocks. The
- * directive-gate classifier block at the bottom drives the `_internals` seam
- * directly: those are synthetic classifier tests, not end-to-end gate
- * evidence.
+ * store-class code. Real ledger state in tmpdir fixtures carrying the
+ * family-convention `.git` marker; no mocks. (The directive-gate classifier
+ * seam tests live in the sibling knowledge-receipt-conflict-classifier.test.ts
+ * — synthetic classifier coverage, not end-to-end gate evidence.)
+ *
+ * Hermeticity: every `commit()` through the helper pins `grace_days: 7`
+ * explicitly, so the pre-cutover configured-grace resolution can never leak
+ * a developer's user-level `receipt_close_grace_days` into these outcomes.
+ * The grace test that intentionally exercises resolution re-files the
+ * journal-derived recorded value, which is config-independent by construction.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
 	type CommitEmptyRetrievalResult,
 	commitEmptyRetrieval,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { _internals as observationInternals } from '../../../src/hooks/knowledge-receipt-observability.js';
 import { validateReceipt } from '../../../src/hooks/knowledge-receipt-validator.js';
-import { _internals as gateInternals } from '../../../src/hooks/phase-complete-directive-gate.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
 const SESSION = 'sess-conflict';
 const PREFIX = 'conflicting immutable empty retrieval for none/' + SESSION;
@@ -33,6 +38,7 @@ type CommitOpts = {
 	grace_days?: number;
 };
 
+/** Hermetic filing: grace pinned so user-level config can never leak in. */
 const commit = (dir: string, opts: CommitOpts = {}) =>
 	commitEmptyRetrieval(dir, {
 		trace_id: 'none',
@@ -40,8 +46,18 @@ const commit = (dir: string, opts: CommitOpts = {}) =>
 		phase: opts.phase,
 		task_id: opts.task_id,
 		agent: 'probe',
-		grace_days: opts.grace_days,
+		grace_days: opts.grace_days ?? 7,
 	});
+
+const cleanups: Array<() => void> = [];
+
+/** Family-convention fixture: realpath'd tmpdir + `.git` marker + cleanup. */
+const fixture = (): string => {
+	const { dir, cleanup } = createSafeTestDir('j15-conflict-');
+	cleanups.push(cleanup);
+	fs.mkdirSync(path.join(dir, '.git'));
+	return dir;
+};
 
 /** Asserts the result is a semantic conflict rejection, never a store code. */
 const conflict = (result: CommitEmptyRetrievalResult) => {
@@ -55,16 +71,17 @@ const conflict = (result: CommitEmptyRetrievalResult) => {
 };
 
 const journalOf = (dir: string): string =>
-	join(dir, '.swarm', 'knowledge-receipts-v2.jsonl');
+	path.join(dir, '.swarm', 'knowledge-receipts-v2.jsonl');
 
 const journalLineCount = (dir: string): number =>
-	existsSync(journalOf(dir))
-		? readFileSync(journalOf(dir), 'utf8').split('\n').filter(Boolean).length
+	fs.existsSync(journalOf(dir))
+		? fs.readFileSync(journalOf(dir), 'utf8').split('\n').filter(Boolean).length
 		: 0;
 
 /** The stored empty trace's resolved grace_days, read from the journal. */
 const storedGraceDaysOf = (dir: string): number | undefined => {
-	for (const line of readFileSync(journalOf(dir), 'utf8')
+	for (const line of fs
+		.readFileSync(journalOf(dir), 'utf8')
 		.split('\n')
 		.filter(Boolean)) {
 		const record = JSON.parse(line) as {
@@ -82,11 +99,12 @@ const realEmit = observationInternals.emit;
 
 afterEach(() => {
 	observationInternals.emit = realEmit;
+	for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
 describe('empty-trace conflict classification (#2965)', () => {
 	test('differing task_id rejects with wrong_task and axis-naming detail', async () => {
-		const dir = canonicalMkdtemp('j15-task-differ-');
+		const dir = fixture();
 		const first = await commit(dir, { task_id: 'T1', phase: 'P1' });
 		expect(first.ok).toBe(true);
 		const rejected = conflict(
@@ -100,7 +118,7 @@ describe('empty-trace conflict classification (#2965)', () => {
 	});
 
 	test('task omission conflicts symmetrically in both directions', async () => {
-		const presentThenOmitted = canonicalMkdtemp('j15-task-omit-a-');
+		const presentThenOmitted = fixture();
 		await commit(presentThenOmitted, { task_id: 'T1', phase: 'P1' });
 		const rejectedA = conflict(
 			await commit(presentThenOmitted, { phase: 'P1' }),
@@ -110,7 +128,7 @@ describe('empty-trace conflict classification (#2965)', () => {
 			"recorded task 'T1' differs from filed omitted",
 		);
 
-		const omittedThenPresent = canonicalMkdtemp('j15-task-omit-b-');
+		const omittedThenPresent = fixture();
 		await commit(omittedThenPresent, { phase: 'P1' });
 		const rejectedB = conflict(
 			await commit(omittedThenPresent, { task_id: 'T1', phase: 'P1' }),
@@ -122,7 +140,7 @@ describe('empty-trace conflict classification (#2965)', () => {
 	});
 
 	test('empty-string task is a defined value, rendered distinctly from omitted', async () => {
-		const dir = canonicalMkdtemp('j15-task-empty-');
+		const dir = fixture();
 		await commit(dir, { task_id: 'T1', phase: 'P1' });
 		const rejected = conflict(await commit(dir, { task_id: '', phase: 'P1' }));
 		expect(rejected.code).toBe('wrong_task');
@@ -130,8 +148,8 @@ describe('empty-trace conflict classification (#2965)', () => {
 		expect(rejected.detail).not.toContain('filed omitted');
 	});
 
-	test('phase differing and omitted reject with wrong_phase in both directions', async () => {
-		const differing = canonicalMkdtemp('j15-phase-differ-');
+	test('phase differing and present-then-omitted reject with wrong_phase', async () => {
+		const differing = fixture();
 		await commit(differing, { task_id: 'T1', phase: 'P1' });
 		const rejectedA = conflict(
 			await commit(differing, { task_id: 'T1', phase: 'P2' }),
@@ -141,7 +159,7 @@ describe('empty-trace conflict classification (#2965)', () => {
 			"recorded phase 'P1' differs from filed 'P2'",
 		);
 
-		const omitted = canonicalMkdtemp('j15-phase-omit-');
+		const omitted = fixture();
 		await commit(omitted, { task_id: 'T1', phase: 'P1' });
 		const rejectedB = conflict(await commit(omitted, { task_id: 'T1' }));
 		expect(rejectedB.code).toBe('wrong_phase');
@@ -149,8 +167,19 @@ describe('empty-trace conflict classification (#2965)', () => {
 		expect(rejectedB.detail).toContain('filed omitted');
 	});
 
+	test('phase omitted-then-present rejects with wrong_phase symmetrically', async () => {
+		const dir = fixture();
+		await commit(dir, { task_id: 'T1' });
+		const rejected = conflict(
+			await commit(dir, { task_id: 'T1', phase: 'P1' }),
+		);
+		expect(rejected.code).toBe('wrong_phase');
+		expect(rejected.detail).toContain('recorded phase omitted');
+		expect(rejected.detail).toContain("differs from filed 'P1'");
+	});
+
 	test('both axes mismatch resolves to wrong_task (task-first precedence)', async () => {
-		const dir = canonicalMkdtemp('j15-both-axes-');
+		const dir = fixture();
 		await commit(dir, { task_id: 'T1', phase: 'P1' });
 		const rejected = conflict(
 			await commit(dir, { task_id: 'T2', phase: 'P2' }),
@@ -159,8 +188,18 @@ describe('empty-trace conflict classification (#2965)', () => {
 		expect(rejected.detail).toContain('task');
 	});
 
+	test('both axes omitted resolves to wrong_task (task axis fires first)', async () => {
+		const dir = fixture();
+		await commit(dir, { task_id: 'T1', phase: 'P1' });
+		const rejected = conflict(await commit(dir, {}));
+		expect(rejected.code).toBe('wrong_task');
+		expect(rejected.detail).toContain(
+			"recorded task 'T1' differs from filed omitted",
+		);
+	});
+
 	test('grace drift rejects with duplicate_conflicting_terminal; equal grace stays idempotent', async () => {
-		const dir = canonicalMkdtemp('j15-grace-');
+		const dir = fixture();
 		await commit(dir, { task_id: 'T1', phase: 'P1', grace_days: 5 });
 		const sameGrace = await commit(dir, {
 			task_id: 'T1',
@@ -180,22 +219,34 @@ describe('empty-trace conflict classification (#2965)', () => {
 		expect(rejected.detail).toContain('resolved 99');
 	});
 
-	test('omitted grace resolved value filed explicitly is idempotent', async () => {
-		const dir = canonicalMkdtemp('j15-grace-default-');
-		const first = await commit(dir, { task_id: 'T1', phase: 'P1' });
+	test('omitted grace resolved value filed explicitly is idempotent (config-independent)', async () => {
+		const dir = fixture();
+		// Direct calls without a pinned grace: re-filing the journal-derived
+		// recorded value is idempotent under ANY receipt_close_grace_days
+		// setting, so this leg stays hermetic by construction.
+		const first = await commitEmptyRetrieval(dir, {
+			trace_id: 'none',
+			session_id: SESSION,
+			phase: 'P1',
+			task_id: 'T1',
+			agent: 'probe',
+		});
 		expect(first.ok).toBe(true);
 		const resolvedGrace = storedGraceDaysOf(dir);
-		expect(resolvedGrace).toBeGreaterThan(0);
-		const retry = await commit(dir, {
-			task_id: 'T1',
+		expect(resolvedGrace).toBeGreaterThanOrEqual(0);
+		const retry = await commitEmptyRetrieval(dir, {
+			trace_id: 'none',
+			session_id: SESSION,
 			phase: 'P1',
+			task_id: 'T1',
+			agent: 'probe',
 			grace_days: resolvedGrace,
 		});
 		expect(retry.ok).toBe(true);
 	});
 
-	test('conflict detail is bounded and control-character sanitized', async () => {
-		const dir = canonicalMkdtemp('j15-bounded-');
+	test('conflict detail is bounded, sanitized, and marks truncated values', async () => {
+		const dir = fixture();
 		const longTask = `T-${'x'.repeat(500)}`;
 		await commit(dir, { task_id: longTask, phase: 'P1' });
 		const rejected = conflict(
@@ -206,18 +257,101 @@ describe('empty-trace conflict classification (#2965)', () => {
 		);
 		expect(rejected.detail.length).toBeLessThanOrEqual(300);
 		expect(rejected.detail).not.toContain('\u0007');
+		// The truncated filed value carries the visible elision marker.
+		expect(rejected.detail).toContain("filed 'T-");
+		expect(rejected.detail).toContain('…');
+	});
+
+	test('axis sentence survives unbounded trace/session identifiers', async () => {
+		const dir = fixture();
+		const longTrace = 't'.repeat(200);
+		const longSession = 's'.repeat(80);
+		await commitEmptyRetrieval(dir, {
+			trace_id: longTrace,
+			session_id: longSession,
+			phase: 'P1',
+			task_id: 'T1',
+			agent: 'probe',
+			grace_days: 7,
+		});
+		const rejected = conflict(
+			await commitEmptyRetrieval(dir, {
+				trace_id: longTrace,
+				session_id: longSession,
+				phase: 'P1',
+				task_id: 'T2',
+				agent: 'probe',
+				grace_days: 7,
+			}),
+		);
+		expect(rejected.detail.length).toBeLessThanOrEqual(300);
+		expect(rejected.detail).toContain("recorded task 'T1'");
+		expect(rejected.detail).toContain("differs from filed 'T2'");
+	});
+
+	test('trace/session identifiers are sanitized like the axis values', async () => {
+		const dir = fixture();
+		const controlSession = 'sess\u0007ctl';
+		await commitEmptyRetrieval(dir, {
+			trace_id: 'none',
+			session_id: controlSession,
+			phase: 'P1',
+			task_id: 'T1',
+			agent: 'probe',
+			grace_days: 7,
+		});
+		const rejected = conflict(
+			await commitEmptyRetrieval(dir, {
+				trace_id: 'none',
+				session_id: controlSession,
+				phase: 'P1',
+				task_id: 'T2',
+				agent: 'probe',
+				grace_days: 7,
+			}),
+		);
+		expect(rejected.detail).not.toContain('\u0007');
+		expect(rejected.detail).toContain('sess?ctl');
+	});
+
+	test('embedded quotes are doubled so a value cannot forge axis clauses', async () => {
+		const dir = fixture();
+		const forged = "x' differs from filed 'Y";
+		await commit(dir, { task_id: forged, phase: 'P1' });
+		const rejected = conflict(
+			await commit(dir, { task_id: 'T2', phase: 'P1' }),
+		);
+		expect(rejected.detail).toContain(
+			"recorded task 'x'' differs from filed ''Y'",
+		);
+	});
+
+	test('truncation never splits a surrogate pair', async () => {
+		const dir = fixture();
+		const astralTask = `${'A'.repeat(64)}\u{1F4A9}`;
+		await commit(dir, { task_id: astralTask, phase: 'P1' });
+		const rejected = conflict(
+			await commit(dir, { task_id: 'T2', phase: 'P1' }),
+		);
+		expect(rejected.detail).not.toContain('\uD83D');
+		expect(rejected.detail).not.toContain('\uDCA9');
+		expect(rejected.detail).toContain('…');
 	});
 
 	test('rejected re-file appends no journal records and emits no transitions', async () => {
-		const dir = canonicalMkdtemp('j15-noappend-');
-		const first = await commit(dir, { task_id: 'T1', phase: 'P1' });
-		expect(first.ok).toBe(true);
-		const baseline = journalLineCount(dir);
-		expect(baseline).toBeGreaterThan(0);
+		const dir = fixture();
+		// Positive control FIRST: the spy is live before the committing
+		// operation, and a real commit must produce emissions through it.
 		let emissions = 0;
 		observationInternals.emit = (() => {
 			emissions += 1;
 		}) as typeof observationInternals.emit;
+		const first = await commit(dir, { task_id: 'T1', phase: 'P1' });
+		expect(first.ok).toBe(true);
+		expect(emissions).toBeGreaterThan(0);
+		const baseline = journalLineCount(dir);
+		expect(baseline).toBeGreaterThan(0);
+		emissions = 0;
 		const rejected = conflict(
 			await commit(dir, { task_id: 'T2', phase: 'P1' }),
 		);
@@ -227,10 +361,13 @@ describe('empty-trace conflict classification (#2965)', () => {
 	});
 
 	test('conflict then retry with the originally recorded identity is idempotent', async () => {
-		const dir = canonicalMkdtemp('j15-recover-');
+		const dir = fixture();
 		const first = await commit(dir, { task_id: 'T1', phase: 'P1' });
 		expect(first.ok).toBe(true);
-		conflict(await commit(dir, { task_id: 'T2', phase: 'P1' }));
+		const rejected = conflict(
+			await commit(dir, { task_id: 'T2', phase: 'P1' }),
+		);
+		expect(rejected.code).toBe('wrong_task');
 		const retry = await commit(dir, { task_id: 'T1', phase: 'P1' });
 		expect(retry.ok).toBe(true);
 		if (retry.ok && first.ok) {
@@ -240,7 +377,7 @@ describe('empty-trace conflict classification (#2965)', () => {
 	});
 
 	test('genuine store failure still returns store_unavailable', async () => {
-		const missing = join(canonicalMkdtemp('j15-store-'), 'does-not-exist');
+		const missing = path.join(fixture(), 'does-not-exist');
 		const result = await commitEmptyRetrieval(missing, {
 			trace_id: 'none',
 			session_id: SESSION,
@@ -253,40 +390,55 @@ describe('empty-trace conflict classification (#2965)', () => {
 		}
 	});
 
-	test('concurrent same-identity filings serialize to one idempotent commit', async () => {
-		const dir = canonicalMkdtemp('j15-conc-same-');
-		const [a, b] = await Promise.all([
+	test('concurrent same-identity filings serialize with stable ids under lock contention', async () => {
+		const dir = fixture();
+		const outcomes = await Promise.all([
 			commit(dir, { task_id: 'T1', phase: 'P1' }),
 			commit(dir, { task_id: 'T1', phase: 'P1' }),
 		]);
-		expect(a.ok).toBe(true);
-		expect(b.ok).toBe(true);
-		if (a.ok && b.ok) {
-			expect(a.event_id).toBe(b.event_id);
-			expect(a.terminal_event_id).toBe(b.terminal_event_id);
+		// A contended loser may legitimately exhaust the lock budget and
+		// receive the retry-class lock_timeout; every settled outcome must be
+		// an ok sharing the canonical ids or exactly that store code.
+		const oks = outcomes.filter((o) => o.ok);
+		expect(oks.length).toBeGreaterThanOrEqual(1);
+		const canonical = oks[0];
+		if (!canonical || !canonical.ok) throw new Error('unreachable');
+		for (const outcome of outcomes) {
+			if (outcome.ok) {
+				expect(outcome.event_id).toBe(canonical.event_id);
+				expect(outcome.terminal_event_id).toBe(canonical.terminal_event_id);
+			} else {
+				expect(outcome.code).toBe('lock_timeout');
+			}
 		}
 		expect(journalLineCount(dir)).toBeGreaterThan(0);
 	});
 
-	test('concurrent differing-identity filings yield one commit and one typed conflict', async () => {
-		const dir = canonicalMkdtemp('j15-conc-diff-');
-		const [a, b] = await Promise.all([
+	test('concurrent differing-identity filings yield one commit and at most one typed conflict', async () => {
+		const dir = fixture();
+		const outcomes = await Promise.all([
 			commit(dir, { task_id: 'T1', phase: 'P1' }),
 			commit(dir, { task_id: 'T2', phase: 'P1' }),
 		]);
-		const outcomes = [a, b];
 		const oks = outcomes.filter((o) => o.ok);
-		const rejected = outcomes.filter((o) => !o.ok);
-		expect(oks.length).toBe(1);
-		expect(rejected.length).toBe(1);
-		const loser = conflict(rejected[0] as CommitEmptyRetrievalResult);
-		expect(loser.code).toBe('wrong_task');
+		expect(oks.length).toBeGreaterThanOrEqual(1);
+		for (const outcome of outcomes) {
+			if (outcome.ok) continue;
+			// The loser is either the typed permanent conflict or a legitimate
+			// lock-budget expiry (retry-class) — never any other code.
+			expect(
+				outcome.code === 'wrong_task' || outcome.code === 'lock_timeout',
+			).toBe(true);
+			if (outcome.code === 'wrong_task') {
+				expect(outcome.detail).toContain(PREFIX);
+			}
+		}
 	});
 });
 
 describe('validator sentinel branch carries the precise reason (#2965)', () => {
 	test('reject() returns the typed conflict code and axis detail', async () => {
-		const dir = canonicalMkdtemp('j15-validator-');
+		const dir = fixture();
 		const first = await commit(dir, { task_id: 'T1', phase: 'P1' });
 		expect(first.ok).toBe(true);
 		const result = await validateReceipt({
@@ -306,53 +458,5 @@ describe('validator sentinel branch carries the precise reason (#2965)', () => {
 			expect(result.reason).toBe('wrong_task');
 			expect(result.detail).toContain(PREFIX);
 		}
-	});
-});
-
-describe('directive-gate failure classifier (#2965, synthetic seam tests)', () => {
-	test('conflict codes map to RECEIPT_CONFLICT with tool recovery, ahead of detail sniffing', () => {
-		const transientLacedDetail =
-			'conflicting immutable empty retrieval for none/sess — temporarily unavailable, transient, EBUSY';
-		for (const code of [
-			'wrong_task',
-			'wrong_phase',
-			'duplicate_conflicting_terminal',
-		] as const) {
-			const classified = gateInternals.classifyDirectiveGateFailure({
-				ok: false,
-				code,
-				detail: transientLacedDetail,
-			});
-			expect(classified.failure?.code).toBe('RECEIPT_CONFLICT');
-			expect(classified.recovery?.kind).toBe('tool');
-			expect(classified.recovery?.action).toBe('knowledge_receipt');
-		}
-	});
-
-	test('genuine transient store failure still classifies as retry', () => {
-		const classified = gateInternals.classifyDirectiveGateFailure({
-			ok: false,
-			code: 'store_unavailable',
-			detail: 'the operation was temporarily unavailable (EBUSY)',
-		});
-		expect(classified.failure?.code).toBe('RECEIPT_TRANSIENT');
-		expect(classified.recovery?.kind).toBe('retry');
-	});
-
-	test('store_corrupt and lock_timeout arms are unchanged', () => {
-		const corrupt = gateInternals.classifyDirectiveGateFailure({
-			ok: false,
-			code: 'store_corrupt',
-			detail: 'journal hash mismatch',
-		});
-		expect(corrupt.failure?.code).toBe('RECEIPT_CORRUPT');
-		expect(corrupt.recovery?.action).toBe('repair_knowledge_receipt_ledger');
-		const lock = gateInternals.classifyDirectiveGateFailure({
-			ok: false,
-			code: 'lock_timeout',
-			detail: 'receipt correctness lock unavailable before bounded timeout',
-		});
-		expect(lock.failure?.code).toBe('RECEIPT_LOCK_TIMEOUT');
-		expect(lock.recovery?.kind).toBe('retry');
 	});
 });

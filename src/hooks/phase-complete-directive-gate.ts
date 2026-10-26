@@ -40,16 +40,21 @@ export type DirectiveGateFailureCode =
 
 /**
  * #2965: the receipt-ledger conflict codes are permanent identity conflicts.
- * Kept next to the classifier so the bucket membership is a one-lookup fact.
- * Typed as strings so the widened classifier input (whose code is a runtime
- * string, not the narrow ledger literal union) can probe it directly.
+ * The Record keys must stay exhaustive with `ReceiptEmptyTraceConflictCode` —
+ * adding a fourth code to the ledger union without listing it here is a
+ * compile error, so the permanent bucket can never silently miss one.
  */
-const EMPTY_TRACE_CONFLICT_CODES: ReadonlySet<string> =
-	new Set<ReceiptEmptyTraceConflictCode>([
-		'wrong_task',
-		'wrong_phase',
-		'duplicate_conflicting_terminal',
-	]);
+const EMPTY_TRACE_CONFLICT_CODE_RECORD: Record<
+	ReceiptEmptyTraceConflictCode,
+	true
+> = {
+	wrong_task: true,
+	wrong_phase: true,
+	duplicate_conflicting_terminal: true,
+};
+const EMPTY_TRACE_CONFLICT_CODES: ReadonlySet<string> = new Set(
+	Object.keys(EMPTY_TRACE_CONFLICT_CODE_RECORD),
+);
 
 export interface DirectiveGateResult {
 	blocked: boolean;
@@ -95,9 +100,15 @@ export interface DirectiveGateResult {
 /**
  * #2965: widened cast target — the receipt-ledger now returns conflict-coded
  * rejections alongside store unavailability, and the conflict codes are not
- * members of `ReceiptUnavailable['code']`'s literal union.
+ * members of `ReceiptUnavailable['code']`'s literal union. The optional
+ * `reason` field covers the validator's rejection shape (`{ok:false,
+ * rejected:true, reason, detail}`), which carries the same codes without a
+ * `code` field.
  */
-type GateFailureInput = Omit<ReceiptUnavailable, 'code'> & { code: string };
+type GateFailureInput = Omit<ReceiptUnavailable, 'code'> & {
+	code?: string;
+	reason?: unknown;
+};
 
 function classifyDirectiveGateFailure(
 	error: unknown | ReceiptUnavailable,
@@ -106,15 +117,26 @@ function classifyDirectiveGateFailure(
 		typeof error === 'object' &&
 		error !== null &&
 		'ok' in error &&
-		error.ok === false &&
-		'code' in error
+		error.ok === false
 	) {
-		const unavailable = error as GateFailureInput;
-		// #2965: typed conflict codes are PERMANENT identity conflicts — the
-		// remedy is re-filing with the recorded identity, never a retry. This
-		// arm runs before every detail-string heuristic so a transient-sounding
-		// conflict detail can never reach RECEIPT_TRANSIENT.
-		if (EMPTY_TRACE_CONFLICT_CODES.has(unavailable.code)) {
+		const failure = error as GateFailureInput;
+		// #2965: typed conflict codes are PERMANENT identity conflicts — never
+		// a retry. For wrong_task/wrong_phase the remedy is re-filing with the
+		// recorded identity; for duplicate_conflicting_terminal the recorded
+		// grace window changed, so re-filing cannot fix it and the recovery
+		// pointer is best-effort (an operator restores
+		// knowledge.receipt_close_grace_days). This arm runs before every
+		// detail-string heuristic so a transient-sounding conflict detail can
+		// never reach RECEIPT_TRANSIENT, and it accepts both the ledger shape
+		// (`code`) and the validator's rejection shape (`reason`) so the codes
+		// stay classified wherever the chain surfaces them.
+		const typedCode =
+			typeof failure.code === 'string'
+				? failure.code
+				: typeof failure.reason === 'string'
+					? failure.reason
+					: undefined;
+		if (typedCode !== undefined && EMPTY_TRACE_CONFLICT_CODES.has(typedCode)) {
 			return {
 				failure: {
 					code: 'RECEIPT_CONFLICT',
@@ -123,7 +145,7 @@ function classifyDirectiveGateFailure(
 				recovery: { kind: 'tool', action: 'knowledge_receipt' },
 			};
 		}
-		if (unavailable.code === 'store_corrupt') {
+		if (failure.code === 'store_corrupt') {
 			return {
 				failure: {
 					code: 'RECEIPT_CORRUPT',
@@ -135,7 +157,7 @@ function classifyDirectiveGateFailure(
 				},
 			};
 		}
-		if (unavailable.code === 'lock_timeout') {
+		if (failure.code === 'lock_timeout') {
 			return {
 				failure: {
 					code: 'RECEIPT_LOCK_TIMEOUT',
@@ -144,7 +166,7 @@ function classifyDirectiveGateFailure(
 				recovery: { kind: 'retry', action: 'phase_complete' },
 			};
 		}
-		error = unavailable.detail;
+		error = failure.detail;
 	}
 	const message =
 		error instanceof Error
