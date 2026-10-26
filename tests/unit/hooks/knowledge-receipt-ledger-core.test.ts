@@ -8,7 +8,6 @@ import {
 	_internals as ledgerInternals,
 	queryHistoricalOutcomes,
 	queryLiveMemberships,
-	type ReceiptLedgerResult,
 	recordPhaseCloseIntent,
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
@@ -38,7 +37,13 @@ function project(prefix: string): string {
 	return fixture.dir;
 }
 
-function unwrap<T>(result: ReceiptLedgerResult<T>): T {
+// #2965: widened to a structural success/failure shape so it also accepts
+// `CommitEmptyRetrievalResult` (whose conflict arm carries a semantic code
+// outside `ReceiptUnavailable`'s literal union). Every `ReceiptLedgerResult`
+// call site remains assignable.
+function unwrap<T>(
+	result: ({ ok: true } & T) | { ok: false; code: string; detail: string },
+): T {
 	if (!result.ok) throw new Error(`${result.code}: ${result.detail}`);
 	return result;
 }

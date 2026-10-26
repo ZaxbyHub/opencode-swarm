@@ -417,4 +417,33 @@ describe('knowledge_receipt', () => {
 		);
 		expect(events).toHaveLength(1);
 	});
+
+	it('reports a conflicting none-sentinel re-file with the precise permanent reason (#2965)', async () => {
+		const session = ctx(dir);
+		const first = await knowledge_receipt.execute(
+			{
+				trace_id: 'none',
+				no_relevant_knowledge: true,
+				task_id: 'T1',
+				phase: 'P1',
+			} as never,
+			session,
+		);
+		expect(JSON.parse(first).recorded).toBe(true);
+		const second = await knowledge_receipt.execute(
+			{
+				trace_id: 'none',
+				no_relevant_knowledge: true,
+				task_id: 'T2',
+				phase: 'P1',
+			} as never,
+			session,
+		);
+		const rejected = JSON.parse(second);
+		expect(rejected.recorded).toBe(false);
+		expect(rejected.rejected).toBe(true);
+		expect(rejected.reason).toBe('wrong_task');
+		expect(rejected.detail).toContain('conflicting immutable empty retrieval');
+		expect(rejected.detail).toContain("recorded task 'T1'");
+	});
 });

@@ -138,7 +138,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		allowWorkingDirectoryOverride: true,
 		description:
-			'File a receipt for knowledge surfaced by a retrieval (by trace_id): which entries were applied (with evidence), ignored with a reason (relevant but deliberately not followed — counts against the entry), marked n_a with a reason (not applicable to this task — neutral), or contradicted (with proposed remediation), plus any new lessons. Each item is recorded as an immutable knowledge event. Set no_relevant_knowledge:true when a retrieval surfaced nothing useful.',
+			'File a receipt for knowledge surfaced by a retrieval (by trace_id): which entries were applied (with evidence), ignored with a reason (relevant but deliberately not followed — counts against the entry), marked n_a with a reason (not applicable to this task — neutral), or contradicted (with proposed remediation), plus any new lessons. Each item is recorded as an immutable knowledge event. Set no_relevant_knowledge:true when a retrieval surfaced nothing useful. A second "none" receipt in the same session with a different or omitted task_id/phase is a PERMANENT identity conflict (reason wrong_task/wrong_phase/duplicate_conflicting_terminal): re-filing the same conflicting identity will keep failing — re-file with the originally recorded task/phase (or the exact same arguments) to succeed idempotently; never treat these reasons as retryable store failures.',
 		args: {
 			trace_id: z
 				.string()

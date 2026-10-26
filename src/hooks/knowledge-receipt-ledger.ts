@@ -290,6 +290,29 @@ export type ReceiptUnavailable = {
 
 export type ReceiptLedgerResult<T> = ({ ok: true } & T) | ReceiptUnavailable;
 
+/**
+ * #2965: permanent identity-conflict codes for the empty-trace immutability
+ * rule. The conflict itself stays legitimate — only its category changes: a
+ * deterministic policy rejection must never ride the retry-inviting
+ * `store_unavailable` store channel (AGENTS.md invariant 9).
+ */
+export type ReceiptEmptyTraceConflictCode =
+	| 'wrong_task'
+	| 'wrong_phase'
+	| 'duplicate_conflicting_terminal';
+
+/** #2965: typed rejection for a conflicting `'none'`-sentinel re-file. */
+export type ReceiptEmptyTraceConflict = {
+	ok: false;
+	code: ReceiptEmptyTraceConflictCode;
+	detail: string;
+};
+
+export type CommitEmptyRetrievalResult =
+	| { ok: true; event_id: string; terminal_event_id: string }
+	| ReceiptEmptyTraceConflict
+	| ReceiptUnavailable;
+
 const GENESIS_HASH = 'GENESIS';
 const MAX_JOURNAL_RECORDS = 2_000;
 const MAX_AUDIT_TAIL_RECORDS = 256;
@@ -305,6 +328,22 @@ const keyOf = (traceId: string, entryId: string): string =>
 	`${traceId.length}:${traceId}${entryId}`;
 const emptyKeyOf = (traceId: string, sessionId: string): string =>
 	`${traceId.length}:${traceId}${sessionId}`;
+// #2965: bounded, sanitized rendering for empty-trace conflict details. Task
+// and phase ids are short bounded strings in practice, but the detail must
+// stay bounded even for adversarial callers, and undefined must render
+// distinctly from an empty string.
+const MAX_CONFLICT_FIELD_CHARS = 64;
+const MAX_CONFLICT_DETAIL_CHARS = 300;
+const sanitizeConflictValue = (value: string): string => {
+	let out = '';
+	for (let i = 0; i < value.length && i < MAX_CONFLICT_FIELD_CHARS; i += 1) {
+		const code = value.charCodeAt(i);
+		out += code < 0x20 || code === 0x7f ? ' ' : value[i];
+	}
+	return out;
+};
+const renderConflictValue = (value: string | undefined): string =>
+	value === undefined ? 'omitted' : `'${sanitizeConflictValue(value)}'`;
 const phaseLifecycleKey = (
 	phase: string,
 	sessionId: string,
@@ -2912,76 +2951,103 @@ export async function commitDisplayedMembership(
 export async function commitEmptyRetrieval(
 	directory: string,
 	input: Omit<CommitDisplayedMembershipInput, 'entries'>,
-): Promise<
-	ReceiptLedgerResult<{ event_id: string; terminal_event_id: string }>
-> {
-	return runLocked(
-		directory,
-		input.grace_days,
-		async (paths, state, graceDays) => {
-			const existing = state.emptyTraces.get(
-				emptyKeyOf(input.trace_id, input.session_id),
-			);
-			if (existing) {
-				if (
-					existing.phase !== input.phase ||
-					existing.task_id !== input.task_id ||
-					existing.grace_days !== graceDays
-				) {
-					throw new ReceiptStoreError(
-						'store_unavailable',
-						`conflicting immutable empty retrieval for ${input.trace_id}/${input.session_id}`,
-					);
-				}
-				if (!existing.terminal_event_id) {
-					const terminal = makeRecord(state, 'terminal_committed', {
-						empty_trace_id: input.trace_id,
-						empty_trace_session_id: input.session_id,
-					});
-					await appendRecord(paths, state, terminal);
-				}
+): Promise<CommitEmptyRetrievalResult> {
+	const outcome = await runLocked<
+		| { event_id: string; terminal_event_id: string }
+		| { conflict: { code: ReceiptEmptyTraceConflictCode; detail: string } }
+	>(directory, input.grace_days, async (paths, state, graceDays) => {
+		const existing = state.emptyTraces.get(
+			emptyKeyOf(input.trace_id, input.session_id),
+		);
+		if (existing) {
+			if (
+				existing.phase !== input.phase ||
+				existing.task_id !== input.task_id ||
+				existing.grace_days !== graceDays
+			) {
+				// #2965: the immutability conflict is a permanent semantic
+				// mismatch, not a store failure. Return the typed rejection
+				// instead of throwing so runLocked's catch-all never reports a
+				// deterministic policy rejection as retry-inviting
+				// store_unavailable. Task axis first, then phase; a grace_days
+				// drift alone is indistinguishable from any residual mismatch.
+				const axis =
+					existing.task_id !== input.task_id
+						? {
+								code: 'wrong_task' as const,
+								detail: `recorded task ${renderConflictValue(existing.task_id)} differs from filed ${renderConflictValue(input.task_id)}`,
+							}
+						: existing.phase !== input.phase
+							? {
+									code: 'wrong_phase' as const,
+									detail: `recorded phase ${renderConflictValue(existing.phase)} differs from filed ${renderConflictValue(input.phase)}`,
+								}
+							: {
+									code: 'duplicate_conflicting_terminal' as const,
+									detail: `recorded grace_days ${existing.grace_days} differs from resolved ${graceDays}`,
+								};
 				return {
-					event_id: existing.empty_event_id,
-					terminal_event_id: existing.terminal_event_id as string,
+					conflict: {
+						code: axis.code,
+						detail:
+							`conflicting immutable empty retrieval for ${input.trace_id}/${input.session_id}: ${axis.detail}`.slice(
+								0,
+								MAX_CONFLICT_DETAIL_CHARS,
+							),
+					},
 				};
 			}
-			const eventId = randomUUID();
-			const terminalEventId = randomUUID();
-			const trace: EmptyTrace = {
-				trace_id: input.trace_id,
-				session_id: input.session_id,
-				phase: input.phase,
-				task_id: input.task_id,
-				committed_at: nowIso(),
-				empty_event_id: eventId,
-				grace_days: graceDays,
+			if (!existing.terminal_event_id) {
+				const terminal = makeRecord(state, 'terminal_committed', {
+					empty_trace_id: input.trace_id,
+					empty_trace_session_id: input.session_id,
+				});
+				await appendRecord(paths, state, terminal);
+			}
+			return {
+				event_id: existing.empty_event_id,
+				terminal_event_id: existing.terminal_event_id as string,
 			};
-			await appendRecord(
-				paths,
+		}
+		const eventId = randomUUID();
+		const terminalEventId = randomUUID();
+		const trace: EmptyTrace = {
+			trace_id: input.trace_id,
+			session_id: input.session_id,
+			phase: input.phase,
+			task_id: input.task_id,
+			committed_at: nowIso(),
+			empty_event_id: eventId,
+			grace_days: graceDays,
+		};
+		await appendRecord(
+			paths,
+			state,
+			makeRecord(state, 'empty_retrieval_committed', { trace }, eventId),
+		);
+		await appendRecord(
+			paths,
+			state,
+			makeRecord(
 				state,
-				makeRecord(state, 'empty_retrieval_committed', { trace }, eventId),
-			);
-			await appendRecord(
-				paths,
-				state,
-				makeRecord(
-					state,
-					'terminal_committed',
-					{
-						empty_trace_id: input.trace_id,
-						empty_trace_session_id: input.session_id,
-					},
-					terminalEventId,
-				),
-			);
-			await clearRepairUncertaintyIfFresh(paths, state, input, {
-				event_id: eventId,
-				trace_id: input.trace_id,
-				kind: 'empty_retrieval_committed',
-			});
-			return { event_id: eventId, terminal_event_id: terminalEventId };
-		},
-	);
+				'terminal_committed',
+				{
+					empty_trace_id: input.trace_id,
+					empty_trace_session_id: input.session_id,
+				},
+				terminalEventId,
+			),
+		);
+		await clearRepairUncertaintyIfFresh(paths, state, input, {
+			event_id: eventId,
+			trace_id: input.trace_id,
+			kind: 'empty_retrieval_committed',
+		});
+		return { event_id: eventId, terminal_event_id: terminalEventId };
+	});
+	if (!outcome.ok) return outcome;
+	if ('conflict' in outcome) return { ok: false, ...outcome.conflict };
+	return outcome;
 }
 
 export interface TerminalBatchInput {

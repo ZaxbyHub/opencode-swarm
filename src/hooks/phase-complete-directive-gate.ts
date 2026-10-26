@@ -20,6 +20,7 @@
 import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	queryLiveMemberships,
+	type ReceiptEmptyTraceConflictCode,
 	type ReceiptMembership,
 	type ReceiptUnavailable,
 	validateAndCommitTerminalBatch,
@@ -34,7 +35,21 @@ export type DirectiveGateFailureCode =
 	| 'RECEIPT_WRONG_ROOT'
 	| 'RECEIPT_PERMISSION'
 	| 'RECEIPT_TRANSIENT'
+	| 'RECEIPT_CONFLICT'
 	| 'RECEIPT_STORE_UNAVAILABLE';
+
+/**
+ * #2965: the receipt-ledger conflict codes are permanent identity conflicts.
+ * Kept next to the classifier so the bucket membership is a one-lookup fact.
+ * Typed as strings so the widened classifier input (whose code is a runtime
+ * string, not the narrow ledger literal union) can probe it directly.
+ */
+const EMPTY_TRACE_CONFLICT_CODES: ReadonlySet<string> =
+	new Set<ReceiptEmptyTraceConflictCode>([
+		'wrong_task',
+		'wrong_phase',
+		'duplicate_conflicting_terminal',
+	]);
 
 export interface DirectiveGateResult {
 	blocked: boolean;
@@ -77,6 +92,13 @@ export interface DirectiveGateResult {
 	};
 }
 
+/**
+ * #2965: widened cast target — the receipt-ledger now returns conflict-coded
+ * rejections alongside store unavailability, and the conflict codes are not
+ * members of `ReceiptUnavailable['code']`'s literal union.
+ */
+type GateFailureInput = Omit<ReceiptUnavailable, 'code'> & { code: string };
+
 function classifyDirectiveGateFailure(
 	error: unknown | ReceiptUnavailable,
 ): Pick<DirectiveGateResult, 'failure' | 'recovery'> {
@@ -87,7 +109,20 @@ function classifyDirectiveGateFailure(
 		error.ok === false &&
 		'code' in error
 	) {
-		const unavailable = error as ReceiptUnavailable;
+		const unavailable = error as GateFailureInput;
+		// #2965: typed conflict codes are PERMANENT identity conflicts — the
+		// remedy is re-filing with the recorded identity, never a retry. This
+		// arm runs before every detail-string heuristic so a transient-sounding
+		// conflict detail can never reach RECEIPT_TRANSIENT.
+		if (EMPTY_TRACE_CONFLICT_CODES.has(unavailable.code)) {
+			return {
+				failure: {
+					code: 'RECEIPT_CONFLICT',
+					action_id: 'knowledge_receipt',
+				},
+				recovery: { kind: 'tool', action: 'knowledge_receipt' },
+			};
+		}
 		if (unavailable.code === 'store_corrupt') {
 			return {
 				failure: {
@@ -473,3 +508,11 @@ export function formatDirectiveBlockMessage(
 		'written justification.',
 	].join('\n');
 }
+
+/**
+ * #2965: dependency-injection seam for the failure classifier. Tests drive
+ * `classifyDirectiveGateFailure` through this seam (per the repo's
+ * `_internals` convention); these are synthetic classifier tests, not
+ * end-to-end gate evidence.
+ */
+export const _internals = { classifyDirectiveGateFailure };
