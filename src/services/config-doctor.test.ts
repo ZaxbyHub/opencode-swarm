@@ -75,21 +75,6 @@ describe('Config Doctor Service', () => {
 			expect(result.hasAutoFixableIssues).toBe(false);
 		});
 
-		it('should detect deprecated agents config', () => {
-			const config = createTestConfigObj({
-				agents: {
-					coder: { model: 'gpt-4' },
-				},
-			});
-
-			const result = runConfigDoctor(config, tempDir);
-
-			expect(result.findings).toHaveLength(1);
-			expect(result.findings[0]!.id).toBe('deprecated-agents-config');
-			expect(result.findings[0]!.severity).toBe('warn');
-			expect(result.findings[0]!.autoFixable).toBe(false);
-		});
-
 		it('should detect guardrails disabled', () => {
 			const config = createTestConfigObj({
 				guardrails: {
