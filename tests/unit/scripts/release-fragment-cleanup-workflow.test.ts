@@ -71,7 +71,10 @@ describe('release fragment cleanup workflow', () => {
 		expect(releaseWorkflow).toContain(
 			'git diff --name-only "$parent_sha" "$remote_sha"',
 		);
-		expect(releaseWorkflow).toContain('cut -c4-');
+		// #3299: the lossy newline-scalar producer (`cut -c4-`) was replaced
+		// by the NUL-end-to-end pipeline; pin the new producer here.
+		expect(releaseWorkflow).toContain('git status --porcelain=v1 -z');
+		expect(releaseWorkflow).toContain('--paths-format jsonl');
 		expect(releaseWorkflow).not.toContain("grep -v '^docs/releases/' || true");
 	});
 
