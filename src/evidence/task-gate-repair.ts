@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	assertTaskEvidenceWriteAllowed,
-	evidenceMatchesCurrentPlanIdentity,
+	evidenceStampedForDifferentPlan,
 	parseTaskEvidence,
 	TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
 	TASK_WORKFLOW_SCHEMA_MARKER,
@@ -11,6 +11,7 @@ import {
 } from '../gate-evidence.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { loadPlan } from '../plan/manager.js';
+import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import { swarmState } from '../state.js';
 import { assertProjectRoot } from '../utils/project-boundary.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
@@ -808,13 +809,16 @@ export async function repairTaskGateEvidence(
 				!evidenceHasLegacyMarker &&
 				latestReceipt != null &&
 				!receiptHasLegacyMarker &&
-				evidenceMatchesCurrentPlanIdentity(read.evidence, plan)
+				!evidenceStampedForDifferentPlan(
+					read.evidence,
+					plan ? derivePlanIdentityHash(plan) : null,
+				)
 			) {
 				return {
 					success: false,
 					message: 'TASK_GATE_EVIDENCE_REPAIR_NOT_REQUIRED',
 					errors: [
-						`TASK_GATE_EVIDENCE_REPAIR_NOT_REQUIRED: ${args.task_id} has valid authoritative evidence. Use the normal workflow repair path; this tool only rebuilds corrupt or legacy evidence.`,
+						`TASK_GATE_EVIDENCE_REPAIR_NOT_REQUIRED: ${args.task_id} has valid authoritative evidence. Use the normal workflow repair path; this tool only rebuilds corrupt or legacy evidence, or evidence stamped for a different plan than the current .swarm/plan.json.`,
 					],
 				};
 			}
@@ -941,6 +945,13 @@ export async function repairTaskGateEvidence(
 				};
 			}
 
+			// Rebuilt evidence has no recorded gates, so it belongs to the current
+			// campaign by construction: stamp it so the rebuilt record no longer
+			// reads as prior-campaign evidence.
+			if (plan) {
+				nextEvidence.planId = derivePlanId(plan);
+				nextEvidence.planIdentityHash = derivePlanIdentityHash(plan);
+			}
 			const serialized = canonicalizeTaskEvidence(args.task_id, nextEvidence);
 			let quarantine: { digest: string; filePath: string } | undefined;
 			if (isQuarantinableTaskEvidenceRead(read)) {

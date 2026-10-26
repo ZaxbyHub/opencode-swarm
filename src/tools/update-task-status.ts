@@ -19,6 +19,7 @@ import {
 import type { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
 import {
 	deriveApplicableGateSet,
+	evidenceStampedForDifferentPlan,
 	externalProofCurrent,
 	getTaskWorkflowSnapshot,
 	isExternalEvidenceInitialCompletionEligible,
@@ -753,14 +754,16 @@ export function checkReviewerGate(
 					);
 				}
 				// Stage B wedge fix (Class E/D): evidence stamped with a different
-				// plan identity - or unstamped legacy evidence - predates the current
-				// campaign and cannot satisfy its receipts. Distinguish "evidence
-				// predates this campaign" from "evidence missing".
-				const currentPlanIdentity = resolveCurrentPlanIdentitySync(authoritativeDir);
-				const priorCampaignEvidence =
-					currentPlanIdentity != null &&
-					(evidence.planIdentityHash === undefined ||
-						evidence.planIdentityHash !== currentPlanIdentity.planIdentityHash);
+				// plan identity predates the current campaign and cannot satisfy its
+				// receipts. Distinguish "evidence predates this campaign" from
+				// "evidence missing". Unstamped legacy evidence is "unknown", not
+				// prior-campaign, and keeps the pre-existing refusal.
+				const currentPlanIdentity =
+					resolveCurrentPlanIdentitySync(authoritativeDir);
+				const priorCampaignEvidence = evidenceStampedForDifferentPlan(
+					evidence,
+					currentPlanIdentity?.planIdentityHash,
+				);
 				const workflowComplete =
 					workflow.state === 'tests_run' || workflow.state === 'complete';
 				if (
@@ -778,15 +781,14 @@ export function checkReviewerGate(
 							{
 								blocked: true,
 								reason: priorCampaignEvidence
-								? `Task ${taskId}'s exact-task evidence predates the current plan campaign (plan-identity stamp absent or mismatched). Run repair_gate_evidence for task ${taskId} to rebuild current-campaign evidence, then re-run the QA chain.`
-								: `Task ${taskId} has not satisfied its exact v1 review route receipt. Missing or mismatched route evidence fails closed.`,
+									? `Task ${taskId}'s exact-task evidence predates the current plan campaign (plan-identity stamp names a different plan). Run repair_gate_evidence for task ${taskId} to rebuild current-campaign evidence, then re-run the QA chain.`
+									: `Task ${taskId} has not satisfied its exact v1 review route receipt. Missing or mismatched route evidence fails closed.`,
 								requiredGates,
 								satisfiedGates,
 								missingGates: ['review_route_receipt'],
 								source: 'durable_exact_task',
 								generation: workflow.generation,
-								nextAction:
-									priorCampaignEvidence
+								nextAction: priorCampaignEvidence
 									? 'Run repair_gate_evidence for this task to rebuild current-campaign evidence, then re-run Stage A and Stage B.'
 									: 'Recover the exact route receipt and independent Stage-B bindings before completing this task.',
 							},

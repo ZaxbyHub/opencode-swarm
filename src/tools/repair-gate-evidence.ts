@@ -48,7 +48,7 @@ export async function executeRepairGateEvidence(
 
 export const repair_gate_evidence: ToolDefinition = createSwarmTool({
 	description:
-		'Architect-only evidence repair for exact-task gate files. Rebuilds from a durable requirements receipt, recovers receipt-backed legacy marker wedges or the exact sentinel-only historical reset, and refuses every other receipt-less reconstruction.',
+		'Architect-only evidence repair for exact-task gate files. Rebuilds from a durable requirements receipt, recovers receipt-backed legacy marker wedges or the exact sentinel-only historical reset, rebuilds otherwise-valid evidence stamped for a different plan than the current .swarm/plan.json (stamping the rebuilt record with the current plan identity), and refuses every other receipt-less reconstruction.',
 	args: {
 		task_id: z
 			.string()

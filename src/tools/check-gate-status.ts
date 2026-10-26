@@ -579,17 +579,21 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 					}
 				: null;
 		// Stage B wedge fix (Class E): flag evidence that predates the current
-		// plan campaign (no plan-identity stamp, or a stamp for a different plan).
-		const currentPlanIdentity = resolveCurrentPlanIdentitySync(dirResult.directory);
-		const evidencePlanIdentityHash = (evidenceData as { planIdentityHash?: string } | null)?.planIdentityHash;
+		// plan campaign (a plan-identity stamp for a different plan).
+		const currentPlanIdentity = resolveCurrentPlanIdentitySync(
+			dirResult.directory,
+		);
+		const evidencePlanIdentityHash = (
+			evidenceData as { planIdentityHash?: string } | null
+		)?.planIdentityHash;
 		let priorCampaignEvidence: string | undefined;
 		if (
 			currentPlanIdentity != null &&
-			evidenceData != null &&
-			(evidencePlanIdentityHash === undefined ||
-				evidencePlanIdentityHash !== currentPlanIdentity.planIdentityHash)
+			evidencePlanIdentityHash !== undefined &&
+			evidencePlanIdentityHash !== currentPlanIdentity.planIdentityHash
 		) {
-			priorCampaignEvidence = 'Evidence for this task predates the current plan campaign (plan-identity stamp absent or mismatched). Its gates do not satisfy the current campaign receipts; run repair_gate_evidence for this task to rebuild current-campaign evidence.';
+			priorCampaignEvidence =
+				'Evidence for this task predates the current plan campaign (plan-identity stamp names a different plan). Its gates may not satisfy the current campaign receipts (status above is unchanged and advisory only); run repair_gate_evidence for this task to rebuild current-campaign evidence.';
 			message += ` ${priorCampaignEvidence}`;
 		}
 		let workflowAttributionHint: string | undefined;
@@ -619,7 +623,9 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 			...(workflowAttributionHint
 				? { workflow_attribution_hint: workflowAttributionHint }
 				: {}),
-			...(priorCampaignEvidence ? { prior_campaign_evidence: priorCampaignEvidence } : {}),
+			...(priorCampaignEvidence
+				? { prior_campaign_evidence: priorCampaignEvidence }
+				: {}),
 		};
 
 		return JSON.stringify(result, null, 2);
