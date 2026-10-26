@@ -408,5 +408,11 @@ describe('PR-review collection receipt footer', () => {
 		});
 		// This intentionally large receipt corpus performs hundreds of SQLite-backed
 		// transitions; allow slower Windows/macOS runners while keeping the test bounded.
-	}, 30_000);
+		// A per-test timeout overrides the coverage gate's `--timeout 60000` default
+		// (scripts/ci/run-coverage-gate.sh), so this cap must budget for the
+		// coverage-instrumented runtime: ~23 s bare / ~28 s instrumented locally, and
+		// 31 095 ms on shared CI runners, where it hard-failed coverage-shard 6 twice
+		// (runs 40255972796 + 40282456510, issue #3263). 60 s matches the gate's own
+		// per-test budget with ~2x headroom over the slowest observed instrumented run.
+	}, 60_000);
 });
