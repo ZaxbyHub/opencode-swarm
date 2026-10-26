@@ -23,7 +23,12 @@
  *
  * Escape hatch: FRAGMENT_CHECK_ENFORCE=0|false|no|off soft-warns (prints
  * the violation, exits 0) — same convention as TEST_CAP_ENFORCE, for a
- * deliberate exception PR. The escape hatch does NOT apply to
+ * deliberate exception PR. The hatch ALSO soft-warns git infrastructure
+ * failures (unusable repository root, base-branch probes, merge-base or
+ * diff failures and timeouts) so a developer with a broken local git is
+ * never hard-blocked; CI never sets the hatch, so the required `quality`
+ * context fails CLOSED on every git infrastructure failure (issue #3283).
+ * The escape hatch does NOT apply to
  * --print-requirement (a classification probe for workflow consumers; the
  * caller owns its messaging and exit handling).
  *
@@ -149,24 +154,91 @@ export function resolveEnforce(raw: string | undefined): boolean {
 	return !['0', 'false', 'no', 'off'].includes(raw.trim().toLowerCase());
 }
 
-/** Repo-root resolution identical to check-test-file-cap.ts. */
-export function resolveRepoRoot(cwd: string): string {
-	let proc: ReturnType<typeof Bun.spawnSync>;
-	try {
-		proc = Bun.spawnSync({
-			cmd: ['git', 'rev-parse', '--show-toplevel'],
-			cwd,
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: GIT_TIMEOUT_MS,
-		});
-	} catch {
-		return cwd;
+/**
+ * DI seam for every Bun.spawnSync git call this module makes (issue #3283).
+ * Tests inject call-sensitive wrappers here to force spawn timeouts
+ * (`exitCode: null`) and per-call failures deterministically; production is
+ * the identity indirection. Restore in `finally` — the convention of
+ * AGENTS.md invariant 7.
+ */
+export const _internals = {
+	spawnSync: (options: Parameters<typeof Bun.spawnSync>[0]) =>
+		Bun.spawnSync(options),
+};
+
+export type RepoRootClassification =
+	| { kind: 'root'; root: string }
+	| { kind: 'non-repo' }
+	| { kind: 'infra'; reason: string };
+
+/**
+ * Structural repository classification (issue #3283). A `.git` marker (file
+ * or directory) anywhere in the bounded ancestor walk means repository
+ * context: git must then resolve the toplevel, and a marker it cannot use —
+ * an empty `.git` directory, a malformed/dangling `.git` file, a corrupt
+ * repository — is an INFRASTRUCTURE failure, never a silent pass. Marker
+ * ABSENCE, proven by the walk itself, is the only non-repository outcome;
+ * git's (locale-dependent) stderr is never consulted.
+ */
+export function classifyRepoRoot(startDir: string): RepoRootClassification {
+	let dir = path.resolve(startDir);
+	for (;;) {
+		let marker: fs.Stats | undefined;
+		try {
+			marker = fs.lstatSync(path.join(dir, '.git'));
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== 'ENOENT') {
+				return {
+					kind: 'infra',
+					reason: `could not inspect ${path.join(dir, '.git')} (${code ?? 'unknown error'})`,
+				};
+			}
+		}
+		if (marker) {
+			let proc: ReturnType<typeof Bun.spawnSync>;
+			try {
+				proc = _internals.spawnSync({
+					cmd: ['git', 'rev-parse', '--show-toplevel'],
+					cwd: dir,
+					stdin: 'ignore',
+					stdout: 'pipe',
+					stderr: 'pipe',
+					timeout: GIT_TIMEOUT_MS,
+				});
+			} catch {
+				return {
+					kind: 'infra',
+					reason: `git failed to start while resolving the repository root at ${dir}`,
+				};
+			}
+			if (proc.exitCode === null) {
+				return {
+					kind: 'infra',
+					reason: `git rev-parse --show-toplevel timed out at ${dir}`,
+				};
+			}
+			if (proc.exitCode !== 0) {
+				return {
+					kind: 'infra',
+					reason: `git could not resolve the repository root at ${dir} (exit ${proc.exitCode}) — the .git marker is present but unusable`,
+				};
+			}
+			const root = proc.stdout.toString().trim();
+			if (root.length === 0) {
+				return {
+					kind: 'infra',
+					reason: `git rev-parse --show-toplevel returned no root at ${dir}`,
+				};
+			}
+			return { kind: 'root', root: path.resolve(root) };
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) {
+			return { kind: 'non-repo' };
+		}
+		dir = parent;
 	}
-	if (proc.exitCode !== 0) return cwd;
-	const trimmed = proc.stdout.toString().trim();
-	return trimmed.length > 0 ? path.resolve(trimmed) : cwd;
 }
 
 const BASE_BRANCH_CANDIDATES = ['origin/main', 'main'];
@@ -174,9 +246,9 @@ const BASE_BRANCH_CANDIDATES = ['origin/main', 'main'];
 function runGit(
 	args: string[],
 	cwd: string,
-): { exitCode: number; stdout: string } {
+): { exitCode: number; stdout: string; infra: boolean } {
 	try {
-		const proc = Bun.spawnSync({
+		const proc = _internals.spawnSync({
 			cmd: ['git', ...args],
 			cwd,
 			stdin: 'ignore',
@@ -184,9 +256,15 @@ function runGit(
 			stderr: 'pipe',
 			timeout: GIT_TIMEOUT_MS,
 		});
-		return { exitCode: proc.exitCode ?? 1, stdout: proc.stdout.toString() };
+		return {
+			exitCode: proc.exitCode ?? 1,
+			stdout: proc.stdout.toString(),
+			// exitCode null = killed by the spawn timeout: an infrastructure
+			// failure, distinct from git answering "no" (issue #3283).
+			infra: proc.exitCode === null,
+		};
 	} catch {
-		return { exitCode: 1, stdout: '' };
+		return { exitCode: 1, stdout: '', infra: true };
 	}
 }
 
@@ -195,61 +273,110 @@ function splitNulList(raw: string): string[] {
 }
 
 export function main(startDir: string = process.cwd()): number {
-	const cwd = resolveRepoRoot(startDir);
+	const enforce = resolveEnforce(process.env.FRAGMENT_CHECK_ENFORCE);
+	// Issue #3283: "cannot determine" must FAIL the required quality gate,
+	// never pass it. Every git infrastructure failure below routes through
+	// this one exit shape — an infrastructure-labeled message (never the
+	// author-facing VIOLATION label) and exit 1, with the documented
+	// FRAGMENT_CHECK_ENFORCE=0 hatch still soft-warning for local runs.
+	const failClosedOnGitInfra = (message: string): number => {
+		console.error(`[check-pending-fragment] ${message}`);
+		if (!enforce) {
+			console.error(
+				'[check-pending-fragment] FRAGMENT_CHECK_ENFORCE=0 — soft-warn only',
+			);
+			return 0;
+		}
+		return 1;
+	};
+
+	const rootClass = classifyRepoRoot(startDir);
+	if (rootClass.kind === 'infra') {
+		return failClosedOnGitInfra(
+			`repository root unusable — ${rootClass.reason} — failing the gate: the diff cannot be determined`,
+		);
+	}
+	if (rootClass.kind === 'non-repo') {
+		// Marker-free ancestry (proved structurally, not from git stderr): a
+		// genuinely non-repository directory has nothing to compare. CI always
+		// provides a repository; this is the documented local pass.
+		console.log(
+			'[check-pending-fragment] no base branch found — nothing to compare, passing',
+		);
+		return 0;
+	}
+	const cwd = rootClass.root;
+
 	let baseBranch: string | null = null;
 	for (const branch of BASE_BRANCH_CANDIDATES) {
-		if (runGit(['rev-parse', branch], cwd).exitCode === 0) {
+		const verify = runGit(['rev-parse', '--verify', '--quiet', branch], cwd);
+		if (verify.infra || (verify.exitCode !== 0 && verify.exitCode !== 1)) {
+			return failClosedOnGitInfra(
+				`could not determine whether base branch ${branch} exists (git rev-parse --verify exit ${verify.exitCode}${verify.infra ? ' — the spawned git timed out' : ''}) — failing the gate: the base state cannot be determined`,
+			);
+		}
+		if (verify.exitCode === 0) {
 			baseBranch = branch;
 			break;
 		}
 	}
 
-	let changedFiles: string[] = [];
-	let addedFiles: string[] = [];
-	if (baseBranch) {
-		// Merge-base-relative diff (BOT-H1): a two-dot `base HEAD` diff also
-		// includes the REVERSED diff of commits main gained after this branch
-		// diverged, so an unrelated PR gets blamed for main-side files — a
-		// false-positive block on ordinary base drift. Diffing from the
-		// merge-base restricts the comparison to this branch's own changes.
-		const mergeBase = runGit(['merge-base', baseBranch, 'HEAD'], cwd);
-		const baseRef = mergeBase.exitCode === 0 ? mergeBase.stdout.trim() : null;
-		if (!baseRef) {
-			console.error(
-				`[check-pending-fragment] could not resolve merge-base with ${baseBranch} — gate inconclusive, passing (fix your git setup if this persists)`,
-			);
-			return 0;
-		}
-		const changed = runGit(
-				['diff', '--name-only', '--no-renames', '-z', baseRef, 'HEAD'],
-				cwd,
-			);
-		if (changed.exitCode !== 0) {
-			console.error(
-				`[check-pending-fragment] git diff failed (exit ${changed.exitCode}) — gate inconclusive, passing rather than blocking on a git infrastructure failure`,
-			);
-			return 0;
-		}
-		changedFiles = splitNulList(changed.stdout);
-		const added = runGit(
-			['diff', '--diff-filter=A', '--name-only', '-z', '--find-renames=100%', baseRef, 'HEAD'],
-			cwd,
+	if (baseBranch === null) {
+		// Both candidates returned rc 1 = positively absent (a valid repo
+		// without main/origin/main — e.g. a trunk-initialized local checkout).
+		// CI always provides origin/main (full checkout); local runs on an
+		// up-to-date main resolve a merge-base equal to HEAD and see an empty
+		// diff. This is the documented no-base pass, distinct from the infra
+		// failures above.
+		console.log(
+			'[check-pending-fragment] no base branch found — nothing to compare, passing',
 		);
-		if (added.exitCode !== 0) {
-			console.error(
-				`[check-pending-fragment] git diff --diff-filter=A failed (exit ${added.exitCode}) — treating added-files as unknown`,
-			);
-		} else {
-			addedFiles = splitNulList(added.stdout);
-		}
-	} else {
-		// No base branch (shallow checkout / detached context): the gate
-		// cannot see a diff, so it reports inconclusive and passes. CI always
-		// provides origin/main (full checkout); local runs on an up-to-date
-		// main resolve a merge-base equal to HEAD and see an empty diff.
-		console.log('[check-pending-fragment] no base branch found — nothing to compare, passing');
 		return 0;
 	}
+
+	let changedFiles: string[] = [];
+	let addedFiles: string[] = [];
+	// Merge-base-relative diff (BOT-H1): a two-dot `base HEAD` diff also
+	// includes the REVERSED diff of commits main gained after this branch
+	// diverged, so an unrelated PR gets blamed for main-side files — a
+	// false-positive block on ordinary base drift. Diffing from the
+	// merge-base restricts the comparison to this branch's own changes.
+	const mergeBase = runGit(['merge-base', baseBranch, 'HEAD'], cwd);
+	if (mergeBase.infra || mergeBase.exitCode !== 0) {
+		return failClosedOnGitInfra(
+			`could not resolve merge-base with ${baseBranch} (git exit ${mergeBase.exitCode}) — failing the gate: the diff cannot be determined (broken or unrelated history)`,
+		);
+	}
+	const baseRef = mergeBase.stdout.trim();
+	if (baseRef.length === 0) {
+		return failClosedOnGitInfra(
+			`git merge-base with ${baseBranch} produced no base commit — failing the gate: the diff cannot be determined`,
+		);
+	}
+	const changed = runGit(
+		['diff', '--name-only', '--no-renames', '-z', baseRef, 'HEAD'],
+		cwd,
+	);
+	if (changed.infra || changed.exitCode !== 0) {
+		return failClosedOnGitInfra(
+			`git diff failed (exit ${changed.exitCode}${changed.infra ? ' — the spawned git timed out' : ''}) — failing the gate rather than passing on a git infrastructure failure`,
+		);
+	}
+	changedFiles = splitNulList(changed.stdout);
+	const added = runGit(
+		['diff', '--diff-filter=A', '--name-only', '-z', '--find-renames=100%', baseRef, 'HEAD'],
+		cwd,
+	);
+	if (added.infra || added.exitCode !== 0) {
+		// Issue #3283: the added-files list is what FRAGMENT_SATISFACTION
+		// ('added-only') evaluates; if it cannot be determined, satisfaction
+		// is unknowable — continuing with an empty list would manufacture an
+		// author-facing VIOLATION out of an infrastructure failure.
+		return failClosedOnGitInfra(
+			`git diff --diff-filter=A failed (exit ${added.exitCode}${added.infra ? ' — the spawned git timed out' : ''}) — failing the gate: the added-files list the fragment mandate depends on cannot be determined`,
+		);
+	}
+	addedFiles = splitNulList(added.stdout);
 
 	const result = evaluateFragmentCheck({ changedFiles, addedFiles });
 
@@ -258,8 +385,10 @@ export function main(startDir: string = process.cwd()): number {
 		return 0;
 	}
 	console.error(`[check-pending-fragment] VIOLATION — ${result.message}`);
-	if (!resolveEnforce(process.env.FRAGMENT_CHECK_ENFORCE)) {
-		console.error('[check-pending-fragment] FRAGMENT_CHECK_ENFORCE=0 — soft-warn only');
+	if (!enforce) {
+		console.error(
+			'[check-pending-fragment] FRAGMENT_CHECK_ENFORCE=0 — soft-warn only',
+		);
 		return 0;
 	}
 	return 1;

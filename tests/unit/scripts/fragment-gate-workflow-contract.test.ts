@@ -106,6 +106,10 @@ function runMapping(
 		/** Dispatched-arm (issue #3290) stub inputs. */
 		entries?: string[];
 		changedFiles?: number;
+		/** Issue #3307 pin: raw JSON for pr_json's changed_files (e.g. null). */
+		rawChangedFiles?: string;
+		/** Issue #3299: jsonl file contents seeded as $cleanup_paths. */
+		cleanupPaths?: string;
 		headSha?: string;
 		/** Exit code the gh stub returns for the files-listing call (PRR-003). */
 		ghListingRc?: number;
@@ -141,6 +145,15 @@ function runMapping(
 	];
 	const changedFiles = opts.changedFiles ?? entries.length;
 	const headSha = opts.headSha ?? 'deadbeefcafe';
+	// Issue #3299: the cleanup arm's classifier invocation now reads a jsonl
+	// file through "$cleanup_paths"; the seed keeps the extracted slice
+	// set -u safe and carries the bytes the arm would classify.
+	const tmpCleanup = path.join(dir, 'cleanup-paths.jsonl');
+	writeFileSync(
+		tmpCleanup,
+		`${opts.cleanupPaths ?? '"docs/releases/pending/mine.md"'}\n`,
+		'utf8',
+	);
 	const script = [
 		'changed="src/index.ts"',
 		// Single-quoted and apostrophe-escaped (PRR-024) so adversarial
@@ -151,7 +164,8 @@ function runMapping(
 		'classifier_args=()',
 		`tmp_changed='${tmpChanged}'`,
 		`tmp_added='${tmpAdded}'`,
-		`pr_json='{"changed_files":${changedFiles},"head":{"sha":"deadbeefcafe"}}'`,
+		`cleanup_paths='${tmpCleanup}'`,
+		`pr_json='{"changed_files":${opts.rawChangedFiles ?? changedFiles},"head":{"sha":"deadbeefcafe"}}'`,
 		'PR_NUMBER=1234',
 		'GITHUB_SHA=deadbeefcafe',
 		'GITHUB_REPOSITORY=example/example',
@@ -331,6 +345,20 @@ describe('fragment-gate workflow exit mapping (issue #2955)', () => {
 	// the mktemp/trap/listing/completeness/head-re-assertion/derivation
 	// preamble between the rc=0 seed and the classifier call) against the
 	// call-sensitive gh() stub and real jq/wc/mktemp.
+
+	test('dispatched arm 3307: non-integer changed_files fails closed (pin for the #3297 guard)', () => {
+		// PR #3297 added the ''|*[!0-9]* case guard on $expected but no test
+		// pinned it — deleting the guard shipped green. Seeds a valid-JSON
+		// null (what gh api returns for an absent changed_files field); jq -r
+		// renders "null", which the guard must refuse before the -ne compare.
+		const result = runMapping(dispatchedMapping, {
+			rc: 0,
+			verdict: '',
+			rawChangedFiles: 'null',
+		});
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toContain('non-integer changed_files');
+	});
 
 	test('dispatched arm 3290: a truncated listing fails closed with both counts', () => {
 		const result = runMapping(dispatchedMapping, {

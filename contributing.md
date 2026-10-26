@@ -436,7 +436,11 @@ fragments into the release notes, so a missing fragment means the PR ships with
 no notes. Escape hatch: `FRAGMENT_CHECK_ENFORCE=0` (soft-warn) applies to
 the CI quality gate only — the PR Standards fragment gate has no soft-warn
 path, so a workflow/skills/`docs/configuration.md` PR missing a fragment is
-blocked regardless. Release-please branches are exempt.
+blocked regardless. Release-please branches are exempt. The hatch soft-warns
+BOTH fragment violations and git infrastructure failures (unusable repository
+root, base-branch probe failures, merge-base/diff failures and timeouts —
+issue #3283); CI never sets it, so the required `quality` context fails closed
+whenever the gate cannot determine the diff instead of silently passing.
 
 **Do not ask for a merge if any check is red.** Fix the issue first.
 

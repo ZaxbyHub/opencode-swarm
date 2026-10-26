@@ -30,6 +30,8 @@ const workflow = parse(
 			}>;
 		}
 	>;
+	permissions?: Record<string, string>;
+	concurrency?: { group?: string; 'cancel-in-progress'?: unknown };
 };
 
 describe('pr-standards execution-boundary hardening (issue #3282)', () => {
@@ -40,7 +42,7 @@ describe('pr-standards execution-boundary hardening (issue #3282)', () => {
 		expect(job['timeout-minutes'] as number).toBeGreaterThanOrEqual(1);
 	});
 
-	test('3290 every checkout in the pr-standards job sets persist-credentials false', () => {
+	test('every checkout in the pr-standards job sets persist-credentials false', () => {
 		const checkouts = job.steps.filter((step) =>
 			(step.uses ?? '').startsWith('actions/checkout'),
 		);
@@ -50,5 +52,48 @@ describe('pr-standards execution-boundary hardening (issue #3282)', () => {
 		for (const step of checkouts) {
 			expect(step.with?.['persist-credentials']).toBe(false);
 		}
+	});
+});
+
+/**
+ * Issue #3300 + #3307 posture pins. #3297 added the pr-standards job bound
+ * and persist-credentials pins (above); #3300 closes the remaining unbounded
+ * job (check-title), and #3307 pins the least-privilege top-level
+ * permissions block verbatim plus the run-supersession concurrency group —
+ * whose cancel semantics must stay scoped to pull_request so merge-queue
+ * checks are never cancelled mid-batch.
+ */
+describe('pr-standards workflow posture pins (#3300, #3307)', () => {
+	test('3300 the check-title job declares a timeout-minutes bound', () => {
+		const bound = workflow.jobs['check-title']?.['timeout-minutes'];
+		expect(typeof bound).toBe('number');
+		expect(bound as number).toBeGreaterThanOrEqual(1);
+	});
+
+	test('3307 the top-level permissions block is least-privilege, verbatim', () => {
+		expect(workflow.permissions).toEqual({
+			contents: 'read',
+			'pull-requests': 'read',
+		});
+	});
+
+	test('3307 the concurrency group is per-PR for pull_request runs only', () => {
+		const group = workflow.concurrency?.group;
+		expect(typeof group).toBe('string');
+		// Verbatim pin (not token presence): the group keys on the event name
+		// and the PR number for pull_request, falling back to a run-unique id
+		// for every other event — merge_group and dispatch runs therefore
+		// never share a group with anything.
+		expect(group).toBe(
+			"pr-standards-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.number || github.run_id }}",
+		);
+	});
+
+	test('3307 cancel-in-progress is conditional on pull_request, never literal true', () => {
+		const cancel = workflow.concurrency?.['cancel-in-progress'];
+		// A literal true would cancel merge_group checks and block the merge
+		// queue; the expression form evaluates false for every non-PR event.
+		expect(cancel).not.toBe(true);
+		expect(cancel).toBe("${{ github.event_name == 'pull_request' }}");
 	});
 });

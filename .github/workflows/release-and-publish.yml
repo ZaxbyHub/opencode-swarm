@@ -267,8 +267,30 @@ jobs:
             echo "Release fragment cleanup is already materialized."
             exit 0
           fi
-          workspace_changes="$(git status --porcelain)"
-          changed_paths="$(printf '%s\n' "$workspace_changes" | cut -c4-)"
+          # NUL-end-to-end path list for the classifier (issue #3299):
+          # `git status --porcelain=v1 -z` emits records verbatim — no
+          # C-quoting, no newline splitting — and the jq reducer turns them
+          # into one JSON string per line (the classifier's jsonl framing;
+          # -c prints each list element as compact JSON). It strips each
+          # status record's 3-char "XY " prefix (two status columns plus the
+          # separator) and carries a rename/copy record's SECOND NUL field
+          # (the source path, emitted unprefixed by porcelain -z) as its own
+          # entry, resetting that state on the next ordinary record. The
+          # snapshot intentionally stays here, before the cleanup branch
+          # checkout/commit below.
+          cleanup_paths="$(mktemp)"
+          trap 'rm -f "${cleanup_paths:-}"' EXIT
+          git status --porcelain=v1 -z | jq -R -s -c '
+            reduce (split("\u0000") | map(select(length > 0)) | .[]) as $r
+              ({out: [], rename_next: false};
+              if .rename_next then
+                (.out += [$r] | .rename_next = false)
+              else
+                (.out += [$r[3:]] |
+                 .rename_next = ($r[0:2] | test("^[RC]")))
+              end)
+              | .out[]
+          ' > "$cleanup_paths"
 
           branch="chore/release-fragments-${TAG_NAME#v}"
           remote_sha=""
@@ -352,7 +374,7 @@ jobs:
           # verdict line is parsed because with no --added inputs exit 0
           # would also cover a (never expected) satisfied-required case.
           cleanup_rc=0
-          cleanup_verdict="$(printf '%s\n' "$changed_paths" | bun scripts/check-pending-fragment.ts --print-requirement)" || cleanup_rc=$?
+          cleanup_verdict="$(bun scripts/check-pending-fragment.ts --print-requirement --paths-format jsonl --changed-file "$cleanup_paths")" || cleanup_rc=$?
           case "$cleanup_rc" in
             0|1)
               case "$cleanup_verdict" in
