@@ -13,7 +13,8 @@
  *
  * The end-to-end arms below reuse the #2236 stale-worktree fixture with the ONE
  * production condition every prior suite omitted: the durable-status singleton
- * bound to the lane worktree before it is destroyed.
+ * bound to the removed lane worktree's path at recovery time (as a lane-instance
+ * delegation gate leaves it).
  *
  * #3409/#3420 forward-compatibility: draft PR #3420 changes the self-heal
  * semantics for a lane whose auto-commit object is still alive (it throws the
@@ -60,7 +61,10 @@ import {
 	readWal,
 	STALE_WORKTREE_TASK_ID as TASK_ID,
 } from '../../../helpers/stale-worktree-2236.js';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir.js';
+import {
+	canonicalMkdtemp,
+	removeTreeWithRetry,
+} from '../../../helpers/tmpdir.js';
 
 const FAILURE = {
 	outcome: 'failed' as const,
@@ -76,6 +80,10 @@ beforeEach(() => {
 	_internals.liveDispatches.clear();
 	standardWorktreeByCallID.clear();
 	awaitingMergeByCallID.clear();
+	// Isolate the durable-status singleton BEFORE each test too, so a future
+	// test that skips initDurableStatusPath cannot inherit the previous test's
+	// bound path and lazily-reloaded registry.
+	mergeStatusInternals.resetForTest();
 });
 
 afterEach(() => {
@@ -85,7 +93,8 @@ afterEach(() => {
 	awaitingMergeByCallID.clear();
 	mergeStatusInternals.resetForTest();
 	for (const root of roots.splice(0)) {
-		fs.rmSync(root, { recursive: true, force: true });
+		// Real-git fixture roots: tolerate the Windows EBUSY/EPERM teardown class.
+		removeTreeWithRetry(root);
 	}
 });
 
@@ -182,45 +191,65 @@ function destroyWorktreeAndBranch(fixture: Fixture): void {
 }
 
 describe('#3448 recovery self-heal is not blocked by the status writer', () => {
-	test('Arm A - current-tree contract: recover self-heals to ABORTED with the singleton lane-bound', async () => {
-		const fixture = await interruptedAfterOnBeforeMerge('heal-3448-contract');
-		destroyWorktreeAndBranch(fixture);
-		expect(branchExists(fixture)).toBe(false);
-		// The production condition every prior suite omitted.
-		initDurableStatusPath(fixture.worktree);
+	test(
+		'Arm A - current-tree contract: recover self-heals to ABORTED with the singleton lane-bound',
+		async () => {
+			const fixture = await interruptedAfterOnBeforeMerge('heal-3448-contract');
+			destroyWorktreeAndBranch(fixture);
+			expect(branchExists(fixture)).toBe(false);
+			// The production condition every prior suite omitted.
+			initDurableStatusPath(fixture.worktree);
 
-		await expect(
-			recoverCoderSettlement(fixture.repo, TASK_ID),
-		).resolves.toBeNull();
+			await expect(
+				recoverCoderSettlement(fixture.repo, TASK_ID),
+			).resolves.toBeNull();
 
-		expect(readWal(fixture)).toMatchObject({ state: 'ABORTED' });
-		// The #3448 invariant proper: the lane root was not resurrected.
-		expect(fs.existsSync(fixture.worktree)).toBe(false);
-		const warnings = getDeferredWarnings().join('\n');
-		expect(warnings).toContain('STALE_CODER_SETTLEMENT_SELF_HEALED');
-	});
+			expect(readWal(fixture)).toMatchObject({ state: 'ABORTED' });
+			// The #3448 invariant proper: the lane root was not resurrected.
+			expect(fs.existsSync(fixture.worktree)).toBe(false);
+			const warnings = getDeferredWarnings().join('\n');
+			expect(warnings).toContain('STALE_CODER_SETTLEMENT_SELF_HEALED');
+		},
+		// Real git spawns + a full recovery loop: explicit ceiling so a bare
+		// `bun test` (5s default) passes; CI's per-file budget is 120s anyway.
+		120_000,
+	);
 
-	test('Arm B - #3420-tolerant invariant: the lane root stays absent and the loop error never returns', async () => {
-		const fixture = await interruptedAfterOnBeforeMerge('heal-3448-alive');
-		destroyWorktreeAndBranch(fixture);
-		expect(branchExists(fixture)).toBe(false);
-		initDurableStatusPath(fixture.worktree);
+	test(
+		'Arm B - #3420-tolerant invariant: the lane root stays absent and the loop error never returns',
+		async () => {
+			const fixture = await interruptedAfterOnBeforeMerge('heal-3448-alive');
+			destroyWorktreeAndBranch(fixture);
+			expect(branchExists(fixture)).toBe(false);
+			initDurableStatusPath(fixture.worktree);
 
-		let thrown: string | undefined;
-		try {
-			await recoverCoderSettlement(fixture.repo, TASK_ID);
-		} catch (error) {
-			thrown = error instanceof Error ? error.message : String(error);
-		}
+			let thrown: string | undefined;
+			try {
+				await recoverCoderSettlement(fixture.repo, TASK_ID);
+			} catch (error) {
+				thrown = error instanceof Error ? error.message : String(error);
+			}
 
-		// The #3448 invariant: no resurrected lane root.
-		expect(fs.existsSync(fixture.worktree)).toBe(false);
-		// Whitelisted outcomes only: this PR heals silently; once #3409/#3420
-		// lands, the designed RECOVERABLE_ORPHAN_COMMIT is acceptable. Any other
-		// error (and in particular the CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED
-		// self-defeating loop) is a regression.
-		if (thrown !== undefined) {
-			expect(thrown).toContain('RECOVERABLE_ORPHAN_COMMIT');
-		}
-	});
+			// The #3448 invariant: no resurrected lane root.
+			expect(fs.existsSync(fixture.worktree)).toBe(false);
+			if (thrown === undefined) {
+				// No-throw path (this PR's tree): the recovery healed — pin the full
+				// terminal contract so a silent null-return with the WAL left
+				// DISPATCHED cannot pass.
+				expect(readWal(fixture)).toMatchObject({ state: 'ABORTED' });
+				expect(getDeferredWarnings().join('\n')).toContain(
+					'STALE_CODER_SETTLEMENT_SELF_HEALED',
+				);
+			} else {
+				// Whitelisted throw path (a #3409/#3420-carrying tree): ONLY the
+				// designed RECOVERABLE_ORPHAN_COMMIT is acceptable, and the message
+				// must not smuggle the self-defeating loop error alongside it.
+				expect(thrown).toContain('RECOVERABLE_ORPHAN_COMMIT');
+				expect(thrown).not.toContain(
+					'CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED',
+				);
+			}
+		},
+		120_000,
+	);
 });

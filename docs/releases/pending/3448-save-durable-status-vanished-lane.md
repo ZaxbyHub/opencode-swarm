@@ -24,15 +24,17 @@ first attempt; a live root persists exactly as before.
 
 `/swarm recover` on a DISPATCHED settlement whose lane worktree and branch are both gone now
 reaches `STALE_CODER_SETTLEMENT_SELF_HEALED` (WAL marked ABORTED, task unblocked) on the first
-attempt. No recovery data is lost by the skipped lane-local write: the self-heal decision reads
-the WAL descriptor's worktree/branch paths, not this status file, and the in-memory registry
-remains authoritative for the process lifetime (the module's documented non-fatal durable-save
-philosophy).
+attempt. No project-visible recovery data is lost by the skipped lane-local write: the self-heal
+decision reads the WAL descriptor's worktree/branch paths, not this status file, and no reader
+scans a lane-local copy (project-level readers scan the project root). The in-memory registry
+remains authoritative for the process; a failure recorded while bound to an already-vanished lane
+is memory-only and is not restored after a restart (it previously persisted only to a file inside
+the removed lane, which no reader consulted either).
 
 ## Impact
 
-- `/swarm recover <task>` no longer wedges in the worktree+branch-both-gone scenario; no manual
-  directory deletion is needed.
+- `/swarm recover <task>` no longer wedges in the worktree+branch-both-gone scenario; new
+  occurrences need no manual directory deletion.
 - Normal durable-status persistence on live project/lane roots is unchanged (atomic temp-write
   path untouched).
 - Concurrent `.swarm` creation by another writer (`EEXIST`) proceeds to the write; a root that
@@ -40,4 +42,8 @@ philosophy).
 
 ## Migration
 
-No migration required. Pure bug fix restoring the intended self-heal behavior.
+No migration is required to benefit from the fix, but an install that already hit the old loop
+still has the plugin-recreated lane directory on disk (containing only
+`.swarm/worktree-merge-status.json`); recovery keeps failing until that leftover directory is
+deleted once. A host restart may reclaim it automatically as an ownerless lane directory;
+otherwise delete `.swarm-worktrees/<session>/<task>/` by hand, then re-run `/swarm recover`.

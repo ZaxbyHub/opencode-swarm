@@ -21,10 +21,10 @@
  * can depend on it without creating an import cycle.
  *
  * STATE DURABILITY: Status is stored in an in-memory Map (fast, per-process)
- * AND persisted to `.swarm/worktree-merge-status.json` (survives plugin restart).
- * On each write, the JSON file is atomically updated. On read, the in-memory
- * map is checked first (fast path); on plugin restart, the map is empty but
- * the durable file is restored on first read or Rule 2 lookup.
+ * AND persisted to `.swarm/worktree-merge-status.json` (survives plugin restart;
+ * EXCEPTION (#3448): a write whose status-directory parent root has vanished is
+ * skipped rather than recreating that root). On read, the in-memory map is
+ * checked first (fast path); after a restart the durable file restores it.
  */
 
 import * as crypto from 'node:crypto';
@@ -110,7 +110,10 @@ function saveDurableStatus(statusPath: string): void {
 			// lane root — permanently defeating the coder-settlement self-heal that
 			// keys on that root's absence. Skipping the write matches this
 			// function's non-fatal durable-save philosophy (the in-memory map stays
-			// authoritative); no reader depends on a lane-local status file.
+			// authoritative); no reader consumes the skipped vanished-root record:
+			// project-level readers scan the project-root path and the self-heal
+			// reads WAL descriptor paths. A live-lane bind still reads its own file
+			// via loadDurableStatus — only the vanished-root write is skipped.
 			if (!fs.existsSync(path.dirname(dir))) return;
 			// `dir` is always exactly `<root>/.swarm` (one level under a project or
 			// lane root), so a non-recursive mkdir suffices — and unlike recursive
