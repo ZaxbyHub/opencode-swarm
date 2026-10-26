@@ -191,6 +191,8 @@ function destroyWorktreeAndBranch(fixture: Fixture): void {
 }
 
 describe('#3448 recovery self-heal is not blocked by the status writer', () => {
+	// Real git spawns + a full recovery loop: explicit 120s per-test ceilings so
+	// a bare `bun test` (5s default) passes; CI's per-file budget is 120s anyway.
 	test('Arm A - current-tree contract: recover self-heals to ABORTED with the singleton lane-bound', async () => {
 		const fixture = await interruptedAfterOnBeforeMerge('heal-3448-contract');
 		destroyWorktreeAndBranch(fixture);
@@ -207,9 +209,7 @@ describe('#3448 recovery self-heal is not blocked by the status writer', () => {
 		expect(fs.existsSync(fixture.worktree)).toBe(false);
 		const warnings = getDeferredWarnings().join('\n');
 		expect(warnings).toContain('STALE_CODER_SETTLEMENT_SELF_HEALED');
-	}, // Real git spawns + a full recovery loop: explicit ceiling so a bare
-	// `bun test` (5s default) passes; CI's per-file budget is 120s anyway.
-	120_000);
+	}, 120_000);
 
 	test('Arm B - #3420-tolerant invariant: the lane root stays absent and the loop error never returns', async () => {
 		const fixture = await interruptedAfterOnBeforeMerge('heal-3448-alive');
