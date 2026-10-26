@@ -36,6 +36,8 @@ const TEST_DIR = canonicalMkdtemp('guardrails-shell-write-rmdir-scope-');
 const OUTSIDE_DIR = canonicalMkdtemp('guardrails-shell-write-rmdir-outside-');
 const isWin32 = process.platform === 'win32';
 const SCOPE_VIOLATION = /^WRITE BLOCKED: SCOPE_VIOLATION: shell write target /;
+const ROOT_ESCAPE =
+	/^WRITE BLOCKED: Agent "coder" is not authorised to write .*AUTHORITY_ROOT_ESCAPE/;
 
 function config(): GuardrailsConfig {
 	return {
@@ -143,21 +145,32 @@ describe('shell write scope: bare rmdir of a workspace directory', () => {
 	it('keeps blocking rmdir of a directory outside the workspace', async () => {
 		const outside = path.join(OUTSIDE_DIR, 'victim');
 		mkdirSync(outside, { recursive: true });
+		// Forward slashes: the POSIX parse treats `\` as an escape, so a raw
+		// win32 path would name a drive-relative `C:Users...` instead. Which
+		// layer refuses depends on the host temp path: a destructive-command
+		// guard ("BLOCKED: ...", e.g. its cmd `rmdir /s` heuristic matches any
+		// `/s` in the path, or its system-path list) or the shell write gate's
+		// file authority ("WRITE BLOCKED: ... AUTHORITY_ROOT_ESCAPE").
 		await expect(
-			runAsCoder('rmdir-outside', `rmdir ${outside}`),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+			runAsCoder('rmdir-outside', `rmdir ${outside.replace(/\\/g, '/')}`),
+		).rejects.toThrow(/^(?:WRITE )?BLOCKED: /);
 	});
 
 	it('keeps blocking rmdir that escapes the workspace through a symlink', async () => {
-		mkdirSync(path.join(OUTSIDE_DIR, 'linked', 'sub'), { recursive: true });
+		// The leaf is not named `s...`: an operand containing `/s` trips the
+		// destructive guard's cmd `rmdir /s` heuristic first, which would hide
+		// that the shell write gate's file authority (canonical containment)
+		// refuses the escape; the exemption helper is the second line
+		// (isEmptyDirectoryRemovalWithinWorkspace symlink tests below).
+		mkdirSync(path.join(OUTSIDE_DIR, 'linked', 'inner'), { recursive: true });
 		symlinkSync(
 			path.join(OUTSIDE_DIR, 'linked'),
 			path.join(TEST_DIR, 'escape-link'),
 			isWin32 ? 'junction' : 'dir',
 		);
 		await expect(
-			runAsCoder('rmdir-symlink', 'rmdir escape-link/sub'),
-		).rejects.toThrow(/^(?:WRITE )?BLOCKED: /);
+			runAsCoder('rmdir-symlink', 'rmdir escape-link/inner'),
+		).rejects.toThrow(ROOT_ESCAPE);
 	});
 
 	it('keeps blocking a bare rmdir that a cd moves outside the workspace', async () => {
@@ -166,7 +179,7 @@ describe('shell write scope: bare rmdir of a workspace directory', () => {
 				'rmdir-cd-escape',
 				`cd .. && rmdir ${path.basename(OUTSIDE_DIR)}`,
 			),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(ROOT_ESCAPE);
 	});
 
 	it.each([
@@ -257,30 +270,45 @@ describe('isEmptyDirectoryRemovalWithinWorkspace', () => {
 	});
 });
 
+/**
+ * `/swarm guardrail explain` has no tool or platform flag: it evaluates the
+ * command as the `shell` tool. Off Windows that is a POSIX executor, so it
+ * mirrors the live gate; on a Windows host the `shell` tool is not POSIX, so
+ * explain conservatively blocks a bare rmdir that the live `bash` tool admits.
+ */
 describe('guardrail explain parity for bare rmdir', () => {
-	it('explains a bare out-of-scope rmdir as allowed and rmdir -p as blocked', async () => {
-		emptyDir('.scratch-g/tmp1');
-		const bare = await handleGuardrailExplain(TEST_DIR, [
+	const explainRmdir = (...operands: string[]) =>
+		handleGuardrailExplain(TEST_DIR, [
 			'--agent',
 			'coder',
 			'--scope',
 			'src',
 			'rmdir',
-			'.scratch-g/tmp1',
+			...operands,
 		]);
-		expect(bare).toMatch(/\| *Decision *\| *allow */i);
-		const parents = await handleGuardrailExplain(TEST_DIR, [
-			'--agent',
-			'coder',
-			'--scope',
-			'src',
-			'rmdir',
-			'-p',
-			'.scratch-g/tmp1',
-		]);
-		expect(parents).toMatch(/\| *Decision *\| *block */i);
-		expect(parents).toContain('scope_violation');
-	});
+
+	it.skipIf(isWin32)(
+		'explains a bare out-of-scope rmdir as allowed and rmdir -p as blocked',
+		async () => {
+			emptyDir('.scratch-g/tmp1');
+			expect(await explainRmdir('.scratch-g/tmp1')).toMatch(
+				/\| *Decision *\| *allow */i,
+			);
+			const parents = await explainRmdir('-p', '.scratch-g/tmp1');
+			expect(parents).toMatch(/\| *Decision *\| *block */i);
+			expect(parents).toContain('scope_violation');
+		},
+	);
+
+	it.skipIf(!isWin32)(
+		'on a Windows host explains a bare out-of-scope rmdir as blocked (shell tool)',
+		async () => {
+			emptyDir('.scratch-g/tmp2');
+			const bare = await explainRmdir('.scratch-g/tmp2');
+			expect(bare).toMatch(/\| *Decision *\| *block */i);
+			expect(bare).toContain('scope_violation');
+		},
+	);
 });
 
 /**
@@ -363,6 +391,12 @@ describe('bare rmdir exemption: POSIX executor and real directory only', () => {
 				'powershell -Command "rmdir a"',
 				'linux',
 			),
+		).toBe(false);
+		expect(isPosixRmdirExecutor('bash', null, 'cmd /c rmdir a', 'linux')).toBe(
+			false,
+		);
+		expect(
+			isPosixRmdirExecutor('bash', null, 'cmd /d /s /c rmdir a', 'linux'),
 		).toBe(false);
 	});
 
