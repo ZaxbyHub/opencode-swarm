@@ -175,6 +175,22 @@ const READ_ONLY_TOOLS = new Set<string>([
 	'doc_extract',
 	'req_coverage',
 	'req_coverage'.toLowerCase(),
+	// swarm tools audited as read-only: module + callees read, no write, spawn or
+	// network call (see docs/releases/pending fragment). Tools that look
+	// read-only but write (lean_turbo_status / lean_turbo_runner_status archive
+	// and seed state on read; export_pr_review_partial_results and
+	// convene_general_council write files) are deliberately NOT here.
+	'skill_list',
+	'skill_inspect',
+	'external_skill_list',
+	'external_skill_inspect',
+	'knowledge_receipt_status',
+	'retrieve_lane_output',
+	'lean_turbo_plan_lanes',
+	'plan_conflict_check',
+	'scope_validate',
+	'context_status',
+	'suggest_patch',
 	// opencode native read tools (opaque to the swarm but commonly reachable)
 	'read',
 	'glob',
