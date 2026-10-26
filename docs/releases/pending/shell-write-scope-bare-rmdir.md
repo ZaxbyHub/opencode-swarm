@@ -11,14 +11,15 @@ is inside the workspace.
   resolved, is strictly inside the session workspace, when the command runs
   under a POSIX shell (the `bash` tool, or the `shell` tool on a non-Windows
   host). The target must not exist yet or must be a real directory.
-- The exemption applies only to a plain command line: the whole command
+- The exemption applies only to a plain command line, judged on the
+  command text after the gate's existing one-layer `eval` / `sh -c`
+  unwrapping (so the quotes of such a wrapper itself do not matter). That
   text may hold only letters, digits, spaces, newlines and the characters
-  `_ . / - = & | ; < >`, and every command in it (after the gate's existing
-  one-layer `eval` / `sh -c` unwrapping) must be one of `rmdir`, `mkdir`,
-  `echo`, `true`, `false` or `test`. None of these commands can
+  `_ . / - = & | ; < >`, and every command in it must be one of `rmdir`,
+  `mkdir`, `echo`, `true`, `false` or `test`. None of these commands can
   change the shell's working directory, and without `$`, quotes,
   backslashes, backticks, parentheses, braces, brackets or `#` nothing in
-  the line can expand, be evaluated, be quoted, define a function or start
+  that text can expand, be evaluated, be quoted, define a function or start
   a comment, so `rmdir` runs in the directory the gate checks and removes
   exactly the operand the gate checks. `&&` / `||` / `;` lists, pipelines,
   redirections such as `2>/dev/null`, `FOO=1 rmdir x` prefixes and `if` and
@@ -28,16 +29,17 @@ is inside the workspace.
   `rmdir a && echo done` and `FOO=1 rmdir a` keep the exemption, and each
   `rmdir` of a distinct operand is judged separately.
 - Every other line gives every `rmdir` in it the ordinary declared-scope
-  check. That includes any line with a character outside the set above:
+  check. That includes any text with a character outside the set above:
   `rmdir "dir"`, `rmdir a && echo "done"`, `echo $HOME; rmdir a`,
   `[ -d src ] && rmdir a`, subshells and brace groups (`(rmdir a)`,
   `{ rmdir a; }`), `case`, `$(...)`, backticks, any `#` (`rmdir d#/x`
   removes the one directory `d#/x` in bash, and `rmdir a # note` loses the
-  exemption too), and paths containing `~ + , : @ %`. An interior tab or
-  carriage return is never exempt either. It also includes any other
+  exemption too), and paths containing `~ + , : @ %`. An interior tab is
+  refused outright as unsafe command text, and an interior carriage return
+  is never exempt either. It also includes any other
   command in the line: `cd`, `pushd`, `popd`, function
-  definitions, `source` and `.`, `exec`, `trap`, `alias`, `builtin`
-  and `command` wrappers, an upper-case `RMDIR`, and every other command
+  definitions, `source` and `.`, `trap`, `alias`,
+  an upper-case `RMDIR`, and every other command
   (`ls d && rmdir d`, `cd build && rmdir tmp`). A line with a
   here-document normally loses the exemption too, because the gate reads
   the body and delimiter lines as commands that must also be on the list
