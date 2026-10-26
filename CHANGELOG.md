@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.200.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.3...v7.200.4) (2026-10-26)
+
+
+### Bug Fixes
+
+* **worktree:** feedback-round hardening for the [#3448](https://github.com/ZaxbyHub/opencode-swarm/issues/3448) suite and docs ([dbf3d5a](https://github.com/ZaxbyHub/opencode-swarm/commit/dbf3d5a3fa9d4a7e6ea30959cafd177ddbe8a50d))
+* **worktree:** stop saveDurableStatus from resurrecting a vanished lane root ([#3448](https://github.com/ZaxbyHub/opencode-swarm/issues/3448)) ([28b90c5](https://github.com/ZaxbyHub/opencode-swarm/commit/28b90c5c24bc3c9643a5c03521c9c6a107c97ea5))
+
 ## [7.200.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.2...v7.200.3) (2026-10-26)
 
 
