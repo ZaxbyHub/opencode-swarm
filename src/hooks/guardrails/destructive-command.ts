@@ -204,9 +204,18 @@ export function dcStripOneWrapper(cmd: string): string | null {
 
 	// sudo / env VAR=val / time / nohup / nice -n N: strip leading word + optional args
 	// Case-insensitive: SUDO, TIME, NOHUP are valid in encoded/obfuscated commands.
+	// #3343: the env strip must consume env's OWN flags before the payload —
+	// argument-less flags (-i, --ignore-environment, any short flag), arg-taking
+	// flags WITH their separate argument (-u/-U/-C/-S/--split-string + one
+	// word), and VAR=VALUE assignments — or `env -u FOO python -c …` unwraps
+	// to `-u FOO python -c …`, whose `-u` command word detects no writes, and
+	// the gate would evaluate the (worse) unwrapped analysis instead of the
+	// primary one (impl-review r3 finding 2).
+	const envPrefix =
+		/^env(?:\s+(?:[A-Za-z_][A-Za-z0-9_]*=\S+|(?:-[i0vVh]*[uUCSaP]|--u(?:n(?:s(?:e(?:t)?)?)?)?|--c(?:h(?:d(?:i(?:r)?)?)?)?|--a(?:r(?:g(?:v(?:0)?)?)?)?|--s(?:p(?:l(?:i(?:t(?:-(?:s(?:t(?:r(?:i(?:n(?:g)?)?)?)?)?)?)?)?)?)?)?|--e(?:n(?:v(?:0(?:-(?:f(?:r(?:o(?:m)?)?)?)?)?)?)?)?)\s+\S+|-\S+|--[A-Za-z][A-Za-z0-9-]*))*\s+(.+)$/is;
 	const prefixMatch =
 		/^(?:sudo|time|nohup)\s+(.+)$/is.exec(t) ??
-		/^env(?:\s+[A-Za-z_][A-Za-z0-9_]*=[^\s]*)*\s+(.+)$/is.exec(t) ??
+		envPrefix.exec(t) ??
 		/^nice\s+(?:-n\s+\d+\s+)?(.+)$/is.exec(t);
 	if (prefixMatch) return prefixMatch[1].trim();
 

@@ -55,6 +55,11 @@
 			"path": "dist/promise/permission.d.ts"
 		},
 		{
+			"id": "plugin/promise-shell",
+			"origin": "@opencode/plugin",
+			"path": "dist/promise/shell.d.ts"
+		},
+		{
 			"id": "plugin/app",
 			"origin": "@opencode/plugin",
 			"path": "dist/app.d.ts"
@@ -320,6 +325,19 @@
 		"plugin/promise-permission export-interface PermissionHooks#head : cbe5cfdf7c2118a9",
 		"plugin/promise-permission export-interface PermissionHooks.evaluate : a37c315fbfe67948",
 		"plugin/promise-permission export-type PermissionDomain : 0e97a9af7bc9488c",
+		"plugin/promise-shell export-interface ShellCreateBefore",
+		"plugin/promise-shell export-interface ShellCreateBefore#head : cbe5cfdf7c2118a9",
+		"plugin/promise-shell export-interface ShellCreateBefore.command : 4c419975bc402748",
+		"plugin/promise-shell export-interface ShellCreateBefore.cwd : 4c419975bc402748",
+		"plugin/promise-shell export-interface ShellCreateBefore.timeout : f0e50e332349e3a0",
+		"plugin/promise-shell export-interface ShellCreateBefore.shell : 4c419975bc402748",
+		"plugin/promise-shell export-interface ShellCreateBefore.env : 1e0331ce1b689372",
+		"plugin/promise-shell export-interface ShellHooks",
+		"plugin/promise-shell export-interface ShellHooks#head : cbe5cfdf7c2118a9",
+		"plugin/promise-shell export-interface ShellHooks.create.before : c0f47ebb838f6566",
+		"plugin/promise-shell export-interface ShellDomain",
+		"plugin/promise-shell export-interface ShellDomain#head : cbe5cfdf7c2118a9",
+		"plugin/promise-shell export-interface ShellDomain.hook : 7cdc2f6ea06a635b",
 		"plugin/app export-interface App",
 		"plugin/app export-interface App#head : cbe5cfdf7c2118a9",
 		"plugin/app export-interface App.name : c0ea0a83162da54e",
@@ -415,7 +433,7 @@
 		"host/migrate export-function migrateProvider : 1ce12187ee3103c9",
 		"host/migrate export-function providerID : e2f435ff8944449d"
 	],
-	"structuralDigest": "78f2134348db3963e4825c9bca741f6d432128caedad75c7219156562f5f7086",
+	"structuralDigest": "77174ec07a11e85f32f969789663105b4dca14a78eca347c6fe8dd049a471ba1",
 	"textualDigests": {
 		"plugin/promise-plugin": "ad8e00e94b4c94587800db750132a44754f42fe322d5cfb6da9fb0168ced09f1",
 		"plugin/promise-registration": "90a5b4f900999f942f22dbc31cc76f947b6b29e7607b5d30255258014985a900",
@@ -427,6 +445,7 @@
 		"plugin/promise-event": "7e8549dc513c83bd3fcf7cd1b36bcd66b137fac5384f2ac65850b56c0ebcddad",
 		"plugin/promise-storage": "81d4d33862bd2f0f31caf5c3649a21c2fe774bf524bc60362e4ec8af9f7a5cbb",
 		"plugin/promise-permission": "533417da01f54839b003909e11863916b171d7641d0efe47f30d347e5e45a5e3",
+		"plugin/promise-shell": "38168a362cbc5a714efe7d7df75cd75b7896a8feb261d2b5e869c218f29041a3",
 		"plugin/app": "c461e171de85c361b83c89c6ad1f081a6f6a2a9af6b129efb8e4a95558a7c77d",
 		"plugin/options": "da083f4e23582702a9df1025ef44123720198cd94b27a54f4c840ad87d6280c6",
 		"schema/agent": "dcd9bec9bb4dd36f2e692af7f9270ce77f6d5fe73fe973dd45eb8233ed7e337d",

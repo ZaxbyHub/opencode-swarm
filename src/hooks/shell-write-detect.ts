@@ -61,6 +61,17 @@ export interface WriteTarget {
 	operator: string;
 	/** The file path written to, or null when the path cannot be determined statically. */
 	path: string | null;
+	/**
+	 * Present ONLY on inspectable POSIX inline-code interpreter evals
+	 * (`python -c`, `node -e`, `bash -c`, `eval`, … — the detectInterpreterEval
+	 * sites). Marks a capability write whose target the gate routes through
+	 * declared scope / file authority at the eval's working directory
+	 * (#1902/#3347). The opaque interpreter_eval classes (PowerShell
+	 * -EncodedCommand, nested script blocks, dynamic `&`/IEX invocation,
+	 * unsafe-text parse failures) deliberately do NOT set it and keep the
+	 * blanket block.
+	 */
+	capability?: true;
 }
 
 /**
@@ -92,6 +103,13 @@ export interface ResolvedWriteTarget {
 	 * contains command substitution ($(cmd) or `cmd`).
 	 */
 	resolved: boolean;
+	/**
+	 * For capability interpreter-eval writes only: the working directory the
+	 * eval runs at, tracked through subshell `cd` commands (the starting cwd
+	 * when none precedes it). The gate authorizes the eval against this
+	 * directory (#1902/#3347); absent for every other write kind.
+	 */
+	evalDirectory?: string;
 }
 
 /**
@@ -1145,6 +1163,173 @@ function getCommandName(cmd: unknown): string | null {
 }
 
 /**
+ * Separator-independent basename: splits on BOTH `/` and `\` so a Windows
+ * path (`C:\Python311\python.exe`) yields the same leaf under any host
+ * platform, then strips a case-insensitive `.exe` suffix. Used by the
+ * interpreter-spelling normalizer (#3343) and the host-shell classifier
+ * (#3346) — never `path.basename`, which is separator-bound to the host.
+ */
+export function basenameAnySep(word: string): string {
+	const leaf = word.split(/[\\/]/).filter(Boolean).pop() ?? word;
+	return leaf.replace(/\.exe$/i, '').toLowerCase();
+}
+
+/**
+ * Issue #3343: normalize an interpreter invocation to the canonical name the
+ * eval tables key on, regardless of spelling. Consumes the ORDERED COMMAND
+ * WORDS (name + suffix words) with a scan CURSOR, not just the first word,
+ * so transparent `env`/`command`/`exec` prefixes unwrap to the interpreter
+ * that actually runs — including WRAPPER CHAINS (`command env python -c`)
+ * and `env` flags that take a separate ARGUMENT (GNU env `-u NAME`, `-S
+ * "opts"`, `-C dir`): the argument is consumed together with its flag and
+ * never mistaken for the interpreter (final-critic round-1 Critical).
+ *   - `env` skips its own flags — arg-taking ones (`-u`/`-U`/`-C`/`-S`/
+ *     `--split-string`) skip their following argument too — and `VAR=VALUE`
+ *     assignments; `command`/`exec` (with their own `-p/-v/-V/-l` flags)
+ *     take the next word directly; the cursor advances through the whole
+ *     chain (`/usr/bin/env python3.12`, `exec env python -c`).
+ *   - basename (separator-independent `basenameAnySep`) handles
+ *     `/usr/bin/python3` and `C:/Python311/python.exe`.
+ *   - DUAL-FORM version lookup: strip a trailing digit-run version
+ *     `\d+(\.\d+)*` and accept when EITHER the stripped form OR the full
+ *     form is a known eval interpreter. A dotted-only strip would leave
+ *     `ruby3`/`perl5`/`php8`/`node22` — none are table keys — so the full
+ *     form is checked first and the stripped form (`ruby3.2`→`ruby`,
+ *     `node22.0.0`→`node`, `ksh93`→`ksh`) second. `python3.11-config`
+ *     ends non-digit, so it never strips and never matches.
+ * Returns null when no canonical interpreter matches (the caller leaves the
+ * command unclassified, exactly as before).
+ */
+// env flags whose value is a SEPARATE argument — the COMPLETE GNU coreutils
+// env set (9.x manual): -u/--unset NAME, -C/--chdir DIR, -S/--split-string
+// "opts", -a/--argv0 NAME (argv[0] override, the env sibling of exec a —
+// final-critic r3), --env0-from FILE.
+const ENV_FLAGS_WITH_ARG = new Set([
+	'-u',
+	'-U',
+	'-C',
+	'-S',
+	'-a',
+	'-P', // BSD/macOS env: -P altpath (required arg; final-critic r6)
+	'--split-string',
+	'--unset',
+	'--chdir',
+	'--argv0',
+	'--env0-from',
+]);
+
+/**
+ * True when an `env` flag token consumes the FOLLOWING word as its argument
+ * (final-critic r4: GNU getopt accepts unambiguous long-option ABBREVIATIONS
+ * (`--un` = `--unset`) and short-option CLUSTERS whose last member takes an
+ * argument (`-iu FOO` = `-i -u FOO`) — both re-opened the arg-taking-flag
+ * evasion until canonicalized). The five long arg-taking flags have unique
+ * first letters (u/c/a/s/e), so any prefix of length ≥3 is unambiguous
+ * across the set. Attached short forms (`-uFOO`) and mid-cluster arg-takers
+ * carry their argument inside the token and stay safe without it.
+ */
+function envFlagConsumesNextWord(token: string): boolean {
+	if (token.startsWith('--')) {
+		const exact = ENV_FLAGS_WITH_ARG.has(token);
+		if (exact) return true;
+		// GNU getopt accepts unambiguous long-option abbreviations of ANY
+		// length (`--u` = `--unset`; final-critic r5). The five arg-taking
+		// long flags have unique first letters, so any `--x…` prefix that
+		// matches exactly one is unambiguous.
+		if (token.length < 3) return false; // bare `--` terminator
+		return (
+			[...ENV_FLAGS_WITH_ARG].filter(
+				(flag) => flag.startsWith('--') && flag.startsWith(token),
+			).length === 1
+		);
+	}
+	if (token.startsWith('-') && token.length > 2) {
+		// Short cluster (final-critic r5): getopt walks left-to-right — the
+		// FIRST arg-taking member either is the final char (its argument is
+		// the NEXT word: `-iu FOO` = -i -u FOO) or swallows the REST of the
+		// token as its attached argument (`-uu` = -u u, `-Cu` = -C u) and
+		// the token consumes NO next word. Only the first shape skips a word.
+		const chars = token.slice(1).split('');
+		const argTaking = ['u', 'U', 'C', 'S', 'a', 'P'];
+		const firstArgIndex = chars.findIndex((c) => argTaking.includes(c));
+		return (
+			firstArgIndex === chars.length - 1 &&
+			chars.slice(0, -1).every((c) => !argTaking.includes(c))
+		);
+	}
+	return ENV_FLAGS_WITH_ARG.has(token);
+}
+
+function canonicalInterpreterName(cmd: unknown): string | null {
+	const name = getCommandName(cmd);
+	if (!name) return null;
+	const words = [name, ...getSuffixWords(cmd)];
+	let i = 0;
+	// Walk the transparent wrapper chain. The cursor only moves forward, so
+	// `command env python -c` advances name→env→python instead of re-reading
+	// the first suffix word on every hop (the round-1 critic chain bug). No
+	// hop cap: every iteration consumes at least the wrapper word, so the
+	// cursor bound alone terminates the loop (impl-review r3 finding 4 — a
+	// fixed cap re-opened a depth-N+1 bypass for no safety benefit).
+	for (let hop = 0; hop < words.length; hop++) {
+		const base = basenameAnySep(words[i] ?? '');
+		if (base !== 'env' && base !== 'command' && base !== 'exec') break;
+		i += 1; // consume the wrapper word
+		if (base === 'env') {
+			while (i < words.length) {
+				const token = words[i];
+				if (token === undefined) break;
+				if (envFlagConsumesNextWord(token)) {
+					i += 2; // flag + its separate argument
+					continue;
+				}
+				if (token.startsWith('-')) {
+					i += 1; // env's own no-argument flag (-i, --ignore-environment…)
+					continue;
+				}
+				if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+					i += 1; // VAR=VALUE assignment
+					continue;
+				}
+				break; // the interpreter word
+			}
+		} else {
+			// command/exec: only their own flags precede the program word.
+			// exec's `-a NAME` (argv[0] override) takes a separate argument
+			// (impl-review r3 finding 3) — consume it with the flag like the
+			// env branch does.
+			while (i < words.length) {
+				const token = words[i];
+				if (token === undefined) break;
+				if (token === '-a' || token === '--arg0') {
+					i += 2;
+					continue;
+				}
+				if (token.startsWith('-')) {
+					i += 1;
+					continue;
+				}
+				break;
+			}
+		}
+		if (i >= words.length) return null; // wrapper with no program word
+	}
+	const word = words[i];
+	if (word === undefined) return null;
+	const full = basenameAnySep(word);
+	if (INTERPRETER_EVAL_COMMANDS.has(full)) return full;
+	const stripped = full.replace(/\d+(\.\d+)*$/, '');
+	if (
+		stripped !== '' &&
+		stripped !== full &&
+		INTERPRETER_EVAL_COMMANDS.has(stripped)
+	) {
+		return stripped;
+	}
+	return null;
+}
+
+/**
  * Get the suffix (arguments after command name) from a command node. Returns
  * array of word texts.
  *
@@ -2160,8 +2345,13 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 	const name = getCommandName(cmd);
 	if (!name) return results;
 
-	const lowerName = name.toLowerCase();
-	if (!INTERPRETER_EVAL_COMMANDS.has(lowerName)) return [];
+	// Issue #3343: classify through the canonical spelling so versioned
+	// (`python3.11`), path-qualified (`/usr/bin/python3`), and
+	// env/command/exec-wrapped (`env python -c`) invocations cannot sidestep
+	// interpreter_eval detection. The emitted operator keeps the RAW first
+	// command word so diagnostics stay faithful to the invocation.
+	const canonical = canonicalInterpreterName(cmd);
+	if (!canonical) return [];
 
 	const suffixWords = getSuffixWords(cmd);
 
@@ -2188,16 +2378,17 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		zsh: ['-c'],
 		ksh: ['-c'],
 	};
-	if (lowerName === 'eval') {
+	if (canonical === 'eval') {
 		results.push({
 			category: 'interpreter_eval',
 			operator: 'eval',
 			path: null,
+			capability: true,
 		});
 		return results;
 	}
 
-	const relevantFlags = evalFlags[lowerName] ?? [];
+	const relevantFlags = evalFlags[canonical] ?? [];
 	// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
 	const hasEvalFlag = suffixWords.some((word) =>
 		relevantFlags.some(
@@ -2207,11 +2398,14 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 
 	if (!hasEvalFlag) return [];
 
-	// Interpreter eval is a write effect even without a specific file target
+	// Interpreter eval is a write effect even without a specific file target.
+	// capability marks the inspectable inline-code class the gate routes
+	// through declared scope / file authority (#1902/#3347).
 	results.push({
 		category: 'interpreter_eval',
 		operator: `${name} [eval]`,
 		path: null,
+		capability: true,
 	});
 
 	return results;
@@ -2731,6 +2925,7 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		/(?:^|\s)-(?:e|ec|enc|encodedcommand)(?=\s|=|$)/i.test(trimmed)
 	) {
 		results.push({
+			// opaque interpreter_eval class: no capability flag, blanket-blocked
 			category: 'interpreter_eval',
 			operator: 'PowerShell -EncodedCommand',
 			path: null,
@@ -2786,6 +2981,7 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		)
 	) {
 		results.push({
+			// opaque interpreter_eval class: no capability flag, blanket-blocked
 			category: 'interpreter_eval',
 			operator: 'nested PowerShell script block',
 			path: null,
@@ -2801,6 +2997,7 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		/(?:^|[;|])\s*(?:Invoke-Expression|IEX)\b/i.test(innerCommand)
 	) {
 		results.push({
+			// opaque interpreter_eval class: no capability flag, blanket-blocked
 			category: 'interpreter_eval',
 			operator: 'dynamic PowerShell invocation',
 			path: null,
@@ -3445,6 +3642,8 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		return {
 			writes: [
 				{
+					// opaque interpreter_eval class: no capability flag,
+					// blanket-blocked
 					category: 'interpreter_eval',
 					operator: 'unsafe command text',
 					path: null,
@@ -3496,14 +3695,31 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		allWrites.push(...procSubWrites);
 	}
 
-	// Deduplicate by (category, operator, path) to avoid double-counting
+	// Deduplicate by (category, operator, path) to avoid double-counting.
+	// Capability evals are the exception (#3347): same-interpreter occurrences
+	// across `cd` boundaries must EACH survive so the gate can route every
+	// occurrence at its own working directory. A duplicate capability eval
+	// keeps its entry with an occurrence-suffixed operator (`python [eval] #2`)
+	// which stays unique through the resolution and merge dedupe layers that
+	// key on the same triple — both AST walks traverse in the same order, so
+	// the suffixes pair up across the two passes.
 	const seen = new Set<string>();
-	const writes = allWrites.filter((wt) => {
+	const occurrence = new Map<string, number>();
+	const writes: WriteTarget[] = [];
+	for (const wt of allWrites) {
 		const key = buildDedupeKey(wt.category, wt.operator, wt.path);
-		if (seen.has(key)) return false;
+		if (seen.has(key)) {
+			if (wt.capability !== true || wt.category !== 'interpreter_eval') {
+				continue;
+			}
+			const n = (occurrence.get(key) ?? 1) + 1;
+			occurrence.set(key, n);
+			writes.push({ ...wt, operator: `${wt.operator} #${n}` });
+			continue;
+		}
 		seen.add(key);
-		return true;
-	});
+		writes.push(wt);
+	}
 
 	return {
 		writes,
@@ -3540,6 +3756,8 @@ export function detectWindowsWrites(
 		return {
 			writes: [
 				{
+					// opaque interpreter_eval class: no capability flag,
+					// blanket-blocked
 					category: 'interpreter_eval',
 					operator: 'unsafe command text',
 					path: null,
@@ -3796,10 +4014,15 @@ function collectWritesWithNodes(
 						// recursing double-applies it and resolves later sibling
 						// writes against a path the shell never writes (#3099
 						// round-4 Critical 3). cd itself produces no writes.
-						currentStack[0] = path.posix.resolve(
-							currentStack[0] ?? '/',
-							cdTarget,
-						);
+						// Windows-safe resolution (#3347 plan r3): a native
+						// backslash cwd must not flow through path.posix.resolve.
+						// resolvePath handles both separators; a dynamic cd
+						// target ($VAR/$(cmd)) resolves to null and falls back
+						// to the historical literal-append, which lands outside
+						// any declared scope (conservative).
+						currentStack[0] =
+							resolvePath(cdTarget, currentStack[0] ?? '/') ??
+							path.posix.resolve(currentStack[0] ?? '/', cdTarget);
 					} else {
 						// Use the current (possibly mutated) stack so cd changes propagate
 						collectWritesWithNodes(cmd, out, currentStack);
@@ -3944,8 +4167,11 @@ function collectWritesWithNodes(
 			// Check for cd command
 			const cdTarget = getCdTarget(node);
 			if (cdTarget) {
-				// Resolve relative cd target against current effective cwd
-				cwdStack[0] = path.posix.resolve(cwdStack[0] ?? '/', cdTarget);
+				// Resolve relative cd target against current effective cwd —
+				// Windows-aware (see the compound-loop cd site for rationale)
+				cwdStack[0] =
+					resolvePath(cdTarget, cwdStack[0] ?? '/') ??
+					path.posix.resolve(cwdStack[0] ?? '/', cdTarget);
 				return;
 			}
 
@@ -4087,6 +4313,10 @@ export function resolveWriteTargets(
 			original,
 			resolvedPath: resolvePath(original.path, cwd),
 			resolved: original.path !== null && !isDynamicPath(original.path),
+			...(original.capability === true &&
+			original.category === 'interpreter_eval'
+				? { evalDirectory: cwd }
+				: {}),
 		}));
 	}
 
@@ -4102,6 +4332,10 @@ export function resolveWriteTargets(
 			original,
 			resolvedPath: resolvePath(original.path, cwd),
 			resolved: original.path !== null && !isDynamicPath(original.path),
+			...(original.capability === true &&
+			original.category === 'interpreter_eval'
+				? { evalDirectory: cwd }
+				: {}),
 		}));
 	}
 
@@ -4110,30 +4344,56 @@ export function resolveWriteTargets(
 	const writesWithNodes: WriteWithNode[] = [];
 	collectWritesWithNodes(ast as BashNode, writesWithNodes, cwdStack);
 
-	// Deduplicate writes the same way detectPosixWrites does
+	// Deduplicate writes the same way detectPosixWrites does — including the
+	// capability-eval occurrence rename, so the nth occurrence here carries
+	// the same suffixed operator as the nth occurrence there and the map
+	// below pairs each occurrence with ITS OWN tracked context (#3347).
 	const seen = new Set<string>();
-	const deduplicated = writesWithNodes.filter((wwn) => {
+	const occurrence = new Map<string, number>();
+	const deduplicated: WriteWithNode[] = [];
+	for (const wwn of writesWithNodes) {
 		const key = buildDedupeKey(
 			wwn.write.category,
 			wwn.write.operator,
 			wwn.write.path,
 		);
-		if (seen.has(key)) return false;
+		if (seen.has(key)) {
+			if (
+				wwn.write.capability !== true ||
+				wwn.write.category !== 'interpreter_eval'
+			) {
+				continue;
+			}
+			const n = (occurrence.get(key) ?? 1) + 1;
+			occurrence.set(key, n);
+			deduplicated.push({
+				write: { ...wwn.write, operator: `${wwn.write.operator} #${n}` },
+				context: wwn.context,
+			});
+			continue;
+		}
 		seen.add(key);
-		return true;
-	});
+		deduplicated.push(wwn);
+	}
 
 	// Build a map from WriteTarget to its resolved path, using the context from each write
 	const resolvedMap = new Map<
 		string,
-		{ resolvedPath: string | null; resolved: boolean }
+		{ resolvedPath: string | null; resolved: boolean; evalDirectory?: string }
 	>();
 
 	for (const { write, context } of deduplicated) {
 		const resolvedPath = resolvePath(write.path, context);
 		const resolved = write.path !== null && !isDynamicPath(write.path);
 		const key = buildDedupeKey(write.category, write.operator, write.path);
-		resolvedMap.set(key, { resolvedPath, resolved });
+		// A capability eval has no static target; the working directory it
+		// runs at (tracked through any `cd`) IS what the gate authorizes
+		// against (#1902/#3347).
+		const evalDirectory =
+			write.capability === true && write.category === 'interpreter_eval'
+				? context
+				: undefined;
+		resolvedMap.set(key, { resolvedPath, resolved, evalDirectory });
 	}
 
 	// Map the input writes to their resolved paths
@@ -4149,13 +4409,21 @@ export function resolveWriteTargets(
 				original,
 				resolvedPath: resolved.resolvedPath,
 				resolved: resolved.resolved,
+				...(resolved.evalDirectory !== undefined
+					? { evalDirectory: resolved.evalDirectory }
+					: {}),
 			};
 		}
-		// Fallback: couldn't find this write in the detected set
+		// Fallback: couldn't find this write in the detected set — the eval
+		// working directory degrades to the starting cwd.
 		return {
 			original,
 			resolvedPath: resolvePath(original.path, cwd),
 			resolved: original.path !== null && !isDynamicPath(original.path),
+			...(original.capability === true &&
+			original.category === 'interpreter_eval'
+				? { evalDirectory: cwd }
+				: {}),
 		};
 	});
 }

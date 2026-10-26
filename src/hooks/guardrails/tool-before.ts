@@ -62,6 +62,8 @@ import { isTaskToolId, normalizeToolName } from '../normalize-tool-name';
 import {
 	CMD_WRAPPER_DECLARATION,
 	declaresWindowsWrapperLoose,
+	getObservedHostShell,
+	hostShellGrammarFamily,
 } from '../shell-executor-context';
 import {
 	detectInteractiveSession,
@@ -263,6 +265,7 @@ export function resolveWindowsWriteAuthority(
 	detectedShellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash',
 	shaped: boolean,
 	platform: NodeJS.Platform = process.platform,
+	hostShell?: string,
 ): 'powershell' | 'cmd' | null {
 	// A wrapper is an executor DECLARATION only at an invocation position: the
 	// very start of the command, or the receiving side of a pipe. A bare
@@ -282,13 +285,33 @@ export function resolveWindowsWriteAuthority(
 	// holds for the `shell` tool off Windows (#3323): there is no cmd.exe or
 	// PowerShell to inherit, so only an explicit wrapper or a shaped body
 	// (steps 1-2) can select a Windows grammar.
+	// #3346: when the v2 host has REPORTED the shell the `shell` tool
+	// actually executes (ctx.shell "create.before" → the observed-host-shell
+	// store), that report is AUTHORITATIVE ACROSS PLATFORMS — a win32 host
+	// whose `shell` tool runs Git Bash must not take cmd/PowerShell grammar
+	// from command content, and a POSIX host running PowerShell is covered by
+	// the wrapper/shaped steps above. Only a Windows-family report
+	// (powershell/pwsh/cmd — hostShellGrammarFamily) keeps the inherited
+	// content-detected grammar; any POSIX-family report disables it. With NO
+	// report yet (v1 host, or the first shell call before any
+	// shell.create.before fired) the platform-keyed interim from #3326
+	// applies: `shell` inherits content-detected Windows grammar on win32
+	// only — never wider than the pre-#3346 behavior.
 	const inheritedWindows =
 		detectedShellType === 'powershell' || detectedShellType === 'cmd';
 	if (cmdWrapper) return 'cmd';
 	if (psWrapper || shaped) return 'powershell';
-	const posixShellTool =
-		tool === 'bash' || (tool === 'shell' && platform !== 'win32');
+	if (tool === 'bash') return null;
+	if (tool === 'shell' && hostShell !== undefined && hostShell !== '') {
+		return hostShellGrammarFamily(hostShell) === 'windows' && inheritedWindows
+			? (detectedShellType as 'powershell' | 'cmd')
+			: null;
+	}
+	const posixShellTool = tool === 'bash' || tool === 'shell';
 	if (inheritedWindows && !posixShellTool) {
+		return detectedShellType as 'powershell' | 'cmd';
+	}
+	if (inheritedWindows && posixShellTool && platform === 'win32') {
 		return detectedShellType as 'powershell' | 'cmd';
 	}
 	return null;
@@ -1139,6 +1162,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			command,
 			detectedShellType,
 			shaped,
+			process.platform,
+			// #3346: the v2 host reports the shell the `shell` tool actually
+			// executes (observed-host-shell store); keying inheritance on that
+			// report closes the Git-Bash-on-Windows false positive class. The
+			// `bash` tool and unreported hosts keep the platform interim.
+			normalizedTool === 'shell' ? getObservedHostShell() : undefined,
 		);
 
 		// Shared constructs resolve to the POSIX reading whenever the POSIX
@@ -1260,6 +1289,76 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			shellDirectory,
 		);
 
+		// #3347: the universal-deny → file-authority → declared-scope tail of
+		// the write loop, shared verbatim by resolved writes and by routed
+		// capability evals (which authorize against the eval's tracked
+		// working directory) so every message shape stays identical by
+		// construction. Returns 'lenient' when the caller must skip the rest
+		// of the loop body for a no-scope lenient agent (resolved writes
+		// `continue`; a routed eval treats leniency like any other write).
+		const enforceWriteAuthorization = (
+			target: string,
+		): 'lenient' | 'enforced' => {
+			if (enforce && noScopeLenient && universalDenyPrefixes.length > 0) {
+				for (const prefix of universalDenyPrefixes) {
+					if (matchesAuthorityDenyPrefix(target, prefix, shellDirectory)) {
+						throw new Error(
+							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: Path is under universal deny prefix "${prefix}"`,
+						);
+					}
+				}
+			}
+
+			// No-scope agents: enforce only the universal deny list above, then
+			// preserve the prior leniency for the declared-scope authority checks.
+			if (noScopeLenient) return 'lenient';
+
+			const authorityCheck = checkFileAuthorityWithRules(
+				shellWriteAgent,
+				target,
+				shellDirectory,
+				precomputedAuthorityRules,
+				{
+					declaredScope,
+					authorityEnabled: authorityConfig?.enabled,
+					universalDenyPrefixes,
+					verifierConfigPaths: authorityConfig?.verifier_config_paths,
+				},
+			);
+			if (enforce && !authorityCheck.allowed) {
+				const evidenceEventID =
+					authorityCheck.layer === 'protected-path'
+						? recordFullAutoSevereEvidenceEvent({
+								sessionID,
+								childSessionID: sessionID,
+								category: 'protected_state_mutation',
+								paths: [target],
+							})
+						: undefined;
+				throw new Error(
+					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+				);
+			}
+
+			if (
+				enforce &&
+				declaredScope &&
+				declaredScope.length > 0 &&
+				!isInDeclaredScope(target, declaredScope, shellDirectory)
+			) {
+				const safeTarget = sanitizeDiagnosticText(target, 320);
+				const scopeSummary = declaredScope
+					.slice(0, 10)
+					.map((entry) => sanitizeDiagnosticText(entry, 160))
+					.join(', ');
+				const omitted = Math.max(0, declaredScope.length - 10);
+				throw new Error(
+					`WRITE BLOCKED: SCOPE_VIOLATION: shell write target "${safeTarget}" is outside the active scope [${scopeSummary}${omitted > 0 ? `, ... (+${omitted} more)` : ''}]. ACTION[architect]: if the target is intended, call declare_scope for the exact workspace-relative path and redispatch; otherwise correct the command.`,
+				);
+			}
+			return 'enforced';
+		};
+
 		for (const write of resolvedWrites) {
 			if (write.resolvedPath === null) {
 				// A null resolved path has three distinct causes that must NOT be
@@ -1276,11 +1375,36 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 				if (enforce && write.original.category === 'interpreter_eval') {
 					// Inline code (`python -c`, `node -e`, …) can write to arbitrary
-					// files whose targets are not statically knowable, so it cannot be
-					// verified against the declared scope. This stays fail-closed (it is
-					// how the scope/config-zone protections resist an eval bypass), but
-					// with an actionable message — the old text claimed an "unresolvable
-					// path target" that never existed for an eval.
+					// files whose targets are not statically knowable. The OPAQUE
+					// classes (PowerShell -EncodedCommand, nested script blocks,
+					// dynamic `&`/IEX invocation — the writes WITHOUT the
+					// capability flag) stay blanket-blocked: their payloads cannot
+					// be inspected at all.
+					// #3347/#1902 SCOPE-GATED ROUTING for the inspectable
+					// capability class (detectInterpreterEval): read-only /
+					// dedicated-tool-only roles route through file authority at
+					// the eval's working directory (the denial names the role),
+					// and agents WITH a declared scope route through the same
+					// universal-deny/authority/declared-scope checks as any
+					// other write, with the cd-tracked working directory as the
+					// target — an in-scope cwd admits the eval, an out-of-scope
+					// one rejects with the declared-scope error. Scope-less
+					// write-capable roles (architect, reviewer, the lenient
+					// general/build/plan class) KEEP the fail-closed block: no
+					// scope exists to verify the eval's unbounded write
+					// capability against (#3347 AC3 keeps the eval-block pins
+					// green; widening for orchestrator roles is the issue's open
+					// maintainer decision).
+					if (
+						write.original.capability === true &&
+						(isImmutableNonWriter ||
+							(declaredScope !== null &&
+								declaredScope !== undefined &&
+								declaredScope.length > 0))
+					) {
+						enforceWriteAuthorization(write.evalDirectory ?? shellDirectory);
+						continue;
+					}
 					throw new Error(
 						`BLOCKED: ${write.original.operator} evaluates inline code whose write targets cannot be verified against the declared scope — rejecting for safety. Write files with the write/edit tools or a checked-in script, and invoke installed tools directly (e.g. \`pytest\`, \`ruff\`) instead of an inline \`python -c\` / \`node -e\` eval.`,
 					);
@@ -1302,68 +1426,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				continue;
 			}
 
-			if (enforce && noScopeLenient && universalDenyPrefixes.length > 0) {
-				for (const prefix of universalDenyPrefixes) {
-					if (
-						matchesAuthorityDenyPrefix(
-							write.resolvedPath,
-							prefix,
-							shellDirectory,
-						)
-					) {
-						throw new Error(
-							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: Path is under universal deny prefix "${prefix}"`,
-						);
-					}
-				}
-			}
-
-			// No-scope agents: enforce only the universal deny list above, then
-			// preserve the prior leniency for the declared-scope authority checks.
-			if (noScopeLenient) continue;
-
-			const authorityCheck = checkFileAuthorityWithRules(
-				shellWriteAgent,
-				write.resolvedPath,
-				shellDirectory,
-				precomputedAuthorityRules,
-				{
-					declaredScope,
-					authorityEnabled: authorityConfig?.enabled,
-					universalDenyPrefixes,
-					verifierConfigPaths: authorityConfig?.verifier_config_paths,
-				},
-			);
-			if (enforce && !authorityCheck.allowed) {
-				const evidenceEventID =
-					authorityCheck.layer === 'protected-path'
-						? recordFullAutoSevereEvidenceEvent({
-								sessionID,
-								childSessionID: sessionID,
-								category: 'protected_state_mutation',
-								paths: [write.resolvedPath],
-							})
-						: undefined;
-				throw new Error(
-					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
-				);
-			}
-
-			if (
-				enforce &&
-				declaredScope &&
-				declaredScope.length > 0 &&
-				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory)
-			) {
-				const safeTarget = sanitizeDiagnosticText(write.resolvedPath, 320);
-				const scopeSummary = declaredScope
-					.slice(0, 10)
-					.map((entry) => sanitizeDiagnosticText(entry, 160))
-					.join(', ');
-				const omitted = Math.max(0, declaredScope.length - 10);
-				throw new Error(
-					`WRITE BLOCKED: SCOPE_VIOLATION: shell write target "${safeTarget}" is outside the active scope [${scopeSummary}${omitted > 0 ? `, ... (+${omitted} more)` : ''}]. ACTION[architect]: if the target is intended, call declare_scope for the exact workspace-relative path and redispatch; otherwise correct the command.`,
-				);
+			// #3347: the universal-deny → authority → declared-scope tail now
+			// lives in the shared enforceWriteAuthorization closure (defined
+			// above the loop) so routed capability evals and resolved writes
+			// produce byte-identical message shapes.
+			if (enforceWriteAuthorization(write.resolvedPath) === 'lenient') {
+				continue;
 			}
 			if (isCoder && session?.currentTaskId) {
 				const writeBinding = enforce
