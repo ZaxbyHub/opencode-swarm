@@ -241,14 +241,38 @@ function throwDestructiveBlock(
  * @returns The toolBefore handler function
  */
 /**
+ * Whether the executor that will run a bare `rmdir` has POSIX rmdir(2)
+ * semantics, the only basis for the empty-directory-removal exemption. Under
+ * PowerShell `rmdir` is an alias of Remove-Item (it deletes a file operand and
+ * can recurse), and cmd's `rd` differs too. So: no Windows grammar may own the
+ * command (`windowsShell` from resolveWindowsWriteAuthority; when it is null
+ * the Windows detectors do not run at all), the `shell` tool on a Windows host
+ * is not POSIX, and a Windows wrapper exposed only by unwrapping
+ * (`bash -c 'powershell -Command …'`) also disqualifies it.
+ */
+export function isPosixRmdirExecutor(
+	tool: string,
+	windowsShell: 'powershell' | 'cmd' | null,
+	detectionCommand: string,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	if (windowsShell !== null) return false;
+	if (tool !== 'bash' && platform === 'win32') return false;
+	return (
+		!declaresWindowsWrapperLoose(detectionCommand) &&
+		!CMD_WRAPPER_DECLARATION.test(detectionCommand)
+	);
+}
+
+/**
  * Whether a bare `rmdir` target (`WriteTarget.emptyDirectoryRemoval`) may skip
  * declared-scope membership: its canonical location, with every
  * symlink/junction in the parent chain resolved, is strictly inside the
  * canonical workspace root. Fail-closed: a resolution error, the root itself,
- * or a target outside the root returns false. rmdir(2) does not follow a
- * final symlink, so the parent chain decides containment. There is
- * deliberately no emptiness check — that would be a TOCTOU race; the
- * kernel's ENOTEMPTY is the authoritative guard.
+ * a target outside the root, or a target that exists as a file or symlink
+ * returns false. rmdir(2) does not follow a final symlink, so the parent
+ * chain decides containment. There is deliberately no emptiness check — that
+ * would be a TOCTOU race; the kernel's ENOTEMPTY is the authoritative guard.
  */
 export function isEmptyDirectoryRemovalWithinWorkspace(
 	targetPath: string,
@@ -259,6 +283,15 @@ export function isEmptyDirectoryRemovalWithinWorkspace(
 		const absolute = path.resolve(root, targetPath);
 		const parent = fs.realpathSync.native(path.dirname(absolute));
 		const canonical = path.join(parent, path.basename(absolute));
+		// Defence in depth: an existing file or symlink is not an rmdir(2)
+		// candidate, so it falls back to the normal declared-scope check.
+		let stat: fs.Stats | undefined;
+		try {
+			stat = fs.lstatSync(canonical);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+		}
+		if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) return false;
 		return (
 			!pathIdentitiesEqual(canonical, root) &&
 			isPathIdentityWithin(canonical, root)
@@ -1386,10 +1419,16 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				declaredScope &&
 				declaredScope.length > 0 &&
 				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory) &&
-				// A bare rmdir cannot remove a non-empty directory (ENOTEMPTY), so
-				// inside the workspace it needs no declared-scope membership.
+				// A bare POSIX rmdir cannot remove a non-empty directory
+				// (ENOTEMPTY), so inside the workspace it needs no declared-scope
+				// membership. Windows executors never qualify (Remove-Item alias).
 				!(
 					write.original.emptyDirectoryRemoval === true &&
+					isPosixRmdirExecutor(
+						normalizedTool,
+						windowsShell,
+						detectionCommand,
+					) &&
 					isEmptyDirectoryRemovalWithinWorkspace(
 						write.resolvedPath,
 						shellDirectory,

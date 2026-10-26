@@ -23,7 +23,10 @@ import {
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
-import { isEmptyDirectoryRemovalWithinWorkspace } from '../../../src/hooks/guardrails/tool-before';
+import {
+	isEmptyDirectoryRemovalWithinWorkspace,
+	isPosixRmdirExecutor,
+} from '../../../src/hooks/guardrails/tool-before';
 import { handleGuardrailExplain } from '../../../src/services/guardrail-explain-service';
 import { resetSwarmState, startAgentSession } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
@@ -62,13 +65,14 @@ function coderWithScope(sessionID: string, files: string[]): string {
 	return callID;
 }
 
-async function runAsCoder(sessionID: string, command: string): Promise<void> {
+async function runAsCoder(
+	sessionID: string,
+	command: string,
+	tool = 'bash',
+): Promise<void> {
 	const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 	const callID = coderWithScope(sessionID, ['src/']);
-	await hooks.toolBefore(
-		{ tool: 'bash', sessionID, callID },
-		{ args: { command } },
-	);
+	await hooks.toolBefore({ tool, sessionID, callID }, { args: { command } });
 }
 
 function emptyDir(relative: string): string {
@@ -276,5 +280,104 @@ describe('guardrail explain parity for bare rmdir', () => {
 		]);
 		expect(parents).toMatch(/\| *Decision *\| *block */i);
 		expect(parents).toContain('scope_violation');
+	});
+});
+
+/**
+ * The exemption rests on POSIX rmdir(2) semantics. Under PowerShell `rmdir`
+ * is an alias of Remove-Item (it deletes a FILE operand and can recurse), and
+ * cmd's `rd` differs too, so a Windows executor never earns it. A target that
+ * exists as a file or symlink also falls back to the normal scope check.
+ */
+describe('bare rmdir exemption: POSIX executor and real directory only', () => {
+	beforeEach(() => {
+		resetSwarmState();
+	});
+
+	it.each([
+		['bash', 'powershell -Command "rmdir .scratch-h/x"'],
+		['bash', 'pwsh -c "rmdir .scratch-h/x"'],
+		['bash', 'cmd /c rmdir .scratch-h/x'],
+		['bash', 'Get-ChildItem .scratch-h | Out-Null; rmdir .scratch-h/x'],
+		['shell', 'powershell -Command "rmdir .scratch-h/x"'],
+		['shell', 'Get-ChildItem .scratch-h | Out-Null; rmdir .scratch-h/x'],
+	])('keeps scope gating under a Windows executor (%s: %s)', async (tool, command) => {
+		emptyDir('.scratch-h/x');
+		await expect(
+			runAsCoder(`rmdir-windows-${++callCounter}`, command, tool),
+		).rejects.toThrow(SCOPE_VIOLATION);
+	});
+
+	it('keeps scope gating for a file operand named like a directory', async () => {
+		emptyDir('.scratch-i');
+		writeFileSync(path.join(TEST_DIR, '.scratch-i', 'looks-like-dir'), 'data');
+		await expect(
+			runAsCoder('rmdir-file-operand', 'rmdir .scratch-i/looks-like-dir'),
+		).rejects.toThrow(SCOPE_VIOLATION);
+	});
+
+	it('keeps scope gating for a symlink to a directory inside the workspace', async () => {
+		emptyDir('.scratch-i/real');
+		symlinkSync(
+			path.join(TEST_DIR, '.scratch-i', 'real'),
+			path.join(TEST_DIR, '.scratch-i', 'link'),
+			isWin32 ? 'junction' : 'dir',
+		);
+		await expect(
+			runAsCoder('rmdir-symlink-operand', 'rmdir .scratch-i/link'),
+		).rejects.toThrow(SCOPE_VIOLATION);
+	});
+
+	it('helper rejects a file or symlink target', () => {
+		emptyDir('.scratch-j/real');
+		writeFileSync(path.join(TEST_DIR, '.scratch-j', 'file'), 'data');
+		symlinkSync(
+			path.join(TEST_DIR, '.scratch-j', 'real'),
+			path.join(TEST_DIR, '.scratch-j', 'link'),
+			isWin32 ? 'junction' : 'dir',
+		);
+		expect(
+			isEmptyDirectoryRemovalWithinWorkspace('.scratch-j/file', TEST_DIR),
+		).toBe(false);
+		expect(
+			isEmptyDirectoryRemovalWithinWorkspace('.scratch-j/link', TEST_DIR),
+		).toBe(false);
+		expect(
+			isEmptyDirectoryRemovalWithinWorkspace('.scratch-j/real', TEST_DIR),
+		).toBe(true);
+	});
+
+	it('executor predicate admits only a POSIX executor', () => {
+		expect(isPosixRmdirExecutor('bash', null, 'rmdir a', 'linux')).toBe(true);
+		expect(isPosixRmdirExecutor('shell', null, 'rmdir a', 'darwin')).toBe(true);
+		expect(isPosixRmdirExecutor('bash', null, 'rmdir a', 'win32')).toBe(true);
+		expect(isPosixRmdirExecutor('shell', null, 'rmdir a', 'win32')).toBe(false);
+		expect(isPosixRmdirExecutor('bash', 'powershell', 'rmdir a', 'linux')).toBe(
+			false,
+		);
+		expect(isPosixRmdirExecutor('bash', 'cmd', 'rmdir a', 'linux')).toBe(false);
+		expect(
+			isPosixRmdirExecutor(
+				'bash',
+				null,
+				'powershell -Command "rmdir a"',
+				'linux',
+			),
+		).toBe(false);
+	});
+
+	it('explain blocks a PowerShell-wrapped rmdir like the gate', async () => {
+		emptyDir('.scratch-k/x');
+		const wrapped = await handleGuardrailExplain(TEST_DIR, [
+			'--agent',
+			'coder',
+			'--scope',
+			'src',
+			'powershell',
+			'-Command',
+			'"rmdir',
+			'.scratch-k/x"',
+		]);
+		expect(wrapped).toMatch(/\| *Decision *\| *block */i);
 	});
 });

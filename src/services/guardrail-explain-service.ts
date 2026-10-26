@@ -19,6 +19,7 @@ import {
 } from '../hooks/guardrails/helpers.js';
 import {
 	isEmptyDirectoryRemovalWithinWorkspace,
+	isPosixRmdirExecutor,
 	resolveWindowsWriteAuthority,
 } from '../hooks/guardrails/tool-before.js';
 import { declaresWindowsWrapperLoose } from '../hooks/shell-executor-context';
@@ -748,11 +749,13 @@ export async function handleGuardrailExplain(
 				if (write.resolvedPath) {
 					// Architect is exempt from scope checks
 					if (agent !== 'architect') {
-						// Mirrors the live gate: a bare rmdir inside the workspace
-						// needs no declared-scope membership (ENOTEMPTY-safe).
+						// Mirrors the live gate: a bare POSIX rmdir inside the
+						// workspace needs no declared-scope membership (ENOTEMPTY-safe);
+						// Windows executors never qualify.
 						const inScope =
 							isInDeclaredScope(write.resolvedPath, scopeEntries, directory) ||
 							(write.original.emptyDirectoryRemoval === true &&
+								isPosixRmdirExecutor('shell', authority, detectionCommand) &&
 								isEmptyDirectoryRemovalWithinWorkspace(
 									write.resolvedPath,
 									directory,

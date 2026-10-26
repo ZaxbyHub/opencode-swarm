@@ -8,16 +8,23 @@ is inside the workspace.
 
 - Admitted: `rmdir <dir>` with no options and exactly one literal operand
   whose location, with every symlink or junction in its parent chain
-  resolved, is strictly inside the session workspace. Each `rmdir` in a
-  `&&` / `;` sequence is judged separately.
+  resolved, is strictly inside the session workspace, when the command runs
+  under a POSIX shell (the `bash` tool, or the `shell` tool on a non-Windows
+  host). The target must not exist yet or must be a real directory. Each
+  `rmdir` in a `&&` / `;` sequence is judged separately.
 - Unchanged (still blocked as before): `rmdir -p`, any other option
   (`--ignore-fail-on-non-empty`, `--`), several operands, globs, brace
   expansion, variables or command substitution, targets outside the
   workspace (including after a `cd`), symlink escapes, the workspace root
-  itself, and every recursive form (`rm -rf`, `rmdir /s`, `rd /s`).
+  itself, every recursive form (`rm -rf`, `rmdir /s`, `rd /s`), a target
+  that exists as a file or symlink, and any `rmdir` run by a Windows
+  executor (a `powershell -Command` / `pwsh -c` / `cmd /c` wrapper, a
+  PowerShell-shaped command, or the `shell` tool on Windows). In PowerShell
+  `rmdir` is an alias of `Remove-Item`, which also deletes files.
 - File-authority and protected-path checks still apply to the target; only
   the declared-scope membership check is skipped.
-- `/swarm guardrail explain` reports the same decision as the live gate.
+- `/swarm guardrail explain` reports the same decision as the live gate
+  (it evaluates the command as the `shell` tool).
 
 ## Why
 
