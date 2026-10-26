@@ -101,6 +101,11 @@ export async function persistPrReviewBatch(
 		// both fields, matching the production dispatch record.
 		const subagentSessionId = options.subagentSessionId ?? defaultCorrelationId;
 		const correlationId = subagentSessionId;
+		// Issue #3340: critic lanes settle only when the child delegation record
+		// ran the `critic` role; mirror the production normalizedAgent for the
+		// mode instead of hardcoding 'reviewer' for every lane.
+		const recordAgent =
+			mode === 'swarm-pr-review:critic' ? 'critic' : 'reviewer';
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: options.prReviewResultReceipt
@@ -111,8 +116,8 @@ export async function persistPrReviewBatch(
 			subagentSessionId,
 			parentSessionId: PR_ARTIFACT_SESSION_ID,
 			callID: `call-${correlationId}`,
-			normalizedAgent: 'reviewer',
-			swarmPrefixedAgent: 'reviewer',
+			normalizedAgent: recordAgent,
+			swarmPrefixedAgent: recordAgent,
 			planTaskId: null,
 			evidenceTaskId: null,
 			batchId,
@@ -158,8 +163,8 @@ export async function persistPrReviewBatch(
 		const stored = storeLaneOutput(directory, {
 			batchId,
 			laneId: lane.laneId,
-			agent: 'reviewer',
-			role: options.artifactRole ?? 'reviewer',
+			agent: recordAgent,
+			role: options.artifactRole ?? recordAgent,
 			sessionId: subagentSessionId,
 			parentSessionId: PR_ARTIFACT_SESSION_ID,
 			mode,
@@ -345,6 +350,7 @@ export async function settleCriticPhase(
 		[
 			{
 				laneId: `${runId}-cr`,
+				agent: 'critic',
 				workflowLane: `${runId}-cr`,
 				reviewItemIds: [...itemIds],
 			},

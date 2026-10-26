@@ -146,7 +146,7 @@ export function runPartitionPreflight(
 		let files: string[] = [];
 		let hasDeclaredScope = false;
 
-		if (scopes && task.id in scopes) {
+		if (scopes && Object.hasOwn(scopes, task.id)) {
 			files = scopes[task.id];
 			hasDeclaredScope = true;
 		} else {

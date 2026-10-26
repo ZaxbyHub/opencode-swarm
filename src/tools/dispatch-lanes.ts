@@ -1759,6 +1759,10 @@ export async function executeDispatchLanesAsync(
 					workflowLane: lane.workflow_lane,
 					reviewItemIds: lane.review_item_ids,
 					ownedWorkflowLanes: lane.owned_workflow_lanes,
+					// Issue #3340 AC1: thread the declared agent so the gate
+					// recorder can assert the critic-role rule itself instead
+					// of trusting this call site (#3310).
+					agent: lane.agent,
 				}));
 				const depthTier: PrReviewDepthTier = gateState.prReviewDepthTier ?? 'L';
 				if (parsed.data.mode === 'swarm-pr-review:base') {
@@ -2020,6 +2024,11 @@ export async function executeDispatchLanesAsync(
 							batchId,
 							prHeadSha: headSha,
 							expectedPresentationOrder: prReviewPresentationOrder,
+							// Issue #3340 AC1: resolve declared lane agents through
+							// the same registry this call site's admission loop
+							// uses, so the gate's critic-role assertion reaches the
+							// identical verdict for prefixed generated names.
+							generatedAgentNames: swarmState.generatedAgentNames,
 						},
 					);
 				} else {
@@ -2088,12 +2097,14 @@ export async function executeDispatchLanesAsync(
 							: phase === 'closeout-critic'
 								? 'critic'
 								: 'reviewer';
-					if (
-						lane.workflow_lane !== phase ||
-						(expectedRole === 'critic'
-							? !role.startsWith('critic')
-							: role !== expectedRole)
-					) {
+					// Issue #3340 AC2 (recorded decision): closeout-critic requires
+					// the role to be EXACTLY `critic` — aligned with the PR_REVIEW
+					// critic rule (#3310). The pre-#3340 predicate accepted any
+					// role starting with `critic`, but the closeout gate settles on
+					// one [CLOSEOUT-CRITIC] verdict row per feedback item, the same
+					// row-emission contract the other critic-family agents cannot
+					// produce under their own output contracts.
+					if (lane.workflow_lane !== phase || role !== expectedRole) {
 						throw new Error(
 							`BLOCKED: PR_FEEDBACK ${phase} requires workflow_lane "${phase}" and role "${expectedRole}"`,
 						);

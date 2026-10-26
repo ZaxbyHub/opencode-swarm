@@ -2,22 +2,40 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { clearV2AgentTransformSurface } from '../../../../src/host/v2/model-apply';
-import { openCodeSwarmV2Setup } from '../../../../src/host/v2/setup';
+import {
+	_internals,
+	openCodeSwarmV2Setup,
+} from '../../../../src/host/v2/setup';
 import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
 } from '../../../../src/services/warning-buffer';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../../helpers/tmpdir';
 
 /**
  * #3327 review feedback: the v2 registration stage runs its five domains in
- * parallel under ONE 3.5 s budget (V2_REGISTRATION_TIMEOUT_MS) while init /
- * cleanup / tail preflight use the generous V2_SETUP_TIMEOUT_MS (60 s). A
- * stalled domain must not hold setup() open; it is named in a deferred warning,
- * and a registration that lands after cleanup started is disposed on arrival.
+ * parallel under ONE budget (setup.ts V2_REGISTRATION_TIMEOUT_MS, 3.5 s)
+ * while init / cleanup / tail preflight use the generous V2_SETUP_TIMEOUT_MS
+ * (60 s). A stalled domain must not hold setup() open; it is named in a
+ * deferred warning, and a registration that lands after cleanup started is
+ * disposed on arrival.
+ *
+ * #3350 AC4 SEAM CONVERSION (decision recorded on
+ * https://github.com/ZaxbyHub/opencode-swarm/issues/3350#issuecomment-6388937737):
+ * every registration-stage case pins the budget through the declared
+ * `_internals.registrationTimeoutMs` seam (read at call time by setup.ts)
+ * instead of waiting out real 3.5 s wall-clock windows — same contract, fast
+ * and stable (docs/testing/test-stability.md). The 4 s runInit leg below is
+ * deliberately NOT converted: it pins runInit's own inner budgets, not the
+ * registration stage, and no seam exists without invasive timer DI.
  */
 
 const PARTIAL = 'partial registration';
+
+/** Fast seam-pinned registration budget for the converted cases. */
+const FAST_BUDGET_MS = 50;
+/** Generous ceiling for a seam-pinned setup (mirrors the fakeclock check). */
+const SETUP_CEILING_MS = 5_000;
 
 interface Spy {
 	dispose: () => Promise<void>;
@@ -106,20 +124,32 @@ const partialWarnings = () =>
 	getDeferredWarnings().filter((w) => w.includes(PARTIAL));
 
 let dir: string;
+let savedBudget: number | undefined;
+
+/** Pin the registration-stage budget through the declared seam. */
+function pinRegistrationBudget(ms: number): void {
+	savedBudget = _internals.registrationTimeoutMs;
+	_internals.registrationTimeoutMs = ms;
+}
 
 beforeEach(() => {
 	clearDeferredWarnings();
 	dir = canonicalMkdtemp('v2-reg-budget-3327-');
 });
 
-afterEach(() => {
+afterEach(async () => {
+	if (savedBudget !== undefined) {
+		_internals.registrationTimeoutMs = savedBudget;
+		savedBudget = undefined;
+	}
 	clearV2AgentTransformSurface();
 	clearDeferredWarnings();
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeTreeWithRetry(dir);
 });
 
-describe('#3327 registration budget: stalled domain', () => {
-	test('a never-settling registration resolves setup within ~3.5s, others land, warning names the domain', async () => {
+describe('#3327 registration budget: stalled domain (seam-pinned budget)', () => {
+	test('a never-settling registration resolves setup at the pinned budget, others land, warning names the domain + budget', async () => {
+		pinRegistrationBudget(FAST_BUDGET_MS);
 		const { ctx, counts } = buildCtx(dir, {
 			toolTransform: () => new Promise<never>(() => {}),
 		});
@@ -129,8 +159,7 @@ describe('#3327 registration budget: stalled domain', () => {
 		});
 		const elapsed = performance.now() - start;
 
-		expect(elapsed).toBeGreaterThanOrEqual(3000);
-		expect(elapsed).toBeLessThan(6000);
+		expect(elapsed).toBeLessThan(SETUP_CEILING_MS);
 		expect(typeof cleanup).toBe('function');
 		// Every other domain registered despite the stalled one.
 		expect(counts.agent).toBe(1);
@@ -142,7 +171,8 @@ describe('#3327 registration budget: stalled domain', () => {
 		const warnings = partialWarnings();
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]).toContain('(tool)');
-		expect(warnings[0]).toContain('3500ms');
+		// The warning names the LIVE (seam-pinned) budget value.
+		expect(warnings[0]).toContain(`${FAST_BUDGET_MS}ms`);
 		// Settled domains are not blamed.
 		expect(warnings[0]).not.toContain('context-hook');
 		expect(warnings[0]).not.toContain('tool-hook');
@@ -152,6 +182,7 @@ describe('#3327 registration budget: stalled domain', () => {
 	}, 15_000);
 
 	test('several stalled domains are all named, in registration order, in one warning', async () => {
+		pinRegistrationBudget(FAST_BUDGET_MS);
 		const { ctx } = buildCtx(dir, {
 			toolTransform: () => new Promise<never>(() => {}),
 			toolHook: () => new Promise<never>(() => {}),
@@ -169,6 +200,7 @@ describe('#3327 registration budget: stalled domain', () => {
 	}, 15_000);
 
 	test('a registration landing after budget AND after cleanup is disposed on arrival', async () => {
+		pinRegistrationBudget(FAST_BUDGET_MS);
 		let release!: (r: Spy) => void;
 		const gate = new Promise<Spy>((resolve) => {
 			release = resolve;
@@ -198,6 +230,7 @@ describe('#3327 registration budget: stalled domain', () => {
 	}, 15_000);
 
 	test('a late registration whose dispose throws does not surface as an unhandled rejection', async () => {
+		pinRegistrationBudget(FAST_BUDGET_MS);
 		let release!: (r: unknown) => void;
 		const gate = new Promise<unknown>((resolve) => {
 			release = resolve;
@@ -228,8 +261,9 @@ describe('#3327 registration budget: stalled domain', () => {
 	}, 15_000);
 });
 
-describe('#3327 registration budget: per-domain isolation', () => {
+describe('#3327 registration budget: per-domain isolation (seam-pinned budget)', () => {
 	test('a rejecting domain does not block others; cleanup disposes the successes', async () => {
+		pinRegistrationBudget(FAST_BUDGET_MS);
 		const { ctx, counts, registrations } = buildCtx(dir, {
 			commandTransform: async () => {
 				throw new Error('command boom');
@@ -256,12 +290,16 @@ describe('#3327 registration budget: per-domain isolation', () => {
 	}, 15_000);
 
 	test('a rejecting domain does not cut short a slower sibling (setup waits for it)', async () => {
+		// This scenario needs the sibling to land INSIDE the budget, so the
+		// seam pin is 500ms (not 50ms): same seam-read contract, a window the
+		// 150ms sibling reliably fits in.
+		pinRegistrationBudget(500);
 		const slow = makeRegistration();
 		const { ctx, counts, registrations } = buildCtx(dir, {
 			commandTransform: async () => {
 				throw new Error('command boom');
 			},
-			// Lands well after the fast rejection but well inside the 3.5s budget.
+			// Lands well after the fast rejection but well inside the budget.
 			toolTransform: () =>
 				new Promise<Spy>((resolve) => setTimeout(() => resolve(slow), 150)),
 		});
@@ -282,8 +320,11 @@ describe('#3327 registration budget: per-domain isolation', () => {
 	}, 15_000);
 });
 
-describe('#3327 runInit budget (60s, not 3.5s)', () => {
+describe('#3327 runInit budget (60s, not the registration budget)', () => {
 	test('a 4000ms runInit now succeeds', async () => {
+		// NOT seam-converted: this leg pins runInit's own inner budgets (the
+		// generous 60s setup stage), which no registration seam can reach
+		// without invasive timer DI (#3350 AC4 decision, comment 6388937737).
 		const { ctx } = buildCtx(dir);
 		const start = performance.now();
 		const cleanup = await openCodeSwarmV2Setup(ctx as never, {
@@ -318,7 +359,7 @@ describe('#3327 runInit budget (60s, not 3.5s)', () => {
 	});
 });
 
-describe('#3327 source contract', () => {
+describe('#3327 source contract (seam-read form, #3350 AC4)', () => {
 	const src = fs.readFileSync(
 		path.resolve(import.meta.dir, '../../../../src/host/v2/setup.ts'),
 		'utf-8',
@@ -330,20 +371,20 @@ describe('#3327 source contract', () => {
 		expect(src).toContain('const V2_PREFLIGHT_CONFIG_TIMEOUT_MS = 2_000;');
 	});
 
-	test('preflight uses the async config loader only', () => {
+	test('preflight reads the loader and budget through the _internals seam', () => {
 		const start = src.indexOf('async function deferredV2StartupModelPreflight');
 		const end = src.indexOf('export interface V2SetupDependencies');
 		expect(start).toBeGreaterThanOrEqual(0);
 		const body = src.slice(start, end);
-		expect(body).toContain('loadPluginConfigWithMetaAsync(directory)');
-		expect(body).toContain('V2_PREFLIGHT_CONFIG_TIMEOUT_MS');
+		expect(body).toContain('_internals.loadConfig(directory)');
+		expect(body).toContain('_internals.preflightConfigTimeoutMs');
 		// \b: the sync name must not appear (Async variant is a different word).
 		expect(src).not.toMatch(/\bloadPluginConfigWithMeta\b/);
 	});
 
-	test('registration Promise.all is wrapped by withTimeout with the registration budget', () => {
+	test('registration Promise.all is wrapped by withTimeout reading the seam budget', () => {
 		expect(src).toMatch(
-			/withTimeout\(\s*Promise\.all\(\[[\s\S]*?\]\),\s*V2_REGISTRATION_TIMEOUT_MS,/,
+			/withTimeout\(\s*Promise\.all\(\[[\s\S]*?\]\),\s*_internals\.registrationTimeoutMs,/,
 		);
 		// init stays on the generous budget, not the registration one.
 		expect(src).toMatch(
@@ -366,8 +407,12 @@ describe('#3327 source contract', () => {
 		expect(src).toMatch(
 			/withTimeout\(\s*state\.disposeV1\(\),\s*V2_SETUP_TIMEOUT_MS,/,
 		);
-		// the 3.5s registration budget is used by exactly one withTimeout stage
-		const uses = src.match(/V2_REGISTRATION_TIMEOUT_MS,/g) ?? [];
-		expect(uses.length).toBe(1);
+		// The registration-stage budget is read through the seam exactly once
+		// (the withTimeout stage arg), and the constant itself survives only
+		// in its declaration + the _internals initializer (trailing-comma use).
+		const seamUses = src.match(/_internals\.registrationTimeoutMs,/g) ?? [];
+		expect(seamUses.length).toBe(1);
+		const constantUses = src.match(/V2_REGISTRATION_TIMEOUT_MS,/g) ?? [];
+		expect(constantUses.length).toBe(1);
 	});
 });

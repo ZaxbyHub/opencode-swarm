@@ -10,7 +10,10 @@ name: host-contract-check
 # Lanes:
 #   - weekly schedule + workflow_dispatch: BLOCKING. On structural drift the
 #     check step routes to a single deduplicated tracking issue
-#     ("Host contract drift: message-v2.ts @ <tag>").
+#     ("Host contract drift: message-v2.ts @ <tag>"). The v2 leg
+#     (scripts/check-host-contract-v2.ts, issue #2910) routes to its own
+#     deduplicated tracking issue and is failure-INDEPENDENT of the v1 leg
+#     (its step runs `if: always()` so a v1 failure never masks v2 drift).
 #   - pull_request (gated on host-contract surfaces): ADVISORY
 #     (continue-on-error) — a PR cannot fix upstream drift, so it must never
 #     block on it; the output is still visible in the log and job summary.
@@ -26,12 +29,19 @@ on:
         description: "Host tag to compare (empty = npm-latest of @opencode-ai/plugin)"
         required: false
         default: ""
+      tag_v2:
+        description: "v2 @opencode/plugin version to compare (empty = npm-latest)"
+        required: false
+        default: ""
   pull_request:
     branches: ["**"]
     paths:
       - "tests/helpers/host-*"
       - "tests/fixtures/host/**"
+      - "tests/fixtures/host/expected-structure-v2.json"
       - "scripts/check-host-contract.ts"
+      - "scripts/check-host-contract-v2.ts"
+      - "tests/unit/scripts/check-host-contract-v2.test.ts"
       - ".github/workflows/host-contract-check.yml"
       - "bun.lock"
       - "package.json"
@@ -92,6 +102,35 @@ jobs:
             bun scripts/check-host-contract.ts $ARGS 2>&1 | tee host-contract-output.txt
           fi
           exit "${PIPESTATUS[0]}"
+      # Issue #2910 W1.4: the v2 leg is failure-INDEPENDENT of the v1 leg —
+      # `if: always()` (plus the v1 leg's PR-only continue-on-error) means a
+      # v1 structural drift can never mask v2 drift or vice versa. Advisory on
+      # PRs, blocking on the weekly schedule and manual dispatch, with its own
+      # output file, summary block, and deduplicated tracking issue.
+      - name: Run v2 host-contract check
+        id: host_contract_v2
+        if: always()
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        # Same env discipline as the v1 leg: the dispatch tag reaches the
+        # shell only as an env VALUE, never an inline ${{ }} interpolation
+        # (PRR-006); GH_TOKEN/GH_REPO drive tracking-issue routing.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          INPUT_TAG_V2: ${{ inputs.tag_v2 }}
+        run: |
+          set -uo pipefail
+          ARGS=""
+          if [ "${{ github.event_name != 'pull_request' }}" = "true" ]; then
+            ARGS="--route-on-drift"
+          fi
+          # shellcheck disable=SC2086 — ARGS is deliberately word-split
+          if [ -n "$INPUT_TAG_V2" ]; then
+            bun scripts/check-host-contract-v2.ts $ARGS --tag "$INPUT_TAG_V2" 2>&1 | tee host-contract-v2-output.txt
+          else
+            bun scripts/check-host-contract-v2.ts $ARGS 2>&1 | tee host-contract-v2-output.txt
+          fi
+          exit "${PIPESTATUS[0]}"
       - name: Record compared tag in job summary
         if: always()
         run: |
@@ -99,5 +138,14 @@ jobs:
             echo "## Host contract check"
             echo '```text'
             cat host-contract-output.txt 2>/dev/null || echo "(no output captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Record v2 verdict in job summary
+        if: always()
+        run: |
+          {
+            echo "## Host contract check (v2)"
+            echo '```text'
+            cat host-contract-v2-output.txt 2>/dev/null || echo "(no output captured)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

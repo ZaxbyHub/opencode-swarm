@@ -46,8 +46,16 @@ export const _internals = {
 		undefined as unknown as typeof import('./orchestrator.js').detectFullAuto,
 	guaranteeAllPlansComplete:
 		undefined as unknown as typeof import('./finalize-stage.js').guaranteeAllPlansComplete,
+	// #3427: the align stage's repository probe rides the shared async
+	// reader (same GitRepositoryStatus result vocabulary the sync
+	// branch.getGitRepositoryStatus produced, so the reason-specific skip
+	// diagnostics survive) — the slot keeps its name; only the return type
+	// became a Promise. Legacy sync stubs keep working at runtime (awaiting
+	// a plain value is a no-op) — note the test tree is NOT typechecked
+	// (tsconfig includes src/ only), so that tolerance, not the compiler,
+	// is what keeps older sync stubs passing.
 	getGitRepositoryStatus:
-		undefined as unknown as typeof import('../../git/branch.js').getGitRepositoryStatus,
+		undefined as unknown as typeof import('../../commands/git-status-read.js').readGitRepositoryStatusDetailedAsync,
 	// #2953: the seam value is guardResetWithRecheck (installed by
 	// wireCloseInternals) — it takes the wider options (carrying the
 	// confirmed tracked-dirty scope) and returns a result that may carry

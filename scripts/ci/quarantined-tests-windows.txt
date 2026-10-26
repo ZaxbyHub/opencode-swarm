@@ -12,7 +12,7 @@
 # gate; an EXPIRY more than 14 days in the past also fails (inside the grace
 # window it only warns).
 #
-# STATUS: 6 active entries — tests/unit/execute-journey/j02-failure-rejection-distinct.test.ts (issue #2826), tests/unit/hooks/delegation-gate-background-coder.test.ts (issue #2867), and tests/unit/tools/dispatch-lanes-pr-review-resilience-followups.test.ts (issue #3248); OWNER/EXPIRY blocks below. The 9-entry I3 renewal cohort was retired per issue
+# STATUS: 8 active entries — tests/unit/execute-journey/j02-failure-rejection-distinct.test.ts (renewed 2026-10-21 per #3203, EXPIRY 2026-11-18), tests/unit/hooks/delegation-gate-background-coder.test.ts (renewed 2026-10-21 per #3203, EXPIRY 2026-11-18), and tests/unit/tools/dispatch-lanes-pr-review-resilience-followups.test.ts (issue #3248), plus the five issue #3264 merge-group flake cohort entries quarantined 2026-10-21 (EXPIRY 2026-11-20); OWNER/EXPIRY blocks below. The 9-entry I3 renewal cohort was retired per issue
 # #2973 on 2026-09-27: rows with their named root fixes already in-tree —
 # pr-monitor-status (PR #2190 freezeClock + EBUSY-retry), 2602-lifecycle and
 # phase-complete.lock-adversarial (PR #2807 safeRmRecursive) — and rows whose
@@ -23,6 +23,25 @@
 # opts the PR tier in because the diff touches scripts/) plus merge_group.
 # Do not re-add any of these files without a fresh merge-group windows-latest
 # failure per the #1782 convention.)
+#
+# The 3-entry #3261 windows EBUSY cohort was retired per issue #3203 on
+# 2026-10-21: tests/unit/session/hydration-populate-guard.test.ts's named
+# root fix (safeRmRecursive teardown — the #2190/#2807 bounded
+# EBUSY/EPERM-retry pattern) already landed in-tree via #3248 (3bffa0295,
+# pinned by tests/unit/session/hydration-teardown-routing-3248.test.ts),
+# and the same conversion landed for
+# tests/unit/hooks/delegation-gate-rework-remediation.test.ts and
+# tests/unit/hooks/delegation-gate-reentry-bypass.test.ts in the retiring
+# PR (raw `await fs.rm` teardown with zero retries → safeRmRecursive's
+# ~10 s bounded retry budget, closing each entry's EXPIRY criterion
+# "root-fix the EBUSY teardown"). The two entries whose named remedies
+# could not be verified from CI evidence (j02 wall-clock boot sensitivity,
+# delegation-gate-background-coder observer timing — its named
+# safe-test-dir candidate has been in place since ec5bcceef, 2026-07-24)
+# were renewed to EXPIRY 2026-11-18 under the open #2973 cohort anchor per
+# the renewal-requires-issue policy (#2905). Do not re-add any of the
+# retired files without a fresh merge-group windows-latest failure that
+# cannot be fixed at the root.
 #
 # History: this list previously held 9 Windows-only failures. They were fixed
 # in issue #1729 by a combination of:
@@ -95,18 +114,16 @@
 # per issue #2185 / archive.test.ts per issue #2812), not a logic bug.
 # Pre-existing, unrelated to any specific PR. Quarantined per issue #2867;
 # tracked under #1782 (test-stability sprint).
-# OWNER: zaxbysauce — issue #2867 (windows-only retry-flake on
-#   `unit (windows-latest, 2)`; CORE-TREE per detector rule C, single-OS
-#   windows-latest so routed here after human review; see merge-group run
-#   35491073606, unit-shard-2 artifact 10599416863 for the
-#   `Passed on retry 2 (flaky)` annotation)
-# EXPIRY: 2026-10-20 — root-fix the windows git-spawn / observer-timing
-#   flake (candidate: convert the per-test mkdtempSync/rmSync cycle to
-#   use tests/helpers/safe-test-dir.ts safeRmRecursive with bounded
-#   EBUSY/EPERM retries, matching the PR #2190 / #2807 pattern already
-#   root-fixed for pr-monitor-status.test.ts and #2602 lifecycle) or
-#   renew with an updated diagnosis under #1782/#2477. After EXPIRY,
-#   Check 7 warns for 14 days, then hard-fails on day 15.
+# OWNER: zaxbysauce — issue #2973 (I3 renewal-cohort retirement tracker; original flake evidence: closed #2867, run 35491073606 unit-shard-2 artifact 10599416863, block history above)
+# EXPIRY: 2026-11-18 — updated diagnosis per #3203: the original criterion's
+#   named candidate (convert the per-test cycle to
+#   tests/helpers/safe-test-dir.ts safeRmRecursive) has been in place since
+#   ec5bcceef (2026-07-24, createSafeTestDir), so the residual flake is the
+#   windows git-spawn / completion-observer timing class; retire when that
+#   is root-fixed or the file passes windows-latest merge-group runs clean
+#   (#2973 cohort). After EXPIRY, Check 7 warns for 14 days, then
+#   hard-fails on day 15.
+# Renewed 2026-10-21 per issue #3203 (quarantine-aging tracker); previous EXPIRY 2026-10-20.
 tests/unit/hooks/delegation-gate-background-coder.test.ts
 
 #
@@ -134,12 +151,13 @@ tests/unit/hooks/delegation-gate-background-coder.test.ts
 # file passes locally (4/4 cases, 5.95s). Pre-existing, unrelated to any
 # specific PR. Quarantined per issues #2826/#2810; tracked under #1737
 # (test quarantine debt) pending a dedicated test-stability sprint (#1782).
-# OWNER: zaxbysauce — issue #2826 (windows-latest-only merge-group flake;
-#   single-OS evidence: windows-3/5 retry-passes, siblings green)
-# EXPIRY: 2026-10-17 — root-fix the journey-host boot/120s-budget wall-clock
-#   sensitivity (e.g. trim per-case boot cost or freeze the clock) or renew
-#   with an updated criterion. After EXPIRY, Check 7 warns for 14 days, then
+# OWNER: zaxbysauce — issue #2973 (I3 renewal-cohort retirement tracker; original flake evidence: closed #2826, windows-3/5 retry-passes with siblings green, block history above)
+# EXPIRY: 2026-11-18 — retire when the journey-host boot / 120s-budget
+#   wall-clock sensitivity is root-fixed (trim per-case boot cost or
+#   freeze the clock) or the file passes windows-latest merge-group runs
+#   clean (#2973 cohort). After EXPIRY, Check 7 warns for 14 days, then
 #   hard-fails on day 15.
+# Renewed 2026-10-21 per issue #3203 (quarantine-aging tracker; renewed four days past EXPIRY, inside the 14-day grace window); previous EXPIRY 2026-10-17.
 tests/unit/execute-journey/j02-failure-rejection-distinct.test.ts
 
 #
@@ -176,32 +194,90 @@ tests/unit/execute-journey/j02-failure-rejection-distinct.test.ts
 tests/unit/tools/dispatch-lanes-pr-review-resilience-followups.test.ts
 
 
-# Quarantined 2026-10-14 per auto-flake tracker #3261; evidence from PR #3242
-#   merge-queue candidates (runs 38574480126, 38583979646): both files failed
-#   windows-only with "EBUSY: resource busy or locked, rm <temp scratch>" in
-#   afterAll/afterEach recursive rm, retried 3x per shard with assertions
-#   passing; same head passed pull_request CI 45/45. Environmental handle
-#   contention, not diff-caused (#3242 touches workflow CI + a new lint only).
-# OWNER: zaxbysauce — issue #3261 (merge-queue flake candidates; PR #3242
-#   closeout evidence in comments)
-# EXPIRY: 2026-10-28 — retire when each file passes a windows-latest
-#   merge-group run clean, or root-fix the EBUSY teardown (retry-with-backoff
-#   or platform-safe cleanup).
-tests/unit/session/hydration-populate-guard.test.ts
+# tests/unit/tools/test-runner-feedback-regressions.test.ts (issue #3264)
+# -----------------------------------------------------------------------
+# Tests the test_runner feedback-regression ratchets (FB-006/FB-007
+# exit-before-timeout classification, fail-closed target-scope/coverage/
+# bail handling). Passed-on-retry (attempt-1 fail, no assertion text
+# captured) on merge-group windows-latest three times in five days: run
+# 38761977428 shard 3 (2026-10-15), run 39120650779 shard 2 (2026-10-18),
+# and run 39276759894 shard 4 (2026-10-19 — after the 473df7e07/
+# 592e7b233 worktree-storm fixes, so not an artifact of that storm).
+# No ubuntu/macos flake annotations for this file across the 11-run
+# 2026-10-14..20 merge-group harvest. Pre-existing, unrelated to any
+# specific PR.
+# OWNER: zaxbysauce — issue #3264 (merge-group flake cohort, Oct 2026)
+# EXPIRY: 2026-11-20 — retire when the file passes three consecutive
+#   merge-group windows-latest runs green, or the attempt-1 failure
+#   signature is root-fixed.
+tests/unit/tools/test-runner-feedback-regressions.test.ts
 
+# tests/unit/full-auto/state-locking.test.ts (issue #3264)
+# -----------------------------------------------------------------------
+# Tests Full-Auto state-lock acquisition and cross-process RMW (worker
+# subprocesses coordinating through lock files). Hard-failed unit
+# (windows-latest, 5) on merge-group run 38761977428 (2026-10-15), 3/3
+# identical attempts: "Full-Auto state cross-process RMW > retains both
+# updates from independent workers after serialized reads" expected exits
+# [0, 0] but a worker subprocess exited 1 (state-locking.test.ts:290) —
+# cross-process lock-contention timing under the windows runner, not an
+# EBUSY/infra signature and not part of the 2026-10-18 worktree storm.
+# Green on ubuntu/macos and in all six later harvested merge-group runs.
+# Pre-existing, unrelated to any specific PR.
+# OWNER: zaxbysauce — issue #3264 (merge-group flake cohort, Oct 2026)
+# EXPIRY: 2026-11-20 — retire when the cross-process RMW worker-exit race
+#   is root-fixed (bounded worker-exit tolerance) or the file passes three
+#   consecutive merge-group windows-latest runs green.
+tests/unit/full-auto/state-locking.test.ts
 
-# OWNER: zaxbysauce — issue #3261 (merge-queue flake candidates; PR #3242
-#   closeout evidence in comments)
-# EXPIRY: 2026-10-28 — retire when the file passes a windows-latest
-#   merge-group run clean, or root-fix the EBUSY teardown (retry-with-backoff
-#   or platform-safe cleanup).
-tests/unit/hooks/delegation-gate-rework-remediation.test.ts
+# tests/unit/evaluation/runner-failures.test.ts (issue #3264)
+# -----------------------------------------------------------------------
+# Tests evaluation-runner failure classification (per-task deadline under
+# an executor that ignores AbortSignal, portable scorer imports). Passed-
+# on-retry (attempt-1 fail, no assertion text captured) on merge-group
+# unit (windows-latest, 3), run 39401121156 (2026-10-20, post
+# worktree-storm fixes). Recurrence signal: this flake family was already
+# root-fixed once per issue #2478 (2026-09-02), so the 2026-10-20 event
+# is a post-fix recurrence, not storm fallout. No ubuntu/macos flake
+# annotations for this file across the 11-run 2026-10-14..20 harvest.
+# Pre-existing, unrelated to any specific PR.
+# OWNER: zaxbysauce — issue #3264 (merge-group flake cohort, Oct 2026)
+# EXPIRY: 2026-11-20 — retire when the file passes three consecutive
+#   merge-group windows-latest runs green, or the attempt-1 failure
+#   signature is root-fixed.
+tests/unit/evaluation/runner-failures.test.ts
 
+# tests/unit/workflow/coder-settlement-2214-hardening.test.ts (issue #3264)
+# -----------------------------------------------------------------------
+# Tests issue #2214 review-feedback hardening (denial rollback releasing
+# ownership under lock contention, clean-workspace dispatch admission).
+# Passed-on-retry (attempt-1 fail, no assertion text captured) on
+# merge-group unit (windows-latest, 4), run 39276759894 (2026-10-19,
+# post worktree-storm fixes — not storm fallout). No ubuntu/macos flake
+# annotations for this file across the 11-run 2026-10-14..20 merge-group
+# harvest. Pre-existing, unrelated to any specific PR.
+# OWNER: zaxbysauce — issue #3264 (merge-group flake cohort, Oct 2026)
+# EXPIRY: 2026-11-20 — retire when the file passes three consecutive
+#   merge-group windows-latest runs green, or the attempt-1 failure
+#   signature is root-fixed.
+tests/unit/workflow/coder-settlement-2214-hardening.test.ts
 
-# OWNER: zaxbysauce — issue #3261 (same windows EBUSY teardown storm as the
-#   two entries above; PR #3242 pull_request run 38617312185, shard
-#   windows-latest/1: delegation-gate-reentry-bypass EBUSY on aftereach
-#   rm of dg-reentry-test-* scratch, 3x retries, assertions passing)
-# EXPIRY: 2026-10-28 — retire with the two EBUSY entries above (shared
-#   root fix: retry-with-backoff or platform-safe temp cleanup).
-tests/unit/hooks/delegation-gate-reentry-bypass.test.ts
+# tests/unit/commands/archive.test.ts (re-add, issue #3264)
+# -----------------------------------------------------------------------
+# RE-ADDED per the #2973 retirement re-add rule (no silent re-add without
+# fresh merge-group windows-latest failure evidence) — fresh evidence now
+# exists: passed-on-retry (attempt-1 fail, no assertion text captured) on
+# merge-group unit (windows-latest, 4), run 39138948653 (2026-10-18T15:06Z,
+# head contains 473df7e07 but not yet 592e7b233). Same file and same
+# windows teardown/EBUSY-family signature that originally quarantined it
+# per issue #2812 and was retired per #2973 on 2026-09-27. Caveat: the
+# detection falls inside the 2026-10-18 worktree-storm window, so it may
+# be storm-correlated; if so, the three-consecutive-green retirement
+# criterion below retires it quickly. Do not confuse with
+# tests/unit/evidence/archive.test.ts (different file, NOT quarantined).
+# OWNER: zaxbysauce — issue #3264 (merge-group flake cohort, Oct 2026;
+#   original quarantine #2812, retirement #2973)
+# EXPIRY: 2026-11-20 — retire when the file passes three consecutive
+#   merge-group windows-latest runs green (likely fast if the 2026-10-18
+#   detection was storm-correlated), or the teardown flake is root-fixed.
+tests/unit/commands/archive.test.ts

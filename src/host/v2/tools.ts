@@ -20,6 +20,7 @@
 
 import { log } from '../../utils';
 import { withTimeout } from '../../utils/timeout';
+import { normalizeV2PermissionAction } from './agents-commands';
 import {
 	normalizeV2AgentRef,
 	seedV1SessionState,
@@ -126,7 +127,6 @@ export async function registerV2Tools(
 	registrations: V2Registration[],
 ): Promise<void> {
 	const toolMap = hooks.tool ?? {};
-	const permissionBridge = buildPermissionBridge(ctx);
 	const registration = await withTimeout(
 		ctx.tool.transform((editor) => {
 			for (const [name, definition] of Object.entries(toolMap)) {
@@ -145,7 +145,9 @@ export async function registerV2Tools(
 									synthesizeV1ToolContext(
 										context,
 										projectRoot,
-										permissionBridge,
+										// #3351: built PER-EXECUTE — the assert input carries
+										// this execution's sessionID/agent.
+										buildPermissionBridge(ctx, context),
 									),
 								),
 							),
@@ -167,37 +169,95 @@ export async function registerV2Tools(
 }
 
 /**
- * Best-effort bridge from the v1 `ask()` shape onto the v2 permission
- * domain. The v2 permission surface (ask/reply) differs structurally from the
- * v1 AskInput; until the per-tool permission port lands (inventory follow-up),
- * presence of a reply-capable domain is required to even attempt a bridge —
- * otherwise undefined, which makes ask() fail closed.
+ * Bridge from the v1 `ask()` payload onto the v2 permission domain (#3351
+ * fail-closed). Built per-execute so the assert input can carry the CURRENT
+ * tool execution's sessionID/agent.
+ *
+ *  - assert-capable hosts (documented in @opencode/plugin@2.0.29
+ *    dist/promise/permission.d.ts; ABSENT at the 2.0.26 vendored pin, hence
+ *    the `typeof === 'function'` feature-detect): `ask()` routes through
+ *    `permission.assert({ sessionID, agent, action, resources })` — action
+ *    normalized by the EXACT host v1→v2 table (normalizeV2PermissionAction,
+ *    shared with the #2910 W2 agent permission port), resources = the ask
+ *    payload's patterns array (default []). Resolution grants; rejection
+ *    denies. `reply` is NOT consulted when assert exists.
+ *  - reply-only hosts (the 2.0.26 shape): ANY resolved reply value DENIES —
+ *    no grant interpretation at all. reply is the host's ANSWER-side RPC
+ *    `{ requestID, reply, message }`, not an ask surface; grant shapes are
+ *    deliberately uninterpreted pending the live-host observation recorded on
+ *    https://github.com/ZaxbyHub/opencode-swarm/issues/3351#issuecomment-6388938061.
+ *    A rejecting reply still denies (the await rejects through).
+ *  - No permission domain (or neither member): undefined, which makes ask()
+ *    fail closed with the 'denying by default' denial.
  */
 function buildPermissionBridge(
 	ctx: V2PluginContext,
+	context: V2ToolContext,
 ): ((input: unknown) => Promise<void>) | undefined {
 	const permission = ctx.permission;
-	if (!permission || typeof permission.reply !== 'function') return undefined;
-	return async (input: unknown): Promise<void> => {
-		const askInput = input as
-			| { permission?: unknown; patterns?: unknown }
-			| undefined;
-		log('v2 permission bridge invoked (best-effort passthrough)', {
-			// Minimization: never log the ask payload body (paths, prompt text).
-			permission:
-				typeof askInput?.permission === 'string'
-					? askInput.permission
-					: 'unknown',
-			patternCount: Array.isArray(askInput?.patterns)
-				? askInput.patterns.length
-				: 0,
-		});
-		await withTimeout(
-			Promise.resolve(permission.reply?.(input)),
-			V2_TOOL_EXECUTE_TIMEOUT_MS,
-			new Error('[opencode-swarm] v2: permission reply exceeded budget'),
-		);
-	};
+	if (!permission) return undefined;
+	if (typeof permission.assert === 'function') {
+		const assert = permission.assert;
+		const agentName = normalizeV2AgentRef(context.agent) ?? 'architect';
+		return async (input: unknown): Promise<void> => {
+			const askInput = input as
+				| { permission?: unknown; patterns?: unknown }
+				| undefined;
+			const action = normalizeV2PermissionAction(
+				typeof askInput?.permission === 'string' ? askInput.permission : '',
+			);
+			const resources = Array.isArray(askInput?.patterns)
+				? askInput.patterns
+				: [];
+			log('v2 permission bridge ask routed through assert', {
+				// Minimization: never log the ask payload body (paths, prompt text).
+				action,
+				resourceCount: resources.length,
+			});
+			await withTimeout(
+				Promise.resolve(
+					assert({
+						sessionID: context.sessionID,
+						agent: agentName,
+						action,
+						resources,
+					}),
+				),
+				V2_TOOL_EXECUTE_TIMEOUT_MS,
+				new Error('[opencode-swarm] v2: permission assert exceeded budget'),
+			);
+		};
+	}
+	if (typeof permission.reply === 'function') {
+		const reply = permission.reply;
+		return async (input: unknown): Promise<void> => {
+			log('v2 permission bridge invoked (reply-only host; fail-closed)', {
+				// Minimization: never log the ask payload body (paths, prompt text).
+				permission:
+					typeof (input as { permission?: unknown } | undefined)?.permission ===
+					'string'
+						? (input as { permission: string }).permission
+						: 'unknown',
+				patternCount: Array.isArray(
+					(input as { patterns?: unknown } | undefined)?.patterns,
+				)
+					? (input as { patterns: unknown[] }).patterns.length
+					: 0,
+			});
+			await withTimeout(
+				Promise.resolve(reply(input)).then(() => {
+					// ANY resolution denies: the resolved value is the answer-side
+					// RPC's acknowledgement shape, never a grant decision.
+					throw new Error(
+						'[opencode-swarm] v2: permission ask denied — the reply surface resolved without a grant decision (fail-closed, #3351).',
+					);
+				}),
+				V2_TOOL_EXECUTE_TIMEOUT_MS,
+				new Error('[opencode-swarm] v2: permission reply exceeded budget'),
+			);
+		};
+	}
+	return undefined;
 }
 
 // Test seam (repo _internals convention): the ToolContext synthesis is the

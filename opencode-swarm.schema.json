@@ -5311,6 +5311,9 @@
             "allow_defaults": {
               "default": true,
               "type": "boolean"
+            },
+            "trust_code_mode_wrapper": {
+              "type": "boolean"
             }
           }
         },
@@ -5422,6 +5425,11 @@
               "type": "integer",
               "minimum": 100,
               "maximum": 10000
+            },
+            "hook_timeout_ms": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 900000
             }
           }
         }

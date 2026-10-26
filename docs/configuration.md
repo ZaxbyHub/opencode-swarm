@@ -569,10 +569,12 @@ Full-Auto v2 — opencode-swarm's autonomy control plane. Reduces approval frict
 | `denials.max_consecutive` | number | `3` | Pause after N consecutive denials. |
 | `denials.max_total` | number | `20` | Pause after N total denials in the session. |
 | `protected_paths` | string[] | `['.git', '.github/workflows', '.opencode', '.swarm', 'package.json', 'package-lock.json']` | Paths the Full-Auto agent is forbidden from writing. `.opencode` is in the default list to prevent the agent from editing the plugin config that governs it. |
+| `permission_policy.trust_code_mode_wrapper` | boolean | `false` | **OpenCode 2 only.** Let Full-Auto pass the host's Code Mode `execute` wrapper without a critic round trip, but only for a call the v2 adapter marked as that wrapper whose program is exactly one `tools.<path>(<plain data>)` or `search(<plain data>)` call (the sandbox also exposes `fetch` and `Function`, which no hook sees). Off by default: v2 tool events carry no field proving a tool is host-owned, so a third-party tool that merely shares the name `execute` cannot be told apart. Enable only when you control the plugin and MCP set. Nested `tools.<name>()` calls are classified individually either way. |
 | `oversight.max_dispatch_retries` | number | `2` | Same-operation retry cap for transient critic infrastructure failures. |
 | `oversight.max_consecutive_dispatch_failures` | number | `3` | Consecutive infrastructure failures before Full-Auto terminates to manual control. |
 | `oversight.total_timeout_ms` | number | `120000` | Total wall-clock budget (1,000–300,000 ms) shared by critic session creation, prompt, retry/fallback, backoff, parse, and cleanup. |
 | `oversight.cleanup_timeout_ms` | number | `2000` | Short cleanup bound (100–10,000 ms) that cannot extend the total oversight deadline. |
+| `oversight.hook_timeout_ms` | number | _(unset)_ | **OpenCode 2 only.** Budget (1,000–900,000 ms) for the whole `tool.execute.before` guard chain, which contains the oversight dispatch while Full-Auto runs. Unset: while a Full-Auto run is active it follows `oversight.total_timeout_ms` + 30 s (never below 60 s); otherwise 60 s. Before this key the chain was cut off at a fixed 60 s, shorter than the 120 s default oversight deadline, so the host reported `tool.execute.before exceeded budget` while the critic was still working. |
 
 **Fail-closed semantics:**
 - Activation refuses if a config file exists but cannot be loaded (corrupt JSON, oversized, permission error) — `locked` is treated as "unknown", not "false".

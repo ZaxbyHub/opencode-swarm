@@ -16,6 +16,11 @@ All git and GitHub CLI subprocess calls now implement bounded transient retry fo
 
 ### checkpoint tool warning improvements
 
+> **Superseded in this same release by PR #3441 (issue #3427): the
+> checkpoint-local `isGitRepo` helper and its `GitRepoProbe` type described
+> below were removed — the checkpoint probes now use the shared async git
+> reader, and the empty-SHA warning on `saveCheckpointRecord` is unchanged.**
+
 - **`isGitRepo`** now returns `GitRepoProbe { isRepo: boolean; warning?: string }` instead of a bare boolean. Callers receive a warning message when the git probe fails for transient reasons.
 - **`saveCheckpointRecord`** surfaces a warning when the recorded SHA is empty (directory is not a git repository or HEAD is unavailable) instead of silently recording an empty SHA.
 

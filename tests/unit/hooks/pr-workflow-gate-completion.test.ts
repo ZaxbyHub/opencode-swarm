@@ -350,7 +350,7 @@ describe('PR workflow terminal completion', () => {
 			],
 			[
 				'closeout-critic',
-				'critic_oversight',
+				'critic',
 				'[CLOSEOUT-CRITIC] | FB-001 | APPROVE | evidence',
 			],
 		] as const;

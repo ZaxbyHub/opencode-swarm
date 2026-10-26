@@ -592,6 +592,12 @@ function computePlanContentHash(plan: Plan): string {
 						files_touched: [...task.files_touched].sort(),
 						evidence_path: task.evidence_path,
 						blocked_reason: task.blocked_reason,
+						// `task.evidence_class`/`task.evidence_anchors` (#3422) ARE
+						// included here (unlike fr_refs below): optional and
+						// omitted-when-unset keeps legacy output byte-identical while
+						// declaration edits stay hash-visible.
+						evidence_class: task.evidence_class,
+						evidence_anchors: task.evidence_anchors,
 						// `task.fr_refs` (optional spec FR/SC mapping, #1687) is
 						// deliberately EXCLUDED from this field list to preserve
 						// byte-identical output for every plan persisted before this
@@ -3071,6 +3077,20 @@ export function derivePlanMarkdown(plan: Plan): string {
 			if (task.files_touched.length > 0) {
 				const sortedFiles = [...task.files_touched].sort();
 				suffix += ` (files_touched: ${JSON.stringify(sortedFiles)})`;
+			}
+
+			// External-evidence declarations (#3422): declared tasks append a
+			// compact anchor-command summary; undeclared task lines render
+			// byte-identically to the pre-declaration projection.
+			if (task.evidence_class === 'external_git') {
+				const anchorCommands = (task.evidence_anchors ?? [])
+					.map((anchor) => anchor.command)
+					.join('; ');
+				const anchorsSummary =
+					anchorCommands.length > 120
+						? `${anchorCommands.slice(0, 117)}...`
+						: anchorCommands;
+				suffix += ` — external evidence: external_git (anchors: ${anchorsSummary})`;
 			}
 
 			// Mark as CURRENT if it's the first in_progress task in current phase

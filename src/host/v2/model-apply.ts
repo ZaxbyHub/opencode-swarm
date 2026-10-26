@@ -17,6 +17,10 @@
  *
  * Everything here is fail-open: with no registered surface (v1 hosts, or a v2
  * host without the agent domain) the apply is a logged no-op.
+ *
+ * #3352 / #2910 W5: the surface is OWNER-TOKEN-KEYED (see the registry
+ * comment below) — setup.ts passes its per-instance token on register and on
+ * owner-scoped clear, so concurrent live setups own disjoint surfaces.
  */
 
 import { log } from '../../utils';
@@ -27,58 +31,128 @@ const V2_MODEL_APPLY_TIMEOUT_MS = 10_000;
 
 type AgentTransform = V2PluginContext['agent']['transform'];
 
-let registeredTransform: AgentTransform | undefined;
-
 /**
- * Host registrations held per applied agent (#3029 review F-002). Each
- * `transform(...)` returns a Registration whose `dispose()` is the HOST'S
- * UNDO PATH for that transform's rewrites (state re-materializes from
- * initial() plus the remaining transforms), so a registration must neither
- * leak (unbounded) nor be disposed on behalf of a DIFFERENT agent — that
- * would revert the other agent's sticky model rewrite and reintroduce the
- * #3022 unavailable-model failure for it. Keyed by the exact registered
- * agent name; re-apply replaces only that agent's entry; cleanup disposes
- * all. FIFO eviction above MAX disposes the evicted rewrite and is
- * reachable only under implausible distinct-agent churn.
+ * #3352 / #2910 W5: the apply surface is OWNER-TOKEN-KEYED. Each v2 setup
+ * instance registers its own entry (setup.ts generates the token); a legacy
+ * no-argument register call uses the '__default__' owner so every pre-W5
+ * call site and test keeps working. `applyV2AgentModelOverride` resolves
+ * through the MOST-RECENTLY-REGISTERED owner that carries a transform, and
+ * `clearV2AgentTransformSurface(token)` clears ONLY that owner's surface +
+ * held registrations — one instance's cleanup can never destroy another live
+ * instance's surface (the base-defect class this port closes).
  */
-const MAX_HELD_APPLY_REGISTRATIONS = 128;
-const registrationsByAgent = new Map<string, V2Registration>();
+const DEFAULT_V2_MODEL_APPLY_OWNER = '__default__';
 
-/**
- * Remember the v2 agent transform surface for later model rewrites. Called
- * once from setup after agent registration; cleared on cleanup.
- */
-export function registerV2AgentTransformSurface(ctx: V2PluginContext): void {
-	const transform =
-		ctx?.agent && typeof ctx.agent.transform === 'function'
-			? ctx.agent.transform.bind(ctx.agent)
-			: undefined;
-	registeredTransform = transform;
-	if (transform === undefined) {
-		log('v2 agent transform surface absent; runtime model apply disabled', {});
-	}
+interface V2ModelApplyOwnerState {
+	transform: AgentTransform | undefined;
+	/**
+	 * Host registrations held per applied agent (#3029 review F-002), keyed by
+	 * the exact registered agent name; re-apply replaces only that agent's
+	 * entry; owner cleanup disposes all. FIFO eviction above MAX disposes the
+	 * evicted rewrite and is reachable only under implausible distinct-agent
+	 * churn.
+	 */
+	registrationsByAgent: Map<string, V2Registration>;
 }
 
-/**
- * Drop the registered surface and dispose every held apply registration
- * (v2 cleanup). Best-effort: disposal failure is logged, never thrown.
- */
-export function clearV2AgentTransformSurface(): void {
-	registeredTransform = undefined;
-	const held = [...registrationsByAgent.values()];
-	registrationsByAgent.clear();
+const MAX_HELD_APPLY_REGISTRATIONS = 128;
+const modelApplyOwners = new Map<string, V2ModelApplyOwnerState>();
+
+/** Re-register at the END so Map insertion order == registration recency. */
+function touchModelApplyOwner(token: string): V2ModelApplyOwnerState {
+	const existing = modelApplyOwners.get(token);
+	if (existing !== undefined) {
+		modelApplyOwners.delete(token);
+		modelApplyOwners.set(token, existing);
+		return existing;
+	}
+	const state: V2ModelApplyOwnerState = {
+		transform: undefined,
+		registrationsByAgent: new Map(),
+	};
+	modelApplyOwners.set(token, state);
+	return state;
+}
+
+/** Best-effort dispose of one owner's held registrations (never throws). */
+function disposeHeldRegistrations(
+	owner: V2ModelApplyOwnerState,
+	label: string,
+): void {
+	const held = [...owner.registrationsByAgent.values()];
+	owner.registrationsByAgent.clear();
 	for (const reg of held) {
 		void reg.dispose().catch((err: unknown) => {
-			log('v2 model-apply registration dispose failed (non-fatal)', {
+			log(`v2 model-apply registration dispose failed (${label}; non-fatal)`, {
 				error: err instanceof Error ? err.message : String(err),
 			});
 		});
 	}
 }
 
-/** True when a v2 apply surface is registered (test/diagnostic seam). */
+/**
+ * Remember the v2 agent transform surface for later model rewrites. Called
+ * once from setup after agent registration (with the setup's owner token);
+ * a no-argument call registers the legacy '__default__' owner. Cleared on
+ * cleanup via `clearV2AgentTransformSurface(token)`.
+ */
+export function registerV2AgentTransformSurface(
+	ctx: V2PluginContext,
+	token?: string,
+): void {
+	const ownerToken = token ?? DEFAULT_V2_MODEL_APPLY_OWNER;
+	const transform =
+		ctx?.agent && typeof ctx.agent.transform === 'function'
+			? ctx.agent.transform.bind(ctx.agent)
+			: undefined;
+	const owner = touchModelApplyOwner(ownerToken);
+	owner.transform = transform;
+	if (transform === undefined) {
+		log('v2 agent transform surface absent; runtime model apply disabled', {});
+	}
+}
+
+/**
+ * Drop a registered surface and dispose every held apply registration.
+ * WITH token: clears/disposes ONLY that owner's surface + held registrations
+ * (v2 setup cleanup — a concurrent live instance is untouched). WITHOUT
+ * token: LEGACY ADMINISTRATIVE clear-all (kept for the pre-W5 test seams
+ * model-apply-3022 / setup-wiring-3022 / review-followup-3029). Best-effort:
+ * disposal failure is logged, never thrown.
+ */
+export function clearV2AgentTransformSurface(token?: string): void {
+	if (token === undefined) {
+		for (const [ownerToken, owner] of [...modelApplyOwners.entries()]) {
+			disposeHeldRegistrations(owner, `clear-all ${ownerToken}`);
+		}
+		modelApplyOwners.clear();
+		return;
+	}
+	const owner = modelApplyOwners.get(token);
+	if (owner === undefined) return;
+	owner.transform = undefined;
+	disposeHeldRegistrations(owner, `owner ${token}`);
+	if (owner.transform === undefined && owner.registrationsByAgent.size === 0) {
+		modelApplyOwners.delete(token);
+	}
+}
+
+/** True when any live owner carries a v2 apply surface (test/diagnostic seam). */
 export function hasV2AgentTransformSurface(): boolean {
-	return registeredTransform !== undefined;
+	for (const owner of modelApplyOwners.values()) {
+		if (owner.transform !== undefined) return true;
+	}
+	return false;
+}
+
+/** The most-recently-registered owner that carries a transform, if any. */
+function resolveActiveModelApplyOwner(): V2ModelApplyOwnerState | undefined {
+	const tokens = [...modelApplyOwners.keys()];
+	for (let i = tokens.length - 1; i >= 0; i -= 1) {
+		const owner = modelApplyOwners.get(tokens[i] ?? '');
+		if (owner?.transform !== undefined) return owner;
+	}
+	return undefined;
 }
 
 /**
@@ -90,8 +164,9 @@ export async function applyV2AgentModelOverride(
 	agentName: string,
 	modelString: string,
 ): Promise<boolean> {
-	const transform = registeredTransform;
-	if (transform === undefined) {
+	const owner = resolveActiveModelApplyOwner();
+	const transform = owner?.transform;
+	if (owner === undefined || transform === undefined) {
 		// v1 host or pre-cleanup: the v1 chat-boundary override owns application.
 		return false;
 	}
@@ -130,13 +205,13 @@ export async function applyV2AgentModelOverride(
 		// previous entry (F-002): host dispose is the transform's undo path,
 		// so disposing a different agent's registration would revert that
 		// agent's sticky model rewrite.
-		const previous = registrationsByAgent.get(agentName);
-		registrationsByAgent.set(agentName, applied);
-		while (registrationsByAgent.size > MAX_HELD_APPLY_REGISTRATIONS) {
-			const oldest = registrationsByAgent.keys().next().value;
+		const previous = owner.registrationsByAgent.get(agentName);
+		owner.registrationsByAgent.set(agentName, applied);
+		while (owner.registrationsByAgent.size > MAX_HELD_APPLY_REGISTRATIONS) {
+			const oldest = owner.registrationsByAgent.keys().next().value;
 			if (typeof oldest !== 'string') break;
-			const evicted = registrationsByAgent.get(oldest);
-			registrationsByAgent.delete(oldest);
+			const evicted = owner.registrationsByAgent.get(oldest);
+			owner.registrationsByAgent.delete(oldest);
 			void evicted?.dispose().catch((err: unknown) => {
 				log('v2 evicted model-apply registration dispose failed (non-fatal)', {
 					agentName: oldest,

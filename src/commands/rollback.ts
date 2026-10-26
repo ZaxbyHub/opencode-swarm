@@ -17,6 +17,8 @@ import { resetSwarmArtifactCache } from '../utils/swarm-artifact-cache';
 import { consumeConfirmToken, issueConfirmToken } from './destructive-purge';
 import { backupSwarmStateBeforeReset } from './reset-backup';
 import {
+	describeUnreadableCause,
+	formatExcludedRecord,
 	measureGitDestruction,
 	ROLLBACK_GIT_KIND,
 	ROLLBACK_PHASE_KIND,
@@ -205,16 +207,46 @@ async function restoreGitCheckpointGated(
 	selected: GitCheckpoint,
 	flags: { confirmToken?: string; yes?: boolean },
 ): Promise<string> {
-	const measurement = measureGitDestruction(directory, selected.sha);
+	const measurement = await measureGitDestruction(directory, selected.sha);
 	if (measurement.kind === 'unreadable') {
-		return 'Error: cannot verify the working tree (git status unreadable) — refusing to restore without a preview. Retry, or inspect git status manually.';
+		// #3317: name WHY the read failed when the async reader could tell
+		// (single shared source with the checkpoint tool sink). #3434: this
+		// also covers an unreadable ls-tree/ls-files enumeration, and the
+		// feedback-round `source` field names WHICH read failed instead of
+		// always blaming git status.
+		const cause = describeUnreadableCause(measurement, measurement.source);
+		const unreadableNote =
+			measurement.excludedOutOfRoot && measurement.excludedOutOfRoot.length > 0
+				? ` — ${measurement.excludedOutOfRoot.length} out-of-root porcelain record(s) had been excluded from the scope before the read failed (first: ${formatExcludedRecord(measurement.excludedOutOfRoot[0])})`
+				: '';
+		return `Error: cannot verify the working tree (${
+			measurement.source === 'enumeration'
+				? 'the target-tree listing could not be read'
+				: 'git status unreadable'
+		}; ${cause})${unreadableNote} — refusing to restore without a preview.`;
 	}
+	// #3434: bounded diagnostic for out-of-root porcelain records excluded
+	// from the scope — surfaced on EVERY branch below, including the
+	// all-excluded clean-tree case, so an exclusion is never silent. The
+	// record bytes are sanitized+bounded by formatExcludedRecord before
+	// they reach operator/agent-visible text.
+	const exclusionNote =
+		measurement.excludedOutOfRoot.length > 0
+			? `⚠ ${measurement.excludedOutOfRoot.length} out-of-root porcelain record(s) were excluded from this scope (first: ${formatExcludedRecord(measurement.excludedOutOfRoot[0])})`
+			: null;
 	if (flags.yes && flags.confirmToken) {
 		return 'Error: pass either --yes or --confirm=<token>, not both.';
 	}
 	if (measurement.dirtyRelPaths.length === 0) {
-		// Clean tree — nothing tracked to destroy; single-call restore.
-		return restoreGitCheckpoint(directory, selected, flags.confirmToken);
+		// Clean tree — nothing tracked to destroy; single-call restore. When
+		// every dirty record was out-of-root-excluded (#3434), the operator
+		// still sees what was dropped (appended once the restore returns).
+		const restored = await restoreGitCheckpoint(
+			directory,
+			selected,
+			flags.confirmToken,
+		);
+		return exclusionNote ? `${restored}\n${exclusionNote}` : restored;
 	}
 	const candidates = trackedDirtyCandidates(
 		directory,
@@ -229,10 +261,16 @@ async function restoreGitCheckpointGated(
 			kind: ROLLBACK_GIT_KIND,
 			candidates,
 		});
-		return restoreGitCheckpoint(directory, selected, token);
+		const restored = await restoreGitCheckpoint(directory, selected, token);
+		return exclusionNote ? `${restored}\n${exclusionNote}` : restored;
 	}
 	if (flags.confirmToken) {
-		return restoreGitCheckpoint(directory, selected, flags.confirmToken);
+		const restored = await restoreGitCheckpoint(
+			directory,
+			selected,
+			flags.confirmToken,
+		);
+		return exclusionNote ? `${restored}\n${exclusionNote}` : restored;
 	}
 	// Bare invocation on a destructive scope: preview only, nothing restored.
 	const token = issueConfirmToken(scopeAnchor, directory, {
@@ -245,6 +283,7 @@ async function restoreGitCheckpointGated(
 		`⚠️ Restoring to checkpoint "${selected.label}" (${selected.sha.slice(0, 12)}) runs git reset --hard and would DESTROY ${candidates.length} uncommitted tracked file(s):`,
 		...shown.map((p) => `  - ${p}`),
 		...(overflow > 0 ? [`  (+${overflow} more)`] : []),
+		...(exclusionNote ? ['', exclusionNote] : []),
 		'',
 		'🔐 Nothing was restored. Destroyed bytes are backed up to .swarm/rollback-backups/ once confirmed.',
 		`Re-run /swarm rollback ${selected.label} --confirm=${token} (valid 15 minutes), or add --yes to confirm in one step.`,

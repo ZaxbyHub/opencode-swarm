@@ -1,8 +1,11 @@
-import * as child_process from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import packageJson from '../../package.json' with { type: 'json' };
+import {
+	type GitStatusReadResult,
+	gitStatusReadInternals,
+} from '../commands/git-status-read.js';
 import {
 	discoverVersionPinnedCachePaths,
 	getPluginCachePaths,
@@ -27,7 +30,6 @@ import { getSandboxSkipSummary } from '../sandbox/skip-state.js';
 import { sanitizeDiagnosticText } from '../scope/path-identity';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { getAgentSession } from '../state.js';
-import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
 import { renderRecoveryInvocationQuickForms } from '../workflow/recovery-invocation.js';
 import { scanWedgedStageA } from '../workflow/stage-a-repair.js';
@@ -54,15 +56,25 @@ export const _internals = {
 	detectSandboxCapability: () => sandboxCapabilityProbe.detect(),
 	getSandboxExecutor: getExecutor,
 	/**
-	 * #2674 test seam (repo convention — see src/sast/semgrep.ts): lets the
-	 * subprocess-bounds tests inject timeout-shaped throws into
-	 * `checkGitRepository` without `mock.module`. Deliberately call-time
-	 * resolving (`child_process.execFileSync` is read inside the wrapper, not
-	 * captured at module init) so existing `mock.module('node:child_process')`
-	 * tests keep observing their mock.
+	 * #3317 test seam (repo convention): lets the subprocess-bounds tests
+	 * inject failure-shaped reads into `checkGitRepository` without
+	 * `mock.module`. The default is ONE bounded async attempt through the
+	 * shared git reader (single `readOnce`, so the 5 s budget in the honest
+	 * timeout row stays true).
 	 */
-	execFileSync: (...args: Parameters<typeof child_process.execFileSync>) =>
-		child_process.execFileSync(...args),
+	readGitRepositoryOnce: (
+		cwd: string,
+		timeoutMs: number,
+	): Promise<GitStatusReadResult> =>
+		gitStatusReadInternals.readOnce(
+			['rev-parse', '--git-dir'],
+			cwd,
+			timeoutMs,
+			undefined,
+			// Output volume is irrelevant to an exit-code-only probe: the
+			// overflowing-child arm of the #2674 bounds suite stays ✅.
+			true,
+		),
 };
 
 /**
@@ -465,47 +477,36 @@ async function checkConfigBackups(directory: string): Promise<HealthCheck> {
  * health check never reports a hung git as a missing repository.
  */
 const GIT_REPOSITORY_CHECK_TIMEOUT_MS = 5_000;
-const GIT_REPOSITORY_CHECK_MAX_BUFFER_BYTES = 64 * 1024;
-
-/** A spawn timeout/kill surfaces as any of these shapes on the sync APIs. */
-function isSpawnTimeoutLike(err: unknown): boolean {
-	if (typeof err !== 'object' || err === null) return false;
-	const e = err as { killed?: unknown; signal?: unknown; code?: unknown };
-	return (
-		e.killed === true ||
-		e.signal === 'SIGKILL' ||
-		e.signal === 'SIGTERM' ||
-		e.code === 'ETIMEDOUT'
-	);
-}
 
 async function checkGitRepository(directory: string): Promise<HealthCheck> {
-	try {
-		if (!existsSync(directory) || !statSync(directory).isDirectory()) {
-			return {
-				name: 'Git Repository',
-				status: '❌',
-				detail: 'Invalid directory — cannot check git status',
-			};
-		}
-		const gitExecutable = await resolveGitExecutableAsync();
-		_internals.execFileSync(gitExecutable, ['rev-parse', '--git-dir'], {
-			cwd: directory,
-			stdio: ['ignore', 'ignore', 'ignore'],
-			timeout: GIT_REPOSITORY_CHECK_TIMEOUT_MS,
-			// POSIX: a SIGTERM-trapping child must not defeat the bound; on
-			// Windows identical to the default TerminateProcess coercion.
-			killSignal: 'SIGKILL',
-			maxBuffer: GIT_REPOSITORY_CHECK_MAX_BUFFER_BYTES,
-			env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-		});
+	if (!existsSync(directory) || !statSync(directory).isDirectory()) {
 		return {
 			name: 'Git Repository',
-			status: '✅',
-			detail: 'Git repository detected',
+			status: '❌',
+			detail: 'Invalid directory — cannot check git status',
 		};
+	}
+	// #3317: ONE bounded async attempt through the shared git reader (single
+	// `readOnce` — no transient retry — so the 5 s budget in the honest
+	// timeout row below stays true). The read is killable and never blocks
+	// the host event loop; the display contract is unchanged.
+	let read: Awaited<ReturnType<typeof _internals.readGitRepositoryOnce>>;
+	try {
+		read = await _internals.readGitRepositoryOnce(
+			directory,
+			GIT_REPOSITORY_CHECK_TIMEOUT_MS,
+		);
 	} catch (err) {
-		if (isSpawnTimeoutLike(err)) {
+		// The reader is no-throw by contract; a throw here is seam-injected.
+		// Timeout-like shapes (the #2674 DI arms: killed/signal/ETIMEDOUT)
+		// keep the honest unknown row; anything else answers "no".
+		const e = err as { code?: string; killed?: boolean; signal?: string };
+		const timeoutLike =
+			e?.code === 'ETIMEDOUT' ||
+			e?.killed === true ||
+			e?.signal === 'SIGKILL' ||
+			e?.signal === 'SIGTERM';
+		if (timeoutLike) {
 			return {
 				name: 'Git Repository',
 				status: '⬜',
@@ -518,6 +519,54 @@ async function checkGitRepository(directory: string): Promise<HealthCheck> {
 			detail: 'Not a git repository — version control recommended',
 		};
 	}
+	if (read.ok) {
+		return {
+			name: 'Git Repository',
+			status: '✅',
+			detail: 'Git repository detected',
+		};
+	}
+	// Cause-matched classification of the structured failure (#3317 review
+	// PRR-010): only a real hang earns the "did not answer within N ms" row;
+	// a missing binary, a permission/spawn failure, and an external kill each
+	// say what actually happened — never a false "not a repository" and never
+	// a false timeout.
+	const code = read.code;
+	if (code === 'ETIMEDOUT') {
+		return {
+			name: 'Git Repository',
+			status: '⬜',
+			detail: `git rev-parse did not answer within ${GIT_REPOSITORY_CHECK_TIMEOUT_MS} ms — git state unknown`,
+		};
+	}
+	if (code === 'ESIGNAL') {
+		return {
+			name: 'Git Repository',
+			status: '⬜',
+			detail:
+				'git rev-parse was terminated before it answered (signal) — git state unknown',
+		};
+	}
+	if (code === 'ENOENT') {
+		return {
+			name: 'Git Repository',
+			status: '❌',
+			detail:
+				'git executable not found (ENOENT) — install git on PATH or set git.binary in your USER-level config',
+		};
+	}
+	if (code !== null) {
+		return {
+			name: 'Git Repository',
+			status: '⬜',
+			detail: `git rev-parse could not be spawned (code ${code}) — git state unknown`,
+		};
+	}
+	return {
+		name: 'Git Repository',
+		status: '❌',
+		detail: 'Not a git repository — version control recommended',
+	};
 }
 
 /**

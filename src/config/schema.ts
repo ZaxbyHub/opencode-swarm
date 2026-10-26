@@ -4525,6 +4525,13 @@ export const PluginConfigSchema = z.object({
 							'dist',
 						]),
 					allow_defaults: z.boolean().default(true),
+					// OpenCode 2: let Full-Auto pass the host's Code Mode `execute`
+					// wrapper (one `tools.<path>(<plain data>)` call) without a critic
+					// round trip. Off by default: v2 tool events carry no field proving
+					// a tool is host-owned, so a third-party tool that merely shares
+					// the name `execute` cannot be told apart. Enable only when you
+					// control the plugin and MCP set (#3446).
+					trust_code_mode_wrapper: z.boolean().optional(),
 				})
 				.default(() => ({
 					enabled: true,
@@ -4602,6 +4609,11 @@ export const PluginConfigSchema = z.object({
 						.min(100)
 						.max(10000)
 						.default(2000),
+					// OpenCode 2 only: budget (ms) for the whole tool.execute.before
+					// guard chain, which contains the oversight dispatch while Full-Auto
+					// runs. Unset: while a run is active it follows total_timeout_ms +
+					// 30 s (never below 60 s); otherwise 60 s.
+					hook_timeout_ms: z.number().int().min(1000).max(900000).optional(),
 				})
 				.default(() => ({
 					on_plan_change: true,

@@ -48,6 +48,29 @@ interface ReadinessEntry {
 	settled: boolean;
 	underlying: Promise<void>;
 	error?: string;
+	/**
+	 * #2963: why this entry is closing, recorded by the only origins that
+	 * know it — the reset command's release-gate decision
+	 * ('reset-cleanup-failed') or host shutdown marking ('shutdown'). An
+	 * in-flight reset's guard carries NO reason: consumers must never infer
+	 * the cleanup-stranded contract from `settled` alone (a normal active
+	 * reset presents `closing && settled` with no reason).
+	 */
+	closingReason?: 'reset-cleanup-failed' | 'shutdown';
+	/**
+	 * #2963: true while the ORIGINAL initializer this closing window is
+	 * waiting on is still unsettled (priorUnsettled close-timeout, including
+	 * guards installed by a reset re-entry before the original settled).
+	 * Cleared by the identity-safe settlement observer below.
+	 */
+	pendingPriorAttempt?: boolean;
+	/**
+	 * #2963: the still-unsettled original initializer's promise, captured at
+	 * the first priorUnsettled guard and propagated with the flag through
+	 * every replacement so the whole chain observes the same original. Never
+	 * exposed on SnapshotCoordinationStatus.
+	 */
+	pendingPriorUnderlying?: Promise<void>;
 }
 
 function isReadinessEntryClosing(entry: ReadinessEntry | undefined): boolean {
@@ -60,6 +83,10 @@ export interface SnapshotCoordinationStatus {
 	generation?: number;
 	settled: boolean;
 	error?: string;
+	/** #2963: read-only origin classification (see ReadinessEntry.closingReason). */
+	closingReason?: 'reset-cleanup-failed' | 'shutdown';
+	/** #2963: read-only — a prior initialization attempt is still settling. */
+	pendingPriorAttempt?: boolean;
 }
 
 /**
@@ -71,9 +98,21 @@ export interface SnapshotCoordinationResetGuard {
 	closeError?: Error;
 	/** True when the prior initializer did not settle before the reset deadline. */
 	priorUnsettled?: boolean;
+	/**
+	 * #2963: mark THIS guard's entry as cleanup-stranded. Returns whether the
+	 * marking landed (same identity discipline as release(): false when a
+	 * newer guard has replaced this one at the root). Callers gate any
+	 * stranded-stop advisory on the boolean — a void no-op cannot.
+	 */
+	markStranded(): boolean;
 }
 
 const entries = new Map<string, ReadinessEntry>();
+// PRR-002 (#3445 review): one settlement observer per ORIGINAL pending
+// initializer promise, ever — replacement guards share the same original,
+// so per-guard observers would accumulate one reaction (and one retained
+// guard) per reset re-entry until it settles.
+const pendingSettlementObserved = new WeakSet<Promise<void>>();
 let nextAttemptId = 1;
 
 // #2794: bounded, counts-only supersession bookkeeping (invariant 8 posture:
@@ -464,7 +503,38 @@ export function retrySnapshotCoordinationInitialization(
 	const root = canonicalProjectKey(directory);
 	const entry = entries.get(root);
 	if (entry?.state === 'closing') {
-		throw new Error('coordination initialization is closing for reset-session');
+		// #2963: origin-keyed refusals so /swarm recover --coordination can
+		// render the recovery contract that matches the operator's actual
+		// state (combined-first, same precedence as every other consumer).
+		// Every message keeps the `closing for` + origin marker; existing
+		// /closing for reset-session/i pins are regex pins on
+		// ensureSnapshotCoordinationReady and stay green.
+		if (
+			entry.pendingPriorAttempt &&
+			entry.closingReason === 'reset-cleanup-failed'
+		) {
+			throw new Error(
+				'coordination is closing for reset-session (a prior initialization attempt is still settling; guard stranded): once it settles, re-run /swarm reset-session to completion, or restart the host',
+			);
+		}
+		if (entry.pendingPriorAttempt) {
+			throw new Error(
+				'coordination is closing for reset-session (a prior initialization attempt is still settling): wait for it to settle before retrying, or restart the host',
+			);
+		}
+		if (entry.closingReason === 'reset-cleanup-failed') {
+			throw new Error(
+				'coordination is closing for reset-session (settled): re-run /swarm reset-session to completion, or restart the host to clear the guard',
+			);
+		}
+		if (entry.closingReason === 'shutdown') {
+			throw new Error(
+				'coordination is closing for host shutdown; restart the host to clear the guard',
+			);
+		}
+		throw new Error(
+			'coordination is closing for an in-flight /swarm reset-session; wait for it to finish before retrying',
+		);
 	}
 	if (entry && !entry.settled) {
 		throw new Error(
@@ -486,6 +556,8 @@ export function getSnapshotCoordinationStatus(
 		generation: entry.generation,
 		settled: entry.settled,
 		...(entry.error ? { error: entry.error.slice(0, 512) } : {}),
+		...(entry.closingReason ? { closingReason: entry.closingReason } : {}),
+		...(entry.pendingPriorAttempt ? { pendingPriorAttempt: true } : {}),
 	};
 }
 
@@ -522,6 +594,13 @@ export async function beginSnapshotCoordinationReset(
 		}
 	}
 
+	// #2963: capture the still-unsettled ORIGINAL initializer promise when
+	// this guard is the first priorUnsettled one; later re-entries inherit
+	// the same reference from the prior guard so the whole replacement chain
+	// observes one original.
+	const pendingPriorUnderlying: Promise<void> | undefined = priorUnsettled
+		? prior?.underlying
+		: prior?.pendingPriorUnderlying;
 	const guard: ReadinessEntry = {
 		attemptId: nextAttemptId++,
 		generation: (prior?.generation ?? 0) + 1,
@@ -529,8 +608,39 @@ export async function beginSnapshotCoordinationReset(
 		settled: true,
 		underlying: Promise.resolve(),
 		...(closeError ? { error: closeError.message } : {}),
+		// #2963: a prior initializer that has not settled yet keeps the
+		// settle-wait recovery contract alive across this guard and any later
+		// re-entry (the original promise propagates with the flag so the
+		// whole replacement chain observes the same attempt).
+		...(priorUnsettled || prior?.pendingPriorAttempt === true
+			? { pendingPriorAttempt: true }
+			: {}),
+		...(pendingPriorUnderlying ? { pendingPriorUnderlying } : {}),
 	};
 	entries.set(root, guard);
+	if (
+		guard.pendingPriorAttempt &&
+		pendingPriorUnderlying &&
+		!pendingSettlementObserved.has(pendingPriorUnderlying)
+	) {
+		// #2963 settlement lifecycle, ONE observer per ORIGINAL promise
+		// (PRR-002, #3445 review): replacement guards inherit the same
+		// original, so a per-guard .then would accumulate one reaction per
+		// re-entry and retain every superseded guard until the original
+		// settles. The single observer clears whichever entry is live at
+		// settlement (identity via the propagated promise reference) and
+		// drops the settled promise from that entry. Both arms are handled
+		// (the rejection's real consumers already observe it elsewhere), so
+		// no unhandled rejection is introduced.
+		pendingSettlementObserved.add(pendingPriorUnderlying);
+		const clearPending = () => {
+			const live = entries.get(root);
+			if (live?.pendingPriorUnderlying !== pendingPriorUnderlying) return;
+			live.pendingPriorAttempt = false;
+			live.pendingPriorUnderlying = undefined;
+		};
+		void pendingPriorUnderlying.then(clearPending, clearPending);
+	}
 	let released = false;
 	const release = () => {
 		if (released) return;
@@ -547,8 +657,18 @@ export async function beginSnapshotCoordinationReset(
 		// initializer cannot race a reset and resurrect the old snapshot.
 		void prior.underlying.then(removeGuard, removeGuard);
 	};
+	// #2963: guard-owned stranded marking. Only the invocation that installed
+	// THIS guard can strand it; an older reset whose cleanup failed after a
+	// newer reset replaced the entry gets false and must not claim the newer
+	// guard's window as its own persistence stop.
+	const markStranded = (): boolean => {
+		if (entries.get(root) !== guard || guard.state !== 'closing') return false;
+		guard.closingReason = 'reset-cleanup-failed';
+		return true;
+	};
 	return {
 		release,
+		markStranded,
 		...(closeError ? { closeError } : {}),
 		...(priorUnsettled ? { priorUnsettled: true } : {}),
 	};
@@ -567,7 +687,14 @@ export async function closeSnapshotCoordinationInitialization(
 
 export function markSnapshotCoordinationClosing(directory: string): void {
 	const entry = entries.get(canonicalProjectKey(directory));
-	if (entry) entry.state = 'closing';
+	if (entry) {
+		entry.state = 'closing';
+		// #2963: shutdown-marked closing carries its own origin so consumers
+		// render the restart contract instead of a reset-recovery one.
+		// PRR-003 (#3445 review): never clobber a recorded origin — an entry
+		// already stranded as 'reset-cleanup-failed' keeps that contract.
+		if (!entry.closingReason) entry.closingReason = 'shutdown';
+	}
 }
 
 export const _snapshotCoordinationInternals: {

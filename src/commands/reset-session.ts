@@ -19,8 +19,10 @@ import { validateSwarmPath } from '../hooks/utils';
 import { listLiveLaneOwners } from '../parallel/lane-owners';
 import { resetPrmSessionState } from '../prm';
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
+import { advisoryWarn } from '../services/warning-buffer.js';
 import {
 	beginSnapshotCoordinationReset,
+	getSnapshotCoordinationStatus,
 	type SnapshotCoordinationResetGuard,
 } from '../session/snapshot-coordination-init.js';
 import {
@@ -448,6 +450,16 @@ export async function handleResetSessionCommand(
 	// later initializer must not re-import stale rows while the operator retries
 	// reset-session. Successful SQLite + projection cleanup is the only point at
 	// which it is safe to admit new coordination work.
+	let persistenceStopAdvised = false;
+	const advisePersistenceStop = (combined: boolean): void => {
+		if (persistenceStopAdvised) return;
+		persistenceStopAdvised = true;
+		advisoryWarn(
+			combined
+				? '[opencode-swarm] /swarm reset-session partially failed while a prior initialization attempt is still settling: durable session-snapshot persistence is stopped — wait for that attempt to settle, then re-run /swarm reset-session to completion (or restart the host) to recover.'
+				: '[opencode-swarm] /swarm reset-session partially failed: durable session-snapshot persistence is stopped for this project until a reset-session run succeeds — re-run /swarm reset-session (or restart the host) to recover.',
+		);
+	};
 	if (
 		snapshotResetGuard &&
 		snapshotAuthorityCleared &&
@@ -455,6 +467,28 @@ export async function handleResetSessionCommand(
 		legacySnapshotCleared
 	) {
 		snapshotResetGuard.release();
+	} else if (snapshotResetGuard) {
+		// #2963: exactly one bounded, always-visible operator advisory when
+		// THIS invocation actually strands its own guard. The boolean gates
+		// the emission: if a newer reset already replaced our guard, marking
+		// returns false and the newer guard's own release decision owns its
+		// window — we must not claim it as our persistence stop. The wording
+		// uses the same combined-first contract as every other consumer: if
+		// the just-stranded entry is still waiting on a prior initializer,
+		// name both the settle-wait and the re-run.
+		const stranded = snapshotResetGuard.markStranded();
+		if (stranded) {
+			advisePersistenceStop(
+				getSnapshotCoordinationStatus(directory).pendingPriorAttempt === true,
+			);
+		}
+	} else if (getSnapshotCoordinationStatus(directory).state === 'closing') {
+		// Production-unreachable (beginSnapshotCoordinationReset cannot throw
+		// between installing its guard and returning; only canonicalProjectKey
+		// precedes the install and throws before touching entries). A stubbed
+		// begin in tests can land here with a closing entry installed: emit
+		// without marking, because this invocation owns no guard to strand.
+		advisePersistenceStop(false);
 	}
 
 	// Issue #2398: reset-session is the operator's documented escape from the

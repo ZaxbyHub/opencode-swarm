@@ -60,3 +60,22 @@ tests/unit/telemetry/init-rehome.test.ts
 #   shard clean across a full merge-group run, or root-fix/retire the
 #   heap-growth probe.
 tests/unit/services/evidence-summary-adversarial.test.ts
+
+# tests/unit/background/plan-sync-worker.test.ts (issue #3264)
+# -----------------------------------------------------------------------
+# Tests PlanSyncWorker construction/options/scheduling (2179-line file,
+# FR-006-era consolidation) for the background plan-sync lane. Passed-on-
+# retry (attempt-1 fail, no assertion text captured — ci.yml discards
+# attempt-1 output when a retry passes) on merge-group unit (ubuntu-latest,
+# 6), run 39389866535 (2026-10-20). Ubuntu has no per-OS ledger and the
+# coverage gate honors ONLY this general ledger (init-rehome precedent,
+# issue #2660), so ubuntu evidence routes here; accepted over-provision —
+# the unit job consumes this ledger unconditionally on every RUNNER_OS
+# with the per-OS ledgers additive. No windows/macos flake annotations for
+# this file across the 11-run 2026-10-14..20 merge-group harvest.
+# Pre-existing, unrelated to any specific PR.
+# OWNER: zaxbysauce — issue #3264 (merge-group flake cohort, Oct 2026)
+# EXPIRY: 2026-11-20 — retire when the file passes three consecutive
+#   merge-group runs green on its executing unit shard, or the attempt-1
+#   failure signature is root-fixed.
+tests/unit/background/plan-sync-worker.test.ts

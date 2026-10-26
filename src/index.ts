@@ -4231,657 +4231,14 @@ async function initializeOpenCodeSwarm(
 
 		// Configure OpenCode - merge agents into config
 		config: async (opencodeConfig: Record<string, unknown>) => {
-			const isObjectRecord = (
-				value: unknown,
-			): value is Record<string, unknown> =>
-				typeof value === 'object' && value !== null;
-			const pluginConfig = opencodeConfig as Record<string, unknown> & {
-				agent?: Record<string, unknown>;
-			};
-
-			// Normalize agent config to a plain object if it's absent or a non-object primitive
-			if (!isObjectRecord(pluginConfig.agent)) {
-				pluginConfig.agent = {};
-			}
-			const agentConfig = pluginConfig.agent;
-
-			// Merge agent configs (don't override default_agent)
-			Object.assign(agentConfig, agents);
-
-			// Worktree-lane permission scoping.
-			//
-			// OpenCode partitions permission state per directory, and `Plugin.state`
-			// is built through the same directory-keyed InstanceState cache as
-			// `Permission.state` — so when this hook runs inside a lane instance,
-			// `ctx.directory` IS the lane path. Pre-resolving `external_directory`
-			// here prevents the ask from ever being raised, which matters because a
-			// lane instance has no TUI that could answer one (the host's
-			// `Permission.ask` awaits its deferred with no timeout).
-			//
-			// A no-op for every ordinary session: `applyLanePermissions` mutates
-			// nothing unless the directory resolves as a swarm worktree lane.
-			// Wrapped because a config-hook throw is logged and ignored by the host
-			// (`tryPromise` + `tapError` + `ignore`), which would silently drop the
-			// agent registration work above on some future refactor.
-			try {
-				// Read straight off `config` rather than via
-				// `resolveWorktreeIsolationConfig`: that resolver is a spread over
-				// DEFAULT_WORKTREE_ISOLATION_CONFIG whose `lane_permissions` default
-				// is this same 'scoped_allow', so the two are behaviourally
-				// identical here — and the direct read keeps this hook off the
-				// resolver's import chain. Do not "simplify" it into that import
-				// without re-checking the init-path cost.
-				applyLanePermissions(
-					opencodeConfig,
-					ctx.directory,
-					config?.worktree?.lane_permissions ?? 'scoped_allow',
-				);
-			} catch (err) {
-				addDeferredWarning(
-					`[swarm] lane permission scoping failed: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			}
-
-			// Auto-select architect: disable competing built-in agents when enabled
-			const autoSelect = config?.auto_select_architect;
-			if (autoSelect) {
-				// Check that at least one architect agent exists in the generated set
-				const hasArchitect = Object.keys(agents).some(
-					(name) => stripKnownSwarmPrefix(name) === 'architect',
-				);
-				if (hasArchitect) {
-					// Disable build and plan built-in agents
-					for (const builtin of ['build', 'plan'] as const) {
-						const existing = agentConfig[builtin];
-						if (isObjectRecord(existing) && existing.disable === true) {
-							// User already disabled this agent — respect their override
-							continue;
-						}
-						agentConfig[builtin] = {
-							...(isObjectRecord(existing) ? existing : {}),
-							disable: true,
-						};
-					}
-
-					// Warn when boolean true and multiple architects are primary
-					if (autoSelect === true) {
-						const primaryArchitects = Object.entries(agents).filter(
-							([name, cfg]) =>
-								stripKnownSwarmPrefix(name) === 'architect' &&
-								isObjectRecord(cfg) &&
-								cfg.mode === 'primary',
-						);
-						if (primaryArchitects.length > 1) {
-							const names = primaryArchitects.map(([n]) => n).join(', ');
-							addDeferredWarning(
-								`[swarm] auto_select_architect is true but ${primaryArchitects.length} architect agents are primary (${names}). Consider setting auto_select_architect to a specific agent name.`,
-							);
-						}
-					}
-
-					// When a specific architect name is provided, demote non-matching architects to subagent
-					if (typeof autoSelect === 'string' && autoSelect !== '') {
-						const targetName = autoSelect;
-						// Only proceed if the target is actually an architect-role agent
-						const targetIsArchitect =
-							Object.hasOwn(agents, targetName) &&
-							stripKnownSwarmPrefix(targetName) === 'architect';
-
-						if (targetIsArchitect) {
-							// Demote non-matching architects to subagent
-							for (const [name, cfg] of Object.entries(agents)) {
-								if (
-									stripKnownSwarmPrefix(name) === 'architect' &&
-									name !== targetName
-								) {
-									agentConfig[name] = {
-										...(isObjectRecord(cfg) ? cfg : {}),
-										mode: 'subagent',
-									};
-								}
-							}
-							// Promote the target architect to primary
-							const targetExisting = agentConfig[targetName];
-							const targetAgent = agents[targetName];
-							agentConfig[targetName] = {
-								...(isObjectRecord(targetExisting) ? targetExisting : {}),
-								...(isObjectRecord(targetAgent) ? targetAgent : {}),
-								mode: 'primary',
-							};
-						} else {
-							// Target is not a valid architect — warn the user
-							addDeferredWarning(
-								`[swarm] auto_select_architect is set to "${targetName}" but that is not a known architect agent. No architect demotion applied.`,
-							);
-						}
-					}
-				} else {
-					// No architect agents found — warn the user
-					addDeferredWarning(
-						'[swarm] auto_select_architect is enabled but no architect agents were found in the generated set. The option has no effect.',
-					);
-				}
-			}
-
-			// Register /swarm command
-			// Build a model-facing shortcut description from the registry entry (SSOT — can't drift).
-			const shortcutDescription = (cmd: string): string => {
-				const entry = COMMAND_REGISTRY[cmd as keyof typeof COMMAND_REGISTRY] as
-					| { description?: string }
-					| undefined;
-				if (!entry?.description) {
-					return `Use /swarm ${cmd}`; // fallback if registry entry is somehow missing
-				}
-				const desc =
-					entry.description.charAt(0).toLowerCase() +
-					entry.description.slice(1);
-				return `Use /swarm ${cmd} to ${desc}`;
-			};
-			opencodeConfig.command = {
-				...((opencodeConfig.command as Record<string, unknown>) || {}),
-				swarm: {
-					// Template is required by OpenCode and always sent to the LLM.
-					// Keep it minimal — instructional text confuses non-frontier models.
-					// The actual command is handled by command.execute.before hook.
-					template: '/swarm $ARGUMENTS',
-					description: (() => {
-						// Derive the command list from the registry (single source of truth).
-						// Include standalone (non-alias, non-deprecated, non-subcommand) commands.
-						const standaloneCommands = VALID_COMMANDS.filter((cmd) => {
-							const entry = COMMAND_REGISTRY[
-								cmd as keyof typeof COMMAND_REGISTRY
-							] as {
-								aliasOf?: string;
-								deprecated?: boolean;
-								subcommandOf?: string;
-							};
-							return !entry.aliasOf && !entry.deprecated && !entry.subcommandOf;
-						});
-						return `Swarm management commands: /swarm [${standaloneCommands.join('|')}]`;
-					})(),
-				},
-				// Individual subcommands for discoverability by weaker models (Haiku-class)
-				'swarm-status': {
-					template: '/swarm status',
-					description:
-						'Use /swarm status to show current swarm status and active phase',
-				},
-				'swarm-show-plan': {
-					template: '/swarm show-plan $ARGUMENTS',
-					description:
-						'Use /swarm show-plan to view or filter the current execution plan',
-				},
-				'swarm-plan': {
-					// #2493 review F-06: the palette previously typed the
-					// deprecated alias `/swarm plan`; point the template at the
-					// canonical command while keeping the shortcut key stable
-					// for existing muscle memory and parity snapshots.
-					template: '/swarm show-plan $ARGUMENTS',
-					description:
-						'Deprecated alias for /swarm show-plan (runs the canonical command)',
-				},
-				'swarm-agents': {
-					template: '/swarm agents',
-					description: 'Use /swarm agents to list registered swarm agents',
-				},
-				'swarm-history': {
-					template: '/swarm history',
-					description: 'Use /swarm history to show completed phases summary',
-				},
-				'swarm-config': {
-					template: '/swarm config $ARGUMENTS',
-					description: 'Use /swarm config to show or validate configuration',
-				},
-				'swarm-evidence': {
-					template: '/swarm evidence $ARGUMENTS',
-					description:
-						'Use /swarm evidence to view evidence bundles and summaries',
-				},
-				'swarm-handoff': {
-					template: '/swarm handoff',
-					description:
-						'Use /swarm handoff to prepare handoff brief for switching models mid-task',
-				},
-				'swarm-archive': {
-					template: '/swarm archive',
-					description: 'Use /swarm archive to archive old evidence bundles',
-				},
-				'swarm-diagnose': {
-					template: '/swarm diagnose',
-					description:
-						'Use /swarm diagnose to run health checks on swarm state',
-				},
-				'swarm-diagnosis': {
-					template: '/swarm diagnosis',
-					description:
-						'Use /swarm diagnosis to run health checks on swarm state',
-				},
-				'swarm-preflight': {
-					template: '/swarm preflight',
-					description:
-						'Use /swarm preflight to run preflight automation checks',
-				},
-				'swarm-sync-plan': {
-					template: '/swarm sync-plan',
-					description: 'Use /swarm sync-plan to sync plan.json with plan.md',
-				},
-				'swarm-benchmark': {
-					template: '/swarm benchmark',
-					description: 'Use /swarm benchmark to show performance metrics',
-				},
-				'swarm-gate-audit': {
-					template: '/swarm gate-audit $ARGUMENTS',
-					description:
-						'Use /swarm gate-audit to run the bounded Tier-1 production gate matrix',
-				},
-				'swarm-gate-stats': {
-					template: '/swarm gate-stats $ARGUMENTS',
-					description:
-						'Use /swarm gate-stats to summarize stored gate-audit evidence',
-				},
-				'swarm-skill-opt': {
-					template: '/swarm skill-opt $ARGUMENTS',
-					description:
-						'Use /swarm skill-opt to govern skill optimization (plan|run|status|diff|approve|reject|rollback|history)',
-				},
-				'swarm-harness-opt': {
-					template: '/swarm harness-opt $ARGUMENTS',
-					description:
-						'Use /swarm harness-opt to govern harness optimization rounds (plan|run|status|stop|history)',
-				},
-				'swarm-costs': {
-					template: '/swarm costs $ARGUMENTS',
-					description:
-						'Use /swarm costs to show per-agent, task, gate, and retry token/cost totals',
-				},
-				'swarm-report': {
-					template: '/swarm report $ARGUMENTS',
-					description:
-						'Use /swarm report to query swarm observability events (--task/--session/--trace/--run/--since/--json)',
-				},
-				'swarm-dashboard': {
-					template: '/swarm dashboard',
-					description:
-						'Use /swarm dashboard to show the opt-in local mission-control dashboard URL and status',
-				},
-				'swarm-export': {
-					template: '/swarm export',
-					description: 'Use /swarm export to export plan and context as JSON',
-				},
-				'swarm-dataset-consent': {
-					template: '/swarm dataset consent $ARGUMENTS',
-					description:
-						'Use /swarm dataset consent to grant or revoke the training-content consent (human-only, confirm token)',
-				},
-				'swarm-dataset-export': {
-					template: '/swarm dataset export $ARGUMENTS',
-					description:
-						'Use /swarm dataset export to preview/write the deterministic governed dataset export (human-only, confirm token)',
-				},
-				'swarm-dataset-withdraw': {
-					template: '/swarm dataset withdraw $ARGUMENTS',
-					description:
-						'Use /swarm dataset withdraw to purge vault content, tombstone, and revoke exports (human-only, confirm token)',
-				},
-				'swarm-reset': {
-					template: '/swarm reset --confirm',
-					description:
-						'Use /swarm reset --confirm to clear swarm state (requires --confirm)',
-				},
-				'swarm-rollback': {
-					template: '/swarm rollback $ARGUMENTS',
-					description:
-						'Use /swarm rollback to restore swarm state to a checkpoint',
-				},
-				'swarm-retrieve': {
-					template: '/swarm retrieve $ARGUMENTS',
-					description:
-						'Use /swarm retrieve to retrieve full output from summary',
-				},
-				'swarm-clarify': {
-					template: '/swarm clarify $ARGUMENTS',
-					description:
-						'Use /swarm clarify to clarify and refine a feature specification',
-				},
-				'swarm-analyze': {
-					template: '/swarm analyze',
-					description:
-						'Use /swarm analyze to analyze spec vs plan for coverage gaps',
-				},
-				'swarm-specify': {
-					template: '/swarm specify $ARGUMENTS',
-					description:
-						'Use /swarm specify to generate or import a feature specification',
-				},
-				'swarm-brainstorm': {
-					template: '/swarm brainstorm $ARGUMENTS',
-					description:
-						'Use /swarm brainstorm to enter the architect MODE: BRAINSTORM planning workflow',
-				},
-				'swarm-loop': {
-					template: '/swarm loop $ARGUMENTS',
-					description:
-						'Use /swarm loop <objective> to run a compound-engineering loop: brainstorm → plan → build → review → improve, iterating until done [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]',
-				},
-				'swarm-council': {
-					template: '/swarm council $ARGUMENTS',
-					description:
-						'Use /swarm council <question> to convene a multi-model General Council deliberation (generalist / skeptic / domain expert) [--spec-review]',
-				},
-				'swarm-pr-review': {
-					template: '/swarm pr-review $ARGUMENTS',
-					description:
-						'Use /swarm pr-review to launch deep PR review with multi-lane analysis',
-				},
-				'swarm-review': {
-					template: '/swarm review $ARGUMENTS',
-					description:
-						'Use /swarm review to run the bounded whole-diff review engine for the selected local scope',
-				},
-				'swarm-pr-feedback': {
-					template: '/swarm pr-feedback $ARGUMENTS',
-					description:
-						'Use /swarm pr-feedback to ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh broad review',
-				},
-				'swarm-abort-pr-workflow': {
-					template: '/swarm abort-pr-workflow $ARGUMENTS',
-					description:
-						'Use /swarm abort-pr-workflow to clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop; cancel an armed PR_FEEDBACK without publication with PR_FEEDBACK --cancel-publication <reason...> (human-only escape hatch)',
-				},
-				'swarm-pr-feedback-loop': {
-					template: '/swarm pr-feedback-loop $ARGUMENTS',
-					description:
-						'Use /swarm pr-feedback-loop stop <reason...> to stop the autonomous PR babysitting settling loop for this session (human-only)',
-				},
-				'swarm-approve-plan-critic': {
-					template: '/swarm approve-plan-critic $ARGUMENTS',
-					description:
-						'Use /swarm approve-plan-critic to record a MANUAL plan-critic approval that unblocks the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the snapshot was not recorded (human-only escape hatch)',
-				},
-				'swarm-approve-write': {
-					template: '/swarm approve-write $ARGUMENTS',
-					description:
-						'Use /swarm approve-write to issue one exact, session-bound, one-shot write approval (human-only)',
-				},
-				'swarm-ci-monitor': {
-					template: '/swarm ci-monitor $ARGUMENTS',
-					description:
-						'Use /swarm ci-monitor to drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge)',
-				},
-				'swarm-pr-subscribe': {
-					template: '/swarm pr subscribe $ARGUMENTS',
-					description: shortcutDescription('pr subscribe'),
-				},
-				'swarm-pr-unsubscribe': {
-					template: '/swarm pr unsubscribe $ARGUMENTS',
-					description: shortcutDescription('pr unsubscribe'),
-				},
-				'swarm-pr-status': {
-					template: '/swarm pr status',
-					description: shortcutDescription('pr status'),
-				},
-				'swarm-ci-simulate': {
-					template: '/swarm ci-simulate $ARGUMENTS',
-					description: shortcutDescription('ci-simulate'),
-				},
-				'swarm-ci': {
-					template: '/swarm ci $ARGUMENTS',
-					description: shortcutDescription('ci'),
-				},
-				'swarm-learning': {
-					template: '/swarm learning',
-					description: shortcutDescription('learning'),
-				},
-				'swarm-post-mortem': {
-					template: '/swarm post-mortem $ARGUMENTS',
-					description: shortcutDescription('post-mortem'),
-				},
-				'swarm-deep-dive': {
-					template: '/swarm deep-dive $ARGUMENTS',
-					description:
-						'Use /swarm deep-dive to launch a read-only deep audit with parallel explorer waves, dual reviewers, and critic challenge',
-				},
-				'swarm-deep-research': {
-					template: '/swarm deep-research $ARGUMENTS',
-					description:
-						'Use /swarm deep-research <question> to run a multi-source, fact-checked deep research pass and synthesize a cited report [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
-				},
-				'swarm-codebase-review': {
-					template: '/swarm codebase-review $ARGUMENTS',
-					description:
-						'Use /swarm codebase-review to launch codebase-review-swarm for a quote-grounded full-repo or large-subsystem audit',
-				},
-				'swarm-design-docs': {
-					template: '/swarm design-docs $ARGUMENTS',
-					description:
-						'Use /swarm design-docs to generate or sync language-agnostic design docs for the project under build',
-				},
-				'swarm-sdd': {
-					template: '/swarm sdd $ARGUMENTS',
-					description:
-						'Use /swarm sdd to inspect OpenSpec-compatible SDD artifacts',
-				},
-				'swarm-sdd-status': {
-					template: '/swarm sdd status',
-					description:
-						'Use /swarm sdd status to show effective spec and OpenSpec artifact status',
-				},
-				'swarm-sdd-validate': {
-					template: '/swarm sdd validate $ARGUMENTS',
-					description:
-						'Use /swarm sdd validate to validate OpenSpec-compatible SDD artifacts',
-				},
-				'swarm-sdd-project': {
-					template: '/swarm sdd project $ARGUMENTS',
-					description:
-						'Use /swarm sdd project to materialize OpenSpec artifacts into .swarm/spec.md',
-				},
-				'swarm-blueprint-validate': {
-					template: '/swarm blueprint validate $ARGUMENTS',
-					description: shortcutDescription('blueprint validate'),
-				},
-				'swarm-blueprint-current': {
-					template: '/swarm blueprint current',
-					description: shortcutDescription('blueprint current'),
-				},
-				'swarm-blueprint-history': {
-					template: '/swarm blueprint history',
-					description: shortcutDescription('blueprint history'),
-				},
-				'swarm-blueprint-diff': {
-					template: '/swarm blueprint diff $ARGUMENTS',
-					description: shortcutDescription('blueprint diff'),
-				},
-				'swarm-blueprint-export': {
-					template: '/swarm blueprint export $ARGUMENTS',
-					description: shortcutDescription('blueprint export'),
-				},
-				'swarm-harness-candidate-validate': {
-					template: '/swarm harness candidate validate $ARGUMENTS',
-					description: shortcutDescription('harness candidate validate'),
-				},
-				'swarm-harness-candidate-show': {
-					template: '/swarm harness candidate show $ARGUMENTS',
-					description: shortcutDescription('harness candidate show'),
-				},
-				'swarm-harness-candidate-diff': {
-					template: '/swarm harness candidate diff $ARGUMENTS',
-					description: shortcutDescription('harness candidate diff'),
-				},
-				'swarm-issue': {
-					template: '/swarm issue $ARGUMENTS',
-					description:
-						'Use /swarm issue to ingest a GitHub issue into the swarm workflow',
-				},
-				'swarm-qa-gates': {
-					template: '/swarm qa-gates $ARGUMENTS',
-					description:
-						'Use /swarm qa-gates to view or modify QA gate profile for the current plan',
-				},
-				'swarm-dark-matter': {
-					template: '/swarm dark-matter',
-					description: 'Use /swarm dark-matter to detect hidden file couplings',
-				},
-				'swarm-knowledge': {
-					template: '/swarm knowledge $ARGUMENTS',
-					description:
-						'Use /swarm knowledge for knowledge management (quarantine/restore/migrate)',
-				},
-				'swarm-memory': {
-					template: '/swarm memory $ARGUMENTS',
-					description:
-						'Use /swarm memory for memory status, JSONL export/import, and SQLite migration',
-				},
-				'swarm-memory-status': {
-					template: '/swarm memory status',
-					description:
-						'Use /swarm memory status to show provider and migration status',
-				},
-				'swarm-memory-export': {
-					template: '/swarm memory export',
-					description:
-						'Use /swarm memory export to write current memory to JSONL',
-				},
-				'swarm-memory-import': {
-					template: '/swarm memory import',
-					description:
-						'Use /swarm memory import to import legacy JSONL into SQLite',
-				},
-				'swarm-memory-migrate': {
-					template: '/swarm memory migrate',
-					description:
-						'Use /swarm memory migrate to run the one-time SQLite migration',
-				},
-				'swarm-curate': {
-					template: '/swarm curate',
-					description:
-						'Use /swarm curate to curate knowledge artifacts and entries',
-				},
-				'swarm-consolidate': {
-					template: '/swarm consolidate $ARGUMENTS',
-					description:
-						'Use /swarm consolidate to run quota-bounded skill-improver consolidation',
-				},
-				'swarm-concurrency': {
-					template: '/swarm concurrency $ARGUMENTS',
-					description:
-						'Use /swarm concurrency to manage runtime concurrency override for plan execution',
-				},
-				'swarm-turbo': {
-					template: '/swarm turbo',
-					description:
-						'Use /swarm turbo to enable turbo mode for faster execution',
-				},
-				'swarm-epic': {
-					template: '/swarm epic $ARGUMENTS',
-					description: shortcutDescription('epic'),
-				},
-				'swarm-coupling': {
-					template: '/swarm coupling $ARGUMENTS',
-					description: shortcutDescription('coupling'),
-				},
-				'swarm-lanes': {
-					template: '/swarm lanes',
-					description: shortcutDescription('lanes'),
-				},
-				'swarm-guardrail-explain': {
-					template: '/swarm guardrail explain $ARGUMENTS',
-					description: shortcutDescription('guardrail explain'),
-				},
-				'swarm-guardrail-reset': {
-					template: '/swarm guardrail reset $ARGUMENTS',
-					description: shortcutDescription('guardrail reset'),
-				},
-				'swarm-guardrail-log': {
-					template: '/swarm guardrail-log $ARGUMENTS',
-					description: shortcutDescription('guardrail-log'),
-				},
-				'swarm-full-auto': {
-					template: '/swarm full-auto $ARGUMENTS',
-					description: 'Toggle Full-Auto Mode for the active session [on|off]',
-				},
-				'swarm-auto-proceed': {
-					template: '/swarm auto-proceed $ARGUMENTS',
-					description:
-						'Toggle auto-proceed mode for automatic phase advancement',
-				},
-				'swarm-write-retro': {
-					template: '/swarm write-retro $ARGUMENTS',
-					description:
-						'Use /swarm write-retro to manually write a phase retrospective',
-				},
-				'swarm-reset-session': {
-					template: '/swarm reset-session',
-					description:
-						'Use /swarm reset-session to clear session state and delegation chains',
-				},
-				'swarm-recover': {
-					template: '/swarm recover $ARGUMENTS',
-					description:
-						'Use /swarm recover to settle wedged coder settlements [task_id] [--force]',
-				},
-				'swarm-simulate': {
-					template: '/swarm simulate $ARGUMENTS',
-					description: 'Use /swarm simulate to run a simulated agent session',
-				},
-				'swarm-promote': {
-					template: '/swarm promote $ARGUMENTS',
-					description:
-						'Use /swarm promote to promote knowledge entries to production',
-				},
-				'swarm-checkpoint': {
-					template: '/swarm checkpoint $ARGUMENTS',
-					description:
-						'Use /swarm checkpoint to save or restore git checkpoints',
-				},
-				'swarm-config-doctor': {
-					template: '/swarm config doctor',
-					description:
-						'Use /swarm config doctor to diagnose configuration issues',
-				},
-				'swarm-evidence-summary': {
-					template: '/swarm evidence summary',
-					description:
-						'Use /swarm evidence summary to generate evidence summaries',
-				},
-				'swarm-finalize': {
-					template: '/swarm finalize',
-					description:
-						'Use /swarm finalize to archive the swarm project and close active state',
-				},
-				'swarm-close': {
-					template: '/swarm close',
-					description: 'Deprecated alias for /swarm finalize',
-				},
-				'swarm-acknowledge-spec-drift': {
-					template: '/swarm acknowledge-spec-drift',
-					description:
-						'Use /swarm acknowledge-spec-drift to acknowledge spec drift and suppress further warnings',
-				},
-				'swarm-doctor-tools': {
-					template: '/swarm doctor tools',
-					description:
-						'Use /swarm doctor tools to run tool registration coherence check',
-				},
-				'swarm-context-map-stats': {
-					template: '/swarm context-map stats',
-					description: shortcutDescription('context-map-stats'),
-				},
-				'swarm-link': {
-					template: '/swarm link $ARGUMENTS',
-					description:
-						'Use /swarm link to link this worktree to a shared knowledge store [name|status]',
-				},
-				'swarm-unlink': {
-					template: '/swarm unlink $ARGUMENTS',
-					description:
-						'Use /swarm unlink to unlink this worktree from the shared knowledge store [--no-copy]',
-				},
-			};
-
-			log('Config applied', {
-				agents: Object.keys(agents),
-				commands: ['swarm'],
+			// #2910 W3: the body lives in the shared module-scope builder
+			// (applySwarmRegistrationTables) so the v2 fresh-tables path
+			// (buildV2RegistrationTables) reproduces the EXACT registration
+			// inputs from one source; v1 behavior is byte-equivalent.
+			applySwarmRegistrationTables(opencodeConfig, agents, {
+				directory: ctx.directory,
+				lanePermissions: config?.worktree?.lane_permissions ?? 'scoped_allow',
+				autoSelectArchitect: config?.auto_select_architect,
 			});
 		},
 
@@ -6501,6 +5858,765 @@ function readHostAgent(input: unknown): string | undefined {
 	return typeof agent === 'string' ? agent.trim() || undefined : undefined;
 }
 
+/**
+ * Shared registration-table builder (#2910 W3): the EXACT body the v1
+ * `config` hook runs, extracted so the v2 fresh-tables builder
+ * (`buildV2RegistrationTables`) reproduces the registration inputs from ONE
+ * source — agent merge, worktree-lane permission scoping, auto-select
+ * promotions and the /swarm command table. Mutates `opencodeConfig` in
+ * place; v1 behavior is byte-equivalent (the v1 hook still runs against its
+ * own synthetic object with its init-time closure values).
+ */
+function applySwarmRegistrationTables(
+	opencodeConfig: Record<string, unknown>,
+	agents: Record<string, unknown>,
+	inputs: {
+		directory: string;
+		lanePermissions: Parameters<typeof applyLanePermissions>[2];
+		autoSelectArchitect: boolean | string | undefined;
+	},
+): void {
+	const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
+		typeof value === 'object' && value !== null;
+	const pluginConfig = opencodeConfig as Record<string, unknown> & {
+		agent?: Record<string, unknown>;
+	};
+
+	// Normalize agent config to a plain object if it's absent or a non-object primitive
+	if (!isObjectRecord(pluginConfig.agent)) {
+		pluginConfig.agent = {};
+	}
+	const agentConfig = pluginConfig.agent;
+
+	// Merge agent configs (don't override default_agent)
+	Object.assign(agentConfig, agents);
+
+	// Worktree-lane permission scoping.
+	//
+	// OpenCode partitions permission state per directory, and `Plugin.state`
+	// is built through the same directory-keyed InstanceState cache as
+	// `Permission.state` — so when this hook runs inside a lane instance,
+	// `inputs.directory` IS the lane path. Pre-resolving `external_directory`
+	// here prevents the ask from ever being raised, which matters because a
+	// lane instance has no TUI that could answer one (the host's
+	// `Permission.ask` awaits its deferred with no timeout).
+	//
+	// A no-op for every ordinary session: `applyLanePermissions` mutates
+	// nothing unless the directory resolves as a swarm worktree lane.
+	// Wrapped because a config-hook throw is logged and ignored by the host
+	// (`tryPromise` + `tapError` + `ignore`), which would silently drop the
+	// agent registration work above on some future refactor.
+	try {
+		// The lane mode is read straight off the caller's `config` rather than
+		// via
+		// `resolveWorktreeIsolationConfig`: that resolver is a spread over
+		// DEFAULT_WORKTREE_ISOLATION_CONFIG whose `lane_permissions` default
+		// is this same 'scoped_allow', so the two are behaviourally
+		// identical here — and the direct read keeps this builder off the
+		// resolver's import chain. Do not "simplify" it into that import
+		// without re-checking the init-path cost.
+		applyLanePermissions(
+			opencodeConfig,
+			inputs.directory,
+			inputs.lanePermissions,
+		);
+	} catch (err) {
+		addDeferredWarning(
+			`[swarm] lane permission scoping failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+
+	// Auto-select architect: disable competing built-in agents when enabled
+	const autoSelect = inputs.autoSelectArchitect;
+	if (autoSelect) {
+		// Check that at least one architect agent exists in the generated set
+		const hasArchitect = Object.keys(agents).some(
+			(name) => stripKnownSwarmPrefix(name) === 'architect',
+		);
+		if (hasArchitect) {
+			// Disable build and plan built-in agents
+			for (const builtin of ['build', 'plan'] as const) {
+				const existing = agentConfig[builtin];
+				if (isObjectRecord(existing) && existing.disable === true) {
+					// User already disabled this agent — respect their override
+					continue;
+				}
+				agentConfig[builtin] = {
+					...(isObjectRecord(existing) ? existing : {}),
+					disable: true,
+				};
+			}
+
+			// Warn when boolean true and multiple architects are primary
+			if (autoSelect === true) {
+				const primaryArchitects = Object.entries(agents).filter(
+					([name, cfg]) =>
+						stripKnownSwarmPrefix(name) === 'architect' &&
+						isObjectRecord(cfg) &&
+						cfg.mode === 'primary',
+				);
+				if (primaryArchitects.length > 1) {
+					const names = primaryArchitects.map(([n]) => n).join(', ');
+					addDeferredWarning(
+						`[swarm] auto_select_architect is true but ${primaryArchitects.length} architect agents are primary (${names}). Consider setting auto_select_architect to a specific agent name.`,
+					);
+				}
+			}
+
+			// When a specific architect name is provided, demote non-matching architects to subagent
+			if (typeof autoSelect === 'string' && autoSelect !== '') {
+				const targetName = autoSelect;
+				// Only proceed if the target is actually an architect-role agent
+				const targetIsArchitect =
+					Object.hasOwn(agents, targetName) &&
+					stripKnownSwarmPrefix(targetName) === 'architect';
+
+				if (targetIsArchitect) {
+					// Demote non-matching architects to subagent
+					for (const [name, cfg] of Object.entries(agents)) {
+						if (
+							stripKnownSwarmPrefix(name) === 'architect' &&
+							name !== targetName
+						) {
+							agentConfig[name] = {
+								...(isObjectRecord(cfg) ? cfg : {}),
+								mode: 'subagent',
+							};
+						}
+					}
+					// Promote the target architect to primary
+					const targetExisting = agentConfig[targetName];
+					const targetAgent = agents[targetName];
+					agentConfig[targetName] = {
+						...(isObjectRecord(targetExisting) ? targetExisting : {}),
+						...(isObjectRecord(targetAgent) ? targetAgent : {}),
+						mode: 'primary',
+					};
+				} else {
+					// Target is not a valid architect — warn the user
+					addDeferredWarning(
+						`[swarm] auto_select_architect is set to "${targetName}" but that is not a known architect agent. No architect demotion applied.`,
+					);
+				}
+			}
+		} else {
+			// No architect agents found — warn the user
+			addDeferredWarning(
+				'[swarm] auto_select_architect is enabled but no architect agents were found in the generated set. The option has no effect.',
+			);
+		}
+	}
+
+	// Register /swarm command
+	// Build a model-facing shortcut description from the registry entry (SSOT — can't drift).
+	const shortcutDescription = (cmd: string): string => {
+		const entry = COMMAND_REGISTRY[cmd as keyof typeof COMMAND_REGISTRY] as
+			| { description?: string }
+			| undefined;
+		if (!entry?.description) {
+			return `Use /swarm ${cmd}`; // fallback if registry entry is somehow missing
+		}
+		const desc =
+			entry.description.charAt(0).toLowerCase() + entry.description.slice(1);
+		return `Use /swarm ${cmd} to ${desc}`;
+	};
+	opencodeConfig.command = {
+		...((opencodeConfig.command as Record<string, unknown>) || {}),
+		swarm: {
+			// Template is required by OpenCode and always sent to the LLM.
+			// Keep it minimal — instructional text confuses non-frontier models.
+			// The actual command is handled by command.execute.before hook.
+			template: '/swarm $ARGUMENTS',
+			description: (() => {
+				// Derive the command list from the registry (single source of truth).
+				// Include standalone (non-alias, non-deprecated, non-subcommand) commands.
+				const standaloneCommands = VALID_COMMANDS.filter((cmd) => {
+					const entry = COMMAND_REGISTRY[
+						cmd as keyof typeof COMMAND_REGISTRY
+					] as {
+						aliasOf?: string;
+						deprecated?: boolean;
+						subcommandOf?: string;
+					};
+					return !entry.aliasOf && !entry.deprecated && !entry.subcommandOf;
+				});
+				return `Swarm management commands: /swarm [${standaloneCommands.join('|')}]`;
+			})(),
+		},
+		// Individual subcommands for discoverability by weaker models (Haiku-class)
+		'swarm-status': {
+			template: '/swarm status',
+			description:
+				'Use /swarm status to show current swarm status and active phase',
+		},
+		'swarm-show-plan': {
+			template: '/swarm show-plan $ARGUMENTS',
+			description:
+				'Use /swarm show-plan to view or filter the current execution plan',
+		},
+		'swarm-plan': {
+			// #2493 review F-06: the palette previously typed the
+			// deprecated alias `/swarm plan`; point the template at the
+			// canonical command while keeping the shortcut key stable
+			// for existing muscle memory and parity snapshots.
+			template: '/swarm show-plan $ARGUMENTS',
+			description:
+				'Deprecated alias for /swarm show-plan (runs the canonical command)',
+		},
+		'swarm-agents': {
+			template: '/swarm agents',
+			description: 'Use /swarm agents to list registered swarm agents',
+		},
+		'swarm-history': {
+			template: '/swarm history',
+			description: 'Use /swarm history to show completed phases summary',
+		},
+		'swarm-config': {
+			template: '/swarm config $ARGUMENTS',
+			description: 'Use /swarm config to show or validate configuration',
+		},
+		'swarm-evidence': {
+			template: '/swarm evidence $ARGUMENTS',
+			description: 'Use /swarm evidence to view evidence bundles and summaries',
+		},
+		'swarm-handoff': {
+			template: '/swarm handoff',
+			description:
+				'Use /swarm handoff to prepare handoff brief for switching models mid-task',
+		},
+		'swarm-archive': {
+			template: '/swarm archive',
+			description: 'Use /swarm archive to archive old evidence bundles',
+		},
+		'swarm-diagnose': {
+			template: '/swarm diagnose',
+			description: 'Use /swarm diagnose to run health checks on swarm state',
+		},
+		'swarm-diagnosis': {
+			template: '/swarm diagnosis',
+			description: 'Use /swarm diagnosis to run health checks on swarm state',
+		},
+		'swarm-preflight': {
+			template: '/swarm preflight',
+			description: 'Use /swarm preflight to run preflight automation checks',
+		},
+		'swarm-sync-plan': {
+			template: '/swarm sync-plan',
+			description: 'Use /swarm sync-plan to sync plan.json with plan.md',
+		},
+		'swarm-benchmark': {
+			template: '/swarm benchmark',
+			description: 'Use /swarm benchmark to show performance metrics',
+		},
+		'swarm-gate-audit': {
+			template: '/swarm gate-audit $ARGUMENTS',
+			description:
+				'Use /swarm gate-audit to run the bounded Tier-1 production gate matrix',
+		},
+		'swarm-gate-stats': {
+			template: '/swarm gate-stats $ARGUMENTS',
+			description:
+				'Use /swarm gate-stats to summarize stored gate-audit evidence',
+		},
+		'swarm-skill-opt': {
+			template: '/swarm skill-opt $ARGUMENTS',
+			description:
+				'Use /swarm skill-opt to govern skill optimization (plan|run|status|diff|approve|reject|rollback|history)',
+		},
+		'swarm-harness-opt': {
+			template: '/swarm harness-opt $ARGUMENTS',
+			description:
+				'Use /swarm harness-opt to govern harness optimization rounds (plan|run|status|stop|history)',
+		},
+		'swarm-costs': {
+			template: '/swarm costs $ARGUMENTS',
+			description:
+				'Use /swarm costs to show per-agent, task, gate, and retry token/cost totals',
+		},
+		'swarm-report': {
+			template: '/swarm report $ARGUMENTS',
+			description:
+				'Use /swarm report to query swarm observability events (--task/--session/--trace/--run/--since/--json)',
+		},
+		'swarm-dashboard': {
+			template: '/swarm dashboard',
+			description:
+				'Use /swarm dashboard to show the opt-in local mission-control dashboard URL and status',
+		},
+		'swarm-export': {
+			template: '/swarm export',
+			description: 'Use /swarm export to export plan and context as JSON',
+		},
+		'swarm-dataset-consent': {
+			template: '/swarm dataset consent $ARGUMENTS',
+			description:
+				'Use /swarm dataset consent to grant or revoke the training-content consent (human-only, confirm token)',
+		},
+		'swarm-dataset-export': {
+			template: '/swarm dataset export $ARGUMENTS',
+			description:
+				'Use /swarm dataset export to preview/write the deterministic governed dataset export (human-only, confirm token)',
+		},
+		'swarm-dataset-withdraw': {
+			template: '/swarm dataset withdraw $ARGUMENTS',
+			description:
+				'Use /swarm dataset withdraw to purge vault content, tombstone, and revoke exports (human-only, confirm token)',
+		},
+		'swarm-reset': {
+			template: '/swarm reset --confirm',
+			description:
+				'Use /swarm reset --confirm to clear swarm state (requires --confirm)',
+		},
+		'swarm-rollback': {
+			template: '/swarm rollback $ARGUMENTS',
+			description: 'Use /swarm rollback to restore swarm state to a checkpoint',
+		},
+		'swarm-retrieve': {
+			template: '/swarm retrieve $ARGUMENTS',
+			description: 'Use /swarm retrieve to retrieve full output from summary',
+		},
+		'swarm-clarify': {
+			template: '/swarm clarify $ARGUMENTS',
+			description:
+				'Use /swarm clarify to clarify and refine a feature specification',
+		},
+		'swarm-analyze': {
+			template: '/swarm analyze',
+			description:
+				'Use /swarm analyze to analyze spec vs plan for coverage gaps',
+		},
+		'swarm-specify': {
+			template: '/swarm specify $ARGUMENTS',
+			description:
+				'Use /swarm specify to generate or import a feature specification',
+		},
+		'swarm-brainstorm': {
+			template: '/swarm brainstorm $ARGUMENTS',
+			description:
+				'Use /swarm brainstorm to enter the architect MODE: BRAINSTORM planning workflow',
+		},
+		'swarm-loop': {
+			template: '/swarm loop $ARGUMENTS',
+			description:
+				'Use /swarm loop <objective> to run a compound-engineering loop: brainstorm → plan → build → review → improve, iterating until done [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]',
+		},
+		'swarm-council': {
+			template: '/swarm council $ARGUMENTS',
+			description:
+				'Use /swarm council <question> to convene a multi-model General Council deliberation (generalist / skeptic / domain expert) [--spec-review]',
+		},
+		'swarm-pr-review': {
+			template: '/swarm pr-review $ARGUMENTS',
+			description:
+				'Use /swarm pr-review to launch deep PR review with multi-lane analysis',
+		},
+		'swarm-review': {
+			template: '/swarm review $ARGUMENTS',
+			description:
+				'Use /swarm review to run the bounded whole-diff review engine for the selected local scope',
+		},
+		'swarm-pr-feedback': {
+			template: '/swarm pr-feedback $ARGUMENTS',
+			description:
+				'Use /swarm pr-feedback to ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh broad review',
+		},
+		'swarm-abort-pr-workflow': {
+			template: '/swarm abort-pr-workflow $ARGUMENTS',
+			description:
+				'Use /swarm abort-pr-workflow to clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop; cancel an armed PR_FEEDBACK without publication with PR_FEEDBACK --cancel-publication <reason...> (human-only escape hatch)',
+		},
+		'swarm-pr-feedback-loop': {
+			template: '/swarm pr-feedback-loop $ARGUMENTS',
+			description:
+				'Use /swarm pr-feedback-loop stop <reason...> to stop the autonomous PR babysitting settling loop for this session (human-only)',
+		},
+		'swarm-approve-plan-critic': {
+			template: '/swarm approve-plan-critic $ARGUMENTS',
+			description:
+				'Use /swarm approve-plan-critic to record a MANUAL plan-critic approval that unblocks the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the snapshot was not recorded (human-only escape hatch)',
+		},
+		'swarm-approve-write': {
+			template: '/swarm approve-write $ARGUMENTS',
+			description:
+				'Use /swarm approve-write to issue one exact, session-bound, one-shot write approval (human-only)',
+		},
+		'swarm-ci-monitor': {
+			template: '/swarm ci-monitor $ARGUMENTS',
+			description:
+				'Use /swarm ci-monitor to drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge)',
+		},
+		'swarm-pr-subscribe': {
+			template: '/swarm pr subscribe $ARGUMENTS',
+			description: shortcutDescription('pr subscribe'),
+		},
+		'swarm-pr-unsubscribe': {
+			template: '/swarm pr unsubscribe $ARGUMENTS',
+			description: shortcutDescription('pr unsubscribe'),
+		},
+		'swarm-pr-status': {
+			template: '/swarm pr status',
+			description: shortcutDescription('pr status'),
+		},
+		'swarm-ci-simulate': {
+			template: '/swarm ci-simulate $ARGUMENTS',
+			description: shortcutDescription('ci-simulate'),
+		},
+		'swarm-ci': {
+			template: '/swarm ci $ARGUMENTS',
+			description: shortcutDescription('ci'),
+		},
+		'swarm-learning': {
+			template: '/swarm learning',
+			description: shortcutDescription('learning'),
+		},
+		'swarm-post-mortem': {
+			template: '/swarm post-mortem $ARGUMENTS',
+			description: shortcutDescription('post-mortem'),
+		},
+		'swarm-deep-dive': {
+			template: '/swarm deep-dive $ARGUMENTS',
+			description:
+				'Use /swarm deep-dive to launch a read-only deep audit with parallel explorer waves, dual reviewers, and critic challenge',
+		},
+		'swarm-deep-research': {
+			template: '/swarm deep-research $ARGUMENTS',
+			description:
+				'Use /swarm deep-research <question> to run a multi-source, fact-checked deep research pass and synthesize a cited report [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
+		},
+		'swarm-codebase-review': {
+			template: '/swarm codebase-review $ARGUMENTS',
+			description:
+				'Use /swarm codebase-review to launch codebase-review-swarm for a quote-grounded full-repo or large-subsystem audit',
+		},
+		'swarm-design-docs': {
+			template: '/swarm design-docs $ARGUMENTS',
+			description:
+				'Use /swarm design-docs to generate or sync language-agnostic design docs for the project under build',
+		},
+		'swarm-sdd': {
+			template: '/swarm sdd $ARGUMENTS',
+			description:
+				'Use /swarm sdd to inspect OpenSpec-compatible SDD artifacts',
+		},
+		'swarm-sdd-status': {
+			template: '/swarm sdd status',
+			description:
+				'Use /swarm sdd status to show effective spec and OpenSpec artifact status',
+		},
+		'swarm-sdd-validate': {
+			template: '/swarm sdd validate $ARGUMENTS',
+			description:
+				'Use /swarm sdd validate to validate OpenSpec-compatible SDD artifacts',
+		},
+		'swarm-sdd-project': {
+			template: '/swarm sdd project $ARGUMENTS',
+			description:
+				'Use /swarm sdd project to materialize OpenSpec artifacts into .swarm/spec.md',
+		},
+		'swarm-blueprint-validate': {
+			template: '/swarm blueprint validate $ARGUMENTS',
+			description: shortcutDescription('blueprint validate'),
+		},
+		'swarm-blueprint-current': {
+			template: '/swarm blueprint current',
+			description: shortcutDescription('blueprint current'),
+		},
+		'swarm-blueprint-history': {
+			template: '/swarm blueprint history',
+			description: shortcutDescription('blueprint history'),
+		},
+		'swarm-blueprint-diff': {
+			template: '/swarm blueprint diff $ARGUMENTS',
+			description: shortcutDescription('blueprint diff'),
+		},
+		'swarm-blueprint-export': {
+			template: '/swarm blueprint export $ARGUMENTS',
+			description: shortcutDescription('blueprint export'),
+		},
+		'swarm-harness-candidate-validate': {
+			template: '/swarm harness candidate validate $ARGUMENTS',
+			description: shortcutDescription('harness candidate validate'),
+		},
+		'swarm-harness-candidate-show': {
+			template: '/swarm harness candidate show $ARGUMENTS',
+			description: shortcutDescription('harness candidate show'),
+		},
+		'swarm-harness-candidate-diff': {
+			template: '/swarm harness candidate diff $ARGUMENTS',
+			description: shortcutDescription('harness candidate diff'),
+		},
+		'swarm-issue': {
+			template: '/swarm issue $ARGUMENTS',
+			description:
+				'Use /swarm issue to ingest a GitHub issue into the swarm workflow',
+		},
+		'swarm-qa-gates': {
+			template: '/swarm qa-gates $ARGUMENTS',
+			description:
+				'Use /swarm qa-gates to view or modify QA gate profile for the current plan',
+		},
+		'swarm-dark-matter': {
+			template: '/swarm dark-matter',
+			description: 'Use /swarm dark-matter to detect hidden file couplings',
+		},
+		'swarm-knowledge': {
+			template: '/swarm knowledge $ARGUMENTS',
+			description:
+				'Use /swarm knowledge for knowledge management (quarantine/restore/migrate)',
+		},
+		'swarm-memory': {
+			template: '/swarm memory $ARGUMENTS',
+			description:
+				'Use /swarm memory for memory status, JSONL export/import, and SQLite migration',
+		},
+		'swarm-memory-status': {
+			template: '/swarm memory status',
+			description:
+				'Use /swarm memory status to show provider and migration status',
+		},
+		'swarm-memory-export': {
+			template: '/swarm memory export',
+			description: 'Use /swarm memory export to write current memory to JSONL',
+		},
+		'swarm-memory-import': {
+			template: '/swarm memory import',
+			description:
+				'Use /swarm memory import to import legacy JSONL into SQLite',
+		},
+		'swarm-memory-migrate': {
+			template: '/swarm memory migrate',
+			description:
+				'Use /swarm memory migrate to run the one-time SQLite migration',
+		},
+		'swarm-curate': {
+			template: '/swarm curate',
+			description:
+				'Use /swarm curate to curate knowledge artifacts and entries',
+		},
+		'swarm-consolidate': {
+			template: '/swarm consolidate $ARGUMENTS',
+			description:
+				'Use /swarm consolidate to run quota-bounded skill-improver consolidation',
+		},
+		'swarm-concurrency': {
+			template: '/swarm concurrency $ARGUMENTS',
+			description:
+				'Use /swarm concurrency to manage runtime concurrency override for plan execution',
+		},
+		'swarm-turbo': {
+			template: '/swarm turbo',
+			description: 'Use /swarm turbo to enable turbo mode for faster execution',
+		},
+		'swarm-epic': {
+			template: '/swarm epic $ARGUMENTS',
+			description: shortcutDescription('epic'),
+		},
+		'swarm-coupling': {
+			template: '/swarm coupling $ARGUMENTS',
+			description: shortcutDescription('coupling'),
+		},
+		'swarm-lanes': {
+			template: '/swarm lanes',
+			description: shortcutDescription('lanes'),
+		},
+		'swarm-guardrail-explain': {
+			template: '/swarm guardrail explain $ARGUMENTS',
+			description: shortcutDescription('guardrail explain'),
+		},
+		'swarm-guardrail-reset': {
+			template: '/swarm guardrail reset $ARGUMENTS',
+			description: shortcutDescription('guardrail reset'),
+		},
+		'swarm-guardrail-log': {
+			template: '/swarm guardrail-log $ARGUMENTS',
+			description: shortcutDescription('guardrail-log'),
+		},
+		'swarm-full-auto': {
+			template: '/swarm full-auto $ARGUMENTS',
+			description: 'Toggle Full-Auto Mode for the active session [on|off]',
+		},
+		'swarm-auto-proceed': {
+			template: '/swarm auto-proceed $ARGUMENTS',
+			description: 'Toggle auto-proceed mode for automatic phase advancement',
+		},
+		'swarm-write-retro': {
+			template: '/swarm write-retro $ARGUMENTS',
+			description:
+				'Use /swarm write-retro to manually write a phase retrospective',
+		},
+		'swarm-reset-session': {
+			template: '/swarm reset-session',
+			description:
+				'Use /swarm reset-session to clear session state and delegation chains',
+		},
+		'swarm-recover': {
+			template: '/swarm recover $ARGUMENTS',
+			description:
+				'Use /swarm recover to settle wedged coder settlements [task_id] [--force]',
+		},
+		'swarm-attest': {
+			template: '/swarm attest $ARGUMENTS',
+			description:
+				'Use /swarm attest to verify a git-external deliverable with pinned read-only anchors [task_id]',
+		},
+		'swarm-simulate': {
+			template: '/swarm simulate $ARGUMENTS',
+			description: 'Use /swarm simulate to run a simulated agent session',
+		},
+		'swarm-promote': {
+			template: '/swarm promote $ARGUMENTS',
+			description:
+				'Use /swarm promote to promote knowledge entries to production',
+		},
+		'swarm-checkpoint': {
+			template: '/swarm checkpoint $ARGUMENTS',
+			description: 'Use /swarm checkpoint to save or restore git checkpoints',
+		},
+		'swarm-config-doctor': {
+			template: '/swarm config doctor',
+			description: 'Use /swarm config doctor to diagnose configuration issues',
+		},
+		'swarm-evidence-summary': {
+			template: '/swarm evidence summary',
+			description: 'Use /swarm evidence summary to generate evidence summaries',
+		},
+		'swarm-finalize': {
+			template: '/swarm finalize',
+			description:
+				'Use /swarm finalize to archive the swarm project and close active state',
+		},
+		'swarm-close': {
+			template: '/swarm close',
+			description: 'Deprecated alias for /swarm finalize',
+		},
+		'swarm-acknowledge-spec-drift': {
+			template: '/swarm acknowledge-spec-drift',
+			description:
+				'Use /swarm acknowledge-spec-drift to acknowledge spec drift and suppress further warnings',
+		},
+		'swarm-doctor-tools': {
+			template: '/swarm doctor tools',
+			description:
+				'Use /swarm doctor tools to run tool registration coherence check',
+		},
+		'swarm-context-map-stats': {
+			template: '/swarm context-map stats',
+			description: shortcutDescription('context-map-stats'),
+		},
+		'swarm-link': {
+			template: '/swarm link $ARGUMENTS',
+			description:
+				'Use /swarm link to link this worktree to a shared knowledge store [name|status]',
+		},
+		'swarm-unlink': {
+			template: '/swarm unlink $ARGUMENTS',
+			description:
+				'Use /swarm unlink to unlink this worktree from the shared knowledge store [--no-copy]',
+		},
+	};
+
+	log('Config applied', {
+		agents: Object.keys(agents),
+		commands: ['swarm'],
+	});
+}
+
+/**
+ * Fresh registration-table builder for the v2 host path (#2910 W3 / AC5).
+ * Injected into `openCodeSwarmV2Setup` as the per-instance config rebuild
+ * source: a FRESH config read through the async loader (never the init-time
+ * closure), the same release-aware auto-review resolution, project context
+ * and lane-permission application the v1 init path feeds
+ * `getAgentConfigs`, and the SAME shared table builder — no
+ * side-effecting init re-run (no snapshot / repo-graph / bundled-skill
+ * work). Invoked only from the user-triggered registration refresh, never
+ * from plugin init.
+ */
+export async function buildV2RegistrationTables(directory: string): Promise<{
+	agentTable: Record<string, unknown>;
+	commandTable: Record<string, unknown>;
+}> {
+	const loaded = await withTimeout(
+		loadPluginConfigWithMetaAsync(directory),
+		LOAD_PLUGIN_CONFIG_TIMEOUT_MS,
+		new Error(
+			`[opencode-swarm] v2: registration rebuild config read exceeded the ${LOAD_PLUGIN_CONFIG_TIMEOUT_MS}ms budget`,
+		),
+	).catch((err: unknown) => {
+		log('v2 registration rebuild config read failed (non-fatal)', {
+			error: err instanceof Error ? err.message : String(err),
+		});
+		return getSafeDefaultConfigLoadResult();
+	});
+	const config = loaded.config;
+	let autoReviewConfig: AutoReviewConfig;
+	try {
+		// Same release-aware resolution as the init path (the
+		// configWithResolvedAutoReview equivalent at the getAgentConfigs call).
+		autoReviewConfig = resolveAutoReviewConfigForInit(
+			config.auto_review ?? {},
+			{
+				preset: config.preset,
+			},
+		);
+	} catch (error) {
+		log('v2 registration rebuild auto_review resolution failed (non-fatal)', {
+			error: error instanceof Error ? error.message : String(error),
+		});
+		autoReviewConfig = resolveAutoReviewConfigForInit({ enabled: false });
+	}
+	const configWithResolvedAutoReview = {
+		...config,
+		auto_review: autoReviewConfig,
+	};
+	// Project-context parity with the init path's parallel bounded read
+	// (src/index.ts projectContextP): same 300ms language-backend budget, a
+	// source-only workspace skips the graph entirely.
+	const projectContext = hasManifestAncestor(directory)
+		? await withTimeoutSignal(
+				async (signal) => {
+					const mod = await import('./agents/project-context');
+					return mod.buildProjectContext(directory, signal);
+				},
+				300, // LANG_BACKEND_DETECTION_TIMEOUT_MS — see project-context.ts
+				new Error(
+					'[opencode-swarm] v2: registration rebuild language-backend detection exceeded 300ms',
+				),
+			).catch((err: unknown) => {
+				log(
+					'v2 registration rebuild language-backend detection failed (non-fatal)',
+					{ error: err instanceof Error ? err.message : String(err) },
+				);
+				return null;
+			})
+		: null;
+	// Review PRR-016 (swarm-pr-review pr3444-20261025): a STABLE sessionId —
+	// getAgentConfigs writes an `agent-tools-<sid>.json` evidence snapshot,
+	// and an undefined sid became `init-<Date.now()>`, so EVERY refresh (even
+	// one that later concludes tables-unchanged — the write happens inside
+	// getAgentConfigs, before the comparison) added a NEW timestamped file
+	// with no retention sweep. The stable sid makes the file a single
+	// overwritten agent-tools-v2-registration-refresh.json (getAgentConfigs
+	// only interpolates the sid into the filename — any non-numeric string is
+	// fine).
+	const agents = getAgentConfigs(
+		configWithResolvedAutoReview,
+		directory,
+		'v2-registration-refresh',
+		projectContext ?? undefined,
+	);
+	const synthetic: Record<string, unknown> = {};
+	applySwarmRegistrationTables(synthetic, agents, {
+		directory,
+		lanePermissions: config.worktree?.lane_permissions ?? 'scoped_allow',
+		autoSelectArchitect: config.auto_select_architect,
+	});
+	return {
+		agentTable: (synthetic.agent ?? {}) as Record<string, unknown>,
+		commandTable: (synthetic.command ?? {}) as Record<string, unknown>,
+	};
+}
+
 // Dual-shape plugin entrypoint (issue #3004 / ADR-0003):
 //
 // v1 hosts (OpenCode 1, @opencode-ai/plugin 1.x): readV1Plugin reads
@@ -6527,6 +6643,10 @@ export default {
 			// index ↔ host cycle); the cast bridges the structural subset the
 			// adapter declares to the full inferred hooks type.
 			runInit: runServerInit as unknown as V2SetupDependencies['runInit'],
+			// #2910 W3: the fresh-tables builder is this setup instance's config
+			// rebuild source — a successful config-doctor --fix dispatch refreshes
+			// the v2 registration tables through it.
+			buildV2RegistrationTables,
 		}),
 } satisfies {
 	id: string;

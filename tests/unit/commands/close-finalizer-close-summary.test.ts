@@ -27,6 +27,7 @@ import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import * as actualState from '../../../src/state.js';
+import { mockGitStatusReadNonRepo } from '../../helpers/close-command-mocks';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const realSnapshotWriter = await import(
@@ -88,6 +89,9 @@ mock.module('../../../src/state.js', () => ({
 	hasActiveFullAuto: () => false,
 }));
 
+// #3427: the align stage's repository probe rides the async detailed
+// reader (spread-real module mock; only the detailed reader is overridden).
+mockGitStatusReadNonRepo();
 mock.module('../../../src/git/branch.js', () => ({
 	isGitRepo: () => false,
 	getCurrentBranch: () => 'main',

@@ -2,10 +2,11 @@
  * #2674 — bounded-subprocess contract for the diagnose caller.
  *
  * Drives the REAL `getDiagnoseData` 'Git Repository' row (→
- * `checkGitRepository`'s `execFileSync`) against a real fake-git executable
- * (tests/helpers/fake-git-2674.ts), plus DI-injected timeout-shaped throws
- * through the `_internals.execFileSync` seam (no `mock.module`). Failure
- * modes must never render `✅` or the false "Not a git repository" claim.
+ * `checkGitRepository`'s #3317 async reader) against a real fake-git
+ * executable (tests/helpers/fake-git-2674.ts), plus DI-injected
+ * timeout-shaped throws through the `_internals.readGitRepositoryOnce` seam
+ * (no `mock.module`). Failure modes must never render `✅` or the false "Not
+ * a git repository" claim.
  *
  * Slow tests carry explicit timeouts: bun:test's 5000 ms default would flake
  * against the real 5000 ms caller bound (repo convention for real-subprocess
@@ -42,10 +43,10 @@ async function gitRow(projectDir: string) {
 
 describe('diagnose checkGitRepository subprocess bounds (#2674)', () => {
 	let fixture: FakeGitFixture | null = null;
-	const originalExecFileSync = _internals.execFileSync;
+	const originalRead = _internals.readGitRepositoryOnce;
 
 	afterEach(() => {
-		_internals.execFileSync = originalExecFileSync;
+		_internals.readGitRepositoryOnce = originalRead;
 		teardownFakeGit(fixture);
 		fixture = null;
 	});
@@ -66,13 +67,15 @@ describe('diagnose checkGitRepository subprocess bounds (#2674)', () => {
 		);
 	}, 20_000);
 
-	test('missing executable: row reports ❌ with the not-a-repository detail', async () => {
+	test('missing executable: row reports ❌ naming ENOENT, never "not a repository"', async () => {
+		// #3317 PRR-010: a missing git binary is a tool problem, not a repo
+		// verdict — the row must say what actually happened.
 		fixture = setupFakeGit('normal', true);
 		const row = await gitRow(fixture.projectDir);
 		expect(row.status).toBe('❌');
-		expect(row.detail).toBe(
-			'Not a git repository — version control recommended',
-		);
+		expect(row.detail).toContain('ENOENT');
+		expect(row.detail).toContain('install git');
+		expect(row.detail).not.toContain('Not a git repository');
 	}, 20_000);
 
 	test('output volume: output is ignored, so an overflowing child still renders ✅ and terminates', async () => {
@@ -125,9 +128,9 @@ describe('diagnose checkGitRepository subprocess bounds (#2674)', () => {
 			Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }),
 		];
 		for (const shape of timeoutShapes) {
-			_internals.execFileSync = (() => {
+			_internals.readGitRepositoryOnce = (() => {
 				throw shape;
-			}) as typeof _internals.execFileSync;
+			}) as typeof _internals.readGitRepositoryOnce;
 			const row = await gitRow(fixture.projectDir);
 			expect(row.status).toBe('⬜');
 			expect(row.detail).toContain('did not answer within 5000 ms');
@@ -136,9 +139,9 @@ describe('diagnose checkGitRepository subprocess bounds (#2674)', () => {
 			new Error('plain failure'),
 			Object.assign(new Error('enoent'), { code: 'ENOENT' }),
 		]) {
-			_internals.execFileSync = (() => {
+			_internals.readGitRepositoryOnce = (() => {
 				throw plain;
-			}) as typeof _internals.execFileSync;
+			}) as typeof _internals.readGitRepositoryOnce;
 			const row = await gitRow(fixture.projectDir);
 			expect(row.status).toBe('❌');
 			expect(row.detail).toBe(

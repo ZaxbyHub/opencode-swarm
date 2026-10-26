@@ -1,5 +1,62 @@
 # Changelog
 
+## [7.200.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.1...v7.200.2) (2026-10-26)
+
+
+### Bug Fixes
+
+* [pr-review] Gate-side critic admission and PR_FEEDBACK critic predicate are looser than the review-phase rule ([#3340](https://github.com/ZaxbyHub/opencode-swarm/issues/3340)) ([70cc51e](https://github.com/ZaxbyHub/opencode-swarm/commit/70cc51e765ef60f647b11d343b0e84338ca2de2b))
+* Auto-detected flaky tests (merge-group) — review for quarantine ([#3264](https://github.com/ZaxbyHub/opencode-swarm/issues/3264)) ([f6406fc](https://github.com/ZaxbyHub/opencode-swarm/commit/f6406fc8752ed610d61987fdf5df7bc6cdc6e24b))
+* **full-auto:** close the remaining review findings on the OpenCode 2 PR ([#3446](https://github.com/ZaxbyHub/opencode-swarm/issues/3446)) ([e768cdc](https://github.com/ZaxbyHub/opencode-swarm/commit/e768cdcb691fb3221f873ebae20e3cd3288f715e))
+* **full-auto:** make Full-Auto usable on OpenCode 2 ([956f3a3](https://github.com/ZaxbyHub/opencode-swarm/commit/956f3a30b9843dec4c5bb1537d9c99e1b2976011))
+
+## [7.200.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.0...v7.200.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **ci:** merge main and drop an unused catch binding that tripped biome ci on the merge ref ([8970d12](https://github.com/ZaxbyHub/opencode-swarm/commit/8970d12d5cbda0891e11a675bd898b084e147f4e))
+* **close:** async checkpoint/align git probes, fail-closed rollback enumeration, porcelain path containment ([e124345](https://github.com/ZaxbyHub/opencode-swarm/commit/e124345acf1aede6e725dc906fcf098d35f2cc3d))
+* **close:** close swarm-pr-review findings — probe retry tolerance, source-aware refusals, record sanitization, seam-based test stubs ([70af457](https://github.com/ZaxbyHub/opencode-swarm/commit/70af457137c81bd2e6de67797401ef2eb1de8be7))
+* **lint:** satisfy biome on the merge ref — rollback-gate suppression placement, attest template literal ([0f1f7af](https://github.com/ZaxbyHub/opencode-swarm/commit/0f1f7af2e3ca7acf6ca176a709bfba9db994c1ca))
+* Quarantine aging: 4 entries expire within 21 days ([#3203](https://github.com/ZaxbyHub/opencode-swarm/issues/3203)) ([4c2abb9](https://github.com/ZaxbyHub/opencode-swarm/commit/4c2abb9e8ac541a6bb863c414445fdc76c1abf20))
+* **session:** close swarm-pr-review findings on the reset-session recovery contract ([9365ab1](https://github.com/ZaxbyHub/opencode-swarm/commit/9365ab175f53e73952547058cd5aa2adff61463d))
+* **session:** honor the reset-session recovery contract and make the persistence stop loud ([020dfdb](https://github.com/ZaxbyHub/opencode-swarm/commit/020dfdb4f5ef838155d247fa2f7779e1b6d97fb9))
+* **session:** honor the reset-session recovery contract and make the persistence stop loud ([32f32ec](https://github.com/ZaxbyHub/opencode-swarm/commit/32f32ecadc0baa7134a4133e315bfab50cdf0fc0)), closes [#2963](https://github.com/ZaxbyHub/opencode-swarm/issues/2963)
+
+## [7.200.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.199.6...v7.200.0) (2026-10-24)
+
+
+### Features
+
+* **workflow:** external-evidence task class + /swarm attest — in-machine exit for git-external deliverables ([6457cc9](https://github.com/ZaxbyHub/opencode-swarm/commit/6457cc95b07481e340a2e37c3b8ffa75a408a4c8))
+
+
+### Bug Fixes
+
+* close review findings on web-fetch entity decoding and sibling inherited-key lookups ([099d677](https://github.com/ZaxbyHub/opencode-swarm/commit/099d677f72f48cf79e1c36ae9a7e3c037ab718c7))
+* own-key lookups for web-fetch entities, lean-turbo scopes and concurrency presets; spec-safe numeric entity decoding ([60ff250](https://github.com/ZaxbyHub/opencode-swarm/commit/60ff25052cd902738e3c422629a873e67d7f6aec))
+
+## [7.199.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.199.5...v7.199.6) (2026-10-24)
+
+
+### Bug Fixes
+
+* **host/v2:** keep tool-call pairing when v2 context messages carry no id ([d30353f](https://github.com/ZaxbyHub/opencode-swarm/commit/d30353f65e564e40127055ae95847391d4b04268))
+
+## [7.199.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.199.4...v7.199.5) (2026-10-24)
+
+
+### Bug Fixes
+
+* **citations:** re-pin target-constant-tmp producer after checkpoint.ts shift (CI round 6) ([cb96a2d](https://github.com/ZaxbyHub/opencode-swarm/commit/cb96a2d7f3a85329899d91b76dc08e3b3b5f1634))
+* **close:** async, diagnosable git-status gate reads for close, rollback, and diagnose ([#3317](https://github.com/ZaxbyHub/opencode-swarm/issues/3317)) ([8e5cfd3](https://github.com/ZaxbyHub/opencode-swarm/commit/8e5cfd3872851b57f8ae3cfb25d0fc06bc0cac85))
+* **close:** close out swarm-pr-review [#3426](https://github.com/ZaxbyHub/opencode-swarm/issues/3426) findings — failure classes, Node ENOENT, deadline honesty ([d695ffe](https://github.com/ZaxbyHub/opencode-swarm/commit/d695ffe2e08eaac988a2801277c475ab7a69f504))
+* **git-status-read:** classify signalCode exits ESIGNAL, rescoping kill claims to measured reachability + close five coverage pins (review round 2) ([c2615bc](https://github.com/ZaxbyHub/opencode-swarm/commit/c2615bc3dfcd8573c776a14cb1255daf8a9aa639))
+* **git-status-read:** give the retained partial stderr its EOUTPUT consumer (review round 2 nit) ([48c20db](https://github.com/ZaxbyHub/opencode-swarm/commit/48c20db55a56928bbcc48a725f73e7ef887b44d3))
+* **git-status-read:** race resolution against the deadline + cap async probes by remaining budget (automation review) ([7e3bc29](https://github.com/ZaxbyHub/opencode-swarm/commit/7e3bc29ffe795a5ab9d8b7303d1a57c795a792e1))
+* **pr-review:** reach a disclosed INCOMPLETE and settle finished lanes ([#3312](https://github.com/ZaxbyHub/opencode-swarm/issues/3312) [#3313](https://github.com/ZaxbyHub/opencode-swarm/issues/3313)) ([f11fbea](https://github.com/ZaxbyHub/opencode-swarm/commit/f11fbea9059382a0fde40a6cd7744a95e40d38bb))
+
 ## [7.199.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.199.3...v7.199.4) (2026-10-23)
 
 

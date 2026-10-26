@@ -141,6 +141,12 @@ export async function persistBatch(
 		transcriptIncomplete?: boolean;
 		truncated?: boolean;
 		artifactRole?: string;
+		/**
+		 * Issue #3340 tests: override the child delegation record's resolved
+		 * role (and the artifact's matching role) so a lane can deliberately
+		 * run a non-critic agent and prove settlement rejects it.
+		 */
+		recordAgent?: string;
 		subagentSessionId?: string;
 		scope?: string;
 		prReviewLegacyTranscriptCompatibility?: boolean;
@@ -156,14 +162,20 @@ export async function persistBatch(
 		// production identity invariant true.
 		const subagentSessionId = options.subagentSessionId ?? defaultCorrelationId;
 		const correlationId = options.subagentSessionId ?? defaultCorrelationId;
+		// Issue #3340: critic lanes settle only when the child delegation record
+		// ran the `critic` role; mirror the production normalizedAgent for the
+		// mode instead of hardcoding 'reviewer' for every lane.
+		const recordAgent =
+			options.recordAgent ??
+			(mode === 'swarm-pr-review:critic' ? 'critic' : 'reviewer');
 		await recordPendingDelegation(tempDir, {
 			correlationId,
 			jobId: null,
 			subagentSessionId,
 			parentSessionId: SESSION_ID,
 			callID: `call-${correlationId}`,
-			normalizedAgent: 'reviewer',
-			swarmPrefixedAgent: 'reviewer',
+			normalizedAgent: recordAgent,
+			swarmPrefixedAgent: recordAgent,
 			planTaskId: null,
 			evidenceTaskId: null,
 			batchId,
@@ -215,8 +227,8 @@ export async function persistBatch(
 		const stored = storeLaneOutput(tempDir, {
 			batchId,
 			laneId: lane.laneId,
-			agent: 'reviewer',
-			role: options.artifactRole ?? 'reviewer',
+			agent: recordAgent,
+			role: options.artifactRole ?? recordAgent,
 			sessionId: subagentSessionId,
 			parentSessionId: SESSION_ID,
 			mode,

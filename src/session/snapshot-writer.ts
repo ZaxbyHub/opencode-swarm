@@ -14,8 +14,10 @@ import {
 	unlinkSync,
 } from 'node:fs';
 import * as path from 'node:path';
+import { canonicalProjectKey } from '../db/canonical-project.js';
 import { TASK_WORKFLOW_SCHEMA_MARKER } from '../gate-evidence.js';
 import { validateSwarmPath } from '../hooks/utils';
+import { advisoryWarn } from '../services/warning-buffer.js';
 import type {
 	AgentSessionState,
 	DelegationEntry,
@@ -25,6 +27,7 @@ import { swarmState } from '../state';
 import { log } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
+import { getSnapshotCoordinationStatus } from './snapshot-coordination-init.js';
 import {
 	isSnapshotSessionOwnedLocally,
 	readSnapshotRows,
@@ -544,8 +547,87 @@ export function serializeAgentSession(
 }
 
 /**
+ * #2963: roots that already got their bounded closing-stop advisory from the
+ * writer path. Belt-and-braces behind the reset command's strand-time
+ * advisory: a long-lived process whose strand-time warning was missed still
+ * learns durable persistence is stopped. One entry per root per stop
+ * episode — a root is deleted ONLY when readiness succeeds again (so a
+ * later re-strand is loud again); the set is NEVER cleared or evicted, so a
+ * root can never be re-advised within one continuing stop episode. Hard cap
+ * for invariant-8 boundedness; note beginSnapshotCoordinationReset inserts
+ * guards directly (bypassing startSnapshotCoordinationInitialization's
+ * MAX_READY_ROOTS eviction), so this cap stands on its own. At cap, new
+ * roots fall back to the debug log only.
+ */
+const closingStopAdvisedRoots = new Set<string>();
+const MAX_CLOSING_STOP_ROOTS = 256;
+
+function isClosingRefusal(message: string): boolean {
+	return message.includes('closing for reset-session');
+}
+
+/**
+ * Emit the origin-appropriate closing-stop advisory for one root (at most
+ * once per stop episode). Selection mirrors the combined-first precedence
+ * every other consumer uses; an in-flight reset (no origin markers) is
+ * transient and stays silent, and a stop that already cleared by catch time
+ * emits nothing.
+ */
+function adviseClosingStop(directory: string): void {
+	const status = getSnapshotCoordinationStatus(directory);
+	if (status.state !== 'closing') return;
+	// PRR-001 (#3445 review): an in-flight reset window (closing with no
+	// origin markers) stays silent WITHOUT consuming the root's one-shot
+	// advisory budget — the add below must only run on paths that emit, so
+	// a later genuine strand on this root is still loud.
+	if (!status.pendingPriorAttempt && !status.closingReason) return;
+	const root = canonicalProjectKey(directory);
+	if (closingStopAdvisedRoots.has(root)) return;
+	if (closingStopAdvisedRoots.size >= MAX_CLOSING_STOP_ROOTS) {
+		log('[snapshot-writer] closing-stop advisory cap reached', { root });
+		return;
+	}
+	// Synchronous check-and-add (no await between) so concurrent catches
+	// cannot both emit.
+	closingStopAdvisedRoots.add(root);
+	if (
+		status.pendingPriorAttempt &&
+		status.closingReason === 'reset-cleanup-failed'
+	) {
+		advisoryWarn(
+			'[opencode-swarm] /swarm reset-session partially failed while a prior initialization attempt is still settling: durable session-snapshot persistence is stopped — wait for that attempt to settle, then re-run /swarm reset-session to completion (or restart the host) to recover.',
+		);
+		return;
+	}
+	if (status.pendingPriorAttempt) {
+		advisoryWarn(
+			'[opencode-swarm] durable session-snapshot persistence is paused while coordination closes for reset-session (an underlying initialization attempt is still settling); wait for it to settle or restart the host.',
+		);
+		return;
+	}
+	if (status.closingReason === 'reset-cleanup-failed') {
+		advisoryWarn(
+			'[opencode-swarm] durable session-snapshot persistence is stopped for this project (coordination is closing for reset-session); re-run /swarm reset-session to completion, or restart the host, to recover.',
+		);
+		return;
+	}
+	if (status.closingReason === 'shutdown') {
+		advisoryWarn(
+			'[opencode-swarm] coordination is closing for host shutdown; durable session-snapshot persistence is stopped until the host restarts.',
+		);
+		return;
+	}
+	// In-flight reset window (F4): the running reset owns this guard and
+	// typically releases it; not a persistence stop. Stay silent.
+}
+
+/**
  * Write a snapshot of swarmState to .swarm/session/state.json atomically.
- * Silently swallows errors (non-fatal — never crash the plugin).
+ * Non-fatal — never crashes the plugin. Failures are silent in the debug log
+ * EXCEPT the closing-stop class (#2963): when coordination refuses the write
+ * because a partially-failed reset stranded the closing guard, exactly one
+ * always-visible operational advisory per root per stop episode is emitted
+ * (advisoryWarn — the /swarm diagnose channel, never chat-visible noise).
  */
 export async function writeSnapshot(
 	directory: string,
@@ -556,6 +638,13 @@ export async function writeSnapshot(
 			'./snapshot-coordination-init.js'
 		);
 		await ensureSnapshotCoordinationReady(directory);
+		// Readiness succeeded: the stop (if any) is over — re-arm the
+		// writer advisory for a future strand on this root. Size-guarded so
+		// the common path (nothing ever advised) skips the extra
+		// canonicalize entirely (PRR-018, #3445 review).
+		if (closingStopAdvisedRoots.size > 0) {
+			closingStopAdvisedRoots.delete(canonicalProjectKey(directory));
+		}
 		// Build SnapshotData object from state
 		const snapshot: SnapshotData = {
 			version: 3,
@@ -587,8 +676,12 @@ export async function writeSnapshot(
 		const canonicalSnapshot = readSnapshotRows(directory) ?? snapshot;
 		await writeSnapshotProjection(directory, canonicalSnapshot);
 	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (isClosingRefusal(message)) {
+			adviseClosingStop(directory);
+		}
 		log('[snapshot-writer] write failed', {
-			error: error instanceof Error ? error.message : String(error),
+			error: message,
 		});
 	}
 }

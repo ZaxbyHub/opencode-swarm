@@ -728,7 +728,15 @@ Clear session state while preserving plan, evidence, and knowledge
 
 **Args:** `--confirm=<token> (purge dirty/live lanes)`
 
-Deletes only .swarm/session/state.json and other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge. Also releases this session's pending knowledge-gate obligations (#2398) and recovers stale coder settlements so dispatches cannot wedge on CODER_DISPATCH_IN_PROGRESS (#2268). Auto-backs up removed files to .swarm/reset-backups/ (newest 5 kept).
+Deletes .swarm/session/state.json plus other session files; clears in-memory sessions, chains, and active-agent maps. Preserves plan, evidence, and knowledge; releases this session's pending knowledge-gate obligations (#2398); recovers coder settlements wedged on CODER_DISPATCH_IN_PROGRESS (#2268); backs up to .swarm/reset-backups/ (newest 5 kept). If a cleanup step fails, the closing guard stays closed by design, writes pause (an advisory says why), and a reset re-run or restart recovers.
+
+### `/swarm attest`
+
+Verify a git-external deliverable with pinned anchors <task_id>
+
+**Args:** `<task_id>`
+
+Runs the task's pinned read-only git evidence_anchors (issue #3422) inside the project root and records the durable external-evidence bundle that admits completion — the in-machine exit for tasks whose deliverable (commit/push, gh ops) can never produce a coder settlement. Fail-closed: the plan task must declare evidence_class external_git with 1..16 anchors (expect exact / expect_prefix non-empty), every anchor runs as a bounded no-shell argv spawn (stdin ignored, 10s per anchor, 30s total; output over the 4096-char evidence bound refuses the anchor rather than truncating it), and only positively-known read-only git subcommands/flags (rev-list, log, rev-parse, show, diff) are admitted. Undeclared tasks, mismatched anchors, and non-read-only commands refuse exactly as the completion gate does. Declaration changes revoke stale proofs (a fresh attest is then required). See docs/commands.md and docs/plan-durability.md.
 
 ### `/swarm recover`
 

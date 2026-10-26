@@ -1594,6 +1594,32 @@ jobs:
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
         with:
           node-version: "22"
+      - name: v2-host-smoke — dual-host v2 lane (issue #2910)
+        id: v2-host-smoke
+        # Three legs, gated exactly like the sibling repro steps (the repo's
+        # every-PR lane IS the merge-queue lane):
+        #   1. node scripts/repro-2910-v2.mjs — Node-side DUAL-SHAPE + bounded
+        #      setup() timing: asserts the default export carries { id,
+        #      server, setup } and that setup() resolves within the same
+        #      deadline class as repro-704 (min-of-2 reps <= 400 ms).
+        #   2. node scripts/repro-2910-v2-host.mjs — pinned REAL v2 host
+        #      (npm @opencode/cli@2.0.29 installed into a temp prefix): an
+        #      AUTH-FREE load proof — the loading-plugin line, the swarm
+        #      banner, >=1 agent/command registration event, and .swarm/
+        #      materialization (no model-reply assertion; CI has no
+        #      credentials).
+        #   3. bun test tests/unit/host/v2/guidance-parity-fixture-2910.test.ts
+        #      — the frozen v1/v2 guidance-parity fixture leg.
+        # The repro scripts auto-build dist when missing (bun is installed
+        # earlier in this job); the host script npm-installs the pinned CLI
+        # into a temp prefix itself.
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/repro-2910-v2.mjs
+          node scripts/repro-2910-v2-host.mjs
+          bun test tests/unit/host/v2/guidance-parity-fixture-2910.test.ts --timeout 120000
       - name: Issue #704 repro — Desktop init under Node
         # Loads the compiled dist/ under Node (the runtime OpenCode Desktop's
         # sidecar uses on macOS) and asserts the plugin's `server()` resolves

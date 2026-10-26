@@ -19,6 +19,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { mockGitStatusReadNonRepo } from '../../helpers/close-command-mocks';
 
 const realSnapshotWriter = await import(
 	'../../../src/session/snapshot-writer.js'
@@ -76,6 +77,9 @@ mock.module('../../../src/state.js', () => ({
 	resetSwarmState: () => {},
 }));
 
+// #3427: the align stage's repository probe rides the async detailed
+// reader (spread-real module mock; only the detailed reader is overridden).
+mockGitStatusReadNonRepo();
 mock.module('../../../src/git/branch.js', () => ({
 	isGitRepo: () => false,
 	resetToRemoteBranch: () => ({

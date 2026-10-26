@@ -404,8 +404,12 @@ describe('Phase 4.2 guardrail: session.create foreign-directory inventory', () =
 			'utf-8',
 		);
 		expect(indexSource).toContain('applyLanePermissions');
+		// Since the #2910 feedback round the config-hook body lives in the
+		// shared applySwarmRegistrationTables builder, which threads the
+		// directory through `inputs.directory` (the init call site passes
+		// ctx.directory; the v2 fresh-tables path passes the setup root).
 		expect(indexSource).toMatch(
-			/applyLanePermissions\(\s*opencodeConfig,\s*ctx\.directory,/,
+			/applyLanePermissions\(\s*opencodeConfig,\s*(?:ctx|inputs)\.directory,/,
 		);
 		expect(
 			fs.existsSync(path.join(SRC_ROOT, 'config', 'lane-permissions.ts')),

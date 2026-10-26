@@ -868,6 +868,12 @@ export function computePlanLedgerHash(plan: Plan): string {
 				// `task.fr_refs` (optional spec FR/SC mapping, #1687) is deliberately
 				// EXCLUDED from this field list to preserve byte-identical output for
 				// every plan persisted before this field existed. Do not add it here.
+				// `task.evidence_class`/`task.evidence_anchors` (#3422) ARE included:
+				// they are optional and omitted-when-unset, so plans predating them
+				// hash byte-identically, while a declaration edit (which gates
+				// completion admission) must stay hash-visible.
+				evidence_class: task.evidence_class,
+				evidence_anchors: task.evidence_anchors,
 			})),
 		})),
 	};
@@ -953,6 +959,12 @@ export function computePlanStructureHash(plan: Plan): string {
 				// `task.fr_refs` (optional spec FR/SC mapping, #1687) is deliberately
 				// EXCLUDED from this field list to preserve byte-identical output for
 				// every plan persisted before this field existed. Do not add it here.
+				// `task.evidence_class`/`task.evidence_anchors` (#3422) ARE included:
+				// they are optional and omitted-when-unset, so plans predating them
+				// hash byte-identically, while a declaration edit (which gates
+				// completion admission) must stay hash-visible.
+				evidence_class: task.evidence_class,
+				evidence_anchors: task.evidence_anchors,
 			})),
 		})),
 	};
