@@ -635,7 +635,7 @@ export function parseTaskEvidence(
 	return parsed;
 }
 
-export /**
+/**
  * Stage B wedge fix (Class E): resolve the current plan identity from
  * {directory}/.swarm/plan.json. Returns null when the plan is missing or
  * unreadable; callers must treat null as "identity unknown" and never
@@ -675,7 +675,7 @@ export function evidenceMatchesCurrentPlanIdentity(
 		evidence.planIdentityHash === derivePlanIdentityHash(plan)
 	);
 }
-const DEFAULT_REQUIRED_GATES = ['reviewer', 'test_engineer'];
+export const DEFAULT_REQUIRED_GATES = ['reviewer', 'test_engineer'];
 
 export interface GateDerivationContext {
 	/** Trusted pre/post workspace classification; false/absent fails closed. */
@@ -1791,7 +1791,9 @@ export async function withTaskEvidenceTransaction<T>(
 			const validated = TaskEvidenceSchema.parse({
 				...nextEvidence,
 				taskId,
-				...(planIdentity ? { planId: planIdentity.planId, planIdentityHash: planIdentity.planIdentityHash } : {}),
+				...(planIdentity && nextEvidence.planIdentityHash === undefined
+					? { planId: planIdentity.planId, planIdentityHash: planIdentity.planIdentityHash }
+					: {}),
 			});
 			await atomicWriteFile(evidencePath, JSON.stringify(validated, null, 2));
 			if (event) {
