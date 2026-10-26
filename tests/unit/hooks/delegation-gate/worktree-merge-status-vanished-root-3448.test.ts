@@ -191,65 +191,55 @@ function destroyWorktreeAndBranch(fixture: Fixture): void {
 }
 
 describe('#3448 recovery self-heal is not blocked by the status writer', () => {
-	test(
-		'Arm A - current-tree contract: recover self-heals to ABORTED with the singleton lane-bound',
-		async () => {
-			const fixture = await interruptedAfterOnBeforeMerge('heal-3448-contract');
-			destroyWorktreeAndBranch(fixture);
-			expect(branchExists(fixture)).toBe(false);
-			// The production condition every prior suite omitted.
-			initDurableStatusPath(fixture.worktree);
+	test('Arm A - current-tree contract: recover self-heals to ABORTED with the singleton lane-bound', async () => {
+		const fixture = await interruptedAfterOnBeforeMerge('heal-3448-contract');
+		destroyWorktreeAndBranch(fixture);
+		expect(branchExists(fixture)).toBe(false);
+		// The production condition every prior suite omitted.
+		initDurableStatusPath(fixture.worktree);
 
-			await expect(
-				recoverCoderSettlement(fixture.repo, TASK_ID),
-			).resolves.toBeNull();
+		await expect(
+			recoverCoderSettlement(fixture.repo, TASK_ID),
+		).resolves.toBeNull();
 
+		expect(readWal(fixture)).toMatchObject({ state: 'ABORTED' });
+		// The #3448 invariant proper: the lane root was not resurrected.
+		expect(fs.existsSync(fixture.worktree)).toBe(false);
+		const warnings = getDeferredWarnings().join('\n');
+		expect(warnings).toContain('STALE_CODER_SETTLEMENT_SELF_HEALED');
+	}, // Real git spawns + a full recovery loop: explicit ceiling so a bare
+	// `bun test` (5s default) passes; CI's per-file budget is 120s anyway.
+	120_000);
+
+	test('Arm B - #3420-tolerant invariant: the lane root stays absent and the loop error never returns', async () => {
+		const fixture = await interruptedAfterOnBeforeMerge('heal-3448-alive');
+		destroyWorktreeAndBranch(fixture);
+		expect(branchExists(fixture)).toBe(false);
+		initDurableStatusPath(fixture.worktree);
+
+		let thrown: string | undefined;
+		try {
+			await recoverCoderSettlement(fixture.repo, TASK_ID);
+		} catch (error) {
+			thrown = error instanceof Error ? error.message : String(error);
+		}
+
+		// The #3448 invariant: no resurrected lane root.
+		expect(fs.existsSync(fixture.worktree)).toBe(false);
+		if (thrown === undefined) {
+			// No-throw path (this PR's tree): the recovery healed — pin the full
+			// terminal contract so a silent null-return with the WAL left
+			// DISPATCHED cannot pass.
 			expect(readWal(fixture)).toMatchObject({ state: 'ABORTED' });
-			// The #3448 invariant proper: the lane root was not resurrected.
-			expect(fs.existsSync(fixture.worktree)).toBe(false);
-			const warnings = getDeferredWarnings().join('\n');
-			expect(warnings).toContain('STALE_CODER_SETTLEMENT_SELF_HEALED');
-		},
-		// Real git spawns + a full recovery loop: explicit ceiling so a bare
-		// `bun test` (5s default) passes; CI's per-file budget is 120s anyway.
-		120_000,
-	);
-
-	test(
-		'Arm B - #3420-tolerant invariant: the lane root stays absent and the loop error never returns',
-		async () => {
-			const fixture = await interruptedAfterOnBeforeMerge('heal-3448-alive');
-			destroyWorktreeAndBranch(fixture);
-			expect(branchExists(fixture)).toBe(false);
-			initDurableStatusPath(fixture.worktree);
-
-			let thrown: string | undefined;
-			try {
-				await recoverCoderSettlement(fixture.repo, TASK_ID);
-			} catch (error) {
-				thrown = error instanceof Error ? error.message : String(error);
-			}
-
-			// The #3448 invariant: no resurrected lane root.
-			expect(fs.existsSync(fixture.worktree)).toBe(false);
-			if (thrown === undefined) {
-				// No-throw path (this PR's tree): the recovery healed — pin the full
-				// terminal contract so a silent null-return with the WAL left
-				// DISPATCHED cannot pass.
-				expect(readWal(fixture)).toMatchObject({ state: 'ABORTED' });
-				expect(getDeferredWarnings().join('\n')).toContain(
-					'STALE_CODER_SETTLEMENT_SELF_HEALED',
-				);
-			} else {
-				// Whitelisted throw path (a #3409/#3420-carrying tree): ONLY the
-				// designed RECOVERABLE_ORPHAN_COMMIT is acceptable, and the message
-				// must not smuggle the self-defeating loop error alongside it.
-				expect(thrown).toContain('RECOVERABLE_ORPHAN_COMMIT');
-				expect(thrown).not.toContain(
-					'CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED',
-				);
-			}
-		},
-		120_000,
-	);
+			expect(getDeferredWarnings().join('\n')).toContain(
+				'STALE_CODER_SETTLEMENT_SELF_HEALED',
+			);
+		} else {
+			// Whitelisted throw path (a #3409/#3420-carrying tree): ONLY the
+			// designed RECOVERABLE_ORPHAN_COMMIT is acceptable, and the message
+			// must not smuggle the self-defeating loop error alongside it.
+			expect(thrown).toContain('RECOVERABLE_ORPHAN_COMMIT');
+			expect(thrown).not.toContain('CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED');
+		}
+	}, 120_000);
 });
