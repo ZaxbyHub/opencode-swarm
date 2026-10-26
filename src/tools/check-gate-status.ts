@@ -15,6 +15,7 @@ import {
 	deriveApplicableGateSet,
 	externalProofCurrent,
 	readCurrentTaskDeclaredFiles,
+	resolveCurrentPlanIdentitySync,
 	TASK_WORKFLOW_SCHEMA_MARKER,
 } from '../gate-evidence.js';
 import type { TodoGateConfigBlock } from '../todo/todo-gate.js';
@@ -64,6 +65,7 @@ interface GateStatusResult {
 	 * after /swarm reset-session destroyed the in-memory attribution chain).
 	 */
 	workflow_attribution_hint?: string;
+	prior_campaign_evidence?: string;
 }
 
 // Task ID validation delegated to shared module (#452 item 2)
@@ -576,7 +578,21 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 								: 0,
 					}
 				: null;
-		let workflowAttributionHint: string | undefined;
+		// Stage B wedge fix (Class E): flag evidence that predates the current
+	// plan campaign (no plan-identity stamp, or a stamp for a different plan).
+	const currentPlanIdentity = resolveCurrentPlanIdentitySync(dirResult);
+	const evidencePlanIdentityHash = (evidenceData as { planIdentityHash?: string } | null)?.planIdentityHash;
+	let priorCampaignEvidence: string | undefined;
+	if (
+		currentPlanIdentity != null &&
+		evidenceData != null &&
+		(evidencePlanIdentityHash === undefined ||
+			evidencePlanIdentityHash !== currentPlanIdentity.planIdentityHash)
+	) {
+		priorCampaignEvidence = 'Evidence for this task predates the current plan campaign (plan-identity stamp absent or mismatched). Its gates do not satisfy the current campaign receipts; run repair_gate_evidence for this task to rebuild current-campaign evidence.';
+		message += ` ${priorCampaignEvidence}`;
+	}
+	let workflowAttributionHint: string | undefined;
 		if (
 			status === 'incomplete' &&
 			workflowMeta?.state === 'coder_delegated' &&
@@ -603,6 +619,7 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 			...(workflowAttributionHint
 				? { workflow_attribution_hint: workflowAttributionHint }
 				: {}),
+			...(priorCampaignEvidence ? { prior_campaign_evidence: priorCampaignEvidence } : {}),
 		};
 
 		return JSON.stringify(result, null, 2);

@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	assertTaskEvidenceWriteAllowed,
+	evidenceMatchesCurrentPlanIdentity,
 	parseTaskEvidence,
 	TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
 	TASK_WORKFLOW_SCHEMA_MARKER,
@@ -806,7 +807,8 @@ export async function repairTaskGateEvidence(
 				read.evidence?.workflow?.schema === TASK_WORKFLOW_SCHEMA_MARKER &&
 				!evidenceHasLegacyMarker &&
 				latestReceipt != null &&
-				!receiptHasLegacyMarker
+				!receiptHasLegacyMarker &&
+				evidenceMatchesCurrentPlanIdentity(read.evidence, plan)
 			) {
 				return {
 					success: false,

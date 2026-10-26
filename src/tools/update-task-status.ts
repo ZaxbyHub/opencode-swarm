@@ -25,6 +25,7 @@ import {
 	isReadOnlyNoMutationEligible,
 	readCurrentTaskDeclaredFiles,
 	readTaskEvidenceRaw,
+	resolveCurrentPlanIdentitySync,
 	TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
 } from '../gate-evidence.js';
 import { hasDeclaredDiffScope, validateDiffScope } from '../hooks/diff-scope';
@@ -751,6 +752,15 @@ export function checkReviewerGate(
 						`all required proof exists but workflow state is ${workflow.state}`,
 					);
 				}
+				// Stage B wedge fix (Class E/D): evidence stamped with a different
+				// plan identity - or unstamped legacy evidence - predates the current
+				// campaign and cannot satisfy its receipts. Distinguish "evidence
+				// predates this campaign" from "evidence missing".
+				const currentPlanIdentity = resolveCurrentPlanIdentitySync(authoritativeDir);
+				const priorCampaignEvidence =
+					currentPlanIdentity != null &&
+					(evidence.planIdentityHash === undefined ||
+						evidence.planIdentityHash !== currentPlanIdentity.planIdentityHash);
 				const workflowComplete =
 					workflow.state === 'tests_run' || workflow.state === 'complete';
 				if (
@@ -767,14 +777,18 @@ export function checkReviewerGate(
 							sessionID,
 							{
 								blocked: true,
-								reason: `Task ${taskId} has not satisfied its exact v1 review route receipt. Missing or mismatched route evidence fails closed.`,
+								reason: priorCampaignEvidence
+								? `Task ${taskId}'s exact-task evidence predates the current plan campaign (plan-identity stamp absent or mismatched). Run repair_gate_evidence for task ${taskId} to rebuild current-campaign evidence, then re-run the QA chain.`
+								: `Task ${taskId} has not satisfied its exact v1 review route receipt. Missing or mismatched route evidence fails closed.`,
 								requiredGates,
 								satisfiedGates,
 								missingGates: ['review_route_receipt'],
 								source: 'durable_exact_task',
 								generation: workflow.generation,
 								nextAction:
-									'Recover the exact route receipt and independent Stage-B bindings before completing this task.',
+									priorCampaignEvidence
+									? 'Run repair_gate_evidence for this task to rebuild current-campaign evidence, then re-run Stage A and Stage B.'
+									: 'Recover the exact route receipt and independent Stage-B bindings before completing this task.',
 							},
 							'required_gates_missing',
 							'block',
