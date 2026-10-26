@@ -29,7 +29,11 @@ import {
 	clearSandboxWrapOutcome,
 	recordSandboxWrapOutcome,
 } from '../../sandbox/skip-state';
-import { sanitizeDiagnosticText } from '../../scope/path-identity';
+import {
+	isPathIdentityWithin,
+	pathIdentitiesEqual,
+	sanitizeDiagnosticText,
+} from '../../scope/path-identity';
 import type { ScopeLeaseCandidateInput } from '../../scope/scope-lease-renewal';
 import {
 	resolveAuthorizedScopeBindingDetailed,
@@ -236,6 +240,34 @@ function throwDestructiveBlock(
  * @param ctx Shared configuration and closures from createGuardrailsHooks
  * @returns The toolBefore handler function
  */
+/**
+ * Whether a bare `rmdir` target (`WriteTarget.emptyDirectoryRemoval`) may skip
+ * declared-scope membership: its canonical location, with every
+ * symlink/junction in the parent chain resolved, is strictly inside the
+ * canonical workspace root. Fail-closed: a resolution error, the root itself,
+ * or a target outside the root returns false. rmdir(2) does not follow a
+ * final symlink, so the parent chain decides containment. There is
+ * deliberately no emptiness check — that would be a TOCTOU race; the
+ * kernel's ENOTEMPTY is the authoritative guard.
+ */
+export function isEmptyDirectoryRemovalWithinWorkspace(
+	targetPath: string,
+	workspace: string,
+): boolean {
+	try {
+		const root = fs.realpathSync.native(path.resolve(workspace));
+		const absolute = path.resolve(root, targetPath);
+		const parent = fs.realpathSync.native(path.dirname(absolute));
+		const canonical = path.join(parent, path.basename(absolute));
+		return (
+			!pathIdentitiesEqual(canonical, root) &&
+			isPathIdentityWithin(canonical, root)
+		);
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Issue #3099 R2 (executor context): which grammar OWNS shared constructs.
  *
@@ -1353,7 +1385,16 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				enforce &&
 				declaredScope &&
 				declaredScope.length > 0 &&
-				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory)
+				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory) &&
+				// A bare rmdir cannot remove a non-empty directory (ENOTEMPTY), so
+				// inside the workspace it needs no declared-scope membership.
+				!(
+					write.original.emptyDirectoryRemoval === true &&
+					isEmptyDirectoryRemovalWithinWorkspace(
+						write.resolvedPath,
+						shellDirectory,
+					)
+				)
 			) {
 				const safeTarget = sanitizeDiagnosticText(write.resolvedPath, 320);
 				const scopeSummary = declaredScope

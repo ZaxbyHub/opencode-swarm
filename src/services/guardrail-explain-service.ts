@@ -17,7 +17,10 @@ import {
 	isInDeclaredScope,
 	redactShellCommand,
 } from '../hooks/guardrails/helpers.js';
-import { resolveWindowsWriteAuthority } from '../hooks/guardrails/tool-before.js';
+import {
+	isEmptyDirectoryRemovalWithinWorkspace,
+	resolveWindowsWriteAuthority,
+} from '../hooks/guardrails/tool-before.js';
 import { declaresWindowsWrapperLoose } from '../hooks/shell-executor-context';
 import {
 	detectPosixWrites,
@@ -745,11 +748,15 @@ export async function handleGuardrailExplain(
 				if (write.resolvedPath) {
 					// Architect is exempt from scope checks
 					if (agent !== 'architect') {
-						const inScope = isInDeclaredScope(
-							write.resolvedPath,
-							scopeEntries,
-							directory,
-						);
+						// Mirrors the live gate: a bare rmdir inside the workspace
+						// needs no declared-scope membership (ENOTEMPTY-safe).
+						const inScope =
+							isInDeclaredScope(write.resolvedPath, scopeEntries, directory) ||
+							(write.original.emptyDirectoryRemoval === true &&
+								isEmptyDirectoryRemovalWithinWorkspace(
+									write.resolvedPath,
+									directory,
+								));
 						if (!inScope) {
 							decision = 'block';
 							firingRule = `scope_violation: write outside declared scope: ${redactPath(write.resolvedPath)}`;

@@ -61,6 +61,15 @@ export interface WriteTarget {
 	operator: string;
 	/** The file path written to, or null when the path cannot be determined statically. */
 	path: string | null;
+	/**
+	 * Set only for a bare POSIX `rmdir <dir>`: no options, exactly one literal
+	 * operand (no expansion, glob, brace or quote characters). rmdir(2) refuses
+	 * a non-empty directory (ENOTEMPTY), so this form cannot destroy file data.
+	 * The shell write-scope gate uses it to skip declared-scope membership for
+	 * a target that resolves inside the workspace; every other check still
+	 * applies. `rmdir -p` (removes parents) and all other forms never carry it.
+	 */
+	emptyDirectoryRemoval?: true;
 }
 
 /**
@@ -247,6 +256,13 @@ const BUILTIN_WRITE_COMMANDS = new Set([
 	'unlink',
 	'rmdir',
 ]);
+
+/**
+ * A literal `rmdir` operand eligible for the empty-directory-removal tag: not
+ * an option, and free of glob, brace, expansion, quote, escape and whitespace
+ * characters, so the text is exactly the single path the command receives.
+ */
+const BARE_RMDIR_OPERAND = /^[^-*?[\]{}$`~"'\\\s][^*?[\]{}$`~"'\\\s]*$/;
 
 /** Builtins with in-place editing semantics (modify file argument in place). */
 const INPLACE_EDIT_COMMANDS = new Set(['sed', 'perl', 'awk']);
@@ -1537,6 +1553,24 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		suffixWords.some((word) => /^\/(?:s|q)$/i.test(word))
 	) {
 		return results;
+	}
+
+	if (lowerName === 'rmdir') {
+		const expansionFlags = getSuffixWordExpansionFlags(cmd);
+		if (
+			suffixWords.length === 1 &&
+			expansionFlags.length === 1 &&
+			!expansionFlags[0] &&
+			BARE_RMDIR_OPERAND.test(suffixWords[0])
+		) {
+			results.push({
+				category: 'builtin_write',
+				operator: name,
+				path: suffixWords[0],
+				emptyDirectoryRemoval: true,
+			});
+			return results;
+		}
 	}
 
 	if (lowerName === 'truncate') {
