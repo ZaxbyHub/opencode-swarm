@@ -24,6 +24,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { SpawnSyncReturns } from 'node:child_process';
 import * as fs from 'node:fs';
+import type { bunSpawn } from '../../../src/utils/bun-compat';
 import {
 	_internals,
 	describeGitResolution,
@@ -41,8 +42,26 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const ORIGINAL_INTERNALS = { ..._internals };
 
+/**
+ * #3317: the ASYNC entry no longer drives `_internals.spawnSync` — it probes
+ * through `_internals.asyncSpawn`. This suite exercises cache/generation
+ * semantics of BOTH entries, so both seams answer with a healthy synthetic
+ * probe (the #1952 async-twin test-seam delegation pattern).
+ */
+function fakeAsyncSpawnResult(): ReturnType<typeof bunSpawn> {
+	return {
+		stdout: { text: async () => 'git version 2.43.0\n' },
+		stderr: { text: async () => '' },
+		exited: Promise.resolve(0),
+		spawnError: undefined,
+		signalCode: null,
+		kill() {},
+	} as unknown as ReturnType<typeof bunSpawn>;
+}
+
 function restoreInternals(): void {
 	_internals.spawnSync = ORIGINAL_INTERNALS.spawnSync;
+	_internals.asyncSpawn = ORIGINAL_INTERNALS.asyncSpawn;
 	_internals.platform = ORIGINAL_INTERNALS.platform;
 	_internals.env = ORIGINAL_INTERNALS.env;
 	_internals.now = ORIGINAL_INTERNALS.now;
@@ -80,6 +99,7 @@ beforeEach(() => {
 	_internals.platform = () => SIM_PLATFORM;
 	_internals.now = () => FROZEN_NOW;
 	_internals.spawnSync = () => fakeSpawnResult();
+	_internals.asyncSpawn = () => fakeAsyncSpawnResult();
 });
 
 afterEach(() => {
@@ -184,10 +204,12 @@ describe('git-executable stale in-flight probe guard', () => {
 	test('an uncontested async resolution still memoizes (the guard is not a caching kill switch)', async () => {
 		const pathGit = writeSimFixture(tmpDir, 'plain-git');
 		_internals.env = () => ({ PATH: pathGit.dir });
+		// #3317: the async entry probes through asyncSpawn — count THAT seam
+		// (the sync spawnSync seam is no longer consulted by this entry).
 		let spawnCalls = 0;
-		_internals.spawnSync = () => {
+		_internals.asyncSpawn = () => {
 			spawnCalls += 1;
-			return fakeSpawnResult();
+			return fakeAsyncSpawnResult();
 		};
 
 		expect(await resolveGitExecutableAsync()).toBe(pathGit.candidate);

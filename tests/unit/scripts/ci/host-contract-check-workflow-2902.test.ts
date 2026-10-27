@@ -112,3 +112,74 @@ describe('host-contract-check workflow (issue #2902)', () => {
 		}
 	});
 });
+
+// Issue #2910 W1.4: the v2 host-contract leg runs in the SAME workflow with
+// its own output file, PR continue-on-error, path triggers, and summary
+// block, and is failure-INDEPENDENT of the v1 leg (all v1 pins above stay
+// green — the additions below are purely additive).
+describe('host-contract-check workflow: v2 lane (issue #2910)', () => {
+	function v2Step() {
+		return loadWorkflow().jobs?.check?.steps?.find(
+			(s) => s.id === 'host_contract_v2',
+		);
+	}
+
+	test('the v2 step exists after the v1 step and runs the v2 script', () => {
+		const steps = loadWorkflow().jobs?.check?.steps ?? [];
+		const v1Index = steps.findIndex((s) => s.id === 'host_contract');
+		const v2Index = steps.findIndex((s) => s.id === 'host_contract_v2');
+		expect(v1Index).toBeGreaterThanOrEqual(0);
+		expect(v2Index).toBeGreaterThan(v1Index);
+		expect(v2Step()?.name).toBe('Run v2 host-contract check');
+		const raw = readFileSync(WORKFLOW_PATH, 'utf8');
+		expect(raw).toContain('bun scripts/check-host-contract-v2.ts');
+	});
+
+	test('the v2 step writes its own output file', () => {
+		const raw = readFileSync(WORKFLOW_PATH, 'utf8');
+		expect(raw).toContain('host-contract-v2-output.txt');
+	});
+
+	test('the v2 step is advisory on PRs (own continue-on-error)', () => {
+		expect(v2Step()?.['continue-on-error']).toBe(
+			"${{ github.event_name == 'pull_request' }}",
+		);
+	});
+
+	test('the v2 step is NOT gated on the v1 step outcome (if: always())', () => {
+		// Step-level independence: even a blocking v1 failure on the weekly
+		// lane must never mask v2 drift.
+		expect(v2Step()?.if).toBe('always()');
+	});
+
+	test('PR path triggers include the v2 script, fixture, and its test file', () => {
+		const paths = loadWorkflow().on?.pull_request?.paths ?? [];
+		for (const required of [
+			'scripts/check-host-contract-v2.ts',
+			'tests/fixtures/host/expected-structure-v2.json',
+			'tests/unit/scripts/check-host-contract-v2.test.ts',
+		]) {
+			expect(paths).toContain(required);
+		}
+	});
+
+	test('the v2 step routes with the same GH_TOKEN/GH_REPO env discipline', () => {
+		const step = v2Step();
+		expect(step?.env?.GH_TOKEN).toBe('${{ github.token }}');
+		expect(step?.env?.GH_REPO).toBe('${{ github.repository }}');
+		// The dispatch tag stays env-only (PRR-006): no inline TAG= anywhere.
+		expect(step?.env?.INPUT_TAG_V2).toBe('${{ inputs.tag_v2 }}');
+		const raw = readFileSync(WORKFLOW_PATH, 'utf8');
+		expect(raw.includes('TAG=')).toBe(false);
+	});
+
+	test('the v2 summary step always runs and records its own output file', () => {
+		const steps = loadWorkflow().jobs?.check?.steps ?? [];
+		const summary = steps.find(
+			(s) => s.name === 'Record v2 verdict in job summary',
+		);
+		expect(summary?.if).toBe('always()');
+		const raw = readFileSync(WORKFLOW_PATH, 'utf8');
+		expect(raw).toContain('Host contract check (v2)');
+	});
+});

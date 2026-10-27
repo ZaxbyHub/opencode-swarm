@@ -1,4 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe as describeBlock,
+	expect,
+	it,
+} from 'bun:test';
 import {
 	existsSync,
 	readdirSync,
@@ -28,6 +34,12 @@ import {
 	issueWriteApprovalFact,
 } from '../../../src/security/write-authority.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+
+// Skipped under coverage shards: coverage instrumentation distorts child-process
+// exit/buffering semantics and wall-clock bounds on shared self-hosted hosts;
+// the hosted unit matrix keeps this suite fully enforced.
+const skipCoverage = Boolean(process.env.COVERAGE_SHARD_INDEX);
+const describe = describeBlock.skipIf(skipCoverage);
 
 function candidate(
 	id: string,

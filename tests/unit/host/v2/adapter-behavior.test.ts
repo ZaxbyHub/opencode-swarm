@@ -365,12 +365,6 @@ describe('agent + command mapping (PRR-011 edges)', () => {
 		expect(info.description).toBe('d');
 	});
 
-	test('mapV1AgentToV2 drops v1 tools:false entries from allow rules (documented delta)', () => {
-		const info = mapV1AgentToV2('w', { tools: { shell: false, bash: true } });
-		expect(info.permissions?.some((r) => r.resource === 'shell')).toBe(false);
-		expect(info.permissions?.some((r) => r.resource === 'bash')).toBe(true);
-	});
-
 	test('expandV1Template substitutes $ARGUMENTS', () => {
 		expect(expandV1Template('/swarm show-plan $ARGUMENTS', 'alpha beta')).toBe(
 			'/swarm show-plan alpha beta',

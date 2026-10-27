@@ -7,8 +7,14 @@ import {
 	consumeConfirmToken,
 	issueConfirmToken,
 } from '../commands/destructive-purge';
+import {
+	readGitRepositoryStatusDetailedAsync,
+	readGitStatusAsync,
+} from '../commands/git-status-read';
 import { backupTrackedChangesBeforeRollback } from '../commands/reset-backup';
 import {
+	describeUnreadableCause,
+	formatExcludedRecord,
 	measureGitDestruction,
 	ROLLBACK_GIT_KIND,
 	trackedDirtyCandidates,
@@ -63,11 +69,6 @@ const NON_ASCII_PATTERN = /[^\x20-\x7E]/;
 
 type MutationAction = 'save' | 'restore' | 'delete' | 'save_task_completion';
 
-interface GitRepoProbe {
-	isRepo: boolean;
-	warning?: string;
-}
-
 interface CheckpointEntry {
 	label: string;
 	sha: string;
@@ -107,6 +108,21 @@ export const _internals: {
 	 * `spawnSync` call slots the test is asserting on.
 	 */
 	resolveGitExecutable: typeof resolveGitExecutable;
+	/**
+	 * Feedback-round seam (#3441 review): the restore path's destruction
+	 * measurement is reachable through this slot so a test can stub the
+	 * measurement without mocking the whole rollback-gate module (whose
+	 * process-global mock.module form leaks across co-run files).
+	 */
+	measureGitDestruction: typeof measureGitDestruction;
+	/**
+	 * Feedback-round seams (PRR-011): the two async reader probes are
+	 * reachable through slots so tests stub them by PROPERTY ASSIGNMENT
+	 * (restored in afterEach) instead of mock.module — the module-level
+	 * registration is process-global and poisoned co-run files.
+	 */
+	readGitStatusAsync: typeof readGitStatusAsync;
+	readGitRepositoryStatusDetailedAsync: typeof readGitRepositoryStatusDetailedAsync;
 } = {
 	tryAcquireLock,
 	loadPlan,
@@ -115,6 +131,9 @@ export const _internals: {
 	findCommitByExactSubject,
 	stageAllExcludingSwarm,
 	resolveGitExecutable,
+	measureGitDestruction,
+	readGitStatusAsync,
+	readGitRepositoryStatusDetailedAsync,
 };
 
 function serializeResult(
@@ -371,31 +390,6 @@ function gitExec(args: string[], cwd: string): string {
 
 function getCurrentSha(directory: string): string {
 	return gitExec(['rev-parse', 'HEAD'], directory).trim();
-}
-
-function isGitRepo(directory: string): GitRepoProbe {
-	try {
-		gitExec(['rev-parse', '--git-dir'], directory);
-		return { isRepo: true };
-	} catch (e) {
-		const message = e instanceof Error ? e.message : String(e);
-		const isTransient =
-			/ETIMEDOUT|timed out/i.test(message) &&
-			!/not a git repository/i.test(message);
-
-		if (isTransient) {
-			return {
-				isRepo: false,
-				warning:
-					'git probe failed after retry exhaustion - treating as not a git repository',
-			};
-		}
-
-		return {
-			isRepo: false,
-			warning: 'git probe failed - directory may not be a git repository',
-		};
-	}
 }
 
 function findCommitByExactSubject(
@@ -740,8 +734,21 @@ export async function saveCheckpointRecord(
 				return { success: false, error: `duplicate label: "${label}"` };
 			}
 			let sha = '';
-			const repoProbe = isGitRepo(directory);
-			if (repoProbe.isRepo) {
+			// #3427: the repository probe rides the shared async reader
+			// (bounded, killable) instead of the local sync gitExec retry
+			// chain — on a host whose sync spawns stall (#3275), this leg no
+			// longer blocks the save path. This is a DURABLE write inside the
+			// mutation lock, so unlike the entry preflight it keeps bounded
+			// transient tolerance: readGitStatusAsync retries a transient
+			// spawn failure once (feedback round PRR-003) instead of letting
+			// a single EBUSY/EPERM/ETIMEDOUT record a sha-less checkpoint.
+			// NOTE: readGitStatusAsync resolves to a full GitStatusReadResult
+			// object (always truthy) — branch on `.ok`, never on the object.
+			const saveProbe = await _internals.readGitStatusAsync(
+				['rev-parse', '--git-dir'],
+				directory,
+			);
+			if (saveProbe.ok) {
 				try {
 					sha = getCurrentSha(directory);
 				} catch {
@@ -783,11 +790,11 @@ export async function saveCheckpointRecord(
 	});
 }
 
-function handleRestore(
+async function handleRestore(
 	label: string,
 	directory: string,
 	confirmToken?: string,
-): string {
+): Promise<string> {
 	try {
 		const log = readCheckpointLog(directory);
 		const checkpoint = log.checkpoints.find(
@@ -806,14 +813,41 @@ function handleRestore(
 		// contract. The candidate set is derived by the shared rollback-gate
 		// module so a token minted by /swarm rollback or /swarm checkpoint
 		// (command layer) is consumable here at the sink — and vice versa.
-		const measurement = measureGitDestruction(directory, checkpoint.sha);
+		// Routed through the _internals seam (feedback round) so tests can
+		// stub the measurement without a process-global module mock.
+		const measurement = await _internals.measureGitDestruction(
+			directory,
+			checkpoint.sha,
+		);
 		if (measurement.kind === 'unreadable') {
+			// #3317: name WHY the read failed when the async reader could tell
+			// (single shared source with the /swarm rollback command). #3434:
+			// this also covers an unreadable ls-tree/ls-files enumeration,
+			// and the `source` field names WHICH read failed.
+			const cause = describeUnreadableCause(measurement, measurement.source);
+			const unreadableNote =
+				measurement.excludedOutOfRoot &&
+				measurement.excludedOutOfRoot.length > 0
+					? ` — ${measurement.excludedOutOfRoot.length} out-of-root porcelain record(s) had been excluded from the scope before the read failed (first: ${formatExcludedRecord(measurement.excludedOutOfRoot[0])})`
+					: '';
 			return serializeResult('restore', {
 				success: false,
-				error:
-					'cannot verify the working tree (git status unreadable) — refusing to restore without a preview. Retry, or inspect git status manually.',
+				error: `cannot verify the working tree (${
+					measurement.source === 'enumeration'
+						? 'the target-tree listing could not be read'
+						: 'git status unreadable'
+				}; ${cause})${unreadableNote} — refusing to restore without a preview.`,
 			});
 		}
+		// #3434: bounded diagnostic for out-of-root porcelain records
+		// excluded from the destroy scope — surfaced on the preview, the
+		// confirmed restore, and the clean-tree restore below, so an
+		// exclusion is never silent. Record bytes pass through
+		// formatExcludedRecord before reaching operator/agent-visible text.
+		const exclusionNote =
+			measurement.excludedOutOfRoot.length > 0
+				? `${measurement.excludedOutOfRoot.length} out-of-root porcelain record(s) were excluded from this scope (first: ${formatExcludedRecord(measurement.excludedOutOfRoot[0])})`
+				: null;
 		if (measurement.dirtyRelPaths.length > 0) {
 			const candidates = trackedDirtyCandidates(
 				directory,
@@ -834,6 +868,7 @@ function handleRestore(
 						`Restoring to checkpoint "${label}" runs a hard git reset and would DESTROY ${candidates.length} uncommitted tracked file(s):`,
 						...shown.map((p) => `  - ${p}`),
 						...(overflow > 0 ? [`  (+${overflow} more)`] : []),
+						...(exclusionNote ? [`⚠ ${exclusionNote}`] : []),
 						'Backups are taken automatically once confirmed.',
 					],
 					confirm_token: token,
@@ -894,11 +929,19 @@ function handleRestore(
 					backup.warnings.length > 0
 						? `; warnings: ${backup.warnings.join('; ')}`
 						: ''
+				}${
+					// #3442: the confirmed destructive restore carries the
+					// exclusion note like its preview and clean-tree siblings —
+					// a record excluded between preview and confirm is never
+					// silently dropped from the executed scope's report.
+					exclusionNote ? `; ⚠ ${exclusionNote}` : ''
 				}`,
 			});
 		}
 
-		// Clean tree: nothing tracked to destroy — single-call restore.
+		// Clean tree: nothing tracked to destroy — single-call restore. When
+		// every dirty record was out-of-root-excluded (#3434), the operator
+		// still sees what was dropped.
 		const logBeforeReset = log;
 		gitExec(['reset', '--hard', checkpoint.sha], directory);
 		writeCheckpointLog(logBeforeReset, directory);
@@ -907,7 +950,9 @@ function handleRestore(
 			success: true,
 			label,
 			sha: checkpoint.sha,
-			message: `Restored to checkpoint: "${label}" (hard reset)`,
+			message: `Restored to checkpoint: "${label}" (hard reset)${
+				exclusionNote ? `; ⚠ ${exclusionNote}` : ''
+			}`,
 		});
 	} catch (e) {
 		return serializeResult('restore', {
@@ -1165,11 +1210,27 @@ export const checkpoint: ToolDefinition = createSwarmTool({
 			.describe('Plan task ID (required for save_task_completion), e.g. "1.1"'),
 	},
 	execute: async (args, directory) => {
-		const repoProbe = isGitRepo(directory);
-		if (!repoProbe.isRepo) {
+		// #3427: the entry preflight rides the shared async reader
+		// (single-attempt `rev-parse --git-dir`, bounded, killable) instead of
+		// the local sync gitExec retry chain — on a host whose sync child
+		// spawns stall (#3275), every checkpoint action (list and restore
+		// alike) no longer blocks up to the transient-retry horizon before
+		// refusing. #3442: the probe is the DETAILED twin so the refusal
+		// names the cause (non-repository vs unavailable executable vs a git
+		// error) instead of a uniform not-a-repository message — still
+		// single-attempt, so the wedge fix is unchanged.
+		const repoStatus =
+			await _internals.readGitRepositoryStatusDetailedAsync(directory);
+		if (!repoStatus.isRepo) {
+			const reason =
+				repoStatus.reason === 'not_git_repo'
+					? 'not a git repository'
+					: repoStatus.reason === 'git_unavailable'
+						? 'git executable is not available'
+						: `git probe failed (${repoStatus.message})`;
 			return serializeResult('unknown', {
 				success: false,
-				error: `${repoProbe.warning ?? 'not a git repository'} - checkpoint tools require a git repository`,
+				error: `${reason} - checkpoint tools require a git repository`,
 			});
 		}
 
@@ -1250,7 +1311,7 @@ export const checkpoint: ToolDefinition = createSwarmTool({
 					action: 'restore',
 					directory,
 					operationKey: `restore-${label!}`,
-					run: async () => handleRestore(label!, directory, confirmToken),
+					run: async () => await handleRestore(label!, directory, confirmToken),
 				});
 			case 'list':
 				return handleList(directory);

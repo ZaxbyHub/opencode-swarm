@@ -29,6 +29,7 @@ import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import { savePlan } from '../../../src/plan/manager.js';
 import * as actualState from '../../../src/state.js';
+import { mockGitStatusReadNonRepo } from '../../helpers/close-command-mocks';
 import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -74,6 +75,9 @@ mock.module('../../../src/state.js', () => ({
 	resetSwarmStatePreservingSingletons: () => {},
 	hasActiveFullAuto: () => false,
 }));
+// #3427: the align stage's repository probe rides the async detailed
+// reader (spread-real module mock; only the detailed reader is overridden).
+mockGitStatusReadNonRepo();
 mock.module('../../../src/git/branch.js', () => ({
 	isGitRepo: () => false,
 	getCurrentBranch: () => 'main',

@@ -36,6 +36,7 @@ Nothing is silently dropped.
 ## Collation and budget
 
 - All `FILE` items from one PR go into **one** issue titled `Follow-up from PR #<N>: <theme>`. Use the repository issue format, with at least one acceptance criterion per item, each bound to its own check.
+- Before filing (OPTIONAL workstation tooling — `issue-lint` is NOT bundled with this skill; where an agent workstation has it installed): run `issue-lint <body-file> --repo <repo-root>` and fix every `mechanical-error` finding; surface `semantic-review-needed` findings to the plan critic. Where a PreToolUse `issue-lint-gate` hook is installed it enforces this at `gh issue create` time — the manual run stays the cheap path.
 - Split into a second issue only when the items genuinely need separate PRs, for example different hotspot files that cannot share a review.
 - A HIGH-severity item (fail-open gate, security, data loss) may stand alone.
 - **Budget: at most two follow-up issues per PR.** A standalone HIGH item counts toward it.

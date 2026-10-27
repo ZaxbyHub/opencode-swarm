@@ -238,8 +238,10 @@ describe('architect prompt budget matrix — issue #2671 acceptance', () => {
 			'x'.repeat(ARCHITECT_PROMPT_BUDGET_CHARS),
 		);
 		expect(over.withinBudget).toBe(false);
-		// 163000 -> 164000-char ceiling (#3315 raised it; #2946 raised it
-		// before). The estimate pin derives from the imported ceiling so the
+		// 163000 -> 164000 -> 165000-char ceiling (#3315 raised it; #2946 raised
+		// it before; the #3312/#3313 rebase over #3419 raised it last — the
+		// honest-INCOMPLETE guidance and #3419's verification re-dispatch
+		// recovery fit under the ceiling separately but not together). The estimate pin derives from the imported ceiling so the
 		// suite stays green at both ends of a deliberate ceiling change while
 		// still biting any estimateModelTokens drift.
 		expect(over.tokenEstimate).toBe(

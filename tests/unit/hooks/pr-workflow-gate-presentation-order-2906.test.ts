@@ -176,6 +176,7 @@ describe('presentation-order assignment (issue #2906)', () => {
 			[
 				{
 					laneId: 'po-critic',
+					agent: 'critic',
 					workflowLane: 'po-critic',
 					reviewItemIds: ['C-2'],
 				},

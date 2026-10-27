@@ -45,6 +45,7 @@ import {
 import { classifyCommand } from '../security/command-classifier.js';
 import { isPolicyProtectedPath } from '../security/protected-path-policy.js';
 import { normalizePath } from '../utils/path';
+import { isSingleToolCallProgram } from './code-mode-program';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,6 +79,8 @@ export interface FullAutoPolicyConfig {
 		trusted_domains?: string[];
 		protected_paths?: string[];
 		allow_defaults?: boolean;
+		/** Opt in to passing the marked OpenCode 2 Code Mode wrapper (#3446). */
+		trust_code_mode_wrapper?: boolean;
 	};
 	oversight?: {
 		on_high_risk_action?: boolean;
@@ -100,6 +103,21 @@ export interface FullAutoClassifierInput {
 	planSummary?: string;
 	changedFiles?: string[];
 	fullAutoConfig: FullAutoPolicyConfig | undefined;
+	/**
+	 * True for a call the OpenCode v2 adapter marked as the host's Code Mode
+	 * `execute` wrapper (see `src/hooks/code-mode-wrapper.ts`). The mark is not
+	 * proof of provenance (a same-named third-party tool is marked too), so it
+	 * is only honoured with the operator opt-in `trust_code_mode_wrapper`.
+	 */
+	hostCodeModeWrapper?: boolean;
+	/**
+	 * True when this `swarm_command` is on the explicit read-only allowlist
+	 * (`READ_ONLY_SWARM_COMMANDS`) AND the tool's own policy allows it. Computed
+	 * by the permission hook so this module stays free of the command
+	 * registry's import graph. Absent or false means the call is escalated like
+	 * any unclassified tool.
+	 */
+	swarmCommandReadOnly?: boolean;
 	pluginConfig?: {
 		memory?: { enabled?: boolean };
 		external_skills?: { curation_enabled?: boolean };
@@ -733,6 +751,57 @@ export function classifyFullAutoToolAction(
 			action: 'allow',
 			reason: 'read-only tool',
 			tier: 'safe',
+		};
+	}
+
+	// 1b. OpenCode v2 Code Mode wrapper. v2 exposes plugin and MCP tools to the
+	//     model through one host-owned `execute` tool whose input is a JS
+	//     program (`{ code }`). Each nested `tools.<name>()` call is dispatched
+	//     through the same tool.execute.before chain under its own name, so the
+	//     authority, scope, delegation and Full-Auto checks all still run per
+	//     nested call; escalating the wrapper as well sends every plugin tool
+	//     call to the critic twice.
+	//
+	//     OFF BY DEFAULT. v2 tool events carry no field that proves a tool is
+	//     host-owned (verified on 2.1.4: the event is {tool, sessionID, agent,
+	//     messageID, id, input}), so a third-party tool that merely shares the
+	//     name `execute` is indistinguishable from the wrapper. The operator
+	//     opts in with `permission_policy.trust_code_mode_wrapper` when they
+	//     control the plugin and MCP set. Even then the pass-through needs the
+	//     v2 adapter's per-call mark AND a program that is exactly one
+	//     `tools.<path>(<plain data>)` call: the sandbox also exposes `fetch`
+	//     and `Function`, which no hook sees. Everything else escalates below.
+	if (
+		tool === 'execute' &&
+		config?.permission_policy?.trust_code_mode_wrapper === true &&
+		input.hostCodeModeWrapper === true &&
+		isSingleToolCallProgram(input.args?.code)
+	) {
+		return {
+			action: 'allow',
+			reason:
+				'OpenCode v2 Code Mode wrapper around a single tool call (operator-trusted) — the nested call is classified individually',
+			tier: 'local',
+		};
+	}
+
+	// 1c. `swarm_command` runs a /swarm subcommand. Its own tool policy is an
+	//     allowlist of what an AGENT may run, but that list includes commands
+	//     that change state, spawn CI or run gates (`auto-proceed`,
+	//     `guardrail reset`, `ci-simulate`, `gate-audit`, `sdd project`, ...),
+	//     so it is not a safety classification. Only commands on the explicit
+	//     read-only set (see `READ_ONLY_SWARM_COMMANDS`) pass without a critic,
+	//     and never in strict mode. Everything else escalates (#3446).
+	if (
+		tool === 'swarm_command' &&
+		mode !== 'strict' &&
+		input.swarmCommandReadOnly === true
+	) {
+		return {
+			action: 'allow',
+			reason:
+				'swarm_command is on the explicit read-only allowlist and permitted by the tool policy',
+			tier: 'local',
 		};
 	}
 

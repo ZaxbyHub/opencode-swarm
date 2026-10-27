@@ -11,6 +11,7 @@ import {
 	resetStandardWorktreeIsolationState,
 	type StandardWorktreeDispatch,
 } from '../../../src/hooks/delegation-gate/worktree-isolation';
+import { clearDeferredWarnings } from '../../../src/services/warning-buffer';
 import { beginCoderSettlement } from '../../../src/workflow/coder-settlement';
 import {
 	cleanupOrphanedBranches,
@@ -89,6 +90,7 @@ function retrack(dispatch: StandardWorktreeDispatch): void {
 }
 
 afterEach(() => {
+	clearDeferredWarnings();
 	resetStandardWorktreeIsolationState();
 	for (const root of roots.splice(0))
 		fs.rmSync(root, { recursive: true, force: true });

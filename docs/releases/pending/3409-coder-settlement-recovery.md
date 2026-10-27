@@ -4,7 +4,10 @@ Coder settlement recovery now retains surviving recorded source commits even
 when a lane checkout and branch are missing. Merge recovery can resume on a
 compatible advanced primary branch while retaining conflict, dirty-overlap and
 source-identity checks. Pending settlements protect their artifacts from
-cleanup through shared dispatch/deletion admission.
+cleanup through shared dispatch/deletion admission. That protection covers
+dispatch and lane cleanup performed by the plugin; it does not cover an
+explicit `/swarm close`, which archives the session and then removes the
+`.swarm/coder-settlements/` directory.
 
 Mixed foreground/background completion now hands off settlement ownership
 before removing the lane. Interrupted handoff and leftover cleanup can replay
@@ -13,9 +16,11 @@ for manual recovery.
 
 Recovery also detects the specific historical missing-worktree self-heal that
 may already have marked a settlement aborted. It reports the exact recoverable
-commit and retained backup ref without reviving an old task generation.
-Committed recovery releases its backup; unstaged and historical work remains
-retained for explicit operator review. See
+commit and retained backup ref without reviving an old task generation. That
+`RECOVERABLE_ORPHAN_COMMIT` report is advisory: task status, re-dispatch and
+close are not blocked by it. Committed recovery releases its backup; unstaged
+work and historical work that has not landed by ancestry remain retained for
+explicit operator review. See
 [coder settlement recovery](../../coder-settlement-recovery.md) for discovery
 and safe cleanup commands.
 

@@ -62,7 +62,7 @@ describe('Swarm subcommand registration', () => {
 		// guardrail-reset command. Issue #1825 adds five blueprint commands and
 		// three harness-candidate commands. Issue #2503 adds the
 		// swarm-harness-opt shortcut.
-		expect(commandKeys.length).toBe(102);
+		expect(commandKeys.length).toBe(103); // #3422: +swarm-attest
 
 		expect(commands.swarm).toBeDefined();
 	});
@@ -184,6 +184,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-write-retro',
 			'swarm-reset-session',
 			'swarm-recover',
+			'swarm-attest', // #3422: external-evidence attestation
 			'swarm-simulate',
 			'swarm-promote',
 			'swarm-checkpoint',

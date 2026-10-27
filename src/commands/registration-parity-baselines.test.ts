@@ -123,6 +123,8 @@ describe('Command registration parity — classification baselines', () => {
 		];
 		const EXPECTED_ADDITIONS = {
 			allowlist: new Set([
+				// #3422: attest is agent-callable (toolPolicy 'agent').
+				'attest',
 				'pr status',
 				'pr subscribe',
 				'pr unsubscribe',
@@ -196,6 +198,8 @@ describe('Command registration parity — classification baselines', () => {
 			]),
 			toolCommands: new Set([
 				'full-auto',
+				// #3422: attest carries toolPolicy 'agent'.
+				'attest',
 				// #3169: epic is human-only (schema-visible; never agent-callable).
 				'epic',
 				'dataset consent',

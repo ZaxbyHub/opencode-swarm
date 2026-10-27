@@ -81,6 +81,7 @@ async function settleCriticPhase(
 		[
 			{
 				laneId: batchId,
+				agent: 'critic',
 				workflowLane: batchId,
 				reviewItemIds: [...itemIds],
 			},
@@ -437,6 +438,7 @@ describe('critic settlement diagnostics — regression: preserve attempted NME e
 			[
 				{
 					laneId: 'critic-nme',
+					agent: 'critic',
 					workflowLane: 'critic-nme',
 					reviewItemIds: [...BASE_IDS],
 				},

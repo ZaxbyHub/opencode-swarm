@@ -434,22 +434,25 @@ describe('#2953 close alignment re-check (t1c2-r1-S-03)', () => {
 			]);
 		});
 
-		test('recheck: newly-dirty refuses, subset passes, unreadable refuses', () => {
+		test('recheck: newly-dirty refuses, subset passes, unreadable refuses', async () => {
 			const base = ' M a.txt\n';
 			const real = purgeInternals.runGitStatus;
 			try {
 				purgeInternals.runGitStatus = () => `${base} M b.txt`;
-				const refused = recheckBeforeDestructive('dir', ['a.txt']);
+				const refused = await recheckBeforeDestructive('dir', ['a.txt']);
 				expect(refused.ok).toBe(false);
 				if (!refused.ok) {
 					expect(refused.newDirtyPaths).toEqual(['b.txt']);
 					expect(refused.reason).toMatch(/1 tracked file/);
 				}
 				purgeInternals.runGitStatus = () => base;
-				const subset = recheckBeforeDestructive('dir', ['a.txt', 'gone.txt']);
+				const subset = await recheckBeforeDestructive('dir', [
+					'a.txt',
+					'gone.txt',
+				]);
 				expect(subset.ok).toBe(true);
 				purgeInternals.runGitStatus = () => null;
-				const unreadable = recheckBeforeDestructive('dir', ['a.txt']);
+				const unreadable = await recheckBeforeDestructive('dir', ['a.txt']);
 				expect(unreadable.ok).toBe(false);
 				if (!unreadable.ok) {
 					expect(unreadable.reason).toMatch(/could not be re-read/);

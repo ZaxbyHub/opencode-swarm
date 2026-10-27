@@ -270,11 +270,13 @@ describe('critic-phase N-of-M settlement end-to-end (issue #3101, review PRR-003
 			[
 				{
 					laneId: CRITIC_LIVE_LANE,
+					agent: 'critic',
 					workflowLane: CRITIC_LIVE_LANE,
 					reviewItemIds: criticLive,
 				},
 				{
 					laneId: CRITIC_DEAD_LANE,
+					agent: 'critic',
 					workflowLane: CRITIC_DEAD_LANE,
 					reviewItemIds: criticDead,
 				},
@@ -302,6 +304,7 @@ describe('critic-phase N-of-M settlement end-to-end (issue #3101, review PRR-003
 				[
 					{
 						laneId: CRITIC_DEAD_LANE,
+						agent: 'critic',
 						workflowLane: CRITIC_DEAD_LANE,
 						reviewItemIds: criticDead,
 					},

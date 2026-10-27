@@ -62,6 +62,11 @@ import {
 	withEvidenceLock,
 } from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import {
+	type PrWorkflowPersistedStateBase,
+	readPrWorkflowGateStateFromDisk,
+} from '../pr-review/persistence.js';
+import { readVerdictSettlementReceipt } from '../pr-review/verdict-settlement.js';
 import { telemetry } from '../telemetry.js';
 import { bunWrite } from '../utils/bun-compat.js';
 import {
@@ -3859,6 +3864,30 @@ export async function publishPrReviewResultReceipt(
 					};
 					return;
 				}
+				// Issue #3312 (AC15): cross-lane duplicate finding-id rejection.
+				// Per-envelope uniqueness (assertUniqueStrings in the receipt
+				// schema) keeps one receipt's finding ids distinct, but nothing
+				// kept two lanes of the same workflow from publishing the SAME
+				// id — the first workflow-level duplicate only surfaced
+				// downstream as the FATAL gate assertNoDuplicates refusal,
+				// after the conflicting receipt was already durable. Under this
+				// same locked record load, scan the receipts retained by SIBLING
+				// records of the workflowInstanceId and reject before the
+				// write-once receipt pins the collision. The incoming record's
+				// OWN already-published ids never reach here: that replay
+				// short-circuits to `duplicate` at the receipt check above.
+				const duplicateFindingIdOwner = findCrossLaneFindingIdOwner(
+					records,
+					current,
+					parsed.data,
+				);
+				if (duplicateFindingIdOwner) {
+					outcome = {
+						status: 'conflict',
+						reason: `duplicate id ${duplicateFindingIdOwner.findingId} already published by lane ${duplicateFindingIdOwner.ownerLaneId}`,
+					};
+					return;
+				}
 				// Issue #2865 (claim-first interleaving): the admitted publish
 				// supersedes the stale-decision terminal — the record settles
 				// `completed` on the exactly-bound receipt, mirroring the
@@ -3939,6 +3968,262 @@ export async function publishPrReviewResultReceipt(
 	} catch (error) {
 		return {
 			status: 'uncertain',
+			reason: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
+/**
+ * Structural slice of the PR_REVIEW parent gate state the liveness
+ * supersession needs (issue #3312 U7). The run-id ladder mirrors the landed
+ * validation skip-disclosure resolution (pr-workflow-gate.ts): artifact id
+ * first, then the reservation, then the trigger-eval binding — a COMPLETE run
+ * may carry no artifact or reserved id, and the #3312 fixtures stamp only the
+ * trigger-eval binding. Read through the same codec-bound disk reader the
+ * dispatch-lanes collect path uses (`readPrWorkflowGateStateFromDisk`) so this
+ * store module never statically imports the gate (the gate statically imports
+ * this store; the persistence module is the sanctioned low-level seam).
+ */
+interface VerdictLaneSupersessionGateStateSlice
+	extends PrWorkflowPersistedStateBase {
+	prReviewArtifactRunId?: string;
+	prReviewReservedRunId?: string;
+	prReviewTriggerEvalRunId?: string;
+}
+
+/**
+ * Issue #3312 (U7, AC32-AC35 + AC44): supersede one stale/liveness VERDICT
+ * lane (`swarm-pr-review:reviewer`|`swarm-pr-review:critic` only) with a
+ * later-validated completed transcript, under the store lock.
+ *
+ * The idle stale sweep settles a lane `stale` with the typed `liveness` class
+ * on a silence horizon (dispatch-lanes.ts idle arm); when a later collection
+ * pass observes the host session actually finished and the legacy-transcript
+ * adapter validates the lane's rows, this narrow writer flips the record to
+ * `completed` carrying that validated result. It deliberately bypasses the
+ * generic terminal guard in `appendDelegationTransition` the same way the
+ * existing late-publish exceptions are scoped (the #2865 claim-first
+ * admission and the #2585 parent-repair backfill) — that guard is exactly
+ * what would otherwise refuse the flip, and refusing is the DEFAULT here:
+ * every gate below that can refuse, refuses.
+ *
+ * Refusal gates, in order:
+ * - uncertain store, missing record;
+ * - mode is not a verdict lane (discovery/base/micro/council lanes are out of
+ *   scope — AC35);
+ * - status is not exactly the sweep's `stale`;
+ * - terminal failure class is `operator_cancelled` (stated explicitly even
+ *   though the liveness check subsumes it — AC34 diagnostics) or anything
+ *   other than `liveness`;
+ * - the parent session's gate state cannot be read, carries no resolvable
+ *   pr-review run id, or either persisted verdict-settlement receipt
+ *   (reviewer AND critic phases) is unreadable — the citation check cannot
+ *   be performed, so the supersession fails closed;
+ * - either phase's receipt CITES this record (an item row's
+ *   sourceBatchId/sourceLaneId pair matches — AC44): the N-of-M settlement
+ *   already disclosed this lane as dead evidence, so a later transcript can
+ *   no longer flip it to completed underneath the disclosure.
+ *
+ * The superseding result replaces `record.result` and is sanitized exactly
+ * like the claim-first receipt admission: no `error`, no
+ * `workflowLaneFailureClass` (C32 pins their absence) — the folded record
+ * never carries a liveness verdict next to the completed evidence that
+ * supersedes it.
+ */
+export async function supersedeStaleLivenessVerdictLane(
+	directory: string,
+	input: {
+		correlationId: string;
+		validatedResult: BackgroundDelegationResult;
+	},
+): Promise<{ status: 'superseded' | 'refused'; reason: string }> {
+	let outcome: { status: 'superseded' | 'refused'; reason: string } = {
+		status: 'refused',
+		reason: 'liveness supersession did not complete',
+	};
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) {
+					outcome = {
+						status: 'refused',
+						reason: 'delegation state is uncertain',
+					};
+					return;
+				}
+				const record = findRecordForWrite(records, input.correlationId);
+				if (!record) {
+					outcome = {
+						status: 'refused',
+						reason: `no delegation record for correlationId ${input.correlationId}`,
+					};
+					return;
+				}
+				if (
+					record.mode !== 'swarm-pr-review:reviewer' &&
+					record.mode !== 'swarm-pr-review:critic'
+				) {
+					outcome = {
+						status: 'refused',
+						reason: `mode ${record.mode ?? '<none>'} is not a verdict lane (swarm-pr-review:reviewer|critic only)`,
+					};
+					return;
+				}
+				// The liveness sweep's exact terminal shape: status 'stale' (the
+				// idle stale-sweep arm writes nothing else for this class).
+				if (record.status !== 'stale') {
+					outcome = {
+						status: 'refused',
+						reason: `record status is ${record.status}, not the liveness sweep's stale`,
+					};
+					return;
+				}
+				const terminalClass =
+					record.terminalResult?.result.workflowLaneFailureClass ??
+					record.result?.workflowLaneFailureClass;
+				if (terminalClass === 'operator_cancelled') {
+					// Explicitly stated for diagnostics even though the liveness
+					// check below refuses it anyway (AC34): an authorized operator
+					// cancellation is never resurrected by a later transcript.
+					outcome = {
+						status: 'refused',
+						reason:
+							'terminal failure class operator_cancelled is never superseded by a later transcript',
+					};
+					return;
+				}
+				if (terminalClass !== 'liveness') {
+					outcome = {
+						status: 'refused',
+						reason: `terminal failure class ${terminalClass ?? '<none>'} is not liveness`,
+					};
+					return;
+				}
+				// AC44 receipt-cited refusal: read BOTH persisted phase receipts
+				// (decision-time re-read under the store lock — the #3094 TOCTOU
+				// discipline) and refuse when either cites this record. The runId
+				// ladder mirrors the validation skip-disclosure resolution; the
+				// citation match is the item row's sourceBatchId/sourceLaneId pair
+				// against the record's own ids.
+				let parentState: VerdictLaneSupersessionGateStateSlice | null;
+				try {
+					parentState =
+						await readPrWorkflowGateStateFromDisk<VerdictLaneSupersessionGateStateSlice>(
+							directory,
+							record.parentSessionId,
+						);
+				} catch (error) {
+					outcome = {
+						status: 'refused',
+						reason: `parent gate state read failed (${error instanceof Error ? error.message : String(error)}); cannot verify verdict-settlement receipts`,
+					};
+					return;
+				}
+				if (!parentState) {
+					outcome = {
+						status: 'refused',
+						reason: `no PR_REVIEW gate state for parent session ${record.parentSessionId}; cannot verify verdict-settlement receipts`,
+					};
+					return;
+				}
+				const runId =
+					parentState.prReviewArtifactRunId ??
+					parentState.prReviewReservedRunId ??
+					parentState.prReviewTriggerEvalRunId;
+				if (!runId) {
+					outcome = {
+						status: 'refused',
+						reason:
+							'no resolvable pr-review run id in parent gate state; cannot verify verdict-settlement receipts',
+					};
+					return;
+				}
+				for (const phase of ['reviewer', 'critic'] as const) {
+					const receiptRead = readVerdictSettlementReceipt(
+						directory,
+						runId,
+						phase,
+					);
+					if (receiptRead.status === 'absent') continue;
+					if (receiptRead.status === 'invalid') {
+						outcome = {
+							status: 'refused',
+							reason: `verdict-settlement receipt for phase ${phase} under run ${runId} is unreadable (${receiptRead.reason}); cannot prove the lane uncited`,
+						};
+						return;
+					}
+					// Feedback F12: fail-closed identity check — a receipt read
+					// from the run's path whose own runId disagrees with the
+					// ladder-resolved run proves nothing about THIS run's
+					// settlement; a mismatched receipt must refuse, not cite.
+					if (receiptRead.receipt.runId !== runId) {
+						outcome = {
+							status: 'refused',
+							reason: `verdict-settlement receipt under run ${runId} carries runId ${receiptRead.receipt.runId}; cannot prove the lane uncited`,
+						};
+						return;
+					}
+					const cited = receiptRead.receipt.items.find(
+						(item) =>
+							item.sourceBatchId === record.batchId &&
+							item.sourceLaneId === record.laneId,
+					);
+					if (cited) {
+						outcome = {
+							status: 'refused',
+							reason: `verdict-settlement receipt for phase ${phase} under run ${runId} cites lane ${record.laneId ?? record.correlationId} (batch ${record.batchId ?? '<none>'}, item ${cited.itemId}, ${cited.disposition}); a disclosed dead lane is never resurrected by a later transcript`,
+						};
+						return;
+					}
+				}
+				// SUPERSEDE (mirrors the #2865 claim-first admission write): the
+				// folded record's result IS the validated result — sanitized of
+				// the stale error text and liveness class so no settlement verdict
+				// survives next to the evidence that supersedes it — with a typed
+				// completed terminal written atomically by the same append the
+				// admission path uses. The record keeps a receipt-shaped
+				// schemaVersion floor of 3 when it was not already 4.
+				const now = Date.now();
+				const supersedeResult: BackgroundDelegationResult = {
+					...input.validatedResult,
+				};
+				delete supersedeResult.error;
+				delete supersedeResult.workflowLaneFailureClass;
+				const terminal = buildTypedDelegationTerminal(
+					record,
+					'completed',
+					supersedeResult,
+					now,
+				);
+				const next: BackgroundDelegationRecord = {
+					...record,
+					schemaVersion: record.schemaVersion === 4 ? 4 : 3,
+					status: 'completed',
+					updatedAt: now,
+					result: supersedeResult,
+					terminalResult: terminal,
+					completedAt: terminal.recordedAt,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				outcome = {
+					status: 'superseded',
+					reason: `lane ${record.laneId ?? record.correlationId} superseded its stale/liveness terminal with validated rows`,
+				};
+			},
+		);
+		return outcome;
+	} catch (error) {
+		logger.warn(
+			`[background] supersedeStaleLivenessVerdictLane failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return {
+			status: 'refused',
 			reason: error instanceof Error ? error.message : String(error),
 		};
 	}
@@ -4121,6 +4406,46 @@ function findReceiptPublicationTarget(
 		if (count === 1) record = candidate;
 	}
 	return { count, record: count === 1 ? record : null };
+}
+
+/**
+ * Issue #3312 (AC15): the cross-lane finding-id ownership map for duplicate
+ * rejection at receipt publication. Siblings are every OTHER record (a
+ * different correlationId — the incoming record's own replay is already
+ * handled by `samePrReviewReceiptSemantics` before this runs) whose retained
+ * receipt carries the same workflowInstanceId. The receipt schema's id
+ * surface is `envelope.findings[].id` only (there is no candidates array),
+ * and both finding arrays are schema-bounded, so the scan is bounded by the
+ * record load every publish already performs. Returns the first incoming
+ * finding id a sibling receipt already owns, with the owning lane id for the
+ * refusal reason.
+ */
+function findCrossLaneFindingIdOwner(
+	records: readonly BackgroundDelegationRecord[],
+	incoming: BackgroundDelegationRecord,
+	receipt: PrReviewResultReceipt,
+): { findingId: string; ownerLaneId: string } | null {
+	const ownedByLane = new Map<string, string>();
+	for (const sibling of records) {
+		if (sibling.correlationId === incoming.correlationId) continue;
+		const siblingReceipt = recordedPrReviewResultReceipt(sibling);
+		if (!siblingReceipt) continue;
+		if (siblingReceipt.workflowInstanceId !== receipt.workflowInstanceId) {
+			continue;
+		}
+		for (const finding of siblingReceipt.envelope.findings) {
+			if (!ownedByLane.has(finding.id)) {
+				ownedByLane.set(finding.id, siblingReceipt.laneId);
+			}
+		}
+	}
+	for (const finding of receipt.envelope.findings) {
+		const ownerLaneId = ownedByLane.get(finding.id);
+		if (ownerLaneId !== undefined) {
+			return { findingId: finding.id, ownerLaneId };
+		}
+	}
+	return null;
 }
 
 function settlementProvenanceFor(

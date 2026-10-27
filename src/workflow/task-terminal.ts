@@ -1,5 +1,6 @@
 import { type Plan, TaskStatusSchema } from '../config/plan-schema.js';
 import {
+	externalProofCurrent,
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
 	withTaskEvidenceTransaction,
@@ -56,6 +57,7 @@ async function applyTerminalEvidence(
 					type: 'task_completed',
 					qaExempt: wal.qaExempt,
 					readOnlyNoMutation: wal.readOnlyNoMutation,
+					externalEvidence: wal.externalEvidence,
 					expectedGeneration: wal.generation,
 					transitionId: wal.transitionId,
 				}
@@ -152,6 +154,25 @@ async function recoverPreparedTaskTerminalWithPlanLock(
 			) {
 				await writeWal(walPath, { ...wal, state: 'ABORTED' });
 				return null;
+			}
+			if (wal.externalEvidence === true) {
+				// Predicate-(c) revalidation (issue #3422, 05-fix-plan.md §5): the
+				// cursor-stable digest is recomputed from the CURRENT plan task
+				// above, so a declaration edited inside the PREPARED window refuses
+				// here instead of forwarding a stale attestation. proofCurrent —
+				// not the initial-eligibility predicate — also admits the
+				// already-terminal duplicate shape handled below (R3F1).
+				if (
+					!externalProofCurrent(
+						{ title: plan.title, swarm: plan.swarm },
+						task,
+						evidence,
+					)
+				) {
+					throw new Error(
+						`TASK_TERMINAL_EXTERNAL_EVIDENCE_DIGEST_MISMATCH: ${walPath} records an external-evidence completion for task ${taskId}, but the current plan declaration no longer matches the attested declaration digest. Re-attest with /swarm attest ${taskId} (or re-plan the declaration), then re-run task-terminal recovery.`,
+					);
+				}
 			}
 			if (wal.readOnlyNoMutation === true && !evidenceAlreadyTerminal) {
 				let replayed: Awaited<ReturnType<typeof peekPlanFromLedger>>;
@@ -347,6 +368,7 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 		qaExempt: boolean;
 		preserveEvidence?: boolean;
 		readOnlyNoMutation?: boolean;
+		externalEvidence?: boolean;
 	};
 	planIdentityHash?: string;
 	planEpoch?: string;
@@ -402,6 +424,8 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 				existingWal.newPlanStatus === terminal.targetStatus &&
 				(existingWal.readOnlyNoMutation === true) ===
 					(terminal.readOnlyNoMutation === true) &&
+				(existingWal.externalEvidence === true) ===
+					(terminal.externalEvidence === true) &&
 				evidenceMatchesTerminal(evidence, existingWal)
 			) {
 				return {
@@ -475,6 +499,9 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 				qaExempt: terminal.qaExempt,
 				...(terminal.readOnlyNoMutation === true
 					? { readOnlyNoMutation: true }
+					: {}),
+				...(terminal.externalEvidence === true
+					? { externalEvidence: true }
 					: {}),
 				recordedAt: new Date().toISOString(),
 			};

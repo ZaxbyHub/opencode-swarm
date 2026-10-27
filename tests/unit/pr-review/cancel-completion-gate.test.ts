@@ -8,11 +8,20 @@
  * established.
  *
  * Pinned surfaces per case (stated explicitly per the deviation rule):
- *  (1) contract-terminal sixth + legacy policy → completePrWorkflow(INCOMPLETE)
- *      BLOCKS with the retryable-remainder refusal (naming the dimension and
- *      the retry budget) — the completion surface, before coverage finalization.
- *  (2) same shape with the legacy contract retry consumed → completePrWorkflow
- *      INCOMPLETE COMPLETES (the full artifact ladder is driven first).
+ *  (1) contract-terminal sixth + legacy policy → the write_pr_review_artifact
+ *      admission is REFUSED while the legacy contract retry budget remains
+ *      (#3312 AC10 supersedes #2971's admission-success pin here: retry-first
+ *      order, budget kept unconsumed, disclosure never written), and
+ *      completePrWorkflow(INCOMPLETE) still BLOCKS with the
+ *      retryable-remainder refusal (naming the dimension and the retry
+ *      budget) — the completion surface, before coverage finalization. The
+ *      dimension is undisclosed, so #3312 AC13's disclosed-tuple exclusion
+ *      does not mute the completion gate.
+ *  (2) same shape with the legacy contract retry consumed BEFORE the partial
+ *      write (#3312 AC10 supersedes #2971's write-then-consume order; the
+ *      unlaunched retry dispatch leaves the derived FAILED/contract entry
+ *      unchanged) → completePrWorkflow INCOMPLETE COMPLETES (the full
+ *      artifact ladder is driven first).
  *  (3) operator_cancelled sixth → write_pr_review_artifact admits INCOMPLETE
  *      with failure_class operator_cancelled (safeDetail names the operator,
  *      never host abandonment) AND completePrWorkflow INCOMPLETE completes.
@@ -210,6 +219,7 @@ async function establishFivePlusOne(unresolvedClass: UnresolvedClass): Promise<{
 
 interface PartialWriteResult {
 	success: boolean;
+	message?: string;
 	partial_base_coverage?: {
 		unresolved_dimensions: Array<{
 			dimension: string;
@@ -326,10 +336,21 @@ describe('PR_REVIEW completion retryable-remainder gate + operator_cancelled adm
 	test('contract-terminal sixth with budget left refuses INCOMPLETE completion', async () => {
 		const { missingDimension, records } =
 			await establishFivePlusOne('contract');
+		// #3312 AC10 supersedes the #2971 case-(1) admission-success pin: the
+		// artifact admission now refuses a contract-class partial disclosure
+		// while the legacy retry budget remains (retry-first order), so the
+		// budget stays unconsumed here and the disclosure is never written.
 		const admitted = await writePartial(records, [missingDimension]);
-		expect(admitted.success).toBe(true);
+		expect(admitted.success).toBe(false);
+		expect(admitted.message).toMatch(
+			/refused while contract retry budget remains/,
+		);
+		expect(admitted.message).toContain(missingDimension);
 		// Surface pinned: completePrWorkflow — the refusal fires before coverage
-		// finalization, naming the dimension and the retry budget.
+		// finalization, naming the dimension and the retry budget. The dimension
+		// is UNdisclosed (admission above was refused), so #3312 AC13's
+		// disclosed-tuple exclusion does not apply and the gate's
+		// retryable-remainder refusal still fires at completion.
 		let message = '';
 		try {
 			await completePrWorkflow(
@@ -356,11 +377,13 @@ describe('PR_REVIEW completion retryable-remainder gate + operator_cancelled adm
 	test('the same shape completes once the legacy contract retry is consumed', async () => {
 		const { missingDimension, records } =
 			await establishFivePlusOne('contract');
-		expect((await writePartial(records, [missingDimension])).success).toBe(
-			true,
-		);
-		// Consume the ONE legacy contract retry for the dimension (the entire
-		// legacy retry budget).
+		// #3312 AC10 supersedes the #2971 case-(2) write-then-consume order: the
+		// admission now refuses a contract-class disclosure with an unconsumed
+		// legacy budget, so the ONE contract retry for the dimension (the entire
+		// legacy retry budget) is consumed BEFORE the partial write. The derived
+		// FAILED/contract entry is unchanged by the unlaunched retry dispatch —
+		// its batch carries no delegation record, which reads as "never
+		// dispatched" — so admission still sees the same terminal settlement.
 		await enforcePrReviewBaseDimensions(
 			directory,
 			PR_ARTIFACT_SESSION_ID,
@@ -371,6 +394,9 @@ describe('PR_REVIEW completion retryable-remainder gate + operator_cancelled adm
 				prReviewContractRetry: true,
 				prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 			},
+		);
+		expect((await writePartial(records, [missingDimension])).success).toBe(
+			true,
 		);
 		await finishPartialLadder(records);
 		const status = await completePrWorkflow(

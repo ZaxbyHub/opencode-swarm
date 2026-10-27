@@ -182,16 +182,18 @@ describe('issue #2268 — /swarm recover command', () => {
 	test('unknown task id lists known tasks', async () => {
 		await beginRealDispatch('cmd-known');
 		const out = await handleRecoverCommand(directory, ['2.2']);
-		expect(out).toContain('No settlement WAL for task 2.2');
+		expect(out).toContain(
+			'No coder dispatch or settlement evidence was found for task 2.2',
+		);
 		expect(out).toContain('Known tasks: 1.1');
 	});
 
 	test('empty project with an explicit task_id reports the task-specific miss (PRR-014)', async () => {
 		const out = await handleRecoverCommand(directory, ['2.2']);
-		expect(out).toContain('No settlement WAL for task 2.2');
 		expect(out).toContain(
-			'no settlement WALs found in .swarm/coder-settlements/',
+			'No coder dispatch or settlement evidence was found for task 2.2',
 		);
+		expect(out).toContain('/swarm attest 2.2');
 	});
 
 	test('hostile WAL transitionId is sanitized in rendered output (PRR-001)', async () => {
@@ -297,8 +299,9 @@ describe('issue #2268 — /swarm recover command', () => {
 			const out = await handleRecoverCommand(directory, ['9.9']);
 
 			expect(out).toContain(
-				'No settlement WAL for task 9.9 (no settlement WALs found',
+				'No settlement WAL for task 9.9. Task-evidence exists',
 			);
+			expect(out).toContain('/swarm attest 9.9');
 			expect(out).toContain('## Wedged Stage A Repair');
 			expect(out).toContain('Task 9.9: Stage A repaired');
 			expect(out).toContain('Repaired 1 wedged task(s)');

@@ -3080,7 +3080,7 @@ export async function cleanupStandardWorktreeForCallId(
 		const retainedSession = ensureAgentSession(parentSessionID);
 		pushAdvisory(
 			retainedSession,
-			`STANDARD_WORKTREE_BRANCH_RETAINED: dispatch ${callID} removed worktree ${worktreePath} but retained branch ${branchName} (unstaged landing); the branch is the recovery backup until the landed changes are committed.`,
+			`STANDARD_WORKTREE_BRANCH_RETAINED: dispatch ${callID} removed worktree ${worktreePath} but retained branch ${branchName} as the recovery backup; the landed changes may be unstaged or committed.`,
 		);
 	} else {
 		try {

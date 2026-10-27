@@ -73,7 +73,9 @@ describe('defaults-flip upgrade path (#2504)', () => {
 		const flipFindings = result.findings.filter(
 			(f) => f.id === 'defaults-flip',
 		);
-		expect(flipFindings.length).toBe(2);
+		// #3313 added the third governed flip row (lane_liveness_watchdog.enabled,
+		// false → true) to DEFAULT_FLIPS; the count pins the full table shape.
+		expect(flipFindings.length).toBe(3);
 		const autoReviewRow = flipFindings.find((f) =>
 			f.path.includes('auto_review'),
 		);
@@ -87,6 +89,13 @@ describe('defaults-flip upgrade path (#2504)', () => {
 		expect(parallelRow).toBeDefined();
 		expect(parallelRow!.description).toContain(
 			'execution_profile.parallelization_enabled',
+		);
+		const watchdogRow = flipFindings.find((f) =>
+			f.path.includes('lane_liveness_watchdog'),
+		);
+		expect(watchdogRow).toBeDefined();
+		expect(watchdogRow!.description).toContain(
+			'lane_liveness_watchdog.enabled',
 		);
 	});
 

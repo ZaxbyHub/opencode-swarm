@@ -15,7 +15,11 @@
 // stubbed head/clean/revision reads and a mocked session ops client.
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as path from 'node:path';
-import { _test_exports as gateInternals } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	activatePrWorkflow,
+	_test_exports as gateInternals,
+	recordPrReviewValidationBatch,
+} from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
@@ -152,5 +156,113 @@ describe('dispatch_lanes critic agent admission (issue #3310 AC15)', () => {
 		const message = String(result.message);
 		expect(message).not.toContain('critic_finding_validator');
 		expect(message).not.toContain('uses invalid role');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Issue #3340 — the critic-role rule moves from the dispatch call site into
+// the boundaries that persist and settle verdicts, and the PR_FEEDBACK
+// closeout-critic predicate is aligned with it.
+// ---------------------------------------------------------------------------
+describe('critic admission at the gate boundary (issue #3340)', () => {
+	test('AC1 (gate-level, bypasses dispatch): recordPrReviewValidationBatch rejects a critic lane whose agent is critic_finding_validator', async () => {
+		// The role assertion runs before any state access, so a bare repository
+		// with no workflow bound is enough to prove the gate itself rejects.
+		await expect(
+			recordPrReviewValidationBatch(
+				directory,
+				'gate-level-critic-3340',
+				'critic',
+				[
+					{
+						laneId: 'gate-critic-lane',
+						workflowLane: 'gate-critic-lane',
+						reviewItemIds: ['c1'],
+						agent: 'critic_finding_validator',
+					},
+				],
+				{ batchId: 'gate-critic-batch', prHeadSha: 'abc123' },
+			),
+		).rejects.toThrow(/must use the critic agent/);
+	});
+
+	test('AC1 (gate-level, bypasses dispatch): a critic lane with no declared agent fails closed', async () => {
+		await expect(
+			recordPrReviewValidationBatch(
+				directory,
+				'gate-level-critic-3340',
+				'critic',
+				[
+					{
+						laneId: 'gate-critic-lane',
+						workflowLane: 'gate-critic-lane',
+						reviewItemIds: ['c1'],
+					},
+				],
+				{ batchId: 'gate-critic-batch', prHeadSha: 'abc123' },
+			),
+		).rejects.toThrow(/must declare its agent/);
+	});
+});
+
+describe('PR_FEEDBACK closeout-critic role predicate (issue #3340 AC2)', () => {
+	const SESSION = 'feedback-critic-predicate-3340';
+
+	test("rejects a closeout-critic lane whose agent is 'critic_finding_validator'", async () => {
+		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+			prHeadSha: 'abc123',
+		});
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-feedback:closeout-critic',
+				pr_head_sha: 'abc123',
+				max_concurrent: 1,
+				lanes: [
+					{
+						id: 'closeout-critic-lane',
+						agent: 'critic_finding_validator',
+						prompt: 'Challenge the closeout evidence for FB-001.',
+						workflow_lane: 'closeout-critic',
+						feedback_item_ids: ['FB-001'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: SESSION },
+		);
+		expect(result.success).toBe(false);
+		const message = String(result.message);
+		expect(message).toContain(
+			'BLOCKED: PR_FEEDBACK closeout-critic requires workflow_lane "closeout-critic" and role "critic"',
+		);
+	});
+
+	test("the base 'critic' agent is not swept into the rejection", async () => {
+		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+			prHeadSha: 'abc123',
+		});
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-feedback:closeout-critic',
+				pr_head_sha: 'abc123',
+				max_concurrent: 1,
+				lanes: [
+					{
+						id: 'closeout-critic-lane',
+						agent: 'critic',
+						prompt: 'Challenge the closeout evidence for FB-001.',
+						workflow_lane: 'closeout-critic',
+						feedback_item_ids: ['FB-001'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: SESSION },
+		);
+		// Blocked later by the missing feedback inventory / Stage A state on
+		// this fresh workflow — never by the role predicate.
+		expect(result.success).toBe(false);
+		const message = String(result.message);
+		expect(message).not.toContain('requires workflow_lane');
 	});
 });

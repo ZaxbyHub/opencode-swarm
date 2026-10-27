@@ -309,12 +309,19 @@ jobs:
   quality:
     needs: [detect-release, release-owner-guard]
     # Keep the required quality context present even when the guard fails, so
-    # its status cannot be hidden behind a skipped dependent job. The first
+    # its status cannot be hidden behind a skipped dependent job. The guard
     # step below turns either failed/skipped dependency into a failed quality
     # context before the release fast path can skip the expensive checks.
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
+      # Self-hosted runners persist between jobs; point the temp root at the
+      # per-job RUNNER_TEMP (emptied by the runner each job) so files left by
+      # an earlier job, such as a stray .swarm directory, cannot leak in.
+      - name: Isolate temp dir on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"; echo "BUN_CACHE=$RUNNER_TEMP/bun-cache" >> "$GITHUB_ENV"
       - name: Release-owner guard dependency check
         if: ${{ always() && !cancelled() }}
         shell: bash
@@ -330,15 +337,20 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true'
         with:
           fetch-depth: 0
+      - name: Use the preinstalled Bun when it matches the pin
+        if: needs.detect-release.outputs.is-release != 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: bun --version 2>/dev/null | grep -qx "1.3.13" && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT"
+        id: bun-present
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        if: needs.detect-release.outputs.is-release != 'true'
+        if: needs.detect-release.outputs.is-release != 'true' && steps.bun-present.outputs.need != 'false'
         with:
           bun-version: "1.3.13"
       - name: Cache bun dependencies
         if: needs.detect-release.outputs.is-release != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.bun/install/cache
+          path: ${{ env.BUN_CACHE || '~/.bun/install/cache' }}
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - name: Install dependencies
@@ -520,20 +532,32 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ github.event_name == 'merge_group' && matrix.os == 'ubuntu-latest' && fromJSON('["self-hosted","Linux","X64"]') || github.event_name == 'merge_group' && matrix.os == 'macos-latest' && fromJSON('["self-hosted","macOS","ARM64"]') || matrix.os }}
     timeout-minutes: 10
     steps:
+      # Self-hosted runners persist between jobs; point the temp root at the
+      # per-job RUNNER_TEMP (emptied by the runner each job) so files left by
+      # an earlier job, such as a stray .swarm directory, cannot leak in.
+      - name: Isolate temp dir on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"; echo "BUN_CACHE=$RUNNER_TEMP/bun-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+      - name: Use the preinstalled Bun when it matches the pin
+        if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: bun --version 2>/dev/null | grep -qx "1.3.13" && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT"
+        id: bun-present
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+        if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && steps.bun-present.outputs.need != 'false'
         with:
           bun-version: "1.3.13"
       - name: Cache bun dependencies
         if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.bun/install/cache
+          path: ${{ env.BUN_CACHE || '~/.bun/install/cache' }}
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - name: Install dependencies
@@ -562,6 +586,12 @@ jobs:
       matrix:
         os: ${{ (github.event_name == 'merge_group' || needs.detect-paths.outputs.touches-platform-paths == 'true') && fromJSON('["ubuntu-latest","macos-latest","windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
         shard: [1, 2, 3, 4, 5, 6]
+    # The unit matrix stays on GitHub-hosted runners for every OS: the
+    # self-hosted Linux hosts ran the shards at 29-40+ min against this job's
+    # 40-minute ceiling (two of six were killed at the limit in the first
+    # routed queue run), and the self-hosted macs fail a broad class of
+    # subprocess-spawning suites (children exit before the bound fires).
+    # Revisit only after both are root-caused.
     runs-on: ${{ matrix.os }}
     # 40m: was 90m before sharding (PR #1245). Issue #1778 H4 wired the
     # previously-orphaned src/** + tests/adversarial trees into this job (~1666
@@ -583,7 +613,7 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.bun/install/cache
+          path: ${{ env.BUN_CACHE || '~/.bun/install/cache' }}
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
@@ -894,7 +924,7 @@ jobs:
           echo "All unit matrix cells that ran succeeded."
       - name: Download unit validation reports
         if: always()
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: repository-validation-unit-*
           path: unit-reports
@@ -976,14 +1006,26 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
-    runs-on: ubuntu-latest
-    # 30m: a typical shard is ~12 min (cached install + build + ~278 per-file
-    # coverage runs at ~1.6 s each); the per-file retry budget (2 retries at up
-    # to 60 s each) can add minutes on a flaky window, and a false-positive
-    # shard cancellation costs the whole merge group a requeue — headroom is
-    # cheaper than that (issue #2341).
-    timeout-minutes: 30
+    runs-on: ${{ github.event_name == 'merge_group' && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
+    # 45m: a typical shard is ~24 min on GitHub-hosted runners and the
+    # physical self-hosted host; the self-hosted VM's 8 concurrent slots ran
+    # shards past the old 30-minute ceiling (4 of 6 killed at exactly 30m in
+    # the first fully-routed batch, cancelling the group). 45m covers a ~2x
+    # slot slowdown against the host instances; the merge queue's
+    # check_response_timeout is 90m so worst-case shard+aggregator stays well
+    # inside it. The per-file retry budget (2 retries at up to 60 s each) can
+    # add minutes on a flaky window, and a false-positive shard cancellation
+    # costs the whole merge group a requeue — headroom is cheaper than that
+    # (issue #2341).
+    timeout-minutes: 45
     steps:
+      # Self-hosted runners persist between jobs; point the temp root at the
+      # per-job RUNNER_TEMP (emptied by the runner each job) so files left by
+      # an earlier job, such as a stray .swarm directory, cannot leak in.
+      - name: Isolate temp dir on self-hosted runners
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"; echo "BUN_CACHE=$RUNNER_TEMP/bun-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
         with:
@@ -993,15 +1035,20 @@ jobs:
           # fail only in this merge-group path even though the candidate tree is
           # correct.
           fetch-depth: 0
+      - name: Use the preinstalled Bun when it matches the pin
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: bun --version 2>/dev/null | grep -qx "1.3.13" && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT"
+        id: bun-present
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && steps.bun-present.outputs.need != 'false'
         with:
           bun-version: "1.3.13"
       - name: Cache bun dependencies
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.bun/install/cache
+          path: ${{ env.BUN_CACHE || '~/.bun/install/cache' }}
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - name: Install dependencies
@@ -1030,7 +1077,7 @@ jobs:
           bash scripts/ci/run-coverage-gate.sh
       - name: Upload shard coverage report
         if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
 
         with:
           name: coverage-shard-${{ matrix.shard }}
@@ -1051,7 +1098,7 @@ jobs:
       # collide on extraction.
       - name: Upload coverage flake annotations
         if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
 
         with:
           name: flake-annotations-coverage-shard-${{ matrix.shard }}
@@ -1091,13 +1138,25 @@ jobs:
   coverage:
     needs: [coverage-shard, detect-release]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
+      # Self-hosted runners persist between jobs; point the temp root at the
+      # per-job RUNNER_TEMP (emptied by the runner each job) so files left by
+      # an earlier job, such as a stray .swarm directory, cannot leak in.
+      - name: Isolate temp dir on self-hosted runners
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"; echo "BUN_CACHE=$RUNNER_TEMP/bun-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+      - name: Use the preinstalled Bun when it matches the pin
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: bun --version 2>/dev/null | grep -qx "1.3.13" && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT"
+        id: bun-present
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && steps.bun-present.outputs.need != 'false'
         with:
           bun-version: "1.3.13"
       # merge-lcov.mjs imports only node: builtins — no bun install, no build.
@@ -1114,7 +1173,7 @@ jobs:
           echo "All coverage shard matrix cells that ran succeeded."
       - name: Download shard reports
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: coverage-shard-*
           path: shard-reports
@@ -1155,7 +1214,7 @@ jobs:
           echo "Coverage gate passed: ${coverage_value}% >= ${threshold}%"
       - name: Upload coverage report
         if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
 
         with:
           name: coverage-report
@@ -1176,20 +1235,32 @@ jobs:
   # tests/unit/scripts/ci/ci-merge-queue-critical-path.test.ts pins this.
   integration:
     needs: [detect-release, quality]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
+      # Self-hosted runners persist between jobs; point the temp root at the
+      # per-job RUNNER_TEMP (emptied by the runner each job) so files left by
+      # an earlier job, such as a stray .swarm directory, cannot leak in.
+      - name: Isolate temp dir on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"; echo "BUN_CACHE=$RUNNER_TEMP/bun-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+      - name: Use the preinstalled Bun when it matches the pin
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: bun --version 2>/dev/null | grep -qx "1.3.13" && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT"
+        id: bun-present
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && steps.bun-present.outputs.need != 'false'
         with:
           bun-version: "1.3.13"
       - name: Cache bun dependencies
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.bun/install/cache
+          path: ${{ env.BUN_CACHE || '~/.bun/install/cache' }}
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - name: Install dependencies
@@ -1227,7 +1298,7 @@ jobs:
                 find test -name '*.test.ts' -type f
               fi
             fi
-          } | sort > "$tmpdir/int-all-tests.txt"
+          } | LC_ALL=C sort > "$tmpdir/int-all-tests.txt"
           if [ ! -s "$tmpdir/int-all-tests.txt" ]; then
             echo "::error::Integration discovery produced no test files"
             exit 1
@@ -1235,8 +1306,8 @@ jobs:
           # Drop known-red pre-existing failures (issue #1705) — same rationale
           # as the unit/coverage jobs' quarantine lists. See
           # scripts/ci/quarantined-integration-tests.txt for the tracked list.
-          grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-integration-tests.txt | sort > "$tmpdir/int-quarantined.txt" || true
-          comm -23 "$tmpdir/int-all-tests.txt" "$tmpdir/int-quarantined.txt" > "$tmpdir/int-gated-tests.txt"
+          grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-integration-tests.txt | LC_ALL=C sort > "$tmpdir/int-quarantined.txt" || true
+          LC_ALL=C comm -23 "$tmpdir/int-all-tests.txt" "$tmpdir/int-quarantined.txt" > "$tmpdir/int-gated-tests.txt"
           item_index=0
           while IFS= read -r f; do
             if [ ! -f "$f" ]; then
@@ -1292,7 +1363,7 @@ jobs:
           exit $failed
       - name: Upload repository validation reports
         if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
 
         with:
           name: repository-validation-integration
@@ -1302,12 +1373,24 @@ jobs:
   # Release-please PRs skip package-check (version bumps don't change the bundle).
   package-check:
     needs: [detect-release, quality]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
+      # Self-hosted runners persist between jobs; point the temp root at the
+      # per-job RUNNER_TEMP (emptied by the runner each job) so files left by
+      # an earlier job, such as a stray .swarm directory, cannot leak in.
+      - name: Isolate temp dir on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"; echo "BUN_CACHE=$RUNNER_TEMP/bun-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+      - name: Use the preinstalled Bun when it matches the pin
+        if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: bun --version 2>/dev/null | grep -qx "1.3.13" && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT"
+        id: bun-present
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+        if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && steps.bun-present.outputs.need != 'false'
         with:
           bun-version: "1.3.13"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -1318,7 +1401,7 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.bun/install/cache
+          path: ${{ env.BUN_CACHE || '~/.bun/install/cache' }}
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - name: Install dependencies
@@ -1334,19 +1417,31 @@ jobs:
   # Release-please PRs skip security tests (version bumps don't affect security).
   security:
     needs: [detect-release, quality]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     steps:
+      # Self-hosted runners persist between jobs; point the temp root at the
+      # per-job RUNNER_TEMP (emptied by the runner each job) so files left by
+      # an earlier job, such as a stray .swarm directory, cannot leak in.
+      - name: Isolate temp dir on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"; echo "BUN_CACHE=$RUNNER_TEMP/bun-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+      - name: Use the preinstalled Bun when it matches the pin
+        if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: bun --version 2>/dev/null | grep -qx "1.3.13" && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT"
+        id: bun-present
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+        if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && steps.bun-present.outputs.need != 'false'
         with:
           bun-version: "1.3.13"
       - name: Cache bun dependencies
         if: needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.bun/install/cache
+          path: ${{ env.BUN_CACHE || '~/.bun/install/cache' }}
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - name: Install dependencies
@@ -1378,7 +1473,7 @@ jobs:
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.bun/install/cache
+          path: ${{ env.BUN_CACHE || '~/.bun/install/cache' }}
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - name: Install dependencies
@@ -1475,7 +1570,7 @@ jobs:
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.bun/install/cache
+          path: ${{ env.BUN_CACHE || '~/.bun/install/cache' }}
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - name: Install dependencies
@@ -1494,6 +1589,32 @@ jobs:
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
         with:
           node-version: "22"
+      - name: v2-host-smoke — dual-host v2 lane (issue #2910)
+        id: v2-host-smoke
+        # Three legs, gated exactly like the sibling repro steps (the repo's
+        # every-PR lane IS the merge-queue lane):
+        #   1. node scripts/repro-2910-v2.mjs — Node-side DUAL-SHAPE + bounded
+        #      setup() timing: asserts the default export carries { id,
+        #      server, setup } and that setup() resolves within the same
+        #      deadline class as repro-704 (min-of-2 reps <= 400 ms).
+        #   2. node scripts/repro-2910-v2-host.mjs — pinned REAL v2 host
+        #      (npm @opencode/cli@2.0.29 installed into a temp prefix): an
+        #      AUTH-FREE load proof — the loading-plugin line, the swarm
+        #      banner, >=1 agent/command registration event, and .swarm/
+        #      materialization (no model-reply assertion; CI has no
+        #      credentials).
+        #   3. bun test tests/unit/host/v2/guidance-parity-fixture-2910.test.ts
+        #      — the frozen v1/v2 guidance-parity fixture leg.
+        # The repro scripts auto-build dist when missing (bun is installed
+        # earlier in this job); the host script npm-installs the pinned CLI
+        # into a temp prefix itself.
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/repro-2910-v2.mjs
+          node scripts/repro-2910-v2-host.mjs
+          bun test tests/unit/host/v2/guidance-parity-fixture-2910.test.ts --timeout 120000
       - name: Issue #704 repro — Desktop init under Node
         # Loads the compiled dist/ under Node (the runtime OpenCode Desktop's
         # sidecar uses on macOS) and asserts the plugin's `server()` resolves

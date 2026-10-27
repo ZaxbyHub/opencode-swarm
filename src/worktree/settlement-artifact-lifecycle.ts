@@ -2,13 +2,14 @@ import { lstat, opendir, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
+import { advisoryWarn } from '../services/warning-buffer.js';
 import { assertProjectRoot } from '../utils/project-boundary.js';
 import type { CoderSettlementWal } from '../workflow/workflow-wal-schema.js';
 
 const MAX_INVENTORY_ENTRIES = 200;
 const LIFECYCLE_TARGET = 'locks/coder-settlement-artifacts';
 
-export class SettlementArtifactLifecycleError extends Error {
+class SettlementArtifactLifecycleError extends Error {
 	constructor(
 		readonly code:
 			| 'CODER_SETTLEMENT_ARTIFACT_PROTECTED'
@@ -20,7 +21,7 @@ export class SettlementArtifactLifecycleError extends Error {
 	}
 }
 
-export function isSettlementArtifactLifecycleError(
+function isSettlementArtifactLifecycleError(
 	error: unknown,
 ): error is SettlementArtifactLifecycleError {
 	return error instanceof SettlementArtifactLifecycleError;
@@ -105,11 +106,22 @@ export async function withSettlementArtifactLifecycle<T>(
 			`cannot acquire lifecycle admission (${error instanceof Error ? error.message : String(error)})`,
 		);
 	}
-	if (!admission.acquired) throw uncertain('lifecycle admission is busy');
+	if (!admission.acquired)
+		throw uncertain(
+			'lifecycle admission is busy: a concurrent removal or dispatch holds the lifecycle lock; retry once it completes',
+		);
 	try {
 		return await operation();
 	} finally {
-		await admission.lock._release?.();
+		try {
+			await admission.lock._release?.();
+		} catch (error) {
+			// A release failure must not replace the operation's result or its
+			// original error; surface it as an advisory instead.
+			advisoryWarn(
+				`[worktree] settlement artifact lifecycle lock release failed (${error instanceof Error ? error.message : String(error)})`,
+			);
+		}
 	}
 }
 
@@ -168,11 +180,14 @@ export async function assertSettlementArtifactsRemovable(
 		while (true) {
 			const entry = await handle.read();
 			if (!entry) break;
-			if (++count > MAX_INVENTORY_ENTRIES)
-				throw uncertain('settlement inventory exceeds 200 entries');
 			if (entry.isSymbolicLink())
 				throw uncertain('settlement inventory contains a symbolic entry');
+			// Only settlement records count toward the cap; other entries are ignored.
 			if (!entry.name.endsWith('.json')) continue;
+			if (++count > MAX_INVENTORY_ENTRIES)
+				throw uncertain(
+					`settlement inventory exceeds ${MAX_INVENTORY_ENTRIES} records; run \`/swarm close\` to archive settled coder settlements`,
+				);
 			const filePath = path.join(inventoryPath, entry.name);
 			const stat = await _internals.lstat(filePath);
 			if (!stat.isFile() || stat.isSymbolicLink())
@@ -180,6 +195,15 @@ export async function assertSettlementArtifactsRemovable(
 			const wal = await _internals.readWal(filePath, entry.name.slice(0, -5));
 			if (!wal)
 				throw uncertain('settlement record disappeared during inventory');
+			// The record must be the same file after the read as before it.
+			const after = await _internals.lstat(filePath);
+			if (
+				after.dev !== stat.dev ||
+				after.ino !== stat.ino ||
+				after.size !== stat.size ||
+				after.mtimeMs !== stat.mtimeMs
+			)
+				throw uncertain('settlement record changed during inspection');
 			if (await matchesPendingWal(wal, target, targetPath)) {
 				throw new SettlementArtifactLifecycleError(
 					'CODER_SETTLEMENT_ARTIFACT_PROTECTED',

@@ -131,4 +131,52 @@ describe('Plugin TUI safety', () => {
 		expect(source).toContain('intentionally always emitted as raw');
 		expect(rawConsoleViolations(source)).toEqual([]);
 	});
+
+	test('init path (#3405): ownership hints carry no raw console leg and keep their advisory legs', () => {
+		const source = readRepoFile('src/index.ts');
+		// Statement-anchored absence pin: a comment naming the call cannot
+		// satisfy it. The scan covers EVERY console method (warn, error,
+		// log, info, debug, trace — debug and trace are NOT covered by the
+		// repo's console.(warn|error|log) rationale scan, and under the
+		// Node sidecar console.trace writes to stderr), the
+		// bracket-notated form, and both raw process streams, in the
+		// `if (...)` / trailing-comment / multi-line call shapes.
+		// Residual (disclosed): this SOURCE scan cannot see an emitter whose
+		// method is reached indirectly — an aliased binding (`const w =
+		// console.warn; w(hint)`) or a bracket-notated process stream
+		// (`process["stdout"]["write"](hint)`). The boot-suite capture is
+		// the backstop for an alias bound at CALL time; an IMPORT-time
+		// binding (captured before the capture installs) defeats both
+		// layers, and no test can observe it.
+		const RAW_HINT_EMITTER =
+			/(?:console\.\w+|console\s*\[\s*['"](?:warn|error|log|info|debug|trace)['"]\s*\]|process\.(?:stdout|stderr)\.write)\s*\([\s\S]{0,240}?\b(?:redirectHint|failClosedHint)\b/;
+		expect(RAW_HINT_EMITTER.test(source)).toBe(false);
+		// Retention: the buffered advisory legs must survive any future edit
+		// that touches these branches (partial-deletion mutant must fail).
+		expect(/^\s*advisoryWarn\(redirectHint\);/m.test(source)).toBe(true);
+		expect(/^\s*advisoryWarn\(failClosedHint\);/m.test(source)).toBe(true);
+	});
+
+	test('init path (#3405): the version banner warn exists exactly once and is gated by the opt-in env var', () => {
+		const source = readRepoFile('src/index.ts');
+		const lines = source.split(/\r?\n/);
+		const bannerWarnLines: number[] = [];
+		for (let i = 0; i < lines.length; i += 1) {
+			if (/^\s*console\.warn\(/.test(lines[i]) && /running v/.test(lines[i])) {
+				bannerWarnLines.push(i);
+			}
+		}
+		// The opt-in leg legitimately exists — this is a block-aware pin, not
+		// an absence check.
+		expect(bannerWarnLines).toHaveLength(1);
+		const windowStart = Math.max(0, bannerWarnLines[0] - 8);
+		const gateWindow = lines.slice(windowStart, bannerWarnLines[0]).join('\n');
+		// Statement-anchored: the gate must appear as CODE. A comment that
+		// merely names the env var cannot satisfy this pattern.
+		expect(
+			/^\s*if\s*\(\s*process\.env\.OPENCODE_SWARM_VERSION_BANNER\s*===\s*'1'\s*\)\s*\{\s*$/m.test(
+				gateWindow,
+			),
+		).toBe(true);
+	});
 });

@@ -300,6 +300,7 @@ describe('order_agreement authority cross-check (issue #2906, plan R1)', () => {
 			[
 				{
 					laneId: 'oa-w4-critic',
+					agent: 'critic',
 					workflowLane: 'oa-w4-critic',
 					reviewItemIds: criticItems,
 				},

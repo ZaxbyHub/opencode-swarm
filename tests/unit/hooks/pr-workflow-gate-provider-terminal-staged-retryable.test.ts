@@ -36,10 +36,12 @@ import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js'
 // dimension whose ONLY failure is the provider-terminal record (classless at
 // base; derived class 'resource' after the fix) flows through completion as a
 // TYPED resource failure:
-//   * while retry budget REMAINS (attempts 0 of 3), completion surfaces the
-//     dimension through the retryable-remainder refusal naming
-//     `${dimension} (resource)` — the staged policy treats resource-class
-//     remainders as eligible retryable work;
+//   * #3312 AC13 supersedes #3311 AC27's budget-available refusal pin: once
+//     the dimension is ADMITTED through the typed-resource disclosure, the
+//     retryable-remainder gate no longer re-demands it at completion (that
+//     re-demand was the F-class wedge #3312 closes) — the completion runs to
+//     'completed' with no refusal. The typed-resource ADMISSION assertions
+//     (the discriminating surface of #3311 AC27) are retained below.
 //   * once the retry budget is CONSUMED (attempts 3 of 3), a PARTIAL
 //     INCOMPLETE completion completes without any
 //     "lacks a typed terminal failure" throw.
@@ -355,12 +357,12 @@ async function finishPartialLadder(
 }
 
 describe('AC27: provider-terminal dimension is retryable-class resource under the staged policy', () => {
-	test('retry budget available: completion blocks on the retryable remainder naming the dimension as (resource)', async () => {
+	test('retry budget available: a disclosed typed-resource dimension completes instead of re-demanding a retry', async () => {
 		const { missingDimension, records } =
 			await establishFivePlusOneProviderTerminal();
 		const admitted = await writePartial(records, [missingDimension]);
-		// RED at base: admission refuses the classless provider-terminal
-		// dimension with the typed-terminal-failure BLOCKED message.
+		// Typed-resource admission assertions (the discriminating #3311 AC27
+		// surface, retained through the #3312 supersession).
 		expect(
 			admitted.success,
 			`admission must accept the provider-terminal dimension; writer said: ${admitted.message ?? JSON.stringify(admitted)}`,
@@ -373,8 +375,9 @@ describe('AC27: provider-terminal dimension is retryable-class resource under th
 		await finishPartialLadder(records);
 		await seedStagedResilience(missingDimension, 0);
 		let message = '';
+		let status: string | undefined;
 		try {
-			await completePrWorkflow(
+			status = await completePrWorkflow(
 				directory,
 				PR_ARTIFACT_SESSION_ID,
 				'PR_REVIEW',
@@ -384,10 +387,15 @@ describe('AC27: provider-terminal dimension is retryable-class resource under th
 		} catch (error) {
 			message = error instanceof Error ? error.message : String(error);
 		}
-		// Post-fix pin: the retryable-remainder refusal names the dimension with
-		// its derived class — `${dimension} (resource)` — never a classless form.
-		expect(message).toMatch(/refused while eligible retryable work remains/);
-		expect(message).toContain(`${missingDimension} (resource)`);
+		// #3312 AC13 supersedes #3311 AC27's budget-available refusal pin: the
+		// dimension is covered by the ADMITTED typed-resource disclosure, so
+		// the retryable-remainder gate no longer re-demands it (the C13 shape,
+		// pr-review-partial-disclosure-skips-retry-demand.test.ts) — the
+		// fully driven ladder completes instead of throwing.
+		expect(message).not.toMatch(
+			/refused while eligible retryable work remains/,
+		);
+		expect(status).toBe('completed');
 		expect(message).not.toMatch(/lacks a typed terminal failure/);
 	});
 

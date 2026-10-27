@@ -34,6 +34,7 @@ import {
 	findByBatchIdDetailed,
 	findByCorrelationIdDetailed,
 	recordPendingDelegationDetailed,
+	supersedeStaleLivenessVerdictLane,
 } from '../background/pending-delegations.js';
 import {
 	encodePrReviewCollectionReceiptFooter,
@@ -101,6 +102,7 @@ import {
 	PR_REVIEW_MICRO_LANE_FLOORS,
 	PR_WORKFLOW_PROBE_SKIPPED_NO_BUDGET_REASON,
 	type PrReviewDepthTier,
+	type PrReviewLaneValidationFailure,
 	PrReviewResilienceCircuitOpenError,
 	PrReviewResilienceRetryExhaustedError,
 	type PrReviewVerdictCollectionReceipt,
@@ -111,6 +113,7 @@ import {
 	recordPrReviewValidationBatch,
 	rollbackPrReviewBaseAdmissionIfUnlaunched,
 	rollbackPrReviewValidationBatchIfUnlaunched,
+	validateExactStructuredReceiptCoverage,
 	validatePrReviewDiscoveryLaneCompletion,
 	validatePrWorkflowTransportRecovery,
 } from '../hooks/pr-workflow-gate.js';
@@ -1084,6 +1087,7 @@ export const _internals: {
 	resolvePrWorkflowRevisionDigestAsync: typeof resolvePrWorkflowRevisionDigestAsync;
 	resolveExactMergeBaseAsync: typeof resolveExactMergeBaseAsync;
 	validatePrWorkflowTransportRecovery: typeof validatePrWorkflowTransportRecovery;
+	validateExactStructuredReceiptCoverage: typeof validateExactStructuredReceiptCoverage;
 	now: () => number;
 	sleep: (ms: number) => Promise<void>;
 } = {
@@ -1096,6 +1100,7 @@ export const _internals: {
 	resolvePrWorkflowRevisionDigestAsync,
 	resolveExactMergeBaseAsync,
 	validatePrWorkflowTransportRecovery,
+	validateExactStructuredReceiptCoverage,
 	now: () => Date.now(),
 	sleep,
 };
@@ -1754,6 +1759,10 @@ export async function executeDispatchLanesAsync(
 					workflowLane: lane.workflow_lane,
 					reviewItemIds: lane.review_item_ids,
 					ownedWorkflowLanes: lane.owned_workflow_lanes,
+					// Issue #3340 AC1: thread the declared agent so the gate
+					// recorder can assert the critic-role rule itself instead
+					// of trusting this call site (#3310).
+					agent: lane.agent,
 				}));
 				const depthTier: PrReviewDepthTier = gateState.prReviewDepthTier ?? 'L';
 				if (parsed.data.mode === 'swarm-pr-review:base') {
@@ -2015,6 +2024,11 @@ export async function executeDispatchLanesAsync(
 							batchId,
 							prHeadSha: headSha,
 							expectedPresentationOrder: prReviewPresentationOrder,
+							// Issue #3340 AC1: resolve declared lane agents through
+							// the same registry this call site's admission loop
+							// uses, so the gate's critic-role assertion reaches the
+							// identical verdict for prefixed generated names.
+							generatedAgentNames: swarmState.generatedAgentNames,
 						},
 					);
 				} else {
@@ -2083,12 +2097,14 @@ export async function executeDispatchLanesAsync(
 							: phase === 'closeout-critic'
 								? 'critic'
 								: 'reviewer';
-					if (
-						lane.workflow_lane !== phase ||
-						(expectedRole === 'critic'
-							? !role.startsWith('critic')
-							: role !== expectedRole)
-					) {
+					// Issue #3340 AC2 (recorded decision): closeout-critic requires
+					// the role to be EXACTLY `critic` — aligned with the PR_REVIEW
+					// critic rule (#3310). The pre-#3340 predicate accepted any
+					// role starting with `critic`, but the closeout gate settles on
+					// one [CLOSEOUT-CRITIC] verdict row per feedback item, the same
+					// row-emission contract the other critic-family agents cannot
+					// produce under their own output contracts.
+					if (lane.workflow_lane !== phase || role !== expectedRole) {
 						throw new Error(
 							`BLOCKED: PR_FEEDBACK ${phase} requires workflow_lane "${phase}" and role "${expectedRole}"`,
 						);
@@ -2318,6 +2334,12 @@ export async function executeCollectLaneResults(
 	// wrapped promise would let one starved lane poison every other lane in the
 	// invocation. Each lane wraps the shared promise in its OWN deadline instead.
 	const revisionSnapshots = new Map<string, Promise<string | null>>();
+	// Issue #3312 (AC32): invocation-local supersession-scan bookkeeping. Each
+	// terminal stale/liveness reviewer/critic record gets at most ONE
+	// transcript-fetch attempt per collect invocation, so a `wait: true` poll
+	// loop never re-spends host calls on a record this invocation already
+	// scanned (a later invocation re-evaluates with fresh eyes).
+	const supersessionScannedCorrelationIds = new Set<string>();
 
 	const session = _internals.getSessionOps();
 	if (!session || typeof session.messages !== 'function') {
@@ -2393,6 +2415,10 @@ export async function executeCollectLaneResults(
 		// live: a pass where every record is already terminal (repeat collects
 		// served from the durable delivery cache) must spend ZERO host calls,
 		// so the batched status probe is skipped for it (wait-budget contract).
+		// Deliberate exception (issue #3312): the post-collect supersession
+		// scan below re-scans unscanned stale/liveness verdict lanes once per
+		// invocation even on an all-terminal pass — its transcript fetches are
+		// the one sanctioned host spend for an otherwise terminal batch.
 		if (
 			records.some(
 				(record) => record.status === 'pending' || record.status === 'running',
@@ -2417,6 +2443,21 @@ export async function executeCollectLaneResults(
 			settleFailureLogs,
 			revisionSnapshots,
 		);
+		// Issue #3312 (AC32): after the active-record pass, scan the terminal
+		// stale/liveness reviewer/critic records collectOnce filtered OUT — a
+		// lane the sweep killed as liveness-dead may have since produced a
+		// fully-valid transcript, and the validated rows are claimable evidence
+		// the run should not lose. Bounded by the same deadline and one attempt
+		// per record per invocation.
+		await supersedeStaleLivenessVerdictLanesFromCollect({
+			session,
+			directory,
+			records,
+			deadline,
+			hostTimeouts,
+			revisionSnapshots,
+			scannedCorrelationIds: supersessionScannedCorrelationIds,
+		});
 		await sweepStaleAsyncLaneRecords(
 			session,
 			directory,
@@ -3271,6 +3312,120 @@ async function collectOnce(
 			}
 			continue;
 		}
+		// Issue #3312/#3313 (AC28/AC29): a record that already carries the child's
+		// exactly-once structured result receipt holds durable settlement proof —
+		// it must not wait for a terminal transcript boundary (or the 30-minute
+		// stale sweep) when the fetched window has no assistant text. Settle
+		// straight from the receipt through the #2865 exact-coverage validation;
+		// an unbound receipt (foreign laneId) keeps the lane pending — never a
+		// receipt-launders settle. The settle is a DIRECT typed transition, NOT
+		// settleCollectedLane: this shape has no transcript text, so a receipt
+		// settle that declines falls back to the ordinary empty-text logic below
+		// instead. A lane WITH good transcript text skips this branch entirely
+		// and goes through settleCollectedLane, whose #2865 re-read branch
+		// re-adopts the receipt and credits it (feedback F1: the old
+		// `readiness === 'unknown'` preemption stole that ordinary credit path).
+		if (record.result?.prReviewResultReceipt && !transcript.text) {
+			const receiptSettled = await settleCollectedLaneFromReceipt({
+				directory,
+				record,
+				deadline,
+				hostTimeouts,
+				revisionSnapshots,
+				revisionDigestBudgetMs: laneBudgets.revisionDigestBudgetMs,
+				settleFailureLogs,
+			});
+			// Feedback F1: only an ACCEPTED receipt settle that actually landed is
+			// terminal for this pass. A rejected/absent validation (unbound or
+			// non-discovery mode) or a settle that did not land falls through to
+			// the ordinary idle/empty-text logic below — a declined settle must no
+			// longer suppress the ordinary path.
+			if (receiptSettled) continue;
+		}
+		// Issue #3313 (AC30/AC31): a lane whose window holds NO assistant text is
+		// provably finished when the host affirmatively reports idle, or the
+		// transcript itself carries terminal assistant proof (finite completedAt,
+		// terminal finish, no error). Settle it NOW with the typed 'liveness'
+		// class — the same class the idle stale sweep arm assigns — instead of
+		// wedging it open until the stale horizon. The window must be non-empty:
+		// a lane session always contains its dispatch prompt, so a zero-message
+		// fetch is an observer artifact that says nothing about the child (#2381
+		// discipline — an authorized cancel must still be able to claim the open
+		// lane). Busy readiness never reaches the sequential loop (the fetch
+		// stage skips it), and unknown without proof keeps the pending skip
+		// below: a busy session may still speak and an unobservable one is not
+		// proven dead.
+		if (
+			!transcript.text &&
+			!transcript.terminalError &&
+			messages.data.length > 0 &&
+			(readiness === 'idle' || transcript.terminalAssistantProof === true)
+		) {
+			// Feedback F15: re-read the record fresh before the liveness settle.
+			// The fetch stage ran concurrently with other writers, so a
+			// structured result receipt may have landed on the durable record
+			// AFTER the in-memory `record` was loaded — settling this lane as
+			// textless-liveness now would erase a concurrent receipt credit the
+			// next pass would otherwise take. If the fresh record carries the
+			// receipt, skip: the next pass settles from it (or the fall-through
+			// from a declined receipt settle reaches this same guard).
+			const freshRecordRead = findByCorrelationIdDetailed(
+				directory,
+				record.correlationId,
+			);
+			const freshRecord =
+				freshRecordRead.status === 'ok' ? freshRecordRead.value : null;
+			if (freshRecordRead.status !== 'ok' || !freshRecord) {
+				// Feedback F15 edge: an UNCERTAIN store read must not be read as
+				// absence (#2511 discipline) — the transition cannot be proven
+				// safe, so defer the settle to the next pass rather than risk
+				// erasing a concurrent receipt credit.
+				continue;
+			}
+			if (freshRecord.result?.prReviewResultReceipt) continue;
+			const silentLaneReason =
+				readiness === 'idle'
+					? `lane ${laneLabel} idle with no assistant output: settled as liveness without waiting the stale horizon`
+					: `lane ${laneLabel} ended with a terminal but textless assistant message: settled as liveness`;
+			const silentLivenessResult: BackgroundDelegationResult = record.result
+				? {
+						...record.result,
+						workflowLaneFailureClass: 'liveness',
+					}
+				: {
+						error: silentLaneReason,
+						chars: silentLaneReason.length,
+						truncated: false,
+						digest: digestText(silentLaneReason),
+						workflowLaneFailureClass: 'liveness',
+					};
+			const idleTransitioned = await appendDelegationTransition(
+				directory,
+				record.correlationId,
+				{
+					status: 'stale',
+					result: silentLivenessResult,
+					expectedCurrentStatuses: ['pending', 'running'],
+					terminalResult: buildTypedDelegationTerminal(
+						record,
+						'stale',
+						silentLivenessResult,
+						_internals.now(),
+					),
+				},
+			);
+			if (!idleTransitioned) {
+				// Feedback F8: a refused/uncertain transition must not vanish
+				// silently — record the settle failure so the operator sees why
+				// the lane is still open (mirrors the terminal-error arm).
+				addLaneDiagnostic(
+					settleFailureLogs,
+					laneLabel,
+					`idle liveness settle write did not land for lane "${laneLabel}"; lane left open for retry`,
+				);
+			}
+			continue;
+		}
 		if (!transcript.text) continue;
 		if (readiness === 'unknown' && !transcript.terminalAssistantProof) {
 			continue;
@@ -3293,6 +3448,178 @@ async function collectOnce(
 		);
 	}
 	await Promise.all(pendingSettlements);
+}
+
+/**
+ * Issue #3312 (AC32): the narrow record shape the post-collect supersession
+ * scan targets — terminal `stale`, reviewer/critic verdict mode, typed
+ * `liveness` failure class. Discovery modes, operator cancellations, and any
+ * other class/status are invisible to the scan by construction (AC34/AC35).
+ */
+function isSupersedeableStaleLivenessVerdictRecord(
+	record: BackgroundDelegationRecord,
+): boolean {
+	return (
+		record.status === 'stale' &&
+		(record.mode === 'swarm-pr-review:reviewer' ||
+			record.mode === 'swarm-pr-review:critic') &&
+		(record.result?.workflowLaneFailureClass === 'liveness' ||
+			record.terminalResult?.result.workflowLaneFailureClass === 'liveness')
+	);
+}
+
+/**
+ * Issue #3312 (AC32-AC35, AC44): post-collect supersession scan for terminal
+ * stale/liveness reviewer/critic lanes.
+ *
+ * `collectOnce` only processes pending/running records, so a lane the liveness
+ * sweep killed stays dead even when its host session later finished and the
+ * transcript holds fully-valid verdict rows. For each such record this scan
+ * fetches the session transcript (same session-ops path collectOnce uses; skip
+ * on fetch failure or budget exhaustion), re-validates the rows for the lane's
+ * assigned items through the SAME transport-recovery chain verdict lanes
+ * settle under (the legacy-transcript adapter against the declared batch), and
+ * on a passing validation asks the delegation store's narrow supersession
+ * transition to flip the record to `completed` with the validated rows. Every
+ * refusal — invalid rows, discovery mode, operator cancellation, a persisted
+ * verdict-settlement receipt citing the record — is silent and leaves the
+ * durable record untouched. Bounded: one transcript-fetch attempt per record
+ * per invocation, all host calls under the collect deadline.
+ */
+async function supersedeStaleLivenessVerdictLanesFromCollect(args: {
+	session: SessionOps;
+	directory: string;
+	records: readonly BackgroundDelegationRecord[];
+	deadline: number;
+	hostTimeouts: Set<string>;
+	revisionSnapshots: Map<string, Promise<string | null>>;
+	scannedCorrelationIds: Set<string>;
+}): Promise<void> {
+	if (typeof args.session.messages !== 'function') return;
+	const candidates = args.records
+		.filter(isSupersedeableStaleLivenessVerdictRecord)
+		.filter((record) => !args.scannedCorrelationIds.has(record.correlationId));
+	if (candidates.length === 0) return;
+	const budgets = reserveCollectionLaneCallBudgets(
+		args.deadline,
+		candidates.length,
+		typeof args.session.status === 'function',
+		candidates.some((record) => Boolean(record.workspace?.prHeadSha)),
+	);
+	for (const record of candidates) {
+		if (args.deadline - _internals.now() <= 0) return;
+		// Feedback F11: mark the record scanned only AFTER the deadline check —
+		// a record skipped for budget exhaustion must stay unscanned so a LATER
+		// collect invocation retries it, instead of being silently retired.
+		args.scannedCorrelationIds.add(record.correlationId);
+		const laneLabel = record.laneId ?? record.correlationId;
+		let messages: Awaited<ReturnType<NonNullable<SessionOps['messages']>>>;
+		try {
+			messages = await withCollectionDeadline(
+				() =>
+					args.session.messages!({
+						path: { id: record.subagentSessionId },
+						query: {
+							directory: args.directory,
+							limit: ASYNC_MESSAGE_FETCH_LIMIT,
+						},
+					}),
+				args.deadline,
+				`session.messages for lane "${laneLabel}" (stale-liveness supersession scan)`,
+				args.hostTimeouts,
+				budgets.messagesBudgetMs,
+			);
+		} catch {
+			// Fetch failure or budget timeout: skip silently, a later collect
+			// invocation retries this record.
+			continue;
+		}
+		if (!messages.data) continue;
+		const transcript = extractAssistantTranscript(messages.data);
+		if (!transcript.text) continue;
+		const digestResolution = await resolveCollectLaneRevisionDigest({
+			directory: args.directory,
+			prHeadSha: record.workspace?.prHeadSha,
+			laneLabel,
+			deadline: args.deadline,
+			hostTimeouts: args.hostTimeouts,
+			revisionSnapshots: args.revisionSnapshots,
+			budgetMs: budgets.revisionDigestBudgetMs,
+		});
+		if (digestResolution.status === 'unavailable') continue;
+		const output = prepareLaneOutput({
+			directory: args.directory,
+			batchId: record.batchId ?? record.callID,
+			laneId: record.laneId ?? record.correlationId,
+			agent: record.swarmPrefixedAgent,
+			role: record.normalizedAgent,
+			sessionId: record.subagentSessionId,
+			parentSessionId: record.parentSessionId,
+			mode: record.mode,
+			workflowLane: record.workflowLane,
+			prHeadSha: record.workspace?.prHeadSha ?? undefined,
+			gitHead: record.workspace?.gitHead ?? undefined,
+			revisionDigest: digestResolution.digest,
+			scope: record.workspace?.scope ?? undefined,
+			source: 'collect_lane_results',
+			text: transcript.text,
+			messageCount: transcript.messageCount,
+			transcriptIncomplete: transcript.transcriptIncomplete,
+		});
+		const validatedResult: BackgroundDelegationResult = {
+			text: output.output,
+			chars: output.output_chars,
+			truncated: output.output_truncated,
+			digest: output.output_digest,
+			...(output.output_ref ? { outputRef: output.output_ref } : {}),
+			outputPreviewChars: output.output.length,
+			...(output.output_degraded !== undefined
+				? { outputDegraded: output.output_degraded }
+				: {}),
+			...(output.output_artifact_error
+				? { outputArtifactError: output.output_artifact_error }
+				: {}),
+			...(output.transcript_incomplete !== undefined
+				? { transcriptIncomplete: output.transcript_incomplete }
+				: {}),
+			messageCount: transcript.messageCount,
+		};
+		// The adapter gate (AC33): the supersession is admitted only when the
+		// later transcript's rows are genuinely valid for the lane's assigned
+		// items — the same verdict validation chain the ordinary settle runs.
+		const artifact = output.output_ref
+			? (readLaneOutput(args.directory, output.output_ref)?.artifact ?? null)
+			: null;
+		let validation: Awaited<
+			ReturnType<typeof validatePrWorkflowTransportRecovery>
+		>;
+		try {
+			validation = await withCollectionDeadline(
+				() =>
+					_internals.validatePrWorkflowTransportRecovery({
+						directory: args.directory,
+						record,
+						result: validatedResult,
+						artifact,
+						revisionDigest: digestResolution.digest ?? '',
+					}),
+				args.deadline,
+				`transport recovery validation for lane "${laneLabel}" (stale-liveness supersession scan)`,
+				args.hostTimeouts,
+			);
+		} catch {
+			continue;
+		}
+		if (!validation.ok) continue;
+		try {
+			await supersedeStaleLivenessVerdictLane(args.directory, {
+				correlationId: record.correlationId,
+				validatedResult,
+			});
+		} catch {
+			// Store unavailable: skip silently — a later invocation retries.
+		}
+	}
 }
 
 /**
@@ -3475,6 +3802,361 @@ export function resolveCollectExpectedWorkflowIdentity(
 	const baseSha = parentState.prReviewBaseSha;
 	if (!baseSha) return undefined;
 	return { workflowInstanceId, workflowRevision, baseSha };
+}
+
+/**
+ * Issue #3312 (AC28/U7): bounded revision-digest resolution shared by the
+ * collect-time receipt settle and the stale-liveness supersession scan. Same
+ * memoization/eviction contract as `settleCollectedLane`'s digest block — one
+ * RAW promise per (project root, PR head) so a starved lane degrades only
+ * itself, rejected snapshots evicted so a transient `git` failure is never
+ * terminal for the invocation. An 'unavailable' outcome merely defers the
+ * caller to a later pass: nothing is ever settled from an unresolved digest.
+ */
+async function resolveCollectLaneRevisionDigest(args: {
+	directory: string;
+	prHeadSha: string | null | undefined;
+	laneLabel: string;
+	deadline: number;
+	hostTimeouts: Set<string>;
+	revisionSnapshots: Map<string, Promise<string | null>>;
+	budgetMs: number;
+}): Promise<
+	{ status: 'resolved'; digest: string | undefined } | { status: 'unavailable' }
+> {
+	if (!args.prHeadSha) return { status: 'resolved', digest: undefined };
+	try {
+		const key = revisionSnapshotKey(args.directory, args.prHeadSha);
+		let snapshot = args.revisionSnapshots.get(key);
+		if (snapshot === undefined) {
+			snapshot = _internals.resolvePrWorkflowRevisionDigestAsync(
+				args.directory,
+				args.prHeadSha,
+			);
+			const pending = snapshot;
+			pending.catch(() => {
+				if (args.revisionSnapshots.get(key) === pending) {
+					args.revisionSnapshots.delete(key);
+				}
+			});
+			args.revisionSnapshots.set(key, pending);
+		}
+		const shared = snapshot;
+		const digest =
+			(await withCollectionDeadline(
+				() => shared,
+				args.deadline,
+				`revision digest for lane "${args.laneLabel}"`,
+				args.hostTimeouts,
+				args.budgetMs,
+			)) ?? undefined;
+		return { status: 'resolved', digest };
+	} catch {
+		return { status: 'unavailable' };
+	}
+}
+
+/**
+ * Issue #3312/#3313 (AC28/AC29): settle a receipt-bearing discovery lane
+ * DIRECTLY from its exactly-once structured receipt, inside `collectOnce`.
+ *
+ * Runs the #2865 exact-coverage validation with the expected identity triple
+ * from `resolveCollectExpectedWorkflowIdentity` (without it the validator
+ * rejects every receipt — the #2585 trap). Only an ACCEPTED validation that
+ * lands its transition is terminal for this record's pass (returns true); a
+ * validator 'absent' status (non-base/micro mode), a validation failure, a
+ * degraded artifact store, or a transition that does not land returns false so
+ * `collectOnce` falls through to its ordinary idle/empty-text logic (feedback
+ * F1/F8 — a declined settle must not suppress the ordinary path, and a settle
+ * write that does not land must be diagnosable, not silent). An accepted
+ * receipt stores its serialized form through the lane-output store and settles
+ * with a CREDITABLE result — text/chars/truncated/digest/outputRef mirroring
+ * `prepareLaneOutput`'s field names — so `recordsPassingBatchIntegrity`
+ * accepts the record and the structured-receipt credit branch can credit the
+ * dimension instead of wedging the lane as an uncreditable contract error.
+ */
+async function settleCollectedLaneFromReceipt(args: {
+	directory: string;
+	record: BackgroundDelegationRecord;
+	deadline: number;
+	hostTimeouts: Set<string>;
+	revisionSnapshots: Map<string, Promise<string | null>>;
+	revisionDigestBudgetMs: number;
+	settleFailureLogs: LaneDiagnostics;
+}): Promise<boolean> {
+	const { directory, record } = args;
+	const laneLabel = record.laneId ?? record.correlationId;
+	if (
+		record.mode !== 'swarm-pr-review:base' &&
+		record.mode !== 'swarm-pr-review:micro' &&
+		record.mode !== 'swarm-pr-review:council'
+	) {
+		return false;
+	}
+	const digestResolution = await resolveCollectLaneRevisionDigest({
+		directory,
+		prHeadSha: record.workspace?.prHeadSha,
+		laneLabel,
+		deadline: args.deadline,
+		hostTimeouts: args.hostTimeouts,
+		revisionSnapshots: args.revisionSnapshots,
+		budgetMs: args.revisionDigestBudgetMs,
+	});
+	if (digestResolution.status === 'unavailable') return false;
+	// Fail-open identity read, mirroring settleCollectedLane: an unreadable gate
+	// leaves the triple undefined and the validator keeps its explicit
+	// missing-identity rejection instead of guessing.
+	let collectExpectedIdentity:
+		| ReturnType<typeof resolveCollectExpectedWorkflowIdentity>
+		| undefined;
+	if (record.parentSessionId?.trim()) {
+		try {
+			const parentState =
+				await readPrWorkflowGateStateFromDisk<PrReviewCollectParentGateState>(
+					directory,
+					record.parentSessionId.trim(),
+				);
+			collectExpectedIdentity = resolveCollectExpectedWorkflowIdentity(
+				record,
+				parentState,
+			);
+		} catch {
+			collectExpectedIdentity = undefined;
+		}
+	}
+	const receiptExpected: Parameters<
+		typeof validatePrReviewDiscoveryLaneCompletion
+	>[0]['expected'] = {
+		mode: record.mode,
+		workflowLane: record.workflowLane ?? '',
+		ownedWorkflowLanes: record.ownedWorkflowLanes,
+		prHeadSha: record.workspace?.prHeadSha ?? '',
+		gitHead: record.workspace?.gitHead ?? '',
+		revisionDigest: digestResolution.digest ?? '',
+		reviewScope: record.workspace?.scope ?? undefined,
+		...(collectExpectedIdentity ?? {}),
+	};
+	const receiptProspectiveResult: BackgroundDelegationResult = {
+		// Base fallback mirrors the publish path's ordinary result shape so the
+		// required chars/truncated/digest fields exist even for a bare record.
+		...(record.result ?? {
+			chars: 0,
+			truncated: false,
+			digest: digestText(''),
+		}),
+	};
+	const structuredCoverage = _internals.validateExactStructuredReceiptCoverage({
+		record,
+		result: receiptProspectiveResult,
+		artifact: null,
+		expected: receiptExpected,
+	});
+	if (structuredCoverage.status !== 'accepted') return false;
+	// Feedback F1: an accepted receipt must settle CREDITABLE — serialize the
+	// validated receipt and store it through the lane-output store exactly like
+	// persistLaneRejectionDetail does (same identity fields, source
+	// 'collect_lane_results'), then build the settled result mirroring the
+	// ordinary prepareLaneOutput result field names (text preview / chars /
+	// truncated / digest / outputRef) so the analyzeLaneRecordResultIntegrity
+	// chain (chars > 0, digest, outputRef) accepts it and the gate's
+	// structured-receipt credit branch credits the dimension.
+	const receipt = structuredCoverage.receipt;
+	const receiptText = JSON.stringify(receipt, null, 2);
+	const stored = storeLaneOutput(directory, {
+		batchId: record.batchId ?? record.callID,
+		laneId: record.laneId ?? record.correlationId,
+		agent: record.swarmPrefixedAgent,
+		role: record.normalizedAgent,
+		sessionId: record.subagentSessionId,
+		parentSessionId: record.parentSessionId,
+		mode: record.mode,
+		workflowLane: record.workflowLane,
+		prHeadSha: record.workspace?.prHeadSha ?? undefined,
+		gitHead: record.workspace?.gitHead ?? undefined,
+		revisionDigest: digestResolution.digest ?? undefined,
+		scope: record.workspace?.scope ?? undefined,
+		source: 'collect_lane_results',
+		text: receiptText,
+	});
+	if (!stored.ref || stored.degraded) {
+		// Fail-closed: without a retrievable artifact the result would not be
+		// creditable. Keep the lane pending for a later pass and say why.
+		addLaneDiagnostic(
+			args.settleFailureLogs,
+			laneLabel,
+			`receipt settle deferred for lane "${laneLabel}"; lane-output store degraded (${stored.error ?? 'no artifact ref'}); lane left open for retry`,
+		);
+		return false;
+	}
+	const preview = buildLaneOutputPreview({
+		text: receiptText,
+		ref: stored.ref,
+		degraded: stored.degraded,
+		maxChars: MAX_LANE_OUTPUT_CHARS,
+	});
+	const settledResult: BackgroundDelegationResult = {
+		text: preview.output,
+		chars: stored.chars,
+		truncated: preview.output_truncated,
+		digest: stored.digest,
+		outputRef: stored.ref,
+		prReviewResultReceipt: receipt,
+	};
+	const settled = await appendDelegationTransition(
+		directory,
+		record.correlationId,
+		{
+			status: 'completed',
+			result: settledResult,
+			expectedCurrentStatuses: ['pending', 'running'],
+			terminalResult: buildTypedDelegationTerminal(
+				record,
+				'completed',
+				settledResult,
+				_internals.now(),
+			),
+		},
+	);
+	if (!settled) {
+		// Feedback F8: a null return means the typed transition did not land
+		// (record absent, status raced past the expected set, or the store
+		// rejected the write). Dropping it silently would leave the lane pending
+		// with no trace of why the receipt settle never took.
+		addLaneDiagnostic(
+			args.settleFailureLogs,
+			laneLabel,
+			`receipt settle write did not land for lane "${laneLabel}"; lane left open`,
+		);
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Issue #3313 (AC36): the offending row id for a rejection summary.
+ *
+ * The verdict row contract renders its failure `actual` as a JSON envelope
+ * whose `unexpectedIds` / `invalidOrMissingIds` members name the exact rows
+ * that broke the contract; the discovery row diagnostics name their offending
+ * row by line number instead. Both live inside the bounded failure strings —
+ * extract, never guess, and degrade to an explicit sentinel when neither shape
+ * is recoverable (including a bounded envelope truncated past its members).
+ */
+const LANE_REJECTION_ROW_UNIDENTIFIED = '(unidentified)';
+
+function extractLaneRejectionRowId(failure: {
+	predicate: string;
+	expected: string;
+	actual: string;
+}): string {
+	try {
+		const parsed = JSON.parse(failure.actual) as {
+			unexpectedIds?: unknown;
+			invalidOrMissingIds?: unknown;
+		};
+		const candidate = [
+			...(Array.isArray(parsed.unexpectedIds) ? parsed.unexpectedIds : []),
+			...(Array.isArray(parsed.invalidOrMissingIds)
+				? parsed.invalidOrMissingIds
+				: []),
+		].find((id) => typeof id === 'string' && id.trim().length > 0);
+		if (typeof candidate === 'string') return candidate;
+	} catch {
+		// Not a parseable JSON envelope: fall through to the raw-string scan.
+	}
+	// Feedback F5: the failure `actual` is BOUNDED, so a wide envelope can be
+	// truncated past the point JSON.parse recovers it. The first offending id
+	// is still recoverable from the RAW string whenever the truncation cut it
+	// inside one of the id arrays — regex-scan the original (possibly
+	// truncated) text before degrading to the sentinel.
+	// Priority mirrors the JSON.parse branch (unexpectedIds first, then
+	// invalidOrMissingIds); envelope key order would otherwise surface
+	// invalidOrMissingIds first.
+	const strayId = /"unexpectedIds":\s*\[\s*"([^"]+)"/.exec(failure.actual);
+	if (strayId) return strayId[1]!;
+	const missingId = /"invalidOrMissingIds":\s*\[\s*"([^"]+)"/.exec(
+		failure.actual,
+	);
+	if (missingId) return missingId[1]!;
+	const discoveryRow = /\brow (\d+)\b/.exec(failure.actual);
+	if (discoveryRow) return discoveryRow[1]!;
+	return LANE_REJECTION_ROW_UNIDENTIFIED;
+}
+
+/**
+ * Issue #3313 (AC37): persist the COMPLETE untruncated rejection detail as a
+ * SECOND lane-output artifact for this exact lane — same store, same ref
+ * format, same `retrieve_lane_output` read path as the lane transcript — so
+ * the 1_024-char error slice never has to carry the whole diagnosis.
+ */
+function persistLaneRejectionDetail(
+	directory: string,
+	record: BackgroundDelegationRecord,
+	fullDetail: string,
+): string | undefined {
+	const stored = storeLaneOutput(directory, {
+		batchId: record.batchId ?? record.callID,
+		laneId: record.laneId ?? record.correlationId,
+		agent: record.swarmPrefixedAgent,
+		role: record.normalizedAgent,
+		sessionId: record.subagentSessionId,
+		parentSessionId: record.parentSessionId,
+		mode: record.mode,
+		workflowLane: record.workflowLane,
+		prHeadSha: record.workspace?.prHeadSha ?? undefined,
+		gitHead: record.workspace?.gitHead ?? undefined,
+		scope: record.workspace?.scope ?? undefined,
+		source: 'collect_lane_results',
+		text: fullDetail,
+	});
+	return stored.ref;
+}
+
+/**
+ * Issue #3313 (AC36/AC37): compose a lane-contract rejection error and its
+ * durable detail artifact.
+ *
+ * The summary leads with the error code, the offending row id, and the
+ * violated predicate — with maximal schema-legal batch/lane ids the old
+ * header-first composition exhausted the first 200 characters before the
+ * discriminating content appeared. The complete detail (summary header, lane
+ * identity, the bounded expected/actual render, and any site tail) is stored
+ * via {@link persistLaneRejectionDetail} and its ref is cited in the sliced
+ * error; the bounded rendered detail rides inline after the citation so
+ * short-form consumers keep the predicate evidence, exactly as before.
+ */
+function composeLaneRejectionError(args: {
+	directory: string;
+	record: BackgroundDelegationRecord;
+	errorCode: string;
+	/** The validation failure; omit when the site has none (thrown-cause catch). */
+	failure?: PrReviewLaneValidationFailure;
+	/** Bounded inline detail for sites without a failure object (the thrown cause). */
+	inlineDetail?: string;
+	/** Site tail appended to both the artifact detail and the inline slice. */
+	detailTail?: string;
+}): string {
+	const rowId = args.failure
+		? extractLaneRejectionRowId(args.failure)
+		: LANE_REJECTION_ROW_UNIDENTIFIED;
+	const predicate = args.failure
+		? args.failure.predicate
+		: LANE_REJECTION_ROW_UNIDENTIFIED;
+	const header = `${args.errorCode}: row=${rowId} predicate=${predicate}`;
+	const identity = `; batch=${args.record.batchId ?? '(missing)'} lane=${args.record.laneId ?? '(missing)'} workflow_lane=${args.record.workflowLane ?? '(missing)'}`;
+	const renderedDetail = args.failure
+		? formatPrReviewLaneValidationFailure(args.failure)
+		: (args.inlineDetail ?? '');
+	const tail = args.detailTail ? `; ${args.detailTail}` : '';
+	const artifactRef = persistLaneRejectionDetail(
+		args.directory,
+		args.record,
+		`${header}${identity}\n${renderedDetail}${args.inlineDetail ? `\n${args.inlineDetail}` : ''}${tail}`,
+	);
+	return `${header}${identity}; detail in artifact ${artifactRef ?? '(unavailable)'}; ${renderedDetail}${tail}`.slice(
+		0,
+		1_024,
+	);
 }
 
 async function settleCollectedLane(args: {
@@ -3721,10 +4403,17 @@ async function settleCollectedLane(args: {
 			prospectiveResult.workflowLaneFailureClass = 'contract';
 			const family =
 				record.mode === 'swarm-pr-review:base' ? 'base_explorer' : 'micro_lane';
-			prospectiveResult.error =
-				`PR_REVIEW_DISCOVERY_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ` +
-				`${formatPrReviewLaneValidationFailure(validation.failure)}; expected candidate row: ${CANDIDATE_HEADERS[family]}; expected clean row: ${CLEAN_TEMPLATES[family]}`;
-			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+			// Issue #3313 (AC36/AC37): summary-first composition — the offending
+			// discovery row id and violated predicate lead the sliced error, and
+			// the complete detail (including the expected row templates) lives in
+			// the lane's durable rejection artifact.
+			prospectiveResult.error = composeLaneRejectionError({
+				directory,
+				record,
+				errorCode: 'PR_REVIEW_DISCOVERY_CONTRACT_INVALID',
+				failure: validation.failure,
+				detailTail: `expected candidate row: ${CANDIDATE_HEADERS[family]}; expected clean row: ${CLEAN_TEMPLATES[family]}`,
+			});
 		}
 	}
 	const isPrReviewVerdictLane =
@@ -3772,10 +4461,15 @@ async function settleCollectedLane(args: {
 				return;
 			}
 			terminalStatus = 'error';
-			prospectiveResult.error =
-				`PR_WORKFLOW_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ` +
-				formatError(error);
-			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+			// Issue #3313 (AC36/AC37): summary-first composition; the thrown cause
+			// (the site's discriminating content — no failure object exists for a
+			// crashed validation) rides inline after the artifact citation.
+			prospectiveResult.error = composeLaneRejectionError({
+				directory,
+				record,
+				errorCode: 'PR_WORKFLOW_CONTRACT_INVALID',
+				inlineDetail: formatError(error),
+			});
 			// Issue #3311: a verdict lane whose transport-validation step threw
 			// carries its own typed class so widened N-of-M admission can settle
 			// it once the retry budget is exhausted. PR-feedback modes sharing
@@ -3841,8 +4535,18 @@ async function settleCollectedLane(args: {
 				validation.failure?.predicate === 'critic.verdict_rows'
 					? 'PR_REVIEW_VERDICT_CONTRACT_INVALID'
 					: 'PR_WORKFLOW_CONTRACT_INVALID';
-			prospectiveResult.error = `${errorCode}: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ${validation.reason}`;
-			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+			// Issue #3313 (AC36/AC37): summary-first composition — the offending
+			// verdict row id and violated predicate lead the sliced error (with
+			// maximal schema-legal ids the old header-first order exhausted the
+			// first 200 chars before the row id appeared), and the complete
+			// expected/actual render lives in the lane's rejection artifact.
+			prospectiveResult.error = composeLaneRejectionError({
+				directory,
+				record,
+				errorCode,
+				failure: validation.failure,
+				...(validation.failure ? {} : { inlineDetail: validation.reason }),
+			});
 			// Issue #3311: EVERY failed validation of a verdict lane (whatever the
 			// predicate — verdict-row contract, transcript_incomplete, or any
 			// other) carries the typed class, so a persistently failing
@@ -4759,21 +5463,43 @@ function extractAssistantTranscript(
 			: '';
 	const terminalAssistantFinish =
 		finish === 'stop' || finish === 'length' || finish === 'content-filter';
+	const terminalAssistantProof =
+		typeof completedAt === 'number' &&
+		Number.isFinite(completedAt) &&
+		terminalAssistantFinish &&
+		lastAssistantInfo?.error === undefined;
+	// Issue #3313: the count-truncation term keys on the window ENDING at a
+	// terminal assistant message — the same terminal discriminator as
+	// terminalAssistantProof, evaluated on the window's FINAL message of any
+	// role. Only then does the fetch window provably contain the session's
+	// newest output: a terminal assistant message buried under later turns
+	// leaves room for a still-unfetched later assistant reply, so the
+	// "there MAY be unfetched earlier messages" signal stays honest there.
+	const lastMessageInfo = messages[messages.length - 1]?.info;
+	// When the window's final message IS an assistant message, the loop's
+	// lastAssistantInfo is that same message, so terminalAssistantProof
+	// already carries the full error-free terminal discriminator for it —
+	// reuse that derivation rather than re-reading the error channel here.
+	const windowEndsAtTerminalAssistant =
+		lastMessageInfo?.role === 'assistant' && terminalAssistantProof;
 	return {
 		text: assistantTexts.join('\n\n'),
 		messageCount: assistantTexts.length,
-		// Total message count (not just assistant) is the correct signal: the API
-		// limit is applied to all message types, so hitting it means there may be
-		// earlier messages of any role — including assistant — that were not fetched.
+		// Total message count (not just assistant) is the correct signal for the
+		// TRUNCATION term: the API limit is applied to all message types, so
+		// hitting it means there may be earlier messages of any role — including
+		// assistant — that were not fetched. Issue #3313: the count term is a
+		// "there MAY be unfetched earlier messages" signal, not an "unfinished"
+		// signal, so it keys on the window NOT ending at its terminal assistant
+		// message. A 50-message window whose final message is the lane's
+		// terminal assistant turn has proven it holds the newest output and is
+		// NOT incomplete on count alone; the finish terms are untouched.
 		transcriptIncomplete:
-			messages.length >= ASYNC_MESSAGE_FETCH_LIMIT ||
+			(messages.length >= ASYNC_MESSAGE_FETCH_LIMIT &&
+				!windowEndsAtTerminalAssistant) ||
 			finish === 'length' ||
 			finish === 'content-filter',
-		terminalAssistantProof:
-			typeof completedAt === 'number' &&
-			Number.isFinite(completedAt) &&
-			terminalAssistantFinish &&
-			lastAssistantInfo?.error === undefined,
+		terminalAssistantProof,
 		completedAt: typeof completedAt === 'number' ? completedAt : undefined,
 		windowTruncated: messages.length >= ASYNC_MESSAGE_FETCH_LIMIT,
 		terminalError:

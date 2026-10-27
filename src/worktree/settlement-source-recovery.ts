@@ -10,6 +10,32 @@ interface GitResult {
 }
 export const _internals = { bunSpawn, resolveGitExecutable };
 const OID = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+const REPO_REDIRECT_ENV = new Set([
+	'GIT_DIR',
+	'GIT_WORK_TREE',
+	'GIT_INDEX_FILE',
+	'GIT_COMMON_DIR',
+	'GIT_OBJECT_DIRECTORY',
+	'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+	'GIT_NAMESPACE',
+]);
+
+/**
+ * Environment for Git probes and ref writes with repository-redirecting
+ * variables removed (PRR-026 precedent in src/services/swarm-residue.ts and
+ * src/hooks/guardrails/file-authority.ts): an inherited GIT_DIR or
+ * GIT_OBJECT_DIRECTORY would otherwise bind source-presence probes and backup
+ * ref writes to a different repository than `directory`. Matching is
+ * case-insensitive because Windows environment names are.
+ */
+function gitEnvWithoutRepoRedirectors(): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (!REPO_REDIRECT_ENV.has(key.toUpperCase())) env[key] = value;
+	}
+	env.LC_ALL = 'C';
+	return env;
+}
 
 async function git(directory: string, args: string[]): Promise<GitResult> {
 	let proc: BunCompatSubprocess | undefined;
@@ -21,7 +47,7 @@ async function git(directory: string, args: string[]): Promise<GitResult> {
 			stderr: 'pipe',
 			timeout: 10000,
 			maxBuffer: 65536,
-			env: { ...process.env, LC_ALL: 'C' },
+			env: gitEnvWithoutRepoRedirectors(),
 		});
 		if (proc.spawnError) throw proc.spawnError;
 		const [exitCode, stdout, stderr] = await Promise.all([
@@ -64,13 +90,16 @@ export async function probeSettlementSource(
 			'--git-path',
 			'objects',
 		]);
-		if (
-			objects.exitCode !== 0 ||
-			!objects.stdout.trim() ||
-			!(
-				await stat(path.resolve(directory, objects.stdout.trim()))
-			).isDirectory()
-		) {
+		const objectsPath = objects.exitCode === 0 ? objects.stdout.trim() : '';
+		// A stat failure (ENOENT, EACCES, ...) is the same uncertainty as a
+		// non-directory: absence is never inferred from an unreadable store.
+		const objectsUsable =
+			objectsPath !== '' &&
+			(await stat(path.resolve(directory, objectsPath)).then(
+				(entry) => entry.isDirectory(),
+				() => false,
+			));
+		if (!objectsUsable) {
 			throw new Error(
 				`CODER_SETTLEMENT_SOURCE_UNCERTAIN: object database unavailable for ${oid}`,
 			);

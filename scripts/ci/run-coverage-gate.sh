@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# sort/comm must agree on one collation. GitHub's runner images and
+# self-hosted hosts ship different default locales, and under a non-C locale
+# `sort` can emit an order `comm` then rejects ("file 1 is not in sorted
+# order"), failing the gate on machines GitHub-hosted never touched. Pinning
+# byte order makes the partition identical on every host.
+export LC_ALL=C
+
 # Recalibrated for issue #1778 H4: the gate now measures the expanded set
 # (src/** + tests/adversarial + orphans), which exercises far more source than
 # the old tests/unit-only set. Measured 73.41% on the expanded set; floor set to

@@ -265,8 +265,7 @@ describe('#3409 background worktree settlement handoff ordering', () => {
 		});
 		expect(readLegacyWal().state).toBe('DISPATCHED');
 		expect(fs.existsSync(worktreePath)).toBe(true);
-		const mergedHeadBeforeRetry = git(directory, ['rev-parse', 'HEAD']);
-		expect(mergedHeadBeforeRetry).toBe(baselineHead);
+		expect(git(directory, ['rev-parse', 'HEAD'])).toBe(baselineHead);
 		expect(
 			fs.readFileSync(
 				path.join(directory, 'src', 'mixed-worktree-feature.ts'),
@@ -289,7 +288,7 @@ describe('#3409 background worktree settlement handoff ordering', () => {
 			cleanupComplete: true,
 		});
 		expect(fs.existsSync(worktreePath)).toBe(false);
-		expect(git(directory, ['rev-parse', 'HEAD'])).toBe(mergedHeadBeforeRetry);
+		expect(git(directory, ['rev-parse', 'HEAD'])).toBe(baselineHead);
 		expect(git(directory, ['rev-parse', BRANCH])).toBe(sourceHead);
 		expect(mergePasses).toBe(1);
 	});
@@ -341,6 +340,8 @@ describe('#3409 background worktree settlement handoff ordering', () => {
 			state: 'settled',
 			outcome: { kind: 'standard-worktree', result: 'merged' },
 		});
+		// The first cleanup attempt must have actually reached removeWorktree.
+		expect(removals).toBe(1);
 		expect(settled?.coderSettlement?.sourceHeadAfterCommit).toBe(
 			git(directory, ['rev-parse', BRANCH]),
 		);

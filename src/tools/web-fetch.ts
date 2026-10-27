@@ -332,27 +332,34 @@ const NAMED_ENTITIES: Record<string, string> = {
 };
 
 function decodeEntities(text: string): string {
-	return text.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (whole, body: string) => {
-		const key = body.toLowerCase();
-		if (key in NAMED_ENTITIES) return NAMED_ENTITIES[key];
-		if (body.startsWith('#x') || body.startsWith('#X')) {
-			const code = Number.parseInt(body.slice(2), 16);
-			return Number.isFinite(code) ? safeFromCodePoint(code) : whole;
-		}
-		if (body.startsWith('#')) {
-			const code = Number.parseInt(body.slice(1), 10);
-			return Number.isFinite(code) ? safeFromCodePoint(code) : whole;
-		}
-		return whole;
-	});
+	return text.replace(
+		/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi,
+		(whole, body: string) => {
+			const key = body.toLowerCase();
+			if (Object.hasOwn(NAMED_ENTITIES, key)) return NAMED_ENTITIES[key];
+			if (body.startsWith('#x') || body.startsWith('#X')) {
+				const code = Number.parseInt(body.slice(2), 16);
+				return Number.isFinite(code) ? safeFromCodePoint(code) : whole;
+			}
+			if (body.startsWith('#')) {
+				const code = Number.parseInt(body.slice(1), 10);
+				return Number.isFinite(code) ? safeFromCodePoint(code) : whole;
+			}
+			return whole;
+		},
+	);
 }
 
+/**
+ * Numeric character references that are NUL, a surrogate, or beyond U+10FFFF
+ * decode to U+FFFD, matching the HTML spec, instead of leaking a control
+ * character or lone surrogate (or silently vanishing) into agent-visible text.
+ */
 function safeFromCodePoint(code: number): string {
-	try {
-		return String.fromCodePoint(code);
-	} catch {
-		return '';
+	if (code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
+		return '�';
 	}
+	return String.fromCodePoint(code);
 }
 
 /**

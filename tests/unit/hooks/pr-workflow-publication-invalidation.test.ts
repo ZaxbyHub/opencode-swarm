@@ -208,7 +208,7 @@ describe('revocation + fresh approval (evidence N cannot satisfy N+1)', () => {
 		expect(state?.prFeedbackReadyToPublish?.localHead).toBe(POST_COMMIT_SHA);
 	});
 
-	test('from invalidated, the productive recovery paths are reachable', async () => {
+	test('from invalidated, the recovery ladder is reachable end to end (issue #3316)', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
 		await invalidatePrFeedbackPublication(
 			fixture.directory,
@@ -222,9 +222,8 @@ describe('revocation + fresh approval (evidence N cannot satisfy N+1)', () => {
 			'read',
 			{},
 		);
-		// The ordered ladder restarts at verification (invalidation superseded
-		// those receipts too): Stage A is gated behind re-settled verification
-		// — reachable, in ladder order, not skipped.
+		// Stage A is gated behind re-settled verification (invalidation
+		// superseded those receipts too) — reachable, in ladder order.
 		await expect(
 			enforcePrWorkflowToolBefore(
 				fixture.directory,
@@ -246,6 +245,24 @@ describe('revocation + fresh approval (evidence N cannot satisfy N+1)', () => {
 				HEAD_SHA,
 			),
 		).rejects.toThrow();
+		// The ONE sanctioned soft reset returns HEAD to the immutable intake
+		// head (issue #3316 D6): admitted only for the exact
+		// `git reset --soft <intake>` form on an invalidated generation whose
+		// HEAD is the single non-merge child. The seam flip models the reset's
+		// effect on HEAD (the admission itself ran through the real gate).
+		await enforcePrWorkflowToolBefore(fixture.directory, SESSION_ID, 'shell', {
+			command: `git reset --soft ${HEAD_SHA}`,
+		});
+		fixture.mutators.head(HEAD_SHA);
+		// With HEAD back at the intake head the ladder resumes: the checkout
+		// assert passes and a fresh verification batch + Stage A receipt are
+		// accepted (the invalidation-recovery premises, executed).
+		const { assertCurrentCheckoutHead } = await import(
+			'../../../src/hooks/pr-workflow-gate.js'
+		);
+		await expect(
+			assertCurrentCheckoutHead(fixture.directory, HEAD_SHA, 'PR_FEEDBACK'),
+		).resolves.toBe(HEAD_SHA);
 		const { active } = await readActive();
 		expect(active?.state).toBe('invalidated');
 	});

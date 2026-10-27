@@ -20,7 +20,12 @@ import { DEFAULT_STALE_DELEGATION_TIMEOUT_MS } from '../background/pending-deleg
 import type { LaneLivenessWatchdogConfig } from '../config/schema.js';
 import { LaneLivenessWatchdogConfigSchema } from '../config/schema.js';
 
-/** The five frozen defaults from the #2506 contract (0 disables a feature). */
+/**
+ * The five frozen defaults from the #2506 contract (0 disables a feature).
+ * #3313 AC14 supersedes the #2506 AC1 default-off contract: `enabled` resolves
+ * `true` here because this constant parses `{}` through the schema whose field
+ * default flipped — no literal is pinned in this file, so it cannot drift.
+ */
 export const LANE_LIVENESS_WATCHDOG_DEFAULTS: LaneLivenessWatchdogConfig =
 	LaneLivenessWatchdogConfigSchema.parse({});
 

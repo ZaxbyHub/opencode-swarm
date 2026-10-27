@@ -59,6 +59,7 @@ import {
 	PrReviewRunIdSchema,
 } from '../background/pr-review-contract.js';
 import { prReviewReceiptHasCoverageDegradations } from '../background/pr-review-trigger-receipt-reader.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { CIRCUIT_TERMINAL_DELEGATION_STATUSES } from './circuit.js';
 import {
@@ -124,6 +125,41 @@ export interface PrReviewCompletionState {
 	prReviewCoverageDisclosureDigest?: string;
 	/** Issue #2840: durable trigger-eval receipt path (degradation disclosure). */
 	prReviewTriggerEvalPath?: string;
+	/**
+	 * Issues #3312/#3313: structural mirror of the gate's resilience slice
+	 * (`PrReviewResilienceStateRecord` in `src/hooks/pr-workflow-gate.ts`),
+	 * limited to the fields the settlement reads — the policy toggle, the
+	 * retry-budget ceiling, and the attempt count. The gate's full state
+	 * satisfies this structurally.
+	 */
+	prReviewResilience?: {
+		policy?: { enabled?: boolean; maxRetryAttemptsAfterInitial?: number };
+		attempts?: unknown[];
+	};
+	/**
+	 * Issue #3312: durable validation-phase skip disclosure persisted by the
+	 * gate's INCOMPLETE bypass arm (a controller-derived projection of derived
+	 * state — never a lane/model assertion). Read here only by the report
+	 * projection's disclosed-degradation leg; never a gate-side flag.
+	 */
+	prReviewValidationSkipDisclosure?: {
+		schemaVersion: number;
+		runId: string;
+		prHeadSha: string;
+		revisionDigest: string;
+		createdAt: string;
+		coverageKind: 'COMPLETE' | 'PARTIAL';
+		reportVerdict: 'INCOMPLETE';
+		skippedPhases: Array<{
+			phase: 'reviewer' | 'critic' | 'council';
+			reason: string;
+			unsettledItemIds: string[];
+		}>;
+	};
+	/** Issue #3312: durable path of the validation-skip-disclosure artifact. */
+	prReviewValidationSkipDisclosurePath?: string;
+	/** Issue #3312: sha256 of the validation-skip-disclosure artifact bytes. */
+	prReviewValidationSkipDisclosureDigest?: string;
 }
 
 /** The gate-context surface the settlement consumes (full ctx is gate-owned). */
@@ -1178,6 +1214,21 @@ export function derivePrReviewDimensionSettlement(
 	// was uncertain). They must never be labeled NOT_LAUNCHED — they ride
 	// liveDimensions (blocking) until the store is readable again.
 	const dispatchUncertain = new Set<string>();
+	// Issue #3313 (U5): under staged resilience with the retry budget
+	// exhausted, a dispatched dimension whose only lane evidence is
+	// semantically valid but recorded at a stale revision (never creditable on
+	// the current worktree) settles FAILED/resource instead of wedging
+	// liveDimensions forever with no budget left to re-dispatch. Legacy policy
+	// (or an unexhausted budget) keeps the liveDimensions behavior.
+	const staleRevisionClassificationEligible =
+		state.prReviewResilience?.policy?.enabled === true &&
+		(state.prReviewResilience?.attempts?.length ?? 0) >=
+			1 + (state.prReviewResilience?.policy?.maxRetryAttemptsAfterInitial ?? 0);
+	const staleLaneEvidence = new Map<
+		string,
+		{ batchId: string; laneId: string }
+	>();
+	const nonSemanticallyValidDispatched = new Set<string>();
 	let delegationReadUncertain = attempts.delegationReadUncertain;
 	for (const batch of state.prReviewBaseDispatches ?? []) {
 		const recordsRead = findByBatchIdDetailed(directory, batch.batchId, {
@@ -1194,13 +1245,51 @@ export function derivePrReviewDimensionSettlement(
 			}
 			continue;
 		}
+		// Same derivation as `summarizePrReviewBaseDimensionAttempts`: records
+		// passing batch integrity whose artifacts validate against their OWN
+		// recorded revision (revision-independent semantics). Computed only
+		// when the stale-revision classification is reachable.
+		let semanticallyValidLaneIds: ReadonlySet<string | undefined> | undefined;
+		if (staleRevisionClassificationEligible) {
+			semanticallyValidLaneIds = new Set(
+				recordsPassingBatchIntegrity(
+					directory,
+					state,
+					batch.batchId,
+					batch.lanes,
+					'swarm-pr-review:base',
+					batch.validatedAt,
+				)
+					.filter((qualified) =>
+						hasRevisionIndependentDiscoverySemantics(
+							directory,
+							qualified,
+							state,
+						),
+					)
+					.map((qualified) => qualified.record.laneId),
+			);
+		}
 		for (const lane of batch.lanes) {
 			if (!recordsRead.value.some((record) => record.laneId === lane.laneId))
 				continue;
-			for (const dimension of lane.ownedWorkflowLanes?.length
+			const laneDimensions = lane.ownedWorkflowLanes?.length
 				? lane.ownedWorkflowLanes
-				: [lane.workflowLane]) {
+				: [lane.workflowLane];
+			for (const dimension of laneDimensions) {
 				dispatched.add(dimension);
+			}
+			if (semanticallyValidLaneIds?.has(lane.laneId)) {
+				for (const dimension of laneDimensions) {
+					staleLaneEvidence.set(dimension, {
+						batchId: batch.batchId,
+						laneId: lane.laneId,
+					});
+				}
+			} else if (semanticallyValidLaneIds) {
+				for (const dimension of laneDimensions) {
+					nonSemanticallyValidDispatched.add(dimension);
+				}
 			}
 		}
 	}
@@ -1274,6 +1363,29 @@ export function derivePrReviewDimensionSettlement(
 			continue;
 		}
 		if (dispatched.has(dimension)) {
+			// Issue #3313 (U5): every dispatched lane for this dimension is
+			// semantically valid (revision-independent) yet none is creditable
+			// at the current digest (the dimension would not reach this branch
+			// otherwise), and the staged retry budget is exhausted — disclose
+			// FAILED/resource instead of a permanent liveDimensions wedge.
+			const staleEvidence = staleLaneEvidence.get(dimension);
+			if (
+				staleRevisionClassificationEligible &&
+				staleEvidence &&
+				!nonSemanticallyValidDispatched.has(dimension)
+			) {
+				unresolvedDimensions.push({
+					dimension,
+					terminalState: 'FAILED',
+					reasonKind: 'lane_failure',
+					failureClass: 'resource',
+					batchId: staleEvidence.batchId,
+					laneId: staleEvidence.laneId,
+					safeDetail:
+						'stale revision: lane evidence was recorded at a revision that no longer matches the current digest after retry exhaustion',
+				});
+				continue;
+			}
 			// Dispatched but neither successful, live, terminally failed, nor
 			// cancelled: treat as NOT_LAUNCHED evidence-wise is a lie; surface
 			// it as unresolved-not-launched only when nothing was ever
@@ -1311,7 +1423,14 @@ export function derivePrReviewDimensionSettlement(
 	};
 }
 
-async function readAndVerifyCoverageDisclosure(
+/**
+ * Read and verify the durable coverage disclosure against the in-state
+ * record, path, and digest. Exported for the owning gate (issue #3312 U2/
+ * AC13): its retryable-remainder completion check excludes dimensions whose
+ * tuple is covered by an ADMITTED disclosure, reading it through this
+ * boundary. Returns null when no disclosure state exists at all.
+ */
+export async function readAndVerifyCoverageDisclosure(
 	directory: string,
 	state: PrReviewCompletionState,
 ): Promise<PrReviewPartialBaseCoverageRecordV2 | null> {
@@ -1365,6 +1484,74 @@ async function readAndVerifyCoverageDisclosure(
 	// to the v2 view in memory; the durable file and its digest are never
 	// rewritten.
 	return normalizePrReviewPartialBaseCoverageRecord(parsed.data);
+}
+
+/**
+ * Issues #3312/#3313: the truth-stability surface of a disclosure is the
+ * (dimension, terminalState, failureClass) tuple multiset. Lane, batch, and
+ * terminal-event identities may be superseded by an audited re-admission (a
+ * re-run of the same dimensions); a terminalState or failureClass change is a
+ * DIFFERENT disclosure and is refused.
+ */
+function disclosureTupleKeys(
+	entries: ReadonlyArray<PrReviewUnresolvedDimensionRecord>,
+): string[] {
+	return entries
+		.map(
+			(entry) =>
+				`${entry.dimension} ${entry.terminalState} ${entry.failureClass ?? ''}`,
+		)
+		.sort();
+}
+
+function disclosureTuplesMatch(
+	left: ReadonlyArray<PrReviewUnresolvedDimensionRecord>,
+	right: ReadonlyArray<PrReviewUnresolvedDimensionRecord>,
+): boolean {
+	const leftKeys = disclosureTupleKeys(left);
+	const rightKeys = disclosureTupleKeys(right);
+	return (
+		leftKeys.length === rightKeys.length &&
+		leftKeys.every((key, index) => key === rightKeys[index])
+	);
+}
+
+/**
+ * Issue #3312 (AC10 — retry-first admission): CONTRACT-CLASS ONLY. A
+ * FAILED/contract dimension that still has retry budget refuses a fresh (or
+ * same-tuple superseding) disclosure admission — re-dispatch first. This is
+ * deliberately narrower than the gate's completion-side retryable-remainder
+ * predicate (which also counts resource under staged policy): resource,
+ * liveness, and operator_cancelled terminals are never refused at admission.
+ * Returns the dimensions that must be re-dispatched before disclosing.
+ */
+function contractRetryBudgetRemainingDimensions(
+	state: PrReviewCompletionState,
+	unresolved: ReadonlyArray<PrReviewUnresolvedDimensionRecord>,
+): PrReviewBaseDimensionId[] {
+	if (state.prReviewResilience?.policy?.enabled === true) {
+		const attemptsUsed = state.prReviewResilience?.attempts?.length ?? 0;
+		const maxAttempts =
+			1 + (state.prReviewResilience?.policy?.maxRetryAttemptsAfterInitial ?? 0);
+		if (attemptsUsed >= maxAttempts) return [];
+		return unresolved
+			.filter(
+				(entry) =>
+					entry.terminalState === 'FAILED' && entry.failureClass === 'contract',
+			)
+			.map((entry) => entry.dimension);
+	}
+	const consumedLegacyContractRetry = new Set(
+		state.prReviewContractRetryDimensions ?? [],
+	);
+	return unresolved
+		.filter(
+			(entry) =>
+				entry.terminalState === 'FAILED' &&
+				entry.failureClass === 'contract' &&
+				!consumedLegacyContractRetry.has(entry.dimension),
+		)
+		.map((entry) => entry.dimension);
 }
 
 export async function admitPrReviewPartialBaseCoverage(
@@ -1461,19 +1648,54 @@ export async function admitPrReviewPartialBaseCoverage(
 				);
 			}
 		}
+		// Issue #3312 (plan critic blocker 5 — ordering is load-bearing): the
+		// existing-disclosure compare runs FIRST. A byte-identical replay
+		// returns unchanged with NO budget check (the NO_COVERAGE retry path
+		// depends on it); a same-tuple admission arms the budget-checked
+		// audited supersession below; anything else is a different disclosure
+		// and is refused.
 		const existing = await readAndVerifyCoverageDisclosure(directory, state);
+		let superseding: PrReviewPartialBaseCoverageRecordV2 | null = null;
 		if (existing) {
-			const sameSettlement =
+			const sameRun =
 				existing.runId === normalizedRunId &&
 				existing.prHeadSha === state.prHeadSha &&
-				existing.revisionDigest === ctx.revisionDigest &&
+				existing.revisionDigest === ctx.revisionDigest;
+			if (
+				sameRun &&
 				JSON.stringify(existing.unresolvedDimensions) ===
-					JSON.stringify(settlement.unresolvedDimensions);
-			if (sameSettlement) {
+					JSON.stringify(settlement.unresolvedDimensions)
+			) {
+				// Idempotent replay of the identical settlement.
 				return state;
 			}
+			if (
+				sameRun &&
+				disclosureTuplesMatch(
+					existing.unresolvedDimensions,
+					settlement.unresolvedDimensions,
+				)
+			) {
+				// Same (dimension, terminalState, failureClass) tuple multiset
+				// with new lane/batch/terminal-event identities: an audited
+				// supersession, not a different disclosure.
+				superseding = existing;
+			} else {
+				throw new Error(
+					'BLOCKED: partial base coverage admission differs from the immutable existing disclosure',
+				);
+			}
+		}
+		// Issue #3312 (AC10): fresh disclosures and same-tuple supersessions
+		// both refuse while a contract-class dimension still has retry budget;
+		// the idempotent replay above is exempt.
+		const retryBudgetDimensions = contractRetryBudgetRemainingDimensions(
+			state,
+			settlement.unresolvedDimensions,
+		);
+		if (retryBudgetDimensions.length > 0) {
 			throw new Error(
-				'BLOCKED: partial base coverage admission differs from the immutable existing disclosure',
+				`BLOCKED: partial base coverage disclosure refused while contract retry budget remains for ${retryBudgetDimensions.join(', ')}; re-dispatch the dimension(s) via dispatch_lanes_async first, then disclose`,
 			);
 		}
 		const record: PrReviewPartialBaseCoverageRecordV2 = {
@@ -1497,6 +1719,7 @@ export async function admitPrReviewPartialBaseCoverage(
 			);
 		}
 		let disclosureWasMissing = false;
+		let supersededRaw: string | null = null;
 		const removeNewDisclosure = async (): Promise<void> => {
 			if (!disclosureWasMissing) return;
 			try {
@@ -1507,12 +1730,45 @@ export async function admitPrReviewPartialBaseCoverage(
 				// Preserve the original admission error; cleanup is best effort.
 			}
 		};
+		// Issue #3312 (AC11): a supersession whose state write fails restores
+		// the superseded bytes, so durable state (still carrying the old record
+		// and digest) never points at a file it did not admit. A restore FAILURE
+		// is NOT swallowed (feedback F14c/F-1): at that point the durable state
+		// digest points at unadmitted bytes — a permanent wedge unless the
+		// operator reconciles — so it must fail loud, chained to the admission
+		// error that caused the rollback.
+		const restoreSupersededDisclosure = async (
+			admissionError: unknown,
+		): Promise<void> => {
+			if (supersededRaw === null) return;
+			try {
+				if ((await fsp.readFile(absolutePath, 'utf8')) === raw) {
+					await writeAtomicJson(
+						directory,
+						absolutePath,
+						JSON.parse(supersededRaw),
+					);
+				}
+			} catch (restoreError) {
+				throw new Error(
+					`partial base coverage supersession rollback failed: the superseded disclosure bytes could not be restored (${restoreError instanceof Error ? restoreError.message : String(restoreError)}) and the durable state digest now points at unadmitted bytes (${relativePath}); reconcile the disclosure artifact before retrying (admission error: ${admissionError instanceof Error ? admissionError.message : String(admissionError)})`,
+					{ cause: restoreError },
+				);
+			}
+		};
 		try {
 			const persisted = readFileSync(absolutePath, 'utf8');
 			if (persisted !== raw) {
-				throw new Error(
-					'BLOCKED: partial base coverage disclosure path already contains different content',
-				);
+				if (!superseding) {
+					throw new Error(
+						'BLOCKED: partial base coverage disclosure path already contains different content',
+					);
+				}
+				// Audited supersession (same tuple multiset, new lane
+				// identities): the one same-path different-content write this
+				// guard permits.
+				supersededRaw = persisted;
+				await writeAtomicJson(directory, absolutePath, record);
 			}
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -1529,15 +1785,52 @@ export async function admitPrReviewPartialBaseCoverage(
 		}
 		const digest = createHash('sha256').update(raw, 'utf8').digest('hex');
 		try {
-			return await writeStateWhileLocked(directory, {
+			const admitted = await writeStateWhileLocked(directory, {
 				...state,
 				updatedAt: isoNow(),
 				prReviewPartialBaseCoverage: record,
 				prReviewCoverageDisclosurePath: relativePath,
 				prReviewCoverageDisclosureDigest: digest,
 			});
+			if (superseding) {
+				// Issue #3312 (AC11): the supersession is audited with both
+				// identities — per-dimension old+new terminalEventId/batchId/
+				// laneId, bounded by the six-dimension disclosure vocabulary.
+				try {
+					appendCoreEventSync(directory, {
+						type: 'pr_review_coverage_disclosure_superseded',
+						timestamp: isoNow(),
+						sessionID: state.sessionID,
+						prHeadSha: state.prHeadSha,
+						revisionDigest: ctx.revisionDigest,
+						disclosureRunId: normalizedRunId,
+						supersededDimensions: superseding.unresolvedDimensions.map(
+							(entry) => ({
+								dimension: entry.dimension,
+								terminalEventId: entry.terminalEventId ?? null,
+								batchId: entry.batchId ?? null,
+								laneId: entry.laneId ?? null,
+							}),
+						),
+						supersedingDimensions: record.unresolvedDimensions.map((entry) => ({
+							dimension: entry.dimension,
+							terminalEventId: entry.terminalEventId ?? null,
+							batchId: entry.batchId ?? null,
+							laneId: entry.laneId ?? null,
+						})),
+					});
+				} catch {
+					// Non-fatal audit trail — the supersession itself already
+					// succeeded durably.
+				}
+			}
+			return admitted;
 		} catch (error) {
+			// removeNewDisclosure stays best-effort (fresh admission: no prior
+			// bytes to preserve, and the admission error must win); the
+			// supersession restore propagates its own failure (see above).
 			await removeNewDisclosure();
+			await restoreSupersededDisclosure(error);
 			throw error;
 		}
 	});
@@ -1602,8 +1895,9 @@ export async function rollbackPrReviewPartialBaseCoverageAdmission(
  * matches the currently derived terminal settlement. Throws while any
  * unresolved dimension still has a live lane, or when the disclosure has been
  * invalidated by later evidence (e.g. a late success landing on the same
- * revision) — the disclosure is immutable, so such a run must re-settle or
- * restart rather than silently re-crediting.
+ * revision) — the disclosure is tuple-stable with audited supersession
+ * (issue #3312), so such a run must re-settle through admission or restart
+ * rather than silently re-crediting.
  */
 export async function assertPrReviewBaseCoverageSettled(
 	directory: string,
@@ -1645,8 +1939,10 @@ export async function assertPrReviewBaseCoverageSettled(
 	if (
 		disclosure &&
 		JSON.stringify(disclosureIds) === JSON.stringify(derivedIds) &&
-		JSON.stringify(disclosure?.unresolvedDimensions) ===
-			JSON.stringify(settlement.unresolvedDimensions) &&
+		disclosureTuplesMatch(
+			disclosure.unresolvedDimensions,
+			settlement.unresolvedDimensions,
+		) &&
 		disclosure.prHeadSha === state.prHeadSha &&
 		disclosure.revisionDigest === ctx.revisionDigest &&
 		disclosure.runId ===
@@ -1658,10 +1954,37 @@ export async function assertPrReviewBaseCoverageSettled(
 		disclosure === null
 			? 'no terminal settlement disclosure is admitted; settle via write_pr_review_artifact partial_base_coverage.unresolved_dimensions'
 			: disclosureIds.join(',') !== derivedIds.join(',')
-				? `the admitted disclosure [${disclosureIds.join(', ')}] no longer matches the derived terminal settlement [${derivedIds.join(', ')}] — later evidence invalidated it; the disclosure is immutable, so re-run the affected dimensions or restart the review`
+				? `the admitted disclosure [${disclosureIds.join(', ')}] no longer matches the derived terminal settlement [${derivedIds.join(', ')}] — later evidence invalidated it; the disclosure is tuple-stable with audited supersession, so re-run the affected dimensions through admission or restart the review`
 				: 'the admitted disclosure no longer matches the derived per-dimension terminal evidence';
 	throw new Error(
 		`BLOCKED: PR_REVIEW base coverage is ${settlement.kind} (${settlement.coveredDimensions.length}/${PR_REVIEW_BASE_DIMENSION_IDS.length} dimensions covered; unresolved: ${derivedIds.join(', ') || '(none)'}); ${reason}`,
+	);
+}
+
+/**
+ * Issue #3312 (U1 support): a persisted validation-skip disclosure bound to
+ * the current run identity (runId / prHeadSha / revisionDigest) is itself a
+ * disclosed coverage degradation for report projections, so its verdict
+ * matrix excludes APPROVE for skip-disclosed runs. Presence of the matching
+ * record on state suffices.
+ *
+ * Exported (feedback F2) for the gate consumer:
+ * `readPrReviewFinalFindingPolicyForReport` in `src/hooks/pr-workflow-gate.ts`
+ * ORs this into its disclosedDegradation leg — mirroring the #2840
+ * both-legs discipline (the gate-side completion flag AND the projection must
+ * agree that a skip-disclosed run never admits APPROVE/REQUEST_CHANGES).
+ */
+export function stateCarriesValidationSkipDisclosure(
+	state: PrReviewCompletionState,
+	revisionDigest: string,
+): boolean {
+	const disclosure = state.prReviewValidationSkipDisclosure;
+	if (!disclosure) return false;
+	return (
+		disclosure.prHeadSha === state.prHeadSha &&
+		disclosure.revisionDigest === revisionDigest &&
+		disclosure.runId ===
+			(state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
 	);
 }
 
@@ -1720,6 +2043,10 @@ export async function readPrReviewTerminalCoverageForReport(
 		// dispatch paths keep failing closed.
 		allowedVerdicts: allowedPrReviewReportVerdicts(settlement.kind, [], {
 			disclosedCoverageDegradation:
+				// Issue #3312: a persisted validation-skip disclosure bound to
+				// the current run identity is a disclosed degradation — APPROVE is
+				// excluded for skip-disclosed runs (projection-local only).
+				stateCarriesValidationSkipDisclosure(state, ctx.revisionDigest) ||
 				prReviewReceiptHasCoverageDegradations(
 					directory,
 					state.prReviewTriggerEvalPath,

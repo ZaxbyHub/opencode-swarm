@@ -280,7 +280,11 @@ describe('#3409 background handoff refusal fences', () => {
 		const settled = findByCorrelationId(directory, CORRELATION_ID);
 		expect(settled?.coderSettlement?.state).toBe('settled');
 		expect(fs.existsSync(worktreePath)).toBe(true);
-		worktreeInternals.removeWorktree = realRemove;
+		let removalAttempts = 0;
+		worktreeInternals.removeWorktree = async (...args) => {
+			removalAttempts += 1;
+			return realRemove(...args);
+		};
 		const foreign = {
 			callID: CALL_ID,
 			parentSessionID: 'racing-owner',
@@ -302,6 +306,7 @@ describe('#3409 background handoff refusal fences', () => {
 		}).reconcilePending(settled!);
 
 		expect(recovered).toBe(false);
+		expect(removalAttempts).toBe(0);
 		expect(awaitingMergeByCallID.get(CALL_ID)).toBe(foreign);
 		expect(fs.existsSync(worktreePath)).toBe(true);
 		expect(git(directory, ['rev-parse', BRANCH])).toBe(
@@ -387,6 +392,13 @@ describe('#3409 background handoff refusal fences', () => {
 				mergeAttempts += 1;
 				return realMerge(...args);
 			};
+			// The setup refusal stub must not mask a forced removal: count calls and
+			// delegate to the real implementation so a bypassed guard really removes.
+			let removalAttempts = 0;
+			worktreeInternals.removeWorktree = async (...args) => {
+				removalAttempts += 1;
+				return realRemove(...args);
+			};
 
 			const recovered = await createBackgroundCompletionObserver({
 				config: { enabled: true },
@@ -394,6 +406,7 @@ describe('#3409 background handoff refusal fences', () => {
 			}).reconcilePending(summary!);
 
 			expect(recovered).toBe(false);
+			expect(removalAttempts).toBe(0);
 			expect(fs.existsSync(worktreePath)).toBe(true);
 			if (remnant === 'dirty lane') {
 				expect(

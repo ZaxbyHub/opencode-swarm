@@ -1011,6 +1011,370 @@ export function getMergeStrategy(config: {
 }
 
 /**
+ * Index and working-tree state taken right before `git merge --squash` runs.
+ * A failed squash is restored by comparing against this snapshot rather than
+ * by trusting git's output text.
+ */
+interface SquashStateSnapshot {
+	/** Every index record (`mode oid stage`) for each path in the whole index. */
+	index: Map<string, string>;
+	/** Incoming path -> blob oid, `absent`, or `other` (directory, symlink). */
+	worktree: Map<string, string>;
+	/**
+	 * Fingerprint of every path outside the incoming paths that differs from
+	 * HEAD, plus every assume-unchanged entry. git's failed rollback can rewrite
+	 * these too. Report-only: an `unreadable` marker never blocks a squash.
+	 */
+	dirty: Map<string, string>;
+}
+
+/** Paths per `hash-object` call. */
+const FINGERPRINT_BATCH = 200;
+/**
+ * Characters of path text per `hash-object` call. Windows caps a command line
+ * near 32K, so long paths close a batch before the path count does.
+ */
+const FINGERPRINT_ARG_BUDGET = 24_000;
+
+async function hashWorktreeFiles(
+	primaryDir: string,
+	files: string[],
+): Promise<string[] | string> {
+	const hashed = await runGit(['hash-object', '--', ...files], primaryDir);
+	if (hashed.exitCode !== 0)
+		return `hash-object: ${
+			hashed.stderr.trim() ||
+			hashed.stdout.trim() ||
+			`git exited ${hashed.exitCode}`
+		}`;
+	const oids = hashed.stdout.split(/\r?\n/).filter(Boolean);
+	return oids.length === files.length
+		? oids
+		: 'hash-object: unexpected output length';
+}
+
+/**
+ * Fingerprints working-tree files: blob oid, `absent` (missing or behind a
+ * file), `other` (directory, symlink), or `unreadable`. The default fails
+ * closed with a description, which the restore needs for the incoming paths.
+ * `tolerant` marks an unreadable file `unreadable` and keeps the rest.
+ */
+async function fingerprintWorktreePaths(
+	primaryDir: string,
+	paths: string[],
+	tolerant = false,
+): Promise<Map<string, string> | string> {
+	const fingerprints = new Map<string, string>();
+	const regular: string[] = [];
+	for (const p of paths) {
+		let stat: fs.Stats;
+		try {
+			stat = fs.lstatSync(path.join(primaryDir, p));
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === 'ENOENT' || code === 'ENOTDIR') {
+				fingerprints.set(p, 'absent');
+				continue;
+			}
+			if (!tolerant)
+				return `worktree stat for ${p}: ${(error as Error).message}`;
+			fingerprints.set(p, 'unreadable');
+			continue;
+		}
+		if (stat.isFile()) regular.push(p);
+		else fingerprints.set(p, 'other');
+	}
+	const batches: string[][] = [];
+	let batch: string[] = [];
+	let length = 0;
+	for (const p of regular) {
+		if (
+			batch.length > 0 &&
+			(batch.length >= FINGERPRINT_BATCH ||
+				length + p.length + 1 > FINGERPRINT_ARG_BUDGET)
+		) {
+			batches.push(batch);
+			batch = [];
+			length = 0;
+		}
+		batch.push(p);
+		length += p.length + 1;
+	}
+	if (batch.length > 0) batches.push(batch);
+	for (const current of batches) {
+		const oids = await hashWorktreeFiles(primaryDir, current);
+		if (typeof oids !== 'string') {
+			for (const [index, p] of current.entries())
+				fingerprints.set(p, oids[index]);
+			continue;
+		}
+		if (!tolerant) return oids;
+		// Retry one at a time so a single unreadable file cannot hide the others.
+		for (const p of current) {
+			const single = await hashWorktreeFiles(primaryDir, [p]);
+			fingerprints.set(
+				p,
+				typeof single === 'string' ? 'unreadable' : single[0],
+			);
+		}
+	}
+	return fingerprints;
+}
+
+function unmergedIndexPaths(index: Map<string, string>): Set<string> {
+	const unmerged = new Set<string>();
+	for (const [name, records] of index) {
+		if (records.split('\n').some((record) => !record.endsWith(' 0')))
+			unmerged.add(name);
+	}
+	return unmerged;
+}
+
+async function takeSquashStateSnapshot(
+	primaryDir: string,
+	incomingPaths: string[],
+): Promise<SquashStateSnapshot | string> {
+	const describe = (result: GitResult, operation: string): string =>
+		`${operation}: ${
+			result.stderr.trim() ||
+			result.stdout.trim() ||
+			`git exited ${result.exitCode}`
+		}`;
+	const listing = await runGit(['ls-files', '-s', '-z'], primaryDir);
+	if (listing.exitCode !== 0) return describe(listing, 'index listing');
+	const index = new Map<string, string>();
+	for (const record of listing.stdout.split('\0')) {
+		const tab = record.indexOf('\t');
+		if (tab < 0) continue;
+		const name = record.slice(tab + 1);
+		const entry = record.slice(0, tab);
+		index.set(name, index.has(name) ? `${index.get(name)}\n${entry}` : entry);
+	}
+	const worktree = await fingerprintWorktreePaths(primaryDir, incomingPaths);
+	if (typeof worktree === 'string') return worktree;
+	// Against HEAD, not the index: a staged-only change or a staged deletion of a
+	// committed file must be covered too.
+	const differing = await runGit(
+		['diff', '--name-only', '--no-renames', '-z', 'HEAD'],
+		primaryDir,
+	);
+	if (differing.exitCode !== 0) return describe(differing, 'HEAD diff listing');
+	const flagged = await runGit(['ls-files', '-v', '-z'], primaryDir);
+	if (flagged.exitCode !== 0) return describe(flagged, 'index tag listing');
+	const incoming = new Set(incomingPaths);
+	const outside = new Set<string>();
+	for (const name of differing.stdout.split('\0')) {
+		if (name !== '' && !incoming.has(name)) outside.add(name);
+	}
+	for (const record of flagged.stdout.split('\0')) {
+		// A lowercase tag marks an assume-unchanged entry. git's rollback rewrites
+		// those too, and they never show up in a diff.
+		if (!/^[a-z] /.test(record)) continue;
+		const name = record.slice(2);
+		if (!incoming.has(name)) outside.add(name);
+	}
+	const dirty = await fingerprintWorktreePaths(primaryDir, [...outside], true);
+	if (typeof dirty === 'string') return dirty;
+	return { index, worktree, dirty };
+}
+
+/**
+ * Restores a failed `git merge --squash --no-commit` by comparing the incoming
+ * paths against the snapshot taken just before the squash. Only state the squash
+ * changed is touched, so a user's own edit made in that window is kept:
+ *   - a path whose index entry changed was staged or unmerged by the squash;
+ *   - a tracked path whose index entry did not change, but whose working tree
+ *     did, is restored only when git's own rollback failed and left it absent
+ *     or holding exactly the lane blob (both are recoverable). Any other
+ *     working-tree edit is the user's and is reported, never overwritten;
+ *   - a lane-added path is removed only when its bytes are exactly the lane blob,
+ *     re-checked immediately before removal.
+ * Index changes and unstaged working-tree changes outside the incoming paths,
+ * and unmerged entries the squash created, are reported, never restored.
+ *
+ * @returns `null` when nothing the squash wrote is left behind, otherwise a
+ *   description of what could not be restored.
+ */
+async function restoreFailedSquashPaths(
+	primaryDir: string,
+	branchName: string,
+	incomingPaths: string[],
+	before: SquashStateSnapshot,
+): Promise<string | null> {
+	const describe = (result: GitResult, operation: string): string =>
+		`${operation}: ${
+			result.stderr.trim() ||
+			result.stdout.trim() ||
+			`git exited ${result.exitCode}`
+		}`;
+	const after = await takeSquashStateSnapshot(primaryDir, incomingPaths);
+	if (typeof after === 'string') return after;
+	const incoming = new Set(incomingPaths);
+	const reported: string[] = [];
+	const indexChanged = new Set<string>();
+	const indexNames = new Set([...before.index.keys(), ...after.index.keys()]);
+	for (const name of indexNames) {
+		if (incoming.has(name)) continue;
+		if (before.index.get(name) !== after.index.get(name)) {
+			reported.push(`changed outside the incoming paths: ${name}`);
+			indexChanged.add(name);
+		}
+	}
+	const headListing = await runGit(
+		['--literal-pathspecs', 'ls-tree', '-z', 'HEAD', '--', ...incomingPaths],
+		primaryDir,
+	);
+	if (headListing.exitCode !== 0) return describe(headListing, 'HEAD listing');
+	const headTypes = new Map<string, string>();
+	for (const record of headListing.stdout.split('\0')) {
+		const tab = record.indexOf('\t');
+		if (tab < 0) continue;
+		const [, type] = record.slice(0, tab).split(' ');
+		headTypes.set(record.slice(tab + 1), type);
+	}
+	const laneListing = await runGit(
+		[
+			'--literal-pathspecs',
+			'ls-tree',
+			'-z',
+			branchName,
+			'--',
+			...incomingPaths,
+		],
+		primaryDir,
+	);
+	// A failed lane listing does not stop the restore: without lane bytes no
+	// lane-added file can be proven, so every such file is kept and reported.
+	const laneBlobs = new Map<string, string>();
+	if (laneListing.exitCode !== 0)
+		reported.push(describe(laneListing, 'lane listing'));
+	const laneRecords =
+		laneListing.exitCode === 0 ? laneListing.stdout.split('\0') : [];
+	for (const record of laneRecords) {
+		const tab = record.indexOf('\t');
+		if (tab < 0) continue;
+		const [mode, type, oid] = record.slice(0, tab).split(' ');
+		if (type === 'blob' && mode !== '120000' && oid)
+			laneBlobs.set(record.slice(tab + 1), oid);
+	}
+	const changed: string[] = [];
+	for (const p of incomingPaths) {
+		if (before.index.get(p) !== after.index.get(p)) {
+			changed.push(p);
+			continue;
+		}
+		if (before.worktree.get(p) === after.worktree.get(p)) continue;
+		if (headTypes.get(p) !== 'blob') {
+			changed.push(p);
+			continue;
+		}
+		// A tracked path the squash changed without touching its index entry: git's
+		// own rollback failed (absent, or left the lane bytes), or the user edited it.
+		const state = after.worktree.get(p);
+		if (
+			state === 'absent' ||
+			(state !== 'other' && state === laneBlobs.get(p))
+		) {
+			changed.push(p);
+		} else {
+			reported.push(
+				`left in place (working tree changed without an index change): ${p}`,
+			);
+		}
+	}
+	if (changed.length > 0) {
+		const trackedBlobs = changed.filter((p) => headTypes.get(p) === 'blob');
+		const absentFromHead = changed.filter((p) => !headTypes.has(p));
+		for (const p of changed) {
+			const type = headTypes.get(p);
+			// A tree or submodule in HEAD is never checked out here: a directory
+			// checkout would restore its whole subtree.
+			if (type !== undefined && type !== 'blob')
+				reported.push(`not restored (directory or submodule in HEAD): ${p}`);
+		}
+		const restorable = [...trackedBlobs, ...absentFromHead];
+		if (restorable.length > 0) {
+			const reset = await runGit(
+				['--literal-pathspecs', 'reset', '-q', 'HEAD', '--', ...restorable],
+				primaryDir,
+			);
+			if (reset.exitCode !== 0) return describe(reset, 'index reset');
+		}
+		if (trackedBlobs.length > 0) {
+			const checkout = await runGit(
+				[
+					'--literal-pathspecs',
+					'checkout',
+					'-q',
+					'HEAD',
+					'--',
+					...trackedBlobs,
+				],
+				primaryDir,
+			);
+			if (checkout.exitCode !== 0) return describe(checkout, 'checkout');
+		}
+		const candidates: string[] = [];
+		for (const p of absentFromHead) {
+			const state = after.worktree.get(p);
+			if (state === 'other')
+				reported.push(`left in place (not a regular file): ${p}`);
+			else if (state !== 'absent') candidates.push(p);
+		}
+		for (const p of candidates) {
+			if (laneBlobs.get(p) !== after.worktree.get(p)) {
+				reported.push(`left in place (not the exact lane bytes): ${p}`);
+				continue;
+			}
+			// Re-hash right before removal: the match above was taken earlier, and a
+			// concurrent writer may have replaced the file since.
+			const current = await runGit(['hash-object', '--', p], primaryDir);
+			if (
+				current.exitCode !== 0 ||
+				current.stdout.trim() !== laneBlobs.get(p)
+			) {
+				reported.push(`left in place (changed since it was checked): ${p}`);
+				continue;
+			}
+			try {
+				fs.unlinkSync(path.join(primaryDir, p));
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+					reported.push(`could not remove ${p}: ${(error as Error).message}`);
+			}
+		}
+	}
+	// git's failed rollback rewrites the whole tree, so unstaged files outside the
+	// incoming paths are compared as well. Such a change is reported, never restored:
+	// nothing proves the pre-squash bytes are the squash's to revert.
+	const dirtyNames = new Set([...before.dirty.keys(), ...after.dirty.keys()]);
+	for (const name of dirtyNames) {
+		if (
+			!indexChanged.has(name) &&
+			before.dirty.get(name) !== after.dirty.get(name)
+		)
+			reported.push(
+				`working tree outside the incoming paths changed during the failed squash: ${name}`,
+			);
+	}
+	// Unmerged entries are checked across the whole index: a rename target or a
+	// directory-versus-file clash outside the incoming paths is still the squash's
+	// output. Entries already unmerged before the squash are not ours.
+	const remaining = await runGit(['ls-files', '-u', '-z'], primaryDir);
+	if (remaining.exitCode !== 0)
+		return describe(remaining, 'unmerged listing after restore');
+	const unmergedBefore = unmergedIndexPaths(before.index);
+	for (const record of remaining.stdout.split('\0')) {
+		const tab = record.indexOf('\t');
+		if (tab < 0) continue;
+		const name = record.slice(tab + 1);
+		if (!unmergedBefore.has(name)) reported.push(`unmerged: ${name}`);
+	}
+	const unique = [...new Set(reported)];
+	return unique.length === 0 ? null : `not restored: ${unique.join('; ')}`;
+}
+
+/**
  * Merges a lane branch back into the primary worktree using the specified
  * strategy.
  *
@@ -1095,6 +1459,15 @@ export async function mergeLaneBranch(
 			// Both sides of every rename record must be handled; a one-sided
 			// pathspec splits a rename into a deletion + untracked file.
 			const incomingPaths = [...parsedIncoming.paths.values()];
+			const squashSnapshot = await takeSquashStateSnapshot(
+				primaryDir,
+				incomingPaths,
+			);
+			if (typeof squashSnapshot === 'string') {
+				return {
+					error: `could not record pre-merge state before squash of ${branchName}: ${squashSnapshot}`,
+				};
+			}
 			const squashResult = await runGit(
 				['merge', '--squash', '--no-commit', branchName],
 				primaryDir,
@@ -1107,36 +1480,42 @@ export async function mergeLaneBranch(
 				// exactly the pre-merge state; the user's unrelated staged and
 				// unstaged entries are untouched.
 				const combined = `${squashResult.stderr}\n${squashResult.stdout}`;
-				const restore = await runGit(
-					['checkout', '-q', 'HEAD', '--', ...incomingPaths],
+				const restoreFailure = await restoreFailedSquashPaths(
 					primaryDir,
+					branchName,
+					incomingPaths,
+					squashSnapshot,
 				);
+				if (restoreFailure !== null) {
+					advisoryWarn(
+						`[worktree] mergeLaneBranch: squash merge failed and targeted restore also failed for ${branchName}: ${restoreFailure}`,
+					);
+				}
+				const restoreSuffix =
+					restoreFailure === null
+						? ''
+						: `; restore of pre-merge state incomplete, partial merge state may remain: ${restoreFailure}`;
 				if (/CONFLICT/i.test(combined)) {
 					return {
 						conflict: true,
 						files: parseConflictFiles(combined),
-						message:
+						message: `${
 							squashResult.stderr.trim() ||
 							squashResult.stdout.trim() ||
-							'squash merge reported a conflict',
+							'squash merge reported a conflict'
+						}${restoreSuffix}`,
 					};
 				}
-				if (restore.exitCode !== 0) {
-					advisoryWarn(
-						`[worktree] mergeLaneBranch: squash merge failed and targeted restore also failed for ${branchName}: ${
-							restore.stderr.trim() || restore.stdout.trim()
-						}`,
-					);
-				}
 				return {
-					error:
+					error: `${
 						squashResult.stderr.trim() ||
 						squashResult.stdout.trim() ||
-						'squash merge failed',
+						'squash merge failed'
+					}${restoreSuffix}`,
 				};
 			}
 			const resetResult = await runGit(
-				['reset', '-q', 'HEAD', '--', ...incomingPaths],
+				['--literal-pathspecs', 'reset', '-q', 'HEAD', '--', ...incomingPaths],
 				primaryDir,
 			);
 			if (resetResult.exitCode !== 0) {
@@ -1255,7 +1634,16 @@ async function readOrderedCommitRange(
 export async function recoverMergeBackFromImmutableCoordinates(
 	primaryDir: string,
 	coordinates: ImmutableMergeRecoveryCoordinates,
-	options?: Pick<DirtyMergeOptions, 'landingCommitMessage'>,
+	options?: Pick<DirtyMergeOptions, 'landingCommitMessage'> & {
+		/**
+		 * Land a `'merge'` recovery via the #2508 squash-unstaged shape (changes
+		 * applied unstaged, no merge commit, HEAD does not move) instead of
+		 * `git merge --no-edit`. `attemptMergeBackFromDirty` sets it whenever the
+		 * caller did not opt into `commitLanding`, so the retarget path lands in
+		 * the same shape as the normal path. Ignored for `rebase`/`cherry-pick`.
+		 */
+		landUnstaged?: boolean;
+	},
 ): Promise<ImmutableMergeRecoveryResult> {
 	if (
 		!GIT_OBJECT_ID_PATTERN.test(coordinates.sourceBaseOid) ||
@@ -1333,6 +1721,13 @@ export async function recoverMergeBackFromImmutableCoordinates(
 	}
 
 	if (coordinates.strategy === 'merge') {
+		if (options?.landUnstaged) {
+			return mergeLaneBranch(
+				primaryDir,
+				coordinates.sourceHeadOid,
+				'squash-unstaged',
+			);
+		}
 		return mergeLaneBranch(
 			primaryDir,
 			coordinates.sourceHeadOid,
@@ -1831,6 +2226,32 @@ async function handleSourceWorktreeGone(
 }
 
 /**
+ * Releases the preserved settlement-source ref once a landing is VERIFIED
+ * (ancestry, cherry-pick trailer, or a successful committed git merge).
+ *
+ * The landing has already happened, so a release failure must not change the
+ * outcome: failing here would make a resumed settlement re-run a merge that
+ * already landed. The leftover backup ref is harmless (the next reconcile
+ * releases it again), so the failure is surfaced as an advisory warning only.
+ * Every verified-landing call site routes through here so the same release
+ * failure yields the same outcome on the resume, retarget and fresh paths.
+ */
+async function releaseVerifiedSettlementSource(
+	primaryDir: string,
+	sourceHead: string,
+	context: string,
+): Promise<void> {
+	try {
+		await releaseSettlementSource(primaryDir, sourceHead);
+	} catch (error) {
+		advisoryWarn(
+			`[worktree] attemptMergeBackFromDirty: landing verified (${context}) but releasing preserved settlement source ${sourceHead} failed; outcome unchanged, backup ref left in place:`,
+			error,
+		);
+	}
+}
+
+/**
  * Attempts to merge a lane branch back from a potentially dirty worktree
  * using progressive cleanup (DD-7).
  *
@@ -1932,16 +2353,11 @@ export async function attemptMergeBackFromDirty(
 		}
 		if (reconciliation.landed) {
 			if (reconciliation.method !== 'worktree-match') {
-				try {
-					await releaseSettlementSource(primaryDir, provenance.sourceHead);
-				} catch (error) {
-					return {
-						failed: true,
-						stage: 'reconciliation',
-						message: String(error),
-						provenance,
-					};
-				}
+				await releaseVerifiedSettlementSource(
+					primaryDir,
+					provenance.sourceHead,
+					'resume reconciliation',
+				);
 			}
 			return {
 				merged: true,
@@ -2052,24 +2468,31 @@ export async function attemptMergeBackFromDirty(
 					targetHeadOid: targetHead.stdout.trim(),
 					strategy,
 				},
+				// Same mapping as the normal path below: a 'merge' dispatch without
+				// `commitLanding` lands squash-unstaged, never as a merge commit.
 				options.commitLanding
 					? { landingCommitMessage: options.landingCommitMessage }
-					: undefined,
+					: { landUnstaged: true },
 			);
 			if ('merged' in result) {
-				try {
-					await releaseSettlementSource(primaryDir, provenance.sourceHead);
-				} catch (error) {
-					return {
-						failed: true,
-						stage: 'reconciliation',
-						message: String(error),
-						provenance,
-					};
+				// A squash-unstaged landing keeps its preserved source ref (the
+				// unstaged bytes are only recognisable via that commit), exactly
+				// like the worktree-match reconciliation above. The git merge
+				// itself succeeded, so a release failure on a committed landing
+				// is advisory only.
+				if (result.strategy !== 'squash-unstaged') {
+					await releaseVerifiedSettlementSource(
+						primaryDir,
+						provenance.sourceHead,
+						'retarget recovery',
+					);
 				}
 				return {
 					merged: true,
-					strategy,
+					strategy:
+						result.strategy === 'squash-unstaged'
+							? 'squash-unstaged'
+							: strategy,
 					autoCommitted: false,
 					cleaned: false,
 					reconciled: false,
@@ -2262,16 +2685,11 @@ export async function attemptMergeBackFromDirty(
 		if (provenance && landingStrategy !== 'squash-unstaged') {
 			const landed = await reconcileLandedMerge(primaryDir, provenance);
 			if (landed.landed && landed.method !== 'worktree-match') {
-				try {
-					await releaseSettlementSource(primaryDir, provenance.sourceHead);
-				} catch (error) {
-					return {
-						failed: true,
-						stage: 'reconciliation',
-						message: String(error),
-						provenance,
-					};
-				}
+				await releaseVerifiedSettlementSource(
+					primaryDir,
+					provenance.sourceHead,
+					'fresh landing',
+				);
 			}
 		}
 		return {

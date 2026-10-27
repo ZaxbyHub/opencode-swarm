@@ -49,7 +49,13 @@ function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
-function isNotGitRepositoryMessage(message: string): boolean {
+/**
+ * Repo-detection vocabulary shared with the async detailed reader
+ * (`src/commands/git-status-read.ts`, #3427): the same case-folded phrases
+ * classify a nonzero `rev-parse` exit as `not_git_repo` on the sync and
+ * async probe paths alike, so the two probes cannot drift apart.
+ */
+export function isNotGitRepositoryMessage(message: string): boolean {
 	const lower = message.toLowerCase();
 	return (
 		lower.includes('not a git repository') || lower.includes('not a git repo')
@@ -194,7 +200,7 @@ export function readLaneEnvFileFromDiskSync(
  * classified as present-and-a-directory, which is the fact that rules the
  * #2236 misdiagnosis out rather than leaving it implied.
  */
-function gitBinaryMissingMessage(cwd: string): string {
+export function gitBinaryMissingMessage(cwd: string): string {
 	const resolution = describeGitResolution();
 	const lines = [
 		`git executable is not available: spawning "${

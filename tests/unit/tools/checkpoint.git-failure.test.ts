@@ -1,16 +1,14 @@
 /**
  * Git-failure handling tests for src/tools/checkpoint.ts
  *
- * These tests verify:
- * 1. gitExec transient retry on ETIMEDOUT
- * 2. gitExec immediate throw on permanent (non-zero exit) errors
- * 3. isGitRepo warning on permanent git failure (surfaces via entry guard)
- * 4. Entry guard surfaces specific warning instead of generic message
- *
- * NOTE: saveCheckpointRecord's "empty SHA warning" is NOT reachable via
- * checkpoint.execute('save') — handleSave throws when getCurrentSha throws,
- * propagating to execute() error path. saveCheckpointRecord is internal-only.
- * The entry guard (isGitRepo warning) is the testable surface for git failures.
+ * #3427 rewrite: the entry preflight rides the shared async reader
+ * (`readGitRepositoryStatusAsync`) instead of the local sync `isGitRepo`
+ * helper, so preflight legs stub the READER (a spread-real module mock of
+ * `git-status-read`) and assert the uniform not-a-repository refusal with
+ * ZERO sync spawns. The local `gitExec` retry/classification contract is
+ * unchanged and still covered — through the `save` action's `handleSave`
+ * body, which retains the sync gitExec chain (stageAllExcludingSwarm is its
+ * first git call).
  *
  * These tests MUST run in isolation from checkpoint.test.ts (real git tests)
  * because they mock spawnSync globally. They are in a separate file to avoid
@@ -51,19 +49,30 @@ mock.module('node:child_process', () => ({
 	spawnSync: mockSpawnSync,
 }));
 
-// Import checkpoint AFTER mock is set up
+// #3427 feedback (PRR-011): the reader probes are stubbed through the
+// _internals seams by PROPERTY ASSIGNMENT (restored in afterEach) — the
+// previous mock.module registration on the git-status-read module was
+// process-global and poisoned co-run files. `setupReader` arms both seams:
+// the preflight reads the DETAILED twin (#3442 cause-specific refusal), the
+// save probe reads the boolean-ok twin.
+let repoProbeResult = false;
+let readerCalls = 0;
+
+// Import checkpoint BEFORE installing seam stubs (property assignment needs
+// the live _internals object).
 const { checkpoint, _internals } = await import(
 	'../../../src/tools/checkpoint'
 );
 
-// Issue #2236 hardening: `gitExec` now resolves the git executable via
+const originalReadGitStatusAsync = _internals.readGitStatusAsync;
+const originalReadDetailed = _internals.readGitRepositoryStatusDetailedAsync;
+
+// Issue #2236 hardening: `gitExec` resolves the git executable via
 // `_internals.resolveGitExecutable()` before spawning. Left un-stubbed, that
 // resolver's own candidate-probing loop would consume calls from the SAME
 // mocked `spawnSync` this file uses to drive `gitExec`'s retry/classification
 // logic, throwing off the `callCount` assertions below. Stubbed to a fixed
-// value so only `gitExec`'s own spawn calls are counted — mirrors
-// `src/git/branch.ts`'s `_internals.resolveGitExecutable` test convention
-// (see tests/unit/git/branch-clean.test.ts).
+// value so only `gitExec`'s own spawn calls are counted.
 const originalResolveGitExecutable = _internals.resolveGitExecutable;
 
 function setupMock(...values: Array<child_process.SpawnSyncReturns<string>>) {
@@ -72,243 +81,90 @@ function setupMock(...values: Array<child_process.SpawnSyncReturns<string>>) {
 	mockSpawnSync.mockClear();
 }
 
+function setupReader(isRepo: boolean) {
+	repoProbeResult = isRepo;
+	readerCalls = 0;
+	_internals.readGitRepositoryStatusDetailedAsync = (async () => {
+		readerCalls += 1;
+		return isRepo
+			? { isRepo: true as const }
+			: {
+					isRepo: false as const,
+					reason: 'not_git_repo' as const,
+					message: 'fatal: not a git repository',
+				};
+	}) as unknown as typeof _internals.readGitRepositoryStatusDetailedAsync;
+	_internals.readGitStatusAsync = (async () => {
+		readerCalls += 1;
+		return isRepo
+			? { ok: true as const, stdout: '.git' }
+			: { ok: false as const, code: null, status: 1, stderrTail: '' };
+	}) as unknown as typeof _internals.readGitStatusAsync;
+}
+
 beforeEach(() => {
 	_internals.resolveGitExecutable = () => 'git';
 });
 
-// Undo the module mock after all tests in this file
+// Restore every property-assignment seam (the node:child_process mock.module
+// below stays for the file's lifetime — its isolation constraint is the
+// file-header note, unchanged from base).
 afterEach(() => {
 	mock.restore();
 	_internals.resolveGitExecutable = originalResolveGitExecutable;
+	_internals.readGitStatusAsync = originalReadGitStatusAsync;
+	_internals.readGitRepositoryStatusDetailedAsync = originalReadDetailed;
 });
 
 // =============================================================================
-// gitExec transient retry
+// Entry preflight — async reader (#3427)
 // =============================================================================
 
-describe('gitExec transient retry', () => {
-	/**
-	 * Test that gitExec retries on ETIMEDOUT errors.
-	 *
-	 * The 'list' action triggers isGitRepo (one gitExec call).
-	 * We make it return ETIMEDOUT so gitExec retries MAX_TRANSIENT_RETRIES
-	 * times, then throws. The entry guard catches this and returns a
-	 * transient failure warning.
-	 */
-	test('retries on ETIMEDOUT and surfaces transient failure warning via entry guard', async () => {
-		// All calls return ETIMEDOUT — gitExec will retry up to
-		// MAX_TRANSIENT_RETRIES (5) times, then throw.
-		const etimedoutError = {
-			status: null as number | null,
-			stdout: '',
-			stderr: '',
-			error: {
-				code: 'ETIMEDOUT',
-				message: 'spawn ETIMEDOUT',
-			} as NodeJS.ErrnoException,
-		};
+describe('entry preflight rides the async reader', () => {
+	test('reader-false directory refuses with the uniform message and ZERO sync spawns', async () => {
+		setupReader(false);
+		setupMock();
 
-		// Provide enough ETIMEDOUT values to exhaust all retry attempts.
-		// isGitRepo makes 1 call that retried 5 times = 5 total calls.
-		setupMock(
-			etimedoutError,
-			etimedoutError,
-			etimedoutError,
-			etimedoutError,
-			etimedoutError,
+		const result = await checkpoint.execute({ action: 'list' });
+
+		const parsed = JSON.parse(result);
+		expect(parsed.success).toBe(false);
+		// Uniform refusal — the old sync probe's retry-chain warning texts
+		// ("git probe failed after retry exhaustion - …") died with the
+		// removed local isGitRepo helper.
+		expect(parsed.error).toBe(
+			'not a git repository - checkpoint tools require a git repository',
 		);
-
-		const result = await checkpoint.execute({ action: 'list' });
-
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		// Entry guard surfaces the retry-exhaustion warning from isGitRepo
-		expect(parsed.error).toContain('retry exhaustion');
-		// 5 calls = 1st attempt + 4 retries exhausted
-		expect(callCount).toBe(5);
-	});
-
-	test('permanent (non-zero exit) error throws immediately without retry', async () => {
-		// Non-zero exit status is a permanent error — should throw on FIRST call.
-		// isGitRepo catches it and returns { isRepo: false, warning }.
-		setupMock({
-			status: 128,
-			stdout: '',
-			stderr: 'fatal: not a git repository',
-			error: undefined,
-		});
-
-		const result = await checkpoint.execute({ action: 'list' });
-
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		// isGitRepo permanent failure warning
-		expect(parsed.error).toMatch(/git probe failed|not a git repository/);
-		// MUST be exactly 1 call — no retry for permanent errors
-		expect(callCount).toBe(1);
-	});
-
-	test('non-ETIMEDOUT spawn error without ENOENT pattern throws immediately', async () => {
-		// ENOENT is classified as transient by isGitRepo (matches /ENOENT/i).
-		// Use a different error code to test the permanent spawn-error path.
-		setupMock({
-			status: null as number | null,
-			stdout: '',
-			stderr: '',
-			error: {
-				code: 'EACCES',
-				message: 'spawn EACCES',
-			} as NodeJS.ErrnoException,
-		});
-
-		const result = await checkpoint.execute({ action: 'list' });
-
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		// Should be the permanent failure warning (EACCES is NOT transient)
-		expect(parsed.error).toMatch(/git probe failed|EACCES/);
-		// Exactly 1 call — no retry for non-ETIMEDOUT permanent spawn errors
-		expect(callCount).toBe(1);
-	});
-});
-
-// =============================================================================
-// isGitRepo warning on permanent failure
-// =============================================================================
-
-describe('isGitRepo warning on permanent failure', () => {
-	test('returns warning when git probe fails permanently', async () => {
-		setupMock({
-			status: 128,
-			stdout: '',
-			stderr: 'fatal: not a git repository',
-			error: undefined,
-		});
-
-		const result = await checkpoint.execute({ action: 'list' });
-
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		// Error includes the specific warning from isGitRepo's catch block
-		expect(parsed.error).toMatch(/git probe failed|not a git repository/);
-		expect(callCount).toBe(1);
-	});
-
-	test('transient ETIMEDOUT in isGitRepo surfaces retry-exhaustion warning', async () => {
-		// When all retries are exhausted for ETIMEDOUT, isGitRepo catches
-		// the throw and returns a transient failure warning.
-		const etimedoutError = {
-			status: null as number | null,
-			stdout: '',
-			stderr: '',
-			error: {
-				code: 'ETIMEDOUT',
-				message: 'spawn ETIMEDOUT',
-			} as NodeJS.ErrnoException,
-		};
-		setupMock(
-			etimedoutError,
-			etimedoutError,
-			etimedoutError,
-			etimedoutError,
-			etimedoutError,
-		);
-
-		const result = await checkpoint.execute({ action: 'list' });
-
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		// Should be the retry-exhaustion warning from isGitRepo's catch block
-		expect(parsed.error).toContain('retry exhaustion');
-	});
-});
-
-// =============================================================================
-// Entry guard warning specificity
-// =============================================================================
-
-describe('Entry guard warning specificity', () => {
-	test('error includes specific isGitRepo warning, not generic message', async () => {
-		// Permanent failure — isGitRepo catch block returns:
-		// { isRepo: false, warning: 'git probe failed — directory may not be a git repository' }
-		setupMock({
-			status: 128,
-			stdout: '',
-			stderr: 'fatal: not a git repository',
-			error: undefined,
-		});
-
-		const result = await checkpoint.execute({ action: 'list' });
-
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		// Error should include the specific warning from isGitRepo
-		expect(parsed.error).toContain('git probe failed');
-		// And the suffix about requiring a git repository
 		expect(parsed.error).toContain('checkpoint tools require a git repository');
+		// The preflight crossed the reader, never a sync spawn.
+		expect(readerCalls).toBe(1);
+		expect(callCount).toBe(0);
 	});
 
-	test('transient ETIMEDOUT error includes retry-exhaustion specific message', async () => {
-		const etimedoutError = {
-			status: null as number | null,
-			stdout: '',
-			stderr: '',
-			error: {
-				code: 'ETIMEDOUT',
-				message: 'spawn ETIMEDOUT',
-			} as NodeJS.ErrnoException,
-		};
-		setupMock(
-			etimedoutError,
-			etimedoutError,
-			etimedoutError,
-			etimedoutError,
-			etimedoutError,
-		);
+	test('reader-true preflight proceeds to the action without sync spawns (list)', async () => {
+		setupReader(true);
+		setupMock();
 
 		const result = await checkpoint.execute({ action: 'list' });
 
 		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		// Should surface the specific retry-exhaustion warning, not generic message
-		expect(parsed.error).toContain('retry exhaustion');
-		expect(parsed.error).toContain('checkpoint tools require a git repository');
+		expect(parsed.success).toBe(true);
+		expect(readerCalls).toBe(1);
+		// list is read-only filesystem work — no git spawn at all.
+		expect(callCount).toBe(0);
 	});
 });
 
 // =============================================================================
-// saveCheckpointRecord empty SHA — NOT directly testable via execute('save')
+// Entry guard blocks save action on a reader-false directory
 // =============================================================================
 
-describe('saveCheckpointRecord — unreachable via execute (internal only)', () => {
-	/**
-	 * saveCheckpointRecord is NOT exported — it's internal to checkpoint.ts.
-	 *
-	 * The warning "no git restore target — checkpoint recorded without a SHA"
-	 * is set inside saveCheckpointRecord when sha is empty. However:
-	 *
-	 * - checkpoint.execute('save') calls handleSave, NOT saveCheckpointRecord
-	 * - handleSave throws when getCurrentSha throws, so the warning is not returned
-	 * - The warning is only returned by saveCheckpointRecord itself
-	 *
-	 * This code path is NOT reachable via the public execute() interface.
-	 * Recorded here as documentation of the limitation.
-	 */
-	test.skip('saveCheckpointRecord warning is internal-only and not testable via execute', () => {
-		// This test is a no-op marker documenting that the warning path
-		// inside saveCheckpointRecord cannot be exercised through execute('save').
-		// The function is internal (not exported) and handleSave throws instead
-		// of returning the warning when getCurrentSha throws.
-	});
-});
-
-// =============================================================================
-// Entry guard blocks save action on non-git directory
-// =============================================================================
-
-describe('Entry guard blocks save on non-git directory', () => {
-	test('save action returns error with specific warning when not a git repo', async () => {
-		// First call: isGitRepo probe → permanent failure
+describe('entry guard blocks save on reader-false directory', () => {
+	test('save action returns the uniform refusal before any mutation', async () => {
+		setupReader(false);
+		// If the guard leaked, handleSave's first gitExec call would consume
+		// this permanent-failure value — the assertion surface below proves
+		// it never ran.
 		setupMock({
 			status: 128,
 			stdout: '',
@@ -323,7 +179,105 @@ describe('Entry guard blocks save on non-git directory', () => {
 
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
-		expect(parsed.error).toMatch(/git probe failed|not a git repository/);
-		expect(parsed.error).toContain('checkpoint tools require a git repository');
+		expect(parsed.error).toBe(
+			'not a git repository - checkpoint tools require a git repository',
+		);
+		expect(readerCalls).toBe(1);
+		expect(callCount).toBe(0);
 	});
 });
+
+// =============================================================================
+// gitExec transient retry — via the save action's handleSave body
+// =============================================================================
+
+describe('gitExec transient retry (via handleSave)', () => {
+	/**
+	 * The preflight passes (reader true), so handleSave runs and its first
+	 * git call — stageAllExcludingSwarm — exercises the local gitExec
+	 * retry/classification contract under the mocked spawnSync.
+	 */
+	const etimedoutError = {
+		status: null as number | null,
+		stdout: '',
+		stderr: '',
+		error: {
+			code: 'ETIMEDOUT',
+			message: 'spawn ETIMEDOUT',
+		} as NodeJS.ErrnoException,
+	};
+
+	test('retries on ETIMEDOUT up to the retry ceiling, then fails the save', async () => {
+		setupReader(true);
+		// Enough ETIMEDOUT values to exhaust every retry attempt.
+		setupMock(
+			etimedoutError,
+			etimedoutError,
+			etimedoutError,
+			etimedoutError,
+			etimedoutError,
+		);
+
+		const result = await checkpoint.execute({
+			action: 'save',
+			label: 'retry-exhaustion-probe',
+		});
+
+		const parsed = JSON.parse(result);
+		expect(parsed.success).toBe(false);
+		expect(parsed.error).toMatch(/ETIMEDOUT|save failed/);
+		// 5 calls = first attempt + retries exhausted.
+		expect(callCount).toBe(5);
+	});
+
+	test('permanent (non-zero exit) error throws immediately without retry', async () => {
+		setupReader(true);
+		setupMock({
+			status: 128,
+			stdout: '',
+			stderr: 'fatal: bad object HEAD',
+			error: undefined,
+		});
+
+		const result = await checkpoint.execute({
+			action: 'save',
+			label: 'permanent-failure-probe',
+		});
+
+		const parsed = JSON.parse(result);
+		expect(parsed.success).toBe(false);
+		expect(parsed.error).toContain('fatal: bad object HEAD');
+		// Exactly 1 call — no retry for permanent errors.
+		expect(callCount).toBe(1);
+	});
+
+	test('non-ETIMEDOUT spawn error (EACCES) throws immediately', async () => {
+		setupReader(true);
+		setupMock({
+			status: null as number | null,
+			stdout: '',
+			stderr: '',
+			error: {
+				code: 'EACCES',
+				message: 'spawn EACCES',
+			} as NodeJS.ErrnoException,
+		});
+
+		const result = await checkpoint.execute({
+			action: 'save',
+			label: 'spawn-error-probe',
+		});
+
+		const parsed = JSON.parse(result);
+		expect(parsed.success).toBe(false);
+		expect(parsed.error).toMatch(/EACCES|save failed/);
+		// Exactly 1 call — no retry for non-ETIMEDOUT permanent spawn errors.
+		expect(callCount).toBe(1);
+	});
+});
+
+// NOTE (coverage map): saveCheckpointRecord's reader-backed probe and its
+// empty-SHA guard are exercised in
+// tests/unit/tools/checkpoint-preflight-async-3317.test.ts (the #3427
+// dedicated suite); restore-path git failures stay covered by
+// checkpoint-restore-gate.test.ts / checkpoint-restore-cause-3275.test.ts.

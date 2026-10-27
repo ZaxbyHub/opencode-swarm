@@ -92,6 +92,7 @@ async function settleSixThenCritic(): Promise<void> {
 		[
 			{
 				laneId: 'critic-all',
+				agent: 'critic',
 				workflowLane: 'critic-all',
 				reviewItemIds: BASE_IDS,
 			},
@@ -142,7 +143,15 @@ async function criticBatch(batchId: string): Promise<void> {
 		tempDir,
 		SESSION_ID,
 		'critic',
-		[{ laneId: batchId, workflowLane: batchId, reviewItemIds: BASE_IDS }],
+		// Issue #3340: critic batches must declare the critic agent per lane.
+		[
+			{
+				laneId: batchId,
+				workflowLane: batchId,
+				reviewItemIds: BASE_IDS,
+				agent: 'critic',
+			},
+		],
 		{ batchId, prHeadSha: HEAD_SHA },
 	);
 	await persistBatch(
@@ -351,6 +360,7 @@ describe('pr-workflow-gate critic batch eligibility', () => {
 			[
 				{
 					laneId: criticLane,
+					agent: 'critic',
 					workflowLane: criticLane,
 					reviewItemIds: itemIds,
 				},

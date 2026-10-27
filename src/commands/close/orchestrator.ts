@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -13,15 +12,19 @@ import { buildActionMenu } from '../../services/session-reflection';
 import { closeSnapshotCoordinationInitialization } from '../../session/snapshot-coordination-init.js';
 import { hasActiveFullAuto, swarmState } from '../../state';
 import { atomicWriteSwarmFile } from '../../utils/atomic-write';
-import { resolveGitExecutable } from '../../utils/git-executable.js';
 import { log } from '../../utils/logger';
 import {
 	consumeConfirmToken,
 	GIT_STATUS_ARGS,
 	issueConfirmToken,
 	type PurgeCandidate,
-	parseTrackedDirtyPaths,
+	parseTrackedDirtyPathsWithExclusions,
 } from '../destructive-purge.js';
+import {
+	type GitStatusReadResult,
+	readGitStatusAsync,
+} from '../git-status-read.js';
+import { formatExcludedRecord } from '../rollback-gate.js';
 import { runAlignStage } from './align-stage.js';
 import { emitCloseArchiveResult, runArchiveStage } from './archive-stage.js';
 import { runCleanStage } from './clean-stage.js';
@@ -62,23 +65,119 @@ export interface ClosePurgeGate {
 	 * not trip this signal.
 	 */
 	gitStatusFailed: boolean;
+	/**
+	 * #3317: WHY the read failed, when the async reader could tell — error
+	 * code, exit status, and a bounded stderr tail, interpolated into the
+	 * abort text with a remedy that matches the cause.
+	 */
+	statusFailure?: {
+		code: string | null;
+		status: number | null;
+		stderrTail: string;
+	};
+	/**
+	 * #3434: porcelain records whose path normalized outside the project
+	 * root — excluded from `dirtyPaths`/`candidates` (and therefore from the
+	 * confirm-token digest) and surfaced as a bounded warning instead of
+	 * being joined into the scope unvalidated.
+	 */
+	excludedOutOfRoot: string[];
 }
 
-function runCloseGateGit(args: string[], cwd: string): string | null {
-	const result = spawnSync(resolveGitExecutable(), args, {
-		cwd,
-		encoding: 'utf8',
-		timeout: 10_000,
-		maxBuffer: 1024 * 1024,
-		windowsHide: true,
-		stdio: ['ignore', 'pipe', 'pipe'],
-	});
-	if (result.error || result.status !== 0) return null;
-	return result.stdout ?? '';
+/**
+ * Normalized outcome of one gate git read (#3317). Legacy seam shapes keep
+ * their meaning: a sync `string` is stdout, a sync `null` is an unreadable
+ * read with no detail (the #2508 stub contract), and a `GitStatusReadResult`
+ * is the structured async-reader outcome.
+ */
+type CloseGateReadOutcome =
+	| { kind: 'ok'; stdout: string }
+	| {
+			kind: 'failed';
+			failure: {
+				code: string | null;
+				status: number | null;
+				stderrTail: string;
+			};
+	  };
+
+async function readCloseGateGit(
+	args: string[],
+	cwd: string,
+): Promise<CloseGateReadOutcome> {
+	const raw = await _closeGateInternals.runGit(args, cwd);
+	if (typeof raw === 'string') return { kind: 'ok', stdout: raw };
+	if (raw === null) {
+		return {
+			kind: 'failed',
+			failure: { code: null, status: null, stderrTail: '' },
+		};
+	}
+	if (raw.ok) return { kind: 'ok', stdout: raw.stdout };
+	return {
+		kind: 'failed',
+		failure: {
+			code: raw.code,
+			status: raw.status,
+			stderrTail: raw.stderrTail,
+		},
+	};
 }
 
-/** Test seam for the #2508 gate (simulate git-status read failures). */
-export const _closeGateInternals = { runGit: runCloseGateGit };
+/**
+ * #3317: the cause-matched remedy for a failed gate read. The old text blamed
+ * availability ("Ensure git is available…") for every failure class — wrong
+ * advice whenever git is present and the read itself failed (the #3275 field
+ * report timed out with git working; a corrupt index exits 128).
+ */
+function describeCloseGateStatusFailure(failure?: {
+	code: string | null;
+	status: number | null;
+	stderrTail: string;
+}): string {
+	if (!failure) {
+		return 'The read failed without a reported cause. Inspect git status manually in that directory, then re-run /swarm close.';
+	}
+	if (failure.code === 'ETIMEDOUT') {
+		return 'The git status read timed out (ETIMEDOUT): git was launched but did not answer within the deadline — the host process may be unable to complete child spawns while loaded. Restart the OpenCode host (or inspect the host runtime / security software), then re-run /swarm close.';
+	}
+	if (failure.code === 'EOUTPUT') {
+		return `The git status read exceeded its output safety bound (${failure.stderrTail}) — the working set is too large to verify in one read. Reduce the change footprint (commit or stash some work, or remove untracked bulk), then re-run /swarm close.`;
+	}
+	if (failure.code === 'ESIGNAL') {
+		return `The git process was terminated before it answered (signal)${
+			failure.stderrTail ? `: ${failure.stderrTail}` : ''
+		} — something external (a kill or resource manager) stopped it. Re-run /swarm close; if it recurs, inspect what terminates child processes in this environment.`;
+	}
+	if (failure.code === 'ENOENT') {
+		return 'The git executable was not found (ENOENT). Install git on PATH, or set git.binary in your USER-level config (project-level git.binary is ignored), then re-run /swarm close.';
+	}
+	if (failure.code !== null) {
+		return `The git status read failed to spawn (code ${failure.code}). Inspect git availability in that environment, then re-run /swarm close.`;
+	}
+	if (failure.status !== null) {
+		return `git status exited with status ${failure.status}${
+			failure.stderrTail ? `: ${failure.stderrTail}` : ''
+		}. Repair the repository state (for example, a damaged .git/index), then re-run /swarm close.`;
+	}
+	return 'The git status read failed without a reported cause. Inspect git status manually in that directory, then re-run /swarm close.';
+}
+
+/** Test seam for the #2508 gate (simulate git-status read failures). The
+ * default routes through the #3317 async reader; legacy sync stubs returning
+ * `string | null` keep their original meaning (await-tolerant). */
+export const _closeGateInternals: {
+	runGit: (
+		args: string[],
+		cwd: string,
+	) =>
+		| string
+		| null
+		| GitStatusReadResult
+		| Promise<string | null | GitStatusReadResult>;
+} = {
+	runGit: (args, cwd) => readGitStatusAsync(args, cwd),
+};
 
 /**
  * A real git repository root: `.git` is a linked-worktree/submodule pointer
@@ -96,21 +195,25 @@ function isRealGitRepository(directory: string): boolean {
 	return fsSync.existsSync(path.join(directory, '.git', 'HEAD'));
 }
 
-export function evaluateClosePurgeGate(
+export async function evaluateClosePurgeGate(
 	directory: string,
 	swarmDir: string,
-): ClosePurgeGate {
+): Promise<ClosePurgeGate> {
 	// #2953: the gate measurement consumes the SAME argv (GIT_STATUS_ARGS) and
-	// the SAME parser (parseTrackedDirtyPaths) as the align-stage guard's
+	// the SAME parser family as the align-stage guard's
 	// pre-destruction re-check — both live in destructive-purge.ts, so both
 	// reads parse identically. (Separate spawn wrappers by design: this one
 	// keeps the #2508 test seam.)
-	const statusOutput = _closeGateInternals.runGit(
-		[...GIT_STATUS_ARGS],
-		directory,
-	);
-	const dirtyPaths =
-		statusOutput === null ? [] : parseTrackedDirtyPaths(statusOutput);
+	// #3317: the read is async, bounded, and killable; a failure carries its
+	// cause out through `statusFailure` so the abort can name it.
+	// #3434: the WithExclusions form carries the out-of-root records so the
+	// gate result can surface them; the digest input stays the filtered set.
+	const statusOutput = await readCloseGateGit([...GIT_STATUS_ARGS], directory);
+	const parsed =
+		statusOutput.kind === 'ok'
+			? parseTrackedDirtyPathsWithExclusions(statusOutput.stdout)
+			: { dirtyPaths: [] as string[], excludedOutOfRoot: [] as string[] };
+	const dirtyPaths = parsed.dirtyPaths;
 	const candidates: PurgeCandidate[] = dirtyPaths.map((p) => ({
 		path: path.join(directory, p),
 		reason: 'uncommitted tracked change — discarded by git alignment',
@@ -135,7 +238,13 @@ export function evaluateClosePurgeGate(
 		// A repository whose status cannot be read is never "clean" — fail
 		// closed. Non-repository `.git` markers (#2127 roots) carry no
 		// git-tracked work, so a failed read there is an answer, not a gap.
-		gitStatusFailed: statusOutput === null && isRealGitRepository(directory),
+		gitStatusFailed:
+			statusOutput.kind === 'failed' && isRealGitRepository(directory),
+		statusFailure:
+			statusOutput.kind === 'failed' && isRealGitRepository(directory)
+				? statusOutput.failure
+				: undefined,
+		excludedOutOfRoot: parsed.excludedOutOfRoot,
 	};
 }
 
@@ -252,12 +361,14 @@ export async function handleCloseCommand(
 	const confirmToken = confirmArg
 		? confirmArg.slice('--confirm='.length)
 		: undefined;
-	const purgeGate = evaluateClosePurgeGate(directory, swarmDir);
+	const purgeGate = await evaluateClosePurgeGate(directory, swarmDir);
 	// #2508 fail-closed: without a readable git status the gate cannot prove
 	// the align stage safe. Refuse the destructive pipeline outright — a
 	// measurement that cannot be taken must never read as "clean tree".
+	// #3317: name WHY the read failed (code, exit status, stderr tail) and
+	// give a remedy that matches the cause instead of blaming availability.
 	if (purgeGate.gitStatusFailed) {
-		return `🛑 /swarm close aborted (fail-closed): git status could not be read in ${directory}, so the destructive-purge gate cannot verify uncommitted tracked work. Nothing was closed, archived, or destroyed. Ensure git is available and the repository is readable, then re-run /swarm close.`;
+		return `🛑 /swarm close aborted (fail-closed): git status could not be read in ${directory}, so the destructive-purge gate cannot verify uncommitted tracked work. Nothing was closed, archived, or destroyed. ${describeCloseGateStatusFailure(purgeGate.statusFailure)}`;
 	}
 	if (confirmToken !== undefined) {
 		const verdict = consumeConfirmToken(
@@ -280,12 +391,20 @@ export async function handleCloseCommand(
 		});
 		const listed = purgeGate.dirtyPaths.slice(0, 10);
 		const overflow = purgeGate.dirtyPaths.length - listed.length;
+		// #3434: the early confirmation preview surfaces out-of-root
+		// exclusions here — it returns before any ctx exists.
 		return [
 			'🔐 Destructive close preview — confirmation required.',
 			'',
 			`Git alignment would DISCARD ${purgeGate.dirtyPaths.length} uncommitted tracked change(s):`,
 			...listed.map((p) => `  - ${p}`),
 			...(overflow > 0 ? [`  … and ${overflow} more`] : []),
+			...(purgeGate.excludedOutOfRoot.length > 0
+				? [
+						'',
+						`⚠ ${purgeGate.excludedOutOfRoot.length} out-of-root porcelain record(s) were excluded from this scope (first: ${formatExcludedRecord(purgeGate.excludedOutOfRoot[0])})`,
+					]
+				: []),
 			'',
 			`${activeStateCount} active-state artifact(s) will be archived, then removed.`,
 			'',
@@ -374,7 +493,15 @@ export async function handleCloseCommand(
 			planAlreadyDone,
 			config,
 			projectName: planData.title ?? 'Unknown Project',
-			warnings: [],
+			// #3434: the confirmed full-pipeline run seeds the close summary
+			// with the exclusion diagnostic (the early preview carried it in
+			// its own output; the warnings channel keeps it visible here).
+			warnings:
+				purgeGate.excludedOutOfRoot.length > 0
+					? [
+							`⚠ ${purgeGate.excludedOutOfRoot.length} out-of-root porcelain record(s) were excluded from the destructive scope (first: ${formatExcludedRecord(purgeGate.excludedOutOfRoot[0])})`,
+						]
+					: [],
 			closedPhases: [],
 			closedTasks: [],
 			sessionStart: undefined,

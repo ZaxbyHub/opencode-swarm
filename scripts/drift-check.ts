@@ -28,7 +28,9 @@
  *                         GATE_CONFIG_KNOWN_SECTION_KEYS +
  *                         GATE_CONFIG_READERS (issue #2524).
  *  10. dep-freshness    — locked @opencode-ai/* resolution vs npm-latest (issue
- *                         #1899). Env-gated (SWARM_DEP_FRESHNESS_CHECK) and
+ *                         #1899), plus the vendored @opencode/plugin pin in
+ *                         src/host/v2/types.ts vs npm-latest (issue #2910).
+ *                         Both env-gated (SWARM_DEP_FRESHNESS_CHECK) and
  *                         fail-open: emits advisory `notice` findings only, never
  *                         blocks, so a stale lockfile can't silently age again.
  *  11. required-check-contract — exact ruleset-required contexts and workflow
@@ -1673,6 +1675,176 @@ export async function detectDependencyFreshnessDrift(
 }
 
 // ---------------------------------------------------------------------------
+// 7b) v2 vendored-pin freshness (issue #2910)
+// ---------------------------------------------------------------------------
+
+/**
+ * The v2 host surface is NOT installed — `src/host/v2/types.ts` vendors the
+ * `@opencode/plugin` types behind a provenance pin in its module header. A
+ * `DEP_FRESHNESS_PACKAGES` append would probe node_modules for a package that
+ * is deliberately absent, permanently resolve null, and silently skip
+ * forever. Instead this detector reads the PIN from the vendored corpus file
+ * and compares it against npm-latest with the same threshold + fail-open
+ * `notice` semantics as the v1 entries above (issue #1899 class).
+ */
+const V2_VENDORED_PIN_FILE = 'src/host/v2/types.ts';
+const V2_VENDORED_PIN_PACKAGE = '@opencode/plugin';
+/** Provenance-pinned version in the types.ts module header (first match). */
+const V2_VENDORED_PIN_VERSION_RE = /@opencode\/plugin@(\d+\.\d+\.\d+)/;
+
+export interface V2VendoredPinDeps {
+	/** Reads the vendored-pin corpus file (src/host/v2/types.ts); null on failure. */
+	readPinCorpus: (root: string) => string | null;
+	/** npm dist-tag latest for the v2 host package; null when unresolved. */
+	fetchLatestVersion: () => Promise<string | null>;
+}
+
+function defaultReadV2PinCorpus(root: string): string | null {
+	const { fileExists, readFile } = makeFs(root);
+	if (!fileExists(V2_VENDORED_PIN_FILE)) return null;
+	try {
+		return readFile(V2_VENDORED_PIN_FILE);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Resolve npm `latest` for the v2 host package from its dist-tags endpoint
+ * (same bounded-read + AbortController idiom as `fetchNpmLatestVersion`; the
+ * URL is spelled out via `npmDistTagsUrl('@opencode/plugin')` because the
+ * package is deliberately not installed and no lockfile entry names it).
+ */
+export async function fetchV2PluginLatestVersion(
+	fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
+	const controller = new AbortController();
+	const timer = setTimeout(
+		() => controller.abort(),
+		DEP_FRESHNESS_FETCH_TIMEOUT_MS,
+	);
+	try {
+		const res = await fetchImpl(npmDistTagsUrl('@opencode/plugin'), {
+			signal: controller.signal,
+		});
+		if (!res.ok) return null;
+		const body = await readBounded(res, DEP_FRESHNESS_DIST_TAGS_MAX_BYTES);
+		if (body === null) return null;
+		const tags = JSON.parse(body) as { latest?: unknown };
+		return typeof tags.latest === 'string' ? tags.latest : null;
+	} catch {
+		return null;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
+ * Detect the vendored `@opencode/plugin` pin in `src/host/v2/types.ts` aging
+ * past the threshold behind npm-latest (issue #2910 W1.2). Env-gated OFF by
+ * default like the v1 dep-freshness detector (SWARM_DEP_FRESHNESS_CHECK=1 in
+ * CI opts in); every finding is a non-blocking `notice` naming both versions
+ * and the vendored-pin corpus path, so a refresh PR can never be blocked by
+ * an external-world fact. Fail-open on any error.
+ */
+export async function detectV2VendoredPinFreshnessDrift(
+	root: string = REPO_ROOT,
+	deps: Partial<V2VendoredPinDeps> = {},
+): Promise<DriftFinding[]> {
+	if (!isDepFreshnessEnabled()) return [];
+	const category = 'dep-freshness';
+	const readPinCorpus = deps.readPinCorpus ?? defaultReadV2PinCorpus;
+	const fetchLatestVersion =
+		deps.fetchLatestVersion ?? (async () => fetchV2PluginLatestVersion());
+	const threshold = depFreshnessThreshold();
+
+	let corpusText: string | null = null;
+	try {
+		corpusText = readPinCorpus(root);
+	} catch (err) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `dependency-freshness check errored reading the v2 vendored pin: ${err instanceof Error ? err.message : String(err)} (skipped)`,
+			},
+		];
+	}
+	if (corpusText === null) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `could not read the v2 vendored-pin corpus ${V2_VENDORED_PIN_FILE} (skipped freshness check)`,
+			},
+		];
+	}
+	const pin = V2_VENDORED_PIN_VERSION_RE.exec(corpusText)?.[1];
+	if (!pin) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `could not find the ${V2_VENDORED_PIN_PACKAGE} provenance pin in ${V2_VENDORED_PIN_FILE} (skipped freshness check)`,
+			},
+		];
+	}
+
+	let latest: string | null = null;
+	try {
+		latest = await fetchLatestVersion();
+	} catch (err) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `dependency-freshness check errored for the v2 vendored pin "${V2_VENDORED_PIN_PACKAGE}": ${err instanceof Error ? err.message : String(err)} (skipped)`,
+			},
+		];
+	}
+	if (!latest) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `could not resolve npm-latest version for "${V2_VENDORED_PIN_PACKAGE}" (vendored pin in ${V2_VENDORED_PIN_FILE}; network/registry unavailable; skipped)`,
+			},
+		];
+	}
+	const behind = minorSeriesBehind(pin, latest);
+	if (behind === null) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `could not compare versions for the v2 vendored pin "${V2_VENDORED_PIN_PACKAGE}" (pin="${pin}", latest="${latest}")`,
+			},
+		];
+	}
+	if (behind > threshold) {
+		const gap =
+			behind === Number.POSITIVE_INFINITY
+				? 'a major version'
+				: `${behind} minor series`;
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `v2 vendored pin "${V2_VENDORED_PIN_PACKAGE}" at ${pin} (${V2_VENDORED_PIN_FILE}) is ${gap} behind npm latest ${latest} (threshold ${threshold}). Re-vendor the types and refresh the provenance header + tests/fixtures/host/expected-structure-v2.json (issue #2910).`,
+			},
+		];
+	}
+	return [];
+}
+
+// ---------------------------------------------------------------------------
 // Config schema / config docs drift (issue #1663)
 // ---------------------------------------------------------------------------
 
@@ -2192,6 +2364,11 @@ export async function runAllDetectors(): Promise<DriftFinding[]> {
 	// `notice` only — never blocks a merge.
 	const depFindings = await detectDependencyFreshnessDrift();
 	findings.push(...depFindings);
+	// v2 vendored-pin freshness (issue #2910 W1.2): the same env gate, threshold,
+	// and fail-open notice semantics, over the @opencode/plugin pin in
+	// src/host/v2/types.ts (deliberately NOT installed — see the detector).
+	const v2PinFindings = await detectV2VendoredPinFreshnessDrift();
+	findings.push(...v2PinFindings);
 	return findings;
 }
 

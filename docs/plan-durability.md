@@ -632,6 +632,53 @@ Unlike `execution_profile` (which IS included in `computePlanLedgerHash`), `fr_r
 | `computePlanLedgerHash` / `computePlanStructureHash` / `computePlanContentHash` | ❌ Deliberately excluded (see above) |
 | `migrateLegacyPlan` | Not applicable — legacy markdown plans predate this field |
 
+## Task Fields: `evidence_class` / `evidence_anchors` (Issue #3422)
+
+**v7.x** added two optional task fields for the external-evidence completion
+class: `evidence_class: 'coder_mutation' | 'external_git'` and
+`evidence_anchors: Array<{ command: string; expect?: string; expect_prefix?: string }>`
+(1..16 anchors; `expect` matches trimmed stdout exactly, `expect_prefix` must be
+non-empty and matches a prefix). A task declaring `external_git` completes via
+`/swarm attest <task_id>` — the pinned anchors run as bounded read-only git
+spawns and a durable external-evidence bundle (with a cursor-free
+`declarationDigest` binding the exact declaration + plan identity + workflow
+generation) admits completion without any coder settlement.
+
+### Revision semantics
+
+On a `save_plan` revision, omitting both fields **preserves** the task's prior
+declaration (an ordinary-revision lookup keyed by task id, independent of the
+reconcile-only `existingPhase` path); an explicit `evidence_class:
+'coder_mutation'` **clears** it (and `evidence_anchors` must then be
+absent/empty). A declaration CHANGE (or removing a declared task) revokes the
+task's nonterminal external proof (`external_evidence_revoked` transition)
+before any ledger/projection mutation, so a stale bundle can never become
+current again without a fresh attest; terminal evidence is never revoked
+(audit history), and `repair_idle` reopen already forces a fresh attest.
+
+### Hash coverage — INCLUDED (unlike `fr_refs`)
+
+Both fields ARE included in `computePlanLedgerHash`,
+`computePlanStructureHash`, and `computePlanContentHash`. They are optional
+and omitted-when-unset, so every plan persisted before these fields existed
+still hashes byte-identically; but unlike `fr_refs`, a declaration edit
+changes all three hashes — deliberately, because the declaration gates
+completion admission, so structural snapshots, startup staleness detection,
+and approval drift must all observe it. (Documented trade-off: a plugin
+version predating these fields computes a different hash for a plan that SETS
+them; only new versions author such plans.)
+
+### Round-trip surfaces
+
+| Surface | Carries the declaration? |
+|---------|--------------------------|
+| `plan.json` | Persisted in schema |
+| Ledger replay / snapshot embed | Rides the generic whole-`Plan`-object embed |
+| `checkpoint.ts` import/export | Passes through via `PlanSchema.parse` |
+| `get_approved_plan` tool | Passes through generically |
+| All three hash functions | Included (see above) |
+| `plan.md` / checkpoint markdown | Rendered compactly for declared tasks only (legacy task lines byte-unchanged) |
+
 ## Scope Materialization at Worktree Paths (FR-102)
 
 When Lean Turbo provisions a lane worktree, or the delegation gate provisions an isolated worktree for a coder (standard worktree isolation — always the case for every coder of an open git epic in Epic Mode), the task's declared scope is materialized at:

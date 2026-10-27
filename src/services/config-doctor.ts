@@ -148,6 +148,16 @@ export const DEFAULT_FLIPS: ReadonlyArray<{
 		sinceVersion: 3,
 		evidence: 'docs/defaults-governance.md',
 	},
+	{
+		field: 'lane_liveness_watchdog.enabled',
+		v7Default: 'false (opt-in)',
+		v8Default:
+			'true — a busy PR lane past the 30-minute reachability floor settles as liveness-dead with its host session aborted (#3313)',
+		killSwitch: 'lane_liveness_watchdog.enabled: false',
+		preset: 'conservative',
+		sinceVersion: 3,
+		evidence: 'docs/defaults-governance.md',
+	},
 ];
 
 /**

@@ -63,9 +63,9 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		// agent-callable PR subscription lifecycle (idempotent, capped; ex-human-only)
 		'pr subscribe',
 		'pr unsubscribe',
-		// guardrail diagnostics: pre-existing 'agent' commands not previously
-		// enumerated here — registry is the source of truth (both 'agent')
+		// guardrail diagnostics: pre-existing 'agent' commands (registry is the source of truth)
 		'guardrail explain',
+		'attest', // #3422 (agent)
 		'guardrail reset',
 		'guardrail-log',
 		'lanes',

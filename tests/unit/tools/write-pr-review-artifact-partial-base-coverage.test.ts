@@ -188,6 +188,25 @@ describe('write_pr_review_artifact partial base coverage (#2350)', () => {
 			'no terminal settlement disclosure is admitted; settle via write_pr_review_artifact partial_base_coverage.unresolved_dimensions',
 		);
 
+		// #3312 AC10 supersedes #2350's unconsumed-budget admission pin: the
+		// admission now refuses a contract-class disclosure while the legacy
+		// retry budget remains, so the fixture consumes the ONE legacy contract
+		// retry for the sixth dimension first (the same threading as the
+		// retry-admission test above). The admission surface under test —
+		// tuple identity and the persisted disclosure — is unchanged; the
+		// failure_class 'contract' pins below stay verbatim.
+		await enforcePrReviewBaseDimensions(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+			[{ laneId: 'contract-retry', workflowLane: missingDimension }],
+			{
+				batchId: 'contract-retry',
+				prHeadSha: PR_ARTIFACT_HEAD_SHA,
+				prReviewContractRetry: true,
+				prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
+			},
+		);
+
 		const raw = await executeWritePrReviewArtifact(
 			{
 				kind: 'findings',

@@ -943,10 +943,55 @@ async function cleanupRecoveredWorktree(
 	}
 }
 
+/**
+ * Cooldown for the historical RECOVERABLE_ORPHAN_COMMIT advisory (AGENTS.md
+ * §8: repeated advisory behaviour needs a cooldown, module-level state needs
+ * eviction). Recovery runs on every update_task_status, re-dispatch and close,
+ * so without it one legacy record would re-print a CRITICAL-WARN on every call
+ * and crowd other advisories out of the bounded /swarm diagnose buffer.
+ */
+const HISTORICAL_ORPHAN_ADVISORY_COOLDOWN_MS = 10 * 60_000;
+const MAX_HISTORICAL_ORPHAN_ADVISORIES = 256;
+const historicalOrphanAdvisoryAt = new Map<string, number>();
+
+function shouldEmitHistoricalOrphanAdvisory(key: string): boolean {
+	const now = Date.now();
+	const last = historicalOrphanAdvisoryAt.get(key);
+	if (
+		last !== undefined &&
+		now - last >= 0 &&
+		now - last < HISTORICAL_ORPHAN_ADVISORY_COOLDOWN_MS
+	)
+		return false;
+	// Re-insert so Map iteration order stays least-recently-emitted first.
+	historicalOrphanAdvisoryAt.delete(key);
+	historicalOrphanAdvisoryAt.set(key, now);
+	while (historicalOrphanAdvisoryAt.size > MAX_HISTORICAL_ORPHAN_ADVISORIES) {
+		const oldest = historicalOrphanAdvisoryAt.keys().next().value;
+		if (oldest === undefined) break;
+		historicalOrphanAdvisoryAt.delete(oldest);
+	}
+	return true;
+}
+
+/**
+ * Pre-upgrade releases could self-heal a lane to ABORTED while its recorded
+ * source commit still existed. Pin that commit under the settlement backup ref
+ * and report it — the report is ADVISORY ONLY. The settlement stays ABORTED
+ * and nothing here throws for the orphan itself: throwing would re-wedge
+ * update_task_status, re-dispatch and close on every call with no exit, which
+ * is the deadlock the self-heal exists to remove. Failures to establish the
+ * facts (CODER_SETTLEMENT_SOURCE_UNCERTAIN from the source probe, ref
+ * uncertainty or an occupied backup ref while preserving) still throw: work
+ * that cannot be proven safe is never silently dropped.
+ *
+ * Returns 'orphan' when the retained source is reported (callers must leave
+ * the terminal WAL untouched), 'none' otherwise.
+ */
 async function preserveHistoricalSelfHealedSource(
 	directory: string,
 	wal: CoderSettlementWal,
-): Promise<void> {
+): Promise<'orphan' | 'none'> {
 	if (
 		wal.state !== 'ABORTED' ||
 		!wal.abortReason?.startsWith(
@@ -956,18 +1001,24 @@ async function preserveHistoricalSelfHealedSource(
 		(await probeSettlementSource(directory, wal.mergeProvenance.sourceHead)) !==
 			'present'
 	)
-		return;
+		return 'none';
 	const source = wal.mergeProvenance.sourceHead;
 	const backup = await preserveSettlementSource(directory, source);
 	const landed = await reconcileLandedMerge(directory, wal.mergeProvenance);
 	if (landed.landed && landed.method !== 'worktree-match') {
 		await releaseSettlementSource(directory, source);
-		return;
+		return 'none';
 	}
-	const message = `RECOVERABLE_ORPHAN_COMMIT: historical aborted task ${wal.taskId} source ${source} is retained at ${backup}; apply it explicitly after reviewing the current task generation. The settlement remains ABORTED.`;
-	logger.criticalWarn(message);
-	advisoryWarn(message);
-	throw new Error(message);
+	if (
+		shouldEmitHistoricalOrphanAdvisory(
+			`${canonicalRootKeyFresh(directory)}\0${wal.taskId}\0${source}`,
+		)
+	) {
+		const message = `RECOVERABLE_ORPHAN_COMMIT: historical aborted task ${wal.taskId} source ${source} is retained at ${backup}; apply it explicitly after reviewing the current task generation. The settlement remains ABORTED. This report is advisory: task status, dispatch and close are not blocked by it.`;
+		logger.criticalWarn(message);
+		advisoryWarn(message);
+	}
+	return 'orphan';
 }
 
 export async function completeCoderSettlementCleanup(
@@ -985,7 +1036,11 @@ export async function completeCoderSettlementCleanup(
 		if (wal.state !== 'COMMITTED' && wal.state !== 'ABORTED') {
 			throw new Error('CODER_SETTLEMENT_NOT_COMMITTED');
 		}
-		await preserveHistoricalSelfHealedSource(directory, wal);
+		// A reported historical orphan leaves the terminal WAL byte-for-byte
+		// untouched: its lane is already gone and the source is pinned, so there
+		// is nothing for cleanup to do that could not disturb a later generation.
+		if ((await preserveHistoricalSelfHealedSource(directory, wal)) === 'orphan')
+			return;
 		if (!wal.worktree || wal.cleanupComplete === true) return;
 		await cleanupRecoveredWorktree(directory, wal.worktree);
 		await writeWal(filePath, { ...wal, cleanupComplete: true });
@@ -1081,6 +1136,8 @@ export async function recoverCoderSettlement(
 			// Earlier releases could declare a missing lane unrecoverable while its
 			// persisted source object survived. Preserve that historical work without
 			// reviving a stale task generation or automatically applying its changes.
+			// The orphan report is advisory: recovery still resolves null so the
+			// terminal settlement never blocks the task again.
 			await preserveHistoricalSelfHealedSource(directory, wal);
 			return null;
 		}
@@ -1740,4 +1797,7 @@ export const _internals = {
 	// listed-non-terminal → recovered-atomically race window (a concurrent
 	// completion) and recovery failures without real interleaving.
 	recoverCoderSettlement,
+	// Test seam: the per-process cooldown ledger for the advisory-only historical
+	// RECOVERABLE_ORPHAN_COMMIT report, so tests can pin emit-once / suppress.
+	historicalOrphanAdvisoryAt,
 };

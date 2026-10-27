@@ -14,9 +14,11 @@ import {
 	recoverCoderSettlement,
 } from '../../../src/workflow/coder-settlement';
 import type { MergeOperationProvenance } from '../../../src/worktree/merge';
+import { _internals as settlementSourceInternals } from '../../../src/worktree/settlement-source-recovery';
 import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 const TASK_ID = '1.1';
+const originalSettlementBunSpawn = settlementSourceInternals.bunSpawn;
 const roots: string[] = [];
 function git(directory: string, args: string[]): string {
 	const result = spawnSync('git', ['-C', directory, ...args], {
@@ -115,6 +117,7 @@ beforeEach(() => {
 	_internals.liveDispatches.clear();
 });
 afterEach(() => {
+	settlementSourceInternals.bunSpawn = originalSettlementBunSpawn;
 	_internals.liveDispatches.clear();
 	for (const root of roots.splice(0))
 		fs.rmSync(root, { recursive: true, force: true });
@@ -139,61 +142,89 @@ describe('issue #3409 coder settlement orphan recovery', () => {
 			'commit',
 		);
 
-		let recoveryError: unknown;
-		try {
-			await recoverCoderSettlement(f.repo, TASK_ID);
-		} catch (error) {
-			recoveryError = error;
-		}
+		// The surviving source is the recovery input: recovery restores the lane
+		// branch from it and lands the 'merge' dispatch in the #2508
+		// squash-unstaged shape. It never aborts the settlement and never rejects.
+		const recovered = await recoverCoderSettlement(f.repo, TASK_ID);
+		expect(recovered).not.toBeNull();
+		expect(recovered?.accepted).toBe(true);
+		const wal = JSON.parse(fs.readFileSync(walPath(f), 'utf8')) as {
+			state: string;
+			cleanupComplete?: boolean;
+			worktree?: { landedUnstaged?: boolean };
+		};
+		expect(wal.state).toBe('COMMITTED');
+		expect(wal.worktree?.landedUnstaged).toBe(true);
+		expect(wal.cleanupComplete).toBe(true);
+		// Unstaged landing: HEAD does not move and the source is not an ancestor;
+		// the lane bytes are present in the primary working tree only.
+		expect(git(f.repo, ['rev-parse', 'HEAD'])).toBe(
+			provenance.targetHeadBefore,
+		);
+		expect(fs.readFileSync(path.join(f.repo, 'source.txt'), 'utf8')).toBe(
+			'lane change\n',
+		);
+		// The restored lane branch is retained as the backup for unstaged bytes.
+		expect(git(f.repo, ['rev-parse', '--verify', f.branch])).toBe(
+			provenance.sourceHead,
+		);
+		expect(
+			git(f.repo, [
+				'rev-parse',
+				`refs/swarm/coder-settlements/${provenance.sourceHead}`,
+			]),
+		).toBe(provenance.sourceHead);
+	});
+
+	test('a source that reappears before the self-heal stays pending and is backed up', async () => {
+		const f = fixture('reappeared');
+		await begin(f);
+		const provenance = commitSource(f);
+		await recordCoderMergeProvenance({
+			directory: f.repo,
+			taskId: TASK_ID,
+			transitionId: f.transitionId,
+			provenance,
+			observedFiles: ['source.txt'],
+		});
+		_internals.liveDispatches.clear();
+		git(f.repo, ['worktree', 'remove', '--force', f.worktree]);
+		git(f.repo, ['branch', '-D', f.branch]);
+		// The first source probe reports a clean absence (quiet miss on a healthy
+		// object store); the self-heal's own re-probe under the settlement lock is
+		// real and finds the commit. The guard must keep the settlement pending.
+		let sourceProbes = 0;
+		settlementSourceInternals.bunSpawn = ((cmd, opts) => {
+			const args = cmd.slice(1);
+			const isSourceProbe =
+				args[0] === 'rev-parse' &&
+				args[1] === '--verify' &&
+				args[2] === '--quiet' &&
+				args[3] === `${provenance.sourceHead}^{commit}`;
+			const fakeAbsence = isSourceProbe && ++sourceProbes === 1;
+			return originalSettlementBunSpawn(
+				fakeAbsence
+					? [cmd[0], 'rev-parse', '--verify', '--quiet', 'refs/heads/none']
+					: cmd,
+				opts,
+			);
+		}) as typeof originalSettlementBunSpawn;
+		await expect(recoverCoderSettlement(f.repo, TASK_ID)).rejects.toThrow(
+			/RECOVERABLE_ORPHAN_COMMIT: .*settlement remains pending/,
+		);
+		expect(sourceProbes).toBe(2);
 		const wal = JSON.parse(fs.readFileSync(walPath(f), 'utf8')) as Record<
 			string,
 			unknown
 		>;
-		const state = wal.state;
-		const branchHead = spawnSync(
-			'git',
-			['-C', f.repo, 'rev-parse', '--verify', f.branch],
-			{
-				cwd: f.repo,
-				stdio: ['ignore', 'pipe', 'ignore'],
-				encoding: 'utf8',
-				timeout: 10_000,
-				windowsHide: true,
-			},
-		);
-		const ancestry = spawnSync(
-			'git',
-			[
-				'-C',
-				f.repo,
-				'merge-base',
-				'--is-ancestor',
-				provenance.sourceHead,
-				'HEAD',
-			],
-			{
-				cwd: f.repo,
-				stdio: ['ignore', 'ignore', 'ignore'],
-				timeout: 10_000,
-				windowsHide: true,
-			},
-		);
-		if (ancestry.error) throw ancestry.error;
-		const landed = ancestry.status === 0;
-		// Recovery may safely land the recorded source itself. Otherwise it must leave
-		// the non-terminal WAL intact and a durable named ref for the orphaned commit.
-		expect(state).not.toBe('ABORTED');
-		if (!landed) {
-			expect(String(recoveryError)).toContain('RECOVERABLE_ORPHAN_COMMIT');
-			expect(wal.state).toBe('DISPATCHED');
-			expect(branchHead.status).toBe(0);
-			expect(branchHead.stdout.trim()).toBe(provenance.sourceHead);
-		} else {
-			expect(fs.readFileSync(path.join(f.repo, 'source.txt'), 'utf8')).toBe(
-				'lane change\n',
-			);
-			expect(wal.state).toBe('COMMITTED');
-		}
+		expect(wal.state).toBe('DISPATCHED');
+		expect(wal.abortReason).toBeUndefined();
+		expect(
+			git(f.repo, [
+				'rev-parse',
+				`refs/swarm/coder-settlements/${provenance.sourceHead}`,
+			]),
+		).toBe(provenance.sourceHead);
 	});
 
 	test('partial merge failure leaves the dispatched lane commit reachable for retry', async () => {
@@ -246,21 +277,30 @@ describe('issue #3409 coder settlement orphan recovery', () => {
 		_internals.liveDispatches.clear();
 		git(f.repo, ['worktree', 'remove', '--force', f.worktree]);
 		git(f.repo, ['branch', '-D', f.branch]);
-		// Point Git at a regular file as its object directory. Git cannot determine
-		// whether the WAL's recorded commit is present, so recovery must preserve
-		// the pending settlement instead of treating that uncertainty as absence.
-		const invalidObjectDirectory = path.join(f.root, 'not-an-object-directory');
-		fs.writeFileSync(invalidObjectDirectory, 'unreadable object database');
-		const previousObjectDirectory = process.env.GIT_OBJECT_DIRECTORY;
-		process.env.GIT_OBJECT_DIRECTORY = invalidObjectDirectory;
+		// The source-presence probe fails loudly (a Git error, not a quiet miss), as
+		// it does for an unreadable object store. Git cannot say whether the
+		// WAL's recorded commit is present, so recovery must keep the settlement
+		// pending instead of treating that uncertainty as absence. Only the probe
+		// for this exact source is swapped; every other Git call is real.
+		const probe = ['rev-parse', '--verify', '--quiet'];
+		settlementSourceInternals.bunSpawn = ((cmd, opts) => {
+			const args = cmd.slice(1);
+			const isSourceProbe =
+				probe.every((arg, index) => args[index] === arg) &&
+				args[3] === `${provenance.sourceHead}^{commit}`;
+			return originalSettlementBunSpawn(
+				isSourceProbe
+					? [cmd[0], 'rev-parse', '--verify', 'refs/heads/no-such-object-db']
+					: cmd,
+				opts,
+			);
+		}) as typeof originalSettlementBunSpawn;
 		try {
-			await expect(recoverCoderSettlement(f.repo, TASK_ID)).rejects.toThrow();
+			await expect(recoverCoderSettlement(f.repo, TASK_ID)).rejects.toThrow(
+				'CODER_SETTLEMENT_SOURCE_UNCERTAIN',
+			);
 		} finally {
-			if (previousObjectDirectory === undefined) {
-				delete process.env.GIT_OBJECT_DIRECTORY;
-			} else {
-				process.env.GIT_OBJECT_DIRECTORY = previousObjectDirectory;
-			}
+			settlementSourceInternals.bunSpawn = originalSettlementBunSpawn;
 		}
 		expect(
 			(

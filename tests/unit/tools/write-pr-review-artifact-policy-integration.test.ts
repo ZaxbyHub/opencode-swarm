@@ -149,6 +149,7 @@ describe('PR-review finding policy writer/reader integration', () => {
 			[
 				{
 					laneId: 'policy-critic',
+					agent: 'critic',
 					workflowLane: 'policy-critic',
 					reviewItemIds: findingIds.slice(1),
 				},

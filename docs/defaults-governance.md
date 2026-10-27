@@ -66,6 +66,30 @@ runs; see that issue for scope.
 - **Rollback:** as above; conservative preset coverage tested in
   `tests/unit/config/conservative-preset.test.ts`.
 
+### 3. `lane_liveness_watchdog.enabled` — FLIPPED (#3313)
+
+> Frame note: this flip shipped on the v7.x line (issue #3313), later than the
+> v8 inventory this document was framed around. It is inventoried here anyway
+> because the schema's `CONSERVATIVE_PRESET_BASE` pairing rule
+> (`src/config/schema.ts`) mandates a DEFAULT_FLIPS row and an inventory entry
+> for every preset-restored flip.
+
+- **Pre-flip default:** `false` (opt-in; PR lanes past the reachability floor
+  stayed pending until the 30-minute presumed-stale sweep, retained even when
+  the liveness probe still reported them alive). **Current default:** `true` —
+  a busy PR lane past the 30-minute reachability floor is settled as
+  liveness-dead with its host session aborted (issue #3313; the honest
+  INCOMPLETE lane-settlement workstream #3312/#3313).
+- **Mechanism:** `lane_liveness_watchdog.enabled` schema default in
+  `src/config/schema.ts`; the settlement entry points
+  (`complete_pr_workflow` / `abort_pr_workflow` / the pr-feedback
+  continuation) thread the resolved policy into
+  `settlePresumedStalePrWorkflowLanes`.
+- **Kill switch (one line):** `"lane_liveness_watchdog": { "enabled": false }`.
+- **Rollback:** set the kill switch above, or `"preset": "conservative"`
+  (restores `enabled: false` via `CONSERVATIVE_PRESET_BASE`). Opt-out coverage
+  tested in `tests/unit/config/lane-liveness-watchdog-explicit-opt-out.test.ts`.
+
 ## K3 UX candidate dispositions
 
 - **`auto_select_architect` posture (K3 UX-3) — NO schema flip.** F1 (#2493)
@@ -131,11 +155,12 @@ evidence."
 ## Conservative preset
 
 `"preset": "conservative"` (top-level config key, #2504) restores the pre-flip
-v7 defaults for every flipped surface: `auto_review.enabled: false` and serial
-new plans. It is applied as the lowest-precedence layer in config resolution,
-so an explicit user key always wins over the preset. `"preset": "default"` or
-an absent preset applies the governed v8 defaults. See
-`docs/configuration.md` (`preset`) and `tests/unit/config/conservative-preset.test.ts`.
+v7 defaults for every flipped surface: `auto_review.enabled: false`, serial
+new plans, and `lane_liveness_watchdog.enabled: false` (#3313). It is applied
+as the lowest-precedence layer in config resolution, so an explicit user key
+always wins over the preset. `"preset": "default"` or an absent preset applies
+the governed v8 defaults. See `docs/configuration.md` (`preset`) and
+`tests/unit/config/conservative-preset.test.ts`.
 
 ## Migration, warnings, and acknowledgment
 

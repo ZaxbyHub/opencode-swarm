@@ -1285,10 +1285,17 @@ export function artifactHasExactPositiveVerdictRow(
 		.split(/\r?\n/)
 		.map((line) => pipeFieldsCapped(line, 4))
 		.filter((fields) => fields[0] === marker && fields[1] === itemId);
+	// Issue #3316 (B6): feedback gate lanes have historically emitted the
+	// past-tense `APPROVED` on the three review/critic markers; accept it as
+	// the exact positive token wherever `APPROVE` is expected. `PASS` stays
+	// exact for [STAGE-B-TEST] and no other token (SKIPPED, prose) ever maps.
+	const verdictMatches = (verdict: string): boolean =>
+		verdict === positiveVerdict ||
+		(positiveVerdict === 'APPROVE' && verdict === 'APPROVED');
 	return (
 		rows.length === 1 &&
 		rows[0].length >= 4 &&
-		rows[0][2] === positiveVerdict &&
+		verdictMatches(rows[0][2]) &&
 		rows[0].slice(1, 4).every(Boolean)
 	);
 }

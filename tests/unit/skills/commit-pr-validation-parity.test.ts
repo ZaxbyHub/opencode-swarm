@@ -63,8 +63,27 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 		'(cd scripts/swarm-model && node --test)',
 };
 
-/** Environment-setup commands in the quality job that are not quality gates. */
-const NON_QUALITY_SETUP_COMMANDS = new Set(['bun install --frozen-lockfile']);
+/**
+ * Environment-setup commands in the quality job that are not quality gates.
+ *
+ * `bun install` prepares the toolchain. The TMPDIR echo and the preinstalled-bun
+ * probe are runner plumbing added by the self-hosted routing work: they only
+ * matter on persistent self-hosted hosts (the TMPDIR echo is gated on
+ * `runner.environment == 'self-hosted'`; the bun probe just decides whether
+ * setup-bun needs to download at all), so neither is taught by nor needed in
+ * the contributor-facing commit-pr skill. Only runner-environment preparation
+ * belongs here; a new BLOCKING check must still be taught by the skill.
+ *
+ * Entries are the POST-normalization forms `qualityJobCommands` produces. That
+ * normalizer strips one leading and one trailing quote from every command, so
+ * both echo commands read their final argument without the closing quote here —
+ * a verbatim copy of the ci.yml line will silently miss and fail the test.
+ */
+const NON_QUALITY_SETUP_COMMANDS = new Set([
+	'bun install --frozen-lockfile',
+	'echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"; echo "BUN_CACHE=$RUNNER_TEMP/bun-cache" >> "$GITHUB_ENV',
+	'bun --version 2>/dev/null | grep -qx "1.3.13" && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT',
+]);
 
 /** YAML block-scalar indicators are syntax, not shell commands. */
 const YAML_BLOCK_SCALAR_MARKER = /^[|>][+-]?$/;
@@ -135,6 +154,22 @@ describe('commit-pr validation suite parity (issue #2131 4c)', () => {
 	test('the skill also teaches the package smoke check (package-check CI job)', () => {
 		const skill = readFileSync(COMMIT_PR_SKILL_PATH, 'utf-8');
 		expect(skill).toContain('bun run package:smoke');
+	});
+
+	test('the temp-isolation exemption stays justified by its own guard', () => {
+		// The exemption is legitimate only while the step is gated to
+		// self-hosted runners, where it is runner plumbing rather than a
+		// contributor-facing validation command. Matching on the command text
+		// alone would keep the exemption alive after the guard is deleted and
+		// the echo starts running on the pull_request leg.
+		const source = readFileSync(CI_WORKFLOW_PATH, 'utf-8');
+		const qualityStart = source.indexOf('  quality:');
+		const step =
+			/- name: Isolate temp dir on self-hosted runners\n([\s\S]*?)\n {6}- /.exec(
+				source.slice(qualityStart),
+			);
+		expect(step, 'quality job has the temp-isolation step').not.toBeNull();
+		expect(step?.[1]).toContain("if: runner.environment == 'self-hosted'");
 	});
 
 	test('indented YAML block-scalar run bodies remain in the parity surface', () => {

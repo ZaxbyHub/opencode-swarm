@@ -375,11 +375,12 @@
       "additionalProperties": false
     },
     "lane_liveness_watchdog": {
-      "description": "Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes.",
+      "description": "Lane liveness watchdog (default on; set enabled=false to opt out): execution deadline and stall escalation for PR workflow lanes.",
+      "default": {},
       "type": "object",
       "properties": {
         "enabled": {
-          "default": false,
+          "default": true,
           "type": "boolean"
         },
         "timeout_ms": {
@@ -5310,6 +5311,9 @@
             "allow_defaults": {
               "default": true,
               "type": "boolean"
+            },
+            "trust_code_mode_wrapper": {
+              "type": "boolean"
             }
           }
         },
@@ -5421,6 +5425,11 @@
               "type": "integer",
               "minimum": 100,
               "maximum": 10000
+            },
+            "hook_timeout_ms": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 900000
             }
           }
         }

@@ -5,8 +5,8 @@
  * The mock replaces the BunCompatSubprocess return value so each test can exercise
  * specific exit codes and stdout/stderr strings.
  */
+
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
-import type { LeanTurboConfig } from '../../../../src/config/schema';
 import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
@@ -15,7 +15,6 @@ import {
 	_internals,
 	attemptMergeBackFromDirty,
 	cleanupOrphanedBranches,
-	getMergeStrategy,
 	handleMergeConflict,
 	mergeLaneBranch,
 	postMergeCleanup,
@@ -23,20 +22,14 @@ import {
 } from '../../../../src/turbo/lean/merge-back';
 import { _internals as worktreeInternals } from '../../../../src/turbo/lean/worktree';
 import type { BunCompatSubprocess } from '../../../../src/utils/bun-compat';
+import * as artifactAdmission from '../../../helpers/artifact-admission-stub';
 import { cleanMergeOverlapSnapshot } from '../../../helpers/merge-overlap-fixture';
 
 // Mock helpers
+
 /** Saves the real bunSpawn so tests can restore it in afterEach. */
 const realBunSpawn = _internals.bunSpawn;
-const realArtifactLifecycle = _internals.withSettlementArtifactLifecycle;
-const realArtifactCheck = _internals.assertSettlementArtifactsRemovable;
-function stubArtifactAdmission(): void {
-	// These fake-root fixtures isolate Git cleanup behavior. Real WAL admission
-	// is covered by the settlement-artifact-lifecycle/cleanup-sinks #3409 tests.
-	_internals.withSettlementArtifactLifecycle = async (_directory, operation) =>
-		operation();
-	_internals.assertSettlementArtifactsRemovable = async () => {};
-}
+
 /**
  * Constructs a minimal BunCompatSubprocess mock.
  * exitCode, stdout, and stderr are configurable per test.
@@ -58,6 +51,7 @@ function mockProc(
 		kill: () => {},
 	} as BunCompatSubprocess;
 }
+
 /**
  * Installs a fake bunSpawn that returns a pre-configured mockProc.
  * Subsequent calls to _internals.bunSpawn return the same mock unless
@@ -66,33 +60,16 @@ function mockProc(
 function stubSpawn(exitCode: number, stdout = '', stderr = '') {
 	_internals.bunSpawn = () => mockProc(exitCode, stdout, stderr);
 }
+
 /** Restores the real bunSpawn after every test. */
 afterEach(() => {
 	_internals.bunSpawn = realBunSpawn;
-	_internals.withSettlementArtifactLifecycle = realArtifactLifecycle;
-	_internals.assertSettlementArtifactsRemovable = realArtifactCheck;
+	artifactAdmission.restore(_internals);
 	clearDeferredWarnings();
 });
-// getMergeStrategy
-describe('getMergeStrategy', () => {
-	test('returns config.merge_strategy when set to merge', () => {
-		const config: LeanTurboConfig = { merge_strategy: 'merge' };
-		expect(getMergeStrategy(config)).toBe('merge');
-	});
-	test('returns config.merge_strategy when set to rebase', () => {
-		const config: LeanTurboConfig = { merge_strategy: 'rebase' };
-		expect(getMergeStrategy(config)).toBe('rebase');
-	});
-	test('returns config.merge_strategy when set to cherry-pick', () => {
-		const config: LeanTurboConfig = { merge_strategy: 'cherry-pick' };
-		expect(getMergeStrategy(config)).toBe('cherry-pick');
-	});
-	test('returns merge when config.merge_strategy is undefined', () => {
-		const config: LeanTurboConfig = {};
-		expect(getMergeStrategy(config)).toBe('merge');
-	});
-});
+
 // mergeLaneBranch
+
 describe('mergeLaneBranch', () => {
 	const fakeDir = 'C:\\project-root';
 	const fakeBranch = 'swarm-lane/session-abc/lane-1';
@@ -384,7 +361,7 @@ describe('mergeLaneBranch', () => {
 // postMergeCleanup
 
 describe('postMergeCleanup', () => {
-	beforeEach(stubArtifactAdmission);
+	beforeEach(() => artifactAdmission.install(_internals));
 	const fakeDir = 'C:\\project-root';
 	const fakeBranch = 'swarm-lane/session-abc/lane-1';
 
@@ -921,7 +898,7 @@ describe('_internals.bunSpawn', () => {
 // cleanupOrphanedBranches
 
 describe('cleanupOrphanedBranches', () => {
-	beforeEach(stubArtifactAdmission);
+	beforeEach(() => artifactAdmission.install(_internals));
 	const fakeDir = 'C:\\project-root';
 
 	test('removes branches not in activeSessionIds', async () => {
@@ -1083,6 +1060,7 @@ describe('cleanupOrphanedBranches', () => {
 });
 
 // startupOrphanRecovery
+
 describe('startupOrphanRecovery', () => {
 	const fakeDir = 'C:\\project-root';
 

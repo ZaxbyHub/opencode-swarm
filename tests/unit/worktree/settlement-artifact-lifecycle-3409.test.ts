@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 import type { CoderSettlementWal } from '../../../src/workflow/workflow-wal-schema';
 import {
 	_internals,
@@ -138,9 +142,11 @@ describe('settlement artifact inventory', () => {
 	test('overflow fails closed and closes the directory', async () => {
 		fs.mkdirSync(inventory, { recursive: true });
 		for (let index = 0; index < 201; index++) {
-			fs.writeFileSync(path.join(inventory, `${index}.tmp`), '');
+			fs.writeFileSync(path.join(inventory, `${index}.json`), '');
 		}
 		let closed = false;
+		// The cap trips on the 201st record; settled records before it need only parse.
+		_internals.readWal = async () => wal('COMMITTED');
 		_internals.opendir = async (...args) => {
 			const handle = await originals.opendir(...args);
 			const close = handle.close.bind(handle);
@@ -152,9 +158,41 @@ describe('settlement artifact inventory', () => {
 		};
 		await expect(
 			assertSettlementArtifactsRemovable(root, { branch: 'lane' }),
-		).rejects.toThrow('exceeds 200');
+		).rejects.toThrow('exceeds 200 records; run `/swarm close`');
 		expect(closed).toBe(true);
 	});
+	test('non-JSON entries do not count toward the inventory cap', async () => {
+		fs.mkdirSync(inventory, { recursive: true });
+		for (let index = 0; index < 250; index++) {
+			fs.writeFileSync(path.join(inventory, `${index}.tmp`), '');
+		}
+		writeWal('COMMITTED');
+		await assertSettlementArtifactsRemovable(root, {
+			branch: 'swarm/lane/test',
+		});
+	});
+	for (const field of ['dev', 'ino', 'size', 'mtimeMs'] as const) {
+		test(`record identity change (${field}) during inspection fails closed`, async () => {
+			writeWal('COMMITTED');
+			let calls = 0;
+			// Swap identity only for the record; the second lstat follows readWal.
+			_internals.lstat = (async (
+				...args: Parameters<typeof originals.lstat>
+			) => {
+				const stat = await originals.lstat(...args);
+				if (String(args[0]).endsWith('1.1.json') && ++calls === 2) {
+					// Scale rather than increment: Windows inode numbers can exceed
+					// 2^53, where `+ 1` would not change the value.
+					stat[field] = stat[field] * 2 + 1;
+				}
+				return stat;
+			}) as typeof originals.lstat;
+			await expect(
+				assertSettlementArtifactsRemovable(root, { branch: 'lane' }),
+			).rejects.toThrow('settlement record changed during inspection');
+			expect(calls).toBe(2);
+		});
+	}
 	test('unreadable record fails closed', async () => {
 		writeWal('COMMITTED');
 		// I/O failures are injected; real parsing and other states are covered above.
@@ -169,14 +207,20 @@ describe('settlement artifact inventory', () => {
 		writeWal('COMMITTED');
 		// Simulated lstat works on Windows without requiring symlink privilege.
 		// Real directory traversal and bounded reads remain exercised above.
+		// Only the inventory directory is simulated as a symlink so the
+		// directory-level guard is isolated from the per-record guard.
 		_internals.lstat = (async (...args: Parameters<typeof originals.lstat>) => {
 			const stat = await originals.lstat(...args);
-			stat.isSymbolicLink = () => true;
+			if (path.resolve(String(args[0])) === path.resolve(inventory)) {
+				stat.isSymbolicLink = () => true;
+			}
 			return stat;
 		}) as typeof originals.lstat;
 		await expect(
 			assertSettlementArtifactsRemovable(root, { branch: 'lane' }),
-		).rejects.toThrow('CODER_SETTLEMENT_ARTIFACT_UNCERTAIN');
+		).rejects.toThrow(
+			'CODER_SETTLEMENT_ARTIFACT_UNCERTAIN: settlement inventory is not a direct directory',
+		);
 	});
 	test('symbolic record fails closed independently of directory identity', async () => {
 		writeWal('COMMITTED');
@@ -234,6 +278,50 @@ describe('settlement artifact lifecycle admission', () => {
 			}),
 		).rejects.toThrow('operation failed');
 		expect(released).toBe(true);
+	});
+	describe('release failure', () => {
+		function rejectingRelease() {
+			_internals.tryAcquireLock = async () => ({
+				acquired: true,
+				lock: {
+					filePath: 'test',
+					agent: 'test',
+					taskId: 'test',
+					timestamp: '',
+					expiresAt: 0,
+					_release: async () => {
+						throw new Error('release denied');
+					},
+				},
+			});
+		}
+		beforeEach(() => clearDeferredWarnings());
+		afterEach(() => clearDeferredWarnings());
+		test('a rejected release keeps the operation result and warns', async () => {
+			rejectingRelease();
+			await expect(
+				withSettlementArtifactLifecycle(root, async () => 'result'),
+			).resolves.toBe('result');
+			expect(
+				getDeferredWarnings().some((w) => w.includes('release denied')),
+			).toBe(true);
+		});
+		test('a rejected release keeps the original operation error', async () => {
+			rejectingRelease();
+			await expect(
+				withSettlementArtifactLifecycle(root, async () => {
+					throw new Error('operation failed');
+				}),
+			).rejects.toThrow('operation failed');
+		});
+	});
+	test('busy refusal carries retry guidance and the uncertain code', async () => {
+		_internals.tryAcquireLock = async () => ({ acquired: false });
+		await expect(
+			withSettlementArtifactLifecycle(root, async () => undefined),
+		).rejects.toThrow(
+			/CODER_SETTLEMENT_ARTIFACT_UNCERTAIN: lifecycle admission is busy.*retry once it completes/,
+		);
 	});
 	test('contention and storage failure never run operation', async () => {
 		let ran = false;

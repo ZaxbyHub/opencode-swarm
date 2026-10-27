@@ -115,6 +115,28 @@ insufficient, change the policy through a new decision record after reviewing
 the host check-name evidence. Do not widen the timeout as an unrecorded
 workaround for a single run.
 
+### Coverage shard job ceiling (self-hosted pool)
+
+**Decision:** raise `coverage-shard`'s job-level `timeout-minutes` from 30 to 45
+(PR #3404). The self-hosted VM's 8 concurrent runner slots ran coverage shards
+past the old 30-minute ceiling (4 of 6 killed at exactly 30m in the first
+fully-routed merge-group batch, 2026-10-23; the physical host's instances and
+GitHub-hosted runners measure ~24m per shard), and the cancelled matrix
+fail-closed the `coverage` aggregator, evicting the group. The 90-minute
+status-check timeout above leaves worst-case shard (45m) + aggregator (10m)
+comfortably inside.
+
+**Reopening gate:** if a future batch still kills shards at 45m, the fix is
+fewer concurrent VM slots per host (host-side), not a higher ceiling.
+
+**Coverage-shard test class:** suites asserting child-process exit/buffering
+semantics and wall-clock bounds skip under coverage shards (see the shared
+rationale in the `bun-compat`/`*-subprocess-bounds`/`store-replay-bounds` test
+headers, PR #3404): coverage instrumentation distorts those semantics on
+shared self-hosted hosts, and the gate fails on any single test. The hosted
+unit matrix keeps the class fully enforced. Re-attempting coverage-on-pool
+validation for this class needs instrumentation-robust tests first.
+
 ### Build concurrency
 
 **Decision:** retain build concurrency at 5.

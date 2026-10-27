@@ -80,6 +80,10 @@ package the issue sketched.
   hook fired (swarm agents registered), entrypoint `server()` confirmed by
   both ablations MATCHing. See `logs/v1-host.log`,
   `logs/v1-nosetup-ablation.log`, `logs/v1-noserver-ablation.log`.
+  (Banner note, #3405: since the #3405 fix the raw stderr banner is
+  opt-in — `OPENCODE_SWARM_VERSION_BANNER=1` — and this harness sets it in
+  `isolatedEnv()` so the banner-detection regexes keep matching on fresh
+  runs; the captured logs above predate that change.)
 - v2 2.0.29: plugin loaded via the local shim (`loading plugin
   id=...local-spike.js`), banner, `.swarm/` fully materialized (invariant 4
   directory injection — state under the project root, not `process.cwd()`),

@@ -13,7 +13,7 @@ description: >
   this process.
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "e57e18e79789"
+  swarm-contract-digest: "203da214c99a"
 ---
 
 # Swarm PR Feedback
@@ -471,14 +471,14 @@ Every gate lane emits exactly one fully populated row per feedback ID:
 [CLOSEOUT-CRITIC] | FB-001 | APPROVE|NEEDS_REVISION|BLOCKED | evidence
 ```
 
-Only exact positive verdict fields pass. A sentence containing “not APPROVE,” a
+Only exact positive verdict fields pass — `APPROVE` (or its accepted spelling
+`APPROVED` on the three review/critic markers) for review/critic rows, exact
+`PASS` for test rows; anything else fails. A sentence containing “not APPROVE,” a
 header without item rows, duplicate rows, missing IDs, degraded/truncated
 artifacts, wrong roles, stale content digests, parallel or out-of-order phases,
 and reused pre-edit approvals all fail closed. Any content change after Stage A
-invalidates Stage A and every later gate; restart at step 1. See
-"Re-recording Stage A on an unchanged revision" below for the one retention
-exception, which applies only when the revision digest itself did not change.
-Publication tools
+invalidates Stage A and every later gate; restart at step 1. For an in-scope edit whose moved digest triggers the incomplete-ownership block, re-dispatch `swarm-pr-feedback:verification` on the edited tree (new batch_id, same lane ids) to re-settle coverage; further coder writes need a fresh scope (new task_id), then re-run Stage A and the ordered gates. See
+"Re-recording Stage A on an unchanged revision" below for the one retention exception, which applies only when the revision digest itself did not change. Publication tools
 and `git commit`/`git push` remain blocked until all four ordered lane phases
 settle on the Stage-A digest. After they settle, only one standalone `git commit`
 command may create the reviewed commit; push and remote publication remain

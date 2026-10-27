@@ -39,6 +39,7 @@ const ARG_WINDOW_CHARS = 200;
 interface CallSite {
 	line: number;
 	window: string;
+	index: number;
 }
 
 function callSites(symbol: string): CallSite[] {
@@ -50,9 +51,42 @@ function callSites(symbol: string): CallSite[] {
 		sites.push({
 			line: SOURCE.slice(0, match.index).split('\n').length,
 			window: SOURCE.slice(start, start + ARG_WINDOW_CHARS),
+			index: match.index,
 		});
 	}
 	return sites;
+}
+
+/**
+ * Directory-parameterized builder bodies (the #2910 feedback round extracted
+ * the config-hook body into `applySwarmRegistrationTables` and added the v2
+ * fresh-tables path `buildV2RegistrationTables`). Both thread a DIRECTORY
+ * PARAMETER (v1: ctx.directory at the call site; v2: the setup root), so
+ * their call sites cannot bind `bootstrapRoot`/`ctx.directory` lexically.
+ * The window scan skips these spans; the dedicated builder test below pins
+ * their directory threading instead.
+ */
+function builderSpans(): Array<[number, number]> {
+	const spans: Array<[number, number]> = [];
+	for (const name of [
+		'applySwarmRegistrationTables',
+		'buildV2RegistrationTables',
+	]) {
+		const start = SOURCE.indexOf(`function ${name}(`);
+		if (start < 0) continue;
+		let end = SOURCE.indexOf('\nfunction ', start + 1);
+		const endExport = SOURCE.indexOf('\nexport async function ', start + 1);
+		if (end < 0 || (endExport >= 0 && endExport < end)) end = endExport;
+		if (end < 0) end = SOURCE.length;
+		spans.push([start, end]);
+	}
+	return spans;
+}
+
+const BUILDER_SPANS = builderSpans();
+
+function insideBuilderSpan(index: number): boolean {
+	return BUILDER_SPANS.some(([start, end]) => index >= start && index < end);
 }
 
 /**
@@ -107,6 +141,7 @@ describe('src/index.ts bootstrap-root sources (#2679)', () => {
 				continue;
 			}
 			for (const site of sites) {
+				if (insideBuilderSpan(site.index)) continue;
 				if (!site.window.includes('bootstrapRoot')) {
 					violations.push(
 						`${symbol} (line ${site.line}): no bootstrapRoot within ${ARG_WINDOW_CHARS} chars of the call`,
@@ -131,6 +166,7 @@ describe('src/index.ts bootstrap-root sources (#2679)', () => {
 				continue;
 			}
 			for (const site of sites) {
+				if (insideBuilderSpan(site.index)) continue;
 				if (!site.window.includes('ctx.directory')) {
 					violations.push(
 						`${symbol} (line ${site.line}): expected ctx.directory within ${ARG_WINDOW_CHARS} chars of the call`,
@@ -156,6 +192,27 @@ describe('src/index.ts bootstrap-root sources (#2679)', () => {
 		expect(SOURCE).toContain(
 			"rootDecision.kind === 'redirect' ? rootDecision.owningRoot : ctx.directory",
 		);
+	});
+
+	test('the extracted registration builders thread a directory parameter (never process.cwd)', () => {
+		// The #2910 feedback round extracted the config-hook body into
+		// applySwarmRegistrationTables (directory threaded as inputs.directory
+		// — v1 passes ctx.directory) and added buildV2RegistrationTables
+		// (fresh config read at the v2 setup root). Pin their directory
+		// threading so the window-scan exemption above stays honest.
+		const builder = SOURCE.slice(
+			SOURCE.indexOf('function applySwarmRegistrationTables('),
+			SOURCE.indexOf('export async function buildV2RegistrationTables('),
+		);
+		expect(builder).toContain('applyLanePermissions(');
+		expect(builder).toContain('inputs.directory');
+		expect(builder).not.toContain('process.cwd()');
+		const freshTables = SOURCE.slice(
+			SOURCE.indexOf('export async function buildV2RegistrationTables('),
+		);
+		expect(freshTables).toContain('getAgentConfigs(');
+		expect(freshTables).toContain('directory');
+		expect(freshTables).not.toContain('process.cwd()');
 	});
 
 	test('the host session-API lookup is threaded at the owning bootstrap root', () => {

@@ -44,6 +44,7 @@ Most behavior is controlled by `opencode-swarm.json`. Environment variables are 
 | `TAVILY_API_KEY` | General Council web search | Tavily credential used when `council.general.searchApiKey` is unset and `searchProvider` is `tavily`. |
 | `BRAVE_SEARCH_API_KEY` | General Council web search | Brave Search credential used when `council.general.searchApiKey` is unset and `searchProvider` is `brave`. |
 | `OPENCODE_SWARM_DEBUG=1` | Debug logger | Enables debug-gated log output. Keep disabled for normal use. |
+| `OPENCODE_SWARM_VERSION_BANNER=1` | Startup version banner | Restores the raw stderr `[opencode-swarm] running vX.Y.Z` startup line (default off; the banner otherwise appears only under `OPENCODE_SWARM_DEBUG=1`, in the debug logger's stdout output). Use for headless/CLI stale-cache diagnosis — identifying which cached plugin version actually loaded (issue #2236). The raw stderr leg is off by default because the TUI renders plugin stderr as an overlay (issue #3405). |
 | `DEBUG_SWARM=1` | Startup and hook diagnostics | Enables additional startup, hook, and plan-manager diagnostics. Keep disabled unless debugging plugin behavior. |
 | `OPENCODE_SWARM_ID` | Diagnose service | Identifies the active swarm in diagnostic checks; `/swarm diagnose` reports mismatches between this value and local plan state. |
 | `SWARM_LANG_BACKEND=legacy` | `test_runner` | Opts out of the dispatch language backend. Dispatch is the default. |
@@ -91,7 +92,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `hooks` | object | — | Hook subsystem toggles and settings. | src/commands/registry.ts:handlePrFeedbackCommandWithTransition (+3) |
 | `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. | src/tools/dispatch-lanes.ts:executeDispatchLanesAsync (+1) |
 | `review_routing` | object (strict) | — | Semantic review routing receipt enforcement for Stage B (default on; set enforce_receipts=false only as a one-release rollback). | src/background/stage-b-gates.ts:ingestBackgroundStageBCompletion (+3) |
-| `lane_liveness_watchdog` | object (strict) | — | Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes. | src/commands/registry.ts:handlePrFeedbackCommandWithTransition (+3) |
+| `lane_liveness_watchdog` | object (strict) | {} | Lane liveness watchdog (default on; set enabled=false to opt out): execution deadline and stall escalation for PR workflow lanes. | src/commands/registry.ts:handlePrFeedbackCommandWithTransition (+3) |
 | `dispatch_protection` | object (strict) | — | Dispatch protection: action-local spawn-failure circuit breaker and token-bucket rate limiting for native task delegations. | src/index.ts:initializeOpenCodeSwarm (+1) |
 | `pr_review_legacy_transcript_compatibility` | boolean | — | Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes. | src/tools/dispatch-lanes.ts:launchAsyncLane (+1) |
 | `gates` | object | — | Quality gate configuration (v6.9 anti-slop features). | src/config/loader.ts:sanitizeGatesConfig (+2) |
@@ -172,7 +173,7 @@ Sections marked `(strict)` reject unknown nested keys at config load time - a ty
 ## Architect prompt budget (characters and model tokens)
 
 The architect's built-in prompt composition is bounded by a published
-character ceiling, `ARCHITECT_PROMPT_BUDGET_CHARS` (164,000 chars in
+character ceiling, `ARCHITECT_PROMPT_BUDGET_CHARS` (165,000 chars in
 `src/agents/architect.ts`). Every supported feature combination — the default
 render, the work-complete council on or off, the advisory General Council
 (`council.general.enabled`) composed together with every documented opt-in
@@ -192,7 +193,7 @@ Two separate quantities are measured and recorded for every composition:
 - **Model tokens** — an estimate only (`estimateModelTokens`, roughly 4
   characters per token, rounded up). Real token usage varies by model and
   content; the estimate is reported next to the character count, never instead
-  of it, so a ~41K-token estimate at the 164K-char ceiling is understood as an
+  of it, so a ~41K-token estimate at the 165K-char ceiling is understood as an
   approximation of the system prompt's share of a 128K-token context window.
 
 Overflow policy (deterministic, guidance-preserving):
@@ -568,10 +569,12 @@ Full-Auto v2 — opencode-swarm's autonomy control plane. Reduces approval frict
 | `denials.max_consecutive` | number | `3` | Pause after N consecutive denials. |
 | `denials.max_total` | number | `20` | Pause after N total denials in the session. |
 | `protected_paths` | string[] | `['.git', '.github/workflows', '.opencode', '.swarm', 'package.json', 'package-lock.json']` | Paths the Full-Auto agent is forbidden from writing. `.opencode` is in the default list to prevent the agent from editing the plugin config that governs it. |
+| `permission_policy.trust_code_mode_wrapper` | boolean | `false` | **OpenCode 2 only.** Let Full-Auto pass the host's Code Mode `execute` wrapper without a critic round trip, but only for a call the v2 adapter marked as that wrapper whose program is exactly one `tools.<path>(<plain data>)` or `search(<plain data>)` call (the sandbox also exposes `fetch` and `Function`, which no hook sees). Off by default: v2 tool events carry no field proving a tool is host-owned, so a third-party tool that merely shares the name `execute` cannot be told apart. Enable only when you control the plugin and MCP set. Nested `tools.<name>()` calls are classified individually either way. |
 | `oversight.max_dispatch_retries` | number | `2` | Same-operation retry cap for transient critic infrastructure failures. |
 | `oversight.max_consecutive_dispatch_failures` | number | `3` | Consecutive infrastructure failures before Full-Auto terminates to manual control. |
 | `oversight.total_timeout_ms` | number | `120000` | Total wall-clock budget (1,000–300,000 ms) shared by critic session creation, prompt, retry/fallback, backoff, parse, and cleanup. |
 | `oversight.cleanup_timeout_ms` | number | `2000` | Short cleanup bound (100–10,000 ms) that cannot extend the total oversight deadline. |
+| `oversight.hook_timeout_ms` | number | _(unset)_ | **OpenCode 2 only.** Budget (1,000–900,000 ms) for the whole `tool.execute.before` guard chain, which contains the oversight dispatch while Full-Auto runs. Unset: while a Full-Auto run is active it follows `oversight.total_timeout_ms` + 30 s (never below 60 s); otherwise 60 s. Before this key the chain was cut off at a fixed 60 s, shorter than the 120 s default oversight deadline, so the host reported `tool.execute.before exceeded budget` while the critic was still working. |
 
 **Fail-closed semantics:**
 - Activation refuses if a config file exists but cannot be loaded (corrupt JSON, oversized, permission error) — `locked` is treated as "unknown", not "false".
@@ -1092,24 +1095,28 @@ Behavior notes:
 ### lane_liveness_watchdog
 
 Controls the lane-liveness watchdog for PR workflow lanes (issue #2506): a
-typed execution deadline and an advisory stall escalation. **Disabled by
-default.** An omitted section, or `enabled: false`, is a full no-op — PR-lane
-settlement stays byte-identical to the pre-#2506 substrate (age-only
-settlement, the fail-open liveness probe, probe retention, and the
-human-only force abort). Each numeric field disables its own feature at `0`
-while leaving the others armed.
+typed execution deadline and an advisory stall escalation. **Enabled by
+default** (flipped from the original #2506 default-off contract by the
+#3312/#3313 settlement-honesty work): an omitted section and an empty
+section `{}` both resolve the enabled watchdog with the frozen defaults
+below, so every PR-lane settlement observes one coherent policy without any
+configuration. `enabled: false` is the full opt-out — with it (and only with
+it, short of a `0` knob) PR-lane settlement is byte-identical to the
+pre-#2506 substrate (age-only settlement, the fail-open liveness probe,
+probe retention, and the human-only force abort). Each numeric field still
+disables its own feature at `0` while leaving the others armed.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Arm the watchdog. `false` (or omitted) runs no probes, writes no watchdog events, and never changes the settlement horizon. |
-| `timeout_ms` | number | `1800000` | When enabled and non-zero, the single effective PR-lane settlement horizon in milliseconds (0–86400000). `0` disables the execution deadline and restores the reachability-floor fallback. |
+| `enabled` | boolean | `true` | Arm the watchdog (default). `false` runs no probes, writes no watchdog events, and forces the 30-minute reachability floor as the settlement horizon, overriding any `timeout_ms`. |
+| `timeout_ms` | number | `1800000` | When enabled and non-zero, the single effective PR-lane settlement horizon in milliseconds (0–86400000); the default equals the 30-minute reachability floor. `0` disables the execution deadline and restores the reachability-floor fallback. |
 | `stall_threshold_ms` | number | `300000` | Activity window for stall detection in milliseconds (0–86400000). Stall escalation is active only when this and both thresholds below are non-zero. |
 | `stall_min_steps` | number | `5` | Observable transcript steps within the window that count as progress (0–10000). |
 | `stall_token_threshold` | number | `200` | Estimated tokens within the window that count as progress (0–1000000). |
 
 **The single effective horizon.** An enabled watchdog with `timeout_ms > 0`
-owns the PR-lane settlement horizon. Everything else — no config,
-`enabled: false`, or `timeout_ms: 0` — falls back to the 30-minute
+owns the PR-lane settlement horizon. Everything else — `enabled: false` (the
+opt-out) or `timeout_ms: 0` — falls back to the 30-minute
 reachability floor (`DEFAULT_STALE_DELEGATION_TIMEOUT_MS`), which must never
 disappear: it is the guarantee that abort and completion cannot be
 permanently blocked by a lane whose backing process died. A disagreement
@@ -1165,7 +1172,9 @@ conservative direction for stall escalation (escalate, then let the
 operator inspect). A structured `stall` block on each escalation event
 carries the first escalated lane's observed values beside those thresholds.
 
-**Example** — opt in with the frozen defaults (30-minute horizon, 5-minute stall window, 5 steps / ~200 estimated tokens):
+**Example** — the default: watchdog on with the frozen defaults (30-minute
+horizon, 5-minute stall window, 5 steps / ~200 estimated tokens). An omitted
+or empty section resolves exactly this policy:
 
 ```json
 {
@@ -1175,7 +1184,8 @@ carries the first escalated lane's observed values beside those thresholds.
 }
 ```
 
-**Example** — the default: watchdog off, settlement unchanged:
+**Example** — opt out entirely (settlement falls back to the age-only
+substrate described above):
 
 ```json
 {

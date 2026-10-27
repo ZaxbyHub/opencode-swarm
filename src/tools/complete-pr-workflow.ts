@@ -94,8 +94,10 @@ export async function executeCompletePrWorkflow(
 					: undefined,
 		};
 	} catch {
-		// Config read failure must not block completion; the disabled
-		// default is always safe.
+		// Config read failure must not block completion. The fallback keeps
+		// the watchdog off (the explicit opt-out semantics), independent of
+		// the schema's default — the fail-open here means "no policy read",
+		// not "safe because the default is disabled".
 	}
 	try {
 		const settlement = await _internals.settlePresumedStalePrWorkflowLanes(
@@ -235,6 +237,20 @@ export async function executeCompletePrWorkflow(
 			ReturnType<typeof listPendingPrWorkflowCheckoutRestores>
 		> = [];
 		if (status === 'completed') {
+			if (
+				parsed.data.mode === 'PR_REVIEW' &&
+				parsed.data.report_verdict === 'INCOMPLETE' &&
+				terminalReport
+			) {
+				// Feedback F2 round 2: a run that COMPLETED with report_verdict
+				// INCOMPLETE never admits APPROVE/REQUEST_CHANGES on any path —
+				// the bypass arm (which persists a skip disclosure), a
+				// fully-settled ladder INCOMPLETE, or NO_COVERAGE. The override
+				// is keyed on the completed verdict, not pre-completion state,
+				// so it is truthful for first-time bypass runs and cannot leak
+				// into an APPROVE/REQUEST_CHANGES ladder completion.
+				terminalReport.allowed_verdicts = ['INCOMPLETE'];
+			}
 			try {
 				checkoutRestoreReceipts =
 					await _internals.listPendingPrWorkflowCheckoutRestores(

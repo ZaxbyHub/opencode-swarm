@@ -354,4 +354,78 @@ describe('workflow state-conflict error diagnostics — #2202 recovery errors', 
 		expect(error.message).toContain('/swarm reset-session');
 		expect(error.message).toContain('do not remove the WAL by hand');
 	});
+
+	test('CODER_SETTLEMENT_RECOVERY_UNCERTAIN (merge-strategy ancestry probe error) names task, transition, WAL path, state and recovery command', async () => {
+		const head = initCleanRepo();
+		// reconcileLandedMerge's merge/rebase branch decides "landed" with
+		// `git merge-base --is-ancestor <sourceHead> HEAD`. Exit 0/1 are answers;
+		// anything else is "cannot tell" and must surface as a reconcile error.
+		// Point HEAD at a branch that does not exist: the recorded source commit is
+		// still present (so recovery does not take the source-absent path), but the
+		// ancestry probe's HEAD operand cannot resolve and git exits 128.
+		fs.writeFileSync(
+			path.join(directory, '.git', 'HEAD'),
+			'ref: refs/heads/unborn-recovery-fixture\n',
+		);
+		const walPath = writeWal('coder-settlements', '5.3', {
+			version: 1,
+			state: 'DISPATCHED',
+			taskId: '5.3',
+			transitionId: 'coder:5.3:4',
+			actor: 'coder',
+			processId: deadPid(),
+			runtimeId: 'runtime-1',
+			expectedGeneration: 0,
+			recordedAt: '2026-09-04T00:00:00.000Z',
+			observedFiles: ['src/feature.ts'],
+			mergeProvenance: {
+				operationId: 'coder:5.3:4',
+				sourceHead: head,
+				targetHeadBefore: head,
+				branchName: 'swarm/lane-5.3',
+				strategy: 'merge',
+			},
+			context: {
+				declaredFiles: ['src/feature.ts'],
+				baseline: {
+					directory,
+					gitHead: head,
+					dirtyHash: null,
+					prHeadSha: null,
+					scope: null,
+					changedFiles: [],
+				},
+			},
+			worktree: {
+				callID: 'call-5.3',
+				parentSessionId: 'sess-a',
+				taskId: '5.3',
+				planTaskId: null,
+				worktreePath: path.join(directory, '.swarm', 'gone-worktree'),
+				branchName: 'swarm/lane-5.3',
+				worktreeId: 'wt-5.3',
+				worktreeSessionId: 'sess-wt-5.3',
+				mergeStrategy: 'merge',
+				laneIndex: 0,
+				worktreeDir: null,
+			},
+		});
+
+		const error = await recoverCoderSettlement(directory, '5.3').catch(
+			(caught: unknown) => caught as Error,
+		);
+
+		expect(error.message).toContain('CODER_SETTLEMENT_RECOVERY_UNCERTAIN');
+		expect(error.message).toContain('could not reconcile the landed merge');
+		expect(error.message).toContain('coder:5.3:4');
+		expect(error.message).toContain('task 5.3');
+		expect(error.message).toContain(walPath);
+		expect(error.message).toContain('state DISPATCHED');
+		// The underlying git failure from the ancestry probe is carried through.
+		// (git's wording may be localized; the unresolved `HEAD` operand is not.)
+		expect(error.message).toMatch(/state DISPATCHED\): .*HEAD/);
+		expect(error.message).toContain('Run /swarm recover 5.3');
+		expect(error.message).toContain('/swarm reset-session');
+		expect(error.message).toContain('do not remove the WAL by hand');
+	});
 });

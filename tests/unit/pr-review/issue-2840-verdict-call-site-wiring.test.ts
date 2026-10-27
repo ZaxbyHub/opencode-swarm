@@ -66,15 +66,23 @@ function productionCallSites(): Array<{
 
 describe('issue #2840 — allowedPrReviewReportVerdicts call-site wiring ratchet', () => {
 	test('the production call-site set is exactly the pinned five sites', () => {
-		const sites = productionCallSites().map(
-			(site) => `${site.file}:${site.line}`,
-		);
+		// readdirSync order is filesystem-dependent: self-hosted runners return
+		// src/ entries in a different order than GitHub's images, so the walk
+		// must be normalized to one deterministic order before pinning.
+		const sites = productionCallSites()
+			.map((site) => `${site.file}:${site.line}`)
+			.sort();
 		expect(sites).toEqual([
-			'src/hooks/pr-workflow-gate.ts:12285', // readPrReviewFinalFindingPolicyForReport
-			'src/hooks/pr-workflow-gate.ts:13890', // dispatchCoverageFinalization message formatting
-			'src/hooks/pr-workflow-gate.ts:14025', // completion preflight
-			'src/hooks/pr-workflow-gate.ts:14066', // completion post-ladder finding-policy check
-			'src/pr-review/completion.ts:1721', // readPrReviewTerminalCoverageForReport
+			// Re-pinned after the #3340 gate-side critic admission round
+			// (branch
+			// auto-fix/issue-3340-pr-review-gate-side-critic-adm-b42a37)
+			// shifted the gate lines +78; same five call sites, live grep
+			// values.
+			'src/hooks/pr-workflow-gate.ts:12448', // readPrReviewFinalFindingPolicyForReport
+			'src/hooks/pr-workflow-gate.ts:14580', // dispatchCoverageFinalization message formatting
+			'src/hooks/pr-workflow-gate.ts:15046', // completion preflight
+			'src/hooks/pr-workflow-gate.ts:15087', // completion post-ladder finding-policy check
+			'src/pr-review/completion.ts:2044', // readPrReviewTerminalCoverageForReport
 		]);
 	});
 

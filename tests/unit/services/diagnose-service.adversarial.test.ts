@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as realChildProcess from 'node:child_process';
 import * as realFs from 'node:fs';
 import type { Plan } from '../../../src/config/plan-schema.js';
-import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
+import {
+	_internals as diagnoseInternals,
+	getDiagnoseData,
+} from '../../../src/services/diagnose-service.js';
 import { __seedGitExecutableForTests } from '../../../src/utils/git-executable.js';
 
 // Shared mock registry — allows factory-created mocks to be re-imported
@@ -54,15 +56,7 @@ mock.module('node:fs', () => ({
 	existsSync: mockExistsSync,
 	statSync: mockStatSync,
 }));
-mock.module('node:child_process', () => {
-	const m = mock(() => Buffer.from('.git'));
-	const mFile = mock(() => Buffer.from('.git'));
-	mockRegistry.execSync = m;
-	mockRegistry.execFileSync = mFile;
-	return { ...realChildProcess, execSync: m, execFileSync: mFile };
-});
 
-import { execFileSync, execSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { loadPluginConfig } from '../../../src/config/loader.js';
 import { listEvidenceTaskIds } from '../../../src/evidence/manager.js';
@@ -91,8 +85,6 @@ const mockExistsSyncFromReg = mockRegistry.existsSync as ReturnType<
 	typeof mock
 >;
 const mockStatSyncFromReg = mockRegistry.statSync as ReturnType<typeof mock>;
-const mockExecSync = mockRegistry.execSync as ReturnType<typeof mock>;
-const mockExecFileSync = mockRegistry.execFileSync as ReturnType<typeof mock>;
 
 // Helper to create minimal valid plan object
 function makePlan(
@@ -131,6 +123,8 @@ function findCheck(checks: any[], name: string) {
 
 const testDirectory = '/test/directory';
 
+const originalDiagnoseRead = diagnoseInternals.readGitRepositoryOnce;
+
 beforeEach(() => {
 	mock.clearAllMocks();
 	mockLoadPlanJsonOnly.mockResolvedValue(null);
@@ -141,14 +135,18 @@ beforeEach(() => {
 	mockReaddirSyncFromReg.mockImplementation(() => [] as realFs.Dirent[]);
 	mockExistsSyncFromReg.mockReturnValue(true);
 	mockStatSyncFromReg.mockReturnValue({ isDirectory: () => true });
-	mockExecSync.mockReturnValue(Buffer.from('.git'));
-	mockExecFileSync.mockReturnValue(Buffer.from('.git'));
 	__seedGitExecutableForTests('git');
+	// #3317 PRR-023: stub the async reader seam so no real git spawns here.
+	diagnoseInternals.readGitRepositoryOnce = async () => ({
+		ok: true,
+		stdout: '.git',
+	});
 	// restore env var
 	delete process.env.OPENCODE_SWARM_ID;
 });
 
 afterEach(() => {
+	diagnoseInternals.readGitRepositoryOnce = originalDiagnoseRead;
 	mock.restore();
 	delete process.env.OPENCODE_SWARM_ID;
 });

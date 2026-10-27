@@ -275,7 +275,7 @@ describe('retention registry rows — coverage plumbing', () => {
 			).length;
 		const durableWriter = lineOf(pending, /^function writeDurableFileSync\(/);
 
-		expect(mutationCount).toBe(20);
+		expect(mutationCount).toBe(21); // +1: supersedeStaleLivenessVerdictLane (#3313)
 		expect(row.writerCitations).toEqual([
 			`src/background/pending-delegations.ts:${appendRecord} appendRecord — SQLite coordination event+state transaction with post-commit JSON projection`,
 			`src/background/pending-delegations.ts:${durableWriter} writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility`,

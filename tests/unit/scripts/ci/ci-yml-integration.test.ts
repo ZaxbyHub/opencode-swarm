@@ -306,8 +306,9 @@ describe('ci.yml integration — integration quarantine extraction', () => {
 	});
 
 	test('"Integration tests" step tolerates empty quarantine files', () => {
+		// #3312/#3313: the sort|comm gating pipeline is pinned to C collation (LC_ALL=C; self-hosted locale fix).
 		expect(step).toContain(
-			'grep -vE \'^\\s*#|^\\s*$\' scripts/ci/quarantined-integration-tests.txt | sort > "$tmpdir/int-quarantined.txt" || true',
+			'grep -vE \'^\\s*#|^\\s*$\' scripts/ci/quarantined-integration-tests.txt | LC_ALL=C sort > "$tmpdir/int-quarantined.txt" || true',
 		);
 	});
 

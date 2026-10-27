@@ -57,7 +57,7 @@ export async function guardResetWithRecheck(
 	cwd: string,
 	options?: GuardedResetToMainOptions,
 ): Promise<GuardedResetToMainResult> {
-	const recheck = recheckBeforeDestructive(
+	const recheck = await recheckBeforeDestructive(
 		cwd,
 		options?.expectedDirtyPaths ?? [],
 	);
@@ -94,7 +94,10 @@ export async function runAlignStage(
 	let gitAlignResult = '';
 	const prunedBranches: string[] = [];
 
-	const gitStatus = _internals.getGitRepositoryStatus(ctx.directory);
+	// #3427: the repository probe is awaited through the async seam (the
+	// reader-backed detailed twin wired by wireCloseInternals) — the finalize
+	// pipeline no longer crosses the blocking sync gitExec chain here.
+	const gitStatus = await _internals.getGitRepositoryStatus(ctx.directory);
 	if (gitStatus.isRepo) {
 		// Try aggressive reset first (handles post-merge scenario with uncommitted changes).
 		// #2953: the seam value is guardResetWithRecheck (installed at wiring

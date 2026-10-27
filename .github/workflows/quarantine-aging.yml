@@ -34,7 +34,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     # Bounded: per-gh-call timeout is 30s in the script and anchors cap at
     # 20 lookups, so ~15 minutes is a generous ceiling (review PRR-037).
     timeout-minutes: 15

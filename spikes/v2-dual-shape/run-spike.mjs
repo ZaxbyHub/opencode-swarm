@@ -240,6 +240,12 @@ function isolatedEnv(scratchRoot) {
   return {
     ...process.env,
     OPENCODE_SWARM_DEBUG: '1',
+    // The init banner's raw stderr leg is opt-in since #3405 (the default leg
+    // is the debug-gated logger's stdout line, which the v2 host does not
+    // relay). The harness's banner-detection regexes match the host's
+    // stdout+stderr concatenation, and only the v2 legs can be satisfied by
+    // the stderr leg at all — so keep it on for every host spawn.
+    OPENCODE_SWARM_VERSION_BANNER: '1',
     XDG_CONFIG_HOME: path.join(scratchRoot, 'cfg'),
   };
 }
@@ -398,7 +404,7 @@ async function main() {
     const header = [
       `HOST: opencode ${v1Version} | ${V1_BIN}`,
       `PLUGIN: file:${REPO_ROOT.replaceAll('\\', '/')} | dist sha256 ${distSha}`,
-      `RUN: ${ts()} | args: agent list --print-logs | env: OPENCODE_SWARM_DEBUG=1, isolated XDG_CONFIG_HOME | exit=${r.code} | host-ran=${ran}`,
+      `RUN: ${ts()} | args: agent list --print-logs | env: OPENCODE_SWARM_DEBUG=1, OPENCODE_SWARM_VERSION_BANNER=1, isolated XDG_CONFIG_HOME | exit=${r.code} | host-ran=${ran}`,
       `ENTRYPOINT: server() — the v1 host consulted id/server only; see v1-nosetup-ablation.log / v1-noserver-ablation.log for the ablation proof that setup() is inert on v1`,
       `HOOK-FIRED: config hook — host agent table lists the swarm agents (host output lines, not plugin debug): ${fired ? 'YES (architect (primary) + subagent entries present)' : 'NO'}`,
       `WARNINGS: ${warnings.length ? warnings.join('; ') : 'none observed'}`,
@@ -493,7 +499,7 @@ async function main() {
     const header = [
       `HOST: ${v2Version} | ${V2_BIN} (npm @opencode/cli platform binary; the .cmd shim's blocked postinstall is bypassed by invoking the platform exe directly)`,
       `PLUGIN: .opencode/plugins/local-spike.js re-export ${pathToFileURL(DIST).href} | dist sha256 ${distSha}`,
-      `RUN: ${ts()} | args: run --standalone --print-logs (tool-free prompt) | env: OPENCODE_SWARM_DEBUG=1, isolated XDG_CONFIG_HOME | exit=${r.code} | host-ran=${ran}`,
+      `RUN: ${ts()} | args: run --standalone --print-logs (tool-free prompt) | env: OPENCODE_SWARM_DEBUG=1, OPENCODE_SWARM_VERSION_BANNER=1, isolated XDG_CONFIG_HOME | exit=${r.code} | host-ran=${ran}`,
       `ENTRYPOINT: setup(ctx) — the v2 host decodes the default export against {id, setup|effect}; see v2-noserver-ablation.log / v2-nosetup-ablation.log for the ablation proof that server() is inert on v2`,
       `HOOK-FIRED: session hook family — ${sessionState ? `.swarm/session state written during the tool-free prompt turn; attributable to the registered session hooks on that turn (the context hook via seedV1SessionState and/or the prompt hook via cacheCohortIdAtMessage -> ensureAgentSession — v2 does not relay plugin stdout, so the writer is not disambiguated host-side; both are registrations proved by setup() running)` : 'NOT OBSERVED (.swarm/session empty)'}; model reply received: ${replied ? 'yes ("loaded")' : 'no'}`,
       `WARNINGS: ${warnings.length ? warnings.join('; ') : 'none observed'}`,

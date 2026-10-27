@@ -8,7 +8,13 @@
  * actually run. Failure modes must degrade to `repoUrl: undefined` — bounded,
  * never fabricated, never hanging the runner (the pre-fix tree hangs here).
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe as describeBlock,
+	expect,
+	test,
+} from 'bun:test';
 import { rmSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { writeProjectIdentity } from '../../../src/knowledge/identity.js';
@@ -20,6 +26,12 @@ import {
 	teardownFakeGit,
 } from '../../helpers/fake-git-2674.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+
+// Skipped under coverage shards: coverage instrumentation distorts child-process
+// exit/buffering semantics and wall-clock bounds on shared self-hosted hosts;
+// the hosted unit matrix keeps this suite fully enforced.
+const skipCoverage = Boolean(process.env.COVERAGE_SHARD_INDEX);
+const describe = describeBlock.skipIf(skipCoverage);
 
 // Generous wall-clock slack over the 5 s caller bound so CI load cannot flake
 // the termination assertion (repo convention: assert the bound, not ms
