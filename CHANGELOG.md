@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.200.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.5...v7.200.6) (2026-10-27)
+
+
+### Bug Fixes
+
+* **guard:** interpreter spelling detection, host-reported shell grammar, and scope-gated eval routing (3323/3343/3346/3347) ([f6bc757](https://github.com/ZaxbyHub/opencode-swarm/commit/f6bc757809a8972daed35d4bb4cb50b14fa1f253))
+
 ## [7.200.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.4...v7.200.5) (2026-10-27)
 
 
