@@ -23,6 +23,7 @@ import {
 	resolveWindowsWriteAuthority,
 } from '../hooks/guardrails/tool-before.js';
 import { declaresWindowsWrapperLoose } from '../hooks/shell-executor-context';
+import { getObservedHostShell } from '../hooks/shell-executor-context.js';
 import {
 	detectPosixWrites,
 	detectWindowsWrites,
@@ -682,6 +683,12 @@ export async function handleGuardrailExplain(
 			shellCommand,
 			detected,
 			isPowerShellShaped(shellCommand),
+			// #3346 gate parity: explain evaluates as the `shell` tool, so it
+			// keys grammar inheritance on the same observed host shell the
+			// gate consumes (never wider than the platform interim when no
+			// host report exists).
+			process.platform,
+			getObservedHostShell(),
 		);
 		// Mirrors the gate's wrapper-priority flag (round-5 blocker: omitting it
 		// made explain keep the POSIX reading for explicit cmd/powershell -Command
@@ -791,6 +798,9 @@ export async function handleGuardrailExplain(
 			shellCommand,
 			detected,
 			isPowerShellShaped(shellCommand),
+			// #3346 gate parity (see the allow branch).
+			process.platform,
+			getObservedHostShell(),
 		);
 		// Same wrapper-priority flag as the allow branch; recomputed because
 		// the gate's detect() closure recomputes it on its blocked path too.

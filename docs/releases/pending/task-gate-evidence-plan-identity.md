@@ -1,0 +1,57 @@
+# Task-gate evidence now records which plan it was earned under
+
+## What
+
+Task-gate evidence (`.swarm/evidence/{taskId}.json`) written under a plan now
+carries an optional `planId` / `planIdentityHash` stamp, and the tools that
+refuse or repair evidence use it to tell "this evidence belongs to an earlier
+plan" apart from "this evidence is missing".
+
+- When `update_task_status` refuses completion because the exact review route
+  receipt is missing and the evidence is stamped for a different plan than the
+  current `.swarm/plan.json`, the refusal says so and points at
+  `repair_gate_evidence` instead of the generic missing-receipt message.
+- `check_gate_status` adds a `prior_campaign_evidence` note (the gate `status`
+  is unchanged) when the stamp names a different plan. Plan identity is advisory: it changes
+  refusal wording and diagnostics only and is not itself a completion blocker.
+- `repair_gate_evidence` may rebuild evidence stamped for a different plan even
+  though it is otherwise structurally valid, and stamps the rebuilt record with
+  the current plan identity.
+- A stamp is only minted on new evidence, evidence that carries no recorded
+  gates, or a non-duplicate coder `accepted_mutation` (a campaign restart). Evidence that carries forward
+  previously recorded gates keeps the identity it was earned under, so a
+  supplementary write (for example a todo scan) cannot launder old gates into
+  the current plan.
+
+## Why
+
+When a plan is replaced with a different `swarm` or `title`, evidence for a
+task id that the new plan reuses was indistinguishable from the new plan's own
+evidence, so refusals gave no signal that the gates on file were earned under a
+different plan.
+
+## Limits
+
+- Plan identity is advisory. It changes diagnostics and the wording of one
+  refusal (the exact review-route-receipt branch of `update_task_status`); it is
+  not a completion predicate and does not by itself unblock any task.
+- The restart restamp is a heuristic. A coder `accepted_mutation` under a new
+  plan restamps the record, but the designer, docs, sme, explorer and critic_*
+  verifier gates the reducer keeps were earned earlier and still count toward
+  completion, exactly as before this change. Conversely, a task with no coder
+  step (docs, sme or explorer only) keeps its earlier stamp, so the advisory can
+  flag it even though its gates were earned under the current plan; running
+  `repair_gate_evidence` there discards those gates.
+- The identity is read from raw `plan.json`; a byte-order mark or a transient
+  read failure makes the identity unknown, which disables the advisory rather
+  than producing a false one.
+- Tasks that were already wedged before upgrading have no stamp, so they are
+  treated as unknown and are not recovered by this release.
+- The identity covers `swarm` and `title` only; replacing a plan without
+  changing either does not change the identity.
+
+## Migration
+
+No action required. Evidence written before this change has no stamp and is
+treated as unknown, not as prior-plan evidence: its behaviour, including
+`repair_gate_evidence` refusing structurally valid evidence, is unchanged.

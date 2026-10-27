@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.200.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.6...v7.200.7) (2026-10-27)
+
+
+### Bug Fixes
+
+* **gate-evidence:** key task-gate evidence by plan identity (Stage B wedge classes D and E) ([81ad902](https://github.com/ZaxbyHub/opencode-swarm/commit/81ad90206a391fb1e50dde43f8cd1fb9491ce936))
+
+## [7.200.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.5...v7.200.6) (2026-10-27)
+
+
+### Bug Fixes
+
+* **guard:** interpreter spelling detection, host-reported shell grammar, and scope-gated eval routing (3323/3343/3346/3347) ([f6bc757](https://github.com/ZaxbyHub/opencode-swarm/commit/f6bc757809a8972daed35d4bb4cb50b14fa1f253))
+
 ## [7.200.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.4...v7.200.5) (2026-10-27)
 
 

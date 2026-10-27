@@ -28,6 +28,7 @@ import {
 } from './evidence/task-file.js';
 import { appendTaskGateRequirementsReceiptIfNeeded } from './evidence/task-gate-requirements.js';
 import { validateSwarmPath } from './hooks/utils.js';
+import { derivePlanId, derivePlanIdentityHash } from './plan/utils.js';
 import type { ReviewRouteEvidence } from './review/routing-enforcement.js';
 import type { TaskWorkflowState } from './state';
 import { telemetry } from './telemetry.js';
@@ -170,6 +171,8 @@ export interface TaskEvidence {
 	requirements_state?: 'known' | 'unknown';
 	/** Durable proof that the coder dispatch was classified as exact Markdown-only. */
 	test_engineer_exempt?: boolean;
+	planId?: string;
+	planIdentityHash?: string;
 	/** Exact-task workflow metadata. Missing on legacy evidence written before #2098. */
 	workflow?: TaskWorkflowMetadata;
 	/** Immutable source identity for an idempotent fail-closed evidence repair. */
@@ -593,6 +596,11 @@ const TaskEvidenceSchema = z.object({
 	turbo: z.boolean().optional(),
 	requirements_state: z.enum(['known', 'unknown']).optional(),
 	test_engineer_exempt: z.boolean().optional(),
+	planId: z.string().optional(),
+	planIdentityHash: z
+		.string()
+		.regex(/^[a-f0-9]{64}$/)
+		.optional(),
 	workflow: TaskWorkflowMetadataSchema.optional(),
 	repair_provenance: z
 		.object({
@@ -630,6 +638,90 @@ export function parseTaskEvidence(
 	return parsed;
 }
 
+/**
+ * Stage B wedge fix (Class E): resolve the current plan identity from
+ * {directory}/.swarm/plan.json. Returns null when the plan is missing or
+ * unreadable; callers must treat null as "identity unknown" and never
+ * block evidence writes on it.
+ */
+export function resolveCurrentPlanIdentitySync(
+	directory: string | undefined,
+): { planId: string; planIdentityHash: string } | null {
+	if (!directory) return null;
+	try {
+		const planPath = path.join(directory, '.swarm', 'plan.json');
+		const raw = readFileSync(planPath, 'utf8');
+		const plan = JSON.parse(raw) as { swarm?: unknown; title?: unknown };
+		if (typeof plan.swarm !== 'string' || typeof plan.title !== 'string')
+			return null;
+		return {
+			planId: derivePlanId(plan as { swarm: string; title: string }),
+			planIdentityHash: derivePlanIdentityHash(
+				plan as { swarm: string; title: string },
+			),
+		};
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Stage B wedge fix (Class E): true iff the evidence carries a plan-identity
+ * stamp that names a DIFFERENT plan than the current one. An absent stamp
+ * (legacy evidence written before stamping, or a plan.json that could not be
+ * read at write time) means "unknown", never "prior campaign": only a positive
+ * mismatch classifies evidence as predating the current campaign.
+ */
+export function evidenceStampedForDifferentPlan(
+	evidence: TaskEvidence | null | undefined,
+	currentPlanIdentityHash: string | null | undefined,
+): boolean {
+	if (evidence == null || currentPlanIdentityHash == null) return false;
+	return (
+		typeof evidence.planIdentityHash === 'string' &&
+		evidence.planIdentityHash !== currentPlanIdentityHash
+	);
+}
+
+/**
+ * Plan-identity stamp to attach when persisting evidence that carries no stamp
+ * of its own. A stamp asserts "this evidence belongs to the current campaign",
+ * so it is only minted when that is true by construction (an explicit stamp on
+ * the incoming record is always preserved as-is):
+ *  - evidence that carries no recorded gates, or
+ *  - evidence created now (no previous on-disk record), or
+ *  - a campaign restart: a coder accepted_mutation that is not a duplicate
+ *    replay. The reducer clears the workflow gate proofs there; the gates it
+ *    keeps (designer, docs, explorer, sme, critic_*) were earned earlier and
+ *    still count, so the restamp is a heuristic, not proof (see the fragment).
+ * Evidence that otherwise carries forward previously recorded gates keeps the
+ * identity those gates were earned under: a previous stamp is propagated, and
+ * an unstamped legacy record stays unstamped (unknown) rather than being
+ * laundered into the current campaign.
+ */
+function planStampForPersist(
+	nextEvidence: TaskEvidence,
+	previous: TaskEvidence | null,
+	planIdentity: { planId: string; planIdentityHash: string } | null,
+	campaignRestart: boolean,
+): { planId?: string; planIdentityHash?: string } {
+	if (nextEvidence.planIdentityHash !== undefined) return {};
+	const carriesGates = Object.keys(nextEvidence.gates ?? {}).length > 0;
+	if (carriesGates && previous != null && !campaignRestart) {
+		return previous.planIdentityHash !== undefined
+			? {
+					...(previous.planId !== undefined ? { planId: previous.planId } : {}),
+					planIdentityHash: previous.planIdentityHash,
+				}
+			: {};
+	}
+	return planIdentity
+		? {
+				planId: planIdentity.planId,
+				planIdentityHash: planIdentity.planIdentityHash,
+			}
+		: {};
+}
 export const DEFAULT_REQUIRED_GATES = ['reviewer', 'test_engineer'];
 
 export interface GateDerivationContext {
@@ -1742,9 +1834,18 @@ export async function withTaskEvidenceTransaction<T>(
 			nextEvidence: TaskEvidence,
 			event?: TaskWorkflowTransitionEvent,
 		): Promise<TaskEvidence> => {
+			const planIdentity = resolveCurrentPlanIdentitySync(directory);
 			const validated = TaskEvidenceSchema.parse({
 				...nextEvidence,
 				taskId,
+				...planStampForPersist(
+					nextEvidence,
+					current,
+					planIdentity,
+					event?.type === 'accepted_mutation' &&
+						event.agentType === 'coder' &&
+						nextEvidence !== current,
+				),
 			});
 			await atomicWriteFile(evidencePath, JSON.stringify(validated, null, 2));
 			if (event) {

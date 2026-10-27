@@ -133,6 +133,38 @@ export interface FullAutoClassifierInput {
 // Tool classification helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Swarm tools audited as read-only for the Full-Auto no-critic tier (#3461).
+ * Audit rule: the tool module and its callees were read, and nothing on the
+ * default path mutates project source or scope authority, spawns a process or
+ * uses the network. Narrow, documented exceptions (the classifier is
+ * argument-blind, so these ride along):
+ *  - plan_conflict_check completes the one-shot legacy scope-binding migration
+ *    (for the session's project root the permission hook already performs it)
+ *    and spawns bounded read-only git only when use_cochange is true;
+ *  - context_status may record the model-limit telemetry the context-budget
+ *    hook already writes for the session's project root.
+ * Both tools accept a working_directory override, so those effects can also
+ * land on another project root, as for older members of this tier.
+ * Look-alikes that write unconditionally on the default read path stay out:
+ * lean_turbo_status / lean_turbo_runner_status archive and seed state on every
+ * read; export_pr_review_partial_results and convene_general_council write
+ * files. Exported so tests bind to the real set instead of a hand-copied list.
+ */
+export const FULL_AUTO_AUDITED_READ_ONLY_SWARM_TOOLS = [
+	'skill_list',
+	'skill_inspect',
+	'external_skill_list',
+	'external_skill_inspect',
+	'knowledge_receipt_status',
+	'retrieve_lane_output',
+	'lean_turbo_plan_lanes',
+	'plan_conflict_check',
+	'scope_validate',
+	'context_status',
+	'suggest_patch',
+] as const;
+
 const READ_ONLY_TOOLS = new Set<string>([
 	// swarm read-only / verification tools
 	'check_gate_status',
@@ -175,6 +207,7 @@ const READ_ONLY_TOOLS = new Set<string>([
 	'doc_extract',
 	'req_coverage',
 	'req_coverage'.toLowerCase(),
+	...FULL_AUTO_AUDITED_READ_ONLY_SWARM_TOOLS,
 	// opencode native read tools (opaque to the swarm but commonly reachable)
 	'read',
 	'glob',
@@ -209,7 +242,6 @@ const WRITE_LIKE_TOOLS = new Set<string>([
 	// to the unknown-tool branch below, which escalates to the critic on EVERY
 	// invocation.
 	'consensus_mine',
-	'suggest_patch',
 ]);
 
 const SHELL_TOOLS = new Set<string>(['bash', 'shell', 'exec', 'run']);
