@@ -77,6 +77,11 @@ const EMBEDDED_SHAPES: Array<[string, string, string]> = [
 		'github_pat_11AAAAAAAA0bbbbbbbbbbbbbb_ccccccccccccccccccccccccccccccvvvvvvvvvvv',
 	],
 	[
+		'gitlab glpat- token embedded in word chars',
+		'q'.repeat(12) + 'glpat-' + 'AbCdEfGhIjKlMnOpQrStUvWx' + 'z'.repeat(8),
+		'glpat-AbCdEfGhIjKlMnOpQrStUvWx',
+	],
+	[
 		'gitlab glptt- token embedded in word chars',
 		'q'.repeat(12) + 'glptt-' + 'AbCdEfGhIjKlMnOpQrStUvWx' + 'z'.repeat(8),
 		'glptt-AbCdEfGhIjKlMnOpQrStUvWx',
@@ -98,6 +103,24 @@ const BENIGN_CONTROLS: Array<[string, string]> = [
 	['snake_case with a ghs_ subword', 'load_ghs_metadata_from_cache_store'],
 	['snake_case with highs_and_lows', 'weekly_highs_and_lows_for_the_quarter'],
 	['snake_case with a ghp_ subword', 'reset_ghp_session_token_refresh_handler'],
+	// PRR-011: these two pin the KEPT anchors — the de-anchoring mutant
+	// (strip  from the stripe/jwt arms) makes both MATCH, so each control
+	// fails if the anchor is dropped.
+	[
+		'stripe anchor kept: risk_live_ prose shape',
+		'risk_live_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8',
+	],
+	[
+		'jwt anchor kept: two eyJ segments inside a base64 blob',
+		'w'.repeat(10) +
+			'eyJ' +
+			'a'.repeat(20) +
+			'.eyJ' +
+			'b'.repeat(15) +
+			'.' +
+			'c'.repeat(20) +
+			'w'.repeat(10),
+	],
 ];
 
 describe('embedded secret shapes are redacted and removed (#3382)', () => {

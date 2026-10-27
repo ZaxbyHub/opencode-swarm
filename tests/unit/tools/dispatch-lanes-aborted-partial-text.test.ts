@@ -247,8 +247,9 @@ describe('aborted-with-partial-text verdict lanes are never typed (#3397 RC-03)'
 
 		expect(admission.admitted).toBe(false);
 		// F-006: the refusal must name the CLASSLESS cause (not a budget or
-		// other reason), so reverting the stamp skip — which would re-type the
-		// lanes verdict_contract and flip the refusal cause — fails here.
+		// other reason). This leg seeds the classless terminal directly (it
+		// cannot see a stamp-skip mutant); the stamp-skip mutant is killed by
+		// the ordinary !ok-leg test above, which drives the real stamp path.
 		expect(admission.reason).toMatch(/classless/i);
 	}, 120000);
 });
