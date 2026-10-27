@@ -1,5 +1,51 @@
 # Changelog
 
+## [7.200.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.7...v7.200.8) (2026-10-27)
+
+
+### Bug Fixes
+
+* **full-auto:** allow eleven audited read-only swarm tools without a critic ([1c6f0f7](https://github.com/ZaxbyHub/opencode-swarm/commit/1c6f0f745af1f2732f482ca301192f58b9d55ea1))
+
+## [7.200.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.6...v7.200.7) (2026-10-27)
+
+
+### Bug Fixes
+
+* **gate-evidence:** key task-gate evidence by plan identity (Stage B wedge classes D and E) ([81ad902](https://github.com/ZaxbyHub/opencode-swarm/commit/81ad90206a391fb1e50dde43f8cd1fb9491ce936))
+
+## [7.200.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.5...v7.200.6) (2026-10-27)
+
+
+### Bug Fixes
+
+* **guard:** interpreter spelling detection, host-reported shell grammar, and scope-gated eval routing (3323/3343/3346/3347) ([f6bc757](https://github.com/ZaxbyHub/opencode-swarm/commit/f6bc757809a8972daed35d4bb4cb50b14fa1f253))
+
+## [7.200.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.4...v7.200.5) (2026-10-27)
+
+
+### Bug Fixes
+
+* **guard:** admit bare rmdir of a workspace directory outside declared scope ([ea32581](https://github.com/ZaxbyHub/opencode-swarm/commit/ea325813f27b3e5833a48145cf944f2ca0888d15))
+* **guard:** restrict the bare-rmdir exemption to plain, cwd-neutral command lines ([798ea36](https://github.com/ZaxbyHub/opencode-swarm/commit/798ea3637d34120b7e0157897238d29561dbb13a))
+* **knowledge-receipt:** close review findings on conflict classification (PRR-001..016) ([5932d1e](https://github.com/ZaxbyHub/opencode-swarm/commit/5932d1ed6979d24439e3955ba95959c29ed28579))
+* **knowledge-receipt:** report sentinel conflicts with precise permanent codes, not store_unavailable ([047eea6](https://github.com/ZaxbyHub/opencode-swarm/commit/047eea63a2802c14f2fd983a5fb9907948fb0244))
+
+## [7.200.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.3...v7.200.4) (2026-10-26)
+
+
+### Bug Fixes
+
+* **worktree:** feedback-round hardening for the [#3448](https://github.com/ZaxbyHub/opencode-swarm/issues/3448) suite and docs ([dbf3d5a](https://github.com/ZaxbyHub/opencode-swarm/commit/dbf3d5a3fa9d4a7e6ea30959cafd177ddbe8a50d))
+* **worktree:** stop saveDurableStatus from resurrecting a vanished lane root ([#3448](https://github.com/ZaxbyHub/opencode-swarm/issues/3448)) ([28b90c5](https://github.com/ZaxbyHub/opencode-swarm/commit/28b90c5c24bc3c9643a5c03521c9c6a107c97ea5))
+
+## [7.200.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.2...v7.200.3) (2026-10-26)
+
+
+### Bug Fixes
+
+* **host/v2:** dual-host CI lane, v2 adapter hardening, and the deferred [#2910](https://github.com/ZaxbyHub/opencode-swarm/issues/2910) tail ([d539a93](https://github.com/ZaxbyHub/opencode-swarm/commit/d539a939289f59a493df9915be40f03c98bb0c5d))
+
 ## [7.200.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.1...v7.200.2) (2026-10-26)
 
 

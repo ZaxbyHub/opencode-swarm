@@ -115,7 +115,10 @@ detected, statically resolvable write targets are inside `scope_files`; it is
 an advisory and does not grant permission to any other tool. Parse failures,
 dynamic or unresolved targets, path escapes, symlink/junction escapes, and
 destructive or catastrophic command intent are denied. The command is not
-spawned and no scope declaration is persisted.
+spawned and no scope declaration is persisted. Unlike the live shell
+write-scope gate, `scope_validate` does not apply the bare-`rmdir`
+empty-directory exemption: an `rmdir` of a directory outside `scope_files` is
+denied, so this advisory can be more conservative than the gate.
 
 ### `knowledge_add` (available only under both write gates)
 

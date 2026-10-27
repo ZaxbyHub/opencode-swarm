@@ -24,9 +24,21 @@ permissions:
   contents: read
   pull-requests: read
 
+# Issue #3307: cancel a superseded pull_request run for the same PR (stale
+# verdicts otherwise outlive the head they describe). merge_group and
+# workflow_dispatch runs get run-unique groups and cancel-in-progress false —
+# merge-queue required checks must never be cancelled mid-batch.
+concurrency:
+  group: pr-standards-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check-title:
     runs-on: ubuntu-latest
+    # Issue #3300: bound the job (its steps are one action + two short gh api
+    # calls) so a hung network step cannot occupy a runner to the repository
+    # default ceiling; mirrors the sibling pr-standards job's bound.
+    timeout-minutes: 10
     steps:
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
         if: github.event_name == 'pull_request'
@@ -54,6 +66,18 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
+          # Issue #3307: the dispatch input is an unvalidated string reaching
+          # REST path interpolation below; refuse non-decimal values before
+          # any gh api call.
+          case "${PR_NUMBER}" in
+            ''|*[!0-9]*)
+              # Never reflect the raw input into the workflow command: a
+              # multi-line dispatch value could forge extra annotation lines.
+              # A length + character-class summary is enough to diagnose.
+              echo "::error::pr_number input must be all decimal digits (received ${#PR_NUMBER} character(s) with non-decimal content)."
+              exit 1
+              ;;
+          esac
           pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
           title="$(jq -r '.title' <<< "$pr_json")"
           head_sha="$(jq -r '.head.sha' <<< "$pr_json")"
@@ -235,6 +259,17 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
+          # Issue #3307: same guard as the check-title dispatch step — refuse
+          # a non-decimal pr_number before any gh api call.
+          case "${PR_NUMBER}" in
+            ''|*[!0-9]*)
+              # Never reflect the raw input into the workflow command: a
+              # multi-line dispatch value could forge extra annotation lines.
+              # A length + character-class summary is enough to diagnose.
+              echo "::error::pr_number input must be all decimal digits (received ${#PR_NUMBER} character(s) with non-decimal content)."
+              exit 1
+              ;;
+          esac
 
           pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
           state="$(jq -r '.state' <<< "$pr_json")"

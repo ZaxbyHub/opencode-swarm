@@ -146,6 +146,7 @@ export const V2_CORPUS: readonly CorpusEntry[] = [
 	{ id: 'plugin/promise-event', origin: '@opencode/plugin', path: 'dist/promise/event.d.ts', localName: 'plugin-event.d.ts' },
 	{ id: 'plugin/promise-storage', origin: '@opencode/plugin', path: 'dist/promise/storage.d.ts', localName: 'plugin-storage.d.ts' },
 	{ id: 'plugin/promise-permission', origin: '@opencode/plugin', path: 'dist/promise/permission.d.ts', localName: 'plugin-permission.d.ts' },
+	{ id: 'plugin/promise-shell', origin: '@opencode/plugin', path: 'dist/promise/shell.d.ts', localName: 'plugin-shell.d.ts' },
 	{ id: 'plugin/app', origin: '@opencode/plugin', path: 'dist/app.d.ts', localName: 'plugin-app.d.ts' },
 	{ id: 'plugin/options', origin: '@opencode/plugin', path: 'dist/options.d.ts', localName: 'plugin-options.d.ts' },
 	// — Corpus A2/A3: schema Agent.Info + client permission API (types.ts:4-8 names these) —

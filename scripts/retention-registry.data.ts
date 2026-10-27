@@ -1799,11 +1799,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/gate-evidence.ts', 'src/council/council-evidence-writer.ts'],
 		writerCitations: [
-			'src/gate-evidence.ts:1666 transitionTaskWorkflowEvidence / :1835 recordGateEvidence / :1930 recordAgentDispatch — locked read-modify-write, atomic write',
+			'src/gate-evidence.ts:1758 transitionTaskWorkflowEvidence / :1936 recordGateEvidence / :2031 recordAgentDispatch — locked read-modify-write, atomic write',
 			'src/council/council-evidence-writer.ts:96 writeCouncilEvidence — gates.council section under withTaskEvidenceLock',
 		],
 		readerCitations: [
-			'src/gate-evidence.ts:1974 readTaskEvidence — FULL-FILE fail-open, async; :2050 readTaskEvidenceRaw — strict, sync',
+			'src/gate-evidence.ts:2075 readTaskEvidence — FULL-FILE fail-open, async; :2151 readTaskEvidenceRaw — strict, sync',
 			'src/council/council-evidence-writer.ts:207 hasCouncilEvidenceAttempt',
 		],
 		schemaVersion: 'workflow WAL states; unrecognized states degrade to null (documented :1183-1188)',
@@ -1817,7 +1817,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'retryHistory ≤3 (schema :347); per-task file; evidence/ archived+cleaned at close',
 			scope: 'per-key',
 			keyspaceBound:
-			'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:1453 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close/constants.ts:253-269) and the close clean loop recursively removes the whole tree (src/commands/close/clean-stage.ts:176-190), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close/clean-stage.ts:176-185) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
+			'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:1545 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close/constants.ts:253-269) and the close clean loop recursively removes the whole tree (src/commands/close/clean-stage.ts:176-190), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close/clean-stage.ts:176-185) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
 			citation: 'src/gate-evidence.ts:347; src/commands/close/constants.ts:253-269 ACTIVE_STATE_DIRS_TO_CLEAN',
 		},
 		readBound: { pattern: 'full-file', bound: 'single per-task JSON', sync: true, citation: 'src/gate-evidence.ts:1196-1224' },
@@ -2001,7 +2001,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/evidence/task-gate-repair.ts', 'src/evidence/task-gate-requirements.ts'],
 		writerCitations: [
 			'src/evidence/task-gate-requirements.ts:415 appendTaskGateRequirementsReceiptIfNeeded via atomicWriteFile (schemaVersion 1 records); :434 read-back before append',
-			'src/evidence/task-gate-repair.ts:496 fileHandle.writeFile repaired evidence under withTaskEvidenceLock; :955 atomicWriteFile; quarantine moves into task-gate-quarantine/ (:29-31)',
+			'src/evidence/task-gate-repair.ts:498 fileHandle.writeFile repaired evidence under withTaskEvidenceLock; :968 atomicWriteFile; quarantine moves into task-gate-quarantine/ (:29-31)',
 		],
 		readerCitations: [
 			'src/evidence/task-gate-requirements.ts:245 readTaskGateRequirementsReceipts — bounded read (256 KiB cap enforced :149-175), async',
@@ -3503,12 +3503,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/delegation-gate/worktree-recovery-authority.ts',
 		],
 		writerCitations: [
-			'src/hooks/delegation-gate/worktree-merge-status.ts:259 recordWorktreeMergeFailure / :273 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-125)',
+			'src/hooks/delegation-gate/worktree-merge-status.ts:281 recordWorktreeMergeFailure / :295 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-147; vanished-root guard skips the write rather than recreating the lane root, #3448)',
 			'src/hooks/delegation-gate/worktree-provisioning-owner.ts recordWorktreeProvisioningOwner/removeWorktreeProvisioningOwner — atomic per-owner files plus bounded lifecycle journal',
 			'src/hooks/delegation-gate/worktree-recovery-authority.ts publish/claim/renew/release/finalize/replay — atomic authority, journal, and credential writes under one cross-process lock',
 		],
 		readerCitations: [
-			'worktree-merge-status.ts:166 scanWorktreeMergeFailuresForRecovery — bounded 2 MiB / 512 entries (:59-60)',
+			'worktree-merge-status.ts:188 scanWorktreeMergeFailuresForRecovery — bounded 2 MiB / 512 entries (:59-60)',
 			'worktree-provisioning-owner.ts scanWorktreeProvisioningOwnersForRecovery/scanWorktreeProvisioningLifecycleJournalForRecovery — ≤512 files / 16 KiB per file plus ≤256 KiB / 512-entry journal, fail-closed uncertain',
 			'worktree-recovery-authority.ts bounded store/journal/credential readers and recovery scans — ≤2 MiB / 512 authority or journal entries and ≤16 KiB per credential',
 		],

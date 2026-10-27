@@ -25,6 +25,21 @@ function expectWrites(
 	expect(result.hasWrites).toBe(expected.length > 0);
 }
 
+/** #3347: an inspectable inline-code interpreter-eval capability write. */
+function evalWrite(operator: string): {
+	category: string;
+	operator: string;
+	path: string | null;
+	capability: true;
+} {
+	return {
+		category: 'interpreter_eval',
+		operator,
+		path: null,
+		capability: true,
+	};
+}
+
 function ps(command: string) {
 	return detectWindowsWrites(command, 'powershell');
 }
@@ -312,45 +327,33 @@ describe('in-place editing', () => {
 
 describe('interpreter eval', () => {
 	test('python -c executes inline code', () => {
-		expectWrites('python -c "print(1+1)"', [
-			{ category: 'interpreter_eval', operator: 'python [eval]', path: null },
-		]);
+		expectWrites('python -c "print(1+1)"', [evalWrite('python [eval]')]);
 	});
 
 	test('python3 -c executes inline code', () => {
 		expectWrites('python3 -c "import os; os.write(1,b"hi")"', [
-			{ category: 'interpreter_eval', operator: 'python3 [eval]', path: null },
+			evalWrite('python3 [eval]'),
 		]);
 	});
 
 	test('node -e executes inline code', () => {
-		expectWrites('node -e "console.log(1)"', [
-			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
-		]);
+		expectWrites('node -e "console.log(1)"', [evalWrite('node [eval]')]);
 	});
 
 	test('bun -e executes inline code', () => {
-		expectWrites('bun -e "console.log(1)"', [
-			{ category: 'interpreter_eval', operator: 'bun [eval]', path: null },
-		]);
+		expectWrites('bun -e "console.log(1)"', [evalWrite('bun [eval]')]);
 	});
 
 	test('ruby -e executes inline code', () => {
-		expectWrites('ruby -e "puts 1"', [
-			{ category: 'interpreter_eval', operator: 'ruby [eval]', path: null },
-		]);
+		expectWrites('ruby -e "puts 1"', [evalWrite('ruby [eval]')]);
 	});
 
 	test('perl -e executes inline code', () => {
-		expectWrites('perl -e "print 1"', [
-			{ category: 'interpreter_eval', operator: 'perl [eval]', path: null },
-		]);
+		expectWrites('perl -e "print 1"', [evalWrite('perl [eval]')]);
 	});
 
 	test('php -r executes inline code', () => {
-		expectWrites('php -r "echo 1;"', [
-			{ category: 'interpreter_eval', operator: 'php [eval]', path: null },
-		]);
+		expectWrites('php -r "echo 1;"', [evalWrite('php [eval]')]);
 	});
 
 	test('python -m runs an installed module (a named program) — not flagged as eval (issue #1902)', () => {
@@ -365,9 +368,7 @@ describe('interpreter eval', () => {
 	});
 
 	test('node -p evaluates and prints (write effect)', () => {
-		expectWrites('node -p "1+1"', [
-			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
-		]);
+		expectWrites('node -p "1+1"', [evalWrite('node [eval]')]);
 	});
 
 	test('plain python without -c is not flagged', () => {
@@ -384,20 +385,18 @@ describe('interpreter eval', () => {
 		// `python -c'print(1)'` passes `-cprint(1)` as a single token after shell quoting.
 		// The interpreter-eval guard must match even when the code is glued to the flag.
 		expectWrites('python -c\'import os; os.remove("f")\'', [
-			{ category: 'interpreter_eval', operator: 'python [eval]', path: null },
+			evalWrite('python [eval]'),
 		]);
 	});
 
 	test('glued node -e flag: -e<code> (no space) is flagged as eval (issue #1928)', () => {
 		expectWrites('node -e\'require("fs").writeFileSync("x","y")\'', [
-			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
+			evalWrite('node [eval]'),
 		]);
 	});
 
 	test('glued python -c with equals separator: -c=CODE is flagged as eval', () => {
-		expectWrites('python -c="print(1)"', [
-			{ category: 'interpreter_eval', operator: 'python [eval]', path: null },
-		]);
+		expectWrites('python -c="print(1)"', [evalWrite('python [eval]')]);
 	});
 
 	test('python -m is not flagged even with glued module name (issue #1902 regression guard)', () => {
@@ -407,27 +406,19 @@ describe('interpreter eval', () => {
 	});
 
 	test('glued ruby -e flag: -e<code> (no space) is flagged as eval (issue #1928)', () => {
-		expectWrites("ruby -e'puts 42'", [
-			{ category: 'interpreter_eval', operator: 'ruby [eval]', path: null },
-		]);
+		expectWrites("ruby -e'puts 42'", [evalWrite('ruby [eval]')]);
 	});
 
 	test('glued perl -E flag: -E<code> (no space) is flagged as eval (issue #1928)', () => {
-		expectWrites("perl -E'say 1'", [
-			{ category: 'interpreter_eval', operator: 'perl [eval]', path: null },
-		]);
+		expectWrites("perl -E'say 1'", [evalWrite('perl [eval]')]);
 	});
 
 	test('glued php -r flag: -r<code> (no space) is flagged as eval (issue #1928)', () => {
-		expectWrites("php -r'echo 1;'", [
-			{ category: 'interpreter_eval', operator: 'php [eval]', path: null },
-		]);
+		expectWrites("php -r'echo 1;'", [evalWrite('php [eval]')]);
 	});
 
 	test('glued node -pe flag: -pe<code> (no space) is flagged as eval (issue #1928)', () => {
-		expectWrites("node -pe'1+1'", [
-			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
-		]);
+		expectWrites("node -pe'1+1'", [evalWrite('node [eval]')]);
 	});
 });
 
@@ -1241,9 +1232,7 @@ describe('resolveWriteTargets — basic resolution', () => {
 	});
 
 	test('marks null path as unresolved', () => {
-		const writes = [
-			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
-		];
+		const writes = [evalWrite('node [eval]')];
 		const result = resolveWriteTargets('node -e "code"', writes, '/home/user');
 		expect(result[0].resolvedPath).toBe(null);
 		expect(result[0].resolved).toBe(false);
@@ -2188,13 +2177,7 @@ describe('FR-002 Interpreter eval — resolveWriteTargets scope', () => {
 		// inline code can write to arbitrary files. The caller must flag this
 		// as a write effect regardless of cwd since we cannot statically determine
 		// what file (if any) the code will write.
-		const writes = [
-			{
-				category: 'interpreter_eval',
-				operator: 'node [eval]',
-				path: null,
-			},
-		];
+		const writes = [evalWrite('node [eval]')];
 		const result = resolveWriteTargets('node -e "code"', writes, '/project');
 		expect(result.length).toBe(1);
 		expect(result[0].resolvedPath).toBe(null);

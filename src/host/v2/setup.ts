@@ -190,7 +190,11 @@ import {
 	configureV2ToolBeforeBudget,
 	resetV2ToolBeforeBudget,
 } from './hook-budget';
-import { registerV2SessionHooks, registerV2ToolHooks } from './hooks';
+import {
+	registerV2SessionHooks,
+	registerV2ShellHooks,
+	registerV2ToolHooks,
+} from './hooks';
 import {
 	clearV2AgentTransformSurface,
 	registerV2AgentTransformSurface,
@@ -453,6 +457,9 @@ export async function openCodeSwarmV2Setup(
 				),
 				runRegistration('prompt-hook', () =>
 					registerV2SessionHooks(ctx, hooks, directory, state.registrations),
+				),
+				runRegistration('shell-observer', () =>
+					registerV2ShellHooks(ctx, state.registrations),
 				),
 			]),
 			_internals.registrationTimeoutMs,
