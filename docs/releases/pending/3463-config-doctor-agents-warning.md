@@ -6,6 +6,8 @@
 
 An object-valued `agents` now produces no finding. A non-object value (for example a string, number or array) is still rejected: config loading discards it and `config-doctor` reports `invalid-config-value` (error). The `invalid-agents-type` check in `config-doctor` is a defense-in-depth guard that keeps the key's validation case, which the schema-introspection test requires for every top-level key.
 
+Separately, when `config-doctor` validates a config that has not been through the loader (direct `runConfigDoctor` callers and the re-run after `--fix`, whose result is written to the doctor artifact), an array given to an object-typed key such as `agents`, `swarms`, `pipeline` or `guardrails` now reads `got array` instead of the contradictory `got object`. In a config file such a value is dropped by the loader and reported as `invalid-config-value`, as before.
+
 ## Why
 
 Closes #3463.

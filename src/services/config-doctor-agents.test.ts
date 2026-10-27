@@ -101,4 +101,29 @@ describe('config-doctor: top-level agents (#3463)', () => {
 			);
 		}
 	});
+
+	// Same wording defect as agents: `typeof []` is "object", so an array used to
+	// read `must be an object, got object`. Covers the shared
+	// emitObjectTypeMismatch helper (pipeline) and the swarms guard.
+	it('labels an array "array" in object-type mismatch messages', () => {
+		const cases: Array<[string, unknown, string]> = [
+			['pipeline', ['x'], 'array'],
+			['pipeline', 'oops', 'string'],
+			['swarms', ['x'], 'array'],
+			['swarms', 'oops', 'string'],
+		];
+		for (const [key, bad, kind] of cases) {
+			const result = runConfigDoctor(config({ [key]: bad }), tempDir);
+
+			const finding = result.findings.find(
+				(f) => f.id === `invalid-${key}-type`,
+			);
+			expect(finding?.severity).toBe('error');
+			expect(finding?.path).toBe(key);
+			expect(finding?.currentValue).toEqual(bad);
+			expect(finding?.description).toBe(
+				`"${key}" must be an object, got ${kind}`,
+			);
+		}
+	});
 });

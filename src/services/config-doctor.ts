@@ -191,6 +191,14 @@ function levenshteinDistance(a: string, b: string): number {
 }
 
 /**
+ * Name a value's type for a finding message. `typeof` alone reports an array
+ * as "object", which contradicts a "must be an object" message.
+ */
+function describeValueType(value: unknown): string {
+	return Array.isArray(value) ? 'array' : typeof value;
+}
+
+/**
  * Emit a type-mismatch finding for object-type config keys.
  */
 function emitObjectTypeMismatch(
@@ -205,7 +213,7 @@ function emitObjectTypeMismatch(
 		findings.push({
 			id: `invalid-${key}-type`,
 			title: `Invalid ${key} type`,
-			description: `"${key}" must be an object, got ${typeof value}`,
+			description: `"${key}" must be an object, got ${describeValueType(value)}`,
 			severity: 'error',
 			path: key,
 			currentValue: value,
@@ -1310,9 +1318,7 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			// null and undefined never reach this case: walkConfigAndValidate returns
 			// early on both, so only a defined, non-null value is checked here.
 			if (typeof value !== 'object' || Array.isArray(value)) {
-				// `typeof` alone reports an array as "object", which contradicts the
-				// message, so label it explicitly.
-				const kind = Array.isArray(value) ? 'array' : typeof value;
+				const kind = describeValueType(value);
 				findings.push({
 					id: 'invalid-agents-type',
 					title: 'Invalid agents type',
@@ -1577,7 +1583,7 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 					findings.push({
 						id: 'invalid-swarms-type',
 						title: 'Invalid swarms type',
-						description: `"swarms" must be an object, got ${typeof value}`,
+						description: `"swarms" must be an object, got ${describeValueType(value)}`,
 						severity: 'error',
 						path: 'swarms',
 						currentValue: value,
