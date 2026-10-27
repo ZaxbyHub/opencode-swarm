@@ -494,16 +494,16 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:3266 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
-			'src/background/pending-delegations.ts:1535 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
+			'src/background/pending-delegations.ts:3272 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
+			'src/background/pending-delegations.ts:1541 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:3155 readDelegations — SQLite authority with bounded legacy compatibility, sync',
-			'src/background/pending-delegations.ts:3170 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:3161 readDelegations — SQLite authority with bounded legacy compatibility, sync',
+			'src/background/pending-delegations.ts:3176 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
-			schemaVersion:
-				'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1425,:1446,:1456)',
+		schemaVersion:
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1425,:1446,:1456)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		directFileExemption: {
@@ -609,12 +609,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:6199 writeDelegationFallback / :6250 removeDelegationFallback',
-			'src/background/pending-delegations.ts:6701 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:6205 writeDelegationFallback / :6256 removeDelegationFallback',
+			'src/background/pending-delegations.ts:6707 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:6054 readDelegationFallback / :6066 listDelegationFallbacks / :6100 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:6679 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:6060 readDelegationFallback / :6072 listDelegationFallbacks / :6106 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:6685 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:1041)',
 		stateClass: 'authoritative',
@@ -624,7 +624,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			reviewedIssue: 2034,
 		},
 		writeLimits: {
-			bound: 'MAX_LIVE_BACKGROUND_FALLBACKS 256 (:102); per-file 1 MiB (:118); reservations ≤256 entries / 2 MiB store (:103, :6690), enforced on write/scan (:5789, :6668)',
+			bound: 'MAX_LIVE_BACKGROUND_FALLBACKS 256 (:102); per-file 1 MiB (:118); reservations ≤256 entries / 2 MiB store (:103, :6696), enforced on write/scan (:5795, :6674)',
 			scope: 'global',
 			citation: 'src/background/pending-delegations.ts:102-118,5789',
 		},

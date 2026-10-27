@@ -1202,6 +1202,10 @@ export function parsePrReviewVerdictRow(
 		current += char;
 	}
 	fields.push(current.trim());
+	// #3357: capture the arrival arity BEFORE any normalization mutates
+	// `fields` — the legacy-10 push below means a post-normalization
+	// fields.length would report 12 for a row that arrived with 10.
+	const rawArrivalCount = fields.length;
 	if (fields[0] !== descriptor.marker) return null;
 	if (
 		kind === 'reviewer' &&
@@ -1215,7 +1219,7 @@ export function parsePrReviewVerdictRow(
 		fields.push('UNKNOWN', '');
 	}
 	if (fields.length > descriptor.fieldCount) {
-		const rawFieldCount = fields.length;
+		const rawFieldCount = rawArrivalCount;
 		const retained = fields.slice(0, descriptor.fieldCount - 1);
 		retained.push(fields.slice(descriptor.fieldCount - 1).join('|'));
 		return {
@@ -1224,7 +1228,7 @@ export function parsePrReviewVerdictRow(
 			recoveredOverflow: true,
 			rawFieldCount,
 			overflowClass:
-				fields.length === descriptor.fieldCount + 1 &&
+				rawFieldCount === descriptor.fieldCount + 1 &&
 				fields[fields.length - 1] === ''
 					? 'legacy-fidelity-safe'
 					: 'legacy-lossy',
@@ -1234,7 +1238,7 @@ export function parsePrReviewVerdictRow(
 		marker: descriptor.marker,
 		fields,
 		recoveredOverflow: false,
-		rawFieldCount: fields.length,
+		rawFieldCount: rawArrivalCount,
 		overflowClass:
 			fields.length === descriptor.fieldCount
 				? usedCanonicalEscape

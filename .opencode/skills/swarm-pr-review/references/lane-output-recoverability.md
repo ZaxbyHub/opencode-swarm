@@ -50,10 +50,13 @@ is absence evidence and therefore requires a complete transcript. One positive
 row in a consolidated lane never salvages a sibling dimension whose only
 evidence is `[CLEAN]` or missing. Recovery reasons are lane-scoped and use seven
 kinds: `legacy-verdict-row-recovery`, `legacy-verdict-row-quarantine` (a verdict
-row that ARRIVED over its marker's legal arity and was tail-merged down to it —
-with an unassigned id it is grammar noise such as a Stage-B task row or an
-echoed format line, quarantined on its raw arrival arity instead of voiding
-every valid sibling row, and surfaced on the transport-recovery receipt so a
+row quarantined as grammar noise — either the #3310 post-parse-arity arm (any
+row whose post-parse arity differs from the legal count, including duplicates
+naming assigned ids) or the #3357 over-arrival arm (a row that ARRIVED over its
+marker's legal arity and was tail-merged down to it with an unassigned id, such
+as a Stage-B task row or an echoed format line; quarantined on its raw arrival
+arity instead of voiding every valid sibling row) — itemized with a bounded id
+and raw arity on the transport-recovery receipt, capped, so a
 quarantine-influenced settle is distinguishable from a clean one),
 `parser-normalization`, `parser-row-recovery`,
 `truncated-preview-durable-artifact`,

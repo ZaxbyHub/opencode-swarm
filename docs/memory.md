@@ -493,6 +493,13 @@ The detector is intentionally conservative and covers obvious cases:
   `sk_live_`/`rk_live_` keys, Google `AIza...` keys, OpenSSH private key
   blocks, and AWS secret access keys (label-anchored, plus the
   same-line-after-`AKIA` context heuristic) — issue #1466 (DD-05)
+- embedded credential shapes: the fixed-length and token-prefix patterns
+  match a credential glued inside a longer identifier, not only standalone
+  tokens (#3382). Deliberate trade-off: the `aws_secret_access_key_context`
+  arm redacts the whole span between an `AKIA` id and a same-line 40-char
+  token, so interposed non-secret text on that line is removed from redacted
+  output, and `=`-labeled AWS values longer than 40 chars redact only their
+  first 40 characters
 - bare `?key=...` URL query parameters are NOT redacted (the env-secret
   pattern requires at least one uppercase `PREFIX_` segment) — issue #1466
   (DD-06)

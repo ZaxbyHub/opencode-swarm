@@ -196,6 +196,58 @@ describe('transport-recovery receipt surfaces quarantined strays (#3357 AC2)', (
 		expect(quarantineRecoveries(validation.recoveries)).toEqual([]);
 	}, 120000);
 
+	test('PRR-004: an under-arity stray naming an ASSIGNED id gets an arm-neutral reason (never "unassigned")', async () => {
+		// The #3310 under-arity arm also feeds the same receipt surface; its
+		// rows may name ASSIGNED ids. The reason must not assert "unassigned"
+		// for those (a false durable statement about a controller-declared id).
+		const underArityAssigned = '[REVIEWED] | C-0 | REJECTED | too few fields';
+		const input = await prepareLane(`${GOOD_C0_ROW}\n${underArityAssigned}`);
+		const validation = await validatePrWorkflowTransportRecovery({
+			directory: tempDir,
+			record: input.record,
+			result: input.result,
+			artifact: input.artifact,
+			revisionDigest: REVISION_DIGEST,
+		});
+
+		expect(validation.ok).toBe(true);
+		const named = quarantineRecoveries(validation.recoveries);
+		expect(named.length).toBe(1);
+		expect(named[0]?.reason).toContain('C-0');
+		expect(named[0]?.reason).toContain('4');
+		expect(named[0]?.reason).not.toContain('unassigned');
+	}, 120000);
+
+	test('PRR-006: quarantine entries are capped with an overflow note on the last entry', async () => {
+		const CAP = 16;
+		const strays = Array.from(
+			{ length: CAP + 5 },
+			(_, i) =>
+				`[REVIEWED] | task-stray-${i} | REJECTED | s | w | p | a | b | c | d | e | f | g | h`,
+		);
+		const input = await prepareLane(`${GOOD_C0_ROW}\n${strays.join('\n')}`);
+		const validation = await validatePrWorkflowTransportRecovery({
+			directory: tempDir,
+			record: input.record,
+			result: input.result,
+			artifact: input.artifact,
+			revisionDigest: REVISION_DIGEST,
+		});
+
+		expect(
+			validation.ok,
+			`valid sibling must still settle with strays quarantined; reason: ${validation.ok ? '' : (validation.reason ?? '')}`,
+		).toBe(true);
+		const named = quarantineRecoveries(validation.recoveries);
+		expect(named.length).toBe(CAP);
+		const last = named[CAP - 1]?.reason ?? '';
+		expect(last).toContain(
+			`+${CAP + 5 - CAP} more quarantined row(s) not itemized`,
+		);
+		// Non-last entries carry no overflow note.
+		expect(named[0]?.reason).not.toContain('not itemized');
+	}, 120000);
+
 	test('durable: the quarantine entry survives collect settlement and a delegation-store re-read', async () => {
 		const artifactText = `${GOOD_C0_ROW}\n${STRAY_ROW_14_RAW}`;
 		await prepareLane(artifactText);

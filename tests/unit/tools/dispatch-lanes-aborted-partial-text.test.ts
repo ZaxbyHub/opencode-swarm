@@ -181,6 +181,10 @@ describe('aborted-with-partial-text verdict lanes are never typed (#3397 RC-03)'
 		expect(record).toBeDefined();
 		expect(record?.status).toBe('error');
 		expect(record?.result?.workflowLaneFailureClass).toBeUndefined();
+		// F-006: the durable terminal arm carries the same unclassed contract.
+		expect(
+			record?.terminalResult?.result.workflowLaneFailureClass,
+		).toBeUndefined();
 	}, 120000);
 
 	test('contrast: non-aborted validation failure KEEPS verdict_contract', async () => {
@@ -242,5 +246,9 @@ describe('aborted-with-partial-text verdict lanes are never typed (#3397 RC-03)'
 		});
 
 		expect(admission.admitted).toBe(false);
+		// F-006: the refusal must name the CLASSLESS cause (not a budget or
+		// other reason), so reverting the stamp skip — which would re-type the
+		// lanes verdict_contract and flip the refusal cause — fails here.
+		expect(admission.reason).toMatch(/classless/i);
 	}, 120000);
 });
