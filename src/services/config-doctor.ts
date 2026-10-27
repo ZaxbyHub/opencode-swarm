@@ -1307,14 +1307,16 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 		// lists it as the default-swarm override. A `swarms.<id>.agents` entry
 		// replaces it per role, but neither form is deprecated, so no finding.
 		case 'agents': {
-			if (
-				value !== undefined &&
-				(typeof value !== 'object' || Array.isArray(value) || value === null)
-			) {
+			// null and undefined never reach this case: walkConfigAndValidate returns
+			// early on both, so only a defined, non-null value is checked here.
+			if (typeof value !== 'object' || Array.isArray(value)) {
+				// `typeof` alone reports an array as "object", which contradicts the
+				// message, so label it explicitly.
+				const kind = Array.isArray(value) ? 'array' : typeof value;
 				findings.push({
 					id: 'invalid-agents-type',
 					title: 'Invalid agents type',
-					description: `"agents" must be an object keyed by agent name, got ${typeof value}`,
+					description: `"agents" must be an object keyed by agent name, got ${kind}`,
 					severity: 'error',
 					path: 'agents',
 					currentValue: value,
