@@ -586,8 +586,10 @@ const ENV_FILE_VARIANT = /^\.env(\.|$)/i;
  * central protected-path policy names, or a `.env` / `.env.*` file. Checked on
  * the caller's spelling and on the resolved real path (relative to the
  * workspace), each as written and lower-cased, so directory links, Windows 8.3
- * short names and case variants on case-insensitive filesystems cannot hide a
- * protected target.
+ * short names and case variants of the lower-case protected names (.env, .git,
+ * .swarm, package.json and the lower-case prefixes) cannot hide a target. The
+ * mixed-case policy entries (CHANGELOG.md, CODEOWNERS) are only matched in
+ * their exact spelling: that is a limit of the central policy itself.
  */
 function isProtectedForEcho(
 	file: string,
@@ -603,7 +605,9 @@ function isProtectedForEcho(
 			),
 		);
 	} catch {
-		// Unresolvable real path: fall back to the caller's spelling alone.
+		// The file was just read, so a real path that cannot be resolved is
+		// anomalous: fail closed and withhold the echo.
+		return true;
 	}
 	return spellings.some((spelling) =>
 		[spelling, spelling.toLowerCase()].some(

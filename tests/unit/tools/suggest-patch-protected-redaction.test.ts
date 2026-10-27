@@ -51,15 +51,7 @@ describe('suggest_patch oldContent mismatch disclosure', () => {
 	test('redacts when a directory link points into a protected path', async () => {
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		write('.swarm/notes.txt');
-		try {
-			fs.symlinkSync(
-				path.join(dir, '.swarm'),
-				path.join(dir, 'pub'),
-				'junction',
-			);
-		} catch {
-			return; // link creation not permitted on this host
-		}
+		fs.symlinkSync(path.join(dir, '.swarm'), path.join(dir, 'pub'), 'junction');
 		const out = await mismatch('pub/notes.txt');
 		expect(out).toContain('[redacted: protected path]');
 		expect(out).not.toContain('hunter2');
