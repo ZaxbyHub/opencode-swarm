@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.200.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.6...v7.200.7) (2026-10-27)
+
+
+### Bug Fixes
+
+* **gate-evidence:** key task-gate evidence by plan identity (Stage B wedge classes D and E) ([81ad902](https://github.com/ZaxbyHub/opencode-swarm/commit/81ad90206a391fb1e50dde43f8cd1fb9491ce936))
+
 ## [7.200.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.5...v7.200.6) (2026-10-27)
 
 
