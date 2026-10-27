@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.200.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.7...v7.200.8) (2026-10-27)
+
+
+### Bug Fixes
+
+* **full-auto:** allow eleven audited read-only swarm tools without a critic ([1c6f0f7](https://github.com/ZaxbyHub/opencode-swarm/commit/1c6f0f745af1f2732f482ca301192f58b9d55ea1))
+
 ## [7.200.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.6...v7.200.7) (2026-10-27)
 
 
