@@ -371,9 +371,14 @@ describe('SandboxCapabilityProbe', () => {
 			expect(result.strength).toBe('strong');
 			expect(result.mechanism).toBe('sandbox-exec');
 			expect(result.platform).toBe('darwin');
-			// filesystem comes from the real behavioural probe, which depends on the
-			// host: 'real' on macOS, 'weak' where sandbox-exec is absent (#3462).
-			expect(['real', 'weak']).toContain(result.filesystem);
+			// filesystem comes from the real behavioural probe (only the timeout seam
+			// is mocked), so it depends on the HOST, not on the faked platform: a real
+			// macOS host with sandbox-exec must report 'real' (#3462: it reported
+			// 'weak' because the probe profile's /var/folders path never matched), and
+			// every other host reports 'weak' (no sandbox-exec to run).
+			const hostHasSeatbelt =
+				originalPlatform === 'darwin' && fs.existsSync('/usr/bin/sandbox-exec');
+			expect(result.filesystem).toBe(hostHasSeatbelt ? 'real' : 'weak');
 			expect(result.network).toBe('none');
 			expect(result.process).toBe('none');
 			expect(result.effective).toBe('none');

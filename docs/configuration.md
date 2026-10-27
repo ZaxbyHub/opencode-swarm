@@ -1537,7 +1537,10 @@ reports the same "executor not available, running unsandboxed" state as
 before. Set it to `true` only after verifying the production SBPL profile on
 a real macOS host — for example, confirming that a command targeting an
 in-scope path succeeds and a command targeting an out-of-scope path is denied
-under a real `sandbox-exec -f <profile>` invocation.
+under a real `sandbox-exec -p <profile>` invocation (the executor passes the
+profile inline, as the probe does). The profile also grants write access to the
+temp directory (`os.tmpdir()`, the per-user `$TMPDIR` on macOS), so that whole
+tree is writable by wrapped commands.
 
 When enabled on macOS, `applySandboxExecution` also applies the DYLD
 injection-variable hardening declared by
