@@ -503,7 +503,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1425,:1446,:1456)',
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1431,:1452,:1462)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		directFileExemption: {
@@ -519,11 +519,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:118-123,1979',
+			citation: 'src/background/pending-delegations.ts:118-123,1985',
 		},
 		lockModel: 'withEvidenceLock agent=background on every mutation (:176-179); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1707-1719)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1713-1725)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (src/commands/close/constants.ts:75-77); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, src/commands/close/constants.ts:70-78 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
@@ -532,7 +532,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1979)',
+			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1985)',
 		issue2487Legacy: { path: '.swarm/background-delegations.jsonl (+ checkpoint and manifest)', sourceFile: 'src/background/pending-delegations.ts', tokens: ['BACKGROUND_DELEGATIONS_FILE', 'loadLegacyLedger', 'ensureDelegationCoordinationImported'], readers: ['src/background/pending-delegations.ts:loadLegacyLedger', 'src/background/pending-delegations.ts:ensureDelegationCoordinationImported'], writers: ['src/background/pending-delegations.ts:BACKGROUND_DELEGATIONS_FILE'] },
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
@@ -626,7 +626,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'MAX_LIVE_BACKGROUND_FALLBACKS 256 (:102); per-file 1 MiB (:118); reservations ≤256 entries / 2 MiB store (:103, :6696), enforced on write/scan (:5795, :6674)',
 			scope: 'global',
-			citation: 'src/background/pending-delegations.ts:102-118,5789',
+			citation: 'src/background/pending-delegations.ts:102-118,5795',
 		},
 		readBound: { pattern: 'directory-scan', bound: '≤256 files × 1 MiB', sync: false, citation: 'src/background/pending-delegations.ts:5686-5733' },
 		lockModel: 'separate lock tasks FALLBACK_LOCK_TASK / RESERVATION_LOCK_TASK (:174-175)',
@@ -640,7 +640,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		issue2487Legacy: { path: '.swarm/background-delegation-fallback/*.json + background-coder-reservations.json', sourceFile: 'src/background/pending-delegations.ts', tokens: ['BACKGROUND_DELEGATION_FALLBACK_DIR', 'BACKGROUND_CODER_RESERVATIONS_FILE', 'scanBackgroundCoderReservationsForAdmission', 'readFallbackDirectory'], readers: ['src/background/pending-delegations.ts:readFallbackDirectory', 'src/background/pending-delegations.ts:scanBackgroundCoderReservationsForAdmission'], writers: ['src/background/pending-delegations.ts:BACKGROUND_DELEGATION_FALLBACK_DIR', 'src/background/pending-delegations.ts:BACKGROUND_CODER_RESERVATIONS_FILE'] },
 		healthSignal: 'recovery scans report fallback promotion',
 		owner: '#2034 (merged)',
-		disposition: { kind: 'not-a-defect', proof: 'Hard capacity bounds: 256 fallback artifacts / 1 MiB each, 256 reservations / 2 MiB store, enforced on write and scan (src/background/pending-delegations.ts:102-118,5789).' },
+		disposition: { kind: 'not-a-defect', proof: 'Hard capacity bounds: 256 fallback artifacts / 1 MiB each, 256 reservations / 2 MiB store, enforced on write and scan (src/background/pending-delegations.ts:102-118,5795).' },
 	},
 	{
 		id: 'pr-monitor-subscriptions',
