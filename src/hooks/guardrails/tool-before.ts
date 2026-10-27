@@ -29,7 +29,11 @@ import {
 	clearSandboxWrapOutcome,
 	recordSandboxWrapOutcome,
 } from '../../sandbox/skip-state';
-import { sanitizeDiagnosticText } from '../../scope/path-identity';
+import {
+	isPathIdentityWithin,
+	pathIdentitiesEqual,
+	sanitizeDiagnosticText,
+} from '../../scope/path-identity';
 import type { ScopeLeaseCandidateInput } from '../../scope/scope-lease-renewal';
 import {
 	resolveAuthorizedScopeBindingDetailed,
@@ -40,6 +44,7 @@ import {
 	classifyCommand,
 	getSharedClassifierGuardrailBlock,
 } from '../../security/command-classifier.js';
+import { isPolicyProtectedPath } from '../../security/protected-path-policy.js';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -231,11 +236,104 @@ function throwDestructiveBlock(
 }
 
 /**
- * Creates a toolBefore handler with the given shared context.
- *
- * @param ctx Shared configuration and closures from createGuardrailsHooks
- * @returns The toolBefore handler function
+ * Whether the executor that will run a bare `rmdir` has POSIX rmdir(2)
+ * semantics, the only basis for the empty-directory-removal exemption. Under
+ * PowerShell `rmdir` is an alias of Remove-Item (it deletes a file operand and
+ * can recurse), and cmd's `rd` differs too. So: no Windows grammar may own the
+ * command (`windowsShell` from resolveWindowsWriteAuthority; when it is null
+ * the Windows detectors do not run at all), the `shell` tool on a Windows host
+ * is not POSIX, and a Windows wrapper exposed only by unwrapping
+ * (`bash -c 'powershell -Command …'`) also disqualifies it.
  */
+export function isPosixRmdirExecutor(
+	tool: string,
+	windowsShell: 'powershell' | 'cmd' | null,
+	detectionCommand: string,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	if (windowsShell !== null) return false;
+	if (tool !== 'bash' && platform === 'win32') return false;
+	return (
+		!declaresWindowsWrapperLoose(detectionCommand) &&
+		!CMD_WRAPPER_DECLARATION.test(detectionCommand)
+	);
+}
+
+/**
+ * Repository control state that the bare-rmdir exemption never covers: the
+ * same `.git` / `.swarm` list file-authority.ts applies to coder writes
+ * (`coder-control-state-protection`), reused through the shared
+ * isPolicyProtectedPath predicate.
+ */
+const RMDIR_EXEMPTION_CONTROL_STATE = ['.git', '.swarm'] as const;
+
+function isControlStateRelativePath(relative: string): boolean {
+	// Folded to lower case on every platform: isPolicyProtectedPath folds only
+	// on win32, but macOS volumes are case-insensitive by default, where
+	// `.SWARM/x` IS `.swarm/x`. Over-matching only withdraws the exemption.
+	return isPolicyProtectedPath(relative.toLowerCase(), {
+		includeDefaults: false,
+		additional: RMDIR_EXEMPTION_CONTROL_STATE,
+	});
+}
+
+/**
+ * Whether a bare `rmdir` target (`WriteTarget.emptyDirectoryRemoval`) may skip
+ * declared-scope membership. `targetPath` is the gate's resolved path, which
+ * is already LEXICALLY normalised (path.resolve collapses `.` and `..`
+ * segments before any symlink is followed); that is safe only because an
+ * operand with a `..` segment is never tagged (shell-write-detect.ts
+ * isBareRmdirOperand). The helper then realpaths the target's PARENT, so
+ * every symlink/junction in the parent chain is resolved, and requires the
+ * result to lie strictly inside the canonical workspace root. Fail-closed:
+ * a resolution error, the root itself, a target outside the root, a target
+ * that exists as a file or symlink, or a target under the workspace's
+ * repository control state (`.git` / `.swarm`, checked on both the lexical
+ * and the canonical location — PR #3456 review FB-007: an architect passes
+ * file authority for control paths, so the exemption must not be what lets
+ * a declared-scope-bound role reach them) returns false. rmdir(2) does not
+ * follow a final symlink, so the parent chain decides containment. There is
+ * deliberately no emptiness check — that would be a TOCTOU race; the
+ * kernel's ENOTEMPTY is the authoritative guard.
+ */
+export function isEmptyDirectoryRemovalWithinWorkspace(
+	targetPath: string,
+	workspace: string,
+): boolean {
+	try {
+		const lexicalRoot = path.resolve(workspace);
+		if (
+			isControlStateRelativePath(
+				path.relative(lexicalRoot, path.resolve(lexicalRoot, targetPath)),
+			)
+		) {
+			return false;
+		}
+		const root = fs.realpathSync.native(lexicalRoot);
+		const absolute = path.resolve(root, targetPath);
+		const parent = fs.realpathSync.native(path.dirname(absolute));
+		const canonical = path.join(parent, path.basename(absolute));
+		if (isControlStateRelativePath(path.relative(root, canonical))) {
+			return false;
+		}
+		// Defence in depth: an existing file or symlink is not an rmdir(2)
+		// candidate, so it falls back to the normal declared-scope check.
+		let stat: fs.Stats | undefined;
+		try {
+			stat = fs.lstatSync(canonical);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+		}
+		if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) return false;
+		return (
+			!pathIdentitiesEqual(canonical, root) &&
+			isPathIdentityWithin(canonical, root)
+		);
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Issue #3099 R2 (executor context): which grammar OWNS shared constructs.
  *
@@ -294,6 +392,12 @@ export function resolveWindowsWriteAuthority(
 	return null;
 }
 
+/**
+ * Creates a toolBefore handler with the given shared context.
+ *
+ * @param ctx Shared configuration and closures from createGuardrailsHooks
+ * @returns The toolBefore handler function
+ */
 export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	const {
 		effectiveDirectory,
@@ -1353,7 +1457,23 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				enforce &&
 				declaredScope &&
 				declaredScope.length > 0 &&
-				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory)
+				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory) &&
+				// A bare POSIX rmdir cannot remove a non-empty directory
+				// (ENOTEMPTY), so inside the workspace it needs no declared-scope
+				// membership. Windows executors never qualify (Remove-Item alias),
+				// and neither does repository control state (.git/.swarm).
+				!(
+					write.original.emptyDirectoryRemoval === true &&
+					isPosixRmdirExecutor(
+						normalizedTool,
+						windowsShell,
+						detectionCommand,
+					) &&
+					isEmptyDirectoryRemovalWithinWorkspace(
+						write.resolvedPath,
+						shellDirectory,
+					)
+				)
 			) {
 				const safeTarget = sanitizeDiagnosticText(write.resolvedPath, 320);
 				const scopeSummary = declaredScope
