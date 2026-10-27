@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.200.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.8...v7.200.9) (2026-10-27)
+
+
+### Bug Fixes
+
+* **ci:** fail the fragment gate closed on git infra failures; NUL-safe cleanup transport, bounded check-title, dispatch guards ([3d9bc94](https://github.com/ZaxbyHub/opencode-swarm/commit/3d9bc9436d5dbbffd3714ab2bc9e79faba4ddebd))
+* **ci:** harden the fragment gate per the swarm-pr-review closure round ([c099ca3](https://github.com/ZaxbyHub/opencode-swarm/commit/c099ca31a0427525f07cef7bf73246cb6866f7c3))
+
 ## [7.200.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.7...v7.200.8) (2026-10-27)
 
 
