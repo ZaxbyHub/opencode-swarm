@@ -333,9 +333,15 @@ const BUILTIN_WRITE_COMMANDS = new Set([
  * A literal `rmdir` operand eligible for the empty-directory-removal tag: not
  * an option, and free of glob, brace, expansion, quote, escape, comment and
  * whitespace characters, so the text is exactly the single path the command
- * receives.
+ * receives. A LEADING `=` is excluded (#3475 AC12 decision, comment
+ * 6434634384): on zsh any word beginning with an unquoted `=` undergoes
+ * command-path expansion, so the static containment check would evaluate a
+ * literal the shell never runs (`rmdir =name` targets a PATH location, not
+ * `./=name`). On bash this conservatively withdraws a literal-filename
+ * convenience form. `FOO=1 rmdir a` prefix assignments are separate prefix
+ * words and unaffected.
  */
-const BARE_RMDIR_OPERAND = /^[^-*?[\]{}$`~"'\\#\s][^*?[\]{}$`~"'\\#\s]*$/;
+const BARE_RMDIR_OPERAND = /^[^-*?[\]{}$`~"'=\\#\s][^*?[\]{}$`~"'\\#\s]*$/;
 
 /**
  * Whether `word` may carry the empty-directory-removal tag. Beyond
@@ -390,6 +396,7 @@ const INTERPRETER_EVAL_COMMANDS = new Set([
 	'python',
 	'python3',
 	'python2',
+	'py',
 	'node',
 	'bun',
 	'ruby',
@@ -416,6 +423,62 @@ const ARCHIVE_EXTRACT_COMMANDS = new Set([
 	'xz',
 	'7z',
 	'rar',
+]);
+
+/**
+ * Real bash builtins (#3485 feedback): `builtin CMD` executes CMD only when
+ * CMD names a shell builtin — for anything external (`builtin rm …`,
+ * `builtin curl …`) bash errors "not a shell builtin" and runs nothing, so
+ * neither the dc unwrap nor the detector walk may unwrap those forms (doing
+ * so fabricated destructive/write detections of commands that never ran).
+ * Not exhaustive: membership only gates UNWRAPPING, and missing an exotic
+ * builtin degrades to the safe no-unwrap direction.
+ */
+export const BASH_BUILTIN_COMMANDS = new Set([
+	'echo',
+	'printf',
+	'cd',
+	'pwd',
+	'true',
+	'false',
+	'test',
+	'[',
+	':',
+	'eval',
+	'wait',
+	'read',
+	'mapfile',
+	'source',
+	'.',
+	'alias',
+	'bg',
+	'fg',
+	'jobs',
+	'kill',
+	'type',
+	'ulimit',
+	'umask',
+	'unset',
+	'times',
+	'trap',
+	'getopts',
+	'help',
+	'fc',
+	'hash',
+	'history',
+	'let',
+	'local',
+	'declare',
+	'logout',
+	'pushd',
+	'popd',
+	'dirs',
+	'shopt',
+	'set',
+	'shift',
+	'caller',
+	'compgen',
+	'complete',
 ]);
 
 /** Git commands (subcommand determines if destructive). */
@@ -887,7 +950,9 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget | null {
 	const tokens = cmd.trim().split(/\s+/);
 	if (tokens.length === 0) return null;
 
-	const name = tokens[0].toLowerCase();
+	const leaf = detectorCommandLeafFromWords(tokens[0], tokens.slice(1));
+	const name = detectorSetMember(leaf, BUILTIN_WRITE_COMMANDS);
+	if (!name) return null;
 	// `rmdir /s [/q] <path>` is the Windows spelling of recursive directory
 	// deletion.  The destructive-command guard owns its safety decision for
 	// that form (including allowing trusted `node_modules`/`dist` targets), so
@@ -896,12 +961,10 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget | null {
 	if (name === 'rmdir' && tokens.some((token) => /^\/(?:s|q)$/i.test(token))) {
 		return null;
 	}
-	if (BUILTIN_WRITE_COMMANDS.has(name)) {
-		// Last non-flag argument is the destination
-		for (let i = tokens.length - 1; i >= 1; i--) {
-			if (!tokens[i].startsWith('-')) {
-				return { category: 'builtin_write', operator: name, path: tokens[i] };
-			}
+	// Last non-flag argument is the destination
+	for (let i = tokens.length - 1; i >= 1; i--) {
+		if (!tokens[i].startsWith('-')) {
+			return { category: 'builtin_write', operator: name, path: tokens[i] };
 		}
 	}
 	return null;
@@ -911,6 +974,30 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget | null {
 function wordText(node: unknown): string | null {
 	if (!node || typeof node !== 'object') return null;
 	if (isBashWord(node)) {
+		// #3475: recover `#`-truncated words. bash-parser's QUOTE-REMOVAL
+		// stage (rules/quote-removal.js → shell-quote-word) stops an UNQUOTED
+		// word at a mid-word `#`, while the word's loc still spans the full
+		// source. When the raw slice dequotes to something that starts with
+		// the parsed text and the next dequoted character is an UNQUOTED `#`,
+		// the shell receives the full dequoted form — use it. Word-start `#`
+		// comments are unaffected (their words are not truncated), fully
+		// quoted `#` operands are unaffected (not truncated), and words with
+		// expansions never take this path.
+		const raw = RAW_WORD_TEXT.get(node);
+		if (raw !== undefined) {
+			const expansions = (node as { expansion?: unknown }).expansion;
+			if (!Array.isArray(expansions) || expansions.length === 0) {
+				const { projection, dequoted } = scanQuoting(raw);
+				if (
+					dequoted.length > node.text.length &&
+					dequoted.startsWith(node.text) &&
+					dequoted[node.text.length] === '#' &&
+					projection[node.text.length] !== '\0'
+				) {
+					return dequoted;
+				}
+			}
+		}
 		return node.text;
 	}
 	return null;
@@ -1253,8 +1340,18 @@ function getCommandName(cmd: unknown): string | null {
  * (#3346) — never `path.basename`, which is separator-bound to the host.
  */
 export function basenameAnySep(word: string): string {
+	return basenameAnySepCase(word).toLowerCase();
+}
+
+/**
+ * Case-preserving variant of {@link basenameAnySep}: basename across either
+ * separator, `.exe` stripped, original case kept. Dedupe keys for bash
+ * commands must stay case-sensitive (`rmdir` and `RMDIR` are different
+ * programs and must not collapse into one dedupe entry).
+ */
+function basenameAnySepCase(word: string): string {
 	const leaf = word.split(/[\\/]/).filter(Boolean).pop() ?? word;
-	return leaf.replace(/\.exe$/i, '').toLowerCase();
+	return leaf.replace(/\.exe$/i, '');
 }
 
 /**
@@ -1433,6 +1530,161 @@ function getSuffixWords(cmd: unknown): string[] {
 		if (text !== null) words.push(text);
 	}
 	return words;
+}
+
+/**
+ * Canonical detector command model (#3474): classify write-vector commands
+ * through their canonical spelling so versioned (`curl8.5`, `bzip2.5`),
+ * path-qualified (`/usr/bin/curl`), and execution-wrapper-prefixed
+ * (`command rmdir`, `env -u X curl`) invocations cannot sidestep detection.
+ *
+ * The wrapper walk is EXECUTION-ONLY and shared conceptually with the dc
+ * unwrap layer: `command -v` / `-V` (standalone or glued) are QUERY forms
+ * and abort the walk — the canonical name stays `command`, which is no set
+ * member — while `command [-p]`, `builtin`, `exec [-c|-l|-a NAME]` and `env`
+ * (own flags consumed exactly like canonicalInterpreterName's env hop) are
+ * transparent. This deliberately diverges from canonicalInterpreterName's
+ * generic dash-skip (which would canonicalize `command -v rmdir …` into a
+ * write); the plan critic's round-2 blocker 1.
+ */
+function isQueryFlag(token: string): boolean {
+	// `-v` / `-V` alone or glued into a short cluster (`-pv`, `-vp`).
+	if (token === '-v' || token === '-V') return true;
+	return /^-[pvVP]+$/.test(token) && /[vV]/.test(token);
+}
+
+/**
+ * Walk execution-only wrappers over the suffix words and return the leaf of
+ * the real command word (canonical basename, `.exe` stripped, lowercased).
+ * Returns the wrapper itself when a query form or a malformed hop appears.
+ */
+function detectorCommandLeaf(cmd: unknown): string {
+	return detectorCommandParts(cmd).leaf;
+}
+
+/**
+ * Case-preserving sibling of {@link detectorCommandLeaf} — the resolved real
+ * command's basename with its original spelling kept. Dedupe operators use
+ * this so wrapper spellings collapse onto the real command (PRR-008) without
+ * also collapsing case-distinct commands into each other.
+ */
+function detectorCommandRawLeaf(cmd: unknown): string {
+	return detectorCommandPartsFromWords(getCommandName(cmd), getSuffixWords(cmd))
+		.rawLeaf;
+}
+
+/**
+ * #3485 (PRR-006): the canonical leaf PLUS the unconsumed token tail after
+ * the transparent wrapper chain — `env python` yields leaf 'python' with an
+ * EMPTY tail, which is what stdin-shape checks must inspect (the raw suffix
+ * still holds the wrapper word and would defeat the wrapper-aware lookup).
+ */
+function detectorCommandParts(cmd: unknown): { leaf: string; rest: string[] } {
+	const suffix = getSuffixWords(cmd);
+	return {
+		leaf: detectorCommandLeafFromWords(getCommandName(cmd), suffix),
+		rest: suffix,
+	};
+}
+
+function detectorCommandLeafFromWords(
+	cmdName: string | null | undefined,
+	suffix: string[],
+): string {
+	return detectorCommandPartsFromWords(cmdName, suffix).leaf;
+}
+
+function detectorCommandPartsFromWords(
+	cmdName: string | null | undefined,
+	suffix: string[],
+): { leaf: string; rest: string[]; rawLeaf: string } {
+	let name = cmdName;
+	if (!name) return { leaf: '', rest: suffix, rawLeaf: '' };
+	let cursor = 0;
+	for (let hop = 0; hop < 8; hop++) {
+		const base = basenameAnySep(name);
+		const rawBase = basenameAnySepCase(name);
+		if (
+			base !== 'env' &&
+			base !== 'command' &&
+			base !== 'builtin' &&
+			base !== 'exec'
+		) {
+			return { leaf: base, rest: suffix.slice(cursor), rawLeaf: rawBase };
+		}
+		// Consume the wrapper's own tokens before the wrapped command name.
+		if (base === 'env') {
+			while (cursor < suffix.length) {
+				const token = suffix[cursor];
+				if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+					cursor++;
+					continue;
+				}
+				if (token.startsWith('-') && token !== '-') {
+					cursor++;
+					if (envFlagConsumesNextWord(token) && cursor < suffix.length)
+						cursor++;
+					continue;
+				}
+				break;
+			}
+		} else if (base === 'command') {
+			while (cursor < suffix.length && suffix[cursor] === '-p') cursor++;
+			if (cursor < suffix.length && isQueryFlag(suffix[cursor])) {
+				// Query form (`command -v NAME …`): never an execution wrapper.
+				return { leaf: base, rest: suffix.slice(cursor), rawLeaf: rawBase };
+			}
+			if (cursor < suffix.length && suffix[cursor] === '--') cursor++;
+		} else if (base === 'builtin') {
+			// #3485 (PRR-015): `builtin rm …` errors in bash ("not a shell
+			// builtin") and runs nothing for every external command — only
+			// unwrap when the wrapped name is a real builtin; anything else
+			// stays at the `builtin` leaf (correctly no write detected).
+			if (cursor < suffix.length) {
+				const wrapped = basenameAnySep(suffix[cursor]);
+				if (!BASH_BUILTIN_COMMANDS.has(wrapped))
+					return { leaf: base, rest: suffix.slice(cursor), rawLeaf: rawBase };
+			}
+			if (cursor < suffix.length && suffix[cursor] === '--') cursor++;
+		} else if (base === 'exec') {
+			while (cursor < suffix.length && /^-[cl]$/.test(suffix[cursor])) cursor++;
+			if (cursor < suffix.length && suffix[cursor] === '-a') cursor += 2;
+			// #3485 (PRR-015): glued `-aNAME` and pure `-cl`/`-lc` clusters
+			// (bash internal_getopt) execute the wrapped command.
+			if (cursor < suffix.length && /^-a\S+$/.test(suffix[cursor])) cursor++;
+			if (cursor < suffix.length && /^-[cl]{2,}$/.test(suffix[cursor]))
+				cursor++;
+			if (cursor < suffix.length && suffix[cursor] === '--') cursor++;
+		}
+		if (cursor >= suffix.length)
+			return { leaf: base, rest: suffix.slice(cursor), rawLeaf: rawBase };
+		// Advance to the wrapped command's name word.
+		name = suffix[cursor];
+		cursor++;
+		if (!name)
+			return { leaf: base, rest: suffix.slice(cursor - 1), rawLeaf: rawBase };
+	}
+	return {
+		leaf: basenameAnySep(name),
+		rest: suffix.slice(cursor),
+		rawLeaf: basenameAnySepCase(name),
+	};
+}
+
+/**
+ * Three-tier version lookup (#3474): the full spelling first (canonical
+ * `bzip2` stays itself), then the `.digit+`-stripped candidate (`bzip2.5` →
+ * `bzip2`), then the full digit-run-stripped candidate (`python2.7` /
+ * `curl8.5` → `python` / `curl`). First candidate that is a set member wins;
+ * null when none is.
+ */
+function detectorSetMember(leaf: string, set: Set<string>): string | null {
+	if (leaf && set.has(leaf)) return leaf;
+	const dotted = leaf.replace(/\.\d+(\.\d+)*$/, '');
+	if (dotted !== leaf && set.has(dotted)) return dotted;
+	const stripped = dotted.replace(/\d+(\.\d+)*$/, '');
+	if (stripped !== dotted && set.has(stripped)) return stripped;
+	return null;
 }
 
 /**
@@ -1754,7 +2006,23 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	const name = getCommandName(cmd);
 	if (!name) return results;
 
-	const lowerName = name.toLowerCase();
+	// #3474: classify through the canonical command model so versioned,
+	// path-qualified, and execution-wrapped spellings cannot sidestep the
+	// builtin-write detectors (the emitted operator keeps the raw name).
+	// dd and tee are handled below ahead of the set check, so they join the
+	// gate explicitly.
+	const leaf = detectorCommandLeaf(cmd);
+	const lowerName =
+		detectorSetMember(leaf, BUILTIN_WRITE_COMMANDS) ??
+		(leaf === 'dd' || leaf === 'tee' ? leaf : null);
+	if (!lowerName) return results;
+
+	// #3485 (PRR-008): dedupe on the RESOLVED real command as spelled — not
+	// the raw first word (a transparent wrapper would key every wrapped write
+	// the same: `env cp a b; env mv c b`) and not the lowercased leaf (bash is
+	// case-sensitive; collapsing `rmdir` and `RMDIR` dedupes away a real write
+	// that runs in its own `cd` context).
+	const dedupeOperator = detectorCommandRawLeaf(cmd);
 
 	// dd with of= flag
 	if (lowerName === 'dd') {
@@ -1818,7 +2086,9 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	) {
 		results.push({
 			category: 'builtin_write',
-			operator: name,
+			// #3485 (PRR-008): the resolved real command as spelled (see the
+			// dedupeOperator comment above), not the raw first word.
+			operator: dedupeOperator,
 			path: suffixWords[0],
 			emptyDirectoryRemoval: true,
 		});
@@ -1842,7 +2112,11 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		for (let i = suffixWords.length - 1; i >= 0; i--) {
 			const word = suffixWords[i];
 			if (!word.startsWith('-')) {
-				results.push({ category: 'builtin_write', operator: name, path: word });
+				results.push({
+					category: 'builtin_write',
+					operator: dedupeOperator,
+					path: word,
+				});
 				break;
 			}
 		}
@@ -1919,8 +2193,9 @@ function detectInplaceEdit(cmd: unknown): WriteTarget[] {
 	const name = getCommandName(cmd);
 	if (!name) return results;
 
-	const lowerName = name.toLowerCase();
-	if (!INPLACE_EDIT_COMMANDS.has(lowerName)) return [];
+	const leaf = detectorCommandLeaf(cmd);
+	const lowerName = detectorSetMember(leaf, INPLACE_EDIT_COMMANDS);
+	if (!lowerName) return [];
 
 	const suffixWords = getSuffixWords(cmd);
 
@@ -2428,13 +2703,139 @@ function detectInplaceEdit(cmd: unknown): WriteTarget[] {
 		for (const { word } of candidates) {
 			results.push({
 				category: 'inplace_edit',
-				operator: `${name} -i`,
+				operator: `${lowerName} -i`,
 				path: word,
 			});
 		}
 	}
 
 	return results;
+}
+
+/**
+ * #3474: classify a pipeline whose LAST command is a stdin-fed interpreter
+ * (bare, or with the explicit `-` stdin flag) and whose OTHER commands are
+ * all literal `echo`/`printf` producers (no expansion children, no
+ * redirects): the piped literal text IS the interpreter's program, so the
+ * pipeline is an inline eval. A `< file` stdin redirect on the interpreter
+ * overrides the pipe (script-path carve-out, #1901/#1902). Dynamic producers
+ * (`grep`, command substitution) are deliberately OUT — their output is
+ * data-dependent, closer to the script-path class (maintainer ruling,
+ * issue comment 6434171372). Shared by BOTH walkers so the emitted write
+ * pairs with its tracked cwd in resolveWriteTargets.
+ */
+function classifyPipeStdinEval(node: unknown): WriteTarget | null {
+	if (!node || typeof node !== 'object') return null;
+	const pipeline = node as { type?: string; commands?: unknown };
+	if (pipeline.type !== 'Pipeline' || !Array.isArray(pipeline.commands)) {
+		return null;
+	}
+	if (pipeline.commands.length < 2) return null;
+	// #impl-review r1 F3: the interpreter may sit at ANY position ≥1 —
+	// `echo CODE | python | cat` still executes the piped program. The
+	// commands BEFORE it must all be literal echo/printf producers; the
+	// commands AFTER it consume its output and are irrelevant.
+	for (let pos = pipeline.commands.length - 1; pos >= 1; pos--) {
+		const evalWrite = classifyPipeStdinEvalAt(node, pos);
+		if (evalWrite) return evalWrite;
+	}
+	return null;
+}
+
+function classifyPipeStdinEvalAt(
+	node: unknown,
+	pos: number,
+): WriteTarget | null {
+	const pipeline = node as { type?: string; commands?: unknown };
+	if (!Array.isArray(pipeline.commands)) return null;
+	const last = pipeline.commands[pos];
+	const canonical = detectorSetMember(
+		detectorCommandLeaf(last),
+		INTERPRETER_EVAL_COMMANDS,
+	);
+	if (!canonical || canonical === 'eval') return null;
+	// Interpreter must be stdin-fed from the pipe: no arguments at all, or
+	// exactly the explicit stdin flag `-`. Anything else is the script-file
+	// or flag form (carve-out). #3485 (PRR-006): the shape check must use the
+	// WRAPPER-CONSUMED token tail — the raw suffix of `env python` still holds
+	// the wrapper word and would defeat the wrapper-aware leaf lookup above.
+	const { leaf: _leaf, rest } = detectorCommandPartsFromWords(
+		getCommandName(last),
+		getSuffixWords(last),
+	);
+	if (!(rest.length === 0 || (rest.length === 1 && rest[0] === '-'))) {
+		return null;
+	}
+	// A stdin redirect on the interpreter overrides the pipe (`< file`,
+	// `<< heredoc`: bash-parser types LESS/HEREDOC on the redirect's op node;
+	// simple commands carry redirects inside suffix/prefix, so use the
+	// shared accessor).
+	for (const r of getRedirections(last)) {
+		const opType = (r as { op?: { type?: unknown } }).op?.type;
+		if (typeof opType === 'string' && /LESS|HEREDOC/i.test(opType)) {
+			return null;
+		}
+	}
+	// #3485 (PRR-009): a heredoc overrides the pipe as well, and bash-parser
+	// carries `<<` as a suffix WORD node (type dless) that getSuffixWords
+	// skips — check the raw suffix nodes.
+	const rawSuffixNodes = (last as { suffix?: unknown }).suffix;
+	if (Array.isArray(rawSuffixNodes)) {
+		for (const node of rawSuffixNodes) {
+			if (
+				node &&
+				typeof node === 'object' &&
+				(node as { type?: unknown }).type === 'dless'
+			) {
+				return null;
+			}
+		}
+	}
+	// Every producer before the interpreter must be a literal echo/printf.
+	for (let i = 0; i < pos; i++) {
+		const producer = pipeline.commands[i];
+		const leaf = detectorCommandLeaf(producer);
+		if (leaf !== 'echo' && leaf !== 'printf') return null;
+		const expansions = getSuffixWordExpansionFlags(producer);
+		const words = getSuffixWords(producer);
+		for (let w = 0; w < words.length; w++) {
+			if (w < expansions.length && expansions[w]) return null;
+		}
+		// #3485 (PRR-011): simple commands carry redirects inside
+		// suffix/prefix — use the shared accessor, not the (absent)
+		// `.redirections` field.
+		if (getRedirections(producer).length > 0) {
+			return null;
+		}
+	}
+	return {
+		category: 'interpreter_eval',
+		operator: `${canonical} [eval stdin]`,
+		path: null,
+		capability: true,
+	};
+}
+
+/**
+ * Depth-first walk emitting classifyPipeStdinEval's writes in the same
+ * order collectWritesWithNodes visits Pipeline nodes.
+ */
+function collectPipeStdinEvals(node: unknown, out: WriteTarget[]): void {
+	if (!node || typeof node !== 'object') return;
+	if (Array.isArray(node)) {
+		for (const child of node) collectPipeStdinEvals(child, out);
+		return;
+	}
+	// #3485 (PRR-003): POST-ORDER — descend first, classify after, exactly
+	// matching collectWritesWithNodes' Pipeline emission (children, then the
+	// pipeline's own stdin-eval). A pre-order walk inverted the occurrence
+	// pairing for nested pipelines (outer classified before inner here but
+	// after it in the resolve walker), crossing the #N suffix↔context pairing.
+	for (const value of Object.values(node)) {
+		if (value && typeof value === 'object') collectPipeStdinEvals(value, out);
+	}
+	const candidate = classifyPipeStdinEval(node);
+	if (candidate) out.push(candidate);
 }
 
 /**
@@ -2518,8 +2919,9 @@ function detectNetworkDownloaders(cmd: unknown): WriteTarget[] {
 	const name = getCommandName(cmd);
 	if (!name) return results;
 
-	const lowerName = name.toLowerCase();
-	if (!NETWORK_DOWNLOAD_COMMANDS.has(lowerName)) return [];
+	const leaf = detectorCommandLeaf(cmd);
+	const lowerName = detectorSetMember(leaf, NETWORK_DOWNLOAD_COMMANDS);
+	if (!lowerName) return [];
 
 	const suffixWords = getSuffixWords(cmd);
 
@@ -2590,8 +2992,9 @@ function detectArchiveExtract(cmd: unknown): WriteTarget[] {
 	const name = getCommandName(cmd);
 	if (!name) return results;
 
-	const lowerName = name.toLowerCase();
-	if (!ARCHIVE_EXTRACT_COMMANDS.has(lowerName)) return [];
+	const leaf = detectorCommandLeaf(cmd);
+	const lowerName = detectorSetMember(leaf, ARCHIVE_EXTRACT_COMMANDS);
+	if (!lowerName) return [];
 
 	const suffixWords = getSuffixWords(cmd);
 
@@ -3791,6 +4194,14 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 			// Git destructive
 			allWrites.push(...detectGitDestructive(cmd));
 		}
+
+		// #3474: stdin-fed interpreters behind literal pipe producers
+		// (echo/printf | python). Emitted AFTER the leaf pass, in the same
+		// depth-first pipeline order the collectWritesWithNodes emission
+		// uses, so occurrence suffixes pair across the two walkers. The
+		// `[eval stdin]` operator never collides with the leaf pass's
+		// `[eval]` operator.
+		collectPipeStdinEvals(ast as BashNode, allWrites);
 	}
 
 	// If parse failed, try regex-based process substitution detection.
@@ -3957,6 +4368,70 @@ function isCwdNeutralLeaf(node: BashNode): boolean {
 }
 
 /**
+ * #3474: inline-code flags per canonical interpreter under Windows grammar.
+ * Mirrors the POSIX eval-flag table in detectInterpreterEval (shells
+ * excluded: `-c`/`-Command` wrapper forms are unwrapped by the dc layer).
+ */
+const WINDOWS_INTERPRETER_EVAL_FLAGS: ReadonlyMap<string, readonly string[]> =
+	new Map(
+		Object.entries({
+			python: ['-c'],
+			python3: ['-c'],
+			python2: ['-c'],
+			py: ['-c'],
+			node: ['-e', '--eval', '-p', '--print'],
+			bun: ['-e'],
+			ruby: ['-e'],
+			perl: ['-e', '-E'],
+			php: ['-r', '-R', '-F'],
+		}) as [string, readonly string[]][],
+	);
+
+/**
+ * Recognize a leading interpreter with an inline-code flag in a
+ * Windows-grammar fragment and emit the capability-eval write (path null —
+ * the gate authorizes the eval's working directory, here the command's
+ * STARTING directory via the resolveWriteTargets fallback, conservative for
+ * every proper declared scope because the start is the workspace root).
+ */
+function detectWindowsInterpreterEval(fragment: string): WriteTarget[] {
+	const tokens = fragment.trim().split(/\s+/);
+	if (tokens.length < 2) return [];
+	// #3485 (PRR-018): strip surrounding quotes so quoted exe paths
+	// ("C:\\Program Files\\...\\python.exe") basename correctly.
+	const leaf = basenameAnySep(tokens[0].replace(/^["']+|["']+$/g, ''));
+	const canonical = detectorSetMember(
+		leaf,
+		new Set(WINDOWS_INTERPRETER_EVAL_FLAGS.keys()),
+	);
+	if (!canonical) return [];
+	const flags = WINDOWS_INTERPRETER_EVAL_FLAGS.get(canonical) ?? [];
+	for (let i = 1; i < tokens.length; i++) {
+		const token = tokens[i];
+		// #3485 (PRR-018): glued spellings (`python -ccode`) execute inline
+		// code exactly like the spaced/`=` forms.
+		if (
+			flags.some(
+				(flag) =>
+					token === flag ||
+					token.startsWith(`${flag}=`) ||
+					(token.startsWith(flag) && token.length > flag.length),
+			)
+		) {
+			return [
+				{
+					category: 'interpreter_eval',
+					operator: `${tokens[0]} [eval]`,
+					path: null,
+					capability: true,
+				},
+			];
+		}
+	}
+	return [];
+}
+
+/**
  * Parse a Windows shell command (PowerShell or cmd.exe) and detect all
  * file-system write operations using regex heuristics.
  *
@@ -4000,6 +4475,17 @@ export function detectWindowsWrites(
 		// Split compound commands (pipelines, &&, ||)
 		const subCommands = splitWindowsCommands(command, shell);
 		const allWrites: WriteTarget[] = [];
+
+		// #3474: interpreter evals are grammar-independent — a
+		// backslash path-qualified interpreter with an inline-code flag is an
+		// eval under either Windows grammar. The operator uses the RAW
+		// leading word in exactly the POSIX `${name} [eval]` format so a
+		// spelling both grammars classify collapses to ONE dedupe key and the
+		// Windows row inherits the POSIX walker's tracked context instead of
+		// overriding it (plan-critic r2 B5).
+		for (const subCmd of subCommands) {
+			allWrites.push(...detectWindowsInterpreterEval(subCmd));
+		}
 
 		// Issue #3099: BOTH sub-detectors run on EVERY fragment — never one or
 		// the other. Switching on `shell` lost a family: `copy`, `move`, `ren`,
@@ -4058,9 +4544,23 @@ export function detectWindowsWrites(
 			operator: string;
 			path: string | null;
 		}> = [];
-		const writes = allWrites.filter((wt) => {
+		const occurrence = new Map<string, number>();
+		const writes: WriteTarget[] = [];
+		for (const wt of allWrites) {
 			const key = buildDedupeKey(wt.category, wt.operator, wt.path);
-			if (seen.has(key)) return false;
+			// #3347/#3474 parity: a capability interpreter_eval repeated across
+			// fragments keeps EVERY occurrence with an occurrence-suffixed
+			// operator (`… [eval] #2`), mirroring the POSIX dedupe — the
+			// Windows dedupe used to drop them, hiding later evals.
+			if (seen.has(key)) {
+				if (wt.capability !== true || wt.category !== 'interpreter_eval') {
+					continue;
+				}
+				const n = (occurrence.get(key) ?? 1) + 1;
+				occurrence.set(key, n);
+				writes.push({ ...wt, operator: `${wt.operator} #${n}` });
+				continue;
+			}
 			const stripped = stripQuotes(wt.path);
 			if (stripped !== wt.path) {
 				const artifact = seenStripped.some(
@@ -4069,7 +4569,7 @@ export function detectWindowsWrites(
 						other.operator === wt.operator &&
 						stripQuotes(other.path) === stripped,
 				);
-				if (artifact) return false;
+				if (artifact) continue;
 			}
 			seen.add(key);
 			seenStripped.push({
@@ -4077,8 +4577,8 @@ export function detectWindowsWrites(
 				operator: wt.operator,
 				path: wt.path,
 			});
-			return true;
-		});
+			writes.push(wt);
+		}
 
 		return { writes, hasWrites: writes.length > 0 };
 	} catch {
@@ -4184,15 +4684,28 @@ function collectWritesWithNodes(
 	node: BashNode,
 	out: WriteWithNode[],
 	cwdStack: string[],
+	andSharedStack = true,
 ): void {
 	if (!node || typeof node !== 'object') return;
+
+	// #3485 (PRR-004): a $(...) substitution body executes at the CURRENT
+	// working directory — descend with the same context (and the same
+	// stack-sharing mode) so writes/evals inside it pair with their true
+	// location instead of falling back to the starting cwd. Handled before
+	// the typed switch: bash-parser's node union does not declare this type.
+	if ((node as unknown as { type?: unknown }).type === 'CommandExpansion') {
+		const inner = (node as unknown as { commandAST?: unknown }).commandAST;
+		if (inner)
+			collectWritesWithNodes(inner as BashNode, out, cwdStack, andSharedStack);
+		return;
+	}
 
 	switch (node.type) {
 		case 'Script': {
 			const _globalCwd = cwdStack[0] ?? '/';
 			if (Array.isArray(node.commands)) {
 				for (const cmd of node.commands) {
-					collectWritesWithNodes(cmd, out, cwdStack);
+					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack);
 				}
 			}
 			break;
@@ -4221,7 +4734,7 @@ function collectWritesWithNodes(
 			// cd mutations inside the subshell do not leak to the parent.
 			if (node.list) {
 				const subStack = [...cwdStack];
-				collectWritesWithNodes(node.list, out, subStack);
+				collectWritesWithNodes(node.list, out, subStack, andSharedStack);
 			}
 			break;
 		}
@@ -4253,19 +4766,33 @@ function collectWritesWithNodes(
 							path.posix.resolve(currentStack[0] ?? '/', cdTarget);
 					} else {
 						// Use the current (possibly mutated) stack so cd changes propagate
-						collectWritesWithNodes(cmd, out, currentStack);
+						collectWritesWithNodes(cmd, out, currentStack, andSharedStack);
 					}
 				}
 			}
 			break;
 		}
 
-		case 'Pipeline':
 		case 'Sequence': {
 			if (Array.isArray(node.commands)) {
 				for (const cmd of node.commands) {
-					collectWritesWithNodes(cmd, out, cwdStack);
+					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack);
 				}
+			}
+			break;
+		}
+
+		case 'Pipeline': {
+			if (Array.isArray(node.commands)) {
+				for (const cmd of node.commands) {
+					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack);
+				}
+				// #3474: the stdin-eval write belongs to the pipeline as a
+				// whole; emitted after the children so both walkers list the
+				// pipe-evals in the same relative order.
+				const pipeEval = classifyPipeStdinEval(node);
+				if (pipeEval)
+					out.push({ write: pipeEval, context: cwdStack[0] ?? '/' });
 			}
 			break;
 		}
@@ -4274,15 +4801,33 @@ function collectWritesWithNodes(
 			// LogicalExpression (&& or ||) — same semantics as And/Or
 			// Process left first (may modify cwd via cd)
 			// IMPORTANT: Use cwdStack directly, not a copy, so cd mutations propagate
+			// #3474: for `&&` the right branch joins the SHARED stack — a chain's
+			// middle `cd` (left-associative: And(a, And(b, c)) walks b on a fresh
+			// discarded stack) previously never reached c's resolution, so
+			// `cd src && cd .. && echo x > escape.txt` resolved the target at src
+			// (in scope) and admitted an out-of-scope write. For `||` the right
+			// branch may be SKIPPED (left succeeded) while later siblings still
+			// run, so applying a skipped `cd` would be a NEW fail-open
+			// (plan-critic r2 B4) — `||` keeps the fresh-[leftContext] behavior.
+			const andChain =
+				(node as unknown as { op?: string }).op === 'and' ||
+				(node as unknown as { type?: string }).type === 'And';
 			if (node.left) {
-				collectWritesWithNodes(node.left, out, cwdStack);
+				collectWritesWithNodes(node.left, out, cwdStack, andSharedStack);
 				// Capture the context AFTER left has been processed (cd may have modified it)
 				const leftContext = cwdStack[0] ?? '/';
 				// Process right with potentially updated context from left
 				if (node.right) {
-					// Use a single-element stack for right; leftContext is the only cwd needed
-					const rightStack = [leftContext];
-					collectWritesWithNodes(node.right, out, rightStack);
+					// #3485 (PRR-001): the TRACKED pass shares the stack for && so a
+					// succeeding chain's cd moves later siblings; the PESSIMISTIC
+					// pass (andSharedStack=false) gives the right branch a fresh
+					// stack — a left operand that FAILS at runtime skips the right
+					// branch entirely, so its cd must never reach later siblings
+					// (`false && cd src; write` admitted an out-of-scope write when
+					// the skipped cd was applied to the resolution).
+					const rightStack =
+						andChain && andSharedStack ? cwdStack : [leftContext];
+					collectWritesWithNodes(node.right, out, rightStack, andSharedStack);
 				}
 			}
 			break;
@@ -4292,14 +4837,16 @@ function collectWritesWithNodes(
 		case 'Or': {
 			// Process left first (may modify cwd via cd)
 			// IMPORTANT: Use cwdStack directly, not a copy, so cd mutations propagate
+			// #3474: And shares the stack (see LogicalExpression); Or keeps the
+			// fresh stack (a skipped || branch's cd must not move later siblings).
 			if (node.left) {
-				collectWritesWithNodes(node.left, out, cwdStack);
+				collectWritesWithNodes(node.left, out, cwdStack, andSharedStack);
 				const leftContext = cwdStack[0] ?? '/';
 				// Process right with potentially updated context from left
 				if (node.right) {
-					// Use a single-element stack for right; leftContext is the only cwd needed
-					const rightStack = [leftContext];
-					collectWritesWithNodes(node.right, out, rightStack);
+					const rightStack =
+						node.type === 'And' && andSharedStack ? cwdStack : [leftContext];
+					collectWritesWithNodes(node.right, out, rightStack, andSharedStack);
 				}
 			}
 			break;
@@ -4324,7 +4871,8 @@ function collectWritesWithNodes(
 			// moved a later write. Copy per body: detection added, propagation
 			// kept at base semantics (review round 3).
 			for (const body of [node.clause, node.then, node.else]) {
-				if (body) collectWritesWithNodes(body, out, [...cwdStack]);
+				if (body)
+					collectWritesWithNodes(body, out, [...cwdStack], andSharedStack);
 			}
 			break;
 		}
@@ -4339,8 +4887,10 @@ function collectWritesWithNodes(
 					}
 				}
 			}
-			if (node.clause) collectWritesWithNodes(node.clause, out, [...cwdStack]);
-			if (node.do) collectWritesWithNodes(node.do, out, [...cwdStack]);
+			if (node.clause)
+				collectWritesWithNodes(node.clause, out, [...cwdStack], andSharedStack);
+			if (node.do)
+				collectWritesWithNodes(node.do, out, [...cwdStack], andSharedStack);
 			break;
 		}
 
@@ -4353,7 +4903,8 @@ function collectWritesWithNodes(
 					}
 				}
 			}
-			if (node.do) collectWritesWithNodes(node.do, out, [...cwdStack]);
+			if (node.do)
+				collectWritesWithNodes(node.do, out, [...cwdStack], andSharedStack);
 			break;
 		}
 
@@ -4369,7 +4920,12 @@ function collectWritesWithNodes(
 			if (Array.isArray(node.cases)) {
 				for (const entry of node.cases) {
 					if (entry?.body)
-						collectWritesWithNodes(entry.body, out, [...cwdStack]);
+						collectWritesWithNodes(
+							entry.body,
+							out,
+							[...cwdStack],
+							andSharedStack,
+						);
 				}
 			}
 			break;
@@ -4384,7 +4940,8 @@ function collectWritesWithNodes(
 					}
 				}
 			}
-			if (node.body) collectWritesWithNodes(node.body, out, [...cwdStack]);
+			if (node.body)
+				collectWritesWithNodes(node.body, out, [...cwdStack], andSharedStack);
 			break;
 		}
 
@@ -4567,49 +5124,85 @@ export function resolveWriteTargets(
 		}));
 	}
 
-	// Walk the AST and collect writes WITH their context nodes, in order
+	// Walk the AST and collect writes WITH their context nodes, in order —
+	// twice (PRR-001/#3485): the TRACKED pass shares the cwd stack through &&
+	// right branches (a succeeding chain's cd moves later siblings), and the
+	// PESSIMISTIC pass walks with base semantics (fresh stack per && right
+	// branch) because a left operand that FAILS at runtime skips the right
+	// branch entirely, so its cd never executes. A write whose two
+	// resolutions diverge is emitted once per resolution; the gate requires
+	// EVERY entry to pass, so a shape that could land at either location is
+	// admitted only when both landings are authorized.
 	const cwdStack = [cwd];
-	const writesWithNodes: WriteWithNode[] = [];
-	collectWritesWithNodes(ast as BashNode, writesWithNodes, cwdStack);
+	const trackedNodes: WriteWithNode[] = [];
+	collectWritesWithNodes(ast as BashNode, trackedNodes, cwdStack);
+	// A fresh stack: the tracked walk MUTATES the array it is given (cd writes
+	// cwdStack[0] in place), so the pessimistic pass must not inherit it.
+	const pessimisticNodes: WriteWithNode[] = [];
+	collectWritesWithNodes(ast as BashNode, pessimisticNodes, [cwd], false);
 
-	// Deduplicate writes the same way detectPosixWrites does — including the
+	// Deduplicate walks the same way detectPosixWrites does — including the
 	// capability-eval occurrence rename (#3347: the nth occurrence here
 	// carries the same suffixed operator as the nth occurrence there, so the
-	// map below pairs each occurrence with ITS OWN tracked context) AND the
+	// map pairs each occurrence with ITS OWN tracked context) AND the
 	// emptyDirectoryRemoval collision demotion (PR #3456 review F-2: a key
 	// seen more than once — here or in the caller's `writes` — may name
 	// writes run under different working directories yet resolves against
 	// the FIRST context only, so any write with a colliding key is demoted
 	// by the return mapping below).
-	const seen = new Set<string>();
-	const occurrence = new Map<string, number>();
-	const collidingKeys = new Set<string>();
-	const deduplicated: WriteWithNode[] = [];
-	for (const wwn of writesWithNodes) {
-		const key = buildDedupeKey(
-			wwn.write.category,
-			wwn.write.operator,
-			wwn.write.path,
-		);
-		if (seen.has(key)) {
-			collidingKeys.add(key);
-			if (
-				wwn.write.capability !== true ||
-				wwn.write.category !== 'interpreter_eval'
-			) {
+	const buildResolution = (nodes: WriteWithNode[]) => {
+		const seen = new Set<string>();
+		const occurrence = new Map<string, number>();
+		const colliding = new Set<string>();
+		const deduplicated: WriteWithNode[] = [];
+		for (const wwn of nodes) {
+			const key = buildDedupeKey(
+				wwn.write.category,
+				wwn.write.operator,
+				wwn.write.path,
+			);
+			if (seen.has(key)) {
+				colliding.add(key);
+				if (
+					wwn.write.capability !== true ||
+					wwn.write.category !== 'interpreter_eval'
+				) {
+					continue;
+				}
+				const n = (occurrence.get(key) ?? 1) + 1;
+				occurrence.set(key, n);
+				deduplicated.push({
+					write: { ...wwn.write, operator: `${wwn.write.operator} #${n}` },
+					context: wwn.context,
+				});
 				continue;
 			}
-			const n = (occurrence.get(key) ?? 1) + 1;
-			occurrence.set(key, n);
-			deduplicated.push({
-				write: { ...wwn.write, operator: `${wwn.write.operator} #${n}` },
-				context: wwn.context,
-			});
-			continue;
+			seen.add(key);
+			deduplicated.push(wwn);
 		}
-		seen.add(key);
-		deduplicated.push(wwn);
-	}
+		const map = new Map<
+			string,
+			{ resolvedPath: string | null; resolved: boolean; evalDirectory?: string }
+		>();
+		for (const { write, context } of deduplicated) {
+			const resolvedPath = resolvePath(write.path, context);
+			const resolved = write.path !== null && !isDynamicPath(write.path);
+			const key = buildDedupeKey(write.category, write.operator, write.path);
+			// A capability eval has no static target; the working directory it
+			// runs at (tracked through any `cd`) IS what the gate authorizes
+			// against (#1902/#3347).
+			const evalDirectory =
+				write.capability === true && write.category === 'interpreter_eval'
+					? context
+					: undefined;
+			map.set(key, { resolvedPath, resolved, evalDirectory });
+		}
+		return { map, colliding };
+	};
+
+	const { map: resolvedMap, colliding: collidingKeys } =
+		buildResolution(trackedNodes);
+	const { map: pessimisticMap } = buildResolution(pessimisticNodes);
 	const inputKeys = new Set<string>();
 	for (const write of writes) {
 		const key = buildDedupeKey(write.category, write.operator, write.path);
@@ -4617,53 +5210,53 @@ export function resolveWriteTargets(
 		inputKeys.add(key);
 	}
 
-	// Build a map from WriteTarget to its resolved path, using the context from each write
-	const resolvedMap = new Map<
-		string,
-		{ resolvedPath: string | null; resolved: boolean; evalDirectory?: string }
-	>();
-
-	for (const { write, context } of deduplicated) {
-		const resolvedPath = resolvePath(write.path, context);
-		const resolved = write.path !== null && !isDynamicPath(write.path);
-		const key = buildDedupeKey(write.category, write.operator, write.path);
-		// A capability eval has no static target; the working directory it
-		// runs at (tracked through any `cd`) IS what the gate authorizes
-		// against (#1902/#3347).
-		const evalDirectory =
-			write.capability === true && write.category === 'interpreter_eval'
-				? context
-				: undefined;
-		resolvedMap.set(key, { resolvedPath, resolved, evalDirectory });
-	}
-
-	// Map the input writes to their resolved paths
-	return writes.map((input) => {
+	// Map the input writes to their resolved paths. A write whose pessimistic
+	// resolution diverges from the tracked one emits an ADDITIONAL entry so
+	// the gate enforces both possible landings (PRR-001: `false && cd src; …`
+	// must also be judged at the workspace root, where real bash lands it).
+	return writes.flatMap((input) => {
 		const key = buildDedupeKey(input.category, input.operator, input.path);
 		const original = collidingKeys.has(key)
 			? withoutEmptyDirectoryRemoval(input)
 			: input;
-		const resolved = resolvedMap.get(key);
-		if (resolved) {
-			return {
-				original,
-				resolvedPath: resolved.resolvedPath,
-				resolved: resolved.resolved,
-				...(resolved.evalDirectory !== undefined
-					? { evalDirectory: resolved.evalDirectory }
-					: {}),
-			};
+		const buildEntry = (resolved: {
+			resolvedPath: string | null;
+			resolved: boolean;
+			evalDirectory?: string;
+		}) => ({
+			original,
+			resolvedPath: resolved.resolvedPath,
+			resolved: resolved.resolved,
+			...(resolved.evalDirectory !== undefined
+				? { evalDirectory: resolved.evalDirectory }
+				: {}),
+		});
+		const entries: ResolvedWriteTarget[] = [];
+		const tracked = resolvedMap.get(key);
+		if (tracked) {
+			entries.push(buildEntry(tracked));
+			const pessimistic = pessimisticMap.get(key);
+			if (
+				pessimistic &&
+				(pessimistic.resolvedPath !== tracked.resolvedPath ||
+					pessimistic.evalDirectory !== tracked.evalDirectory)
+			) {
+				entries.push(buildEntry(pessimistic));
+			}
+			return entries;
 		}
 		// Fallback: couldn't find this write in the detected set — the eval
 		// working directory degrades to the starting cwd.
-		return {
-			original,
-			resolvedPath: resolvePath(original.path, cwd),
-			resolved: original.path !== null && !isDynamicPath(original.path),
-			...(original.capability === true &&
-			original.category === 'interpreter_eval'
-				? { evalDirectory: cwd }
-				: {}),
-		};
+		return [
+			{
+				original,
+				resolvedPath: resolvePath(original.path, cwd),
+				resolved: original.path !== null && !isDynamicPath(original.path),
+				...(original.capability === true &&
+				original.category === 'interpreter_eval'
+					? { evalDirectory: cwd }
+					: {}),
+			},
+		];
 	});
 }

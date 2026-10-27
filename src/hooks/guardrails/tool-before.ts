@@ -1329,14 +1329,53 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		);
 		const detectionCommand = didUnwrap ? unwrappedSegments.join('\n') : command;
 
-		const analysis = didUnwrap ? detect(detectionCommand) : primaryAnalysis;
+		let analysis = didUnwrap ? detect(detectionCommand) : primaryAnalysis;
+		// #3485 (PRR-006 + EXT-2 M2): the unwrapped detection command can
+		// LOSE writes the original analysis saw — dcSplitSegments erases pipe
+		// context (a pipeline-internal wrapper's `[eval stdin]` entry) and an
+		// unwrap can consume a redirect as a launcher option argument
+		// (`stdbuf -o > ../out.txt true`). Union back every ORIGINAL write
+		// EXCEPT the wrapper's own eval-artifact entries — every OTHER
+		// path-null interpreter_eval marker names the wrapper spelling itself
+		// (`bash [eval]`, `PowerShell -EncodedCommand`, the powershell
+		// `unsafe command text` payload marker; re-adding them false-blocks
+		// safe `bash -c "echo hello"` / decoded `-enc` forms) — while keeping
+		// `[eval stdin]` entries (PRR-006) and every path-bearing write (M2).
+		// Duplicate keys collapse downstream.
+		if (didUnwrap) {
+			const regained = primaryAnalysis.writes.filter(
+				(w) =>
+					!(
+						w.category === 'interpreter_eval' &&
+						w.path === null &&
+						!w.operator.endsWith('[eval stdin]')
+					),
+			);
+			if (regained.length > 0) {
+				analysis = {
+					...analysis,
+					writes: [...analysis.writes, ...regained],
+					hasWrites: analysis.hasWrites || regained.length > 0,
+				};
+			}
+			// EXT-2 (PE-a): an unwrap that mangles the inner form (a payload
+			// gluing its own `2>&1 | tail` after it) must not hard-reject a
+			// command the shell parses fine — fall back to the ORIGINAL
+			// command's analysis, which is what actually runs.
+			if (analysis.parseError && !primaryAnalysis.parseError) {
+				analysis = primaryAnalysis;
+			}
+		}
 
-		// A wrapped command whose unwrapped inner form fails to parse is also
-		// rejected for safety.
+		// A command whose surviving analysis still fails to parse is rejected
+		// for safety; suppression is judged against the command text that
+		// analysis actually describes (the original after an EXT-2 fallback).
 		if (
 			enforce &&
 			analysis.parseError &&
-			!suppressParseError(detectionCommand)
+			!suppressParseError(
+				analysis === primaryAnalysis ? command : detectionCommand,
+			)
 		) {
 			throw new Error(
 				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,

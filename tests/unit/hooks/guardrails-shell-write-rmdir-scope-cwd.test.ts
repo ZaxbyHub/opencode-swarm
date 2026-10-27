@@ -26,6 +26,15 @@ import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 const SCOPE_VIOLATION = /^WRITE BLOCKED: SCOPE_VIOLATION: shell write target /;
+// #3474 (cd tracking): when the tracker now correctly follows a `cd` out of
+// the workspace (or into control state), the same rejection surfaces as
+// AUTHORITY_ROOT_ESCAPE / AUTHORITY_PROTECTED_PATH instead of
+// SCOPE_VIOLATION (which came from resolving the target at the workspace
+// root the mis-tracking left behind). Both are blocks.
+// #3485 (PRR-020): the intentional verdict classes for these legs only — a
+// session-state or wrong-layer failure must NOT satisfy a scope/cwd leg.
+const ANY_WRITE_BLOCK =
+	/^WRITE BLOCKED: (?:SCOPE_VIOLATION|Agent "coder" is not authorised)/;
 const ROOT_ESCAPE =
 	/^WRITE BLOCKED: Agent "coder" is not authorised to write .*AUTHORITY_ROOT_ESCAPE/;
 const WORKSPACE_DIRS = [
@@ -236,7 +245,7 @@ describe('real gate: a missed cwd change never admits an outside rmdir', () => {
 	it.each(
 		REPORTED_OUTSIDE_SHAPES,
 	)('rejects a coder running %s', async (template) => {
-		expect(await gate('coder', template)).toMatch(SCOPE_VIOLATION);
+		expect(await gate('coder', template)).toMatch(ANY_WRITE_BLOCK);
 	});
 });
 
@@ -248,13 +257,13 @@ describe('real gate: a missed cwd change never reaches control state', () => {
 	it.each(
 		REPORTED_CONTROL_SHAPES,
 	)('rejects a coder running %s', async (command) => {
-		expect(await gate('coder', command)).toMatch(SCOPE_VIOLATION);
+		expect(await gate('coder', command)).toMatch(ANY_WRITE_BLOCK);
 	});
 
 	it.each(
 		REPORTED_CONTROL_SHAPES,
 	)('rejects an architect running %s', async (command) => {
-		expect(await gate('architect', command)).toMatch(SCOPE_VIOLATION);
+		expect(await gate('architect', command)).toMatch(ANY_WRITE_BLOCK);
 	});
 });
 
@@ -395,7 +404,7 @@ describe('real gate: only a plain command line keeps the exemption', () => {
 		['coder', `x='a[$'"{ cd ../<O>; }]"; echo $((x)); rmdir a`],
 		['architect', "[ -v 'a[${ cd .swarm; }]' ]; rmdir lk"],
 	])('rejects a %s running %s', async (role, template) => {
-		expect(await gate(role, template)).toMatch(SCOPE_VIOLATION);
+		expect(await gate(role, template)).toMatch(ANY_WRITE_BLOCK);
 	});
 
 	// Each line holds exactly one kind of excluded character (`$`, a single
@@ -407,7 +416,7 @@ describe('real gate: only a plain command line keeps the exemption', () => {
 		['[ -d src ] && rmdir .scratch-a/tmp1'],
 		['rmdir .scratch-a/tmp1; echo x['],
 	])('scope-checks the non-plain line %s', async (command) => {
-		expect(await gate('coder', command)).toMatch(SCOPE_VIOLATION);
+		expect(await gate('coder', command)).toMatch(ANY_WRITE_BLOCK);
 	});
 
 	it('admits a prefix assignment: FOO=1 rmdir .scratch-a/tmp1', async () => {
