@@ -10,18 +10,29 @@ interface SecretPattern {
 
 const SECRET_PATTERNS: SecretPattern[] = [
 	{ type: 'openai_api_key', pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g },
+	// #3382: the two AWS-secret arms run BEFORE the bare access-key arm.
+	// redactSecrets applies patterns sequentially over the mutated string, so
+	// a bare `AKIA…` replacement here would destroy the anchor the context arm
+	// needs and leave the 40-char secret un-redacted (overlap masking —
+	// pre-existing for exact-40 context secrets, closed with this reorder).
+	// #3382: the credential arms whose prefixes are COLLISION-SAFE (long
+	// separator-bearing prefixes: `ghp_`/`glpat-`/`xoxb-`, and the fixed-length
+	// AKIA/AIza/40-char families) are deliberately NOT \b-anchored: a
+	// credential embedded inside a longer charset-clean token loses both word
+	// boundaries and passed through unredacted at the old anchored forms.
+	// Anchors are KEPT where the short alnum-only prefix collides with
+	// ordinary text: openai `sk-` ("task-", "disk-"), stripe `sk_`/`rk_`
+	// ("risk_live_…"), and `jwt` (`eyJ` sits inside base64 blobs).
 	{
 		type: 'github_token',
-		pattern: /\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b/g,
+		pattern: /(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}/g,
 	},
 	// #3382: the two AWS-secret arms run BEFORE the bare access-key arm.
 	// redactSecrets applies patterns sequentially over the mutated string, so
 	// a bare `AKIA…` replacement here would destroy the anchor the context arm
 	// needs and leave the 40-char secret un-redacted (overlap masking —
 	// pre-existing for exact-40 context secrets, closed with this reorder).
-	// #3382: the fixed-length credential arms are deliberately NOT \b-anchored:
-	// a credential embedded inside a longer charset-clean token loses both word
-	// boundaries and passed through unredacted at the old anchored forms.
+	// #3382: fixed-length arm, deliberately not \b-anchored (see the AWS note above).
 	{
 		type: 'aws_secret_access_key',
 		pattern:
@@ -48,10 +59,13 @@ const SECRET_PATTERNS: SecretPattern[] = [
 	},
 	// FR-08 / DD-05: GitLab tokens. False-positive risk: short `glpat-` strings under 15 chars
 	// are not real tokens; plain "glpat-" without suffix is ignored.
-	{ type: 'gitlab_token', pattern: /\bgl(?:pat|ptt)-[A-Za-z0-9_-]{15,}\b/g },
+	// #3382: separator-bearing prefix, deliberately not \b-anchored (see the
+	// github_token note).
+	{ type: 'gitlab_token', pattern: /gl(?:pat|ptt)-[A-Za-z0-9_-]{15,}/g },
 	// FR-08 / DD-05: Slack tokens. False-positive risk: `xox-` with fewer than 10 chars after the
 	// prefix is not a real Slack token; strings like "xoxb-test" are intentionally excluded.
-	{ type: 'slack_token', pattern: /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g },
+	// #3382: separator-bearing prefix, deliberately not \b-anchored.
+	{ type: 'slack_token', pattern: /xox[abprs]-[A-Za-z0-9-]{10,}/g },
 	// FR-08 / DD-05: JWT tokens. False-positive risk: a single JWT segment (e.g. `eyJonly`) or
 	// strings with only one dot will not match; a full 3-segment base64url token is required.
 	{
@@ -60,6 +74,9 @@ const SECRET_PATTERNS: SecretPattern[] = [
 	},
 	// FR-08 / DD-05: Stripe secret keys. False-positive risk: keys using prefixes other than
 	// `sk_`/`rk_` or environments other than `live`/`test` are ignored; short strings are excluded.
+	// KEPT \b-anchored: the bare `sk_`/`rk_` prefix collides with English prose
+	// ("risk_live_…" contains "sk_live_"), so de-anchoring would over-redact
+	// ordinary text. Not one of the #3382-named families.
 	{
 		type: 'stripe_secret_key',
 		pattern: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b/g,

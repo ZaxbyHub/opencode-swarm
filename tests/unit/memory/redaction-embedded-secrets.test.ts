@@ -51,6 +51,19 @@ const EMBEDDED_SHAPES: Array<[string, string, string]> = [
 		'X'.repeat(10) + AWS_KEY_ID + 'X'.repeat(10) + '  ' + SECRET_40,
 		SECRET_40,
 	],
+	[
+		'github PAT embedded in word chars (#3382 AC1 names the PAT family)',
+		'X'.repeat(20) +
+			'ghp_' +
+			'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8' +
+			'Y'.repeat(10),
+		'ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8',
+	],
+	[
+		'gitlab token embedded in word chars',
+		'q'.repeat(12) + 'glpat-' + 'AbCdEfGhIjKlMnOpQrStUvWx' + 'z'.repeat(8),
+		'glpat-AbCdEfGhIjKlMnOpQrStUvWx',
+	],
 ];
 
 const BENIGN_CONTROLS: Array<[string, string]> = [
