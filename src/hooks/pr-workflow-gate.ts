@@ -20787,6 +20787,17 @@ export async function validatePrWorkflowTransportRecovery(
 						? `legacy verdict row ${itemId} used trailing-field pipe recovery with full field fidelity`
 						: `legacy verdict row ${itemId} used trailing-field pipe recovery with lossy prose normalization`,
 			})),
+			// #3357 AC2: surface quarantined strays on the SAME durable receipt
+			// surface as the recovery entries — without this, a lane that
+			// settled only because grammar-noise rows were quarantined
+			// produces a receipt byte-identical to a clean settle. Ids are
+			// already sentinel-bounded at the quarantine producer
+			// (boundVerdictRowIdentifier); arity is the raw arrival arity.
+			...(analysis.quarantined ?? []).map((stray) => ({
+				workflowLane,
+				kind: 'legacy-verdict-row-quarantine' as const,
+				reason: `legacy verdict row for unassigned id ${stray.itemId} quarantined at raw arity ${stray.arity} (grammar noise; carries no authenticable verdict)`,
+			})),
 			...(input.result.truncated === true
 				? [
 						{

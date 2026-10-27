@@ -928,6 +928,14 @@ export interface ParsedPrReviewVerdictRow {
 	fields: string[];
 	overflowClass: PrReviewVerdictOverflowClass;
 	recoveredOverflow: boolean;
+	/**
+	 * #3357: the raw field count observed immediately BEFORE over-arity
+	 * tail-merge normalization (equals `fields.length` when the row did not
+	 * merge). The quarantine discriminator keys on arrival arity, so callers
+	 * need the pre-merge count as evidence — the post-merge arity is always
+	 * the legal count by construction.
+	 */
+	rawFieldCount: number;
 }
 
 function quoted(value: string): string {
@@ -1207,12 +1215,14 @@ export function parsePrReviewVerdictRow(
 		fields.push('UNKNOWN', '');
 	}
 	if (fields.length > descriptor.fieldCount) {
+		const rawFieldCount = fields.length;
 		const retained = fields.slice(0, descriptor.fieldCount - 1);
 		retained.push(fields.slice(descriptor.fieldCount - 1).join('|'));
 		return {
 			marker: descriptor.marker,
 			fields: retained,
 			recoveredOverflow: true,
+			rawFieldCount,
 			overflowClass:
 				fields.length === descriptor.fieldCount + 1 &&
 				fields[fields.length - 1] === ''
@@ -1224,6 +1234,7 @@ export function parsePrReviewVerdictRow(
 		marker: descriptor.marker,
 		fields,
 		recoveredOverflow: false,
+		rawFieldCount: fields.length,
 		overflowClass:
 			fields.length === descriptor.fieldCount
 				? usedCanonicalEscape

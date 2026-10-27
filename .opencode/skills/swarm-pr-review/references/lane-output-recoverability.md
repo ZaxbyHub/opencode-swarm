@@ -48,8 +48,14 @@ their exact owned workflow lanes are marked salvaged. Council, reviewer, and
 critic outputs remain fail-closed and require retry when incomplete. `[CLEAN]`
 is absence evidence and therefore requires a complete transcript. One positive
 row in a consolidated lane never salvages a sibling dimension whose only
-evidence is `[CLEAN]` or missing. Recovery reasons are lane-scoped and use six
-kinds: `legacy-verdict-row-recovery`, `parser-normalization`, `parser-row-recovery`,
+evidence is `[CLEAN]` or missing. Recovery reasons are lane-scoped and use seven
+kinds: `legacy-verdict-row-recovery`, `legacy-verdict-row-quarantine` (a verdict
+row that ARRIVED over its marker's legal arity and was tail-merged down to it —
+with an unassigned id it is grammar noise such as a Stage-B task row or an
+echoed format line, quarantined on its raw arrival arity instead of voiding
+every valid sibling row, and surfaced on the transport-recovery receipt so a
+quarantine-influenced settle is distinguishable from a clean one),
+`parser-normalization`, `parser-row-recovery`,
 `truncated-preview-durable-artifact`,
 `transcript-incomplete-terminal-candidate`, and
 `clean-attestation-salvaged` (a `[CLEAN]` attestation conflicting with a

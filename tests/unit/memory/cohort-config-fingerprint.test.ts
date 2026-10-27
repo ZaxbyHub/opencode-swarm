@@ -78,8 +78,13 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 	 * (REDACTION_POLICY_SALT 1→2 with the PII policy fields + a new secret
 	 * family), so per the bump rule legacy v1 files fail open via the version
 	 * gate with a re-link advisory. The golden below pins the v2 algorithm.
+	 *
+	 * #3382: version 3 — REDACTION_POLICY_SALT 2→3 with embedded-shape
+	 * detection and the AWS-secret arm reorder. The algorithm (canonicalize +
+	 * hash + truncate) is unchanged, so the same golden input still hashes to
+	 * the same digest; only the CLAIMED version moves.
 	 */
-	test('golden digest pins the fingerprint algorithm (version 2)', () => {
+	test('golden digest pins the fingerprint algorithm (version 3)', () => {
 		const golden: MemoryCohortFingerprintInput = {
 			provider: 'sqlite',
 			redaction_policy_version: 2000029,
@@ -88,7 +93,7 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 			embedding_version: 'v1',
 		};
 		expect(computeMemoryCohortFingerprint(golden)).toBe('125223b54843');
-		expect(FINGERPRINT_ALGORITHM_VERSION).toBe(2);
+		expect(FINGERPRINT_ALGORITHM_VERSION).toBe(3);
 	});
 
 	test('golden digest is independent of key insertion order', () => {
@@ -124,17 +129,18 @@ describe('#2062 F-012 classifyStoredFingerprintAlgorithmVersion', () => {
 	test('absent version is legacy v1, NOT the current version', () => {
 		// The core bug. With an explicit current an absent field must resolve
 		// to 1 and therefore MISMATCH — not silently equal current and
-		// byte-compare. (#1466 made the real current version 2, so the no-arg
-		// call now also mismatches: legacy files fail open with the advisory.)
-		expect(classifyStoredFingerprintAlgorithmVersion(undefined, 2)).toEqual({
+		// byte-compare. (#1466 made the real current version >1, so the no-arg
+		// call now also mismatches: legacy files fail open with the advisory;
+		// #3382 moved the real current to 3.)
+		expect(classifyStoredFingerprintAlgorithmVersion(undefined, 3)).toEqual({
 			status: 'mismatch',
 			storedVersion: 1,
-			currentVersion: 2,
+			currentVersion: 3,
 		});
 		expect(classifyStoredFingerprintAlgorithmVersion(undefined)).toEqual({
 			status: 'mismatch',
 			storedVersion: 1,
-			currentVersion: 2,
+			currentVersion: 3,
 		});
 	});
 
@@ -211,11 +217,14 @@ describe('#1850 SQLite provider fingerprint enforcement (acceptance #10 fail-clo
 		// #1466: carries the CURRENT algorithm version with a DELIBERATELY
 		// wrong fingerprint (without algorithm_version it is legacy v1 and
 		// takes the fail-open path — see the legacy tests below).
+		// #3382: the current version is now 3; a stored 2 is a KNOWN OLD
+		// version and would take the mismatch/fail-open re-link path, so the
+		// fixture must carry 3 to keep exercising the fail-closed compare.
 		writeFileSync(
 			path.join(cohortRoot, 'memory-cohort-config.json'),
 			JSON.stringify({
 				fingerprint: 'deadbeefdead',
-				algorithm_version: 2,
+				algorithm_version: 3,
 			}),
 			'utf-8',
 		);
