@@ -104,8 +104,8 @@ const BENIGN_CONTROLS: Array<[string, string]> = [
 	['snake_case with highs_and_lows', 'weekly_highs_and_lows_for_the_quarter'],
 	['snake_case with a ghp_ subword', 'reset_ghp_session_token_refresh_handler'],
 	// PRR-011: these two pin the KEPT anchors — the de-anchoring mutant
-	// (strip  from the stripe/jwt arms) makes both MATCH, so each control
-	// fails if the anchor is dropped.
+	// (dropping the word-boundary anchor from the stripe/jwt arms) makes
+	// both MATCH, so each control fails if the anchor is dropped.
 	[
 		'stripe anchor kept: risk_live_ prose shape',
 		'risk_live_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8',
