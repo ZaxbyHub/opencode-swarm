@@ -13,7 +13,9 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
  * them — a `src/` path containing a quote or newline silently classified as
  * not-required (fail-open). These tests extract the REAL conversion pipeline
  * and invocation from the workflow and execute both: the reducer must carry
- * every byte faithfully, and the classifier verdict must flip to required on
+ * every byte faithfully for UTF-8-representable paths (non-UTF-8 bytes are
+ * substituted by jq's raw reader and cannot affect the ASCII classification
+ * predicates), and the classifier verdict must flip to required on
  * a faithful user-visible path (so a dropped or mangled entry cannot fake
  * required=false).
  */
@@ -104,23 +106,6 @@ function runBash(
 		stdout: proc.stdout.toString(),
 		stderr: proc.stderr.toString(),
 	};
-}
-
-/** Runs the extracted pipeline over synthetic porcelain -z bytes. */
-function convert(nulRecords: string[]): string {
-	const input = Buffer.from(`${nulRecords.join('\0')}\0`, 'utf8');
-	const dir = canonicalMkdtemp('cleanup-3299-');
-	createdTempDirs.push(dir);
-	const out = path.join(dir, 'out.jsonl');
-	const result = runBash(
-		`${conversionPipeline(cleanupStepRunBlock()).replace(
-			/> "\$cleanup_paths"/,
-			`> '${out.replace(/'/g, "'\\''")}'`,
-		)}`,
-		{ stdin: input },
-	);
-	expect(result.exitCode).toBe(0);
-	return readFileSync(out, 'utf8');
 }
 
 describe('cleanup arm transport (#3299)', () => {
@@ -227,6 +212,66 @@ describe('cleanup arm transport (#3299)', () => {
 		expect(readFileSync(out, 'utf8').replace(/\r/g, '').trim()).toBe(
 			'"docs/releases/pending/gone.md"',
 		);
+	});
+
+	test('the real git status -z producer feeds the pipeline (rename pair included)', () => {
+		// PRR-003/PRR-014: the byte-fidelity tests above feed synthetic bytes,
+		// so a producer-side regression (dropping `-z`, reintroducing
+		// C-quoting) must be caught by a leg that runs REAL git output —
+		// including a rename record, whose second NUL field exercises the
+		// reducer's rename_next state machine against git's actual layout.
+		const dir = canonicalMkdtemp('cleanup-3299-real-');
+		createdTempDirs.push(dir);
+		const git = (...args: string[]) => {
+			const proc = Bun.spawnSync({
+				cmd: ['git', ...args],
+				cwd: dir,
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: 30_000,
+			});
+			if (proc.exitCode !== 0) {
+				throw new Error(`git ${args.join(' ')}: ${proc.stderr.toString()}`);
+			}
+		};
+		git('init', '-b', 'main');
+		git('config', 'user.email', 't@t');
+		git('config', 'user.name', 't');
+		mkdirSync(path.join(dir, 'src'), { recursive: true });
+		writeFileSync(path.join(dir, 'src', 'kept.ts'), 'export {};\n');
+		mkdirSync(path.join(dir, 'docs', 'releases', 'pending'), {
+			recursive: true,
+		});
+		writeFileSync(
+			path.join(dir, 'docs', 'releases', 'pending', 'gone.md'),
+			'# gone\n',
+		);
+		git('add', '.');
+		git('commit', '-m', 'base');
+		// A rename (git emits `R  <new>` + unprefixed `<old>` under -z) plus a
+		// staged deletion, both from real git — no hand-authored bytes.
+		git('mv', 'src/kept.ts', 'src/renamed.ts');
+		rmSync(path.join(dir, 'docs', 'releases', 'pending', 'gone.md'));
+		git('add', '-A');
+		const outDir = canonicalMkdtemp('cleanup-3299-out-');
+		createdTempDirs.push(outDir);
+		const out = path.join(outDir, 'real.jsonl');
+		const pipeline = conversionPipeline(cleanupStepRunBlock()).replace(
+			/> "\$cleanup_paths"/,
+			`> '${out.replace(/'/g, "'''")}'`,
+		);
+		const result = runBash(pipeline, { cwd: dir });
+		expect(result.exitCode).toBe(0);
+		// porcelain sorts by path: the deletion first, then the rename record (new path)
+		// followed by its unprefixed source path.
+		expect(
+			readFileSync(out, 'utf8').replace(/\r/g, '').trim().split('\n'),
+		).toEqual([
+			'"docs/releases/pending/gone.md"',
+			'"src/renamed.ts"',
+			'"src/kept.ts"',
+		]);
 	});
 
 	test('the classifier accepts the converted list and flips on a faithful src path', () => {

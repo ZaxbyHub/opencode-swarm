@@ -71,7 +71,10 @@ jobs:
           # any gh api call.
           case "${PR_NUMBER}" in
             ''|*[!0-9]*)
-              echo "::error::pr_number input must be all decimal digits (got '${PR_NUMBER}')."
+              # Never reflect the raw input into the workflow command: a
+              # multi-line dispatch value could forge extra annotation lines.
+              # A length + character-class summary is enough to diagnose.
+              echo "::error::pr_number input must be all decimal digits (received ${#PR_NUMBER} character(s) with non-decimal content)."
               exit 1
               ;;
           esac
@@ -260,7 +263,10 @@ jobs:
           # a non-decimal pr_number before any gh api call.
           case "${PR_NUMBER}" in
             ''|*[!0-9]*)
-              echo "::error::pr_number input must be all decimal digits (got '${PR_NUMBER}')."
+              # Never reflect the raw input into the workflow command: a
+              # multi-line dispatch value could forge extra annotation lines.
+              # A length + character-class summary is enough to diagnose.
+              echo "::error::pr_number input must be all decimal digits (received ${#PR_NUMBER} character(s) with non-decimal content)."
               exit 1
               ;;
           esac

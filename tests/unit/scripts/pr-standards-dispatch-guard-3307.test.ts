@@ -45,12 +45,14 @@ function stepRun(jobName: string, stepName: string): string {
 function runDispatchBlock(
 	block: string,
 	prNumber: string,
-): { exitCode: number; ghCalls: string } {
+	rawChangedFiles?: string,
+): { exitCode: number; stdout: string; ghCalls: string } {
 	const dir = canonicalMkdtemp('dispatch-guard-3307-');
 	createdTempDirs.push(dir);
 	const ghLog = path.join(dir, 'gh-calls.log');
 	const prJson =
 		'{"title":"fix: seeded title","state":"open","base":{"ref":"main"},' +
+		`"changed_files":${rawChangedFiles ?? 2},` +
 		'"head":{"sha":"deadbeefcafe"},"body":"## Summary\\n\\n## Invariant audit\\n\\n## Test plan\\n"}';
 	const script = [
 		'set -uo pipefail',
@@ -81,6 +83,7 @@ function runDispatchBlock(
 	});
 	return {
 		exitCode: proc.exitCode ?? 1,
+		stdout: proc.stdout.toString(),
 		ghCalls: readFileSync(ghLog, 'utf8'),
 	};
 }
@@ -117,4 +120,21 @@ describe('dispatched pr_number guard (#3307, both surfaces)', () => {
 			expect(result.ghCalls).toContain('repos/example/example/pulls/4321');
 		});
 	}
+
+	// PRR-011: the non-integer changed_files guard pin in
+	// fragment-gate-workflow-contract.test.ts covers only the null shape;
+	// these siblings (fractional, signed) are exercised here so the guard's
+	// full rejection surface is pinned without growing the 499-line contract
+	// file past the FR-006 cap.
+	test('dispatched arm: fractional and signed changed_files fail closed', () => {
+		const prStandardsBlock = stepRun(
+			'pr-standards',
+			'Validate dispatched PR contract',
+		);
+		for (const raw of ['3.5', '-1']) {
+			const result = runDispatchBlock(prStandardsBlock, '4321', raw);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.stdout).toContain('non-integer changed_files');
+		}
+	});
 });

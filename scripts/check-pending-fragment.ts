@@ -172,15 +172,116 @@ export type RepoRootClassification =
 	| { kind: 'infra'; reason: string };
 
 /**
- * Structural repository classification (issue #3283). A `.git` marker (file
- * or directory) anywhere in the bounded ancestor walk means repository
- * context: git must then resolve the toplevel, and a marker it cannot use —
- * an empty `.git` directory, a malformed/dangling `.git` file, a corrupt
- * repository — is an INFRASTRUCTURE failure, never a silent pass. Marker
- * ABSENCE, proven by the walk itself, is the only non-repository outcome;
- * git's (locale-dependent) stderr is never consulted.
+ * Git's own discovery controls. When any of these is set, git may resolve a
+ * repository that has no `.git` marker in the startDir ancestry (GIT_DIR is
+ * the extreme case), so the structural marker walk below must not decide
+ * "non-repository" on its own — discovery is delegated to git instead.
  */
+const GIT_DISCOVERY_OVERRIDE_ENV = [
+	'GIT_DIR',
+	'GIT_WORK_TREE',
+	'GIT_CEILING_DIRECTORIES',
+	'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+] as const;
+
+function hasGitDiscoveryOverride(env: NodeJS.ProcessEnv): boolean {
+	return GIT_DISCOVERY_OVERRIDE_ENV.some(
+		(key) => typeof env[key] === 'string' && (env[key] as string).length > 0,
+	);
+}
+
+/**
+ * Structural repository classification (issue #3283). A `.git` marker (file
+ * or directory) anywhere in the ancestor walk — which terminates at the
+ * filesystem root — means repository context: git must then resolve the
+ * toplevel, and a marker it cannot use (an empty `.git` directory, a
+ * malformed/dangling `.git` file, a corrupt repository) is an INFRASTRUCTURE
+ * failure, never a silent pass. Marker ABSENCE, proven by the walk itself,
+ * is the only non-repository outcome; git's (locale-dependent) stderr is
+ * never consulted. When a git discovery override (GIT_DIR et al.) is set,
+ * the walk is skipped entirely and git's own discovery decides — otherwise a
+ * repository pointed at from outside the ancestry would misread as
+ * marker-free and take the non-repository pass (review feedback, PR #3472).
+ */
+/**
+ * Structural bare-repository signature: HEAD + objects/ + refs/ directly in
+ * the directory (no `.git` subdirectory). Used only to keep the marker walk
+ * from misreading a bare clone as marker-free; git's own resolution decides
+ * the outcome afterwards.
+ */
+function looksLikeBareRepository(dir: string): boolean {
+	try {
+		return (
+			fs.existsSync(path.join(dir, 'HEAD')) &&
+			fs.existsSync(path.join(dir, 'objects')) &&
+			fs.existsSync(path.join(dir, 'refs'))
+		);
+	} catch {
+		return false;
+	}
+}
+
 export function classifyRepoRoot(startDir: string): RepoRootClassification {
+	// Resolve the toplevel through git. `onNoToplevel` is the only behavioral
+	// difference between the two callers: with a marker present, a git that
+	// cannot use that marker is infrastructure (the #3283 fix); with a
+	// discovery override set, git's own cwd-based behavior governs the
+	// subsequent queries, so a repo it can describe only via GIT_DIR (no
+	// toplevel, e.g. GIT_DIR without GIT_WORK_TREE) still evaluates — the
+	// pre-#3283 behavior for that shape (PR #3472 review feedback).
+	const resolveViaGit = (
+		cwd: string,
+		onNoToplevel: () => RepoRootClassification,
+	): RepoRootClassification => {
+		let proc: ReturnType<typeof Bun.spawnSync>;
+		try {
+			proc = _internals.spawnSync({
+				cmd: ['git', 'rev-parse', '--show-toplevel'],
+				cwd,
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: GIT_TIMEOUT_MS,
+			});
+		} catch {
+			return {
+				kind: 'infra',
+				reason: `git failed to start while resolving the repository root at ${cwd}`,
+			};
+		}
+		if (proc.exitCode === null) {
+			return {
+				kind: 'infra',
+				reason: `git rev-parse --show-toplevel timed out at ${cwd}`,
+			};
+		}
+		if (proc.exitCode !== 0) {
+			return onNoToplevel();
+		}
+		const root = proc.stdout.toString().trim();
+		if (root.length === 0) {
+			return {
+				kind: 'infra',
+				reason: `git rev-parse --show-toplevel returned no root at ${cwd}`,
+			};
+		}
+		return { kind: 'root', root: path.resolve(root) };
+	};
+
+	if (hasGitDiscoveryOverride(process.env)) {
+		// Git's discovery governs: with an override set, a repository it can
+		// describe only through the override (no toplevel from this cwd)
+		// still evaluates from startDir, as the gate did before the marker
+		// walk. A cwd git cannot describe at all is infrastructure (the
+		// marker-absence proof is unsound once discovery is overridden), so
+		// this path is stricter than base for that shape — fail-closed by
+		// design, disclosed in the release fragment.
+		return resolveViaGit(path.resolve(startDir), () => ({
+			kind: 'root',
+			root: path.resolve(startDir),
+		}));
+	}
+
 	let dir = path.resolve(startDir);
 	for (;;) {
 		let marker: fs.Stats | undefined;
@@ -195,43 +296,24 @@ export function classifyRepoRoot(startDir: string): RepoRootClassification {
 				};
 			}
 		}
+		// A BARE repository directory carries no `.git` marker yet git
+		// discovers it from the cwd alone (review feedback, PR #3472):
+		// without this the walk would take the non-repository pass on a
+		// violating bare clone — the same fail-open class as the discovery
+		// override. The bare signature is structural (git's own layout).
+		if (!marker && looksLikeBareRepository(dir)) {
+			return resolveViaGit(dir, () => ({
+				kind: 'infra',
+				reason: `git could not resolve a work tree for the bare repository at ${dir}`,
+			}));
+		}
 		if (marker) {
-			let proc: ReturnType<typeof Bun.spawnSync>;
-			try {
-				proc = _internals.spawnSync({
-					cmd: ['git', 'rev-parse', '--show-toplevel'],
-					cwd: dir,
-					stdin: 'ignore',
-					stdout: 'pipe',
-					stderr: 'pipe',
-					timeout: GIT_TIMEOUT_MS,
-				});
-			} catch {
-				return {
-					kind: 'infra',
-					reason: `git failed to start while resolving the repository root at ${dir}`,
-				};
-			}
-			if (proc.exitCode === null) {
-				return {
-					kind: 'infra',
-					reason: `git rev-parse --show-toplevel timed out at ${dir}`,
-				};
-			}
-			if (proc.exitCode !== 0) {
-				return {
-					kind: 'infra',
-					reason: `git could not resolve the repository root at ${dir} (exit ${proc.exitCode}) — the .git marker is present but unusable`,
-				};
-			}
-			const root = proc.stdout.toString().trim();
-			if (root.length === 0) {
-				return {
-					kind: 'infra',
-					reason: `git rev-parse --show-toplevel returned no root at ${dir}`,
-				};
-			}
-			return { kind: 'root', root: path.resolve(root) };
+			// A marker git cannot use (empty `.git` dir, malformed gitfile,
+			// corrupt repository) is infrastructure, never a silent pass.
+			return resolveViaGit(dir, () => ({
+				kind: 'infra',
+				reason: `git could not resolve the repository root at ${dir} (the .git marker is present but unusable)`,
+			}));
 		}
 		const parent = path.dirname(dir);
 		if (parent === dir) {
@@ -241,12 +323,27 @@ export function classifyRepoRoot(startDir: string): RepoRootClassification {
 	}
 }
 
+/**
+ * Human-readable cause for an infra-flagged git result (issue #3472 review
+ * feedback): a spawn exception and a timeout kill are different failures and
+ * the operator message must not claim one for the other.
+ */
+function describeInfra(result: {
+	exitCode: number;
+	infra: boolean;
+	timedOut: boolean;
+}): string {
+	return result.timedOut
+		? ' — the spawned git timed out'
+		: ' — the spawned git could not be run (spawn failed)';
+}
+
 const BASE_BRANCH_CANDIDATES = ['origin/main', 'main'];
 
 function runGit(
 	args: string[],
 	cwd: string,
-): { exitCode: number; stdout: string; infra: boolean } {
+): { exitCode: number; stdout: string; infra: boolean; timedOut: boolean } {
 	try {
 		const proc = _internals.spawnSync({
 			cmd: ['git', ...args],
@@ -262,9 +359,13 @@ function runGit(
 			// exitCode null = killed by the spawn timeout: an infrastructure
 			// failure, distinct from git answering "no" (issue #3283).
 			infra: proc.exitCode === null,
+			timedOut: proc.exitCode === null,
 		};
 	} catch {
-		return { exitCode: 1, stdout: '', infra: true };
+		// A spawn exception (binary missing, resource exhaustion) is a
+		// different infrastructure failure from a timeout — keep them
+		// distinguishable for the operator message (PR #3472 feedback).
+		return { exitCode: 1, stdout: '', infra: true, timedOut: false };
 	}
 }
 
@@ -312,7 +413,7 @@ export function main(startDir: string = process.cwd()): number {
 		const verify = runGit(['rev-parse', '--verify', '--quiet', branch], cwd);
 		if (verify.infra || (verify.exitCode !== 0 && verify.exitCode !== 1)) {
 			return failClosedOnGitInfra(
-				`could not determine whether base branch ${branch} exists (git rev-parse --verify exit ${verify.exitCode}${verify.infra ? ' — the spawned git timed out' : ''}) — failing the gate: the base state cannot be determined`,
+				`could not determine whether base branch ${branch} exists (git rev-parse --verify exit ${verify.exitCode}${verify.infra ? describeInfra(verify) : ''}) — failing the gate: the base state cannot be determined`,
 			);
 		}
 		if (verify.exitCode === 0) {
@@ -359,7 +460,7 @@ export function main(startDir: string = process.cwd()): number {
 	);
 	if (changed.infra || changed.exitCode !== 0) {
 		return failClosedOnGitInfra(
-			`git diff failed (exit ${changed.exitCode}${changed.infra ? ' — the spawned git timed out' : ''}) — failing the gate rather than passing on a git infrastructure failure`,
+			`git diff failed (exit ${changed.exitCode}${changed.infra ? describeInfra(changed) : ''}) — failing the gate rather than passing on a git infrastructure failure`,
 		);
 	}
 	changedFiles = splitNulList(changed.stdout);
@@ -373,7 +474,7 @@ export function main(startDir: string = process.cwd()): number {
 		// is unknowable — continuing with an empty list would manufacture an
 		// author-facing VIOLATION out of an infrastructure failure.
 		return failClosedOnGitInfra(
-			`git diff --diff-filter=A failed (exit ${added.exitCode}${added.infra ? ' — the spawned git timed out' : ''}) — failing the gate: the added-files list the fragment mandate depends on cannot be determined`,
+			`git diff --diff-filter=A failed (exit ${added.exitCode}${added.infra ? describeInfra(added) : ''}) — failing the gate: the added-files list the fragment mandate depends on cannot be determined`,
 		);
 	}
 	addedFiles = splitNulList(added.stdout);

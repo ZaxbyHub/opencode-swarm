@@ -72,9 +72,16 @@ describe('release fragment cleanup workflow', () => {
 			'git diff --name-only "$parent_sha" "$remote_sha"',
 		);
 		// #3299: the lossy newline-scalar producer (`cut -c4-`) was replaced
-		// by the NUL-end-to-end pipeline; pin the new producer here.
-		expect(releaseWorkflow).toContain('git status --porcelain=v1 -z');
-		expect(releaseWorkflow).toContain('--paths-format jsonl');
+		// by the NUL-end-to-end pipeline. PRR-005: pin the tokens against the
+		// PIPELINE LINES (comments stripped) — a whole-file presence check is
+		// satisfied by the explanatory comment alone and certifies nothing.
+		const pipelineLines = releaseWorkflow
+			.split('\n')
+			.filter((line) => !line.trim().startsWith('#'))
+			.join('\n');
+		expect(pipelineLines).toContain('git status --porcelain=v1 -z');
+		expect(pipelineLines).toContain('--paths-format jsonl');
+		expect(pipelineLines).toContain('--changed-file "$cleanup_paths"');
 		expect(releaseWorkflow).not.toContain("grep -v '^docs/releases/' || true");
 	});
 

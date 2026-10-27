@@ -23,6 +23,7 @@ const workflow = parse(
 		string,
 		{
 			'timeout-minutes'?: number;
+			permissions?: unknown;
 			steps: Array<{
 				name?: string;
 				uses?: string;
@@ -64,10 +65,10 @@ describe('pr-standards execution-boundary hardening (issue #3282)', () => {
  * checks are never cancelled mid-batch.
  */
 describe('pr-standards workflow posture pins (#3300, #3307)', () => {
-	test('3300 the check-title job declares a timeout-minutes bound', () => {
-		const bound = workflow.jobs['check-title']?.['timeout-minutes'];
-		expect(typeof bound).toBe('number');
-		expect(bound as number).toBeGreaterThanOrEqual(1);
+	test('3300 the check-title job declares the documented 10-minute bound', () => {
+		// PRR-007: the PR body, release fragment, and issue AC6 all claim
+		// exactly 10 — a >= 1 pin let a 360 (or 5) bound ship green.
+		expect(workflow.jobs['check-title']?.['timeout-minutes']).toBe(10);
 	});
 
 	test('3307 the top-level permissions block is least-privilege, verbatim', () => {
@@ -75,6 +76,16 @@ describe('pr-standards workflow posture pins (#3300, #3307)', () => {
 			contents: 'read',
 			'pull-requests': 'read',
 		});
+	});
+
+	test('3307 no job overrides the workflow permissions with a wider block', () => {
+		// PRR-008: GitHub honors a job-level permissions block as an override
+		// of the workflow-level one, so a top-level pin alone certifies
+		// nothing about the effective scope of any step.
+		for (const [jobName, job] of Object.entries(workflow.jobs)) {
+			expect(job.permissions).toBeUndefined();
+			expect(jobName.length).toBeGreaterThan(0);
+		}
 	});
 
 	test('3307 the concurrency group is per-PR for pull_request runs only', () => {

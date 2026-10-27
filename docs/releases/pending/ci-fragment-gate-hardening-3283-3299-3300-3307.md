@@ -14,8 +14,10 @@ review lineage:
   an author-facing fragment VIOLATION. The documented non-repository /
   no-base local pass is preserved through positive marker-absence and
   positive ref-absence checks (locale-independent: git stderr is never
-  consulted). `FRAGMENT_CHECK_ENFORCE=0` still soft-warns, now explicitly
-  including infrastructure failures, for local runs.
+  consulted). With a git discovery override set (GIT_DIR et al.) the gate fails closed on a cwd git cannot describe, where the previous gate passed — fail-closed by design. Known limit: a MALFORMED (as opposed to absent) loose base ref
+  also yields the ref-absence exit code and takes that documented pass —
+  pre-existing behavior identical to the previous gate. `FRAGMENT_CHECK_ENFORCE=0`
+  still soft-warns, now explicitly including infrastructure failures, for local runs.
 - **#3299** — the `cleanup-release-fragments` arm in
   `release-and-publish.yml` now derives its changed-path list NUL-end-to-end
   (`git status --porcelain=v1 -z` through a jq reducer into the classifier's
@@ -43,7 +45,7 @@ owns the repo's release-notes mandate.
 
 ## Verification
 
-`tests/unit/scripts/check-pending-fragment-git.test.ts` (13 tests: real-git
+`tests/unit/scripts/check-pending-fragment-git.test.ts` (10 tests: real-git
 failure legs plus `_internals.spawnSync` seam legs for deterministic timeout
 and per-call failure shapes), `fragment-gate-cleanup-transport-3299.test.ts`
 (byte-faithful reducer over synthetic porcelain `-z` records including quote-,

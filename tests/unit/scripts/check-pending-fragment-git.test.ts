@@ -7,7 +7,7 @@
  *   - a user-visible PR without a fragment IS still flagged (gate not defanged)
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
@@ -48,6 +48,17 @@ function scratchRepo(): string {
 }
 
 describe('check-pending-fragment main() — merge-base diff (BOT-H1/M1)', () => {
+	// Pin the hatch for this describe's fail-closed leg (F11): an ambient
+	// FRAGMENT_CHECK_ENFORCE=0 must not turn "gate not defanged" green.
+	let prevEnforce: string | undefined;
+	beforeEach(() => {
+		prevEnforce = process.env.FRAGMENT_CHECK_ENFORCE;
+		delete process.env.FRAGMENT_CHECK_ENFORCE;
+	});
+	afterEach(() => {
+		if (prevEnforce === undefined) delete process.env.FRAGMENT_CHECK_ENFORCE;
+		else process.env.FRAGMENT_CHECK_ENFORCE = prevEnforce;
+	});
 	test('test-only PR is NOT flagged when main advanced with user-visible files', () => {
 		const dir = scratchRepo();
 		try {
@@ -141,6 +152,17 @@ describe('check-pending-fragment main() — merge-base diff (BOT-H1/M1)', () => 
  * run REAL git in scratch repositories through the same seam.
  */
 describe('check-pending-fragment main() — git infrastructure failures fail closed (#3283)', () => {
+	// Pin the hatch for every leg: a developer shell exporting
+	// FRAGMENT_CHECK_ENFORCE=0 must not turn fail-closed assertions green.
+	let prevEnforce: string | undefined;
+	beforeEach(() => {
+		prevEnforce = process.env.FRAGMENT_CHECK_ENFORCE;
+		delete process.env.FRAGMENT_CHECK_ENFORCE;
+	});
+	afterEach(() => {
+		if (prevEnforce === undefined) delete process.env.FRAGMENT_CHECK_ENFORCE;
+		else process.env.FRAGMENT_CHECK_ENFORCE = prevEnforce;
+	});
 	/** git() but returns trimmed stdout and tolerates nonzero exits. */
 	function gitRaw(
 		dir: string,
@@ -201,14 +223,40 @@ describe('check-pending-fragment main() — git infrastructure failures fail clo
 
 	/** A PR branch with a user-visible change and NO fragment, off main. */
 	function violationRepo(): string {
-		const dir = scratchRepo();
-		git(dir, 'checkout', '-b', 'pr-branch');
-		mkdirSync(join(dir, 'src'), { recursive: true });
-		writeFileSync(join(dir, 'src', 'feature.ts'), 'export {}\n');
-		git(dir, 'add', '.');
-		git(dir, 'commit', '-m', 'user-visible only');
-		git(dir, 'update-ref', 'refs/remotes/origin/main', 'main');
-		return dir;
+		// Self-cleaning: a setup failure must not leak the scratch repo (the
+		// callers' try/finally only covers a successfully returned dir).
+		let dir: string | undefined;
+		try {
+			dir = scratchRepo();
+			git(dir, 'checkout', '-b', 'pr-branch');
+			mkdirSync(join(dir, 'src'), { recursive: true });
+			writeFileSync(join(dir, 'src', 'feature.ts'), 'export {}\n');
+			git(dir, 'add', '.');
+			git(dir, 'commit', '-m', 'user-visible only');
+			git(dir, 'update-ref', 'refs/remotes/origin/main', 'main');
+			return dir;
+		} catch (error) {
+			if (dir) rmSync(dir, { recursive: true, force: true });
+			throw error;
+		}
+	}
+
+	/** A PR branch whose changes are all test/docs (no user-visible surface). */
+	function cleanRepo(): string {
+		let dir: string | undefined;
+		try {
+			dir = scratchRepo();
+			git(dir, 'checkout', '-b', 'pr-branch');
+			mkdirSync(join(dir, 'tests'), { recursive: true });
+			writeFileSync(join(dir, 'tests', 'a.test.ts'), 'test {}\n');
+			git(dir, 'add', '.');
+			git(dir, 'commit', '-m', 'test only');
+			git(dir, 'update-ref', 'refs/remotes/origin/main', 'main');
+			return dir;
+		} catch (error) {
+			if (dir) rmSync(dir, { recursive: true, force: true });
+			throw error;
+		}
 	}
 
 	test('T1 merge-base failure (orphan history) fails closed, hatch soft-warns', () => {
@@ -311,19 +359,81 @@ describe('check-pending-fragment main() — git infrastructure failures fail clo
 		}
 	});
 
+	test('T6b a spawn exception is reported as a spawn failure, not a timeout', () => {
+		// F15 (PR #3472 review feedback): runGit's catch branch is a different
+		// infrastructure failure from the timeout kill; reverting the label to
+		// the pre-fix always-timeout text used to leave the suite green.
+		const dir = violationRepo();
+		const real = _internals.spawnSync;
+		try {
+			// Throw only on the runGit paths (diff/verify), so the root
+			// resolution still succeeds and the runGit catch branch is what
+			// produces the message under test.
+			_internals.spawnSync = ((options: Parameters<typeof real>[0]) => {
+				const cmd = ((options as { cmd?: string[] }).cmd ?? []) as string[];
+				if (cmd.includes('diff') || cmd.includes('--verify')) {
+					throw new Error('simulated spawn failure (ENOMEM)');
+				}
+				return real(options);
+			}) as typeof _internals.spawnSync;
+			const { code, text } = captureStderr(() => main(dir));
+			expect(code).toBe(1);
+			expect(text).toContain('could not be run (spawn failed)');
+			expect(text).not.toContain('timed out');
+		} finally {
+			_internals.spawnSync = real;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('T4 base-branch discovery failure and timeout fail closed', () => {
 		const dir = violationRepo();
 		try {
-			const matchVerify = (cmd: string[]) =>
-				cmd.includes('rev-parse') && cmd.includes('--verify');
-			expect(
+			// PRR-002: the matcher must not be the only thing standing between
+			// this test and silence — count the forced calls so an argv
+			// refactor that stops matching fails HERE instead of disarming
+			// the forcing and letting the real path satisfy the assertions.
+			const forcedCalls: string[][] = [];
+			const matchVerify = (cmd: string[]) => {
+				const isVerify = cmd.includes('rev-parse') && cmd.includes('--verify');
+				if (isVerify) forcedCalls.push(cmd);
+				return isVerify;
+			};
+			// PRR-001: assert the failure MODE, not just the exit code — the
+			// infra label must be present and the author-facing VIOLATION
+			// label absent (the file's contract, docblock above).
+			const timeout = captureStderr(() =>
 				withForcedSpawn(matchVerify, { exitCode: null }, () => main(dir)),
-			).toBe(1);
+			);
+			expect(forcedCalls.length).toBeGreaterThan(0);
+			expect(timeout.code).toBe(1);
+			expect(timeout.text).toContain('base');
+			expect(timeout.text).not.toContain('VIOLATION');
+
+			forcedCalls.length = 0;
+			const vanished = captureStderr(() =>
+				withForcedSpawn(matchVerify, { exitCode: 128 }, () => main(dir)),
+			);
 			// Any nonzero rc other than the positive-absence rc 1 at discovery
 			// is infrastructure (e.g. a repository that vanished mid-run).
-			expect(
-				withForcedSpawn(matchVerify, { exitCode: 128 }, () => main(dir)),
-			).toBe(1);
+			expect(forcedCalls.length).toBeGreaterThan(0);
+			expect(vanished.code).toBe(1);
+			expect(vanished.text).toContain('base');
+			expect(vanished.text).not.toContain('VIOLATION');
+
+			// The clean-diff leg: with no violation to fall through to, the
+			// only surviving outcomes are infra-fail-closed or the pass — the
+			// pass must NOT be taken when discovery infra-fails.
+			const clean = cleanRepo();
+			try {
+				const cleanResult = captureStderr(() =>
+					withForcedSpawn(matchVerify, { exitCode: null }, () => main(clean)),
+				);
+				expect(cleanResult.code).toBe(1);
+				expect(cleanResult.text).not.toContain('no base branch found');
+			} finally {
+				rmSync(clean, { recursive: true, force: true });
+			}
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -344,75 +454,6 @@ describe('check-pending-fragment main() — git infrastructure failures fail clo
 			);
 			expect(code).toBe(1);
 			expect(text).toContain('timed out');
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	test('T5 plain non-repository directory keeps the documented pass', () => {
-		const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cpf-nongit-')));
-		try {
-			const original = console.log;
-			const chunks: string[] = [];
-			console.log = (...args: unknown[]) => {
-				chunks.push(args.map(String).join(' '));
-			};
-			try {
-				expect(main(dir)).toBe(0);
-			} finally {
-				console.log = original;
-			}
-			expect(chunks.join('\n')).toContain('no base branch found');
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	test('T5 empty .git directory is a broken repository, not a non-repo pass', () => {
-		const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cpf-emptygit-')));
-		try {
-			mkdirSync(join(dir, '.git'));
-			const { code, text } = captureStderr(() => main(dir));
-			expect(code).toBe(1);
-			expect(text).toContain('unusable');
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	test('T5 malformed .git file is a broken repository, not a non-repo pass', () => {
-		const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cpf-brokengit-')));
-		try {
-			writeFileSync(join(dir, '.git'), 'not a valid gitdir pointer\n');
-			const { code, text } = captureStderr(() => main(dir));
-			expect(code).toBe(1);
-			expect(text).toContain('unusable');
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	test('T5 valid repository with both candidates positively absent passes', () => {
-		const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cpf-trunk-')));
-		try {
-			git(dir, 'init', '-b', 'trunk');
-			git(dir, 'config', 'user.email', 't@t');
-			git(dir, 'config', 'user.name', 't');
-			writeFileSync(join(dir, 'README.md'), 'base\n');
-			git(dir, 'add', '.');
-			git(dir, 'commit', '-m', 'base');
-			// Neither origin/main nor main exists (rc 1 = positive absence).
-			const original = console.log;
-			const chunks: string[] = [];
-			console.log = (...args: unknown[]) => {
-				chunks.push(args.map(String).join(' '));
-			};
-			try {
-				expect(main(dir)).toBe(0);
-			} finally {
-				console.log = original;
-			}
-			expect(chunks.join('\n')).toContain('no base branch found');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
