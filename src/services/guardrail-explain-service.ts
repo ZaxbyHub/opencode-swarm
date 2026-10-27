@@ -17,7 +17,11 @@ import {
 	isInDeclaredScope,
 	redactShellCommand,
 } from '../hooks/guardrails/helpers.js';
-import { resolveWindowsWriteAuthority } from '../hooks/guardrails/tool-before.js';
+import {
+	isEmptyDirectoryRemovalWithinWorkspace,
+	isPosixRmdirExecutor,
+	resolveWindowsWriteAuthority,
+} from '../hooks/guardrails/tool-before.js';
 import { declaresWindowsWrapperLoose } from '../hooks/shell-executor-context';
 import { getObservedHostShell } from '../hooks/shell-executor-context.js';
 import {
@@ -752,11 +756,22 @@ export async function handleGuardrailExplain(
 				if (write.resolvedPath) {
 					// Architect is exempt from scope checks
 					if (agent !== 'architect') {
-						const inScope = isInDeclaredScope(
-							write.resolvedPath,
-							scopeEntries,
-							directory,
-						);
+						// Mirrors the live gate for the `shell` tool: a bare POSIX
+						// rmdir inside the workspace needs no declared-scope
+						// membership (ENOTEMPTY-safe); Windows executors and
+						// control state (.git/.swarm) never qualify. Explain has no
+						// tool or platform flag, so it always evaluates as the
+						// `shell` tool: on a Windows host that is not a POSIX
+						// executor, so explain conservatively reports `block` for a
+						// bare rmdir the live `bash` tool admits (fail-closed).
+						const inScope =
+							isInDeclaredScope(write.resolvedPath, scopeEntries, directory) ||
+							(write.original.emptyDirectoryRemoval === true &&
+								isPosixRmdirExecutor('shell', authority, detectionCommand) &&
+								isEmptyDirectoryRemovalWithinWorkspace(
+									write.resolvedPath,
+									directory,
+								));
 						if (!inScope) {
 							decision = 'block';
 							firingRule = `scope_violation: write outside declared scope: ${redactPath(write.resolvedPath)}`;

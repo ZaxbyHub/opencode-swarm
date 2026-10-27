@@ -6,6 +6,7 @@ import {
 	stripKnownSwarmPrefix,
 } from '../config/schema.js';
 import { observeReceiptTransition } from '../health/learning-health';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import { extractPhaseIdFromLabel } from './extractors.js';
 import {
 	appendFsynced,
@@ -290,6 +291,29 @@ export type ReceiptUnavailable = {
 
 export type ReceiptLedgerResult<T> = ({ ok: true } & T) | ReceiptUnavailable;
 
+/**
+ * #2965: permanent identity-conflict codes for the empty-trace immutability
+ * rule. The conflict itself stays legitimate — only its category changes: a
+ * deterministic policy rejection must never ride the retry-inviting
+ * `store_unavailable` store channel (AGENTS.md invariant 9).
+ */
+export type ReceiptEmptyTraceConflictCode =
+	| 'wrong_task'
+	| 'wrong_phase'
+	| 'duplicate_conflicting_terminal';
+
+/** #2965: typed rejection for a conflicting `'none'`-sentinel re-file. */
+export type ReceiptEmptyTraceConflict = {
+	ok: false;
+	code: ReceiptEmptyTraceConflictCode;
+	detail: string;
+};
+
+export type CommitEmptyRetrievalResult =
+	| { ok: true; event_id: string; terminal_event_id: string }
+	| ReceiptEmptyTraceConflict
+	| ReceiptUnavailable;
+
 const GENESIS_HASH = 'GENESIS';
 const MAX_JOURNAL_RECORDS = 2_000;
 const MAX_AUDIT_TAIL_RECORDS = 256;
@@ -305,6 +329,36 @@ const keyOf = (traceId: string, entryId: string): string =>
 	`${traceId.length}:${traceId}${entryId}`;
 const emptyKeyOf = (traceId: string, sessionId: string): string =>
 	`${traceId.length}:${traceId}${sessionId}`;
+// #2965: bounded, sanitized rendering for empty-trace conflict details.
+// Every dynamic component passes through the canonical single-line sanitizer
+// (the same helper the wrong_session detail uses) plus code-point-safe
+// truncation, so control/bidi characters are neutralized, a truncation
+// boundary can never split a surrogate pair, and a truncated value is
+// visibly partial ('…'). Every rendered component is length-bounded, so the
+// detail stays bounded for arbitrary inputs, and the axis sentence is always
+// emitted in full (no tail slice exists to elide it).
+const MAX_CONFLICT_ID_CHARS = 40;
+const MAX_CONFLICT_FIELD_CHARS = 64;
+const truncateCodePoints = (value: string, max: number): string => {
+	const codePoints = Array.from(value);
+	return codePoints.length > max
+		? `${codePoints.slice(0, max).join('')}…`
+		: value;
+};
+// Quote doubling via split/join — never a quote-bearing regex literal, which
+// desyncs the naive string/comment lexers used by the repo's source scanners.
+const doubleSingleQuotes = (value: string): string =>
+	value.split("'").join("''");
+const renderConflictValue = (value: string | undefined): string =>
+	value === undefined
+		? 'omitted'
+		: `'${doubleSingleQuotes(
+				sanitizeDiagnosticText(
+					truncateCodePoints(value, MAX_CONFLICT_FIELD_CHARS),
+				),
+			)}'`;
+const renderConflictId = (value: string): string =>
+	sanitizeDiagnosticText(truncateCodePoints(value, MAX_CONFLICT_ID_CHARS));
 const phaseLifecycleKey = (
 	phase: string,
 	sessionId: string,
@@ -2912,76 +2966,101 @@ export async function commitDisplayedMembership(
 export async function commitEmptyRetrieval(
 	directory: string,
 	input: Omit<CommitDisplayedMembershipInput, 'entries'>,
-): Promise<
-	ReceiptLedgerResult<{ event_id: string; terminal_event_id: string }>
-> {
-	return runLocked(
-		directory,
-		input.grace_days,
-		async (paths, state, graceDays) => {
-			const existing = state.emptyTraces.get(
-				emptyKeyOf(input.trace_id, input.session_id),
-			);
-			if (existing) {
-				if (
-					existing.phase !== input.phase ||
-					existing.task_id !== input.task_id ||
-					existing.grace_days !== graceDays
-				) {
-					throw new ReceiptStoreError(
-						'store_unavailable',
-						`conflicting immutable empty retrieval for ${input.trace_id}/${input.session_id}`,
-					);
-				}
-				if (!existing.terminal_event_id) {
-					const terminal = makeRecord(state, 'terminal_committed', {
-						empty_trace_id: input.trace_id,
-						empty_trace_session_id: input.session_id,
-					});
-					await appendRecord(paths, state, terminal);
-				}
+): Promise<CommitEmptyRetrievalResult> {
+	const outcome = await runLocked<
+		| { event_id: string; terminal_event_id: string }
+		| { conflict: { code: ReceiptEmptyTraceConflictCode; detail: string } }
+	>(directory, input.grace_days, async (paths, state, graceDays) => {
+		const existing = state.emptyTraces.get(
+			emptyKeyOf(input.trace_id, input.session_id),
+		);
+		if (existing) {
+			if (
+				existing.phase !== input.phase ||
+				existing.task_id !== input.task_id ||
+				existing.grace_days !== graceDays
+			) {
+				// #2965: the immutability conflict is a permanent semantic
+				// mismatch, not a store failure. Return the typed rejection
+				// instead of throwing so runLocked's catch-all never reports a
+				// deterministic policy rejection as retry-inviting
+				// store_unavailable. Task axis first, then phase; a grace_days
+				// drift alone is indistinguishable from any residual mismatch.
+				const axis =
+					existing.task_id !== input.task_id
+						? {
+								code: 'wrong_task' as const,
+								detail: `recorded task ${renderConflictValue(existing.task_id)} differs from filed ${renderConflictValue(input.task_id)}`,
+							}
+						: existing.phase !== input.phase
+							? {
+									code: 'wrong_phase' as const,
+									detail: `recorded phase ${renderConflictValue(existing.phase)} differs from filed ${renderConflictValue(input.phase)}`,
+								}
+							: {
+									code: 'duplicate_conflicting_terminal' as const,
+									detail: `recorded grace_days ${existing.grace_days} differs from resolved ${graceDays}`,
+								};
 				return {
-					event_id: existing.empty_event_id,
-					terminal_event_id: existing.terminal_event_id as string,
+					conflict: {
+						code: axis.code,
+						// Every component is length-bounded and no tail slice
+						// exists, so the axis naming can never be elided.
+						detail: `conflicting immutable empty retrieval for ${renderConflictId(input.trace_id)}/${renderConflictId(input.session_id)}: ${axis.detail}`,
+					},
 				};
 			}
-			const eventId = randomUUID();
-			const terminalEventId = randomUUID();
-			const trace: EmptyTrace = {
-				trace_id: input.trace_id,
-				session_id: input.session_id,
-				phase: input.phase,
-				task_id: input.task_id,
-				committed_at: nowIso(),
-				empty_event_id: eventId,
-				grace_days: graceDays,
+			if (!existing.terminal_event_id) {
+				const terminal = makeRecord(state, 'terminal_committed', {
+					empty_trace_id: input.trace_id,
+					empty_trace_session_id: input.session_id,
+				});
+				await appendRecord(paths, state, terminal);
+			}
+			return {
+				event_id: existing.empty_event_id,
+				terminal_event_id: existing.terminal_event_id as string,
 			};
-			await appendRecord(
-				paths,
+		}
+		const eventId = randomUUID();
+		const terminalEventId = randomUUID();
+		const trace: EmptyTrace = {
+			trace_id: input.trace_id,
+			session_id: input.session_id,
+			phase: input.phase,
+			task_id: input.task_id,
+			committed_at: nowIso(),
+			empty_event_id: eventId,
+			grace_days: graceDays,
+		};
+		await appendRecord(
+			paths,
+			state,
+			makeRecord(state, 'empty_retrieval_committed', { trace }, eventId),
+		);
+		await appendRecord(
+			paths,
+			state,
+			makeRecord(
 				state,
-				makeRecord(state, 'empty_retrieval_committed', { trace }, eventId),
-			);
-			await appendRecord(
-				paths,
-				state,
-				makeRecord(
-					state,
-					'terminal_committed',
-					{
-						empty_trace_id: input.trace_id,
-						empty_trace_session_id: input.session_id,
-					},
-					terminalEventId,
-				),
-			);
-			await clearRepairUncertaintyIfFresh(paths, state, input, {
-				event_id: eventId,
-				trace_id: input.trace_id,
-				kind: 'empty_retrieval_committed',
-			});
-			return { event_id: eventId, terminal_event_id: terminalEventId };
-		},
-	);
+				'terminal_committed',
+				{
+					empty_trace_id: input.trace_id,
+					empty_trace_session_id: input.session_id,
+				},
+				terminalEventId,
+			),
+		);
+		await clearRepairUncertaintyIfFresh(paths, state, input, {
+			event_id: eventId,
+			trace_id: input.trace_id,
+			kind: 'empty_retrieval_committed',
+		});
+		return { event_id: eventId, terminal_event_id: terminalEventId };
+	});
+	if (!outcome.ok) return outcome;
+	if ('conflict' in outcome) return { ok: false, ...outcome.conflict };
+	return outcome;
 }
 
 export interface TerminalBatchInput {

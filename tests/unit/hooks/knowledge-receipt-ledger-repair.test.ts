@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	type CommitEmptyRetrievalResult,
 	commitDisplayedMembership,
 	commitEmptyRetrieval,
 	_internals as ledgerInternals,
@@ -31,6 +32,14 @@ function project(prefix: string): string {
 }
 
 function unwrap<T>(result: ReceiptLedgerResult<T>): T {
+	if (!result.ok) throw new Error(`${result.code}: ${result.detail}`);
+	return result;
+}
+
+function unwrapEmpty(result: CommitEmptyRetrievalResult): {
+	event_id: string;
+	terminal_event_id: string;
+} {
 	if (!result.ok) throw new Error(`${result.code}: ${result.detail}`);
 	return result;
 }
@@ -321,7 +330,7 @@ describe('repairKnowledgeReceiptLedger', () => {
 			}),
 		);
 
-		unwrap(
+		unwrapEmpty(
 			await commitEmptyRetrieval(directory, {
 				trace_id: 'trace-empty-unrelated',
 				session_id: 'session-a',
@@ -338,7 +347,7 @@ describe('repairKnowledgeReceiptLedger', () => {
 			).ok,
 		).toBe(false);
 
-		unwrap(
+		unwrapEmpty(
 			await commitEmptyRetrieval(directory, {
 				trace_id: 'trace-empty-complete',
 				session_id: 'session-a',
@@ -429,7 +438,7 @@ describe('repairKnowledgeReceiptLedger', () => {
 					reason: `read repair identity for record number ${index}`,
 				}),
 			);
-			unwrap(
+			unwrapEmpty(
 				await commitEmptyRetrieval(directory, {
 					trace_id: `trace-clear-${index}`,
 					session_id: 'session-a',

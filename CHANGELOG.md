@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.200.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.4...v7.200.5) (2026-10-27)
+
+
+### Bug Fixes
+
+* **guard:** admit bare rmdir of a workspace directory outside declared scope ([ea32581](https://github.com/ZaxbyHub/opencode-swarm/commit/ea325813f27b3e5833a48145cf944f2ca0888d15))
+* **guard:** restrict the bare-rmdir exemption to plain, cwd-neutral command lines ([798ea36](https://github.com/ZaxbyHub/opencode-swarm/commit/798ea3637d34120b7e0157897238d29561dbb13a))
+* **knowledge-receipt:** close review findings on conflict classification (PRR-001..016) ([5932d1e](https://github.com/ZaxbyHub/opencode-swarm/commit/5932d1ed6979d24439e3955ba95959c29ed28579))
+* **knowledge-receipt:** report sentinel conflicts with precise permanent codes, not store_unavailable ([047eea6](https://github.com/ZaxbyHub/opencode-swarm/commit/047eea63a2802c14f2fd983a5fb9907948fb0244))
+
+## [7.200.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.3...v7.200.4) (2026-10-26)
+
+
+### Bug Fixes
+
+* **worktree:** feedback-round hardening for the [#3448](https://github.com/ZaxbyHub/opencode-swarm/issues/3448) suite and docs ([dbf3d5a](https://github.com/ZaxbyHub/opencode-swarm/commit/dbf3d5a3fa9d4a7e6ea30959cafd177ddbe8a50d))
+* **worktree:** stop saveDurableStatus from resurrecting a vanished lane root ([#3448](https://github.com/ZaxbyHub/opencode-swarm/issues/3448)) ([28b90c5](https://github.com/ZaxbyHub/opencode-swarm/commit/28b90c5c24bc3c9643a5c03521c9c6a107c97ea5))
+
 ## [7.200.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.2...v7.200.3) (2026-10-26)
 
 

@@ -72,6 +72,18 @@ export interface WriteTarget {
 	 * blanket block.
 	 */
 	capability?: true;
+	/**
+	 * Set only for a bare POSIX `rmdir <dir>`: no options, exactly one literal
+	 * operand (no expansion, glob, brace or quote characters). rmdir(2) refuses
+	 * a non-empty directory (ENOTEMPTY), so this form cannot destroy file data.
+	 * The shell write-scope gate uses it to skip declared-scope membership for
+	 * a target that resolves inside the workspace; every other check still
+	 * applies. `rmdir -p` (removes parents) and all other forms never carry it,
+	 * and neither does any write of a line that runs a command outside
+	 * CWD_NEUTRAL_COMMANDS or holds a character outside PLAIN_COMMAND_LINE
+	 * (see detectPosixWrites).
+	 */
+	emptyDirectoryRemoval?: true;
 }
 
 /**
@@ -193,22 +205,36 @@ export function mergeWriteAnalyses(
 				stripQuotes(other.path) === stripped,
 		);
 	};
-	const seen = new Set<string>();
+	// A key collision that involves an emptyDirectoryRemoval write demotes the
+	// kept write (see dedupeWriteTargets): the two readings may be different
+	// targets or operations, so neither keeps the bare-rmdir exemption.
+	const keptIndex = new Map<string, number>();
 	const writes: WriteTarget[] = [];
+	const demoteKept = (key: string): void => {
+		const index = keptIndex.get(key);
+		if (index !== undefined) {
+			writes[index] = withoutEmptyDirectoryRemoval(writes[index]);
+		}
+	};
 	for (const write of [...authority.writes, ...supplementary.writes]) {
+		const key = buildDedupeKey(write.category, write.operator, write.path);
 		if (supplementary.writes.includes(write)) {
 			if (wrapperDeclared) {
 				const construct = `${write.category}|${write.operator}`;
 				if (authorityConstructs.has(construct)) continue;
 			} else {
-				const key = buildDedupeKey(write.category, write.operator, write.path);
-				if (authorityKeys.has(key)) continue;
+				if (authorityKeys.has(key)) {
+					demoteKept(key);
+					continue;
+				}
 				if (isQuoteArtifact(write)) continue;
 			}
 		}
-		const key = buildDedupeKey(write.category, write.operator, write.path);
-		if (seen.has(key)) continue;
-		seen.add(key);
+		if (keptIndex.has(key)) {
+			demoteKept(key);
+			continue;
+		}
+		keptIndex.set(key, writes.length);
 		writes.push(write);
 	}
 	return {
@@ -224,6 +250,43 @@ export function buildDedupeKey(
 	path: string | null | undefined,
 ): string {
 	return `${category}|${operator}|${path ?? 'null'}`;
+}
+
+/**
+ * A copy of `write` without the empty-directory-removal tag. Copies rather
+ * than mutating: the writes passed to merge/resolve belong to the caller.
+ */
+function withoutEmptyDirectoryRemoval(write: WriteTarget): WriteTarget {
+	if (write.emptyDirectoryRemoval !== true) return write;
+	const { emptyDirectoryRemoval: _dropped, ...rest } = write;
+	return rest;
+}
+
+/**
+ * Issue #3450 (PR #3456 review F-2): the dedupe key is blind to the working
+ * directory a write runs in and to options that change its meaning, so two
+ * writes with the same key can be different targets (`rmdir a; cd ../o &&
+ * rmdir a`) or different operations (`rmdir a; rmdir -p a`). When a key
+ * collision involves a write tagged `emptyDirectoryRemoval`, the kept write
+ * is DEMOTED (tag removed) so the ordinary declared-scope check applies to it
+ * — fail-closed, the pre-exemption behaviour. Once demoted the kept write is
+ * identical to any untagged write it collided with, so keeping one is enough.
+ * First occurrence wins and order is preserved, exactly as before.
+ */
+function dedupeWriteTargets(writes: readonly WriteTarget[]): WriteTarget[] {
+	const keptIndex = new Map<string, number>();
+	const kept: WriteTarget[] = [];
+	for (const write of writes) {
+		const key = buildDedupeKey(write.category, write.operator, write.path);
+		const index = keptIndex.get(key);
+		if (index === undefined) {
+			keptIndex.set(key, kept.length);
+			kept.push(write);
+			continue;
+		}
+		kept[index] = withoutEmptyDirectoryRemoval(kept[index]);
+	}
+	return kept;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +328,26 @@ const BUILTIN_WRITE_COMMANDS = new Set([
 	'unlink',
 	'rmdir',
 ]);
+
+/**
+ * A literal `rmdir` operand eligible for the empty-directory-removal tag: not
+ * an option, and free of glob, brace, expansion, quote, escape, comment and
+ * whitespace characters, so the text is exactly the single path the command
+ * receives.
+ */
+const BARE_RMDIR_OPERAND = /^[^-*?[\]{}$`~"'\\#\s][^*?[\]{}$`~"'\\#\s]*$/;
+
+/**
+ * Whether `word` may carry the empty-directory-removal tag. Beyond
+ * BARE_RMDIR_OPERAND, a `..` path segment disqualifies it: the gate resolves
+ * the operand lexically (`link/../x` collapses to `x`) before it realpaths
+ * the parent, while the kernel follows `link` first, so the two can name
+ * different directories (PR #3456 review F-3). Such an operand falls back to
+ * the ordinary declared-scope check.
+ */
+function isBareRmdirOperand(word: string): boolean {
+	return BARE_RMDIR_OPERAND.test(word) && !word.split('/').includes('..');
+}
 
 /** Builtins with in-place editing semantics (modify file argument in place). */
 const INPLACE_EDIT_COMMANDS = new Set(['sed', 'perl', 'awk']);
@@ -1721,6 +1804,24 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		lowerName === 'rmdir' &&
 		suffixWords.some((word) => /^\/(?:s|q)$/i.test(word))
 	) {
+		return results;
+	}
+
+	// A quoted, backslash-escaped or expanded operand (`"a"`, `a\b`, `$D`)
+	// never keeps this tag: detectPosixWrites withdraws it from any line that
+	// is not a PLAIN_COMMAND_LINE, so the parsed word is the path the shell
+	// passes to rmdir.
+	if (
+		lowerName === 'rmdir' &&
+		suffixWords.length === 1 &&
+		isBareRmdirOperand(suffixWords[0])
+	) {
+		results.push({
+			category: 'builtin_write',
+			operator: name,
+			path: suffixWords[0],
+			emptyDirectoryRemoval: true,
+		});
 		return results;
 	}
 
@@ -3665,10 +3766,14 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	}
 
 	const allWrites: WriteTarget[] = [];
+	// Stays false (no empty-directory-removal tag survives) unless the parsed
+	// command is proven cwd-neutral below.
+	let cwdNeutral = false;
 
 	if (!parseFailed && ast && typeof ast === 'object') {
 		const leafCommands: BashNode[] = [];
 		collectLeafCommands(ast as BashNode, leafCommands);
+		cwdNeutral = leafCommands.every(isCwdNeutralLeaf);
 
 		for (const cmd of leafCommands) {
 			// Redirections (>, >>, <<, etc.) on any command
@@ -3705,10 +3810,12 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	// the suffixes pair up across the two passes.
 	const seen = new Set<string>();
 	const occurrence = new Map<string, number>();
-	const writes: WriteTarget[] = [];
+	const collidingKeys = new Set<string>();
+	let writes: WriteTarget[] = [];
 	for (const wt of allWrites) {
 		const key = buildDedupeKey(wt.category, wt.operator, wt.path);
 		if (seen.has(key)) {
+			collidingKeys.add(key);
 			if (wt.capability !== true || wt.category !== 'interpreter_eval') {
 				continue;
 			}
@@ -3721,11 +3828,132 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		writes.push(wt);
 	}
 
+	// PR #3456 (F-2): a colliding key resolves against the FIRST context only,
+	// so an emptyDirectoryRemoval write with such a key is demoted (the tag
+	// would authorize the wrong occurrence's directory).
+	writes = writes.map((wt) =>
+		wt.emptyDirectoryRemoval === true &&
+		collidingKeys.has(buildDedupeKey(wt.category, wt.operator, wt.path))
+			? withoutEmptyDirectoryRemoval(wt)
+			: wt,
+	);
+
+	// PR #3456 closeout (issue #3450): an empty-directory-removal tag survives
+	// only on a PLAIN_COMMAND_LINE, which cannot hold a comment, a quote, an
+	// escape, an expansion or code that bash evaluates at run time
+	// (fail-closed: anything else gets the ordinary declared-scope check).
+	if (!PLAIN_COMMAND_LINE.test(command)) {
+		writes = writes.map(withoutEmptyDirectoryRemoval);
+	}
+
+	// PR #3456 closeout (issue #3450): the gate checks a tagged write at the
+	// path resolveWriteTargets computes, and that cwd tracking does not model
+	// every way a line can change directory (`true && cd ../o; rmdir a`,
+	// `pushd`, `builtin cd`, `trap`, `source`, `.`, ...). A tag therefore
+	// survives only when every command in the line is a CWD_NEUTRAL_COMMANDS
+	// name, so the directory a write resolves against is the directory bash
+	// runs it in (fail-closed: anything else gets the ordinary declared-scope
+	// check).
+	if (!cwdNeutral) {
+		writes = writes.map(withoutEmptyDirectoryRemoval);
+	}
+
 	return {
 		writes,
 		hasWrites: writes.length > 0,
 		parseError: parseFailed && writes.length === 0 ? true : undefined,
 	};
+}
+
+/**
+ * The only characters a command line may hold for an empty-directory-removal
+ * tag to survive (detectPosixWrites): ASCII letters, digits, space, tab,
+ * newline and `_ . / - = & | ; < >`. Nothing else: no `$`, backtick, quote,
+ * backslash, parenthesis, brace, bracket, `*`, `?`, `~`, `!`, `#`, `%`, `+`,
+ * `,`, `:`, `@`, carriage return or non-ASCII character. On such a line, by
+ * construction and whatever the parser makes of it:
+ * - no expansion or evaluation context can appear: no parameter, command,
+ *   arithmetic or bash 5.3 `${ cmd; }` substitution, no `test -v` array
+ *   subscript, no quoted code that bash evaluates at run time, and no
+ *   expansion inside a here-document body;
+ * - every word is literal, so a parsed word (a command name, an rmdir
+ *   operand) is exactly the text the shell uses: no quote or backslash can
+ *   make bash-parser and the shell read it differently;
+ * - no function can be defined (`f() ...` needs parentheses, and
+ *   bash-parser reads `function f ...` as a command named `function`), and
+ *   no subshell, brace group or `case` can appear;
+ * - no comment can start: bash starts one only at a word start, so
+ *   `rmdir d#/x` removes the one directory `d#/x` while the tokenizer here
+ *   reads operand `d` plus a comment (PR #3456 review F-3).
+ * Every other line simply gets the ordinary declared-scope check
+ * (fail-closed): the exemption is a convenience for plain lines such as
+ * `rmdir dir` or `rmdir a 2>/dev/null || true`.
+ */
+const PLAIN_COMMAND_LINE = /^[A-Za-z0-9 \t\n_./=&|;<>-]*$/;
+
+/**
+ * Commands that cannot change the shell's working directory, so a line built
+ * only from them runs every `rmdir` in the directory the line started in.
+ * This is the whole allowlist for keeping an empty-directory-removal tag
+ * (detectPosixWrites). Matching is exact and case-sensitive: `RMDIR` is not
+ * `rmdir` here. Everything else, including `cd`, `pushd`, `popd`, `builtin`,
+ * `command`, `eval`, `exec`, `source`, `.`, `trap`, `alias`, `function` and
+ * the name of any function, withdraws the tag, and the write gets the
+ * ordinary declared-scope check.
+ */
+const CWD_NEUTRAL_COMMANDS: ReadonlySet<string> = new Set([
+	'rmdir',
+	'mkdir',
+	'echo',
+	'true',
+	'false',
+	'test',
+]);
+
+/**
+ * The container node types collectLeafCommands pushes and then descends into
+ * on a PLAIN_COMMAND_LINE: `if`, `while`, `until` and `for` statements and
+ * their CompoundList clauses and bodies. They run nothing themselves; their
+ * commands are judged as their own leaves. Any other node type that is not a
+ * Command counts as not cwd-neutral (fail-closed default). No Subshell,
+ * Case or Function node can occur on a plain line (each needs a
+ * parenthesis), so the default and the parenthesis exclusion in
+ * PLAIN_COMMAND_LINE each cover those forms for the other. A brace group
+ * parses as a CompoundList and is kept off a plain line only by the `{` and
+ * `}` exclusions.
+ */
+const CWD_TRANSPARENT_NODE_TYPES: ReadonlySet<string> = new Set([
+	'CompoundList',
+	'If',
+	'While',
+	'Until',
+	'For',
+]);
+
+/**
+ * Whether one entry of the collectLeafCommands list is cwd-neutral: a
+ * CWD_TRANSPARENT_NODE_TYPES container, a command named by a
+ * CWD_NEUTRAL_COMMANDS word, or a command with no name whose prefix holds
+ * only assignments and redirections (`FOO=1`, `>x`). A nameless command
+ * whose prefix holds anything else, such as the bare here-document marker
+ * bash-parser leaves when it drops the delimiter word (`FOO=1 <<E; rmdir a`),
+ * is not.
+ */
+function isCwdNeutralLeaf(node: BashNode): boolean {
+	if (node.type !== 'Command') {
+		return CWD_TRANSPARENT_NODE_TYPES.has(node.type);
+	}
+	const name = getCommandName(node);
+	if (name !== null) return CWD_NEUTRAL_COMMANDS.has(name);
+	const prefix: unknown = (node as BashCommand).prefix ?? [];
+	return (
+		Array.isArray(prefix) &&
+		prefix.every((entry: unknown) => {
+			if (!entry || typeof entry !== 'object') return false;
+			const type = (entry as { type?: unknown }).type;
+			return type === 'AssignmentWord' || type === 'Redirect';
+		})
+	);
 }
 
 /**
@@ -4345,11 +4573,17 @@ export function resolveWriteTargets(
 	collectWritesWithNodes(ast as BashNode, writesWithNodes, cwdStack);
 
 	// Deduplicate writes the same way detectPosixWrites does — including the
-	// capability-eval occurrence rename, so the nth occurrence here carries
-	// the same suffixed operator as the nth occurrence there and the map
-	// below pairs each occurrence with ITS OWN tracked context (#3347).
+	// capability-eval occurrence rename (#3347: the nth occurrence here
+	// carries the same suffixed operator as the nth occurrence there, so the
+	// map below pairs each occurrence with ITS OWN tracked context) AND the
+	// emptyDirectoryRemoval collision demotion (PR #3456 review F-2: a key
+	// seen more than once — here or in the caller's `writes` — may name
+	// writes run under different working directories yet resolves against
+	// the FIRST context only, so any write with a colliding key is demoted
+	// by the return mapping below).
 	const seen = new Set<string>();
 	const occurrence = new Map<string, number>();
+	const collidingKeys = new Set<string>();
 	const deduplicated: WriteWithNode[] = [];
 	for (const wwn of writesWithNodes) {
 		const key = buildDedupeKey(
@@ -4358,6 +4592,7 @@ export function resolveWriteTargets(
 			wwn.write.path,
 		);
 		if (seen.has(key)) {
+			collidingKeys.add(key);
 			if (
 				wwn.write.capability !== true ||
 				wwn.write.category !== 'interpreter_eval'
@@ -4374,6 +4609,12 @@ export function resolveWriteTargets(
 		}
 		seen.add(key);
 		deduplicated.push(wwn);
+	}
+	const inputKeys = new Set<string>();
+	for (const write of writes) {
+		const key = buildDedupeKey(write.category, write.operator, write.path);
+		if (inputKeys.has(key)) collidingKeys.add(key);
+		inputKeys.add(key);
 	}
 
 	// Build a map from WriteTarget to its resolved path, using the context from each write
@@ -4397,12 +4638,11 @@ export function resolveWriteTargets(
 	}
 
 	// Map the input writes to their resolved paths
-	return writes.map((original) => {
-		const key = buildDedupeKey(
-			original.category,
-			original.operator,
-			original.path,
-		);
+	return writes.map((input) => {
+		const key = buildDedupeKey(input.category, input.operator, input.path);
+		const original = collidingKeys.has(key)
+			? withoutEmptyDirectoryRemoval(input)
+			: input;
 		const resolved = resolvedMap.get(key);
 		if (resolved) {
 			return {
