@@ -24,6 +24,8 @@ import { analyzePrReviewVerdictRowContract } from '../../../src/pr-review/legacy
 const AWS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
 const GOOGLE_KEY = 'AIza' + 'A'.repeat(35);
 const SECRET_40 = 'AbCdEfGhIjKlMnOpQrSt01234567890123456789';
+/** Assembled by concatenation so no full token-shaped literal sits in source. */
+const PAT_TOKEN = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8';
 
 const EMBEDDED_SHAPES: Array<[string, string, string]> = [
 	[
@@ -53,11 +55,8 @@ const EMBEDDED_SHAPES: Array<[string, string, string]> = [
 	],
 	[
 		'github PAT embedded in word chars (#3382 AC1 names the PAT family)',
-		'X'.repeat(20) +
-			'ghp_' +
-			'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8' +
-			'Y'.repeat(10),
-		'ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8',
+		'X'.repeat(20) + PAT_TOKEN + 'Y'.repeat(10),
+		PAT_TOKEN,
 	],
 	[
 		'gitlab token embedded in word chars',
