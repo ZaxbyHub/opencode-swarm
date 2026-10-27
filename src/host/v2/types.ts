@@ -107,6 +107,29 @@ export interface V2ToolEditor {
 	}): void;
 }
 
+/**
+ * v2 `ShellCreateBefore` payload (dist/promise/shell.d.ts @2.0.29). The
+ * `shell` field is the resolved shell PATH the host will execute the
+ * command with (upstream `ShellSelect` resolution) — the authoritative
+ * executor report the write gate keys cmd/powershell grammar inheritance
+ * on (#3346).
+ */
+export interface V2ShellCreateBefore {
+	readonly command: string;
+	readonly cwd: string;
+	readonly timeout: number;
+	readonly shell: string;
+	readonly env: Record<string, string | undefined>;
+}
+
+/** v2 `ShellDomain` (dist/promise/shell.d.ts @2.0.29) — hook payloads inline. */
+export interface V2ShellDomain {
+	readonly hook: <K extends 'create.before'>(
+		event: K,
+		handler: (payload: V2ShellCreateBefore) => Promise<void> | void,
+	) => Promise<unknown> | unknown;
+}
+
 /** v2 `ToolDomain` (dist/promise/tool.d.ts) — hook payloads inline. */
 export interface V2ToolDomain {
 	readonly transform: (
@@ -553,6 +576,15 @@ export interface V2PluginContext {
 	readonly permission?: V2PermissionDomain;
 	/** Present on 2.0.26 hosts; no Phase 1 code path consumes it (issue #3169). */
 	readonly worktree?: V2WorktreeDomain;
+	/**
+	 * v2 `ShellDomain` (dist/promise/shell.d.ts @2.0.29; the
+	 * `shell.create.before` hook was added upstream 2026-07-29 and is present
+	 * across the vendored 2.0.26 pin). OPTIONAL: hosts predating the domain —
+	 * and the structural-type discipline of this file — treat it as absent.
+	 * Consumed by `registerV2ShellHooks` (src/host/v2/hooks.ts) to observe
+	 * the shell the `shell` tool actually executes (#3346).
+	 */
+	readonly shell?: V2ShellDomain;
 	readonly [key: string]: unknown;
 }
 

@@ -29,7 +29,11 @@ import {
 	clearSandboxWrapOutcome,
 	recordSandboxWrapOutcome,
 } from '../../sandbox/skip-state';
-import { sanitizeDiagnosticText } from '../../scope/path-identity';
+import {
+	isPathIdentityWithin,
+	pathIdentitiesEqual,
+	sanitizeDiagnosticText,
+} from '../../scope/path-identity';
 import type { ScopeLeaseCandidateInput } from '../../scope/scope-lease-renewal';
 import {
 	resolveAuthorizedScopeBindingDetailed,
@@ -40,6 +44,7 @@ import {
 	classifyCommand,
 	getSharedClassifierGuardrailBlock,
 } from '../../security/command-classifier.js';
+import { isPolicyProtectedPath } from '../../security/protected-path-policy.js';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -62,6 +67,8 @@ import { isTaskToolId, normalizeToolName } from '../normalize-tool-name';
 import {
 	CMD_WRAPPER_DECLARATION,
 	declaresWindowsWrapperLoose,
+	getObservedHostShell,
+	hostShellGrammarFamily,
 } from '../shell-executor-context';
 import {
 	detectInteractiveSession,
@@ -231,11 +238,104 @@ function throwDestructiveBlock(
 }
 
 /**
- * Creates a toolBefore handler with the given shared context.
- *
- * @param ctx Shared configuration and closures from createGuardrailsHooks
- * @returns The toolBefore handler function
+ * Whether the executor that will run a bare `rmdir` has POSIX rmdir(2)
+ * semantics, the only basis for the empty-directory-removal exemption. Under
+ * PowerShell `rmdir` is an alias of Remove-Item (it deletes a file operand and
+ * can recurse), and cmd's `rd` differs too. So: no Windows grammar may own the
+ * command (`windowsShell` from resolveWindowsWriteAuthority; when it is null
+ * the Windows detectors do not run at all), the `shell` tool on a Windows host
+ * is not POSIX, and a Windows wrapper exposed only by unwrapping
+ * (`bash -c 'powershell -Command …'`) also disqualifies it.
  */
+export function isPosixRmdirExecutor(
+	tool: string,
+	windowsShell: 'powershell' | 'cmd' | null,
+	detectionCommand: string,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	if (windowsShell !== null) return false;
+	if (tool !== 'bash' && platform === 'win32') return false;
+	return (
+		!declaresWindowsWrapperLoose(detectionCommand) &&
+		!CMD_WRAPPER_DECLARATION.test(detectionCommand)
+	);
+}
+
+/**
+ * Repository control state that the bare-rmdir exemption never covers: the
+ * same `.git` / `.swarm` list file-authority.ts applies to coder writes
+ * (`coder-control-state-protection`), reused through the shared
+ * isPolicyProtectedPath predicate.
+ */
+const RMDIR_EXEMPTION_CONTROL_STATE = ['.git', '.swarm'] as const;
+
+function isControlStateRelativePath(relative: string): boolean {
+	// Folded to lower case on every platform: isPolicyProtectedPath folds only
+	// on win32, but macOS volumes are case-insensitive by default, where
+	// `.SWARM/x` IS `.swarm/x`. Over-matching only withdraws the exemption.
+	return isPolicyProtectedPath(relative.toLowerCase(), {
+		includeDefaults: false,
+		additional: RMDIR_EXEMPTION_CONTROL_STATE,
+	});
+}
+
+/**
+ * Whether a bare `rmdir` target (`WriteTarget.emptyDirectoryRemoval`) may skip
+ * declared-scope membership. `targetPath` is the gate's resolved path, which
+ * is already LEXICALLY normalised (path.resolve collapses `.` and `..`
+ * segments before any symlink is followed); that is safe only because an
+ * operand with a `..` segment is never tagged (shell-write-detect.ts
+ * isBareRmdirOperand). The helper then realpaths the target's PARENT, so
+ * every symlink/junction in the parent chain is resolved, and requires the
+ * result to lie strictly inside the canonical workspace root. Fail-closed:
+ * a resolution error, the root itself, a target outside the root, a target
+ * that exists as a file or symlink, or a target under the workspace's
+ * repository control state (`.git` / `.swarm`, checked on both the lexical
+ * and the canonical location — PR #3456 review FB-007: an architect passes
+ * file authority for control paths, so the exemption must not be what lets
+ * a declared-scope-bound role reach them) returns false. rmdir(2) does not
+ * follow a final symlink, so the parent chain decides containment. There is
+ * deliberately no emptiness check — that would be a TOCTOU race; the
+ * kernel's ENOTEMPTY is the authoritative guard.
+ */
+export function isEmptyDirectoryRemovalWithinWorkspace(
+	targetPath: string,
+	workspace: string,
+): boolean {
+	try {
+		const lexicalRoot = path.resolve(workspace);
+		if (
+			isControlStateRelativePath(
+				path.relative(lexicalRoot, path.resolve(lexicalRoot, targetPath)),
+			)
+		) {
+			return false;
+		}
+		const root = fs.realpathSync.native(lexicalRoot);
+		const absolute = path.resolve(root, targetPath);
+		const parent = fs.realpathSync.native(path.dirname(absolute));
+		const canonical = path.join(parent, path.basename(absolute));
+		if (isControlStateRelativePath(path.relative(root, canonical))) {
+			return false;
+		}
+		// Defence in depth: an existing file or symlink is not an rmdir(2)
+		// candidate, so it falls back to the normal declared-scope check.
+		let stat: fs.Stats | undefined;
+		try {
+			stat = fs.lstatSync(canonical);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+		}
+		if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) return false;
+		return (
+			!pathIdentitiesEqual(canonical, root) &&
+			isPathIdentityWithin(canonical, root)
+		);
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Issue #3099 R2 (executor context): which grammar OWNS shared constructs.
  *
@@ -263,6 +363,7 @@ export function resolveWindowsWriteAuthority(
 	detectedShellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash',
 	shaped: boolean,
 	platform: NodeJS.Platform = process.platform,
+	hostShell?: string,
 ): 'powershell' | 'cmd' | null {
 	// A wrapper is an executor DECLARATION only at an invocation position: the
 	// very start of the command, or the receiving side of a pipe. A bare
@@ -282,18 +383,44 @@ export function resolveWindowsWriteAuthority(
 	// holds for the `shell` tool off Windows (#3323): there is no cmd.exe or
 	// PowerShell to inherit, so only an explicit wrapper or a shaped body
 	// (steps 1-2) can select a Windows grammar.
+	// #3346: when the v2 host has REPORTED the shell the `shell` tool
+	// actually executes (ctx.shell "create.before" → the observed-host-shell
+	// store), that report is AUTHORITATIVE ACROSS PLATFORMS — a win32 host
+	// whose `shell` tool runs Git Bash must not take cmd/PowerShell grammar
+	// from command content, and a POSIX host running PowerShell is covered by
+	// the wrapper/shaped steps above. Only a Windows-family report
+	// (powershell/pwsh/cmd — hostShellGrammarFamily) keeps the inherited
+	// content-detected grammar; any POSIX-family report disables it. With NO
+	// report yet (v1 host, or the first shell call before any
+	// shell.create.before fired) the platform-keyed interim from #3326
+	// applies: `shell` inherits content-detected Windows grammar on win32
+	// only — never wider than the pre-#3346 behavior.
 	const inheritedWindows =
 		detectedShellType === 'powershell' || detectedShellType === 'cmd';
 	if (cmdWrapper) return 'cmd';
 	if (psWrapper || shaped) return 'powershell';
-	const posixShellTool =
-		tool === 'bash' || (tool === 'shell' && platform !== 'win32');
+	if (tool === 'bash') return null;
+	if (tool === 'shell' && hostShell !== undefined && hostShell !== '') {
+		return hostShellGrammarFamily(hostShell) === 'windows' && inheritedWindows
+			? (detectedShellType as 'powershell' | 'cmd')
+			: null;
+	}
+	const posixShellTool = tool === 'bash' || tool === 'shell';
 	if (inheritedWindows && !posixShellTool) {
+		return detectedShellType as 'powershell' | 'cmd';
+	}
+	if (inheritedWindows && posixShellTool && platform === 'win32') {
 		return detectedShellType as 'powershell' | 'cmd';
 	}
 	return null;
 }
 
+/**
+ * Creates a toolBefore handler with the given shared context.
+ *
+ * @param ctx Shared configuration and closures from createGuardrailsHooks
+ * @returns The toolBefore handler function
+ */
 export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	const {
 		effectiveDirectory,
@@ -1139,6 +1266,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			command,
 			detectedShellType,
 			shaped,
+			process.platform,
+			// #3346: the v2 host reports the shell the `shell` tool actually
+			// executes (observed-host-shell store); keying inheritance on that
+			// report closes the Git-Bash-on-Windows false positive class. The
+			// `bash` tool and unreported hosts keep the platform interim.
+			normalizedTool === 'shell' ? getObservedHostShell() : undefined,
 		);
 
 		// Shared constructs resolve to the POSIX reading whenever the POSIX
@@ -1260,6 +1393,90 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			shellDirectory,
 		);
 
+		// #3347: the universal-deny → file-authority → declared-scope tail of
+		// the write loop, shared verbatim by resolved writes and by routed
+		// capability evals (which authorize against the eval's tracked
+		// working directory) so every message shape stays identical by
+		// construction. Returns 'lenient' when the caller must skip the rest
+		// of the loop body for a no-scope lenient agent (resolved writes
+		// `continue`; a routed eval treats leniency like any other write).
+		const enforceWriteAuthorization = (
+			target: string,
+			opts?: { exemptEmptyDirectoryRemoval?: boolean },
+		): 'lenient' | 'enforced' => {
+			if (enforce && noScopeLenient && universalDenyPrefixes.length > 0) {
+				for (const prefix of universalDenyPrefixes) {
+					if (matchesAuthorityDenyPrefix(target, prefix, shellDirectory)) {
+						throw new Error(
+							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: Path is under universal deny prefix "${prefix}"`,
+						);
+					}
+				}
+			}
+
+			// No-scope agents: enforce only the universal deny list above, then
+			// preserve the prior leniency for the declared-scope authority checks.
+			if (noScopeLenient) return 'lenient';
+
+			const authorityCheck = checkFileAuthorityWithRules(
+				shellWriteAgent,
+				target,
+				shellDirectory,
+				precomputedAuthorityRules,
+				{
+					declaredScope,
+					authorityEnabled: authorityConfig?.enabled,
+					universalDenyPrefixes,
+					verifierConfigPaths: authorityConfig?.verifier_config_paths,
+				},
+			);
+			if (enforce && !authorityCheck.allowed) {
+				const evidenceEventID =
+					authorityCheck.layer === 'protected-path'
+						? recordFullAutoSevereEvidenceEvent({
+								sessionID,
+								childSessionID: sessionID,
+								category: 'protected_state_mutation',
+								paths: [target],
+							})
+						: undefined;
+				throw new Error(
+					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+				);
+			}
+
+			if (
+				enforce &&
+				declaredScope &&
+				declaredScope.length > 0 &&
+				!isInDeclaredScope(target, declaredScope, shellDirectory) &&
+				// PR #3456: a bare POSIX rmdir cannot remove a non-empty directory
+				// (ENOTEMPTY), so inside the workspace it needs no declared-scope
+				// membership. Windows executors never qualify (Remove-Item alias),
+				// and neither does repository control state (.git/.swarm).
+				!(
+					opts?.exemptEmptyDirectoryRemoval === true &&
+					isPosixRmdirExecutor(
+						normalizedTool,
+						windowsShell,
+						detectionCommand,
+					) &&
+					isEmptyDirectoryRemovalWithinWorkspace(target, shellDirectory)
+				)
+			) {
+				const safeTarget = sanitizeDiagnosticText(target, 320);
+				const scopeSummary = declaredScope
+					.slice(0, 10)
+					.map((entry) => sanitizeDiagnosticText(entry, 160))
+					.join(', ');
+				const omitted = Math.max(0, declaredScope.length - 10);
+				throw new Error(
+					`WRITE BLOCKED: SCOPE_VIOLATION: shell write target "${safeTarget}" is outside the active scope [${scopeSummary}${omitted > 0 ? `, ... (+${omitted} more)` : ''}]. ACTION[architect]: if the target is intended, call declare_scope for the exact workspace-relative path and redispatch; otherwise correct the command.`,
+				);
+			}
+			return 'enforced';
+		};
+
 		for (const write of resolvedWrites) {
 			if (write.resolvedPath === null) {
 				// A null resolved path has three distinct causes that must NOT be
@@ -1276,11 +1493,36 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 				if (enforce && write.original.category === 'interpreter_eval') {
 					// Inline code (`python -c`, `node -e`, …) can write to arbitrary
-					// files whose targets are not statically knowable, so it cannot be
-					// verified against the declared scope. This stays fail-closed (it is
-					// how the scope/config-zone protections resist an eval bypass), but
-					// with an actionable message — the old text claimed an "unresolvable
-					// path target" that never existed for an eval.
+					// files whose targets are not statically knowable. The OPAQUE
+					// classes (PowerShell -EncodedCommand, nested script blocks,
+					// dynamic `&`/IEX invocation — the writes WITHOUT the
+					// capability flag) stay blanket-blocked: their payloads cannot
+					// be inspected at all.
+					// #3347/#1902 SCOPE-GATED ROUTING for the inspectable
+					// capability class (detectInterpreterEval): read-only /
+					// dedicated-tool-only roles route through file authority at
+					// the eval's working directory (the denial names the role),
+					// and agents WITH a declared scope route through the same
+					// universal-deny/authority/declared-scope checks as any
+					// other write, with the cd-tracked working directory as the
+					// target — an in-scope cwd admits the eval, an out-of-scope
+					// one rejects with the declared-scope error. Scope-less
+					// write-capable roles (architect, reviewer, the lenient
+					// general/build/plan class) KEEP the fail-closed block: no
+					// scope exists to verify the eval's unbounded write
+					// capability against (#3347 AC3 keeps the eval-block pins
+					// green; widening for orchestrator roles is the issue's open
+					// maintainer decision).
+					if (
+						write.original.capability === true &&
+						(isImmutableNonWriter ||
+							(declaredScope !== null &&
+								declaredScope !== undefined &&
+								declaredScope.length > 0))
+					) {
+						enforceWriteAuthorization(write.evalDirectory ?? shellDirectory);
+						continue;
+					}
 					throw new Error(
 						`BLOCKED: ${write.original.operator} evaluates inline code whose write targets cannot be verified against the declared scope — rejecting for safety. Write files with the write/edit tools or a checked-in script, and invoke installed tools directly (e.g. \`pytest\`, \`ruff\`) instead of an inline \`python -c\` / \`node -e\` eval.`,
 					);
@@ -1302,68 +1544,19 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				continue;
 			}
 
-			if (enforce && noScopeLenient && universalDenyPrefixes.length > 0) {
-				for (const prefix of universalDenyPrefixes) {
-					if (
-						matchesAuthorityDenyPrefix(
-							write.resolvedPath,
-							prefix,
-							shellDirectory,
-						)
-					) {
-						throw new Error(
-							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: Path is under universal deny prefix "${prefix}"`,
-						);
-					}
-				}
-			}
-
-			// No-scope agents: enforce only the universal deny list above, then
-			// preserve the prior leniency for the declared-scope authority checks.
-			if (noScopeLenient) continue;
-
-			const authorityCheck = checkFileAuthorityWithRules(
-				shellWriteAgent,
-				write.resolvedPath,
-				shellDirectory,
-				precomputedAuthorityRules,
-				{
-					declaredScope,
-					authorityEnabled: authorityConfig?.enabled,
-					universalDenyPrefixes,
-					verifierConfigPaths: authorityConfig?.verifier_config_paths,
-				},
-			);
-			if (enforce && !authorityCheck.allowed) {
-				const evidenceEventID =
-					authorityCheck.layer === 'protected-path'
-						? recordFullAutoSevereEvidenceEvent({
-								sessionID,
-								childSessionID: sessionID,
-								category: 'protected_state_mutation',
-								paths: [write.resolvedPath],
-							})
-						: undefined;
-				throw new Error(
-					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
-				);
-			}
-
+			// #3347: the universal-deny → authority → declared-scope tail now
+			// lives in the shared enforceWriteAuthorization closure (defined
+			// above the loop) so routed capability evals and resolved writes
+			// produce byte-identical message shapes. PR #3456: a tagged bare
+			// rmdir carries its declared-scope exemption through the same
+			// closure (opts thread), so both features share one check order.
 			if (
-				enforce &&
-				declaredScope &&
-				declaredScope.length > 0 &&
-				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory)
+				enforceWriteAuthorization(write.resolvedPath, {
+					exemptEmptyDirectoryRemoval:
+						write.original.emptyDirectoryRemoval === true,
+				}) === 'lenient'
 			) {
-				const safeTarget = sanitizeDiagnosticText(write.resolvedPath, 320);
-				const scopeSummary = declaredScope
-					.slice(0, 10)
-					.map((entry) => sanitizeDiagnosticText(entry, 160))
-					.join(', ');
-				const omitted = Math.max(0, declaredScope.length - 10);
-				throw new Error(
-					`WRITE BLOCKED: SCOPE_VIOLATION: shell write target "${safeTarget}" is outside the active scope [${scopeSummary}${omitted > 0 ? `, ... (+${omitted} more)` : ''}]. ACTION[architect]: if the target is intended, call declare_scope for the exact workspace-relative path and redispatch; otherwise correct the command.`,
-				);
+				continue;
 			}
 			if (isCoder && session?.currentTaskId) {
 				const writeBinding = enforce

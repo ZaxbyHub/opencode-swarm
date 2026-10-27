@@ -415,7 +415,12 @@ describe('shell-write-detect: in-place controls are unchanged', () => {
 
 	test('perl -pi -e X f stays an interpreter eval only', () => {
 		expect(detectPosixWrites('perl -pi -e X f').writes).toEqual([
-			{ category: 'interpreter_eval', operator: 'perl [eval]', path: null },
+			{
+				category: 'interpreter_eval',
+				operator: 'perl [eval]',
+				path: null,
+				capability: true,
+			},
 		]);
 	});
 });

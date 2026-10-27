@@ -21,10 +21,10 @@
  * can depend on it without creating an import cycle.
  *
  * STATE DURABILITY: Status is stored in an in-memory Map (fast, per-process)
- * AND persisted to `.swarm/worktree-merge-status.json` (survives plugin restart).
- * On each write, the JSON file is atomically updated. On read, the in-memory
- * map is checked first (fast path); on plugin restart, the map is empty but
- * the durable file is restored on first read or Rule 2 lookup.
+ * AND persisted to `.swarm/worktree-merge-status.json` (survives plugin restart;
+ * EXCEPTION (#3448): a write whose status-directory parent root has vanished is
+ * skipped rather than recreating that root). On read, the in-memory map is
+ * checked first (fast path); after a restart the durable file restores it.
  */
 
 import * as crypto from 'node:crypto';
@@ -103,7 +103,29 @@ function loadDurableStatus(statusPath: string): void {
 function saveDurableStatus(statusPath: string): void {
 	const dir = path.dirname(statusPath);
 	try {
-		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+		if (!fs.existsSync(dir)) {
+			// Never resurrect a vanished worktree/lane root just to persist its own
+			// failure status (#3448): a coder child session binds this singleton to
+			// its lane worktree, and a recursive mkdir here recreates the removed
+			// lane root — permanently defeating the coder-settlement self-heal that
+			// keys on that root's absence. Skipping the write matches this
+			// function's non-fatal durable-save philosophy (the in-memory map stays
+			// authoritative); no reader consumes the skipped vanished-root record:
+			// project-level readers scan the project-root path and the self-heal
+			// reads WAL descriptor paths. A live-lane bind still reads its own file
+			// via loadDurableStatus — only the vanished-root write is skipped.
+			if (!fs.existsSync(path.dirname(dir))) return;
+			// `dir` is always exactly `<root>/.swarm` (one level under a project or
+			// lane root), so a non-recursive mkdir suffices — and unlike recursive
+			// mode it cannot recreate a root that vanishes between the check above
+			// and the mkdir (ENOENT falls into the outer non-fatal catch). EEXIST
+			// means another writer just created `.swarm` — proceed to the write.
+			try {
+				fs.mkdirSync(dir);
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+			}
+		}
 		// Atomic write: write to a UNIQUE temp file then rename. The unique
 		// suffix avoids any chance of two writers (or a crashed prior write)
 		// colliding on a shared `${statusPath}.tmp` path.
