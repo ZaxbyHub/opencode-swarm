@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { isPolicyProtectedPath } from '../security/protected-path-policy';
 import {
 	containsControlChars,
 	containsPathTraversal,
@@ -578,6 +579,41 @@ function validateOldContent(
 	return { valid: true };
 }
 
+const ENV_FILE_VARIANT = /^\.env(\.|$)/i;
+
+/**
+ * True when the file's real content must not be echoed in an error: a path the
+ * central protected-path policy names, or a `.env` / `.env.*` file. Checked on
+ * the caller's spelling and on the resolved real path (relative to the
+ * workspace), each as written and lower-cased, so directory links, Windows 8.3
+ * short names and case variants on case-insensitive filesystems cannot hide a
+ * protected target.
+ */
+function isProtectedForEcho(
+	file: string,
+	fullPath: string,
+	directory: string,
+): boolean {
+	const spellings = [file];
+	try {
+		spellings.push(
+			path.relative(
+				fs.realpathSync.native(directory),
+				fs.realpathSync.native(fullPath),
+			),
+		);
+	} catch {
+		// Unresolvable real path: fall back to the caller's spelling alone.
+	}
+	return spellings.some((spelling) =>
+		[spelling, spelling.toLowerCase()].some(
+			(candidate) =>
+				isPolicyProtectedPath(candidate) ||
+				ENV_FILE_VARIANT.test(path.basename(candidate.replace(/\\/g, '/'))),
+		),
+	);
+}
+
 // ============ Tool Definition ============
 
 export const suggestPatch: ToolDefinition = createSwarmTool({
@@ -808,6 +844,14 @@ export const suggestPatch: ToolDefinition = createSwarmTool({
 			);
 
 			if (!oldContentValidation.valid) {
+				// `actual` is file content the caller has not seen. Never echo it for a
+				// protected path: Full-Auto auto-allows this tool without a critic, so it
+				// must not become a read channel.
+				const actualRedacted = isProtectedForEcho(
+					change.file,
+					fullPath,
+					directory,
+				);
 				errors.push({
 					success: false,
 					error: true,
@@ -815,7 +859,9 @@ export const suggestPatch: ToolDefinition = createSwarmTool({
 					message: `Content at the specified location does not match oldContent`,
 					details: {
 						expected: oldContentValidation.expected,
-						actual: oldContentValidation.actual,
+						actual: actualRedacted
+							? '[redacted: protected path]'
+							: oldContentValidation.actual,
 						location: `${change.file}:${contextMatch.startLineIndex + 1}-${contextMatch.endLineIndex + 1}`,
 					},
 				});
