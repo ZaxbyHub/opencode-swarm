@@ -31,6 +31,7 @@ import {
 	recordCodeModeWrapperCall,
 } from '../../hooks/code-mode-wrapper';
 import { normalizeToolNameLowerCase } from '../../hooks/normalize-tool-name';
+import { recordObservedHostShell } from '../../hooks/shell-executor-context';
 import { addDeferredWarning } from '../../services/warning-buffer';
 import { log } from '../../utils';
 import { withTimeout } from '../../utils/timeout';
@@ -586,5 +587,55 @@ export async function registerV2SessionHooks(
 		throw new Error(
 			'[opencode-swarm] v2: compaction and prompt registrations both failed',
 		);
+	}
+}
+
+/**
+ * Register the shell-executor observer hook (#3346).
+ *
+ * The v2 host reports the shell a `shell`-tool command will actually execute
+ * through `ctx.shell` "create.before" (payload carries the resolved `shell`
+ * path). Recording it in the observed-host-shell store lets the write gate
+ * and `/swarm guardrail explain` key cmd/powershell grammar inheritance on
+ * the real executor instead of the platform — closing the Git-Bash-on-Windows
+ * false-positive class from #3323/#3346.
+ *
+ * Contract (mirrors registerV2SessionHooks' bounded registration, with a
+ * softer failure mode): a host without the shell domain (pre-2.0.29-era
+ * hosts; the vendored member is optional) is a SKIP, not a failure — the
+ * gate falls back to the platform-keyed interim, never wider than today. A
+ * present-but-REJECTING registration warns through the shared
+ * warnV2HookRegistrationFailure path and is likewise non-fatal; a successful
+ * registration lands in the disposal sink. Authoritative hook observations
+ * only — this module performs no environment probing (plan-critic r2).
+ */
+export async function registerV2ShellHooks(
+	ctx: V2PluginContext,
+	registrations: V2Registration[],
+): Promise<void> {
+	const shellDomain = ctx.shell;
+	if (!shellDomain || typeof shellDomain.hook !== 'function') {
+		return;
+	}
+	const registration = await withTimeout(
+		Promise.resolve(
+			shellDomain.hook('create.before', (invocation) => {
+				const shell =
+					invocation && typeof invocation.shell === 'string'
+						? invocation.shell
+						: '';
+				recordObservedHostShell(shell);
+			}) as Promise<unknown>,
+		),
+		V2_HOOK_TIMEOUT_MS,
+		new Error(
+			'[opencode-swarm] v2: shell.create.before registration exceeded budget',
+		),
+	).catch((err: unknown) => {
+		warnV2HookRegistrationFailure('shell.create.before', err);
+		return undefined;
+	});
+	if (registration !== undefined && registration !== null) {
+		registrations.push(registration as V2Registration);
 	}
 }

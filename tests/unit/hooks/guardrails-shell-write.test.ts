@@ -694,23 +694,23 @@ describe('guardrails shell write scope enforcement', () => {
 	// Fail-closed on undetectable paths
 	// -------------------------------------------------------------------------
 
-	describe('fail-closed on undetectable paths (interpreter eval)', () => {
-		it('blocks python -c eval (inline code — target cannot be scope-verified)', async () => {
+	describe('routed interpreter evals for scoped coders (#3347)', () => {
+		// #3347: a scoped coder's eval routes at its working directory (the
+		// session root here) — outside ['src/'], so it blocks with the scope error.
+		it('rejects python -c eval outside the declared scope (scope-shaped error)', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('s60');
 			setDeclaredScope('s60', ['src/']);
 
-			// python -c with inline code has null path because the file being
-			// written is not statically determinable → stays fail-closed.
 			await expect(
 				hooks.toolBefore(
 					makeBashInput('s60'),
 					makeOutput(`python -c "import os; os.write(1, b'data')"`),
 				),
-			).rejects.toThrow(/BLOCKED: python \[eval\] evaluates inline code/);
+			).rejects.toThrow(/SCOPE_VIOLATION.*outside the active scope/);
 		});
 
-		it('blocks node -e eval (inline code)', async () => {
+		it('rejects node -e eval outside the declared scope (scope-shaped error)', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('s61');
 			setDeclaredScope('s61', ['src/']);
@@ -722,10 +722,10 @@ describe('guardrails shell write scope enforcement', () => {
 						`node -e "require('fs').writeFileSync('out.txt', 'data')"`,
 					),
 				),
-			).rejects.toThrow(/BLOCKED: node \[eval\] evaluates inline code/);
+			).rejects.toThrow(/SCOPE_VIOLATION.*outside the active scope/);
 		});
 
-		it('blocks bun -e eval (inline code)', async () => {
+		it('rejects bun -e eval outside the declared scope (scope-shaped error)', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('s62');
 			setDeclaredScope('s62', ['src/']);
@@ -735,7 +735,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeBashInput('s62'),
 					makeOutput(`bun -e "Deno.writeTextFile('out.txt', 'data')"`),
 				),
-			).rejects.toThrow(/BLOCKED: bun \[eval\] evaluates inline code/);
+			).rejects.toThrow(/SCOPE_VIOLATION.*outside the active scope/);
 		});
 	});
 
