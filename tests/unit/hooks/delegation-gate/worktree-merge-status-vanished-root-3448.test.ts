@@ -20,14 +20,11 @@
  * recovered, not aborted. The retained source lands squash-unstaged (pinned by
  * coder-settlement-orphan-3409). Arm A pins that landed outcome in place of the
  * pre-#3409 ABORTED self-heal expectation, per the sanctioned AMEND for the
- * frozen C2 evidence. Arm B pins only the #3448 invariant with a whitelisted
- * outcome: a tree that reports the orphan as RECOVERABLE_ORPHAN_COMMIT is also
- * accepted. A PRUNED-object
- * fixture is deliberately NOT used: on the current tree `git gc --prune=now`
- * makes the recorded merge provenance unverifiable and recovery fails closed
- * with CODER_SETTLEMENT_RECOVERY_UNCERTAIN (verified by probe at
- * implementation time) — the pruned-object heal is #3420's work, not this
- * fix's, and pinning it here would be pinning the other PR's contract.
+ * frozen C2 evidence. Arm B pins the #3448 invariant (no resurrected lane root)
+ * plus a whitelisted outcome: a tree that reports the orphan as
+ * RECOVERABLE_ORPHAN_COMMIT is also accepted. A pruned-object fixture is not
+ * used here: the absent-source self-heal is pinned by
+ * coder-settlement-selfheal-invariant-2236 and coder-settlement-stale-worktree-2236.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -225,7 +222,7 @@ describe('#3448 recovery self-heal is not blocked by the status writer', () => {
 		);
 	}, 120_000);
 
-	test('Arm B - #3420-tolerant invariant: the lane root stays absent and the loop error never returns', async () => {
+	test('Arm B - whitelisted outcome: the lane root stays absent and the loop error never returns', async () => {
 		const fixture = await interruptedAfterOnBeforeMerge('heal-3448-alive');
 		destroyWorktreeAndBranch(fixture);
 		expect(branchExists(fixture)).toBe(false);
@@ -245,8 +242,16 @@ describe('#3448 recovery self-heal is not blocked by the status writer', () => {
 			// terminal contract so a silent null-return with the WAL left
 			// DISPATCHED cannot pass.
 			expect(readWal(fixture)).toMatchObject({ state: 'COMMITTED' });
+			expect(
+				fs
+					.readFileSync(
+						path.join(fixture.repo, 'src', 'nested', 'feature.ts'),
+						'utf-8',
+					)
+					.replace(/\r\n/g, '\n'),
+			).toBe('export const feature = 2;\n');
 		} else {
-			// Whitelisted throw path (a #3409/#3420-carrying tree): ONLY the
+			// Whitelisted throw path (a tree that reports the orphan instead of landing it): ONLY the
 			// designed RECOVERABLE_ORPHAN_COMMIT is acceptable, and the message
 			// must not smuggle the self-defeating loop error alongside it.
 			expect(thrown).toContain('RECOVERABLE_ORPHAN_COMMIT');
