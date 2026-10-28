@@ -78,6 +78,52 @@ export const AGGREGATE_CASCADE_STEPS: readonly string[] = [
 /** The runner-side checkout signature from the 2026-10-27 incident logs. */
 export const STALE_RUNNER_SIGNATURE = /fatal: git upload-pack: not our ref [0-9a-f]{40}/;
 
+/**
+ * Strip C0/DEL control characters (including newlines and ANSI escapes) from
+ * untrusted job names before they are echoed into machine-parsed reason
+ * lines — a name containing a raw newline otherwise forges extra
+ * verdict/reason lines in the CLI output.
+ */
+export function sanitizeJobName(name: string): string {
+	return name.replace(/[\u0000-\u001f\u007f]/g, ' ');
+}
+
+/**
+ * Coerce one untrusted `gh run view --json jobs` entry into a safe
+ * JobSummary: a null/non-object entry, a missing string name, a non-numeric
+ * databaseId, or a non-array steps list becomes an evidence-gap failure
+ * entry (empty steps ⇒ evidenceGap) so every downstream layer classifies it
+ * as `unknown` instead of throwing. Present-but-malformed step entries are
+ * normalized field-by-field.
+ */
+export function normalizeJobEntry(entry: unknown): JobSummary {
+	if (
+		!entry ||
+		typeof entry !== 'object' ||
+		typeof (entry as { name?: unknown }).name !== 'string' ||
+		typeof (entry as { databaseId?: unknown }).databaseId !== 'number'
+	) {
+		return {
+			name: '<malformed job entry>',
+			databaseId: 0,
+			status: 'completed',
+			conclusion: 'failure',
+			steps: [],
+		};
+	}
+	const job = entry as JobSummary;
+	if (job.steps !== undefined && !Array.isArray(job.steps)) {
+		return { ...job, steps: [] };
+	}
+	return {
+		...job,
+		steps: job.steps?.map((step) => ({
+			name: typeof step?.name === 'string' ? step.name : '<malformed step>',
+			conclusion: typeof step?.conclusion === 'string' ? step.conclusion : null,
+		})),
+	};
+}
+
 const CHECKOUT_STEP_PREFIX = 'Run actions/checkout@';
 
 /** @param name job display name, possibly with a ` (matrix-os)` suffix */
@@ -163,7 +209,7 @@ export function classifyMergeGroupFailure(
 	jobs: JobSummary[],
 	logs: Record<string, string> = {},
 ): FailureClassification {
-	const list = Array.isArray(jobs) ? jobs : [];
+	const list = (Array.isArray(jobs) ? jobs : []).map(normalizeJobEntry);
 	const failing = list.filter((job) => job.conclusion === 'failure');
 	if (failing.length === 0) {
 		return { verdict: 'unknown', reason: 'no failures to classify' };
@@ -174,8 +220,8 @@ export function classifyMergeGroupFailure(
 		const checkoutDeaths = failing.filter(checkoutFailed).map((job) => job.name);
 		const reason =
 			checkoutDeaths.length > 0
-				? `real work-phase failure in ${workFailures.map((job) => job.name).join(', ')} (routed checkout deaths also present: ${checkoutDeaths.join(', ')} — manual triage)`
-				: `real work-phase failure in ${workFailures.map((job) => job.name).join(', ')}`;
+				? `real work-phase failure in ${workFailures.map((job) => sanitizeJobName(job.name)).join(', ')} (routed checkout deaths also present: ${checkoutDeaths.map((n) => sanitizeJobName(n)).join(', ')} — manual triage)`
+				: `real work-phase failure in ${workFailures.map((job) => sanitizeJobName(job.name)).join(', ')}`;
 		return { verdict: 'test-failure', reason };
 	}
 
@@ -183,27 +229,52 @@ export function classifyMergeGroupFailure(
 	if (gaps.length > 0) {
 		return {
 			verdict: 'unknown',
-			reason: `evidence gap: ${gaps.map((job) => job.name).join(', ')} failed with no usable step data and no log`,
+			reason: `evidence gap: ${gaps.map((job) => sanitizeJobName(job.name)).join(', ')} failed without attributable step evidence; fetched logs, if any, were not consulted`,
 		};
 	}
 
 	const routedCheckoutDeaths = failing.filter((job) => isRoutedJob(job.name) && checkoutFailed(job));
-	const badHosted = failing.filter((job) => !isRoutedJob(job.name) && !cascadeAggregate(job));
-	if (routedCheckoutDeaths.length === 0 || badHosted.length > 0) {
+	// Any failing job whose failure the stale-clone story cannot explain is
+	// UNEXPLAINED: only a ROUTED checkout death is explained by a stale
+	// self-hosted clone (a HOSTED checkout death is not — hosted runners
+	// fetch fresh), nor are real work failures, nor the recognized
+	// unit-passed cascade. This closes both masks: a hosted job dying at
+	// checkout beside a routed death, and a routed job failing only at a
+	// whitelisted-named step.
+	const unexplained = failing.filter(
+		(job) =>
+			!(isRoutedJob(job.name) && checkoutFailed(job)) &&
+			!realWorkFailure(job) &&
+			!cascadeAggregate(job),
+	);
+	if (routedCheckoutDeaths.length === 0 || unexplained.length > 0) {
 		const detail =
-			badHosted.length > 0
-				? `unexplained hosted failure in ${badHosted.map((job) => job.name).join(', ')}`
+			unexplained.length > 0
+				? `unexplained failure in ${unexplained.map((job) => sanitizeJobName(job.name)).join(', ')}`
 				: 'no routed job failed at checkout';
 		return { verdict: 'unknown', reason: detail };
 	}
 
 	const skippedCount = list.filter((job) => job.conclusion === 'skipped').length;
+	// Hosted legs that ended on a non-success, non-skipped conclusion
+	// (cancelled, timed_out, …) are not "green" — name them in the reason.
+	const hostedAbnormal = list.filter(
+		(job) =>
+			!isRoutedJob(job.name) &&
+			job.conclusion !== 'success' &&
+			job.conclusion !== 'skipped' &&
+			!cascadeAggregate(job),
+	);
+	const hostedNote =
+		hostedAbnormal.length > 0
+			? `; hosted legs not green: ${hostedAbnormal.map((job) => `${sanitizeJobName(job.name)} (${sanitizeJobName(String(job.conclusion))})`).join(', ')}`
+			: '';
 	const confirmations: string[] = [];
 	for (const job of routedCheckoutDeaths) {
 		const log = logs[job.name];
 		if (typeof log === 'string' && STALE_RUNNER_SIGNATURE.test(log)) {
 			const match = log.match(STALE_RUNNER_SIGNATURE);
-			confirmations.push(`${job.name}: ${match?.[0] ?? ''}`);
+			confirmations.push(`${sanitizeJobName(job.name)}: ${match?.[0] ?? ''}`);
 		}
 	}
 	const confirmation =
@@ -212,7 +283,7 @@ export function classifyMergeGroupFailure(
 			: '; no log signature fetched — step evidence only';
 	return {
 		verdict: 'runner-stale-clone',
-		reason: `routed jobs failed at checkout (${routedCheckoutDeaths.map((job) => job.name).join(', ')}), ${skippedCount} downstream jobs skipped, hosted legs green modulo cascade${confirmation}`,
+		reason: `routed jobs failed at checkout (${routedCheckoutDeaths.map((job) => sanitizeJobName(job.name)).join(', ')}), ${skippedCount} downstream jobs skipped, hosted legs green modulo cascade${hostedNote}${confirmation}`,
 	};
 }
 
@@ -253,7 +324,10 @@ export function runCli(argv: string[], io: ClassifierIo): number {
 			io.err('run view payload carried no jobs array');
 			return 1;
 		}
-		jobs = raw as JobSummary[];
+		// Shape-validate untrusted payload entries (see normalizeJobEntry):
+		// degraded entries classify as `unknown`, never crash, never a wrong
+		// verdict — and the log-fetch loop below needs a safe name/id.
+		jobs = raw.map(normalizeJobEntry);
 	} catch (error) {
 		io.err(`gh call failed: ${error instanceof Error ? error.message : String(error)}`);
 		return 1;
@@ -279,6 +353,10 @@ export function runCli(argv: string[], io: ClassifierIo): number {
 		);
 	} else if (result.verdict === 'test-failure') {
 		io.log('guidance: real failure — read the failing job log; do not treat this batch as runner-side.');
+	} else {
+		io.log(
+			`guidance: unknown — the payload could not attribute the failure; inspect the run manually (gh run view ${runId} --log-failed).`,
+		);
 	}
 	return 0;
 }

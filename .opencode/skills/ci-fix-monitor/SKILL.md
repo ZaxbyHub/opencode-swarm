@@ -189,25 +189,31 @@ the stall state to the user rather than waiting indefinitely.
 ### Merge-queue entry stuck (orphaned entry)
 
 When a PR has been queue-eligible for longer than the threshold (default 150
-minutes) with no `gh-readonly-queue/main/pr-<n>-*` build in progress, run the
-detector (issue #3265):
+minutes; override with `--threshold <minutes>`) with no
+`gh-readonly-queue/main/pr-<n>-*` build in a non-terminal state (`queued`
+counts as active — run-level status stays `queued` under runner contention
+while the group's jobs execute), run the detector (issue #3265):
 
 ```
 node scripts/check-merge-queue-progress.mjs --pr <n>
 ```
 
-On `ORPHANED` (exit 2) apply the printed recovery:
+The detector prints `<VERDICT> pr=<n> age=<minutes> state=<state>`; exit 2
+only for `ORPHANED`, 0 otherwise, 1 for usage/gh errors. On `ORPHANED` with
+`state=OPEN`, apply the printed recovery:
 `gh pr close <n> --comment "orphaned queue entry" && gh pr reopen <n> && gh pr merge <n>`.
-Never cancel runs that do not PREDATE the current entry — blanket-cancelling
+The detector itself suppresses the recovery when the PR is not OPEN. Never
+cancel runs that do not PREDATE the current entry — blanket-cancelling
 non-completed runs is harmful (ghost-concurrency zombies hold the workflow's
-concurrency group and a re-enqueued entry queues behind them).
+concurrency group and a re-enqueued entry queues behind them). A removed
+entry (`UNKNOWN` over `removed_from_merge_queue`) is cross-checked against
+PR state: `MERGED` consumed it legitimately; an `OPEN` PR is the
+bot-eviction class whose recovery is a plain re-enqueue (`gh pr merge
+--auto`). Verify the check rollup manually — the detector does not fetch it.
+The `reviewDecision` rollup reads EMPTY even with live approvals; use the
+reviews API.
 
-For a `removed_from_merge_queue` timeline event, cross-check the PR state
-first: a `MERGED` PR consumed its entry legitimately; an `OPEN` PR with green
-checks is the bot-eviction class whose recovery is a plain re-enqueue
-(`gh pr merge --auto`), not the close/reopen power-cycle. Verify the check
-rollup manually — the detector does not fetch it. The `reviewDecision`
-rollup reads EMPTY even with live approvals; use the reviews API.
+### Failed merge-group batch classification
 
 For a failed `merge_group` batch, classify it before diagnosing
 (issue #3487):
@@ -216,10 +222,18 @@ For a failed `merge_group` batch, classify it before diagnosing
 bun scripts/ci/merge-group-stale-runner-classifier.ts --run <run-id>
 ```
 
-`runner-stale-clone` means a self-hosted runner's clone was stale
-(`fatal: git upload-pack: not our ref` at the checkout step): repair is
-out-of-band, then re-enqueue idempotently. Do NOT `gh run rerun --failed` an
-evicted batch. `test-failure` names a real failing job; read its log.
+The classifier reads per-job step evidence (never logs alone) and exits 0
+for every verdict, 1 for usage/gh errors. `runner-stale-clone`: routed jobs
+died at their `actions/checkout` step with hosted legs green — repair is
+out-of-band, then re-enqueue idempotently; do NOT `gh run rerun --failed` an
+evicted batch. `test-failure` outranks a coexisting checkout death: a real
+failing job is named in the reason; read its log. `unknown`: evidence gap or
+unexplained failure — inspect the run manually. Real work failures can never
+be excused as runner-side, even with no logs.
+
+These steps shell out to `gh` and repo-local scripts; in the remote/MCP
+environment where `gh` is unavailable, report the queue or batch state to
+the user instead of attempting the recovery.
 
 ## Step 6 — Verify all green
 

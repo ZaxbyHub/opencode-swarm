@@ -16,7 +16,7 @@ import { classifyMergeGroupFailure } from '../../../../scripts/ci/merge-group-st
  */
 
 const CHECKOUT_STEP =
-	'Run actions/checkout@3d3c42e5aac5ba805825da76410b181273ba90b1';
+	'Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1';
 const NOT_OUR_REF_LINE =
 	'fatal: git upload-pack: not our ref 67fda011e4611d2824fc4363ae1da1564da1fcb0';
 
@@ -253,5 +253,83 @@ describe('merge-group stale-runner classifier negative (C5, issue #3487 AC2)', (
 			quality: `echo ${NOT_OUR_REF_LINE}`,
 		});
 		expect(result.verdict).toBe('test-failure');
+	});
+});
+
+describe('feedback-round regressions (pr3490-fb1: FB-06/09/10/14)', () => {
+	test('FB-06: a HOSTED checkout death beside a routed checkout death → unknown, never runner-stale-clone', () => {
+		// The badHosted gate: a hosted (non-unit-passed) job that also died at
+		// checkout is unexplained — the runner-side verdict must not absorb it.
+		const jobs = [
+			checkoutDeath('quality', 8),
+			checkoutDeath('unit (windows-latest, 3)', 13),
+			green('detect-release', 1),
+		];
+		const result = classifyMergeGroupFailure(jobs, {});
+		expect(result.verdict).toBe('unknown');
+		expect(result.reason).toContain('unexplained failure');
+		expect(result.reason).toContain('unit (windows-latest, 3)');
+	});
+
+	test('FB-14: a failing ROUTED job with only whitelisted-named steps is not masked', () => {
+		// coverage failing only at a step NAMED like the unit-passed cascade:
+		// realWorkFailure=false (whitelisted name), cascadeAggregate=false
+		// (wrong job), checkoutFailed=false — the unexplained rule must catch it.
+		const jobs = [
+			checkoutDeath('quality', 8),
+			workFailure('coverage', 'Check unit job result', 10),
+			green('detect-release', 1),
+		];
+		const result = classifyMergeGroupFailure(jobs, {});
+		expect(result.verdict).toBe('unknown');
+		expect(result.verdict).not.toBe('runner-stale-clone');
+		expect(result.reason).toContain('coverage');
+	});
+
+	test('FB-10: coverage failing at its fail-closed shard check → test-failure (conservative, not whitelisted)', () => {
+		const jobs = [
+			green('detect-release', 1),
+			workFailure('quality', 'Merge shard reports and enforce threshold', 8),
+			workFailure('coverage', 'Check coverage shard results (fail closed)', 10),
+		];
+		const result = classifyMergeGroupFailure(jobs, {});
+		expect(result.verdict).toBe('test-failure');
+		expect(result.reason).toContain('coverage');
+	});
+
+	test('FB-09: a cancelled hosted leg is named in the reason instead of "hosted legs green"', () => {
+		const jobs = [
+			checkoutDeath('quality', 8),
+			job('unit (windows-latest, 3)', 'cancelled', [], 13),
+			green('detect-release', 1),
+		];
+		const result = classifyMergeGroupFailure(jobs, {});
+		expect(result.verdict).toBe('runner-stale-clone');
+		expect(result.reason).toContain('hosted legs not green');
+		expect(result.reason).toContain('unit (windows-latest, 3) (cancelled)');
+	});
+
+	test('FB-12: control characters in job names cannot forge reason lines', async () => {
+		const { sanitizeJobName } = await import(
+			'../../../../scripts/ci/merge-group-stale-runner-classifier'
+		);
+		const ESC = String.fromCharCode(27);
+		const NL = String.fromCharCode(10);
+		const hostile = `quality${NL}runner-stale-clone run=9999${ESC}[31mVERDICT${ESC}[0m`;
+		const jobs = [
+			checkoutDeath('quality', 8),
+			job(hostile, 'failure', [], 99),
+			green('detect-release', 1),
+		];
+		const result = classifyMergeGroupFailure(jobs, {});
+		expect(result.verdict).toBe('unknown');
+		// No raw control character survives into the echoed reason.
+		for (let i = 0; i < result.reason.length; i++) {
+			const codeUnit = result.reason.charCodeAt(i);
+			expect(codeUnit).toBeGreaterThanOrEqual(32);
+			expect(codeUnit).not.toBe(127);
+		}
+		expect(sanitizeJobName(`a${NL}b`)).toBe('a b');
+		expect(sanitizeJobName(`${ESC}[31m`)).toBe(' [31m');
 	});
 });

@@ -26,9 +26,11 @@
  *
  * ORPHANED requires ALL of: the last queue event is `added_to_merge_queue`
  * or `auto_merge_enabled`, its age exceeds the threshold (default 150
- * minutes), and ZERO queue builds are in progress. Any in-progress queue
- * build wins (`BUILDING`) — force-cycling over an active build is strictly
- * worse than waiting, and ghost-concurrency zombies hold the workflow's
+ * minutes), and ZERO queue builds are in a non-terminal state. Any
+ * queued/waiting/in-progress queue build wins (`BUILDING` — run-level
+ * status stays `queued` under runner contention while jobs execute) —
+ * force-cycling over an active build is strictly worse than waiting, and
+ * ghost-concurrency zombies hold the workflow's
  * concurrency group, so recovery must cancel only runs that PREDATE the
  * current entry, never blanket-cancel.
  */
@@ -45,6 +47,16 @@ const GH_MAX_BUFFER = 16 * 1024 * 1024;
 const RUN_LIST_WINDOW = 100;
 
 /**
+ * Run-level statuses that mean a queue build exists for this entry. Run-level
+ * `queued` is NORMAL under runner contention while the group's jobs execute —
+ * counting only `in_progress` produced a false ORPHANED on a live head
+ * (pr-3465, run 40605817703: run `queued`, 6 jobs in_progress). Anything that
+ * is not a terminal status blocks the power-cycle.
+ */
+const ACTIVE_RUN_STATUSES = new Set(['in_progress', 'queued', 'waiting', 'pending', 'requested']);
+const NUMERIC_ARG_PATTERN = /^\d+$/;
+
+/**
  * @typedef {Object} QueueTimelineEvent
  * @property {string} event
  * @property {string} [created_at]
@@ -52,6 +64,7 @@ const RUN_LIST_WINDOW = 100;
  * @typedef {Object} QueueRunRef
  * @property {string} [headBranch]
  * @property {string} status
+ * @property {string} [createdAt] window-coverage guard input (FB-02)
  *
  * @typedef {Object} ClassifyOptions
  * @property {number} now epoch milliseconds
@@ -88,7 +101,8 @@ export function classify(timelineEvents, runs, options) {
 	const activeBuild = (Array.isArray(runs) ? runs : []).some(
 		(run) =>
 			run &&
-			run.status === 'in_progress' &&
+			typeof run.status === 'string' &&
+			ACTIVE_RUN_STATUSES.has(run.status) &&
 			typeof run.headBranch === 'string' &&
 			run.headBranch.startsWith(prefix),
 	);
@@ -125,24 +139,28 @@ const USAGE = 'usage: check-merge-queue-progress.mjs --pr <n> [--threshold <minu
  * @returns {number}
  */
 export function runCli(argv, io) {
-	let pr = 0;
-	let threshold;
+	let pr = '';
+	let threshold = '';
 	const rest = [...(Array.isArray(argv) ? argv : [])];
 	while (rest.length > 0) {
 		const arg = rest.shift();
 		if (arg === '--pr') {
-			pr = Number.parseInt(String(rest.shift() ?? ''), 10);
+			pr = String(rest.shift() ?? '');
 		} else if (arg === '--threshold') {
-			threshold = Number.parseInt(String(rest.shift() ?? ''), 10);
+			threshold = String(rest.shift() ?? '');
 		} else {
 			io.err(USAGE);
 			return 1;
 		}
 	}
-	if (!Number.isInteger(pr) || pr <= 0 || (threshold !== undefined && (!Number.isInteger(threshold) || threshold <= 0))) {
+	// Strict digits-only: Number.parseInt silently coerced '42abc'→42 and
+	// '150m'→150, and a unit-collapsed threshold manufactured a false ORPHANED.
+	if (!NUMERIC_ARG_PATTERN.test(pr) || pr === '0' || (threshold !== '' && (!NUMERIC_ARG_PATTERN.test(threshold) || threshold === '0'))) {
 		io.err(USAGE);
 		return 1;
 	}
+	const prNumber = Number.parseInt(pr, 10);
+	const thresholdMinutes = threshold === '' ? undefined : Number.parseInt(threshold, 10);
 
 	/** @type {any} */
 	let repo;
@@ -160,10 +178,19 @@ export function runCli(argv, io) {
 			'api',
 			'--paginate',
 			'--slurp',
-			`repos/${repo?.nameWithOwner}/issues/${pr}/timeline`,
+			`repos/${repo?.nameWithOwner}/issues/${prNumber}/timeline`,
 		]);
-		runList = io.ghJson(['run', 'list', '--limit', String(RUN_LIST_WINDOW), '--json', 'headBranch,status']);
-		prState = io.ghJson(['pr', 'view', String(pr), '--json', 'state']);
+		runList = io.ghJson([
+			'run',
+			'list',
+			'--limit',
+			String(RUN_LIST_WINDOW),
+			'--event',
+			'merge_group',
+			'--json',
+			'headBranch,status,createdAt',
+		]);
+		prState = io.ghJson(['pr', 'view', String(prNumber), '--json', 'state']);
 	} catch (error) {
 		io.err(`gh call failed: ${error instanceof Error ? error.message : String(error)}`);
 		return 1;
@@ -173,24 +200,68 @@ export function runCli(argv, io) {
 		io.err('timeline payload was not a slurped array; refusing to classify on partial data');
 		return 1;
 	}
+	if (!Array.isArray(runList)) {
+		// The run window is the zero-active-builds oracle behind the ORPHANED
+		// verdict — a malformed window must fail closed exactly like the
+		// timeline, never read as "no builds exist".
+		io.err('run-list payload was not an array; refusing to classify on partial data');
+		return 1;
+	}
 	const events = timeline.flat();
-	const runs = Array.isArray(runList) ? runList : [];
-	const state = typeof prState?.state === 'string' ? prState.state : 'UNKNOWN';
+	const runs = runList;
+	const rawState = typeof prState?.state === 'string' ? prState.state : 'UNKNOWN';
+	// Strip C0/DEL control characters without a regex class (escapes have
+	// been mangled into raw bytes by scripted edits twice in this file's
+	// history) so the state cannot forge lines in the verdict output.
+	const state = Array.from(rawState, (ch) =>
+		ch.codePointAt(0) >= 32 && ch.codePointAt(0) !== 127 ? ch : ' ',
+	).join('');
 
+	const now = typeof io.now === 'function' ? io.now() : Date.now();
 	const result = classify(events, runs, {
-		now: typeof io.now === 'function' ? io.now() : Date.now(),
-		thresholdMinutes: threshold,
-		pr,
+		now,
+		thresholdMinutes,
+		pr: prNumber,
 	});
-	io.log(`${result.verdict} pr=${pr} age=${result.ageMinutes ?? 'unknown'} state=${state}`);
+	// Window-coverage guard: ORPHANED reasons from "zero active builds in the
+	// window". If the newest-100 slice does not reach back to the entry's
+	// acceptance event, zero-active is unproven — fail closed to UNKNOWN.
 	if (result.verdict === 'ORPHANED') {
-		io.log(
-			`recovery: gh pr close ${pr} --comment "orphaned queue entry" && gh pr reopen ${pr} && gh pr merge ${pr}`,
+		const lastCreatedAt = Date.parse(
+			String(events.filter((e) => e && typeof e.event === 'string' && QUEUE_EVENT_PATTERN.test(e.event)).map((e) => e.created_at).filter(Boolean).sort().at(-1) ?? ''),
 		);
-		io.log(
-			'caution: cancel only runs that PREDATE the current entry — blanket-cancelling non-completed runs is harmful',
-		);
-	} else if (result.verdict === 'UNKNOWN' && result.lastEvent === 'removed_from_merge_queue') {
+		const windowOldest = runs
+			.map((run) => Date.parse(String(run?.createdAt ?? '')))
+			.filter((t) => Number.isFinite(t))
+			.sort((a, b) => a - b)[0];
+		if (Number.isFinite(lastCreatedAt) && Number.isFinite(windowOldest) && windowOldest > lastCreatedAt) {
+			result.verdict = 'UNKNOWN';
+			io.log(
+				'note: the 100-run merge_group window does not reach back to the entry event; zero-active-builds is unproven',
+			);
+		}
+	}
+	io.log(`${result.verdict} pr=${prNumber} age=${result.ageMinutes ?? 'unknown'} state=${state}`);
+	if (result.verdict === 'ORPHANED') {
+		if (state === 'OPEN') {
+			io.log(
+				`recovery: gh pr close ${prNumber} --comment "orphaned queue entry" && gh pr reopen ${prNumber} && gh pr merge ${prNumber}`,
+			);
+			io.log(
+				'caution: cancel only runs that PREDATE the current entry — blanket-cancelling non-completed runs is harmful',
+			);
+		} else {
+			// The docstring mandates the state cross-check before any action:
+			// a MERGED/CLOSED PR consumed its entry legitimately, and GitHub
+			// forbids reopening merged PRs anyway.
+			io.log(
+				`no recovery printed: PR state is ${state}, not OPEN — the entry state is stale or the timeline is incomplete; verify manually`,
+			);
+		}
+	} else if (result.lastEvent === 'removed_from_merge_queue') {
+		// Cross-check guidance must survive the BUILDING precedence too: a
+		// removed entry with a still-running ghost build is exactly the
+		// mid-build-eviction shape from the field evidence.
 		if (state === 'MERGED') {
 			io.log('entry consumed by merge; nothing to do');
 		} else {
@@ -226,6 +297,7 @@ export function main(io = {}, argv = process.argv.slice(2)) {
 		ghJson: io.ghJson ?? ghJson,
 		log: io.log ?? ((line) => console.log(line)),
 		err: io.err ?? ((line) => console.error(line)),
+		now: io.now,
 	};
 	process.exitCode = runCli(argv, wired);
 }

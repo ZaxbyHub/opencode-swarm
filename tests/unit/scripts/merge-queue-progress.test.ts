@@ -41,7 +41,7 @@ function completedRuns(
 /** Records every ghJson call so tests can assert exact argv. */
 function fakeIo(responses: {
 	timeline?: unknown;
-	runs?: Array<{ headBranch: string; status: string }>;
+	runs?: unknown;
 	state?: string;
 	timelineError?: Error;
 }) {

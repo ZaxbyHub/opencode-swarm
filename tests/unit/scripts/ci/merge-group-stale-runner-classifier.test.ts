@@ -22,7 +22,7 @@ import {
  */
 
 const CHECKOUT_STEP =
-	'Run actions/checkout@3d3c42e5aac5ba805825da76410b181273ba90b1';
+	'Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1';
 const NOT_OUR_REF_LINE =
 	'fatal: git upload-pack: not our ref 67fda011e4611d2824fc4363ae1da1564da1fcb0';
 
