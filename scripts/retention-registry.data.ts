@@ -4257,7 +4257,6 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/tools/file-extractor.ts',
 			'src/services/skill-reviser.ts',
 			'src/tools/apply-patch.ts',
-			'src/sandbox/macos/sandbox-exec-executor.ts',
 			'src/sandbox/win32/native-sandbox-executor.ts',
 			'src/tools/external-skill-promote.ts',
 		],

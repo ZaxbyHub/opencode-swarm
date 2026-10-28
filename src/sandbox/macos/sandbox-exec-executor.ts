@@ -13,9 +13,8 @@
  */
 
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import * as os from 'node:os';
-import * as path from 'node:path';
 import { warn } from '../../utils/logger';
 import { isValidEnvKey, SandboxError, type SandboxExecutor } from '../executor';
 
@@ -69,6 +68,46 @@ function resolveProbeTargetBinary(): string {
 	return resolveBinary(TRUE_ABSOLUTE, 'true');
 }
 
+/** The one filesystem call realpathOrSelf needs; injectable for tests. */
+interface ResolveFs {
+	realpath(p: string): string;
+}
+
+const REAL_FS: ResolveFs = { realpath: realpathSync };
+
+/** The macOS system links: /tmp, /var and /etc are links into /private. */
+const SYSTEM_LINK_PREFIX = /^\/(tmp|var|etc)(?=\/|$)/;
+
+/**
+ * Return the kernel-resolved form of a path under one of the macOS system
+ * links (`/tmp`, `/var`, `/etc` -> `/private/...`) for embedding in an SBPL
+ * profile. Seatbelt matches `subpath` predicates against the kernel-resolved
+ * path, so the unresolved form of such a path never matches and its allow
+ * line is inert.
+ *
+ * Fail closed by construction: the result is the INPUT STRING with the leading
+ * system prefix swapped (`/var/x` -> `/private/var/x`); the filesystem is
+ * consulted only to confirm that this host's `/var` really is the link to
+ * `/private/var`. No other symlink is ever followed, so a link created inside
+ * a project can neither change the result nor widen the profile to its
+ * target, and there is no check-then-resolve window to race. Any other path
+ * (another prefix, a host where the link is absent, an error) is returned
+ * unchanged: an already-resolved path matches as it always did, while a path
+ * under some other symlink stays unresolved, Seatbelt does not match it, and
+ * its allow line is inert (writes denied, as before).
+ */
+function realpathOrSelf(p: string, fsx: ResolveFs = REAL_FS): string {
+	const match = SYSTEM_LINK_PREFIX.exec(p);
+	if (!match) return p;
+	const target = `/private/${match[1]}`;
+	try {
+		if (fsx.realpath(`/${match[1]}`) !== target) return p;
+	} catch {
+		return p;
+	}
+	return `/private${p}`;
+}
+
 /**
  * Build the SBPL profile used ONLY for availability probing.
  *
@@ -91,7 +130,7 @@ function buildProbeProfile(tempDir: string): string {
 	return `(version 1)
 (allow default)
 (deny file-write*)
-(allow file-write* (subpath "${sbplEscapePath(tempDir)}"))`;
+(allow file-write* (subpath "${sbplEscapePath(realpathOrSelf(tempDir))}"))`;
 }
 
 /**
@@ -200,6 +239,7 @@ export const _internals: {
 	resetProbeMemo: typeof resetProbeMemo;
 	buildSandboxProfile: typeof buildSandboxProfile;
 	buildProbeProfile: typeof buildProbeProfile;
+	realpathOrSelf: typeof realpathOrSelf;
 	buildEnvOverridePrefix: typeof buildEnvOverridePrefix;
 	resolveSandboxExecBinary: typeof resolveSandboxExecBinary;
 	resolveProbeTargetBinary: typeof resolveProbeTargetBinary;
@@ -211,6 +251,7 @@ export const _internals: {
 	resetProbeMemo,
 	buildSandboxProfile,
 	buildProbeProfile,
+	realpathOrSelf,
 	buildEnvOverridePrefix,
 	resolveSandboxExecBinary,
 	resolveProbeTargetBinary,
@@ -308,10 +349,13 @@ function sbplEscapePath(path: string): string {
  * (see buildEnvOverridePrefix / wrapCommand).
  */
 function buildSandboxProfile(scopePaths: string[], tempDir: string): string {
-	// Collect unique paths to allow read-write
-	const rwPaths = [...scopePaths];
+	// Collect the paths to allow read-write. The macOS system links (/tmp, /var,
+	// /etc) are embedded in kernel-resolved form (see realpathOrSelf); other
+	// paths are embedded as given. The temp dir (os.tmpdir() in production) is
+	// always granted, so its whole tree is writable inside the sandbox.
+	const rwPaths = scopePaths.map((p) => realpathOrSelf(p));
 	if (tempDir) {
-		rwPaths.push(tempDir);
+		rwPaths.push(realpathOrSelf(tempDir));
 	}
 
 	// Build (allow file-write* (subpath "...")) lines for each rw path
@@ -450,30 +494,15 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 
 		const profile = buildSandboxProfile(allScopes, temp);
 
-		// Write profile to a dedicated temp directory (mkdtempSync ensures a unique dir per call)
-		let profilePath: string;
-		try {
-			const profileDir = mkdtempSync(path.join(os.tmpdir(), 'sandbox-'));
-			profilePath = path.join(
-				profileDir,
-				`profile-${process.pid}-${Date.now()}.sb`,
-			);
-			writeFileSync(profilePath, profile, { mode: 0o600 });
-		} catch (err: unknown) {
-			const message = err instanceof Error ? err.message : String(err);
-			warn(
-				`Sandbox disabled: failed to write profile (${message}). Falling through to tool-layer enforcement.`,
-			);
-			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
-		}
-
-		// <sandbox-exec> -f <profile> bash -c '<command>'
+		// <sandbox-exec> -p '<profile>' bash -c '<command>'
+		// The profile is passed INLINE (-p), never staged in a file: the temp dir
+		// is inside the write grant, so a staged profile under os.tmpdir() could be
+		// rewritten by a still-running sandboxed process before a later call's
+		// sandbox-exec reads it, and a file also accumulates in os.tmpdir() for
+		// every call. Nothing is written to disk, so there is nothing to race.
 		// Resolved to the base-OS absolute path (F6) so this can never resolve
 		// to a broken PATH shim (e.g. an xcode-select stub that fails after a
 		// successful spawn with an unrelated `xcrun: error`).
-		// Profile file persists for the lifetime of the spawned process.
-		// Note: profile files accumulate in os.tmpdir() over time. This is
-		// acceptable — they are small text files with allowlist rules, no secrets.
 		const binary = _internals.resolveSandboxExecBinary();
 		// Env overrides run FIRST, inside the inner shell, before the user
 		// command (issue #2590): the prefix ends in '; ' so it composes with
@@ -481,8 +510,8 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 		// below for the outer `bash -c '…'` context.
 		const envPrefix = buildEnvOverridePrefix(envOverrides);
 		const escapedCommand = shellEscape(`${envPrefix}${command}`);
-		const escapedProfilePath = shellEscape(profilePath);
-		return `${binary} -f '${escapedProfilePath}' bash -c '${escapedCommand}'`;
+		const escapedProfile = shellEscape(profile);
+		return `${binary} -p '${escapedProfile}' bash -c '${escapedCommand}'`;
 	}
 
 	/**

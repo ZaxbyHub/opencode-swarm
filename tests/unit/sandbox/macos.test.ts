@@ -154,13 +154,13 @@ describe('MacOSSandboxExecutor', () => {
 		});
 
 		describe('wrapCommand()', () => {
-			test('generates a <sandbox-exec> -f <profile> bash -c command when available', () => {
+			test('generates a <sandbox-exec> -p <profile> bash -c command when available', () => {
 				_internals.probeSandboxExec = mock(() => true);
 				const executor = new MacOSSandboxExecutor(['/scope']);
 				const result = executor.wrapCommand('echo hello', []);
 				expect(result).toContain('sandbox-exec');
-				expect(result).toContain('-f');
-				expect(result).toMatch(/sandbox-exec -f .+ bash -c/);
+				expect(result).not.toContain(' -f ');
+				expect(result).toMatch(/sandbox-exec -p '[\s\S]+' bash -c '/);
 			});
 
 			test('embeds the shell command inside bash -c', () => {

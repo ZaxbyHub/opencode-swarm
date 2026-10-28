@@ -154,7 +154,7 @@ describe('macOS sandbox-exec activation tests (issue #2590 follow-ups)', () => {
 					const echoCmd = `echo "ac008" > "${testFile}"`;
 
 					// 100 real wrapped spawns: each pays wrapCommand's fixed cost
-					// (mkdtempSync + profile write + sandbox-exec launch + SBPL
+					// (profile build + sandbox-exec launch + SBPL
 					// compile). ISSUE #2590 CI evidence (2026-09-07): a
 					// percentage bound over a trivial `bash -c echo` baseline is
 					// structurally unachievable for a spawn-per-command sandbox
