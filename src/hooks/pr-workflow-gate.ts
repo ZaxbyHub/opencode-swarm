@@ -8266,7 +8266,7 @@ export async function assertPrReviewValidationSettled(
 						(composed.diagnostics.length > 0
 							? `; diagnostics: ${composed.diagnostics.join(' | ')}`
 							: '') +
-						`; N-of-M settlement not admissible (${admission.reason}); per-item attempts: ${attemptText}; settle or re-dispatch the unclaimed items to exhaust the retry budget, or complete downgrade-only once admissible`,
+						`; N-of-M settlement not admissible (${admission.reason}); per-item attempts: ${attemptText}; settle or re-dispatch the unclaimed items (a re-dispatched lane resolves the item on success), or complete downgrade-only once admissible; an item owned by a classless terminal (e.g. a host-aborted lane) never becomes admissible — complete the workflow with an INCOMPLETE verdict to exit while naming it`,
 				);
 			}
 			const runId = state.prReviewArtifactRunId ?? state.prReviewReservedRunId;
@@ -20778,6 +20778,26 @@ export async function validatePrWorkflowTransportRecovery(
 			acceptedReviewItemIds: [...itemIds],
 			rejectedReviewItemIds: [],
 		};
+		// #3357 AC2 + feedback round (PRR-004/PRR-006): surface quarantined
+		// strays on the SAME durable receipt surface as the recovery entries.
+		// The reason is arm-neutral ("for id", never "for unassigned id"):
+		// analysis.quarantined merges the #3310 post-parse-arity arm — whose
+		// rows may carry ASSIGNED ids — with the #3357 over-arrival arm, so a
+		// hard-coded "unassigned" would be a false durable statement for
+		// #3310 rows. Entries are capped (PRR-006): a stray-heavy artifact
+		// must not inflate the durable record without bound; the last entry
+		// carries the overflow count.
+		const maxQuarantineReceiptEntries = 16;
+		const quarantinedStrays = analysis.quarantined ?? [];
+		const itemizedQuarantined = quarantinedStrays.slice(
+			0,
+			maxQuarantineReceiptEntries,
+		);
+		const overflowCount = quarantinedStrays.length - itemizedQuarantined.length;
+		const overflowNote =
+			overflowCount > 0
+				? `; +${overflowCount} more quarantined row(s) not itemized`
+				: '';
 		const recoveries = [
 			...(analysis.recoveries ?? []).map(({ recovery, itemId }) => ({
 				workflowLane,
@@ -20786,6 +20806,15 @@ export async function validatePrWorkflowTransportRecovery(
 					recovery === 'legacy-fidelity-safe'
 						? `legacy verdict row ${itemId} used trailing-field pipe recovery with full field fidelity`
 						: `legacy verdict row ${itemId} used trailing-field pipe recovery with lossy prose normalization`,
+			})),
+			...itemizedQuarantined.map((stray, index) => ({
+				workflowLane,
+				kind: 'legacy-verdict-row-quarantine' as const,
+				reason: `legacy verdict row for id ${stray.itemId} quarantined at raw arity ${stray.arity} (grammar noise; carries no authenticable verdict)${
+					overflowCount > 0 && index === itemizedQuarantined.length - 1
+						? overflowNote
+						: ''
+				}`,
 			})),
 			...(input.result.truncated === true
 				? [

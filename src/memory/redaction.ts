@@ -9,20 +9,62 @@ interface SecretPattern {
 }
 
 const SECRET_PATTERNS: SecretPattern[] = [
+	// #3382: the whole-token bearer arm runs FIRST so a compound span (e.g. an
+	// AWS key embedded inside a bearer token) is redacted WHOLE. redactSecrets
+	// applies patterns sequentially over the mutated string, and every
+	// replacement placeholder contains `[`/`:` — outside the bearer token's
+	// charset — so once this arm fires, no later arm can match inside the
+	// token again (at the old position, a de-anchored earlier arm could split
+	// the token and leave its tail in cleartext).
+	{
+		type: 'authorization_bearer',
+		pattern: /\bAuthorization\s*:\s*Bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
+	},
 	{ type: 'openai_api_key', pattern: /\bsk-[A-Za-z0-9_-]{20,}\b/g },
+	// #3382: the two AWS-secret arms run BEFORE the bare access-key arm.
+	// redactSecrets applies patterns sequentially over the mutated string, so
+	// a bare `AKIA…` replacement would destroy the anchor the context arm
+	// needs and leave the 40-char secret un-redacted (overlap masking —
+	// pre-existing for exact-40 context secrets, closed with this reorder;
+	// the reorder also makes the context arm LIVE — see its note below).
+	// #3382: the credential arms below are deliberately NOT \b-anchored: a
+	// credential embedded inside a longer charset-clean token loses both word
+	// boundaries and passed through unredacted at the old anchored forms.
+	// Anchors are KEPT where the short alnum-only prefix collides with
+	// ordinary text: openai `sk-` ("task-", "disk-"), stripe `sk_`/`rk_`
+	// ("risk_live_…"), and `jwt` (`eyJ` sits inside base64 blobs). The github
+	// prefixes stay unanchored but their bodies are tightened to
+	// `[A-Za-z0-9]` (no `_`): real classic tokens are base62, and the
+	// underscore-free body is what keeps benign snake_case identifiers like
+	// `load_ghs_metadata_from_cache_store` from matching (the `ghs_` subword
+	// plus an underscore-free 20-char run cannot occur in snake_case).
 	{
 		type: 'github_token',
-		pattern: /\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b/g,
+		pattern:
+			/(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g,
 	},
-	{ type: 'aws_access_key_id', pattern: /\bAKIA[0-9A-Z]{16}\b/g },
+	{
+		type: 'aws_secret_access_key',
+		pattern:
+			/\b(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY|secret_access_key|SecretAccessKey)"?\s*[=:]\s*["']?[A-Za-z0-9/+=]{40}/g,
+	},
+	// #3382: this arm is LIVE since the reorder (at base the bare `AKIA…` arm
+	// always consumed the anchor first). Whole-match replacement redacts the
+	// ENTIRE span — the AKIA id, up to 200 chars of interposed text, and the
+	// 40-char value — so non-secret prose between an access-key id and a
+	// 40-char token on one line is removed from redacted output. That is the
+	// price of redacting the context secret (at base the same shape leaked
+	// the actual 40-char value in cleartext). The 40-char window keeps its
+	// word boundaries: a bare 40-char run inside longer filler never matches.
+	{
+		type: 'aws_secret_access_key_context',
+		pattern: /AKIA[0-9A-Z]{16}[^\n]{0,200}?\b[A-Za-z0-9/+=]{40}\b/g,
+	},
+	{ type: 'aws_access_key_id', pattern: /AKIA[0-9A-Z]{16}/g },
 	{
 		type: 'private_key_block',
 		pattern:
 			/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-	},
-	{
-		type: 'authorization_bearer',
-		pattern: /\bAuthorization\s*:\s*Bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
 	},
 	{
 		type: 'env_secret',
@@ -31,44 +73,32 @@ const SECRET_PATTERNS: SecretPattern[] = [
 	},
 	// FR-08 / DD-05: GitLab tokens. False-positive risk: short `glpat-` strings under 15 chars
 	// are not real tokens; plain "glpat-" without suffix is ignored.
-	{ type: 'gitlab_token', pattern: /\bgl(?:pat|ptt)-[A-Za-z0-9_-]{15,}\b/g },
+	// #3382: separator-bearing prefix, deliberately not \b-anchored (see the
+	// github_token note).
+	{ type: 'gitlab_token', pattern: /gl(?:pat|ptt)-[A-Za-z0-9_-]{15,}/g },
 	// FR-08 / DD-05: Slack tokens. False-positive risk: `xox-` with fewer than 10 chars after the
 	// prefix is not a real Slack token; strings like "xoxb-test" are intentionally excluded.
-	{ type: 'slack_token', pattern: /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g },
+	// #3382: separator-bearing prefix, deliberately not \b-anchored.
+	{ type: 'slack_token', pattern: /xox[abprs]-[A-Za-z0-9-]{10,}/g },
 	// FR-08 / DD-05: JWT tokens. False-positive risk: a single JWT segment (e.g. `eyJonly`) or
 	// strings with only one dot will not match; a full 3-segment base64url token is required.
 	{
 		type: 'jwt_token',
 		pattern: /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
 	},
-	// FR-08 / DD-05: AWS secret access key. False-positive risk: keys shorter than 40 characters
-	// are rejected; the `=`/`:` separator plus key name is required to avoid matching random strings.
-	// #1466: the label set also covers JSON-style `SecretAccessKey` keys — the
-	// optional closing quote lets `"SecretAccessKey": "..."` match.
-	{
-		type: 'aws_secret_access_key',
-		pattern:
-			/\b(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY|secret_access_key|SecretAccessKey)"?\s*[=:]\s*["']?[A-Za-z0-9/+=]{40}\b/g,
-	},
-	// #1466 (DD-05 context heuristic): a 40-char base64 secret sitting on the SAME
-	// line as (within 200 chars after) an AWS access key id. The `[^\n]` window is
-	// intentional — requiring the same logical line keeps the heuristic off
-	// unrelated base64 blobs elsewhere in the document. False-positive risk:
-	// any 40-char base64-ish token within 200 chars after an AKIA id is
-	// redacted together with the id. Keys on separate lines are NOT matched.
-	{
-		type: 'aws_secret_access_key_context',
-		pattern: /\bAKIA[0-9A-Z]{16}\b[^\n]{0,200}?\b[A-Za-z0-9/+=]{40}\b/g,
-	},
 	// FR-08 / DD-05: Stripe secret keys. False-positive risk: keys using prefixes other than
 	// `sk_`/`rk_` or environments other than `live`/`test` are ignored; short strings are excluded.
+	// KEPT \b-anchored: the bare `sk_`/`rk_` prefix collides with English prose
+	// ("risk_live_…" contains "sk_live_"), so de-anchoring would over-redact
+	// ordinary text. Not one of the #3382-named families.
 	{
 		type: 'stripe_secret_key',
 		pattern: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b/g,
 	},
 	// FR-08 / DD-05: Google API keys. False-positive risk: the `AIza` prefix plus 35 additional
 	// chars is required; strings like "AIzaShort" are too short and will not match.
-	{ type: 'google_api_key', pattern: /\bAIza[0-9A-Za-z_-]{35}\b/g },
+	// #3382: fixed-length arm, deliberately not \b-anchored (see the AWS note above).
+	{ type: 'google_api_key', pattern: /AIza[0-9A-Za-z_-]{35}/g },
 	// FR-08 / DD-05: OpenSSH private key blocks. False-positive risk: text that merely mentions
 	// "openssh" without the full `-----BEGIN/END OPENSSH PRIVATE KEY-----` block delimiters
 	// will not match; multiline content between delimiters is required.
@@ -88,9 +118,13 @@ const SECRET_PATTERNS: SecretPattern[] = [
  * cohort-root open. This is honest about what it measures (the regex pattern
  * count + the durable-rejection toggles) — it is NOT a content hash of stored
  * records. Bump the salt constant when the redaction contract changes
- * meaningfully (done for #1466: PII detection settings joined the policy).
+ * meaningfully (done for #1466: PII detection settings joined the policy;
+ * done for #3382: fixed-length credential families match embedded
+ * (non-word-boundary) shapes and the AWS-secret arms now run before the bare
+ * access-key arm, so durable-secret rejection decisions differ between
+ * members on opposite sides of the change).
  */
-export const REDACTION_POLICY_SALT = 2;
+export const REDACTION_POLICY_SALT = 3;
 /**
  * #1466: redaction-policy input. `detectPii`/`rejectDurablePii`/`piiDetector`
  * are optional so non-memory callers (e.g. the consensus miner, which applies
@@ -155,6 +189,12 @@ export interface MemoryCohortFingerprintInput {
  * digest for an unchanged input is a version bump so legacy files surface as
  * "re-run `/swarm memory link`" instead of a false config-mismatch throw.
  *
+ * Version 3 (#3382): again no change to canonicalization, hashing, or
+ * truncation — bumped because `redaction_policy_version` changed for
+ * unchanged user config (REDACTION_POLICY_SALT 2→3 with the embedded-shape
+ * detection and the AWS-secret arm reorder). Same remedy: legacy files
+ * surface as "re-run `/swarm memory link`".
+ *
  * BUMP THIS whenever a change would alter the digest for an unchanged input —
  * e.g. a different hash, a different truncation length, a change to
  * `stableCanonicalStringify`'s output for a reachable input, or a change to the
@@ -162,7 +202,7 @@ export interface MemoryCohortFingerprintInput {
  * comparing fingerprints, so a bump surfaces as "re-run `/swarm memory link`"
  * instead of being misreported as a real provider/embedding config mismatch.
  */
-export const FINGERPRINT_ALGORITHM_VERSION = 2;
+export const FINGERPRINT_ALGORITHM_VERSION = 3;
 
 /**
  * #2062 F-012 (R3 fix): the algorithm version implied by a persisted cohort

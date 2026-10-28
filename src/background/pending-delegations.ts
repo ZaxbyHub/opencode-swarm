@@ -389,6 +389,14 @@ export interface BackgroundPromptSnapshot {
 
 export type BackgroundDelegationRecoveryKind =
 	| 'legacy-verdict-row-recovery'
+	/**
+	 * #3357: quarantined verdict rows — emitted by BOTH quarantine arms in
+	 * `indexVerdictRows`: the #3310 post-parse-arity arm (any row whose
+	 * post-parse arity differs from the legal count, including rows naming
+	 * assigned ids) and the #3357 over-arrival arm (a tail-merged row whose
+	 * id is unassigned).
+	 */
+	| 'legacy-verdict-row-quarantine'
 	| 'parser-normalization'
 	| 'parser-row-recovery'
 	| 'truncated-preview-durable-artifact'
@@ -631,6 +639,7 @@ const WorkflowLaneRecoverySchema = z
 		workflowLane: z.string(),
 		kind: z.enum([
 			'legacy-verdict-row-recovery',
+			'legacy-verdict-row-quarantine',
 			'parser-normalization',
 			'parser-row-recovery',
 			'truncated-preview-durable-artifact',

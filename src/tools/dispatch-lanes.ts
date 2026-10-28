@@ -4474,7 +4474,16 @@ async function settleCollectedLane(args: {
 			// carries its own typed class so widened N-of-M admission can settle
 			// it once the retry budget is exhausted. PR-feedback modes sharing
 			// this catch keep their classless terminal (AC3 floor).
-			if (isPrReviewVerdictLane) {
+			// Issue #3397 (RC-03): a lane the HOST aborted must stay unclassed
+			// even when it produced partial text — an aborted transcript's
+			// contract failure cannot authenticate as typed-dead evidence
+			// (AC26: aborted terminals never typed; classless records block
+			// N-of-M admission by design, verdict-settlement.ts rejects
+			// classless owners before the budget arm).
+			if (
+				isPrReviewVerdictLane &&
+				transcript.terminalError?.kind !== 'aborted'
+			) {
 				prospectiveResult.workflowLaneFailureClass = 'verdict_contract';
 			}
 			await settleDelegationTerminal(
@@ -4554,7 +4563,16 @@ async function settleCollectedLane(args: {
 			// retry budget is exhausted instead of wedging the run. Scoped to
 			// swarm-pr-review:reviewer|critic only; PR-feedback modes keep their
 			// classless terminal (AC3 floor).
-			if (isPrReviewVerdictLane) {
+			// Issue #3397 (RC-03): EXCEPT a lane the host aborted after partial
+			// text — the abort branch above requires !transcript.text, so a
+			// partial-text abort reaches this stamp, and an aborted transcript's
+			// failure is not authentic typed-dead evidence (AC26). Unclassed
+			// keeps blocking N-of-M admission by design (verdict-settlement.ts
+			// rejects classless owners before the budget arm).
+			if (
+				isPrReviewVerdictLane &&
+				transcript.terminalError?.kind !== 'aborted'
+			) {
 				prospectiveResult.workflowLaneFailureClass = 'verdict_contract';
 			}
 		} else if (validation.recoveries?.length) {

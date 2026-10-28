@@ -965,9 +965,20 @@ export interface IndexedVerdictRows {
 	 * grammar noise (typically a Stage-B task row or an echoed format line) —
 	 * they carry no authenticable verdict, so they are quarantined out of the
 	 * exact-set count instead of voiding every valid sibling row. Identifiers
-	 * and arity only; never row prose. A legal-arity row naming an unassigned
-	 * ID is NOT quarantined — that is the spoofing class and still voids the
-	 * lane.
+	 * and arity only; never row prose.
+	 *
+	 * Issue #3357 (second arm): a row that ARRIVED over its legal arity was
+	 * tail-merged back to exactly the legal count (`recoveredOverflow`), so
+	 * the post-parse-arity discriminator above can never see it — the #3310
+	 * headline root cause survived in exactly that shape. When the caller
+	 * supplies the assigned-id set, such a recoveredOverflow row whose
+	 * post-merge id is UNASSIGNED is quarantined on its arrival arity
+	 * (rawFieldCount) instead of being admitted to `markerRows`: over-arrival
+	 * is by construction non-format-conformant (a spoofer copying the injected
+	 * contract card emits exactly the legal arity), so it is grammar noise,
+	 * not spoofing. The spoofing floor is unchanged: a row that arrived at
+	 * EXACTLY the legal arity (no tail-merge) naming an unassigned ID is NOT
+	 * quarantined — that is the spoofing class and still voids the lane.
 	 */
 	quarantined: Array<{
 		marker: '[REVIEWED]' | '[CRITIC]';
@@ -979,6 +990,7 @@ export interface IndexedVerdictRows {
 export function indexVerdictRows(
 	text: string,
 	marker: '[REVIEWED]' | '[CRITIC]',
+	assignedIds?: ReadonlySet<string>,
 ): IndexedVerdictRows {
 	const markerRows: string[][] = [];
 	const rowsByItemId = new Map<string, string[][]>();
@@ -1003,6 +1015,25 @@ export function indexVerdictRows(
 				marker,
 				itemId: boundVerdictRowIdentifier(fields[1]),
 				arity: fields.length,
+			});
+			continue;
+		}
+		if (
+			assignedIds &&
+			row.recoveredOverflow &&
+			!assignedIds.has(fields[1] ?? '')
+		) {
+			// #3357: the row ARRIVED over the legal arity and was tail-merged
+			// down to it, so the #3310 arity discriminator above cannot fire.
+			// With an unassigned id it is Stage-B/echoed-format grammar noise
+			// (over-arrival is non-format-conformant by construction), not the
+			// spoofing class — quarantine on the RAW arrival arity instead of
+			// admitting it into markerRows where it would void every valid
+			// sibling through the exact-set check.
+			quarantined.push({
+				marker,
+				itemId: boundVerdictRowIdentifier(fields[1]),
+				arity: row.rawFieldCount,
 			});
 			continue;
 		}
@@ -1118,7 +1149,7 @@ export function parsePrReviewVerdictRows(
 	>();
 	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
 	const { markerRows, rowsByItemId, recoveries, quarantined } =
-		indexVerdictRows(text, marker);
+		indexVerdictRows(text, marker, new Set(itemIds));
 	for (const itemId of itemIds) {
 		if (itemId === PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID) continue;
 		if (phase === 'reviewer') {

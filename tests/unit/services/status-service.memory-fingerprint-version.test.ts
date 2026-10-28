@@ -117,9 +117,10 @@ describe('#2062 F-012 status-service configFingerprintMatch algorithm_version ha
 
 	test('#1466 legacy config with no algorithm_version is skipped after the v2 bump (no strand)', async () => {
 		// Pre-#1466 (algorithm v1) an absent version meant "current", so the
-		// byte comparison ran. FINGERPRINT_ALGORITHM_VERSION is now 2, so an
-		// absent version means legacy v1: digests are not comparable and the
-		// field stays undefined (fail-open with the re-link advisory).
+		// byte comparison ran. FINGERPRINT_ALGORITHM_VERSION is 3 since
+		// #3382 (was 2 after #1466), so an absent version means legacy v1:
+		// digests are not comparable and the field stays undefined
+		// (fail-open with the re-link advisory).
 		const worktree = setUpLinkedWorktree({ fingerprint: 'deadbeefdead' });
 		const status = await getStatusData(worktree, {});
 		expect(status.memoryCohort?.configFingerprintMatch).toBeUndefined();
