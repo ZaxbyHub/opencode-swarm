@@ -17,6 +17,7 @@
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
+import { BASH_BUILTIN_COMMANDS } from '../shell-write-detect';
 
 // ============================================================================
 // Destructive-command constants
@@ -137,6 +138,163 @@ export function dcNormalizeCommand(cmd: string): string {
 }
 
 /**
+ * Execution-form launcher / process-modifier inner command (#3474/#3475).
+ *
+ * Recognized and unwrapped: `command [-p] CMD…` (execution form only),
+ * `builtin CMD…`, `exec [-c|-l] [-a NAME] CMD…`, `timeout [OPTIONS]
+ * DURATION CMD…` (own options `--foreground`, `--preserve-status`,
+ * `-k/--kill-after DUR`, `-s/--signal SIG`, `=`-glued forms, then one
+ * DURATION token), and `stdbuf [-i|-o|-e MODE|--input/--output/--error
+ * MODE]… [--] CMD…` (both glued and spaced modes). `command -v` / `-V`
+ * (standalone or glued) are QUERY forms and return null — they never
+ * execute CMD, so unwrapping them would fabricate a write out of a lookup.
+ */
+function dcStripExecutionLauncher(t: string): string | null {
+	// #3485 (PRR-005): hostile oversized input must not cost quadratic strip
+	// time — the option loops below scan a bounded prefix (8 KB). Real
+	// launcher option regions are far shorter; anything longer degrades to
+	// same-as-base non-detection instead of a multi-second stall. The quote-
+	// payload arms (-c/encoded/ps) below run on the FULL string (linear).
+	const scanCap = 8192;
+	const bounded = t.length > scanCap;
+	const head = bounded ? t.slice(0, scanCap) : t;
+	const tail = bounded ? t.slice(scanCap) : '';
+	const withTail = (inner: string | null): string | null => {
+		if (inner === null) return null;
+		const joined = `${inner}${tail}`.trim();
+		return joined || null;
+	};
+
+	const cm = /^command\s+(.*)$/is.exec(head);
+	if (cm) {
+		let rest = cm[1];
+		// #3485 (PRR-015): glued `-pp` clusters are legal bash (getopt).
+		while (/^-p+\s+/i.test(rest)) rest = rest.replace(/^-p+\s+/i, '');
+		if (/^-[pvP]*[vV](?:\s|$)/.test(rest)) return null;
+		// `--` ends command's options; the wrapped command follows
+		// (impl-review r1 F2: `command -- rmdir ../x` executes rmdir).
+		if (/^--\s+/.test(rest)) rest = rest.replace(/^--\s+/, '');
+		return withTail(rest.trim() || null);
+	}
+	const bm = /^builtin\s+(.+)$/is.exec(head);
+	if (bm) {
+		// #3485 (PRR-015): `builtin CMD` executes CMD only when CMD is a real
+		// shell builtin — for anything external (`builtin rm …`) bash errors
+		// "not a shell builtin" and runs nothing, so unwrapping would
+		// fabricate destructive/write detections of commands that never ran.
+		const rest = bm[1].replace(/^--\s+/, '');
+		const wrapped = rest.split(/\s+/)[0] ?? '';
+		const leaf =
+			wrapped
+				.split(/[\\/]/)
+				.pop()
+				?.replace(/\.exe$/i, '')
+				.toLowerCase() ?? '';
+		if (!BASH_BUILTIN_COMMANDS.has(leaf)) return null;
+		return withTail(rest.trim() || null);
+	}
+	const em = /^exec\s+(.+)$/is.exec(head);
+	if (em) {
+		let rest = em[1];
+		for (;;) {
+			if (/^--\s+/.test(rest)) {
+				rest = rest.replace(/^--\s+/, '');
+				break;
+			}
+			// #3485 (PRR-015): glued clusters (`-cl`, `-lc`) and attached
+			// `-aNAME` execute the wrapped command (bash internal_getopt).
+			if (/^-[cl]+\s+/i.test(rest)) {
+				rest = rest.replace(/^-[cl]+\s+/i, '');
+				continue;
+			}
+			if (/^-a\S+\s+/i.test(rest)) {
+				rest = rest.replace(/^-a\S+\s+/i, '');
+				continue;
+			}
+			if (/^-a\s+\S+\s+/i.test(rest)) {
+				rest = rest.replace(/^-a\s+\S+\s+/i, '');
+				continue;
+			}
+			break;
+		}
+		return withTail(rest.trim() || null);
+	}
+	const tm = /^timeout\s+(.+)$/is.exec(head);
+	if (tm) {
+		let rest = tm[1];
+		for (;;) {
+			let stripped = true;
+			if (/^--foreground\s+/i.test(rest))
+				rest = rest.replace(/^--foreground\s+/i, '');
+			else if (/^--preserve-status\s+/i.test(rest))
+				rest = rest.replace(/^--preserve-status\s+/i, '');
+			else if (/^--kill-after=\S+\s+/i.test(rest))
+				rest = rest.replace(/^--kill-after=\S+\s+/i, '');
+			else if (/^--signal=\S+\s+/i.test(rest))
+				rest = rest.replace(/^--signal=\S+\s+/i, '');
+			else if (/^--verbose\s+/i.test(rest))
+				rest = rest.replace(/^--verbose\s+/i, '');
+			// #3485 (PRR-015): glued attached-arg shorts (`-sKILL`, `-k5`)
+			// execute the wrapped command exactly like the spaced forms.
+			else if (/^-[sk]\S+\s+/i.test(rest))
+				rest = rest.replace(/^-[sk]\S+\s+/i, '');
+			else if (/^-k\s+\S+\s+/i.test(rest))
+				rest = rest.replace(/^-k\s+\S+\s+/i, '');
+			else if (/^-s\s+\S+\s+/i.test(rest))
+				rest = rest.replace(/^-s\s+\S+\s+/i, '');
+			else if (/^--kill-after\s+\S+\s+/i.test(rest))
+				rest = rest.replace(/^--kill-after\s+\S+\s+/i, '');
+			else if (/^--signal\s+\S+\s+/i.test(rest))
+				rest = rest.replace(/^--signal\s+\S+\s+/i, '');
+			else if (/^-(?:v)\s+/i.test(rest)) rest = rest.replace(/^-(?:v)\s+/i, '');
+			// `--` before the DURATION ends timeout's options (`timeout -- 5
+			// CMD`); a `--` AFTER the duration is NOT consumed — GNU timeout
+			// then fails to exec `--`, so nothing runs (verified).
+			else if (/^--\s+/.test(rest)) rest = rest.replace(/^--\s+/, '');
+			else stripped = false;
+			if (!stripped) break;
+		}
+		// No /i on the SUFFIX: real GNU timeout rejects uppercase suffixes
+		// (`5M` → invalid interval, rc 125, nothing runs — unwrapping
+		// fabricated a detection of a command that never ran, PRR-015). The
+		// duration itself is strtod grammar and IS case-insensitive where GNU
+		// accepts it (probed on real GNU coreutils, EXT-2 M7): `1e3`/`.5`/
+		// `+5`/`5e-1` all run the wrapped command (rc 0), and
+		// `inf`/`INF`/`infinity` mean "no time limit" and run it (rc 124 —
+		// EXT-01). `nan` is rejected (rc 125, nothing runs) and stays
+		// unwrapped.
+		const dm =
+			/^[+-]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[iI][nN][fF](?:[iI][nN][iI][tT][yY])?)[smhd]?\s+(.+)$/.exec(
+				rest,
+			);
+		return dm ? withTail(dm[1].trim()) : null;
+	}
+	const sm = /^stdbuf\s+(.+)$/is.exec(head);
+	if (sm) {
+		let rest = sm[1];
+		for (;;) {
+			let m = /^-[ioe](?:[= ]?\S+)?(?:\s+|$)/i.exec(rest);
+			if (m) {
+				rest = rest.slice(m[0].length);
+				continue;
+			}
+			m = /^--(?:input|output|error)(?:[= ]?\S+)?(?:\s+|$)/i.exec(rest);
+			if (m) {
+				rest = rest.slice(m[0].length);
+				continue;
+			}
+			if (/^--\s+/.test(rest)) {
+				rest = rest.replace(/^--\s+/, '');
+				break;
+			}
+			break;
+		}
+		return withTail(rest.trim() || null);
+	}
+	return null;
+}
+
+/**
  * Strip one layer of a shell wrapper from a command string.
  * Returns the inner command if a wrapper was found, null otherwise.
  *
@@ -190,10 +348,19 @@ export function dcStripOneWrapper(cmd: string): string | null {
 		}
 	}
 
-	// bash/sh/zsh -c "inner" — case-insensitive for consistency with other wrappers
+	// bash/sh/zsh -c "inner" — case-insensitive for consistency with other wrappers.
+	// #3475: single-quoted payloads unwrap identically to double-quoted ones
+	// (a `'...'`-quoted -c argument used to survive unwrapped, hiding every
+	// write inside it). Inner quotes of the OTHER kind survive by construction;
+	// the lazy third alternative keeps the historical unquoted-payload path.
 	const shellMatch =
-		/^(?:bash|sh|zsh|dash|fish)(?:\.exe)?\s+-c\s+"?(.*?)"?\s*$/is.exec(t);
-	if (shellMatch) return shellMatch[1].trim();
+		/^(?:bash|sh|zsh|dash|fish)(?:\.exe)?\s+-c\s+(?:"([^"]*)"|'([^']*)'|"?(.*?)"?)\s*$/is.exec(
+			t,
+		);
+	if (shellMatch) {
+		const inner = shellMatch[1] ?? shellMatch[2] ?? shellMatch[3];
+		return inner.trim();
+	}
 
 	// eval 'inner' / eval "inner" / eval inner — the POSIX builtin executes its
 	// argument as a command, so it must be unwrapped like other wrappers or a
@@ -213,9 +380,18 @@ export function dcStripOneWrapper(cmd: string): string | null {
 	// primary one (impl-review r3 finding 2).
 	const envPrefix =
 		/^env(?:\s+(?:[A-Za-z_][A-Za-z0-9_]*=\S+|(?:-[i0vVh]*[uUCSaP]|--u(?:n(?:s(?:e(?:t)?)?)?)?|--c(?:h(?:d(?:i(?:r)?)?)?)?|--a(?:r(?:g(?:v(?:0)?)?)?)?|--s(?:p(?:l(?:i(?:t(?:-(?:s(?:t(?:r(?:i(?:n(?:g)?)?)?)?)?)?)?)?)?)?)?|--e(?:n(?:v(?:0(?:-(?:f(?:r(?:o(?:m)?)?)?)?)?)?)?)?)\s+\S+|-\S+|--[A-Za-z][A-Za-z0-9-]*))*\s+(.+)$/is;
+	// #3475/#3474: execution-form launcher and process-modifier prefixes.
+	// `command -v`/`-V` (standalone or glued into a short cluster) are QUERY
+	// forms and are deliberately NOT unwrapped — unwrapping would fabricate a
+	// write out of a read-only lookup (plan-critic r2 B3); the same
+	// execution-only rule the detector-level canonical walk applies.
+	const launcherInner = dcStripExecutionLauncher(t);
 	const prefixMatch =
 		/^(?:sudo|time|nohup)\s+(.+)$/is.exec(t) ??
 		envPrefix.exec(t) ??
+		(launcherInner !== null && launcherInner !== ''
+			? [t, launcherInner]
+			: null) ??
 		/^nice\s+(?:-n\s+\d+\s+)?(.+)$/is.exec(t);
 	if (prefixMatch) return prefixMatch[1].trim();
 
