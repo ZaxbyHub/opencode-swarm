@@ -90,9 +90,8 @@ import {
 	dcEvaluateRecursiveDeleteTargets,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
-	dcExtractWindowsCmdTargets,
-	dcHasRecursiveSwitchToken,
 	dcNormalizeCommand,
+	dcParseWindowsRecursiveDelete,
 	dcSplitSegments,
 	dcUnwrapWrappers,
 } from './destructive-command';
@@ -760,43 +759,60 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					throwDestructiveBlock('recursive delete', decision.reason);
 			}
 
-			// Windows cmd.exe: rmdir /s, rd /s — the recursion switch must be a
-			// standalone argument token (or cluster like /s/q) wherever it
-			// appears; a `/s` substring inside a path operand (`rmdir a/share/b`)
-			// is plain POSIX rmdir of a nested path, not a recursive delete
+			// Windows cmd.exe: rmdir/rd — modeled on cmd.exe's actual grammar
+			// (executed ground truth, PR #3499 review round): cmd scans each
+			// UNQUOTED argument for the FIRST `/` — everything after it is
+			// switch text and the text before it is the path. So the switch
+			// may be standalone (`rmdir /s x`), clustered (`/s/q`, `/sq`),
+			// trailing (`rd x /s`), ATTACHED (`rd zzz/s` = `rd zzz /s`),
+			// caret-escaped (`^/^s`), or glued to a quoted operand
+			// (`del /s"file.txt"`). A `/s` substring inside an operand whose
+			// post-slash text is NOT a valid switch cluster (`rmdir
+			// a/share/b` — cmd itself rejects it) is a plain nested path
 			// (issue #3495 item 2).
 			const rmdirSwitchVerb = /^(?:rmdir|rd)(?:\.exe)?\s*/i.exec(seg);
-			if (
-				rmdirSwitchVerb &&
-				dcHasRecursiveSwitchToken(seg.slice(rmdirSwitchVerb[0].length))
-			) {
-				const targets = dcExtractWindowsCmdTargets(seg);
-				if (targets.length === 0) {
-					throwDestructiveBlock(
-						'recursive directory delete',
-						`BLOCKED: Windows recursive directory delete (rmdir /s or rd /s) detected. Verify the target is not a junction/symlink.`,
-					);
+			if (rmdirSwitchVerb) {
+				const parsed = dcParseWindowsRecursiveDelete(
+					seg.slice(rmdirSwitchVerb[0].length),
+				);
+				if (parsed.fires) {
+					if (parsed.targets.length === 0) {
+						throwDestructiveBlock(
+							'recursive directory delete',
+							`BLOCKED: Windows recursive directory delete (rmdir /s or rd /s) detected. Verify the target is not a junction/symlink.`,
+						);
+					}
+					const decision = dcEvaluateRecursiveDeleteTargets({
+						targets: parsed.targets,
+						cwd,
+						verifiedScope,
+					});
+					if (!decision.allowed)
+						throwDestructiveBlock(
+							'recursive directory delete',
+							decision.reason,
+						);
 				}
-				const decision = dcEvaluateRecursiveDeleteTargets({
-					targets,
-					cwd,
-					verifiedScope,
-				});
-				if (!decision.allowed)
-					throwDestructiveBlock('recursive directory delete', decision.reason);
 			}
 
-			// Windows cmd.exe: del /s /q /f — same tokenized switch rule as
-			// rmdir above (issue #3495: `del a/share/b` is a plain delete).
+			// Windows cmd.exe: del — the same grammar model as rmdir above
+			// (`del /s /q /f <path>`, `del x/s`, `del /s"file.txt"`); a
+			// recursion switch with no operand fails closed like the rmdir
+			// arm.
 			const delSwitchVerb = /^del(?:\.exe)?\s*/i.exec(seg);
-			if (
-				delSwitchVerb &&
-				dcHasRecursiveSwitchToken(seg.slice(delSwitchVerb[0].length))
-			) {
-				const targets = dcExtractWindowsCmdTargets(seg);
-				if (targets.length > 0) {
+			if (delSwitchVerb) {
+				const parsed = dcParseWindowsRecursiveDelete(
+					seg.slice(delSwitchVerb[0].length),
+				);
+				if (parsed.fires) {
+					if (parsed.targets.length === 0) {
+						throwDestructiveBlock(
+							'recursive file delete',
+							`BLOCKED: Windows recursive file delete (del /s) detected. Verify the target is not a junction/symlink.`,
+						);
+					}
 					const decision = dcEvaluateRecursiveDeleteTargets({
-						targets,
+						targets: parsed.targets,
 						cwd,
 						verifiedScope,
 					});

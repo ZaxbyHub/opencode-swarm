@@ -37,13 +37,15 @@ describe('issue #3495 explain/enforcement switch parity', () => {
 	});
 
 	test.each([
-		[['rmdir', '/s', 'x'], 'rmdir /s x'],
-		[['rd', 'x', '/s'], 'rd x /s (trailing switch)'],
-		[['rmdir', '/s/q', 'x'], 'rmdir /s/q x (cluster)'],
-		[['del', '/s', 'build-dir'], 'del /s build-dir'],
-		[['rm', '-r', 'dir'], 'rm -r dir'],
-		[['Remove-Item', 'x', '-Recurse'], 'Remove-Item x -Recurse'],
-	])('%s explains as block (genuine switch)', async (args, label) => {
+		['rmdir /s x', ['rmdir', '/s', 'x']],
+		['rd x /s (trailing switch)', ['rd', 'x', '/s']],
+		['rmdir /s/q x (cluster)', ['rmdir', '/s/q', 'x']],
+		['del /s build-dir', ['del', '/s', 'build-dir']],
+		['rd zzz/s (attached switch)', ['rd', 'zzz/s']],
+		['del /s"file.txt" (glued quoted operand)', ['del', '/s"file.txt"']],
+		['rm -r dir', ['rm', '-r', 'dir']],
+		['Remove-Item x -Recurse', ['Remove-Item', 'x', '-Recurse']],
+	])('%s explains as block (genuine switch)', async (label, args) => {
 		const explained = await handleGuardrailExplain(workspace(), [...args]);
 		expect(explained).toMatch(/\| *Decision *\| *block */i);
 	});

@@ -12,13 +12,15 @@
 
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
+import { deriveGateDenialCode } from '../../../src/hooks/gate-denial-tracker';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import { redactPath } from '../../../src/hooks/guardrails/audit-log';
 import {
-	dcExtractWindowsCmdTargets,
+	dcIsSwitchClusterText,
 	dcIsWindowsSwitchCluster,
+	dcParseWindowsRecursiveDelete,
 } from '../../../src/hooks/guardrails/destructive-command';
 import { resetSwarmState, startAgentSession } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
@@ -52,14 +54,13 @@ function config(overrides?: Partial<GuardrailsConfig>): GuardrailsConfig {
 	};
 }
 
-/** Mirror of redactPath's home-profile rule: the home root becomes `~`. */
-function tildeized(absolute: string): string {
-	const home = os.homedir();
-	if (absolute === home) return '~';
-	if (absolute.startsWith(home + path.sep)) {
-		return '~' + absolute.slice(home.length);
-	}
-	return absolute;
+/**
+ * Expected persisted path: the SHIPPED redactPath, not a hand mirror of it
+ * (the mirror diverged from redactPath on non-standard HOME roots and
+ * Windows 8.3 short names — PR #3499 review PRR-010).
+ */
+function expectedPath(absolute: string): string {
+	return normalizedPath(redactPath(absolute));
 }
 
 async function runShell(
@@ -88,10 +89,24 @@ async function runShell(
 
 type AuditRow = Record<string, unknown> | null;
 
-function lastRowOfType(type: string): AuditRow {
+function auditLineCount(): number {
+	const p = path.join(TEST_DIR, '.swarm', 'session', 'shell-audit.jsonl');
+	try {
+		return readFileSync(p, 'utf-8').trim().split('\n').filter(Boolean).length;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * Last row of `type` among lines APPENDED after `minLine` — a whole-file
+ * scan could return a PREVIOUS test's row and satisfy a bound assertion
+ * that its own command never produced (PR #3499 review PRR-006).
+ */
+function lastRowOfType(type: string, minLine = 0): AuditRow {
 	const p = path.join(TEST_DIR, '.swarm', 'session', 'shell-audit.jsonl');
 	const lines = readFileSync(p, 'utf-8').trim().split('\n').filter(Boolean);
-	for (let i = lines.length - 1; i >= 0; i -= 1) {
+	for (let i = lines.length - 1; i >= minLine; i -= 1) {
 		const row = JSON.parse(lines[i]) as Record<string, unknown>;
 		if (row.type === type) return row;
 	}
@@ -106,28 +121,28 @@ describe('shell write-scope audit rows (issue #3495 items 1/3/4)', () => {
 	});
 
 	test('scope denial: row records the exact resolved target, the operator, and the gate-prefixed message', async () => {
+		const before = auditLineCount();
 		await expect(
 			runShell('s-scope', 'echo hi > notes/x.txt', 'coder', ['src/']),
 		).rejects.toThrow(GATE_PREFIX_RE);
 		const row = lastRowOfType('scope_violation');
 		expect(row).not.toBeNull();
 		expect(normalizedPath(String(row?.path))).toBe(
-			normalizedPath(tildeized(path.resolve(TEST_DIR, 'notes/x.txt'))),
+			expectedPath(path.resolve(TEST_DIR, 'notes/x.txt')),
 		);
 		expect(row?.path).not.toBe('SCOPE_VIOLATION:');
 		expect(row?.operator).toBe('>');
 	}, 120_000);
 
 	test('authority denial: row records the exact target, not the token `Agent`', async () => {
+		const before = auditLineCount();
 		await expect(
 			runShell('s-auth', 'echo x > .swarm/state/pwn.json', 'coder', ['src/']),
 		).rejects.toThrow('is not authorised to write');
-		const row = lastRowOfType('scope_violation');
+		const row = lastRowOfType('scope_violation', before);
 		expect(row).not.toBeNull();
-		expect(normalizedPath(String(row?.path))).toBe(
-			normalizedPath(
-				tildeized(path.resolve(TEST_DIR, '.swarm/state/pwn.json')),
-			),
+		expect(expectedPath(String(row?.path))).toBe(
+			expectedPath(path.resolve(TEST_DIR, '.swarm/state/pwn.json')),
 		);
 		expect(row?.path).not.toBe('Agent');
 		expect(row?.operator).toBe('>');
@@ -163,11 +178,14 @@ describe('shell write-scope audit rows (issue #3495 items 1/3/4)', () => {
 
 	test('an oversized write target still produces a bounded persisted row', async () => {
 		const longName = `${'a'.repeat(400)}.txt`;
+		const beforeLong = auditLineCount();
 		await expect(
 			runShell('s-long', `echo hi > notes/${longName}`, 'coder', ['src/']),
 		).rejects.toThrow(GATE_PREFIX_RE);
-		const row = lastRowOfType('scope_violation');
-		// The row must SURVIVE (issue #3495 blocker: an unbounded path made
+		const row = lastRowOfType('scope_violation', beforeLong);
+		// The row must SURVIVE THIS COMMAND (a whole-file scan could return
+		// the previous test's short row and satisfy the bound even if this
+		// row was dropped — PR #3499 review PRR-006) (issue #3495 blocker: an unbounded path made
 		// the store reject the line and the append was swallowed) and stay
 		// within the 320-char bound plus the truncation marker.
 		expect(row).not.toBeNull();
@@ -197,19 +215,38 @@ describe('Windows switch tokenization (issue #3495 item 2)', () => {
 		});
 	});
 
-	describe('dcExtractWindowsCmdTargets', () => {
+	describe('dcParseWindowsRecursiveDelete (cmd.exe grammar)', () => {
 		test.each([
-			['rmdir /s /q x', ['x']],
-			['rd x /s', ['x']],
-			['rmdir /s/q x', ['x']],
-			['rmdir.exe /s /q C:\\target', ['C:\\target']],
-			['del /s/q/f b', ['b']],
-			['rmdir "a dir" /s', ['a dir']],
-			['rmdir "/s" dir', ['/s', 'dir']],
-			['rmdir /s a b', ['a', 'b']],
-			['del notes/x.txt', ['notes/x.txt']],
-		])('%s => %j', (segment, expected) => {
-			expect(dcExtractWindowsCmdTargets(segment)).toEqual(expected);
+			['/s /q x', true, ['x']],
+			['x /s', true, ['x']],
+			['zzz/s', true, ['zzz']],
+			['../s', true, ['..']],
+			['./s', true, ['.']],
+			["'zzz/s'", true, ['zzz']],
+			['^/^s zzz', false, ['zzz']],
+			['/s/q x', true, ['x']],
+			['/sq x', true, ['x']],
+			['/s/q/f b', true, ['b']],
+			['/s"file.txt"', true, ['file.txt']],
+			['a/share/b', false, []],
+			['/s2 x', false, ['x']],
+			['"/s" dir', false, ['/s', 'dir']],
+			['notes/x.txt', false, []], // invalid switch text: cmd errors, nothing deletable
+		])('%s => fires=%j targets=%j', (args, fires, targets) => {
+			expect(dcParseWindowsRecursiveDelete(args)).toEqual({ fires, targets });
+		});
+	});
+
+	describe('dcIsSwitchClusterText', () => {
+		test.each([
+			['s', true],
+			['s/q', true],
+			['sq', true],
+			['share', false],
+			['s2', false],
+			['', false],
+		])('cluster text %s => %j', (text, expected) => {
+			expect(dcIsSwitchClusterText(text)).toBe(expected);
 		});
 	});
 
@@ -252,6 +289,71 @@ describe('Windows switch tokenization (issue #3495 item 2)', () => {
 				'Recursive delete',
 			);
 		}, 120_000);
+	});
+
+	describe('cmd.exe grammar round 2 (PR #3499 review PRR-001..005)', () => {
+		beforeEach(() => {
+			resetSwarmState();
+		});
+
+		test('attached recursion switches block: rd zzz/s, rd ../s, rd ./s', async () => {
+			await expect(runShell('g1', 'rd zzz/s', 'architect')).rejects.toThrow(
+				'Recursive delete',
+			);
+			await expect(runShell('g2', 'rd ../s', 'architect')).rejects.toThrow(
+				'Recursive delete',
+			);
+			await expect(runShell('g3', 'rd ./s', 'architect')).rejects.toThrow(
+				'Recursive delete',
+			);
+		}, 120_000);
+
+		test('caret-escaped and single-quoted switch forms block', async () => {
+			await expect(
+				runShell('g4', 'rmdir ^/^s zzz', 'architect'),
+			).rejects.toThrow('Recursive delete');
+			await expect(
+				runShell('g5', "rmdir 'zzz/s'", 'architect'),
+			).rejects.toThrow('Recursive delete');
+		}, 120_000);
+
+		test('switch glued to a quoted operand blocks: del /s"file.txt"', async () => {
+			await expect(
+				runShell('g6', 'del /s"file.txt"', 'architect'),
+			).rejects.toThrow('Recursive delete');
+			await expect(
+				runShell('g7', 'rd /s"vault-notes"', 'architect'),
+			).rejects.toThrow('Recursive delete');
+		}, 120_000);
+
+		test('a recursion switch with no operand fails closed on both arms', async () => {
+			await expect(runShell('g8', 'rmdir /s', 'architect')).rejects.toThrow(
+				'recursive directory delete',
+			);
+			await expect(runShell('g9', 'del /s', 'architect')).rejects.toThrow(
+				'recursive file delete',
+			);
+		}, 120_000);
+
+		test('a quoted "/s" is a path: the remaining operand reaches the scope gate', async () => {
+			mkdirSync(path.join(TEST_DIR, 'quoted-target'), { recursive: true });
+			await expect(
+				runShell('g10', 'rmdir "/s" quoted-target', 'coder', ['src/']),
+			).rejects.toThrow(/SCOPE_VIOLATION|not authorised/);
+		}, 120_000);
+
+		test('gate-denial classification pins the new prefix (PRR-007)', () => {
+			expect(
+				deriveGateDenialCode(
+					'WRITE BLOCKED [shell-write-scope]: SCOPE_VIOLATION: shell write target "x"',
+				),
+			).toBe('WRITE BLOCKED [shell-write-scope]');
+			expect(
+				deriveGateDenialCode(
+					'WRITE BLOCKED: Agent "coder" is not authorised to write "x"',
+				),
+			).toBe('UNCLASSIFIED');
+		});
 	});
 
 	describe('PowerShell -r/-Recurse arms (same token-vs-substring class)', () => {

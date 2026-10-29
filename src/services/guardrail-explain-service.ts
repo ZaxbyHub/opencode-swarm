@@ -7,9 +7,8 @@ import {
 	dcEvaluateRecursiveDeleteTargets,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
-	dcExtractWindowsCmdTargets,
-	dcHasRecursiveSwitchToken,
 	dcNormalizeCommand,
+	dcParseWindowsRecursiveDelete,
 	dcSplitSegments,
 	dcUnwrapWrappers,
 } from '../hooks/guardrails/destructive-command.js';
@@ -225,42 +224,51 @@ function evaluateDestructiveDecision(
 			}
 		}
 
-		// Windows cmd.exe: rmdir /s, rd /s — tokenized switch match, mirroring
-		// the enforcement gate (issue #3495): a `/s` substring inside a path
-		// operand is a plain delete, and the recursion switch may appear
-		// anywhere (`rd <path> /s`).
+		// Windows cmd.exe: rmdir/rd — the SAME grammar-modeled parse as the
+		// enforcement gate (cmd scans each unquoted argument for the first
+		// `/`; issue #3495, PR #3499 review round).
 		const explainRmdirVerb = /^(?:rmdir|rd)(?:\.exe)?\s*/i.exec(seg);
-		if (
-			explainRmdirVerb &&
-			dcHasRecursiveSwitchToken(seg.slice(explainRmdirVerb[0].length))
-		) {
-			const targets = dcExtractWindowsCmdTargets(seg);
-			if (targets.length === 0) {
-				return {
-					decision: 'block',
-					firingRule:
-						'destructive_block: Windows recursive directory delete (rmdir /s)',
-				};
-			}
-			const targetDecision = dcEvaluateRecursiveDeleteTargets({ targets, cwd });
-			if (!targetDecision.allowed) {
-				return {
-					decision: 'block',
-					firingRule: `${targetDecision.code}: ${targetDecision.reason}`,
-				};
+		if (explainRmdirVerb) {
+			const parsed = dcParseWindowsRecursiveDelete(
+				seg.slice(explainRmdirVerb[0].length),
+			);
+			if (parsed.fires) {
+				if (parsed.targets.length === 0) {
+					return {
+						decision: 'block',
+						firingRule:
+							'destructive_block: Windows recursive directory delete (rmdir /s)',
+					};
+				}
+				const targetDecision = dcEvaluateRecursiveDeleteTargets({
+					targets: parsed.targets,
+					cwd,
+				});
+				if (!targetDecision.allowed) {
+					return {
+						decision: 'block',
+						firingRule: `${targetDecision.code}: ${targetDecision.reason}`,
+					};
+				}
 			}
 		}
 
-		// Windows cmd.exe: del /s /q /f — same tokenized rule (issue #3495).
+		// Windows cmd.exe: del — the same grammar-modeled parse as the gate.
 		const explainDelVerb = /^del(?:\.exe)?\s*/i.exec(seg);
-		if (
-			explainDelVerb &&
-			dcHasRecursiveSwitchToken(seg.slice(explainDelVerb[0].length))
-		) {
-			const targets = dcExtractWindowsCmdTargets(seg);
-			if (targets.length > 0) {
+		if (explainDelVerb) {
+			const parsed = dcParseWindowsRecursiveDelete(
+				seg.slice(explainDelVerb[0].length),
+			);
+			if (parsed.fires) {
+				if (parsed.targets.length === 0) {
+					return {
+						decision: 'block',
+						firingRule:
+							'destructive_block: Windows recursive file delete (del /s)',
+					};
+				}
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
-					targets,
+					targets: parsed.targets,
 					cwd,
 				});
 				if (!targetDecision.allowed) {

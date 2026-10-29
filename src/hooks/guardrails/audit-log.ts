@@ -177,7 +177,7 @@ export const SHELL_AUDIT_FIELD_CLASSES: Readonly<
 	resolvedScope: 'redacted-path',
 	declaredScope: 'redacted-path',
 	action: 'enum',
-	operator: 'enum',
+	operator: 'free-text-redacted',
 	destructiveCategory: 'enum',
 	executorMechanism: 'enum',
 	skipReason: 'enum',
@@ -464,6 +464,13 @@ export function redactDecisionLineForArchive(line: string): string {
 			changed = true;
 		}
 	}
+	if (typeof record.operator === 'string') {
+		const redacted = truncateUtf8Safe(redactEmbeddedPaths(record.operator), 32);
+		if (redacted !== record.operator) {
+			record.operator = redacted;
+			changed = true;
+		}
+	}
 	for (const field of ['declaredScope', 'resolvedScope'] as const) {
 		if (typeof record[field] === 'string') {
 			const redacted = redactPath(record[field] as string);
@@ -573,7 +580,16 @@ export async function appendGuardrailDecision(
 					maxPath,
 				),
 				...(typeof entry.operator === 'string'
-					? { operator: truncateUtf8Safe(entry.operator, 32) }
+					? {
+							// The operator is parsed-command text (the detector's
+							// first command word, e.g. an absolute interpreter
+							// path), so it is free text: redact embedded paths
+							// and bound it like the other free-text fields.
+							operator: truncateUtf8Safe(
+								redactEmbeddedPaths(entry.operator),
+								32,
+							),
+						}
 					: {}),
 			})}\n`;
 			break;

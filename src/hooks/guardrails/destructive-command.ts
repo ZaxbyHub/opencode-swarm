@@ -18,6 +18,7 @@ import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 import { BASH_BUILTIN_COMMANDS } from '../shell-write-detect';
+import { dcIsSwitchClusterText } from './cmd-delete-grammar';
 
 // ============================================================================
 // Destructive-command constants
@@ -126,8 +127,11 @@ export function dcNormalizeCommand(cmd: string): string {
 	s = s.replace(/`(.)/g, '$1');
 
 	// Step 3: cmd.exe caret escapes — ^r^m^d^i^r decodes to rmdir.
-	// Carets outside quoted strings are escape characters; collapse all caret-letter sequences.
-	s = s.replace(/\^([a-zA-Z0-9 ])/g, '$1');
+	// Carets outside quoted strings are escape characters; collapse all
+	// caret-letter sequences. `/` is included: cmd decodes `^/` to `/`
+	// (`rmdir ^/^s zzz` is `rmdir /s zzz` — verified against real cmd.exe),
+	// so a caret-escaped recursion switch must normalize like a literal one.
+	s = s.replace(/\^([a-zA-Z0-9 /])/g, '$1');
 
 	// Step 4: quote-splicing evasion e.g. r""m""dir or R''e''m''o''v''e''-''I''t''e''m
 	// Collapse both doubled double-quotes and doubled single-quotes (PS single-quote splice).
@@ -939,60 +943,25 @@ export function dcCheckJunctionCreation(
 	return null;
 }
 
+export {
+	dcIsSwitchClusterText,
+	dcParseWindowsRecursiveDelete,
+} from './cmd-delete-grammar';
+
 /**
  * Whether a whitespace-delimited cmd.exe argument behaves like a switch
- * cluster (issue #3495): a leading `/` followed by letters where EVERY
+ * cluster (issue #3495): a leading `/` followed by switch text where EVERY
  * slash-separated segment is 1–2 ASCII letters — `/s`, `/S`, `/q`, `/s/q`,
  * `/sq`, `/qs`. Path-like tokens never qualify: `/share` and `/src/old`
  * carry multi-letter segments, and a quoted token (`"/s"`, `"a/share/b"`)
  * does not start with `/`. Verified against real cmd.exe: a quoted `"/s"`
  * is treated as a path, and `/sq` is rejected by cmd itself ("Parameter
  * format not correct"), so classifying these clusters as switches is at
- * worst fail-closed parity.
+ * worst fail-closed parity. Grammar text lives in ./cmd-delete-grammar.
  */
 export function dcIsWindowsSwitchCluster(token: string): boolean {
 	if (!/^\/[A-Za-z]/.test(token)) return false;
-	const segments = token.slice(1).split('/');
-	return (
-		segments.length > 0 && segments.every((seg) => /^[A-Za-z]{1,2}$/.test(seg))
-	);
-}
-
-/**
- * Whether a cmd.exe argument list contains the recursive switch (`/s`, case
- * insensitive) as a standalone argument token or inside a switch cluster,
- * wherever it appears — leading (`rmdir /s x`), trailing (`rd x /s`, a
- * documented form), or between operands. A `/s` substring INSIDE a path
- * operand (`rmdir a/share/b`) must not fire: that is plain POSIX rmdir of a
- * nested path (issue #3495 item 2).
- */
-export function dcHasRecursiveSwitchToken(args: string): boolean {
-	const tokens = args.match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
-	return tokens.some((token) => {
-		if (!dcIsWindowsSwitchCluster(token)) return false;
-		return token.slice(1).split('/').join('').toLowerCase().includes('s');
-	});
-}
-
-/**
- * Extract candidate target paths from a destructive Windows cmd.exe command.
- * Returns array of path-like arguments (issue #3495: switches are stripped
- * wherever they appear — `rd <path> /s` is a documented form — and each
- * remaining operand is its own target; quoted tokens are operands, matching
- * cmd.exe's own treatment of a quoted "/s" as a path).
- */
-export function dcExtractWindowsCmdTargets(segment: string): string[] {
-	// rmdir /s /q <path> | rd <path> /s | del /s /q /f <path>
-	const verb = /^(?:rmdir|rd|del)(?:\.exe)?\s*/i.exec(segment);
-	if (!verb) return [];
-	const tokens =
-		segment.slice(verb[0].length).match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
-	const targets: string[] = [];
-	for (const token of tokens) {
-		if (dcIsWindowsSwitchCluster(token)) continue;
-		targets.push(token.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1'));
-	}
-	return targets;
+	return dcIsSwitchClusterText(token.slice(1));
 }
 
 /**
