@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.200.10](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.9...v7.200.10) (2026-10-29)
+
+
+### Bug Fixes
+
+* **ci:** feedback round — queued runs count as active, state-gated recovery, classifier hardening ([bc4ec3c](https://github.com/ZaxbyHub/opencode-swarm/commit/bc4ec3c5dfb7120945522f850d682e80332924c7))
+* **ci:** merge-queue failure diagnostics — orphaned-entry detector + stale-runner classifier ([e6d260d](https://github.com/ZaxbyHub/opencode-swarm/commit/e6d260d73e9b50dd58aec6d31c51e5d28f38ebf6))
+* **ci:** merge-queue failure diagnostics — orphaned-entry detector + stale-runner classifier ([a45eb31](https://github.com/ZaxbyHub/opencode-swarm/commit/a45eb314f81d868a768cca48efcf2761f379d2a8)), closes [#3265](https://github.com/ZaxbyHub/opencode-swarm/issues/3265) [#3487](https://github.com/ZaxbyHub/opencode-swarm/issues/3487)
+* **config-doctor:** stop reporting top-level agents as deprecated ([5c7c4a7](https://github.com/ZaxbyHub/opencode-swarm/commit/5c7c4a72460a13c670c7a276051df6fe48636e34))
+* **guardrails:** close shell write-detector evasion classes [#3474](https://github.com/ZaxbyHub/opencode-swarm/issues/3474) [#3475](https://github.com/ZaxbyHub/opencode-swarm/issues/3475) ([c4f4faf](https://github.com/ZaxbyHub/opencode-swarm/commit/c4f4faf0e9e9324aaace538600ffcf132fed14e9))
+* **guardrails:** close shell write-detector evasion classes [#3474](https://github.com/ZaxbyHub/opencode-swarm/issues/3474) [#3475](https://github.com/ZaxbyHub/opencode-swarm/issues/3475) ([8a58ef9](https://github.com/ZaxbyHub/opencode-swarm/commit/8a58ef97eb1964d750b394815bec91b1d3f27a89))
+* **pr-review:** verdict-row pipeline integrity — quarantine escape, aborted-lane typing, credential egress (3275/3357/3397/3382) ([c30792f](https://github.com/ZaxbyHub/opencode-swarm/commit/c30792f731e75f9a2b76f9fc0f5c64c3d19befe0))
+* **sandbox:** embed kernel-resolved system paths in the macOS SBPL profile ([3a5a5af](https://github.com/ZaxbyHub/opencode-swarm/commit/3a5a5afd75ce21d6c85f6dffb12b4da1a8c23805))
+* **worktree:** preserve interrupted coder settlement work ([2579763](https://github.com/ZaxbyHub/opencode-swarm/commit/25797639f7e2d934945ad3ec6dd032a504c7b1ae))
+
 ## [7.200.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.8...v7.200.9) (2026-10-27)
 
 
