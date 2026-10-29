@@ -4759,37 +4759,41 @@ export function createDelegationGateHook(
 			} catch (error) {
 				// A route computation failure is fail-open only when an explicit
 				// typed error receipt can be persisted. If persistence itself fails,
-				// the pending marker or missing receipt keeps Stage-B fail closed.
+				// the pending marker or missing receipt keeps Stage-B fail closed
+				// (default review_routing.enforce_receipts). The dispatch-time
+				// gates below (ACCEPTANCE for coder/reviewer, TASK_GATE_AGENTS)
+				// must STILL run: this catch fails the routing bookkeeping
+				// locally, never the whole toolBefore (#3380).
 				const detail = error instanceof Error ? error.message : String(error);
 				if (!routeDispatchStarted) {
 					logger.warn(
 						`[delegation-gate] review route dispatch could not establish its pending receipt: ${detail}`,
 					);
-					return;
-				}
-				const routerError = buildReviewRouteRouterError({
-					code: /unavailable|timed out|timeout|not found/i.test(detail)
-						? 'ROUTER_UNAVAILABLE'
-						: 'ROUTER_FAILED',
-					sessionId: input.sessionID,
-					taskId: routedTaskId ?? `unresolved-${input.callID}`,
-					detail,
-				});
-				try {
-					await persistReviewRouteReceipt({
-						projectRoot: directory,
-						receipt: routerError,
+				} else {
+					const routerError = buildReviewRouteRouterError({
+						code: /unavailable|timed out|timeout|not found/i.test(detail)
+							? 'ROUTER_UNAVAILABLE'
+							: 'ROUTER_FAILED',
+						sessionId: input.sessionID,
+						taskId: routedTaskId ?? `unresolved-${input.callID}`,
+						detail,
 					});
-					if (routedTaskId) {
-						rememberReviewRoute(
-							reviewRouteTaskKey(input.sessionID, routedTaskId),
-							routerError,
+					try {
+						await persistReviewRouteReceipt({
+							projectRoot: directory,
+							receipt: routerError,
+						});
+						if (routedTaskId) {
+							rememberReviewRoute(
+								reviewRouteTaskKey(input.sessionID, routedTaskId),
+								routerError,
+							);
+						}
+					} catch (persistError) {
+						logger.warn(
+							`[delegation-gate] review route receipt was not recorded: ${detail}; router-error persistence failed: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
 						);
 					}
-				} catch (persistError) {
-					logger.warn(
-						`[delegation-gate] review route receipt was not recorded: ${detail}; router-error persistence failed: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
-					);
 				}
 			}
 		}
