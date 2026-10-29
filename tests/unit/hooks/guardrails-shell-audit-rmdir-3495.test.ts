@@ -125,7 +125,7 @@ describe('shell write-scope audit rows (issue #3495 items 1/3/4)', () => {
 		await expect(
 			runShell('s-scope', 'echo hi > notes/x.txt', 'coder', ['src/']),
 		).rejects.toThrow(GATE_PREFIX_RE);
-		const row = lastRowOfType('scope_violation');
+		const row = lastRowOfType('scope_violation', before);
 		expect(row).not.toBeNull();
 		expect(normalizedPath(String(row?.path))).toBe(
 			expectedPath(path.resolve(TEST_DIR, 'notes/x.txt')),
@@ -232,6 +232,8 @@ describe('Windows switch tokenization (issue #3495 item 2)', () => {
 			['/s2 x', false, ['x']],
 			['"/s" dir', false, ['/s', 'dir']],
 			['notes/x.txt', false, []], // invalid switch text: cmd errors, nothing deletable
+			['dist/s ../q', true, ['dist', '..']], // review round 2: non-s cluster prefix harvested when /s fired
+			['"a b"/s', true, ['a b']], // review round 2: partially quoted glue is scanned
 		])('%s => fires=%j targets=%j', (args, fires, targets) => {
 			expect(dcParseWindowsRecursiveDelete(args)).toEqual({ fires, targets });
 		});
@@ -341,6 +343,19 @@ describe('Windows switch tokenization (issue #3495 item 2)', () => {
 				runShell('g10', 'rmdir "/s" quoted-target', 'coder', ['src/']),
 			).rejects.toThrow(/SCOPE_VIOLATION|not authorised/);
 		}, 120_000);
+
+		test(
+			'review round 2: non-s cluster prefix harvested; partial-quote glue scanned',
+			async () => {
+				await expect(
+					runShell('g11', 'rd dist/s ../q', 'architect'),
+				).rejects.toThrow('Recursive delete');
+				await expect(
+					runShell('g12', 'rd "a b"/s', 'architect'),
+				).rejects.toThrow('Recursive delete');
+			},
+			120_000,
+		);
 
 		test('gate-denial classification pins the new prefix (PRR-007)', () => {
 			expect(

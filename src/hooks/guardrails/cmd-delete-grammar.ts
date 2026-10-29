@@ -83,7 +83,6 @@ export function dcParseWindowsRecursiveDelete(args: string): {
 	const tokens = dcScanCmdTokens(args);
 	// Pass 1: does any token carry a valid recursion switch?
 	const fires = tokens.some((token) => {
-		if (token.startsWith('"')) return false;
 		let inQuote = false;
 		let slashIdx = -1;
 		for (let i = 0; i < token.length; i += 1) {
@@ -109,12 +108,11 @@ export function dcParseWindowsRecursiveDelete(args: string): {
 	});
 	const targets: string[] = [];
 	for (const token of tokens) {
-		// A token that opens with a double quote is quoted context for the
-		// slash scan; cmd treats it as a path operand.
-		if (token.startsWith('"')) {
-			targets.push(token.replace(/"/g, ''));
-			continue;
-		}
+		// The quote-aware slash scan itself classifies a FULLY quoted token
+		// as a path operand (no unquoted `/` inside the quotes). A
+		// PARTIALLY quoted token ("a b"/s — quoted path glued to a
+		// trailing switch) must fall through to the scan: its unquoted
+		// slash after the closing quote is switch text.
 		let inQuote = false;
 		let slashIdx = -1;
 		for (let i = 0; i < token.length; i += 1) {
@@ -128,7 +126,8 @@ export function dcParseWindowsRecursiveDelete(args: string): {
 			}
 		}
 		if (slashIdx < 0) {
-			targets.push(token);
+			// A fully quoted token is a path operand (dequoted).
+			targets.push(token.replace(/["']/g, ''));
 			continue;
 		}
 		const afterSlash = token.slice(slashIdx + 1);
@@ -150,7 +149,15 @@ export function dcParseWindowsRecursiveDelete(args: string): {
 			if (fires && prefix.length > 0) targets.push(prefix);
 			continue;
 		}
-		if (!switchText.replace(/\//g, '').toLowerCase().includes('s')) continue;
+		if (!switchText.replace(/\//g, '').toLowerCase().includes('s')) {
+			// Valid non-recursion cluster (../q): cmd deletes nothing
+			// recursively through THIS token, but when a recursion switch
+			// fired from another token the operand's path prefix is a
+			// potential deletion root — harvest it, so rd dist/s ../q
+			// verdict-matches rd dist/s ../s.
+			if (fires && prefix.length > 0) targets.push(prefix);
+			continue;
+		}
 		// Deletion target carried by this token: the path prefix before the
 		// switch (`rd zzz/s` → `zzz`) and/or the quoted span after the
 		// switch letters (`del /s"file.txt"` → `file.txt`).

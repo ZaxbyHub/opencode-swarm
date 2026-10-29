@@ -1524,22 +1524,28 @@ function canonicalInterpreterName(cmd: unknown): string | null {
  * workspace root instead of the real destination.
  */
 /**
- * Raw (quote-preserving) text of each suffix word of a parsed command.
- * bash-parser strips quotes into `Word.text` (`"/s"` reads `/s`), so the
- * cmd.exe switch grammar needs the RAW slice (RAW_WORD_TEXT, populated by
- * annotateRawWordText) to tell a quoted `"/s"` path operand from an
- * unquoted `/s` switch. Falls back to the dequoted text when no raw slice
- * was annotated for the node.
+ * Raw (quote-preserving) text of each suffix Word node of a parsed command,
+ * or null when ANY word lacks its raw slice. bash-parser strips quotes into
+ * `Word.text` (`"/s"` reads `/s`), so the cmd.exe switch grammar needs the
+ * RAW slice (RAW_WORD_TEXT, populated by annotateRawWordText) to tell a
+ * quoted `"/s"` path operand from an unquoted `/s` switch. The null
+ * return is the fail-safe direction: the caller must not defer an rmdir to
+ * the destructive guard on unprovable quoting.
  */
-function rawSuffixWords(cmd: unknown): string[] {
+function rawSuffixWords(cmd: unknown): string[] | null {
 	const c = cmd as BashCommand;
 	const suffix = c.suffix;
 	if (!Array.isArray(suffix)) return [];
 	const words: string[] = [];
 	for (const s of suffix) {
-		const raw = isBashWord(s) ? RAW_WORD_TEXT.get(s) : undefined;
-		const text = raw ?? wordText(s);
-		if (text !== null) words.push(text);
+		if (!isBashWord(s)) continue;
+		const raw = RAW_WORD_TEXT.get(s);
+		// Fail-safe: without the raw slice a dequoted `/s` is
+		// indistinguishable from a quoted `"/s"`, and deferring on the
+		// dequoted form could leave the command with no checking layer.
+		// Callers must NOT defer when null.
+		if (raw === undefined) return null;
+		words.push(raw);
 	}
 	return words;
 }
@@ -2098,9 +2104,11 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	// cmd.exe and a `/q` alone never recurses — dropping those left the
 	// rmdir with NO checking layer at all (PR #3499 review, PRR-005); the
 	// ordinary POSIX write path must scope-check the operands instead.
+	const rawWords = rawSuffixWords(cmd);
 	if (
 		lowerName === 'rmdir' &&
-		dcParseWindowsRecursiveDelete(rawSuffixWords(cmd).join(' ')).fires
+		rawWords !== null &&
+		dcParseWindowsRecursiveDelete(rawWords.join(' ')).fires
 	) {
 		return results;
 	}
