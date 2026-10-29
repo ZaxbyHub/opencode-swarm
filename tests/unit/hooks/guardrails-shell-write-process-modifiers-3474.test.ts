@@ -68,32 +68,32 @@ describe('gate: process-modifier prefixed eval writes (#3474)', () => {
 	it('rejects timeout 5 python -c writing out of scope', async () => {
 		await expect(
 			runAsCoder("timeout 5 python -c \"open('../zzpy.txt','w')\""),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('rejects timeout 5s python -c writing out of scope (unit-suffixed duration)', async () => {
 		await expect(
 			runAsCoder("timeout 5s python -c \"open('../zzpy.txt','w')\""),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('rejects stdbuf -o0 python -c writing out of scope', async () => {
 		await expect(
 			runAsCoder("stdbuf -o0 python -c \"open('../zzpy.txt','w')\""),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	// Round-2: stdbuf option-form spellings of the same evasion.
 	it('rejects stdbuf -oL python -c writing out of scope', async () => {
 		await expect(
 			runAsCoder("stdbuf -oL python -c \"open('../zzpy.txt','w')\""),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('rejects stdbuf --output=L python -c writing out of scope', async () => {
 		await expect(
 			runAsCoder("stdbuf --output=L python -c \"open('../zzpy.txt','w')\""),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	// Round-2: timeout's own long flag before the duration.
@@ -102,13 +102,13 @@ describe('gate: process-modifier prefixed eval writes (#3474)', () => {
 			runAsCoder(
 				"timeout --foreground 5 python -c \"open('../zzpy.txt','w')\"",
 			),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('rejects the unprefixed control (the detector fires on it)', async () => {
 		await expect(
 			runAsCoder("python -c \"open('../zzpy.txt','w')\""),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('still admits timeout 5 make test', async () => {

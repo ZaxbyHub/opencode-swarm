@@ -149,7 +149,7 @@ describe.skipIf(process.platform !== 'win32')(
 						},
 					},
 				),
-			).rejects.toThrow(/^WRITE BLOCKED: /);
+			).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 		});
 
 		// Round-2/3: the Windows-grammar eval authorizes against the command's
@@ -184,7 +184,7 @@ describe.skipIf(process.platform !== 'win32')(
 						},
 					},
 				),
-			).rejects.toThrow(/^WRITE BLOCKED: /);
+			).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 		});
 
 		// Round-4: critic R2/R3 raw-operator identity requirement (attribution: the && cwd fix alone would restore the tracked src context; this leg catches a MISMATCHED Windows operator re-adding a fallback-root row, while the backslash legs force the Windows table itself). The
@@ -219,7 +219,7 @@ describe.skipIf(process.platform !== 'win32')(
 						},
 					},
 				),
-			).rejects.toThrow(/^WRITE BLOCKED: /);
+			).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 		});
 	},
 );

@@ -940,22 +940,59 @@ export function dcCheckJunctionCreation(
 }
 
 /**
+ * Whether a whitespace-delimited cmd.exe argument behaves like a switch
+ * cluster (issue #3495): a leading `/` followed by letters where EVERY
+ * slash-separated segment is 1–2 ASCII letters — `/s`, `/S`, `/q`, `/s/q`,
+ * `/sq`, `/qs`. Path-like tokens never qualify: `/share` and `/src/old`
+ * carry multi-letter segments, and a quoted token (`"/s"`, `"a/share/b"`)
+ * does not start with `/`. Verified against real cmd.exe: a quoted `"/s"`
+ * is treated as a path, and `/sq` is rejected by cmd itself ("Parameter
+ * format not correct"), so classifying these clusters as switches is at
+ * worst fail-closed parity.
+ */
+export function dcIsWindowsSwitchCluster(token: string): boolean {
+	if (!/^\/[A-Za-z]/.test(token)) return false;
+	const segments = token.slice(1).split('/');
+	return (
+		segments.length > 0 && segments.every((seg) => /^[A-Za-z]{1,2}$/.test(seg))
+	);
+}
+
+/**
+ * Whether a cmd.exe argument list contains the recursive switch (`/s`, case
+ * insensitive) as a standalone argument token or inside a switch cluster,
+ * wherever it appears — leading (`rmdir /s x`), trailing (`rd x /s`, a
+ * documented form), or between operands. A `/s` substring INSIDE a path
+ * operand (`rmdir a/share/b`) must not fire: that is plain POSIX rmdir of a
+ * nested path (issue #3495 item 2).
+ */
+export function dcHasRecursiveSwitchToken(args: string): boolean {
+	const tokens = args.match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
+	return tokens.some((token) => {
+		if (!dcIsWindowsSwitchCluster(token)) return false;
+		return token.slice(1).split('/').join('').toLowerCase().includes('s');
+	});
+}
+
+/**
  * Extract candidate target paths from a destructive Windows cmd.exe command.
- * Returns array of path-like arguments.
+ * Returns array of path-like arguments (issue #3495: switches are stripped
+ * wherever they appear — `rd <path> /s` is a documented form — and each
+ * remaining operand is its own target; quoted tokens are operands, matching
+ * cmd.exe's own treatment of a quoted "/s" as a path).
  */
 export function dcExtractWindowsCmdTargets(segment: string): string[] {
-	// rmdir /s /q <path> or rd /s <path>
-	const rmdirMatch =
-		/^(?:rmdir|rd)(?:\.exe)?\s+(?:\/[sqSQ]\s+)*"?(.+?)"?\s*$/i.exec(segment);
-	if (rmdirMatch) return [rmdirMatch[1].trim()];
-
-	// del /s /q /f <path>
-	const delMatch = /^del(?:\.exe)?\s+(?:\/[sqfSQF]\s+)*"?(.+?)"?\s*$/i.exec(
-		segment,
-	);
-	if (delMatch) return [delMatch[1].trim()];
-
-	return [];
+	// rmdir /s /q <path> | rd <path> /s | del /s /q /f <path>
+	const verb = /^(?:rmdir|rd|del)(?:\.exe)?\s*/i.exec(segment);
+	if (!verb) return [];
+	const tokens =
+		segment.slice(verb[0].length).match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
+	const targets: string[] = [];
+	for (const token of tokens) {
+		if (dcIsWindowsSwitchCluster(token)) continue;
+		targets.push(token.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1'));
+	}
+	return targets;
 }
 
 /**

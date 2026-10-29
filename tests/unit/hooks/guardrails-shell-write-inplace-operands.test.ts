@@ -122,7 +122,7 @@ describe('guardrails shell writes: in-place operands the picker used to miss', (
 				output("awk -i inplace '{print}' src/a.ts -v ../v"),
 			),
 		).rejects.toThrow(
-			/^WRITE BLOCKED: SCOPE_VIOLATION: shell write target "[^"]*[\\/]-v" is outside the active scope/,
+			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target "[^"]*[\\/]-v" is outside the active scope/,
 		);
 	});
 

@@ -80,7 +80,7 @@ describe('gate: launcher-prefixed write commands (#3475)', () => {
 		'exec',
 	])('%s rmdir ../zz rejects like the unprefixed form', async (prefix) => {
 		await expect(runAsCoder(`${prefix} rmdir ../zz`)).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
@@ -89,7 +89,7 @@ describe('gate: launcher-prefixed write commands (#3475)', () => {
 		'exec',
 	])('%s cp src/x.txt ../zz4 rejects like the unprefixed form', async (prefix) => {
 		await expect(runAsCoder(`${prefix} cp src/x.txt ../zz4`)).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
@@ -98,7 +98,7 @@ describe('gate: launcher-prefixed write commands (#3475)', () => {
 		'exec',
 	])('%s mv src/x.txt ../zz5 rejects like the unprefixed form', async (prefix) => {
 		await expect(runAsCoder(`${prefix} mv src/x.txt ../zz5`)).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
@@ -115,7 +115,7 @@ describe('gate: launcher-prefixed write commands (#3475)', () => {
 
 	it('rejects timeout 5 rmdir ../zz', async () => {
 		await expect(runAsCoder('timeout 5 rmdir ../zz')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
@@ -129,20 +129,20 @@ describe('gate: launcher-prefixed write commands (#3475)', () => {
 	// follows (verified against real bash: `command -- rmdir ../x` runs rmdir).
 	it('rejects command -- rmdir ../zz (-- terminator unwraps)', async () => {
 		await expect(runAsCoder('command -- rmdir ../zz')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
 	it('rejects command -- rm -rf ../zz (-- terminator unwraps)', async () => {
 		// Blocks via the destructive layer's recursive-delete message.
 		await expect(runAsCoder('command -- rm -rf ../zz')).rejects.toThrow(
-			/^WRITE BLOCKED: |^BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: |^BLOCKED: /,
 		);
 	});
 
 	it('rejects rmdir =somecmd (leading-= operand guard withdraws the exemption)', async () => {
 		await expect(runAsCoder('rmdir =somecmd')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
@@ -165,7 +165,7 @@ describe('gate: launcher-prefixed write commands (#3475)', () => {
 	it('rejects timeout 5 rmdir -p of an in-workspace directory (option kills the exemption)', async () => {
 		mkdirSync(path.join(TEST_DIR, '.scratch-p', 'x'), { recursive: true });
 		await expect(runAsCoder('timeout 5 rmdir -p .scratch-p/x')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
@@ -182,7 +182,7 @@ describe('gate: launcher-prefixed write commands (#3475)', () => {
 			runAsCoder(
 				`command -- cd ..; rmdir ${path.basename(SIBLING_OUTSIDE_DIR)}`,
 			),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('rejects command rm -rf ../zz', async () => {
@@ -238,12 +238,14 @@ describe('gate: launcher-prefixed write commands (#3475)', () => {
 	});
 
 	it('controls: the unprefixed forms still reject (the detector fires)', async () => {
-		await expect(runAsCoder('rmdir ../zz')).rejects.toThrow(/^WRITE BLOCKED: /);
+		await expect(runAsCoder('rmdir ../zz')).rejects.toThrow(
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
+		);
 		await expect(runAsCoder('cp src/x.txt ../zz2')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 		await expect(runAsCoder('mv src/x.txt ../zz3')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 		await expect(runAsCoder('rm -rf ../zz')).rejects.toThrow(
 			/^(?:WRITE )?BLOCKED: /,

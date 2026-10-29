@@ -8,6 +8,7 @@ import {
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
 	dcExtractWindowsCmdTargets,
+	dcHasRecursiveSwitchToken,
 	dcNormalizeCommand,
 	dcSplitSegments,
 	dcUnwrapWrappers,
@@ -224,8 +225,15 @@ function evaluateDestructiveDecision(
 			}
 		}
 
-		// Windows cmd.exe: rmdir /s, rd /s
-		if (/^(?:rmdir|rd)(?:\.exe)?\s+.*\/[sS]/i.test(seg)) {
+		// Windows cmd.exe: rmdir /s, rd /s — tokenized switch match, mirroring
+		// the enforcement gate (issue #3495): a `/s` substring inside a path
+		// operand is a plain delete, and the recursion switch may appear
+		// anywhere (`rd <path> /s`).
+		const explainRmdirVerb = /^(?:rmdir|rd)(?:\.exe)?\s*/i.exec(seg);
+		if (
+			explainRmdirVerb &&
+			dcHasRecursiveSwitchToken(seg.slice(explainRmdirVerb[0].length))
+		) {
 			const targets = dcExtractWindowsCmdTargets(seg);
 			if (targets.length === 0) {
 				return {
@@ -243,8 +251,12 @@ function evaluateDestructiveDecision(
 			}
 		}
 
-		// Windows cmd.exe: del /s /q /f
-		if (/^del(?:\.exe)?\s+.*\/[sS]/i.test(seg)) {
+		// Windows cmd.exe: del /s /q /f — same tokenized rule (issue #3495).
+		const explainDelVerb = /^del(?:\.exe)?\s*/i.exec(seg);
+		if (
+			explainDelVerb &&
+			dcHasRecursiveSwitchToken(seg.slice(explainDelVerb[0].length))
+		) {
 			const targets = dcExtractWindowsCmdTargets(seg);
 			if (targets.length > 0) {
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
@@ -260,10 +272,14 @@ function evaluateDestructiveDecision(
 			}
 		}
 
-		// PowerShell: Remove-Item / aliases with -Recurse
+		// PowerShell: Remove-Item / aliases with -Recurse — whitespace-delimited
+		// switch tokens, mirroring the gate (a `-r` substring inside a path
+		// operand like `rm some-r/x` is a plain delete; issue #3495 class).
 		if (
-			/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*-[Rr]ecurse\b/i.test(seg) ||
-			/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*-[Rr]\b/i.test(seg)
+			/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]ecurse\b/i.test(
+				seg,
+			) ||
+			/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]\b/i.test(seg)
 		) {
 			const targets = dcExtractPowerShellTargets(seg);
 			if (targets.length > 0) {
