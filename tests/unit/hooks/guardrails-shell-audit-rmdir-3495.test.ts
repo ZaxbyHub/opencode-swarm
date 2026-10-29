@@ -346,31 +346,23 @@ describe('Windows switch tokenization (issue #3495 item 2)', () => {
 			).rejects.toThrow(/SCOPE_VIOLATION|not authorised/);
 		}, 120_000);
 
-		test(
-			'review round 3: comma/equals-delimited switch spellings block',
-			async () => {
-				await expect(
-					runShell('g13', 'rd /s,/q,plugins/oxlint-plugin-effect', 'architect'),
-				).rejects.toThrow(/Recursive delete|recursive directory delete/);
-				await expect(
-					runShell('g14', 'rd plugins/oxlint-plugin-effect,/s,/q', 'architect'),
-				).rejects.toThrow(/Recursive delete|recursive directory delete/);
-			},
-			120_000,
-		);
+		test('review round 3: comma/equals-delimited switch spellings block', async () => {
+			await expect(
+				runShell('g13', 'rd /s,/q,plugins/oxlint-plugin-effect', 'architect'),
+			).rejects.toThrow(/Recursive delete|recursive directory delete/);
+			await expect(
+				runShell('g14', 'rd plugins/oxlint-plugin-effect,/s,/q', 'architect'),
+			).rejects.toThrow(/Recursive delete|recursive directory delete/);
+		}, 120_000);
 
-		test(
-			'review round 2: non-s cluster prefix harvested; partial-quote glue scanned',
-			async () => {
-				await expect(
-					runShell('g11', 'rd dist/s ../q', 'architect'),
-				).rejects.toThrow('Recursive delete');
-				await expect(
-					runShell('g12', 'rd "a b"/s', 'architect'),
-				).rejects.toThrow('Recursive delete');
-			},
-			120_000,
-		);
+		test('review round 2: non-s cluster prefix harvested; partial-quote glue scanned', async () => {
+			await expect(
+				runShell('g11', 'rd dist/s ../q', 'architect'),
+			).rejects.toThrow('Recursive delete');
+			await expect(runShell('g12', 'rd "a b"/s', 'architect')).rejects.toThrow(
+				'Recursive delete',
+			);
+		}, 120_000);
 
 		test('gate-denial classification pins the new prefix (PRR-007)', () => {
 			expect(
