@@ -22,6 +22,7 @@ import type {
 } from 'bash-parser';
 import parse from 'bash-parser';
 import { unsafePathTextReason } from '../scope/path-identity';
+import { dcParseWindowsRecursiveDelete } from './guardrails/cmd-delete-grammar';
 import {
 	CMD_BUILTIN_PREFIX,
 	CMD_STRIP_PREFIX,
@@ -956,9 +957,12 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget | null {
 	// `rmdir /s [/q] <path>` is the Windows spelling of recursive directory
 	// deletion.  The destructive-command guard owns its safety decision for
 	// that form (including allowing trusted `node_modules`/`dist` targets), so
-	// do not also classify the command as an ordinary POSIX write.  Plain
-	// `rmdir <path>` remains a POSIX write and is handled below.
-	if (name === 'rmdir' && tokens.some((token) => /^\/(?:s|q)$/i.test(token))) {
+	// do not also classify the command as an ordinary POSIX write — but only
+	// when the guard will actually evaluate it (the recursion switch is
+	// really present per the cmd.exe grammar; a quoted `"/s"` is a path and
+	// a `/q` alone never recurses).  Plain `rmdir <path>` remains a POSIX
+	// write and is handled below.
+	if (name === 'rmdir' && dcParseWindowsRecursiveDelete(cmd).fires) {
 		return null;
 	}
 	// Last non-flag argument is the destination
@@ -1519,6 +1523,33 @@ function canonicalInterpreterName(cmd: unknown): string | null {
  * picker (cp, mv, install, ln) report an empty path that resolved to the
  * workspace root instead of the real destination.
  */
+/**
+ * Raw (quote-preserving) text of each suffix Word node of a parsed command,
+ * or null when ANY word lacks its raw slice. bash-parser strips quotes into
+ * `Word.text` (`"/s"` reads `/s`), so the cmd.exe switch grammar needs the
+ * RAW slice (RAW_WORD_TEXT, populated by annotateRawWordText) to tell a
+ * quoted `"/s"` path operand from an unquoted `/s` switch. The null
+ * return is the fail-safe direction: the caller must not defer an rmdir to
+ * the destructive guard on unprovable quoting.
+ */
+function rawSuffixWords(cmd: unknown): string[] | null {
+	const c = cmd as BashCommand;
+	const suffix = c.suffix;
+	if (!Array.isArray(suffix)) return [];
+	const words: string[] = [];
+	for (const s of suffix) {
+		if (!isBashWord(s)) continue;
+		const raw = RAW_WORD_TEXT.get(s);
+		// Fail-safe: without the raw slice a dequoted `/s` is
+		// indistinguishable from a quoted `"/s"`, and deferring on the
+		// dequoted form could leave the command with no checking layer.
+		// Callers must NOT defer when null.
+		if (raw === undefined) return null;
+		words.push(raw);
+	}
+	return words;
+}
+
 function getSuffixWords(cmd: unknown): string[] {
 	if (!cmd || typeof cmd !== 'object') return [];
 	const c = cmd as BashCommand;
@@ -2063,17 +2094,26 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 
 	if (!BUILTIN_WRITE_COMMANDS.has(lowerName)) return results;
 
-	const suffixWords = getSuffixWords(cmd);
 	// `rmdir /s [/q] <path>` is a cmd.exe destructive form.  Let the
 	// destructive-command guard evaluate its target containment instead of
-	// feeding it through the POSIX write-authority gate used by `bash` calls.
-	// A normal POSIX `rmdir <path>` is still reported as a write.
+	// feeding it through the POSIX write-authority gate used by `bash` calls
+	// — but ONLY when the guard will actually evaluate the shape: the RAW
+	// (quote-preserving) suffix words are parsed with the same cmd.exe
+	// grammar the guard uses, and the tag is withdrawn only when the
+	// recursion switch is really present.  A quoted `"/s"` is a PATH per
+	// cmd.exe and a `/q` alone never recurses — dropping those left the
+	// rmdir with NO checking layer at all (PR #3499 review, PRR-005); the
+	// ordinary POSIX write path must scope-check the operands instead.
+	const rawWords = rawSuffixWords(cmd);
 	if (
 		lowerName === 'rmdir' &&
-		suffixWords.some((word) => /^\/(?:s|q)$/i.test(word))
+		rawWords !== null &&
+		dcParseWindowsRecursiveDelete(rawWords.join(' ')).fires
 	) {
 		return results;
 	}
+
+	const suffixWords = getSuffixWords(cmd);
 
 	// A quoted, backslash-escaped or expanded operand (`"a"`, `a\b`, `$D`)
 	// never keeps this tag: detectPosixWrites withdraws it from any line that

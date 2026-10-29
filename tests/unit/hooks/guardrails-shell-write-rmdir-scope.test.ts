@@ -35,7 +35,8 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 const TEST_DIR = canonicalMkdtemp('guardrails-shell-write-rmdir-scope-');
 const OUTSIDE_DIR = canonicalMkdtemp('guardrails-shell-write-rmdir-outside-');
 const isWin32 = process.platform === 'win32';
-const SCOPE_VIOLATION = /^WRITE BLOCKED: SCOPE_VIOLATION: shell write target /;
+const SCOPE_VIOLATION =
+	/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target /;
 const ROOT_ESCAPE =
 	/^WRITE BLOCKED: Agent "coder" is not authorised to write .*AUTHORITY_ROOT_ESCAPE/;
 

@@ -138,26 +138,26 @@ describe('gate: pipe-fed eval vs script-path carve-out (#3474)', () => {
 	it("rejects echo 'open(...)' | python | cat (mid-pipe interpreter)", async () => {
 		await expect(
 			runAsCoder(`echo 'open("../zz-mp.txt","w")' | python | cat`),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it("rejects echo 'open(...)' | python for a src/-scoped coder", async () => {
 		await expect(
 			runAsCoder('echo \'open("../zz.txt","w")\' | python'),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it("rejects printf 'open(...)' | python for a src/-scoped coder", async () => {
 		await expect(
 			runAsCoder('printf \'open("../zz.txt","w")\' | python'),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	// Round-2: stdin-consumed spelling through the gate.
 	it("rejects echo 'open(...)' | python - for a src/-scoped coder", async () => {
 		await expect(
 			runAsCoder('echo \'open("a.txt","w")\' | python -'),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	// Round-2/3: the SECOND pipe-fed eval of the compound runs after `cd ..`
@@ -170,7 +170,7 @@ describe('gate: pipe-fed eval vs script-path carve-out (#3474)', () => {
 			runAsCoder(
 				'cd src; echo \'open("esc-a.txt","w")\' | python; cd ..; echo \'open("../esc-b.txt","w")\' | python',
 			),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	// Round-2 control (green at base AND post-fix): with NO cd, the pipe-fed
@@ -204,7 +204,7 @@ describe('gate: pipe-fed eval vs script-path carve-out (#3474)', () => {
 			const message =
 				writeGateBlocked instanceof Error ? writeGateBlocked.message : '';
 			expect(
-				/^WRITE BLOCKED: /.test(message),
+				/^WRITE BLOCKED(?: \[shell-write-scope\])?: /.test(message),
 				'cat src/script.py | python must stay admitted by the write-scope gate ' +
 					`(#1901 carve-out); got: ${message.slice(0, 120)}`,
 			).toBe(false);

@@ -25,7 +25,8 @@ import { resetSwarmState, startAgentSession } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
-const SCOPE_VIOLATION = /^WRITE BLOCKED: SCOPE_VIOLATION: shell write target /;
+const SCOPE_VIOLATION =
+	/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target /;
 // #3474 (cd tracking): when the tracker now correctly follows a `cd` out of
 // the workspace (or into control state), the same rejection surfaces as
 // AUTHORITY_ROOT_ESCAPE / AUTHORITY_PROTECTED_PATH instead of
@@ -34,9 +35,9 @@ const SCOPE_VIOLATION = /^WRITE BLOCKED: SCOPE_VIOLATION: shell write target /;
 // #3485 (PRR-020): the intentional verdict classes for these legs only — a
 // session-state or wrong-layer failure must NOT satisfy a scope/cwd leg.
 const ANY_WRITE_BLOCK =
-	/^WRITE BLOCKED: (?:SCOPE_VIOLATION|Agent "coder" is not authorised)/;
+	/^WRITE BLOCKED(?: \[shell-write-scope\])?: (?:SCOPE_VIOLATION|Agent "coder" is not authorised)/;
 const ROOT_ESCAPE =
-	/^WRITE BLOCKED: Agent "coder" is not authorised to write .*AUTHORITY_ROOT_ESCAPE/;
+	/^WRITE BLOCKED(?: \[shell-write-scope\])?: Agent "coder" is not authorised to write .*AUTHORITY_ROOT_ESCAPE/;
 const WORKSPACE_DIRS = [
 	'a',
 	'src',

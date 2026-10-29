@@ -31,7 +31,8 @@ import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 const isWin32 = process.platform === 'win32';
-const SCOPE_VIOLATION = /^WRITE BLOCKED: SCOPE_VIOLATION: shell write target /;
+const SCOPE_VIOLATION =
+	/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target /;
 const created: string[] = [];
 let counter = 0;
 

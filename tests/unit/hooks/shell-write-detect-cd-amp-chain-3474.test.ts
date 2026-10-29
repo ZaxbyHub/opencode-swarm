@@ -72,13 +72,13 @@ describe('gate: cd chains track every cd under && like under ; (#3474)', () => {
 	it('rejects a && chain that cds out of scope and writes at the workspace root', async () => {
 		await expect(
 			runAsCoder('cd src && cd .. && echo x > escape.txt'),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('rejects the ; twin (control, already correct at base)', async () => {
 		await expect(
 			runAsCoder('cd src; cd ..; echo x > escape.txt'),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('blocks a && chain whose ../esc.md is in scope only if every cd succeeds (PRR-001 dual-context)', async () => {
@@ -87,7 +87,7 @@ describe('gate: cd chains track every cd under && like under ; (#3474)', () => {
 		// ws/esc.md — outside scope src/. The write must pass BOTH readings.
 		await expect(
 			runAsCoder('cd src && cd sub && echo x > ../esc.md'),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('resolves the ; twin (control, already correct at base)', async () => {
@@ -99,13 +99,13 @@ describe('gate: cd chains track every cd under && like under ; (#3474)', () => {
 	it('rejects a && chain that cds out of scope before an interpreter eval', async () => {
 		await expect(
 			runAsCoder("cd src && cd .. && python -c \"open('esc.py.txt','w')\""),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('rejects the ; twin of the eval escape (control)', async () => {
 		await expect(
 			runAsCoder("cd src; cd ..; python -c \"open('esc.py.txt','w')\""),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	// Round-2 control (green at base AND post-fix): the first `cd ..` of an
@@ -116,6 +116,6 @@ describe('gate: cd chains track every cd under && like under ; (#3474)', () => {
 		const workspaceSrc = `${path.basename(TEST_DIR)}/src`;
 		await expect(
 			runAsCoder(`cd .. || cd ${workspaceSrc} && echo x > escape.txt`),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 });
