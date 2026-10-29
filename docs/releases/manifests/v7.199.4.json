@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.199.4",
+  "tagCommit": "6b5487e66a038422b309a9b5679293a0d3383e4a",
+  "targetCommitish": "6b5487e66a038422b309a9b5679293a0d3383e4a",
+  "releaseBodySha256": "52c6ec46cf381bf7bbf43042b821a4b24207a73e32a1a7e9a97c8221b3bcda5e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/ci-self-hosted-runner-routing.md",
+      "sha256": "07b910e377e16a0fe3e8ff96bc5352021e3e9edc6e224f0825162ca240328cc0"
+    }
+  ]
+}
