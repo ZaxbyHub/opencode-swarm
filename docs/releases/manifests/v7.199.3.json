@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.199.3",
+  "tagCommit": "7332c1fb315b726514a459b70d039786d5ef2af3",
+  "targetCommitish": "7332c1fb315b726514a459b70d039786d5ef2af3",
+  "releaseBodySha256": "5d10018ec4e5538cc69b40719d36da5e4bf69539fe4965d8e1e85b9abd6394f4",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/3316-pr-feedback-rework-recoverable.md",
+      "sha256": "7d77fb7b61de9dffe47062d43b135de04f4467efe4187df2e56cfc65b07bece3"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3405-tui-raw-console-warn-init-overlay.md",
+      "sha256": "415cc6e4c7980d6f62494967f765c597701e857504024f8673e27a77e0d705dc"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/fix-ci-action-version-comments.md",
+      "sha256": "bd0cd0ea8f67d2f9a5940bb20d4618f0d3196f45004fb56ff6afa80eda8ac227"
+    }
+  ]
+}
