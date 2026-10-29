@@ -3724,6 +3724,30 @@ function flushStageBSettlementDropWarnings(
 }
 
 /**
+ * #3502 review (PRR-001): the TASK_GATE block re-reads the PR-review re-entry
+ * binding context OUTSIDE the routing try/catch. A routing-surface read fault
+ * (ENOTDIR/EACCES on a broken or locked `.swarm`) must degrade locally —
+ * exactly like the routing block's own catch — instead of rejecting the whole
+ * toolBefore with a raw fs error. `null` is the same "no binding context"
+ * value the ENOENT path returns, so the dispatch-time gates still run
+ * (equal-or-tighter than the pre-#3380 skip) and the raw host-path error no
+ * longer reaches the model-visible rejection surface (PRR-019).
+ */
+async function readPrReviewReentryBindingContextSafe(
+	directory: string,
+	sessionId: string,
+): Promise<Awaited<ReturnType<typeof readPrReviewReentryBindingContext>>> {
+	try {
+		return await readPrReviewReentryBindingContext(directory, sessionId);
+	} catch (error) {
+		logger.warn(
+			`[delegation-gate] PR-review re-entry binding context unreadable; routing-bookkeeping fault degrades locally, dispatch-time gates still run (#3380): ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return null;
+	}
+}
+
+/**
  * Creates the experimental.chat.messages.transform hook for delegation gating.
  * Inspects coder delegations and warns when tasks are oversized or batched.
  */
@@ -3866,6 +3890,15 @@ export function createDelegationGateHook(
 		for (const key of reviewRouteByTaskKey.keys()) {
 			if (key.startsWith(prefix)) reviewRouteByTaskKey.delete(key);
 		}
+	};
+	// #3502 review (PRR-007): a failed route-receipt persist must not leave the
+	// PREVIOUS dispatch's in-memory route record bindable for this dispatch —
+	// bindReviewRouteSlots reads only this map, and a binding derived from a
+	// stale receipt credits the failed dispatch against an earlier routing
+	// decision. Forgetting the entry makes the dispatch fail closed
+	// (ROUTE_RECEIPT_DISPATCH_REQUIRED) instead.
+	const forgetReviewRoute = (key: string): void => {
+		reviewRouteByTaskKey.delete(key);
 	};
 	const bindReviewRouteSlots = (
 		callID: string,
@@ -4137,6 +4170,14 @@ export function createDelegationGateHook(
 			);
 		}
 		stageBDispatchGenerationsByCallID.set(callID, generations);
+		// #3502 review (PRR-011): a dispatch with NO bound tasks has nothing to
+		// persist — the store returns false for an empty binding list, which is
+		// indistinguishable from a genuine write failure and produced a false
+		// "binding write FAILED" CRITICAL-WARN on every such dispatch. Drop
+		// vacuously: there is no binding to lose, so drop-on-restart holds.
+		if (generations.size === 0) {
+			return;
+		}
 		// Issue #2829: durable twin of the in-memory binding. NON-FATAL by
 		// design — the in-memory map remains the primary fence; the durable
 		// record only ADDS post-restart reconstruction (which still feeds the
@@ -4769,6 +4810,16 @@ export function createDelegationGateHook(
 					logger.warn(
 						`[delegation-gate] review route dispatch could not establish its pending receipt: ${detail}`,
 					);
+					// #3502 review (PRR-007): drop any PRIOR dispatch's in-memory
+					// route record for this task so the failed dispatch cannot be
+					// authorized by a stale receipt; enforcement then fails closed
+					// (ROUTE_RECEIPT_DISPATCH_REQUIRED) instead of crediting this
+					// dispatch against an earlier routing decision.
+					if (routedTaskId) {
+						forgetReviewRoute(
+							reviewRouteTaskKey(input.sessionID, routedTaskId),
+						);
+					}
 				} else {
 					const routerError = buildReviewRouteRouterError({
 						code: /unavailable|timed out|timeout|not found/i.test(detail)
@@ -4973,7 +5024,10 @@ export function createDelegationGateHook(
 				directory,
 			);
 			const activePrReviewBinding = isPrReviewReentryAgent
-				? await readPrReviewReentryBindingContext(directory, input.sessionID)
+				? await readPrReviewReentryBindingContextSafe(
+						directory,
+						input.sessionID,
+					)
 				: null;
 			const resolvedTaskId = await resolveEvidenceTaskId(
 				args,
@@ -5026,6 +5080,21 @@ export function createDelegationGateHook(
 				const { reserveActivePrReviewReentryAuthorization } = await import(
 					'./pr-workflow-gate.js'
 				);
+				// #3502 review (PRR-009): pre-flight the capacity fence BEFORE
+				// consuming the one-use token — rememberStageBDispatchGenerations
+				// throws STAGE_B_CONTEXT_CAPACITY when the fence trips, and at this
+				// point the throw is guaranteed not to fire again below (the same
+				// condition), so a capacity refusal can no longer burn a consumed
+				// authorization.
+				if (
+					!stageBDispatchGenerationsByCallID.has(input.callID) &&
+					stageBDispatchGenerationsByCallID.size >=
+						MAX_PENDING_CODER_CHANGE_CONTEXTS
+				) {
+					throw new Error(
+						`STAGE_B_CONTEXT_CAPACITY: refusing Stage B dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live generation bindings are already tracked`,
+					);
+				}
 				const consumed = await reserveActivePrReviewReentryAuthorization(
 					directory,
 					input.sessionID,
@@ -5057,7 +5126,10 @@ export function createDelegationGateHook(
 					return;
 				}
 				if (
-					await readPrReviewReentryBindingContext(directory, input.sessionID)
+					await readPrReviewReentryBindingContextSafe(
+						directory,
+						input.sessionID,
+					)
 				) {
 					throw new Error(
 						`TASK_WORKFLOW_STAGE_A_REQUIRED: cannot dispatch ${targetAgent} without a task workflow because its one-use PR-review re-entry authorization was already consumed or is unavailable. Issue a fresh authorization immediately before the direct Task dispatch.`,
@@ -5126,6 +5198,17 @@ export function createDelegationGateHook(
 					const { reserveActivePrReviewReentryAuthorization } = await import(
 						'./pr-workflow-gate.js'
 					);
+					// #3502 review (PRR-009): capacity pre-flight before consuming
+					// the one-use token (same rationale as the standalone site).
+					if (
+						!stageBDispatchGenerationsByCallID.has(input.callID) &&
+						stageBDispatchGenerationsByCallID.size >=
+							MAX_PENDING_CODER_CHANGE_CONTEXTS
+					) {
+						throw new Error(
+							`STAGE_B_CONTEXT_CAPACITY: refusing Stage B dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live generation bindings are already tracked`,
+						);
+					}
 					const consumed = await reserveActivePrReviewReentryAuthorization(
 						directory,
 						input.sessionID,
