@@ -49,7 +49,11 @@ function dcScanCmdTokens(args: string): string[] {
 			current += ch;
 			continue;
 		}
-		if (!inQuote && /\s/.test(ch)) {
+		// cmd.exe splits internal-command arguments on unquoted , ; = as
+		// well as whitespace before the switch scan (executed ground truth:
+		// rd /s,/q,<path> removes the tree), so those characters are
+		// argument boundaries here too.
+		if (!inQuote && /[\s,;=]/.test(ch)) {
 			if (current.length > 0) tokens.push(current);
 			current = '';
 			continue;
