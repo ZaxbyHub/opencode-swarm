@@ -32,6 +32,13 @@ import {
 	reconcileLandedMerge,
 	SOURCE_WORKTREE_GONE_STAGE,
 } from '../worktree/merge.js';
+import { withSettlementArtifactLifecycle } from '../worktree/settlement-artifact-lifecycle.js';
+import {
+	preserveSettlementSource,
+	probeSettlementSource,
+	releaseSettlementSource,
+	validateSettlementLane,
+} from '../worktree/settlement-source-recovery.js';
 import {
 	readWorkflowWalFile,
 	writeWorkflowWalFile,
@@ -453,31 +460,55 @@ export async function beginCoderSettlement(options: {
 							return;
 						}
 					}
-					await transaction.transition({
-						type: 'dispatch_attempted',
-						agentType: 'coder',
-						expectedGeneration: options.expectedGeneration,
-						transitionId: options.transitionId,
-					});
-					await writeWal(filePath, {
-						version: 1,
-						state: 'DISPATCHED',
-						taskId: options.taskId,
-						transitionId: options.transitionId,
-						actor: options.actor,
-						processId: process.pid,
-						runtimeId,
-						expectedGeneration: options.expectedGeneration,
-						context: options.context,
-						...(options.worktree ? { worktree: options.worktree } : {}),
-						recordedAt: new Date().toISOString(),
-					});
-					ownsActiveDispatch = true;
-					await appendSettlementEvent(options.directory, 'dispatched', {
-						taskId: options.taskId,
-						transitionId: options.transitionId,
-						actor: options.actor,
-					});
+					const publish = async () => {
+						if (options.worktree) {
+							if (
+								canonicalRootKeyFresh(options.context.baseline.directory) !==
+									canonicalRootKeyFresh(options.worktree.worktreePath) ||
+								options.context.baseline.gitHead === null
+							) {
+								throw new Error('CODER_SETTLEMENT_DISPATCH_ARTIFACT_CHANGED');
+							}
+							await _internals.validateSettlementLane(
+								options.worktree.worktreePath,
+								options.worktree.branchName,
+								options.context.baseline.gitHead,
+							);
+						}
+						await transaction.transition({
+							type: 'dispatch_attempted',
+							agentType: 'coder',
+							expectedGeneration: options.expectedGeneration,
+							transitionId: options.transitionId,
+						});
+						await writeWal(filePath, {
+							version: 1,
+							state: 'DISPATCHED',
+							taskId: options.taskId,
+							transitionId: options.transitionId,
+							actor: options.actor,
+							processId: process.pid,
+							runtimeId,
+							expectedGeneration: options.expectedGeneration,
+							context: options.context,
+							...(options.worktree ? { worktree: options.worktree } : {}),
+							recordedAt: new Date().toISOString(),
+						});
+						ownsActiveDispatch = true;
+						await appendSettlementEvent(options.directory, 'dispatched', {
+							taskId: options.taskId,
+							transitionId: options.transitionId,
+							actor: options.actor,
+						});
+					};
+					if (options.worktree) {
+						await _internals.withSettlementArtifactLifecycle(
+							options.directory,
+							publish,
+						);
+					} else {
+						await publish();
+					}
 				},
 			),
 	);
@@ -912,6 +943,84 @@ async function cleanupRecoveredWorktree(
 	}
 }
 
+/**
+ * Cooldown for the historical RECOVERABLE_ORPHAN_COMMIT advisory (AGENTS.md
+ * §8: repeated advisory behaviour needs a cooldown, module-level state needs
+ * eviction). Recovery runs on every update_task_status, re-dispatch and close,
+ * so without it one legacy record would re-print a CRITICAL-WARN on every call
+ * and crowd other advisories out of the bounded /swarm diagnose buffer.
+ */
+const HISTORICAL_ORPHAN_ADVISORY_COOLDOWN_MS = 10 * 60_000;
+const MAX_HISTORICAL_ORPHAN_ADVISORIES = 256;
+const historicalOrphanAdvisoryAt = new Map<string, number>();
+
+function shouldEmitHistoricalOrphanAdvisory(key: string): boolean {
+	const now = Date.now();
+	const last = historicalOrphanAdvisoryAt.get(key);
+	if (
+		last !== undefined &&
+		now - last >= 0 &&
+		now - last < HISTORICAL_ORPHAN_ADVISORY_COOLDOWN_MS
+	)
+		return false;
+	// Re-insert so Map iteration order stays least-recently-emitted first.
+	historicalOrphanAdvisoryAt.delete(key);
+	historicalOrphanAdvisoryAt.set(key, now);
+	while (historicalOrphanAdvisoryAt.size > MAX_HISTORICAL_ORPHAN_ADVISORIES) {
+		const oldest = historicalOrphanAdvisoryAt.keys().next().value;
+		if (oldest === undefined) break;
+		historicalOrphanAdvisoryAt.delete(oldest);
+	}
+	return true;
+}
+
+/**
+ * Pre-upgrade releases could self-heal a lane to ABORTED while its recorded
+ * source commit still existed. Pin that commit under the settlement backup ref
+ * and report it — the report is ADVISORY ONLY. The settlement stays ABORTED
+ * and nothing here throws for the orphan itself: throwing would re-wedge
+ * update_task_status, re-dispatch and close on every call with no exit, which
+ * is the deadlock the self-heal exists to remove. Failures to establish the
+ * facts (CODER_SETTLEMENT_SOURCE_UNCERTAIN from the source probe, ref
+ * uncertainty or an occupied backup ref while preserving) still throw: work
+ * that cannot be proven safe is never silently dropped.
+ *
+ * Returns 'orphan' when the retained source is reported (callers must leave
+ * the terminal WAL untouched), 'none' otherwise.
+ */
+async function preserveHistoricalSelfHealedSource(
+	directory: string,
+	wal: CoderSettlementWal,
+): Promise<'orphan' | 'none'> {
+	if (
+		wal.state !== 'ABORTED' ||
+		!wal.abortReason?.startsWith(
+			'CODER_SETTLEMENT_SELF_HEALED_MISSING_WORKTREE',
+		) ||
+		!wal.mergeProvenance ||
+		(await probeSettlementSource(directory, wal.mergeProvenance.sourceHead)) !==
+			'present'
+	)
+		return 'none';
+	const source = wal.mergeProvenance.sourceHead;
+	const backup = await preserveSettlementSource(directory, source);
+	const landed = await reconcileLandedMerge(directory, wal.mergeProvenance);
+	if (landed.landed && landed.method !== 'worktree-match') {
+		await releaseSettlementSource(directory, source);
+		return 'none';
+	}
+	if (
+		shouldEmitHistoricalOrphanAdvisory(
+			`${canonicalRootKeyFresh(directory)}\0${wal.taskId}\0${source}`,
+		)
+	) {
+		const message = `RECOVERABLE_ORPHAN_COMMIT: historical aborted task ${wal.taskId} source ${source} is retained at ${backup}; apply it explicitly after reviewing the current task generation. The settlement remains ABORTED. This report is advisory: task status, dispatch and close are not blocked by it.`;
+		logger.criticalWarn(message);
+		advisoryWarn(message);
+	}
+	return 'orphan';
+}
+
 export async function completeCoderSettlementCleanup(
 	directory: string,
 	taskId: string,
@@ -927,6 +1036,11 @@ export async function completeCoderSettlementCleanup(
 		if (wal.state !== 'COMMITTED' && wal.state !== 'ABORTED') {
 			throw new Error('CODER_SETTLEMENT_NOT_COMMITTED');
 		}
+		// A reported historical orphan leaves the terminal WAL byte-for-byte
+		// untouched: its lane is already gone and the source is pinned, so there
+		// is nothing for cleanup to do that could not disturb a later generation.
+		if ((await preserveHistoricalSelfHealedSource(directory, wal)) === 'orphan')
+			return;
 		if (!wal.worktree || wal.cleanupComplete === true) return;
 		await cleanupRecoveredWorktree(directory, wal.worktree);
 		await writeWal(filePath, { ...wal, cleanupComplete: true });
@@ -962,6 +1076,16 @@ async function selfHealMissingLaneWorktree(
 	// Throws CODER_SETTLEMENT_CLEANUP_UNCERTAIN (or the raw spawn error) when
 	// git cannot answer — intentionally NOT caught.
 	if (_internals.branchExists(directory, descriptor.branchName)) return false;
+	const currentWal = await readWal(filePath, taskId);
+	if (currentWal?.mergeProvenance) {
+		const source = currentWal.mergeProvenance.sourceHead;
+		if ((await probeSettlementSource(directory, source)) === 'present') {
+			const backup = await preserveSettlementSource(directory, source);
+			throw new Error(
+				`RECOVERABLE_ORPHAN_COMMIT: task ${taskId} source ${source} is retained at ${backup}; settlement remains pending.`,
+			);
+		}
+	}
 
 	const reason = `CODER_SETTLEMENT_SELF_HEALED_MISSING_WORKTREE: ${detail}`;
 	const aborted = await abortDispatchedWalUnderLock(
@@ -1008,7 +1132,15 @@ export async function recoverCoderSettlement(
 		const existingWal = await readWal(filePath, taskId);
 		if (existingWal === null) return null;
 		let wal: CoderSettlementWal = existingWal;
-		if (wal.state === 'ABORTED') return null;
+		if (wal.state === 'ABORTED') {
+			// Earlier releases could declare a missing lane unrecoverable while its
+			// persisted source object survived. Preserve that historical work without
+			// reviving a stale task generation or automatically applying its changes.
+			// The orphan report is advisory: recovery still resolves null so the
+			// terminal settlement never blocks the task again.
+			await preserveHistoricalSelfHealedSource(directory, wal);
+			return null;
+		}
 		if (wal.state === 'COMMITTED') {
 			if (wal.worktree && wal.cleanupComplete !== true) {
 				await cleanupRecoveredWorktree(directory, wal.worktree);
@@ -1028,6 +1160,24 @@ export async function recoverCoderSettlement(
 		if (wal.state === 'DISPATCHED') {
 			if (wal.worktree) {
 				const worktree = wal.worktree;
+				const sourceState = wal.mergeProvenance
+					? await probeSettlementSource(
+							directory,
+							wal.mergeProvenance.sourceHead,
+						)
+					: undefined;
+				if (
+					sourceState === 'absent' &&
+					(await selfHealMissingLaneWorktree(
+						directory,
+						filePath,
+						taskId,
+						wal.transitionId,
+						worktree,
+						'the recorded source object, lane branch and checkout are absent',
+					))
+				)
+					return null;
 				const observed =
 					wal.observedFiles ??
 					(await scopedObservedFiles(worktree.worktreePath, wal.context));
@@ -1044,7 +1194,7 @@ export async function recoverCoderSettlement(
 				const accepted = observed.length > 0 || unattributedEmptyScopeMutation;
 				const settlementFailed =
 					wal.settlementFailed === true || unattributedEmptyScopeMutation;
-				if (wal.mergeProvenance) {
+				if (wal.mergeProvenance && sourceState !== 'absent') {
 					const landed = await reconcileLandedMerge(
 						directory,
 						wal.mergeProvenance,
@@ -1055,6 +1205,17 @@ export async function recoverCoderSettlement(
 						// stamp and branch retention must reflect that landing shape,
 						// not the legacy committed-merge cleanup.
 						const landedUnstaged = landed.method === 'worktree-match';
+						if (landedUnstaged) {
+							await preserveSettlementSource(
+								directory,
+								wal.mergeProvenance.sourceHead,
+							);
+						} else {
+							await releaseSettlementSource(
+								directory,
+								wal.mergeProvenance.sourceHead,
+							);
+						}
 						wal = {
 							...wal,
 							state: 'PREPARED',
@@ -1087,6 +1248,10 @@ export async function recoverCoderSettlement(
 						});
 						return committed;
 					}
+					await preserveSettlementSource(
+						directory,
+						wal.mergeProvenance.sourceHead,
+					);
 					if (landed.error) {
 						throw new Error(
 							`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: transition ${wal.transitionId} for task ${taskId} could not reconcile the landed merge (${filePath}, state ${wal.state}): ${landed.error}. Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
@@ -1614,6 +1779,8 @@ export async function recoverStaleCoderSettlements(
 
 export const _internals = {
 	liveDispatches,
+	withSettlementArtifactLifecycle,
+	validateSettlementLane,
 	// Test seam: owner cleanup is a mutation boundary whose failure must leave
 	// the settlement recoverable rather than being reported as successful.
 	removeWorktreeProvisioningOwner,
@@ -1630,4 +1797,7 @@ export const _internals = {
 	// listed-non-terminal → recovered-atomically race window (a concurrent
 	// completion) and recovery failures without real interleaving.
 	recoverCoderSettlement,
+	// Test seam: the per-process cooldown ledger for the advisory-only historical
+	// RECOVERABLE_ORPHAN_COMMIT report, so tests can pin emit-once / suppress.
+	historicalOrphanAdvisoryAt,
 };

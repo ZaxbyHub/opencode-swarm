@@ -16,18 +16,15 @@
  * bound to the removed lane worktree's path at recovery time (as a lane-instance
  * delegation gate leaves it).
  *
- * #3409/#3420 forward-compatibility: draft PR #3420 changes the self-heal
- * semantics for a lane whose auto-commit object is still alive (it throws the
- * designed RECOVERABLE_ORPHAN_COMMIT instead of healing). Arm A therefore pins
- * the CURRENT-tree contract on the alive-object fixture (this PR must land
- * before #3420; if #3420 lands first, the frozen C2 evidence is reconciled via
- * a sanctioned AMEND rather than ignored). Arm B pins only the #3448 invariant
- * with a whitelisted outcome, which holds on both trees. A PRUNED-object
- * fixture is deliberately NOT used: on the current tree `git gc --prune=now`
- * makes the recorded merge provenance unverifiable and recovery fails closed
- * with CODER_SETTLEMENT_RECOVERY_UNCERTAIN (verified by probe at
- * implementation time) — the pruned-object heal is #3420's work, not this
- * fix's, and pinning it here would be pinning the other PR's contract.
+ * #3409 contract on this tree: a lane whose auto-commit object is still alive is
+ * recovered, not aborted. The retained source lands squash-unstaged (pinned by
+ * coder-settlement-orphan-3409). Arm A pins that landed outcome in place of the
+ * pre-#3409 ABORTED self-heal expectation, per the sanctioned AMEND for the
+ * frozen C2 evidence. Arm B pins the #3448 invariant (no resurrected lane root)
+ * plus a whitelisted outcome: a tree that reports the orphan as
+ * RECOVERABLE_ORPHAN_COMMIT is also accepted. A pruned-object fixture is not
+ * used here: the absent-source self-heal is pinned by
+ * coder-settlement-selfheal-invariant-2236 and coder-settlement-stale-worktree-2236.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -193,7 +190,7 @@ function destroyWorktreeAndBranch(fixture: Fixture): void {
 describe('#3448 recovery self-heal is not blocked by the status writer', () => {
 	// Real git spawns + a full recovery loop: explicit 120s per-test ceilings so
 	// a bare `bun test` (5s default) passes; CI's per-file budget is 120s anyway.
-	test('Arm A - current-tree contract: recover self-heals to ABORTED with the singleton lane-bound', async () => {
+	test('Arm A - #3409 contract: an alive orphan lands squash-unstaged and never resurrects the lane root', async () => {
 		const fixture = await interruptedAfterOnBeforeMerge('heal-3448-contract');
 		destroyWorktreeAndBranch(fixture);
 		expect(branchExists(fixture)).toBe(false);
@@ -202,16 +199,30 @@ describe('#3448 recovery self-heal is not blocked by the status writer', () => {
 
 		await expect(
 			recoverCoderSettlement(fixture.repo, TASK_ID),
-		).resolves.toBeNull();
+		).resolves.not.toBeNull();
 
-		expect(readWal(fixture)).toMatchObject({ state: 'ABORTED' });
+		// The retained source is landed in the squash-unstaged shape, not aborted.
+		expect(readWal(fixture)).toMatchObject({
+			state: 'COMMITTED',
+			cleanupComplete: true,
+			worktree: { landedUnstaged: true },
+		});
+		expect(
+			fs
+				.readFileSync(
+					path.join(fixture.repo, 'src', 'nested', 'feature.ts'),
+					'utf-8',
+				)
+				.replace(/\r\n/g, '\n'),
+		).toBe('export const feature = 2;\n');
 		// The #3448 invariant proper: the lane root was not resurrected.
 		expect(fs.existsSync(fixture.worktree)).toBe(false);
-		const warnings = getDeferredWarnings().join('\n');
-		expect(warnings).toContain('STALE_CODER_SETTLEMENT_SELF_HEALED');
+		expect(getDeferredWarnings().join('\n')).not.toContain(
+			'STALE_CODER_SETTLEMENT_SELF_HEALED',
+		);
 	}, 120_000);
 
-	test('Arm B - #3420-tolerant invariant: the lane root stays absent and the loop error never returns', async () => {
+	test('Arm B - whitelisted outcome: the lane root stays absent and the loop error never returns', async () => {
 		const fixture = await interruptedAfterOnBeforeMerge('heal-3448-alive');
 		destroyWorktreeAndBranch(fixture);
 		expect(branchExists(fixture)).toBe(false);
@@ -227,15 +238,20 @@ describe('#3448 recovery self-heal is not blocked by the status writer', () => {
 		// The #3448 invariant: no resurrected lane root.
 		expect(fs.existsSync(fixture.worktree)).toBe(false);
 		if (thrown === undefined) {
-			// No-throw path (this PR's tree): the recovery healed — pin the full
+			// No-throw path (this tree): the orphan lands squash-unstaged. Pin the full
 			// terminal contract so a silent null-return with the WAL left
 			// DISPATCHED cannot pass.
-			expect(readWal(fixture)).toMatchObject({ state: 'ABORTED' });
-			expect(getDeferredWarnings().join('\n')).toContain(
-				'STALE_CODER_SETTLEMENT_SELF_HEALED',
-			);
+			expect(readWal(fixture)).toMatchObject({ state: 'COMMITTED' });
+			expect(
+				fs
+					.readFileSync(
+						path.join(fixture.repo, 'src', 'nested', 'feature.ts'),
+						'utf-8',
+					)
+					.replace(/\r\n/g, '\n'),
+			).toBe('export const feature = 2;\n');
 		} else {
-			// Whitelisted throw path (a #3409/#3420-carrying tree): ONLY the
+			// Whitelisted throw path (a tree that reports the orphan instead of landing it): ONLY the
 			// designed RECOVERABLE_ORPHAN_COMMIT is acceptable, and the message
 			// must not smuggle the self-defeating loop error alongside it.
 			expect(thrown).toContain('RECOVERABLE_ORPHAN_COMMIT');

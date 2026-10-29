@@ -57,6 +57,10 @@ import {
 	SOURCE_WORKTREE_GONE_STAGE,
 	SOURCE_WORKTREE_UNCERTAIN_STAGE,
 } from '../../worktree/merge';
+import {
+	assertSettlementArtifactsRemovable,
+	withSettlementArtifactLifecycle,
+} from '../../worktree/settlement-artifact-lifecycle';
 import type { MergeStrategy } from '../../worktree/types';
 import { verifyReviewerScopeGenerationMergeBack } from '../reviewer-scope-mergeback';
 import { recordDeadLaneReclaim } from './dead-lane-reclaim';
@@ -3031,6 +3035,7 @@ export async function cleanupStandardWorktreeForCallId(
 		if (!('error' in result)) {
 			removedWorktree = true;
 		} else if (
+			!result.error.startsWith('CODER_SETTLEMENT_ARTIFACT_REMOVAL_REFUSED:') &&
 			result.error.includes('is not a working tree') &&
 			(await pathExists(worktreePath)) &&
 			isPathUnderSwarmWorktreeBase(
@@ -3040,8 +3045,17 @@ export async function cleanupStandardWorktreeForCallId(
 			)
 		) {
 			try {
-				await fs.rm(worktreePath, { recursive: true, force: true });
-				removedWorktree = !(await pathExists(worktreePath));
+				await _internals.withSettlementArtifactLifecycle(
+					directory,
+					async () => {
+						await _internals.assertSettlementArtifactsRemovable(directory, {
+							path: worktreePath,
+							branch: branchName,
+						});
+						await fs.rm(worktreePath, { recursive: true, force: true });
+						removedWorktree = !(await pathExists(worktreePath));
+					},
+				);
 			} catch (err) {
 				logger.log(
 					`[swarm] cleanupStandardWorktreeForCallId: residual directory cleanup failed for ${callID}: ${err}`,
@@ -3066,7 +3080,7 @@ export async function cleanupStandardWorktreeForCallId(
 		const retainedSession = ensureAgentSession(parentSessionID);
 		pushAdvisory(
 			retainedSession,
-			`STANDARD_WORKTREE_BRANCH_RETAINED: dispatch ${callID} removed worktree ${worktreePath} but retained branch ${branchName} (unstaged landing); the branch is the recovery backup until the landed changes are committed.`,
+			`STANDARD_WORKTREE_BRANCH_RETAINED: dispatch ${callID} removed worktree ${worktreePath} but retained branch ${branchName} as the recovery backup; the landed changes may be unstaged or committed.`,
 		);
 	} else {
 		try {
@@ -3755,6 +3769,8 @@ export async function readLaneEnvFileFromDisk(
  * here via getters/setters) to mock worktree provisioning, merge-back, etc.
  */
 export const _internals = {
+	withSettlementArtifactLifecycle,
+	assertSettlementArtifactsRemovable,
 	/** Epic v2 C3: committed landing for a task of the open epic. */
 	epicCommitLandingFor,
 	provisionWorktree,

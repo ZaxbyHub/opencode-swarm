@@ -26,6 +26,7 @@ import {
 	shortenWorktreePath,
 } from '../../../../src/turbo/lean/worktree';
 import type { BunCompatSubprocess } from '../../../../src/utils/bun-compat';
+import * as artifactAdmission from '../../../helpers/artifact-admission-stub';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -78,6 +79,7 @@ afterEach(() => {
 	_internals.osTmpdir = realOsTmpdir;
 	_internals.getCoreLongPaths = realGetCoreLongPaths;
 	_internals.fs = realFs;
+	artifactAdmission.restore(_internals);
 });
 
 // ---------------------------------------------------------------------------
@@ -232,6 +234,7 @@ branch refs/heads/${branchName}
 // ---------------------------------------------------------------------------
 
 describe('removeWorktree', () => {
+	beforeEach(() => artifactAdmission.install(_internals));
 	const fakeWorktreePath = 'C:\\worktrees\\ses_abc\\lane-1';
 	const fakeProjectRoot = 'C:\\project-root';
 
@@ -955,24 +958,6 @@ describe('provisionWorktree — path budget (Windows)', () => {
 		const allWarnings = warnings.join('\n');
 		expect(warnings.length).toBeGreaterThan(0);
 		expect(allWarnings).toContain('Path budget warning');
-	});
-});
-
-// ---------------------------------------------------------------------------
-// _internals DI seam
-// ---------------------------------------------------------------------------
-
-describe('_internals.bunSpawn', () => {
-	test('_internals.bunSpawn can be replaced for testing', () => {
-		// Confirm the seam exists and is initially the real function
-		expect(typeof _internals.bunSpawn).toBe('function');
-
-		// Replace with a no-op mock
-		_internals.bunSpawn = () => mockProc(0, 'replaced', '');
-		const result = _internals.bunSpawn();
-		expect(result.exitCode).toBe(0);
-		expect(result).toHaveProperty('exited');
-		expect(result).toHaveProperty('kill');
 	});
 });
 

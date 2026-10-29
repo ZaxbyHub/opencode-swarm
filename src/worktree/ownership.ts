@@ -34,6 +34,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveWorktreeRepoOwnership } from '../config/lane-context';
 import { isPathUnderSwarmWorktreeBase, removeWorktree } from './core';
+import {
+	assertSettlementArtifactsRemovable,
+	withSettlementArtifactLifecycle,
+} from './settlement-artifact-lifecycle';
 
 export type OwnedRemovalOutcome =
 	| { status: 'removed' }
@@ -43,6 +47,8 @@ export type OwnedRemovalOutcome =
 export type GitMarkerProbe = 'gitless' | 'present' | 'uncertain';
 
 export const _internals = {
+	withSettlementArtifactLifecycle,
+	assertSettlementArtifactsRemovable,
 	resolveWorktreeRepoOwnership,
 	isPathUnderSwarmWorktreeBase,
 	removeWorktree,
@@ -102,7 +108,20 @@ export async function removeOwnedWorktreeDir(
 			};
 		}
 		try {
-			_internals.rmSync(worktreePath, { recursive: true, force: true });
+			await _internals.withSettlementArtifactLifecycle(
+				projectRoot,
+				async () => {
+					await _internals.assertSettlementArtifactsRemovable(projectRoot, {
+						path: worktreePath,
+					});
+					// Recheck after lock acquisition: a concurrently published Git marker
+					// must not be treated as the earlier gitless remnant.
+					if (probeGitMarker(path.join(worktreePath, '.git')) !== 'gitless') {
+						throw new Error('worktree marker changed during removal admission');
+					}
+					_internals.rmSync(worktreePath, { recursive: true, force: true });
+				},
+			);
 			return { status: 'removed' };
 		} catch (error) {
 			return {
