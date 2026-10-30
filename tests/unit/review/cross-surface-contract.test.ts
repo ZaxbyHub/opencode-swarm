@@ -13,6 +13,8 @@ import type { ReviewModelDispatcher } from '../../../src/review/contracts';
 import { runFinalReviewGate } from '../../../src/tools/phase-complete/gates';
 import { buildPluginToolObject } from '../../../src/tools/plugin-registration';
 
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
 const repositoryRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	'../../..',
@@ -20,6 +22,29 @@ const repositoryRoot = path.resolve(
 
 function read(relativePath: string): string {
 	return fs.readFileSync(path.join(repositoryRoot, relativePath), 'utf8');
+}
+
+// Consumption-aware source resolution for the #1675 fragment (#3511, the
+// merged-#3507 pattern): pending present -> pending is the sole authority;
+// absent -> scan the materialized docs/releases/vX.Y.Z.md history. Returns
+// null when neither surface carries the fragment.
+function autoReviewFragmentText(root: string): string | null {
+	const pendingFragment = path.join(
+		root,
+		'docs/releases/pending/1675-default-auto-review-engine.md',
+	);
+	if (fs.existsSync(pendingFragment)) {
+		return fs.readFileSync(pendingFragment, 'utf8');
+	}
+	const releasesPath = path.join(root, 'docs/releases');
+	if (!fs.existsSync(releasesPath)) return null;
+	const parts: string[] = [];
+	for (const name of fs.readdirSync(releasesPath)) {
+		if (/^v\d+\.\d+\.\d+\.md$/.test(name)) {
+			parts.push(fs.readFileSync(path.join(releasesPath, name), 'utf8'));
+		}
+	}
+	return parts.length > 0 ? parts.join('\n') : null;
 }
 
 describe('auto-review cross-surface contract', () => {
@@ -64,8 +89,35 @@ describe('auto-review cross-surface contract', () => {
 		expect(read('docs/proposals/auto-review-by-review-model.md')).toContain(
 			'Status: implemented by issue #1675',
 		);
-		expect(
-			read('docs/releases/pending/1675-default-auto-review-engine.md'),
-		).toContain('/swarm review');
+		// Consumption-aware (#3511, the merged-#3507 pattern): while the pending
+		// fragment exists it is the sole authority; once a release-fragment
+		// cleanup consumes it, the sentence must be found in the materialized
+		// release history instead. Exclusive arms — never a union.
+		expect(autoReviewFragmentText(repositoryRoot)).toContain('/swarm review');
+	});
+
+	test('consumption-aware fragment resolution fails closed when neither surface carries it', () => {
+		// Strength leg (#3511): consumed + unarchived must read as null, so the
+		// pin above fails rather than passing vacuously; the archive arm must
+		// carry the sentence once materialized.
+		const neitherDir = canonicalMkdtemp('swarm-cross-surface-neither-');
+		try {
+			expect(autoReviewFragmentText(neitherDir)).toBeNull();
+		} finally {
+			fs.rmSync(neitherDir, { recursive: true, force: true });
+		}
+		const archivedDir = canonicalMkdtemp('swarm-cross-surface-arch-');
+		try {
+			fs.mkdirSync(path.join(archivedDir, 'docs/releases'), {
+				recursive: true,
+			});
+			fs.writeFileSync(
+				path.join(archivedDir, 'docs/releases/v0.0.0.md'),
+				'auto-review engine documented /swarm review surface',
+			);
+			expect(autoReviewFragmentText(archivedDir)).toContain('/swarm review');
+		} finally {
+			fs.rmSync(archivedDir, { recursive: true, force: true });
+		}
 	});
 });

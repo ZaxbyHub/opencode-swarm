@@ -512,8 +512,11 @@ jobs:
   # invisible unless someone opened the run page. This summary job runs on every
   # release regardless of the cleanup result and surfaces a non-success
   # conclusion as an ::error:: annotation plus a run-summary line.
+  # Issue #3510: update-release-notes is in needs too — cleanup is SKIPPED (not
+  # failed) when it fails, so a summary that only watches cleanup reports green
+  # while the release strands silently (v7.199.2 / v7.200.1).
   release-health-summary:
-    needs: [release-please, cleanup-release-fragments]
+    needs: [release-please, update-release-notes, cleanup-release-fragments]
     if: ${{ always() && needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -523,9 +526,14 @@ jobs:
       - name: Report release job conclusions
         run: |
           echo "release-please: ${{ needs.release-please.result }}"
+          echo "update-release-notes: ${{ needs.update-release-notes.result }}"
           echo "cleanup-release-fragments: ${{ needs.cleanup-release-fragments.result }}"
-          echo "release-please=${{ needs.release-please.result }} cleanup-release-fragments=${{ needs.cleanup-release-fragments.result }}" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ needs.cleanup-release-fragments.result }}" != "success" ] && [ "${{ needs.cleanup-release-fragments.result }}" != "skipped" ]; then
+          echo "release-please=${{ needs.release-please.result }} update-release-notes=${{ needs.update-release-notes.result }} cleanup-release-fragments=${{ needs.cleanup-release-fragments.result }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ needs.update-release-notes.result }}" != "success" ]; then
+            echo "::error::update-release-notes concluded ${{ needs.update-release-notes.result }} — release notes could not be reconciled (docs/releases archive cannot materialize for this release)"
+            exit 1
+          fi
+          if [ "${{ needs.cleanup-release-fragments.result }}" != "success" ]; then
             echo "::error::cleanup-release-fragments concluded ${{ needs.cleanup-release-fragments.result }} — fragment cleanup did not complete (docs/releases archive not materialized for this release)"
             exit 1
           fi

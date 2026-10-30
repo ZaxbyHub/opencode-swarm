@@ -54,6 +54,7 @@ export const FRAGMENT_DIR = 'docs/releases/pending';
 export const HISTORICAL_REPLAY_STATE =
 	'docs/releases/manifests/historical-replay-state.json';
 export const HISTORICAL_REPLAY_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+export const FRAGMENT_SEPARATOR = '\n\n---\n\n';
 
 // -----------------------------------------------------------------------------
 // Pure helpers — exported for unit tests. No I/O, no gh CLI.
@@ -123,6 +124,67 @@ function publishedPartMatchesEntryContent(part, content) {
 	);
 }
 
+export const MAX_PROVENANCE_PARTS = 256;
+export const MAX_PROVENANCE_SEGMENTATIONS = 2;
+export const MAX_PROVENANCE_WORK = 100_000;
+
+/**
+ * Segment the separator-split published parts back onto workspace entries
+ * (issue #3500). A fragment whose own content contains blank-line `---`
+ * horizontal rules spans MULTIPLE consecutive parts, so a per-part exact
+ * match can never resolve it: at each position a segment of 1..N parts
+ * (joined back with the separator) must match EXACTLY ONE unused
+ * content-bearing entry. The search enumerates complete segmentations and
+ * succeeds only when exactly one exists — zero or multiple complete
+ * segmentations fail closed, as do the explicit caps (parts, solutions,
+ * comparison work). Archived (content-less) entries never match a segment:
+ * a published block referencing an already-archived fragment therefore
+ * fails closed rather than being silently omitted (the duplicate-
+ * consumption hazard).
+ */
+export function matchPartsToEntries(parts, available) {
+	if (!Array.isArray(parts) || parts.length === 0) return [];
+	if (parts.length > MAX_PROVENANCE_PARTS) {
+		throw new Error('incomplete release provenance: parts cap exceeded');
+	}
+	const solutions = [];
+	let work = 0;
+	const used = new Set();
+	const chosen = [];
+	const consider = (index) => {
+		if (index === parts.length) {
+			solutions.push([...chosen]);
+			return solutions.length < MAX_PROVENANCE_SEGMENTATIONS;
+		}
+		for (let length = 1; length <= parts.length - index; length += 1) {
+			work += 1;
+			if (work > MAX_PROVENANCE_WORK) {
+				throw new Error('incomplete release provenance: search budget exceeded');
+			}
+			const span = parts.slice(index, index + length).join(FRAGMENT_SEPARATOR);
+			const matches = available.filter(
+				(entry) =>
+					typeof entry?.filePath === 'string' &&
+					typeof entry?.content === 'string' &&
+					!used.has(entry.filePath) &&
+					publishedPartMatchesEntryContent(span, entry.content),
+			);
+			if (matches.length !== 1) continue;
+			const match = matches[0];
+			used.add(match.filePath);
+			chosen.push(match);
+			const exhaustive = consider(index + length);
+			used.delete(match.filePath);
+			chosen.pop();
+			if (!exhaustive) return false;
+		}
+		return true;
+	};
+	const exhaustive = consider(0);
+	if (!exhaustive || solutions.length !== 1) return null;
+	return solutions[0];
+}
+
 function publishedBlockMatchesEntries(releaseBody, entries) {
 	const raw = combineFragments(entries);
 	const rendered = combineRenderedFragments(entries);
@@ -141,20 +203,11 @@ function publishedBlockMatchesEntries(releaseBody, entries) {
 export function selectEntriesForPublishedBlock(entries, releaseBody) {
 	const payload = customReleaseNotesPayload(releaseBody);
 	if (!payload) return [];
-	const selected = [];
-	const usedPaths = new Set();
-	for (const part of payload.split('\n\n---\n\n')) {
-		const matches = entries.filter(
-			(entry) =>
-				typeof entry?.filePath === 'string' &&
-				typeof entry?.content === 'string' &&
-				publishedPartMatchesEntryContent(part, entry.content) &&
-				!usedPaths.has(entry.filePath),
-		);
-		if (matches.length !== 1) return null;
-		selected.push(matches[0]);
-		usedPaths.add(matches[0].filePath);
-	}
+	const selected = matchPartsToEntries(
+		payload.split(FRAGMENT_SEPARATOR),
+		entries,
+	);
+	if (!selected) return null;
 	return publishedBlockMatchesEntries(releaseBody, selected) ? selected : null;
 }
 
@@ -193,25 +246,20 @@ export function reconstructPublishedBlockFromWorkspace(
 			throw error;
 		}
 	});
-	const selected = [];
-	const usedPaths = new Set();
-	const parts = payload.split('\n\n---\n\n');
-	for (let order = 0; order < parts.length; order += 1) {
-		const matches = available.filter(
-			(entry) =>
-				publishedPartMatchesEntryContent(parts[order], entry.content) &&
-				!usedPaths.has(entry.filePath),
+	const segmented = matchPartsToEntries(
+		payload.split(FRAGMENT_SEPARATOR),
+		available,
+	);
+	if (!segmented) {
+		throw new Error(
+			'incomplete release provenance: published fragment has no unique exact segmentation of workspace fragments',
 		);
-		if (matches.length !== 1) {
-			throw new Error(
-				'incomplete release provenance: published fragment has ' +
-					matches.length +
-					' exact workspace matches',
-			);
-		}
-		selected.push({ ...matches[0], prNumber: null, order });
-		usedPaths.add(matches[0].filePath);
 	}
+	const selected = segmented.map((entry, order) => ({
+		...entry,
+		prNumber: null,
+		order,
+	}));
 	if (!publishedBlockMatchesEntries(releaseBody, selected)) {
 		throw new Error(
 			'incomplete release provenance: workspace fragments do not reconstruct the published block',
@@ -911,27 +959,48 @@ export async function reconcileTaggedRelease(options) {
 			!entry ||
 			(!Number.isInteger(entry.prNumber) && !Number.isInteger(entry.order)) ||
 			typeof entry.filePath !== 'string' ||
-			typeof entry.content !== 'string'
+			(typeof entry.content !== 'string' && !entry.archivedClaim)
 		) {
 			throw new Error('malformed consumed fragment entry');
 		}
-		if (Buffer.byteLength(entry.content, 'utf8') > MAX_FRAGMENT_BYTES) {
-			throw new Error('consumed fragment content size cap exceeded: ' + entry.filePath);
-		}
 		const { normalized } = containedPendingPath(repoRoot, entry.filePath);
-		const contentSha256 = entry.contentSha256 ?? sha256(entry.content);
-		if (!/^[0-9a-f]{64}$/.test(contentSha256)) {
-			throw new Error('malformed consumed fragment hash: ' + normalized);
-		}
-		if (contentSha256 !== sha256(entry.content)) {
-			throw new Error(
-				'consumed fragment hash does not match UTF-8 content: ' + normalized,
-			);
+		let content = entry.content;
+		let contentSha256;
+		if (entry.archivedClaim) {
+			// Claim-only archived entry (issue #3500): validated by RE-RESOLVING
+			// the merged-manifest claim, never by content bytes — the raw bytes
+			// are gone by construction; only the earlier manifest's claim
+			// remains as the authoritative record of what was published.
+			const claim = resolveArchivedClaim(repoRoot, normalized);
+			if (
+				!claim ||
+				claim.sha256 !== entry.archivedClaim.sha256 ||
+				claim.manifest !== entry.archivedClaim.manifest
+			) {
+				throw new Error('malformed archived claim: ' + normalized);
+			}
+			content = null;
+			contentSha256 = claim.sha256;
+		} else {
+			if (Buffer.byteLength(entry.content, 'utf8') > MAX_FRAGMENT_BYTES) {
+				throw new Error(
+					'consumed fragment content size cap exceeded: ' + entry.filePath,
+				);
+			}
+			contentSha256 = entry.contentSha256 ?? sha256(entry.content);
+			if (!/^[0-9a-f]{64}$/.test(contentSha256)) {
+				throw new Error('malformed consumed fragment hash: ' + normalized);
+			}
+			if (contentSha256 !== sha256(entry.content)) {
+				throw new Error(
+					'consumed fragment hash does not match UTF-8 content: ' + normalized,
+				);
+			}
 		}
 		const previous = entryByPath.get(normalized);
 		if (
 			previous &&
-			(previous.content !== entry.content ||
+			(previous.content !== content ||
 				previous.contentSha256 !== contentSha256)
 		) {
 			throw new Error('ambiguous consumed fragment content: ' + normalized);
@@ -939,10 +1008,24 @@ export async function reconcileTaggedRelease(options) {
 		if (!previous) {
 			entryByPath.set(normalized, {
 				...entry,
+				content,
 				filePath: normalized,
 				contentSha256,
 			});
 		}
+	}
+	if (release.body === '' && entryByPath.size > 0) {
+		// Issue #3500: an empty published body consumed nothing (e.g. v7.199.2).
+		// Candidates were still provenance-checked upstream (requireComplete
+		// resolves or fails before this point), but no fragment bytes were
+		// published in an empty body, so nothing is consumed, no manifest claim
+		// is recorded (zero-fragment materializations are contract-correct),
+		// and present fragments stay pending for the releases that actually
+		// publish them.
+		log(
+			'release body is empty — recording no consumed fragments for ' + tagName,
+		);
+		entryByPath.clear();
 	}
 
 	const eligible = new Set();
@@ -1560,6 +1643,89 @@ export async function verifyBlockSurvived(opts) {
  * workspace. Returns the `entries` array shape expected by
  * `combineFragments`.
  */
+/**
+ * Resolve an archived-fragment claim for a pending path that is no longer on
+ * disk (issue #3500): a merged release manifest in
+ * docs/releases/manifests/*.json whose fragments[] carries the path proves the
+ * bytes were published and deleted by an earlier materialization. Claims with
+ * IDENTICAL digests (any count) resolve; DISTINCT digests for one path fail
+ * closed (no scan-order dependence, no verifiable disambiguation). A
+ * malformed digest is not a claim. Returns null when no manifest claims the
+ * path. Scan shape mirrors auditFragmentRetention's bounded manifest walk.
+ */
+export function resolveArchivedClaim(repoRoot, filePath) {
+	if (typeof repoRoot !== 'string' || typeof filePath !== 'string') return null;
+	const manifestsRoot = path.resolve(repoRoot, 'docs/releases/manifests');
+	if (!existsSync(manifestsRoot)) return null;
+	assertSafeDirectoryChain(repoRoot, 'docs/releases/manifests');
+	const names = readDirectoryNamesBounded(
+		manifestsRoot,
+		MAX_RELEASE_MANIFEST_SCAN,
+		'release manifest',
+	)
+		.filter(
+			(name) =>
+				name !== path.basename(HISTORICAL_REPLAY_STATE) &&
+				name.toLowerCase().endsWith('.json'),
+		)
+		.sort();
+	let scannedBytes = 0;
+	let scannedEntries = 0;
+	let resolved = null;
+	let resolvedManifest = null;
+	for (const name of names) {
+		const absolute = path.resolve(manifestsRoot, name);
+		const stat = lstatSync(absolute);
+		if (
+			!stat.isFile() ||
+			stat.isSymbolicLink() ||
+			stat.size > MAX_RELEASE_MANIFEST_BYTES
+		) {
+			throw new Error('unsafe or oversized release manifest: ' + name);
+		}
+		scannedBytes += stat.size;
+		if (scannedBytes > MAX_RELEASE_MANIFEST_AUDIT_BYTES) {
+			throw new Error('release manifest audit byte cap exceeded');
+		}
+		let manifest;
+		try {
+			manifest = JSON.parse(readFileSync(absolute, 'utf8'));
+		} catch {
+			continue;
+		}
+		if (manifest?.schemaVersion !== 1 || !Array.isArray(manifest.fragments)) {
+			continue;
+		}
+		scannedEntries += manifest.fragments.length;
+		if (scannedEntries > MAX_RELEASE_MANIFEST_AUDIT_ENTRIES) {
+			throw new Error('release manifest audit entry cap exceeded');
+		}
+		for (const fragment of manifest.fragments) {
+			if (
+				!fragment ||
+				fragment.path !== filePath ||
+				typeof fragment.sha256 !== 'string' ||
+				!/^[0-9a-f]{64}$/.test(fragment.sha256)
+			) {
+				continue;
+			}
+			if (resolved === null) {
+				resolved = fragment.sha256;
+				resolvedManifest = name;
+				continue;
+			}
+			if (resolved !== fragment.sha256) {
+				throw new Error(
+					'archived claim is ambiguous (distinct digests across manifests): ' +
+						filePath,
+				);
+			}
+		}
+	}
+	if (resolved === null) return null;
+	return { manifest: resolvedManifest, sha256: resolved };
+}
+
 export function collectFragmentsForPrs(
 	candidates,
 	repoRoot,
@@ -1602,6 +1768,28 @@ export function collectFragmentsForPrs(
 			const fragment = readFragment(repoRoot, fp);
 			if (fragment === null) {
 				if (requireComplete) {
+					// Issue #3500: a candidate PR's fragment may already be consumed
+					// by an earlier materialization (deleted from pending, claim
+					// recorded in a merged manifest). Resolve it as a claim-only
+					// archived entry instead of failing the whole provenance run;
+					// with no claim the availability failure still fails closed.
+					const claim = resolveArchivedClaim(repoRoot, fp);
+					if (claim) {
+						log(
+							'fragment ' +
+								fp +
+								' referenced by #' +
+								num +
+								' resolved via archived claim in ' +
+								claim.manifest,
+						);
+						entries.push({
+							prNumber: num,
+							filePath: fp,
+							archivedClaim: claim,
+						});
+						continue;
+					}
 					throw new Error(
 						'incomplete release provenance: fragment referenced by #' +
 							num +
@@ -2128,8 +2316,16 @@ export async function resolveReleaseEntries(
 		readFragment,
 	});
 	if (payload && !selectEntriesForPublishedBlock(entries, releaseBody)) {
+		const archived = entries
+			.filter((entry) => entry?.archivedClaim)
+			.map((entry) => entry.filePath);
 		throw new Error(
-			'incomplete release provenance: published block could not be reconstructed exactly',
+			'incomplete release provenance: published block could not be reconstructed exactly' +
+				(archived.length > 0
+					? ' (published block references already-archived fragment: ' +
+						archived.join(', ') +
+						' — duplicate-consumption hazard)'
+					: ''),
 		);
 	}
 	return entries;

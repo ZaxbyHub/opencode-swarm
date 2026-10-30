@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // ADR review checklist for issue #2505 (Workstream G slot G1). This test is
 // the executable "ADR review checklist" the issue requires: it mechanically
@@ -16,6 +17,36 @@ function read(relativePath: string): string {
 	return fs
 		.readFileSync(path.join(repositoryRoot, relativePath), 'utf8')
 		.replace(/\r\n/g, '\n');
+}
+
+// Consumption-aware source resolution (#3511, the merged-#3507 pattern):
+// while the pending fragment exists it is the sole authority; once a
+// release-fragment cleanup consumes it, the narration must be found in the
+// materialized release history (docs/releases/vX.Y.Z.md) instead. Exclusive
+// arms — never a union — so a stale re-added same-slug fragment cannot hide
+// a dropped sentence behind an older archive hit. Returns null when neither
+// surface carries the fragment (the pin then fails, never passes vacuously).
+function adoptionAdrFragmentText(root: string): string | null {
+	const pendingFragment = path.join(
+		root,
+		'docs/releases/pending/2505-ensemble-adoption-adr.md',
+	);
+	if (fs.existsSync(pendingFragment)) {
+		return fs.readFileSync(pendingFragment, 'utf8').replace(/\r\n/g, '\n');
+	}
+	const releasesPath = path.join(root, 'docs/releases');
+	if (!fs.existsSync(releasesPath)) return null;
+	const parts: string[] = [];
+	for (const name of fs.readdirSync(releasesPath)) {
+		if (/^v\d+\.\d+\.\d+\.md$/.test(name)) {
+			parts.push(
+				fs
+					.readFileSync(path.join(releasesPath, name), 'utf8')
+					.replace(/\r\n/g, '\n'),
+			);
+		}
+	}
+	return parts.length > 0 ? parts.join('\n') : null;
 }
 
 /** True when `index` sits outside any fenced code block (even number of ``` before it). */
@@ -182,12 +213,43 @@ describe('ensemble adoption ADR (issue #2505) — review checklist', () => {
 	});
 
 	test('release fragment for the adoption ADR is present and narrates the change', () => {
-		const fragment = read(
-			'docs/releases/pending/2505-ensemble-adoption-adr.md',
-		);
+		// Consumption-aware (#3511, the #3507 pattern): while the pending
+		// fragment exists it is the sole authority; once a release-fragment
+		// cleanup consumes it, the narration must be found in the materialized
+		// release history instead. Exclusive arms — never a union — so a stale
+		// re-added same-slug fragment cannot hide behind an old archive hit.
+		const fragment = adoptionAdrFragmentText(repositoryRoot);
+		expect(fragment).not.toBeNull();
 		expect(fragment).toMatch(/^# /m);
 		expect(fragment).toContain('2505');
 		expect(fragment).toContain('ADR 0002');
 		expect(fragment).toContain('ensemble-adr-2505.test.ts');
+	});
+
+	test('consumption-aware resolution fails closed when neither surface carries the fragment', () => {
+		// Strength leg (#3511): the resolver must return null when the pending
+		// fragment is consumed and no materialized history carries its text —
+		// the pin above then fails instead of passing vacuously.
+		const empty = canonicalMkdtemp('swarm-ensemble-adr-2505-empty-');
+		try {
+			expect(adoptionAdrFragmentText(empty)).toBeNull();
+		} finally {
+			fs.rmSync(empty, { recursive: true, force: true });
+		}
+		const archivedOnly = canonicalMkdtemp('swarm-ensemble-adr-2505-arch-');
+		try {
+			fs.mkdirSync(path.join(archivedOnly, 'docs/releases'), {
+				recursive: true,
+			});
+			fs.writeFileSync(
+				path.join(archivedOnly, 'docs/releases/v0.0.0.md'),
+				'# archived narration for ADR 0002 (issue 2505)' + '\n',
+			);
+			const text = adoptionAdrFragmentText(archivedOnly);
+			expect(text).toContain('ADR 0002');
+			expect(text).toContain('2505');
+		} finally {
+			fs.rmSync(archivedOnly, { recursive: true, force: true });
+		}
 	});
 });

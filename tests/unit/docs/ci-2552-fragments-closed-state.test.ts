@@ -1,9 +1,16 @@
 import { describe, expect, test } from 'bun:test';
-import { readdirSync, readFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const REPO_ROOT = join(import.meta.dir, '../../..');
-const PENDING_DIR = join(REPO_ROOT, 'docs/releases/pending');
 
 // Every release fragment that references the #2552 merge-queue receipt work.
 // The Stage-A receipt set is closed (three receipts recorded, the third being
@@ -11,6 +18,14 @@ const PENDING_DIR = join(REPO_ROOT, 'docs/releases/pending');
 // present-tense claim that the third receipt is still pending or that the
 // issue cannot close — such a claim contradicts docs/ci/merge-queue-policy.md
 // and would surface verbatim in aggregated release notes.
+//
+// Consumption-aware (#3511, the merged-#3507 pattern): each named fragment is
+// resolved at TEST time (never describe time — a collection-time read fails
+// the whole file when one fragment is consumed) against pending OR the
+// materialized docs/releases/vX.Y.Z.md history. Exclusive arms — never a
+// union — so a stale re-added same-slug fragment cannot hide behind an older
+// archive hit. A fragment missing from BOTH surfaces reads as null and the
+// pin fails (never passes vacuously).
 const FRAGMENTS_2552 = [
 	'ci-gate-policy-2552.md',
 	'ci-stage-a-decision-2552.md',
@@ -22,21 +37,31 @@ function readText(path: string): string {
 	return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
 }
 
-describe('#2552 release fragments agree with the closed Stage-A receipt set', () => {
-	const fragments = FRAGMENTS_2552.map((name) => ({
-		name,
-		body: readText(join(PENDING_DIR, name)),
-	}));
+function fragmentText(root: string, name: string): string | null {
+	const pendingFragment = join(root, 'docs/releases/pending', name);
+	if (existsSync(pendingFragment)) return readText(pendingFragment);
+	const releasesPath = join(root, 'docs/releases');
+	if (!existsSync(releasesPath)) return null;
+	const parts: string[] = [];
+	for (const entry of readdirSync(releasesPath)) {
+		if (/^v\d+\.\d+\.\d+\.md$/.test(entry)) {
+			parts.push(readText(join(releasesPath, entry)));
+		}
+	}
+	return parts.length > 0 ? parts.join('\n') : null;
+}
 
-	test('every #2552 fragment exists under docs/releases/pending', () => {
-		const onDisk = new Set(readdirSync(PENDING_DIR));
+describe('#2552 release fragments agree with the closed Stage-A receipt set', () => {
+	test('every #2552 fragment resolves on disk (pending or materialized)', () => {
 		for (const name of FRAGMENTS_2552) {
-			expect(onDisk.has(name)).toBe(true);
+			expect(fragmentText(REPO_ROOT, name)).not.toBeNull();
 		}
 	});
 
 	test('no fragment claims the third Stage-A receipt is still pending', () => {
-		for (const { name, body } of fragments) {
+		for (const name of FRAGMENTS_2552) {
+			const body = fragmentText(REPO_ROOT, name);
+			expect(body).not.toBeNull();
 			expect(body).not.toMatch(/a third remains\s+pending/i);
 			expect(body).not.toMatch(/remains pending/i);
 			expect(body).not.toMatch(/remain required before issue #2552 can close/i);
@@ -44,8 +69,33 @@ describe('#2552 release fragments agree with the closed Stage-A receipt set', ()
 	});
 
 	test('every fragment cites the completing receipt run 34162959243', () => {
-		for (const { name, body } of fragments) {
+		for (const name of FRAGMENTS_2552) {
+			const body = fragmentText(REPO_ROOT, name);
+			expect(body).not.toBeNull();
 			expect(body).toContain('34162959243');
+		}
+	});
+
+	test('consumption-aware resolution fails closed when neither surface carries a fragment', () => {
+		// Strength leg (#3511): consumed + unarchived reads as null (the pins
+		// above fail); the archive arm carries the citation once materialized.
+		const neitherDir = canonicalMkdtemp('swarm-ci2552-neither-');
+		try {
+			expect(fragmentText(neitherDir, 'ci-gate-policy-2552.md')).toBeNull();
+		} finally {
+			rmSync(neitherDir, { recursive: true, force: true });
+		}
+		const archivedDir = canonicalMkdtemp('swarm-ci2552-arch-');
+		try {
+			mkdirSync(join(archivedDir, 'docs/releases'), { recursive: true });
+			writeFileSync(
+				join(archivedDir, 'docs/releases/v0.0.0.md'),
+				'ci gate policy record cites completing run 34162959243',
+			);
+			const body = fragmentText(archivedDir, 'ci-gate-policy-2552.md');
+			expect(body).toContain('34162959243');
+		} finally {
+			rmSync(archivedDir, { recursive: true, force: true });
 		}
 	});
 });
