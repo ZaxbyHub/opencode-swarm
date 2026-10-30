@@ -27,8 +27,11 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 const TEST_DIR = canonicalMkdtemp(
 	'guardrails-shell-write-rmdir-multi-operand-',
 );
-// Loose pin: the full message embeds host-specific absolute paths.
-const WRITE_BLOCKED = /^WRITE BLOCKED/;
+// Pin the scope-denial class, not every denial shape (#3512 review N-3):
+// every leg here denies with SCOPE_VIOLATION (workspace-inside,
+// scope-outside relative targets); the trailing text embeds host-specific
+// absolute paths, so the pin stops after the gate + code.
+const WRITE_BLOCKED = /^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: /;
 
 function config(): GuardrailsConfig {
 	return {
@@ -142,6 +145,10 @@ describe('detectPosixWrites: multi-operand builtin write operand sets (#3503)', 
 });
 
 describe('process substitution fallback: multi-operand operands reach the gate (#3503, plan-critic R2-1)', () => {
+	beforeEach(() => {
+		resetSwarmState();
+	});
+
 	it('denies true >(rmdir outside-oos src/ok) — the string fallback reports every operand', async () => {
 		await expect(
 			runAsCoder('procsub-rmdir', 'true >(rmdir outside-oos src/ok)'),
@@ -168,5 +175,57 @@ describe('process substitution fallback: multi-operand operands reach the gate (
 
 	it('in-scope floor: true >(rmdir src/a src/b) stays admitted', async () => {
 		await runAsCoder('procsub-in-scope', 'true >(rmdir src/a src/b)');
+	});
+});
+
+describe('disclosed /q-operand arm and -- end-of-options (#3512 review N-1, P-6)', () => {
+	beforeEach(() => {
+		resetSwarmState();
+	});
+
+	it('denies multi-operand rmdir whose /q token resolves outside the scope (disclosed POSIX operand arm)', async () => {
+		// Every other operand is in scope, so the denial can ONLY come from
+		// the /q-as-operand arm this leg pins (final-critic round 1). The /q
+		// token is drive-root absolute on win32 (`C:\q`), so the denial
+		// surfaces as AUTHORITY_ROOT_ESCAPE there and SCOPE_VIOLATION on
+		// platforms where it resolves inside the workspace; both are
+		// shell-write denials. Widen the message pin, keep the block.
+		await expect(
+			runAsCoder('q-operand-oos', 'rmdir /q src/ok'),
+		).rejects.toThrow(
+			/^WRITE BLOCKED(?: \[shell-write-scope\]: SCOPE_VIOLATION|: Agent )/,
+		);
+	});
+
+	it('admits in-scope rmdir with a /q-named sibling operand (no over-block)', async () => {
+		await runAsCoder('q-operand-in-scope', 'rmdir src/q src/a');
+	});
+
+	it('reports post--- numeric operands as file names (truncate)', () => {
+		expect(
+			detectPosixWrites('truncate -s 0 -- 5').writes.map((write) => write.path),
+		).toContain('5');
+	});
+
+	it('reports dash-named operands after -- (rmdir)', () => {
+		expect(
+			detectPosixWrites('rmdir -- -/../../outside').writes.map(
+				(write) => write.path,
+			),
+		).toContain('-/../../outside');
+	});
+
+	it('reports dash-named operands after -- (truncate)', () => {
+		expect(
+			detectPosixWrites('truncate -s 0 -- -x').writes.map(
+				(write) => write.path,
+			),
+		).toContain('-x');
+	});
+
+	it('still skips flags before --', () => {
+		expect(
+			detectPosixWrites('rmdir -p src/ok').writes.map((write) => write.path),
+		).toEqual(['src/ok']);
 	});
 });

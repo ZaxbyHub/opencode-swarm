@@ -61,3 +61,13 @@ ordinary path operand for bash, so it is now scope-checked like every other
 operand (previously only the last operand was). Windows quiet-flag
 tolerance, if ever wanted, is a design change in the #3491/#3088 detector
 program, not this fix.
+
+Feedback round (PR #3512 review): the token-aware switch matcher splits on
+unquoted cmd delimiters `( ) < > | &` in addition to whitespace and `,;=` —
+a delimiter glued to the switch (`(rd x /s)`, `rd x /s>nul`, block-wrapped
+`if exist x (rd x /S)`) still reaches the switch at execution, so these
+forms stay classified destructive for both policy consumers (Full-Auto and
+`scope_validate` with `shell=cmd`), matching the pre-token-aware behavior.
+The multi-operand detector loops also honor the `--` end-of-options
+convention (a dash-named operand after `--` is a path), and adversarially
+large operand lists no longer rely on the JS engine's spread-arity limit.

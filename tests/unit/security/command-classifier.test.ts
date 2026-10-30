@@ -1,4 +1,5 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
+import { rmSync } from 'node:fs';
 import { classifyCommandRisk } from '../../../src/full-auto/policy';
 import {
 	classifyCommand,
@@ -122,30 +123,13 @@ describe('windows-recursive-delete: nested-path rmdir is not a cmd.exe switch (#
 	});
 });
 
-describe('windows-recursive-delete true-positive floor (#3505 AC4)', () => {
-	test.each([
-		'rmdir /s build',
-		'rmdir /S build',
-		'rmdir /s /q build',
-		'rmdir /s/q build',
-		'rmdir /sq build',
-		'rmdir /qs build',
-		'rd.exe /s dir',
-		'rmdir /q x',
-	])('%s keeps a destructive windows-recursive-delete segment', (command) => {
-		const result = classifyCommand(command);
-		expect(
-			result.segments.some(
-				(entry) =>
-					entry.category === 'destructive' &&
-					entry.ruleId === 'windows-recursive-delete',
-			),
-		).toBe(true);
-	});
-});
-
 describe('scope_validate consumer: nested-path rmdirs are no longer destructive (#3505 AC3, plan-critic R2-2)', () => {
 	const SV_DIR = canonicalMkdtemp('classifier-scope-validate-');
+	// #3512 review N-4: remove the fixture dir so the suite does not leak
+	// classifier-scope-validate-* directories into the system temp root.
+	afterAll(() => {
+		rmSync(SV_DIR, { recursive: true, force: true });
+	});
 	const outcome = (command: string): { allowed: boolean; code?: string } => {
 		try {
 			evaluateScopeValidate(
@@ -171,5 +155,61 @@ describe('scope_validate consumer: nested-path rmdirs are no longer destructive 
 
 	test('true-positive floor: rmdir /s build still fails DESTRUCTIVE_COMMAND', () => {
 		expect(outcome('rmdir /s build').code).toBe('DESTRUCTIVE_COMMAND');
+	});
+});
+
+describe('glued cmd-delimiter recursive deletes stay destructive (#3512 review F-1)', () => {
+	test.each([
+		'(rd nx /s)',
+		'(rd /s /q nx)',
+		'rd nx /s>nul',
+		'rd nx /s/q>nul',
+		'if exist nx (rd nx /S)',
+	])('%s keeps a destructive windows-recursive-delete segment', (command) => {
+		const result = classifyCommand(command);
+		expect(
+			result.segments.some(
+				(entry) =>
+					entry.category === 'destructive' &&
+					entry.ruleId === 'windows-recursive-delete',
+			),
+		).toBe(true);
+	});
+
+	test('quoted switch-looking tokens still stay non-matching (disclosed widening)', () => {
+		for (const command of ['rd "/s" x', 'rmdir "dir /s name"']) {
+			expect(
+				classifyCommand(command).segments.some(
+					(s) => s.ruleId === 'windows-recursive-delete',
+				),
+			).toBe(false);
+		}
+	});
+});
+
+describe('glued cmd-delimiter consumers (#3512 review F-1)', () => {
+	const SV_DIR2 = canonicalMkdtemp('classifier-glued-sv-');
+	afterAll(() => {
+		rmSync(SV_DIR2, { recursive: true, force: true });
+	});
+	const outcome = (command: string): { allowed: boolean; code?: string } => {
+		try {
+			evaluateScopeValidate(
+				{ command, shell: 'cmd', scope_files: ['src/'] },
+				SV_DIR2,
+			);
+			return { allowed: true };
+		} catch (err) {
+			const e = err as { code?: string };
+			return { allowed: false, code: e.code ?? 'UNKNOWN' };
+		}
+	};
+
+	test('paren-glued recursive delete fails DESTRUCTIVE_COMMAND (shell=cmd)', () => {
+		expect(outcome('(rd ../../outside /s)').code).toBe('DESTRUCTIVE_COMMAND');
+	});
+
+	test('redirect-glued recursive delete fails DESTRUCTIVE_COMMAND (shell=cmd)', () => {
+		expect(outcome('rd ../../outside /s>nul').code).toBe('DESTRUCTIVE_COMMAND');
 	});
 });

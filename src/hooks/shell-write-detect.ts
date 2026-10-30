@@ -917,7 +917,12 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 			// Note: detectPowerShellWrites is not used here because the inner command
 			// of a process substitution is POSIX bash, not PowerShell.
 			const builtinWrites = detectBuiltinWritesFromString(stage);
-			results.push(...builtinWrites);
+			// Plain loop (not spread-push): an adversarial operand count must
+			// not hit the engine's spread-arity limit (#3512 review N-2; the
+			// throw would be fail-closed, but the bound is not ours to lean on).
+			for (const write of builtinWrites) {
+				results.push(write);
+			}
 
 			// Detect redirections in the stage: check >> first to avoid double-matching
 			// when both > and >> patterns could match the same input.
@@ -973,11 +978,19 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 		return [];
 	}
 	if (name === 'rmdir' || name === 'truncate') {
+		// Same per-command operand semantics as the AST branch, including the
+		// `--` end-of-options convention (#3512 review P-6): a `-`-prefixed
+		// word after `--` is a path, not a flag.
 		const writes: WriteTarget[] = [];
+		let endOfOptions = false;
 		for (let i = 1; i < tokens.length; i += 1) {
 			const token = tokens[i];
-			if (token.startsWith('-')) continue;
-			if (name === 'truncate' && isNumeric(token)) continue;
+			if (!endOfOptions && token === '--') {
+				endOfOptions = true;
+				continue;
+			}
+			if (!endOfOptions && token.startsWith('-')) continue;
+			if (name === 'truncate' && !endOfOptions && isNumeric(token)) continue;
 			writes.push({ category: 'builtin_write', operator: name, path: token });
 		}
 		return writes;
@@ -2155,9 +2168,20 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	if (lowerName === 'truncate') {
 		// POSIX `truncate FILE...` truncates EVERY named file (#3503): report
 		// each non-flag, non-size operand — the old first-word-and-break loop
-		// left every later operand outside the scope gate.
+		// left every later operand outside the scope gate. The size exclusion
+		// is purely numeric (`isNumeric`); suffixed sizes (`10M`, `2G`) are
+		// reported too — an over-report (fail-closed), matching the pre-#3503
+		// first-word behavior for that shape.
+		let endOfOptions = false;
 		for (const word of suffixWords) {
-			if (!word.startsWith('-') && !isNumeric(word)) {
+			if (!endOfOptions && word === '--') {
+				endOfOptions = true;
+				continue;
+			}
+			// After `--`, operands are file names even when purely numeric
+			// (coreutils): the numeric size exclusion applies only to the
+			// pre-`--` option region (#3512 final-critic residual).
+			if (endOfOptions || (!word.startsWith('-') && !isNumeric(word))) {
 				results.push({
 					category: 'builtin_write',
 					operator: 'truncate',
@@ -2171,9 +2195,16 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		// tag here — the bare-single exemption above only ever fires for a
 		// one-operand literal, so multi-target (and non-bare single) forms
 		// keep the ordinary declared-scope check, exactly like today's
-		// last-operand emission.
+		// last-operand emission. `--` ends option parsing (coreutils): a
+		// `-`-prefixed word after it is a path, not a flag (#3512 review P-6;
+		// the tee branch models the same convention).
+		let endOfOptions = false;
 		for (const word of suffixWords) {
-			if (!word.startsWith('-')) {
+			if (!endOfOptions && word === '--') {
+				endOfOptions = true;
+				continue;
+			}
+			if (endOfOptions || !word.startsWith('-')) {
 				results.push({
 					category: 'builtin_write',
 					operator: dedupeOperator,
@@ -4253,20 +4284,17 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		cwdNeutral = leafCommands.every(isCwdNeutralLeaf);
 
 		for (const cmd of leafCommands) {
-			// Redirections (>, >>, <<, etc.) on any command
-			allWrites.push(...detectRedirects(cmd));
-			// Builtin writes
-			allWrites.push(...detectBuiltinWrites(cmd));
-			// In-place editors
-			allWrites.push(...detectInplaceEdit(cmd));
-			// Interpreter evals
-			allWrites.push(...detectInterpreterEval(cmd));
-			// Network downloaders
-			allWrites.push(...detectNetworkDownloaders(cmd));
-			// Archive extraction
-			allWrites.push(...detectArchiveExtract(cmd));
-			// Git destructive
-			allWrites.push(...detectGitDestructive(cmd));
+			// Plain loop-push (not spread): a detector result can be
+			// operand-proportional (rmdir/truncate with adversarial operand
+			// counts), and the JS engine's spread-arity limit must not be the
+			// thing that bounds it (#3512 review N-2, final-critic round 1).
+			for (const write of detectRedirects(cmd)) allWrites.push(write);
+			for (const write of detectBuiltinWrites(cmd)) allWrites.push(write);
+			for (const write of detectInplaceEdit(cmd)) allWrites.push(write);
+			for (const write of detectInterpreterEval(cmd)) allWrites.push(write);
+			for (const write of detectNetworkDownloaders(cmd)) allWrites.push(write);
+			for (const write of detectArchiveExtract(cmd)) allWrites.push(write);
+			for (const write of detectGitDestructive(cmd)) allWrites.push(write);
 		}
 
 		// #3474: stdin-fed interpreters behind literal pipe producers
@@ -4282,7 +4310,11 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	// This catches commands like `tee >(cat > file.txt)` which bash-parser cannot parse.
 	if (parseFailed) {
 		const procSubWrites = detectProcessSubstitutionWrites(command);
-		allWrites.push(...procSubWrites);
+		// Plain loop (not spread-push): adversarial operand counts must not
+		// hit the engine's spread-arity limit (#3512 review N-2).
+		for (const write of procSubWrites) {
+			allWrites.push(write);
+		}
 	}
 
 	// Deduplicate by (category, operator, path) to avoid double-counting.
