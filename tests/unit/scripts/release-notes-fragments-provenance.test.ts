@@ -75,10 +75,10 @@ describe('complete release provenance', () => {
 			},
 		]);
 		writeFileSync(path.join(pending, 'duplicate.md'), '# Historical note\n');
-		expect(() =>
-			reconstructPublishedBlockFromWorkspace(repoRoot, body),
-		// #3500: ambiguous workspace provenance now fails closed through the
-		// complete-segmentation matcher (two equally valid segmentations).
+		expect(
+			() => reconstructPublishedBlockFromWorkspace(repoRoot, body),
+			// #3500: ambiguous workspace provenance now fails closed through the
+			// complete-segmentation matcher (two equally valid segmentations).
 		).toThrow(/no unique exact segmentation/i);
 	});
 
