@@ -19,7 +19,7 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const TEST_DIR = canonicalMkdtemp('guardrails-shell-write-fb3485-');
 const SCOPE_OR_ROOT =
-	/^WRITE BLOCKED: (?:SCOPE_VIOLATION|Agent "coder" is not authorised)/;
+	/^WRITE BLOCKED(?: \[shell-write-scope\])?: (?:SCOPE_VIOLATION|Agent "coder" is not authorised)/;
 
 function config(): GuardrailsConfig {
 	return {
@@ -90,7 +90,7 @@ describe('PRR-001: failing-left && cd must not leak into later siblings', () => 
 	it('blocks the out-of-workspace landing shape (cd .. && true; false && cd src; write)', async () => {
 		await expect(
 			runAsCoder('cd .. && true; false && cd src; echo marker > out-c.txt'),
-		).rejects.toThrow(/^WRITE BLOCKED: |^BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: |^BLOCKED: /);
 	});
 
 	it('still admits a succeeding && chain whose target is in scope', async () => {
@@ -137,7 +137,7 @@ describe('PRR-006: wrapper-prefixed stdin interpreters are classified', () => {
 	it('blocks echo x | env python for a src/-scoped coder (gate)', async () => {
 		await expect(
 			runAsCoder(`echo 'open("../zz-fb.txt","w")' | env python`),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 });
 
@@ -192,13 +192,13 @@ describe('PRR-015: launcher option-table completion + over-block removal', () =>
 
 	it('blocks exec -cl cp outside scope (glued cluster)', async () => {
 		await expect(runAsCoder('exec -cl cp src/x.txt ../zz4')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
 	it('blocks command -pp cp outside scope (glued -p cluster)', async () => {
 		await expect(runAsCoder('command -pp cp src/x.txt ../zz5')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
@@ -251,12 +251,12 @@ describe('EXT-2: parallel-review must-fix shapes (PR comment 6450031840)', () =>
 	it('blocks a skipped && cd leaking into a later ; segment (M1a)', async () => {
 		await expect(
 			runAsCoder('false && cd src/x; echo x > ../zz-x3.txt'),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 	it('blocks a failed-left && chain eval (M1c)', async () => {
 		await expect(
 			runAsCoder(`false && cd src; python3 -c "open('../zz-x4.txt','w')"`),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	// M3: a sibling unwrap must not erase a pipeline's stdin-eval
@@ -264,7 +264,7 @@ describe('EXT-2: parallel-review must-fix shapes (PR comment 6450031840)', () =>
 	it('blocks the pipe-eval control beside an unwrapping sibling (M3a)', async () => {
 		await expect(
 			runAsCoder(`echo "print(1)" | python; time true`),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	// M7: strtod duration spellings run the wrapped command on real GNU

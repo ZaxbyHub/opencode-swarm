@@ -88,6 +88,8 @@ export interface ScopeViolationDecision {
 	declaredScope: string;
 	resolvedScope: string;
 	action: string;
+	/** Shell write operator that tripped the gate (issue #3495 item 4). */
+	operator?: string;
 }
 
 export interface DestructiveBlockDecision {
@@ -175,6 +177,7 @@ export const SHELL_AUDIT_FIELD_CLASSES: Readonly<
 	resolvedScope: 'redacted-path',
 	declaredScope: 'redacted-path',
 	action: 'enum',
+	operator: 'free-text-redacted',
 	destructiveCategory: 'enum',
 	executorMechanism: 'enum',
 	skipReason: 'enum',
@@ -266,6 +269,15 @@ function validateEntry(entry: unknown): entry is GuardrailDecisionEntry {
 					);
 					return false;
 				}
+			}
+			// `operator` is optional, but a present value must be a string
+			// (issue #3495 item 4).
+			if (entry.operator !== undefined && typeof entry.operator !== 'string') {
+				log(
+					'guardrail audit: rejected scope_violation entry with non-string operator',
+					{ entry },
+				);
+				return false;
 			}
 			break;
 		}
@@ -452,6 +464,13 @@ export function redactDecisionLineForArchive(line: string): string {
 			changed = true;
 		}
 	}
+	if (typeof record.operator === 'string') {
+		const redacted = truncateUtf8Safe(redactEmbeddedPaths(record.operator), 32);
+		if (redacted !== record.operator) {
+			record.operator = redacted;
+			changed = true;
+		}
+	}
 	for (const field of ['declaredScope', 'resolvedScope'] as const) {
 		if (typeof record[field] === 'string') {
 			const redacted = redactPath(record[field] as string);
@@ -499,6 +518,7 @@ export async function appendGuardrailDecision(
 
 	const maxCommand = SHELL_AUDIT_LIMITS.maxCommandChars;
 	const maxReason = SHELL_AUDIT_LIMITS.maxReasonChars;
+	const maxPath = SHELL_AUDIT_LIMITS.maxPathChars;
 
 	// Legacy shell entries persist as the exact 5-field shape
 	// {ts, sessionID, agent, tool, command} with the `type` discriminator stripped.
@@ -539,17 +559,38 @@ export async function appendGuardrailDecision(
 		case 'file_write':
 			line = `${JSON.stringify({
 				...entry,
-				path: redactPath(entry.path),
+				path: truncateUtf8Safe(redactPath(entry.path), maxPath),
 				reason: truncateUtf8Safe(redactEmbeddedPaths(entry.reason), maxReason),
-				resolvedScope: redactPath(entry.resolvedScope),
+				resolvedScope: truncateUtf8Safe(
+					redactPath(entry.resolvedScope),
+					maxPath,
+				),
 			})}\n`;
 			break;
 		case 'scope_violation':
 			line = `${JSON.stringify({
 				...entry,
-				path: redactPath(entry.path),
-				declaredScope: redactPath(entry.declaredScope),
-				resolvedScope: redactPath(entry.resolvedScope),
+				path: truncateUtf8Safe(redactPath(entry.path), maxPath),
+				declaredScope: truncateUtf8Safe(
+					redactPath(entry.declaredScope),
+					maxPath,
+				),
+				resolvedScope: truncateUtf8Safe(
+					redactPath(entry.resolvedScope),
+					maxPath,
+				),
+				...(typeof entry.operator === 'string'
+					? {
+							// The operator is parsed-command text (the detector's
+							// first command word, e.g. an absolute interpreter
+							// path), so it is free text: redact embedded paths
+							// and bound it like the other free-text fields.
+							operator: truncateUtf8Safe(
+								redactEmbeddedPaths(entry.operator),
+								32,
+							),
+						}
+					: {}),
 			})}\n`;
 			break;
 	}

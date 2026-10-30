@@ -18,6 +18,7 @@ import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 import { BASH_BUILTIN_COMMANDS } from '../shell-write-detect';
+import { dcIsSwitchClusterText } from './cmd-delete-grammar';
 
 // ============================================================================
 // Destructive-command constants
@@ -126,8 +127,11 @@ export function dcNormalizeCommand(cmd: string): string {
 	s = s.replace(/`(.)/g, '$1');
 
 	// Step 3: cmd.exe caret escapes — ^r^m^d^i^r decodes to rmdir.
-	// Carets outside quoted strings are escape characters; collapse all caret-letter sequences.
-	s = s.replace(/\^([a-zA-Z0-9 ])/g, '$1');
+	// Carets outside quoted strings are escape characters; collapse all
+	// caret-letter sequences. `/` is included: cmd decodes `^/` to `/`
+	// (`rmdir ^/^s zzz` is `rmdir /s zzz` — verified against real cmd.exe),
+	// so a caret-escaped recursion switch must normalize like a literal one.
+	s = s.replace(/\^([a-zA-Z0-9 /])/g, '$1');
 
 	// Step 4: quote-splicing evasion e.g. r""m""dir or R''e''m''o''v''e''-''I''t''e''m
 	// Collapse both doubled double-quotes and doubled single-quotes (PS single-quote splice).
@@ -939,23 +943,25 @@ export function dcCheckJunctionCreation(
 	return null;
 }
 
+export {
+	dcIsSwitchClusterText,
+	dcParseWindowsRecursiveDelete,
+} from './cmd-delete-grammar';
+
 /**
- * Extract candidate target paths from a destructive Windows cmd.exe command.
- * Returns array of path-like arguments.
+ * Whether a whitespace-delimited cmd.exe argument behaves like a switch
+ * cluster (issue #3495): a leading `/` followed by switch text where EVERY
+ * slash-separated segment is 1–2 ASCII letters — `/s`, `/S`, `/q`, `/s/q`,
+ * `/sq`, `/qs`. Path-like tokens never qualify: `/share` and `/src/old`
+ * carry multi-letter segments, and a quoted token (`"/s"`, `"a/share/b"`)
+ * does not start with `/`. Verified against real cmd.exe: a quoted `"/s"`
+ * is treated as a path, and `/sq` is rejected by cmd itself ("Parameter
+ * format not correct"), so classifying these clusters as switches is at
+ * worst fail-closed parity. Grammar text lives in ./cmd-delete-grammar.
  */
-export function dcExtractWindowsCmdTargets(segment: string): string[] {
-	// rmdir /s /q <path> or rd /s <path>
-	const rmdirMatch =
-		/^(?:rmdir|rd)(?:\.exe)?\s+(?:\/[sqSQ]\s+)*"?(.+?)"?\s*$/i.exec(segment);
-	if (rmdirMatch) return [rmdirMatch[1].trim()];
-
-	// del /s /q /f <path>
-	const delMatch = /^del(?:\.exe)?\s+(?:\/[sqfSQF]\s+)*"?(.+?)"?\s*$/i.exec(
-		segment,
-	);
-	if (delMatch) return [delMatch[1].trim()];
-
-	return [];
+export function dcIsWindowsSwitchCluster(token: string): boolean {
+	if (!/^\/[A-Za-z]/.test(token)) return false;
+	return dcIsSwitchClusterText(token.slice(1));
 }
 
 /**

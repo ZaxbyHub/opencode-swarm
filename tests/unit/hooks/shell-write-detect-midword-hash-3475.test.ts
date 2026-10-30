@@ -71,12 +71,12 @@ describe('gate: mid-word # is not a comment start (#3475)', () => {
 	it('rejects cp src/x.txt src/x.txt#../../../zz (real operand escapes scope)', async () => {
 		await expect(
 			runAsCoder('cp src/x.txt src/x.txt#../../../zz'),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	it('rejects mv src/x.txt src/f#../../../zz (real operand escapes scope)', async () => {
 		await expect(runAsCoder('mv src/x.txt src/f#../../../zz')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
@@ -94,7 +94,7 @@ describe('gate: mid-word # is not a comment start (#3475)', () => {
 
 	it('still rejects an out-of-scope redirect whose target contains # (control)', async () => {
 		await expect(runAsCoder('echo x > ../zz#a')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 
@@ -103,7 +103,7 @@ describe('gate: mid-word # is not a comment start (#3475)', () => {
 	it("rejects cp src/x.txt src/'x.txt'#../../../zz (mixed-quote truncation)", async () => {
 		await expect(
 			runAsCoder("cp src/x.txt src/'x.txt'#../../../zz"),
-		).rejects.toThrow(/^WRITE BLOCKED: /);
+		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
 	});
 
 	// Round-2: a redirect target whose mid-word # truncates the parsed file
@@ -111,7 +111,7 @@ describe('gate: mid-word # is not a comment start (#3475)', () => {
 	// parsed prefix being in scope must not authorize the real target.
 	it('rejects echo x > src/x#../../../zz (redirect file truncated at #)', async () => {
 		await expect(runAsCoder('echo x > src/x#../../../zz')).rejects.toThrow(
-			/^WRITE BLOCKED: /,
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: /,
 		);
 	});
 

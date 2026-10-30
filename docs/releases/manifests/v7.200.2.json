@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.2",
+  "tagCommit": "709cc4573309e77ca6154b24ec1bf8e24b333ad1",
+  "targetCommitish": "709cc4573309e77ca6154b24ec1bf8e24b333ad1",
+  "releaseBodySha256": "073d1bab78933389682fa70df3d800608e2909d0fd6fe308931ce535a5571a8b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3264-quarantine-merge-group-flakes.md",
+      "sha256": "a60a5f55ab67e3426e2dd8a471ad6da9343f296f2cce2bc324adf04ffc37125c"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3340-gate-side-critic-admission-closeout-role.md",
+      "sha256": "26a258a15951f8038bee027cd039e6683c755cda163d89704e835230b4eb7337"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/3446-full-auto-v2-code-mode-execute.md",
+      "sha256": "5794c9a46c72d70f8de310a77063caf76cefb219bf25797be73328b04e35b77a"
+    }
+  ]
+}

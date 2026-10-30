@@ -90,8 +90,8 @@ import {
 	dcEvaluateRecursiveDeleteTargets,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
-	dcExtractWindowsCmdTargets,
 	dcNormalizeCommand,
+	dcParseWindowsRecursiveDelete,
 	dcSplitSegments,
 	dcUnwrapWrappers,
 } from './destructive-command';
@@ -227,6 +227,39 @@ class DestructiveCommandBlockedError extends Error {
 	) {
 		super(message);
 		this.name = 'DestructiveCommandBlockedError';
+	}
+}
+
+/**
+ * Structured denial from the shell write-scope gate (issue #3495). The
+ * message stays the operator-facing contract; these fields carry the
+ * structured facts the audit row needs (resolved target + write operator) so
+ * the toolBefore catch never re-parses human-readable text to recover them.
+ * Either field may be absent when the denial site does not know it (e.g. the
+ * dynamic-path denial has an operator but no resolvable target).
+ */
+export class ShellWriteBlockedError extends Error {
+	readonly writeTarget?: string;
+	readonly writeOperator?: string;
+
+	constructor(
+		message: string,
+		details: { writeTarget?: string; writeOperator?: string } = {},
+	) {
+		super(message);
+		this.name = 'ShellWriteBlockedError';
+		if (
+			typeof details.writeTarget === 'string' &&
+			details.writeTarget.length > 0
+		) {
+			this.writeTarget = details.writeTarget;
+		}
+		if (
+			typeof details.writeOperator === 'string' &&
+			details.writeOperator.length > 0
+		) {
+			this.writeOperator = details.writeOperator;
+		}
 	}
 }
 
@@ -726,30 +759,60 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					throwDestructiveBlock('recursive delete', decision.reason);
 			}
 
-			// Windows cmd.exe: rmdir /s, rd /s
-			if (/^(?:rmdir|rd)(?:\.exe)?\s+.*\/[sS]/i.test(seg)) {
-				const targets = dcExtractWindowsCmdTargets(seg);
-				if (targets.length === 0) {
-					throwDestructiveBlock(
-						'recursive directory delete',
-						`BLOCKED: Windows recursive directory delete (rmdir /s or rd /s) detected. Verify the target is not a junction/symlink.`,
-					);
+			// Windows cmd.exe: rmdir/rd — modeled on cmd.exe's actual grammar
+			// (executed ground truth, PR #3499 review round): cmd scans each
+			// UNQUOTED argument for the FIRST `/` — everything after it is
+			// switch text and the text before it is the path. So the switch
+			// may be standalone (`rmdir /s x`), clustered (`/s/q`, `/sq`),
+			// trailing (`rd x /s`), ATTACHED (`rd zzz/s` = `rd zzz /s`),
+			// caret-escaped (`^/^s`), or glued to a quoted operand
+			// (`del /s"file.txt"`). A `/s` substring inside an operand whose
+			// post-slash text is NOT a valid switch cluster (`rmdir
+			// a/share/b` — cmd itself rejects it) is a plain nested path
+			// (issue #3495 item 2).
+			const rmdirSwitchVerb = /^(?:rmdir|rd)(?:\.exe)?\s*/i.exec(seg);
+			if (rmdirSwitchVerb) {
+				const parsed = dcParseWindowsRecursiveDelete(
+					seg.slice(rmdirSwitchVerb[0].length),
+				);
+				if (parsed.fires) {
+					if (parsed.targets.length === 0) {
+						throwDestructiveBlock(
+							'recursive directory delete',
+							`BLOCKED: Windows recursive directory delete (rmdir /s or rd /s) detected. Verify the target is not a junction/symlink.`,
+						);
+					}
+					const decision = dcEvaluateRecursiveDeleteTargets({
+						targets: parsed.targets,
+						cwd,
+						verifiedScope,
+					});
+					if (!decision.allowed)
+						throwDestructiveBlock(
+							'recursive directory delete',
+							decision.reason,
+						);
 				}
-				const decision = dcEvaluateRecursiveDeleteTargets({
-					targets,
-					cwd,
-					verifiedScope,
-				});
-				if (!decision.allowed)
-					throwDestructiveBlock('recursive directory delete', decision.reason);
 			}
 
-			// Windows cmd.exe: del /s /q /f
-			if (/^del(?:\.exe)?\s+.*\/[sS]/i.test(seg)) {
-				const targets = dcExtractWindowsCmdTargets(seg);
-				if (targets.length > 0) {
+			// Windows cmd.exe: del — the same grammar model as rmdir above
+			// (`del /s /q /f <path>`, `del x/s`, `del /s"file.txt"`); a
+			// recursion switch with no operand fails closed like the rmdir
+			// arm.
+			const delSwitchVerb = /^del(?:\.exe)?\s*/i.exec(seg);
+			if (delSwitchVerb) {
+				const parsed = dcParseWindowsRecursiveDelete(
+					seg.slice(delSwitchVerb[0].length),
+				);
+				if (parsed.fires) {
+					if (parsed.targets.length === 0) {
+						throwDestructiveBlock(
+							'recursive file delete',
+							`BLOCKED: Windows recursive file delete (del /s) detected. Verify the target is not a junction/symlink.`,
+						);
+					}
 					const decision = dcEvaluateRecursiveDeleteTargets({
-						targets,
+						targets: parsed.targets,
 						cwd,
 						verifiedScope,
 					});
@@ -758,12 +821,16 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 
-			// PowerShell: Remove-Item / aliases with -Recurse
+			// PowerShell: Remove-Item / aliases with -Recurse. The switch must
+			// be a whitespace-delimited token start (`\s-`): a `-r`/`-Recurse`
+			// substring INSIDE a path operand (`rm some-r/x`,
+			// `rm x-Recurse/y`) is a plain delete, not a recursive one — the
+			// same token-vs-substring class as the cmd.exe /s fix (#3495).
 			if (
-				/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*-[Rr]ecurse\b/i.test(
+				/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]ecurse\b/i.test(
 					seg,
 				) ||
-				/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*-[Rr]\b/i.test(seg)
+				/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]\b/i.test(seg)
 			) {
 				const targets = dcExtractPowerShellTargets(seg);
 				if (targets.length > 0) {
@@ -1441,13 +1508,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// `continue`; a routed eval treats leniency like any other write).
 		const enforceWriteAuthorization = (
 			target: string,
-			opts?: { exemptEmptyDirectoryRemoval?: boolean },
+			opts?: { exemptEmptyDirectoryRemoval?: boolean; writeOperator?: string },
 		): 'lenient' | 'enforced' => {
 			if (enforce && noScopeLenient && universalDenyPrefixes.length > 0) {
 				for (const prefix of universalDenyPrefixes) {
 					if (matchesAuthorityDenyPrefix(target, prefix, shellDirectory)) {
-						throw new Error(
+						throw new ShellWriteBlockedError(
 							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: Path is under universal deny prefix "${prefix}"`,
+							{ writeTarget: target, writeOperator: opts?.writeOperator },
 						);
 					}
 				}
@@ -1479,8 +1547,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 								paths: [target],
 							})
 						: undefined;
-				throw new Error(
+				throw new ShellWriteBlockedError(
 					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+					{ writeTarget: target, writeOperator: opts?.writeOperator },
 				);
 			}
 
@@ -1509,8 +1578,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					.map((entry) => sanitizeDiagnosticText(entry, 160))
 					.join(', ');
 				const omitted = Math.max(0, declaredScope.length - 10);
-				throw new Error(
-					`WRITE BLOCKED: SCOPE_VIOLATION: shell write target "${safeTarget}" is outside the active scope [${scopeSummary}${omitted > 0 ? `, ... (+${omitted} more)` : ''}]. ACTION[architect]: if the target is intended, call declare_scope for the exact workspace-relative path and redispatch; otherwise correct the command.`,
+				throw new ShellWriteBlockedError(
+					`WRITE BLOCKED [shell-write-scope]: SCOPE_VIOLATION: shell write target "${safeTarget}" is outside the active scope [${scopeSummary}${omitted > 0 ? `, ... (+${omitted} more)` : ''}]. ACTION[architect]: if the target is intended, call declare_scope for the exact workspace-relative path and redispatch; otherwise correct the command.`,
+					{ writeTarget: target, writeOperator: opts?.writeOperator },
 				);
 			}
 			return 'enforced';
@@ -1559,11 +1629,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 								declaredScope !== undefined &&
 								declaredScope.length > 0))
 					) {
-						enforceWriteAuthorization(write.evalDirectory ?? shellDirectory);
+						enforceWriteAuthorization(write.evalDirectory ?? shellDirectory, {
+							writeOperator: write.original.operator,
+						});
 						continue;
 					}
-					throw new Error(
+					throw new ShellWriteBlockedError(
 						`BLOCKED: ${write.original.operator} evaluates inline code whose write targets cannot be verified against the declared scope — rejecting for safety. Write files with the write/edit tools or a checked-in script, and invoke installed tools directly (e.g. \`pytest\`, \`ruff\`) instead of an inline \`python -c\` / \`node -e\` eval.`,
+						{ writeOperator: write.original.operator },
 					);
 				}
 				// A concrete redirect/builtin target that resolved to null because it
@@ -1572,10 +1645,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				// skips this write target; the aggregate lease candidate below
 				// is not remembered (targets must be provable, issue #2664).
 				if (enforce) {
-					throw new Error(
+					throw new ShellWriteBlockedError(
 						`BLOCKED: bash/shell write to a dynamic path target${
 							write.original.path ? ` "${write.original.path}"` : ''
 						} that cannot be statically resolved (shell variable or command substitution) — rejecting for safety.`,
+						{ writeOperator: write.original.operator },
 					);
 				}
 				// Observe mode: an unprovable target cannot participate in
@@ -1593,6 +1667,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				enforceWriteAuthorization(write.resolvedPath, {
 					exemptEmptyDirectoryRemoval:
 						write.original.emptyDirectoryRemoval === true,
+					writeOperator: write.original.operator,
 				}) === 'lenient'
 			) {
 				continue;
@@ -2947,6 +3022,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const pathMatch = /[^\s]+/.exec(
 				err instanceof Error ? err.message : String(err),
 			);
+			// Issue #3495: a structured shell-write denial carries the resolved
+			// target and the write operator as data, so the row never depends on
+			// re-parsing the human-readable message.
+			const structuredWrite =
+				err instanceof ShellWriteBlockedError ? err : undefined;
 			const targetPath = (() => {
 				const p =
 					toolArgs?.filePath ??
@@ -2955,11 +3035,18 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					toolArgs?.target;
 				if (typeof p === 'string' && p.length > 0) return p;
 
+				if (structuredWrite?.writeTarget) return structuredWrite.writeTarget;
+
 				const rawMessage = err instanceof Error ? err.message : String(err);
 
-				// Extract the violating write target from known guardrail error formats
-				// before falling back to the first error-message token or placeholder.
+				// Extract the violating write target from known guardrail error
+				// formats first — the quoted target in the two canonical denial
+				// shapes — before trying generic label-colon heuristics, whose
+				// first match on a `WRITE BLOCKED: …` message is otherwise the
+				// next bare token (`SCOPE_VIOLATION:`, `Agent`), never the target.
 				const extracted =
+					/shell write target "([^"]+)"/.exec(rawMessage) ??
+					/is not authorised to write "([^"]+)"/.exec(rawMessage) ??
 					/(?:write|target|file|path|scope|prefix)[^:]*:\s*(?:"([^"]+)"|'([^']+)'|(\S+))/i.exec(
 						rawMessage,
 					) ??
@@ -2999,6 +3086,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					declaredScope: declaredScopeText,
 					resolvedScope: resolvedScopeText,
 					action: 'bash',
+					...(structuredWrite?.writeOperator
+						? { operator: structuredWrite.writeOperator }
+						: {}),
 				},
 				{
 					directory: effectiveDirectory,

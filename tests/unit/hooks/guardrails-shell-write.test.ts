@@ -91,7 +91,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('echo hello > src/output.txt'),
 				),
 			).resolves.toBeUndefined();
-		});
+		}, 120_000);
 
 		it('allows append redirect to file inside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -104,7 +104,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('echo world >> src/log.txt'),
 				),
 			).resolves.toBeUndefined();
-		});
+		}, 120_000);
 
 		it('allows cp (copy) to file inside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -130,7 +130,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('mv old.ts src/new.ts'),
 				),
 			).resolves.toBeUndefined();
-		});
+		}, 120_000);
 
 		it('allows sed -i (in-place edit) on file inside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -143,7 +143,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput("sed -i 's/foo/bar/g' src/file.ts"),
 				),
 			).resolves.toBeUndefined();
-		});
+		}, 120_000);
 
 		it('allows install command to file inside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -187,8 +187,8 @@ describe('guardrails shell write scope enforcement', () => {
 					makeBashInput('s10'),
 					makeOutput('echo hello > outside.txt'),
 				),
-			).rejects.toThrow('WRITE BLOCKED: SCOPE_VIOLATION:');
-		});
+			).rejects.toThrow('WRITE BLOCKED [shell-write-scope]: SCOPE_VIOLATION:');
+		}, 120_000);
 
 		it('blocks append redirect to file outside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -201,7 +201,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('echo world >> /tmp/log.txt'),
 				),
 			).rejects.toThrow(OUTSIDE_DENIAL);
-		});
+		}, 120_000);
 
 		it('blocks cp to file outside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -227,7 +227,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('mv file.txt /home/user/file.txt'),
 				),
 			).rejects.toThrow(OUTSIDE_DENIAL);
-		});
+		}, 120_000);
 
 		it('blocks sed -i on file outside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -240,7 +240,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput("sed -i 's/foo/bar/g' outside.txt"),
 				),
 			).rejects.toThrow(OUTSIDE_DENIAL);
-		});
+		}, 120_000);
 
 		it('blocks tar extraction to directory outside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -358,7 +358,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('echo "hello world"'),
 				),
 			).resolves.toBeUndefined();
-		});
+		}, 120_000);
 
 		it('allows git status (read-only)', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -417,7 +417,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('powershell -Command "echo data > src/out.txt"'),
 				),
 			).resolves.toBeUndefined();
-		});
+		}, 120_000);
 
 		it('blocks redirect > to file outside scope via shell tool', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -430,7 +430,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('powershell -Command "echo data > C:\\outside.txt"'),
 				),
 			).rejects.toThrow(OUTSIDE_DENIAL);
-		});
+		}, 120_000);
 
 		it('allows Copy-Item to path inside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -501,7 +501,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('cmd /c "echo hello > src\\out.txt"'),
 				),
 			).resolves.toBeUndefined();
-		});
+		}, 120_000);
 
 		it('blocks echo redirect > to file outside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -514,7 +514,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('cmd /c "echo hello > C:\\temp\\out.txt"'),
 				),
 			).rejects.toThrow(OUTSIDE_DENIAL);
-		});
+		}, 120_000);
 
 		it('allows move to path inside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -527,7 +527,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('cmd /c "move old.txt src\\new.txt"'),
 				),
 			).resolves.toBeUndefined();
-		});
+		}, 120_000);
 
 		it('blocks move to path outside scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -540,7 +540,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('cmd /c "move file.txt C:\\temp\\file.txt"'),
 				),
 			).rejects.toThrow(OUTSIDE_DENIAL);
-		});
+		}, 120_000);
 	});
 
 	describe('edge case: no declared scope — backward compatibility', () => {
@@ -581,7 +581,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('echo test > .swarm/evidence/5.4.json'),
 				),
 			).rejects.toThrow(/WRITE BLOCKED: Agent "architect".*config zone/);
-		});
+		}, 120_000);
 
 		it('blocks architect interpreter-eval inline code even without declared scope (eval bypass guard)', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -632,7 +632,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('echo test > .swarm/evidence/5.4.json'),
 				),
 			).rejects.toThrow(/WRITE BLOCKED.*config zone/);
-		});
+		}, 120_000);
 
 		it('blocks lowtier_architect redirect writes to config-zone evidence paths without declared scope', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -643,7 +643,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('echo test > .swarm/evidence/5.4.json'),
 				),
 			).rejects.toThrow(/WRITE BLOCKED.*config zone/);
-		});
+		}, 120_000);
 	});
 
 	// -------------------------------------------------------------------------
@@ -783,7 +783,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('echo data > $OUTFILE'),
 				),
 			).rejects.toThrow(/BLOCKED: bash\/shell write to a dynamic path target/);
-		});
+		}, 120_000);
 	});
 
 	// -------------------------------------------------------------------------

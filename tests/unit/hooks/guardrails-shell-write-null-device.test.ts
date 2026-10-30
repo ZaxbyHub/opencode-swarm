@@ -54,7 +54,6 @@ function coderWithScope(sessionID: string, files: string[]): void {
 }
 
 afterAll(() => rmSync(TEST_DIR, { recursive: true, force: true }));
-
 describe('guardrails shell writes: /dev/null redirects', () => {
 	beforeEach(() => {
 		resetSwarmState();
@@ -72,7 +71,6 @@ describe('guardrails shell writes: /dev/null redirects', () => {
 			hooks.toolBefore(bashInput('arch-null'), output(command)),
 		).resolves.toBeUndefined();
 	});
-
 	it('coder with a declared scope: stderr to /dev/null is allowed', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 		coderWithScope('coder-null', ['src/']);
@@ -107,7 +105,7 @@ describe('guardrails shell writes: /dev/null redirects', () => {
 				bashInput('coder-mixed'),
 				output('cat src/a.ts 2>/dev/null > outside.txt'),
 			),
-		).rejects.toThrow('WRITE BLOCKED: SCOPE_VIOLATION:');
+		).rejects.toThrow('WRITE BLOCKED [shell-write-scope]: SCOPE_VIOLATION:');
 	});
 
 	it('architect: cp to an outside path with 2>/dev/null is a root escape', async () => {
@@ -157,7 +155,9 @@ describe('guardrails shell writes: /dev/null redirects', () => {
 				bashInput('coder-cp-outside'),
 				output('cp src/a.ts outside.txt 2>/dev/null'),
 			),
-		).rejects.toThrow(/WRITE BLOCKED: SCOPE_VIOLATION:.*outside\.txt/);
+		).rejects.toThrow(
+			/WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION:.*outside\.txt/,
+		);
 	});
 
 	it('coder: cp inside scope with 2>/dev/null is allowed', async () => {
@@ -190,7 +190,7 @@ describe('guardrails shell writes: /dev/null redirects', () => {
 				bashInput('coder-relative'),
 				output('echo x > dev/null'),
 			),
-		).rejects.toThrow('WRITE BLOCKED: SCOPE_VIOLATION:');
+		).rejects.toThrow('WRITE BLOCKED [shell-write-scope]: SCOPE_VIOLATION:');
 	});
 
 	it('architect: sed -i on an outside file with 2>/dev/null is a root escape', async () => {
@@ -253,7 +253,7 @@ describe('guardrails shell writes: in-place edits with attached script flags', (
 				output("sed -i -e's/a/b/' outside.txt"),
 			),
 		).rejects.toThrow(
-			/^WRITE BLOCKED: SCOPE_VIOLATION: shell write target "[^"]*outside\.txt" is outside the active scope/,
+			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target "[^"]*outside\.txt" is outside the active scope/,
 		);
 	});
 
@@ -467,7 +467,7 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 				output('sed -i {1d,../../outside/v} src/a.ts'),
 			),
 		).rejects.toThrow(
-			/^WRITE BLOCKED: SCOPE_VIOLATION: shell write target "[^"]*outside[\\/]v\}" is outside the active scope/,
+			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target "[^"]*outside[\\/]v\}" is outside the active scope/,
 		);
 	});
 
@@ -480,7 +480,7 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 				output("sed -i '' s-x-/{..,a}/{..,b}/outside/victimH-1 src/a.ts -n"),
 			),
 		).rejects.toThrow(
-			/^WRITE BLOCKED: SCOPE_VIOLATION: shell write target "[^"]*victimH-1" is outside the active scope/,
+			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target "[^"]*victimH-1" is outside the active scope/,
 		);
 	});
 
