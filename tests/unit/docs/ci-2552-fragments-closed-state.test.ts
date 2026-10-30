@@ -58,10 +58,16 @@ describe('#2552 release fragments agree with the closed Stage-A receipt set', ()
 		}
 	});
 
-	test('no fragment claims the third Stage-A receipt is still pending', () => {
+	test('no PENDING fragment claims the third Stage-A receipt is still pending', () => {
+		// Authoring invariant (#3511): the negative claims-scan applies only to
+		// a fragment's OWN pending text. Once consumed, the resolver returns
+		// the aggregated materialized history, where unrelated historical
+		// release bodies may legitimately contain the scanned phrases — the
+		// consumed-state obligation is the positive citation pin below.
 		for (const name of FRAGMENTS_2552) {
-			const body = fragmentText(REPO_ROOT, name);
-			expect(body).not.toBeNull();
+			const pendingPath = join(REPO_ROOT, 'docs/releases/pending', name);
+			if (!existsSync(pendingPath)) continue;
+			const body = readText(pendingPath);
 			expect(body).not.toMatch(/a third remains\s+pending/i);
 			expect(body).not.toMatch(/remains pending/i);
 			expect(body).not.toMatch(/remain required before issue #2552 can close/i);
@@ -69,6 +75,8 @@ describe('#2552 release fragments agree with the closed Stage-A receipt set', ()
 	});
 
 	test('every fragment cites the completing receipt run 34162959243', () => {
+		// Positive pin holds in BOTH states: pending text or, once consumed,
+		// the materialized release history (aggregate scan).
 		for (const name of FRAGMENTS_2552) {
 			const body = fragmentText(REPO_ROOT, name);
 			expect(body).not.toBeNull();
