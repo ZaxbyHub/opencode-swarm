@@ -1,16 +1,22 @@
 /**
  * #3475 docs + gate pin for the bare-rmdir shell-write scope note:
- * (a) docs/releases/pending/shell-write-scope-bare-rmdir.md must document
- *     that launcher prefixes are unwrapped before the bare-rmdir judgement;
+ * (a) the launcher-unwrapping sentence must remain present on the pending
+ *     fragment docs/releases/pending/shell-write-scope-bare-rmdir.md while
+ *     unconsumed (the fragment is then the authority), and in the
+ *     materialized release history (docs/releases/v*.md) once a
+ *     release-fragment cleanup has deleted it;
  * (b) the gate must actually do it: `command rmdir ../outside` and
  *     `sh -c 'rmdir ../outside'` REJECT like the bare form;
  * (c) control: docs/mcp.md still carries the bare-rmdir scope wording.
  * Substrings are built by plain concatenation so backticks stay lint-clean.
+ * Consumption-aware resolution added for the v7.200.10 materialization
+ * (PR #3496), which removes the pending fragment; the archive is the
+ * byte-identical published form of its current text.
  * RED at base, GREEN after the fix.
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'bun:test';
-import { readFileSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
@@ -79,18 +85,40 @@ afterAll(() => {
 	}
 });
 
+// Consumption-aware source resolution for the release-note surface: while
+// the pending fragment exists it is the AUTHORITY (its bytes must carry the
+// sentence); once a release-fragment cleanup (e.g. the v7.200.10
+// materialization, PR #3496) has consumed and deleted it, the sentence must
+// be found in the materialized release history instead. The published
+// docs/releases/v*.md section is byte-identical to the fragment text it
+// consumed (manifest sha256 040af72e… for shell-write-scope-bare-rmdir.md),
+// so the archive arm preserves the pin's strength across the transition,
+// and the exclusive arm keeps a future same-slug fragment from hiding a
+// dropped sentence behind an older archive match. Read-only probe of the
+// real checkout docs (same shape as the mcp.md controls); missing history
+// directory stays loud (readdirSync throws).
+function bareRmdirReleaseNoteText(): string {
+	const releasesPath = path.resolve(process.cwd(), 'docs', 'releases');
+	const pendingFragment = path.join(
+		releasesPath,
+		'pending',
+		'shell-write-scope-bare-rmdir.md',
+	);
+	if (existsSync(pendingFragment)) {
+		return readFileSync(pendingFragment, 'utf8');
+	}
+	const parts: string[] = [];
+	for (const name of readdirSync(releasesPath)) {
+		if (/^v\d+\.\d+\.\d+\.md$/.test(name)) {
+			parts.push(readFileSync(path.join(releasesPath, name), 'utf8'));
+		}
+	}
+	return parts.join('\n');
+}
+
 describe('docs: bare-rmdir release note documents launcher unwrapping (#3475)', () => {
-	it('docs/releases/pending/shell-write-scope-bare-rmdir.md contains the launcher-prefix sentence', () => {
-		const doc = readFileSync(
-			path.resolve(
-				process.cwd(),
-				'docs',
-				'releases',
-				'pending',
-				'shell-write-scope-bare-rmdir.md',
-			),
-			'utf8',
-		);
+	it('the launcher-prefix sentence is present on the pending fragment or in the materialized release history', () => {
+		const doc = bareRmdirReleaseNoteText();
 		expect(doc).toContain(LAUNCHER_UNWRAP_SENTENCE);
 	});
 
