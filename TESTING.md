@@ -30,6 +30,14 @@ bun --smol test tests/unit/hooks --timeout 120000
 bun --smol test tests/unit/cli --timeout 120000
 ```
 
+A test's explicit per-test timeout (the third `bun test` argument) overrides
+these CLI values. The receipt-footer aggregate-bounds test
+(`tests/unit/tools/dispatch-lanes-pr-review-receipt-footer.test.ts`) carries
+one such explicit 60 s cap, deliberately equal to the coverage gate's own
+per-test budget in `scripts/ci/run-coverage-gate.sh` — the lockstep is pinned
+by `tests/unit/scripts/ci/ci-coverage-timeout-lockstep.test.ts`, so raising
+either side without the other fails CI (#3263).
+
 ### Reproducible repository validation
 
 Issue #2675's canonical validation command runs the complete, ordered surface

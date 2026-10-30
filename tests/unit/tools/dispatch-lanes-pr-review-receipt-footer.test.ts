@@ -408,11 +408,15 @@ describe('PR-review collection receipt footer', () => {
 		});
 		// This intentionally large receipt corpus performs hundreds of SQLite-backed
 		// transitions; allow slower Windows/macOS runners while keeping the test bounded.
-		// A per-test timeout overrides the coverage gate's `--timeout 60000` default
-		// (scripts/ci/run-coverage-gate.sh), so this cap must budget for the
-		// coverage-instrumented runtime: ~23 s bare / ~28 s instrumented locally, and
-		// 31 095 ms on shared CI runners, where it hard-failed coverage-shard 6 twice
-		// (runs 40255972796 + 40282456510, issue #3263). 60 s matches the gate's own
-		// per-test budget with ~2x headroom over the slowest observed instrumented run.
+		// A per-test timeout overrides the coverage gate's `--timeout 60000` budget
+		// (scripts/ci/run-coverage-gate.sh), so this cap must cover the
+		// coverage-instrumented runtime: the old 30 s cap hard-killed this test at
+		// nine detections across 2026-10-22..27 (issues #3264 and #3263), including
+		// 3/3-attempt shard failures in runs 40152945255, 40253942931, 40255972796,
+		// 40282456510 and 40449933636 on the self-hosted merge-group Linux fleet.
+		// All observed figures (30.2-32.0 s) are censored elapsed times at the kill;
+		// 60 s equals the gate budget (~1.9x over the highest censored observation).
+		// Keep the two literals in lockstep — pinned by
+		// tests/unit/scripts/ci/ci-coverage-timeout-lockstep.test.ts.
 	}, 60_000);
 });
