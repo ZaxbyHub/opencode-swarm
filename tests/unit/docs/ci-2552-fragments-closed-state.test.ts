@@ -93,6 +93,30 @@ describe('#2552 release fragments agree with the closed Stage-A receipt set', ()
 		} finally {
 			rmSync(neitherDir, { recursive: true, force: true });
 		}
+		const exclusive = canonicalMkdtemp('swarm-ci2552-excl-');
+		try {
+			mkdirSync(join(exclusive, 'docs/releases/pending'), {
+				recursive: true,
+			});
+			mkdirSync(join(exclusive, 'docs/releases'), { recursive: true });
+			// Exclusive arms (#3511): pending present WITHOUT the citation while
+			// a stale archive carries it — pending is the sole authority, so the
+			// pin must fail; a UNION resolver would leak the archived citation
+			// and pass vacuously (probe-proven shape).
+			writeFileSync(
+				join(exclusive, 'docs/releases/pending/ci-gate-policy-2552.md'),
+				'# gate policy record without the receipt citation',
+			);
+			writeFileSync(
+				join(exclusive, 'docs/releases/v0.0.0.md'),
+				'# stale archive citing run 34162959243',
+			);
+			expect(
+				fragmentText(exclusive, 'ci-gate-policy-2552.md'),
+			).not.toContain('34162959243');
+		} finally {
+			rmSync(exclusive, { recursive: true, force: true });
+		}
 		const archivedDir = canonicalMkdtemp('swarm-ci2552-arch-');
 		try {
 			mkdirSync(join(archivedDir, 'docs/releases'), { recursive: true });
