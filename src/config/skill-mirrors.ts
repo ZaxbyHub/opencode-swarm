@@ -468,7 +468,7 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 			'.agents/skills/mock-to-internals-migration/SKILL.md',
 		],
 		reason:
-			'.agents-only skill with no .claude counterpart. The .agents shim references .opencode/skills/generated/mock-to-internals-migration as its canonical reference.',
+			'.agents-only skill with no .claude counterpart. Self-contained Codex canon for the mock.module → _internals migration protocol (issue #2966 ported the protocol body in from the retired generated fork; it no longer references .opencode/skills/generated/).',
 	},
 	{
 		slug: 'subprocess-safety',

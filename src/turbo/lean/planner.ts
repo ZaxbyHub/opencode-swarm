@@ -126,11 +126,14 @@ export interface LeanTurboLanePlan {
  *        redesign). When supplied, a cross-batch dependency (a `depends:`
  *        upstream not present in this planning call's task set — typically
  *        completed in a prior phase) is treated as satisfied **only** if
- *        the predicate returns `true`. Production callers build this from
- *        `buildIsUpstreamCommitted(directory)` so the check resolves to
- *        "is there a `swarm(task <id>)` commit in HEAD". When undefined
- *        the planner falls back to its legacy behavior (cross-batch deps
- *        are implicitly satisfied) for backward compatibility.
+ *        the predicate returns `true`. Production lean callers supply it via
+ *        `resolveLeanRule3Predicate(directory, taskIds)`
+ *        (`src/turbo/lean/upstream-committed.ts`) ONLY while an Epic is open
+ *        for the project — `swarm(task <id>):` landing commits exist only
+ *        under Epic Mode, so wiring it unconditionally would wrongly degrade
+ *        every healthy pure-lean cross-phase dependent. When undefined (no
+ *        open Epic) the planner falls back to its legacy behavior (cross-batch
+ *        deps are implicitly satisfied) for backward compatibility.
  * @returns Complete lane plan with lanes, degraded tasks, and counters
  */
 export function planLeanTurboLanes(

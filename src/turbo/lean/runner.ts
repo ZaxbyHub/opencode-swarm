@@ -64,6 +64,7 @@ import { clearRecoveryRecord, writeRecoveryRecord } from './recovery';
 import type { LeanTurboDegradedTask, LeanTurboLane } from './state';
 import { loadLeanTurboRunState, saveLeanTurboRunState } from './state';
 import { withTurboStateLock } from './state-lock';
+import { resolveLeanRule3Predicate } from './upstream-committed';
 import {
 	assertCleanWorkingTree,
 	parseLeanLaneIndex,
@@ -371,6 +372,8 @@ export class LeanTurboRunner {
 	static _internals: {
 		loadPlanJsonOnly: typeof loadPlanJsonOnly;
 		planLeanTurboLanes: typeof planLeanTurboLanes;
+		/** Issue #2962: epic-gated Rule-3 upstream-commit predicate for lane planning. */
+		resolveLeanRule3Predicate: typeof resolveLeanRule3Predicate;
 		acquireLaneLocks: typeof acquireLaneLocks;
 		releaseLaneLocks: typeof releaseLaneLocks;
 		loadLeanTurboRunState: typeof loadLeanTurboRunState;
@@ -398,6 +401,7 @@ export class LeanTurboRunner {
 	} = {
 		loadPlanJsonOnly,
 		planLeanTurboLanes,
+		resolveLeanRule3Predicate,
 		acquireLaneLocks,
 		releaseLaneLocks,
 		loadLeanTurboRunState,
@@ -605,6 +609,15 @@ export class LeanTurboRunner {
 		// Plan lane distribution — type cast needed because Phase (schema) is structurally
 		// wider than PlanPhase (planner) but at runtime all used fields are compatible
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		//
+		// Rule 3 (issue #2962): supply the epic-gated upstream-commit predicate.
+		// undefined when no Epic is open for the project keeps placement
+		// byte-identical to the legacy pure-lean behavior.
+		const isUpstreamCommitted =
+			LeanTurboRunner._internals.resolveLeanRule3Predicate(
+				this._directory,
+				plan.phases.flatMap((p) => p.tasks.map((t) => t.id)),
+			);
 		const lanePlan: LeanTurboLanePlan =
 			LeanTurboRunner._internals.planLeanTurboLanes(
 				this._directory,
@@ -612,6 +625,8 @@ export class LeanTurboRunner {
 				// biome-ignore lint/suspicious/noExplicitAny: Phase/PlanPhase structural type mismatch
 				{ phases: plan.phases as any },
 				leanConfig,
+				undefined,
+				isUpstreamCommitted,
 			);
 
 		// FR-106: If a dirty-tree downgrade was recorded before planning, enumerate the
