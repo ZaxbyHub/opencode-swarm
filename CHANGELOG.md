@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.200.11](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.10...v7.200.11) (2026-10-30)
+
+
+### Bug Fixes
+
+* **delegation:** close swarm-pr-review findings — guarded re-entry reads, stale-route forget, capacity pre-flight, honest suite ([99b2300](https://github.com/ZaxbyHub/opencode-swarm/commit/99b2300c94139081a8554b126853e3de48f8a8d9))
+* **delegation:** PRR-007 extension — invalidate the routing decision at settlement, not just the in-memory map ([2bbb821](https://github.com/ZaxbyHub/opencode-swarm/commit/2bbb8211c810720e8a8ef1bc603f0453748f67fb))
+* **delegation:** route-receipt persist failure falls through to the ACCEPTANCE and TASK gates ([22fca82](https://github.com/ZaxbyHub/opencode-swarm/commit/22fca82e92f991b148899a6b457eb245e649aeaf))
+* **delegation:** route-receipt persist failure falls through to the ACCEPTANCE and TASK gates ([#3380](https://github.com/ZaxbyHub/opencode-swarm/issues/3380)) ([bc17aa2](https://github.com/ZaxbyHub/opencode-swarm/commit/bc17aa20bf6f733be0627b54a9b3af534850b954))
+* **guardrails:** audit rows carry real targets and operators; /s and -r switch checks match tokens, not path substrings ([#3495](https://github.com/ZaxbyHub/opencode-swarm/issues/3495), [#3345](https://github.com/ZaxbyHub/opencode-swarm/issues/3345)) ([6cebd7a](https://github.com/ZaxbyHub/opencode-swarm/commit/6cebd7a702be01cd6da70a80e121baca24f884a7))
+* **guardrails:** close two fail-open shapes in the cmd.exe grammar parser (review round 2) ([29b58cb](https://github.com/ZaxbyHub/opencode-swarm/commit/29b58cb54380dd2dc677195c465036ea6252e052))
+* **guardrails:** rmdir /s grammar follows cmd.exe's actual switch scan (PR [#3499](https://github.com/ZaxbyHub/opencode-swarm/issues/3499) review PRR-001..015) ([63be740](https://github.com/ZaxbyHub/opencode-swarm/commit/63be740d62ace7a6bad899f2bcdce224a96e23ea))
+* **guardrails:** shell-audit rows record real targets/operators; /s and -r switch checks match tokens, not path substrings ([#3495](https://github.com/ZaxbyHub/opencode-swarm/issues/3495), [#3345](https://github.com/ZaxbyHub/opencode-swarm/issues/3345)) ([ba3c96f](https://github.com/ZaxbyHub/opencode-swarm/commit/ba3c96fa9b9ab7f57fd0b948c3414bd380f5cdf3))
+* **guardrails:** split unquoted comma/equals as cmd.exe argument boundaries (critic round 3) ([4c6a001](https://github.com/ZaxbyHub/opencode-swarm/commit/4c6a001defa138916d258d823c44846d76d2a4c4))
+
 ## [7.200.10](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.9...v7.200.10) (2026-10-29)
 
 
