@@ -1,9 +1,30 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const read = (relativePath: string): string =>
 	readFileSync(join(process.cwd(), relativePath), 'utf8');
+
+function fragmentTextOrArchive(name: string): string | null {
+	const pendingFragment = join(process.cwd(), 'docs/releases/pending', name);
+	if (existsSync(pendingFragment)) return readFileSync(pendingFragment, 'utf8');
+	const releasesPath = join(process.cwd(), 'docs/releases');
+	if (!existsSync(releasesPath)) return null;
+	const parts: string[] = [];
+	for (const entry of readdirSync(releasesPath)) {
+		if (/^v\d+\.\d+\.\d+\.md$/.test(entry)) {
+			parts.push(readFileSync(join(releasesPath, entry), 'utf8'));
+		}
+	}
+	return parts.length > 0 ? parts.join('\n') : null;
+}
+
+function pendingText(name: string): string | null {
+	const pendingFragment = join(process.cwd(), 'docs/releases/pending', name);
+	return existsSync(pendingFragment)
+		? readFileSync(pendingFragment, 'utf8')
+		: null;
+}
 
 describe('swarm-pr-review runtime friction guidance', () => {
 	test('uses Windows-portable exact-commit verification on every guidance surface', () => {
@@ -28,13 +49,23 @@ describe('swarm-pr-review runtime friction guidance', () => {
 			'First run: git -C "${directory}" fetch origin <base-branch>. Then run:',
 		);
 
-		const pendingDiagnostic = read(
-			'docs/releases/pending/1931-pr-review-diagnostic-errors.md',
+		// Consumption-aware (#3511 class, #3507 pattern): the positive pin
+		// resolves pending OR materialized history; the negative pin applies to
+		// pending text only (aggregate history can legitimately contain the
+		// scanned phrase in unrelated release notes).
+		const diagnostic = fragmentTextOrArchive(
+			'1931-pr-review-diagnostic-errors.md',
 		);
-		expect(pendingDiagnostic).not.toContain(
-			'git -C "<directory>" switch --detach',
+		expect(diagnostic).not.toBeNull();
+		expect(diagnostic).toContain('git switch --detach <sha>');
+		const pendingDiagnostic = pendingText(
+			'1931-pr-review-diagnostic-errors.md',
 		);
-		expect(pendingDiagnostic).toContain('git switch --detach <sha>');
+		if (pendingDiagnostic !== null) {
+			expect(pendingDiagnostic).not.toContain(
+				'git -C "<directory>" switch --detach',
+			);
+		}
 	});
 
 	test('Profile A keeps context in dispatch prompts instead of requiring blocked scratch writes', () => {

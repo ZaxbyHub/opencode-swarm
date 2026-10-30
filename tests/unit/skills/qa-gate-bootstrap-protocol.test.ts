@@ -1,10 +1,32 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createArchitectAgent } from '../../../src/agents/architect';
 
 const read = (path: string): string =>
 	readFileSync(join(process.cwd(), path), 'utf-8');
+
+function fragmentTextOrArchive(name: string): string | null {
+	const pendingFragment = join(process.cwd(), 'docs/releases/pending', name);
+	if (existsSync(pendingFragment))
+		return readFileSync(pendingFragment, 'utf-8');
+	const releasesPath = join(process.cwd(), 'docs/releases');
+	if (!existsSync(releasesPath)) return null;
+	const parts: string[] = [];
+	for (const entry of readdirSync(releasesPath)) {
+		if (/^v\d+\.\d+\.\d+\.md$/.test(entry)) {
+			parts.push(readFileSync(join(releasesPath, entry), 'utf-8'));
+		}
+	}
+	return parts.length > 0 ? parts.join('\n') : null;
+}
+
+function pendingText(name: string): string | null {
+	const pendingFragment = join(process.cwd(), 'docs/releases/pending', name);
+	return existsSync(pendingFragment)
+		? readFileSync(pendingFragment, 'utf-8')
+		: null;
+}
 
 const mirroredSkills = [
 	'brainstorm',
@@ -81,20 +103,35 @@ describe('QA gate pre-plan bootstrap protocol (#2145)', () => {
 	});
 
 	test('release notes name the exact task-completion checkpoint action', () => {
-		const releaseNote = read('docs/releases/pending/2145-qa-gate-bootstrap.md');
-		const commitFrequencyReleaseNote = read(
-			'docs/releases/pending/task-completion-commit-frequency.md',
+		// Consumption-aware (#3511 class, #3507 pattern): pending is the sole
+		// authority while present; once a cleanup consumes the fragment the
+		// positive pins resolve against the materialized history. Negative
+		// pins apply to pending text only (aggregate history can legitimately
+		// contain the scanned phrases in unrelated release notes).
+		const releaseNote = fragmentTextOrArchive('2145-qa-gate-bootstrap.md');
+		const commitFrequencyReleaseNote = fragmentTextOrArchive(
+			'task-completion-commit-frequency.md',
 		);
+		expect(releaseNote).not.toBeNull();
+		expect(commitFrequencyReleaseNote).not.toBeNull();
 
 		expect(releaseNote).toContain('`save_task_completion` checkpoint action');
 		expect(releaseNote).toContain('adopt_legacy_binding_only');
 		expect(commitFrequencyReleaseNote).toContain(
 			'`checkpoint({ action: "save_task_completion", task_id: "<task-id>" })`',
 		);
-		expect(commitFrequencyReleaseNote).not.toContain('`checkpoint save`');
-		expect(releaseNote).not.toMatch(
-			/checkpoint creation happens only after task completion and\s+pre-commit gates,/,
+		const pendingRelease = pendingText('2145-qa-gate-bootstrap.md');
+		const pendingCommitFrequency = pendingText(
+			'task-completion-commit-frequency.md',
 		);
+		if (pendingCommitFrequency !== null) {
+			expect(pendingCommitFrequency).not.toContain('`checkpoint save`');
+		}
+		if (pendingRelease !== null) {
+			expect(pendingRelease).not.toMatch(
+				/checkpoint creation happens only after task completion and\s+pre-commit gates,/,
+			);
+		}
 	});
 
 	test('PLAN freezes identity and persists gates before the first save', () => {
