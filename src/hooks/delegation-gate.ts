@@ -3512,6 +3512,14 @@ const maintainBackgroundDelegationsForDispatch: typeof import('../background/pen
  */
 export const _internals = {
 	isEpicOpenForProject,
+	/**
+	 * #3502 review (PRR-007): set by createDelegationGateHook so tests can
+	 * observe the settlement-side invalidation gate for a specific hook
+	 * instance (did THIS dispatch's route persist fail for this task?).
+	 */
+	routeInvalidationProbe: null as
+		| ((callID: string, sessionId: string, taskId: string) => boolean)
+		| null,
 	/** Epic v2 C4: wave-only coder admission + the wave's parallel/isolation policy. */
 	resolveEpicDispatchPolicy,
 	resolveEpicPrFeedbackConflict,
@@ -3900,6 +3908,60 @@ export function createDelegationGateHook(
 	const forgetReviewRoute = (key: string): void => {
 		reviewRouteByTaskKey.delete(key);
 	};
+	// #3502 review (PRR-007, extended): forgetting the in-memory record is NOT
+	// sufficient by itself — a PRIOR dispatch's fail-open router-error receipt
+	// may still sit on disk at the same per-(session,task) receipt path, and
+	// the settlement's disk-read enforcement would advance on that stale
+	// authority. Record the invalidation per callID; the Stage-B settlement
+	// consults it and withholds advancement for the failed attempt regardless
+	// of what is on disk. Bounded FIFO like the route map itself.
+	const routeInvalidatedByCallID = new Map<string, Set<string>>();
+	const MAX_ROUTE_INVALIDATION_RECORDS = 128;
+	const invalidateRouteForCall = (callID: string, key: string): void => {
+		let keys = routeInvalidatedByCallID.get(callID);
+		if (!keys) {
+			keys = new Set<string>();
+			routeInvalidatedByCallID.set(callID, keys);
+			while (routeInvalidatedByCallID.size > MAX_ROUTE_INVALIDATION_RECORDS) {
+				const oldest = routeInvalidatedByCallID.keys().next().value as
+					| string
+					| undefined;
+				if (!oldest) break;
+				routeInvalidatedByCallID.delete(oldest);
+			}
+		}
+		keys.add(key);
+	};
+	const isRouteInvalidatedForCall = (callID: string, key: string): boolean =>
+		routeInvalidatedByCallID.get(callID)?.has(key) ?? false;
+	const consumeRouteInvalidationsForCall = (callID: string): void => {
+		routeInvalidatedByCallID.delete(callID);
+	};
+	/**
+	 * #3502 review (PRR-007): settlement-side gate — did THIS dispatch's route
+	 * persist fail for this task? When true, a prior (possibly fail-open
+	 * router-error) receipt on disk must not authorize the attempt; the
+	 * settlement drops it. Consumes the record so a later healthy dispatch
+	 * re-routes normally. Exposed via _internals.routeInvalidationProbe for
+	 * tests.
+	 */
+	const isRouteBlockedForSettlement = (
+		callID: string,
+		sessionId: string,
+		taskId: string,
+	): boolean => {
+		const invalidated = isRouteInvalidatedForCall(
+			callID,
+			reviewRouteTaskKey(sessionId, taskId),
+		);
+		if (invalidated) {
+			consumeRouteInvalidationsForCall(callID);
+		}
+		return invalidated;
+	};
+	// #3502 review (PRR-007): expose THIS hook instance's settlement-side
+	// invalidation gate to tests (the maps are per-hook-instance closures).
+	_internals.routeInvalidationProbe = isRouteBlockedForSettlement;
 	const bindReviewRouteSlots = (
 		callID: string,
 		sessionId: string,
@@ -4812,13 +4874,15 @@ export function createDelegationGateHook(
 					);
 					// #3502 review (PRR-007): drop any PRIOR dispatch's in-memory
 					// route record for this task so the failed dispatch cannot be
-					// authorized by a stale receipt; enforcement then fails closed
-					// (ROUTE_RECEIPT_DISPATCH_REQUIRED) instead of crediting this
-					// dispatch against an earlier routing decision.
+					// authorized by a stale receipt, AND record the invalidation —
+					// a prior fail-open router-error receipt on disk would
+					// otherwise still advance Stage B; the settlement consults
+					// this record and withholds advancement for the failed
+					// attempt regardless of disk state.
 					if (routedTaskId) {
-						forgetReviewRoute(
-							reviewRouteTaskKey(input.sessionID, routedTaskId),
-						);
+						const staleKey = reviewRouteTaskKey(input.sessionID, routedTaskId);
+						forgetReviewRoute(staleKey);
+						invalidateRouteForCall(input.callID, staleKey);
 					}
 				} else {
 					const routerError = buildReviewRouteRouterError({
@@ -7038,6 +7102,32 @@ export function createDelegationGateHook(
 											: getStageBRouteEvidence(session, taskId);
 										const routeEnforcementEnabled =
 											config.review_routing?.enforce_receipts ?? true;
+										// #3502 review (PRR-007): THIS dispatch's routing failed
+										// for this task (recorded at the failed persist) — a
+										// prior fail-open router-error receipt on disk must not
+										// authorize it. Withhold advancement regardless of disk
+										// state; the record is consumed so a later healthy
+										// dispatch re-routes normally.
+										const routeInvalidatedHere = isRouteBlockedForSettlement(
+											input.callID,
+											input.sessionID,
+											taskId,
+										);
+										if (routeInvalidatedHere && routeEnforcementEnabled) {
+											logger.warn(
+												`[delegation-gate] Stage B route receipt blocked ${taskId}: ROUTE_RECEIPT_INVALIDATED (this dispatch's route persist failed; a prior receipt does not authorize it)`,
+											);
+											warnStageBSettlementDropped(session, {
+												taskId,
+												agent: targetAgent,
+												callID: input.callID,
+												reasonClass: 'route_blocked',
+												detail:
+													'route receipt invalidated: this dispatch route persist failed',
+												drops: stageBSettlementDrops,
+											});
+											continue;
+										}
 										const routeDecision = enforcePersistedReviewRouteReceipt({
 											projectRoot: directory,
 											sessionId: input.sessionID,

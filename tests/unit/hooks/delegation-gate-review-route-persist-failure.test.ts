@@ -27,7 +27,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
-import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import {
+	_internals,
+	createDelegationGateHook,
+} from '../../../src/hooks/delegation-gate';
 import { enforcePersistedReviewRouteReceipt } from '../../../src/review/routing-enforcement';
 import {
 	ensureAgentSession,
@@ -124,16 +127,14 @@ describe('review/test_engineer route-receipt persist failure (#3380)', () => {
 		dir: string,
 		sessionID: string,
 		args: { subagent_type: string; prompt: string },
+		callID = 'call-1',
 	): Promise<unknown> {
 		const hooks = createDelegationGateHook(makeConfig(), dir);
 		// Created WITH the project directory so the session shape matches
 		// production (disk rehydration registered; the PR-review re-entry
 		// rehydration guard at the TASK_GATE block is exercised for real).
 		ensureAgentSession(sessionID, 'architect', dir);
-		return hooks.toolBefore(
-			{ tool: 'Task', sessionID, callID: 'call-1' },
-			{ args },
-		);
+		return hooks.toolBefore({ tool: 'Task', sessionID, callID }, { args });
 	}
 
 	it('reviewer without ACCEPTANCE is still rejected when receipt persistence fails', async () => {
@@ -245,6 +246,45 @@ describe('review/test_engineer route-receipt persist failure (#3380)', () => {
 			),
 		) as { kind?: string };
 		expect(receipt.kind).toBe('review_route_receipt');
+	});
+
+	it('a failed persist invalidates THIS dispatch so a prior disk receipt cannot authorize it (#3502 PRR-007)', async () => {
+		const dir = gateDir({ persistFails: false, withPlan: true });
+		dirs.push(dir);
+		const sessionID = 'sess-rs';
+		ensureAgentSession(sessionID, 'architect', dir);
+		const session = swarmState.agentSessions.get(sessionID);
+		expect(session).toBeDefined();
+		recordModifiedFilesForTask(session!, '1.1', ['src/foo.ts'], dir);
+		const args = {
+			subagent_type: 'reviewer',
+			prompt:
+				'TASK: 1.1 review the change\nACCEPTANCE: FR-001 the diff satisfies the requirement',
+		};
+		// Dispatch 1 (call-r1): persist OK — a route receipt lands on disk.
+		await expect(dispatch(dir, sessionID, args, 'call-r1')).rejects.toThrow(
+			'TASK_WORKFLOW_',
+		);
+		expect(receiptJsonFiles(dir).length).toBeGreaterThan(0);
+		// Break ONLY the receipt path: the prior receipt stays on disk (the
+		// stale-authority surface), but every new persist now fails.
+		fs.rmSync(path.join(dir, '.swarm', 'pr-review'), {
+			recursive: true,
+			force: true,
+		});
+		fs.writeFileSync(path.join(dir, '.swarm', 'pr-review'), 'not a directory');
+		// Dispatch 2 (call-r2): persist fails; the routing failure is recorded
+		// for THIS callID so the disk receipt cannot authorize its settlement.
+		await expect(dispatch(dir, sessionID, args, 'call-r2')).rejects.toThrow(
+			'TASK_WORKFLOW_',
+		);
+		const probe = _internals.routeInvalidationProbe;
+		expect(probe).toBeInstanceOf(Function);
+		expect(probe!('call-r2', sessionID, '1.1')).toBe(true);
+		// Consumed on read: a later healthy dispatch re-routes normally.
+		expect(probe!('call-r2', sessionID, '1.1')).toBe(false);
+		// The unrelated dispatch was never invalidated.
+		expect(probe!('call-r1', sessionID, '1.1')).toBe(false);
 	});
 });
 
