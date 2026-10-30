@@ -126,6 +126,73 @@ export interface MemoryFamilyMigrationCounts {
 		merged: number;
 		skipped: number;
 	}>;
+	/**
+	 * #2958 tombstone / recency audit, one entry per member that had anything
+	 * to report (members whose three fields are all empty are omitted). Every
+	 * emitted entry carries all three fields.
+	 */
+	readonly audit: ReadonlyArray<MemoryFamilyMemberAudit>;
+}
+
+/** Per-member divergence audit (#2958). */
+export interface MemoryFamilyMemberAudit {
+	readonly filename: string;
+	/** Destination-deleted ids a newer live source row resurrected. */
+	readonly resurrectedIds: readonly string[];
+	/**
+	 * Collisions resolved by recency where content changed or a resurrection
+	 * was suppressed: source-newer wins (live or tombstone) plus
+	 * destination-tombstone suppressions. Destination-newer keep-rows are not
+	 * supersessions (nothing moved).
+	 */
+	readonly supersededCount: number;
+	/** Collisions with no usable recency signal (destination kept, reported). */
+	readonly unresolvedCollisions: readonly string[];
+}
+
+/**
+ * Recency keys per versioned JSONL member (#2958), verified against the
+ * persisted producer shapes: memories rows are full MemoryRecords (camelCase
+ * `updatedAt`); reviewed proposals are re-appended under the same id with a
+ * re-stamped `reviewedAt` (`createdAt` is immutable at propose and is never a
+ * recency key). Members not listed are event logs with unique ids — no
+ * version recency.
+ */
+const MEMBER_RECENCY_KEYS: Readonly<Record<string, readonly string[]>> = {
+	'memories.jsonl': ['updatedAt', 'updated_at'],
+	'proposals.jsonl': ['reviewedAt'],
+};
+
+/** Parse a row's recency (ISO string → epoch ms) from the member's key list. */
+function rowRecency(row: unknown, keys: readonly string[]): number | undefined {
+	if (typeof row !== 'object' || row === null) return undefined;
+	const o = row as Record<string, unknown>;
+	for (const key of keys) {
+		const value = o[key];
+		if (typeof value === 'string') {
+			const ms = Date.parse(value);
+			if (!Number.isNaN(ms)) return ms;
+		}
+	}
+	return undefined;
+}
+
+/** Real string row id, or null when the row carries no id (whole-row identity). */
+function rowId(row: unknown): string | null {
+	if (typeof row !== 'object' || row === null) return null;
+	const o = row as Record<string, unknown>;
+	return typeof o.id === 'string' ? o.id : null;
+}
+
+/** jsonl tombstone flag (#2958): `metadata.deleted === true` on a memory row. */
+function rowIsTombstone(row: unknown): boolean {
+	if (typeof row !== 'object' || row === null) return false;
+	const metadata = (row as { metadata?: unknown }).metadata;
+	return (
+		typeof metadata === 'object' &&
+		metadata !== null &&
+		(metadata as { deleted?: unknown }).deleted === true
+	);
 }
 
 /** Read a JSONL file into parsed objects (malformed lines skipped). */
@@ -149,32 +216,146 @@ function readJsonl<T>(filePath: string): T[] {
 	}
 }
 
-/** Id-keyed union of two append-only JSONL arrays (idempotent on retry). */
+/** Options for {@link appendUnionById}. */
+export interface AppendUnionByIdOptions {
+	/**
+	 * Member filename — selects the member's recency rules
+	 * ({@link MEMBER_RECENCY_KEYS}). Defaults to the memories shape.
+	 */
+	memberFilename?: string;
+}
+
+/** Result of {@link appendUnionById} (#2958 recency-aware union). */
+export interface AppendUnionByIdResult<T> {
+	merged: T[];
+	added: number;
+	skipped: number;
+	/** Source rows that superseded an older destination row for a shared id. */
+	superseded: number;
+	/** Shared ids with no usable recency signal (destination kept, reported). */
+	unresolvedCollisions: readonly string[];
+	/** Destination tombstones resurrected by a newer live source row. */
+	resurrectedIds: readonly string[];
+}
+
+/**
+ * Id-keyed union of two append-only JSONL arrays — recency-aware (#2958).
+ *
+ * For a shared id the union compares the source row against the EFFECTIVE last
+ * destination row (load is last-row-wins; the map is updated as rows append,
+ * so a multi-row source history resolves against the merge's own state). A
+ * strictly newer source row is APPENDED (files stay append-only — never
+ * rewritten in place); destination-newer or equal keeps today's skip; a
+ * byte-equal retry is benign dedup; a collision with no usable recency signal
+ * keeps the destination row AND is reported in `unresolvedCollisions`.
+ * Proposals use reviewed-outranks-unreviewed ordering (a curator review is a
+ * lifecycle advancement); tombstoned destination memories resurrected by a
+ * newer live source row are reported in `resurrectedIds`.
+ */
 function appendUnionById<T>(
 	destination: T[],
 	source: T[],
-): { merged: T[]; added: number; skipped: number } {
+	options: AppendUnionByIdOptions = {},
+): AppendUnionByIdResult<T> {
+	const memberFilename = options.memberFilename ?? 'memories.jsonl';
+	const recencyKeys = MEMBER_RECENCY_KEYS[memberFilename] ?? [];
 	const result = [...destination];
-	const seen = new Set(
-		result.map((r) => {
-			const o = r as unknown as Record<string, unknown>;
-			return typeof o.id === 'string' ? o.id : JSON.stringify(r);
-		}),
-	);
+	const effectiveLast = new Map<string, T>();
+	const seenRowJson = new Set<string>();
+	for (const row of destination) {
+		const id = rowId(row);
+		if (id !== null) effectiveLast.set(id, row);
+		seenRowJson.add(JSON.stringify(row));
+	}
 	let added = 0;
 	let skipped = 0;
+	let superseded = 0;
+	const unresolvedCollisions: string[] = [];
+	const resurrectedIds: string[] = [];
 	for (const src of source) {
-		const o = src as unknown as Record<string, unknown>;
-		const id = typeof o.id === 'string' ? o.id : JSON.stringify(src);
-		if (seen.has(id)) {
+		const id = rowId(src);
+		if (id === null) {
+			// No id (event/consolidation rows): whole-row identity — a
+			// byte-identical retry is benign dedup, anything else appends.
+			const json = JSON.stringify(src);
+			if (seenRowJson.has(json)) {
+				skipped++;
+				continue;
+			}
+			result.push(src);
+			seenRowJson.add(json);
+			added++;
+			continue;
+		}
+		const destRow = effectiveLast.get(id);
+		if (destRow === undefined) {
+			result.push(src);
+			effectiveLast.set(id, src);
+			added++;
+			continue;
+		}
+		if (JSON.stringify(destRow) === JSON.stringify(src)) {
+			// Exact retry: benign dedup (F-17 semantics preserved).
 			skipped++;
 			continue;
 		}
+		if (recencyKeys.length === 0) {
+			// Event-log member with a real id: a differing payload under the
+			// same event id is an anomaly — keep destination, report it.
+			unresolvedCollisions.push(id);
+			skipped++;
+			continue;
+		}
+		const destRecency = rowRecency(destRow, recencyKeys);
+		const srcRecency = rowRecency(src, recencyKeys);
+		let sourceWins: boolean;
+		if (memberFilename === 'proposals.jsonl') {
+			// Reviewed-outranks-unreviewed: a valid reviewedAt outranks its
+			// absence; timestamps compare only when both are valid; neither
+			// side carrying a valid signal is unresolved.
+			if (destRecency === undefined && srcRecency === undefined) {
+				unresolvedCollisions.push(id);
+				skipped++;
+				continue;
+			}
+			sourceWins =
+				destRecency === undefined
+					? true
+					: srcRecency === undefined
+						? false
+						: srcRecency > destRecency;
+		} else {
+			if (destRecency === undefined || srcRecency === undefined) {
+				unresolvedCollisions.push(id);
+				skipped++;
+				continue;
+			}
+			sourceWins = srcRecency > destRecency;
+		}
+		if (!sourceWins) {
+			if (rowIsTombstone(destRow) && !rowIsTombstone(src)) {
+				// A newer destination tombstone suppressed the resurrection.
+				superseded++;
+			} else {
+				skipped++;
+			}
+			continue;
+		}
+		if (rowIsTombstone(destRow) && !rowIsTombstone(src)) {
+			resurrectedIds.push(id);
+		}
 		result.push(src);
-		seen.add(id);
-		added++;
+		effectiveLast.set(id, src);
+		superseded++;
 	}
-	return { merged: result, added, skipped };
+	return {
+		merged: result,
+		added,
+		skipped,
+		superseded,
+		unresolvedCollisions,
+		resurrectedIds,
+	};
 }
 
 /**
@@ -272,7 +453,11 @@ function stageSqliteDb(
 async function mergeStagedSqlite(
 	destStoragePath: string,
 	stagedPath: string,
-): Promise<{ merged: number; skipped: number }> {
+): Promise<{
+	merged: number;
+	skipped: number;
+	audit: MemoryFamilyMemberAudit;
+}> {
 	const destDbPath = path.join(destStoragePath, 'memory.db');
 	if (!existsSync(destDbPath)) {
 		// Empty destination — atomic rename.
@@ -289,7 +474,16 @@ async function mergeStagedSqlite(
 			}
 		}
 		// Count rows in the renamed DB for the report (best-effort).
-		return { merged: await countRowsSafe(destDbPath), skipped: 0 };
+		return {
+			merged: await countRowsSafe(destDbPath),
+			skipped: 0,
+			audit: {
+				filename: 'memory.db',
+				resurrectedIds: [],
+				supersededCount: 0,
+				unresolvedCollisions: [],
+			},
+		};
 	}
 	// #1850 (reviewer fix + CONCERN-6): non-empty destination — ATTACH the
 	// staged DB and INSERT OR IGNORE rows keyed by id, so a re-link-after-
@@ -300,6 +494,131 @@ async function mergeStagedSqlite(
 		const { loadDatabaseCtor } = await import('../db/sqlite-loader.js');
 		const Db = loadDatabaseCtor();
 		const db = new Db(destDbPath);
+
+		/** Ordered column list of a table in the given schema (`main` or `staged`). */
+		function tableColumns(schema: 'main' | 'staged', table: string): string[] {
+			try {
+				const rows = db
+					.query<{ name: string }, []>(`PRAGMA ${schema}.table_info(${table})`)
+					.all();
+				return rows.map((r) => r.name);
+			} catch {
+				return [];
+			}
+		}
+
+		/**
+		 * Build and run the #2958 newer-wins upsert for `memory_items`, restricted to
+		 * the columns BOTH schemas carry (a matching pre-v12 pair must keep merging —
+		 * positional `SELECT *` did, and the shared-column form still does). Only a
+		 * strictly newer source row updates the destination (`excluded.updated_at >
+		 * memory_items.updated_at`); the `WHERE true` token is REQUIRED grammar for
+		 * `INSERT … SELECT … ON CONFLICT` in both bun:sqlite and node:sqlite.
+		 * Parameter-free (AGENTS.md invariant 2 — node:sqlite placeholder strictness).
+		 *
+		 * Returns the audit facts the caller folds into the per-member audit.
+		 */
+		function mergeMemoryItemsRecency(): {
+			merged: number;
+			skipped: number;
+			resurrectedIds: string[];
+			supersededCount: number;
+		} {
+			const destCols = tableColumns('main', 'memory_items');
+			const stagedCols = tableColumns('staged', 'memory_items');
+			const shared = destCols.filter((c) => stagedCols.includes(c));
+			// The recency upsert applies only when both schemas carry the SAME
+			// column set (current×current or a matching pre-v12 pair). A column
+			// mismatch (skew) keeps today's positional INSERT OR IGNORE, whose
+			// count mismatch degrades per-table into failedTables — unchanged
+			// semantics for a shape this migration has never reconciled.
+			const shapesMatch =
+				destCols.length > 0 &&
+				destCols.length === stagedCols.length &&
+				shared.length === destCols.length;
+			if (!shapesMatch || !shared.includes('updated_at')) {
+				// No matching recency shape — plain id-keyed union (see above).
+				const result = db.run(
+					'INSERT OR IGNORE INTO memory_items SELECT * FROM staged.memory_items;',
+				);
+				return {
+					merged: result.changes ?? 0,
+					skipped: 0,
+					resurrectedIds: [],
+					supersededCount: 0,
+				};
+			}
+			interface OverlapRow {
+				id: string;
+				dest_deleted: number;
+				src_deleted: number;
+				dest_at: string;
+				src_at: string;
+			}
+			const overlaps = db
+				.query<OverlapRow, []>(
+					`SELECT destination.id AS id,
+				        destination.deleted AS dest_deleted,
+				        source.deleted AS src_deleted,
+				        destination.updated_at AS dest_at,
+				        source.updated_at AS src_at
+				 FROM memory_items AS destination
+				 JOIN staged.memory_items AS source ON source.id = destination.id`,
+				)
+				.all();
+			const resurrectedIds: string[] = [];
+			let supersededCount = 0;
+			for (const row of overlaps) {
+				const srcNewer = row.src_at > row.dest_at;
+				if (row.dest_deleted === 1 && row.src_deleted === 0 && srcNewer) {
+					// A newer live source row resurrects a destination tombstone — the
+					// upsert flips it live; report it.
+					resurrectedIds.push(row.id);
+					supersededCount++;
+				} else if (srcNewer) {
+					// A newer source row (live-over-live, or a newer source tombstone
+					// over a live destination) wins by recency.
+					supersededCount++;
+				} else if (row.dest_deleted === 1 && row.src_deleted === 0) {
+					// A newer destination tombstone suppresses the resurrection.
+					supersededCount++;
+				}
+			}
+			const colList = shared.join(', ');
+			const plainSet = shared.filter(
+				(c) => c !== 'id' && c !== 'valid_from' && c !== 'supersedes_reason',
+			);
+			const setList = plainSet.map((c) => `${c} = excluded.${c}`).join(',\n');
+			const validFromClause = shared.includes('valid_from')
+				? ',\nvalid_from = memory_items.valid_from'
+				: '';
+			// #1466 parity with writeMemory: a re-write must not reset valid_from, and
+			// an empty supersedes_reason keeps the destination's value.
+			const supersedesClause = shared.includes('supersedes_reason')
+				? ',\nsupersedes_reason = COALESCE(excluded.supersedes_reason, memory_items.supersedes_reason)'
+				: '';
+			const result = db.run(
+				`INSERT INTO memory_items (${colList})
+			SELECT ${colList} FROM staged.memory_items WHERE true
+			ON CONFLICT(id) DO UPDATE SET
+				${setList}${validFromClause}${supersedesClause}
+			WHERE excluded.updated_at > memory_items.updated_at;`,
+			);
+			const merged = result.changes ?? 0;
+			// Every overlapping id that did not produce a change is a collision the
+			// recency guard declined (destination-newer/equal or byte-identical retry).
+			const stagedCount =
+				db
+					.query<{ n: number }, []>(
+						'SELECT COUNT(*) AS n FROM staged.memory_items',
+					)
+					.get()?.n ?? 0;
+			const newIds = Math.max(0, stagedCount - overlaps.length);
+			const updated = Math.min(Math.max(0, merged - newIds), overlaps.length);
+			const skipped = Math.max(0, overlaps.length - updated);
+			return { merged, skipped, resurrectedIds, supersededCount };
+		}
+
 		let attached = false;
 		let transactionActive = false;
 		try {
@@ -324,8 +643,12 @@ async function mergeStagedSqlite(
 			);`);
 			db.run(`CREATE INDEX IF NOT EXISTS idx_memory_outcomes_memory_generation
 				ON memory_outcomes(memory_id, generation, at, id);`);
-			// Merge each id-keyed table. INSERT OR IGNORE skips rows whose id
-			// already exists in the destination (idempotent on retry).
+			// Merge each id-keyed table. memory_items resolves collisions by
+			// RECENCY (#2958 newer-wins upsert — a strictly newer source row
+			// beats the destination); every other table below has NO usable
+			// version-recency signal, so those keep INSERT OR IGNORE (event /
+			// usage logs have unique randomUUID ids; memory_proposals.created_at
+			// is immutable at propose; memory_outcomes is fail-closed above).
 			const tables = [
 				'memory_items',
 				'memory_proposals',
@@ -335,8 +658,12 @@ async function mergeStagedSqlite(
 				'memory_outcomes',
 			];
 			let merged = 0;
+			let skippedCollisions = 0;
 			let skippedDueToError = 0;
 			const failedTables: string[] = [];
+			const unresolvedCollisions: string[] = [];
+			let resurrectedIds: string[] = [];
+			let supersededCount = 0;
 			for (const table of tables) {
 				try {
 					// Check the staged table exists (a freshly-created staged DB
@@ -347,6 +674,28 @@ async function mergeStagedSqlite(
 						)
 						.get();
 					if (!stashed || stashed.n === 0) continue;
+					if (table === 'memory_items') {
+						const outcome = mergeMemoryItemsRecency();
+						merged += outcome.merged;
+						skippedCollisions += outcome.skipped;
+						resurrectedIds = outcome.resurrectedIds;
+						supersededCount = outcome.supersededCount;
+						continue;
+					}
+					if (table === 'memory_proposals') {
+						// created_at is immutable at propose (never a version
+						// recency signal) — recency cannot apply, so this table
+						// keeps INSERT OR IGNORE and reports its collided ids as
+						// unresolved (#2958 audit).
+						const collided = db
+							.query<{ id: string }, []>(
+								`SELECT destination.id AS id
+								 FROM memory_proposals AS destination
+								 JOIN staged.memory_proposals AS source ON source.id = destination.id`,
+							)
+							.all();
+						for (const row of collided) unresolvedCollisions.push(row.id);
+					}
 					if (table === 'memory_outcomes') {
 						const overlaps = db
 							.query<
@@ -383,6 +732,7 @@ async function mergeStagedSqlite(
 							assertEventIdentityCompatible(destinationEvent, sourceEvent);
 						}
 					}
+					// No version-recency signal applies — id-keyed union.
 					const result = db.run(
 						`INSERT OR IGNORE INTO ${table} SELECT * FROM staged.${table};`,
 					);
@@ -409,7 +759,16 @@ async function mergeStagedSqlite(
 					`[memory-family-migration] ${failedTables.length} table(s) skipped during SQLite ATTACH merge: ${failedTables.join(', ')}`,
 				);
 			}
-			return { merged, skipped: skippedDueToError };
+			return {
+				merged,
+				skipped: skippedDueToError + skippedCollisions,
+				audit: {
+					filename: 'memory.db',
+					resurrectedIds,
+					supersededCount,
+					unresolvedCollisions,
+				},
+			};
 		} catch (error) {
 			if (transactionActive) {
 				try {
@@ -523,6 +882,7 @@ export async function migrateMemoryFamily(
 		merged: number;
 		skipped: number;
 	}> = [];
+	const auditEntries: MemoryFamilyMemberAudit[] = [];
 
 	try {
 		// 2-7. For each member: read source, merge into destination, validate, commit.
@@ -541,11 +901,18 @@ export async function migrateMemoryFamily(
 					perMember.push({ filename: member.filename, merged: 0, skipped: 0 });
 					continue;
 				}
-				const { merged, skipped } = await mergeStagedSqlite(
+				const { merged, skipped, audit } = await mergeStagedSqlite(
 					destStoragePath,
 					staged.stagedPath,
 				);
 				perMember.push({ filename: member.filename, merged, skipped });
+				if (
+					audit.resurrectedIds.length > 0 ||
+					audit.supersededCount > 0 ||
+					audit.unresolvedCollisions.length > 0
+				) {
+					auditEntries.push(audit);
+				}
 				continue;
 			}
 
@@ -556,10 +923,31 @@ export async function migrateMemoryFamily(
 				}
 				const srcData = readJsonl<unknown>(srcPath);
 				const destData = readJsonl<unknown>(destPath);
-				const { merged, added, skipped } =
-					member.filename === 'outcome-events.jsonl'
-						? appendUnionOutcomeEvents(destData, srcData)
-						: appendUnionById(destData, srcData);
+				if (member.filename === 'outcome-events.jsonl') {
+					const { merged, added, skipped } = appendUnionOutcomeEvents(
+						destData,
+						srcData,
+					);
+					const serialized = serializeJsonl(merged);
+					if (!validateSerializedJsonl(serialized)) {
+						throw new Error(
+							`memory-family-migration: validation failed for ${member.filename}; aborting before commit`,
+						);
+					}
+					await atomicWriteFile(destPath, serialized);
+					perMember.push({ filename: member.filename, merged: added, skipped });
+					continue;
+				}
+				const {
+					merged,
+					added,
+					skipped,
+					superseded,
+					unresolvedCollisions,
+					resurrectedIds,
+				} = appendUnionById(destData, srcData, {
+					memberFilename: member.filename,
+				});
 				const serialized = serializeJsonl(merged);
 				if (!validateSerializedJsonl(serialized)) {
 					throw new Error(
@@ -568,6 +956,18 @@ export async function migrateMemoryFamily(
 				}
 				await atomicWriteFile(destPath, serialized);
 				perMember.push({ filename: member.filename, merged: added, skipped });
+				if (
+					resurrectedIds.length > 0 ||
+					superseded > 0 ||
+					unresolvedCollisions.length > 0
+				) {
+					auditEntries.push({
+						filename: member.filename,
+						resurrectedIds,
+						supersededCount: superseded,
+						unresolvedCollisions,
+					});
+				}
 			}
 		}
 
@@ -616,7 +1016,7 @@ export async function migrateMemoryFamily(
 		}
 	}
 
-	return { perMember };
+	return { perMember, audit: auditEntries };
 }
 
 export const _internals = {

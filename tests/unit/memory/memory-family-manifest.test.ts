@@ -69,6 +69,65 @@ describe('#1850 memory family migration — JSONL append-union', () => {
 		expect(skipped).toBe(1);
 	});
 
+	// #2958: the union is recency-aware — newer source rows supersede,
+	// missing recency reports unresolved, tombstone resurrections are listed.
+	test('#2958: newer source row supersedes (both counters, no unresolved)', () => {
+		const dest = [
+			{ id: 'a', text: 'v1', updatedAt: '2026-09-20T00:00:00.000Z' },
+		];
+		const src = [
+			{ id: 'a', text: 'v2', updatedAt: '2026-09-22T00:00:00.000Z' },
+		];
+		const r = _internals.appendUnionById(dest, src);
+		expect(r.superseded).toBe(1);
+		expect(r.skipped).toBe(0);
+		expect(r.added).toBe(0);
+		expect(r.unresolvedCollisions).toHaveLength(0);
+		expect(
+			r.merged.filter((x) => (x as { id: string }).id === 'a'),
+		).toHaveLength(2);
+	});
+
+	test('#2958: destination-newer keeps (skip, no supersession, no unresolved)', () => {
+		const dest = [
+			{ id: 'a', text: 'v2', updatedAt: '2026-09-22T00:00:00.000Z' },
+		];
+		const src = [
+			{ id: 'a', text: 'v1', updatedAt: '2026-09-20T00:00:00.000Z' },
+		];
+		const r = _internals.appendUnionById(dest, src);
+		expect(r.skipped).toBe(1);
+		expect(r.superseded).toBe(0);
+		expect(r.unresolvedCollisions).toHaveLength(0);
+		expect(r.merged).toHaveLength(1);
+	});
+
+	test('#2958: missing recency on either side reports the id unresolved', () => {
+		const dest = [{ id: 'a', text: 'old' }];
+		const src = [{ id: 'a', text: 'new' }];
+		const r = _internals.appendUnionById(dest, src);
+		expect(r.skipped).toBe(1);
+		expect(r.unresolvedCollisions).toEqual(['a']);
+		expect(r.merged).toHaveLength(1);
+	});
+
+	test('#2958: destination tombstone resurrected by a newer live source row', () => {
+		const dest = [
+			{
+				id: 'a',
+				text: 'gone',
+				updatedAt: '2026-09-20T00:00:00.000Z',
+				metadata: { deleted: true },
+			},
+		];
+		const src = [
+			{ id: 'a', text: 'back', updatedAt: '2026-09-22T00:00:00.000Z' },
+		];
+		const r = _internals.appendUnionById(dest, src);
+		expect(r.resurrectedIds).toEqual(['a']);
+		expect(r.superseded).toBe(1);
+	});
+
 	test('F-18: validateSerializedJsonl rejects malformed JSON', () => {
 		expect(_internals.validateSerializedJsonl('{"id":"a"}\nnot json\n')).toBe(
 			false,
