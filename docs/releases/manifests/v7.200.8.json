@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.8",
+  "tagCommit": "a57535fe33760c6f744a4ca56090ffb782028e7a",
+  "targetCommitish": "a57535fe33760c6f744a4ca56090ffb782028e7a",
+  "releaseBodySha256": "7cb5f5912da0c66d159a8f8626eae64b7c9790977c4e382e3ad9689d3bd9835c",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3461-full-auto-readonly-tool-tier.md",
+      "sha256": "aa8bf048811694e646bc6fa49b0234f43a10a5572ea8b039d1accd7ff6edb5e4"
+    }
+  ]
+}
