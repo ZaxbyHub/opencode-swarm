@@ -1788,6 +1788,12 @@ export function collectFragmentsForPrs(
 							filePath: fp,
 							archivedClaim: claim,
 						});
+						// The aggregate entry cap must bound claim-only entries
+						// too (they are full collection members), not only the
+						// content-bearing arm below (round-5 plan-critic finding).
+						if (entries.length > MAX_FRAGMENT_ENTRIES) {
+							throw new Error('release fragment entry cap exceeded');
+						}
 						continue;
 					}
 					throw new Error(

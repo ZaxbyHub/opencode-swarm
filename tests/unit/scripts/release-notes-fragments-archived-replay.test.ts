@@ -171,6 +171,43 @@ describe('archived-claim resolution (#3500 claim-only design)', () => {
 		).toThrow(/archived claim is ambiguous/);
 	});
 
+	test('the aggregate entry cap bounds claim-only entries too (round-5 finding)', () => {
+		// #3500 round-5 plan-critic finding: the archived-claim arm must not
+		// bypass the aggregate MAX_FRAGMENT_ENTRIES check. A full content-bearing
+		// collection followed by one archived claim must refuse the collection.
+		const root = fixtureRoot();
+		const sha = hex64(11);
+		put(
+			root,
+			'docs/releases/manifests/v1.0.0.json',
+			manifestFor('v1.0.0', [
+				{ path: 'docs/releases/pending/gone.md', sha256: sha },
+			]),
+		);
+		const contentFiles: string[] = [];
+		for (let index = 0; index < 5000; index += 1) {
+			const fp = `docs/releases/pending/live-${index}.md`;
+			contentFiles.push(fp);
+		}
+		let served = 0;
+		const verifyCandidate = (num: number) => ({
+			kind: 'pr',
+			files: num === 1 ? contentFiles : ['docs/releases/pending/gone.md'],
+		});
+		const readFragment = (repoRoot: string, fp: string) => {
+			if (fp === 'docs/releases/pending/gone.md') return null;
+			served += 1;
+			return { content: '- live ' + fp + '\n' };
+		};
+		expect(() =>
+			collectFragmentsForPrs([1, 2], root, () => {}, {
+				requireComplete: true,
+				verifyCandidate,
+				readFragment,
+			}),
+		).toThrow(/release fragment entry cap exceeded/);
+	});
+
 	test('collectFragmentsForPrs resolves a claimed fragment as a claim-only entry', () => {
 		const root = fixtureRoot();
 		const sha = hex64(6);
