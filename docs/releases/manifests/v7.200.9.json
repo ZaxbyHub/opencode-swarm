@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.9",
+  "tagCommit": "7fa53aa41d2926c2ab8f5f242f47bd27098bfbb7",
+  "targetCommitish": "7fa53aa41d2926c2ab8f5f242f47bd27098bfbb7",
+  "releaseBodySha256": "901cbfd478854946f45db0cdb2a6fbe2dcc30cc3c1770bcf208bfe884e4c02dd",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/ci-fragment-gate-hardening-3283-3299-3300-3307.md",
+      "sha256": "cb5ec960adcd1e3a6a2882b4dcc0ae8e2d60c0a4784f3255fceb7d99c504a72f"
+    }
+  ]
+}
