@@ -254,33 +254,34 @@ describe('validator arms', () => {
 		expect(result.reason).toContain('retired');
 	});
 
-	test('symlink whose TARGET directory is retired is blocked (realpath policy)', () => {
+	test('alias whose TARGET directory is retired is blocked (realpath policy)', () => {
 		const target = writeSkillDir(
 			scratch,
 			'.opencode/skills/generated/retired-real',
 			{
 				kind: 'retired',
+				payload: JSON.stringify({
+					retiredAt: '2026-07-02T00:00:00.000Z',
+					reason: 'retired via junction target',
+				}),
 			},
 		);
-		const aliasDir = path.join(scratch, '.opencode/skills/alias-skill');
-		fs.mkdirSync(aliasDir, { recursive: true });
-		try {
-			fs.symlinkSync(
-				path.join(target, 'SKILL.md'),
-				path.join(aliasDir, 'SKILL.md'),
-				'file',
-			);
-		} catch {
-			// Windows without symlink privilege: the containment-level behavior
-			// is covered by the lexical-dir arm below; skip this arm.
-			return;
-		}
+		// A directory junction needs no symlink privilege on Windows (and is a
+		// plain symlink on POSIX), so this arm EXECUTES on every CI platform:
+		// the lexical directory is the alias, the realpath directory is the
+		// retired target, and the realpath-side marker must block.
+		const aliasDir = path.join(scratch, '.opencode/skills/alias-junction');
+		fs.symlinkSync(target, aliasDir, 'junction');
 		const result = validate(
 			scratch,
-			'file:.opencode/skills/alias-skill/SKILL.md',
+			'file:.opencode/skills/alias-junction/SKILL.md',
 		);
 		expect(result.valid).toBe(false);
-		expect(result.reason).toContain('retired-real');
+		// The refusal names the LEXICAL slug (what the architect referenced)…
+		expect(result.reason).toContain('alias-junction');
+		// …classifies it as retired, and carries the target-side marker detail.
+		expect(result.reason).toContain('retired');
+		expect(result.reason).toContain('retired via junction target');
 	});
 
 	test('marker on the LEXICAL directory blocks even when the target differs', () => {
@@ -305,6 +306,10 @@ describe('validator arms', () => {
 			'file:.opencode/skills/lexically-retired/SKILL.md',
 		);
 		expect(result.valid).toBe(false);
+		// The refusal names the LEXICAL slug whose directory carries the marker
+		// (the file-symlink target itself is a live directory).
+		expect(result.reason).toContain('lexically-retired');
+		expect(result.reason).toContain('retired');
 	});
 });
 
