@@ -236,6 +236,35 @@ describe('ensemble adoption ADR (issue #2505) — review checklist', () => {
 		} finally {
 			fs.rmSync(empty, { recursive: true, force: true });
 		}
+		const exclusive = canonicalMkdtemp('swarm-ensemble-adr-2505-excl-');
+		try {
+			fs.mkdirSync(path.join(exclusive, 'docs/releases/pending'), {
+				recursive: true,
+			});
+			fs.mkdirSync(path.join(exclusive, 'docs/releases'), {
+				recursive: true,
+			});
+			// Pending present but MISSING the pinned sentence, while a stale
+			// archive carries it: pending is the sole authority, so the pin
+			// fails — a UNION resolver would pass by leaking the archive text
+			// (the stale re-add hazard the exclusive arms exist to kill).
+			fs.writeFileSync(
+				path.join(
+					exclusive,
+					'docs/releases/pending/2505-ensemble-adoption-adr.md',
+				),
+				'# adoption ADR record without the pinned sentences',
+			);
+			fs.writeFileSync(
+				path.join(exclusive, 'docs/releases/v0.0.0.md'),
+				'# stale archive hit with ADR 0002 and 2505 narration',
+			);
+			const resolved = adoptionAdrFragmentText(exclusive);
+			expect(resolved).not.toContain('ADR 0002');
+			expect(resolved).not.toContain('2505');
+		} finally {
+			fs.rmSync(exclusive, { recursive: true, force: true });
+		}
 		const archivedOnly = canonicalMkdtemp('swarm-ensemble-adr-2505-arch-');
 		try {
 			fs.mkdirSync(path.join(archivedOnly, 'docs/releases'), {

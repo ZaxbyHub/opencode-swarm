@@ -17,6 +17,7 @@ import {
 	matchPartsToEntries,
 	reconcileTaggedRelease,
 	resolveArchivedClaim,
+	resolveReleaseEntries,
 } from '../../../scripts/release-notes-fragments.mjs';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -169,6 +170,34 @@ describe('archived-claim resolution (#3500 claim-only design)', () => {
 		expect(() =>
 			resolveArchivedClaim(conflict, 'docs/releases/pending/gone.md'),
 		).toThrow(/archived claim is ambiguous/);
+	});
+
+	test('a nonempty published block referencing an archived fragment fails closed (duplicate-consumption hazard)', async () => {
+		// #3500 round-2 addendum: the defined fail-closed mechanism for nonempty
+		// bodies containing claim-only entries — pinned here per the 4.5 review.
+		const root = fixtureRoot();
+		const sha = hex64(12);
+		put(
+			root,
+			'docs/releases/manifests/v1.0.0.json',
+			manifestFor('v1.0.0', [
+				{ path: 'docs/releases/pending/gone.md', sha256: sha },
+			]),
+		);
+		const body =
+			'release notes for PR #3387\n' +
+			releaseBody('already-published narrative');
+		await expect(
+			resolveReleaseEntries('v1.2.3', body, root, () => {}, {
+				verifyCandidate: () => ({
+					kind: 'pr',
+					files: ['docs/releases/pending/gone.md'],
+				}),
+				readFragment: () => null,
+			}),
+		).rejects.toThrow(
+			/published block references already-archived fragment: docs.+pending.gone.md . duplicate-consumption hazard/,
+		);
 	});
 
 	test('the aggregate entry cap bounds claim-only entries too (round-5 finding)', () => {

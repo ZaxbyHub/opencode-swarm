@@ -106,6 +106,32 @@ describe('auto-review cross-surface contract', () => {
 		} finally {
 			fs.rmSync(neitherDir, { recursive: true, force: true });
 		}
+		const exclusive = canonicalMkdtemp('swarm-cross-surface-excl-');
+		try {
+			fs.mkdirSync(path.join(exclusive, 'docs/releases/pending'), {
+				recursive: true,
+			});
+			fs.mkdirSync(path.join(exclusive, 'docs/releases'), {
+				recursive: true,
+			});
+			// Pending present but missing '/swarm review' while a stale
+			// archive carries it: pending is the sole authority — a union
+			// resolver would leak the archive sentence and pass vacuously.
+			fs.writeFileSync(
+				path.join(
+					exclusive,
+					'docs/releases/pending/1675-default-auto-review-engine.md',
+				),
+				'# auto-review engine record without the command pin',
+			);
+			fs.writeFileSync(
+				path.join(exclusive, 'docs/releases/v0.0.0.md'),
+				'# stale archive hit documenting /swarm review surface',
+			);
+			expect(autoReviewFragmentText(exclusive)).not.toContain('/swarm review');
+		} finally {
+			fs.rmSync(exclusive, { recursive: true, force: true });
+		}
 		const archivedDir = canonicalMkdtemp('swarm-cross-surface-arch-');
 		try {
 			fs.mkdirSync(path.join(archivedDir, 'docs/releases'), {
