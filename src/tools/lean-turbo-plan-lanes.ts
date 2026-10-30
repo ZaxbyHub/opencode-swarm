@@ -75,10 +75,15 @@ export async function executeLeanTurboPlanLanes(
 	try {
 		// Rule 3 (issue #2962): supply the epic-gated upstream-commit predicate.
 		// undefined when no Epic is open for the project keeps placement
-		// byte-identical to the legacy pure-lean behavior.
+		// byte-identical to the legacy pure-lean behavior. Ids are filtered to
+		// strings: this tool parses plan.json without the schema gate, and a
+		// non-string id would throw inside the marker read and be misread as a
+		// git failure (#2962 review PRR-007).
 		const isUpstreamCommitted = resolveLeanRule3Predicate(
 			directory,
-			plan.phases.flatMap((p) => p.tasks.map((t) => t.id)),
+			plan.phases
+				.flatMap((p) => p.tasks.map((t) => t.id))
+				.filter((id): id is string => typeof id === 'string'),
 		);
 		const lanePlan = planLeanTurboLanes(
 			directory,

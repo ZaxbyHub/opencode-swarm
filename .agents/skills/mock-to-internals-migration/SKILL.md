@@ -31,6 +31,7 @@ procedure and checks.
   `bun run check:invariants` Check 4).
 - Design command-transformation pipelines as idempotent passes, not stacking
   layers.
+- Check for existing wrapper patterns before applying sandbox wrapping.
 - Run tests on the unmodified codebase before starting, to establish a failure
   baseline.
 - Run the lint check (e.g. `bun run lint`) as part of pre-submit verification,

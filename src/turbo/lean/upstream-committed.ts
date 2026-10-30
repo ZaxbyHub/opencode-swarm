@@ -48,6 +48,7 @@ import type { EpicRecordV1 } from '../../epic/lifecycle.js';
 import { getOpenEpic, isEpicOpenForProject } from '../../epic/lifecycle.js';
 import { epicCommitRange, findTaskCommits } from '../../epic/markers.js';
 import { _internals as gitBranchInternals } from '../../git/branch.js';
+import { canonicalRootKeyLexical } from '../../utils/canonical-root.js';
 import * as logger from '../../utils/logger.js';
 
 /** Bounds for the HEAD probe (same values as `gitExec`). */
@@ -105,8 +106,23 @@ function headCommitExistsReal(directory: string): HeadCommitState {
 /** Bounded warn-once registry so one flapping directory cannot spam. */
 const warnedDirectories = new Set<string>();
 
-function warnOnceReal(directory: string, message: string): void {
-	const key = directory;
+/**
+ * Warn once per (resolved directory, failure class). The class key keeps the
+ * two semantically distinct degradations from suppressing each other (#2962
+ * review PRR-006): an unreadable-Epic warning must not silence a later
+ * git-log-failure warning for the same project, and vice versa. The key is
+ * the canonical lexical root so path-spelling variants dedup to one entry.
+ */
+function warnOnceReal(
+	directory: string,
+	failureClass: 'epic-unreadable' | 'rule3-git-failure',
+	message: string,
+): void {
+	// The canonical-root lexical key is the sanctioned project-identity form
+	// (check:path-identity); appending the failure class keeps the two Rule-3
+	// degradation classes from suppressing each other (PRR-006).
+	const rootKey = canonicalRootKeyLexical(directory);
+	const key = `${rootKey}::${failureClass}`;
 	if (warnedDirectories.has(key)) return;
 	if (warnedDirectories.size >= MAX_WARNED_DIRECTORIES) {
 		const oldest = warnedDirectories.values().next().value;
@@ -143,6 +159,7 @@ export function resolveLeanRule3Predicate(
 	} catch {
 		_internals.warnOnce(
 			directory,
+			'epic-unreadable',
 			'Epic state became unreadable mid-read; Lean Rule-3 wiring stays legacy until repaired',
 		);
 		return undefined;
@@ -172,6 +189,7 @@ export function resolveLeanRule3Predicate(
 		}
 		_internals.warnOnce(
 			directory,
+			'rule3-git-failure',
 			'git log read failed for Lean Rule-3; cross-batch dependency proof unavailable (legacy degradation)',
 		);
 		return () => true;
@@ -188,4 +206,6 @@ export const _internals = {
 	headCommitExists: headCommitExistsReal,
 	warnOnce: warnOnceReal,
 	criticalWarn: logger.criticalWarn,
+	/** Test-reset surface for the module-level dedup registry (lifecycle.ts precedent). */
+	warnedDirectories,
 };

@@ -23,6 +23,7 @@ import * as path from 'node:path';
 import { bundledProjectSkillFileReference } from '../config/bundled-skills.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { appendCoreEventSync } from '../events/core-events.js';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import { criticalWarn, warn } from '../utils/logger.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type { MessageWithParts } from './knowledge-types.js';
@@ -283,6 +284,7 @@ export const _internals: {
 	readdirSync: typeof fs.readdirSync;
 	existsSync: typeof fs.existsSync;
 	statSync: typeof fs.statSync;
+	lstatSync: typeof fs.lstatSync;
 	realpathSync: typeof fs.realpathSync;
 	mkdirSync: typeof fs.mkdirSync;
 	appendFileSync: typeof fs.appendFileSync;
@@ -311,6 +313,7 @@ export const _internals: {
 	readdirSync: fs.readdirSync.bind(fs),
 	existsSync: fs.existsSync.bind(fs),
 	statSync: fs.statSync.bind(fs),
+	lstatSync: fs.lstatSync.bind(fs),
 	realpathSync: fs.realpathSync.bind(fs),
 	mkdirSync: fs.mkdirSync.bind(fs),
 	appendFileSync: fs.appendFileSync.bind(fs),
@@ -588,36 +591,45 @@ export const RETIRED_SKILL_REPLACEMENTS: Readonly<Record<string, string>> = {
 		'worktree-retry-cleanup',
 	),
 	'pr-review-fix': bundledProjectSkillFileReference('swarm-pr-feedback'),
+	// pr-readiness was likewise a legacy shim naming swarm-pr-feedback as its
+	// successor (its deleted SKILL.md: "Use swarm-pr-feedback skill instead").
+	'pr-readiness': bundledProjectSkillFileReference('swarm-pr-feedback'),
 };
 
 /** Bound on marker-derived text entering architect-visible refusal reasons. */
 const RETIREMENT_REASON_MAX_CHARS = 160;
 
-/** Flatten control characters/newlines and bound the length (marker text is repository-controlled). */
-function sanitizeMarkerText(value: string): string {
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is this sanitizer's entire purpose — marker payloads are repository-controlled text that must never inject newlines into refusal reasons (#2966).
-	const flat = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
-	return flat.length > RETIREMENT_REASON_MAX_CHARS
-		? `${flat.slice(0, RETIREMENT_REASON_MAX_CHARS)}…`
-		: flat;
-}
+/** Byte cap before reading a repository-controlled marker file (#2966 review: cap-before-read, like MAX_SKILL_BYTES). */
+const MAX_MARKER_BYTES = 8_192;
 
 type RetirementMarker = 'retired' | 'stale';
 
+/**
+ * Marker presence via lstat: a DANGLING symlinked marker still counts as
+ * present (fail closed — review LO/RB-06), and a live symlinked marker counts
+ * as present for the blocking decision while its content is refused for the
+ * detail read (#2966 review PRR-005: never read through a symlink).
+ */
 function readRetirementMarker(skillDir: string): RetirementMarker | null {
-	if (_internals.existsSync(path.join(skillDir, 'retired.marker'))) {
-		return 'retired';
-	}
-	if (_internals.existsSync(path.join(skillDir, 'stale.marker'))) {
-		return 'stale';
+	for (const kind of ['retired', 'stale'] as const) {
+		try {
+			const st = _internals.lstatSync(path.join(skillDir, `${kind}.marker`));
+			if (st.isFile() || st.isSymbolicLink()) return kind;
+		} catch {
+			// ENOENT and unreadable alike — try the next kind, then no marker.
+		}
 	}
 	return null;
 }
 
 /**
  * Best-effort marker payload for the refusal message: `{retiredAt, reason}`
- * JSON for retired markers, free text for stale ones. An unreadable marker
- * yields undefined — the refusal still fails closed with the generic message.
+ * JSON for retired markers, free text for stale ones. Content is never read
+ * through a symlink and never beyond a small byte cap (cap-before-read, the
+ * repo's convention for repo-controlled files); rendered through the canonical
+ * `sanitizeDiagnosticText` (C0+C1+bidi flattened, single line) and bounded
+ * once on the AGGREGATE. An unreadable/refused marker yields undefined — the
+ * refusal still fails closed with the generic message.
  */
 function readMarkerDetail(
 	skillDir: string,
@@ -628,6 +640,10 @@ function readMarkerDetail(
 		marker === 'retired' ? 'retired.marker' : 'stale.marker',
 	);
 	try {
+		const st = _internals.lstatSync(file);
+		if (st.isSymbolicLink() || !st.isFile() || st.size > MAX_MARKER_BYTES) {
+			return undefined;
+		}
 		const raw = _internals.readFileSync(file, 'utf-8');
 		if (marker === 'retired') {
 			try {
@@ -640,20 +656,25 @@ function readMarkerDetail(
 					typeof parsed.reason === 'string' &&
 					parsed.reason.trim().length > 0
 				) {
-					parts.push(sanitizeMarkerText(parsed.reason));
+					parts.push(parsed.reason);
 				}
 				if (
 					typeof parsed.retiredAt === 'string' &&
 					parsed.retiredAt.trim().length > 0
 				) {
-					parts.push(`retired ${sanitizeMarkerText(parsed.retiredAt)}`);
+					parts.push(`retired ${parsed.retiredAt}`);
 				}
-				if (parts.length > 0) return parts.join(', ');
+				if (parts.length > 0) {
+					return sanitizeDiagnosticText(
+						parts.join(', '),
+						RETIREMENT_REASON_MAX_CHARS,
+					);
+				}
 			} catch {
 				// Non-JSON payload — fall through to the sanitized raw text.
 			}
 		}
-		const flat = sanitizeMarkerText(raw);
+		const flat = sanitizeDiagnosticText(raw, RETIREMENT_REASON_MAX_CHARS);
 		return flat.length > 0 ? flat : undefined;
 	} catch {
 		return undefined;
@@ -667,12 +688,18 @@ function retirementMessage(
 ): string {
 	const state = marker === 'retired' ? 'retired' : 'stale';
 	const detailText = detail === undefined ? '' : ` (${detail})`;
-	const replacement = RETIRED_SKILL_REPLACEMENTS[slug];
+	const safeSlug = sanitizeDiagnosticText(slug, 120);
+	// Own-property lookup only: a skill directory named `constructor` or
+	// `toString` must not resolve inherited Object.prototype members into the
+	// guidance (#2966 review PRR-004/LO-11).
+	const replacement = Object.hasOwn(RETIRED_SKILL_REPLACEMENTS, slug)
+		? RETIRED_SKILL_REPLACEMENTS[slug]
+		: undefined;
 	const guidance =
 		replacement === undefined
 			? 'regenerate via skill_generate or pick a live skill with skill_inspect'
 			: `use "${replacement}" instead`;
-	return `skill "${slug}" is ${state}${detailText}: ${guidance} — do not delegate with retired skills`;
+	return `skill "${safeSlug}" is ${state}${detailText}: ${guidance} — do not delegate with retired skills`;
 }
 
 interface SkillReferenceValidation {
@@ -760,16 +787,29 @@ export function validateSkillReference(
 		// `SKILLS: file:` references (a retired fork passes every path-shape
 		// check above). Both the realpath's directory and the lexical path's
 		// directory are checked — a marker on either side of a symlink blocks
-		// (conservative lifecycle policy); `retired` wins over `stale`.
+		// (conservative lifecycle policy). Marker STATE wins over which side it
+		// sits on: a `retired` marker on EITHER side beats a `stale` marker on
+		// the other (#2966 review PRR-001); a same-state tie prefers the
+		// realpath side. When both directories are the same (no symlink), the
+		// second probe is skipped.
 		const realSkillDir = path.dirname(realPath);
 		const lexicalSkillDir = path.dirname(lexicalPath);
 		const realMarker = readRetirementMarker(realSkillDir);
-		const lexicalMarker = readRetirementMarker(lexicalSkillDir);
-		const retirement = realMarker ?? lexicalMarker;
+		const lexicalMarker =
+			realSkillDir === lexicalSkillDir
+				? null
+				: readRetirementMarker(lexicalSkillDir);
+		const retirement =
+			realMarker === 'retired' || lexicalMarker === 'retired'
+				? 'retired'
+				: (realMarker ?? lexicalMarker);
 		if (retirement !== null) {
 			const slug = path.basename(lexicalSkillDir);
+			// The detail comes from the side that supplied the winning marker
+			// state (a same-state tie prefers the realpath side).
+			const winnerIsReal = realMarker === retirement;
 			const detail = readMarkerDetail(
-				realMarker !== null ? realSkillDir : lexicalSkillDir,
+				winnerIsReal ? realSkillDir : lexicalSkillDir,
 				retirement,
 			);
 			return {
