@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.200.13](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.12...v7.200.13) (2026-10-30)
+
+
+### Bug Fixes
+
+* **guardrails:** scope-check every rmdir/truncate operand and match real cmd.exe switch clusters ([#3503](https://github.com/ZaxbyHub/opencode-swarm/issues/3503), [#3505](https://github.com/ZaxbyHub/opencode-swarm/issues/3505)) ([d1e0cdc](https://github.com/ZaxbyHub/opencode-swarm/commit/d1e0cdc275876254b590474157ab1b72dff83db2))
+* **guardrails:** split glued cmd delimiters in the switch grammar; end-of-options and operand-count hardening ([#3503](https://github.com/ZaxbyHub/opencode-swarm/issues/3503), [#3505](https://github.com/ZaxbyHub/opencode-swarm/issues/3505)) ([d130d62](https://github.com/ZaxbyHub/opencode-swarm/commit/d130d627500fcefb410c5fe6a89edd9d690afdf4))
+* **turbo,skills:** wire the Rule-3 epic gate into lean lane placement and block retired-skill injection ([#2962](https://github.com/ZaxbyHub/opencode-swarm/issues/2962), [#2966](https://github.com/ZaxbyHub/opencode-swarm/issues/2966)) ([9935eda](https://github.com/ZaxbyHub/opencode-swarm/commit/9935edada9af83ceb72ad1c6561868067cba0bfd))
+
 ## [7.200.12](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.11...v7.200.12) (2026-10-30)
 
 
