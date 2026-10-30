@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.5",
+  "tagCommit": "cda37c8f6cf11620a8d3edc9b1960549fe9aaf44",
+  "targetCommitish": "cda37c8f6cf11620a8d3edc9b1960549fe9aaf44",
+  "releaseBodySha256": "578ebe5ef795fd2e87ded0db33853dafbf9701c38eb50d31ac366a7f3789ad5b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2965-sentinel-conflict-category.md",
+      "sha256": "c7e97e74909f63951d0b2b02c552e22868b6096d5446db7af118de8e523edb55"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/shell-write-scope-bare-rmdir.md",
+      "sha256": "b28d0347880040786f2dc77759213af4462d8bce16dd13815f9cbf0e9aa77b8d"
+    }
+  ]
+}
