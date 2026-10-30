@@ -52,7 +52,13 @@ interface SharedGuardrailRule {
 
 interface CommandClassifierRule {
 	id: string;
-	/** Regex applied per segment. A rule carries either `pattern` or `match`. */
+	/**
+	 * Regex applied per segment when `match` is absent. A rule that also
+	 * declares `match` keeps `pattern` only as the documented verb-locating
+	 * anchor — `matchRule` consults `match` first, so the pattern alone
+	 * never decides the match (#3505 final-critic note: keep the pair in
+	 * sync or drop both).
+	 */
 	pattern?: RegExp;
 	/**
 	 * Structural matcher applied per segment (#3505): preferred over

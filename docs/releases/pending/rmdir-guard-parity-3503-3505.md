@@ -54,3 +54,10 @@ same command. Both defects were probe-verified at the affected commits
 
 - Closes #3503
 - Closes #3505
+
+Note: cmd.exe-style quiet-flag spellings inside bash commands
+(`rmdir /q src/x`) are multi-operand POSIX forms — the `/q` token is an
+ordinary path operand for bash, so it is now scope-checked like every other
+operand (previously only the last operand was). Windows quiet-flag
+tolerance, if ever wanted, is a design change in the #3491/#3088 detector
+program, not this fix.
