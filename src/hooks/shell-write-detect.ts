@@ -916,8 +916,8 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 			// Detect builtin writes (cp, mv, etc.) in the inner POSIX command.
 			// Note: detectPowerShellWrites is not used here because the inner command
 			// of a process substitution is POSIX bash, not PowerShell.
-			const builtinResult = detectBuiltinWritesFromString(stage);
-			if (builtinResult) results.push(builtinResult);
+			const builtinWrites = detectBuiltinWritesFromString(stage);
+			results.push(...builtinWrites);
 
 			// Detect redirections in the stage: check >> first to avoid double-matching
 			// when both > and >> patterns could match the same input.
@@ -946,14 +946,21 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 /**
  * Detect builtin writes from a simple command string (used for process substitution inner commands).
  * Parses the command string without going through bash-parser.
+ *
+ * #3503: reports EVERY written operand with the same per-command semantics
+ * as the AST branch — `rmdir dir...` removes and `truncate FILE...`
+ * truncates each operand, while cp/mv/install/ln/unlink write only the
+ * last (destination). The old single-last-token return left an
+ * out-of-scope operand placed before an in-scope one outside the scope
+ * gate, and its finding suppressed `parseError` for the whole line.
  */
-function detectBuiltinWritesFromString(cmd: string): WriteTarget | null {
+function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 	const tokens = cmd.trim().split(/\s+/);
-	if (tokens.length === 0) return null;
+	if (tokens.length === 0) return [];
 
 	const leaf = detectorCommandLeafFromWords(tokens[0], tokens.slice(1));
 	const name = detectorSetMember(leaf, BUILTIN_WRITE_COMMANDS);
-	if (!name) return null;
+	if (!name) return [];
 	// `rmdir /s [/q] <path>` is the Windows spelling of recursive directory
 	// deletion.  The destructive-command guard owns its safety decision for
 	// that form (including allowing trusted `node_modules`/`dist` targets), so
@@ -963,15 +970,25 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget | null {
 	// a `/q` alone never recurses).  Plain `rmdir <path>` remains a POSIX
 	// write and is handled below.
 	if (name === 'rmdir' && dcParseWindowsRecursiveDelete(cmd).fires) {
-		return null;
+		return [];
+	}
+	if (name === 'rmdir' || name === 'truncate') {
+		const writes: WriteTarget[] = [];
+		for (let i = 1; i < tokens.length; i += 1) {
+			const token = tokens[i];
+			if (token.startsWith('-')) continue;
+			if (name === 'truncate' && isNumeric(token)) continue;
+			writes.push({ category: 'builtin_write', operator: name, path: token });
+		}
+		return writes;
 	}
 	// Last non-flag argument is the destination
 	for (let i = tokens.length - 1; i >= 1; i--) {
 		if (!tokens[i].startsWith('-')) {
-			return { category: 'builtin_write', operator: name, path: tokens[i] };
+			return [{ category: 'builtin_write', operator: name, path: tokens[i] }];
 		}
 	}
-	return null;
+	return [];
 }
 
 /** Extract the text value from an AST Word node. */
@@ -2136,7 +2153,9 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	}
 
 	if (lowerName === 'truncate') {
-		// find first word that doesn't start with - and isn't a pure numeric size
+		// POSIX `truncate FILE...` truncates EVERY named file (#3503): report
+		// each non-flag, non-size operand — the old first-word-and-break loop
+		// left every later operand outside the scope gate.
 		for (const word of suffixWords) {
 			if (!word.startsWith('-') && !isNumeric(word)) {
 				results.push({
@@ -2144,7 +2163,22 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 					operator: 'truncate',
 					path: word,
 				});
-				break;
+			}
+		}
+	} else if (lowerName === 'rmdir') {
+		// POSIX `rmdir dir...` removes EVERY operand (#3503): report each
+		// non-flag operand as its own write target. No emptyDirectoryRemoval
+		// tag here — the bare-single exemption above only ever fires for a
+		// one-operand literal, so multi-target (and non-bare single) forms
+		// keep the ordinary declared-scope check, exactly like today's
+		// last-operand emission.
+		for (const word of suffixWords) {
+			if (!word.startsWith('-')) {
+				results.push({
+					category: 'builtin_write',
+					operator: dedupeOperator,
+					path: word,
+				});
 			}
 		}
 	} else {

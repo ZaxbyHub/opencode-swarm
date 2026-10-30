@@ -6,6 +6,7 @@
  * never become `safe`.
  */
 import { createHash } from 'node:crypto';
+import { dcHasCmdDeleteSwitch } from '../hooks/guardrails/cmd-delete-grammar.js';
 import {
 	dcNormalizeCommand,
 	dcSplitSegments,
@@ -51,7 +52,14 @@ interface SharedGuardrailRule {
 
 interface CommandClassifierRule {
 	id: string;
-	pattern: RegExp;
+	/** Regex applied per segment. A rule carries either `pattern` or `match`. */
+	pattern?: RegExp;
+	/**
+	 * Structural matcher applied per segment (#3505): preferred over
+	 * `pattern` when present, for rules whose condition cannot be expressed
+	 * as one honest regex (cmd.exe switch-cluster grammar).
+	 */
+	match?: (segment: string) => boolean;
 	reason?: string;
 	liveGuardrail?: SharedGuardrailRule;
 }
@@ -67,6 +75,29 @@ const SEVERITY: Record<CommandRiskCategory, number> = {
 	destructive: 3,
 	catastrophic: 4,
 };
+
+const WINDOWS_RECURSIVE_DELETE_VERB = /\b(?:rmdir|rd|del)(?:\.exe)?\b/i;
+
+/**
+ * #3505: token-aware match for the `windows-recursive-delete` rule. The
+ * verb-locating regex names the rmdir/rd/del invocation; the switch test
+ * runs the SAME executed-ground-truth cmd.exe grammar the destructive
+ * guard uses (quote-aware first-unquoted-`/` per token, cluster
+ * validation), so `rmdir /s build` and `rd zzz/s` fire while
+ * `rmdir src/share/opencode2`, `rmdir /tmp/Scratch` and the quoted
+ * `rd "/s" x` do not. Line-bounded like the retired `[^\n]*` rule: a
+ * switch on a later command line belongs to that line's own verb.
+ */
+function windowsRecursiveDeleteMatch(segment: string): boolean {
+	const verb = WINDOWS_RECURSIVE_DELETE_VERB.exec(segment);
+	if (verb === null) return false;
+	let args = segment.slice(verb.index + verb[0].length);
+	const lineBreak = /[\r\n]/.exec(args);
+	if (lineBreak !== null) {
+		args = args.slice(0, lineBreak.index);
+	}
+	return dcHasCmdDeleteSwitch(args, 'sqf');
+}
 
 const CATASTROPHIC: readonly CommandClassifierRule[] = [
 	{
@@ -224,7 +255,16 @@ const DESTRUCTIVE: readonly CommandClassifierRule[] = [
 	},
 	{
 		id: 'windows-recursive-delete',
-		pattern: /\b(?:rmdir|rd|del)(?:\.exe)?\b[^\n]*\/[sqf]/i,
+		// #3505: the verb-locating pattern pairs with the `match` predicate —
+		// a `/`-led token is a switch only when its post-slash text forms a
+		// VALID cmd.exe cluster (every slash-separated segment 1-2 ASCII
+		// letters), scanned with the same executed-ground-truth grammar the
+		// destructive guard uses. The old unanchored `[^\n]*\/[sqf]` tail
+		// matched `/s`-shaped PATH segments (`rmdir src/share/opencode2`)
+		// and denied legal nested-path deletes in both policy consumers.
+		pattern: /\b(?:rmdir|rd|del)(?:\.exe)?\b/i,
+		match: windowsRecursiveDeleteMatch,
+		reason: 'cmd.exe delete switch (valid cluster containing s/q/f)',
 		liveGuardrail: {
 			mode: 'target-aware',
 			destructiveCategory: 'recursive delete',
@@ -455,7 +495,9 @@ function matchRule(
 	segment: string,
 ): CommandClassifierRule | null {
 	for (const rule of rules) {
-		if (rule.pattern.test(segment)) return rule;
+		if (rule.match ? rule.match(segment) : rule.pattern?.test(segment)) {
+			return rule;
+		}
 	}
 	return null;
 }
@@ -470,7 +512,8 @@ function classifySegment(
 		return {
 			segment: bounded,
 			category: 'catastrophic',
-			reason: catastrophic.reason ?? catastrophic.pattern.source,
+			reason:
+				catastrophic.reason ?? catastrophic.pattern?.source ?? catastrophic.id,
 			ruleId: catastrophic.id,
 		};
 	const destructive = matchRule(DESTRUCTIVE, segment);
@@ -478,7 +521,8 @@ function classifySegment(
 		return {
 			segment: bounded,
 			category: 'destructive',
-			reason: destructive.reason ?? destructive.pattern.source,
+			reason:
+				destructive.reason ?? destructive.pattern?.source ?? destructive.id,
 			ruleId: destructive.id,
 		};
 	if (
@@ -496,7 +540,7 @@ function classifySegment(
 		return {
 			segment: bounded,
 			category: 'escalate',
-			reason: escalate.reason ?? escalate.pattern.source,
+			reason: escalate.reason ?? escalate.pattern?.source ?? escalate.id,
 			ruleId: escalate.id,
 		};
 	const safe = matchRule(SAFE, segment);
@@ -504,7 +548,7 @@ function classifySegment(
 		return {
 			segment: bounded,
 			category: 'safe',
-			reason: safe.reason ?? safe.pattern.source,
+			reason: safe.reason ?? safe.pattern?.source ?? safe.id,
 			ruleId: safe.id,
 		};
 	return {

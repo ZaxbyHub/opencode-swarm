@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test';
+import { classifyCommandRisk } from '../../../src/full-auto/policy';
 import {
 	classifyCommand,
 	getSharedClassifierGuardrailBlock,
 } from '../../../src/security/command-classifier.js';
+import { evaluateScopeValidate } from '../../../src/tools/scope-validate.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('shared command classifier', () => {
 	test('uses most severe compound segment', () => {
@@ -69,5 +72,104 @@ describe('shared command classifier', () => {
 		expect(result.originalDigest).toMatch(/^[a-f0-9]{64}$/);
 		expect(Object.isFrozen(result)).toBe(true);
 		expect(Object.isFrozen(result.segments)).toBe(true);
+	});
+});
+
+describe('windows-recursive-delete: nested-path rmdir is not a cmd.exe switch (#3505 AC3)', () => {
+	test.each([
+		'rmdir src/share/opencode2',
+		'rmdir /tmp/Scratch',
+		'rmdir keg/share/x',
+		'del src/s/q/f.txt',
+	])('classifies %s without a windows-recursive-delete segment', (command) => {
+		const result = classifyCommand(command);
+		expect(
+			result.segments.some(
+				(entry) => entry.ruleId === 'windows-recursive-delete',
+			),
+		).toBe(false);
+		expect(result.aggregate).not.toBe('destructive');
+	});
+
+	// Deliberate widening pin (#3505 disclosed Out-of-scope consequence): per
+	// cmd.exe grammar a quoted "/s" is a PATH, not a switch, so the token-aware
+	// rewrite stops matching quoted switch text. These rows are matched by
+	// today's substring rule and intentionally flip.
+	test.each([
+		'rmdir "dir /s name"',
+		'rd "/s" x',
+	])('deliberate widening: %s is not matched by windows-recursive-delete (quoted switch text is a path)', (command) => {
+		expect(
+			classifyCommand(command).segments.some(
+				(entry) => entry.ruleId === 'windows-recursive-delete',
+			),
+		).toBe(false);
+	});
+
+	test('Full-Auto classifyCommandRisk does not deny the nested-path rows', () => {
+		for (const command of [
+			'rmdir src/share/opencode2',
+			'rmdir /tmp/Scratch',
+			'rmdir keg/share/x',
+		]) {
+			expect(
+				classifyCommandRisk(command, '.', { directory: '.' }).decision,
+			).not.toBe('deny');
+		}
+		expect(
+			classifyCommandRisk('rmdir /s build', '.', { directory: '.' }).decision,
+		).toBe('deny');
+	});
+});
+
+describe('windows-recursive-delete true-positive floor (#3505 AC4)', () => {
+	test.each([
+		'rmdir /s build',
+		'rmdir /S build',
+		'rmdir /s /q build',
+		'rmdir /s/q build',
+		'rmdir /sq build',
+		'rmdir /qs build',
+		'rd.exe /s dir',
+		'rmdir /q x',
+	])('%s keeps a destructive windows-recursive-delete segment', (command) => {
+		const result = classifyCommand(command);
+		expect(
+			result.segments.some(
+				(entry) =>
+					entry.category === 'destructive' &&
+					entry.ruleId === 'windows-recursive-delete',
+			),
+		).toBe(true);
+	});
+});
+
+describe('scope_validate consumer: nested-path rmdirs are no longer destructive (#3505 AC3, plan-critic R2-2)', () => {
+	const SV_DIR = canonicalMkdtemp('classifier-scope-validate-');
+	const outcome = (command: string): { allowed: boolean; code?: string } => {
+		try {
+			evaluateScopeValidate(
+				{ command, shell: 'posix', scope_files: ['src/'] },
+				SV_DIR,
+			);
+			return { allowed: true };
+		} catch (err) {
+			const e = err as { code?: string };
+			return { allowed: false, code: e.code ?? 'UNKNOWN' };
+		}
+	};
+
+	test('in-scope nested-path rmdir is allowed', () => {
+		expect(outcome('rmdir src/share/opencode2').allowed).toBe(true);
+	});
+
+	test('out-of-scope nested-path rmdirs no longer fail DESTRUCTIVE_COMMAND', () => {
+		for (const command of ['rmdir /tmp/Scratch', 'rmdir keg/share/x']) {
+			expect(outcome(command).code).not.toBe('DESTRUCTIVE_COMMAND');
+		}
+	});
+
+	test('true-positive floor: rmdir /s build still fails DESTRUCTIVE_COMMAND', () => {
+		expect(outcome('rmdir /s build').code).toBe('DESTRUCTIVE_COMMAND');
 	});
 });

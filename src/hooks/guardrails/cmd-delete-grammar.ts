@@ -80,13 +80,20 @@ function dcScanCmdTokens(args: string): string[] {
  * Returns `fires` (the recursion switch is present) and the deletion
  * targets to evaluate when it fires.
  */
-export function dcParseWindowsRecursiveDelete(args: string): {
-	fires: boolean;
-	targets: string[];
-} {
-	const tokens = dcScanCmdTokens(args);
-	// Pass 1: does any token carry a valid recursion switch?
-	const fires = tokens.some((token) => {
+/**
+ * Whether any cmd.exe argument token of `args` carries a switch cluster
+ * containing at least one of `letters` (case-insensitive). The scan is the
+ * executed-ground-truth grammar above: quote-aware first-unquoted-`/` per
+ * token, switch text up to an optional following quote, and cluster
+ * validation — `rd "/s" x` (fully quoted token) and `rmdir src/share/x`
+ * (invalid cluster `share/x`) never fire, `rd zzz/s` does. Shared by the
+ * destructive guard's recursion pass (`letters: 's'`, #3499) and the
+ * shared command classifier's windows-recursive-delete rule
+ * (`letters: 'sqf'`, #3505) so the two surfaces cannot drift apart.
+ */
+export function dcHasCmdDeleteSwitch(args: string, letters: string): boolean {
+	const wanted = letters.toLowerCase();
+	return dcScanCmdTokens(args).some((token) => {
 		let inQuote = false;
 		let slashIdx = -1;
 		for (let i = 0; i < token.length; i += 1) {
@@ -105,11 +112,22 @@ export function dcParseWindowsRecursiveDelete(args: string): {
 		const switchText = (
 			quoteIdx >= 0 ? afterSlash.slice(0, quoteIdx) : afterSlash
 		).replace(/["']/g, '');
-		return (
-			dcIsSwitchClusterText(switchText) &&
-			switchText.replace(/\//g, '').toLowerCase().includes('s')
-		);
+		if (!dcIsSwitchClusterText(switchText)) return false;
+		const cluster = switchText.replace(/\//g, '').toLowerCase();
+		for (const letter of wanted) {
+			if (cluster.includes(letter)) return true;
+		}
+		return false;
 	});
+}
+
+export function dcParseWindowsRecursiveDelete(args: string): {
+	fires: boolean;
+	targets: string[];
+} {
+	const tokens = dcScanCmdTokens(args);
+	// Pass 1: does any token carry a valid recursion switch?
+	const fires = dcHasCmdDeleteSwitch(args, 's');
 	const targets: string[] = [];
 	for (const token of tokens) {
 		// The quote-aware slash scan itself classifies a FULLY quoted token
