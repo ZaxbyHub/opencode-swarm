@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { DEFAULT_LEAN_TURBO_CONFIG } from '../config/constants';
 import type { LeanTurboLanePlan } from '../turbo/lean/planner';
 import { type PlanPhase, planLeanTurboLanes } from '../turbo/lean/planner';
+import { resolveLeanRule3Predicate } from '../turbo/lean/upstream-committed';
 import { createSwarmTool } from './create-tool';
 
 /**
@@ -72,12 +73,20 @@ export async function executeLeanTurboPlanLanes(
 	const defaultConfig = { ...DEFAULT_LEAN_TURBO_CONFIG };
 
 	try {
+		// Rule 3 (issue #2962): supply the epic-gated upstream-commit predicate.
+		// undefined when no Epic is open for the project keeps placement
+		// byte-identical to the legacy pure-lean behavior.
+		const isUpstreamCommitted = resolveLeanRule3Predicate(
+			directory,
+			plan.phases.flatMap((p) => p.tasks.map((t) => t.id)),
+		);
 		const lanePlan = planLeanTurboLanes(
 			directory,
 			phase,
 			plan,
 			defaultConfig,
 			scopes,
+			isUpstreamCommitted,
 		);
 
 		return {

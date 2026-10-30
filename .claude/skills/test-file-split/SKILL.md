@@ -49,7 +49,7 @@ Three options, in order of preference:
    If only `bun:test` imports and 1-2 source imports are shared, duplicate them in both files. Simpler than a utility module for trivial cases.
 
 3. **Extract pure functions from source (for testability):**
-   If the source module has inline validation logic, extract them as exported pure functions (e.g., `isValidPrNumber`, `resolveAllCandidates`) so both test files can target them independently. See the PR #1762 example below. See `.opencode/skills/generated/safe-extraction/SKILL.md` for the source extraction pattern.
+   If the source module has inline validation logic, extract them as exported pure functions (e.g., `isValidPrNumber`, `resolveAllCandidates`) so both test files can target them independently. See the PR #1762 example below. The extraction pattern: move the inline predicate or validator into an exported pure function and import it from both test files.
 
 ## Step 4 — Extract and move describe blocks
 

@@ -10,22 +10,12 @@ import { join } from 'node:path';
 
 const GENERATED_ROOT = join(process.cwd(), '.opencode', 'skills', 'generated');
 
-/** The 13 files that carried a legacy top-level `triggers:` list at base. */
-const MIGRATED_SLUGS = [
-	'add-path-type-assertions-or-realpath-resolve-calls-in-path-joini',
-	'bundle-safety',
-	'git-revert-safety',
-	'grep-for-mock-module-across-the-entire-test-file-and-confirm-eve',
-	'mock-module',
-	'mock-to-internals-migration',
-	'opt-in-tool-registration',
-	'phase-complete',
-	'pr-readiness',
-	'propagation-test',
-	'run-tests-on-the-unmodified-codebase-before-starting-to-establis',
-	'spread-real-module-exports-as-base-of-every-mock-module-return-o',
-	'widen-return-type',
-] as const;
+/**
+ * The previously-legacy files that still exist after the #2966 reconciliation
+ * (19 retired forks + the active ci-failure-batching collision were deleted;
+ * 12 of the 13 original members went with them — only bundle-safety remains).
+ */
+const MIGRATED_SLUGS = ['bundle-safety'] as const;
 
 /** Independent oracle for renderSkillMarkdown's yamlJsonString (not exported). */
 function yamlJsonString(values: string[]): string {
@@ -85,7 +75,7 @@ describe('generated triggers migration shape (issue #3216)', () => {
 		}
 	});
 
-	test('the 13 previously-legacy files declare the metadata-child triggers', () => {
+	test('the previously-legacy survivors declare the metadata-child triggers', () => {
 		for (const slug of MIGRATED_SLUGS) {
 			const frontmatter = readFrontmatter(slug);
 			expect(
