@@ -111,9 +111,9 @@ describe('#2552 release fragments agree with the closed Stage-A receipt set', ()
 				join(exclusive, 'docs/releases/v0.0.0.md'),
 				'# stale archive citing run 34162959243',
 			);
-			expect(
-				fragmentText(exclusive, 'ci-gate-policy-2552.md'),
-			).not.toContain('34162959243');
+			expect(fragmentText(exclusive, 'ci-gate-policy-2552.md')).not.toContain(
+				'34162959243',
+			);
 		} finally {
 			rmSync(exclusive, { recursive: true, force: true });
 		}
