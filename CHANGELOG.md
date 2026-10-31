@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.200.14](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.13...v7.200.14) (2026-10-31)
+
+
+### Bug Fixes
+
+* **#3519:** feedback closure - latest-wins claims, DELETED-entry exclusion, live-path hazard, matcher soundness+memoization, manifest-claim resolvers ([c7ce816](https://github.com/ZaxbyHub/opencode-swarm/commit/c7ce8163280a8dc43bf63955ce5a0e0d587ed71b))
+* **release:** repair fragment-pipeline stranding — materialize v7.199.2/v7.200.1, alarm on failed producers, consumption-aware pins ([#3500](https://github.com/ZaxbyHub/opencode-swarm/issues/3500) [#3510](https://github.com/ZaxbyHub/opencode-swarm/issues/3510) [#3511](https://github.com/ZaxbyHub/opencode-swarm/issues/3511)) ([efacfb4](https://github.com/ZaxbyHub/opencode-swarm/commit/efacfb4c8954fcbb55ff149dee548f865356d5af))
+
 ## [7.200.13](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.12...v7.200.13) (2026-10-30)
 
 
