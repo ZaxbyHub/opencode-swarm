@@ -25,4 +25,8 @@ the identical substrate (one mutually exclusive protocol per target); the
 events store adopts the same payload-writing two-phase acquire, dropping its
 raw mtime stale-break. The PID-reuse corner (a dead holder's pid recycled by
 a long-lived unrelated process) is report-only via `/swarm config doctor
---integrity` — surfaced, never auto-removed.
+--integrity` — surfaced, never auto-removed. One disclosed upgrade window:
+during a mixed-version deployment, an OLD-code writer that starts after this
+version's legacy probe completes holds only the legacy proper-lockfile
+artifact, so mutual exclusion between that old writer and a new-code holder
+of the same target is best-effort for the duration of the upgrade.
