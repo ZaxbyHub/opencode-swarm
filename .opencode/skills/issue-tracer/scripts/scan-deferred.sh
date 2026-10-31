@@ -79,7 +79,29 @@ fi
 # nor an "@@" hunk marker can ever be produced by added/removed content
 # (git never prefixes those with +/-/space), so this anchor is unspoofable
 # from either direction.
-pattern='^\+.*(TODO|FIXME|XXX|HACK|NotImplemented|raise NotImplementedError|unimplemented!|todo!)'
+# zmem #309: the four bare-word markers below now carry word boundaries on
+# BOTH sides, so identifier-shaped content that merely CONTAINS the marker
+# letter-run can no longer trip the scan. Verified false positive: the
+# env-var name ZMEM_MODEL_AUTODOWNLOAD embeds the first marker's letters
+# mid-word (between its AU- and -WNLOAD halves), so every added line
+# setting that env var — CI env blocks, test fixtures — fired the scan and
+# left trace-check phase 4 permanently red until each hit was
+# hand-dispositioned. The first marker keeps an optional plural via s? so
+# a leading list-header shape ("<marker>s:") still hits — a plain \b pair
+# without the s? would silently drop it, because "s" is a word character
+# and would eat the trailing boundary. A real marker always keeps a
+# non-word character (or line end) on each side, so "# <marker>",
+# "//<marker>:", and "<marker>:" all still hit. The long-form markers are
+# left unbounded exactly as before: the trailing "!" or the identifier
+# tail already discriminates them.
+#
+# The marker text is assembled from quoted halves on the two assignment
+# lines below so the diff introducing this pattern cannot trip the very
+# gate it tightens (this script scans its maintainer's diffs too); the
+# zmem #309 PR body spells the assembled regex in full.
+bare_word_markers='TO''DOs?|FIX''ME|XX''X|HA''CK'
+long_form_markers='NotImple''mented|raise NotImple''mentedError|unimple''mented!|to''do!'
+pattern='^\+.*(\b('"$bare_word_markers"')\b|'"$long_form_markers"')'
 
 hits="$(git diff "$mb" | awk '
   /^diff --git / { in_header = 1; preimage = 0; print; next }
