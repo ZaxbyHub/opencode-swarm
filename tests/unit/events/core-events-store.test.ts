@@ -34,6 +34,7 @@ import {
 	getCoreEventLifetimeCount,
 	readCoreEvents,
 } from '../../../src/events/core-events';
+import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function mkTempDir(): string {
@@ -361,10 +362,14 @@ describe('core event store — bounded store contract (issue #2039)', () => {
 
 		test('transient EPERM on the atomic rename is retried; non-retryable fails fast (PRR-003)', () => {
 			_internals.limits = tinyLimits();
-			const realRename = _internals.renameSync;
+			// #2969 rename dedup: the tmp→final rename now routes through the
+			// ONE shared helper in src/utils/atomic-write.ts, whose DI seam
+			// (`_internals.renameSync` THERE, not core-events' own mirror) is
+			// where failure injection lands. Assertion shapes unchanged.
+			const realRename = atomicWriteInternals.renameSync;
 			type Seam = { renameSync: typeof fs.renameSync };
 			let calls = 0;
-			(_internals as Seam).renameSync = ((
+			(atomicWriteInternals as Seam).renameSync = ((
 				from: fs.PathLike,
 				to: fs.PathLike,
 			) => {
@@ -385,14 +390,14 @@ describe('core event store — bounded store contract (issue #2039)', () => {
 				// next append recreates it (existing-file appends skip rename).
 				fs.rmSync(eventsFile(dir));
 				let ncalls = 0;
-				(_internals as Seam).renameSync = (() => {
+				(atomicWriteInternals as Seam).renameSync = (() => {
 					ncalls += 1;
 					throw Object.assign(new Error('ENOENT: gone'), { code: 'ENOENT' });
 				}) as typeof fs.renameSync;
 				expect(() => appendCoreEventSync(dir, opEvent(2))).toThrow();
 				expect(ncalls).toBe(1);
 			} finally {
-				(_internals as Seam).renameSync = realRename;
+				(atomicWriteInternals as Seam).renameSync = realRename;
 			}
 		});
 	});

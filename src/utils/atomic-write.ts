@@ -313,7 +313,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		parsesTarget: false,
 		producers: [
 			'src/tools/checkpoint.ts:224',
-			'src/full-auto/state.ts:637',
+			'src/full-auto/state.ts:638',
 			'src/context-map/persistence.ts:135',
 			'src/context-map/capsule-persistence.ts:111',
 			'src/test-impact/history-store.ts:297',
@@ -324,7 +324,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/skill-usage-log.ts:1165',
 			'src/hooks/skill-usage-log.ts:1675',
 			'src/hooks/skill-usage-pending.ts:817',
-			'src/parallel/file-locks.ts:113',
+			'src/parallel/file-locks.ts:836',
 			'src/plan/ledger.ts:607',
 			'src/plan/ledger.ts:1808',
 		],
@@ -770,6 +770,36 @@ function syncSleep(ms: number): void {
 			/* bounded busy-wait fallback */
 		}
 	}
+}
+
+/** Bounded rename with the retryable-delay loop (issue #2969: one canonical
+ *  implementation consumed by the full-auto state writer and the OTLP
+ *  exporter instead of per-file raw `renameSync` calls). Semantics are the
+ *  long-standing internal contract: up to 6 attempts, sleeping
+ *  RENAME_RETRY_DELAYS_MS between retryable failures (EPERM/EBUSY/EACCES/
+ *  EEXIST — Windows AV scanners transiently hold freshly written files),
+ *  immediate rethrow for non-retryable errors, rethrow of the last error on
+ *  exhaustion. Routes through the `_internals.renameSync` seam like every
+ *  other write primitive here. */
+export function renameSyncWithRetry(
+	tempPath: string,
+	targetPath: string,
+): void {
+	let lastError: unknown;
+	for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt++) {
+		try {
+			_internals.renameSync(tempPath, targetPath);
+			return;
+		} catch (err) {
+			lastError = err;
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (!code || !RETRYABLE_RENAME_CODES.has(code)) throw err;
+			if (attempt < RENAME_RETRY_DELAYS_MS.length) {
+				syncSleep(RENAME_RETRY_DELAYS_MS[attempt]);
+			}
+		}
+	}
+	throw lastError;
 }
 
 function renameWithRetry(tempPath: string, targetPath: string): void {

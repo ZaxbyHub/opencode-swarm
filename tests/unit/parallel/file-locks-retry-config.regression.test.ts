@@ -1,106 +1,87 @@
 /**
- * REGRESSION GUARD — issue #660 FR-004, finding F-09.
+ * REGRESSION GUARD — issue #660 FR-004, finding F-09 (behavioral form).
  *
- * Pins the retry configuration that `tryAcquireLock` passes to
- * `proper-lockfile`'s `lock()` (src/parallel/file-locks.ts ~L163-172):
- *   retries: { retries: 5, minTimeout: 10, maxTimeout: 500, factor: 2 }
+ * Pins the BOUNDED INTERNAL RETRY contract of `tryAcquireLock`
+ * (src/parallel/file-locks.ts) — preserved verbatim by the #2967 wx
+ * owner-payload substrate migration, which replaced the historical
+ * proper-lockfile `retries` option with an equivalent in-process loop
+ * (5 attempts, 10-500 ms backoff ≈ 310 ms worst case).
  *
- * Prior buggy behavior (what the fix corrected): lock acquisition used
- * `retries: 0` (no automatic retry). Transient lock contention immediately
- * returned `acquired: false`, forcing a manual LLM-driven retry of the whole
- * tool call. The fix added bounded exponential-backoff retries so transient
- * contention is absorbed in-process before reporting contention.
+ * Prior buggy behavior (what F-09 corrected): lock acquisition used
+ * `retries: 0` — transient contention immediately surfaced as
+ * `acquired: false`, forcing a manual LLM-driven retry of the whole tool
+ * call. The contract, pinned here behaviorally rather than by intercepting
+ * library options (the plain path no longer passes any):
  *
- * How this guard works (and how it fails on revert):
- *   `tryAcquireLock` calls `lockfile.lock(path, options)` directly (there is no
- *   `_internals` seam for the proper-lockfile dependency), so we intercept the
- *   `proper-lockfile` module via `mock.module` (normalizes to the allowlisted
- *   `src/proper-lockfile`) and capture the options object.
- *
- *   Revert that breaks this guard: changing the option back to `retries: 0`
- *   makes `options.retries` a number, so `typeof options.retries === 'object'`
- *   fails; any reduction below 5, removal of exponential backoff (factor < 2),
- *   or a non-growing window (maxTimeout <= minTimeout) also fails.
+ *   1. Under SUSTAINED contention a single tryAcquireLock call absorbs the
+ *      whole internal retry budget (measurably slower than one shot) and
+ *      still returns bounded in time with `{ acquired: false }`.
+ *   2. Under TRANSIENT contention (holder releases mid-call) the internal
+ *      retries absorb it: ONE call returns `{ acquired: true }` with no
+ *      caller-side retry.
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { tryAcquireLock } from '../../../src/parallel/file-locks.js';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
-interface LockRetries {
-	retries: number;
-	minTimeout?: number;
-	maxTimeout?: number;
-	factor?: number;
-}
-interface LockOptions {
-	retries?: LockRetries | number;
-	stale?: number;
-	realpath?: boolean;
-}
-
-const capturedOptions: LockOptions[] = [];
-
-// Capture the options proper-lockfile.lock() is invoked with, then return a
-// no-op release function so tryAcquireLock reports success.
-const lockSpy = mock(async (_lockPath: string, options: LockOptions) => {
-	capturedOptions.push(options);
-	return async () => {};
-});
-
-mock.module('proper-lockfile', () => ({
-	default: {
-		lock: lockSpy,
-		unlock: mock(async () => {}),
-	},
-}));
-
-// Import AFTER the mock is registered so file-locks binds the mocked module.
-import { tryAcquireLock } from '../../../src/parallel/file-locks';
-
-let tmpDir: string;
+let tmpDir = '';
 
 beforeEach(() => {
-	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'file-locks-retry-guard-'));
-	capturedOptions.length = 0;
-	lockSpy.mockClear();
+	tmpDir = canonicalMkdtemp('file-locks-retry-guard-');
 });
 
 afterEach(() => {
-	mock.restore();
-	try {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
-	} catch {
-		// ignore cleanup errors
-	}
+	if (tmpDir !== '') removeTreeWithRetry(tmpDir);
 });
 
-describe('file-locks — regression: tryAcquireLock retry config (F-09)', () => {
-	test('passes bounded exponential-backoff retries (>=5) to proper-lockfile.lock', async () => {
-		// Before the fix, the options were `retries: 0` (no retry), so transient
-		// ELOCKED contention surfaced immediately. The fix passes a retries object
-		// with exponential backoff.
+describe('file-locks — regression: tryAcquireLock bounded internal retries (F-09)', () => {
+	test('sustained contention: one call spends the retry budget, bounded, then reports contention', async () => {
+		// Live holder (same-process wx exclusion) for the whole call.
+		const holder = await tryAcquireLock(tmpDir, 'target.ts', 'holder', 'h');
+		expect(holder.acquired).toBe(true);
+		if (!holder.acquired) return;
+
+		const t0 = Date.now();
 		const result = await tryAcquireLock(tmpDir, 'target.ts', 'agent', 'task');
+		const elapsed = Date.now() - t0;
+
+		// Contention reported (never an unbounded wait or a steal).
+		expect(result.acquired).toBe(false);
+		// The internal bounded retry loop actually ran: a single failed
+		// attempt returns in ~5 ms, while the four inter-attempt backoffs
+		// (10+20+40+80 ms before the final attempt) push one sustained
+		// call well past 100 ms — yet far inside the F-09 budget.
+		expect(elapsed).toBeGreaterThan(100);
+		expect(elapsed).toBeLessThan(4000);
+
+		await holder.lock._release?.();
+		// The contender left no residue behind.
+		const locksDir = path.join(tmpDir, '.swarm', 'locks');
+		expect(fs.readdirSync(locksDir)).toHaveLength(0);
+	}, 10_000);
+
+	test('transient contention: one call absorbs it internally and acquires', async () => {
+		const holder = await tryAcquireLock(tmpDir, 'target.ts', 'holder', 'h');
+		expect(holder.acquired).toBe(true);
+		if (!holder.acquired) return;
+
+		// Holder releases 60 ms in — between the 2nd and 3rd internal
+		// attempts (10+20 ms) — so only the internal retry loop can see
+		// the freed lock. No caller-side retry happens in this test.
+		setTimeout(() => {
+			void holder.lock._release?.();
+		}, 60);
+
+		const t0 = Date.now();
+		const result = await tryAcquireLock(tmpDir, 'target.ts', 'agent', 'task');
+		const elapsed = Date.now() - t0;
 
 		expect(result.acquired).toBe(true);
-		expect(lockSpy).toHaveBeenCalledTimes(1);
-		expect(capturedOptions.length).toBe(1);
-
-		const opts = capturedOptions[0];
-
-		// retries must be an OBJECT (not the number 0 from the reverted config).
-		expect(typeof opts.retries).toBe('object');
-		const retries = opts.retries as LockRetries;
-
-		// At least 5 retries — the core of the F-09 fix.
-		expect(retries.retries).toBeGreaterThanOrEqual(5);
-		// Exponential backoff (factor >= 2) over a growing window.
-		expect(retries.factor ?? 0).toBeGreaterThanOrEqual(2);
-		expect(retries.minTimeout ?? 0).toBeGreaterThan(0);
-		expect(retries.maxTimeout ?? 0).toBeGreaterThan(retries.minTimeout ?? 0);
-
-		// Stale timeout is still configured so dead locks expire.
-		expect(opts.stale ?? 0).toBeGreaterThan(0);
-	});
+		// Fast absorption: bounded backoffs only, no busy spin.
+		expect(elapsed).toBeLessThan(4000);
+		if (result.acquired) await result.lock._release?.();
+	}, 10_000);
 });

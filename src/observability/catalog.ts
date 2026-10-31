@@ -1,8 +1,8 @@
 /**
  * The event catalog (issue #2029).
  *
- * Exactly 66 entries, matching the `TelemetryEvent` union at
- * `src/telemetry.ts:27-210`. Thirty-eight predate the #2029 contract; the 39th is
+ * Exactly 67 entries, matching the `TelemetryEvent` union at
+ * `src/telemetry.ts:27-211`. Thirty-eight predate the #2029 contract; the 39th is
  * `agent_conflict_detected` (previously emitted through a force-cast past the
  * type system), the 40th is `close_archive_result` (issue #2030 — the
  * structured close/archive result event), the 41st is the bounded diagnostic
@@ -96,7 +96,7 @@ export interface CatalogEntry {
 	/**
 	 * Whether an event of this kind must carry `trace.parentSpanId`.
 	 *
-	 * `false` for all 66 entries today, and that is a truthful statement about
+	 * `false` for all 67 entries today, and that is a truthful statement about
 	 * the current system rather than a placeholder: no producer supplies a
 	 * parent span, so `createObservation` never sets one. Setting this to `true`
 	 * for a kind whose producer cannot supply a parent would make every
@@ -924,7 +924,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'info',
 			// Carries `directory` and `evidencePath` — absolute paths.
 			privacyClass: 'sensitive',
-			producer: 'src/evidence/lock.ts:99',
+			producer: 'src/evidence/lock.ts:142',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -938,7 +938,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'evidence',
 			severity: 'notice',
 			privacyClass: 'sensitive',
-			producer: 'src/evidence/lock.ts:134',
+			producer: 'src/evidence/lock.ts:196',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -952,7 +952,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'evidence',
 			severity: 'notice',
 			privacyClass: 'sensitive',
-			producer: 'src/evidence/lock.ts:91',
+			producer: 'src/evidence/lock.ts:133',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -1282,6 +1282,31 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			// Aggregate-only counts; no workflow correlation applies.
 			requiredWorkflowIds: NO_WORKFLOW_IDS,
 			allowsLinks: false,
+		},
+	],
+
+	// ── Stale store-lock recovery (issue #2967) ────────────────────────────
+	[
+		'store_lock_stale_broken',
+		{
+			// Emitted exactly once per ACTUAL stale-lock break by the fenced
+			// liveness breaker (`breakStaleLockIfOwnerDead`, shared by the
+			// evidence and events lock stores) — never on a live-owner backoff
+			// or a fail-closed 'unknown'. Payload is the store discriminator
+			// (`evidence` | `events`) and the lock age in ms — no paths, no
+			// pids, no session identity — so `operational` is the truthful
+			// privacy class. No live consumer yet; reporting surfaces will
+			// consume it (same posture as the store-health kinds).
+			category: 'lifecycle',
+			severity: 'notice',
+			privacyClass: 'operational',
+			producer: 'src/parallel/file-locks.ts:523',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
+			// Store-level discriminator + age only; no workflow correlation
+			// applies.
+			requiredWorkflowIds: NO_WORKFLOW_IDS,
 		},
 	],
 

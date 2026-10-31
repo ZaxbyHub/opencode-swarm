@@ -49,9 +49,15 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
 import { observeStoreHealth } from '../health/learning-health.js';
+import {
+	acquireOwnerLockOnce,
+	breakStaleLockIfOwnerDead,
+	readOwnerLockPayload,
+	releaseOwnerLock,
+} from '../parallel/file-locks.js';
 import { telemetry } from '../telemetry.js';
+import { renameSyncWithRetry } from '../utils/atomic-write.js';
 import { warn } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -683,7 +689,6 @@ function atomicReplace(directory: string, content: string): void {
 
 const LOCK_RETRY_ATTEMPTS = 20;
 const LOCK_RETRY_DELAY_MS = 5;
-const LOCK_STALE_MS = 5 * 60_000;
 
 /** Bounded synchronous sleep (works on Node/Bun main threads, unlike the
  *  browser restriction). On the theoretical runtime where Atomics.wait is
@@ -702,66 +707,43 @@ function syncSleep(ms: number): void {
 }
 
 // Windows AV scanners transiently hold new files, making the tmp→final rename
-// fail with EPERM/EBUSY/EACCES (and EEXIST for clobbered tmp names). Mirrors
-// src/utils/atomic-write.ts RENAME_RETRY_DELAYS_MS/RETRYABLE_RENAME_CODES —
-// PR review PRR-003: the raw renameSync here predates noticing that precedent.
-const RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
-const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'EEXIST']);
+// fail with EPERM/EBUSY/EACCES — the tmp→final renames below route through
+// the ONE shared bounded-retry helper (src/utils/atomic-write.ts
+// `renameSyncWithRetry`, issue #2969; PR review PRR-003: this module's former
+// local duplicate predates noticing that precedent). The shared helper routes
+// through ATOMIC-WRITE's `_internals.renameSync` seam, which is where
+// failure-injection tests stub it.
 
-/** Rename with the bounded retryable-delay loop (atomic-write precedent). */
-function renameSyncWithRetry(fromPath: string, toPath: string): void {
-	let lastError: unknown;
-	for (
-		let attempt = 0;
-		attempt <= RENAME_RETRY_DELAYS_MS.length;
-		attempt += 1
-	) {
-		try {
-			_internals.renameSync(fromPath, toPath);
-			return;
-		} catch (err) {
-			lastError = err;
-			const code = (err as NodeJS.ErrnoException)?.code;
-			if (!code || !RETRYABLE_RENAME_CODES.has(code)) throw err;
-			if (attempt < RENAME_RETRY_DELAYS_MS.length) {
-				syncSleep(RENAME_RETRY_DELAYS_MS[attempt]);
-			}
-		}
-	}
-	throw lastError;
-}
-
-/** Internal: one lock acquisition attempt (wx create + stale-break). */
+/** Internal: one lock acquisition attempt. #2967: the store lock migrated
+ *  onto the shared wx owner-payload state machine (`acquireOwnerLockOnce`
+ *  from src/parallel/file-locks.ts — payload written INSIDE the lock file,
+ *  two-phase marker re-check). The historical raw mtime stale-break is GONE:
+ *  all breaking routes through the fenced liveness breaker, which is what
+ *  makes a dead owner's lock recoverable in milliseconds instead of failing
+ *  every append for the 5-minute TTL. */
 function tryLockOnce(directory: string): boolean {
 	const lockPath = lockFilePath(directory);
 	try {
 		_internals.mkdirSync(path.dirname(lockPath), { recursive: true });
-		const fd = _internals.openSync(lockPath, 'wx');
-		_internals.closeSync(fd);
-		return true;
 	} catch {
-		try {
-			const age = _internals.now() - _internals.statSync(lockPath).mtimeMs;
-			if (age > LOCK_STALE_MS) {
-				try {
-					_internals.unlinkSync(lockPath);
-				} catch {
-					/* ignore */
-				}
-				try {
-					const fd = _internals.openSync(lockPath, 'wx');
-					_internals.closeSync(fd);
-					return true;
-				} catch {
-					return false;
-				}
-			}
-		} catch {
-			/* stat failed — treat as held */
-		}
-		return false;
+		/* ignore */
 	}
+	const result = acquireOwnerLockOnce(lockPath, 'core-events', 'store');
+	if (result.acquired && result.payload) {
+		heldEventLockPayload = result.payload;
+		return true;
+	}
+	heldEventLockPayload = null;
+	return false;
 }
+
+/** Payload of the lock this process currently holds (identity fence for the
+ *  finally-release). */
+let heldEventLockPayload: {
+	ownerPid: number;
+	startBoundMs: number;
+	nonce: string;
+} | null = null;
 
 export interface CoreEventStoreLock {
 	/** Release the lock (idempotent). */
@@ -773,22 +755,44 @@ export interface CoreEventStoreLock {
  * while holding it. Returns null when the lock stays contended for the whole
  * retry window — callers map that onto their existing error contract
  * (operational producers catch+warn; the two hard-fail producers rethrow
- * their pre-existing audit-locked codes).
+ * their pre-existing audit-locked codes). #2967: on the FIRST failed round
+ * the fenced liveness breaker runs once (dead-owner recovery is ms-scale;
+ * live-owner fail-fast stays ~100 ms; an ownerless legacy lock recovers via
+ * the ttl-cleanup class once past the TTL — AC4 semantics preserved through
+ * the serialized protocol).
  */
 export function withCoreEventStoreLock<T>(
 	directory: string,
 	fn: () => T,
 ): T | null {
+	const lockPath = lockFilePath(directory);
 	for (let attempt = 0; attempt < LOCK_RETRY_ATTEMPTS; attempt += 1) {
 		if (tryLockOnce(directory)) {
 			try {
 				return fn();
 			} finally {
-				try {
-					_internals.unlinkSync(lockFilePath(directory));
-				} catch {
-					/* ignore */
+				const payload = heldEventLockPayload;
+				heldEventLockPayload = null;
+				if (payload) {
+					releaseOwnerLock(lockPath, payload);
+				} else {
+					try {
+						_internals.unlinkSync(lockPath);
+					} catch {
+						/* ignore */
+					}
 				}
+			}
+		}
+		if (attempt === 0) {
+			// First contention: one fenced liveness break attempt.
+			const raw = readOwnerLockPayload(lockPath);
+			const breakResult = breakStaleLockIfOwnerDead(lockPath, {
+				class: raw !== null && raw.length > 0 ? 'dead-owner' : 'ttl-cleanup',
+				store: 'events',
+			});
+			if (breakResult === 'broken') {
+				continue; // the next round acquires the freed lock
 			}
 		}
 		if (attempt < LOCK_RETRY_ATTEMPTS - 1) {
