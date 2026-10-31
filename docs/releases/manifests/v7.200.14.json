@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.14",
+  "tagCommit": "09c86ea727ee04330c1938768afb15b1fb7735e4",
+  "targetCommitish": "09c86ea727ee04330c1938768afb15b1fb7735e4",
+  "releaseBodySha256": "9a5bd53cf779426bf7d4822d680c84b2645a20a9fddb68f842238530a7ab7879",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3500-3510-3511-release-fragment-stranding.md",
+      "sha256": "85e213b2e77fd6f427f27190966943f808ca1406aa3ed1abb9e5439ca97cfbf5"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/j18-memory-family-recency-merge.md",
+      "sha256": "e5db6cba6a290dfbfe2251ca14fe561ce66bae37dc7f1bcb2378770e897b72ba"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/j19-teardown-transient-not-death.md",
+      "sha256": "8a87798083eef35e6334869f371133476b0bc04233b81a78906b2fabe96b5cf9"
+    }
+  ]
+}
