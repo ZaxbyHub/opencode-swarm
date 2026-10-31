@@ -2,7 +2,7 @@
 issue: 3518,3521
 ---
 
-## Shell write-gate escape classes + knowledge family migration recency (#3518, #3518 follow-ups)
+## Shell write-gate escape classes + knowledge family migration recency (#3518, #3521)
 
 Closes #3518 and #3521 (collated).
 
@@ -33,8 +33,10 @@ Closes #3518 and #3521 (collated).
   resolve identically at the gate.
 - **Parenthesis-led destructive segments reach the live gate arms.** The
   rd/rmdir/del (cmd.exe), rm (POSIX), and Remove-Item (PowerShell) anchors
-  tolerate a leading open-paren, closing the reversed wedge where the
-  classifier denied `(rd ../../outside /s)` while the live gate admitted it.
+  tolerate a leading open-paren — glued `(rd x /s)`, spaced `( rd x /s )`,
+  and POSIX brace groups `{ rm -rf x; }` — closing the reversed wedge where
+  the classifier denied `(rd ../../outside /s)` while the live gate
+  admitted it.
 
 ### #3521 — knowledge family migration (data-loss class, config-ungated)
 

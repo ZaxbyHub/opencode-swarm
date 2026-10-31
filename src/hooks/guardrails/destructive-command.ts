@@ -510,11 +510,19 @@ export function dcSplitSegments(cmd: string): string[] {
  */
 export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	const tokens = segment.match(/"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g) ?? [];
-	// #3518 P-5 (class): tolerate leading open-parens/braces/whitespace before
-	// the verb — a parenthesized segment `(rm -rf x)` runs the same rm in a
-	// POSIX subshell; a segment-start-only check let it skip this arm. The
-	// tokenizer glues the paren onto the verb (`(rm`), so strip the prefix
-	// from the first token rather than expecting a standalone one.
+	// #3518 P-5 (class, final-critic round 1): tolerate leading
+	// open-parens/braces — a parenthesized segment runs the same rm in a
+	// POSIX subshell, whether the paren GLUES to the verb (`(rm`) or stands
+	// alone (`( rm`). Drop standalone delimiter tokens, then strip a glued
+	// prefix from what remains; a token that normalizes empty fails closed.
+	while (
+		tokens.length > 0 &&
+		tokens[0] !== undefined &&
+		/^[({\s]*$/.test(tokens[0]) &&
+		tokens[0].length > 0
+	) {
+		tokens.shift();
+	}
 	if (tokens.length > 0 && tokens[0] !== undefined) {
 		tokens[0] = tokens[0].replace(/^[({\s]+/, '');
 	}

@@ -87,8 +87,14 @@ describe('gate: paren-led recursive delete segments (analysis-only)', () => {
 });
 
 describe('gate: paren-led POSIX rm and PowerShell Remove-Item (class sweep)', () => {
-	test('(rm -rf <oos>) is BLOCKED', async () => {
+	test('(rm -rf <oos>) is BLOCKED (glued paren)', async () => {
 		await expect(gate('(rm -rf ../../outside)')).resolves.toMatch(ANY_BLOCK);
+	});
+	test('( rm -rf <oos> ) is BLOCKED (spaced paren — final-critic round 1)', async () => {
+		await expect(gate('( rm -rf ../../outside )')).resolves.toMatch(ANY_BLOCK);
+	});
+	test('{ rm -rf <oos> } is BLOCKED (brace group)', async () => {
+		await expect(gate('{ rm -rf ../../outside; }')).resolves.toMatch(ANY_BLOCK);
 	});
 	test('(Remove-Item <oos> -Recurse) is BLOCKED', async () => {
 		await expect(
