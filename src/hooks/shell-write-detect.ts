@@ -9,6 +9,7 @@
  * @module shell-write-detect
  */
 
+import { statSync } from 'node:fs';
 import * as path from 'node:path';
 import type {
 	BashCommand,
@@ -85,6 +86,18 @@ export interface WriteTarget {
 	 * (see detectPosixWrites).
 	 */
 	emptyDirectoryRemoval?: true;
+	/**
+	 * Present ONLY on string-fallback writes whose operand or context cannot be
+	 * resolved safely (#3518): a process-substitution write emitted by the
+	 * parse-failure fallback when the same line carries a `cd` (its resolution
+	 * cwd is unknowable without an AST), or a fallback operand whose quoting is
+	 * ambiguous (fragmented/unbalanced quotes — the whitespace tokenizer cannot
+	 * recover the real operand). The resolver withdraws such writes to
+	 * `{ resolvedPath: null, resolved: false }` on every return path so the
+	 * live gate denies them (fail-closed), instead of resolving at the starting
+	 * cwd or at a quote-fragment path.
+	 */
+	unresolvedContext?: true;
 }
 
 /**
@@ -928,7 +941,8 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 			// when both > and >> patterns could match the same input.
 			const appendMatch = stage.match(/^\s*(.*?)\s*>>(\s*)(\S+)\s*$/);
 			if (appendMatch) {
-				const path = appendMatch[3];
+				const path = dequoteFallbackOperand(appendMatch[3]);
+				if (path === null) continue;
 				if (path && !isNullDevice(path)) {
 					results.push({ category: 'redirect', operator: '>>', path });
 				}
@@ -936,7 +950,8 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 				// Only check > if >> did not match (negative lookahead alternative)
 				const writeMatch = stage.match(/^\s*(.*?)\s*>(?!>)(\s*)(\S+)\s*$/);
 				if (writeMatch) {
-					const path = writeMatch[3];
+					const path = dequoteFallbackOperand(writeMatch[3]);
+					if (path === null) continue;
 					if (path && !isNullDevice(path)) {
 						results.push({ category: 'redirect', operator: '>', path });
 					}
@@ -946,6 +961,54 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 	}
 
 	return results;
+}
+
+/**
+ * Resolve a whitespace-tokenized fallback operand to the path bash would
+ * write (#3518 P-1). A token fully wrapped in a matched quote pair dequotes
+ * one layer (the same quote-removal the AST branch's Word nodes carry). A
+ * token that merely CONTAINS a quote character (a fragment of a quoted
+ * operand the whitespace split tore apart, e.g. `src/f"` from
+ * `"../../outside src/f"`, or any unbalanced remainder) returns `null`:
+ * the real operand is unrecoverable without a tokenizer, so the caller
+ * withdraws the write (`unresolvedContext`, fail-closed) instead of
+ * resolving the fragment — which can land inside scope while bash writes
+ * outside it.
+ */
+function dequoteFallbackOperand(token: string): string | null {
+	if (!token.includes('"') && !token.includes("'")) return token;
+	const first = token[0];
+	if (
+		(first === '"' || first === "'") &&
+		token.length >= 2 &&
+		token[token.length - 1] === first &&
+		!token.slice(1, -1).includes(first)
+	) {
+		return token.slice(1, -1);
+	}
+	// Quoted-but-not-a-clean-pair: fragment or unbalanced — unresolvable.
+	return null;
+}
+
+/**
+ * Whether ANY whitespace token of a fallback stage carries a quote character
+ * that is not a matched pair wrapping the whole token (#3518 P-1): the
+ * whitespace tokenizer tore a quoted operand apart, so every operand the
+ * stage selects (including unselected fragments — the selected "last"
+ * operand can be the in-scope-looking tail of an out-of-scope quoted
+ * destination) is unreliable for that stage.
+ */
+function stageHasQuoteFragment(tokens: string[]): boolean {
+	return tokens.some((t) => {
+		if (!t.includes('"') && !t.includes("'")) return false;
+		const first = t[0];
+		return !(
+			(first === '"' || first === "'") &&
+			t.length >= 2 &&
+			t[t.length - 1] === first &&
+			!t.slice(1, -1).includes(first)
+		);
+	});
 }
 
 /**
@@ -966,6 +1029,22 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 	const leaf = detectorCommandLeafFromWords(tokens[0], tokens.slice(1));
 	const name = detectorSetMember(leaf, BUILTIN_WRITE_COMMANDS);
 	if (!name) return [];
+	// #3518 P-1: a stage whose quoting the whitespace tokenizer tore apart
+	// (any token holds a quote that is not a matched pair around the whole
+	// token) has unreliable operands — the "last"/"nth" operand the loops
+	// below select can be the in-scope-looking tail of an out-of-scope
+	// quoted destination. Withdraw every write of such a stage (fail-closed)
+	// rather than resolving a fragment.
+	if (stageHasQuoteFragment(tokens)) {
+		return [
+			{
+				category: 'builtin_write',
+				operator: name,
+				path: null,
+				unresolvedContext: true,
+			},
+		];
+	}
 	// `rmdir /s [/q] <path>` is the Windows spelling of recursive directory
 	// deletion.  The destructive-command guard owns its safety decision for
 	// that form (including allowing trusted `node_modules`/`dist` targets), so
@@ -991,14 +1070,36 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 			}
 			if (!endOfOptions && token.startsWith('-')) continue;
 			if (name === 'truncate' && !endOfOptions && isNumeric(token)) continue;
-			writes.push({ category: 'builtin_write', operator: name, path: token });
+			const operand = dequoteFallbackOperand(token);
+			if (operand === null) {
+				// Fragment/unbalanced quoting: the real operand is unrecoverable.
+				writes.push({
+					category: 'builtin_write',
+					operator: name,
+					path: null,
+					unresolvedContext: true,
+				});
+				continue;
+			}
+			writes.push({ category: 'builtin_write', operator: name, path: operand });
 		}
 		return writes;
 	}
 	// Last non-flag argument is the destination
 	for (let i = tokens.length - 1; i >= 1; i--) {
 		if (!tokens[i].startsWith('-')) {
-			return [{ category: 'builtin_write', operator: name, path: tokens[i] }];
+			const operand = dequoteFallbackOperand(tokens[i]);
+			if (operand === null) {
+				return [
+					{
+						category: 'builtin_write',
+						operator: name,
+						path: null,
+						unresolvedContext: true,
+					},
+				];
+			}
+			return [{ category: 'builtin_write', operator: name, path: operand }];
 		}
 	}
 	return [];
@@ -4310,21 +4411,37 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	// This catches commands like `tee >(cat > file.txt)` which bash-parser cannot parse.
 	if (parseFailed) {
 		const procSubWrites = detectProcessSubstitutionWrites(command);
+		// #3518 P-3: the fallback has no AST, so a `cd` earlier in the same
+		// line cannot move its tracked context — every write it emits would
+		// silently resolve at the STARTING cwd while real bash writes at the
+		// post-cd directory. Withdraw such writes (`unresolvedContext`) so the
+		// resolver nulls them and the gate denies, fail-closed. The scan is a
+		// local text check (no cross-module import): any `;`/`&&`/`||`/newline
+		// separated region whose first word is `cd` with an operand.
+		const cdContext = /(^|[;&|\n(]|&&|\|\|)\s*cd\s+\S+/.test(command);
 		// Plain loop (not spread-push): adversarial operand counts must not
 		// hit the engine's spread-arity limit (#3512 review N-2).
 		for (const write of procSubWrites) {
-			allWrites.push(write);
+			allWrites.push(
+				cdContext && write.unresolvedContext !== true
+					? { ...write, unresolvedContext: true }
+					: write,
+			);
 		}
 	}
 
-	// Deduplicate by (category, operator, path) to avoid double-counting.
-	// Capability evals are the exception (#3347): same-interpreter occurrences
-	// across `cd` boundaries must EACH survive so the gate can route every
-	// occurrence at its own working directory. A duplicate capability eval
-	// keeps its entry with an occurrence-suffixed operator (`python [eval] #2`)
-	// which stays unique through the resolution and merge dedupe layers that
-	// key on the same triple — both AST walks traverse in the same order, so
-	// the suffixes pair up across the two passes.
+	// Deduplicate by (category, operator, path) to avoid double-counting —
+	// but every nth duplicate occurrence SURVIVES with an occurrence-suffixed
+	// operator (`#2`, `#3`, …). #3347 introduced the suffix for capability
+	// evals (same-interpreter occurrences across `cd` boundaries each need
+	// routing at their own working directory); #3518 P-4 widened it to every
+	// duplicate: a same-literal write pair separated by a `cd` resolves each
+	// occurrence at its own tracked context instead of collapsing onto the
+	// first occurrence's resolution. The suffix stays unique through the
+	// resolution and merge dedupe layers that key on the same triple — both
+	// AST walks traverse in the same order, so the suffixes pair up across
+	// the two passes. Same-cwd duplicates resolve identically either way, so
+	// the widening only adds per-occurrence precision.
 	const seen = new Set<string>();
 	const occurrence = new Map<string, number>();
 	const collidingKeys = new Set<string>();
@@ -4333,9 +4450,6 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		const key = buildDedupeKey(wt.category, wt.operator, wt.path);
 		if (seen.has(key)) {
 			collidingKeys.add(key);
-			if (wt.capability !== true || wt.category !== 'interpreter_eval') {
-				continue;
-			}
 			const n = (occurrence.get(key) ?? 1) + 1;
 			occurrence.set(key, n);
 			writes.push({ ...wt, operator: `${wt.operator} #${n}` });
@@ -5059,10 +5173,32 @@ function collectWritesWithNodes(
 			const cdTarget = getCdTarget(node);
 			if (cdTarget) {
 				// Resolve relative cd target against current effective cwd —
-				// Windows-aware (see the compound-loop cd site for rationale)
-				cwdStack[0] =
-					resolvePath(cdTarget, cwdStack[0] ?? '/') ??
-					path.posix.resolve(cwdStack[0] ?? '/', cdTarget);
+				// Windows-aware (see the compound-loop cd site for rationale).
+				// #3518 P-2: bash only changes directory when the target is an
+				// existing directory (a missing path or a plain file makes `cd`
+				// fail and leaves the cwd unchanged), so the tracked stack moves
+				// ONLY for a target that stat says is a directory. Before this
+				// gate a failing `cd nx/y; write` still moved every later
+				// sibling's tracked cwd, and the mis-tracked resolution could
+				// admit an out-of-scope write. A dynamic target (resolvePath
+				// null) keeps the historical literal fallback — the #3491
+				// flag-form program owns that surface.
+				const resolvedTarget = resolvePath(cdTarget, cwdStack[0] ?? '/');
+				if (resolvedTarget !== null) {
+					let isDirectory = false;
+					try {
+						isDirectory =
+							statSync(resolvedTarget, {
+								throwIfNoEntry: false,
+							})?.isDirectory() === true;
+					} catch {
+						isDirectory = false;
+					}
+					if (!isDirectory) return;
+					cwdStack[0] = resolvedTarget;
+					return;
+				}
+				cwdStack[0] = path.posix.resolve(cwdStack[0] ?? '/', cdTarget);
 				return;
 			}
 
@@ -5221,8 +5357,18 @@ export function resolveWriteTargets(
 	if (!ast || typeof ast !== 'object') {
 		return writes.map((original) => ({
 			original,
-			resolvedPath: resolvePath(original.path, cwd),
-			resolved: original.path !== null && !isDynamicPath(original.path),
+			// #3518 P-1/P-3: a withdrawn (unresolvedContext) write resolves to
+			// a null path on EVERY return path — the live gate rejects on
+			// resolvedPath === null (fail-closed), never on a fragment or the
+			// starting cwd.
+			resolvedPath:
+				original.unresolvedContext === true
+					? null
+					: resolvePath(original.path, cwd),
+			resolved:
+				original.unresolvedContext !== true &&
+				original.path !== null &&
+				!isDynamicPath(original.path),
 			...(original.capability === true &&
 			original.category === 'interpreter_eval'
 				? { evalDirectory: cwd }
@@ -5248,14 +5394,15 @@ export function resolveWriteTargets(
 	collectWritesWithNodes(ast as BashNode, pessimisticNodes, [cwd], false);
 
 	// Deduplicate walks the same way detectPosixWrites does — including the
-	// capability-eval occurrence rename (#3347: the nth occurrence here
-	// carries the same suffixed operator as the nth occurrence there, so the
-	// map pairs each occurrence with ITS OWN tracked context) AND the
+	// occurrence rename (#3347 for capability evals, widened to EVERY
+	// duplicate by #3518 P-4: the nth occurrence here carries the same
+	// suffixed operator as the nth occurrence there, so the map pairs each
+	// occurrence with ITS OWN tracked context — a same-literal write after a
+	// `cd` is judged at the directory it actually runs in) AND the
 	// emptyDirectoryRemoval collision demotion (PR #3456 review F-2: a key
 	// seen more than once — here or in the caller's `writes` — may name
-	// writes run under different working directories yet resolves against
-	// the FIRST context only, so any write with a colliding key is demoted
-	// by the return mapping below).
+	// writes run under different working directories, so any write with a
+	// colliding base key is demoted by the return mapping below).
 	const buildResolution = (nodes: WriteWithNode[]) => {
 		const seen = new Set<string>();
 		const occurrence = new Map<string, number>();
@@ -5269,12 +5416,6 @@ export function resolveWriteTargets(
 			);
 			if (seen.has(key)) {
 				colliding.add(key);
-				if (
-					wwn.write.capability !== true ||
-					wwn.write.category !== 'interpreter_eval'
-				) {
-					continue;
-				}
 				const n = (occurrence.get(key) ?? 1) + 1;
 				occurrence.set(key, n);
 				deduplicated.push({
@@ -5352,12 +5493,20 @@ export function resolveWriteTargets(
 			return entries;
 		}
 		// Fallback: couldn't find this write in the detected set — the eval
-		// working directory degrades to the starting cwd.
+		// working directory degrades to the starting cwd. A withdrawn
+		// (#3518 unresolvedContext) write nulls out here too, exactly like
+		// the parse-failure branch above.
 		return [
 			{
 				original,
-				resolvedPath: resolvePath(original.path, cwd),
-				resolved: original.path !== null && !isDynamicPath(original.path),
+				resolvedPath:
+					original.unresolvedContext === true
+						? null
+						: resolvePath(original.path, cwd),
+				resolved:
+					original.unresolvedContext !== true &&
+					original.path !== null &&
+					!isDynamicPath(original.path),
 				...(original.capability === true &&
 				original.category === 'interpreter_eval'
 					? { evalDirectory: cwd }

@@ -770,7 +770,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// post-slash text is NOT a valid switch cluster (`rmdir
 			// a/share/b` — cmd itself rejects it) is a plain nested path
 			// (issue #3495 item 2).
-			const rmdirSwitchVerb = /^(?:rmdir|rd)(?:\.exe)?\s*/i.exec(seg);
+			// #3518 P-5: the anchor tolerates leading open-parens/whitespace —
+			// a parenthesized segment `(rd x /s)` runs the same rd as an
+			// unparenthesized one (POSIX subshell), and the delimiter-aware
+			// classifier already fires on it; only these live arms were
+			// segment-start-anchored, leaving the reversed wedge.
+			const rmdirSwitchVerb = /^(?:[({\s])*(?:rmdir|rd)(?:\.exe)?\s*/i.exec(
+				seg,
+			);
 			if (rmdirSwitchVerb) {
 				const parsed = dcParseWindowsRecursiveDelete(
 					seg.slice(rmdirSwitchVerb[0].length),
@@ -799,7 +806,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// (`del /s /q /f <path>`, `del x/s`, `del /s"file.txt"`); a
 			// recursion switch with no operand fails closed like the rmdir
 			// arm.
-			const delSwitchVerb = /^del(?:\.exe)?\s*/i.exec(seg);
+			// #3518 P-5: same leading paren/whitespace tolerance as the rd arm.
+			const delSwitchVerb = /^(?:[({\s])*del(?:\.exe)?\s*/i.exec(seg);
 			if (delSwitchVerb) {
 				const parsed = dcParseWindowsRecursiveDelete(
 					seg.slice(delSwitchVerb[0].length),
@@ -826,11 +834,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// substring INSIDE a path operand (`rm some-r/x`,
 			// `rm x-Recurse/y`) is a plain delete, not a recursive one — the
 			// same token-vs-substring class as the cmd.exe /s fix (#3495).
+			// #3518 P-5 (class): leading open-parens/whitespace tolerated so a
+			// parenthesized `(Remove-Item x -Recurse)` segment reaches the arm.
 			if (
-				/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]ecurse\b/i.test(
+				/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]ecurse\b/i.test(
 					seg,
 				) ||
-				/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]\b/i.test(seg)
+				/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]\b/i.test(
+					seg,
+				)
 			) {
 				const targets = dcExtractPowerShellTargets(seg);
 				if (targets.length > 0) {

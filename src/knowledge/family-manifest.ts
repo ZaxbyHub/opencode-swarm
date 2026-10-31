@@ -46,6 +46,8 @@
  *    worktree by design.
  */
 
+import { createHash } from 'node:crypto';
+
 export type FamilyRole =
 	| 'store'
 	| 'events'
@@ -136,6 +138,54 @@ function curationProposalKey(line: unknown): string | null {
 }
 
 /**
+ * Key selector for `knowledge-events.jsonl` (issue #3521 D2). Real producer
+ * rows (`RetrievedEvent`, `ReceiptEvent`, … in `hooks/knowledge-events.ts`)
+ * carry `event_id` and NO top-level `id`, so the default `lineId` selector
+ * returned `null` for every real row — silently dropping them on link and
+ * aborting unlink copy-back at the pre-commit validator. `event_id` is the
+ * producer's unique event identity; a legacy top-level `id` (the synthetic
+ * shape the original tests used) still keys when `event_id` is absent.
+ */
+function knowledgeEventKey(line: unknown): string | null {
+	if (!line || typeof line !== 'object') return null;
+	const o = line as Record<string, unknown>;
+	return reqStr(o, 'event_id') ?? reqStr(o, 'id');
+}
+
+/**
+ * Key selector for `knowledge-application.jsonl` (issue #3521 D2). Records
+ * (`KnowledgeApplicationRecord`, `hooks/knowledge-types.ts`) carry
+ * `knowledgeId` but NO unique record id, and `knowledgeId` alone is NOT a
+ * record identity — multiple application outcomes for one knowledge entry
+ * are meaningful (they fold into counters). The key is therefore the
+ * CANONICAL WHOLE-ROW identity: a bounded sha1 over the row's sorted-key
+ * JSON serialization, prefixed by `knowledgeId`. Distinct audit rows
+ * (differing `sessionId`/`taskId`/`action`/`reason` at the same
+ * timestamp+result) stay distinct; an exact retry re-seen on relink dedupes
+ * byte-identically. `knowledgeId` must be present (else the line is
+ * malformed → `null` → validator rejects as before); a legacy top-level
+ * `id` takes precedence when present.
+ */
+function knowledgeApplicationKey(line: unknown): string | null {
+	if (!line || typeof line !== 'object') return null;
+	const o = line as Record<string, unknown>;
+	const legacyId = reqStr(o, 'id');
+	if (legacyId !== null) return legacyId;
+	if (reqStr(o, 'knowledgeId') === null) return null;
+	const canonical = JSON.stringify(line, (_key, value) => {
+		if (value && typeof value === 'object' && !Array.isArray(value)) {
+			return Object.fromEntries(
+				Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+					a < b ? -1 : a > b ? 1 : 0,
+				),
+			);
+		}
+		return value;
+	});
+	return `app:${createHash('sha1').update(canonical).digest('hex')}`;
+}
+
+/**
  * The complete knowledge family that participates in cohort linking.
  * Adding a member here automatically includes it in link + unlink migration.
  */
@@ -151,6 +201,7 @@ export const KNOWLEDGE_FAMILY: readonly KnowledgeFamilyMember[] = [
 		role: 'events',
 		mergeStrategy: 'append-union',
 		reversible: true,
+		keyOf: knowledgeEventKey,
 	},
 	{
 		filename: 'knowledge-rejected.jsonl',
@@ -187,6 +238,7 @@ export const KNOWLEDGE_FAMILY: readonly KnowledgeFamilyMember[] = [
 		role: 'application-legacy',
 		mergeStrategy: 'append-union',
 		reversible: true,
+		keyOf: knowledgeApplicationKey,
 	},
 	{
 		// Issue #1848 §3: cohort-scoped immutable before/after rewrite/merge audit

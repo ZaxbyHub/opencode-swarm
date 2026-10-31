@@ -510,6 +510,12 @@ export function dcSplitSegments(cmd: string): string[] {
  */
 export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	const tokens = segment.match(/"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g) ?? [];
+	// #3518 P-5 (class): tolerate leading open-parens/braces/whitespace before
+	// the verb — a parenthesized segment `(rm -rf x)` runs the same rm in a
+	// POSIX subshell; a segment-start-only check let it skip this arm. The
+	// tokenizer glues the paren onto the verb (`(rm`), so strip the prefix
+	// from the first token rather than expecting a standalone one.
+	if (tokens.length > 0) tokens[0] = tokens[0].replace(/^[({\s]+/, '');
 	if (tokens.length < 2 || tokens[0] !== 'rm') return null;
 
 	let destructive = false;
@@ -969,10 +975,10 @@ export function dcIsWindowsSwitchCluster(token: string): boolean {
  * Handles both `Remove-Item <path> -Recurse` and `Remove-Item -Recurse <path>` orderings.
  */
 export function dcExtractPowerShellTargets(segment: string): string[] {
-	// Strip the leading verb
-	const verbMatch = /^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\s+/i.exec(
-		segment,
-	);
+	// Strip the leading verb. #3518 P-5 (class): leading open-parens/
+	// whitespace tolerated — `(Remove-Item x -Recurse)` runs the same cmdlet.
+	const verbMatch =
+		/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\s+/i.exec(segment);
 	if (!verbMatch) return [];
 	const rest = segment.slice(verbMatch[0].length);
 
