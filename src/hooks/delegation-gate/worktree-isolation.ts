@@ -1490,7 +1490,7 @@ export async function precreateStandardWorktreeSession(args: {
 											if (!verification.ok) {
 												pushAdvisory(
 													ensureAgentSession(args.parentSessionID),
-													`WORKTREE_RECOVERY_CHILD_SESSION_LEAKED: recovery child session ${lateChildSessionId} survived verified teardown (${verification.reason}); it holds the lane swarm.db at ${collision.worktreePath}. Retry the dispatch or restart the host to release it.`,
+													`WORKTREE_RECOVERY_CHILD_SESSION_LEAKED: recovery child session ${lateChildSessionId} was not confirmed deleted by verified teardown (${verification.reason}); it holds the lane swarm.db at ${collision.worktreePath}. Retry the dispatch or restart the host to release it.`,
 												);
 											}
 										}
@@ -1569,7 +1569,7 @@ export async function precreateStandardWorktreeSession(args: {
 						if (!verification.ok) {
 							pushAdvisory(
 								ensureAgentSession(args.parentSessionID),
-								`WORKTREE_RECOVERY_CHILD_SESSION_LEAKED: recovery child session ${recoveredChildSessionId} survived verified teardown (${verification.reason}); it holds the lane swarm.db at ${collision.worktreePath}. Retry the dispatch or restart the host to release it.`,
+								`WORKTREE_RECOVERY_CHILD_SESSION_LEAKED: recovery child session ${recoveredChildSessionId} was not confirmed deleted by verified teardown (${verification.reason}); it holds the lane swarm.db at ${collision.worktreePath}. Retry the dispatch or restart the host to release it.`,
 							);
 						}
 					}
@@ -1926,7 +1926,7 @@ export async function precreateStandardWorktreeSession(args: {
 								lanePath: handle.worktreePath,
 								branchName: handle.branchName,
 								taskId: args.taskId,
-								reason: `late child session ${lateChildSessionId} survived verified teardown (${verification.reason})`,
+								reason: `late child session ${lateChildSessionId} was not confirmed deleted by verified teardown (${verification.reason})`,
 							});
 						}
 					}
