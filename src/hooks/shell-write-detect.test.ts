@@ -726,17 +726,9 @@ describe('deduplication', () => {
 		expect(result.writes.filter((w) => w.path === '')).toHaveLength(0);
 	});
 
-	test('multiple same redirects deduplicated', () => {
-		// #3518 P-4 widened the #3347 occurrence suffix to EVERY duplicate:
-		// same-literal writes survive per-occurrence (suffixed operator) so a
-		// cd-separated pair is judged at each occurrence's own cwd. Same-cwd
-		// duplicates still resolve identically at the gate; the detector
-		// surface keeps every occurrence with distinct operator keys.
-		const result = detectPosixWrites('echo a > f; echo b > f');
-		const fWrites = result.writes.filter((w) => w.path === 'f');
-		expect(fWrites.length).toBe(2);
-		expect(new Set(fWrites.map((w) => w.operator)).size).toBe(2);
-	});
+	// 'multiple same redirects deduplicated' moved to
+	// shell-write-detect-cd-statgate-3518.test.ts (#3518 per-occurrence
+	// contract; FR-006 — this grandfathered file may not grow).
 });
 
 // ---------------------------------------------------------------------------
@@ -1480,69 +1472,6 @@ describe('resolveWriteTargets — subshell cd does not leak to parent', () => {
 		const outerWrite = result.find((r) => r.original.path === 'outer.txt');
 		expect(innerWrite?.resolvedPath).toBe('/tmp/inner.txt');
 		expect(outerWrite?.resolvedPath).toBe('/project/outer.txt');
-	});
-});
-
-describe('resolveWriteTargets — relative cd path resolution', () => {
-	// Regression: F2 — relative `cd subdir` must resolve against current cwd, not store raw string.
-	// #3518 P-2: the tracker stat-gates the cd mutation, so every fixture
-	// directory below REALLY exists (a cd into a missing dir keeps the cwd).
-	test('cd src && echo hello > output.txt resolves to <cwd>/src/output.txt', () => {
-		const root = canonicalMkdtemp('swd-cd-src-');
-		try {
-			mkdirSync(path.join(root, 'src'), { recursive: true });
-			const analysis = detectPosixWrites('cd src && echo hello > output.txt');
-			const result = resolveWriteTargets(
-				'cd src && echo hello > output.txt',
-				analysis.writes,
-				root,
-			);
-			const outWrite = result.find((r) => r.original.path === 'output.txt');
-			expect(outWrite?.resolvedPath).toBe(path.join(root, 'src', 'output.txt'));
-		} finally {
-			removeTreeWithRetry(root);
-		}
-	});
-
-	test('cd subdir in CompoundList resolves relative target', () => {
-		// cd subdir && (cd nested && echo > file.txt) — first cd resolves, then nested cd resolves
-		const root = canonicalMkdtemp('swd-cd-nested-');
-		try {
-			mkdirSync(path.join(root, 'subdir', 'nested'), { recursive: true });
-			const analysis = detectPosixWrites(
-				'cd subdir && (cd nested && echo > file.txt)',
-			);
-			const result = resolveWriteTargets(
-				'cd subdir && (cd nested && echo > file.txt)',
-				analysis.writes,
-				root,
-			);
-			const fileWrite = result.find((r) => r.original.path === 'file.txt');
-			// nested cd is relative to subdir, so <root>/subdir/nested/file.txt
-			expect(fileWrite?.resolvedPath).toBe(
-				path.join(root, 'subdir', 'nested', 'file.txt'),
-			);
-		} finally {
-			removeTreeWithRetry(root);
-		}
-	});
-
-	test('cd ../../parent resolves multi-level relative path', () => {
-		const root = canonicalMkdtemp('swd-cd-parent-');
-		try {
-			// cwd is <root>/project/src; ../../parent is <root>/parent
-			mkdirSync(path.join(root, 'project', 'src'), { recursive: true });
-			mkdirSync(path.join(root, 'parent'), { recursive: true });
-			const writes = [{ category: 'redirect', operator: '>', path: 'out.txt' }];
-			const result = resolveWriteTargets(
-				'cd ../../parent && echo > out.txt',
-				writes,
-				path.join(root, 'project', 'src'),
-			);
-			expect(result[0].resolvedPath).toBe(path.join(root, 'parent', 'out.txt'));
-		} finally {
-			removeTreeWithRetry(root);
-		}
 	});
 });
 
@@ -2749,20 +2678,9 @@ describe('FR-002 cmd.exe builtins — resolveWriteTargets scope', () => {
 });
 
 describe('dedup key behavior (via detectPosixWrites / detectWindowsWrites)', () => {
-	test('detectPosixWrites deduplicates identical write entries', () => {
-		// A command that produces two identical writes (same category, operator,
-		// path) keeps one entry per OCCURRENCE (#3518 P-4 widened the #3347
-		// suffix to every duplicate): the second occurrence survives with a
-		// suffixed operator, so the (category, operator, path) triples stay
-		// unique.
-		const result = detectPosixWrites('cat a > /tmp/out && cat b > /tmp/out');
-		const triples = result.writes.map(
-			(w) => `${w.category}|${w.operator}|${w.path}`,
-		);
-		const unique = [...new Set(triples)];
-		expect(unique.length).toBe(triples.length);
-		expect(result.writes.filter((w) => w.path === '/tmp/out')).toHaveLength(2);
-	});
+	// 'detectPosixWrites deduplicates identical write entries' moved to
+	// shell-write-detect-cd-statgate-3518.test.ts (#3518 per-occurrence
+	// contract; FR-006 — this grandfathered file may not grow).
 
 	test('detectWindowsWrites deduplicates identical write entries', () => {
 		const result = detectWindowsWrites(

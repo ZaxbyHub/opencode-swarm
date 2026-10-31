@@ -515,7 +515,9 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	// POSIX subshell; a segment-start-only check let it skip this arm. The
 	// tokenizer glues the paren onto the verb (`(rm`), so strip the prefix
 	// from the first token rather than expecting a standalone one.
-	if (tokens.length > 0) tokens[0] = tokens[0].replace(/^[({\s]+/, '');
+	if (tokens.length > 0 && tokens[0] !== undefined) {
+		tokens[0] = tokens[0].replace(/^[({\s]+/, '');
+	}
 	if (tokens.length < 2 || tokens[0] !== 'rm') return null;
 
 	let destructive = false;
