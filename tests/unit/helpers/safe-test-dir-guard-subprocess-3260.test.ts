@@ -26,7 +26,7 @@ function runBunFixture(fixture: string): Promise<ProbeResult> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(
 			process.execPath,
-			['test', `tests/fixtures/preload/${fixture}`],
+			['test', `./tests/fixtures/preload/${fixture}`],
 			{
 				cwd: REPO_ROOT,
 				stdio: ['ignore', 'pipe', 'pipe'],
@@ -72,14 +72,16 @@ function runBunFixture(fixture: string): Promise<ProbeResult> {
 
 describe('run-wide internals restorer guard (3260-D)', () => {
 	test('a leaked _internals.wait fails the run and the guard names it', async () => {
-		const leak = await runBunFixture('internals-leak-fixture.test.ts');
+		const leak = await runBunFixture('internals-leak-fixture.bun-test.ts');
 		expect(leak.code).not.toBe(0);
 		expect(leak.output).toContain('internals-restoration guard');
 		expect(leak.output).toContain('wait');
 	}, 90_000);
 
 	test('the restoring control run stays green', async () => {
-		const control = await runBunFixture('internals-restore-control.test.ts');
+		const control = await runBunFixture(
+			'internals-restore-control.bun-test.ts',
+		);
 		expect(control.code).toBe(0);
 	}, 90_000);
 });

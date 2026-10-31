@@ -2,12 +2,13 @@
  * DELIBERATELY-LEAKING fixture for the #3260-D restorer-guard subprocess probe
  * (tests/unit/helpers/safe-test-dir-guard-subprocess-3260.test.ts).
  *
- * NOT part of any CI test glob: it lives under tests/fixtures/ (unit discovery
- * globs tests/unit, tests/adversarial, tests/architect, tests/cli, tests/tools,
- * tests/helpers, and top-level tests/*.test.ts — never tests/fixtures). It is
- * executed ONLY when explicitly spawned by the probe:
+ * NOT part of any CI test glob: the .bun-test.ts extension keeps it outside
+ * every discovery glob AND outside the ci-gate-policy #2552 owner-map census
+ * (tests/fixtures stays an unpopulated fixture directory). It is executed ONLY
+ * when explicitly spawned by the probe (bun test runs explicit non-glob
+ * paths):
  *
- *   bun test tests/fixtures/preload/internals-leak-fixture.test.ts
+ *   bun test tests/fixtures/preload/internals-leak-fixture.bun-test.ts
  *
  * The test below swaps `_internals.wait` and never restores it. The aggregated
  * preload afterAll (tests/preload/prod-store-tripwire.ts) must catch the leak
