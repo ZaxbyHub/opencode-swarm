@@ -304,7 +304,10 @@ const TODO_BANG_LIT = 'to' + 'do!';
 
 describe('scan-deferred.sh — zmem #309 word-boundary regressions', () => {
 	test.each([
-		['env-var name (the exact zmem #309 shape)', '"ZMEM_MODEL_AUTODOWNLOAD": "0",'],
+		[
+			'env-var name (the exact zmem #309 shape)',
+			'"ZMEM_MODEL_AUTODOWNLOAD": "0",',
+		],
 		['marker letters mid-identifier', 'const enableAUTODOWNLOAD = false;'],
 		['marker as identifier suffix', 'const SOMETHING_TODO = "later";'],
 		['marker underscore-wrapped', 'const _TODO_ = "wrapped";'],
@@ -321,11 +324,19 @@ describe('scan-deferred.sh — zmem #309 word-boundary regressions', () => {
 
 	test.each([
 		['bare first marker', `// ${TODO_LIT}: x`, `${TODO_LIT}: x`],
-		['plural list-header form', `${TODO_LIT}s: plural form`, `${TODO_LIT}s: plural form`],
+		[
+			'plural list-header form',
+			`${TODO_LIT}s: plural form`,
+			`${TODO_LIT}s: plural form`,
+		],
 		['second bare marker', `// ${FIXME_LIT}: x`, `${FIXME_LIT}: x`],
 		['third bare marker', `// ${XXX_LIT}: x`, `${XXX_LIT}: x`],
 		['fourth bare marker', `// ${HACK_LIT}: x`, `${HACK_LIT}: x`],
-		['long-form identifier marker', `const x = ${NOTIMPL_LIT};`, `${NOTIMPL_LIT};`],
+		[
+			'long-form identifier marker',
+			`const x = ${NOTIMPL_LIT};`,
+			`${NOTIMPL_LIT};`,
+		],
 		['rust-style bang marker', `${TODO_BANG_LIT}()`, `${TODO_BANG_LIT}()`],
 	])('still hits: %s', async (_label, addedLine, reported) => {
 		const repo = track(makeRepo('scan-deferred-zmem309-hit-'));
