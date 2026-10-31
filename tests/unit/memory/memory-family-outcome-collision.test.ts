@@ -148,7 +148,11 @@ describe('memory family outcome collision semantics', () => {
 					'outcome event id already exists with a different payload',
 				);
 			} else {
-				await expect(merge).resolves.toMatchObject({ skipped: 0 });
+				// #2958: the identical-record arm seeds the SAME memory_items row
+				// in both stores, so the recency-aware merge now counts that
+				// collided-but-not-newer row in `skipped` (previously the
+				// collision was invisible). Outcome-event behavior is unchanged.
+				await expect(merge).resolves.toMatchObject({ skipped: 1 });
 			}
 
 			const reopened = track(

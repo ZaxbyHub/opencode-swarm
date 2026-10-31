@@ -27,6 +27,7 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { sanitizeString } from '../background/candidate-sidecar-store.js';
 import { loadPluginConfigWithMeta } from '../config';
 import { MemoryConfigSchema } from '../config/schema.js';
 import {
@@ -174,17 +175,29 @@ export async function handleMemoryLinkCommand(
 
 	let totalMerged = 0;
 	let totalSkipped = 0;
+	let totalSuperseded = 0;
 	let familySummary = '';
+	let familyAuditNote = '';
 	try {
 		const result = await migrateMemoryFamily(cohortRoot, localRoot);
 		for (const m of result.perMember) {
 			totalMerged += m.merged;
 			totalSkipped += m.skipped;
+			totalSuperseded += m.superseded;
 		}
+		// #3520 PRR-002: supersessions must be visible — a member whose only
+		// change is a supersession previously reported "0 new, 0 already
+		// present" and was filtered out of the summary entirely.
 		familySummary = result.perMember
-			.filter((m) => m.merged > 0 || m.skipped > 0)
-			.map((m) => `    ${m.filename}: ${m.merged} merged, ${m.skipped} kept`)
+			.filter((m) => m.merged > 0 || m.skipped > 0 || m.superseded > 0)
+			.map(
+				(m) =>
+					`    ${m.filename}: ${m.merged} merged, ${m.skipped} kept${
+						m.superseded > 0 ? `, ${m.superseded} recency-resolved` : ''
+					}`,
+			)
 			.join('\n');
+		familyAuditNote = formatFamilyAuditNote(result.audit);
 	} catch (error) {
 		return `❌ Failed to migrate the memory family into the cohort store: ${
 			error instanceof Error ? error.message : String(error)
@@ -245,14 +258,67 @@ export async function handleMemoryLinkCommand(
 		? `\n(Re-linked from previous memory link "${existing.linkId}".)`
 		: '';
 	const familyNote = familySummary ? `\n${familySummary}` : '';
+	const auditNote = familyAuditNote ? `\n${familyAuditNote}` : '';
 	return [
 		`🔗 Linked this worktree's memory to shared cohort store "${linkId}".`,
-		`  migrated the memory family (${totalMerged} new, ${totalSkipped} already present).`,
+		`  migrated the memory family (${totalMerged} new, ${totalSkipped} already present${
+			totalSuperseded > 0 ? `, ${totalSuperseded} resolved by recency` : ''
+		}).`,
 		`  shared at: ${cohortRoot.cohortRoot}`,
 		'All worktrees linked to this id now read and write the same memory.' +
 			relinkNote +
-			familyNote,
+			familyNote +
+			auditNote,
 	].join('\n');
+}
+
+/**
+ * #2958: bounded, truthful audit lines for the family migration result.
+ * Resurrections, supersessions, and unresolved collisions get DISTINCT
+ * wording; id lists are capped at 5 ids, each sanitized (control chars and
+ * ANSI escape sequences stripped, per the candidate-sidecar-store
+ * convention) and truncated to 40 chars (only real string ids are ever
+ * reported by the migration engine — whole-row fallback keys never surface).
+ */
+function formatFamilyAuditNote(
+	audit: ReadonlyArray<{
+		filename: string;
+		resurrectedIds: readonly string[];
+		supersededCount: number;
+		unresolvedCollisions: readonly string[];
+	}>,
+): string {
+	const resurrected = [...new Set(audit.flatMap((m) => m.resurrectedIds))];
+	const unresolved = [...new Set(audit.flatMap((m) => m.unresolvedCollisions))];
+	const totalSuperseded = audit.reduce((sum, m) => sum + m.supersededCount, 0);
+	const fmtIds = (ids: string[]): string => {
+		const shown = ids.slice(0, 5).map((raw) => {
+			// Store-controlled ids must never inject terminal output: run the
+			// canonical FR-021 sanitizer (strips ANSI/CSI escape sequences and
+			// neutralizes control characters) before echoing.
+			const id = sanitizeString(raw);
+			return id.length > 40 ? `${id.slice(0, 39)}…` : id;
+		});
+		const more = ids.length > 5 ? ` +${ids.length - 5} more` : '';
+		return `ids: ${shown.join(', ')}${more}`;
+	};
+	const lines: string[] = [];
+	if (resurrected.length > 0) {
+		lines.push(
+			`⚠ ${resurrected.length} record(s) deleted in one store were re-added from the other (${fmtIds(resurrected)}).`,
+		);
+	}
+	if (totalSuperseded > 0) {
+		lines.push(
+			`ℹ ${totalSuperseded} record collision(s) resolved by recency — the newer state won.`,
+		);
+	}
+	if (unresolved.length > 0) {
+		lines.push(
+			`⚠ ${unresolved.length} collision(s) had no recency signal; the pre-existing version was kept (${fmtIds(unresolved)}).`,
+		);
+	}
+	return lines.join('\n');
 }
 
 export async function handleMemoryUnlinkCommand(
@@ -264,6 +330,7 @@ export async function handleMemoryUnlinkCommand(
 	if (!pointer) {
 		return 'ℹ️ Memory is not linked. Nothing to unlink.';
 	}
+	let unlinkAuditNote = '';
 
 	const cohortDir = resolveLinkDir(pointer.linkId);
 	const localRoot: VettedMemoryRoot = wrapLocalRoot(directory);
@@ -282,7 +349,11 @@ export async function handleMemoryUnlinkCommand(
 
 	if (!noCopy) {
 		try {
-			await migrateMemoryFamily(localRoot, cohortRoot);
+			// #2958: capture the migration result — the audit note below reports
+			// resurrected deletions and unresolved collisions (previously the
+			// result was discarded and the restore message unconditional).
+			const result = await migrateMemoryFamily(localRoot, cohortRoot);
+			unlinkAuditNote = formatFamilyAuditNote(result.audit);
 		} catch (error) {
 			return `❌ Failed to copy the cohort memory family back to local storage: ${
 				error instanceof Error ? error.message : String(error)
@@ -305,5 +376,6 @@ export async function handleMemoryUnlinkCommand(
 		`🔓 Unlinked memory. ${copyNote}`,
 		`  The shared cohort store at ${cohortRoot.cohortRoot} is NOT deleted`,
 		'  (other worktrees may still be linked to it).',
+		...(unlinkAuditNote ? [unlinkAuditNote] : []),
 	].join('\n');
 }
