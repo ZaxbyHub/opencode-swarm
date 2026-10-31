@@ -265,6 +265,9 @@ describe('#1850 /swarm memory link + unlink commands', () => {
 		expect(auditLine).toBeDefined();
 		expect(auditLine).not.toContain('r6');
 		expect(auditLine).not.toContain('r7');
+		// All 7 events are resurrections — none may double-render as
+		// recency-resolved (#3520 critic).
+		expect(result).not.toContain('resolved by recency');
 	});
 
 	// PRR-010: the command-level unresolved-collision wording had zero coverage.

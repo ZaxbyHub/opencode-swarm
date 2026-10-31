@@ -159,7 +159,9 @@ describe('#1850 memory family migration — JSONL append-union', () => {
 		];
 		const r = _internals.appendUnionById(dest, src);
 		expect(r.resurrectedIds).toEqual(['a']);
-		expect(r.superseded).toBe(1);
+		// Resurrections are reported solely via resurrectedIds (#3520 critic:
+		// double-counting rendered the same event twice).
+		expect(r.superseded).toBe(0);
 	});
 
 	test('F-18: validateSerializedJsonl rejects malformed JSON', () => {

@@ -142,10 +142,11 @@ export interface MemoryFamilyMemberAudit {
 	/** Destination-deleted ids a newer live source row resurrected. */
 	readonly resurrectedIds: readonly string[];
 	/**
-	 * Collisions resolved by recency where content changed or a resurrection
-	 * was suppressed: source-newer wins (live or tombstone) plus
-	 * destination-tombstone suppressions. Destination-newer keep-rows are not
-	 * supersessions (nothing moved).
+	 * Collisions resolved by recency OTHER THAN resurrections: source-newer
+	 * wins (live or tombstone) plus destination-tombstone suppressions.
+	 * Destination-newer keep-rows are not supersessions (nothing moved), and
+	 * resurrections are reported solely via {@link resurrectedIds} so no
+	 * event renders twice.
 	 */
 	readonly supersededCount: number;
 	/** Collisions with no usable recency signal (destination kept, reported). */
@@ -344,7 +345,13 @@ function appendUnionById<T>(
 			continue;
 		}
 		if (rowIsTombstone(destRow) && !rowIsTombstone(src)) {
+			// Resurrection is reported SOLELY via resurrectedIds (#3520 critic:
+			// counting it here too double-rendered the same event as both
+			// "re-added" and "replaced").
 			resurrectedIds.push(id);
+			result.push(src);
+			effectiveLast.set(id, src);
+			continue;
 		}
 		result.push(src);
 		effectiveLast.set(id, src);
@@ -574,9 +581,10 @@ async function mergeStagedSqlite(
 				const srcNewer = row.src_at > row.dest_at;
 				if (row.dest_deleted === 1 && row.src_deleted === 0 && srcNewer) {
 					// A newer live source row resurrects a destination tombstone — the
-					// upsert flips it live; report it.
+					// upsert flips it live. Reported SOLELY via resurrectedIds (the
+					// render has its own line for it; double-counting rendered the
+					// same event as both "re-added" and "resolved").
 					resurrectedIds.push(row.id);
-					supersededCount++;
 				} else if (srcNewer) {
 					// A newer source row (live-over-live, or a newer source tombstone
 					// over a live destination) wins by recency.

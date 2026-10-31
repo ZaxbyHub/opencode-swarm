@@ -193,7 +193,7 @@ export async function handleMemoryLinkCommand(
 			.map(
 				(m) =>
 					`    ${m.filename}: ${m.merged} merged, ${m.skipped} kept${
-						m.superseded > 0 ? `, ${m.superseded} superseded` : ''
+						m.superseded > 0 ? `, ${m.superseded} recency-resolved` : ''
 					}`,
 			)
 			.join('\n');
@@ -262,9 +262,7 @@ export async function handleMemoryLinkCommand(
 	return [
 		`🔗 Linked this worktree's memory to shared cohort store "${linkId}".`,
 		`  migrated the memory family (${totalMerged} new, ${totalSkipped} already present${
-			totalSuperseded > 0
-				? `, ${totalSuperseded} superseded by newer versions`
-				: ''
+			totalSuperseded > 0 ? `, ${totalSuperseded} resolved by recency` : ''
 		}).`,
 		`  shared at: ${cohortRoot.cohortRoot}`,
 		'All worktrees linked to this id now read and write the same memory.' +
@@ -312,7 +310,7 @@ function formatFamilyAuditNote(
 	}
 	if (totalSuperseded > 0) {
 		lines.push(
-			`ℹ ${totalSuperseded} record(s) were replaced by newer versions from the other store.`,
+			`ℹ ${totalSuperseded} record collision(s) resolved by recency — the newer state won.`,
 		);
 	}
 	if (unresolved.length > 0) {
