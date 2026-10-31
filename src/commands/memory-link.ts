@@ -27,6 +27,7 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { sanitizeString } from '../background/candidate-sidecar-store.js';
 import { loadPluginConfigWithMeta } from '../config';
 import { MemoryConfigSchema } from '../config/schema.js';
 import {
@@ -174,6 +175,7 @@ export async function handleMemoryLinkCommand(
 
 	let totalMerged = 0;
 	let totalSkipped = 0;
+	let totalSuperseded = 0;
 	let familySummary = '';
 	let familyAuditNote = '';
 	try {
@@ -181,10 +183,19 @@ export async function handleMemoryLinkCommand(
 		for (const m of result.perMember) {
 			totalMerged += m.merged;
 			totalSkipped += m.skipped;
+			totalSuperseded += m.superseded;
 		}
+		// #3520 PRR-002: supersessions must be visible — a member whose only
+		// change is a supersession previously reported "0 new, 0 already
+		// present" and was filtered out of the summary entirely.
 		familySummary = result.perMember
-			.filter((m) => m.merged > 0 || m.skipped > 0)
-			.map((m) => `    ${m.filename}: ${m.merged} merged, ${m.skipped} kept`)
+			.filter((m) => m.merged > 0 || m.skipped > 0 || m.superseded > 0)
+			.map(
+				(m) =>
+					`    ${m.filename}: ${m.merged} merged, ${m.skipped} kept${
+						m.superseded > 0 ? `, ${m.superseded} superseded` : ''
+					}`,
+			)
 			.join('\n');
 		familyAuditNote = formatFamilyAuditNote(result.audit);
 	} catch (error) {
@@ -250,7 +261,11 @@ export async function handleMemoryLinkCommand(
 	const auditNote = familyAuditNote ? `\n${familyAuditNote}` : '';
 	return [
 		`🔗 Linked this worktree's memory to shared cohort store "${linkId}".`,
-		`  migrated the memory family (${totalMerged} new, ${totalSkipped} already present).`,
+		`  migrated the memory family (${totalMerged} new, ${totalSkipped} already present${
+			totalSuperseded > 0
+				? `, ${totalSuperseded} superseded by newer versions`
+				: ''
+		}).`,
 		`  shared at: ${cohortRoot.cohortRoot}`,
 		'All worktrees linked to this id now read and write the same memory.' +
 			relinkNote +
@@ -261,8 +276,10 @@ export async function handleMemoryLinkCommand(
 
 /**
  * #2958: bounded, truthful audit lines for the family migration result.
- * Resurrections and unresolved collisions get DISTINCT wording; id lists are
- * capped at 5 ids, each truncated to 40 chars (only real string ids are ever
+ * Resurrections, supersessions, and unresolved collisions get DISTINCT
+ * wording; id lists are capped at 5 ids, each sanitized (control chars and
+ * ANSI escape sequences stripped, per the candidate-sidecar-store
+ * convention) and truncated to 40 chars (only real string ids are ever
  * reported by the migration engine — whole-row fallback keys never surface).
  */
 function formatFamilyAuditNote(
@@ -275,10 +292,15 @@ function formatFamilyAuditNote(
 ): string {
 	const resurrected = [...new Set(audit.flatMap((m) => m.resurrectedIds))];
 	const unresolved = [...new Set(audit.flatMap((m) => m.unresolvedCollisions))];
+	const totalSuperseded = audit.reduce((sum, m) => sum + m.supersededCount, 0);
 	const fmtIds = (ids: string[]): string => {
-		const shown = ids
-			.slice(0, 5)
-			.map((id) => (id.length > 40 ? `${id.slice(0, 39)}…` : id));
+		const shown = ids.slice(0, 5).map((raw) => {
+			// Store-controlled ids must never inject terminal output: run the
+			// canonical FR-021 sanitizer (strips ANSI/CSI escape sequences and
+			// neutralizes control characters) before echoing.
+			const id = sanitizeString(raw);
+			return id.length > 40 ? `${id.slice(0, 39)}…` : id;
+		});
 		const more = ids.length > 5 ? ` +${ids.length - 5} more` : '';
 		return `ids: ${shown.join(', ')}${more}`;
 	};
@@ -286,6 +308,11 @@ function formatFamilyAuditNote(
 	if (resurrected.length > 0) {
 		lines.push(
 			`⚠ ${resurrected.length} record(s) deleted in one store were re-added from the other (${fmtIds(resurrected)}).`,
+		);
+	}
+	if (totalSuperseded > 0) {
+		lines.push(
+			`ℹ ${totalSuperseded} record(s) were replaced by newer versions from the other store.`,
 		);
 	}
 	if (unresolved.length > 0) {

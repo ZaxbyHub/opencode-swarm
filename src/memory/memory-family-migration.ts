@@ -125,6 +125,8 @@ export interface MemoryFamilyMigrationCounts {
 		filename: string;
 		merged: number;
 		skipped: number;
+		/** Same-id rows replaced by a strictly newer version (#3520 PRR-002 truthfulness). */
+		superseded: number;
 	}>;
 	/**
 	 * #2958 tombstone / recency audit, one entry per member that had anything
@@ -616,6 +618,25 @@ async function mergeStagedSqlite(
 			const newIds = Math.max(0, stagedCount - overlaps.length);
 			const updated = Math.min(Math.max(0, merged - newIds), overlaps.length);
 			const skipped = Math.max(0, overlaps.length - updated);
+			if (updated > 0) {
+				// In-place updates keep row counts equal, which would defeat the
+				// provider's count-mismatch FTS rebuild trigger (sqlite-provider
+				// initializeFtsIndex rebuilds only when validMemoryCount !==
+				// ftsCount) — the destination's FTS index would keep serving the
+				// OLD text/tags for the updated ids. Clear the index so the next
+				// provider open rebuilds it, the same recovery path a
+				// row-adding merge already exercises. Guarded: a hand-built or
+				// pre-FTS destination may not carry the table.
+				const ftsTable =
+					db
+						.query<{ n: number }, []>(
+							"SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='memory_items_fts'",
+						)
+						.get()?.n ?? 0;
+				if (ftsTable > 0) {
+					db.run('DELETE FROM memory_items_fts;');
+				}
+			}
 			return { merged, skipped, resurrectedIds, supersededCount };
 		}
 
@@ -881,6 +902,7 @@ export async function migrateMemoryFamily(
 		filename: string;
 		merged: number;
 		skipped: number;
+		superseded: number;
 	}> = [];
 	const auditEntries: MemoryFamilyMemberAudit[] = [];
 
@@ -893,19 +915,34 @@ export async function migrateMemoryFamily(
 
 			if (member.mergeStrategy === 'sqlite-file-copy') {
 				if (!existsSync(srcPath)) {
-					perMember.push({ filename: member.filename, merged: 0, skipped: 0 });
+					perMember.push({
+						filename: member.filename,
+						merged: 0,
+						skipped: 0,
+						superseded: 0,
+					});
 					continue;
 				}
 				const staged = stageSqliteDb(sourceStoragePath, destStoragePath);
 				if (!staged) {
-					perMember.push({ filename: member.filename, merged: 0, skipped: 0 });
+					perMember.push({
+						filename: member.filename,
+						merged: 0,
+						skipped: 0,
+						superseded: 0,
+					});
 					continue;
 				}
 				const { merged, skipped, audit } = await mergeStagedSqlite(
 					destStoragePath,
 					staged.stagedPath,
 				);
-				perMember.push({ filename: member.filename, merged, skipped });
+				perMember.push({
+					filename: member.filename,
+					merged,
+					skipped,
+					superseded: audit.supersededCount,
+				});
 				if (
 					audit.resurrectedIds.length > 0 ||
 					audit.supersededCount > 0 ||
@@ -918,7 +955,12 @@ export async function migrateMemoryFamily(
 
 			if (member.mergeStrategy === 'append-union') {
 				if (!existsSync(srcPath)) {
-					perMember.push({ filename: member.filename, merged: 0, skipped: 0 });
+					perMember.push({
+						filename: member.filename,
+						merged: 0,
+						skipped: 0,
+						superseded: 0,
+					});
 					continue;
 				}
 				const srcData = readJsonl<unknown>(srcPath);
@@ -935,7 +977,12 @@ export async function migrateMemoryFamily(
 						);
 					}
 					await atomicWriteFile(destPath, serialized);
-					perMember.push({ filename: member.filename, merged: added, skipped });
+					perMember.push({
+						filename: member.filename,
+						merged: added,
+						skipped,
+						superseded: 0,
+					});
 					continue;
 				}
 				const {
@@ -955,7 +1002,12 @@ export async function migrateMemoryFamily(
 					);
 				}
 				await atomicWriteFile(destPath, serialized);
-				perMember.push({ filename: member.filename, merged: added, skipped });
+				perMember.push({
+					filename: member.filename,
+					merged: added,
+					skipped,
+					superseded,
+				});
 				if (
 					resurrectedIds.length > 0 ||
 					superseded > 0 ||

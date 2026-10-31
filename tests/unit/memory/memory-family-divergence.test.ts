@@ -325,7 +325,7 @@ describe('#2958 tombstone audit', () => {
 			deleted: 0,
 			payload: 'live-old',
 		});
-		const result: unknown = await migrateMemoryFamily(
+		const result = await migrateMemoryFamily(
 			localRoot(destDir),
 			localRoot(srcDir),
 		);
@@ -335,6 +335,10 @@ describe('#2958 tombstone audit', () => {
 		const row = readDestItem(destDir);
 		expect(row?.deleted).toBe(1);
 		expect(row?.updated_at).toBe(T3);
+		// PRR-009: the suppression is a supersession — pin the sqlite counter
+		// (deleting the suppression arm must fail here).
+		const dbAudit = result.audit.find((m) => m.filename === 'memory.db');
+		expect(dbAudit?.supersededCount).toBe(1);
 	});
 
 	test('jsonl: dest tombstone resurrected by newer live row — reported; newer tombstone suppresses', async () => {

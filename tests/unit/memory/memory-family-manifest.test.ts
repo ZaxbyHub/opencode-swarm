@@ -111,6 +111,40 @@ describe('#1850 memory family migration — JSONL append-union', () => {
 		expect(r.merged).toHaveLength(1);
 	});
 
+	test('#2958: snake_case updated_at alias is honored', () => {
+		const dest = [
+			{ id: 'a', text: 'v1', updated_at: '2026-09-20T00:00:00.000Z' },
+		];
+		const src = [
+			{ id: 'a', text: 'v2', updatedAt: '2026-09-22T00:00:00.000Z' },
+		];
+		const r2 = _internals.appendUnionById(dest, src);
+		expect(r2.superseded).toBe(1);
+		expect(r2.unresolvedCollisions).toHaveLength(0);
+	});
+
+	test('#2958: an unparsable timestamp is no recency signal (unresolved)', () => {
+		const dest = [{ id: 'a', text: 'old', updatedAt: 'not-a-date' }];
+		const src = [
+			{ id: 'a', text: 'new', updatedAt: '2026-09-22T00:00:00.000Z' },
+		];
+		const r2 = _internals.appendUnionById(dest, src);
+		expect(r2.skipped).toBe(1);
+		expect(r2.unresolvedCollisions).toEqual(['a']);
+	});
+
+	test('#2958: an id-bearing row on a no-recency member reports unresolved', () => {
+		// audit.jsonl / reward-events.jsonl rows carry randomUUID ids but no
+		// version recency — a differing same-id row is kept + reported.
+		const dest = [{ id: 'e1', operation: 'op-a' }];
+		const src = [{ id: 'e1', operation: 'op-b' }];
+		const r2 = _internals.appendUnionById(dest, src, {
+			memberFilename: 'audit.jsonl',
+		});
+		expect(r2.skipped).toBe(1);
+		expect(r2.unresolvedCollisions).toEqual(['e1']);
+	});
+
 	test('#2958: destination tombstone resurrected by a newer live source row', () => {
 		const dest = [
 			{

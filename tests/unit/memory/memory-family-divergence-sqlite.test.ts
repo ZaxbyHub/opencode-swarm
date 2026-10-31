@@ -122,10 +122,20 @@ describe('#2958 schema matrix (sqlite memory_items)', () => {
 		const srcDir = path.join(tmpDir, 'src');
 		buildItemsDb(destDir, true, { id: 'M', updatedAt: T1, payload: 'v1' });
 		buildItemsDb(srcDir, true, { id: 'M', updatedAt: T2, payload: 'v2' });
-		await migrateMemoryFamily(localRoot(destDir), localRoot(srcDir));
+		const result = await migrateMemoryFamily(
+			localRoot(destDir),
+			localRoot(srcDir),
+		);
 		const row = readDestItem(destDir);
 		expect(row?.updated_at).toBe(T2);
 		expect(row?.record_json).toBe('v2');
+		// PRR-009: the sqlite supersession counters must be pinned non-vacuously
+		// (a regression to always-0 must fail here).
+		const dbMember = result.perMember.find((m) => m.filename === 'memory.db');
+		expect(dbMember?.superseded).toBe(1);
+		expect(
+			result.audit.find((m) => m.filename === 'memory.db')?.supersededCount,
+		).toBe(1);
 	});
 
 	test('current vs pre-v12 skew degrades per-table (failedTables path), merge still resolves', async () => {
@@ -143,9 +153,11 @@ describe('#2958 schema matrix (sqlite memory_items)', () => {
 		);
 		const row = readDestItem(destDir);
 		expect(row?.updated_at).toBe(T1); // destination untouched
+		// The per-table catch surfaces as a skipped count (failedTables proxy) —
+		// the merge did NOT silently succeed.
 		expect(
-			result.perMember.find((m) => m.filename === 'memory.db'),
-		).toBeDefined();
+			result.perMember.find((m) => m.filename === 'memory.db')?.skipped,
+		).toBe(1);
 	});
 
 	test('sqlite memory_proposals same-id collision: destination kept, id reported unresolved', async () => {

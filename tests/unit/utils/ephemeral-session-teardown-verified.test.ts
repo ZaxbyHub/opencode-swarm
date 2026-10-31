@@ -148,6 +148,26 @@ describe('teardownEphemeralSessionVerified transient arm (#2964)', () => {
 			expect(result.kind).toBe('ephemeral-session-teardown-unverified');
 			expect(result.reason).toBe('verify-unreadable');
 		}
+		// PRR-010: the unreadable branch must not consume delete retries.
+		expect(result.attempts).toBe(1);
+		expect(lifecycle.calls.filter((c) => c === 'delete')).toHaveLength(1);
+	});
+
+	test('identity discriminator: a HOST error with the same message is NOT the deadline error', async () => {
+		// The deadline is distinguished BY OBJECT IDENTITY — a host-thrown
+		// error that merely carries the identical message must keep today's
+		// 'gone' reading (ok:true), not flip to unreadable.
+		const lifecycle = fakeLifecycle({
+			getImpl: async () => {
+				throw new Error('ephemeral session verify timed out after 25ms');
+			},
+		});
+		const result = await teardownEphemeralSessionVerified(
+			lifecycle,
+			'ses-impersonator',
+			{ verifyTimeoutMs: 25 },
+		);
+		expect(result.ok).toBe(true);
 	});
 
 	test('S2: transport TypeError rejection returns typed verify-unreadable', async () => {

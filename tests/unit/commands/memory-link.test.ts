@@ -257,7 +257,47 @@ describe('#1850 /swarm memory link + unlink commands', () => {
 		// Bounded: at most 5 ids shown, the rest summarized.
 		expect(result).toContain('+2 more');
 		for (const shown of ids.slice(0, 5)) expect(result).toContain(shown);
-		expect(result).not.toContain('r6');
-		expect(result).not.toContain('r7');
+		// r6/r7 are asserted absent via their UNIQUE audit rendering, not the
+		// raw output (the echoed cohort path could coincidentally contain them).
+		const auditLine = result
+			.split('\n')
+			.find((l) => l.includes('deleted in one store were re-added'));
+		expect(auditLine).toBeDefined();
+		expect(auditLine).not.toContain('r6');
+		expect(auditLine).not.toContain('r7');
+	});
+
+	// PRR-010: the command-level unresolved-collision wording had zero coverage.
+	test('#2958: link reports unresolved collisions (no recency signal) with bounded ids', async () => {
+		const fs = await import('node:fs/promises');
+		await fs.mkdir(path.join(dir, '.opencode'), { recursive: true });
+		await fs.writeFile(
+			path.join(dir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ memory: { enabled: true, link: { enabled: true } } }),
+			'utf-8',
+		);
+		const localMem = path.join(dir, '.swarm', 'memory');
+		await fs.mkdir(localMem, { recursive: true });
+		// Local (source) rows carry NO updatedAt → no recency signal on either
+		// side for the shared id → destination kept + id reported unresolved.
+		const longId = 'u'.repeat(45);
+		await fs.writeFile(
+			path.join(localMem, 'memories.jsonl'),
+			`${JSON.stringify({ id: 'M', text: 'local-new' })}\n${JSON.stringify({ id: longId, text: 'long' })}\n`,
+			'utf-8',
+		);
+		const cohortMem = path.join(resolveLinkDir('unresolved-cohort'), 'memory');
+		await fs.mkdir(cohortMem, { recursive: true });
+		await fs.writeFile(
+			path.join(cohortMem, 'memories.jsonl'),
+			`${JSON.stringify({ id: 'M', text: 'cohort-old' })}\n${JSON.stringify({ id: longId, text: 'cohort-long' })}\n`,
+			'utf-8',
+		);
+		const result = await handleMemoryLinkCommand(dir, ['unresolved-cohort']);
+		expect(result).toContain('Linked');
+		expect(result).toContain('had no recency signal');
+		// The 45-char id renders truncated to 39 chars + ellipsis (PRR-010).
+		expect(result).toContain(`${'u'.repeat(39)}…`);
+		expect(result).toContain('2 collision(s)');
 	});
 });
