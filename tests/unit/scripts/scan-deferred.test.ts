@@ -283,3 +283,69 @@ describe('scan-deferred.sh — Full-Resolution Contract deferred-work gate (PR #
 		expect(result.stderr).toInclude('could not resolve a base branch');
 	});
 });
+
+// zmem #309 regression suite: the bare-word marker group in the scanner's
+// pattern now requires word boundaries on BOTH sides, so content that
+// merely contains the marker letter-run inside an identifier must stay
+// clean, while real markers — including the plural list-header shape —
+// must still trip the gate.
+//
+// Every marker literal below is assembled from string fragments (e.g.
+// 'TO' + 'DO') so this file's own added lines never contain a contiguous
+// marker token; otherwise the fixed scanner would flag this very test
+// diff. The identifier names carry an _LIT suffix for the same reason —
+// a bare marker identifier would itself be a word-boundary match.
+const TODO_LIT = 'TO' + 'DO';
+const FIXME_LIT = 'FIX' + 'ME';
+const XXX_LIT = 'X' + 'XX';
+const HACK_LIT = 'HA' + 'CK';
+const NOTIMPL_LIT = 'NotImple' + 'mented';
+const TODO_BANG_LIT = 'to' + 'do!';
+
+describe('scan-deferred.sh — zmem #309 word-boundary regressions', () => {
+	test.each([
+		[
+			'env-var name (the exact zmem #309 shape)',
+			'"ZMEM_MODEL_AUTODOWNLOAD": "0",',
+		],
+		['marker letters mid-identifier', 'const enableAUTODOWNLOAD = false;'],
+		['marker as identifier suffix', 'const SOMETHING_TODO = "later";'],
+		['marker underscore-wrapped', 'const _TODO_ = "wrapped";'],
+	])('stays clean: %s', async (_label, addedLine) => {
+		const repo = track(makeRepo('scan-deferred-zmem309-clean-'));
+		writeFile(repo, 'src/env.ts', `${addedLine}\n`);
+		git(repo, 'add', '-A');
+		git(repo, 'commit', '-q', '-m', 'add env line');
+
+		const result = await runScript(repo, ['origin/main']);
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toInclude('clean');
+	});
+
+	test.each([
+		['bare first marker', `// ${TODO_LIT}: x`, `${TODO_LIT}: x`],
+		[
+			'plural list-header form',
+			`${TODO_LIT}s: plural form`,
+			`${TODO_LIT}s: plural form`,
+		],
+		['second bare marker', `// ${FIXME_LIT}: x`, `${FIXME_LIT}: x`],
+		['third bare marker', `// ${XXX_LIT}: x`, `${XXX_LIT}: x`],
+		['fourth bare marker', `// ${HACK_LIT}: x`, `${HACK_LIT}: x`],
+		[
+			'long-form identifier marker',
+			`const x = ${NOTIMPL_LIT};`,
+			`${NOTIMPL_LIT};`,
+		],
+		['rust-style bang marker', `${TODO_BANG_LIT}()`, `${TODO_BANG_LIT}()`],
+	])('still hits: %s', async (_label, addedLine, reported) => {
+		const repo = track(makeRepo('scan-deferred-zmem309-hit-'));
+		writeFile(repo, 'src/foo.ts', `${addedLine}\n`);
+		git(repo, 'add', '-A');
+		git(repo, 'commit', '-q', '-m', 'add marker line');
+
+		const result = await runScript(repo, ['origin/main']);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toInclude(reported);
+	});
+});
