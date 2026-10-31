@@ -625,8 +625,11 @@ The drift workflow runs `verify-retention` to reject byte-identical consumed
 fragments and to enforce the pending-fragment count limit, reporting the
 14-day add rate and projected days-to-limit (with a `::warning::` under 30
 days). Every release run ends in a `release-health-summary` job that reports
-the cleanup conclusion and emits an `::error::` annotation if the cleanup job
-did not complete.
+the release-please, update-release-notes, and cleanup-release-fragments
+conclusions and emits an `::error::` annotation (plus a job failure) if
+`update-release-notes` did not succeed — a failed producer cannot strand a
+release silently behind a skipped cleanup — or if the cleanup job did not
+complete.
 
 ---
 
