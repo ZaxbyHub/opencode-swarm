@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.12",
+  "tagCommit": "b13998f2a12d85dc370516329dcf32c46a4cf809",
+  "targetCommitish": "b13998f2a12d85dc370516329dcf32c46a4cf809",
+  "releaseBodySha256": "b78b04415f97fd8e1d8fd86a637e34a79e1d097fa04969231260da8dfd308111",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-3263-dispatch-lanes-receipt-footer-timeout.md",
+      "sha256": "687e21652438531e9f627aedfef72d7fbafc4b1e55336f947ff6a81ed672a823"
+    }
+  ]
+}
