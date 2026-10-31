@@ -181,24 +181,31 @@ function mergeStoreEntries(
 	noSignal: number;
 } {
 	const result = [...destination];
-	const indexOfId = new Map<string, number>();
-	result.forEach((e, i) => {
-		if (!indexOfId.has(e.id)) indexOfId.set(e.id, i);
-	});
 	// Within-destination duplicates: keep the effective (recency-newest) row
 	// at the first occurrence's position, so the result holds exactly one row
-	// per id (#3521 D1). No-signal duplicates keep the first occurrence.
+	// per id (#3521 D1). No-signal duplicates keep the first occurrence. The
+	// id→index map is rebuilt AFTER the reduction — splicing shifts indices,
+	// and a stale map made the source loop below read the wrong incumbent or
+	// skip a live id entirely (4.5 review blocker 1: silent row loss).
 	for (let i = 0; i < result.length; i += 1) {
-		const firstIdx = indexOfId.get(result[i].id);
-		if (firstIdx === undefined || firstIdx === i) continue;
-		const incumbent = result[firstIdx];
-		const later = result[i];
-		if (isStrictlyNewer(rowRecency(later), rowRecency(incumbent))) {
-			result[firstIdx] = later;
+		let firstIdx = -1;
+		for (let j = 0; j < i; j += 1) {
+			if (result[j].id === result[i].id) {
+				firstIdx = j;
+				break;
+			}
+		}
+		if (firstIdx === -1) continue;
+		if (isStrictlyNewer(rowRecency(result[i]), rowRecency(result[firstIdx]))) {
+			result[firstIdx] = result[i];
 		}
 		result.splice(i, 1);
 		i -= 1;
 	}
+	const indexOfId = new Map<string, number>();
+	result.forEach((e, i) => {
+		indexOfId.set(e.id, i);
+	});
 	let added = 0;
 	let skipped = 0;
 	let superseded = 0;
@@ -259,13 +266,18 @@ function appendUnionById<T>(
 	// Pre-reduce within-side duplicates to the effective (recency-newest) row
 	// at the first occurrence's position (#3521 D1): a later newer duplicate on
 	// either side must win, byte-equal retries stay deduped, and no-signal rows
-	// keep the first occurrence. Keyless rows are unaddressable and skipped as
-	// before.
+	// keep the first occurrence. A keyless DESTINATION row is unaddressable
+	// but NOT deletable — base carried it through verbatim, and dropping it
+	// would silently lose destination data on link (4.5 review blocker 3);
+	// only keyless SOURCE rows are skipped (they can never be merged).
 	const result: T[] = [];
 	const indexOfKey = new Map<string, number>();
 	for (const row of destination) {
 		const key = keyOf(row);
-		if (key === null) continue;
+		if (key === null) {
+			result.push(row);
+			continue;
+		}
 		const firstIdx = indexOfKey.get(key);
 		if (firstIdx === undefined) {
 			indexOfKey.set(key, result.length);

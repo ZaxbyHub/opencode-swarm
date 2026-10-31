@@ -29,7 +29,7 @@ import {
 	expect,
 	it,
 } from 'bun:test';
-import { readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
@@ -43,6 +43,9 @@ import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const TEST_DIR = canonicalMkdtemp('guardrails-eval-cdaware-');
+// #3518 P-2: the cd tracker stat-gates its mutation, so the fixture's `cd
+// src` target must actually exist (same as real bash).
+mkdirSync(path.join(TEST_DIR, 'src'), { recursive: true });
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -257,6 +260,10 @@ describe('same-interpreter multi-occurrence preservation (#3347)', () => {
 
 describe('windows-safe cd tracking (#3347 plan r3)', () => {
 	it('resolves a cd-relative redirect target under a native Windows cwd', () => {
+		// #3518 P-2: cd tracking is stat-gated, so the fixture directory must
+		// really exist on the host (a synthetic C:\work\proj no longer tracks).
+		const root = canonicalMkdtemp('guardrails-eval-win-');
+		mkdirSync(path.join(root, 'src'), { recursive: true });
 		const writes = [
 			{
 				category: 'redirect' as const,
@@ -267,15 +274,15 @@ describe('windows-safe cd tracking (#3347 plan r3)', () => {
 		const result = resolveWriteTargets(
 			'cd src && echo x > out.txt',
 			writes,
-			'C:\\work\\proj',
+			root,
 		);
 		expect(result.length).toBe(1);
-		expect(result[0].resolvedPath?.replace(/\//g, '\\')).toBe(
-			'C:\\work\\proj\\src\\out.txt',
-		);
+		expect(result[0].resolvedPath).toBe(path.join(root, 'src', 'out.txt'));
 	});
 
 	it('carries the tracked directory as the capability eval working directory', () => {
+		const root = canonicalMkdtemp('guardrails-eval-win-');
+		mkdirSync(path.join(root, 'src'), { recursive: true });
 		const analysis = resolveWriteTargets(
 			'cd src && python -c "print(1)"',
 			[
@@ -286,12 +293,10 @@ describe('windows-safe cd tracking (#3347 plan r3)', () => {
 					capability: true as const,
 				},
 			],
-			'C:\\work\\proj',
+			root,
 		);
 		expect(analysis.length).toBe(1);
-		expect(analysis[0].evalDirectory?.replace(/\//g, '\\')).toBe(
-			'C:\\work\\proj\\src',
-		);
+		expect(analysis[0].evalDirectory).toBe(path.join(root, 'src'));
 	});
 });
 

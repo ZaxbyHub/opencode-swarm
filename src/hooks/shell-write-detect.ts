@@ -4459,12 +4459,14 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		writes.push(wt);
 	}
 
-	// PR #3456 (F-2): a colliding key resolves against the FIRST context only,
-	// so an emptyDirectoryRemoval write with such a key is demoted (the tag
-	// would authorize the wrong occurrence's directory).
+	// PR #3456 (F-2): a colliding key may name writes run under different
+	// working directories, so EVERY occurrence of a colliding key — including
+	// the #3518 occurrence-suffixed survivors — is demoted (the tag would
+	// authorize a directory the gate cannot pin to this occurrence).
+	const baseDedupeKey = (wt: WriteTarget): string =>
+		buildDedupeKey(wt.category, wt.operator.replace(/ #[0-9]+$/, ''), wt.path);
 	writes = writes.map((wt) =>
-		wt.emptyDirectoryRemoval === true &&
-		collidingKeys.has(buildDedupeKey(wt.category, wt.operator, wt.path))
+		wt.emptyDirectoryRemoval === true && collidingKeys.has(baseDedupeKey(wt))
 			? withoutEmptyDirectoryRemoval(wt)
 			: wt,
 	);
