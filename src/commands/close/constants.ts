@@ -290,8 +290,13 @@ export const ACTIVE_STATE_DIRS_TO_CLEAN = [
  * (The merge-group hard failure in run 38507292215 surfaced the *teardown*
  * helper's budget — that evidence belongs to the safeRmRecursive fix, not
  * this schedule.)
+ *
+ * #3260: the array itself moved to the import-free leaf module
+ * ./unlink-schedule.ts so tests/helpers/safe-test-dir.ts consumes the SAME
+ * schedule (the ~9.9 s teardown window against this ~15.2 s production
+ * schedule was the #3260-A defect). Re-exported here for existing importers.
  */
-export const ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS = [
-	25, 50, 100, 200, 400, 600, 800, 1000, 1000, 1000, 1000, 1000, 1000, 1000,
-	1000, 1000, 1000, 1000, 1000, 1000,
-] as const;
+export {
+	ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS,
+	CLEAN_STAGE_DEADLINE_MS,
+} from './unlink-schedule.js';

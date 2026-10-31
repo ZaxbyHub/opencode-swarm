@@ -22,6 +22,7 @@ import {
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader';
 import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
 let tempDir: string;
@@ -74,7 +75,7 @@ afterEach(() => {
 	_internals.recordKnowledgeShown = originalRecordShown;
 	_internals.recordLessonsShown = originalRecordLessonsShown;
 	_internals.confirmEntriesPhase = originalConfirmEntriesPhase;
-	rmSync(tempDir, { recursive: true, force: true });
+	safeRmRecursive(tempDir);
 });
 
 const shownFile = (dir: string) =>

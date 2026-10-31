@@ -30,6 +30,7 @@ import {
 	installProdStoreTripwire,
 	verifyRealStoresUnchanged,
 } from '../helpers/prod-store-tripwire.js';
+import { assertInternalsRestored } from '../helpers/safe-test-dir.js';
 
 installProdStoreTripwire();
 
@@ -59,6 +60,11 @@ afterEach(async () => {
 //  - checkout drift: no suite may leave new or modified entries in the
 //    checkout root or its .swarm/ (gitignored, so `git status` never reveals
 //    them).
+//  - #3260-D internals restoration: every suite must leave the safe-test-dir
+//    `_internals` seam exactly as it was at import time. A leaked member
+//    swap (e.g. `wait`) silently converts every later consumer's retry
+//    budget to ~0 s — loud throw, silent cause — so this fails the run
+//    run-wide, not just in the leaking file.
 afterAll(() => {
 	const failures: unknown[] = [];
 	try {
@@ -72,6 +78,11 @@ afterAll(() => {
 			resolveDriftMode(process.env),
 			repoRoot,
 		);
+	} catch (error) {
+		failures.push(error);
+	}
+	try {
+		assertInternalsRestored();
 	} catch (error) {
 		failures.push(error);
 	}

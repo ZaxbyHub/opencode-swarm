@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS } from '../../src/commands/close/unlink-schedule.js';
 import { closeProjectDb } from '../../src/db/project-db.js';
 import { collectGarbageBestEffort } from '../../src/utils/bun-compat.js';
 
@@ -20,6 +21,38 @@ export const _internals: {
 		Atomics.wait(RETRY_WAIT, 0, 0, ms);
 	},
 };
+
+/**
+ * Import-time snapshot of the `_internals` member values (#3260-D). Tests that
+ * swap seam members must restore them (AGENTS.md invariant 7); the snapshot is
+ * what makes a LEAK detectable: `assertInternalsRestored` (below) fails when
+ * any member still differs. A leaked `wait` swap silently converts every
+ * consumer's retry budget to ~0 s — loud throw, silent cause — so the guard
+ * runs run-wide from the aggregated preload afterAll
+ * (tests/preload/prod-store-tripwire.ts).
+ */
+const IMPORT_TIME_INTERNALS: Readonly<Record<string, unknown>> = {
+	..._internals,
+};
+
+/**
+ * Throws when any `_internals` member differs from its import-time value (a
+ * test swapped a seam member and did not restore it). Returns normally when
+ * the seam is clean. Run-wide wiring lives in the aggregated preload afterAll;
+ * individual suites may also call it directly.
+ */
+export function assertInternalsRestored(): void {
+	for (const key of Object.keys(IMPORT_TIME_INTERNALS)) {
+		if (
+			(_internals as Record<string, unknown>)[key] !==
+			IMPORT_TIME_INTERNALS[key]
+		) {
+			throw new Error(
+				`safe-test-dir internals-restoration guard: _internals.${key} differs from its import-time value — a test swapped this seam member without restoring it, leaking its semantics to every later consumer in this process`,
+			);
+		}
+	}
+}
 
 const RETRY_WAIT = new Int32Array(new SharedArrayBuffer(4));
 
@@ -167,28 +200,60 @@ export function safeRmRecursive(targetPath: string): void {
 	closeProjectDb(lexicalTarget);
 
 	// Bun does not consistently honor fs.rmSync's maxRetries on Windows. Retry
-	// transient handle-release failures explicitly on a ~10 s deadline
-	// (100 attempts at 100 ms cadence). Issue #3248 class 2: windows-latest
-	// cold-FS/AV handle holds on fresh sqlite temp dirs outlived the previous
-	// ~2 s budget and hard-failed merge-group shards (close-active's
-	// close-query-cache-* teardown, run 38507292215 windows-latest 1; 3/3
-	// attempts). collectGarbageBestEffort runs on EVERY failed attempt: a
-	// hedge for GC-reclaimable handles (Bun sqlite statement caches), not a
-	// cure for AV-held handles — only elapsed time helps those.
-	for (let attempt = 0; ; attempt += 1) {
+	// transient handle-release failures on the PRODUCTION delay schedule
+	// (ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS — the same ~15.2 s budget PR #3254
+	// sized to the instrumented windows-latest handle-release tail; sum
+	// 15,175 ms over 20 delays). Issue #3248 class 2 introduced the retry;
+	// issue #3260-A tied it to the production schedule after the independent
+	// ~9.9 s literal (99 × 100 ms) was found NOT to cover the same tail the
+	// production unlink schedule covers. Shape: one attempt per schedule
+	// delay (20 attempts + waits), then ONE final attempt after the schedule
+	// is exhausted (21 rmSync attempts total), with NO wait after the final
+	// failure. collectGarbageBestEffort runs on EVERY failed attempt: a hedge
+	// for GC-reclaimable handles (Bun sqlite statement caches), not a cure
+	// for AV-held handles — only elapsed time helps those.
+	for (const delay of ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS) {
 		try {
 			_internals.rmSync(lexicalTarget, { recursive: true, force: true });
 			return;
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
-			if (
-				attempt >= 99 ||
-				(code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY')
-			)
+			if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY')
 				throw error;
 			_internals.collectGarbageBestEffort();
-			_internals.wait(100);
+			_internals.wait(delay);
 		}
+	}
+	// Schedule exhausted: one last attempt, then surface the final error
+	// (no wait after the final failure).
+	_internals.rmSync(lexicalTarget, { recursive: true, force: true });
+}
+
+/**
+ * Recursively remove MULTIPLE test paths the way `safeRmRecursive` does, but
+ * attempt EVERY target and throw only AFTER the loop (#3260-C): a `for (const
+ * d of dirs) safeRmRecursive(d);` loop rethrows on the first exhausted dir and
+ * strands the remaining temp dirs (their cleanup never runs, and sibling
+ * bookkeeping like `testRoots.clear()` is skipped too). The aggregate error
+ * names every failed target; per-target causes are preserved as AggregateError
+ * causes.
+ */
+export function safeRmAllRecursive(targets: readonly string[]): void {
+	const failures: Array<{ target: string; error: unknown }> = [];
+	for (const target of targets) {
+		try {
+			safeRmRecursive(target);
+		} catch (error) {
+			failures.push({ target, error });
+		}
+	}
+	if (failures.length > 0) {
+		throw new AggregateError(
+			failures.map((failure) => failure.error),
+			`safeRmAllRecursive: ${failures.length}/${targets.length} teardown target(s) failed: ${failures
+				.map((failure) => failure.target)
+				.join(', ')}`,
+		);
 	}
 }
 

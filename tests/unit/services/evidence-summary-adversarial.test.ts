@@ -53,6 +53,7 @@ import {
 	loadEvidence,
 } from '../../../src/evidence/manager';
 import { loadPlanJsonOnly } from '../../../src/plan/manager';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 const mockLoadPlanJsonOnly = loadPlanJsonOnly as ReturnType<typeof mock>;
 const mockLoadEvidence = loadEvidence as ReturnType<typeof mock>;
@@ -71,9 +72,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	rmSync(tempDir, { recursive: true, force: true });
+	safeRmRecursive(tempDir);
 });
-
 // ============================================================================
 // ATTACK VECTOR 1: MALFORMED EVIDENCE PAYLOADS
 // ============================================================================
@@ -781,7 +781,7 @@ describe('ATTACK: Artifact Path Abuse', () => {
 		);
 		expect(secretContent).toBe('SECRET_DATA');
 
-		rmSync(symlinkTarget, { recursive: true, force: true });
+		safeRmRecursive(symlinkTarget);
 	});
 });
 

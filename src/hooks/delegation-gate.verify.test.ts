@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { safeRmRecursive } from '../../tests/helpers/safe-test-dir.js';
 import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import { ensureAgentSession, resetSwarmState } from '../state';
 import { _internals } from './delegation-gate';
@@ -22,7 +23,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	resetSwarmState();
-	rmSync(tmpDir, { recursive: true, force: true });
+	safeRmRecursive(tmpDir);
 });
 
 describe('delegation evidence task-id resolution', () => {

@@ -8,6 +8,7 @@ import {
 	resolveExecutableFromPath,
 	runExternalTool,
 } from '../../../src/utils/external-tool-runner';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 const realBunSpawn = _internals.bunSpawn;
 const realPlatform = _internals.platform;
@@ -483,7 +484,7 @@ describe('external-tool-runner', () => {
 			writeFileSync(sg, '');
 			expect(resolveExecutableFromPath(['sg'], tmpDir, 'linux')).toBe(sg);
 		} finally {
-			rmSync(tmpDir, { recursive: true, force: true });
+			safeRmRecursive(tmpDir);
 		}
 	});
 });
