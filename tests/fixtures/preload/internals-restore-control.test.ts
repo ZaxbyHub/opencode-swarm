@@ -7,15 +7,16 @@
  * Not in any CI test glob (tests/fixtures/); spawned only by
  * tests/unit/helpers/safe-test-dir-guard-subprocess-3260.test.ts.
  */
-import { describe, expect, test } from 'bun:test';
+import { describe, test } from 'bun:test';
 import { _internals } from '../../helpers/safe-test-dir.js';
 
 describe('internals restoration control fixture (3260-D probe)', () => {
-	test('passes and restores the swapped member (the run must stay green)', () => {
+	test('swaps then restores the member (the run must stay green)', () => {
 		const realWait = _internals.wait;
 		try {
+			// No assertion by design (vacuous-assertion ratchet): the fixture's
+			// clean exit through the preload afterAll IS the observation.
 			_internals.wait = () => {};
-			expect(true).toBe(true);
 		} finally {
 			_internals.wait = realWait;
 		}

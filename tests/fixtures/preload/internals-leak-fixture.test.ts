@@ -13,14 +13,16 @@
  * preload afterAll (tests/preload/prod-store-tripwire.ts) must catch the leak
  * via assertInternalsRestored and fail the run (nonzero exit naming `wait`).
  */
-import { describe, expect, test } from 'bun:test';
+import { describe, test } from 'bun:test';
 import { _internals } from '../../helpers/safe-test-dir.js';
 
 describe('deliberate internals leak fixture (3260-D probe)', () => {
-	test('passes while leaking the wait member (the guard must fail the run)', () => {
-		// Deliberate leak: NO try/finally restore. The preload guard is the
-		// thing under test in the spawning process.
+	test('swaps the wait member and never restores it (the guard must fail the run)', () => {
+		// Deliberate leak: NO try/finally restore, and deliberately NO
+		// assertion — the fixture's pass is not the point; the aggregated
+		// preload afterAll failing THIS RUN is (probed by the spawning test).
+		// (Also keeps the vacuous-assertion ratchet clean: expect(true) here
+		// would be a textbook vacuous assertion.)
 		_internals.wait = () => {};
-		expect(true).toBe(true);
 	});
 });
