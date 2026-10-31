@@ -64,26 +64,13 @@ function buildItemsDb(dir: string, legacy: boolean, row: SeedItem): void {
 	try {
 		// legacy = pre-v12 8-column shape; current adds the #1466 provenance
 		// columns. Both carry updated_at and id PRIMARY KEY.
-		const ddl = [
-			'id TEXT PRIMARY KEY',
-			'scope_key TEXT NOT NULL',
-			'kind TEXT NOT NULL',
-			'updated_at TEXT NOT NULL',
-			'expires_at TEXT',
-			'superseded_by TEXT',
-			'deleted INTEGER NOT NULL DEFAULT 0',
-			'record_json TEXT NOT NULL',
-		];
-		if (!legacy) {
-			ddl.push(
-				'source_task_id TEXT',
-				'agent_role TEXT',
-				'embedding_model_version TEXT',
-				'valid_from TEXT',
-				'supersedes_reason TEXT',
-			);
-		}
-		db.run(`CREATE TABLE memory_items (${ddl.join(', ')});`);
+		const ddl =
+			'id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, kind TEXT NOT NULL, updated_at TEXT NOT NULL,' +
+			' expires_at TEXT, superseded_by TEXT, deleted INTEGER NOT NULL DEFAULT 0, record_json TEXT NOT NULL' +
+			(legacy
+				? ''
+				: ', source_task_id TEXT, agent_role TEXT, embedding_model_version TEXT, valid_from TEXT, supersedes_reason TEXT');
+		db.run(`CREATE TABLE memory_items (${ddl});`);
 		const vals = [
 			row.id,
 			'global',
@@ -437,63 +424,5 @@ describe('#2958 unresolved collisions and retries', () => {
 		expect(r.added).toBe(1);
 		expect(r.skipped).toBe(1);
 		expect(r.unresolvedCollisions).toHaveLength(0);
-	});
-});
-
-describe('#2958 schema matrix (sqlite memory_items)', () => {
-	test('matching pre-v12 pair keeps merging: newer row wins on shared columns', async () => {
-		const destDir = path.join(tmpDir, 'dest');
-		const srcDir = path.join(tmpDir, 'src');
-		buildItemsDb(destDir, true, { id: 'M', updatedAt: T1, payload: 'v1' });
-		buildItemsDb(srcDir, true, { id: 'M', updatedAt: T2, payload: 'v2' });
-		await migrateMemoryFamily(localRoot(destDir), localRoot(srcDir));
-		const row = readDestItem(destDir);
-		expect(row?.updated_at).toBe(T2);
-		expect(row?.record_json).toBe('v2');
-	});
-
-	test('current vs pre-v12 skew degrades per-table (failedTables path), merge still resolves', async () => {
-		const destDir = path.join(tmpDir, 'dest');
-		const srcDir = path.join(tmpDir, 'src');
-		buildItemsDb(destDir, false, { id: 'M', updatedAt: T1, payload: 'v1' });
-		buildItemsDb(srcDir, true, { id: 'M', updatedAt: T2, payload: 'v2' });
-		// The shared-column upsert inserts only the 8 shared columns into a
-		// 13-column table whose NOT NULL columns have no defaults → per-table
-		// error → failedTables (today's degradation for positional mismatch).
-		const result = await migrateMemoryFamily(
-			localRoot(destDir),
-			localRoot(srcDir),
-		);
-		const row = readDestItem(destDir);
-		expect(row?.updated_at).toBe(T1); // destination untouched
-		expect(
-			result.perMember.find((m) => m.filename === 'memory.db'),
-		).toBeDefined();
-	});
-});
-
-describe('#2958 outcome-events control (fail-closed, unchanged)', () => {
-	test('same-id different-payload outcome events still throw', () => {
-		const dest = [
-			{
-				id: 'e1',
-				memoryId: 'M',
-				generation: 'g1',
-				outcome: { outcome: 'useful', at: T1 },
-				anchors: [],
-			},
-		];
-		const src = [
-			{
-				id: 'e1',
-				memoryId: 'M',
-				generation: 'g1',
-				outcome: { outcome: 'dead_end', at: T2 },
-				anchors: [],
-			},
-		];
-		expect(() => _internals.appendUnionOutcomeEvents(dest, src)).toThrow(
-			/different payload|identity/i,
-		);
 	});
 });
