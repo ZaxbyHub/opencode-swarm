@@ -305,6 +305,13 @@ describe('#2958 tombstone audit', () => {
 		const resurrected = new Set<string>();
 		collectResurrected(result, resurrected);
 		expect(resurrected.has('M')).toBe(true);
+		// Resurrections are counted solely via resurrectedIds (#3520 critic
+		// round 2, sqlite-side pin mirroring the JSONL one).
+		expect(
+			(result as { audit?: Array<{ supersededCount: number }> }).audit?.find(
+				(m) => m.filename === 'memory.db',
+			)?.supersededCount,
+		).toBe(0);
 		const row = readDestItem(destDir);
 		expect(row?.deleted).toBe(0);
 		expect(row?.updated_at).toBe(T2);

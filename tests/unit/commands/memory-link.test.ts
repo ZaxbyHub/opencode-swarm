@@ -270,6 +270,46 @@ describe('#1850 /swarm memory link + unlink commands', () => {
 		expect(result).not.toContain('resolved by recency');
 	});
 
+	// #3520 critic round 2: the command-level recency-resolved render strings
+	// are load-bearing — pin totals + member + audit wording on a source-wins
+	// merge, and the absence of the retired falsifying strings.
+	test('#2958: link renders recency-resolved supersessions in totals and audit', async () => {
+		const fs = await import('node:fs/promises');
+		await fs.mkdir(path.join(dir, '.opencode'), { recursive: true });
+		await fs.writeFile(
+			path.join(dir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ memory: { enabled: true, link: { enabled: true } } }),
+			'utf-8',
+		);
+		const T1 = '2026-09-20T00:00:00.000Z';
+		const T2 = '2026-09-22T00:00:00.000Z';
+		const localMem = path.join(dir, '.swarm', 'memory');
+		await fs.mkdir(localMem, { recursive: true });
+		await fs.writeFile(
+			path.join(localMem, 'memories.jsonl'),
+			`${JSON.stringify({ id: 'M', text: 'v2', updatedAt: T2 })}
+`,
+			'utf-8',
+		);
+		const cohortMem = path.join(resolveLinkDir('render-cohort'), 'memory');
+		await fs.mkdir(cohortMem, { recursive: true });
+		await fs.writeFile(
+			path.join(cohortMem, 'memories.jsonl'),
+			`${JSON.stringify({ id: 'M', text: 'v1', updatedAt: T1 })}
+`,
+			'utf-8',
+		);
+		const result = await handleMemoryLinkCommand(dir, ['render-cohort']);
+		expect(result).toContain('Linked');
+		expect(result).toContain('1 resolved by recency');
+		expect(result).toContain('1 recency-resolved');
+		expect(result).toContain(
+			'1 record collision(s) resolved by recency — the newer state won.',
+		);
+		expect(result).not.toContain('superseded by newer versions');
+		expect(result).not.toContain('were replaced by newer versions');
+	});
+
 	// PRR-010: the command-level unresolved-collision wording had zero coverage.
 	test('#2958: link reports unresolved collisions (no recency signal) with bounded ids', async () => {
 		const fs = await import('node:fs/promises');
