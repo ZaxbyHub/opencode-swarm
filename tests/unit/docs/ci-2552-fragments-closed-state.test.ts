@@ -37,18 +37,63 @@ function readText(path: string): string {
 	return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
 }
 
+/** Parse `v?X.Y.Z` into a comparable number; unparseable tags sort lowest. */
+function tagOrder(tag: string): number {
+	const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+	if (!m) return -1;
+	return Number(m[1]) * 1_000_000 + Number(m[2]) * 1_000 + Number(m[3]);
+}
+
+/**
+ * Consumption-aware fragment resolution (issue #3511; tightened per the
+ * #3519 feedback): PENDING is the sole authority while present. Once
+ * consumed, the obligation resolves through the fragment's MANIFEST CLAIM —
+ * the claiming manifest's tag names the materialized `docs/releases/<tag>.md`
+ * body that carries the obligation — never through a name-blind aggregate of
+ * every release body (the previous archive arm ignored `name`, so pins could
+ * pass for never-consumed fragments: '2505' was satisfied by unrelated
+ * history). No claim → null → the pins fail (never vacuous).
+ */
 function fragmentText(root: string, name: string): string | null {
 	const pendingFragment = join(root, 'docs/releases/pending', name);
 	if (existsSync(pendingFragment)) return readText(pendingFragment);
-	const releasesPath = join(root, 'docs/releases');
-	if (!existsSync(releasesPath)) return null;
-	const parts: string[] = [];
-	for (const entry of readdirSync(releasesPath)) {
-		if (/^v\d+\.\d+\.\d+\.md$/.test(entry)) {
-			parts.push(readText(join(releasesPath, entry)));
+	const manifestsDir = join(root, 'docs/releases/manifests');
+	if (!existsSync(manifestsDir)) return null;
+	const claims: Array<{ tag: string; manifest: string }> = [];
+	for (const entry of readdirSync(manifestsDir)) {
+		if (!entry.toLowerCase().endsWith('.json')) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(readFileSync(join(manifestsDir, entry), 'utf8'));
+		} catch {
+			continue;
 		}
+		const manifest = parsed as {
+			schemaVersion?: unknown;
+			tag?: unknown;
+			fragments?: Array<{ path?: unknown }>;
+		};
+		if (
+			manifest?.schemaVersion !== 1 ||
+			!Array.isArray(manifest.fragments) ||
+			typeof manifest.tag !== 'string'
+		) {
+			continue;
+		}
+		const claimed = manifest.fragments.some(
+			(fragment) => fragment?.path === `docs/releases/pending/${name}`,
+		);
+		if (claimed) claims.push({ tag: manifest.tag, manifest: entry });
 	}
-	return parts.length > 0 ? parts.join('\n') : null;
+	if (claims.length === 0) return null;
+	claims.sort(
+		(a, b) =>
+			tagOrder(b.tag) - tagOrder(a.tag) ||
+			(a.manifest < b.manifest ? 1 : a.manifest > b.manifest ? -1 : 0),
+	);
+	const archivedBody = join(root, 'docs/releases', `${claims[0].tag}.md`);
+	if (!existsSync(archivedBody)) return null;
+	return readText(archivedBody);
 }
 
 describe('#2552 release fragments agree with the closed Stage-A receipt set', () => {
@@ -85,8 +130,7 @@ describe('#2552 release fragments agree with the closed Stage-A receipt set', ()
 	});
 
 	test('consumption-aware resolution fails closed when neither surface carries a fragment', () => {
-		// Strength leg (#3511): consumed + unarchived reads as null (the pins
-		// above fail); the archive arm carries the citation once materialized.
+		// Strength legs (#3511 + #3519 feedback):
 		const neitherDir = canonicalMkdtemp('swarm-ci2552-neither-');
 		try {
 			expect(fragmentText(neitherDir, 'ci-gate-policy-2552.md')).toBeNull();
@@ -119,15 +163,89 @@ describe('#2552 release fragments agree with the closed Stage-A receipt set', ()
 		}
 		const archivedDir = canonicalMkdtemp('swarm-ci2552-arch-');
 		try {
-			mkdirSync(join(archivedDir, 'docs/releases'), { recursive: true });
+			mkdirSync(join(archivedDir, 'docs/releases/manifests'), {
+				recursive: true,
+			});
 			writeFileSync(
 				join(archivedDir, 'docs/releases/v0.0.0.md'),
 				'ci gate policy record cites completing run 34162959243',
 			);
+			// The consumed obligation resolves ONLY through the manifest claim:
+			// without a claim for this exact path, a stray vX.md must NOT
+			// satisfy the pin (the name-blind aggregate defect this round
+			// fixes). The fragment stays unresolved → null → pins fail.
+			expect(fragmentText(archivedDir, 'ci-gate-policy-2552.md')).toBeNull();
+			// With the claim staged, the claiming tag's body carries it.
+			writeFileSync(
+				join(archivedDir, 'docs/releases/manifests/v0.0.0.json'),
+				JSON.stringify({
+					schemaVersion: 1,
+					tag: 'v0.0.0',
+					tagCommit: 'a'.repeat(40),
+					targetCommitish: 'a'.repeat(40),
+					releaseBodySha256: '0'.repeat(64),
+					fragments: [
+						{
+							prNumber: null,
+							order: 0,
+							path: 'docs/releases/pending/ci-gate-policy-2552.md',
+							sha256: '1'.repeat(64),
+						},
+					],
+				}),
+			);
 			const body = fragmentText(archivedDir, 'ci-gate-policy-2552.md');
 			expect(body).toContain('34162959243');
+			// Claim-without-body fails closed: the claiming tag's vX.md missing
+			// must not fabricate an obligation.
+			rmSync(join(archivedDir, 'docs/releases/v0.0.0.md'));
+			expect(fragmentText(archivedDir, 'ci-gate-policy-2552.md')).toBeNull();
 		} finally {
 			rmSync(archivedDir, { recursive: true, force: true });
+		}
+		const coexistence = canonicalMkdtemp('swarm-ci2552-coex-');
+		try {
+			mkdirSync(join(coexistence, 'docs/releases/pending'), {
+				recursive: true,
+			});
+			mkdirSync(join(coexistence, 'docs/releases'), { recursive: true });
+			mkdirSync(join(coexistence, 'docs/releases/manifests'), {
+				recursive: true,
+			});
+			// Pending + claim coexistence (re-added fragment with different
+			// bytes): pending is the sole authority even when a manifest claims
+			// the same path.
+			writeFileSync(
+				join(coexistence, 'docs/releases/pending/ci-gate-policy-2552.md'),
+				'current pending record without the citation',
+			);
+			writeFileSync(
+				join(coexistence, 'docs/releases/v0.0.1.md'),
+				'older consumed body citing run 34162959243',
+			);
+			writeFileSync(
+				join(coexistence, 'docs/releases/manifests/v0.0.1.json'),
+				JSON.stringify({
+					schemaVersion: 1,
+					tag: 'v0.0.1',
+					tagCommit: 'a'.repeat(40),
+					targetCommitish: 'a'.repeat(40),
+					releaseBodySha256: '0'.repeat(64),
+					fragments: [
+						{
+							prNumber: null,
+							order: 0,
+							path: 'docs/releases/pending/ci-gate-policy-2552.md',
+							sha256: '2'.repeat(64),
+						},
+					],
+				}),
+			);
+			expect(fragmentText(coexistence, 'ci-gate-policy-2552.md')).not.toContain(
+				'34162959243',
+			);
+		} finally {
+			rmSync(coexistence, { recursive: true, force: true });
 		}
 	});
 });

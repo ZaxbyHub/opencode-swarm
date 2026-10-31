@@ -34,19 +34,59 @@ function adoptionAdrFragmentText(root: string): string | null {
 	if (fs.existsSync(pendingFragment)) {
 		return fs.readFileSync(pendingFragment, 'utf8').replace(/\r\n/g, '\n');
 	}
-	const releasesPath = path.join(root, 'docs/releases');
-	if (!fs.existsSync(releasesPath)) return null;
-	const parts: string[] = [];
-	for (const name of fs.readdirSync(releasesPath)) {
-		if (/^v\d+\.\d+\.\d+\.md$/.test(name)) {
-			parts.push(
-				fs
-					.readFileSync(path.join(releasesPath, name), 'utf8')
-					.replace(/\r\n/g, '\n'),
+	// #3519 feedback: the consumed obligation resolves through the fragment's
+	// MANIFEST CLAIM (the claiming tag's vX.md carries it), never through a
+	// name-blind aggregate of every release body — 'ADR 0002' and '2505'
+	// appear in unrelated history, so the aggregate arm passed for
+	// never-consumed fragments.
+	const manifestsDir = path.join(root, 'docs/releases/manifests');
+	if (!fs.existsSync(manifestsDir)) return null;
+	const claims: Array<{ tag: string; manifest: string }> = [];
+	for (const name of fs.readdirSync(manifestsDir)) {
+		if (!name.toLowerCase().endsWith('.json')) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(
+				fs.readFileSync(path.join(manifestsDir, name), 'utf8'),
 			);
+		} catch {
+			continue;
 		}
+		const manifest = parsed as {
+			schemaVersion?: unknown;
+			tag?: unknown;
+			fragments?: Array<{ path?: unknown }>;
+		};
+		if (
+			manifest?.schemaVersion !== 1 ||
+			!Array.isArray(manifest.fragments) ||
+			typeof manifest.tag !== 'string'
+		) {
+			continue;
+		}
+		const claimed = manifest.fragments.some(
+			(fragment) =>
+				fragment?.path ===
+				'docs/releases/pending/2505-ensemble-adoption-adr.md',
+		);
+		if (claimed) claims.push({ tag: manifest.tag, manifest: name });
 	}
-	return parts.length > 0 ? parts.join('\n') : null;
+	if (claims.length === 0) return null;
+	claims.sort(
+		(a, b) =>
+			tagOrderOf(b.tag) - tagOrderOf(a.tag) ||
+			(a.manifest < b.manifest ? 1 : a.manifest > b.manifest ? -1 : 0),
+	);
+	const archivedBody = path.join(root, 'docs/releases', `${claims[0].tag}.md`);
+	if (!fs.existsSync(archivedBody)) return null;
+	return fs.readFileSync(archivedBody, 'utf8').replace(/\r\n/g, '\n');
+}
+
+/** Parse `v?X.Y.Z` into a comparable number; unparseable tags sort lowest. */
+function tagOrderOf(tag: string): number {
+	const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+	if (!m) return -1;
+	return Number(m[1]) * 1_000_000 + Number(m[2]) * 1_000 + Number(m[3]);
 }
 
 /** True when `index` sits outside any fenced code block (even number of ``` before it). */
@@ -267,16 +307,42 @@ describe('ensemble adoption ADR (issue #2505) — review checklist', () => {
 		}
 		const archivedOnly = canonicalMkdtemp('swarm-ensemble-adr-2505-arch-');
 		try {
-			fs.mkdirSync(path.join(archivedOnly, 'docs/releases'), {
+			fs.mkdirSync(path.join(archivedOnly, 'docs/releases/manifests'), {
 				recursive: true,
 			});
 			fs.writeFileSync(
 				path.join(archivedOnly, 'docs/releases/v0.0.0.md'),
 				'# archived narration for ADR 0002 (issue 2505)' + '\n',
 			);
+			// #3519 feedback: a stray vX.md WITHOUT a manifest claim for this
+			// exact path must NOT satisfy the pin (name-blind aggregate defect
+			// this round fixes) — resolution requires the claim.
+			expect(adoptionAdrFragmentText(archivedOnly)).toBeNull();
+			fs.writeFileSync(
+				path.join(archivedOnly, 'docs/releases/manifests/v0.0.0.json'),
+				JSON.stringify({
+					schemaVersion: 1,
+					tag: 'v0.0.0',
+					tagCommit: 'a'.repeat(40),
+					targetCommitish: 'a'.repeat(40),
+					releaseBodySha256: '0'.repeat(64),
+					fragments: [
+						{
+							prNumber: null,
+							order: 0,
+							path: 'docs/releases/pending/2505-ensemble-adoption-adr.md',
+							sha256: '3'.repeat(64),
+						},
+					],
+				}),
+			);
 			const text = adoptionAdrFragmentText(archivedOnly);
 			expect(text).toContain('ADR 0002');
 			expect(text).toContain('2505');
+			// Claim-without-body fails closed: the claiming tag's vX.md missing
+			// must not fabricate an obligation.
+			fs.rmSync(path.join(archivedOnly, 'docs/releases/v0.0.0.md'));
+			expect(adoptionAdrFragmentText(archivedOnly)).toBeNull();
 		} finally {
 			fs.rmSync(archivedOnly, { recursive: true, force: true });
 		}

@@ -36,15 +36,58 @@ function autoReviewFragmentText(root: string): string | null {
 	if (fs.existsSync(pendingFragment)) {
 		return fs.readFileSync(pendingFragment, 'utf8');
 	}
-	const releasesPath = path.join(root, 'docs/releases');
-	if (!fs.existsSync(releasesPath)) return null;
-	const parts: string[] = [];
-	for (const name of fs.readdirSync(releasesPath)) {
-		if (/^v\d+\.\d+\.\d+\.md$/.test(name)) {
-			parts.push(fs.readFileSync(path.join(releasesPath, name), 'utf8'));
+	// #3519 feedback: the consumed obligation resolves through the fragment's
+	// MANIFEST CLAIM (the claiming tag's vX.md carries it), never through a
+	// name-blind aggregate of every release body (the aggregate arm could
+	// satisfy the pin from unrelated history).
+	const manifestsDir = path.join(root, 'docs/releases/manifests');
+	if (!fs.existsSync(manifestsDir)) return null;
+	const claims: Array<{ tag: string; manifest: string }> = [];
+	for (const name of fs.readdirSync(manifestsDir)) {
+		if (!name.toLowerCase().endsWith('.json')) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(
+				fs.readFileSync(path.join(manifestsDir, name), 'utf8'),
+			);
+		} catch {
+			continue;
 		}
+		const manifest = parsed as {
+			schemaVersion?: unknown;
+			tag?: unknown;
+			fragments?: Array<{ path?: unknown }>;
+		};
+		if (
+			manifest?.schemaVersion !== 1 ||
+			!Array.isArray(manifest.fragments) ||
+			typeof manifest.tag !== 'string'
+		) {
+			continue;
+		}
+		const claimed = manifest.fragments.some(
+			(fragment) =>
+				fragment?.path ===
+				'docs/releases/pending/1675-default-auto-review-engine.md',
+		);
+		if (claimed) claims.push({ tag: manifest.tag, manifest: name });
 	}
-	return parts.length > 0 ? parts.join('\n') : null;
+	if (claims.length === 0) return null;
+	claims.sort(
+		(a, b) =>
+			tagOrderOf(b.tag) - tagOrderOf(a.tag) ||
+			(a.manifest < b.manifest ? 1 : a.manifest > b.manifest ? -1 : 0),
+	);
+	const archivedBody = path.join(root, 'docs/releases', `${claims[0].tag}.md`);
+	if (!fs.existsSync(archivedBody)) return null;
+	return fs.readFileSync(archivedBody, 'utf8');
+}
+
+/** Parse `v?X.Y.Z` into a comparable number; unparseable tags sort lowest. */
+function tagOrderOf(tag: string): number {
+	const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+	if (!m) return -1;
+	return Number(m[1]) * 1_000_000 + Number(m[2]) * 1_000 + Number(m[3]);
 }
 
 describe('auto-review cross-surface contract', () => {
@@ -134,14 +177,40 @@ describe('auto-review cross-surface contract', () => {
 		}
 		const archivedDir = canonicalMkdtemp('swarm-cross-surface-arch-');
 		try {
-			fs.mkdirSync(path.join(archivedDir, 'docs/releases'), {
+			fs.mkdirSync(path.join(archivedDir, 'docs/releases/manifests'), {
 				recursive: true,
 			});
 			fs.writeFileSync(
 				path.join(archivedDir, 'docs/releases/v0.0.0.md'),
 				'auto-review engine documented /swarm review surface',
 			);
+			// #3519 feedback: a stray vX.md WITHOUT a manifest claim for this
+			// exact path must NOT satisfy the pin — resolution requires the
+			// claim (the name-blind aggregate defect this round fixes).
+			expect(autoReviewFragmentText(archivedDir)).toBeNull();
+			fs.writeFileSync(
+				path.join(archivedDir, 'docs/releases/manifests/v0.0.0.json'),
+				JSON.stringify({
+					schemaVersion: 1,
+					tag: 'v0.0.0',
+					tagCommit: 'a'.repeat(40),
+					targetCommitish: 'a'.repeat(40),
+					releaseBodySha256: '0'.repeat(64),
+					fragments: [
+						{
+							prNumber: null,
+							order: 0,
+							path: 'docs/releases/pending/1675-default-auto-review-engine.md',
+							sha256: '4'.repeat(64),
+						},
+					],
+				}),
+			);
 			expect(autoReviewFragmentText(archivedDir)).toContain('/swarm review');
+			// Claim-without-body fails closed: the claiming tag's vX.md missing
+			// must not fabricate an obligation.
+			fs.rmSync(path.join(archivedDir, 'docs/releases/v0.0.0.md'));
+			expect(autoReviewFragmentText(archivedDir)).toBeNull();
 		} finally {
 			fs.rmSync(archivedDir, { recursive: true, force: true });
 		}

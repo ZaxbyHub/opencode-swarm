@@ -5,18 +5,64 @@ import { join } from 'node:path';
 const read = (relativePath: string): string =>
 	readFileSync(join(process.cwd(), relativePath), 'utf8');
 
+/**
+ * Consumption-aware fragment resolution (issue #3511; tightened per the
+ * #3519 feedback): pending is the sole authority while present; once
+ * consumed, the obligation resolves through the fragment's MANIFEST CLAIM —
+ * the claiming manifest's tag names the materialized body carrying the
+ * obligation — never through a name-blind aggregate of every release body.
+ * No claim → null → the pins fail (never vacuous).
+ */
 function fragmentTextOrArchive(name: string): string | null {
-	const pendingFragment = join(process.cwd(), 'docs/releases/pending', name);
+	// Repo root from this file's location (tests/unit/skills/* → root);
+	// FR-011 forbids new fixture roots anchored at the checkout cwd.
+	const root = join(import.meta.dir, '..', '..', '..');
+	const pendingFragment = join(root, 'docs/releases/pending', name);
 	if (existsSync(pendingFragment)) return readFileSync(pendingFragment, 'utf8');
-	const releasesPath = join(process.cwd(), 'docs/releases');
-	if (!existsSync(releasesPath)) return null;
-	const parts: string[] = [];
-	for (const entry of readdirSync(releasesPath)) {
-		if (/^v\d+\.\d+\.\d+\.md$/.test(entry)) {
-			parts.push(readFileSync(join(releasesPath, entry), 'utf8'));
+	const manifestsDir = join(root, 'docs/releases/manifests');
+	if (!existsSync(manifestsDir)) return null;
+	const claims: Array<{ tag: string; manifest: string }> = [];
+	for (const entry of readdirSync(manifestsDir)) {
+		if (!entry.toLowerCase().endsWith('.json')) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(readFileSync(join(manifestsDir, entry), 'utf8'));
+		} catch {
+			continue;
 		}
+		const manifest = parsed as {
+			schemaVersion?: unknown;
+			tag?: unknown;
+			fragments?: Array<{ path?: unknown }>;
+		};
+		if (
+			manifest?.schemaVersion !== 1 ||
+			!Array.isArray(manifest.fragments) ||
+			typeof manifest.tag !== 'string'
+		) {
+			continue;
+		}
+		const claimed = manifest.fragments.some(
+			(fragment) => fragment?.path === `docs/releases/pending/${name}`,
+		);
+		if (claimed) claims.push({ tag: manifest.tag, manifest: entry });
 	}
-	return parts.length > 0 ? parts.join('\n') : null;
+	if (claims.length === 0) return null;
+	claims.sort(
+		(a, b) =>
+			tagOrderOf(b.tag) - tagOrderOf(a.tag) ||
+			(a.manifest < b.manifest ? 1 : a.manifest > b.manifest ? -1 : 0),
+	);
+	const archivedBody = join(root, 'docs/releases', `${claims[0].tag}.md`);
+	if (!existsSync(archivedBody)) return null;
+	return readFileSync(archivedBody, 'utf8');
+}
+
+/** Parse `v?X.Y.Z` into a comparable number; unparseable tags sort lowest. */
+function tagOrderOf(tag: string): number {
+	const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+	if (!m) return -1;
+	return Number(m[1]) * 1_000_000 + Number(m[2]) * 1_000 + Number(m[3]);
 }
 
 function pendingText(name: string): string | null {

@@ -128,7 +128,7 @@ describe('archived-claim resolution (#3500 claim-only design)', () => {
 		).toBeNull();
 	});
 
-	test('identical digests across manifests resolve; distinct digests fail closed', () => {
+	test('identical digests across manifests resolve; distinct digests resolve to the latest consumption (issue #3519 feedback)', () => {
 		const same = fixtureRoot();
 		const sha = hex64(3);
 		put(
@@ -145,13 +145,10 @@ describe('archived-claim resolution (#3500 claim-only design)', () => {
 				{ path: 'docs/releases/pending/gone.md', sha256: sha },
 			]),
 		);
+		// Latest-wins + digest-only identity: the greatest tag wins.
 		expect(resolveArchivedClaim(same, 'docs/releases/pending/gone.md')).toEqual(
-			{
-				manifest: 'v1.0.0.json',
-				sha256: sha,
-			},
+			{ manifest: 'v1.0.1.json', sha256: sha },
 		);
-
 		const conflict = fixtureRoot();
 		put(
 			conflict,
@@ -167,9 +164,11 @@ describe('archived-claim resolution (#3500 claim-only design)', () => {
 				{ path: 'docs/releases/pending/gone.md', sha256: hex64(5) },
 			]),
 		);
-		expect(() =>
+		// Normal history: the LATEST consumption's digest wins (32 real
+		// double-claimed corpus paths previously threw).
+		expect(
 			resolveArchivedClaim(conflict, 'docs/releases/pending/gone.md'),
-		).toThrow(/archived claim is ambiguous/);
+		).toEqual({ manifest: 'v1.0.1.json', sha256: hex64(5) });
 	});
 
 	test('a nonempty published block referencing an archived fragment fails closed (duplicate-consumption hazard)', async () => {
