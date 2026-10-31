@@ -565,7 +565,6 @@ export async function tryAcquireLock(
 			// Legacy probe (once, NOT held): exclude a possibly-live
 			// old-version holder of the same target. A dead NEW holder holds
 			// no legacy artifact, so this probe never wedges recovery.
-			let probeRelease: (() => Promise<void>) | undefined;
 			let probeBlocked = false;
 			for (const sentinel of existingLegacySentinels(directory, filePath)) {
 				try {
@@ -579,7 +578,6 @@ export async function tryAcquireLock(
 					} catch {
 						/* probe release best-effort */
 					}
-					probeRelease = undefined;
 				} catch {
 					probeBlocked = true;
 					break;
@@ -589,7 +587,6 @@ export async function tryAcquireLock(
 				result.release();
 				return { acquired: false };
 			}
-			void probeRelease;
 			const payload = result.payload;
 			const lock: FileLock = {
 				filePath,
@@ -760,7 +757,7 @@ export function listActiveLocks(directory: string): FileLock[] {
 				const stat = fs.statSync(lockPath);
 				if (payload !== null && isPidAlive(payload.ownerPid)) {
 					locks.push({
-						filePath: payload.taskId ? lockPath : lockPath, // identity is the hash name; meta carries the original path for lanes
+						filePath: lockPath, // identity is the hash name; meta carries the original path for lanes
 						agent: payload.agent,
 						taskId: payload.taskId,
 						timestamp: new Date(payload.acquiredAtMs).toISOString(),

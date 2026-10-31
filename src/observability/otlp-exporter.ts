@@ -294,7 +294,7 @@ function noteDrop(reason: string): void {
 
 /** Classification stamped on the rethrown error so the record-owning catch
  *  sites count the drop ONCE under the right category (#2969, SIB3-2). */
-export type SwarmWriteClass =
+type SwarmWriteClass =
 	| 'spool_write_failed'
 	| 'state_write_failed'
 	| 'spool_cleanup_failed';

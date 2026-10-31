@@ -785,10 +785,22 @@ export function withCoreEventStoreLock<T>(
 			}
 		}
 		if (attempt === 0) {
-			// First contention: one fenced liveness break attempt.
+			// First contention: one fenced liveness break attempt. Class
+			// selection keys on PARSABILITY (the evidence path's #2967 rule),
+			// not mere non-emptiness — a torn non-empty payload is just as
+			// ownerless as an empty one (impl-review finding 1).
 			const raw = readOwnerLockPayload(lockPath);
+			let parsable = false;
+			if (raw !== null && raw.length > 0) {
+				try {
+					const parsed = JSON.parse(raw) as { v?: unknown; ownerPid?: unknown };
+					parsable = parsed?.v === 1 && Number.isSafeInteger(parsed.ownerPid);
+				} catch {
+					parsable = false;
+				}
+			}
 			const breakResult = breakStaleLockIfOwnerDead(lockPath, {
-				class: raw !== null && raw.length > 0 ? 'dead-owner' : 'ttl-cleanup',
+				class: parsable ? 'dead-owner' : 'ttl-cleanup',
 				store: 'events',
 			});
 			if (breakResult === 'broken') {
