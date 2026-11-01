@@ -130,3 +130,78 @@ describe('dedup key behavior — per-occurrence survival (#3518 P-4)', () => {
 		expect(result.writes.filter((w) => w.path === '/tmp/out')).toHaveLength(2);
 	});
 });
+
+describe('resolveWriteTargets — subshell cd tracking (real fixtures)', () => {
+	// Moved from the grandfathered base suite (#3518 P-2 CI round): the
+	// historical shapes cd'd into synthetic /tmp|/home paths, which only
+	// track on hosts where <current-drive>:	mp exists — green locally,
+	// red on the CI runner (unit windows-6). Real fixtures below.
+
+	test('subshell cd changes effective cwd for writes inside', () => {
+		const root = canonicalMkdtemp('swd3518-sub-1-');
+		try {
+			mkdirSync(path.join(root, 'tmpdir'), { recursive: true });
+			const writes = [{ category: 'redirect', operator: '>', path: 'file' }];
+			const result = resolveWriteTargets(
+				'(cd tmpdir && echo x > file)',
+				writes,
+				root,
+			);
+			expect(result[0].resolvedPath).toBe(path.join(root, 'tmpdir', 'file'));
+			expect(result[0].resolved).toBe(true);
+		} finally {
+			removeTreeWithRetry(root);
+		}
+	});
+
+	test('cd in parent shell propagates to subshell entry cwd', () => {
+		const root = canonicalMkdtemp('swd3518-sub-2-');
+		try {
+			mkdirSync(path.join(root, 'tmpdir'), { recursive: true });
+			const writes = [{ category: 'redirect', operator: '>', path: 'file' }];
+			const result = resolveWriteTargets(
+				'cd tmpdir && (echo x > file)',
+				writes,
+				root,
+			);
+			// The subshell inherits the parent cwd at entry: cd ran BEFORE it.
+			expect(result[0].resolvedPath).toBe(path.join(root, 'tmpdir', 'file'));
+			expect(result[0].resolved).toBe(true);
+		} finally {
+			removeTreeWithRetry(root);
+		}
+	});
+
+	test('nested subshells track cwd independently', () => {
+		const root = canonicalMkdtemp('swd3518-sub-3-');
+		try {
+			mkdirSync(path.join(root, 'home'), { recursive: true });
+			const writes = [{ category: 'redirect', operator: '>', path: 'file' }];
+			const result = resolveWriteTargets(
+				'( (cd home && echo x > file) )',
+				writes,
+				root,
+			);
+			expect(result[0].resolvedPath).toBe(path.join(root, 'home', 'file'));
+			expect(result[0].resolved).toBe(true);
+		} finally {
+			removeTreeWithRetry(root);
+		}
+	});
+
+	test('multiple writes in subshell all use same effective cwd', () => {
+		const root = canonicalMkdtemp('swd3518-sub-4-');
+		try {
+			mkdirSync(path.join(root, 'tmpdir'), { recursive: true });
+			const command = '(cd tmpdir && echo a > a.txt && echo b > b.txt)';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			const aWrite = result.find((r) => r.original.path === 'a.txt');
+			const bWrite = result.find((r) => r.original.path === 'b.txt');
+			expect(aWrite?.resolvedPath).toBe(path.join(root, 'tmpdir', 'a.txt'));
+			expect(bWrite?.resolvedPath).toBe(path.join(root, 'tmpdir', 'b.txt'));
+		} finally {
+			removeTreeWithRetry(root);
+		}
+	});
+});
