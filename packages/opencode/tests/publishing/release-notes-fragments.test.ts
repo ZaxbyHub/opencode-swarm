@@ -159,7 +159,7 @@ describe('release-notes-fragments — cleanup deletion planner (consume-and-remo
 	};
 	const entryB = {
 		prNumber: 11,
-		filePath: 'docs/releases/pending/changed-after-publication.md',
+		filePath: 'docs/releases/pending/mutated-since-collection.md',
 		content: 'Changed fragment body',
 		sha256: '',
 	};
@@ -179,7 +179,7 @@ describe('release-notes-fragments — cleanup deletion planner (consume-and-remo
 		`${entryA.content}\n\n---\n\n${entryB.content}`,
 	);
 
-	test('deletes only byte-identical published fragments; retains changed and unpublished ones', () => {
+	test('deletes only byte-identical published fragments; retains mutated-since-collection and unpublished ones', () => {
 		const entries = [
 			{ ...entryA, sha256: sha256Of(entryA.content) },
 			{ ...entryB, sha256: sha256Of(entryB.content) },
@@ -188,7 +188,7 @@ describe('release-notes-fragments — cleanup deletion planner (consume-and-remo
 		const plan = planFragmentDeletions(publishedBody, entries, (filePath) => workspace.get(filePath) ?? null);
 		expect(plan.deletable.map((e) => e.filePath)).toEqual([entryA.filePath]);
 		const reasons = Object.fromEntries(plan.retained.map((r) => [r.entry.filePath, r.reason]));
-		expect(reasons[entryB.filePath]).toContain('hash mismatch');
+		expect(reasons[entryB.filePath]).toContain('same-run integrity');
 		expect(reasons[entryC.filePath]).toContain('not present in published body');
 	});
 
@@ -203,7 +203,7 @@ describe('release-notes-fragments — cleanup deletion planner (consume-and-remo
 		const entries = [{ ...entryA, sha256: sha256Of(entryA.content) }];
 		const plan = planFragmentDeletions(publishedBody, entries, () => null);
 		expect(plan.deletable).toEqual([]);
-		expect(plan.retained[0]?.reason).toContain('hash mismatch');
+		expect(plan.retained[0]?.reason).toContain('same-run integrity');
 	});
 
 	test('the pending fragment on this branch survives the planner (nothing references it yet)', () => {

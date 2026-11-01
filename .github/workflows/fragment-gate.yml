@@ -25,6 +25,13 @@ jobs:
           # the base ref, which a depth-1 checkout cannot resolve.
           fetch-depth: 0
 
+      # GitHub-hosted runners do NOT ship bun (review F-1): without this the
+      # gate's `bun scripts/...` exits 127 on every non-bot PR and the step's
+      # fail-closed mapping turns that into a hard error.
+      - uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
+        with:
+          bun-version: "1.x"
+
       - name: Require pending release fragment
         if: github.event_name == 'pull_request'
         shell: bash

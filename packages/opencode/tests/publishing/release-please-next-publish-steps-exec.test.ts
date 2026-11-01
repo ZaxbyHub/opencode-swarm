@@ -160,6 +160,19 @@ function runStepBody(body: string, scenario: NpmScenario, envExtra: Record<strin
 	}
 }
 
+// Execute the ref-guard step body with a controlled GITHUB_REF (no fake npm
+// needed — the guard only inspects the env var and echoes/exits).
+function runGuardBody(body: string, githubRef: string): RunResult {
+	const result = spawnSync('bash', ['-c', body], {
+		cwd: process.cwd(),
+		timeout: 10_000,
+		maxBuffer: 1024 * 1024,
+		env: { ...process.env, GITHUB_REF: githubRef },
+		encoding: 'utf8',
+	});
+	return { code: result.status ?? -1, stdout: result.stdout ?? '' };
+}
+
 // The three neutralization shapes from the #3220 review record. Each keeps
 // every construct the line-shaped suite requires (the `set -eo pipefail`
 // line, the `::error::` string, a literal `exit 1`, the tolerance grep)
@@ -232,6 +245,37 @@ describe('release-please-next publish steps — executable harness (#3229 R1)', 
 			});
 		});
 	}
+
+	describe('ref guard (review F-4): the refusal step is EXECUTED, not just present', () => {
+		// The guard step's run body, extracted by step name with the same
+		// block-scalar semantics as the publish steps.
+		const guardBody = (() => {
+			const lines = readFileSync(WORKFLOW_PATH, 'utf8').split(/\r?\n/);
+			const nameIdx = lines.findIndex((ln) => /-\s+name:\s*Refuse publishes from refs other than next\s*$/.test(ln));
+			expect(nameIdx, 'the refusal guard step must exist').toBeGreaterThanOrEqual(0);
+			const runIdx = lines.findIndex((ln, idx) => idx > nameIdx && /^\s*run:\s*\|\s*$/.test(ln));
+			expect(runIdx, 'the refusal guard step must carry a run-pipe body').toBeGreaterThan(nameIdx);
+			const runIndent = indentOf(lines[runIdx]);
+			const body: string[] = [];
+			for (let k = runIdx + 1; k < lines.length; k += 1) {
+				const ln = lines[k];
+				if (ln.trim() !== '' && indentOf(ln) <= runIndent) break;
+				body.push(ln);
+			}
+			return body.join('\n');
+		})();
+
+		test('exits nonzero when GITHUB_REF is not refs/heads/next', () => {
+			const result = runGuardBody(guardBody, 'refs/heads/feature/x');
+			expect(result.code, `stdout: ${result.stdout}`).not.toBe(0);
+			expect(result.stdout.includes('publish refused')).toBe(true);
+		});
+
+		test('exits 0 when GITHUB_REF is refs/heads/next (dispatch recovery preserved)', () => {
+			const result = runGuardBody(guardBody, 'refs/heads/next');
+			expect(result.code, `stdout: ${result.stdout}`).toBe(0);
+		});
+	});
 
 	describe('neutralization mutants genuinely neutralize (the class the real-step legs guard)', () => {
 		const firstStep = collectPublishStepBodies()[0];

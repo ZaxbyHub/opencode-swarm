@@ -199,7 +199,9 @@ jobs:
     if: ${{ always() && needs.release-please.result == 'success' && needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # gh release view needs read, gh release edit needs write (review F-2);
+      # this job touches releases only — no pull-request mutations.
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 

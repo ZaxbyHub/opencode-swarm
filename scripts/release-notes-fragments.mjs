@@ -534,11 +534,16 @@ async function modeUpdateRelease(logFn) {
 /**
  * Pure deletion planner. A fragment is deletable iff BOTH hold:
  *  1. its rendered content appears in the CURRENT published body's marker
- *     payload (re-fetched — not the body captured at injection time);
- *  2. its workspace bytes at THIS checkout (the release merge SHA) still
- *     hash-match the entry captured at collection time — a fragment
- *     changed after publication is retained, never deleted on a
- *     self-comparison.
+ *     payload (re-fetched — not the body captured at injection time). THIS
+ *     is the operative oracle: a fragment edited in a later commit on next
+ *     renders differently than the published body, so a retry/dispatch
+ *     cleanup run RETAINS it (review F-5).
+ *  2. its workspace bytes still hash-match the entry captured at collection
+ *     time — a same-run integrity guard (defense in depth: fires if the
+ *     pending tree is mutated between collection and deletion inside one
+ *     run; in the current single-checkout workflow topology the bytes are
+ *     the same commit by construction, so this leg cannot fire there —
+ *     pinned by unit fixtures, honestly disclosed as such).
  * Exported for unit tests.
  */
 export function planFragmentDeletions(publishedBody, entries, readCurrentBytes) {
@@ -560,7 +565,7 @@ export function planFragmentDeletions(publishedBody, entries, readCurrentBytes) 
 		}
 		const currentBytes = readCurrentBytes(entry.filePath);
 		if (currentBytes === null || sha256(currentBytes) !== entry.sha256) {
-			retained.push({ entry, reason: 'file changed after publication (hash mismatch at release merge SHA)' });
+			retained.push({ entry, reason: 'file unreadable or mutated between collection and deletion (same-run integrity)' });
 			continue;
 		}
 		deletable.push(entry);

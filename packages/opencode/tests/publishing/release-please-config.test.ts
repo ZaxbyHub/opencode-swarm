@@ -151,7 +151,7 @@ describe('release-please config (issue #3150 release enablement)', () => {
 		// '…\n\nBREAKING CHANGE: x\n' | git interpret-trailers --parse emits
 		// nothing). The trailer leg therefore sees hyphen-form footers.
 		const trailers = Bun.spawnSync(
-			['git', '-C', REPO_ROOT, 'log', '--format=%H|%-(trailers:key=BREAKING CHANGE,valueonly)', `${REQUIRED_BOOTSTRAP_SHA}..HEAD`],
+			['git', '-C', REPO_ROOT, 'log', '--format=%H|%-(trailers:key=BREAKING-CHANGE,valueonly)', `${REQUIRED_BOOTSTRAP_SHA}..HEAD`],
 			{ stdout: 'pipe', stderr: 'ignore' },
 		);
 		expect(trailers.exitCode).toBe(0);
