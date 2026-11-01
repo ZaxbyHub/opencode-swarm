@@ -9,7 +9,10 @@
  * What they cover is the shapes a naive fix would newly admit, plus the
  * redirect-preservation constraint the clause recursion has to honour.
  */
+
 import { describe, expect, it } from 'bun:test';
+import { mkdirSync } from 'node:fs';
+import * as path from 'node:path';
 import {
 	detectPosixWrites,
 	detectWindowsWrites,
@@ -17,6 +20,7 @@ import {
 	isPowerShellShaped,
 	resolveWriteTargets,
 } from '../../../../src/hooks/shell-write-detect';
+import { canonicalMkdtemp } from '../../../../tests/helpers/tmpdir';
 
 const writes = (command: string) => detectPosixWrites(command).writes;
 
@@ -209,36 +213,37 @@ describe('#3099 — shell-write clause recursion and shape classification', () =
 	// behavior through resolveWriteTargets with cwd '/w'.
 	// ------------------------------------------------------------------
 	describe('#3099 round 3 — unreachable-cd does not poison resolution', () => {
+		// #3518 P-2: the cd tracker stat-gates its mutation, so the fixture
+		// root and its `src` subdir really exist on the host (the historical
+		// synthetic /w cwd no longer tracks a taken cd).
+		const root = canonicalMkdtemp('swcr3099-cd-');
+		mkdirSync(path.join(root, 'src'), { recursive: true });
+		const atRoot = path.join(root, 'OUT.txt');
+		const atSrc = path.join(root, 'src', 'OUT.txt');
 		const cases: Array<[string, string, string]> = [
 			[
 				'untaken if-branch cd',
 				'if false; then cd src; fi; echo hi > OUT.txt',
-				'/w/OUT.txt',
+				atRoot,
 			],
-			[
-				'function-definition cd',
-				'f() { cd src; }; echo hi > OUT.txt',
-				'/w/OUT.txt',
-			],
+			['function-definition cd', 'f() { cd src; }; echo hi > OUT.txt', atRoot],
 			[
 				'untaken while-body cd',
 				'while false; do cd src; done; echo hi > OUT.txt',
-				'/w/OUT.txt',
+				atRoot,
 			],
 			[
 				'taken top-level cd still propagates',
 				'cd src; echo hi > OUT.txt',
-				'/w/src/OUT.txt',
+				atSrc,
 			],
 		];
 		for (const [label, command, wantPath] of cases) {
 			it(`resolves ${label} against the reachable cwd`, () => {
 				const det = detectPosixWrites(command);
-				const resolved = resolveWriteTargets(command, det.writes, '/w');
+				const resolved = resolveWriteTargets(command, det.writes, root);
 				expect(
-					resolved.some(
-						(r) => (r.resolvedPath ?? '').replace(/\+/g, '/') === wantPath,
-					),
+					resolved.some((r) => path.resolve(r.resolvedPath ?? '') === wantPath),
 				).toBe(true);
 			});
 		}

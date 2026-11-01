@@ -509,7 +509,43 @@ export function dcSplitSegments(cmd: string): string[] {
  * segment is not a destructive rm form.
  */
 export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
-	const tokens = segment.match(/"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g) ?? [];
+	const tokens: string[] =
+		segment.match(/"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g) ?? [];
+	// #3518 P-5 (class, final-critic round 1): tolerate leading
+	// open-parens/braces — a parenthesized segment runs the same rm in a
+	// POSIX subshell, whether the paren GLUES to the verb (`(rm`) or stands
+	// alone (`( rm`). Index-based scan (parallel-review A5: token.shift() in
+	// a while loop is quadratic on Node for delimiter-flooded segments —
+	// 160k tokens ~24s; an index cursor is linear) — drop standalone
+	// delimiter tokens, then strip a glued prefix from what remains.
+	let start = 0;
+	while (
+		start < tokens.length &&
+		tokens[start] !== undefined &&
+		tokens[start].length > 0 &&
+		/^[({\s]*$/.test(tokens[start])
+	) {
+		start += 1;
+	}
+	if (start < tokens.length && tokens[start] !== undefined) {
+		tokens[start] = tokens[start].replace(/^[({\s]+/, '');
+	}
+	const verbTokens = tokens.slice(start);
+	if (verbTokens.length < 2 || verbTokens[0] !== 'rm') return null;
+	tokens.length = 0;
+	tokens.push(...verbTokens);
+
+	// PRR-010: a trailing `)`/`}` stays glued to the LAST operand of a
+	// parenthesized segment (`(rm -rf dist)` extracted `dist)`), so strip
+	// trailing close delimiters and drop standalone delimiter tokens — the
+	// allowlisted safe form `(rm -rf dist)` must extract `dist`, and the
+	// blocked reason for `(rm -rf ../../outside)` must name the real target.
+	for (let i = 1; i < tokens.length; i += 1) {
+		tokens[i] = tokens[i].replace(/[)}]+$/, '');
+	}
+	const delimStripped = tokens.filter((t) => t.length > 0);
+	tokens.length = 0;
+	tokens.push(...delimStripped);
 	if (tokens.length < 2 || tokens[0] !== 'rm') return null;
 
 	let destructive = false;
@@ -969,10 +1005,10 @@ export function dcIsWindowsSwitchCluster(token: string): boolean {
  * Handles both `Remove-Item <path> -Recurse` and `Remove-Item -Recurse <path>` orderings.
  */
 export function dcExtractPowerShellTargets(segment: string): string[] {
-	// Strip the leading verb
-	const verbMatch = /^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\s+/i.exec(
-		segment,
-	);
+	// Strip the leading verb. #3518 P-5 (class): leading open-parens/
+	// whitespace tolerated — `(Remove-Item x -Recurse)` runs the same cmdlet.
+	const verbMatch =
+		/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\s+/i.exec(segment);
 	if (!verbMatch) return [];
 	const rest = segment.slice(verbMatch[0].length);
 
