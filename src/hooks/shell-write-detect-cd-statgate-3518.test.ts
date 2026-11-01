@@ -46,10 +46,15 @@ describe('resolveWriteTargets — relative cd path resolution (stat-gated)', () 
 				analysis.writes,
 				root,
 			);
-			const fileWrite = result.find((r) => r.original.path === 'file.txt');
-			expect(fileWrite?.resolvedPath).toBe(
-				path.join(root, 'subdir', 'nested', 'file.txt'),
-			);
+			// #3530 dual-resolution: a conditional right-branch cd emits BOTH
+			// landings — the skip landing (cds unapplied, file.txt at subdir)
+			// and the executed landing (both cds applied, file.txt at
+			// subdir/nested, where real bash writes it). The gate requires
+			// every landing to pass, so assert the executed landing is present.
+			const paths = result
+				.filter((r) => r.original.path === 'file.txt')
+				.map((r) => r.resolvedPath);
+			expect(paths).toContain(path.join(root, 'subdir', 'nested', 'file.txt'));
 		} finally {
 			removeTreeWithRetry(root);
 		}

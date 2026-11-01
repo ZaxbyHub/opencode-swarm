@@ -4987,9 +4987,14 @@ interface WriteWithNode {
 function applyCdTracking(
 	cwdStack: string[],
 	cdTarget: string,
-	cdMode: 'gate' | 'succeed',
+	cdMode: 'gate' | 'gate-skip' | 'succeed',
 ): boolean {
 	const current = cwdStack[0] ?? '/';
+	// 'gate-skip' (the tracked walk inside a conditional right branch):
+	// model the SKIP landing — bash never runs this cd when the left operand
+	// fails, so following siblings resolve at the pre-branch cwd (#3485
+	// PRR-001 skip contract: `false && cd src; write` lands at the root).
+	if (cdMode === 'gate-skip') return false;
 	const resolvedTarget = resolvePath(cdTarget, current);
 	if (resolvedTarget === null) {
 		// Dynamic target ($VAR/$(cmd)): keep the historical literal-append
@@ -5039,7 +5044,7 @@ function collectWritesWithNodes(
 	out: WriteWithNode[],
 	cwdStack: string[],
 	andSharedStack = true,
-	cdMode: 'gate' | 'succeed' = 'gate',
+	cdMode: 'gate' | 'gate-skip' | 'succeed' = 'gate',
 ): void {
 	if (!node || typeof node !== 'object') return;
 
@@ -5204,21 +5209,22 @@ function collectWritesWithNodes(
 					// the skipped cd was applied to the resolution).
 					const rightStack =
 						andChain && andSharedStack ? cwdStack : [leftContext];
+					// #3530 dual-resolution: the right branch of a conditional is
+					// AMBIGUOUS — gate mode models the SKIP landing (cds in the
+					// branch unapplied: `false && cd src; write` lands at the
+					// root), succeed mode models the EXECUTION landing (cds
+					// applied + propagated: `mkdir x && cd x` leaves the shell in
+					// x for later siblings). resolveWriteTargets emits both
+					// landings when they diverge and the gate requires every
+					// entry to pass.
+					const rightCdMode = cdMode === 'succeed' ? 'succeed' : 'gate-skip';
 					collectWritesWithNodes(
 						node.right,
 						out,
 						rightStack,
 						andSharedStack,
-						cdMode,
+						rightCdMode,
 					);
-					// #3530: in 'succeed' mode the right branch is modeled as
-					// EXECUTED (the pessimistic success landing), so a cd inside
-					// it persists to following siblings — bash executes
-					// `mkdir x && cd x` and every later command on the line runs
-					// in x. Without this propagation a left-nested chain
-					// (LogicalExpression(LogicalExpression(mkdir, cd), echo))
-					// discards the fresh right-stack and the success landing
-					// collapses onto the stale pre-cd cwd.
 					if (cdMode === 'succeed' && rightStack !== cwdStack) {
 						cwdStack[0] = rightStack[0] ?? leftContext;
 					}
@@ -5246,20 +5252,14 @@ function collectWritesWithNodes(
 				if (node.right) {
 					const rightStack =
 						node.type === 'And' && andSharedStack ? cwdStack : [leftContext];
+					const rightCdMode = cdMode === 'succeed' ? 'succeed' : 'gate-skip';
 					collectWritesWithNodes(
 						node.right,
 						out,
 						rightStack,
 						andSharedStack,
-						cdMode,
+						rightCdMode,
 					);
-					// #3530: in 'succeed' mode the right branch is modeled as
-					// EXECUTED (the pessimistic success landing), so a cd inside
-					// it persists to following siblings — bash: `mkdir x && cd x`
-					// leaves the shell in x for every later command on the line.
-					// Without this propagation a left-nested chain
-					// (And(And(mkdir, cd), echo)) discards the fresh right-stack
-					// and the success landing collapses back onto the stale cwd.
 					if (cdMode === 'succeed' && rightStack !== cwdStack) {
 						cwdStack[0] = rightStack[0] ?? leftContext;
 					}

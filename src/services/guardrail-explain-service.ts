@@ -284,10 +284,12 @@ function evaluateDestructiveDecision(
 		// switch tokens, mirroring the gate (a `-r` substring inside a path
 		// operand like `rm some-r/x` is a plain delete; issue #3495 class).
 		if (
-			/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]ecurse\b/i.test(
+			/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]ecurse\b/i.test(
 				seg,
 			) ||
-			/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]\b/i.test(seg)
+			/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]\b/i.test(
+				seg,
+			)
 		) {
 			const targets = dcExtractPowerShellTargets(seg);
 			if (targets.length > 0) {

@@ -43,7 +43,7 @@ export async function handleUnlinkCommand(
 	// migration engine locks the right directories. The shared cohort is never
 	// deleted/truncated (acceptance: must not lose data for peers).
 	let totalMerged = 0;
-	const totalSuperseded = 0;
+	let totalSuperseded = 0;
 	let totalSkipped = 0;
 	let familySummary = '';
 	if (copyBack) {
@@ -55,10 +55,28 @@ export async function handleUnlinkCommand(
 			for (const m of result.perMember) {
 				totalMerged += m.merged;
 				totalSkipped += m.skipped;
+				totalSuperseded += m.superseded ?? 0;
 			}
 			familySummary = result.perMember
-				.filter((m) => m.merged > 0 || m.skipped > 0)
-				.map((m) => `    ${m.filename}: ${m.merged} copied, ${m.skipped} kept`)
+				.filter(
+					(m) =>
+						m.merged > 0 ||
+						m.skipped > 0 ||
+						(m.superseded ?? 0) > 0 ||
+						(m.noSignal ?? 0) > 0 ||
+						(m.deduped ?? 0) > 0,
+				)
+				.map((m) => {
+					const recency =
+						(m.superseded ?? 0) > 0 ? `, ${m.superseded} recency-resolved` : '';
+					const noSig =
+						(m.noSignal ?? 0) > 0
+							? `, ${m.noSignal} no-recency-signal kept`
+							: '';
+					const dedup =
+						(m.deduped ?? 0) > 0 ? `, ${m.deduped} duplicates collapsed` : '';
+					return `    ${m.filename}: ${m.merged} copied, ${m.skipped} kept${recency}${noSig}${dedup}`;
+				})
 				.join('\n');
 		} catch (error) {
 			return `❌ Failed to copy shared knowledge family back to local: ${

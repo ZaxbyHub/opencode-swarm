@@ -3,9 +3,16 @@
  * quarantined-member recency field (PRR-014), O(n) destination reduction
  * with the deduped counter (PRR-009/015), and provenance-preserving replace.
  */
-import { describe, expect, test } from 'bun:test';
+
+import { afterAll, describe, expect, test } from 'bun:test';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import * as path from 'node:path';
 import { KNOWLEDGE_FAMILY } from '../../../src/knowledge/family-manifest';
-import { _internals } from '../../../src/knowledge/family-migration';
+import {
+	_internals,
+	migrateKnowledgeFamily,
+} from '../../../src/knowledge/family-migration';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 const { mergeStoreEntries, appendUnionById, keySelectorFor } = _internals;
 
@@ -108,14 +115,54 @@ describe('quarantined-member recency field (PRR-014)', () => {
 		expect(r.superseded).toBe(1);
 	});
 
+	// Fixed upper bound well above every fixture stamp (mirrors the engine's
+	// far-future rejection window without a real-clock read).
+	const RECENCY_CEILING = Date.parse('2027-01-01T00:00:00Z');
 	function rowRecencyWithField(row: unknown, field: string) {
 		const o = row as Record<string, unknown>;
 		const raw = typeof o[field] === 'string' ? (o[field] as string) : undefined;
 		if (raw === undefined) return null;
 		const at = Date.parse(raw);
-		if (Number.isNaN(at) || at > Date.now() + 86_400_000) return null;
+		if (Number.isNaN(at) || at > RECENCY_CEILING) return null;
 		return { at, revision: 0 };
 	}
+});
+
+describe('quarantined recency through the PRODUCTION merge path (PRR-014)', () => {
+	test('migrateKnowledgeFamily keeps the newer quarantine record', async () => {
+		const root = canonicalMkdtemp('km-recency-prod-');
+		afterAll(() => removeTreeWithRetry(root));
+		const mkStore = (dir: string, quarantinedAt: string, lesson: string) => {
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(
+				path.join(dir, 'knowledge-quarantined.jsonl'),
+				`${JSON.stringify({
+					id: 'q1',
+					lesson,
+					updated_at: '2026-01-01T00:00:00Z',
+					quarantined_at: quarantinedAt,
+				})}
+`,
+			);
+		};
+		const shared = path.join(root, 'shared');
+		const local = path.join(root, 'local');
+		// BOTH rows carry the same updated_at — only quarantined_at
+		// distinguishes them, so the member recencyField is load-bearing.
+		mkStore(shared, '2026-01-01T00:00:00Z', 'old quarantine');
+		mkStore(local, '2026-08-01T00:00:00Z', 'new quarantine record');
+		await migrateKnowledgeFamily(shared, local);
+		const merged = readFileSync(
+			path.join(shared, 'knowledge-quarantined.jsonl'),
+			'utf8',
+		)
+			.split('\n')
+			.filter((line) => line.trim().length > 0)
+			.map((line) => JSON.parse(line) as { id: string; lesson: string });
+		const kept = merged.filter((e) => e.id === 'q1');
+		expect(kept).toHaveLength(1);
+		expect(kept[0].lesson).toBe('new quarantine record');
+	});
 });
 
 describe('O(n) destination reduction + deduped counter (PRR-009/015)', () => {

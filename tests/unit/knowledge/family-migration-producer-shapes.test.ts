@@ -224,9 +224,17 @@ describe('migrateKnowledgeFamily on real producer shapes (link + unlink)', () =>
 			'utf8',
 		);
 		expect(localEvents).toContain('evt-abc-123');
-		// Sanity: the migration reported work happened.
-		expect(
-			linkCounts.perMember.some((m) => m.filename === 'knowledge-events.jsonl'),
-		).toBe(true);
+		// The application member's copy-back is asserted too — the original
+		// gap never checked it (PRR-020c).
+		const localApplication = readFileSync(
+			path.join(local, 'knowledge-application.jsonl'),
+			'utf8',
+		);
+		expect(localApplication).toContain('k42');
+		// The events member actually merged work (added the real event row).
+		const eventsMemberCount = linkCounts.perMember.find(
+			(m) => m.filename === 'knowledge-events.jsonl',
+		);
+		expect(eventsMemberCount?.merged).toBeGreaterThan(0);
 	});
 });
