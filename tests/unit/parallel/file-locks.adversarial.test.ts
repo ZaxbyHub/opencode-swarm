@@ -691,15 +691,9 @@ describe('file-locks — adversarial security tests', () => {
 			const released = await releaseLaneLocks(dir, 'lane-2');
 			expect(released).toBe(0);
 
-			// Lane-1's lock should still be visible — #2967 adaptation: the
-			// lane lock's listing identity is its `.lck` artifact path.
-			const active = listActiveLocks(dir);
-			expect(
-				active.some(
-					(l) => l.filePath === getOwnerLockPath(dir, 'src/lane-specific.txt'),
-				),
-			).toBe(true);
-
+			// #2967: listing identity is the `.lck` artifact path.
+			const lane1 = getOwnerLockPath(dir, 'src/lane-specific.txt');
+			expect(listActiveLocks(dir).some((l) => l.filePath === lane1)).toBe(true);
 			// Clean up lane-1.
 			await releaseLaneLocks(dir, 'lane-1');
 		});

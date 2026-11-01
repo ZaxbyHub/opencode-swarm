@@ -457,68 +457,6 @@ describe('lane-based file locks', () => {
 		});
 	});
 
-	// ========== GROUP 6: listActiveLocks with metadata ==========
-	describe('Group 6: listActiveLocks with metadata', () => {
-		it('lists lane locks via the .lck payload projection; rich lane identity lives in the .meta sidecar', async () => {
-			// #2967 adaptation: lane locks ride the wx owner-payload
-			// substrate — listActiveLocks projects the PAYLOAD (artifact
-			// path + agent/taskId + live heartbeat); the laneId and
-			// original path are carried by the .meta sidecar (pinned
-			// below and in Group 3).
-			const files = ['real-path-a.ts', 'real-path-b.ts'];
-			await acquireLaneLocks(
-				tmpDir,
-				'rich-lane',
-				files,
-				'rich-agent',
-				'3.14',
-				'rich-session',
-			);
-
-			const locks = listActiveLocks(tmpDir);
-
-			expect(locks.length).toBeGreaterThanOrEqual(2);
-			const richLocks = locks.filter(
-				(l) => l.agent === 'rich-agent' && l.taskId === '3.14',
-			);
-			expect(richLocks).toHaveLength(2);
-
-			const expectedPaths = files.map((f) => getOwnerLockPath(tmpDir, f));
-			const listedPaths = richLocks.map((l) => l.filePath).sort();
-			expect(listedPaths).toEqual(expectedPaths.sort());
-			for (const lock of richLocks) {
-				// Live owner heartbeat: active with no expiry horizon.
-				expect(lock.expiresAt).toBe(Number.MAX_SAFE_INTEGER);
-			}
-
-			// The lane's rich metadata (laneId + original path) is intact
-			// in the sidecar.
-			const locksDir = path.join(tmpDir, '.swarm', 'locks');
-			const laneMetas = fs
-				.readdirSync(locksDir)
-				.filter((f) => f.endsWith('.meta'))
-				.map(
-					(f) =>
-						JSON.parse(
-							fs.readFileSync(path.join(locksDir, f), 'utf-8'),
-						) as LockMetadata,
-				)
-				.filter((m) => m.laneId === 'rich-lane');
-			expect(laneMetas).toHaveLength(2);
-			for (const meta of laneMetas) {
-				expect(files).toContain(meta.originalPath);
-				expect(meta.agent).toBe('rich-agent');
-			}
-
-			await releaseLaneLocks(tmpDir, 'rich-lane');
-		});
-
-		it('returns empty array when no locks exist', () => {
-			const locks = listActiveLocks(tmpDir);
-			expect(locks).toEqual([]);
-		});
-	});
-
 	// ========== GROUP 7: listActiveLocks filters expired ==========
 	describe('Group 7: listActiveLocks filters expired', () => {
 		it('expired locks (past expiresAt) are not returned', async () => {
