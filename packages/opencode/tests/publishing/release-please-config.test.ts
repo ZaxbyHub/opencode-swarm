@@ -216,10 +216,14 @@ describe('breaking-commit body-scan leg is self-verifying (#3229 R2)', () => {
 		expect(tree.exitCode).toBe(0);
 		const treeSha = tree.stdout.toString().trim();
 		const commitWithMessage = (message: string): string => {
-			const res = Bun.spawnSync(['git', '-C', REPO_ROOT, 'commit-tree', treeSha, '-p', 'HEAD', '-m', message], {
-				stdout: 'pipe',
-				stderr: 'ignore',
-			});
+			// CI runners carry no git identity (actions/checkout configures
+			// none), and commit-tree refuses without one (exit 128). Provide
+			// a per-invocation test identity so the probe is deterministic on
+			// every runner image.
+			const res = Bun.spawnSync(
+				['git', '-C', REPO_ROOT, '-c', 'user.name=issue-tracer-probe', '-c', 'user.email=probe@example.invalid', 'commit-tree', treeSha, '-p', 'HEAD', '-m', message],
+				{ stdout: 'pipe', stderr: 'ignore' },
+			);
 			expect(res.exitCode).toBe(0);
 			return res.stdout.toString().trim();
 		};
