@@ -4,7 +4,7 @@ description: Run a graph-guided, tool-augmented PR review using context packing,
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "286793ba997d"
+  swarm-contract-digest: "23d8c7cdf48a"
 ---
 
 # /swarm-pr-review
@@ -1285,10 +1285,14 @@ generic swap for it), and the synthesis MUST carry the degraded-independence
 disclosure. Under Profiles B/C a generic agent type is additionally a
 FALLBACK only when no pinned critic type exists on the roster at all, or the
 pinned dispatch failed (that failure means the Hard Rule 14 initial attempt
-plus its two retries on the same pinned type); any same-family critic —
-pinned or generic — is disclosed as a degraded independence gate, never
-presented as equivalent. Under Profile A the controller's `critic` role is
-the pinned type and the generic fallback does not apply. This policy binds
+plus its two retries on the same pinned type); a fallback that also fails
+surfaces BLOCKED per Hard Rule 14 — this fallback is the critic-role
+exception to that rule's BLOCKED-on-retry-exhaustion. Any same-family
+critic — pinned or generic — is disclosed as a degraded independence gate,
+never presented as equivalent. Where the harness does not expose model
+identity, no pinned critic is eligible: the pinned critic serves with the
+disclosure. Under Profile A the controller's `critic` role is the pinned
+type and the generic fallback does not apply. This policy binds
 the harness adapters: a condensed/installed skill copy whose routing note
 names a generic agent for this role without this pinned-first rule is
 defective — correct it, do not follow it. The binding is to the role and its
@@ -1408,7 +1412,7 @@ Detailed reference material moved to `.opencode/skills/swarm-pr-review/reference
 
 | Verdict | Condition | `report_verdict` |
 |---|---|---|
-| `APPROVE` | zero unresolved CRITICAL findings, zero unresolved HIGH findings, all blocking obligations MET, no required validation phase failed | `APPROVE` -> APPROVE |
+| `APPROVE` | zero unresolved CRITICAL findings, zero unresolved HIGH findings, all blocking obligations MET, no required validation phase failed, and the Pre-Synthesis critic-independence gate is not DEGRADED | `APPROVE` -> APPROVE |
 | `APPROVE_WITH_NOTES` | zero unresolved CRITICAL findings, HIGH findings are downgraded/advisory only, obligations MET or explicitly non-blocking | `APPROVE_WITH_NOTES` -> APPROVE |
 | `REQUEST_CHANGES` | any unresolved HIGH finding, any NOT_MET blocking obligation, multiple MEDIUM findings with the same root cause, or validation/probe evidence indicates user-impacting risk | `REQUEST_CHANGES` -> REQUEST_CHANGES |
 | `BLOCK` | any unresolved CRITICAL finding, unsafe write/git/security issue, evidence integrity break, role/tool permission bypass, or config ratchet violation that can disable required protections | `BLOCK` -> REQUEST_CHANGES |
@@ -1466,7 +1470,7 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] findings escalated to critic: ___
 [VALIDATION] critic dispatched: ___ OR "SKIPPED — no typed critic-routed finding (CRITICAL/HIGH, MEDIUM+HIGH_IMPACT, MEDIUM+risk_tags, or UNKNOWN)"
 [VALIDATION] critic returned: ___ OR "N/A"
-[VALIDATION] critic agent type / independence: eligible pinned cross-model | DEGRADED — <reason> (a DEGRADED critic gate restricts the verdict to REQUEST_CHANGES or INCOMPLETE, mirroring the Profile A DEGRADED_DISCLOSED rule)
+[VALIDATION] critic agent type / independence: eligible pinned cross-model | independent generic fallback (Profiles B/C: no pinned critic on the roster, or pinned dispatch failed after Hard Rule 14) | N/A — no critic dispatch | DEGRADED — <reason> (only DEGRADED restricts the verdict, to REQUEST_CHANGES or INCOMPLETE, mirroring the Profile A DEGRADED_DISCLOSED rule)
 [VALIDATION] findings upheld by critic: ___
 [VALIDATION] findings downgraded by critic: ___
 [VALIDATION] findings disproved by critic: ___
