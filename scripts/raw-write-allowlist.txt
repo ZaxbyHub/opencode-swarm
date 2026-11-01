@@ -29,8 +29,8 @@
 # Freeze provenance (issue #2969): the issue's 95/49 figures are NOT
 # claimed — they were not reproducible from the tree. This freeze is the
 # live scan at introduction:
-#   src arm:   71 raw renameSync site(s) across 42 file(s)
-#   tests arm: 154 raw rm site(s) across 80 file(s)
+#   src arm:   70 raw renameSync site(s) across 42 file(s)
+#   tests arm: 154 raw rm site(s) across 79 file(s)
 
 # --- src arm (raw renameSync) ---
 src/background/delegation-health.ts: 1
@@ -74,11 +74,11 @@ src/tools/sast-baseline.ts: 2
 src/tools/submit-phase-council-verdicts.ts: 1
 src/turbo/lean/recovery.ts: 1
 src/turbo/lean/state.ts: 3
-src/utils/atomic-write.ts: 3
+src/utils/atomic-write.ts: 2
 
 # --- tests arm (raw rm in db-handle test files) ---
 tests/helpers/isolated-test-env.ts: 1
-tests/helpers/safe-test-dir.ts: 1
+tests/helpers/safe-test-dir.ts: 2
 tests/helpers/swarm-write-cache-scan.ts: 1
 tests/integration/curator-pipeline-health.test.ts: 2
 tests/integration/learning-loop-e2e.test.ts: 1
@@ -101,7 +101,6 @@ tests/unit/db/durability.test.ts: 1
 tests/unit/db/group-commit-writer.test.ts: 2
 tests/unit/db/insight-candidate-store.test.ts: 1
 tests/unit/db/observability-event-store.test.ts: 2
-tests/unit/db/observability-live-import-dedupe-2487.test.ts: 1
 tests/unit/db/observability-sink-controls-2487.test.ts: 1
 tests/unit/db/phase-report-store.test.ts: 1
 tests/unit/db/project-db-concurrency.test.ts: 3
