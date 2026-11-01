@@ -313,7 +313,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		parsesTarget: false,
 		producers: [
 			'src/tools/checkpoint.ts:224',
-			'src/full-auto/state.ts:',
+			'src/full-auto/state.ts:638',
 			'src/context-map/persistence.ts:135',
 			'src/context-map/capsule-persistence.ts:111',
 			'src/test-impact/history-store.ts:297',
