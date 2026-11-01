@@ -17,6 +17,7 @@ import * as path from 'node:path';
 import { handleArchiveCommand } from '../../../src/commands/archive.js';
 import type { Evidence } from '../../../src/config/evidence-schema.js';
 import { saveEvidence } from '../../../src/evidence/manager.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 let tempDir: string;
 
@@ -31,7 +32,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	rmSync(tempDir, { recursive: true, force: true });
+	safeRmRecursive(tempDir);
 });
 
 function createNoteEvidence(taskId: string): Evidence {

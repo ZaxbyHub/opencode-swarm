@@ -9,7 +9,7 @@ import {
 	prepareReceipt,
 	readWriteReceiptStatus,
 } from '../../../src/mcp/write-receipts';
-import { safeRmRecursive } from '../../helpers/safe-test-dir';
+import { safeRmAllRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function args(idempotency_key: string, scope?: string) {
@@ -35,8 +35,14 @@ describe('MCP receipt feedback regressions (#2500)', () => {
 	afterEach(() => {
 		// Retry-safe teardown (#2973 retirement of the #2812 windows flake): the
 		// FB-018 roll-over cells leave AV-held handles that raw rmSync cannot clear.
-		for (const root of testRoots) safeRmRecursive(root);
-		testRoots.clear();
+		// #3260-C: one stuck root no longer strands the rest — safeRmAllRecursive
+		// attempts EVERY root and throws after collecting failures; the clear()
+		// rides in finally so bookkeeping resets even when the aggregate throws.
+		try {
+			safeRmAllRecursive([...testRoots]);
+		} finally {
+			testRoots.clear();
+		}
 	});
 
 	test('FB-007: omitted and explicit global scopes share an identity', () => {

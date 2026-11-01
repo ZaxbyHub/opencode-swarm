@@ -33,6 +33,24 @@ export const _internals = {
 		undefined as unknown as typeof import('./fs-helpers.js').unlinkActiveStateFileWithRetry,
 	unlink: fs.unlink,
 	unlinkSidecarSync: fsSync.unlinkSync,
+	// #3260-B: write-denied discriminator for the unlink retry. True ONLY for
+	// explicitly classified permission errors (EACCES/EPERM) from an access
+	// W_OK probe — ENOENT and every other access outcome mean "not denied"
+	// (the retry schedule continues), so a transient lock on a readable file
+	// never fails fast and a missing file (ENOENT) never misclassifies as a
+	// permanent hold.
+	isWriteDenied: ((targetPath: string): boolean => {
+		try {
+			fsSync.accessSync(targetPath, fsSync.constants.W_OK);
+			return false;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			return code === 'EACCES' || code === 'EPERM';
+		}
+	}) as (targetPath: string) => boolean,
+	// #3260-B: injectable clock for the clean-stage admission deadline
+	// (tests stub this member instead of touching Date).
+	now: (() => Date.now()) as () => number,
 	sleep:
 		undefined as unknown as typeof import('../../utils/bun-compat.js').sleep,
 	collectGarbageBestEffort:

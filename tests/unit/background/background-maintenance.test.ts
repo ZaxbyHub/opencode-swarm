@@ -23,6 +23,7 @@ import {
 	scanBackgroundCoderReservationsForAdmission,
 } from '../../../src/background/pending-delegations';
 import { withEvidenceLock } from '../../../src/evidence/lock';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -101,7 +102,7 @@ describe('maintainBackgroundDelegations (issue #2104)', () => {
 
 	afterEach(() => {
 		restoreClock();
-		fs.rmSync(dir, { recursive: true, force: true });
+		safeRmRecursive(dir);
 	});
 
 	it('returns ok on an empty store and records the run in the health artifact', async () => {

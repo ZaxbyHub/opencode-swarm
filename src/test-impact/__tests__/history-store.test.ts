@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { safeRmRecursive } from '../../../tests/helpers/safe-test-dir.js';
 import {
 	appendTestRun,
 	getAllHistory,
@@ -11,8 +12,7 @@ import {
 } from '../../test-impact/history-store.js';
 
 const { tmpdir } = os;
-const { mkdtempSync, rmSync } = await import('node:fs');
-
+const { mkdtempSync } = await import('node:fs');
 describe('history-store', () => {
 	let tempDir: string;
 	let savedValidateProjectRoot: typeof historyInternals.validateProjectRoot;
@@ -31,7 +31,7 @@ describe('history-store', () => {
 	afterEach(() => {
 		historyInternals.validateProjectRoot = savedValidateProjectRoot;
 		// Clean up temp directory
-		rmSync(tempDir, { recursive: true, force: true });
+		safeRmRecursive(tempDir);
 	});
 
 	// -------------------------------------------------------------------------

@@ -135,15 +135,51 @@ echo "${quarantined_count} file(s) quarantined repo-wide, issue #1705"
 # mirrors the unit job's manifest posture — POSTURE ONLY: unlike the unit
 # job's manifest (consumed by verify-repository-validation-reports.ts and
 # uploaded as an artifact), nothing reads or verifies this file; its whole
-# job is to make .swarm/ exist before the first per-file snapshot, and the
-# directory is left in place (gitignored, prefix-ignored by the drift
-# helper). Interim alignment, not the end state: #3165-A retires the writers
-# and then flips the .swarm diff from warn to enforce, which restores
-# creation detection.
+# job is to make .swarm/ exist before the first per-file snapshot. #3260-E:
+# the gate-owned directory is now removed by an EXIT trap — a LOCAL
+# (non-CI) run on a fresh checkout no longer leaves `.swarm/` behind, which
+# silently disabled checkout-drift's "creating .swarm where none existed"
+# enforcement for every later local `bun test` until manual deletion. On CI
+# shards the trap is harmless (the workspace is discarded), and the manifest
+# is still present for the whole per-file loop, which is all any consumer
+# needs. The #3165-A end state (retire the writers, flip warn to enforce)
+# is unchanged.
 if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then
 	echo "::error::.swarm must be a real directory; symlinks, junctions, and non-directories are rejected"
 	exit 1
 fi
+# #3260-E: record whether THIS invocation created .swarm itself (fresh
+# checkout); the exit trap below removes the gate directory and the .swarm
+# parent only when we created them (content written by the test run itself
+# stays visible, exactly as a bare `bun test` would have left it). A
+# PRE-EXISTING .swarm/coverage-gate is NOT ours to destroy: the trap removes
+# only the manifest this run staged (FB-1, PR-review: an unconditional
+# rm -rf treats pre-existing directory content as disposable).
+gate_created_swarm=0
+if [ ! -d .swarm ]; then
+	gate_created_swarm=1
+fi
+gate_gate_dir_preexisting=0
+if [ -d .swarm/coverage-gate ]; then
+	gate_gate_dir_preexisting=1
+fi
+gate_cleanup() {
+	# Best-effort only: cleanup failures must never mask the gate's real exit
+	# status (no `exit` inside the trap; every rm is error-guarded).
+	if [ -d .swarm/coverage-gate ]; then
+		if [ "$gate_gate_dir_preexisting" -eq 1 ]; then
+			# Not created by this invocation: remove only the manifest we
+			# staged, never pre-existing content.
+			rm -f ".swarm/coverage-gate/shard-${shard_index:-all}-expected-files.txt" 2>/dev/null || true
+		else
+			rm -rf .swarm/coverage-gate 2>/dev/null || true
+		fi
+	fi
+	if [ "$gate_created_swarm" -eq 1 ] && [ -d .swarm ]; then
+		rmdir .swarm 2>/dev/null || true
+	fi
+}
+trap gate_cleanup EXIT
 # Annotate these setup failures: under set -e a bare mkdir/cp failure would
 # abort the gate with no ::error:: line, no flake-annotations entry, and the
 # parts dir leaked — indistinguishable from a clean run to annotation-based

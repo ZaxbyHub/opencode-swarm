@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.200.16](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.15...v7.200.16) (2026-11-01)
+
+
+### Bug Fixes
+
+* **close,tests:** feedback round — trap ownership, deadline side-effects, env pin, local hook budget, pair-atomic admission (PR [#3529](https://github.com/ZaxbyHub/opencode-swarm/issues/3529) review) ([d3da22d](https://github.com/ZaxbyHub/opencode-swarm/commit/d3da22d4b87758e90e96286384625585e619af17))
+* **tests:** drop vacuous assertions from the 3260-D leak/control fixtures (CI vacuous-assertion ratchet, [#2903](https://github.com/ZaxbyHub/opencode-swarm/issues/2903)) ([c69faa8](https://github.com/ZaxbyHub/opencode-swarm/commit/c69faa86f3a9774e2e61228f6830921c0bed2af3))
+* **tests:** keep the 3260-D fixtures outside the CI gate-policy census (.bun-test.ts, [#2552](https://github.com/ZaxbyHub/opencode-swarm/issues/2552)) ([32b5905](https://github.com/ZaxbyHub/opencode-swarm/commit/32b59052dd306f5ed835311fda84112680083e79))
+* **tests:** teardown/retry hardening — one schedule, bounded clean stage, non-stranding teardown, run-wide seam guard ([#3260](https://github.com/ZaxbyHub/opencode-swarm/issues/3260), [#3252](https://github.com/ZaxbyHub/opencode-swarm/issues/3252)) ([c929f9c](https://github.com/ZaxbyHub/opencode-swarm/commit/c929f9c1e47f089f4daebbfcfc34af70296cfe52))
+* **tests:** teardown/retry hardening — one schedule, bounded clean stage, non-stranding teardown, run-wide seam guard, gate cleanup ([#3260](https://github.com/ZaxbyHub/opencode-swarm/issues/3260), [#3252](https://github.com/ZaxbyHub/opencode-swarm/issues/3252)) ([6f4772b](https://github.com/ZaxbyHub/opencode-swarm/commit/6f4772b0e872d08c86e7b4f6963fa7f00ad014b9))
+
+## [7.200.15](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.14...v7.200.15) (2026-10-31)
+
+
+### Bug Fixes
+
+* **issue-tracer:** word-boundary the deferred-work bare markers — no false positive on ZMEM_MODEL_AUTODOWNLOAD (zmem [#309](https://github.com/ZaxbyHub/opencode-swarm/issues/309)) ([f65d18e](https://github.com/ZaxbyHub/opencode-swarm/commit/f65d18e9ffe2c1a7ad97bb3c9490242a62628fea))
+
 ## [7.200.14](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.13...v7.200.14) (2026-10-31)
 
 

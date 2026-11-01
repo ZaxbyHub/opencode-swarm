@@ -7,6 +7,7 @@ import {
 	discoverTestFiles,
 	validateRepository,
 } from '../../../../scripts/ci/repository-validation';
+import { safeRmRecursive } from '../../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '../../../..');
@@ -161,7 +162,7 @@ describe('repository-validation authority real-process fixtures — issue #2675'
 			});
 			expect(report.status).toBe('incomplete');
 		} finally {
-			rmSync(fixtureRoot, { recursive: true, force: true });
+			safeRmRecursive(fixtureRoot);
 		}
 	});
 });

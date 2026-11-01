@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { safeRmRecursive } from '../../tests/helpers/safe-test-dir.js';
 import { handleDoctorCommand } from '../commands/doctor';
 import { handlePreflightCommand } from '../commands/preflight';
 import { handleSyncPlanCommand } from '../commands/sync-plan';
@@ -14,7 +15,7 @@ function createTempDir(): string {
 
 function cleanupDir(dir: string): void {
 	if (fs.existsSync(dir)) {
-		fs.rmSync(dir, { recursive: true, force: true });
+		safeRmRecursive(dir);
 	}
 }
 
