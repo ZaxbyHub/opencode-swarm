@@ -24,6 +24,12 @@ describe('critic role binding policy pin (swarm-pr-review Phase 8)', () => {
 		expect(flat).toContain('**Critic role binding (all profiles).**');
 		expect(flat).toContain('ELIGIBLE type');
 		expect(flat).toContain("not the reviewer's model family");
+		expect(flat).toContain(
+			"MUST resolve to the harness's pinned critic agent type",
+		);
+		expect(flat).toContain(
+			'is disclosed as a degraded independence gate, never presented as equivalent',
+		);
 		expect(flat).toContain('never a generic swap for it');
 		expect(flat).toContain('degraded-independence disclosure');
 		expect(flat).toContain('no pinned critic type exists on the roster at all');
@@ -32,7 +38,7 @@ describe('critic role binding policy pin (swarm-pr-review Phase 8)', () => {
 			'a fallback that also fails surfaces BLOCKED per Hard Rule 14',
 		);
 		expect(flat).toContain(
-			'no pinned critic is eligible: the pinned critic serves with the disclosure',
+			'nothing is eligible and no fallback is independent — the pinned critic serves with the disclosure',
 		);
 		expect(flat).toContain('the generic fallback does not apply');
 		expect(flat).toContain('correct it, do not follow it');
@@ -42,7 +48,9 @@ describe('critic role binding policy pin (swarm-pr-review Phase 8)', () => {
 		expect(flat).toContain('critic agent type / independence:');
 		expect(flat).toContain('independent generic fallback');
 		expect(flat).toContain('N/A — no critic dispatch');
-		expect(flat).toContain('only DEGRADED restricts the verdict, to REQUEST_CHANGES or INCOMPLETE');
+		expect(flat).toContain(
+			'only DEGRADED restricts the verdict, to REQUEST_CHANGES or INCOMPLETE',
+		);
 	});
 
 	test('the verdict table and provenance carry the gate consequence', () => {
