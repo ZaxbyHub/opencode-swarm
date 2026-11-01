@@ -1326,66 +1326,18 @@ describe('resolveWriteTargets — basic resolution', () => {
 });
 
 describe('resolveWriteTargets — subshell cd tracking', () => {
-	test('subshell cd changes effective cwd for writes inside', () => {
-		// (cd /tmp && echo x > file) — file resolves to /tmp/file
-		const writes = [{ category: 'redirect', operator: '>', path: 'file' }];
-		const result = resolveWriteTargets(
-			'(cd /tmp && echo x > file)',
-			writes,
-			'/home/user',
-		);
-		expect(result[0].resolvedPath).toBe('/tmp/file');
-		expect(result[0].resolved).toBe(true);
-	});
-
-	test('cd in parent shell propagates to subshell entry cwd', () => {
-		// cd /tmp && (echo x > file) — cd is in parent, subshell inherits it
-		const writes = [{ category: 'redirect', operator: '>', path: 'file' }];
-		const result = resolveWriteTargets(
-			'cd /tmp && (echo x > file)',
-			writes,
-			'/home/user',
-		);
-		// The subshell inherits parent's cwd at subshell entry time.
-		// Since cd /tmp happens BEFORE the subshell, the subshell starts at /tmp.
-		// So file resolves to /tmp/file.
-		expect(result[0].resolvedPath).toBe('/tmp/file');
-		expect(result[0].resolved).toBe(true);
-	});
-
-	test('nested subshells track cwd independently', () => {
-		// ( (cd /home && echo x > file) ) — file resolves to /home/file
-		const writes = [{ category: 'redirect', operator: '>', path: 'file' }];
-		const result = resolveWriteTargets(
-			'( (cd /home && echo x > file) )',
-			writes,
-			'/',
-		);
-		expect(result[0].resolvedPath).toBe('/home/file');
-		expect(result[0].resolved).toBe(true);
-	});
-
-	test('multiple writes in subshell all use same effective cwd', () => {
-		// (cd /tmp && echo a > a.txt && echo b > b.txt)
-		const analysis = detectPosixWrites(
-			'(cd /tmp && echo a > a.txt && echo b > b.txt)',
-		);
-		const result = resolveWriteTargets(
-			'(cd /tmp && echo a > a.txt && echo b > b.txt)',
-			analysis.writes,
-			'/home/user',
-		);
-		const aWrite = result.find((r) => r.original.path === 'a.txt');
-		const bWrite = result.find((r) => r.original.path === 'b.txt');
-		expect(aWrite?.resolvedPath).toBe('/tmp/a.txt');
-		expect(bWrite?.resolvedPath).toBe('/tmp/b.txt');
-	});
+	// The four subshell tests that cd'd into synthetic /tmp|/home paths moved
+	// to src/hooks/shell-write-detect-cd-statgate-3518.test.ts with REAL
+	// fixtures (#3518 P-2): the stat-gated tracker only tracks a synthetic
+	// /tmp where <current-drive>:\tmp exists — green on hosts that have it,
+	// red on CI runners (host-dependent green; caught by unit windows-6).
 
 	test('cd without subshell does not persist after command', () => {
-		// cd /tmp && echo hello — no write target, so just verify context
-		const analysis = detectPosixWrites('cd /tmp && echo hello');
+		// cd tmpdir && echo hello — no write target, so just verify context
+		// (relative cd with an empty writes list: no fs dependency).
+		const analysis = detectPosixWrites('cd tmpdir && echo hello');
 		const result = resolveWriteTargets(
-			'cd /tmp && echo hello',
+			'cd tmpdir && echo hello',
 			analysis.writes,
 			'/home/user',
 		);
@@ -1419,59 +1371,66 @@ describe('resolveWriteTargets — subshell cd tracking', () => {
 
 describe('resolveWriteTargets — multiple writes with different contexts', () => {
 	test('write inside subshell vs write outside subshell have different contexts', () => {
-		// cd /tmp && (echo inside > file1) && echo outside > file2
-		// file1 resolves to /tmp/file1 (subshell inherits cd /tmp)
-		// file2 resolves to /tmp/file2 (cd /tmp already took effect in parent context)
-		const analysis = detectPosixWrites(
-			'cd /tmp && (echo inside > file1) && echo outside > file2',
-		);
-		const result = resolveWriteTargets(
-			'cd /tmp && (echo inside > file1) && echo outside > file2',
-			analysis.writes,
-			'/home/user',
-		);
-		const file1Write = result.find((r) => r.original.path === 'file1');
-		const file2Write = result.find((r) => r.original.path === 'file2');
-		// file1 is inside subshell that started at /tmp (cd /tmp happened before subshell)
-		expect(file1Write?.resolvedPath).toBe('/tmp/file1');
-		// file2 is outside, at global level after cd /tmp already took effect
-		expect(file2Write?.resolvedPath).toBe('/tmp/file2');
+		// #3518 P-2: real fixture — the cd tracker stat-gates its mutation
+		// (moved from the synthetic /tmp shape that only tracked on hosts
+		// where <current-drive>:\tmp exists).
+		const root = canonicalMkdtemp('swd-subshell-ctx-');
+		try {
+			mkdirSync(path.join(root, 'tmpdir'), { recursive: true });
+			const command =
+				'cd tmpdir && (echo inside > file1) && echo outside > file2';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			const file1Write = result.find((r) => r.original.path === 'file1');
+			const file2Write = result.find((r) => r.original.path === 'file2');
+			// file1 is inside a subshell that started at tmpdir (cd before it)
+			expect(file1Write?.resolvedPath).toBe(path.join(root, 'tmpdir', 'file1'));
+			// file2 is outside, at global level after the cd took effect
+			expect(file2Write?.resolvedPath).toBe(path.join(root, 'tmpdir', 'file2'));
+		} finally {
+			removeTreeWithRetry(root);
+		}
 	});
 });
 
 describe('resolveWriteTargets — subshell cd does not leak to parent', () => {
-	// Regression: F1 — POSIX subshell (...) does NOT propagate cd mutations to parent
-	test('(cd /tmp && echo a > a.txt); echo b > b.txt → a.txt=/tmp/a.txt, b.txt=<cwd>/b.txt', () => {
-		const analysis = detectPosixWrites(
-			'(cd /tmp && echo a > a.txt); echo b > b.txt',
-		);
-		const result = resolveWriteTargets(
-			'(cd /tmp && echo a > a.txt); echo b > b.txt',
-			analysis.writes,
-			'/home/user',
-		);
-		const aWrite = result.find((r) => r.original.path === 'a.txt');
-		const bWrite = result.find((r) => r.original.path === 'b.txt');
-		// a.txt is inside subshell: cd /tmp took effect inside the subshell
-		expect(aWrite?.resolvedPath).toBe('/tmp/a.txt');
-		// b.txt is outside subshell: parent cwd remains /home/user
-		expect(bWrite?.resolvedPath).toBe('/home/user/b.txt');
+	// Regression: F1 — POSIX subshell (...) does NOT propagate cd mutations to
+	// parent. #3518 P-2: real fixtures (the synthetic /tmp shapes were
+	// host-dependent greens — see the cd-statgate sibling).
+	test('(cd tmpdir && echo a > a.txt); echo b > b.txt → a.txt in tmpdir, b.txt at root', () => {
+		const root = canonicalMkdtemp('swd-subshell-leak-1-');
+		try {
+			mkdirSync(path.join(root, 'tmpdir'), { recursive: true });
+			const command = '(cd tmpdir && echo a > a.txt); echo b > b.txt';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			const aWrite = result.find((r) => r.original.path === 'a.txt');
+			const bWrite = result.find((r) => r.original.path === 'b.txt');
+			// a.txt is inside subshell: the cd took effect inside it
+			expect(aWrite?.resolvedPath).toBe(path.join(root, 'tmpdir', 'a.txt'));
+			// b.txt is outside subshell: parent cwd remains root
+			expect(bWrite?.resolvedPath).toBe(path.join(root, 'b.txt'));
+		} finally {
+			removeTreeWithRetry(root);
+		}
 	});
 
 	test('cd inside (...) subshell does not affect subsequent commands outside', () => {
-		// (cd /tmp && echo > inner.txt) && echo > outer.txt
-		const analysis = detectPosixWrites(
-			'(cd /tmp && echo > inner.txt) && echo > outer.txt',
-		);
-		const result = resolveWriteTargets(
-			'(cd /tmp && echo > inner.txt) && echo > outer.txt',
-			analysis.writes,
-			'/project',
-		);
-		const innerWrite = result.find((r) => r.original.path === 'inner.txt');
-		const outerWrite = result.find((r) => r.original.path === 'outer.txt');
-		expect(innerWrite?.resolvedPath).toBe('/tmp/inner.txt');
-		expect(outerWrite?.resolvedPath).toBe('/project/outer.txt');
+		const root = canonicalMkdtemp('swd-subshell-leak-2-');
+		try {
+			mkdirSync(path.join(root, 'tmpdir'), { recursive: true });
+			const command = '(cd tmpdir && echo > inner.txt) && echo > outer.txt';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			const innerWrite = result.find((r) => r.original.path === 'inner.txt');
+			const outerWrite = result.find((r) => r.original.path === 'outer.txt');
+			expect(innerWrite?.resolvedPath).toBe(
+				path.join(root, 'tmpdir', 'inner.txt'),
+			);
+			expect(outerWrite?.resolvedPath).toBe(path.join(root, 'outer.txt'));
+		} finally {
+			removeTreeWithRetry(root);
+		}
 	});
 });
 
