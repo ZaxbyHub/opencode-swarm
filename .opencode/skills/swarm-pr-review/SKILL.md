@@ -1275,6 +1275,20 @@ neither the explorer nor the reviewer for those findings; under Profile C, run
 a separate critic pass. The one-parseable-`[CRITIC]`-row-per-assigned-ID
 contract and the reviewer-before-critic ordering are universal.
 
+**Critic role binding (all profiles).** The critic dispatch MUST resolve to
+the harness's pinned cross-model critic agent type when one exists, so the
+challenge is model-independent from the reviewer that produced the findings
+(where the harness exposes model identity, the critic must not resolve to the
+reviewer's model family). A generic agent type is a FALLBACK only when no
+pinned critic type exists on the active roster or the pinned dispatch fails
+— the substitution is then disclosed in the synthesis as a degraded
+independence gate, never presented as equivalent. This policy binds the
+harness adapters: a condensed/installed skill copy whose routing note names a
+generic agent for this role without the pinned-first rule is defective and
+must be corrected, not followed. The orchestrator's own type-name quotation
+proves nothing — the binding is to the role and its independence
+requirement, not to any copied literal.
+
 The critic must challenge:
 
 - severity inflation,
