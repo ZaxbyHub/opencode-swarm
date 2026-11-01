@@ -535,9 +535,8 @@ async function modeUpdateRelease(logFn) {
  * Pure deletion planner. A fragment is deletable iff BOTH hold:
  *  1. its rendered content appears in the CURRENT published body's marker
  *     payload (re-fetched — not the body captured at injection time). THIS
- *     is the operative oracle: a fragment edited in a later commit on next
- *     renders differently than the published body, so a retry/dispatch
- *     cleanup run RETAINS it (review F-5).
+ *     is the operative oracle: a fragment whose bytes differ from what the
+ *     release published renders differently and is RETAINED (review F-5).
  *  2. its workspace bytes still hash-match the entry captured at collection
  *     time — a same-run integrity guard (defense in depth: fires if the
  *     pending tree is mutated between collection and deletion inside one
