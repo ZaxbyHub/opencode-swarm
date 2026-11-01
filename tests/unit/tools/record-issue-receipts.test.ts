@@ -196,6 +196,28 @@ describe('record_issue_publication', () => {
 		expect(JSON.parse(result).success).toBe(true);
 	});
 
+	test('accepts a fleet Forgejo pull prUrl', async () => {
+		const result = await executeRecordIssuePublication(
+			{
+				issueNumber: 42,
+				prNumber: 12,
+				prUrl: 'https://git.centralcloud.net/singularity/singularity-engine/pulls/12',
+				headSha: 'deadbeef',
+			},
+			dir,
+		);
+		expect(JSON.parse(result).success).toBe(true);
+		const written = JSON.parse(
+			fs.readFileSync(
+				path.join(dir, '.swarm', 'issue-publication.json'),
+				'utf-8',
+			),
+		);
+		expect(written.prUrl).toBe(
+			'https://git.centralcloud.net/singularity/singularity-engine/pulls/12',
+		);
+	});
+
 	test('rejects a bitbucket prUrl (unsupported forge)', async () => {
 		const result = await executeRecordIssuePublication(
 			{
