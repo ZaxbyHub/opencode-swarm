@@ -227,7 +227,7 @@ function evaluateDestructiveDecision(
 		// Windows cmd.exe: rmdir/rd — the SAME grammar-modeled parse as the
 		// enforcement gate (cmd scans each unquoted argument for the first
 		// `/`; issue #3495, PR #3499 review round).
-		const explainRmdirVerb = /^(?:rmdir|rd)(?:\.exe)?\s*/i.exec(seg);
+		const explainRmdirVerb = /^(?:[({\s])*(?:rmdir|rd)(?:\.exe)?\s*/i.exec(seg);
 		if (explainRmdirVerb) {
 			const parsed = dcParseWindowsRecursiveDelete(
 				seg.slice(explainRmdirVerb[0].length),
@@ -254,7 +254,7 @@ function evaluateDestructiveDecision(
 		}
 
 		// Windows cmd.exe: del — the same grammar-modeled parse as the gate.
-		const explainDelVerb = /^del(?:\.exe)?\s*/i.exec(seg);
+		const explainDelVerb = /^(?:[({\s])*del(?:\.exe)?\s*/i.exec(seg);
 		if (explainDelVerb) {
 			const parsed = dcParseWindowsRecursiveDelete(
 				seg.slice(explainDelVerb[0].length),

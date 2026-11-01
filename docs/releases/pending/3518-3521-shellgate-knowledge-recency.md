@@ -10,16 +10,22 @@ Closes #3518 and #3521 (collated).
 
 - **Quoted process-substitution operands no longer escape the declared
   scope.** The parse-failure string fallback dequotes exactly-pair-quoted
-  operands (matching the AST branch) and withdraws fragmented/unbalanced
-  quoting (e.g. a quoted destination containing whitespace) to a null
-  resolution — fail-closed instead of resolving an in-scope-looking fragment
-  (`true >(truncate -s 0 "../../src/t.txt")` is now denied).
-- **A `cd` that cannot succeed no longer moves the walker's tracked cwd.**
-  The tracker stat-gates its mutation (`throwIfNoEntry` + `isDirectory`), so
-  `cd nx/y; echo pwn > ../../src/f2` and the `||` form are denied; a plain
-  file at the cd target behaves the same. Known edge: a failing `cd` before
-  `&&` now conservatively blocks the never-executed right-side write (base
-  admitted it via the phantom cwd) — fail-closed on an ambiguous shape.
+  operands (matching the AST branch) and withdraws — fail-closed — every
+  unresolvable shape: fragmented/unbalanced quoting, quoted destinations
+  containing whitespace, backslash-escaped-space operands, multi-redirect
+  stages where the lazy capture only sees the last target, and any
+  procsub write on a line whose text carries a `cd`/`pushd <target>` word
+  (then/do/brace-led forms included).
+- **An unprovable `cd` is judged at BOTH landings.** The tracked walk models
+  the cd failing (cwd kept); the pessimistic walk models it succeeding at the
+  bash-true target (Git Bash `/x/...` drive spellings mapped, landings
+  propagated through `&&` chains and control-flow bodies) — the gate requires
+  every landing to pass. A `cd` whose target the same command creates
+  (`mkdir -p zz && cd zz && …`), grouped/brace/if-body cd forms, and
+  Git-Bash drive paths all deny when the success landing is outside the
+  declared scope. Known edge: a failing `cd` before `&&` now conservatively
+  blocks the never-executed right-side write — fail-closed on an ambiguous
+  shape.
 - **The process-substitution fallback after a `cd` no longer resolves at the
   starting cwd.** `cd ../.. && true >(truncate -s 0 src/f)` is denied like
   its procsub-free twin (withdrawn, fail-closed). Known edge: this
@@ -60,5 +66,8 @@ Closes #3518 and #3521 (collated).
 
 The string fallback remains a heuristic tokenizer (the #3491/#3088 detector
 programs track the deeper rewrite); this change closes the five frozen
-escape classes and widens fail-closed withdrawal to ambiguous quoting and
-post-cd fallback writes.
+escape classes plus the feedback-round escapes (mkdir-then-cd, grouped cd,
+drive-phantom paths, torn procsub operands) and widens fail-closed
+withdrawal to ambiguous quoting and post-cd fallback writes. Bare `cd`,
+`cd ~`, and `popd`-adjacent directory changes remain untracked (#3491
+program).

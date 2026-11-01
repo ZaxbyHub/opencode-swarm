@@ -926,6 +926,25 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 		// Use a minimal parse: split by | to get pipeline stages and analyze each.
 		const stages = innerCommand.split('|').map((s) => s.trim());
 		for (const stage of stages) {
+			// #3530 PRR-006 (critic D4): a stage carrying MULTIPLE redirect
+			// operators (`cat > ../../src/"f" && cat > src/ok`) is torn by the
+			// lazy `>` regex — only the LAST target is captured and the earlier
+			// (out-of-scope, quoted-fragment) target is invisible. Any
+			// multi-redirect stage is unresolvable: withdraw it fail-closed
+			// (the quoted-span normalization keeps `2>&1`-style tokens and
+			// honest `=>`-style tokens out of the count).
+			const qStage = stage.replace(/"[^"]*"|'[^']*'/g, 'Q');
+			const redirectCount = qStage.match(/(?<![->=>])>(?!>)/g)?.length ?? 0;
+			if (redirectCount >= 2) {
+				results.push({
+					category: 'redirect',
+					operator: '>',
+					path: null,
+					unresolvedContext: true,
+				});
+				continue;
+			}
+
 			// Detect builtin writes (cp, mv, etc.) in the inner POSIX command.
 			// Note: detectPowerShellWrites is not used here because the inner command
 			// of a process substitution is POSIX bash, not PowerShell.
@@ -942,7 +961,19 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 			const appendMatch = stage.match(/^\s*(.*?)\s*>>(\s*)(\S+)\s*$/);
 			if (appendMatch) {
 				const path = dequoteFallbackOperand(appendMatch[3]);
-				if (path === null) continue;
+				if (path === null) {
+					// #3530 PRR-006(a): withdraw, never drop — the resolver
+					// nulls an unresolvedContext write so the gate denies it.
+					// A bare `continue` here silently removed the write from
+					// the analysis (fail-open with a sibling in-scope write).
+					results.push({
+						category: 'redirect',
+						operator: '>>',
+						path: null,
+						unresolvedContext: true,
+					});
+					continue;
+				}
 				if (path && !isNullDevice(path)) {
 					results.push({ category: 'redirect', operator: '>>', path });
 				}
@@ -951,10 +982,35 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 				const writeMatch = stage.match(/^\s*(.*?)\s*>(?!>)(\s*)(\S+)\s*$/);
 				if (writeMatch) {
 					const path = dequoteFallbackOperand(writeMatch[3]);
-					if (path === null) continue;
+					if (path === null) {
+						// #3530 PRR-006(a): withdraw, never drop (see above).
+						results.push({
+							category: 'redirect',
+							operator: '>',
+							path: null,
+							unresolvedContext: true,
+						});
+						continue;
+					}
 					if (path && !isNullDevice(path)) {
 						results.push({ category: 'redirect', operator: '>', path });
 					}
+				} else if (
+					/>/.test(stage.replace(/"[^"]*"|'[^']*'/g, 'Q')) &&
+					!/^\s*\w+(\s+-{1,2}[\w-]+)*\s*$/.test(stage)
+				) {
+					// #3530 PRR-006(b): neither redirect regex matched but the
+					// stage still carries a `>` operator — the (\S+) capture
+					// cannot span a quoted-with-whitespace target, so the
+					// operand is unrecoverable. Withdraw (fail-closed) instead
+					// of emitting nothing; the guard keeps flag-only/benign
+					// stages clean.
+					results.push({
+						category: 'redirect',
+						operator: '>',
+						path: null,
+						unresolvedContext: true,
+					});
 				}
 			}
 		}
@@ -1000,6 +1056,10 @@ function dequoteFallbackOperand(token: string): string | null {
  */
 function stageHasQuoteFragment(tokens: string[]): boolean {
 	return tokens.some((t) => {
+		// #3530 PRR-006(c): a token ENDING with a backslash is an escaped
+		// space (`../../out\ src`) — the whitespace tokenizer tore the real
+		// operand apart and the selected tail is in-scope-looking garbage.
+		if (/\\$/.test(t)) return true;
 		if (!t.includes('"') && !t.includes("'")) return false;
 		const first = t[0];
 		return !(
@@ -4418,7 +4478,13 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		// resolver nulls them and the gate denies, fail-closed. The scan is a
 		// local text check (no cross-module import): any `;`/`&&`/`||`/newline
 		// separated region whose first word is `cd` with an operand.
-		const cdContext = /(^|[;&|\n(]|&&|\|\|)\s*cd\s+\S+/.test(command);
+		// #3530 PRR-005: a word boundary, not a separator class — `then cd`,
+		// `do cd`, `{ cd`, `! cd` forms are equally cd-context on a
+		// parse-failing line, and `pushd` changes the directory too.
+		// Over-withdraw direction is fail-closed and bounded to parse-failing
+		// (process-substitution) lines whose text merely mentions a
+		// `cd|pushd <token>` word.
+		const cdContext = /(^|[^\w\\])(?:cd|pushd)\s+\S+/.test(command);
 		// Plain loop (not spread-push): adversarial operand counts must not
 		// hit the engine's spread-arity limit (#3512 review N-2).
 		for (const write of procSubWrites) {
@@ -4902,11 +4968,78 @@ interface WriteWithNode {
  * Walk a node and collect writes with their source nodes, in the same order
  * as `collectLeafCommands` so we can match writes by position.
  */
+/**
+ * Shared cd-tracking core for both walker cd sites (#3530 feedback). Returns
+ * true when the tracked cwd was moved.
+ *
+ * - 'gate' mode (tracked walk): move ONLY when analysis can prove the target is
+ *   an existing directory (a cd that cannot succeed must not move the tracked
+ *   cwd — #3518 P-2). An unprovable cd keeps the current cwd; the caller's
+ *   pessimistic walk ('succeed' mode) supplies the success landing, and the
+ *   gate requires both landings to pass, so ambiguity fails closed without
+ *   filesystem truth at execution time (mkdir-then-cd, win32 drive-phantom
+ *   paths, stat error classes).
+ * - 'succeed' mode (pessimistic walk): track the directory bash WOULD select if
+ *   the cd succeeds — Git Bash MSYS drive mapping for `/x/...` spellings
+ *   (plain win32 resolution maps `/e/a` to the CURRENT drive, not drive E:),
+ *   then the ordinary analyzer resolution.
+ */
+function applyCdTracking(
+	cwdStack: string[],
+	cdTarget: string,
+	cdMode: 'gate' | 'succeed',
+): boolean {
+	const current = cwdStack[0] ?? '/';
+	const resolvedTarget = resolvePath(cdTarget, current);
+	if (resolvedTarget === null) {
+		// Dynamic target ($VAR/$(cmd)): keep the historical literal-append
+		// (lands outside any declared scope — conservative) in both modes.
+		cwdStack[0] = path.posix.resolve(current, cdTarget);
+		return true;
+	}
+	if (cdMode === 'succeed') {
+		cwdStack[0] = resolveBashCdTarget(cdTarget, current, resolvedTarget);
+		return true;
+	}
+	let isDirectory = false;
+	try {
+		isDirectory =
+			statSync(resolvedTarget, { throwIfNoEntry: false })?.isDirectory() ===
+			true;
+	} catch {
+		isDirectory = false;
+	}
+	if (!isDirectory) return false;
+	cwdStack[0] = resolvedTarget;
+	return true;
+}
+
+/**
+ * The directory Git Bash would select for a cd target — the pessimistic
+ * ('succeed') landing. MSYS drive rule: a POSIX-absolute path whose first
+ * segment is a single drive letter names THAT drive (`/e/a` -> `E:\a`);
+ * plain win32 resolution of such a path names the CURRENT drive instead.
+ * Everything else falls back to the analyzer resolution.
+ */
+function resolveBashCdTarget(
+	cdTarget: string,
+	current: string,
+	analyzerResolved: string,
+): string {
+	const driveForm = /^\/([a-zA-Z])(?=\/|$)(.*)$/.exec(cdTarget);
+	if (driveForm) {
+		const rest = driveForm[2];
+		return `${driveForm[1].toUpperCase()}:${rest === '' ? '\\' : rest}`;
+	}
+	return analyzerResolved || path.posix.resolve(current, cdTarget);
+}
+
 function collectWritesWithNodes(
 	node: BashNode,
 	out: WriteWithNode[],
 	cwdStack: string[],
 	andSharedStack = true,
+	cdMode: 'gate' | 'succeed' = 'gate',
 ): void {
 	if (!node || typeof node !== 'object') return;
 
@@ -4918,7 +5051,13 @@ function collectWritesWithNodes(
 	if ((node as unknown as { type?: unknown }).type === 'CommandExpansion') {
 		const inner = (node as unknown as { commandAST?: unknown }).commandAST;
 		if (inner)
-			collectWritesWithNodes(inner as BashNode, out, cwdStack, andSharedStack);
+			collectWritesWithNodes(
+				inner as BashNode,
+				out,
+				cwdStack,
+				andSharedStack,
+				cdMode,
+			);
 		return;
 	}
 
@@ -4927,7 +5066,7 @@ function collectWritesWithNodes(
 			const _globalCwd = cwdStack[0] ?? '/';
 			if (Array.isArray(node.commands)) {
 				for (const cmd of node.commands) {
-					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack);
+					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack, cdMode);
 				}
 			}
 			break;
@@ -4956,7 +5095,13 @@ function collectWritesWithNodes(
 			// cd mutations inside the subshell do not leak to the parent.
 			if (node.list) {
 				const subStack = [...cwdStack];
-				collectWritesWithNodes(node.list, out, subStack, andSharedStack);
+				collectWritesWithNodes(
+					node.list,
+					out,
+					subStack,
+					andSharedStack,
+					cdMode,
+				);
 			}
 			break;
 		}
@@ -4983,12 +5128,16 @@ function collectWritesWithNodes(
 						// target ($VAR/$(cmd)) resolves to null and falls back
 						// to the historical literal-append, which lands outside
 						// any declared scope (conservative).
-						currentStack[0] =
-							resolvePath(cdTarget, currentStack[0] ?? '/') ??
-							path.posix.resolve(currentStack[0] ?? '/', cdTarget);
+						applyCdTracking(currentStack, cdTarget, cdMode);
 					} else {
 						// Use the current (possibly mutated) stack so cd changes propagate
-						collectWritesWithNodes(cmd, out, currentStack, andSharedStack);
+						collectWritesWithNodes(
+							cmd,
+							out,
+							currentStack,
+							andSharedStack,
+							cdMode,
+						);
 					}
 				}
 			}
@@ -4998,7 +5147,7 @@ function collectWritesWithNodes(
 		case 'Sequence': {
 			if (Array.isArray(node.commands)) {
 				for (const cmd of node.commands) {
-					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack);
+					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack, cdMode);
 				}
 			}
 			break;
@@ -5007,7 +5156,7 @@ function collectWritesWithNodes(
 		case 'Pipeline': {
 			if (Array.isArray(node.commands)) {
 				for (const cmd of node.commands) {
-					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack);
+					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack, cdMode);
 				}
 				// #3474: the stdin-eval write belongs to the pipeline as a
 				// whole; emitted after the children so both walkers list the
@@ -5035,7 +5184,13 @@ function collectWritesWithNodes(
 				(node as unknown as { op?: string }).op === 'and' ||
 				(node as unknown as { type?: string }).type === 'And';
 			if (node.left) {
-				collectWritesWithNodes(node.left, out, cwdStack, andSharedStack);
+				collectWritesWithNodes(
+					node.left,
+					out,
+					cwdStack,
+					andSharedStack,
+					cdMode,
+				);
 				// Capture the context AFTER left has been processed (cd may have modified it)
 				const leftContext = cwdStack[0] ?? '/';
 				// Process right with potentially updated context from left
@@ -5049,7 +5204,24 @@ function collectWritesWithNodes(
 					// the skipped cd was applied to the resolution).
 					const rightStack =
 						andChain && andSharedStack ? cwdStack : [leftContext];
-					collectWritesWithNodes(node.right, out, rightStack, andSharedStack);
+					collectWritesWithNodes(
+						node.right,
+						out,
+						rightStack,
+						andSharedStack,
+						cdMode,
+					);
+					// #3530: in 'succeed' mode the right branch is modeled as
+					// EXECUTED (the pessimistic success landing), so a cd inside
+					// it persists to following siblings — bash executes
+					// `mkdir x && cd x` and every later command on the line runs
+					// in x. Without this propagation a left-nested chain
+					// (LogicalExpression(LogicalExpression(mkdir, cd), echo))
+					// discards the fresh right-stack and the success landing
+					// collapses onto the stale pre-cd cwd.
+					if (cdMode === 'succeed' && rightStack !== cwdStack) {
+						cwdStack[0] = rightStack[0] ?? leftContext;
+					}
 				}
 			}
 			break;
@@ -5062,13 +5234,35 @@ function collectWritesWithNodes(
 			// #3474: And shares the stack (see LogicalExpression); Or keeps the
 			// fresh stack (a skipped || branch's cd must not move later siblings).
 			if (node.left) {
-				collectWritesWithNodes(node.left, out, cwdStack, andSharedStack);
+				collectWritesWithNodes(
+					node.left,
+					out,
+					cwdStack,
+					andSharedStack,
+					cdMode,
+				);
 				const leftContext = cwdStack[0] ?? '/';
 				// Process right with potentially updated context from left
 				if (node.right) {
 					const rightStack =
 						node.type === 'And' && andSharedStack ? cwdStack : [leftContext];
-					collectWritesWithNodes(node.right, out, rightStack, andSharedStack);
+					collectWritesWithNodes(
+						node.right,
+						out,
+						rightStack,
+						andSharedStack,
+						cdMode,
+					);
+					// #3530: in 'succeed' mode the right branch is modeled as
+					// EXECUTED (the pessimistic success landing), so a cd inside
+					// it persists to following siblings — bash: `mkdir x && cd x`
+					// leaves the shell in x for every later command on the line.
+					// Without this propagation a left-nested chain
+					// (And(And(mkdir, cd), echo)) discards the fresh right-stack
+					// and the success landing collapses back onto the stale cwd.
+					if (cdMode === 'succeed' && rightStack !== cwdStack) {
+						cwdStack[0] = rightStack[0] ?? leftContext;
+					}
 				}
 			}
 			break;
@@ -5093,8 +5287,15 @@ function collectWritesWithNodes(
 			// moved a later write. Copy per body: detection added, propagation
 			// kept at base semantics (review round 3).
 			for (const body of [node.clause, node.then, node.else]) {
-				if (body)
-					collectWritesWithNodes(body, out, [...cwdStack], andSharedStack);
+				if (body) {
+					const bodyStack = [...cwdStack];
+					collectWritesWithNodes(body, out, bodyStack, andSharedStack, cdMode);
+					// #3530: 'succeed' mode models the body as executed — its
+					// landing cwd persists to following siblings (PRR-004).
+					if (cdMode === 'succeed') {
+						cwdStack[0] = bodyStack[0] ?? cwdStack[0];
+					}
+				}
 			}
 			break;
 		}
@@ -5109,10 +5310,30 @@ function collectWritesWithNodes(
 					}
 				}
 			}
-			if (node.clause)
-				collectWritesWithNodes(node.clause, out, [...cwdStack], andSharedStack);
-			if (node.do)
-				collectWritesWithNodes(node.do, out, [...cwdStack], andSharedStack);
+			if (node.clause) {
+				const clauseStack = [...cwdStack];
+				collectWritesWithNodes(
+					node.clause,
+					out,
+					clauseStack,
+					andSharedStack,
+					cdMode,
+				);
+				// #3530: 'succeed' mode models the body as executed — its
+				// landing cwd persists to following siblings (PRR-004).
+				if (cdMode === 'succeed') {
+					cwdStack[0] = clauseStack[0] ?? cwdStack[0];
+				}
+			}
+			if (node.do) {
+				const doStack = [...cwdStack];
+				collectWritesWithNodes(node.do, out, doStack, andSharedStack, cdMode);
+				// #3530: 'succeed' mode models the body as executed — its
+				// landing cwd persists to following siblings (PRR-004).
+				if (cdMode === 'succeed') {
+					cwdStack[0] = doStack[0] ?? cwdStack[0];
+				}
+			}
 			break;
 		}
 
@@ -5125,8 +5346,15 @@ function collectWritesWithNodes(
 					}
 				}
 			}
-			if (node.do)
-				collectWritesWithNodes(node.do, out, [...cwdStack], andSharedStack);
+			if (node.do) {
+				const doStack = [...cwdStack];
+				collectWritesWithNodes(node.do, out, doStack, andSharedStack, cdMode);
+				// #3530: 'succeed' mode models the body as executed — its
+				// landing cwd persists to following siblings (PRR-004).
+				if (cdMode === 'succeed') {
+					cwdStack[0] = doStack[0] ?? cwdStack[0];
+				}
+			}
 			break;
 		}
 
@@ -5141,13 +5369,20 @@ function collectWritesWithNodes(
 			}
 			if (Array.isArray(node.cases)) {
 				for (const entry of node.cases) {
-					if (entry?.body)
+					if (entry?.body) {
+						const bodyStack = [...cwdStack];
 						collectWritesWithNodes(
 							entry.body,
 							out,
-							[...cwdStack],
+							bodyStack,
 							andSharedStack,
+							cdMode,
 						);
+						// #3530: 'succeed' mode models the body as executed (PRR-004).
+						if (cdMode === 'succeed') {
+							cwdStack[0] = bodyStack[0] ?? cwdStack[0];
+						}
+					}
 				}
 			}
 			break;
@@ -5162,8 +5397,21 @@ function collectWritesWithNodes(
 					}
 				}
 			}
-			if (node.body)
-				collectWritesWithNodes(node.body, out, [...cwdStack], andSharedStack);
+			if (node.body) {
+				const bodyStack = [...cwdStack];
+				collectWritesWithNodes(
+					node.body,
+					out,
+					bodyStack,
+					andSharedStack,
+					cdMode,
+				);
+				// #3530: 'succeed' mode models the body as executed — its
+				// landing cwd persists to following siblings (PRR-004).
+				if (cdMode === 'succeed') {
+					cwdStack[0] = bodyStack[0] ?? cwdStack[0];
+				}
+			}
 			break;
 		}
 
@@ -5174,33 +5422,15 @@ function collectWritesWithNodes(
 			// Check for cd command
 			const cdTarget = getCdTarget(node);
 			if (cdTarget) {
-				// Resolve relative cd target against current effective cwd —
-				// Windows-aware (see the compound-loop cd site for rationale).
-				// #3518 P-2: bash only changes directory when the target is an
-				// existing directory (a missing path or a plain file makes `cd`
-				// fail and leaves the cwd unchanged), so the tracked stack moves
-				// ONLY for a target that stat says is a directory. Before this
-				// gate a failing `cd nx/y; write` still moved every later
-				// sibling's tracked cwd, and the mis-tracked resolution could
-				// admit an out-of-scope write. A dynamic target (resolvePath
-				// null) keeps the historical literal fallback — the #3491
-				// flag-form program owns that surface.
-				const resolvedTarget = resolvePath(cdTarget, cwdStack[0] ?? '/');
-				if (resolvedTarget !== null) {
-					let isDirectory = false;
-					try {
-						isDirectory =
-							statSync(resolvedTarget, {
-								throwIfNoEntry: false,
-							})?.isDirectory() === true;
-					} catch {
-						isDirectory = false;
-					}
-					if (!isDirectory) return;
-					cwdStack[0] = resolvedTarget;
-					return;
-				}
-				cwdStack[0] = path.posix.resolve(cwdStack[0] ?? '/', cdTarget);
+				// #3530: mode-aware cd tracking via the shared helper. The
+				// tracked walk ('gate') treats an unprovable cd as failed; the
+				// pessimistic walk ('succeed') tracks the bash-true success
+				// landing. Both landings reach the gate through the existing
+				// tracked/pessimistic divergence, and the gate requires EVERY
+				// entry to pass — ambiguity denies without filesystem truth at
+				// execution time (mkdir-then-cd, win32 drive-phantom paths,
+				// stat error classes).
+				applyCdTracking(cwdStack, cdTarget, cdMode);
 				return;
 			}
 
@@ -5389,11 +5619,17 @@ export function resolveWriteTargets(
 	// admitted only when both landings are authorized.
 	const cwdStack = [cwd];
 	const trackedNodes: WriteWithNode[] = [];
-	collectWritesWithNodes(ast as BashNode, trackedNodes, cwdStack);
+	collectWritesWithNodes(ast as BashNode, trackedNodes, cwdStack, true, 'gate');
 	// A fresh stack: the tracked walk MUTATES the array it is given (cd writes
 	// cwdStack[0] in place), so the pessimistic pass must not inherit it.
 	const pessimisticNodes: WriteWithNode[] = [];
-	collectWritesWithNodes(ast as BashNode, pessimisticNodes, [cwd], false);
+	collectWritesWithNodes(
+		ast as BashNode,
+		pessimisticNodes,
+		[cwd],
+		false,
+		'succeed',
+	);
 
 	// Deduplicate walks the same way detectPosixWrites does — including the
 	// occurrence rename (#3347 for capability evals, widened to EVERY

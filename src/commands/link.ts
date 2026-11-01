@@ -130,6 +130,7 @@ export async function handleLinkCommand(
 
 	const linkDir = resolveLinkDir(linkId);
 	let totalMerged = 0;
+	const totalSuperseded = 0;
 	let totalSkipped = 0;
 	let familySummary = '';
 	try {
@@ -215,7 +216,7 @@ export async function handleLinkCommand(
 	const familyNote = familySummary ? `\n${familySummary}` : '';
 	return [
 		`🔗 Linked this worktree to shared knowledge store "${linkId}".`,
-		`  migrated the complete knowledge family (${totalMerged} new, ${totalSkipped} already present).`,
+		`  migrated the complete knowledge family (${totalMerged} new, ${totalSkipped} already present${totalSuperseded > 0 ? `, ${totalSuperseded} resolved by recency` : ''}).`,
 		`  shared at: ${linkDir}`,
 		'All swarms linked to this id now read and write the same knowledge.' +
 			relinkNote +

@@ -1598,6 +1598,17 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			return 'enforced';
 		};
 
+		// PRR-017: the scope binding is per-SESSION and identical for every
+		// write in this command — resolve it ONCE before the loop instead of
+		// per-occurrence (the P-4 occurrence widening otherwise re-reads and
+		// re-parses plan.json N times inside this synchronous loop).
+		const hoistedWriteBinding =
+			isCoder && session?.currentTaskId
+				? enforce
+					? resolveActiveScopeBinding(sessionID)
+					: resolveActiveScopeBindingObserving(sessionID)
+				: null;
+
 		for (const write of resolvedWrites) {
 			if (write.resolvedPath === null) {
 				// A null resolved path has three distinct causes that must NOT be
@@ -1685,9 +1696,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				continue;
 			}
 			if (isCoder && session?.currentTaskId) {
-				const writeBinding = enforce
-					? resolveActiveScopeBinding(sessionID)
-					: resolveActiveScopeBindingObserving(sessionID);
+				const writeBinding = hoistedWriteBinding;
 				if (
 					writeBinding?.activation === 'active' &&
 					writeBinding.parentOwnerSessionId &&

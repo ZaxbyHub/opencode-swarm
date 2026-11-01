@@ -59,6 +59,12 @@ export interface FamilyMigrationCounts {
 		filename: string;
 		merged: number;
 		skipped: number;
+		/** Rows replaced by a strictly newer same-key version (PRR-015). */
+		readonly superseded?: number;
+		/** Same-key collisions with no usable recency signal (PRR-015). */
+		readonly noSignal?: number;
+		/** Destination-side duplicate rows collapsed during pre-reduction. */
+		readonly deduped?: number;
 	}>;
 }
 
@@ -127,22 +133,44 @@ function keySelectorFor(
  * retractions, application history) — yields NO signal, and a collision on
  * a no-signal row keeps today's destination-wins skip (an unparsable or
  * missing timestamp is never read as epoch-0 "oldest").
+ *
+ * `preferField` (PRR-014): a member whose PRODUCER always writes a more
+ * specific event timestamp (quarantined rows carry the spread entry's
+ * `updated_at` AND their own `quarantined_at`) selects that field FIRST —
+ * otherwise the generic `updated_at` shadows the event time and a
+ * re-quarantine can never win over an older record.
+ *
+ * Far-future bound (PRR-011): a stamp more than a day in the future is
+ * no-signal (destination wins). `Date.parse` accepts any locale/format, so an
+ * unvalidated `9999-…` row would otherwise permanently replace the canonical
+ * destination row and silently disable recency propagation for its id.
  */
-function rowRecency(row: unknown): { at: number; revision: number } | null {
+function rowRecency(
+	row: unknown,
+	preferField?: string,
+): { at: number; revision: number } | null {
 	if (!row || typeof row !== 'object') return null;
 	const o = row as Record<string, unknown>;
-	const stamp = typeof o.updated_at === 'string' ? o.updated_at : undefined;
-	const quarantine =
-		typeof o.quarantined_at === 'string' ? o.quarantined_at : undefined;
-	const raw = stamp ?? quarantine;
-	if (raw === undefined) return null;
-	const at = Date.parse(raw);
-	if (Number.isNaN(at)) return null;
-	const revision =
-		typeof o.revision === 'number' && Number.isFinite(o.revision)
-			? o.revision
-			: 0;
-	return { at, revision };
+	const candidates: string[] = [];
+	if (preferField !== undefined && typeof o[preferField] === 'string') {
+		candidates.push(o[preferField] as string);
+	}
+	if (typeof o.updated_at === 'string') candidates.push(o.updated_at);
+	if (typeof o.quarantined_at === 'string') {
+		candidates.push(o.quarantined_at);
+	}
+	for (const raw of candidates) {
+		const at = Date.parse(raw);
+		if (Number.isNaN(at)) continue;
+		// More than a day in the future = corrupt/hostile stamp: no signal.
+		if (at > Date.now() + 86_400_000) continue;
+		const revision =
+			typeof o.revision === 'number' && Number.isFinite(o.revision)
+				? o.revision
+				: 0;
+		return { at, revision };
+	}
+	return null;
 }
 
 /** Strictly-newer comparison; equal or older is NOT newer (null = no signal). */
@@ -179,30 +207,37 @@ function mergeStoreEntries(
 	skipped: number;
 	superseded: number;
 	noSignal: number;
+	deduped: number;
 } {
 	const result = [...destination];
 	// Within-destination duplicates: keep the effective (recency-newest) row
 	// at the first occurrence's position, so the result holds exactly one row
-	// per id (#3521 D1). No-signal duplicates keep the first occurrence. The
-	// id→index map is rebuilt AFTER the reduction — splicing shifts indices,
-	// and a stale map made the source loop below read the wrong incumbent or
-	// skip a live id entirely (4.5 review blocker 1: silent row loss).
+	// per id (#3521 D1). No-signal duplicates keep the first occurrence.
+	// Map-based single pass (PRR-009): the previous nested scan was O(n²)
+	// INSIDE the destination-lock critical section — at cohort-store sizes the
+	// sync block could outlive MIGRATION_LOCK_STALE_MS and starve the lock's
+	// refresh timer, letting a concurrent migration stale-take the lock
+	// (two writers, lost update).
+	const indexOfId = new Map<string, number>();
+	const duplicateIndexes = new Set<number>();
 	for (let i = 0; i < result.length; i += 1) {
-		let firstIdx = -1;
-		for (let j = 0; j < i; j += 1) {
-			if (result[j].id === result[i].id) {
-				firstIdx = j;
-				break;
-			}
+		const firstIdx = indexOfId.get(result[i].id);
+		if (firstIdx === undefined) {
+			indexOfId.set(result[i].id, i);
+			continue;
 		}
-		if (firstIdx === -1) continue;
+		duplicateIndexes.add(i);
 		if (isStrictlyNewer(rowRecency(result[i]), rowRecency(result[firstIdx]))) {
 			result[firstIdx] = result[i];
 		}
-		result.splice(i, 1);
-		i -= 1;
 	}
-	const indexOfId = new Map<string, number>();
+	const deduped = duplicateIndexes.size;
+	if (deduped > 0) {
+		const reduced = result.filter((_, i) => !duplicateIndexes.has(i));
+		result.length = 0;
+		result.push(...reduced);
+	}
+	indexOfId.clear();
 	result.forEach((e, i) => {
 		indexOfId.set(e.id, i);
 	});
@@ -222,7 +257,10 @@ function mergeStoreEntries(
 			const srcRec = rowRecency(src);
 			const dstRec = rowRecency(incumbent);
 			if (isStrictlyNewer(srcRec, dstRec)) {
-				result[firstIdx] = src;
+				// Provenance-preserving replace (parallel-review MED): source
+				// fields win, destination-only fields carry over so a
+				// cohort-local annotation is not silently dropped.
+				result[firstIdx] = { ...incumbent, ...src };
 				superseded++;
 			} else {
 				skipped++;
@@ -241,7 +279,7 @@ function mergeStoreEntries(
 		indexOfId.set(src.id, result.length - 1);
 		added++;
 	}
-	return { merged: result, added, skipped, superseded, noSignal };
+	return { merged: result, added, skipped, superseded, noSignal, deduped };
 }
 
 /**
@@ -256,12 +294,16 @@ function appendUnionById<T>(
 	destination: T[],
 	source: T[],
 	keyOf: (obj: unknown) => string | null = lineId,
+	recencyOf: (row: unknown) => { at: number; revision: number } | null = (
+		row,
+	) => rowRecency(row),
 ): {
 	merged: T[];
 	added: number;
 	skipped: number;
 	superseded: number;
 	noSignal: number;
+	deduped: number;
 } {
 	// Pre-reduce within-side duplicates to the effective (recency-newest) row
 	// at the first occurrence's position (#3521 D1): a later newer duplicate on
@@ -284,10 +326,11 @@ function appendUnionById<T>(
 			result.push(row);
 			continue;
 		}
-		if (isStrictlyNewer(rowRecency(row), rowRecency(result[firstIdx]))) {
+		if (isStrictlyNewer(recencyOf(row), recencyOf(result[firstIdx]))) {
 			result[firstIdx] = row;
 		}
 	}
+	const deduped = destination.length - result.length;
 	let added = 0;
 	let skipped = 0;
 	let superseded = 0;
@@ -301,13 +344,17 @@ function appendUnionById<T>(
 		const firstIdx = indexOfKey.get(id);
 		if (firstIdx !== undefined) {
 			// Same-key collision on a versioned member: the strictly newer row
-			// replaces the older in place (one row survives); equal or
+			// replaces the older in place (one row survives; destination-only
+			// fields carry over — provenance-preserving), equal or
 			// destination-newer keeps today's skip; no usable recency signal
 			// keeps the destination and is counted.
-			const srcRec = rowRecency(src);
-			const dstRec = rowRecency(result[firstIdx]);
+			const srcRec = recencyOf(src);
+			const dstRec = recencyOf(result[firstIdx]);
 			if (isStrictlyNewer(srcRec, dstRec)) {
-				result[firstIdx] = src;
+				result[firstIdx] = {
+					...(result[firstIdx] as Record<string, unknown>),
+					...(src as Record<string, unknown>),
+				} as T;
 				superseded++;
 			} else {
 				skipped++;
@@ -319,7 +366,7 @@ function appendUnionById<T>(
 		indexOfKey.set(id, result.length - 1);
 		added++;
 	}
-	return { merged: result, added, skipped, superseded, noSignal };
+	return { merged: result, added, skipped, superseded, noSignal, deduped };
 }
 
 /**
@@ -440,7 +487,16 @@ function mergeMember(
 	skipped: number;
 	superseded: number;
 	noSignal: number;
+	deduped: number;
 } {
+	// PRR-014: a member whose producer always writes a more specific event
+	// timestamp selects that field FIRST for recency (quarantined rows carry
+	// the spread entry's `updated_at` AND their own `quarantined_at` — the
+	// generic updated_at shadowed the quarantine instant).
+	const recencyOf =
+		member.recencyField !== undefined
+			? (row: unknown) => rowRecency(row, member.recencyField)
+			: (row: unknown) => rowRecency(row);
 	switch (member.mergeStrategy) {
 		case 'dedup-id-merge': {
 			const r = mergeStoreEntries(
@@ -453,6 +509,7 @@ function mergeMember(
 				skipped: r.skipped,
 				superseded: r.superseded,
 				noSignal: r.noSignal,
+				deduped: r.deduped,
 			};
 		}
 		case 'append-union':
@@ -465,6 +522,7 @@ function mergeMember(
 				(destinationData as unknown[]) ?? [],
 				(sourceData as unknown[]) ?? [],
 				keySelectorFor(member),
+				recencyOf,
 			);
 			return {
 				merged: r.merged,
@@ -472,6 +530,7 @@ function mergeMember(
 				skipped: r.skipped,
 				superseded: r.superseded,
 				noSignal: r.noSignal,
+				deduped: r.deduped,
 			};
 		}
 		case 'sum-counters': {
@@ -485,6 +544,7 @@ function mergeMember(
 				skipped: r.skipped,
 				superseded: 0,
 				noSignal: 0,
+				deduped: 0,
 			};
 		}
 		default:
@@ -494,6 +554,7 @@ function mergeMember(
 				skipped: 0,
 				superseded: 0,
 				noSignal: 0,
+				deduped: 0,
 			};
 	}
 }
@@ -585,6 +646,7 @@ export async function migrateKnowledgeFamily(
 		skipped: number;
 		superseded?: number;
 		noSignal?: number;
+		deduped?: number;
 	}> = [];
 	const staged: Array<{ member: KnowledgeFamilyMember; serialized: string }> =
 		[];
@@ -596,17 +658,15 @@ export async function migrateKnowledgeFamily(
 			const srcData =
 				sourceSnapshot[member.filename] ??
 				(member.mergeStrategy === 'sum-counters' ? {} : []);
-			const { merged, added, skipped, superseded, noSignal } = mergeMember(
-				member,
-				destData,
-				srcData,
-			);
+			const { merged, added, skipped, superseded, noSignal, deduped } =
+				mergeMember(member, destData, srcData);
 			perMember.push({
 				filename: member.filename,
 				merged: added,
 				skipped,
 				superseded,
 				noSignal,
+				deduped,
 			});
 			staged.push({ member, serialized: serialize(member, merged) });
 		}

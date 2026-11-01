@@ -509,7 +509,8 @@ export function dcSplitSegments(cmd: string): string[] {
  * segment is not a destructive rm form.
  */
 export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
-	const tokens = segment.match(/"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g) ?? [];
+	const tokens: string[] =
+		segment.match(/"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g) ?? [];
 	// #3518 P-5 (class, final-critic round 1): tolerate leading
 	// open-parens/braces — a parenthesized segment runs the same rm in a
 	// POSIX subshell, whether the paren GLUES to the verb (`(rm`) or stands
@@ -526,6 +527,19 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	if (tokens.length > 0 && tokens[0] !== undefined) {
 		tokens[0] = tokens[0].replace(/^[({\s]+/, '');
 	}
+	if (tokens.length < 2 || tokens[0] !== 'rm') return null;
+
+	// PRR-010: a trailing `)`/`}` stays glued to the LAST operand of a
+	// parenthesized segment (`(rm -rf dist)` extracted `dist)`), so strip
+	// trailing close delimiters and drop standalone delimiter tokens — the
+	// allowlisted safe form `(rm -rf dist)` must extract `dist`, and the
+	// blocked reason for `(rm -rf ../../outside)` must name the real target.
+	for (let i = 1; i < tokens.length; i += 1) {
+		tokens[i] = tokens[i].replace(/[)}]+$/, '');
+	}
+	const delimStripped = tokens.filter((t) => t.length > 0);
+	tokens.length = 0;
+	tokens.push(...delimStripped);
 	if (tokens.length < 2 || tokens[0] !== 'rm') return null;
 
 	let destructive = false;

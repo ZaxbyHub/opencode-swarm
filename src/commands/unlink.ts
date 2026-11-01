@@ -43,6 +43,7 @@ export async function handleUnlinkCommand(
 	// migration engine locks the right directories. The shared cohort is never
 	// deleted/truncated (acceptance: must not lose data for peers).
 	let totalMerged = 0;
+	const totalSuperseded = 0;
 	let totalSkipped = 0;
 	let familySummary = '';
 	if (copyBack) {
@@ -85,7 +86,7 @@ export async function handleUnlinkCommand(
 	const familyNote = familySummary ? `\n${familySummary}` : '';
 	return [
 		`🔓 Unlinked this worktree from shared knowledge store "${pointer.linkId}".`,
-		`  copied the shared knowledge family back to local (${totalMerged} new, ${totalSkipped} already present).`,
+		`  copied the shared knowledge family back to local (${totalMerged} new, ${totalSkipped} already present${totalSuperseded > 0 ? `, ${totalSuperseded} resolved by recency` : ''}).`,
 		'This worktree now uses its local `.swarm/` knowledge again.',
 		`The shared store is retained for any still-linked worktrees.${familyNote}`,
 	].join('\n');

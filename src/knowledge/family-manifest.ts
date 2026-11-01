@@ -88,6 +88,14 @@ export interface KnowledgeFamilyMember {
 	 * `id` (append-only audit logs) supply a composite selector here.
 	 */
 	readonly keyOf?: FamilyKeySelector;
+	/**
+	 * Optional member-specific recency field (PRR-014). A member whose
+	 * producer always writes a more specific event timestamp alongside the
+	 * spread entry's `updated_at` (quarantined rows carry BOTH) declares that
+	 * field here so recency comparisons read the event instant, not the
+	 * shadowing entry stamp.
+	 */
+	readonly recencyField?: string;
 }
 
 /** Read a required non-empty string field off a parsed line, else `null`. */
@@ -226,6 +234,7 @@ export const KNOWLEDGE_FAMILY: readonly KnowledgeFamilyMember[] = [
 		role: 'quarantine',
 		mergeStrategy: 'append-union',
 		reversible: true,
+		recencyField: 'quarantined_at',
 	},
 	{
 		filename: 'knowledge-unactionable.jsonl',
