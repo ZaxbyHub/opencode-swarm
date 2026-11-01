@@ -6,7 +6,6 @@
 // by the .meta sidecar.
 import { beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	acquireLaneLocks,
@@ -14,11 +13,12 @@ import {
 	listActiveLocks,
 	releaseLaneLocks,
 } from '../../../src/parallel/file-locks';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tmpDir: string;
 
 beforeEach(() => {
-	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lane-listing-2967-'));
+	tmpDir = canonicalMkdtemp('lane-listing-2967-');
 });
 
 describe('Group 6: listActiveLocks with metadata (#2967 payload projection)', () => {
