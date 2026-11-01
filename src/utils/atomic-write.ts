@@ -324,7 +324,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/skill-usage-log.ts:1165',
 			'src/hooks/skill-usage-log.ts:1675',
 			'src/hooks/skill-usage-pending.ts:817',
-			'src/parallel/file-locks.ts:836',
+			'src/parallel/file-locks.ts:833',
 			'src/plan/ledger.ts:607',
 			'src/plan/ledger.ts:1808',
 		],
