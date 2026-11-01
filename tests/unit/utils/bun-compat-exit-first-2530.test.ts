@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as bunCompat from '../../../src/utils/bun-compat';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 // #2973: 30s — cold bun-build/node probes on stalled macos runners exceeded 5s.
 const PROBE_TIMEOUT_MS = 30_000;
@@ -67,7 +68,7 @@ function runNodeProbe(
 			},
 		);
 	} finally {
-		rmSync(tempDir, { recursive: true, force: true });
+		safeRmRecursive(tempDir);
 	}
 }
 
@@ -292,8 +293,8 @@ function runPublicCleanProbe() {
 			entryPath,
 		);
 	} finally {
-		rmSync(entryDir, { recursive: true, force: true });
-		rmSync(repo, { recursive: true, force: true });
+		safeRmRecursive(entryDir);
+		safeRmRecursive(repo);
 	}
 }
 
@@ -491,7 +492,6 @@ describe('bunSpawn Node fallback exit-first output consumption (#2530)', () => {
 	test('native Bun timeout preserves partial output and termination outcome', async () => {
 		assertTimeoutReceipt(await nativeTimeoutProbe());
 	});
-
 	test('plain-Node built public isCleanWorktree path handles a clean Git repo', () => {
 		const result = runPublicCleanProbe();
 		expect(result.status).toBe(0);

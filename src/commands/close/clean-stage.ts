@@ -11,12 +11,31 @@ import { log } from '../../utils/logger';
 import {
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	ACTIVE_STATE_TO_CLEAN,
+	CLEAN_STAGE_DEADLINE_MS,
 	KNOWLEDGE_FAMILY_ARTIFACTS,
 	TERMINAL_STATE_FILES,
 } from './constants.js';
 import type { CleanStageResult, CloseStageContext } from './context.js';
 import { removeSqliteSidecarsAfterClose } from './db-helpers.js';
 import { _internals } from './internals.js';
+
+/**
+ * #3260-B: resolve the clean-stage admission deadline. This is an ADMISSION
+ * budget, not a wall-clock cap on the whole stage — worst case is this
+ * deadline plus one in-flight artifact schedule plus pre-unlink database
+ * closure work. Env override SWARM_CLEAN_STAGE_DEADLINE_MS is for operators
+ * and tests; invalid or non-positive values fall back to the default.
+ */
+export function resolveCleanStageDeadlineMs(): number {
+	const raw = process.env.SWARM_CLEAN_STAGE_DEADLINE_MS;
+	if (raw === undefined || raw === '') {
+		return CLEAN_STAGE_DEADLINE_MS;
+	}
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) && parsed > 0
+		? parsed
+		: CLEAN_STAGE_DEADLINE_MS;
+}
 
 export async function runCleanStage(
 	ctx: CloseStageContext,
@@ -43,7 +62,26 @@ export async function runCleanStage(
 		}
 	}
 	if (ctx.archivedActiveStateFiles.size > 0) {
+		// #3260-B: admission deadline for the per-artifact unlink retry loop.
+		// Once elapsed, no FURTHER artifact is admitted (each admission can add
+		// up to one full per-artifact schedule); skipped artifacts stay in place
+		// — their archive copies exist — and ONE bounded warning is emitted
+		// after the loop. This deliberately does NOT skip the post-loop
+		// terminal-state removal, residue quarantine, or the context.md reset:
+		// those are unconditional close invariants.
+		const stageDeadlineMs = resolveCleanStageDeadlineMs();
+		const stageStartMs = _internals.now();
+		let deadlineSkippedArtifacts = 0;
 		for (const artifact of ACTIVE_STATE_TO_CLEAN) {
+			if (_internals.now() - stageStartMs > stageDeadlineMs) {
+				// Count only artifacts actually DENIED admission (archived
+				// ones the loop would otherwise process); never-archived
+				// entries skip below regardless.
+				if (ctx.archivedActiveStateFiles.has(artifact)) {
+					deadlineSkippedArtifacts += 1;
+				}
+				continue;
+			}
 			// Never delete cohort-shared knowledge state from a single worktree's
 			// close (it was deliberately not archived above; peers may be active).
 			if (linkedKnowledgeShared && KNOWLEDGE_FAMILY_ARTIFACTS.has(artifact)) {
@@ -145,6 +183,14 @@ export async function runCleanStage(
 			if (artifact === 'swarm.db') {
 				removeSqliteSidecarsAfterClose(ctx.swarmDir);
 			}
+		}
+		if (deadlineSkippedArtifacts > 0) {
+			// #3260-B: ONE bounded warning for the whole stage. Terminal-state
+			// files are NOT covered by this skip — their unconditional removal
+			// below still runs (resurrection prevention).
+			ctx.warnings.push(
+				`clean-stage admission deadline (${stageDeadlineMs} ms) exceeded; ${deadlineSkippedArtifacts} active-state artifact(s) left in place for preservation (archive copies exist; terminal-state removal still ran).`,
+			);
 		}
 	} else {
 		ctx.warnings.push(

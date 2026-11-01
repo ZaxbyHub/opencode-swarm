@@ -30,10 +30,13 @@ import { createPublicationFixture } from './pr-workflow-publication.test-fixture
  *
  * Window history: safeRmRecursive's bounded window was ~2.1 s until PR
  * #3254 (issue #3248) raised it to ~10 s (100 attempts × 100 ms) because
- * windows-latest AV holds outlived the old budget. The exhaustion test
- * therefore compresses the inter-attempt cadence through the helper's
- * `_internals.wait` seam (the same 100-attempt exhaustion path, at syscall
- * speed) instead of holding a directory for >10 s of wall clock: the -n 4
+ * windows-latest AV holds outlived the old budget; #3260-A re-tied it to the
+ * PRODUCTION unlink schedule (ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS, ~15.2 s
+ * over 20 delays + one final attempt — one source in
+ * src/commands/close/unlink-schedule.ts). The exhaustion test therefore
+ * compresses the inter-attempt cadence through the helper's
+ * `_internals.wait` seam (the same schedule-exhaustion path, at syscall
+ * speed) instead of holding a directory for >15 s of wall clock: the -n 4
  * holder (~3 s) outlives the compressed attempt budget, so the teardown
  * still exhausts and throws. The rides-out tests below pin the real-cadence
  * success path unchanged.
@@ -109,13 +112,14 @@ describe('pr-workflow fixture teardown EBUSY tolerance (issue 2866)', () => {
 			const holderDone = holdDirectoryUntilExit(dir, 4);
 			await flushEventLoop();
 			// Compress the inter-attempt cadence through the seam (see the file
-			// docblock): the exhaustion path is the same 100-attempt loop, run
-			// at syscall speed, so the ~3 s holder outlives it without this
-			// test costing >10 s of wall clock. The per-attempt GC hedge is
-			// stubbed TOO: 99 real full Bun.gc(true) collections on a loaded
-			// runner's heap cost >3 s of wall clock, which would let the
-			// holder exit mid-loop and defeat the exhaustion pin (that exact
-			// failure hit this PR's first post-fix CI run on windows-4).
+			// docblock): the exhaustion path is the same schedule loop (21
+			// attempts over 20 delays), run at syscall speed, so the ~3 s
+			// holder outlives it without this test costing >15 s of wall
+			// clock. The per-attempt GC hedge is stubbed TOO: 20 real full
+			// Bun.gc(true) collections on a loaded runner's heap can cost
+			// >3 s of wall clock, which would let the holder exit mid-loop
+			// and defeat the exhaustion pin (that exact failure hit this
+			// PR's first post-fix CI run on windows-4).
 			const realWait = _internals.wait;
 			const realCollectGarbage = _internals.collectGarbageBestEffort;
 			_internals.wait = () => {};

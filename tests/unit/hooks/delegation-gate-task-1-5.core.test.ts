@@ -19,6 +19,7 @@ import {
 	isGuidanceCarrier,
 } from '../../../src/hooks/system-guidance-carrier';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import {
 	makeConfig,
 	makeMessages,
@@ -102,7 +103,7 @@ describe('Task 1.5: [NEXT] Guidance — Core', () => {
 
 	afterEach(() => {
 		resetSwarmState();
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		safeRmRecursive(tempDir);
 	});
 
 	describe('[NEXT] guidance injection', () => {
@@ -235,7 +236,7 @@ describe('Task 1.5: [NEXT] Guidance — Core', () => {
 					'before declare_scope or starting another task',
 				);
 			} finally {
-				fs.rmSync(tempDir, { recursive: true, force: true });
+				safeRmRecursive(tempDir);
 			}
 		});
 	});

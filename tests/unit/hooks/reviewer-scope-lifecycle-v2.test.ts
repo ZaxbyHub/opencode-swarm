@@ -24,6 +24,7 @@ import {
 	swarmState,
 } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory = '';
@@ -134,7 +135,7 @@ beforeEach(() => {
 afterEach(() => {
 	fingerprintInternals.read = realRead;
 	resetSwarmState();
-	fs.rmSync(directory, { recursive: true, force: true });
+	safeRmRecursive(directory);
 });
 
 describe('reviewer scope lifecycle v2 (issue #2100 contracts D/E/F)', () => {

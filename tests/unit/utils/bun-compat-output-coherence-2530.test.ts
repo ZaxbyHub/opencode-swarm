@@ -17,6 +17,7 @@ import {
 	bunSpawn,
 	DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES,
 } from '../../../src/utils/bun-compat';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 const TEST_CWD = path.resolve(import.meta.dir, '../../..');
 const TIMEOUT_MS = 5_000;
@@ -82,7 +83,7 @@ function runNodeProbe(makeProbe: (moduleUrl: string) => string) {
 			},
 		);
 	} finally {
-		rmSync(tempDir, { recursive: true, force: true });
+		safeRmRecursive(tempDir);
 	}
 }
 

@@ -15,6 +15,7 @@ import {
 	detectToolRegistrationDrift,
 	runSyncDetectors,
 } from '../../../scripts/drift-check.ts';
+import { safeRmAllRecursive } from '../../helpers/safe-test-dir';
 
 // Issue #1497: the drift checker must (a) detect real drift in each category and
 // (b) produce no error/warning false positives on the current repository tree.
@@ -36,10 +37,8 @@ function writeFile(root: string, relativePath: string, contents: string): void {
 }
 
 afterEach(() => {
-	while (tempRoots.length > 0) {
-		const root = tempRoots.pop();
-		if (root) fs.rmSync(root, { recursive: true, force: true });
-	}
+	// #3260-C: attempt every root, throw after collecting failures.
+	safeRmAllRecursive(tempRoots.splice(0));
 });
 
 describe('drift-check: no false positives on the real repository', () => {

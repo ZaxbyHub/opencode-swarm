@@ -21,6 +21,7 @@ import {
 	DELEGATE_DIRECTIVE_BLOCK_TAG,
 } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
 	makeConfig,
@@ -28,9 +29,7 @@ import {
 	makeInput,
 } from './delegate-directive-injection.fixtures.js';
 
-// ---------------------------------------------------------------------------
 // Test suite
-// ---------------------------------------------------------------------------
 
 describe('injectDelegateDirectivesBefore — FR-012 behavioral tests', () => {
 	let testDir: string;
@@ -50,7 +49,7 @@ describe('injectDelegateDirectivesBefore — FR-012 behavioral tests', () => {
 		const ki = await import('../../../src/hooks/knowledge-injector.js');
 		ki._internals.searchKnowledge = originalSearchKnowledge;
 		ki._internals.recordKnowledgeEvent = originalRecordKnowledgeEvent;
-		rmSync(testDir, { recursive: true, force: true });
+		safeRmRecursive(testDir);
 		mock.restore();
 	});
 
