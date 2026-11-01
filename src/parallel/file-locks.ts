@@ -334,6 +334,7 @@ export function acquireOwnerLockOnce(
 		}
 		return { acquired: false, release: () => {}, payload: null };
 	}
+	acquiredNonces.set(ownerLockPath, payload.nonce);
 	return {
 		acquired: true,
 		payload,
@@ -341,27 +342,47 @@ export function acquireOwnerLockOnce(
 	};
 }
 
-/** Identity-fenced release: unlinks the lock ONLY if its current payload
- *  still names OUR identity triple. A successor's lock (installed after a
- *  legitimate break of a provably-dead us) can never be deleted by our
- *  late release. Exported for the events store's finally-unlink. */
+/** In-process acquire record: proves ownership at release even when the
+ *  payload READ is unreliable (a consumer's DI/mocked fs surface returning
+ *  foreign bytes for the lock path would otherwise make the identity fence
+ *  refuse forever and leak the lock — wedging every later acquire in the
+ *  directory). Keyed by path, bounded by the acquire itself. */
+const acquiredNonces = new Map<string, string>();
+
+/** Identity-fenced release: unlinks the lock ONLY if our ownership is
+ *  proven — either the on-disk payload still names OUR identity triple, or
+ *  the path is in this process's acquire record with the same nonce. A
+ *  successor's lock (installed after a legitimate break of a provably-dead
+ *  us) can never be deleted by our late release: a broken generation
+ *  removes the acquire record, and the successor's payload matches neither
+ *  the fence nor the nonce. Exported for the events store's finally-unlink. */
 export function releaseOwnerLock(
 	ownerLockPath: string,
 	self: { ownerPid: number; startBoundMs: number; nonce: string },
 ): void {
-	const current = parseOwnerPayload(readOwnerPayload(ownerLockPath));
-	if (
-		current === null ||
-		current.ownerPid !== self.ownerPid ||
-		current.startBoundMs !== self.startBoundMs ||
-		current.nonce !== self.nonce
-	) {
-		return;
-	}
+	const ours = acquiredNonces.get(ownerLockPath) === self.nonce;
 	try {
+		const current = parseOwnerPayload(readOwnerPayload(ownerLockPath));
+		const identityMatch =
+			current !== null &&
+			current.ownerPid === self.ownerPid &&
+			current.startBoundMs === self.startBoundMs &&
+			current.nonce === self.nonce;
+		if (!identityMatch && !ours) {
+			return;
+		}
 		fs.unlinkSync(ownerLockPath);
 	} catch {
-		/* already gone */
+		// Read or unlink failed: fall back to the acquire record alone.
+		if (ours) {
+			try {
+				fs.unlinkSync(ownerLockPath);
+			} catch {
+				/* already gone */
+			}
+		}
+	} finally {
+		acquiredNonces.delete(ownerLockPath);
 	}
 }
 
@@ -507,12 +528,15 @@ export function breakStaleLockIfOwnerDead(
 		const rawAfter = readOwnerPayload(ownerLockPath);
 		if (rawAfter !== rawBefore) return 'unknown';
 		// 5. Break (we are THE taker; successors self-release against our
-		//    fresh marker and cannot complete acquire past it).
+		//    fresh marker and cannot complete acquire past it). Dropping the
+		//    acquire record keeps the identity fence closed for the
+		//    successor generation.
 		try {
 			fs.unlinkSync(ownerLockPath);
 		} catch {
 			return 'unknown';
 		}
+		acquiredNonces.delete(ownerLockPath);
 		result = 'broken';
 		const payload = parseOwnerPayload(rawBefore);
 		const ageMs = payload
