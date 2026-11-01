@@ -6,15 +6,33 @@ import path from 'node:path';
 const REPO_ROOT = path.resolve(import.meta.dir, '..', '..', '..', '..');
 const CONFIG_PATH = path.join(REPO_ROOT, 'release-please-config.json');
 
-// The reviewed bootstrap bound: the last BREAKING CHANGE commit on `next`
-// (98b020168 "feat!: extract core into monorepo..."). release-please's
-// bootstrap walk stops EXCLUSIVELY at this sha (manifest.js breaks before
-// collecting it), so every breaking commit is excluded from the sweep while
-// the packages/telemetry fix commits (376b12730, 6fdebce18) stay in range.
-// A bound at the March tip 23f051f1 strands telemetry (no packages/telemetry
-// commits in (23f051f1, HEAD]); an earlier bound re-includes the breaking
-// commits and re-proposes 9.0.0-beta.0 (issue #3173's misfire).
-const REQUIRED_BOOTSTRAP_SHA = '98b020168298679467bce6d5d20ce1fbdf62c06b';
+// The reviewed bootstrap bound: the DORMANT TIP of the pre-resurrection
+// 8.x line (23f051f1 "Merge pull request #207 …", 2026-03-16). The bound
+// must exclude every BREAKING CHANGE commit (an earlier bound re-includes
+// them and re-proposes 9.0.0-beta.0 — issue #3173's misfire); the dormant
+// tip strictly dominates the previous bound (the last breaking commit,
+// 98b020168) as an ancestor, so the exclusion invariant is preserved,
+// while the six same-day March fix commits between them (376b12730,
+// 288ac87, 6fdebce18, 7211e9a, 6a3ac99, and the merge noise) drop out of
+// the bootstrap changelog sweep — they were polluting the release PR body
+// (observed in #3235).
+//
+// Stranding note (corrects the previous bound rationale): telemetry has
+// zero commits in (23f051f1, HEAD], and that is SAFE — release-please's
+// linked-versions plugin appends
+//   chore(telemetry): Synchronize opencode-swarm versions
+//     Release-As: <primaryVersion>
+// for group members with no release of their own (plugins/linked-versions
+// buildRelocations path, verified against release-please 16.18.0 and
+// 17.1.3), forcing every group member to release in lockstep whenever ANY
+// member releases. The per-package "needs >=1 commit after the bound"
+// leg that used to live here encoded the opposite (pre-linked-versions)
+// premise and was replaced by the group-membership assertion below (the
+// 'linked-versions lockstep group covers exactly the configured
+// components' test) — that is the property that actually prevents
+// stranding.
+const REQUIRED_BOOTSTRAP_SHA = '23f051f1143d3566f05163c1a7a80d40b5b16ee7';
+const PREVIOUS_BOOTSTRAP_SHA = '98b020168298679467bce6d5d20ce1fbdf62c06b';
 // Explicit path -> component mapping (not just a set): a swapped pair would
 // pass a set assertion while rendering misattributed tags
 // (e.g. core released as telemetry-v8.0.2-beta.0).
@@ -25,8 +43,8 @@ const EXPECTED_COMPONENT_BY_PATH: Record<string, string> = {
 	'packages/telemetry': 'telemetry',
 };
 // Dead config keys: `branches` is consumed by nothing (release-please@16/17
-// read root keys only); `changelog-notes-type` is not a release-please key at
-// all (the schema key is `changelog-type`) and is silently ignored.
+// read root keys only); `changelog-notes-type` is not a release-please key
+// at all (the schema key is `changelog-type`) and is silently ignored.
 const DEAD_ROOT_KEYS = ['branches', 'changelog-notes-type'];
 
 function loadConfig(): Record<string, unknown> {
@@ -103,10 +121,11 @@ describe('release-please config (issue #3150 release enablement)', () => {
 	// default and cannot resolve the anchor, so the leg degrades there — but
 	// the two failure shapes are distinguished: a SHALLOW clone skips honestly,
 	// while a FULL clone that cannot resolve the anchor (bogus/rewritten sha)
-	// FAILS. On full clones it additionally proves the two properties that
-	// make the bound correct: no BREAKING CHANGE commit after it, and every
-	// package has at least one commit after it (no stranded package).
-	test('bootstrap-sha is the last breaking commit and covers every package (honest skip on shallow checkouts)', () => {
+	// FAILS. On full clones it proves the properties that make the bound
+	// correct: the bound resolves and is an ancestor of HEAD, it dominates
+	// the previous (last-breaking-commit) bound, and no BREAKING CHANGE
+	// commit exists after it — detected in BOTH Conventional-Commits forms.
+	test('bootstrap-sha is the dormant tip and no breaking commit follows it (honest skip on shallow checkouts)', () => {
 		const shallow = Bun.spawnSync(['git', '-C', REPO_ROOT, 'rev-parse', '--is-shallow-repository'], {
 			stdout: 'pipe',
 			stderr: 'ignore',
@@ -117,11 +136,20 @@ describe('release-please config (issue #3150 release enablement)', () => {
 		}
 		expect(gitExitCode(['cat-file', '-e', `${REQUIRED_BOOTSTRAP_SHA}^{commit}`]), 'bootstrap-sha must resolve in a full clone (bogus/rewritten sha is a config defect)').toBe(0);
 		expect(gitExitCode(['merge-base', '--is-ancestor', REQUIRED_BOOTSTRAP_SHA, 'HEAD']), 'bootstrap-sha must be an ancestor of HEAD').toBe(0);
+		// The dormant tip must dominate the previous bound (the last breaking
+		// commit): that is what guarantees the move never re-exposes a
+		// breaking commit to the sweep.
+		expect(gitExitCode(['merge-base', '--is-ancestor', PREVIOUS_BOOTSTRAP_SHA, REQUIRED_BOOTSTRAP_SHA]), 'the dormant-tip bound must strictly dominate the previous last-breaking-commit bound').toBe(0);
 		// No BREAKING CHANGE commit may exist after the bound: one would force
 		// a major bump back onto the 9.0.0-beta.0 misfire path. Conventional
-		// commits express breaking two ways - a `BREAKING CHANGE:` TRAILER
-		// (parsed by git trailers, immune to prose mentions in commit bodies)
-		// or a `!` before the colon in the subject's type position.
+		// commits express breaking two ways - a `BREAKING CHANGE:` footer
+		// (trailer form) or a `!` before the colon in the subject.
+		//
+		// TRAILER LEG: git's trailer parser accepts the hyphen form
+		// (`BREAKING-CHANGE:`) only — trailer keys are space-free, so the
+		// standard space form parses to ZERO trailers (verified: printf
+		// '…\n\nBREAKING CHANGE: x\n' | git interpret-trailers --parse emits
+		// nothing). The trailer leg therefore sees hyphen-form footers.
 		const trailers = Bun.spawnSync(
 			['git', '-C', REPO_ROOT, 'log', '--format=%H|%-(trailers:key=BREAKING CHANGE,valueonly)', `${REQUIRED_BOOTSTRAP_SHA}..HEAD`],
 			{ stdout: 'pipe', stderr: 'ignore' },
@@ -132,6 +160,27 @@ describe('release-please config (issue #3150 release enablement)', () => {
 			return line.includes('|') && value !== '';
 		});
 		expect(trailerBreaking, `commits with a BREAKING CHANGE trailer after the bound: ${trailerBreaking.join('; ')}`).toEqual([]);
+		// BODY-SCAN LEG (#3229 R2): the space form `BREAKING CHANGE:` is
+		// invisible to every trailers:key filter, so scan raw bodies
+		// line-anchored. Both `BREAKING CHANGE:` and `BREAKING-CHANGE:` at
+		// line start match. Records are framed with %x1e (argv-safe; a real
+		// NUL cannot travel in an argv string).
+		const bodies = Bun.spawnSync(
+			['git', '-C', REPO_ROOT, 'log', '--format=%H%x1e%B%x1e', `${REQUIRED_BOOTSTRAP_SHA}..HEAD`],
+			{ stdout: 'pipe', stderr: 'ignore' },
+		);
+		expect(bodies.exitCode).toBe(0);
+		const bodyBreaking: string[] = [];
+		for (const record of bodies.stdout.toString().split('')) {
+			const trimmed = record.trim();
+			if (trimmed === '') continue;
+			const sep = trimmed.indexOf('');
+			const sha = (sep === -1 ? trimmed : trimmed.slice(0, sep)).trim();
+			if (/^BREAKING[ -]CHANGE:/m.test(trimmed)) {
+				bodyBreaking.push(sha);
+			}
+		}
+		expect(bodyBreaking, `commits with a space/hyphen-form BREAKING CHANGE footer after the bound: ${bodyBreaking.join('; ')}`).toEqual([]);
 		const subjects = Bun.spawnSync(['git', '-C', REPO_ROOT, 'log', '--format=%s', `${REQUIRED_BOOTSTRAP_SHA}..HEAD`], {
 			stdout: 'pipe',
 			stderr: 'ignore',
@@ -139,15 +188,60 @@ describe('release-please config (issue #3150 release enablement)', () => {
 		expect(subjects.exitCode).toBe(0);
 		const bangBreaking = subjects.stdout.toString().split('\n').filter((line) => /^[a-zA-Z]+(\([^)]*\))?!:/.test(line));
 		expect(bangBreaking, `breaking-by-syntax subjects after the bound: ${bangBreaking.join('; ')}`).toEqual([]);
-		// Per-package coverage: each package needs >=1 commit after the bound,
-		// or the lockstep release strands it on its published version.
-		for (const pkgPath of Object.keys(EXPECTED_COMPONENT_BY_PATH)) {
-			const commits = Bun.spawnSync(['git', '-C', REPO_ROOT, 'log', '--oneline', `${REQUIRED_BOOTSTRAP_SHA}..HEAD`, '--', pkgPath], {
+	});
+});
+
+describe('breaking-commit body-scan leg is self-verifying (#3229 R2)', () => {
+	// The scan regex used by the ancestry leg, exercised directly: it must
+	// match BOTH footer spellings at line start and NOT match prose mentions
+	// mid-line or a `BREAKING`-prefixed unrelated token. This pins the
+	// detector itself, so a future refactor cannot silently narrow it back
+	// to the trailer parser's hyphen-only view.
+	const scanRe = /^BREAKING[ -]CHANGE:/m;
+	test('matches space and hyphen footer forms at line start', () => {
+		expect(scanRe.test('fix: demo\n\nBREAKING CHANGE: drops the v1 API\n')).toBe(true);
+		expect(scanRe.test('fix: demo\n\nBREAKING-CHANGE: drops the v1 API\n')).toBe(true);
+	});
+	test('does not match prose mentions or unrelated tokens', () => {
+		expect(scanRe.test('fix: demo\n\nthis is not a BREAKING CHANGE: notice\n')).toBe(false);
+		expect(scanRe.test('fix: mention of BREAKING CHANGES elsewhere\n')).toBe(false);
+		expect(scanRe.test('fix: BREAKINGCHANGE: no space before colon\n')).toBe(false);
+	});
+	test('executed mechanism pin: the space-key trailer filter was vacuous; corrected filter + body scan detect footers (#3229 R2)', () => {
+		// Synthetic dangling commits (commit-tree against HEAD's tree, no ref
+		// created, no working-tree impact) carry one footer spelling each —
+		// the executed proof that the trailer leg alone is insufficient and
+		// the body-scan leg is load-bearing.
+		const tree = Bun.spawnSync(['git', '-C', REPO_ROOT, 'rev-parse', 'HEAD^{tree}'], { stdout: 'pipe', stderr: 'ignore' });
+		expect(tree.exitCode).toBe(0);
+		const treeSha = tree.stdout.toString().trim();
+		const commitWithMessage = (message: string): string => {
+			const res = Bun.spawnSync(['git', '-C', REPO_ROOT, 'commit-tree', treeSha, '-p', 'HEAD', '-m', message], {
 				stdout: 'pipe',
 				stderr: 'ignore',
 			});
-			expect(commits.exitCode).toBe(0);
-			expect(commits.stdout.toString().trim().length, `${pkgPath} must have at least one commit after the bound (stranded package)`).toBeGreaterThan(0);
-		}
+			expect(res.exitCode).toBe(0);
+			return res.stdout.toString().trim();
+		};
+		const spaceForm = commitWithMessage('fix: probe\n\nBREAKING CHANGE: space form value');
+		const hyphenForm = commitWithMessage('fix: probe\n\nBREAKING-CHANGE: hyphen form value');
+		const trailerValue = (sha: string, key: string): string => {
+			const res = Bun.spawnSync(
+				['git', '-C', REPO_ROOT, 'log', '-1', `--format=%(trailers:key=${key},valueonly)`, sha],
+				{ stdout: 'pipe', stderr: 'ignore' },
+			);
+			return res.stdout.toString().trim();
+		};
+		// The ORIGINAL filter spelling (`key=BREAKING CHANGE`, space-bearing)
+		// matched NOTHING at all — the old leg was vacuous. git's trailer key
+		// grammar is space-free, so the filter key itself never matches.
+		expect(trailerValue(spaceForm, 'BREAKING CHANGE')).toBe('');
+		expect(trailerValue(hyphenForm, 'BREAKING CHANGE')).toBe('');
+		// The corrected hyphen-key filter sees the hyphen form only.
+		expect(trailerValue(spaceForm, 'BREAKING-CHANGE')).toBe('');
+		expect(trailerValue(hyphenForm, 'BREAKING-CHANGE')).toBe('hyphen form value');
+		// The body scan catches BOTH spellings — the reason it exists.
+		expect(scanRe.test(`fix: probe\n\nBREAKING CHANGE: space form value\n`)).toBe(true);
+		expect(scanRe.test(`fix: probe\n\nBREAKING-CHANGE: hyphen form value\n`)).toBe(true);
 	});
 });

@@ -1,0 +1,97 @@
+name: fragment-gate
+
+# Pending release-fragment requirement for the 8.x line (issue #3228):
+# the port of the main line's pr-standards "Require pending release
+# fragment" arm. Deliberately a SEPARATE workflow (like main's
+# pr-standards.yml): the ci-workflow-security suite scans ci.yml only,
+# and this step legitimately needs `github.event.pull_request` context and
+# shell pipes — both banned inside ci.yml by that scanner.
+
+on:
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  require-pending-release-fragment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          # Full history: the changed/added diff needs the merge base with
+          # the base ref, which a depth-1 checkout cannot resolve.
+          fetch-depth: 0
+
+      - name: Require pending release fragment
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+
+          case "$PR_AUTHOR" in
+            *"[bot]"|"Copilot")
+              echo "Bot author ($PR_AUTHOR) — skipping release fragment requirement."
+              exit 0
+              ;;
+          esac
+
+          git fetch --no-tags --quiet origin "$BASE_REF"
+
+          # Path classification is owned by scripts/user-visible-paths.ts:
+          # changed/added lists go to the classifier, which prints one
+          # verdict line and maps the exit code to gate semantics
+          # (0 = verdict printed; 2 = unusable transport). The lists travel
+          # NUL-framed through temp files (issue #3290): `git diff -z`
+          # never C-quotes a name, and a NUL delimiter survives names
+          # containing newlines.
+          tmp_changed="$(mktemp)"
+          tmp_added="$(mktemp)"
+          trap 'rm -f "${tmp_changed:-}" "${tmp_added:-}"' EXIT
+          git diff --name-only --no-renames -z "origin/${BASE_REF}...HEAD" > "$tmp_changed"
+          git diff --name-only --diff-filter=A --find-renames=100% -z "origin/${BASE_REF}...HEAD" > "$tmp_added"
+
+          # No file changes -> nothing to gate.
+          if [ ! -s "$tmp_changed" ]; then
+            echo "No changed files detected; release fragment not required."
+            exit 0
+          fi
+
+          rc=0
+          verdict="$(bun scripts/check-pending-fragment.ts --print-requirement --paths-format nul --changed-file "$tmp_changed" --added-file "$tmp_added")" || rc=$?
+
+          case "$rc" in
+            0)
+              case "$verdict" in
+                *'required=false'*)
+                  echo "Docs/workflow-lab-only change without release fragment accepted."
+                  ;;
+                *)
+                  echo "Release fragment present:"
+                  tr '\0' '\n' < "$tmp_added" | grep -E '^docs/releases/pending/.+\.md$' || true
+                  ;;
+              esac
+              ;;
+            1)
+              # A bun crash also exits 1, so the verdict line decides whether
+              # this is a real violation or an unusable classifier.
+              case "$verdict" in
+                'required=true satisfied=false')
+                  echo "::error::Missing docs/releases/pending/<unique-slug>.md release fragment (user-visible change)."
+                  ;;
+                *)
+                  echo "::error::Fragment classifier failed (exit 1, no violation verdict): ${verdict:-<no output>}"
+                  ;;
+              esac
+              exit 1
+              ;;
+            *)
+              echo "::error::Fragment classifier unusable (exit $rc): $verdict"
+              exit 1
+              ;;
+          esac

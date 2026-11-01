@@ -109,13 +109,75 @@ describe('release-please-next publish steps (issue #3150 silent-skip guard)', ()
 			// The gate must be ONE condition line that binds BOTH the input and
 			// the message-specific tolerance pattern — a mention of the input
 			// anywhere else (echo, comment, separate branch) does not gate the
-			// tolerance.
+			// tolerance. Since #3229 AC1 the input reaches the script through
+			// the job-level FORCE_PUBLISH env var (${{ }} interpolation into
+			// run: text is the injection pattern GitHub's hardening guide
+			// forbids).
 			const gateLine = codeLines.find(
-				(ln) => ln.trim().startsWith('if [') && ln.includes('inputs.force_publish') && ln.includes(TOLERANCE_PATTERN),
+				(ln) => ln.trim().startsWith('if [') && ln.includes('"$FORCE_PUBLISH"') && ln.includes(TOLERANCE_PATTERN),
 			);
-			expect(gateLine, `${name}: the tolerance grep must be gated by 'if [ "...inputs.force_publish..." = "true" ] && grep' on a single line`).toBeTypeOf('string');
+			expect(gateLine, `${name}: the tolerance grep must be gated by 'if [ "$FORCE_PUBLISH" = "true" ] && grep' on a single line`).toBeTypeOf('string');
 			expect(gateLine.includes('|| cat /tmp/pub.log'), `${name}: ungated || cat masking must not remain`).toBe(false);
 		}
+	});
+
+	test('force_publish reaches scripts via env: indirection, never shell interpolation (#3229 AC1)', () => {
+		const raw = readFileSync(WORKFLOW_PATH, 'utf8');
+		// Extract every literal run-pipe block precisely: the `run: |` line
+		// plus every following line that is blank or MORE indented than it
+		// (a less-indented line — env:, the next step — ends the block, so a
+		// legitimate ${{ secrets.* }} in a following env: block is not
+		// misattributed to the script text).
+		const lines = raw.split(/\r?\n/);
+		const runBlocks: string[] = [];
+		let i = 0;
+		while (i < lines.length) {
+			const m = /^(\s*)run:\s*\|\s*$/.exec(lines[i]);
+			if (!m) {
+				i += 1;
+				continue;
+			}
+			const indent = m[1].length;
+			const block: string[] = [lines[i]];
+			let j = i + 1;
+			while (j < lines.length) {
+				const ln = lines[j];
+				if (ln.trim() !== '' && indentOf(ln) <= indent) break;
+				block.push(ln);
+				j += 1;
+			}
+			runBlocks.push(block.join('\n'));
+			i = j;
+		}
+		expect(runBlocks.length, 'the workflow must have run-pipe blocks to inspect').toBeGreaterThan(0);
+		for (const block of runBlocks) {
+			expect(block.includes('${{'), 'a run: block must not contain ${{ }} expression interpolation').toBe(false);
+		}
+		// The job-level env block defines FORCE_PUBLISH from the input.
+		const envDefinition = /publish-npm-next:[\s\S]*?env:[\s\S]*?FORCE_PUBLISH:\s*\$\{\{\s*inputs\.force_publish\s*\}\}/.exec(raw);
+		expect(envDefinition, 'publish-npm-next must define FORCE_PUBLISH via its env: block').not.toBeNull();
+	});
+
+	test('the publish job refuses refs other than next before any npm publish (#3229 AC3)', () => {
+		const raw = readFileSync(WORKFLOW_PATH, 'utf8');
+		// The ref guard runs as the publish job's FIRST step (before the
+		// checkout that precedes npm publish) and compares the runner-provided
+		// GITHUB_REF — no expression interpolation.
+		const guardStep = /- name: Refuse publishes from refs other than next\s*\n\s*run:\s*\|\s*\n[\s\S]*?GITHUB_REF[\s\S]*?refs\/heads\/next/.exec(raw);
+		expect(guardStep, 'publish job must carry the GITHUB_REF refusal guard step').not.toBeNull();
+		const publishOrder = raw.indexOf('Refuse publishes from refs other than next');
+		const firstPublish = raw.indexOf('Publish @opencode-swarm/telemetry');
+		expect(publishOrder, 'ref guard must precede the first publish step').toBeLessThan(firstPublish);
+	});
+
+	test('the workflow serializes runs through a concurrency group (#3229 AC2)', () => {
+		const raw = readFileSync(WORKFLOW_PATH, 'utf8');
+		const concurrency = /^concurrency:\s*$/m.exec(raw);
+		expect(concurrency, 'workflow must declare a top-level concurrency key').not.toBeNull();
+		const group = /group:\s*release-please-next/.exec(raw);
+		expect(group, 'concurrency group must be the workflow identity').not.toBeNull();
+		const cancel = /cancel-in-progress:\s*false/.exec(raw);
+		expect(cancel, 'cancel-in-progress must be false (never cancel a run that may be mid-publish)').not.toBeNull();
 	});
 
 	test('continue-on-error appears nowhere in the workflow (step-level, quoted, or job-level)', () => {
