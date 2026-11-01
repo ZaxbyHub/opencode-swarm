@@ -88,6 +88,15 @@ function isPidAlive(pid: number): boolean {
 	}
 }
 
+/** Raw fs bindings captured at module load for the lock primitive's
+ *  EXCLUSIVE CREATE + payload write. Consumer suites spyOn(fs, 'openSync')
+ *  etc. to steer their own code paths; the lock substrate must keep real
+ *  filesystem exclusivity regardless (the pre-#2967 substrate had the same
+ *  property for free — proper-lockfile captured its fs at its own import). */
+const rawOpenSync = fs.openSync;
+const rawWriteSync = fs.writeSync;
+const rawCloseSync = fs.closeSync;
+
 function processStartBoundMs(): number {
 	return Date.now() - Math.floor(process.uptime() * 1000);
 }
@@ -261,9 +270,13 @@ function readMarker(markerPath: string): MarkerPayload | null {
 function markerBlocksAcquisition(markerPath: string): boolean {
 	const marker = readMarker(markerPath);
 	if (marker === null) {
-		// Unparsable marker: treat as a live unknown breaker (fail-safe —
-		// the fenced breaker's takeover gate will age it out safely).
-		return true;
+		// Unparsable/absent-but-locked marker: NOT a barrier. Markers are
+		// pure protocol state written only by the fenced breaker (wx + one
+		// JSON write), so foreign bytes mean the file is corrupt or orphaned
+		// — never a live protocol participant. Blocking acquisition on it
+		// forever is exactly the permanent-wedge class #2967 eliminates;
+		// the rename-atomic takeover already serializes real breakers.
+		return false;
 	}
 	return isPidAlive(marker.breakerPid);
 }
@@ -291,7 +304,7 @@ export function acquireOwnerLockOnce(
 	// Phase 2: exclusive create. EEXIST = held.
 	let fd: number;
 	try {
-		fd = fs.openSync(ownerLockPath, 'wx');
+		fd = rawOpenSync(ownerLockPath, 'wx');
 	} catch {
 		return { acquired: false, release: () => {}, payload: null };
 	}
@@ -305,10 +318,10 @@ export function acquireOwnerLockOnce(
 		acquiredAtMs: Date.now(),
 	};
 	try {
-		fs.writeSync(fd, JSON.stringify(payload), 0, 'utf-8');
+		rawWriteSync(fd, JSON.stringify(payload), 0, 'utf-8');
 	} catch {
 		try {
-			fs.closeSync(fd);
+			rawCloseSync(fd);
 		} catch {
 			/* ignore */
 		}
@@ -320,7 +333,7 @@ export function acquireOwnerLockOnce(
 		return { acquired: false, release: () => {}, payload: null };
 	}
 	try {
-		fs.closeSync(fd);
+		rawCloseSync(fd);
 	} catch {
 		/* ignore */
 	}
