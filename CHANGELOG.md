@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.200.15](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.14...v7.200.15) (2026-10-31)
+
+
+### Bug Fixes
+
+* **issue-tracer:** word-boundary the deferred-work bare markers — no false positive on ZMEM_MODEL_AUTODOWNLOAD (zmem [#309](https://github.com/ZaxbyHub/opencode-swarm/issues/309)) ([f65d18e](https://github.com/ZaxbyHub/opencode-swarm/commit/f65d18e9ffe2c1a7ad97bb3c9490242a62628fea))
+
 ## [7.200.14](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.13...v7.200.14) (2026-10-31)
 
 
