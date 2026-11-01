@@ -1,0 +1,158 @@
+# raw-write Allowlist — scripts/raw-write-allowlist.txt
+# One entry per line: `<normalized-posix-path>: <count>` — the frozen
+# per-file count of raw crash-prone write sites. Blank lines and #
+# comments are ignored. Owned by Check 10 in scripts/check-invariants.ts
+# (issue #2969).
+#
+# Arms:
+#   src arm   — src/**/*.ts, skipping *.test.ts: raw `renameSync(` sites
+#   tests arm — tests/{unit,helpers,integration}/**/*.ts whose content
+#               references a `.db` path (db-handle predicate /\.db\b/):
+#               raw `rmSync(` / `.rm(` / `promises.rm(` sites
+#
+# NO whole-file exemptions: every file is frozen by exact per-file count
+# (src/utils/atomic-write.ts and tests/helpers/safe-test-dir.ts included).
+# The ratchet is shrink-only: counts and paths may shrink or drop out
+# freely; ANY growth — a new path or a higher count — fails Check 10
+# until a growth marker approves it.
+#
+# To approve growth added in a PR, add a standalone marker line:
+#   # APPROVED-NEW: <path>: <count>
+# (path AND new count must both match the entry exactly; the marker may
+# appear anywhere in this file, convention places it immediately above
+# the approved entry, and regeneration preserves that placement).
+# Escape hatch for a deliberate growth PR: RAW_WRITE_ENFORCE=0 (soft-warn).
+#
+# Regenerate after a legitimate shrink (never to paper over growth):
+#   bun run scripts/check-invariants.ts --regen-raw-write-allowlist
+#
+# Freeze provenance (issue #2969): the issue's 95/49 figures are NOT
+# claimed — they were not reproducible from the tree. This freeze is the
+# live scan at introduction:
+#   src arm:   70 raw renameSync site(s) across 42 file(s)
+#   tests arm: 154 raw rm site(s) across 79 file(s)
+
+# --- src arm (raw renameSync) ---
+src/background/delegation-health.ts: 1
+src/background/lane-delivery-store.ts: 1
+src/background/lane-output-store.ts: 1
+src/background/pending-delegations.ts: 2
+src/background/pr-subscriptions.ts: 2
+src/commands/archive-sqlite.ts: 1
+src/context-map/capsule-persistence.ts: 1
+src/context-map/persistence.ts: 1
+src/context-map/telemetry.ts: 1
+src/db/legacy-import.ts: 1
+src/epic/legacy-migration.ts: 2
+src/evidence/manager.ts: 1
+src/harness/store.ts: 2
+src/hooks/delegation-gate/worktree-merge-status.ts: 1
+src/hooks/guardrails/shell-audit-store.ts: 1
+src/hooks/issue-trace-state.ts: 2
+src/hooks/review-receipt.ts: 3
+src/hooks/skill-usage-log.ts: 2
+src/hooks/skill-usage-pending.ts: 2
+src/hooks/system-enhancer.ts: 2
+src/memory/jsonl-migration.ts: 4
+src/parallel/file-locks.ts: 1
+src/plan/ledger.ts: 1
+src/plan/manager.ts: 8
+src/retention/jsonl-cap.ts: 1
+src/review/evidence.ts: 1
+src/scope/scope-persistence.ts: 2
+src/sdd/effective-spec.ts: 1
+src/services/config-doctor.ts: 2
+src/services/skill-optimizer/activation.ts: 1
+src/services/skill-optimizer/store.ts: 1
+src/services/swarm-residue.ts: 2
+src/session/snapshot-reader.ts: 1
+src/telemetry.ts: 1
+src/test-impact/history-store.ts: 2
+src/tools/apply-patch.ts: 1
+src/tools/checkpoint.ts: 1
+src/tools/sast-baseline.ts: 2
+src/tools/submit-phase-council-verdicts.ts: 1
+src/turbo/lean/recovery.ts: 1
+src/turbo/lean/state.ts: 3
+src/utils/atomic-write.ts: 2
+
+# --- tests arm (raw rm in db-handle test files) ---
+tests/helpers/isolated-test-env.ts: 1
+tests/helpers/safe-test-dir.ts: 2
+tests/helpers/swarm-write-cache-scan.ts: 1
+tests/integration/curator-pipeline-health.test.ts: 2
+tests/integration/learning-loop-e2e.test.ts: 1
+tests/integration/micro-reflector-end-to-end.test.ts: 1
+tests/unit/commands/archive-sqlite.test.ts: 1
+tests/unit/commands/close-archive-result-event.test.ts: 1
+tests/unit/commands/close-cleanup.test.ts: 1
+tests/unit/commands/close-dry-run.test.ts: 3
+tests/unit/commands/close-repo-memory-cleanup.test.ts: 1
+tests/unit/commands/close-sqlite-cleanup.test.ts: 1
+tests/unit/commands/close-sqlite-safe.test.ts: 1
+tests/unit/commands/close-wal-preserve.test.ts: 1
+tests/unit/commands/coupling-suggest.test.ts: 1
+tests/unit/commands/memory-link.test.ts: 1
+tests/unit/commands/recover-coordination.test.ts: 1
+tests/unit/dashboard/server-lifecycle.test.ts: 1
+tests/unit/db/canonical-project.test.ts: 8
+tests/unit/db/driver-parity.test.ts: 1
+tests/unit/db/durability.test.ts: 1
+tests/unit/db/group-commit-writer.test.ts: 2
+tests/unit/db/insight-candidate-store.test.ts: 1
+tests/unit/db/observability-event-store.test.ts: 2
+tests/unit/db/observability-sink-controls-2487.test.ts: 1
+tests/unit/db/phase-report-store.test.ts: 1
+tests/unit/db/project-db-concurrency.test.ts: 3
+tests/unit/db/project-db-hardening.test.ts: 5
+tests/unit/db/qa-gate-session-override.test.ts: 1
+tests/unit/db/swarm-db-backup-restore.test.ts: 4
+tests/unit/epic/legacy-migration.test.ts: 1
+tests/unit/epic/lifecycle-probe.test.ts: 2
+tests/unit/epic/lifecycle-writes.test.ts: 1
+tests/unit/epic/plan-shaping-seam.test.ts: 2
+tests/unit/epic/start-inflight.test.ts: 2
+tests/unit/hooks/curator-drift-store.test.ts: 2
+tests/unit/hooks/curator-drift-verifier-gate.test.ts: 2
+tests/unit/hooks/curator-drift.test.ts: 5
+tests/unit/hooks/curator-input-aggregation.test.ts: 2
+tests/unit/hooks/curator-postmortem-concurrency.test.ts: 4
+tests/unit/hooks/curator-postmortem-robustness.test.ts: 1
+tests/unit/hooks/curator-postmortem.test.ts: 2
+tests/unit/hooks/design-doc-drift.test.ts: 1
+tests/unit/hooks/full-auto-swarm-command-policy-3446.test.ts: 1
+tests/unit/hooks/insight-candidates-cap.test.ts: 1
+tests/unit/hooks/scope-guard-write-targets.test.ts: 1
+tests/unit/index-bootstrap-late-writer-2679.test.ts: 1
+tests/unit/index-pr-workflow-session-lifecycle-2602.test.ts: 1
+tests/unit/learning/admission-idempotency-checks.test.ts: 1
+tests/unit/learning/prm-durable-backstop.test.ts: 1
+tests/unit/learning/wiring.test.ts: 2
+tests/unit/memory/gateway-path-identity.test.ts: 19
+tests/unit/memory/memory-family-divergence-sqlite.test.ts: 1
+tests/unit/memory/memory-family-divergence.test.ts: 1
+tests/unit/memory/memory-family-manifest.test.ts: 1
+tests/unit/memory/memory-family-migration-locking.test.ts: 1
+tests/unit/memory/migration-renumber.test.ts: 1
+tests/unit/memory/outcome-provider-migration.test.ts: 1
+tests/unit/memory/provider-contract.test.ts: 1
+tests/unit/memory/provider-pool-cohort-key.test.ts: 13
+tests/unit/memory/reward-capture-fb004-fb005.test.ts: 1
+tests/unit/memory/sqlite-provider-dense-retrieval.test.ts: 1
+tests/unit/memory/sqlite-provider-recall-exploration.test.ts: 1
+tests/unit/memory/sqlite-provider-recall-run-id.test.ts: 1
+tests/unit/memory/sqlite-provider-recall-unit-id.test.ts: 1
+tests/unit/memory/sqlite-provider-vec.test.ts: 1
+tests/unit/memory/sqlite-provider-version-enforcement.test.ts: 1
+tests/unit/memory/sqlite-provider-write-embedding.test.ts: 1
+tests/unit/plan/ledger-sqlite-store.test.ts: 1
+tests/unit/retention/close-sidecars-2483.test.ts: 1
+tests/unit/retention/sweep-2483.test.ts: 1
+tests/unit/scripts/check-retention-registry-db-seam.test.ts: 1
+tests/unit/services/diagnose-swarm-db.test.ts: 1
+tests/unit/session/restart-policy-reconciliation.test.ts: 5
+tests/unit/tools/abort-pr-workflow-coordination-corrupt-2602.test.ts: 3
+tests/unit/tools/get-qa-gate-profile.test.ts: 2
+tests/unit/tools/pre-check-batch-secretscan-registry.test.ts: 1
+tests/unit/tools/pre-check-docs-safe-scoping-2918.test.ts: 1
+tests/unit/tools/write-hallucination-evidence.test.ts: 2

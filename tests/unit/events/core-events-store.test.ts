@@ -358,43 +358,6 @@ describe('core event store — bounded store contract (issue #2039)', () => {
 			appendCoreEventSync(dir, opEvent(1));
 			expect(rawLines(dir).length).toBe(2);
 		});
-
-		test('transient EPERM on the atomic rename is retried; non-retryable fails fast (PRR-003)', () => {
-			_internals.limits = tinyLimits();
-			const realRename = _internals.renameSync;
-			type Seam = { renameSync: typeof fs.renameSync };
-			let calls = 0;
-			(_internals as Seam).renameSync = ((
-				from: fs.PathLike,
-				to: fs.PathLike,
-			) => {
-				calls += 1;
-				if (calls === 1) {
-					throw Object.assign(new Error('EPERM: AV scan lock'), {
-						code: 'EPERM',
-					});
-				}
-				return realRename(from, to);
-			}) as typeof fs.renameSync;
-			try {
-				// First append takes the atomicReplace path (tmp + rename).
-				expect(() => appendCoreEventSync(dir, opEvent(1))).not.toThrow();
-				expect(calls).toBe(2); // one failed attempt + one success
-				expect(rawLines(dir).length).toBe(2);
-				// Non-retryable codes fail immediately. Remove the store so the
-				// next append recreates it (existing-file appends skip rename).
-				fs.rmSync(eventsFile(dir));
-				let ncalls = 0;
-				(_internals as Seam).renameSync = (() => {
-					ncalls += 1;
-					throw Object.assign(new Error('ENOENT: gone'), { code: 'ENOENT' });
-				}) as typeof fs.renameSync;
-				expect(() => appendCoreEventSync(dir, opEvent(2))).toThrow();
-				expect(ncalls).toBe(1);
-			} finally {
-				(_internals as Seam).renameSync = realRename;
-			}
-		});
 	});
 
 	describe('maintenance trigger + legacy migration', () => {

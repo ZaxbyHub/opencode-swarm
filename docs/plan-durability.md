@@ -884,6 +884,67 @@ bounded raw-spelling memo in `hydration-ownership.ts` — one realpath per
 distinct directory spelling per process; every later resolution on the init or
 chat.message path is a pure Map hit.
 
+## Store integrity report
+
+`/swarm config doctor --integrity` (issue #2969, fix plan 05 v8 §2.6) appends a
+**read-only** crash-consistency audit of the local `.swarm` store to the doctor
+report. It is an interactive surface only — the flag is matched exactly (a
+typo'd longer prefix such as `--integrityy` selects nothing) and the command
+registry's no-args policy blocks agent-passed flags. Every operation under the
+flag is a stat/read/readdir: **this report never mutates, repairs, quarantines,
+or deletes anything** — recovery stays a separate, explicit operator action.
+
+Categories (each bounded: at most 20 listed entries per category; walks are
+entry- and depth-capped; every category fails open to 0 with a note on a
+filesystem error):
+
+| Category | Signal |
+|----------|--------|
+| `ledger_torn_tail` | `.swarm/plan-ledger.jsonl` last line is not newline-terminated or not valid JSON (probes only the final 64 KiB; a missing file is 0) |
+| `events_torn_tail` | Same torn-tail probe for `.swarm/events.jsonl` |
+| `temp_artifacts` | Files under `.swarm` whose basename matches a registered atomic-write temp grammar (`matchTempGrammar`), found by a bounded walk (max 2000 entries, depth 8) that skips the `archive/`, `quarantine/`, and `locks/` subtrees |
+| `stale_locks` | `.swarm/locks` entries past the lock TTL: pid-DEAD or unparsable `.lck` owner payloads, plus legacy proper-lockfile `*.lock.lock` directories |
+| `orphaned_bak` | `*.bak` files under `.swarm` with no sibling canonical file (a `.bak` beside its canonical file is the intentional full-auto backup pattern) |
+| `memory_same_id_divergences` | Only when `.swarm/memory-link.json` exists: same-id rows of the versioned JSONL family members whose version/updated (recency) fields differ between the linked cohort store and the local store. Row identity, versioned membership, and the recency comparison all come from the migration engine's exported helpers, so the report cannot drift from merge semantics. Not linked → 0 with a `not linked` note |
+
+`integrity_issues_total:` is the sum of the **actionable** category counts only.
+
+**Report-only semantics (`stale_locks`):** a `.lck` whose owner pid is ALIVE
+past the TTL is listed with a `(report-only: live owner pid — manual recovery;
+never auto-removed)` note and is deliberately **not counted** toward
+`integrity_issues_total`. This is the PID-reuse corner of the #2967 lock
+substrate: no time window ever converts a live pid into a dead classification,
+so the report can never motivate breaking a live owner. Automatic recovery of
+that corner resumes when the pid exits; until then removal is a manual operator
+action. Disclosed deviation per fix plan 05 v8 §1.1 (critic round 6, item 2).
+
+## Crash-consistency fsync policy
+
+Which durable file classes fsync before their atomic rename, and why. The
+governing rule at the end of this section applies to every change of these
+cells.
+
+| File class | Durability requirement | fsync-before-rename |
+|------------|------------------------|---------------------|
+| Plan ledger append (`.swarm/plan-ledger.jsonl`, `file_shadow`) | A published ledger is never partially written; losing the very last rename on power loss is tolerated (the prior canonical file is intact) | **ON** — `writeFileFsyncedThenRename` (`src/plan/ledger.ts`); the containing-directory fsync is deliberately omitted (see that function's comment) |
+| Events append (`.swarm/events.jsonl`) | Append-only event stream; a torn tail is *tolerated and detected* (`events_torn_tail` above) | **OFF** — plain append through the core-events seam |
+| Full-Auto state (`.swarm/full-auto-state.json`) | Durable fail-closed control state; a crash mid-write must not truncate the canonical file | **ON** — `tmp → fsync → rename` (`src/full-auto/state.ts`; pre-existing) |
+| Plan projections (`plan.json` / `plan.md`) | Derived from the authoritative ledger; rebuildable by replay on hash mismatch | **ON** — the canonical writer fsyncs the temp before rename (`src/utils/atomic-write.ts`), and the plan.json rebuild path fsyncs explicitly (`src/plan/manager.ts:2387`) |
+| OTLP spool + state (`src/observability/otlp-exporter.ts`) | Best-effort telemetry; write failures preserve replay and are accounted per record | **OFF** — rename-retry without fsync |
+
+**Rule — flipping any class to fsync-on requires a Windows cold-filesystem
+latency measurement recorded in the flipping PR.** The repro-704 lesson
+(AGENTS.md invariant 1): `fsync` on a cold Windows filesystem can be several
+times more expensive than on warm POSIX CI, and every awaited write's latency
+counts toward the init deadline even when it is wrapped in a timeout. An fsync
+flip that passes on Linux CI does not prove Windows. The measurement (before
+vs after, on a cold FS) must appear in the PR description next to the invariant
+audit.
+
+**The #2967/#2969 branch changes no fsync behavior** — this section documents
+the policy as-is; the store integrity report above is a read-only audit of
+exactly these file classes' crash residue.
+
 ## Quick Reference
 
 | Operation | Command / Trigger |
@@ -893,6 +954,7 @@ chat.message path is a pure Map hit.
 | Import checkpoint | `importCheckpoint()` function |
 | Rebuild from ledger | Automatic on hash mismatch |
 | View ledger | `cat .swarm/plan-ledger.jsonl` |
+| Store integrity report (read-only audit) | `/swarm config doctor --integrity` |
 | Set execution profile | `save_plan` with `execution_profile` field |
 | Lock execution profile | `save_plan` with `execution_profile.locked: true` |
 | View worktree lanes | `/swarm lanes [--json]` |

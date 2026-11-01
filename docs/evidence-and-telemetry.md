@@ -172,7 +172,7 @@ its own. `swarm_internals_read_denied` records a read/glob/grep/bash call that
 targeted the installed plugin package; its `target` field is relative to the
 package root, never an absolute user path.
 
-**Parallel foundation:** `evidence_lock_acquired`, `evidence_lock_contended`, `plan_ledger_cas_retry`
+**Parallel foundation:** `evidence_lock_acquired`, `evidence_lock_contended`, `evidence_lock_stale_recovered`, `store_lock_stale_broken`, `plan_ledger_cas_retry`
 
 **PRM:** `prm_pattern_detected`, `prm_course_correction_injected`, `prm_escalation_triggered`, `prm_hard_stop`, `prm_hard_stop_delivered`, `prm_hard_stop_terminal`
 

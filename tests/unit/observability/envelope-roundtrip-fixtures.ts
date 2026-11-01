@@ -214,6 +214,10 @@ export const FIXTURES: Record<string, Record<string, unknown>> = {
 		taskId: '1.1',
 		attempt: 2,
 	},
+	// Issue #2967 fenced stale store-lock break: identifier-free payload
+	// (store discriminator + age only), mirroring the emit site in
+	// src/parallel/file-locks.ts.
+	store_lock_stale_broken: { store: 'evidence', ageMs: 1234 },
 	plan_ledger_cas_retry: {
 		attempt: 1,
 		expectedHashPrefix: 'deadbeef',

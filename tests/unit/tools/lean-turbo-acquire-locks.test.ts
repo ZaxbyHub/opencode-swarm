@@ -10,7 +10,6 @@
  * without needing to manage real concurrent processes. The real
  * proper-lockfile library is exercised in the successful-path tests.
  */
-
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -154,9 +153,10 @@ describe('lean_turbo_acquire_locks tool', () => {
 
 			const locksDir = path.join(tmpDir, '.swarm', 'locks');
 			expect(fs.existsSync(locksDir)).toBe(true);
+			// #2967: lane artifacts are wx `.lck` files.
 			const lockFiles = fs
 				.readdirSync(locksDir)
-				.filter((f) => f.endsWith('.lock'));
+				.filter((f) => f.endsWith('.lck'));
 			expect(lockFiles.length).toBeGreaterThan(0);
 		});
 
@@ -330,16 +330,17 @@ describe('lean_turbo_acquire_locks tool', () => {
 			expect(result.acquired).toBe(true);
 
 			const locksDir = path.join(tmpDir, '.swarm', 'locks');
+			// #2967: lane artifacts are wx `.lck` files.
 			const lockFilesBefore = fs
 				.readdirSync(locksDir)
-				.filter((f) => f.endsWith('.lock'));
+				.filter((f) => f.endsWith('.lck'));
 
 			// Simulate work completion — call _release()
 			await result.locks[0]._release!();
 
 			const lockFilesAfter = fs
 				.readdirSync(locksDir)
-				.filter((f) => f.endsWith('.lock'));
+				.filter((f) => f.endsWith('.lck'));
 			// After release, the sentinel file may be gone or the .lock dir may be unlocked
 			expect(lockFilesAfter.length).toBeLessThanOrEqual(lockFilesBefore.length);
 		});

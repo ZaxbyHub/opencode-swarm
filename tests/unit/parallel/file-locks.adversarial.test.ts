@@ -6,6 +6,7 @@ import {
 	_internals,
 	acquireLaneLocks,
 	cleanupExpiredLocks,
+	getOwnerLockPath,
 	isLocked,
 	type LockMetadata,
 	listActiveLocks,
@@ -16,11 +17,9 @@ import {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
 function tempDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), 'file-locks-adversarial-'));
 }
-
 // ---------------------------------------------------------------------------
 // Security note on path validation
 // ---------------------------------------------------------------------------
@@ -29,11 +28,9 @@ function tempDir(): string {
 // NOT validate filename characters — on Unix, whitespace/newlines/pipes are
 // valid filename characters and the code correctly accepts them.  Attackers
 // cannot escape the project directory via filenames.
-
 // ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
-
 describe('file-locks — adversarial security tests', () => {
 	let dir: string;
 
@@ -404,7 +401,6 @@ describe('file-locks — adversarial security tests', () => {
 			// Create a proper-lockfile lock directory (treated specially by cleanup).
 			const plLockDir = path.join(locksDir, 'sentinel.lock.lock');
 			fs.mkdirSync(plLockDir, { recursive: true });
-
 			// Must not throw.
 			expect(() => cleanupExpiredLocks(dir)).not.toThrow();
 		});
@@ -690,10 +686,14 @@ describe('file-locks — adversarial security tests', () => {
 			const released = await releaseLaneLocks(dir, 'lane-2');
 			expect(released).toBe(0);
 
-			// Lane-1's lock should still be visible.
-			const active = listActiveLocks(dir);
-			expect(active.some((l) => l.laneId === 'lane-1')).toBe(true);
-
+			// Feedback PRR-001: lane identity is projected from the .meta
+			// sidecar, so the held lane lock lists under its original path.
+			expect(
+				listActiveLocks(dir).some(
+					(l) =>
+						l.filePath === 'src/lane-specific.txt' && l.laneId === 'lane-1',
+				),
+			).toBe(true);
 			// Clean up lane-1.
 			await releaseLaneLocks(dir, 'lane-1');
 		});
