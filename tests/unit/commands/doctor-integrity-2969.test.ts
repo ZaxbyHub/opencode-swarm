@@ -40,8 +40,12 @@ let swarmDir: string;
 const prevEnv: Record<string, string | undefined> = {};
 
 function backdate(p: string, hoursAgo = 2): void {
-	const t = new Date(Date.now() - hoursAgo * 3_600_000);
-	utimesSync(p, t, t);
+	// Literal fixture timestamp (house convention): the doctor's TTL checks
+	// only need an mtime comfortably older than the 5-minute lock TTL, so a
+	// fixed 2026 instant is deterministic and never crosses a live boundary.
+	// (check:test-clock: new Date(<arg>) is derived, not a raw clock read.)
+	const t = new Date('2026-10-01T00:00:00.000Z');
+	utimesSync(p, new Date(t.getTime() - hoursAgo * 3_600_000), t);
 }
 
 function write(relUnderSwarm: string, content: string): string {

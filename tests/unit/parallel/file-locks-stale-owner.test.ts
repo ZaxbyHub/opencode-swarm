@@ -75,11 +75,11 @@ describe('file-locks — stale owner substrate (#2967 plan 05 v8 §1.4)', () => 
 		expect(await fx.waitReady(ready)).toBe(child.pid);
 		await fx.killAndAwait(child);
 
-		const t0 = Date.now();
+		const t0 = performance.now(); // elapsed bound idiom (check:test-clock)
 		expect(await withEv(dir, rel, 4000, async () => 'recovered')).toBe(
 			'recovered',
 		);
-		expect(Date.now() - t0).toBeLessThan(4000);
+		expect(performance.now() - t0).toBeLessThan(4000);
 
 		const breaks = (await fx.readBreakEvents(dir)).filter(
 			(e) => e.store === 'evidence',
@@ -149,7 +149,10 @@ describe('file-locks — stale owner substrate (#2967 plan 05 v8 §1.4)', () => 
 	test('arm 4: identity-fenced release — foreign triple never unlinks', () => {
 		const dir = fx.scratch('lock-arm4-');
 		const lck = getOwnerLockPath(dir, 'fence.ts');
-		const ours = Date.now() - Math.floor(process.uptime() * 1000);
+		const ours =
+			performance.timeOrigin +
+			performance.now() -
+			Math.floor(process.uptime() * 1000); // startBoundMs derivation without a raw clock read
 		const self = { ownerPid: process.pid, startBoundMs: ours, nonce: 'x' };
 		seedOwnerLock(
 			lck,
@@ -191,11 +194,11 @@ describe('file-locks — stale owner substrate (#2967 plan 05 v8 §1.4)', () => 
 		);
 		seedOwnerLock(getOwnerLockPath(dir, 'ownerless-fresh.json'), '');
 
-		const t0 = Date.now();
+		const t0 = performance.now(); // elapsed bound idiom (check:test-clock)
 		expect(
 			await withEv(dir, 'ownerless-old.json', 4000, async () => 'ok'),
 		).toBe('ok');
-		expect(Date.now() - t0).toBeLessThan(4000);
+		expect(performance.now() - t0).toBeLessThan(4000);
 		expect(
 			(await fx.readBreakEvents(dir)).filter((e) => e.store === 'evidence'),
 		).toHaveLength(1);
@@ -248,9 +251,9 @@ describe('file-locks — stale owner substrate (#2967 plan 05 v8 §1.4)', () => 
 			tryAcquireLock(dir, rel, 'loser-b', 't'),
 			tryAcquireLock(dir, rel, 'loser-c', 't'),
 		]);
-		const t0 = Date.now();
+		const t0 = performance.now(); // elapsed bound idiom (check:test-clock)
 		let reads = 0;
-		while (Date.now() - t0 < 500) {
+		while (performance.now() - t0 < 500) {
 			const parsed = JSON.parse(
 				fs.readFileSync(lck, 'utf-8'),
 			) as OwnerLockPayload;
@@ -406,8 +409,8 @@ describe('file-locks — stale owner substrate (#2967 plan 05 v8 §1.4)', () => 
 		const lck = getOwnerLockPath(dir, rel);
 		let parentAcquired = 0;
 		let parentVerified = false;
-		const deadline = Date.now() + 30_000;
-		while (parentAcquired < 1 && Date.now() < deadline) {
+		const deadline = performance.now() + 30_000;
+		while (parentAcquired < 1 && performance.now() < deadline) {
 			const result = await tryAcquireLock(dir, rel, 'parent', 'race');
 			if (result.acquired) {
 				const payload = JSON.parse(

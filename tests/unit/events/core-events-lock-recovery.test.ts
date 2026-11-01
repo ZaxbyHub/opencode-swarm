@@ -32,7 +32,7 @@ const eventsLockPath = (dir: string) => path.join(dir, '.swarm', 'events.lock');
 const probeEvent = (id: string) => ({
 	type: 'lock-recovery-probe',
 	probeId: id,
-	at: new Date().toISOString(),
+	at: '2026-10-31T12:00:00.000Z', // literal fixture timestamp (house convention; inert field)
 });
 
 beforeEach(() => {
@@ -54,11 +54,11 @@ describe('core-events store lock recovery (#2967)', () => {
 		expect(await fx.waitReady(ready)).toBe(child.pid);
 		await fx.killAndAwait(child);
 
-		const t0 = Date.now();
+		const t0 = performance.now(); // elapsed bound: performance.now is the house idiom for duration assertions
 		expect(() =>
 			appendCoreEventSync(dir, probeEvent('dead-owner')),
 		).not.toThrow();
-		const elapsed = Date.now() - t0;
+		const elapsed = performance.now() - t0;
 		// Dead-owner recovery is ms-scale (C2), not a 5-minute TTL wedge.
 		expect(elapsed).toBeLessThan(1500);
 
@@ -85,13 +85,13 @@ describe('core-events store lock recovery (#2967)', () => {
 			eventsLockPath(dir),
 			makePayload({ ownerPid: process.pid, agent: 'core-events' }),
 		);
-		const t0 = Date.now();
+		const t0 = performance.now(); // elapsed bound: performance.now is the house idiom for duration assertions
 		expect(() => appendCoreEventSync(dir, probeEvent('live-owner'))).toThrow(
 			CORE_EVENT_LOCKED,
 		);
 		// ~100 ms budget (20 rounds x 5 ms + one breaker probe) pinned
 		// behaviorally under the single-attempt policy (r5-#3).
-		expect(Date.now() - t0).toBeLessThan(1000);
+		expect(performance.now() - t0).toBeLessThan(1000);
 		expect(fs.existsSync(coreEventsFilePath(dir))).toBe(false);
 	});
 

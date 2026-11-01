@@ -44,9 +44,9 @@ describe('file-locks — regression: tryAcquireLock bounded internal retries (F-
 		expect(holder.acquired).toBe(true);
 		if (!holder.acquired) return;
 
-		const t0 = Date.now();
+		const t0 = performance.now(); // elapsed bound idiom (check:test-clock)
 		const result = await tryAcquireLock(tmpDir, 'target.ts', 'agent', 'task');
-		const elapsed = Date.now() - t0;
+		const elapsed = performance.now() - t0;
 
 		// Contention reported (never an unbounded wait or a steal).
 		expect(result.acquired).toBe(false);
@@ -75,9 +75,9 @@ describe('file-locks — regression: tryAcquireLock bounded internal retries (F-
 			void holder.lock._release?.();
 		}, 60);
 
-		const t0 = Date.now();
+		const t0 = performance.now(); // elapsed bound idiom (check:test-clock)
 		const result = await tryAcquireLock(tmpDir, 'target.ts', 'agent', 'task');
-		const elapsed = Date.now() - t0;
+		const elapsed = performance.now() - t0;
 
 		expect(result.acquired).toBe(true);
 		// Fast absorption: bounded backoffs only, no busy spin.
