@@ -4,7 +4,7 @@ description: Run a graph-guided, tool-augmented PR review using context packing,
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "7567be2cf5f2"
+  swarm-contract-digest: "286793ba997d"
 ---
 
 # /swarm-pr-review
@@ -1276,18 +1276,23 @@ a separate critic pass. The one-parseable-`[CRITIC]`-row-per-assigned-ID
 contract and the reviewer-before-critic ordering are universal.
 
 **Critic role binding (all profiles).** The critic dispatch MUST resolve to
-the harness's pinned cross-model critic agent type when one exists, so the
-challenge is model-independent from the reviewer that produced the findings
-(where the harness exposes model identity, the critic must not resolve to the
-reviewer's model family). A generic agent type is a FALLBACK only when no
-pinned critic type exists on the active roster or the pinned dispatch fails
-— the substitution is then disclosed in the synthesis as a degraded
-independence gate, never presented as equivalent. This policy binds the
-harness adapters: a condensed/installed skill copy whose routing note names a
-generic agent for this role without the pinned-first rule is defective and
-must be corrected, not followed. The orchestrator's own type-name quotation
-proves nothing — the binding is to the role and its independence
-requirement, not to any copied literal.
+the harness's pinned critic agent type when one exists on the active roster,
+choosing an ELIGIBLE type: one that is not the reviewer's model family where
+the harness exposes model identity. When no eligible pinned critic exists —
+including the default configuration where every pinned critic shares the
+reviewer's family — the dispatch still uses the pinned critic (never a
+generic swap for it), and the synthesis MUST carry the degraded-independence
+disclosure. Under Profiles B/C a generic agent type is additionally a
+FALLBACK only when no pinned critic type exists on the roster at all, or the
+pinned dispatch failed (that failure means the Hard Rule 14 initial attempt
+plus its two retries on the same pinned type); any same-family critic —
+pinned or generic — is disclosed as a degraded independence gate, never
+presented as equivalent. Under Profile A the controller's `critic` role is
+the pinned type and the generic fallback does not apply. This policy binds
+the harness adapters: a condensed/installed skill copy whose routing note
+names a generic agent for this role without this pinned-first rule is
+defective — correct it, do not follow it. The binding is to the role and its
+eligibility requirement, not to any copied literal.
 
 The critic must challenge:
 
@@ -1461,6 +1466,7 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] findings escalated to critic: ___
 [VALIDATION] critic dispatched: ___ OR "SKIPPED — no typed critic-routed finding (CRITICAL/HIGH, MEDIUM+HIGH_IMPACT, MEDIUM+risk_tags, or UNKNOWN)"
 [VALIDATION] critic returned: ___ OR "N/A"
+[VALIDATION] critic agent type / independence: eligible pinned cross-model | DEGRADED — <reason> (a DEGRADED critic gate restricts the verdict to REQUEST_CHANGES or INCOMPLETE, mirroring the Profile A DEGRADED_DISCLOSED rule)
 [VALIDATION] findings upheld by critic: ___
 [VALIDATION] findings downgraded by critic: ___
 [VALIDATION] findings disproved by critic: ___
@@ -1508,6 +1514,7 @@ Include:
 - micro-lanes triggered,
 - deterministic signals ingested,
 - reviewer identity / role for each finding,
+- critic agent type / model independence for the critic gate,
 - critic result for each escalated finding,
 - findings DISPROVED by reviewer with reason,
 - findings DOWNGRADED by critic with reason,
